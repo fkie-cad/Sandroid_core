@@ -302,7 +302,7 @@ async def run_malware_analysis(
     """Run TrigDroid-based malware analysis via the unified engine.
 
     This function:
-    1. Sets the spotlight application to the target package (spawn mode)
+    1. Sets the spotlight application to the target package
     2. Optionally runs the TrigDroid CCF utility (only when explicitly
        requested via ``trigdroid_ccf``; it exits the process)
     3. Creates the ``tmp`` snapshot the engine reverts to on its first step
@@ -330,8 +330,8 @@ async def run_malware_analysis(
     from sandroid.features.trigdroid import Trigdroid
     from sandroid.services import get_spotlight_service
 
-    # 1. Point the spotlight at the target package in spawn mode.
-    get_spotlight_service().set_spawn_app(package, auto_resume=True)
+    # 1. Point the spotlight at the target package.
+    get_spotlight_service().set_app(package)
 
     # 2. Optional TrigDroid CCF (guarded; never part of a normal run). run_ccf()
     #    reads Toolbox.args.trigdroid_ccf and exits the process, so it is only
@@ -530,8 +530,8 @@ async def run_security_analysis(
         logger.info(f"Running security analysis on installed package: {apk_path}")
         from sandroid.services import get_spotlight_service
 
-        # set_app() also leaves spawn mode, so a spawn target left behind by
-        # an earlier run (e.g. malware analysis) is not analysed instead.
+        # Replaces any selection left behind by an earlier run (e.g. malware
+        # analysis), so that app is not analysed instead.
         get_spotlight_service().set_app(apk_path)
 
         analyzer = StaticAnalysis(

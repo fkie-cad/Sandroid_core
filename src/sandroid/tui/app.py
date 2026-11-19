@@ -1732,7 +1732,7 @@ class SandroidTUI(App):
         if get_task_service().get_running():
             return True
         spotlight = get_spotlight_service()
-        return bool(spotlight.get_app_tuple() or spotlight.get_spawn_package())
+        return spotlight.has_app()
 
     def _perform_device_switch(self, target_serial: str, cleanup: bool = False) -> None:
         """Switch device and refresh UI."""
@@ -1991,7 +1991,41 @@ class SandroidTUI(App):
             )
             return
 
-        package_name = spotlight.get_app_tuple()[0]
+        package_name = spotlight.get_effective_package()
+        # Objection's own spawn kills a running app: check off the UI thread
+        # and default to attach when it runs (the modal warns on spawn).
+        self.run_worker(
+            lambda: self._objection_liveness(package_name),
+            name="objection_liveness",
+            thread=True,
+        )
+
+    def _objection_liveness(self, package_name: str) -> None:
+        """Worker: is the app running / held with hooks? Then open the modal."""
+        from sandroid.services.app_start import (
+            Liveness,
+            live_job_names,
+            probe_liveness,
+        )
+
+        try:
+            liveness, pid = probe_liveness(package_name)
+        except Exception:
+            liveness, pid = Liveness.UNKNOWN, None
+        held = False
+        try:
+            from sandroid.core.toolbox import Toolbox
+
+            jm = Toolbox.get_frida_job_manager()
+            held = bool(get_spotlight_service().is_app_paused() and live_job_names(jm))
+        except Exception:
+            held = False
+        self.call_from_thread(
+            self._open_objection_modal, package_name, liveness, pid, held
+        )
+
+    def _open_objection_modal(self, package_name, liveness, pid, held) -> None:
+        from sandroid.services.app_start import Liveness
         from sandroid.tui.modals.objection_modal import (
             ObjectionModal,
             build_objection_command,
@@ -1999,6 +2033,13 @@ class SandroidTUI(App):
         from sandroid.tui.screens.objection_terminal_screen import (
             ObjectionTerminalScreen,
         )
+
+        if held:
+            self.notify(
+                "App is paused with hooks loaded — ␣ resume first.",
+                severity="warning",
+            )
+            return
 
         def on_config(config):
             if config is None:
@@ -2010,7 +2051,15 @@ class SandroidTUI(App):
                 )
             )
 
-        self.push_screen(ObjectionModal(package_name=package_name), on_config)
+        self.push_screen(
+            ObjectionModal(
+                package_name=package_name,
+                initial_spawn_mode=liveness == Liveness.NOT_RUNNING,
+                running_pid=pid if liveness == Liveness.RUNNING else None,
+                running_unknown=liveness == Liveness.UNKNOWN,
+            ),
+            on_config,
+        )
 
     def action_resume_objection(self) -> None:
         self._objection_resume_controller.resume_session()

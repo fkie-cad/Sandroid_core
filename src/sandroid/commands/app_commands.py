@@ -21,7 +21,7 @@ class InstallApkCommand(CommandHandler):
     1. Local file: If a valid file path is provided, installs directly
     2. Online search: If input is not a file, searches online APK repositories
 
-    After successful installation, offers to set the app as the spotlight spawn app.
+    After successful installation, offers to select the app as the spotlight app.
     """
 
     key = "n"
@@ -209,7 +209,7 @@ class InstallApkCommand(CommandHandler):
             except Exception:
                 pass
 
-        # Offer to set as spotlight spawn app
+        # Offer to select it as the spotlight app
         if installed_package and ctx.toolbox:
             await self._offer_set_spotlight(ctx, installed_package)
 
@@ -222,7 +222,7 @@ class InstallApkCommand(CommandHandler):
     async def _offer_set_spotlight(
         self, ctx: CommandContext, package_name: str
     ) -> None:
-        """Offer to set the installed app as spotlight spawn app.
+        """Offer to select the installed app as the spotlight app.
 
         Args:
             ctx: Command context
@@ -234,11 +234,11 @@ class InstallApkCommand(CommandHandler):
             if ctx.is_tui_mode and ctx.request_confirm:
                 set_spotlight = ctx.request_confirm(
                     title="Set as Spotlight App?",
-                    message=f"Set '{package_name}' as the spotlight spawn app?",
+                    message=f"Set '{package_name}' as the spotlight app?",
                 )
             else:
                 # Rich console mode
-                logger.info(f"Set '{package_name}' as spotlight spawn app? (y/N): ")
+                logger.info(f"Set '{package_name}' as spotlight app? (y/N): ")
                 if ctx.toolbox:
                     response = ctx.toolbox.safe_input("").lower()
                 else:
@@ -246,27 +246,23 @@ class InstallApkCommand(CommandHandler):
                 set_spotlight = response in ("y", "yes")
 
             if set_spotlight:
-                get_spotlight_service().set_spawn_app(package_name)
-                logger.info(f"Spotlight spawn app set to: {package_name}")
+                get_spotlight_service().set_app(package_name)
+                logger.info(f"Spotlight app set to: {package_name}")
 
         except Exception as e:
             logger.warning(f"Could not set spotlight app: {e}")
 
 
 class SetSpotlightAttachCommand(CommandHandler):
-    """Command to set the focused app as spotlight in ATTACH mode.
+    """``c``: make the foreground app the spotlight app (with its PID).
 
-    ATTACH mode connects to an already-running app, which is useful for:
-    - Apps that don't have a launchable main activity
-    - Cases where you want to observe an app in its current state
-    - Avoiding the "unable to find front-door activity" error
-
-    Sets the spotlight application, PID, and disables spawn mode.
+    The spotlight is a selection only; tools later attach to the running app
+    (or start it when it is not running).
     """
 
     key = "c"
-    name = "Set Spotlight (Attach)"
-    description = "Set focused app as spotlight in attach mode"
+    name = "Use Foreground App"
+    description = "Make the foreground app the spotlight app"
     category = CommandCategory.APP
     views = ["forensic", "malware", "security"]
 
@@ -299,10 +295,9 @@ class SetSpotlightAttachCommand(CommandHandler):
             )
 
     async def execute(self, ctx: CommandContext) -> CommandResult:
-        """Set the currently focused app as spotlight in attach mode.
+        """Make the currently focused app the spotlight app.
 
-        Gets the focused app from the device, retrieves its PID,
-        and configures the toolbox for attach mode.
+        Gets the focused app from the device and retrieves its PID.
 
         Args:
             ctx: Command context with toolbox access
@@ -352,21 +347,14 @@ class SetSpotlightAttachCommand(CommandHandler):
             # Set the spotlight application with all info including PID
             # Note: Must use set_app() with pid parameter, NOT set_app_from_tuple()
             # followed by set_pid(), as that would overwrite the PID
-            from sandroid.core.enums import SpawnMode
-
             get_spotlight_service().set_app(
                 package_name=package_name,
                 activity_name=activity_name,
                 pid=pid,
-                mode=SpawnMode.ATTACH,
             )
 
-            # Set spawn mode to False (attach mode)
-            get_spotlight_service().set_spawn_mode(False)
-
-            result_message = f"Spotlight set to: {package_name} (ATTACH mode)"
-            if pid:
-                result_message += f" [PID: {pid}]"
+            state = f"pid {pid}" if pid else "not running"
+            result_message = f"Spotlight: {package_name} ({state})"
 
             logger.debug(result_message)
 
@@ -377,12 +365,11 @@ class SetSpotlightAttachCommand(CommandHandler):
                     "package_name": package_name,
                     "activity_name": activity_name,
                     "pid": pid,
-                    "mode": "attach",
                 },
             )
 
         except Exception as e:
-            logger.exception("Error setting spotlight app in attach mode")
+            logger.exception("Error setting the foreground app as spotlight app")
             return CommandResult(
                 success=False,
                 message=f"Failed to set spotlight app: {e!s}",
@@ -391,20 +378,15 @@ class SetSpotlightAttachCommand(CommandHandler):
 
 
 class SetSpotlightSpawnCommand(CommandHandler):
-    """Command to set a spotlight app in SPAWN mode using fuzzy search.
+    """``⇧C``: pick the spotlight app from the installed apps (fuzzy search).
 
-    SPAWN mode launches the app fresh with Frida hooks from the start,
-    which is useful for:
-    - Capturing initialization behavior
-    - Hooking methods that run at startup
-    - Ensuring hooks are active before any code runs
-
-    Uses fuzzy search to help find the app to spawn.
+    A selection only: nothing is started or restarted. The PID is looked up
+    quietly, so the header shows "running pid N" or "not running".
     """
 
     key = "C"
-    name = "Set Spotlight (Spawn)"
-    description = "Select app for spawn mode with fuzzy search"
+    name = "Pick an App…"
+    description = "Pick the spotlight app from the installed apps"
     category = CommandCategory.APP
     views = ["forensic", "malware", "security"]
 
@@ -443,12 +425,11 @@ class SetSpotlightSpawnCommand(CommandHandler):
             )
 
     async def execute(self, ctx: CommandContext) -> CommandResult:
-        """Select an app for spawn mode using fuzzy search.
+        """Pick the spotlight app using fuzzy search.
 
-        Shows available apps and allows fuzzy search filtering. Spawn-vs-attach
-        and resume behavior are now chosen per action in the spotlight panel
-        (Start / Restart / Attach / Start-paused), so this only records the
-        spawn target — no auto-resume prompt.
+        Shows available apps and allows fuzzy search filtering. How the app
+        is started is chosen per action in the spotlight panel (Start /
+        Restart / Attach / Start-paused) or by each tool.
 
         Args:
             ctx: Command context with toolbox access
@@ -476,15 +457,27 @@ class SetSpotlightSpawnCommand(CommandHandler):
                     message="App selection cancelled",
                 )
 
-            logger.info(f"Selected app for spawn: {package_name}")
+            logger.info(f"Picked spotlight app: {package_name}")
 
-            # Set as spotlight spawn application. Keeps spawn mode + spawn
-            # package set so all existing readers keep working; how/when the
-            # app actually launches is chosen per action in the panel.
+            # A selection only; the explicit lookup's result (also "none",
+            # which clears a stale PID) is the PID.
+            from sandroid.core.adb import Adb
+
+            try:
+                pid = Adb.get_pid_for_package_name(
+                    package_name, use_frida_fallback=False, quiet=True
+                )
+            except Exception:
+                pid = None
             spotlight = get_spotlight_service()
-            spotlight.set_spawn_app(package_name)
+            spotlight.set_app(package_name, pid=pid)
 
-            result_message = f"Spotlight spawn app set to: {package_name} (SPAWN mode)"
+            if pid:
+                result_message = f"Spotlight: {package_name} — running pid {pid}"
+            else:
+                result_message = (
+                    f"Spotlight: {package_name} — not running · ␣ starts it"
+                )
 
             logger.debug(result_message)
 
@@ -493,15 +486,15 @@ class SetSpotlightSpawnCommand(CommandHandler):
                 message=result_message,
                 data={
                     "package_name": package_name,
-                    "mode": "spawn",
+                    "pid": pid,
                 },
             )
 
         except Exception as e:
-            logger.exception("Error setting spotlight spawn app")
+            logger.exception("Error picking the spotlight app")
             return CommandResult(
                 success=False,
-                message=f"Failed to set spotlight spawn app: {e!s}",
+                message=f"Failed to set the spotlight app: {e!s}",
                 error=str(e),
             )
 

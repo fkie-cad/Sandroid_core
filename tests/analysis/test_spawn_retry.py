@@ -41,16 +41,12 @@ PID = 4242
 class FakeSpotlight:
     """Minimal spotlight double for the spawn paths."""
 
-    def __init__(self, spawn_mode: bool = True, pid: int = PID) -> None:
-        self._spawn_mode = spawn_mode
+    def __init__(self, pid: int = PID) -> None:
         self._pid = pid
         self._seed_pid = pid
         self.spawn_calls: list[str] = []
         self.set_pid_calls: list = []
         self.auto_resume = None
-
-    def is_spawn_mode(self) -> bool:
-        return self._spawn_mode
 
     def get_pid(self):
         return self._pid
@@ -66,9 +62,6 @@ class FakeSpotlight:
     def spawn_app_paused(self, package: str):
         self.spawn_calls.append(package)
         return (object(), self._seed_pid)
-
-    def set_auto_resume(self, enabled: bool) -> None:
-        self.auto_resume = enabled
 
 
 class _Proc:
@@ -276,18 +269,24 @@ class TestRetryLadder:
         assert len(sfn.calls) == 1
         teardown.assert_not_called()
 
-    def test_attach_mode_skips_ladder(self, bypass, spotlight, cfg, monkeypatch):
-        spotlight._spawn_mode = False
-        poll = Mock(return_value=True)
-        monkeypatch.setattr(bypass, "_poll_liveness", poll)
-        sfn = make_spawn_fn([(True, "Applied live")], spotlight)
+    def test_ladder_runs_for_an_app_picked_with_c(
+        self, bypass, cfg, force_stop_spy, monkeypatch
+    ):
+        """Bug 4: a `c` selection (set_app, no mode) gets the retry ladder."""
+        from sandroid.services.spotlight_service import SpotlightService
+
+        svc = SpotlightService()
+        svc.set_app("com.x", pid=1)
+        monkeypatch.setattr("sandroid.services.get_spotlight_service", lambda: svc)
+        cfg(attempts=4, window=0.0)
+        monkeypatch.setattr(bypass, "_frida_device", object)
+        monkeypatch.setattr(bypass, "_poll_liveness", Mock(side_effect=[False, True]))
+        sfn = make_spawn_fn([(True, "Spawned"), (True, "Spawned")], svc)
 
         ok, msg = bypass.apply_to_fresh_spawn_with_retry("com.x", {"ssl"}, spawn_fn=sfn)
 
         assert ok is True
-        assert len(sfn.calls) == 1  # single call, no ladder
-        poll.assert_not_called()  # no liveness poll outside spawn mode
-        assert spotlight.spawn_calls == []  # spawn_app_paused never reached
+        assert len(sfn.calls) == 2  # the PID vanished: re-spawned
 
     def test_resume_false_no_liveness(self, bypass, spotlight, cfg, monkeypatch):
         poll = Mock(return_value=True)
@@ -597,10 +596,28 @@ def test_failed_spawn_teardown_publishes_the_cleared_pid(bypass, force_stop_spy)
     assert _pid_events(events) == [None]
 
 
-def test_restart_publishes_the_dead_pid_before_spawning(monkeypatch):
+def _patch_restart(monkeypatch, svc, bypass, order=None):
+    """Route app_start.restart_app at ``svc``/``bypass``; no device."""
+    from sandroid import services
     from sandroid.core.adb import Adb
-    from sandroid.tui.widgets import spotlight_panel as sp
+    from sandroid.services import app_start
 
+    monkeypatch.setattr(services, "get_spotlight_service", lambda: svc)
+    monkeypatch.setattr(app_start, "_bypass", lambda: bypass)
+    monkeypatch.setattr(app_start, "_job_manager", lambda: None)
+    monkeypatch.setattr(app_start, "stop_app_tools", lambda package: [])
+    monkeypatch.setattr(app_start.time, "sleep", lambda s: None)
+    monkeypatch.setattr(
+        Adb,
+        "force_stop",
+        staticmethod(
+            lambda package: order.append(("kill",)) if order is not None else None
+        ),
+    )
+    return app_start
+
+
+def test_restart_publishes_the_dead_pid_before_spawning(monkeypatch):
     svc, events = _real_spotlight()
     seen_at_spawn = []
 
@@ -608,22 +625,16 @@ def test_restart_publishes_the_dead_pid_before_spawning(monkeypatch):
         def armed_categories(self):
             return {"ssl"}
 
-        def stop_all(self):
-            return []
+        def forget_process(self):
+            pass
 
-        def apply_to_fresh_spawn_with_retry(self, package, armed):
+        def apply_to_fresh_spawn_with_retry(self, package, armed, resume=True):
             seen_at_spawn.append((svc.get_pid(), _pid_events(events)))
             return False, db.FRIDA_SERVER_DOWN_MSG
 
-    panel = SimpleNamespace(
-        _spotlight=lambda: svc,
-        _bypass=_Bypass,
-        _reset_frida_session=lambda: None,
-    )
-    monkeypatch.setattr(Adb, "force_stop", staticmethod(lambda package: None))
-    monkeypatch.setattr(sp.time, "sleep", lambda s: None)
+    app_start = _patch_restart(monkeypatch, svc, _Bypass())
 
-    ok, msg = sp.SpotlightPanel._work_restart(panel)
+    ok, msg = app_start.restart_app()
 
     assert (ok, msg) == (False, db.FRIDA_SERVER_DOWN_MSG)
     # The header already showed "not running" while the spawn ladder ran.
@@ -636,9 +647,6 @@ def test_restart_publishes_the_dead_pid_before_spawning(monkeypatch):
 
 
 def test_restart_says_restarting_from_the_kill_until_the_new_pid(monkeypatch):
-    from sandroid.core.adb import Adb
-    from sandroid.tui.widgets import spotlight_panel as sp
-
     svc, events = _real_spotlight()
     order: list = []
 
@@ -646,30 +654,21 @@ def test_restart_says_restarting_from_the_kill_until_the_new_pid(monkeypatch):
         def armed_categories(self):
             return set()
 
-        def stop_all(self):
+        def forget_process(self):
             # Already published before the (slow) teardown and spawn.
-            order.append(("stop_all", svc.get_pid(), svc.is_restarting()))
-            return []
+            order.append(("forget", svc.get_pid(), svc.is_restarting()))
 
-        def apply_to_fresh_spawn_with_retry(self, package, armed):
+        def apply_to_fresh_spawn_with_retry(self, package, armed, resume=True):
             assert svc.announce_pid(12345, package)  # the spawn knows it
             order.append(("spawned", svc.get_pid(), svc.is_restarting()))
             return True, "Spawned"
 
-    panel = SimpleNamespace(
-        _spotlight=lambda: svc,
-        _bypass=_Bypass,
-        _reset_frida_session=lambda: None,
-    )
-    monkeypatch.setattr(
-        Adb, "force_stop", staticmethod(lambda package: order.append(("kill",)))
-    )
-    monkeypatch.setattr(sp.time, "sleep", lambda s: None)
+    app_start = _patch_restart(monkeypatch, svc, _Bypass(), order)
 
-    assert sp.SpotlightPanel._work_restart(panel) == (True, "Spawned")
+    assert app_start.restart_app() == (True, "Spawned")
     assert order == [
         ("kill",),
-        ("stop_all", None, True),
+        ("forget", None, True),
         ("spawned", 12345, True),
     ]
     assert not svc.is_restarting("org.mozilla.firefox")

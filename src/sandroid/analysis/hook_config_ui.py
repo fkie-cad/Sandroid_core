@@ -349,6 +349,10 @@ class HookConfigurationUI:
 # ---------------------------------------------------------------------------
 
 
+#: Toggle: restart a running app so Dexray captures its startup (asks first).
+_FRESH_LABEL = "Restart the app first (capture startup)"
+
+
 class AppProfilerConfigUI:
     """Interactive UI for AppProfiler configuration.
 
@@ -372,6 +376,8 @@ class AppProfilerConfigUI:
             "enable_fritap": False,
             "fritap_output_dir": "fritap_output",
             "custom_scripts": [],
+            # Restart a running app first (asks before killing it).
+            "fresh": False,
         }
         if initial_settings:
             for key in self._settings:
@@ -402,6 +408,7 @@ class AppProfilerConfigUI:
             "Enable FriTap (TLS key extraction and traffic capture)": self._settings[
                 "enable_fritap"
             ],
+            _FRESH_LABEL: self._settings["fresh"],
         }
         result = request_toggle_config(
             title="AppProfiler Configuration",
@@ -423,6 +430,7 @@ class AppProfilerConfigUI:
             ),
             "fritap_output_dir": self._settings["fritap_output_dir"],
             "custom_scripts": self._settings["custom_scripts"],
+            "fresh": result.get(_FRESH_LABEL, False),
         }
 
     # -- Rich console mode --------------------------------------------------

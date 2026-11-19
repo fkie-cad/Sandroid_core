@@ -78,12 +78,12 @@ def run_dexray_headless(
     # Detect whether to attach or spawn
     spotlight = get_spotlight_service()
     pid = Adb.get_pid_for_package_name(package)
+    # Dexray attaches to a running app and starts a stopped one.
     if pid:
-        logger.info(f"App {package} is running (PID: {pid}), using attach mode")
-        spotlight.set_app(package, pid=pid)
+        logger.info(f"App {package} is running (PID: {pid}), attaching")
     else:
-        logger.info(f"App {package} not running, using spawn mode")
-        spotlight.set_spawn_app(package, auto_resume=True)
+        logger.info(f"App {package} not running, Dexray starts it")
+    spotlight.set_app(package, pid=pid)
 
     # Build custom hook_config if hook_groups were specified
     custom_hook_config = None

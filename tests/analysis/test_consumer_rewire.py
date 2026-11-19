@@ -139,8 +139,9 @@ def test_cli_run_analysis_writes_to_json_dict(monkeypatch, tmp_path):
 
     # The tmp snapshot the engine reverts to was created before the run.
     assert b"tmp" in toolbox.snapshots
-    # Spotlight was pointed at the target package in spawn mode.
-    spotlight.set_spawn_app.assert_called_once_with("com.example.app", auto_resume=True)
+    # Spotlight was pointed at the target package (a selection, no mode).
+    spotlight.set_app.assert_called_once_with("com.example.app")
+    spotlight.set_spawn_app.assert_not_called()
     # Network was reset (degrade_network defaults off).
     assert adb.send_telnet_command.call_count == 2
 
@@ -191,7 +192,8 @@ def test_headless_malware_returns_engine_dict(monkeypatch):
         )
     )
 
-    spotlight.set_spawn_app.assert_called_once_with("com.evil.app", auto_resume=True)
+    spotlight.set_app.assert_called_once_with("com.evil.app")
+    spotlight.set_spawn_app.assert_not_called()
     assert b"tmp" in toolbox.snapshots
 
     expected = json.loads(json.dumps(canned.to_json_dict(), default=json_encoder))

@@ -61,17 +61,16 @@ def run_fridump_headless(
     # Detect whether to attach or spawn
     spotlight = get_spotlight_service()
     pid = Adb.get_pid_for_package_name(package)
-    mode: SpawnMode
-    if pid:
-        logger.info(f"App {package} is running (PID: {pid}), using attach mode")
-        console.print(f"[accent]Attaching to {package} (PID: {pid})[/accent]")
-        spotlight.set_app(package, pid=pid)
-        mode = SpawnMode.ATTACH
-    else:
-        logger.info(f"App {package} not running, using spawn mode")
-        console.print(f"[accent]App {package} not running, using spawn mode[/accent]")
-        spotlight.set_spawn_app(package, auto_resume=True)
-        mode = SpawnMode.SPAWN
+    if not pid:
+        # A dump of a just-started app is worthless: fridump never spawns.
+        console.print(
+            f"[error]{package} is not running. Start it first, then dump.[/error]"
+        )
+        sys.exit(1)
+    logger.info(f"App {package} is running (PID: {pid}), attaching")
+    console.print(f"[accent]Attaching to {package} (PID: {pid})[/accent]")
+    spotlight.set_app(package, pid=pid)
+    mode = SpawnMode.ATTACH
 
     try:
         console.print(f"[accent]Starting memory dump for: {package}[/accent]")

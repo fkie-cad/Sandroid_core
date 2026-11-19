@@ -2088,7 +2088,7 @@ def test_real_settings_footprint_counts_de_storage(fake_adb):
     assert "/data/user_de/0/com.android.settings" in script
 
 
-def test_static_analysis_uses_spawn_mode_spotlight(monkeypatch, tmp_path):
+def test_static_analysis_uses_a_selected_spotlight(monkeypatch, tmp_path):
     """An app picked with ⇧C but not started (spawn mode) is analysed.
 
     A real service in spawn mode: the attach-only legacy getter returned
@@ -2098,7 +2098,7 @@ def test_static_analysis_uses_spawn_mode_spotlight(monkeypatch, tmp_path):
     from sandroid.services.spotlight_service import SpotlightService
 
     spotlight = SpotlightService()
-    spotlight.set_spawn_app("org.mozilla.firefox")
+    spotlight.set_app("org.mozilla.firefox")
     monkeypatch.setattr(services, "get_spotlight_service", lambda: spotlight)
     analyzer = static_analysis.StaticAnalysis(adb=SimpleNamespace())
     seen = []

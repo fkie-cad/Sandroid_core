@@ -1935,8 +1935,10 @@ class MitmproxyService:
 
         with self._lock:
             if success:
-                self._ssl_via_mitm = owns
-                self._state.ssl_unpin_active = True
+                # A stopped app gets SSL armed only (␣ starts it with it).
+                active = svc.is_active("ssl")
+                self._ssl_via_mitm = owns and active
+                self._state.ssl_unpin_active = active
                 self._state.ssl_unpin_app = svc.target_app("ssl")
                 self._emit(f"[INFO] {msg}")
             else:

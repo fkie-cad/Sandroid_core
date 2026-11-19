@@ -474,10 +474,15 @@ def _dexray_monitor(bypass_hooks: bool, telephony_hooks: bool = False):
     mm._run_interactive_configuration = lambda: True
     mm._snapshot_manager = types.SimpleNamespace(discard_snapshot=lambda tb: None)
 
-    def _setup_reached(toolbox):
+    def _decided() -> bool:
+        mm._decision = types.SimpleNamespace(owns_spawn=False)
+        return True
+
+    def _setup_reached(toolbox, will_spawn=False):
         mm.reached_setup = True
         raise RuntimeError("stop here: no device in tests")
 
+    mm._decide_start = _decided
     mm._create_pre_analysis_snapshot = _setup_reached
     return mm
 
@@ -532,9 +537,6 @@ def test_b_categories_refused_while_dexray_bypass_group_runs(
     class _NoSpawn:
         def spawn_app_paused(self, package):
             raise AssertionError("must refuse before spawning")
-
-        def is_spawn_mode(self):
-            return True
 
     monkeypatch.setattr(db, "get_spotlight_service", _NoSpawn)
     monkeypatch.setattr("sandroid.services.get_spotlight_service", _NoSpawn)
@@ -899,8 +901,6 @@ def test_status_bar_shows_every_category_including_emulator(
     nothing = lambda *a: None  # noqa: E731
     no_app = types.SimpleNamespace(
         get_app_tuple=nothing,
-        get_spawn_package=nothing,
-        is_spawn_mode=lambda: False,
         get_pid=nothing,
         is_app_paused=lambda: False,
         get_effective_package=nothing,

@@ -34,8 +34,13 @@ class MonitoringHandler:
         hook_config: dict[str, bool] | None = None,
         enable_fritap: bool = False,
         enable_stacktrace: bool = False,
+        fresh: bool = False,
     ) -> CommandResult:
-        """Start the dexray-intercept malware monitor (non-blocking)."""
+        """Start the dexray-intercept malware monitor (non-blocking).
+
+        ``fresh=True`` restarts a running app first (the caller consents);
+        otherwise a running app is attached to and a stopped one started.
+        """
         from sandroid.analysis.malwaremonitor import MalwareMonitor
         from sandroid.services import get_spotlight_service
 
@@ -78,6 +83,8 @@ class MonitoringHandler:
 
         if hook_config:
             monitor.hook_config.update(hook_config)
+        monitor.fresh = fresh
+        monitor.fresh_consent = fresh
 
         success = monitor.start_monitoring()
 

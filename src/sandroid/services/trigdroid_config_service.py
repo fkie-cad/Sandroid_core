@@ -43,6 +43,10 @@ class TrigDroidConfigService:
         """Initialize the TrigDroidConfigService with default values."""
         self._spawn_mode: bool = True
         self._auto_resume: bool = True
+        #: Restart a running app for the trigger run (asks in the TUI; a
+        #: headless run takes this flag as the consent). Without it a
+        #: running app is attached to, whatever ``spawn_mode`` says.
+        self.fresh: bool = False
         self._logger = logger
 
     # =========================================================================
@@ -99,6 +103,7 @@ class TrigDroidConfigService:
         """Reset all TrigDroid configuration to defaults."""
         self._spawn_mode = True
         self._auto_resume = True
+        self.fresh = False
         self._logger.info("Reset TrigDroid config service state")
 
     def get_state_dict(self) -> dict[str, Any]:

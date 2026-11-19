@@ -228,7 +228,7 @@ def test_engine_wires_filter_and_reports_filtered_noise(caplog):
     ]
 
 
-def test_engine_protects_a_spawn_mode_target():
+def test_engine_protects_a_selected_target_that_is_not_running():
     """An app picked with ⇧C but not started (spawn mode) is protected too."""
     config = RunConfig(
         number_of_runs=1,
@@ -240,7 +240,7 @@ def test_engine_protects_a_spawn_mode_target():
     )
     spotlight = SpotlightService()
     spotlight.set_app("com.example.old", pid=7)
-    spotlight.set_spawn_app("org.mozilla.firefox")
+    spotlight.set_app("org.mozilla.firefox")
     engine = _make_engine(config, classes=_classes(), spotlight=spotlight)
 
     engine.run()

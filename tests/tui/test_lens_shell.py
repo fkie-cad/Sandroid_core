@@ -1431,14 +1431,24 @@ async def test_q_after_closing_the_objection_dialog_asks(monkeypatch) -> None:
     """R2-N2 (b): ``b`` ``o`` Esc, then ``q`` must reach the quit dialog."""
     from types import SimpleNamespace
 
+    from sandroid.services import app_start
     from sandroid.tui import app as app_mod
 
     monkeypatch.setattr(
         app_mod,
         "get_spotlight_service",
         lambda: SimpleNamespace(
-            has_app=lambda: True, get_app_tuple=lambda: ("org.example", 0)
+            has_app=lambda: True,
+            get_app_tuple=lambda: ("org.example", 0),
+            get_effective_package=lambda: "org.example",
+            is_app_paused=lambda: False,
         ),
+    )
+    # Objection checks liveness off the UI thread before its dialog opens.
+    monkeypatch.setattr(
+        app_start,
+        "probe_liveness",
+        lambda pkg, frida_fallback=False: (app_start.Liveness.NOT_RUNNING, None),
     )
     app = _app()
     async with app.run_test(size=(80, 24)) as pilot:
@@ -1448,7 +1458,7 @@ async def test_q_after_closing_the_objection_dialog_asks(monkeypatch) -> None:
         await pilot.press("b")
         await settle(pilot)
         await pilot.press("o")
-        await settle(pilot)
+        await until(pilot, lambda: type(app.screen).__name__ == "ObjectionModal")
         assert type(app.screen).__name__ == "ObjectionModal"
         await pilot.press("escape")
         await settle(pilot)
@@ -1753,7 +1763,6 @@ def test_header_says_restarting_without_a_pid_during_shift_r():
 
     bar = StatusBar()
     bar.spotlight_app = "org.mozilla.firefox"
-    bar.spawn_mode = True
     bar.spotlight_pid = None
     bar.spotlight_restarting = True
     app_seg = next(s.plain for s in bar._segments() if s.plain.startswith("App"))

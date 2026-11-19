@@ -28,6 +28,10 @@ def _get_display_value(field: str, default):
     return default
 
 
+#: Toggle: restart a running app so friTap captures from launch (asks first).
+_FRESH_LABEL = "Restart the app first (capture from launch)"
+
+
 def configure_fritap_tui() -> dict | None:
     """Show FriTap toggle configuration modal in TUI mode.
 
@@ -44,6 +48,7 @@ def configure_fritap_tui() -> dict | None:
         "Show Output in Activity Log": True,
         "Output Keylog (SSLKEYLOGFILE format)": True,
         "Output JSON (structured data)": True,
+        _FRESH_LABEL: False,
     }
 
     if not network_already_running:
@@ -67,6 +72,7 @@ def configure_fritap_tui() -> dict | None:
         "enable_network_capture": result.get("Enable Network Capture (tcpdump)", False),
         "output_keylog": result.get("Output Keylog (SSLKEYLOGFILE format)", True),
         "output_json": result.get("Output JSON (structured data)", True),
+        "fresh": result.get(_FRESH_LABEL, False),
     }
 
 
@@ -91,6 +97,7 @@ def configure_fritap_cli() -> dict | None:
         "enable_network_capture": False,
         "output_keylog": True,
         "output_json": True,
+        "fresh": False,
     }
 
     network_already_running = get_network_capture_service().is_capturing()
@@ -122,6 +129,8 @@ def configure_fritap_cli() -> dict | None:
             settings["output_keylog"] = not settings["output_keylog"]
         elif choice == "j":
             settings["output_json"] = not settings["output_json"]
+        elif choice == "r":
+            settings["fresh"] = not settings["fresh"]
 
 
 def _render_config_box(
@@ -204,6 +213,16 @@ def _render_config_box(
     console.print(
         _box_line(
             f"[accent]\\[J][/accent] JSON Output:     {json_status} (structured data)",
+            align="left",
+        )
+    )
+
+    fresh_status = (
+        "[success]●[/success]" if settings.get("fresh") else "[error]○[/error]"
+    )
+    console.print(
+        _box_line(
+            f"[accent]\\[R][/accent] Restart App:     {fresh_status} (capture from launch)",
             align="left",
         )
     )

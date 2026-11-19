@@ -103,7 +103,7 @@ class APKInstallController:
             self._push_modal(APKInstallModal(), on_apk_result)
 
     def _offer_spotlight_setup(self, package_name: str) -> None:
-        """Offer to set installed package as spotlight spawn app.
+        """Offer to select the installed package as the spotlight app.
 
         Args:
             package_name: The package name of the installed APK.
@@ -115,11 +115,10 @@ class APKInstallController:
                 if confirmed:
                     from sandroid.services import get_spotlight_service
 
-                    get_spotlight_service().set_spawn_app(package_name)
-                    self._log_success(f"Spotlight spawn app set: {package_name}")
+                    get_spotlight_service().set_app(package_name)
+                    self._log_success(f"Spotlight app set: {package_name}")
                     if self._force_ui_refresh:
                         self._force_ui_refresh()
-                    self._offer_auto_resume()
                 else:
                     self._log_info("Spotlight setup skipped")
             except Exception:
@@ -130,31 +129,6 @@ class APKInstallController:
                 ConfirmModal(
                     title="Set Spotlight App",
                     message=f"Set {package_name} as spotlight app?",
-                ),
-                on_confirm,
-            )
-
-    def _offer_auto_resume(self) -> None:
-        """Offer to enable auto-resume for spotlight app."""
-        from sandroid.tui.modals import ConfirmModal
-
-        def on_confirm(confirmed: bool) -> None:
-            try:
-                from sandroid.services import get_spotlight_service
-
-                get_spotlight_service().set_auto_resume(confirmed)
-                status = "enabled" if confirmed else "disabled"
-                self._log_info(f"Auto-resume: {status}")
-                if self._force_ui_refresh:
-                    self._force_ui_refresh()
-            except Exception:
-                pass
-
-        if self._push_modal:
-            self._push_modal(
-                ConfirmModal(
-                    title="Auto-Resume",
-                    message="Auto-resume app after spawn? (recommended)",
                 ),
                 on_confirm,
             )

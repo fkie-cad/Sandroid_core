@@ -179,7 +179,14 @@ class MalwareMonitorCommand(CommandHandler):
 
             return CommandResult(
                 success=True,
-                message=f"Malware monitoring started for {app_name or 'spotlight app'}",
+                message=(
+                    f"Malware monitoring started for {app_name or 'spotlight app'}"
+                    + (
+                        f" · {note}"
+                        if (note := getattr(monitor, "start_note", ""))
+                        else ""
+                    )
+                ),
                 data={
                     "action": "started",
                     "app_name": app_name,
@@ -222,13 +229,8 @@ class MalwareMonitorCommand(CommandHandler):
                     error="No active monitoring task found",
                 )
 
-            # Stop the task
+            # Stop the task (the spotlight selection stays as it is)
             success = task_service.stop(task_name)
-
-            # Reset spotlight application if in spawn mode
-            spotlight = get_spotlight_service()
-            if spotlight.is_spawn_mode():
-                spotlight.reset()
 
             if success:
                 return CommandResult(

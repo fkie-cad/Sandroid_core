@@ -1095,6 +1095,21 @@ class CAManager:
             logger.error(f"Failed to compute SPKI hash: {e}")
             return None
 
+    @staticmethod
+    def _chrome_is_running_spotlight() -> bool:
+        """True if Chrome is the spotlight app and runs (fail safe: True)."""
+        try:
+            from sandroid.services import get_spotlight_service
+
+            if get_spotlight_service().get_package_name() != "com.android.chrome":
+                return False
+            from sandroid.services.app_start import Liveness, probe_liveness
+
+            liveness, _pid = probe_liveness("com.android.chrome")
+            return liveness != Liveness.NOT_RUNNING
+        except Exception:
+            return True
+
     def bypass_chrome_ct(self, cert_path: Path) -> tuple[bool, str]:
         """Bypass Chrome Certificate Transparency enforcement for a CA cert.
 
@@ -1151,7 +1166,15 @@ class CAManager:
                 "shell settings put global debug_app com.android.chrome"
             )
 
-            # Force-stop Chrome so it picks up the new flags on next launch
+            # Force-stop Chrome so it picks up the new flags on next launch --
+            # unless Chrome is the running spotlight app: that is never
+            # killed without the user's OK (they restart it with ⇧R).
+            if self._chrome_is_running_spotlight():
+                logger.info("Chrome CT bypass flags installed (8 locations)")
+                return True, (
+                    f"Chrome CT bypass installed (SPKI: {spki_hash[:12]}...) "
+                    "— Chrome keeps running; restart it (⇧R) to apply"
+                )
             Adb.send_adb_command("shell am force-stop com.android.chrome")
 
             logger.info("Chrome CT bypass flags installed (8 locations)")

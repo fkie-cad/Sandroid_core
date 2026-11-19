@@ -2801,89 +2801,42 @@ class BypassService:
     # -- session setup ----------------------------------------------------
 
     def _setup_session(self, *, paused: bool) -> bool:
-        """Ensure a Frida session for the spotlight app, reusing any existing.
+        """Ensure a Frida session on the spotlight app, never starting it.
 
-        Records :attr:`_app_package` / :attr:`_process_id` and surfaces the PID
-        to the spotlight panel. On the spawn path the session already exists
-        (created paused by ``spawn_app_paused``); on the attach path this
-        attaches to the running PID.
+        Records :attr:`_app_package` / :attr:`_process_id` and surfaces the
+        PID to the spotlight panel. Joins the JobManager's session on the app
+        (the paused spawn of Start/⇧P/⇧R, or a live session of another tool)
+        or attaches to the running PID. A stopped app is refused, never
+        spawned (:func:`sandroid.services.app_start.resolve_start` with
+        ``allow_spawn=False``), and a running one is never restarted.
 
         Returns:
-            True iff this call *itself* created a fresh **spawn** session (so a
-            live caller knows it must resume the now-paused process). False when
-            reusing a session or attaching to a running PID.
+            False (kept for callers: this never creates a spawn to resume).
 
         Raises:
-            ValueError: If no spotlight app is selected, or attach mode is
-                requested for an app that is not running.
+            ValueError: No spotlight app, the app is not running, or Frida is
+                busy (the message says why).
         """
-        from sandroid.core.adb import Adb
+        from sandroid.services.app_start import StartAction, open_session
+        from sandroid.services.app_start import resolve_start as _resolve
 
         spotlight = get_spotlight_service()
-        app_tuple = spotlight.get_app_tuple()
-        if not app_tuple:
-            raise ValueError(
-                "No spotlight app selected. Press 'C' to select an app first."
-            )
-
-        self._app_package = app_tuple[0]
-        process_id = spotlight.get_pid()
-        should_spawn = spotlight.is_spawn_mode()
-
-        if not should_spawn and not process_id:
-            process_id = Adb.get_pid_for_package_name(self._app_package)
-            if not process_id:
-                raise ValueError(
-                    f"App {self._app_package} not running. "
-                    "Start it or use spawn mode (Shift+C)."
-                )
-
-        created_spawn = False
-        jm = Toolbox.get_frida_job_manager()
-        if not jm.has_active_session():
-            logger.debug("No existing Frida session — creating new one")
-            target = self._app_package if should_spawn else process_id
-            jm.setup_frida_session(
-                target, self._message_handler, should_spawn=should_spawn
-            )
-            if should_spawn:
-                created_spawn = True
-                info = jm.get_session_info()
-                if info and info.get("pid"):
-                    process_id = info["pid"]
+        decision = _resolve(tool="Bypass", allow_spawn=False, java_agent=False)
+        if decision.action not in (StartAction.JOIN, StartAction.ATTACH):
+            raise ValueError(decision.reason or "Spotlight app not available")
+        self._app_package = decision.package
+        if decision.action == StartAction.ATTACH:
+            logger.debug("Attaching the bypass to PID %s", decision.pid)
+            open_session(decision, self._message_handler)
         else:
-            session_pkg = jm.package_name
-            if session_pkg and session_pkg != self._app_package:
-                logger.info(
-                    "Session targets %s but spotlight is %s — resetting",
-                    session_pkg,
-                    self._app_package,
-                )
-                jm.reset_session()
-                target = self._app_package if should_spawn else process_id
-                jm.setup_frida_session(
-                    target,
-                    self._message_handler,
-                    should_spawn=should_spawn,
-                )
-                if should_spawn:
-                    created_spawn = True
-                    info = jm.get_session_info()
-                    if info and info.get("pid"):
-                        process_id = info["pid"]
-            else:
-                logger.debug("Reusing existing Frida session")
-                if not process_id:
-                    info = jm.get_session_info()
-                    if info and info.get("pid"):
-                        process_id = info["pid"]
-
+            logger.debug("Reusing the Frida session on PID %s", decision.pid)
+        process_id = decision.pid
         self._process_id = process_id
         # Surface the resolved PID so the spotlight panel shows it (non-
         # publishing, so this does not retrigger a panel refresh loop).
         if process_id:
             spotlight.set_pid(process_id)
-        return created_spawn
+        return False
 
     # -- combined-script assembly -----------------------------------------
 
@@ -3006,7 +2959,7 @@ class BypassService:
             self._merge_errors = set()
 
         try:
-            created_spawn = self._setup_session(paused=paused)
+            self._setup_session(paused=paused)
         except ValueError as exc:
             return False, str(exc), False
 
@@ -3061,31 +3014,6 @@ class BypassService:
             self._job = job
             self._script = script
             self._temp_path = path
-
-        # If this live transition itself spawned a fresh (now paused) session —
-        # e.g. start()/start_many() against a spawn-selected app with no prior
-        # session — nothing has resumed it yet. Resume once, preserving the
-        # anti-Frida self-kill diagnostic. The explicit paused-spawn flow
-        # (paused=True) resumes separately, so skip it there.
-        if not paused and created_spawn and jm.is_paused():
-            try:
-                Toolbox.resume_spawned_process_after_hooks(
-                    self._frida_device(), self._process_id
-                )
-            except frida.ProcessNotFoundError:
-                msg = (
-                    "Process died during hook load — target likely has "
-                    "anti-Frida detection. Enable the Frida detection "
-                    "bypass first, or attach instead of spawning."
-                )
-                logger.error(msg)
-                self._reset_script_state()
-                return False, msg, False
-            except frida.InvalidOperationError as exc:
-                logger.info(
-                    "[Bypass] Process already running; skipping resume (%s)",
-                    exc,
-                )
 
         return True, "Bypass script loaded", True
 
@@ -3271,12 +3199,40 @@ class BypassService:
 
     # -- public category controls -----------------------------------------
 
+    def _arm_unless_live(self, categories) -> tuple[bool, str] | None:
+        """Arm ``categories`` instead of loading them when the app is not live.
+
+        Ctrl+P / the AI ``start_ssl_unpin`` never start or restart the app:
+        a stopped app gets the categories armed (␣ starts it with them), a
+        held paused spawn gets them on ␣ resume.
+
+        Returns:
+            ``(ok, message)`` when armed or refused, None when the app runs
+            and the caller loads the categories live.
+        """
+        from sandroid.services.app_start import StartAction
+        from sandroid.services.app_start import resolve_start as _resolve
+
+        decision = _resolve(tool="Bypass", allow_spawn=False, java_agent=False)
+        names = ", ".join(self.display_name(c) for c in categories)
+        if decision.action == StartAction.JOIN and decision.paused:
+            for cat in categories:
+                self._arm(cat)
+            return True, f"{names} armed — ␣ resume applies it"
+        if decision.action == StartAction.REFUSE:
+            if decision.code == "not_running":
+                for cat in categories:
+                    self._arm(cat)
+                return True, f"{names} armed — ␣ starts {decision.package} with it"
+            return False, decision.reason
+        return None
+
     def start(
         self,
         category: str,
         on_message: Callable[[Any], None] | None = None,
     ) -> tuple[bool, str]:
-        """Add one category live (attach path). Idempotent."""
+        """Add one category live. Idempotent; arms only when not running."""
         cls = self._manager_class(category)
         if cls is None:
             return False, f"Unknown bypass category: {category}"
@@ -3287,6 +3243,9 @@ class BypassService:
             if category in self._active:
                 return True, f"{self.display_name(category)} already active"
             target = set(self._active) | {category}
+        armed = self._arm_unless_live([category])
+        if armed is not None:
+            return armed
         return self.set_active(target, paused=False, on_message=on_message)
 
     def start_many(
@@ -3294,9 +3253,18 @@ class BypassService:
         categories,
         on_message: Callable[[Any], None] | None = None,
     ) -> tuple[bool, str]:
-        """Add several categories live in ONE set_flags op (no N reloads)."""
+        """Add several categories live in ONE set_flags op (no N reloads).
+
+        Arms only when the app is not running (never starts it).
+        """
+        conflict = self.exclusive_conflict(categories)
+        if conflict:
+            return False, conflict
         with self._lock:
             target = set(self._active) | set(categories)
+        armed = self._arm_unless_live(sorted(set(categories)))
+        if armed is not None:
+            return armed
         return self.set_active(target, paused=False, on_message=on_message)
 
     def stop(self, category: str) -> bool:
@@ -3340,13 +3308,15 @@ class BypassService:
                 if not ok:
                     self._disarm(category)
                     return False, msg
-                if getattr(self._manager_class(category), "APPLY_AT_SPAWN", False):
+                if self.applies_at_spawn(category):
                     return True, (
-                        f"{name} active — restart the app (R) so checks it "
+                        f"{name} active — restart the app (⇧R) so checks it "
                         "ran at startup see it too"
                     )
                 return True, f"{name} active"
-            return True, f"{name} armed — Start to apply"
+            if self.is_paused_session():
+                return True, f"{name} armed — ␣ resume applies it"
+            return True, f"{name} armed — ␣ start applies it"
 
         # Turning OFF.
         self._disarm(category)
@@ -3358,6 +3328,18 @@ class BypassService:
         return False, f"{name} off"
 
     # -- queries ----------------------------------------------------------
+
+    def applies_at_spawn(self, category: str) -> bool:
+        """True if ``category`` only fully works from the app's start."""
+        return bool(getattr(self._manager_class(category), "APPLY_AT_SPAWN", False))
+
+    def forget_process(self) -> None:
+        """Drop the resident script and its process (keeps the armed set).
+
+        For a restart or a dropped Frida session: the next load goes onto
+        the new process from scratch.
+        """
+        self._reset_script_state()
 
     def is_active(self, category: str) -> bool:
         with self._lock:
@@ -3550,10 +3532,9 @@ class BypassService:
                 f"Spawned (paused) {package} with {active_n} bypass(es) (Resume to run)"
             )
 
-        # 4'. Resume exactly once, preserving the anti-Frida self-kill
-        # diagnostic: resume_spawned_process_after_hooks lets a
-        # ProcessNotFoundError propagate (resume_app would swallow it).
-        spotlight.set_auto_resume(True)  # spawn_app_paused had set it False
+        # 4'. Resume exactly once (we own this spawn), preserving the
+        # anti-Frida self-kill diagnostic: resume_spawned_process_after_hooks
+        # lets a ProcessNotFoundError propagate (resume_app would swallow it).
         try:
             Toolbox.resume_spawned_process_after_hooks(self._frida_device(), pid)
         except frida.ProcessNotFoundError:
@@ -3603,9 +3584,9 @@ class BypassService:
         stock/uninstrumented launch — for a forensic tool a clear failure beats
         a quietly-unhooked capture.
 
-        Only active in spawn mode: outside spawn mode this is EXACTLY one
-        :meth:`apply_to_fresh_spawn` call (zero behaviour change; attach is the
-        separate ``apply_armed`` path).
+        Always active: every Start/⇧P/⇧R spawn gets the ladder (attach is
+        the separate ``apply_armed`` path). Callers check that the app is not
+        running before calling (a spawn kills a running instance).
 
         Args:
             package: Package to spawn.
@@ -3631,11 +3612,6 @@ class BypassService:
             conflict = self.exclusive_conflict(categories)
             if conflict:
                 return False, conflict  # not a spawn failure: no retry ladder
-
-        # Gate: the ladder only augments spawn mode. Outside it, behave EXACTLY
-        # like the pre-change single call.
-        if not spotlight.is_spawn_mode():
-            return do_spawn(package, categories, on_message, resume)
 
         attempts, splash_window, retry_sleep = 4, 5.0, 0.6
         try:

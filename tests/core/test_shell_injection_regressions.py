@@ -281,7 +281,7 @@ def test_spotlight_service_rejects_invalid_package():
     with pytest.raises(ValueError):
         svc.set_app("com.x;touch${IFS}/tmp/PWNED;#")
     with pytest.raises(ValueError):
-        svc.set_spawn_app("com.x;id")
+        svc.set_app("com.x;id")
     assert svc.get_app() is None
     svc.set_app("com.example.app")
     assert svc.get_effective_package() == "com.example.app"

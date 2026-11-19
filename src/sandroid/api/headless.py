@@ -688,9 +688,9 @@ class SandroidHeadlessAPI(SandroidAPI):
     async def set_spotlight_app(
         self,
         package_name: str,
-        mode: str = "attach",
+        mode: str | None = None,
     ) -> CommandResult:
-        """Set the spotlight application."""
+        """Select the spotlight application (``mode`` is deprecated, ignored)."""
         return await self._app_handler.set_spotlight_app(package_name, mode)
 
     async def get_installed_apps(self) -> list[str]:
@@ -708,13 +708,18 @@ class SandroidHeadlessAPI(SandroidAPI):
         verbose: bool = False,
         keylog_output: str | None = None,
         json_output: str | None = None,
+        fresh: bool = False,
     ) -> CommandResult:
-        """Start FriTap SSL/TLS key extraction (non-blocking)."""
+        """Start FriTap SSL/TLS key extraction (non-blocking).
+
+        ``fresh=True`` restarts a running app first (the caller consents).
+        """
         return await self._fritap.start(
             package=package,
             verbose=verbose,
             keylog_output=keylog_output,
             json_output=json_output,
+            fresh=fresh,
         )
 
     async def stop_fritap(self, timeout: float = 5.0) -> CommandResult:
@@ -736,13 +741,18 @@ class SandroidHeadlessAPI(SandroidAPI):
         hook_config: dict[str, bool] | None = None,
         enable_fritap: bool = False,
         enable_stacktrace: bool = False,
+        fresh: bool = False,
     ) -> CommandResult:
-        """Start the dexray-intercept malware monitor (non-blocking)."""
+        """Start the dexray-intercept malware monitor (non-blocking).
+
+        ``fresh=True`` restarts a running app first (the caller consents).
+        """
         return await self._monitoring_handler.start_malware_monitor(
             package=package,
             hook_config=hook_config,
             enable_fritap=enable_fritap,
             enable_stacktrace=enable_stacktrace,
+            fresh=fresh,
         )
 
     @require_initialized

@@ -1,8 +1,9 @@
 """Spotlight Application Service for Sandroid.
 
 This service manages the "spotlight" application - the app currently being
-monitored/analyzed. It handles app selection, spawn vs attach modes, and
-maintains the current target state.
+monitored/analyzed. It holds a single *selection* (package, plus PID and
+activity when known) and no spawn/attach mode: how a tool gets the app's
+process is decided per call by :mod:`sandroid.services.app_start`.
 
 Extracted from Toolbox class to follow Single Responsibility Principle.
 
@@ -20,12 +21,13 @@ Usage:
     if spotlight.has_app():
         pkg = spotlight.get_package_name()
 
-    # Spawn mode
-    spotlight.set_spawn_app("com.example.app", auto_resume=True)
+    # Run state (cached PID + JobManager flag, no ADB)
+    spotlight.get_run_state()  # "running" | "paused" | "not_running" | ...
 """
 
 import logging
 import threading
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -37,6 +39,19 @@ from sandroid.services.protocols import EventBusProtocol
 
 logger = logging.getLogger(__name__)
 
+#: ``set_app(pid=...)`` default: keep the PID of a re-picked same package.
+#: An explicit ``pid=None`` clears it (⇧C after a lookup found nothing).
+_UNSET: Any = object()
+
+
+def _deprecated(name: str, instead: str) -> None:
+    warnings.warn(
+        f"SpotlightService.{name} is deprecated: the spotlight has no "
+        f"spawn/attach mode any more ({instead}).",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
 
 @dataclass
 class SpotlightApp:
@@ -46,7 +61,7 @@ class SpotlightApp:
         package_name: Android package name (e.g., "com.example.app")
         activity_name: Current activity name (if known)
         pid: Process ID (if known)
-        mode: SpawnMode enum (ATTACH or SPAWN)
+        mode: Deprecated, always ATTACH (removed in step 2)
         set_at: When the spotlight was set
     """
 
@@ -74,18 +89,13 @@ class JobManagerProtocol(Protocol):
 
 
 class SpotlightService:
-    """Service for managing the spotlight application.
+    """Service for managing the spotlight application (one selection).
 
-    The spotlight application is the app currently being monitored or analyzed.
-    This service tracks which app is selected, supports both SpawnMode.ATTACH
-    (connecting to a running app) and SpawnMode.SPAWN (launching app with hooks).
-
-    State Variables:
-        - _current_app: SpotlightApp or None -- the attach-selected app
-        - _spawn_package: str or None -- the spawn target
-        - _spawn_pid: int or None -- PID of a spawn-selected app
-        - _spawn_mode: bool -- whether in spawn mode
-        - _auto_resume: bool -- auto-resume after a spawn
+    The spotlight application is the app currently being monitored or
+    analyzed: one :class:`SpotlightApp` record (package, activity, PID,
+    set_at). There is no spawn/attach mode. Whether a Frida tool joins,
+    attaches to, spawns or (with consent) restarts the app is decided per
+    call by :func:`sandroid.services.app_start.resolve_start`.
 
     This service is the single source of truth for the spotlight app;
     read it with :meth:`get_effective_package`. The file watchlist lives in
@@ -96,18 +106,8 @@ class SpotlightService:
 
     Example:
         service = SpotlightService()
-
-        # Attach to running app
-        service.set_app("com.example.app", pid=12345, mode=SpawnMode.ATTACH)
-
-        # Or use spawn mode
-        service.set_spawn_app("com.example.app", auto_resume=True)
-
-        # Query state
-        if service.is_spawn_mode():
-            pkg = service.get_spawn_package()
-        else:
-            app = service.get_app()
+        service.set_app("com.example.app", pid=12345)
+        service.get_run_state()  # "running"
     """
 
     def __init__(
@@ -122,22 +122,12 @@ class SpotlightService:
             job_manager_factory: Optional factory callable to get JobManager instance.
                                  If not provided, will use Toolbox.get_frida_job_manager().
         """
-        # Guards the multi-attribute state below so concurrent callers (e.g.
-        # async subtasks plus the orchestrator) can't read/write a torn
-        # combination of _current_app/_spawn_* fields. An RLock, NOT a plain
-        # Lock: composite methods like reset()/get_state_dict() call the
-        # (also-locked) get_effective_package(), which would self-deadlock
-        # under a non-reentrant lock. Event publishing always happens OUTSIDE
-        # this lock (repo convention: snapshot under lock, publish after).
+        # Guards the record so concurrent callers (async subtasks plus the
+        # orchestrator) never read a torn state. An RLock: composite methods
+        # like get_state_dict() call other locked getters. Event publishing
+        # always happens OUTSIDE this lock (snapshot under lock, publish after).
         self._lock = threading.RLock()
         self._current_app: SpotlightApp | None = None
-        self._spawn_package: str | None = None
-        # PID for a spawn-selected app (Shift+C), which has no _current_app.
-        # Lets the live running-state indicator surface a PID even before an
-        # attach record exists. Kept in sync by set_pid().
-        self._spawn_pid: int | None = None
-        self._spawn_mode: bool = False
-        self._auto_resume: bool = True
         #: Why the last spawn_app_paused() failed (None after a success).
         self.last_spawn_error: str | None = None
         #: Package Sandroid is restarting (⇧R) right now, else None.
@@ -147,26 +137,27 @@ class SpotlightService:
         self._logger = logger
 
     # =========================================================================
-    # App State (Attach Mode)
+    # The selection
     # =========================================================================
 
     def set_app(
         self,
         package_name: str,
         activity_name: str | None = None,
-        pid: int | None = None,
-        mode: SpawnMode | str = SpawnMode.ATTACH,
+        pid: Any = _UNSET,
+        mode: SpawnMode | str | None = None,
     ) -> None:
-        """Set the spotlight application.
+        """Select ``package_name`` as the spotlight app.
 
-        Leaves spawn mode: the spawn target, its PID and the auto-resume flag
-        are reset, so the effective package is *package_name* afterwards.
+        Re-selecting the same package without a ``pid`` keeps the known PID
+        (and the activity when none is given), so a re-pick of the running
+        app does not forget its process. An explicit ``pid=None`` clears it.
 
         Args:
             package_name: Android package name
             activity_name: Activity name (optional)
-            pid: Process ID (optional)
-            mode: SpawnMode.ATTACH or SpawnMode.SPAWN (accepts string for backwards compatibility)
+            pid: Process ID; omit to keep a same-package PID, None to clear.
+            mode: Deprecated and ignored (the spotlight has no mode).
 
         Raises:
             ValueError: *package_name* is not a valid Android package name.
@@ -174,32 +165,29 @@ class SpotlightService:
                 (pidof, force-stop, proxy lanes), so it is validated here.
         """
         validate_package_name(package_name)
-        # Convert string to SpawnMode for backwards compatibility
-        if isinstance(mode, str):
-            mode = SpawnMode(mode)
+        if mode is not None and str(getattr(mode, "value", mode)) != "attach":
+            self._logger.debug(f"set_app: ignoring deprecated mode={mode!r}")
         with self._lock:
             previous = self._current_app
+            same = previous is not None and previous.package_name == package_name
+            if pid is _UNSET:
+                pid = previous.pid if same else None
+            if activity_name is None and same:
+                activity_name = previous.activity_name
             self._current_app = SpotlightApp(
                 package_name=package_name,
                 activity_name=activity_name,
                 pid=pid,
-                mode=mode,
             )
-            self._spawn_package = None
-            self._spawn_pid = None
-            self._spawn_mode = False
-            self._auto_resume = True
             previous_package = previous.package_name if previous else None
         self._logger.debug(
-            f"Set spotlight app: {package_name}"
-            + (f" (PID: {pid})" if pid else "")
-            + f" [{mode} mode]"
+            f"Set spotlight app: {package_name}" + (f" (PID: {pid})" if pid else "")
         )
 
         self._publish_app_changed(
             package_name=package_name,
             previous_package=previous_package,
-            mode=mode.value,  # Pass string value for event serialization
+            mode=SpawnMode.ATTACH.value,
             pid=pid,
         )
 
@@ -228,57 +216,31 @@ class SpotlightService:
         Returns:
             Package name string or None
         """
-        return self._current_app.package_name if self._current_app else None
+        app = self._current_app
+        return app.package_name if app else None
 
     def get_activity_name(self) -> str | None:
         """Get the current spotlight activity name.
 
-        Ignores an attach record that is not the effective package (spawn
-        mode on another app).
-
         Returns:
             Activity name string or None
         """
-        with self._lock:
-            app = self._effective_current_app()
-            return app.activity_name if app else None
+        app = self._current_app
+        return app.activity_name if app else None
 
     def get_pid(self) -> int | None:
-        """Get the current spotlight process ID.
-
-        Works for both attach-selected apps (``_current_app``) and
-        spawn-selected apps (only ``_spawn_package`` set). An attach record
-        that is not the effective package is ignored.
+        """Get the cached PID of the spotlight app (no ADB).
 
         Returns:
             PID integer or None
         """
-        with self._lock:
-            app = self._effective_current_app()
-            if app:
-                return app.pid
-            return self._spawn_pid
-
-    def _effective_current_app(self) -> SpotlightApp | None:
-        """The attach record, if it belongs to the effective package.
-
-        Returns:
-            ``_current_app``, or None when it is unset or describes another
-            app than :meth:`get_effective_package`.
-        """
-        with self._lock:
-            app = self._current_app
-            if app and app.package_name == self.get_effective_package():
-                return app
-            return None
+        app = self._current_app
+        return app.pid if app else None
 
     def set_pid(self, pid: int | None) -> None:
-        """Update the PID of the current spotlight app.
+        """Update the cached PID of the current spotlight app.
 
-        Works whether the app was attach-selected (``_current_app``) or
-        spawn-selected (only ``_spawn_package`` set). Pass ``None`` to clear
-        the PID (e.g. after the app is killed). An attach record that is not
-        the effective package is left alone.
+        Pass ``None`` to clear the PID (e.g. after the app is killed).
 
         Deliberately **non-publishing** (A5): it does not emit
         ``STATE_CHANGED``. The panel's running-state poll calls this from a
@@ -289,10 +251,8 @@ class SpotlightService:
             pid: New process ID, or None to clear it.
         """
         with self._lock:
-            app = self._effective_current_app()
-            if app:
-                app.pid = pid
-            self._spawn_pid = pid
+            if self._current_app:
+                self._current_app.pid = pid
         if pid:
             self._logger.debug(f"Updated spotlight PID to {pid}")
         else:
@@ -378,184 +338,85 @@ class SpotlightService:
         """Check if a spotlight app is currently set.
 
         Returns:
-            True if an app is set (in either attach or spawn mode)
+            True if an app is selected
         """
-        return self._current_app is not None or self._spawn_package is not None
+        return self._current_app is not None
 
     def get_app_tuple(self) -> tuple[str, str] | None:
         """Get the spotlight app as (package_name, activity_name) tuple.
 
         For backwards compatibility with code expecting this format.
-        Handles both attach mode (via _current_app) and spawn mode (via _spawn_package).
 
         Returns:
             Tuple of (package_name, activity_name) or None
         """
-        with self._lock:
-            # Handle spawn mode first
-            if self._spawn_mode and self._spawn_package:
-                return (self._spawn_package, "")
+        app = self._current_app
+        if not app:
+            return None
+        return (app.package_name, app.activity_name or "")
 
-            # Fall back to attach mode
-            if not self._current_app:
-                return None
-            return (
-                self._current_app.package_name,
-                self._current_app.activity_name or "",
-            )
+    def get_run_state(self) -> str:
+        """``"running"``, ``"paused"``, ``"not_running"`` or ``"restarting"``.
+
+        Cheap: the cached PID plus the JobManager's paused flag, no ADB.
+        Returns ``"not_running"`` without an app too.
+        """
+        if self.is_restarting():
+            return "restarting"
+        pid = self.get_pid()
+        if pid and self.is_app_paused():
+            return "paused"
+        if pid:
+            return "running"
+        if self.is_app_paused():
+            return "paused"  # a held, still-unnamed spawn (no pidof yet)
+        return "not_running"
 
     # =========================================================================
-    # Spawn Mode
+    # Deprecated mode API (no-op shims; removed in step 2)
     # =========================================================================
 
-    def set_spawn_app(
-        self,
-        package_name: str,
-        auto_resume: bool = True,
-    ) -> None:
-        """Set the app to spawn with Frida hooks.
-
-        Enables spawn mode where the app is launched fresh with
-        hooks attached from the start.
-
-        Args:
-            package_name: Package name to spawn
-            auto_resume: Whether to auto-resume after hooks load
+    def set_spawn_app(self, package_name: str, auto_resume: bool = True) -> None:
+        """Deprecated: select ``package_name`` (same as :meth:`set_app`).
 
         Raises:
             ValueError: *package_name* is not a valid Android package name.
         """
-        validate_package_name(package_name)
-        previous = self._select_spawn_package(package_name, auto_resume, keep_pid=True)
-
-        self._logger.info(f"Set spawn app: {package_name} (auto_resume: {auto_resume})")
-
-        self._publish_app_changed(
-            package_name=package_name,
-            previous_package=previous,
-            mode=SpawnMode.SPAWN.value,
-            pid=None,
-        )
-
-    def _select_spawn_package(
-        self, package_name: str, auto_resume: bool, *, keep_pid: bool = False
-    ) -> str | None:
-        """Make *package_name* the spawn target (spawn mode on).
-
-        Shared by :meth:`set_spawn_app` and :meth:`spawn_app_paused`. The
-        spawn PID is reset and an attach record of another package is
-        dropped. An attach record of the same package keeps its activity; it
-        keeps its PID only with *keep_pid* (a ⇧C re-pick of the running app,
-        so Space still re-checks the PID instead of killing it by a spawn).
-
-        Args:
-            package_name: Package name to spawn.
-            auto_resume: Whether to auto-resume after hooks load.
-            keep_pid: Keep a same-package attach record's PID. False when a
-                new process was just spawned (that PID is stale).
-
-        Returns:
-            The previous spawn package, or None.
-        """
-        with self._lock:
-            previous = self._spawn_package
-            if self._current_app and self._current_app.package_name != package_name:
-                self._current_app = None
-            elif self._current_app and not keep_pid:
-                self._current_app.pid = None
-            self._spawn_package = package_name
-            self._spawn_pid = None
-            self._spawn_mode = True
-            self._auto_resume = auto_resume
-        return previous
+        _deprecated("set_spawn_app", "use set_app")
+        self.set_app(package_name)
 
     def get_spawn_package(self) -> str | None:
-        """Get the package name configured for spawn mode.
-
-        Returns:
-            Package name string or None
-        """
-        return self._spawn_package
+        """Deprecated: always None (there is no spawn target)."""
+        _deprecated("get_spawn_package", "use get_effective_package")
+        return None
 
     def is_spawn_mode(self) -> bool:
-        """Check if spawn mode is active.
-
-        Returns:
-            True if spawn mode is enabled
-        """
-        return self._spawn_mode
+        """Deprecated: always False (tools decide per call)."""
+        _deprecated("is_spawn_mode", "tools decide via app_start")
+        return False
 
     def set_spawn_mode(self, mode: bool | str) -> None:
-        """Set the spawn mode for the next Frida operation.
-
-        Args:
-            mode: Either a boolean (True=spawn, False=attach) for simple usage,
-                  or one of 'multi_tool', 'single_tool', 'late_attach', 'attach'
-                  for advanced control:
-                - True or 'single_tool': Spawn with one primary tool, auto-resume
-                  after hooks loaded
-                - False or 'attach' or 'late_attach': Attach to running app
-                - 'multi_tool': Spawn paused, load multiple tools, then resume
-        """
-        # Handle boolean for backward compatibility
-        if isinstance(mode, bool):
-            self._spawn_mode = mode
-            self._auto_resume = True
-            mode_str = "SPAWN" if mode else "ATTACH"
-            self._logger.debug(f"Spotlight mode set to: {mode_str}")
-            return
-
-        # Handle string modes
-        if mode == "multi_tool":
-            self._spawn_mode = True
-            self._auto_resume = False
-        elif mode == "single_tool":
-            self._spawn_mode = True
-            self._auto_resume = True
-        elif mode in ("late_attach", "attach"):
-            self._spawn_mode = False
-            self._auto_resume = True
-        else:
-            self._logger.warning(
-                f"Unknown spawn mode: {mode}, defaulting to single_tool"
-            )
-            self._spawn_mode = True
-            self._auto_resume = True
-
-        self._logger.info(
-            f"Spawn mode set to: {mode} (spawn={self._spawn_mode}, "
-            f"auto_resume={self._auto_resume})"
-        )
+        """Deprecated no-op."""
+        _deprecated("set_spawn_mode", "tools decide via app_start")
 
     def get_auto_resume(self) -> bool:
-        """Check if auto-resume after spawn is enabled.
-
-        Returns:
-            True if auto-resume is enabled
-        """
-        return self._auto_resume
+        """Deprecated: always True (resume follows spawn ownership)."""
+        _deprecated("get_auto_resume", "resume follows spawn ownership")
+        return True
 
     def set_auto_resume(self, enabled: bool) -> None:
-        """Enable or disable auto-resume after spawn.
-
-        Args:
-            enabled: True to enable auto-resume
-        """
-        self._auto_resume = enabled
-        # debug: the UI that toggles it already reports the new state.
-        self._logger.debug(f"Auto-resume {'enabled' if enabled else 'disabled'}")
+        """Deprecated no-op (resume follows spawn ownership)."""
+        _deprecated("set_auto_resume", "resume follows spawn ownership")
 
     def get_spawn_mode_string(self) -> str:
-        """Get the current spawn mode setting as a descriptive string.
-
-        Returns:
-            One of: 'multi_tool', 'single_tool', 'late_attach'
-        """
-        if self._spawn_mode and not self._auto_resume:
-            return "multi_tool"
-        if self._spawn_mode:
-            return "single_tool"
+        """Deprecated: always ``"late_attach"``."""
+        _deprecated("get_spawn_mode_string", "tools decide via app_start")
         return "late_attach"
+
+    def get_effective_mode(self) -> SpawnMode:
+        """Deprecated: always ``SpawnMode.ATTACH``."""
+        _deprecated("get_effective_mode", "use get_run_state")
+        return SpawnMode.ATTACH
 
     # =========================================================================
     # Spawn App Paused (Multi-Tool Loading)
@@ -603,7 +464,14 @@ class SpotlightService:
 
             pid = job_manager.spawn_paused(package_name)
             self.last_spawn_error = None
-            self._select_spawn_package(package_name, auto_resume=False)
+            # A new process: another package replaces the record; the same
+            # package keeps its activity but not its old PID.
+            with self._lock:
+                app = self._current_app
+                if app is None or app.package_name != package_name:
+                    self._current_app = SpotlightApp(package_name=package_name)
+                else:
+                    app.pid = None
             # Still paused: a running file monitor follows the new process
             # before its first instruction (gap-free).
             self.notify_spawned(pid, package_name)
@@ -660,20 +528,34 @@ class SpotlightService:
 
         result = job_manager.resume_app()
         if result:
-            self._auto_resume = True  # Reset to default
-            self._logger.info(f"Resumed app {self._spawn_package}")
+            self._logger.info(f"Resumed app {self.get_package_name()}")
         return result
 
     def is_app_paused(self) -> bool:
-        """Check if there's a paused app waiting to be resumed.
+        """True if the JobManager holds the *spotlight app* paused.
+
+        Package-scoped: a paused spawn of another package does not count.
+        On an attach session AFM's ``package_name`` is the PID, so the
+        cached PID is compared too.
 
         Returns:
-            True if an app is paused, False otherwise.
+            True if the spotlight app is paused, False otherwise.
         """
         job_manager = self._get_job_manager()
         if job_manager is None:
             return False
-        return job_manager.is_paused()
+        try:
+            if not job_manager.is_paused():
+                return False
+        except Exception:
+            return False
+        package = self.get_package_name()
+        target = getattr(job_manager, "package_name", None)
+        if not isinstance(target, (str, int)) or target in ("", None):
+            return True  # a test double / unknown target: trust the flag
+        if isinstance(target, int):
+            return target == self.get_pid()
+        return target == package
 
     # =========================================================================
     # Reset
@@ -682,15 +564,11 @@ class SpotlightService:
     def reset(self) -> None:
         """Reset all spotlight state.
 
-        Clears the current app, spawn configuration, and mode.
+        Clears the selection (leaves any running app alone).
         """
         with self._lock:
             previous_pkg = self.get_effective_package()
             self._current_app = None
-            self._spawn_package = None
-            self._spawn_pid = None
-            self._spawn_mode = False
-            self._auto_resume = True
 
         self._logger.info("Reset spotlight application")
 
@@ -703,53 +581,36 @@ class SpotlightService:
             )
 
     # =========================================================================
-    # Effective State (combines attach and spawn)
+    # Effective State
     # =========================================================================
 
     def get_effective_package(self) -> str | None:
-        """Get the effective package name (spawn or attach).
-
-        Returns the spawn package if in spawn mode, otherwise
-        returns the attached app's package name.
+        """The spotlight package (alias of :meth:`get_package_name`).
 
         Returns:
             Package name string or None
         """
-        with self._lock:
-            if self._spawn_mode and self._spawn_package:
-                return self._spawn_package
-            return self.get_package_name()
-
-    def get_effective_mode(self) -> SpawnMode:
-        """Get the effective mode.
-
-        Returns:
-            SpawnMode.SPAWN if spawn mode active, otherwise SpawnMode.ATTACH
-        """
-        with self._lock:
-            return SpawnMode.SPAWN if self._spawn_mode else SpawnMode.ATTACH
+        return self.get_package_name()
 
     def get_state_dict(self) -> dict[str, Any]:
         """Get the complete spotlight state as a dictionary.
 
-        Useful for serialization and debugging.
-
         Returns:
-            Dictionary with all spotlight state
+            ``{has_app, package_name, activity_name, pid, state, running,
+            paused, set_at}``; ``state`` is :meth:`get_run_state`.
         """
         with self._lock:
+            app = self._current_app
+            state = self.get_run_state() if app else "not_running"
             return {
-                "has_app": self.has_app(),
-                "package_name": self.get_effective_package(),
-                "activity_name": self.get_activity_name(),
-                "pid": self.get_pid(),
-                "mode": self.get_effective_mode(),
-                "spawn_mode": self._spawn_mode,
-                "spawn_package": self._spawn_package,
-                "auto_resume": self._auto_resume,
-                "set_at": (
-                    self._current_app.set_at.isoformat() if self._current_app else None
-                ),
+                "has_app": app is not None,
+                "package_name": app.package_name if app else None,
+                "activity_name": app.activity_name if app else None,
+                "pid": app.pid if app else None,
+                "state": state,
+                "running": state in ("running", "paused"),
+                "paused": state == "paused",
+                "set_at": app.set_at.isoformat() if app else None,
             }
 
     # =========================================================================
@@ -795,7 +656,7 @@ class SpotlightService:
         """Ensure a spotlight app is set, prompting user to select if not.
 
         This is the unified entry point for tools that require a spotlight application.
-        Shows a UI asking user to choose ATTACH or SPAWN mode if no app is set.
+        Deprecated (no callers; removed in step 2).
 
         Supports both CLI mode (Rich console) and TUI mode (modal dialogs).
 

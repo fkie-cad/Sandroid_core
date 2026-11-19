@@ -1,8 +1,8 @@
 """SpotlightService is the single source of truth for the spotlight app.
 
-Covers the canonical state (attach vs spawn selection stay consistent), the
-callers that used to read the removed legacy Toolbox state, and a source
-guard that keeps that legacy state from coming back.
+Covers the canonical state (one selection, no spawn/attach mode), the
+callers that used to read the removed legacy Toolbox state, and source
+guards that keep the legacy state and the old mode API from coming back.
 """
 
 from __future__ import annotations
@@ -34,50 +34,75 @@ class _FakeJobManager:
 # -- canonical state ----------------------------------------------------------
 
 
-def test_set_app_after_spawn_app_leaves_spawn_mode():
+def test_set_app_replaces_the_selection():
     svc = SpotlightService()
-    svc.set_spawn_app(A, auto_resume=False)
-    svc.set_pid(99)
+    svc.set_app(A, activity_name=".Main", pid=99)
 
     svc.set_app(B)
 
     assert svc.get_effective_package() == B
     assert svc.get_app_tuple() == (B, "")
-    assert svc.is_spawn_mode() is False
-    assert svc.get_spawn_package() is None
-    assert svc.get_auto_resume() is True
-    assert svc.get_pid() is None
-
-
-def test_spawn_app_of_another_package_drops_the_attach_record():
-    svc = SpotlightService()
-    svc.set_app(A, activity_name=".Main", pid=1)
-
-    svc.set_spawn_app(B)
-
-    assert svc.get_effective_package() == B
     assert svc.get_pid() is None
     assert svc.get_activity_name() is None
-    assert svc.get_app() is None
 
 
-def test_spawn_app_of_the_same_package_keeps_it_with_its_pid():
-    """⇧C re-pick of the attached app keeps its PID, so Space re-checks it."""
+def test_set_app_of_the_same_package_keeps_pid_and_activity():
+    """A re-pick of the running app (⇧C, AI) keeps its PID and activity."""
     svc = SpotlightService()
     svc.set_app(A, activity_name=".Main", pid=1)
 
-    svc.set_spawn_app(A)
+    svc.set_app(A)
 
-    assert svc.get_effective_package() == A
-    assert svc.is_spawn_mode() is True
     assert svc.get_pid() == 1
     assert svc.get_activity_name() == ".Main"
     svc.set_pid(2)
-    assert svc.get_pid() == 2
     assert svc.get_app().pid == 2
 
 
-def test_spawn_app_paused_uses_the_same_selection_rules(monkeypatch):
+def test_set_app_with_an_explicit_none_pid_clears_it():
+    """⇧C after a lookup that found nothing: the stale PID must go."""
+    svc = SpotlightService()
+    svc.set_app(A, pid=1)
+
+    svc.set_app(A, pid=None)
+
+    assert svc.get_pid() is None
+
+
+def test_set_app_ignores_the_deprecated_mode():
+    svc = SpotlightService()
+
+    svc.set_app(A, pid=5, mode="spawn")
+
+    assert svc.get_effective_package() == A
+    assert svc.get_pid() == 5
+
+
+def test_set_app_still_validates_the_package():
+    with pytest.raises(ValueError):
+        SpotlightService().set_app("com.x;id")
+
+
+def test_mode_shims_are_deprecated_no_ops():
+    svc = SpotlightService()
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        svc.set_spawn_app(A, auto_resume=False)
+    assert svc.get_effective_package() == A
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        assert svc.is_spawn_mode() is False
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        assert svc.get_spawn_package() is None
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        assert svc.get_auto_resume() is True
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        svc.set_spawn_mode(True)
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        assert svc.get_spawn_mode_string() == "late_attach"
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        assert svc.get_effective_mode().value == "attach"
+
+
+def test_spawn_app_paused_of_another_package_replaces_the_selection(monkeypatch):
     monkeypatch.setattr(SpotlightService, "_spawn_listeners", [])
     svc = SpotlightService(job_manager_factory=_FakeJobManager)
     svc.set_app(A, pid=1)
@@ -86,14 +111,11 @@ def test_spawn_app_paused_uses_the_same_selection_rules(monkeypatch):
 
     assert pid == 4321
     assert svc.get_effective_package() == B
-    assert svc.is_spawn_mode() is True
-    assert svc.get_auto_resume() is False
-    assert svc.get_app() is None
     assert svc.get_pid() is None
 
 
 def test_spawn_app_paused_of_the_same_package_drops_the_old_pid(monkeypatch):
-    """A fresh spawn of the attached app: the old process's PID is stale."""
+    """A fresh spawn of the selected app: the old process's PID is stale."""
     monkeypatch.setattr(SpotlightService, "_spawn_listeners", [])
     svc = SpotlightService(job_manager_factory=_FakeJobManager)
     svc.set_app(A, activity_name=".Main", pid=1)
@@ -105,25 +127,47 @@ def test_spawn_app_paused_of_the_same_package_drops_the_old_pid(monkeypatch):
     assert svc.get_activity_name() == ".Main"
 
 
-def test_pid_getters_ignore_an_attach_record_of_another_package():
-    """Defence in depth: a stale attach record never answers for the target."""
-    svc = SpotlightService()
-    svc.set_app(A, activity_name=".Main", pid=1)
-    svc.set_spawn_mode(True)
-    svc._spawn_package = B  # a state no public path produces any more
+class _PausedJM:
+    def __init__(self, package_name, paused=True):
+        self.package_name = package_name
+        self._paused = paused
 
-    assert svc.get_pid() is None
-    assert svc.get_activity_name() is None
-    svc.set_pid(7)
-    assert svc.get_pid() == 7
-    assert svc.get_app().pid == 1  # B's PID is not written into A's record
+    def is_paused(self):
+        return self._paused
+
+
+def test_is_app_paused_is_scoped_to_the_spotlight_package():
+    svc = SpotlightService(job_manager_factory=lambda: _PausedJM(B))
+    svc.set_app(A, pid=1)
+    assert svc.is_app_paused() is False
+
+    svc = SpotlightService(job_manager_factory=lambda: _PausedJM(A))
+    svc.set_app(A, pid=1)
+    assert svc.is_app_paused() is True
+
+
+@pytest.mark.parametrize(
+    ("pid", "paused", "restarting", "state"),
+    [
+        (7, False, False, "running"),
+        (7, True, False, "paused"),
+        (None, True, False, "paused"),  # a held spawn pidof cannot name yet
+        (None, False, False, "not_running"),
+        (None, False, True, "restarting"),
+    ],
+)
+def test_run_state(pid, paused, restarting, state):
+    svc = SpotlightService(job_manager_factory=lambda: _PausedJM(A, paused))
+    svc.set_app(A, pid=pid)
+    if restarting:
+        svc._restarting = A
+
+    assert svc.get_run_state() == state
 
 
 def test_reset_clears_everything():
     svc = SpotlightService()
     svc.set_app(A, activity_name=".Main", pid=1)
-    svc.set_spawn_app(B, auto_resume=False)
-    svc.set_pid(3)
 
     svc.reset()
 
@@ -131,14 +175,11 @@ def test_reset_clears_everything():
     assert svc.get_effective_package() is None
     assert svc.get_app() is None
     assert svc.get_pid() is None
-    assert svc.is_spawn_mode() is False
-    assert svc.get_spawn_package() is None
-    assert svc.get_auto_resume() is True
 
 
-def test_state_dict_has_no_legacy_keys():
-    svc = SpotlightService()
-    svc.set_spawn_app(A)
+def test_state_dict_reports_the_run_state_not_a_mode():
+    svc = SpotlightService(job_manager_factory=lambda: _PausedJM(A, False))
+    svc.set_app(A, pid=3)
 
     state = svc.get_state_dict()
 
@@ -147,23 +188,25 @@ def test_state_dict_has_no_legacy_keys():
         "package_name",
         "activity_name",
         "pid",
-        "mode",
-        "spawn_mode",
-        "spawn_package",
-        "auto_resume",
+        "state",
+        "running",
+        "paused",
         "set_at",
     }
     assert state["package_name"] == A
+    assert state["state"] == "running"
+    assert state["running"] is True
+    assert state["paused"] is False
 
 
-# -- callers in spawn mode ------------------------------------------------------
+# -- callers with a selected app that is not running ----------------------------
 
 
 @pytest.fixture
 def spawn_spotlight(monkeypatch) -> SpotlightService:
-    """A fresh service in spawn mode, installed as the process singleton."""
+    """A fresh service with a selected (not running) app, as the singleton."""
     svc = SpotlightService()
-    svc.set_spawn_app("org.wikipedia")
+    svc.set_app("org.wikipedia")
     monkeypatch.setattr(services, "get_spotlight_service", lambda: svc)
     return svc
 
@@ -256,7 +299,7 @@ def test_headless_security_run_after_a_malware_run_analyses_its_own_app(
     monkeypatch.setattr(static_analysis.StaticAnalysis, "_send_adb_command", send)
     monkeypatch.chdir(tmp_path)
 
-    svc.set_spawn_app(A, auto_resume=True)  # what run_malware_analysis does
+    svc.set_app(A)  # what run_malware_analysis does
     asyncio.run(run_security_analysis(adb=None, toolbox=None, apk_path=B))
 
     assert sent[0] == f"shell pm path {B}"

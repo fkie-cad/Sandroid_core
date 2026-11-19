@@ -26,8 +26,8 @@ class SnapshotManager:
     """Manages AVD snapshots around analysis sessions.
 
     Handles creating a snapshot before analysis begins and prompting
-    the user to revert when analysis stops. Only active in SPAWN mode
-    with an interactive TTY session.
+    the user to revert when analysis stops. Only active when the analysis
+    spawns the app, with an interactive TTY session.
 
     Attributes:
         snapshot_name: The name of the created snapshot (bytes), or None.
@@ -96,17 +96,23 @@ class SnapshotManager:
         return True
 
     def create_pre_analysis_snapshot(
-        self, toolbox, prefix: str = "sandroid_malware"
+        self,
+        toolbox,
+        prefix: str = "sandroid_malware",
+        *,
+        will_spawn: bool = False,
     ) -> None:
-        """Prompt the user to create a snapshot before analysis (SPAWN mode only).
+        """Prompt the user to create a snapshot before analysis (spawns only).
 
         This ensures a clean state to revert to after analysis.
 
         Args:
             toolbox: The Toolbox instance for snapshot operations.
             prefix: Prefix for the snapshot name. Defaults to "sandroid_malware".
+            will_spawn: This start spawns (or restarts) the app; attaching to
+                a running app never asks.
         """
-        if not (toolbox.is_spawn_mode() and self._is_interactive()):
+        if not (will_spawn and self._is_interactive()):
             return
         if not self._is_emulator(toolbox):
             return

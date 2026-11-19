@@ -41,7 +41,7 @@ def run_analysis(
     The legacy ``ActionQ.assembleQ()``/``do_next()`` pump is gone; this
     reaches the same :class:`~sandroid.analysis.engine.AnalysisEngine` the TUI
     and headless paths use. The pre-analysis setup ``assembleQ`` performed
-    (TrigDroid CCF, network degradation, spotlight spawn app, and the initial
+    (TrigDroid CCF, network degradation, spotlight app, and the initial
     ``tmp`` snapshot) is replicated here, gated on the same options as before,
     because the engine's first step reverts to that snapshot.
 
@@ -83,11 +83,9 @@ def run_analysis(
         if config.trigdroid.config_mode:
             Trigdroid().run_ccf()
 
-        # Point the spotlight at the target package in spawn mode.
+        # Point the spotlight at the target package.
         if config.trigdroid.package_name:
-            get_spotlight_service().set_spawn_app(
-                config.trigdroid.package_name, auto_resume=True
-            )
+            get_spotlight_service().set_app(config.trigdroid.package_name)
             logger.info(
                 "SpotlightService initialized with package: "
                 f"{config.trigdroid.package_name}"

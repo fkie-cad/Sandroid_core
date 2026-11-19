@@ -548,26 +548,18 @@ class FridaSessionService:
             )
             return
 
-        spotlight = self._spotlight
-        auto_resume = True
-        if spotlight:
-            auto_resume = spotlight.get_auto_resume()
-
-        if auto_resume:
-            self._logger.debug(f"Resuming spawned process {pid}")
-            device.resume(pid)
-            time.sleep(1)  # CRITICAL: Prevents Java.perform from silently failing
-            # device.resume() bypasses JobManager.resume_app() (used directly
-            # here to keep the ProcessNotFoundError anti-Frida diagnostic), so
-            # clear the paused flag ourselves — otherwise is_paused() would
-            # stay True and later live bundle ops would wrongly rebuild-merge.
-            jm = self._job_manager
-            if jm is not None:
-                jm.mark_resumed()
-        else:
-            self._logger.info(
-                f"Process {pid} remains PAUSED. Resume manually when ready."
-            )
+        # Resume follows ownership: callers only get here for a spawn they
+        # own (see sandroid.services.app_start.finish_owned_spawn).
+        self._logger.debug(f"Resuming spawned process {pid}")
+        device.resume(pid)
+        time.sleep(1)  # CRITICAL: Prevents Java.perform from silently failing
+        # device.resume() bypasses JobManager.resume_app() (used directly
+        # here to keep the ProcessNotFoundError anti-Frida diagnostic), so
+        # clear the paused flag ourselves — otherwise is_paused() would
+        # stay True and later live bundle ops would wrongly rebuild-merge.
+        jm = self._job_manager
+        if jm is not None:
+            jm.mark_resumed()
 
     # =========================================================================
     # Session State (uses _job_manager_call helper)
@@ -658,16 +650,16 @@ class FridaSessionService:
     # =========================================================================
 
     def get_session_for_spotlight(self) -> tuple[Any, str, dict[str, Any]]:
-        """Returns appropriate Frida session based on current mode (spawn/attach).
+        """A private Frida session on the *running* spotlight app (fridump).
 
-        This is the unified abstraction layer for all Frida-based tools.
-        Supports multi-device environments by using the active device from DeviceManager.
+        Never spawns or restarts: the app must run (or be held paused by the
+        JobManager); see :func:`sandroid.services.app_start.resolve_start`
+        with ``allow_spawn=False``. The session is the caller's own
+        (``device.attach``), not the JobManager's.
 
         Returns:
-            A tuple of (session, mode, app_info) where:
-                - session: Frida session object
-                - mode: "spawn" or "attach"
-                - app_info: dict with package_name, pid, mode, device
+            A tuple of (session, "attach", app_info) where app_info is a dict
+            with package_name, pid, mode, device and ``owns_spawn`` (False).
 
         Raises:
             ValueError: If no spotlight app is set or app is not running
@@ -685,11 +677,14 @@ class FridaSessionService:
             # Get Frida device based on active device selection (multi-device support)
             device = self._device_manager.get_device_for_session()
 
-            spawn_package = spotlight.get_spawn_package()
-            if spotlight.is_spawn_mode() and spawn_package:
-                return self._spawn_session(device, spawn_package, spotlight)
+            from sandroid.services.app_start import StartAction, resolve_start
 
-            return self._attach_session(device, spotlight)
+            decision = resolve_start(
+                tool="Memory dump", allow_spawn=False, java_agent=False
+            )
+            if decision.action not in (StartAction.JOIN, StartAction.ATTACH):
+                raise ValueError(decision.reason or "Spotlight app not available")
+            return self._attach_session(device, spotlight, decision.pid)
 
         except frida.ProcessNotFoundError as e:
             self._logger.error(f"Process not found: {e}")
@@ -729,8 +724,8 @@ class FridaSessionService:
 
         # Don't resume yet - let the caller resume AFTER installing hooks
         self._logger.debug(
-            f"Process spawned and attached but PAUSED. "
-            f"Will be resumed after hooks are installed (auto-resume: {spotlight.get_auto_resume()})"
+            "Process spawned and attached but PAUSED. "
+            "Will be resumed after hooks are installed (by its owner)."
         )
 
         app_info = {
@@ -763,7 +758,7 @@ class FridaSessionService:
             notify(pid, package)
 
     def _attach_session(
-        self, device: Any, spotlight: Any
+        self, device: Any, spotlight: Any, pid: int | None = None
     ) -> tuple[Any, str, dict[str, Any]]:
         """Attach to a running application.
 
@@ -780,20 +775,21 @@ class FridaSessionService:
         app_tuple = spotlight.get_app_tuple()
         if not app_tuple:
             raise ValueError(
-                "No spotlight application set. Press 'c' to set current app or 'C' to select spawn app."
+                "No spotlight application set. Press 'c' (use the foreground "
+                "app) or 'C' (pick an app…) first."
             )
 
         package_name = app_tuple[0]
         self._logger.info(f"Attaching to running application: {package_name}")
 
         # Get PID if not already set
-        current_pid = spotlight.get_pid()
+        current_pid = pid or spotlight.get_pid()
         if not current_pid:
             pid = self._get_pid_for_package(package_name)
             if not pid:
                 raise ValueError(
                     f"Application {package_name} is not running. "
-                    f"Start it first or use spawn mode (Shift+C)."
+                    "Start it first (App lens ␣)."
                 )
             spotlight.set_pid(pid)
         else:
@@ -810,6 +806,7 @@ class FridaSessionService:
             "pid": pid,
             "mode": "attach",
             "device": device,
+            "owns_spawn": False,
         }
 
         self._logger.info(f"Successfully attached to {package_name} (PID: {pid})")
@@ -836,7 +833,7 @@ class FridaSessionService:
             self._logger.error("Suggestions:")
             self._logger.error("  - Verify the package name is correct")
             self._logger.error(
-                "  - Try using ATTACH mode instead (press 'c' after launching the app manually)"
+                "  - Launch the app manually, then press 'c' (use the foreground app)"
             )
             self._logger.error("  - Check if the app appears in the launcher")
             self._logger.error("  - For system services, use attach mode only")

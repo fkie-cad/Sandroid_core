@@ -957,16 +957,8 @@ class DeviceController:
 
             # Get spotlight app info
             spotlight = get_spotlight_service()
-            app = spotlight.get_app_tuple()
-            spawn_app = spotlight.get_spawn_package()
-            has_spotlight = bool(app or spawn_app)
-            spotlight_name = ""
-            if spawn_app:
-                spotlight_name = spawn_app
-            elif app and isinstance(app, tuple):
-                spotlight_name = app[0]
-            elif app:
-                spotlight_name = str(app)
+            spotlight_name = spotlight.get_effective_package() or ""
+            has_spotlight = bool(spotlight_name)
 
             # Check for snapshots (only relevant for emulators)
             has_snapshots = current_device.is_emulator if current_device else False

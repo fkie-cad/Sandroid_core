@@ -198,35 +198,40 @@ class _Device:
         self.resumed.append(pid)
 
 
-def _spawned_fritap(paused_in_jm: bool):
+def _opened_fritap(monkeypatch, *, owns: bool, paused: bool = True):
+    from sandroid.services import app_start
+
     ft = fritap_mod.FriTap.__new__(fritap_mod.FriTap)
     ft.process_id = 4242
-    ft._spawn_device = _Device()
-    ft.frida_device = object()
-    ft.job_manager = types.SimpleNamespace(is_paused=lambda: paused_in_jm)
-    return ft
+    ft._opened = app_start.Opened(4242, owns, paused, _Device(), "org.wikipedia")
+    resumed: list = []
+
+    def _resume(device, pid):
+        resumed.append(pid)
+
+    monkeypatch.setattr(
+        "sandroid.services.get_frida_session_service",
+        lambda: types.SimpleNamespace(resume_spawned_process=_resume),
+    )
+    monkeypatch.setattr(app_start, "_job_manager", lambda: None)
+    monkeypatch.setattr(app_start, "apply_armed_after_launch", lambda tool: "")
+    return ft, resumed
 
 
-def test_spawned_target_is_resumed_when_jobmanager_did_not_spawn(monkeypatch):
+def test_own_spawn_is_resumed_after_the_agent_loaded(monkeypatch):
     monkeypatch.setattr(fritap_mod.time, "sleep", lambda s: None)
-    ft = _spawned_fritap(paused_in_jm=False)
-    toolbox = types.SimpleNamespace(
-        resume_spawned_process_after_hooks=lambda *a: pytest.fail("A2 path used")
-    )
+    ft, resumed = _opened_fritap(monkeypatch, owns=True)
     job = types.SimpleNamespace(state="running")  # AFM 2.0.7 Job shape
-    ft._resume_spawned_target(toolbox, job)
-    assert ft._spawn_device.resumed == [4242]
+    ft._resume_spawned_target(None, job)
+    assert resumed == [4242]
 
 
-def test_jobmanager_owned_spawn_uses_existing_resume_path():
-    ft = _spawned_fritap(paused_in_jm=True)
-    calls = []
-    toolbox = types.SimpleNamespace(
-        resume_spawned_process_after_hooks=lambda dev, pid: calls.append(pid)
-    )
-    ft._resume_spawned_target(toolbox, types.SimpleNamespace())
-    assert calls == [4242]
-    assert ft._spawn_device.resumed == []
+def test_a_joined_paused_app_is_never_resumed_by_fritap(monkeypatch):
+    """Bug 3 / ownership: ⇧P then h joins the hold; Space resumes it."""
+    ft, resumed = _opened_fritap(monkeypatch, owns=False, paused=True)
+    note = ft._resume_spawned_target(None, types.SimpleNamespace(state="running"))
+    assert resumed == []
+    assert "still paused" in note
 
 
 # --- H2: hooks of dead jobs ----------------------------------------------------
@@ -378,16 +383,9 @@ def _fresh_pids(monkeypatch):
 
 
 class _Spotlight:
-    def __init__(self, pid=None, spawn=False):
+    def __init__(self, pid=None):
         self.pid = pid
-        self.spawn = spawn
         self.announced = []
-
-    def is_spawn_mode(self):
-        return self.spawn
-
-    def get_spawn_package(self):
-        return "org.wikipedia" if self.spawn else None
 
     def get_app_tuple(self):
         return ("org.wikipedia", "")
@@ -401,14 +399,7 @@ class _Spotlight:
         return True
 
 
-def _attach_check(monkeypatch, spotlight, live_pid, maps=False, shared=False):
-    from sandroid import services
-    from sandroid.core.adb import Adb
-
-    monkeypatch.setattr(services, "get_spotlight_service", lambda: spotlight)
-    monkeypatch.setattr(
-        Adb, "get_pid_for_package_name", classmethod(lambda cls, p, **k: live_pid)
-    )
+def _attach_check(monkeypatch, maps=False, shared=False):
     monkeypatch.setattr(fritap_mod, "frida_agent_mapped", lambda pid: maps)
     ft = fritap_mod.FriTap.__new__(fritap_mod.FriTap)
     ft.job_manager = types.SimpleNamespace(
@@ -417,43 +408,46 @@ def _attach_check(monkeypatch, spotlight, live_pid, maps=False, shared=False):
     return ft
 
 
-def test_attach_reresolves_a_stale_pid(monkeypatch, _fresh_pids):
-    spot = _Spotlight(pid=9756)
-    _attach_check(monkeypatch, spot, live_pid=10588)._check_attach_target()
-    assert spot.announced == [10588]
+def _decision(action: str, pid=7):
+    from sandroid.services.app_start import StartAction, StartDecision
 
-
-def test_attach_to_dead_app_is_refused_and_pid_cleared(monkeypatch, _fresh_pids):
-    spot = _Spotlight(pid=9756)
-    ft = _attach_check(monkeypatch, spot, live_pid=None)
-    with pytest.raises(fritap_mod.FriTapTargetError, match="not running"):
-        ft._check_attach_target()
-    assert spot.pid is None
+    return StartDecision(StartAction(action), "org.wikipedia", pid=pid)
 
 
 def test_reattach_to_injected_pid_is_refused(monkeypatch, _fresh_pids):
     fritap_mod.remember_injected_pid(10588)
-    ft = _attach_check(monkeypatch, _Spotlight(pid=10588), live_pid=10588)
-    with pytest.raises(fritap_mod.FriTapTargetError, match="spawn mode"):
-        ft._check_attach_target()
+    ft = _attach_check(monkeypatch)
+    with pytest.raises(fritap_mod.FriTapTargetError, match="Restart the app"):
+        ft._check_attach_target(_decision("attach", 10588))
+    with pytest.raises(fritap_mod.FriTapTargetError, match="already ran"):
+        ft._check_attach_target(_decision("join", 10588))
     fritap_mod.forget_injected_pid(10588)
-    ft._check_attach_target()  # process gone/forgotten -> allowed again
+    ft._check_attach_target(_decision("attach", 10588))  # forgotten -> allowed
 
 
 def test_leftover_agent_in_maps_is_refused(monkeypatch, _fresh_pids):
-    ft = _attach_check(monkeypatch, _Spotlight(pid=7), live_pid=7, maps=True)
+    ft = _attach_check(monkeypatch, maps=True)
     with pytest.raises(fritap_mod.FriTapTargetError, match="earlier session"):
-        ft._check_attach_target()
+        ft._check_attach_target(_decision("attach"))
 
 
 def test_live_agent_of_another_tool_is_allowed(monkeypatch, _fresh_pids):
-    ft = _attach_check(monkeypatch, _Spotlight(pid=7), 7, maps=True, shared=True)
-    ft._check_attach_target()
+    ft = _attach_check(monkeypatch, maps=True, shared=True)
+    ft._check_attach_target(_decision("attach"))
 
 
-def test_spawn_mode_skips_the_attach_check(monkeypatch, _fresh_pids):
-    ft = _attach_check(monkeypatch, _Spotlight(pid=1, spawn=True), live_pid=None)
-    ft._check_attach_target()
+def test_a_join_skips_the_agent_mapped_check(monkeypatch, _fresh_pids):
+    """Our own session (⇧P hold, bypass) carries an agent by design."""
+    ft = _attach_check(monkeypatch, maps=True)
+    ft._check_attach_target(_decision("join"))
+
+
+def test_a_spawn_skips_the_attach_check(monkeypatch, _fresh_pids):
+    fritap_mod.remember_injected_pid(7)
+    ft = _attach_check(monkeypatch, maps=True)
+    ft._check_attach_target(_decision("spawn", None))
+    ft._check_attach_target(_decision("respawn", None))
+    fritap_mod.forget_injected_pid(7)
 
 
 def test_frida_agent_mapped_reads_proc_maps(monkeypatch):

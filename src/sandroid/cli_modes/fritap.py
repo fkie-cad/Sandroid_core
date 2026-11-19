@@ -59,12 +59,12 @@ def run_fritap_headless(
     # Detect whether to attach or spawn
     spotlight = get_spotlight_service()
     pid = Adb.get_pid_for_package_name(package)
+    # friTap attaches to a running app and starts a stopped one.
     if pid:
-        logger.info(f"App {package} is running (PID: {pid}), using attach mode")
-        spotlight.set_app(package, pid=pid)
+        logger.info(f"App {package} is running (PID: {pid}), attaching")
     else:
-        logger.info(f"App {package} not running, using spawn mode")
-        spotlight.set_spawn_app(package, auto_resume=True)
+        logger.info(f"App {package} not running, friTap starts it")
+    spotlight.set_app(package, pid=pid)
 
     fritap = FriTap()
     fritap.print_to_console = True

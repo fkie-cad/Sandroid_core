@@ -428,21 +428,7 @@ class StatusBar(Static):
 
             # Update spotlight app
             spotlight = get_spotlight_service()
-            app = spotlight.get_app_tuple()
-            spawn_app = spotlight.get_spawn_package()
-            self.spawn_mode = spotlight.is_spawn_mode()
-
-            if self.spawn_mode and spawn_app:
-                # spawn_app is just the package name string
-                self.spotlight_app = spawn_app
-            elif app:
-                # app is a tuple (package_name, activity_name) - extract just the package name
-                if isinstance(app, tuple):
-                    self.spotlight_app = app[0] if app[0] else "None"
-                else:
-                    self.spotlight_app = str(app)
-            else:
-                self.spotlight_app = "None"
+            self.spotlight_app = spotlight.get_effective_package() or "None"
 
             # PID + paused state (cheap, cached — no ADB on the hot path).
             try:

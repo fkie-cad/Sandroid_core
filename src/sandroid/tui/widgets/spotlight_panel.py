@@ -899,7 +899,14 @@ class SpotlightPanel(Widget):
             return
 
         def _work() -> tuple[bool, str]:
-            _now_on, msg = self._bypass().toggle(category)
+            now_on, msg = self._bypass().toggle(category)
+            if now_on and self._bypass().is_active(category):
+                try:
+                    early = self._bypass().applies_at_spawn(category)
+                except Exception:
+                    early = False
+                if early:
+                    self._post(self._offer_restart_for, category)
             return True, msg
 
         label = f"toggle {category}"
@@ -922,6 +929,37 @@ class SpotlightPanel(Widget):
             )
         else:
             self._run_action_bg(_work, label)
+
+    def _offer_restart_for(self, category: str) -> None:
+        """Offer a restart so a start-time bypass (emulator) sees app start.
+
+        The bypass is live already; No keeps the app and its state.
+        """
+        package = self._current_package()
+        if not package or not self._safe_pid():
+            return
+        from sandroid.tui.modals import ConfirmModal
+
+        name = self._bypass().display_name(category)
+
+        def on_result(yes: bool | None) -> None:
+            if yes:
+                self._run_frida_action(self._work_restart, "restart", "Restarting")
+
+        self.app.push_screen(
+            ConfirmModal(
+                title=f"Restart {package} now?",
+                message=(
+                    f"{name} is active, but checks {package} ran at startup "
+                    "missed it. Restart the app so they see it too? No keeps "
+                    "it running as it is."
+                ),
+                yes_label="Restart",
+                no_label="Keep running",
+                guard_typing=True,
+            ),
+            on_result,
+        )
 
     # -- lifecycle actions (main-thread entry points) ---------------------
 
@@ -1029,10 +1067,62 @@ class SpotlightPanel(Widget):
             self._run_action_bg(self._work_attach, "attach")
 
     def action_start_paused(self) -> None:
+        """⇧P: start paused; a running app is only restarted after a Yes."""
         if not self._require_package():
             return
-        self._run_frida_action(
-            self._work_start_paused, "start-paused", "Spawning an app"
+        package = self._current_package()
+
+        def _check() -> None:
+            from sandroid.services.app_start import probe_liveness
+
+            try:
+                liveness, pid = probe_liveness(package)
+            except Exception as exc:
+                logger.debug(f"⇧P liveness check failed: {exc}")
+                liveness, pid = None, None
+            self._post(self._after_paused_check, package, liveness, pid)
+
+        self.run_worker(_check, name="spotlight_paused_check", thread=True)
+
+    def _after_paused_check(self, package: str, liveness, pid: int | None) -> None:
+        """Main thread: start paused, or ask before restarting a running app."""
+        from sandroid.services.app_start import Liveness
+
+        if liveness == Liveness.NOT_RUNNING:
+            self._run_frida_action(
+                self._work_start_paused, "start-paused", "Spawning an app"
+            )
+            return
+        if liveness != Liveness.RUNNING:
+            self._notify(
+                f"Could not tell whether {package} is running — not started.",
+                "error",
+            )
+            return
+        from sandroid.tui.modals import ConfirmModal
+
+        def on_result(yes: bool | None) -> None:
+            if yes:
+                self._run_frida_action(
+                    self._work_restart_paused, "restart-paused", "Restarting"
+                )
+            else:
+                self._notify(f"{package} keeps running.", "information")
+
+        self.app.push_screen(
+            ConfirmModal(
+                title=f"Restart {package} paused?",
+                message=(
+                    f"{package} is running (pid {pid}). Start paused "
+                    "force-stops it and starts it again, held paused with the "
+                    "armed bypasses until ␣ (Android ends the hold after "
+                    "about 10 s)."
+                ),
+                yes_label="Restart paused",
+                no_label="Keep running",
+                guard_typing=True,
+            ),
+            on_result,
         )
 
     def action_stop_all(self) -> None:
@@ -1069,65 +1159,32 @@ class SpotlightPanel(Widget):
 
     # -- blocking work bodies (run on worker threads) ---------------------
 
+    # The bodies live in sandroid.services.app_start so the AI reuses them.
+
     def _work_start(self) -> tuple[bool, str]:
-        spotlight = self._spotlight()
-        bypass = self._bypass()
-        package = spotlight.get_effective_package()
-        if not package:
-            return False, "No spotlight app selected"
-        return bypass.apply_to_fresh_spawn_with_retry(
-            package, bypass.armed_categories()
-        )
+        from sandroid.services import app_start
+
+        return app_start.start_app()
 
     def _work_start_paused(self) -> tuple[bool, str]:
-        spotlight = self._spotlight()
-        bypass = self._bypass()
-        package = spotlight.get_effective_package()
-        if not package:
-            return False, "No spotlight app selected"
-        return bypass.apply_to_fresh_spawn_with_retry(
-            package, bypass.armed_categories(), resume=False
-        )
+        from sandroid.services import app_start
+
+        return app_start.start_app(paused=True)
 
     def _work_resume(self) -> tuple[bool, str]:
-        spotlight = self._spotlight()
-        if not spotlight.is_app_paused():
-            return False, "No paused app to resume"
-        # Start-paused already loaded the FULL bypass set as one merged script
-        # while paused (AFM bundle), so resume is just resume — every hook is
-        # installed. No post-resume re-apply (which would also risk #218).
-        ok = spotlight.resume_paused_app()
-        if not ok:
-            return False, "Resume failed"
-        return True, "Resumed app"
+        from sandroid.services import app_start
+
+        return app_start.resume_app()
 
     def _work_restart(self) -> tuple[bool, str]:
-        spotlight = self._spotlight()
-        bypass = self._bypass()
-        package = spotlight.get_effective_package()
-        if not package:
-            return False, "No spotlight app selected"
-        from sandroid.core.adb import Adb
+        from sandroid.services import app_start
 
-        # Capture armed intent BEFORE stop_all clears it.
-        armed = bypass.armed_categories()
-        # Teardown — force_stop FIRST. Unloading a Frida script on a LIVE
-        # process can hang indefinitely (close_job → script.unload), so kill
-        # the process before any unload/detach: every subsequent unload/detach
-        # then fast-fails on the dead session. (The old order unloaded on the
-        # live app first and could wedge the worker → "action in progress".)
-        Adb.force_stop(package)
-        # Publishing: the app is dead now, and the spawn below can take a
-        # minute -- the header says "restarting…" with no PID until the new
-        # one is known (apply_to_fresh_spawn announces it), not the old PID.
-        spotlight.begin_restart(package)
-        try:
-            time.sleep(0.5)  # let the process die so the session connection breaks
-            bypass.stop_all()  # now fast: unloads fast-fail on the dead process
-            self._reset_frida_session()  # clears jobs/session, is_first_job=True
-            return bypass.apply_to_fresh_spawn_with_retry(package, armed)
-        finally:
-            spotlight.end_restart()
+        return app_start.restart_app()
+
+    def _work_restart_paused(self) -> tuple[bool, str]:
+        from sandroid.services import app_start
+
+        return app_start.restart_app(paused=True)
 
     def _work_kill(self) -> tuple[bool, str]:
         spotlight = self._spotlight()
@@ -1147,21 +1204,9 @@ class SpotlightPanel(Widget):
         return True, f"Killed {package}"
 
     def _work_attach(self) -> tuple[bool, str]:
-        from sandroid.core.adb import Adb
-        from sandroid.core.enums import SpawnMode
+        from sandroid.services import app_start
 
-        spotlight = self._spotlight()
-        bypass = self._bypass()
-        package = spotlight.get_effective_package()
-        if not package:
-            return False, "No spotlight app selected"
-        pid = Adb.get_pid_for_package_name(package)
-        if not pid:
-            return False, f"{package} is not running — use Start to spawn it"
-        spotlight.set_app(package_name=package, pid=pid, mode=SpawnMode.ATTACH)
-        spotlight.set_spawn_mode(False)
-        # Apply armed bypasses live against the running process (no resume).
-        return bypass.apply_armed()
+        return app_start.attach_app()
 
     # -- shared teardown helpers ------------------------------------------
 

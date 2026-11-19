@@ -75,6 +75,12 @@ class ObjectionModal(FridaModal[ObjectionConfig | None]):
         color: $foreground;
     }
 
+    ObjectionModal #objection-restart-warning {
+        width: 100%;
+        height: auto;
+        padding: 0 2;
+    }
+
     ObjectionModal #objection-bypass-note {
         width: 100%;
         height: auto;
@@ -98,6 +104,8 @@ class ObjectionModal(FridaModal[ObjectionConfig | None]):
         name: str = None,
         id: str = None,
         classes: str = None,
+        running_pid: int | None = None,
+        running_unknown: bool = False,
     ):
         """Initialize the objection modal.
 
@@ -107,10 +115,15 @@ class ObjectionModal(FridaModal[ObjectionConfig | None]):
             name: Widget name
             id: Widget ID
             classes: CSS classes
+            running_pid: PID of the running app: spawn would restart it, so
+                the modal warns while spawn is selected (Enter confirms).
+            running_unknown: Whether the app runs could not be checked.
         """
         super().__init__(name=name, id=id, classes=classes)
         self.package_name = package_name
         self.config = ObjectionConfig(spawn_mode=initial_spawn_mode)
+        self.running_pid = running_pid
+        self.running_unknown = running_unknown
 
     def compose(self) -> ComposeResult:
         """Create the modal layout."""
@@ -121,6 +134,7 @@ class ObjectionModal(FridaModal[ObjectionConfig | None]):
             )
 
             yield Static(self._spawn_text(), id="spawn-mode-option")
+            yield Static(self._warning_text(), id="objection-restart-warning")
             yield Static(
                 "[dim]Objection loads no bypass hooks: detection bypasses "
                 "come only from the App lens's b chord.[/dim]",
@@ -145,14 +159,32 @@ class ObjectionModal(FridaModal[ObjectionConfig | None]):
             )
         return "[b]s[/] Mode: [bold $success]● ATTACH[/] - Attach to running app"
 
+    def _warning_text(self) -> str:
+        """The restart warning while spawn would kill a (maybe) running app."""
+        if not self.config.spawn_mode:
+            return ""
+        from sandroid.tui.themes import lens_palette
+
+        warn = lens_palette().warn
+        if self.running_pid:
+            return (
+                f"[{warn}]⚠ restarts the running app (pid {self.running_pid}) "
+                "— Enter confirms[/]"
+            )
+        if self.running_unknown:
+            return f"[{warn}]⚠ restarts the app if it is running — Enter confirms[/]"
+        return ""
+
     def _update_display(self) -> None:
-        """Update the spawn-mode row."""
+        """Update the spawn-mode row and the restart warning."""
         try:
             spawn_option = self.query_one("#spawn-mode-option", Static)
+            warning = self.query_one("#objection-restart-warning", Static)
         except Exception:
             return
         spawn_option.update(self._spawn_text())
         spawn_option.set_class(self.config.spawn_mode, "spawn-enabled")
+        warning.update(self._warning_text())
 
     def action_toggle_spawn(self) -> None:
         """Toggle spawn mode."""

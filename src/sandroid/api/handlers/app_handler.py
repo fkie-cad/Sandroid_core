@@ -65,22 +65,23 @@ class AppHandler:
     async def set_spotlight_app(
         self,
         package_name: str,
-        mode: str = "attach",
+        mode: str | None = None,
     ) -> CommandResult:
-        """Set the spotlight application."""
+        """Select the spotlight application.
+
+        ``mode`` is deprecated and ignored: tools attach to a running app and
+        start a stopped one; a restart needs a tool's ``fresh=True``.
+        """
         from sandroid.services import get_spotlight_service
 
-        spotlight = get_spotlight_service()
-
-        if mode == "spawn":
-            spotlight.set_spawn_app(package_name, auto_resume=True)
-        else:
-            spotlight.set_app(package_name)
+        if mode is not None:
+            logger.info("set_spotlight_app: mode=%r is deprecated, ignored", mode)
+        get_spotlight_service().set_app(package_name)
 
         self._api._spotlight_app = package_name
         return CommandResult(
             success=True,
-            message=f"Spotlight set to {package_name} ({mode} mode)",
+            message=f"Spotlight set to {package_name}",
         )
 
     async def get_installed_apps(self) -> list[str]:

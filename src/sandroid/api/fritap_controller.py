@@ -58,6 +58,7 @@ class HeadlessFriTapController:
         verbose: bool = False,
         keylog_output: str | None = None,
         json_output: str | None = None,
+        fresh: bool = False,
     ) -> CommandResult:
         """Start FriTap SSL/TLS key extraction (non-blocking).
 
@@ -77,6 +78,9 @@ class HeadlessFriTapController:
             verbose: Enable verbose logging output.
             keylog_output: Path for SSLKEYLOGFILE output (optional).
             json_output: Path for JSON traffic log (optional).
+            fresh: Restart a running app first so friTap captures from
+                launch (the caller consents). Default: attach if running,
+                start if not.
 
         Returns:
             CommandResult with success status and output file paths.
@@ -90,19 +94,9 @@ class HeadlessFriTapController:
             if package:
                 spotlight = get_spotlight_service()
 
-                # Check if app is already running - use attach mode if so
+                # friTap attaches to a running app and starts a stopped one.
                 pid = self._adb.get_pid_for_package_name(package) if self._adb else None
-
-                if pid:
-                    # App is running - use attach mode
-                    logger.info(
-                        f"App {package} is running (PID: {pid}), using attach mode"
-                    )
-                    spotlight.set_app(package, pid=pid)
-                else:
-                    # App not running - use spawn mode
-                    logger.info(f"App {package} not running, using spawn mode")
-                    spotlight.set_spawn_app(package, auto_resume=True)
+                spotlight.set_app(package, pid=pid)
 
                 if self._set_spotlight_app:
                     self._set_spotlight_app(package)
@@ -126,6 +120,9 @@ class HeadlessFriTapController:
                 fritap.keylog_path = keylog_output
             if json_output:
                 fritap.json_output_path = json_output
+
+            fritap.fresh = fresh
+            fritap.fresh_consent = fresh  # headless: the caller's flag is consent
 
             # Start in non-interactive mode for headless
             success = fritap.start(interactive=False)

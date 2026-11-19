@@ -197,7 +197,15 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
 
             return CommandResult(
                 success=True,
-                message=f"FriTap started for {fritap.app_package} (PID: {fritap.process_id})",
+                message=(
+                    f"FriTap started for {fritap.app_package} "
+                    f"(PID: {fritap.process_id})"
+                    + (
+                        f" · {note}"
+                        if (note := getattr(fritap, "start_note", ""))
+                        else ""
+                    )
+                ),
                 data={
                     "app_package": fritap.app_package,
                     "pid": fritap.process_id,

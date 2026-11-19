@@ -719,15 +719,11 @@ class MenuController:
 
         if action.requires_spotlight:
             spotlight = get_spotlight_service()
-            has_attach_app = spotlight.get_app_tuple() is not None
-            has_spawn_app = (
-                spotlight.is_spawn_mode() and spotlight.get_spawn_package() is not None
-            )
-            if not has_attach_app and not has_spawn_app:
+            if not spotlight.has_app():
                 return (
                     False,
-                    "No spotlight app set. Press [c] to attach to the focused app "
-                    "or [Shift+C] to pick an app to spawn.",
+                    "No spotlight app set. Press [c] to use the foreground app "
+                    "or [Shift+C] to pick an app.",
                 )
 
         if action.requires_dexray_running:

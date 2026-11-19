@@ -446,6 +446,15 @@ class FriTap(DataGatherBase):
         self._stopping = False
         self._stopped = False
         self.target_gone: str | None = None
+        #: Restart the app first so friTap captures from launch (config
+        #: toggle / CLI). On a running app the user confirms (TUI dialog)
+        #: unless ``fresh_consent`` is set (non-interactive callers).
+        self.fresh = False
+        self.fresh_consent = False
+        #: The process friTap got (sandroid.services.app_start.Opened).
+        self._opened = None
+        #: Note for the user after start() ("app still paused — ␣ resumes").
+        self.start_note = ""
 
     def _create_activity_log_wrapper(self, original_handler):
         """Create a wrapper that forwards messages to the activity log and/or console.
@@ -488,20 +497,19 @@ class FriTap(DataGatherBase):
         return wrapper
 
     def _setup_session(self, config: dict = None):
-        """Set up FriTap session following the old proven pattern.
+        """Get a Frida session on the spotlight app (worker thread only).
 
-        Creates Frida device AND session in the SAME worker thread via
-        get_frida_session_for_spotlight(), avoiding the thread-affinity
-        violation that caused FriTap to hang in TUI mode.
+        :func:`sandroid.services.app_start.negotiate_start` decides: join the
+        JobManager's session, attach to the running app, start a stopped
+        one, or -- with ``fresh`` and the user's OK -- restart it. A running
+        app is never restarted without that OK.
 
         Args:
             config: Optional configuration dict from interactive menu
 
         Raises:
-            ValueError: If no spotlight app is selected or app not running
+            FriTapTargetError: The app cannot take friTap now (says why).
         """
-        from sandroid.core.toolbox import Toolbox
-
         # Use config or defaults
         output_keylog = config.get("output_keylog", True) if config else True
         output_json = config.get("output_json", True) if config else True
@@ -510,6 +518,8 @@ class FriTap(DataGatherBase):
         self.show_in_activity_log = (
             config.get("show_in_activity_log", False) if config else False
         )
+        if config and "fresh" in config:
+            self.fresh = bool(config["fresh"])
 
         # Set up activity log handler for friTap's verbose/debug output
         if self.show_in_activity_log:
@@ -538,28 +548,34 @@ class FriTap(DataGatherBase):
             self.json_output_path = None
         self.log_path = f"{fritap_dir}fritap.log"
 
-        # Attach mode: re-resolve the PID (the cached one may belong to a
-        # crashed process) and refuse a second friTap agent in one process.
-        self._check_attach_target()
-
-        # Get session via unified getter (creates fresh device on worker thread)
-        # This is the old proven pattern — no pre-initialized devices, no fork issues.
-        probe_session, mode, app_info = Toolbox.get_frida_session_for_spotlight()
-        self.process_id = app_info["pid"]
-        self.app_package = app_info["package_name"]
-        self.mode = mode
-        self.frida_device = app_info["device"]
-        # The device that spawned the target (kept: frida_device is replaced by
-        # the JobManager's device below).
-        self._spawn_device = app_info["device"]
-
-        logger.debug(
-            f"Frida session created: {self.app_package} "
-            f"(PID: {self.process_id}, mode: {self.mode})"
+        # One rule for every tool: join our session, attach to the running
+        # app, start a stopped one; a restart of a running app only with the
+        # user's OK (fresh). Re-resolves the PID (the cached one may belong
+        # to a crashed process).
+        from sandroid.services.app_start import (
+            AppStartError,
+            StartAction,
+            negotiate_start,
+            open_session,
         )
 
-        # Initialize SSL_Logger (use app_package for spawn, process_id for attach)
-        target = self.app_package if self.mode == "spawn" else self.process_id
+        decision = negotiate_start(
+            "friTap",
+            fresh=getattr(self, "fresh", False),
+            consent=getattr(self, "fresh_consent", False),
+            java_agent=True,
+        )
+        if decision.action == StartAction.REFUSE:
+            raise FriTapTargetError(decision.reason)
+        # Refuse a second friTap agent in one process.
+        self._check_attach_target(decision)
+
+        owns = decision.owns_spawn
+        self.app_package = decision.package
+        self.mode = SpawnMode.SPAWN.value if owns else SpawnMode.ATTACH.value
+
+        # Initialize SSL_Logger (the package for a spawn, the PID otherwise)
+        target = self.app_package if owns else decision.pid
         self.ssl_log = SSL_Logger(
             target,
             verbose=verbose,
@@ -567,16 +583,6 @@ class FriTap(DataGatherBase):
             debug_output=debug_output,
             json_output=self.json_output_path,
         )
-        # SSL_Logger only drives the agent here (Sandroid owns spawn/attach),
-        # so record the real target mode in fritap_output.json's session_info.
-        try:
-            info = self.ssl_log.session_data["session_info"]
-            info["spawn"] = self.mode in (SpawnMode.SPAWN, SpawnMode.SPAWN.value)
-            info["mobile"] = True
-            info["target_app"] = self.app_package
-            info["pid"] = self.process_id
-        except Exception:
-            pass
 
         # Log the configuration
         if verbose or debug_output:
@@ -593,20 +599,27 @@ class FriTap(DataGatherBase):
         # (friTap 2.0 renamed get_fritap_frida_script_path() -> get_agent_script_path())
         self.frida_script_path = self.ssl_log.get_agent_script_path()
 
-        # Register with JobManager using setup_frida_session (old proven pattern).
-        # setup_frida_session(should_spawn=False) will:
-        # 1. Call setup_frida_handler() → creates fresh device on worker thread
-        # 2. Call attach_app() → does device.attach(pid) (second attach, harmless)
+        # JOIN reuses the JobManager's session; ATTACH attaches it to the
+        # PID; SPAWN/RESPAWN spawn paused (friTap resumes its own spawn).
         install_stale_detach_guard(self.job_manager)
-        self.job_manager.setup_frida_session(
-            self.process_id,
-            self.message_handler,
-            should_spawn=False,
-        )
-        self.frida_device = self.job_manager.device
-        # The getter's own session is not used by anyone; leaving it attached
-        # kept an agent session open in the app after friTap stopped.
-        _detach_quietly(probe_session)
+        try:
+            opened = open_session(decision, self.message_handler)
+        except AppStartError as e:
+            raise FriTapTargetError(str(e)) from e
+        self._opened = opened
+        self.process_id = opened.pid
+        self.frida_device = self.job_manager.device or opened.device
+        self._spawn_device = self.frida_device
+        # SSL_Logger only drives the agent here (Sandroid owns spawn/attach),
+        # so record the real target mode in fritap_output.json's session_info.
+        try:
+            info = self.ssl_log.session_data["session_info"]
+            info["spawn"] = owns
+            info["mobile"] = True
+            info["target_app"] = self.app_package
+            info["pid"] = self.process_id
+        except Exception:
+            pass
         self._watch_target(self.job_manager.process_session)
 
         logger.debug(
@@ -614,57 +627,41 @@ class FriTap(DataGatherBase):
             f"{self.app_package} (PID: {self.process_id})"
         )
 
-    def _check_attach_target(self) -> None:
-        """Validate the attach target before any Frida session touches it.
+    def _check_attach_target(self, decision) -> None:
+        """Refuse a process that already carries friTap's or a stale agent.
 
-        - Re-resolves the spotlight PID: after a crash the cached PID belonged
-          to a dead process and every start failed with ProcessNotFoundError
-          until the app was re-selected.
-        - Refuses a PID that already carries friTap's (or another stale)
-          Frida agent: re-attaching crashed the app every time in phase 3.
+        Re-attaching friTap crashed the app every time (phase 3). A spawn
+        (SPAWN/RESPAWN) is a fresh process; a JOIN is our own session, whose
+        agents are live and wanted, so only ``was_injected`` applies there.
+
+        Args:
+            decision: The ``app_start`` decision for this start.
 
         Raises:
-            FriTapTargetError: The app is not running, or the process already
-                carries an agent.
+            FriTapTargetError: The process already carries an agent.
         """
-        from sandroid.services import get_spotlight_service
+        from sandroid.services.app_start import StartAction
 
-        spotlight = get_spotlight_service()
-        if spotlight.is_spawn_mode() and spotlight.get_spawn_package():
-            return  # a spawn always gives a fresh process
-        app_tuple = spotlight.get_app_tuple()
-        if not app_tuple:
-            return  # the session getter raises its own guidance
-        package = app_tuple[0]
-        cached = spotlight.get_pid()
-
-        from sandroid.core.adb import Adb
-
-        live = Adb.get_pid_for_package_name(package, quiet=True)
-        if live != cached:
-            if cached:
-                logger.info(
-                    f"Spotlight PID {cached} of {package} is stale; "
-                    f"now {live or 'not running'}"
-                )
-            spotlight.announce_pid(live, package)
-        if not live:
-            raise FriTapTargetError(
-                f"{package} is not running. Start it (Spotlight Enter) or use "
-                "spawn mode (Shift+C)."
-            )
-
+        if decision.action not in (StartAction.JOIN, StartAction.ATTACH):
+            return
+        pid, package = decision.pid, decision.package
+        if not pid:
+            return
         why = None
-        if was_injected(live):
+        if was_injected(pid):
             why = "friTap already ran in this process earlier"
-        elif frida_agent_mapped(live) and not self._shared_live_session():
+        elif (
+            decision.action == StartAction.ATTACH
+            and frida_agent_mapped(pid)
+            and not self._shared_live_session()
+        ):
             why = "the process still carries a Frida agent from an earlier session"
         if why:
             raise FriTapTargetError(
-                f"Not attaching friTap to {package} (PID {live}): {why}. "
+                f"Not attaching friTap to {package} (PID {pid}): {why}. "
                 "Injecting a second agent into the same process crashes the app. "
-                "Restart the app (Spotlight ⇧R) or use spawn mode (Shift+C) "
-                "for a fresh process."
+                "Restart the app (App lens ⇧R) or turn on friTap's 'Restart "
+                "the app first' option for a fresh process."
             )
 
     def _shared_live_session(self) -> bool:
@@ -765,7 +762,12 @@ class FriTap(DataGatherBase):
         if bus.has_active_handler():
             return configure_fritap_tui()
 
-        return configure_fritap_cli()
+        config = configure_fritap_cli()
+        # The CLI menu's explicit "Restart App" toggle is the consent there
+        # (no dialog can ask later).
+        if config and config.get("fresh"):
+            self.fresh_consent = True
+        return config
 
     def start(self, interactive: bool = True) -> bool:
         """Start FriTap monitoring.
@@ -875,7 +877,7 @@ class FriTap(DataGatherBase):
                     "Resume the app before loading friTap on a paused spawn — "
                     "it attaches live, and stacking a 2nd Frida script on a "
                     "still-paused spawn can crash the agent "
-                    "(frida-java-bridge #218). Press Enter/Resume first, then "
+                    "(frida-java-bridge #218). Press ␣ (resume) first, then "
                     "start friTap."
                 )
                 logger.error(msg)
@@ -886,6 +888,7 @@ class FriTap(DataGatherBase):
             logger.debug(
                 f"FriTap.start(): Calling job_manager.start_job() with script: {self.frida_script_path}"
             )
+            # auto_resume=False: only the owner of a spawn resumes it (below).
             job = self.job_manager.start_job(
                 self.frida_script_path,
                 custom_hooking_handler_name=self.message_handler,
@@ -893,6 +896,7 @@ class FriTap(DataGatherBase):
                 display_name="FriTap SSL Logger",
                 hooks_registry=FRITAP_SSL_HOOKS,
                 priority=10,  # High priority for SSL interception
+                auto_resume=False,
             )
             logger.debug(f"FriTap.start(): job_manager.start_job() returned: {job}")
             self.job_id = job.get_id() if job else None
@@ -940,9 +944,9 @@ class FriTap(DataGatherBase):
             # This process now carries friTap's agent: never inject it twice.
             remember_injected_pid(self.process_id)
 
-            # Resume spawned process now that hooks are installed
-            if self.mode == SpawnMode.SPAWN or self.mode == SpawnMode.SPAWN.value:
-                self._resume_spawned_target(toolbox, job)
+            # Resume our own spawn now that hooks are installed (a joined
+            # ⇧P hold stays paused until Space).
+            self.start_note = self._resume_spawned_target(toolbox, job)
 
             # Register tool usage and files for exit summary
             files = [self.log_path]
@@ -993,50 +997,31 @@ class FriTap(DataGatherBase):
             raise  # Re-raise so the caller knows it failed
 
     def _resume_spawned_target(self, toolbox, job, load_timeout: float = 5.0):
-        """Resume the spawned (paused) target once friTap's agent is loaded.
+        """Resume the target once friTap's agent is loaded -- if friTap owns it.
 
-        The spawn happens in ``FridaSessionService._spawn_session`` -- outside
-        AFM's JobManager, which then only *attaches* to the pid. JobManager
-        therefore neither auto-resumes it nor reports ``is_paused()``, so
-        ``resume_spawned_process_after_hooks`` skipped the resume and Android
-        killed the still-paused app ~10 s later ("start timeout"), leaving
-        friTap "running" on a dead pid with 0 keys.
+        Only a process friTap spawned itself is resumed (then the armed
+        bypasses are applied live); a joined paused process (⇧P) stays
+        paused until Space. The agent gets a moment to install its hooks,
+        well inside Android's 10 s process-start timeout.
+
+        Returns:
+            A note for the user ("" when there is nothing to say).
         """
-        if self.job_manager.is_paused():
-            # JobManager owns the spawn: keep the existing (A2-guarded) path.
-            toolbox.resume_spawned_process_after_hooks(
-                self.frida_device, self.process_id
-            )
-            return
+        from sandroid.services.app_start import finish_owned_spawn
 
-        try:
-            from sandroid.services import get_spotlight_service
-
-            auto_resume = get_spotlight_service().get_auto_resume()
-        except Exception:
-            auto_resume = True
-        if not auto_resume:
-            logger.info(
-                f"Process {self.process_id} remains PAUSED (auto-resume off). "
-                "Resume it manually -- Android kills a paused app after ~10 s."
-            )
-            return
-
-        # Give the agent a moment to install its hooks before the app runs, but
-        # stay well inside Android's 10 s process-start timeout.
-        deadline = time.monotonic() + load_timeout
-        while time.monotonic() < deadline:
-            if _job_state(job) in ("running", "error", "stopped", None):
-                break
-            time.sleep(0.1)
-
-        device = getattr(self, "_spawn_device", None) or self.frida_device
-        try:
-            device.resume(self.process_id)
-            logger.info(f"Resumed spawned process {self.process_id}")
-            time.sleep(1)  # let Java.perform settle (same as AFM/JobManager)
-        except Exception as e:  # e.g. already running
-            logger.debug(f"Resume of {self.process_id} skipped: {e}")
+        opened = getattr(self, "_opened", None)
+        if opened is None:
+            return ""
+        if opened.owns_spawn:
+            deadline = time.monotonic() + load_timeout
+            while time.monotonic() < deadline:
+                if _job_state(job) in ("running", "error", "stopped", None):
+                    break
+                time.sleep(0.1)
+        note = finish_owned_spawn(opened, tool="friTap")
+        if note:
+            logger.info(f"friTap: {note}")
+        return note
 
     def _start_anr_watch(self) -> None:
         """Watch the target for an "isn't responding" freeze while friTap runs.
@@ -1288,8 +1273,8 @@ class FriTap(DataGatherBase):
         )
         if spawned and _force_stop_if_running(package, pid):
             msg = (
-                f"{cause} Sandroid spawned it, so it was force-stopped. Spawn "
-                "it again (Shift+C) or start it from the launcher."
+                f"{cause} Sandroid spawned it, so it was force-stopped. Start "
+                "it again (App lens ␣) or from the launcher."
             )
             forget_injected_pid(pid)
             try:
