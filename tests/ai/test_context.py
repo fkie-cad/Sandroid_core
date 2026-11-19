@@ -435,6 +435,23 @@ def test_app_proxies_renders_active_lane_pkg_and_target_pairs(monkeypatch):
     assert "com.other.app -> http://127.0.0.1:8888" in line
 
 
+def test_app_proxies_report_lanes_that_pass_no_traffic(monkeypatch):
+    waiting = proxy_manager.LaneHealth(proxy_manager.LANE_WAITING)
+    active = proxy_manager.LaneHealth(proxy_manager.LANE_ACTIVE)
+    monkeypatch.setattr(
+        proxy_manager,
+        "get_focus_manager",
+        lambda: SimpleNamespace(
+            app_proxies_nonblocking=lambda: {"a.b": "ours", "c.d": "ours"},
+            lane_health_nonblocking=lambda: {"a.b": waiting, "c.d": active},
+        ),
+    )
+    line = context._describe_app_proxies()
+    assert "a.b -> ours (waiting for mitmproxy)" in line
+    assert "c.d -> ours," not in line
+    assert line.endswith("c.d -> ours")
+
+
 def test_app_proxies_degrades_to_none_on_lock_contention(monkeypatch):
     """app_proxies_nonblocking() returning None (lock contention) must
     degrade to None, not render a misleading "none active" line.

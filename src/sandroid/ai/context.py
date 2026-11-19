@@ -222,7 +222,8 @@ def _describe_app_proxies() -> str | None:
             return None
         if not apps:
             return "App proxies: none currently active."
-        health = manager.lane_health_nonblocking() or {}
+        reader = getattr(manager, "lane_health_nonblocking", None)
+        health = (reader() if reader is not None else None) or {}
         parts = []
         for pkg, target in apps.items():
             lane = health.get(pkg)
