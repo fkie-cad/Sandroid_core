@@ -12,7 +12,7 @@ Starting the TUI
 
    sandroid                              # default config discovery
    sandroid --config my-analysis.toml    # explicit config
-   sandroid --network --screenshot 5     # pre-configure analysis options
+   sandroid --network                    # pre-configure analysis options
    sandroid --log                        # also print log messages to the terminal
    sandroid -s emulator-5556             # use this device (adb serial)
 
@@ -38,11 +38,13 @@ everything else out of the way until you ask for it:
   the scope pill (``● LIVE``; ``● REC`` while recording; ``● REPLAY ·
   <phase>`` while a Play runs -- ``loading snapshot``, ``replay 1/2``,
   ``settle 8s``, ``dry run``, ``analysing``; ``◆ REVIEW #<n> <label>`` while
-  reviewing a run) and the clock.
+  reviewing a run), the innermost open label (``▶ 7 'accept cookies' 0:12``),
+  ``◉ TRK`` while Tracking runs, ``⚠ timeline locked (…)`` / ``⚠ timeline
+  failed`` when this window records no timeline, and the clock.
 - **Status strip** (one or two rows): app state and pid, frida-server, active
   hooks and bypasses, mitmproxy / Device Proxy / App Proxies, capture.
-- **Lens bar**: ``1 App  2 Network  3 Files  4 Runs`` (a lens may show an
-  alert badge such as ``⚑2``).
+- **Lens bar**: ``1 App  2 Network  3 Files  4 Sessions  5 Timeline`` (a lens
+  may show an alert badge such as ``⚑2``).
 - **Lens** (full width). ``Enter`` on a row opens the **Inspector** on the
   right where the lens offers details; ``[`` / ``]`` (or ``←``/``→``, except
   in a text input) switch its tabs while focus stays in the lens;
@@ -58,13 +60,18 @@ Navigation
 ==========================  ==================================================
 Key                         Action
 ==========================  ==================================================
-``1`` - ``4``               App / Network / Files / Runs lens
+``1`` - ``5``               App / Network / Files / Sessions / Timeline lens
 ``Shift+Left/Right``        Previous/next lens
 ``Enter`` / ``Esc``         Open the Inspector (where offered) / close it
 ``[`` / ``]``               Previous/next Inspector tab
 Backtick (grave accent)     Toggle the log drawer
 ``S`` (or ``0``)            Snapshot picker
 ``r`` / ``p``               Record / Play (replay + diff) -- from any lens
+``#``                       Start a label (closes open labels; name prompt)
+``+``                       Start a sub-label (name prompt)
+``-``                       Stop the innermost label
+``B`` (Shift+B)             Mark: a named point in time (name prompt)
+``Ctrl+T``                  Tracking on/off (input + screens into the timeline)
 ``L`` (Shift+L)             Back to LIVE while reviewing a run (``◆ REVIEW``)
 ``?``                       Help & keybinding editor (all actions by category)
 ``Ctrl+Shift+P``            Command palette (fuzzy-search any action)
@@ -89,7 +96,7 @@ Overrides for ids from 2.1 that no longer exist (``load_slot_1`` …
 an upper-case key means Shift+key and is shown as ``⇧R`` in the footer and
 ``Shift+R`` in the ``?`` list. The ``?`` list also shows each lens's own keys
 (they only work while that lens has focus). The footer shows at most seven
-keys: Record, Play, the active lens's own keys, ``1-4``, quit and help.
+keys: Record, Play, the active lens's own keys, ``1-5``, quit and help.
 
 Lenses
 ------
@@ -263,13 +270,11 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   of the file and its companions equals the newest version's, nothing is
   pulled: one line goes to ``checks.jsonl`` in the file's folder and the
   Versions tab shows it as ``· 12:41:02 auto checked, no change (2×)``
-  between versions. ``marks.jsonl`` in the session results folder (every
-  mark: number, name, time) and ``files/timeline.jsonl`` (every monitor
-  event: sequence number, time, operation, path, package, process, source,
-  mark) are written as they happen, with millisecond times. All timestamps
-  carry their UTC offset; readers ignore fields they do not know.
-- **Device clock** (``clock.jsonl`` in the session results folder, next to
-  ``marks.jsonl``): the device clocks drift from the host's, and a snapshot
+  between versions. Every monitor event, pull, check, label and mark is a
+  line of the session timeline (see :ref:`timeline-lens`), with millisecond
+  times and their UTC offset.
+- **Device clock** (``clock`` lines of the session timeline): the device
+  clocks drift from the host's, and a snapshot
   load restores the clock the snapshot was saved with (75 min behind in one
   test). Sandroid samples the device's wall clock and its CLOCK_MONOTONIC
   (getevent, Frida, ``logcat -v monotonic`` and kprobe times use it)
@@ -295,8 +300,10 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   monitored app is pulled once (``trigger: session-start``; at most 50, the
   rest named in the log), so the first change has a version to diff
   against; an unchanged file only gets a ``checks.jsonl`` line.
-- **Marks**: ``B`` drops a mark (optional name; ⏎ on an empty name keeps
-  it unnamed, Esc drops none). The table then shows only the activity
+- **Marks and labels**: ``B`` (any lens) drops a mark (optional name; ⏎ on
+  an empty name keeps it unnamed, Esc drops none); a top-level label's start
+  (``#``) and end (``-``) are boundaries too (segments ``label 7 'x'`` and
+  ``after label 7 (no label)``). The table then shows only the activity
   since that mark (★ rows with activity in it stay on top; the idle ★ rows
   fold into one row, ``▸ ★ 21 watched · idle since mark 3``, that ⏎ or →
   opens and ← folds); ``A`` toggles everything / since the last mark (4 or
@@ -381,8 +388,8 @@ What the kprobe monitor can and cannot see:
   watches a single path and, on kernels without fanotify, its per-process
   filter is unreliable.
 
-Runs (4)
-~~~~~~~~
+Sessions (4)
+~~~~~~~~~~~~
 
 Record/Play results and the run history (``r``/``p`` work from every lens;
 ``p`` lands here; Shift+``P`` generates the PDF report of the selected run):
@@ -440,6 +447,71 @@ Shift+``P``         Write a PDF report for the run
                     delete the run (each asks first; dialogs name the run by
                     ``#`` and id)
 ==================  =========================================================
+
+.. _timeline-lens:
+
+Timeline (5)
+~~~~~~~~~~~~
+
+Everything the session recorded, one line per event and newest at the
+bottom: file events, monitor notes, clock samples, snapshot loads, labels,
+runs, Tracking input and screens, network flows. It reads the device folder's
+``timeline.jsonl`` (the newest 20,000 lines first; ``Home`` at the top loads
+older pages) and follows new lines live while it is shown. Columns: label
+depth (``│``) and a flag (``!`` warning, ``~`` uncertain device time, ``▒``
+masked), time, the step to the previous row, source, kind, actor and the
+summary (``×n`` for coalesced or counted lines, ``⇢`` when ``J`` can jump).
+
+Separators mark what changes how to read the lines after them: ``⟲`` a world
+change (snapshot load, cold boot, a device clock that went backwards), ``⏱``
+a device clock epoch, ``▶ ■ ◆`` labels, ``● REC`` / ``▷ Play`` runs, ``⋯``
+a restarted Sandroid, Tracking and intervention (e.g. accessibility helper)
+on/off. Clock samples, count lines and a quick device reconnect are hidden
+until ``N``.
+
+===================  ========================================================
+Key (Timeline lens)  Action
+===================  ========================================================
+``Space``            Follow on / off (↑ pauses: ``‖ paused · 23 new ↓``)
+``End`` / ``Home``   Newest + follow / oldest (at the top: load older lines)
+``/``                Filter: ``src:files,label`` ``-src:clock``
+                     ``kind:modify`` ``actor:user`` ``phase:replay``
+                     ``run:<id>`` ``world:3`` ``pkg:x`` ``level:warn`` and
+                     words (quoted for phrases) matching the summary; shown
+                     as chips with the count; ``Esc`` clears it
+``N``                Show / hide clock samples, counts, reconnects
+``Enter``            Inspector: *Line* (envelope, data, follow-ups, enclosing
+                     labels), *JSON*, *Ref* (the referenced line, file with
+                     sha256 check, diff, run), *Chain* (hash, previous hash,
+                     a one-line verify)
+``J``                Jump to the source: a pulled file (Files, Versions
+                     tab), a flow (Network), a run (Sessions) or the line it
+                     refers to
+``V``                Reveal a masked line (asks first; the reveal is recorded
+                     on the timeline)
+===================  ========================================================
+
+In REVIEW scope the lens shows the reviewed run's lines (an implicit
+``run:<id>`` chip) plus the separators inside its time window.
+
+**Labels** (any lens): ``#`` starts a top-level label and ends every open
+one; ``+`` starts a sub-label inside the open label (or a sibling of an open
+sub-label; with nothing open it starts a top-level label); ``-`` ends the
+innermost label; ``B`` drops a point. ``#``, ``+`` and ``B`` take their time
+when the key is pressed and ask for an optional name; ``Esc`` writes nothing.
+Labels survive snapshot loads and are ended when Sandroid quits or the device
+changes.
+
+**Masking**: lines marked sensitive (typed text, passwords) are shown
+masked in the lens, exports and reports while ``timeline.mask_sensitive`` is
+on (Settings → Timeline; default off). ``ai.mask_sensitive`` does the same
+for the AI assistant. The summary never holds the secret.
+
+**Settings → Timeline** sets which sources are recorded, kinds that are off
+or only counted, the file-event coalescing window, the clock sampling
+interval, both mask switches and the Tracking capture settings (helper
+mode, screenshots before/after taps and on screen changes, text capture,
+gesture thresholds).
 
 Other Actions
 -------------

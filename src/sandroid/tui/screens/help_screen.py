@@ -90,6 +90,7 @@ _PANEL_SECTIONS: list[tuple[str, str, str]] = [
     ("Network lens", "sandroid.tui.widgets.network_panel", "NetworkPanel"),
     ("Files lens", "sandroid.tui.widgets.files_panel", "FilesPanel"),
     ("Sessions lens", "sandroid.tui.widgets.diffs_view", "DiffsView"),
+    ("Timeline lens", "sandroid.tui.widgets.timeline_lens", "TimelineLens"),
     (
         "Snapshot picker (S)",
         "sandroid.tui.modals.snapshot_save_choice_modal",
@@ -104,6 +105,7 @@ _LENS_SECTIONS: dict[str, tuple[str, ...]] = {
     "network": ("Network lens",),
     "files": ("Files lens",),
     "runs": ("Sessions lens",),
+    "timeline": ("Timeline lens",),
 }
 #: Display-only rows listed first in a lens's section: keys the lens gets
 #: from elsewhere (Enter = MainScreen's inspect, Tab = focus order), which
@@ -114,6 +116,10 @@ _LENS_EXTRA_ROWS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
         ("Tab / ⇧Tab", "Next / previous section", ("tab", "shift+tab")),
     ],
     "Network lens": [("⏎", "Inspect the selected flow", ("enter",))],
+    "Timeline lens": [
+        ("⏎", "Inspect the selected line (Line / JSON / Ref / Chain)", ("enter",)),
+        ("↑/↓/PgUp/PgDn", "Move (up pauses follow)", ("up", "down")),
+    ],
 }
 #: Headings of the global (works everywhere) panel sections.
 _GLOBAL_PANEL_SECTIONS = ("Lens navigation", "Main screen")
@@ -556,7 +562,7 @@ class HelpScreen(ModalScreen):
         # -- collect: global action rows, panel sections ---------------------
         def action_order(a: Action):
             # The demo/main flow (Record, Play) leads, digit keys (the lenses
-            # 1-4) follow in key order; the rest alphabetical.
+            # 1-5) follow in key order; the rest alphabetical.
             return (
                 a.name not in ("record", "play"),
                 a.name != "record",
@@ -759,7 +765,7 @@ class HelpScreen(ModalScreen):
                 "Works everywhere on the main screen."
                 if heading == "General"
                 else "Works only while this lens / view has focus "
-                "(1-4 or Shift+←/→ switch lenses)."
+                "(1-5 or Shift+←/→ switch lenses)."
             )
             override = self._overrides.get((heading, key))
             if override:

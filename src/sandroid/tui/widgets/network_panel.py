@@ -1687,6 +1687,36 @@ class NetworkPanel(Widget):
             return None
         return self.flow_content(row)
 
+    def reveal_flow(self, flow_id: str, record: dict | None = None) -> bool:
+        """Show the flow ``flow_id`` (the Timeline lens's ``J`` on a net line).
+
+        The listed row (``f{seq}``) gets the cursor and the Inspector; a flow
+        that is not listed (filtered, cleared, an older session page) opens
+        from ``record`` -- the flow-log record shape, built from the timeline
+        line -- with ``FlowRow.from_record``. False when neither is there.
+        """
+        row = next((r for r in reversed(self._model()) if r.flow_id == flow_id), None)
+        if row is not None:
+            try:
+                table = self.table
+                table.move_cursor(row=table.get_row_index(row.key), animate=False)
+            except Exception:
+                pass
+        elif record is not None and record.get("id") == flow_id:
+            try:
+                row = FlowRow.from_record(
+                    {k: v for k, v in record.items() if v is not None}, _flow_dir()
+                )
+            except Exception:
+                logger.debug("reveal_flow: bad record", exc_info=True)
+                return False
+        if row is None:
+            return False
+        ms = self._main_screen()
+        if ms is not None:
+            ms.open_inspector(self.flow_content(row))
+        return True
+
     def flow_content(self, row: FlowRow) -> InspectorContent:
         key = f"network:row:{row.key}"
         label, _known = row.recipient

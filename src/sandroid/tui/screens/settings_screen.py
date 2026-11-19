@@ -67,6 +67,42 @@ _MONITOR_VISIBILITY_LABELS = {
 }
 
 
+# Settings → Timeline (session timeline policy, Tracking capture, masking).
+# Only 2-part config keys are staged: ``timeline.sources`` (dict) and the
+# ``timeline.kinds_off`` / ``timeline.count_only`` lists are staged WHOLE, like
+# ``tui.monitor_event_visibility``; per-source switches use ``__`` after the
+# field name so ``_id_to_key`` never makes a 3-part key of them.
+_TIMELINE_SOURCES_PREFIX = "setting-timeline--sources__"
+_TIMELINE_SOURCE_ORDER = ("files", "monitor", "net", "input", "screen", "shot")
+_TIMELINE_LIST_IDS = {
+    "setting-timeline--kinds_off": "timeline.kinds_off",
+    "setting-timeline--count_only": "timeline.count_only",
+}
+#: (field, label, input type) of the numeric timeline / Tracking fields.
+_TIMELINE_NUMBERS = (
+    ("files_modify_coalesce_ms", "Coalesce modify (ms, 0 off):", "integer"),
+    ("count_window_s", "Count window (s):", "number"),
+    ("queue_max", "Queue max (lines):", "integer"),
+    ("clock_every_s", "Clock sample every (s, 0 off):", "integer"),
+)
+_TRACKING_SWITCHES = (
+    ("auto_on_record", "On while recording:"),
+    ("shot_before_tap", "Shot before tap:"),
+    ("shot_screen_change", "Shot on screen change:"),
+    ("shot_after_tap", "Shot after tap:"),
+    ("shot_label", "Shot on label:"),
+    ("capture_text", "Capture typed text:"),
+    ("logcat_screen_backup", "Logcat screen backup:"),
+)
+_TRACKING_NUMBERS = (
+    ("settle_interval_ms", "Settle interval (ms):"),
+    ("settle_max_ms", "Settle max (ms):"),
+    ("text_idle_ms", "Text idle (ms):"),
+    ("long_press_ms", "Long press (ms):"),
+    ("swipe_slop_px", "Swipe slop (px):"),
+)
+
+
 class SettingsScreen(ModalScreen[SandroidConfig | None]):
     """Modal settings screen with tabbed configuration panels.
 
@@ -288,6 +324,9 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 with TabPane("Timeouts", id="tab-timeouts"):
                     with ScrollableContainer():
                         yield from self._compose_timeouts_tab(config)
+                with TabPane("Timeline", id="tab-timeline"):
+                    with ScrollableContainer():
+                        yield from self._compose_timeline_tab(config)
 
             yield Static(
                 "[dim]Ctrl+S=Save  Esc=Cancel  Tab/Shift+Tab=Navigate[/dim]",
@@ -336,7 +375,8 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 config.emulator.avd_auto_start, "setting-emulator--avd_auto_start"
             )
 
-        # Device clock sync after a snapshot load (offsets go to clock.jsonl)
+        # Device clock sync after a snapshot load (offsets go to the session
+        # timeline)
         with Horizontal(classes="setting-row"):
             yield Label("Sync Clock After Load:", classes="setting-label")
             yield from self._switch_with_state(
@@ -837,6 +877,126 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                     classes="setting-input",
                 )
 
+    def _compose_timeline_tab(self, config: SandroidConfig) -> ComposeResult:
+        """Compose the Timeline tab: policy, masking, Tracking capture."""
+        timeline = getattr(config, "timeline", None)
+        tracking = getattr(config, "tracking", None)
+        ai = getattr(config, "ai", None)
+        if timeline is None and tracking is None:
+            yield Static(
+                "[dim]The session timeline is not installed in this build.[/dim]",
+                classes="setting-help",
+            )
+            return
+        if timeline is not None:
+            yield Static("Session timeline", classes="section-header")
+            sources = dict(getattr(timeline, "sources", None) or {})
+            order = [s for s in _TIMELINE_SOURCE_ORDER if s in sources]
+            order += sorted(s for s in sources if s not in order)
+            for src in order:
+                with Horizontal(classes="setting-row"):
+                    yield Label(f"Record {src}:", classes="setting-label")
+                    yield from self._switch_with_state(
+                        bool(sources[src]), f"{_TIMELINE_SOURCES_PREFIX}{src}"
+                    )
+            yield Static(
+                "[dim]Labels, snapshots, devices, runs and clock lines are "
+                "always recorded.[/dim]",
+                classes="setting-help",
+            )
+            for field, label in (
+                ("kinds_off", "Kinds off (src.kind, …):"),
+                ("count_only", "Count only (src.kind, …):"),
+            ):
+                with Horizontal(classes="setting-row"):
+                    yield Label(label, classes="setting-label")
+                    yield Input(
+                        value=", ".join(getattr(timeline, field, None) or []),
+                        id=f"setting-timeline--{field}",
+                        classes="setting-input",
+                    )
+            with Horizontal(classes="setting-row"):
+                yield Label("File attrs:", classes="setting-label")
+                yield Select(
+                    [
+                        ("Lines in the app's dirs", "app_dirs"),
+                        ("Always lines", "lines"),
+                        ("Counts only", "counts"),
+                    ],
+                    value=getattr(timeline, "files_attrs", "app_dirs"),
+                    id="setting-timeline--files_attrs",
+                    classes="setting-select",
+                    allow_blank=False,
+                )
+            for field, label, kind in _TIMELINE_NUMBERS:
+                with Horizontal(classes="setting-row"):
+                    yield Label(label, classes="setting-label")
+                    yield Input(
+                        value=str(getattr(timeline, field, "")),
+                        id=f"setting-timeline--{field}",
+                        type=kind,
+                        classes="setting-input",
+                    )
+            yield Static("Masking", classes="section-header")
+            with Horizontal(classes="setting-row"):
+                yield Label("Mask sensitive lines:", classes="setting-label")
+                yield from self._switch_with_state(
+                    bool(getattr(timeline, "mask_sensitive", False)),
+                    "setting-timeline--mask_sensitive",
+                )
+            yield Static(
+                "[dim]Typed text and other sensitive lines show masked in the "
+                "Timeline lens, exports and reports (V reveals one, "
+                "recorded).[/dim]",
+                classes="setting-help",
+            )
+        if ai is not None and hasattr(ai, "mask_sensitive"):
+            with Horizontal(classes="setting-row"):
+                yield Label("Mask for the AI:", classes="setting-label")
+                yield from self._switch_with_state(
+                    bool(ai.mask_sensitive), "setting-ai--mask_sensitive"
+                )
+        if tracking is not None:
+            yield Static("Tracking (Ctrl+T)", classes="section-header")
+            with Horizontal(classes="setting-row"):
+                yield Label("UI helper:", classes="setting-label")
+                yield Select(
+                    [
+                        ("Full (accessibility)", "full"),
+                        ("Invisible (no a11y)", "invisible"),
+                        ("Off", "off"),
+                    ],
+                    value=getattr(tracking, "helper_mode", "full"),
+                    id="setting-tracking--helper_mode",
+                    classes="setting-select",
+                    allow_blank=False,
+                )
+            for field, label in _TRACKING_SWITCHES:
+                with Horizontal(classes="setting-row"):
+                    yield Label(label, classes="setting-label")
+                    yield from self._switch_with_state(
+                        bool(getattr(tracking, field, False)),
+                        f"setting-tracking--{field}",
+                    )
+            for field, label in _TRACKING_NUMBERS:
+                with Horizontal(classes="setting-row"):
+                    yield Label(label, classes="setting-label")
+                    yield Input(
+                        value=str(getattr(tracking, field, "")),
+                        id=f"setting-tracking--{field}",
+                        type="integer",
+                        classes="setting-input",
+                    )
+
+    def _timeline_sources(self) -> dict[str, bool]:
+        """Every per-source switch, as the whole ``timeline.sources`` dict."""
+        sources: dict[str, bool] = {}
+        for switch in self.query(Switch):
+            wid = switch.id or ""
+            if wid.startswith(_TIMELINE_SOURCES_PREFIX):
+                sources[wid[len(_TIMELINE_SOURCES_PREFIX) :]] = bool(switch.value)
+        return sources
+
     # -------------------------------------------------------------------------
     # Event Handlers
     # -------------------------------------------------------------------------
@@ -1142,10 +1302,14 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         """
         widget_id = event.switch.id
         if widget_id and widget_id.startswith("setting-"):
-            key = self._id_to_key(widget_id)
-            self._pending[key] = event.value
-            if key in self._LIVE_AI_TOGGLE_KEYS:
-                self._apply_ai_toggle_live(key, event.value)
+            if widget_id.startswith(_TIMELINE_SOURCES_PREFIX):
+                # Staged whole (2-part key), like monitor_event_visibility.
+                self._pending["timeline.sources"] = self._timeline_sources()
+            else:
+                key = self._id_to_key(widget_id)
+                self._pending[key] = event.value
+                if key in self._LIVE_AI_TOGGLE_KEYS:
+                    self._apply_ai_toggle_live(key, event.value)
             try:
                 state_label = self.query_one(f"#{widget_id}-state", Static)
                 state_label.update("ON" if event.value else "OFF")
@@ -1308,6 +1472,13 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 select = None
             if select is not None and select.value == "__custom__":
                 self._pending["frida.server_version"] = event.value
+            return
+
+        # Timeline kinds_off / count_only: a comma list staged as one list.
+        if widget_id in _TIMELINE_LIST_IDS:
+            self._pending[_TIMELINE_LIST_IDS[widget_id]] = [
+                item.strip() for item in event.value.split(",") if item.strip()
+            ]
             return
 
         # The default monitor path must never be staged empty:

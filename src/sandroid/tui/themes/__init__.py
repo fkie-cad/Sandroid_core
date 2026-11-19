@@ -4,11 +4,8 @@ This module provides 8 color themes for the TUI interface:
 - 4 standard themes: default, dark, light, high_contrast
 - 4 new themes: cyberpunk, nord, dracula, solarized
 
-Themes can be cycled at runtime with multiple keybindings:
-- Ctrl+T (may be captured by some terminals)
-- Shift+T (uppercase T)
-- F6 (function key)
-- ] (next theme) / [ (previous theme)
+Themes are picked in Settings (``,``) → Appearance. ``Ctrl+T`` is not a
+theme key: it toggles Tracking (session timeline).
 
 Each theme has a corresponding CSS file in this directory.
 """

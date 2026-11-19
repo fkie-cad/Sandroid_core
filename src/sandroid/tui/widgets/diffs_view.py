@@ -471,6 +471,21 @@ class DiffsView(FilesSubViewBase):
         self._load_run_detail(run_id)
         self._follow_in_inspector()
 
+    def select_run(self, run_id: str) -> bool:
+        """Select ``run_id`` and show it in the Inspector (the Timeline lens's
+        ``J`` on a line with ``ref.run``). False for an unknown run.
+        """
+        if self._summary(run_id) is None:
+            return False
+        self._select_run(run_id)
+        ms = self._main_screen()
+        if ms is not None:
+            self._check_evidence(run_id, force=True)
+            content = self._run_content(run_id)
+            if content is not None:
+                ms.open_inspector(content)
+        return True
+
     def _load_run_detail(self, run_id: str) -> None:
         """Read the full RunRecord (disk I/O) off the main thread."""
         self._run_bg(
@@ -570,8 +585,12 @@ class DiffsView(FilesSubViewBase):
             RecordingController,
         )
 
+        # Tracking's raw getevent copy (new runs), else the legacy file.
+        recording = run_dir / "recording.getevent.txt"
+        if not recording.exists():
+            recording = run_dir / "recording.txt"
         facts["recording_seconds"] = RecordingController.recording_seconds(
-            str(run_dir / "recording.txt")
+            str(recording)
         )
         try:
             facts["pcaps"] = sorted(

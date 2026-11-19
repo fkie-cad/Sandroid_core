@@ -26,9 +26,12 @@ diff base; these are MainScreen keys bound nowhere else, so they never clash
 with the lens's ``<``/``>``/``B`` marks. The Inspector forwards the lens keys
 it advertises while it has focus (``lens_shell.Inspector.on_key``).
 
-**Marks** (shell-level, ``MainScreen.marks``): ``B`` drops a timestamped
-mark ("bookmark"; the time is taken when the key is pressed) and asks for an
-optional name (⏎ on an empty name = unnamed, Esc = no mark). The table then
+**Marks** (shell-level, ``MainScreen.marks``, a view over the session
+timeline's labels): the global ``B`` drops a timestamped mark ("bookmark";
+the time is taken when the key is pressed) and asks for an optional name
+(⏎ on an empty name = unnamed, Esc = no mark); ``#`` starts and ``-`` stops
+a top-level label, whose start and end are segment boundaries too ("label 7
+'x'", "after label 7 (no label)"). The table then
 shows only what happened since that mark: counts/ops per segment, rows
 without activity in the segment hidden, ★ rows with activity in it pinned on
 top. The idle ★ rows (and patterns) fold into ONE row below them --
@@ -64,11 +67,15 @@ the marks; Summary "by" counts writes per app process (main, tab_17, gpu).
 
 Keys (on this lens): ``w`` watch/unwatch · ``u`` pull the row · ``U`` pull
 all watched · ``/`` filter · ``n`` watch a path or pattern that is not in
-the table · ``B`` mark · ``A`` all / since mark · ``<``/``>`` mark
+the table · ``A`` all / since mark · ``<``/``>`` mark
 segments · ``N`` show everything raw (as in the Network lens) · ``R`` path
 rules · ``.`` full paths · ``z`` zoom the diff · ``O`` sort (recent / name /
 count) · ``Home``/``End`` first/last row · ``Ctrl+L`` clear. Only
 ``w``/``u`` are shown in the footer (the rest are in ``?``).
+
+Jump target: ``reveal(path, version=None)`` puts the cursor on a file's row
+and opens its Inspector on the Versions tab (the Timeline lens's ``J`` on a
+``files/pull`` line).
 
 REVIEW scope (``MainScreen.set_scope(run_dir)``): the same table lists the
 run's changed/new/deleted files (from the run's ``RunRecord``, the data the
@@ -464,7 +471,6 @@ class FilesPanel(Widget):
         Binding("U", "pull_all", "Pull all watched", show=False),
         Binding("slash", "filter", "Filter", show=False),
         Binding("n", "add_path", "Watch a path…", show=False),
-        Binding("B", "add_mark", "Mark (bookmark) now…", show=False),
         Binding("A", "toggle_since_mark", "All / since the last mark", show=False),
         Binding("less_than_sign", "step_mark(-1)", "Earlier mark segment", show=False),
         Binding("greater_than_sign", "step_mark(1)", "Later mark segment", show=False),
@@ -554,7 +560,7 @@ class FilesPanel(Widget):
         #: Viewed segment: None = everything, n = since mark n (0 = before
         #: the first mark).
         self._segment: int | None = None
-        #: The time of a mark being named (``B`` pressed, input open).
+        #: The time of a label / mark being named (prompt open; MarksChanged).
         self._pending_mark: datetime | None = None
         #: Expanded group folders.
         self._expanded: set[str] = set()
@@ -778,7 +784,6 @@ class FilesPanel(Widget):
         """Fold a monitor batch in; the table redraws on the next tick."""
         now = now or datetime.now()
         batch = list(batch)
-        self._export_events(batch, now)
         touched = self.activity.ingest(batch, now=now)
         writes = self.activity.writes
         if writes:
@@ -792,73 +797,6 @@ class FilesPanel(Widget):
         if touched:
             self._dirty = True
             self._refresh_inspector(touched)
-
-    def _export_events(self, batch: list, now: datetime) -> None:
-        """Append the batch to the session's ``files/timeline.jsonl``.
-
-        One JSON object per monitor event, before any noise rule or category
-        filter (the file is the record, the table is a view): ``seq``
-        (added by the store), ``at`` (the event's capture time when the item
-        carries one as an epoch ``timestamp``, else when the batch reached
-        the lens; milliseconds + UTC offset), ``at_source`` (``capture`` /
-        ``batch``), ``op``/``category``, ``path`` (+ ``new_path`` of a
-        rename), ``pkg`` (the app whose data directory holds the path, when
-        known), ``process`` (fsmon's process / the kernel comm, in app
-        scope "<app process> · <thread>"), ``pid`` when the backend reports
-        one (kprobe: the writing thread's process, TGID), ``tid`` (kprobe:
-        the writing thread; ``None`` for fsmon), ``source`` (fsmon / kprobe)
-        and ``mark`` (the number of the mark whose segment the event is in,
-        ``None`` before the first).
-        """
-        if not batch:
-            return
-        try:
-            from sandroid.core import watchlist_store
-
-            batch_at = watchlist_store.iso_tz(now, "milliseconds")
-            mark = sum(1 for m in self._marks if m.when <= now) or None
-            entries = []
-            for item in batch:
-                captured = getattr(item, "timestamp", None)
-                if isinstance(captured, (int, float)) and not isinstance(
-                    captured, bool
-                ):
-                    at = watchlist_store.iso_tz(float(captured), "milliseconds")
-                    at_source = "capture"
-                else:
-                    at, at_source = batch_at, "batch"
-                path = getattr(item, "path", "") or "/".join(
-                    p
-                    for p in (
-                        getattr(item, "directory", ""),
-                        getattr(item, "filename", ""),
-                    )
-                    if p
-                )
-                pkg = None
-                if path.startswith("/"):
-                    pkg = watchlist_store.package_of(
-                        getattr(item, "new_path", None) or path
-                    )
-                entries.append(
-                    {
-                        "at": at,
-                        "at_source": at_source,
-                        "op": getattr(item, "label", "") or None,
-                        "category": getattr(item, "category", None),
-                        "path": path,
-                        "new_path": getattr(item, "new_path", None),
-                        "pkg": pkg,
-                        "process": getattr(item, "process", "") or None,
-                        "pid": getattr(item, "pid", None),
-                        "tid": getattr(item, "tid", None),
-                        "source": getattr(item, "source", None),
-                        "mark": mark,
-                    }
-                )
-            watchlist_store.append_timeline(entries)
-        except Exception:
-            logger.debug("Files lens: timeline export failed", exc_info=True)
 
     def _on_monitor_lifecycle(self, event_type) -> None:
         from sandroid.core.events import EventType
@@ -1551,7 +1489,11 @@ class FilesPanel(Widget):
     # -- marks + segments ---------------------------------------------------------
 
     def _segment_title(self) -> str:
-        """Caption title of the viewed segment."""
+        """Caption title of the viewed segment.
+
+        A segment that starts at a label's end has no label:
+        ``after label 7 (no label)``; points keep ``mark N``.
+        """
         seg = self._segment
         marks = self._marks
         if seg is None or not marks:
@@ -1559,13 +1501,14 @@ class FilesPanel(Widget):
         if seg == 0:
             return f"before {marks[0].label()} · until {marks[0].when:%H:%M:%S}"
         start = marks[seg - 1]
+        after_end = getattr(start, "kind", "point") == "end"
+        head = f"{start.label()} (no label)" if after_end else start.label()
         if seg >= len(marks):
-            return f"since {start.label()} · {start.when:%H:%M:%S}"
+            if after_end:
+                return f"{head} · {start.when:%H:%M:%S}"
+            return f"since {head} · {start.when:%H:%M:%S}"
         end = marks[seg]
-        return (
-            f"{start.label()} → {end.label()} · "
-            f"{start.when:%H:%M:%S}–{end.when:%H:%M:%S}"
-        )
+        return f"{head} → {end.label()} · {start.when:%H:%M:%S}–{end.when:%H:%M:%S}"
 
     def _set_marks(self, marks: list[Mark], follow: bool = True) -> None:
         """Adopt the session's marks; ``follow`` jumps to the newest segment."""
@@ -1581,6 +1524,16 @@ class FilesPanel(Widget):
         self._dirty = True
 
     def on_marks_changed(self, message: MarksChanged) -> None:
+        pending = getattr(message, "pending", None)
+        if pending is not None:
+            # A label name prompt is open: segment the activity from the key
+            # press on, before anything is written (Esc settles it again).
+            self._pending_mark = pending
+            self.activity.set_marks([*(m.when for m in self._marks), pending])
+            self._dirty = True
+            self.refresh_rows()
+            return
+        self._pending_mark = None
         self._set_marks(message.marks, follow=message.added is not None)
         self.refresh_rows()
         self._refresh_inspector()
@@ -1606,6 +1559,49 @@ class FilesPanel(Widget):
         self._set_marks(self._local_marks.marks)
         self.refresh_rows()
         return mark
+
+    # -- jump target ------------------------------------------------------------------
+
+    def reveal(self, path: str, version: str | None = None) -> bool:
+        """Show ``path`` (a device path): cursor on its row, its Inspector on
+        the Versions tab, ``version`` (a version folder name) selected.
+
+        Used by the Timeline lens's ``J``. Leaves a mark segment or a filter
+        that hides the row. False when the lens does not know the file.
+        """
+        if self.review:
+            self.app.notify("Files lens is in REVIEW (L goes back to live).")
+            return False
+        if path not in {r.key for r in self._rows}:
+            self._segment = None
+            self._filter = ""
+            self._dirty = True
+            self.refresh_rows()
+        row = next((r for r in self._rows if r.key == path and r.group is None), None)
+        if row is None:
+            row = self._row_for(path)
+        if row is None:
+            return False
+        try:
+            self.table.move_cursor(row=self.table.get_row_index(path), animate=False)
+        except Exception:
+            pass
+        if version:
+            file_inspect.state_for(path).selected = version
+        ms = self._main_screen()
+        if ms is None:
+            return True
+        ms.open_inspector(self._inspector_for(row))
+        try:
+            from .lens_shell import Inspector
+
+            inspector = ms.query_one("#inspector", Inspector)
+            names = [name for name, _sections in inspector.content.tabs]
+            if "Versions" in names:
+                inspector.select_tab(names.index("Versions"))
+        except Exception:
+            pass
+        return True
 
     # -- groups ----------------------------------------------------------------------
 
@@ -2185,16 +2181,6 @@ class FilesPanel(Widget):
     def action_pull_all(self) -> None:
         self.watchlist.pull_all()
 
-    def action_add_mark(self) -> None:
-        """``B``: drop a mark now; the input asks for an optional name."""
-        if self.review:
-            self.app.notify("Marks belong to the live session (L).", severity="warning")
-            return
-        self._pending_mark = datetime.now()
-        # Segment the activity from the key press on, before it is named.
-        self.activity.set_marks([*(m.when for m in self._marks), self._pending_mark])
-        self.open_input("mark")
-
     def action_toggle_since_mark(self) -> None:
         """``A``: everything ↔ since the last mark."""
         if not self._marks:
@@ -2295,13 +2281,6 @@ class FilesPanel(Widget):
         if mode == "filter":
             field.placeholder = "filter paths   ⏎ keep · esc clear"
             field.value = self._filter
-        elif mode == "mark":
-            when = self._pending_mark or datetime.now()
-            field.placeholder = (
-                f"name mark {len(self._marks) + 1} ({when:%H:%M:%S}), optional"
-                "   ⏎ mark · esc cancel"
-            )
-            field.value = ""
         else:
             field.placeholder = "/data/data/<pkg>/databases/*   ⏎ watch · esc cancel"
             field.value = self._app_root() or ""
@@ -2319,9 +2298,6 @@ class FilesPanel(Widget):
         if cancel and field.mode == "filter" and self._filter:
             self._filter = ""
             self.refresh_rows()
-        if field.mode == "mark" and self._pending_mark is not None:
-            self._pending_mark = None
-            self.activity.set_marks(m.when for m in self._marks)  # no mark
         field.mode = "filter"
         field.value = ""
         field.set_class(False, "-shown")
@@ -2341,12 +2317,6 @@ class FilesPanel(Widget):
         event.stop()
         if event.input.mode == "filter":
             self._filter = event.value.strip()
-            self.close_input()
-            return
-        if event.input.mode == "mark":
-            when = self._pending_mark or datetime.now()
-            self._pending_mark = None
-            self.drop_mark(event.value.strip(), when)
             self.close_input()
             return
         path = event.value.strip()

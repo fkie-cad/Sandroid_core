@@ -9,7 +9,7 @@ Features:
 - Vim-style navigation (j/k/g/G)
 - Help overlay (?) showing all shortcuts
 - Command palette (Ctrl+Shift+P) for fuzzy search
-- Theme switching (Ctrl+T) with 8 themes
+- Theme switching (Settings → Appearance) with 8 themes
 - Native modal dialogs (no Rich mode switching)
 - Real-time background task monitoring
 - Keyboard-driven interaction
