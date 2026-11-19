@@ -455,6 +455,8 @@ class FriTap(DataGatherBase):
         self._opened = None
         #: Note for the user after start() ("app still paused — ␣ resumes").
         self.start_note = ""
+        #: friTap resumed its own spawn (a later failure must not kill it).
+        self._spawn_resumed = False
 
     def _create_activity_log_wrapper(self, original_handler):
         """Create a wrapper that forwards messages to the activity log and/or console.
@@ -995,27 +997,40 @@ class FriTap(DataGatherBase):
                 logger.info("Cleaning up network capture due to FriTap startup failure")
                 self._stop_network_capture()
             # Our own spawn must not stay frozen with the session held.
-            self._abort_owned_spawn()
+            self._cleanup_failed_start()
             raise  # Re-raise so the caller knows it failed
 
-    def _abort_owned_spawn(self) -> None:
-        """A failed start after friTap spawned the app: kill that spawn.
+    def _cleanup_failed_start(self) -> None:
+        """Undo a failed start: friTap's own spawn, else only its own job.
 
-        Force-stops it, drops the JobManager session, clears the PID (the
-        header shows ○) and the "friTap is still loading" marker. A process
-        friTap joined or attached to is left alone.
+        Before friTap resumed its own spawn, the spawn is killed (force-stop,
+        session dropped, PID cleared, "friTap is still loading" marker ended;
+        see :func:`~sandroid.services.app_start.abort_owned_spawn`, which
+        never touches a process that replaced it). After the resume -- the app
+        runs, a later step failed -- and on a joined or attached app, only
+        friTap's own job is stopped; the app keeps running.
         """
         opened = getattr(self, "_opened", None)
-        if opened is None or not opened.owns_spawn:
-            return
-        from sandroid.services.app_start import abort_owned_spawn
+        if (
+            opened is not None
+            and opened.owns_spawn
+            and not getattr(self, "_spawn_resumed", False)
+        ):
+            from sandroid.services.app_start import abort_owned_spawn
 
-        try:
-            abort_owned_spawn(opened)
-        except Exception as e:
-            logger.warning(f"Cleaning up friTap's own spawn failed: {e}")
-        forget_injected_pid(opened.pid)
-        self._opened = None
+            try:
+                abort_owned_spawn(opened)
+            except Exception as e:
+                logger.warning(f"Cleaning up friTap's own spawn failed: {e}")
+            forget_injected_pid(opened.pid)
+            self._opened = None
+            return
+        job_id = getattr(self, "job_id", None)
+        if job_id:
+            try:
+                stop_frida_job_bounded(self.job_manager, job_id, timeout=_STOP_TIMEOUT)
+            except Exception as e:
+                logger.debug(f"Stopping friTap's job after a failed start: {e}")
 
     def _resume_spawned_target(self, toolbox, job, load_timeout: float = 5.0):
         """Resume the target once friTap's agent is loaded -- if friTap owns it.
@@ -1040,6 +1055,8 @@ class FriTap(DataGatherBase):
                     break
                 time.sleep(0.1)
         note = finish_owned_spawn(opened, tool="friTap")
+        if opened.owns_spawn:
+            self._spawn_resumed = True  # the app runs: never kill it now
         if note:
             logger.info(f"friTap: {note}")
         return note

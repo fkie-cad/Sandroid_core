@@ -315,9 +315,9 @@ class FakeJM:
 
 @pytest.fixture(autouse=True)
 def _no_setup_owner():
-    app_start.end_setup()
+    app_start._reset_setup()
     yield
-    app_start.end_setup()
+    app_start._reset_setup()
 
 
 @pytest.fixture
@@ -1174,3 +1174,197 @@ def test_fritap_failed_start_kills_its_own_spawn(env, fritap, monkeypatch):
         ft.start(interactive=False)
     assert aborted == [opened]
     assert ft._opened is None
+
+
+# -- second review round -------------------------------------------------------
+
+
+def test_setup_marker_is_owner_scoped():
+    app_start._begin_setup("friTap", PKG, 4321)
+    app_start.end_setup("Dexray")  # not Dexray's marker
+    app_start.end_setup("friTap", 999)  # not this spawn
+    assert app_start._SETUP == ("friTap", PKG, 4321)
+    app_start.end_setup("friTap", 4321)
+    assert app_start._SETUP is None
+
+
+def test_marker_is_set_before_the_spawn_so_space_cannot_resume(env, monkeypatch):
+    """The gap between spawn_app_paused and its PID is guarded too."""
+    seen: dict = {}
+
+    def _spawn(pkg):
+        seen["owner"] = app_start.setup_owner()
+        env.jm = FakeJM(session_pid=4321, package_name=PKG, paused=True)
+        monkeypatch.setattr(env.spotlight, "is_app_paused", lambda: True)
+        seen["resume"] = app_start.resume_app()
+        return env.jm, 4321
+
+    monkeypatch.setattr(env.spotlight, "spawn_app_paused", _spawn)
+    app_start.open_session(
+        StartDecision(StartAction.SPAWN, PKG, owns_spawn=True, tool="friTap")
+    )
+    assert seen["owner"] == "friTap"
+    assert seen["resume"][0] is False
+    assert "friTap is still loading" in seen["resume"][1]
+    assert app_start._SETUP == ("friTap", PKG, 4321)
+
+
+def test_a_failed_spawn_clears_its_placeholder(env, monkeypatch):
+    monkeypatch.setattr(env.spotlight, "spawn_app_paused", lambda pkg: (None, -1))
+    with pytest.raises(AppStartError):
+        app_start.open_session(
+            StartDecision(StartAction.SPAWN, PKG, owns_spawn=True, tool="friTap")
+        )
+    assert app_start._SETUP is None
+
+
+def test_shift_r_during_a_tools_setup_never_kills_the_new_process(env, monkeypatch):
+    """⇧R (or a die-and-respawn) replaced friTap's spawn: abort is harmless."""
+    from sandroid.core.adb import Adb
+
+    killed: list = []
+    monkeypatch.setattr(Adb, "force_stop", staticmethod(killed.append))
+    _spawning(env, monkeypatch, pid=4321)
+    opened = app_start.open_session(
+        StartDecision(StartAction.SPAWN, PKG, owns_spawn=True, tool="friTap")
+    )
+    # ⇧R: the app runs as 5555 now, with its own session.
+    env.jm = FakeJM(session_pid=5555, package_name=PKG)
+    env.live = (Liveness.RUNNING, 5555)
+    env.spotlight.set_pid(5555)
+    assert app_start.setup_owner() is None  # friTap's stale marker dropped
+
+    app_start.abort_owned_spawn(opened)  # real liveness: the new process
+
+    assert killed == []
+    assert env.jm.calls == []  # the new session is not reset
+    assert env.spotlight.get_pid() == 5555
+
+
+def test_abort_kills_a_spawn_pidof_still_names(env, monkeypatch):
+    from sandroid.core.adb import Adb
+
+    killed: list = []
+    monkeypatch.setattr(Adb, "force_stop", staticmethod(killed.append))
+    env.jm = FakeJM()  # session already gone
+    env.live = (Liveness.RUNNING, 4321)
+    app_start._begin_setup("friTap", PKG, 4321)
+
+    app_start.abort_owned_spawn(Opened(4321, True, True, None, PKG, "friTap"))
+
+    assert killed == [PKG]
+    assert app_start._SETUP is None
+
+
+def test_a_newer_owner_keeps_its_marker_when_an_old_spawn_aborts(env, monkeypatch):
+    from sandroid.core.adb import Adb
+
+    monkeypatch.setattr(Adb, "force_stop", staticmethod(lambda p: None))
+    app_start._begin_setup("Dexray", PKG, 6000)
+    app_start.abort_owned_spawn(Opened(4321, True, True, None, PKG, "friTap"))
+    assert app_start._SETUP == ("Dexray", PKG, 6000)
+
+
+def test_attach_reset_runs_under_the_lifecycle_lock(env):
+    """drop_idle_session refuses while another thread starts/restarts."""
+    env.jm = FakeJM(session_pid=12)
+    held, release = threading.Event(), threading.Event()
+
+    def _hold():
+        app_start._LIFECYCLE.try_acquire()
+        held.set()
+        release.wait(5)
+        app_start._LIFECYCLE.release()
+
+    t = threading.Thread(target=_hold)
+    t.start()
+    held.wait(5)
+    try:
+        with pytest.raises(AppStartError, match="in progress"):
+            app_start.open_session(
+                StartDecision(StartAction.ATTACH, PKG, pid=77, reset_session=True)
+            )
+    finally:
+        release.set()
+        t.join(5)
+    assert env.jm.calls == []
+
+
+def test_fritap_failure_after_its_resume_stops_only_its_job(env, fritap, monkeypatch):
+    """The app runs: a late failure must not force-stop it."""
+    stopped: list = []
+    monkeypatch.setattr(
+        app_start, "abort_owned_spawn", lambda o: pytest.fail("killed the app")
+    )
+    monkeypatch.setattr(
+        fritap.mod,
+        "stop_frida_job_bounded",
+        lambda jm, job_id, timeout: stopped.append(job_id) or True,
+    )
+    ft = fritap.make()
+    ft._opened = Opened(4321, True, True, None, PKG, "friTap")
+    ft._spawn_resumed = True
+    ft.job_id = "job-9"
+
+    ft._cleanup_failed_start()
+
+    assert stopped == ["job-9"]
+
+
+def test_dexray_ends_only_its_own_marker(monkeypatch):
+    from sandroid.analysis.malwaremonitor import MalwareMonitor
+
+    mm = MalwareMonitor.__new__(MalwareMonitor)
+    mm._decision = StartDecision(StartAction.SPAWN, PKG, owns_spawn=True, tool="Dexray")
+    mm._app_pid = 4321
+    app_start._begin_setup("friTap", PKG, 777)
+    mm._end_own_setup()
+    assert app_start._SETUP == ("friTap", PKG, 777)  # another tool's marker
+
+    app_start._begin_setup("Dexray", PKG, 4321)
+    mm._decision = StartDecision(StartAction.JOIN, PKG, pid=4321, tool="Dexray")
+    mm._end_own_setup()  # did not spawn: leaves it
+    assert app_start._SETUP == ("Dexray", PKG, 4321)
+
+    mm._decision = StartDecision(StartAction.SPAWN, PKG, owns_spawn=True, tool="Dexray")
+    mm._end_own_setup()
+    assert app_start._SETUP is None
+
+
+def test_dexray_resume_and_abort_end_its_marker(monkeypatch):
+    from sandroid.analysis.malwaremonitor import MalwareMonitor
+
+    mm = MalwareMonitor.__new__(MalwareMonitor)
+    mm._decision = StartDecision(StartAction.SPAWN, PKG, owns_spawn=True, tool="Dexray")
+    mm._app_pid = 4321
+    mm.frida_device = None
+    resumed: list = []
+    mm.job_manager = SimpleNamespace(
+        device=SimpleNamespace(resume=resumed.append), pid=4321
+    )
+    mm._spawned_at = 1.0
+    app_start._begin_setup("Dexray", PKG, 4321)
+    mm._resume_spawned_target()
+    assert resumed == [4321]
+    assert app_start._SETUP is None
+
+    # _abort_start before the resume: resumes and ends the marker too.
+    app_start._begin_setup("Dexray", PKG, 4321)
+    mm._spawned_at = 1.0
+    mm._owns_session = True
+    mm._bypass_claims = []
+    mm._snapshot_manager = SimpleNamespace(discard_snapshot=lambda tb: None)
+    mm.job_manager.detach_from_app = lambda timeout=0: None
+    mm._abort_start(SimpleNamespace(malware_monitor_running=True))
+    assert app_start._SETUP is None
+
+
+def test_trigdroid_fresh_joins_a_held_spawn(env, monkeypatch):
+    from sandroid.features.trigdroid import Trigdroid
+    from sandroid.services import get_trigdroid_config_service
+
+    monkeypatch.setattr(get_trigdroid_config_service(), "fresh", True)
+    env.jm = FakeJM(session_pid=77, package_name=PKG, paused=True)
+    env.live = (Liveness.NOT_RUNNING, None)
+
+    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is False

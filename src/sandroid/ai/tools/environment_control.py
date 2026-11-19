@@ -462,7 +462,10 @@ def start_ssl_unpin() -> dict[str, Any]:
 
 @sandroid_tool(
     name="stop_ssl_unpin",
-    description="Stop an active SSL pinning bypass (SSL unpin), if one is running.",
+    description=(
+        "Stop an active SSL pinning bypass (SSL unpin), if one is running; "
+        "an SSL unpin only armed for a stopped app is disarmed."
+    ),
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.REVERSIBLE,
     category="frida",
@@ -486,12 +489,18 @@ def stop_ssl_unpin() -> dict[str, Any]:
         ``{"stopped": False, "was_active": True, "error": str}`` if a bypass
         was active but the stop call itself raised, or reported failure.
         ``{"stopped": True, "was_active": True}`` on a confirmed stop.
+        ``{"stopped": False, "was_active": False, "disarmed": True}`` when SSL
+        unpin was only armed (for a stopped app) and is now disarmed.
     """
     from sandroid.services.mitmproxy_service import get_mitmproxy_service
 
     service = get_mitmproxy_service()
     was_active = service.ssl_unpin_is_active()
     if not was_active:
+        is_on = getattr(service, "ssl_unpin_is_on", None)
+        if callable(is_on) and is_on():
+            service.stop_ssl_unpin()  # disarms an armed-only bypass
+            return {"stopped": False, "was_active": False, "disarmed": True}
         return {"stopped": False, "was_active": False}
 
     try:

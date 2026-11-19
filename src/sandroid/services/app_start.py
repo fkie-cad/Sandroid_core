@@ -343,41 +343,76 @@ def _lifecycle() -> Iterator[None]:
 
 _SETUP_LOCK = threading.Lock()
 #: ``(tool, package, pid)`` of a tool that spawned the app and is still
-#: loading its hooks, else None. Set by :func:`open_session`, cleared by
-#: :func:`finish_owned_spawn` / :func:`abort_owned_spawn` / :func:`end_setup`.
+#: loading its hooks, else None. ``pid`` is None while the spawn is under
+#: way. Set by :func:`open_session`, cleared by its owner only
+#: (:func:`finish_owned_spawn` / :func:`abort_owned_spawn` /
+#: :func:`end_setup`).
 _SETUP: tuple[str, str, int | None] | None = None
 
 
-def _begin_setup(tool: str, package: str, pid: int | None) -> None:
+def _begin_setup(tool: str, package: str, pid: int | None = None) -> None:
     global _SETUP
     with _SETUP_LOCK:
         _SETUP = (tool, package, pid)
 
 
-def end_setup() -> None:
-    """The owning tool resumed (or gave up) its spawn. Idempotent."""
+def _setup_spawned(tool: str, pid: int) -> None:
+    """The owner's spawn has its PID now (placeholder -> real marker)."""
+    global _SETUP
+    with _SETUP_LOCK:
+        if _SETUP is not None and _SETUP[0] == tool and _SETUP[2] is None:
+            _SETUP = (tool, _SETUP[1], pid)
+
+
+def end_setup(tool: str, pid: int | None = None) -> None:
+    """The owner resumed (or gave up) its spawn. Idempotent.
+
+    Clears only the marker of ``tool`` (and of ``pid`` when given): a later
+    owner's marker -- a ⇧R or another tool spawned meanwhile -- stays.
+    """
+    global _SETUP
+    with _SETUP_LOCK:
+        marker = _SETUP
+        if marker is None or marker[0] != tool:
+            return
+        if pid is not None and marker[2] is not None and marker[2] != pid:
+            return
+        _SETUP = None
+
+
+def _reset_setup() -> None:
+    """Forget any marker (tests)."""
     global _SETUP
     with _SETUP_LOCK:
         _SETUP = None
+
+
+def _drop_if_current(marker: tuple[str, str, int | None]) -> None:
+    global _SETUP
+    with _SETUP_LOCK:
+        if _SETUP is marker:
+            _SETUP = None
 
 
 def setup_owner(jm: Any = None) -> str | None:
     """The tool still loading its hooks into its own paused spawn, or None.
 
     A marker whose process is gone (the JobManager's live session is another
-    PID or none) is stale and dropped.
+    PID or none) is stale and dropped -- only that very marker (compare and
+    swap). A placeholder (spawn under way, no PID yet) is never stale.
     """
-    global _SETUP
     with _SETUP_LOCK:
         marker = _SETUP
     if marker is None:
         return None
     tool, _package, pid = marker
+    if pid is None:
+        return tool
     if jm is None:
         jm = _job_manager()
     spid = session_pid(jm)
-    if pid is not None and spid is not None and spid != pid:
-        end_setup()
+    if spid is not None and spid != pid:
+        _drop_if_current(marker)
         return None
     if spid is None and jm is not None:
         try:
@@ -385,7 +420,7 @@ def setup_owner(jm: Any = None) -> str | None:
         except Exception:
             alive = True
         if not alive:
-            end_setup()
+            _drop_if_current(marker)
             return None
     return tool
 
@@ -772,6 +807,7 @@ class Opened:
     paused: bool
     device: Any = None
     package: str = ""
+    tool: str = ""
 
 
 def _bypass() -> Any:
@@ -800,22 +836,25 @@ def drop_session(jm: Any) -> None:
 def drop_idle_session(jm: Any, tool: str = "this tool") -> None:
     """:func:`drop_session`, but only when no job runs on it.
 
-    Re-checked right before the reset: a dialog (Dexray's snapshot prompt)
-    may sit between the decision and this call.
+    Re-checked right before the reset, and check plus reset run under the
+    lifecycle lock: a dialog (Dexray's snapshot prompt) may sit between the
+    decision and this call.
 
     Raises:
-        AppStartError: Live jobs appeared meanwhile.
+        AppStartError: Live jobs appeared meanwhile, or another start holds
+            the lifecycle lock.
     """
-    try:
-        alive = bool(jm.has_active_session()) if jm is not None else False
-    except Exception:
-        alive = True
-    jobs = live_job_names(jm) if alive else ()
-    if jobs:
-        raise AppStartError(
-            f"Frida started {', '.join(jobs)} meanwhile; {tool} not started."
-        )
-    drop_session(jm)
+    with _lifecycle():
+        try:
+            alive = bool(jm.has_active_session()) if jm is not None else False
+        except Exception:
+            alive = True
+        jobs = live_job_names(jm) if alive else ()
+        if jobs:
+            raise AppStartError(
+                f"Frida started {', '.join(jobs)} meanwhile; {tool} not started."
+            )
+        drop_session(jm)
 
 
 def stop_app_tools(package: str) -> list[str]:
@@ -867,19 +906,30 @@ def respawn_teardown(package: str) -> None:
     drop_session(_job_manager())
 
 
-def _spawn_paused(package: str) -> Opened:
+def _spawn_paused(package: str, tool: str = "") -> Opened:
+    """Spawn ``package`` paused as ``tool``'s own (setup marker first).
+
+    The marker is set before the spawn, so Space cannot resume the new
+    process in the gap before the PID is known; a failed spawn clears it.
+    """
     from sandroid.services import get_spotlight_service
 
     spotlight = get_spotlight_service()
-    jm, pid = spotlight.spawn_app_paused(package)
-    if not pid or pid <= 0:
-        reason = getattr(spotlight, "last_spawn_error", None) or "no PID"
-        raise AppStartError(f"Failed to spawn {package}: {reason}")
+    _begin_setup(tool, package)
+    try:
+        jm, pid = spotlight.spawn_app_paused(package)
+        if not pid or pid <= 0:
+            reason = getattr(spotlight, "last_spawn_error", None) or "no PID"
+            raise AppStartError(f"Failed to spawn {package}: {reason}")
+    except BaseException:
+        end_setup(tool)
+        raise
+    _setup_spawned(tool, pid)
     try:
         spotlight.announce_pid(pid, package)
     except Exception:
         pass
-    return Opened(pid, True, True, getattr(jm, "device", None), package)
+    return Opened(pid, True, True, getattr(jm, "device", None), package, tool)
 
 
 def open_session(decision: StartDecision, handler: Any = None) -> Opened:
@@ -926,9 +976,7 @@ def open_session(decision: StartDecision, handler: Any = None) -> Opened:
                 )
             if decision.reset_session:
                 drop_idle_session(jm, decision.tool)
-            opened = _spawn_paused(pkg)
-            _begin_setup(decision.tool, pkg, opened.pid)
-            return opened
+            return _spawn_paused(pkg, decision.tool)
     if action == StartAction.RESPAWN:
         from sandroid.services import get_spotlight_service
 
@@ -936,9 +984,7 @@ def open_session(decision: StartDecision, handler: Any = None) -> Opened:
         with _lifecycle():
             try:
                 respawn_teardown(pkg)
-                opened = _spawn_paused(pkg)
-                _begin_setup(decision.tool, pkg, opened.pid)
-                return opened
+                return _spawn_paused(pkg, decision.tool)
             finally:
                 spotlight.end_restart()
     raise AppStartError(decision.reason or f"{decision.tool} not started")
@@ -994,8 +1040,14 @@ def finish_owned_spawn(opened: Opened, tool: str = "the tool") -> str:
     try:
         get_frida_session_service().resume_spawned_process(device, opened.pid)
     finally:
-        end_setup()
-    return apply_armed_after_launch(tool)
+        end_setup(opened.tool, opened.pid)
+    # Resumed: from here on nothing may fail the tool's start (its caller
+    # would treat the running app as a frozen spawn).
+    try:
+        return apply_armed_after_launch(tool)
+    except Exception as exc:
+        logger.warning("Applying armed bypasses after launch failed: %s", exc)
+        return f"armed bypasses not applied: {exc}"
 
 
 def abort_owned_spawn(opened: Opened | None) -> None:
@@ -1003,28 +1055,45 @@ def abort_owned_spawn(opened: Opened | None) -> None:
 
     Force-stops the spawn (first: unloads on a live process can hang), drops
     the JobManager session and the bypass handles, clears the PID so the
-    header shows ○, and ends the setup marker. A process the tool did not
-    spawn is left alone.
+    header shows ○ -- but only while the spawn is still the app's process
+    (pidof or the JobManager's session PID): after a ⇧R / AI restart or a
+    die-and-respawn the new process is never touched. The tool's setup
+    marker is always ended. A process the tool did not spawn is left alone.
     """
     if opened is None or not opened.owns_spawn:
         return
     try:
-        from sandroid.core.adb import Adb
+        jm = _job_manager()
+        spid = session_pid(jm)
+        try:
+            liveness, live = probe_liveness(opened.package)
+        except Exception:
+            liveness, live = Liveness.UNKNOWN, None
+        ours = live == opened.pid or (live is None and spid == opened.pid)
+        if not ours:
+            logger.info(
+                "Not stopping %s: pid %s is no longer the failed spawn %s",
+                opened.package,
+                live or spid,
+                opened.pid,
+            )
+            return
+        try:
+            from sandroid.core.adb import Adb
 
-        if opened.package:
-            Adb.force_stop(opened.package)
-    except Exception as exc:
-        logger.warning("force_stop of the failed spawn failed: %s", exc)
-    try:
-        drop_session(_job_manager())
+            if opened.package:
+                Adb.force_stop(opened.package)
+        except Exception as exc:
+            logger.warning("force_stop of the failed spawn failed: %s", exc)
+        drop_session(jm)
+        try:
+            from sandroid.services import get_spotlight_service
+
+            get_spotlight_service().announce_pid(None, opened.package or None)
+        except Exception as exc:
+            logger.debug("Could not clear the spotlight PID: %s", exc)
     finally:
-        end_setup()
-    try:
-        from sandroid.services import get_spotlight_service
-
-        get_spotlight_service().announce_pid(None, opened.package or None)
-    except Exception as exc:
-        logger.debug("Could not clear the spotlight PID: %s", exc)
+        end_setup(opened.tool, opened.pid)
 
 
 # ---------------------------------------------------------------------------
@@ -1122,6 +1191,8 @@ def resume_app() -> tuple[bool, str]:
     spotlight = get_spotlight_service()
     if not spotlight.is_app_paused():
         return False, "No paused app to resume"
+    if _LIFECYCLE.busy_for_caller():
+        return False, _BUSY_MSG
     owner = setup_owner()
     if owner:
         return False, f"{owner} is still loading its hooks — ␣ resumes after it"

@@ -1131,3 +1131,35 @@ async def test_review_of_an_old_run_says_where_it_looked(flow_dir, tmp_path):
         await settle(pilot)
         hint = str(panel.query_one("#net-empty-hint").render())
         assert "predates flows stored in its bundle" in hint
+
+
+def test_network_tab_ctrl_p_disarms_an_armed_ssl_unpin(monkeypatch):
+    """Armed-only SSL (stopped app): Ctrl+P disarms, no "[ERROR] … failed"."""
+    from types import SimpleNamespace
+
+    from sandroid.analysis import detection_bypass as db
+    from sandroid.services.mitmproxy_service import MitmproxyService
+    from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
+
+    svc = db.BypassService()
+    svc._armed = {"ssl"}
+    monkeypatch.setattr(db, "get_bypass_service", lambda: svc)
+    monkeypatch.setattr(db.BypassService, "_unregister_task", lambda self: None)
+    service = MitmproxyService()
+    monkeypatch.setattr(service, "_bypass_service", lambda: svc)
+    mitm = MitmproxyPanel()
+    mitm._service = service
+    lines: list[str] = []
+    monkeypatch.setattr(mitm, "_append_line", lines.append)
+    monkeypatch.setattr(mitm, "_refresh_header", lambda: None)
+    monkeypatch.setattr(mitm, "run_worker", lambda fn, **kw: fn())
+    monkeypatch.setattr(
+        MitmproxyPanel,
+        "app",
+        property(lambda self: SimpleNamespace(call_from_thread=lambda f: f())),
+    )
+
+    mitm.action_toggle_ssl_unpin()
+
+    assert svc.armed_categories() == []
+    assert lines == ["[INFO] SSL pinning bypass disarmed"]

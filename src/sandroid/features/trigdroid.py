@@ -150,8 +150,9 @@ class Trigdroid(Functionality):
         ``spawn_mode`` allows it). TrigDroid spawns through its own Frida
         session, outside Sandroid's JobManager, so it cannot restart a
         running app cleanly (stop the other tools, re-apply the armed
-        bypasses): with the config's ``fresh`` flag on a running app it
-        refuses and asks for a restart first.
+        bypasses): with the config's ``fresh`` flag on an app that has
+        already run it refuses and asks for a restart first; a held (paused)
+        spawn has not run yet and is joined.
 
         Returns:
             TrigDroid's ``spawn_mode`` for this run, or None to abort.
@@ -170,11 +171,13 @@ class Trigdroid(Functionality):
                 logger.error(f"TrigDroid not started: {package_name} is not running")
                 return None
             return True
-        if fresh:
+        if fresh and not (action == StartAction.JOIN and decision.paused):
+            # A held spawn has not run yet: it already counts as fresh.
             logger.error(
-                f"TrigDroid not started: {package_name} is running and TrigDroid "
-                "cannot restart it itself — restart the app with ⇧R (headless: "
-                "stop it first), then run TrigDroid."
+                f"TrigDroid not started: it needs a fresh start of {package_name}, "
+                "which has already run, and TrigDroid cannot restart an app "
+                "itself — restart it with ⇧R (headless: stop it first), then "
+                "run TrigDroid."
             )
             return None
         return False

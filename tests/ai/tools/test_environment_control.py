@@ -799,3 +799,18 @@ def test_get_ssl_unpin_status_inactive(monkeypatch):
     _patch_mitmproxy_service(monkeypatch, service)
 
     assert ec.get_ssl_unpin_status() == {"active": False, "target": None}
+
+
+def test_stop_ssl_unpin_disarms_an_armed_only_bypass(monkeypatch):
+    calls = []
+    service = SimpleNamespace(
+        ssl_unpin_is_active=lambda: False,
+        ssl_unpin_is_on=lambda: True,
+        stop_ssl_unpin=lambda: calls.append("stop") or False,
+    )
+    _patch_mitmproxy_service(monkeypatch, service)
+
+    result = ec.stop_ssl_unpin()
+
+    assert result == {"stopped": False, "was_active": False, "disarmed": True}
+    assert calls == ["stop"]

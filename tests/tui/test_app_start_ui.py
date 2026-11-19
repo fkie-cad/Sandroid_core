@@ -193,3 +193,31 @@ def test_a_held_spawn_is_not_taken_for_a_resumed_app() -> None:
     # Another process of the same package being attached says nothing about ours.
     assert parse(_AM_RESUMED.replace(" 8735:", " 8800:"), 8735) is False
     assert parse("", 8735) is False
+
+
+def test_am_parser_matches_whole_pids_and_record_boundaries() -> None:
+    parse = SpotlightPanel._parse_am_process_attached
+    # " 873:" must not match the " 8735:" record (and vice versa).
+    collide = (
+        "  *APP* UID 10219 ProcessRecord{9075a3 8735:org.mozilla.firefox/u0a219}\n"
+        "    thread=android.app.IApplicationThread$Stub$Proxy@c72926e\n"
+        "  *APP* UID 10220 ProcessRecord{11aa22 873:org.example/u0a220}\n"
+        "    thread=null\n"
+    )
+    assert parse(collide, 873) is False
+    assert parse(collide, 8735) is True
+    # thread=null with trailing detail is still unattached.
+    assert parse(collide.replace("thread=null", "thread=null pid=873"), 873) is False
+    # *PERS*, isolated and sandboxed records end ours: their thread= is theirs.
+    for header in (
+        "  *PERS* UID 1000 ProcessRecord{55ee66 700:system/1000}",
+        "  Isolated #0: ProcessRecord{77ff88 701:org.example:sandboxed/u0i5}",
+        "  *APP* UID 99001 ProcessRecord{99aa00 702:org.example:privileged_process0/u0i9}",
+    ):
+        dump = (
+            "  *APP* UID 10220 ProcessRecord{11aa22 873:org.example/u0a220}\n"
+            "    pid=873 starting=true\n"
+            f"{header}\n"
+            "    thread=android.app.IApplicationThread$Stub$Proxy@1\n"
+        )
+        assert parse(dump, 873) is False, header

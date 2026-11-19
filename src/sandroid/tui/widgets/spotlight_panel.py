@@ -29,6 +29,7 @@ from __future__ import annotations
 import concurrent.futures
 import functools
 import logging
+import re
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -89,6 +90,11 @@ _POLL_INTERVAL = 4.0
 # reads the same PID and showed a dead attach PID as "running" for >= 49 s
 # after an external restart (phase 4) when the poll stopped with the tab.
 _HIDDEN_POLL_EVERY = 2
+
+
+#: ``ProcessRecord{<hash> <pid>:<name>/<uid>}`` in ``dumpsys activity
+#: processes`` (the PID is matched as a whole number, never a prefix).
+_AM_RECORD = re.compile(r"ProcessRecord\{[0-9a-fA-F]+ (\d+):")
 
 
 def _is_static_analysis_end(event) -> bool:
@@ -822,15 +828,22 @@ class SpotlightPanel(Widget):
         """
         if not dump:
             return False
-        marker = "ProcessRecord{"
         in_record = False
         for line in dump.splitlines():
             stripped = line.strip()
-            if stripped.startswith("*APP*") or stripped.startswith(marker):
-                in_record = f" {pid}:" in stripped
+            record = _AM_RECORD.search(stripped)
+            # Every record header ends the previous record: *APP* / *PERS* /
+            # *IMP* ..., "Isolated #n:", "PID #n:" and section titles.
+            if (
+                record
+                or stripped.startswith(("*", "Isolated #"))
+                or (stripped.endswith(":") and "=" not in stripped)
+            ):
+                in_record = bool(record) and int(record.group(1)) == pid
                 continue
             if in_record and stripped.startswith("thread="):
-                return stripped != "thread=null"
+                first = stripped.split()[0]
+                return not first.startswith("thread=null")
         return False
 
     def _proc_resumed(self, pid: int) -> bool:

@@ -1566,7 +1566,7 @@ class MitmproxyPanel(Widget):
         — SSL unpin is a Frida-only operation. Without mitmweb you just
         won't see the decrypted traffic in the panel below.
         """
-        if not self._service.ssl_unpin_is_active():
+        if not self._service.ssl_unpin_is_on():
             # Validate spotlight before delegating so we can produce a
             # specific error from inside the panel.
             try:
@@ -1590,7 +1590,8 @@ class MitmproxyPanel(Widget):
 
         # The toggle can block on Frida script readiness — run it off the UI
         # thread (under a bounded watchdog) and marshal results back.
-        was_active = self._service.ssl_unpin_is_active()
+        # Armed counts as on: Ctrl+P disarms an SSL unpin armed for a stopped app.
+        was_active = self._service.ssl_unpin_is_on()
 
         def _job() -> None:
             ok, msg = False, ""
@@ -1615,7 +1616,7 @@ class MitmproxyPanel(Widget):
 
             def _report() -> None:
                 if was_active:
-                    self._append_line("[INFO] SSL pinning bypass stopped")
+                    self._append_line(f"[INFO] {msg or 'SSL pinning bypass stopped'}")
                 elif ok:
                     self._append_line(f"[INFO] {msg}")
                 else:
