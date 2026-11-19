@@ -779,3 +779,38 @@ def test_the_bar_heading_has_a_theme_background(store):
     text = view.bar_text(200)
     heading = next(span for span in text.spans if span.start == 0)
     assert str(heading.style).endswith(f"on {lens_palette().band}")
+
+
+async def test_network_H_while_live_keeps_live_and_the_newest_row(flow_dir, store):
+    """sandroid-tracking: toggling the AI filter while live stays live, cursor
+    on the newest shown row.
+    """
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _network(app, pilot, flow_dir)
+        table = panel.table
+        store.create("network", "facebook", reasons={"flow-2": "fb", "flow-3": "x"})
+        await until(pilot, lambda: "hl" in _cols(table))
+        assert panel.following
+        table.focus()
+        for _ in range(3):  # set -> off -> set
+            await pilot.press("H")
+            await settle(pilot)
+            assert panel.following
+            assert table.cursor_row == table.row_count - 1
+
+
+async def test_files_H_while_live_keeps_live_and_the_newest_row(store):
+    app = _Harness()
+    async with app.run_test(size=WIDE) as pilot:
+        panel = await _files(app, pilot)
+        table = panel.table
+        store.create("files", "secrets", reasons={PREFS: "a", MISC: "b", CACHE: "c"})
+        await until(pilot, lambda: _bar(panel))
+        assert panel.following
+        table.focus()
+        for _ in range(3):
+            await pilot.press("H")
+            await settle(pilot)
+            assert panel.following
+            assert table.cursor_row == table.row_count - 1
