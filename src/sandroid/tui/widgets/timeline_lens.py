@@ -294,6 +294,7 @@ def row_from_line(line: dict, offset: int | None = None) -> Row:
         if (
             src in _KEEP_DATA
             or (src == "files" and kind in ("pull", "check"))
+            or (src == "privacy" and kind in ("sent", "stored"))
             or (src == "sandroid" and kind in ("world", "intervention", "resume"))
         ):
             keep = data
