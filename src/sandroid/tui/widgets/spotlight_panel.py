@@ -1,10 +1,13 @@
 """TUI panel giving on-screen feedback + control for the spotlight app.
 
-The spotlight (``C`` attach / ``Shift+C`` spawn) was previously invisible —
-no indication of which app, running state, PID, or which Frida hooks/bypasses
-were active. This panel surfaces all of that, shows **live running state**, and
-offers explicit lifecycle actions (Start / Restart / Kill / Attach, plus the
-advanced Start-paused / Resume) together with immediate bypass toggles.
+The spotlight is one app *selection* (``c`` use the foreground app /
+``Shift+C`` pick an app…) with no spawn/attach mode. This panel shows which
+app, its **live running state** (running pid N / paused / not running) and
+which Frida hooks/bypasses are active, and offers explicit lifecycle actions
+(Start / Restart / Kill / Attach, plus the advanced Start-paused / Resume)
+together with immediate bypass toggles. Tools decide per start whether they
+join, attach or start the app (:mod:`sandroid.services.app_start`); a restart
+of a running app always asks, except ⇧R, the explicit restart key.
 
 It is intentionally **stateless**: it owns no manager instances and reads
 everything live from the process-wide services (BypassService, SpotlightService,
@@ -117,14 +120,15 @@ class SpotlightPanel(Widget):
         b then 1-6: toggle/arm SSL / Root / Frida / Debug / Integrity /
                  Emulator bypass
                  (``b`` then ``o`` launches Objection, the global ``b``)
-        Space:   primary (Start if stopped · Resume if paused)
+        Space:   primary (Start if stopped · Resume if paused; never restarts)
         Enter:   inspect the selected section row (MainScreen → Inspector)
         /:       filter the rows of all sections (Esc clears)
         z:       fold / unfold the focused section
         u:       refresh runtime facts (grants, AppOps, footprint, services)
-        R:       restart (force-stop + respawn with armed hooks)
+        R:       restart (force-stop + respawn with armed hooks; no dialog)
         A:       attach to the live process + apply armed hooks
-        P:       start paused (advanced; Space then resumes)
+        P:       start paused (advanced; Space then resumes; asks before
+                 restarting a running app; Android ends a hold after ~10 s)
         K:       kill the app + tear down all hooks
         X:       clear the spotlight selection
 
@@ -424,21 +428,25 @@ class SpotlightPanel(Widget):
         c = lens_palette()
         package = self._current_package()
         if not package:
-            return f"[{c.bad}]○ no app[/] — press [b]c[/] (attach) / [b]⇧C[/] (spawn)"
+            return (
+                f"[{c.bad}]○ no app[/] — [b]c[/] use the foreground app · "
+                "[b]⇧C[/] pick an app…"
+            )
 
         pid = self._safe_pid()
         paused = self._is_paused()
         hooks = self._hooks_for_app(package)
         on = self._on_categories()
 
-        if paused and pid:
-            state = f"[{c.warn}]◐ paused[/] PID [b]{pid}[/]"
+        if paused:
+            pid_part = f" pid [b]{pid}[/]" if pid else ""
+            state = f"[{c.warn}]◐ paused[/]{pid_part} [{c.dim}]· ␣ resume[/]"
         elif pid:
-            state = f"[{c.ok}]● running[/] PID [b]{pid}[/]"
+            state = f"[{c.ok}]● running[/] pid [b]{pid}[/]"
         elif self._restarting():
             state = f"[{c.warn}]◌ restarting…[/]"
         else:
-            state = f"[{c.bad}]○ not running[/]"
+            state = f"[{c.bad}]○ not running[/] [{c.dim}]· ␣ start[/]"
 
         bypass_tag = (
             f"[{c.ok}]bypass: {','.join(on)}[/]" if on else f"[{c.dim}]bypass: none[/]"
@@ -452,9 +460,9 @@ class SpotlightPanel(Widget):
 
         if not package:
             return (
-                f"[{c.dim}]No spotlight app selected.\n\n"
-                "Press [b]c[/] to attach to the focused app, or [b]Shift+C[/] to "
-                "pick an app to spawn with hooks from the start.[/]"
+                f"[{c.dim}]No app selected.\n\n"
+                "Press [b]c[/] to use the foreground app or [b]⇧C[/] to pick "
+                "an app…; then [b]␣[/] starts it, [b]⇧A[/] attaches.[/]"
             )
 
         # Three rows on the gutter the sections below use (right-aligned
@@ -1246,7 +1254,8 @@ class SpotlightPanel(Widget):
     def _require_package(self) -> bool:
         if not self._current_package():
             self._notify(
-                "No spotlight app. Press c (attach) or Shift+C (spawn) first.",
+                "No spotlight app. Press c (use the foreground app) or ⇧C "
+                "(pick an app…) first.",
                 "warning",
             )
             return False

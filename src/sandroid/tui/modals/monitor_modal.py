@@ -290,8 +290,6 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
         spotlight = get_spotlight_service()
         self._spotlight_app = spotlight.get_app_tuple()
         self._spotlight_pid = spotlight.get_pid()
-        self._spawn_mode = spotlight.is_spawn_mode()
-        self._spawn_app = spotlight.get_spawn_package()
 
         # Determine default path
         self._default_path = self._get_default_path()
@@ -354,9 +352,7 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
             return False
 
     def _get_package_name(self) -> str:
-        """Get package name from spawn app or spotlight app."""
-        if self._spawn_mode and self._spawn_app:
-            return self._spawn_app
+        """Get the spotlight package name."""
         if self._spotlight_app:
             return (
                 self._spotlight_app[0]
@@ -420,11 +416,15 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
             # Spotlight app info
             app_name = self._get_app_name()
             if app_name:
-                mode_str = "SPAWN" if self._spawn_mode else "ATTACH"
-                pid_str = (
-                    f" (PID: {self._spotlight_pid})" if self._spotlight_pid else ""
+                state = (
+                    f"running pid {self._spotlight_pid}"
+                    if self._spotlight_pid
+                    else "not running"
                 )
-                info_text = f"[bold]Spotlight App:[/bold] {app_name}{pid_str}\n[bold]Mode:[/bold] {mode_str}"
+                info_text = (
+                    f"[bold]Spotlight App:[/bold] {app_name}\n"
+                    f"[bold]State:[/bold] {state}"
+                )
                 spotlight_info = Static(info_text, id="spotlight-info")
                 spotlight_info.add_class("has-app")
                 yield spotlight_info

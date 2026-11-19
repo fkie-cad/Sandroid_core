@@ -77,14 +77,16 @@ def _describe_spotlight_app() -> str | None:
         if not package:
             return "Spotlight app: none currently selected."
 
-        mode = service.get_effective_mode()
-        mode_str = getattr(mode, "value", str(mode))
+        state = service.get_run_state()
         pid = service.get_pid()
-
-        detail = f"{package} ({mode_str} mode"
-        if pid:
-            detail += f", pid {pid}"
-        detail += ")"
+        if state in ("running", "paused") and pid:
+            detail = f"{package} ({state}, pid {pid})"
+        elif state == "paused":
+            detail = f"{package} (paused)"
+        elif state == "restarting":
+            detail = f"{package} (restarting)"
+        else:
+            detail = f"{package} (not running)"
         return f"Spotlight app (the analyst's chosen investigation target): {detail}"
     except Exception:
         return None

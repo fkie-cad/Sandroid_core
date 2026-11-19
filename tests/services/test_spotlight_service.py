@@ -325,3 +325,34 @@ def test_no_source_file_uses_the_legacy_spotlight_state():
         if _LEGACY_NAMES.search(line)
     ]
     assert not offenders, offenders
+
+
+#: The spawn/attach mode API is gone; only deprecated shims remain (step 1).
+_REMOVED_MODE_NAMES = re.compile(
+    r"\bset_spawn_app\(|\bis_spawn_mode\(|\bget_spawn_package\(|\bset_spawn_mode\("
+    r"|\b(get|set)_auto_resume\(|\bget_effective_mode\(|get_spawn_mode_string"
+    r"|SpawnModeModal|SpotlightSelectionUI|ensure_(spotlight_)?app_for_tools"
+    r"|\bspawn_app_paused\(.*auto_resume"
+)
+
+#: Shim definitions and dead code that step 2 deletes.
+_MODE_ALLOWLIST = (
+    "sandroid/services/spotlight_service.py",
+    "sandroid/services/frida_session_service.py",
+    "sandroid/core/toolbox.py",
+    "sandroid/tui/controllers/spotlight_selection_ui.py",
+    "sandroid/tui/controllers/__init__.py",
+    "sandroid/tui/modals/spawn_mode_modal.py",
+    "sandroid/tui/modals/__init__.py",
+)
+
+
+def test_no_source_file_uses_the_removed_mode_api():
+    offenders = [
+        f"{rel}:{n}"
+        for path in _SRC.rglob("*.py")
+        if not (rel := path.relative_to(_SRC).as_posix()).endswith(_MODE_ALLOWLIST)
+        for n, line in enumerate(path.read_text("utf-8").splitlines(), 1)
+        if _REMOVED_MODE_NAMES.search(line)
+    ]
+    assert not offenders, offenders

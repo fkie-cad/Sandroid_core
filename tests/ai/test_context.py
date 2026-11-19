@@ -12,6 +12,8 @@ style ``test_loop.py`` uses for ``loop_module.get_tool_registry``.
 
 from types import SimpleNamespace
 
+import pytest
+
 from sandroid import services
 from sandroid.ai import context
 from sandroid.core import proxy_manager
@@ -173,7 +175,6 @@ def test_spotlight_app_renders_explicit_absence_when_no_effective_package(
         "get_spotlight_service",
         lambda: SimpleNamespace(
             get_effective_package=lambda: None,
-            get_effective_mode=lambda: SimpleNamespace(value="attach"),
             get_pid=lambda: None,
         ),
     )
@@ -187,23 +188,32 @@ def test_spotlight_app_renders_explicit_absence_when_no_effective_package(
     assert "spotlight" in line.lower()
 
 
-def test_spotlight_app_renders_package_mode_and_pid(monkeypatch):
+@pytest.mark.parametrize(
+    ("state", "pid", "expected"),
+    [
+        ("running", 1234, "com.example.target (running, pid 1234)"),
+        ("paused", 1234, "com.example.target (paused, pid 1234)"),
+        ("paused", None, "com.example.target (paused)"),
+        ("not_running", None, "com.example.target (not running)"),
+        ("restarting", None, "com.example.target (restarting)"),
+    ],
+)
+def test_spotlight_app_renders_package_and_run_state(monkeypatch, state, pid, expected):
     monkeypatch.setattr(
         services,
         "get_spotlight_service",
         lambda: SimpleNamespace(
             get_effective_package=lambda: "com.example.target",
-            get_effective_mode=lambda: SimpleNamespace(value="spawn"),
-            get_pid=lambda: 1234,
+            get_run_state=lambda: state,
+            get_pid=lambda: pid,
         ),
     )
 
     line = context._describe_spotlight_app()
 
     assert line is not None
-    assert "com.example.target" in line
-    assert "spawn" in line
-    assert "1234" in line
+    assert line.endswith(expected)
+    assert "mode" not in line
 
 
 # -- _describe_active_device --------------------------------------------------

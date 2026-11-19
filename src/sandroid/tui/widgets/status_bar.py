@@ -46,7 +46,6 @@ class StatusBar(Static):
         # (avoids Textual reactive descriptor overhead that blocks mount chain)
         self.frida_status = "Not running"
         self.spotlight_app = "None"
-        self.spawn_mode = False
         self.current_view = "FORENSIC"
         self.current_theme = ""
         self.show_theme_indicator = False
@@ -285,16 +284,17 @@ class StatusBar(Static):
 
         # App state (package itself is in the header breadcrumb).
         if self.spotlight_app and self.spotlight_app != "None":
-            mode = "spawn" if self.spawn_mode else "attach"
-            if self.spotlight_pid and self.spotlight_paused:
-                state = f"[{paused}]◐ paused[/] [{muted}]pid {self.spotlight_pid}[/]"
-            elif self.spotlight_pid:
-                state = f"[{run}]● running[/] [{muted}]pid {self.spotlight_pid}[/]"
+            pid = self.spotlight_pid
+            if self.spotlight_paused:
+                pid_part = f" pid {pid}" if pid else ""
+                state = f"[{paused}]◐ paused[/][{muted}]{pid_part} · ␣ resume[/]"
+            elif pid:
+                state = f"[{run}]● running[/] [{muted}]pid {pid}[/]"
             elif self.spotlight_restarting:
                 state = f"[{paused}]◌ restarting…[/]"
             else:
-                state = f"[{stop}]○ not running[/]"
-            segs.append(f"[{muted}]App[/] {state} [{muted}]· {mode}[/]")
+                state = f"[{stop}]○ not running[/] [{muted}]· ␣ start[/]"
+            segs.append(f"[{muted}]App[/] {state}")
         else:
             segs.append(f"[{muted}]App ○ none[/]")
 

@@ -385,8 +385,7 @@ class StaticAnalysis(DataGatherBase):
         insight_dir = f"{os.getenv('RESULTS_PATH', '')}dexray_insight/"
         os.makedirs(insight_dir, exist_ok=True)
 
-        # The effective package covers attach and spawn mode (an app picked
-        # with ⇧C but not started is spawn mode).
+        # The spotlight package, whether the app runs or not.
         apk_name = None
         try:
             from sandroid.services import get_spotlight_service

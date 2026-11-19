@@ -5,8 +5,10 @@ DATA"`` markers -- every tool here dispatches to a genuinely existing
 Sandroid service):
 
 - **Spotlight app selection** (``category="spotlight"``): ``set_spotlight_app``
-  (``RiskTier.REVERSIBLE``) and ``get_spotlight_app`` (``RiskTier.READ_ONLY``),
-  backed by :class:`~sandroid.services.spotlight_service.SpotlightService`.
+  (``RiskTier.REVERSIBLE``), ``get_spotlight_app`` (``RiskTier.READ_ONLY``)
+  and ``start_spotlight_app`` (``RiskTier.CONSEQUENTIAL``, asks every call),
+  backed by :class:`~sandroid.services.spotlight_service.SpotlightService`
+  and :mod:`sandroid.services.app_start`.
 - **Mitmproxy lifecycle + device-proxy routing**
   (``category="network_control"``): ``start_mitmproxy``
   (``RiskTier.CONSEQUENTIAL``), ``stop_mitmproxy``, ``set_device_proxy``,
@@ -25,14 +27,16 @@ Sandroid service):
   caller itself enabled, tracked in the module-level
   ``_app_proxy_owner_by_package`` map -- see that function's docstring.
 
-Importing this module registers all twelve tools into the
+Importing this module registers all thirteen tools into the
 :class:`~sandroid.ai.tools.registry.ToolRegistry` singleton as a side effect
 (see the ``@sandroid_tool`` decorator). Every tool here defaults
 ``can_remember_choice=True`` except ``enable_app_proxy``
 (``can_remember_choice=False`` -- its ``target`` argument can point a lane at
 an arbitrary, unreviewed external host, the same argument-dependent-risk
 reason ``install_frida_server``/``load_snapshot`` use, see
-:mod:`sandroid.ai.tools.environment_control`); every other tool's risk does
+:mod:`sandroid.ai.tools.environment_control`) and ``start_spotlight_app``
+(``can_remember_choice=False`` -- ``fresh=true`` kills a running app, so the
+analyst approves every call); every other tool's risk does
 not vary meaningfully by argument, so a remembered allow/deny choice is safe
 to reuse across future calls.
 """
@@ -45,7 +49,6 @@ from sandroid.ai.errors import ToolExecutionError
 from sandroid.ai.tools._shared import validate_package_name
 from sandroid.ai.tools.registry import RiskTier, sandroid_tool
 from sandroid.core.adb_utils import is_valid_package_name
-from sandroid.core.enums import SpawnMode
 
 #: How long to let mitmweb settle after a successful ``start()`` before
 #: trusting ``is_running()``. Found via E2E testing: a successful spawn can
@@ -62,10 +65,7 @@ _MITMPROXY_SETTLE_S = 0.5
 def _curated_spotlight_state(service: Any) -> dict[str, Any]:
     """Curate ``SpotlightService.get_state_dict()`` down to the AI-facing shape.
 
-    Shared by :func:`set_spotlight_app` and :func:`get_spotlight_app` so the
-    field curation + ``SpawnMode`` -> ``str`` normalization lives in one
-    place. Excludes the internal ``spawn_package`` field the raw dict also
-    carries.
+    Shared by :func:`set_spotlight_app` and :func:`get_spotlight_app`.
 
     Args:
         service: A :class:`~sandroid.services.spotlight_service.SpotlightService`
@@ -73,42 +73,31 @@ def _curated_spotlight_state(service: Any) -> dict[str, Any]:
 
     Returns:
         ``{"has_app": bool, "package_name": str | None,
-        "activity_name": str | None, "pid": int | None, "mode": str,
-        "spawn_mode": bool, "auto_resume": bool, "set_at": str | None}``.
-        ``mode`` is always a plain string -- the raw dict's ``"mode"`` field is
-        a :class:`~sandroid.core.enums.SpawnMode` instance, normalized here to
-        ``.value`` explicitly (not relied upon incidentally via
-        ``SpawnMode``'s ``str`` subclassing).
+        "activity_name": str | None, "pid": int | None, "state": str,
+        "running": bool, "paused": bool, "set_at": str | None}``. ``state``
+        is ``"running"``, ``"paused"``, ``"not_running"`` or
+        ``"restarting"`` (cached; no device round trip).
     """
     raw = service.get_state_dict()
-    mode = raw["mode"]
-    mode_value = mode.value if isinstance(mode, SpawnMode) else mode
-    spawn_mode = raw["spawn_mode"]
-    # get_state_dict()'s "set_at" is only ever populated from attach-mode
-    # state (SpotlightService never timestamps a spawn selection) -- so in
-    # spawn mode it can carry a stale timestamp left over from a *previous*
-    # attach call. Found via E2E testing. Report None instead of a
-    # misleading leftover value.
-    set_at = None if spawn_mode else raw["set_at"]
     return {
         "has_app": raw["has_app"],
         "package_name": raw["package_name"],
         "activity_name": raw["activity_name"],
         "pid": raw["pid"],
-        "mode": mode_value,
-        "spawn_mode": spawn_mode,
-        "auto_resume": raw["auto_resume"],
-        "set_at": set_at,
+        "state": raw.get("state", "not_running"),
+        "running": bool(raw.get("running", False)),
+        "paused": bool(raw.get("paused", False)),
+        "set_at": raw["set_at"],
     }
 
 
 @sandroid_tool(
     name="set_spotlight_app",
     description=(
-        "Select the investigation target app (the 'spotlight' app). Use "
-        "mode='attach' to connect to an already-running instance, or "
-        "mode='spawn' to launch the app fresh next time a Frida tool is "
-        "started (hooks attach from process start)."
+        "Select the investigation target app (the 'spotlight' app). This only "
+        "selects it: nothing is started or restarted. Frida tools later "
+        "attach to it when it runs and start it when it does not; use "
+        "start_spotlight_app to start, resume or restart it."
     ),
     parameters={
         "type": "object",
@@ -120,23 +109,9 @@ def _curated_spotlight_state(service: Any) -> dict[str, Any]:
                     "(e.g. 'com.example.app')."
                 ),
             },
-            "mode": {
-                "type": "string",
-                "enum": ["attach", "spawn"],
-                "description": (
-                    "'attach' connects to an already-running instance of the "
-                    "app. 'spawn' configures the app to be launched fresh "
-                    "(Frida-instrumented from the start) the next time a "
-                    "tool spawns it. Defaults to 'attach'."
-                ),
-                "default": "attach",
-            },
             "activity_name": {
                 "type": "string",
-                "description": (
-                    "Optional activity name to record alongside the package. "
-                    "Only meaningful in attach mode; ignored in spawn mode."
-                ),
+                "description": "Optional activity name to record with the package.",
             },
         },
         "required": ["package_name"],
@@ -149,43 +124,28 @@ def _curated_spotlight_state(service: Any) -> dict[str, Any]:
 )
 def set_spotlight_app(
     package_name: str,
-    mode: str = "attach",
+    mode: str | None = None,
     activity_name: str | None = None,
 ) -> dict[str, Any]:
-    """Select the spotlight (investigation-target) app, attach or spawn mode.
+    """Select the spotlight (investigation-target) app.
 
-    Real integration points:
-    :meth:`sandroid.services.spotlight_service.SpotlightService.set_app`,
-    :meth:`~sandroid.services.spotlight_service.SpotlightService.set_spawn_app`,
-    and :meth:`~sandroid.services.spotlight_service.SpotlightService.set_spawn_mode`.
-
-    ``mode`` is validated before the spotlight service is even looked up, so
-    an invalid value never touches service state. ``mode="spawn"`` calls
-    ``set_spawn_app(package_name)`` directly -- never ``set_app(...,
-    mode="spawn")``, which only tags a display field and does not set the
-    internal spawn-target state ``get_effective_package()``/
-    ``get_effective_mode()`` actually read. ``mode="attach"`` calls
-    ``set_app(package_name, activity_name=activity_name,
-    mode=SpawnMode.ATTACH)`` and then ``set_spawn_mode(False)``. ``set_app``
-    already leaves spawn mode on its own (it clears the spawn target, its PID
-    and the auto-resume flag); the second call is kept to mirror the other
-    attach callers (e.g. ``spotlight_selection_ui.py``'s attach handlers).
+    Real integration point:
+    :meth:`sandroid.services.spotlight_service.SpotlightService.set_app`.
+    The spotlight has no spawn/attach mode any more; ``mode`` is no longer in
+    the schema but still accepted (and ignored) so old transcripts dispatch.
 
     Args:
         package_name: Fully qualified package name to spotlight.
-        mode: ``"attach"`` (default) or ``"spawn"``.
-        activity_name: Optional activity name, attach mode only.
+        mode: Deprecated, ignored.
+        activity_name: Optional activity name.
 
     Returns:
         The same curated dict shape as :func:`get_spotlight_app` (see
         :func:`_curated_spotlight_state`), reflecting the just-applied state.
 
     Raises:
-        ToolExecutionError: ``mode`` is neither ``"attach"`` nor ``"spawn"``,
-            or *package_name* is not a valid Android package name.
+        ToolExecutionError: *package_name* is not a valid Android package name.
     """
-    if mode not in ("attach", "spawn"):
-        raise ToolExecutionError(f"invalid mode {mode!r}: must be 'attach' or 'spawn'")
     package_name = validate_package_name(package_name)
 
     # Lazy import (matches the convention in `ai/tools/_shared.py` and
@@ -194,14 +154,7 @@ def set_spotlight_app(
     from sandroid.services import get_spotlight_service
 
     service = get_spotlight_service()
-    if mode == "spawn":
-        service.set_spawn_app(package_name)
-    else:
-        service.set_app(
-            package_name, activity_name=activity_name, mode=SpawnMode.ATTACH
-        )
-        service.set_spawn_mode(False)
-
+    service.set_app(package_name, activity_name=activity_name)
     return _curated_spotlight_state(service)
 
 
@@ -209,7 +162,8 @@ def set_spotlight_app(
     name="get_spotlight_app",
     description=(
         "Get the current spotlight (investigation-target) app: package name, "
-        "mode, pid, activity name, auto-resume setting, and when it was set."
+        "run state (running/paused/not_running/restarting), pid, activity "
+        "name, and when it was selected."
     ),
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.READ_ONLY,
@@ -222,20 +176,132 @@ def get_spotlight_app() -> dict[str, Any]:
     :meth:`sandroid.services.spotlight_service.SpotlightService.get_state_dict`
     (see :func:`_curated_spotlight_state` for the field curation).
 
-    This adds ``activity_name``, ``auto_resume``, and ``set_at`` beyond what
-    the ambient-context block
-    (:func:`sandroid.ai.context._describe_spotlight_app`) already surfaces
-    every turn (just package name, mode, and pid) -- so calling this tool is
-    not pure duplication of what the model already sees.
-
     Returns:
-        ``{"has_app": bool, "package_name": str | None,
-        "activity_name": str | None, "pid": int | None, "mode": str,
-        "spawn_mode": bool, "auto_resume": bool, "set_at": str | None}``.
+        ``{"has_app", "package_name", "activity_name", "pid", "state",
+        "running", "paused", "set_at"}``.
     """
     from sandroid.services import get_spotlight_service
 
     return _curated_spotlight_state(get_spotlight_service())
+
+
+def _in_subtask() -> bool:
+    """True when the current tool call runs inside an AI subtask."""
+    try:
+        from sandroid.ai.loop import _current_owner_id
+        from sandroid.ai.subtasks import get_subtask_manager
+
+        owner = _current_owner_id.get()
+        return owner is not None and owner in get_subtask_manager().active_owner_ids()
+    except Exception:
+        return False
+
+
+@sandroid_tool(
+    name="start_spotlight_app",
+    description=(
+        "Start, resume or restart the spotlight app with the armed bypasses. "
+        "fresh=true RESTARTS a running app (force-stop + spawn); without it a "
+        "running app is left alone. paused=true holds the new process paused "
+        "until resumed (Android ends the hold after about 10 s). The analyst "
+        "approves every call."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "fresh": {
+                "type": "boolean",
+                "description": (
+                    "Restart the app even if it runs (kills the running "
+                    "process). Default false."
+                ),
+                "default": False,
+            },
+            "paused": {
+                "type": "boolean",
+                "description": (
+                    "Keep the started process paused (hooks loaded, app not "
+                    "running yet). Default false."
+                ),
+                "default": False,
+            },
+        },
+        "required": [],
+    },
+    risk=RiskTier.CONSEQUENTIAL,
+    category="spotlight",
+    can_remember_choice=False,
+    resources=frozenset({ResourceId.FRIDA_SERVER}),
+)
+def start_spotlight_app(fresh: bool = False, paused: bool = False) -> dict[str, Any]:
+    """Start / resume / restart the spotlight app (the Space / ⇧P / ⇧R paths).
+
+    Real integration points: :func:`sandroid.services.app_start.start_app`,
+    :func:`~sandroid.services.app_start.restart_app` and
+    :func:`~sandroid.services.app_start.resume_app` -- the same code the App
+    lens keys run. The approval gate is the consent for ``fresh``; a
+    restart is refused inside a subtask (a privileged subtask is blanket
+    approved, so it would kill the app without a per-call prompt).
+
+    Args:
+        fresh: Restart a running app.
+        paused: Hold the new process paused.
+
+    Returns:
+        ``{"started": bool, "running": bool, "paused": bool,
+        "pid": int | None, "message": str}``.
+
+    Raises:
+        ToolExecutionError: No spotlight app is selected, or a restart was
+            asked for inside a subtask.
+    """
+    from sandroid.services import app_start, get_spotlight_service
+
+    service = get_spotlight_service()
+    package = service.get_effective_package()
+    if not package:
+        raise ToolExecutionError(
+            "no spotlight app selected; call set_spotlight_app first"
+        )
+    liveness, pid = app_start.probe_liveness(package, frida_fallback=True)
+    held = bool(service.is_app_paused())
+    if liveness == app_start.Liveness.UNKNOWN and not held:
+        return _start_result(
+            False, service, f"could not tell whether {package} is running"
+        )
+    running = pid is not None or held
+    if fresh and running and _in_subtask():
+        raise ToolExecutionError(
+            "start_spotlight_app(fresh=true) restarts a running app and is not "
+            "allowed inside a subtask; ask the orchestrator/analyst to do it"
+        )
+    if held and not fresh:
+        if paused:
+            return _start_result(False, service, f"{package} is already paused")
+        ok, msg = app_start.resume_app()
+        return _start_result(ok, service, msg)
+    if running and not fresh:
+        return _start_result(
+            False,
+            service,
+            f"{package} is already running (pid {pid}); pass fresh=true to restart it",
+        )
+    if running:
+        ok, msg = app_start.restart_app(paused=paused)
+    else:
+        ok, msg = app_start.start_app(paused=paused)
+    return _start_result(ok, service, msg)
+
+
+def _start_result(started: bool, service: Any, message: str) -> dict[str, Any]:
+    state = service.get_run_state()
+    return {
+        "started": bool(started),
+        "running": state in ("running", "paused"),
+        "paused": state == "paused",
+        "pid": service.get_pid(),
+        "message": message,
+    }
 
 
 # =============================================================================

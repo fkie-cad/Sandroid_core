@@ -905,7 +905,7 @@ class AnalysisEngine:
     def _target_packages(self) -> list[str]:
         """The spotlight (target) app's package, if one is selected.
 
-        Attach or spawn mode: an app picked with ⇧C but not started counts.
+        A selected app counts whether it runs or not.
         """
         try:
             package = self.spotlight_service.get_effective_package()

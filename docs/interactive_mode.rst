@@ -104,13 +104,20 @@ Lenses
 App (1)
 ~~~~~~~
 
-The app under investigation (the spotlight). ``c`` attaches to the
-foreground app, ``C`` (Shift+C) spawns an installed app as spotlight. With the
+The app under investigation (the spotlight) is a selection: ``c`` uses the
+foreground app, ``C`` (Shift+C) picks an installed app. Selecting starts
+nothing; the header shows the app's state (``● running pid N``,
+``◐ paused · ␣ resume``, ``○ not running · ␣ start``). Frida tools (friTap,
+Dexray, the bypasses, fridump, …) attach to a running app and start a stopped
+one; they ask before restarting a running app (friTap's and Dexray's "Restart
+the app first" option), and only Shift+``R`` restarts without asking. With the
 lens focused:
 
-- ``Enter`` start (or resume a paused start), Shift+``A`` attach, Shift+``P``
-  start paused, Shift+``R`` restart with the armed hooks, Shift+``K`` kill and
-  tear down hooks, Shift+``X`` clear the selection
+- ``Space`` start (or resume a paused start; never restarts a running app),
+  Shift+``A`` attach, Shift+``P`` start paused (asks first when the app runs;
+  the app stays paused until ``Space``, which Android limits to about 10 s),
+  Shift+``R`` restart with the armed hooks, Shift+``K`` kill and tear down
+  hooks, Shift+``X`` clear the selection
 - ``b`` then ``1``-``6`` toggles/arms the Frida bypass categories **SSL**,
   **Root**, **Frida**, **Debug**, **Integrity**
   (PairIP/licensing/attestation) and **Emulator** (Build profile, qemu

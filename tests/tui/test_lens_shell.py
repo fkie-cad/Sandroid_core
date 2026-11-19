@@ -1758,6 +1758,25 @@ def test_frida_pill_says_connection_lost_until_the_server_runs_again(monkeypatch
     assert "● running" in _pill()
 
 
+def test_header_app_segment_shows_the_run_state_not_a_mode():
+    from sandroid.tui.widgets.status_bar import StatusBar
+
+    bar = StatusBar()
+    bar.spotlight_app = "org.wikipedia"
+
+    def app_seg() -> str:
+        return next(s.plain for s in bar._segments() if s.plain.startswith("App"))
+
+    bar.spotlight_pid, bar.spotlight_paused = None, False
+    assert app_seg() == "App ○ not running · ␣ start"
+    bar.spotlight_pid = 77
+    assert app_seg() == "App ● running pid 77"
+    bar.spotlight_paused = True
+    assert app_seg() == "App ◐ paused pid 77 · ␣ resume"
+    for word in ("spawn", "attach"):
+        assert word not in app_seg()
+
+
 def test_header_says_restarting_without_a_pid_during_shift_r():
     from sandroid.tui.widgets.status_bar import StatusBar
 

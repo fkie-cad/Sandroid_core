@@ -110,7 +110,6 @@ class MonitorCommand(ToggleCommand):
 
         # Check if we have a spotlight app to monitor by PID
         if ctx.spotlight_service and ctx.spotlight_service.has_app():
-            # Attach or spawn mode: get_app() is None for a ⇧C-picked app.
             app_name = ctx.spotlight_service.get_effective_package()
             if app_name:
                 # Try to get the PID for the app

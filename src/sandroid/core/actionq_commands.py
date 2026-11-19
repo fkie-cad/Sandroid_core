@@ -62,8 +62,8 @@ COMMAND_KEYS: set[str] = {
     "f",  # Frida server (toggle)
     # App commands
     "n",  # New APK installation
-    "c",  # Attach mode - set spotlight app
-    "C",  # Spawn mode - select app to spawn
+    "c",  # Use the foreground app as spotlight app
+    "C",  # Pick an app as spotlight app
     # Analysis commands
     "a",  # Static analysis
     "F",  # Forensic evidence scan (MVT)

@@ -44,12 +44,6 @@ class _StubSpotlight:
     def get_pid(self):
         return None
 
-    def is_spawn_mode(self):
-        return False
-
-    def get_spawn_package(self):
-        return None
-
 
 def _make_config(backend: str = "fsmon", default_path: str = "/data/"):
     """Build a minimal config namespace matching the fields the modal reads."""

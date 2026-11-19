@@ -187,11 +187,11 @@ class SandroidTUI(App):
         Binding("i", "action_key('i')", "Import", show=False, id="import"),
         # Spotlight
         Binding(
-            "c", "action_key('c')", "Spotlight Attach", show=False,
+            "c", "action_key('c')", "Use foreground app", show=False,
             id="spotlight_attach",
         ),
         Binding(
-            "C", "action_key('C')", "Spotlight Spawn", show=False,
+            "C", "action_key('C')", "Pick an app…", show=False,
             id="spotlight_spawn",
         ),
         Binding("d", "action_key('d')", "Dump Memory", show=False, id="dump_memory"),
@@ -1578,7 +1578,8 @@ class SandroidTUI(App):
                 spotlight = get_spotlight_service()
                 if not spotlight.get_app_tuple():
                     self.notify(
-                        "No spotlight app. Press c (attach) or Shift+C (spawn) first.",
+                        "No spotlight app. Press c (use the foreground app) or "
+                        "⇧C (pick an app…) first.",
                         severity="warning",
                     )
                     return
@@ -2116,7 +2117,8 @@ class SandroidTUI(App):
         if not has_app:
             self.notify(
                 "No app selected -- recording device-wide. Select one first "
-                "with [b]c[/b] (attach) or [b]⇧C[/b] (spawn) to focus the analysis.",
+                "with [b]c[/b] (use the foreground app) or [b]⇧C[/b] (pick an "
+                "app…) to focus the analysis.",
                 title="Record",
                 severity="warning",
             )
@@ -2458,7 +2460,7 @@ class SandroidTUI(App):
             # has a visible home.
             if key == "h":
                 ms.open_fritap_tab()
-        # Spotlight selection (C attach / Shift+C spawn) does NOT force the
+        # Spotlight selection (c foreground app / ⇧C pick) does NOT force the
         # panel open — it stays minimized by default. The panel live-updates
         # via the EventBus whether shown or hidden; press 1 to view it.
 

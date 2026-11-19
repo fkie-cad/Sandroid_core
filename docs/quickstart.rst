@@ -187,8 +187,8 @@ Common Workflows
    Press ``Ctrl+T`` to turn on Tracking: taps, typed text and screenshots
    are recorded on the session timeline.
 
-3. **Monitor Specific App**: press ``c`` (attach) or ``C`` (spawn) to make the
-   foreground/selected app the Spotlight app.
+3. **Monitor Specific App**: press ``c`` (use the foreground app) or ``C``
+   (pick an app…) to make it the Spotlight app.
 
 Understanding Results
 ---------------------

@@ -1927,7 +1927,7 @@ class NetworkPanel(Widget):
         self._focus_app = self._spotlight_package()
         if not self._app_only and not self._focus_app:
             self.app.notify(
-                "No spotlight app — pick one in the App lens (c / Shift+C).",
+                "No spotlight app — c uses the foreground app, ⇧C picks one.",
                 timeout=3,
             )
             return

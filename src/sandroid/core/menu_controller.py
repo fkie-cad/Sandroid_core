@@ -157,23 +157,23 @@ class MenuController:
         # ===== Spotlight Actions =====
         self._register(
             "spotlight_attach",
-            "Set spotlight app (ATTACH)",
+            "Use foreground app",
             "c",
             ActionCategory.SPOTLIGHT,
             ["forensic", "malware", "security"],
-            description="Attach to currently running app",
-            inline_text="set [c]urrent app in focus as spotlight app",
-            mode_indicator="ATTACH MODE",
+            description="Make the foreground app the spotlight app",
+            inline_text="use the [c]urrent foreground app as spotlight app",
+            mode_indicator="",
         )
         self._register(
             "spotlight_spawn",
-            "Set spotlight app (SPAWN)",
+            "Pick an app…",
             "C",
             ActionCategory.SPOTLIGHT,
             ["forensic", "malware", "security"],
-            description="Select app for spawning with Frida",
-            inline_text="select app with [Shift+C] for spawning",
-            mode_indicator="SPAWN MODE",
+            description="Pick the spotlight app from the installed apps",
+            inline_text="pick an app with [Shift+C]",
+            mode_indicator="",
         )
         self._register(
             "dump_memory",

@@ -45,7 +45,6 @@ from sandroid.ai import loop as ai_loop
 from sandroid.ai.errors import ToolExecutionError
 from sandroid.ai.tools import session_control
 from sandroid.core import proxy_manager
-from sandroid.core.enums import SpawnMode
 from sandroid.core.proxy_manager import ProxyConfig, ProxyStatus
 from sandroid.services import mitmproxy_service
 
@@ -64,19 +63,16 @@ class _FakeSpotlightService:
             "package_name": "com.example.app",
             "activity_name": None,
             "pid": None,
-            "mode": SpawnMode.ATTACH,
-            "spawn_mode": False,
-            "auto_resume": True,
+            "state": "not_running",
+            "running": False,
+            "paused": False,
             "set_at": None,
             # Legacy/internal fields that must never survive curation.
+            "mode": "spawn",
+            "spawn_mode": True,
             "spawn_package": None,
-            "spotlight_application": ("com.example.app", None),
-            "spotlight_application_pid": None,
-            "spotlight_spawn_application": None,
-            "auto_resume_after_spawn": True,
+            "auto_resume": True,
             "spotlight_files": [],
-            "spotlight_pull_one": None,
-            "spotlight_pull_two": None,
         }
 
     def set_app(self, package_name, activity_name=None, pid=None, mode=None):
@@ -152,39 +148,34 @@ class _FakeMitmproxyService:
 # =============================================================================
 
 
-def test_set_spotlight_app_attach_calls_set_app_then_set_spawn_mode(monkeypatch):
+def test_set_spotlight_app_only_selects(monkeypatch):
     fake = _FakeSpotlightService()
     monkeypatch.setattr(services, "get_spotlight_service", lambda: fake)
 
-    session_control.set_spotlight_app(
-        "com.example.app", mode="attach", activity_name=".MainActivity"
-    )
+    session_control.set_spotlight_app("com.example.app", activity_name=".MainActivity")
 
-    assert fake.calls == [
-        ("set_app", "com.example.app", ".MainActivity", SpawnMode.ATTACH),
-        ("set_spawn_mode", False),
-    ]
+    assert fake.calls == [("set_app", "com.example.app", ".MainActivity", None)]
 
 
-def test_set_spotlight_app_spawn_calls_set_spawn_app_only(monkeypatch):
+def test_set_spotlight_app_ignores_the_deprecated_mode(monkeypatch):
+    """Old transcripts still dispatch mode='spawn': it only selects the app."""
     fake = _FakeSpotlightService()
     monkeypatch.setattr(services, "get_spotlight_service", lambda: fake)
 
     session_control.set_spotlight_app("com.example.app", mode="spawn")
+    session_control.set_spotlight_app("com.example.app", mode="bogus")
 
-    assert fake.calls == [("set_spawn_app", "com.example.app")]
+    assert fake.calls == [
+        ("set_app", "com.example.app", None, None),
+        ("set_app", "com.example.app", None, None),
+    ]
 
 
-def test_set_spotlight_app_invalid_mode_raises_without_touching_service(monkeypatch):
-    def _unexpected_lookup():
-        raise AssertionError(
-            "get_spotlight_service must not be looked up for an invalid mode"
-        )
+def test_set_spotlight_app_schema_has_no_mode():
+    from sandroid.ai.tools.registry import get_tool_registry
 
-    monkeypatch.setattr(services, "get_spotlight_service", _unexpected_lookup)
-
-    with pytest.raises(ToolExecutionError):
-        session_control.set_spotlight_app("com.example.app", mode="bogus")
+    spec = get_tool_registry().get_spec("set_spotlight_app")
+    assert "mode" not in spec.parameters["properties"]
 
 
 def test_set_spotlight_app_returns_curated_state(monkeypatch):
@@ -193,35 +184,30 @@ def test_set_spotlight_app_returns_curated_state(monkeypatch):
             "has_app": True,
             "package_name": "com.example.app",
             "activity_name": ".MainActivity",
-            "pid": None,
-            "mode": SpawnMode.ATTACH,
+            "pid": 42,
+            "state": "running",
+            "running": True,
+            "paused": False,
+            "set_at": "2026-01-01T00:00:00",
+            "mode": "attach",
             "spawn_mode": False,
             "auto_resume": True,
-            "set_at": "2026-01-01T00:00:00",
-            "spawn_package": None,
-            "spotlight_application": ("com.example.app", ".MainActivity"),
-            "spotlight_application_pid": None,
-            "spotlight_spawn_application": None,
-            "auto_resume_after_spawn": True,
-            "spotlight_files": [],
-            "spotlight_pull_one": None,
-            "spotlight_pull_two": None,
         }
     )
     monkeypatch.setattr(services, "get_spotlight_service", lambda: fake)
 
     result = session_control.set_spotlight_app(
-        "com.example.app", mode="attach", activity_name=".MainActivity"
+        "com.example.app", activity_name=".MainActivity"
     )
 
     assert result == {
         "has_app": True,
         "package_name": "com.example.app",
         "activity_name": ".MainActivity",
-        "pid": None,
-        "mode": "attach",
-        "spawn_mode": False,
-        "auto_resume": True,
+        "pid": 42,
+        "state": "running",
+        "running": True,
+        "paused": False,
         "set_at": "2026-01-01T00:00:00",
     }
 
@@ -231,87 +217,155 @@ def test_set_spotlight_app_returns_curated_state(monkeypatch):
 # =============================================================================
 
 
-def test_get_spotlight_app_excludes_legacy_fields_and_normalizes_enum(monkeypatch):
-    fake = _FakeSpotlightService(
-        state={
-            "has_app": True,
-            "package_name": "com.example.app",
-            "activity_name": ".MainActivity",
-            "pid": 1234,
-            "mode": SpawnMode.SPAWN,
-            "spawn_mode": True,
-            "auto_resume": False,
-            "set_at": None,
-            # Legacy fields -- must be excluded from the curated result.
-            "spawn_package": "com.example.app",
-            "spotlight_application": None,
-            "spotlight_application_pid": None,
-            "spotlight_spawn_application": "com.example.app",
-            "auto_resume_after_spawn": False,
-            "spotlight_files": ["/sdcard/watched_file"],
-            "spotlight_pull_one": {"stale": "data"},
-            "spotlight_pull_two": {"stale": "data"},
-        }
-    )
+def test_get_spotlight_app_reports_state_and_drops_mode_keys(monkeypatch):
+    fake = _FakeSpotlightService()
     monkeypatch.setattr(services, "get_spotlight_service", lambda: fake)
 
     result = session_control.get_spotlight_app()
 
-    assert result == {
-        "has_app": True,
-        "package_name": "com.example.app",
-        "activity_name": ".MainActivity",
-        "pid": 1234,
-        "mode": "spawn",
-        "spawn_mode": True,
-        "auto_resume": False,
-        "set_at": None,
+    assert set(result) == {
+        "has_app",
+        "package_name",
+        "activity_name",
+        "pid",
+        "state",
+        "running",
+        "paused",
+        "set_at",
     }
-    assert isinstance(result["mode"], str)
-    for legacy_field in (
-        "spawn_package",
-        "spotlight_application",
-        "spotlight_application_pid",
-        "spotlight_spawn_application",
-        "auto_resume_after_spawn",
-        "spotlight_files",
-        "spotlight_pull_one",
-        "spotlight_pull_two",
-    ):
-        assert legacy_field not in result
+    assert result["state"] == "not_running"
+    for gone in ("mode", "spawn_mode", "auto_resume", "spawn_package"):
+        assert gone not in result
 
 
-def test_get_spotlight_app_masks_stale_set_at_in_spawn_mode(monkeypatch):
-    """Regression (found via E2E testing): SpotlightService.get_state_dict()
-    only ever populates "set_at" from attach-mode state, so in spawn mode it
-    can carry a stale timestamp left over from a *previous* attach call. The
-    curated result must report None instead of that misleading value.
-    """
-    fake = _FakeSpotlightService(
-        state={
-            "has_app": True,
-            "package_name": "com.spawned.app",
-            "activity_name": None,
-            "pid": None,
-            "mode": SpawnMode.SPAWN,
-            "spawn_mode": True,
-            "auto_resume": True,
-            "set_at": "2026-01-01T00:00:00",  # stale, from a prior attach call
-            "spawn_package": "com.spawned.app",
-            "spotlight_application": ("com.old.attach.app", None),
-            "spotlight_application_pid": None,
-            "spotlight_spawn_application": "com.spawned.app",
-            "auto_resume_after_spawn": True,
-            "spotlight_files": [],
-            "spotlight_pull_one": None,
-            "spotlight_pull_two": None,
-        }
+# =============================================================================
+# start_spotlight_app
+# =============================================================================
+
+
+def test_start_spotlight_app_spec_always_asks():
+    from sandroid.ai.tool_permissions import resolve_tool_policy
+    from sandroid.ai.tools.registry import RiskTier, get_tool_registry
+
+    spec = get_tool_registry().get_spec("start_spotlight_app")
+    assert spec.risk == RiskTier.CONSEQUENTIAL
+    assert spec.can_remember_choice is False
+    assert resolve_tool_policy(spec.name, spec.risk, spec.can_remember_choice) == "ask"
+
+
+class _LifecycleSpotlight:
+    def __init__(self, package="com.example.app", pid=None, paused=False):
+        self.package = package
+        self.pid = pid
+        self.paused = paused
+
+    def get_effective_package(self):
+        return self.package
+
+    def is_app_paused(self):
+        return self.paused
+
+    def get_run_state(self):
+        if self.paused:
+            return "paused"
+        return "running" if self.pid else "not_running"
+
+    def get_pid(self):
+        return self.pid
+
+
+@pytest.fixture
+def lifecycle(monkeypatch):
+    """Fake spotlight + app_start lifecycle; records which one ran."""
+    from sandroid.services import app_start
+
+    spot = _LifecycleSpotlight()
+    calls: list[tuple] = []
+    live = {"value": (app_start.Liveness.NOT_RUNNING, None)}
+    monkeypatch.setattr(services, "get_spotlight_service", lambda: spot)
+    monkeypatch.setattr(
+        app_start, "probe_liveness", lambda pkg, frida_fallback=False: live["value"]
     )
-    monkeypatch.setattr(services, "get_spotlight_service", lambda: fake)
+    monkeypatch.setattr(
+        app_start,
+        "start_app",
+        lambda paused=False: calls.append(("start", paused)) or (True, "started"),
+    )
+    monkeypatch.setattr(
+        app_start,
+        "restart_app",
+        lambda paused=False: calls.append(("restart", paused)) or (True, "restarted"),
+    )
+    monkeypatch.setattr(
+        app_start,
+        "resume_app",
+        lambda: calls.append(("resume",)) or (True, "resumed"),
+    )
+    return SimpleNamespace(spot=spot, calls=calls, live=live, app_start=app_start)
 
-    result = session_control.get_spotlight_app()
 
-    assert result["set_at"] is None
+@pytest.mark.parametrize(
+    ("running", "held", "fresh", "paused", "expected"),
+    [
+        (False, False, False, False, [("start", False)]),
+        (False, False, False, True, [("start", True)]),
+        (False, False, True, False, [("start", False)]),  # nothing to kill
+        (True, False, False, False, []),  # running, not fresh: left alone
+        (True, False, True, False, [("restart", False)]),
+        (True, False, True, True, [("restart", True)]),
+        (False, True, False, False, [("resume",)]),
+        (False, True, False, True, []),  # already paused
+        (False, True, True, False, [("restart", False)]),
+    ],
+)
+def test_start_spotlight_app_state_matrix(
+    lifecycle, running, held, fresh, paused, expected
+):
+    if running:
+        lifecycle.live["value"] = (lifecycle.app_start.Liveness.RUNNING, 77)
+        lifecycle.spot.pid = 77
+    lifecycle.spot.paused = held
+
+    result = session_control.start_spotlight_app(fresh=fresh, paused=paused)
+
+    assert lifecycle.calls == expected
+    assert set(result) == {"started", "running", "paused", "pid", "message"}
+    assert result["started"] is bool(expected)
+
+
+def test_start_spotlight_app_refuses_on_an_adb_error(lifecycle):
+    lifecycle.live["value"] = (lifecycle.app_start.Liveness.UNKNOWN, None)
+
+    result = session_control.start_spotlight_app(fresh=True)
+
+    assert lifecycle.calls == []
+    assert result["started"] is False
+
+
+def test_start_spotlight_app_without_an_app_raises(lifecycle):
+    lifecycle.spot.package = None
+
+    with pytest.raises(ToolExecutionError):
+        session_control.start_spotlight_app()
+
+
+def test_start_spotlight_app_fresh_inside_a_subtask_refuses(lifecycle, monkeypatch):
+    from sandroid.ai import subtasks
+
+    lifecycle.live["value"] = (lifecycle.app_start.Liveness.RUNNING, 77)
+    lifecycle.spot.pid = 77
+    monkeypatch.setattr(
+        subtasks,
+        "get_subtask_manager",
+        lambda: SimpleNamespace(active_owner_ids=lambda: {"sub-1"}),
+    )
+    token = ai_loop._current_owner_id.set("sub-1")
+    try:
+        with pytest.raises(ToolExecutionError, match="subtask"):
+            session_control.start_spotlight_app(fresh=True)
+    finally:
+        ai_loop._current_owner_id.reset(token)
+    assert lifecycle.calls == []
 
 
 # =============================================================================

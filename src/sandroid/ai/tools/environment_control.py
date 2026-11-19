@@ -416,7 +416,8 @@ def check_hook_conflicts(hooks: list[str]) -> dict[str, Any]:
         "EXPERIMENTAL: start SSL pinning bypass (SSL unpin) for the current "
         "spotlight app by injecting a Frida script into it. Results may be "
         "incomplete; tell the analyst it is experimental. Idempotent -- a "
-        "no-op if already active."
+        "no-op if already active. Never restarts a running app; a stopped "
+        "app gets SSL unpin armed (applied when the app is started)."
     ),
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.REVERSIBLE,
