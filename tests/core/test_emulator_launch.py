@@ -93,6 +93,7 @@ class FakeAdb:
         self.booted: dict[str, bool] = {}
         self.pm_ready: dict[str, bool] = {}
         self.avd: dict[str, str] = {}
+        self.console: dict[str, bool] = {}  # False: ``emu`` fails
         self.calls: list[tuple[str, str | None]] = []
         self.kill_removes = True
         self.target = None
@@ -120,9 +121,17 @@ class FakeAdb:
             if self.pm_ready.get(serial):
                 return "package:/system/framework/framework-res.apk\n", ""
             return "", "Error: Could not access the Package Manager."
+        if command == "emu avd name":
+            if not self.console.get(serial, True) or not self.avd.get(serial):
+                return "", "error: could not connect to TCP port"
+            return self.avd[serial] + "\r\nOK\r\n", ""
         if command == "shell getprop ro.boot.qemu.avd_name":
             return self.avd.get(serial, "") + "\n", ""
         return "", ""
+
+    def touched(self) -> set[str]:
+        """Serials any adb / console command was sent to."""
+        return {serial for _command, serial in self.calls if serial}
 
     def send_telnet_command(self, command, serial=None):
         self.calls.append((f"telnet {command}", serial))
@@ -177,6 +186,7 @@ def env(monkeypatch, tmp_path, log_dir):
         "startup": [],
         "on_spawn": None,
         "procs": [],
+        "locked": set(),  # AVDs whose directory holds a live emulator lock
     }
 
     def fake_spawn(command, avd_name, env=None):
@@ -205,6 +215,20 @@ def env(monkeypatch, tmp_path, log_dir):
     monkeypatch.setattr(emu, "_LAUNCHES", {})
     monkeypatch.setattr(emu, "_RESERVED_PORTS", set())
     monkeypatch.setattr(emu, "_STARTING_AVDS", set())
+    monkeypatch.setattr(
+        emu,
+        "avd_lock_files",
+        lambda name: [Path(f"/avd/{name}.avd/hardware-qemu.ini.lock")]
+        if name in state["locked"]
+        else [],
+    )
+    # No pin unless a test sets one (the lab running the suite may export
+    # ANDROID_SERIAL).
+    from sandroid.core.device_manager import DeviceManager
+
+    monkeypatch.delenv("ANDROID_SERIAL", raising=False)
+    monkeypatch.setattr(DeviceManager, "_preferred_serial", None)
+    monkeypatch.setattr(emu, "_config_emulator", lambda: None)
     state["adb"] = adb
     return state
 
@@ -416,9 +440,7 @@ def test_restart_resolves_avd_before_kill_and_never_wipes(env):
     assert command[:5] == ["/sdk/emulator", "-avd", "Other", "-port", "5558"]
     assert "-wipe-data" not in command
     names = [c[0] for c in adb.calls]
-    assert names.index("shell getprop ro.boot.qemu.avd_name") < names.index(
-        "telnet kill"
-    )
+    assert names.index("emu avd name") < names.index("telnet kill")
 
 
 def test_restart_without_launch_record_uses_remembered_options(env):
@@ -493,18 +515,192 @@ def test_wait_until_ready_honours_cancel(env):
 
 def test_ensure_avd_running_reuses_a_running_emulator(env):
     env["adb"].add("emulator-5570", avd="Pixel")
+    env["locked"].add("Pixel")
     assert emu.ensure_avd_running("Pixel") == "emulator-5570"
     assert env["spawned"] == []
 
 
-def test_ensure_avd_running_skips_offline_emulators(env):
-    env["adb"].add("emulator-5570", avd="Pixel", state="offline")
-    env["on_spawn"] = lambda command: env["adb"].add(
+def test_ensure_avd_running_not_running_launches_without_probing_anyone(env):
+    """No lock in its directory: the AVD does not run, so no other
+    session's emulator is asked anything (only ``adb devices``).
+    """
+    adb = env["adb"]
+    adb.add("emulator-5554", avd="Other")
+    adb.add("emulator-5556", avd="Third")
+    adb.add("emulator-5570", avd="Pixel", state="offline")
+    env["on_spawn"] = lambda command: adb.add(
         f"emulator-{_port_of(command)}", avd="Pixel"
     )
-    assert emu.ensure_avd_running("Pixel") == "emulator-5554"
-    asked = {serial for command, serial in env["adb"].calls if "avd" in command}
-    assert "emulator-5570" not in asked
+    serial = emu.ensure_avd_running("Pixel")
+    assert serial == "emulator-5558"
+    assert adb.touched() == {"emulator-5558"}
+
+
+def test_ensure_avd_running_asks_only_the_pinned_serial(env, monkeypatch):
+    adb = env["adb"]
+    adb.add("emulator-5554", avd="Other")
+    adb.add("emulator-5562", avd="Pixel")
+    env["locked"].add("Pixel")
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-5562")
+    assert emu.ensure_avd_running("Pixel") == "emulator-5562"
+    assert adb.touched() == {"emulator-5562"}
+    assert env["spawned"] == []
+
+
+def test_ensure_avd_running_asks_the_remembered_port_after_the_pin(env, monkeypatch):
+    adb = env["adb"]
+    adb.add("emulator-5554", avd="Other")
+    adb.add("emulator-5562", avd="Mine")  # pinned, but runs another AVD
+    adb.add("emulator-5570", avd="Pixel")
+    env["locked"].add("Pixel")
+    emu._remember_port("Pixel", 5570)
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-5562")
+    assert emu.ensure_avd_running("Pixel") == "emulator-5570"
+    asked = [s for c, s in adb.calls if c == "emu avd name"]
+    assert asked == ["emulator-5562", "emulator-5570"]
+    assert "emulator-5554" not in adb.touched()
+
+
+def test_ensure_avd_running_uses_our_launch_without_any_probe(env):
+    adb = env["adb"]
+    adb.add("emulator-5554", avd="Other")
+    env["on_spawn"] = lambda command: adb.add(
+        f"emulator-{_port_of(command)}", avd="Pixel"
+    )
+    launch = emu.launch_avd("Pixel")
+    adb.calls.clear()
+    assert emu.ensure_avd_running("Pixel") == launch.serial
+    assert not any(c == "emu avd name" for c, _s in adb.calls)
+    assert "emulator-5554" not in adb.touched()
+
+
+def test_ensure_avd_running_probes_the_rest_only_as_a_last_resort(env, caplog):
+    adb = env["adb"]
+    adb.add("emulator-5554", avd="Other")
+    adb.add("emulator-5570", avd="Pixel")
+    adb.add("emulator-5572", avd="Gone", state="offline")
+    env["locked"].add("Pixel")
+    with caplog.at_level("INFO", logger=emu.logger.name):
+        assert emu.ensure_avd_running("Pixel") == "emulator-5570"
+    assert "emulator-5554, emulator-5570" in caplog.text
+    assert "emulator-5572" not in adb.touched()  # offline: not asked
+
+
+def test_ensure_avd_running_locked_but_not_found_raises(env):
+    env["adb"].add("emulator-5554", avd="Other")
+    env["locked"].add("Pixel")
+    with pytest.raises(EmulatorLaunchError, match="already running"):
+        emu.ensure_avd_running("Pixel")
+    assert env["spawned"] == []
+
+
+# -- AVD name: the console first ---------------------------------------------
+
+
+def test_avd_name_asks_the_console_first(env):
+    adb = env["adb"]
+    adb.add("emulator-5570", avd="Pixel", booted=False)
+    assert emu.avd_name_of("emulator-5570") == "Pixel"
+    assert [c for c, _s in adb.calls] == ["emu avd name"]
+
+
+def test_avd_name_falls_back_to_the_property_when_the_console_fails(env):
+    adb = env["adb"]
+    adb.add("emulator-5570", avd="Pixel")
+    adb.console["emulator-5570"] = False
+    assert emu.avd_name_of("emulator-5570") == "Pixel"
+    assert [c for c, _s in adb.calls] == [
+        "emu avd name",
+        "shell getprop ro.boot.qemu.avd_name",
+    ]
+    assert adb.touched() == {"emulator-5570"}
+
+
+# -- console port preference --------------------------------------------------
+
+
+def test_launch_uses_the_pinned_port_over_first_free(env, monkeypatch):
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-5562")
+    launch = emu.launch_avd("Pixel")
+    assert launch.serial == "emulator-5562"
+    assert emu.remembered_port("Pixel") == 5562
+
+
+def test_pinned_port_wins_over_the_remembered_port(env, monkeypatch):
+    emu._remember_port("Pixel", 5570)
+    monkeypatch.setattr(
+        "sandroid.core.device_manager.DeviceManager._preferred_serial",
+        "emulator-5562",
+    )
+    assert emu.preferred_console_port("Pixel", set()) == (5562, "pinned")
+    assert emu.launch_avd("Pixel").port == 5562
+
+
+def test_config_serial_counts_as_pin(env, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        emu, "_config_emulator", lambda: SimpleNamespace(serial="emulator-5566")
+    )
+    assert emu.preferred_console_port("Pixel", set()) == (5566, "pinned")
+
+
+def test_listed_pinned_port_falls_through_to_the_remembered_port(env, monkeypatch):
+    env["adb"].add("emulator-5562", avd="Mine")  # the pin already runs
+    emu._remember_port("Pixel", 5570)
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-5562")
+    launch = emu.launch_avd("Pixel")
+    assert launch.port == 5570
+    assert emu.preferred_console_port("Pixel", {5562}) == (5570, "last used")
+
+
+def test_busy_pinned_and_remembered_ports_fall_through_to_auto(env, monkeypatch):
+    env["busy"].update({5562, 5570})  # bound by something adb does not list
+    emu._remember_port("Pixel", 5570)
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-5562")
+    assert emu.preferred_console_port("Pixel", set()) == (5554, "auto")
+    assert emu.launch_avd("Pixel").port == 5554
+
+
+def test_remembered_port_is_used_without_a_pin(env):
+    emu._remember_port("Pixel", 5570)
+    assert emu.launch_avd("Pixel").port == 5570
+
+
+def test_unusable_pins_are_ignored(env):
+    for pinned in ("R58N123ABC", "emulator-5590", "emulator-5563"):
+        assert emu.preferred_console_port("P", set(), pinned=pinned) == (
+            5554,
+            "auto",
+        )
+
+
+def test_every_launch_remembers_its_port_and_keeps_the_options(env):
+    emu.remember_launch("Pixel", AvdLaunchOptions(headless=True, boot="cold"))
+    emu.launch_avd("Pixel", port=5576)
+    assert emu.remembered_port("Pixel") == 5576
+    assert emu.remembered_options("Pixel") == AvdLaunchOptions(
+        headless=True, boot="cold"
+    )
+    # Changing an option keeps the port.
+    emu.remember_launch("Pixel", AvdLaunchOptions(), make_last=False)
+    assert emu.remembered_port("Pixel") == 5576
+
+
+def test_a_port_only_entry_keeps_first_launch_defaults(env, monkeypatch):
+    from types import SimpleNamespace
+
+    emu._remember_port("Pixel", 5570)
+    monkeypatch.setattr(
+        emu, "_config_emulator", lambda: SimpleNamespace(avd_headless=True)
+    )
+    assert emu.remembered_options("Pixel") == AvdLaunchOptions(headless=True)
+
+
+def test_restart_keeps_its_port_even_with_a_pin(env, monkeypatch):
+    env["adb"].add("emulator-5558", avd="Other")
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-5562")
+    assert emu.restart_emulator("emulator-5558").port == 5558
 
 
 def test_avd_name_console_query_has_a_short_timeout(env, monkeypatch):

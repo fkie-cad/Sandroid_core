@@ -96,6 +96,13 @@ RUNNING_ELSEWHERE_HELP = (
     "stale *.lock files in its .avd directory."
 )
 
+UNPROBED_HELP = (
+    "In use · not probed: this session is pinned to another serial, so this "
+    "device was never asked anything -- it is most likely another session's "
+    "(its AVD shows as running elsewhere). ⏎ attaches it only after you "
+    "confirm."
+)
+
 OFFLINE_HELP = (
     "Offline: adb sees the device but cannot talk to it. Wait a moment, "
     "replug it / run `adb reconnect offline`, or restart the emulator (R)."
@@ -110,6 +117,8 @@ class RowState(Enum):
     OFFLINE = "offline"
     UNAUTHORIZED = "unauthorized"
     NO_PERMISSIONS = "no permissions"
+    #: Online, but someone else's under a pin: never probed (shared lab).
+    UNPROBED = "in use · not probed"
     OTHER = "other"
 
 
@@ -199,6 +208,8 @@ class AvdRow:
             although no listed device runs it (another session / adb
             server): listed, but not startable, renamable or wipeable here.
         snapshots: Names of its saved snapshots.
+        port: Console port a start would use (``None``: unknown / none free).
+        port_reason: Why: ``pinned``, ``last used`` or ``auto``.
     """
 
     name: str
@@ -211,6 +222,8 @@ class AvdRow:
     device_name: str = ""
     running_elsewhere: bool = False
     snapshots: tuple[str, ...] = ()
+    port: int | None = None
+    port_reason: str = ""
 
     @property
     def key(self) -> str:
@@ -292,6 +305,8 @@ def build_snapshot(
     known: dict[str, Any] | None = None,
     notes: Sequence[str] = (),
     locked_avds: Collection[str] = (),
+    unprobed: Collection[str] = (),
+    ports: dict[str, tuple[int, str]] | None = None,
 ) -> HubSnapshot:
     """Combine adb, probes, the AVD catalogue and our launches (pure).
 
@@ -310,6 +325,11 @@ def build_snapshot(
         locked_avds: AVDs whose directory holds emulator lock files
             (:func:`~sandroid.core.emulator.avd_lock_files`); those not
             running here are listed last as running elsewhere.
+        unprobed: Serials deliberately not probed (someone else's devices
+            under a pin): online ones show as :attr:`RowState.UNPROBED`,
+            never as ready.
+        ports: ``(port, reason)`` a start of each stopped AVD would use
+            (:func:`~sandroid.core.emulator.preferred_console_port`).
 
     Returns:
         The snapshot. Our launch not yet listed (or still offline) shows as
@@ -335,6 +355,8 @@ def build_snapshot(
             getattr(device, "api_level", 0) or None
         )
         state = classify(entry.state, probe, booting)
+        if state is RowState.READY and probe is None and serial in unprobed:
+            state = RowState.UNPROBED
         is_emulator = serial_port(serial) is not None
         rows[serial] = DeviceRow(
             serial=serial,
@@ -389,6 +411,7 @@ def build_snapshot(
     running_avds = {row.avd_name for row in rows.values() if row.avd_name}
     last_avd = prefs.get("last_avd")
     locked = set(locked_avds)
+    ports = ports or {}
     avd_rows = sorted(
         (
             AvdRow(
@@ -402,6 +425,8 @@ def build_snapshot(
                 device_name=info.device_name,
                 running_elsewhere=info.name in locked,
                 snapshots=tuple(getattr(info, "snapshots", ()) or ()),
+                port=ports.get(info.name, (None, ""))[0],
+                port_reason=ports.get(info.name, (None, ""))[1],
             )
             for info in avds
             if info.name not in running_avds
@@ -593,6 +618,11 @@ class HubCollector:
                 if serial not in listed:
                     self._probes.pop(serial, None)
                     self._avd_names.pop(serial, None)
+        unprobed = {
+            entry.serial
+            for entry in entries
+            if pinned and entry.serial != pinned and entry.serial not in ours
+        }
         for entry in entries:
             serial = entry.serial
             if entry.state != "device":
@@ -640,6 +670,8 @@ class HubCollector:
                     locked.add(info.name)
             except Exception:
                 logger.debug(f"lock check of {info.name} failed", exc_info=True)
+        prefs = emulator.load_launch_prefs()
+        ports = self._start_ports(avds, locked, entries, launches, prefs)
         with self._lock:
             probes = dict(self._probes)
             avd_names = {k: v for k, v in self._avd_names.items() if v}
@@ -648,14 +680,42 @@ class HubCollector:
             probes,
             avd_names,
             avds,
-            emulator.load_launch_prefs(),
+            prefs,
             launches,
             active_serial,
             time.monotonic(),
             known=known,
             notes=notes,
             locked_avds=locked,
+            unprobed=unprobed,
+            ports=ports,
         )
+
+    @staticmethod
+    def _start_ports(
+        avds: Iterable[Any],
+        locked: Collection[str],
+        entries: Iterable[Any],
+        launches: Iterable[Any],
+        prefs: dict[str, Any],
+    ) -> dict[str, tuple[int, str]]:
+        """Console port (and why) a start of each startable AVD would use."""
+        from sandroid.core import emulator
+
+        serials = [entry.serial for entry in entries]
+        serials += [launch.serial for launch in launches if launch.alive]
+        taken = {port for serial in serials if (port := emulator.serial_port(serial))}
+        ports: dict[str, tuple[int, str]] = {}
+        for info in avds:
+            if info.name in locked:
+                continue
+            try:
+                ports[info.name] = emulator.preferred_console_port(
+                    info.name, taken, prefs=prefs
+                )
+            except Exception:
+                logger.debug(f"no console port for {info.name}", exc_info=True)
+        return ports
 
 
 # ---------------------------------------------------------------------------
@@ -677,6 +737,7 @@ _STATE_STYLE = {
     RowState.OFFLINE: "bad",
     RowState.UNAUTHORIZED: "bad",
     RowState.NO_PERMISSIONS: "bad",
+    RowState.UNPROBED: "dim",
     RowState.OTHER: "dim",
 }
 
@@ -686,6 +747,7 @@ _STATE_GLYPH = {
     RowState.OFFLINE: "✕",
     RowState.UNAUTHORIZED: "!",
     RowState.NO_PERMISSIONS: "!",
+    RowState.UNPROBED: "◌",
     RowState.OTHER: "?",
 }
 
@@ -1158,6 +1220,8 @@ class DevicesScreen(ModalScreen[str | None]):
             label = f"booting {elapsed}".strip()
         elif row.state is RowState.OTHER:
             label = row.raw_state
+        elif row.state is RowState.UNPROBED and not row.is_emulator:
+            label = "not probed"
         return Text(label, style=_c(_STATE_STYLE[row.state]))
 
     def _cells(self, row: DeviceRow | AvdRow) -> tuple[Any, ...]:
@@ -1262,8 +1326,13 @@ class DevicesScreen(ModalScreen[str | None]):
     def _initial_cursor(self, snap: HubSnapshot) -> None:
         """The active device, else the first device, else the last-used AVD."""
         table = self.query_one("#hub-table", DataTable)
-        if snap.devices:
-            index = next((i for i, d in enumerate(snap.devices) if d.active), 0)
+        mine = [
+            i for i, d in enumerate(snap.devices) if d.state is not RowState.UNPROBED
+        ]
+        if mine:
+            index = next((i for i in mine if snap.devices[i].active), mine[0])
+        elif not snap.avds:
+            index = 0
         else:
             index = next((i for i, a in enumerate(snap.avds) if a.last_used), 0)
         if snap.rows:
@@ -1382,8 +1451,15 @@ class DevicesScreen(ModalScreen[str | None]):
                 if count
                 else "no snapshots"
             )
+            if row.port is not None and not row.running_elsewhere:
+                text.append(f"Port: {row.port} ({row.port_reason})\n")
             text.append(" · ".join(f for f in facts if f), style=_c("dim"))
             return text
+        from sandroid.core.emulator import serial_port
+
+        port = serial_port(row.serial)
+        if port is not None:
+            text.append(f"Port: {port}\n")
         facts = [
             f"API {row.api}" if row.api else "",
             f"root: {row.root_kind}" if row.root_kind else "",
@@ -1411,6 +1487,7 @@ class DevicesScreen(ModalScreen[str | None]):
             RowState.UNAUTHORIZED: UNAUTHORIZED_HELP,
             RowState.NO_PERMISSIONS: NO_PERMISSIONS_HELP,
             RowState.OFFLINE: OFFLINE_HELP,
+            RowState.UNPROBED: UNPROBED_HELP,
         }.get(row.state)
         if help_text:
             text.append(help_text, style=_c("warn"))
@@ -1662,6 +1739,9 @@ class DevicesScreen(ModalScreen[str | None]):
         if row.state is RowState.READY:
             self.dismiss(row.serial)
             return
+        if row.state is RowState.UNPROBED:
+            self._confirm_foreign_attach(row)
+            return
         hint = {
             RowState.BOOTING: "is still booting -- it can be attached once ready",
             RowState.UNAUTHORIZED: "is not authorized (see the help below)",
@@ -1669,6 +1749,29 @@ class DevicesScreen(ModalScreen[str | None]):
             RowState.OFFLINE: "is offline",
         }.get(row.state, f"is in state '{row.raw_state}'")
         self.app.notify(f"{row.title} {hint}", title="Devices", severity="warning")
+
+    def _confirm_foreign_attach(self, row: DeviceRow) -> None:
+        """⏎ on a device the pin rule never probed: attach only on "yes"."""
+        from sandroid.core.device_manager import DeviceManager
+        from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+        pinned = DeviceManager.preferred_serial() or "another serial"
+
+        def confirmed(yes: bool | None) -> None:
+            if yes and self.is_attached:
+                self.dismiss(row.serial)
+
+        self.app.push_screen(
+            ConfirmModal(
+                title=f"Attach {row.serial}?",
+                message=f"This session is pinned to {pinned}. {row.serial} is "
+                "not pinned and was not probed: it is probably another "
+                "session's device, whose work an attach can disturb.",
+                yes_label="Attach anyway",
+                no_label="Cancel",
+            ),
+            confirmed,
+        )
 
     def _avd_row(self, *, startable: bool = True) -> AvdRow | None:
         """The highlighted AVD row (``None`` if it may not be started here)."""

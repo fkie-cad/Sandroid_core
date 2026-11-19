@@ -204,6 +204,42 @@ def test_locked_avds_are_listed_last_as_running_elsewhere() -> None:
     ]
 
 
+def test_unprobed_foreign_devices_are_in_use_not_ready() -> None:
+    """Under a pin, someone else's online device is never shown green/ready;
+    its AVD stays listed as running elsewhere (lock-based).
+    """
+    entries = _entries(
+        "emulator-5554\tdevice model:sdk_gphone64\n"
+        "emulator-5556\toffline\n"
+        "emulator-5562\tdevice\n"
+    )
+    snap = build_snapshot(
+        entries,
+        {"emulator-5562": SerialProbe(booted=True, api=35)},
+        {"emulator-5562": "Mine"},
+        [AvdInfo(name="Theirs"), AvdInfo(name="Idle")],
+        {},
+        [],
+        "emulator-5562",
+        0.0,
+        locked_avds={"Theirs", "Mine"},
+        unprobed={"emulator-5554", "emulator-5556"},
+        ports={"Idle": (5564, "last used")},
+    )
+    rows = {row.serial: row for row in snap.devices}
+    assert rows["emulator-5554"].state is RowState.UNPROBED
+    assert rows["emulator-5554"].state.value == "in use · not probed"
+    assert rows["emulator-5556"].state is RowState.OFFLINE  # adb's own word
+    assert rows["emulator-5562"].state is RowState.READY
+    assert [
+        (a.name, a.running_elsewhere, a.port, a.port_reason) for a in snap.avds
+    ] == [
+        ("Idle", False, 5564, "last used"),
+        ("Theirs", True, None, ""),
+    ]
+    assert hub._STATE_STYLE[RowState.UNPROBED] != hub._STATE_STYLE[RowState.READY]
+
+
 def test_a_booted_probe_ends_booting_even_if_the_waiter_gave_up() -> None:
     entries = _entries("emulator-5560\tdevice\n")
     launch = _Launch("Pixel_7", "emulator-5560", started_at=0.0)  # not ready
@@ -390,6 +426,42 @@ def test_collector_reports_locked_avds(collector_env, monkeypatch) -> None:
         ("A", False),
         ("B", True),
     }
+
+
+def test_collector_marks_foreign_devices_unprobed_under_a_pin(
+    collector_env, monkeypatch
+) -> None:
+    collector_env.set_preferred_serial("emulator-5562")
+    monkeypatch.setattr(emulator, "emulator_binary", lambda: "/sdk/emulator")
+    monkeypatch.setattr(emulator, "list_avds", lambda timeout=15.0: ["A", "B"])
+    monkeypatch.setattr(emulator, "avd_info", lambda name: AvdInfo(name=name))
+    monkeypatch.setattr(
+        emulator, "avd_lock_files", lambda name: ["x.lock"] if name == "B" else []
+    )
+    monkeypatch.setattr(emulator, "_ports_free", lambda port: True)
+    adb = _FakeAdb("emulator-5554\tdevice\n")
+    snap = hub.HubCollector(adb).collect()
+    assert _probed(adb) == set()
+    (foreign,) = snap.devices
+    assert foreign.state is RowState.UNPROBED
+    # The pinned serial is not running: a start of A would take its port.
+    assert {(a.name, a.port, a.port_reason) for a in snap.avds} == {
+        ("A", 5562, "pinned"),
+        ("B", None, ""),
+    }
+
+
+def test_collector_without_a_pin_previews_the_first_free_port(
+    collector_env, monkeypatch
+) -> None:
+    monkeypatch.setattr(emulator, "emulator_binary", lambda: "/sdk/emulator")
+    monkeypatch.setattr(emulator, "list_avds", lambda timeout=15.0: ["A"])
+    monkeypatch.setattr(emulator, "avd_info", lambda name: AvdInfo(name=name))
+    monkeypatch.setattr(emulator, "avd_lock_files", lambda name: [])
+    monkeypatch.setattr(emulator, "_ports_free", lambda port: True)
+    monkeypatch.setattr(emulator, "_config_emulator", lambda: None)
+    snap = hub.HubCollector(_FakeAdb("emulator-5554\tdevice\n")).collect()
+    assert [(a.port, a.port_reason) for a in snap.avds] == [(5556, "auto")]
 
 
 # --------------------------------------------------------------------------
@@ -817,6 +889,56 @@ async def test_unauthorized_row_explains_what_to_do() -> None:
         await settle(pilot)
         assert app.screen is screen
     assert app.result == "unset"
+
+
+FOREIGN = DeviceRow(
+    serial="emulator-5556",
+    model="sdk_gphone64",
+    state=RowState.UNPROBED,
+    is_emulator=True,
+)
+
+
+async def test_an_unprobed_device_attaches_only_after_a_confirm(
+    monkeypatch,
+) -> None:
+    from sandroid.core.device_manager import DeviceManager
+
+    monkeypatch.setattr(DeviceManager, "_preferred_serial", "emulator-5562")
+    app, screen = _hub(devices=[FOREIGN])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        assert str(screen._state_cell(FOREIGN)) == "in use · not probed"
+        assert "not probed" in _box(screen)["note"]
+        await pilot.press("enter")
+        await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
+        assert "emulator-5562" in app.screen.message_text
+        await pilot.press("n")
+        await until(pilot, lambda: app.screen is screen)
+        assert app.result == "unset"
+        await pilot.press("enter")
+        await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
+        await pilot.press("y")
+        await settle(pilot)
+    assert app.result == "emulator-5556"
+
+
+async def test_the_options_box_shows_the_console_port() -> None:
+    pinned = AvdRow(
+        name="Pinned", options=AvdLaunchOptions(), port=5562, port_reason="pinned"
+    )
+    app, screen = _hub(devices=[READY], avds=[pinned, OTHER])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+
+        def facts() -> str:
+            return str(screen.query_one("#opt-facts").render())
+
+        assert "Port: 5554" in facts()  # running: its actual port
+        await pilot.press("down")
+        await until(pilot, lambda: "Port: 5562 (pinned)" in facts())
+        await pilot.press("down")
+        await until(pilot, lambda: "Port" not in facts())  # unknown: no line
 
 
 async def test_footer_keys_follow_the_highlighted_row() -> None:

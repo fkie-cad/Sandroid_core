@@ -9,7 +9,9 @@ restarts an emulator goes through this module:
   :func:`rename_avd`, :func:`avd_name_of`.
 * **Launch** (one path): :class:`AvdLaunchOptions`,
   :func:`build_emulator_command`, :func:`free_console_port`,
-  :func:`launch_avd` -> :class:`EmulatorLaunch` (kept in a registry, see
+  :func:`preferred_console_port` (pinned serial's port, else the AVD's
+  last port, else the first free one), :func:`launch_avd` ->
+  :class:`EmulatorLaunch` (kept in a registry, see
   :func:`get_launch` / :func:`booting_serials`). Every launch passes an
   explicit ``-port`` so the adb serial (``emulator-<port>``) is known before
   the emulator even starts.
@@ -693,22 +695,30 @@ def _retarget_ini_line(line: str, old: str, new: str, new_dir: Path) -> str:
 def avd_name_of(serial: str, adb: Any = None) -> str | None:
     """AVD name of the running emulator *serial*.
 
-    Our own (live) launch record first, then the ``ro.boot.qemu.avd_name`` /
-    ``ro.kernel.qemu.avd_name`` property (one adb round-trip), then the
-    console's ``emu avd name``. Every adb call has a short timeout.
+    Our own (live) launch record first, then the emulator console's
+    ``adb -s <serial> emu avd name`` -- what the emulator itself reports; it
+    answers before the boot completed and runs nothing inside the guest.
+    Only when the console gives no name: the ``ro.boot.qemu.avd_name`` /
+    ``ro.kernel.qemu.avd_name`` properties. Every adb call is scoped to
+    *serial* and has a short timeout.
     """
     launch = get_launch(serial)
     if launch is not None and launch.alive:
         return launch.avd
     adb = _adb(adb)
+    for line in _adb_call(adb, "emu avd name", serial).splitlines():
+        line = line.strip()
+        if (
+            line
+            and line != "OK"
+            and not line.startswith("KO")
+            and not line.lower().startswith("error")
+        ):
+            return line
     for prop in ("ro.boot.qemu.avd_name", "ro.kernel.qemu.avd_name"):
         name = _adb_call(adb, f"shell getprop {prop}", serial).strip()
         if name:
             return name
-    for line in _adb_call(adb, "emu avd name", serial).splitlines():
-        line = line.strip()
-        if line and line != "OK" and not line.startswith("KO"):
-            return line
     return None
 
 
@@ -819,6 +829,87 @@ def serial_port(serial: str) -> int | None:
     """Console port of an ``emulator-<port>`` serial (``None`` otherwise)."""
     match = re.fullmatch(r"emulator-(\d+)", serial or "")
     return int(match.group(1)) if match else None
+
+
+#: Why :func:`preferred_console_port` chose a port.
+PortReason = Literal["pinned", "last used", "auto"]
+
+
+def pinned_serial() -> str | None:
+    """The serial this session is pinned to, if any.
+
+    ``--serial`` (``DeviceManager.set_preferred_serial``), then config
+    ``emulator.serial``, then ``$ANDROID_SERIAL``.
+    """
+    try:
+        from sandroid.core.device_manager import DeviceManager
+
+        explicit = DeviceManager._preferred_serial
+    except Exception:
+        explicit = None
+    configured = getattr(_config_emulator(), "serial", None)
+    return (
+        explicit
+        or (configured if isinstance(configured, str) else None)
+        or os.environ.get("ANDROID_SERIAL")
+        or None
+    )
+
+
+def _usable_console_port(port: int | None) -> bool:
+    """An even console port adb auto-discovers (5554-5584)."""
+    return (
+        port is not None
+        and CONSOLE_PORT_MIN <= port <= CONSOLE_PORT_MAX
+        and port % 2 == 0
+    )
+
+
+def remembered_port(name: str, prefs: dict[str, Any] | None = None) -> int | None:
+    """Console port AVD *name* last ran on (``devices.json``), if known."""
+    prefs = load_launch_prefs() if prefs is None else prefs
+    entry = (prefs.get("avds") or {}).get(name)
+    port = entry.get("port") if isinstance(entry, dict) else None
+    return port if isinstance(port, int) and _usable_console_port(port) else None
+
+
+def preferred_console_port(
+    avd: str,
+    taken: set[int],
+    *,
+    pinned: str | None = None,
+    prefs: dict[str, Any] | None = None,
+) -> tuple[int, PortReason]:
+    """The console port a launch of *avd* uses (every launch path).
+
+    In a shared lab every session owns one console port, so a launch must
+    not grab the first free port when it has a better one:
+
+    1. **pinned**: the session is pinned to ``emulator-<N>`` (see
+       :func:`pinned_serial`), no listed emulator uses it and N is free.
+    2. **last used**: the port *avd* last ran on, if free.
+    3. **auto**: :func:`free_console_port`.
+
+    Args:
+        avd: AVD name.
+        taken: Console ports to skip (listed emulators, our launches).
+        pinned: Pinned serial (default: :func:`pinned_serial`).
+        prefs: Launch prefs (default: :func:`load_launch_prefs`).
+
+    Returns:
+        ``(port, reason)``.
+
+    Raises:
+        EmulatorLaunchError: No port is free.
+    """
+    pinned = pinned_serial() if pinned is None else pinned
+    port = serial_port(pinned or "")
+    if _usable_console_port(port) and port not in taken and _ports_free(port):
+        return port, "pinned"
+    last = remembered_port(avd, prefs)
+    if last is not None and last not in taken and _ports_free(last):
+        return last, "last used"
+    return free_console_port(taken), "auto"
 
 
 @dataclass
@@ -939,8 +1030,11 @@ def _our_ports() -> set[int]:
     } | _RESERVED_PORTS
 
 
-def _reserve_port(taken: set[int], port: int | None) -> int:
+def _reserve_port(taken: set[int], port: int | None, avd: str | None = None) -> int:
     """Choose (or claim *port*) and reserve it, under the registry lock.
+
+    With *avd* the choice follows :func:`preferred_console_port` (pinned,
+    then last-used port); without it, the first free port.
 
     Raises:
         EmulatorLaunchError: *port* is already reserved / used by our live
@@ -954,6 +1048,9 @@ def _reserve_port(taken: set[int], port: int | None) -> int:
                     f"Console port {port} is already used by another launch"
                 )
             chosen = port
+        elif avd is not None:
+            chosen, reason = preferred_console_port(avd, taken | ours)
+            logger.info(f"Console port {chosen} for '{avd}' ({reason})")
         else:
             chosen = free_console_port(taken | ours)
         _RESERVED_PORTS.add(chosen)
@@ -982,7 +1079,9 @@ def launch_avd(
     Args:
         avd: AVD name.
         options: Launch options (default: :class:`AvdLaunchOptions`).
-        port: Console port; ``None`` picks :func:`free_console_port`.
+        port: Console port; ``None`` picks :func:`preferred_console_port`
+            (the pinned serial's port, else the AVD's last port, else the
+            first free one).
         adb: adb interface (default: the global ``Adb``).
 
     Returns:
@@ -1015,10 +1114,13 @@ def launch_avd(
             raise EmulatorLaunchError(f"AVD '{avd}' is already being started")
         _STARTING_AVDS.add(avd)
     try:
-        return _launch_reserved(avd, opts, binary, _adb(adb), port)
+        launch = _launch_reserved(avd, opts, binary, _adb(adb), port)
     finally:
         with _LAUNCH_LOCK:
             _STARTING_AVDS.discard(avd)
+    # Outside the "being started" window: a restart may follow at once.
+    _remember_port(avd, launch.port)
+    return launch
 
 
 def _launch_reserved(
@@ -1027,7 +1129,7 @@ def _launch_reserved(
     """:func:`launch_avd` once *avd* is marked as starting."""
     explicit = port is not None
     taken = _listed_ports(adb)
-    chosen = _reserve_port(taken, port)
+    chosen = _reserve_port(taken, port, avd)
     try:
         for attempt in (1, 2):
             launch = _spawn_launch(binary, avd, chosen, opts)
@@ -1284,6 +1386,45 @@ def restart_emulator(
     return launch_avd(avd, options, port=port, adb=adb)
 
 
+def _find_running_avd(avd: str, adb: Any) -> str | None:
+    """Serial of the listed emulator running AVD *avd* (it is known to run).
+
+    Asks as few emulators as possible -- in a shared lab the others belong
+    to other sessions: our own launch (no adb call), then the pinned serial,
+    then the serial of the AVD's last port. Only when none of those runs it
+    are the remaining online emulators asked (logged).
+    """
+    with _LAUNCH_LOCK:
+        ours = next((x for x in _LAUNCHES.values() if x.avd == avd and x.alive), None)
+    if ours is not None:
+        return ours.serial
+    entries = _list_entries(adb) or []
+    listed = {e.serial: e.state for e in entries if serial_port(e.serial)}
+    candidates: list[str] = []
+    pinned = pinned_serial()
+    last = remembered_port(avd)
+    for serial in (pinned, f"emulator-{last}" if last else None):
+        if serial and serial in listed and serial not in candidates:
+            candidates.append(serial)
+    for serial in candidates:
+        if avd_name_of(serial, adb) == avd:
+            return serial
+    others = [
+        serial
+        for serial, state in listed.items()
+        if serial not in candidates and state == "device"
+    ]
+    if others:
+        logger.info(
+            f"AVD '{avd}' runs, but not as the pinned / last-used serial; "
+            f"asking the other emulators: {', '.join(others)}"
+        )
+    for serial in others:
+        if avd_name_of(serial, adb) == avd:
+            return serial
+    return None
+
+
 def ensure_avd_running(
     avd: str,
     *,
@@ -1294,25 +1435,35 @@ def ensure_avd_running(
 ) -> str:
     """Serial of a ready emulator running AVD *avd*, starting it if needed.
 
-    Reuses an emulator of that AVD that is already running (any session's;
-    only online ones -- an offline emulator cannot be asked for its AVD);
-    otherwise launches it with *options* (default: the remembered options),
-    remembers them and waits for the boot.
+    Whether the AVD runs at all is decided without asking any emulator: our
+    live launch, or emulator lock files in its directory
+    (:func:`avd_lock_files`). Not running -> it is launched with *options*
+    (default: the remembered options), which are remembered, and the boot
+    is awaited. Running -> its serial is found by :func:`_find_running_avd`
+    (our launch, the pinned serial, the AVD's last port; other sessions'
+    emulators only as a last resort) and awaited.
 
     Raises:
-        EmulatorLaunchError: The launch failed or it did not boot in time.
+        EmulatorLaunchError: The launch failed, it did not boot in time, or
+            the AVD runs but no listed online emulator reports it.
     """
     adb = _adb(adb)
-    for entry in _list_entries(adb) or []:
-        if serial_port(entry.serial) is None or entry.state != "device":
-            continue
-        if avd_name_of(entry.serial, adb) != avd:
-            continue
-        if wait_until_ready(entry.serial, timeout, on_progress, adb=adb):
-            return entry.serial
+    with _LAUNCH_LOCK:
+        ours = any(x.avd == avd and x.alive for x in _LAUNCHES.values())
+    locks = [] if ours else avd_lock_files(avd)
+    if ours or locks:
+        serial = _find_running_avd(avd, adb)
+        if serial is None:
+            names = ", ".join(path.name for path in locks)
+            raise EmulatorLaunchError(
+                f"AVD '{avd}' is already running ({names}), but no online "
+                "emulator adb lists reports it (another adb server, or it is "
+                "still starting); stop it or try again"
+            )
+        if wait_until_ready(serial, timeout, on_progress, adb=adb):
+            return serial
         raise EmulatorLaunchError(
-            f"Emulator {entry.serial} ({avd}) did not become ready within "
-            f"{timeout:g}s"
+            f"Emulator {serial} ({avd}) did not become ready within {timeout:g}s"
         )
     launch = launch_avd(avd, options or remembered_options(avd), adb=adb)
     remember_launch(avd, launch.options)
@@ -1350,7 +1501,8 @@ def load_launch_prefs() -> dict[str, Any]:
     Returns:
         ``{"schema_version": 1, "last_avd": str | None, "avds": {name:
         {"headless": bool, "boot": str, "snapshot": str | None,
-        "save_on_exit": bool}}}``; the empty document when the file is
+        "save_on_exit": bool, "port": int}}}`` (``port``: the console port
+        of its last launch); the empty document when the file is
         missing or unreadable. Older files (``boot: "wipe"``, no
         ``save_on_exit``) are read by :func:`options_from_prefs`.
     """
@@ -1392,7 +1544,8 @@ def options_from_prefs(prefs: dict[str, Any], name: str) -> AvdLaunchOptions:
         boot, a missing ``save_on_exit`` as False.
     """
     entry = (prefs.get("avds") or {}).get(name)
-    if not isinstance(entry, dict):
+    if not isinstance(entry, dict) or not set(entry) - {"port"}:
+        # No options remembered (at most the port of a launch is known).
         return AvdLaunchOptions(
             headless=bool(getattr(_config_emulator(), "avd_headless", False))
         )
@@ -1440,12 +1593,31 @@ def remember_launch(
         prefs = load_launch_prefs()
         if make_last:
             prefs["last_avd"] = name
-        prefs["avds"][name] = {
+        entry = {
             "headless": bool(opts.headless),
             "boot": boot,
             "snapshot": snapshot,
             "save_on_exit": bool(opts.save_on_exit),
         }
+        port = prefs["avds"].get(name, {}).get("port")
+        if port is not None:
+            entry["port"] = port
+        prefs["avds"][name] = entry
+        _save_prefs(prefs)
+
+
+def _remember_port(name: str, port: int) -> None:
+    """Persist the console port AVD *name* was just launched on.
+
+    :func:`preferred_console_port` offers it again next time, so an AVD
+    keeps its serial across launches. Its options stay as they are.
+    """
+    with _PREFS_LOCK:
+        prefs = load_launch_prefs()
+        entry = prefs["avds"].setdefault(name, {})
+        if entry.get("port") == port:
+            return
+        entry["port"] = port
         _save_prefs(prefs)
 
 
@@ -1492,8 +1664,11 @@ __all__ = [
     "load_launch_prefs",
     "looks_like_sdk",
     "options_from_prefs",
+    "pinned_serial",
+    "preferred_console_port",
     "remember_launch",
     "remembered_options",
+    "remembered_port",
     "rename_avd",
     "restart_emulator",
     "sdk_root",
