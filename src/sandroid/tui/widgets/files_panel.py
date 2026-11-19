@@ -1656,6 +1656,7 @@ class FilesPanel(Widget):
         if self.review:
             self.app.notify("Files lens is in REVIEW (L goes back to live).")
             return False
+        path = self._known_alias(path)
         if path not in {r.key for r in self._rows}:
             self._segment = None
             self._filter = ""
@@ -1751,11 +1752,36 @@ class FilesPanel(Widget):
         if row is not None:
             ms.update_inspector(self._inspector_for(row))
 
+    def _known_alias(self, path: str) -> str:
+        """The form of ``path`` the lens knows it by (rows, activity, the
+        watchlist), else its canonical form.
+        """
+        from sandroid.core.adb_utils import device_path_aliases
+
+        try:
+            known = device_path_aliases(path)
+        except Exception:
+            return path
+        aliases = list(dict.fromkeys([path, *known]))
+        wl = self._watchlist_or_none()
+        keys = {r.key for r in self._rows}
+        for alias in aliases:
+            if (
+                alias in keys
+                or alias in self.activity.paths
+                or (wl is not None and alias in wl.rows)
+            ):
+                return alias
+        return known[0] if known else path
+
     def _row_for(self, path: str) -> _Row | None:
         wl = self._watchlist_or_none()
         act = self.activity.paths.get(path)
         watched = wl.watched_by(path) if wl is not None else None
         if act is None and watched is None:
+            # An unstarred file the identity profile's auto-watch pulled.
+            if self._has_versions(path):
+                return _Row(key=path)
             return None
         return _Row(key=path, watched=watched, activity=act)
 

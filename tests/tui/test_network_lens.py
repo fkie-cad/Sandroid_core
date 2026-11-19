@@ -1426,3 +1426,33 @@ def test_markers_sharing_a_tag_show_it_once():
     ]
     assert np_mod.tags_plain(tags) == "AdID, GPS"
     assert np_mod.tag_words(tags).plain == "AdID, GPS"
+
+
+async def test_reveal_lands_on_a_flow_the_hidden_lens_has_not_loaded(flow_dir):
+    """J from another lens (Identity, Sessions) on a flow logged while the
+    Network lens was hidden: the lens loads it and puts the cursor on it.
+    """
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        await pilot.press("1")
+        await settle(pilot)
+        write_flows(flow_dir, time.time(), specs=_SPECS[1:2], start_seq=200)
+        assert panel._listed_flow("flow-200") is None  # hidden: not polled
+        ms.switch_lens("network")
+        assert panel.reveal_flow("flow-200")
+        await until(
+            pilot,
+            lambda: getattr(ms.inspector_content, "key", None) == "network:row:f200",
+        )
+        row_key = panel.table.coordinate_to_cell_key(
+            (panel.table.cursor_row, 0)
+        ).row_key.value
+        assert row_key == "f200"
+        assert panel._pending_reveal is None
+        # A flow that is not in the log: its record opens it, nothing else.
+        record = {"id": "flow-gone", "host": "gone.example", "ts_start": time.time()}
+        assert panel.reveal_flow("flow-gone", record=record)
+        await until(pilot, lambda: panel._pending_reveal is None)
+        assert ms.inspector_content.key.startswith("network:row:")
+        assert panel.table.row_count  # the table is unchanged

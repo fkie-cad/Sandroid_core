@@ -678,3 +678,33 @@ async def test_files_lens_tags_and_tints_files_with_profile_values(
         await until(pilot, lambda: PREFS in panel.table.profile_keys)
         assert "ident" in [str(c.value) for c in panel.table.columns]
         assert str(panel.table.get_cell(PREFS, "ident")) == "Ad ID"
+
+
+async def test_auto_pulled_unstarred_files_show_their_versions(tmp_path, monkeypatch):
+    """The identity profile's auto-watch pulls app files that are not
+    starred: their Inspector shows the pulled versions and the profile
+    values, and J from the Identity lens lands on them.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    fake = _prefs_with_ad_id(tmp_path, monkeypatch)
+    newest = fake.hits()[0].source["version"]
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await boot(app, pilot)
+        panel = ms.lens_widget("files")
+        # No versions known: the lens does not know the file.
+        assert not panel.reveal(PREFS, version=newest)
+        fake.version_paths.add(PREFS)
+        ms.switch_lens("files")
+        await settle(pilot)
+        alias = PREFS.replace("/data/data/", "/data/user/0/")
+        assert panel.reveal(alias, version=newest)
+        await until(pilot, lambda: ms.inspector_is_open)
+        assert ms.inspector_content.subtitle == PREFS  # the canonical path
+        tabs = dict(ms.inspector_content.tabs)
+        versions = _sections_text(tabs["Versions"], 80)
+        assert "Watch (" not in versions
+        assert "Diff  v2" in versions
+        assert "Profile values in v2: 1 value" in versions
+        assert "Watch (" not in _sections_text(tabs["Content"], 80)

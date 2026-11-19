@@ -1410,7 +1410,11 @@ class IdentityLens(Vertical):
             ms.switch_lens("network")
             panel = ms.lens_widget("network")
             reveal = getattr(panel, "reveal_flow", None)
-            if reveal is not None and reveal(str(src["flow_id"])):
+            from .network_panel import flow_record_of
+
+            # The record opens a flow the (hidden) lens has not loaded yet.
+            record = flow_record_of(hit)
+            if reveal is not None and reveal(str(src["flow_id"]), record=record):
                 return True
             if hit.tl_seq is None:
                 return False

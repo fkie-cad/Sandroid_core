@@ -1547,16 +1547,9 @@ class DiffsView(FilesSubViewBase):
         if hit.flow_id:
             ms.switch_lens("network")
             reveal = getattr(ms.lens_widget("network"), "reveal_flow", None)
-            record = {
-                "id": hit.flow_id,
-                "seq": src.get("flow_seq"),
-                "method": src.get("method"),
-                "host": src.get("host"),
-                "path": src.get("path"),
-                "app": src.get("app"),
-                "ts_start": hit.t,
-                "ts_end": hit.t,
-            }
+            from .network_panel import flow_record_of
+
+            record = flow_record_of(hit)
             if reveal is not None and reveal(hit.flow_id, record=record):
                 return True
         elif hit.device_path:

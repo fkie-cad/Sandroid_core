@@ -63,6 +63,7 @@ points to the run's pcap. ``L`` (MainScreen) returns to LIVE.
 from __future__ import annotations
 
 import base64
+import contextlib
 import functools
 import json
 import logging
@@ -680,6 +681,23 @@ PRIVACY_COLUMN_MIN_WIDTH = 100
 PRIVACY_POST_STALE_S = 5.0
 
 
+def flow_record_of(hit: Any) -> dict[str, Any]:
+    """A flow-log record (the shape ``FlowRow.from_record`` reads) built
+    from a privacy hit's source, to open a flow that is not listed.
+    """
+    src = hit.source or {}
+    return {
+        "id": hit.flow_id,
+        "seq": src.get("flow_seq"),
+        "method": src.get("method"),
+        "host": src.get("host"),
+        "path": src.get("path"),
+        "app": src.get("app"),
+        "ts_start": hit.t,
+        "ts_end": hit.t,
+    }
+
+
 def privacy_service() -> Any | None:
     """The privacy scan service, or None when it is not available."""
     try:
@@ -1188,6 +1206,9 @@ class NetworkPanel(Widget):
         self._stat: tuple[int, int] | None = None
         self._poll_busy = False
         self._poll_again = False
+        #: ``(flow id, record)`` a ``J`` asked for before it was loaded: the
+        #: next poll reveals it (see :meth:`reveal_flow`).
+        self._pending_reveal: tuple[str, dict | None] | None = None
         self._tls_n = 0
         self._unseen_tls = 0
         self._floor_seq = 0
@@ -1422,6 +1443,8 @@ class NetworkPanel(Widget):
         if self._poll_again:
             self._poll_again = False
             self.poll_now()
+        if not self._poll_busy and self._pending_reveal is not None:
+            self._resolve_pending_reveal()
 
     # -- live rows -------------------------------------------------------
 
@@ -2122,27 +2145,62 @@ class NetworkPanel(Widget):
         from ``record`` -- the flow-log record shape, built from the timeline
         line -- with ``FlowRow.from_record``. False when neither is there.
         """
-        row = next((r for r in reversed(self._model()) if r.flow_id == flow_id), None)
+        row = self._listed_flow(flow_id)
         if row is not None:
+            self._show_flow(row)
+            return True
+        if not self.in_review:
+            # Not loaded yet: a hidden lens polls only while it is shown.
+            # Poll now and put the cursor on the flow once it is listed; the
+            # record (if any) opens it in the meantime.
+            self._pending_reveal = (flow_id, record)
+            self.poll_now()
+            row = self._record_row(flow_id, record)
+            if row is not None:
+                self._show_flow(row, cursor=False)
+            return True
+        row = self._record_row(flow_id, record)
+        if row is None:
+            return False
+        self._show_flow(row, cursor=False)
+        return True
+
+    def _listed_flow(self, flow_id: str) -> FlowRow | None:
+        return next((r for r in reversed(self._model()) if r.flow_id == flow_id), None)
+
+    @staticmethod
+    def _record_row(flow_id: str, record: dict | None) -> FlowRow | None:
+        if record is None or record.get("id") != flow_id:
+            return None
+        try:
+            return FlowRow.from_record(
+                {k: v for k, v in record.items() if v is not None}, _flow_dir()
+            )
+        except Exception:
+            logger.debug("reveal_flow: bad record", exc_info=True)
+            return None
+
+    def _show_flow(self, row: FlowRow, *, cursor: bool = True) -> None:
+        if cursor:
             try:
                 table = self.table
                 table.move_cursor(row=table.get_row_index(row.key), animate=False)
             except Exception:
                 pass
-        elif record is not None and record.get("id") == flow_id:
-            try:
-                row = FlowRow.from_record(
-                    {k: v for k, v in record.items() if v is not None}, _flow_dir()
-                )
-            except Exception:
-                logger.debug("reveal_flow: bad record", exc_info=True)
-                return False
-        if row is None:
-            return False
         ms = self._main_screen()
         if ms is not None:
             ms.open_inspector(self.flow_content(row))
-        return True
+
+    def _resolve_pending_reveal(self) -> None:
+        """The poll after a ``J`` landed: show the flow, or say it is gone."""
+        flow_id, record = self._pending_reveal or ("", None)
+        self._pending_reveal = None
+        row = self._listed_flow(flow_id)
+        if row is not None:
+            self._show_flow(row)
+        elif record is None:
+            with contextlib.suppress(Exception):
+                self.app.notify("That flow is not in the flow log.", timeout=3)
 
     def flow_content(self, row: FlowRow) -> InspectorContent:
         key = f"network:row:{row.key}"
