@@ -221,6 +221,8 @@ def test_no_subtask_view_can_nest_a_subtask():
 #: for a time because nothing asserted the allow-list's exhaustiveness).
 _DELIBERATELY_EXCLUDED_READ_ONLY_TOOLS = frozenset(
     {"take_screenshot", "list_snapshots", "check_frida_server_status"}
+    # Meta tools (tool_search/call_tool/read_result) belong to the new runtime.
+    | {"tool_search", "call_tool", "read_result"}
 )
 
 
