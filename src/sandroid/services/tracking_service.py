@@ -41,7 +41,9 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import functools
 import hashlib
+import io
 import logging
 import os
 import queue
@@ -102,6 +104,26 @@ INPUT_SKEW_S = 1.0
 BEFORE_TAP_FRAME_S = 0.25
 #: How long a screen-change decision waits for a before-tap capture.
 BEFORE_TAP_WAIT_S = 2.0
+#: R1 perceptual "same screen" (:func:`frame_distance`): a grayscale
+#: thumbnail about this many px wide (an integer box reduction) ...
+SAME_THUMB_W = 96
+#: ... blurred with this Gaussian radius (thumbnail px) ...
+SAME_BLUR = 2.0
+#: ... without the outer edge columns (scrollbars) and the top strip
+#: (status bar: clock, icons), as fractions of the frame ...
+SAME_EDGE = 0.04
+SAME_TOP = 0.06
+#: ... compared at the best of these shifts (thumbnail px, x and y: about
+#: +-11 / +-55 px on a 1080-wide frame -- a content nudge, a scroll offset).
+SAME_SHIFT = (1, 5)
+#: A final frame whose distance to the before-tap frame (mean absolute grey
+#: difference, 0-255) is at most this is the previous screen. Calibrated on
+#: the 88 shots of E2E rounds 1-5 (DESIGN_FINAL §12 R1): same screen and
+#: state <= 0.51 (748 pairs; round 5 #66 vs #65: 0.07), different screens
+#: >= 3.48 (2892 pairs; a blank frame vs a sparse list, >= 4.8 otherwise);
+#: synthetic scroll offsets up to 50 px <= 1.28. Near the log-midpoint
+#: (1.34), above the scroll offsets: 2.3x below the closest different pair.
+SAME_MAX_DIFF = 1.5
 #: Device and host lags that differ by more than this are from different
 #: clock epochs (snapshot load): only the host lag counts.
 CLOCK_SANE_MS = 5_000.0
@@ -613,6 +635,68 @@ def _config() -> Any:
         from sandroid.config.schema import TrackingConfig
 
         return TrackingConfig()
+
+
+@functools.lru_cache(maxsize=4)
+def _screen_thumb(png: bytes) -> Any:
+    """The blurred grayscale thumbnail :func:`frame_distance` compares
+    (:data:`SAME_THUMB_W` .. :data:`SAME_TOP`); None when ``png`` does not
+    decode. Cached: a before-tap frame serves every line of its change.
+    """
+    try:
+        from PIL import Image, ImageFilter
+
+        with Image.open(io.BytesIO(png)) as im:
+            gray = im.convert("L")
+    except Exception:
+        return None
+    w, h = gray.size
+    if w < 16 or h < 16:
+        return None
+    edge = round(w * SAME_EDGE)
+    gray = gray.crop((edge, round(h * SAME_TOP), w - edge, h))
+    gray = gray.reduce(max(1, round(w / SAME_THUMB_W)))
+    return gray.filter(ImageFilter.GaussianBlur(SAME_BLUR))
+
+
+def frame_distance(png_a: bytes, png_b: bytes) -> float | None:
+    """R1: how far apart two screenshots look -- the mean absolute grey
+    difference (0-255) of their thumbnails (:func:`_screen_thumb`) at the
+    best alignment within :data:`SAME_SHIFT`. Blur and the shifts absorb what
+    changes on a screen that stays put: a scrollbar fading, content moving a
+    pixel or two, a small scroll offset; the crop drops the status bar.
+    None when either frame does not decode or the sizes differ.
+    """
+    from PIL import ImageChops, ImageStat
+
+    a, b = _screen_thumb(png_a), _screen_thumb(png_b)
+    if a is None or b is None or a.size != b.size:
+        return None
+    w, h = a.size
+    sx, sy = SAME_SHIFT
+    best: float | None = None
+    for dy in range(-sy, sy + 1):
+        for dx in range(-sx, sx + 1):
+            box_a = (max(0, dx), max(0, dy), w + min(0, dx), h + min(0, dy))
+            box_b = (max(0, -dx), max(0, -dy), w + min(0, -dx), h + min(0, -dy))
+            diff = ImageChops.difference(a.crop(box_a), b.crop(box_b))
+            mean = float(ImageStat.Stat(diff).mean[0])
+            best = mean if best is None else min(best, mean)
+    return best
+
+
+def same_screen(png_a: bytes | None, png_b: bytes | None) -> bool:
+    """R1: the two screenshots show the same screen (:func:`frame_distance`
+    at most :data:`SAME_MAX_DIFF`). False when either cannot be compared.
+    """
+    if not png_a or not png_b:
+        return False
+    try:
+        d = frame_distance(png_a, png_b)
+    except Exception as exc:
+        logger.debug(f"tracking: frame distance failed: {exc}")
+        return False
+    return d is not None and d <= SAME_MAX_DIFF
 
 
 def _short_cls(cls: str | None) -> str:
@@ -2433,14 +2517,17 @@ class TrackingService:
             return None
         return None if self._late(res, down[1].t_up) else res
 
-    def _before_frame(self, inp: tuple[float, float]) -> str | None:
-        """The frame hash the input ``inp`` acted on: its stored before-tap
-        shot, else the cached frame closest to its finger-down (within
-        :data:`BEFORE_TAP_FRAME_S`, before its finger-up).
+    def _before_frame(
+        self, inp: tuple[float, float]
+    ) -> tuple[str, bytes | None] | None:
+        """The frame the input ``inp`` acted on, ``(hash, png)``: its stored
+        before-tap shot (with its PNG), else the cached frame closest to its
+        finger-down (within :data:`BEFORE_TAP_FRAME_S`, before its finger-up;
+        no PNG).
         """
         res = self._tap_shot(inp)
         if res is not None:
-            return str(res.hash)
+            return str(res.hash), getattr(res, "png", None) or None
         dev_in, host_in = inp
         with self._lock:
             frames = list(self._frames)
@@ -2455,16 +2542,18 @@ class TrackingService:
                 continue  # another clock epoch (a snapshot load)
             if best is None or abs(dev - dev_in) < best[0]:
                 best = (abs(dev - dev_in), frame)
-        return best[1] if best else None
+        return (best[1], None) if best else None
 
     def _prev_screen(self, req: dict) -> str | None:
         """R1: the previous screen of ``req`` -- the before-tap frame of the
         triggering input (the latest input before the event); None without
         one (R3: the app navigated by itself) or without a frame for it.
+        ``req["prev_png"]``: that frame's PNG when a before-tap shot holds it.
         """
         if "prev" not in req:
             inp = self._input_before(req)
-            req["prev"] = self._before_frame(inp) if inp is not None else None
+            got = self._before_frame(inp) if inp is not None else None
+            req["prev"], req["prev_png"] = got if got else (None, None)
         return req["prev"]
 
     def _start_logcat(self, gen: int, serial: str) -> None:
@@ -3160,8 +3249,11 @@ class TrackingService:
         R1: after an input (the triggering input: the latest finger-down
         or key before the event) the previous screen is that input's
         before-tap frame (:meth:`_prev_screen`). A final frame equal to it
-        is never stored: dropped, counted ``unverified`` -- whether or not
-        the pre-change hash was late. The one exception: an a11y window
+        -- the same hash, or, with the before-tap PNG at hand, perceptually
+        the same (:func:`same_screen`: a faded scrollbar or a 1 px nudge
+        changes the hash) -- is never stored: dropped, counted
+        ``unverified`` -- whether or not the pre-change hash was late
+        (R4 then shows the next before-tap). The one exception: an a11y window
         line whose timely pre-change hash equals the final frame keeps it,
         flagged ``data.unchanged``. Otherwise a final frame equal to a
         timely pre-change hash is flagged ``data.unchanged``, and one equal
@@ -3286,12 +3378,20 @@ class TrackingService:
             if helper is not None and frame:
                 same = timely and frame == before
                 prev = self._prev_screen(req)
+                keep = same and req.get("a11y")  # the one R1 exception
                 if (
-                    prev is not None
-                    and frame == prev
-                    and not (same and req.get("a11y"))
-                ) or (
-                    not same and (timely or self._old_frames(req)) and frame in old()
+                    (prev is not None and frame == prev and not keep)
+                    or (
+                        not same
+                        and (timely or self._old_frames(req))
+                        and frame in old()
+                    )
+                    or (
+                        prev is not None
+                        and frame != prev
+                        and not keep
+                        and same_screen(png, req.get("prev_png"))
+                    )
                 ):
                     # still the previous screen: the new one has not drawn
                     with self._lock:

@@ -7,6 +7,7 @@ is a fake, and every line is collected with ``timeline.capture()``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import queue
 import subprocess
@@ -2865,6 +2866,93 @@ def test_round5_invisible_66_like_previous_screen_is_unverified(env, cfg):
         data = _stop_data(svc, lines)
     assert not of(lines, "shot", "screen_change")
     assert data["shots_dropped"] == {"unverified": 1}
+
+
+#: Round-5 evidence (INVISIBLE), downscaled 4x to grayscale: #65 (the
+#: before-tap of the back tap #62, Notifications), #66 (the shot of logcat
+#: #64: the same Notifications screen, scrollbar faded, content 1 px off --
+#: a different hash) and #55 (Battery, a different screen).
+R1_FIXTURES = Path(__file__).parent / "fixtures" / "tracking_r1"
+R1_PNGS = {
+    "notif": "r5_65_notifications_before_tap.png",
+    "notif-faded": "r5_66_notifications_scrollbar_faded.png",
+    "battery": "r5_55_battery_before_tap.png",
+}
+
+
+def _r1_png(frame: str) -> bytes:
+    return (R1_FIXTURES / R1_PNGS[frame]).read_bytes()
+
+
+def test_r1_frame_distance_on_the_round5_evidence():
+    """The perceptual R1 metric: #66 vs #65 is the same screen (the hash
+    differs), Notifications vs Battery is not; undecodable frames are
+    never "the same".
+    """
+    notif, faded, battery = (_r1_png(f) for f in R1_PNGS)
+    assert notif != faded
+    same = ts.frame_distance(notif, faded)
+    other = ts.frame_distance(notif, battery)
+    assert same is not None
+    assert other is not None
+    assert same < ts.SAME_MAX_DIFF / 5  # 0.08
+    assert other > ts.SAME_MAX_DIFF * 5  # 10.3
+    assert ts.frame_distance(faded, notif) == pytest.approx(same)
+    assert ts.same_screen(notif, faded)
+    assert not ts.same_screen(notif, battery)
+    assert not ts.same_screen(notif, _frame_png("x"))  # not a PNG
+    assert not ts.same_screen(notif, None)
+
+
+@pytest.mark.parametrize(
+    ("final", "stored"), [("notif-faded", False), ("battery", True)]
+)
+def test_r1_late_logcat_near_duplicate_of_the_before_tap_is_unverified(
+    env, cfg, final, stored
+):
+    """E2E round 5 #66 as it happened: the final frame's hash differs from
+    the before-tap #65 only because the scrollbar faded; perceptually it is
+    the previous screen: dropped ``unverified`` (R4 shows the next
+    before-tap). A final frame that differs (Battery) is stored.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg, settle_max_ms=600)
+    cfg.shot_before_tap = True
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg, mode="invisible")
+        h = helpers[0]
+        stats = _clocked_helper(h, "notif", 42438.0)
+        clocked = h.shot
+
+        def shot(*, hash_only=False, timeout=5.0):
+            res = clocked(hash_only=hash_only, timeout=timeout)
+            if hash_only:
+                return res
+            return ShotResult(res.t_mono_ms, 1080, 2424, res.hash, 14.0,
+                              _r1_png(res.hash), "/x")  # fmt: skip
+
+        h.shot = shot
+        _tap_with_before_shot(ge, lines, stats["now"]())  # #62 back
+        svc._screen_pre_lane.submit(time.sleep, 0.4)  # 727 ms late in the E2E
+        svc._emit_screen("activity", pkg=SETTINGS, cls=SETTINGS + ".Settings",
+                         title=None, window_id=None, via="logcat",
+                         dev_mono=stats["now"]())  # fmt: skip
+        time.sleep(0.1)
+        h.frame = final
+        if stored:
+            assert wait_for(lambda: of(lines, "shot", "screen_change"), timeout=4.0)
+        else:
+            assert wait_for(lambda: svc._shot_drops.get("unverified") == 1, timeout=4.0)
+        data = _stop_data(svc, lines)
+    shots = of(lines, "shot", "screen_change")
+    if stored:
+        assert [s["ref"]["sha256"] for s in shots] == [
+            hashlib.sha256(_r1_png("battery")).hexdigest()
+        ]
+        assert not data.get("shots_dropped")
+    else:
+        assert not shots
+        assert data["shots_dropped"] == {"unverified": 1}
 
 
 def test_r1_a_timely_a11y_frame_equal_to_the_before_tap_keeps_unchanged(env, cfg):
