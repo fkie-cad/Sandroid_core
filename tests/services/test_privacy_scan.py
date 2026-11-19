@@ -764,7 +764,8 @@ def test_sweep_after_run_waits_for_the_pulls_and_the_scans(monkeypatch):
     monkeypatch.setattr(ps, "get_privacy_scan_service", lambda: Fake())
     assert ps.sweep_after_run("com.a", "emulator-5", run_id="r1", wait=5.0)
     assert done.is_set()
-    assert flushed and 0 < flushed[0] <= 5.0
+    assert flushed
+    assert 0 < flushed[0] <= 5.0
 
 
 def test_listener_runs_on_the_worker(svc, flow_dir):
