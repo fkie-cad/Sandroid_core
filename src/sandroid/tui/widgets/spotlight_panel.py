@@ -335,16 +335,16 @@ class SpotlightPanel(Widget):
         from sandroid.services.app_start import remove_pre_spawn_status_listener
 
         remove_pre_spawn_status_listener(self._on_pre_spawn_status)
-
-    def _on_pre_spawn_status(self) -> None:
-        """A pre-start step began or ended (any thread): repaint the header."""
-        self._post(self._repaint_text)
         if self._poll_timer is not None:
             try:
                 self._poll_timer.stop()
             except Exception:
                 pass
             self._poll_timer = None
+
+    def _on_pre_spawn_status(self) -> None:
+        """A pre-start step began or ended (any thread): repaint the header."""
+        self._post(self._repaint_text)
 
     # -- EventBus wiring (non-blocking, thread-safe) ----------------------
 
@@ -472,6 +472,8 @@ class SpotlightPanel(Widget):
         from sandroid.services.app_start import pre_spawn_status
 
         step = pre_spawn_status(package)
+        if step and self.size.width and len(step) + len(package) + 40 > self.size.width:
+            step = pre_spawn_status(package, short=True)
         if step:
             # Identity's apply can take minutes: say so, not "not running".
             state = f"[{c.warn}]{escape(step)}[/]"

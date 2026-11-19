@@ -41,11 +41,8 @@ not vary meaningfully by argument, so a remembered allow/deny choice is safe
 to reuse across future calls.
 """
 
-import contextvars
-import threading
 import time
-from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any
 
 from sandroid.ai.arbiter import ResourceId
 from sandroid.ai.errors import ToolExecutionError
@@ -214,55 +211,6 @@ def _in_subtask() -> bool:
     return owner != ORCHESTRATOR_ID
 
 
-_T = TypeVar("_T")
-
-#: Seconds kept back from the executor timeout to answer in time.
-_DEADLINE_MARGIN_S = 5.0
-
-#: Why an app start can outlast its tool call.
-STILL_STARTING = (
-    "a pre-start step (the analyst's confirmation, or an identity profile "
-    "with an Android framework restart) is still running, so the app may "
-    "still start. Check with get_spotlight_app before retrying; a retry "
-    "now is refused as busy."
-)
-
-
-def run_within_tool_deadline(work: Callable[[], _T], pending: Callable[[], _T]) -> _T:
-    """Run ``work``; answer ``pending()`` before the executor gives up on it.
-
-    A pre-start step (its dialog up to 5 min, a framework restart up to a
-    few minutes) can outlast the tool's timeout. ``work`` then keeps running
-    in the background (it holds the app lifecycle lock), and the model gets
-    a clear "may still start" instead of a bare timeout.
-    """
-    from sandroid.ai.loop import tool_time_remaining
-
-    remaining = tool_time_remaining()
-    if remaining is None:
-        return work()
-    box: dict[str, Any] = {}
-    done = threading.Event()
-
-    def run() -> None:
-        try:
-            box["value"] = work()
-        except BaseException as exc:  # re-raised in the caller
-            box["error"] = exc
-        finally:
-            done.set()
-
-    ctx = contextvars.copy_context()
-    threading.Thread(
-        target=ctx.run, args=(run,), name="ai-app-start", daemon=True
-    ).start()
-    if not done.wait(max(0.0, remaining - _DEADLINE_MARGIN_S)):
-        return pending()
-    if "error" in box:
-        raise box["error"]
-    return box["value"]
-
-
 @sandroid_tool(
     name="start_spotlight_app",
     description=(
@@ -271,7 +219,9 @@ def run_within_tool_deadline(work: Callable[[], _T], pending: Callable[[], _T]) 
         "tools running on it (friTap, Dexray, ...; armed bypasses are "
         "re-applied); without it a running app is left alone. paused=true holds the new process paused "
         "until resumed (Android ends the hold after about 10 s). The analyst "
-        "approves every call."
+        "approves every call. A pre-start step (e.g. an identity profile "
+        "with an Android framework restart, after the analyst confirms) can "
+        "make a start take minutes."
     ),
     parameters={
         "type": "object",
@@ -358,20 +308,11 @@ def start_spotlight_app(fresh: bool = False, paused: bool = False) -> dict[str, 
         )
     # consent=False: a pre-start step that stops every app is the analyst's
     # call (the TUI dialog); the tool's approval covers this app only.
-    lifecycle = app_start.restart_app if running else app_start.start_app
-
-    def pending() -> dict[str, Any]:
-        result = _start_result(
-            False, service, f"Still starting {package}: {STILL_STARTING}"
-        )
-        result["pending"] = True
-        return result
-
-    def started() -> dict[str, Any]:
-        ok, msg = lifecycle(paused=paused, consent=False)
-        return _start_result(ok, service, msg)
-
-    return run_within_tool_deadline(started, pending)
+    if running:
+        ok, msg = app_start.restart_app(paused=paused, consent=False)
+    else:
+        ok, msg = app_start.start_app(paused=paused, consent=False)
+    return _start_result(ok, service, msg)
 
 
 def _start_result(started: bool, service: Any, message: str) -> dict[str, Any]:

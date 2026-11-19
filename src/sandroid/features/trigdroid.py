@@ -157,6 +157,8 @@ class Trigdroid(Functionality):
         Before a spawn the pre-spawn hooks (e.g. the identity profile) run
         under the lifecycle lock (``prepare_launch``); TrigDroid's own spawn
         follows right after, outside the lock (it runs for the whole test).
+        Whether the app runs (attach) or is held is the resolver's call
+        above, also when no hook has anything to do.
 
         Returns:
             TrigDroid's ``spawn_mode`` for this run, or None to abort.

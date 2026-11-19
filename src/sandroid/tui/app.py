@@ -2253,14 +2253,18 @@ class SandroidTUI(App):
 
             try:
                 prepare_launch(package_name, "Objection")
-            except AppStartError as exc:
+            except Exception as exc:
+                if not isinstance(exc, AppStartError):
+                    logger.exception("Objection pre-start step failed")
                 self.call_from_thread(
                     self.notify, f"Objection not started: {exc}", severity="error"
                 )
                 return
             self.call_from_thread(open_terminal)
 
-        self.run_worker(prepare, name="objection_prepare", thread=True)
+        self.run_worker(
+            prepare, name="objection_prepare", thread=True, exit_on_error=False
+        )
 
     def action_resume_objection(self) -> None:
         self._objection_resume_controller.resume_session()

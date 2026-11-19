@@ -871,8 +871,9 @@ _HOOKS_LOCK = threading.Lock()
 _PRE_SPAWN_HOOKS: list[PreSpawnHook] = []
 #: Pre-start steps (dialog or apply) in progress, see pre_spawn_running().
 _PHASES = 0
-#: ``(package, text)`` while a pre-start step applies, see pre_spawn_status().
-_STATUS: tuple[str, str] | None = None
+#: ``(package, text, short text)`` while a pre-start step applies, see
+#: pre_spawn_status().
+_STATUS: tuple[str, ...] | None = None
 _STATUS_LISTENERS: list[Callable[[], None]] = []
 #: Poll interval of recover_after_framework_restart().
 _RECOVERY_POLL_S = 1.0
@@ -902,11 +903,12 @@ def pre_spawn_running() -> bool:
         return _PHASES > 0
 
 
-def pre_spawn_status(package: str | None = None) -> str | None:
+def pre_spawn_status(package: str | None = None, *, short: bool = False) -> str | None:
     """What the pre-start step applying right now does (for the App lens).
 
     Args:
         package: Only for this app (None: any).
+        short: The few-word form for a narrow lens.
 
     Returns:
         One plain sentence, or None when no step applies (also while its
@@ -916,7 +918,7 @@ def pre_spawn_status(package: str | None = None) -> str | None:
         status = _STATUS
     if status is None or (package is not None and status[0] != package):
         return None
-    return status[1]
+    return status[2] if short and len(status) > 2 else status[1]
 
 
 def add_pre_spawn_status_listener(cb: Callable[[], None]) -> None:
@@ -933,7 +935,7 @@ def remove_pre_spawn_status_listener(cb: Callable[[], None]) -> None:
             _STATUS_LISTENERS.remove(cb)
 
 
-def _set_status(status: tuple[str, str] | None) -> None:
+def _set_status(status: tuple[str, ...] | None) -> None:
     global _STATUS
     with _HOOKS_LOCK:
         _STATUS = status
@@ -946,7 +948,7 @@ def _set_status(status: tuple[str, str] | None) -> None:
 
 
 @contextmanager
-def _pre_spawn_phase(status: tuple[str, str] | None = None) -> Iterator[None]:
+def _pre_spawn_phase(status: tuple[str, ...] | None = None) -> Iterator[None]:
     global _PHASES
     with _HOOKS_LOCK:
         _PHASES += 1
@@ -961,18 +963,27 @@ def _pre_spawn_phase(status: tuple[str, str] | None = None) -> Iterator[None]:
             _set_status(None)
 
 
-def _progress_text(plans: list[PreSpawnPlan]) -> str:
+def _progress_text(plans: list[PreSpawnPlan]) -> tuple[str, str]:
     """``Applying identity profile 'x' (…) — the Android framework restarts;
-    this can take a few minutes`` (plain words for the App lens).
+    this can take a few minutes`` and a short form (``Applying identity
+    profile 'x', framework restarts``) for the App lens.
     """
     what = _plans_text(plans)
     if what.startswith("apply "):
         what = "Applying " + what[len("apply ") :]
     else:
         what = f"Before the start: {what}"
+    brief = plans[0].description.split(" (", 1)[0]
+    if brief.startswith("apply "):
+        brief = "Applying " + brief[len("apply ") :]
+    if len(plans) > 1:
+        brief += f" (+{len(plans) - 1})"
     if any(plan.disruptive for plan in plans):
-        return f"{what} — the Android framework restarts; this can take a few minutes"
-    return f"{what} — the app starts after it"
+        return (
+            f"{what} — the Android framework restarts; this can take a few minutes",
+            f"{brief}, framework restarts",
+        )
+    return f"{what} — the app starts after it", brief
 
 
 def _hook_name(hook: Any) -> str:
@@ -1104,7 +1115,7 @@ def _apply_pre_spawn(plans: list[PreSpawnPlan], package: str) -> None:
     if not plans:
         return
     error: AppStartError | None = None
-    with _pre_spawn_phase((package, _progress_text(plans))):
+    with _pre_spawn_phase((package, *_progress_text(plans))):
         previous = _system_server_pid()
         for plan in plans:
             try:
@@ -1133,18 +1144,28 @@ def _after_framework_restart(
     """Recover when system_server changed since ``previous``.
 
     Without a ``previous`` reading (adb failed) there is nothing to wait
-    for: recover only when system_server runs again and a plan said it
-    restarts the framework, else skip (logged).
+    for: when a plan said it restarts the framework, recover if
+    system_server runs again, else just drop the dead Frida handles (no
+    wait); without that claim skip (logged).
     """
     now = _system_server_pid()
     if previous is None:
-        if now is None or not disruptive:
+        if not disruptive:
             logger.info(
                 "Pre-start step for %s: system_server unreadable before it "
                 "(now %s); not waiting for a framework restart",
                 package,
                 now,
             )
+            return
+        if now is None:
+            logger.info(
+                "Pre-start step for %s: system_server unreadable before and "
+                "after it; dropping the Frida handles without waiting",
+                package,
+            )
+            _drop_dead_frida_state()
+            _stop_launched_tools(package)
             return
     elif now == previous:
         logger.debug(
@@ -1154,14 +1175,21 @@ def _after_framework_restart(
             previous,
         )
         return
-    recover_after_framework_restart(previous)
-    if package != _spotlight_pkg():
-        stop_app_tools(package)  # the spotlight app's: in the recovery
+    try:
+        recover_after_framework_restart(previous)
+    finally:
+        _stop_launched_tools(package)
     logger.info(
         "The Android framework restarted before %s started: Frida handles "
         "dropped, armed bypasses kept",
         package,
     )
+
+
+def _stop_launched_tools(package: str) -> None:
+    """The launched app's tools died too (the spotlight app's: in the drop)."""
+    if package != _spotlight_pkg():
+        stop_app_tools(package)
 
 
 def _drop_dead_frida_state() -> None:
@@ -1736,13 +1764,14 @@ def restart_app(paused: bool = False, *, consent: bool = False) -> tuple[bool, s
         pkg = spotlight.get_effective_package()
         if not pkg:
             return False, _no_app("Restart").reason
+        # The armed set now: a selection change during the dialog disarms.
+        bypass = _bypass()
+        armed = bypass.armed_categories()
         try:
             plans = _collect_pre_spawn(pkg, pkg)
             _confirm_pre_spawn(plans, pkg, pkg, consent)
         except AppStartError as exc:
             return False, str(exc)  # nothing was torn down
-        bypass = _bypass()
-        armed = bypass.armed_categories()
         try:
             respawn_teardown(pkg)
             try:

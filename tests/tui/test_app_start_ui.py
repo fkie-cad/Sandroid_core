@@ -514,6 +514,7 @@ class _ObjectionApp:
     def run_worker(self, fn, **kwargs):
         import threading
 
+        self.worker_kwargs = kwargs
         t = threading.Thread(target=fn)
         t.start()
         t.join(5)
@@ -568,11 +569,17 @@ async def test_the_header_says_what_the_pre_start_step_does(monkeypatch):
     def header() -> str:
         return str(app.query_one("#spotlight-header").content)
 
+    short = "Applying identity profile 'mara-de', framework restarts"
     app = _Harness()
     async with app.run_test(size=(240, 30)) as pilot:
         await settle(pilot)
+        panel = app.query_one(SpotlightPanel)
+        timer = panel._poll_timer
+        stops: list = []
+        stop = timer.stop
+        timer.stop = lambda: stops.append(1) or stop()
         assert "not running" in header()
-        t = threading.Thread(target=app_start._set_status, args=((PKG, text),))
+        t = threading.Thread(target=app_start._set_status, args=((PKG, text, short),))
         t.start()
         await until(pilot, lambda: text in header())
         assert "not running" not in header()
@@ -580,4 +587,45 @@ async def test_the_header_says_what_the_pre_start_step_does(monkeypatch):
         t = threading.Thread(target=app_start._set_status, args=(None,))
         t.start()
         await until(pilot, lambda: "not running" in header())
+        # The status listener never touches the running-state poll.
+        assert panel._poll_timer is timer
+        assert stops == []
+    assert stops == [1]  # unmount stops it
+    assert panel._poll_timer is None
     assert app_start._STATUS_LISTENERS == []  # unmount unsubscribed
+
+
+async def test_the_progress_line_is_short_on_a_narrow_lens(monkeypatch):
+    _panel_env(monkeypatch, pid=None)
+    text = (
+        "Applying identity profile 'mara-de' (ssaid) — the Android framework "
+        "restarts; this can take a few minutes"
+    )
+    short = "Applying identity profile 'mara-de', framework restarts"
+    app = _Harness()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await settle(pilot)
+        app_start._set_status((PKG, text, short))  # UI thread: repaints inline
+        try:
+            await settle(pilot)
+            header = str(app.query_one("#spotlight-header").content)
+            assert short in header
+            assert text not in header
+        finally:
+            app_start._set_status(None)
+
+
+def test_an_unexpected_objection_pre_start_error_is_shown(monkeypatch):
+    from sandroid.tui.app import SandroidTUI
+
+    def prepare(pkg, tool, **kw):
+        raise RuntimeError("adb gone")
+
+    monkeypatch.setattr(app_start, "prepare_launch", prepare)
+    fake = _ObjectionApp()
+
+    SandroidTUI._start_objection(fake, PKG, SimpleNamespace(spawn_mode=True))
+
+    assert fake.pushed == []
+    assert fake.notes == [("Objection not started: adb gone", "error")]
+    assert fake.worker_kwargs["exit_on_error"] is False
