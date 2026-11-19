@@ -22,6 +22,11 @@ One daemon worker (``privacy-scan``) does every scan; callers only enqueue
 idempotent). A finding that is new for its recipient (network) or file
 (storage) also writes one ``privacy/sent`` or ``privacy/stored`` line to the
 session timeline; it names the marker, never the value.
+
+The records shown are those of the session timeline's folder: the timeline's
+``bound`` doorbell (a session started, resumed or switched) makes the
+service drop the old session's records at once and read the new folder's on
+the worker, with or without an active profile (:meth:`switch_folder`).
 """
 
 from __future__ import annotations
@@ -91,7 +96,9 @@ AUTO_WATCH_DIRS = ("shared_prefs/", "databases/", "no_backup/")
 #: Minimum seconds between two auto-watch pulls of one file.
 AUTO_WATCH_MIN_INTERVAL_S = 10.0
 
-#: Queue priorities (lower first).
+#: Queue priorities (lower first). A session switch goes before any scan.
+PRIO_STOP = -2
+PRIO_LOAD = -1
 PRIO_NET = 0
 PRIO_FILE = 1
 PRIO_SWEEP = 2
@@ -113,7 +120,6 @@ _ENCODED_TOKENS = (
     "bytes(",
     "e7(",
     "double_",
-    "float_",
 )
 _GENERIC_TOKENS = frozenset(
     {
@@ -350,6 +356,8 @@ class _Item:
     fp: str
     submitted: float
     retro: bool = False
+    #: The folder generation a retro item was listed for (-1: live item).
+    gen: int = -1
 
     def key(self) -> str:  # pragma: no cover - overridden
         raise NotImplementedError
@@ -383,6 +391,7 @@ class _SweepItem(_Item):
     local: Path = Path()
     sweep_id: str = ""
     package: str | None = None
+    run_id: str | None = None
 
     def key(self) -> str:
         return f"sweep:{self.sweep_id}:{self.device_path}:{self.member}"
@@ -394,6 +403,18 @@ class _SweepDone(_Item):
 
     def key(self) -> str:
         return f"sweep-done:{self.root.name}"
+
+
+@dataclass
+class _LoadItem(_Item):
+    """Switch to the session timeline's folder (``folder`` when the timeline
+    cannot say) and read its records.
+    """
+
+    folder: Path | None = None
+
+    def key(self) -> str:
+        return f"load:{self.folder}"
 
 
 @dataclass
@@ -432,7 +453,9 @@ def scan_stream(
     """Scan ``stream`` in :data:`CHUNK` pieces overlapping by the longest needle.
 
     Yields the GIL between chunks. A hit is reported once even when it
-    straddles a chunk boundary.
+    straddles a chunk boundary, and a weaker form inside a stronger hit
+    counted in the previous chunk stays suppressed (the scan's
+    ``_drop_contained`` only sees one buffer).
 
     Returns:
         ``(aggregates by (marker_id, transform), sha256 of the bytes read,
@@ -446,6 +469,9 @@ def scan_stream(
     total = 0
     truncated = False
     eof = False
+    # (marker_id, start, end) in stream offsets of counted hits that reach
+    # past the last chunk's limit: they contain hits found in the next one.
+    carry: list[tuple[str, int, int]] = []
     while not eof:
         want = min(CHUNK, cap - total)
         if want <= 0:
@@ -465,9 +491,15 @@ def scan_stream(
         limit = len(buf) if eof else len(buf) - overlap
         if limit <= 0:
             continue
+        next_carry: list[tuple[str, int, int]] = []
         for hit in needles.scan(buf):
             if hit.offset >= limit:
                 continue
+            start, end = base + hit.offset, base + hit.end
+            if any(m == hit.marker_id and s <= start and end <= e for m, s, e in carry):
+                continue  # inside a stronger hit of the previous chunk
+            if hit.end > limit:
+                next_carry.append((hit.marker_id, start, end))
             key = (hit.marker_id, hit.transform)
             agg = aggs.get(key)
             if agg is None:
@@ -477,6 +509,7 @@ def scan_stream(
                     confidence=hit.confidence,
                 )
             agg.add(hit, base + hit.offset)
+        carry = [c for c in (*carry, *next_carry) if c[2] > base + limit]
         buf = buf[limit:]
         base += limit
         time.sleep(0)  # let the UI thread run between chunks
@@ -645,32 +678,43 @@ def _recipient_lookup(host: str) -> tuple[str, bool]:
 
 
 def _first_party(host: str, package: str | None) -> bool:
+    """The host's registrable domain is named after the app's package.
+
+    Whole labels only: the domain's name label (``fittrack`` of
+    ``api.fittrack.de``) must equal a non-generic package token
+    (``com.fittrack.app``). A substring is not enough: ``com.google.*`` and
+    ``google-analytics.com`` or ``com.amazon.*`` and ``amazon-adsystem.com``
+    are different recipients.
+    """
     if not package:
         return False
     domain = registrable_domain(host)
     name = domain.split(".", 1)[0] if domain else ""
     if len(name) < 3:
         return False
-    tokens = [
+    tokens = {
         t
         for t in package.lower().split(".")
         if len(t) >= 3 and t not in _GENERIC_TOKENS
-    ]
-    return any(t == name or (len(t) >= 5 and t in name) for t in tokens)
+    }
+    return name in tokens
 
 
 def classify_party(host: str, package: str | None) -> tuple[str, str]:
     """``(recipient label, party)`` of a flow's host.
 
-    ``first`` when the registrable domain matches a token of the package
-    name (``com.fittrack.app`` -> ``fittrack.*``), ``third`` when Dexray
-    Insight (or the Network lens's table) knows the host as a tracker or
-    vendor, else ``unknown``.
+    ``third`` when Dexray Insight (or the Network lens's table) knows the
+    host as a tracker, ad network or vendor (this wins: an app of the same
+    vendor still sends to its tracking domain), else ``first`` when the
+    registrable domain's name equals a token of the package name
+    (``com.fittrack.app`` -> ``fittrack.*``), else ``unknown``.
     """
     label, known = _recipient_lookup(host or "")
+    if known:
+        return label, "third"
     if _first_party(host or "", package):
         return label, "first"
-    return label, ("third" if known else "unknown")
+    return label, "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -716,6 +760,15 @@ class PrivacyScanService:
         self._retro_iter: Iterator[_Item] | None = None
         # records
         self._folder: Path | None = None
+        #: The in-memory records were dropped (a session switch); the next
+        #: load reads the folder again even when it did not change.
+        self._stale = False
+        #: Bumped on every folder load: retro items of an older one are
+        #: dropped.
+        self._gen = 0
+        #: Bumped whenever the loaded records change (cheap cache key for
+        #: the lenses).
+        self.revision = 0
         self._hits: list[HitRecord] = []
         self._by_flow: dict[str, list[HitRecord]] = {}
         self._by_file: dict[str, list[HitRecord]] = {}
@@ -843,10 +896,14 @@ class PrivacyScanService:
             self._dropped.append(item.key())
             self.dropped += 1
             return False
+        # After the put: an idle worker that just ended (no profile) cannot
+        # strand the item.
+        self._ensure_worker()
         return True
 
     def _snapshot(self) -> tuple[NeedleSet, str] | None:
-        needles, fp = self._needles, self._fp
+        with self._lock:  # one consistent pair (set_markers writes both)
+            needles, fp = self._needles, self._fp
         if needles is None or fp is None or self._closed:
             return None
         return needles, fp
@@ -900,12 +957,17 @@ class PrivacyScanService:
             ),
         )
 
-    def sweep_app_data(self, serial: str | None, package: str) -> None:
+    def sweep_app_data(
+        self, serial: str | None, package: str, *, run_id: str | None = None
+    ) -> None:
         """Pull every file of ``package``'s data folders and scan them.
 
         Pulls on its own thread (``privacy-sweep``); the scans run on the
         worker, and only files with hits are kept (under
-        ``privacy/sweep/``). No-op while no profile is active.
+        ``privacy/sweep/``). No-op while no profile is active. ``run_id``:
+        the Play the sweep ends; its records carry it (``source.run_id``),
+        so the run's views include them although they are found after the
+        run's end.
         """
         snap = self._snapshot()
         if snap is None or not package:
@@ -913,12 +975,14 @@ class PrivacyScanService:
         self._ensure_worker()
         threading.Thread(
             target=self._sweep,
-            args=(serial, package, snap),
+            args=(serial, package, snap, run_id),
             name="privacy-sweep",
             daemon=True,
         ).start()
 
-    def _sweep(self, serial: str | None, package: str, snap: tuple) -> None:
+    def _sweep(
+        self, serial: str | None, package: str, snap: tuple, run_id: str | None = None
+    ) -> None:
         folder = self._privacy_dir()
         if folder is None:
             return
@@ -956,6 +1020,7 @@ class PrivacyScanService:
                     local=Path(result.local_path),
                     sweep_id=sweep_id,
                     package=package,
+                    run_id=run_id,
                 ),
             )
         self._put(PRIO_SWEEP, _SweepDone(snap[0], snap[1], now, root=out))
@@ -1012,6 +1077,22 @@ class PrivacyScanService:
         with self._lock:
             return [h for h in self._hits if h.t is not None and t0 <= h.t <= t1]
 
+    def hits_for_run(self, run_id: str | None, t0: float, t1: float) -> list[HitRecord]:
+        """The loaded session's hits of one run: in ``[t0, t1]`` or attributed
+        to ``run_id`` (the end-of-run sweep, found after the run's end).
+        """
+        with self._lock:
+            return run_hits(self._hits, run_id, t0, t1)
+
+    def has_hits(self) -> bool:
+        """The loaded session has any hit record (cheap: no copy, no lock)."""
+        return bool(self._hits)
+
+    @property
+    def folder(self) -> Path | None:
+        """The timeline folder whose records are loaded (None: none yet)."""
+        return self._folder
+
     def tags_for_flow(self, flow_id: str) -> list[TagInfo]:
         """One :class:`TagInfo` per marker found in the flow, strongest first."""
         return _tags(self.hits_for_flow(flow_id))
@@ -1020,8 +1101,12 @@ class PrivacyScanService:
         """One :class:`TagInfo` per marker found in the file, strongest first."""
         return _tags(self.hits_for_file(device_path))
 
-    def add_listener(self, cb: Callable[[HitRecord], None]) -> None:
-        """``cb(record)`` for every new record, on the worker thread."""
+    def add_listener(self, cb: Callable[[HitRecord | None], None]) -> None:
+        """``cb(record)`` for every new record, on the worker thread.
+
+        ``cb(None)``: the loaded records changed as a whole (a session
+        switch dropped or loaded them); redraw everything.
+        """
         with self._lock:
             if cb not in self._listeners:
                 self._listeners.append(cb)
@@ -1032,12 +1117,70 @@ class PrivacyScanService:
                 self._listeners.remove(cb)
 
     def load_session(self, folder: Path) -> None:
-        """Show the records of ``folder`` (a session's timeline folder).
+        """Read the records of ``folder`` (a session's timeline folder) now,
+        on the calling thread (file I/O: not for the UI thread; the TUI
+        uses :meth:`switch_folder`).
 
         Live scans keep writing to the live session's folder and switch the
         view back on their next item.
         """
         self._load(Path(folder))
+        self._notify_reset()
+
+    def switch_folder(self, folder: Path | str | None = None) -> None:
+        """The session timeline's folder changed (session start, resume, new
+        session, device switch) or is first known: show its records.
+
+        Any thread, never blocks, works without an active profile (stored
+        findings are shown read-only). A different ``folder`` drops the old
+        session's records, summary and flow folder from memory at once; the
+        worker then reads the new folder's ``hits.jsonl`` / ``coverage.jsonl``
+        (the timeline's active folder; ``folder`` when it cannot say) and
+        calls the listeners with ``None``. With a profile active, the new
+        session's flows and kept versions are retro-scanned once.
+
+        Args:
+            folder: The new timeline folder (the ``bound`` doorbell's
+                ``folder``), or None to ask the timeline on the worker.
+        """
+        if self._closed:
+            return
+        target = Path(folder) if folder is not None else None
+        with self._lock:
+            if target is not None and target == self._folder and not self._stale:
+                return
+            if target is not None and self._folder is not None:
+                self._clear_views()
+        if target is not None and self._folder is not None:
+            self._notify_reset()
+        self._put(PRIO_LOAD, _LoadItem(None, "", time.monotonic(), folder=target))  # type: ignore[arg-type]
+
+    def _clear_views(self) -> None:
+        """Lock held: drop the loaded session's records (its files stay)."""
+        self._stale = True
+        self._hits = []
+        self._by_flow = {}
+        self._by_file = {}
+        self._covered = set()
+        self._seen = set()
+        self._emitted = set()
+        self._version_sets = {}
+        self._file_last = {}
+        self._flow_dir = None
+        self._auto_pulls = {}
+        self._retro_iter = None
+        self._recount()
+        self.revision += 1
+
+    def _notify_reset(self) -> None:
+        """Every listener gets ``None``: the loaded records changed as a whole."""
+        with self._lock:
+            listeners = list(self._listeners)
+        for cb in listeners:
+            try:
+                cb(None)
+            except Exception:
+                logger.debug("privacy scan: listener failed", exc_info=True)
 
     # -- worker ---------------------------------------------------------------
 
@@ -1066,7 +1209,7 @@ class PrivacyScanService:
         """Stop the worker (tests, quit)."""
         self._closed = True
         with contextlib.suppress(queue.Full):
-            self._queue.put_nowait((-1, next(self._counter), None))
+            self._queue.put_nowait((PRIO_STOP, next(self._counter), None))
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
@@ -1089,6 +1232,8 @@ class PrivacyScanService:
         while not self._closed:
             item = self._next_item()
             if item is None:
+                if self._idle_exit():
+                    return
                 continue
             try:
                 self._process(item)
@@ -1099,11 +1244,33 @@ class PrivacyScanService:
                     self._busy = False
                     self._idle.notify_all()
 
+    def _idle_exit(self) -> bool:
+        """No profile and nothing to do: end the worker (``_ensure_worker``
+        starts a new one; submitters put first and ensure after).
+        """
+        with self._lock:
+            if (
+                self._needles is not None
+                or not self._queue.empty()
+                or self._retro_pending()
+                or self._thread is not threading.current_thread()
+            ):
+                return False
+            self._thread = None
+        with self._idle:
+            self._idle.notify_all()
+        return True
+
     def _next_item(self) -> _Item | None:
         with self._lock:
-            request, self._retro_request = self._retro_request, None
-            if request is not None:
-                self._retro_iter = self._retro_items(*request)
+            request = self._retro_request
+        if request is not None:
+            # Load the session first: the listing reads its coverage.
+            self._ensure_folder()
+            with self._lock:
+                if self._retro_request is request:
+                    self._retro_request = None
+                    self._retro_iter = self._retro_items(*request)
         retro = self._retro_iter
         try:
             entry = (
@@ -1139,6 +1306,11 @@ class PrivacyScanService:
         return None
 
     def _process(self, item: _Item) -> None:
+        if isinstance(item, _LoadItem):
+            self._switch(item)
+            return
+        if item.retro and item.gen != self._gen:
+            return  # listed for a session that is no longer loaded
         self._ensure_folder()
         self._flush_dropped(item)
         if isinstance(item, _FlowItem):
@@ -1155,27 +1327,44 @@ class PrivacyScanService:
     def _folder_now(self) -> Path | None:
         if self._folder_fn is not None:
             return self._folder_fn()
-        from sandroid.core import timeline
-
-        try:
-            status = timeline.get_timeline().status()
-            if status.folder:
-                return Path(status.folder)
-        except Exception:
-            pass
-        try:
-            return timeline.timeline_folder()
-        except Exception:
-            return None
+        return current_timeline_folder()
 
     def _privacy_dir(self) -> Path | None:
         folder = self._folder_now()
         return folder / FOLDER_NAME if folder is not None else None
 
     def _ensure_folder(self) -> None:
+        """Worker: follow the session timeline's folder (lazy backstop of
+        :meth:`switch_folder`).
+        """
         folder = self._folder_now()
-        if folder is not None and folder != self._folder:
-            self._load(folder)
+        if folder is not None and (folder != self._folder or self._stale):
+            self._switch_to(folder)
+
+    def _switch(self, item: _LoadItem) -> None:
+        """Worker: load the session timeline's folder (see switch_folder)."""
+        folder = self._folder_now() or item.folder
+        if folder is not None and (folder != self._folder or self._stale):
+            self._switch_to(folder)
+
+    def _switch_to(self, folder: Path) -> None:
+        """Worker: load ``folder``; after a real switch with a profile active,
+        retro-scan the new session; tell the listeners.
+        """
+        previous = self._folder
+        self._load(folder)
+        with self._lock:
+            needles, fp = self._needles, self._fp
+            if (
+                needles is not None
+                and fp is not None
+                and previous is not None
+                and previous != folder
+            ):
+                # The new session's flows and versions not yet scanned for
+                # the active profile (idempotent per item: coverage).
+                self._retro_request = (needles, fp)
+        self._notify_reset()
 
     def _load(self, folder: Path) -> None:
         privacy = folder / FOLDER_NAME
@@ -1189,7 +1378,14 @@ class PrivacyScanService:
             if line.get("skip") in (None, "unscannable") and line.get("key"):
                 covered.add((str(line["key"]), str(line.get("fp")), line.get("engine")))
         with self._lock:
+            if self._folder is not None and folder != self._folder:
+                self._flow_dir = None  # the old session's mitmproxy folder
+                self._auto_pulls = {}
+                self._retro_iter = None
             self._folder = folder
+            self._stale = False
+            self._gen += 1
+            self.revision += 1
             self._hits = []
             self._by_flow = {}
             self._by_file = {}
@@ -1303,12 +1499,27 @@ class PrivacyScanService:
                 return None
             time.sleep(0.1)
 
-    def _flow_parts(self, rec: dict, detail: dict) -> list[tuple]:
-        """``(part, data, direction, truncated, decoded)`` per scanned part."""
+    def _flow_parts(self, rec: dict, detail: dict | None) -> list[tuple]:
+        """``(part, data, direction, truncated, decoded)`` per scanned part.
+
+        Without a details file only what the ``flows.jsonl`` line has: the
+        URL (host, path, query) and its content-type headers.
+        """
         url = f"{rec.get('host') or ''}{rec.get('path') or ''}"
         parts: list[tuple] = [
             ("url", url.encode("utf-8", "surrogatepass"), "sent", False, None)
         ]
+        if detail is None:
+            for key, prefix, direction in (
+                ("request_content_type", "req", "sent"),
+                ("response_content_type", "resp", "received"),
+            ):
+                value = rec.get(key)
+                if value:
+                    data = str(value).encode("utf-8", "surrogatepass")
+                    part = f"{prefix}.header:Content-Type"
+                    parts.append((part, data, direction, False, None))
+            return parts
         for side, direction in (("request", "sent"), ("response", "received")):
             prefix = "req" if side == "request" else "resp"
             for pair in detail.get(f"{side}_headers") or ():
@@ -1328,10 +1539,10 @@ class PrivacyScanService:
             return
         started = time.monotonic()
         rec = item.rec
+        # No details file (dropped by retention, never written): scan what
+        # the flows.jsonl line has and mark the flow "partial", so a later
+        # retro scan with the details completes it.
         detail = self._read_detail(item)
-        if detail is None:
-            self._ledger(item, started=started, skip="unscannable")
-            return
         host = str(rec.get("host") or "")
         app = rec.get("app") or None
         label, party = classify_party(host, app)
@@ -1360,9 +1571,19 @@ class PrivacyScanService:
         sent_markers = {
             agg.hit.marker_id for _p, d, _t, _c, agg in found if d == "sent"
         }
+        # Parts already recorded for this flow and profile (an earlier
+        # partial scan) are not recorded again.
+        with self._lock:
+            known = {
+                (h.part, h.marker_id, h.transform)
+                for h in self._by_flow.get(str(rec.get("id")), ())
+                if h.fp == item.fp
+            }
         records = []
         t = rec.get("ts_start")
         for part, direction, truncated, decoded, agg in found:
+            if (part, agg.hit.marker_id, agg.hit.transform) in known:
+                continue
             records.append(
                 self._record(
                     item,
@@ -1388,6 +1609,7 @@ class PrivacyScanService:
             truncated=any_truncated,
             started=started,
             n_hits=len(records),
+            skip="partial" if detail is None else None,
             extra={"flow_id": rec.get("id")},
         )
 
@@ -1554,6 +1776,8 @@ class PrivacyScanService:
             "package": item.package,
             "local": str(item.local),
         }
+        if item.run_id:
+            source["run_id"] = item.run_id
         records = [
             self._record(
                 item,
@@ -1683,7 +1907,9 @@ class PrivacyScanService:
             "engine": rec.engine,
             "retro": rec.retro,
         }
-        transform = short_transform(rec.transform)
+        if rec.source.get("run_id"):
+            data["run_id"] = rec.source["run_id"]
+        transform = _transform_words(rec.transform)
         if rec.direction == "sent":
             src = rec.source
             recipient = rec.recipient or {}
@@ -1696,8 +1922,8 @@ class PrivacyScanService:
                 recipient=recipient.get("label"),
             )
             summary = (
-                f"{rec.label} sent to {src.get('host') or '?'} · "
-                f"{part_label(rec.part)} · {transform}"
+                f"{rec.label} sent to {src.get('host') or 'an unknown host'}, "
+                f"{_part_words(rec.part)}, {transform}"
             )
             kind = "sent"
         else:
@@ -1713,7 +1939,7 @@ class PrivacyScanService:
                 where = owner_and_relative(str(src.get("device_path")))[1]
             except Exception:
                 where = str(src.get("device_path"))
-            summary = f"{rec.label} stored in {where} · {transform}"
+            summary = f"{rec.label} stored in {where}, {transform}"
             kind = "stored"
         try:
             from sandroid.core.timeline import get_timeline
@@ -1738,6 +1964,7 @@ class PrivacyScanService:
             return
         self._append(HITS_FILE, [r.to_json() for r in records])
         with self._lock:
+            self.revision += 1
             for rec in records:
                 self._index(rec)
                 if rec.fp == self._fp:
@@ -1757,8 +1984,12 @@ class PrivacyScanService:
     # -- retro -------------------------------------------------------------------
 
     def _retro_items(self, needles: NeedleSet, fp: str) -> Iterator[_Item]:
-        """Items of the session not yet scanned for ``fp`` (lazily, oldest first)."""
-        self._ensure_folder()
+        """Items of the session not yet scanned for ``fp`` (lazily, oldest first).
+
+        Each item carries the folder generation it was listed for; after a
+        session switch the rest is dropped (``_process``).
+        """
+        gen = self._gen
         now = time.monotonic()
         if self._flow_dir_fn is not None:
             flow_dir = self._flow_dir_fn()
@@ -1772,7 +2003,14 @@ class PrivacyScanService:
                 if rec.get("kind") == "tls" or not rec.get("id"):
                     continue
                 item = _FlowItem(
-                    needles, fp, now, retro=True, rec=rec, flow_dir=flow_dir, seq=None
+                    needles,
+                    fp,
+                    now,
+                    retro=True,
+                    gen=gen,
+                    rec=rec,
+                    flow_dir=flow_dir,
+                    seq=None,
                 )
                 if not self._is_covered(item.key(), fp):
                     yield item
@@ -1782,6 +2020,7 @@ class PrivacyScanService:
                 fp,
                 now,
                 retro=True,
+                gen=gen,
                 device_path=device_path,
                 version_dir=version_dir,
                 pull_seq=None,
@@ -1794,6 +2033,75 @@ class PrivacyScanService:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+def _transform_words(transform: str) -> str:
+    """``sha256(lower(value))`` -> ``sha256 of the lower-case value``."""
+    try:
+        from sandroid.core.report_engine import transform_words
+
+        return transform_words(transform)
+    except Exception:
+        return short_transform(transform)
+
+
+def _part_words(part: str) -> str:
+    """``req.body`` -> ``request body``, ``url`` -> ``URL``."""
+    try:
+        from sandroid.core.report_engine import part_words
+
+        return part_words(part)
+    except Exception:
+        return part_label(part)
+
+
+def run_hits(
+    records: list[HitRecord], run_id: str | None, t0: float, t1: float
+) -> list[HitRecord]:
+    """The records of one run: in ``[t0, t1]`` or attributed to ``run_id``."""
+    return [
+        h
+        for h in records
+        if (h.t is not None and t0 <= h.t <= t1)
+        or (run_id and h.source.get("run_id") == run_id)
+    ]
+
+
+def read_hits(folder: Path | str) -> tuple[list[HitRecord], bool]:
+    """Read a session's stored findings (read-only; file I/O, not on the UI
+    thread).
+
+    Args:
+        folder: The session's timeline folder.
+
+    Returns:
+        ``(records, scanned)``: ``scanned`` means the privacy scan ran in
+        that session (its ``coverage.jsonl`` or ``hits.jsonl`` exists).
+    """
+    privacy = Path(folder) / FOLDER_NAME
+    records = [
+        rec
+        for line in _read_jsonl(privacy / HITS_FILE)
+        if (rec := HitRecord.from_json(line)) is not None
+    ]
+    scanned = bool(records) or (privacy / COVERAGE_FILE).is_file()
+    return records, scanned
+
+
+def current_timeline_folder() -> Path | None:
+    """The live session timeline's folder (what the scan writes below)."""
+    from sandroid.core import timeline
+
+    try:
+        status = timeline.get_timeline().status()
+        if status.folder:
+            return Path(status.folder)
+    except Exception:
+        pass
+    try:
+        return timeline.timeline_folder()
+    except Exception:
+        return None
 
 
 def _novelty_key(rec: HitRecord) -> tuple:
@@ -1986,13 +2294,58 @@ def _net_sink(rec: dict, flow_dir: Path, seq: int | None) -> None:
     get_privacy_scan_service().submit_flow(rec, flow_dir, seq)
 
 
+def _on_timeline_event(event: Any) -> None:
+    """The timeline doorbell: a ``bound`` (new active timeline folder: a
+    session started, resumed or switched, or another device) switches the
+    scan's records to that folder. Enqueue only, never blocks.
+    """
+    payload = getattr(event, "data", event) or {}
+    if not isinstance(payload, dict) or payload.get("op") != "bound":
+        return
+    if payload.get("active") is False:
+        return
+    try:
+        service = _existing_service()
+        if service is not None:
+            service.switch_folder(payload.get("folder") or None)
+    except Exception:
+        logger.debug("privacy scan: session switch failed", exc_info=True)
+
+
+def _existing_service() -> PrivacyScanService | None:
+    """The singleton when it exists (the doorbell never creates one)."""
+    try:
+        from sandroid.services import _service_instances
+
+        return _service_instances.get(PrivacyScanService)
+    except Exception:
+        return None
+
+
+def _subscribe_timeline(on: bool) -> None:
+    try:
+        from sandroid.core.events import EventBus, EventType
+
+        bus = EventBus.get()
+        bus.unsubscribe(EventType.TIMELINE_EVENT, _on_timeline_event)
+        if on:
+            bus.subscribe(EventType.TIMELINE_EVENT, _on_timeline_event)
+    except Exception:
+        logger.debug("privacy scan: no timeline doorbell", exc_info=True)
+
+
 def start_privacy_scan() -> PrivacyScanService:
-    """TUI startup: scan logged flows and follow the identity profile."""
+    """TUI startup: scan logged flows, follow the identity profile and the
+    session timeline's folder (its stored findings load even with no
+    profile active).
+    """
     from sandroid.services.tracking_service import NetFlowSource
 
     service = get_privacy_scan_service()
     NetFlowSource.add_sink(_net_sink)
+    _subscribe_timeline(True)
     service.attach_identity()
+    service.switch_folder()  # the session the TUI started in (worker reads)
     return service
 
 
@@ -2002,6 +2355,7 @@ def stop_privacy_scan() -> None:
         from sandroid.services.tracking_service import NetFlowSource
 
         NetFlowSource.remove_sink(_net_sink)
+    _subscribe_timeline(False)
     get_privacy_scan_service().close()
 
 
@@ -2017,10 +2371,17 @@ def submit_pulled_version(
         logger.debug("privacy scan: submit_version failed", exc_info=True)
 
 
-def sweep_after_run(package: str | None = None, serial: str | None = None) -> bool:
+def sweep_after_run(
+    package: str | None = None,
+    serial: str | None = None,
+    *,
+    run_id: str | None = None,
+) -> bool:
     """A Play finished: sweep the app's data folders when a profile is active.
 
     ``package`` defaults to the Spotlight app, ``serial`` to the adb target.
+    ``run_id``: the finished run; the sweep's records carry it, so the run's
+    Privacy tab includes them although they are found after its end.
     Returns whether a sweep was started (never raises, never blocks).
     """
     try:
@@ -2037,7 +2398,7 @@ def sweep_after_run(package: str | None = None, serial: str | None = None) -> bo
             from sandroid.core.adb import Adb
 
             serial = Adb.get_target_device()
-        service.sweep_app_data(serial, package)
+        service.sweep_app_data(serial, package, run_id=run_id)
         return True
     except Exception:
         logger.debug("privacy scan: sweep after run failed", exc_info=True)
@@ -2054,10 +2415,13 @@ __all__ = [
     "TagInfo",
     "body_bytes",
     "classify_party",
+    "current_timeline_folder",
     "get_privacy_scan_service",
     "is_approx",
     "is_encoded",
+    "read_hits",
     "registrable_domain",
+    "run_hits",
     "scan_bytes",
     "scan_stream",
     "start_privacy_scan",

@@ -1,7 +1,8 @@
 """An in-memory stand-in for the privacy scan service (lens tests).
 
-``FakePrivacy`` has the query API the lenses use (``hits*``, ``tags_for_*``,
-``add_listener``/``remove_listener``, ``is_active``) over a list of real
+``FakePrivacy`` has the query API the lenses use (``hits*``, ``has_hits``,
+``tags_for_*``, ``add_listener``/``remove_listener``, ``is_active``,
+``folder``, ``revision``) over a list of real
 :class:`~sandroid.services.privacy_scan.HitRecord` s; ``add(hit)`` delivers a
 hit to the listeners from a worker thread, like the scan worker does.
 ``install(monkeypatch, hits)`` patches ``get_privacy_scan_service``.
@@ -20,10 +21,17 @@ GLYPHS = "■▲◆●✓✗⚑⌁"
 
 
 class FakePrivacy:
-    def __init__(self, hits=(), *, active: bool = True) -> None:
+    def __init__(self, hits=(), *, active: bool = True, folder=None) -> None:
         self._hits = list(hits)
         self.is_active = active
         self.listeners: list = []
+        self.folder = folder
+        self.revision = 0
+        #: tags_for_flow calls (tests check rows look up once).
+        self.tag_calls = 0
+
+    def has_hits(self) -> bool:
+        return bool(self._hits)
 
     def hits(self, *, marker_id=None):
         return [h for h in self._hits if marker_id in (None, h.marker_id)]
@@ -37,7 +45,11 @@ class FakePrivacy:
     def hits_between(self, t0, t1):
         return [h for h in self._hits if h.t is not None and t0 <= h.t <= t1]
 
+    def hits_for_run(self, run_id, t0, t1):
+        return privacy_scan.run_hits(self._hits, run_id, t0, t1)
+
     def tags_for_flow(self, flow_id):
+        self.tag_calls += 1
         return privacy_scan._tags(self.hits_for_flow(flow_id))
 
     def tags_for_file(self, device_path):
@@ -54,6 +66,17 @@ class FakePrivacy:
     def add(self, hit) -> None:
         """Record ``hit`` and call the listeners on a worker thread."""
         self._hits.append(hit)
+        self.revision += 1
+        self._notify(hit)
+
+    def reset(self, hits=(), *, folder=None) -> None:
+        """A session switch: replace the records, listeners get ``None``."""
+        self._hits = list(hits)
+        self.folder = folder
+        self.revision += 1
+        self._notify(None)
+
+    def _notify(self, hit) -> None:
         listeners = list(self.listeners)
 
         def run() -> None:
@@ -65,8 +88,8 @@ class FakePrivacy:
         worker.join()
 
 
-def install(monkeypatch, hits=(), *, active: bool = True) -> FakePrivacy:
-    fake = FakePrivacy(hits, active=active)
+def install(monkeypatch, hits=(), *, active: bool = True, folder=None) -> FakePrivacy:
+    fake = FakePrivacy(hits, active=active, folder=folder)
     monkeypatch.setattr(privacy_scan, "get_privacy_scan_service", lambda: fake)
     return fake
 
@@ -135,7 +158,17 @@ def file_hit(
     t: float | None = None,
     tl_seq: int | None = None,
     pull_seq: int | None = None,
+    run_id: str | None = None,
 ) -> HitRecord:
+    source = {
+        "type": "file",
+        "device_path": device_path,
+        "version": version,
+        "member": device_path.rsplit("/", 1)[-1],
+        "pull_seq": pull_seq,
+    }
+    if run_id:
+        source["run_id"] = run_id  # an end-of-run sweep's record
     return HitRecord(
         v=1,
         at=time.time(),
@@ -153,13 +186,7 @@ def file_hit(
         count=1,
         offsets=(10,),
         snippet=tuple(snippet),
-        source={
-            "type": "file",
-            "device_path": device_path,
-            "version": version,
-            "member": device_path.rsplit("/", 1)[-1],
-            "pull_seq": pull_seq,
-        },
+        source=source,
         recipient=None,
         tl_seq=tl_seq,
     )

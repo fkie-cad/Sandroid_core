@@ -63,6 +63,7 @@ points to the run's pcap. ``L`` (MainScreen) returns to LIVE.
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import logging
 import threading
@@ -674,6 +675,9 @@ def body_renderable(body: Any, content_type: str | None) -> RenderableType:
 PRIVACY_REFRESH_S = 1.0
 #: The Identity column is shown from this lens width on (the row tint stays).
 PRIVACY_COLUMN_MIN_WIDTH = 100
+#: A posted redraw that has not run after this long (its timer died with an
+#: unmounted lens) no longer blocks new ones (seconds).
+PRIVACY_POST_STALE_S = 5.0
 
 
 def privacy_service() -> Any | None:
@@ -758,17 +762,29 @@ def party_color(party: str | None) -> str:
     return pal.text
 
 
-def profile_tint(role: str = "warn", amount: float = 0.13) -> str:
-    """The lens background blended a little towards a theme token."""
+@functools.lru_cache(maxsize=32)
+def _blend(bg: str, color: str, amount: float) -> str:
     from textual.color import Color
 
+    try:
+        return Color.parse(bg).blend(Color.parse(color), amount).hex
+    except Exception:
+        return bg
+
+
+@functools.lru_cache(maxsize=32)
+def _bg_style(color: str) -> Style:
+    return Style(bgcolor=color)
+
+
+def profile_tint(role: str = "warn", amount: float = 0.13) -> str:
+    """The lens background blended a little towards a theme token (cached
+    per palette colours, so a theme change picks up the new tint).
+    """
     from sandroid.tui.themes import lens_palette
 
     pal = lens_palette()
-    try:
-        return Color.parse(pal.bg).blend(Color.parse(getattr(pal, role)), amount).hex
-    except Exception:
-        return pal.bg
+    return _blend(pal.bg, getattr(pal, role), amount)
 
 
 def tag_words(tags: Any, width: int | None = None) -> Text:
@@ -861,10 +877,11 @@ def hits_renderable(hits: Any) -> RenderableType:
     return Group(*blocks)
 
 
-def _privacy_tags_for_flow(flow_id: str | None) -> list:
+def _privacy_tags_for_flow(flow_id: str | None, service: Any = None) -> list:
     if not flow_id:
         return []
-    service = privacy_service()
+    if service is None:
+        service = privacy_service()
     if service is None:
         return []
     try:
@@ -873,14 +890,29 @@ def _privacy_tags_for_flow(flow_id: str | None) -> list:
         return []
 
 
+def privacy_has_hits(service: Any) -> bool:
+    """The service has loaded hit records (``has_hits``; no copy of them)."""
+    if service is None:
+        return False
+    has_hits = getattr(service, "has_hits", None)
+    if has_hits is not None:
+        return bool(has_hits())
+    return bool(service.hits())
+
+
 class PrivacyFeed:
     """New privacy-scan hits for a lens, redrawn at most once a second.
 
     The scan service calls listeners on its worker thread; this only queues
     ``key(record)`` (a flow id, a device path ...) and posts one UI hop
     (non-blocking, :class:`UiDispatcher`). On the UI the owner's
-    ``flush(keys)`` runs at most once per :data:`PRIVACY_REFRESH_S`.
+    ``flush(keys)`` runs at most once per :data:`PRIVACY_REFRESH_S`. A
+    ``None`` record (the service loaded or dropped a whole session) queues
+    :attr:`ALL`: redraw everything.
     """
+
+    #: The key of "everything changed" (a session switch).
+    ALL = "*"
 
     def __init__(
         self,
@@ -894,6 +926,7 @@ class PrivacyFeed:
         self._lock = threading.Lock()
         self._pending: set[str] = set()
         self._posted = False
+        self._posted_at = 0.0
         self._last = 0.0
         self._ui = UiDispatcher()
         self._service: Any = None
@@ -901,6 +934,8 @@ class PrivacyFeed:
     def attach(self) -> None:
         """Start listening (call on the UI thread, e.g. ``on_mount``)."""
         self._ui = UiDispatcher.capture()
+        with self._lock:
+            self._posted = False
         service = privacy_service()
         if service is None:
             return
@@ -920,17 +955,24 @@ class PrivacyFeed:
 
     def on_hit(self, rec: Any) -> None:
         """Scan worker thread: queue the record's key, post one UI hop."""
-        try:
-            key = self._key(rec)
-        except Exception:
-            key = None
+        if rec is None:
+            key: Any = self.ALL
+        else:
+            try:
+                key = self._key(rec)
+            except Exception:
+                key = None
         if not key:
             return
+        now = time.monotonic()
         with self._lock:
             self._pending.add(str(key))
-            if self._posted:
+            # A post whose redraw never ran (its timer died with the lens)
+            # must not block every later one.
+            if self._posted and now - self._posted_at < PRIVACY_POST_STALE_S:
                 return
             self._posted = True
+            self._posted_at = now
         if not self._ui.post(self._schedule):
             with self._lock:
                 self._posted = False
@@ -981,7 +1023,7 @@ class ProfileTintMixin:
         except Exception:
             return style
         if cell.row_key.value in keys:
-            return style + Style(bgcolor=profile_tint())
+            return style + _bg_style(profile_tint())  # both cached
         return style
 
 
@@ -1166,6 +1208,11 @@ class NetworkPanel(Widget):
         self._privacy_feed = PrivacyFeed(
             self, self._privacy_flush, lambda rec: rec.flow_id
         )
+        #: flow id -> tags, valid for one service revision (one lookup per
+        #: row: the filter, "/" and the Identity cell share it).
+        self._tags_cache: dict[str, list] = {}
+        self._tags_rev: Any = None
+        self._tags_owner: Any = None
 
     # -- compose / mount -------------------------------------------------
 
@@ -1444,7 +1491,7 @@ class NetworkPanel(Widget):
         """Whether ``row`` is shown (``noise=False``: ignore the noise filter)."""
         if self.in_review and not self._show_all_phases and row.phase in HIDDEN_PHASES:
             return False
-        if self._profile_only and not _privacy_tags_for_flow(row.flow_id):
+        if self._profile_only and not self._flow_tags(row):
             return False
         if self._app_only and self._focus_app and row.app != self._focus_app:
             return False
@@ -1460,8 +1507,7 @@ class NetworkPanel(Widget):
                 return False
         return True
 
-    @staticmethod
-    def _haystack(row: FlowRow) -> str:
+    def _haystack(self, row: FlowRow) -> str:
         """What ``/`` matches: host, path, method, app, recipient, status.
 
         The status column's words are included, so ``/404``, ``/tls`` or
@@ -1474,7 +1520,7 @@ class NetworkPanel(Widget):
         else:
             status = str(row.status) if row.status is not None else ""
         hay = f"{row.method} {row.host}{row.path} {row.app} {row.recipient[0]} {status}"
-        hay += " " + tags_plain(_privacy_tags_for_flow(row.flow_id))
+        hay += " " + tags_plain(self._flow_tags(row))
         return hay.lower()
 
     def _count_phase_hidden(self) -> dict[str, int]:
@@ -2255,9 +2301,27 @@ class NetworkPanel(Widget):
         if service is None:
             return False
         try:
-            return bool(service.is_active or service.hits())
+            return bool(service.is_active or privacy_has_hits(service))
         except Exception:
             return False
+
+    def _flow_tags(self, row: FlowRow) -> list:
+        """The row's profile tags, looked up once per service revision."""
+        flow_id = row.flow_id
+        if not flow_id:
+            return []
+        service = privacy_service()
+        rev = getattr(service, "revision", None) if service is not None else None
+        if rev is None:  # a service without revisions: no caching
+            return _privacy_tags_for_flow(flow_id, service)
+        if rev != self._tags_rev or service is not self._tags_owner:
+            self._tags_cache = {}
+            self._tags_rev = rev
+            self._tags_owner = service
+        tags = self._tags_cache.get(flow_id)
+        if tags is None:
+            tags = self._tags_cache[flow_id] = _privacy_tags_for_flow(flow_id, service)
+        return tags
 
     def _privacy_columns(self, avail: int) -> list[tuple[str, str, int]]:
         if avail < PRIVACY_COLUMN_MIN_WIDTH or not self._privacy_wanted():
@@ -2266,7 +2330,7 @@ class NetworkPanel(Widget):
 
     def _privacy_cell(self, row: FlowRow, width: int) -> Text:
         """The Identity cell; also (un)marks the row for the tint."""
-        tags = _privacy_tags_for_flow(row.flow_id) if row.kind == "flow" else []
+        tags = self._flow_tags(row) if row.kind == "flow" else []
         table = self._privacy_table
         if table is None:  # one DOM query, not one per row
             try:
@@ -2316,7 +2380,8 @@ class NetworkPanel(Widget):
         keys = [k for k, _, _ in self._net_layout]
         has_col = "ident" in keys
         wants_col = bool(self._privacy_columns(self.size.width or 120))
-        if self._profile_only or has_col != wants_col or not keys:
+        everything = PrivacyFeed.ALL in pending
+        if everything or self._profile_only or has_col != wants_col or not keys:
             self._rebuild()
         else:
             column = "ident" if has_col else "req"
@@ -2335,7 +2400,7 @@ class NetworkPanel(Widget):
             ms = self._main_screen()
             key = str(ms.inspector_content.key).removeprefix("network:row:")
             row = self._row_by_key(key)
-            if row is not None and row.flow_id in pending:
+            if row is not None and (everything or row.flow_id in pending):
                 ms.update_inspector(self.flow_content(row))
         self._do_refresh_status()
 

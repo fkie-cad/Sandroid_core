@@ -168,7 +168,7 @@ def test_snippet_marks_the_match_and_hides_binary():
     needles = build_needles([Marker("ad_id", AD_ID, kind="uuid")])
     data = b"\x00\x01gaid=" + AD_ID.encode() + b"&x=1"
     before, match, after = snippet(data, needles.scan(data)[0], width=8)
-    assert (before, match, after) == ("··gaid=", AD_ID, "&x=1")
+    assert (before, match, after) == ("  gaid=", AD_ID, "&x=1")  # no glyphs
 
 
 def test_scan_is_fast_enough_for_flow_bodies():
@@ -207,3 +207,51 @@ def test_max_needle_len_for_chunk_overlap():
     needles = build_needles([Marker("email", EMAIL, kind="email")])
     assert needles.max_needle_len == max(len(n.pattern) for n in needles.needles)
     assert build_needles([]).max_needle_len == 0
+
+
+def _gps():
+    return build_needles(
+        [
+            Marker("lat", "52.520008", kind="latitude", group="gps"),
+            Marker("lon", "13.404954", kind="longitude", group="gps"),
+        ]
+    )
+
+
+def test_pair_boost_needs_the_two_close_together():
+    needles = _gps()
+    near = needles.scan(b"lat=52.520&lon=13.405")
+    assert {h.marker_id: h.confidence for h in near} == {"lat": "high", "lon": "high"}
+    # A price and a weight a kilobyte apart are no GPS fix.
+    far = needles.scan(b"price=52.520&" + b"x" * 1024 + b"&weight=13.405")
+    assert {h.marker_id for h in far} == {"lat", "lon"}
+    assert "high" not in {h.confidence for h in far}
+
+
+def test_pair_boost_only_raises_the_hits_near_a_partner():
+    needles = _gps()
+    data = b"a=52.520 " + b"x" * 400 + b" lat=52.520,lon=13.405"
+    lats = sorted(
+        (h.offset, h.confidence) for h in needles.scan(data) if h.marker_id == "lat"
+    )
+    assert [c for _o, c in lats] == ["low", "high"]
+
+
+def test_no_float_needles_and_no_short_needles():
+    needles = _gps()
+    transforms = {n.transform for n in needles.needles}
+    assert not any(t.startswith("float_") for t in transforms)
+    assert {"double_le(value)", "double_be(value)"} <= transforms
+    assert all(len(n.pattern) >= MIN_NEEDLE_LEN for n in needles.needles)
+
+
+def test_base64_never_raises_confidence():
+    needles = _gps()
+    base64_low = [
+        n
+        for n in needles.needles
+        if n.transform.startswith("base64") and "3)" in n.transform
+    ]
+    assert base64_low
+    # 3 decimals is "low"; a short base64 fragment of it stays low.
+    assert {n.confidence for n in base64_low} == {"low"}

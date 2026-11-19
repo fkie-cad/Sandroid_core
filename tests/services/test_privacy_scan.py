@@ -171,7 +171,7 @@ def test_flow_scan_parts_echo_and_timeline(svc, flow_dir, folder):
         "domain": "facebook.com",
     }
     assert header.source["flow_id"] == "f1"
-    # The first (retro) scan made the lines; the second scan only records.
+    # The first (retro) scan made the lines; the rescan adds nothing.
     sent = _privacy_lines(lines)
     assert [line["kind"] for line in sent] == ["sent"] * 3
     first = sent[0]
@@ -182,13 +182,19 @@ def test_flow_scan_parts_echo_and_timeline(svc, flow_dir, folder):
     assert timeline._instant(first["t"]) == pytest.approx(rec["ts_start"], abs=1e-3)
     summaries = " ".join(line["summary"] for line in sent)
     assert "Advertising ID sent to graph.facebook.com" in summaries
-    assert "req body · sha256(lower)" in summaries
+    assert (
+        "Advertising ID sent to graph.facebook.com, URL, as is" in summaries
+    )  # plain words, commas: no separator glyphs
+    assert (
+        "E-mail sent to graph.facebook.com, request body, sha256 of the "
+        "lower-case value" in summaries
+    )
+    assert "·" not in summaries
     assert AD_ID not in summaries
     assert EMAIL_SHA not in summaries
-    live = [h for h in hits if not h.retro]
-    assert live
-    assert all(not h.new and h.tl_seq is None for h in live)
-    assert live[0].source["net_seq"] == 42
+    # The rescan of the same flow (coverage dropped) records no duplicates.
+    assert all(h.retro for h in hits)
+    assert len({(h.part, h.marker_id, h.transform) for h in hits}) == len(hits)
     # Records on disk mirror memory; the ledger has one line per scan.
     written = (folder / "privacy" / "hits.jsonl").read_text().splitlines()
     assert len(written) == len(hits)
@@ -232,20 +238,56 @@ def test_detail_file_race_is_retried(svc, flow_dir):
     assert {h.marker_id for h in svc.hits_for_flow("f1")} == {"ad_id", "email"}
 
 
-def test_vanished_details_are_unscannable(svc, flow_dir, folder, monkeypatch):
+def _coverage(folder: Path) -> list[dict]:
+    return [
+        json.loads(x)
+        for x in (folder / "privacy" / "coverage.jsonl").read_text().splitlines()
+    ]
+
+
+def test_flow_without_details_scans_the_url_and_completes_later(
+    svc, flow_dir, folder, monkeypatch
+):
+    """No details file: the URL is still scanned and the flow stays "partial";
+    a later retro scan with the details adds the body hits, without
+    recording the URL hit or its timeline line again.
+    """
     monkeypatch.setattr(ps, "DETAIL_RETRY_S", 0.1)
     svc.set_markers(FP, MARKERS)
     assert svc.flush()
     rec = _rec(1)
     _write_flow(flow_dir, rec, None)
-    svc.submit_flow(rec, flow_dir, 5)
-    assert svc.flush()
-    assert svc.hits_for_flow("f1") == []
-    coverage = [
-        json.loads(x)
-        for x in (folder / "privacy" / "coverage.jsonl").read_text().splitlines()
+    with timeline.capture() as lines:
+        svc.submit_flow(rec, flow_dir, 5)
+        assert svc.flush()
+        first = svc.hits_for_flow("f1")
+        assert [(h.part, h.marker_id) for h in first] == [("url", "ad_id")]
+        assert [c["skip"] for c in _coverage(folder) if c["key"] == "flow:f1"] == [
+            "partial"
+        ]
+        # The details appear (a later retro scan, e.g. a new profile or a
+        # restart): the body is scanned, the URL hit is not recorded again.
+        detail = _detail("f1", req=json.dumps({"mail": EMAIL}).encode())
+        (flow_dir / "details" / "f1.json").write_text(json.dumps(detail))
+        again = ps.PrivacyScanService(
+            folder_fn=lambda: folder, flow_dir_fn=lambda: flow_dir
+        )
+        try:
+            again.set_markers(FP, MARKERS)
+            assert again.flush()
+            hits = again.hits_for_flow("f1")
+        finally:
+            again.close()
+    assert sorted((h.part, h.marker_id) for h in hits) == [
+        ("req.body", "email"),
+        ("url", "ad_id"),
     ]
-    assert [c["skip"] for c in coverage if c["key"] == "flow:f1"] == ["unscannable"]
+    assert [c["skip"] for c in _coverage(folder) if c["key"] == "flow:f1"] == [
+        "partial",
+        None,
+    ]
+    sent = _privacy_lines(lines)
+    assert [line["data"]["marker_id"] for line in sent] == ["ad_id", "email"]
 
 
 def test_tls_records_and_inactive_service_are_ignored(svc, flow_dir):
@@ -290,6 +332,36 @@ def test_classify_party():
     assert ps.classify_party("x.app.com", pkg)[1] == "unknown"  # generic token
 
 
+@pytest.mark.parametrize(
+    ("host", "package"),
+    [
+        ("www.google-analytics.com", "com.google.android.youtube"),
+        ("pagead2.googlesyndication.com", "com.google.android.apps.maps"),
+        ("aax.amazon-adsystem.com", "com.amazon.mShop.android.shopping"),
+        ("config.samsungads.com", "com.samsung.android.app.notes"),
+    ],
+)
+def test_party_trackers_of_the_apps_vendor_are_third(monkeypatch, host, package):
+    """A package token inside a tracker's domain name is no first party."""
+    # Unknown to the lookup: whole labels only, so not "first" either.
+    assert ps.classify_party(host, package)[1] == "unknown"
+    assert not ps._first_party(host, package)
+
+    def known(h: str) -> tuple[str, bool]:
+        return ("Ad network", True) if h == host else (ps.registrable_domain(h), False)
+
+    monkeypatch.setattr(ps, "_RECIPIENT_FN", known)
+    assert ps.classify_party(host, package) == ("Ad network", "third")
+
+
+def test_party_known_tracker_wins_over_a_matching_package(monkeypatch):
+    monkeypatch.setattr(ps, "_RECIPIENT_FN", lambda h: ("Meta", True))
+    assert ps.classify_party("graph.facebook.com", "com.facebook.katana") == (
+        "Meta",
+        "third",
+    )
+
+
 # ------------------------------------------------------------------- scanning
 
 
@@ -301,6 +373,20 @@ def test_chunk_boundary_overlap_reports_once(monkeypatch):
         aggs, truncated = ps.scan_bytes(needles, data)
         agg = aggs[("email", "value")]
         assert (agg.count, agg.offsets, truncated) == (1, [start], False), start
+
+
+def test_chunk_boundary_keeps_a_weaker_form_suppressed(monkeypatch):
+    """``+4915112345678`` straddling a chunk limit: its digits-only form
+    (inside it, found again in the next chunk) is not a second record.
+    """
+    phone = "+4915112345678"
+    needles = build_needles([Marker("phone", phone, kind="phone", label="Phone")])
+    monkeypatch.setattr(ps, "CHUNK", 64)
+    for start in range(200):  # some put "+" before a limit, the digits after
+        data = b"x" * start + phone.encode() + b"y" * 150
+        aggs, _truncated = ps.scan_bytes(needles, data)
+        assert set(aggs) == {("phone", "value")}, start
+        assert aggs[("phone", "value")].offsets == [start], start
 
 
 def test_file_cap_flags_truncated(monkeypatch):
@@ -375,7 +461,7 @@ def test_wal_member_and_new_vs_repeat(svc):
         "path": "privacy/hits.jsonl",
         "lens": "files",
     }
-    assert stored[0]["summary"] == "E-mail stored in databases/app.db · plain"
+    assert stored[0]["summary"] == "E-mail stored in databases/app.db, as is"
     assert svc.tags_for_file(DB)[0].party == "stored"
 
 
@@ -407,6 +493,135 @@ def test_retro_scan_is_idempotent_per_fingerprint(svc, flow_dir, folder):
         assert len(coverage_file.read_text().splitlines()) == 2 * n_cov
     finally:
         again.close()
+
+
+def test_read_hits_and_run_hits(svc, flow_dir, folder, tmp_path):
+    _standard_flow(flow_dir)
+    svc.set_markers(FP, MARKERS)
+    assert svc.flush()
+    records, scanned = ps.read_hits(folder)
+    assert scanned
+    assert [r.to_json() for r in records] == [h.to_json() for h in svc.hits()]
+    assert ps.read_hits(tmp_path / "nowhere") == ([], False)
+    t = 1_700_000_001.0
+    assert ps.run_hits(records, None, t - 1, t + 1) == records
+    assert ps.run_hits(records, "run-x", 0, 1) == []
+
+
+# ------------------------------------------------------------ session switch
+
+
+def _session_with_hits(folder: Path, flow_dir: Path) -> int:
+    service = ps.PrivacyScanService(
+        folder_fn=lambda: folder, flow_dir_fn=lambda: flow_dir
+    )
+    try:
+        _standard_flow(flow_dir)
+        service.set_markers(FP, MARKERS)
+        assert service.flush()
+        return len(service.hits())
+    finally:
+        service.close()
+
+
+def test_switch_folder_loads_stored_findings_without_a_profile(tmp_path, flow_dir):
+    """Identity mode off: a resumed session's findings still show, and a new
+    session drops them at once (hits, summary, flow folder).
+    """
+    old, new = tmp_path / "old", tmp_path / "new"
+    n = _session_with_hits(old, flow_dir)
+    current = {"folder": old}
+    service = ps.PrivacyScanService(folder_fn=lambda: current["folder"])
+    resets: list = []
+    service.add_listener(resets.append)
+    try:
+        service.switch_folder()  # startup: no profile, no submit, still loads
+        assert service.flush()
+        assert len(service.hits()) == n
+        assert service.has_hits()
+        assert service.folder == old
+        assert resets == [None]
+        assert not service.is_active
+        assert wait_for(lambda: service._thread is None)  # idle worker ends
+        rev = service.revision
+        service._flow_dir = flow_dir
+        current["folder"] = new
+        service.switch_folder(new)  # the "bound" doorbell
+        # Dropped at once, before the worker reads the new folder.
+        assert service.hits() == []
+        assert not service.has_hits()
+        assert service._flow_dir is None
+        assert service.revision > rev
+        assert service.flush()
+        assert service.folder == new
+        assert service.hits() == []
+        assert service.summary().hits_total == 0
+        assert resets[-1] is None
+        # Switching back reads the old session again.
+        current["folder"] = old
+        service.switch_folder(old)
+        assert service.flush()
+        assert len(service.hits()) == n
+    finally:
+        service.close()
+
+
+def test_switch_folder_resets_the_summary_and_retro_scans_the_new_session(
+    tmp_path, flow_dir, monkeypatch
+):
+    """With a profile active the header counts restart in the new session,
+    and the previous session's flow folder is not retro-scanned into it.
+    """
+    old, new = tmp_path / "old", tmp_path / "new"
+    current = {"folder": old}
+    monkeypatch.setattr(ps, "_default_flow_dir", lambda: None)
+    service = ps.PrivacyScanService(folder_fn=lambda: current["folder"])
+    try:
+        service.set_markers(FP, MARKERS)
+        assert service.flush()
+        rec = _standard_flow(flow_dir)
+        service.submit_flow(rec, flow_dir, 1)  # caches the old flow folder
+        assert service.flush()
+        assert service.summary().values_found == 2
+        current["folder"] = new
+        service.switch_folder(new)
+        assert service.summary().values_found == 0
+        assert service.flush()
+        assert service.summary().values_found == 0
+        assert service.hits() == []
+        assert not (new / "privacy" / "hits.jsonl").exists()
+    finally:
+        service.close()
+
+
+def test_timeline_bound_doorbell_switches_the_folder(monkeypatch, tmp_path):
+    from sandroid.core.events import Event, EventType
+
+    calls: list = []
+
+    class Fake:
+        def switch_folder(self, folder=None):
+            calls.append(folder)
+
+    monkeypatch.setattr(ps, "_existing_service", lambda: None)
+    bound = {"op": "bound", "folder": str(tmp_path), "active": True}
+    ps._on_timeline_event(Event(EventType.TIMELINE_EVENT, bound))  # no service
+    monkeypatch.setattr(ps, "_existing_service", lambda: Fake())
+    ps._on_timeline_event(Event(EventType.TIMELINE_EVENT, bound))
+    ps._on_timeline_event(Event(EventType.TIMELINE_EVENT, {"op": "lines"}))
+    ps._on_timeline_event(Event(EventType.TIMELINE_EVENT, {**bound, "active": False}))
+    assert calls == [str(tmp_path)]
+    # Through the bus, as the timeline writer rings it (subscribed once).
+    from sandroid.core.events import EventBus
+
+    ps._subscribe_timeline(True)
+    ps._subscribe_timeline(True)
+    try:
+        EventBus.get().publish(Event(EventType.TIMELINE_EVENT, bound))
+    finally:
+        ps._subscribe_timeline(False)
+    EventBus.get().publish(Event(EventType.TIMELINE_EVENT, bound))
+    assert calls == [str(tmp_path)] * 2
 
 
 def test_load_session_and_hits_between(svc, flow_dir, folder):
@@ -445,12 +660,26 @@ def test_sweep_keeps_only_files_with_hits(svc, folder, monkeypatch):
     monkeypatch.setattr(services, "get_file_extraction_service", FakeFx)
     svc.set_markers(FP, MARKERS)
     assert svc.flush()
-    svc.sweep_app_data("emulator-test", "com.fittrack.app")
-    assert wait_for(lambda: svc.hits())
-    assert svc.flush()
+    with timeline.capture() as lines:
+        assert (
+            ps.sweep_after_run(
+                "com.fittrack.app", "emulator-test", run_id="20260101_000000_abcdef"
+            )
+            is False
+        )  # another service is the singleton: not active
+        svc.sweep_app_data("emulator-test", "com.fittrack.app", run_id="run-7")
+        assert wait_for(lambda: svc.hits())
+        assert svc.flush()
     (hit,) = svc.hits()
     assert hit.device_path == "/data/data/com.fittrack.app/prefs.xml"
     assert hit.source["version"].startswith("sweep:com.fittrack.app_")
+    # Found after the run's end, still the run's: it carries the run id.
+    assert hit.source["run_id"] == "run-7"
+    assert svc.hits_between(0, 1) == []
+    assert svc.hits_for_run("run-7", 0, 1) == [hit]
+    assert svc.hits_for_run("run-8", 0, 1) == []
+    (line,) = _privacy_lines(lines)
+    assert line["data"]["run_id"] == "run-7"
     kept = [p.name for p in (folder / "privacy" / "sweep").rglob("*") if p.is_file()]
     assert kept == ["prefs.xml"]
 
@@ -485,10 +714,26 @@ def test_queue_overflow_goes_to_the_ledger(folder, flow_dir):
     assert {h.flow_id for h in service.hits()} == {f"f{i}" for i in range(1, 6)}
 
 
+def test_sweep_after_run_passes_the_run_id(monkeypatch):
+    calls: list = []
+
+    class Fake:
+        is_active = True
+
+        def sweep_app_data(self, serial, package, *, run_id=None):
+            calls.append((serial, package, run_id))
+
+    monkeypatch.setattr(ps, "get_privacy_scan_service", lambda: Fake())
+    assert ps.sweep_after_run("com.a", "emulator-5", run_id="r1")
+    assert calls == [("emulator-5", "com.a", "r1")]
+
+
 def test_listener_runs_on_the_worker(svc, flow_dir):
     seen: list[tuple[str, str]] = []
     svc.add_listener(
-        lambda rec: seen.append((threading.current_thread().name, rec.part))
+        lambda rec: seen.append(
+            (threading.current_thread().name, rec.part if rec else "reset")
+        )
     )
     _standard_flow(flow_dir)
     svc.set_markers(FP, MARKERS)

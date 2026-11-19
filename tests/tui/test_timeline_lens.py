@@ -1681,7 +1681,7 @@ def _privacy_lines(t: float) -> list[dict]:
             t + 2,
             "privacy",
             "sent",
-            summary="Advertising ID sent to graph.facebook.com · req body · plain",
+            summary="Advertising ID sent to graph.facebook.com, request body, as is",
             actor="app",
             ref={"of": 2, "id": "abc", "path": "privacy/hits.jsonl", "lens": "network"},
         ),
@@ -1690,7 +1690,7 @@ def _privacy_lines(t: float) -> list[dict]:
             t + 3,
             "privacy",
             "stored",
-            summary="Email stored in shared_prefs/p.xml · plain",
+            summary="Email stored in shared_prefs/p.xml, as is",
             actor="app",
             ref={"of": 1, "path": "privacy/hits.jsonl", "lens": "files"},
         ),
@@ -1699,7 +1699,7 @@ def _privacy_lines(t: float) -> list[dict]:
             t + 4,
             "privacy",
             "sent",
-            summary="GPS sent to example.com · URL · plain",
+            summary="GPS sent to example.com, URL, as is",
             actor="app",
             ref={
                 "of": 999,
@@ -1713,7 +1713,7 @@ def _privacy_lines(t: float) -> list[dict]:
             t + 5,
             "privacy",
             "stored",
-            summary="Email stored in databases/a.db · plain",
+            summary="Email stored in databases/a.db, as is",
             actor="app",
             ref={"of": 998, "path": "privacy/hits.jsonl", "lens": "files"},
         ),
@@ -1749,7 +1749,7 @@ async def test_privacy_rows_are_tinted_and_keep_their_summary(install_fakes) -> 
         y = lens._view_index(3) + lens._display_offset()
         segments = list(lens.strip_for(y, 160))
         text = "".join(s.text for s in segments)
-        assert "Advertising ID sent to graph.facebook.com · req body · plain" in text
+        assert "Advertising ID sent to graph.facebook.com, request body, as is" in text
         warn = lens_palette().warn
         summary = next(s for s in segments if "Advertising ID" in s.text)
         assert summary.style.color.name == warn

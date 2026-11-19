@@ -1313,7 +1313,6 @@ _VALUE_WORDS = {
     "e7": "the value times ten million",
     "double_le": "a binary double (little-endian)",
     "double_be": "a binary double (big-endian)",
-    "float_le": "a binary float (little-endian)",
 }
 _PARTY_WORDS = {"third": "third party", "first": "first party"}
 
@@ -1360,8 +1359,7 @@ def encoding_class(transform: str) -> str:
     if any(tok in text for tok in ("round(", "truncate(", "e7(")):
         return "rounded"
     if any(
-        tok in text
-        for tok in ("base64", "hex(", "utf16(", "url(", "bytes(", "double_", "float_")
+        tok in text for tok in ("base64", "hex(", "utf16(", "url(", "bytes(", "double_")
     ):
         return "encoded"
     return "as is"

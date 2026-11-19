@@ -810,9 +810,9 @@ def _sentences(doc: dict) -> list[str]:
 
 def _privacy_line(tl, sec, kind, label, transform, **data):
     if kind == "sent":
-        summary = f"{label} sent to {data['host']} · req body · {transform}"
+        summary = f"{label} sent to {data['host']}, request body, {transform}"
     else:
-        summary = f"{label} stored in {data['path']} · {transform}"
+        summary = f"{label} stored in {data['path']}, {transform}"
     return tl.add(
         sec,
         "privacy",

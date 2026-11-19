@@ -1210,10 +1210,11 @@ class RecordingController:
                 self._ui(self._set_replay_phase, None)
         self._timeline_play_end(run_id, play_start, result, error, saved_run_id)
         # Identity profile active: sweep the app's data folders for markers
-        # (own thread; never raises).
+        # (own thread; never raises). The records carry the run id: they are
+        # found after the run's end but belong to it.
         from sandroid.services.privacy_scan import sweep_after_run
 
-        sweep_after_run()
+        sweep_after_run(run_id=saved_run_id or run_id)
 
         if error == "Replay cancelled":
             self._ui(self._log_warning, "Replay stopped; the partial run was saved.")
@@ -1568,6 +1569,16 @@ class RecordingController:
                 deleted_files=[],
                 counts={"changed": 0, "new": 0, "deleted": 0},
             )
+
+        # The session timeline the run belongs to: its privacy findings live
+        # there (the run index spans sessions).
+        try:
+            from sandroid.services.privacy_scan import current_timeline_folder
+
+            folder = current_timeline_folder()
+            record.timeline_folder = str(folder) if folder is not None else ""
+        except Exception:
+            logger.debug("Could not note the run's timeline folder", exc_info=True)
 
         saved_run_id: str | None = run_id
         try:

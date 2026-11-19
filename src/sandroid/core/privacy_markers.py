@@ -54,6 +54,10 @@ MIN_NEEDLE_LEN = 6
 #: A single needle reports at most this many hits per haystack.
 MAX_HITS_PER_NEEDLE = 50
 
+#: Hits of a marker group (e.g. latitude and longitude) raise each other's
+#: confidence only when they lie at most this many bytes apart.
+GROUP_PROXIMITY = 128
+
 _HASHES = ("md5", "sha1", "sha256")
 _COORDINATE_KINDS = ("latitude", "longitude")
 
@@ -70,8 +74,8 @@ class Marker:
         forms: Extra plain forms the caller knows about, e.g. a national
             phone number format.
         group: Markers sharing a group (e.g. ``"gps"`` for latitude and
-            longitude) raise each other's confidence when both are found in
-            the same haystack.
+            longitude) raise each other's confidence when all of them are
+            found close together (:data:`GROUP_PROXIMITY` bytes).
         tag: Short display tag for row markers, e.g. ``"AdID"`` (defaults to
             ``label``).
     """
@@ -223,7 +227,7 @@ def build_needles(markers: Iterable[Marker]) -> NeedleSet:
 def snippet(data: bytes | str, hit: MarkerHit, width: int = 32) -> tuple[str, str, str]:
     """Return printable ``(before, match, after)`` text around a hit.
 
-    Non-printable bytes are shown as ``·`` so binary files stay readable.
+    Non-printable bytes are shown as spaces so binary files stay readable.
     """
     if isinstance(data, str):
         data = data.encode("utf-8", "surrogatepass")
@@ -336,12 +340,18 @@ def _base64_needles(
     for fragment in _base64_fragments(raw):
         if len(fragment) < MIN_NEEDLE_LEN:
             continue
-        conf = confidence if len(fragment) >= 12 else "medium"
+        # A short fragment matches by chance more often: lower, never raise.
+        conf = confidence if len(fragment) >= 12 else _weaker(confidence, "medium")
         out.append(Needle(fragment, False, marker, f"base64({name})", conf))
         url_safe = fragment.translate(bytes.maketrans(b"+/", b"-_"))
         if url_safe != fragment:
             out.append(Needle(url_safe, False, marker, f"base64url({name})", conf))
     return out
+
+
+def _weaker(a: str, b: str) -> str:
+    """The weaker of two confidences."""
+    return a if CONFIDENCES.index(a) >= CONFIDENCES.index(b) else b
 
 
 def _base64_fragments(raw: bytes) -> list[bytes]:
@@ -396,10 +406,11 @@ def _coordinate_needles(marker: Marker) -> list[Needle]:
         raw = text.encode("ascii")
         needles.append(Needle(raw, True, marker, transform, confidence))
         needles += _base64_needles(marker, raw, transform, confidence)
-    # Binary IEEE-754 forms (protobuf/FlatBuffers doubles and floats). Only
-    # the exact seeded value can match, so these are strong evidence.
+    # Binary IEEE-754 doubles (protobuf/FlatBuffers). Only the exact seeded
+    # value can match, so these are strong evidence. (A 4-byte float is
+    # shorter than MIN_NEEDLE_LEN, so it is not generated.)
     exact = float(number)
-    for fmt, name in (("<d", "double_le"), (">d", "double_be"), ("<f", "float_le")):
+    for fmt, name in (("<d", "double_le"), (">d", "double_be")):
         raw = struct.pack(fmt, exact)
         needles.append(Needle(raw, False, marker, f"{name}(value)", "high"))
     return needles
@@ -450,31 +461,40 @@ def _drop_contained(hits: list[MarkerHit]) -> list[MarkerHit]:
     return kept
 
 
+def _near(a: MarkerHit, b: MarkerHit) -> bool:
+    """The two hits lie at most :data:`GROUP_PROXIMITY` bytes apart."""
+    return max(a.offset, b.offset) - min(a.end, b.end) <= GROUP_PROXIMITY
+
+
 def _boost_groups(hits: list[MarkerHit], markers: Sequence[Marker]) -> list[MarkerHit]:
-    """Raise confidence when several markers of one group are all found."""
+    """Raise a hit's confidence when every other marker of its group is found
+    close to it (``lat=52.520&lon=13.405``), not just anywhere in the
+    haystack (a price and a weight far apart are no GPS fix).
+    """
     groups = {m.id: m.group for m in markers if m.group}
     if not groups:
         return hits
-    found: dict[str, set[str]] = {}
+    members: dict[str, set[str]] = {}
+    for marker_id, group in groups.items():
+        members.setdefault(group, set()).add(marker_id)
+    by_marker: dict[str, list[MarkerHit]] = {}
+    for hit in hits:
+        if hit.marker_id in groups:
+            by_marker.setdefault(hit.marker_id, []).append(hit)
+    if len(by_marker) < 2:
+        return hits
+    out = []
     for hit in hits:
         group = groups.get(hit.marker_id)
-        if group:
-            found.setdefault(group, set()).add(hit.marker_id)
-    complete = {
-        g
-        for g, ids in found.items()
-        if len(ids) == sum(v == g for v in groups.values())
-    }
-    if not complete:
-        return hits
-    return [
-        replace(hit, confidence="high")
-        if groups.get(hit.marker_id) in complete
-        else hit
-        for hit in hits
-    ]
+        others = members.get(group, set()) - {hit.marker_id} if group else set()
+        if others and all(
+            any(_near(hit, o) for o in by_marker.get(other, ())) for other in others
+        ):
+            hit = replace(hit, confidence="high")
+        out.append(hit)
+    return out
 
 
 def _printable(chunk: bytes) -> str:
     text = chunk.decode("utf-8", "replace")
-    return "".join(ch if ch.isprintable() else "·" for ch in text)
+    return "".join(ch if ch.isprintable() else " " for ch in text)
