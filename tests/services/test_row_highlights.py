@@ -151,13 +151,18 @@ def test_registry_passes_with_store_registered(store, notes):
 
 def test_notify_after_mutations(store, notes):
     hs = store.create("network", "x", reasons={"f1": ""})
-    assert notes[-1] == ("network", frozenset({"f1"}))
+    # A new set changes the bar / column / filter: the whole lens redraws.
+    assert notes[-1] == ("network", None)
     store.add(hs.id, {"f2": ""})
     assert notes[-1] == ("network", frozenset({"f2"}))
     store.finish(hs.id, complete=False, stats={"scanned": 3})
     assert notes[-1] == ("network", None)
     assert store.get(hs.id).complete is False
     assert store.get(hs.id).stats == {"scanned": 3}
+    empty = store.create("network", "empty")
+    assert notes[-1] == ("network", None)
+    store.remove(empty.id)
+    assert notes[-1] == ("network", None)
     rev = store.revision
     store.clear()
     assert store.revision > rev

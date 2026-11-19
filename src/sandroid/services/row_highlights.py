@@ -398,10 +398,10 @@ class HighlightStore:
             self._sets[set_id] = hs
             if filter:
                 self._filters[lens] = set_id
-            changed = set(clean) | (set(old.reasons) if old else set())
             self._commit(lens)
             result = hs.copy()
-        self._notify(lens, changed)
+        # The list of sets changed (bar, column, filter): redraw the whole lens.
+        self._notify(lens, None)
         return result
 
     def add(self, set_id: str, reasons: Mapping[str, str]) -> int:
@@ -514,8 +514,8 @@ class HighlightStore:
             if self._filters.get(hs.lens) == set_id:
                 del self._filters[hs.lens]
             self._commit(hs.lens)
-            lens, keys = hs.lens, list(hs.reasons)
-        self._notify(lens, keys)
+            lens = hs.lens
+        self._notify(lens, None)
 
     def clear(self, lens: str | None = None) -> list[str]:
         """Delete every set (of *lens*); returns the removed ids."""
