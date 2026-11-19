@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import types
 
 import pytest
 
@@ -63,7 +64,18 @@ def _guard(proc, monkeypatch, *, limit_gb=8, action="kill"):
     adb_calls: list[list[str]] = []
     monkeypatch.setattr(eg, "find_emulator_process", lambda serial: proc)
     monkeypatch.setattr(eg.subprocess, "run", lambda argv, **kw: adb_calls.append(argv))
-    monkeypatch.setattr(eg.time, "sleep", lambda s: None)
+    # A fake clock local to the module: sleeping advances it, so the 15 s
+    # "wait for emu kill" loop in _shutdown ends at once without busy-spinning
+    # and without patching time.sleep for every other thread of the process.
+    clock = [1000.0]
+    monkeypatch.setattr(
+        eg,
+        "time",
+        types.SimpleNamespace(
+            monotonic=lambda: clock[0],
+            sleep=lambda s: clock.__setitem__(0, clock[0] + s),
+        ),
+    )
     g = eg.EmulatorMemoryGuard(
         lambda: "emulator-5556",
         limit_gb=limit_gb,

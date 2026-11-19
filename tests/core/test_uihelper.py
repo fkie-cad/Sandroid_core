@@ -916,6 +916,7 @@ def test_buffered_wraps_raw_pipe_only():
         raw.close()
 
 
+@pytest.mark.perf
 def test_big_reply_on_unbuffered_pipe_is_fast(adb):
     big = "x" * 3_000_000
 

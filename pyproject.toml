@@ -107,6 +107,7 @@ dev = [
     "pytest-cov>=4.0.0",
     "pytest-mock>=3.10.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-xdist>=3.6",
     "ruff==0.12.7",
     "black>=23.0.0",
     "isort>=5.12.0",
@@ -200,7 +201,9 @@ python_functions = ["test_*"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
-    "slow: marks tests as slow",
+    "slow: marks tests as slow (tools/test.sh quick skips them)",
+    "perf: wall-clock performance budgets; tools/test.sh full runs them serially after the parallel pass",
+    "quarantine(reason, issue): known-flaky test, deselected by tools/test.sh until the issue is fixed (both arguments required)",
     "integration: marks tests as integration tests",
     "requires_device: marks tests that require a connected Android device",
     "requires_frida: marks tests that require Frida",

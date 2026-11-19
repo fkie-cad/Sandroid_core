@@ -37,6 +37,15 @@ temporary directory, ``ANDROID_HOME``/``ANDROID_SDK_ROOT`` pointing to a
 nonexistent path, any ``SANDROID_*`` / AI-key environment variables removed,
 and the working directory set to a temporary directory, so tests neither read
 the developer's ``~/.config/sandroid`` nor leave ``./results`` behind.
+That scratch directory is created under ``TMPDIR`` (``tools/test.sh`` gives
+every run its own) and removed when the session ends.
+
+The session also refuses to start when ``import sandroid`` resolves outside
+this checkout's ``src/`` (a venv bound to another worktree would otherwise
+silently test that worktree's code), and every test restores the
+AndroidFridaManager class attributes Sandroid patches at runtime.
+
+Run the suite with ``tools/test.sh`` (see its header for modes).
 """
 
 from __future__ import annotations
@@ -44,6 +53,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -118,8 +128,24 @@ _ORIG_POPEN_INIT = subprocess.Popen.__init__
 _ORIG_CONNECT = socket.socket.connect
 _ORIG_CONNECT_EX = socket.socket.connect_ex
 
+#: A cheap stand-in for a blocked tool: exits 1 without starting an
+#: interpreter (falls back to ``python -c`` where there is no ``false``).
+_FALSE = next(
+    (p for p in ("/usr/bin/false", "/bin/false") if os.access(p, os.X_OK)),
+    shutil.which("false") if os.name != "nt" else None,
+)
+
 _saved_env: dict[str, str | None] = {}
 _saved_cwd: str | None = None
+
+#: Class attributes of AndroidFridaManager's ``FridaManager`` that
+#: ``sandroid.core.frida_manager.install_zygote_pid_fix`` replaces process-wide.
+_AFM_PATCHED_ATTRS = ("_build_frida_server_launcher", "_sandroid_zygote_pid_fix")
+#: ``(FridaManager class, its pristine values)``, captured in ``pytest_configure``.
+_afm_pristine: tuple[type, dict[str, Any]] | None = None
+
+#: Where this checkout's sources live; ``import sandroid`` must resolve here.
+_SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 
 
 # --------------------------------------------------------------------------
@@ -198,7 +224,10 @@ def _guarded_popen_init(self, args, *pargs, **kwargs):
     if _argv_is_blocked(args, kwargs.get("executable"), shell):
         _record("subprocess", _describe(args)[:300])
         kwargs["executable"] = None
-        args = "exit 1" if shell else [sys.executable, "-c", "raise SystemExit(1)"]
+        if shell:
+            args = "exit 1"
+        else:
+            args = [_FALSE] if _FALSE else [sys.executable, "-c", "raise SystemExit(1)"]
         if shell and os.name == "nt":
             args = "exit /b 1"
     return _ORIG_POPEN_INIT(self, args, *pargs, **kwargs)
@@ -258,9 +287,39 @@ def pytest_addoption(parser):
     )
 
 
+def _check_sandroid_source() -> None:
+    """Fail the session if ``sandroid`` is imported from another checkout."""
+    import sandroid
+
+    where = Path(sandroid.__file__).resolve()
+    if not where.is_relative_to(_SRC_DIR):
+        raise pytest.UsageError(
+            f"sandroid is imported from {where},\n"
+            f"not from this checkout's {_SRC_DIR}.\n"
+            "The tests would exercise another tree's code. Run tools/test.sh "
+            "(it sets PYTHONPATH=<checkout>/src), or reinstall this checkout "
+            "with `pip install -e .`."
+        )
+
+
+def _capture_afm_pristine() -> None:
+    global _afm_pristine
+    try:
+        from AndroidFridaManager import FridaManager as afm_cls
+    except Exception:  # AFM missing or broken: nothing to restore
+        return
+    _afm_pristine = (
+        afm_cls,
+        {a: afm_cls.__dict__[a] for a in _AFM_PATCHED_ATTRS if a in afm_cls.__dict__},
+    )
+
+
 def pytest_configure(config):
     """Isolate HOME/XDG/Android SDK env before any test module is imported."""
     global _saved_cwd
+    # Honour TMPDIR as it is now (tools/test.sh sets one per run), even if
+    # something computed and cached the temp dir earlier.
+    tempfile.tempdir = None
     base = Path(tempfile.mkdtemp(prefix="sandroid-tests-"))
     home = base / "home"
     home.mkdir()
@@ -281,10 +340,12 @@ def pytest_configure(config):
         _saved_env.setdefault(key, os.environ.get(key))
         os.environ[key] = value
     config._sandroid_test_base = base  # type: ignore[attr-defined]
+    _check_sandroid_source()
     global _real_tl
     from sandroid.core import timeline
 
     _real_tl = timeline
+    _capture_afm_pristine()
 
 
 def pytest_unconfigure(config):
@@ -294,6 +355,29 @@ def pytest_unconfigure(config):
         else:
             os.environ[key] = value
     _saved_env.clear()
+    base = getattr(config, "_sandroid_test_base", None)
+    if base is not None:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _restore_afm_class():
+    """Undo ``install_zygote_pid_fix`` after every test.
+
+    Services call it when they first build a FridaManager; it patches
+    AndroidFridaManager's class for the rest of the process, so a later
+    test that checks the unpatched launcher would depend on test order.
+    """
+    yield
+    if _afm_pristine is None:
+        return
+    afm_cls, pristine = _afm_pristine
+    for attr in _AFM_PATCHED_ATTRS:
+        if attr in pristine:
+            if afm_cls.__dict__.get(attr) is not pristine[attr]:
+                setattr(afm_cls, attr, pristine[attr])
+        elif attr in afm_cls.__dict__:
+            delattr(afm_cls, attr)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -405,6 +489,14 @@ def timeline_sink(tmp_path):
 
 
 def pytest_collection_modifyitems(config, items):
+    for item in items:
+        for mark in item.iter_markers("quarantine"):
+            if not (mark.kwargs.get("reason") and mark.kwargs.get("issue")):
+                raise pytest.UsageError(
+                    f"{item.nodeid}: quarantine needs reason= and issue=, "
+                    "e.g. @pytest.mark.quarantine(reason='races the "
+                    "settle timer', issue='#123')"
+                )
     if config.getoption("--allow-device"):
         return
     skip = pytest.mark.skip(reason="requires a real device (run with --allow-device)")
@@ -466,6 +558,20 @@ def _block_device_access(request, monkeypatch):
             f"\n  {calls}",
             pytrace=False,
         )
+
+
+def pytest_sessionfinish(session):
+    """On an xdist worker: hand this worker's blocked calls to the controller."""
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if workeroutput is not None:
+        workeroutput["sandroid_blocked"] = [list(entry) for entry in _blocked]
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error):
+    """On the xdist controller: collect a finished worker's blocked calls."""
+    entries = getattr(node, "workeroutput", {}).get("sandroid_blocked", [])
+    _blocked.extend(tuple(entry) for entry in entries)
 
 
 def pytest_terminal_summary(terminalreporter):

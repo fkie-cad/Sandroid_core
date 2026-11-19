@@ -2043,6 +2043,7 @@ def _label_path_brute(labels, ts, seq):
     return path
 
 
+@pytest.mark.perf
 def test_label_path_index_matches_the_scan_and_is_fast():
     import random
     import time as _time

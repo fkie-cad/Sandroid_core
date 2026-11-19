@@ -246,6 +246,7 @@ def test_cli_tail_masks_per_export_setting_unless_revealed(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.perf
 def test_emit_never_waits_for_a_writer_stalled_in_io(timeline_sink, monkeypatch):
     """The monitor reader thread calls emit: it must not wait on file I/O
     (trace_pipe overruns otherwise). The writer holds no lock while writing.

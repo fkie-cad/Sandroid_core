@@ -282,6 +282,7 @@ def test_no_key_clashes_app_screen_lenses_inspector_inputs() -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.perf
 async def test_tail_load_of_100k_lines_paints_in_under_a_second(
     install_fakes,
 ) -> None:
@@ -1515,6 +1516,7 @@ def test_late_insert_patches_the_view_like_a_full_rebuild() -> None:
         assert patched == lens._view, text
 
 
+@pytest.mark.perf
 def test_late_insert_is_much_cheaper_than_a_rebuild() -> None:
     n = 60_000
     t0 = NOW - n
