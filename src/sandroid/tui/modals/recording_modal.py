@@ -413,6 +413,7 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         self._wrapper: RecordingWrapper | None = None
         self._timer: Timer | None = None
         self._live_event_lines: list[str] = []
+        self._live_refresh_queued = False
         self._max_live_lines = 100
         from sandroid.core.run_bundle import RECORDING_FILENAME
 
@@ -758,11 +759,12 @@ class RecordingModal(ExtractionModal[RecordingResult]):
             self._show_error(f"Failed to create snapshot: {error}")
             return
 
-        # Create wrapper with callbacks
+        # Create the wrapper. The count is polled by _update_elapsed; the
+        # live lines arrive on Record's dispatcher thread and are handed to
+        # the UI without waiting (never a blocking call_from_thread).
         self._wrapper = RecordingWrapper(
             output_file=self._output_file,
-            on_event=self._on_event if self.show_live_events else None,
-            on_count_update=self._on_count_update,
+            on_event=self._on_event,
         )
 
         # Start recording
@@ -825,8 +827,13 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         # _start_recording/_on_snapshot_ready), this stops it from starting
         # capture anyway once it finishes.
         self._cancelled = True
-        if self._wrapper and self._wrapper.is_running:
-            self._wrapper.stop()
+        wrapper = self._wrapper
+        # The lease is held even while the shared getevent restarts (then
+        # is_running is False): release it whenever it is held.
+        if wrapper is not None and (
+            getattr(wrapper, "holds_lease", False) or wrapper.is_running
+        ):
+            wrapper.stop()
             try:
                 get_task_service().unregister("recording")
             except Exception:
@@ -844,7 +851,10 @@ class RecordingModal(ExtractionModal[RecordingResult]):
             self.event_count = self._wrapper.event_count
 
     def _on_event(self, line: str) -> None:
-        """Callback for live event display."""
+        """Live event line (Record's dispatcher thread): never waits for the
+        UI. One display refresh is queued at a time (``call_later`` posts a
+        message thread-safely and returns at once).
+        """
         if not self.show_live_events:
             return
 
@@ -852,16 +862,18 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         if len(self._live_event_lines) > self._max_live_lines:
             self._live_event_lines = self._live_event_lines[-self._max_live_lines :]
 
-        # Update display (thread-safe)
-        self.app.call_from_thread(self._update_live_events)
-
-    def _on_count_update(self, count: int) -> None:
-        """Callback for event count updates."""
-        # Update in main thread
-        self.app.call_from_thread(setattr, self, "event_count", count)
+        if self._live_refresh_queued:
+            return
+        self._live_refresh_queued = True
+        try:
+            if not self.call_later(self._update_live_events):
+                self._live_refresh_queued = False
+        except Exception:
+            self._live_refresh_queued = False
 
     def _update_live_events(self) -> None:
         """Update live events display."""
+        self._live_refresh_queued = False
         try:
             log = self.query_one("#live-events-log", Static)
             # Show last 20 lines

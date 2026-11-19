@@ -13,6 +13,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -125,6 +126,7 @@ class FakeHelper:
         self.shots: list[ShotResult] = []
         self.hashes: list[str] = []
         self.shot_calls = 0
+        self.shot_t_ms = 500.0
         self.last_error = None
         self.start_ok = True
         self.stopped = False
@@ -164,7 +166,8 @@ class FakeHelper:
             return ShotResult(1.0, 1080, 2424, h, 3.0, None, None)
         if self.shots:
             return self.shots.pop(0)
-        return ShotResult(81_234_000.0, 1080, 2424, "h-before", 14.0, PNG_A, "/x")
+        # captured before the taps of the tests (a later capture is "late")
+        return ShotResult(self.shot_t_ms, 1080, 2424, "h-before", 14.0, PNG_A, "/x")
 
 
 def wait_for(cond, timeout: float = 3.0) -> bool:
@@ -716,7 +719,7 @@ def test_sha256_dedupe_one_file_two_lines_and_seq_file_name(env, cfg):
     assert files == [f"{first['seq']}_before_tap.png"]
     assert (tmp / "tracking/shots" / files[0]).read_bytes() == PNG_A
     assert not list((tmp / "tracking/shots/.incoming").iterdir())
-    assert first["dev_mono"] == 81234.0
+    assert first["dev_mono"] == 0.5
     assert first["data"]["via"] == "helper"
 
 
@@ -1000,12 +1003,18 @@ def test_recording_is_the_exact_raw_slice(env, cfg, monkeypatch):
     body = tap_lines(2.0) + ['  name:     "virtio"', "add device 2: x"] + tap_lines(3.0)
     ge.feed(*body)
     assert wait_for(lambda: before.line_no() == 7 + len(body))
+    assert wait_for(lambda: counts and counts[-1] == 12)
     rec.stop()
     ge.feed(*tap_lines(4.0))  # after the stop: not in the recording
     out = (tmp / "raw/recording.getevent.txt").read_text().splitlines()
-    assert out == tap_lines(2.0) + tap_lines(3.0)
+    # the events verbatim, between the start/stop markers (clamped here: the
+    # fake kernel times are far from the host clock)
+    assert out[1:-1] == tap_lines(2.0) + tap_lines(3.0)
+    first, last = ts.parse_getevent(out[0]), ts.parse_getevent(out[-1])
+    assert first == (2.0, "/dev/input/event1", 0, 0, 0)
+    assert last[1:] == ("/dev/input/event1", 0, 0, 0)
+    assert last[0] >= 3.08
     assert rec.event_count == 12
-    assert counts[-1] == 12
     assert live[0] == "/dev/input/event1: 0003 0039 00000001"
     assert not (tmp / "raw/recording.txt").exists()
     before.release()
@@ -1177,6 +1186,44 @@ def test_mitmproxy_service_starts_and_stops_the_net_source(monkeypatch):
     assert svc._listeners == []
 
 
+def test_mitmproxy_stops_the_net_source_after_mitmweb_is_gone(monkeypatch):
+    """Flows that finish while mitmweb shuts down must still become lines:
+    the source's final drain runs after the process is gone.
+    """
+    from sandroid.services import mitmproxy_service as ms
+
+    order: list[str] = []
+
+    class Source:
+        def on_line(self, line):
+            pass
+
+        def stop(self):
+            order.append("net-source-stop")
+
+    svc = ms.MitmproxyService.__new__(ms.MitmproxyService)
+    svc._lock = threading.RLock()
+    svc._listeners = []
+    svc._net_source = Source()
+    svc._listeners.append(svc._net_source.on_line)
+    svc._proc = object()
+    svc._ssl_via_mitm = False
+    svc._state = type("S", (), {"running": True, "pid": 1})()
+    svc._addon_path = None
+    svc._web_token = None
+    svc._emit = lambda msg: None
+    monkeypatch.setattr(
+        svc, "_terminate", lambda proc, timeout: order.append("mitmweb-terminated")
+    )
+    monkeypatch.setattr(
+        "sandroid.core.proxy_manager.get_focus_manager",
+        lambda: SimpleNamespace(disable_focus=lambda: None),
+    )
+    svc.stop(release_device_proxy=False)
+    assert order == ["mitmweb-terminated", "net-source-stop"]
+    assert svc._net_source is None
+
+
 # --------------------------------------------------------------------------
 # the interval screenshot is gone
 # --------------------------------------------------------------------------
@@ -1187,7 +1234,8 @@ def test_interval_screenshot_feature_is_gone():
     out = subprocess.run(
         [
             "grep",
-            "-rn",
+            "-rnI",  # text files only: a stale .pyc is no source
+            "--exclude-dir=__pycache__",
             r"screenshot_interval\|features.screenshot\|StartScreenshotStep",
             str(src),
         ],
@@ -1195,3 +1243,651 @@ def test_interval_screenshot_feature_is_gone():
         text=True,
     )
     assert out.stdout == ""
+
+
+# --------------------------------------------------------------------------
+# review 3/4 fixes (repros from scratchpad/review3, review4)
+# --------------------------------------------------------------------------
+
+E1 = "/dev/input/event1"
+
+
+def ge(t: float, typ: int, code: int, val: int, dev: str = E1) -> str:
+    return f"[{t:15.6f}] {dev}: {typ:04x} {code:04x} {val & 0xFFFFFFFF:08x}"
+
+
+def decode_all(lines: list[str], d: ts.TouchDecoder | None = None):
+    d = d or ts.TouchDecoder()
+    out = []
+    for i, line in enumerate(lines, 1):
+        out += d.feed(line, i)
+    return out
+
+
+def taps_on_slot0(t0: float, n: int, *, x: int = 0x3000, y: int = 0x3000):
+    lines = []
+    for i in range(n):
+        t = t0 + i
+        lines += [ge(t, 3, 0x39, 10 + i), ge(t, 3, 0x35, x), ge(t, 3, 0x36, y),
+                  ge(t, 0, 0, 0), ge(t + 0.05, 3, 0x39, -1), ge(t + 0.05, 0, 0, 0)]  # fmt: skip
+    return lines
+
+
+def test_syn_dropped_closes_the_gesture_and_skips_to_the_next_report():
+    """r_decoder #2 / r1_decoder #3: a SYN_DROPPED that lost the finger-up
+    must not merge the next tap into the stuck gesture.
+    """
+    lines = [
+        ge(1.0, 3, 0x39, 1), ge(1.0, 3, 0x35, 0x1000), ge(1.0, 3, 0x36, 0x1000),
+        ge(1.0, 0, 0, 0),
+        ge(1.05, 0, 3, 0),  # SYN_DROPPED: the up frame was lost
+        ge(1.05, 3, 0x39, -1),  # dropped (until the SYN_REPORT)
+        ge(1.05, 0, 0, 0),
+        ge(9.0, 3, 0x39, 2), ge(9.0, 3, 0x35, 0x6000), ge(9.0, 3, 0x36, 0x6000),
+        ge(9.0, 0, 0, 0), ge(9.05, 3, 0x39, -1), ge(9.05, 0, 0, 0),
+    ]  # fmt: skip
+    ends = [e.gesture for e in decode_all(lines) if e.kind == "end"]
+    assert len(ends) == 2
+    first, second = ends
+    assert first.dropped
+    assert first.uncertain
+    assert (first.t_down, first.t_up) == (1.0, 1.05)
+    assert (first.line_a, first.line_b) == (1, 5)
+    assert not second.dropped
+    assert (second.t_down, second.t_up, second.x0) == (9.0, 9.05, 0x6000)
+
+
+def test_syn_dropped_without_a_report_does_not_swallow_a_later_tap():
+    """r1_decoder #3 shape: no SYN_REPORT after the SYN_DROPPED."""
+    lines = [
+        ge(3.0, 3, 0x39, 7), ge(3.0, 3, 0x35, 100), ge(3.0, 3, 0x36, 100),
+        ge(3.0, 0, 0, 0), ge(3.1, 0, 3, 0),
+        ge(60.0, 3, 0x39, 8), ge(60.0, 3, 0x35, 30000), ge(60.0, 3, 0x36, 30000),
+        ge(60.0, 0, 0, 0), ge(60.1, 3, 0x39, -1), ge(60.1, 0, 0, 0),
+    ]  # fmt: skip
+    ends = [e.gesture for e in decode_all(lines) if e.kind == "end"]
+    assert [(g.t_down, g.t_up, g.dropped) for g in ends] == [
+        (3.0, 3.1, True),
+        (60.0, 60.1, False),
+    ]
+    assert (ends[1].x0, ends[1].y0) == (30000, 30000)
+
+
+def test_lost_up_in_a_pinch_never_blocks_later_taps():
+    """r_dropped2: before, 10 taps after a pinch with a lost up gave 0 lines."""
+    pinch = [
+        ge(1.0, 3, 0x2F, 0), ge(1.0, 3, 0x39, 1), ge(1.0, 3, 0x35, 0x1000),
+        ge(1.0, 3, 0x36, 0x1000), ge(1.0, 3, 0x2F, 1), ge(1.0, 3, 0x39, 2),
+        ge(1.0, 3, 0x35, 0x2000), ge(1.0, 3, 0x36, 0x2000), ge(1.0, 0, 0, 0),
+        ge(1.5, 0, 3, 0),  # SYN_DROPPED (slot 1's up is lost)
+        ge(1.6, 3, 0x2F, 0), ge(1.6, 3, 0x39, -1), ge(1.6, 0, 0, 0),
+    ]  # fmt: skip
+    events = decode_all(pinch + taps_on_slot0(3.0, 10))
+    ends = [e.gesture for e in events if e.kind == "end"]
+    assert len(ends) == 11
+    assert ends[0].dropped
+    assert ends[0].pointers == 2
+    assert [g.t_down for g in ends[1:]] == [3.0 + i for i in range(10)]
+    assert not any(g.dropped for g in ends[1:])
+
+
+def test_new_tracking_id_on_a_held_slot_closes_the_gesture():
+    lines = [
+        ge(1.0, 3, 0x39, 7), ge(1.0, 3, 0x35, 100), ge(1.0, 3, 0x36, 100),
+        ge(1.0, 0, 0, 0),
+        # the up of id 7 never came; id 8 starts on the same slot
+        ge(2.0, 3, 0x39, 8), ge(2.0, 3, 0x35, 30000), ge(2.0, 3, 0x36, 30000),
+        ge(2.0, 0, 0, 0), ge(2.1, 3, 0x39, -1), ge(2.1, 0, 0, 0),
+    ]  # fmt: skip
+    ends = [e.gesture for e in decode_all(lines) if e.kind == "end"]
+    assert [(g.t_down, g.dropped) for g in ends] == [(1.0, True), (2.0, False)]
+    assert ends[0].line_b == 4
+    assert ends[1].x0 == 30000
+
+
+def test_a_slot_held_for_ever_is_closed_by_a_new_contact_after_idle():
+    lines = [  # slot 1 never lifts (no SYN_DROPPED either)
+        ge(1.0, 3, 0x2F, 1), ge(1.0, 3, 0x39, 5), ge(1.0, 3, 0x35, 100),
+        ge(1.0, 3, 0x36, 100), ge(1.0, 0, 0, 0),
+        ge(1.0, 3, 0x2F, 0),
+    ]  # fmt: skip
+    events = decode_all(lines + taps_on_slot0(1.0 + ts.GESTURE_IDLE_S + 1, 2))
+    ends = [e.gesture for e in events if e.kind == "end"]
+    assert [g.dropped for g in ends] == [True, False, False]
+
+
+def test_app_switch_key_is_a_key_and_btn_codes_are_not():
+    """r_decoder #1: KEY_APPSELECT (580) is above 0x100 but not a BTN_*."""
+    k = "/dev/input/event12"
+    events = decode_all([
+        ge(1.0, 1, 580, 1, k), ge(1.0, 0, 0, 0, k),
+        ge(1.1, 1, 580, 0, k), ge(1.1, 0, 0, 0, k),
+        ge(2.0, 1, 0x14A, 1), ge(2.1, 1, 0x14A, 0),  # BTN_TOUCH
+        ge(3.0, 1, 0x2C0, 1), ge(3.1, 1, 0x2C0, 0),  # BTN_TRIGGER_HAPPY1
+    ])  # fmt: skip
+    assert [(e.kind, e.gesture.key_code) for e in events] == [("key", 580)]
+    assert ts.KEY_NAMES[580] == "APP_SWITCH"
+
+
+def test_an_unseen_axis_is_never_zero():
+    """r1_decoder #2 / r_decoder #3: Y unseen at down -> not (x, 0), and a
+    still tap whose Y arrives later is not a 1465 px swipe.
+    """
+    d = ts.TouchDecoder()
+    events = decode_all([
+        ge(2.0, 3, 0x39, 5), ge(2.0, 3, 0x35, 16000), ge(2.0, 0, 0, 0),
+        ge(2.02, 3, 0x36, 20000), ge(2.02, 0, 0, 0),  # first Y seen
+        ge(2.05, 3, 0x39, -1), ge(2.05, 0, 0, 0),
+    ], d)  # fmt: skip
+    down = next(e.gesture for e in events if e.kind == "down")
+    end = next(e.gesture for e in events if e.kind == "end")
+    assert down is end
+    assert end.uncertain
+    assert (end.x0, end.y0) == (16000, 20000)  # the first Y is the origin
+    assert all(None not in p[:2] for p in end.path)
+    assert all(p[1] == 20000 for p in end.path)  # no point at y = 0
+
+
+def _tap_y_unseen(t: float):
+    return [ge(t, 3, 0x39, 9), ge(t, 3, 0x35, 16000), ge(t, 0, 0, 0),
+            ge(t + 0.05, 3, 0x39, -1), ge(t + 0.05, 0, 0, 0)]  # fmt: skip
+
+
+def test_uncertain_tap_skips_node_at_and_the_click_names_the_target(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    with timeline.capture() as lines:
+        g = start(svc, popen, helpers, cfg)
+        g.feed(*_tap_y_unseen(10.0))
+        assert wait_for(lambda: of(lines, "input", "tap"))
+        helpers[0].on_event(
+            {"type": "ev", "ev": "CLICKED", "t_mono_ms": 10_080.0,
+             "src": {"rid": "com.x:id/ok", "text": "OK", "bounds": [1, 2, 3, 4]}},
+            time.time(),
+        )  # fmt: skip
+        assert wait_for(lambda: of(lines, "input", "confirm"))
+    tap = of(lines, "input", "tap")[0]
+    assert helpers[0].node_calls == []  # never node_at(x, 0)
+    assert tap["data"]["x"] is None
+    assert tap["data"]["y"] is None
+    assert tap["data"]["xy_uncertain"] is True
+    assert tap["data"]["target"] is None
+    assert tap["summary"] == "tap · position unknown"
+    confirm = of(lines, "input", "confirm")[0]
+    assert confirm["ref"] == {"of": tap["seq"]}
+    assert confirm["data"]["target_of_input"] is True
+    assert confirm["data"]["node"]["bounds"] == [1, 2, 3, 4]
+
+
+def test_axis_values_outlive_a_tracking_restart(env, cfg, monkeypatch):
+    """One decoder per stream lifetime: Record keeps the stream while
+    Tracking restarts, the X/Y seen before stay known.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    lease = svc.getevent(SERIAL)  # e.g. Record
+    with timeline.capture() as lines:
+        g = start(svc, popen, helpers, cfg, mode="off")
+        g.feed(*tap_lines(1.0, 0x4000, 0x5000))
+        assert wait_for(lambda: len(of(lines, "input")) == 1)
+        svc.stop()
+        start(svc, popen, helpers, cfg, mode="off")
+        assert len(popen.of("getevent -t")) == 1
+        g.feed(  # the same spot: the kernel repeats neither axis
+            ge(2.0, 3, 0x39, 3), ge(2.0, 0, 0, 0),
+            ge(2.05, 3, 0x39, -1), ge(2.05, 0, 0, 0),
+        )  # fmt: skip
+        assert wait_for(lambda: len(of(lines, "input")) == 2)
+    first, second = of(lines, "input")
+    assert second["data"]["xy_uncertain"] is False
+    assert (second["data"]["x"], second["data"]["y"]) == (
+        first["data"]["x"],
+        first["data"]["y"],
+    )
+    lease.release()
+
+
+def test_dropped_gesture_is_flagged_on_the_input_line(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        g = start(svc, popen, helpers, cfg, mode="off")
+        g.feed(ge(1.0, 3, 0x39, 1), ge(1.0, 3, 0x35, 0x1000),
+               ge(1.0, 3, 0x36, 0x1000), ge(1.0, 0, 0, 0), ge(1.2, 0, 3, 0),
+               ge(1.2, 0, 0, 0), *taps_on_slot0(3.0, 2))  # fmt: skip
+        assert wait_for(lambda: len(of(lines, "input")) == 3)
+    first, *rest = of(lines, "input")
+    assert first["data"]["dropped"] is True
+    assert first["data"]["xy_uncertain"] is True
+    assert not any("dropped" in x["data"] for x in rest)
+
+
+def test_before_tap_shots_never_pile_up_and_late_ones_are_dropped(env, cfg):
+    """r_before / r2_shots B: fast taps with a slow capture used to queue a
+    "before" shot per tap that landed long after its tap.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        g = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        t_dev0 = 100.0
+        t_host0 = time.monotonic()
+
+        def slow_shot(*, hash_only=False, timeout=5.0):
+            cap = t_dev0 + (time.monotonic() - t_host0)  # capture instant
+            time.sleep(0.3)
+            return ShotResult(cap * 1000.0, 1080, 2424, "h", 9.0, PNG_A, "/x")
+
+        h.shot = slow_shot
+        for i in range(6):  # one tap every 125 ms, 50 ms long
+            g.feed(*tap_lines(t_dev0 + i * 0.125, dur=0.05))
+            time.sleep(0.125)
+        assert wait_for(lambda: len(of(lines, "input")) == 6)
+        time.sleep(0.8)
+    taps = {x["seq"]: x for x in of(lines, "input", "tap")}
+    shots = of(lines, "shot", "before_tap")
+    skipped = [x for x in taps.values() if x["data"].get("before_shot") == "skipped"]
+    # one capture at a time: the taps meanwhile get none (before: 6 queued
+    # captures, the last one 1 s after its tap)
+    assert len(shots) + len(skipped) == 6
+    assert 1 <= len(shots) <= 2
+    assert shots[0]["ref"]["of"] == min(taps)
+    for shot in shots:  # never captured after its tap's finger-up
+        assert shot["dev_mono"] <= taps[shot["ref"]["of"]]["dev_mono"] + 0.05
+
+
+def test_a_before_shot_captured_after_the_finger_up_is_dropped(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        g = start(svc, popen, helpers, cfg)
+        helpers[0].shot_t_ms = 1_200.0  # captured after the up at 1.08 s
+        g.feed(*tap_lines(1.0))
+        assert wait_for(lambda: of(lines, "input"))
+        time.sleep(0.3)
+    assert not of(lines, "shot", "before_tap")
+
+
+def test_sha_dedupe_is_per_folder(tmp_path, cfg):
+    """r_sha / r2_shots A: a new session's identical image is stored again
+    in its own folder (it pointed into the old session's folder).
+    """
+    cfg.helper_mode = "off"
+    folders = {"devA": tmp_path / "A", "devB": tmp_path / "B"}
+    popen, run = FakePopen(), FakeRun()
+    svc = ts.TrackingService(popen=popen, run=run, helper_factory=lambda *a: None,
+                             folder_fn=lambda s: folders[s],
+                             clock_record=lambda r, s: None)  # fmt: skip
+    try:
+        with timeline.capture() as lines:
+            for n, dev in enumerate(("devA", "devB", "devB"), 1):
+                assert svc.start(dev)
+                assert wait_for(svc._geometry_ready.is_set)
+                svc.manual_shot()
+                assert wait_for(lambda n=n: len(of(lines, "shot")) == n)
+                svc.stop()
+    finally:
+        svc.shutdown(2.0)
+    a, b, b2 = of(lines, "shot")
+    assert b["data"]["dup_of"] is None
+    assert (folders["devB"] / b["ref"]["path"]).exists()
+    assert (folders["devA"] / a["ref"]["path"]).exists()
+    assert b2["data"]["dup_of"] == b["seq"]  # same folder: deduped
+
+
+def test_a_kept_stream_writes_its_raw_log_into_the_new_folder(tmp_path, cfg):
+    """Record keeps the stream alive across a session change: the raw log
+    (and the input refs into it) follow the new timeline folder.
+    """
+    cfg.helper_mode = "off"
+    folder = {"now": tmp_path / "s1"}
+    popen, run = FakePopen(), FakeRun()
+    svc = ts.TrackingService(popen=popen, run=run, helper_factory=lambda *a: None,
+                             folder_fn=lambda s: folder["now"],
+                             clock_record=lambda r, s: None)  # fmt: skip
+    try:
+        record = svc.getevent(SERIAL)
+        g = popen.of("getevent -t")[0]
+        g.feed(*tap_lines(1.0))
+        assert wait_for(lambda: record.line_no() == 6)
+        folder["now"] = tmp_path / "s2"  # a new session
+        with timeline.capture() as lines:
+            assert svc.start(SERIAL)
+            g.feed(*tap_lines(2.0))
+            assert wait_for(lambda: of(lines, "input"))
+            svc.stop()
+        record.release()
+    finally:
+        svc.shutdown(2.0)
+    raw2 = (tmp_path / "s2" / ts.RAW_DIR / ts.GETEVENT_FILE).read_text().splitlines()
+    assert raw2 == tap_lines(2.0)
+    assert of(lines, "input")[0]["ref"]["raw"].endswith("#L1-L6")
+    assert len((tmp_path / "s1/tracking/raw/getevent.txt").read_text().split()) > 0
+
+
+def test_rotation_follows_the_screen(env, cfg):
+    svc, popen, run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    with timeline.capture() as lines:
+        g = start(svc, popen, helpers, cfg)
+        assert svc.geometry.rotation == 0
+        helpers[0].display = lambda timeout=2.0: {"w": 2424, "h": 1080, "rotation": 1}
+        helpers[0].on_event(
+            {"type": "ev", "ev": "WINDOW_STATE_CHANGED", "pkg": "a", "cls": "a.B"},
+            time.time(),
+        )
+        assert wait_for(lambda: svc.geometry.rotation == 1)
+        g.feed(*tap_lines(5.0, 0x4000, 0x2000))
+        assert wait_for(lambda: of(lines, "input"))
+    tap = of(lines, "input", "tap")[0]
+    assert tap["data"]["rotation"] == 1
+    assert tap["data"]["screen"] == [2424, 1080]
+    # no helper display: dumpsys input
+    svc.geometry.rotation = 0
+    helpers[0].display = None
+    real = run.__class__.__call__
+
+    def rotated(self, argv, timeout=10.0):
+        if "SurfaceOrientation" in " ".join(argv):
+            return 0, b"      SurfaceOrientation: 3\n"
+        return real(self, argv, timeout)
+
+    run.__class__ = type("R", (FakeRun,), {"__call__": rotated})
+    svc.on_logcat_line(ACTIVITY, time.time())
+    with timeline.capture():
+        helpers[0].alive = False  # logcat activity without a FULL helper
+        svc.on_logcat_line(ACTIVITY.replace("Settings", "Other"), time.time())
+        assert wait_for(lambda: svc.geometry.rotation == 3)
+
+
+IME_REPLY = {
+    "type": "node_at",
+    "cached": {
+        "window": {"id": 9, "type": "ime"},
+        "hit": {"cls": "android.widget.Key", "text": "q"},
+        "target": {"cls": "android.widget.Key", "text": "q", "desc": "q",
+                   "bounds": [0, 2000, 100, 2100]},
+        "pkg": "com.google.android.inputmethod.latin",
+        "label": "q",
+    },
+}  # fmt: skip
+
+
+def test_password_focus_and_keyboard_taps_are_sensitive(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        g = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        g.feed(*tap_lines(1.0))  # an ordinary tap
+        assert wait_for(lambda: len(of(lines, "shot", "before_tap")) == 1)
+        h.on_event({"type": "ev", "ev": "FOCUSED", "password": True,
+                    "src": {"rid": "com.x:id/pw"}}, time.time())  # fmt: skip
+        h.node_reply = IME_REPLY  # a key of the keyboard
+        g.feed(*tap_lines(2.0))
+        assert wait_for(lambda: len(of(lines, "shot", "before_tap")) == 2)
+        h.node_reply = NODE_REPLY  # "Sign in" while the password is focused
+        g.feed(*tap_lines(3.0))
+        assert wait_for(lambda: len(of(lines, "shot", "before_tap")) == 3)
+        h.on_event({"type": "ev", "ev": "FOCUSED", "src": {"rid": "com.x:id/u"}},
+                   time.time())  # fmt: skip
+        h.node_reply = IME_REPLY  # keyboard, plain field: still sensitive
+        g.feed(*tap_lines(4.0))
+        assert wait_for(lambda: len(of(lines, "input")) == 4)
+        svc.manual_shot()
+        assert wait_for(lambda: of(lines, "shot", "manual"))
+    plain, key, sign_in, key2 = of(lines, "input")
+    shots = {x["ref"]["of"]: x for x in of(lines, "shot", "before_tap")}
+    assert "sensitive" not in plain
+    assert "sensitive" not in shots[plain["seq"]]
+    assert key["sensitive"] is True
+    assert shots[key["seq"]]["sensitive"] is True
+    assert key["summary"] == "tap on keyboard (password field)"
+    assert "q" not in json.dumps(key["data"]["target"])  # no key label
+    assert key["data"]["ime"] is True
+    assert sign_in["sensitive"] is True
+    assert shots[sign_in["seq"]]["sensitive"] is True
+    assert key2["sensitive"] is True
+    assert key2["summary"] == "tap on keyboard"
+    assert "sensitive" not in of(lines, "shot", "manual")[0]  # focus moved on
+    masked = timeline.mask(key)
+    assert masked["data"]["_masked"] is True
+
+
+def test_buffered_shot_keeps_its_file(env, cfg, monkeypatch):
+    """A must-keep shot line held back by a detached timeline (emit returns
+    None, the line is written later) must find its image.
+    """
+    svc, popen, _run, helpers, tmp = env
+    emitted: list[dict] = []
+    monkeypatch.setattr(svc, "_sink_buffering", lambda: True)
+    monkeypatch.setattr(
+        ts, "_emit", lambda src, kind, **kw: emitted.append(kw) and None
+    )
+    svc._folder = tmp
+    seq = svc._store(
+        "manual", PNG_A, of=None, via="helper", w=1, h=1, cap_ms=1.0, t=1.0,
+        dev_mono=None,
+    )  # fmt: skip
+    assert seq is None
+    path = emitted[0]["ref"]["path"]
+    assert "{seq}" not in path
+    assert (tmp / path).read_bytes() == PNG_A
+    assert not list((tmp / "tracking/shots/.incoming").iterdir())
+
+
+def test_stale_helper_callbacks_are_ignored_but_its_end_is_written(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        old = helpers[0]
+        svc.stop()
+        assert wait_for(lambda: old.stopped)
+        start(svc, popen, helpers, cfg)
+        new = helpers[1]
+        assert wait_for(lambda: svc.state().helper == "connected")
+        # the old helper (a late restart / event) must not touch this session
+        old.on_status("lost", {"mode": "full"})
+        old.on_event({"type": "ev", "ev": "WINDOW_STATE_CHANGED", "pkg": "old",
+                      "cls": "old.A"}, time.time())  # fmt: skip
+        new.on_event({"type": "ev", "ev": "WINDOW_STATE_CHANGED", "pkg": "new",
+                      "cls": "new.A"}, time.time())  # fmt: skip
+        assert svc.state().helper == "connected"
+        svc.stop()
+        assert wait_for(lambda: new.stopped)
+        assert wait_for(lambda: len(of(lines, "sandroid", "intervention")) == 4)
+    assert [x["data"]["pkg"] for x in of(lines, "screen", "window")] == ["new"]
+    states = [x["data"]["state"] for x in of(lines, "sandroid", "intervention")]
+    assert states == ["on", "off", "on", "off"]
+    assert "lost" not in [x["data"]["helper"] for x in of(lines, "tracking")
+                          if x["kind"] == "helper"]  # fmt: skip
+
+
+def test_new_session_waits_for_the_old_helper_to_stop(env, cfg, monkeypatch):
+    """a11y_before must be read after the old helper restored a11y."""
+    svc, popen, _run, helpers, _tmp = env
+    order: list[str] = []
+    orig_stop = FakeHelper.stop
+
+    def slow_stop(self):
+        time.sleep(0.4)
+        order.append("stopped")
+        orig_stop(self)
+
+    monkeypatch.setattr(FakeHelper, "stop", slow_stop)
+    orig_start = FakeHelper.start
+    monkeypatch.setattr(
+        FakeHelper, "start", lambda self: order.append("start") or orig_start(self)
+    )
+    with timeline.capture():
+        start(svc, popen, helpers, cfg)
+        svc.stop()
+        start(svc, popen, helpers, cfg)
+    assert order == ["start", "stopped", "start"]
+
+
+def test_a_dead_getevent_pid_is_never_killed(env, cfg):
+    svc, popen, run, _helpers, _tmp = env
+    s = svc.getevent(SERIAL)
+    p = popen.of("getevent -t")[0]
+    p.feed("add device 1: /dev/input/event0")
+    assert wait_for(lambda: s._pid == 4242)
+    p.rc = 1  # getevent died: the pid may be reused
+    p.stdout.q.put(None)
+    assert wait_for(lambda: s._pid is None)
+    s.release()
+    s.wait_closed()
+    kill = [c for c in run.calls if "kill" in " ".join(c)][-1][-1]
+    assert "kill 4242" not in kill
+    assert "grep -q getevent /proc/$p/cmdline" in kill  # never a reused pid
+
+
+def test_the_kill_checks_the_pid_is_still_getevent(env, cfg):
+    svc, popen, run, _helpers, _tmp = env
+    s = svc.getevent(SERIAL)
+    popen.of("getevent -t")[0].feed("add device 1: /dev/input/event0")
+    assert wait_for(lambda: s._pid == 4242)
+    s.release()
+    s.wait_closed()
+    kill = [c for c in run.calls if "kill" in " ".join(c)][-1][-1]
+    assert "p=4242;" in kill
+    assert "grep -q getevent /proc/$p/cmdline" in kill
+
+
+def test_last_release_and_a_new_lease_are_atomic(env, cfg):
+    svc, popen, run, _helpers, _tmp = env
+    s = svc.getevent(SERIAL)
+    with svc._lock:  # a getevent() racing with the last release
+        t = threading.Thread(target=s.release)
+        t.start()
+        time.sleep(0.1)
+        again = svc.getevent(SERIAL)
+    t.join(2.0)
+    assert again is s
+    assert s.leases == 1
+    assert svc._streams.get(SERIAL) is s
+    assert not any("kill" in " ".join(c) for c in run.calls)
+    s.release()
+    s.wait_closed()
+    assert s.acquire() is False  # closed for good
+    fresh = svc.getevent(SERIAL)
+    assert fresh is not s
+    fresh.release()
+
+
+def test_record_never_stops_a_tracking_session_restarted_meanwhile(
+    env, cfg, monkeypatch
+):
+    svc, popen, _run, _helpers, tmp = env
+    cfg.helper_mode = "off"
+    monkeypatch.setattr("sandroid.config.get_config", type("C", (), {"tracking": cfg}))
+    with timeline.capture() as lines:
+        rec = _record(monkeypatch, svc, tmp)
+        assert rec.start()  # Record starts Tracking
+        svc.stop()  # the user stops it ...
+        assert svc.start(SERIAL)  # ... and starts their own
+        rec.stop()
+        assert svc.is_active()
+        svc.stop()
+    reasons = [x["data"]["reason"] for x in of(lines, "tracking")]
+    assert reasons == ["record", "user", "user", "user"]
+
+
+def test_start_never_blocks_the_header(env, cfg, monkeypatch):
+    """start() used to hold the state lock across wait_closed (up to 5 s)."""
+    svc, popen, run, _helpers, _tmp = env
+    cfg.helper_mode = "off"
+    real = FakeRun.__call__
+
+    def slow_kill(self, argv, timeout=10.0):
+        if "kill" in " ".join(argv):
+            time.sleep(1.0)
+        return real(self, argv, timeout)
+
+    monkeypatch.setattr(FakeRun, "__call__", slow_kill)
+    s = svc.getevent(SERIAL)
+    s.release()  # the teardown takes 1 s
+    with timeline.capture():
+        t = threading.Thread(target=svc.start, args=(SERIAL,))
+        t.start()
+        time.sleep(0.1)
+        t0 = time.monotonic()
+        svc.state()
+        took = time.monotonic() - t0
+        t.join(3.0)
+    assert took < 0.2
+    assert svc.is_active()
+
+
+def test_record_markers_keep_lead_in_and_tail(env, cfg, monkeypatch):
+    """Play waits from the record start to the first touch and keeps the
+    trailing pause (the old dummy start/stop events), ``recording_seconds``
+    is the record length, and the real events replay unchanged.
+    """
+    import sandroid.features.player as player_module
+    from sandroid.core.adb import Adb
+    from sandroid.core.toolbox import Toolbox
+    from sandroid.features.player import Player
+    from sandroid.tui.controllers.recording_controller import RecordingController
+
+    svc, popen, _run, _helpers, tmp = env
+    cfg.auto_on_record = False
+    monkeypatch.setattr("sandroid.config.get_config", type("C", (), {"tracking": cfg}))
+    off = 5_000.0 - time.time()  # device CLOCK_MONOTONIC - host epoch
+    rec = _record(monkeypatch, svc, tmp)
+    assert rec.start()
+    g = popen.of("getevent -t")[0]
+    t_start = time.time()
+    time.sleep(0.4)
+    taps = tap_lines(time.time() + off)
+    g.feed(*taps)
+    assert wait_for(lambda: rec.event_count == 6)
+    time.sleep(0.4)
+    t_stop = time.time()
+    rec.stop()
+    path = tmp / "raw/recording.getevent.txt"
+    out = path.read_text().splitlines()
+    assert out[1:-1] == taps
+    first, last = ts.parse_getevent(out[0]), ts.parse_getevent(out[-1])
+    assert first[1:] == last[1:] == (E1, 0, 0, 0)
+    assert abs(first[0] - (t_start + off)) < 0.1
+    assert abs(last[0] - (t_stop + off)) < 0.1
+    seconds = RecordingController.recording_seconds(str(path))
+    assert seconds == pytest.approx(t_stop - t_start, abs=0.1)
+    sent: list[str] = []
+    waits: list[float] = []
+    monkeypatch.setattr(Adb, "send_adb_command", staticmethod(sent.append))
+    monkeypatch.setattr(Toolbox, "set_action_time", staticmethod(lambda: None))
+    monkeypatch.setattr(Toolbox, "set_action_duration", staticmethod(lambda s: None))
+    monkeypatch.setattr(player_module._cancel_event, "wait", waits.append)
+    Player(recording_path=str(path)).perform()
+    assert sent[0] == sent[-1] == f"shell sendevent {E1} 0 0 0"
+    real = [player_module.parse_store_line(x) for x in taps]
+    assert sent[1:-1] == [f"shell sendevent {d} {a} {b} {c}" for _t, d, a, b, c in real]
+    assert waits[0] == pytest.approx(0.4, abs=0.1)  # lead-in
+    # tail after the up (the fake's up is stamped 80 ms "ahead" of the host,
+    # which the offset estimate absorbs)
+    assert 0.25 < waits[-1] < 0.6
+
+
+def test_record_display_callbacks_never_block_the_reader(env, cfg, monkeypatch):
+    """A UI that does not answer (call_from_thread) must not stall the shared
+    getevent reader: Tracking keeps decoding while the display hangs.
+    """
+    svc, popen, _run, helpers, tmp = env
+    cfg.auto_on_record = False
+    monkeypatch.setattr("sandroid.config.get_config", type("C", (), {"tracking": cfg}))
+    from sandroid.tui.utils.recording_wrapper import RecordingWrapper
+
+    hang = threading.Event()
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg, mode="off")
+        rec = RecordingWrapper(
+            output_file=str(tmp / "raw/recording.getevent.txt"),
+            on_event=lambda line: hang.wait(5.0),
+            on_count_update=lambda n: hang.wait(5.0),
+            serial=SERIAL,
+        )
+        assert rec.start()
+        popen.of("getevent -t")[0].feed(*tap_lines(1.0), *tap_lines(2.0))
+        assert wait_for(lambda: len(of(lines, "input")) == 2, 1.0)
+        assert rec.event_count == 12
+        hang.set()
+        rec.stop()

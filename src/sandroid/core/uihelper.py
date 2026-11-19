@@ -558,6 +558,16 @@ class UiHelper:
         ws = r.get("windows")
         return ws if isinstance(ws, list) else None
 
+    def display(self, timeout: float = 2.0) -> dict | None:
+        """``{w, h, rotation}`` of the display now (``windows`` reply), or None
+        (INVISIBLE mode, error or timeout).
+        """
+        if self._mode is Mode.INVISIBLE:
+            return None
+        r = self._ok(self.request("windows", timeout), "windows")
+        disp = (r or {}).get("display")
+        return disp if isinstance(disp, dict) else None
+
     def shot(
         self, *, hash_only: bool = False, timeout: float = 5.0
     ) -> ShotResult | None:
