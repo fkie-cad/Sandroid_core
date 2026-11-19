@@ -941,8 +941,11 @@ def test_the_doorbell_is_gated_and_carries_no_lines(timeline_sink):
     finally:
         bus.unsubscribe(EventType.TIMELINE_EVENT, handler)
     payload = got[0]
-    assert set(payload) == {"op", "dev", "folder", "first_seq", "last_seq", "srcs"}
+    assert set(payload) == {"op", "dev", "folder", "session_id", "labels_version",
+                            "active", "first_seq", "last_seq", "srcs"}  # fmt: skip
     assert payload["op"] == "lines"
+    assert payload["active"] is True
+    assert payload["labels_version"] == service.labels.version
     assert payload["dev"] == SERIAL
     assert "input" in payload["srcs"]
 
@@ -1077,3 +1080,268 @@ def test_close_is_idempotent_and_bounded(timeline_sink):
     assert timeline.flush_timeline(1.0)
     assert path.stat().st_size == size
     assert service.status().state == "closed"
+
+
+# ---------------------------------------------------------------------------
+# review fixes (bad t, transitions, doorbell, resume, close, routing, ...)
+# ---------------------------------------------------------------------------
+
+
+def test_a_bad_t_never_loses_the_batch_or_leaves_a_seq_gap(tmp_path):
+    folder = tmp_path / "s" / "dev"
+    service = _service(folder)
+    before = service.emit("monitor", "a", summary="before")
+    label = service.labels.point("must keep", actor="user")
+    bad = service.emit("monitor", "b", summary="ms as s", t=time.time() * 1000)
+    after = service.emit("monitor", "c", summary="after")
+    assert service.flush(3.0)
+    assert service.close("test", 3.0)
+    lines = _lines(folder / timeline.FILE_NAME)
+    assert [x["seq"] for x in lines] == list(range(1, len(lines) + 1))
+    by_seq = {x["seq"]: x for x in lines}
+    assert {before, label.seq, bad, after} <= set(by_seq)
+    flagged = by_seq[bad]
+    assert (flagged["clk"], flagged["level"]) == ("none", "warn")
+    assert flagged["t"] == flagged["t_rx"]
+    assert flagged["data"]["_bad_t"].startswith("1")
+    assert timeline.verify_chain(folder / timeline.FILE_NAME, strict=True).ok
+
+
+def test_a_line_that_cannot_be_finalized_is_written_as_an_error_line(
+    tmp_path, monkeypatch
+):
+    real = timeline._finalize
+
+    def flaky(sink, item, *args):
+        if item.fields.get("summary") == "boom":
+            raise RuntimeError("cannot finalize")
+        return real(sink, item, *args)
+
+    monkeypatch.setattr(timeline, "_finalize", flaky)
+    folder = tmp_path / "s" / "dev"
+    service = _service(folder)
+    service.emit("monitor", "a", summary="before")
+    boom = service.emit("monitor", "b", summary="boom", sensitive=True)
+    service.emit("monitor", "c", summary="after")
+    seal = service.seal(by="test", timeout=3.0)
+    assert seal is not None
+    assert seal.verified
+    assert service.close("test", 3.0)
+    lines = _lines(folder / timeline.FILE_NAME)
+    assert [x["seq"] for x in lines] == list(range(1, len(lines) + 1))
+    error = next(x for x in lines if x["seq"] == boom)
+    assert (error["src"], error["kind"], error["level"]) == ("monitor", "b", "error")
+    assert error["sensitive"] is True
+    assert "cannot finalize" in error["data"]["_finalize_error"]
+    assert timeline.verify_chain(folder / timeline.FILE_NAME).ok
+
+
+def test_a_transition_inserted_earlier_refolds_the_later_states(tmp_path):
+    folder = tmp_path / "s" / "dev"
+    service = _service(folder)
+    now = time.time()
+    service.set_phase("record", "r1", t=now)
+    # A clock jump sampled 0.3 s earlier, emitted after the phase change.
+    service.emit("clock", "jump", summary="jump", t=now - 0.3,
+                 data={"jump": True, "off_wall": 1.0})  # fmt: skip
+    service.emit("sandroid", "note", summary="after both", t=now + 0.05)
+    assert service.close("test", 3.0)
+    lines = {x["kind"]: x for x in _lines(folder / timeline.FILE_NAME)}
+    states = {k: (lines[k]["epoch"], lines[k]["phase"]) for k in ("jump", "phase",
+                                                                   "note")}  # fmt: skip
+    assert states == {"jump": (1, "live"), "phase": (1, "record"),
+                      "note": (1, "record")}  # fmt: skip
+
+
+def test_switching_back_to_an_open_sink_rings_bound_with_its_labels_version(
+    tmp_path,
+):
+    from sandroid.core.events import EventBus, EventType
+
+    got: list[dict] = []
+    bus = EventBus.get()
+    handler = lambda event: got.append(event.data)  # noqa: E731
+    bus.subscribe(EventType.TIMELINE_EVENT, handler)
+    try:
+        service = TimelineService()
+        a, b = tmp_path / "s" / "a", tmp_path / "s" / "b"
+        assert service.bind("A", a).state == "open"
+        service.labels.start("on A", actor="user")
+        version_a = service.labels.version
+        assert service.bind("B", b).state == "open"
+        service.labels.start("on B", actor="user")
+        version_b = service.labels.version
+        assert version_a != version_b  # unique across files
+        got.clear()
+        assert service.bind("A", a).state == "open"
+        version = service.labels.version
+    finally:
+        bus.unsubscribe(EventType.TIMELINE_EVENT, handler)
+    bound = [x for x in got if x["op"] == "bound"]
+    assert len(bound) == 1
+    assert bound[0]["dev"] == "A"
+    assert bound[0]["folder"] == str(a.absolute())
+    assert bound[0]["session_id"] == "s/a"
+    assert bound[0]["labels_version"] == version
+    assert version not in (version_b,)
+    assert bound[0]["active"] is True
+    assert service.close("test", 3.0)
+
+
+@pytest.mark.parametrize("cut", ["newline", "reterminated"])
+def test_a_tail_missing_only_its_newline_is_adopted(tmp_path, cut):
+    folder = tmp_path / "s" / "dev"
+    service = _service(folder)
+    for i in range(3):
+        service.emit("monitor", "note", summary=f"n{i}")
+    _crash(service)
+    path = folder / timeline.FILE_NAME
+    data = path.read_bytes()
+    if cut == "newline":  # a crash right before the last line's newline
+        path.write_bytes(data[:-1])
+        expect_torn = None
+    else:  # a torn fragment closed by a resume that crashed before its line
+        fragment = b'{"v":1,"seq":99,"src":"mon'
+        path.write_bytes(data + fragment + b"\n")
+        expect_torn = {"offset": len(data), "bytes": len(fragment),
+                       "sha256": hashlib.sha256(fragment).hexdigest()}  # fmt: skip
+    again = _service(folder)
+    again.emit("monitor", "note", summary="after")
+    assert again.close("test", 3.0)
+    resume = next(x for x in _lines_skip(path) if x["kind"] == "resume")
+    assert resume["data"]["torn"] == expect_torn
+    if cut == "newline":
+        assert resume["data"]["verified"] is True
+        assert resume["data"]["adopted_tail"] == data.rfind(b"\n", 0, -1) + 1
+    result = timeline.verify_chain(path, strict=True)
+    assert result.ok, result.errors
+
+
+def test_close_while_a_sink_is_still_opening_writes_its_close_line(
+    tmp_path, monkeypatch
+):
+    entered, release = threading.Event(), threading.Event()
+    real = timeline._try_lock
+
+    def slow_lock(path, serial):
+        entered.set()
+        release.wait(5.0)
+        return real(path, serial)
+
+    monkeypatch.setattr(timeline, "_try_lock", slow_lock)
+    service = TimelineService()
+    folder = tmp_path / "s" / "dev"
+    binder = threading.Thread(target=service.bind, args=(SERIAL, folder))
+    binder.start()
+    assert entered.wait(3.0)
+    result: list[bool] = []
+    closer = threading.Thread(target=lambda: result.append(service.close("quit", 5.0)))
+    closer.start()
+    deadline = time.monotonic() + 3.0
+    while not service._closed and time.monotonic() < deadline:
+        time.sleep(0.01)
+    release.set()
+    closer.join(6.0)
+    binder.join(3.0)
+    assert result == [True]
+    lines = _lines(folder / timeline.FILE_NAME)
+    assert _kinds(lines)[-1] == "sandroid/close"
+    assert lines[-1]["data"]["reason"] == "quit"
+    assert timeline.verify_chain(folder / timeline.FILE_NAME).ok
+    thread = service._thread
+    if thread is not None:
+        thread.join(2.0)
+        assert not thread.is_alive()
+
+
+def test_dev_mono_without_dev_converts_with_the_sinks_serial(tmp_path, monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(device_clock, "_now", lambda: now)
+    _epoch_sample(SERIAL, 1000.0, now - 60)
+    folder = tmp_path / "s" / "dev"
+    service = _service(folder)
+    service.emit("input", "tap", summary="no dev", dev_mono=1050.0)
+    assert service.close("test", 3.0)
+    tap = next(x for x in _lines(folder / timeline.FILE_NAME) if x["src"] == "input")
+    assert tap["clk"] == "dev_mono"
+    assert datetime.fromisoformat(tap["t"]).timestamp() == pytest.approx(
+        now - 10, abs=2e-3
+    )
+
+
+def test_the_root_fallback_goes_to_the_session_folder_not_results(
+    tmp_path, monkeypatch
+):
+    from sandroid import services
+
+    session = tmp_path / "results" / "session_A"
+    session.mkdir(parents=True)
+    monkeypatch.delenv("SDROID_FILES_DIR", raising=False)
+    monkeypatch.delenv("SESSION_PATH", raising=False)
+    monkeypatch.setenv("RESULTS_PATH", str(session) + "/")
+    monkeypatch.setattr(services, "get_initialization_service",
+                        lambda: SimpleNamespace(get_session_path=lambda: None,
+                                                get_device_path=lambda: None))  # fmt: skip
+    service = TimelineService()
+    service.labels.point("before any device", actor="user")
+    assert service.close("quit", 3.0)
+    assert (session / timeline.FILE_NAME).is_file()
+    assert not (tmp_path / "results" / timeline.FILE_NAME).exists()
+    monkeypatch.delenv("RESULTS_PATH")
+    assert timeline.session_folder() is None  # never ./results or the cwd
+
+
+def test_a_rename_flushes_the_targets_pending_modifies_oldest_first():
+    service = timeline.get_timeline()
+    p = "/data/data/com.x/databases/a.db"
+    with timeline.capture() as out:
+        t = time.time()
+        for i in range(3):
+            _event(service, "MODIFY", p, pid=10, t=t + i * 0.1)
+        _event(service, "MODIFY", p, pid=11, t=t + 0.35)
+        service.file_event(op="RENAME", path="/data/data/com.x/x.tmp", new_path=p,
+                           t=t + 0.4, backend="kprobe", pid=10,
+                           app_pkg="com.x")  # fmt: skip
+        _event(service, "DELETE", p, pid=10, t=t + 0.5)
+    assert [(x["kind"], x.get("pid"), (x.get("data") or {}).get("n")) for x in out] == [
+        ("modify", 10, 3), ("modify", 11, 1), ("rename", 10, None),
+        ("delete", 10, None)]  # fmt: skip
+
+
+def test_a_locked_folder_is_retried_and_active_so_nothing_is_misrouted(tmp_path):
+    a, b = tmp_path / "s" / "a", tmp_path / "s" / "b"
+    other = _service(b, "B")
+    service = TimelineService()
+    assert service.bind("A", a).state == "open"
+    assert service.bind("B", b).state == "locked"
+    assert service.bind("A", a).state == "open"
+    assert service.bind("B", b).state == "locked"
+    assert service.active_serial == "B"
+    service.emit("snapshot", "save", summary="meant for B")
+    assert service.labels.start("meant for B") is None
+    assert other.close("test", 3.0)
+    # The other process quit: the next bind gets the lock.
+    assert service.bind("B", b).state == "open"
+    assert service.close("test", 3.0)
+    on_a = [x["summary"] for x in _lines(a / timeline.FILE_NAME)]
+    assert "meant for B" not in on_a
+    assert timeline.verify_chain(b / timeline.FILE_NAME).ok
+
+
+def test_a_clock_sample_from_before_a_world_change_does_not_count_it_twice():
+    now = time.time()
+    with timeline.capture() as lines:
+        service = timeline.get_timeline()
+        service.emit("clock", "sample", summary="s", t=now - 5,
+                     data={"dev_mono": 900.0})  # fmt: skip
+        service.on_world_change("snapshot-load", t=now)
+        # Measured before the load (old world), emitted after it.
+        service.emit("clock", "sample", summary="stale", t=now - 1,
+                     data={"dev_mono": 904.0})  # fmt: skip
+        # The first sample of the new world: rewound, already explained.
+        service.emit("clock", "jump", summary="j", t=now + 1,
+                     data={"dev_mono": 50.0, "jump": True})  # fmt: skip
+    assert _kinds(lines) == ["clock/sample", "snapshot/load", "clock/sample",
+                             "clock/jump"]  # fmt: skip
+    assert [(x["world"], x["epoch"]) for x in lines] == [
+        (0, 0), (1, 1), (0, 0), (1, 1)]  # fmt: skip
