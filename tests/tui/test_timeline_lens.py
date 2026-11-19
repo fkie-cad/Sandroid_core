@@ -625,6 +625,14 @@ async def test_inspector_masks_per_setting_and_V_reveals_after_confirm(
         await _settle(pilot)
         assert fakes.service.reveals == [4]
         assert lens.revealed == 4
+        # The reveal paused follow: its own audit line (#5), pulled in by the
+        # live poll, must not move the cursor and end the reveal (this raced
+        # the 250 ms poll under load).
+        assert not lens.following
+        lens._poll()
+        lens.release_pending()
+        await _wait(pilot, lambda: 5 in lens._by_seq)
+        assert lens.revealed == 4
         await _wait(pilot, lambda: "hunter22" in _plain(ms.inspector_content, "JSON"))
         # Moving the selection masks it again.
         lens.view.focus()
@@ -1421,10 +1429,16 @@ async def test_reveal_ends_on_follow_filter_and_rebind(install_fakes) -> None:
         assert lens.following
         lens.reveal(2)
         assert fakes.service.reveal_devs == [timeline_fakes.SERIAL]  # dev passed
-        # follow moves the selection to a new line: the reveal ends
+        # the reveal paused follow: a new line keeps the selection (and it)
+        assert not lens.following
         fakes.service.emit("files", "modify", summary="new", t=NOW - 10)
         lens._poll()
-        await _wait(pilot, lambda: len(lens.rows) == 3)
+        lens.release_pending()
+        await _wait(pilot, lambda: len(lens.rows) >= 3)
+        assert lens.cursor_row.seq == 2
+        assert lens.revealed == 2
+        # resuming follow moves the selection to the newest line: it ends
+        lens.action_newest()
         assert lens.cursor_row.seq != 2
         assert lens.revealed is None
         lens.click_line(1)
