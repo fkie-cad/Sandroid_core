@@ -2655,10 +2655,15 @@ class TrackingService:
                 self._helper_state = "busy"
             else:
                 self._helper_state = state
+        # reason: why the host replaced a stale helper process (UiHelper)
+        lost = {
+            "system_restart": "helper lost · system server restarted · restarting",
+            "reconnect_busy": "helper lost · reconnect refused · restarting",
+        }.get(info.get("reason"), "helper lost · restarting")
         summary = {
             "connected": f"helper connected · {mode}",
             "restarted": f"helper restarted · attempt {info.get('attempt', '?')}",
-            "lost": "helper lost · restarting",
+            "lost": lost,
             "busy": "helper waiting · another UiAutomation client holds the device",
             "down": "helper down · gave up after repeated deaths",
             "stopped": "helper stopped",
@@ -2668,7 +2673,7 @@ class TrackingService:
             "mode": mode,
             **{
                 k: info[k]
-                for k in ("pid", "version", "rc", "attempt", "deaths")
+                for k in ("pid", "version", "rc", "reason", "attempt", "deaths")
                 if k in info
             },
         }

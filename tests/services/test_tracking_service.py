@@ -1614,6 +1614,130 @@ def test_before_shot_off_and_failed(env, cfg):
     assert [(x["ref"]["of"], x["level"]) for x in failed] == [(taps[2]["seq"], "warn")]
 
 
+#: Every shot's answer once the system server restarted under the helper.
+DEAD_SYSTEM = "DeadSystemRuntimeException: android.os.DeadSystemException"
+
+
+class FakeHelperShell:
+    """``adb shell <helper>`` for a real :class:`UiHelper`: the line protocol
+    over queues. ``node_at`` and ``shot`` answer; once ``dead`` is set every
+    shot fails while the process stays up, as after a Zygote restart.
+    """
+
+    def __init__(self, argv) -> None:
+        self.argv = argv
+        self.stdout, self.stderr = FakeStdout(), FakeStdout()
+        self.stdin = self
+        self.returncode = None
+        self.dead = False
+        self.emit({"type": "hello", "pid": 4242, "mode": "full", "flags": 1,
+                   "display": {"w": 1080, "h": 2424, "rotation": 0}})  # fmt: skip
+        self.emit({"type": "status", "state": "connected", "reason": "start"})
+
+    def emit(self, obj: dict) -> None:
+        self.stdout.q.put((json.dumps(obj) + "\n").encode())
+
+    def write(self, data: bytes) -> int:
+        name, *args = data.decode().split()
+        rid = args[-1].removeprefix("id=")
+        if name == "node_at":
+            self.emit({**NODE_REPLY, "id": rid})
+        elif name == "shot" and self.dead:
+            self.emit({"type": "error", "id": rid, "cmd": "shot", "error": DEAD_SYSTEM})
+        elif name == "shot":
+            path = [a[5:] for a in args if a.startswith("path=")]
+            self.emit({"type": "shot", "id": rid, "t_mono_ms": 500.0, "w": 1080,
+                       "h": 2424, "hash": "h-before", "cap_ms": 9.0,
+                       **({"path": path[0]} if path else {})})  # fmt: skip
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:  # stdin EOF: the helper disconnects and exits
+        if self.returncode is None:
+            self.returncode = 0
+            self.stdout.q.put(None)
+            self.stderr.q.put(None)
+
+    kill = close
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def _helper_states(lines) -> list[str]:
+    return [x["data"]["helper"] for x in of(lines, "tracking", "helper")]
+
+
+def test_before_tap_shots_recover_after_a_system_server_restart(
+    tmp_path, cfg, monkeypatch
+):
+    """A real session: the CA injection restarted Zygote mid-tracking. The
+    helper's watchdog reconnected UiAutomation in place, node_at answered
+    again, but the process kept handles into the dead system server: every
+    later before-tap shot was ``failed`` (26 in a row) while screen-change
+    shots fell back to screencap. The real UiHelper now replaces it.
+    """
+    from sandroid.core import uihelper
+    from sandroid.core.adb import Adb
+
+    def fake_adb(cmd, serial=None, timeout=30):
+        if cmd.startswith("shell sha256sum"):
+            return f"{uihelper.JAR_SHA256}  {uihelper.REMOTE_JAR}\n", ""
+        return ("0\n" if cmd.startswith("shell settings get") else ""), ""
+
+    monkeypatch.setattr(Adb, "send_adb_command", fake_adb)
+    shells: list[FakeHelperShell] = []
+
+    def helper_popen(argv, **kw):
+        if "exec-out" in argv:  # the PNG fetch
+            return SimpleNamespace(communicate=lambda timeout=None: (PNG_A, b""))
+        shells.append(FakeHelperShell(argv))
+        return shells[-1]
+
+    helpers: list[uihelper.UiHelper] = []
+
+    def factory(serial, mode, on_event, on_status, raw_log):
+        helpers.append(uihelper.UiHelper(
+            serial, uihelper.Mode(mode), on_event=on_event, on_status=on_status,
+            raw_log=raw_log, popen=helper_popen, adb_argv=["adb", "-s", serial],
+            sleep=lambda s: None))  # fmt: skip
+        return helpers[-1]
+
+    popen = FakePopen()
+    svc = ts.TrackingService(popen=popen, run=FakeRun(), helper_factory=factory,
+                             folder_fn=lambda serial: tmp_path,
+                             clock_record=lambda reason, serial: None)  # fmt: skip
+    monkeypatch.setattr(ts, "_SERVICE", svc)
+    try:
+        with timeline.capture() as lines:
+            ge = start(svc, popen, helpers, cfg)
+            ge.feed(*tap_lines(10.0))
+            assert wait_for(lambda: len(of(lines, "input", "tap")) == 1)
+            shells[0].dead = True  # the Zygote restart, then the watchdog:
+            shells[0].emit({"type": "status", "state": "lost", "reason": "watchdog"})
+            shells[0].emit(
+                {"type": "status", "state": "connected", "reason": "reconnect"}
+            )
+            restarted = wait_for(lambda: "restarted" in _helper_states(lines))
+            ge.feed(*tap_lines(20.0))
+            assert wait_for(lambda: len(of(lines, "input", "tap")) == 2)
+            svc.stop()
+    finally:
+        svc.shutdown(2.0)
+    taps = of(lines, "input", "tap")
+    assert [t["data"]["before_shot"] for t in taps] == ["taken", "taken"]
+    assert restarted
+    assert len(shells) == 2
+    lost = [x for x in of(lines, "tracking", "helper") if x["data"]["helper"] == "lost"]
+    assert [x["data"]["reason"] for x in lost] == ["system_restart"]
+    assert "system server restarted" in lost[0]["summary"]
+
+
 def test_sha_dedupe_is_per_folder(tmp_path, cfg):
     """r_sha / r2_shots A: a new session's identical image is stored again
     in its own folder (it pointed into the old session's folder).
