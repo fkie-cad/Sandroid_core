@@ -182,6 +182,50 @@ The Emulator class provides control over Android emulator instances.
    # Load snapshot
    emulator.load_snapshot("clean_baseline")
 
+Launch hooks
+~~~~~~~~~~~~
+
+Code that has to prepare an AVD before it boots (patch files under its
+directory, add emulator arguments) and undo that afterwards registers hooks
+with the emulator backend instead of wrapping each launch path:
+
+.. code-block:: python
+
+   from sandroid.core import emulator
+
+   def prepare(ctx: emulator.LaunchContext) -> tuple[str, ...]:
+       # ctx.avd, ctx.avd_dir (ini path= redirect honoured), ctx.port, ctx.options
+       patch_config(ctx.avd_dir)
+       return ("-writable-system",)
+
+   def restore(ctx: emulator.LaunchContext) -> None:
+       unpatch_config(ctx.avd_dir)
+
+   emulator.register_pre_launch_hook(prepare)
+   emulator.register_post_stop_hook(restore)
+
+- **Pre-launch** hooks run before every emulator process Sandroid spawns --
+  ``launch_avd``, ``restart_emulator`` and ``ensure_avd_running`` (Devices
+  screen, AI tools, ``--avd``) all funnel through one spot -- after the
+  console port was chosen, in registration order (registering a callable
+  twice is a no-op). Their arguments are appended after
+  ``options.extra_args`` and never stored in ``devices.json``. Reusing an
+  AVD that already runs calls no hook.
+- A pre-launch hook that raises fails the launch closed: no process is
+  started, the port is released, the post-stop hooks run (best effort) and
+  ``EmulatorLaunchError`` names the hook and its error.
+- **Post-stop** hooks get the same ``LaunchContext`` once that emulator has
+  exited: on stop, on restart (before the relaunch's pre-launch hooks), on a
+  startup crash, and best effort when it died on its own (noticed by the
+  boot waiter, ``reap_exited_launches()`` or the next launch). They run at
+  most once per launch; their exceptions are logged and never block a stop
+  or restart, so they must tolerate a launch with nothing to restore.
+- Emulators Sandroid did not launch can still be stopped, but get no
+  post-stop hooks.
+- Hooks run on the backend's worker threads, never on the Textual UI
+  thread; ``unregister_pre_launch_hook`` / ``unregister_post_stop_hook``
+  remove them.
+
 File Operations
 ---------------
 

@@ -6,7 +6,8 @@ log; one retry when an auto port is grabbed (never for a pinned / last-used
 port); ``stop_emulator`` sends
 ``emu kill`` to exactly one serial; ``restart_emulator`` keeps AVD, port and
 options; ``wait_until_ready`` needs boot_completed AND the package manager;
-EmulatorService / DeviceController delegate with the right serial.
+EmulatorService / DeviceController delegate with the right serial; the
+pre-launch / post-stop hooks (order, fail-closed launch, once per launch).
 """
 
 from __future__ import annotations
@@ -216,6 +217,8 @@ def env(monkeypatch, tmp_path, log_dir):
     monkeypatch.setattr(emu, "_LAUNCHES", {})
     monkeypatch.setattr(emu, "_RESERVED_PORTS", set())
     monkeypatch.setattr(emu, "_STARTING_AVDS", set())
+    monkeypatch.setattr(emu, "_UNFINISHED", [])
+    monkeypatch.setattr(emu, "_HOOKS", {"pre_launch": [], "post_stop": []})
     monkeypatch.setattr(
         emu,
         "avd_lock_files",
@@ -1072,3 +1075,276 @@ def test_default_attach_never_switches_on_the_ui_thread(env):
     _inline(controller)
     controller.start_avd("Pixel")
     assert switched_on_ui == [False]
+
+
+# -- launch hooks ---------------------------------------------------------------
+
+
+def _kill_exits_process(env):
+    """``emu kill`` also ends the fake process of that serial."""
+    adb = env["adb"]
+    original = adb.send_telnet_command
+
+    def send(command, serial=None):
+        result = original(command, serial=serial)
+        if command == "kill":
+            for cmd, proc in zip(env["spawned"], env["procs"], strict=True):
+                if f"emulator-{_port_of(cmd)}" == serial and proc.exit_code is None:
+                    proc._exit(0)
+        return result
+
+    adb.send_telnet_command = send
+
+
+def _recorders(events):
+    """A (pre-launch, post-stop) hook pair appending to *events*."""
+
+    def pre(ctx):
+        events.append(("pre", ctx.port, ctx))
+        return ()
+
+    def post(ctx):
+        events.append(("post", ctx.port, ctx))
+
+    emu.register_pre_launch_hook(pre)
+    emu.register_post_stop_hook(post)
+    return pre, post
+
+
+def _kinds(events):
+    return [(kind, port) for kind, port, _ctx in events]
+
+
+def test_hook_registration_is_ordered_idempotent_and_removable(env):
+    class Owner:
+        def hook(self, ctx):
+            return ()
+
+    owner = Owner()
+
+    def a(ctx):
+        return ()
+
+    emu.register_pre_launch_hook(a)
+    emu.register_pre_launch_hook(owner.hook)
+    emu.register_pre_launch_hook(a)
+    emu.register_pre_launch_hook(owner.hook)  # a new but equal bound method
+    assert emu._hook_snapshot("pre_launch") == [a, owner.hook]
+    emu.unregister_pre_launch_hook(a)
+    emu.unregister_pre_launch_hook(a)  # not registered: no-op
+    assert emu._hook_snapshot("pre_launch") == [owner.hook]
+    emu.register_post_stop_hook(a)
+    emu.unregister_post_stop_hook(owner.hook)  # never a post-stop hook
+    assert emu._hook_snapshot("post_stop") == [a]
+    with pytest.raises(TypeError):
+        emu.register_post_stop_hook("not callable")
+
+
+def test_pre_launch_args_follow_extra_args_and_are_never_remembered(env):
+    import json
+
+    emu.register_pre_launch_hook(lambda ctx: ("-hook-one",))
+    emu.register_pre_launch_hook(lambda ctx: ["-hook-two", "value"])
+    env["on_spawn"] = lambda cmd: env["adb"].add(
+        f"emulator-{_port_of(cmd)}", avd="Pixel"
+    )
+    opts = AvdLaunchOptions(extra_args=("-extra",))
+    serial = emu.ensure_avd_running("Pixel", options=opts)
+    command = env["spawned"][0]
+    assert command[-4:] == ["-extra", "-hook-one", "-hook-two", "value"]
+    launch = emu.get_launch(serial)
+    assert launch.options == opts
+    assert launch.hook_args == ("-hook-one", "-hook-two", "value")
+    text = json.dumps(emu.load_launch_prefs())
+    assert "-hook" not in text
+    assert "-extra" not in text  # extra_args are not remembered either
+
+
+def test_pre_launch_hook_sees_the_real_port_and_redirected_avd_dir(
+    env, tmp_path, monkeypatch
+):
+    home = tmp_path / "avdhome"
+    home.mkdir()
+    elsewhere = tmp_path / "disk" / "Pixel.avd"
+    elsewhere.mkdir(parents=True)
+    (home / "Pixel.ini").write_text(f"path={elsewhere}\n")
+    monkeypatch.setenv("ANDROID_AVD_HOME", str(home))
+    emu._remember_port("Pixel", 5570)
+    events = []
+    _recorders(events)
+    opts = AvdLaunchOptions(headless=True)
+    launch = emu.launch_avd("Pixel", opts)
+    [(kind, port, ctx)] = events
+    assert (kind, port) == ("pre", 5570)
+    assert ctx == emu.LaunchContext("Pixel", elsewhere, 5570, opts)
+    assert launch.context is ctx
+    assert _port_of(env["spawned"][0]) == 5570
+
+
+def test_failing_pre_launch_hook_fails_closed(env):
+    events = []
+    _recorders(events)
+
+    def broken_patch(ctx):
+        raise ValueError("disk full")
+
+    emu.register_pre_launch_hook(broken_patch)
+    with pytest.raises(EmulatorLaunchError) as info:
+        emu.launch_avd("Pixel")
+    assert "broken_patch" in str(info.value)
+    assert "ValueError: disk full" in str(info.value)
+    assert env["spawned"] == []
+    assert not emu._RESERVED_PORTS
+    assert not emu._STARTING_AVDS
+    assert emu.launches() == []
+    # The hook that ran (and the failing one's partial patch) is restored.
+    assert _kinds(events) == [("pre", 5554), ("post", 5554)]
+    assert events[0][2] is events[1][2]
+    emu.unregister_pre_launch_hook(broken_patch)
+    assert emu.launch_avd("Pixel").port == 5554  # the port was released
+
+
+def test_pre_launch_hook_returning_a_string_fails_closed(env):
+    emu.register_pre_launch_hook(lambda ctx: "-oops")
+    with pytest.raises(EmulatorLaunchError, match="tuple of str"):
+        emu.launch_avd("Pixel")
+    assert env["spawned"] == []
+
+
+def test_spawn_failure_restores_what_pre_launch_patched(env, monkeypatch):
+    events = []
+    _recorders(events)
+
+    def no_binary(command, avd_name, env=None):
+        raise FileNotFoundError("emulator vanished")
+
+    monkeypatch.setattr(emu, "spawn_emulator", no_binary)
+    with pytest.raises(EmulatorLaunchError, match="Could not start"):
+        emu.launch_avd("Pixel")
+    assert _kinds(events) == [("pre", 5554), ("post", 5554)]
+    assert not emu._RESERVED_PORTS
+
+
+def test_post_stop_runs_once_after_stop_with_the_launch_context(env):
+    events = []
+    _recorders(events)
+    _kill_exits_process(env)
+    launch = emu.launch_avd("Pixel")
+    env["adb"].add(launch.serial, avd="Pixel")
+    assert emu.stop_emulator(launch.serial) is True
+    assert _kinds(events) == [("pre", 5554), ("post", 5554)]
+    assert events[1][2] is launch.context
+    assert emu.stop_emulator(launch.serial) is True  # already gone
+    assert emu.reap_exited_launches() == []
+    assert len(events) == 2
+
+
+def test_post_stop_waits_until_a_stopped_emulator_has_exited(env):
+    """It left adb but still runs (saving its state): post-stop is due
+    once it exited, noticed by the next reap.
+    """
+    events = []
+    _recorders(events)
+    launch = emu.launch_avd("Pixel")
+    env["adb"].add(launch.serial, avd="Pixel")
+    assert emu.stop_emulator(launch.serial) is True
+    assert _kinds(events) == [("pre", 5554)]
+    assert [x is launch for x in emu._UNFINISHED] == [True]
+    launch.process.exit_code = 0
+    assert emu.reap_exited_launches() == [launch]
+    assert _kinds(events) == [("pre", 5554), ("post", 5554)]
+    assert emu._UNFINISHED == []
+    emu.reap_exited_launches()
+    assert len(events) == 2
+
+
+def test_restart_runs_post_stop_before_the_next_pre_launch(env):
+    events = []
+    _recorders(events)
+    _kill_exits_process(env)
+    first = emu.launch_avd("Pixel", port=5560)
+    env["adb"].add(first.serial, avd="Pixel")
+    second = emu.restart_emulator(first.serial)
+    assert _kinds(events) == [("pre", 5560), ("post", 5560), ("pre", 5560)]
+    assert events[1][2] is first.context
+    assert events[2][2] is second.context is not first.context
+
+
+def test_restart_waits_for_the_old_process_before_pre_launch(env, monkeypatch):
+    events = []
+    _recorders(events)
+    first = emu.launch_avd("Pixel", port=5560)
+    env["adb"].add(first.serial, avd="Pixel")
+    # It leaves adb on ``emu kill`` but exits only during the port wait.
+    monkeypatch.setattr(emu.time, "sleep", lambda s: first.process._exit(0))
+    emu.restart_emulator(first.serial)
+    assert _kinds(events) == [("pre", 5560), ("post", 5560), ("pre", 5560)]
+
+
+def test_post_stop_runs_once_when_our_emulator_dies_on_its_own(env):
+    events = []
+    _recorders(events)
+    launch = emu.launch_avd("Pixel")
+    launch.process.exit_code = 1
+    assert emu.wait_until_ready(launch.serial, timeout=10_000) is False
+    assert _kinds(events) == [("pre", 5554), ("post", 5554)]
+    assert emu.wait_until_ready(launch.serial, timeout=10_000) is False
+    assert emu.stop_emulator(launch.serial) is True
+    emu.reap_exited_launches()
+    assert len(events) == 2
+
+
+def test_next_launch_reaps_a_death_nobody_noticed(env):
+    events = []
+    _recorders(events)
+    first = emu.launch_avd("Pixel")
+    first.process.exit_code = 1  # died; no boot waiter saw it
+    emu.launch_avd("Pixel")
+    assert _kinds(events) == [("pre", 5554), ("post", 5554), ("pre", 5554)]
+
+
+def test_startup_crash_runs_post_stop_before_the_retry(env):
+    events = []
+    _recorders(events)
+    env["on_spawn"] = lambda command: env["busy"].add(_port_of(command))
+    env["startup"] = [(False, "ERROR: port in use"), (True, "")]
+    launch = emu.launch_avd("Pixel")
+    assert _kinds(events) == [("pre", 5554), ("post", 5554), ("pre", 5556)]
+    assert launch.context.port == 5556
+
+
+def test_post_stop_exceptions_are_logged_and_swallowed(env, caplog):
+    events = []
+
+    def failing_restore(ctx):
+        raise OSError("read-only")
+
+    emu.register_post_stop_hook(failing_restore)
+    _recorders(events)
+    _kill_exits_process(env)
+    first = emu.launch_avd("Pixel", port=5560)
+    env["adb"].add(first.serial, avd="Pixel")
+    with caplog.at_level("WARNING", logger=emu.__name__):
+        assert emu.stop_emulator(first.serial) is True
+    assert _kinds(events) == [("pre", 5560), ("post", 5560)]
+    assert "failing_restore" in caplog.text
+    second = emu.launch_avd("Pixel", port=5560)
+    env["adb"].add(second.serial, avd="Pixel")
+    assert emu.restart_emulator(second.serial).serial == "emulator-5560"
+
+
+def test_reusing_a_running_avd_runs_no_pre_launch_hook(env):
+    events = []
+    _recorders(events)
+    env["adb"].add("emulator-5570", avd="Pixel")
+    env["locked"].add("Pixel")
+    assert emu.ensure_avd_running("Pixel") == "emulator-5570"
+    assert events == []
+
+
+def test_stopping_a_foreign_emulator_runs_no_post_stop_hook(env):
+    events = []
+    _recorders(events)
+    env["adb"].add("emulator-5556", avd="Other")
+    assert emu.stop_emulator("emulator-5556") is True
+    assert events == []
