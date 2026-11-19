@@ -40,18 +40,26 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from sandroid.tui.row_annotations import (
-    LENS_FILES,
-    LENS_NETWORK,
-    PRIORITY_AI,
-    Annotation,
-    registry,
-)
-
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
+    from sandroid.tui.row_annotations import Annotation, RowAnnotationRegistry
+
 logger = logging.getLogger(__name__)
+
+#: Lens names (equal to ``sandroid.tui.row_annotations.LENS_*``; not imported:
+#: importing ``sandroid.tui`` costs about 0.7 s, so this module imports it
+#: lazily, only where an annotation or the registry is needed).
+LENS_NETWORK = "network"
+LENS_FILES = "files"
+
+
+def registry() -> RowAnnotationRegistry:
+    """The process-wide row annotation registry (lazy import)."""
+    from sandroid.tui.row_annotations import registry as _registry
+
+    return _registry()
+
 
 #: Highlight sets per lens (one tint colour slot each).
 MAX_SETS_PER_LENS = 4
@@ -279,6 +287,8 @@ class HighlightStore:
         entries = self.lookup(lens, key)
         if not entries:
             return []
+        from sandroid.tui.row_annotations import PRIORITY_AI, Annotation
+
         fid = self._filters.get(lens)
         out = [
             Annotation(
