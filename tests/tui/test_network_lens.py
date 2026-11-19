@@ -680,6 +680,9 @@ async def test_filter_matches_status_and_esc_clears_it(flow_dir):
         await pilot.press("escape")
         await settle(pilot)
         assert panel._filter == ""
+        # No debounce is left armed by the cleared input: it would re-apply
+        # "" over a filter set right after (the next step, under load).
+        assert panel._filter_timer is None
         assert panel.table.row_count == shown
         assert not panel.query_one("#net-filter").has_class("-open")
         assert app.focused is panel.table

@@ -1974,7 +1974,10 @@ class NetworkPanel(Widget):
                 pass
             self._filter_timer = None
         had_filter = bool(self._filter or box.value.strip())
-        box.value = ""
+        # No Input.Changed: its debounce would re-apply "" 150 ms later,
+        # over a filter set meanwhile.
+        with self.prevent(Input.Changed):
+            box.value = ""
         box.remove_class("-open")
         self.set_filter("")
         self.focus()
