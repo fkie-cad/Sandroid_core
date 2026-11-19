@@ -551,7 +551,7 @@ class MainScreen(Screen):
                         logger.debug("lens hook %s failed", hook, exc_info=True)
         except Exception:
             pass
-        self.call_after_refresh(self._ensure_view_focus)
+        self.call_after_refresh(self._ensure_view_focus, self._keys_routed())
         # Whenever the lens changes -- by any means -- the active nav level
         # goes back to "outer" and stale inner highlights are cleared.
         self._reset_nav_level_to_outer()
@@ -628,11 +628,14 @@ class MainScreen(Screen):
                     panel.cycle_subtab(delta)
                 except Exception:
                     pass
-                self.call_after_refresh(self._ensure_view_focus)
+                self.call_after_refresh(self._ensure_view_focus, self._keys_routed())
             return
         self.cycle_lens(delta)
 
-    def _ensure_view_focus(self) -> None:
+    def _keys_routed(self) -> int:
+        return int(getattr(self.app, "keys_routed", 0))
+
+    def _ensure_view_focus(self, keys_at_switch: int | None = None) -> None:
         """After a view switch, never leave the caret in a text input.
 
         Switching lenses focuses the new view's table/list. If focus
@@ -642,9 +645,16 @@ class MainScreen(Screen):
         for the PDF report -- would be typed into it. Move focus to the first
         non-input focusable widget of the active lens instead (or to nothing,
         which keeps global keys live).
+
+        Runs after the next refresh, which can come late under load: when a
+        key was routed after the switch (``keys_at_switch``), that key's own
+        focus move wins (``3`` then ``/aid``: the Files filter the ``/``
+        opened must keep the focus, or ``aid`` runs as commands).
         """
         from textual.widgets import Input, TextArea
 
+        if keys_at_switch is not None and self._keys_routed() != keys_at_switch:
+            return
         focused = self.focused
         if focused is not None and not isinstance(focused, Input | TextArea):
             return

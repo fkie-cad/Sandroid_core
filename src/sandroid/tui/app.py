@@ -321,6 +321,9 @@ class SandroidTUI(App):
         # routed, the screen it was routed on, and the keys waiting for it.
         self._key_in_flight = None
         self._key_routed_at = 0.0
+        #: Keys routed so far (a key handled after a deferred focus fix-up
+        #: was scheduled moved focus on purpose, see MainScreen).
+        self.keys_routed = 0
         self._key_screen = None
         self._key_backlog: collections.deque = collections.deque()
 
@@ -1075,6 +1078,7 @@ class SandroidTUI(App):
 
     async def _route_key(self, event) -> None:
         """Route one key (priority bindings, else the focused widget)."""
+        self.keys_routed += 1
         self._key_in_flight = event
         self._key_routed_at = time.monotonic()
         try:

@@ -2454,3 +2454,28 @@ async def test_title_is_not_live_while_the_monitor_is_off_or_stopping() -> None:
         title, info = panel.caption()
         assert title == "monitor stopping…"
         assert "o stops" not in info
+
+
+@pytest.mark.asyncio
+async def test_a_late_view_focus_fixup_keeps_a_filter_a_key_opened() -> None:
+    """M1 root cause, deterministic: the switch's focus fix-up runs after the
+    next refresh, which can come after the next key (``/`` opened the filter).
+    A key routed since the switch wins; without one the fix-up still moves
+    focus out of a text field.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms, panel = await _boot_files(pilot, app)
+        field = panel.query_one("#files-input", Input)
+        at_switch = ms._keys_routed()
+        await pilot.press("slash")  # a key after the switch opens the filter
+        await settle(pilot)
+        assert ms.focused is field
+        ms._ensure_view_focus(at_switch)  # the late fix-up
+        await settle(pilot)
+        assert ms.focused is field
+        ms._ensure_view_focus(ms._keys_routed())  # no key since: fix-up acts
+        await settle(pilot)
+        assert ms.focused is not field
