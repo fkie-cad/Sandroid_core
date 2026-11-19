@@ -799,8 +799,8 @@ async def test_files_lens_in_the_app_enter_opens_and_live_updates_inspector() ->
         before = ms.inspector_content
         panel.ingest(_items(_fse("FSE_CONTENT_MODIFIED", other)), now=T0)
         assert ms.inspector_content is before
-        # Moving the cursor follows with the Inspector.
-        await pilot.press("down")
+        # Moving the cursor follows with the Inspector (newest last: up).
+        await pilot.press("up")
         await settle(pilot)
         assert ms.inspector_content.key[2] != path
         await pilot.press("escape")
@@ -1191,7 +1191,7 @@ async def test_marks_show_only_activity_since_and_step_through_segments() -> Non
         panel.ingest(
             _items(_fse("FSE_CREATE_FILE", new)), now=T0 + timedelta(seconds=25)
         )
-        assert _keys(panel) == [DB, new, PREFS]
+        assert _keys(panel) == [DB, PREFS, new]  # newest last
         assert _row(panel, PREFS).stats.count == 1  # reset per segment
         assert _row(panel, DB).dim
         assert panel._path_cell(_row(panel, DB)).spans[-1].style == "#5b6479"
@@ -1215,7 +1215,7 @@ async def test_marks_show_only_activity_since_and_step_through_segments() -> Non
         assert panel.caption()[0] == "since mark 2 · 10:40:30"
         await pilot.press("less_than_sign")
         await pilot.pause()
-        assert _keys(panel) == [DB, new, PREFS]
+        assert _keys(panel) == [DB, PREFS, new]
         assert panel.caption()[0] == ("mark 1 'tap login' → mark 2 · 10:40:10–10:40:30")
         await pilot.press("less_than_sign")
         await pilot.pause()
@@ -1245,12 +1245,13 @@ async def test_marks_show_only_activity_since_and_step_through_segments() -> Non
         assert len(lines) == 3
 
 
-async def test_B_asks_for_a_name_enter_keeps_it_unnamed_and_esc_cancels(
+async def test_B_asks_for_a_note_text_empty_enter_keeps_asking_esc_cancels(
     install_fakes,
 ) -> None:
-    """``B`` is the App's label-point key now: an ``InputModal`` asks for the
-    optional name (Enter on an empty name = unnamed, Esc = no mark); the
-    Files lens pre-splits at the key press while the prompt is open.
+    """``B`` is the App's Note key: an ``InputModal`` asks for the note's
+    text, which it needs (an empty Enter keeps the prompt open with a hint,
+    Esc = no note); the Files lens pre-splits at the key press while the
+    prompt is open.
     """
     from sandroid.tui.app import SandroidTUI
 
@@ -1264,16 +1265,23 @@ async def test_B_asks_for_a_name_enter_keeps_it_unnamed_and_esc_cancels(
         await pilot.press("B")
         await settle(pilot)
         assert type(app.screen).__name__ == "InputModal"
-        assert "Mark 1" in app.screen.title_text
+        assert "Note 1 · at " in app.screen.title_text
+        assert app.screen.title_text.endswith("— text")
         assert len(panel.activity.mark_times) == 1  # pre-split at the key press
-        await pilot.press("enter")  # empty name = unnamed
+        await pilot.press("enter")  # empty: the prompt stays, with a hint
         await settle(pilot)
-        assert [m.label() for m in panel.marks] == ["mark 1"]
+        assert type(app.screen).__name__ == "InputModal"
+        hint = str(app.screen.query_one("#input-hint").render())
+        assert "needs its text" in hint
+        assert panel.marks == []
+        await pilot.press(*"first", "enter")
+        await settle(pilot)
+        assert [m.label() for m in panel.marks] == ["mark 1 'first'"]
         await pilot.press("B")
         await settle(pilot)
         await pilot.press(*"login", "enter")
         await settle(pilot)
-        assert [m.label() for m in panel.marks] == ["mark 1", "mark 2 'login'"]
+        assert [m.label() for m in panel.marks] == ["mark 1 'first'", "mark 2 'login'"]
         await pilot.press("B")
         await settle(pilot)
         await pilot.press("escape")  # no mark
@@ -1367,7 +1375,7 @@ async def test_cache_folders_collapse_into_one_expandable_row() -> None:
             _items(_fse("FSE_CONTENT_MODIFIED", PREFS)), now=T0 + timedelta(seconds=2)
         )
         group = f"{ROOT}/cache/"
-        assert _keys(panel) == [PREFS, f"{ROOT}/code_cache/", group]
+        assert _keys(panel) == [group, f"{ROOT}/code_cache/", PREFS]  # newest last
         row = _row(panel, group)
         assert panel._path_cell(row).plain == "cache/ · 3 files"
         assert str(panel._mark_cell(row)) == "▸"
@@ -1375,14 +1383,14 @@ async def test_cache_folders_collapse_into_one_expandable_row() -> None:
         assert panel.caption()[1].startswith("1 path + 2 groups")
 
         panel.table.focus()
-        panel.table.move_cursor(row=2)
+        panel.table.move_cursor(row=0)
         await pilot.press("enter")  # opens the group, no Inspector
         await pilot.pause()
-        assert _keys(panel)[2] == group
-        assert set(_keys(panel)[3:]) == set(cache_files)
+        assert _keys(panel)[0] == group
+        assert set(_keys(panel)[1:4]) == set(cache_files)
         assert str(panel._mark_cell(_row(panel, group))) == "▾"
         assert panel._path_cell(_row(panel, cache_files[0])).plain.startswith("  ")
-        panel.table.move_cursor(row=4)
+        panel.table.move_cursor(row=2)
         await pilot.press("left")  # folds from a member row
         await pilot.pause()
         assert len(_keys(panel)) == 3
@@ -1870,6 +1878,7 @@ async def test_stray_window_passes_keys_that_are_not_typing(monkeypatch) -> None
         )
         panel.refresh_rows()
         panel.table.focus()
+        panel.table.move_cursor(row=0)  # following sits on the newest (last)
         await settle(pilot)
         row = panel.table.cursor_row
         _burst(app, "q", "x", "3", "down")
@@ -2080,10 +2089,10 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
             ),
             now=T0 + timedelta(seconds=20),
         )
-        # Since the mark: the active ★ row on top, ONE fold row for the 21
-        # idle watches (incl. the pattern and prefs[3], active before the
-        # mark only), then the segment's activity.
-        assert _keys(panel) == [prefs[5], IDLE_FOLD, AAID]
+        # Since the mark: ONE fold row for the 21 idle watches (incl. the
+        # pattern and prefs[3], active before the mark only) on top, then
+        # the active ★ row, then the segment's activity (newest last).
+        assert _keys(panel) == [IDLE_FOLD, prefs[5], AAID]
         fold = _row(panel, IDLE_FOLD)
         assert len(fold.members) == 21
         assert pattern in {m.key for m in fold.members}
@@ -2096,12 +2105,12 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
         assert "1 group" not in panel.caption()[1]  # the fold is no cache group
 
         panel.table.focus()
-        panel.table.move_cursor(row=1)
+        panel.table.move_cursor(row=0)
         await pilot.press("enter")  # opens the fold, no Inspector
         await pilot.pause()
         keys = _keys(panel)
-        assert keys[:2] == [prefs[5], IDLE_FOLD]
-        assert keys[-1] == AAID
+        assert keys[0] == IDLE_FOLD
+        assert keys[-2:] == [prefs[5], AAID]
         assert len(keys) == 2 + 21 + 1
         assert str(panel._mark_cell(_row(panel, IDLE_FOLD))) == "▾"
         assert panel._path_cell(_row(panel, prefs[0])).plain.startswith("  ")
@@ -2112,7 +2121,7 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
         panel.table.move_cursor(row=4)
         await pilot.press("left")  # folds from a member row
         await pilot.pause()
-        assert _keys(panel) == [prefs[5], IDLE_FOLD, AAID]
+        assert _keys(panel) == [IDLE_FOLD, prefs[5], AAID]
         assert panel._cursor_key() == IDLE_FOLD
         await pilot.press("u")  # on the fold row: a hint, no pull
         await pilot.pause()
@@ -2122,8 +2131,7 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
         await pilot.press("A")
         await pilot.pause()
         keys = _keys(panel)
-        assert keys[:2] == [prefs[5], prefs[3]]
-        assert IDLE_FOLD in keys
+        assert keys[:3] == [IDLE_FOLD, prefs[3], prefs[5]]
         assert panel._path_cell(_row(panel, IDLE_FOLD)).plain.startswith(
             "★ 19 watched · idle"
         )
@@ -2140,7 +2148,7 @@ async def test_a_single_idle_watch_is_not_folded() -> None:
         assert set(_keys(panel)) == {DB, PREFS}  # 2 idle in the all view: kept
         panel.drop_mark("m", T0)
         panel.ingest(_items(_fse("FSE_CONTENT_MODIFIED", DB)), now=T0)
-        assert _keys(panel) == [DB, PREFS]  # 1 idle in the segment: kept
+        assert _keys(panel) == [PREFS, DB]  # 1 idle in the segment: kept
         assert _row(panel, PREFS).dim
 
 
@@ -2418,12 +2426,12 @@ async def test_watched_rows_with_only_open_events_stay_in_the_idle_fold() -> Non
             ),
             now=T0 + timedelta(seconds=1),
         )
-        assert _keys(panel) == [prefs[2], IDLE_FOLD]
+        assert _keys(panel) == [IDLE_FOLD, prefs[2]]
         assert len(_row(panel, IDLE_FOLD).members) == 4
         panel.table.focus()
         await pilot.press("A")  # everything: still 4 idle -> still folded
         await pilot.pause()
-        assert _keys(panel) == [prefs[2], IDLE_FOLD]
+        assert _keys(panel) == [IDLE_FOLD, prefs[2]]
         # Unfolded, an OPEN-only row shows no ops and no count.
         panel._expanded.add(IDLE_FOLD)
         panel.refresh_rows()
@@ -2479,3 +2487,60 @@ async def test_a_late_view_focus_fixup_keeps_a_filter_a_key_opened() -> None:
         ms._ensure_view_focus(ms._keys_routed())  # no key since: fix-up acts
         await settle(pilot)
         assert ms.focused is not field
+
+
+# --------------------------------------------------------------------------
+# newest at the bottom + follow (the shared rules of follow.py)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_newest_change_is_at_the_bottom_and_followed_until_moving_up() -> None:
+    """Files changes list oldest first; while live the cursor sits on the
+    newest row. ↑ stops following (the monitor keeps recording; the caption
+    counts the rows that changed since), End resumes.
+    """
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        for k, path in enumerate((DB, AAID, PREFS)):
+            panel.ingest(
+                _items(_fse("FSE_CONTENT_MODIFIED", path)),
+                now=T0 + timedelta(seconds=k),
+            )
+        assert _keys(panel) == [DB, AAID, PREFS]  # newest last
+        assert panel.following
+        assert panel._cursor_key() == PREFS
+        assert "· live" in panel.caption()[1]
+        # A change moves its row to the bottom; following keeps up with it.
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", DB)), now=T0 + timedelta(seconds=5)
+        )
+        assert _keys(panel) == [AAID, PREFS, DB]
+        assert panel._cursor_key() == DB
+        panel.table.focus()
+        await pilot.press("up")
+        await settle(pilot)
+        assert not panel.following
+        assert panel._cursor_key() == PREFS
+        assert "scrolled back · 0 new below · End = live" in panel.caption()[1]
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", AAID)), now=T0 + timedelta(seconds=9)
+        )
+        assert _keys(panel) == [PREFS, DB, AAID]
+        assert panel._cursor_key() == PREFS  # the view stays put
+        assert "scrolled back · 1 new below · End = live" in panel.caption()[1]
+        await pilot.press("end")
+        await settle(pilot)
+        assert panel.following
+        assert panel._cursor_key() == AAID
+        assert "· live" in panel.caption()[1]
+        # A click on a row above the newest one stops following too.
+        await pilot.click("#files-table", offset=(5, 0))
+        await settle(pilot)
+        assert not panel.following
+        assert panel._cursor_key() == PREFS
+        # Sorted by name / count there is no "newest": no follow wording.
+        await pilot.press("O")
+        await settle(pilot)
+        assert "live" not in panel.caption()[1]

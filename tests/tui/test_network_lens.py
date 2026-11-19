@@ -1163,3 +1163,41 @@ def test_network_tab_ctrl_p_disarms_an_armed_ssl_unpin(monkeypatch):
 
     assert svc.armed_categories() == []
     assert lines == ["[INFO] SSL pinning bypass disarmed"]
+
+
+async def test_follow_live_stops_on_up_or_a_click_and_end_resumes(flow_dir):
+    """The shared follow rules: newest flow at the bottom and selected while
+    live; ↑ or a click above it stops that (capturing goes on: the caption
+    counts what arrived below); End resumes.
+    """
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        table = panel.table
+        assert panel.following
+        assert ms._lens_captions["network"][1].startswith("live · ")
+        table.focus()
+        await pilot.press("up")
+        await settle(pilot)
+        assert not panel.following
+        info = ms._lens_captions["network"][1]
+        assert info.startswith("scrolled back · 0 new below · End = live")
+        row = table.cursor_row
+        count = table.row_count
+        write_flows(flow_dir, time.time(), specs=_SPECS[1:3], start_seq=100)
+        panel.poll_now()
+        await until(pilot, lambda: table.row_count == count + 2)
+        await settle(pilot)
+        assert table.cursor_row == row
+        info = ms._lens_captions["network"][1]
+        assert info.startswith("scrolled back · 2 new below · End = live")
+        await pilot.press("end")
+        await settle(pilot)
+        assert panel.following
+        assert table.cursor_row == table.row_count - 1
+        assert ms._lens_captions["network"][1].startswith("live · ")
+        # A click on a row above the newest one stops following.
+        await pilot.click("#net-flows", offset=(4, 2))
+        await settle(pilot)
+        assert not panel.following
+        assert table.cursor_row < table.row_count - 1

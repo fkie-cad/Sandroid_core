@@ -146,17 +146,18 @@ class SandroidTUI(App):
             "5", "switch_lens('timeline')", "Timeline lens", show=False,
             id="lens_timeline",
         ),
-        # Labels (session timeline) and Tracking: main screen only (see
-        # check_action), every lens. #/+/B ask for an optional name.
+        # Sections and notes (session timeline labels) and Tracking: main
+        # screen only (see check_action), every lens. # and + ask for an
+        # optional name, B for the note's text (required).
         Binding(
-            "number_sign", "label_start", "Label: start…", show=False,
+            "number_sign", "label_start", "Section: start…", show=False,
             id="label_start",
         ),
-        Binding("plus", "label_sub", "Label: sub-label…", show=False, id="label_sub"),
-        Binding("minus", "label_stop", "Label: stop", show=False, id="label_stop"),
         Binding(
-            "B", "label_point", "Label: point (mark)…", show=False, id="label_point"
+            "plus", "label_sub", "Sub-section: start…", show=False, id="label_sub"
         ),
+        Binding("minus", "label_stop", "End section", show=False, id="label_stop"),
+        Binding("B", "label_point", "Note…", show=False, id="label_point"),
         Binding(
             "ctrl+t", "tracking_toggle", "Tracking on/off", show=False,
             id="tracking_toggle",
@@ -1358,23 +1359,27 @@ class SandroidTUI(App):
     # -- labels + Tracking (session timeline) ---------------------------------
 
     def action_label_start(self) -> None:
-        """``#``: a top-level label (closes every open label)."""
+        """``#``: a Section (a top-level label; closes every open one)."""
         self._label_prompt("start", "top")
 
     def action_label_sub(self) -> None:
-        """``+``: a sub-label (a sibling of the innermost sub-label)."""
+        """``+``: a Sub-section (a sibling of the innermost sub-section)."""
         self._label_prompt("start", "sub")
 
     def action_label_point(self) -> None:
-        """``B``: a point (mark) at the key press."""
+        """``B``: a Note (a point label) at the key press."""
         self._label_prompt("point", "top")
 
     def _label_prompt(self, kind: str, level: str) -> None:
-        """Ask for the label's optional name; ``t`` is the key press.
+        """Ask for a section's optional name or a note's text; ``t`` is the
+        key press.
 
-        Enter writes the label (an empty name = unnamed), Esc writes nothing.
-        While the prompt is open the lenses see the pending boundary
-        (``MarksChanged.pending``; the Files lens pre-splits its segments).
+        Enter writes the label (a section without a name = unnamed; a note
+        needs its text: an empty Enter keeps the prompt open with a hint),
+        Esc writes nothing. While the prompt is open the lenses see the
+        pending boundary (``MarksChanged.pending``; the Files lens pre-splits
+        its segments). A new note shows ``Note 4 'text'`` in the header for
+        a few seconds.
         """
         from datetime import datetime
 
@@ -1394,7 +1399,7 @@ class SandroidTUI(App):
         if number is None:
             number = max((m.number for m in ms.marks), default=0) + 1
         if kind == "point":
-            title = f"Mark {number} · at {stamp:%H:%M:%S} — name (optional)"
+            title = f"Note {number} · at {stamp:%H:%M:%S} — text"
         elif level == "sub" and open_spans:
             parent = open_spans[-1]
             if getattr(parent, "depth", 0) >= 1 and parent.parent is not None:
@@ -1402,16 +1407,17 @@ class SandroidTUI(App):
             else:
                 parent_no = parent.number
             title = (
-                f"Label {number} (in {parent_no}) · start at {stamp:%H:%M:%S}"
-                " — name (optional)"
+                f"Sub-section {number} (in {parent_no}) · start at "
+                f"{stamp:%H:%M:%S} — name (optional)"
             )
         else:
-            title = f"Label {number} · start at {stamp:%H:%M:%S} — name (optional)"
+            title = f"Section {number} · start at {stamp:%H:%M:%S} — name (optional)"
         no_open = level == "sub" and not open_spans
         # Files sees top-level starts and points (labels.boundaries()).
         boundary = kind == "point" or level == "top" or no_open
         if ms.scope is not None:
-            self.notify("Label added to the live session.", timeout=3)
+            what = "Note" if kind == "point" else "Section"
+            self.notify(f"{what} added to the live session.", timeout=3)
         # "#" while a label is open ends it at the key press: the boundaries
         # gain its end AND the new start there, so pre-split at both.
         ends_open = kind == "start" and level == "top" and bool(open_spans)
@@ -1426,17 +1432,26 @@ class SandroidTUI(App):
                 if boundary:
                     screen.post_marks_pending(None)
                 return
-            screen.add_label(kind, name, when, level=level, source="key", actor="user")
+            mark = screen.add_label(
+                kind, name, when, level=level, source="key", actor="user"
+            )
             if no_open and screen.labels_api() is not None:
-                self.notify("No open label — started a top-level label.", timeout=3)
+                self.notify("No open section — started a top-level section.", timeout=3)
+            if kind == "point" and mark is not None:
+                screen.flash_label_note(f"Note {mark.number} '{name.strip()}'")
 
-        self.push_screen(
-            InputModal(
+        if kind == "point":
+            prompt = InputModal(
                 title=title,
-                placeholder="name (optional) · ⏎ keep · esc cancel",
-            ),
-            done,
-        )
+                placeholder="text · Enter adds · Esc cancels",
+                required="A note needs its text (Esc cancels).",
+            )
+        else:
+            prompt = InputModal(
+                title=title,
+                placeholder="name (optional) · Enter keeps · Esc cancels",
+            )
+        self.push_screen(prompt, done)
 
     def action_label_stop(self) -> None:
         """``-``: end the innermost open label right away."""
@@ -1445,17 +1460,18 @@ class SandroidTUI(App):
             return
         if ms.labels_api() is None:
             self.notify(
-                "Timeline unavailable — labels need the session timeline.",
+                "Timeline unavailable — sections need the session timeline.",
                 severity="warning",
                 timeout=3,
             )
             return
         event = ms.stop_label(time.time(), actor="user")
         if event is None:
-            self.notify("No open label.", severity="warning", timeout=3)
+            self.notify("No open section.", severity="warning", timeout=3)
             return
         named = f" '{event.name}'" if event.name else ""
-        self.notify(f"■ Label {event.number}{named} stopped.", timeout=3)
+        word = "Sub-section" if getattr(event, "depth", 0) else "Section"
+        self.notify(f"{word} {event.number}{named} ended.", timeout=3)
 
     def action_tracking_toggle(self) -> None:
         """``Ctrl+T``: Tracking (input + screen capture) on/off."""

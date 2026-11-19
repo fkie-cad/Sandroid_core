@@ -15,6 +15,7 @@ class InputModal(ForensicModal[str]):
     - Submit with Enter or button
     - Cancel with Escape or button
     - Returns input value or None if cancelled
+    - ``required``: an empty value keeps the dialog open with a short hint
     - Centered with transparent background
     - ``select_all=True``: the default value starts selected, so typing
       replaces it (rename); otherwise the cursor sits at its end, so typing
@@ -54,6 +55,7 @@ class InputModal(ForensicModal[str]):
         id: str = None,
         classes: str = None,
         select_all: bool = False,
+        required: str = "",
     ):
         """Initialize the input modal.
 
@@ -66,6 +68,8 @@ class InputModal(ForensicModal[str]):
             id: Widget ID
             classes: CSS classes
             select_all: Select the default value so typing replaces it.
+            required: When set, an empty value is not accepted: Enter keeps
+                the dialog open and shows this hint (Esc still cancels).
         """
         super().__init__(name=name, id=id, classes=classes)
         self.title_text = title
@@ -73,6 +77,7 @@ class InputModal(ForensicModal[str]):
         self.default = default
         self.placeholder = placeholder or "Enter value..."
         self.select_all = select_all
+        self.required = required
 
     def compose(self) -> ComposeResult:
         """Create the modal layout."""
@@ -87,6 +92,8 @@ class InputModal(ForensicModal[str]):
                 classes="no-compact",
                 select_on_focus=self.select_all,
             )
+            if self.required:
+                yield Label("", id="input-hint", classes="modal-message")
             with Horizontal(classes="button-row"):
                 yield Button("Submit", id="submit", classes="-primary")
                 yield Button("Cancel", id="cancel", classes="-secondary")
@@ -118,4 +125,8 @@ class InputModal(ForensicModal[str]):
     def _submit(self) -> None:
         """Submit the input value."""
         value = self.query_one("#input-field", Input).value
+        if self.required and not value.strip():
+            self.query_one("#input-hint", Label).update(self.required)
+            self.query_one("#input-field", Input).focus()
+            return
         self._dismiss_with_refresh(value)

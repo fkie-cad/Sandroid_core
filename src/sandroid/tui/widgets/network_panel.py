@@ -14,9 +14,12 @@ Data flow
   one ``stat``. A ``[FLOW]`` line from mitmweb's stdout triggers an early
   poll so new rows show up promptly.
 * The in-memory model is bounded (``MAX_ROWS``); the table appends new rows
-  at the bottom and only follows them while the cursor sits on the last row
-  and no flow is open in the Inspector -- a user who scrolled or selected a
-  row is never yanked.
+  at the bottom and follows them while *live* (``follow.py``, the same rules
+  as the Timeline and Files lenses): ↑, PgUp, Home, a wheel up or a click on
+  a row above the newest one stop following (capturing goes on), ``End``
+  resumes; opening a flow in the Inspector stops it too, so a user who
+  scrolled or selected a row is never yanked. The caption says ``live`` or
+  ``scrolled back · 12 new below · End = live``.
 * ``[TLS_FAIL]`` lines become ✗ rows at once; the addon also writes them to
   ``flows.jsonl`` (``kind: "tls"``, no detail file), and the poll pairs that
   record with the stdout row instead of adding it twice. While the lens is
@@ -73,6 +76,7 @@ from textual.widget import Widget
 from textual.widgets import DataTable, Input, Static
 
 from sandroid.tui.utils.ui_thread import in_app_context
+from sandroid.tui.widgets.follow import Follow
 from sandroid.tui.widgets.fritap_panel import FriTapPanel
 from sandroid.tui.widgets.lens_shell import InspectorContent, is_shown
 from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
@@ -659,12 +663,52 @@ class FlowTable(DataTable):
 
     DataTable's own Home / End scroll sideways (the cursor is a row cursor
     here, so they did nothing visible; End never reached the newest flow).
+    Moving up (↑, PgUp, Home, a wheel up, a click above the newest row) stops
+    following the newest flow; End resumes (``follow.py``).
     """
 
     BINDINGS = [
         Binding("home", "scroll_top", "First row", show=False),
-        Binding("end", "scroll_bottom", "Last row", show=False),
+        Binding("end", "scroll_bottom", "Last row + follow", show=False),
     ]
+
+    def _panel(self) -> NetworkPanel | None:
+        for node in self.ancestors:
+            if isinstance(node, NetworkPanel):
+                return node
+        return None
+
+    def _follow(self, live: bool) -> None:
+        panel = self._panel()
+        if panel is not None:
+            panel.set_following(live)
+
+    def action_cursor_up(self) -> None:
+        super().action_cursor_up()
+        self._follow(False)
+
+    def action_page_up(self) -> None:
+        super().action_page_up()
+        self._follow(False)
+
+    def action_scroll_top(self) -> None:
+        super().action_scroll_top()
+        self._follow(False)
+
+    def action_scroll_bottom(self) -> None:
+        super().action_scroll_bottom()
+        self._follow(True)
+
+    def on_click(self, event) -> None:
+        try:
+            row = event.style.meta.get("row")
+        except Exception:
+            row = None
+        if isinstance(row, int) and 0 <= row < self.row_count - 1:
+            self._follow(False)
+
+    def on_mouse_scroll_up(self, _event) -> None:
+        self._follow(False)
 
 
 class NetworkPanel(Widget):
@@ -808,6 +852,8 @@ class NetworkPanel(Widget):
         self._net_layout: list[tuple[str, str, int]] = []
         self._status_pending = False
         self._filter_timer = None
+        #: Follow the newest flow (``follow.py``); live rows only.
+        self._follow = Follow()
 
     # -- compose / mount -------------------------------------------------
 
@@ -1218,6 +1264,32 @@ class NetworkPanel(Widget):
         """True when the cursor sits on the last row (or there is none)."""
         return table.row_count == 0 or table.cursor_row >= table.row_count - 1
 
+    @property
+    def following(self) -> bool:
+        """The table sticks to the newest flow (``live``)."""
+        return self._follow.live
+
+    def set_following(self, live: bool) -> None:
+        """Stop following (a move up) or resume it (End: the newest row)."""
+        if live:
+            changed = self._follow.resume()
+            try:
+                table = self.table
+                if table.row_count:
+                    table.move_cursor(row=table.row_count - 1, animate=False)
+                    table.scroll_end(animate=False)
+            except Exception:
+                pass
+        else:
+            changed = self._follow.stop()
+        if changed:
+            self._do_refresh_status()
+
+    def _check_follow(self, table: DataTable) -> None:
+        """The cursor left the newest row some other way: stop following."""
+        if self._follow.live and table.row_count and not self._at_tail(table):
+            self._follow.stop()
+
     def _rebuild(self, *, to_top: bool = False) -> None:
         """Re-render the table from the current model + filters.
 
@@ -1230,7 +1302,9 @@ class NetworkPanel(Widget):
             return
         self._focus_app = self._spotlight_package()
         keep = None
-        if table.row_count and not self._at_tail(table):
+        if not to_top:
+            self._check_follow(table)
+        if table.row_count and not self._follow.live:
             keep = self._cursor_key()
         layout = self._columns(table)
         rows = [r for r in self._model() if self._passes(r)]
@@ -1269,17 +1343,21 @@ class NetworkPanel(Widget):
         if self.size.width != self._width or not self._net_layout:
             self._rebuild()
             return
-        follow = self._at_tail(table) and not self._inspecting_flow()
-        added = False
+        self._check_follow(table)
+        if self._follow.live and self._inspecting_flow():
+            self._follow.stop()  # the open flow stays selected
+        added = 0
         self._noise_hidden += self._count_noise(rows)
         for row in rows:
             if self._passes(row):
                 table.add_row(*self._cells(row, self._net_layout), key=row.key)
                 self._shown += 1
-                added = True
-        if added and follow:
+                added += 1
+        if added and self._follow.live:
             table.move_cursor(row=table.row_count - 1, animate=False)
             table.scroll_end(animate=False)
+        else:
+            self._follow.added(added)
         self._update_empty()
 
     def _cursor_key(self) -> str | None:
@@ -1468,6 +1546,8 @@ class NetworkPanel(Widget):
         if not total:
             return ""
         parts = []
+        if not self.in_review:
+            parts.append(self._follow.text)
         if self._shown != total:
             parts.append(f"{self._shown} of {total}")
         else:
@@ -1538,6 +1618,7 @@ class NetworkPanel(Widget):
         self._show_all_phases = False
         if run_id is None:
             self._review_loading = False
+            self._follow.resume()
             self._rebuild()
             self._do_refresh_status()
             return
@@ -1699,7 +1780,10 @@ class NetworkPanel(Widget):
         if row is not None:
             try:
                 table = self.table
-                table.move_cursor(row=table.get_row_index(row.key), animate=False)
+                index = table.get_row_index(row.key)
+                if index < table.row_count - 1:
+                    self._follow.stop()
+                table.move_cursor(row=index, animate=False)
             except Exception:
                 pass
         elif record is not None and record.get("id") == flow_id:
@@ -1912,6 +1996,7 @@ class NetworkPanel(Widget):
         if seqs:
             self._floor_seq = max(self._floor_seq, *seqs)
         self._live = []
+        self._follow.resume()
         self._rebuild()
         self._do_refresh_status()
 

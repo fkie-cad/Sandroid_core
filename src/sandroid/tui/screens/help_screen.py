@@ -117,8 +117,17 @@ _LENS_EXTRA_ROWS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
     ],
     "Network lens": [("⏎", "Inspect the selected flow", ("enter",))],
     "Timeline lens": [
-        ("⏎", "Inspect the selected line (Line / JSON / Ref / Chain)", ("enter",)),
-        ("↑/↓/PgUp/PgDn", "Move (up pauses follow)", ("up", "down")),
+        (
+            "⏎",
+            "Inspect the selected line (Line / JSON / Ref / Chain); "
+            "on a folded row: open / close it",
+            ("enter",),
+        ),
+        (
+            "↑/↓/PgUp/PgDn",
+            "Move (up stops following the newest line; End = live)",
+            ("up", "down"),
+        ),
     ],
 }
 #: Headings of the global (works everywhere) panel sections.

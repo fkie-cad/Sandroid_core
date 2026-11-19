@@ -62,6 +62,10 @@ PARENT_DIR = THEMES_DIR.parent
 #   band               section header band (top border of each section)
 #   band_focus         header band of the focused section
 #   stripe             zebra stripe of the longer tables (permissions, ...)
+#   user               Timeline lens: the type word of the user's own input
+#                      (tap, typed, key ...); those rows are tinted ``band``
+#   screen             Timeline lens: the type word of screen changes and
+#                      screenshots (a second accent, apart from ``user``)
 #   cursor_keeps_colors  (bool, not a CSS variable) True: a cell keeps its
 #                      own color under the row cursor (``dangerous`` stays
 #                      amber) instead of taking the cursor text color.
@@ -110,6 +114,8 @@ class LensPalette:
     band: str
     band_focus: str
     stripe: str
+    user: str
+    screen: str
     cursor_keeps_colors: bool = False
 
     def css_variables(self) -> dict[str, str]:
@@ -153,6 +159,8 @@ DEFAULT_LENS = LensPalette(
     band="#0f1c33",
     band_focus="#173560",
     stripe="#0a1121",
+    user="#38bdf8",
+    screen="#c4b5fd",
 )
 
 
@@ -345,6 +353,8 @@ DARK_THEME = Theme(
         band="#1A1A1A",
         band_focus="#2E2540",
         stripe="#111111",
+        user="#03DAC6",
+        screen="#BB86FC",
     ),
 )
 
@@ -408,6 +418,8 @@ LIGHT_THEME = Theme(
         band="#EDF2F8",
         band_focus="#D3E5FA",
         stripe="#F6F8FB",
+        user="#1565C0",
+        screen="#7B1FA2",
     ),
     status_colors={
         "running": "#2E7D32",
@@ -487,6 +499,8 @@ PAPER_THEME = Theme(
         band="#EEE7D7",
         band_focus="#DDE8EB",
         stripe="#F7F3EA",
+        user="#1C5D7C",
+        screen="#6A4A86",
     ),
     status_colors={
         "running": PAPER_OK,
@@ -581,6 +595,8 @@ DAYLIGHT_THEME = Theme(
         band="#EDF0F8",
         band_focus="#E0E4FF",
         stripe="#F7F9FC",
+        user="#4338E0",
+        screen="#0F766E",
     ),
     status_colors={
         "running": DAYLIGHT_OK,
@@ -670,6 +686,8 @@ HIGH_CONTRAST_THEME = Theme(
         band="#1A1A1A",
         band_focus="#00006E",
         stripe="#0E0E0E",
+        user="#00FFFF",
+        screen="#FF00FF",
     ),
 )
 
@@ -732,6 +750,8 @@ CYBERPUNK_THEME = Theme(
         band="#1E0B3A",
         band_focus="#3A1660",
         stripe="#130630",
+        user="#00FFFF",
+        screen="#FF00FF",
     ),
 )
 
@@ -794,6 +814,8 @@ NORD_THEME = Theme(
         band="#3B4252",
         band_focus="#4C566A",
         stripe="#323845",
+        user="#88C0D0",
+        screen="#B48EAD",
     ),
 )
 
@@ -856,6 +878,8 @@ DRACULA_THEME = Theme(
         band="#323444",
         band_focus="#44475A",
         stripe="#2C2E3B",
+        user="#8BE9FD",
+        screen="#FF79C6",
     ),
 )
 
@@ -920,6 +944,8 @@ SOLARIZED_THEME = Theme(
         band="#063440",
         band_focus="#0E4A58",
         stripe="#03303B",
+        user="#268BD2",
+        screen="#D33682",
     ),
 )
 
@@ -993,6 +1019,8 @@ GRAPHITE_LENS = LensPalette(
     band="#26272B",
     band_focus="#35302A",
     stripe="#1E1F22",
+    user="#F0A15C",
+    screen="#C8A2E8",
     cursor_keeps_colors=True,
 )
 
@@ -1055,6 +1083,8 @@ DEEP_SEA_LENS = LensPalette(
     band="#1D2C3A",
     band_focus="#22405A",
     stripe="#17242F",
+    user="#5CD0DA",
+    screen="#B9A4F0",
     cursor_keeps_colors=True,
 )
 
@@ -1117,6 +1147,8 @@ EVERGREEN_LENS = LensPalette(
     band="#242B25",
     band_focus="#2F3D2C",
     stripe="#1D231E",
+    user="#CDAEE6",
+    screen="#8CC4E0",
     cursor_keeps_colors=True,
 )
 

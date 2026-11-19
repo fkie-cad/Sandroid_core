@@ -150,11 +150,14 @@ Scope (LIVE / REVIEW)
 
 Marks and labels
 ----------------
-Labels live in the session timeline (``sandroid.core.timeline``, ``Labels``):
-``#`` starts a top-level label (closing every open one), ``+`` a sub-label
-(or a sibling of the innermost sub-label), ``-`` stops the innermost one and
-``B`` drops a point -- App keys, in every lens, each asking for an optional
-name (``InputModal``; Esc writes nothing).
+Labels live in the session timeline (``sandroid.core.timeline``, ``Labels``);
+the UI calls them Section, Sub-section, End section and Note: ``#`` starts a
+Section (a top-level label, closing every open one), ``+`` a Sub-section (or a
+sibling of the innermost one), ``-`` ends the innermost one and ``B`` drops a
+Note (a point) -- App keys, in every lens. ``#`` / ``+`` ask for an optional
+name, ``B`` for the note's text, which it needs (``InputModal``; Esc writes
+nothing). The header shows the open section, and a new note for
+``NOTE_FLASH_S`` seconds (``ShellHeader.flash_label_note``).
 
 * ``MainScreen.marks`` -- a :class:`SessionMarks` *view* rebuilt from
   ``labels.boundaries()``: top-level label starts, top-level label ends and
@@ -203,6 +206,10 @@ if TYPE_CHECKING:
     from rich.console import RenderableType
     from textual.app import ComposeResult
     from textual.widget import Widget
+
+#: Seconds the header shows a new note (``Note 4 'text'``) before it returns
+#: to the open section.
+NOTE_FLASH_S = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +516,8 @@ class ShellHeader(Header):
         #: lens; shown instead of the plain "● LIVE" pill.
         self._live_note: str | None = None
         self._label_note: str | None = None
+        #: ``(text, until)``: a new note shown instead of the open section.
+        self._flash: tuple[str, float] | None = None
         self._tracking = False
         self._banner: str | None = None
 
@@ -539,7 +548,7 @@ class ShellHeader(Header):
         label.set_class(bool(text), "-on")
 
     def set_label_note(self, text: str | None) -> None:
-        """The innermost open label, e.g. ``▶ 7 'accept cookies' 0:12``."""
+        """The innermost open section, e.g. ``Section 7 'accept cookies' 0:12``."""
         text = text or None
         if text != self._label_note:
             self._label_note = text
@@ -557,6 +566,16 @@ class ShellHeader(Header):
         if text != self._banner:
             self._banner = text
             self._set_piece("timeline-banner", text)
+
+    def flash_label_note(
+        self, text: str, seconds: float = NOTE_FLASH_S, now: float | None = None
+    ) -> None:
+        """Show ``text`` (``Note 4 'text'``) for ``seconds``, then the open
+        section again.
+        """
+        now = time.time() if now is None else now
+        self._flash = (text, now + seconds)
+        self.set_label_note(text)
 
     @property
     def label_note(self) -> str | None:
@@ -590,7 +609,10 @@ class ShellHeader(Header):
                 inner = spans[-1]
                 elapsed = max(0, int(now - float(inner.t)))
                 named = f" '{inner.name}'" if inner.name else ""
-                note = f"▶ {inner.number}{named} {elapsed // 60}:{elapsed % 60:02d}"
+                word = "Sub-section" if getattr(inner, "depth", 0) else "Section"
+                note = (
+                    f"{word} {inner.number}{named} {elapsed // 60}:{elapsed % 60:02d}"
+                )
             try:
                 status = svc.status()
             except Exception:
@@ -601,6 +623,11 @@ class ShellHeader(Header):
                 banner = f"⚠ timeline locked ({who})" if who else "⚠ timeline locked"
             elif state == "failed":
                 banner = "⚠ timeline failed"
+        if self._flash is not None:
+            if now < self._flash[1]:
+                note = self._flash[0]
+            else:
+                self._flash = None
         self.set_label_note(note)
         self.set_timeline_banner(banner)
         active = False

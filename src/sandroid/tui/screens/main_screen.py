@@ -1366,7 +1366,7 @@ class MainScreen(Screen):
     def _timeline_unavailable(self) -> None:
         try:
             self.app.notify(
-                "Timeline unavailable — the label is kept in memory only.",
+                "Timeline unavailable — kept in memory only.",
                 severity="warning",
                 timeout=3,
             )
@@ -1411,6 +1411,13 @@ class MainScreen(Screen):
     def _refresh_label_note(self) -> None:
         try:
             self.query_one("#shell-header", ShellHeader).refresh_timeline_state()
+        except Exception:
+            pass
+
+    def flash_label_note(self, text: str) -> None:
+        """Show ``text`` (``Note 4 'text'``) top right for a few seconds."""
+        try:
+            self.query_one("#shell-header", ShellHeader).flash_label_note(text)
         except Exception:
             pass
 

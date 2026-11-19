@@ -38,7 +38,8 @@ everything else out of the way until you ask for it:
   the scope pill (``● LIVE``; ``● REC`` while recording; ``● REPLAY ·
   <phase>`` while a Play runs -- ``loading snapshot``, ``replay 1/2``,
   ``settle 8s``, ``dry run``, ``analysing``; ``◆ REVIEW #<n> <label>`` while
-  reviewing a run), the innermost open label (``▶ 7 'accept cookies' 0:12``),
+  reviewing a run), the innermost open section (``Section 7 'accept cookies'
+  0:12``; a new note shows ``Note 8 'text'`` there for 5 s),
   ``◉ TRK`` while Tracking runs, ``⚠ timeline locked (…)`` / ``⚠ timeline
   failed`` when this window records no timeline, and the clock.
 - **Status strip** (one or two rows): app state and pid, frida-server, active
@@ -67,10 +68,10 @@ Key                         Action
 Backtick (grave accent)     Toggle the log drawer
 ``S`` (or ``0``)            Snapshot picker
 ``r`` / ``p``               Record / Play (replay + diff) -- from any lens
-``#``                       Start a label (closes open labels; name prompt)
-``+``                       Start a sub-label (name prompt)
-``-``                       Stop the innermost label
-``B`` (Shift+B)             Mark: a named point in time (name prompt)
+``#``                       Section: start one (ends open sections; name)
+``+``                       Sub-section: start one (name prompt)
+``-``                       End section: ends the innermost one
+``B`` (Shift+B)             Note: a point in time (asks for its text)
 ``Ctrl+T``                  Tracking on/off (input + screens into the timeline)
 ``L`` (Shift+L)             Back to LIVE while reviewing a run (``◆ REVIEW``)
 ``?``                       Help & keybinding editor (all actions by category)
@@ -473,23 +474,52 @@ Everything the session recorded, one line per event and newest at the
 bottom: file events, monitor notes, clock samples, snapshot loads, labels,
 runs, Tracking input and screens, network flows. It reads the device folder's
 ``timeline.jsonl`` (the newest 20,000 lines first; ``Home`` at the top loads
-older pages) and follows new lines live while it is shown. Columns: label
+older pages) and follows new lines live while it is shown. Columns: section
 depth (``│``) and a flag (``!`` warning, ``~`` uncertain device time, ``▒``
-masked), time, the step to the previous row, source, kind, actor and the
-summary (``×n`` for coalesced or counted lines, ``⇢`` when ``J`` can jump).
+masked), time, the step to the previous row, the type in plain words
+(``tap``, ``long press``, ``swipe``, ``typed``, ``key``, ``screen``,
+``screenshot``, ``request``, ``TLS failed``, ``file``, ``clock``,
+``system`` ...), kind, actor and the summary (``· n times`` for coalesced or
+counted lines). Colour, brightness and a background tint tell the types
+apart (from the theme): your own input is the brightest row on a tinted
+band, screens and screenshots have a second accent, requests a muted type
+word, file, clock and system rows are dimmed; warnings and errors keep their
+colours.
 
-Separators mark what changes how to read the lines after them: ``⟲`` a world
-change (snapshot load, cold boot, a device clock that went backwards), ``⏱``
-a device clock epoch, ``▶ ■ ◆`` labels, ``● REC`` / ``▷ Play`` runs, ``⋯``
-a restarted Sandroid, Tracking and intervention (e.g. accessibility helper)
-on/off. Clock samples, count lines and a quick device reconnect are hidden
-until ``N``.
+The **type bar** above the list lists every type present in its colour with
+its count (``tap 21 · typed 2 · screen 76 · request 445 · file 3,084``) and
+then the apps present: a click on a type hides / shows it, a click on an app
+shows only its lines (the ``pkg:`` filter; ``all`` for every app). ``t``
+reaches it from the keyboard (←/→, ``Space``; ``t`` or ``Esc`` back). It
+combines with the ``/`` filter.
+
+**Folding** (view only; the rows, the Inspector, ``J``/``V`` and reports keep
+every line): consecutive file rows of one app less than 2 s apart fold into
+one row (``file · org.x · 214 changes (88 modify, 61 create, 40 rename …) in
+cache2, databases``); ``Enter`` or a click opens / closes it. ``z`` or a
+click on a section's header row folds the section into one row (``Section 3
+'Login' · 2:14 · 412 lines (12 taps, 300 files, 80 requests)``). Filters
+apply before folding.
+
+Separators mark what changes how to read the lines after them, in plain
+words: ``snapshot loaded · world 3`` (a world change: snapshot load, cold
+boot, a device clock that went backwards), ``clock epoch 2``, ``Section`` /
+``Sub-section`` / ``End section`` / ``Note``, ``recording started`` /
+``replay started`` runs, ``restarted`` (Sandroid), Tracking and intervention
+(e.g. accessibility helper) on/off. Clock samples, count lines and a quick
+device reconnect are hidden until ``N``.
 
 ===================  ========================================================
 Key (Timeline lens)  Action
 ===================  ========================================================
-``Space``            Follow on / off (↑ pauses: ``‖ paused · 23 new ↓``)
+``Space``            Follow on / off: ``live`` sticks to the newest line; ↑
+                     or a click above it stops that (recording goes on):
+                     ``scrolled back · 23 new below · End = live``. The
+                     Files and Network lenses follow the same way
 ``End`` / ``Home``   Newest + follow / oldest (at the top: load older lines)
+``t``                Type bar: ←/→, ``Space`` hides / shows a type or picks
+                     an app
+``z``                Fold / unfold the section around the cursor
 ``/``                Filter: ``src:files,label`` ``-src:clock``
                      ``kind:modify`` ``actor:user`` ``phase:replay``
                      ``run:<id>`` ``world:3`` ``pkg:x`` ``level:warn`` and
@@ -497,7 +527,7 @@ Key (Timeline lens)  Action
                      as chips with the count; ``Esc`` clears it
 ``N``                Show / hide clock samples, counts, reconnects
 ``Enter``            Inspector: *Line* (envelope, data, follow-ups, enclosing
-                     labels), *JSON*, *Ref* (the referenced line, file with
+                     sections), *JSON*, *Ref* (the referenced line, file with
                      sha256 check, diff, run), *Chain* (hash, previous hash,
                      a one-line verify)
 ``J``                Jump to the source: a pulled file (Files, Versions
@@ -510,13 +540,14 @@ Key (Timeline lens)  Action
 In REVIEW scope the lens shows the reviewed run's lines (an implicit
 ``run:<id>`` chip) plus the separators inside its time window.
 
-**Labels** (any lens): ``#`` starts a top-level label and ends every open
-one; ``+`` starts a sub-label inside the open label (or a sibling of an open
-sub-label; with nothing open it starts a top-level label); ``-`` ends the
-innermost label; ``B`` drops a point. ``#``, ``+`` and ``B`` take their time
-when the key is pressed and ask for an optional name; ``Esc`` writes nothing.
-Labels survive snapshot loads and are ended when Sandroid quits or the device
-changes.
+**Sections and notes** (any lens; the timeline's labels): ``#`` starts a
+Section and ends every open one; ``+`` starts a Sub-section inside the open
+section (or a sibling of an open sub-section; with nothing open it starts a
+section); ``-`` ends the innermost section (End section); ``B`` drops a Note.
+``#``, ``+`` and ``B`` take their time when the key is pressed; ``#`` and
+``+`` ask for an optional name, ``B`` for the note's text, which it needs (an
+empty ``Enter`` keeps asking); ``Esc`` writes nothing. Sections survive
+snapshot loads and are ended when Sandroid quits or the device changes.
 
 **Masking**: lines marked sensitive (typed text, passwords) are shown
 masked in the lens, exports and reports while ``timeline.mask_sensitive`` is
