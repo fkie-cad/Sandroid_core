@@ -7,9 +7,11 @@ Frida, ``logcat -v monotonic``, kprobe trace timestamps). Both drift from
 the host: a few seconds normally, and by however long a snapshot sat on
 disk after a snapshot load (a snapshot restores the guest clocks it was
 saved with). This module measures both offsets and writes them down. It
-changes the device wall clock only in :func:`sync`, called after a snapshot
-load when ``emulator.sync_clock_after_snapshot`` is on; nothing syncs
-CLOCK_MONOTONIC, so ``off_mono`` is what maps monotonic timestamps.
+changes the device wall clock only in :func:`sync`, called at session start
+(:func:`after_device_connect`) and after a snapshot load
+(:func:`after_snapshot_load`) when ``emulator.sync_device_clock`` is on;
+nothing syncs CLOCK_MONOTONIC, so ``off_mono`` is what maps monotonic
+timestamps.
 
 **Measuring** (:func:`measure`): one persistent ``adb -s <serial> shell``
 per device (opened lazily, reused; a one-shot ``adb shell`` has a 58-107 ms
@@ -55,17 +57,23 @@ whenever ``off_wall`` or ``off_mono`` moved more than :data:`JUMP_S`
 seconds since the previous line of that serial; ``jump_wall_s`` /
 ``jump_mono_s`` give the moves. A sample that jumped is always written,
 whatever took it. ``snapshot`` names the snapshot of a ``snapshot-load`` /
-``sync`` line; a ``sync`` line also has ``before_off_wall``,
-``after_off_wall``, ``ok`` and ``command``. Times are ISO 8601 with
-milliseconds and the UTC offset (:func:`watchlist_store.iso_tz`); the format
-grows additively and readers ignore fields they do not know.
+``sync`` line; a ``sync`` line also has ``trigger`` (``snapshot-load`` /
+``session-start``), ``before_off_wall``, ``after_off_wall``, ``ok``,
+``command`` and ``sets`` (``date`` commands issued). The ``snapshot-load``
+and ``device-connect`` lines carry ``sync_policy`` (the setting then).
+Times are ISO 8601 with milliseconds and the UTC offset
+(:func:`watchlist_store.iso_tz`); the format grows additively and readers
+ignore fields they do not know.
 
 **World changes** (a snapshot load, a cold boot): the timeline calls
 :func:`begin_epoch` (a barrier: the newest epoch ends now, so fresh
 monotonic times are not mapped with the old offset until the next sample)
 and :func:`to_host_time` takes ``near`` (the time the event was received)
 to pick, among the epochs that cover a time, the one whose result lies in
-``[near - 30 s, near + 1 s]``. On a resume :func:`seed` restores the last
+``[near - 30 s, near + 1 s]``. A sample measured before the newest
+:func:`begin_epoch` of its serial describes the old world: :func:`current`
+never reuses it and the header (``last_sample(current_world=True)``) does
+not show it. On a resume :func:`seed` restores the last
 recorded offsets so the first new sample detects a jump.
 """
 
@@ -87,6 +95,8 @@ logger = logging.getLogger(__name__)
 JUMP_S = 2.0
 #: Wall-clock offsets above this (seconds) are shown and warned about.
 NOTABLE_S = 1.0
+#: A clock sync succeeded when the wall clock is this close to the host (s).
+SYNC_TOLERANCE_S = 0.05
 #: A sample younger than this is reused by :func:`current` (bursts of pulls).
 REUSE_S = 10.0
 #: Reasons that are clock epoch changes by themselves.
@@ -123,6 +133,12 @@ _FAILED: dict[str, float] = {}
 _WARNED: set[tuple[str, str]] = set()
 #: serial -> clock epochs of CLOCK_MONOTONIC (see :func:`to_host_time`).
 _EPOCHS: dict[str, list[dict]] = {}
+#: serial -> host time of the newest world change (:func:`begin_epoch`):
+#: samples measured before it are never reused or shown.
+_BARRIER: dict[str, float] = {}
+#: serials whose session-start sync waits for startup's SELinux step
+#: (:func:`after_selinux_step`; SELinux was Enforcing at connect).
+_PENDING_SYNC: set[str] = set()
 #: serial -> the open shell, and the lock that serialises its queries.
 _SHELLS: dict[str, Shell] = {}
 _SHELL_LOCKS: dict[str, threading.Lock] = {}
@@ -131,6 +147,8 @@ Send = Callable[[str], tuple]
 
 #: The host clock (``time.time``; tests replace it with a fake one).
 _now: Callable[[], float] = time.time
+#: Waits (``time.sleep``; tests replace it with one that moves the fake clock).
+_sleep: Callable[[float], None] = time.sleep
 
 
 def _key(serial: str | None) -> str:
@@ -400,14 +418,29 @@ def _public(sample: dict | None) -> dict | None:
     return None if sample is None else {k: v for k, v in sample.items() if k[0] != "_"}
 
 
-def last_sample(serial: str | None = None) -> dict | None:
+def _in_current_world(key: str, host: float | None) -> bool:
+    """``host`` (a sample's or failure's time) is not before the newest
+    world change of ``key`` (``_LOCK`` held).
+    """
+    barrier = _BARRIER.get(key)
+    return barrier is None or (host is not None and host >= barrier)
+
+
+def last_sample(serial: str | None = None, current_world: bool = False) -> dict | None:
     """The newest sample of ``serial`` (default: the adb target), or ``None``.
 
     No adb call: what a live display uses (device wall time = host now -
-    ``off_wall``). A copy, with the keys of the module docstring.
+    ``off_wall``). A copy, with the keys of the module docstring. With
+    ``current_world``, ``None`` while the newest sample is from before the
+    latest world change (snapshot load, cold boot): its offset is stale.
     """
+    key = _key(_target(serial))
     with _LOCK:
-        return _public(_LAST.get(_key(_target(serial))))
+        sample = _LAST.get(key)
+        if current_world and sample is not None:
+            if not _in_current_world(key, sample.get("_host")):
+                return None
+        return _public(sample)
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +459,8 @@ def _add_to_epochs(key: str, sample: dict) -> bool:
     """
     epochs = _EPOCHS.setdefault(key, [])
     closes = [e["closed_host"] for e in epochs if "closed_host" in e]
+    if key in _BARRIER:
+        closes.append(_BARRIER[key])
     if closes and sample.get("_host", math.inf) < max(closes):
         return False
     off, mono = sample["off_mono"], sample["dev_mono"]
@@ -501,10 +536,16 @@ def begin_epoch(serial: str | None) -> None:
     newest monotonic epoch at host now. Until the next sample, fresh
     monotonic times are not mapped with the old offset.
     """
+    key = _key(_target(serial))
     with _LOCK:
-        epochs = _EPOCHS.get(_key(_target(serial)))
+        now = _now()
+        _BARRIER[key] = now
+        # A session-start sync still waiting is superseded by the new world
+        # (a snapshot load syncs by itself).
+        _PENDING_SYNC.discard(key)
+        epochs = _EPOCHS.get(key)
         if epochs and "closed_host" not in epochs[-1]:
-            epochs[-1]["closed_host"] = _now()
+            epochs[-1]["closed_host"] = now
 
 
 def seed(
@@ -527,6 +568,8 @@ def _current_epoch_sample(serial: str | None) -> dict | None:
         if sample is None:
             return None
         if epochs and "closed_host" in epochs[-1]:
+            return None
+        if not _in_current_world(key, sample.get("_host")):
             return None
         return dict(sample)
 
@@ -636,14 +679,21 @@ def current(serial: str | None = None, max_age: float = REUSE_S) -> dict | None:
 
     Reuses the last sample when younger than ``max_age`` seconds (and does
     not retry a failed measurement within that time), else measures
-    (:data:`SAMPLES_QUICK`). A fresh sample that jumped is written to the
-    session timeline (``reason: "pull"``).
+    (:data:`SAMPLES_QUICK`). Never reuses a sample (or a failure) from
+    before the latest world change (:func:`begin_epoch`): after a snapshot
+    load or cold boot the offset is measured again. A fresh sample that
+    jumped is written to the session timeline (``reason: "pull"``).
     """
     serial = _target(serial)
+    key = _key(serial)
     now = _now()
     with _LOCK:
-        last = _LAST.get(_key(serial))
-        failed = _FAILED.get(_key(serial))
+        last = _LAST.get(key)
+        if last is not None and not _in_current_world(key, last["_host"]):
+            last = None
+        failed = _FAILED.get(key)
+        if failed is not None and not _in_current_world(key, failed):
+            failed = None
     if last is not None and now - last["_host"] < max_age:
         return _public(last)
     if failed is not None and now - failed < max_age:
@@ -726,82 +776,208 @@ def notable(sample: dict | None) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# snapshot loads (EmulatorService.load_snapshot)
+# setting the wall clock: session start, snapshot loads
 # ---------------------------------------------------------------------------
 
 #: ``date`` forms that set the wall clock (UTC), most precise first: toybox
-#: ``@<epoch>[.fraction]``, then ``MMDDhhmmCCYY.ss`` (every toybox/toolbox).
-_SET_FORMS: tuple[Callable[[float], str], ...] = (
-    lambda epoch: f"date -u @{epoch:.3f}",
-    lambda epoch: f"date -u @{round(epoch)}",
-    lambda epoch: (
-        "date -u " + datetime.fromtimestamp(round(epoch), UTC).strftime("%m%d%H%M%Y.%S")
+#: ``@<epoch>.<fraction>``, then whole seconds: ``@<epoch>`` and
+#: ``MMDDhhmmCCYY.ss`` (every toybox/toolbox). ``(form, fractional)``: a
+#: whole-second form is sent so that it lands on a second boundary.
+_SET_FORMS: tuple[tuple[Callable[[float], str], bool], ...] = (
+    (lambda epoch: f"date -u @{epoch:.3f}", True),
+    (lambda epoch: f"date -u @{round(epoch)}", False),
+    (
+        lambda epoch: (
+            "date -u "
+            + datetime.fromtimestamp(round(epoch), UTC).strftime("%m%d%H%M%Y.%S")
+        ),
+        False,
     ),
 )
 #: As the adb shell user (root on the analysis AVDs), then through ``su 0``.
 _SET_PREFIXES = ("", "su 0 ")
 
 
-def _run_set(serial: str | None, command: str, send: Send | None) -> None:
-    """Run a ``date`` set command: over the persistent shell, else ``send``
-    (default a one-shot ``adb shell``). Output is discarded.
+def _shell_lock(key: str) -> threading.Lock:
+    with _LOCK:
+        return _SHELL_LOCKS.setdefault(key, threading.Lock())
+
+
+def _set_epoch(lead: float, fractional: bool) -> float:
+    """The epoch to set, taken now (just before sending): host now +
+    ``lead`` (the one-way trip). A whole-second form waits until host now +
+    ``lead`` is a whole second, so the set lands on that second.
+    """
+    now = _now()
+    if fractional:
+        return now + lead
+    target = math.ceil(now + lead)
+    wait = target - lead - now
+    if wait > 0:
+        _sleep(wait)
+    return float(target)
+
+
+def _shell_lead_s(key: str, shell: Shell) -> float:
+    """Half the persistent shell's round trip: from the newest sample it
+    measured, else one no-op query timed now (shell lock held).
+    """
+    with _LOCK:
+        last = _LAST.get(key)
+    if last is not None and last.get("method") == "shell":
+        return (last.get("err_ms") or 0.0) / 1000
+    _lines, t0, t1 = shell.query(f"echo {_END}")
+    return (t1 - t0) / 2
+
+
+def _run_set(
+    serial: str | None,
+    prefix: str,
+    form: tuple[Callable[[float], str], bool],
+    send: Send | None,
+) -> str | None:
+    """Run one ``date`` set command: over the persistent shell; only when it
+    is dead, one-shot ``adb shell`` through ``send`` (default
+    :func:`_default_send`) with the lead from that path's own round trip.
+    The target epoch is taken after the shell lock, just before sending.
+    Returns the command sent, ``None`` when neither path could send it.
     """
     from sandroid.core.adb_utils import device_shell_command
 
-    line = f"{command} >/dev/null 2>&1"
-    if send is None:
-        with _LOCK:
-            lock = _SHELL_LOCKS.setdefault(_key(serial), threading.Lock())
-        with lock:
-            try:
-                _shell(serial).query(f"{line}; echo {_END}")
-                return
-            except (ShellDeadError, OSError, ValueError, SystemExit):
-                _SHELLS.pop(_key(serial), None)
+    make, fractional = form
+    key = _key(serial)
+    with _shell_lock(key):
+        try:
+            shell = _shell(serial)
+            command = prefix + make(_set_epoch(_shell_lead_s(key, shell), fractional))
+            shell.query(f"{command} >/dev/null 2>&1; echo {_END}")
+            return command
+        except (ShellDeadError, OSError, ValueError, SystemExit) as exc:
+            logger.debug("device clock: shell set for %s failed: %s", serial, exc)
+            _SHELLS.pop(key, None)
+    send = send or _default_send(serial)
     try:
-        (send or _default_send(serial))(device_shell_command(line))
+        t0 = _now()
+        send(device_shell_command("true"))
+        lead = (_now() - t0) / 2
+        command = prefix + make(_set_epoch(lead, fractional))
+        send(device_shell_command(f"{command} >/dev/null 2>&1"))
+        return command
     except (Exception, SystemExit):
-        logger.debug("device clock: %r failed", command, exc_info=True)
+        logger.debug("device clock: one-shot set failed", exc_info=True)
+        return None
+
+
+def _applied(before: dict, after: dict) -> bool:
+    """The wall offset moved more than the measurements' error: a ``date``
+    took effect (whether or not it landed within tolerance).
+    """
+    err = ((before.get("err_ms") or 0.0) + (after.get("err_ms") or 0.0)) / 1000
+    return abs(after["off_wall"] - before["off_wall"]) > SYNC_TOLERANCE_S + err
 
 
 def sync(serial: str | None = None, send: Send | None = None) -> dict | None:
     """Set the device wall clock to the host clock and measure again.
 
-    Tries each ``date`` form (:data:`_SET_FORMS`, plain then ``su 0``; the
-    epoch is host now + half the last round trip) until a re-measurement is
-    within :data:`NOTABLE_S`. ``send`` runs the ``date`` commands instead of
-    the persistent shell. Returns the last sample with ``ok`` and the
-    ``command`` that worked, ``None`` if the device never answered. Writes
-    nothing; see :func:`after_snapshot_load`. CLOCK_MONOTONIC is untouched.
+    Over the persistent shell (``send``: the one-shot fallback when it is
+    dead). The fractional ``date -u @S.fff`` first; the next form / ``su 0``
+    only when the previous command evidently did not apply (the offset did
+    not move); one corrective retry when it applied but missed
+    :data:`SYNC_TOLERANCE_S`. Returns the last sample with ``ok``
+    (``|off_wall| <= SYNC_TOLERANCE_S``), the ``command`` that applied and
+    ``sets`` (commands issued), ``None`` if the device never answered.
+    Writes nothing; see :func:`after_snapshot_load`. CLOCK_MONOTONIC is
+    untouched.
     """
     return _public(_sync(serial, send))
 
 
-def _sync(serial: str | None = None, send: Send | None = None) -> dict | None:
-    """:func:`sync` keeping the internal ``_host`` of the last sample."""
+def _sync(
+    serial: str | None = None, send: Send | None = None, before: dict | None = None
+) -> dict | None:
+    """:func:`sync` keeping the internal ``_host`` of the last sample;
+    ``before`` is the sample the sync starts from (default: measured now).
+    """
     serial = _target(serial)
-    after = None
-    for prefix in _SET_PREFIXES:
-        for form in _SET_FORMS:
-            lead = ((last_sample(serial) or {}).get("err_ms") or 0) / 1000
-            command = prefix + form(_now() + lead)
-            _run_set(serial, command, send)
-            after = _measure(serial, samples=SAMPLES_QUICK)
-            if after is None:
-                return None
-            if abs(after["off_wall"]) <= NOTABLE_S:
-                return {**after, "ok": True, "command": command}
-    return None if after is None else {**after, "ok": False, "command": None}
+    if before is None:
+        before = _measure(serial, samples=SAMPLES_QUICK)
+        if before is None:
+            return None
+    steps = [(prefix, form) for prefix in _SET_PREFIXES for form in _SET_FORMS]
+    sets, step, landed, retried = 0, 0, None, False
+    reference, after = before, None
+    while step < len(steps):
+        command = _run_set(serial, *steps[step], send)
+        sets += command is not None
+        after = _measure(serial, samples=SAMPLES_QUICK)
+        if after is None:
+            return None
+        if abs(after["off_wall"]) <= SYNC_TOLERANCE_S:
+            return {**after, "ok": True, "command": command, "sets": sets}
+        applied = command is not None and _applied(reference, after)
+        if applied:
+            landed = command
+        if retried:
+            break
+        reference = after
+        if applied:
+            retried = True  # landed imprecisely: once more, the same form
+        else:
+            step += 1  # did not take: the next form / prefix
+    if after is None:
+        return None
+    return {**after, "ok": False, "command": landed, "sets": sets}
 
 
 def sync_enabled() -> bool:
-    """``emulator.sync_clock_after_snapshot`` of the live config (default on)."""
+    """``emulator.sync_device_clock`` of the live config (default on)."""
     try:
         from sandroid.config import get_config
 
-        return bool(get_config().emulator.sync_clock_after_snapshot)
+        return bool(get_config().emulator.sync_device_clock)
     except Exception:
         return True
+
+
+def _sync_and_note(
+    serial: str | None,
+    before: dict,
+    trigger: str,
+    send: Send | None,
+    where: str,
+    **extra,
+) -> dict | None:
+    """:func:`_sync` from ``before``, then its ``reason: "sync"`` line
+    (``trigger``, ``before_off_wall`` / ``after_off_wall`` / ``ok`` /
+    ``command`` / ``sets``). A failed sync is warned about once per device.
+    Returns the line (``None``: the device did not answer).
+    """
+    synced = _sync(serial, send, before)
+    final = None
+    if synced is not None:
+        ok = bool(synced.pop("ok"))
+        command = synced.pop("command", None)
+        sets = synced.pop("sets", 0)
+        final = _note(
+            synced,
+            "sync",
+            always=True,
+            trigger=trigger,
+            before_off_wall=before["off_wall"],
+            after_off_wall=synced["off_wall"],
+            ok=ok,
+            command=command,
+            sets=sets,
+            **extra,
+        ) or {**_public(synced), "ok": ok}
+    if final is None or not final.get("ok"):
+        warn_once(
+            "sync",
+            serial,
+            f"Could not set the device clock to host time {where} (needs root "
+            f"`date`); recording the offset in the session timeline instead.",
+        )
+    return final
 
 
 def after_snapshot_load(
@@ -809,45 +985,36 @@ def after_snapshot_load(
 ) -> dict | None:
     """Record the clocks after a snapshot load; sync the wall clock if set.
 
-    1. ``reason: "snapshot-load"`` (always ``jump: true``): the restored,
-       frozen clocks.
-    2. With ``emulator.sync_clock_after_snapshot`` on and the wall clock
-       more than :data:`NOTABLE_S` off: :func:`sync`, then a
-       ``reason: "sync"`` line (``before_off_wall`` / ``after_off_wall`` /
-       ``ok`` / ``command``). A failed sync is warned about once per device
-       and the recording goes on.
+    1. ``reason: "snapshot-load"`` (always ``jump: true``; ``sync_policy``:
+       the setting): the restored, frozen clocks.
+    2. With ``emulator.sync_device_clock`` on and the wall clock more than
+       :data:`NOTABLE_S` off: :func:`sync`, then a ``reason: "sync"`` line
+       (``trigger: "snapshot-load"``, ``before_off_wall`` /
+       ``after_off_wall`` / ``ok`` / ``command`` / ``sets``). A failed sync
+       is warned about once per device and the recording goes on.
     3. One WARNING per device when the wall clock is still more than
        :data:`NOTABLE_S` off afterwards.
 
-    Returns the last line written (``None``: the device did not answer).
+    ``send`` is the one-shot fallback of the ``date`` commands. Returns the
+    last line written (``None``: the device did not answer).
     """
     serial = _target(serial)
-    final = loaded = record("snapshot-load", serial, snapshot=name)
+    policy = sync_enabled()
+    final = loaded = record("snapshot-load", serial, snapshot=name, sync_policy=policy)
     if loaded is None:
         return None
-    if sync_enabled() and notable(loaded):
-        synced = _sync(serial, send)
-        if synced is not None:
-            ok = bool(synced.pop("ok"))
-            command = synced.pop("command", None)
-            final = _note(
-                synced,
-                "sync",
-                always=True,
-                before_off_wall=loaded["off_wall"],
-                after_off_wall=synced["off_wall"],
-                ok=ok,
-                command=command,
-                snapshot=name,
-            ) or {**_public(synced), "ok": ok}
-        if synced is None or not final.get("ok"):
-            warn_once(
-                "sync",
+    if policy and notable(loaded):
+        final = (
+            _sync_and_note(
                 serial,
-                f"Could not set the device clock to host time after loading "
-                f"snapshot '{name}' (needs root `date`); recording the offset "
-                f"in the session timeline instead.",
+                loaded,
+                "snapshot-load",
+                send,
+                f"after loading snapshot '{name}'",
+                snapshot=name,
             )
+            or final
+        )
     if notable(final):
         warn_once(
             "offset",
@@ -860,6 +1027,93 @@ def after_snapshot_load(
     return final
 
 
+def _selinux_enforcing(serial: str | None) -> bool:
+    """``getenforce`` says Enforcing (over the persistent shell, else one
+    one-shot ``adb shell``). Unknown counts as not Enforcing.
+    """
+    from sandroid.core.adb_utils import device_shell_command
+
+    key = _key(serial)
+    with _shell_lock(key):
+        try:
+            lines, _t0, _t1 = _shell(serial).query(f"getenforce; echo {_END}")
+            return any(line.strip().lower() == "enforcing" for line in lines)
+        except (ShellDeadError, OSError, ValueError, SystemExit):
+            _SHELLS.pop(key, None)
+    try:
+        stdout, _stderr = _default_send(serial)(device_shell_command("getenforce"))
+    except (Exception, SystemExit):
+        return False
+    return str(stdout or "").strip().lower() == "enforcing"
+
+
+def _session_start_sync(
+    serial: str | None, before: dict | None = None, send: Send | None = None
+) -> dict | None:
+    """The pending session-start sync of ``serial`` (once): from ``before``
+    or a fresh sample, only while the wall clock is more than
+    :data:`NOTABLE_S` off. Returns the ``sync`` line or ``None``.
+    """
+    key = _key(serial)
+    with _LOCK:
+        if key not in _PENDING_SYNC:
+            return None
+        _PENDING_SYNC.discard(key)
+    if before is None:
+        before = _measure(serial, samples=SAMPLES_QUICK)
+        if before is None or before.get("_stale") or not notable(before):
+            return None
+    return _sync_and_note(serial, before, "session-start", send, "at session start")
+
+
+def after_device_connect(
+    serial: str | None = None, send: Send | None = None
+) -> dict | None:
+    """Record the clocks when a device is connected; sync the wall clock if set.
+
+    1. ``reason: "device-connect"`` with ``sync_policy`` (the setting),
+       always written.
+    2. With ``emulator.sync_device_clock`` on and the wall clock more than
+       :data:`NOTABLE_S` off (an emulator booted from a snapshot): a
+       session-start sync, ``reason: "sync"`` / ``trigger:
+       "session-start"``. While SELinux is still Enforcing (root ``date``
+       and ``/proc/timer_list`` may be denied) the sync waits for
+       :func:`after_selinux_step` (startup's ``setenforce 0``).
+
+    With the setting off it only records. Returns the last line written
+    (``None``: the device did not answer, or the sync waits).
+    """
+    serial = _target(serial)
+    policy = sync_enabled()
+    connected = record("device-connect", serial, sync_policy=policy)
+    if connected is None or not (policy and notable(connected)):
+        return connected
+    with _LOCK:
+        _PENDING_SYNC.add(_key(serial))
+    if _selinux_enforcing(serial):
+        return None
+    return _session_start_sync(serial, connected, send) or connected
+
+
+def _background(target: Callable, name: str, *args) -> None:
+    threading.Thread(target=target, args=args, name=name, daemon=True).start()
+
+
+def after_device_connect_async(serial: str | None = None) -> None:
+    """:func:`after_device_connect` on a daemon thread (never blocks)."""
+    _background(after_device_connect, "device-clock-connect", _target(serial))
+
+
+def after_selinux_step(serial: str | None = None) -> None:
+    """Startup's SELinux step is done: run a session-start sync that waited
+    for it (on a daemon thread; nothing to do without one).
+    """
+    with _LOCK:
+        if not _PENDING_SYNC:
+            return
+    _background(_session_start_sync, "device-clock-sync", _target(serial))
+
+
 def reset() -> None:
     """Forget every sample and close the shells (tests; a new session)."""
     close_shells()
@@ -870,6 +1124,8 @@ def reset() -> None:
         _WARNED.clear()
         _EPOCHS.clear()
         _SHELL_LOCKS.clear()
+        _BARRIER.clear()
+        _PENDING_SYNC.clear()
 
 
 __all__ = [
@@ -882,9 +1138,13 @@ __all__ = [
     "SAMPLES",
     "SAMPLES_QUICK",
     "SHELL_FACTORY",
+    "SYNC_TOLERANCE_S",
     "WARMUP",
     "Shell",
     "ShellDeadError",
+    "after_device_connect",
+    "after_device_connect_async",
+    "after_selinux_step",
     "after_snapshot_load",
     "begin_epoch",
     "close_shells",

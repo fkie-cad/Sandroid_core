@@ -164,8 +164,9 @@ Emulator (``[emulator]``)
    # What to do above the limit: "kill" or "warn"
    memory_guard_action = "kill"
 
-   # Set the device clock to host time after every snapshot load
-   sync_clock_after_snapshot = true
+   # Set the device clock to host time at session start and after every
+   # snapshot load (old name, still read: sync_clock_after_snapshot)
+   sync_device_clock = true
 
 **Host-memory guard.** With guest Vulkan enabled, the emulator leaks host
 memory on every snapshot load and can grow to tens of GB. Sandroid therefore
@@ -189,11 +190,14 @@ watches the qemu process behind the active serial every 10 s:
   reading, one poll interval later, is still above the limit. A warning is
   logged once at 75 % of the limit.
 
-**Device clock after a snapshot load.** A snapshot restores the guest clock
-it was saved with, so after a load the device can be minutes or hours behind
-the host. With ``sync_clock_after_snapshot`` on (default, also in Settings →
-General), Sandroid sets the device wall clock to host time with a root
-``date`` when it is more than 1 s off, and re-measures. Either way the
+**Device clock at session start and after a snapshot load.** A snapshot
+restores the guest clock it was saved with, so an emulator booted from a
+snapshot, and every load, can leave the device minutes or hours behind the
+host. With ``sync_device_clock`` on (default, also in Settings → General;
+the old name ``sync_clock_after_snapshot`` is still read), Sandroid sets the
+device wall clock to host time with a root ``date`` when it is more than 1 s
+off, and re-measures: when a device is connected (once SELinux is
+Permissive, after startup's ``setenforce 0``) and after every snapshot load. Either way the
 offsets before and after go to the session timeline as ``clock`` lines (see
 the ``[timeline]`` section below); a failed sync is logged once as a warning and the
 offset is still recorded. Off keeps the snapshot's frozen clock. The device's

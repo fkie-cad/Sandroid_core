@@ -66,6 +66,31 @@ def test_a_load_is_a_world_change_before_the_clock_is_sampled(service, monkeypat
     assert world["t"] >= timeline._iso(sent)
 
 
+def test_a_load_restores_selinux_before_the_clock_step(service, monkeypatch):
+    """Ready -> SELinux Permissive -> clock record/sync -> device proxy:
+    under Enforcing the clock step's root reads and ``date`` may be denied.
+    """
+    steps: list[str] = []
+    monkeypatch.setattr(
+        service, "_wait_for_device_ready", lambda adb, serial: steps.append("ready")
+    )
+    monkeypatch.setattr(
+        service,
+        "_restore_selinux_permissive",
+        lambda adb, serial: steps.append("selinux"),
+    )
+    monkeypatch.setattr(
+        service, "_record_device_clock", lambda adb, name, serial: steps.append("clock")
+    )
+    monkeypatch.setattr(
+        service, "_restore_device_proxy", lambda serial: steps.append("proxy")
+    )
+    monkeypatch.setattr(device_clock, "begin_epoch", lambda serial: None)
+    with timeline.capture():
+        assert service.load_snapshot("clean", serial="emu-1") is True
+    assert steps == ["ready", "selinux", "clock", "proxy"]
+
+
 def test_a_failed_load_is_a_warning_and_no_world_change(service):
     service.adb_fake.reply = ("KO: unknown snapshot\n", "")
     with timeline.acting_as("user"), timeline.capture() as lines:

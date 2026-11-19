@@ -610,14 +610,18 @@ class ShellHeader(Header):
         the last device clock sample is more than 1 s off the host:
         ``device 17:16:02 -75 min ⚠``. Computed as host now - ``off_wall``
         (no adb call, display only: the timeline's writer thread takes the
-        periodic samples). Returns the text shown.
+        periodic samples). Hidden after a snapshot load / cold boot until
+        the first sample of the new world (the old offset is stale).
+        Returns the text shown.
         """
         from sandroid.core import device_clock
         from sandroid.core.adb import Adb
 
         now = time.time() if now is None else now
         serial = Adb.get_target_device()
-        sample = device_clock.last_sample(serial) if serial else None
+        sample = (
+            device_clock.last_sample(serial, current_world=True) if serial else None
+        )
         text = ""
         if device_clock.notable(sample):
             when = datetime.fromtimestamp(now - sample["off_wall"])

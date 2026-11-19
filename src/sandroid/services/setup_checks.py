@@ -440,6 +440,16 @@ def check_and_set_selinux(adb: Any) -> SetupCheckResult:
         check.status = SetupCheckStatus.WARNING
         check.message = f"Error setting SELinux: {e!s}"
 
+    # A session-start device clock sync waits for this step (root ``date``
+    # and /proc/timer_list may be denied under Enforcing); it runs now, in
+    # the background, whatever the outcome (a failed sync is warned about).
+    try:
+        from sandroid.core import device_clock
+
+        device_clock.after_selinux_step()
+    except Exception as e:
+        logger.debug(f"Device clock sync after the SELinux step failed: {e}")
+
     return check
 
 

@@ -86,15 +86,35 @@ class EmulatorConfig(BaseModel):
         default="kill",
         description="What to do when max_host_memory_gb is exceeded: kill or warn",
     )
-    sync_clock_after_snapshot: bool = Field(
+    sync_device_clock: bool = Field(
         default=True,
         description=(
-            "After every snapshot load, set the device wall clock to host "
-            "time (root `date`) when it is more than 1 s off. The offset "
-            "before and after is recorded in the session timeline either "
-            "way; off keeps the snapshot's frozen clock."
+            "At session start (device connect) and after every snapshot "
+            "load, set the device wall clock to host time (root `date`) when "
+            "it is more than 1 s off. The offset before and after is recorded "
+            "in the session timeline either way; off keeps the device's clock "
+            "(e.g. a snapshot's frozen one). Replaces the deprecated "
+            "sync_clock_after_snapshot, which is still read."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_legacy_clock_key(cls, data):
+        """Back-fill the deprecated ``sync_clock_after_snapshot`` onto
+        ``sync_device_clock`` (now session start + snapshot loads) when the
+        new key isn't present; sub-models ignore unknown keys otherwise.
+        """
+        if isinstance(data, dict):
+            old, new = "sync_clock_after_snapshot", "sync_device_clock"
+            if old in data and new not in data:
+                data = {**data, new: data[old]}
+        return data
+
+    @property
+    def sync_clock_after_snapshot(self) -> bool:
+        """Deprecated alias of :attr:`sync_device_clock` (read-only)."""
+        return self.sync_device_clock
 
     @validator("android_emulator_path", "sdk_path", "adb_path", "avd_home", pre=True)
     def expand_user_path(cls, v):

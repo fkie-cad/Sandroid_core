@@ -390,13 +390,16 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 config.emulator.avd_auto_start, "setting-emulator--avd_auto_start"
             )
 
-        # Device clock sync after a snapshot load (offsets go to the session
-        # timeline)
+        # Device clock sync at session start and after a snapshot load
+        # (offsets go to the session timeline either way)
         with Horizontal(classes="setting-row"):
-            yield Label("Sync Clock After Load:", classes="setting-label")
+            yield Label(
+                "Sync device clock to host (session start + snapshot loads)",
+                classes="setting-label",
+            )
             yield from self._switch_with_state(
-                config.emulator.sync_clock_after_snapshot,
-                "setting-emulator--sync_clock_after_snapshot",
+                config.emulator.sync_device_clock,
+                "setting-emulator--sync_device_clock",
             )
 
         # Frida Auto-Start

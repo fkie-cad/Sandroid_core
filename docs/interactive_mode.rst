@@ -288,9 +288,16 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   whenever either offset moved by more than 2 s (``jump_wall_s`` /
   ``jump_mono_s``), so every clock change of the session is visible.
   ``off_mono`` is null without root (``mono_note`` says why). With
-  ``emulator.sync_clock_after_snapshot`` on (default) the device wall clock
-  is set to host time after a load and a ``sync`` line records
-  ``before_off_wall`` / ``after_off_wall`` / ``ok``. Each
+  ``emulator.sync_device_clock`` on (default) the device wall clock is set
+  to host time at session start and after a load, and a ``sync`` line
+  records ``trigger`` (``session-start`` / ``snapshot-load``),
+  ``before_off_wall`` / ``after_off_wall`` / ``ok`` / ``sets``; the
+  ``device-connect`` and ``snapshot-load`` lines record the setting as
+  ``sync_policy``. File and database timestamps (mtimes, values inside
+  app databases) are device-clock values. After a snapshot reset the device
+  wall clock can pass through the same times again, so such a value may not
+  map to a single real time; the timeline records every clock jump and sync
+  so an analyst can judge it. Each
   ``acquisition.json`` and ``checks.jsonl`` line carries the
   ``device_clock`` sample of its pull; when the device clock is more than
   1 s off, the Inspector (Summary, Versions) and the header (``device
