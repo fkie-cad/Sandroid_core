@@ -1,0 +1,3250 @@
+"""Identity profiles: distinctive fake canary values seeded on an emulator.
+
+An identity profile is a named set of fake values (Android ID, advertising
+ID, device name, phone number, GPS fix, contacts, SMS, call log, ...) that
+carry a per-profile random ``token``. Once seeded, a privacy scan can find
+them in traffic and files (:mod:`sandroid.core.privacy_markers`) and
+attribute every hit to the value that leaked.
+
+The module has four layers:
+
+* **Profile model** -- a TOML file per profile in the library
+  (``$XDG_CONFIG_HOME/sandroid/profiles/<id>.toml``): parsing, templates,
+  validation, the built-in generator, import/export.
+* **Kind registry** (:data:`REGISTRY`) -- what the code knows per value kind:
+  provider, restart class, app permission, mechanism and read-back. It is
+  not user-editable.
+* **Apply pipeline** (:class:`IdentityService`) -- P0 one batched preflight
+  read, P1 plan, P2 the caller decides about a restart, P3 live steps, P4
+  Google Play services steps, P5 one framework restart window, P6 verify
+  (the same batched read), P7 freeze the ground truth into the session.
+  Idempotent and resumable (a marker file on the device survives a crash in
+  the restart window). Every device call runs on the caller's thread: call
+  it from a worker, never from the UI thread.
+* **Markers** -- the applied profile as :class:`Marker` objects for the
+  privacy scanner, with change listeners.
+"""
+
+from __future__ import annotations
+
+import base64
+import contextlib
+import hashlib
+import hmac
+import json
+import logging
+import os
+import re
+import secrets
+import shlex
+import tempfile
+import threading
+import time
+import tomllib
+import uuid as uuidlib
+import xml.etree.ElementTree as ET
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
+
+import tomli_w
+
+from sandroid.core.privacy_markers import Marker
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# constants
+# ---------------------------------------------------------------------------
+
+FORMAT = "sandroid-identity"
+#: Profile schema this code writes; a newer one is refused on load/import.
+SCHEMA = 1
+TOKEN_RE = re.compile(r"^[0-9a-f]{8,32}$")
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+PROFILES_DIR_ENV = "SDROID_PROFILES_DIR"
+
+STATUSES = ("pending", "applied", "verified", "failed", "hook-only", "skipped")
+#: Restart classes, cheapest first.
+RESTARTS = ("none", "gms", "framework")
+_RESTART_RANK = {name: i for i, name in enumerate(RESTARTS)}
+
+DEVICE_DIR = "/data/local/tmp/sandroid"
+STAGE_DIR = f"{DEVICE_DIR}/identity"
+#: Sourceable copy of zygote's environment: ``content``, ``abx2xml`` and
+#: ``xml2abx`` do nothing under adb root without it, and zygote is gone while
+#: the framework is stopped, so it is captured once into a file.
+ZYGOTE_ENV_FILE = f"{DEVICE_DIR}/zygote.env"
+ZYGOTE_PREFIX = f"[ -r {ZYGOTE_ENV_FILE} ] && . {ZYGOTE_ENV_FILE}"
+#: Present on the device while a framework restart window is open.
+RESTART_MARKER = f"{DEVICE_DIR}/identity.restart"
+SSAID_FILE = "/data/system/users/0/settings_ssaid.xml"
+PACKAGES_XML = "/data/system/packages.xml"
+GMS = "com.google.android.gms"
+GAID_DIR = f"/data/data/{GMS}/shared_prefs"
+GAID_FILE = f"{GAID_DIR}/adid_settings.xml"
+APPSET_FILE = f"/data/data/{GMS}/files/appset/shared/pvids.pb"
+PREFLIGHT_TAG = "@@identity-preflight@@"
+NEEDS_RESTART = "needs a framework restart"
+_OK = "sandroid-identity-ok"
+
+#: Framework restart: wait this long for a new system_server.
+RESTART_TIMEOUT_S = 180.0
+RESTART_POLL_S = 2.0
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
+)
+_UUID_BYTES_RE = re.compile(
+    rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
+_LOCALE_RE = re.compile(r"^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PHONE_RE = re.compile(r"^\+?[0-9]{3,15}$")
+_COORD_RE = re.compile(r"^-?\d{1,3}(\.\d+)?$")
+
+
+class ProfileError(ValueError):
+    """A profile file cannot be read, imported or saved."""
+
+
+class IdentityApplyError(RuntimeError):
+    """Applying a profile failed (raised by a pre-spawn ``apply``)."""
+
+
+# ---------------------------------------------------------------------------
+# kind registry (code, not user-editable)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class KindSpec:
+    """What the code knows about one value kind.
+
+    Attributes:
+        kind: Registry key.
+        label: Human label.
+        tag: Short display tag for markers.
+        marker: :data:`privacy_markers.KINDS` entry, ``None`` = not markable.
+        providers: Allowed providers, the default first; ``("hook",)`` means
+            the value is only recorded (a Frida hook would present it).
+        restart: ``none`` | ``gms`` (force-stop Play services) | ``framework``
+            (``stop``/``start``: every app stops).
+        permission: Android permission an app needs to read the value.
+        mechanism: How the value is applied natively.
+        readback: How the value is read back.
+        verify: ``strict`` (mismatch = failed), ``soft`` (match = verified,
+            else it stays applied) or ``none`` (no read-back).
+        needs_root: The native mechanism needs adbd as root.
+        needs_emulator: The mechanism is an emulator console command.
+        derives: Allowed ``derive`` methods.
+        volatile: The device forgets the value on reboot / radio events.
+    """
+
+    kind: str
+    label: str
+    tag: str
+    marker: str | None
+    providers: tuple[str, ...] = ("native",)
+    restart: str = "none"
+    permission: str = ""
+    mechanism: str = ""
+    readback: str = ""
+    verify: str = "strict"
+    needs_root: bool = False
+    needs_emulator: bool = False
+    derives: tuple[str, ...] = ()
+    volatile: bool = False
+
+
+def _spec(*args: Any, **kw: Any) -> tuple[str, KindSpec]:
+    spec = KindSpec(*args, **kw)
+    return spec.kind, spec
+
+
+REGISTRY: dict[str, KindSpec] = dict(
+    [
+        _spec(
+            "android_id",
+            "Android ID",
+            "AndroidID",
+            "hex_id",
+            ("native", "hook"),
+            "framework",
+            "",
+            "edit settings_ssaid.xml (ABX) in a framework restart window",
+            "abx2xml settings_ssaid.xml",
+            needs_root=True,
+            derives=("ssaid",),
+        ),
+        _spec(
+            "gaid",
+            "Advertising ID",
+            "AdID",
+            "uuid",
+            ("native", "hook"),
+            "gms",
+            "",
+            "adid_key in GMS adid_settings.xml",
+            "cat adid_settings.xml",
+            needs_root=True,
+            derives=("uuid",),
+        ),
+        _spec(
+            "app_set_id",
+            "App Set ID",
+            "AppSetID",
+            "uuid",
+            ("native", "hook"),
+            "gms",
+            "",
+            "replace the UUIDs in GMS appset/shared/pvids.pb",
+            "base64 pvids.pb",
+            needs_root=True,
+            derives=("uuid",),
+        ),
+        _spec(
+            "device_name",
+            "Device name",
+            "DevName",
+            "text",
+            ("native", "hook"),
+            "none",
+            "BLUETOOTH_CONNECT",
+            "settings put global device_name",
+            "settings get global",
+        ),
+        _spec(
+            "phone_number",
+            "Phone number",
+            "Phone",
+            "phone",
+            ("native", "hook"),
+            "none",
+            "READ_PHONE_NUMBERS",
+            "adb emu phonenumber (<=11 digits)",
+            "",
+            verify="none",
+            needs_emulator=True,
+        ),
+        _spec(
+            "gps",
+            "GPS position",
+            "GPS",
+            "latitude",
+            ("native", "hook"),
+            "none",
+            "ACCESS_FINE_LOCATION",
+            "adb emu geo fix <lon> <lat> <alt>",
+            "dumpsys location (after an app's GPS session)",
+            verify="soft",
+            needs_emulator=True,
+        ),
+        _spec(
+            "timezone",
+            "Time zone",
+            "TZ",
+            None,
+            ("native",),
+            "none",
+            "",
+            "auto_time_zone 0; cmd alarm set-timezone",
+            "getprop persist.sys.timezone",
+        ),
+        _spec(
+            "locale",
+            "Locale",
+            "Locale",
+            None,
+            ("native",),
+            "framework",
+            "",
+            "setprop persist.sys.locale (zygote restart)",
+            "getprop persist.sys.locale",
+            needs_root=True,
+        ),
+        _spec(
+            "sim_operator",
+            "SIM operator name",
+            "SimOp",
+            "text",
+            ("native", "hook"),
+            "none",
+            "READ_PHONE_STATE",
+            "setprop gsm.sim.operator.alpha",
+            "getprop",
+            needs_root=True,
+            volatile=True,
+        ),
+        _spec(
+            "sim_mccmnc",
+            "SIM operator MCC/MNC",
+            "MCCMNC",
+            None,
+            ("native",),
+            "none",
+            "",
+            "setprop gsm.sim.operator.numeric",
+            "getprop",
+            needs_root=True,
+            volatile=True,
+        ),
+        _spec(
+            "build_model",
+            "Device model",
+            "Model",
+            "text",
+            ("native", "hook"),
+            "framework",
+            "",
+            "resetprop ro.product.model (framework restart)",
+            "getprop ro.product.model",
+            needs_root=True,
+            volatile=True,
+        ),
+        _spec(
+            "imei",
+            "IMEI",
+            "IMEI",
+            "text",
+            ("hook",),
+            permission="READ_PRIVILEGED_PHONE_STATE",
+        ),
+        _spec(
+            "imsi",
+            "IMSI",
+            "IMSI",
+            "text",
+            ("hook",),
+            permission="READ_PRIVILEGED_PHONE_STATE",
+        ),
+        _spec(
+            "iccid",
+            "ICCID",
+            "ICCID",
+            "text",
+            ("hook",),
+            permission="READ_PRIVILEGED_PHONE_STATE",
+        ),
+        _spec(
+            "serial",
+            "Serial number",
+            "Serial",
+            "text",
+            ("hook",),
+            permission="READ_PRIVILEGED_PHONE_STATE",
+        ),
+        _spec(
+            "account",
+            "Account e-mail",
+            "Account",
+            "email",
+            ("hook",),
+            permission="GET_ACCOUNTS",
+        ),
+        _spec("clipboard", "Clipboard text", "Clip", "text", ("hook",)),
+    ]
+)
+
+
+@dataclass(frozen=True)
+class ListSpec:
+    """A list section (``[[contacts]]``, ``[[sms]]``, ``[[calls]]``)."""
+
+    name: str
+    label: str
+    tag: str
+    permission: str
+    fields: tuple[str, ...]  # string fields rendered as templates
+    token_field: str  # must carry the token: the idempotency key on device
+    mechanism: str
+
+
+LISTS: dict[str, ListSpec] = {
+    "contacts": ListSpec(
+        "contacts",
+        "Contacts",
+        "Contact",
+        "READ_CONTACTS",
+        ("name", "phone", "email"),
+        "name",
+        "content insert raw_contacts + data (name, phone_v2, email_v2)",
+    ),
+    "sms": ListSpec(
+        "sms",
+        "SMS",
+        "SMS",
+        "READ_SMS",
+        ("address", "body"),
+        "body",
+        "content insert content://sms/inbox|sent",
+    ),
+    "calls": ListSpec(
+        "calls",
+        "Call log",
+        "Call",
+        "READ_CALL_LOG",
+        ("number", "name"),
+        "name",
+        "content insert content://call_log/calls",
+    ),
+}
+
+_CONTACT_MIME = {
+    "name": "vnd.android.cursor.item/name",
+    "phone": "vnd.android.cursor.item/phone_v2",
+    "email": "vnd.android.cursor.item/email_v2",
+}
+_CALL_TYPES = {"incoming": 1, "outgoing": 2, "missed": 3}
+_SMS_TYPES = {"inbox": 1, "sent": 2}
+
+# ---------------------------------------------------------------------------
+# profile model
+# ---------------------------------------------------------------------------
+
+_VALUE_KEYS = (
+    "kind",
+    "label",
+    "value",
+    "template",
+    "derive",
+    "scope",
+    "provider",
+    "enabled",
+)
+
+
+@dataclass
+class ValueSpec:
+    """One ``[values.<id>]`` table.
+
+    Exactly one of ``value``, ``template`` and ``derive`` is set.
+    """
+
+    id: str
+    kind: str = ""
+    value: str | None = None
+    template: str | None = None
+    derive: str | None = None
+    scope: str = "signer"
+    provider: str = ""
+    enabled: bool = True
+    label: str = ""
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.kind:
+            self.kind = self.id
+
+    @property
+    def spec(self) -> KindSpec | None:
+        """The registry row of :attr:`kind` (``None`` if unknown)."""
+        return REGISTRY.get(self.kind)
+
+    @property
+    def effective_provider(self) -> str:
+        """``provider`` or the kind's default."""
+        if self.provider:
+            return self.provider
+        spec = self.spec
+        return spec.providers[0] if spec else "native"
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        if self.kind != self.id:
+            out["kind"] = self.kind
+        if self.label:
+            out["label"] = self.label
+        for key in ("value", "template", "derive"):
+            if getattr(self, key) is not None:
+                out[key] = getattr(self, key)
+        if self.derive == "ssaid":
+            out["scope"] = self.scope
+        if self.provider:
+            out["provider"] = self.provider
+        if not self.enabled:
+            out["enabled"] = False
+        out.update(self.extra)
+        return out
+
+    @classmethod
+    def from_dict(cls, vid: str, data: dict[str, Any]) -> ValueSpec:
+        def text(key: str) -> str | None:
+            raw = data.get(key)
+            return None if raw is None else str(raw)
+
+        return cls(
+            id=vid,
+            kind=str(data.get("kind") or vid),
+            value=text("value"),
+            template=text("template"),
+            derive=text("derive"),
+            scope=str(data.get("scope") or "signer"),
+            provider=str(data.get("provider") or ""),
+            enabled=bool(data.get("enabled", True)),
+            label=str(data.get("label") or ""),
+            extra={k: v for k, v in data.items() if k not in _VALUE_KEYS},
+        )
+
+
+@dataclass
+class Profile:
+    """An identity profile (one TOML file in the library)."""
+
+    id: str
+    name: str = ""
+    token: str = ""
+    seed: str = ""  # "hex:<64 hex>"
+    revision: int = 0
+    created: datetime | None = None
+    preset: str = ""
+    notes: str = ""
+    values: dict[str, ValueSpec] = field(default_factory=dict)
+    contacts: list[dict[str, Any]] = field(default_factory=list)
+    sms: list[dict[str, Any]] = field(default_factory=list)
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    retired_tokens: list[str] = field(default_factory=list)
+    schema: int = SCHEMA
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def seed_bytes(self) -> bytes:
+        """The seed as bytes (empty when missing or malformed)."""
+        raw = self.seed[4:] if self.seed.startswith("hex:") else ""
+        try:
+            return bytes.fromhex(raw)
+        except ValueError:
+            return b""
+
+    def lists(self) -> dict[str, list[dict[str, Any]]]:
+        """``{"contacts": [...], "sms": [...], "calls": [...]}``."""
+        return {"contacts": self.contacts, "sms": self.sms, "calls": self.calls}
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "format": FORMAT,
+            "schema": self.schema,
+            "id": self.id,
+            "name": self.name,
+            "revision": self.revision,
+            "token": self.token,
+            "seed": self.seed,
+        }
+        if self.created is not None:
+            out["created"] = self.created
+        out["preset"] = self.preset
+        out["notes"] = self.notes
+        if self.retired_tokens:
+            out["retired_tokens"] = list(self.retired_tokens)
+        out.update(self.extra)
+        out["values"] = {vid: v.to_dict() for vid, v in self.values.items()}
+        for name, items in self.lists().items():
+            if items:
+                out[name] = [dict(item) for item in items]
+        return out
+
+    def dumps(self) -> str:
+        """The profile as TOML text."""
+        return tomli_w.dumps(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Profile:
+        """Build a profile from parsed TOML.
+
+        Raises:
+            ProfileError: Wrong ``format``, newer ``schema`` or no ``id``.
+        """
+        if data.get("format") != FORMAT:
+            raise ProfileError(f"not a {FORMAT} file (format={data.get('format')!r})")
+        schema = data.get("schema")
+        if not isinstance(schema, int) or schema < 1:
+            raise ProfileError(f"invalid schema {schema!r}")
+        if schema > SCHEMA:
+            raise ProfileError(
+                f"profile schema {schema} is newer than this Sandroid ({SCHEMA})"
+            )
+        pid = data.get("id")
+        if not isinstance(pid, str) or not pid:
+            raise ProfileError("profile has no id")
+        values_raw = data.get("values") or {}
+        if not isinstance(values_raw, dict):
+            raise ProfileError("[values] must be a table")
+        known = {
+            "format",
+            "schema",
+            "id",
+            "name",
+            "revision",
+            "token",
+            "seed",
+            "created",
+            "preset",
+            "notes",
+            "values",
+            "contacts",
+            "sms",
+            "calls",
+            "retired_tokens",
+        }
+        created = data.get("created")
+        return cls(
+            id=pid,
+            name=str(data.get("name") or ""),
+            token=str(data.get("token") or ""),
+            seed=str(data.get("seed") or ""),
+            revision=int(data.get("revision") or 0),
+            created=created if isinstance(created, datetime) else None,
+            preset=str(data.get("preset") or ""),
+            notes=str(data.get("notes") or ""),
+            values={
+                str(vid): ValueSpec.from_dict(
+                    str(vid), v if isinstance(v, dict) else {}
+                )
+                for vid, v in values_raw.items()
+            },
+            contacts=[
+                dict(x) for x in data.get("contacts") or [] if isinstance(x, dict)
+            ],
+            sms=[dict(x) for x in data.get("sms") or [] if isinstance(x, dict)],
+            calls=[dict(x) for x in data.get("calls") or [] if isinstance(x, dict)],
+            retired_tokens=[str(t) for t in data.get("retired_tokens") or []],
+            schema=schema,
+            extra={k: v for k, v in data.items() if k not in known},
+        )
+
+    @classmethod
+    def loads(cls, text: str) -> Profile:
+        """Parse TOML text (raises :class:`ProfileError`)."""
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            raise ProfileError(f"invalid TOML: {exc}") from exc
+        return cls.from_dict(data)
+
+
+# ---------------------------------------------------------------------------
+# templates and derivation
+# ---------------------------------------------------------------------------
+
+_PLACEHOLDER_RE = re.compile(r"\{\{|\}\}|\{([a-z_]+)(?::(\d+))?\}")
+
+
+class TemplateError(ValueError):
+    """A template has an unknown placeholder or an unbalanced brace."""
+
+
+class _Stream:
+    """Deterministic byte stream ``HMAC-SHA256(seed, key#n)``."""
+
+    def __init__(self, seed: bytes, key: str) -> None:
+        self._seed, self._key, self._n, self._buf = seed, key, 0, b""
+
+    def byte(self) -> int:
+        if not self._buf:
+            self._buf = hmac.new(
+                self._seed, f"{self._key}#{self._n}".encode(), hashlib.sha256
+            ).digest()
+            self._n += 1
+        value, self._buf = self._buf[0], self._buf[1:]
+        return value
+
+    def digits(self, n: int) -> str:
+        out = []
+        while len(out) < n:
+            b = self.byte()
+            if b < 250:
+                out.append(str(b % 10))
+        return "".join(out)
+
+    def hex(self, n: int) -> str:
+        return "".join(f"{self.byte() & 0xF:x}" for _ in range(n))
+
+
+def luhn_check_digit(digits: str) -> str:
+    """The Luhn check digit to append to ``digits`` (non-digits ignored)."""
+    total = 0
+    for i, ch in enumerate(reversed([c for c in digits if c.isdigit()])):
+        d = int(ch)
+        if i % 2 == 0:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return str((10 - total % 10) % 10)
+
+
+def luhn_ok(number: str) -> bool:
+    """True when the last digit of ``number`` is its Luhn check digit."""
+    return (
+        len(number) > 1
+        and number.isdigit()
+        and luhn_check_digit(number[:-1]) == number[-1]
+    )
+
+
+def token_uuid(token: str, seed: bytes, key: str) -> str:
+    """A version-4 UUID that starts with ``token[:8]`` (rest from the seed)."""
+    rest = hmac.new(seed, f"uuid|{key}".encode(), hashlib.sha256).hexdigest()
+    h = list((token[:8] + rest)[:32])
+    h[12] = "4"
+    h[16] = "89ab"[int(h[16], 16) & 3]
+    s = "".join(h)
+    return f"{s[:8]}-{s[8:12]}-{s[12:16]}-{s[16:20]}-{s[20:]}"
+
+
+def ssaid_for(token: str, seed: bytes, scope_key: str) -> str:
+    """Android ID for one app: ``token[:8]`` + ``HMAC(seed, scope)[:8]``."""
+    tail = hmac.new(seed, f"ssaid|{scope_key}".encode(), hashlib.sha256).hexdigest()
+    return (token[:8] + tail)[:16]
+
+
+def render_template(template: str, *, token: str, seed: bytes, key: str) -> str:
+    """Render ``{token}``, ``{digits:N}``, ``{hex:N}``, ``{luhn}``, ``{uuid}``.
+
+    ``{luhn}`` is the Luhn digit of all digits rendered before it; ``{{`` and
+    ``}}`` are literal braces. The result depends only on ``(template,
+    token, seed, key)``.
+
+    Raises:
+        TemplateError: Unknown placeholder or a stray brace.
+    """
+    stream = _Stream(seed, key)
+    out: list[str] = []
+    pos = 0
+    for match in _PLACEHOLDER_RE.finditer(template):
+        literal = template[pos : match.start()]
+        if "{" in literal or "}" in literal:
+            raise TemplateError(f"unbalanced brace in {template!r}")
+        out.append(literal)
+        pos = match.end()
+        whole, name, arg = match.group(0), match.group(1), match.group(2)
+        if whole in ("{{", "}}"):
+            out.append(whole[0])
+            continue
+        n = int(arg) if arg else 1
+        if n > 64:
+            raise TemplateError(f"{whole}: at most 64")
+        if name == "token":
+            out.append(token)
+        elif name == "digits":
+            out.append(stream.digits(n))
+        elif name == "hex":
+            out.append(stream.hex(n))
+        elif name == "luhn":
+            out.append(luhn_check_digit("".join(out)))
+        elif name == "uuid":
+            out.append(token_uuid(token, seed, key))
+        else:
+            raise TemplateError(f"unknown placeholder {whole}")
+    tail = template[pos:]
+    if "{" in tail or "}" in tail:
+        raise TemplateError(f"unbalanced brace in {template!r}")
+    out.append(tail)
+    return "".join(out)
+
+
+def render_value(profile: Profile, vs: ValueSpec) -> str | None:
+    """The rendered value of ``vs`` (``None`` for a per-app ``derive``).
+
+    Raises:
+        TemplateError: For a broken template.
+    """
+    if vs.value is not None:
+        return vs.value
+    if vs.template is not None:
+        return render_template(
+            vs.template, token=profile.token, seed=profile.seed_bytes, key=vs.id
+        )
+    if vs.derive == "uuid":
+        return token_uuid(profile.token, profile.seed_bytes, vs.id)
+    return None
+
+
+def render_lists(profile: Profile) -> dict[str, list[dict[str, Any]]]:
+    """Every list item with its string fields rendered (others as is)."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for name, items in profile.lists().items():
+        spec = LISTS[name]
+        rendered = []
+        for i, item in enumerate(items):
+            row = dict(item)
+            for fname in spec.fields:
+                if isinstance(row.get(fname), str):
+                    row[fname] = render_template(
+                        row[fname],
+                        token=profile.token,
+                        seed=profile.seed_bytes,
+                        key=f"{name}.{i}.{fname}",
+                    )
+            rendered.append(row)
+        out[name] = rendered
+    return out
+
+
+def split_gps(value: str) -> tuple[str, str, str]:
+    """``"lat, lon[, alt]"`` -> ``(lat, lon, alt)`` (alt defaults to ``"34"``).
+
+    Raises:
+        ValueError: Not two or three comma-separated numbers.
+    """
+    parts = [p.strip() for p in value.split(",")]
+    if len(parts) not in (2, 3) or not all(_COORD_RE.match(p) for p in parts[:2]):
+        raise ValueError(f"GPS {value!r} is not 'lat, lon[, alt]'")
+    alt = parts[2] if len(parts) == 3 else "34"
+    float(alt)
+    return parts[0], parts[1], alt
+
+
+def fingerprint(profile: Profile) -> str:
+    """Stable id of the profile's seeded content (16 hex)."""
+    try:
+        values = {
+            vid: [
+                vs.kind,
+                vs.effective_provider,
+                vs.enabled,
+                render_value(profile, vs),
+                vs.derive,
+                vs.scope,
+            ]
+            for vid, vs in sorted(profile.values.items())
+        }
+        lists = render_lists(profile)
+    except (TemplateError, ValueError):
+        values, lists = {"_raw": profile.to_dict()["values"]}, {}
+    blob = json.dumps(
+        {
+            "id": profile.id,
+            "token": profile.token,
+            "seed": profile.seed,
+            "values": values,
+            "lists": lists,
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# validation
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Issue:
+    """One validation finding; ``error`` blocks apply, ``warning`` does not."""
+
+    severity: str  # "error" | "warning"
+    path: str  # "values.gaid", "contacts.0.phone", "token", ...
+    message: str
+
+
+def _mccmnc_of(profile: Profile, rendered: dict[str, str | None]) -> str:
+    for vid, vs in profile.values.items():
+        if vs.kind == "sim_mccmnc" and rendered.get(vid):
+            return str(rendered[vid])
+    if profile.preset:
+        try:
+            from sandroid.services.device_settings_service import COUNTRY_PRESETS
+
+            preset = COUNTRY_PRESETS.get(profile.preset)
+            if preset is not None:
+                return preset.telephony_mnc
+        except Exception:  # pragma: no cover - defensive
+            pass
+    return ""
+
+
+def _check_value(
+    kind: str, value: str, provider: str, mccmnc: str
+) -> list[tuple[str, str]]:
+    """``(severity, message)`` findings for one rendered value of ``kind``."""
+    out: list[tuple[str, str]] = []
+    if kind == "android_id":
+        if not re.fullmatch(r"[0-9a-f]{16}", value):
+            out.append(("error", "Android ID must be 16 lower-case hex digits"))
+    elif kind in ("gaid", "app_set_id"):
+        if not _UUID_RE.match(value):
+            out.append(("error", "must be a UUID (8-4-4-4-12 hex)"))
+        elif uuidlib.UUID(value).int == 0:
+            out.append(("error", "the nil UUID means 'no ID' to apps"))
+    elif kind == "imei":
+        if not (len(value) == 15 and value.isdigit() and luhn_ok(value)):
+            out.append(("error", "IMEI must be 15 digits with a valid Luhn digit"))
+    elif kind == "iccid":
+        if not (
+            value.isdigit()
+            and len(value) in (19, 20)
+            and value.startswith("89")
+            and luhn_ok(value)
+        ):
+            out.append(("error", "ICCID must be 19-20 digits, start with 89, Luhn"))
+    elif kind == "imsi":
+        if not (value.isdigit() and 14 <= len(value) <= 15):
+            out.append(("error", "IMSI must be 14-15 digits"))
+        elif mccmnc and not value.startswith(mccmnc):
+            out.append(("error", f"IMSI must start with the SIM MCC/MNC {mccmnc}"))
+    elif kind == "sim_mccmnc":
+        if not (value.isdigit() and len(value) in (5, 6)):
+            out.append(("error", "MCC/MNC must be 5-6 digits"))
+    elif kind == "phone_number":
+        if provider == "native":
+            if not value.isdigit() or len(value) > 11:
+                out.append(("error", "the emulator takes at most 11 digits, no '+'"))
+        elif not _PHONE_RE.match(value):
+            out.append(("error", "phone number must be digits (optional '+')"))
+    elif kind == "gps":
+        try:
+            lat, lon, _alt = split_gps(value)
+        except ValueError as exc:
+            out.append(("error", str(exc)))
+        else:
+            if not -90 <= float(lat) <= 90:
+                out.append(("error", "latitude must be within ±90"))
+            if not -180 <= float(lon) <= 180:
+                out.append(("error", "longitude must be within ±180"))
+            if any(len(c.partition(".")[2]) < 6 for c in (lat, lon)):
+                out.append(("warning", "fewer than 6 decimals: weak marker"))
+    elif kind == "timezone":
+        try:
+            ZoneInfo(value)
+        except Exception:
+            out.append(("error", f"unknown time zone {value!r}"))
+    elif kind == "locale":
+        if not _LOCALE_RE.match(value):
+            out.append(("error", "locale must be BCP-47 like 'de-DE'"))
+    elif kind == "account":
+        if not _EMAIL_RE.match(value):
+            out.append(("error", "not an e-mail address"))
+    elif kind in ("device_name", "sim_operator", "build_model"):
+        if not value.strip():
+            out.append(("error", "must not be empty"))
+        elif len(value) > 64:
+            out.append(("error", "at most 64 characters"))
+    return out
+
+
+def _norm_marker(m: Marker) -> list[str]:
+    forms = [m.value.casefold()]
+    if m.kind == "phone":
+        forms.append("".join(c for c in m.value if c.isdigit()))
+    return forms
+
+
+def validate(profile: Profile) -> list[Issue]:
+    """Every problem of ``profile``; errors block apply, drafts may be saved."""
+    issues: list[Issue] = []
+
+    def add(sev: str, path: str, msg: str) -> None:
+        issues.append(Issue(sev, path, msg))
+
+    if not ID_RE.match(profile.id):
+        add("error", "id", "id must be lower-case letters, digits, '.', '_', '-'")
+    if not TOKEN_RE.match(profile.token):
+        add("error", "token", "token must be 8-32 lower-case hex digits")
+    if len(profile.seed_bytes) != 32:
+        add("error", "seed", "seed must be 'hex:' + 32 bytes")
+    if not profile.name.strip():
+        add("warning", "name", "profile has no name")
+    if issues and any(i.severity == "error" for i in issues):
+        return issues  # templates need a token and a seed
+    rendered: dict[str, str | None] = {}
+    for vid, vs in profile.values.items():
+        path = f"values.{vid}"
+        spec = vs.spec
+        if spec is None:
+            add("error", path, f"unknown kind {vs.kind!r}")
+            continue
+        sources = [k for k in ("value", "template", "derive") if getattr(vs, k)]
+        if len(sources) != 1:
+            add("error", path, "exactly one of value, template, derive")
+            continue
+        if vs.provider and vs.provider not in spec.providers:
+            allowed = ", ".join(spec.providers)
+            add("error", path, f"provider {vs.provider!r} not allowed ({allowed})")
+        if vs.derive and vs.derive not in spec.derives:
+            add("error", path, f"derive {vs.derive!r} not supported for {vs.kind}")
+        if vs.derive == "ssaid" and vs.scope not in ("signer", "package"):
+            add("error", path, "scope must be 'signer' or 'package'")
+        try:
+            rendered[vid] = render_value(profile, vs)
+        except TemplateError as exc:
+            add("error", path, str(exc))
+    mccmnc = _mccmnc_of(profile, rendered)
+    for vid, value in rendered.items():
+        vs = profile.values[vid]
+        if value is None or not vs.enabled:
+            continue
+        for sev, msg in _check_value(vs.kind, value, vs.effective_provider, mccmnc):
+            add(sev, f"values.{vid}", msg)
+        spec = vs.spec
+        if (
+            spec is not None
+            and spec.marker in ("text", "email")
+            and not value.isdigit()
+            and profile.token not in value
+        ):
+            add("warning", f"values.{vid}", "no {token}: hits may be coincidental")
+    try:
+        lists = render_lists(profile)
+    except TemplateError as exc:
+        add("error", "lists", str(exc))
+        lists = {}
+    for name, items in lists.items():
+        spec_l = LISTS[name]
+        for i, item in enumerate(items):
+            path = f"{name}.{i}"
+            key_val = item.get(spec_l.token_field)
+            if not isinstance(key_val, str) or profile.token not in key_val:
+                add(
+                    "error",
+                    f"{path}.{spec_l.token_field}",
+                    "must contain {token} (finds the row on the device)",
+                )
+            for fname in ("phone", "address", "number"):
+                val = item.get(fname)
+                if fname in spec_l.fields and val and not _PHONE_RE.match(str(val)):
+                    add("error", f"{path}.{fname}", "phone must be digits (opt. '+')")
+            email = item.get("email")
+            if email and not _EMAIL_RE.match(str(email)):
+                add("error", f"{path}.email", "not an e-mail address")
+            if name == "sms" and str(item.get("box", "inbox")) not in _SMS_TYPES:
+                add("error", f"{path}.box", "box must be inbox or sent")
+            if name == "calls" and str(item.get("type", "incoming")) not in _CALL_TYPES:
+                add("error", f"{path}.type", "type must be incoming, outgoing, missed")
+            if name in ("sms", "calls") and item.get("date") is not None:
+                try:
+                    _resolve_date(item["date"], 0, datetime.now(UTC))
+                except ValueError as exc:
+                    add("error", f"{path}.date", str(exc))
+    if any(i.severity == "error" for i in issues):
+        return issues
+    # Markers: distinct, and none inside another (the scanner folds case).
+    markers = markers_for(profile, {}, dedupe=False)
+    norm = [(m, _norm_marker(m)) for m in markers]
+    for i, (a, fa) in enumerate(norm):
+        for b, fb in norm[i + 1 :]:
+            if a.group and a.group == b.group:
+                continue
+            clash = next(
+                ((x, y) for x in fa for y in fb if x and y and (x in y or y in x)),
+                None,
+            )
+            if clash:
+                same = clash[0] == clash[1]
+                what = "the same value as" if same else "a substring clash with"
+                add("error", _marker_path(a.id), f"{what} {b.id}")
+    return issues
+
+
+def _marker_path(mid: str) -> str:
+    return mid if mid.split(".")[0] in LISTS else f"values.{mid.split('.')[0]}"
+
+
+def _resolve_date(raw: Any, index: int, now: datetime) -> datetime:
+    """``raw`` (datetime, ISO text, ``"-3d"``/``"-2h"``/``"-30m"``, None)."""
+    if raw is None:
+        return now - timedelta(days=index + 1, hours=index * 3)
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=UTC)
+    text = str(raw).strip()
+    match = re.fullmatch(r"-(\d+)([dhm])", text)
+    if match:
+        unit = {"d": "days", "h": "hours", "m": "minutes"}[match.group(2)]
+        return now - timedelta(**{unit: int(match.group(1))})
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        raise ValueError(f"date {text!r}: ISO time or -Nd/-Nh/-Nm") from None
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
+
+
+# ---------------------------------------------------------------------------
+# markers
+# ---------------------------------------------------------------------------
+
+#: Country calling codes of the presets (national <-> E.164 forms).
+CALLING_CODES = {
+    "de": "49",
+    "us": "1",
+    "gb": "44",
+    "fr": "33",
+    "ru": "7",
+    "cn": "86",
+    "jp": "81",
+    "kr": "82",
+    "br": "55",
+    "in": "91",
+    "ir": "98",
+    "kp": "850",
+}
+
+
+def _phone_marker_value(number: str, cc: str) -> tuple[str, tuple[str, ...]]:
+    """(marker value, extra forms) for a phone number."""
+    digits = "".join(c for c in number if c.isdigit())
+    if number.startswith("+"):
+        national = digits[len(cc) :] if cc and digits.startswith(cc) else ""
+        return number, (("0" + national,) if national else ())
+    if cc:
+        return f"+{cc}{digits}", (digits, "0" + digits)
+    return digits, ()
+
+
+def markers_for(
+    profile: Profile,
+    ssaids: dict[str, str],
+    primary: str | None = None,
+    *,
+    dedupe: bool = True,
+) -> list[Marker]:
+    """The markers of ``profile``.
+
+    Args:
+        profile: A profile whose templates render.
+        ssaids: ``{package: android id}`` recorded at apply.
+        primary: The package whose Android ID gets the plain id
+            ``android_id`` (others: ``android_id@<package>``).
+        dedupe: List a value once (validation turns it off to see clashes).
+
+    Returns:
+        One marker per markable value (GPS: latitude and longitude, group
+        ``gps``) and per list field; duplicate values are listed once.
+    """
+    cc = CALLING_CODES.get(profile.preset, "")
+    out: list[Marker] = []
+    seen: set[str] = set()
+
+    def add(m: Marker) -> None:
+        if m.value and (not dedupe or m.value not in seen):
+            seen.add(m.value)
+            out.append(m)
+
+    for vid, vs in profile.values.items():
+        spec = vs.spec
+        if spec is None or spec.marker is None or not vs.enabled:
+            continue
+        label = vs.label or spec.label
+        if vs.derive == "ssaid" or (vs.kind == "android_id" and ssaids):
+            ordered = sorted(ssaids, key=lambda p: (p != primary, p))
+            for pkg in ordered:
+                mid = vid if pkg == primary else f"{vid}@{pkg}"
+                add(
+                    Marker(mid, ssaids[pkg], "hex_id", f"{label} ({pkg})", tag=spec.tag)
+                )
+            if vs.derive == "ssaid":
+                continue
+        value = render_value(profile, vs)
+        if value is None:
+            continue
+        if vs.kind == "gps":
+            lat, lon, _alt = split_gps(value)
+            add(
+                Marker(
+                    f"{vid}.latitude",
+                    lat,
+                    "latitude",
+                    f"{label} latitude",
+                    group=vid,
+                    tag=spec.tag,
+                )
+            )
+            add(
+                Marker(
+                    f"{vid}.longitude",
+                    lon,
+                    "longitude",
+                    f"{label} longitude",
+                    group=vid,
+                    tag=spec.tag,
+                )
+            )
+        elif spec.marker == "phone":
+            mval, forms = _phone_marker_value(value, cc)
+            add(Marker(vid, mval, "phone", label, forms, tag=spec.tag))
+        else:
+            add(Marker(vid, value, spec.marker, label, tag=spec.tag))
+    for name, items in render_lists(profile).items():
+        spec_l = LISTS[name]
+        for i, item in enumerate(items):
+            title = str(item.get(spec_l.token_field) or "")
+            for fname in spec_l.fields:
+                val = item.get(fname)
+                if not isinstance(val, str) or not val:
+                    continue
+                label = f"{spec_l.tag}: {title} ({fname})"
+                mid = f"{name}.{i}.{fname}"
+                if fname in ("phone", "address", "number") and _PHONE_RE.match(val):
+                    mval, forms = _phone_marker_value(val, cc)
+                    add(Marker(mid, mval, "phone", label, forms, tag=spec_l.tag))
+                elif fname == "email":
+                    add(Marker(mid, val, "email", label, tag="Email"))
+                else:
+                    add(Marker(mid, val, "text", label, tag=spec_l.tag))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# built-in generator
+# ---------------------------------------------------------------------------
+
+_PEOPLE = {
+    "de": {
+        "owner": ("Mara", "Kessler"),
+        "contacts": [("Jonas", "Weber"), ("Lena", "Hoffmann"), ("Tobias", "Brandt")],
+        "carrier": "Telekom",
+        "mobile": "+49151{digits:7}",
+        "line": "1520{digits:7}",
+        "sms": [
+            "Dein Paket {token}{digits:3} kommt heute",
+            "Termin bestaetigt, Code {token}-{digits:4}",
+        ],
+        "calls": ["Praxis Dr. Albers {token}", "Paketdienst {token}"],
+    },
+    "en": {
+        "owner": ("Alex", "Morgan"),
+        "contacts": [("Jordan", "Reed"), ("Casey", "Turner"), ("Riley", "Brooks")],
+        "carrier": "Carrier",
+        "mobile": "+1212555{digits:4}",
+        "line": "212555{digits:4}",
+        "sms": [
+            "Your parcel {token}{digits:3} arrives today",
+            "Appointment confirmed, code {token}-{digits:4}",
+        ],
+        "calls": ["Dr. Albers Office {token}", "Courier {token}"],
+    },
+}
+
+
+def _jitter(value: float, rnd: secrets.SystemRandom) -> str:
+    text = f"{value + rnd.uniform(-0.01, 0.01):.6f}"
+    if text.endswith("0"):
+        text = text[:-1] + str(rnd.randint(1, 9))
+    return text
+
+
+def generate_profile(
+    preset: str = "de", *, name: str = "", profile_id: str = ""
+) -> Profile:
+    """A complete, valid profile seeded from a country preset.
+
+    Uses ``COUNTRY_PRESETS`` (GPS around the capital, time zone, language,
+    MCC/MNC) plus built-in fake people. Values carry a fresh random token.
+
+    Args:
+        preset: Key of ``COUNTRY_PRESETS`` (``"de"``, ``"us"``, ...).
+        name: Display name (default: owner name and country).
+        profile_id: Library id (default: ``<owner>-<preset>``).
+    """
+    from sandroid.services.device_settings_service import COUNTRY_PRESETS
+
+    country = COUNTRY_PRESETS.get(preset) or COUNTRY_PRESETS["de"]
+    preset = country.country_code
+    people = _PEOPLE.get(preset, _PEOPLE["en"])
+    rnd = secrets.SystemRandom()
+    first, last = people["owner"]
+    token = secrets.token_hex(4)
+    mccmnc = country.telephony_mnc
+    imsi_len = 15 - len(mccmnc)
+    values = {
+        "android_id": ValueSpec("android_id", derive="ssaid", scope="signer"),
+        "gaid": ValueSpec("gaid", derive="uuid"),
+        "app_set_id": ValueSpec("app_set_id", derive="uuid"),
+        "device_name": ValueSpec("device_name", template=f"{first}s Pixel {{token}}"),
+        "phone_number": ValueSpec("phone_number", template=people["line"]),
+        "gps": ValueSpec(
+            "gps",
+            value=f"{_jitter(country.latitude, rnd)}, "
+            f"{_jitter(country.longitude, rnd)}",
+        ),
+        "timezone": ValueSpec("timezone", value=country.timezone),
+        "locale": ValueSpec("locale", value=f"{country.language}-{country.country}"),
+        "sim_operator": ValueSpec(
+            "sim_operator", template=f"{people['carrier']} {{token}}"
+        ),
+        "sim_mccmnc": ValueSpec("sim_mccmnc", value=mccmnc),
+        "build_model": ValueSpec(
+            "build_model", template="Pixel 8 {token}", enabled=False
+        ),
+        "imei": ValueSpec("imei", template="35847631{digits:6}{luhn}"),
+        "imsi": ValueSpec("imsi", template=f"{mccmnc}{{digits:{imsi_len}}}"),
+        "iccid": ValueSpec("iccid", template="8949{digits:14}{luhn}"),
+        "serial": ValueSpec("serial", template="RF8N{token}"),
+        "account": ValueSpec(
+            "account", template=f"{first.lower()}.{last.lower()}.{{token}}@example.org"
+        ),
+        "clipboard": ValueSpec("clipboard", template="Notiz {token} merken"),
+    }
+    contacts = [
+        {
+            "name": f"{cf} {cl} {{token}}",
+            "phone": people["mobile"],
+            "email": f"{cf.lower()}.{{token}}@example.org",
+        }
+        for cf, cl in people["contacts"]
+    ]
+    sms = [
+        {
+            "address": people["mobile"],
+            "body": body,
+            "box": "inbox",
+            "date": f"-{i + 1}d",
+        }
+        for i, body in enumerate(people["sms"])
+    ]
+    calls = [
+        {
+            "number": people["mobile"],
+            "name": cname,
+            "type": ctype,
+            "duration": 42 + i,
+            "date": f"-{i + 2}d",
+        }
+        for i, (cname, ctype) in enumerate(
+            zip(people["calls"], ("incoming", "missed"), strict=False)
+        )
+    ]
+    pid = profile_id or f"{first.lower()}-{preset}"
+    profile = Profile(
+        id=pid,
+        name=name or f"{first} {last} · {preset.upper()}",
+        token=token,
+        seed="hex:" + secrets.token_hex(32),
+        revision=0,
+        created=datetime.now().astimezone().replace(microsecond=0),
+        preset=preset,
+        values=values,
+        contacts=contacts,
+        sms=sms,
+        calls=calls,
+    )
+    # Random digits can collide (two equal phone numbers): draw again.
+    for _ in range(20):
+        if not any(i.severity == "error" for i in validate(profile)):
+            break
+        _regenerate(profile, retire=False)
+    return profile
+
+
+# ---------------------------------------------------------------------------
+# library
+# ---------------------------------------------------------------------------
+
+
+def profiles_dir() -> Path:
+    """``$XDG_CONFIG_HOME/sandroid/profiles`` (created)."""
+    from sandroid.core.watchlist_store import _user_dir
+
+    override = os.environ.get(PROFILES_DIR_ENV)
+    directory = Path(override).expanduser() if override else _user_dir() / "profiles"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp-{uuidlib.uuid4().hex[:8]}")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _profile_path(pid: str) -> Path:
+    if not ID_RE.match(pid):
+        raise ProfileError(f"invalid profile id {pid!r}")
+    return profiles_dir() / f"{pid}.toml"
+
+
+@dataclass(frozen=True)
+class ProfileInfo:
+    """A library entry (for a list view)."""
+
+    id: str
+    name: str
+    revision: int
+    token: str
+    preset: str
+    path: Path
+    error: str = ""  # unreadable / newer schema
+
+
+# ---------------------------------------------------------------------------
+# device access
+# ---------------------------------------------------------------------------
+
+
+def _send(command: str, serial: str | None, timeout: float = 60) -> tuple[str, str]:
+    """One adb command for ``serial`` (tests monkeypatch this)."""
+    from sandroid.core.adb import Adb
+
+    return Adb.send_adb_command(command, serial=serial, timeout=timeout)
+
+
+def _q(text: str) -> str:
+    """Quote for the device shell."""
+    return shlex.quote(text)
+
+
+class _Device:
+    """Thin per-serial wrapper around :func:`_send`."""
+
+    def __init__(self, serial: str) -> None:
+        self.serial = serial
+
+    def shell(self, script: str, *, zygote: bool = False, timeout: float = 60) -> str:
+        if zygote:
+            script = f"{ZYGOTE_PREFIX}\n{script}"
+        from sandroid.core.adb_utils import quote_host_arg
+
+        out, err = _send(f"shell {quote_host_arg(script)}", self.serial, timeout)
+        if err and not out:
+            logger.debug(f"identity: shell stderr: {err}")
+        return out
+
+    def emu(self, args: str) -> tuple[str, str]:
+        return _send(f"emu {args}", self.serial, 30)
+
+    def write(
+        self,
+        remote: str,
+        data: bytes,
+        *,
+        abx: bool = False,
+        chown: str = "",
+        restorecon: bool = False,
+    ) -> str:
+        """Write ``data`` to ``remote`` with ``cat >`` (keeps owner and label).
+
+        Returns:
+            ``""`` on success, else the error text.
+        """
+        from sandroid.core.adb_utils import quote_host_arg
+
+        stage = f"{STAGE_DIR}/{Path(remote).name}.{uuidlib.uuid4().hex[:8]}"
+        fd, local = tempfile.mkstemp(prefix="sandroid-identity-")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+            out, err = _send(
+                f"push {quote_host_arg(local)} {quote_host_arg(stage)}",
+                self.serial,
+                60,
+            )
+            text = f"{out}\n{err}".lower()
+            if "error" in text or "failed" in text or "no such file" in text:
+                return f"push failed: {(err or out).strip()[:200]}"
+            src = stage
+            steps = []
+            if abx:
+                src = f"{stage}.abx"
+                steps.append(f"xml2abx {_q(stage)} {_q(src)}")
+            steps.append(f"cat {_q(src)} > {_q(remote)}")
+            if chown:
+                steps += [f"chown {chown} {_q(remote)}", f"chmod 660 {_q(remote)}"]
+            if restorecon:
+                steps.append(f"restorecon {_q(remote)}")
+            steps.append(f"echo {_OK}")
+            script = " && ".join(steps) + f"; rm -f {_q(stage)} {_q(stage)}.abx"
+            result = self.shell(script, zygote=abx)
+            return "" if _OK in result else f"write failed: {result.strip()[:200]}"
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(local)
+
+
+# ---------------------------------------------------------------------------
+# preflight (P0): one batched read
+# ---------------------------------------------------------------------------
+
+_PROPS = (
+    "ro.kernel.qemu",
+    "ro.boot.qemu",
+    "ro.build.version.sdk",
+    "ro.product.model",
+    "persist.sys.locale",
+    "persist.sys.timezone",
+    "gsm.sim.operator.alpha",
+    "gsm.sim.operator.numeric",
+    "ro.boot.qemu.avd_name",
+    "sys.boot_completed",
+)
+_LIST_QUERY = {
+    "contacts": (
+        "content://com.android.contacts/data",
+        ("raw_contact_id", "display_name", "mimetype", "data1"),
+        "display_name",
+    ),
+    "sms": ("content://sms", ("_id", "address", "body", "type"), "body"),
+    "calls": (
+        "content://call_log/calls",
+        ("_id", "number", "name", "type", "duration"),
+        "name",
+    ),
+}
+
+
+def _where_like(column: str, tokens: Iterable[str]) -> str:
+    return " OR ".join(f"{column} LIKE '%{t}%'" for t in tokens)
+
+
+def preflight_script(packages: Iterable[str], tokens: Iterable[str]) -> str:
+    """The one batched read: every current value the pipeline compares."""
+    tokens = [t for t in tokens if TOKEN_RE.match(t)]
+    pkgs = [p for p in packages if re.fullmatch(r"[A-Za-z0-9_.]+", p)]
+    px = f"{STAGE_DIR}/packages.xml"
+    lines = [
+        f"echo {PREFLIGHT_TAG}",
+        f"mkdir -p {STAGE_DIR} 2>/dev/null",
+        f"if [ ! -s {ZYGOTE_ENV_FILE} ]; then ZP=$(pidof zygote64 || pidof zygote);"
+        f" ZP=${{ZP%% *}}; [ -n \"$ZP\" ] && tr '\\0' '\\n' < /proc/$ZP/environ"
+        " | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' | grep -v '^ANDROID_SOCKET_'"
+        ' | sed -e "s/\'//g" -e "s/=/=\'/" -e "s/\\$/\'/" -e \'s/^/export /\''
+        f" > {ZYGOTE_ENV_FILE}; fi",
+        "echo @@props@@",
+        f'for p in {" ".join(_PROPS)}; do echo "$p=$(getprop $p)"; done',
+        "echo @@root@@; id -u",
+        "echo @@resetprop@@; command -v resetprop",
+        "echo @@system_server@@; pidof system_server",
+        f"echo @@marker@@; cat {RESTART_MARKER} 2>/dev/null",
+        f"echo @@gms@@; pm path {GMS} 2>/dev/null | head -n 1",
+        "echo @@settings@@",
+        'echo "device_name=$(settings get global device_name)"',
+        'echo "auto_time_zone=$(settings get global auto_time_zone)"',
+        f"echo @@ssaid@@; ({ZYGOTE_PREFIX}; abx2xml {SSAID_FILE} - 2>/dev/null"
+        f" || cat {SSAID_FILE})",
+        f"echo @@gaid_owner@@; stat -c %u:%g {GAID_DIR} 2>/dev/null",
+        f"echo @@gaid@@; cat {GAID_FILE} 2>/dev/null",
+        f"echo @@appset@@; base64 -w 0 {APPSET_FILE} 2>/dev/null; echo",
+        "echo @@location@@; dumpsys location 2>/dev/null"
+        " | grep -m 3 -E 'Location\\[(gps|fused) '",
+    ]
+    if pkgs:
+        # One tag per line, whether or not abx2xml indents.
+        lines.append(
+            f"({ZYGOTE_PREFIX}; abx2xml {PACKAGES_XML} - 2>/dev/null) | tr '<' '\\n'"
+            f" > {px}"
+        )
+        lines.append("echo @@uids@@; pm list packages -U 2>/dev/null")
+        for pkg in pkgs:
+            rx = pkg.replace(".", "\\.")
+            # The certificate from packages.xml; the framework's short
+            # signature hash (dumpsys) only when that fails.
+            lines += [
+                f"echo @@pkg:{pkg}@@; KEY=",
+                f"IDX=$(sed -n '/^package name=\"{rx}\"/,/^\\/package>/p' {px}"
+                " | grep -o '^cert index=\"[0-9]*\"' | head -n 1"
+                " | grep -o '[0-9][0-9]*')",
+                f'[ -n "$IDX" ] && KEY=$(grep -o "^cert index=\\"$IDX\\"'
+                f' key=\\"[0-9a-fA-F]*\\"" {px} | head -n 1)',
+                'if [ -n "$KEY" ]; then echo "$KEY"; else'
+                f" dumpsys package {pkg} 2>/dev/null"
+                " | grep -m 1 -o 'signatures:\\[[0-9a-f, ]*\\]'; fi",
+            ]
+        lines.append(f"rm -f {px}")
+    if tokens:
+        for name, (uri, proj, col) in _LIST_QUERY.items():
+            where = _where_like(col, tokens)
+            lines.append(
+                f"echo @@list:{name}@@; ({ZYGOTE_PREFIX}; content query --uri {uri}"
+                f" --projection {':'.join(proj)} --where {_q(where)} 2>/dev/null)"
+            )
+    lines.append("echo @@end@@")
+    return "\n".join(lines)
+
+
+def _sections(text: str) -> dict[str, str]:
+    out: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in text.splitlines():
+        match = re.fullmatch(r"@@([a-z_]+(?::[A-Za-z0-9_.]+)?)@@", line.strip())
+        if match:
+            current = out.setdefault(match.group(1), [])
+            continue
+        if current is not None:
+            current.append(line)
+    return {k: "\n".join(v).strip() for k, v in out.items()}
+
+
+def parse_rows(text: str, keys: tuple[str, ...]) -> list[dict[str, str]]:
+    """Rows of ``content query`` output (values may contain ``", "``)."""
+    split = re.compile(r", (?=(?:" + "|".join(map(re.escape, keys)) + r")=)")
+    rows = []
+    for line in text.splitlines():
+        match = re.match(r"Row: \d+ (.*)$", line.strip())
+        if not match:
+            continue
+        row: dict[str, str] = {}
+        for part in split.split(match.group(1)):
+            key, _, value = part.partition("=")
+            row[key] = "" if value == "NULL" else value
+        rows.append(row)
+    return rows
+
+
+@dataclass
+class PackageInfo:
+    """A target package on the device."""
+
+    package: str
+    uid: int | None
+    signer: str  # scope key: "sha256:<hex>" or "sighash:<hex>" or ""
+
+
+@dataclass
+class DeviceState:
+    """Everything one preflight read returned."""
+
+    serial: str
+    ok: bool = False
+    props: dict[str, str] = field(default_factory=dict)
+    root: bool = False
+    emulator: bool = False
+    api: int = 0
+    resetprop: bool = False
+    system_server: str = ""
+    marker: str = ""
+    gms: bool = False
+    settings: dict[str, str] = field(default_factory=dict)
+    ssaid_xml: str = ""
+    ssaid: dict[str, tuple[str, str]] = field(default_factory=dict)  # pkg->(uid, v)
+    gaid_owner: str = ""
+    gaid_xml: str = ""
+    gaid: str = ""
+    appset: bytes | None = None
+    location: tuple[float, float] | None = None
+    packages: dict[str, PackageInfo] = field(default_factory=dict)
+    lists: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+
+
+def _parse_ssaid(xml_text: str) -> dict[str, tuple[str, str]]:
+    out: dict[str, tuple[str, str]] = {}
+    if not xml_text.strip():
+        return out
+    try:
+        root = ET.fromstring(xml_text.encode("utf-8"))  # noqa: S314 - device file
+    except ET.ParseError:
+        return out
+    for row in root.iter("setting"):
+        pkg = row.get("package") or ""
+        if pkg and pkg != "android":
+            out[pkg] = (row.get("name") or "", row.get("value") or "")
+    return out
+
+
+def parse_preflight(serial: str, text: str) -> DeviceState:
+    """Parse the output of :func:`preflight_script`."""
+    state = DeviceState(serial=serial)
+    if PREFLIGHT_TAG not in text:
+        return state
+    sec = _sections(text.split(PREFLIGHT_TAG, 1)[1])
+    state.ok = "end" in sec
+    for line in sec.get("props", "").splitlines():
+        key, _, value = line.partition("=")
+        state.props[key.strip()] = value.strip()
+    state.root = sec.get("root", "").strip() == "0"
+    state.emulator = (
+        state.props.get("ro.kernel.qemu") == "1"
+        or state.props.get("ro.boot.qemu") == "1"
+        or serial.startswith("emulator-")
+    )
+    with contextlib.suppress(ValueError):
+        state.api = int(state.props.get("ro.build.version.sdk") or 0)
+    state.resetprop = bool(sec.get("resetprop"))
+    state.system_server = sec.get("system_server", "").split(" ")[0]
+    state.marker = sec.get("marker", "")
+    state.gms = sec.get("gms", "").startswith("package:")
+    for line in sec.get("settings", "").splitlines():
+        key, _, value = line.partition("=")
+        state.settings[key.strip()] = value.strip()
+    state.ssaid_xml = sec.get("ssaid", "")
+    state.ssaid = _parse_ssaid(state.ssaid_xml)
+    state.gaid_owner = sec.get("gaid_owner", "")
+    state.gaid_xml = sec.get("gaid", "")
+    match = re.search(r'name="adid_key">([^<]*)<', state.gaid_xml)
+    state.gaid = match.group(1) if match else ""
+    raw = sec.get("appset", "")
+    if raw:
+        with contextlib.suppress(ValueError):
+            state.appset = base64.b64decode(raw, validate=False)
+    match = re.search(
+        r"Location\[\w+ (-?\d+\.\d+),(-?\d+\.\d+)", sec.get("location", "")
+    )
+    if match:
+        state.location = (float(match.group(1)), float(match.group(2)))
+    for key, body in sec.items():
+        if key.startswith("pkg:"):
+            pkg = key[4:]
+            uid = None
+            m_uid = re.search(
+                rf"^package:{re.escape(pkg)} uid:(\d+)", sec.get("uids", ""), re.M
+            )
+            if m_uid:
+                uid = int(m_uid.group(1))
+            signer = ""
+            m_key = re.search(r'key="([0-9a-fA-F]+)"', body)
+            m_hash = re.search(r"signatures:\[([0-9a-f]+)", body)
+            if m_key:
+                with contextlib.suppress(ValueError):
+                    der = bytes.fromhex(m_key.group(1))
+                    signer = "sha256:" + hashlib.sha256(der).hexdigest()
+            if not signer and m_hash:
+                signer = "sighash:" + m_hash.group(1)
+            state.packages[pkg] = PackageInfo(pkg, uid, signer)
+        elif key.startswith("list:"):
+            name = key[5:]
+            state.lists[name] = parse_rows(body, _LIST_QUERY[name][1])
+    return state
+
+
+# ---------------------------------------------------------------------------
+# statuses, plan
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ValueInfo:
+    """Per-value metadata and status (for the lens)."""
+
+    id: str
+    kind: str
+    label: str
+    tag: str
+    provider: str
+    restart: str
+    permission: str
+    mechanism: str
+    enabled: bool = True
+    volatile: bool = False
+    status: str = "pending"
+    reason: str = ""
+    rendered: str = ""
+    current: str = ""
+    before: str = ""
+    per_app: dict[str, dict[str, str]] = field(default_factory=dict)
+
+
+@dataclass
+class Step:
+    """One planned change."""
+
+    value_id: str
+    restart: str
+    desired: Any
+    current: Any = None
+
+
+@dataclass
+class IdentityPlan:
+    """P1: what an apply would do on one device."""
+
+    serial: str
+    packages: tuple[str, ...]
+    profile_id: str
+    fingerprint: str
+    steps: list[Step] = field(default_factory=list)
+    infos: dict[str, ValueInfo] = field(default_factory=dict)
+    recovery: bool = False  # a restart window was interrupted
+
+    @property
+    def restart(self) -> str:
+        """Highest restart class among the steps (``none`` if no step)."""
+        ranks = [_RESTART_RANK[s.restart] for s in self.steps]
+        if self.recovery:
+            ranks.append(_RESTART_RANK["framework"])
+        return RESTARTS[max(ranks, default=0)]
+
+    @property
+    def disruptive(self) -> bool:
+        """True when a framework restart (every app stops) is needed."""
+        return self.restart == "framework"
+
+    @property
+    def todo(self) -> list[str]:
+        """Value ids with a step."""
+        return [s.value_id for s in self.steps]
+
+
+@dataclass(frozen=True)
+class _FallbackPreSpawnPlan:
+    """Local twin of ``app_start.PreSpawnPlan`` (used when it is absent)."""
+
+    description: str
+    disruptive: bool
+    apply: Callable[[], None]
+
+
+def _pre_spawn_plan_cls() -> type:
+    try:
+        from sandroid.services.app_start import (
+            PreSpawnPlan,  # type: ignore[import-not-found]
+        )
+
+        return PreSpawnPlan
+    except Exception:
+        return _FallbackPreSpawnPlan
+
+
+def _list_sig(name: str, row: dict[str, Any]) -> tuple:
+    def phone(v: Any) -> str:
+        return "".join(c for c in str(v or "") if c.isdigit() or c == "+")
+
+    if name == "contacts":
+        return (
+            str(row.get("name") or ""),
+            phone(row.get("phone")),
+            str(row.get("email") or "").lower(),
+        )
+    if name == "sms":
+        box = row.get("box", "inbox")
+        box = _SMS_TYPES.get(str(box), box)
+        return (phone(row.get("address")), str(row.get("body") or ""), str(box))
+    ctype = row.get("type", "incoming")
+    ctype = _CALL_TYPES.get(str(ctype), ctype)
+    return (
+        phone(row.get("number")),
+        str(row.get("name") or ""),
+        str(ctype),
+        str(int(row.get("duration") or 0)),
+    )
+
+
+def _device_list_items(name: str, rows: list[dict[str, str]]) -> dict[str, dict]:
+    """Device rows grouped into items: ``{row id: {fields}}``."""
+    items: dict[str, dict] = {}
+    if name == "contacts":
+        for row in rows:
+            rid = row.get("raw_contact_id", "")
+            item = items.setdefault(rid, {"name": row.get("display_name", "")})
+            mime = row.get("mimetype", "")
+            for fname, m in _CONTACT_MIME.items():
+                if mime == m:
+                    item[fname] = row.get("data1", "")
+        return items
+    for row in rows:
+        if name == "sms":
+            items[row.get("_id", "")] = {
+                "address": row.get("address"),
+                "body": row.get("body"),
+                "box": row.get("type"),
+            }
+        else:
+            items[row.get("_id", "")] = dict(row)
+    return items
+
+
+# ---------------------------------------------------------------------------
+# the service
+# ---------------------------------------------------------------------------
+
+MarkersListener = Callable[[str | None, list[Marker]], None]
+StatusListener = Callable[[list[ValueInfo]], None]
+
+
+@dataclass
+class _Applied:
+    """What this process applied on one device (for idempotence)."""
+
+    fingerprint: str = ""
+    emu: dict[str, str] = field(default_factory=dict)  # value id -> sent value
+    done: set[str] = field(default_factory=set)  # packages fully applied
+    ssaids: dict[str, str] = field(default_factory=dict)
+    befores: dict[str, str] = field(default_factory=dict)  # also "ssaid:<pkg>"
+    befores_done: bool = False
+    frozen: str = ""  # fingerprint+statuses digest of the last freeze
+
+
+class IdentityService:
+    """Identity profile library, apply pipeline and marker source."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._apply_lock = threading.Lock()
+        self._markers_listeners: list[MarkersListener] = []
+        self._status_listeners: list[StatusListener] = []
+        self._active: tuple[str, list[Marker]] | None = None
+        self._loaded_frozen = False
+        self._statuses: dict[str, ValueInfo] = {}
+        self._applied: dict[str, _Applied] = {}
+        self._hook_installed = False
+        self._sleep: Callable[[float], None] = time.sleep
+        self._clock: Callable[[], float] = time.monotonic
+
+    # -- library ----------------------------------------------------------
+
+    def list_profiles(self) -> list[ProfileInfo]:
+        """Every profile in the library, by id."""
+        out = []
+        for path in sorted(profiles_dir().glob("*.toml")):
+            if path.name.startswith("."):
+                continue
+            try:
+                p = Profile.loads(path.read_text(encoding="utf-8"))
+                out.append(
+                    ProfileInfo(p.id, p.name, p.revision, p.token, p.preset, path)
+                )
+            except (OSError, ProfileError) as exc:
+                out.append(ProfileInfo(path.stem, path.stem, 0, "", "", path, str(exc)))
+        return out
+
+    def load(self, profile_id: str) -> Profile:
+        """Load one profile (raises :class:`ProfileError`)."""
+        path = _profile_path(profile_id)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ProfileError(f"no profile {profile_id!r}") from exc
+        return Profile.loads(text)
+
+    def save(self, profile: Profile) -> Profile:
+        """Save ``profile`` (drafts with errors too); bumps ``revision``."""
+        if not ID_RE.match(profile.id):
+            raise ProfileError(f"invalid profile id {profile.id!r}")
+        profile.revision += 1
+        if profile.created is None:
+            profile.created = datetime.now().astimezone().replace(microsecond=0)
+        _atomic_write_text(_profile_path(profile.id), profile.dumps())
+        return profile
+
+    def create(
+        self, preset: str = "de", *, name: str = "", profile_id: str = ""
+    ) -> Profile:
+        """Generate and save a new profile from a country preset."""
+        profile = generate_profile(preset, name=name, profile_id=profile_id)
+        profile.id = self._free_id(profile.id)
+        return self.save(profile)
+
+    def duplicate(
+        self, profile_id: str, new_id: str = "", *, fresh: bool = True
+    ) -> Profile:
+        """Copy a profile; ``fresh`` gives the copy its own token and seed."""
+        profile = self.load(profile_id)
+        profile.id = self._free_id(new_id or f"{profile_id}-copy")
+        profile.name = f"{profile.name} (copy)"
+        profile.revision = 0
+        profile.retired_tokens = []
+        if fresh:
+            _regenerate(profile, retire=False)
+        return self.save(profile)
+
+    def rename(self, profile_id: str, name: str, new_id: str = "") -> Profile:
+        """Change the display name (and, with ``new_id``, the file/id)."""
+        profile = self.load(profile_id)
+        profile.name = name
+        if new_id and new_id != profile_id:
+            if _profile_path(new_id).exists():
+                raise ProfileError(f"profile {new_id!r} exists")
+            profile.id = new_id
+            self.save(profile)
+            _profile_path(profile_id).unlink(missing_ok=True)
+            if self.config().profile == profile_id:
+                self.set_active(new_id)
+            return profile
+        return self.save(profile)
+
+    def delete(self, profile_id: str) -> None:
+        """Delete a profile file (frozen session copies stay)."""
+        _profile_path(profile_id).unlink(missing_ok=True)
+
+    def regenerate(self, profile_id: str) -> Profile:
+        """Fresh token and seed; the old token is retired (its rows are removed
+        from the device at the next apply).
+        """
+        profile = self.load(profile_id)
+        _regenerate(profile, retire=True)
+        return self.save(profile)
+
+    def import_profile(self, source: str | Path) -> tuple[str, str]:
+        """Import a profile file; never overwrites.
+
+        Returns:
+            ``(id, outcome)`` with outcome ``imported`` (verbatim),
+            ``renamed`` (same id, other content -> ``<id>-2``) or
+            ``identical`` (no-op).
+
+        Raises:
+            ProfileError: Unreadable, wrong format or a newer schema.
+        """
+        try:
+            text = Path(source).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ProfileError(f"cannot read {source}: {exc}") from exc
+        profile = Profile.loads(text)
+        if not ID_RE.match(profile.id):
+            raise ProfileError(f"invalid profile id {profile.id!r}")
+        target = _profile_path(profile.id)
+        if not target.exists():
+            _atomic_write_text(target, text)
+            return profile.id, "imported"
+        try:
+            existing = self.load(profile.id)
+        except ProfileError:
+            existing = None
+        if existing is not None and _canonical(existing) == _canonical(profile):
+            return profile.id, "identical"
+        for other in self.list_profiles():
+            if other.error:
+                continue
+            with contextlib.suppress(ProfileError):
+                if _canonical(self.load(other.id)) == _canonical(
+                    replace(profile, id=other.id)
+                ):
+                    return other.id, "identical"
+        profile.id = self._free_id(profile.id)
+        _atomic_write_text(_profile_path(profile.id), profile.dumps())
+        return profile.id, "renamed"
+
+    def export_profile(self, profile_id: str, dest: str | Path) -> Path:
+        """Copy the profile file verbatim to ``dest`` (a file or a folder)."""
+        src = _profile_path(profile_id)
+        if not src.exists():
+            raise ProfileError(f"no profile {profile_id!r}")
+        target = Path(dest)
+        if target.is_dir():
+            target = target / src.name
+        target.write_bytes(src.read_bytes())
+        return target
+
+    def validate(self, profile: Profile) -> list[Issue]:
+        """:func:`validate`."""
+        return validate(profile)
+
+    def describe(self, profile: Profile) -> list[ValueInfo]:
+        """Per-value metadata of ``profile`` (no device access)."""
+        infos = self._infos(profile)
+        return list(infos.values())
+
+    def _free_id(self, base: str) -> str:
+        if not _profile_path(base).exists():
+            return base
+        stem = re.sub(r"-\d+$", "", base)
+        n = 2
+        while _profile_path(f"{stem}-{n}").exists():
+            n += 1
+        return f"{stem}-{n}"
+
+    # -- configuration ------------------------------------------------------
+
+    @staticmethod
+    def config() -> Any:
+        """The ``[identity]`` config section."""
+        from sandroid.config import get_config
+
+        return get_config().identity
+
+    def set_active(
+        self,
+        profile_id: str | None = None,
+        mode: str | None = None,
+        restart: str | None = None,
+    ) -> None:
+        """Persist the active profile / mode / restart policy."""
+        from sandroid.config import update_config
+
+        updates: dict[str, Any] = {}
+        if profile_id is not None:
+            updates["identity.profile"] = profile_id
+        if mode is not None:
+            updates["identity.mode"] = mode
+        if restart is not None:
+            updates["identity.restart"] = restart
+        before = self.config().mode, self.config().profile
+        update_config(updates)
+        if (self.config().mode, self.config().profile) != before:
+            with self._lock:
+                self._active = None
+                self._loaded_frozen = True  # a new choice: wait for an apply
+            self._notify_markers()
+
+    def active_profile(self) -> Profile | None:
+        """The configured profile when mode is ``profile`` (else ``None``)."""
+        cfg = self.config()
+        if cfg.mode != "profile" or not cfg.profile:
+            return None
+        return self.load(cfg.profile)
+
+    # -- listeners ----------------------------------------------------------
+
+    def add_markers_listener(self, cb: MarkersListener) -> None:
+        """Call ``cb(fingerprint | None, markers)`` (any thread) on changes."""
+        with self._lock:
+            if cb not in self._markers_listeners:
+                self._markers_listeners.append(cb)
+
+    def remove_markers_listener(self, cb: MarkersListener) -> None:
+        """Stop calling ``cb``."""
+        with self._lock:
+            if cb in self._markers_listeners:
+                self._markers_listeners.remove(cb)
+
+    def add_status_listener(self, cb: StatusListener) -> None:
+        """Call ``cb(statuses)`` (worker thread) after plan/apply/verify."""
+        with self._lock:
+            if cb not in self._status_listeners:
+                self._status_listeners.append(cb)
+
+    def remove_status_listener(self, cb: StatusListener) -> None:
+        """Stop calling ``cb``."""
+        with self._lock:
+            if cb in self._status_listeners:
+                self._status_listeners.remove(cb)
+
+    def _notify_markers(self) -> None:
+        with self._lock:
+            active = self._active
+            listeners = list(self._markers_listeners)
+        fp, markers = active if active else (None, [])
+        for cb in listeners:
+            try:
+                cb(fp, list(markers))
+            except Exception:
+                logger.exception("identity: markers listener failed")
+
+    def _notify_status(self) -> None:
+        statuses = self.statuses()
+        with self._lock:
+            listeners = list(self._status_listeners)
+        for cb in listeners:
+            try:
+                cb(statuses)
+            except Exception:
+                logger.exception("identity: status listener failed")
+
+    # -- markers ------------------------------------------------------------
+
+    def active_markers(self) -> tuple[str, list[Marker]] | None:
+        """``(fingerprint, markers)`` of the profile applied in this session,
+        ``None`` when the mode is off or nothing was applied yet.
+        """
+        if self.config().mode != "profile":
+            return None
+        with self._lock:
+            if self._active is None and not self._loaded_frozen:
+                self._loaded_frozen = True
+                self._active = _load_latest_frozen()
+            if self._active is None:
+                return None
+            return self._active[0], list(self._active[1])
+
+    # -- statuses -----------------------------------------------------------
+
+    def statuses(self) -> list[ValueInfo]:
+        """Per-value status of the last plan/apply/verify."""
+        with self._lock:
+            return [
+                replace(v, per_app=dict(v.per_app)) for v in self._statuses.values()
+            ]
+
+    def _infos(self, profile: Profile) -> dict[str, ValueInfo]:
+        infos: dict[str, ValueInfo] = {}
+        for vid, vs in profile.values.items():
+            spec = vs.spec
+            if spec is None:
+                continue
+            try:
+                rendered = render_value(profile, vs) or ""
+            except TemplateError:
+                rendered = ""
+            provider = vs.effective_provider
+            info = ValueInfo(
+                vid,
+                vs.kind,
+                vs.label or spec.label,
+                spec.tag,
+                provider,
+                spec.restart if provider == "native" else "none",
+                spec.permission,
+                spec.mechanism if provider == "native" else "hook",
+                vs.enabled,
+                spec.volatile,
+                rendered=rendered,
+            )
+            if not vs.enabled:
+                info.status = "skipped"
+                info.reason = "disabled"
+            elif provider == "hook":
+                info.status = "hook-only"
+            infos[vid] = info
+        for name, items in profile.lists().items():
+            if not items:
+                continue
+            spec_l = LISTS[name]
+            infos[name] = ValueInfo(
+                name,
+                name,
+                spec_l.label,
+                spec_l.tag,
+                "native",
+                "none",
+                spec_l.permission,
+                spec_l.mechanism,
+                rendered=f"{len(items)} items",
+            )
+        return infos
+
+    # -- P0/P1 --------------------------------------------------------------
+
+    def _packages(self, serial: str, package: str | None) -> tuple[str, ...]:
+        with self._lock:
+            known = set(self._applied.get(serial, _Applied()).ssaids)
+        if package:
+            known.add(package)
+        return tuple(sorted(known))
+
+    def preflight(
+        self, serial: str, packages: Iterable[str], profile: Profile
+    ) -> DeviceState:
+        """P0: one adb call reading every current value."""
+        tokens = [profile.token, *profile.retired_tokens]
+        script = preflight_script(packages, tokens)
+        return parse_preflight(serial, _Device(serial).shell(script, timeout=120))
+
+    def plan(
+        self, serial: str, package: str | None = None, profile: Profile | None = None
+    ) -> IdentityPlan:
+        """P0+P1: read the device once and plan (no writes)."""
+        profile = profile or self._require_profile()
+        pkgs = self._packages(serial, package)
+        state = self.preflight(serial, pkgs, profile)
+        plan = self._plan(profile, state, pkgs)
+        self._publish(plan.infos)
+        return plan
+
+    def _require_profile(self) -> Profile:
+        profile = self.active_profile()
+        if profile is None:
+            raise ProfileError("no active identity profile (mode off or none chosen)")
+        return profile
+
+    def _plan(
+        self, profile: Profile, state: DeviceState, pkgs: tuple[str, ...]
+    ) -> IdentityPlan:
+        fp = fingerprint(profile)
+        plan = IdentityPlan(
+            state.serial,
+            pkgs,
+            profile.id,
+            fp,
+            infos=self._infos(profile),
+            recovery=bool(state.marker),
+        )
+        with self._lock:
+            mem = self._applied.setdefault(state.serial, _Applied())
+            if mem.fingerprint != fp:
+                mem.fingerprint, mem.emu, mem.done = fp, {}, set()
+        if not state.ok:
+            for info in plan.infos.values():
+                if info.status == "pending":
+                    info.status, info.reason = "failed", "device did not answer"
+            return plan
+        for vid, vs in profile.values.items():
+            info = plan.infos.get(vid)
+            spec = vs.spec
+            if info is None or spec is None or info.status != "pending":
+                continue
+            if spec.needs_root and not state.root:
+                info.status, info.reason = "failed", "adbd is not root"
+                continue
+            if spec.needs_emulator and not state.emulator:
+                info.status, info.reason = "skipped", "not an emulator"
+                continue
+            if spec.restart == "gms" and not state.gms:
+                info.status, info.reason = "skipped", "no Google Play services"
+                continue
+            if vs.kind == "android_id":
+                self._plan_ssaid(profile, vs, state, pkgs, plan, info)
+                continue
+            desired = info.rendered
+            current, verified = self._current(vs.kind, state, desired, mem, vid)
+            info.current = current
+            if verified:
+                info.status = "verified"
+            elif vs.kind in ("phone_number", "gps") and mem.emu.get(vid) == desired:
+                info.status = "applied"
+                info.reason = "unverified" if vs.kind == "gps" else ""
+            elif vs.kind == "app_set_id" and state.appset is None:
+                info.status, info.reason = "skipped", "no App Set ID store yet"
+            elif vs.kind == "build_model" and not state.resetprop:
+                info.status, info.reason = "failed", "resetprop (Magisk) missing"
+            else:
+                plan.steps.append(Step(vid, spec.restart, desired, current))
+        for name, items in render_lists(profile).items():
+            info = plan.infos.get(name)
+            if info is None:
+                continue
+            if not state.root:
+                info.status, info.reason = "failed", "adbd is not root"
+                continue
+            stale, missing = self._list_diff(name, items, state, profile)
+            found = len(items) - len(missing)
+            info.current = f"{found}/{len(items)} on device"
+            if stale or missing:
+                plan.steps.append(
+                    Step(name, "none", {"stale": stale, "missing": missing})
+                )
+            else:
+                info.status = "verified"
+        return plan
+
+    def _plan_ssaid(
+        self,
+        profile: Profile,
+        vs: ValueSpec,
+        state: DeviceState,
+        pkgs: tuple[str, ...],
+        plan: IdentityPlan,
+        info: ValueInfo,
+    ) -> None:
+        if not pkgs:
+            info.status, info.reason = "pending", "no target app yet"
+            return
+        if not state.ssaid_xml:
+            info.status, info.reason = "failed", "cannot read settings_ssaid.xml"
+            return
+        desired: dict[str, dict[str, Any]] = {}
+        all_ok = True
+        for pkg in pkgs:
+            pinfo = state.packages.get(pkg)
+            row = state.ssaid.get(pkg)
+            with self._lock:
+                mem = self._applied.setdefault(state.serial, _Applied())
+                before = mem.befores.setdefault(f"ssaid:{pkg}", row[1] if row else "")
+            entry = {"before": before}
+            if pinfo is None or pinfo.uid is None:
+                entry.update(status="pending", reason="not installed")
+                all_ok = False
+            else:
+                value = self._ssaid_value(profile, vs, pkg, pinfo)
+                if value is None:
+                    entry.update(status="failed", reason="signer not found")
+                    all_ok = False
+                else:
+                    entry.update(value=value, uid=str(pinfo.uid), signer=pinfo.signer)
+                    ok = (
+                        row is not None and row[1] == value and row[0] == str(pinfo.uid)
+                    )
+                    entry["status"] = "verified" if ok else "pending"
+                    if not ok:
+                        desired[pkg] = entry
+                        all_ok = False
+            info.per_app[pkg] = {k: str(v) for k, v in entry.items()}
+        info.current = ", ".join(
+            f"{p}={(state.ssaid.get(p) or ('', '-'))[1]}" for p in pkgs
+        )
+        if desired:
+            plan.steps.append(Step(vs.id, "framework", desired))
+        elif all_ok:
+            info.status = "verified"
+        else:
+            bad = [e for e in info.per_app.values() if e["status"] == "failed"]
+            info.status = "failed" if bad else "pending"
+            info.reason = (bad or list(info.per_app.values()))[0].get("reason", "")
+
+    @staticmethod
+    def _ssaid_value(
+        profile: Profile, vs: ValueSpec, pkg: str, pinfo: PackageInfo
+    ) -> str | None:
+        if vs.value is not None or vs.template is not None:
+            return render_value(profile, vs)
+        if vs.scope == "package":
+            return ssaid_for(profile.token, profile.seed_bytes, f"package:{pkg}")
+        if not pinfo.signer:
+            return None
+        return ssaid_for(profile.token, profile.seed_bytes, pinfo.signer)
+
+    @staticmethod
+    def _current(
+        kind: str, state: DeviceState, desired: str, mem: _Applied, vid: str
+    ) -> tuple[str, bool]:
+        """``(current device value, it equals the desired one)``."""
+        p = state.props
+        current = {
+            "device_name": state.settings.get("device_name", ""),
+            "timezone": p.get("persist.sys.timezone", ""),
+            "locale": p.get("persist.sys.locale", ""),
+            "sim_operator": p.get("gsm.sim.operator.alpha", ""),
+            "sim_mccmnc": p.get("gsm.sim.operator.numeric", ""),
+            "build_model": p.get("ro.product.model", ""),
+            "gaid": state.gaid,
+        }.get(kind)
+        if kind == "app_set_id":
+            found = _UUID_BYTES_RE.findall(state.appset or b"")
+            uniq = {f.decode() for f in found}
+            current = ", ".join(sorted(uniq))
+            return current, bool(uniq) and uniq == {desired}
+        if kind == "gps":
+            if state.location is None:
+                return "", False
+            lat, lon, _alt = split_gps(desired)
+            here = state.location
+            ok = abs(here[0] - float(lat)) < 2e-6 and abs(here[1] - float(lon)) < 2e-6
+            return f"{here[0]}, {here[1]}", ok
+        if kind == "phone_number":
+            return mem.emu.get(vid, ""), False
+        if current is None:
+            return "", False
+        if kind == "timezone" and state.settings.get("auto_time_zone") not in ("0", ""):
+            return current, False
+        return current, current == desired
+
+    def _list_diff(
+        self, name: str, items: list[dict], state: DeviceState, profile: Profile
+    ) -> tuple[list[str], list[int]]:
+        """``(stale device row ids, indexes of missing items)``."""
+        tokens = [profile.token, *profile.retired_tokens]
+        rows = [
+            r
+            for r in state.lists.get(name, [])
+            if any(t in " ".join(r.values()) for t in tokens)
+        ]
+        device = _device_list_items(name, rows)
+        want: dict[tuple, int] = {}
+        for i, item in enumerate(items):
+            want.setdefault(_list_sig(name, item), i)
+        stale: list[str] = []
+        have: set[tuple] = set()
+        for rid, item in device.items():
+            sig = _list_sig(name, item)
+            if sig in want and sig not in have:
+                have.add(sig)
+            else:
+                stale.append(rid)
+        missing = [i for sig, i in want.items() if sig not in have]
+        return stale, missing
+
+    # -- apply --------------------------------------------------------------
+
+    def apply(
+        self,
+        serial: str,
+        package: str | None = None,
+        allow_restart: bool | None = None,
+        profile: Profile | None = None,
+    ) -> IdentityPlan:
+        """P0-P7 on ``serial`` (call from a worker thread).
+
+        Args:
+            serial: Device serial.
+            package: The app about to start (its Android ID is seeded).
+            allow_restart: Allow the framework restart window (every app
+                stops). ``None`` follows ``identity.restart`` (``ask`` counts
+                as allowed: the caller asked already).
+            profile: Profile to apply (default: the active one).
+
+        Returns:
+            The final plan (``infos`` hold the statuses after verify).
+
+        Raises:
+            ProfileError: No profile, or it has validation errors.
+        """
+        profile = profile or self._require_profile()
+        errors = [i for i in validate(profile) if i.severity == "error"]
+        if errors:
+            raise ProfileError(
+                f"profile {profile.id!r} is invalid: {errors[0].path}: {errors[0].message}"
+            )
+        if allow_restart is None:
+            allow_restart = self.config().restart != "never"
+        with self._apply_lock:
+            return self._apply(serial, package, allow_restart, profile)
+
+    def _apply(
+        self, serial: str, package: str | None, allow_restart: bool, profile: Profile
+    ) -> IdentityPlan:
+        dev = _Device(serial)
+        pkgs = self._packages(serial, package)
+        state = self.preflight(serial, pkgs, profile)
+        if state.ok and state.marker:
+            self._recover(dev, state)
+            state = self.preflight(serial, pkgs, profile)
+        with self._lock:
+            mem = self._applied.setdefault(serial, _Applied())
+        if state.ok and not mem.befores_done:
+            mem.befores.update(self._befores(profile, state))
+            mem.befores_done = True
+        plan = self._plan(profile, state, pkgs)
+        if not plan.steps:
+            self._finish(profile, plan, state, wrote=False, package=package)
+            return plan
+        self._emit(
+            "apply",
+            f"apply identity profile {profile.id!r} r{profile.revision}"
+            f" ({', '.join(plan.todo)})",
+            serial,
+            package,
+            data={
+                "profile": profile.id,
+                "revision": profile.revision,
+                "fingerprint": plan.fingerprint,
+                "todo": plan.todo,
+                "restart": plan.restart,
+            },
+        )
+        if not allow_restart:
+            for step in [s for s in plan.steps if s.restart == "framework"]:
+                info = plan.infos[step.value_id]
+                info.status, info.reason = "pending", NEEDS_RESTART
+            plan.steps = [s for s in plan.steps if s.restart != "framework"]
+            if not plan.steps:
+                self._finish(profile, plan, state, wrote=False, package=package)
+                return plan
+        steps = {s.value_id: s for s in plan.steps}
+        # P3: live steps
+        for step in plan.steps:
+            if step.restart == "none":
+                self._run_live(dev, profile, step, plan.infos[step.value_id], mem)
+        # P4: Google Play services steps
+        gms = [s for s in plan.steps if s.restart == "gms"]
+        if gms:
+            dev.shell(f"am force-stop {GMS}")
+            for step in gms:
+                self._run_gms(dev, state, step, plan.infos[step.value_id])
+        # P5: one framework restart window
+        fw = [s for s in plan.steps if s.restart == "framework"]
+        if fw:
+            self._framework_window(dev, profile, state, fw, plan)
+        # P6: verify with the same batched read
+        state2 = self.preflight(serial, pkgs, profile)
+        verified = self._plan(profile, state2, pkgs)
+        for vid, info in plan.infos.items():
+            after = verified.infos.get(vid)
+            if after is None or vid not in steps:
+                continue
+            if info.status == "failed":
+                continue
+            spec = REGISTRY.get(info.kind)
+            mode = spec.verify if spec else "strict"
+            info.current = after.current
+            if after.per_app:
+                info.per_app = after.per_app
+            if after.status == "verified":
+                info.status, info.reason = "verified", ""
+            elif after.status in ("pending", "skipped", "failed") and after.reason:
+                info.status, info.reason = after.status, after.reason
+            elif mode == "strict":
+                info.status = "failed"
+                info.reason = f"read-back mismatch: {after.current or 'empty'}"
+            else:
+                info.status = "applied"
+                info.reason = "unverified" if mode == "soft" else ""
+        counts = _counts(plan.infos)
+        self._emit(
+            "verify",
+            "identity verify: " + ", ".join(f"{v} {k}" for k, v in counts.items()),
+            serial,
+            package,
+            data={"counts": counts},
+        )
+        self._finish(profile, plan, state2, wrote=True, package=package)
+        return plan
+
+    def _befores(self, profile: Profile, state: DeviceState) -> dict[str, str]:
+        out = {}
+        mem = _Applied()
+        for vid, vs in profile.values.items():
+            if vs.kind == "android_id" or not vs.spec:
+                continue
+            try:
+                desired = render_value(profile, vs) or ""
+                out[vid] = self._current(vs.kind, state, desired, mem, vid)[0]
+            except (TemplateError, ValueError):
+                continue
+            if vs.kind == "phone_number":
+                port = state.serial.rpartition("-")[2]
+                out[vid] = f"1555521{port}" if port.isdigit() else ""
+        return out
+
+    def _recover(self, dev: _Device, state: DeviceState) -> None:
+        """A restart window was interrupted: bring the framework back."""
+        self._emit(
+            "restart",
+            "identity: resuming an interrupted framework restart",
+            state.serial,
+            None,
+            level="warn",
+            data={"marker": state.marker[:200], "recovery": True},
+        )
+        if not state.system_server:
+            dev.shell("start")
+            self._wait_framework(dev, "")
+        dev.shell(f"rm -f {RESTART_MARKER}")
+
+    def _run_live(
+        self, dev: _Device, profile: Profile, step: Step, info: ValueInfo, mem: _Applied
+    ) -> None:
+        kind, value = info.kind, step.desired
+        err = ""
+        if kind == "device_name":
+            err = self._check(
+                dev.shell(f"settings put global device_name {_q(value)} && echo {_OK}")
+            )
+        elif kind == "timezone":
+            err = self._check(
+                dev.shell(
+                    f"settings put global auto_time_zone 0 && cmd alarm set-timezone {_q(value)}"
+                    f" && echo {_OK}"
+                )
+            )
+        elif kind == "sim_operator":
+            err = self._check(
+                dev.shell(f"setprop gsm.sim.operator.alpha {_q(value)} && echo {_OK}")
+            )
+        elif kind == "sim_mccmnc":
+            err = self._check(
+                dev.shell(f"setprop gsm.sim.operator.numeric {_q(value)} && echo {_OK}")
+            )
+        elif kind == "phone_number":
+            out, e = dev.emu(f"phonenumber {value}")
+            err = "" if "OK" in out else f"emu phonenumber: {(e or out).strip()[:120]}"
+            if not err:
+                with self._lock:
+                    mem.emu[step.value_id] = value
+        elif kind == "gps":
+            lat, lon, alt = split_gps(value)
+            out, e = dev.emu(f"geo fix {_nmea_pad(lon)} {_nmea_pad(lat)} {alt}")
+            err = "" if "OK" in out else f"emu geo fix: {(e or out).strip()[:120]}"
+            if not err:
+                with self._lock:
+                    mem.emu[step.value_id] = value
+        elif kind in LISTS:
+            err = self._run_list(dev, profile, kind, step.desired)
+        else:
+            err = f"no native mechanism for {kind}"
+        info.status, info.reason = ("failed", err) if err else ("applied", "")
+
+    @staticmethod
+    def _check(out: str) -> str:
+        return "" if _OK in out else (out.strip()[:160] or "no answer")
+
+    def _run_list(self, dev: _Device, profile: Profile, name: str, diff: dict) -> str:
+        items = render_lists(profile)[name]
+        now = datetime.now(UTC)
+        lines = []
+        uri, _proj, _col = _LIST_QUERY[name]
+        for rid in diff["stale"]:
+            if not str(rid).isdigit():
+                continue
+            if name == "contacts":
+                lines.append(
+                    "content delete --uri"
+                    " 'content://com.android.contacts/raw_contacts?caller_is_syncadapter=true'"
+                    f" --where {_q(f'_id={rid}')}"
+                )
+            else:
+                lines.append(f"content delete --uri {uri} --where {_q(f'_id={rid}')}")
+        for i in diff["missing"]:
+            item = items[i]
+            if name == "contacts":
+                lines += [
+                    "content insert --uri content://com.android.contacts/raw_contacts"
+                    " --bind account_type:n: --bind account_name:n:",
+                    "RID=$(content query --uri content://com.android.contacts/raw_contacts"
+                    " --projection _id --sort '_id DESC' | head -n 1 | sed 's/.*_id=//')",
+                ]
+                for fname, mime in _CONTACT_MIME.items():
+                    val = item.get(fname)
+                    if not val:
+                        continue
+                    extra = " --bind data2:i:2" if fname in ("phone", "email") else ""
+                    lines.append(
+                        "content insert --uri content://com.android.contacts/data"
+                        ' --bind raw_contact_id:i:"$RID"'
+                        f" --bind {_q('mimetype:s:' + mime)}"
+                        f" --bind {_q('data1:s:' + str(val))}{extra}"
+                    )
+            elif name == "sms":
+                box = str(item.get("box", "inbox"))
+                when = int(_resolve_date(item.get("date"), i, now).timestamp() * 1000)
+                lines.append(
+                    f"content insert --uri content://sms/{box}"
+                    f" --bind {_q('address:s:' + str(item['address']))}"
+                    f" --bind {_q('body:s:' + str(item['body']))}"
+                    f" --bind date:l:{when} --bind read:i:1"
+                    f" --bind type:i:{_SMS_TYPES[box]}"
+                )
+            else:
+                ctype = _CALL_TYPES[str(item.get("type", "incoming"))]
+                when = int(_resolve_date(item.get("date"), i, now).timestamp() * 1000)
+                lines.append(
+                    "content insert --uri content://call_log/calls"
+                    f" --bind {_q('number:s:' + str(item['number']))}"
+                    f" --bind {_q('name:s:' + str(item.get('name') or ''))}"
+                    f" --bind type:i:{ctype} --bind date:l:{when}"
+                    f" --bind duration:i:{int(item.get('duration') or 0)} --bind new:i:0"
+                )
+        lines.append(f"echo {_OK}")
+        return self._check(dev.shell("\n".join(lines), zygote=True, timeout=120))
+
+    def _run_gms(
+        self, dev: _Device, state: DeviceState, step: Step, info: ValueInfo
+    ) -> None:
+        err = ""
+        if info.kind == "gaid":
+            xml = state.gaid_xml
+            entry = f'<string name="adid_key">{step.desired}</string>'
+            if re.search(r'<string name="adid_key">[^<]*</string>', xml):
+                xml = re.sub(r'<string name="adid_key">[^<]*</string>', entry, xml)
+                chown = ""
+            elif "<map>" in xml:
+                xml = xml.replace("<map>", f"<map>\n    {entry}", 1)
+                chown = ""
+            else:
+                xml = (
+                    "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
+                    f"<map>\n    {entry}\n</map>\n"
+                )
+                chown = (
+                    state.gaid_owner
+                    if re.fullmatch(r"\d+:\d+", state.gaid_owner)
+                    else ""
+                )
+            err = dev.write(GAID_FILE, xml.encode(), chown=chown, restorecon=True)
+        elif info.kind == "app_set_id":
+            data = _UUID_BYTES_RE.sub(step.desired.encode(), state.appset or b"")
+            err = dev.write(APPSET_FILE, data, restorecon=True)
+        info.status, info.reason = ("failed", err) if err else ("applied", "")
+
+    def _framework_window(
+        self,
+        dev: _Device,
+        profile: Profile,
+        state: DeviceState,
+        steps: list[Step],
+        plan: IdentityPlan,
+    ) -> None:
+        names = ", ".join(plan.infos[s.value_id].label for s in steps)
+        self._emit(
+            "restart",
+            f"framework restart for {names}: every app stops",
+            state.serial,
+            None,
+            level="warn",
+            data={"values": [s.value_id for s in steps]},
+        )
+        stamp = f"{plan.fingerprint} {int(time.time())} {','.join(s.value_id for s in steps)}"
+        dev.shell(f"echo {_q(stamp)} > {RESTART_MARKER}")
+        dev.shell("stop")
+        for step in steps:
+            info = plan.infos[step.value_id]
+            err = ""
+            if info.kind == "android_id":
+                current = dev.shell(
+                    f"abx2xml {SSAID_FILE} - 2>/dev/null || cat {SSAID_FILE}",
+                    zygote=True,
+                )
+                xml = _edit_ssaid(current or state.ssaid_xml, step.desired)
+                if xml is None:
+                    err = "cannot parse settings_ssaid.xml"
+                else:
+                    err = dev.write(SSAID_FILE, xml.encode(), abx=True)
+            elif info.kind == "locale":
+                err = self._check(
+                    dev.shell(
+                        f"setprop persist.sys.locale {_q(step.desired)} && echo {_OK}"
+                    )
+                )
+            elif info.kind == "build_model":
+                err = self._check(
+                    dev.shell(
+                        f"resetprop ro.product.model {_q(step.desired)} && echo {_OK}"
+                    )
+                )
+            info.status, info.reason = ("failed", err) if err else ("applied", "")
+        dev.shell("start")
+        if not self._wait_framework(dev, state.system_server):
+            for step in steps:
+                info = plan.infos[step.value_id]
+                if info.status == "applied":
+                    info.status, info.reason = "failed", "framework did not come back"
+            return
+        dev.shell(f"rm -f {RESTART_MARKER}")
+
+    def _wait_framework(self, dev: _Device, old_pid: str) -> bool:
+        """Wait for a new system_server and a working package manager."""
+        deadline = self._clock() + RESTART_TIMEOUT_S
+        while self._clock() < deadline:
+            out = dev.shell("pidof system_server; pm path android 2>/dev/null")
+            lines = out.split()
+            pid = lines[0] if lines and lines[0].isdigit() else ""
+            if pid and pid != old_pid and "package:" in out:
+                return True
+            self._sleep(RESTART_POLL_S)
+        return False
+
+    # -- verify -------------------------------------------------------------
+
+    def verify(self, serial: str, profile: Profile | None = None) -> IdentityPlan:
+        """P6 alone: read back and refresh the statuses (no writes)."""
+        profile = profile or self._require_profile()
+        plan = self.plan(serial, None, profile)
+        counts = _counts(plan.infos)
+        self._emit(
+            "verify",
+            "identity verify: " + ", ".join(f"{v} {k}" for k, v in counts.items()),
+            serial,
+            None,
+            data={"counts": counts},
+        )
+        return plan
+
+    # -- P7 freeze ----------------------------------------------------------
+
+    def _finish(
+        self,
+        profile: Profile,
+        plan: IdentityPlan,
+        state: DeviceState,
+        *,
+        wrote: bool,
+        package: str | None,
+    ) -> None:
+        mem = self._applied[plan.serial]
+        info = plan.infos.get("android_id")
+        ssaids = dict(mem.ssaids)
+        if info is not None:
+            for pkg, entry in info.per_app.items():
+                if entry.get("status") == "verified" and entry.get("value"):
+                    ssaids[pkg] = entry["value"]
+        bad = [
+            i
+            for i in plan.infos.values()
+            if i.status == "failed"
+            or (i.status == "pending" and i.reason != NEEDS_RESTART)
+        ]
+        with self._lock:
+            mem.ssaids = ssaids
+            if package and not bad:
+                mem.done.add(package)
+            elif package:
+                mem.done.discard(package)
+        self._publish(plan.infos)
+        digest = hashlib.sha256(
+            json.dumps(
+                [
+                    plan.fingerprint,
+                    sorted(ssaids.items()),
+                    sorted((k, v.status) for k, v in plan.infos.items()),
+                ]
+            ).encode()
+        ).hexdigest()
+        if not state.ok or (not wrote and mem.frozen == digest):
+            return
+        markers = markers_for(profile, ssaids, package)
+        path, sha = self._freeze(profile, plan, state, ssaids, markers, mem.befores)
+        mem.frozen = digest
+        with self._lock:
+            changed = self._active is None or self._active != (
+                plan.fingerprint,
+                markers,
+            )
+            self._active = (plan.fingerprint, markers)
+            self._loaded_frozen = True
+        counts = _counts(plan.infos)
+        ref = {"path": _timeline_rel(path), "sha256": sha} if path else None
+        self._emit(
+            "applied",
+            f"identity {profile.id!r} r{profile.revision} applied: "
+            + ", ".join(f"{v} {k}" for k, v in counts.items()),
+            plan.serial,
+            package,
+            ref=ref,
+            data={
+                "profile": profile.id,
+                "name": profile.name,
+                "revision": profile.revision,
+                "fingerprint": plan.fingerprint,
+                "token": profile.token,
+                "counts": counts,
+                "values": {k: v.status for k, v in plan.infos.items()},
+                "ssaid_packages": len(ssaids),
+                "markers": len(markers),
+            },
+        )
+        if changed:
+            self._notify_markers()
+
+    def _freeze(
+        self,
+        profile: Profile,
+        plan: IdentityPlan,
+        state: DeviceState,
+        ssaids: dict[str, str],
+        markers: list[Marker],
+        befores: dict[str, str],
+    ) -> tuple[Path | None, str]:
+        try:
+            from sandroid.core.timeline import timeline_folder
+
+            folder = timeline_folder() / "identity"
+            folder.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            logger.warning(
+                "identity: no session folder; ground truth not frozen", exc_info=True
+            )
+            return None, ""
+        numbers = [
+            int(m.group(1))
+            for p in folder.glob("*.toml")
+            if (m := re.match(r"(\d+)-", p.name))
+        ]
+        path = (
+            folder
+            / f"{max(numbers, default=0) + 1:03d}-{profile.id}-r{profile.revision}.toml"
+        )
+        record = frozen_record(profile, plan, state, ssaids, markers, befores)
+        text = tomli_w.dumps(_tomlable(record))
+        _atomic_write_text(path, text)
+        return path, hashlib.sha256(text.encode()).hexdigest()
+
+    def _publish(self, infos: dict[str, ValueInfo]) -> None:
+        with self._lock:
+            self._statuses = {
+                k: replace(v, per_app=dict(v.per_app)) for k, v in infos.items()
+            }
+        self._notify_status()
+
+    @staticmethod
+    def _emit(
+        kind: str,
+        summary: str,
+        serial: str,
+        package: str | None,
+        *,
+        data: dict | None = None,
+        ref: dict | None = None,
+        level: str = "info",
+    ) -> None:
+        try:
+            from sandroid.core import timeline
+
+            timeline.emit(
+                "identity",
+                kind,
+                summary=summary,
+                data=data,
+                ref=ref,
+                dev=serial,
+                pkg=package,
+                level=level,
+            )
+        except Exception:
+            logger.debug("identity: timeline emit failed", exc_info=True)
+
+    # -- pre-spawn hook -----------------------------------------------------
+
+    def pre_spawn(self, package: str) -> Any:
+        """The pre-spawn hook: a plan when ``package`` needs seeding, else None.
+
+        No device access here (it may run on any thread): the decision comes
+        from what this process applied. Idempotent: once an apply for the
+        package succeeded with the current profile, it returns ``None``.
+        """
+        cfg = self.config()
+        if cfg.mode != "profile" or not cfg.profile:
+            return None
+        try:
+            profile = self.load(cfg.profile)
+        except ProfileError as exc:
+            logger.warning(f"identity: active profile unusable: {exc}")
+            return None
+        from sandroid.core.adb import Adb
+
+        serial = Adb.get_target_device()
+        if not serial:
+            return None
+        fp = fingerprint(profile)
+        with self._lock:
+            mem = self._applied.get(serial)
+            if mem is not None and mem.fingerprint == fp and package in mem.done:
+                return None
+            known = mem is not None and mem.fingerprint == fp and package in mem.ssaids
+        needs_fw = any(
+            vs.enabled
+            and vs.effective_provider == "native"
+            and vs.spec is not None
+            and vs.spec.restart == "framework"
+            and (vs.kind != "android_id" or not known)
+            for vs in profile.values.values()
+        )
+        allow = cfg.restart != "never"
+        kinds = sorted(
+            {
+                REGISTRY[vs.kind].tag
+                for vs in profile.values.values()
+                if vs.enabled
+                and vs.effective_provider == "native"
+                and vs.kind in REGISTRY
+            }
+        )
+
+        def run() -> None:
+            plan = self.apply(serial, package, allow_restart=allow, profile=profile)
+            failed = [i for i in plan.infos.values() if i.status == "failed"]
+            if failed:
+                raise IdentityApplyError(
+                    f"identity profile {profile.id!r}: {failed[0].label}: {failed[0].reason}"
+                )
+
+        return _pre_spawn_plan_cls()(
+            description=f"apply identity profile {profile.id!r} ({', '.join(kinds)})",
+            disruptive=needs_fw and allow,
+            apply=run,
+        )
+
+    def install_pre_spawn_hook(self) -> bool:
+        """Register :meth:`pre_spawn` with ``services.app_start`` (no-op when
+        that module does not exist). Returns True when registered.
+        """
+        try:
+            from sandroid.services.app_start import (
+                register_pre_spawn_hook,  # type: ignore[import-not-found]
+            )
+        except ImportError:
+            return False
+        with self._lock:
+            if self._hook_installed:
+                return True
+            register_pre_spawn_hook(self.pre_spawn)
+            self._hook_installed = True
+        return True
+
+    def uninstall_pre_spawn_hook(self) -> None:
+        """Undo :meth:`install_pre_spawn_hook`."""
+        try:
+            from sandroid.services.app_start import (
+                unregister_pre_spawn_hook,  # type: ignore[import-not-found]
+            )
+        except ImportError:
+            return
+        with self._lock:
+            if self._hook_installed:
+                unregister_pre_spawn_hook(self.pre_spawn)
+                self._hook_installed = False
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+
+def _regenerate(profile: Profile, *, retire: bool) -> None:
+    old = profile.token
+    profile.token = secrets.token_hex(4)
+    profile.seed = "hex:" + secrets.token_hex(32)
+    if retire and old and old not in profile.retired_tokens:
+        profile.retired_tokens = [*profile.retired_tokens, old][-10:]
+    if old:
+        for vs in profile.values.values():
+            if vs.value is not None:
+                vs.value = vs.value.replace(old, profile.token)
+        for items in profile.lists().values():
+            for item in items:
+                for key, val in item.items():
+                    if isinstance(val, str):
+                        item[key] = val.replace(old, profile.token)
+
+
+def _canonical(profile: Profile) -> str:
+    data = profile.to_dict()
+    data.pop("revision", None)
+    return json.dumps(data, sort_keys=True, default=str)
+
+
+def _nmea_pad(coord: str) -> str:
+    """Append ``0001``: the emulator truncates to 4 NMEA minute decimals."""
+    if "." not in coord:
+        coord += ".0"
+    return coord + "0001"
+
+
+def _counts(infos: dict[str, ValueInfo]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for info in infos.values():
+        out[info.status] = out.get(info.status, 0) + 1
+    return out
+
+
+def _timeline_rel(path: Path) -> str:
+    try:
+        from sandroid.core.timeline import timeline_folder
+
+        return os.path.relpath(path, timeline_folder())
+    except ValueError:
+        return str(path)
+
+
+def _edit_ssaid(xml_text: str, desired: dict[str, dict[str, Any]]) -> str | None:
+    """Set (or add) the SSAID rows of ``desired`` (``{pkg: {uid, value}}``)."""
+    try:
+        root = ET.fromstring(xml_text.encode("utf-8"))  # noqa: S314 - device file
+    except ET.ParseError:
+        return None
+    rows = {r.get("package"): r for r in root.iter("setting")}
+    next_id = max((int(r.get("id") or 0) for r in rows.values()), default=0) + 1
+    for pkg, entry in desired.items():
+        row = rows.get(pkg)
+        if row is None:
+            row = ET.SubElement(root, "setting")
+            row.set("id", str(next_id))
+            next_id += 1
+            row.set("name", entry["uid"])
+            row.set("package", pkg)
+            row.set("defaultSysSet", "false")
+            row.set("tag", "null")
+        row.set("name", entry["uid"])
+        row.set("value", entry["value"])
+        row.set("defaultValue", entry["value"])
+    root.tail = None
+    body = ET.tostring(root, encoding="unicode")
+    return "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n" + body + "\n"
+
+
+def frozen_record(
+    profile: Profile,
+    plan: IdentityPlan,
+    state: DeviceState,
+    ssaids: dict[str, str],
+    markers: list[Marker],
+    befores: dict[str, str],
+) -> dict[str, Any]:
+    """The ground truth written to ``<session>/identity/NNN-<id>-r<rev>.toml``."""
+    values = {}
+    for vid, info in plan.infos.items():
+        values[vid] = {
+            "kind": info.kind,
+            "label": info.label,
+            "provider": info.provider,
+            "status": info.status,
+            "reason": info.reason,
+            "rendered": info.rendered,
+            "current": info.current,
+            "before": befores.get(vid, ""),
+        }
+    ssaid_info = plan.infos.get("android_id")
+    per_app = ssaid_info.per_app if ssaid_info else {}
+    return {
+        "format": "sandroid-identity-applied",
+        "schema": 1,
+        "applied_at": datetime.now().astimezone().replace(microsecond=0),
+        "device": {
+            "serial": state.serial,
+            "avd": state.props.get("ro.boot.qemu.avd_name", ""),
+            "api": state.api,
+            "emulator": state.emulator,
+            "root": state.root,
+        },
+        "fingerprint": plan.fingerprint,
+        "packages": list(plan.packages),
+        "values": values,
+        "ssaid": {
+            pkg: {
+                "value": value,
+                **{
+                    k: v
+                    for k, v in per_app.get(pkg, {}).items()
+                    if k in ("uid", "signer", "before")
+                },
+            }
+            for pkg, value in sorted(ssaids.items())
+        },
+        "lists": render_lists(profile),
+        "markers": [
+            {
+                "id": m.id,
+                "value": m.value,
+                "kind": m.kind,
+                "label": m.label,
+                "forms": list(m.forms),
+                "group": m.group,
+                "tag": m.tag,
+            }
+            for m in markers
+        ],
+        "profile": profile.to_dict(),
+    }
+
+
+def _tomlable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _tomlable(v) for k, v in value.items() if v is not None}
+    if isinstance(value, (list, tuple)):
+        return [_tomlable(v) for v in value if v is not None]
+    if isinstance(value, bytes):
+        return value.hex()
+    return value
+
+
+def _load_latest_frozen() -> tuple[str, list[Marker]] | None:
+    """The newest frozen apply of the live session (after a TUI restart)."""
+    try:
+        from sandroid.core.timeline import timeline_folder
+
+        folder = timeline_folder() / "identity"
+        files = sorted(folder.glob("[0-9]*.toml")) if folder.is_dir() else []
+    except Exception:
+        return None
+    for path in reversed(files):
+        try:
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+            markers = [
+                Marker(
+                    m["id"],
+                    m["value"],
+                    m.get("kind", "text"),
+                    m.get("label", ""),
+                    tuple(m.get("forms") or ()),
+                    m.get("group", ""),
+                    m.get("tag", ""),
+                )
+                for m in data.get("markers") or []
+            ]
+            return str(data.get("fingerprint") or ""), markers
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return None
+
+
+def get_identity_service() -> IdentityService:
+    """The process's :class:`IdentityService` (reset by ``reset_services``)."""
+    from sandroid.services import _get_or_create
+
+    return _get_or_create(IdentityService)
+
+
+__all__ = [
+    "CALLING_CODES",
+    "FORMAT",
+    "LISTS",
+    "REGISTRY",
+    "SCHEMA",
+    "DeviceState",
+    "IdentityApplyError",
+    "IdentityPlan",
+    "IdentityService",
+    "Issue",
+    "KindSpec",
+    "Profile",
+    "ProfileError",
+    "ProfileInfo",
+    "TemplateError",
+    "ValueInfo",
+    "ValueSpec",
+    "fingerprint",
+    "frozen_record",
+    "generate_profile",
+    "get_identity_service",
+    "luhn_check_digit",
+    "luhn_ok",
+    "markers_for",
+    "parse_preflight",
+    "preflight_script",
+    "profiles_dir",
+    "render_lists",
+    "render_template",
+    "render_value",
+    "ssaid_for",
+    "token_uuid",
+    "validate",
+]

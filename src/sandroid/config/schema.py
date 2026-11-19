@@ -823,7 +823,7 @@ class TUIConfig(BaseModel):
 #: Timeline sources the policy can never turn off (mirrors
 #: ``sandroid.core.timeline.ALWAYS_ON``).
 TIMELINE_ALWAYS_ON = frozenset(
-    {"label", "sandroid", "clock", "snapshot", "device", "run"}
+    {"label", "sandroid", "clock", "snapshot", "device", "run", "identity", "privacy"}
 )
 _SRC_KIND_RE = re.compile(r"^[a-z][a-z0-9_-]{0,15}\.([a-z][a-z0-9_-]{0,23}|\*)$")
 
@@ -942,6 +942,21 @@ class TrackingConfig(BaseModel):
     swipe_slop_px: int = Field(default=24, ge=4, le=200)
     logcat_screen_backup: bool = Field(
         default=True, description="Activity changes from logcat as a backup"
+    )
+
+
+class IdentityConfig(BaseModel):
+    """Identity profile: fake canary values seeded on the emulator."""
+
+    profile: str = Field(
+        default="", description="Id of the active profile in the profile library"
+    )
+    mode: Literal["off", "profile"] = Field(
+        default="off", description="off, or seed the active profile before app starts"
+    )
+    restart: Literal["ask", "always", "never"] = Field(
+        default="ask",
+        description="Framework restart for SSAID/locale/model: ask, always, never",
     )
 
 
@@ -1555,6 +1570,7 @@ class SandroidConfig(BaseModel):
     tui: TUIConfig = Field(default_factory=TUIConfig)
     timeline: TimelineConfig = Field(default_factory=TimelineConfig)
     tracking: TrackingConfig = Field(default_factory=TrackingConfig)
+    identity: IdentityConfig = Field(default_factory=IdentityConfig)
     mvt: MVTConfig = Field(default_factory=MVTConfig)
     mitmproxy: MitmproxyConfig = Field(default_factory=MitmproxyConfig)
     focus: FocusConfig = Field(default_factory=FocusConfig)

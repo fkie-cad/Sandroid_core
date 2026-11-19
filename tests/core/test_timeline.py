@@ -338,6 +338,37 @@ def test_bulk_lines_drop_when_the_queue_is_full_must_keep_never(
     assert timeline.verify_chain(path).ok
 
 
+def test_privacy_findings_survive_the_bulk_drop(timeline_sink, monkeypatch):
+    service, path = timeline_sink
+    service._policy.queue_max = 2
+    service._policy.coalesce_s = 0
+    entered, release = threading.Event(), threading.Event()
+    real_write = timeline._write
+
+    def stalled(fd, data):
+        entered.set()
+        release.wait(10)
+        return real_write(fd, data)
+
+    monkeypatch.setattr(timeline, "_write", stalled)
+    service.emit("input", "tap", summary="wake the writer")
+    service._kick.set()
+    assert entered.wait(5)
+    bulk = [service.emit("monitor", "lost", summary=str(i)) for i in range(10)]
+    assert sum(s is not None for s in bulk) == 2  # the queue is full now
+    sent = [service.emit("privacy", "sent", summary=f"AdID {i}") for i in range(5)]
+    stored = [service.emit("privacy", "stored", summary=f"file {i}") for i in range(5)]
+    assert None not in sent + stored
+    release.set()
+    assert service.close("test", 5.0)
+    lines = _lines(path)
+    kinds = [x["kind"] for x in lines if x["src"] == "privacy"]
+    assert kinds.count("sent") == 5
+    assert kinds.count("stored") == 5
+    (dropped,) = [x for x in lines if x["src"] == "sandroid" and x["kind"] == "dropped"]
+    assert dropped["data"]["by_src"] == {"monitor": 8}
+
+
 # ---------------------------------------------------------------------------
 # policy, counts, coalescing, attrs
 # ---------------------------------------------------------------------------

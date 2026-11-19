@@ -55,11 +55,15 @@ CLOCKS = ("host", "dev_mono", "dev_wall", "none")
 LEVELS = ("info", "warn", "error")
 MUST_KEEP = frozenset(
     {"label", "sandroid", "clock", "snapshot", "device", "run", "tracking", "input",
-     "screen", "shot"}
+     "screen", "shot", "identity"}
 )  # fmt: skip
-ALWAYS_ON = frozenset({"label", "sandroid", "clock", "snapshot", "device", "run"})
-#: Must-keep kinds of otherwise bulk sources (evidence pulls/checks).
-MUST_KEEP_KINDS = frozenset({("files", "pull"), ("files", "check")})
+ALWAYS_ON = frozenset(
+    {"label", "sandroid", "clock", "snapshot", "device", "run", "identity", "privacy"}
+)
+#: Must-keep kinds of otherwise bulk sources (evidence pulls/checks, privacy hits).
+MUST_KEEP_KINDS = frozenset(
+    {("files", "pull"), ("files", "check"), ("privacy", "sent"), ("privacy", "stored")}
+)
 SUMMARY_MAX = 240
 DATA_MAX = 16_384
 RING_SIZE = 5_000
