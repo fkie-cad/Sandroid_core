@@ -1017,7 +1017,9 @@ class IdentityLens(Vertical):
                 if old is not None and _text_sig(old[index]) == _text_sig(new[index]):
                     continue
                 try:
-                    table.update_cell(key, col_key, new[index])
+                    # Grow the column: it was sized for the first words
+                    # ("not seen", an empty "Device now").
+                    table.update_cell(key, col_key, new[index], update_width=True)
                 except Exception:
                     logger.debug("identity lens: update_cell failed", exc_info=True)
                 changed = True

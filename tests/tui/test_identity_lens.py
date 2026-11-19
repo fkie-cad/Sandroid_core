@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 from pilot_helpers import boot, settle, until
+from textual.widgets.data_table import ColumnKey
 
 from sandroid.services import identity as identity_mod
 from sandroid.services import privacy_scan as privacy_mod
@@ -413,6 +414,27 @@ async def test_found_column_reflects_hits_and_tints_rows(fakes) -> None:
         finally:
             il.REFRESH_MIN_S = 1.0
         assert lens.table.current_key() == "timezone"
+
+
+async def test_columns_widen_when_a_live_hit_arrives(fakes) -> None:
+    # The table is first built with every Found cell "not seen": a later,
+    # longer word must widen the column, not be cut to "sent and".
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        lens = await _open_lens(app, pilot)
+        assert _cell(lens, "gaid", "found") == "not seen"
+        fakes.privacy.records = _hits()
+        il.REFRESH_MIN_S = 0.0
+        try:
+            for cb in list(fakes.privacy.listeners):
+                cb(None)
+            await until(
+                pilot, lambda: _cell(lens, "phone_number", "found") == "sent and stored"
+            )
+        finally:
+            il.REFRESH_MIN_S = 1.0
+        found = lens.table.columns[ColumnKey("found")]
+        assert found.content_width >= len("sent and stored")
 
 
 async def test_inspector_found_tab_selection_and_jump(fakes, monkeypatch) -> None:
