@@ -456,6 +456,36 @@ def _mixed() -> list[dict]:
     ]
 
 
+async def test_row_columns_never_run_together(install_fakes) -> None:
+    """F4: full-width src/kind/actor values are still separated by a gap."""
+    import re
+
+    install_fakes(
+        [
+            make_line(1, NOW - 2, "sandroid", "policy", summary="FIRST"),
+            make_line(2, NOW - 1, "sandroid", "play-result", summary="SECOND"),
+        ]
+    )
+    app = _LensHarness()
+    async with app.run_test(size=SIZE) as pilot:
+        lens = await _loaded_lens(pilot, app)
+        assert [r.seq for r in lens.rows] == [1, 2]
+
+        def text(y: int, width: int) -> str:
+            return "".join(seg.text for seg in lens.strip_for(y, width))
+
+        # >= 100 cols: delta, src, kind, actor, summary.
+        assert re.search(r"\.\d{3} +sandroid +policy +sandr… +FIRST", text(0, 160))
+        assert re.search(r"\+\S+ +sandroid +play-result +sandr… +SECOND", text(1, 160))
+        # 80..99 cols: no actor column.
+        assert re.search(r"\+\S+ +sandroid +play-result +SECOND", text(1, 90))
+        # < 80 cols: no delta column either.
+        assert re.search(r"\.\d{3} +sandroid +play-result +SECOND", text(1, 70))
+        for width in (160, 90, 70):
+            assert "sandroidpolicy" not in text(0, width)
+            assert "play-resultsandr" not in text(1, width)
+
+
 async def test_separators_hidden_rows_and_N(install_fakes) -> None:
     install_fakes(_mixed())
     app = _LensHarness()
