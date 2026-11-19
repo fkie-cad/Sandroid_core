@@ -242,6 +242,9 @@ class SpotlightPanel(Widget):
         # Layout mode from the panel width (on_resize).
         self._compact = False
         self._narrow = False
+        # (package, profile id) while the identity profile was not applied
+        # to the app; read off the UI thread (poll, identity status events).
+        self._identity_gap: tuple[str, str] | None = None
 
     # -- services (lazy) --------------------------------------------------
 
@@ -311,9 +314,21 @@ class SpotlightPanel(Widget):
         # on_unmount; each tick is a no-op when no app is selected or the
         # strip is collapsed.
         self._poll_timer = self.set_interval(_POLL_INTERVAL, self._poll_running_state)
+        try:
+            from sandroid.services.identity import get_identity_service
+
+            get_identity_service().add_status_listener(self._on_identity_status)
+        except Exception:
+            logger.debug("Spotlight panel: no identity status", exc_info=True)
 
     def on_unmount(self) -> None:
         self._unsubscribe_events()
+        try:
+            from sandroid.services.identity import get_identity_service
+
+            get_identity_service().remove_status_listener(self._on_identity_status)
+        except Exception:
+            pass
         if self._poll_timer is not None:
             try:
                 self._poll_timer.stop()
@@ -497,6 +512,7 @@ class SpotlightPanel(Widget):
                 "  ".join(f"[{c.ok}]●[/] {n}" for n in names) or f"[{c.dim}]none[/]",
             )
         )
+        identity = self._identity_line(package, width)
 
         # Immediate bypass toggles (armed | active)
         on = set(self._on_categories())
@@ -511,6 +527,8 @@ class SpotlightPanel(Widget):
                     " ",
                 )
             )
+            if identity:
+                lines.append(row("identity", identity))
             return "\n".join(lines)
         # Toggles wrap onto continuation lines aligned with the values; the
         # key hint follows when there is room for it.
@@ -538,7 +556,57 @@ class SpotlightPanel(Widget):
             used += extra
         lines.append(row("bypass", gap.join(rows[0])))
         lines += [" " * (width + 3) + gap.join(r) for r in rows[1:]]
+        if identity:
+            lines.append(row("identity", identity))
         return "\n".join(lines)
+
+    def _identity_line(self, package: str, label_width: int) -> str:
+        """One warn line while the running app lacks the identity profile.
+
+        Not while the app is stopped: the pre-start step covers its next
+        start. Shortened when the full sentence does not fit.
+        """
+        gap = self._identity_gap
+        if gap is None or gap[0] != package:
+            return ""
+        if not (self._safe_pid() or self._is_paused()):
+            return ""
+        name = escape(gap[1])
+        full = (
+            f"Identity profile '{name}' not applied to this app — it started "
+            "before the profile. ⇧R restarts it with the profile; Space in the "
+            "Identity lens applies the live values without a restart."
+        )
+        short = (
+            f"Identity profile '{name}' not applied to this app — ⇧R restarts "
+            "it with the profile"
+        )
+        room = self.size.width - 2 - (label_width + 3)
+        text = full if self.size.width and len(full) <= room else short
+        return f"[{lens_palette().warn}]{text}[/]"
+
+    def _read_identity_gap(self, package: str | None) -> bool:
+        """Re-read whether ``package`` lacks the identity profile (worker
+        thread: loads the profile file). Returns True when it changed.
+        """
+        gap = None
+        if package:
+            try:
+                from sandroid.services.identity import get_identity_service
+
+                svc = get_identity_service()
+                if svc.applied_state(package) == "not_applied":
+                    gap = (package, str(svc.config().profile))
+            except Exception:
+                logger.debug("Identity applied state unreadable", exc_info=True)
+        changed = gap != self._identity_gap
+        self._identity_gap = gap
+        return changed
+
+    def _on_identity_status(self, _statuses: list) -> None:
+        """Identity plan/apply/verify finished (worker thread)."""
+        if self._read_identity_gap(self._current_package()):
+            self._post(self._repaint_text)
 
     def _primary_label(self) -> str:
         """Context-sensitive label for the Space / primary action cell."""
@@ -807,12 +875,15 @@ class SpotlightPanel(Widget):
         self._reconcile_paused_flag(pid)
 
         running = pid is not None
+        identity_changed = self._read_identity_gap(package)
         # A respawn (dexray/friTap spawn, crash + relaunch) keeps the app
         # "running" but changes its PID: repaint then too, or the panel keeps
         # showing the old PID.
         if running != self._last_running_state or pid != previous_pid:
             self._last_running_state = running
             self._post(self.refresh_panel)
+        elif identity_changed:
+            self._post(self._repaint_text)
 
     @staticmethod
     def _parse_am_process_attached(dump: str, pid: int) -> bool:

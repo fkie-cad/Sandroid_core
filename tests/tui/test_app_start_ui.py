@@ -388,3 +388,105 @@ async def test_shift_x_and_another_app_disarm(monkeypatch):
         svc.set_app(PKG)
         svc.set_app("org.example.other")  # another app: armed was per-app
         assert env.bypass.armed_categories() == []
+
+
+# -- the identity profile notice ------------------------------------------------------
+
+
+class _Identity:
+    """IdentityService double: applied_state + the status listener."""
+
+    def __init__(self, state: str | None, profile: str = "mara-de") -> None:
+        self.state = state
+        self.listeners: list = []
+        self._config = SimpleNamespace(profile=profile)
+
+    def applied_state(self, package, serial=None):
+        return self.state
+
+    def config(self):
+        return self._config
+
+    def add_status_listener(self, cb):
+        self.listeners.append(cb)
+
+    def remove_status_listener(self, cb):
+        self.listeners.remove(cb)
+
+    def fire(self):
+        """A plan/apply/verify finished (listeners run on a worker thread)."""
+        import threading
+
+        for cb in list(self.listeners):
+            threading.Thread(target=cb, args=([],)).start()
+
+
+def _identity_env(monkeypatch, state, *, pid=77):
+    from sandroid.services import identity
+
+    svc, _ran = _panel_env(monkeypatch, pid=pid)
+    fake = _Identity(state)
+    monkeypatch.setattr(identity, "get_identity_service", lambda: fake)
+    return svc, fake
+
+
+def _body(app) -> str:
+    return str(app.query_one("#spotlight-body").content)
+
+
+FULL = (
+    "Identity profile 'mara-de' not applied to this app — it started before the "
+    "profile. ⇧R restarts it with the profile; Space in the Identity lens applies "
+    "the live values without a restart."
+)
+SHORT = "Identity profile 'mara-de' not applied to this app — ⇧R restarts it with "
+
+
+async def test_identity_notice_comes_and_goes_with_the_applied_state(monkeypatch):
+    from sandroid.tui.themes import lens_palette
+
+    _svc, fake = _identity_env(monkeypatch, "not_applied")
+    app = _Harness()
+    async with app.run_test(size=(240, 30)) as pilot:
+        await settle(pilot)
+        assert "Identity profile" not in _body(app)  # nothing read yet
+        fake.fire()
+        await until(pilot, lambda: FULL in _body(app))
+        panel = app.query_one(SpotlightPanel)
+        assert f"[{lens_palette().warn}]" in panel._render_body()
+
+        fake.state = "applied"  # e.g. Space in the Identity lens
+        fake.fire()
+        await until(pilot, lambda: "Identity profile" not in _body(app))
+    assert fake.listeners == []  # unmount unsubscribed
+
+
+async def test_identity_notice_is_short_on_a_narrow_lens_and_polled(monkeypatch):
+    from sandroid.core.adb import Adb
+
+    _svc, _fake = _identity_env(monkeypatch, "not_applied")
+    monkeypatch.setattr(
+        Adb, "get_pid_for_package_name", staticmethod(lambda *a, **k: 77)
+    )
+    app = _Harness()
+    async with app.run_test(size=(120, 30)) as pilot:
+        await settle(pilot)
+        panel = app.query_one(SpotlightPanel)
+        panel.run_worker(lambda: panel._poll_worker(PKG), thread=True)
+        await until(pilot, lambda: SHORT in _body(app))
+        assert FULL not in _body(app)
+
+
+@pytest.mark.parametrize(("state", "pid"), [(None, 77), ("not_applied", None)])
+async def test_no_identity_notice_when_off_or_not_running(monkeypatch, state, pid):
+    """Mode off: no line. A stopped app: the pre-start step covers it."""
+    _svc, _fake = _identity_env(monkeypatch, state, pid=pid)
+    app = _Harness()
+    async with app.run_test(size=(240, 30)) as pilot:
+        await settle(pilot)
+        panel = app.query_one(SpotlightPanel)
+        panel._on_identity_status([])  # on the UI thread: repaints inline
+        await settle(pilot)
+        expected = (PKG, "mara-de") if state else None
+        assert panel._identity_gap == expected
+        assert "Identity profile" not in _body(app)
