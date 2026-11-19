@@ -1,16 +1,21 @@
-"""Devices screen: every running device and every installed AVD, live.
+"""Devices screen: every device and every installed AVD in one live list.
 
-One screen replaces the old device / AVD / boot-mode pickers:
+One screen replaces the old device / AVD / boot-mode pickers. Two boxes:
 
-* **Running** -- what ``adb devices -l`` lists plus emulators Sandroid is
-  still launching: serial, AVD name, model, API level, state (booting with
-  elapsed time, ready, offline, unauthorized, no permissions), root kind and
-  the active-device marker. ⏎ attaches a ready device; ``x`` stops and ``R``
-  restarts an emulator (per serial, never by process name).
-* **Available AVDs** -- installed AVDs that are not running, with API level,
-  image tag, snapshot count and the remembered launch options. ⏎ starts one
-  with those options; ``c`` cold boot, ``n`` from a snapshot, ``w`` wipe,
-  ``h`` toggles headless (remembered), ``e`` renames.
+* **Devices** -- one list, each AVD exactly once: running devices first
+  (what ``adb devices -l`` lists plus emulators Sandroid is still launching;
+  physical and network devices included, with booting / ready / offline /
+  unauthorized / no-permissions states), then the stopped AVDs, then AVDs
+  running elsewhere (another session holds their lock files). ⏎ attaches a
+  ready device or starts a stopped AVD; ``x`` stops and ``R`` restarts an
+  emulator (per serial, never by process name); ``e`` renames an AVD.
+* **Launch options** -- for the highlighted row. A stopped AVD's options
+  are editable and saved for that AVD at once (``devices.json``): boot
+  (quick / cold / a snapshot), headless, save state on exit and a one-off
+  wipe; ⏎ starts with exactly what is shown. ``c`` / ``n`` / ``h`` / ``s``
+  / ``w`` change them without leaving the list (the mouse works too). A
+  running emulator shows, read-only, what it was started with -- what ``R``
+  reuses. Physical devices show their state and what to do about it.
 
 The module is split in two halves:
 
@@ -38,9 +43,19 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from rich.text import Text
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
+from textual.content import Content
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Static
+from textual.widgets import (
+    Checkbox,
+    DataTable,
+    Footer,
+    RadioButton,
+    RadioSet,
+    Select,
+    Static,
+)
 
 from sandroid.core.adb_device_monitor import AdbDeviceMonitor
 from sandroid.tui.themes import lens_palette
@@ -131,6 +146,10 @@ class DeviceRow:
         active: The session's active device.
         ours: Sandroid launched it in this session.
         log_path: Our launch's emulator log ("" otherwise).
+        launch_options: The options our launch used (``None`` when Sandroid
+            did not start it in this session).
+        saved_options: The remembered options of its AVD (what a restart
+            of an emulator we did not launch uses); ``None`` if no AVD.
     """
 
     serial: str
@@ -145,10 +164,17 @@ class DeviceRow:
     active: bool = False
     ours: bool = False
     log_path: str = ""
+    launch_options: Any = None
+    saved_options: Any = None
 
     @property
     def key(self) -> str:
         return f"dev:{self.serial}"
+
+    @property
+    def network(self) -> bool:
+        """Connected over the network (``host:port`` serial)."""
+        return not self.is_emulator and ":" in self.serial
 
     @property
     def title(self) -> str:
@@ -172,6 +198,7 @@ class AvdRow:
         running_elsewhere: Its directory holds an emulator's lock files
             although no listed device runs it (another session / adb
             server): listed, but not startable, renamable or wipeable here.
+        snapshots: Names of its saved snapshots.
     """
 
     name: str
@@ -183,6 +210,7 @@ class AvdRow:
     abi: str = ""
     device_name: str = ""
     running_elsewhere: bool = False
+    snapshots: tuple[str, ...] = ()
 
     @property
     def key(self) -> str:
@@ -195,7 +223,8 @@ class HubSnapshot:
 
     Attributes:
         devices: Running devices, sorted by serial.
-        avds: Installed AVDs that are not running.
+        avds: Installed AVDs that are not running (those running elsewhere
+            last).
         notes: Warnings (adb missing, a launch that crashed...).
         taken_at: ``time.monotonic()`` when it was built.
     """
@@ -208,6 +237,11 @@ class HubSnapshot:
     @property
     def booting(self) -> bool:
         return any(row.state is RowState.BOOTING for row in self.devices)
+
+    @property
+    def rows(self) -> tuple[DeviceRow | AvdRow, ...]:
+        """The one list: running devices, stopped AVDs, AVDs elsewhere."""
+        return (*self.devices, *self.avds)
 
 
 def _launch_booting(launch: Any, now: float) -> bool:
@@ -301,6 +335,7 @@ def build_snapshot(
             getattr(device, "api_level", 0) or None
         )
         state = classify(entry.state, probe, booting)
+        is_emulator = serial_port(serial) is not None
         rows[serial] = DeviceRow(
             serial=serial,
             avd_name=avd_name,
@@ -314,10 +349,16 @@ def build_snapshot(
                 else None
             ),
             root_kind=getattr(device, "root_kind", "") or "",
-            is_emulator=serial_port(serial) is not None,
+            is_emulator=is_emulator,
             active=serial == active_serial,
             ours=launch is not None,
             log_path=str(launch.log_path or "") if launch else "",
+            launch_options=launch.options if launch else None,
+            saved_options=(
+                options_from_prefs(prefs, avd_name)
+                if is_emulator and avd_name
+                else None
+            ),
         )
 
     for serial, launch in by_serial.items():
@@ -334,6 +375,8 @@ def build_snapshot(
                 active=serial == active_serial,
                 ours=True,
                 log_path=str(launch.log_path or ""),
+                launch_options=launch.options,
+                saved_options=options_from_prefs(prefs, launch.avd),
             )
         elif (
             not launch.ready
@@ -358,6 +401,7 @@ def build_snapshot(
                 abi=info.abi,
                 device_name=info.device_name,
                 running_elsewhere=info.name in locked,
+                snapshots=tuple(getattr(info, "snapshots", ()) or ()),
             )
             for info in avds
             if info.name not in running_avds
@@ -383,17 +427,24 @@ def format_elapsed(seconds: float | None) -> str:
 
 
 def describe_options(options: Any) -> str:
-    """Remembered launch options in a few words (``window · quick boot``)."""
+    """Launch options in a few words (``window · quick boot``).
+
+    Saving the state on exit and a one-off wipe are named only when set.
+    """
     if options is None:
         return ""
     window = "headless" if options.headless else "window"
     boot = {
         "normal": "quick boot",
         "cold": "cold boot",
-        "wipe": "wipe data",
         "snapshot": f"snapshot {options.snapshot}",
     }.get(options.boot, options.boot)
-    return f"{window} · {boot}"
+    parts = [window, boot]
+    if getattr(options, "save_on_exit", False):
+        parts.append("saves state on exit")
+    if getattr(options, "wipe_once", False):
+        parts.append("wipe data")
+    return " · ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +662,7 @@ class HubCollector:
 # Screen
 # ---------------------------------------------------------------------------
 
+
 def _c(role: str) -> str:
     """The current theme's lens color *role* (``themes.LensPalette``: ok,
     warn, bad, title, dim, text), read per render so a theme change
@@ -628,25 +680,74 @@ _STATE_STYLE = {
     RowState.OTHER: "dim",
 }
 
+_STATE_GLYPH = {
+    RowState.READY: "●",
+    RowState.BOOTING: "◐",
+    RowState.OFFLINE: "✕",
+    RowState.UNAUTHORIZED: "!",
+    RowState.NO_PERMISSIONS: "!",
+    RowState.OTHER: "?",
+}
+
 #: Actions that need a row of the given kind (see ``check_action``).
 _DEVICE_ACTIONS = frozenset({"attach"})
 _EMULATOR_ACTIONS = frozenset({"stop", "restart"})
-_AVD_ACTIONS = frozenset({"start", "cold", "snapshot", "wipe", "headless", "rename"})
-#: AVD actions refused while another emulator holds the AVD's lock files.
-_LOCKED_AVD_ACTIONS = frozenset({"start", "cold", "snapshot", "wipe", "rename"})
+#: Launch-option keys: they edit the highlighted stopped AVD's options.
+_OPTION_ACTIONS = frozenset({"cold", "snapshot", "headless", "save", "wipe"})
+_AVD_ACTIONS = frozenset({"start", "rename"}) | _OPTION_ACTIONS
+
+#: Boot radio button ids -> ``AvdLaunchOptions.boot``.
+_BOOT_IDS = {"opt-quick": "normal", "opt-cold": "cold", "opt-snap": "snapshot"}
+#: Option control ids -> (label, its key). The key is shown only while the
+#: options can be edited.
+_LABELS = {
+    "opt-quick": ("Quick boot", ""),
+    "opt-cold": ("Cold boot", "c"),
+    "opt-snap": ("Snapshot", "n"),
+    "opt-headless": ("Headless", "h"),
+    "opt-save": ("Save state on exit", "s"),
+    "opt-wipe": ("Wipe data, once", "w"),
+}
+
+
+def _label(control_id: str, with_key: bool) -> str:
+    """Markup label of an option control (``Headless  h`` when editable)."""
+    label, key = _LABELS[control_id]
+    return f"{label}  [dim]{key}[/]" if with_key and key else label
 
 
 class _HubTable(DataTable):
-    """A Devices list where a click only highlights.
+    """The Devices list, where a click only highlights.
 
     Selecting a row starts or attaches something, so a single (stray) click
     must never do it: ⏎ selects, and so does a second click on the row the
     previous click highlighted. Textual's own rule ("click the cell that has
     the cursor") also fired on the very first click when it hit the cell
     the screen had highlighted on its own.
+
+    ⏎ has two footer labels, *Attach* (a running device) and *Start* (a
+    stopped AVD); the screen's ``check_action`` decides which one shows.
     """
 
+    BINDINGS = [
+        Binding("enter", "attach_row", "Attach"),
+        Binding("enter", "start_row", "Start"),
+    ]
+
     _armed_row: int | None = None
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "attach_row":
+            return self.screen.check_action("attach", parameters)
+        if action == "start_row":
+            return self.screen.check_action("start", parameters)
+        return super().check_action(action, parameters)
+
+    def action_attach_row(self) -> None:
+        self.action_select_cursor()
+
+    def action_start_row(self) -> None:
+        self.action_select_cursor()
 
     async def _on_click(self, event: events.Click) -> None:
         row = event.style.meta.get("row")
@@ -664,20 +765,32 @@ class _HubTable(DataTable):
         self.move_cursor(row=row, animate=False)
 
 
-class _RunningTable(_HubTable):
-    """The running-devices list (⏎ attaches; shown in the footer)."""
-
-    BINDINGS = [Binding("enter", "select_cursor", "Attach")]
+class _BootRadios(RadioSet, can_focus=False):
+    """Boot mode; clicked or set with ``c`` / ``n`` (the list keeps focus)."""
 
 
-class _AvdTable(_HubTable):
-    """The available-AVDs list (⏎ starts; shown in the footer)."""
+class _Radio(RadioButton):
+    """A boot mode drawn as ``(•)`` / ``( )``: readable on any background."""
 
-    BINDINGS = [Binding("enter", "select_cursor", "Start")]
+    @property
+    def _button(self) -> Content:
+        style = self.get_visual_style("toggle--button")
+        return Content.assemble(("(" + ("•" if self.value else " ") + ")", style))
+
+
+class _Option(Checkbox, can_focus=False):
+    """A launch option drawn as ``[x]`` / ``[ ]``; clicked or toggled with
+    its key (focus stays on the list).
+    """
+
+    @property
+    def _button(self) -> Content:
+        style = self.get_visual_style("toggle--button")
+        return Content.assemble(("[" + ("x" if self.value else " ") + "]", style))
 
 
 class DevicesScreen(ModalScreen[str | None]):
-    """Full-screen live list of running devices and installed AVDs.
+    """Full-screen live list of devices and AVDs plus the launch options.
 
     Dismisses with the serial to attach, or ``None``. Starting, stopping and
     restarting emulators happens in place (the screen stays open and shows
@@ -707,9 +820,8 @@ class DevicesScreen(ModalScreen[str | None]):
         background: $lens-bg;
         align: center top;
     }
-    DevicesScreen #hub {
+    DevicesScreen .hub-box {
         width: 100%;
-        height: 1fr;
         background: $lens-panel;
         border: round $lens-rule;
         border-title-color: $lens-accent;
@@ -717,24 +829,20 @@ class DevicesScreen(ModalScreen[str | None]):
         border-subtitle-color: $lens-muted;
         padding: 0 1;
     }
+    DevicesScreen #hub {
+        height: 1fr;
+        min-height: 7;
+    }
     DevicesScreen #hub-reason {
         color: $lens-warn;
         height: auto;
         margin: 0 0 1 0;
     }
     DevicesScreen DataTable {
-        height: auto;
-        max-height: 45%;
-        margin: 1 0 0 0;
+        height: 1fr;
         border: none;
-        border-top: solid $lens-rule;
-        border-title-color: $lens-title;
-        border-title-style: bold;
         background: $lens-panel;
         scrollbar-size-vertical: 1;
-    }
-    DevicesScreen DataTable:focus {
-        border-top: heavy $lens-rule-focus;
     }
     DevicesScreen DataTable > .datatable--header {
         background: $lens-panel;
@@ -748,25 +856,84 @@ class DevicesScreen(ModalScreen[str | None]):
     DevicesScreen DataTable:focus > .datatable--cursor {
         background: $lens-cursor-focus;
     }
-    DevicesScreen .hub-empty {
+    DevicesScreen #hub-empty {
         color: $lens-dim;
         height: auto;
-        padding: 0 1;
-    }
-    DevicesScreen #hub-spacer {
-        height: 1fr;
-    }
-    DevicesScreen #hub-detail {
-        height: auto;
-        min-height: 3;
-        color: $lens-text;
-        border-top: solid $lens-rule;
-        padding: 0 1;
+        padding: 1 1;
     }
     DevicesScreen #hub-notes {
         height: auto;
         color: $lens-warn;
         padding: 0 1;
+    }
+    DevicesScreen #hub-options {
+        height: auto;
+        margin: 1 0 0 0;
+    }
+    DevicesScreen #opt-row {
+        height: auto;
+        margin: 0 0 1 0;
+    }
+    DevicesScreen .opt-col {
+        width: auto;
+        height: auto;
+        margin: 0 3 0 0;
+    }
+    DevicesScreen .opt-heading {
+        color: $lens-header;
+        height: 1;
+    }
+    DevicesScreen #opt-boot {
+        border: none;
+        background: transparent;
+        padding: 0;
+        width: auto;
+        height: auto;
+    }
+    DevicesScreen #hub-options ToggleButton {
+        border: none;
+        background: transparent;
+        padding: 0;
+        height: 1;
+        width: auto;
+        color: $lens-text;
+    }
+    DevicesScreen #hub-options ToggleButton > .toggle--button {
+        background: transparent;
+        color: $lens-dim;
+    }
+    DevicesScreen #hub-options ToggleButton.-on > .toggle--button {
+        background: transparent;
+        color: $lens-ok;
+        text-style: bold;
+    }
+    DevicesScreen #hub-options ToggleButton > .toggle--label {
+        background: transparent;
+    }
+    DevicesScreen #hub-options ToggleButton:hover > .toggle--label {
+        background: $lens-cursor;
+    }
+    DevicesScreen #hub-options ToggleButton:disabled,
+    DevicesScreen #hub-options ToggleButton:disabled > .toggle--button,
+    DevicesScreen #hub-options ToggleButton.-on:disabled > .toggle--button {
+        color: $lens-label;
+    }
+    DevicesScreen #hub-options #opt-wipe.-on,
+    DevicesScreen #hub-options #opt-wipe.-on > .toggle--button {
+        color: $lens-warn;
+    }
+    DevicesScreen #opt-snapshot {
+        width: 26;
+        margin: 0 0 0 4;
+    }
+    DevicesScreen #opt-facts {
+        width: 1fr;
+        height: auto;
+        color: $lens-dim;
+    }
+    DevicesScreen #opt-note {
+        height: auto;
+        color: $lens-text;
     }
     DevicesScreen Footer {
         background: $lens-action-bg;
@@ -774,16 +941,16 @@ class DevicesScreen(ModalScreen[str | None]):
     """
 
     BINDINGS = [
-        Binding("c", "cold", "Cold boot"),
+        Binding("c", "cold", "Cold"),
         Binding("n", "snapshot", "Snapshot…"),
-        Binding("w", "wipe", "Wipe…"),
         Binding("h", "headless", "Headless"),
+        Binding("s", "save", "Save state"),
+        Binding("w", "wipe", "Wipe"),
         Binding("e", "rename", "Rename…"),
         Binding("x", "stop", "Stop…"),
         Binding("R", "restart", "Restart"),
-        Binding("a", "connect", "adb connect…"),
+        Binding("a", "connect", "Connect…"),
         Binding("ctrl+r", "refresh", "Refresh"),
-        Binding("tab", "switch_table", "Other list"),
         Binding("j", "cursor('down')", "Down", show=False),
         Binding("k", "cursor('up')", "Up", show=False),
         Binding("escape", "cancel", "Close"),
@@ -809,6 +976,8 @@ class DevicesScreen(ModalScreen[str | None]):
         self.snapshot: HubSnapshot | None = None
         #: Row key -> what is being done to it ("stopping…").
         self._busy: dict[str, str] = {}
+        #: AVDs whose next start wipes their data (never persisted).
+        self._wipe: set[str] = set()
         self._in_flight = False
         self._pending = False
         self._pending_force = False
@@ -817,47 +986,60 @@ class DevicesScreen(ModalScreen[str | None]):
         self._last_backstop = time.monotonic()
         #: ``time.monotonic()`` when the shown snapshot was applied.
         self._applied_at = time.monotonic()
+        #: Snapshot names the Select currently offers.
+        self._select_names: tuple[str, ...] | None = None
 
     # -- layout -------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="hub") as hub:
+        with Vertical(id="hub", classes="hub-box") as hub:
             hub.border_title = "Devices"
             if self.reason:
                 yield Static(self.reason, id="hub-reason", markup=False)
-            running = _RunningTable(id="hub-running", cursor_type="row")
-            running.border_title = "Running"
-            yield running
-            yield Static("", id="hub-running-empty", classes="hub-empty")
-            avds = _AvdTable(id="hub-avds", cursor_type="row")
-            avds.border_title = "Available AVDs"
-            yield avds
-            yield Static("", id="hub-avds-empty", classes="hub-empty")
-            yield Static("", id="hub-spacer")
-            yield Static("", id="hub-detail")
+            yield _HubTable(id="hub-table", cursor_type="row")
+            yield Static("", id="hub-empty")
             yield Static("", id="hub-notes")
+        with Vertical(id="hub-options", classes="hub-box") as box:
+            box.border_title = "Launch options"
+            with Horizontal(id="opt-row"):
+                with Vertical(classes="opt-col"):
+                    yield Static("Boot", classes="opt-heading")
+                    with _BootRadios(id="opt-boot", compact=True):
+                        yield _Radio(_label("opt-quick", True), id="opt-quick")
+                        yield _Radio(_label("opt-cold", True), id="opt-cold")
+                        yield _Radio(_label("opt-snap", True), id="opt-snap")
+                    yield Select(
+                        [],
+                        prompt="no snapshots",
+                        allow_blank=True,
+                        compact=True,
+                        id="opt-snapshot",
+                    )
+                with Vertical(classes="opt-col"):
+                    yield Static("Options", classes="opt-heading")
+                    for option_id in ("opt-headless", "opt-save", "opt-wipe"):
+                        yield _Option(
+                            _label(option_id, True), id=option_id, compact=True
+                        )
+                yield Static("", id="opt-facts")
+            yield Static("", id="opt-note")
         yield Footer()
 
     def on_mount(self) -> None:
-        running = self.query_one("#hub-running", DataTable)
-        running.add_column(" ", key="mark", width=1)
-        running.add_column("Serial", key="serial")
-        running.add_column("AVD / device", key="name")
-        running.add_column("Model", key="model")
-        running.add_column("API", key="api")
-        running.add_column("State", key="state")
-        running.add_column("Root", key="root")
-        running.add_column("", key="active")
-        avds = self.query_one("#hub-avds", DataTable)
-        avds.add_column(" ", key="mark", width=1)
-        avds.add_column("AVD", key="name")
-        avds.add_column("API", key="api")
-        avds.add_column("Image", key="tag")
-        avds.add_column("Snapshots", key="snapshots")
-        avds.add_column("Launch", key="launch")
-        self.query_one("#hub-running-empty", Static).update("Looking for devices…")
-        self.query_one("#hub-avds-empty", Static).display = False
-        running.focus()
+        try:
+            table = self.query_one("#hub-table", DataTable)
+        except NoMatches:
+            return  # dismissed before it mounted
+        table.add_column(" ", key="mark", width=1)
+        table.add_column("Name", key="name")
+        table.add_column("API", key="api")
+        table.add_column("State", key="state")
+        table.add_column("Root", key="root")
+        table.add_column("Serial", key="serial")
+        table.display = False
+        self.query_one("#hub-empty", Static).update("Looking for devices…")
+        self.query_one("#hub-options").display = False
+        table.focus()
         if self.monitor_factory is not None:
             try:
                 self._monitor = self.monitor_factory(on_change=self._on_adb_change)
@@ -942,14 +1124,16 @@ class DevicesScreen(ModalScreen[str | None]):
         snap = self.snapshot
         if snap is None or not snap.booting or not self.is_attached:
             return
-        table = self.query_one("#hub-running", DataTable)
+        table = self.query_one("#hub-table", DataTable)
         for row in snap.devices:
             if row.state is RowState.BOOTING and row.boot_elapsed is not None:
                 try:
                     table.update_cell(row.key, "state", self._state_cell(row))
                 except Exception:
                     pass
-        self._update_detail()
+        row = self.current_row()
+        if isinstance(row, DeviceRow) and row.state is RowState.BOOTING:
+            self.query_one("#opt-note", Static).update(self._note_text(row))
 
     # -- rendering -----------------------------------------------------------
 
@@ -958,10 +1142,16 @@ class DevicesScreen(ModalScreen[str | None]):
             return None
         return row.boot_elapsed + max(0.0, time.monotonic() - self._applied_at)
 
-    def _state_cell(self, row: DeviceRow) -> Text:
+    def _state_cell(self, row: DeviceRow | AvdRow) -> Text:
         busy = self._busy.get(row.key)
         if busy:
             return Text(busy, style=_c("title"))
+        if isinstance(row, AvdRow):
+            if row.running_elsewhere:
+                return Text("running elsewhere", style=_c("warn"))
+            return Text("stopped", style=_c("dim"))
+        if row.active:
+            return Text("ready ◀ active", style=f"bold {_c('ok')}")
         label = row.state.value
         if row.state is RowState.BOOTING:
             elapsed = format_elapsed(self._elapsed(row))
@@ -970,43 +1160,40 @@ class DevicesScreen(ModalScreen[str | None]):
             label = row.raw_state
         return Text(label, style=_c(_STATE_STYLE[row.state]))
 
-    def _device_cells(self, row: DeviceRow) -> tuple[Any, ...]:
+    def _cells(self, row: DeviceRow | AvdRow) -> tuple[Any, ...]:
         dim = Text("–", style=_c("dim"))
+        if isinstance(row, AvdRow):
+            if row.running_elsewhere:
+                glyph, name_style = Text("◌", style=_c("warn")), _c("dim")
+            else:
+                glyph = Text("★" if row.last_used else "○", style=_c("dim"))
+                name_style = "bold" if row.last_used else ""
+            return (
+                glyph,
+                Text(row.name, style=name_style),
+                Text(str(row.api)) if row.api else dim,
+                self._state_cell(row),
+                dim,
+                dim,
+            )
+        name = Text(row.title, style="bold" if row.active else "")
+        if not row.is_emulator:
+            name.append(" · network" if row.network else " · USB", style=_c("dim"))
         return (
-            Text("●", style=_c("ok")) if row.active else Text(""),
-            Text(row.serial, style="bold" if row.active else ""),
-            Text(row.avd_name) if row.avd_name else dim,
-            Text(row.model) if row.model else dim,
+            Text(_STATE_GLYPH[row.state], style=_c(_STATE_STYLE[row.state])),
+            name,
             Text(str(row.api)) if row.api else dim,
             self._state_cell(row),
             Text(row.root_kind) if row.root_kind else dim,
-            Text("◀ active", style=f"bold {_c('ok')}") if row.active else Text(""),
+            Text(row.serial, style=_c("dim")),
         )
 
-    def _avd_cells(self, row: AvdRow) -> tuple[Any, ...]:
-        dim = Text("–", style=_c("dim"))
-        busy = self._busy.get(row.key)
-        if busy:
-            launch = Text(busy, style=_c("title"))
-        elif row.running_elsewhere:
-            launch = Text("running elsewhere", style=_c("warn"))
-        else:
-            launch = Text(describe_options(row.options), style=_c("text"))
-        name_style = (
-            _c("dim") if row.running_elsewhere else "bold" if row.last_used else ""
-        )
-        return (
-            Text("★", style=_c("warn")) if row.last_used else Text(""),
-            Text(row.name, style=name_style),
-            Text(str(row.api)) if row.api else dim,
-            Text(row.tag) if row.tag else dim,
-            Text(str(row.snapshot_count)) if row.snapshot_count else dim,
-            launch,
-        )
+    def _fill(self, table: DataTable, rows: Sequence[DeviceRow | AvdRow]) -> None:
+        """Replace *table*'s rows, keeping the cursor on the same row.
 
-    @staticmethod
-    def _fill(table: DataTable, rows: Sequence[Any], cells: Callable) -> None:
-        """Replace *table*'s rows, keeping the cursor on the same row key."""
+        A stopped AVD that was just started keeps the cursor: its row
+        becomes the running emulator of that AVD.
+        """
         keep = None
         if table.row_count:
             try:
@@ -1016,15 +1203,23 @@ class DevicesScreen(ModalScreen[str | None]):
         old_index = table.cursor_row
         table.clear()
         for row in rows:
-            table.add_row(*cells(row), key=row.key)
+            table.add_row(*self._cells(row), key=row.key)
         if not rows:
             return
         keys = [row.key for row in rows]
-        index = (
-            keys.index(keep.value)
-            if keep is not None and keep.value in keys
-            else old_index
-        )
+        index = old_index
+        if keep is not None and keep.value in keys:
+            index = keys.index(keep.value)
+        elif keep is not None and str(keep.value).startswith("avd:"):
+            name = str(keep.value)[4:]
+            index = next(
+                (
+                    i
+                    for i, row in enumerate(rows)
+                    if isinstance(row, DeviceRow) and row.avd_name == name
+                ),
+                old_index,
+            )
         table.move_cursor(row=max(0, min(index, len(rows) - 1)), animate=False)
 
     def _apply(self, snap: HubSnapshot) -> None:
@@ -1034,33 +1229,26 @@ class DevicesScreen(ModalScreen[str | None]):
         if self.snapshot is None or snap.taken_at != self.snapshot.taken_at:
             self._applied_at = time.monotonic()  # boot_elapsed is as of now
         self.snapshot = snap
-        running = self.query_one("#hub-running", DataTable)
-        avds = self.query_one("#hub-avds", DataTable)
-        self._fill(running, snap.devices, self._device_cells)
-        self._fill(avds, snap.avds, self._avd_cells)
+        table = self.query_one("#hub-table", DataTable)
+        rows = snap.rows
+        self._fill(table, rows)
+        running = len(snap.devices)
         booting = sum(1 for d in snap.devices if d.state is RowState.BOOTING)
-        running.border_title = f"Running · {len(snap.devices)}" + (
-            f" · {booting} booting" if booting else ""
-        )
         elsewhere = sum(1 for a in snap.avds if a.running_elsewhere)
-        avds.border_title = f"Available AVDs · {len(snap.avds) - elsewhere}" + (
-            f" · {elsewhere} running elsewhere" if elsewhere else ""
-        )
-        running.display = bool(snap.devices)
-        avds.display = bool(snap.avds)
-        empty_running = self.query_one("#hub-running-empty", Static)
-        empty_running.display = not snap.devices
-        empty_running.update(
-            "Running · none -- start an AVD below (⏎) or connect a device "
-            "over the network (a)."
-            if snap.avds
-            else "Running · none -- plug in a device with USB debugging on, or "
-            "connect one over the network (a)."
-        )
-        empty_avds = self.query_one("#hub-avds-empty", Static)
-        empty_avds.display = not snap.avds
-        empty_avds.update(
-            "Available AVDs · none (create one in Android Studio's Device Manager)"
+        counts = [f"{running} connected"]
+        if booting:
+            counts.append(f"{booting} booting")
+        counts.append(f"{len(snap.avds) - elsewhere} stopped")
+        if elsewhere:
+            counts.append(f"{elsewhere} elsewhere")
+        self.query_one("#hub").border_title = "Devices · " + " · ".join(counts)
+        table.display = bool(rows)
+        empty = self.query_one("#hub-empty", Static)
+        empty.display = not rows
+        empty.update(
+            "No devices and no AVDs. Plug in a device with USB debugging on, "
+            "connect one over the network (a), or create an AVD in Android "
+            "Studio's Device Manager."
         )
         notes = self.query_one("#hub-notes", Static)
         notes.update(Text("\n".join(f"⚠ {n}" for n in snap.notes)))
@@ -1068,109 +1256,280 @@ class DevicesScreen(ModalScreen[str | None]):
         if self._first_apply:
             self._first_apply = False
             self._initial_cursor(snap)
-        elif not running.display and self.focused is running:
-            avds.focus()
-        elif not avds.display and self.focused is avds and running.display:
-            running.focus()
-        self._update_detail()
+        self._sync_options()
         self.refresh_bindings()
 
     def _initial_cursor(self, snap: HubSnapshot) -> None:
-        running = self.query_one("#hub-running", DataTable)
-        avds = self.query_one("#hub-avds", DataTable)
+        """The active device, else the first device, else the last-used AVD."""
+        table = self.query_one("#hub-table", DataTable)
         if snap.devices:
             index = next((i for i, d in enumerate(snap.devices) if d.active), 0)
-            running.move_cursor(row=index, animate=False)
-            running.focus()
-        elif snap.avds:
+        else:
             index = next((i for i, a in enumerate(snap.avds) if a.last_used), 0)
-            avds.move_cursor(row=index, animate=False)
-            avds.focus()
+        if snap.rows:
+            table.move_cursor(row=index, animate=False)
 
     def current_row(self) -> DeviceRow | AvdRow | None:
-        """The highlighted row of the focused list."""
+        """The highlighted row of the list (whatever has the focus)."""
         snap = self.snapshot
-        focused = self.focused
-        if snap is None or not isinstance(focused, DataTable):
+        if snap is None:
             return None
-        rows: Sequence[Any] = snap.devices if focused.id == "hub-running" else snap.avds
-        if not rows or not focused.row_count:
+        try:
+            table = self.query_one("#hub-table", DataTable)
+        except NoMatches:
             return None
-        index = focused.cursor_row
+        rows = snap.rows
+        if not rows or not table.row_count:
+            return None
+        index = table.cursor_row
         return rows[index] if 0 <= index < len(rows) else None
 
-    def _detail_text(self, row: DeviceRow | AvdRow | None) -> Text:
-        if row is None:
-            return Text("")
+    # -- the launch-options box -----------------------------------------------
+
+    def _editable(self, row: Any = None) -> AvdRow | None:
+        """The highlighted AVD if its options may be changed here."""
+        row = self.current_row() if row is None else row
+        if (
+            isinstance(row, AvdRow)
+            and not row.running_elsewhere
+            and row.options is not None
+        ):
+            return row
+        return None
+
+    def _shown_options(self, row: DeviceRow | AvdRow) -> Any:
+        """The options the box shows for *row* (``None``: no options)."""
         if isinstance(row, AvdRow):
-            parts = [describe_options(row.options)]
-            facts = " · ".join(
-                p
-                for p in (
-                    f"API {row.api}" if row.api else "",
-                    row.tag,
-                    row.abi,
-                    row.device_name,
-                )
-                if p
-            )
-            text = Text()
-            text.append(row.name, style=f"bold {_c('title')}")
-            if facts:
-                text.append(f"  {facts}", style=_c("dim"))
+            if row.options is None:
+                return None
+            return replace(row.options, wipe_once=row.name in self._wipe)
+        if not row.is_emulator:
+            return None
+        return row.launch_options or row.saved_options
+
+    def _sync_options(self) -> None:
+        """Make the options box show the highlighted row (no events)."""
+        try:
+            box = self.query_one("#hub-options")
+        except NoMatches:
+            return
+        row = self.current_row()
+        box.display = row is not None
+        if row is None:
+            return
+        options = self._shown_options(row)
+        editable = self._editable(row) is not None
+        if isinstance(row, AvdRow):
+            title = f"Launch options · {row.name}"
             if row.running_elsewhere:
-                text.append(f"\n{RUNNING_ELSEWHERE_HELP}", style=_c("warn"))
-                return text
-            text.append("\n⏎ starts it with ", style=_c("text"))
-            text.append(parts[0], style="bold")
-            text.append(
-                " (remembered). c cold boot · n from a snapshot · w wipe data · "
-                "h headless on/off · e rename",
-                style=_c("text"),
+                title += " · read-only"
+        elif row.is_emulator:
+            title = f"Launch options · {row.title} · read-only"
+        else:
+            title = f"Device · {row.title} · {row.serial}"
+        box.border_title = title
+        controls = self.query_one("#opt-row")
+        controls.display = options is not None
+        if options is not None:
+            self._set_controls(row, options, editable)
+        self.query_one("#opt-facts", Static).update(self._facts_text(row))
+        self.query_one("#opt-note", Static).update(self._note_text(row))
+
+    def _set_controls(self, row: Any, options: Any, editable: bool) -> None:
+        names = row.snapshots if isinstance(row, AvdRow) else ()
+        if options.boot == "snapshot" and options.snapshot not in names:
+            names = (*names, options.snapshot) if options.snapshot else names
+        select = self.query_one("#opt-snapshot", Select)
+        with self.prevent(
+            RadioButton.Changed, RadioSet.Changed, Checkbox.Changed, Select.Changed
+        ):
+            if names != self._select_names:
+                self._select_names = names
+                select.set_options([(n, n) for n in names])
+            # Every button explicitly: with RadioButton.Changed prevented the
+            # RadioSet would not switch the others off.
+            for button_id, boot in _BOOT_IDS.items():
+                button = self.query_one(f"#{button_id}", RadioButton)
+                button.value = options.boot == boot
+            select.value = (
+                options.snapshot
+                if options.boot == "snapshot" and options.snapshot in names
+                else Select.NULL
             )
-            return text
+            self.query_one("#opt-headless", Checkbox).value = bool(options.headless)
+            self.query_one("#opt-save", Checkbox).value = bool(options.save_on_exit)
+            self.query_one("#opt-wipe", Checkbox).value = bool(options.wipe_once)
+        for widget in self.query("#opt-row RadioButton, #opt-row Checkbox"):
+            if widget.disabled == editable:  # editability changed
+                widget.label = _label(widget.id or "", editable)
+            widget.disabled = not editable
+        self.query_one("#opt-boot").disabled = not editable
+        self.query_one("#opt-snap", RadioButton).disabled = not editable or not names
+        select.disabled = not editable or not names
+
+    def _facts_text(self, row: DeviceRow | AvdRow) -> Text:
         text = Text()
-        text.append(row.title, style=f"bold {_c('title')}")
-        text.append(f"  {row.serial}", style=_c("dim"))
-        text.append("\n")
-        if row.state is RowState.UNAUTHORIZED:
-            text.append(UNAUTHORIZED_HELP, style=_c("warn"))
-        elif row.state is RowState.NO_PERMISSIONS:
-            text.append(NO_PERMISSIONS_HELP, style=_c("warn"))
-        elif row.state is RowState.OFFLINE:
-            text.append(OFFLINE_HELP, style=_c("warn"))
-        elif row.state is RowState.BOOTING:
+        if isinstance(row, AvdRow):
+            facts = [
+                f"API {row.api}" if row.api else "",
+                row.tag,
+                row.abi,
+                row.device_name,
+            ]
+            count = row.snapshot_count or len(row.snapshots)
+            facts.append(
+                f"{count} snapshot{'s' if count != 1 else ''}"
+                if count
+                else "no snapshots"
+            )
+            text.append(" · ".join(f for f in facts if f), style=_c("dim"))
+            return text
+        facts = [
+            f"API {row.api}" if row.api else "",
+            f"root: {row.root_kind}" if row.root_kind else "",
+            row.serial,
+        ]
+        if row.log_path:
+            facts.append(f"log: {row.log_path}")
+        text.append(" · ".join(f for f in facts if f), style=_c("dim"))
+        return text
+
+    def _note_text(self, row: DeviceRow | AvdRow) -> Text:
+        """What the box says under the options (state, help, what ⏎ does)."""
+        text = Text()
+        if isinstance(row, AvdRow):
+            if row.running_elsewhere:
+                text.append(RUNNING_ELSEWHERE_HELP, style=_c("warn"))
+                return text
+            text.append("⏎ starts it with these options", style=_c("text"))
+            if row.name in self._wipe:
+                text.append(" -- and wipes its data first (asks)", style=_c("warn"))
+            text.append(". Changes are saved for this AVD at once; ", style=_c("text"))
+            text.append("a wipe is never remembered.", style=_c("dim"))
+            return text
+        help_text = {
+            RowState.UNAUTHORIZED: UNAUTHORIZED_HELP,
+            RowState.NO_PERMISSIONS: NO_PERMISSIONS_HELP,
+            RowState.OFFLINE: OFFLINE_HELP,
+        }.get(row.state)
+        if help_text:
+            text.append(help_text, style=_c("warn"))
+            return text
+        if row.state is RowState.BOOTING:
             elapsed = format_elapsed(self._elapsed(row))
             since = f" for {elapsed}" if elapsed else ""
             text.append(
                 f"Booting{since} -- it can be attached once Android is ready.",
                 style=_c("warn"),
             )
-            if row.log_path:
-                text.append(f"  log: {row.log_path}", style=_c("dim"))
         elif row.state is RowState.OTHER:
             text.append(f"adb state: {row.raw_state}", style=_c("dim"))
         elif row.active:
             text.append("The active device of this session.", style=_c("ok"))
         else:
             text.append("⏎ attaches it to this session.", style=_c("text"))
-        if row.is_emulator and row.state is not RowState.UNAUTHORIZED:
-            text.append("  x stop · R restart", style=_c("dim"))
+        if not row.is_emulator:
+            kind = "Network device" if row.network else "Physical device"
+            text.append(f"\n{kind}: no launch options.", style=_c("dim"))
+            return text
+        if row.launch_options is not None:
+            text.append(
+                "\nStarted by Sandroid with these options; R restarts with them "
+                "(never wipes).",
+                style=_c("dim"),
+            )
+        elif row.saved_options is not None:
+            text.append(
+                f"\nStarted outside Sandroid (its options are unknown); these are "
+                f"{row.avd_name}'s saved options, which R restarts with.",
+                style=_c("dim"),
+            )
+        else:
+            text.append(
+                "\nStarted outside Sandroid; its AVD is not known yet.",
+                style=_c("dim"),
+            )
         return text
 
-    def _update_detail(self) -> None:
-        try:
-            detail = self.query_one("#hub-detail", Static)
-        except Exception:
+    def _set_options(self, row: AvdRow, options: Any) -> None:
+        """Save *options* for *row*'s AVD and show them (wipe stays local)."""
+        from sandroid.core import emulator
+
+        if options.wipe_once:
+            self._wipe.add(row.name)
+        else:
+            self._wipe.discard(row.name)
+        saved = replace(options, wipe_once=False)
+        if saved != row.options:
+            emulator.remember_launch(row.name, saved, make_last=False)
+        if self.snapshot is not None:
+            avds = tuple(
+                replace(a, options=saved) if a.name == row.name else a
+                for a in self.snapshot.avds
+            )
+            self._apply(replace(self.snapshot, avds=avds))
+        else:
+            self._sync_options()
+
+    def _edit(self, **changes: Any) -> None:
+        """Change the highlighted stopped AVD's options (key / mouse)."""
+        row = self._editable()
+        if row is None:
+            self._sync_options()  # undo a click on a read-only control
             return
-        detail.update(self._detail_text(self.current_row()))
+        current = self._shown_options(row)
+        updated = replace(current, **changes)
+        if updated.boot != "snapshot":
+            updated = replace(updated, snapshot=None)
+        if updated != current:
+            self._set_options(row, updated)
+
+    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+        event.stop()
+        boot = _BOOT_IDS.get(event.pressed.id or "", "normal")
+        row = self._editable()
+        if boot == "snapshot" and row is not None:
+            current = self._shown_options(row)
+            name = current.snapshot if current.snapshot in row.snapshots else None
+            name = name or (row.snapshots[0] if row.snapshots else None)
+            if name is None:
+                self._sync_options()
+                return
+            self._edit(boot="snapshot", snapshot=name)
+            return
+        self._edit(boot=boot)
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        event.stop()
+        field_name = {
+            "opt-headless": "headless",
+            "opt-save": "save_on_exit",
+            "opt-wipe": "wipe_once",
+        }.get(event.checkbox.id or "")
+        if field_name:
+            self._edit(**{field_name: bool(event.value)})
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        event.stop()
+        if isinstance(event.value, str):
+            self._edit(boot="snapshot", snapshot=event.value)
+        else:
+            row = self._editable()
+            if row is not None and self._shown_options(row).boot == "snapshot":
+                self._edit(boot="normal")
+        self._focus_list()
+
+    def _focus_list(self) -> None:
+        try:
+            self.query_one("#hub-table", DataTable).focus()
+        except NoMatches:
+            pass
 
     def on_data_table_row_highlighted(self, _event: DataTable.RowHighlighted) -> None:
-        self._update_detail()
+        self._sync_options()
         self.refresh_bindings()
 
     def on_descendant_focus(self, _event: events.DescendantFocus) -> None:
-        self._update_detail()
         self.refresh_bindings()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -1193,9 +1552,9 @@ class DevicesScreen(ModalScreen[str | None]):
                 return isinstance(row, DeviceRow) and row.is_emulator
             if not isinstance(row, AvdRow):
                 return False
-            if row.running_elsewhere and action in _LOCKED_AVD_ACTIONS:
+            if row.running_elsewhere:
                 return None  # shown, disabled
-            if action == "snapshot" and not row.snapshot_count:
+            if action == "snapshot" and not row.snapshots:
                 return None  # shown, disabled
             return True
         return True
@@ -1253,7 +1612,18 @@ class DevicesScreen(ModalScreen[str | None]):
     # -- actions -------------------------------------------------------------
 
     def action_cancel(self) -> None:
-        """Esc: close without attaching (sync, see quit_controller)."""
+        """Esc: close an open snapshot list, else close without attaching.
+
+        Sync on purpose (the app's priority Esc calls it, see quit_controller).
+        """
+        try:
+            select = self.query_one("#opt-snapshot", Select)
+        except NoMatches:
+            select = None
+        if select is not None and (select.expanded or self.focused is select):
+            select.expanded = False
+            self._focus_list()
+            return
         self.dismiss(None)
 
     def action_abort(self) -> None:
@@ -1278,19 +1648,12 @@ class DevicesScreen(ModalScreen[str | None]):
             self._collector.invalidate_avds()
         self.request_refresh(force_avds=True)
 
-    def action_switch_table(self) -> None:
-        tables = [t for t in self.query(DataTable) if t.display and t.row_count]
-        if not tables:
-            return
-        index = tables.index(self.focused) if self.focused in tables else -1
-        tables[(index + 1) % len(tables)].focus()
-
     def action_cursor(self, direction: str) -> None:
-        if isinstance(self.focused, DataTable):
-            if direction == "down":
-                self.focused.action_cursor_down()
-            else:
-                self.focused.action_cursor_up()
+        table = self.query_one("#hub-table", DataTable)
+        if direction == "down":
+            table.action_cursor_down()
+        else:
+            table.action_cursor_up()
 
     def action_attach(self) -> None:
         row = self.current_row()
@@ -1321,59 +1684,33 @@ class DevicesScreen(ModalScreen[str | None]):
             return None
         return row
 
-    def _start(self, row: AvdRow, options: Any, label: str) -> None:
-        self._call("start_avd", row.key, label, row.name, options)
-
     def action_start(self) -> None:
+        """⏎ on a stopped AVD: start it with exactly the shown options."""
         row = self._avd_row()
-        if row is not None:
-            self._start(row, row.options, "starting…")
-
-    def action_cold(self) -> None:
-        row = self._avd_row()
-        if row is not None:
-            self._start(
-                row, replace(row.options, boot="cold", snapshot=None), "cold boot…"
-            )
-
-    def action_snapshot(self) -> None:
-        row = self._avd_row()
-        if row is None:
+        if row is None or row.options is None:
             return
-        from sandroid.core.emulator import avd_snapshots
-        from sandroid.tui.modals.selection_modal import SelectionModal
-
-        names = [s.name for s in avd_snapshots(row.name)]
-        if not names:
-            self.app.notify(f"'{row.name}' has no snapshots", severity="warning")
+        options = self._shown_options(row)
+        if not options.wipe_once:
+            self._call("start_avd", row.key, "starting…", row.name, options)
             return
-
-        def picked(name: str | None) -> None:
-            if name:
-                opts = replace(row.options, boot="snapshot", snapshot=name)
-                self._start(row, opts, f"loading {name}…")
-
-        self.app.push_screen(
-            SelectionModal(title=f"Start {row.name} from a snapshot", options=names),
-            picked,
-        )
-
-    def action_wipe(self) -> None:
-        row = self._avd_row()
-        if row is None:
+        if row.key in self._busy:
+            self._call("start_avd", row.key, "", row.name, options)  # "Already…"
             return
         from sandroid.tui.modals.confirm_modal import ConfirmModal
 
         def confirmed(yes: bool | None) -> None:
-            if yes:
-                opts = replace(row.options, boot="wipe", snapshot=None)
-                self._start(row, opts, "wiping…")
+            if not yes:
+                return
+            self._wipe.discard(row.name)
+            self._call("start_avd", row.key, "wiping…", row.name, options)
+            self._sync_options()
 
         self.app.push_screen(
             ConfirmModal(
                 title=f"Wipe '{row.name}'?",
                 message="Factory reset: all apps and data on this AVD are "
-                "deleted, then it boots fresh.",
+                f"deleted, then it boots ({describe_options(options)}). The "
+                "wipe is done once and not remembered.",
                 yes_label="Wipe & start",
                 no_label="Cancel",
                 guard_typing=True,
@@ -1381,22 +1718,49 @@ class DevicesScreen(ModalScreen[str | None]):
             confirmed,
         )
 
-    def action_headless(self) -> None:
-        row = self._avd_row(startable=False)
-        if row is None or row.options is None:
-            return
-        from sandroid.core.emulator import remember_launch
+    def action_cold(self) -> None:
+        """``c``: cold boot on / off (back to a quick boot)."""
+        row = self._editable()
+        if row is not None:
+            cold = self._shown_options(row).boot != "cold"
+            self._edit(boot="cold" if cold else "normal")
 
-        options = replace(row.options, headless=not row.options.headless)
-        remember_launch(row.name, options, make_last=False)
-        if self.snapshot is not None:
-            avds = tuple(
-                replace(a, options=options) if a.name == row.name else a
-                for a in self.snapshot.avds
-            )
-            self._apply(replace(self.snapshot, avds=avds))
-        mode = "headless" if options.headless else "with a window"
-        self.app.notify(f"'{row.name}' starts {mode} from now on", timeout=4)
+    def action_snapshot(self) -> None:
+        """``n``: pick the snapshot to boot from."""
+        row = self._editable()
+        if row is None:
+            return
+        if not row.snapshots:
+            self.app.notify(f"'{row.name}' has no snapshots", severity="warning")
+            return
+        from sandroid.tui.modals.selection_modal import SelectionModal
+
+        def picked(name: str | None) -> None:
+            if name and self._editable() == row:
+                self._edit(boot="snapshot", snapshot=name)
+
+        self.app.push_screen(
+            SelectionModal(
+                title=f"Boot {row.name} from a snapshot", options=list(row.snapshots)
+            ),
+            picked,
+        )
+
+    def action_headless(self) -> None:
+        row = self._editable()
+        if row is not None:
+            self._edit(headless=not self._shown_options(row).headless)
+
+    def action_save(self) -> None:
+        row = self._editable()
+        if row is not None:
+            self._edit(save_on_exit=not self._shown_options(row).save_on_exit)
+
+    def action_wipe(self) -> None:
+        """``w``: wipe the data on the next start (asks then; not saved)."""
+        row = self._editable()
+        if row is not None:
+            self._edit(wipe_once=row.name not in self._wipe)
 
     def action_rename(self) -> None:
         row = self._avd_row()

@@ -25,16 +25,27 @@ quits with exit status 2.
 
 **Devices screen.** Opens by itself at startup when no device (or more than
 one, without ``--serial``/``--avd``) is connected, after a disconnect that does
-not reconnect, and with ``D`` any time. *Running* lists every device adb sees
-(serial, AVD, model, API, booting/ready/offline/unauthorized, root): ``⏎``
-attaches it, ``x`` stops an emulator (``emu kill`` for that serial only),
-``R`` restarts it with the same options, ``a`` runs ``adb connect
-host:port``. *Available AVDs* lists the AVDs that are not running: ``⏎``
-starts one with its remembered options (the last-used AVD is preselected),
-``c`` cold boot, ``n`` from a snapshot, ``w`` wipe data (asks first), ``h``
-toggles headless, ``e`` renames it. Launch options are remembered per AVD in
-``~/.config/sandroid/devices.json``; ``emulator.avd_headless`` is only the
-first-launch default.
+not reconnect, and with ``D`` any time. The *Devices* box lists everything
+once: the devices adb sees (emulators, USB and network devices: AVD or model,
+API, booting/ready/offline/unauthorized, root, serial), then the AVDs that are
+stopped, then AVDs running elsewhere (another session holds them). ``⏎``
+attaches a ready device or starts a stopped AVD (the last-used AVD is
+preselected); ``x`` stops an emulator (``emu kill`` for that serial only),
+``R`` restarts it, ``e`` renames a stopped AVD, ``a`` runs ``adb connect
+host:port``.
+
+The *Launch options* box below shows the highlighted row's options. For a
+stopped AVD they are editable and saved for that AVD at once (in
+``~/.config/sandroid/devices.json``): boot (quick boot, ``c`` cold boot, ``n``
+from a snapshot), ``h`` headless, ``s`` save state on exit (off by default:
+the emulator starts with ``-no-snapshot-save``, so every boot starts from the
+same state) and ``w`` wipe data once (asks on start, never remembered). The
+keys work while the list keeps the focus, and the boxes can be clicked. ``⏎``
+starts the AVD with exactly what is shown. For a running emulator the box
+shows, read-only, what Sandroid started it with -- what ``R`` reuses -- or,
+for one started outside Sandroid, the AVD's saved options. For a physical
+device it shows its state and what to do about it (e.g. authorize USB
+debugging). ``emulator.avd_headless`` is only the first-launch default.
 
 .. note::
 

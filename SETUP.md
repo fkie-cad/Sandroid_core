@@ -169,7 +169,9 @@ The record/play workflow and the Snapshots tab rely on **AVD snapshots**.
 Keep snapshots enabled: do **not** start the emulator with `-no-snapshot`. If
 you do not want the emulator to overwrite its quick-boot snapshot on exit, use
 `-no-snapshot-save`, or start it from Sandroid's Devices screen (`D`), which
-offers normal, cold, from-snapshot and wipe boots and never disables snapshots.
+offers quick, cold and from-snapshot boots plus a one-off wipe, adds
+`-no-snapshot-save` unless *Save state on exit* is ticked, and never disables
+snapshots.
 
 ### Physical devices
 
@@ -184,12 +186,16 @@ Devices and AVDs are managed inside the TUI, in the **Devices screen**. It
 opens by itself at startup when no device (or more than one) is connected, and
 `D` opens it any time:
 
-- **Running** devices (serial, AVD, model, API, boot state, root) — `⏎`
-  attaches one; `x` stops an emulator, `R` restarts it; `a` runs
+- **Devices** — one list: running devices (emulators, USB and network
+  devices with boot state, root and serial), then stopped AVDs, then AVDs
+  running elsewhere. `⏎` attaches a ready device or starts a stopped AVD;
+  `x` stops an emulator, `R` restarts it; `e` renames a stopped AVD; `a` runs
   `adb connect host:port`.
-- **Available AVDs** — `⏎` starts one with its remembered options, `c` cold
-  boot, `n` boot from a snapshot, `w` wipe data (asks first), `h` toggles
-  headless (remembered per AVD), `e` renames a stopped AVD.
+- **Launch options** of the highlighted AVD, saved per AVD as soon as they
+  change: boot (quick / `c` cold / `n` from a snapshot), `h` headless, `s`
+  save state on exit (off by default → `-no-snapshot-save`), `w` wipe data
+  once (asks on start, never remembered). A running emulator shows what it
+  was started with (read-only; `R` reuses it).
 
 From the command line, `sandroid --avd NAME` reuses the running emulator of
 that AVD or starts it (with the remembered options) and waits for the boot

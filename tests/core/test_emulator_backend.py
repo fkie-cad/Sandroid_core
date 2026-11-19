@@ -95,12 +95,29 @@ def test_parse_garbage_and_empty():
 @pytest.mark.parametrize(
     ("opts", "tail"),
     [
-        (AvdLaunchOptions(), []),
-        (AvdLaunchOptions(boot="cold"), ["-no-snapshot-load"]),
-        (AvdLaunchOptions(boot="wipe"), ["-wipe-data"]),
-        (AvdLaunchOptions(boot="snapshot", snapshot="clean"), ["-snapshot", "clean"]),
-        (AvdLaunchOptions(boot="snapshot"), []),
-        (AvdLaunchOptions(extra_args=("-no-audio",)), ["-no-audio"]),
+        (AvdLaunchOptions(), ["-no-snapshot-save"]),
+        (AvdLaunchOptions(save_on_exit=True), []),
+        (
+            AvdLaunchOptions(boot="cold"),
+            ["-no-snapshot-load", "-no-snapshot-save"],
+        ),
+        (AvdLaunchOptions(boot="cold", save_on_exit=True), ["-no-snapshot-load"]),
+        (AvdLaunchOptions(wipe_once=True), ["-wipe-data", "-no-snapshot-save"]),
+        # The old boot mode "wipe" is a one-off wipe of a normal boot.
+        (AvdLaunchOptions(boot="wipe"), ["-wipe-data", "-no-snapshot-save"]),
+        (
+            AvdLaunchOptions(boot="snapshot", snapshot="clean", save_on_exit=True),
+            ["-snapshot", "clean"],
+        ),
+        (
+            AvdLaunchOptions(boot="snapshot", snapshot="clean"),
+            ["-snapshot", "clean", "-no-snapshot-save"],
+        ),
+        (AvdLaunchOptions(boot="snapshot"), ["-no-snapshot-save"]),
+        (
+            AvdLaunchOptions(extra_args=("-no-audio",)),
+            ["-no-snapshot-save", "-no-audio"],
+        ),
     ],
 )
 def test_build_emulator_command_boot_modes(opts, tail):
@@ -131,6 +148,7 @@ def test_build_emulator_command_headless():
         "-no-window",
         "-no-boot-anim",
         "-no-snapshot-load",
+        "-no-snapshot-save",
     ]
 
 
@@ -368,6 +386,30 @@ def test_list_avds_timeout_and_missing_binary(monkeypatch):
 # -- remembered launch options --------------------------------------------------
 
 
+def test_old_prefs_migrate_wipe_to_normal_and_save_off(
+    no_config, tmp_path, monkeypatch
+):
+    """devices.json of the first Devices screen: boot "wipe", no save_on_exit."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    path = tmp_path / "xdg" / "sandroid" / "devices.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"schema_version": 1, "last_avd": "A", "avds": {'
+        '"A": {"headless": true, "boot": "wipe", "snapshot": null},'
+        '"B": {"headless": false, "boot": "cold", "snapshot": null},'
+        '"C": {"boot": "snapshot", "snapshot": "s1", "save_on_exit": true}}}'
+    )
+    assert emu.remembered_options("A") == AvdLaunchOptions(headless=True)
+    assert emu.remembered_options("B") == AvdLaunchOptions(boot="cold")
+    assert emu.remembered_options("C") == AvdLaunchOptions(
+        boot="snapshot", snapshot="s1", save_on_exit=True
+    )
+    emu.remember_launch("B", emu.remembered_options("B"), make_last=False)
+    prefs = emu.load_launch_prefs()
+    assert prefs["last_avd"] == "A"
+    assert prefs["avds"]["B"]["save_on_exit"] is False
+
+
 def test_prefs_round_trip_never_store_wipe(no_config, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     assert emu.load_launch_prefs() == {
@@ -378,14 +420,21 @@ def test_prefs_round_trip_never_store_wipe(no_config, tmp_path, monkeypatch):
     no_config.avd_headless = True
     assert emu.remembered_options("New") == AvdLaunchOptions(headless=True)
 
-    emu.remember_launch("A", AvdLaunchOptions(headless=True, boot="wipe"))
-    emu.remember_launch("B", AvdLaunchOptions(boot="snapshot", snapshot="clean"))
+    emu.remember_launch("A", AvdLaunchOptions(headless=True, wipe_once=True))
+    emu.remember_launch(
+        "B", AvdLaunchOptions(boot="snapshot", snapshot="clean", save_on_exit=True)
+    )
     prefs = emu.load_launch_prefs()
     assert prefs["last_avd"] == "B"
-    assert prefs["avds"]["A"] == {"headless": True, "boot": "normal", "snapshot": None}
+    assert prefs["avds"]["A"] == {
+        "headless": True,
+        "boot": "normal",
+        "snapshot": None,
+        "save_on_exit": False,
+    }
     assert emu.remembered_options("A") == AvdLaunchOptions(headless=True)
     assert emu.remembered_options("B") == AvdLaunchOptions(
-        boot="snapshot", snapshot="clean"
+        boot="snapshot", snapshot="clean", save_on_exit=True
     )
     path = tmp_path / "xdg" / "sandroid" / "devices.json"
     assert path.is_file()
@@ -402,8 +451,7 @@ def test_rename_avd_moves_dir_ini_and_prefs(no_config, tmp_path, monkeypatch):
     _make_avd(
         home,
         "Old",
-        ini=f"avd.ini.encoding=UTF-8\npath={home / 'Old.avd'}\n"
-        "path.rel=avd/Old.avd\n",
+        ini=f"avd.ini.encoding=UTF-8\npath={home / 'Old.avd'}\npath.rel=avd/Old.avd\n",
     )
     emu.remember_launch("Old", AvdLaunchOptions(headless=True))
 
@@ -439,14 +487,10 @@ def test_avd_lock_files_ignore_multiinstance_and_dead_pids(
     (directory / "hardware-qemu.ini.lock").write_text(f"{dead.pid} ")
     assert emu.avd_lock_files("Pixel") == []  # a crashed emulator's lock
     (directory / "hardware-qemu.ini.lock").write_text(f"{os.getpid()} ")
-    assert [p.name for p in emu.avd_lock_files("Pixel")] == [
-        "hardware-qemu.ini.lock"
-    ]
+    assert [p.name for p in emu.avd_lock_files("Pixel")] == ["hardware-qemu.ini.lock"]
     (directory / "hardware-qemu.ini.lock").unlink()
     (directory / "userdata-qemu.img.lock").mkdir()  # Windows-style lock dir
-    assert [p.name for p in emu.avd_lock_files("Pixel")] == [
-        "userdata-qemu.img.lock"
-    ]
+    assert [p.name for p in emu.avd_lock_files("Pixel")] == ["userdata-qemu.img.lock"]
     assert emu.avd_lock_files("Ghost") == []
 
 
@@ -627,9 +671,7 @@ def adb_table(dm, monkeypatch):
     monkeypatch.setattr(Adb, "send_adb_command", table.send)
     monkeypatch.setattr(DeviceManager, "_preferred_serial", None)
     connected: list[str] = []
-    monkeypatch.setattr(
-        device_clock, "after_device_connect_async", connected.append
-    )
+    monkeypatch.setattr(device_clock, "after_device_connect_async", connected.append)
     table.connected = connected
     return table
 

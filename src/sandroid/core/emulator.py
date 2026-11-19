@@ -70,7 +70,7 @@ BOOTING_MAX_AGE = 600.0
 #: Timeout of every adb call made from this module.
 _ADB_TIMEOUT = 10.0
 
-BootMode = Literal["normal", "cold", "snapshot", "wipe"]
+BootMode = Literal["normal", "cold", "snapshot"]
 BootState = Literal["absent", "offline", "booting", "ready"]
 
 
@@ -462,6 +462,7 @@ class AvdInfo:
         device_name: Hardware profile (``hw.device.name``).
         path: The AVD directory, ``None`` if missing.
         snapshot_count: Number of saved snapshots.
+        snapshots: Their names (``default_boot`` first, then newest first).
     """
 
     name: str
@@ -472,6 +473,7 @@ class AvdInfo:
     device_name: str = ""
     path: Path | None = None
     snapshot_count: int = 0
+    snapshots: tuple[str, ...] = ()
 
 
 def avd_info(name: str) -> AvdInfo:
@@ -496,6 +498,7 @@ def avd_info(name: str) -> AvdInfo:
     if not tag and len(sys_parts) >= 2 and not sys_parts[-2].startswith("android-"):
         tag = sys_parts[-2]
     abi = config.get("abi.type", "") or (sys_parts[-1] if sys_parts else "")
+    snapshots = avd_snapshots(name) if directory else []
 
     return AvdInfo(
         name=name,
@@ -507,7 +510,8 @@ def avd_info(name: str) -> AvdInfo:
         abi=abi,
         device_name=config.get("hw.device.name", ""),
         path=directory,
-        snapshot_count=len(avd_snapshots(name)) if directory else 0,
+        snapshot_count=len(snapshots),
+        snapshots=tuple(s.name for s in snapshots),
     )
 
 
@@ -719,16 +723,31 @@ class AvdLaunchOptions:
 
     Attributes:
         headless: No window (``-no-window -no-boot-anim``, software GLES).
-        boot: ``normal`` (quick-boot snapshot), ``cold`` (no snapshot load),
-            ``snapshot`` (load *snapshot*), ``wipe`` (factory reset).
+        boot: ``normal`` (quick boot from the AVD's quick-boot snapshot),
+            ``cold`` (no snapshot load) or ``snapshot`` (load *snapshot*).
         snapshot: Snapshot name for ``boot="snapshot"``.
+        save_on_exit: Let the emulator save its state when it shuts down
+            (its default). False adds ``-no-snapshot-save``: every boot
+            starts from the same state.
+        wipe_once: Factory-reset this launch (``-wipe-data``). Never
+            remembered and never repeated by a restart.
         extra_args: Further emulator arguments.
+
+    ``boot="wipe"`` (the old way to ask for a factory reset) is accepted and
+    becomes ``boot="normal", wipe_once=True``.
     """
 
     headless: bool = False
     boot: BootMode = "normal"
     snapshot: str | None = None
+    save_on_exit: bool = False
+    wipe_once: bool = False
     extra_args: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.boot == "wipe":  # type: ignore[comparison-overlap]
+            object.__setattr__(self, "boot", "normal")
+            object.__setattr__(self, "wipe_once", True)
 
 
 def build_emulator_command(
@@ -745,10 +764,12 @@ def build_emulator_command(
         command += ["-no-window", "-no-boot-anim"]
     if opts.boot == "cold":
         command.append("-no-snapshot-load")
-    elif opts.boot == "wipe":
-        command.append("-wipe-data")
     elif opts.boot == "snapshot" and opts.snapshot:
         command += ["-snapshot", opts.snapshot]
+    if opts.wipe_once:
+        command.append("-wipe-data")
+    if not opts.save_on_exit:
+        command.append("-no-snapshot-save")
     command += list(opts.extra_args)
     return command
 
@@ -1230,7 +1251,7 @@ def restart_emulator(
     """Stop emulator *serial* and start the same AVD on the same port.
 
     The AVD name is resolved BEFORE the kill. Options default to the launch
-    record, then the remembered options; ``wipe`` becomes ``normal`` (a
+    record, then the remembered options; ``wipe_once`` is dropped (a
     restart never factory-resets). Same port -> same serial, so the session
     reconnects to it. Does not wait for the boot (see
     :func:`wait_until_ready`).
@@ -1249,8 +1270,8 @@ def restart_emulator(
     if options is None:
         launch = get_launch(serial)
         options = launch.options if launch is not None else remembered_options(avd)
-    if options.boot == "wipe":
-        options = replace(options, boot="normal")
+    if options.wipe_once:
+        options = replace(options, wipe_once=False)
     if not stop_emulator(serial, adb):
         raise EmulatorLaunchError(f"Emulator {serial} did not stop")
     # Bindable ignores TIME_WAIT (see _port_bindable): this only waits for
@@ -1328,8 +1349,10 @@ def load_launch_prefs() -> dict[str, Any]:
 
     Returns:
         ``{"schema_version": 1, "last_avd": str | None, "avds": {name:
-        {"headless": bool, "boot": str, "snapshot": str | None}}}``; the
-        empty document when the file is missing or unreadable.
+        {"headless": bool, "boot": str, "snapshot": str | None,
+        "save_on_exit": bool}}}``; the empty document when the file is
+        missing or unreadable. Older files (``boot: "wipe"``, no
+        ``save_on_exit``) are read by :func:`options_from_prefs`.
     """
     try:
         data = json.loads(_prefs_path().read_text(encoding="utf-8"))
@@ -1356,7 +1379,7 @@ def _save_prefs(prefs: dict[str, Any]) -> None:
 
 
 def options_from_prefs(prefs: dict[str, Any], name: str) -> AvdLaunchOptions:
-    """Launch options remembered for AVD *name* in *prefs* (never ``wipe``).
+    """Launch options remembered for AVD *name* in *prefs* (never a wipe).
 
     Args:
         prefs: A document as returned by :func:`load_launch_prefs`.
@@ -1364,7 +1387,9 @@ def options_from_prefs(prefs: dict[str, Any], name: str) -> AvdLaunchOptions:
 
     Returns:
         The remembered options; for an AVD launched never before: normal
-        boot, headless per config ``emulator.avd_headless``.
+        boot, no state saved on exit, headless per config
+        ``emulator.avd_headless``. An old ``boot: "wipe"`` reads as a normal
+        boot, a missing ``save_on_exit`` as False.
     """
     entry = (prefs.get("avds") or {}).get(name)
     if not isinstance(entry, dict):
@@ -1381,11 +1406,12 @@ def options_from_prefs(prefs: dict[str, Any], name: str) -> AvdLaunchOptions:
         headless=bool(entry.get("headless", False)),
         boot=boot,
         snapshot=snapshot if boot == "snapshot" else None,
+        save_on_exit=entry.get("save_on_exit") is True,
     )
 
 
 def remembered_options(name: str) -> AvdLaunchOptions:
-    """Launch options last used for AVD *name* (never ``wipe``).
+    """Launch options last used for AVD *name* (never a wipe).
 
     First launch: normal boot, headless per config ``emulator.avd_headless``.
     """
@@ -1397,16 +1423,16 @@ def remember_launch(
 ) -> None:
     """Persist *opts* for AVD *name* and make it the last-used AVD.
 
-    A ``wipe`` is stored as ``normal``: a factory reset is never repeated by
+    ``wipe_once`` is never stored: a factory reset is never repeated by
     accident. Write errors are logged, not raised.
 
     Args:
         name: AVD name.
         opts: The options to remember.
         make_last: Also make *name* the last-used AVD (False when only an
-            option is changed, e.g. the headless toggle in the Devices screen).
+            option is changed in the Devices screen).
     """
-    boot = "normal" if opts.boot == "wipe" else opts.boot
+    boot = opts.boot
     snapshot = opts.snapshot if boot == "snapshot" else None
     if boot == "snapshot" and not snapshot:
         boot = "normal"
@@ -1418,6 +1444,7 @@ def remember_launch(
             "headless": bool(opts.headless),
             "boot": boot,
             "snapshot": snapshot,
+            "save_on_exit": bool(opts.save_on_exit),
         }
         _save_prefs(prefs)
 

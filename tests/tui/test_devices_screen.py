@@ -139,6 +139,7 @@ def test_our_listed_launch_stays_booting_until_ready() -> None:
     launch = _Launch("Pixel_7", "emulator-5560", started_at=90.0)
     snap = build_snapshot(entries, {}, {}, [], {}, [launch], None, 100.0)
     assert snap.devices[0].state is RowState.BOOTING
+    assert snap.devices[0].launch_options is launch.options
     ready = _Launch("Pixel_7", "emulator-5560", ready=True)
     entries = _entries("emulator-5560\tdevice\n")
     snap = build_snapshot(entries, {}, {}, [], {}, [ready], None, 100.0)
@@ -160,7 +161,13 @@ def test_running_avds_are_not_available_and_options_are_remembered() -> None:
     entries = _entries("emulator-5554\tdevice\n")
     avds = [
         AvdInfo(name="Running_AVD", api_level=35),
-        AvdInfo(name="Idle_AVD", api_level=34, tag="google_apis", snapshot_count=2),
+        AvdInfo(
+            name="Idle_AVD",
+            api_level=34,
+            tag="google_apis",
+            snapshot_count=2,
+            snapshots=("default_boot", "s1"),
+        ),
         AvdInfo(name="Other_AVD"),
     ]
     prefs = {
@@ -171,10 +178,19 @@ def test_running_avds_are_not_available_and_options_are_remembered() -> None:
         entries, {}, {"emulator-5554": "Running_AVD"}, avds, prefs, [], None, 0.0
     )
     assert [a.name for a in snap.avds] == ["Idle_AVD", "Other_AVD"]
+    assert [r.key for r in snap.rows] == [
+        "dev:emulator-5554",
+        "avd:Idle_AVD",
+        "avd:Other_AVD",
+    ]
+    # Not launched by us: no start options; its AVD's saved ones for R.
+    assert snap.devices[0].launch_options is None
+    assert snap.devices[0].saved_options == AvdLaunchOptions()
     idle = snap.avds[0]
     assert idle.last_used
     assert idle.options == AvdLaunchOptions(headless=True, boot="cold")
     assert idle.snapshot_count == 2
+    assert idle.snapshots == ("default_boot", "s1")
     assert idle.tag == "google_apis"
     assert not snap.avds[1].last_used
 
@@ -218,6 +234,9 @@ def test_formatting_helpers() -> None:
         )
         == "headless · snapshot s1"
     )
+    assert describe_options(
+        AvdLaunchOptions(boot="cold", save_on_exit=True, wipe_once=True)
+    ) == ("window · cold boot · saves state on exit · wipe data")
 
 
 # --------------------------------------------------------------------------
@@ -378,6 +397,7 @@ def test_collector_reports_locked_avds(collector_env, monkeypatch) -> None:
 # --------------------------------------------------------------------------
 
 
+STARTED = AvdLaunchOptions(headless=True, boot="cold")
 READY = DeviceRow(
     serial="emulator-5554",
     avd_name="Pixel_7",
@@ -385,6 +405,9 @@ READY = DeviceRow(
     state=RowState.READY,
     is_emulator=True,
     root_kind="adbd root",
+    ours=True,
+    launch_options=STARTED,
+    saved_options=AvdLaunchOptions(),
 )
 ACTIVE = DeviceRow(
     serial="emulator-5556",
@@ -393,6 +416,7 @@ ACTIVE = DeviceRow(
     state=RowState.READY,
     is_emulator=True,
     active=True,
+    saved_options=AvdLaunchOptions(save_on_exit=True),
 )
 UNAUTH = DeviceRow(serial="R58M", state=RowState.UNAUTHORIZED, raw_state="unauthorized")
 BOOTING = DeviceRow(
@@ -403,15 +427,19 @@ BOOTING = DeviceRow(
     boot_elapsed=12.0,
     is_emulator=True,
     ours=True,
+    launch_options=AvdLaunchOptions(),
 )
 IDLE = AvdRow(
     name="Idle_AVD",
     api=34,
     tag="google_apis",
-    snapshot_count=1,
+    snapshot_count=2,
+    snapshots=("default_boot", "s1"),
     options=AvdLaunchOptions(headless=True, boot="cold"),
     last_used=True,
 )
+OTHER = AvdRow(name="Other", options=AvdLaunchOptions())
+BUSY_AVD = AvdRow(name="Busy_AVD", options=AvdLaunchOptions(), running_elsewhere=True)
 
 
 class FakeActions:
@@ -449,6 +477,18 @@ class HubApp(App):
         self.result = result
 
 
+@pytest.fixture(autouse=True)
+def saved(monkeypatch) -> list:
+    """Every ``remember_launch`` of the screen: (name, options, make_last)."""
+    calls: list = []
+    monkeypatch.setattr(
+        emulator,
+        "remember_launch",
+        lambda name, opts, make_last=True: calls.append((name, opts, make_last)),
+    )
+    return calls
+
+
 def _hub(devices=(), avds=(), notes=(), actions=None, **kw):
     snap = HubSnapshot(devices=tuple(devices), avds=tuple(avds), notes=tuple(notes))
     collects: list[bool] = []
@@ -466,6 +506,39 @@ async def _shown(pilot, screen) -> None:
     """The screen applied its first snapshot (collected in a thread worker)."""
     await until(pilot, lambda: screen.snapshot is not None)
     await settle(pilot)
+
+
+def _box(screen) -> dict:
+    """What the launch-options box shows."""
+    from textual.widgets import Checkbox, RadioButton, Select
+
+    def checked(widget_id):
+        return screen.query_one(f"#{widget_id}", Checkbox).value
+
+    boot = next(
+        (
+            boot
+            for widget_id, boot in hub._BOOT_IDS.items()
+            if screen.query_one(f"#{widget_id}", RadioButton).value
+        ),
+        None,
+    )
+    select = screen.query_one("#opt-snapshot", Select)
+    return {
+        "title": str(screen.query_one("#hub-options").border_title),
+        "controls": screen.query_one("#opt-row").display,
+        "boot": boot,
+        "snapshot": select.value if isinstance(select.value, str) else None,
+        "headless": checked("opt-headless"),
+        "save": checked("opt-save"),
+        "wipe": checked("opt-wipe"),
+        "editable": not screen.query_one("#opt-headless").disabled,
+        "note": str(screen.query_one("#opt-note").render()),
+    }
+
+
+def _command(options) -> list[str]:
+    return emulator.build_emulator_command("/sdk/emulator", "AVD", 5560, options)
 
 
 async def test_enter_on_a_ready_device_dismisses_with_its_serial() -> None:
@@ -489,34 +562,192 @@ async def test_enter_on_a_booting_device_does_not_dismiss() -> None:
         await settle(pilot)
         assert app.screen is screen
         assert "booting" in str(screen._state_cell(BOOTING))
+        assert "Booting for 0:1" in _box(screen)["note"]
     assert app.result == "unset"
 
 
-async def test_enter_on_an_avd_starts_it_with_remembered_options() -> None:
+async def test_one_list_running_then_stopped_then_elsewhere() -> None:
+    app, screen = _hub(devices=[READY, UNAUTH], avds=[IDLE, BUSY_AVD, OTHER])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        table = screen.query_one("#hub-table")
+        assert table.row_count == 5
+        assert [r.key for r in screen.snapshot.rows] == [
+            READY.key,
+            UNAUTH.key,
+            IDLE.key,
+            BUSY_AVD.key,
+            OTHER.key,
+        ]
+        title = str(screen.query_one("#hub").border_title)
+        assert "2 connected" in title
+        assert "2 stopped" in title
+        assert "1 elsewhere" in title
+
+
+async def test_options_box_follows_the_cursor() -> None:
+    app, screen = _hub(devices=[READY, ACTIVE], avds=[IDLE, OTHER])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        assert screen.current_row() == ACTIVE  # started outside Sandroid
+        box = _box(screen)
+        assert box["title"] == "Launch options · Pixel_8 · read-only"
+        assert box["save"]
+        assert not box["editable"]
+        assert "Started outside Sandroid" in box["note"]
+        await pilot.press("up")  # READY: Sandroid started it headless + cold
+        box = _box(screen)
+        assert (box["boot"], box["headless"], box["save"]) == ("cold", True, False)
+        assert "Started by Sandroid" in box["note"]
+        await pilot.press("down", "down")  # IDLE: editable, remembered options
+        box = _box(screen)
+        assert box["title"] == "Launch options · Idle_AVD"
+        assert box["editable"]
+        assert (box["boot"], box["headless"], box["save"]) == ("cold", True, False)
+        await pilot.press("down")  # OTHER: defaults
+        box = _box(screen)
+        assert box["title"] == "Launch options · Other"
+        assert (box["boot"], box["headless"], box["save"]) == ("normal", False, False)
+        assert screen.query_one("#opt-snap").disabled  # no snapshots
+
+
+async def test_option_keys_persist_per_avd_and_keep_the_focus(saved) -> None:
+    app, screen = _hub(avds=[IDLE, OTHER])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        table = screen.query_one("#hub-table")
+        assert screen.current_row() == IDLE
+        await pilot.press("h")  # headless off
+        await pilot.press("s")  # save state on
+        await pilot.press("c")  # cold -> quick boot
+        await settle(pilot)
+        assert screen.focused is table
+        box = _box(screen)
+        assert (box["boot"], box["headless"], box["save"]) == ("normal", False, True)
+        assert saved[-1] == ("Idle_AVD", AvdLaunchOptions(save_on_exit=True), False)
+        assert screen.current_row().options == AvdLaunchOptions(save_on_exit=True)
+        await pilot.press("down", "c")  # OTHER: cold boot
+        await settle(pilot)
+        assert saved[-1] == ("Other", AvdLaunchOptions(boot="cold"), False)
+        await pilot.press("up")
+        assert _box(screen)["save"]  # IDLE kept its own options
+        assert all(not opts.wipe_once for _name, opts, _last in saved)
+
+
+async def test_mouse_toggles_options_and_the_list_keeps_the_focus(saved) -> None:
+    app, screen = _hub(avds=[OTHER])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        table = screen.query_one("#hub-table")
+        await pilot.click("#opt-save")
+        await settle(pilot)
+        assert saved == [("Other", AvdLaunchOptions(save_on_exit=True), False)]
+        await pilot.click("#opt-cold")
+        await settle(pilot)
+        assert saved[-1] == (
+            "Other",
+            AvdLaunchOptions(boot="cold", save_on_exit=True),
+            False,
+        )
+        assert _box(screen)["boot"] == "cold"
+        assert screen.focused is table
+
+
+async def test_enter_starts_with_exactly_the_shown_options(saved) -> None:
     actions = FakeActions()
     app, screen = _hub(avds=[IDLE], actions=actions)
     async with app.run_test(size=SIZE) as pilot:
         await _shown(pilot, screen)
-        # Nothing running: the cursor is on the last-used AVD.
-        assert screen.current_row() == IDLE
+        await pilot.press("s")  # headless + cold + save state
         await pilot.press("enter")
         await settle(pilot)
         assert app.screen is screen  # stays open, shows the boot
         assert screen._busy == {IDLE.key: "starting…"}
-    assert actions.calls == [("start_avd", "Idle_AVD", IDLE.options)]
+    ((_, name, options),) = actions.calls
+    assert name == "Idle_AVD"
+    assert options == AvdLaunchOptions(headless=True, boot="cold", save_on_exit=True)
+    command = _command(options)
+    assert "-no-window" in command
+    assert "-no-snapshot-load" in command
+    assert "-no-snapshot-save" not in command
+    assert "-wipe-data" not in command
 
 
-async def test_cold_boot_key_overrides_the_boot_mode() -> None:
+async def test_a_snapshot_picked_with_n_is_what_enter_boots(saved) -> None:
     actions = FakeActions()
-    app, screen = _hub(
-        avds=[IDLE.__class__(name="A", options=AvdLaunchOptions(), last_used=True)],
-        actions=actions,
-    )
+    app, screen = _hub(avds=[IDLE], actions=actions)
     async with app.run_test(size=SIZE) as pilot:
         await _shown(pilot, screen)
-        await pilot.press("c")
+        await pilot.press("h")  # with a window
+        await pilot.press("n")
+        await until(pilot, lambda: type(app.screen).__name__ == "SelectionModal")
+        app.screen.dismiss("s1")
+        await until(pilot, lambda: _box(screen)["boot"] == "snapshot")
+        assert app.screen is screen
+        box = _box(screen)
+        assert (box["boot"], box["snapshot"]) == ("snapshot", "s1")
+        assert saved[-1] == (
+            "Idle_AVD",
+            AvdLaunchOptions(boot="snapshot", snapshot="s1"),
+            False,
+        )
+        await pilot.press("enter")
         await settle(pilot)
-    assert actions.calls == [("start_avd", "A", AvdLaunchOptions(boot="cold"))]
+    ((_, _, options),) = actions.calls
+    command = _command(options)
+    assert command[command.index("-snapshot") + 1] == "s1"
+    assert "-no-snapshot-save" in command
+    assert "-no-snapshot-load" not in command
+    assert "-no-window" not in command
+
+
+async def test_wipe_asks_then_unticks_and_is_never_saved(saved) -> None:
+    actions = FakeActions()
+    app, screen = _hub(avds=[OTHER], actions=actions)
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        await pilot.press("w")
+        await settle(pilot)
+        assert _box(screen)["wipe"]
+        assert saved == []  # a wipe is never remembered
+        await pilot.press("enter")
+        await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
+        await pilot.press("n")  # cancel: nothing starts, still ticked
+        await until(pilot, lambda: app.screen is screen)
+        assert actions.calls == []
+        assert _box(screen)["wipe"]
+        await pilot.press("enter")
+        await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
+        app.screen._opened_at -= app.screen.ARM_SECONDS  # past the typing guard
+        await pilot.press("y")
+        await until(pilot, lambda: actions.calls)
+        await settle(pilot)
+        assert app.screen is screen
+        assert not _box(screen)["wipe"]  # once
+        assert screen._busy == {OTHER.key: "wiping…"}
+    ((_, _, options),) = actions.calls
+    assert options == AvdLaunchOptions(wipe_once=True)
+    assert "-wipe-data" in _command(options)
+    assert saved == []
+
+
+async def test_running_row_is_read_only(saved) -> None:
+    app, screen = _hub(devices=[READY])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        for key in ("h", "s", "c", "w"):
+            assert not screen.check_action(
+                {"h": "headless", "s": "save", "c": "cold", "w": "wipe"}[key], ()
+            )
+            await pilot.press(key)
+        await pilot.click("#opt-save")
+        await settle(pilot)
+        box = _box(screen)
+        assert not box["editable"]
+        assert (box["boot"], box["headless"], box["save"]) == ("cold", True, False)
+        assert "R restarts with them" in box["note"]
+        assert "  h" not in str(screen.query_one("#opt-headless").label)
+    assert saved == []
 
 
 async def test_x_then_y_stops_the_emulator_by_serial() -> None:
@@ -525,11 +756,9 @@ async def test_x_then_y_stops_the_emulator_by_serial() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await _shown(pilot, screen)
         await pilot.press("x")
-        await settle(pilot)
-        assert type(app.screen).__name__ == "ConfirmModal"
+        await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
         await pilot.press("y")
-        await settle(pilot)
-        assert app.screen is screen
+        await until(pilot, lambda: app.screen is screen)
         assert screen._busy == {}  # on_done cleared it
         await until(pilot, lambda: screen.collects[-1] is True)  # and refreshed
     assert actions.calls == [("stop_emulator", "emulator-5554")]
@@ -541,21 +770,26 @@ async def test_x_then_n_does_not_stop() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await _shown(pilot, screen)
         await pilot.press("x")
-        await settle(pilot)
+        await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
         await pilot.press("n")
-        await settle(pilot)
+        await until(pilot, lambda: app.screen is screen)
     assert actions.calls == []
 
 
-async def test_stop_is_not_offered_for_a_physical_device() -> None:
+async def test_a_physical_device_offers_attach_only() -> None:
     actions = FakeActions()
-    phys = DeviceRow(serial="R58M", state=RowState.READY)
+    phys = DeviceRow(serial="R58M", model="SM_G991B", state=RowState.READY)
     app, screen = _hub(devices=[phys], actions=actions)
     async with app.run_test(size=SIZE) as pilot:
         await _shown(pilot, screen)
         assert screen.check_action("stop", ()) is False
         assert screen.check_action("attach", ()) is True
-        assert screen.check_action("start", ()) is False
+        for action in ("start", "cold", "headless", "save", "wipe", "rename"):
+            assert screen.check_action(action, ()) is False
+        box = _box(screen)
+        assert box["title"] == "Device · SM_G991B · R58M"
+        assert not box["controls"]
+        assert "no launch options" in box["note"]
         await pilot.press("x")
         await settle(pilot)
         assert app.screen is screen
@@ -575,42 +809,39 @@ async def test_unauthorized_row_explains_what_to_do() -> None:
     app, screen = _hub(devices=[UNAUTH])
     async with app.run_test(size=SIZE) as pilot:
         await _shown(pilot, screen)
-        detail = str(screen.query_one("#hub-detail").render())
-        assert "Allow USB debugging" in detail
-        assert UNAUTHORIZED_HELP.split(":")[0] in detail
+        box = _box(screen)
+        assert "Allow USB debugging" in box["note"]
+        assert UNAUTHORIZED_HELP.split(":")[0] in box["note"]
+        assert not box["controls"]
         await pilot.press("enter")
         await settle(pilot)
         assert app.screen is screen
     assert app.result == "unset"
 
 
-async def test_tab_moves_between_the_lists_and_footer_follows() -> None:
+async def test_footer_keys_follow_the_highlighted_row() -> None:
     app, screen = _hub(devices=[READY], avds=[IDLE])
     async with app.run_test(size=SIZE) as pilot:
         await _shown(pilot, screen)
-        assert isinstance(screen.current_row(), DeviceRow)
-        assert screen.check_action("cold", ()) is False
-        await pilot.press("tab")
-        await settle(pilot)
-        assert screen.current_row() == IDLE
-        assert screen.check_action("cold", ()) is True
-        assert screen.check_action("stop", ()) is False
+        table = screen.query_one("#hub-table")
 
+        def footer() -> dict[str, str]:
+            return {
+                key: b.binding.description
+                for key, b in screen.active_bindings.items()
+                if b.binding.show
+            }
 
-async def test_headless_toggle_is_remembered(monkeypatch) -> None:
-    saved: list = []
-    monkeypatch.setattr(
-        emulator,
-        "remember_launch",
-        lambda name, opts, make_last=True: saved.append((name, opts, make_last)),
-    )
-    app, screen = _hub(avds=[IDLE])
-    async with app.run_test(size=SIZE) as pilot:
-        await _shown(pilot, screen)
-        await pilot.press("h")
-        await settle(pilot)
-        assert screen.current_row().options.headless is False
-    assert saved == [("Idle_AVD", AvdLaunchOptions(boot="cold"), False)]
+        keys = footer()
+        assert keys["enter"] == "Attach"
+        assert {"x", "R"} <= set(keys)
+        assert not {"c", "n", "h", "s", "w", "e"} & set(keys)
+        await pilot.press("down")
+        keys = footer()
+        assert keys["enter"] == "Start"
+        assert {"c", "n", "h", "s", "w", "e"} <= set(keys)
+        assert not {"x", "R"} & set(keys)
+        assert screen.focused is table
 
 
 async def test_notes_and_empty_states_render() -> None:
@@ -618,7 +849,48 @@ async def test_notes_and_empty_states_render() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await _shown(pilot, screen)
         assert "boom" in str(screen.query_one("#hub-notes").render())
-        assert "none" in str(screen.query_one("#hub-running-empty").render())
+        assert "No devices and no AVDs" in str(screen.query_one("#hub-empty").render())
+        assert not screen.query_one("#hub-options").display
+
+
+async def test_escape_closes_an_open_snapshot_list_first() -> None:
+    """The app's priority Esc calls action_cancel: it must not close Devices
+    while the snapshot list is open (or focused after a click).
+    """
+    app, screen = _hub(avds=[IDLE])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        select = screen.query_one("#opt-snapshot")
+        select.focus()
+        select.expanded = True
+        await settle(pilot)
+        screen.action_cancel()
+        await settle(pilot)
+        assert app.screen is screen
+        assert not select.expanded
+        assert screen.focused is screen.query_one("#hub-table")
+        screen.action_cancel()
+        await settle(pilot)
+    assert app.result is None
+
+
+async def test_a_started_avd_keeps_the_cursor_as_its_running_row() -> None:
+    app, screen = _hub(avds=[OTHER, IDLE])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        assert screen.current_row() == IDLE
+        running = DeviceRow(
+            serial="emulator-5560",
+            avd_name="Idle_AVD",
+            state=RowState.BOOTING,
+            is_emulator=True,
+            ours=True,
+            launch_options=IDLE.options,
+        )
+        screen._apply(HubSnapshot(devices=(running,), avds=(OTHER,), taken_at=1.0))
+        await settle(pilot)
+        assert screen.current_row() == running
+        assert "read-only" in _box(screen)["title"]
 
 
 # --------------------------------------------------------------------------
@@ -995,8 +1267,6 @@ async def test_devices_opened_with_d_stays_open_on_reconnect(detached) -> None:
 # guards: stray clicks, double starts, AVDs running elsewhere, restart
 # --------------------------------------------------------------------------
 
-BUSY_AVD = AvdRow(name="Busy_AVD", options=AvdLaunchOptions(), running_elsewhere=True)
-
 
 async def test_a_single_click_never_starts_an_avd() -> None:
     actions = FakeActions()
@@ -1004,9 +1274,9 @@ async def test_a_single_click_never_starts_an_avd() -> None:
     app, screen = _hub(avds=[IDLE, other], actions=actions)
     async with app.run_test(size=SIZE) as pilot:
         await _shown(pilot, screen)
-        table = screen.query_one("#hub-avds")
+        table = screen.query_one("#hub-table")
         assert table.cursor_row == 0  # the screen highlighted IDLE itself
-        y = 2  # border-top, header, first row
+        y = 1  # header, first row
         await pilot.click(table, offset=(1, y))  # exactly the highlighted cell
         await settle(pilot)
         await pilot.click(table, offset=(10, y + 1))  # another row
@@ -1032,23 +1302,26 @@ async def test_a_second_start_while_the_first_runs_is_ignored() -> None:
     assert actions.calls == [("start_avd", "Idle_AVD", IDLE.options)]
 
 
-async def test_an_avd_running_elsewhere_cannot_be_started_or_renamed() -> None:
+async def test_an_avd_running_elsewhere_cannot_be_started_or_renamed(saved) -> None:
     actions = FakeActions()
     app, screen = _hub(avds=[BUSY_AVD], actions=actions)
     async with app.run_test(size=SIZE) as pilot:
         await _shown(pilot, screen)
         assert screen.current_row() == BUSY_AVD
-        for action in ("start", "cold", "wipe", "rename"):
+        for action in ("start", "cold", "snapshot", "headless", "save", "wipe"):
             assert not screen.check_action(action, ())
-        assert screen.check_action("headless", ()) is True
-        for key in ("enter", "c", "w", "e"):
+        assert not screen.check_action("rename", ())
+        for key in ("enter", "c", "h", "s", "w", "e"):
             await pilot.press(key)
             await settle(pilot)
             assert app.screen is screen  # no confirm / rename dialog
-        detail = str(screen.query_one("#hub-detail").render())
-        assert "Running elsewhere" in detail
-        assert "running elsewhere" in str(screen._avd_cells(BUSY_AVD)[-1])
+        box = _box(screen)
+        assert "Running elsewhere" in box["note"]
+        assert box["title"].endswith("read-only")
+        assert not box["editable"]
+        assert "running elsewhere" in str(screen._state_cell(BUSY_AVD))
     assert actions.calls == []
+    assert saved == []
 
 
 @pytest.mark.parametrize(("busy", "confirm"), [(False, False), (True, True)])
@@ -1064,7 +1337,7 @@ async def test_restart_of_the_active_device_asks_while_tasks_run(busy, confirm) 
             assert type(app.screen).__name__ == "ConfirmModal"
             assert actions.calls == []
             await pilot.press("y")
-            await settle(pilot)
+            await until(pilot, lambda: app.screen is screen)
         assert app.screen is screen
     assert actions.calls == [("restart_emulator", "emulator-5556")]
 

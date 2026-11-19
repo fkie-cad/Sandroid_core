@@ -230,6 +230,7 @@ def test_launch_avd_uses_explicit_port_safe_flags_and_registers(env):
             "-Vulkan",
             "-gpu",
             "host",
+            "-no-snapshot-save",
         ]
     ]
     assert launch.serial == "emulator-5556"
@@ -406,8 +407,11 @@ def test_restart_cancels_the_old_launch_s_boot_waiter(env):
 def test_restart_resolves_avd_before_kill_and_never_wipes(env):
     adb = env["adb"]
     adb.add("emulator-5558", avd="Other")
-    launch = emu.restart_emulator("emulator-5558", AvdLaunchOptions(boot="wipe"))
+    launch = emu.restart_emulator(
+        "emulator-5558", AvdLaunchOptions(wipe_once=True, save_on_exit=True)
+    )
     assert launch.avd == "Other"
+    assert launch.options == AvdLaunchOptions(save_on_exit=True)
     command = env["spawned"][-1]
     assert command[:5] == ["/sdk/emulator", "-avd", "Other", "-port", "5558"]
     assert "-wipe-data" not in command
@@ -424,7 +428,7 @@ def test_restart_without_launch_record_uses_remembered_options(env):
     )
     emu.restart_emulator("emulator-5558")
     command = env["spawned"][-1]
-    assert command[-2:] == ["-snapshot", "clean"]
+    assert command[-3:] == ["-snapshot", "clean", "-no-snapshot-save"]
     assert "-no-window" in command
 
 
