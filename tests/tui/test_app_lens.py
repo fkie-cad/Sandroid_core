@@ -993,8 +993,9 @@ async def test_light_themes_recolor_the_shell_chrome_and_status_glyphs(fake):
             await _settle(pilot)
             assert app.theme == f"sandroid-{name}"
             assert fixed_color("running") == theme.status_colors["running"]
-            assert app.get_css_variables()["footer-key-foreground"] == (
-                theme.textual_variables["footer-key-foreground"]
+            assert (
+                app.get_css_variables()["footer-key-foreground"]
+                == (theme.textual_variables["footer-key-foreground"])
             )
             assert header.styles.background.hex.upper() != "#0B1628"
 

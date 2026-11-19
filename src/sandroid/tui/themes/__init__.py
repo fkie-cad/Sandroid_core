@@ -1394,8 +1394,8 @@ def get_available_theme_css_files() -> dict[str, Path]:
 __all__ = [
     "CYBERPUNK_THEME",
     "DARK_THEME",
-    "DEEP_SEA_THEME",
     "DAYLIGHT_THEME",
+    "DEEP_SEA_THEME",
     "DEFAULT_LENS",
     "DEFAULT_THEME",
     "DRACULA_THEME",
