@@ -110,6 +110,20 @@ _LABEL_PROP = {
     "description": "The ask in a few words (<=60 chars), shown in the lens.",
 }
 
+_SHORT_PROP = {
+    "type": "string",
+    "description": (
+        "A 1-3 word label (<=14 chars) for the lens column and bar, e.g. "
+        "'personal data', 'POST api.x', 'email'. Pass it; the automatic one "
+        "is a guess."
+    ),
+}
+
+_REGEX_PROP = {
+    "type": "boolean",
+    "description": "Alias of where.regex (text/*_contains as regular expressions).",
+}
+
 _HID_PROP = {
     "type": "string",
     "description": "Existing highlight set id (h<n>) to extend instead of a new one.",
@@ -321,17 +335,33 @@ def _monitor_rows() -> list[dict]:
     return list(rows.values())
 
 
-def collect_rows(lens: str) -> tuple[list[dict], str]:
-    """``(rows, source)``: the lens's rows (``lens``) or a fallback."""
+def _max_seq(raw: list[dict]) -> int | None:
+    seqs = []
+    for r in raw:
+        with contextlib.suppress(TypeError, ValueError):
+            if r.get("seq") is not None:
+                seqs.append(int(r["seq"]))
+    return max(seqs) if seqs else None
+
+
+def _collect(lens: str) -> tuple[list[dict], str, int | None]:
+    """``(rows, source, max seq)``; the seq counts every row of the view,
+    also the ones the tools cannot take (TLS failures without a flow id).
+    """
     snap = _store().snapshot_rows(lens)
     if snap is not None:
-        rows = [r for r in (_normalize_row(lens, x) for x in snap) if r is not None]
-        return rows, "lens"
-    if lens == "network":
+        raw, source = snap, "lens"
+    elif lens == "network":
         raw, source = _flow_log_rows(), "flow_log"
     else:
         raw, source = _monitor_rows(), "monitor"
     rows = [r for r in (_normalize_row(lens, x) for x in raw) if r is not None]
+    return rows, source, _max_seq(raw) if lens == "network" else None
+
+
+def collect_rows(lens: str) -> tuple[list[dict], str]:
+    """``(rows, source)``: the lens's rows (``lens``) or a fallback."""
+    rows, source, _seq = _collect(lens)
     return rows, source
 
 
@@ -558,6 +588,58 @@ def network_haystack(row: Mapping[str, Any]) -> str:
     )
 
 
+_WHERE_NAMES = {
+    "method": "method",
+    "host_glob": "host",
+    "path_glob": "path",
+    "status": "status",
+    "content_type_glob": "content type",
+    "app": "app",
+    "kind": "kind",
+    "ops": "ops",
+    "process": "process",
+    "review_kind": "review",
+}
+_WHERE_TEXT = {
+    "text": "text",
+    "body_contains": "body",
+    "header_contains": "headers",
+    "content_contains": "content",
+}
+
+
+def _where_words(field: str, value: Any, regex: bool) -> str:
+    """One ``where`` field in plain words: ``method POST or GET``."""
+    items = " or ".join(str(v) for v in _as_list(value))
+    if field in _WHERE_TEXT:
+        verb = "matches" if regex else "contains"
+        return f"{_WHERE_TEXT[field]} {verb} “{items}”"
+    if field == "url_regex":
+        return f"URL matches “{items}”"
+    if field == "min_bytes":
+        return f"at least {items} bytes"
+    if field == "max_bytes":
+        return f"at most {items} bytes"
+    if field == "min_count":
+        return f"at least {items} events"
+    if field == "watched":
+        return "watched" if value else "not watched"
+    if field == "method":
+        items = items.upper()
+    return f"{_WHERE_NAMES.get(field, field)} {items}"
+
+
+def _with_regex_alias(where: Any, regex: bool | None) -> dict | None:
+    """``where`` plus a top-level ``regex`` (a common model slip) as where.regex."""
+    if where is not None and not isinstance(where, dict):
+        raise _invalid("where must be an object")
+    if regex is None:
+        return where
+    out = dict(where or {})
+    out.setdefault("regex", bool(regex))
+    return out
+
+
 def compile_where(
     lens: str, where: Mapping[str, Any] | None, details: _Details
 ) -> tuple[list[Predicate], str]:
@@ -581,7 +663,7 @@ def compile_where(
     for field, value in where.items():
         if value is None or value == [] or value == "":
             continue
-        summary.append(f"{field}={value}")
+        summary.append(_where_words(field, value, regex))
         if lens == "network":
             _network_pred(field, value, regex, details, cheap, costly)
         else:
@@ -728,14 +810,18 @@ def _row_line(lens: str, row: Mapping[str, Any]) -> str:
 
 
 def _basis(
-    lens: str, rows: list[dict], evaluated: int, at: float | None = None
+    lens: str,
+    rows: list[dict],
+    evaluated: int,
+    at: float | None = None,
+    through: int | None = None,
 ) -> dict:
     """``{"judged_at", "through_seq", "evaluated"}`` for "N new since".
 
     *rows* must be ALL scoped rows of the view (not only the candidates):
     a row that existed when the rows were collected (*at*) is never "new".
     """
-    seqs = []
+    seqs = [] if through is None else [through]
     for r in rows:
         with contextlib.suppress(TypeError, ValueError):
             if r.get("seq") is not None:
@@ -756,6 +842,7 @@ def _create_set(
     lens: str,
     label: str,
     *,
+    short: str | None = None,
     reasons: Mapping[str, str],
     origin: str,
     query: str,
@@ -769,6 +856,7 @@ def _create_set(
         hs = store.create(
             lens,
             label,
+            short=short or None,
             reasons=reasons,
             origin=origin,
             query=query,
@@ -843,7 +931,8 @@ def _existing_set(store: Any, lens: str, set_id: str) -> Any:
         "highlight or filter it highlights the matches in the lens itself "
         "(or shows only them); never copy keys around. Returns N of M, "
         "hidden_by_lens_filters and at most 50 keys. Use classify_rows when "
-        "matching needs judgement."
+        "matching needs judgement. With apply, pass label (the ask) and short "
+        "(1-3 words for the lens column, e.g. 'POST api.x')."
     ),
     parameters={
         "type": "object",
@@ -861,7 +950,9 @@ def _existing_set(store: Any, lens: str, set_id: str) -> Any:
                 "default": "none",
             },
             "label": _LABEL_PROP,
+            "short": _SHORT_PROP,
             "highlight_id": _HID_PROP,
+            "regex": _REGEX_PROP,
         },
         "required": ["lens"],
     },
@@ -875,6 +966,8 @@ def find_rows(
     apply: str = "none",
     label: str | None = None,
     highlight_id: str | None = None,
+    short: str | None = None,
+    regex: bool | None = None,
 ) -> dict[str, Any]:
     """Structural row search; see the tool description."""
     lens = _check_lens(lens)
@@ -882,11 +975,10 @@ def find_rows(
         raise _invalid("apply must be none, highlight or filter")
     if apply != "none":
         _require_orchestrator("find_rows with apply")
-    if where is not None and not isinstance(where, dict):
-        raise _invalid("where must be an object")
+    where = _with_regex_alias(where, regex)
     details = _Details()
     preds, summary = compile_where(lens, where, details)
-    rows, source = collect_rows(lens)
+    rows, source, max_seq = _collect(lens)
     collected_at = time.time()
     scoped = _scoped(rows, scope)
     matches = _filter(scoped, preds)
@@ -931,11 +1023,12 @@ def find_rows(
                 store,
                 lens,
                 label or summary or "found rows",
+                short=short,
                 reasons=reasons,
                 origin="structural",
                 query=summary,
                 scope=matches[0].get("scope"),
-                basis=_basis(lens, scoped, len(scoped), collected_at),
+                basis=_basis(lens, scoped, len(scoped), collected_at, max_seq),
                 complete=True,
                 filter=apply == "filter",
                 generation=gen,
@@ -1019,7 +1112,8 @@ def classifier_client() -> Any:
         "structural part into 'where' first. Rows are compact digests (auth "
         "values reduced, bodies capped). Returns N of M, partial, "
         "hidden_by_lens_filters, sampled reasons and bytes_sent. Ctrl+X stops "
-        "it and keeps a partial set."
+        "it and keeps a partial set. Pass label (the ask) and short (1-3 "
+        "words for the lens column, e.g. 'personal data')."
     ),
     parameters={
         "type": "object",
@@ -1043,7 +1137,9 @@ def classifier_client() -> Any:
                 "default": "highlight",
             },
             "label": _LABEL_PROP,
+            "short": _SHORT_PROP,
             "highlight_id": _HID_PROP,
+            "regex": _REGEX_PROP,
             "max_rows": {
                 "type": "integer",
                 "description": "Refuse when more rows remain (default 1000, at most 2000).",
@@ -1064,6 +1160,8 @@ def classify_rows(
     label: str | None = None,
     highlight_id: str | None = None,
     max_rows: int | None = None,
+    short: str | None = None,
+    regex: bool | None = None,
 ) -> dict[str, Any]:
     """Semantic row classification; see the tool description."""
     from sandroid.ai import row_classifier as rc
@@ -1080,8 +1178,7 @@ def classify_rows(
         raise _invalid("query must describe what a matching row is")
     if apply not in ("highlight", "filter", "none"):
         raise _invalid("apply must be highlight, filter or none")
-    if where is not None and not isinstance(where, dict):
-        raise _invalid("where must be an object")
+    where = _with_regex_alias(where, regex)
     limit = _cfg("max_rows", 1000) if max_rows is None else max_rows
     try:
         limit = int(limit)
@@ -1095,7 +1192,7 @@ def classify_rows(
 
     details = _Details()
     preds, where_summary = compile_where(lens, where, details)
-    rows, source = collect_rows(lens)
+    rows, source, max_seq = _collect(lens)
     collected_at = time.time()
     scoped = _scoped(rows, scope)
     by_key = {r["key"]: r for r in scoped}
@@ -1176,11 +1273,12 @@ def classify_rows(
                 store,
                 lens,
                 label or query,
+                short=short,
                 reasons={},
                 origin="ai",
                 query=query + (f" where {where_summary}" if where_summary else ""),
                 scope=candidates[0].get("scope"),
-                basis=_basis(lens, scoped, 0, collected_at),
+                basis=_basis(lens, scoped, 0, collected_at, max_seq),
                 complete=False,
                 filter=False,
                 generation=gen,
@@ -1268,7 +1366,7 @@ def classify_rows(
                     sid,
                     complete=not outcome.partial,
                     stats=stats,
-                    basis=_basis(lens, scoped, outcome.scanned, collected_at),
+                    basis=_basis(lens, scoped, outcome.scanned, collected_at, max_seq),
                     generation=gen,
                 )
                 if apply == "filter":
@@ -1391,9 +1489,9 @@ def classify_rows(
     description=(
         "Add, remove or replace rows of a highlight set by key, or switch a "
         "set between highlight and filter (mode). Without highlight_id it "
-        "creates a set (label and keys needed). Keys the lens does not have "
-        "are returned, not stored. For many rows use find_rows/classify_rows "
-        "with apply instead."
+        "creates a set (label, short and keys; short = 1-3 words for the lens "
+        "column). Keys the lens does not have are returned, not stored. For "
+        "many rows use find_rows/classify_rows with apply instead."
     ),
     parameters={
         "type": "object",
@@ -1405,6 +1503,7 @@ def classify_rows(
                 "description": "Row keys (flow ids / device paths), at most 500.",
             },
             "label": _LABEL_PROP,
+            "short": _SHORT_PROP,
             "reasons": {
                 "type": "object",
                 "description": "Optional {key: short reason} per row.",
@@ -1438,6 +1537,7 @@ def highlight_rows(
     mode: str | None = None,
     highlight_id: str | None = None,
     action: str = "add",
+    short: str | None = None,
 ) -> dict[str, Any]:
     """Manual highlight edits; see the tool description."""
     _require_orchestrator("highlight_rows")
@@ -1511,6 +1611,7 @@ def highlight_rows(
                 store,
                 lens,
                 label or "picked rows",
+                short=short,
                 reasons=applied,
                 origin="manual",
                 query="",
@@ -1532,8 +1633,8 @@ def highlight_rows(
                     dropped = _add_capped(store, set_id, applied, gen)
                 current = store.get(set_id)
                 total = current.count if current is not None else 0
-            if label:
-                store.update_meta(set_id, label=label, generation=gen)
+            if label or short:
+                store.update_meta(set_id, label=label, short=short, generation=gen)
             if mode == "filter":
                 store.set_filter(lens, set_id, generation=gen)
             elif mode == "highlight" and store.filter_set(lens) == set_id:

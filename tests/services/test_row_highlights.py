@@ -47,8 +47,26 @@ def test_create_assigns_ids_slots_and_short_labels(store):
     assert (b.id, b.slot) == ("h2", 2)
     assert (c.id, c.slot) == ("h3", 1)
     assert len(a.short) <= 14
-    assert a.short == "POST requests"
+    # Filler words go, content words stay; a cut word gets an ellipsis.
+    assert a.short == "POST api.exam…"
     assert [s.id for s in store.sets("network")] == ["h1", "h2"]
+
+
+@pytest.mark.parametrize(
+    ("label", "short"),
+    [
+        ("files with personal data", "personal data"),
+        ("show only requests that contain email", "email"),
+        ("POST requests to api.x", "POST api.x"),
+        ("all requests to tracker hosts", "tracker hosts"),
+        ("tracking", "tracking"),
+        ("Supercalifragilisticexpialidocious", "Supercalifrag…"),
+        ("highlight all files", "highlight all"),  # nothing but filler
+    ],
+)
+def test_short_label_keeps_content_words(label, short):
+    assert rh.short_label(label) == short
+    assert len(rh.short_label(label)) <= rh.SHORT_MAX
 
 
 def test_lowest_free_slot_and_ids_never_reused(store):

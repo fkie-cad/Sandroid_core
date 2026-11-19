@@ -227,20 +227,72 @@ def _clip(text: Any, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+#: Filler words :func:`short_label` drops ("all POST requests to api.x").
+_FILLER = frozenset(
+    {
+        "a",
+        "all",
+        "an",
+        "and",
+        "any",
+        "are",
+        "contain",
+        "containing",
+        "contains",
+        "every",
+        "file",
+        "files",
+        "flow",
+        "flows",
+        "for",
+        "from",
+        "has",
+        "have",
+        "highlight",
+        "highlights",
+        "in",
+        "is",
+        "of",
+        "only",
+        "request",
+        "requests",
+        "row",
+        "rows",
+        "show",
+        "sent",
+        "that",
+        "the",
+        "to",
+        "where",
+        "which",
+        "with",
+    }
+)
+
+
 def short_label(label: str) -> str:
-    """A column-sized label from a longer one (whole words when possible)."""
+    """A 1-3 word column/bar label from a longer one (at most 14 characters).
+
+    Filler words are dropped and the content words kept ("POST requests to
+    api.x" -> "POST api.x", "files with personal data" -> "personal data");
+    a word that no longer fits is cut with an ellipsis, never silently.
+    """
     label = " ".join(str(label or "").split())
     if len(label) <= SHORT_MAX:
         return label
-    words: list[str] = []
-    for word in label.split():
-        candidate = " ".join([*words, word])
-        if len(candidate) > SHORT_MAX:
-            break
-        words.append(word)
-    if words:
-        return " ".join(words)
-    return label[: SHORT_MAX - 1] + "…"
+    words = [w for w in label.split() if w.lower().strip(",.:;") not in _FILLER]
+    words = words or label.split()
+    out = ""
+    for word in words[:3]:
+        candidate = f"{out} {word}".strip()
+        if len(candidate) <= SHORT_MAX:
+            out = candidate
+            continue
+        room = SHORT_MAX - (len(out) + 1 if out else 0)
+        if room >= 4 or not out:
+            out = (f"{out} " if out else "") + word[: max(1, room - 1)] + "…"
+        break
+    return out
 
 
 def normalize_key(lens: str, key: Any) -> str:

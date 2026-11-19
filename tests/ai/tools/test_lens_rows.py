@@ -1027,3 +1027,75 @@ def test_classify_rows_result_holds_at_most_max_verdicts(
     stored = ResultStore(None).put("classify_rows", {}, result)
     shaped = json.loads(shape_result(result, stored.id, cap_tokens=50))
     assert shaped.get("_rid") == stored.id or stored.id in json.dumps(shaped)
+
+
+# -- E2E findings ----------------------------------------------------------------------------------
+
+
+def test_where_summary_and_reasons_are_plain_words(store, flow_dir):
+    result = lens_rows.find_rows(
+        "network",
+        {"method": ["post"], "host_glob": ["api.*", "other.*"], "body_contains": "@"},
+        apply="highlight",
+    )
+    hs = store.get(result["highlight_id"])
+    assert hs.query == "method POST, host api.* or other.*, body contains “@”"
+    assert hs.reasons["a1"] == "matches " + hs.query
+    assert "[" not in result["summary"]
+    assert lens_rows._where_words("status", [200, "4xx"], False) == "status 200 or 4xx"
+    assert lens_rows._where_words("text", "a.b", True) == "text matches “a.b”"
+    assert lens_rows._where_words("min_bytes", 10, False) == "at least 10 bytes"
+    assert lens_rows._where_words("watched", False, False) == "not watched"
+
+
+def test_regex_outside_where_is_accepted_as_an_alias(
+    store, flow_dir, run_ctx, monkeypatch
+):
+    found = lens_rows.find_rows("network", {"body_contains": r"pass=\w+"}, regex=True)
+    assert found["keys"] == ["a3"]
+    _use_client(monkeypatch, PiiClient())
+    result = lens_rows.classify_rows(
+        "network", "pii", where={"text": r"other\.net"}, regex=True, apply="none"
+    )
+    assert result["candidates"] == 1
+    for name in ("find_rows", "classify_rows"):
+        spec = get_tool_registry().get_spec(name)
+        assert "regex" in spec.parameters["properties"]
+        assert "short" in spec.parameters["properties"]
+    assert (
+        "short"
+        in get_tool_registry().get_spec("highlight_rows").parameters["properties"]
+    )
+
+
+def test_tools_take_a_short_label(store, flow_dir, run_ctx, monkeypatch):
+    a = lens_rows.find_rows(
+        "network", {"method": ["POST"]}, apply="highlight", short="POST api"
+    )
+    assert store.get(a["highlight_id"]).short == "POST api"
+    _use_client(monkeypatch, PiiClient())
+    b = lens_rows.classify_rows("network", "personal data", short="personal")
+    assert store.get(b["highlight_id"]).short == "personal"
+    c = lens_rows.highlight_rows("network", keys=["a2"], label="x", short="cdn")
+    assert store.get(c["highlight_id"]).short == "cdn"
+    lens_rows.highlight_rows("network", highlight_id=c["highlight_id"], short="img")
+    assert store.get(c["highlight_id"]).short == "img"
+    # Without one, filler words are dropped from the label.
+    d = lens_rows.find_rows(
+        "network",
+        {"status": "4xx"},
+        apply="highlight",
+        label="all requests to other.net",
+    )
+    assert store.get(d["highlight_id"]).short == "other.net"
+
+
+def test_new_since_basis_counts_rows_the_tools_cannot_take(store):
+    rows = [
+        {"key": "f1", "flow_id": "a1", "seq": 1, "shown": True, "method": "POST"},
+        {"key": None, "flow_id": None, "seq": 7, "shown": True, "kind": "tls"},
+    ]
+    store.register_row_source("network", lambda: rows, None)
+    result = lens_rows.find_rows("network", {"method": ["POST"]}, apply="highlight")
+    assert result["scanned"] == 1
+    assert store.get(result["highlight_id"]).basis["through_seq"] == 7
