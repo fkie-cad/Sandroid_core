@@ -1233,10 +1233,13 @@ class PrivacyScanService:
                 return
             if self._thread is not None and self._thread.is_alive():
                 return
-            self._thread = threading.Thread(
+            # Published only once started (under the lock): close() on another
+            # thread never sees, and joins, a thread that has not started.
+            thread = threading.Thread(
                 target=self._run, name="privacy-scan", daemon=True
             )
-            self._thread.start()
+            thread.start()
+            self._thread = thread
 
     def _kick(self) -> None:
         """Wake the worker (a retro request needs no queued item)."""
@@ -1250,10 +1253,11 @@ class PrivacyScanService:
 
     def close(self, timeout: float = 2.0) -> None:
         """Stop the worker (tests, quit)."""
-        self._closed = True
+        with self._lock:  # no worker starts after this; see _ensure_worker
+            self._closed = True
+            thread = self._thread
         with contextlib.suppress(queue.Full):
             self._queue.put_nowait((PRIO_STOP, next(self._counter), None))
-        thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
 

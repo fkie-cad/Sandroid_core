@@ -981,3 +981,16 @@ def test_has_versions_knows_pulled_files_without_io(svc, folder, flow_dir):
         assert not again.has_versions("/data/data/com.fittrack.app/other.xml")
     finally:
         again.close()
+
+
+def test_close_never_joins_a_worker_that_has_not_started():
+    """close() racing the worker start: it joins a started thread or none."""
+    for _ in range(200):
+        service = ps.PrivacyScanService()
+        starter = threading.Thread(target=service._ensure_worker)
+        starter.start()
+        service.close(timeout=1.0)  # must not raise "cannot join thread..."
+        starter.join()
+        service.close(timeout=1.0)
+        thread = service._thread
+        assert thread is None or thread.ident is not None
