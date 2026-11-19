@@ -106,7 +106,7 @@ class EnvironmentService:
 
     Attributes:
         adb: ADB interface (injected or uses global Adb)
-        emulator: Emulator interface (injected or uses global Emulator)
+        emulator: Emulator interface (injected or CoreEmulator)
         event_bus: Optional event bus for publishing state changes
 
     Example:
@@ -134,7 +134,7 @@ class EnvironmentService:
             adb: ADB interface for device communication.
                  If None, uses global Adb class.
             emulator: Emulator interface for AVD management.
-                      If None, uses global Emulator class.
+                      If None, uses CoreEmulator.
             event_bus: Optional event bus for state change notifications.
         """
         self._adb = adb
@@ -155,9 +155,9 @@ class EnvironmentService:
         """Get Emulator interface, falling back to global if not injected."""
         if self._emulator is not None:
             return self._emulator
-        from sandroid.core.emulator import Emulator
+        from sandroid.services.setup_service import CoreEmulator
 
-        return Emulator
+        return CoreEmulator
 
     def check_setup(self, auto_start_emulator: bool = False) -> SetupResult:
         """Validate the environment setup.

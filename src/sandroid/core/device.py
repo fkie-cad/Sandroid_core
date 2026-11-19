@@ -4,8 +4,79 @@ This module provides classes for representing Android devices (emulators and phy
 with automatic type detection and capability management.
 """
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum, auto
+
+#: Single-word adb device states (``adb devices``).
+_ADB_STATES = frozenset(
+    {
+        "device",
+        "offline",
+        "unauthorized",
+        "authorizing",
+        "connecting",
+        "bootloader",
+        "recovery",
+        "sideload",
+        "rescue",
+        "host",
+        "unknown",
+        "detached",
+    }
+)
+_PROP_RE = re.compile(r"^[a-z_]+:\S+$")
+
+
+@dataclass(frozen=True)
+class AdbDeviceEntry:
+    """One line of ``adb devices`` / ``adb devices -l``.
+
+    Attributes:
+        serial: adb serial.
+        state: adb state (``device``, ``offline``, ``unauthorized``,
+            ``no permissions``...).
+        props: ``-l`` key/value pairs (``model``, ``product``, ``device``,
+            ``transport_id``, ``usb``...).
+    """
+
+    serial: str
+    state: str
+    props: dict[str, str] = field(default_factory=dict)
+
+
+def parse_adb_devices(text: str) -> list[AdbDeviceEntry]:
+    """Parse ``adb devices`` (tab separated) or ``adb devices -l`` output.
+
+    Skips the header and ``* daemon ...`` lines. A multi-word state such as
+    ``no permissions (missing udev rules?); see [url]`` is reduced to
+    ``no permissions``.
+    """
+    entries: list[AdbDeviceEntry] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("*") or line.lower().startswith("list of"):
+            continue
+        if "\t" in line:
+            serial, _, rest = line.partition("\t")
+        else:
+            serial, _, rest = line.partition(" ")
+        serial, words = serial.strip(), rest.split()
+        if not serial or not words or serial.endswith(":"):  # "error: ..."
+            continue
+        if words[0] in _ADB_STATES:
+            state, tail = words[0], words[1:]
+        else:
+            n = next((i for i, w in enumerate(words) if _PROP_RE.match(w)), len(words))
+            state = re.split(r"[(;\[]", " ".join(words[:n]), maxsplit=1)[0].strip()
+            tail = words[n:]
+        props = {}
+        for word in tail:
+            if _PROP_RE.match(word):
+                key, _, value = word.partition(":")
+                props[key] = value
+        entries.append(AdbDeviceEntry(serial, state or "unknown", props))
+    return entries
 
 
 class DeviceType(Enum):
@@ -47,6 +118,9 @@ class Device:
         last_probe_attempt: ``time.monotonic()`` timestamp of the last
             ``_populate_device_info`` probe attempt, used to cooldown-gate
             re-probing a flickering/zombie device.
+        root_kind: How root is available: ``"adbd root"`` (adbd runs as
+            root), ``"adb root"`` (userdebug/eng build, ``adb root`` works),
+            ``"su"`` (su binary), ``"none"``; ``""`` until probed.
     """
 
     serial: str
@@ -58,6 +132,7 @@ class Device:
     api_level: int = 0
     capabilities: set[DeviceCapability] = field(default_factory=set)
     last_probe_attempt: float = 0.0
+    root_kind: str = ""
 
     def __post_init__(self):
         """Detect device type and capabilities based on serial pattern."""
@@ -88,7 +163,6 @@ class Device:
                 DeviceCapability.SNAPSHOTS,
                 DeviceCapability.EMULATOR_CONTROLS,
                 DeviceCapability.NETWORK_CAPTURE,
-                DeviceCapability.ADB_ROOT,
             }
         # Physical devices have restricted capabilities
         return common

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 
-from sandroid.config import android_env
+from sandroid.core import emulator
 from sandroid.tui.controllers.device_controller import AVDInfo, DeviceController
 
 
@@ -270,8 +270,7 @@ def test_resolve_selection_cancel_falls_back_to_auto_select():
 
 
 def test_offer_avd_start_marshals_via_call_from_thread_only(monkeypatch):
-    monkeypatch.setattr(android_env, "find_emulator_path", lambda: "/fake/emulator")
-    monkeypatch.setattr(android_env, "find_existing_sdk", lambda: "/fake/sdk")
+    monkeypatch.setattr(emulator, "emulator_binary", lambda: "/fake/emulator")
 
     dm = _FakeDeviceManager(devices=[])
     push_calls: list = []

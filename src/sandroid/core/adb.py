@@ -18,7 +18,6 @@ do not need any changes.
 import contextlib
 import functools
 import re
-import shutil
 import subprocess
 import threading
 from collections.abc import Iterator
@@ -202,35 +201,25 @@ class Adb:
     # ------------------------------------------------------------------
 
     @classmethod
-    # TODO: make sure adb root is run
     def init(cls):
-        """Initializes the ADB class by setting the ADB path and logger.
+        """Resolve the adb executable (:func:`sandroid.core.emulator.adb_binary`).
 
-        .. note::
-            This method ensures that the ADB path is correctly set and logs the path.
+        Raises:
+            AdbNotFoundError: adb is neither configured, on PATH nor in the
+                Android SDK. (Never exits the process: this can run on a
+                worker thread of the TUI.)
         """
         if not cls.ADB_PATH:
-            try:
-                cls.ADB_PATH = shutil.which("adb")
-            except shutil.Error:
-                logger.critical("Could not find ADB path")
-                exit(1)
-            if cls.ADB_PATH is None:
-                # Not on PATH: fall back to the Android SDK (ANDROID_HOME /
-                # ANDROID_SDK_ROOT / default SDK locations).
-                try:
-                    from sandroid.config.android_env import find_adb_path
+            from sandroid.core.emulator import adb_binary
+            from sandroid.core.exceptions import AdbNotFoundError
 
-                    sdk_adb = find_adb_path()
-                    cls.ADB_PATH = str(sdk_adb) if sdk_adb else None
-                except Exception as e:  # pragma: no cover - defensive
-                    logger.debug(f"SDK adb lookup failed: {e}")
-            if cls.ADB_PATH is None:
-                logger.critical(
+            path = adb_binary()
+            if path is None:
+                raise AdbNotFoundError(
                     "adb not found on PATH or in the Android SDK "
                     "(set ANDROID_HOME or add platform-tools to PATH)"
                 )
-                exit(1)
+            cls.ADB_PATH = str(path)
             logger.debug("Android debug bridge path found: " + cls.ADB_PATH)
 
     # ------------------------------------------------------------------
@@ -263,9 +252,14 @@ class Adb:
             OSError: If the ADB process fails to start.
             subprocess.SubprocessError: If there is a subprocess error during execution.
         """
-        # Ensure ADB path is initialized
+        # Ensure ADB path is initialized. A missing adb reads like any other
+        # failed start ("OSError: ..."), which callers already handle.
         if not cls.ADB_PATH:
-            cls.init()
+            try:
+                cls.init()
+            except OSError as e:
+                logger.error(str(e))
+                return "", f"OSError: {e}"
 
         full_command = cls._build_command(command, serial=serial)
         logger.debug("Running ADB command " + full_command)

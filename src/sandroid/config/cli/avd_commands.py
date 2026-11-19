@@ -660,101 +660,42 @@ def _start_avd(
     Args:
         avd_name: Name of AVD to start
         headless: Whether to start in headless mode
-        android_env: Dictionary with Android environment paths
+        android_env: Unused (the emulator and its environment come from
+            :mod:`sandroid.core.emulator`); kept for the callers.
         boot_mode: Boot mode ("default", "cold", "snapshot", "wipe")
         snapshot_name: Snapshot name for "snapshot" boot mode
 
     Returns:
         True if AVD started successfully
     """
-    import os
+    from sandroid.core.emulator import (
+        AvdLaunchOptions,
+        launch_avd,
+        remember_launch,
+    )
+    from sandroid.core.exceptions import EmulatorLaunchError
 
+    boot = {"default": "normal"}.get(boot_mode, boot_mode)
+    opts = AvdLaunchOptions(
+        headless=headless,
+        boot=boot if boot in ("normal", "cold", "snapshot", "wipe") else "normal",
+        snapshot=snapshot_name if boot == "snapshot" else None,
+    )
     try:
-        emulator_path = android_env.get("emulator_path")
-        if not emulator_path:
-            console.print("[red]Emulator path not configured[/red]")
-            return False
-
-        # Validate emulator executable path
-        emulator_name = Path(emulator_path).name
-        if emulator_name not in {"emulator", "emulator.exe"}:
-            console.print(f"[red]Invalid emulator executable: {emulator_name}[/red]")
-            return False
-
-        # Validate AVD name (prevent command injection)
-        if (
-            not avd_name
-            or not avd_name.replace("_", "").replace("-", "").replace(".", "").isalnum()
-        ):
-            console.print(f"[red]Invalid AVD name: {avd_name}[/red]")
-            return False
-
-        # Validate snapshot name if provided (prevent command injection)
-        if (
-            snapshot_name
-            and not snapshot_name.replace("_", "")
-            .replace("-", "")
-            .replace(".", "")
-            .isalnum()
-        ):
-            console.print(f"[red]Invalid snapshot name: {snapshot_name}[/red]")
-            return False
-
-        # Build command with validated inputs
-        cmd = [str(emulator_path), "-avd", avd_name]
-
-        # Add boot mode flags
-        if boot_mode == "cold":
-            cmd.append("-no-snapshot-load")
-        elif boot_mode == "wipe":
-            cmd.append("-wipe-data")
-        elif boot_mode == "snapshot" and snapshot_name:
-            cmd.extend(["-snapshot", snapshot_name])
-
-        # Only allow specific safe emulator arguments
-        from sandroid.core.emulator_guard import emulator_launch_args
-
-        # Guest Vulkan off in every mode: SwiftShader Vulkan leaks host memory
-        # on each snapshot load.
-        if headless:
-            cmd.extend(
-                ["-no-window", "-no-boot-anim", *emulator_launch_args(headless=True)]
-            )
-        else:
-            cmd.extend(emulator_launch_args())
-
-        # Set up environment
-        env = os.environ.copy()
-        if android_env.get("sdk_path"):
-            env["ANDROID_SDK_ROOT"] = str(android_env["sdk_path"])
-            env["ANDROID_HOME"] = str(android_env["sdk_path"])
-        if android_env.get("avd_home"):
-            env["ANDROID_AVD_HOME"] = str(android_env["avd_home"])
-
-        console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
-
-        # Start emulator in background with validated command; its output
-        # goes to a log file (a never-drained stderr pipe stalls it later).
-        from sandroid.core.emulator import check_emulator_startup, spawn_emulator
-
-        process, log_path = spawn_emulator(cmd, avd_name, env)
-
-        console.print(f"[green]>[/green] AVD '{avd_name}' starting in background...")
-        console.print(f"[dim]Process ID: {process.pid}[/dim]")
-
-        if headless:
-            console.print("[dim]Running in headless mode (no UI)[/dim]")
-        else:
-            console.print("[dim]Running with UI[/dim]")
-
-        # Verify emulator process survives initial startup
-        ok, error_msg = check_emulator_startup(process, log_path)
-        if not ok:
-            console.print(f"[red]Emulator startup failed: {error_msg}[/red]")
-            return False
-
-        return True
-
-    except Exception as e:
-        console.print(f"[red]Failed to start AVD: {e}[/red]")
+        launch = launch_avd(avd_name, opts)
+    except EmulatorLaunchError as e:
+        console.print(f"[red]Emulator startup failed: {e}[/red]")
         return False
+    remember_launch(avd_name, opts)
+    console.print(
+        f"[green]>[/green] AVD '{avd_name}' starting in background as "
+        f"{launch.serial}..."
+    )
+    console.print(
+        f"[dim]Process ID: {launch.process.pid}  Log: {launch.log_path}[/dim]"
+    )
+    if headless:
+        console.print("[dim]Running in headless mode (no UI)[/dim]")
+    else:
+        console.print("[dim]Running with UI[/dim]")
+    return True

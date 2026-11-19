@@ -935,158 +935,98 @@ class EmulatorService:
     # =========================================================================
 
     def restart(self, boot_timeout: float = 180.0) -> bool:
-        """Restart the running Android emulator and wait until it has booted.
+        """Restart the target emulator and wait until it has booted.
 
-        Relaunches the AVD that is actually running (``adb emu avd name``;
-        the configured device name is only a fallback) with the safe launch
-        flags (:func:`~sandroid.core.emulator_guard.emulator_launch_args`),
-        output to a log file, and only reports success once the new instance
-        is online with ``sys.boot_completed=1``.
+        Delegates to :func:`sandroid.core.emulator.restart_emulator` with the
+        explicit target serial: exactly that emulator is stopped (``adb -s
+        <serial> emu kill``) and the AVD it was running is relaunched on the
+        same port (same serial) with the safe launch flags. Success is only
+        reported once it is ready again (``sys.boot_completed=1`` and the
+        package manager answers).
 
         Args:
             boot_timeout: Seconds to wait for the restarted emulator to boot.
 
         Returns:
-            True once the restarted emulator has booted; False if it crashed
-            on startup or did not boot within ``boot_timeout``.
+            True once the restarted emulator has booted; False if it could
+            not be restarted, crashed on startup or did not boot in time.
 
         Raises:
-            RuntimeError: The emulator executable is missing or cannot be
-                started.
+            RuntimeError: No emulator executable, or no target emulator.
         """
-        from sandroid.core.emulator import (
-            Emulator,
-            check_emulator_startup,
-            spawn_emulator,
-        )
-        from sandroid.core.emulator_guard import emulator_launch_args
+        from sandroid.core import emulator
+        from sandroid.core.exceptions import EmulatorLaunchError
 
         self._logger.info("Restarting emulator")
         adb = self._get_adb()
         serial = self._target_serial(adb)
-
-        # Resolve the AVD BEFORE killing it: afterwards there is nobody left
-        # to ask. The configured name is only a fallback.
-        avd_name = None
-        get_name = getattr(adb, "get_current_avd_name", None)
-        if callable(get_name):
-            try:
-                avd_name = get_name()
-            except Exception:
-                avd_name = None
-        if not avd_name:
-            avd_name = self._get_device_name()
-            self._logger.warning(
-                f"Could not query the running AVD name; restarting configured "
-                f"AVD '{avd_name}'"
-            )
-        emulator_path = self._get_emulator_path() or Emulator.detect_emulator_path()
-        if not emulator_path:
+        if not serial or emulator.serial_port(serial) is None:
+            raise RuntimeError(f"No target emulator to restart (target: {serial})")
+        if emulator.emulator_binary() is None:
             raise RuntimeError("Emulator executable not found (emulator path unset)")
 
         try:
-            _stdout, stderr = adb.send_telnet_command(b"kill")
-            if stderr:
-                self._logger.warning(
-                    f"Emulator {avd_name} was not running, starting now"
-                )
-            else:
-                self._wait_for_device_gone(adb, serial)
-        except Exception as e:
-            self._logger.debug(
-                f"Kill command failed (emulator may not be running): {e}"
-            )
+            launch = emulator.restart_emulator(serial, adb=adb)
+        except EmulatorLaunchError as e:
+            self._logger.error(f"Could not restart {serial}: {e}")
+            return False
 
-        command = [emulator_path, "-avd", avd_name, *emulator_launch_args()]
-        try:
-            process, log_path = spawn_emulator(command, avd_name)
-        except FileNotFoundError as e:
-            error_msg = f"Emulator executable not found at '{emulator_path}': {e}"
-            self._logger.error(error_msg)
-            raise RuntimeError(error_msg) from e
-        except (OSError, subprocess.SubprocessError) as e:
-            error_msg = f"Failed to start emulator '{avd_name}': {e}"
-            self._logger.error(error_msg)
-            raise RuntimeError(error_msg) from e
-
-        ok, error_msg = check_emulator_startup(process, log_path)
-        if not ok:
+        if not emulator.wait_until_ready(serial, timeout=boot_timeout, adb=adb):
             self._logger.error(
-                f"Emulator '{avd_name}' crashed during startup: {error_msg}"
+                f"Emulator '{launch.avd}' did not finish booting within "
+                f"{boot_timeout:.0f}s (log: {launch.log_path})"
             )
             return False
 
-        if not self._wait_for_boot_completed(adb, serial, boot_timeout):
-            self._logger.error(
-                f"Emulator '{avd_name}' did not finish booting within "
-                f"{boot_timeout:.0f}s (log: {log_path})"
-            )
-            return False
-
-        self._logger.info(f"Emulator {avd_name} restarted")
+        self._logger.info(f"Emulator {launch.avd} restarted")
         _world_change(
             "cold-boot",
             src="device",
             kind="boot",
-            summary=f"⟲ emulator {avd_name} cold-booted",
+            summary=f"⟲ emulator {launch.avd} cold-booted",
             dev=serial,
-            data={"avd": avd_name, "ok": True},
+            data={"avd": launch.avd, "ok": True},
         )
         return True
 
     @staticmethod
     def _target_serial(adb: Any) -> str | None:
+        """The target serial: the adb target, else the active device."""
         getter = getattr(adb, "get_target_device", None)
-        if not callable(getter):
-            return None
+        if callable(getter):
+            try:
+                serial = getter()
+            except Exception:
+                serial = None
+            if serial:
+                return serial
         try:
-            return getter()
+            from sandroid.core.device_manager import DeviceManager
+
+            device = DeviceManager.get().active_device
         except Exception:
-            return None
-
-    def _wait_for_device_gone(
-        self, adb: AdbProtocol, serial: str | None, timeout: float = 30.0
-    ) -> None:
-        """Poll until the killed emulator has left ``adb`` (best effort)."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                stdout, _ = adb.send_adb_command("get-state", serial=serial)
-            except Exception:
-                return
-            if (stdout or "").strip() != "device":
-                return
-            time.sleep(1.0)
-
-    def _wait_for_boot_completed(
-        self, adb: AdbProtocol, serial: str | None, timeout: float
-    ) -> bool:
-        """Poll ``sys.boot_completed`` until it reads ``1`` or *timeout* passes."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                stdout, _ = adb.send_adb_command(
-                    "shell getprop sys.boot_completed", serial=serial
-                )
-                if (stdout or "").strip() == "1":
-                    return True
-            except Exception:
-                pass
-            time.sleep(2.0)
-        return False
+            device = None
+        return device.serial if device is not None else None
 
     def kill(self) -> bool:
-        """Kill the running emulator.
+        """Stop the target emulator (``adb -s <serial> emu kill``).
+
+        Delegates to :func:`sandroid.core.emulator.stop_emulator`; never
+        kills processes by name, so other emulators are untouched.
 
         Returns:
-            True if kill command was sent.
+            True once the emulator has left ``adb devices``.
         """
+        from sandroid.core.emulator import stop_emulator
+
         self._logger.info("Killing emulator")
         adb = self._get_adb()
-
+        serial = self._target_serial(adb)
+        if not serial:
+            self._logger.error("Failed to kill emulator: no target device")
+            return False
         try:
-            _stdout, _stderr = adb.send_telnet_command(b"kill")
-            return True
+            return stop_emulator(serial, adb)
         except Exception as e:
             self._logger.error(f"Failed to kill emulator: {e}")
             return False
@@ -1161,20 +1101,6 @@ class EmulatorService:
         if raw_path:
             return os.path.join(raw_path, "screenshots")
         return "screenshots"
-
-    def _get_device_name(self) -> str:
-        """Get device name from config or default."""
-        if self._config_service:
-            return self._config_service.get_device_name()
-        return "Pixel_6_Pro_API_31"
-
-    def _get_emulator_path(self) -> str:
-        """Get emulator path from config or auto-detect."""
-        if self._config_service:
-            path = self._config_service.get_emulator_path()
-            if path:
-                return path
-        return ""
 
     def _mark_tool_used(self, tool_name: str, files: list[str]) -> None:
         """Mark a tool as used with associated files."""

@@ -990,15 +990,13 @@ def kill_emulator() -> dict[str, Any]:
     Real integration point:
     :meth:`sandroid.services.emulator_service.EmulatorService.kill`.
     Emulator-telnet-console-only; guarded by :func:`_require_emulator_device`
-    so a physical device gets a clean, immediate rejection. Per
-    ``EmulatorService.kill()``'s own docstring, a ``True`` return only means
-    the kill command was successfully *sent* over the telnet console -- it
-    is not a confirmation that the emulator process actually died, and this
-    wrapper adds no extra liveness polling of its own on top of that.
+    so a physical device gets a clean, immediate rejection.
+    ``EmulatorService.kill()`` sends ``emu kill`` to exactly the target
+    serial and waits (up to 30 s) until it has left ``adb devices``.
 
     Returns:
-        ``{"killed": bool}`` -- ``True`` only means the kill command was
-        sent, not that the emulator's death has been confirmed.
+        ``{"killed": bool}`` -- ``True`` once the emulator has left
+        ``adb devices``.
 
     Raises:
         ToolExecutionError: The active device is not an emulator.

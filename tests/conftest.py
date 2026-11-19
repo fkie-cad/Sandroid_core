@@ -631,10 +631,11 @@ def _block_device_access(request, monkeypatch):
         emulator_guard = None
     if emulator_guard is not None:
         monkeypatch.setattr(emulator_guard, "start_memory_guard", lambda config: None)
-    # On hosts without adb (CI runners) ``Adb.init`` calls ``exit(1)`` the
-    # first time a widget asks the device anything. Give it a placeholder
-    # path: the Popen guard above blocks every ``adb`` call anyway, so code
-    # under test takes its normal "command failed" path.
+    # On hosts without adb (CI runners) ``Adb.init`` raises
+    # ``AdbNotFoundError`` the first time a widget asks the device anything
+    # (``send_adb_command`` turns it into an "OSError: adb not found" reply).
+    # Give it a placeholder path so tests see the same "command failed" path
+    # as with a real adb: the Popen guard above blocks every ``adb`` call.
     try:
         from sandroid.core.adb import Adb
     except Exception:

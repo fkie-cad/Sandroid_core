@@ -228,6 +228,30 @@ class EmulatorProtocol(Protocol):
         ...
 
 
+class CoreEmulator:
+    """:class:`EmulatorProtocol` over :mod:`sandroid.core.emulator`."""
+
+    @staticmethod
+    def list_available_avds() -> list[str]:
+        """Installed AVD names (:func:`sandroid.core.emulator.list_avds`)."""
+        from sandroid.core.emulator import list_avds
+
+        return list_avds()
+
+    @staticmethod
+    def start_avd(avd_name: str) -> bool:
+        """Launch *avd_name* with its remembered options; True if it started."""
+        from sandroid.core.emulator import launch_avd, remembered_options
+        from sandroid.core.exceptions import EmulatorLaunchError
+
+        try:
+            launch_avd(avd_name, remembered_options(avd_name))
+        except EmulatorLaunchError as e:
+            logger.error(str(e))
+            return False
+        return True
+
+
 class SetupService:
     """Service for environment setup validation.
 
@@ -246,7 +270,7 @@ class SetupService:
 
     Attributes:
         adb: ADB interface (injected or uses global Adb)
-        emulator: Emulator interface (injected or uses global Emulator)
+        emulator: Emulator interface (injected or CoreEmulator)
         event_bus: Optional event bus for publishing state changes
 
     Example:
@@ -278,7 +302,7 @@ class SetupService:
             adb: ADB interface for device communication.
                  If None, uses global Adb class.
             emulator: Emulator interface for AVD management.
-                      If None, uses global Emulator class.
+                      If None, uses CoreEmulator.
             event_bus: Optional event bus for state change notifications.
         """
         self._adb = adb
@@ -308,9 +332,7 @@ class SetupService:
         """
         if self._emulator is not None:
             return self._emulator
-        from sandroid.core.emulator import Emulator
-
-        return Emulator
+        return CoreEmulator
 
     # ==================== Full Setup Validation ====================
 

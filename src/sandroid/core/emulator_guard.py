@@ -74,8 +74,8 @@ def console_port(cmdline: list[str]) -> int | None:
 
     Returns ``None`` when the command line has no ``-port``/``-ports``: the
     emulator then auto-assigns the first free even port from 5554, so the
-    port cannot be derived from the command line (Sandroid itself never
-    passes ``-port``).
+    port cannot be derived from the command line (emulators Sandroid starts
+    always pass ``-port``; ones started elsewhere may not).
     """
     for i, arg in enumerate(cmdline[:-1]):
         if arg in ("-port", "-ports"):
@@ -294,26 +294,6 @@ def parse_ram_size(value: str) -> int | None:
     return int(float(match.group(1)) * _UNIT_BYTES[unit + "B"]) or None
 
 
-def _avd_dir(name: str) -> Path | None:
-    """Directory of AVD *name* (honours ``ANDROID_AVD_HOME`` and ``path=``)."""
-    try:
-        from sandroid.config.android_env import find_existing_avd_home
-
-        home = find_existing_avd_home()
-    except Exception:
-        home = None
-    home = home or Path("~/.android/avd").expanduser()
-    try:
-        for line in (home / f"{name}.ini").read_text(encoding="utf-8").splitlines():
-            key, _, value = line.partition("=")
-            if key.strip() == "path" and Path(value.strip()).is_dir():
-                return Path(value.strip())
-    except OSError:
-        pass
-    default = home / f"{name}.avd"
-    return default if default.is_dir() else None
-
-
 def guest_ram_bytes(cmdline: list[str]) -> int | None:
     """Guest RAM of an emulator: ``-memory`` or the AVD's ``hw.ramSize``.
 
@@ -330,12 +310,14 @@ def guest_ram_bytes(cmdline: list[str]) -> int | None:
             avd = cmdline[i + 1]
     if not avd:
         return None
-    avd_dir = _avd_dir(avd)
-    if avd_dir is None:
+    from sandroid.core.emulator import avd_dir
+
+    directory = avd_dir(avd)
+    if directory is None:
         return None
     for name in ("hardware-qemu.ini", "config.ini"):
         try:
-            text = (avd_dir / name).read_text(encoding="utf-8", errors="replace")
+            text = (directory / name).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         for line in text.splitlines():

@@ -404,14 +404,10 @@ class SetSpotlightSpawnCommand(CommandHandler):
 
         try:
             from sandroid.core.adb import Adb
+            from sandroid.core.device import parse_adb_devices
 
             stdout, _stderr = Adb.send_adb_command("devices")
-            # Check if any device is connected (more than just the header line)
-            lines = [
-                line.strip() for line in stdout.strip().split("\n") if line.strip()
-            ]
-            # First line is "List of devices attached", so we need at least 2 lines
-            if len(lines) < 2:
+            if not parse_adb_devices(stdout):
                 return (
                     False,
                     "No device connected. Make sure an Android device/emulator is running.",

@@ -120,16 +120,18 @@ def test_save_and_delete_lines(service):
 
 
 def test_a_cold_boot_is_a_world_change(service, monkeypatch):
+    from types import SimpleNamespace
+
     import sandroid.core.emulator as emulator_mod
 
-    monkeypatch.setattr(service, "_get_emulator_path", lambda: "/bin/emulator")
-    monkeypatch.setattr(service, "_wait_for_device_gone", lambda adb, serial: None)
-    monkeypatch.setattr(service, "_wait_for_boot_completed", lambda *a: True)
-    monkeypatch.setattr(service, "_get_device_name", lambda: "Pixel")
-    monkeypatch.setattr(emulator_mod, "spawn_emulator", lambda cmd, avd: (None, "log"))
+    service.adb_fake.get_target_device = lambda: "emulator-5556"
+    monkeypatch.setattr(emulator_mod, "emulator_binary", lambda: "/bin/emulator")
     monkeypatch.setattr(
-        emulator_mod, "check_emulator_startup", lambda p, log: (True, "")
+        emulator_mod,
+        "restart_emulator",
+        lambda serial, adb=None: SimpleNamespace(avd="Pixel", log_path=None),
     )
+    monkeypatch.setattr(emulator_mod, "wait_until_ready", lambda *a, **kw: True)
     monkeypatch.setattr(device_clock, "begin_epoch", lambda serial: None)
     with timeline.capture() as lines:
         assert service.restart(boot_timeout=1) is True

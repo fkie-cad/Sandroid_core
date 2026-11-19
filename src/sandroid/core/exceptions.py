@@ -45,6 +45,26 @@ class DeviceTimeError(SandroidError, RuntimeError):
     """
 
 
+class AdbNotFoundError(SandroidError, OSError):
+    """The adb executable was found neither on PATH nor in the Android SDK.
+
+    Raised by :meth:`sandroid.core.adb.Adb.init` instead of exiting the
+    process (it can run on a worker thread of the TUI).
+    """
+
+
+class EmulatorLaunchError(SandroidError, RuntimeError):
+    """An emulator could not be started, stopped or restarted.
+
+    Attributes:
+        log_path: The emulator's log file, when one was written.
+    """
+
+    def __init__(self, message: str, *, log_path=None):
+        super().__init__(message)
+        self.log_path = log_path
+
+
 class APKDownloadError(SandroidError):
     """Base exception for APK download errors."""
 

@@ -932,27 +932,13 @@ class RecordingController:
 
     @staticmethod
     def _avd_dir(avd_name: str) -> str | None:
-        """Host directory of ``avd_name`` (honours ANDROID_AVD_HOME and the
-        ``path=`` redirect in ``<avd>.ini``), or None if not found.
+        """Host directory of ``avd_name`` (see
+        :func:`sandroid.core.emulator.avd_dir`), or None if not found.
         """
-        try:
-            from sandroid.config.android_env import find_existing_avd_home
+        from sandroid.core.emulator import avd_dir
 
-            home = find_existing_avd_home()
-        except Exception:
-            home = None
-        if home is None:
-            home = Path("~/.android/avd").expanduser()
-        ini = home / f"{avd_name}.ini"
-        try:
-            for line in ini.read_text(encoding="utf-8").splitlines():
-                key, _, value = line.partition("=")
-                if key.strip() == "path" and Path(value.strip()).is_dir():
-                    return value.strip()
-        except OSError:
-            pass
-        default = home / f"{avd_name}.avd"
-        return str(default) if default.is_dir() else None
+        directory = avd_dir(avd_name)
+        return str(directory) if directory is not None else None
 
     def _verify_snapshot(self) -> bool:
         """Verify that a snapshot exists for playback.

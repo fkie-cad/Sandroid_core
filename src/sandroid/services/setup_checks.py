@@ -136,15 +136,9 @@ def list_adb_devices(adb: Any) -> list[tuple[str, str]]:
         stdout, _stderr = _send_untargeted(adb, "devices")
     except Exception:
         return []
-    devices: list[tuple[str, str]] = []
-    for line in (stdout or "").splitlines():
-        line = line.strip()
-        if not line or line.lower().startswith(("list of devices", "*")):
-            continue
-        parts = line.split()
-        if len(parts) >= 2:
-            devices.append((parts[0], parts[1]))
-    return devices
+    from sandroid.core.device import parse_adb_devices
+
+    return [(e.serial, e.state) for e in parse_adb_devices(stdout or "")]
 
 
 def check_adb_availability(adb: Any) -> SetupCheckResult:

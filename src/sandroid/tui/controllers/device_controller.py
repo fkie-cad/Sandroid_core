@@ -30,7 +30,6 @@ Usage:
 
 import logging
 import os
-import subprocess
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -353,34 +352,23 @@ class DeviceController:
             List of AVDInfo objects for available AVDs
         """
         try:
-            from sandroid.config.android_env import (
-                find_emulator_path,
-                find_existing_sdk,
-                get_avd_info,
-                list_available_avds,
-            )
+            from sandroid.core.emulator import avd_info, emulator_binary, list_avds
 
-            emulator_path = find_emulator_path()
-            sdk_path = find_existing_sdk()
-
-            if not emulator_path:
+            if emulator_binary() is None:
                 logger.warning("No emulator path found")
                 return []
 
-            avd_names = list_available_avds(emulator_path, sdk_path)
-
             avds = []
-            for name in avd_names:
-                info = get_avd_info(name)
+            for name in list_avds():
+                info = avd_info(name)
                 avds.append(
                     AVDInfo(
                         name=name,
-                        android_version=info.get("android_version", "Unknown"),
-                        api_level=info.get("api_level", "?"),
-                        device_name=info.get("device_name", ""),
+                        android_version=info.android_version,
+                        api_level=str(info.api_level) if info.api_level else "?",
+                        device_name=info.device_name,
                     )
                 )
-
             return avds
         except Exception as e:
             logger.error(f"Error getting available AVDs: {e}")
@@ -393,15 +381,9 @@ class DeviceController:
         if the push_modal callback is configured.
         """
         try:
-            from sandroid.config.android_env import (
-                find_emulator_path,
-                find_existing_sdk,
-            )
+            from sandroid.core.emulator import emulator_binary
 
-            emulator_path = find_emulator_path()
-            sdk_path = find_existing_sdk()
-
-            if not emulator_path:
+            if emulator_binary() is None:
                 self._log_warning(
                     "No Android device connected. Run 'sandroid-config init' to configure AVD."
                 )
@@ -447,8 +429,6 @@ class DeviceController:
                     result.selected_avd,
                     headless=result.headless,
                     save_as_default=result.save_as_default,
-                    emulator_path=emulator_path,
-                    sdk_path=sdk_path,
                 )
 
             # check_devices_on_startup (this method's only caller) runs off a
@@ -472,96 +452,130 @@ class DeviceController:
         emulator_path: str | None = None,
         sdk_path: str | None = None,
     ) -> bool:
-        """Start an AVD and poll for it to become available.
+        """Start an AVD in the background and attach it once it has booted.
+
+        Launches through :func:`sandroid.core.emulator.launch_avd` (explicit
+        port, safe flags, log file), remembers the options and waits for
+        exactly that serial to boot (see :meth:`_launch_and_watch`).
 
         Args:
             avd_name: Name of AVD to start
             headless: Whether to start in headless mode
             save_as_default: Whether to save this AVD as default
-            emulator_path: Path to emulator (auto-detected if not provided)
-            sdk_path: Path to SDK (auto-detected if not provided)
+            emulator_path: Ignored (kept for compatibility; the emulator is
+                resolved by :func:`sandroid.core.emulator.emulator_binary`).
+            sdk_path: Ignored (kept for compatibility).
 
         Returns:
             True if AVD start was initiated successfully
         """
+        from sandroid.core.emulator import AvdLaunchOptions
+
+        mode_str = "headless" if headless else "with UI"
+        self._log_info(f"Starting AVD '{avd_name}' ({mode_str})...")
+        opts = AvdLaunchOptions(headless=headless)
+        thread = threading.Thread(
+            target=self._launch_and_watch,
+            args=(avd_name, opts),
+            name=f"start-avd-{avd_name}",
+            daemon=True,
+        )
+        thread.start()
+        if save_as_default:
+            self.save_avd_as_default(avd_name, headless)
+        return True
+
+    def _launch_and_watch(
+        self,
+        avd_name: str | None,
+        options: Any,
+        restart_serial: str | None = None,
+        notify: Callable[[str], Any] | None = None,
+        call_from_thread: Callable[..., Any] | None = None,
+    ) -> Any:
+        """Worker: launch (or restart) an emulator, wait for its boot, attach.
+
+        Runs on a background thread; every UI call is marshaled through
+        ``call_from_thread``. Once booted, the emulator becomes the active
+        device only if no device is active.
+
+        Args:
+            avd_name: AVD to launch (ignored with *restart_serial*).
+            options: :class:`~sandroid.core.emulator.AvdLaunchOptions`.
+            restart_serial: Restart this emulator (same AVD, same port)
+                instead of launching *avd_name*.
+            notify: Optional toast callback (UI thread).
+            call_from_thread: Marshals onto the UI thread (default: the
+                controller's).
+
+        Returns:
+            The :class:`~sandroid.core.emulator.EmulatorLaunch`, or ``None``
+            when the launch failed.
+        """
+        from sandroid.core import emulator
+        from sandroid.core.exceptions import EmulatorLaunchError
+
+        ui = call_from_thread or self._call_from_thread
+
+        def say(fn: Callable[..., Any] | None, *args: Any) -> None:
+            if fn is None:
+                return
+            try:
+                ui(fn, *args)
+            except Exception:
+                logger.debug("Could not report to the UI", exc_info=True)
+
         try:
-            from sandroid.config.android_env import (
-                find_emulator_path,
-                find_existing_avd_home,
-                find_existing_sdk,
-            )
-
-            if not emulator_path:
-                emulator_path = find_emulator_path()
-            if not sdk_path:
-                sdk_path = find_existing_sdk()
-
-            if not emulator_path:
-                self._log_error("Cannot start AVD: Emulator not found")
-                return False
-
-            mode_str = "headless" if headless else "with UI"
-            self._log_info(f"Starting AVD '{avd_name}' ({mode_str})...")
-
-            # Build command. Guest Vulkan off in every mode (SwiftShader Vulkan
-            # leaks host memory on each snapshot load), same flags as the CLI.
-            from sandroid.core.emulator_guard import emulator_launch_args
-
-            cmd = [str(emulator_path), "-avd", avd_name]
-            if headless:
-                cmd.extend(["-no-window", "-no-boot-anim"])
-            cmd.extend(emulator_launch_args(headless=headless))
-
-            # Set up environment
-            env = os.environ.copy()
-            avd_home = find_existing_avd_home()
-            if avd_home:
-                env["ANDROID_AVD_HOME"] = str(avd_home)
-            if sdk_path:
-                env["ANDROID_SDK_ROOT"] = str(sdk_path)
-
-            # Start emulator in background thread
-            def start_emulator():
-                try:
-                    subprocess.Popen(
-                        cmd,
-                        env=env,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        start_new_session=True,
-                        stdin=subprocess.DEVNULL,
-                    )
-                except FileNotFoundError as e:
-                    logger.error(
-                        f"Emulator executable not found for AVD '{avd_name}': {e}. "
-                        "Check ANDROID_SDK_ROOT and emulator installation."
-                    )
-                except OSError as e:
-                    logger.error(f"OS error starting AVD '{avd_name}': {e}")
-                except subprocess.SubprocessError as e:
-                    logger.error(f"Subprocess error starting AVD '{avd_name}': {e}")
-                except Exception as e:
-                    logger.error(
-                        f"Unexpected error starting AVD '{avd_name}': "
-                        f"{type(e).__name__}: {e}"
-                    )
-
-            thread = threading.Thread(target=start_emulator, daemon=True)
-            thread.start()
-
-            # Save as default if requested
-            if save_as_default:
-                self.save_avd_as_default(avd_name, headless)
-
-            # Start polling for device
-            self.start_device_poll(avd_name)
-
-            return True
-
+            if restart_serial:
+                launch = emulator.restart_emulator(restart_serial, options)
+            else:
+                launch = emulator.launch_avd(avd_name, options)
+        except EmulatorLaunchError as e:
+            say(self._log_error, f"Failed to start AVD: {e}")
+            return None
         except Exception as e:
-            logger.exception(f"Error starting AVD: {e}")
-            self._log_error(f"Failed to start AVD: {e}")
-            return False
+            logger.exception("Emulator launch failed")
+            say(self._log_error, f"Failed to start AVD: {type(e).__name__}: {e}")
+            return None
+        emulator.remember_launch(launch.avd, launch.options)
+        verb = "restarting" if restart_serial else "starting"
+        msg = f"AVD '{launch.avd}' {verb} as {launch.serial} ({launch.options.boot})"
+        say(self._log_info, msg + "...")
+        say(notify, msg + "...")
+
+        if not emulator.wait_until_ready(launch.serial):
+            log = f" (log: {launch.log_path})" if launch.log_path else ""
+            say(
+                self._log_warning,
+                f"AVD '{launch.avd}' ({launch.serial}) did not finish booting{log}. "
+                "Press 'D' to refresh the device list when it is ready.",
+            )
+            return launch
+        try:
+            self._get_device_manager().refresh_devices(auto_select=False)
+        except Exception:
+            logger.debug("Device refresh after boot failed", exc_info=True)
+        say(self._attach_if_idle, launch.serial, launch.avd)
+        return launch
+
+    def _attach_if_idle(self, serial: str, avd_name: str) -> None:
+        """UI thread: make a freshly booted emulator active if none is."""
+        try:
+            dm = self._get_device_manager()
+            active = dm.active_device
+            if active is None:
+                if self.switch_device(serial, cleanup=False):
+                    return
+            elif active.serial == serial:
+                self._log_info(f"AVD '{avd_name}' ({serial}) is ready")
+                if self._refresh_ui:
+                    self._refresh_ui()
+                return
+            self._log_info(
+                f"AVD '{avd_name}' ({serial}) is ready -- press D to switch to it"
+            )
+        except Exception as e:
+            logger.error(f"Error attaching {serial}: {e}")
 
     def save_avd_as_default(self, avd_name: str, headless: bool = False) -> bool:
         """Save AVD as default in config.
@@ -781,6 +795,28 @@ class DeviceController:
     # Boot Mode Operations
     # =========================================================================
 
+    @staticmethod
+    def _boot_options(boot_mode: str, snapshot_name: str | None, headless: bool) -> Any:
+        """``AvdLaunchOptions`` for a modal boot mode (``default`` = normal)."""
+        from sandroid.core.emulator import AvdLaunchOptions
+
+        boot = {"default": "normal"}.get(boot_mode, boot_mode)
+        if boot not in ("normal", "cold", "snapshot", "wipe"):
+            boot = "normal"
+        return AvdLaunchOptions(
+            headless=headless,
+            boot=boot,
+            snapshot=snapshot_name if boot == "snapshot" else None,
+        )
+
+    def _run_background(
+        self, fn: Callable[[], Any], name: str, run_worker: Callable | None
+    ) -> None:
+        if run_worker:
+            run_worker(fn, name=name, thread=True)
+        else:
+            threading.Thread(target=fn, name=name, daemon=True).start()
+
     def start_avd_with_boot_mode(
         self,
         avd_name: str,
@@ -791,6 +827,9 @@ class DeviceController:
         notify: Callable | None = None,
     ) -> bool:
         """Start an AVD with the specified boot mode.
+
+        Headless follows the AVD's remembered options; the launch goes
+        through :func:`sandroid.core.emulator.launch_avd`.
 
         Args:
             avd_name: Name of the AVD to start
@@ -803,36 +842,17 @@ class DeviceController:
         Returns:
             True if start was initiated
         """
-        from sandroid.core.emulator import Emulator
 
-        def start_avd_worker():
-            """Worker function to start AVD in background."""
-            try:
-                success = Emulator.start_avd(
-                    avd_name,
-                    boot_mode=boot_mode,
-                    snapshot_name=snapshot_name,
-                )
+        def start_avd_worker() -> None:
+            from sandroid.core.emulator import remembered_options
 
-                if success:
-                    if call_from_thread and notify:
-                        call_from_thread(
-                            notify,
-                            f"AVD '{avd_name}' starting ({boot_mode} mode)...",
-                        )
-                    self._log_info(f"AVD '{avd_name}' starting ({boot_mode} mode)...")
-                else:
-                    self._log_error(f"Failed to start AVD '{avd_name}'")
-            except Exception as e:
-                self._log_error(f"Error starting AVD: {e}")
+            headless = remembered_options(avd_name).headless
+            opts = self._boot_options(boot_mode, snapshot_name, headless)
+            self._launch_and_watch(
+                avd_name, opts, notify=notify, call_from_thread=call_from_thread
+            )
 
-        if run_worker:
-            run_worker(start_avd_worker, name="start_avd", thread=True)
-        else:
-            # Run in thread if no worker provided
-            thread = threading.Thread(target=start_avd_worker, daemon=True)
-            thread.start()
-
+        self._run_background(start_avd_worker, "start_avd", run_worker)
         return True
 
     def restart_emulator_with_boot_mode(
@@ -844,7 +864,11 @@ class DeviceController:
         call_from_thread: Callable | None = None,
         notify: Callable | None = None,
     ) -> bool:
-        """Restart an emulator with the specified boot mode.
+        """Restart emulator *serial* with the specified boot mode.
+
+        Stops exactly that emulator (``adb -s <serial> emu kill``) and
+        relaunches its AVD on the same port, so the serial stays the same
+        (see :func:`sandroid.core.emulator.restart_emulator`).
 
         Args:
             serial: Serial number of the emulator
@@ -857,50 +881,30 @@ class DeviceController:
         Returns:
             True if restart was initiated
         """
-        import time
 
-        from sandroid.core.adb import Adb
-        from sandroid.core.emulator import Emulator
+        def restart_worker() -> None:
+            from sandroid.core.emulator import (
+                avd_name_of,
+                get_launch,
+                remembered_options,
+            )
 
-        def restart_worker():
-            """Worker function to restart emulator in background."""
-            try:
-                dm = self._get_device_manager()
-                device = dm.get_device(serial)
-                if not device:
-                    self._log_error(f"Device '{serial}' not found")
-                    return
+            launch = get_launch(serial)
+            if launch is not None:
+                headless = launch.options.headless
+            else:
+                avd = avd_name_of(serial)
+                headless = remembered_options(avd).headless if avd else False
+            opts = self._boot_options(boot_mode, snapshot_name, headless)
+            self._launch_and_watch(
+                None,
+                opts,
+                restart_serial=serial,
+                notify=notify,
+                call_from_thread=call_from_thread,
+            )
 
-                avd_name = device.name or device.model
-
-                # Kill the emulator
-                self._log_info(f"Stopping emulator '{avd_name}'...")
-                Adb.send_telnet_command("kill")
-
-                # Wait for emulator to stop
-                time.sleep(3)
-
-                # Start with new boot mode
-                self._log_info(f"Starting '{avd_name}' with {boot_mode} mode...")
-                success = Emulator.start_avd(
-                    avd_name,
-                    boot_mode=boot_mode,
-                    snapshot_name=snapshot_name,
-                )
-
-                if success:
-                    self._log_info(f"AVD '{avd_name}' restarting ({boot_mode} mode)...")
-                else:
-                    self._log_error(f"Failed to restart AVD '{avd_name}'")
-            except Exception as e:
-                self._log_error(f"Error restarting emulator: {e}")
-
-        if run_worker:
-            run_worker(restart_worker, name="restart_emulator", thread=True)
-        else:
-            thread = threading.Thread(target=restart_worker, daemon=True)
-            thread.start()
-
+        self._run_background(restart_worker, "restart_emulator", run_worker)
         return True
 
     # =========================================================================

@@ -345,7 +345,7 @@ def _shell_queries(serial: str | None, samples: int) -> list | None:
                 shell.query(QUERY)
             return [shell.query(QUERY) for _ in range(samples)]
         except (ShellDeadError, OSError, ValueError, SystemExit) as exc:
-            # (Adb.init() exits when there is no adb at all.)
+            # (Adb.init() raises AdbNotFoundError, an OSError, without adb.)
             logger.debug("device clock: shell for %s failed: %s", serial, exc)
     _SHELLS.pop(_key(serial), None)
     return None

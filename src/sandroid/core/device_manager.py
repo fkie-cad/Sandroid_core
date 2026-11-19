@@ -10,7 +10,7 @@ import threading
 import time
 from collections.abc import Callable
 
-from .device import Device, DeviceCapability
+from .device import Device, DeviceCapability, parse_adb_devices
 
 logger = logging.getLogger(__name__)
 
@@ -183,39 +183,12 @@ class DeviceManager:
             # shared multi-emulator lab, never probe other people's devices.
             pinned = self.preferred_serial()
 
-            # Parse "adb devices -l" output
-            # Format: serial state [key:value ...]
-            # Example: emulator-5554 device product:sdk_gphone64_x86_64 model:sdk_gphone64_x86_64 device:emu64xa transport_id:1
-            for line in output.strip().split("\n")[
-                1:
-            ]:  # Skip header "List of devices attached"
-                if not line.strip():
-                    continue
-
-                parts = line.split()
-                if len(parts) < 2:
-                    continue
-
-                serial = parts[0]
-                state = parts[1]
-
-                # Parse additional device info
-                model = ""
-                product = ""
-                device_name = ""
-                transport_id = ""
-
-                for part in parts[2:]:
-                    if ":" in part:
-                        key, value = part.split(":", 1)
-                        if key == "model":
-                            model = value
-                        elif key == "product":
-                            product = value
-                        elif key == "device":
-                            device_name = value
-                        elif key == "transport_id":
-                            transport_id = value
+            for entry in parse_adb_devices(output):
+                serial = entry.serial
+                state = entry.state
+                model = entry.props.get("model", "")
+                product = entry.props.get("product", "")
+                device_name = entry.props.get("device", "")
 
                 # Check if device already exists
                 if serial in self._devices:
@@ -388,9 +361,7 @@ class DeviceManager:
                 # Use a friendly format of the serial as placeholder
                 device.name = device.serial  # e.g., "emulator-5554"
 
-            # For physical devices, check root capability (fast)
-            if device.is_physical:
-                self._check_root_capability(device)
+            self._probe_root_kind(device)
 
         except Exception as e:
             logger.debug(f"Failed to populate device info for {device.serial}: {e}")
@@ -408,25 +379,13 @@ class DeviceManager:
         Returns:
             The AVD name if available, otherwise the serial number
         """
-        from .adb import Adb
-
         # Only fetch for emulators that haven't had their AVD name fetched yet
         if device.is_emulator and not getattr(device, "_avd_name_fetched", False):
             try:
-                # Fast path: the emulator exports its AVD name as a system
-                # property (API 31+: ro.boot.qemu.avd_name, older images:
-                # ro.kernel.qemu.avd_name) -- one adb round-trip instead of
-                # the 5-30 s telnet console call below.
-                avd_name = None
-                for prop in ("ro.boot.qemu.avd_name", "ro.kernel.qemu.avd_name"):
-                    out, _err = Adb.send_adb_command(
-                        f"shell getprop {prop}", serial=device.serial
-                    )
-                    avd_name = (out or "").strip() or None
-                    if avd_name:
-                        break
-                if not avd_name:
-                    avd_name = Adb.get_current_avd_name(serial=device.serial)
+                from .adb import Adb
+                from .emulator import avd_name_of
+
+                avd_name = avd_name_of(device.serial, Adb)
                 if avd_name:
                     device.name = avd_name
                     device._avd_name_fetched = True
@@ -436,19 +395,53 @@ class DeviceManager:
 
         return device.name
 
+    def _probe_root_kind(self, device: Device) -> None:
+        """Set ``device.root_kind`` (and ``ADB_ROOT`` when root is usable).
+
+        Emulators: adbd running as root (``id -u`` = 0) -> ``"adbd root"``;
+        else a userdebug/eng build -> ``"adb root"``; else ``"none"``.
+        Physical devices: a working ``su`` -> ``"su"``, else ``"none"``.
+
+        Args:
+            device: The device to probe (targeted via ``serial=``).
+        """
+        from .adb import Adb
+
+        if not device.is_emulator:
+            self._check_root_capability(device)
+            return
+        kind = "none"
+        try:
+            uid, _err = Adb.send_adb_command("shell id -u", serial=device.serial)
+            if (uid or "").strip() == "0":
+                kind = "adbd root"
+            else:
+                build, _err = Adb.send_adb_command(
+                    "shell getprop ro.build.type", serial=device.serial
+                )
+                if (build or "").strip() in ("userdebug", "eng"):
+                    kind = "adb root"
+        except Exception:
+            pass
+        device.root_kind = kind
+        if kind != "none":
+            device.add_capability(DeviceCapability.ADB_ROOT)
+
     def _check_root_capability(self, device: Device) -> None:
-        """Check if a physical device has root access.
+        """Check if a physical device has root access (``su``).
 
         Args:
             device: The device to check
         """
         from .adb import Adb
 
+        device.root_kind = "none"
         try:
             stdout, _stderr = Adb.send_adb_command(
                 "shell su -c id", serial=device.serial
             )
             if stdout and "uid=0" in stdout:
+                device.root_kind = "su"
                 device.add_capability(DeviceCapability.ADB_ROOT)
                 logger.debug(f"Device {device.serial} has root access")
         except Exception:
@@ -779,8 +772,18 @@ class DeviceManager:
             logger.warning("No devices connected")
             return None
 
-        # Filter to only devices in ready state
-        ready_devices = [d for d in devices if d.state == "device"]
+        # Filter to only devices in ready state. An emulator Sandroid itself
+        # launched is "device" long before it has booted; it is attached when
+        # its boot completes, not here.
+        try:
+            from .emulator import booting_serials
+
+            booting = set(booting_serials())
+        except Exception:
+            booting = set()
+        ready_devices = [
+            d for d in devices if d.state == "device" and d.serial not in booting
+        ]
 
         # An explicitly requested serial (--serial / config / ANDROID_SERIAL)
         # wins; never silently fall back to a different device.
