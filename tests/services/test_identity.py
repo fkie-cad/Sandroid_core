@@ -207,6 +207,11 @@ class FakeDevice:
         self.sms: list[dict] = []
         self.call_log: list[dict] = []
         self.next_id = 100
+        #: The call-log provider clears the name of an inserted call (it
+        #: looks the number up in the contacts).
+        self.clear_call_names = False
+        #: Preflights whose list providers are not up yet (no answer).
+        self.providers_down = 0
         self.emu_state: dict[str, str] = {}
 
     # -- transport --------------------------------------------------------
@@ -389,7 +394,10 @@ class FakeDevice:
             self.sms.append({"id": self.next_id, **binds})
             self.next_id += 1
         else:
-            self.call_log.append({"id": self.next_id, **binds})
+            row = {"id": self.next_id, **binds}
+            if self.clear_call_names:
+                row["name"] = ""
+            self.call_log.append(row)
             self.next_id += 1
         return ""
 
@@ -420,7 +428,11 @@ class FakeDevice:
         for pkg, (_uid, cert) in self.packages.items():
             if f"@@pkg:{pkg}@@" in script:
                 lines += [f"@@pkg:{pkg}@@", f'cert index="3" key="{cert}"']
-        if "@@list:" in script:
+        if "@@list:" in script and self.providers_down:
+            # Not up yet: ``content query`` fails (stderr is dropped).
+            self.providers_down -= 1
+            lines += ["@@list:contacts@@", "@@list:sms@@", "@@list:calls@@"]
+        elif "@@list:" in script:
             lines.append("@@list:contacts@@")
             n = 0
             for c in self.contacts:
@@ -431,6 +443,8 @@ class FakeDevice:
                             f"{c.get('name', '')}, mimetype={mime}, data1={c[field]}"
                         )
                         n += 1
+            if not n:
+                lines.append(ident._NO_RESULT)
             lines.append("@@list:sms@@")
             for n, s in enumerate(self.sms):
                 type_ = s.get("type")
@@ -438,12 +452,18 @@ class FakeDevice:
                     f"Row: {n} _id={s['id']}, address={s['address']}, "
                     f"body={s['body']}, type={type_}"
                 )
+            if not self.sms:
+                lines.append(ident._NO_RESULT)
             lines.append("@@list:calls@@")
             for n, c in enumerate(self.call_log):
+                name = c.get("name") or "NULL"
                 lines.append(
-                    f"Row: {n} _id={c['id']}, number={c['number']}, name={c['name']}, "
-                    f"type={c['type']}, duration={c['duration']}"
+                    f"Row: {n} _id={c['id']}, number={c['number']}, name={name}, "
+                    f"type={c['type']}, duration={c['duration']}, "
+                    f"date={c.get('date', 'NULL')}"
                 )
+            if not self.call_log:
+                lines.append(ident._NO_RESULT)
         lines.append("@@end@@")
         return "\n".join(lines) + "\n"
 
@@ -1007,6 +1027,76 @@ def test_regenerate_removes_rows_of_the_retired_token(service, device):
     assert all(new.token in n and old not in n for n in names)
     assert all(old not in s["body"] for s in device.sms)
     assert len(device.call_log) == 2
+
+
+def test_call_log_is_matched_by_number_type_date_not_name(service, device):
+    """The call-log provider clears a call's name: rows are found by number
+    and matched on number, type, date and duration, so a re-apply inserts
+    nothing (it used to add both calls again every time).
+    """
+    device.clear_call_names = True
+    first = service.apply(SERIAL, "com.example.app")
+    assert first.infos["calls"].status == "verified"
+    assert len(device.call_log) == 2
+    dates = sorted(c["date"] for c in device.call_log)
+    for _ in range(3):
+        device.writes.clear()
+        plan = service.apply(SERIAL, "com.example.app")
+        assert plan.infos["calls"].status == "verified"
+        assert plan.infos["calls"].current == "2/2 on device"
+        assert not [w for w in device.writes if "call_log" in w]
+    assert len(device.call_log) == 2
+    assert sorted(c["date"] for c in device.call_log) == dates  # stable dates
+    # The same for contacts and SMS: nothing written again.
+    assert len(device.contacts) == 3
+    assert len(device.sms) == 2
+
+
+def test_call_rows_of_an_older_apply_are_replaced_once(service, device):
+    """Rows written with another date (the old "now"-relative dates) are
+    found by number and replaced: one row per call afterwards.
+    """
+    service.apply(SERIAL, "com.example.app")
+    for row in device.call_log:
+        row["date"] = str(int(row["date"]) - 7_200_000)
+        row["name"] = ""
+    device.call_log.append({**device.call_log[0], "id": 999})  # a duplicate
+    plan = service.apply(SERIAL, "com.example.app")
+    assert plan.infos["calls"].status == "verified"
+    assert len(device.call_log) == 2
+    assert 999 not in [c["id"] for c in device.call_log]
+
+
+def test_list_read_back_waits_for_the_providers_after_a_restart(service, device):
+    """Right after the framework restart the providers do not answer: the
+    read-back retries (bounded, about 10 s) instead of failing 0/3.
+    """
+    slept: list[float] = []
+    service._sleep = slept.append
+    real_shell = device._shell
+
+    def shell(script: str) -> str:
+        if script.startswith("start") or "\nstart" in script:
+            device.providers_down = 2  # down for the next two reads
+        return real_shell(script)
+
+    device._shell = shell
+    plan = service.apply(SERIAL, "com.example.app")
+    for name in ("contacts", "sms", "calls"):
+        assert plan.infos[name].status == "verified", plan.infos[name]
+    assert slept[-2:] == list(ident.PROVIDER_WAITS_S[:2])  # two re-reads
+    assert sum(ident.PROVIDER_WAITS_S) <= 11
+    assert len(device.contacts) == 3  # no blind insert
+    # Providers that never come up: pending with the reason, not "failed".
+    device.providers_down = 99
+    slept.clear()
+    state = service.preflight(SERIAL, ("com.example.app",), service.active_profile())
+    assert state.lists_unread == {"contacts", "sms", "calls"}
+    again = service.apply(SERIAL, "com.example.app")
+    info = again.infos["contacts"]
+    assert (info.status, info.reason) == ("pending", ident.PROVIDER_DOWN)
+    assert len(device.contacts) == 3
+    assert not slept  # nothing was written, nothing to wait for
 
 
 def test_frozen_timeline_data_stays_small_with_300_apps_and_50_contacts(

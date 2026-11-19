@@ -92,6 +92,9 @@ GAID_FILE = f"{GAID_DIR}/adid_settings.xml"
 APPSET_FILE = f"/data/data/{GMS}/files/appset/shared/pvids.pb"
 PREFLIGHT_TAG = "@@identity-preflight@@"
 NEEDS_RESTART = "needs a framework restart"
+PROVIDER_DOWN = "its content provider did not answer (not up yet)"
+#: Waits before re-reading lists whose provider was not up (about 10 s).
+PROVIDER_WAITS_S = (1.0, 1.5, 2.0, 2.5, 3.0)
 _OK = "sandroid-identity-ok"
 
 #: Framework restart: wait this long for a new system_server.
@@ -1094,6 +1097,21 @@ def _resolve_date(raw: Any, index: int, now: datetime) -> datetime:
     return when if when.tzinfo else when.replace(tzinfo=UTC)
 
 
+def _list_anchor(profile: Profile) -> datetime:
+    """What relative list dates (``"-3d"``, none) count back from: the day
+    the profile was created (UTC midnight), so every apply writes, and every
+    read-back expects, the same date (a call-log row is matched on it).
+    """
+    base = profile.created or datetime.now(UTC)
+    base = base if base.tzinfo else base.replace(tzinfo=UTC)
+    return base.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _item_date_ms(item: dict[str, Any], index: int, anchor: datetime) -> int:
+    """The ``date`` (epoch ms) a list item is written with."""
+    return int(_resolve_date(item.get("date"), index, anchor).timestamp() * 1000)
+
+
 # ---------------------------------------------------------------------------
 # markers
 # ---------------------------------------------------------------------------
@@ -1548,19 +1566,43 @@ _LIST_QUERY = {
     "sms": ("content://sms", ("_id", "address", "body", "type"), "body"),
     "calls": (
         "content://call_log/calls",
-        ("_id", "number", "name", "type", "duration"),
+        ("_id", "number", "name", "type", "duration", "date"),
         "name",
     ),
 }
+#: ``content query`` prints this when the provider answered with no row; no
+#: row and no such line means the provider did not answer (not up yet).
+_NO_RESULT = "No result found."
 
 
 def _where_like(column: str, tokens: Iterable[str]) -> str:
     return " OR ".join(f"{column} LIKE '%{t}%'" for t in tokens)
 
 
-def preflight_script(packages: Iterable[str], tokens: Iterable[str]) -> str:
-    """The one batched read: every current value the pipeline compares."""
+def _phone_digits(value: Any) -> str:
+    return "".join(c for c in str(value or "") if c.isdigit() or c == "+")
+
+
+def call_numbers(profile: Profile) -> list[str]:
+    """The numbers of the profile's call-log items (the provider rewrites a
+    call's ``name``, so the rows are found by number too).
+    """
+    try:
+        items = render_lists(profile).get("calls", [])
+    except (TemplateError, ValueError):
+        return []
+    numbers = {_phone_digits(item.get("number")) for item in items}
+    return sorted(n for n in numbers if _PHONE_RE.fullmatch(n))
+
+
+def preflight_script(
+    packages: Iterable[str], tokens: Iterable[str], numbers: Iterable[str] = ()
+) -> str:
+    """The one batched read: every current value the pipeline compares
+    (``numbers``: the call-log numbers, found by number as well).
+    """
     tokens = [t for t in tokens if TOKEN_RE.fullmatch(t)]
+    numbers = [n for n in numbers if _PHONE_RE.fullmatch(n)]
     pkgs = [p for p in packages if re.fullmatch(r"[A-Za-z0-9_.]+", p)]
     px = f"{STAGE_DIR}/packages.xml"
     lines = [
@@ -1615,6 +1657,8 @@ def preflight_script(packages: Iterable[str], tokens: Iterable[str]) -> str:
     if tokens:
         for name, (uri, proj, col) in _LIST_QUERY.items():
             where = _where_like(col, tokens)
+            if name == "calls" and numbers:
+                where += " OR number IN (" + ",".join(f"'{n}'" for n in numbers) + ")"
             lines.append(
                 f"echo @@list:{name}@@; ({ZYGOTE_PREFIX}; content query --uri {uri}"
                 f" --projection {':'.join(proj)} --where {_q(where)} 2>/dev/null)"
@@ -1685,6 +1729,9 @@ class DeviceState:
     location: tuple[float, float] | None = None
     packages: dict[str, PackageInfo] = field(default_factory=dict)
     lists: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    #: Lists whose provider did not answer (no row, no "No result found."):
+    #: not up yet, e.g. right after a framework restart.
+    lists_unread: set[str] = field(default_factory=set)
 
 
 def _settings_document(xml_text: str) -> tuple[ET.Element, ET.Element] | None:
@@ -1785,7 +1832,10 @@ def parse_preflight(serial: str, text: str) -> DeviceState:
             state.packages[pkg] = PackageInfo(pkg, uid, signer)
         elif key.startswith("list:"):
             name = key[5:]
-            state.lists[name] = parse_rows(body, _LIST_QUERY[name][1])
+            rows = parse_rows(body, _LIST_QUERY[name][1])
+            state.lists[name] = rows
+            if not rows and _NO_RESULT not in body:
+                state.lists_unread.add(name)
     return state
 
 
@@ -1882,10 +1932,15 @@ def _pre_spawn_plan_cls() -> type:
         return _FallbackPreSpawnPlan
 
 
-def _list_sig(name: str, row: dict[str, Any]) -> tuple:
-    def phone(v: Any) -> str:
-        return "".join(c for c in str(v or "") if c.isdigit() or c == "+")
+def _list_sig(name: str, row: dict[str, Any], when: int | None = None) -> tuple:
+    """What identifies one list item on the device.
 
+    A call is matched on number, type, date and duration, never on its
+    ``name``: the call-log provider clears or rewrites it (from contacts).
+    ``when`` is the date (epoch ms) a profile item is written with; device
+    rows carry their own.
+    """
+    phone = _phone_digits
     if name == "contacts":
         return (
             str(row.get("name") or ""),
@@ -1898,10 +1953,11 @@ def _list_sig(name: str, row: dict[str, Any]) -> tuple:
         return (phone(row.get("address")), str(row.get("body") or ""), str(box))
     ctype = row.get("type", "incoming")
     ctype = _CALL_TYPES.get(str(ctype), ctype)
+    date = when if when is not None else row.get("date")
     return (
         phone(row.get("number")),
-        str(row.get("name") or ""),
         str(ctype),
+        str(date or ""),
         str(_call_duration(row.get("duration")) or 0),
     )
 
@@ -2376,7 +2432,7 @@ class IdentityService:
     ) -> DeviceState:
         """P0: one adb call reading every current value."""
         tokens = [profile.token, *profile.retired_tokens]
-        script = preflight_script(packages, tokens)
+        script = preflight_script(packages, tokens, call_numbers(profile))
         return parse_preflight(serial, _Device(serial).shell(script, timeout=120))
 
     def plan(
@@ -2454,6 +2510,10 @@ class IdentityService:
                 continue
             if not state.root:
                 info.status, info.reason = "failed", "adbd is not root"
+                continue
+            if name in state.lists_unread:
+                # Inserting blind would duplicate rows that are there.
+                info.status, info.reason = "pending", PROVIDER_DOWN
                 continue
             stale, missing = self._list_diff(name, items, state, profile)
             found = len(items) - len(missing)
@@ -2572,15 +2632,19 @@ class IdentityService:
     ) -> tuple[list[str], list[int]]:
         """``(stale device row ids, indexes of missing items)``."""
         tokens = [profile.token, *profile.retired_tokens]
+        numbers = set(call_numbers(profile)) if name == "calls" else set()
         rows = [
             r
             for r in state.lists.get(name, [])
             if any(t in " ".join(r.values()) for t in tokens)
+            or (numbers and _phone_digits(r.get("number")) in numbers)
         ]
         device = _device_list_items(name, rows)
+        anchor = _list_anchor(profile)
         want: dict[tuple, int] = {}
         for i, item in enumerate(items):
-            want.setdefault(_list_sig(name, item), i)
+            when = _item_date_ms(item, i, anchor) if name == "calls" else None
+            want.setdefault(_list_sig(name, item, when), i)
         stale: list[str] = []
         have: set[tuple] = set()
         for rid, item in device.items():
@@ -2686,6 +2750,9 @@ class IdentityService:
         # P6: verify with the same batched read
         state2 = self.preflight(serial, pkgs, profile)
         verified = self._plan(profile, state2, pkgs)
+        state2, verified = self._await_providers(
+            serial, pkgs, profile, state2, verified, steps, restarted=bool(fw)
+        )
         for vid, info in plan.infos.items():
             after = verified.infos.get(vid)
             if after is None or vid not in steps:
@@ -2717,6 +2784,44 @@ class IdentityService:
         )
         self._finish(profile, plan, state2, wrote=True, package=package)
         return plan
+
+    def _await_providers(
+        self,
+        serial: str,
+        pkgs: tuple[str, ...],
+        profile: Profile,
+        state: DeviceState,
+        verified: IdentityPlan,
+        steps: dict[str, Step],
+        *,
+        restarted: bool,
+    ) -> tuple[DeviceState, IdentityPlan]:
+        """Re-read the written lists while their providers are not up.
+
+        Right after a framework restart (or a boot) the contacts, SMS and
+        call-log providers answer late: a read-back then finds nothing
+        although the rows are there. Waits :data:`PROVIDER_WAITS_S` (about
+        10 s) at most before the verify result stands.
+        """
+
+        def waiting(st: DeviceState, plan: IdentityPlan) -> bool:
+            for name in LISTS:
+                if name not in steps:
+                    continue
+                if name in st.lists_unread:
+                    return True
+                after = plan.infos.get(name)
+                if restarted and after is not None and after.status != "verified":
+                    return True
+            return False
+
+        for delay in PROVIDER_WAITS_S:
+            if not waiting(state, verified):
+                break
+            self._sleep(delay)
+            state = self.preflight(serial, pkgs, profile)
+            verified = self._plan(profile, state, pkgs)
+        return state, verified
 
     def _befores(self, profile: Profile, state: DeviceState) -> dict[str, str]:
         out = {}
@@ -2804,7 +2909,7 @@ class IdentityService:
         :data:`_LIST_FAIL` with its item, and the list fails naming them.
         """
         items = render_lists(profile)[name]
-        now = datetime.now(UTC)
+        anchor = _list_anchor(profile)
         lines = []
         uri, _proj, _col = _LIST_QUERY[name]
 
@@ -2828,7 +2933,7 @@ class IdentityService:
                 chain(f"{name}.{i}", _contact_steps(item))
             elif name == "sms":
                 box = str(item.get("box", "inbox"))
-                when = int(_resolve_date(item.get("date"), i, now).timestamp() * 1000)
+                when = _item_date_ms(item, i, anchor)
                 chain(
                     f"{name}.{i}",
                     [
@@ -2841,7 +2946,7 @@ class IdentityService:
                 )
             else:
                 ctype = _CALL_TYPES[str(item.get("type", "incoming"))]
-                when = int(_resolve_date(item.get("date"), i, now).timestamp() * 1000)
+                when = _item_date_ms(item, i, anchor)
                 duration = _call_duration(item.get("duration")) or 0
                 chain(
                     f"{name}.{i}",
