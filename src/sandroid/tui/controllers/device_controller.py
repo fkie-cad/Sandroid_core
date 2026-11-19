@@ -4,9 +4,9 @@ This controller manages device/AVD lifecycle operations, extracted from the
 monolithic app.py to follow Single Responsibility Principle.
 
 Responsibilities:
-- Device detection and connection checking
-- AVD selection and startup
-- Device polling for availability
+- Device detection on startup (else the Devices screen opens)
+- Non-blocking AVD start / emulator stop, restart, rename and adb connect
+  for the Devices screen
 - Device switching with session management
 - Results folder setup per device
 
@@ -33,7 +33,6 @@ import os
 import re
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Protocol
 
 if TYPE_CHECKING:
@@ -81,35 +80,6 @@ class ToolboxProtocol(Protocol):
         ...
 
 
-@dataclass
-class AVDInfo:
-    """Information about an Android Virtual Device."""
-
-    name: str
-    android_version: str = "Unknown"
-    api_level: str = "?"
-    device_name: str = ""
-
-
-@dataclass
-class DeviceInfo:
-    """Information about a connected device."""
-
-    serial: str
-    display_name: str
-    is_emulator: bool
-    api_level: str | None = None
-
-
-@dataclass
-class DevicePollResult:
-    """Result of device polling operation."""
-
-    found: bool
-    device: DeviceInfo | None = None
-    message: str = ""
-
-
 class DeviceController:
     """Controller for device/AVD lifecycle management.
 
@@ -135,8 +105,8 @@ class DeviceController:
         # Check startup devices
         controller.check_devices_on_startup()
 
-        # Start AVD with polling
-        controller.start_avd_and_poll("Pixel_6", headless=True)
+        # Start an AVD (non-blocking; attached once booted)
+        controller.start_avd("Pixel_6")
     """
 
     def __init__(
@@ -225,42 +195,55 @@ class DeviceController:
     # Device Detection
     # =========================================================================
 
-    def check_devices_on_startup(self) -> bool:
-        """Check for connected devices on startup.
+    def check_devices_on_startup(self, open_devices: bool = True) -> bool:
+        """Make sure the session has a device; otherwise open Devices.
 
-        Enumerates without auto-selecting (``auto_select=False``) so that,
-        when 2+ devices are ready, a picker can be offered before any device
-        is silently selected -- see ``_resolve_startup_device_selection``.
+        Selects only an unambiguous device (``auto_select_device``: the
+        requested ``--serial``, the only ready one, or the previous one --
+        never a guess among several). Normally the StartupScreen already
+        resolved this; when nothing is active (none connected, several, or
+        the requested one missing) the Devices screen opens.
+
+        Args:
+            open_devices: Open the Devices screen when nothing is active.
 
         Returns:
-            True if devices are available, False if no devices found
+            True if a device is active afterwards.
         """
         try:
             dm = self._get_device_manager()
             devices = dm.refresh_devices(auto_select=False)
-
-            if devices:
+            if dm.active_device is None:
+                dm.auto_select_device()
+            if dm.active_device is not None:
                 logger.debug(f"Found {len(devices)} device(s) on startup")
-                self._resolve_startup_device_selection(dm, devices)
                 return True
 
-            # No devices connected - offer to start an AVD
-            logger.info("No devices connected on startup")
             explicit = getattr(dm, "preferred_serial", lambda: None)()
+            ready = [d for d in devices if getattr(d, "state", "") == "device"]
             if explicit:
                 self._report_requested_device_missing(dm, explicit)
-            self.offer_avd_start()
+                reason = f"Requested device {explicit} is not available."
+            elif len(ready) > 1:
+                reason = "Several devices are connected -- choose one."
+            elif devices:
+                reason = "No device is ready (see its state below)."
+            else:
+                reason = "No device connected -- start an AVD or connect one."
+            logger.info(f"No device selected on startup: {reason}")
+            if open_devices:
+                self.open_devices(reason)
             return False
         except Exception as e:
             logger.error(f"Error checking devices on startup: {e}")
-            self._log_error(f"Error checking devices: {e}")
+            self._ui(self._log_error, f"Error checking devices: {e}")
             return False
 
     def _report_requested_device_missing(self, dm: Any, serial: str) -> None:
         """Say clearly that the requested ``--serial`` device is unusable.
 
         Nothing is selected instead (no silent fallback to another device);
-        the user can start the AVD or pick a device with the selector.
+        the user can start the AVD or pick a device in Devices.
         """
         try:
             from sandroid.core.initializer import describe_device_problem
@@ -274,88 +257,7 @@ class DeviceController:
             "device. Start it, or choose one in Devices (D)."
         )
         logger.error(msg)
-        try:
-            self._call_from_thread(self._log_error, msg)
-        except Exception:
-            logger.debug("Could not show the device error in the UI", exc_info=True)
-
-    def _resolve_startup_device_selection(self, dm: Any, devices: list) -> None:
-        """Resolve device selection at startup, prompting when 2+ are ready.
-
-        With fewer than 2 ready (``state == "device"``) devices, or when a
-        device is already active, falls back to the existing silent
-        ``auto_select_device()``. With 2+ ready devices, pushes the existing
-        ``DeviceSelectionModal`` so the user picks explicitly instead of
-        silently landing on ``emulators[0]``.
-
-        This is deliberately startup-only. Normally the StartupScreen already
-        asked (``initialize_core`` refuses to guess among 2+ devices), so a
-        device is active here. ``auto_select_device()`` never picks one of
-        several devices either, so a cancelled picker leaves the session
-        without a device (press D to choose) rather than on a guessed one.
-
-        Args:
-            dm: The device manager instance.
-            devices: The freshly refreshed device list.
-        """
-        try:
-            if dm.active_device is not None:
-                return
-
-            ready_devices = [d for d in devices if d.state == "device"]
-            explicit = getattr(dm, "preferred_serial", lambda: None)()
-            if explicit or len(ready_devices) < 2 or not self._push_modal:
-                # auto_select_device() honours --serial / ANDROID_SERIAL and
-                # never falls back to another device.
-                dm.auto_select_device()
-                if explicit and dm.active_device is None:
-                    self._report_requested_device_missing(dm, explicit)
-                return
-
-            from sandroid.tui.modals import DeviceSelectionModal
-
-            def on_selected(serial: str | None) -> None:
-                if serial:
-                    self.switch_device(serial)
-                else:
-                    dm.auto_select_device()
-
-            modal = DeviceSelectionModal(devices=devices, current_serial=None)
-            # Runs off a raw background thread (check_devices_on_startup's
-            # caller) -- push_modal (Textual's push_screen) calls
-            # asyncio.get_running_loop() internally and raises if invoked
-            # directly off-thread, so this must marshal onto the UI thread.
-            self._call_from_thread(self._push_modal, modal, on_selected)
-
-        except Exception as e:
-            logger.exception(f"Error resolving startup device selection: {e}")
-            try:
-                dm.auto_select_device()
-            except Exception:
-                pass
-
-    def get_connected_devices(self) -> list[DeviceInfo]:
-        """Get list of currently connected devices.
-
-        Returns:
-            List of DeviceInfo objects for connected devices
-        """
-        try:
-            dm = self._get_device_manager()
-            devices = dm.refresh_devices()
-
-            return [
-                DeviceInfo(
-                    serial=d.serial,
-                    display_name=d.display_name,
-                    is_emulator=d.is_emulator,
-                    api_level=getattr(d, "api_level", None),
-                )
-                for d in devices
-            ]
-        except Exception as e:
-            logger.error(f"Error getting connected devices: {e}")
-            return []
+        self._ui(self._log_error, msg)
 
     def has_active_session(self) -> bool:
         """Check if there's an active analysis session.
@@ -374,148 +276,8 @@ class DeviceController:
             return False
 
     # =========================================================================
-    # AVD Management
+    # Emulator launch
     # =========================================================================
-
-    def get_available_avds(self) -> list[AVDInfo]:
-        """Get list of available AVDs.
-
-        Returns:
-            List of AVDInfo objects for available AVDs
-        """
-        try:
-            from sandroid.core.emulator import avd_info, emulator_binary, list_avds
-
-            if emulator_binary() is None:
-                logger.warning("No emulator path found")
-                return []
-
-            avds = []
-            for name in list_avds():
-                info = avd_info(name)
-                avds.append(
-                    AVDInfo(
-                        name=name,
-                        android_version=info.android_version,
-                        api_level=str(info.api_level) if info.api_level else "?",
-                        device_name=info.device_name,
-                    )
-                )
-            return avds
-        except Exception as e:
-            logger.error(f"Error getting available AVDs: {e}")
-            return []
-
-    def offer_avd_start(self) -> None:
-        """Show AVD selection when no devices are connected.
-
-        This method retrieves available AVDs and pushes a selection modal
-        if the push_modal callback is configured.
-        """
-        try:
-            from sandroid.core.emulator import emulator_binary
-
-            if emulator_binary() is None:
-                self._log_warning(
-                    "No Android device connected. Run 'sandroid-config init' to configure AVD."
-                )
-                return
-
-            avds = self.get_available_avds()
-
-            if not avds:
-                self._log_warning(
-                    "No Android device or AVD available. Create an AVD in Android Studio."
-                )
-                return
-
-            if not self._push_modal:
-                self._log_info(f"No devices connected. {len(avds)} AVD(s) available.")
-                return
-
-            # Push AVD selection modal
-            from sandroid.tui.modals import AVDInfo as ModalAVDInfo
-            from sandroid.tui.modals import (
-                AVDSelectionModal,
-                AVDSelectionResult,
-            )
-
-            modal_avds = [
-                ModalAVDInfo(
-                    name=avd.name,
-                    android_version=avd.android_version,
-                    api_level=avd.api_level,
-                    device_name=avd.device_name,
-                )
-                for avd in avds
-            ]
-
-            def on_avd_selected(result: AVDSelectionResult) -> None:
-                if result.cancelled:
-                    self._log_info(
-                        "No AVD started. Connect a device or run 'sandroid-config avd start'."
-                    )
-                    return
-
-                self.start_avd_and_poll(
-                    result.selected_avd,
-                    headless=result.headless,
-                    save_as_default=result.save_as_default,
-                )
-
-            # check_devices_on_startup (this method's only caller) runs off a
-            # raw background thread -- push_modal (Textual's push_screen)
-            # calls asyncio.get_running_loop() internally and raises if
-            # invoked directly off-thread, so this must marshal onto the UI
-            # thread (matching _resolve_startup_device_selection).
-            self._call_from_thread(
-                self._push_modal, AVDSelectionModal(avds=modal_avds), on_avd_selected
-            )
-
-        except Exception as e:
-            logger.exception(f"Error offering AVD start: {e}")
-            self._log_error(f"Error showing AVD selection: {e}")
-
-    def start_avd_and_poll(
-        self,
-        avd_name: str,
-        headless: bool = False,
-        save_as_default: bool = False,
-        emulator_path: str | None = None,
-        sdk_path: str | None = None,
-    ) -> bool:
-        """Start an AVD in the background and attach it once it has booted.
-
-        Launches through :func:`sandroid.core.emulator.launch_avd` (explicit
-        port, safe flags, log file), remembers the options and waits for
-        exactly that serial to boot (see :meth:`_launch_and_watch`).
-
-        Args:
-            avd_name: Name of AVD to start
-            headless: Whether to start in headless mode
-            save_as_default: Whether to save this AVD as default
-            emulator_path: Ignored (kept for compatibility; the emulator is
-                resolved by :func:`sandroid.core.emulator.emulator_binary`).
-            sdk_path: Ignored (kept for compatibility).
-
-        Returns:
-            True if AVD start was initiated successfully
-        """
-        from sandroid.core.emulator import AvdLaunchOptions
-
-        mode_str = "headless" if headless else "with UI"
-        self._log_info(f"Starting AVD '{avd_name}' ({mode_str})...")
-        opts = AvdLaunchOptions(headless=headless)
-        thread = threading.Thread(
-            target=self._launch_and_watch,
-            args=(avd_name, opts),
-            name=f"start-avd-{avd_name}",
-            daemon=True,
-        )
-        thread.start()
-        if save_as_default:
-            self.save_avd_as_default(avd_name, headless)
-        return True
 
     def _launch_and_watch(
         self,
@@ -616,112 +378,17 @@ class DeviceController:
         except Exception as e:
             logger.error(f"Error attaching {serial}: {e}")
 
-    def save_avd_as_default(self, avd_name: str, headless: bool = False) -> bool:
-        """Save AVD as default in config.
-
-        Args:
-            avd_name: Name of AVD to save
-            headless: Whether to save headless mode preference
-
-        Returns:
-            True if saved successfully
-        """
-        try:
-            from sandroid.config.loader import ConfigLoader
-
-            loader = ConfigLoader()
-            loader.load_and_update_section(
-                "emulator",
-                {
-                    "selected_avd": avd_name,
-                    "device_name": avd_name,
-                    "avd_headless": headless,
-                },
-            )
-            self._log_info(f"Saved '{avd_name}' as default AVD")
-            return True
-
-        except Exception as e:
-            logger.debug(f"Failed to save AVD as default: {e}")
-            return False
-
     # =========================================================================
-    # Device Polling
+    # Disconnect-detection suppression
     # =========================================================================
-
-    def start_device_poll(
-        self,
-        avd_name: str,
-        attempts: int = 0,
-        max_attempts: int = 30,
-        interval_seconds: float = 2.0,
-    ) -> None:
-        """Poll for device to appear after starting AVD.
-
-        Args:
-            avd_name: Name of AVD being started (for logging)
-            attempts: Current attempt count
-            max_attempts: Maximum poll attempts (default 30 = 60 seconds)
-            interval_seconds: Seconds between poll attempts
-        """
-        self._polling_active = True
-
-        try:
-            dm = self._get_device_manager()
-            devices = dm.refresh_devices()
-
-            if devices:
-                # Device appeared!
-                self._polling_active = False
-                device = devices[0]
-                type_tag = "[E]" if device.is_emulator else "[P]"
-                self._log_info(f"Device connected: {type_tag} {device.display_name}")
-
-                # Force UI refresh
-                if self._refresh_ui:
-                    self._refresh_ui()
-                return
-
-            if attempts >= max_attempts:
-                self._polling_active = False
-                self._log_warning(
-                    "AVD taking longer than expected to start. "
-                    "Press 'D' to refresh device list when ready."
-                )
-                return
-
-            # Schedule next poll
-            if self._schedule_timer:
-                self._schedule_timer(
-                    interval_seconds,
-                    lambda: self.start_device_poll(
-                        avd_name, attempts + 1, max_attempts, interval_seconds
-                    ),
-                )
-            else:
-                # No timer available, poll synchronously (for testing)
-                import time
-
-                time.sleep(interval_seconds)
-                self.start_device_poll(
-                    avd_name, attempts + 1, max_attempts, interval_seconds
-                )
-
-        except Exception as e:
-            self._polling_active = False
-            logger.error(f"Error polling for device: {e}")
 
     def is_polling(self) -> bool:
-        """Check if device polling is currently active.
+        """Whether disconnect detection is suppressed (snapshot save/load).
 
         Returns:
-            True if polling for device
+            True while :meth:`suppress_disconnect_detection` is active.
         """
         return self._polling_active
-
-    def stop_polling(self) -> None:
-        """Stop any active device polling."""
-        self._polling_active = False
 
     def suppress_disconnect_detection(self, active: bool) -> None:
         """Suppress the periodic device-disconnect poll during a known-
@@ -731,10 +398,8 @@ class DeviceController:
         (offline -> unauthorized -> occasionally a duplicate listing before
         it settles), which the app's poll loop (``SandroidTUI.
         _poll_device_state()``) can otherwise misread as a real device
-        disconnect and stop all running tasks. Reuses the exact
-        ``_polling_active`` flag :meth:`is_polling` already exposes for the
-        AVD-boot poll -- ``_poll_device_state()`` already checks it, so no
-        new plumbing is needed in the app's poll loop, just this call.
+        disconnect and stop all running tasks. ``_poll_device_state()`` and
+        the post-disconnect Devices screen check :meth:`is_polling`.
 
         Callers must pair every ``True`` with a ``False`` (e.g. via
         ``try/finally``), so normal disconnect detection resumes even if the
@@ -982,122 +647,6 @@ class DeviceController:
         self._ui(self._open_devices, reason)
 
     # =========================================================================
-    # Boot Mode Operations
-    # =========================================================================
-
-    @staticmethod
-    def _boot_options(boot_mode: str, snapshot_name: str | None, headless: bool) -> Any:
-        """``AvdLaunchOptions`` for a modal boot mode (``default`` = normal)."""
-        from sandroid.core.emulator import AvdLaunchOptions
-
-        boot = {"default": "normal"}.get(boot_mode, boot_mode)
-        if boot not in ("normal", "cold", "snapshot", "wipe"):
-            boot = "normal"
-        return AvdLaunchOptions(
-            headless=headless,
-            boot=boot,
-            snapshot=snapshot_name if boot == "snapshot" else None,
-        )
-
-    def _run_background(
-        self, fn: Callable[[], Any], name: str, run_worker: Callable | None
-    ) -> None:
-        if run_worker:
-            run_worker(fn, name=name, thread=True)
-        else:
-            threading.Thread(target=fn, name=name, daemon=True).start()
-
-    def start_avd_with_boot_mode(
-        self,
-        avd_name: str,
-        boot_mode: str,
-        snapshot_name: str | None = None,
-        run_worker: Callable | None = None,
-        call_from_thread: Callable | None = None,
-        notify: Callable | None = None,
-    ) -> bool:
-        """Start an AVD with the specified boot mode.
-
-        Headless follows the AVD's remembered options; the launch goes
-        through :func:`sandroid.core.emulator.launch_avd`.
-
-        Args:
-            avd_name: Name of the AVD to start
-            boot_mode: Boot mode ("default", "cold", "snapshot", "wipe")
-            snapshot_name: Snapshot name for "snapshot" boot mode
-            run_worker: Callback to run in worker thread
-            call_from_thread: Callback to execute on main thread
-            notify: Callback for notifications
-
-        Returns:
-            True if start was initiated
-        """
-
-        def start_avd_worker() -> None:
-            from sandroid.core.emulator import remembered_options
-
-            headless = remembered_options(avd_name).headless
-            opts = self._boot_options(boot_mode, snapshot_name, headless)
-            self._launch_and_watch(
-                avd_name, opts, notify=notify, call_from_thread=call_from_thread
-            )
-
-        self._run_background(start_avd_worker, "start_avd", run_worker)
-        return True
-
-    def restart_emulator_with_boot_mode(
-        self,
-        serial: str,
-        boot_mode: str,
-        snapshot_name: str | None = None,
-        run_worker: Callable | None = None,
-        call_from_thread: Callable | None = None,
-        notify: Callable | None = None,
-    ) -> bool:
-        """Restart emulator *serial* with the specified boot mode.
-
-        Stops exactly that emulator (``adb -s <serial> emu kill``) and
-        relaunches its AVD on the same port, so the serial stays the same
-        (see :func:`sandroid.core.emulator.restart_emulator`).
-
-        Args:
-            serial: Serial number of the emulator
-            boot_mode: Boot mode ("default", "cold", "snapshot", "wipe")
-            snapshot_name: Snapshot name for "snapshot" boot mode
-            run_worker: Callback to run in worker thread
-            call_from_thread: Callback to execute on main thread
-            notify: Callback for notifications
-
-        Returns:
-            True if restart was initiated
-        """
-
-        def restart_worker() -> None:
-            from sandroid.core.emulator import (
-                avd_name_of,
-                get_launch,
-                remembered_options,
-            )
-
-            launch = get_launch(serial)
-            if launch is not None:
-                headless = launch.options.headless
-            else:
-                avd = avd_name_of(serial)
-                headless = remembered_options(avd).headless if avd else False
-            opts = self._boot_options(boot_mode, snapshot_name, headless)
-            self._launch_and_watch(
-                None,
-                opts,
-                restart_serial=serial,
-                notify=notify,
-                call_from_thread=call_from_thread,
-            )
-
-        self._run_background(restart_worker, "restart_emulator", run_worker)
-        return True
-
-    # =========================================================================
     # Device Switch with Confirmation
     # =========================================================================
 
@@ -1187,8 +736,5 @@ class DeviceController:
 
 
 __all__ = [
-    "AVDInfo",
     "DeviceController",
-    "DeviceInfo",
-    "DevicePollResult",
 ]

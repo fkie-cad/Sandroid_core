@@ -484,6 +484,11 @@ def _controller(dm, logs):
     )
 
 
+def _inline(controller) -> None:
+    """Run the controller's background workers inline (deterministic)."""
+    controller._spawn = lambda fn, name: fn()
+
+
 @pytest.mark.parametrize("headless", [False, True])
 def test_tui_start_avd_launches_with_safe_flags_and_attaches(env, headless):
     from sandroid.core.emulator_guard import emulator_launch_args
@@ -494,7 +499,7 @@ def test_tui_start_avd_launches_with_safe_flags_and_attaches(env, headless):
     )
     dm, logs = _Dm(), []
     controller = _controller(dm, logs)
-    assert controller.start_avd_and_poll("Pixel", headless=headless)
+    controller.start_avd("Pixel", emu.AvdLaunchOptions(headless=headless))
     for thread in threading.enumerate():
         if thread.name == "start-avd-Pixel":
             thread.join(10)
@@ -515,9 +520,8 @@ def test_tui_boot_does_not_steal_an_active_device(env):
     active = type("D", (), {"serial": "R58N123ABC"})()
     dm, logs = _Dm(active=active), []
     controller = _controller(dm, logs)
-    controller.start_avd_with_boot_mode(
-        "Pixel", "cold", run_worker=lambda fn, **kw: fn()
-    )
+    _inline(controller)
+    controller.start_avd("Pixel", emu.AvdLaunchOptions(boot="cold"))
     assert dm.switched == []
     assert any("switch to it in Devices (D)" in str(m) for m in logs)
     assert "-no-snapshot-load" in env["spawned"][0]
@@ -531,9 +535,8 @@ def test_tui_restart_targets_the_given_serial_not_the_global_target(env):
     env["on_spawn"] = lambda command: adb.add("emulator-5556", avd="Pixel")
     dm, logs = _Dm(), []
     controller = _controller(dm, logs)
-    controller.restart_emulator_with_boot_mode(
-        "emulator-5556", "default", run_worker=lambda fn, **kw: fn()
-    )
+    _inline(controller)
+    controller.restart_emulator("emulator-5556")
     assert [c for c in adb.calls if c[0].startswith("telnet")] == [
         ("telnet kill", "emulator-5556")
     ]
@@ -551,8 +554,7 @@ def test_tui_launch_failure_is_logged_not_raised(env):
     env["startup"] = [(False, "PANIC: broken")]
     dm, logs = _Dm(), []
     controller = _controller(dm, logs)
-    controller.start_avd_with_boot_mode(
-        "Pixel", "default", run_worker=lambda fn, **kw: fn()
-    )
+    _inline(controller)
+    controller.start_avd("Pixel", emu.AvdLaunchOptions())
     assert any("PANIC: broken" in str(m) for m in logs)
     assert dm.switched == []

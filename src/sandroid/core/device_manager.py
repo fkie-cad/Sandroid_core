@@ -143,8 +143,8 @@ class DeviceManager:
             auto_select: Whether to auto-select a device when there is no
                 active device (default: True, preserving prior behavior).
                 Pass False to enumerate without ever auto-selecting -- used
-                by the startup-only multi-device picker so it can offer a
-                choice before anything is silently selected.
+                when the caller resolves the selection itself (startup
+                check, Devices screen) before anything is silently selected.
 
         Returns:
             List of Device objects
@@ -279,7 +279,7 @@ class DeviceManager:
             self._devices = new_devices
 
             # Auto-select if there are devices but no active device (unless the
-            # caller opted out, e.g. the startup picker choosing among 2+).
+            # caller opted out, e.g. the startup check choosing among 2+).
             need_auto_select = (
                 auto_select and not self._active_device and len(self._devices) > 0
             )
@@ -287,9 +287,8 @@ class DeviceManager:
         # DEADLOCK AVOIDANCE: enumerate/mutate under the lock above, then
         # notify/auto-select OUTSIDE it. The app's registered change handler
         # calls Textual's blocking call_from_thread; if these callbacks fired
-        # while holding the lock, a UI-thread refresh_devices() (e.g.
-        # action_show_device_selector) waiting on the lock would deadlock the
-        # event loop.
+        # while holding the lock, a UI-thread refresh_devices() waiting on
+        # the lock would deadlock the event loop.
 
         # Notify list listeners.
         for callback in self._on_devices_updated_callbacks:
@@ -760,7 +759,7 @@ class DeviceManager:
         3. If several are ready, return to the previously active device when
            it is back (reconnect after a snapshot load / emulator restart)
         4. Otherwise don't select: the user must choose (``--serial`` or the
-           device selector). Picking "the first emulator" once prepared and
+           Devices screen). Picking "the first emulator" once prepared and
            hooked another session's emulator.
 
         Returns:

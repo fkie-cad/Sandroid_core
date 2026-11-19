@@ -3,7 +3,8 @@
 * the adb check must not call a missing *device* a missing *adb binary*
   (``sandroid -s emulator-5999`` said "ADB not found in PATH");
 * the error screen owns its keys (``r`` retried *and* fired Record);
-* ``r``/``R``, ``q``/``Q`` both work, ``d`` picks another device;
+* ``r``/``R``, ``q``/``Q`` both work, ``d`` opens the Devices screen (also
+  by itself on a device problem); its pick is pinned and the start retried;
 * quitting a failed start exits non-zero and drops an unused session folder.
 
 All adb traffic goes to an in-process double; the suite-wide conftest blocks
@@ -16,7 +17,7 @@ import logging
 from types import SimpleNamespace
 
 import pytest
-from pilot_helpers import settle
+from pilot_helpers import settle, until
 
 from sandroid.services.setup_checks import (
     adb_binary_missing,
@@ -198,11 +199,11 @@ async def test_error_screen_shows_the_device_and_its_keys(startup) -> None:
         hint = str(screen.query_one("#startup-hint").render())
         assert f"Device '{MISSING}' not found" in error
         assert "ADB not found" not in error
-        for key_hint in ("r retry", "d pick a device", "q quit"):
+        for key_hint in ("r retry", "d devices", "q quit"):
             assert key_hint in hint
         screen._show_error("ADB not found in PATH", device_problem=False)
         await settle(pilot)
-        assert "pick a device" not in str(screen.query_one("#startup-hint").render())
+        assert "d devices" not in str(screen.query_one("#startup-hint").render())
 
 
 @pytest.mark.parametrize("key", ["r", "R"])
@@ -262,35 +263,89 @@ async def test_q_while_loading_is_ignored_ctrl_c_aborts(startup) -> None:
     assert app.return_code == EXIT_STARTUP_ABORTED
 
 
-@pytest.mark.parametrize("key", ["d", "D"])
-async def test_d_picks_a_device_pins_it_and_retries(startup, monkeypatch, key) -> None:
-    from sandroid.core.adb import Adb
-    from sandroid.core.device_manager import DeviceManager
-    from sandroid.tui.screens.startup_screen import StartupScreen
+@pytest.fixture
+def hub(monkeypatch):
+    """The Devices screen lists ``PRESENT`` as ready (no adb, no monitor)."""
+    from sandroid.tui.screens import devices_screen
+    from sandroid.tui.screens.devices_screen import (
+        DeviceRow,
+        DevicesScreen,
+        HubSnapshot,
+        RowState,
+    )
 
-    device = SimpleNamespace(
-        serial=PRESENT, state="device", is_emulator=True, name="Pixel", model=""
+    monkeypatch.setattr(DevicesScreen, "monitor_factory", None)
+    snap = HubSnapshot(
+        devices=(DeviceRow(serial=PRESENT, state=RowState.READY, is_emulator=True),)
     )
     monkeypatch.setattr(
-        StartupScreen,
-        "_load_devices",
-        lambda self: self.app.call_from_thread(self._show_device_picker, [device]),
+        devices_screen.HubCollector, "collect", lambda self, force_avds=False: snap
     )
+    return DevicesScreen
+
+
+def _assert_pinned_and_retried(startup) -> None:
+    from sandroid.core.adb import Adb
+    from sandroid.core.device_manager import DeviceManager
+
+    assert startup.inits == [1]  # retried with the picked device
+    assert startup.config.emulator.serial == PRESENT
+    assert Adb.get_target_device() == PRESENT
+    assert DeviceManager.preferred_serial() == PRESENT
+
+
+@pytest.mark.parametrize("key", ["d", "D"])
+async def test_d_opens_devices_its_pick_is_pinned_and_retried(
+    startup, hub, key
+) -> None:
     app = startup.app
     async with app.run_test(size=SIZE) as pilot:
         await _error_screen(app, pilot)
         startup.inits.clear()
         await pilot.press(key)
-        await settle(pilot)
-        assert type(app.screen).__name__ == "DeviceSelectionModal"
-        assert startup.globals_fired == []  # not the app's D (device selector)
+        await until(pilot, lambda: isinstance(app.screen, hub))
+        assert app.screen.mode == "startup"
+        assert f"Device '{MISSING}' not found" in app.screen.reason
+        assert startup.globals_fired == []  # not the app's D (show_devices)
         await pilot.press("enter")
+        await until(pilot, lambda: type(app.screen).__name__ == "StartupScreen")
         await settle(pilot)
-        assert type(app.screen).__name__ == "StartupScreen"
-        assert startup.inits == [1]  # retried with the picked device
-        assert startup.config.emulator.serial == PRESENT
-        assert Adb.get_target_device() == PRESENT
-        assert DeviceManager.preferred_serial() == PRESENT
+        _assert_pinned_and_retried(startup)
+
+
+async def test_device_error_opens_devices_escape_returns_to_the_error(
+    startup, hub
+) -> None:
+    app = startup.app
+    async with app.run_test(size=SIZE) as pilot:
+        await settle(pilot)
+        screen = app.screen
+        startup.inits.clear()
+        screen._ask_for_device([PRESENT, "emulator-5556"])
+        await until(pilot, lambda: isinstance(app.screen, hub))
+        assert "More than one device" in app.screen.reason
+        await pilot.press("escape")
+        await until(pilot, lambda: app.screen is screen)
+        assert screen.has_error
+        assert "d devices" in str(screen.query_one("#startup-hint").render())
+        assert startup.inits == []  # nothing retried, nothing pinned
+        assert startup.config.emulator.serial == MISSING
+        await pilot.press("d")  # opens again
+        await until(pilot, lambda: isinstance(app.screen, hub))
+
+
+async def test_emulator_ready_during_startup_is_taken_as_the_pick(startup, hub) -> None:
+    """An AVD started from the startup Devices screen is used once booted."""
+    app = startup.app
+    async with app.run_test(size=SIZE) as pilot:
+        await settle(pilot)
+        screen = app.screen
+        startup.inits.clear()
+        screen._device_error(ERROR)
+        await until(pilot, lambda: isinstance(app.screen, hub))
+        app._on_emulator_ready(PRESENT, "Pixel")
+        await until(pilot, lambda: app.screen is screen)
+        _assert_pinned_and_retried(startup)
 
 
 # --------------------------------------------------------------------------

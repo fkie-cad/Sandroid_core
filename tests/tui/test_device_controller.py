@@ -1,14 +1,10 @@
-"""Unit tests for DeviceController's startup-only multi-device picker.
+"""Unit tests for DeviceController's startup check and device switching.
 
 Covers:
-- ``check_devices_on_startup`` enumerating with ``auto_select=False``;
-- ``_resolve_startup_device_selection``'s 0/1/2+-ready-device and
-  active-device-already-set branches, plus the selection/cancel callback;
-- that both ``_resolve_startup_device_selection`` and ``offer_avd_start``
-  marshal the modal push through ``call_from_thread`` rather than calling
-  ``push_modal`` directly -- the latter was verified to raise
-  ``RuntimeError: no current event loop in thread`` when invoked straight
-  from the background thread ``check_devices_on_startup`` runs on.
+- ``check_devices_on_startup`` enumerating with ``auto_select=False``, taking
+  only an unambiguous device and otherwise opening the Devices screen (with
+  the reason; a missing ``--serial`` is also reported) -- marshaled onto the
+  UI thread, since it runs on a background thread;
 - ``switch_device``/``setup_device_results_folder`` reading ``dm.active_device``
   (regression test for the ``get_current_device`` AttributeError, traced to
   commit ``cc40b98``, that was silently swallowed by a broad ``except``).
@@ -17,9 +13,9 @@ Covers:
 from __future__ import annotations
 
 import os
+import threading
 
-from sandroid.core import emulator
-from sandroid.tui.controllers.device_controller import AVDInfo, DeviceController
+from sandroid.tui.controllers.device_controller import DeviceController
 
 
 class _FakeDevice:
@@ -32,16 +28,27 @@ class _FakeDevice:
 class _FakeDeviceManager:
     """Minimal stand-in exposing exactly what DeviceController touches."""
 
-    def __init__(self, devices=None, active_device=None):
+    def __init__(self, devices=None, active_device=None, preferred=None):
         self.devices = devices or []
         self.active_device = active_device
+        self.preferred = preferred
         self.auto_select_called = 0
 
     def refresh_devices(self, auto_select: bool = True):
         return self.devices
 
+    def preferred_serial(self):
+        return self.preferred
+
     def auto_select_device(self):
+        """Like the real one: the pinned serial, or the only ready device."""
         self.auto_select_called += 1
+        ready = [d for d in self.devices if d.state == "device"]
+        if self.preferred:
+            ready = [d for d in ready if d.serial == self.preferred]
+        if len(ready) == 1:
+            self.active_device = ready[0]
+        return self.active_device
 
     def set_active_device(self, serial: str) -> bool:
         for device in self.devices:
@@ -51,7 +58,9 @@ class _FakeDeviceManager:
         return False
 
 
-def _make_controller(dm, push_modal=None, call_from_thread=None) -> DeviceController:
+def _make_controller(
+    dm, push_modal=None, call_from_thread=None, open_devices=None, log_error=None
+) -> DeviceController:
     class _FakeToolbox:
         @classmethod
         def get_device_manager(cls):
@@ -61,31 +70,9 @@ def _make_controller(dm, push_modal=None, call_from_thread=None) -> DeviceContro
         push_modal=push_modal,
         call_from_thread=call_from_thread,
         toolbox=_FakeToolbox,
+        open_devices=open_devices,
+        log_error=log_error,
     )
-
-
-def _invoking_call_from_thread(calls: list):
-    """A call_from_thread fake that immediately runs the marshaled call."""
-
-    def _cft(fn, *args):
-        calls.append((fn, args))
-        fn(*args)
-
-    return _cft
-
-
-def _recording_call_from_thread(calls: list):
-    """A call_from_thread fake that only records -- never runs the call.
-
-    Used to prove a function is invoked ONLY through call_from_thread: if
-    the code under test called it directly too, that would show up as an
-    extra invocation despite this fake never executing it.
-    """
-
-    def _cft(fn, *args):
-        calls.append((fn, args))
-
-    return _cft
 
 
 # ---------------------------------------------------------------------------
@@ -103,195 +90,84 @@ def test_check_devices_on_startup_refreshes_with_auto_select_false():
         return real_refresh(auto_select=auto_select)
 
     dm.refresh_devices = spy_refresh
-    controller = _make_controller(dm)
+    opened: list = []
+    controller = _make_controller(dm, open_devices=opened.append)
 
     result = controller.check_devices_on_startup()
 
     assert result is True
     assert seen["auto_select"] is False
-    assert dm.auto_select_called == 1  # single device -> falls back silently
+    assert dm.auto_select_called == 1  # single device -> selected silently
+    assert opened == []
 
 
-def test_check_devices_on_startup_no_devices_offers_avd_start(monkeypatch):
-    dm = _FakeDeviceManager(devices=[])
-    controller = _make_controller(dm)
-
-    offered = []
-    monkeypatch.setattr(controller, "offer_avd_start", lambda: offered.append(True))
-
-    result = controller.check_devices_on_startup()
-
-    assert result is False
-    assert offered == [True]
-
-
-# ---------------------------------------------------------------------------
-# _resolve_startup_device_selection: 0 / 1 / 2+ ready-device branches
-# ---------------------------------------------------------------------------
-
-
-def test_resolve_selection_no_devices_auto_selects():
-    dm = _FakeDeviceManager(devices=[])
-    controller = _make_controller(dm)
-
-    controller._resolve_startup_device_selection(dm, dm.devices)
-
-    assert dm.auto_select_called == 1
-
-
-def test_resolve_selection_one_ready_device_auto_selects():
-    dm = _FakeDeviceManager(devices=[_FakeDevice("emulator-5554")])
-    push_calls: list = []
-    controller = _make_controller(dm, push_modal=lambda *a: push_calls.append(a))
-
-    controller._resolve_startup_device_selection(dm, dm.devices)
-
-    assert dm.auto_select_called == 1
-    assert push_calls == []
-
-
-def test_resolve_selection_counts_only_ready_state():
-    """One 'device' + one 'offline' is only 1 READY device -> no picker."""
+def test_check_devices_on_startup_keeps_an_active_device():
+    active = _FakeDevice("emulator-5554")
     dm = _FakeDeviceManager(
-        devices=[
-            _FakeDevice("emulator-5554", state="device"),
-            _FakeDevice("emulator-5556", state="offline"),
-        ]
+        devices=[active, _FakeDevice("emulator-5556")], active_device=active
     )
-    controller = _make_controller(dm)
+    opened: list = []
+    controller = _make_controller(dm, open_devices=opened.append)
 
-    controller._resolve_startup_device_selection(dm, dm.devices)
-
-    assert dm.auto_select_called == 1
-
-
-def test_resolve_selection_skips_entirely_when_already_active():
-    dm = _FakeDeviceManager(
-        devices=[_FakeDevice("emulator-5554"), _FakeDevice("emulator-5556")],
-        active_device=_FakeDevice("emulator-5554"),
-    )
-    push_calls: list = []
-    controller = _make_controller(dm, push_modal=lambda *a: push_calls.append(a))
-
-    controller._resolve_startup_device_selection(dm, dm.devices)
-
+    assert controller.check_devices_on_startup() is True
     assert dm.auto_select_called == 0
-    assert push_calls == []
+    assert opened == []
 
 
-def test_resolve_selection_no_push_modal_configured_falls_back():
-    dm = _FakeDeviceManager(
-        devices=[_FakeDevice("emulator-5554"), _FakeDevice("emulator-5556")]
-    )
-    controller = _make_controller(dm, push_modal=None)
-
-    controller._resolve_startup_device_selection(dm, dm.devices)
-
-    assert dm.auto_select_called == 1
-
-
-def test_resolve_selection_two_ready_marshals_via_call_from_thread_only():
-    """The modal push must go through call_from_thread, never push_modal directly."""
-    dm = _FakeDeviceManager(
-        devices=[_FakeDevice("emulator-5554"), _FakeDevice("emulator-5556")]
-    )
-    push_calls: list = []
-    cft_calls: list = []
-
-    controller = _make_controller(
-        dm,
-        push_modal=lambda *a: push_calls.append(a),
-        call_from_thread=_recording_call_from_thread(cft_calls),
-    )
-
-    controller._resolve_startup_device_selection(dm, dm.devices)
-
-    assert len(cft_calls) == 1
-    assert cft_calls[0][0] is controller._push_modal
-    assert push_calls == []  # never invoked directly/synchronously
-    assert dm.auto_select_called == 0
-
-
-# ---------------------------------------------------------------------------
-# _resolve_startup_device_selection: the on-selection callback itself
-# ---------------------------------------------------------------------------
-
-
-def test_resolve_selection_choosing_a_device_switches_to_it():
-    dm = _FakeDeviceManager(
-        devices=[_FakeDevice("emulator-5554"), _FakeDevice("emulator-5556")]
-    )
-    switch_calls: list = []
-    captured = {}
-
-    def fake_push_modal(modal, callback):
-        captured["callback"] = callback
-
-    cft_calls: list = []
-    controller = _make_controller(
-        dm,
-        push_modal=fake_push_modal,
-        call_from_thread=_invoking_call_from_thread(cft_calls),
-    )
-    controller.switch_device = lambda serial: switch_calls.append(serial)
-
-    controller._resolve_startup_device_selection(dm, dm.devices)
-    captured["callback"]("emulator-5556")
-
-    assert switch_calls == ["emulator-5556"]
-    assert dm.auto_select_called == 0
-
-
-def test_resolve_selection_cancel_falls_back_to_auto_select():
-    dm = _FakeDeviceManager(
-        devices=[_FakeDevice("emulator-5554"), _FakeDevice("emulator-5556")]
-    )
-    captured = {}
-
-    def fake_push_modal(modal, callback):
-        captured["callback"] = callback
-
-    cft_calls: list = []
-    controller = _make_controller(
-        dm,
-        push_modal=fake_push_modal,
-        call_from_thread=_invoking_call_from_thread(cft_calls),
-    )
-
-    controller._resolve_startup_device_selection(dm, dm.devices)
-    captured["callback"](None)  # modal cancelled
-
-    assert dm.auto_select_called == 1
-
-
-# ---------------------------------------------------------------------------
-# offer_avd_start: same call_from_thread marshaling fix
-# ---------------------------------------------------------------------------
-
-
-def test_offer_avd_start_marshals_via_call_from_thread_only(monkeypatch):
-    monkeypatch.setattr(emulator, "emulator_binary", lambda: "/fake/emulator")
-
+def test_check_devices_on_startup_no_devices_opens_devices():
     dm = _FakeDeviceManager(devices=[])
-    push_calls: list = []
-    cft_calls: list = []
+    opened: list = []
+    controller = _make_controller(dm, open_devices=opened.append)
 
+    assert controller.check_devices_on_startup() is False
+    assert len(opened) == 1
+    assert "No device connected" in opened[0]
+
+
+def test_check_devices_on_startup_several_ready_opens_devices():
+    dm = _FakeDeviceManager(
+        devices=[_FakeDevice("emulator-5554"), _FakeDevice("emulator-5556")]
+    )
+    opened: list = []
+    controller = _make_controller(dm, open_devices=opened.append)
+
+    assert controller.check_devices_on_startup() is False
+    assert dm.active_device is None  # never a guess among several
+    assert opened == ["Several devices are connected -- choose one."]
+
+
+def test_check_devices_on_startup_missing_pin_reports_and_opens_devices():
+    dm = _FakeDeviceManager(
+        devices=[_FakeDevice("emulator-5554")], preferred="emulator-5999"
+    )
+    opened: list = []
+    errors: list = []
     controller = _make_controller(
-        dm,
-        push_modal=lambda *a: push_calls.append(a),
-        call_from_thread=_recording_call_from_thread(cft_calls),
-    )
-    monkeypatch.setattr(
-        controller,
-        "get_available_avds",
-        lambda: [AVDInfo(name="Pixel_6_API_34", android_version="14", api_level="34")],
+        dm, open_devices=opened.append, log_error=errors.append
     )
 
-    controller.offer_avd_start()
+    assert controller.check_devices_on_startup() is False
+    assert dm.active_device is None  # no fallback to another device
+    assert opened == ["Requested device emulator-5999 is not available."]
+    assert any("emulator-5999" in e and "Devices (D)" in e for e in errors)
 
-    assert len(cft_calls) == 1
-    assert cft_calls[0][0] is controller._push_modal
-    assert push_calls == []  # never invoked directly/synchronously
+
+def test_check_devices_on_startup_marshals_open_devices_off_thread():
+    """Off the UI thread, open_devices goes through call_from_thread only."""
+    dm = _FakeDeviceManager(devices=[])
+    opened: list = []
+    marshaled: list = []
+
+    def cft(fn, *args):
+        marshaled.append((fn, args))  # never runs it
+
+    controller = _make_controller(dm, call_from_thread=cft, open_devices=opened.append)
+    worker = threading.Thread(target=controller.check_devices_on_startup)
+    worker.start()
+    worker.join(5)
+
+    assert opened == []  # not called directly from the worker
+    assert [fn for fn, _ in marshaled] == [opened.append]
 
 
 # ---------------------------------------------------------------------------

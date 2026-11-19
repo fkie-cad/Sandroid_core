@@ -708,3 +708,114 @@ async def test_devices_result_switches_without_a_session(tui, monkeypatch) -> No
         assert switched == []
         app._on_devices_result("emulator-5556")
         assert switched == ["emulator-5556"]
+
+
+# --------------------------------------------------------------------------
+# disconnect -> Devices (and back)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def detached(tui, monkeypatch):
+    """The app with a fake active device; ``cb()`` is its device-change hook."""
+    from sandroid.services import get_device_service, get_frida_session_service
+    from sandroid.tui import app as app_module
+    from sandroid.tui.controllers import recording_controller
+
+    monkeypatch.setattr(
+        get_frida_session_service(), "update_device_serial", lambda serial: None
+    )
+    monkeypatch.setattr(recording_controller, "drop_stale_frida_device", lambda: 0)
+    monkeypatch.setattr(app_module, "DETACHED_DEVICES_DELAY", 0.05)
+    app = tui
+    for name in ("_auto_start_frida_server", "_warm_kprobe_cache_on_device_change"):
+        monkeypatch.setattr(app, name, lambda: None)
+    state = SimpleNamespace(device=SimpleNamespace(serial="emulator-5554"))
+    monkeypatch.setattr(app, "_active_device", lambda: state.device)
+    service = get_device_service()
+    hooks: list = []
+    register = service.register_device_change_callback
+
+    def capture(callback):
+        hooks.append(callback)
+        register(callback)
+
+    monkeypatch.setattr(service, "register_device_change_callback", capture)
+
+    def app_hook():
+        return next(h for h in hooks if "_register_frida" in h.__qualname__)
+
+    return SimpleNamespace(app=app, cb=app_hook, state=state)
+
+
+async def test_open_devices_if_detached_only_without_an_active_device(
+    detached, monkeypatch
+) -> None:
+    app = detached.app
+    async with app.run_test(size=(160, 45)) as pilot:
+        await _boot(app, pilot)
+        app._open_devices_if_detached()  # the device is back already
+        await _settle(pilot)
+        assert _hubs(app) == []
+        detached.state.device = None
+        monkeypatch.setattr(app._device_controller, "is_polling", lambda: True)
+        app._open_devices_if_detached()  # snapshot load in progress
+        await _settle(pilot)
+        assert _hubs(app) == []
+        monkeypatch.setattr(app._device_controller, "is_polling", lambda: False)
+        app._open_devices_if_detached()
+        await _settle(pilot)
+        assert len(_hubs(app)) == 1
+        assert app.screen.mode == "session"
+        assert "disconnected" in app.screen.reason
+        app._open_devices_if_detached()  # never a second one
+        await _settle(pilot)
+        assert len(_hubs(app)) == 1
+
+
+async def test_disconnect_opens_devices_and_reconnect_closes_it(detached) -> None:
+    import asyncio
+
+    app = detached.app
+    async with app.run_test(size=(160, 45), notifications=True) as pilot:
+        await _boot(app, pilot)
+        callback = detached.cb()
+        detached.state.device = None
+        # The poll worker reports the disconnect (off the UI thread).
+        await asyncio.to_thread(callback, None)
+        await _settle(pilot, 6)
+        assert any("disconnected" in str(n.message) for n in app._notifications)
+        assert isinstance(app.screen, DevicesScreen)
+        # Auto-reconnect (here on the UI thread: no call_from_thread there).
+        detached.state.device = SimpleNamespace(serial="emulator-5554")
+        callback(detached.state.device)
+        await _settle(pilot)
+        assert _hubs(app) == []
+        assert type(app.screen).__name__ == "MainScreen"
+
+
+async def test_quick_reconnect_never_opens_devices(detached) -> None:
+    import asyncio
+
+    app = detached.app
+    async with app.run_test(size=(160, 45)) as pilot:
+        await _boot(app, pilot)
+        callback = detached.cb()
+        detached.state.device = None
+        await asyncio.to_thread(callback, None)
+        detached.state.device = SimpleNamespace(serial="emulator-5554")
+        await asyncio.to_thread(callback, detached.state.device)
+        await _settle(pilot, 6)
+        assert _hubs(app) == []
+
+
+async def test_devices_opened_with_d_stays_open_on_reconnect(detached) -> None:
+    app = detached.app
+    async with app.run_test(size=(160, 45)) as pilot:
+        await _boot(app, pilot)
+        callback = detached.cb()
+        app.open_devices()
+        await _settle(pilot)
+        callback(detached.state.device)
+        await _settle(pilot)
+        assert len(_hubs(app)) == 1

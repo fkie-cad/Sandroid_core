@@ -19,7 +19,7 @@ class MultipleDevicesError(DeviceNotAvailableError):
     Raised by :func:`sandroid.core.initializer.initialize_core` before any
     device work (no ``adb root``, ``setenforce``, Frida), so Sandroid never
     guesses which of several devices -- possibly another session's emulator
-    -- to prepare. The TUI answers it with the device picker; headless and
+    -- to prepare. The TUI answers it with the Devices screen; headless and
     CLI modes report it and exit.
 
     Attributes:

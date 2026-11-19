@@ -85,6 +85,9 @@ logger = logging.getLogger(__name__)
 # failure, so a slower cadence keeps fallback latency acceptable with minimal
 # churn.
 DEVICE_POLL_SECONDS = 10.0
+#: Seconds after a disconnect before the Devices screen opens (gives the
+#: unambiguous auto-reconnect -- snapshot load, emulator restart -- a chance).
+DETACHED_DEVICES_DELAY = 4.0
 
 # Module-level reference for cross-thread access (ContextVars don't work across threads).
 _current_tui_app: Optional["SandroidTUI"] = None
@@ -119,6 +122,9 @@ class SandroidTUI(App):
     TITLE = "Sandroid"
     CSS_PATH = None  # loaded dynamically via css_resolver
     ENABLE_COMMAND_PALETTE = False  # we use our own CommandPalette
+    #: Open Devices when the post-start check finds no device (the test suite,
+    #: which has none, turns it off -- like ``DevicesScreen.monitor_factory``).
+    open_devices_on_startup = True
 
     # fmt: off
     BINDINGS = [
@@ -599,7 +605,7 @@ class SandroidTUI(App):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Refuse every app-level action while the StartupScreen is up.
 
-        The startup screen (and a device picker opened from it) owns the
+        The startup screen (and the Devices screen opened from it) owns the
         keyboard: without this, ``r`` (retry) would also fire Record, and
         ``p``/``1``-``4``/``D``/... would act on a session that does not
         exist yet. A refused priority binding falls through to the screen's
@@ -855,10 +861,11 @@ class SandroidTUI(App):
                 # This callback now also fires on disconnect (from the device
                 # poll worker thread). Marshal UI work to the main thread and
                 # guard against teardown races (same convention as status_bar).
-                try:
-                    self.call_from_thread(self._update_status_bar)
-                except Exception:
-                    pass
+                self._run_on_ui(self._update_status_bar)
+                if device is not None:
+                    # Back (auto-reconnect / attached elsewhere): a Devices
+                    # screen the disconnect opened is not needed any more.
+                    self._run_on_ui(self._close_reconnect_devices_screen)
 
                 # Disconnect-only reactions. A normal device *switch* (device is
                 # not None) already runs _reset_device_state() in
@@ -869,21 +876,77 @@ class SandroidTUI(App):
                             self._device_controller.stop_all_tasks()
                     except Exception as exc:
                         logger.debug(f"stop_all_tasks on disconnect failed: {exc}")
-                    try:
-                        self.call_from_thread(
-                            self.notify,
-                            "Device disconnected — stopped running tasks. "
-                            "Press D to open Devices.",
-                            severity="warning",
-                        )
-                    except Exception:
-                        pass
+                    self._run_on_ui(
+                        self.notify,
+                        "Device disconnected — stopped running tasks. Devices "
+                        "opens unless it comes back.",
+                        severity="warning",
+                    )
+                    # Unambiguous reconnects happen by themselves (the poll's
+                    # auto-select); otherwise let the user choose.
+                    self._run_on_ui(
+                        self.set_timer,
+                        DETACHED_DEVICES_DELAY,
+                        self._open_devices_if_detached,
+                    )
 
             device_service.register_device_change_callback(on_device_change)
             logger.debug("Registered Frida device change callback")
 
         except Exception as e:
             logger.warning(f"Failed to register Frida device change callback: {e}")
+
+    def _run_on_ui(self, fn, *args, **kwargs) -> None:
+        """Run *fn* on the UI thread: directly there, marshaled from a worker.
+
+        ``call_from_thread`` raises on the UI thread itself, and the device
+        change callbacks fire from both (poll worker, UI-thread switches).
+        Never raises (teardown races).
+        """
+        try:
+            if threading.current_thread() is threading.main_thread():
+                fn(*args, **kwargs)
+            else:
+                self.call_from_thread(fn, *args, **kwargs)
+        except Exception:
+            logger.debug("UI call failed", exc_info=True)
+
+    def _open_devices_if_detached(self) -> None:
+        """After a disconnect: open Devices if the session still has no device.
+
+        Skipped once the device is back (auto-reconnect), during startup or
+        quit, while a Devices screen is open, and while a snapshot load
+        suppresses disconnect detection. The screen opened here closes by
+        itself when the active device returns.
+        """
+        if getattr(self, "_exit_started", False) or self._startup_screen_up():
+            return
+        if self._active_device() is not None or self._devices_screen_open():
+            return
+        try:
+            if self._device_controller.is_polling():
+                return
+        except Exception:
+            return
+        if self.open_devices(
+            "The device was disconnected -- attach, start or reconnect one."
+        ):
+            self._reconnect_devices_screen = self.screen
+
+    def _close_reconnect_devices_screen(self) -> None:
+        """The active device is back: close the screen the disconnect opened.
+
+        Only while it is on top -- with a dialog over it the user is busy
+        there, and it stays open.
+        """
+        screen = getattr(self, "_reconnect_devices_screen", None)
+        self._reconnect_devices_screen = None
+        if screen is None or self.screen is not screen:
+            return
+        if self._active_device() is None:
+            return
+        screen.dismiss(None)
+        self.notify("Device reconnected.", timeout=3)
 
     def _on_adb_devices_changed(self) -> None:
         """Fast-path edge trigger from the adb host:track-devices stream.
@@ -962,7 +1025,9 @@ class SandroidTUI(App):
         import threading
 
         def _background_check():
-            self._device_controller.check_devices_on_startup()
+            self._device_controller.check_devices_on_startup(
+                open_devices=self.open_devices_on_startup
+            )
             self._run_deferred_setup_checks()
             self._auto_start_frida_server()
             self._warm_kprobe_cache_on_startup()
@@ -1810,41 +1875,6 @@ class SandroidTUI(App):
                 title="Emulator ready",
                 timeout=8,
             )
-
-    def handle_device_launch_choice(self, serial: str) -> bool:
-        """Act on a DeviceSelectionModal "start AVD" / "restart emulator" pick.
-
-        Only the StartupScreen's device picker still uses that modal (the
-        session uses the Devices screen); both go away together.
-
-        The modal encodes those as ``__start_avd__<name>__<mode>__<snapshot>``
-        / ``__restart_emulator__<serial>__<mode>__<snapshot>``.
-
-        Returns:
-            True if ``serial`` was such an encoded choice (handled here), False
-            for a plain device serial.
-        """
-        if not serial.startswith(("__start_avd__", "__restart_emulator__")):
-            return False
-        parts = serial.split("__")
-        if len(parts) < 4 or not parts[2]:
-            return True
-        target, mode = parts[2], parts[3]
-        snapshot = parts[4] if len(parts) > 4 and parts[4] else None
-        worker_kw = {
-            "run_worker": self.run_worker,
-            "call_from_thread": self.call_from_thread,
-            "notify": self.notify,
-        }
-        if serial.startswith("__start_avd__"):
-            self._device_controller.start_avd_with_boot_mode(
-                target, mode, snapshot, **worker_kw
-            )
-        else:
-            self._device_controller.restart_emulator_with_boot_mode(
-                target, mode, snapshot, **worker_kw
-            )
-        return True
 
     def _has_active_session(self) -> bool:
         """True if background tasks or spotlight app are active."""

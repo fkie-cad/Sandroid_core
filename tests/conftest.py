@@ -631,6 +631,14 @@ def _block_device_access(request, monkeypatch):
         emulator_guard = None
     if emulator_guard is not None:
         monkeypatch.setattr(emulator_guard, "start_memory_guard", lambda config: None)
+    # Without devices the TUI's post-start check would open the Devices screen
+    # over every app test (tests/tui/test_device_controller.py covers it).
+    try:
+        from sandroid.tui.app import SandroidTUI
+    except Exception:
+        SandroidTUI = None
+    if SandroidTUI is not None:
+        monkeypatch.setattr(SandroidTUI, "open_devices_on_startup", False)
     # On hosts without adb (CI runners) ``Adb.init`` raises
     # ``AdbNotFoundError`` the first time a widget asks the device anything
     # (``send_adb_command`` turns it into an "OSError: adb not found" reply).

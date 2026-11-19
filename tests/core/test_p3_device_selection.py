@@ -58,6 +58,11 @@ answers = {{
     "shell getprop ro.boot.qemu.avd_name": "Pixel_9_2",
     "shell getprop ro.product.model": "sdk_gphone64_arm64",
     "shell getprop ro.boot.qemu": "1",
+    # The Devices screen's read-only readiness probe.
+    "shell getprop sys.boot_completed; getprop ro.build.version.sdk; "
+    "getprop ro.boot.qemu.avd_name; getprop ro.kernel.qemu.avd_name": (
+        "1\n35\nPixel_9_2\n"
+    ),
 }}
 sys.stdout.write(answers.get(" ".join(args), "") + "\n")
 """
@@ -406,12 +411,16 @@ def test_cli_headless_two_devices_without_serial_refuses(
 async def test_tui_two_devices_without_pin_asks_before_any_prep(
     fake_adb, core_spies, monkeypatch
 ):
-    """The picker opens before Toolbox.init / setup checks touch a device."""
+    """Devices opens before Toolbox.init / setup checks touch a device."""
     from sandroid import services
+    from sandroid.core import emulator
     from sandroid.tui.app import SandroidTUI
     from sandroid.tui.screens import startup_screen
+    from sandroid.tui.screens.devices_screen import DevicesScreen
 
     monkeypatch.setattr(startup_screen, "_startup_failure", None)
+    monkeypatch.setattr(DevicesScreen, "monitor_factory", None)
+    monkeypatch.setattr(emulator, "emulator_binary", lambda: None)  # no AVDs
     setup_calls: list[str | None] = []
 
     class _Setup:
@@ -433,9 +442,16 @@ async def test_tui_two_devices_without_pin_asks_before_any_prep(
     async with app.run_test(size=(160, 45)) as pilot:
         for _ in range(60):
             await pilot.pause(0.05)
-            if type(app.screen).__name__ == "DeviceSelectionModal":
+            screen = app.screen
+            if isinstance(screen, DevicesScreen) and screen.snapshot is not None:
                 break
-        assert type(app.screen).__name__ == "DeviceSelectionModal"
+        assert isinstance(app.screen, DevicesScreen)
+        assert app.screen.mode == "startup"
+        assert {row.serial for row in app.screen.snapshot.devices} == {
+            "emulator-5556",
+            "emulator-5554",
+        }
+        await pilot.pause(0.1)
         assert core_spies.inits == []
         assert setup_calls == []
         assert _device_changing(fake_adb.calls()) == []
@@ -582,14 +598,16 @@ def test_tui_reports_missing_requested_serial(fake_adb, monkeypatch):
 
     _no_session_side_effects(monkeypatch)
     errors = []
+    opened = []
     DeviceManager.set_preferred_serial("emulator-5999")
     controller = DeviceController(
         log_error=errors.append,
         toolbox=SimpleNamespace(get_device_manager=DeviceManager.get),
+        open_devices=opened.append,
     )
-    monkeypatch.setattr(controller, "offer_avd_start", lambda: None)
-    controller.check_devices_on_startup()
+    assert controller.check_devices_on_startup() is False
     assert DeviceManager.get().active_device is None
+    assert opened == ["Requested device emulator-5999 is not available."]
     assert len(errors) == 1
     assert "emulator-5999 is not connected" in errors[0]
     assert "emulator-5556" in errors[0]
