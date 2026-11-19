@@ -423,7 +423,11 @@ def test_a_failed_sync_is_warned_once_and_recording_goes_on(device, caplog):
         device_clock.after_snapshot_load("clean", SERIAL)
         device_clock.after_snapshot_load("clean", SERIAL)
     reasons = [x["reason"] for x in _lines()]
-    assert reasons == ["snapshot-load", "sync", "snapshot-load", "sync"]
+    # A clock still off after the sync gets one network-time force refresh.
+    assert reasons == ["snapshot-load", "sync", "sync"] * 2
+    assert _lines()[2]["trigger"] == "force-refresh"
+    assert _lines()[2]["command"] == device_clock.FORCE_REFRESH_COMMAND
+    assert _lines()[2]["ok"] is False
     assert _lines()[1]["ok"] is False
     assert _lines()[1]["command"] is None
     assert _lines()[1]["sets"] == 6  # 3 forms x (plain, su 0), none applied

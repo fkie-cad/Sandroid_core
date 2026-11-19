@@ -1127,7 +1127,7 @@ class EmulatorService:
         )
         return False
 
-    def delete_snapshot(self, name: str) -> bool:
+    def delete_snapshot(self, name: str, serial: str | None = None) -> bool:
         """Delete a previously created snapshot.
 
         Mirrors :meth:`create_snapshot` exactly, changing only the console
@@ -1139,6 +1139,8 @@ class EmulatorService:
 
         Args:
             name: Name of the snapshot to delete.
+            serial: Device serial to target for this call only (as for
+                :meth:`create_snapshot`); omit for the current global target.
 
         Returns:
             True if the snapshot was deleted successfully.
@@ -1149,22 +1151,25 @@ class EmulatorService:
         try:
             command = _snapshot_command("del", name)
 
-            stdout, stderr = adb.send_telnet_command(command)
+            if serial is None:
+                stdout, stderr = adb.send_telnet_command(command)
+            else:
+                stdout, stderr = adb.send_telnet_command(command, serial=serial)
 
             # Like save/load, the console reports failures (unknown snapshot,
             # bad sub-command) as "KO: ..." on stdout while adb exits 0.
             if stderr or "KO:" in str(stdout or ""):
                 self._logger.error(f"Failed to delete snapshot: {stderr or stdout}")
-                _snapshot_line("delete", name, False, None, str(stderr or stdout))
+                _snapshot_line("delete", name, False, serial, str(stderr or stdout))
                 return False
 
             self._logger.info(f"Snapshot '{name}' deleted successfully")
-            _snapshot_line("delete", name, True, None)
+            _snapshot_line("delete", name, True, serial)
             return True
 
         except Exception as e:
             self._logger.error(f"Failed to delete snapshot: {e}")
-            _snapshot_line("delete", name, False, None, str(e))
+            _snapshot_line("delete", name, False, serial, str(e))
             return False
 
     def list_snapshots(self) -> list[SnapshotInfo]:
