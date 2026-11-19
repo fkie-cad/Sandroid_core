@@ -1248,15 +1248,19 @@ class _TurnRunner:
                 )
             else:
                 outcome = self.executor.execute(call_id, name, raw, budget=budget)
+            payload = outcome.event_payload()
             ref = self._append(
                 {"role": "tool", "tool_call_id": call_id, "content": outcome.content},
                 {
                     "result_id": outcome.result_id,
                     "tool": outcome.name,
                     "status": outcome.status,
+                    # Lets a resumed thread re-render the full result chip.
+                    "summary": payload.get("summary"),
+                    "error_code": payload.get("error_code"),
+                    "duration_ms": payload.get("duration_ms"),
                 },
             )
-            payload = outcome.event_payload()
             payload["args"] = outcome.args
             payload["via_call_tool"] = outcome.via_call_tool
             if ref:
