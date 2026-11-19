@@ -373,8 +373,8 @@ async def test_key_6_shows_the_table_with_status_words_and_no_glyphs(fakes) -> N
         # Caption: name, revision, mode; plain words, no separator glyphs.
         host = ms.query_one("#lens-host")
         assert "rev 3, mode on" in host.border_title
-        # (the lens shell's own "Identity · " prefix is shared by every lens)
-        assert "·" not in host.border_title.partition(" · ")[2]
+        assert host.border_title.startswith("Identity  ")
+        assert "·" not in host.border_title
         assert "·" not in str(host.border_subtitle or "")
         await settle(pilot)
         text = _region_text(app, ms.query_one("#lens-host"))

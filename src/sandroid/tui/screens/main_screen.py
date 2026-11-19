@@ -490,7 +490,10 @@ class MainScreen(Screen):
         except Exception:
             return
         # No caption: no frame title (the lens bar already names the lens).
-        host.border_title = f"{spec.label} · {title}" if title else ""
+        # The Identity lens uses no separator glyph (plain spacing); the
+        # other lenses keep their titles.
+        sep = "  " if spec.id == "identity" else " · "
+        host.border_title = f"{spec.label}{sep}{title}" if title else ""
         host.border_subtitle = info or ""
         try:
             self.query_one("#lens-bar", LensBar).set_active(spec.id)
