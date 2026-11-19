@@ -8,6 +8,10 @@ by condition (no fixed sleeps).
 
 from __future__ import annotations
 
+import concurrent.futures
+from types import SimpleNamespace
+
+import pytest
 from pilot_helpers import settle, until
 from textual.app import App
 
@@ -235,3 +239,39 @@ def test_a_record_sub_header_does_not_end_the_record() -> None:
         "  PID mappings:\n"
     )
     assert SpotlightPanel._parse_am_process_attached(dump, 8735) is True
+
+
+# -- the action watchdog and the pre-start step ----------------------------------
+
+
+class _SlowFuture:
+    """Done at ``done_at`` on a fake clock; every wait advances the clock."""
+
+    def __init__(self, clock, done_at: float) -> None:
+        self.clock, self.done_at = clock, done_at
+
+    def result(self, timeout: float):
+        self.clock.now += timeout
+        if self.clock.now >= self.done_at:
+            return True, "Spawned"
+        raise concurrent.futures.TimeoutError
+
+
+def test_the_watchdog_does_not_count_a_pre_start_step(monkeypatch):
+    """A 5-minute dialog + framework restart, then a 60 s spawn: no timeout."""
+    from sandroid.tui.widgets import spotlight_panel as sp
+
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(sp, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    panel = SimpleNamespace(_ACTION_TIMEOUT=90.0)
+    monkeypatch.setattr(app_start, "pre_spawn_running", lambda: clock.now < 300)
+
+    result = SpotlightPanel._await_action(panel, _SlowFuture(clock, 360))
+
+    assert result == (True, "Spawned")
+
+    clock.now = 0.0  # without a pre-start step the watchdog trips at 90 s
+    monkeypatch.setattr(app_start, "pre_spawn_running", lambda: False)
+    with pytest.raises(concurrent.futures.TimeoutError):
+        SpotlightPanel._await_action(panel, _SlowFuture(clock, 360))
+    assert clock.now == pytest.approx(90.0)

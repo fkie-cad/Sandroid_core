@@ -1320,7 +1320,7 @@ class SpotlightPanel(Widget):
             try:
                 future = executor.submit(work)
                 try:
-                    ok, msg = future.result(timeout=self._ACTION_TIMEOUT)
+                    ok, msg = self._await_action(future)
                 except concurrent.futures.TimeoutError:
                     ok, msg = (
                         False,
@@ -1344,6 +1344,28 @@ class SpotlightPanel(Widget):
                 self._post(self.refresh_panel)
 
         self.run_worker(_job, name=f"spotlight_{label}", exclusive=False, thread=True)
+
+    def _await_action(self, future) -> tuple[bool, str]:
+        """``future.result()`` under the watchdog (worker thread).
+
+        A pre-start step (the "Apply before starting" dialog, a framework
+        restart) is not a hang: the watchdog starts over once it is done.
+
+        Raises:
+            concurrent.futures.TimeoutError: The watchdog tripped.
+        """
+        from sandroid.services.app_start import pre_spawn_running
+
+        deadline = time.monotonic() + self._ACTION_TIMEOUT
+        while True:
+            wait = min(1.0, max(0.0, deadline - time.monotonic()))
+            try:
+                return future.result(timeout=wait)
+            except concurrent.futures.TimeoutError:
+                if pre_spawn_running():
+                    deadline = time.monotonic() + self._ACTION_TIMEOUT
+                elif time.monotonic() >= deadline:
+                    raise
 
     # -- frida-server pre-flight ------------------------------------------
 

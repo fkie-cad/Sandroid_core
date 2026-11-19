@@ -257,6 +257,12 @@ def launch_app(package_name: str, activity_name: str | None = None) -> dict[str,
     function quotes ``package_name``/``activity_name`` for the device and
     host shell.
 
+    A first launch (the app is not running) runs the pre-spawn hooks first
+    (:func:`sandroid.services.app_start.prepare_launch`, e.g. the identity
+    profile; one that stops every app asks the analyst), and the launch
+    stays under the app lifecycle lock. Busy, an adb error, a failed or
+    declined pre-start step: not launched.
+
     Args:
         package_name: Fully qualified package name to launch.
         activity_name: Optional launchable activity (short, e.g.
@@ -271,9 +277,20 @@ def launch_app(package_name: str, activity_name: str | None = None) -> dict[str,
         ToolExecutionError: *package_name* does not match Android's package
             identifier format.
     """
+    from sandroid.services.app_start import (
+        AppStartError,
+        lifecycle_lock,
+        prepare_launch,
+    )
+
     package_name = validate_package_name(package_name)
-    # Adb.launch_app quotes both values for the device and host shell itself.
-    success, message = Adb.launch_app(package_name, activity_name or None)
+    try:
+        with lifecycle_lock():
+            prepare_launch(package_name, package_name)
+            # Adb.launch_app quotes both values for the device and host shell.
+            success, message = Adb.launch_app(package_name, activity_name or None)
+    except AppStartError as exc:
+        success, message = False, str(exc)
     return {
         "launched": success,
         "package_name": package_name,

@@ -712,8 +712,8 @@ class SandroidTUI(App):
             start_privacy_scan()
         except Exception as exc:
             logger.debug(f"Failed to start the privacy scan: {exc}")
-        # Identity profile: seed the active profile before app starts (a
-        # no-op until the app-start pre-spawn hook API exists).
+        # Identity profile: seed the active profile before app starts (an
+        # app_start pre-spawn hook).
         try:
             from sandroid.services.identity import get_identity_service
 

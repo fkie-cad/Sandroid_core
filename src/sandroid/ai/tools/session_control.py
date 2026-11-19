@@ -304,10 +304,12 @@ def start_spotlight_app(fresh: bool = False, paused: bool = False) -> dict[str, 
             service,
             f"{package} is already running (pid {pid}); pass fresh=true to restart it",
         )
+    # consent=False: a pre-start step that stops every app is the analyst's
+    # call (the TUI dialog); the tool's approval covers this app only.
     if running:
-        ok, msg = app_start.restart_app(paused=paused)
+        ok, msg = app_start.restart_app(paused=paused, consent=False)
     else:
-        ok, msg = app_start.start_app(paused=paused)
+        ok, msg = app_start.start_app(paused=paused, consent=False)
     return _start_result(ok, service, msg)
 
 

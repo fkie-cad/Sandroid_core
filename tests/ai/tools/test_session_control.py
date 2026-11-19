@@ -280,22 +280,28 @@ def lifecycle(monkeypatch):
     monkeypatch.setattr(
         app_start, "probe_liveness", lambda pkg, frida_fallback=False: live["value"]
     )
-    monkeypatch.setattr(
-        app_start,
-        "start_app",
-        lambda paused=False: calls.append(("start", paused)) or (True, "started"),
-    )
-    monkeypatch.setattr(
-        app_start,
-        "restart_app",
-        lambda paused=False: calls.append(("restart", paused)) or (True, "restarted"),
-    )
+    consents: list[bool] = []
+
+    def _start(paused=False, *, consent=None):
+        consents.append(consent)
+        calls.append(("start", paused))
+        return True, "started"
+
+    def _restart(paused=False, *, consent=None):
+        consents.append(consent)
+        calls.append(("restart", paused))
+        return True, "restarted"
+
+    monkeypatch.setattr(app_start, "start_app", _start)
+    monkeypatch.setattr(app_start, "restart_app", _restart)
     monkeypatch.setattr(
         app_start,
         "resume_app",
         lambda: calls.append(("resume",)) or (True, "resumed"),
     )
-    return SimpleNamespace(spot=spot, calls=calls, live=live, app_start=app_start)
+    return SimpleNamespace(
+        spot=spot, calls=calls, live=live, app_start=app_start, consents=consents
+    )
 
 
 @pytest.mark.parametrize(
@@ -325,6 +331,8 @@ def test_start_spotlight_app_state_matrix(
     assert lifecycle.calls == expected
     assert set(result) == {"started", "running", "paused", "pid", "message"}
     assert result["started"] is bool(expected)
+    # A pre-start step that stops every app is never covered by the AI.
+    assert all(consent is False for consent in lifecycle.consents)
 
 
 def test_start_spotlight_app_refuses_on_an_adb_error(lifecycle):

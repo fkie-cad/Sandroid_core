@@ -19,6 +19,14 @@ from sandroid.ai.errors import ToolExecutionError
 from sandroid.ai.tools import app_lifecycle
 from sandroid.core.adb import Adb
 from sandroid.core.exceptions import APKInstallError
+from sandroid.services import app_start
+
+
+@pytest.fixture(autouse=True)
+def _no_pre_spawn(monkeypatch):
+    """launch_app's pre-start step (tests/services/test_app_start.py)."""
+    monkeypatch.setattr(app_start, "prepare_launch", lambda *a, **k: False)
+
 
 # -- install_apk --------------------------------------------------------------------
 
