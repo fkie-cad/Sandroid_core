@@ -103,7 +103,6 @@ from sandroid.tui.widgets.highlight_bar import (
     HL_WIDTH,
     HighlightBar,
     HighlightView,
-    RowKeyMap,
     flow_snapshot,
 )
 from sandroid.tui.widgets.lens_shell import InspectorContent, is_shown
@@ -1170,7 +1169,6 @@ class NetworkPanel(Widget):
         self._follow = Follow()
         #: AI highlight sets (``highlight_bar``), keyed by flow id.
         self._hl = HighlightView(LENS_NETWORK, noun="flow")
-        self._hl_keys = RowKeyMap(self._model, lambda r: r.key, lambda r: r.flow_id)
 
     # -- compose / mount -------------------------------------------------
 
@@ -1206,9 +1204,6 @@ class NetworkPanel(Widget):
             pass
         self._do_refresh_status()
         self._hl.attach(self, self._redraw_highlights, self._highlight_rows_snapshot)
-
-    def on_unmount(self) -> None:
-        self._hl.detach()
 
     # -- accessors ---------------------------------------------------------
 
@@ -1536,10 +1531,13 @@ class NetworkPanel(Widget):
             cols = [c for c in cols if c[0] != "size"]
         if avail < 58:
             cols = [c for c in cols if c[0] != "time"]
-        if self._hl.show_column(avail):
-            cols.append(("hl", "Highlight", HL_WIDTH))
         # 2 cells padding per column + 1 scrollbar column
         fixed = sum(w for _, _, w in cols) + 2 * len(cols) + 1
+        # The Highlight column only while Request keeps a readable width
+        # (with the Identity column too, a ~100 column lens has no room).
+        if self._hl.show_column(avail) and avail - fixed - (HL_WIDTH + 2) >= 24:
+            cols.append(("hl", "Highlight", HL_WIDTH))
+            fixed += HL_WIDTH + 2
         req = max(12, avail - fixed)
         return [(k, label, w or req) for k, label, w in cols]
 
@@ -2505,6 +2503,7 @@ class NetworkPanel(Widget):
         self._profile_only = not self._profile_only
         self._rebuild()
         self._do_refresh_status()
+
     # -- AI highlights (highlight_bar) ----------------------------------
 
     def _update_highlight_bar(self) -> None:

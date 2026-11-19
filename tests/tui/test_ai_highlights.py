@@ -178,7 +178,8 @@ def test_H_and_X_shadow_no_app_wide_key_and_are_in_the_help():
         keys = {b.key: b.action for b in cls.BINDINGS}
         assert keys["H"] == "cycle_highlight_filter"
         assert keys["X"] == "clear_highlights"
-        assert "exclamation_mark" not in keys
+        # ``!`` belongs to the privacy scan (Network: profile values only).
+        assert keys.get("exclamation_mark") in (None, "toggle_profile_only")
         assert "ctrl+h" not in keys
     assert not {"H", "X"} & app_keys
     for module, cls_name, heading in (
@@ -408,6 +409,45 @@ async def test_network_highlight_words_take_the_light_theme_colours(flow_dir, st
         cell = panel.table.get_cell("f2", "hl")
         assert HIGHLIGHT_LIGHT[0] in str(cell.spans[0].style)
         assert _tint_of(panel.table, "f2") == _expected_tint(1)
+
+
+async def test_network_identity_and_highlight_columns_together(
+    flow_dir, store, monkeypatch
+):
+    """With the privacy scan on the same registry: Identity after Recipient,
+    Highlight last, the AI tint wins a row that has both, and a privacy hit
+    redraws through the privacy feed only (no whole-lens AI redraw).
+    """
+    import privacy_fakes
+    from test_network_lens import _privacy_hits
+
+    from sandroid.tui.row_annotations import registry
+
+    fake = privacy_fakes.install(monkeypatch, _privacy_hits()[:1])
+    registry().register(store)  # install() starts a fresh registry
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _network(app, pilot, flow_dir)
+        table = panel.table
+        store.create("network", "POST trackers", reasons={"flow-2": "POST"})
+        await until(pilot, lambda: "hl" in _cols(table))
+        cols = _cols(table)
+        assert cols.index("who") + 1 == cols.index("ident")
+        assert cols[-1] == "hl"
+        assert _cell(table, "f2", "ident") == "Ad ID"
+        assert _cell(table, "f2", "hl") == "POST trackers"
+        assert _tint_of(table, "f2") == _expected_tint(1)
+        rebuilds = []
+        rebuild = panel._rebuild
+        monkeypatch.setattr(
+            panel, "_rebuild", lambda *a, **k: (rebuilds.append(1), rebuild(*a, **k))
+        )
+        fake.add(privacy_fakes.flow_hit("flow-4", "Email", "Email"))
+        await until(pilot, lambda: _cell(table, "f4", "ident") == "Email")
+        await asyncio.sleep(1.2)  # past the feeds' once-a-second window
+        await settle(pilot)
+        assert rebuilds == []
+        assert _cell(table, "f2", "hl") == "POST trackers"
 
 
 # --------------------------------------------------------------------------

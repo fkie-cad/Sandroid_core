@@ -122,37 +122,6 @@ class SetCounts:
     changed: int = 0
 
 
-class RowKeyMap:
-    """Table row key -> annotation key, rebuilt only when the rows change.
-
-    ``rows()`` returns the panel's current row list; the map is rebuilt when
-    that list (its identity, length or last key) changed.
-    """
-
-    def __init__(
-        self,
-        rows: Callable[[], list],
-        key: Callable[[Any], str],
-        value: Callable[[Any], str | None],
-    ) -> None:
-        self._rows = rows
-        self._key = key
-        self._value = value
-        self._sig: tuple | None = None
-        self._map: dict[str, str | None] = {}
-
-    def get(self, row_key: Any) -> str | None:
-        try:
-            rows = self._rows()
-        except Exception:
-            return None
-        sig = (id(rows), len(rows), self._key(rows[-1]) if rows else None)
-        if sig != self._sig:
-            self._map = {self._key(r): self._value(r) for r in rows}
-            self._sig = sig
-        return self._map.get(str(row_key)) if row_key is not None else None
-
-
 class HighlightView:
     """One lens's view of the highlight store (see the module docstring)."""
 
@@ -554,8 +523,22 @@ class HighlightView:
         """On mount (UI thread): redraw feed + row source for the AI tools."""
         from sandroid.tui.utils.ui_thread import UiDispatcher
 
+        last: list[Any] = [None]
+
+        def on_change(keys: set[str] | None) -> None:
+            # The registry signal is shared with the other row-annotation
+            # sources (the privacy scan): redraw only when the highlight
+            # store itself changed (each of its notifies follows a new
+            # revision); the other sources redraw through their own feed.
+            store = self.store
+            rev = getattr(store, "revision", None) if store is not None else None
+            if rev is not None and rev == last[0]:
+                return
+            last[0] = rev
+            flush(keys)
+
         try:
-            self._feed = AnnotationFeed(owner, self.lens, flush)
+            self._feed = AnnotationFeed(owner, self.lens, on_change)
             self._feed.attach()
         except Exception:
             logger.debug("highlight feed attach failed", exc_info=True)
@@ -710,7 +693,6 @@ __all__ = [
     "HL_WIDTH",
     "HighlightBar",
     "HighlightView",
-    "RowKeyMap",
     "SetCounts",
     "canonical_key",
     "escape_markup",

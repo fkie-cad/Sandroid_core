@@ -129,7 +129,6 @@ from .highlight_bar import (
     HL_WIDTH,
     HighlightBar,
     HighlightView,
-    RowKeyMap,
     canonical_key,
     escape_markup,
     file_snapshot,
