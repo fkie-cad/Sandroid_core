@@ -435,12 +435,12 @@ class MenuController:
         )
         self._register(
             "device_selector",
-            "Open device selector",
+            "Devices",
             "D",
             ActionCategory.NAVIGATION,
             ["forensic", "malware", "security"],
-            description="Switch between connected devices or start AVD",
-            inline_text="[Shift+D] device selector",
+            description="Attach, start, stop or restart devices and AVDs",
+            inline_text="[Shift+D] devices",
         )
 
         # ===== Lenses (TUI) =====

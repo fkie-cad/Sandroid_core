@@ -519,7 +519,7 @@ def test_tui_boot_does_not_steal_an_active_device(env):
         "Pixel", "cold", run_worker=lambda fn, **kw: fn()
     )
     assert dm.switched == []
-    assert any("press D to switch" in str(m) for m in logs)
+    assert any("switch to it in Devices (D)" in str(m) for m in logs)
     assert "-no-snapshot-load" in env["spawned"][0]
 
 

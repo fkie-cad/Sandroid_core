@@ -60,6 +60,7 @@ from sandroid.tui.key_display import format_key
 from sandroid.tui.launcher import run_tui, run_tui_guarded
 from sandroid.tui.modal_manager import ModalManager
 from sandroid.tui.screens.command_palette import CommandPalette
+from sandroid.tui.screens.devices_screen import DevicesScreen
 from sandroid.tui.screens.help_screen import LEGACY_BINDING_IDS, HelpScreen
 from sandroid.tui.screens.main_screen import MainScreen
 from sandroid.tui.themes import (
@@ -168,7 +169,7 @@ class SandroidTUI(App):
             id="tracking_toggle",
         ),
         Binding("grave_accent", "toggle_log", "Log", show=False, id="toggle_log"),
-        Binding("D", "show_device_selector", "Devices", show=False, priority=True),
+        Binding("D", "show_devices", "Devices", show=False, priority=True),
         Binding("q", "request_quit", "Quit"),
         Binding("escape", "maybe_quit", "Back", show=False, priority=True),
         Binding("ctrl+c", "request_quit", "Quit", show=False, priority=True),
@@ -446,6 +447,8 @@ class SandroidTUI(App):
             schedule_timer=self.set_timer,
             refresh_ui=cb.force_ui_refresh,
             call_from_thread=cb.call_from_thread,
+            on_emulator_ready=self._on_emulator_ready,
+            open_devices=self.open_devices,
         )
 
         self._widget_refresh_controller = WidgetRefreshController(
@@ -605,11 +608,22 @@ class SandroidTUI(App):
         Also refuses everything once a quit is under way: the cleanup runs
         off the UI thread, and a key typed meanwhile (``y`` = Proxy Settings,
         ``M`` = mitm) must not start anything new.
+
+        ``D`` (Devices) only opens from the main screen, never a second time,
+        and not while a text field has the focus (the letter is typed there).
         """
         if getattr(self, "_exit_started", False):
             return False
         if self._startup_screen_up():
             return False
+        if action == "show_devices":
+            from textual.widgets import Input, TextArea
+
+            return (
+                isinstance(self.screen, MainScreen)
+                and not self._devices_screen_open()
+                and not isinstance(self.focused, (Input, TextArea))
+            )
         if action in _MAIN_SCREEN_ONLY:
             # Label / Tracking keys: only with the main screen on top (a
             # modal or the help owns the keyboard).
@@ -786,7 +800,7 @@ class SandroidTUI(App):
                     "  ⏎ / Esc       details on demand / close them\n"
                     "  S             snapshots     `  log\n"
                     "  ?             help & all keybindings\n"
-                    "  D             select device\n"
+                    "  D             devices: attach, start, stop\n"
                     "\n"
                     "For scripted runs see: sandroid --help (--headless).\n"
                     "\n"
@@ -859,7 +873,7 @@ class SandroidTUI(App):
                         self.call_from_thread(
                             self.notify,
                             "Device disconnected — stopped running tasks. "
-                            "Press D to reconnect.",
+                            "Press D to open Devices.",
                             severity="warning",
                         )
                     except Exception:
@@ -903,10 +917,12 @@ class SandroidTUI(App):
             return
         try:
             # DeviceController polls refresh_devices() itself during AVD boot;
-            # and a modal / device selector owns device interactions.
+            # a modal owns device interactions. The Devices screen is the
+            # exception: it shows the live state, so the device manager (the
+            # active device, its disconnect) must stay current under it.
             if self._device_controller.is_polling():
                 return
-            if not isinstance(self.screen, MainScreen):
+            if not isinstance(self.screen, (MainScreen, DevicesScreen)):
                 return
         except Exception:
             return
@@ -1720,37 +1736,86 @@ class SandroidTUI(App):
             except Exception:
                 pass
 
-    def action_show_device_selector(self) -> None:
-        """Show the device selection modal."""
-        from sandroid.core.toolbox import Toolbox
-        from sandroid.tui.modals import DeviceSelectionModal
+    def action_show_devices(self) -> None:
+        """``D``: open the Devices screen (attach / start / stop devices)."""
+        self.open_devices()
 
-        dm = Toolbox.get_device_manager()
-        devices = dm.refresh_devices()
-        current_serial = dm.active_device.serial if dm.active_device else None
+    def _devices_screen_open(self) -> bool:
+        try:
+            return any(isinstance(s, DevicesScreen) for s in self.screen_stack)
+        except Exception:
+            return False
 
-        def on_device_selected(serial: str | None) -> None:
-            if serial is None:
-                return
-            if self.handle_device_launch_choice(serial):
-                return
-            if serial != current_serial:
-                if self._has_active_session():
-                    self._device_controller.show_device_switch_confirmation(
-                        serial, current_serial, on_confirm=self._perform_device_switch
-                    )
-                else:
-                    self._perform_device_switch(serial)
-            else:
-                self._update_status_bar()
+    def open_devices(self, reason: str = "") -> bool:
+        """Push the Devices screen (session mode) unless one is already open.
 
+        Args:
+            reason: Why it opens (shown under its title).
+
+        Returns:
+            True if the screen was pushed.
+        """
+        if self._devices_screen_open():
+            return False
         self.push_screen(
-            DeviceSelectionModal(devices=devices, current_serial=current_serial),
-            on_device_selected,
+            DevicesScreen(mode="session", reason=reason), self._on_devices_result
         )
+        return True
+
+    def _on_devices_result(self, serial: str | None) -> None:
+        """The Devices screen closed; *serial* is the device to attach."""
+        current = self._active_device()
+        current_serial = current.serial if current is not None else None
+        if not serial or serial == current_serial:
+            self._update_status_bar()
+            return
+        if self._has_active_session():
+            self._device_controller.show_device_switch_confirmation(
+                serial, current_serial, on_confirm=self._perform_device_switch
+            )
+        else:
+            self._perform_device_switch(serial)
+
+    def _on_emulator_ready(self, serial: str, avd_name: str) -> None:
+        """UI thread: an emulator Sandroid launched finished booting.
+
+        * Startup: a startup Devices screen on top takes it as its pick; a
+          StartupScreen showing a device error retries with it.
+        * Session without an active device: it becomes the active device.
+        * Otherwise the session stays on its device and a toast says how to
+          switch.
+        """
+        from sandroid.tui.screens.startup_screen import StartupScreen
+
+        if self._startup_screen_up():
+            top = self.screen
+            if isinstance(top, DevicesScreen) and top.mode == "startup":
+                top.dismiss(serial)
+                return
+            if isinstance(top, StartupScreen) and getattr(top, "has_error", False):
+                top.use_device(serial)
+            return
+        for screen in self.screen_stack:
+            if isinstance(screen, DevicesScreen):
+                screen.request_refresh()
+        current = self._active_device()
+        if current is None:
+            self._perform_device_switch(serial)
+        elif current.serial == serial:
+            self._activity_log.log_info(f"AVD '{avd_name}' ({serial}) is ready")
+            self._force_ui_refresh()
+        else:
+            self.notify(
+                f"{avd_name} is ready — ⏎ on it in Devices (D) to switch.",
+                title="Emulator ready",
+                timeout=8,
+            )
 
     def handle_device_launch_choice(self, serial: str) -> bool:
         """Act on a DeviceSelectionModal "start AVD" / "restart emulator" pick.
+
+        Only the StartupScreen's device picker still uses that modal (the
+        session uses the Devices screen); both go away together.
 
         The modal encodes those as ``__start_avd__<name>__<mode>__<snapshot>``
         / ``__restart_emulator__<serial>__<mode>__<snapshot>``.
@@ -1789,9 +1854,27 @@ class SandroidTUI(App):
         return spotlight.has_app()
 
     def _perform_device_switch(self, target_serial: str, cleanup: bool = False) -> None:
-        """Switch device and refresh UI."""
-        self._device_controller.switch_device(target_serial, cleanup=cleanup)
-        self.call_later(self._force_ui_refresh)
+        """Switch to *target_serial* in a thread worker, then refresh the UI.
+
+        The device list is refreshed first (a just-booted emulator may not be
+        known to the device manager yet); both talk to adb, so neither runs
+        on the UI thread.
+        """
+
+        def work() -> None:
+            from sandroid.core.toolbox import Toolbox
+
+            try:
+                Toolbox.get_device_manager().refresh_devices(auto_select=False)
+            except Exception as e:
+                logger.debug(f"Device refresh before switch failed: {e}")
+            self._device_controller.switch_device(target_serial, cleanup=cleanup)
+            try:
+                self.call_from_thread(self._force_ui_refresh)
+            except Exception:
+                pass
+
+        self.run_worker(work, thread=True, group="device-switch", exit_on_error=False)
 
     def _force_ui_refresh(self) -> None:
         self._widget_refresh_controller.refresh_all()
@@ -2140,7 +2223,8 @@ class SandroidTUI(App):
             return True
         if self._active_device() is None:
             self.notify(
-                "No device connected. Press [b]⇧D[/b] to pick or start one.",
+                "No device connected. Press [b]⇧D[/b] to open Devices and "
+                "attach or start one.",
                 title=f"Cannot {what}",
                 severity="error",
             )
@@ -2523,7 +2607,7 @@ class SandroidTUI(App):
     ) -> None:
         """Handle action selected from command palette."""
         dispatch = {
-            "device_selector": self.action_show_device_selector,
+            "device_selector": self.action_show_devices,
             "help": self.action_show_help,
             "quit": self.action_request_quit,
             "pick_save_slot": self.action_pick_save_slot,

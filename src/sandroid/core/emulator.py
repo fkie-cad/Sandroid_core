@@ -768,6 +768,12 @@ def get_launch(serial: str) -> EmulatorLaunch | None:
         return _LAUNCHES.get(serial)
 
 
+def launches() -> list[EmulatorLaunch]:
+    """All launch records (live, booting, ready and crashed ones)."""
+    with _LAUNCH_LOCK:
+        return list(_LAUNCHES.values())
+
+
 def booting_serials() -> list[str]:
     """Serials of our launches still booting (alive, not yet ready)."""
     now = time.monotonic()
@@ -1143,13 +1149,19 @@ def _save_prefs(prefs: dict[str, Any]) -> None:
         logger.warning(f"Could not save launch options to {path}: {e}")
 
 
-def remembered_options(name: str) -> AvdLaunchOptions:
-    """Launch options last used for AVD *name* (never ``wipe``).
+def options_from_prefs(prefs: dict[str, Any], name: str) -> AvdLaunchOptions:
+    """Launch options remembered for AVD *name* in *prefs* (never ``wipe``).
 
-    First launch: normal boot, headless per config ``emulator.avd_headless``.
+    Args:
+        prefs: A document as returned by :func:`load_launch_prefs`.
+        name: AVD name.
+
+    Returns:
+        The remembered options; for an AVD launched never before: normal
+        boot, headless per config ``emulator.avd_headless``.
     """
-    entry = load_launch_prefs()["avds"].get(name)
-    if entry is None:
+    entry = (prefs.get("avds") or {}).get(name)
+    if not isinstance(entry, dict):
         return AvdLaunchOptions(
             headless=bool(getattr(_config_emulator(), "avd_headless", False))
         )
@@ -1166,11 +1178,27 @@ def remembered_options(name: str) -> AvdLaunchOptions:
     )
 
 
-def remember_launch(name: str, opts: AvdLaunchOptions) -> None:
+def remembered_options(name: str) -> AvdLaunchOptions:
+    """Launch options last used for AVD *name* (never ``wipe``).
+
+    First launch: normal boot, headless per config ``emulator.avd_headless``.
+    """
+    return options_from_prefs(load_launch_prefs(), name)
+
+
+def remember_launch(
+    name: str, opts: AvdLaunchOptions, *, make_last: bool = True
+) -> None:
     """Persist *opts* for AVD *name* and make it the last-used AVD.
 
     A ``wipe`` is stored as ``normal``: a factory reset is never repeated by
     accident. Write errors are logged, not raised.
+
+    Args:
+        name: AVD name.
+        opts: The options to remember.
+        make_last: Also make *name* the last-used AVD (False when only an
+            option is changed, e.g. the headless toggle in the Devices screen).
     """
     boot = "normal" if opts.boot == "wipe" else opts.boot
     snapshot = opts.snapshot if boot == "snapshot" else None
@@ -1178,7 +1206,8 @@ def remember_launch(name: str, opts: AvdLaunchOptions) -> None:
         boot = "normal"
     with _PREFS_LOCK:
         prefs = load_launch_prefs()
-        prefs["last_avd"] = name
+        if make_last:
+            prefs["last_avd"] = name
         prefs["avds"][name] = {
             "headless": bool(opts.headless),
             "boot": boot,
@@ -1225,9 +1254,11 @@ __all__ = [
     "free_console_port",
     "get_launch",
     "launch_avd",
+    "launches",
     "list_avds",
     "load_launch_prefs",
     "looks_like_sdk",
+    "options_from_prefs",
     "remember_launch",
     "remembered_options",
     "rename_avd",

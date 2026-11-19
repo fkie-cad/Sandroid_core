@@ -24,12 +24,13 @@ Usage:
     # Check for devices on startup
     controller.check_devices_on_startup()
 
-    # Start an AVD
-    controller.start_avd("Pixel_6_Pro_API_31", headless=True)
+    # Start an AVD with its remembered launch options
+    controller.start_avd("Pixel_6_Pro_API_31")
 """
 
 import logging
 import os
+import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -39,6 +40,11 @@ if TYPE_CHECKING:
     from sandroid.core.device_manager import Device
 
 logger = logging.getLogger(__name__)
+
+#: ``host[:port]`` accepted by :meth:`DeviceController.connect`.
+_ADDRESS_RE = re.compile(
+    r"[A-Za-z0-9._\-]+(?::\d{1,5})?|\[[0-9A-Fa-f:]+\](?::\d{1,5})?"
+)
 
 
 class DeviceManagerProtocol(Protocol):
@@ -143,6 +149,8 @@ class DeviceController:
         refresh_ui: Callable[[], None] | None = None,
         toolbox: Any | None = None,
         call_from_thread: Callable[..., Any] | None = None,
+        on_emulator_ready: Callable[[str, str], Any] | None = None,
+        open_devices: Callable[[str], Any] | None = None,
     ):
         """Initialize DeviceController with UI callbacks.
 
@@ -162,6 +170,12 @@ class DeviceController:
                 invoked directly off-thread. Defaults to calling the
                 function immediately (safe for tests / already-UI-thread
                 callers).
+            on_emulator_ready: UI-thread callback ``(serial, avd_name)`` once
+                an emulator Sandroid launched has booted (the app decides
+                whether to attach it). Defaults to attaching it when no
+                device is active.
+            open_devices: UI-thread callback ``(reason)`` that opens the
+                Devices screen.
         """
         self._log_info = log_info or self._default_log
         self._log_warning = log_warning or self._default_log
@@ -172,6 +186,8 @@ class DeviceController:
         self._toolbox = toolbox
         self._call_from_thread = call_from_thread or (lambda fn, *args: fn(*args))
         self._polling_active = False
+        self._on_emulator_ready = on_emulator_ready
+        self._open_devices = open_devices
 
     def _default_log(self, message: str) -> None:
         """Default logging when no callback provided."""
@@ -188,6 +204,22 @@ class DeviceController:
     def _get_device_manager(self) -> DeviceManagerProtocol:
         """Get device manager from Toolbox."""
         return self._get_toolbox().get_device_manager()
+
+    def _ui(self, fn: Callable[..., Any] | None, *args: Any) -> None:
+        """Run *fn* on the UI thread (marshaled when called off it)."""
+        if fn is None:
+            return
+        try:
+            if threading.current_thread() is threading.main_thread():
+                fn(*args)
+            else:
+                self._call_from_thread(fn, *args)
+        except Exception:
+            logger.debug("Could not report to the UI", exc_info=True)
+
+    @staticmethod
+    def _spawn(fn: Callable[[], Any], name: str) -> None:
+        threading.Thread(target=fn, name=name, daemon=True).start()
 
     # =========================================================================
     # Device Detection
@@ -239,7 +271,7 @@ class DeviceController:
         problem = problem or f"Requested device {serial} is not connected"
         msg = (
             f"{problem}. No device selected -- nothing will run on another "
-            "device. Start it, or choose one with the device selector."
+            "device. Start it, or choose one in Devices (D)."
         )
         logger.error(msg)
         try:
@@ -492,12 +524,14 @@ class DeviceController:
         restart_serial: str | None = None,
         notify: Callable[[str], Any] | None = None,
         call_from_thread: Callable[..., Any] | None = None,
+        on_launched: Callable[[bool, str], Any] | None = None,
     ) -> Any:
         """Worker: launch (or restart) an emulator, wait for its boot, attach.
 
         Runs on a background thread; every UI call is marshaled through
-        ``call_from_thread``. Once booted, the emulator becomes the active
-        device only if no device is active.
+        ``call_from_thread``. Once booted, ``on_emulator_ready`` decides what
+        happens (default: it becomes the active device only if no device is
+        active).
 
         Args:
             avd_name: AVD to launch (ignored with *restart_serial*).
@@ -507,6 +541,8 @@ class DeviceController:
             notify: Optional toast callback (UI thread).
             call_from_thread: Marshals onto the UI thread (default: the
                 controller's).
+            on_launched: UI-thread callback ``(ok, message)`` once the
+                emulator process started (or failed to).
 
         Returns:
             The :class:`~sandroid.core.emulator.EmulatorLaunch`, or ``None``
@@ -532,30 +568,33 @@ class DeviceController:
                 launch = emulator.launch_avd(avd_name, options)
         except EmulatorLaunchError as e:
             say(self._log_error, f"Failed to start AVD: {e}")
+            say(on_launched, False, str(e))
             return None
         except Exception as e:
             logger.exception("Emulator launch failed")
             say(self._log_error, f"Failed to start AVD: {type(e).__name__}: {e}")
+            say(on_launched, False, f"{type(e).__name__}: {e}")
             return None
         emulator.remember_launch(launch.avd, launch.options)
         verb = "restarting" if restart_serial else "starting"
         msg = f"AVD '{launch.avd}' {verb} as {launch.serial} ({launch.options.boot})"
         say(self._log_info, msg + "...")
         say(notify, msg + "...")
+        say(on_launched, True, msg)
 
         if not emulator.wait_until_ready(launch.serial):
             log = f" (log: {launch.log_path})" if launch.log_path else ""
             say(
                 self._log_warning,
                 f"AVD '{launch.avd}' ({launch.serial}) did not finish booting{log}. "
-                "Press 'D' to refresh the device list when it is ready.",
+                "It is listed in Devices (D) once it is ready.",
             )
             return launch
         try:
             self._get_device_manager().refresh_devices(auto_select=False)
         except Exception:
             logger.debug("Device refresh after boot failed", exc_info=True)
-        say(self._attach_if_idle, launch.serial, launch.avd)
+        say(self._on_emulator_ready or self._attach_if_idle, launch.serial, launch.avd)
         return launch
 
     def _attach_if_idle(self, serial: str, avd_name: str) -> None:
@@ -572,7 +611,7 @@ class DeviceController:
                     self._refresh_ui()
                 return
             self._log_info(
-                f"AVD '{avd_name}' ({serial}) is ready -- press D to switch to it"
+                f"AVD '{avd_name}' ({serial}) is ready -- switch to it in Devices (D)"
             )
         except Exception as e:
             logger.error(f"Error attaching {serial}: {e}")
@@ -714,6 +753,9 @@ class DeviceController:
     def switch_device(self, serial: str, cleanup: bool = True) -> bool:
         """Switch to a different device.
 
+        Safe to call from a worker thread (ADB work stays there; log lines
+        and the UI refresh are marshaled onto the UI thread).
+
         Args:
             serial: Serial number of device to switch to
             cleanup: Whether to stop running tasks before switching
@@ -729,17 +771,15 @@ class DeviceController:
             success = dm.set_active_device(serial)
 
             if success:
-                self._log_info(f"Switched to device: {serial}")
+                self._ui(self._log_info, f"Switched to device: {serial}")
                 self.setup_device_results_folder()
-
-                if self._refresh_ui:
-                    self._refresh_ui()
+                self._ui(self._refresh_ui)
 
             return success
 
         except Exception as e:
             logger.error(f"Error switching device: {e}")
-            self._log_error(f"Failed to switch device: {e}")
+            self._ui(self._log_error, f"Failed to switch device: {e}")
             return False
 
     def stop_all_tasks(self) -> None:
@@ -754,7 +794,7 @@ class DeviceController:
             # so the AttributeError was swallowed and NO task was stopped.)
             for task_name in list(task_service.get_running()):
                 task_service.stop(task_name)
-                self._log_info(f"Stopped task: {task_name}")
+                self._ui(self._log_info, f"Stopped task: {task_name}")
 
         except Exception as e:
             logger.error(f"Error stopping tasks: {e}")
@@ -790,6 +830,156 @@ class DeviceController:
         except Exception as e:
             logger.error(f"Error setting up results folder: {e}")
             return None
+
+    # =========================================================================
+    # Devices screen actions (all non-blocking; results via ``on_done``)
+    # =========================================================================
+
+    def _done(
+        self, on_done: Callable[[bool, str], Any] | None, ok: bool, message: str
+    ) -> None:
+        """Worker thread: log *message* and report it to ``on_done`` (UI)."""
+        self._ui(self._log_info if ok else self._log_error, message)
+        self._ui(on_done, ok, message)
+
+    def start_avd(
+        self,
+        name: str,
+        options: Any = None,
+        *,
+        on_done: Callable[[bool, str], Any] | None = None,
+    ) -> None:
+        """Launch AVD *name* in the background, then wait for its boot.
+
+        Args:
+            name: AVD name.
+            options: :class:`~sandroid.core.emulator.AvdLaunchOptions`
+                (default: the options remembered for *name*). They are
+                remembered for the next launch (a wipe as a normal boot).
+            on_done: UI-thread callback ``(ok, message)`` once the emulator
+                process started (not booted) or failed to start.
+        """
+
+        def worker() -> None:
+            from sandroid.core import emulator
+
+            opts = options if options is not None else emulator.remembered_options(name)
+            self._launch_and_watch(name, opts, on_launched=on_done)
+
+        self._spawn(worker, f"start-avd-{name}")
+
+    def stop_emulator(
+        self, serial: str, *, on_done: Callable[[bool, str], Any] | None = None
+    ) -> None:
+        """Stop emulator *serial* (``adb -s <serial> emu kill``, never pkill).
+
+        Args:
+            serial: Emulator serial.
+            on_done: UI-thread callback ``(ok, message)`` once it is gone (or
+                still listed after the timeout).
+        """
+
+        def worker() -> None:
+            from sandroid.core import emulator
+
+            try:
+                ok = emulator.stop_emulator(serial)
+            except Exception as e:
+                logger.exception(f"Stopping {serial} failed")
+                self._done(on_done, False, f"Could not stop {serial}: {e}")
+                return
+            if ok:
+                self._done(on_done, True, f"Emulator {serial} stopped")
+            else:
+                self._done(on_done, False, f"Emulator {serial} did not stop")
+
+        self._spawn(worker, f"stop-emulator-{serial}")
+
+    def restart_emulator(
+        self,
+        serial: str,
+        options: Any = None,
+        *,
+        on_done: Callable[[bool, str], Any] | None = None,
+    ) -> None:
+        """Restart emulator *serial*: same AVD, same port (so same serial).
+
+        Args:
+            serial: Emulator serial.
+            options: Launch options (default: those it was launched with, else
+                the remembered ones; a wipe becomes a normal boot).
+            on_done: UI-thread callback ``(ok, message)`` once the relaunched
+                process started or the restart failed.
+        """
+
+        def worker() -> None:
+            self._launch_and_watch(
+                None, options, restart_serial=serial, on_launched=on_done
+            )
+
+        self._spawn(worker, f"restart-emulator-{serial}")
+
+    def connect(
+        self, address: str, *, on_done: Callable[[bool, str], Any] | None = None
+    ) -> None:
+        """``adb connect`` *address* (``host[:port]``, port 5555 by default).
+
+        Args:
+            address: Network address of the device.
+            on_done: UI-thread callback ``(ok, message)``.
+        """
+        address = (address or "").strip()
+        if not _ADDRESS_RE.fullmatch(address):
+            self._done(on_done, False, f"Not a host[:port] address: {address!r}")
+            return
+
+        def worker() -> None:
+            from sandroid.core.adb import Adb
+
+            out, err = Adb.send_adb_command(f"connect {address}", serial="", timeout=20)
+            text = " ".join(f"{out} {err}".split())
+            ok = "connected to" in text.lower() and not any(
+                word in text.lower() for word in ("failed", "unable", "cannot")
+            )
+            self._done(
+                on_done,
+                ok,
+                (text or f"Connected to {address}")
+                if ok
+                else f"adb connect {address} failed: {text or 'no answer'}",
+            )
+
+        self._spawn(worker, f"adb-connect-{address}")
+
+    def rename_avd(
+        self,
+        old: str,
+        new: str,
+        *,
+        on_done: Callable[[bool, str], Any] | None = None,
+    ) -> None:
+        """Rename stopped AVD *old* to *new* (moves its remembered options).
+
+        Args:
+            old: Current AVD name.
+            new: New AVD name.
+            on_done: UI-thread callback ``(ok, message)``.
+        """
+
+        def worker() -> None:
+            from sandroid.core import emulator
+
+            try:
+                ok, message = emulator.rename_avd(old, new)
+            except Exception as e:
+                ok, message = False, f"{type(e).__name__}: {e}"
+            self._done(on_done, ok, message or f"Renamed '{old}' to '{new}'")
+
+        self._spawn(worker, f"rename-avd-{old}")
+
+    def open_devices(self, reason: str = "") -> None:
+        """Open the Devices screen (thread-safe; no-op without the callback)."""
+        self._ui(self._open_devices, reason)
 
     # =========================================================================
     # Boot Mode Operations

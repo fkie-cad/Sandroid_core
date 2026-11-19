@@ -167,7 +167,7 @@ def startup(monkeypatch):
     config = SimpleNamespace(emulator=SimpleNamespace(serial=MISSING))
     app = SandroidTUI(startup_config=config)
     globals_fired: list[str] = []
-    for name in ("record", "play", "show_device_selector", "switch_lens"):
+    for name in ("record", "play", "show_devices", "switch_lens"):
         monkeypatch.setattr(
             app, f"action_{name}", lambda *a, _n=name: globals_fired.append(_n)
         )

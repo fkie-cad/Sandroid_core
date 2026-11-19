@@ -823,7 +823,7 @@ class DeviceManager:
         self._ambiguous_serials = serials
         log(
             f"More than one device is connected ({', '.join(serials)}); not "
-            "selecting one. Choose with the device selector or --serial."
+            "selecting one. Choose one in Devices (D) or with --serial."
         )
         return None
 
