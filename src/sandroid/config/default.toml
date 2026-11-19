@@ -127,6 +127,14 @@ long_press_ms = 500
 swipe_slop_px = 24
 logcat_screen_backup = true
 
+[identity]
+# Identity profile: distinctive fake values (Android ID, advertising ID, phone,
+# GPS, contacts, ...) seeded on the emulator so privacy scans can find them.
+# Profiles live in ~/.config/sandroid/profiles/<id>.toml.
+profile = ""                            # id of the active profile
+mode = "off"                            # off | profile
+restart = "ask"                         # framework restart (SSAID/locale): ask | always | never
+
 # MCP (Model Context Protocol) client — lets the (experimental) AI Chat call
 # tools hosted by external MCP servers. No server is configured by default, and
 # servers are only started when AI Chat is configured. MCP tools always ask for

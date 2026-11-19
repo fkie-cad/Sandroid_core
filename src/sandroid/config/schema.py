@@ -945,6 +945,21 @@ class TrackingConfig(BaseModel):
     )
 
 
+class IdentityConfig(BaseModel):
+    """Identity profile: fake canary values seeded on the emulator."""
+
+    profile: str = Field(
+        default="", description="Id of the active profile in the profile library"
+    )
+    mode: Literal["off", "profile"] = Field(
+        default="off", description="off, or seed the active profile before app starts"
+    )
+    restart: Literal["ask", "always", "never"] = Field(
+        default="ask",
+        description="Framework restart for SSAID/locale/model: ask, always, never",
+    )
+
+
 class MVTConfig(BaseModel):
     """Mobile Verification Toolkit (MVT) integration configuration.
 
@@ -1555,6 +1570,7 @@ class SandroidConfig(BaseModel):
     tui: TUIConfig = Field(default_factory=TUIConfig)
     timeline: TimelineConfig = Field(default_factory=TimelineConfig)
     tracking: TrackingConfig = Field(default_factory=TrackingConfig)
+    identity: IdentityConfig = Field(default_factory=IdentityConfig)
     mvt: MVTConfig = Field(default_factory=MVTConfig)
     mitmproxy: MitmproxyConfig = Field(default_factory=MitmproxyConfig)
     focus: FocusConfig = Field(default_factory=FocusConfig)
