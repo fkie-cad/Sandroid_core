@@ -23,6 +23,7 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -57,7 +58,7 @@ import java.util.zip.CRC32;
  * reply {@code {"type":"error","error":"mode"}}.
  */
 public final class Main {
-    static final String VERSION = "1.0.0";
+    static final String VERSION = "1.1.0";
     static final int PROTOCOL = 2;
 
     static double monoMs() {
@@ -194,6 +195,7 @@ public final class Main {
         volatile boolean events = true;
         volatile boolean visibleOnly = true;
         volatile int maxDepth = 0;
+        volatile boolean warm = true; // pre-load a new window's web content
     }
 
     // ================================================================= state
@@ -209,6 +211,12 @@ public final class Main {
             new ArrayBlockingQueue<Runnable>(64), daemonFactory("uihelper-cmd"));
     private final ThreadPoolExecutor touchPool = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS,
             new ArrayBlockingQueue<Runnable>(16), daemonFactory("uihelper-touch-resolve"));
+    /** Web warm-up of new windows, off the event and command threads. */
+    private final ScheduledExecutorService warmExec = daemonScheduled("uihelper-warm");
+    private final java.util.Set<Integer> warmPending = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** windowId -> warm-up attempts (bounded, oldest dropped); MAX_VALUE once warmed. */
+    private final LinkedHashMap<Integer, Integer> warmTries = new LinkedHashMap<>();
+    private final AtomicLong warms = new AtomicLong();
     private volatile TouchWatch touch;
     private volatile boolean closing;
     private final double startMs = monoMs();
@@ -345,6 +353,7 @@ public final class Main {
     private void shutdown() {
         closing = true;
         wdExec.shutdownNow();
+        warmExec.shutdownNow();
         TouchWatch t = touch;
         if (t != null) {
             t.stop();
@@ -482,6 +491,9 @@ public final class Main {
             int type = e.getEventType();
             if (changesUi(type)) {
                 snaps.onChange(e.getEventTime());
+            }
+            if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                scheduleWarm(e.getWindowId());
             }
             if (!cfg.events) {
                 return;
@@ -763,6 +775,10 @@ public final class Main {
                     takeId(c, 0);
                     submit(c, () -> windows(c));
                     break;
+                case "focus":
+                    takeId(c, 0);
+                    submit(c, () -> focus(c));
+                    break;
                 case "config":
                     takeId(c, 0);
                     applyConfig(c.kv);
@@ -800,7 +816,7 @@ public final class Main {
 
     /** Commands that need the a11y connection (unavailable in invisible mode). */
     private static final java.util.Set<String> A11Y_ONLY = new java.util.HashSet<>(
-            java.util.Arrays.asList("node_at", "dump", "windows", "clear_cache"));
+            java.util.Arrays.asList("node_at", "dump", "windows", "clear_cache", "focus"));
 
     private void modeError(Cmd c) throws JSONException {
         out.reply(new JSONObject()
@@ -930,6 +946,9 @@ public final class Main {
                 case "event_cap":
                     out.eventCap = Integer.parseInt(v);
                     break;
+                case "warm":
+                    cfg.warm = !"0".equals(v);
+                    break;
                 default:
                     throw new IllegalArgumentException("unknown config key: " + k);
             }
@@ -962,7 +981,8 @@ public final class Main {
                 .put("snap_max_ms", cfg.snapMaxMs)
                 .put("visible_only", cfg.visibleOnly ? 1 : 0)
                 .put("max_depth", cfg.maxDepth)
-                .put("event_cap", out.eventCap);
+                .put("event_cap", out.eventCap)
+                .put("warm", cfg.warm ? 1 : 0);
     }
 
     private JSONObject statsJson() throws JSONException {
@@ -974,6 +994,7 @@ public final class Main {
                 .put("connected", uia.isConnected())
                 .put("mode", helperMode)
                 .put("shots", shots.get())
+                .put("warms", warms.get())
                 .put("connects", uia.connects)
                 .put("reconnects", reconnects.get())
                 .put("ev_in", evIn.get())
@@ -1068,6 +1089,14 @@ public final class Main {
         int tm = cfg.textMax;
         Tree.SNode h = Tree.hit(sw.root, x, y, tm);
         Tree.SNode t = Tree.target(h);
+        // A generic web node (a span in a button): its interactive ancestor.
+        Tree.SNode wc = Tree.webControl(h);
+        if (wc == null && t != null && t != h) {
+            wc = Tree.webControl(t);
+        }
+        if (wc != null) {
+            t = wc;
+        }
         r.putOpt("pkg", h.pkg != null ? h.pkg : sw.root.pkg);
         r.put("hit", Tree.nodeJson(h).put("depth", h.depth));
         r.put("path", Tree.path(h));
@@ -1075,10 +1104,147 @@ public final class Main {
             r.put("target", Tree.nodeJson(t).put("depth", t.depth));
         }
         r.putOpt("label", Tree.label(t != null ? t : h, tm, 200, cfg.labelMax));
+        if (Tree.bareWeb(h)) {
+            r.put("bare_web", true);
+        }
+        JSONObject doc = webDoc(sw, h);
+        if (doc != null) {
+            r.put("web_doc", doc);
+        }
         return r;
     }
 
+    /**
+     * The web document around {@code h}: the top document's title, an inner
+     * frame's title, and (Chrome, Firefox) the raw text of the window's
+     * address bar ({@code bar}; the host still has a localized suffix).
+     */
+    private JSONObject webDoc(Tree.SWindow sw, Tree.SNode h) throws JSONException {
+        Tree.SNode outer = null;
+        Tree.SNode inner = null;
+        for (Tree.SNode s = h; s != null; s = s.parent) {
+            if (Tree.webDocument(s)) {
+                if (inner == null) {
+                    inner = s;
+                }
+                outer = s;
+            }
+        }
+        if (outer == null) {
+            return null;
+        }
+        JSONObject o = new JSONObject().putOpt("title", Tree.webTitle(outer));
+        if (inner != outer) {
+            o.putOpt("frame", Tree.webTitle(inner));
+        }
+        try {
+            o.putOpt("bar", addressBar(sw));
+        } catch (Throwable ignored) {
+            // the toolbar went away meanwhile
+        }
+        return o;
+    }
+
+    private static boolean chromePkg(String pkg) {
+        return pkg.equals("com.android.chrome") || pkg.startsWith("com.chrome.")
+                || pkg.startsWith("org.chromium.");
+    }
+
+    /** Text of a browser's address bar node, or null (hint, other node). */
+    private static String barText(String rid, CharSequence text, CharSequence desc, boolean hint) {
+        if (rid == null) {
+            return null;
+        }
+        if (rid.endsWith(":id/url_bar") || rid.endsWith(":id/mozac_browser_toolbar_url_view")) {
+            return hint ? null : Tree.str(text, 300);
+        }
+        if (rid.equals("ADDRESSBAR_URL_BOX")) {
+            return Tree.str(desc != null ? desc : text, 300);
+        }
+        return null;
+    }
+
+    /**
+     * The address bar text of a Chrome / Firefox window. A snapshot has the
+     * whole tree in memory; a live query asks the toolbar only (Chrome: one
+     * view-id lookup; Firefox: the Compose toolbar's small subtree).
+     */
+    private String addressBar(Tree.SWindow sw) {
+        Tree.SNode root = sw.root;
+        String pkg = root == null ? null : root.pkg;
+        if (pkg == null || !(chromePkg(pkg) || pkg.startsWith("org.mozilla."))) {
+            return null;
+        }
+        if (root.info == null) { // snapshot
+            ArrayList<Tree.SNode> stack = new ArrayList<>();
+            stack.add(root);
+            while (!stack.isEmpty()) {
+                Tree.SNode s = stack.remove(stack.size() - 1);
+                String b = barText(s.rid, s.text, s.desc, s.showingHint);
+                if (b != null) {
+                    return b;
+                }
+                if (s.kids != null) {
+                    stack.addAll(Arrays.asList(s.kids));
+                }
+            }
+            return null;
+        }
+        String[] ids = chromePkg(pkg)
+                ? new String[] {pkg + ":id/url_bar"}
+                : new String[] {pkg + ":id/composable_toolbar", pkg + ":id/mozac_browser_toolbar_url_view"};
+        for (String id : ids) {
+            List<AccessibilityNodeInfo> found = root.info.findAccessibilityNodeInfosByViewId(id);
+            if (found == null || found.isEmpty()) {
+                continue;
+            }
+            ArrayList<AccessibilityNodeInfo> q = new ArrayList<>(found.subList(0, 1));
+            long end = System.nanoTime() + 60_000_000L;
+            for (int i = 0; i < q.size() && i < 80 && System.nanoTime() < end; i++) {
+                AccessibilityNodeInfo n = q.get(i);
+                boolean hint = Build.VERSION.SDK_INT >= 26 && n.isShowingHintText();
+                String b = barText(Tree.str(n.getViewIdResourceName(), 300), n.getText(),
+                        n.getContentDescription(), hint);
+                if (b != null) {
+                    return b;
+                }
+                for (int k = 0; k < n.getChildCount(); k++) {
+                    AccessibilityNodeInfo ch = Build.VERSION.SDK_INT >= 33
+                            ? n.getChild(k, AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID)
+                            : n.getChild(k);
+                    if (ch != null) {
+                        q.add(ch);
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Live hit test. When it ends on a bare web container (nothing loaded
+     * under the finger yet: Gecko builds its tree on first access), it is
+     * asked once more after {@link #WEB_RETRY_MS}.
+     */
     private JSONObject nodeAtLive(int x, int y) throws JSONException {
+        double t0 = monoMs();
+        JSONObject r = nodeAtLiveOnce(x, y);
+        if (r.optBoolean("bare_web")) {
+            try {
+                Thread.sleep(WEB_RETRY_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return r;
+            }
+            r = nodeAtLiveOnce(x, y);
+            r.put("web_retry", true).put("t_start_ms", r1(t0)).put("ms", r1(monoMs() - t0));
+        }
+        return r;
+    }
+
+    static final long WEB_RETRY_MS = 200;
+
+    private JSONObject nodeAtLiveOnce(int x, int y) throws JSONException {
         double t0 = monoMs();
         UiAutomation u = uia.get();
         JSONObject r = null;
@@ -1233,6 +1399,152 @@ public final class Main {
         }
         JSONObject o = base("windows", c, reqMs).put("windows", wa).put("display", d.json());
         finish(o, reqMs);
+    }
+
+    // ============================================================ read-back
+
+    /**
+     * {@code focus [x=<px> y=<px>] [id]}: the input-focused node, refreshed
+     * ({@code input}; its text is the field's value now, also for fields that
+     * send no TEXT_CHANGED: Compose, browser address bars). When nothing
+     * editable has the input focus and a point is given, the editable node
+     * under it (the field that was tapped), refreshed ({@code node}).
+     */
+    private void focus(Cmd c) throws JSONException {
+        double reqMs = monoMs();
+        JSONObject o = base("focus", c, reqMs);
+        UiAutomation u = uia.get();
+        int tm = cfg.textMax;
+        AccessibilityNodeInfo f = null;
+        try {
+            f = u.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+        } catch (Throwable ignored) {
+            // no focus / window gone
+        }
+        boolean editable = false;
+        if (f != null) {
+            f.refresh();
+            Tree.SNode s = Tree.copy(f, f.getWindowId(), 0, 0, tm);
+            editable = s.editable;
+            o.put("input", Tree.nodeJson(s).put("window_id", s.windowId).putOpt("pkg", s.pkg));
+        }
+        if (!editable && c.kv.containsKey("x") && c.kv.containsKey("y")) {
+            int x = Integer.parseInt(c.kv.get("x"));
+            int y = Integer.parseInt(c.kv.get("y"));
+            for (AccessibilityWindowInfo w : Tree.zOrder(u.getWindows())) {
+                Tree.SWindow sw = Tree.copyWindow(w);
+                if (!sw.contains(x, y)) {
+                    continue;
+                }
+                AccessibilityNodeInfo root = Tree.rootOf(w);
+                if (root == null) {
+                    break;
+                }
+                Tree.SNode sr = Tree.copy(root, sw.id, 0, 0, tm);
+                sr.info = root;
+                for (Tree.SNode s = Tree.hit(sr, x, y, tm); s != null; s = s.parent) {
+                    if (s.editable && s.info != null) {
+                        s.info.refresh();
+                        Tree.SNode fresh = Tree.copy(s.info, sw.id, s.depth, s.index, tm);
+                        o.put("node", Tree.nodeJson(fresh).put("window_id", sw.id).putOpt("pkg", fresh.pkg));
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+        finish(o, reqMs);
+    }
+
+    // ============================================================== warm-up
+
+    /**
+     * A window appeared (WINDOW_STATE_CHANGED): warm its web content once,
+     * {@link #WARM_DELAY_MS} later on its own thread (never on a tap's path).
+     */
+    private void scheduleWarm(final int windowId) {
+        if (!cfg.warm || !uia.usesA11y() || windowId < 0 || closing) {
+            return;
+        }
+        synchronized (warmTries) {
+            Integer tries = warmTries.get(windowId);
+            if (tries != null && tries >= WARM_TRIES) {
+                return;
+            }
+        }
+        if (!warmPending.add(windowId)) {
+            return;
+        }
+        try {
+            warmExec.schedule(() -> {
+                warmPending.remove(windowId);
+                try {
+                    warmWindow(windowId);
+                } catch (Throwable ignored) {
+                    // not connected / window gone: a later window event retries
+                }
+            }, WARM_DELAY_MS, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            warmPending.remove(windowId);
+        }
+    }
+
+    static final long WARM_DELAY_MS = 300;
+    /** Attempts per window without a WebView found (it may load later). */
+    static final int WARM_TRIES = 3;
+
+    /**
+     * Fetch the first two levels under every WebView of an app window, the
+     * way a first hit test would: Gecko builds its accessibility tree on
+     * first access, so the first tap would see the bare WebView otherwise.
+     * Bounded: 400 nodes to find WebViews, 50 children each, 300 ms.
+     */
+    private void warmWindow(int windowId) {
+        UiAutomation u = uia.get();
+        for (AccessibilityWindowInfo w : u.getWindows()) {
+            if (w.getId() != windowId || w.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) {
+                continue;
+            }
+            AccessibilityNodeInfo root = Tree.rootOf(w);
+            if (root == null) {
+                return;
+            }
+            boolean found = false;
+            long end = System.nanoTime() + 300_000_000L;
+            ArrayList<AccessibilityNodeInfo> q = new ArrayList<>();
+            q.add(root);
+            for (int i = 0; i < q.size() && i < 400 && System.nanoTime() < end; i++) {
+                AccessibilityNodeInfo n = q.get(i);
+                CharSequence cls = n.getClassName();
+                if (cls != null && "android.webkit.WebView".contentEquals(cls)) {
+                    found = true;
+                    for (int k = 0; k < Math.min(n.getChildCount(), 50); k++) {
+                        AccessibilityNodeInfo ch = n.getChild(k);
+                        for (int g = 0; ch != null && g < Math.min(ch.getChildCount(), 50); g++) {
+                            ch.getChild(g);
+                        }
+                    }
+                    continue; // the web content itself is not walked here
+                }
+                for (int k = 0; k < n.getChildCount(); k++) {
+                    AccessibilityNodeInfo ch = n.getChild(k);
+                    if (ch != null) {
+                        q.add(ch);
+                    }
+                }
+            }
+            synchronized (warmTries) {
+                Integer tries = warmTries.get(windowId);
+                warmTries.put(windowId, found ? Integer.MAX_VALUE : (tries == null ? 1 : tries + 1));
+                while (warmTries.size() > 64) {
+                    warmTries.remove(warmTries.keySet().iterator().next());
+                }
+            }
+            if (found) {
+                warms.incrementAndGet();
+            }
+            return;
+        }
     }
 
     // ================================================================== shot

@@ -53,13 +53,13 @@ logger = logging.getLogger(__name__)
 
 REMOTE_JAR = "/data/local/tmp/sandroid-uihelper.jar"
 MAIN_CLASS = "sandroid.uihelper.Main"
-HELPER_VERSION = "1.0.0"
+HELPER_VERSION = "1.1.0"
 PROTOCOL = 2
 
 #: sha256 of ``src/sandroid/assets/uihelper/uihelper.jar`` (printed by build.sh).
-JAR_SHA256 = "c2ea72f40874e01011597efc27db184a3f8b972988d81dafc6d011ebfb65130e"
+JAR_SHA256 = "a4b3b021bad567fa6c71cf95c3aed88be869f4d8944b1b92c95dd14299b36943"
 #: :func:`source_sha256` of ``tools/uihelper/src`` the jar was built from.
-SOURCE_SHA256 = "4875e9f854a3be5c969a3809016dfdf83f422f2422102f9454d708d3f86a2387"
+SOURCE_SHA256 = "13f46f56c523851787d824352076b05ad5c19a0c8f2bb94945a574c33ac05469"
 
 #: Device folder for screenshots in flight (each is fetched, then removed).
 REMOTE_SHOT_DIR = "/data/local/tmp/sandroid-shots"
@@ -642,6 +642,26 @@ class UiHelper:
         if t_mono_ms is not None:
             cmd += f" t={float(t_mono_ms):.1f}"
         return self._ok(self.request(cmd, timeout), "node_at")
+
+    def focus(
+        self, x: int | None = None, y: int | None = None, *, timeout: float = 1.0
+    ) -> dict | None:
+        """Read back the field being typed into (``focus`` request).
+
+        ``input``: the input-focused node, refreshed (its ``text`` is the
+        value now, also for fields that send no TEXT_CHANGED). With ``x``,
+        ``y`` and nothing editable focused: ``node``, the editable node
+        under that point (the tapped field), refreshed.
+
+        Returns:
+            The reply, or None (INVISIBLE mode, error or timeout).
+        """
+        if self._mode is Mode.INVISIBLE:
+            return None
+        cmd = "focus"
+        if x is not None and y is not None:
+            cmd += f" x={int(x)} y={int(y)}"
+        return self._ok(self.request(cmd, timeout), "focus")
 
     def dump(self, *, max_nodes: int = 50_000, timeout: float = 30.0) -> dict | None:
         """Full tree of every interactive window (``windows[].root``), bounded."""

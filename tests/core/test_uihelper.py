@@ -168,6 +168,18 @@ class FakeHelper:
             )
         elif name == "windows":
             self.emit({"type": "windows", "id": rid, "windows": [{"id": 7}]})
+        elif name == "focus":
+            self.emit(
+                {
+                    "type": "focus",
+                    "id": rid,
+                    "input": {
+                        "rid": "com.android.chrome:id/url_bar",
+                        "text": "audi.de",
+                        "editable": True,
+                    },
+                }
+            )
         elif name == "shot" and self.shot_error:
             self.emit(
                 {"type": "error", "id": rid, "cmd": "shot", "error": self.shot_error}
@@ -406,7 +418,7 @@ def test_jar_resolves_through_importlib_resources():
 
 def test_build_info():
     assert uihelper.build_info() == {
-        "version": "1.0.0",
+        "version": "1.1.0",
         "protocol": 2,
         "jar_sha256": uihelper.JAR_SHA256,
         "source_sha256": uihelper.SOURCE_SHA256,
@@ -545,6 +557,19 @@ def test_start_upgrades_an_old_jar_before_spawning(adb):
     assert jar_at_spawn == [uihelper.JAR_SHA256, "stopped"]
     h.stop()
 
+
+def test_focus_reads_back_the_focused_field(adb):
+    h, popen, rec, _ = make_helper(adb)
+    assert h.start() is True
+    r = h.focus(120, 340)
+    assert r is not None
+    assert r["input"]["text"] == "audi.de"
+    assert popen.current.commands[-1].startswith("focus x=120 y=340 id=")
+    assert h.focus() is not None
+    assert popen.current.commands[-1].startswith("focus id=")
+    h.stop()
+    inv, _p, _r, _ = make_helper(adb, Mode.INVISIBLE)
+    assert inv.focus(1, 2) is None  # no a11y: no round trip
 
 
 # ------------------------------------------------------------ helper_command
