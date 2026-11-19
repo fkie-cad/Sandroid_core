@@ -131,6 +131,7 @@ from .highlight_bar import (
     HighlightView,
     RowKeyMap,
     canonical_key,
+    escape_markup,
     file_snapshot,
 )
 from .lens_shell import InspectorContent, Mark, SessionMarks, ShellHeader, is_shown
@@ -1719,10 +1720,11 @@ class FilesPanel(Widget):
                 # Follow state: in ONE place, the title (as in every lens).
                 title = f"{self._follow.text} · {title}"
         if self._filter:
-            parts.insert(0, f"/{self._filter}")
+            parts.insert(0, f"/{escape_markup(self._filter)}")
         ai = self._hl.caption_count(self._hl.view_shown, self._hl.view_total)
         if ai is not None:
-            parts.insert(0, ai)
+            # The frame caption is markup; the label is chat agent text.
+            parts.insert(0, escape_markup(ai))
         return title, " · ".join(parts)
 
     def hidden_summary(self) -> str:
@@ -2458,20 +2460,34 @@ class FilesPanel(Widget):
         bar.show_text(self._hl.bar_text(self.size.width or 160, self._scope))
 
     def _hl_live_items(self):
-        """``(key, passes the other filters, None, last change)`` per live path."""
+        """``(key, passes the other filters, None, last change)`` per live path.
+
+        Watched (★) files are listed whatever their activity -- idle ones in
+        the idle fold -- so they count as present while the ``/`` filter
+        lets them through.
+        """
         segment = self._segment
+        wl = self._watchlist_or_none()
         for key, act in self.activity.paths.items():
             canon = canonical_key(key)
-            ok = (
-                act.stats(segment) is not None
-                and (
-                    self.activity.hide_reason(act, segment) is None
-                    or self._hl.bypass_noise(canon)
+            if wl is not None and wl.watched_by(key) is not None:
+                ok = self._matches(_Row(key=key, activity=act, watched=key), ai=False)
+            else:
+                ok = (
+                    act.stats(segment) is not None
+                    and (
+                        self.activity.hide_reason(act, segment) is None
+                        or self._hl.bypass_noise(canon)
+                    )
+                    and self._matches(_Row(key=key, activity=act), ai=False)
                 )
-                and self._matches(_Row(key=key, activity=act), ai=False)
-            )
             last = act.last.timestamp() if act.last else None
             yield canon, ok, None, last
+        if wl is not None:
+            for path in wl.rows:
+                if path not in self.activity.paths:
+                    row = _Row(key=path, watched=path)
+                    yield canonical_key(path), self._matches(row, ai=False), None, None
 
     def _redraw_highlights(self, _keys: set[str] | None = None) -> None:
         """Highlights changed (AnnotationFeed, H, X): redraw, keep the cursor."""
@@ -2540,7 +2556,9 @@ class FilesPanel(Widget):
         if not self._hl.leave_filter():
             return False
         self._redraw_highlights()
-        self.app.notify("AI filter off — the rows stay highlighted", timeout=2)
+        self.app.notify(
+            "AI filter off — the rows stay highlighted", timeout=2, markup=False
+        )
         return True
 
     def action_cycle_highlight_filter(self) -> None:
@@ -2548,7 +2566,8 @@ class FilesPanel(Widget):
         notice = self._hl.cycle_filter()
         self._redraw_highlights()
         if notice:
-            self.app.notify(notice, timeout=3)
+            # The notice holds the set's label (chat agent text): no markup.
+            self.app.notify(notice, timeout=3, markup=False)
 
     def action_clear_highlights(self) -> None:
         """``X``: remove this lens's highlight sets (asks first)."""
@@ -2621,9 +2640,7 @@ class FilesPanel(Widget):
             what = (
                 "a directory"
                 if act.is_dir
-                else "renamed away"
-                if act.moved_to
-                else "deleted on the device"
+                else "renamed away" if act.moved_to else "deleted on the device"
             )
             self.app.notify(f"Nothing to pull: {what}.", severity="warning")
             return

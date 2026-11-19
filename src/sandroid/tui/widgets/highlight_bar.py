@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from rich.text import Text
+from textual.markup import escape as escape_markup
 from textual.widgets import Static
 
 from sandroid.tui.row_annotations import (
@@ -80,6 +81,13 @@ def canonical_key(path: str) -> str:
         return canonical_device_path(path)
     except Exception:
         return path
+
+
+def _heading_style(pal: Any) -> str:
+    """The bar's heading: theme band colours, never the terminal default
+    (on light themes an unset background showed as a black box).
+    """
+    return f"bold {pal.muted} on {pal.band}"
 
 
 def slot_role(slot: int) -> str:
@@ -241,10 +249,21 @@ class HighlightView:
 
     # -- rendering -------------------------------------------------------------
 
+    def ordered(self, key: str | None) -> tuple:
+        """:meth:`lookup` with the AI filter set first (it wins the tint too)."""
+        hits = self.lookup(key)
+        fid = self.filter_id() if hits else None
+        if fid is None or len(hits) < 2:
+            return hits
+        return tuple(sorted(hits, key=lambda e: e[0] != fid))
+
     def cell(self, key: str | None) -> Text:
-        """The Highlight cell: the sets' short words in their slot colours."""
+        """The Highlight cell: the sets' short words in their slot colours.
+
+        The AI filter set comes first (the set whose colour tints the row).
+        """
         text = Text(no_wrap=True, overflow="ellipsis")
-        for i, (_sid, slot, short, _reason) in enumerate(self.lookup(key)):
+        for i, (_sid, slot, short, _reason) in enumerate(self.ordered(key)):
             if i:
                 text.append(", ", style=lens_palette().dim)
             text.append(short, style=f"bold {role_color(slot_role(slot))}")
@@ -265,7 +284,7 @@ class HighlightView:
         ``last_change`` (Files: the row's last activity, epoch seconds) adds
         "changed after the AI looked at it" when it is after the judgement.
         """
-        hits = self.lookup(key)
+        hits = self.ordered(key)
         if not hits:
             return []
         pal = lens_palette()
@@ -343,7 +362,8 @@ class HighlightView:
                         c.hidden += 1
                     elif changes and judged and last and last > float(judged):
                         c.changed += 1
-                elif ok and fresh:
+                elif ok and fresh and key:
+                    # Rows without a key (TLS failures) can never be in a set.
                     if through is not None and seq is not None:
                         if seq > int(through):
                             c.new += 1
@@ -352,49 +372,94 @@ class HighlightView:
         self.counts, self.view_total, self.view_shown = counts, total, shown
 
     def bar_text(self, width: int = 160, scope: str | None = None) -> Text | None:
-        """The bar line (None: no sets)."""
+        """The bar line (None: no sets), condensed to fit *width* cells.
+
+        Forms, most verbose first: labels + flags + the key hint; without
+        the hint; short labels + flags; ``4 sets:`` with counts only. The
+        first that fits wins (the last one is cut with an ellipsis).
+        """
         sets = self.sets()
         if not sets:
             return None
+        room = max(10, int(width) - 2)  # the bar's own padding
+        forms = (
+            (False, True, True),
+            (False, True, False),
+            (True, True, False),
+        )
+        for short, flags, hint in forms:
+            text = self._bar_line(sets, scope, short=short, flags=flags, hint=hint)
+            if text.cell_len <= room:
+                return text
+        return self._bar_counts(sets)
+
+    def _chip(self, text: Text, hs: Any, body: str) -> None:
+        role = slot_role(hs.slot)
+        text.append(
+            f" {body} ", style=f"bold {role_color(role)} on {row_tint(role, TINT)}"
+        )
+
+    def _count(self, hs: Any) -> str:
+        c = self.counts.get(hs.id, SetCounts())
+        n = len(hs.reasons)
+        return f"{c.present}" if c.present >= n else f"{c.present} of {n}"
+
+    def _bar_line(
+        self, sets: list, scope: str | None, *, short: bool, flags: bool, hint: bool
+    ) -> Text:
         pal = lens_palette()
         fid = self.filter_id()
-        short = width < BAR_SHORT_BELOW
         text = Text(no_wrap=True, overflow="ellipsis")
-        text.append("AI highlights", style=f"bold {pal.muted}")
+        text.append(" AI highlights ", style=_heading_style(pal))
         for hs in sets:
-            role = slot_role(hs.slot)
             c = self.counts.get(hs.id, SetCounts())
             label = hs.short if short else _clip(hs.label, 32)
-            n = (
-                f"{c.present}"
-                if c.present >= len(hs.reasons)
-                else (f"{c.present} of {len(hs.reasons)}")
-            )
             text.append("  ")
-            text.append(
-                f" {label} {n} ",
-                style=f"bold {role_color(role)} on {row_tint(role, TINT)}",
-            )
-            flags = []
+            self._chip(text, hs, f"{label} {self._count(hs)}")
+            if not flags:
+                continue
+            words = []
             if hs.id == fid:
-                flags.append("filtering")
+                words.append("filtering")
             if not hs.complete:
-                flags.append("partial")
+                words.append("partial")
             if c.new:
-                flags.append(f"{c.new} new since")
+                words.append(f"{c.new} new since")
             if c.changed:
-                flags.append(f"{c.changed} changed since")
+                words.append(f"{c.changed} changed since")
             if c.hidden and hs.id != fid:
-                flags.append(f"{c.hidden} hidden by lens filters")
+                words.append(f"{c.hidden} hidden by lens filters")
             if self.lens == LENS_FILES and hs.scope != scope:
-                flags.append("judged on live" if hs.scope is None else "from a run")
-            if flags:
-                text.append(" " + ", ".join(flags), style=pal.text)
-        text.append("  ·  H filter · X clear", style=pal.dim)
+                words.append("judged on live" if hs.scope is None else "from a run")
+            if words:
+                text.append(" " + ", ".join(words), style=pal.text)
+        if hint:
+            text.append("  ·  H filter · X clear", style=pal.dim)
+        return text
+
+    def _bar_counts(self, sets: list) -> Text:
+        """The narrowest form: ``AI highlights · 4 sets: 10 8 4 3``."""
+        pal = lens_palette()
+        fid = self.filter_id()
+        text = Text(no_wrap=True, overflow="ellipsis")
+        text.append(" AI highlights ", style=_heading_style(pal))
+        text.append(
+            f"  {len(sets)} set{'s' if len(sets) != 1 else ''}:", style=pal.text
+        )
+        for hs in sets:
+            text.append(" ")
+            self._chip(text, hs, self._count(hs))
+        if fid is not None:
+            text.append(" filtering", style=pal.text)
         return text
 
     def caption_count(self, shown: int, total: int) -> str | None:
-        """``AI filter: <label> · 12 of 340`` while the AI filter is on."""
+        """``AI filter: <label> · 12 of 340`` while the AI filter is on.
+
+        *total*: the rows the lens would show without the AI filter (the
+        footer's base). Plain text: callers that put it into markup (frame
+        captions) escape it.
+        """
         hs = self.filter_set()
         if hs is None:
             return None
@@ -451,7 +516,8 @@ class HighlightView:
             return
         from sandroid.tui.modals import ConfirmModal
 
-        names = ", ".join(f"“{_clip(s.label, 40)}”" for s in sets)
+        # Labels come from the chat agent: never markup (``[/x]`` would crash).
+        names = ", ".join(f"“{escape_markup(_clip(s.label, 40))}”" for s in sets)
         n = len(sets)
 
         def on_result(yes: bool | None) -> None:
@@ -647,6 +713,7 @@ __all__ = [
     "RowKeyMap",
     "SetCounts",
     "canonical_key",
+    "escape_markup",
     "file_snapshot",
     "flow_snapshot",
     "highlight_store",

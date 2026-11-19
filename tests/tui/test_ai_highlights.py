@@ -260,7 +260,9 @@ async def test_network_ai_filter_noise_bypass_H_cycle_and_esc_order(flow_dir, st
         await settle(pilot)
         assert store.filter_set("network") == h1.id
         assert sorted(_keys(table)) == ["f2", "f3"]
-        assert "AI filter: facebook · 2 of 7" in ms._lens_captions["network"][1]
+        # M = what the lens shows without the AI filter (the footer's base:
+        # the two OS-noise flows stay out of it).
+        assert "AI filter: facebook · 2 of 5" in ms._lens_captions["network"][1]
         assert "filtering" in _bar(panel)
         await pilot.press("H")
         await settle(pilot)
@@ -602,3 +604,178 @@ async def test_files_review_snapshot_carries_the_diff_head(store, tmp_path):
         assert by_key[AAID]["diff_head"] is None
     head = diff_head(["x" * 4000])
     assert len(head) == DIFF_HEAD_CAP
+
+
+# --------------------------------------------------------------------------
+# verifier findings: labels are never markup
+# --------------------------------------------------------------------------
+
+BRACKET_LABEL = "POSTs to [/v1/track] [bold]x"
+
+
+async def test_network_H_and_X_with_a_bracket_label_do_not_crash(
+    flow_dir, store, monkeypatch
+):
+    from sandroid.tui.modals import ConfirmModal
+
+    monkeypatch.setattr(ConfirmModal, "ARM_SECONDS", 0.0)
+    app = _app()
+    async with app.run_test(size=SIZE, notifications=True) as pilot:
+        ms, panel = await _network(app, pilot, flow_dir)
+        store.create("network", BRACKET_LABEL, reasons={"flow-2": "x"})
+        await until(pilot, lambda: panel._hl.active)
+        panel.table.focus()
+        await pilot.press("H")
+        for _ in range(4):
+            await pilot.pause(0.1)
+        notes = [n.message for n in app._notifications]
+        assert f"AI filter: {BRACKET_LABEL}" in notes
+        assert BRACKET_LABEL in ms._lens_captions["network"][1].replace("\\", "")
+        await pilot.press("X")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        await pilot.pause(0.2)
+        message = str(app.screen.query_one(".modal-message").render())
+        assert "[/v1/track] [bold]x" in message
+        await pilot.press("y")
+        await until(pilot, lambda: not store.sets("network"))
+    assert app.return_code in (None, 0)
+
+
+async def test_files_bracket_label_in_the_caption_and_H_notice(store):
+    app = _Harness()
+    async with app.run_test(size=WIDE, notifications=True) as pilot:
+        panel = await _files(app, pilot)
+        store.create("files", "prefs under [/sdcard]", reasons={PREFS: "r"})
+        await until(pilot, lambda: _bar(panel))
+        panel.table.focus()
+        await pilot.press("H")
+        for _ in range(4):
+            await pilot.pause(0.1)
+        assert "AI filter: prefs under [/sdcard]" in [
+            n.message for n in app._notifications
+        ]
+        info = panel.caption()[1]
+        assert "prefs under \\[/sdcard]" in info  # escaped for the frame markup
+        from textual.content import Content
+
+        assert "prefs under [/sdcard]" in Content.from_markup(info).plain
+    assert app.return_code in (None, 0)
+
+
+# --------------------------------------------------------------------------
+# verifier findings: counts, column order, bar width
+# --------------------------------------------------------------------------
+
+
+async def test_files_bar_counts_idle_watched_rows_as_present(store):
+    from sandroid.services import get_forensic_service
+
+    watched = [f"{ROOT}/shared_prefs/w{i}.xml" for i in range(5)]
+    for path in watched:
+        get_forensic_service().add_spotlight_file(path)
+    try:
+        app = _Harness()
+        async with app.run_test(size=WIDE) as pilot:
+            panel = await _files(app, pilot)
+            store.create(
+                "files",
+                "watched prefs",
+                reasons={**dict.fromkeys(watched[:3], "w"), PREFS: "p"},
+            )
+            await until(pilot, lambda: _bar(panel))
+            bar = _bar(panel)
+            assert "watched prefs 4" in bar
+            assert "of 4" not in bar
+            assert "hidden by lens filters" not in bar
+    finally:
+        get_forensic_service()._spotlight_files.clear()
+
+
+def _view_with(store, n: int):
+    from sandroid.tui.widgets.highlight_bar import HighlightView
+
+    labels = ["shop POSTs to the API", "tracker hosts", "cdn assets", "geo lookups"]
+    for i in range(n):
+        store.create(
+            "network",
+            labels[i],
+            reasons={f"k{i}": "r"},
+            basis={"through_seq": 5, "judged_at": 1.0},
+        )
+    return HighlightView("network")
+
+
+def test_highlight_cell_shows_the_filter_set_first(store):
+    view = _view_with(store, 3)
+    store.add("h3", {"k0": "also"})
+    first, third = store.get("h1").short, store.get("h3").short
+    assert view.cell("k0").plain == f"{first}, {third}"
+    store.set_filter("network", "h3")
+    assert view.cell("k0").plain == f"{third}, {first}"
+    assert [e[0] for e in view.ordered("k0")] == ["h3", "h1"]
+
+
+def test_rows_without_a_key_never_count_as_new(store):
+    view = _view_with(store, 1)
+    view.measure(
+        iter([("k0", True, 1, 1.0), (None, True, 9, 9.0), ("x", True, 6, 9.0)]),
+        live=True,
+    )
+    assert view.counts["h1"].new == 1  # only "x"; the keyless TLS row is not
+
+
+@pytest.mark.parametrize("width", [200, 170, 120, 100, 80, 60, 40])
+def test_the_bar_condenses_instead_of_overflowing(store, width):
+    view = _view_with(store, 4)
+    view.measure(iter([(f"k{i}", True, 1, 1.0) for i in range(4)]), live=True)
+    text = view.bar_text(width)
+    plain = text.plain
+    full = view.bar_text(1000).plain
+    assert "H filter · X clear" in full
+    if text.cell_len > width - 2:
+        # only the last form may be cut, and then with an ellipsis
+        assert plain.startswith(" AI highlights   4 sets:")
+    if width <= 100:
+        assert "H filter" not in plain  # the hint goes first
+    if width <= 60:
+        assert plain.startswith(" AI highlights   4 sets: ")
+
+
+# --------------------------------------------------------------------------
+# E2E finding: the Network lens follows light themes
+# --------------------------------------------------------------------------
+
+
+async def test_network_lens_follows_a_light_theme(flow_dir, store):
+    from textual.color import Color
+
+    from sandroid.tui.themes import lens_palette
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _network(app, pilot, flow_dir)
+        dark_bg = panel.styles.background
+        assert dark_bg == Color.parse("#050811")  # the default stays identical
+        from sandroid.tui.themes import textual_theme_name
+
+        app.theme = textual_theme_name("paper")
+        await settle(pilot)
+        app.call_later(panel._rebuild)
+        await settle(pilot)
+        pal = lens_palette()
+        assert pal.bg.upper() == "#FBF8F1"  # paper's lens background
+        assert panel.styles.background == Color.parse(pal.bg)
+        assert panel.table.styles.background == Color.parse(pal.bg)
+        request = panel.table.get_cell("f2", "req")
+        assert all(
+            str(span.style) in (pal.text, pal.muted) for span in request.spans
+        ), request.spans
+
+
+def test_the_bar_heading_has_a_theme_background(store):
+    from sandroid.tui.themes import lens_palette
+
+    view = _view_with(store, 1)
+    text = view.bar_text(200)
+    heading = next(span for span in text.spans if span.start == 0)
+    assert str(heading.style).endswith(f"on {lens_palette().band}")

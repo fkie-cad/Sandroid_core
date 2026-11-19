@@ -361,16 +361,16 @@ def smart_request(method: str, host: str, path: str, width: int) -> Text:
             chosen = cand
             break
     text = Text(no_wrap=True, overflow="ellipsis")
-    text.append(method, style="#8f9bb3")
+    text.append(method, style=lens_palette().muted)
     text.append(" ")
     if chosen is None:
         rest = _ellipsize(host + candidates[-1], max(1, width - len(method) - 1))
         hlen = min(len(host), len(rest))
-        text.append(rest[:hlen], style="#e5e9f0")
-        text.append(rest[hlen:], style="#8f9bb3")
+        text.append(rest[:hlen], style=lens_palette().text)
+        text.append(rest[hlen:], style=lens_palette().muted)
         return text
-    text.append(host, style="#e5e9f0")
-    text.append(chosen, style="#8f9bb3")
+    text.append(host, style=lens_palette().text)
+    text.append(chosen, style=lens_palette().muted)
     return text
 
 
@@ -578,20 +578,22 @@ BODY_DISPLAY_CAP = 16 * 1024
 
 def _grid() -> Table:
     grid = Table.grid(padding=(0, 2))
-    grid.add_column(style="#8f9bb3", no_wrap=True)
+    grid.add_column(style=lens_palette().muted, no_wrap=True)
     grid.add_column(overflow="fold")
     return grid
 
 
 def _headers_renderable(headers: Any) -> RenderableType:
     if not headers:
-        return Text("none", style="#5b6479")
+        return Text("none", style=lens_palette().dim)
     grid = Table.grid(padding=(0, 1))
-    grid.add_column(style="#8f9bb3", no_wrap=True)
+    grid.add_column(style=lens_palette().muted, no_wrap=True)
     grid.add_column(overflow="fold")
     for i, pair in enumerate(headers):
         if i >= 60:
-            grid.add_row("…", Text(f"{len(headers) - 60} more", style="#5b6479"))
+            grid.add_row(
+                "…", Text(f"{len(headers) - 60} more", style=lens_palette().dim)
+            )
             break
         try:
             name, value = pair[0], pair[1]
@@ -606,7 +608,7 @@ def _headers_renderable(headers: Any) -> RenderableType:
 
 def _hex_preview(raw: bytes, limit: int = 128, per_line: int = 8) -> Text:
     """Hex + ASCII preview; 8 bytes a line fit the Inspector without wrapping."""
-    out = Text(style="#8f9bb3")
+    out = Text(style=lens_palette().muted)
     chunk = raw[:limit]
     width = per_line * 3 - 1
     for off in range(0, len(chunk), per_line):
@@ -620,7 +622,7 @@ def _hex_preview(raw: bytes, limit: int = 128, per_line: int = 8) -> Text:
 def body_renderable(body: Any, content_type: str | None) -> RenderableType:
     """Decoded, capped body: pretty JSON, form fields, text, or a hex note."""
     if not isinstance(body, dict) or not body.get("size_bytes"):
-        return Text("empty", style="#5b6479")
+        return Text("empty", style=lens_palette().dim)
     size = int(body.get("size_bytes") or 0)
     note = ""
     if body.get("truncated"):
@@ -633,20 +635,22 @@ def body_renderable(body: Any, content_type: str | None) -> RenderableType:
         parts.append(
             Text(
                 f"{encoding}-encoded; could not be decoded, shown as received",
-                style="#facc15",
+                style=lens_palette().warn,
             )
         )
     elif encoding:
         wire = body.get("encoded_bytes")
         on_wire = f" · {human_size(int(wire))} on the wire" if wire else ""
-        parts.append(Text(f"decoded from {encoding}{on_wire}", style="#5b6479"))
+        parts.append(
+            Text(f"decoded from {encoding}{on_wire}", style=lens_palette().dim)
+        )
     if body.get("encoding") == "base64":
         try:
             raw = base64.b64decode(content)
         except (ValueError, TypeError):
             raw = b""
         label = f"binary · {human_size(size)}" + (f" · {ctype}" if ctype else "")
-        parts.append(Text(label, style="#8f9bb3"))
+        parts.append(Text(label, style=lens_palette().muted))
         if raw:
             parts.append(_hex_preview(raw))
     else:
@@ -677,7 +681,7 @@ def body_renderable(body: Any, content_type: str | None) -> RenderableType:
             rendered = Text(text)
         parts.append(rendered)
     if note:
-        parts.append(Text(note, style="#5b6479"))
+        parts.append(Text(note, style=lens_palette().dim))
     from rich.console import Group
 
     return Group(*parts)
@@ -1048,26 +1052,27 @@ class NetworkPanel(Widget):
     NetworkPanel {
         layout: vertical;
         height: 1fr;
-        background: #050811;
+        background: $lens-bg;
     }
     NetworkPanel > #net-filter {
         display: none;
         height: 1;
         border: none;
         padding: 0 1;
-        background: #0b1628;
-        color: #e5e9f0;
+        background: $lens-input-bg;
+        color: $lens-input-text;
     }
     NetworkPanel > #net-filter.-open {
         display: block;
     }
     NetworkPanel > #net-filter:focus {
         border: none;
-        background: #11203a;
+        background: $lens-input-focus-bg;
     }
     NetworkPanel > #net-flows {
         height: 1fr;
-        background: #050811;
+        background: $lens-bg;
+        color: $lens-text;
         scrollbar-size-vertical: 1;
         scrollbar-size-horizontal: 0;
     }
@@ -1078,19 +1083,19 @@ class NetworkPanel(Widget):
         height: 2;
     }
     NetworkPanel > #net-flows > .datatable--header {
-        background: #050811;
-        color: #5b6479;
+        background: $lens-bg;
+        color: $lens-header;
         text-style: none;
     }
     NetworkPanel > #net-flows > .datatable--cursor {
-        background: #11203a;
+        background: $lens-input-focus-bg;
         text-style: none;
     }
     NetworkPanel > #net-flows:focus > .datatable--cursor {
-        background: #1d3557;
+        background: $lens-cursor-focus;
     }
     NetworkPanel > #net-flows > .datatable--hover {
-        background: #0b1628;
+        background: $lens-cursor;
     }
     NetworkPanel > #net-empty {
         display: none;
@@ -1104,13 +1109,13 @@ class NetworkPanel(Widget):
         width: 100%;
         content-align: center middle;
         text-align: center;
-        color: #cbd5e1;
+        color: $lens-text;
     }
     NetworkPanel #net-empty-hint {
         width: 100%;
         margin: 1 0 0 0;
         text-align: center;
-        color: #5b6479;
+        color: $lens-dim;
     }
     """
 
@@ -1541,23 +1546,25 @@ class NetworkPanel(Widget):
     def _cells(self, row: FlowRow, layout: list[tuple[str, str, int]]) -> list[Text]:
         widths = {k: w for k, _, w in layout}
         req_w, who_w = widths["req"], widths["who"]
-        t = Text(time.strftime("%H:%M:%S", time.localtime(row.ts)), style="#5b6479")
+        t = Text(
+            time.strftime("%H:%M:%S", time.localtime(row.ts)), style=lens_palette().dim
+        )
         label, known = row.recipient
-        who = Text(_ellipsize(label, who_w), style="#e5e9f0" if known else "#cbd5e1")
+        who = Text(_ellipsize(label, who_w), style=lens_palette().text)
         tag = _phase_tag(row.phase) if self.in_review else ""
         if row.kind == "tls":
             req = Text(no_wrap=True, overflow="ellipsis")
             if tag:  # a dry-run / setup TLS failure is marked like its flows
-                req.append(f"{tag} ", style="#fbbf24")
-            req.append("TLS ", style="#8f9bb3")
+                req.append(f"{tag} ", style=lens_palette().warn)
+            req.append("TLS ", style=lens_palette().muted)
             host_w = req_w - 4 - (len(tag) + 1 if tag else 0)
-            req.append(_ellipsize(row.host, host_w), style="#e5e9f0")
+            req.append(_ellipsize(row.host, host_w), style=lens_palette().text)
             status = Text("TLS failed", style=f"bold {lens_palette().bad}")
             size = Text("")
         else:
             if tag:
                 req = Text(no_wrap=True, overflow="ellipsis")
-                req.append(f"{tag} ", style="#fbbf24")
+                req.append(f"{tag} ", style=lens_palette().warn)
                 req.append_text(
                     smart_request(row.method, row.host, row.path, req_w - len(tag) - 1)
                 )
@@ -1568,21 +1575,21 @@ class NetworkPanel(Widget):
                     f"error {_short_error(row.error)}", style=lens_palette().bad
                 )
             elif row.status is None:
-                status = Text("…", style="#5b6479")
+                status = Text("…", style=lens_palette().dim)
             else:
                 code = int(row.status)
-                color = "#8f9bb3"
+                color = lens_palette().muted
                 if 400 <= code < 500:
-                    color = "#facc15"
+                    color = lens_palette().warn
                 elif code >= 500:
-                    color = "#fb7185"
+                    color = lens_palette().bad
                 status = Text(str(code), style=color)
             if row.req_bytes:
-                size = Text(f"↑ {human_size(row.req_bytes)}", style="#cbd5e1")
+                size = Text(f"↑ {human_size(row.req_bytes)}", style=lens_palette().text)
             elif row.resp_bytes:
-                size = Text(f"↓ {human_size(row.resp_bytes)}", style="#5b6479")
+                size = Text(f"↓ {human_size(row.resp_bytes)}", style=lens_palette().dim)
             else:
-                size = Text("–", style="#5b6479")
+                size = Text("–", style=lens_palette().dim)
         size.justify = "right"
         cells = {"time": t, "who": who, "req": req, "status": status, "size": size}
         cells["ident"] = self._privacy_cell(row, widths.get("ident", 0))
@@ -1902,7 +1909,8 @@ class NetworkPanel(Widget):
         if not total:
             return ""
         parts = []
-        ai = self._hl.caption_count(self._shown, total)
+        # M of the AI filter: the rows shown without it (the footer's base).
+        ai = self._hl.caption_count(self._shown, self._hl.view_total)
         if ai is not None:
             parts.append(escape(ai))
         elif self._shown != total:
@@ -2251,7 +2259,7 @@ class NetworkPanel(Widget):
                 "phase",
                 Text(
                     row.phase,
-                    style="#fbbf24" if row.phase in HIDDEN_PHASES else "",
+                    style=lens_palette().warn if row.phase in HIDDEN_PHASES else "",
                 ),
             )
         if row.error:
@@ -2277,12 +2285,12 @@ class NetworkPanel(Widget):
             f"{human_size(row.resp_bytes)}"
             + (f" · {row.resp_type}" if row.resp_type else ""),
         )
-        summary = [("", grid), ("URL", Text(row.url(), style="#cbd5e1"))]
+        summary = [("", grid), ("URL", Text(row.url(), style=lens_palette().text))]
         summary += self._hl.sections(row.flow_id)
         if detail is None:
             missing = Text(
                 "details not stored (trimmed by retention or never captured)",
-                style="#5b6479",
+                style=lens_palette().dim,
             )
             request = [("", missing)]
             response = [("", missing)]
@@ -2297,7 +2305,7 @@ class NetworkPanel(Widget):
             ]
             if detail.get("error"):
                 response.insert(
-                    0, ("Error", Text(str(detail["error"]), style="#fb7185"))
+                    0, ("Error", Text(str(detail["error"]), style=lens_palette().bad))
                 )
         tabs = [("Summary", summary), ("Request", request), ("Response", response)]
         tabs += self._identity_tabs(row)
@@ -2324,7 +2332,9 @@ class NetworkPanel(Widget):
         m_recent = list(mitm.recent_lines)[-8:] if mitm is not None else []
         m_sections: list[tuple[str, Any]] = [("", m_grid), ("Keys", m_keys)]
         if m_recent:
-            m_sections.append(("Recent", Text("\n".join(m_recent), style="#8f9bb3")))
+            m_sections.append(
+                ("Recent", Text("\n".join(m_recent), style=lens_palette().muted))
+            )
         f_grid = _grid()
         for label, value in fritap.status_rows() if fritap is not None else []:
             f_grid.add_row(label, Text.from_markup(value))
@@ -2334,7 +2344,9 @@ class NetworkPanel(Widget):
             ("Keys", "[b]h[/b] start/stop friTap  [b]^F[/b] output folder"),
         ]
         if f_recent:
-            f_sections.append(("Recent", Text("\n".join(f_recent), style="#8f9bb3")))
+            f_sections.append(
+                ("Recent", Text("\n".join(f_recent), style=lens_palette().muted))
+            )
         return InspectorContent(
             title="Capture status",
             tabs=[("mitmproxy", m_sections), ("friTap", f_sections)],
@@ -2530,20 +2542,20 @@ class NetworkPanel(Widget):
         """Every row of this view (live or the reviewed run) for the AI tools.
 
         ``shown`` = passes the lens's current filters. Rows without a flow id
-        (stdout-only TLS failures) cannot be highlighted and are left out.
+        (stdout-only TLS failures) cannot be highlighted: they come with key
+        None (the tools drop them) only so their ``seq`` counts for the
+        "new since" basis.
         """
-        return [
-            flow_snapshot(r, self._passes(r), self._scope)
-            for r in self._model()
-            if r.flow_id
-        ]
+        return [flow_snapshot(r, self._passes(r), self._scope) for r in self._model()]
 
     def _leave_highlight_filter(self) -> bool:
         if not self._hl.leave_filter():
             return False
         self._redraw_highlights()
         try:
-            self.app.notify("AI filter off — the rows stay highlighted", timeout=2)
+            self.app.notify(
+                "AI filter off — the rows stay highlighted", timeout=2, markup=False
+            )
         except Exception:
             pass
         return True
@@ -2553,7 +2565,8 @@ class NetworkPanel(Widget):
         notice = self._hl.cycle_filter()
         self._redraw_highlights()
         if notice:
-            self.app.notify(notice, timeout=3)
+            # The notice holds the set's label (chat agent text): no markup.
+            self.app.notify(notice, timeout=3, markup=False)
 
     def action_clear_highlights(self) -> None:
         """``X``: remove this lens's highlight sets (asks first)."""
