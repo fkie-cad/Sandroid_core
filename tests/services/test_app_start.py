@@ -313,6 +313,13 @@ class FakeJM:
         raise AssertionError("must not spawn")
 
 
+@pytest.fixture(autouse=True)
+def _no_setup_owner():
+    app_start.end_setup()
+    yield
+    app_start.end_setup()
+
+
 @pytest.fixture
 def env(monkeypatch):
     """Real SpotlightService + BypassService, fake JobManager/adb/tasks."""
@@ -809,7 +816,8 @@ def test_fridump_never_starts_or_restarts(env, monkeypatch):
     assert (session.pid, mode, info["owns_spawn"]) == (77, "attach", False)
 
 
-def test_trigdroid_attaches_to_a_running_app_unless_fresh(env, bus, monkeypatch):
+def test_trigdroid_attaches_to_a_running_app_and_never_restarts(env, bus, monkeypatch):
+    """TrigDroid spawns outside the JobManager: no RESPAWN, ever."""
     from sandroid.features.trigdroid import Trigdroid
     from sandroid.services import get_trigdroid_config_service
 
@@ -819,17 +827,16 @@ def test_trigdroid_attaches_to_a_running_app_unless_fresh(env, bus, monkeypatch)
 
     # spawn_mode=True (the default) no longer restarts a running app.
     assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is False
+
+    monkeypatch.setattr(cfg, "fresh", True)  # needs a fresh process: refuse
+    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is None
+    bus.active = False  # headless: refuses too, never kills
+    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is None
     assert bus.asked == []
 
-    monkeypatch.setattr(cfg, "fresh", True)
-    bus.answer = False  # TUI: the user keeps it running
-    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is None
-    bus.active = False  # headless: fresh is the consent
-    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is True
-
     env.live = (Liveness.NOT_RUNNING, None)
-    monkeypatch.setattr(cfg, "fresh", False)
     assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is True
+    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, False)) is None
 
 
 def test_chrome_ct_bypass_keeps_a_running_spotlight_chrome(env):
@@ -856,3 +863,314 @@ def test_gather_inputs_keeps_the_pid_of_a_held_unnamed_spawn(env):
     env.jm = FakeJM()
     app_start.gather_inputs(PKG)
     assert env.spotlight.get_pid() is None  # really gone now
+
+
+# -- review fixes ----------------------------------------------------------------
+
+
+def test_an_unnamable_session_with_live_jobs_is_never_reset():
+    """Item 8: an attached session whose PID cannot be read keeps its jobs."""
+    d = decide_start(
+        _inputs(session_alive=True, live_jobs=("FriTap SSL Logger",), has_session=True)
+    )
+    assert d.action == StartAction.REFUSE
+    assert d.code == "frida_busy"
+    d = decide_start(
+        _inputs(
+            liveness=Liveness.NOT_RUNNING,
+            session_alive=True,
+            live_jobs=("Dexray",),
+            has_session=True,
+        )
+    )
+    assert d.action == StartAction.REFUSE
+
+
+def test_spawn_rechecks_live_jobs_before_resetting(env, monkeypatch):
+    """Item 8: a job started during Dexray's snapshot prompt is not killed."""
+    monkeypatch.setattr(
+        env.spotlight,
+        "spawn_app_paused",
+        lambda pkg: pytest.fail("spawned over live jobs"),
+    )
+    env.jm = FakeJM(session_pid=12)
+    env.jm.jobs = {"x": FakeJob(display_name="FriTap SSL Logger")}
+    d = StartDecision(
+        StartAction.SPAWN, PKG, owns_spawn=True, reset_session=True, tool="Dexray"
+    )
+
+    with pytest.raises(AppStartError, match="FriTap SSL Logger"):
+        app_start.open_session(d)
+    assert "reset_session" not in env.jm.calls
+
+
+def _spawning(env, monkeypatch, pid=4321):
+    monkeypatch.setattr(env.spotlight, "spawn_app_paused", lambda pkg: (env.jm, pid))
+
+
+def test_own_spawn_is_guarded_until_its_tool_resumes(env, monkeypatch):
+    """Item 4: Space and other tools wait for the tool that spawned the app."""
+    _spawning(env, monkeypatch)
+    opened = app_start.open_session(
+        StartDecision(StartAction.SPAWN, PKG, owns_spawn=True, tool="friTap")
+    )
+    env.jm = FakeJM(session_pid=4321, package_name=PKG, paused=True)
+    assert app_start.setup_owner() == "friTap"
+
+    monkeypatch.setattr(
+        env.spotlight, "resume_paused_app", lambda: pytest.fail("resumed early")
+    )
+    ok, msg = app_start.resume_app()
+    assert ok is False
+    assert "friTap is still loading its hooks" in msg
+
+    env.live = (Liveness.NOT_RUNNING, None)
+    d = app_start.resolve_start(tool="Dexray", java_agent=False)
+    assert d.action == StartAction.REFUSE
+    assert d.code == "setup"
+    assert "friTap is still loading" in d.reason
+
+    def _boom(device, pid):
+        raise RuntimeError("process died")
+
+    monkeypatch.setattr(
+        services,
+        "get_frida_session_service",
+        lambda: SimpleNamespace(resume_spawned_process=_boom),
+    )
+    with pytest.raises(RuntimeError):
+        app_start.finish_owned_spawn(opened)
+    assert app_start.setup_owner() is None  # cleared on every exit path
+
+
+def test_a_stale_setup_marker_is_dropped(env, monkeypatch):
+    _spawning(env, monkeypatch, pid=4321)
+    app_start.open_session(
+        StartDecision(StartAction.SPAWN, PKG, owns_spawn=True, tool="friTap")
+    )
+    env.jm = FakeJM(session_pid=999)  # the spawn is gone, another session
+    assert app_start.setup_owner() is None
+
+
+def test_abort_owned_spawn_kills_it_and_clears_everything(env, monkeypatch):
+    """Item 2: a failed tool start leaves no frozen spawn behind."""
+    from sandroid.core.adb import Adb
+
+    killed: list = []
+    monkeypatch.setattr(Adb, "force_stop", staticmethod(killed.append))
+    _spawning(env, monkeypatch)
+    opened = app_start.open_session(
+        StartDecision(StartAction.SPAWN, PKG, owns_spawn=True, tool="friTap")
+    )
+    env.jm = FakeJM(session_pid=4321, package_name=PKG, paused=True)
+    assert env.spotlight.get_pid() == 4321
+
+    app_start.abort_owned_spawn(opened)
+
+    assert killed == [PKG]
+    assert "reset_session" in env.jm.calls
+    assert env.spotlight.get_pid() is None
+    assert app_start.setup_owner() is None
+    env.jm.calls.clear()
+    app_start.abort_owned_spawn(Opened(77, False, True, None, PKG))  # joined
+    assert env.jm.calls == []
+
+
+def test_restart_teardown_failure_never_leaves_restarting(env, monkeypatch):
+    """Item 7: the teardown is inside the end_restart finally."""
+
+    def _teardown(pkg):
+        env.spotlight.begin_restart(pkg)
+        raise RuntimeError("adb gone")
+
+    monkeypatch.setattr(app_start, "respawn_teardown", _teardown)
+
+    with pytest.raises(RuntimeError):
+        app_start.restart_app()
+    assert not env.spotlight.is_restarting()
+
+
+def test_restart_teardown_stops_dexray_without_the_revert_dialog(env):
+    """Item 3: no snapshot-revert prompt while the lifecycle lock is held."""
+    calls: list = []
+    monitor = SimpleNamespace(
+        quiet_stop=lambda: calls.append("quiet"),
+    )
+    task = SimpleNamespace(
+        name="dexray-intercept",
+        app_name=PKG,
+        display_name="Dexray",
+        instance=monitor,
+        stop_callback=lambda: calls.append("stop_monitoring (prompts)"),
+    )
+    env.tasks = [task]
+    stopped: list = []
+
+    def _stop(name):
+        task.stop_callback()
+        stopped.append(name)
+        return True
+
+    from sandroid.services import get_task_service
+
+    get_task_service().stop = _stop  # the fixture's fake TaskService
+
+    assert app_start.stop_app_tools(PKG) == ["Dexray"]
+    assert calls == ["quiet"]
+
+
+def test_dexray_stop_monitoring_can_skip_the_revert_prompt():
+    from sandroid.analysis.malwaremonitor import MalwareMonitor
+
+    mm = MalwareMonitor.__new__(MalwareMonitor)
+    asked: list = []
+    mm.running = True
+    mm._accept_messages = True
+    mm.profiler = None
+    mm._bypass_claims = []
+    mm._job_id = None
+    mm.enable_fritap = False
+    mm._hook_registry = SimpleNamespace(unregister_hooks=lambda tb: None)
+    mm._registered_hooks = []
+    mm._get_toolbox = lambda: SimpleNamespace(malware_monitor_running=True)
+    mm._unregister_hooks_from_toolbox = lambda: None
+    mm._prompt_snapshot_revert = lambda tb: asked.append("revert?")
+    mm._snapshot_manager = SimpleNamespace(discard_snapshot=lambda tb: None)
+
+    mm.quiet_stop()
+    assert asked == []
+    mm.running = True
+    mm.stop_monitoring()
+    assert asked == ["revert?"]
+
+
+def test_ctrl_p_disarms_an_armed_ssl_unpin(env):
+    """Item 9: a second Ctrl+P disarms SSL armed for a stopped app."""
+    import threading as _threading
+
+    from sandroid.services.mitmproxy_service import MitmproxyService
+
+    env.live = (Liveness.NOT_RUNNING, None)
+    svc = MitmproxyService.__new__(MitmproxyService)
+    svc._lock = _threading.RLock()
+    svc._state = SimpleNamespace(ssl_unpin_active=False, ssl_unpin_app=None)
+    svc._ssl_via_mitm = False
+    svc._emit = lambda line: None
+    svc._bypass_service = lambda: env.bypass
+    svc.is_running = lambda: False
+
+    now_on, msg = svc.toggle_ssl_unpin()
+    assert env.bypass.armed_categories() == ["ssl"]
+    assert svc.ssl_unpin_is_on() is True
+    assert svc.ssl_unpin_is_active() is False
+
+    now_on, msg = svc.toggle_ssl_unpin()
+    assert now_on is False
+    assert msg == "SSL pinning bypass disarmed"
+    assert env.bypass.armed_categories() == []
+
+
+# -- friTap's own decision path (bugs 1 and 3) ----------------------------------
+
+
+class _SSLLogger:
+    def __init__(self, target, **kw):
+        self.target = target
+        self.session_data = {"session_info": {}}
+
+    def on_fritap_message(self, job, message, data):
+        return None
+
+    def get_agent_script_path(self):
+        return "/tmp/fritap-agent.js"
+
+
+@pytest.fixture
+def fritap(env, monkeypatch, tmp_path):
+    from sandroid.analysis import fritap as fritap_mod
+
+    monkeypatch.setattr(fritap_mod, "_INJECTED_PIDS", {})
+    monkeypatch.setattr(fritap_mod, "_setup_fritap_logging", lambda: None)
+    monkeypatch.setattr(fritap_mod, "_get_device_results_path", lambda: f"{tmp_path}/")
+    monkeypatch.setattr(fritap_mod, "SSL_Logger", _SSLLogger)
+    monkeypatch.setattr(
+        env.spotlight, "spawn_app_paused", lambda pkg: pytest.fail("re-spawned")
+    )
+
+    def _make():
+        ft = fritap_mod.FriTap.__new__(fritap_mod.FriTap)
+        ft.job_manager = env.jm
+        ft.keylog_path = ft.json_output_path = None
+        ft.fresh = ft.fresh_consent = False
+        ft._opened = None
+        ft.app_package = ft.process_id = None
+        return ft
+
+    return SimpleNamespace(make=_make, mod=fritap_mod)
+
+
+def test_fritap_after_c_space_joins_the_running_app(env, fritap):
+    """Bug 1: ⇧C, Space, h -- friTap joins the live session, no re-spawn."""
+    env.jm = FakeJM(session_pid=77, package_name=PKG)
+    env.live = (Liveness.RUNNING, 77)
+    ft = fritap.make()
+
+    ft._setup_session()
+
+    assert env.jm.calls == []  # neither spawn nor setup_frida_session
+    assert ft.process_id == 77
+    assert ft.mode == "attach"
+    assert ft._opened.owns_spawn is False
+
+
+def test_fritap_after_shift_p_joins_the_held_app(env, fritap):
+    """Bug 3: ⇧P, h -- friTap joins the paused spawn and never resumes it."""
+    env.jm = FakeJM(session_pid=77, package_name=PKG, paused=True)
+    env.live = (Liveness.NOT_RUNNING, None)  # pidof cannot name it yet
+    ft = fritap.make()
+
+    ft._setup_session()
+
+    assert env.jm.calls == []
+    assert ft._opened.paused is True
+    assert "still paused" in ft._resume_spawned_target(None, FakeJob())
+    assert ("resume", 77) not in env.jm.calls
+
+    env.jm.jobs = {"b": FakeJob(display_name="Detection Bypass")}
+    with pytest.raises(fritap.mod.FriTapTargetError, match="#218"):
+        fritap.make()._setup_session()
+
+
+def test_fritap_failed_start_kills_its_own_spawn(env, fritap, monkeypatch):
+    """Item 2: start_job returning None after friTap spawned the app."""
+    from sandroid.analysis import fritap as fritap_mod
+
+    aborted: list = []
+    monkeypatch.setattr(app_start, "abort_owned_spawn", aborted.append)
+    ft = fritap.make()
+    opened = Opened(4321, True, True, None, PKG)
+
+    def _setup(config=None):
+        ft._opened = opened
+        ft.process_id = 4321
+        ft.app_package = PKG
+        ft.mode = "spawn"
+        ft.frida_script_path = "/tmp/a.js"
+        ft.message_handler = None
+
+    ft._setup_session = _setup
+    ft.show_in_activity_log = False
+    ft.job_manager = SimpleNamespace(
+        is_paused=lambda: False,
+        running_jobs=list,
+        start_job=lambda *a, **k: None,
+        has_active_session=lambda: True,
+        get_running_jobs_info=list,
+    )
+    ft._get_toolbox = lambda: SimpleNamespace(check_frida_hook_conflicts=lambda h: {})
+    monkeypatch.setattr(fritap_mod, "set_lifecycle", lambda *a: None)
+
+    with pytest.raises(RuntimeError):
+        ft.start(interactive=False)
+    assert aborted == [opened]
+    assert ft._opened is None

@@ -17,6 +17,8 @@ R0    another start/restart is in flight         REFUSE (busy)
 R0b   adb could not tell whether it runs         REFUSE (unknown)
 R1    JobManager holds a *paused* session of     JOIN (paused); REFUSE when a Java
       the app (also a still-unnamed spawn)       agent would join live jobs (#218)
+                                                 or the tool that spawned it still
+                                                 loads its hooks
 R2    the app is not running                     SPAWN (owned) or REFUSE when
                                                  spawning is not allowed / Frida is
                                                  busy with another target
@@ -24,7 +26,9 @@ R3    running, ``fresh`` and no consent          NEEDS_CONFIRM
 R4    running, ``fresh`` and consent             RESPAWN (owned)
 R5    JobManager holds a live session on it      JOIN (running)
 R6    otherwise                                  ATTACH; REFUSE while Frida runs
-                                                 live jobs on another target
+                                                 live jobs on another (or an
+                                                 unnamable) target; only an idle
+                                                 or dead session is reset
 ====  =========================================  ==================================
 
 A running app is never killed without consent: only RESPAWN kills, and
@@ -93,6 +97,10 @@ class StartInputs:
         session_paused: The JobManager holds its process paused.
         live_jobs: Names of JobManager jobs not stopped/errored.
         has_session: The JobManager holds any session state (live or dead).
+        session_alive: The JobManager's session is attached (its PID may
+            still be unreadable).
+        setup_owner: A tool that spawned the app and is still loading its
+            hooks (nobody else may join or resume it meanwhile).
         app_tools: Tools running on the app (stopped by a RESPAWN).
         busy: Why a start is in flight right now, else None.
         fresh: The tool needs a process that has not run yet.
@@ -110,6 +118,8 @@ class StartInputs:
     session_paused: bool = False
     live_jobs: tuple[str, ...] = ()
     has_session: bool = False
+    session_alive: bool = False
+    setup_owner: str | None = None
     app_tools: tuple[str, ...] = ()
     busy: str | None = None
     fresh: bool = False
@@ -148,6 +158,11 @@ class StartDecision:
     tool: str = "this tool"
 
 
+def stops_sentence(tools: tuple[str, ...] | list[str]) -> str:
+    """`` This stops: A, B.`` for a restart dialog ("" without tools)."""
+    return f" This stops: {', '.join(tools)}." if tools else ""
+
+
 def _refuse(i: StartInputs, code: str, reason: str) -> StartDecision:
     return StartDecision(
         StartAction.REFUSE, i.package, reason=reason, code=code, tool=i.tool
@@ -175,6 +190,12 @@ def decide_start(i: StartInputs) -> StartDecision:
     )
     # R1: a held spawn has not run yet, so it already counts as fresh.
     if ours and i.session_paused:
+        if i.setup_owner:
+            return _refuse(
+                i,
+                "setup",
+                f"{i.setup_owner} is still loading its hooks; {i.tool} not started.",
+            )
         if i.java_agent and i.live_jobs:
             return _refuse(
                 i,
@@ -189,6 +210,14 @@ def decide_start(i: StartInputs) -> StartDecision:
             pid=i.session_pid,
             paused=True,
             tool=i.tool,
+        )
+    if i.session_alive and i.session_pid is None and i.live_jobs:
+        # An attached session whose PID cannot be read: never reset it.
+        return _refuse(
+            i,
+            "frida_busy",
+            f"Frida runs {', '.join(i.live_jobs)} on a process it cannot "
+            f"name; stop those first. {i.tool} not started.",
         )
     busy_elsewhere = i.session_pid is not None and not ours and bool(i.live_jobs)
     if busy_elsewhere:
@@ -209,14 +238,14 @@ def decide_start(i: StartInputs) -> StartDecision:
             StartAction.SPAWN,
             pkg,
             owns_spawn=True,
-            reset_session=i.has_session,
+            reset_session=i.has_session and not i.live_jobs,
             tool=i.tool,
         )
     target = i.live_pid if running else i.session_pid
     # R3/R4: the tool needs a process that has not run yet.
     if i.fresh:
         if not i.consent:
-            stops = f" This stops: {', '.join(i.app_tools)}." if i.app_tools else ""
+            stops = stops_sentence(i.app_tools)
             return StartDecision(
                 StartAction.NEEDS_CONFIRM,
                 pkg,
@@ -245,7 +274,7 @@ def decide_start(i: StartInputs) -> StartDecision:
         StartAction.ATTACH,
         pkg,
         pid=target,
-        reset_session=i.has_session,
+        reset_session=i.has_session and not i.live_jobs,
         tool=i.tool,
     )
 
@@ -306,6 +335,59 @@ def _lifecycle() -> Iterator[None]:
         yield
     finally:
         _LIFECYCLE.release()
+
+
+# ---------------------------------------------------------------------------
+# Setup owner: a tool between its own spawn and its resume
+# ---------------------------------------------------------------------------
+
+_SETUP_LOCK = threading.Lock()
+#: ``(tool, package, pid)`` of a tool that spawned the app and is still
+#: loading its hooks, else None. Set by :func:`open_session`, cleared by
+#: :func:`finish_owned_spawn` / :func:`abort_owned_spawn` / :func:`end_setup`.
+_SETUP: tuple[str, str, int | None] | None = None
+
+
+def _begin_setup(tool: str, package: str, pid: int | None) -> None:
+    global _SETUP
+    with _SETUP_LOCK:
+        _SETUP = (tool, package, pid)
+
+
+def end_setup() -> None:
+    """The owning tool resumed (or gave up) its spawn. Idempotent."""
+    global _SETUP
+    with _SETUP_LOCK:
+        _SETUP = None
+
+
+def setup_owner(jm: Any = None) -> str | None:
+    """The tool still loading its hooks into its own paused spawn, or None.
+
+    A marker whose process is gone (the JobManager's live session is another
+    PID or none) is stale and dropped.
+    """
+    global _SETUP
+    with _SETUP_LOCK:
+        marker = _SETUP
+    if marker is None:
+        return None
+    tool, _package, pid = marker
+    if jm is None:
+        jm = _job_manager()
+    spid = session_pid(jm)
+    if pid is not None and spid is not None and spid != pid:
+        end_setup()
+        return None
+    if spid is None and jm is not None:
+        try:
+            alive = bool(jm.has_active_session())
+        except Exception:
+            alive = True
+        if not alive:
+            end_setup()
+            return None
+    return tool
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +597,10 @@ def gather_inputs(
     except Exception as exc:
         logger.debug("Could not update the spotlight PID: %s", exc)
     try:
+        alive = bool(jm.has_active_session()) if jm is not None else False
+    except Exception:
+        alive = False
+    try:
         paused = bool(jm.is_paused()) if jm is not None and spid else False
     except Exception:
         paused = False
@@ -525,8 +611,10 @@ def gather_inputs(
         session_pid=spid,
         session_package=_session_package(jm),
         session_paused=paused,
-        live_jobs=live_job_names(jm) if spid else (),
+        live_jobs=live_job_names(jm) if alive else (),
         has_session=_has_session_state(jm),
+        session_alive=alive,
+        setup_owner=setup_owner(jm) if spid else None,
         app_tools=app_tools(package),
         busy=_busy_reason(spotlight, package),
         fresh=fresh,
@@ -709,22 +797,49 @@ def drop_session(jm: Any) -> None:
             logger.warning("reset_session failed: %s", exc)
 
 
+def drop_idle_session(jm: Any, tool: str = "this tool") -> None:
+    """:func:`drop_session`, but only when no job runs on it.
+
+    Re-checked right before the reset: a dialog (Dexray's snapshot prompt)
+    may sit between the decision and this call.
+
+    Raises:
+        AppStartError: Live jobs appeared meanwhile.
+    """
+    try:
+        alive = bool(jm.has_active_session()) if jm is not None else False
+    except Exception:
+        alive = True
+    jobs = live_job_names(jm) if alive else ()
+    if jobs:
+        raise AppStartError(
+            f"Frida started {', '.join(jobs)} meanwhile; {tool} not started."
+        )
+    drop_session(jm)
+
+
 def stop_app_tools(package: str) -> list[str]:
     """Stop the TaskService tools on ``package`` (not the bypass/monitor).
 
     The bypass job is dropped by ``forget_process`` (keeps the armed set);
-    stopping its task would clear the armed set.
+    stopping its task would clear the armed set. A tool with a ``quiet_stop``
+    (Dexray) is stopped through it: no dialog (snapshot revert) may pop up
+    while a restart holds the lifecycle lock.
     """
     stopped = []
     try:
         from sandroid.services import get_task_service
 
         svc = get_task_service()
+        tasks = {getattr(t, "name", ""): t for t in svc.get_running_tasks()}
     except Exception:
         return stopped
     for name, display in _app_tasks(package):
         if name == "bypass":
             continue
+        quiet = getattr(getattr(tasks.get(name), "instance", None), "quiet_stop", None)
+        if callable(quiet):
+            tasks[name].stop_callback = quiet
         try:
             if svc.stop(name):
                 stopped.append(display)
@@ -790,7 +905,7 @@ def open_session(decision: StartDecision, handler: Any = None) -> Opened:
         if jm is None:
             raise AppStartError("Frida JobManager unavailable")
         if decision.reset_session:
-            drop_session(jm)
+            drop_idle_session(jm, decision.tool)
         from sandroid.core.frida_manager import install_stale_detach_guard
 
         install_stale_detach_guard(jm)
@@ -810,8 +925,10 @@ def open_session(decision: StartDecision, handler: Any = None) -> Opened:
                     f"{decision.tool} again to attach to it."
                 )
             if decision.reset_session:
-                drop_session(jm)
-            return _spawn_paused(pkg)
+                drop_idle_session(jm, decision.tool)
+            opened = _spawn_paused(pkg)
+            _begin_setup(decision.tool, pkg, opened.pid)
+            return opened
     if action == StartAction.RESPAWN:
         from sandroid.services import get_spotlight_service
 
@@ -819,7 +936,9 @@ def open_session(decision: StartDecision, handler: Any = None) -> Opened:
         with _lifecycle():
             try:
                 respawn_teardown(pkg)
-                return _spawn_paused(pkg)
+                opened = _spawn_paused(pkg)
+                _begin_setup(decision.tool, pkg, opened.pid)
+                return opened
             finally:
                 spotlight.end_restart()
     raise AppStartError(decision.reason or f"{decision.tool} not started")
@@ -872,8 +991,40 @@ def finish_owned_spawn(opened: Opened, tool: str = "the tool") -> str:
 
     jm = _job_manager()
     device = getattr(jm, "device", None) or opened.device
-    get_frida_session_service().resume_spawned_process(device, opened.pid)
+    try:
+        get_frida_session_service().resume_spawned_process(device, opened.pid)
+    finally:
+        end_setup()
     return apply_armed_after_launch(tool)
+
+
+def abort_owned_spawn(opened: Opened | None) -> None:
+    """A tool failed after spawning the app itself: leave nothing frozen.
+
+    Force-stops the spawn (first: unloads on a live process can hang), drops
+    the JobManager session and the bypass handles, clears the PID so the
+    header shows ○, and ends the setup marker. A process the tool did not
+    spawn is left alone.
+    """
+    if opened is None or not opened.owns_spawn:
+        return
+    try:
+        from sandroid.core.adb import Adb
+
+        if opened.package:
+            Adb.force_stop(opened.package)
+    except Exception as exc:
+        logger.warning("force_stop of the failed spawn failed: %s", exc)
+    try:
+        drop_session(_job_manager())
+    finally:
+        end_setup()
+    try:
+        from sandroid.services import get_spotlight_service
+
+        get_spotlight_service().announce_pid(None, opened.package or None)
+    except Exception as exc:
+        logger.debug("Could not clear the spotlight PID: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -916,7 +1067,10 @@ def start_app(paused: bool = False) -> tuple[bool, str]:
                 "it, ⇧A attaches"
             )
         if decision.reset_session:
-            drop_session(_job_manager())
+            try:
+                drop_idle_session(_job_manager(), "Start")
+            except AppStartError as exc:
+                return False, str(exc)
         bypass = _bypass()
         return bypass.apply_to_fresh_spawn_with_retry(
             pkg, bypass.armed_categories(), resume=not paused
@@ -949,8 +1103,8 @@ def restart_app(paused: bool = False) -> tuple[bool, str]:
             return False, _no_app("Restart").reason
         bypass = _bypass()
         armed = bypass.armed_categories()
-        respawn_teardown(pkg)
         try:
+            respawn_teardown(pkg)
             return bypass.apply_to_fresh_spawn_with_retry(pkg, armed, resume=not paused)
         finally:
             spotlight.end_restart()
@@ -968,6 +1122,9 @@ def resume_app() -> tuple[bool, str]:
     spotlight = get_spotlight_service()
     if not spotlight.is_app_paused():
         return False, "No paused app to resume"
+    owner = setup_owner()
+    if owner:
+        return False, f"{owner} is still loading its hooks — ␣ resumes after it"
     if not spotlight.resume_paused_app():
         return False, "Resume failed"
     bypass = _bypass()
@@ -1005,9 +1162,11 @@ __all__ = [
     "StartAction",
     "StartDecision",
     "StartInputs",
+    "abort_owned_spawn",
     "apply_armed_after_launch",
     "attach_app",
     "decide_start",
+    "end_setup",
     "finish_owned_spawn",
     "negotiate_start",
     "open_session",
@@ -1015,5 +1174,7 @@ __all__ = [
     "resolve_start",
     "restart_app",
     "resume_app",
+    "setup_owner",
     "start_app",
+    "stops_sentence",
 ]

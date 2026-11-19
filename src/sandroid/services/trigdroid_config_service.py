@@ -43,9 +43,9 @@ class TrigDroidConfigService:
         """Initialize the TrigDroidConfigService with default values."""
         self._spawn_mode: bool = True
         self._auto_resume: bool = True
-        #: Restart a running app for the trigger run (asks in the TUI; a
-        #: headless run takes this flag as the consent). Without it a
-        #: running app is attached to, whatever ``spawn_mode`` says.
+        #: The trigger run needs a fresh process: on a running app TrigDroid
+        #: then refuses (restart it with ⇧R first). Without it a running app
+        #: is attached to, whatever ``spawn_mode`` says.
         self.fresh: bool = False
         self._logger = logger
 

@@ -144,36 +144,40 @@ class Trigdroid(Functionality):
 
     @staticmethod
     def _resolve_spawn(package_name: str, spawn_mode: bool) -> bool | None:
-        """Spawn or attach, by the one start rule (never a silent restart).
+        """Spawn or attach, by the one start rule (never a restart).
 
         A running app is attached to; a stopped one is spawned (when
-        ``spawn_mode`` allows it). A restart of a running app needs the
-        config's ``fresh`` flag and, in the TUI, the user's OK; a headless
-        run takes ``fresh`` as the consent.
+        ``spawn_mode`` allows it). TrigDroid spawns through its own Frida
+        session, outside Sandroid's JobManager, so it cannot restart a
+        running app cleanly (stop the other tools, re-apply the armed
+        bypasses): with the config's ``fresh`` flag on a running app it
+        refuses and asks for a restart first.
 
         Returns:
             TrigDroid's ``spawn_mode`` for this run, or None to abort.
         """
-        from sandroid.core.ui_request_bus import UIRequestBus
         from sandroid.services import get_trigdroid_config_service
-        from sandroid.services.app_start import StartAction, negotiate_start
+        from sandroid.services.app_start import StartAction, resolve_start
 
         fresh = bool(getattr(get_trigdroid_config_service(), "fresh", False))
-        decision = negotiate_start(
-            "TrigDroid",
-            package=package_name,
-            fresh=fresh,
-            consent=fresh and not UIRequestBus.get().has_active_handler(),
-            java_agent=True,
-        )
+        decision = resolve_start(package_name, tool="TrigDroid", java_agent=True)
         action = decision.action
         if action == StartAction.REFUSE:
             logger.error(f"TrigDroid not started: {decision.reason}")
             return None
-        if action == StartAction.SPAWN and not spawn_mode:
-            logger.error(f"TrigDroid not started: {package_name} is not running")
+        if action == StartAction.SPAWN:
+            if not spawn_mode:
+                logger.error(f"TrigDroid not started: {package_name} is not running")
+                return None
+            return True
+        if fresh:
+            logger.error(
+                f"TrigDroid not started: {package_name} is running and TrigDroid "
+                "cannot restart it itself — restart the app with ⇧R (headless: "
+                "stop it first), then run TrigDroid."
+            )
             return None
-        return action in (StartAction.SPAWN, StartAction.RESPAWN)
+        return False
 
     def _run_real_analysis(
         self,

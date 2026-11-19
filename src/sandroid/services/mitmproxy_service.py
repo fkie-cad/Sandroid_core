@@ -1894,6 +1894,10 @@ class MitmproxyService:
     def ssl_unpin_is_active(self) -> bool:
         return self._bypass_service().is_active("ssl")
 
+    def ssl_unpin_is_on(self) -> bool:
+        """SSL unpin is active or armed (applied when the app starts)."""
+        return "ssl" in self._bypass_service().on_categories()
+
     def ssl_unpin_target(self) -> str | None:
         return self._bypass_service().target_app("ssl")
 
@@ -1966,9 +1970,16 @@ class MitmproxyService:
         self,
         on_message: Callable[[Any], None] | None = None,
     ) -> tuple[bool, str]:
-        """Toggle SSL unpin. Returns (now_active, message)."""
-        if self.ssl_unpin_is_active():
+        """Toggle SSL unpin. Returns (now_active, message).
+
+        Armed counts as on: a second Ctrl+P disarms an SSL unpin armed for a
+        stopped app.
+        """
+        if self.ssl_unpin_is_on():
+            active = self.ssl_unpin_is_active()
             self.stop_ssl_unpin()
+            if not active:
+                return False, "SSL pinning bypass disarmed"
             return False, "SSL pinning bypass stopped"
         return self.start_ssl_unpin(on_message=on_message)
 

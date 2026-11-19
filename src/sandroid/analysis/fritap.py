@@ -921,7 +921,7 @@ class FriTap(DataGatherBase):
             )
 
             # Validate job was actually started
-            if not self.job_id:
+            if not job or not self.job_id:
                 raise RuntimeError(
                     "job_manager.start_job() failed to return a valid job"
                 )
@@ -994,7 +994,28 @@ class FriTap(DataGatherBase):
             if network_started and network_instance:
                 logger.info("Cleaning up network capture due to FriTap startup failure")
                 self._stop_network_capture()
+            # Our own spawn must not stay frozen with the session held.
+            self._abort_owned_spawn()
             raise  # Re-raise so the caller knows it failed
+
+    def _abort_owned_spawn(self) -> None:
+        """A failed start after friTap spawned the app: kill that spawn.
+
+        Force-stops it, drops the JobManager session, clears the PID (the
+        header shows ○) and the "friTap is still loading" marker. A process
+        friTap joined or attached to is left alone.
+        """
+        opened = getattr(self, "_opened", None)
+        if opened is None or not opened.owns_spawn:
+            return
+        from sandroid.services.app_start import abort_owned_spawn
+
+        try:
+            abort_owned_spawn(opened)
+        except Exception as e:
+            logger.warning(f"Cleaning up friTap's own spawn failed: {e}")
+        forget_injected_pid(opened.pid)
+        self._opened = None
 
     def _resume_spawned_target(self, toolbox, job, load_timeout: float = 5.0):
         """Resume the target once friTap's agent is loaded -- if friTap owns it.

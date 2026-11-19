@@ -1573,7 +1573,7 @@ class SandroidTUI(App):
 
         svc = get_mitmproxy_service()
 
-        if not svc.ssl_unpin_is_active():
+        if not svc.ssl_unpin_is_on():
             try:
                 spotlight = get_spotlight_service()
                 if not spotlight.get_app_tuple():
@@ -1589,7 +1589,7 @@ class SandroidTUI(App):
                 return
 
         # Snapshot intent on the UI thread; the worker only does the toggle.
-        was_active = svc.ssl_unpin_is_active()
+        was_active = svc.ssl_unpin_is_on()  # armed counts: Ctrl+P disarms
 
         def _job() -> None:
             ok, msg = False, ""
@@ -1614,7 +1614,9 @@ class SandroidTUI(App):
             # now_active=False and must NOT render as an error.
             def _report() -> None:
                 if was_active:
-                    self.notify("SSL pinning bypass stopped", severity="information")
+                    self.notify(
+                        msg or "SSL pinning bypass stopped", severity="information"
+                    )
                 elif ok:
                     self.notify(msg, severity="information")
                 else:
