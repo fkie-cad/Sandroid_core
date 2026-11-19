@@ -73,6 +73,8 @@ class TailResult:
     lines: list
     last_seq: int
     gap: bool
+    #: File offsets parallel to ``lines`` (``None``: the core has none yet).
+    offsets: list | None = None
 
 
 # --------------------------------------------------------------------------
@@ -180,9 +182,11 @@ class FakeLabels:
         actor: str | None = None,
         source: str = "key",
     ) -> LabelEvent | None:
-        self.calls.append(("start", {"name": name, "level": level, "t": t}))
+        self.calls.append(
+            ("start", {"name": name, "level": level, "t": t, "actor": actor})
+        )
         when = _epoch(t)
-        actor = actor or "user"
+        actor = actor or "sandroid"  # the core's default outside acting_as
         parent: int | None = None
         depth = 0
         if level == "nest" and self._stack:
@@ -214,10 +218,10 @@ class FakeLabels:
         return event
 
     def stop(self, *, t: Any = None, actor: str | None = None) -> LabelEvent | None:
-        self.calls.append(("stop", {"t": t}))
+        self.calls.append(("stop", {"t": t, "actor": actor}))
         if not self._stack:
             return None
-        self._end(self._stack[-1], "stop", _epoch(t), actor or "user")
+        self._end(self._stack[-1], "stop", _epoch(t), actor or "sandroid")
         self.version += 1
         return self._history[-1]
 
@@ -229,7 +233,9 @@ class FakeLabels:
         actor: str | None = None,
         source: str = "key",
     ) -> LabelEvent:
-        self.calls.append(("point", {"name": name, "t": t, "source": source}))
+        self.calls.append(
+            ("point", {"name": name, "t": t, "source": source, "actor": actor})
+        )
         when = _epoch(t)
         self._number += 1
         inner = self._stack[-1] if self._stack else None
@@ -249,7 +255,7 @@ class FakeLabels:
             len(self._stack),
             None,
             None,
-            actor or "user",
+            actor or "sandroid",
         )
         self._history.append(event)
         self.version += 1
@@ -300,17 +306,28 @@ class FakeTimeline:
         self.locked_by: str | None = None
         self.dropped: dict[str, int] = {}
         self.reveals: list[int] = []
+        self.reveal_devs: list[str | None] = []
         self.gap_once = False
         self.tail_calls = 0
         self.active_serial: str | None = SERIAL
         self.labels = FakeLabels(self)
+        #: Append every emitted line to ``folder/timeline.jsonl`` (the writer).
+        self.write_through = False
+        #: ``tail()`` returns the ring's file offsets (``TailResult.offsets``).
+        self.ring_offsets = False
+        self.offsets: dict[int, int] = {}
 
     def emit(self, src: str, kind: str, *, summary: str = "", **kw: Any) -> int:
         seq = self.next_seq
         self.next_seq += 1
         t = _epoch(kw.pop("t", None))
         extra = {k: v for k, v in kw.items() if v is not None}
-        self.lines.append(make_line(seq, t, src, kind, summary, **extra))
+        line = make_line(seq, t, src, kind, summary, **extra)
+        self.lines.append(line)
+        if self.write_through and self.folder is not None:
+            path = Path(self.folder) / FILE_NAME
+            self.offsets[seq] = path.stat().st_size if path.exists() else 0
+            write_lines(path, [line])
         return seq
 
     def tail(
@@ -320,7 +337,11 @@ class FakeTimeline:
         lines = [dict(line) for line in self.lines if line["seq"] > after_seq]
         gap, self.gap_once = self.gap_once, False
         last = self.lines[-1]["seq"] if self.lines else after_seq
-        return TailResult(lines[:limit], last, gap)
+        lines = lines[:limit]
+        offsets = None
+        if self.ring_offsets:
+            offsets = [self.offsets.get(line["seq"]) for line in lines]
+        return TailResult(lines, last, gap, offsets)
 
     def status(self, dev: str | None = None) -> SinkStatus:
         return SinkStatus(
@@ -337,6 +358,7 @@ class FakeTimeline:
 
     def note_reveal(self, seq: int, *, dev: str | None = None) -> int:
         self.reveals.append(seq)
+        self.reveal_devs.append(dev)
         return self.emit("sandroid", "reveal", summary=f"revealed #{seq}")
 
     def reset_for_tests(self) -> None:

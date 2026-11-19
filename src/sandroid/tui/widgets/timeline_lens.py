@@ -719,6 +719,7 @@ class TimelineLens(Vertical):
             self._poll_timer.resume()
 
     def _apply_rows(self, rows: list[Row], first: int) -> None:
+        self._revealed = None
         self._rows = rows
         self._by_seq = {r.seq: r for r in rows}
         self._last_seq = max(self._by_seq, default=0)
@@ -736,6 +737,7 @@ class TimelineLens(Vertical):
 
     def on_timeline_bound(self) -> None:
         """The active sink changed (``op:"bound"``): read the new file."""
+        self._drop_reveal()
         self._loaded = False
         self._lines.clear()
         self._detail.clear()
@@ -832,7 +834,13 @@ class TimelineLens(Vertical):
             self._reload_gap()
             return
         pending = {r.seq for r in self._pending}
-        for line in result.lines:
+        # The ring's file offsets (``TailResult.offsets``, parallel to
+        # ``lines``) when the core provides them: a live row then reads its
+        # line back like a loaded one once it left the line cache.
+        offsets = getattr(result, "offsets", None)
+        if not isinstance(offsets, (list, tuple)) or len(offsets) != len(result.lines):
+            offsets = None
+        for i, line in enumerate(result.lines):
             try:
                 seq = int(line.get("seq") or 0)
             except (TypeError, ValueError):
@@ -840,7 +848,10 @@ class TimelineLens(Vertical):
             if seq <= 0 or seq in self._by_seq or seq in pending:
                 continue
             self._lines[seq] = line
-            self._pending.append(row_from_line(line))
+            off = offsets[i] if offsets is not None else None
+            self._pending.append(
+                row_from_line(line, off if isinstance(off, int) and off >= 0 else None)
+            )
             pending.add(seq)
             self._last_seq = max(self._last_seq, seq)
         while len(self._lines) > _LINE_CACHE:
@@ -917,13 +928,15 @@ class TimelineLens(Vertical):
             self._strips.clear()
         else:
             for r in new:
-                pos = bisect.bisect_right(self._rows, r.key, key=lambda x: x.key)
-                self._rows.insert(pos, r)
-            self._rebuild_view(keep=False)
+                self._insert_one(r)
+            self._strips.clear()
+            self._view_seq_cache = None
             if top_row is not None and not self._follow:
                 before = self._view_index(top_row.seq)
                 late = sum(
-                    1 for r in new if r.key < top_row.key and r.seq in self._view_seqs()
+                    1
+                    for r in new
+                    if r.key < top_row.key and self._view_index(r.seq) is not None
                 )
                 if late:
                     self._late_above += late
@@ -937,6 +950,30 @@ class TimelineLens(Vertical):
             self._cursor = max(0, len(self._view) - 1)
             self._new_below = 0
         self._sync_view(scroll_to_cursor=self._follow, end=self._follow)
+
+    def _insert_one(self, row: Row) -> None:
+        """Bisect-insert one late row and patch the view in place.
+
+        A full rebuild re-evaluated every row (140 ms at 200k rows) for one
+        late line; only the new row and its successor (whose epoch separator
+        depends on its predecessor) can change visibility.
+        """
+        pos = bisect.bisect_right(self._rows, row.key, key=lambda x: x.key)
+        self._rows.insert(pos, row)
+        view = self._view
+        k = bisect.bisect_left(view, pos)
+        if k < len(view):
+            view[k:] = [i + 1 for i in view[k:]]
+        for i in (pos, pos + 1):
+            if i >= len(self._rows):
+                continue
+            j = bisect.bisect_left(view, i)
+            present = j < len(view) and view[j] == i
+            visible = self._visible(i)
+            if visible and not present:
+                view.insert(j, i)
+            elif present and not visible:
+                del view[j]
 
     def _enforce_cap(self) -> None:
         extra = len(self._rows) - ROW_CAP
@@ -1014,6 +1051,10 @@ class TimelineLens(Vertical):
             if not all(w in summary for w in q.words):
                 return False
         for key, values in q.neg.items():
+            if sep and key not in ("src", "run"):
+                # separators survive negative terms too; only an explicit
+                # -src: (or a text word) hides them (DESIGN_FINAL §11)
+                continue
             if _field(row, key) in values:
                 return False
         run = self._review_run
@@ -1204,6 +1245,10 @@ class TimelineLens(Vertical):
     # -- view sync, cursor -------------------------------------------------------------
 
     def _sync_view(self, scroll_to_cursor: bool = False, end: bool = False) -> None:
+        if self._revealed is not None:
+            row = self.cursor_row
+            if row is None or row.seq != self._revealed:
+                self._drop_reveal()  # the selection moved (follow, filter, load)
         if not self.is_mounted:
             return
         try:
@@ -1267,7 +1312,7 @@ class TimelineLens(Vertical):
         if self._revealed is not None:
             row = self.cursor_row
             if row is None or row.seq != self._revealed:
-                self._revealed = None
+                self._drop_reveal()
         self._strips.clear()
         self._sync_view(scroll_to_cursor=True)
         self._follow_inspector()
@@ -1431,6 +1476,8 @@ class TimelineLens(Vertical):
     # -- filter ------------------------------------------------------------------------
 
     def set_filter(self, text: str) -> None:
+        if text != self._query.text:
+            self._drop_reveal()
         self._query = parse_query(text)
         self._rebuild_view()
         if self._follow:
@@ -1541,19 +1588,34 @@ class TimelineLens(Vertical):
         )
 
     def reveal(self, seq: int) -> None:
-        """Unmask ``seq`` until the selection changes; recorded on the timeline."""
+        """Unmask ``seq`` until the selection changes; recorded on the timeline.
+
+        The reveal ends on any selection change (cursor, follow, filter,
+        reload, a new sink), not only on a cursor key.
+        """
         self._revealed = seq
+        row = self._by_seq.get(seq)
         svc = timeline_service()
         if svc is not None:
+            dev = row.dev if row is not None else None
+            if not dev:
+                try:
+                    dev = svc.status().serial
+                except Exception:
+                    dev = None
             try:
-                svc.note_reveal(seq)
+                svc.note_reveal(seq, dev=dev)
+            except TypeError:  # an older core without ``dev``
+                try:
+                    svc.note_reveal(seq)
+                except Exception:
+                    logger.debug("note_reveal failed", exc_info=True)
             except Exception:
                 logger.debug("note_reveal failed", exc_info=True)
         self._detail.pop(seq, None)
         self._strips.clear()
         self.view.refresh()
         ms = self._main_screen()
-        row = self._by_seq.get(seq)
         if ms is not None and row is not None:
             ms.open_inspector(self._content(row))
             self._load_detail(row)
@@ -1561,6 +1623,21 @@ class TimelineLens(Vertical):
     @property
     def revealed(self) -> int | None:
         return self._revealed
+
+    def _drop_reveal(self) -> None:
+        """End a reveal; an Inspector showing that line is masked again."""
+        seq = self._revealed
+        if seq is None:
+            return
+        self._revealed = None
+        self._strips.clear()
+        ms = self._main_screen()
+        if ms is None or not getattr(ms, "inspector_is_open", False):
+            return
+        row = self._by_seq.get(seq)
+        key = getattr(ms.inspector_content, "key", None)
+        if row is not None and key == self._inspector_key(row):
+            ms.update_inspector(self._content(row))
 
     def action_jump(self) -> None:
         """``J``: the selected line's source in its own lens."""
@@ -1649,17 +1726,29 @@ class TimelineLens(Vertical):
             mod is not None and folder
         ) else None  # fmt: skip
 
+        by_seq = self._by_seq
+
         def job() -> None:
             detail: dict[str, Any] = {"line": cached, "prev": cached_prev}
             try:
-                if (
-                    detail["line"] is None
-                    and path is not None
-                    and row.offset is not None
-                ):
-                    detail["line"] = mod.read_line_at(
-                        path, row.offset, reader="ui", mask_sensitive=False
-                    )
+                if detail["line"] is None and path is not None:
+                    if row.offset is not None:
+                        detail["line"] = mod.read_line_at(
+                            path, row.offset, reader="ui", mask_sensitive=False
+                        )
+                    else:
+                        # A live row without a file offset that left the line
+                        # cache: find it by seq (never "loading…" forever).
+                        found = _find_by_seq(mod, path, row.seq, by_seq)
+                        if found is not None:
+                            detail["offset"], detail["line"], prev_line = found
+                            if detail["prev"] is None and prev_line is not None:
+                                detail["prev"] = prev_line
+                if detail["line"] is None:
+                    detail["error"] = (
+                        "No timeline file." if path is None
+                        else f"Line #{row.seq} is not readable from the file."
+                    )  # fmt: skip
                 if (
                     detail["prev"] is None
                     and prev is not None
@@ -1679,6 +1768,10 @@ class TimelineLens(Vertical):
 
     def _detail_done(self, seq: int, detail: dict) -> None:
         self._detail[seq] = detail
+        offset = detail.get("offset")
+        row = self._by_seq.get(seq)
+        if isinstance(offset, int) and row is not None and row.offset is None:
+            self._set_row_offset(row, offset)
         while len(self._detail) > 64:
             self._detail.pop(next(iter(self._detail)))
         ms = self._main_screen()
@@ -1688,6 +1781,14 @@ class TimelineLens(Vertical):
         row = self._by_seq.get(seq)
         if row is not None and key == self._inspector_key(row):
             ms.update_inspector(self._content(row))
+
+    def _set_row_offset(self, row: Row, offset: int) -> None:
+        """Remember a live row's file offset once it was found by seq."""
+        pos = bisect.bisect_left(self._rows, row.key, key=lambda x: x.key)
+        if pos < len(self._rows) and self._rows[pos].seq == row.seq:
+            fixed = row._replace(offset=offset)
+            self._rows[pos] = fixed
+            self._by_seq[row.seq] = fixed
 
     def _prev_row(self, row: Row) -> Row | None:
         return self._by_seq.get(row.seq - 1)
@@ -1710,11 +1811,11 @@ class TimelineLens(Vertical):
                 f"{_clock(row.t)} · world {row.world} · epoch {row.epoch} · {row.phase}"
             )
         tabs: list[tuple[str, list]] = [
-            ("Line", self._line_tab(row, shown)),
+            ("Line", self._line_tab(row, shown, detail)),
             ("JSON", self._json_tab(shown, masked, detail)),
         ]
         if row.ref or (line or {}).get("ref"):
-            tabs.append(("Ref", self._ref_tab(row, detail)))
+            tabs.append(("Ref", self._ref_tab(row, detail, masked)))
         tabs.append(("Chain", self._chain_tab(row, line, detail)))
         hints = []
         if "j" in row.flags:
@@ -1729,7 +1830,9 @@ class TimelineLens(Vertical):
             key=self._inspector_key(row),
         )
 
-    def _line_tab(self, row: Row, line: dict | None) -> list:
+    def _line_tab(
+        self, row: Row, line: dict | None, detail: dict | None = None
+    ) -> list:
         grid = Table.grid(padding=(0, 2))
         grid.add_column(style="#8f9bb3")
         grid.add_column()
@@ -1754,7 +1857,8 @@ class TimelineLens(Vertical):
                 kv.add_row(str(key), Text(shown[:400]))
             sections.append(("Data", kv))
         elif line is None:
-            sections.append(("Data", Text("loading…", style="#5b6479")))
+            text = (detail.get("error") or "not readable") if detail else "loading…"
+            sections.append(("Data", Text(text, style="#5b6479")))
         follow = [r for r in self._rows if r.ref_of == row.seq][:20]
         if follow:
             sections.append(
@@ -1800,8 +1904,11 @@ class TimelineLens(Vertical):
             )
         return sections
 
-    def _ref_tab(self, row: Row, detail: dict) -> list:
-        ref = row.ref or {}
+    def _ref_tab(self, row: Row, detail: dict, masked: bool = False) -> list:
+        ref = row.ref or (detail.get("line") or {}).get("ref") or {}
+        if masked:
+            # the masked form, exactly as the JSON tab shows it (ref.raw ...)
+            ref = mask_line({"sensitive": True, "ref": dict(ref)}).get("ref") or {}
         sections: list = []
         grid = Table.grid(padding=(0, 2))
         grid.add_column(style="#8f9bb3")
@@ -1868,6 +1975,39 @@ def _flow_record(row: Row) -> dict:
         "ts_end": end,
         "tls_reason": data.get("reason"),
     }
+
+
+def _find_by_seq(
+    mod: Any, path: Path, seq: int, by_seq: dict[int, Row]
+) -> tuple[int, dict, dict | None] | None:
+    """``(offset, line, previous line)`` of line ``seq``, read from the file.
+
+    Starts at the nearest earlier row with a known offset (the file is in seq
+    order), else at 0; ``None`` when the file has no such line.
+    """
+    start = 0
+    for back in range(1, 200_001):
+        known = by_seq.get(seq - back)
+        if known is not None and known.offset is not None:
+            start = known.offset
+            break
+        if seq - back <= 0:
+            break
+    for begin in (start, 0) if start else (0,):
+        prev: dict | None = None
+        for off, line in mod.read_lines(
+            path, start=begin, reader="ui", mask_sensitive=False
+        ):
+            try:
+                got = int(line.get("seq") or 0)
+            except (TypeError, ValueError):
+                continue
+            if got == seq:
+                return off, line, prev
+            if got > seq:
+                break
+            prev = line if got == seq - 1 else None
+    return None
 
 
 def _ref_facts(line: dict, folder: str | None) -> list[tuple[str, str]]:

@@ -1212,20 +1212,43 @@ class MainScreen(Screen):
         labels = getattr(svc, "labels", None) if svc is not None else None
         return labels if hasattr(labels, "boundaries") else None
 
+    def _labels_cache_key(self, labels) -> tuple | None:
+        """``(sink, labels.version)``: the version alone collides across sinks
+        (each device's sink counts from 0), so the label sink (its folder,
+        else its session id; else the one of the last ``bound`` doorbell) is
+        part of the key.
+        """
+        version = getattr(labels, "version", None)
+        if version is None:
+            return None
+        sink = None
+        svc = timeline_service()
+        if svc is not None:
+            try:
+                status = svc.status()
+                sink = getattr(status, "folder", None) or getattr(
+                    status, "session_id", None
+                )
+            except Exception:
+                sink = None
+        if not sink:
+            sink = getattr(self, "_labels_sink", None)
+        return (str(sink) if sink else None, version)
+
     @property
     def marks(self) -> SessionMarks:
         """The session's marks (see ``lens_shell.SessionMarks``)."""
         marks = getattr(self, "_marks", None)
         if marks is None:
             marks = self._marks = SessionMarks()
-            self._labels_version = None
+            self._labels_key = None
         labels = self.labels_api()
         if labels is not None:
-            version = getattr(labels, "version", None)
-            if version is None or version != getattr(self, "_labels_version", None):
+            key = self._labels_cache_key(labels)
+            if key is None or key != getattr(self, "_labels_key", None):
                 try:
                     marks.rebuild(labels.boundaries())
-                    self._labels_version = version
+                    self._labels_key = key
                 except Exception:
                     logger.debug("marks: boundaries() failed", exc_info=True)
         return marks
@@ -1246,9 +1269,13 @@ class MainScreen(Screen):
         *,
         level: str = "top",
         source: str = "key",
+        actor: str | None = None,
     ) -> Mark | None:
         """Start a label (``kind="start"``, ``level`` top/sub/nest) or drop a
         point (``kind="point"``) at ``when`` (datetime / epoch / None = now).
+
+        ``actor``: ``"user"`` for the label keys (None = the timeline's
+        current actor, ``sandroid`` outside ``acting_as``).
 
         Returns the event as a :class:`Mark` (None if nothing was written).
         """
@@ -1271,19 +1298,23 @@ class MainScreen(Screen):
             return mark
         try:
             if kind == "point":
-                event = labels.point(name, t=t, source=source)
+                event = labels.point(name, t=t, actor=actor, source=source)
             else:
-                event = labels.start(name, level=level, t=t, source=source)
+                event = labels.start(name, level=level, t=t, actor=actor, source=source)
         except Exception:
             logger.warning("Label not written", exc_info=True)
+            self._post_marks(None)  # settle a pending pre-split (Files)
             return None
         if event is None:
             self._post_marks(None)
             return None
         return self._labels_changed(event)
 
-    def stop_label(self, when=None):
-        """``-``: end the innermost open label (None when nothing is open)."""
+    def stop_label(self, when=None, *, actor: str | None = None):
+        """``-``: end the innermost open label (None when nothing is open).
+
+        ``actor``: ``"user"`` for the ``-`` key (see :meth:`add_label`).
+        """
         import time as _time
         from datetime import datetime
 
@@ -1293,7 +1324,9 @@ class MainScreen(Screen):
         if isinstance(when, datetime):
             when = when.timestamp()
         try:
-            event = labels.stop(t=_time.time() if when is None else float(when))
+            event = labels.stop(
+                t=_time.time() if when is None else float(when), actor=actor
+            )
         except Exception:
             logger.warning("Label stop not written", exc_info=True)
             return None
@@ -1301,13 +1334,24 @@ class MainScreen(Screen):
             self._labels_changed(event)
         return event
 
-    def post_marks_pending(self, when) -> None:
-        """A label name prompt is open (``when``) or closed (``None``)."""
+    def post_marks_pending(self, when, *, ends_open: bool = False) -> None:
+        """A label name prompt is open (``when``) or closed (``None``).
+
+        ``ends_open``: the pending label is a top-level start while a label
+        is open, so it will add two boundaries at ``when`` (the open label's
+        end, then the new start). The message's ``pending_times`` then holds
+        both, so the Files pre-split matches the final segments (activity
+        typed during the prompt lands in the new label, not in the
+        zero-length "after label N" segment between them).
+        """
         marks = self.marks.marks
+        times = [] if when is None else [when, when] if ends_open else [when]
         for spec in LENSES:
             widget = self.lens_widget(spec.id)
             if widget is not None:
-                widget.post_message(MarksChanged(marks, None, pending=when))
+                message = MarksChanged(marks, None, pending=when)
+                message.pending_times = list(times)
+                widget.post_message(message)
 
     def _timeline_unavailable(self) -> None:
         try:
@@ -1365,8 +1409,10 @@ class MainScreen(Screen):
         op = data.get("op")
         if op == "lines" and "label" in (data.get("srcs") or ()):
             labels = self.labels_api()
-            version = getattr(labels, "version", None) if labels else None
-            if labels is None or version == getattr(self, "_labels_version", None):
+            if labels is None:
+                return
+            key = self._labels_cache_key(labels)
+            if key is not None and key == getattr(self, "_labels_key", None):
                 return
             old = getattr(self, "_marks", None)
             before = len(old) if old is not None else 0
@@ -1375,7 +1421,12 @@ class MainScreen(Screen):
             self._post_marks(added)
             self._refresh_label_note()
         elif op == "bound":
-            self._labels_version = None
+            # A (re)activated sink, possibly one already open: always rebuild
+            # (marks, the Files segments and the Watchlist's acquisition mark
+            # follow the active device's labels).
+            sink = data.get("folder") or data.get("session_id")
+            self._labels_sink = str(sink) if sink else None
+            self._labels_key = None
             self._post_marks(None)
             lens = self.lens_widget("timeline")
             if lens is not None and hasattr(lens, "on_timeline_bound"):

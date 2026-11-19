@@ -30,6 +30,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import hashlib
+import io
 import json
 import logging
 import os
@@ -78,6 +79,11 @@ RESTART_BACKOFF_S = (1.0, 2.0, 4.0, 8.0, 10.0)
 #: ``down``: no more restarts until the next :meth:`UiHelper.start`.
 MAX_DEATHS = 5
 DEATH_WINDOW_S = 60.0
+#: This many restart attempts in a row that never connected -> ``down``, however
+#: long each one took (a restart that hangs until its connect timeout is slower
+#: than :data:`DEATH_WINDOW_S` / :data:`MAX_DEATHS`, so the window alone would
+#: retry forever).
+MAX_FAILED_RESTARTS = 5
 
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _STDERR_TAIL = 50
@@ -225,6 +231,25 @@ def _setting(value: str | None) -> str | None:
     return None if v in ("", "null") else v
 
 
+def _join(t: threading.Thread | None, timeout: float) -> None:
+    """Join ``t`` unless it is missing, not started yet, or the caller itself."""
+    if t is None or t is threading.current_thread() or t.ident is None:
+        return
+    t.join(timeout)
+
+
+def _buffered(stream: Any) -> Any:
+    """A buffered view of a pipe end opened with ``bufsize=0``.
+
+    ``readline`` on a raw ``FileIO`` reads one byte per syscall (a 5 MB ``dump``
+    line took seconds); :class:`io.BufferedReader` reads in chunks and still
+    returns each line as soon as its newline arrived.
+    """
+    if isinstance(stream, io.RawIOBase):
+        return io.BufferedReader(stream, buffer_size=1 << 16)
+    return stream
+
+
 # ---------------------------------------------------------------------- helper
 
 
@@ -239,9 +264,10 @@ class _Waiter:
 class _Gen:
     """One spawned helper process and its per-process state."""
 
-    def __init__(self, n: int, proc: Any) -> None:
+    def __init__(self, n: int, proc: Any, epoch: int = 0) -> None:
         self.n = n
         self.proc = proc
+        self.epoch = epoch  # the lifecycle epoch that spawned it (see UiHelper)
         self.hello: dict | None = None
         self.state = threading.Event()  # set on connected / busy / exit
         self.outcome: str | None = None  # "connected" | "busy" | "exit"
@@ -293,16 +319,28 @@ class UiHelper:
         self._sleep = sleep
         self._clock = clock
 
-        #: ``settings get secure`` values before a FULL start (None = unset).
+        #: ``settings get secure`` values before a FULL start (None = unset). A
+        #: key whose read failed is missing: the prior state is unknown, and an
+        #: unknown state is never "restored".
         self.a11y_before: dict[str, str | None] = {}
         #: Why the last :meth:`start` returned False (``jar``, ``busy``,
-        #: ``timeout``, ``exit`` or ``spawn: ...``).
+        #: ``timeout``, ``exit``, ``cancelled`` or ``spawn: ...``).
         self.last_error: str | None = None
         self.stderr_tail: collections.deque[str] = collections.deque(
             maxlen=_STDERR_TAIL
         )
 
         self._lock = threading.Lock()
+        # Lifecycle: ``_state`` is idle | starting | running | down | stopping.
+        # Every start()/stop() bumps ``_epoch`` under ``_lock``; a spawner (start
+        # or the supervisor) registers its process only while its epoch is
+        # current, so a stale spawner can never leave a helper behind, and
+        # ``_cancel_evt`` (one per epoch) wakes a stale back-off at once.
+        self._state = "idle"
+        self._epoch = 0
+        self._cancel_evt = threading.Event()
+        self._start_lock = threading.Lock()  # one start() at a time
+        self._start_done: threading.Event | None = None
         self._write_lock = threading.Lock()
         self._log_lock = threading.Lock()
         self._waiters: dict[str, _Waiter] = {}
@@ -311,11 +349,10 @@ class UiHelper:
         self._shot_dir_ready = False
         self._gen: _Gen | None = None
         self._gen_n = 0
-        self._started = False
         self._stopping = False
-        self._stop_evt = threading.Event()
         self._deaths: collections.deque[float] = collections.deque()
         self._consecutive = 0  # deaths since the helper last stayed up
+        self._failed_restarts = 0  # restart attempts in a row that never connected
         self._log: IO[str] | None = None
         self._supervisor: threading.Thread | None = None
 
@@ -337,7 +374,8 @@ class UiHelper:
             g is not None
             and g.outcome == "connected"
             and g.proc.poll() is None
-            and not self._stopping
+            and self._state == "running"
+            and g.epoch == self._epoch
         )
 
     # -- lifecycle ------------------------------------------------------------
@@ -345,59 +383,132 @@ class UiHelper:
     def start(self, timeout: float = 20.0) -> bool:
         """Push the jar if needed, record the a11y state, spawn and connect.
 
+        A :meth:`stop` meanwhile cancels the start (the in-flight process is
+        killed, False is returned). A start during the supervisor's back-off
+        takes over: the supervisor's pending restart is cancelled, so only one
+        spawner ever runs.
+
         Returns:
             True once the helper said ``hello`` and ``status connected``. False
             when the jar could not be installed, another UiAutomation client
-            holds the device (``on_status("busy")``), or nothing connected
-            within ``timeout`` (see :attr:`last_error`).
+            holds the device (``on_status("busy")``), nothing connected within
+            ``timeout``, or :meth:`stop` cancelled it (see :attr:`last_error`).
         """
-        if self.alive:
-            return True
-        self._stopping = False
-        self._stop_evt.clear()
-        self._deaths.clear()
-        self._consecutive = 0
-        self.last_error = None
-        if not ensure_jar(self.serial):
-            self.last_error = "jar"
-            return False
-        if self._mode is Mode.FULL:
-            self.a11y_before = self._read_a11y()
-        self._open_log()
-        self._started = True
-        outcome = self._spawn(timeout)
-        if outcome == "connected":
-            self._status("connected", self._info())
-            return True
-        if outcome == "busy":
-            self._status("busy", self._info())
-        self._started = False
+        with self._start_lock:
+            return self._start(timeout)
+
+    def _start(self, timeout: float) -> bool:
+        with self._lock:
+            if self.alive:
+                return True
+            token = self._bump()
+            self._state = "starting"
+            self._stopping = False
+            self._start_done = done = threading.Event()
+            self._deaths.clear()
+            self._consecutive = 0
+            self._failed_restarts = 0
+            self.last_error = None
+            stale = self._gen
+        try:
+            if stale is not None and stale.proc.poll() is None:
+                self._terminate(stale, 2.0)  # a supervisor restart we took over
+            if not ensure_jar(self.serial):
+                return self._start_failed(token, "jar", None)
+            if self._cancelled(token):
+                return self._start_failed(token, "cancelled", None)
+            if self._mode is Mode.FULL:
+                self.a11y_before = self._read_a11y()
+            self._open_log()
+            if self._cancelled(token):
+                return self._start_failed(token, "cancelled", None)
+            outcome = self._spawn(timeout, token)
+            with self._lock:
+                ok = outcome == "connected" and token == self._epoch
+                if ok:
+                    self._state = "running"
+            if ok:
+                done.set()  # before the callback: it may call stop()
+                self._status("connected", self._info())
+                return True
+            if outcome == "cancelled" or self._cancelled(token):
+                return self._start_failed(token, "cancelled", None)
+            # _spawn set last_error (busy, timeout, exit, spawn: ...)
+            return self._start_failed(
+                token, None, "busy" if outcome == "busy" else None
+            )
+        finally:
+            done.set()
+
+    def _start_failed(self, token: int, error: str | None, status: str | None) -> bool:
+        """Clean up a start that did not connect; a cancelled one is stop()'s.
+
+        The helper may already have flipped ``accessibility_enabled`` before it
+        failed, so a FULL start that read the prior state puts it back here.
+        """
+        if error is not None:
+            self.last_error = error
+        with self._lock:
+            mine = token == self._epoch
+        if not mine:
+            self.last_error = "cancelled"
+            return False  # stop() (or a newer start) owns the cleanup
+        g = self._gen
+        if g is not None and g.epoch == token and g.proc.poll() is None:
+            self._terminate(g, 2.0)
+        restored = self._restore_a11y()
         self._close_log()
+        with self._lock:
+            if token == self._epoch:
+                self._state = "idle"
+        if self._start_done is not None:
+            self._start_done.set()  # before the callback: it may call stop()
+        if status is not None:
+            self._status(status, {**self._info(), "a11y_restored": restored})
         return False
 
     def stop(self, timeout: float = 5.0) -> None:
         """Close stdin (the helper disconnects and exits), then clean up.
 
         Kills the helper by pid (from ``hello``) if it does not exit within
-        ``timeout``. In FULL mode, resets ``accessibility_enabled`` to 0 when it
-        was 0/unset before :meth:`start` and is 1 now.
+        ``timeout``. Also cancels a :meth:`start` in progress and the
+        supervisor (its in-flight restart is killed first). In FULL mode, then
+        resets ``accessibility_enabled`` to 0 when it was 0/unset (read
+        successfully) before :meth:`start` and is 1 now.
         """
-        if not self._started:
-            return
-        self._stopping = True
-        self._stop_evt.set()
-        g = self._gen
+        with self._lock:
+            if self._state in ("idle", "stopping"):
+                return
+            self._bump()
+            self._state = "stopping"
+            self._stopping = True
+            done = self._start_done
+            g = self._gen
         if g is not None:
             self._terminate(g, timeout)
-            if g.reader is not None and g.reader is not threading.current_thread():
-                g.reader.join(2.0)  # the last lines (bye) reach the raw log
-        sup = self._supervisor
-        if sup is not None and sup is not threading.current_thread():
-            sup.join(timeout)
+            _join(g.reader, 2.0)  # the last lines (bye) reach the raw log
+        if done is not None and not done.is_set():
+            done.wait(timeout + 5.0)  # a start() in flight: it backs out
+        _join(self._supervisor, timeout)
+        g2 = self._gen
+        if g2 is not None and g2 is not g and g2.proc.poll() is None:
+            self._terminate(g2, 2.0)  # spawned while we were stopping
         restored = self._restore_a11y()
-        self._started = False
+        with self._lock:
+            self._state = "idle"
         self._close_log()
         self._status("stopped", {**self._info(), "a11y_restored": restored})
+
+    def _bump(self) -> int:
+        """New lifecycle epoch (caller holds ``_lock``): cancels the old one."""
+        self._epoch += 1
+        self._cancel_evt.set()
+        self._cancel_evt = threading.Event()
+        return self._epoch
+
+    def _cancelled(self, token: int) -> bool:
+        with self._lock:
+            return token != self._epoch
 
     # -- queries --------------------------------------------------------------
 
@@ -538,8 +649,12 @@ class UiHelper:
             return list(self._adb_argv)
         return Adb.base_argv(self.serial)
 
-    def _spawn(self, timeout: float) -> str:
-        """Start one helper process and wait for connected/busy/exit."""
+    def _spawn(self, timeout: float, token: int) -> str:
+        """Start one helper process and wait for connected/busy/exit.
+
+        ``token`` is the caller's lifecycle epoch: once it is stale (stop() or
+        a newer start()), the process is killed and ``cancelled`` returned.
+        """
         argv = [*self._argv_prefix(), "shell", helper_command(self._mode)]
         try:
             proc = self._popen(
@@ -555,9 +670,14 @@ class UiHelper:
             return "exit"
         with self._lock:
             self._gen_n += 1
-            g = _Gen(self._gen_n, proc)
-            self._gen = g
-            self._shot_dir_ready = False
+            g = _Gen(self._gen_n, proc, token)
+            current = token == self._epoch
+            if current:
+                self._gen = g
+                self._shot_dir_ready = False
+        if not current:
+            self._terminate(g, 2.0)  # cancelled while adb shell came up
+            return "cancelled"
         g.reader = threading.Thread(
             target=self._read, args=(g,), name="uihelper-reader", daemon=True
         )
@@ -566,10 +686,16 @@ class UiHelper:
             target=self._read_err, args=(g,), name="uihelper-stderr", daemon=True
         ).start()
         if not g.state.wait(timeout):
+            if self._cancelled(token):
+                self._terminate(g, 2.0)
+                return "cancelled"
             self.last_error = "timeout"
             logger.warning(f"UI helper on {self.serial}: no connection in {timeout}s")
             self._terminate(g, 2.0)
             return "timeout"
+        if self._cancelled(token):
+            self._terminate(g, 2.0)
+            return "cancelled"
         if g.outcome != "connected":
             self.last_error = g.outcome
             if g.outcome == "busy":
@@ -607,7 +733,7 @@ class UiHelper:
             return False
 
     def _read(self, g: _Gen) -> None:
-        stream = g.proc.stdout
+        stream = _buffered(g.proc.stdout)
         try:
             for raw_b in iter(stream.readline, b""):
                 host_recv = time.time()
@@ -623,6 +749,7 @@ class UiHelper:
         stream = g.proc.stderr
         if stream is None:
             return
+        stream = _buffered(stream)
         try:
             for raw_b in iter(stream.readline, b""):
                 line = raw_b.decode("utf-8", "replace").rstrip()
@@ -686,91 +813,152 @@ class UiHelper:
                 waiters = []
         for w in waiters:
             w.event.set()  # reply stays None: the caller gets None at once
-        if not current or self._stopping or not self._started:
-            return
         if g.outcome != "connected":
             return  # a spawn that never connected: _spawn's caller handles it
-        if (
-            g.connected_at is not None
-            and self._clock() - g.connected_at >= DEATH_WINDOW_S
-        ):
-            self._consecutive = 0  # it had been stable: start the back-off over
+        with self._lock:
+            if not current or g.epoch != self._epoch or self._state != "running":
+                return
+            token = g.epoch
+            evt = self._cancel_evt
+            if (
+                g.connected_at is not None
+                and self._clock() - g.connected_at >= DEATH_WINDOW_S
+            ):
+                self._consecutive = 0  # it had been stable: start the back-off over
         rc = g.proc.poll()
         self._status("lost", {**self._info(), "rc": rc})
-        sup = threading.Thread(
-            target=self._supervise, name="uihelper-supervisor", daemon=True
-        )
-        self._supervisor = sup
-        sup.start()
+        with self._lock:
+            # Started under the lock: stop() always sees (and joins) a started
+            # supervisor, or bumps the epoch first so none starts.
+            if token != self._epoch or self._state != "running":
+                return
+            sup = threading.Thread(
+                target=self._supervise,
+                args=(token, evt),
+                name="uihelper-supervisor",
+                daemon=True,
+            )
+            self._supervisor = sup
+            sup.start()
 
     # -- internals: supervision -----------------------------------------------
 
-    def _death(self) -> bool:
-        """Record a death; True when the helper is now ``down``."""
-        now = self._clock()
-        self._consecutive += 1
-        self._deaths.append(now)
-        while self._deaths and now - self._deaths[0] > DEATH_WINDOW_S:
-            self._deaths.popleft()
-        return len(self._deaths) >= MAX_DEATHS
+    def _death(self, token: int, *, failed_restart: bool = False) -> bool | None:
+        """Record a death; True when the helper is now ``down``.
 
-    def _wait(self, seconds: float) -> bool:
-        """Back-off wait; True when :meth:`stop` was called meanwhile."""
+        None when ``token`` is stale (a stop()/start() took over: count nothing).
+        """
+        now = self._clock()
+        with self._lock:
+            if token != self._epoch:
+                return None
+            self._consecutive += 1
+            if failed_restart:
+                self._failed_restarts += 1
+            self._deaths.append(now)
+            while self._deaths and now - self._deaths[0] > DEATH_WINDOW_S:
+                self._deaths.popleft()
+            return (
+                len(self._deaths) >= MAX_DEATHS
+                or self._failed_restarts >= MAX_FAILED_RESTARTS
+            )
+
+    def _wait(self, seconds: float, evt: threading.Event) -> bool:
+        """Back-off wait; True when this epoch was cancelled meanwhile."""
         if self._sleep is not None:
             self._sleep(seconds)
-            return self._stopping
-        return self._stop_evt.wait(seconds)
+            return evt.is_set()
+        return evt.wait(seconds)
 
-    def _supervise(self) -> None:
-        if self._death():
-            self._go_down()
+    def _supervise(self, token: int, evt: threading.Event) -> None:
+        down = self._death(token)
+        if down is None:
+            return
+        if down:
+            self._go_down(token)
             return
         attempt = 0
-        while not self._stopping:
+        while not evt.is_set():
             idx = min(self._consecutive, len(RESTART_BACKOFF_S)) - 1
-            if self._wait(RESTART_BACKOFF_S[max(idx, 0)]):
+            if self._wait(RESTART_BACKOFF_S[max(idx, 0)], evt):
                 return
             attempt += 1
             # The device may have been reverted (snapshot load): re-check the jar.
-            outcome = self._spawn(20.0) if ensure_jar(self.serial) else "jar"
-            if self._stopping:
-                g = self._gen
-                if g is not None and g.proc.poll() is None:
-                    self._terminate(g, 2.0)  # stop() raced with this restart
+            if not ensure_jar(self.serial):
+                outcome = "jar"
+            elif evt.is_set():
                 return
+            else:
+                outcome = self._spawn(20.0, token)
+            if outcome == "cancelled" or evt.is_set():
+                return  # stop()/start() took over; _spawn killed what it made
             if outcome == "connected":
+                with self._lock:
+                    if token != self._epoch:
+                        return
+                    self._failed_restarts = 0
                 self._status("restarted", {**self._info(), "attempt": attempt})
                 return
-            if self._death():
-                self._go_down()
+            down = self._death(token, failed_restart=True)
+            if down is None:
+                return
+            if down:
+                self._go_down(token)
                 return
 
-    def _go_down(self) -> None:
-        g = self._gen
+    def _go_down(self, token: int) -> None:
+        with self._lock:
+            if token != self._epoch:
+                return
+            self._state = "down"
+            g = self._gen
         if g is not None and g.proc.poll() is None:
             self._terminate(g, 2.0)
         restored = self._restore_a11y()
         self._status(
             "down",
-            {**self._info(), "deaths": len(self._deaths), "a11y_restored": restored},
+            {
+                **self._info(),
+                "deaths": len(self._deaths),
+                "failed_restarts": self._failed_restarts,
+                "a11y_restored": restored,
+            },
         )
 
     # -- internals: a11y state ------------------------------------------------
 
     def _read_a11y(self) -> dict[str, str | None]:
+        """``settings get secure`` per key; a failed read leaves the key out.
+
+        ``settings get`` prints ``null`` for an unset key, so empty output means
+        the read itself failed (adb error, timeout): the prior state is unknown,
+        which must not be mistaken for "unset".
+        """
         out: dict[str, str | None] = {}
         for key in ("accessibility_enabled", "enabled_accessibility_services"):
-            v, _ = Adb.send_adb_command(
+            v, err = Adb.send_adb_command(
                 f"shell settings get secure {key}", serial=self.serial
             )
+            if not (v or "").strip():
+                logger.warning(
+                    f"UI helper: cannot read {key} on {self.serial} "
+                    f"({(err or 'no output').strip()}); prior state unknown"
+                )
+                continue
             out[key] = _setting(v)
         return out
 
     def _restore_a11y(self) -> bool:
-        """FULL only: undo accessibility_enabled 0/unset -> 1. True if reset."""
-        if self._mode is not Mode.FULL or not self.a11y_before:
+        """FULL only: undo accessibility_enabled 0/unset -> 1. True if reset.
+
+        Only when the prior value was actually read: an unknown prior state is
+        left alone (it may have been a real a11y service such as TalkBack).
+        """
+        if self._mode is not Mode.FULL:
             return False
-        if self.a11y_before.get("accessibility_enabled") not in (None, "0"):
+        if "accessibility_enabled" not in self.a11y_before:
+            return False
+        if self.a11y_before["accessibility_enabled"] not in (None, "0"):
             return False
         now, _ = Adb.send_adb_command(
             "shell settings get secure accessibility_enabled", serial=self.serial
