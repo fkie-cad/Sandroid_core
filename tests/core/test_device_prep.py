@@ -838,3 +838,160 @@ def test_restart_records_the_cold_boot_itself_while_the_step_is_off(rig, monkeyp
     monkeypatch.setattr(emulator_mod, "wait_until_ready", lambda *a, **kw: True)
     assert service.restart(boot_timeout=1) is True
     assert worlds == ["cold-boot"]
+
+
+# ------------------------------------------------------- step 5: Frida / app
+
+
+def test_frida_auto_start_waits_for_the_step(rig, monkeypatch):
+    from sandroid.core import frida_manager
+
+    seen: list = []
+    monkeypatch.setattr(
+        frida_manager,
+        "_auto_start_locked",
+        lambda fm, force: seen.append(device_prep.is_preparing(SERIAL)) or (True, "ok"),
+    )
+    rig.fake.settle_gate.clear()
+    device_prep.request_prepare(SERIAL, "attach")
+    thread = threading.Thread(
+        target=lambda: frida_manager.auto_start_frida_server(fm=object())
+    )
+    thread.start()
+    time.sleep(0.1)
+    assert seen == []  # still waiting for the step
+    rig.fake.settle_gate.set()
+    thread.join(5)
+    assert seen == [False]
+
+
+def test_app_start_open_session_waits_for_the_step(rig, monkeypatch):
+    from sandroid.services import app_start
+
+    gated: list = []
+    monkeypatch.setattr(device_prep, "gate", lambda what, **kw: gated.append(what))
+    monkeypatch.setattr(app_start, "_job_manager", lambda: None)
+    decision = SimpleNamespace(
+        action=app_start.StartAction.ATTACH,
+        package="com.example",
+        tool="Hooks",
+        pid=42,
+        paused=False,
+        reset_session=False,
+    )
+    with pytest.raises(app_start.AppStartError):
+        app_start.open_session(decision)
+    assert gated == ["Hooks start"]
+    join = SimpleNamespace(**{**vars(decision), "action": app_start.StartAction.JOIN})
+    app_start.open_session(join)
+    assert gated == ["Hooks start"]  # joining touches nothing
+
+
+def _app_callbacks(rig, monkeypatch):
+    """The app's device callbacks, registered against fakes."""
+    from sandroid import services
+    from sandroid.tui import app as app_mod
+    from sandroid.tui.controllers import recording_controller
+
+    calls: list = []
+    started = threading.Event()
+    stored: dict = {}
+    device_service = SimpleNamespace(
+        register_device_change_callback=lambda cb: stored.setdefault("change", cb),
+        has_device_manager=lambda: True,
+        get_device_manager=lambda: rig.manager,
+    )
+    frida_service = SimpleNamespace(
+        invalidate_frida_device_cache=lambda: None,
+        update_device_serial=lambda serial: calls.append("serial"),
+    )
+    monkeypatch.setattr(services, "get_device_service", lambda: device_service)
+    monkeypatch.setattr(services, "get_frida_session_service", lambda: frida_service)
+    monkeypatch.setattr(
+        recording_controller,
+        "drop_stale_frida_device",
+        lambda: calls.append("drop") or False,
+    )
+    fake_app = SimpleNamespace(
+        _auto_start_frida_server=started.set,
+        _warm_kprobe_cache_on_device_change=lambda: calls.append("kprobe"),
+        _report_device_prepared=lambda result: calls.append(("report", result.kind)),
+        _run_on_ui=lambda fn, *a, **k: None,
+        _update_status_bar=None,
+        _close_reconnect_devices_screen=None,
+    )
+    app_mod.SandroidTUI._register_frida_device_change_callback(fake_app)
+    return stored["change"], calls, started
+
+
+def test_app_frida_work_runs_after_the_device_is_prepared(rig, monkeypatch):
+    on_change, calls, started = _app_callbacks(rig, monkeypatch)
+    on_change(rig.device)  # set_active_device's change: not yet prepared
+    assert calls == ["serial"]
+    assert not started.wait(0.1)
+    _run()  # the step finishes -> on_device_prepared
+    assert started.wait(5)
+    assert calls[1:] == [("report", "first"), "drop", "kprobe"]
+
+
+def test_app_frida_work_runs_on_change_while_the_step_is_off(rig, monkeypatch):
+    on_change, calls, started = _app_callbacks(rig, monkeypatch)
+    device_prep.set_enabled(False)
+    on_change(rig.device)
+    assert calls == ["serial", "drop", "kprobe"]
+    assert started.wait(5)
+
+
+def test_mitm_panel_re_probes_after_the_device_is_prepared(rig):
+    from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
+
+    posted: list = []
+    panel = SimpleNamespace(
+        _unmounted=False,
+        _prepared_cb_registered=True,
+        _ui=SimpleNamespace(post=lambda fn, device: posted.append(device)),
+        _handle_device_change=None,
+    )
+    MitmproxyPanel._on_device_change(panel, rig.device)
+    assert posted == []  # waits for on_device_prepared
+    MitmproxyPanel._on_device_change(panel, rig.device, True)
+    MitmproxyPanel._on_device_change(panel, None)  # a disconnect at once
+    assert posted == [rig.device, None]
+    device_prep.set_enabled(False)
+    MitmproxyPanel._on_device_change(panel, rig.device)
+    assert posted == [rig.device, None, rig.device]
+
+
+def test_status_bar_shows_the_running_stage(rig):
+    from sandroid.tui.widgets.status_bar import StatusBar
+
+    bar = StatusBar()
+    rig.fake.settle_gate.clear()
+    device_prep.request_prepare(SERIAL, "attach")
+    deadline = time.monotonic() + 5
+    while bar.device_prep_stage != "waiting for the device":
+        assert time.monotonic() < deadline
+        bar._read_device_prep_stage()
+        time.sleep(0.01)
+    rig.fake.settle_gate.set()
+    assert device_prep.wait_prepared(SERIAL, 5)
+    bar._read_device_prep_stage()
+    assert bar.device_prep_stage == ""
+
+
+def test_a_ready_emulator_with_the_active_serial_is_prepared_again(rig, monkeypatch):
+    from sandroid.tui.controllers.device_controller import DeviceController
+
+    requests: list = []
+    monkeypatch.setattr(
+        device_prep,
+        "request_prepare",
+        lambda serial, reason, manager=None: requests.append((serial, reason)),
+    )
+    controller = DeviceController.__new__(DeviceController)
+    controller._get_device_manager = lambda: rig.manager
+    controller._ui = lambda fn, *a: None
+    controller._log_info = None
+    controller._refresh_ui = None
+    controller._attach_if_idle(SERIAL, "Pixel")
+    assert requests == [(SERIAL, "ready")]

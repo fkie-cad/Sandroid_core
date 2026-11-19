@@ -1539,6 +1539,19 @@ def _spawn_paused(package: str, tool: str = "") -> Opened:
     return Opened(pid, True, True, getattr(jm, "device", None), package, tool)
 
 
+def _wait_device_prepared(tool: str) -> None:
+    """Backstop: attach / spawn waits for a running device-prepared step
+    (a just-rebooted device gets root, SELinux and the proxy CA first).
+    Worker thread only; goes on after a timeout. Never raises.
+    """
+    try:
+        from sandroid.core import device_prep
+
+        device_prep.gate(f"{tool} start")
+    except Exception:
+        logger.debug("device-prepared gate failed", exc_info=True)
+
+
 def open_session(decision: StartDecision, handler: Any = None) -> Opened:
     """Give the caller a JobManager session as ``decision`` says (worker only).
 
@@ -1554,6 +1567,8 @@ def open_session(decision: StartDecision, handler: Any = None) -> Opened:
             app that started meanwhile, a failed or declined pre-start step,
             a failed spawn.
     """
+    if decision.action != StartAction.JOIN:
+        _wait_device_prepared(decision.tool)
     jm = _job_manager()
     pkg = decision.package
     action = decision.action

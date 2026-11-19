@@ -411,6 +411,9 @@ class DeviceController:
                 if self.switch_device(serial, cleanup=False):
                     return
             elif active.serial == serial:
+                from sandroid.core import device_prep
+
+                device_prep.request_prepare(serial, "ready", manager=dm)
                 self._ui(self._log_info, f"AVD '{avd_name}' ({serial}) is ready")
                 self._ui(self._refresh_ui)
                 return

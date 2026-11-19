@@ -242,15 +242,34 @@ class MitmproxyPanel(Widget):
         try:
             from sandroid.services import get_device_service
 
-            get_device_service().register_device_change_callback(self._on_device_change)
+            service = get_device_service()
+            service.register_device_change_callback(self._on_device_change)
             self._device_cb_registered = True
+            # A (re)connected device is re-probed once it is prepared (root,
+            # SELinux, the proxy restore hooks), not while that still runs.
+            if service.has_device_manager():
+                register = getattr(
+                    service.get_device_manager(), "on_device_prepared", None
+                )
+                if callable(register):
+                    register(
+                        lambda device, _result: self._on_device_change(device, True)
+                    )
+                    self._prepared_cb_registered = True
         except Exception as exc:
             logger.debug("mitm panel device-change subscription failed: %s", exc)
 
-    def _on_device_change(self, device) -> None:
-        """Device-poll thread → UI thread (non-blocking, like _on_service_line)."""
+    def _on_device_change(self, device, prepared: bool = False) -> None:
+        """Device-poll / prepare thread → UI thread (non-blocking)."""
         if self._unmounted:
             return
+        if device is not None and not prepared:
+            from sandroid.core import device_prep
+
+            if getattr(self, "_prepared_cb_registered", False) and (
+                device_prep.is_enabled()
+            ):
+                return  # re-probed from on_device_prepared
         self._ui.post(self._handle_device_change, device)
 
     def _handle_device_change(self, device) -> None:
