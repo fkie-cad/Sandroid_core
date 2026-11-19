@@ -1242,6 +1242,8 @@ class DiffsView(FilesSubViewBase):
         if record is None:
             sections.append(("", Text("loading…", style=_DIM)))
             return sections
+        if getattr(record, "mode", ""):
+            return [*sections, *self._rewind_sections(record)]
         rows = run_history.file_diff_rows(record)
         for kind, title in (
             ("changed", "Changed"),
@@ -1270,6 +1272,50 @@ class DiffsView(FilesSubViewBase):
             sections.append((f"Hosts ({len(hosts)})", body))
         sections.append(("", Text("z full diff · v review in Files", style=_DIM)))
         return sections
+
+    def _rewind_sections(self, record: Any) -> list[tuple[str, Any]]:
+        """A Rewind run: per selected file its result, the replayed steps,
+        the compared requests and the requests per run (plain words).
+        """
+        from sandroid.core import rewind
+
+        info = getattr(record, "rewind", None) or {}
+        out: list[tuple[str, Any]] = []
+        verdicts = getattr(record, "verdicts", None) or {}
+        if verdicts:
+            body = Text()
+            for path, verdict in verdicts.items():
+                if body:
+                    body.append("\n")
+                body.append(self._short_path(path, 44))
+                color = {rewind.SAME: _GOOD, rewind.DIFFERENT: "#facc15"}.get(
+                    verdict, _MUTED
+                )
+                body.append(f"  {verdict}", style=color)
+            out.append(("What your action changed", body))
+        steps = info.get("steps") or []
+        if steps:
+            body = Text()
+            for st in steps:
+                if body:
+                    body.append("\n")
+                way = st.get("way") or ""
+                if way == "failed":
+                    way = f"failed: {st.get('reason')}"
+                body.append(f"{st.get('i')}. {st.get('what')}  ")
+                body.append(way, style=_BAD if way.startswith("failed") else _MUTED)
+            out.append(("Replayed steps", body))
+        flows = info.get("flows") or []
+        if flows:
+            lines = [ln for f in flows for ln in f]
+            out.append(("Compared requests", Text("\n".join(lines))))
+        for title, reqs in (info.get("requests") or {}).items():
+            body = Text("\n".join(reqs[:_LIST_LIMIT]) or "none")
+            if len(reqs) > _LIST_LIMIT:
+                body.append(f"\n… {len(reqs) - _LIST_LIMIT} more", style=_DIM)
+            out.append((f"Requests · {title} ({len(reqs)})", body))
+        out.append(("", Text("z full results · v review in Files", style=_DIM)))
+        return out
 
     @staticmethod
     def _short_path(path: str, limit: int = 52) -> str:

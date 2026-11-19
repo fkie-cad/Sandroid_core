@@ -1954,6 +1954,12 @@ class TrackingService:
             return None
         return helper
 
+    def live_helper(self) -> Any:
+        """The running UI helper (``dump``/``node_at``), or None (Rewind's
+        replay looks recorded elements up with it).
+        """
+        return self._helper_up()
+
     def _at_down(self, g: Gesture) -> Future | None:
         """Start the node lookup and the before-tap capture (returned)."""
         helper = self._helper_up()

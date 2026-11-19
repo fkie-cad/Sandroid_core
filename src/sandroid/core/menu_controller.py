@@ -118,22 +118,22 @@ class MenuController:
             ActionCategory.RECORDING,
             ["forensic", "malware"],
             description=(
-                "Record device input (any lens). Esc/Enter in the recording "
-                "window stops & saves, then it replays automatically"
+                "Save a start point and record what you do on the device (any "
+                "lens); r again stops and opens Review"
             ),
             inline_text="[r]ecord an action",
         )
         self._register(
             "play",
-            "Play loaded action",
+            "Review the recording",
             "p",
             ActionCategory.RECORDING,
             ["forensic", "malware"],
             description=(
-                "Replay the current recording N times and diff the results "
-                "(opens the Sessions lens; Shift+P there = PDF report)"
+                "Review what the recording changed; select files, then Rewind "
+                "or Rewind + Replay"
             ),
-            inline_text="[p]lay the currently loaded action",
+            inline_text="[p] review the recording",
         )
         self._register(
             "export",

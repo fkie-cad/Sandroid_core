@@ -8,7 +8,9 @@ import math
 import re
 import threading
 import time
+from dataclasses import dataclass
 from logging import getLogger
+from typing import Any
 
 from sandroid.core.adb import Adb
 from sandroid.core.toolbox import Toolbox
@@ -255,3 +257,545 @@ class Player(Functionality):
         action_duration = math.ceil(time.time() - start_time)
         Toolbox.set_action_duration(action_duration)
         logger.debug(f"Set action duration to {action_duration} seconds")
+
+
+# ---------------------------------------------------------------------------
+# Rewind + Replay: replaying recorded steps by element, else by position
+# ---------------------------------------------------------------------------
+#
+# The steps are Tracking's ``input/*`` timeline lines of one recording
+# (``core/rewind.py``). Every tap or long press that has a recorded element
+# (``data.target``) is looked up again in a live helper ``dump`` and tapped at
+# the element's current centre ("by element"); when no single element
+# matches within the wait, the recorded coordinates are tapped instead ("by
+# position"). Injection uses ``adb shell input``: getevent does not see it, so
+# Tracking never records a replayed step as a new user input; each step
+# writes its own ``run/step`` timeline line saying which way it went.
+
+#: Seconds to wait for a recorded element before tapping its position.
+ELEMENT_WAIT_S = 10.0
+#: Poll interval of the element wait (s); bounds must match in two polls.
+ELEMENT_POLL_S = 0.3
+#: Longest recorded pause that is waited before a step (s).
+MAX_GAP_S = 10.0
+#: Waits after the last step before After (replay) is pulled (s).
+SETTLE_AFTER_S = 3.0
+
+WAY_ELEMENT = "by element"
+WAY_POSITION = "by position"
+WAY_TYPED = "typed"
+WAY_FAILED = "failed"
+
+_STEP_KINDS = ("tap", "long_press", "swipe", "key", "gesture")
+#: Linux key names (Tracking's ``KEY_NAMES``) -> ``input keyevent`` names.
+_KEYEVENT = {"MUTE": "VOLUME_MUTE", "ESCAPE": "ESCAPE"}
+
+
+class StepStoppedError(Exception):
+    """The replay cannot go on; ``str(exc)`` is the plain reason."""
+
+
+def _norm(value: object) -> str:
+    return " ".join(str(value).split()) if value is not None else ""
+
+
+def _short_cls(cls: object) -> str:
+    return str(cls or "").rsplit(".", 1)[-1]
+
+
+def _bounds(value: object) -> tuple[int, int, int, int] | None:
+    if isinstance(value, (list, tuple)) and len(value) == 4:
+        try:
+            left, top, right, bottom = (int(v) for v in value)
+        except (TypeError, ValueError):
+            return None
+        if right > left and bottom > top:
+            return left, top, right, bottom
+    return None
+
+
+def centre(bounds: tuple[int, int, int, int]) -> tuple[int, int]:
+    """The centre of ``[left, top, right, bottom]``."""
+    left, top, right, bottom = bounds
+    return (left + right) // 2, (top + bottom) // 2
+
+
+def _node_path(chain: list[dict]) -> list[str]:
+    out = []
+    for node in chain:
+        part = _short_cls(node.get("cls")) or "?"
+        rid = node.get("rid")
+        if rid:
+            part += "#" + str(rid).split("/", 1)[-1]
+        out.append(part)
+    return out
+
+
+def walk_dump(reply: dict | None) -> list[dict[str, Any]]:
+    """Every node of a helper ``dump`` reply, flattened, top window first.
+
+    Each item: ``node``, ``pkg`` (inherited down the tree), ``window``
+    (the window dict without its tree), ``path`` (``cls#rid`` from the
+    window root, as Tracking records it) and ``texts`` (the node's own and
+    its descendants' text/desc, for a recorded ``label``).
+    """
+    out: list[dict[str, Any]] = []
+    for window in (reply or {}).get("windows") or []:
+        if not isinstance(window, dict) or not isinstance(window.get("root"), dict):
+            continue
+        meta = {k: v for k, v in window.items() if k != "root"}
+
+        def visit(
+            node: dict, pkg: str | None, chain: list[dict], meta: dict = meta
+        ) -> list[str]:
+            pkg = node.get("pkg") or pkg
+            chain = [*chain, node]
+            texts = [_norm(node.get(k)) for k in ("text", "desc") if _norm(node.get(k))]
+            item = {
+                "node": node,
+                "pkg": pkg,
+                "window": meta,
+                "path": None,
+                "anc": {id(n) for n in chain[:-1]},
+            }
+            out.append(item)
+            for kid in node.get("kids") or []:
+                if isinstance(kid, dict):
+                    texts.extend(visit(kid, pkg, chain, meta))
+            item["path"] = _node_path(chain)
+            item["texts"] = texts
+            return texts
+
+        visit(window["root"], meta.get("pkg"), [])
+    return out
+
+
+def _identifying(target: dict) -> bool:
+    """The recorded target names an element (not just a class)."""
+    web = target.get("web") if isinstance(target.get("web"), dict) else {}
+    keys = ("rid", "text", "desc", "label", "hint")
+    return any(_norm(target.get(k)) for k in keys) or any(
+        _norm(web.get(k)) for k in ("html_id", "field", "href", "raw_role")
+    )
+
+
+def _label_ok(label: str, texts: list[str]) -> bool:
+    parts = [p.strip() for p in label.split(" / ") if p.strip()]
+    have = set(texts)
+    return bool(parts) and all(p in have for p in parts)
+
+
+def node_matches(target: dict, item: dict[str, Any]) -> bool:
+    """Every identifying field the target recorded equals the node's.
+
+    Native fields: ``rid``, ``text`` (never recorded for editable or
+    password fields), ``desc``, ``hint``, ``label`` (the text inside a row)
+    and ``cls``. Web fields (feature/tracking-web's ``target.web``):
+    ``html_id`` (the node's ``rid``), ``field`` (``web.label``), ``href`` and
+    ``raw_role`` (``web.role``). A field the target lacks is not compared.
+    """
+    node = item["node"]
+    if node.get("visible") is False:
+        return False
+    for key in ("rid", "text", "desc", "hint"):
+        want = _norm(target.get(key))
+        if want and _norm(node.get(key)) != want:
+            return False
+    label = _norm(target.get("label"))
+    if label and not _label_ok(label, item.get("texts") or []):
+        return False
+    cls = target.get("cls")
+    if cls and node.get("cls") and _short_cls(cls) != _short_cls(node.get("cls")):
+        return False
+    web = target.get("web")
+    if isinstance(web, dict):
+        nweb = node.get("web") if isinstance(node.get("web"), dict) else {}
+        if _norm(web.get("html_id")) and _norm(node.get("rid")) != _norm(
+            web.get("html_id")
+        ):
+            return False
+        for tkey, nkey in (("field", "label"), ("href", "href"), ("raw_role", "role")):
+            want = _norm(web.get(tkey))
+            if want and nweb and _norm(nweb.get(nkey)) != want:
+                return False
+    return _bounds(node.get("bounds")) is not None
+
+
+def find_element(
+    target: dict, reply: dict | None, pkg: str | None = None
+) -> tuple[dict[str, Any] | None, str]:
+    """The one node of ``reply`` that is the recorded ``target``.
+
+    Returns ``(item, "")`` or ``(None, reason)`` with a plain reason:
+    ``nothing to match`` (the target names no element), ``not found``, or
+    ``N elements match``. Several matches are narrowed by the recorded app,
+    the recorded ancestry (``path``) and the recorded bounds, in that order;
+    anything still ambiguous is not guessed.
+    """
+    if not target or not _identifying(target):
+        return None, "nothing to match"
+    found = [it for it in walk_dump(reply) if node_matches(target, it)]
+    if not found:
+        return None, "not found"
+    # A container matches what its children match (their text is its
+    # label): keep the innermost matches, not their ancestors.
+    inner = set().union(*(it["anc"] for it in found))
+    found = [it for it in found if id(it["node"]) not in inner] or found
+    if len(found) > 1 and pkg:
+        same = [it for it in found if it.get("pkg") == pkg]
+        found = same or found
+    path = target.get("path")
+    if len(found) > 1 and isinstance(path, list) and path:
+        same = [it for it in found if it.get("path") == path]
+        found = same or found
+    recorded = _bounds(target.get("bounds"))
+    if len(found) > 1 and recorded is not None:
+        same = [it for it in found if _bounds(it["node"].get("bounds")) == recorded]
+        found = same or found
+    if len(found) > 1:
+        return None, f"{len(found)} elements match"
+    return found[0], ""
+
+
+@dataclass
+class Step:
+    """One recorded step to replay."""
+
+    i: int
+    seq: int
+    kind: str
+    t: float | None
+    data: dict[str, Any]
+    summary: str = ""
+    pkg: str | None = None
+    raw: str | None = None
+
+    @property
+    def target(self) -> dict | None:
+        t = self.data.get("target")
+        return t if isinstance(t, dict) else None
+
+    @property
+    def what(self) -> str:
+        """The step in plain words (its timeline summary)."""
+        return self.summary or self.kind.replace("_", " ")
+
+
+def extract_steps(lines: list[dict]) -> list[Step]:
+    """The user's ``input/*`` lines of a recording as replayable steps.
+
+    Taps, long presses, swipes, keys and multi-finger gestures are steps;
+    keyboard taps (``data.ime``) replay the typed text by position. An
+    ``input/text`` line becomes a ``text`` step only when no keyboard tap
+    came before it (text typed another way, e.g. a host keyboard).
+    ``input/confirm`` lines are not steps; one that names the target of a
+    tap whose position was unknown fills in that tap's target.
+    """
+    confirm: dict[int, dict] = {}
+    for line in lines:
+        if line.get("src") == "input" and line.get("kind") == "confirm":
+            data = line.get("data") or {}
+            of = (line.get("ref") or {}).get("of")
+            if isinstance(of, int) and data.get("target_of_input"):
+                confirm[of] = data.get("node") or {}
+    steps: list[Step] = []
+    ime_since_text = False
+    for line in sorted(lines, key=lambda ln: ln.get("seq") or 0):
+        if line.get("src") != "input" or line.get("actor") not in (None, "user"):
+            continue
+        kind = line.get("kind")
+        data = dict(line.get("data") or {})
+        seq = line.get("seq")
+        if not isinstance(seq, int):
+            continue
+        if kind == "text":
+            if not ime_since_text:
+                steps.append(
+                    Step(len(steps) + 1, seq, "text", line.get("t"), data,
+                         line.get("summary") or "", line.get("pkg"))
+                )  # fmt: skip
+            ime_since_text = False
+            continue
+        if kind not in _STEP_KINDS:
+            continue
+        if data.get("ime"):
+            ime_since_text = True
+        if data.get("target") is None and seq in confirm:
+            data["target"] = confirm[seq]
+        raw = (line.get("ref") or {}).get("raw")
+        steps.append(
+            Step(len(steps) + 1, seq, kind, line.get("t"), data,
+                 line.get("summary") or "", line.get("pkg"), raw)
+        )  # fmt: skip
+    return steps
+
+
+def input_text_arg(text: str) -> str | None:
+    """``text`` for ``input text`` (spaces as ``%s``), None if not ASCII."""
+    if not text or any(ord(c) < 32 or ord(c) > 126 for c in text):
+        return None
+    import shlex
+
+    return shlex.quote(text.replace("%", "\\%").replace(" ", "%s"))
+
+
+def _raw_range(raw: str | None) -> tuple[str, int, int] | None:
+    m = re.match(r"^(?P<file>.+)#L(?P<a>\d+)-L(?P<b>\d+)$", raw or "")
+    if not m:
+        return None
+    return m["file"], int(m["a"]), int(m["b"])
+
+
+class StepReplayer:
+    """Replays :class:`Step` s on the device (call :meth:`run` on a worker).
+
+    Args:
+        shell: Runs one device shell command line, returns stdout; raises
+            when the device is gone.
+        helper: The live UI helper (``dump``), or None when there is none.
+        cancelled: True once the user asked to stop.
+        progress: Shows one plain progress line.
+        emit: Writes a timeline line (``TimelineService.emit``-like).
+        raw_lines: ``(file, first, last) -> getevent lines`` of a gesture.
+    """
+
+    def __init__(
+        self,
+        *,
+        shell: Any,
+        helper: Any,
+        cancelled: Any = lambda: False,
+        progress: Any = lambda _t: None,
+        emit: Any = None,
+        raw_lines: Any = None,
+        sleep: Any = None,
+        monotonic: Any = None,
+        element_wait_s: float = ELEMENT_WAIT_S,
+    ) -> None:
+        self.shell = shell
+        self.helper = helper
+        self.cancelled = cancelled
+        self.progress = progress
+        self.emit = emit
+        self.raw_lines = raw_lines
+        self._sleep = sleep or time.sleep
+        self._mono = monotonic or time.monotonic
+        self.element_wait_s = element_wait_s
+
+    # -- helpers ------------------------------------------------------------
+
+    def _wait(self, seconds: float) -> None:
+        end = self._mono() + max(0.0, seconds)
+        while True:
+            if self.cancelled():
+                raise StepStoppedError("you pressed Esc")
+            left = end - self._mono()
+            if left <= 0:
+                return
+            self._sleep(min(left, 0.2))
+
+    def _run(self, command: str) -> str:
+        try:
+            out = self.shell(command)
+        except Exception as exc:
+            raise StepStoppedError(f"the device did not answer ({exc})") from exc
+        return out if isinstance(out, str) else str(out or "")
+
+    def _dump(self) -> dict | None:
+        helper = self.helper() if callable(self.helper) else self.helper
+        if helper is None:
+            return None
+        try:
+            return helper.dump(timeout=5.0)
+        except Exception:
+            logger.debug("replay: dump failed", exc_info=True)
+            return None
+
+    def locate(self, step: Step) -> tuple[tuple[int, int] | None, str]:
+        """Wait for the step's element; ``(centre, "")`` or ``(None, why)``.
+
+        The element must be the only match and have the same bounds in two
+        polls :data:`ELEMENT_POLL_S` apart (the screen stopped moving).
+        """
+        target = step.target or {}
+        if not _identifying(target):
+            return None, "nothing to match"
+        deadline = self._mono() + self.element_wait_s
+        last_bounds = None
+        why = "the UI helper is not running"
+        while True:
+            if self.cancelled():
+                raise StepStoppedError("you pressed Esc")
+            reply = self._dump()
+            if reply is not None:
+                item, why = find_element(target, reply, step.pkg)
+                if item is not None:
+                    b = _bounds(item["node"].get("bounds"))
+                    if b is not None and b == last_bounds:
+                        return centre(b), ""
+                    last_bounds = b
+                    why = "the element kept moving"
+                else:
+                    last_bounds = None
+            elif not callable(self.helper) and self.helper is None:
+                return None, why
+            if self._mono() >= deadline:
+                return None, why
+            self._sleep(ELEMENT_POLL_S)
+
+    @staticmethod
+    def _xy(step: Step) -> tuple[int, int] | None:
+        x, y = step.data.get("x"), step.data.get("y")
+        if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+            if step.data.get("xy_uncertain"):
+                return None
+            return int(x), int(y)
+        return None
+
+    # -- one step -------------------------------------------------------------
+
+    def do_step(self, step: Step) -> dict[str, Any]:
+        """Replay one step; returns ``{way, reason, x, y}``.
+
+        Raises:
+            StepStoppedError: the step could not be done at all (it is reported
+                as ``failed: <reason>`` and the replay stops there).
+        """
+        kind, data = step.kind, step.data
+        if kind in ("tap", "long_press"):
+            xy, way, reason = None, WAY_ELEMENT, ""
+            if data.get("ime"):
+                reason = "keyboard key"
+            else:
+                xy, reason = self.locate(step)
+            if xy is None:
+                way = WAY_POSITION
+                xy = self._xy(step)
+                if xy is None:
+                    raise StepStoppedError(
+                        f"{reason}, and the recorded position is unknown"
+                        if reason and reason != "nothing to match"
+                        else "the recorded position is unknown"
+                    )
+            x, y = xy
+            if kind == "tap":
+                self._run(f"input tap {x} {y}")
+            else:
+                dur = max(600, int(data.get("dur_ms") or 600))
+                self._run(f"input swipe {x} {y} {x} {y} {dur}")
+            return {"way": way, "reason": reason, "x": x, "y": y}
+        if kind == "swipe":
+            start, x1, y1 = self._xy(step), data.get("x1"), data.get("y1")
+            if start is None or not isinstance(x1, (int, float)):
+                raise StepStoppedError("the swipe's path is unknown")
+            dur = max(100, int(data.get("dur_ms") or 300))
+            self._run(f"input swipe {start[0]} {start[1]} {int(x1)} {int(y1)} {dur}")
+            return {"way": WAY_POSITION, "reason": "", "x": start[0], "y": start[1]}
+        if kind == "key":
+            name = str(data.get("name") or "")
+            if not re.match(r"^[A-Z_]+$", name):
+                raise StepStoppedError("the key is unknown")
+            self._run(f"input keyevent KEYCODE_{_KEYEVENT.get(name, name)}")
+            return {"way": WAY_POSITION, "reason": f"key {name}"}
+        if kind == "text":
+            text = data.get("text")
+            if not isinstance(text, str) or not text:
+                raise StepStoppedError("the typed text was not recorded")
+            arg = input_text_arg(text)
+            if arg is None:
+                raise StepStoppedError("only plain ASCII text can be typed again")
+            self._run(f"input text {arg}")
+            return {"way": WAY_TYPED, "reason": f"{len(text)} characters"}
+        if kind == "gesture":
+            return self._raw_gesture(step)
+        raise StepStoppedError(f"{kind} steps cannot be replayed")
+
+    def _raw_gesture(self, step: Step) -> dict[str, Any]:
+        """A multi-finger gesture: its recorded getevent lines, as sendevent."""
+        span = _raw_range(step.raw)
+        lines = self.raw_lines(*span) if (span and self.raw_lines) else None
+        if not lines:
+            raise StepStoppedError("the gesture's raw events are missing")
+        cmds: list[str] = []
+        last_ts = None
+        for line in lines:
+            parsed = parse_store_line(line)
+            if parsed is None:
+                continue
+            ts, dev, etype, ecode, value = parsed
+            if last_ts is not None and ts - last_ts > 1:
+                cmds.append(f"sleep {(ts - last_ts) / 1000.0:.3f}")
+            last_ts = ts
+            cmds.append(f"sendevent {dev} {etype} {ecode} {value}")
+        if not cmds:
+            raise StepStoppedError("the gesture's raw events are missing")
+        self._run("; ".join(cmds))
+        return {"way": WAY_POSITION, "reason": "replayed the raw finger events"}
+
+    # -- the replay -----------------------------------------------------------
+
+    def _line(self, step: Step, n: int, way: str, reason: str, res: dict) -> None:
+        if self.emit is None:
+            return
+        word = way if way != WAY_FAILED else f"failed: {reason}"
+        summary = f"step {step.i} of {n} · {step.what} · {word}"
+        if way == WAY_POSITION and reason and reason != "nothing to match":
+            summary += f" ({reason})"
+        try:
+            self.emit(
+                "run",
+                "step",
+                summary=summary,
+                actor="replay",
+                data={
+                    "i": step.i,
+                    "of": n,
+                    "kind": step.kind,
+                    "way": way,
+                    "reason": reason or None,
+                    "x": res.get("x"),
+                    "y": res.get("y"),
+                },
+                ref={"of": step.seq},
+                level="error" if way == WAY_FAILED else "info",
+            )
+        except Exception:
+            logger.debug("replay: step line failed", exc_info=True)
+
+    def run(self, steps: list[Step]) -> dict[str, Any]:
+        """Replay ``steps`` in order, keeping the recorded pauses.
+
+        Returns ``{"steps": [...], "stopped_at_step": i | None, "error":
+        plain sentence | None}``.
+        """
+        report: list[dict[str, Any]] = []
+        n = len(steps)
+        prev_t: float | None = None
+        for step in steps:
+            gap = 0.0
+            if prev_t is not None and isinstance(step.t, (int, float)):
+                gap = min(MAX_GAP_S, max(0.0, float(step.t) - prev_t))
+            if isinstance(step.t, (int, float)):
+                prev_t = float(step.t)
+            self.progress(f"Replaying step {step.i} of {n}: {step.what}")
+            entry = {"i": step.i, "seq": step.seq, "what": step.what}
+            try:
+                self._wait(gap)
+                res = self.do_step(step)
+            except StepStoppedError as exc:
+                reason = str(exc)
+                entry.update(way=WAY_FAILED, reason=reason)
+                report.append(entry)
+                self._line(step, n, WAY_FAILED, reason, {})
+                return {
+                    "steps": report,
+                    "stopped_at_step": step.i,
+                    "error": f"Replay stopped at step {step.i} of {n}: "
+                    f"{step.what}: {reason}.",
+                }
+            entry.update(way=res["way"], reason=res.get("reason") or "")
+            report.append(entry)
+            self._line(step, n, res["way"], res.get("reason") or "", res)
+        if n:
+            self._wait(SETTLE_AFTER_S)
+        return {"steps": report, "stopped_at_step": None, "error": None}

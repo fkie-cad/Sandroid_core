@@ -737,41 +737,6 @@ def test_set_config_makes_get_config_return_cli_config():
         config_mod._config_instance = saved
 
 
-def test_tui_play_finalizes_run_bundle(tmp_path, monkeypatch):
-    from sandroid.core import run_bundle, run_report
-    from sandroid.tui.controllers.recording_controller import RecordingController
-
-    seen = {}
-
-    def fake_finalize(result_dir, results, **kwargs):
-        seen.update(kwargs, result_dir=result_dir, results=results)
-        return run_report.FinalizeOutcome(results_json=tmp_path / "sandroid.json")
-
-    monkeypatch.setattr(run_report, "finalize_run", fake_finalize)
-    cfg = SimpleNamespace(report=SimpleNamespace(generate_pdf=True))
-    ctl = RecordingController(
-        toolbox=SimpleNamespace(config=cfg), call_from_thread=lambda fn, *a: fn(*a)
-    )
-    result = SimpleNamespace(to_json_dict=lambda: {"Device Name": "x"})
-    ctl._finalize_run_bundle(
-        run_id="r1", result=result, bundle_dir=str(tmp_path), recorded_at="t0"
-    )
-    assert seen["result_dir"] == str(tmp_path)
-    assert seen["mode"] == "tui-play"
-    assert seen["run_id"] == "r1"
-    assert seen["generate_pdf"] is True
-    assert seen["config"] is cfg
-
-    run_bundle.record_session_bundle(str(tmp_path))
-    assert str(tmp_path) in run_bundle.session_bundles()
-    # L12: a bundle deleted in the Runs lens is not listed at exit.
-    gone = tmp_path / "deleted_run"
-    gone.mkdir()
-    run_bundle.record_session_bundle(str(gone))
-    gone.rmdir()
-    assert str(gone) not in run_bundle.session_bundles()
-
-
 def test_headless_runner_finalizes_into_session_dir(tmp_path, monkeypatch):
     from sandroid.api import analysis_runners
     from sandroid.core import run_report

@@ -49,16 +49,21 @@ pruning — this module never deletes anything on its own.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import logging
 import os
 import shutil
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +131,16 @@ class RunRecord:
     #: unknown (runs saved before it was stored, a Play without a recording
     #: of this session).
     record_window: list[float] = field(default_factory=list)
+    #: Rewind runs (``core/rewind.py``): ``"rewind"`` or ``"rewind-replay"``;
+    #: empty for a batch Play (command line / headless).
+    mode: str = ""
+    #: The recording this Rewind belongs to (``recordings/<rec_id>/``).
+    rec_id: str = ""
+    #: Per selected file: its result word (``same change in the replay`` ...).
+    verdicts: dict[str, str] = field(default_factory=dict)
+    #: Rewind details: ``steps`` (way per step), ``stopped_at_step``,
+    #: ``flows`` (compared requests, plain lines), ``requests`` (per run).
+    rewind: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -277,6 +292,8 @@ def _summary_from_record(record: RunRecord) -> dict[str, Any]:
         "counts": dict(record.counts),
         "timeline_folder": record.timeline_folder,
         "record_window": list(record.record_window),
+        "mode": record.mode,
+        "rec_id": record.rec_id,
     }
 
 
@@ -377,13 +394,39 @@ def save_run(record: RunRecord) -> None:
     """
     _atomic_write_json(_run_file(record.run_id), record.to_dict())
 
-    entries = _load_all_index_entries()
-    entries = [e for e in entries if e.get("run_id") != record.run_id]
-    entries.append(_summary_from_record(record))
-    entries.sort(key=lambda e: e.get("run_id", ""), reverse=True)
-    _atomic_write_json(
-        _index_file(), {"schema_version": SCHEMA_VERSION, "runs": entries}
-    )
+    with _index_lock():
+        entries = _load_all_index_entries()
+        entries = [e for e in entries if e.get("run_id") != record.run_id]
+        entries.append(_summary_from_record(record))
+        entries.sort(key=lambda e: e.get("run_id", ""), reverse=True)
+        _atomic_write_json(
+            _index_file(), {"schema_version": SCHEMA_VERSION, "runs": entries}
+        )
+
+
+_INDEX_THREAD_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _index_lock() -> Iterator[None]:
+    """Serialise index rewrites (threads and processes: ``index.lock``)."""
+    with _INDEX_THREAD_LOCK:
+        handle = None
+        try:
+            handle = open(_runs_dir() / "index.lock", "a")
+            try:
+                import fcntl
+
+                fcntl.flock(handle, fcntl.LOCK_EX)
+            except (ImportError, OSError):
+                pass
+        except OSError:
+            handle = None
+        try:
+            yield
+        finally:
+            if handle is not None:
+                handle.close()
 
 
 def load_run(run_id: str) -> RunRecord:

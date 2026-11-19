@@ -183,27 +183,6 @@ def spawn_spotlight(monkeypatch) -> SpotlightService:
     return svc
 
 
-def test_recording_hint_sees_a_spawn_mode_app(monkeypatch, spawn_spotlight):
-    from sandroid.tui.modals import recording_modal
-
-    monkeypatch.setattr(
-        "sandroid.config.get_config",
-        lambda: SimpleNamespace(
-            analysis=SimpleNamespace(network_reset_after_snapshot="off")
-        ),
-    )
-    monkeypatch.setattr(
-        recording_modal.Adb,
-        "get_focused_app",
-        classmethod(lambda cls, max_retries=3: ("org.wikipedia", ".Main")),
-    )
-
-    hint = recording_modal.foreground_app_hint()
-
-    assert hint is not None
-    assert "org.wikipedia" in hint
-
-
 def test_monitor_command_offers_pid_mode_for_a_spawn_mode_app(
     monkeypatch, spawn_spotlight
 ):

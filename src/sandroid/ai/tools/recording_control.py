@@ -1,6 +1,6 @@
-"""AI-chat tools for Sandroid's record/replay (getevent/sendevent) workflow.
+"""AI-chat tools for Sandroid's Rewind workflow (record, review, rewind).
 
-Importing this module registers all seven tools into the
+Importing this module registers all eight tools into the
 :class:`~sandroid.ai.tools.registry.ToolRegistry` singleton as a side effect
 (see the ``@sandroid_tool`` decorator). ``category="recording"``.
 
@@ -8,16 +8,15 @@ Like :mod:`sandroid.ai.tools.monitor_control`, these dispatch to the
 TUI-only :class:`~sandroid.tui.controllers.recording_controller.RecordingController`
 (constructed once in ``app.py``, never a singleton) via the
 :mod:`sandroid.tui.controller_registry` seam, rather than duplicating its
-orchestration (snapshotting, ``AnalysisEngine`` wiring, run-history
-persistence) into a parallel service layer.
+orchestration (start points, the Review list, run-history persistence)
+into a parallel service layer (see :mod:`sandroid.core.rewind`).
 
-There is deliberately no ``RecordingModal`` in this flow: the AI is expected
-to have already asked the analyst for a run *label* in chat before calling
-``start_device_recording``, and tells them in chat when to perform the
-action and when to stop -- the modal's job is replaced by the chat turn
-itself. Record and replay are separate tool calls, never auto-chained in
-code -- the LLM decides when to call ``start_replay`` after being told
-"I'm done" (by default right after stopping, but it can wait if asked to).
+The AI tells the analyst in chat when to do the action and when it is done;
+``stop_device_recording`` returns the Review list, ``start_replay`` selects
+files and rewinds (optionally replaying), and ``get_recording_changes``
+reads the results. The old batch replay (replay count, dry run, noise
+filter) is gone: its parameters are ignored (recording) or rejected
+(``start_replay``).
 
 - ``start_device_recording``, ``stop_device_recording`` --
   ``RiskTier.REVERSIBLE``, claiming/releasing
@@ -42,8 +41,9 @@ code -- the LLM decides when to call ``start_replay`` after being told
   Closed by excluding ``start_replay`` from every subagent profile
   (``sandroid.ai.agents.ASYNC_LEASE_TOOL_NAMES``) -- only the orchestrator
   can call this tool.
-- ``get_recording_status``, ``get_replay_status``, ``list_recent_runs``,
-  ``get_run_detail`` -- all ``RiskTier.READ_ONLY``, no resource claimed.
+- ``get_recording_status``, ``get_replay_status``, ``get_recording_changes``,
+  ``list_recent_runs``, ``get_run_detail`` -- all ``RiskTier.READ_ONLY``, no
+  resource claimed.
 """
 
 from typing import Any
@@ -75,77 +75,94 @@ def _require_recording_controller() -> Any:
     return controller
 
 
+_BATCH_REMOVED = (
+    "the batch replay was removed; call start_replay without counts "
+    "(it rewinds to the start point once, optionally replaying the steps)"
+)
+
+
 @sandroid_tool(
     name="start_device_recording",
     description=(
-        "Start recording device input events (getevent) for later replay. "
-        "Creates a snapshot first so replay can restore this exact starting "
-        "state. The analyst should already have been asked for a run label "
-        "in chat before calling this -- there is no separate naming modal."
+        "Rewind, step 1: save a start point (emulator snapshot) and start "
+        "recording the analyst's input on the selected app. Tell the analyst "
+        "to do the action, then call stop_device_recording. The recording "
+        "is named 'Recording HH:MM' unless a label is given. "
+        "number_of_runs/noise_filter are accepted but ignored (the batch "
+        "replay was removed)."
     ),
     parameters={
         "type": "object",
         "properties": {
             "label": {
                 "type": "string",
-                "description": "Human-readable name for this run.",
+                "description": "Optional name of the recording.",
             },
             "number_of_runs": {
                 "type": "integer",
-                "description": "Replay-repeat count seeded for a later replay.",
-                "default": 2,
+                "description": "Ignored (the batch replay was removed).",
             },
             "noise_filter": {
                 "type": "boolean",
-                "description": (
-                    "Dry-run noise-filter toggle seeded for a later replay."
-                ),
-                "default": True,
+                "description": "Ignored (the batch replay was removed).",
             },
         },
-        "required": ["label"],
+        "required": [],
     },
     risk=RiskTier.REVERSIBLE,
     category="recording",
     resources=frozenset({ResourceId.INPUT_RECORDING}),
 )
 def start_device_recording(
-    label: str, number_of_runs: int = 2, noise_filter: bool = True
+    label: str | None = None,
+    number_of_runs: int | None = None,
+    noise_filter: bool | None = None,
 ) -> dict[str, Any]:
-    """Start a device input-event recording.
+    """Save a start point and start recording (blocking, about 5 s).
 
     Real integration point:
     :meth:`~sandroid.tui.controllers.recording_controller.RecordingController.start_recording_chat`.
 
     Returns:
-        ``{"success": False, "message": str}`` if a recording is already in
-        progress, the pre-recording snapshot failed, or the recorder failed
-        to start; ``{"success": True, "label": str}`` once recording has
-        actually started.
+        ``{"success": False, "message": str}`` (no app selected, no device,
+        the start point could not be saved, ...) or ``{"success": True,
+        "rec_id", "name", "start_point"}``; ``ignored`` lists old batch
+        parameters that were passed.
     """
     controller = _require_recording_controller()
-    return controller.start_recording_chat(label, number_of_runs, noise_filter)
+    result = dict(controller.start_recording_chat(label))
+    ignored = [
+        name
+        for name, value in (
+            ("number_of_runs", number_of_runs),
+            ("noise_filter", noise_filter),
+        )
+        if value is not None
+    ]
+    if ignored:
+        result["ignored"] = ignored
+        result["note"] = "number_of_runs and noise_filter are ignored now."
+    return result
 
 
 @sandroid_tool(
     name="stop_device_recording",
-    description="Stop the in-progress device input-event recording.",
+    description=(
+        "Rewind, step 2: stop the recording. Returns the Review list: the "
+        "files that changed (new/changed/deleted) and the requests seen. "
+        "Pass the files to compare to start_replay."
+    ),
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.REVERSIBLE,
     category="recording",
     releases=frozenset({ResourceId.INPUT_RECORDING}),
 )
 def stop_device_recording() -> dict[str, Any]:
-    """Stop the current recording.
+    """Stop the current recording and return the Review list.
 
     Real integration point:
     :meth:`~sandroid.tui.controllers.recording_controller.RecordingController.stop_recording_chat`.
-    Does NOT auto-chain into replay -- call ``start_replay`` separately.
-
-    Returns:
-        ``{"success": False, "message": str}`` if nothing was recording,
-        else ``{"success": True, "event_count": int, "duration": float,
-        "label": str | None}``.
+    Does NOT rewind: call ``start_replay`` separately.
     """
     controller = _require_recording_controller()
     return controller.stop_recording_chat()
@@ -154,29 +171,37 @@ def stop_device_recording() -> dict[str, Any]:
 @sandroid_tool(
     name="start_replay",
     description=(
-        "Replay the most recently recorded input events against a freshly "
-        "reverted emulator snapshot, then diff the filesystem before/after. "
-        "This reverts device state (same as load_snapshot) and runs in the "
-        "background -- poll get_replay_status for completion, then "
-        "list_recent_runs/get_run_detail for results."
+        "Rewind, step 3: select files (they are watched and their current "
+        "version is saved as After), then go back to the start point and "
+        "save Before. With replay=true (default) the recorded steps are "
+        "repeated and After (replay) is saved; the device ends after the "
+        "action. With replay=false the device stays at the start point. "
+        "This reverts device state (like load_snapshot) and runs in the "
+        "background: poll get_replay_status, then get_recording_changes."
     ),
     parameters={
         "type": "object",
         "properties": {
+            "paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Device paths from the Review list to select (watch). "
+                    "Omit to keep the current selection."
+                ),
+            },
+            "replay": {
+                "type": "boolean",
+                "description": "Repeat the recorded steps after the rewind.",
+                "default": True,
+            },
             "number_of_runs": {
                 "type": "integer",
-                "description": (
-                    "Override the seeded replay-repeat count for this "
-                    "replay (and future ones, until the next recording). "
-                    "Omit to keep the current seed."
-                ),
+                "description": "Removed; any value above 1 is rejected.",
             },
             "include_dry_run": {
                 "type": "boolean",
-                "description": (
-                    "Override the seeded dry-run noise-filter toggle. Omit "
-                    "to keep the current seed."
-                ),
+                "description": "Removed; true is rejected.",
             },
         },
         "required": [],
@@ -189,44 +214,56 @@ def stop_device_recording() -> dict[str, Any]:
     releases=frozenset(),
 )
 def start_replay(
-    number_of_runs: int | None = None, include_dry_run: bool | None = None
+    paths: list[str] | None = None,
+    replay: bool = True,
+    number_of_runs: int | None = None,
+    include_dry_run: bool | None = None,
 ) -> dict[str, Any]:
-    """Kick off a replay of the current recording.
+    """Select ``paths`` and start Rewind (+ Replay) of the current recording.
 
     Real integration point:
-    :meth:`~sandroid.tui.controllers.recording_controller.RecordingController.start_playback_chat`.
+    :meth:`~sandroid.tui.controllers.recording_controller.RecordingController.start_rewind_chat`.
+    The ``WORLD`` lease claimed for this call is released by the controller
+    once the detached rewind worker finishes.
 
-    Captures this call's resource-arbiter owner id (from
-    ``sandroid.ai.loop._current_owner_id``, the same ``ContextVar`` the loop
-    itself reads before claiming resources -- the identical pattern
-    ``session_control.enable_app_proxy`` uses to capture an owner id for a
-    later-attributed release) and passes it through so
-    ``RecordingController`` can release the ``WORLD`` lease claimed above
-    itself, once the detached replay worker actually finishes -- this
-    dispatch returns almost immediately, long before that happens.
-
-    Args:
-        number_of_runs: Replay-repeat count override, or ``None`` to keep
-            the seed from the last ``start_device_recording`` call.
-        include_dry_run: Dry-run/noise-filter toggle override (renamed from
-            the controller's own ``noise_filter`` for a clearer tool-facing
-            name), or ``None`` to keep the seed.
-
-    Returns:
-        ``{"success": False, "message": str}`` if there is no recording to
-        replay, or one is still in progress; otherwise ``{"success": True,
-        "number_of_runs": int, "noise_filter": bool}`` once the replay
-        worker has been kicked off.
+    Raises:
+        ToolExecutionError: an old batch parameter was used
+            (``number_of_runs > 1`` or ``include_dry_run=True``).
     """
     from sandroid.ai.loop import _current_owner_id
 
+    if (number_of_runs is not None and int(number_of_runs) > 1) or include_dry_run:
+        raise ToolExecutionError(_BATCH_REMOVED)
+    if paths is not None and (
+        not isinstance(paths, list) or not all(isinstance(p, str) for p in paths)
+    ):
+        raise ToolExecutionError("paths must be a list of device paths")
     controller = _require_recording_controller()
     owner = _current_owner_id.get()
-    return controller.start_playback_chat(
-        number_of_runs=number_of_runs,
-        noise_filter=include_dry_run,
-        owner_id=owner,
+    return controller.start_rewind_chat(
+        paths=paths, replay=bool(replay), owner_id=owner
     )
+
+
+@sandroid_tool(
+    name="get_recording_changes",
+    description=(
+        "Read the current recording's Review list (changed files, requests, "
+        "what is selected) and, after a rewind, each selected file's "
+        "'What your action changed' and the replay's same/different result."
+    ),
+    parameters={"type": "object", "properties": {}, "required": []},
+    risk=RiskTier.READ_ONLY,
+    category="recording",
+)
+def get_recording_changes() -> dict[str, Any]:
+    """The Review list and the latest results (read-only).
+
+    Real integration point:
+    :meth:`~sandroid.tui.controllers.recording_controller.RecordingController.review_dict`.
+    """
+    controller = _require_recording_controller()
+    return controller.review_dict()
 
 
 @sandroid_tool(
@@ -265,7 +302,7 @@ def get_recording_status() -> dict[str, Any]:
 
 @sandroid_tool(
     name="get_replay_status",
-    description="Check whether a replay (started via start_replay) is still running.",
+    description=("Check whether a rewind (started via start_replay) is still running."),
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.READ_ONLY,
     category="recording",
@@ -290,7 +327,8 @@ def get_replay_status() -> dict[str, Any]:
 @sandroid_tool(
     name="list_recent_runs",
     description=(
-        "List past record->replay analysis runs for the current device, "
+        "List past runs (Rewind runs and command-line analyses) for the "
+        "current device, "
         "newest first (label, timing, changed/new/deleted file counts). "
         "Use get_run_detail with a run's 'run_id' for the full diffs."
     ),
@@ -347,8 +385,10 @@ def list_recent_runs(limit: int = 20) -> dict[str, Any]:
 @sandroid_tool(
     name="get_run_detail",
     description=(
-        "Get one record->replay run's full detail, including per-file diff "
-        "text. Use the 'run_id' field from list_recent_runs."
+        "Get one run's full detail: per-file text (for a Rewind: 'What your "
+        "action changed' and the replay result), 'verdicts' per file, and "
+        "'rewind' (steps, compared requests, requests per run). Use the "
+        "'run_id' field from list_recent_runs."
     ),
     parameters={
         "type": "object",

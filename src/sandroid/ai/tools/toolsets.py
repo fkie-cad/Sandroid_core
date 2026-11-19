@@ -71,7 +71,7 @@ TOOLSET_DESCRIPTIONS: dict[str, str] = {
     "capture": "screenshots and screen recordings",
     "emulator": "snapshots and emulator restart/kill",
     "monitor": "file-system monitor: live changes and per-file diffs",
-    "recording": "record and replay device input, past runs and their diffs",
+    "recording": "record an action, review what changed, rewind and replay it",
     "lenses": (
         "find, AI-classify, highlight and filter rows in the Network and Files lenses"
     ),
@@ -190,6 +190,7 @@ TOOLSET_TABLE: dict[str, ToolsetEntry] = {
     "start_replay": _e("recording", timeout_s=_LONG),
     "get_recording_status": _e("recording"),
     "get_replay_status": _e("recording"),
+    "get_recording_changes": _e("recording"),
     "list_recent_runs": _e("recording"),
     "get_run_detail": _e("recording"),
     # lenses (AI row highlights). classify_rows runs batched model requests,

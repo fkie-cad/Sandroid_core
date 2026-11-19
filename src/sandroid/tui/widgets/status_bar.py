@@ -390,11 +390,13 @@ class StatusBar(Static):
             )
             segs.append(f"[{muted}]Capture[/] [{run}]● {filename}[/]")
 
-        if self.recording_active:
-            segs.append(f"[{stop} bold]● RECORDING[/]")
-        elif self.replay_active:
-            phase = f" · {escape(self.replay_phase)}" if self.replay_phase else ""
-            segs.append(f"[{fixed_color('spawn_mode')} bold]● REPLAYING{phase}[/]")
+        # Record / Rewind: the controller's plain status line (no symbols).
+        if self.recording_active or self.replay_active or self.replay_phase:
+            text = self.replay_phase or (
+                "Recording" if self.recording_active else "Rewind running"
+            )
+            color = stop if self.recording_active else fixed_color("spawn_mode")
+            segs.append(f"[{color} bold]{escape(text)}[/]")
 
         if self.show_theme_indicator:
             segs.append(f"[{muted}]Theme[/] [{primary}]{self.current_theme}[/]")

@@ -133,7 +133,7 @@ class SandroidTUI(App):
         # focused panel could still shadow them -- none does any more
         # (Snapshots refresh moved to Ctrl+R, Watchlist pull to u/U).
         Binding("r", "record", "Record", id="record"),
-        Binding("p", "play", "Play/Replay", id="play"),
+        Binding("p", "play", "Review", id="play"),
         # Navigation
         # Lenses: 1-6 switch the full-width analysis view (Shift+←/→ cycles).
         # Only "1" is shown, labelled "1-6", to keep the footer short.
@@ -394,6 +394,12 @@ class SandroidTUI(App):
             # body runs later, not the attribute lookup inside it).
             suppress_disconnect_guard=self._suppress_device_disconnect_detection,
             set_replay_phase=self._set_replay_phase,
+            notify=lambda message, severity="information": self.notify(
+                message, severity=severity
+            ),
+            watchlist=self._rewind_watchlist,
+            resume_monitor=self._rewind_resume_monitor,
+            ensure_monitor=self._rewind_ensure_monitor,
         )
         # Publish the singleton instance so the AI chat's recording_control
         # tools can reach it without importing app.py/MainScreen directly
@@ -2298,8 +2304,8 @@ class SandroidTUI(App):
         rc = self._recording_controller
         if rc.is_replaying:
             self.notify(
-                "A replay is still running -- wait for it to finish "
-                "(progress in the Sessions lens, 4).",
+                "A rewind is still running. Wait for it to finish; the header "
+                "shows how far it is.",
                 title=f"Cannot {what}",
                 severity="warning",
             )
@@ -2315,39 +2321,26 @@ class SandroidTUI(App):
         return False
 
     def action_record(self) -> bool:
-        """Global ``r``: open the Record settings form and start recording.
-
-        Stopping is done in the recording window itself (Esc/Enter = stop &
-        save, which then auto-replays).
+        """Global ``r``: save a start point and record; ``r`` again stops and
+        opens Review (Rewind, ``core/rewind.py``).
         """
         rc = self._recording_controller
+        if rc.state == "recording":
+            return rc.stop_recording()
         if rc.is_recording():
             self.notify(
-                "Already recording -- press Esc or Enter in the recording "
-                "window to stop & save.",
+                "The recording is starting or stopping. Wait a moment.",
                 severity="warning",
             )
             return False
         if self._flow_blocked("record"):
             return False
-        try:
-            has_app = bool(get_spotlight_service().get_app_tuple())
-        except Exception:
-            has_app = True  # don't nag if the check itself fails
-        if not has_app:
-            self.notify(
-                "No app selected -- recording device-wide. Select one first "
-                "with [b]c[/b] (use the foreground app) or [b]⇧C[/b] (pick an "
-                "app…) to focus the analysis.",
-                title="Record",
-                severity="warning",
-            )
         return rc.start_recording()
 
     def action_play(self) -> bool:
-        """Global ``p``: replay the current recording N times and diff.
+        """Global ``p``: open Review for the current recording.
 
-        While a replay is running, ``p`` offers to stop it instead.
+        While a rewind runs, ``p`` asks whether to stop it.
         """
         rc = self._recording_controller
         if rc.is_replaying:
@@ -2355,99 +2348,79 @@ class SandroidTUI(App):
             return False
         if rc.is_recording():
             self.notify(
-                "Stop the recording first (Esc or Enter in the recording window).",
-                title="Cannot replay",
+                "Stop the recording first: press r.",
+                title="Review",
                 severity="warning",
             )
-            return False
-        if self._flow_blocked("replay"):
             return False
         if not rc.has_recording():
             self.notify(
-                "Nothing recorded yet -- press [b]r[/b] to record first.",
-                title="Cannot replay",
+                "Nothing recorded yet. Press r to record.",
+                title="Review",
                 severity="warning",
             )
             return False
-        self._confirm_play()
-        return True
-
-    def _confirm_play(self) -> None:
-        """Ask before ``p`` reverts the device (M-35).
-
-        Play loads the snapshot taken when the recording started, which
-        throws away whatever happened on the device since, and then runs for
-        several minutes. The dialog says which recording it plays, how many
-        replays, and roughly how long it takes.
-        """
-        from rich.markup import escape
-
-        from sandroid.tui.modals import ConfirmModal
-
-        rc = self._recording_controller
-        try:
-            plan = rc.play_plan()
-        except Exception:
-            plan = {}
-        label = plan.get("recording") or "the last recording"
-        runs = int(plan.get("number_of_runs") or 1)
-        what = f"{runs} replay{'s' if runs != 1 else ''}"
-        if plan.get("noise_filter"):
-            what += " + a dry run"
-        lines = [
-            f"Replay '{escape(label)}' ({what})?",
-            "This reverts the device to the snapshot taken when the recording "
-            "started ('tmp'); changes made on the device since are lost.",
-        ]
-        estimate = plan.get("estimate")
-        if estimate:
-            # A range: snapshot loads and result pulls vary run to run.
-            low = max(1, round(float(estimate) * 0.85 / 60))
-            high = max(low + 1, round(float(estimate) * 1.15 / 60))
-            seconds = plan.get("seconds") or 0
-            lines.append(
-                f"Takes roughly {low}-{high} min (recording {round(seconds)} s); "
-                "the header shows the phase."
-            )
-
-        def on_result(yes: bool | None) -> None:
-            if not yes:
-                return
-            # Tab-switch on Play start always happens, regardless of what run
-            # history looks like (the other, gated half of the unified focus
-            # rule — whether the completed run also steals the rail's current
-            # *selection* — lives in DiffsView.on_new_run).
-            ms = self._get_main_screen()
-            if ms is not None:
-                ms.open_runs_lens()
-            rc.start_playback()
-
-        self.push_screen(
-            # guard_typing: p is one letter; a word typed while no text field
-            # had focus ("places") must not revert the device (E2E finding).
-            ConfirmModal(
-                title="Play (replay)", message="\n".join(lines), guard_typing=True
-            ),
-            on_result,
-        )
+        return rc.open_review()
 
     def _confirm_stop_replay(self) -> None:
-        """Ask before stopping the running replay (``p`` while replaying)."""
+        """Ask before stopping the running rewind (``p`` while it runs)."""
         from sandroid.tui.modals import ConfirmModal
 
         def on_result(yes: bool | None) -> None:
             if yes:
-                self._recording_controller.stop_playback()
+                self._recording_controller.stop_rewind()
 
         self.push_screen(
             ConfirmModal(
-                title="Stop replay",
+                title="Stop the replay?",
+                message="Before and After stay as far as they got.",
+                yes_label="Stop",
+                no_label="Continue",
                 guard_typing=True,
-                message="A replay is running. Stop it now? The partial run "
-                "is still saved in the Sessions lens (4).",
             ),
             on_result,
         )
+
+    def _rewind_watchlist(self):
+        """The Files lens's watchlist engine (Rewind selects files there)."""
+        ms = self._main_screen_in_stack()
+        if ms is None:
+            return None
+        try:
+            panel = ms.query_one("#files-panel")
+            return getattr(panel, "watchlist", None)
+        except Exception:
+            return None
+
+    def _rewind_resume_monitor(self, config) -> bool:
+        """Restart the file monitor after a rewind (True on success)."""
+        try:
+            return bool(self._monitor_controller.resume_after_playback(config))
+        except Exception:
+            logger.debug("monitor resume after rewind failed", exc_info=True)
+            return False
+
+    def _rewind_ensure_monitor(self, package: str) -> None:
+        """``r``: start the file monitor on the app's folders if it is off."""
+        try:
+            mc = self._monitor_controller
+            if mc.is_running():
+                return
+            from sandroid.core import rewind
+            from sandroid.tui.controllers.monitor_controller import MonitorConfig
+
+            dirs = rewind.app_dirs(package)
+            mc.start_with_config(
+                MonitorConfig(
+                    mode="path",
+                    target_path=dirs[0],
+                    target_paths=dirs,
+                    target_pid=None,
+                    app_name=package,
+                )
+            )
+        except Exception:
+            logger.debug("Could not start the file monitor for Rewind", exc_info=True)
 
     def _notify_diffs_new_run(self, run_id: str) -> None:
         """Tell DiffsView a new run was saved (RecordingController's on_run_saved).
