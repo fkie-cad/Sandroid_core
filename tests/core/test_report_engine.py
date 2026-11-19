@@ -1091,6 +1091,89 @@ class TestScreenGapFill:
         assert _step(off, s["win17"])["shots"] == []
 
 
+#: The fix7 R1 fixtures (E2E round 5, downscaled): Notifications, the same
+#: screen with its scrollbar faded (another sha256), and Battery.
+R1_FIXTURES = Path(__file__).parents[1] / "services" / "fixtures" / "tracking_r1"
+
+
+def _file_shot(tl, sec, of, name):
+    """A before-tap shot line whose file is the R1 fixture ``name``."""
+    seq = len(tl.lines) + 1
+    rel = f"tracking/shots/{seq}_before_tap.png"
+    png = (R1_FIXTURES / name).read_bytes()
+    (tl.folder / rel).parent.mkdir(parents=True, exist_ok=True)
+    (tl.folder / rel).write_bytes(png)
+    sha = hashlib.sha256(png).hexdigest()
+    return tl.add(sec, "shot", "before_tap", "screenshot before tap", clk="dev_mono",
+                  ref={"of": of, "path": rel, "sha256": sha},
+                  data={"trigger": "before_tap", "w": 270, "h": 606, "cap_ms": 14,
+                        "via": "helper", "dup_of": None})  # fmt: skip
+
+
+def _refusal_session(tmp_path, next_shot: str | None):
+    """E2E round 6 #47-#51 (INVISIBLE): tap #47 on Notifications, the
+    SubSettings activity #48 (its shot dropped), then tap #50 whose before-tap
+    shot is ``next_shot``: None = the same file as #47's (#51 = #49).
+    """
+    tl = TimelineFixture(tmp_path / "refuse" / "dev")
+    tl.add(0, "sandroid", "open", "timeline opened",
+           data={"session_id": SESSION_ID, "serial": SERIAL, "schema": 1})  # fmt: skip
+    tl.add(0.01, "sandroid", "policy", "policy · open",
+           data={"reason": "open", **POLICY})  # fmt: skip
+    s: dict[str, int] = {}
+    s["tap47"] = _tap(tl, 10, _target("Battery"))
+    s["bt49"] = _file_shot(tl, 10.01, s["tap47"], "r5_65_notifications_before_tap.png")
+    s["act48"] = _screen(tl, 10.4, "activity", ".SubSettings", via="logcat")
+    s["tap50"] = _tap(tl, 12, _target(None, "com.x:id/up"))
+    if next_shot is None:
+        s["bt51"] = tl.shot(12.01, "before_tap", s["tap50"], None, dup=s["bt49"])
+    else:
+        s["bt51"] = _file_shot(tl, 12.01, s["tap50"], next_shot)
+    tl.write()
+    bundle = tmp_path / "refuse_results" / "runs" / RUN_ID
+    bundle.mkdir(parents=True)
+    (bundle / "sandroid.json").write_text(json.dumps(_results()), encoding="utf-8")
+    return SimpleNamespace(tl=tl, seqs=s, bundle=bundle, root=tmp_path)
+
+
+class TestGapFillRefusesThePreviousScreen:
+    """R4 (E2E round 6 #48): the next before-tap shot that still shows the
+    previous screen (the triggering input's before-tap shot) is no image of
+    the new screen: no gap-fill, a ``shot_note`` instead.
+    """
+
+    @pytest.mark.parametrize(
+        "next_shot",
+        [None, "r5_66_notifications_scrollbar_faded.png"],
+        ids=["sha256", "perceptual"],
+    )
+    def test_refused(self, tmp_path, fake_timeline, next_shot):
+        sess = _refusal_session(tmp_path, next_shot)
+        s = sess.seqs
+        doc = _build(sess)
+        step = _step(doc, s["act48"])
+        assert step["shots"] == []
+        assert step["shot_note"] == report_engine.GAP_FILL_REFUSED
+        assert step["shot_note"] == (
+            "no screenshot: the new screen had not drawn before the next input"
+        )
+        assert [b["seq"] for b in _step(doc, s["tap50"])["shots"]] == [s["bt51"]]
+        md = report_render.render_markdown(doc, base_dir=sess.bundle)
+        assert report_engine.GAP_FILL_REFUSED in md
+        assert "screen at next input" not in md
+        pdf = report_render.render_pdf(doc, sess.root / "r.pdf")
+        assert pdf.is_file()
+
+    def test_a_different_screen_is_still_filled(self, tmp_path, fake_timeline):
+        sess = _refusal_session(tmp_path, "r5_55_battery_before_tap.png")
+        s = sess.seqs
+        step = _step(_build(sess), s["act48"])
+        assert "shot_note" not in step
+        assert [(b["seq"], b["source"]) for b in step["shots"]] == [
+            (s["bt51"], "next_before_tap")
+        ]
+
+
 # ---------------------------------------------------------------------------
 # Coverage, results, seal, isolation
 # ---------------------------------------------------------------------------

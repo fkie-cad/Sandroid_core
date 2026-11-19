@@ -1274,18 +1274,51 @@ class _Shots:
         return [_image_block(self.ctx, ln) for ln in self.by_of.get(seq, [])]
 
 
+#: R4: the caption of a screen step whose next before-tap shot still shows
+#: the previous screen (the new one had not drawn when the user went on).
+GAP_FILL_REFUSED = "no screenshot: the new screen had not drawn before the next input"
+
+
+def _png_of(block: Mapping[str, Any]) -> bytes | None:
+    path = block.get("path")
+    if not path or block.get("error"):
+        return None
+    try:
+        return Path(str(path)).read_bytes()
+    except OSError:
+        return None
+
+
+def _same_shot(ctx: ReportContext, a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+    """Two shot lines show the same screen: equal sha256, else R1's
+    perceptual :func:`sandroid.core.frames.same_screen` on their files.
+    """
+    sha_a, sha_b = _ref(a).get("sha256"), _ref(b).get("sha256")
+    if sha_a and sha_a == sha_b:
+        return True
+    from .frames import same_screen
+
+    return same_screen(_png_of(_image_block(ctx, a)), _png_of(_image_block(ctx, b)))
+
+
 def _gap_fill(
     ctx: ReportContext,
     step: dict[str, Any],
     events: list[Mapping[str, Any]],
     start: int,
     before_tap: Mapping[int, Mapping[str, Any]],
+    prev: Mapping[str, Any] | None = None,
 ) -> None:
     """R4: a screen step without a screen-change shot shows the NEXT
     input's before-tap shot (taken at its finger-down: the screen it acted
     on), unless another screen line comes first (``events[start:]`` follow
     the step). The block is marked
     ``source: next_before_tap`` (``report.json`` stays self-contained).
+
+    ``prev``: the before-tap shot of the step's triggering input (R1: the
+    previous screen). A next before-tap shot that is the previous screen
+    (same sha256, or perceptually the same) is no image of the new screen:
+    the step gets none and ``shot_note`` :data:`GAP_FILL_REFUSED`.
     """
     if (
         not ctx.options.include_screenshots
@@ -1299,7 +1332,9 @@ def _gap_fill(
             return
         if ln.get("src") == "input" and ln.get("kind") in INPUT_KINDS:
             shot = before_tap.get(ln.get("seq"))  # type: ignore[arg-type]
-            if shot is not None:
+            if shot is not None and prev is not None and _same_shot(ctx, prev, shot):
+                step["shot_note"] = GAP_FILL_REFUSED
+            elif shot is not None:
                 block = _image_block(ctx, shot)
                 block["source"] = "next_before_tap"
                 block["for"] = step.get("seq")
@@ -1540,6 +1575,7 @@ def build_transcript(ctx: ReportContext) -> dict:
         blocks.append(head)
         shown_heading.add(span.number)
 
+    trigger_shot: Mapping[str, Any] | None = None
     for i, ln in enumerate(events):
         ts, seq = ln.get("_ts") or 0.0, int(ln.get("seq") or 0)
         if ln.get("src") == "label" and ln.get("kind") == "start":
@@ -1563,7 +1599,11 @@ def build_transcript(ctx: ReportContext) -> dict:
             label=path,
         )
         if ln.get("src") == "screen":
-            _gap_fill(ctx, step, events, i + 1, before_tap)
+            _gap_fill(ctx, step, events, i + 1, before_tap, trigger_shot)
+        elif ln.get("src") == "input" and ln.get("kind") in INPUT_KINDS:
+            # R1: the latest input before a screen line triggered it; its
+            # before-tap shot is the previous screen
+            trigger_shot = before_tap.get(seq)
         if ln.get("src") == "input":
             nxt = bisect_left(input_ts, ts)
             while nxt < len(input_ts) and input_ts[nxt] <= ts:
