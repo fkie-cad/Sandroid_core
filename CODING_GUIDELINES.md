@@ -343,7 +343,7 @@ waits briefly, then starts with what is free. Never use `-n auto` locally
 
 Markers: `@pytest.mark.perf` for wall-clock budgets (run serially by `full`,
 skipped by `quick`); `slow`, skipped by `quick` and applied from
-`tests/slow_tests.txt` (tests over 1 s in the last full run's parallel pass;
+`tests/slow_tests.txt` (tests over 0.5 s in the last full run's parallel pass;
 regenerate it with `tools/test.sh --update-slow` and commit it rather than
 marking tests by hand); and
 `@pytest.mark.quarantine(reason="...", issue="#123")` for a known-flaky test

@@ -38,7 +38,7 @@
 # Environment: SANDROID_TEST_CACHE (default ~/.cache/sandroid-tests),
 # SANDROID_TEST_PYTHON (default python3.13), SANDROID_TEST_SLOTS (8),
 # SANDROID_TEST_SLOT_WAIT (seconds to wait for the full -n before starting
-# with fewer, default 20), SANDROID_TEST_SLOW_S (--update-slow threshold).
+# with fewer, default 20), SANDROID_TEST_SLOW_S (--update-slow threshold, default 0.5 s).
 # SANDROID_TESTS_STRICT_DEVICE and SANDROID_TESTS_BLOCKED_LOG are passed on
 # to tests/conftest.py's device guard.
 #
@@ -142,7 +142,7 @@ if [ "$MODE" = update-slow ]; then
         [ -n "$SRC" ] || die "no full run in $WT/.test-results; run tools/test.sh full first"
         TARGETS=("$SRC")
     fi
-    "$PY" -I - "$WT/tests/slow_tests.txt" "${SANDROID_TEST_SLOW_S:-1.0}" \
+    "$PY" -I - "$WT/tests/slow_tests.txt" "${SANDROID_TEST_SLOW_S:-0.5}" \
         "${TARGETS[@]}" <<'EOF'
 import os, sys, xml.etree.ElementTree as ET
 

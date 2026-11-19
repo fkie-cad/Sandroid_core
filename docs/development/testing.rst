@@ -80,9 +80,9 @@ Markers
 
 ``slow``
    Applied from ``tests/slow_tests.txt``: the node ids of the tests that took
-   over 1 s in the parallel pass of the last ``full`` run. ``quick`` skips
+   over 0.5 s in the parallel pass of the last ``full`` run. ``quick`` skips
    them. After a ``full`` run, ``tools/test.sh --update-slow`` rewrites the
-   list (``SANDROID_TEST_SLOW_S`` changes the 1 s threshold; a JUnit file may
+   list (``SANDROID_TEST_SLOW_S`` changes the 0.5 s threshold; a JUnit file may
    be given instead of the last run's); commit the result. A test can also
    be marked ``@pytest.mark.slow`` directly.
 ``perf``

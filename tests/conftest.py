@@ -153,7 +153,7 @@ _afm_pristine: tuple[type, dict[str, Any]] | None = None
 #: Where this checkout's sources live; ``import sandroid`` must resolve here.
 _SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 
-#: Node IDs of tests over 1 s in the last ``full`` run's parallel pass (one
+#: Node IDs of tests over 0.5 s in the last ``full`` run's parallel pass (one
 #: per line, ``#`` comments); ``tools/test.sh --update-slow`` rewrites it.
 _SLOW_LIST = Path(__file__).with_name("slow_tests.txt")
 
