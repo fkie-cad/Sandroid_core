@@ -78,7 +78,7 @@ Sandroid's default interface is an interactive terminal UI (Textual) built aroun
 
 ### Record → Play and run history
 
-From any panel, `r` records your interactions with the device (Esc/Enter in the recording window stops and saves) and `p` plays them back, landing on the **Runs** lens (`4`): Sandroid reverts the emulator to the snapshot taken before recording, replays the recording, measures background noise with a dry run of the same duration (unless `--avoid-strong-noise-filter`) and diffs the filesystem, so only artifacts caused by your action remain (changed / new / deleted files with inline diffs, processes, sockets, network). Every Play is stored as a self-contained **run bundle** under `<results_path>/runs/<run_id>/` (`run.json` manifest, `recording.txt`, the raw pull tree) and listed in the Runs lens, scoped to the active device. Runs are never deleted automatically. `Enter` on a run opens its summary, changes and report in the Inspector; `v` **reviews** it — the header shows `◆ REVIEW #<n> <run>` and the Files and Network lenses show that run instead of the live session until `L` (or `v` again) returns to LIVE. `p` asks before it reverts the device (with the recording's name and an estimated duration); while it runs the header shows the phase (`● REPLAY · replay 1/2`, `dry run`, `analysing`). A run's mitmproxy flows are stored in its bundle (`network/flows.jsonl`, covered by `SHA256SUMS`) tagged by phase, so REVIEW shows the replays' traffic — also in a later session — with the dry-run noise hidden (`A` shows it). Runs of the same recording that disagree strongly are flagged `≠` in the Runs table, the Inspector and `=` compare.
+From any panel, `r` records your interactions with the device (Esc/Enter in the recording window stops and saves) and `p` plays them back, landing on the **Runs** lens (`4`): Sandroid reverts the emulator to the snapshot taken before recording, replays the recording, measures background noise with a dry run of the same duration (unless `--avoid-strong-noise-filter`) and diffs the filesystem, so only artifacts caused by your action remain (changed / new / deleted files with inline diffs, processes, sockets, network). Every Play is stored as a self-contained **run bundle** under `<results_path>/runs/<run_id>/` (`run.json` manifest, `recording.getevent.txt` — the raw `getevent -t` lines Record captured — and the raw pull tree) and listed in the Runs lens, scoped to the active device. Runs are never deleted automatically. `Enter` on a run opens its summary, changes and report in the Inspector; `v` **reviews** it — the header shows `◆ REVIEW #<n> <run>` and the Files and Network lenses show that run instead of the live session until `L` (or `v` again) returns to LIVE. `p` asks before it reverts the device (with the recording's name and an estimated duration); while it runs the header shows the phase (`● REPLAY · replay 1/2`, `dry run`, `analysing`). A run's mitmproxy flows are stored in its bundle (`network/flows.jsonl`, covered by `SHA256SUMS`) tagged by phase, so REVIEW shows the replays' traffic — also in a later session — with the dry-run noise hidden (`A` shows it). Runs of the same recording that disagree strongly are flagged `≠` in the Runs table, the Inspector and `=` compare.
 
 ### File monitor (kprobe)
 
@@ -109,7 +109,6 @@ Analysis Options:
   -d, --show-deleted              Reveal deleted files via full filesystem checks
   --no-processes                  Do not monitor active processes
   --sockets                       Monitor listening sockets
-  --screenshot INTERVAL           Take a screenshot each INTERVAL seconds
   --trigdroid PACKAGE_NAME        Execute malware triggers for PACKAGE_NAME
   --hash                          Create MD5 hashes of changed and new files
   --apk                           List all APKs and their hashes
@@ -135,7 +134,7 @@ Device Management:
   --proxy IP:PORT                 Set HTTP proxy on device
   --proxy-clear                   Clear HTTP proxy settings
   --install-apk PATH              Install APK on device
-  --import-action PATH            Replay a run bundle's recording.txt headless
+  --import-action PATH            Replay a run bundle's recording headless
   --device-settings FILE          Apply device settings from JSON file
   --preset CODE                   Apply country preset (e.g., de, us, ru, cn)
 

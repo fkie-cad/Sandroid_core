@@ -231,8 +231,8 @@ def __getattr__(name: str):
     metavar="PATH",
     default=None,
     help=(
-        "Replay a TUI recording headless: PATH is a run bundle's recording.txt "
-        "(or the bundle folder). Runs a forensic analysis that replays it in "
+        "Replay a TUI recording headless: PATH is a run bundle's "
+        "recording.getevent.txt (or legacy recording.txt, or the bundle folder). Runs a forensic analysis that replays it in "
         "every run (-n, --report, --network, ... apply)."
     ),
 )
@@ -640,9 +640,9 @@ def _run_install_apk(sandroid_config, apk_path: str) -> None:
 def resolve_recording(action_path: str) -> tuple[str | None, str | None]:
     """Validate an ``--import-action`` argument.
 
-    Accepts a ``recording.txt`` (``<timestamp> <device> <type> <code> <value>``
-    lines as written by the TUI recorder) or a run bundle folder containing
-    one.
+    Accepts a ``recording.getevent.txt`` (raw ``getevent -t`` lines, written
+    by Record), a legacy ``recording.txt`` (``<timestamp> <device> <type>
+    <code> <value>`` lines) or a run bundle folder containing one.
 
     Returns:
         ``(absolute recording path, None)`` or ``(None, error message)``.

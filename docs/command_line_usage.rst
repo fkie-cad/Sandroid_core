@@ -257,8 +257,8 @@ Replay a recording made in the TUI without the TUI: a forensic analysis runs
 and the recording is replayed via the Player in every run (``-n``, ``--report``,
 ``--network``, ``--hash``, ``--show-deleted`` and ``-f`` apply). Pass the run
 bundle's ``recording.getevent.txt`` (the raw ``getevent -t`` slice written by
-Record); a legacy ``recording.txt`` from an older bundle is still accepted. Pass
-the file path rather than the bundle folder. The replay starts from the
+Record) or the bundle folder; a legacy ``recording.txt`` from an older bundle is
+still accepted. The replay starts from the
 device's current state, so bring the device to the state the recording expects
 (e.g. load the snapshot used when recording). JSON action files cannot be
 replayed and are rejected.

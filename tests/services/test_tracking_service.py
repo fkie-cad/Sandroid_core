@@ -622,6 +622,23 @@ def test_screen_window_dedupe_and_screen_change_shot(env, cfg):
     assert shot["ref"]["of"] == windows[0]["seq"]
 
 
+def test_no_screen_change_shot_once_tracking_stops(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_screen_change = True
+    cfg.settle_interval_ms = 100
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg, mode="invisible")
+        svc.stop()
+        # a logcat line that was already on its way when stop() began
+        svc._emit_screen(
+            "activity", pkg="a", cls="a.B", title=None, window_id=None,
+            via="logcat", dev_mono=1.0,
+        )  # fmt: skip
+        time.sleep(0.4)
+    assert of(lines, "screen", "activity")
+    assert not of(lines, "shot")
+
+
 ACTIVITY = (
     "  4553.443  1543  1580 I wm_set_resumed_activity: "
     "[0,com.android.settings/.Settings,resumeTopActivity]"

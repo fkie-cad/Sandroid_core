@@ -1284,7 +1284,8 @@ class TrackingService:
 
     def _finish(self, gen: int, g: Gesture) -> None:
         """Order lane: classify, wait <= NODE_WAIT_S for node_at, emit."""
-        del gen  # a gesture queued before stop() is still written
+        # A gesture queued before stop() is still written; ``gen`` only
+        # cancels the after-tap shot of a gesture finished after stop().
         pending = self._pending.pop(g.gid, None)
         cfg = _config()
         serial = self._serial
@@ -1393,7 +1394,7 @@ class TrackingService:
         if before is not None:
             self._store_lane.submit(self._before_shot, before, seq, kind)
         if cfg.shot_after_tap and kind in ("tap", "long_press"):
-            self._shot_lane.submit(self._after_tap, self._gen, seq, kind, before)
+            self._shot_lane.submit(self._after_tap, gen, seq, kind, before)
 
     @staticmethod
     def _path(g: Gesture, geo: Geometry) -> list[list[float]]:
@@ -1652,6 +1653,8 @@ class TrackingService:
     ) -> int | None:
         key = (pkg, cls, title)
         with self._lock:
+            gen = self._gen  # a stop() from here on cancels the shot
+            active = self._active
             if key == self._last_screen:
                 return None
             self._last_screen = key
@@ -1677,12 +1680,12 @@ class TrackingService:
             data=data,
             dev=self._serial,
         )
-        if seq is not None and _config().shot_screen_change:
+        if seq is not None and active and _config().shot_screen_change:
             with self._lock:
                 first = self._screen_req is None
                 self._screen_req = {"seq": seq}
             if first:
-                self._shot_lane.submit(self._screen_shot, self._gen)
+                self._shot_lane.submit(self._screen_shot, gen)
         return seq
 
     def _start_logcat(self, gen: int, serial: str) -> None:
