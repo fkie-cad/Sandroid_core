@@ -6,8 +6,8 @@ a question of the user). Each source is a :class:`RowAnnotationProvider`
 registered once in the process-wide :func:`registry`; a lens asks the
 registry, never the sources, so a new source needs no lens change.
 
-A provider answers, per lens (``"network"``, ``"files"``) and row key (a
-flow key ``f<seq>``, a canonical device path):
+A provider answers, per lens (``"network"``, ``"files"``) and row key (the
+mitm flow id, a canonical device path):
 
 * :meth:`~RowAnnotationProvider.annotations_for` -- what to show for the row:
   plain words (``label``), a theme-token colour, a reason for the inspector
@@ -29,7 +29,9 @@ palette, the per-row lookup per registry revision.
 
 Everything here is UI-agnostic except :class:`AnnotationFeed` (needs a
 mounted widget) and :class:`AnnotationTintMixin` (a ``DataTable`` mixin);
-both import Textual lazily, so services may import this module.
+both import Textual lazily. Importing this module still runs
+``sandroid/tui/__init__`` (about 0.7 s), so a service imports it lazily,
+inside the function that needs it.
 """
 
 from __future__ import annotations
