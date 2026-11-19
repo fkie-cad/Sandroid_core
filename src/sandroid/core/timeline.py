@@ -421,6 +421,9 @@ class TailResult:
     lines: list[dict]
     last_seq: int
     gap: bool
+    #: File offset of each line in ``lines`` (parallel list; None: no file,
+    #: e.g. a capture sink).
+    offsets: list[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -1766,6 +1769,7 @@ class TimelineService:
                 sink.state = "failed"
             logger.warning("Session timeline %s: cannot open (%s)", sink.path, exc)
             self._release(sink)
+            self._doorbell(sink, "bound")  # every active change rings "bound"
         finally:
             sink.opened.set()
 
@@ -1786,6 +1790,8 @@ class TimelineService:
                 "Sandroid on this folder): this window records no timeline.",
             )
             self._doorbell(sink, "locked")
+            # The active sink changed all the same (to one without a file).
+            self._doorbell(sink, "bound")
             return
         sink.lock_fd = lock_fd
         fd = os.open(sink.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
@@ -2086,13 +2092,17 @@ class TimelineService:
                 return TailResult([], after_seq, False)
             ring = list(sink.ring)
             last = sink.written_seq
+            has_file = sink.path is not None
         if not ring:
-            return TailResult([], max(after_seq, last), False)
+            return TailResult([], max(after_seq, last), False,
+                              [] if has_file else None)  # fmt: skip
         first = ring[0][0]["seq"]
         gap = after_seq + 1 < first and after_seq < last
-        lines = [line for line, _o in ring if line["seq"] > after_seq][:limit]
+        pairs = [(line, o) for line, o in ring if line["seq"] > after_seq][:limit]
+        lines = [line for line, _o in pairs]
+        offsets = [o for _line, o in pairs] if has_file else None
         last_seq = lines[-1]["seq"] if lines else max(after_seq, last)
-        return TailResult(lines, last_seq, gap)
+        return TailResult(lines, last_seq, gap, offsets)
 
     def seal(self, *, by: str, dev: str | None = None, report: str | None = None,
              timeout: float = 5.0) -> Seal | None:  # fmt: skip

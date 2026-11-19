@@ -1345,3 +1345,50 @@ def test_a_clock_sample_from_before_a_world_change_does_not_count_it_twice():
                              "clock/jump"]  # fmt: skip
     assert [(x["world"], x["epoch"]) for x in lines] == [
         (0, 0), (1, 1), (0, 0), (1, 1)]  # fmt: skip
+
+
+def test_tail_returns_the_file_offset_of_every_line(timeline_sink):
+    service, path = timeline_sink
+    for i in range(5):
+        service.emit("input", "tap", summary=f"tap {i}")
+    assert service.flush(3.0)
+    result = service.tail(2)
+    assert len(result.offsets) == len(result.lines) > 0
+    for line, offset in zip(result.lines, result.offsets, strict=True):
+        assert timeline.read_line_at(path, offset, mask_sensitive=False) == line
+    assert service.tail(result.last_seq).offsets == []
+    with timeline.capture():
+        timeline.emit("input", "tap", summary="in memory")
+        assert timeline.get_timeline().tail().offsets is None  # no file
+
+
+def test_every_change_of_the_active_sink_rings_bound(tmp_path):
+    from sandroid.core.events import EventBus, EventType
+
+    a, b, c = (tmp_path / "s" / name for name in ("a", "b", "c"))
+    other = _service(c, "C")  # holds c's lock
+    got: list[dict] = []
+    bus = EventBus.get()
+    handler = lambda event: got.append(event.data)  # noqa: E731
+    bus.subscribe(EventType.TIMELINE_EVENT, handler)
+    try:
+        service = TimelineService()
+        assert service.bind("A", a).state == "open"  # new
+        assert service.bind("B", b).state == "open"  # new
+        assert service.bind("A", a).state == "open"  # re-activated
+        assert service.bind("C", c).state == "locked"  # active, no file
+        deadline = time.monotonic() + 3.0
+        while sum(x["op"] == "bound" for x in got) < 4 and time.monotonic() < deadline:
+            time.sleep(0.02)
+    finally:
+        bus.unsubscribe(EventType.TIMELINE_EVENT, handler)
+    bound = [x for x in got if x["op"] == "bound"]
+    assert [(x["dev"], x["folder"], x["session_id"], x["active"]) for x in bound] == [
+        ("A", str(a.absolute()), "s/a", True),
+        ("B", str(b.absolute()), "s/b", True),
+        ("A", str(a.absolute()), "s/a", True),
+        ("C", str(c.absolute()), "s/c", True),
+    ]
+    assert service.status().state == "locked"
+    assert service.close("test", 3.0)
+    assert other.close("test", 3.0)
