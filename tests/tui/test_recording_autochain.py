@@ -128,6 +128,30 @@ def test_record_start_stop_and_result_lines() -> None:
     assert controller._tl_record_range == [start["seq"], stop["seq"]]
 
 
+def test_esc_on_the_record_settings_writes_no_result_line() -> None:
+    """F6 (E2E): Esc on the Record-settings form (Record never started)
+    wrote run/record-result "cancelled" without a record-start.
+    """
+    from sandroid.core import timeline
+
+    controller, captured, _play_calls = _controller_with_captured_result_cb()
+    with timeline.capture() as lines:
+        captured["callback"](RecordingResult(cancelled=True))
+        captured["callback"](None)
+    assert lines == []
+    # A later real recording still gets its start/stop/result.
+    controller, captured, _play_calls = _controller_with_captured_result_cb()
+    with timeline.capture() as lines:
+        controller._set_recording_indicator(True)
+        controller._set_recording_indicator(False)
+        captured["callback"](RecordingResult(cancelled=True))
+    assert [x["kind"] for x in lines] == [
+        "record-start",
+        "record-stop",
+        "record-result",
+    ]
+
+
 def test_a_chat_recording_is_the_ais(monkeypatch) -> None:
     from types import SimpleNamespace
 

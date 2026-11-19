@@ -297,10 +297,12 @@ def _short_cls(cls: Any) -> str | None:
 
 
 def element_name(target: Mapping[str, Any] | None) -> str | None:
-    """Element name: ``text`` > ``desc`` > short ``rid`` > short ``cls``."""
+    """Element name: ``text`` > ``desc`` > ``label`` (a row without own
+    text, named by its descendants) > short ``rid`` > short ``cls``.
+    """
     if not isinstance(target, Mapping):
         return None
-    for key in ("text", "desc"):
+    for key in ("text", "desc", "label"):
         value = target.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -1357,7 +1359,7 @@ def _step(
         if target:
             step["target"] = {
                 k: target.get(k)
-                for k in ("text", "desc", "rid", "cls", "bounds", "source")
+                for k in ("text", "desc", "label", "rid", "cls", "bounds", "source")
                 if target.get(k) is not None
             }
             step["element_class"] = _short_cls(target.get("cls"))

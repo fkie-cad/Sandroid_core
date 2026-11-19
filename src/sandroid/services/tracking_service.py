@@ -704,6 +704,9 @@ class GeteventStream:
         self._reader: threading.Thread | None = None
         self._teardown: threading.Thread | None = None
         self.restarts = 0
+        #: Set once a quit/stop is in progress: a getevent that ends is
+        #: never respawned again.
+        self._no_restart = False
 
     # -- leases --------------------------------------------------------------
 
@@ -759,6 +762,12 @@ class GeteventStream:
             daemon=True,
         )
         self._teardown.start()
+
+    def suppress_restarts(self) -> None:
+        """No respawn from now on (a quit is in progress): a getevent that
+        ends (or is killed) stays ended.
+        """
+        self._no_restart = True
 
     def wait_closed(self, timeout: float = 5.0) -> None:
         """Wait for the background teardown of the last release."""
@@ -935,7 +944,7 @@ class GeteventStream:
             with self._lock:
                 if self._proc is proc and proc.poll() is not None:
                     self._pid = None  # dead: the pid may be reused
-            if self._stop.is_set():
+            if self._stop.is_set() or self._no_restart:
                 break
             delay = self._backoff[min(attempt, len(self._backoff) - 1)]
             attempt += 1
@@ -945,7 +954,7 @@ class GeteventStream:
             if self._stop.wait(delay):
                 break
             with self._lock:
-                if self._stop.is_set():
+                if self._stop.is_set() or self._no_restart:
                     break
                 try:
                     self._spawn()
@@ -1054,6 +1063,9 @@ class TrackingService:
         self._op_lock = threading.Lock()
         self._streams: dict[str, GeteventStream] = {}
         self._closing: dict[str, GeteventStream] = {}
+        #: A quit is in progress (:meth:`shutdown`): no new session, no
+        #: getevent / helper restart.
+        self._quitting = False
         # session state (guarded by _lock)
         self._active = False
         self._serial: str | None = None
@@ -1088,7 +1100,10 @@ class TrackingService:
         self._last_screen: tuple | None = None
         self._last_window_host = 0.0
         self._activities: list[dict] = []
-        self._screen_req: dict | None = None
+        #: Screen-change shot requests not started yet (FIFO), and the one
+        #: being settled (``open`` until its frame is captured).
+        self._screen_q: deque[dict] = deque()
+        self._screen_cur: dict | None = None
         self._label_seen = 0
         #: sha256 -> (ref path, seq) per shots folder (a new session or
         #: device writes into another folder: its own files, its own dedupe).
@@ -1103,6 +1118,8 @@ class TrackingService:
         self._shot_lane = _Lane("tracking-shot")
         self._store_lane = _Lane("tracking-store")
         self._probe_lane = _Lane("tracking-probe")
+        #: The pre-change frame hash of a screen event, taken at event time.
+        self._screen_pre_lane = _Lane("tracking-screen-pre")
 
     # -- defaults --------------------------------------------------------------
 
@@ -1195,6 +1212,8 @@ class TrackingService:
                 if stream.leases == 0:
                     self._streams.pop(serial, None)
                 raise RuntimeError(f"getevent could not be started on {serial}")
+            if self._quitting:
+                stream.suppress_restarts()
             return stream
 
     def _stream_closed(self, stream: GeteventStream) -> None:
@@ -1250,6 +1269,8 @@ class TrackingService:
             logger.warning("Tracking: no device")
             return False
         with self._op_lock:
+            if self._quitting:
+                return False
             with self._lock:
                 if self._active:
                     return self._serial == serial
@@ -1266,6 +1287,8 @@ class TrackingService:
         if not serial:
             return None
         with self._op_lock:
+            if self._quitting:
+                return None
             with self._lock:
                 if self._active:
                     return None
@@ -1301,7 +1324,8 @@ class TrackingService:
             self._text = None
             self._last_screen = None
             self._activities = []
-            self._screen_req = None
+            self._screen_q.clear()
+            self._screen_cur = None
             self._session = None
             self._pw_focus = False
             self._label_seen = self._timeline_last_seq()
@@ -1406,16 +1430,40 @@ class TrackingService:
         self._pre_lane.submit(self._manual, gen, t, actor)
         return True
 
-    def shutdown(self, timeout: float = 5.0) -> None:
-        """Process exit: stop Tracking and every getevent, bounded."""
+    def shutdown(
+        self,
+        timeout: float = 5.0,
+        *,
+        reason: str = "exit",
+        actor: str | None = "sandroid",
+    ) -> None:
+        """Quit / process exit: stop Tracking (``tracking/stop`` with
+        ``reason``), the helper (its ``intervention`` off line) and every
+        getevent, waiting up to ``timeout`` for each.
+
+        From the first call on nothing restarts: no new session, no getevent
+        respawn, no helper restart (a quit kills adb processes; a restart
+        would race it).
+        """
+        with self._lock:
+            self._quitting = True
+            helper = self._helper
+            streams = list(self._streams.values()) + list(self._closing.values())
+        for stream in streams:
+            stream.suppress_restarts()
+        suppress = getattr(helper, "suppress_restarts", None)
+        if callable(suppress):
+            with contextlib.suppress(Exception):
+                suppress()
         with contextlib.suppress(Exception):
-            self.stop(reason="exit", actor="sandroid")
+            self.stop(reason=reason, actor=actor)
         t = self._helper_stop
-        if t is not None:
+        if t is not None and t is not threading.current_thread():
             t.join(timeout)
         with self._lock:
             streams = list(self._streams.values()) + list(self._closing.values())
         for stream in streams:
+            stream.suppress_restarts()
             while stream.leases:
                 stream.release()
             stream.wait_closed(timeout)
@@ -1701,6 +1749,7 @@ class TrackingService:
             data["ime"] = True
             if target is not None:
                 target["text"] = target["desc"] = None
+                target.pop("label", None)
         data["target"] = target
         if ime:
             summary = f"{kind.replace('_', ' ')} on keyboard" + (
@@ -1789,6 +1838,18 @@ class TrackingService:
                 for key in ("hint", "password", "editable"):
                     if node.get(key):
                         target[key] = node[key]
+                # A node without its own text/desc (a list row) is named by
+                # its descendants' label ('Battery / Charged'): kept as
+                # ``label``; ``text`` stays the node's own text.
+                label = answer.get("label") if answer.get("target") is node else None
+                if (
+                    isinstance(label, str)
+                    and label.strip()
+                    and not _private(node)
+                    and not node.get("text")
+                    and not node.get("desc")
+                ):
+                    target["label"] = label
                 return target, answer
         return None, {}
 
@@ -2072,12 +2133,48 @@ class TrackingService:
             dev=self._serial,
         )
         if seq is not None and active and _config().shot_screen_change:
-            with self._lock:
-                first = self._screen_req is None
-                self._screen_req = {"seq": seq}
-            if first:
-                self._shot_lane.submit(self._screen_shot, gen)
+            self._request_screen_shot(gen, seq, pkg, cls, title)
         return seq
+
+    def _request_screen_shot(
+        self, gen: int, seq: int, pkg: Any, cls: Any, title: Any
+    ) -> None:
+        """Queue the screen-change shot of line ``seq`` (any thread).
+
+        The pre-change frame's hash is requested now, at event time; the
+        shot waits for a frame that differs from it. Every distinct screen
+        keeps its own request; an activity line (no title) and a window line
+        of the same ``pkg``/``cls`` are one screen: they share one capture
+        while it has not been taken yet (each line still gets its shot line).
+        """
+        ident = (pkg, cls)
+        with self._lock:
+            # Only the latest screen not captured yet can absorb this line.
+            last = self._screen_q[-1] if self._screen_q else self._screen_cur
+            if (
+                last is not None
+                and last["open"]
+                and last["ident"] == ident
+                and not (last["titled"] and title)
+            ):
+                last["seqs"].append(seq)
+                last["titled"] = last["titled"] or bool(title)
+                return
+            helper = self._helper_up()
+            before = (
+                self._screen_pre_lane.submit(helper.shot, hash_only=True)
+                if helper is not None
+                else None
+            )
+            req = {
+                "seqs": [seq],
+                "ident": ident,
+                "titled": bool(title),
+                "before": before,
+                "open": True,
+            }
+            self._screen_q.append(req)
+        self._shot_lane.submit(self._screen_shot, gen, req)
 
     def _start_logcat(self, gen: int, serial: str) -> None:
         argv = [
@@ -2391,6 +2488,25 @@ class TrackingService:
             return None, t0, cap, f"screencap rc={rc}"
         return out, t0, cap, None
 
+    def _capture(self, t: float | None = None) -> dict[str, Any]:
+        """Capture now (helper, else screencap): :meth:`_store` keywords."""
+        helper = self._helper_up()
+        if helper is not None:
+            res = None
+            try:
+                res = helper.shot()
+            except Exception as exc:
+                logger.debug(f"tracking shot failed: {exc}")
+            if res is not None:
+                return {"png": res.png, "via": "helper", "w": res.w, "h": res.h,
+                        "cap_ms": res.cap_ms, "dev_mono": res.t_mono_ms / 1000.0,
+                        "t": t, "error": res.error}  # fmt: skip
+        png, t_host, cap, err = self._screencap()
+        w, h = self.geometry.screen
+        return {"png": png, "via": "screencap", "w": w, "h": h, "cap_ms": cap,
+                "dev_mono": None, "t": t if t is not None else t_host,
+                "error": err}  # fmt: skip
+
     def _take(
         self,
         trigger: str,
@@ -2405,24 +2521,9 @@ class TrackingService:
         """Capture now (helper, else screencap) and write the shot line."""
         if gen != self._gen:
             return None
-        helper = self._helper_up()
-        if helper is not None:
-            res = None
-            try:
-                res = helper.shot()
-            except Exception as exc:
-                logger.debug(f"tracking shot failed: {exc}")
-            if res is not None:
-                return self._store(trigger, res.png, of=of, via="helper", w=res.w, h=res.h,
-                                   cap_ms=res.cap_ms, dev_mono=res.t_mono_ms / 1000.0,
-                                   t=t, actor=actor, error=res.error, extra=extra,
-                                   sensitive=sensitive)  # fmt: skip
-        png, t_host, cap, err = self._screencap()
-        w, h = self.geometry.screen
-        return self._store(trigger, png, of=of, via="screencap", w=w, h=h, cap_ms=cap,
-                           dev_mono=None, t=t if t is not None else t_host,
-                           actor=actor, error=err, extra=extra,
-                           sensitive=sensitive)  # fmt: skip
+        cap = self._capture(t)
+        return self._store(trigger, cap.pop("png"), of=of, actor=actor, extra=extra,
+                           sensitive=sensitive, **cap)  # fmt: skip
 
     def _sink_buffering(self) -> bool:
         """The timeline holds lines back (no session folder yet): a line's
@@ -2651,18 +2752,81 @@ class TrackingService:
                    extra={"input": kind, "stable": stable, "settle_ms": waited},
                    sensitive=sensitive)  # fmt: skip
 
-    def _screen_shot(self, gen: int) -> None:
-        cfg = _config()
-        helper = self._helper_up()
-        if helper is not None:
-            self._settle(helper, cfg)
-        else:
+    def _settle_change(
+        self, helper: Any, cfg: Any, before: str | None
+    ) -> tuple[bool, bool, float]:
+        """hash_only shots until the frame differs from ``before`` (the
+        pre-change frame) and two consecutive hashes match, or
+        ``settle_max_ms``: ``(changed, stable, ms waited)``. Without
+        ``before`` only the settling counts.
+        """
+        t0 = time.monotonic()
+        deadline = t0 + cfg.settle_max_ms / 1000.0
+        prev = None
+        changed = stable = False
+        while time.monotonic() < deadline:
             time.sleep(cfg.settle_interval_ms / 1000.0)
+            try:
+                r = helper.shot(hash_only=True)
+            except Exception:
+                r = None
+            if r is None:
+                break
+            new = before is None or r.hash != before
+            changed = changed or (before is not None and new)
+            stable = r.hash == prev
+            if stable and new:
+                break
+            prev = r.hash
+        return changed, stable, round((time.monotonic() - t0) * 1000.0, 1)
+
+    def _screen_shot(self, gen: int, req: dict) -> None:
+        """Shot lane: one screen-change request (FIFO, so the oldest).
+
+        Waits until the frame differs from the pre-change frame (hashed at
+        event time) and settles, at most ``settle_max_ms``; a frame that
+        never changed is still kept, flagged ``data.unchanged``. One capture
+        serves every line of the request (the later ones are dedup lines).
+        """
         with self._lock:
-            req, self._screen_req = self._screen_req, None
-        if req is None or gen != self._gen or not _config().shot_screen_change:
-            return
-        self._take("screen_change", of=req["seq"], gen=gen)
+            with contextlib.suppress(ValueError):
+                self._screen_q.remove(req)
+            self._screen_cur = req
+        try:
+            cfg = _config()
+            if gen != self._gen or not cfg.shot_screen_change:
+                return
+            extra: dict[str, Any] = {}
+            helper = self._helper_up()
+            if helper is not None:
+                before = None
+                fut = req["before"]
+                if fut is not None:
+                    with contextlib.suppress(Exception):
+                        res = fut.result(timeout=cfg.settle_max_ms / 1000.0)
+                        before = getattr(res, "hash", None)
+                changed, stable, waited = self._settle_change(helper, cfg, before)
+                extra = {"stable": stable, "settle_ms": waited}
+                if before is not None and not changed:
+                    extra["unchanged"] = True  # the frame never left the old one
+            else:
+                time.sleep(cfg.settle_interval_ms / 1000.0)
+            with self._lock:
+                req["open"] = False
+                seqs = list(req["seqs"])
+            if gen != self._gen or not _config().shot_screen_change:
+                return
+            cap = self._capture()
+            png = cap.pop("png")
+            for seq in seqs:
+                if gen != self._gen:
+                    return
+                self._store("screen_change", png, of=seq, extra=extra, **cap)
+        finally:
+            with self._lock:
+                req["open"] = False
+                if self._screen_cur is req:
+                    self._screen_cur = None
 
     def _manual(self, gen: int, t: float, actor: str) -> None:
         self._take("manual", of=None, gen=gen, t=t, actor=actor)
@@ -2890,11 +3054,21 @@ def is_active(serial: str | None = None) -> bool:
     return service is not None and service.is_active(serial)
 
 
-def _atexit_stop() -> None:
+def shutdown_tracking(
+    reason: str = "quit", timeout: float = 5.0, actor: str | None = "sandroid"
+) -> None:
+    """Quit step: stop Tracking (``tracking/stop`` with ``reason``), its
+    helper and every getevent, and allow no restart from now on. Touches
+    only a service that exists already (none is created on the way out).
+    """
     service = _SERVICE
     if service is not None:
-        with contextlib.suppress(Exception):
-            service.shutdown(5.0)
+        service.shutdown(timeout, reason=reason, actor=actor)
+
+
+def _atexit_stop() -> None:
+    with contextlib.suppress(Exception):
+        shutdown_tracking("exit", 5.0)
 
 
 def reset_for_tests() -> None:
@@ -2919,4 +3093,5 @@ __all__ = [
     "parse_getevent",
     "parse_getevent_p",
     "parse_wm_size",
+    "shutdown_tracking",
 ]

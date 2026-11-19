@@ -1891,3 +1891,273 @@ def test_record_display_callbacks_never_block_the_reader(env, cfg, monkeypatch):
         assert rec.event_count == 12
         hang.set()
         rec.stop()
+
+
+# --------------------------------------------------------------------------
+# E2E round 1 fixes (scratchpad/e2e)
+# --------------------------------------------------------------------------
+
+
+def _quit_stubs(monkeypatch, on_task_kill):
+    from sandroid import services
+    from sandroid.core import ui_request_bus
+    from sandroid.services import setup_checks
+    from sandroid.tui.controllers import quit_controller as qc
+
+    monkeypatch.setattr(qc, "_flush_timeline", lambda timeout: None)
+    monkeypatch.setattr(qc, "_close_timeline", lambda reason, timeout: None)
+    monkeypatch.setattr(qc, "shutdown_network", lambda timeout=0: None)
+    monkeypatch.setattr(qc, "run_shutdown_hooks", lambda timeout=0: None)
+    monkeypatch.setattr(qc.QuitController, "_stop_frida_sessions",
+                        staticmethod(lambda: None))  # fmt: skip
+    monkeypatch.setattr(qc.QuitController, "_cleanup_rest", staticmethod(lambda: None))
+    monkeypatch.setattr(setup_checks, "restore_selinux_on_quit", lambda: None)
+    bus = SimpleNamespace(shutdown=lambda: None)
+    monkeypatch.setattr(ui_request_bus.UIRequestBus, "get", staticmethod(lambda: bus))
+    monkeypatch.setattr(services, "get_task_service",
+                        lambda: SimpleNamespace(stop_all=on_task_kill))  # fmt: skip
+    return qc
+
+
+def test_quit_stops_tracking_before_the_task_kill_and_nothing_restarts(
+    env, cfg, monkeypatch
+):
+    """F1: quitting with Tracking on wrote no tracking/stop and no
+    intervention-off line; the task kill then killed getevent and the helper,
+    which restarted ("helper lost · restarting") during the quit.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    seen: dict = {}
+
+    def task_kill():  # what the background-task / untracked-work kill does
+        seen["active"] = svc.is_active()
+        seen["helper_stopped"] = helpers[0].stopped
+        seen["leases"] = sum(s.leases for s in svc._streams.values())
+        for proc in popen.of("getevent -t"):
+            proc.terminate()
+
+    qc = _quit_stubs(monkeypatch, task_kill)
+    monkeypatch.setattr(ts, "RESTART_BACKOFF_S", (0.05,))
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        qc.QuitController().force_exit()
+        time.sleep(0.4)
+        assert svc.start(SERIAL) is False  # nothing starts while quitting
+    assert seen == {"active": False, "helper_stopped": True, "leases": 0}
+    stop = of(lines, "tracking", "stop")
+    assert len(stop) == 1
+    assert stop[0]["data"]["reason"] == "quit"
+    off = [x for x in of(lines, "sandroid", "intervention")
+           if x["data"]["state"] == "off"]  # fmt: skip
+    assert len(off) == 1
+    assert [x["data"]["helper"] for x in of(lines, "tracking", "helper")] == [
+        "connected",
+        "stopped",
+    ]
+    assert len(popen.of("getevent -t")) == 1  # never respawned
+    assert popen.of("getevent -t")[0].terminated
+
+
+def test_a_getevent_killed_while_quitting_is_not_respawned(tmp_path):
+    """F1: the getevent restart loop stops once a quit suppressed it."""
+    popen = FakePopen()
+    stream = ts.GeteventStream(
+        SERIAL, tmp_path / "ge.txt", popen=popen, run=FakeRun(), backoff=(0.05,)
+    )
+    assert stream.acquire()
+    popen.procs[0].terminate()  # not suppressed: respawned
+    assert wait_for(lambda: len(popen.procs) == 2)
+    stream.suppress_restarts()
+    popen.procs[1].terminate()
+    time.sleep(0.3)
+    assert len(popen.procs) == 2
+    stream.release()
+    stream.wait_closed(2.0)
+
+
+def test_quit_paths_stop_tracking(monkeypatch):
+    """F1: emergency_cleanup and the atexit hook stop Tracking too (and
+    never create the service on the way out).
+    """
+    from sandroid.tui.controllers import quit_controller as qc
+
+    calls = []
+    fake = SimpleNamespace(
+        shutdown=lambda timeout, reason, actor: calls.append((reason, timeout))
+    )
+    monkeypatch.setattr(qc, "shutdown_network", lambda timeout=0: None)
+    monkeypatch.setattr(qc, "_close_timeline", lambda reason, timeout: None)
+    monkeypatch.setattr(ts, "_SERVICE", None)
+    qc.emergency_cleanup()
+    ts._atexit_stop()
+    assert calls == []
+    assert ts._SERVICE is None
+    monkeypatch.setattr(ts, "_SERVICE", fake)
+    qc.emergency_cleanup()
+    ts._atexit_stop()
+    assert calls == [("forced-exit", 2.0), ("exit", 5.0)]
+
+
+ROW_REPLY = {  # the real node_at answer of the E2E tap on Settings > Battery
+    "type": "node_at",
+    "cached": {
+        "window": {"id": 379, "type": "app", "title": "Settings"},
+        "pkg": "com.android.settings",
+        "hit": {
+            "cls": "android.widget.TextView",
+            "text": "Battery",
+            "rid": "android:id/title",
+            "bounds": [189, 1757, 357, 1828],
+        },
+        "path": ["RecyclerView#recycler_view", "LinearLayout", "TextView#title"],
+        "target": {
+            "cls": "android.widget.LinearLayout",
+            "bounds": [0, 1703, 1080, 1934],
+            "clickable": True,
+        },
+        "label": "Battery / Charged",
+    },
+    "live": {"hit": None, "reason": "no_window"},
+}
+
+
+def test_a_row_without_text_keeps_its_descendant_label(env, cfg):
+    """F3: the summary said 'Battery / Charged' but the target kept no name,
+    so the report printed 'LinearLayout'.
+    """
+    from sandroid.core import report_engine
+
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        helpers[0].node_reply = ROW_REPLY
+        ge.feed(*tap_lines(5.0))
+        assert wait_for(lambda: of(lines, "input", "tap"))
+    tap = of(lines, "input", "tap")[0]
+    target = tap["data"]["target"]
+    assert tap["summary"] == "tap 'Battery / Charged' (LinearLayout)"
+    assert target["text"] is None  # still the node's OWN text
+    assert target["label"] == "Battery / Charged"
+    assert report_engine.element_name(target) == "Battery / Charged"
+
+
+def _frame_png(frame: str) -> bytes:
+    return b"\x89PNG\r\n\x1a\n" + frame.encode() * 8
+
+
+def _screen_helper(h: FakeHelper, frame: str) -> None:
+    """The helper's frame is ``h.frame`` (what the device shows now)."""
+    h.frame = frame
+
+    def shot(*, hash_only=False, timeout=5.0):
+        f = h.frame
+        if hash_only:
+            return ShotResult(1.0, 1080, 2424, f, 3.0, None, None)
+        return ShotResult(1.0, 1080, 2424, f, 14.0, _frame_png(f), "/x")
+
+    h.shot = shot
+
+
+def _sha(frame: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(_frame_png(frame)).hexdigest()
+
+
+SETTINGS = "com.android.settings"
+SUB = "com.android.settings.SubSettings"
+
+
+def test_screen_change_shot_waits_for_the_new_screen(env, cfg):
+    """F2: a logcat activity line fires before the new activity draws; the
+    shot showed the PREVIOUS screen, and the window line that followed lost
+    its own shot. E2E: activity SubSettings (#191), window SubSettings ·
+    Battery (#193), window homepage (#198).
+    """
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_screen_change = True
+    cfg.settle_interval_ms = 100
+    cfg.settle_max_ms = 2000
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        _screen_helper(h, "home")
+        svc._emit_screen("activity", pkg=SETTINGS, cls=SUB, title=None,
+                         window_id=None, via="logcat", dev_mono=1.0)  # fmt: skip
+        time.sleep(0.15)
+        h.on_event({"type": "ev", "ev": "WINDOW_STATE_CHANGED", "pkg": SETTINGS,
+                    "cls": SUB, "text": "Battery", "window_id": 422,
+                    "t_mono_ms": 2000.0}, time.time())  # fmt: skip
+        time.sleep(0.3)
+        h.frame = "battery"  # drawn late (a loaded emulator)
+        assert wait_for(lambda: len(of(lines, "shot", "screen_change")) == 2)
+        time.sleep(0.2)
+        h.on_event({"type": "ev", "ev": "WINDOW_STATE_CHANGED", "pkg": SETTINGS,
+                    "cls": f"{SETTINGS}.homepage.SettingsHomepageActivity",
+                    "text": "Settings", "window_id": 413,
+                    "t_mono_ms": 3000.0}, time.time())  # fmt: skip
+        time.sleep(0.3)
+        h.frame = "home"
+        assert wait_for(lambda: len(of(lines, "shot", "screen_change")) == 3)
+    act = of(lines, "screen", "activity")[0]
+    win_battery, win_home = of(lines, "screen", "window")
+    shots = of(lines, "shot", "screen_change")
+    assert [s["ref"]["of"] for s in shots] == [
+        act["seq"],
+        win_battery["seq"],
+        win_home["seq"],
+    ]
+    assert [s["ref"]["sha256"] for s in shots] == [
+        _sha("battery"),
+        _sha("battery"),  # the window's own line, same capture
+        _sha("home"),
+    ]
+    assert shots[1]["data"]["dup_of"] == shots[0]["seq"]
+    for s in shots:
+        assert s["data"]["stable"] is True
+        assert "unchanged" not in s["data"]
+
+
+def test_screen_change_shot_flags_a_frame_that_never_changed(env, cfg):
+    """F2: no new frame within settle_max_ms: the stable frame is kept,
+    flagged ``data.unchanged``.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_screen_change = True
+    cfg.settle_interval_ms = 100
+    cfg.settle_max_ms = 500
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        _screen_helper(helpers[0], "same")
+        svc._emit_screen("window", pkg="a", cls="a.B", title="T",
+                         window_id=1, via="a11y", dev_mono=1.0)  # fmt: skip
+        assert wait_for(lambda: of(lines, "shot", "screen_change"))
+    shot = of(lines, "shot", "screen_change")[0]
+    assert shot["data"]["unchanged"] is True
+    assert shot["data"]["stable"] is True
+    assert shot["data"]["settle_ms"] >= 400
+    assert shot["ref"]["sha256"] == _sha("same")
+
+
+def test_invisible_mode_logcat_shot_waits_for_the_new_screen(env, cfg):
+    """F2, invisible mode (screen lines from logcat only): E2E #106 was the
+    before-tap image, #101 the splash of the previous screen.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_screen_change = True
+    cfg.logcat_screen_backup = True
+    cfg.settle_interval_ms = 100
+    cfg.settle_max_ms = 2000
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg, mode="invisible")
+        _screen_helper(helpers[0], "before")
+        assert wait_for(lambda: popen.of("wm_set_resumed_activity"))
+        popen.of("wm_set_resumed_activity")[0].feed(ACTIVITY)
+        assert wait_for(lambda: of(lines, "screen", "activity"))
+        time.sleep(0.35)
+        helpers[0].frame = "after"
+        assert wait_for(lambda: of(lines, "shot", "screen_change"))
+    shot = of(lines, "shot", "screen_change")[0]
+    assert shot["ref"]["of"] == of(lines, "screen", "activity")[0]["seq"]
+    assert shot["ref"]["sha256"] == _sha("after")
+    assert "unchanged" not in shot["data"]
