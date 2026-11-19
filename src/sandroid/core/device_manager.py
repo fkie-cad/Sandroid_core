@@ -94,6 +94,10 @@ class DeviceManager:
         """Initialize the device manager."""
         self._devices: dict[str, Device] = {}
         self._active_device: Device | None = None
+        # Last serial made active; auto-select may return to it after a
+        # disconnect even when other devices are online (never to another).
+        self._last_active_serial: str | None = None
+        self._ambiguous_serials: tuple[str, ...] = ()
         self._on_device_change_callbacks: list[Callable[[Device], None]] = []
         self._on_devices_updated_callbacks: list[Callable[[list[Device]], None]] = []
         # Serializes refresh_devices() across background poll threads; must be
@@ -531,6 +535,7 @@ class DeviceManager:
             self._reset_device_state(previous_serial=self._active_device.serial)
 
         self._active_device = device
+        self._last_active_serial = serial
 
         # Configure ADB to target this device
         Adb.set_target_device(serial)
@@ -751,13 +756,17 @@ class DeviceManager:
         self._on_devices_updated_callbacks.append(callback)
 
     def auto_select_device(self) -> Device | None:
-        """Automatically select a device, preferring emulators over physical devices.
+        """Automatically select a device -- only when the choice is unambiguous.
 
         Selection priority:
-        1. If only one device is connected, select it
-        2. If multiple devices, prefer emulators (they have root access by default)
-        3. If multiple emulators, select the first one
-        4. If only physical devices, don't auto-select (user should choose)
+        1. An explicitly requested serial (``--serial`` / config /
+           ``ANDROID_SERIAL``), and never another device
+        2. If only one device is ready, select it
+        3. If several are ready, return to the previously active device when
+           it is back (reconnect after a snapshot load / emulator restart)
+        4. Otherwise don't select: the user must choose (``--serial`` or the
+           device selector). Picking "the first emulator" once prepared and
+           hooked another session's emulator.
 
         Returns:
             The selected Device, or None if no suitable device found
@@ -794,33 +803,23 @@ class DeviceManager:
             self.set_active_device(ready_devices[0].serial)
             return ready_devices[0]
 
-        # Multiple devices connected - prefer emulators
-        emulators = [d for d in ready_devices if d.is_emulator]
-        physical = [d for d in ready_devices if d.is_physical]
-
-        if emulators:
-            # Select first emulator (they have root by default, better for Sandroid)
-            selected = emulators[0]
-            logger.info(
-                f"Multiple devices connected ({len(ready_devices)}). "
-                f"Auto-selecting emulator: {selected.display_name}"
-            )
-            if physical:
-                logger.info(
-                    f"Physical device(s) also connected: "
-                    f"{', '.join(d.short_name for d in physical)}. "
-                    "Use device selector to switch if needed."
-                )
-            self.set_active_device(selected.serial)
-            return selected
-
-        # Only physical devices - don't auto-select, user should choose
-        logger.info(
-            f"Multiple physical devices connected ({len(physical)}). "
-            "Use device selector to choose one. "
-            "Note: Physical devices require root access for full Sandroid functionality."
+        # Several devices ready: only return to the one this session used.
+        previous = next(
+            (d for d in ready_devices if d.serial == self._last_active_serial), None
         )
+        if previous is not None:
+            logger.info(f"Reconnected to the previous device: {previous.display_name}")
+            self.set_active_device(previous.serial)
+            return previous
 
+        serials = tuple(d.serial for d in ready_devices)
+        # The device poll lands here every few seconds: say it once per set.
+        log = logger.debug if serials == self._ambiguous_serials else logger.warning
+        self._ambiguous_serials = serials
+        log(
+            f"More than one device is connected ({', '.join(serials)}); not "
+            "selecting one. Choose with the device selector or --serial."
+        )
         return None
 
     def has_devices(self) -> bool:

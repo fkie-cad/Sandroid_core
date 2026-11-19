@@ -59,7 +59,7 @@ class DeviceManagerProtocol(Protocol):
         ...
 
     def auto_select_device(self) -> Optional["Device"]:
-        """Automatically select a device, preferring emulators."""
+        """Automatically select a device (only when unambiguous)."""
         ...
 
     def get_device(self, serial: str) -> Optional["Device"]:
@@ -257,10 +257,11 @@ class DeviceController:
         ``DeviceSelectionModal`` so the user picks explicitly instead of
         silently landing on ``emulators[0]``.
 
-        This is deliberately startup-only: any later mid-session auto-select
-        (e.g. after a disconnect leaves 2+ devices) keeps today's silent
-        behavior and is untouched by this method. The session is never left
-        device-less just because the picker was cancelled or unavailable.
+        This is deliberately startup-only. Normally the StartupScreen already
+        asked (``initialize_core`` refuses to guess among 2+ devices), so a
+        device is active here. ``auto_select_device()`` never picks one of
+        several devices either, so a cancelled picker leaves the session
+        without a device (press D to choose) rather than on a guessed one.
 
         Args:
             dm: The device manager instance.

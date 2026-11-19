@@ -9,6 +9,12 @@ refuses every app-level action (Record, Play, lenses, ...), so only the keys
 below work. On a failed start: ``r`` retries, ``d`` picks another device
 (the device selector, e.g. after ``--serial`` named a missing one), ``q``
 quits with :data:`EXIT_STARTUP_FAILED`. Upper-case works too.
+
+With several online devices and no ``--serial`` / ``$ANDROID_SERIAL`` /
+``emulator.serial``, ``initialize_core`` refuses to guess
+(:class:`~sandroid.core.exceptions.MultipleDevicesError`) before any device
+work, and the device selector opens right away; the pick is pinned like
+``--serial``.
 """
 
 import logging
@@ -174,12 +180,21 @@ class StartupScreen(Screen):
 
     def _run_initialization(self) -> None:
         """Run blocking initialization in a background thread."""
+        from sandroid.core.exceptions import MultipleDevicesError
+
         try:
             logger.debug("[STARTUP] Beginning core initialization")
             self._update_status("Initializing core...")
             from sandroid.core.initializer import initialize_core
 
-            initialize_core(self._config)
+            try:
+                initialize_core(self._config)
+            except MultipleDevicesError as e:
+                # Several devices and no --serial: ask before anything (adb
+                # root, setenforce, frida-server) touches one of them.
+                logger.info(f"[STARTUP] {e}")
+                self.app.call_from_thread(self._ask_for_device, e.serials)
+                return
             logger.debug("[STARTUP] Core initialization complete")
 
             self._update_status("Checking ADB...")
@@ -251,6 +266,21 @@ class StartupScreen(Screen):
             hint.display = True
         except NoMatches:
             pass
+
+    def _ask_for_device(self, serials: list[str]) -> None:
+        """Several devices are online and none is pinned: open the picker.
+
+        Shown as the (device-problem) error state, so cancelling the picker
+        leaves ``d`` (pick), ``r`` (ask again) and ``q`` (quit) -- nothing
+        has been done to any device yet.
+        """
+        self._show_error(
+            f"More than one device is connected ({', '.join(serials)}).\n"
+            "Choose the device for this session (or start with --serial).",
+            device_problem=True,
+        )
+        self.status_text = "Choose a device"
+        self.action_pick_device()
 
     def action_retry(self) -> None:
         """Retry initialization (``r`` / ``R``)."""

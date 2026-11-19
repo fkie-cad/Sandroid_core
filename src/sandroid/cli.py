@@ -74,8 +74,9 @@ def __getattr__(name: str):
     default=None,
     help=(
         "ADB serial of the device to use (e.g. emulator-5556). Default: "
-        "$ANDROID_SERIAL, then config emulator.serial, then auto-select "
-        "(prefers emulators)."
+        "$ANDROID_SERIAL, then config emulator.serial, then the only "
+        "connected device. With several devices and none of these, the TUI "
+        "asks and headless/CLI modes exit with an error."
     ),
 )
 @click.option(

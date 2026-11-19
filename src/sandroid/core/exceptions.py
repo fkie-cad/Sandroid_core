@@ -13,6 +13,28 @@ class DeviceNotAvailableError(SandroidError):
     """
 
 
+class MultipleDevicesError(DeviceNotAvailableError):
+    """More than one device is online and none was chosen explicitly.
+
+    Raised by :func:`sandroid.core.initializer.initialize_core` before any
+    device work (no ``adb root``, ``setenforce``, Frida), so Sandroid never
+    guesses which of several devices -- possibly another session's emulator
+    -- to prepare. The TUI answers it with the device picker; headless and
+    CLI modes report it and exit.
+
+    Attributes:
+        serials: The online (``state == "device"``) serials, in adb order.
+    """
+
+    def __init__(self, serials: list[str]):
+        self.serials = list(serials)
+        super().__init__(
+            f"More than one device is connected ({', '.join(self.serials)}) and "
+            "none was selected. Choose one with --serial SERIAL, $ANDROID_SERIAL "
+            "or emulator.serial in the config."
+        )
+
+
 class APKDownloadError(SandroidError):
     """Base exception for APK download errors."""
 

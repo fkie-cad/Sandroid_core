@@ -262,6 +262,200 @@ def test_headless_run_analysis_refuses_without_device(fake_adb, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Several devices, no pin: ask (TUI) / refuse (headless) before device work
+# ---------------------------------------------------------------------------
+
+#: adb arguments that change a device (prep, root, Frida, installs).
+_DEVICE_CHANGING = ("root", "setenforce", "frida", "install", "push", "kill")
+
+
+def _device_changing(calls: list[str]) -> list[str]:
+    return [c for c in calls if any(word in c for word in _DEVICE_CHANGING)]
+
+
+@pytest.fixture
+def core_spies(monkeypatch):
+    """Record Toolbox.init / prepare_device instead of running them."""
+    from sandroid.core import emulator_guard, initializer
+    from sandroid.core.toolbox import Toolbox
+
+    spies = SimpleNamespace(inits=[], prepared=[])
+    monkeypatch.setattr(
+        Toolbox, "config", getattr(Toolbox, "config", None), raising=False
+    )
+    monkeypatch.setattr(
+        Toolbox,
+        "init",
+        classmethod(lambda cls: spies.inits.append(Adb.get_target_device())),
+    )
+    monkeypatch.setattr(
+        initializer,
+        "prepare_device",
+        lambda console=None: spies.prepared.append(Adb.get_target_device()),
+    )
+    monkeypatch.setattr(emulator_guard, "start_memory_guard", lambda config: None)
+    _no_session_side_effects(monkeypatch)
+    return spies
+
+
+@pytest.mark.parametrize("prepare", [False, True])
+def test_initialize_core_refuses_two_devices_without_a_pin(
+    fake_adb, core_spies, prepare
+):
+    from sandroid.core.exceptions import MultipleDevicesError
+    from sandroid.core.initializer import initialize_core
+
+    fake_adb.set_devices(_TWO_EMUS)
+    with pytest.raises(MultipleDevicesError) as exc:
+        initialize_core(SimpleNamespace(), prepare=prepare)
+    assert exc.value.serials == ["emulator-5556", "emulator-5554"]
+    assert "emulator-5556, emulator-5554" in str(exc.value)
+    assert "--serial" in str(exc.value)
+    assert core_spies.inits == []
+    assert core_spies.prepared == []
+    assert fake_adb.calls() == ["devices"]  # read-only enumeration only
+    assert Adb.get_target_device() is None
+
+
+@pytest.mark.parametrize("how", ["config", "env"])
+def test_initialize_core_with_a_pin_skips_the_question(
+    fake_adb, core_spies, monkeypatch, how
+):
+    from sandroid.core.initializer import initialize_core
+
+    fake_adb.set_devices(_TWO_EMUS)
+    config = SimpleNamespace(emulator=SimpleNamespace(serial=None))
+    if how == "config":
+        config.emulator.serial = "emulator-5554"
+    else:
+        monkeypatch.setenv("ANDROID_SERIAL", "emulator-5554")
+    initialize_core(config, prepare=True)
+    assert core_spies.prepared == ["emulator-5554"]
+    assert core_spies.inits == ["emulator-5554"]
+
+
+def test_initialize_core_with_one_device_is_unchanged(fake_adb, core_spies):
+    from sandroid.core.initializer import initialize_core
+
+    fake_adb.set_devices(_ONE_EMU + "emulator-5554 offline transport_id:2\n")
+    initialize_core(SimpleNamespace(), prepare=True)  # offline does not count
+    assert core_spies.prepared == ["emulator-5556"]
+    assert core_spies.inits == ["emulator-5556"]
+
+
+def test_auto_select_never_guesses_among_several_devices(fake_adb, monkeypatch):
+    """Mid-session too: no silent switch to another emulator after a loss."""
+    _no_session_side_effects(monkeypatch)
+    third = "emulator-5558 device product:sdk model:sdk device:emu transport_id:3\n"
+    fake_adb.set_devices(_TWO_EMUS + third)
+    dm = DeviceManager.get()
+    dm.refresh_devices()
+    assert dm.active_device is None  # used to be emulators[0]
+
+    dm.set_active_device("emulator-5554")
+    fake_adb.set_devices(_ONE_EMU + third)  # 5554 drops out (snapshot load)
+    dm.refresh_devices()
+    assert dm.active_device is None  # not 5556 / 5558: someone else's
+
+    fake_adb.set_devices(_TWO_EMUS + third)  # 5554 is back
+    dm.refresh_devices()
+    assert dm.active_device.serial == "emulator-5554"
+
+
+def test_cli_headless_two_devices_without_serial_refuses(
+    fake_adb, tmp_path, monkeypatch
+):
+    """``--headless`` with two devices and no pin: exit 1, list the serials."""
+    import AndroidFridaManager
+    from click.testing import CliRunner
+
+    from sandroid.cli import main
+
+    def _no_afm(*args, **kwargs):
+        raise AssertionError("AndroidFridaManager must not be created")
+
+    monkeypatch.setattr(AndroidFridaManager, "FridaManager", _no_afm)
+    monkeypatch.setattr(AndroidFridaManager, "JobManager", _no_afm)
+    fake_adb.set_devices(_TWO_EMUS)
+
+    work = tmp_path / "work"
+    work.mkdir()
+    results = tmp_path / "results"
+    (work / "sandroid.toml").write_text(
+        "[paths]\n"
+        f'results_path = "{results.as_posix()}"\n'
+        f'raw_results_path = "{(results / "raw").as_posix()}"\n'
+        "[emulator]\n"
+        f'adb_path = "{fake_adb.path.as_posix()}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    _restore_cli_globals(monkeypatch)
+
+    res = CliRunner().invoke(main, ["--headless", "--mode", "forensic", "-n", "2"])
+
+    out = " ".join(res.output.split())
+    assert res.exit_code == 1, res.output
+    assert "More than one device is connected (emulator-5556, emulator-5554)" in out
+    assert "--serial" in out
+    assert fake_adb.calls() == ["devices"]
+    assert _device_changing(fake_adb.calls()) == []
+
+
+async def test_tui_two_devices_without_pin_asks_before_any_prep(
+    fake_adb, core_spies, monkeypatch
+):
+    """The picker opens before Toolbox.init / setup checks touch a device."""
+    from sandroid import services
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.screens import startup_screen
+
+    monkeypatch.setattr(startup_screen, "_startup_failure", None)
+    setup_calls: list[str | None] = []
+
+    class _Setup:
+        def check_critical_setup(self):
+            setup_calls.append(Adb.get_target_device())
+            return SimpleNamespace(
+                success=False,
+                message="stop here",
+                errors=[],
+                adb_available=True,
+                device_connected=True,
+            )
+
+    monkeypatch.setattr(services, "get_setup_service", _Setup)
+    fake_adb.set_devices(_TWO_EMUS)
+    config = SimpleNamespace(emulator=SimpleNamespace(serial=None))
+    app = SandroidTUI(startup_config=config)
+
+    async with app.run_test(size=(160, 45)) as pilot:
+        for _ in range(60):
+            await pilot.pause(0.05)
+            if type(app.screen).__name__ == "DeviceSelectionModal":
+                break
+        assert type(app.screen).__name__ == "DeviceSelectionModal"
+        assert core_spies.inits == []
+        assert setup_calls == []
+        assert _device_changing(fake_adb.calls()) == []
+        assert Adb.get_target_device() is None
+
+        await pilot.press("enter")
+        for _ in range(60):
+            await pilot.pause(0.05)
+            if setup_calls:
+                break
+        for _ in range(10):
+            await pilot.pause(0.05)
+        picked = config.emulator.serial
+        assert picked in ("emulator-5556", "emulator-5554")
+        assert core_spies.inits == [picked]  # prep only after the choice...
+        assert setup_calls == [picked]  # ...and only on the chosen device
+        assert DeviceManager.preferred_serial() == picked
+
+
+# ---------------------------------------------------------------------------
 # Every adb call carries -s, also across a snapshot-load "disconnect"
 # ---------------------------------------------------------------------------
 
