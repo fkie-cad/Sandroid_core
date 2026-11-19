@@ -2047,3 +2047,35 @@ def test_lifecycle_lock_is_reentrant_and_never_waits_on_the_ui_thread(env):
         with app_start.lifecycle_lock(timeout=1.0):
             pass
     assert not app_start._LIFECYCLE.locked()
+
+
+# -- ⇧K keeps the bypasses armed -----------------------------------------------------
+
+
+def test_kill_keeps_active_bypasses_armed_and_space_applies_them(env, monkeypatch):
+    env.bypass._armed = {"root"}
+    env.bypass._active = {"ssl"}  # on live only (Ctrl+P on the running app)
+
+    assert env.bypass.keep_armed_and_forget() == ["ssl", "root"]
+    assert env.bypass.active_categories() == []
+
+    log: list = []
+    _ladder(env, monkeypatch, log)
+    assert app_start.start_app() == (True, "ok")
+    assert log == [("spawn", {"ssl", "root"})]
+
+
+def test_stop_all_and_a_new_selection_clear_the_armed_set(env):
+    env.bypass._armed = {"ssl"}
+    env.bypass.stop_all()
+    assert env.bypass.armed_categories() == []
+
+    env.bypass._armed = {"ssl"}
+    env.spotlight.set_app(PKG, pid=77)  # same app: kept
+    assert env.bypass.armed_categories() == ["ssl"]
+    env.spotlight.set_app("org.example.other")
+    assert env.bypass.armed_categories() == []
+
+    env.bypass._armed = {"root"}
+    env.spotlight.reset()
+    assert env.bypass.armed_categories() == []

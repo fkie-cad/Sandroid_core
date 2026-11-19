@@ -138,6 +138,7 @@ class SpotlightService:
         Re-selecting the same package without a ``pid`` keeps the known PID
         (and the activity when none is given), so a re-pick of the running
         app does not forget its process. An explicit ``pid=None`` clears it.
+        Selecting another package disarms the bypasses armed for the old one.
 
         Args:
             package_name: Android package name
@@ -166,6 +167,8 @@ class SpotlightService:
         self._logger.debug(
             f"Set spotlight app: {package_name}" + (f" (PID: {pid})" if pid else "")
         )
+        if previous_package and not same:
+            self._disarm_bypasses(previous_package)
 
         self._publish_app_changed(
             package_name=package_name,
@@ -500,7 +503,8 @@ class SpotlightService:
     def reset(self) -> None:
         """Reset all spotlight state.
 
-        Clears the selection (leaves any running app alone).
+        Clears the selection (leaves any running app alone) and disarms the
+        bypasses armed for it.
         """
         with self._lock:
             previous_pkg = self.get_effective_package()
@@ -509,6 +513,7 @@ class SpotlightService:
         self._logger.info("Reset spotlight application")
 
         if previous_pkg:
+            self._disarm_bypasses(previous_pkg)
             self._publish_app_changed(
                 package_name="",
                 previous_package=previous_pkg,
@@ -551,6 +556,21 @@ class SpotlightService:
     # =========================================================================
     # Event Publishing (Private)
     # =========================================================================
+
+    def _disarm_bypasses(self, previous_package: str) -> None:
+        """Armed bypasses are intent for one app: a new selection starts clean."""
+        try:
+            from sandroid.analysis.detection_bypass import get_bypass_service
+
+            cleared = get_bypass_service().disarm_all()
+        except Exception as exc:
+            self._logger.debug(f"Could not disarm the bypasses: {exc}")
+            return
+        if cleared:
+            self._logger.info(
+                f"Selection left {previous_package}: bypass "
+                f"{', '.join(cleared)} disarmed"
+            )
 
     def _publish_app_changed(
         self,

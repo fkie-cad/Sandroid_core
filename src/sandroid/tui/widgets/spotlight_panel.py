@@ -1237,10 +1237,21 @@ class SpotlightPanel(Widget):
         # hang; killing first makes the teardown unloads/detach fast-fail.
         Adb.force_stop(package)
         time.sleep(0.5)
-        self._stop_everything_for(package)
+        # The bypasses that were on stay armed (intent): ␣ starts with them.
+        kept: list[str] = []
+        try:
+            kept = self._bypass().keep_armed_and_forget()
+        except Exception as exc:
+            logger.warning(f"Bypass teardown failed: {exc}")
+        self._stop_app_tasks(package)
         self._reset_frida_session()
         spotlight.set_pid(None)
         self._last_running_state = False
+        if kept:
+            return True, (
+                f"Killed {package} — bypass {', '.join(kept)} stay armed; "
+                "␣ starts with them"
+            )
         return True, f"Killed {package}"
 
     def _work_attach(self) -> tuple[bool, str]:
@@ -1261,19 +1272,28 @@ class SpotlightPanel(Widget):
     def _stop_everything_for(self, package: str) -> int:
         """Stop bypasses (clears armed) + any background tasks for the app.
 
-        Returns the number of items stopped. Does NOT early-return when there
-        are no TaskService tasks — the bypasses are stopped regardless.
+        Stop all: clearing the armed set is the explicit "done" (⇧K keeps
+        it). Returns the number of items stopped. Does NOT early-return when
+        there are no TaskService tasks — the bypasses are stopped regardless.
         """
         stopped = 0
         try:
             stopped += len(self._bypass().stop_all())
         except Exception as exc:
             logger.warning(f"Bypass stop_all failed: {exc}")
+        return stopped + self._stop_app_tasks(package)
+
+    def _stop_app_tasks(self, package: str) -> int:
+        """Stop the app's background tasks except the bypass (done apart)."""
+        stopped = 0
         try:
             svc = self._tasks()
             for t in self._hooks_for_app(package):
+                name = getattr(t, "name", "")
+                if name == "bypass":
+                    continue  # its stop callback would clear the armed set
                 try:
-                    if svc.stop(getattr(t, "name", "")):
+                    if svc.stop(name):
                         stopped += 1
                 except Exception as exc:
                     logger.warning(f"Stop task failed: {exc}")

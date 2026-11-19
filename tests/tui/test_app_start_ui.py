@@ -275,3 +275,116 @@ def test_the_watchdog_does_not_count_a_pre_start_step(monkeypatch):
     with pytest.raises(concurrent.futures.TimeoutError):
         SpotlightPanel._await_action(panel, _SlowFuture(clock, 360))
     assert clock.now == pytest.approx(90.0)
+
+
+# -- ⇧K keeps the armed bypasses; Stop all, ⇧X and a new app clear them --------
+
+
+def _bypass_env(monkeypatch, *, armed=(), active=(), tasks=()):
+    """A real BypassService (no Frida) and fake tasks, adb and JobManager."""
+    from sandroid.analysis import detection_bypass as db
+    from sandroid.core.adb import Adb
+    from sandroid.core.toolbox import Toolbox
+    from sandroid.tui.widgets import spotlight_panel as sp
+
+    state = SimpleNamespace(stopped=[], killed=[], notes=[], resets=[])
+    fake_tasks = SimpleNamespace(
+        get_running_tasks=lambda: list(tasks),
+        stop=lambda name: state.stopped.append(name) or True,
+        is_running=lambda name: False,
+        unregister=lambda name: None,
+    )
+    monkeypatch.setattr(services, "get_task_service", lambda: fake_tasks)
+    monkeypatch.setattr(db, "get_task_service", lambda: fake_tasks)
+    bypass = db.BypassService()
+    bypass._armed, bypass._active = set(armed), set(active)
+    monkeypatch.setattr(db, "_INSTANCE", bypass)
+    monkeypatch.setattr(Adb, "force_stop", staticmethod(state.killed.append))
+    monkeypatch.setattr(
+        Toolbox,
+        "get_frida_job_manager",
+        staticmethod(
+            lambda: SimpleNamespace(reset_session=lambda: state.resets.append(1))
+        ),
+    )
+    real_time = sp.time
+    monkeypatch.setattr(
+        sp, "time", SimpleNamespace(sleep=lambda s: None, monotonic=real_time.monotonic)
+    )
+    monkeypatch.setattr(
+        SpotlightPanel,
+        "_notify",
+        lambda self, message, severity="information": state.notes.append(message),
+    )
+    state.bypass = bypass
+    return state
+
+
+async def test_shift_k_keeps_every_bypass_that_was_on_armed(monkeypatch):
+    svc, _ran = _panel_env(monkeypatch)
+    tasks = (
+        SimpleNamespace(name="fritap", app_name=PKG, display_name="FriTap"),
+        SimpleNamespace(name="bypass", app_name=PKG, display_name="Bypass"),
+    )
+    # root was armed; ssl was only active (Ctrl+P on the running app).
+    env = _bypass_env(monkeypatch, armed={"root"}, active={"ssl"}, tasks=tasks)
+    app = _Harness()
+    async with app.run_test(size=(120, 30)) as pilot:
+        panel = app.query_one(SpotlightPanel)
+        panel.action_kill_app()
+        modal = await until(
+            pilot, lambda: isinstance(app.screen, ConfirmModal) and app.screen
+        )
+        modal._opened_at -= modal.ARM_SECONDS  # read, not typed ahead
+        await pilot.press("y")
+        await until(pilot, lambda: env.notes)
+
+    assert env.notes == [
+        f"Killed {PKG} — bypass ssl, root stay armed; ␣ starts with them"
+    ]
+    assert env.killed == [PKG]
+    assert env.stopped == ["fritap"]  # the bypass task is not stopped
+    assert sorted(env.bypass.armed_categories()) == ["root", "ssl"]
+    assert env.bypass.active_categories() == []
+    assert env.resets == [1]
+    assert svc.get_pid() is None
+
+
+async def test_shift_k_without_bypasses_says_killed(monkeypatch):
+    _panel_env(monkeypatch)
+    env = _bypass_env(monkeypatch)
+    app = _Harness()
+    async with app.run_test(size=(120, 30)) as pilot:
+        await settle(pilot)
+        ok, msg = app.query_one(SpotlightPanel)._work_kill()
+    assert (ok, msg) == (True, f"Killed {PKG}")
+    assert env.bypass.armed_categories() == []
+
+
+async def test_stop_all_clears_the_armed_set(monkeypatch):
+    _panel_env(monkeypatch)
+    env = _bypass_env(monkeypatch, armed={"root"}, active={"ssl"})
+    app = _Harness()
+    async with app.run_test(size=(120, 30)) as pilot:
+        app.query_one(SpotlightPanel).action_stop_all()
+        await until(pilot, lambda: env.notes)
+    assert env.notes == ["Stopped 1 item(s)"]
+    assert env.bypass.armed_categories() == []
+    assert env.killed == []  # the app keeps running
+
+
+async def test_shift_x_and_another_app_disarm(monkeypatch):
+    svc, _ran = _panel_env(monkeypatch)
+    env = _bypass_env(monkeypatch, armed={"ssl", "root"})
+    app = _Harness()
+    async with app.run_test(size=(120, 30)) as pilot:
+        await settle(pilot)
+        svc.set_app(PKG)  # a re-pick of the same app keeps them
+        assert sorted(env.bypass.armed_categories()) == ["root", "ssl"]
+        app.query_one(SpotlightPanel).action_clear_spotlight()  # ⇧X
+        assert env.bypass.armed_categories() == []
+
+        env.bypass._armed = {"ssl"}
+        svc.set_app(PKG)
+        svc.set_app("org.example.other")  # another app: armed was per-app
+        assert env.bypass.armed_categories() == []

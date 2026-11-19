@@ -3341,6 +3341,36 @@ class BypassService:
         """
         self._reset_script_state()
 
+    def keep_armed_and_forget(self) -> list[str]:
+        """Drop the resident script but keep its categories as intent (⇧K).
+
+        The active categories join the armed set (also those turned on live
+        without arming, e.g. Ctrl+P), then the script state is reset like
+        :meth:`forget_process`. The next start applies them all.
+
+        Returns:
+            The armed categories, in display order.
+        """
+        with self._lock:
+            self._armed |= self._active
+            armed = set(self._armed)
+        self._reset_script_state()
+        rank = {c: i for i, c in enumerate(self.categories())}
+        return sorted(armed, key=lambda c: (rank.get(c, len(rank)), c))
+
+    def disarm_all(self) -> list[str]:
+        """Clear the armed set; the live script is left alone.
+
+        Armed is intent for one app: a new spotlight selection starts clean.
+
+        Returns:
+            The categories that were armed.
+        """
+        with self._lock:
+            cleared = sorted(self._armed)
+            self._armed.clear()
+        return cleared
+
     def is_active(self, category: str) -> bool:
         with self._lock:
             return category in self._active
