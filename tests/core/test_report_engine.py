@@ -1066,7 +1066,39 @@ class TestCoverage:
         )
         text = "\n".join(_sentences(doc))
         assert "3 screen-change screenshots were not taken: the next input" in text
+        assert "not kept" not in text
         assert _step(doc, win)["shots"] == []
+
+    def test_unverified_screen_shots_are_stated_not_shown(
+        self, tmp_path, fake_timeline
+    ):
+        """DESIGN_FINAL §12: a screen-change frame still equal to the old
+        screen when the wait ended is dropped (``unverified``); the report
+        states it apart from the late/superseded ones.
+        """
+        tl = TimelineFixture(tmp_path / "dev")
+        tl.add(0, "sandroid", "open", data={"session_id": SESSION_ID})
+        tl.add(1, "tracking", "start", "tracking on", actor="user",
+               data={"mode": "invisible", "reason": "user"})  # fmt: skip
+        act = tl.add(2, "screen", "activity", "→ com.x/.Sub", actor="app",
+                     data={"pkg": "com.x", "cls": "com.x.Sub", "via": "logcat"})  # fmt: skip
+        tl.add(9, "tracking", "stop", "tracking off", actor="user",
+               data={"reason": "user",
+                     "shots_dropped": {"late": 1, "unverified": 2}})  # fmt: skip
+        tl.write()
+        doc = report_engine.build_report(
+            timeline=tl.path,
+            seal=_fake_seal_file(tl.path),
+            scope=report_engine.ReportScope(),
+            bundle_dir=None,
+        )
+        text = "\n".join(_sentences(doc))
+        assert "1 screen-change screenshot was not taken: the next input" in text
+        assert (
+            "2 screen-change screenshots were not kept: the device still showed "
+            "the previous screen" in text
+        )
+        assert _step(doc, act)["shots"] == []
 
     def test_no_timeline_is_stated(self, tmp_path):
         doc = report_engine.build_report(

@@ -79,6 +79,15 @@ LOGCAT_GRACE_S = 0.5
 #: frame was hashed at most this long after the screen event; a later hash
 #: may already show the new screen (or a transition frame).
 SCREEN_BEFORE_MAX_MS = 300.0
+#: A logcat ``screen/activity`` line (``wm_set_resumed_activity``) fires
+#: before the new activity draws, under load seconds before: its shot waits
+#: this many times ``settle_max_ms`` for the change, at most
+#: :data:`LOGCAT_SETTLE_CAP_MS`. A11y window lines are in step with drawing.
+LOGCAT_SETTLE_FACTOR = 2.5
+LOGCAT_SETTLE_CAP_MS = 8_000.0
+#: Frame hashes seen recently (``(device s | None, host start, host end,
+#: hash)``): the "old screen" references of a screen-change shot.
+FRAMES_KEPT = 128
 #: An input received this long (host) before a screen event is never "next";
 #: one received this long after it always is (a snapshot load can rewind the
 #: device clock in between).
@@ -1118,8 +1127,13 @@ class TrackingService:
         #: ``(device s, host epoch)`` of recent finger-downs and keys: a
         #: screen-change shot taken after the next input is not that screen's.
         self._input_seen: deque[tuple[float, float]] = deque(maxlen=64)
-        #: Screen-change shots not taken, per reason (``late``, ``superseded``).
+        #: Screen-change shots not taken, per reason (``late``,
+        #: ``superseded``, ``unverified``).
         self._shot_drops: dict[str, int] = {}
+        #: Every helper frame hash seen (see :data:`FRAMES_KEPT`).
+        self._frames: deque[tuple[float | None, float, float, str]] = deque(
+            maxlen=FRAMES_KEPT
+        )
         self._label_seen = 0
         #: sha256 -> (ref path, seq) per shots folder (a new session or
         #: device writes into another folder: its own files, its own dedupe).
@@ -1343,6 +1357,7 @@ class TrackingService:
             self._screen_q.clear()
             self._screen_cur = None
             self._input_seen.clear()
+            self._frames.clear()
             self._shot_drops = {}
             self._session = None
             self._pw_focus = False
@@ -1643,7 +1658,7 @@ class TrackingService:
             if self._pre_inflight:
                 return None
             self._pre_inflight += 1
-        fut = self._pre_lane.submit(helper.shot)
+        fut = self._pre_lane.submit(self._shot_seen, helper)
         fut.add_done_callback(self._pre_done)
         return fut
 
@@ -2161,7 +2176,9 @@ class TrackingService:
             dev=self._serial,
         )
         if seq is not None and active and _config().shot_screen_change:
-            self._request_screen_shot(gen, seq, pkg, cls, title, dev_mono, t_evt)
+            self._request_screen_shot(
+                gen, seq, pkg, cls, title, dev_mono, t_evt, via=via
+            )
         return seq
 
     def _request_screen_shot(
@@ -2173,6 +2190,8 @@ class TrackingService:
         title: Any,
         dev_mono: float | None = None,
         t_evt: float | None = None,
+        *,
+        via: str | None = None,
     ) -> None:
         """Queue the screen-change shot of line ``seq`` (any thread).
 
@@ -2224,15 +2243,85 @@ class TrackingService:
                 "open": True,
                 "t_evt": t_evt,
                 "ev_dev": float(dev_mono) if dev_mono and dev_mono > 0 else None,
+                "logcat": via == "logcat",
             }
             self._screen_q.append(req)
         self._shot_lane.submit(self._screen_shot, gen, req)
 
-    @staticmethod
-    def _pre_hash(helper: Any) -> tuple[Any, float]:
+    def _pre_hash(self, helper: Any) -> tuple[Any, float]:
         """Screen-pre lane: the pre-change frame hash and its host start."""
         start = time.time()
-        return helper.shot(hash_only=True), start
+        return self._shot_seen(helper, hash_only=True), start
+
+    def _shot_seen(self, helper: Any, **kw: Any) -> Any:
+        """``helper.shot(**kw)``; its frame hash is remembered (with the
+        device capture time and the host request span) as a possible "old
+        screen" reference of later screen-change shots.
+        """
+        h0 = time.time()
+        res = helper.shot(**kw)
+        frame = getattr(res, "hash", None) if res is not None else None
+        if frame:
+            try:
+                ms = float(res.t_mono_ms)
+            except (AttributeError, TypeError, ValueError):
+                ms = 0.0
+            dev = ms / 1000.0 if ms > 0 else None
+            with self._lock:
+                self._frames.append((dev, h0, time.time(), str(frame)))
+        return res
+
+    @staticmethod
+    def _dev_ok(dev: float | None, h0: float, h1: float, req: dict) -> bool:
+        """Device time ``dev`` (taken during the host span ``h0``-``h1``) is
+        on the clock of ``req``'s event: mapped with the event's host-device
+        offset (late by the event's delivery) it falls into that span.
+        """
+        ev_dev = req.get("ev_dev")
+        if dev is None or ev_dev is None:
+            return False
+        mapped = dev + (req["t_evt"] - ev_dev)
+        return h0 - 0.1 <= mapped <= h1 + INPUT_SKEW_S
+
+    def _input_before(self, req: dict) -> tuple[float, float] | None:
+        """The latest input (finger-down or key) before ``req``'s event."""
+        ev_dev, t_evt = req.get("ev_dev"), req["t_evt"]
+        with self._lock:
+            seen = list(self._input_seen)
+        last = None
+        for dev, host in seen:
+            if ev_dev is None:
+                before = host <= t_evt
+            else:
+                before = host <= t_evt - INPUT_SKEW_S or (
+                    dev <= ev_dev and host <= t_evt + INPUT_SKEW_S
+                )
+            if before:
+                last = (dev, host)
+        return last
+
+    def _old_frames(self, req: dict) -> set[str]:
+        """Frame hashes that show the screen before ``req``'s event: the
+        latest frame seen before it, and every frame seen between the last
+        input before the event and the event (a before-tap shot, settle
+        samples; a ripple can make them differ).
+        """
+        with self._lock:
+            frames = list(self._frames)
+        pre = []
+        for dev, h0, h1, frame in frames:
+            ok = self._dev_ok(dev, h0, h1, req)
+            if (dev < req["ev_dev"]) if ok else (h1 <= req["t_evt"]):
+                pre.append((dev if ok else None, h0, frame))
+        if not pre:
+            return set()
+        old = {pre[-1][2]}
+        inp = self._input_before(req)
+        if inp is not None:
+            for dev, h0, frame in pre:
+                if (dev >= inp[0]) if dev is not None else (h0 >= inp[1]):
+                    old.add(frame)
+        return old
 
     def _count_drop_locked(self, req: dict, reason: str) -> None:
         """Lock held: the shot lines of ``req`` are not written (``reason``)."""
@@ -2589,23 +2678,26 @@ class TrackingService:
         return out, t0, cap, None
 
     def _capture(self, t: float | None = None) -> dict[str, Any]:
-        """Capture now (helper, else screencap): :meth:`_store` keywords."""
+        """Capture now (helper, else screencap): :meth:`_store` keywords,
+        plus ``png`` and the helper's frame ``hash`` (``None`` for screencap).
+        """
         helper = self._helper_up()
         if helper is not None:
             res = None
             try:
-                res = helper.shot()
+                res = self._shot_seen(helper)
             except Exception as exc:
                 logger.debug(f"tracking shot failed: {exc}")
             if res is not None:
                 return {"png": res.png, "via": "helper", "w": res.w, "h": res.h,
                         "cap_ms": res.cap_ms, "dev_mono": res.t_mono_ms / 1000.0,
-                        "t": t, "error": res.error}  # fmt: skip
+                        "t": t, "error": res.error,
+                        "hash": getattr(res, "hash", None) or None}  # fmt: skip
         png, t_host, cap, err = self._screencap()
         w, h = self.geometry.screen
         return {"png": png, "via": "screencap", "w": w, "h": h, "cap_ms": cap,
                 "dev_mono": None, "t": t if t is not None else t_host,
-                "error": err}  # fmt: skip
+                "error": err, "hash": None}  # fmt: skip
 
     def _take(
         self,
@@ -2622,6 +2714,7 @@ class TrackingService:
         if gen != self._gen:
             return None
         cap = self._capture(t)
+        cap.pop("hash", None)
         return self._store(trigger, cap.pop("png"), of=of, actor=actor, extra=extra,
                            sensitive=sensitive, **cap)  # fmt: skip
 
@@ -2811,7 +2904,7 @@ class TrackingService:
         while time.monotonic() < deadline:
             time.sleep(cfg.settle_interval_ms / 1000.0)
             try:
-                r = helper.shot(hash_only=True)
+                r = self._shot_seen(helper, hash_only=True)
             except Exception:
                 r = None
             if r is None:
@@ -2856,17 +2949,20 @@ class TrackingService:
         self,
         helper: Any,
         cfg: Any,
-        before: str | None,
+        old: Callable[[], set[str]],
         abort: Callable[[], bool] | None = None,
-    ) -> tuple[bool, bool, float]:
-        """hash_only shots until the frame differs from ``before`` (the
-        pre-change frame) and two consecutive hashes match, or
-        ``settle_max_ms``: ``(changed, stable, ms waited)``. Without
-        ``before`` only the settling counts. ``abort()`` true ends the wait
-        early (the shot is no longer wanted).
+        max_ms: float | None = None,
+    ) -> tuple[bool, bool, float, str | None]:
+        """hash_only shots until the frame is none of ``old()`` (the
+        pre-change frames, asked again each round: references can arrive
+        late) and two consecutive hashes match, or ``max_ms`` (default
+        ``settle_max_ms``): ``(changed, stable, ms waited, last hash)``.
+        Without references only the settling counts. ``abort()`` true ends
+        the wait early (the shot is no longer wanted).
         """
         t0 = time.monotonic()
-        deadline = t0 + cfg.settle_max_ms / 1000.0
+        wait_ms = cfg.settle_max_ms if max_ms is None else max_ms
+        deadline = t0 + wait_ms / 1000.0
         prev = None
         changed = stable = False
         while time.monotonic() < deadline:
@@ -2874,29 +2970,37 @@ class TrackingService:
             if abort is not None and abort():
                 break
             try:
-                r = helper.shot(hash_only=True)
+                r = self._shot_seen(helper, hash_only=True)
             except Exception:
                 r = None
             if r is None:
                 break
-            new = before is None or r.hash != before
-            changed = changed or (before is not None and new)
+            refs = old()
+            new = r.hash not in refs
+            changed = changed or (bool(refs) and new)
             stable = r.hash == prev
+            prev = r.hash
             if stable and new:
                 break
-            prev = r.hash
-        return changed, stable, round((time.monotonic() - t0) * 1000.0, 1)
+        return changed, stable, round((time.monotonic() - t0) * 1000.0, 1), prev
 
     def _screen_shot(self, gen: int, req: dict) -> None:
         """Shot lane: one screen-change request.
 
-        Waits until the frame differs from the pre-change frame (hashed at
-        event time) and settles, at most ``settle_max_ms``; a frame that
-        never changed is still kept, flagged ``data.unchanged`` -- only when
-        that hash was taken within :data:`SCREEN_BEFORE_MAX_MS` of the event
-        (else ``data.before_late_ms`` and no claim). One capture serves every
-        line of the request (the later ones are dedup lines); ``data.lag_ms``
-        is capture instant - event time.
+        Waits until the frame differs from the old screen and settles, at
+        most ``settle_max_ms`` (a logcat activity line, which fires before
+        the new activity draws: :data:`LOGCAT_SETTLE_FACTOR` times that).
+        The old screen is the pre-change hash taken at event time when it
+        was taken within :data:`SCREEN_BEFORE_MAX_MS` of the event; else
+        (``data.before_late_ms``) the frames seen before the event
+        (:meth:`_old_frames`), and the late hash only when none was seen.
+
+        A final frame equal to a timely pre-change hash is kept, flagged
+        ``data.unchanged``. A final frame equal to another old-screen frame
+        is the previous screen (the new one has not drawn yet): dropped,
+        counted ``unverified``. One capture serves every line of the request
+        (the later ones are dedup lines); ``data.lag_ms`` is capture instant
+        - event time.
 
         A capture that would start (or, per the helper's device time, was
         taken) after the next input's finger-down, or after a newer screen
@@ -2917,8 +3021,20 @@ class TrackingService:
                 return
             extra: dict[str, Any] = {}
             helper = self._helper_up()
+            before: str | None = None
+            timely = False
+            last: str | None = None
+
+            def old() -> set[str]:
+                """The old-screen references (see above)."""
+                if timely:
+                    # a logcat line comes before the draw: every frame seen
+                    # before it is the old screen too
+                    frames = self._old_frames(req) if req.get("logcat") else set()
+                    return {before} | frames  # type: ignore[arg-type]
+                return self._old_frames(req) or ({before} if before else set())
+
             if helper is not None:
-                before = None
                 fut = req["before"]
                 if fut is not None:
                     with contextlib.suppress(Exception):
@@ -2930,15 +3046,22 @@ class TrackingService:
                             )
                             if before_lag > SCREEN_BEFORE_MAX_MS:
                                 extra["before_late_ms"] = before_lag
-                changed, stable, waited = self._settle_change(
+                            else:
+                                timely = True
+                max_ms = float(cfg.settle_max_ms)
+                if req.get("logcat"):
+                    max_ms = max(
+                        max_ms,
+                        min(max_ms * LOGCAT_SETTLE_FACTOR, LOGCAT_SETTLE_CAP_MS),
+                    )
+                _changed, stable, waited, last = self._settle_change(
                     helper,
                     cfg,
-                    before,
+                    old,
                     abort=lambda: bool(req.get("superseded")) or self._input_after(req),
+                    max_ms=max_ms,
                 )
                 extra.update(stable=stable, settle_ms=waited)
-                if before is not None and not changed and "before_late_ms" not in extra:
-                    extra["unchanged"] = True  # the frame never left the old one
             else:
                 time.sleep(cfg.settle_interval_ms / 1000.0)
             if gen != self._gen or not _config().shot_screen_change:
@@ -2950,12 +3073,21 @@ class TrackingService:
             cap_host = time.time()
             cap = self._capture()
             png = cap.pop("png")
+            frame = cap.pop("hash", None) or last
             dev_s = cap.get("dev_mono")
             if dev_s is not None and self._input_after(req, until_dev=dev_s):
                 # the helper took it after the next finger-down (it was busy)
                 with self._lock:
                     self._count_drop_locked(req, "late")
                 return
+            if helper is not None and frame:
+                if timely and frame == before:
+                    extra["unchanged"] = True  # the frame never left the old one
+                elif (timely or self._old_frames(req)) and frame in old():
+                    # still the previous screen: the new one has not drawn
+                    with self._lock:
+                        self._count_drop_locked(req, "unverified")
+                    return
             extra["lag_ms"] = self._lag_ms(
                 req, cap_host, dev_s * 1000.0 if dev_s is not None else None
             )

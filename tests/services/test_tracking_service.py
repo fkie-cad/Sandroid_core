@@ -2367,3 +2367,141 @@ def test_a_settling_screen_shot_yields_to_a_newer_screen(env, cfg):
     assert shots[0]["ref"]["sha256"] == _sha("B")
     assert first not in [s["ref"]["of"] for s in shots]
     assert svc._shot_drops == {"superseded": 1}
+
+
+# --------------------------------------------------------------------------
+# F2: a logcat screen line before the new screen draws (E2E runC #78/#82/#105)
+# --------------------------------------------------------------------------
+
+
+def _spy_pre_hash(svc) -> list[tuple]:
+    """The pre-change hashes taken: ``(result, host start)``."""
+    taken, orig = [], svc._pre_hash
+
+    def spy(helper):
+        res = orig(helper)
+        taken.append(res)
+        return res
+
+    svc._pre_hash = spy
+    return taken
+
+
+def _tap_with_before_shot(ge, lines, t: float) -> None:
+    n = len(of(lines, "shot", "before_tap"))
+    ge.feed(*tap_lines(t))
+    assert wait_for(lambda: len(of(lines, "shot", "before_tap")) == n + 1)
+
+
+def test_a_late_before_hash_equal_to_the_old_screen_is_not_stored(env, cfg):
+    """#78 (of logcat #76): the pre-change hash was 644 ms late and already
+    the old screen; the new activity had not drawn when the wait ended. The
+    shot was stored with no flag. The before-tap frame proves it is the old
+    screen: dropped, counted ``unverified``.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg, settle_max_ms=600)  # a logcat line waits 1.5 s
+    cfg.shot_before_tap = True
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg, mode="invisible")
+        _screen_helper(helpers[0], "old")
+        _tap_with_before_shot(ge, lines, 9.5)
+        taken = _spy_pre_hash(svc)
+        svc._screen_pre_lane.submit(time.sleep, 0.4)  # the pre-change hash is late
+        t_evt = time.time()
+        svc._emit_screen("activity", pkg=SETTINGS, cls=SUB, title=None,
+                         window_id=None, via="logcat", dev_mono=10.0)  # fmt: skip
+        assert wait_for(lambda: svc._shot_drops.get("unverified") == 1, timeout=4.0)
+        data = _stop_data(svc, lines)
+    assert not of(lines, "shot", "screen_change")
+    assert data["shots_dropped"] == {"unverified": 1}
+    # the hash was late, and itself the old screen: no frame ever differed
+    assert taken[0][1] - t_evt > ts.SCREEN_BEFORE_MAX_MS / 1000.0
+    assert {f[3] for f in svc._frames} == {"old"}
+    assert "1 dropped" in of(lines, "tracking", "stop")[-1]["summary"]
+
+
+def test_a_frame_equal_to_an_earlier_before_tap_shot_is_not_stored(env, cfg):
+    """#105 (of logcat #102) was ``dup_of`` #98, the before-tap image of the
+    screen the tap left. The late pre-change hash and the latest frame seen
+    before the event were the pressed row (a ripple), so the frame "changed"
+    back to the old screen. Every frame seen between the tap and the event
+    is the old screen: dropped, counted ``unverified``.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg, settle_max_ms=600)
+    cfg.shot_before_tap = True
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        _screen_helper(h, "home")
+        _tap_with_before_shot(ge, lines, 9.5)
+        h.frame = "ripple"
+        svc._shot_seen(h, hash_only=True)  # seen after the tap, before the event
+        taken = _spy_pre_hash(svc)
+        svc._screen_pre_lane.submit(time.sleep, 0.4)
+        svc._emit_screen("activity", pkg=SETTINGS, cls=SUB, title=None,
+                         window_id=None, via="logcat", dev_mono=10.0)  # fmt: skip
+        time.sleep(0.6)
+        h.frame = "home"  # the ripple ends; the new activity has not drawn yet
+        assert wait_for(lambda: svc._shot_drops.get("unverified") == 1, timeout=4.0)
+    assert not of(lines, "shot", "screen_change")
+    assert all(s["data"]["dup_of"] is None for s in of(lines, "shot"))
+    assert taken[0][0].hash == "ripple"  # the late pre-change hash
+
+
+def test_a_logcat_screen_drawn_3_s_later_is_still_captured(env, cfg):
+    """#78: the activity drew more than 2 s after its logcat line. A logcat
+    line waits ``settle_max_ms`` x 2.5 for the change, so the shot shows it.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg)  # settle_max_ms 2000: a logcat line waits up to 5 s
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg, mode="invisible")
+        _screen_helper(helpers[0], "old")
+        seq = svc._emit_screen("activity", pkg=SETTINGS, cls=SUB, title=None,
+                               window_id=None, via="logcat", dev_mono=10.0)  # fmt: skip
+        time.sleep(3.0)
+        helpers[0].frame = "new"
+        assert wait_for(lambda: of(lines, "shot", "screen_change"), timeout=4.0)
+    shot = of(lines, "shot", "screen_change")[0]
+    assert shot["ref"]["of"] == seq
+    assert shot["ref"]["sha256"] == _sha("new")
+    assert "unchanged" not in shot["data"]
+    assert shot["data"]["stable"] is True
+    assert shot["data"]["settle_ms"] > cfg.settle_max_ms
+    assert shot["data"]["lag_ms"] >= 3000
+    assert not svc._shot_drops
+
+
+def test_going_back_to_an_earlier_screen_is_still_captured(env, cfg):
+    """Only frames since the last input count as the old screen: a back
+    navigation to a screen shot earlier is stored (a dedup line).
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg, settle_max_ms=600)
+    cfg.shot_before_tap = True
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg, mode="invisible")
+        h = helpers[0]
+        _screen_helper(h, "A")
+        _tap_with_before_shot(ge, lines, 5.0)
+        svc._emit_screen("activity", pkg="a", cls="a.B", title=None,
+                         window_id=None, via="logcat", dev_mono=5.2)  # fmt: skip
+        time.sleep(0.05)
+        h.frame = "B"
+        assert wait_for(lambda: of(lines, "shot", "screen_change"))
+        _tap_with_before_shot(ge, lines, 9.5)  # back
+        svc._screen_pre_lane.submit(time.sleep, 0.4)  # a late pre-change hash
+        svc._emit_screen("activity", pkg="a", cls="a.A", title=None,
+                         window_id=None, via="logcat", dev_mono=10.0)  # fmt: skip
+        time.sleep(0.5)
+        h.frame = "A"
+        assert wait_for(lambda: len(of(lines, "shot", "screen_change")) == 2)
+    first_before = of(lines, "shot", "before_tap")[0]
+    shot_b, shot_a = of(lines, "shot", "screen_change")
+    assert shot_b["ref"]["sha256"] == _sha("B")
+    assert shot_a["ref"]["sha256"] == _sha("A")
+    assert shot_a["data"]["dup_of"] == first_before["seq"]
+    assert shot_a["data"]["before_late_ms"] > ts.SCREEN_BEFORE_MAX_MS
+    assert not svc._shot_drops
