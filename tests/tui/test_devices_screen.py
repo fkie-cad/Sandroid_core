@@ -1385,6 +1385,34 @@ async def test_devices_opened_with_d_stays_open_on_reconnect(detached) -> None:
         assert len(_hubs(app)) == 1
 
 
+@pytest.mark.parametrize("ticks", range(12))
+async def test_a_dismiss_while_mounting_waits_for_the_mount(ticks) -> None:
+    """A reconnect / Esc right after the push must not crash the app.
+
+    Popping the screen mid-mount pruned the snapshot Select between its
+    compose and its Mount (Select._on_mount: NoMatches for SelectOverlay).
+    """
+    import asyncio
+
+    results: list = []
+    app = App()
+    async with app.run_test(size=SIZE) as pilot:
+        base = app.screen
+        screen = DevicesScreen(
+            collect=lambda force_avds=False: HubSnapshot(avds=(IDLE,)),
+            actions=FakeActions(),
+        )
+        app.push_screen(screen, results.append)
+        for _ in range(ticks):
+            await asyncio.sleep(0)
+        screen.dismiss("emulator-5554")
+        screen.dismiss(None)  # a second one while mounting is dropped
+        await until(pilot, lambda: results)
+        await settle(pilot)
+        assert results == ["emulator-5554"]
+        assert app.screen is base
+
+
 # --------------------------------------------------------------------------
 # guards: stray clicks, double starts, AVDs running elsewhere, restart
 # --------------------------------------------------------------------------

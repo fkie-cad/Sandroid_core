@@ -42,6 +42,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
 from rich.text import Text
+from textual.await_complete import AwaitComplete
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
@@ -1050,6 +1051,8 @@ class DevicesScreen(ModalScreen[str | None]):
         self._applied_at = time.monotonic()
         #: Snapshot names the Select currently offers.
         self._select_names: tuple[str, ...] | None = None
+        #: A dismiss that came in while the screen was still mounting.
+        self._dismiss_deferred = False
 
     # -- layout -------------------------------------------------------------
 
@@ -1086,6 +1089,30 @@ class DevicesScreen(ModalScreen[str | None]):
                 yield Static("", id="opt-facts")
             yield Static("", id="opt-note")
         yield Footer()
+
+    def dismiss(self, result: str | None = None) -> AwaitComplete:
+        """Close with *result*; while still mounting, once it has mounted.
+
+        Popping the screen mid-mount prunes the snapshot ``Select`` between
+        its compose and its Mount, and Textual's ``Select._on_mount`` then
+        raises ``NoMatches`` for its ``SelectOverlay`` -- which crashes the
+        app. A reconnect, Esc or a ready emulator can dismiss that early.
+        """
+        if self.is_mounted:
+            return super().dismiss(result)
+        if not self._dismiss_deferred:
+            self._dismiss_deferred = True
+            # The screen's own queue runs only once it has mounted.
+            self.call_later(self._deferred_dismiss, result)
+        return AwaitComplete()
+
+    def _deferred_dismiss(self, result: str | None) -> None:
+        try:
+            on_top = self.app.screen is self
+        except Exception:
+            on_top = False
+        if on_top:  # pop_screen pops whatever is on top
+            super().dismiss(result)
 
     def on_mount(self) -> None:
         try:
