@@ -160,7 +160,8 @@ class ReviewModal(ForensicModal[None]):
                 yield Vertical(id="review-results")
             yield Static(
                 "Rewind takes the device back to the start point. Replay repeats "
-                "your steps and sends the same requests again.",
+                "your steps"
+                + (" and sends the same requests again." if rec.requests else "."),
                 classes="review-hint",
             )
             yield Static("", id="review-problem", classes="review-warn")
@@ -218,6 +219,12 @@ class ReviewModal(ForensicModal[None]):
         size = _size(entry.get("size"))
         if size:
             line.append(f"  {size}", style="dim")
+        mtime = entry.get("mtime")
+        if isinstance(mtime, (int, float)) and mtime > 0:
+            from datetime import datetime
+
+            stamp = datetime.fromtimestamp(mtime).strftime("%H:%M:%S")
+            line.append(f"  modified {stamp}", style="dim")
         if entry.get("outside_app"):
             line.append("  outside the app's folders", style="dim")
         state = self._file_state.get(path)
@@ -364,8 +371,13 @@ class ReviewModal(ForensicModal[None]):
         ]
         if fr.before is None:
             out.append(Static("Before was not copied.", classes="review-warn"))
-        if fr.after is None and not self.rec.runs[:1]:
-            out.append(Static("After was not copied.", classes="review-warn"))
+        if fr.after is None:
+            out.append(
+                Static(
+                    "After was not copied (selected after a rewind).",
+                    classes="review-warn",
+                )
+            )
         if fr.after_replay is not None:
             out.append(Static("What the replay changed (Before → After (replay))"))
             out.append(Static(escape(_clip_lines(fr.replay_text or "no change"))))
@@ -434,12 +446,29 @@ class ReviewModal(ForensicModal[None]):
         row.styles.height = "auto"
         return [Static("Requests per run", classes="review-section"), row]
 
+    def _current(self) -> bool:
+        """This Review shows the controller's current recording."""
+        return getattr(self.controller, "recording", self.rec) is self.rec
+
+    def refresh_buttons(self) -> None:
+        with contextlib.suppress(Exception):
+            self._update_buttons()
+
     def _update_buttons(self) -> None:
         problem = self.controller.rewind_problem(self.rec)
+        if not self._current():
+            problem = "This Review shows an older recording. Press p for the new one."
         running = bool(getattr(self.controller, "is_replaying", False))
         for bid in ("#rewind-replay", "#rewind"):
             with contextlib.suppress(Exception):
                 self.query_one(bid, Button).disabled = bool(problem) or running
+        for lid in ("#review-files", "#review-requests"):
+            with contextlib.suppress(Exception):
+                # No selection while a rewind runs: the device is not after
+                # the action then.
+                self.query_one(lid, SelectionList).disabled = (
+                    running or not self._current()
+                )
         text = "" if running else (problem or self.rec.note or "")
         self.query_one("#review-problem", Static).update(escape(text))
         keep = self.query_one("#review-keep", Checkbox)
@@ -472,7 +501,7 @@ class ReviewModal(ForensicModal[None]):
     def on_selection_list_selection_toggled(
         self, event: SelectionList.SelectionToggled
     ) -> None:
-        if self._building:
+        if self._building or not self._current():
             return
         event.stop()
         value = event.selection.value
@@ -506,7 +535,7 @@ class ReviewModal(ForensicModal[None]):
         bid = event.button.id
         if bid == "close":
             self.action_cancel()
-        elif bid in ("rewind", "rewind-replay"):
+        elif bid in ("rewind", "rewind-replay") and self._current():
             if self.controller.start_rewind(replay=bid == "rewind-replay"):
                 self.set_progress("Going back to the start point")
 

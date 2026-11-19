@@ -621,7 +621,11 @@ def test_keyboard_taps_replay_typed_text_by_position_and_text_fallback():
     report = rep.run(steps)
     assert log[1] == "input tap 50 2000"
     assert log[2] == "input text hello%sworld"
-    assert [s["way"] for s in report["steps"]] == ["by element", "by position", "typed"]
+    assert [s["way"] for s in report["steps"]] == [
+        "by element",
+        "by position",
+        "replayed",
+    ]
 
 
 def test_input_text_arg_rejects_non_ascii():
@@ -808,7 +812,8 @@ def test_file_absent_on_both_sides_says_not_on_the_device(files_root):
     assert res.action_text == "not on the device"
     assert not res.error
     rec.set_role(path, "after_replay", rewind.ABSENT)
-    assert rewind.file_result(rec, path).verdict == rewind.UNCHANGED
+    # Neither run left the file: the replay ended like your run.
+    assert rewind.file_result(rec, path).verdict == rewind.SAME
 
 
 def test_new_and_deleted_files_get_replay_verdicts(files_root):
@@ -863,3 +868,67 @@ def test_tls_failures_never_match_and_extra_duplicates_take_the_last():
     assert rewind.compare_flow(orig[3], replay, lambda _i: None).replay["seq"] == 11
     assert rewind.compare_flow(orig[1], replay, lambda _i: None).replay["seq"] == 10
     assert rewind.match_flow(orig[1], []) is None
+
+
+def test_replay_keeps_pauses_with_iso_times_from_the_timeline_file():
+    lines = [
+        {**_tap(seq=1), "t": "2026-11-20T13:36:02.000+01:00"},
+        {**_tap(seq=2), "t": "2026-11-20T13:36:07.000+01:00"},
+    ]
+    log: list[tuple[float, str]] = []
+    clock = Clock()
+    rep = StepReplayer(
+        shell=lambda c: log.append((clock.t, c)) or "",
+        helper=None,
+        sleep=clock.sleep,
+        monotonic=clock.mono,
+    )
+    rep.run(extract_steps(lines))
+    assert log[1][0] - log[0][0] == pytest.approx(5.0, abs=0.25)
+
+
+def test_in_time_and_line_time_read_iso_text():
+    lines = [{"t": "2026-11-20T13:36:02+00:00"}, {"t": "2026-11-20T13:36:09+00:00"}]
+    t0 = rewind.line_time(lines[0])
+    assert rewind.line_time({"t": None}) is None
+    assert rewind.in_time(lines, t0, t0 + 5) == lines[:1]
+
+
+def test_verdict_categories(files_root):
+    path = "/data/data/p/files/v.txt"
+    same = _version(path, "v001_10-00-00", b"a\n")
+    copy = _version(path, "v002_10-00-01", b"a\n")  # same content, new version
+    rec = rewind.Recording(rec_id="rec-1", name="R", pkg="p", serial="s")
+    rec.set_role(path, "before", same)
+    rec.set_role(path, "after", same)
+    rec.set_role(path, "after_replay", copy)
+    # The action did not change it, nor did the replay: the same.
+    assert rewind.file_result(rec, path).verdict == rewind.SAME
+    changed = _version(path, "v003_10-00-02", b"b\n")
+    rec.set_role(path, "after", changed)
+    # The action changed it; the replay's copy has the Before content.
+    assert rewind.file_result(rec, path).verdict == rewind.UNCHANGED
+
+
+def test_failed_after_replay_says_not_copied_and_a_plain_rewind_hides_it(files_root):
+    path = "/data/data/p/files/w.txt"
+    rec = rewind.Recording(rec_id="rec-1", name="R", pkg="p", serial="s")
+    rec.set_role(path, "before", _version(path, "v001_10-00-00", b"a\n"))
+    rec.set_role(path, "after", _version(path, "v002_10-00-01", b"b\n"))
+    rec.set_role(path, "after_replay", None)
+    assert rewind.file_result(rec, path).verdict == rewind.NOT_COPIED
+    rec.set_role(path, "after_replay", "v002_10-00-01")
+    assert rewind.file_result(rec, path, with_replay=False).verdict == rewind.NO_REPLAY
+
+
+def test_a_failed_before_pull_keeps_the_earlier_before(tmp_path, monkeypatch):
+    dev = FakeDevice(pull_error_on="/data/data/p/a")
+    rec = _rec(tmp_path, monkeypatch)
+    rec.set_role("/data/data/p/a", "before", "v-old")
+    rewind.RewindRunner(rec, dev.deps()).run(replay=False)
+    assert rec.role_version("/data/data/p/a", "before") == "v-old"
+
+
+def test_input_text_percent_is_sent_as_is():
+    assert input_text_arg("100%") == "100%"
+    assert input_text_arg("a%sb") is None

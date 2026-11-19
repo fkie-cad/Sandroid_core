@@ -283,7 +283,8 @@ SETTLE_AFTER_S = 3.0
 
 WAY_ELEMENT = "by element"
 WAY_POSITION = "by position"
-WAY_TYPED = "typed"
+#: Keys and typed text have no element or position to choose between.
+WAY_REPLAYED = "replayed"
 WAY_FAILED = "failed"
 
 _STEP_KINDS = ("tap", "long_press", "swipe", "key", "gesture")
@@ -530,13 +531,29 @@ def extract_steps(lines: list[dict]) -> list[Step]:
     return steps
 
 
+def _epoch(value: Any) -> float | None:
+    """A line's ``t`` (ISO text from the timeline file, or epoch seconds)."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(str(value)).timestamp()
+    except ValueError:
+        return None
+
+
 def input_text_arg(text: str) -> str | None:
-    """``text`` for ``input text`` (spaces as ``%s``), None if not ASCII."""
-    if not text or any(ord(c) < 32 or ord(c) > 126 for c in text):
+    """``text`` for ``input text`` (spaces as ``%s``); None when it cannot be
+    typed that way (not plain ASCII, or a literal ``%s`` in it).
+    """
+    if not text or "%s" in text or any(ord(c) < 32 or ord(c) > 126 for c in text):
         return None
     import shlex
 
-    return shlex.quote(text.replace("%", "\\%").replace(" ", "%s"))
+    return shlex.quote(text.replace(" ", "%s"))
 
 
 def _raw_range(raw: str | None) -> tuple[str, int, int] | None:
@@ -703,7 +720,7 @@ class StepReplayer:
             if not re.match(r"^[A-Z_]+$", name):
                 raise StepStoppedError("the key is unknown")
             self._run(f"input keyevent KEYCODE_{_KEYEVENT.get(name, name)}")
-            return {"way": WAY_POSITION, "reason": f"key {name}"}
+            return {"way": WAY_REPLAYED, "reason": f"key {name}"}
         if kind == "text":
             text = data.get("text")
             if not isinstance(text, str) or not text:
@@ -712,7 +729,7 @@ class StepReplayer:
             if arg is None:
                 raise StepStoppedError("only plain ASCII text can be typed again")
             self._run(f"input text {arg}")
-            return {"way": WAY_TYPED, "reason": f"{len(text)} characters"}
+            return {"way": WAY_REPLAYED, "reason": f"typed {len(text)} characters"}
         if kind == "gesture":
             return self._raw_gesture(step)
         raise StepStoppedError(f"{kind} steps cannot be replayed")
@@ -746,7 +763,11 @@ class StepReplayer:
             return
         word = way if way != WAY_FAILED else f"failed: {reason}"
         summary = f"step {step.i} of {n} · {step.what} · {word}"
-        if way == WAY_POSITION and reason and reason != "nothing to match":
+        if (
+            way in (WAY_POSITION, WAY_REPLAYED)
+            and reason
+            and reason != "nothing to match"
+        ):
             summary += f" ({reason})"
         try:
             self.emit(
@@ -780,10 +801,11 @@ class StepReplayer:
         prev_t: float | None = None
         for step in steps:
             gap = 0.0
-            if prev_t is not None and isinstance(step.t, (int, float)):
-                gap = min(MAX_GAP_S, max(0.0, float(step.t) - prev_t))
-            if isinstance(step.t, (int, float)):
-                prev_t = float(step.t)
+            t = _epoch(step.t)
+            if prev_t is not None and t is not None:
+                gap = min(MAX_GAP_S, max(0.0, t - prev_t))
+            if t is not None:
+                prev_t = t
             self.progress(f"Replaying step {step.i} of {n}: {step.what}")
             entry = {"i": step.i, "seq": step.seq, "what": step.what}
             try:

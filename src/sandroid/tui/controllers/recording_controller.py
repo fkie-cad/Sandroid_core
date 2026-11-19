@@ -170,6 +170,10 @@ class RecordingController:
         self._replay_owner_id: str | None = None
         #: rec_id -> the first file list (None: it failed).
         self._start_facts: dict[str, dict | None] = {}
+        #: After pulls still running (a Rewind waits for them).
+        self._pending_after: set[str] = set()
+        #: Serialises the late file list with a Rewind's snapshot load.
+        self._list_lock = threading.Lock()
 
     # -- plumbing -------------------------------------------------------------
 
@@ -701,10 +705,11 @@ class RecordingController:
         lines = rewind.lines_between(
             rec.seq.get("start"), None, offset=rec.timeline_offset
         )
-        stop_seq = rec.seq.get("stop")
-        in_window = [
-            ln for ln in lines if stop_seq is None or (ln.get("seq") or 0) <= stop_seq
-        ]
+        # Requests by their own time: the mitmproxy log is read a moment
+        # after the request, so its line can come after record-stop.
+        in_window = rewind.in_time(
+            lines, rec.started, (rec.stopped or 0) + rewind.REQUEST_SLACK_S
+        )
         rec.changed = rewind.merge_changes(
             listed, rewind.monitor_changes(lines, rec.pkg)
         )
@@ -740,13 +745,13 @@ class RecordingController:
         self._ui(self._review_refresh, rec, True)
         time.sleep(rewind.LATE_WRITES_S if wait is None else wait)
         # Not while a Rewind runs (the list would read the start point and
-        # empty the Review) or a new recording is starting.
-        if self._rec is not rec or _rewound(rec) or self._state != "idle":
-            self._ui(self._review_refresh, rec, False)
-            return
-        with contextlib.suppress(Exception):
-            self._collect_changes(rec, "files_late.tsv")
-            rewind.save_recording(rec)
+        # empty the Review) or a new recording is starting. The lock keeps a
+        # Rewind's snapshot load from starting in the middle of the list.
+        with self._list_lock:
+            if self._rec is rec and not _rewound(rec) and self._state == "idle":
+                with contextlib.suppress(Exception):
+                    self._collect_changes(rec, "files_late.tsv")
+                    rewind.save_recording(rec)
         self._ui(self._review_refresh, rec, False)
 
     def _review_refresh(self, rec: Any, filling: bool) -> None:
@@ -815,6 +820,9 @@ class RecordingController:
             return "Stop the recording first (press r)."
         if rec is None or rec.stopped is None:
             return "Nothing recorded yet."
+        if self._pending_after:
+            n = len(self._pending_after)
+            return f"Saving After of {n} file{'s' if n != 1 else ''}. Wait a moment."
         if not rec.emulator:
             return "Rewind needs an emulator: physical devices have no snapshots."
         if not rec.start_point_name:
@@ -835,6 +843,11 @@ class RecordingController:
 
         rec = self._rec
         if rec is None:
+            return
+        if self._state != "idle":
+            # A Rewind (or a recording) runs: the device is not after the
+            # action, so no After now, and the selection stays as it is.
+            self._toast("Wait until the rewind has finished.", "warning")
             return
         if not selected:
             if path in rec.selected:
@@ -861,12 +874,18 @@ class RecordingController:
             self._review_file_state(path, "could not watch: the Files lens is missing")
             return
         self._review_file_state(path, "saving After")
+        self._pending_after.add(path)
+        self._review_buttons()
         self._spawn(lambda: self._pull_after(rec, view, path), "rewind_after")
 
     def _pull_after(self, rec: Any, view: Any, path: str) -> None:
         from sandroid.core import rewind
 
-        version, error = view.pull_role(path, "after", rec.rec_id, 1)
+        try:
+            version, error = view.pull_role(path, "after", rec.rec_id, 1)
+        finally:
+            self._pending_after.discard(path)
+            self._review_buttons()
         if version is not None or error is None:
             rec.set_role(path, "after", version)
             with contextlib.suppress(Exception):
@@ -880,6 +899,11 @@ class RecordingController:
         else:
             self._review_file_state(path, "After saved")
 
+    def _review_buttons(self) -> None:
+        review = self._review
+        if review is not None and hasattr(review, "refresh_buttons"):
+            self._ui(review.refresh_buttons)
+
     def _review_file_state(self, path: str, text: str) -> None:
         review = self._review
         if review is not None and hasattr(review, "set_file_state"):
@@ -890,7 +914,7 @@ class RecordingController:
         from sandroid.core import rewind
 
         rec = self._rec
-        if rec is None:
+        if rec is None or self._state != "idle":
             return
         key = (row.get("seq"), row.get("flow_id"))
         rec.selected_flows = [
@@ -967,6 +991,8 @@ class RecordingController:
         outcome = None
         run_id = None
         try:
+            with self._list_lock:
+                pass  # a late file list in progress finishes first
             runner = rewind.RewindRunner(rec, self._deps(rec, view, replay))
             outcome = runner.run(replay=replay)
             if outcome.monitor_config is not None:
@@ -1020,12 +1046,26 @@ class RecordingController:
         from sandroid.core import rewind
         from sandroid.features.player import StepReplayer, extract_steps
 
-        lines = rewind.lines_between(
-            rec.seq.get("start"), rec.seq.get("stop"), offset=rec.timeline_offset
+        # Tracking writes an input line up to a moment after the finger is
+        # up, so the last tap can come after record-stop: lines are taken
+        # by time (the steps' own actor filter drops replayed lines).
+        lines = rewind.in_time(
+            rewind.lines_between(
+                rec.seq.get("start"),
+                getattr(runner, "start_seq", None),
+                offset=rec.timeline_offset,
+            ),
+            None,
+            rec.stopped,
         )
         steps = extract_steps(lines)
         if not steps:
-            return {"steps": [], "stopped_at_step": None, "error": None}
+            return {
+                "steps": [],
+                "stopped_at_step": None,
+                "error": "No steps were recorded (Tracking saw no input); nothing "
+                "was replayed. The device is at the start point.",
+            }
         tracking = None
         own_gen = None
         try:
@@ -1108,13 +1148,19 @@ class RecordingController:
         rec = rec or self._rec
         if rec is None:
             return {"files": [], "flows": []}
-        files = [rewind.file_result(rec, p) for p in rec.selected]
+        last_kind = rec.runs[-1].get("kind") if rec.runs else None
+        with_replay = last_kind in (None, "rewind-replay")
+        files = [
+            rewind.file_result(rec, p, with_replay=with_replay) for p in rec.selected
+        ]
         flows = []
         last = rec.runs[-1] if rec.runs else None
         if last and last.get("kind") == "rewind-replay" and rec.selected_flows:
             seq = last.get("seq") or {}
             replay_lines = rewind.lines_between(
-                seq.get("start"), seq.get("end"), offset=rec.timeline_offset
+                seq.get("replay") or seq.get("start"),
+                seq.get("end"),
+                offset=rec.timeline_offset,
             )
             replay_reqs = rewind.requests_in(replay_lines)
             read = rewind.flow_detail_reader()
@@ -1134,7 +1180,9 @@ class RecordingController:
             seq = last.get("seq") or {}
             out["Replay"] = rewind.requests_in(
                 rewind.lines_between(
-                    seq.get("start"), seq.get("end"), offset=rec.timeline_offset
+                    seq.get("replay") or seq.get("start"),
+                    seq.get("end"),
+                    offset=rec.timeline_offset,
                 )
             )
         return out
@@ -1226,7 +1274,11 @@ class RecordingController:
             emulator=bool(getattr(device, "is_emulator", False)),
         )
         self._set_state("saving")
-        self._status("Saving start point (about 5 s)")
+        self._status(
+            "Saving start point (about 5 s)"
+            if rec.emulator
+            else "Starting the recording (no start point on a physical device)"
+        )
         return self._start_worker(rec)
 
     def stop_recording_chat(self) -> dict[str, Any]:

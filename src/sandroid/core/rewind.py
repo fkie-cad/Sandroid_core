@@ -62,8 +62,12 @@ SAME = "same change in the replay"
 DIFFERENT = "replay changed it differently"
 UNCHANGED = "replay did not change it"
 NO_REPLAY = "no replay yet"
+NOT_COPIED = "After (replay) was not copied"
 #: ``pull`` outcome for a file that is not on the device.
 ABSENT = "absent"
+#: Requests seen up to this many seconds after Stop still count (the
+#: mitmproxy log is read a moment later than the request).
+REQUEST_SLACK_S = 2.0
 
 #: App data roots listed for the Review (``{pkg}`` is filled in).
 APP_DIRS = (
@@ -444,6 +448,32 @@ def lines_between(
     return out
 
 
+def line_time(line: dict) -> float | None:
+    """Epoch seconds of a timeline line's ``t`` (ISO text on disk)."""
+    value = line.get("t")
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except ValueError:
+        return None
+
+
+def in_time(lines: Iterable[dict], t0: float | None, t1: float | None) -> list[dict]:
+    """The lines whose ``t`` lies in ``[t0, t1]`` (an open end: no bound)."""
+    out = []
+    for line in lines:
+        t = line_time(line)
+        if t is None:
+            continue
+        if (t0 is not None and t < t0) or (t1 is not None and t > t1):
+            continue
+        out.append(line)
+    return out
+
+
 def requests_in(lines: Iterable[dict]) -> list[dict[str, Any]]:
     """``net/flow`` and ``net/tls-fail`` lines as Review rows.
 
@@ -750,23 +780,41 @@ def _diff_lines(path: str, old: str | None, new: str | None) -> tuple[list[str],
     return [ln for ln in body if ln.strip()], ""
 
 
-def file_result(rec: Recording, path: str) -> FileResult:
-    """Before → After and Before → After (replay) of one selected file."""
+def _no_change(lines: list[str], note: str) -> bool:
+    return not lines and (
+        note in ("no change", "no change in the content")
+        or note.startswith("The bytes changed")
+    )
+
+
+def file_result(rec: Recording, path: str, *, with_replay: bool = True) -> FileResult:
+    """Before → After and Before → After (replay) of one selected file.
+
+    ``with_replay=False``: the latest run was a plain Rewind, so an older
+    replay's copy is not compared (its verdict would be stale).
+    """
     before = rec.role_version(path, "before")
     after = rec.role_version(path, "after")
-    replay = rec.role_version(path, "after_replay")
+    replays = rec.versions.get(path, {}).get("after_replay") or []
+    replay = rec.role_version(path, "after_replay") if with_replay else None
     res = FileResult(path, before, after, replay)
     try:
         run_lines, run_note = _diff_lines(path, before, after)
         res.action_text = "\n".join(run_lines) if run_lines else run_note
         if replay is None:
-            res.verdict = NO_REPLAY
+            res.verdict = NOT_COPIED if with_replay and replays else NO_REPLAY
             return res
         rep_lines, rep_note = _diff_lines(path, before, replay)
         res.replay_text = "\n".join(rep_lines) if rep_lines else rep_note
-        if replay == before or (not rep_lines and rep_note == "no change"):
+        run_none, rep_none = (
+            _no_change(run_lines, run_note),
+            _no_change(rep_lines, rep_note),
+        )
+        if after == replay or (run_none and rep_none):
+            res.verdict = SAME
+        elif replay == before or rep_none:
             res.verdict = UNCHANGED
-        elif (run_lines == rep_lines and run_note == rep_note) or after == replay:
+        elif run_lines == rep_lines and run_note == rep_note:
             res.verdict = SAME
         else:
             res.verdict = DIFFERENT
@@ -861,6 +909,7 @@ class RewindRunner:
     def __init__(self, rec: Recording, deps: RewindDeps) -> None:
         self.rec = rec
         self.deps = deps
+        self.start_seq: int | None = None
 
     # -- small helpers ------------------------------------------------------
 
@@ -916,6 +965,8 @@ class RewindRunner:
                 out = PullOutcome(None, str(exc))
             if out.error and out.version is None:
                 errors[path] = out.error
+                if role != "after_replay":
+                    continue  # keep an earlier good copy of this role
             self.rec.set_role(path, role, out.version)
         return errors
 
@@ -940,6 +991,8 @@ class RewindRunner:
             summary=f"{words} · {rec.name}",
             data={"mode": mode, "rec_id": rec.rec_id, "run": n, "start_point": name},
         )
+        #: This run's play-start line: the recording's lines end before it.
+        self.start_seq = out.seq["start"]
         pids: list[int] = []
         try:
             if not name:
@@ -972,7 +1025,7 @@ class RewindRunner:
                 return out
             if self.deps.replay is None:
                 raise RewindStoppedError("Replay is not available yet.")
-            self._emit(
+            out.seq["replay"] = self._emit(
                 "replay",
                 f"{rec.rec_id}#{n}",
                 kind="phase",

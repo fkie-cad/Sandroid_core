@@ -794,3 +794,49 @@ async def test_results_are_computed_off_the_ui_thread():
             lambda: "Results of the last Rewind"
             in " ".join(str(w.render()) for w in modal.query("#review-results Static")),
         )
+
+
+def test_no_selection_while_a_rewind_runs(controller):
+    rec = _rec()
+    controller._rec = rec
+    controller._state = "running"
+    controller.select_file(rec.changed[0]["path"], True)
+    assert rec.selected == []
+    assert controller.view.pulls == []
+    controller.select_flow(rec.requests[0], True)
+    assert rec.selected_flows == []
+
+
+def test_rewind_waits_for_after_pulls(controller):
+    controller._rec = _rec()
+    controller._pending_after.add("/data/data/org.x/databases/c.sqlite")
+    assert "Saving After of 1 file" in controller.rewind_problem()
+
+
+def test_replay_without_recorded_steps_is_an_error(controller, monkeypatch):
+    monkeypatch.setattr(rewind, "lines_between", lambda *a, **k: [])
+    runner = type("R", (), {"start_seq": 5, "deps": None})()
+    report = controller._replay(_rec(), runner)
+    assert "No steps were recorded" in report["error"]
+
+
+def test_late_list_and_rewind_never_overlap(controller, monkeypatch):
+    import threading
+
+    rec = _rec()
+    controller._rec = rec
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_collect(r, name):
+        entered.set()
+        release.wait(5)
+
+    monkeypatch.setattr(controller, "_collect_changes", slow_collect)
+    t = threading.Thread(target=controller._late_writes, args=(rec, 0))
+    t.start()
+    assert entered.wait(5)
+    assert controller._list_lock.locked()  # a Rewind's worker waits here
+    release.set()
+    t.join(5)
+    assert not controller._list_lock.locked()
