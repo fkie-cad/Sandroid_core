@@ -2213,7 +2213,11 @@ class SandroidTUI(App):
 
         def on_config(config):
             if config is not None:
-                self._start_objection(package_name, config)
+                # Spawn on an app the dialog showed running: the user agreed
+                # to restart it (the dialog warned).
+                self._start_objection(
+                    package_name, config, restart=liveness == Liveness.RUNNING
+                )
 
         self.push_screen(
             ObjectionModal(
@@ -2225,7 +2229,9 @@ class SandroidTUI(App):
             on_config,
         )
 
-    def _start_objection(self, package_name: str, config) -> None:
+    def _start_objection(
+        self, package_name: str, config, *, restart: bool = False
+    ) -> None:
         """Open Objection; a spawn runs the pre-start step first (worker).
 
         The pre-start step (identity profile) may ask, apply and restart the
@@ -2252,7 +2258,7 @@ class SandroidTUI(App):
             from sandroid.services.app_start import AppStartError, prepare_launch
 
             try:
-                may_start = prepare_launch(package_name, "Objection")
+                may_start = prepare_launch(package_name, "Objection", restart=restart)
             except Exception as exc:
                 if not isinstance(exc, AppStartError):
                     logger.exception("Objection pre-start step failed")

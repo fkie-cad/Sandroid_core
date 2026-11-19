@@ -625,7 +625,7 @@ def test_restart_publishes_the_dead_pid_before_spawning(monkeypatch):
         def armed_categories(self):
             return {"ssl"}
 
-        def on_categories(self):
+        def carried_categories(self, package):
             return {"ssl"}
 
         def forget_process(self):
@@ -657,7 +657,7 @@ def test_restart_says_restarting_from_the_kill_until_the_new_pid(monkeypatch):
         def armed_categories(self):
             return set()
 
-        def on_categories(self):
+        def carried_categories(self, package):
             return set()
 
         def forget_process(self):

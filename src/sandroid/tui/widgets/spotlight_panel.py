@@ -1324,12 +1324,18 @@ class SpotlightPanel(Widget):
 
         # force_stop FIRST (see _work_restart): unloading on a live process can
         # hang; killing first makes the teardown unloads/detach fast-fail.
+        # What was on is armed before the kill: the liveness poll drops the
+        # active set as soon as the process is gone.
+        try:
+            self._bypass().arm_active(package)
+        except Exception as exc:
+            logger.warning(f"Keeping the bypasses armed failed: {exc}")
         Adb.force_stop(package)
         time.sleep(0.5)
         # The bypasses that were on stay armed (intent): ␣ starts with them.
         kept: list[str] = []
         try:
-            kept = self._bypass().keep_armed_and_forget()
+            kept = self._bypass().keep_armed_and_forget(package)
         except Exception as exc:
             logger.warning(f"Bypass teardown failed: {exc}")
         self._stop_app_tasks(package)

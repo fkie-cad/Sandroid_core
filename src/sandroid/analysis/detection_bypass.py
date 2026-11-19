@@ -3341,12 +3341,16 @@ class BypassService:
         """
         self._reset_script_state()
 
-    def keep_armed_and_forget(self) -> list[str]:
+    def keep_armed_and_forget(self, package: str | None = None) -> list[str]:
         """Drop the resident script but keep its categories as intent (⇧K).
 
         The active categories join the armed set (also those turned on live
         without arming, e.g. Ctrl+P), then the script state is reset like
         :meth:`forget_process`. The next start applies them all.
+
+        Args:
+            package: The app being stopped; active categories hooked into
+                another app (the selection changed since) are not kept.
 
         Returns:
             The armed categories, in display order.
@@ -3354,7 +3358,8 @@ class BypassService:
         # One lock hold for the union and the drop: a live toggle lands
         # either before (kept as armed) or after (a fresh load), never lost.
         with self._lock:
-            self._armed |= self._active
+            if package is None or self._app_package == package:
+                self._armed |= self._active
             armed = set(self._armed)
             job, path = self._take_script_locked()
         self._dispose_script(job, path)
@@ -3390,6 +3395,23 @@ class BypassService:
         """Categories that are armed OR active (what the panel renders ON)."""
         with self._lock:
             return sorted(self._armed | self._active)
+
+    def arm_active(self, package: str) -> None:
+        """Add the categories active on ``package`` to the armed set.
+
+        Called before a force-stop: the liveness poll may clear the active
+        set as soon as the process dies. Unloads nothing, so it cannot hang.
+        """
+        with self._lock:
+            if self._app_package == package:
+                self._armed |= self._active
+
+    def carried_categories(self, package: str) -> set[str]:
+        """What a restart of ``package`` re-applies: armed, plus active on it."""
+        with self._lock:
+            if self._app_package == package:
+                return self._armed | self._active
+            return set(self._armed)
 
     def reconcile_liveness(self) -> list[str]:
         """Drop the active categories when their hooked process is gone.

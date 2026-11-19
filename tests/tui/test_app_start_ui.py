@@ -298,6 +298,7 @@ def _bypass_env(monkeypatch, *, armed=(), active=(), tasks=()):
     monkeypatch.setattr(db, "get_task_service", lambda: fake_tasks)
     bypass = db.BypassService()
     bypass._armed, bypass._active = set(armed), set(active)
+    bypass._app_package = PKG if active else None
     monkeypatch.setattr(db, "_INSTANCE", bypass)
     monkeypatch.setattr(Adb, "force_stop", staticmethod(state.killed.append))
     monkeypatch.setattr(
@@ -562,7 +563,12 @@ def test_objection_spawn_does_not_restart_an_app_that_came_up(monkeypatch):
     from sandroid.tui.app import SandroidTUI
     from sandroid.tui.modals import objection_modal
 
-    monkeypatch.setattr(app_start, "prepare_launch", lambda pkg, tool, **kw: False)
+    seen: list = []
+    monkeypatch.setattr(
+        app_start,
+        "prepare_launch",
+        lambda pkg, tool, **kw: seen.append(kw.get("restart")) or False,
+    )
     monkeypatch.setattr(
         objection_modal, "build_objection_command", lambda pkg, cfg: ["objection"]
     )
@@ -578,6 +584,14 @@ def test_objection_spawn_does_not_restart_an_app_that_came_up(monkeypatch):
             "warning",
         )
     ]
+    assert seen == [False]  # the dialog showed it not running: no consent
+
+    seen.clear()
+    fake.notes.clear()
+    SandroidTUI._start_objection(
+        fake, PKG, SimpleNamespace(spawn_mode=True), restart=True
+    )
+    assert seen == [True]  # spawn on a running app: the user agreed
 
 
 async def test_the_header_says_what_the_pre_start_step_does(monkeypatch):

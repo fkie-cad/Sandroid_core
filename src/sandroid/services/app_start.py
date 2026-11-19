@@ -1311,7 +1311,9 @@ def recover_after_framework_restart(
     logger.info("After the framework restart: %s", _refresh_frida_server())
 
 
-def prepare_launch(package: str, tool: str, *, consent: bool = False) -> bool:
+def prepare_launch(
+    package: str, tool: str, *, consent: bool = False, restart: bool = False
+) -> bool:
     """Run the pre-spawn hooks before a start outside the Frida spawn path.
 
     For launches that do not go through :func:`open_session` /
@@ -1325,11 +1327,15 @@ def prepare_launch(package: str, tool: str, *, consent: bool = False) -> bool:
         package: The app about to start.
         tool: User-facing name for messages.
         consent: Headless consent for a step that stops every app.
+        restart: The user already agreed to restart a running app (Objection
+            spawn on a running app): it is stopped after the dialog, then
+            the plans run.
 
     Returns:
         True when the caller may start the app now (no hook had anything to
         do, or the app is not running and the plans ran); False when it
-        already runs (or Frida holds it): nothing was run.
+        already runs (or Frida holds it) and ``restart`` is not set: nothing
+        was run.
 
     Raises:
         AppStartError: A hook failed; with plans also busy, an adb error, a
@@ -1347,9 +1353,17 @@ def prepare_launch(package: str, tool: str, *, consent: bool = False) -> bool:
             )
         jm = _job_manager()
         held = session_pid(jm) is not None and _session_package(jm) == package
-        if liveness == Liveness.RUNNING or held:
+        if (liveness == Liveness.RUNNING or held) and not restart:
             return False
         _confirm_pre_spawn(plans, package, tool, consent)
+        if liveness == Liveness.RUNNING or held:
+            from sandroid.services import get_spotlight_service
+
+            spotlight = get_spotlight_service()
+            try:
+                respawn_teardown(package)  # after the OK: Cancel keeps it
+            finally:
+                spotlight.end_restart()
         _apply_pre_spawn(plans, package)
         return True
 
@@ -1460,16 +1474,20 @@ def respawn_teardown(package: str) -> None:
     from sandroid.services import get_spotlight_service
 
     spotlight = get_spotlight_service()
+    try:
+        # Bypasses turned on live (Ctrl+P) join the armed set, as on ⇧K,
+        # before the kill: the liveness poll drops them once the app is gone.
+        _bypass().arm_active(package)
+    except Exception as exc:
+        logger.warning("Keeping the live bypasses armed failed: %s", exc)
     Adb.force_stop(package)
     spotlight.begin_restart(package)
     time.sleep(0.5)  # let the process die so the session connection breaks
     stop_app_tools(package)
     try:
-        # Bypasses turned on live (Ctrl+P) join the armed set, as on ⇧K:
-        # the new process gets everything that was on.
-        _bypass().keep_armed_and_forget()
+        _bypass().keep_armed_and_forget(package)  # drops the dead script
     except Exception as exc:
-        logger.warning("Keeping the live bypasses armed failed: %s", exc)
+        logger.warning("Dropping the bypass script failed: %s", exc)
     drop_session(_job_manager())
 
 
@@ -1773,7 +1791,7 @@ def restart_app(paused: bool = False, *, consent: bool = False) -> tuple[bool, s
             return False, _no_app("Restart").reason
         # Armed or on live, now: a selection change during the dialog disarms.
         bypass = _bypass()
-        armed = bypass.on_categories()
+        armed = bypass.carried_categories(pkg)
         try:
             plans = _collect_pre_spawn(pkg, pkg)
             _confirm_pre_spawn(plans, pkg, pkg, consent)

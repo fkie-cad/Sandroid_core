@@ -2076,8 +2076,9 @@ def test_lifecycle_lock_is_reentrant_and_never_waits_on_the_ui_thread(env):
 def test_kill_keeps_active_bypasses_armed_and_space_applies_them(env, monkeypatch):
     env.bypass._armed = {"root"}
     env.bypass._active = {"ssl"}  # on live only (Ctrl+P on the running app)
+    env.bypass._app_package = PKG
 
-    assert env.bypass.keep_armed_and_forget() == ["ssl", "root"]
+    assert env.bypass.keep_armed_and_forget(PKG) == ["ssl", "root"]
     assert env.bypass.active_categories() == []
 
     log: list = []
@@ -2328,9 +2329,66 @@ def test_restart_keeps_bypasses_turned_on_live(env, monkeypatch):
     monkeypatch.setattr(Adb, "force_stop", staticmethod(lambda pkg: None))
     env.bypass._armed = {"root"}
     env.bypass._active = {"ssl"}
+    env.bypass._app_package = PKG
 
     assert app_start.restart_app() == (True, "ok")
     assert log == [("spawn", {"ssl", "root"})]
+
+
+def test_prepare_launch_restarts_a_running_app_only_with_consent(
+    env, framework, monkeypatch
+):
+    """Objection spawn on a running app: dialog first, then stop, then plans."""
+    order: list = []
+    monkeypatch.setattr(
+        app_start, "respawn_teardown", lambda pkg: order.append(("teardown", pkg))
+    )
+    framework.pids = [100]
+    app_start.register_pre_spawn_hook(
+        lambda pkg: app_start.PreSpawnPlan(DESC, False, lambda: order.append("plan"))
+    )
+    env.live = (Liveness.RUNNING, 77)
+
+    assert app_start.prepare_launch(PKG, "Objection") is False
+    assert order == []
+
+    assert app_start.prepare_launch(PKG, "Objection", restart=True) is True
+    assert order == [("teardown", PKG), "plan"]
+    assert not env.spotlight.is_restarting()
+
+
+def test_teardown_arms_live_bypasses_before_the_kill(env, monkeypatch):
+    """The liveness poll may clear the active set once the app is dead."""
+    from sandroid.core.adb import Adb
+
+    monkeypatch.setattr(app_start.time, "sleep", lambda s: None)
+    env.bypass._active = {"ssl"}
+    env.bypass._app_package = PKG
+
+    def _kill(pkg):
+        env.bypass._active.clear()  # the poll saw the dead process
+
+    monkeypatch.setattr(Adb, "force_stop", staticmethod(_kill))
+
+    app_start.respawn_teardown(PKG)
+
+    assert env.bypass.armed_categories() == ["ssl"]
+
+
+def test_restart_leaves_the_previous_apps_live_bypass_behind(env, monkeypatch):
+    """Ctrl+P on app A, select B (disarms), ⇧R on B: B starts clean."""
+    from sandroid.core.adb import Adb
+
+    log: list = []
+    _ladder(env, monkeypatch, log)
+    monkeypatch.setattr(app_start.time, "sleep", lambda s: None)
+    monkeypatch.setattr(Adb, "force_stop", staticmethod(lambda pkg: None))
+    env.bypass._active = {"ssl"}
+    env.bypass._app_package = "org.example.previous"
+
+    assert app_start.restart_app() == (True, "ok")
+    assert log == [("spawn", set())]
+    assert env.bypass.armed_categories() == []
 
 
 def test_respawn_teardown_keeps_live_bypasses_armed(env, monkeypatch):
@@ -2340,6 +2398,7 @@ def test_respawn_teardown_keeps_live_bypasses_armed(env, monkeypatch):
     monkeypatch.setattr(app_start.time, "sleep", lambda s: None)
     monkeypatch.setattr(Adb, "force_stop", staticmethod(lambda pkg: None))
     env.bypass._active = {"ssl"}
+    env.bypass._app_package = PKG
 
     app_start.respawn_teardown(PKG)
 
