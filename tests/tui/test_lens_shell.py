@@ -85,10 +85,10 @@ async def test_shift_arrows_cycle_lenses() -> None:
             await pilot.press("shift+right")
             await _settle(pilot)
             seen.append(ms.active_lens)
-        assert seen == ["network", "files", "runs", "app"]
+        assert seen == ["network", "files", "runs", "timeline", "app"]
         await pilot.press("shift+left")
         await _settle(pilot)
-        assert ms.active_lens == "runs"
+        assert ms.active_lens == "timeline"
 
 
 async def test_digits_do_nothing_while_a_modal_is_open() -> None:
@@ -507,7 +507,7 @@ async def test_footer_shows_at_most_seven_keys() -> None:
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         await _boot(app, pilot)
-        for key in ("1", "2", "3", "4"):
+        for key in ("1", "2", "3", "4", "5"):
             await pilot.press(key)
             await _settle(pilot)
             footer = app.screen.query_one(SandroidFooter)
@@ -1622,6 +1622,7 @@ async def test_help_opens_on_the_current_lens_and_explains_shadowed_keys(
         assert heads.index("Recording") < heads.index("App lens")
         assert heads.index("App lens") < heads.index("Network lens")
         assert heads.index("Network lens") < heads.index("Sessions lens")
+        assert heads.index("Sessions lens") < heads.index("Timeline lens")
         # The list opens on the Files lens's first key, scrolled to the top.
         assert options.highlighted == 1
         assert options.scroll_offset.y == 0

@@ -449,13 +449,14 @@ class MenuController:
         )
 
         # ===== Lenses (TUI) =====
-        # Digits 1-4 switch the full-width analysis view; Shift+Left/Right
+        # Digits 1-5 switch the full-width analysis view; Shift+Left/Right
         # cycles. TUI-only: the palette dispatches these directly (app.py).
         for key, lens, label in (
             ("1", "app", "App"),
             ("2", "network", "Network"),
             ("3", "files", "Files"),
             ("4", "runs", "Sessions"),
+            ("5", "timeline", "Timeline"),
         ):
             self._register(
                 f"lens_{lens}",
@@ -465,6 +466,50 @@ class MenuController:
                 ["forensic", "malware", "security"],
                 description=f"Show the {label} lens (full width; Enter = details)",
                 inline_text=f"[{key}] {label} lens",
+            )
+        # ===== Labels + Tracking (session timeline; TUI-only) =====
+        # Every lens; the palette dispatches these directly (app.py).
+        for name, display, key, description in (
+            (
+                "label_start",
+                "Start a label",
+                "number_sign",
+                "Start a top-level label at the key press (closes open labels); "
+                "asks for an optional name",
+            ),
+            (
+                "label_sub",
+                "Start a sub-label",
+                "plus",
+                "A label inside the open one (a sibling of an open sub-label)",
+            ),
+            (
+                "label_stop",
+                "Stop the label",
+                "minus",
+                "End the innermost open label",
+            ),
+            (
+                "label_point",
+                "Mark (point label)",
+                "B",
+                "A named point in time; the Files lens segments by it",
+            ),
+            (
+                "tracking_toggle",
+                "Tracking on/off",
+                "ctrl+t",
+                "Record taps, keys, text and screens into the session timeline",
+            ),
+        ):
+            self._register(
+                name,
+                display,
+                key,
+                ActionCategory.RECORDING,
+                ["forensic", "malware", "security"],
+                description=description,
+                inline_text=display,
             )
         self._register(
             "toggle_log",

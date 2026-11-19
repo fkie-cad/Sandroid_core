@@ -43,6 +43,11 @@ from sandroid.tui.widgets.lens_shell import (
     SessionMarks,
     ShellHeader,
 )
+from sandroid.tui.widgets.timeline_lens import (
+    TimelineLens,
+    label_event_text,
+    timeline_service,
+)
 
 if TYPE_CHECKING:
     from sandroid.core.actionQ import ActionQ
@@ -349,6 +354,7 @@ class MainScreen(Screen):
                     yield NetworkPanel(id="network-panel")
                     yield FilesPanel(id="files-panel")
                     yield DiffsView(id="runs-panel")
+                    yield TimelineLens(id="timeline-panel")
             with Vertical(id="side-slot"):
                 yield Inspector(id="inspector")
                 with Vertical(id="chat-dock"):
@@ -389,7 +395,7 @@ class MainScreen(Screen):
 
             activity_log.write(
                 f"[dim]Sandroid {__version__} · [bold]?[/] help · "
-                "[bold]1-4[/] lenses · [bold]`[/] this log[/]"
+                "[bold]1-5[/] lenses · [bold]`[/] this log[/]"
             )
             logger.debug("[MAIN_SCREEN] on_mount: welcome shown")
         except Exception as e:
@@ -427,7 +433,7 @@ class MainScreen(Screen):
 
     @property
     def active_lens(self) -> str:
-        """Id of the active lens (``"app"``, ``"network"``, ``"files"``, ``"runs"``)."""
+        """Id of the active lens (``"app"`` ... ``"runs"``, ``"timeline"``)."""
         spec = LENS_BY_WIDGET.get(self._bottom_current() or "")
         return spec.id if spec else LENSES[0].id
 
@@ -1193,7 +1199,18 @@ class MainScreen(Screen):
         for spec in LENSES:
             self._post_scope(spec.id)
 
-    # -- marks (shared by every lens) ------------------------------------------
+    # -- marks + labels (shared by every lens) -----------------------------------
+    #
+    # Labels live in the session timeline (``Labels``); ``marks`` is the Files
+    # projection of them (``labels.boundaries()``). Without the timeline core
+    # the marks are an in-memory list of points (``SessionMarks.add``).
+
+    @staticmethod
+    def labels_api():
+        """The timeline's ``Labels`` (None when the timeline is missing)."""
+        svc = timeline_service()
+        labels = getattr(svc, "labels", None) if svc is not None else None
+        return labels if hasattr(labels, "boundaries") else None
 
     @property
     def marks(self) -> SessionMarks:
@@ -1201,31 +1218,174 @@ class MainScreen(Screen):
         marks = getattr(self, "_marks", None)
         if marks is None:
             marks = self._marks = SessionMarks()
+            self._labels_version = None
+        labels = self.labels_api()
+        if labels is not None:
+            version = getattr(labels, "version", None)
+            if version is None or version != getattr(self, "_labels_version", None):
+                try:
+                    marks.rebuild(labels.boundaries())
+                    self._labels_version = version
+                except Exception:
+                    logger.debug("marks: boundaries() failed", exc_info=True)
         return marks
 
-    def add_mark(self, name: str = "", when=None) -> Mark:
-        """Drop a mark: log separator line + ``MarksChanged`` to every lens."""
-        mark = self.marks.add(name, when)
-        try:
-            # Kept with the session's evidence: <session>/files/marks.jsonl.
-            from sandroid.core import watchlist_store
+    def add_mark(self, name: str = "", when=None, *, source: str = "api") -> Mark:
+        """Drop a point (``labels.point``): log separator line +
+        ``MarksChanged`` to every lens. Without the timeline: an in-memory
+        mark (and the notice "timeline unavailable").
+        """
+        mark = self.add_label("point", name, when, source=source)
+        return mark if mark is not None else self.marks[-1]
 
-            watchlist_store.append_mark(mark.number, mark.name, mark.when)
+    def add_label(
+        self,
+        kind: str,
+        name: str = "",
+        when=None,
+        *,
+        level: str = "top",
+        source: str = "key",
+    ) -> Mark | None:
+        """Start a label (``kind="start"``, ``level`` top/sub/nest) or drop a
+        point (``kind="point"``) at ``when`` (datetime / epoch / None = now).
+
+        Returns the event as a :class:`Mark` (None if nothing was written).
+        """
+        import time as _time
+        from datetime import datetime
+
+        if isinstance(when, datetime):
+            t = when.timestamp()
+        elif when is None:
+            t = _time.time()
+        else:
+            t = float(when)
+        name = (name or "").strip()
+        labels = self.labels_api()
+        if labels is None:
+            mark = self.marks.add(name, datetime.fromtimestamp(t))
+            self._timeline_unavailable()
+            self._log_label(mark.label(), mark.when)
+            self._post_marks(mark)
+            return mark
+        try:
+            if kind == "point":
+                event = labels.point(name, t=t, source=source)
+            else:
+                event = labels.start(name, level=level, t=t, source=source)
         except Exception:
-            logger.debug("add_mark: marks.jsonl not written", exc_info=True)
+            logger.warning("Label not written", exc_info=True)
+            return None
+        if event is None:
+            self._post_marks(None)
+            return None
+        return self._labels_changed(event)
+
+    def stop_label(self, when=None):
+        """``-``: end the innermost open label (None when nothing is open)."""
+        import time as _time
+        from datetime import datetime
+
+        labels = self.labels_api()
+        if labels is None:
+            return None
+        if isinstance(when, datetime):
+            when = when.timestamp()
+        try:
+            event = labels.stop(t=_time.time() if when is None else float(when))
+        except Exception:
+            logger.warning("Label stop not written", exc_info=True)
+            return None
+        if event is not None:
+            self._labels_changed(event)
+        return event
+
+    def post_marks_pending(self, when) -> None:
+        """A label name prompt is open (``when``) or closed (``None``)."""
+        marks = self.marks.marks
+        for spec in LENSES:
+            widget = self.lens_widget(spec.id)
+            if widget is not None:
+                widget.post_message(MarksChanged(marks, None, pending=when))
+
+    def _timeline_unavailable(self) -> None:
+        try:
+            self.app.notify(
+                "Timeline unavailable — the label is kept in memory only.",
+                severity="warning",
+                timeout=3,
+            )
+        except Exception:
+            pass
+
+    def _labels_changed(self, event) -> Mark:
+        """Rebuild the marks from the labels, log the event, tell the lenses."""
+        from datetime import datetime
+
+        boundary = event.kind == "point" or getattr(event, "depth", 0) == 0
+        mark = Mark.from_event(event)
+        self._log_label(
+            mark.label() if event.kind == "point" else label_event_text(event),
+            datetime.fromtimestamp(float(event.t)),
+            icon={"start": "▶ ", "end": "■ "}.get(event.kind, ""),
+        )
+        self._post_marks(mark if boundary else None)
+        self._refresh_label_note()
+        return mark
+
+    def _log_label(self, text: str, when, icon: str = "") -> None:
         try:
             from rich.markup import escape
 
             self.query_one("#activity-log", ActivityLog).write(
-                f"[bold #facc15]── {escape(mark.label())} · {mark.when:%H:%M:%S} ──[/]"
+                f"[bold #facc15]── {icon}{escape(text)} · {when:%H:%M:%S} ──[/]"
             )
         except Exception:
             pass
+
+    def _post_marks(self, added: Mark | None) -> None:
+        marks = self.marks.marks
         for spec in LENSES:
             widget = self.lens_widget(spec.id)
             if widget is not None:
-                widget.post_message(MarksChanged(self.marks.marks, mark))
-        return mark
+                widget.post_message(MarksChanged(marks, added))
+
+    def _refresh_label_note(self) -> None:
+        try:
+            self.query_one("#shell-header", ShellHeader).refresh_timeline_state()
+        except Exception:
+            pass
+
+    def _handle_timeline_event(self, event) -> None:
+        """The timeline doorbell (``TIMELINE_EVENT``, no lines): labels added
+        elsewhere (AI, API), a new sink, a lock.
+        """
+        data = getattr(event, "data", None) or {}
+        op = data.get("op")
+        if op == "lines" and "label" in (data.get("srcs") or ()):
+            labels = self.labels_api()
+            version = getattr(labels, "version", None) if labels else None
+            if labels is None or version == getattr(self, "_labels_version", None):
+                return
+            old = getattr(self, "_marks", None)
+            before = len(old) if old is not None else 0
+            marks = self.marks  # rebuilds: the version changed
+            added = marks[-1] if len(marks) > before else None
+            self._post_marks(added)
+            self._refresh_label_note()
+        elif op == "bound":
+            self._labels_version = None
+            self._post_marks(None)
+            lens = self.lens_widget("timeline")
+            if lens is not None and hasattr(lens, "on_timeline_bound"):
+                lens.on_timeline_bound()
+            self._refresh_label_note()
+        elif op in ("locked", "closed"):
+            self._refresh_label_note()
+            lens = self.lens_widget("timeline")
+            if op == "locked" and lens is not None and hasattr(lens, "note_locked"):
+                lens.note_locked()
 
     def _post_scope(self, lens_id: str) -> None:
         widget = self.lens_widget(lens_id)
@@ -1381,6 +1541,11 @@ class MainScreen(Screen):
                     _safe_call(h, event)
 
                 return _cb
+
+            # The timeline doorbell (WP1); absent without the timeline core.
+            timeline_event = getattr(EventType, "TIMELINE_EVENT", None)
+            if timeline_event is not None:
+                event_handler_map[timeline_event] = self._handle_timeline_event
 
             for event_type, handler in event_handler_map.items():
                 cb = _make_callback(handler)

@@ -99,6 +99,12 @@ def effective_keymap(keybindings: dict | None) -> dict[str, str]:
     return keymap
 
 
+#: App actions that run only while the MainScreen is on top.
+_MAIN_SCREEN_ONLY = frozenset(
+    {"label_start", "label_sub", "label_stop", "label_point", "tracking_toggle"}
+)
+
+
 class SandroidTUI(App):
     """Textual-based TUI for Android forensic analysis (mitmproxy-like UX)."""
 
@@ -115,10 +121,10 @@ class SandroidTUI(App):
         Binding("r", "record", "Record", id="record"),
         Binding("p", "play", "Play/Replay", id="play"),
         # Navigation
-        # Lenses: 1-4 switch the full-width analysis view (Shift+←/→ cycles).
-        # Only "1" is shown, labelled "1-4", to keep the footer short.
+        # Lenses: 1-5 switch the full-width analysis view (Shift+←/→ cycles).
+        # Only "1" is shown, labelled "1-5", to keep the footer short.
         Binding(
-            "1", "switch_lens('app')", "Lens", key_display="1-4", id="lens_app"
+            "1", "switch_lens('app')", "Lens", key_display="1-5", id="lens_app"
         ),
         Binding(
             "2", "switch_lens('network')", "Network lens", show=False,
@@ -129,6 +135,25 @@ class SandroidTUI(App):
         ),
         Binding(
             "4", "switch_lens('runs')", "Sessions lens", show=False, id="lens_runs"
+        ),
+        Binding(
+            "5", "switch_lens('timeline')", "Timeline lens", show=False,
+            id="lens_timeline",
+        ),
+        # Labels (session timeline) and Tracking: main screen only (see
+        # check_action), every lens. #/+/B ask for an optional name.
+        Binding(
+            "number_sign", "label_start", "Label: start…", show=False,
+            id="label_start",
+        ),
+        Binding("plus", "label_sub", "Label: sub-label…", show=False, id="label_sub"),
+        Binding("minus", "label_stop", "Label: stop", show=False, id="label_stop"),
+        Binding(
+            "B", "label_point", "Label: point (mark)…", show=False, id="label_point"
+        ),
+        Binding(
+            "ctrl+t", "tracking_toggle", "Tracking on/off", show=False,
+            id="tracking_toggle",
         ),
         Binding("grave_accent", "toggle_log", "Log", show=False, id="toggle_log"),
         Binding("D", "show_device_selector", "Devices", show=False, priority=True),
@@ -562,6 +587,10 @@ class SandroidTUI(App):
             return False
         if self._startup_screen_up():
             return False
+        if action in _MAIN_SCREEN_ONLY:
+            # Label / Tracking keys: only with the main screen on top (a
+            # modal or the help owns the keyboard).
+            return isinstance(self.screen, MainScreen)
         return True
 
     def on_startup_screen_init_complete(self, message) -> None:
@@ -713,7 +742,7 @@ class SandroidTUI(App):
                 message=(
                     "Sandroid runs as this terminal UI by default.\n"
                     "\n"
-                    "  1-4           App · Network · Files · Sessions\n"
+                    "  1-5           App · Network · Files · Sessions · Timeline\n"
                     "  ⏎ / Esc       details on demand / close them\n"
                     "  S             snapshots     `  log\n"
                     "  ?             help & all keybindings\n"
@@ -1303,10 +1332,142 @@ class SandroidTUI(App):
             ms.open_snapshot_picker(then=fn)
 
     def action_switch_lens(self, lens: str) -> None:
-        """Digits 1-4: switch the lens (only while the main screen is on top)."""
+        """Digits 1-5: switch the lens (only while the main screen is on top)."""
         ms = self._get_main_screen()
         if ms is not None:
             ms.switch_lens(lens)
+
+    # -- labels + Tracking (session timeline) ---------------------------------
+
+    def action_label_start(self) -> None:
+        """``#``: a top-level label (closes every open label)."""
+        self._label_prompt("start", "top")
+
+    def action_label_sub(self) -> None:
+        """``+``: a sub-label (a sibling of the innermost sub-label)."""
+        self._label_prompt("start", "sub")
+
+    def action_label_point(self) -> None:
+        """``B``: a point (mark) at the key press."""
+        self._label_prompt("point", "top")
+
+    def _label_prompt(self, kind: str, level: str) -> None:
+        """Ask for the label's optional name; ``t`` is the key press.
+
+        Enter writes the label (an empty name = unnamed), Esc writes nothing.
+        While the prompt is open the lenses see the pending boundary
+        (``MarksChanged.pending``; the Files lens pre-splits its segments).
+        """
+        from datetime import datetime
+
+        from sandroid.tui.modals import InputModal
+
+        ms = self._get_main_screen()
+        if ms is None:
+            return
+        when = time.time()
+        stamp = datetime.fromtimestamp(when)
+        labels = ms.labels_api()
+        try:
+            number = labels.next_number() if labels is not None else None
+            open_spans = labels.open_spans() if labels is not None else []
+        except Exception:
+            number, open_spans = None, []
+        if number is None:
+            number = max((m.number for m in ms.marks), default=0) + 1
+        if kind == "point":
+            title = f"Mark {number} · at {stamp:%H:%M:%S} — name (optional)"
+        elif level == "sub" and open_spans:
+            parent = open_spans[-1]
+            if getattr(parent, "depth", 0) >= 1 and parent.parent is not None:
+                parent_no = parent.parent
+            else:
+                parent_no = parent.number
+            title = (
+                f"Label {number} (in {parent_no}) · start at {stamp:%H:%M:%S}"
+                " — name (optional)"
+            )
+        else:
+            title = f"Label {number} · start at {stamp:%H:%M:%S} — name (optional)"
+        no_open = level == "sub" and not open_spans
+        # Files sees top-level starts and points (labels.boundaries()).
+        boundary = kind == "point" or level == "top" or no_open
+        if ms.scope is not None:
+            self.notify("Label added to the live session.", timeout=3)
+        if boundary:
+            ms.post_marks_pending(stamp)
+
+        def done(name: str | None) -> None:
+            screen = self._main_screen_in_stack()
+            if screen is None:
+                return
+            if name is None:  # Esc: nothing is written
+                if boundary:
+                    screen.post_marks_pending(None)
+                return
+            screen.add_label(kind, name, when, level=level, source="key")
+            if no_open and screen.labels_api() is not None:
+                self.notify("No open label — started a top-level label.", timeout=3)
+
+        self.push_screen(
+            InputModal(
+                title=title,
+                placeholder="name (optional) · ⏎ keep · esc cancel",
+            ),
+            done,
+        )
+
+    def action_label_stop(self) -> None:
+        """``-``: end the innermost open label right away."""
+        ms = self._get_main_screen()
+        if ms is None:
+            return
+        if ms.labels_api() is None:
+            self.notify(
+                "Timeline unavailable — labels need the session timeline.",
+                severity="warning",
+                timeout=3,
+            )
+            return
+        event = ms.stop_label(time.time())
+        if event is None:
+            self.notify("No open label.", severity="warning", timeout=3)
+            return
+        named = f" '{event.name}'" if event.name else ""
+        self.notify(f"■ Label {event.number}{named} stopped.", timeout=3)
+
+    def action_tracking_toggle(self) -> None:
+        """``Ctrl+T``: Tracking (input + screen capture) on/off."""
+        from sandroid.tui.widgets.timeline_lens import tracking_module
+
+        mod = tracking_module()
+        if mod is None:
+            self.notify("Tracking not available.", severity="warning", timeout=3)
+            return
+
+        def work() -> None:
+            try:
+                active = mod.get_tracking().toggle(actor="user")
+                message, severity = (
+                    ("Tracking on.", "information")
+                    if active
+                    else ("Tracking off.", "information")
+                )
+            except Exception as exc:
+                logger.warning("Tracking toggle failed", exc_info=True)
+                message, severity = f"Tracking failed: {exc}", "error"
+            try:
+                self.call_from_thread(self._tracking_toggled, message, severity)
+            except Exception:
+                pass
+
+        self.run_worker(work, name="tracking-toggle", thread=True, exclusive=True)
+
+    def _tracking_toggled(self, message: str, severity: str) -> None:
+        self.notify(message, severity=severity, timeout=3)
+        ms = self._main_screen_in_stack()
+        if ms is not None:
+            ms._refresh_label_note()
 
     def action_toggle_log(self) -> None:
         """Backtick: show/hide the bottom log drawer."""
@@ -2247,6 +2408,12 @@ class SandroidTUI(App):
             "lens_network": lambda: self.action_switch_lens("network"),
             "lens_files": lambda: self.action_switch_lens("files"),
             "lens_runs": lambda: self.action_switch_lens("runs"),
+            "lens_timeline": lambda: self.action_switch_lens("timeline"),
+            "label_start": self.action_label_start,
+            "label_sub": self.action_label_sub,
+            "label_stop": self.action_label_stop,
+            "label_point": self.action_label_point,
+            "tracking_toggle": self.action_tracking_toggle,
         }
         handler = dispatch.get(message.action_name)
         if handler:

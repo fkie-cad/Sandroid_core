@@ -2,11 +2,11 @@
 
 Layout (top to bottom, see ``MainScreen.compose``)::
 
-    ShellHeader   #shell-header   breadcrumb · snapshot · scope pill · clock
+    ShellHeader   #shell-header   crumb · snapshot · label · Tracking · pill · clock
     StatusBar     #status-bar     1-2 rows of live tool state
-    LensBar       #lens-bar       1 App  2 Network  3 Files  4 Sessions  (+ badges)
+    LensBar       #lens-bar       1 App  2 Network  3 Files  4 Sessions  5 Timeline
     #workspace    Horizontal
-      #lens-host  framed ContentSwitcher #lens-body holding the four lenses
+      #lens-host  framed ContentSwitcher #lens-body holding the five lenses
       #side-slot  right-hand slot: Inspector #inspector  OR  chat #chat-dock
     LogTicker     #log-ticker     newest log line + "` log" hint
     LogDrawer     #log-drawer     hidden; ` toggles it; holds ActivityLog #activity-log
@@ -28,6 +28,7 @@ lens id    key  label        widget id              widget (module)
 ``network``2    Network      ``network-panel``      NetworkPanel (network_panel)
 ``files``  3    Files        ``files-panel``        FilesPanel (files_panel)
 ``runs``   4    Sessions     ``runs-panel``         DiffsView (diffs_view)
+``timeline`` 5  Timeline     ``timeline-panel``     TimelineLens (timeline_lens)
 =========  ===  ===========  =====================  =============================
 
 To replace a lens body, keep the widget id (or change it here *and* in
@@ -147,15 +148,25 @@ Scope (LIVE / REVIEW)
   - ``read_results_doc(run_dir) -> dict | None`` -- the full results JSON
     (``"Run Metadata"``, ``"Run Errors"``, ``"Network"`` ...); can be large.
 
-Marks
------
-* ``MainScreen.marks`` -- the one :class:`SessionMarks` list of the session
-  (timestamped, optionally named points: "tap login").
-* ``MainScreen.add_mark(name="", when=None) -> Mark`` -- appends a mark,
-  writes a separator line to the log (and so the ticker) and posts a
-  (non-bubbling) :class:`MarksChanged` to every lens widget. Any lens can
-  use the marks (segment = mark n up to mark n+1); the Files lens does
-  (``B`` drops one there).
+Marks and labels
+----------------
+Labels live in the session timeline (``sandroid.core.timeline``, ``Labels``):
+``#`` starts a top-level label (closing every open one), ``+`` a sub-label
+(or a sibling of the innermost sub-label), ``-`` stops the innermost one and
+``B`` drops a point -- App keys, in every lens, each asking for an optional
+name (``InputModal``; Esc writes nothing).
+
+* ``MainScreen.marks`` -- a :class:`SessionMarks` *view* rebuilt from
+  ``labels.boundaries()``: top-level label starts, top-level label ends and
+  every point, in time order (:class:`Mark` with ``kind``
+  ``"start"``/``"end"``/``"point"``). Without the timeline core it is a plain
+  in-memory list of points.
+* ``MainScreen.add_mark(name="", when=None) -> Mark`` -- drops a point
+  (``labels.point``), writes a separator line to the log (and so the ticker)
+  and posts a (non-bubbling) :class:`MarksChanged` to every lens widget. Any
+  lens can use the marks (segment = mark n up to mark n+1); the Files lens
+  does. While a label name prompt is open, ``MarksChanged.pending`` carries
+  the key-press time (the Files lens pre-splits its segments there).
 
 Log
 ---
@@ -213,6 +224,7 @@ LENSES: tuple[LensSpec, ...] = (
     LensSpec("files", "3", "Files", "files-panel"),
     # Labelled "Sessions" (id and widget id stay "runs" / "runs-panel").
     LensSpec("runs", "4", "Sessions", "runs-panel"),
+    LensSpec("timeline", "5", "Timeline", "timeline-panel"),
 )
 LENS_BY_ID: dict[str, LensSpec] = {spec.id: spec for spec in LENSES}
 LENS_BY_WIDGET: dict[str, LensSpec] = {spec.widget_id: spec for spec in LENSES}
@@ -274,31 +286,54 @@ class InspectorContent:
 
 @dataclass(frozen=True)
 class Mark:
-    """A timestamped point in the live session ("tap login").
+    """A boundary in the live session: a point ("tap login") or the start /
+    end of a top-level label.
 
-    ``number`` counts from 1 in the order the marks were dropped; ``name``
-    is optional (``""`` = unnamed).
+    ``number`` is the label number (one sequence over starts and points per
+    timeline file; an end repeats its start's number); ``name`` is optional
+    (``""`` = unnamed). ``kind`` is ``"point"``, ``"start"`` or ``"end"``;
+    ``parent`` the enclosing label of a point; ``seq`` the timeline line.
     """
 
     number: int
     when: datetime
     name: str = ""
+    kind: str = "point"
+    parent: int | None = None
+    seq: int | None = None
 
     def label(self) -> str:
-        """``mark 3 'tap login'`` (``mark 3`` when unnamed)."""
-        return (
-            f"mark {self.number} '{self.name}'" if self.name else f"mark {self.number}"
+        """``mark 3 'tap login'`` (point), ``label 7 'x'`` (start) or
+        ``after label 7`` (end); the name is left out when empty.
+        """
+        if self.kind == "end":
+            return f"after label {self.number}"
+        word = "label" if self.kind == "start" else "mark"
+        named = f" '{self.name}'" if self.name else ""
+        return f"{word} {self.number}{named}"
+
+    @classmethod
+    def from_event(cls, event: Any) -> Mark:
+        """A Mark from a timeline ``LabelEvent`` (host epoch ``t``)."""
+        return cls(
+            number=int(event.number),
+            when=datetime.fromtimestamp(float(event.t)),
+            name=event.name or "",
+            kind=event.kind,
+            parent=event.parent,
+            seq=event.seq,
         )
 
 
 class SessionMarks:
     """The shell's one list of marks (``MainScreen.marks``), shared by lenses.
 
-    Pure Python. ``add`` appends and returns the new :class:`Mark`; every
-    change is announced to the lenses with :class:`MarksChanged` by
-    ``MainScreen.add_mark``. A lens turns the list into segments: segment 0
-    is before the first mark, segment ``n`` is from mark ``n`` up to the next
-    mark (or now).
+    Pure Python. With the timeline core it is a view: ``rebuild`` replaces
+    the list from ``labels.boundaries()``. Without it ``add`` appends a point
+    and returns the new :class:`Mark` (in-memory fallback). Every change is
+    announced to the lenses with :class:`MarksChanged` by ``MainScreen``. A
+    lens turns the list into segments: segment 0 is before the first mark,
+    segment ``n`` is from mark ``n`` up to the next mark (or now).
     """
 
     def __init__(self) -> None:
@@ -318,23 +353,38 @@ class SessionMarks:
         return list(self._marks)
 
     def add(self, name: str = "", when: datetime | None = None) -> Mark:
-        mark = Mark(len(self._marks) + 1, when or datetime.now(), name.strip())
+        number = max((m.number for m in self._marks), default=0) + 1
+        mark = Mark(number, when or datetime.now(), name.strip())
         self._marks.append(mark)
         return mark
+
+    def rebuild(self, events: Sequence[Any]) -> None:
+        """Replace the list with ``labels.boundaries()`` (LabelEvents)."""
+        self._marks = [Mark.from_event(e) for e in events]
 
     def clear(self) -> None:
         self._marks.clear()
 
 
 class MarksChanged(Message):
-    """Posted to every lens widget when a mark is added (or marks cleared)."""
+    """Posted to every lens widget when a mark is added (or marks cleared).
+
+    ``pending``: a label name prompt is open for a boundary at that time
+    (nothing is written yet); a later ``MarksChanged`` without it settles it.
+    """
 
     bubble = False
 
-    def __init__(self, marks: list[Mark], added: Mark | None = None) -> None:
+    def __init__(
+        self,
+        marks: list[Mark],
+        added: Mark | None = None,
+        pending: datetime | None = None,
+    ) -> None:
         super().__init__()
         self.marks = marks
         self.added = added
+        self.pending = pending
 
 
 class ScopeChanged(Message):
@@ -370,11 +420,15 @@ def _as_text(markup: str) -> Text:
 
 
 class ShellHeader(Header):
-    """One-row header: ``○ Sandroid ▸ device ▸ app ◇ snapshot``, pill, clock.
+    """One-row header: ``○ Sandroid ▸ device ▸ app ◇ snapshot``, the open
+    label (``▶ 7 'accept cookies' 0:12``), the Tracking dot, a timeline
+    banner (locked / failed), pill, clock.
 
     Subclasses Textual's ``Header`` so theme rules for ``Header`` apply and the
     clock/title plumbing is reused; only the title formatting and the extra
-    scope pill are ours.
+    pieces are ours. The 1 s tick only *displays* (device clock offset, open
+    label, Tracking, timeline state); periodic device clock samples are taken
+    by the timeline's writer thread.
     """
 
     DEFAULT_CSS = """
@@ -414,10 +468,30 @@ class ShellHeader(Header):
     ShellHeader #device-clock.-off {
         display: block;
     }
+    ShellHeader #label-note,
+    ShellHeader #tracking-dot,
+    ShellHeader #timeline-banner {
+        display: none;
+        width: auto;
+        padding: 0 1 0 0;
+    }
+    ShellHeader #label-note {
+        color: #facc15;
+    }
+    ShellHeader #tracking-dot {
+        color: #4ade80;
+        text-style: bold;
+    }
+    ShellHeader #timeline-banner {
+        color: #fb923c;
+        text-style: bold;
+    }
+    ShellHeader #label-note.-on,
+    ShellHeader #tracking-dot.-on,
+    ShellHeader #timeline-banner.-on {
+        display: block;
+    }
     """
-
-    #: Seconds between background device clock samples while a device is set.
-    DEVICE_CLOCK_EVERY = 60.0
 
     def __init__(self, **kwargs) -> None:
         super().__init__(show_clock=True, **kwargs)
@@ -427,36 +501,122 @@ class ShellHeader(Header):
         #: Why LIVE is not quite live ("monitor blind"), set by the Files
         #: lens; shown instead of the plain "● LIVE" pill.
         self._live_note: str | None = None
-        #: Host time of the last background device clock sample (0: none).
-        self._clock_sampled = 0.0
+        self._label_note: str | None = None
+        self._tracking = False
+        self._banner: str | None = None
 
     def compose(self) -> ComposeResult:
         yield HeaderTitle()
+        yield Static("", id="label-note")
+        yield Static("", id="tracking-dot")
+        yield Static("", id="timeline-banner")
         yield Static(self._pill[0], id="scope-pill", classes="-live")
         yield Static("", id="device-clock")
         yield HeaderClock().data_bind(Header.time_format)
 
     def on_mount(self) -> None:
-        self.set_interval(1.0, self.update_device_clock, name="device clock")
+        self.set_interval(1.0, self._tick, name="header tick")
+
+    def _tick(self) -> None:
+        self.update_device_clock()
+        self.refresh_timeline_state()
+
+    # -- open label, Tracking, timeline state ----------------------------------
+
+    def _set_piece(self, wid: str, text: str | None) -> None:
+        try:
+            label = self.query_one(f"#{wid}", Static)
+        except Exception:
+            return
+        label.update(Text(text or ""))
+        label.set_class(bool(text), "-on")
+
+    def set_label_note(self, text: str | None) -> None:
+        """The innermost open label, e.g. ``▶ 7 'accept cookies' 0:12``."""
+        text = text or None
+        if text != self._label_note:
+            self._label_note = text
+            self._set_piece("label-note", text)
+
+    def set_tracking(self, active: bool) -> None:
+        """The Tracking indicator (``◉ TRK`` while Tracking runs)."""
+        if active != self._tracking:
+            self._tracking = active
+            self._set_piece("tracking-dot", "◉ TRK" if active else None)
+
+    def set_timeline_banner(self, text: str | None) -> None:
+        """``⚠ timeline locked (PID 4711 on host)`` / ``⚠ timeline failed``."""
+        text = text or None
+        if text != self._banner:
+            self._banner = text
+            self._set_piece("timeline-banner", text)
+
+    @property
+    def label_note(self) -> str | None:
+        return self._label_note
+
+    @property
+    def tracking_on(self) -> bool:
+        return self._tracking
+
+    @property
+    def timeline_banner(self) -> str | None:
+        return self._banner
+
+    def refresh_timeline_state(self, now: float | None = None) -> None:
+        """Open label, Tracking and the timeline state (cheap, no I/O)."""
+        from sandroid.tui.widgets.timeline_lens import (
+            timeline_service,
+            tracking_module,
+        )
+
+        now = time.time() if now is None else now
+        note = None
+        banner = None
+        svc = timeline_service()
+        if svc is not None:
+            try:
+                spans = svc.labels.open_spans()
+            except Exception:
+                spans = []
+            if spans:
+                inner = spans[-1]
+                elapsed = max(0, int(now - float(inner.t)))
+                named = f" '{inner.name}'" if inner.name else ""
+                note = f"▶ {inner.number}{named} {elapsed // 60}:{elapsed % 60:02d}"
+            try:
+                status = svc.status()
+            except Exception:
+                status = None
+            state = getattr(status, "state", None)
+            if state == "locked":
+                who = getattr(status, "locked_by", None)
+                banner = f"⚠ timeline locked ({who})" if who else "⚠ timeline locked"
+            elif state == "failed":
+                banner = "⚠ timeline failed"
+        self.set_label_note(note)
+        self.set_timeline_banner(banner)
+        active = False
+        tracking = tracking_module()
+        if tracking is not None:
+            try:
+                active = bool(tracking.is_active())
+            except Exception:
+                active = False
+        self.set_tracking(active)
 
     def update_device_clock(self, now: float | None = None) -> str:
         """The device's wall time beside the host clock, in amber, only while
         the last device clock sample is more than 1 s off the host:
         ``device 17:16:02 -75 min ⚠``. Computed as host now - ``off_wall``
-        (no adb call); every ``DEVICE_CLOCK_EVERY`` s a sample is taken in
-        the background while a device is selected. Returns the text shown.
+        (no adb call, display only: the timeline's writer thread takes the
+        periodic samples). Returns the text shown.
         """
         from sandroid.core import device_clock
         from sandroid.core.adb import Adb
 
         now = time.time() if now is None else now
         serial = Adb.get_target_device()
-        if serial and now - self._clock_sampled >= self.DEVICE_CLOCK_EVERY:
-            if self._clock_sampled:  # the first sample is the connect one
-                device_clock.record_async(
-                    "periodic", serial, samples=device_clock.SAMPLES_QUICK
-                )
-            self._clock_sampled = now
         sample = device_clock.last_sample(serial) if serial else None
         text = ""
         if device_clock.notable(sample):
@@ -540,7 +700,7 @@ class ShellHeader(Header):
 
 
 class LensBar(Horizontal):
-    """``1 App  2 Network  3 Files  4 Sessions`` with optional per-lens badges.
+    """``1 App  2 Network  3 Files  4 Sessions  5 Timeline`` + per-lens badges.
 
     Clicks are routed by ``MainScreen.on_click`` (ids ``lens-tab-<lens id>``).
     Carries ``-level-active`` while Shift+←/→ cycles lenses (vs. a lens's own

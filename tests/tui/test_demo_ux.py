@@ -306,7 +306,7 @@ async def test_shift_arrow_moves_focus_into_each_panel() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await _boot(app, pilot)
         seen = []
-        for _ in range(4):
+        for _ in range(5):  # App -> Network -> Files -> Sessions -> Timeline -> App
             await pilot.press("shift+right")
             await _settle(pilot)
             current = app.screen.query_one("#lens-body").current
@@ -717,12 +717,25 @@ def test_app_bindings_have_no_duplicate_keys() -> None:
     assert by_id["show_snapshots"].key == "S"
     assert "pick_save_slot" not in by_id
     assert not any(i.startswith("load_slot_") for i in by_id)
-    assert [by_id[f"lens_{n}"].key for n in ("app", "network", "files", "runs")] == [
-        "1",
-        "2",
-        "3",
-        "4",
-    ]
+    lenses = ("app", "network", "files", "runs", "timeline")
+    assert [by_id[f"lens_{n}"].key for n in lenses] == ["1", "2", "3", "4", "5"]
+    # Labels (session timeline) and Tracking: App keys with ids (rebindable).
+    assert {
+        name: by_id[name].key
+        for name in (
+            "label_start",
+            "label_sub",
+            "label_stop",
+            "label_point",
+            "tracking_toggle",
+        )
+    } == {
+        "label_start": "number_sign",
+        "label_sub": "plus",
+        "label_stop": "minus",
+        "label_point": "B",
+        "tracking_toggle": "ctrl+t",
+    }
     # ``t`` (TrigDroid's bypass wrapper) is retired: free, and its old id is
     # ignored when it lingers in a user's keybindings.
     assert "t" not in keys

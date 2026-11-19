@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+import timeline_fakes
 from textual.app import App, ComposeResult
 from textual.widgets import Button, Input
 
@@ -48,6 +49,16 @@ CACHE = f"{ROOT}/cache/okhttp/journal"
 AAID = f"{ROOT}/files/aaid.txt"
 MISC = "/data/misc/keystore/x"
 T0 = datetime(2026, 11, 17, 10, 40, 0)
+
+
+@pytest.fixture
+def install_fakes(monkeypatch, tmp_path):
+    """``install_fakes(lines=None, tracking=True)``: see ``timeline_fakes``."""
+
+    def _install(lines=None, *, tracking: bool = True):
+        return timeline_fakes.install(monkeypatch, tmp_path, lines, tracking=tracking)
+
+    return _install
 
 
 @pytest.fixture(autouse=True)
@@ -1252,36 +1263,49 @@ async def test_marks_show_only_activity_since_and_step_through_segments() -> Non
         assert len(lines) == 3
 
 
-@pytest.mark.asyncio
-async def test_B_asks_for_a_name_enter_keeps_it_unnamed_and_esc_cancels() -> None:
-    app = _Harness()
-    async with app.run_test() as pilot:
-        panel = app.query_one(FilesPanel)
+async def test_B_asks_for_a_name_enter_keeps_it_unnamed_and_esc_cancels(
+    install_fakes,
+) -> None:
+    """``B`` is the App's label-point key now: an ``InputModal`` asks for the
+    optional name (Enter on an empty name = unnamed, Esc = no mark); the
+    Files lens pre-splits at the key press while the prompt is open.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    fakes = install_fakes()
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms, panel = await _boot_files(pilot, app)
         panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
         panel.refresh_rows()
         panel.table.focus()
         await pilot.press("B")
-        await pilot.pause()
-        field = panel.query_one("#files-input", Input)
-        assert app.focused is field
-        assert "name mark 1" in field.placeholder
+        await pilot.pause(0.15)
+        assert type(app.screen).__name__ == "InputModal"
+        assert "Mark 1" in app.screen.title_text
+        assert len(panel.activity.mark_times) == 1  # pre-split at the key press
         await pilot.press("enter")  # empty name = unnamed
-        await pilot.pause()
+        await pilot.pause(0.15)
         assert [m.label() for m in panel.marks] == ["mark 1"]
-        await pilot.press("B", *"login", "enter")
-        await pilot.pause()
+        await pilot.press("B")
+        await pilot.pause(0.15)
+        await pilot.press(*"login", "enter")
+        await pilot.pause(0.15)
         assert [m.label() for m in panel.marks] == ["mark 1", "mark 2 'login'"]
         await pilot.press("B")
+        await pilot.pause(0.15)
         await pilot.press("escape")  # no mark
-        await pilot.pause()
+        await pilot.pause(0.15)
         assert len(panel.marks) == 2
         assert len(panel.activity.mark_times) == 2
-        assert not field.has_class("-shown")
+        assert [e.kind for e in fakes.labels.history()] == ["point", "point"]
+        assert type(app.screen).__name__ == "MainScreen"
 
 
 def test_the_new_lens_keys_shadow_no_app_wide_key() -> None:
-    """``B``/``A``/``<``/``>``/``R`` are free app-wide (``m`` is Dexray, ``a``
-    Analyze -- the lens no longer shadows ``a``).
+    """``A``/``<``/``>``/``R`` are free app-wide (``m`` is Dexray, ``a``
+    Analyze -- the lens no longer shadows ``a``); ``B`` moved to the App
+    (label point, every lens) and is no Files key any more.
     """
     from sandroid.tui.app import SandroidTUI
     from sandroid.tui.screens.main_screen import MainScreen
@@ -1290,15 +1314,21 @@ def test_the_new_lens_keys_shadow_no_app_wide_key() -> None:
         b.key for b in MainScreen.BINDINGS
     }
     lens_keys = {b.key for b in FilesPanel.BINDINGS}
-    for key in ("B", "A", "less_than_sign", "greater_than_sign", "R"):
+    for key in ("A", "less_than_sign", "greater_than_sign", "R"):
         assert key in lens_keys
         assert key not in app_keys
     assert "a" not in lens_keys  # auto-pull poll mode removed; Analyze works
+    assert "B" not in lens_keys
+    by_key = {b.key: b.action for b in SandroidTUI.BINDINGS}
+    assert by_key["B"] == "label_point"
 
 
-async def test_marks_are_a_shell_concept_logged_and_sent_to_every_lens() -> None:
+async def test_marks_are_a_shell_concept_logged_and_sent_to_every_lens(
+    install_fakes,
+) -> None:
     from sandroid.tui.app import SandroidTUI
 
+    fakes = install_fakes()
     app = SandroidTUI()
     async with app.run_test(size=(160, 45)) as pilot:
         for _ in range(8):
@@ -1313,7 +1343,9 @@ async def test_marks_are_a_shell_concept_logged_and_sent_to_every_lens() -> None
         panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
         panel.refresh_rows()
         panel.table.focus()
-        await pilot.press("B", *"tap login", "enter")
+        await pilot.press("B")
+        await pilot.pause(0.15)
+        await pilot.press(*"tap login", "enter")
         await pilot.pause(0.1)
         assert [m.label() for m in ms.marks] == ["mark 1 'tap login'"]
         assert "mark 1 'tap login'" in ms.query_one("#log-ticker").last_line
@@ -1327,60 +1359,13 @@ async def test_marks_are_a_shell_concept_logged_and_sent_to_every_lens() -> None
         assert [m.number for m in panel.marks] == [1, 2]
         assert panel.segment == 2
 
-        # Marks and the monitor timeline survive in the session folder.
-        from sandroid.core import watchlist_store
-
-        marks = watchlist_store.read_jsonl(watchlist_store.marks_file())
-        assert [(m["number"], m["name"]) for m in marks] == [
-            (1, "tap login"),
-            (2, "from elsewhere"),
+        # The marks are label lines of the session timeline (no marks.jsonl).
+        points = [line for line in fakes.service.lines if line["src"] == "label"]
+        assert [(line["kind"], line["data"]["name"]) for line in points] == [
+            ("point", "tap login"),
+            ("point", "from elsewhere"),
         ]
-        assert all(datetime.fromisoformat(m["at"]).tzinfo is not None for m in marks)
-        panel.ingest(_items(_fse("FSE_CONTENT_MODIFIED", PREFS)))
-        events = watchlist_store.read_jsonl(watchlist_store.timeline_file())
-        assert [(e["seq"], e["op"], e["path"], e["mark"]) for e in events] == [
-            (1, "CREATE", AAID, None),  # at T0, before the first mark
-            (2, "MODIFY", PREFS, 2),
-        ]
-        assert events[-1]["pkg"] == PKG
-        assert events[-1]["process"] == "fitness"
-        assert events[-1]["source"] == "fsmon"
-        assert events[-1]["at_source"] == "batch"  # no capture time on the item
-        assert events[0]["at"].startswith("2026-11-17T10:40:00.000")
-        assert datetime.fromisoformat(events[-1]["at"]).tzinfo is not None
-        assert (
-            watchlist_store.marks_file().parent == watchlist_store.files_root().parent
-        )
-
-
-def test_timeline_uses_an_events_capture_time_when_it_has_one() -> None:
-    """A monitor item that carries its capture time (epoch ``timestamp``)
-    is logged at that time, not at the batch's arrival.
-    """
-    from types import SimpleNamespace
-
-    from sandroid.core import watchlist_store
-
-    captured = datetime(2026, 11, 17, 10, 39, 58, 123000).timestamp()
-    item = SimpleNamespace(
-        label="MODIFY",
-        category="modify",
-        path=DB,
-        new_path=None,
-        process="fit",
-        source="kprobe",
-        timestamp=captured,
-    )
-    other = SimpleNamespace(label="OPEN", category="noise", path="/proc/x")
-    FilesPanel._export_events(SimpleNamespace(_marks=[]), [item, other], T0)
-    first, second = watchlist_store.read_jsonl(watchlist_store.timeline_file())
-    assert first["at"].startswith("2026-11-17T10:39:58.123")
-    assert first["at_source"] == "capture"
-    assert first["pkg"] == PKG
-    assert second["at"].startswith("2026-11-17T10:40:00.000")
-    assert second["at_source"] == "batch"
-    assert second["pkg"] is None
-    assert [first["seq"], second["seq"]] == [1, 2]
+        assert [c[1]["source"] for c in fakes.labels.calls] == ["key", "api"]
 
 
 # --------------------------------------------------------------------------
@@ -2498,26 +2483,3 @@ async def test_title_is_not_live_while_the_monitor_is_off_or_stopping() -> None:
         title, info = panel.caption()
         assert title == "monitor stopping…"
         assert "o stops" not in info
-
-
-def test_timeline_rows_carry_the_thread_next_to_the_process() -> None:
-    from types import SimpleNamespace
-
-    from sandroid.core import watchlist_store
-
-    item = SimpleNamespace(
-        label="MODIFY",
-        category="modify",
-        path=DB,
-        new_path=None,
-        process="main · Classifier Upda",
-        source="kprobe",
-        pid=4665,
-        tid=5656,
-    )
-    fsmon = SimpleNamespace(label="MODIFY", category="modify", path=DB, pid=42)
-    FilesPanel._export_events(SimpleNamespace(_marks=[]), [item, fsmon], T0)
-    first, second = watchlist_store.read_jsonl(watchlist_store.timeline_file())
-    assert (first["pid"], first["tid"]) == (4665, 5656)
-    assert first["process"] == "main · Classifier Upda"
-    assert (second["pid"], second["tid"]) == (42, None)
