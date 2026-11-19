@@ -73,3 +73,45 @@ jobs:
         /tmp/wheel-venv/bin/python -c "import sandroid, sandroid._version as v; print(v.__version__)"
         /tmp/wheel-venv/bin/sandroid --help > /dev/null
         /tmp/wheel-venv/bin/sandroid-config --help > /dev/null
+
+  uihelper:
+    name: UI helper builds from source
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Java 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install what importing sandroid.core needs
+      # Only the package __init__ chain (config schema/loader), not the full
+      # dependency set: this job just reads uihelper.SOURCE_SHA256.
+      run: python -m pip install pydantic platformdirs tomli-w pyyaml
+
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Install android-35 platform and build-tools
+      run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+    - name: Build the helper and check SOURCE_SHA256
+      # The jar hash itself is not compared here: d8 output is not byte-stable
+      # across build-tools versions. tests/core/test_uihelper.py checks the
+      # committed jar against JAR_SHA256 instead.
+      run: |
+        BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0" tools/uihelper/build.sh | tee build.log
+        built=$(sed -n 's/^SOURCE_SHA256=//p' build.log)
+        expected=$(python -c "import sys; sys.path.insert(0,'src'); from sandroid.core import uihelper; print(uihelper.SOURCE_SHA256)")
+        echo "built=$built expected=$expected"
+        test -n "$built" && test "$built" = "$expected"

@@ -1,0 +1,886 @@
+"""Host side of the Sandroid UI helper (the single UiAutomation connection).
+
+The helper is a dex jar (``tools/uihelper``, built by ``tools/uihelper/build.sh``)
+that runs on the device under ``app_process`` over ONE persistent
+``adb -s <serial> shell``. It owns the device's only UiAutomation client and
+speaks a line protocol: commands on stdin, one JSON object per line on stdout.
+Replies echo the request ``id``; everything else (``hello``, ``status``, a11y
+``ev``, ``touch``, ``bye`` ...) is unsolicited and goes to ``on_event``. All
+helper times are device CLOCK_MONOTONIC milliseconds (the clock of
+``getevent -t`` and a11y ``EventTime``).
+
+Two modes:
+
+* :attr:`Mode.FULL` connects with ``FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES``
+  (1): events, window/node queries and screenshots. It is detectable: apps see
+  ``accessibility_enabled`` = 1 while it is connected, so :meth:`UiHelper.start`
+  records the prior state in :attr:`UiHelper.a11y_before` and
+  :meth:`UiHelper.stop` puts it back.
+* :attr:`Mode.INVISIBLE` connects with ``FLAG_DONT_USE_ACCESSIBILITY`` (2): no
+  a11y registration (nothing for apps to see), only :meth:`UiHelper.shot` and
+  :meth:`UiHelper.ping`. The a11y queries return ``None`` without a round trip.
+
+Every adb call names the serial (``adb -s``); nothing here uses the global
+target device. This module does not write timeline lines: callers (Tracking)
+turn :meth:`UiHelper.on_status` transitions and ``a11y_before`` into them.
+"""
+
+from __future__ import annotations
+
+import collections
+import contextlib
+import hashlib
+import json
+import logging
+import os
+import subprocess
+import threading
+import time
+from dataclasses import dataclass
+from enum import StrEnum
+from importlib import resources
+from pathlib import Path
+from typing import IO, TYPE_CHECKING, Any
+
+from sandroid.core.adb import Adb
+from sandroid.core.adb_utils import quote_host_arg
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
+
+REMOTE_JAR = "/data/local/tmp/sandroid-uihelper.jar"
+MAIN_CLASS = "sandroid.uihelper.Main"
+HELPER_VERSION = "1.0.0"
+PROTOCOL = 2
+
+#: sha256 of ``src/sandroid/assets/uihelper/uihelper.jar`` (printed by build.sh).
+JAR_SHA256 = "c2ea72f40874e01011597efc27db184a3f8b972988d81dafc6d011ebfb65130e"
+#: :func:`source_sha256` of ``tools/uihelper/src`` the jar was built from.
+SOURCE_SHA256 = "4875e9f854a3be5c969a3809016dfdf83f422f2422102f9454d708d3f86a2387"
+
+#: Device folder for screenshots in flight (each is fetched, then removed).
+REMOTE_SHOT_DIR = "/data/local/tmp/sandroid-shots"
+
+#: Rooted images whose adb shell lacks the zygote env (BOOTCLASSPATH etc.) need
+#: it imported before app_process can boot the runtime (a no-op otherwise).
+ZYGOTE_ENV = (
+    'if [ -z "$BOOTCLASSPATH" ]; then ZP=$(pidof zygote64 || pidof zygote); '
+    "for kv in $(tr '\\0' '\\n' < /proc/$ZP/environ | grep -vE '^ANDROID_SOCKET_'); "
+    'do export "$kv"; done; fi'
+)
+
+#: Supervisor back-off before a restart, indexed by the number of deaths since
+#: the helper last stayed up for :data:`DEATH_WINDOW_S` (the last one repeats).
+RESTART_BACKOFF_S = (1.0, 2.0, 4.0, 8.0, 10.0)
+#: This many deaths (a failed restart counts) inside :data:`DEATH_WINDOW_S` ->
+#: ``down``: no more restarts until the next :meth:`UiHelper.start`.
+MAX_DEATHS = 5
+DEATH_WINDOW_S = 60.0
+
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_STDERR_TAIL = 50
+
+
+class Mode(StrEnum):
+    """How the helper connects UiAutomation (see the module docstring)."""
+
+    FULL = "full"
+    INVISIBLE = "invisible"
+
+
+@dataclass(frozen=True)
+class ShotResult:
+    """One ``UiAutomation.takeScreenshot()``.
+
+    Attributes:
+        t_mono_ms: Device CLOCK_MONOTONIC (ms) when the capture was taken.
+        w: Width in pixels.
+        h: Height in pixels.
+        hash: crc32 (8 hex digits) over the ARGB_8888 pixel buffer; equal hashes
+            mean identical frames.
+        cap_ms: Duration of the capture call on the device.
+        png: The PNG bytes; ``None`` for ``hash_only`` shots or when the fetch
+            failed (then ``error`` says why).
+        remote_path: Device path the PNG was written to (removed after fetch).
+        error: Why ``png`` is missing although it was asked for, else ``None``.
+    """
+
+    t_mono_ms: float
+    w: int
+    h: int
+    hash: str
+    cap_ms: float
+    png: bytes | None
+    remote_path: str | None
+    error: str | None = None
+
+
+# --------------------------------------------------------------------- the jar
+
+
+def jar_path() -> Path:
+    """Path of the packaged helper jar (``sandroid/assets/uihelper/uihelper.jar``)."""
+    res = (
+        resources.files("sandroid")
+        .joinpath("assets")
+        .joinpath("uihelper")
+        .joinpath("uihelper.jar")
+    )
+    return Path(str(res))
+
+
+def source_sha256(root: Path | str) -> str:
+    """Fingerprint of the helper's Java sources, identical to build.sh's.
+
+    sha256 over, for every ``*.java`` under ``root`` sorted by its POSIX path
+    relative to ``root``: the relative path, NUL, the file bytes, NUL.
+
+    Args:
+        root: ``tools/uihelper/src``.
+
+    Returns:
+        The hex digest.
+    """
+    base = Path(root)
+    files = sorted((p.relative_to(base).as_posix(), p) for p in base.rglob("*.java"))
+    h = hashlib.sha256()
+    for rel, path in files:
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        h.update(path.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def build_info() -> dict[str, Any]:
+    """Version, protocol and hashes of the packaged helper."""
+    return {
+        "version": HELPER_VERSION,
+        "protocol": PROTOCOL,
+        "jar_sha256": JAR_SHA256,
+        "source_sha256": SOURCE_SHA256,
+    }
+
+
+def _remote_sha256(serial: str) -> str:
+    out, _ = Adb.send_adb_command(f"shell sha256sum {REMOTE_JAR}", serial=serial)
+    first = (out or "").strip().split()
+    return first[0].lower() if first else ""
+
+
+def ensure_jar(serial: str) -> bool:
+    """Make sure the device has exactly the packaged jar at :data:`REMOTE_JAR`.
+
+    Skips the push when the device copy already hashes to :data:`JAR_SHA256`;
+    otherwise removes it, pushes the packaged jar, verifies the hash and
+    ``chmod 644``s it.
+
+    Args:
+        serial: Device serial (every adb call is ``-s serial``).
+
+    Returns:
+        True when the device holds the right jar.
+    """
+    if _remote_sha256(serial) == JAR_SHA256:
+        return True
+    local = jar_path()
+    try:
+        if _file_sha256(local) != JAR_SHA256:
+            logger.warning(f"UI helper: packaged jar {local} does not match JAR_SHA256")
+            return False
+    except OSError as exc:
+        logger.warning(f"UI helper: packaged jar unreadable: {exc}")
+        return False
+    Adb.send_adb_command(f"shell rm -f {REMOTE_JAR}", serial=serial)
+    Adb.send_adb_command(
+        f"push {quote_host_arg(str(local))} {REMOTE_JAR}", serial=serial
+    )
+    got = _remote_sha256(serial)
+    if got != JAR_SHA256:
+        logger.warning(
+            f"UI helper: jar push to {serial} failed verification "
+            f"(device sha256 {got or 'missing'})"
+        )
+        return False
+    Adb.send_adb_command(f"shell chmod 644 {REMOTE_JAR}", serial=serial)
+    return True
+
+
+def helper_command(mode: Mode | str, jar: str = REMOTE_JAR) -> str:
+    """Device shell command starting the helper (``exec``: it replaces the shell)."""
+    m = Mode(mode)
+    return (
+        f"{ZYGOTE_ENV}; CLASSPATH={jar} exec app_process / {MAIN_CLASS} mode={m.value}"
+    )
+
+
+def _setting(value: str | None) -> str | None:
+    v = (value or "").strip()
+    return None if v in ("", "null") else v
+
+
+# ---------------------------------------------------------------------- helper
+
+
+class _Waiter:
+    __slots__ = ("event", "reply")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.reply: dict | None = None
+
+
+class _Gen:
+    """One spawned helper process and its per-process state."""
+
+    def __init__(self, n: int, proc: Any) -> None:
+        self.n = n
+        self.proc = proc
+        self.hello: dict | None = None
+        self.state = threading.Event()  # set on connected / busy / exit
+        self.outcome: str | None = None  # "connected" | "busy" | "exit"
+        self.status_detail: str | None = None
+        self.connected_at: float | None = None
+        self.reader: threading.Thread | None = None
+
+
+class UiHelper:
+    r"""One helper process on one device: request/reply plus supervision.
+
+    Args:
+        serial: Device serial; every adb call uses ``-s serial``.
+        mode: :class:`Mode`.
+        on_event: ``(line, host_recv)`` for every unsolicited line (hello,
+            status, ev, touch, touch_node, bye ...). Runs on the reader thread.
+        on_status: ``(state, info)`` with state ``connected``, ``lost``,
+            ``restarted``, ``down``, ``busy`` or ``stopped``.
+        raw_log: Append every stdout line as ``<host_recv>\\t<raw>`` (mode 0600).
+        popen: ``subprocess.Popen`` stand-in (tests).
+        adb_argv: argv prefix for the persistent shell and the screenshot fetch;
+            defaults to ``Adb.base_argv(serial)``.
+        sleep: Back-off wait (tests); defaults to an interruptible wait.
+        clock: Monotonic seconds for the death window (tests).
+    """
+
+    def __init__(
+        self,
+        serial: str,
+        mode: Mode = Mode.FULL,
+        *,
+        on_event: Callable[[dict, float], None] | None = None,
+        on_status: Callable[[str, dict], None] | None = None,
+        raw_log: Path | None = None,
+        popen: Callable[..., Any] = subprocess.Popen,
+        adb_argv: list[str] | None = None,
+        sleep: Callable[[float], None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if not serial:
+            raise ValueError("UiHelper needs an explicit device serial")
+        self.serial = serial
+        self._mode = Mode(mode)
+        self._on_event = on_event
+        self._on_status = on_status
+        self._raw_log_path = Path(raw_log) if raw_log is not None else None
+        self._popen = popen
+        self._adb_argv = list(adb_argv) if adb_argv else None
+        self._sleep = sleep
+        self._clock = clock
+
+        #: ``settings get secure`` values before a FULL start (None = unset).
+        self.a11y_before: dict[str, str | None] = {}
+        #: Why the last :meth:`start` returned False (``jar``, ``busy``,
+        #: ``timeout``, ``exit`` or ``spawn: ...``).
+        self.last_error: str | None = None
+        self.stderr_tail: collections.deque[str] = collections.deque(
+            maxlen=_STDERR_TAIL
+        )
+
+        self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._log_lock = threading.Lock()
+        self._waiters: dict[str, _Waiter] = {}
+        self._seq = 0
+        self._shot_n = 0
+        self._shot_dir_ready = False
+        self._gen: _Gen | None = None
+        self._gen_n = 0
+        self._started = False
+        self._stopping = False
+        self._stop_evt = threading.Event()
+        self._deaths: collections.deque[float] = collections.deque()
+        self._consecutive = 0  # deaths since the helper last stayed up
+        self._log: IO[str] | None = None
+        self._supervisor: threading.Thread | None = None
+
+    # -- properties -----------------------------------------------------------
+
+    @property
+    def mode(self) -> Mode:
+        return self._mode
+
+    @property
+    def hello(self) -> dict | None:
+        g = self._gen
+        return g.hello if g else None
+
+    @property
+    def alive(self) -> bool:
+        g = self._gen
+        return (
+            g is not None
+            and g.outcome == "connected"
+            and g.proc.poll() is None
+            and not self._stopping
+        )
+
+    # -- lifecycle ------------------------------------------------------------
+
+    def start(self, timeout: float = 20.0) -> bool:
+        """Push the jar if needed, record the a11y state, spawn and connect.
+
+        Returns:
+            True once the helper said ``hello`` and ``status connected``. False
+            when the jar could not be installed, another UiAutomation client
+            holds the device (``on_status("busy")``), or nothing connected
+            within ``timeout`` (see :attr:`last_error`).
+        """
+        if self.alive:
+            return True
+        self._stopping = False
+        self._stop_evt.clear()
+        self._deaths.clear()
+        self._consecutive = 0
+        self.last_error = None
+        if not ensure_jar(self.serial):
+            self.last_error = "jar"
+            return False
+        if self._mode is Mode.FULL:
+            self.a11y_before = self._read_a11y()
+        self._open_log()
+        self._started = True
+        outcome = self._spawn(timeout)
+        if outcome == "connected":
+            self._status("connected", self._info())
+            return True
+        if outcome == "busy":
+            self._status("busy", self._info())
+        self._started = False
+        self._close_log()
+        return False
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Close stdin (the helper disconnects and exits), then clean up.
+
+        Kills the helper by pid (from ``hello``) if it does not exit within
+        ``timeout``. In FULL mode, resets ``accessibility_enabled`` to 0 when it
+        was 0/unset before :meth:`start` and is 1 now.
+        """
+        if not self._started:
+            return
+        self._stopping = True
+        self._stop_evt.set()
+        g = self._gen
+        if g is not None:
+            self._terminate(g, timeout)
+            if g.reader is not None and g.reader is not threading.current_thread():
+                g.reader.join(2.0)  # the last lines (bye) reach the raw log
+        sup = self._supervisor
+        if sup is not None and sup is not threading.current_thread():
+            sup.join(timeout)
+        restored = self._restore_a11y()
+        self._started = False
+        self._close_log()
+        self._status("stopped", {**self._info(), "a11y_restored": restored})
+
+    # -- queries --------------------------------------------------------------
+
+    def node_at(
+        self,
+        x: int,
+        y: int,
+        *,
+        t_mono_ms: float | None = None,
+        timeout: float = 1.0,
+    ) -> dict | None:
+        """Element under (x, y), resolved both live and from the snapshot cache.
+
+        Args:
+            x: Screen x (px, current rotation).
+            y: Screen y.
+            t_mono_ms: Device-monotonic instant to resolve the cached answer at
+                (e.g. the finger-down time); defaults to now.
+            timeout: Seconds to wait for the reply.
+
+        Returns:
+            The ``node_at`` reply (keys ``cached`` and ``live``), or None
+            (INVISIBLE mode, error or timeout).
+        """
+        if self._mode is Mode.INVISIBLE:
+            return None
+        cmd = f"node_at {int(x)} {int(y)} both"
+        if t_mono_ms is not None:
+            cmd += f" t={float(t_mono_ms):.1f}"
+        return self._ok(self.request(cmd, timeout), "node_at")
+
+    def dump(self, *, max_nodes: int = 50_000, timeout: float = 30.0) -> dict | None:
+        """Full tree of every interactive window (``windows[].root``), bounded."""
+        if self._mode is Mode.INVISIBLE:
+            return None
+        return self._ok(
+            self.request(f"dump max_nodes={int(max_nodes)}", timeout), "dump"
+        )
+
+    def windows(self, timeout: float = 2.0) -> list[dict] | None:
+        """Interactive windows, top-most first (no node trees)."""
+        if self._mode is Mode.INVISIBLE:
+            return None
+        r = self._ok(self.request("windows", timeout), "windows")
+        if r is None:
+            return None
+        ws = r.get("windows")
+        return ws if isinstance(ws, list) else None
+
+    def shot(
+        self, *, hash_only: bool = False, timeout: float = 5.0
+    ) -> ShotResult | None:
+        """One screenshot via UiAutomation (works in both modes).
+
+        Without ``hash_only`` the helper writes a PNG under
+        :data:`REMOTE_SHOT_DIR`, which is fetched with ``adb exec-out cat`` and
+        removed. ``hash_only`` returns only the frame hash (no encode, no fetch).
+
+        Returns:
+            A :class:`ShotResult`, or None when the helper did not capture
+            (not running, error, timeout). A capture whose PNG fetch failed is
+            returned with ``png=None`` and ``error`` set.
+        """
+        if hash_only:
+            r = self._ok(self.request("shot hash_only=1", timeout), "shot")
+            return self._shot_result(r, None, None, None) if r else None
+        if not self.alive:
+            return None
+        if not self._shot_dir_ready:
+            Adb.send_adb_command(
+                f"shell mkdir -p {REMOTE_SHOT_DIR}", serial=self.serial
+            )
+            self._shot_dir_ready = True
+        with self._lock:
+            self._shot_n += 1
+            n = self._shot_n
+        path = f"{REMOTE_SHOT_DIR}/{os.getpid()}-{n}.png"
+        r = self._ok(self.request(f"shot path={path}", timeout), "shot")
+        if r is None:
+            self._rm(path)
+            return None
+        png, err = self._fetch(path, timeout)
+        self._rm(path)
+        return self._shot_result(r, png, path, err)
+
+    def ping(self, timeout: float = 2.0) -> dict | None:
+        """Round trip: ``{t_mono_ms, rtt_ms, host_mid, connected, ...}``.
+
+        ``host_mid`` (host epoch seconds, midway between send and receive) pairs
+        with the device ``t_mono_ms`` for a clock offset estimate.
+        """
+        r = self._ok(self.request("ping", timeout), "pong")
+        if r is None:
+            return None
+        t0 = float(r["_host_send"])
+        t1 = float(r["_host_recv"])
+        return {
+            "t_mono_ms": r.get("t_mono_ms"),
+            "rtt_ms": (t1 - t0) * 1e3,
+            "host_mid": (t0 + t1) / 2,
+            "connected": bool(r.get("connected")),
+            "uptime_ms": r.get("uptime_ms"),
+            "mode": r.get("mode"),
+        }
+
+    def request(self, cmd: str, timeout: float = 5.0) -> dict | None:
+        """Send ``cmd`` with a fresh ``id``; the reply, or None on timeout/death.
+
+        The reply gains ``_host_send`` / ``_host_recv`` (host epoch seconds).
+        """
+        g = self._gen
+        if g is None or g.proc.poll() is not None or self._stopping:
+            return None
+        w = _Waiter()
+        with self._lock:
+            self._seq += 1
+            rid = f"r{self._seq}"
+            self._waiters[rid] = w
+        t_send = time.time()
+        if not self._write(g, f"{cmd} id={rid}"):
+            with self._lock:
+                self._waiters.pop(rid, None)
+            return None
+        if not w.event.wait(timeout):
+            with self._lock:
+                self._waiters.pop(rid, None)
+            logger.debug(f"UI helper: no reply to {cmd!r} within {timeout}s")
+            return None
+        if w.reply is None:
+            return None
+        w.reply["_host_send"] = t_send
+        return w.reply
+
+    # -- internals: process ---------------------------------------------------
+
+    def _argv_prefix(self) -> list[str]:
+        if self._adb_argv:
+            return list(self._adb_argv)
+        return Adb.base_argv(self.serial)
+
+    def _spawn(self, timeout: float) -> str:
+        """Start one helper process and wait for connected/busy/exit."""
+        argv = [*self._argv_prefix(), "shell", helper_command(self._mode)]
+        try:
+            proc = self._popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+        except (OSError, ValueError) as exc:
+            self.last_error = f"spawn: {exc}"
+            logger.warning(f"UI helper: cannot start adb shell: {exc}")
+            return "exit"
+        with self._lock:
+            self._gen_n += 1
+            g = _Gen(self._gen_n, proc)
+            self._gen = g
+            self._shot_dir_ready = False
+        g.reader = threading.Thread(
+            target=self._read, args=(g,), name="uihelper-reader", daemon=True
+        )
+        g.reader.start()
+        threading.Thread(
+            target=self._read_err, args=(g,), name="uihelper-stderr", daemon=True
+        ).start()
+        if not g.state.wait(timeout):
+            self.last_error = "timeout"
+            logger.warning(f"UI helper on {self.serial}: no connection in {timeout}s")
+            self._terminate(g, 2.0)
+            return "timeout"
+        if g.outcome != "connected":
+            self.last_error = g.outcome
+            if g.outcome == "busy":
+                logger.warning(
+                    f"UI helper on {self.serial}: another UiAutomation client "
+                    f"holds the device ({g.status_detail})"
+                )
+            self._terminate(g, 2.0)
+        return g.outcome or "exit"
+
+    def _terminate(self, g: _Gen, timeout: float) -> None:
+        proc = g.proc
+        with contextlib.suppress(OSError, ValueError, AttributeError):
+            proc.stdin.close()  # EOF: the helper disconnects UiAutomation and exits
+        try:
+            proc.wait(timeout=timeout)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        pid = (g.hello or {}).get("pid")
+        if isinstance(pid, int) and pid > 0:
+            Adb.send_adb_command(f"shell kill {pid}", serial=self.serial)
+        with contextlib.suppress(OSError):
+            proc.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=2.0)
+
+    def _write(self, g: _Gen, line: str) -> bool:
+        try:
+            with self._write_lock:
+                g.proc.stdin.write((line + "\n").encode("utf-8"))
+                g.proc.stdin.flush()
+            return True
+        except (OSError, ValueError, AttributeError):
+            return False
+
+    def _read(self, g: _Gen) -> None:
+        stream = g.proc.stdout
+        try:
+            for raw_b in iter(stream.readline, b""):
+                host_recv = time.time()
+                try:
+                    self._handle_line(g, raw_b, host_recv)
+                except Exception:  # the reader must survive
+                    logger.debug("UI helper: line handler failed", exc_info=True)
+        except (OSError, ValueError):
+            pass
+        self._on_exit(g)
+
+    def _read_err(self, g: _Gen) -> None:
+        stream = g.proc.stderr
+        if stream is None:
+            return
+        try:
+            for raw_b in iter(stream.readline, b""):
+                line = raw_b.decode("utf-8", "replace").rstrip()
+                if line:
+                    self.stderr_tail.append(line)
+                    logger.debug(f"UI helper stderr: {line}")
+        except (OSError, ValueError):
+            pass
+
+    def _handle_line(self, g: _Gen, raw_b: bytes, host_recv: float) -> None:
+        raw = raw_b.decode("utf-8", "replace").strip()
+        if not raw:
+            return
+        self._log_line(raw, host_recv)
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            logger.debug(f"UI helper: non-JSON line {raw[:200]!r}")
+            return
+        if not isinstance(d, dict):
+            return
+        typ = d.get("type")
+        if typ == "hello":
+            g.hello = d
+        elif typ == "status" and g.outcome is None:
+            state = d.get("state")
+            if state in ("connected", "busy"):
+                if state == "connected":
+                    g.connected_at = self._clock()
+                g.outcome = state
+                g.status_detail = d.get("detail")
+                g.state.set()
+        rid = d.get("id")
+        if rid is not None:
+            with self._lock:
+                w = self._waiters.pop(str(rid), None)
+            if w is not None:
+                d["_host_recv"] = host_recv
+                w.reply = d
+                w.event.set()
+                return
+        if self._on_event is not None:
+            try:
+                self._on_event(d, host_recv)
+            except Exception:  # never kill the reader
+                logger.debug("UI helper: on_event callback failed", exc_info=True)
+
+    def _on_exit(self, g: _Gen) -> None:
+        """The stdout of generation ``g`` ended: the helper process is gone."""
+        if g.outcome is None:
+            g.outcome = "exit"
+            g.state.set()
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+            g.proc.wait(timeout=2.0)
+        with self._lock:
+            current = self._gen is g
+            if current:
+                waiters = list(self._waiters.values())
+                self._waiters.clear()
+            else:
+                waiters = []
+        for w in waiters:
+            w.event.set()  # reply stays None: the caller gets None at once
+        if not current or self._stopping or not self._started:
+            return
+        if g.outcome != "connected":
+            return  # a spawn that never connected: _spawn's caller handles it
+        if (
+            g.connected_at is not None
+            and self._clock() - g.connected_at >= DEATH_WINDOW_S
+        ):
+            self._consecutive = 0  # it had been stable: start the back-off over
+        rc = g.proc.poll()
+        self._status("lost", {**self._info(), "rc": rc})
+        sup = threading.Thread(
+            target=self._supervise, name="uihelper-supervisor", daemon=True
+        )
+        self._supervisor = sup
+        sup.start()
+
+    # -- internals: supervision -----------------------------------------------
+
+    def _death(self) -> bool:
+        """Record a death; True when the helper is now ``down``."""
+        now = self._clock()
+        self._consecutive += 1
+        self._deaths.append(now)
+        while self._deaths and now - self._deaths[0] > DEATH_WINDOW_S:
+            self._deaths.popleft()
+        return len(self._deaths) >= MAX_DEATHS
+
+    def _wait(self, seconds: float) -> bool:
+        """Back-off wait; True when :meth:`stop` was called meanwhile."""
+        if self._sleep is not None:
+            self._sleep(seconds)
+            return self._stopping
+        return self._stop_evt.wait(seconds)
+
+    def _supervise(self) -> None:
+        if self._death():
+            self._go_down()
+            return
+        attempt = 0
+        while not self._stopping:
+            idx = min(self._consecutive, len(RESTART_BACKOFF_S)) - 1
+            if self._wait(RESTART_BACKOFF_S[max(idx, 0)]):
+                return
+            attempt += 1
+            # The device may have been reverted (snapshot load): re-check the jar.
+            outcome = self._spawn(20.0) if ensure_jar(self.serial) else "jar"
+            if self._stopping:
+                g = self._gen
+                if g is not None and g.proc.poll() is None:
+                    self._terminate(g, 2.0)  # stop() raced with this restart
+                return
+            if outcome == "connected":
+                self._status("restarted", {**self._info(), "attempt": attempt})
+                return
+            if self._death():
+                self._go_down()
+                return
+
+    def _go_down(self) -> None:
+        g = self._gen
+        if g is not None and g.proc.poll() is None:
+            self._terminate(g, 2.0)
+        restored = self._restore_a11y()
+        self._status(
+            "down",
+            {**self._info(), "deaths": len(self._deaths), "a11y_restored": restored},
+        )
+
+    # -- internals: a11y state ------------------------------------------------
+
+    def _read_a11y(self) -> dict[str, str | None]:
+        out: dict[str, str | None] = {}
+        for key in ("accessibility_enabled", "enabled_accessibility_services"):
+            v, _ = Adb.send_adb_command(
+                f"shell settings get secure {key}", serial=self.serial
+            )
+            out[key] = _setting(v)
+        return out
+
+    def _restore_a11y(self) -> bool:
+        """FULL only: undo accessibility_enabled 0/unset -> 1. True if reset."""
+        if self._mode is not Mode.FULL or not self.a11y_before:
+            return False
+        if self.a11y_before.get("accessibility_enabled") not in (None, "0"):
+            return False
+        now, _ = Adb.send_adb_command(
+            "shell settings get secure accessibility_enabled", serial=self.serial
+        )
+        if _setting(now) != "1":
+            return False
+        Adb.send_adb_command(
+            "shell settings put secure accessibility_enabled 0", serial=self.serial
+        )
+        logger.info(f"UI helper: reset accessibility_enabled to 0 on {self.serial}")
+        return True
+
+    # -- internals: misc ------------------------------------------------------
+
+    def _info(self) -> dict[str, Any]:
+        h = self.hello or {}
+        return {
+            "serial": self.serial,
+            "mode": self._mode.value,
+            "flags": h.get("flags", 2 if self._mode is Mode.INVISIBLE else 1),
+            "pid": h.get("pid"),
+            "version": h.get("version"),
+            "a11y_before": dict(self.a11y_before),
+        }
+
+    def _status(self, state: str, info: dict) -> None:
+        logger.debug(f"UI helper {self.serial}: {state}")
+        if self._on_status is None:
+            return
+        try:
+            self._on_status(state, info)
+        except Exception:  # must not break supervision
+            logger.debug("UI helper: on_status callback failed", exc_info=True)
+
+    @staticmethod
+    def _ok(reply: dict | None, typ: str) -> dict | None:
+        if reply is None:
+            return None
+        if reply.get("type") != typ:
+            logger.debug(f"UI helper: {typ} failed: {reply.get('error')}")
+            return None
+        return reply
+
+    @staticmethod
+    def _shot_result(
+        r: dict, png: bytes | None, path: str | None, err: str | None
+    ) -> ShotResult:
+        return ShotResult(
+            t_mono_ms=float(r.get("t_mono_ms") or 0.0),
+            w=int(r.get("w") or 0),
+            h=int(r.get("h") or 0),
+            hash=str(r.get("hash") or ""),
+            cap_ms=float(r.get("cap_ms") or 0.0),
+            png=png,
+            remote_path=path,
+            error=err,
+        )
+
+    def _fetch(self, path: str, timeout: float) -> tuple[bytes | None, str | None]:
+        argv = [*self._argv_prefix(), "exec-out", "cat", path]
+        try:
+            proc = self._popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            data, err = proc.communicate(timeout=max(timeout, 5.0))
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                proc.kill()
+            return None, "fetch timed out"
+        except (OSError, ValueError) as exc:
+            return None, f"fetch failed: {exc}"
+        if not data or not data.startswith(_PNG_MAGIC):
+            detail = (err or b"").decode("utf-8", "replace").strip()
+            return None, f"fetch failed: {detail or 'not a PNG'}"
+        return data, None
+
+    def _rm(self, path: str) -> None:
+        Adb.send_adb_command(f"shell rm -f {path}", serial=self.serial)
+
+    def _open_log(self) -> None:
+        if self._raw_log_path is None or self._log is not None:
+            return
+        try:
+            self._raw_log_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(
+                self._raw_log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
+            )
+            with contextlib.suppress(OSError):
+                os.fchmod(fd, 0o600)
+            self._log = os.fdopen(fd, "a", encoding="utf-8", buffering=1)
+        except OSError as exc:
+            logger.warning(
+                f"UI helper: cannot open raw log {self._raw_log_path}: {exc}"
+            )
+
+    def _close_log(self) -> None:
+        with self._log_lock:
+            log, self._log = self._log, None
+        if log is not None:
+            with contextlib.suppress(OSError):
+                log.close()
+
+    def _log_line(self, raw: str, host_recv: float) -> None:
+        with self._log_lock:
+            if self._log is None:
+                return
+            try:
+                self._log.write(f"{host_recv:.6f}\t{raw}\n")
+            except (OSError, ValueError):
+                pass
