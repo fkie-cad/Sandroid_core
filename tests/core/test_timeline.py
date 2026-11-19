@@ -953,6 +953,17 @@ def test_masking_per_reader(monkeypatch):
     assert timeline.should_mask("ai")
 
 
+def test_masking_swaps_a_summary_that_quotes_typed_text():
+    line = {"src": "input", "kind": "text", "sensitive": True,
+            "summary": "typed \"hunter22\" into password field 'pw'",
+            "data": {"text": "hunter22", "password": True,
+                     "masked_summary": "typed 8 chars into password field 'pw'"}}  # fmt: skip
+    masked = timeline.mask(line)
+    assert masked["summary"] == "typed 8 chars into password field 'pw'"
+    assert "hunter22" not in json.dumps(masked)
+    assert line["summary"].startswith('typed "hunter22"')  # the line itself kept
+
+
 def test_readers_mask_unless_told_not_to(timeline_sink, monkeypatch):
     from sandroid.config import get_config
 

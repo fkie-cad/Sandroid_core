@@ -129,6 +129,21 @@ HELPER_STOP_WAIT_S = 20.0
 #: A new contact after this long without any event of its node closes a
 #: gesture whose finger-up was lost (another slot still looks held).
 GESTURE_IDLE_S = 10.0
+#: Read-back of a field that sends no TEXT_CHANGED (Compose, browser
+#: address bars): read this long after the last keystroke ...
+READBACK_DEBOUNCE_S = 0.3
+#: ... waiting at most this long for the helper's ``focus`` reply.
+READBACK_TIMEOUT_S = 0.6
+#: Keystrokes this soon after a TEXT_CHANGED go to a field that reports
+#: itself: no read-back.
+READBACK_TEXT_GRACE_S = 1.5
+#: What password fields show instead of a character (Firefox shows the last
+#: typed one in clear for a moment).
+BULLET = "\u2022"
+#: The object replacement character Gecko puts for embedded objects.
+OBJ_CHAR = "\ufffc"
+#: Typed text in a summary is clipped to this many characters.
+TEXT_SUMMARY_MAX = 60
 #: After ``SYN_DROPPED`` events are ignored up to the next ``SYN_REPORT``;
 #: an event this much later ends that early (the report itself was lost).
 DROP_RESYNC_S = 0.5
@@ -641,7 +656,10 @@ def _clip(text: str, n: int = 60) -> str:
 
 
 def _field_name(node: dict) -> str:
-    """A field's name that is never its content (hint/desc/rid/class)."""
+    """A field's name that is never its content (web label/hint/desc/rid/class)."""
+    web = node.get("web")
+    if isinstance(web, dict) and web.get("label"):
+        return _clip(web["label"], 40)
     for key in ("hint", "desc", "tooltip", "pane"):
         if node.get(key):
             return _clip(node[key], 40)
@@ -652,6 +670,61 @@ def _private(node: dict) -> bool:
     return bool(node.get("password") or node.get("editable"))
 
 
+def _chars(n: int) -> str:
+    return f"{n} char{'' if n == 1 else 's'}"
+
+
+def rebuild_password(
+    known: list[str | None], partial: bool, text: str, frm: Any = None
+) -> tuple[list[str | None], bool]:
+    """One TEXT_CHANGED of a password field that shows bullets plus, for a
+    moment, the last typed character (Firefox: ``•••x``): the value rebuilt
+    keystroke by keystroke (``None`` = a character never seen in clear).
+
+    Clear text (no bullet) is taken as it is. A text one longer than what is
+    known adds its one clear character at its place (a bullet only: an
+    unknown one); the same length takes a clear character at its place (the
+    bullet that replaces it changes nothing); a shorter one removes
+    characters at ``frm`` (``fromIndex``). Anything else -- several
+    characters at once, a deletion without a usable index -- makes the
+    result ``partial``.
+
+    Returns:
+        ``(known, partial)``.
+    """
+    if BULLET not in text:
+        return list(text), False
+    known = list(known)
+    n, k = len(text), len(known)
+    clear = [(i, c) for i, c in enumerate(text) if c != BULLET]
+    if n == k:
+        for i, c in clear:
+            known[i] = c
+    elif n == k + 1 and len(clear) <= 1:
+        if clear:
+            i, c = clear[0]
+            known.insert(i, c)
+        else:
+            at = frm if isinstance(frm, int) and 0 <= frm <= k else k
+            known.insert(at, None)
+            partial = True
+    elif n > k:
+        known.extend([None] * (n - k))
+        for i, c in clear:
+            known[i] = c
+        partial = True
+    else:
+        drop = k - n
+        if isinstance(frm, int) and 0 <= frm <= n:
+            del known[frm : frm + drop]
+        else:
+            del known[n:]
+            partial = True
+        for i, c in clear:
+            known[i] = c
+    return known, partial
+
+
 def _node_label(answer: dict, node: dict) -> str | None:
     if _private(node):
         return _field_name(node)
@@ -660,6 +733,161 @@ def _node_label(answer: dict, node: dict) -> str | None:
         if value:
             return _clip(value)
     return _short_rid(node.get("rid"))
+
+
+#: Chromium / Gecko role (lower case, no spaces) -> the plain word of a
+#: summary. Roles not here (sections, text, containers) get no word.
+_WEB_ROLE_WORDS = {
+    **dict.fromkeys(("button", "pushbutton", "togglebutton"), "button"),
+    **dict.fromkeys(
+        ("textfield", "entry", "searchbox", "textfieldwithcombobox"), "text field"
+    ),
+    "passwordtext": "password field",
+    **dict.fromkeys(
+        ("comboboxselect", "comboboxmenubutton", "comboboxgrouping", "combobox"),
+        "drop-down",
+    ),
+    "popupbutton": "drop-down",
+    **dict.fromkeys(
+        ("checkbox", "checkbutton", "menuitemcheckbox", "checkmenuitem"), "check box"
+    ),
+    "link": "link",
+    **dict.fromkeys(("radiobutton", "menuitemradio", "radiomenuitem"), "radio button"),
+    "switch": "switch",
+    "slider": "slider",
+    **dict.fromkeys(("menuitem", "parentmenuitem"), "menu item"),
+    **dict.fromkeys(("tab", "pagetab"), "tab"),
+    **dict.fromkeys(
+        ("option", "listboxoption", "menulistoption", "comboboxoption"), "option"
+    ),
+    "heading": "heading",
+    **dict.fromkeys(("image", "graphic"), "image"),
+}
+#: Role words of form controls: named by their label, never by their value.
+_FIELD_WORDS = frozenset(
+    {"text field", "password field", "drop-down", "check box", "radio button",
+     "switch", "slider"}
+)  # fmt: skip
+#: ``InputType`` variations (TYPE_CLASS_TEXT) and classes -> a plain word.
+_TEXT_VARIATIONS = {
+    0x10: "url",
+    0x20: "email",
+    0x30: "subject",
+    0x40: "message",
+    0x50: "message",
+    0x60: "name",
+    0x70: "address",
+    0x80: "password",
+    0x90: "password",
+    0xA0: "filter",
+    0xB0: "text",
+    0xC0: "text",
+    0xD0: "email",
+    0xE0: "password",
+}
+_INPUT_CLASSES = {2: "number", 3: "phone", 4: "date"}
+#: Address bar node ids (Chrome, Firefox): typed text there is "the address bar".
+_ADDRESS_BARS = ("url_bar", "ADDRESSBAR_SEARCH_BOX", "ADDRESSBAR_URL_BOX",
+                 "mozac_browser_toolbar_edit_url_view")  # fmt: skip
+_HOST = re.compile(r"\s*(?:[a-z][a-z0-9+.-]*://)?([^\s/?#]+)", re.IGNORECASE)
+_HOST_OK = re.compile(
+    r"(?:[A-Za-z0-9-]+\.)*[A-Za-z0-9-]+(?::\d{1,5})?|\[[0-9a-fA-F:.]+\](?::\d{1,5})?"
+)
+
+
+def _web_role(raw: Any, node: dict) -> str | None:
+    """The plain role word of a web node (``password field`` for a password
+    input), or None for a generic role.
+    """
+    if node.get("password"):
+        return "password field"
+    key = str(raw or "").replace(" ", "").lower()
+    return _WEB_ROLE_WORDS.get(key)
+
+
+def _input_word(input_type: Any) -> str | None:
+    """``InputType`` bits -> ``email``, ``password``, ``number`` ..."""
+    if not isinstance(input_type, int) or input_type <= 0:
+        return None
+    cls = input_type & 0xF
+    if cls == 1:
+        return _TEXT_VARIATIONS.get(input_type & 0xFF0, "text")
+    if cls == 2 and input_type & 0xFF0 == 0x10:
+        return "password"
+    return _INPUT_CLASSES.get(cls)
+
+
+def page_host(bar: Any) -> str | None:
+    """The leading host of a browser's address bar text (``127.0.0.1:8097``
+    of ``127.0.0.1:8097/index.html. Connection is not secure``): what follows
+    the host is localized. None when it starts with no host (a hint such as
+    ``Search or type URL``).
+    """
+    m = _HOST.match(str(bar or ""))
+    if m is None:
+        return None
+    host = m[1].rstrip(".,;")
+    if "@" in host:
+        host = host.rsplit("@", 1)[-1]
+    if not _HOST_OK.fullmatch(host):
+        return None
+    if "." not in host and ":" not in host and host.lower() != "localhost":
+        return None
+    return host
+
+
+def _short_url(url: str) -> str:
+    """``https://example.com/privacy/`` -> ``example.com/privacy``."""
+    text = re.sub(r"^[a-z][a-z0-9+.-]*://", "", str(url), flags=re.IGNORECASE)
+    return _clip(text.rstrip("/"), 60)
+
+
+def _address_bar(node: dict) -> bool:
+    """``node`` is a browser's address bar (Chrome, Firefox)."""
+    rid = str(node.get("rid") or "")
+    return bool(rid) and rid.rsplit("/", 1)[-1] in _ADDRESS_BARS
+
+
+def _web_target(node: dict, answer: dict, alt: dict | None) -> dict | None:
+    """``data.target.web`` of a web node (None for native views)."""
+    w = node.get("web")
+    if not isinstance(w, dict) or not w.get("engine"):
+        return None
+    doc = answer.get("web_doc") or (alt or {}).get("web_doc") or {}
+    if not isinstance(doc, dict):
+        doc = {}
+    page = page_host(doc.get("bar"))
+    if page is None and alt and isinstance(alt.get("web_doc"), dict):
+        page = page_host(alt["web_doc"].get("bar"))
+    return {
+        "engine": w.get("engine"),
+        "role": _web_role(w.get("role"), node),
+        "raw_role": w.get("role"),
+        "html_id": node.get("rid"),
+        "href": w.get("href"),
+        "field": w.get("label"),
+        "input": _input_word(w.get("input_type")),
+        "doc": doc.get("title"),
+        "page": page,
+    }
+
+
+def _web_name(node: dict, web: dict, answer: dict) -> str | None:
+    """What a user reads on a web element: a form control's label (never
+    its value), else its text, description or the text inside it.
+    """
+    private = _private(node) or web.get("role") in _FIELD_WORDS
+    if private:
+        order = (web.get("field"), node.get("desc"), node.get("hint"))
+        if not _private(node):  # a check box's own text is its label
+            order = (*order, node.get("text"))
+    else:
+        label = answer.get("label") if answer.get("target") is node else None
+        order = (node.get("text"), node.get("desc"), label, web.get("field"))
+    for value in order:
+        if isinstance(value, str) and value.strip():
+            return _clip(value)
+    return None
 
 
 def _same_node(a: dict | None, b: dict | None) -> bool:
@@ -1139,6 +1367,13 @@ class TrackingService:
         self._recent_inputs: deque[dict] = deque(maxlen=64)
         self._recent_clicks: deque[dict] = deque(maxlen=64)
         self._text: dict | None = None
+        #: The field being watched for a read-back (see ``_rb_arm``), and
+        #: when the last TEXT_CHANGED came (host epoch).
+        self._rb: dict | None = None
+        self._last_text_host = 0.0
+        #: Packages of the input method (keyboard): its windows are no
+        #: screen change of the field being typed into.
+        self._ime_pkgs: set[str] = set()
         self._last_screen: tuple | None = None
         self._last_window_host = 0.0
         self._activities: list[dict] = []
@@ -1172,6 +1407,7 @@ class TrackingService:
         self._shot_lane = _Lane("tracking-shot")
         self._store_lane = _Lane("tracking-store")
         self._probe_lane = _Lane("tracking-probe")
+        self._rb_lane = _Lane("tracking-readback")
         #: The pre-change frame hash of a screen event, taken at event time.
         self._screen_pre_lane = _Lane("tracking-screen-pre")
 
@@ -1376,6 +1612,8 @@ class TrackingService:
             self._recent_inputs.clear()
             self._recent_clicks.clear()
             self._text = None
+            self._rb = None
+            self._last_text_host = 0.0
             self._last_screen = None
             self._activities = []
             self._screen_q.clear()
@@ -1447,6 +1685,7 @@ class TrackingService:
             unsub()
         self._order_lane.drain(1.5)
         self._flush_text()
+        self._rb_trigger(flush=True, wait=True)
         self._unsubscribe_bell()
         if logcat is not None:
             with contextlib.suppress(Exception):
@@ -1642,6 +1881,11 @@ class TrackingService:
             g = ev.gesture
             g.host_recv = host_recv
             fut = self._at_down(g) if ev.kind == "down" else None
+            if ev.kind == "down":
+                with self._lock:
+                    rb = self._rb_pending()
+                if rb is not None:  # the field still has the focus now
+                    self._rb_lane.submit(self._rb_read, rb)
             if ev.kind in ("down", "key"):
                 # after _at_down: an input seen by the shot lane has its
                 # before-tap capture registered
@@ -1739,7 +1983,12 @@ class TrackingService:
             name = KEY_NAMES.get(g.key_code)
             if name is None:
                 self._keys_other += 1
+                self._rb_key(g)  # a character typed on a keyboard
                 return
+            if name == "DEL":
+                self._rb_key(g)
+            elif name in ("ENTER", "TAB"):
+                self._rb_trigger(flush=True, wait=True)
             seq = _emit(
                 "input",
                 "key",
@@ -1820,6 +2069,12 @@ class TrackingService:
         # Privacy: a tap while a password field has the focus, on a password
         # field, or on the keyboard is sensitive (masked by readers, never
         # suppressed); a keyboard key never names its label.
+        if ime:
+            if pkg:
+                self._ime_pkgs.add(str(pkg))
+        else:
+            # the next tap ends typing into a field that sends no text events
+            self._rb_trigger(flush=True, wait=True)
         pw = self._pw_focus or bool(target and target.get("password"))
         sensitive = pw or ime
         if ime:
@@ -1851,6 +2106,11 @@ class TrackingService:
             return
         with self._lock:
             self._inputs += 1
+        raw_node = (answer.get("target") or answer.get("hit") or {}) if answer else {}
+        if ime:
+            self._rb_key(g)
+        elif kind in ("tap", "long_press") and raw_node.get("editable"):
+            self._rb_arm(raw_node, answer, g)
         rec = {
             "seq": seq,
             "kind": kind,
@@ -1896,36 +2156,80 @@ class TrackingService:
     def _target(reply: dict | None) -> tuple[dict | None, dict]:
         if not reply:
             return None, {}
-        for source in ("cached", "live"):
-            answer = reply.get(source)
-            if isinstance(answer, dict) and answer.get("hit"):
-                node = answer.get("target") or answer.get("hit")
-                target = {
-                    "rid": node.get("rid"),
-                    "text": None if _private(node) else node.get("text"),
-                    "desc": node.get("desc"),
-                    "cls": node.get("cls"),
-                    "path": answer.get("path"),
-                    "bounds": node.get("bounds"),
-                    "source": source,
-                }
-                for key in ("hint", "password", "editable"):
-                    if node.get(key):
-                        target[key] = node[key]
-                # A node without its own text/desc (a list row) is named by
-                # its descendants' label ('Battery / Charged'): kept as
-                # ``label``; ``text`` stays the node's own text.
-                label = answer.get("label") if answer.get("target") is node else None
-                if (
-                    isinstance(label, str)
-                    and label.strip()
-                    and not _private(node)
-                    and not node.get("text")
-                    and not node.get("desc")
-                ):
-                    target["label"] = label
-                return target, answer
-        return None, {}
+        found = [
+            (source, reply[source])
+            for source in ("cached", "live")
+            if isinstance(reply.get(source), dict) and reply[source].get("hit")
+        ]
+        if len(found) == 2 and TrackingService._live_is_better(
+            found[0][1], found[1][1]
+        ):
+            found.reverse()
+        if not found:
+            return None, {}
+        source, answer = found[0]
+        alt = found[1][1] if len(found) == 2 else None
+        node = answer.get("target") or answer.get("hit")
+        target = {
+            "rid": node.get("rid"),
+            "text": None if _private(node) else node.get("text"),
+            "desc": node.get("desc"),
+            "cls": node.get("cls"),
+            "path": answer.get("path"),
+            "bounds": node.get("bounds"),
+            "source": source,
+        }
+        for key in ("hint", "password", "editable"):
+            if node.get(key):
+                target[key] = node[key]
+        # A node without its own text/desc (a list row) is named by its
+        # descendants' label ('Battery / Charged'): kept as ``label``;
+        # ``text`` stays the node's own text.
+        label = answer.get("label") if answer.get("target") is node else None
+        if (
+            isinstance(label, str)
+            and label.strip()
+            and not _private(node)
+            and not node.get("text")
+            and not node.get("desc")
+        ):
+            target["label"] = label
+        web = _web_target(node, answer, alt)
+        if web is not None:
+            target["web"] = web
+        return target, answer
+
+    @staticmethod
+    def _live_is_better(cached: dict, live: dict) -> bool:
+        """The live answer names the element and the snapshot did not.
+
+        The snapshot is the screen at finger-down, so it wins -- unless it
+        saw only the bare web container (Gecko had not built the page yet),
+        or it was outdated (the screen changed while or after it was taken,
+        or it was cut short) and missed what the live answer finds at the
+        point: web content, or an editable field inside its element (Chrome
+        rebuilds its toolbar and page tree while the keyboard moves).
+        """
+        if live.get("bare_web"):
+            return False
+        if cached.get("bare_web"):
+            return True
+        snap = cached.get("snapshot") or {}
+        if not (snap.get("changes_since_start") or snap.get("truncated")):
+            return False
+        c = cached.get("target") or cached.get("hit") or {}
+        n = live.get("target") or live.get("hit") or {}
+        if isinstance(n.get("web"), dict) and not isinstance(c.get("web"), dict):
+            return not cached.get("target") or not c.get("clickable")
+        cb, nb = c.get("bounds"), n.get("bounds")
+        return bool(
+            n.get("editable")
+            and not c.get("editable")
+            and isinstance(cb, list)
+            and isinstance(nb, list)
+            and len(cb) == len(nb) == 4
+            and cb[0] <= nb[0] and cb[1] <= nb[1] and nb[2] <= cb[2] and nb[3] <= cb[3]
+        )  # fmt: skip
 
     @staticmethod
     def _ime_hit(reply: dict | None) -> bool:
@@ -1955,11 +2259,40 @@ class TrackingService:
                 way = "down" if dy > 0 else "up"
             text = f"swipe {way} · {data['x']},{data['y']} → {data['x1']},{data['y1']}"
             return f"{text} on '{name}'" if name else text
+        if target is not None and isinstance(target.get("web"), dict):
+            node = answer.get("target") or answer.get("hit") or {}
+            return TrackingService._web_summary(word, data, target["web"], node, answer)
         if name:
             return f"{word} '{name}' ({_short_cls(target.get('cls'))})"
         if data.get("x") is None or data.get("y") is None:
             return f"{word} · position unknown"
         return f"{word} at {data['x']},{data['y']}"
+
+    @staticmethod
+    def _web_summary(word: str, data: dict, web: dict, node: dict, answer: dict) -> str:
+        """``tap button 'Accept all' (#accept-all) on example.com``: plain
+        words; the role word, the link target, the html id and the page only
+        when known (``in page '<title>'`` inside an app's WebView).
+        """
+        role = web.get("role")
+        name = _web_name(node, web, answer)
+        parts = [word]
+        if role:
+            parts.append(role)
+        if name:
+            parts.append(f"'{name}'")
+        elif not role:
+            x, y = data.get("x"), data.get("y")
+            parts.append(f"at {x},{y}" if x is not None and y is not None else "")
+        if role == "link" and web.get("href"):
+            parts.append(f"to {_short_url(web['href'])}")
+        if web.get("html_id"):
+            parts.append(f"(#{_clip(web['html_id'], 40)})")
+        if web.get("page"):
+            parts.append(f"on {web['page']}")
+        elif web.get("doc"):
+            parts.append(f"in page '{_clip(web['doc'], 40)}'")
+        return " ".join(p for p in parts if p)
 
     # -- helper events ----------------------------------------------------------
 
@@ -1985,15 +2318,24 @@ class TrackingService:
         if ev in ("CLICKED", "LONG_CLICKED"):
             self._on_click(d, host_recv)
         elif ev == "TEXT_CHANGED":
+            d = self._text_event(d)
+            if d is None:
+                return
             if d.get("password") or (d.get("src") or {}).get("password"):
                 self._pw_focus = True
             self._on_text(d, host_recv)
         elif ev == "FOCUSED":
+            pkg = str(d.get("pkg") or "")
+            if pkg in self._ime_pkgs or "inputmethod" in pkg:
+                return  # the keyboard itself: the field keeps the focus
             self._pw_focus = bool(
                 d.get("password") or (d.get("src") or {}).get("password")
             )
             self._flush_text()
         elif ev == "WINDOW_STATE_CHANGED":
+            pkg = str(d.get("pkg") or "")
+            if pkg not in self._ime_pkgs and "inputmethod" not in pkg:
+                self._rb_trigger(flush=True)
             self._flush_text()
             self._on_window(d, host_recv)
 
@@ -2073,6 +2415,23 @@ class TrackingService:
 
     # text
 
+    @staticmethod
+    def _text_event(d: dict) -> dict | None:
+        """A TEXT_CHANGED worth a line, cleaned; None for a source that is
+        not editable (Gecko reports document changes as text changes of the
+        page: no typing). U+FFFC (an embedded object) is dropped.
+        """
+        src = d.get("src")
+        if isinstance(src, dict) and src and not src.get("editable"):
+            return None
+        if any(OBJ_CHAR in str(d.get(k) or "") for k in ("text", "before")):
+            d = {
+                **d,
+                "text": str(d.get("text") or "").replace(OBJ_CHAR, ""),
+                "before": str(d.get("before") or "").replace(OBJ_CHAR, ""),
+            }
+        return d
+
     def _on_text(self, d: dict, host_recv: float) -> None:
         src = d.get("src") or {}
         rid = src.get("rid")
@@ -2084,6 +2443,9 @@ class TrackingService:
         )
         flush = None
         with self._lock:
+            # The field reports itself: no read-back of it.
+            self._last_text_host = host_recv
+            self._rb = None
             cur = self._text
             if cur is not None and cur["key"] != key:
                 flush, cur = cur, None
@@ -2098,13 +2460,22 @@ class TrackingService:
                     "window_id": win,
                     "password": False,
                     "data_sensitive": False,
+                    "chars": [],
+                    "partial": False,
+                    "masked": False,
                 }
             cur["edits"] += 1
             cur["last_ms"] = float(d.get("t_mono_ms") or 0.0)
             cur["host"] = host_recv
-            cur["text"] = d.get("text") or ""
+            text = d.get("text") or ""
+            cur["text"] = text
             cur["password"] |= bool(d.get("password") or src.get("password"))
             cur["data_sensitive"] |= bool(d.get("data_sensitive"))
+            if cur["password"]:
+                cur["chars"], cur["partial"] = rebuild_password(
+                    cur["chars"], cur["partial"], text, d.get("from")
+                )
+                cur["masked"] = BULLET in text
             self._text = cur
         if flush is not None:
             self._emit_text(flush)
@@ -2115,20 +2486,51 @@ class TrackingService:
         if cur is not None:
             self._emit_text(cur)
 
+    @staticmethod
+    def _typed(cur: dict) -> tuple[str, bool]:
+        """``(value, partial)`` of a coalesced text record: a password
+        field that shows bullets gives its rebuilt value (unknown
+        characters as bullets).
+        """
+        text = cur.get("text") or ""
+        if cur.get("masked"):
+            chars = cur.get("chars") or []
+            value = "".join(c if c is not None else BULLET for c in chars)
+            return value, bool(cur.get("partial")) or None in chars
+        if cur.get("password") and text and set(text) == {BULLET}:
+            return text, True  # only bullets were ever readable
+        return text, False
+
     def _emit_text(self, cur: dict) -> None:
         cfg = _config()
         node = cur["node"] or {}
-        text = cur.get("text") or ""
+        text, partial = self._typed(cur)
         password = bool(cur["password"])
         sensitive = password or bool(cur["data_sensitive"])
         name = _field_name({**node, "cls": cur["cls"]})
         cls = _short_cls(cur["cls"])
-        summary = f"typed {len(text)} chars into '{name}' ({cls}{', password' if password else ''})"
+        if _address_bar(node):
+            into = "the address bar"
+        else:
+            into = f"{'password field ' if password else ''}'{name}'"
+        count = f"typed {_chars(len(text))} into {into}"
+        if not cfg.capture_text:
+            summary = (
+                f"typed {_chars(len(text))} into '{name}' "
+                f"({cls}{', password' if password else ''})"
+            )
+        elif partial:
+            summary = f"{count} (partly read)"
+        elif not text:
+            summary = f"cleared {into}"
+        else:
+            summary = f'typed "{_clip(text, TEXT_SUMMARY_MAX)}" into {into}'
         data: dict[str, Any] = {
             "password": password,
             "edits": cur["edits"],
             "len": len(text),
             "dur_ms": round(cur.get("last_ms", 0.0) - cur["first_ms"], 1),
+            "via": cur.get("via", "a11y"),
             "target": {
                 "rid": node.get("rid"),
                 "cls": cur["cls"],
@@ -2137,10 +2539,17 @@ class TrackingService:
                 "window_id": cur["window_id"],
             },
         }
+        if isinstance(node.get("web"), dict) and node["web"].get("label"):
+            data["target"]["field"] = node["web"]["label"]
         if cur["data_sensitive"]:
             data["data_sensitive"] = True
+        if partial:
+            data["partial"] = True
         if cfg.capture_text:
             data["text"] = text
+            if sensitive and summary != count:
+                # what readers show while sensitive lines are masked
+                data["masked_summary"] = count
         else:
             data["captured"] = False
         _emit(
@@ -2157,6 +2566,173 @@ class TrackingService:
         )
         with self._lock:
             self._inputs += 1
+
+    # read-back: fields that send no TEXT_CHANGED (Compose, address bars)
+
+    def _rb_arm(self, node: dict, answer: dict, g: Gesture) -> None:
+        """An editable was tapped (order lane): watch it for keystrokes.
+
+        ``node`` is the raw node of the helper's answer (its own text is the
+        field's value at the tap, unless it shows its hint).
+        """
+        b = node.get("bounds")
+        xy = None
+        if isinstance(b, list) and len(b) == 4:
+            xy = ((b[0] + b[2]) // 2, (b[1] + b[3]) // 2)
+        rb = {
+            "node": node,
+            "xy": xy,
+            "pkg": answer.get("pkg"),
+            "window_id": (answer.get("window") or {}).get("id"),
+            "initial": "" if node.get("showing_hint") else (node.get("text") or ""),
+            "armed_host": time.time(),
+            "first_ms": None,
+            "last_ms": g.t_down * 1000.0,
+            "keys": 0,
+            "last_key_host": None,
+            "read_keys": 0,
+        }
+        with self._lock:
+            self._rb = rb
+
+    def _rb_key(self, g: Gesture) -> None:
+        """A keystroke (a keyboard tap or a character key; order lane)."""
+        now = time.time()
+        with self._lock:
+            rb = self._rb
+            if rb is None:
+                if now - self._last_text_host < READBACK_TEXT_GRACE_S:
+                    return  # the focused field reports its text itself
+                rb = self._rb = {
+                    "node": None,
+                    "xy": None,
+                    "pkg": None,
+                    "window_id": None,
+                    "initial": None,
+                    "armed_host": now,
+                    "first_ms": None,
+                    "keys": 0,
+                    "read_keys": 0,
+                }
+            rb["keys"] += 1
+            rb["last_key_host"] = now
+            if rb["first_ms"] is None:
+                rb["first_ms"] = g.t_down * 1000.0
+            rb["last_ms"] = (g.t_up or g.t_down) * 1000.0
+
+    def _rb_pending(self) -> dict | None:
+        """The read-back with keystrokes no read covers yet (lock held)."""
+        rb = self._rb
+        if rb is None or rb["keys"] <= rb["read_keys"]:
+            return None
+        return rb
+
+    def _rb_read(self, rb: dict) -> None:
+        """Read lane: ask the helper for the field's value now."""
+        helper = self._helper_up()
+        fn = getattr(helper, "focus", None) if helper is not None else None
+        with self._lock:
+            if self._rb is not rb or not callable(fn):
+                return
+            keys = rb["keys"]
+        x, y = rb["xy"] or (None, None)
+        try:
+            reply = fn(x, y, timeout=READBACK_TIMEOUT_S)
+        except Exception:
+            reply = None
+        if not isinstance(reply, dict):
+            return
+        node, good = self._rb_node(reply, rb)
+        with self._lock:
+            if self._rb is not rb:
+                return
+            rb["read_keys"] = max(rb["read_keys"], keys)
+            if node is None:
+                return
+            value = "" if node.get("showing_hint") else (node.get("text") or "")
+            if good:
+                rb["good"] = (value, node, keys)
+            else:
+                rb["weak"] = (value, node, keys)
+
+    @staticmethod
+    def _rb_node(reply: dict, rb: dict) -> tuple[dict | None, bool]:
+        """``(node, good)`` of a ``focus`` reply: the focused editable (good
+        when it is the watched field), else the editable re-read at the
+        tapped point (weak: it may have lost its focus).
+        """
+        inp = reply.get("input")
+        armed = rb.get("node")
+        if isinstance(inp, dict) and inp.get("editable"):
+            same = armed is None or (
+                (inp.get("rid") and inp.get("rid") == armed.get("rid"))
+                or (inp.get("bounds") and inp.get("bounds") == armed.get("bounds"))
+                or (_address_bar(inp) and _address_bar(armed))
+            )
+            if same:
+                return inp, True
+        node = reply.get("node")
+        if isinstance(node, dict) and node.get("editable"):
+            return node, False
+        if isinstance(inp, dict) and inp.get("editable") and armed is None:
+            return inp, True
+        return None, False
+
+    def _rb_flush(self, rb: dict | None = None, *, read: bool = True) -> None:
+        """Read lane: read once more when keystrokes are not covered yet,
+        then write the read-back line (``data.via = "readback"``).
+        """
+        with self._lock:
+            rb = rb or self._rb
+            if rb is None or rb is not self._rb or not rb["keys"]:
+                return
+            need = rb["keys"] > rb["read_keys"]
+        if need and read:
+            self._rb_read(rb)
+        with self._lock:
+            if self._rb is not rb:
+                return
+            self._rb = None
+            reported = self._last_text_host >= rb["armed_host"] - 0.05
+        good, weak = rb.get("good"), rb.get("weak")
+        pick = good
+        if weak is not None and (
+            good is None or (weak[2] > good[2] and not _address_bar(weak[1]))
+        ):
+            pick = weak  # the field kept its text after losing the focus
+        if pick is None or reported:
+            return
+        value, node, _keys = pick
+        if rb["initial"] is not None and value == rb["initial"]:
+            return  # nothing changed
+        cur = {
+            "key": None,
+            "first_ms": rb["first_ms"] or 0.0,
+            "last_ms": rb.get("last_ms") or rb["first_ms"] or 0.0,
+            "edits": rb["keys"],
+            "node": node,
+            "pkg": node.get("pkg") or rb["pkg"],
+            "cls": node.get("cls"),
+            "window_id": node.get("window_id", rb["window_id"]),
+            "password": bool(node.get("password")),
+            "data_sensitive": False,
+            "text": value,
+            "via": "readback",
+        }
+        self._emit_text(cur)
+
+    def _rb_trigger(self, *, flush: bool, wait: bool = False) -> None:
+        """Queue a read (``flush``: and the line) of the watched field;
+        ``wait``: until it is done (order lane: before the next input line).
+        """
+        with self._lock:
+            rb = self._rb
+            if rb is None or not rb["keys"]:
+                return
+        fut = self._rb_lane.submit(self._rb_flush if flush else self._rb_read, rb)
+        if wait:
+            with contextlib.suppress(Exception):
+                fut.result(timeout=READBACK_TIMEOUT_S + 0.5)
 
     # screen
 
@@ -2629,12 +3205,41 @@ class TrackingService:
             idle = cur is not None and (now - cur["host"]) * 1000.0 >= cfg.text_idle_ms
         if idle:
             self._flush_text()
+        self._rb_tick(now, cfg)
         self._check_activities(now)
         with self._lock:
             while self._recent_clicks and now - self._recent_clicks[0]["host"] > 5.0:
                 self._recent_clicks.popleft()
             while self._recent_inputs and now - self._recent_inputs[0]["host"] > 5.0:
                 self._recent_inputs.popleft()
+
+    def _rb_tick(self, now: float, cfg: Any) -> None:
+        """Read the watched field :data:`READBACK_DEBOUNCE_S` after the last
+        keystroke; write its line once idle for ``text_idle_ms``.
+        """
+        with self._lock:
+            rb = self._rb
+            if rb is None or not rb["keys"]:
+                return
+            last = rb.get("last_key_host") or rb["armed_host"]
+            read = (
+                rb["keys"] > rb["read_keys"]
+                and now - last >= READBACK_DEBOUNCE_S
+                and rb.get("queued") != rb["keys"]
+            )
+            flush = (
+                not read
+                and (now - last) * 1000.0 >= cfg.text_idle_ms
+                and not rb.get("flushing")
+            )
+            if read:
+                rb["queued"] = rb["keys"]
+            if flush:
+                rb["flushing"] = True
+        if read:
+            self._rb_lane.submit(self._rb_read, rb)
+        elif flush:
+            self._rb_lane.submit(self._rb_flush, rb)
 
     # -- helper status ---------------------------------------------------------------
 

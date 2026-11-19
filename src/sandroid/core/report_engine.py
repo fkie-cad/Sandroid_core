@@ -307,6 +307,10 @@ def element_name(target: Mapping[str, Any] | None) -> str | None:
         value = target.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+    web = target.get("web")
+    if isinstance(web, Mapping) and isinstance(web.get("field"), str):
+        if web["field"].strip():
+            return web["field"].strip()  # a web form control's label
     return _short_id(target.get("rid")) or _short_cls(target.get("cls"))
 
 

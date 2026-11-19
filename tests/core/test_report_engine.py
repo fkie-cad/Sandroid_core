@@ -2252,3 +2252,9 @@ def test_label_path_index_matches_the_scan_and_is_fast():
     for i in range(20_000):
         report_engine._label_path(ctx, i * 0.05, i)
     assert _time.perf_counter() - start < 2.0
+
+
+def test_a_web_form_control_is_named_by_its_label():
+    target = {"rid": "chk", "cls": "android.widget.CheckBox",
+              "web": {"field": "I agree", "role": "check box"}}  # fmt: skip
+    assert report_engine.element_name(target) == "I agree"

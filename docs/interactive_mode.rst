@@ -602,7 +602,16 @@ snapshot loads and are ended when Sandroid quits or the device changes.
 **Masking**: lines marked sensitive (typed text, passwords) are shown
 masked in the lens, exports and reports while ``timeline.mask_sensitive`` is
 on (Settings → Timeline; default off). ``ai.mask_sensitive`` does the same
-for the AI assistant. The summary never holds the secret.
+for the AI assistant. A typed-text line's summary quotes what was typed
+(``typed "hunter22" into password field 'Passwort'``); while masked it only
+gives the count (``typed 8 chars into password field 'Passwort'``).
+
+**Web pages**: a tap in a browser or an app's WebView names the HTML element
+from the accessibility tree alone (no script in the page): its role, label,
+html id, a link's target and the page (``tap button 'Accept all'
+(#accept-all) on example.com``, ``... in page '<title>'`` inside an app).
+Fields that send no text events (browser address bars, Jetpack Compose) are
+read back once typing pauses (``data.via`` ``readback``).
 
 **Settings → Timeline** sets which sources are recorded, kinds that are off
 or only counted, the file-event coalescing window, the clock sampling

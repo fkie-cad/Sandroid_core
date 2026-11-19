@@ -498,7 +498,9 @@ Tracking (``[tracking]``)
    settle_interval_ms = 300
    settle_max_ms = 2000
 
-   # Typed text (a line once the field is idle for text_idle_ms)
+   # Typed text (a line once the field is idle for text_idle_ms); the line's
+   # summary quotes it, passwords included (timeline.mask_sensitive hides it).
+   # Off: only the number of characters is recorded.
    capture_text = true
    text_idle_ms = 1500
 
