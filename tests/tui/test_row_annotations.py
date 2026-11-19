@@ -58,6 +58,7 @@ def test_merge_priority_and_tint():
     assert reg.tint_role_for("network", "f1") == "accent"
     assert reg.tint_role_for("network", "f2") == "warn"
     assert reg.tint_role_for("network", "f3") is None
+    assert reg.tint_for("network", "f1") == ("accent", 0.13)
     assert reg.annotations_for("files", "f1") == []
 
 

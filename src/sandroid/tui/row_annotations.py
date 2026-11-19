@@ -23,8 +23,8 @@ blocks. A lens receives them through an :class:`AnnotationFeed`, which makes
 one non-blocking UI hop and flushes at most once per :data:`REFRESH_S`.
 
 Rendering: :class:`AnnotationTintMixin` for a ``DataTable`` tints rows whose
-annotations carry a ``tint_role`` (the highest-priority one wins; privacy
-has a higher priority than AI marks). The tint colour is cached per theme
+annotations carry a ``tint_role`` (the highest-priority one wins; AI
+highlights, asked for explicitly, beat the privacy tint). The tint colour is cached per theme
 palette, the per-row lookup per registry revision.
 
 Everything here is UI-agnostic except :class:`AnnotationFeed` (needs a
@@ -60,7 +60,11 @@ POST_STALE_S = 5.0
 
 #: Default priorities (higher wins the tint and sorts first).
 PRIORITY_PRIVACY = 100
-PRIORITY_AI = 50
+#: AI highlights are asked for explicitly by the user: they win the tint.
+PRIORITY_AI = 150
+
+#: Default row tint strength (lens bg blended towards the tint role).
+TINT_AMOUNT = 0.13
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,7 @@ class Annotation:
             for the label.
         reason: Longer text for the inspector ("body has an email address").
         tint_role: Palette role to tint the whole row towards, or ``None``.
+        tint_amount: How far the row background blends towards it.
         priority: Higher sorts first and wins the row tint.
         group: The provider's id of the set this note belongs to (an AI mark
             set id, a privacy marker id); free-form.
@@ -86,6 +91,7 @@ class Annotation:
     colour_role: str = "accent"
     reason: str = ""
     tint_role: str | None = None
+    tint_amount: float = TINT_AMOUNT
     priority: int = 0
     group: str = ""
 
@@ -172,10 +178,15 @@ class RowAnnotationRegistry:
         return out
 
     def tint_role_for(self, lens: str, key: str) -> str | None:
-        """The row tint of the highest-priority note that has one."""
+        """The row tint role of the highest-priority note that has one."""
+        tint = self.tint_for(lens, key)
+        return tint[0] if tint else None
+
+    def tint_for(self, lens: str, key: str) -> tuple[str, float] | None:
+        """``(role, amount)`` of the highest-priority note with a tint."""
         for a in self.annotations_for(lens, key):
             if a.tint_role:
-                return a.tint_role
+                return (a.tint_role, a.tint_amount)
         return None
 
     def filter_predicates(self, lens: str) -> list[Callable[[str], bool]]:
@@ -370,7 +381,7 @@ def role_color(role: str) -> str:
     return str(getattr(pal, role, None) or pal.text)
 
 
-def row_tint(role: str = "warn", amount: float = 0.13) -> str:
+def row_tint(role: str = "warn", amount: float = TINT_AMOUNT) -> str:
     """The lens background blended a little towards a palette role.
 
     Cached per palette colours, so a theme change picks up the new tint.
@@ -386,7 +397,7 @@ class AnnotationTintMixin:
 
     Set ``annotation_lens`` (``"network"`` / ``"files"``) on the table. The
     tint of a row is the ``tint_role`` of its highest-priority annotation
-    (:meth:`RowAnnotationRegistry.tint_role_for`). Lookups are cached per
+    (:meth:`RowAnnotationRegistry.tint_for`). Lookups are cached per
     registry revision; colours per theme palette. Override
     :meth:`annotation_key` to map a Textual row key to the annotation key
     (default: the row key's value). After a change, the owner redraws the
@@ -402,16 +413,16 @@ class AnnotationTintMixin:
     def annotation_key(self, row_key_value: Any) -> str | None:
         return None if row_key_value is None else str(row_key_value)
 
-    def _annotation_tint_role(self, key: str) -> str | None:
+    def _annotation_tint(self, key: str) -> tuple[str, float] | None:
         reg = registry()
         rev = reg.revision
         cache = getattr(self, "_annotation_tint_cache", None)
         if cache is None or cache[0] != rev:
             cache = (rev, {})
             self._annotation_tint_cache = cache
-        memo: dict[str, str | None] = cache[1]
+        memo: dict[str, tuple[str, float] | None] = cache[1]
         if key not in memo:
-            memo[key] = reg.tint_role_for(self.annotation_lens, key)
+            memo[key] = reg.tint_for(self.annotation_lens, key)
         return memo[key]
 
     def _get_row_style(self, row_index: int, base_style: Style) -> Style:
@@ -427,7 +438,7 @@ class AnnotationTintMixin:
             return style
         if not key:
             return style
-        role = self._annotation_tint_role(key)
-        if role:
-            return style + bg_style(row_tint(role))
+        tint = self._annotation_tint(key)
+        if tint:
+            return style + bg_style(row_tint(*tint))
         return style
