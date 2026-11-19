@@ -1288,7 +1288,7 @@ class DiffsView(FilesSubViewBase):
                 if body:
                     body.append("\n")
                 body.append(self._short_path(path, 44))
-                color = {rewind.SAME: _GOOD, rewind.DIFFERENT: "#facc15"}.get(
+                color = {rewind.SAME: _GOOD, rewind.DIFFERENT: _WARN}.get(
                     verdict, _MUTED
                 )
                 body.append(f"  {verdict}", style=color)

@@ -216,7 +216,9 @@ def _pull_serial() -> str | None:
 def _says_missing(error: str) -> bool:
     """An adb pull error that means the file is not there."""
     text = (error or "").lower()
-    return "no such file" in text or "does not exist" in text
+    # "File not found on device" is detect_adb_pull_error's word for adb's
+    # "failed to stat remote object"; "device 'x' not found" is not a file.
+    return any(w in text for w in ("no such file", "does not exist", "file not found"))
 
 
 def timeline_pull(
@@ -918,9 +920,13 @@ class WatchlistView(Widget):
         result = fx.pull_file(path, str(current_main))
         if not result.success:
             error = result.error or "Pull failed"
-            if rewind is not None and (path not in device or _says_missing(error)):
+            if rewind is not None and (
+                _says_missing(error) or (device and path not in device)
+            ):
                 # Not on the device (a new file at the start point, a
                 # deleted one after): a fact of the role, not an error.
+                # Empty facts alone prove nothing: they are also what a
+                # failed stat (device gone, adb hiccup) returns.
                 watchlist_store.discard_current(path)
                 timeline_pull(path, trigger, ok=True, error="not on the device")
                 self._post(self._pulling.discard, path)

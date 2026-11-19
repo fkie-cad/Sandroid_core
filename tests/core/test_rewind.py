@@ -704,3 +704,162 @@ def test_raw_gesture_is_sent_as_sendevent():
 def test_player_module_keeps_the_raw_cli_player():
     assert hasattr(player, "Player")
     assert hasattr(player, "parse_store_line")
+
+
+# ---------------------------------------------------------------------------
+# edge cases (review round)
+# ---------------------------------------------------------------------------
+
+
+def test_replay_element_gone_but_position_known_goes_by_position():
+    steps = extract_steps([_tap(target={"text": "Accept all"})])
+    log: list[str] = []
+    rep, lines = _replayer(FakeHelper([_dump(_node("Reject"))]), log,
+                           element_wait_s=1.0)  # fmt: skip
+    report = rep.run(steps)
+    assert log == ["input tap 500 600"]
+    assert report["steps"][0] == {
+        "i": 1, "seq": 1, "what": "tap 'Accept all' (Button)",
+        "way": "by position", "reason": "not found",
+    }  # fmt: skip
+    assert "by position (not found)" in lines[0]["summary"]
+    assert report["error"] is None
+
+
+def test_replay_ambiguous_element_without_position_fails_and_stops():
+    steps = extract_steps(
+        [_tap(target={"text": "OK"}, x=None, y=None), _tap(seq=2, t=101)]
+    )
+    dump = _dump(_node("OK"), _node("OK", bounds=(0, 800, 50, 900)))
+    log: list[str] = []
+    rep, lines = _replayer(FakeHelper([dump]), log, element_wait_s=1.0)
+    report = rep.run(steps)
+    assert log == []
+    assert [s["way"] for s in report["steps"]] == ["failed"]
+    assert report["steps"][0]["reason"] == (
+        "2 elements match, and the recorded position is unknown"
+    )
+    assert lines[0]["level"] == "error"
+
+
+def test_replay_swipe_without_an_end_point_is_a_failed_step():
+    lines = [
+        {"src": "input", "kind": "swipe", "seq": 1, "t": 1, "actor": "user",
+         "data": {"x": 10, "y": 900, "x1": 10, "y1": None}},
+    ]  # fmt: skip
+    log: list[str] = []
+    rep, _ = _replayer(None, log)
+    report = rep.run(extract_steps(lines))
+    assert log == []
+    assert report["stopped_at_step"] == 1
+    assert report["steps"][0]["way"] == "failed"
+    assert "swipe" in report["steps"][0]["reason"]
+
+
+def test_replay_unexpected_step_error_is_a_failed_step_not_a_crash():
+    line = {"src": "input", "kind": "gesture", "seq": 1, "t": 1, "actor": "user",
+            "data": {}, "ref": {"raw": "tracking/raw/getevent.txt#L3-L4"}}  # fmt: skip
+
+    def broken(*_a):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")
+
+    log: list[str] = []
+    rep, _ = _replayer(None, log, raw_lines=broken)
+    report = rep.run(extract_steps([line]))
+    assert report["stopped_at_step"] == 1
+    assert report["steps"][0]["way"] == "failed"
+    assert report["error"].startswith("Replay stopped at step 1 of 1")
+
+
+def test_rewind_with_the_app_not_running_pulls_without_pausing(tmp_path, monkeypatch):
+    dev = FakeDevice()
+    dev.shell = lambda cmd: (dev.calls.append(cmd.split()[0]) or " PID NAME\n 9 x\n")
+    rec = _rec(tmp_path, monkeypatch)
+    out = rewind.RewindRunner(rec, dev.deps()).run(replay=False)
+    assert out.paused == []
+    assert "kill" not in dev.calls
+    assert [c for c in dev.calls if c.startswith("pull")] == [
+        "pull before /data/data/p/a",
+        "pull before /data/data/p/b",
+    ]
+    assert out.result == "rewound"
+
+
+def test_rewind_when_ps_fails_still_pulls(tmp_path, monkeypatch):
+    dev = FakeDevice()
+
+    def shell(cmd):
+        raise RuntimeError("device offline")
+
+    dev.shell = shell
+    rec = _rec(tmp_path, monkeypatch)
+    out = rewind.RewindRunner(rec, dev.deps()).run(replay=False)
+    assert out.paused == []
+    assert out.result == "rewound"
+    assert sum(c.startswith("pull before") for c in dev.calls) == 2
+
+
+def test_file_absent_on_both_sides_says_not_on_the_device(files_root):
+    rec = rewind.Recording(rec_id="rec-1", name="R", pkg="p", serial="s")
+    path = "/data/data/p/files/tmp.lock"
+    rec.set_role(path, "after", rewind.ABSENT)
+    rec.set_role(path, "before", rewind.ABSENT)
+    res = rewind.file_result(rec, path)
+    assert res.action_text == "not on the device"
+    assert not res.error
+    rec.set_role(path, "after_replay", rewind.ABSENT)
+    assert rewind.file_result(rec, path).verdict == rewind.UNCHANGED
+
+
+def test_new_and_deleted_files_get_replay_verdicts(files_root):
+    path = "/data/data/p/files/new.txt"
+    after = _version(path, "v001_10-00-00", b"hello\n")
+    rec = rewind.Recording(rec_id="rec-1", name="R", pkg="p", serial="s")
+    rec.set_role(path, "after", after)
+    rec.set_role(path, "before", rewind.ABSENT)
+    rec.set_role(path, "after_replay", after)  # identical copy: same version
+    assert rewind.file_result(rec, path).verdict == rewind.SAME
+    rec.set_role(path, "after_replay", rewind.ABSENT)  # replay made nothing
+    assert rewind.file_result(rec, path).verdict == rewind.UNCHANGED
+
+    gone = "/data/data/p/files/gone.txt"
+    before = _version(gone, "v001_10-00-00", b"bye\n")
+    rec.set_role(gone, "after", rewind.ABSENT)
+    rec.set_role(gone, "before", before)
+    rec.set_role(gone, "after_replay", rewind.ABSENT)
+    res = rewind.file_result(rec, gone)
+    assert res.verdict == rewind.SAME
+    assert "deleted" in res.replay_text
+
+
+def test_large_text_change_stays_bounded(files_root):
+    path = "/data/data/p/files/big.txt"
+    rec = rewind.Recording(rec_id="rec-1", name="R", pkg="p", serial="s")
+    big = b"x" * (5 * 1024 * 1024)  # over the line-diff limit: binary diff
+    rec.set_role(path, "before", _version(path, "v001_10-00-00", big + b"\n"))
+    rec.set_role(path, "after", _version(path, "v002_10-00-01", big + b"y\n"))
+    res = rewind.file_result(rec, path)
+    assert not res.error
+    assert len(res.action_text) < 100_000
+
+
+def test_tls_failures_never_match_and_extra_duplicates_take_the_last():
+    orig = rewind.requests_in(
+        [
+            {"src": "net", "kind": "tls-fail", "seq": 1, "data": {"host": "h"}},
+            _flow(2, "GET", "h", "/p", 200),
+            _flow(3, "GET", "h", "/p", 201),
+            _flow(4, "GET", "h", "/p", 202),
+        ]
+    )
+    replay = rewind.requests_in(
+        [
+            {"src": "net", "kind": "tls-fail", "seq": 9, "data": {"host": "h"}},
+            _flow(10, "GET", "H", "/p", 200),  # host compared without case
+            _flow(11, "get", "h", "/p", 201),
+        ]
+    )
+    assert rewind.match_flow(orig[0], replay) is None
+    assert rewind.compare_flow(orig[3], replay, lambda _i: None).replay["seq"] == 11
+    assert rewind.compare_flow(orig[1], replay, lambda _i: None).replay["seq"] == 10
+    assert rewind.match_flow(orig[1], []) is None

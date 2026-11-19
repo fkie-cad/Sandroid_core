@@ -333,3 +333,464 @@ def test_monitor_restarts_after_a_rewind_or_is_offered(controller):
     controller._resume_monitor = lambda cfg: False
     controller._resume_after("cfg")
     assert offered == ["cfg"]
+
+
+# ---------------------------------------------------------------------------
+# edge cases (review round)
+# ---------------------------------------------------------------------------
+
+
+async def test_enter_in_the_name_field_never_starts_a_rewind():
+    from textual.widgets import Input
+
+    ctl = FakeController()
+    modal = ReviewModal(_rec(), ctl)
+    app = Host(modal)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await until(pilot, lambda: app.screen is modal)
+        name = modal.query_one("#review-name", Input)
+        name.focus()
+        await until(pilot, lambda: app.focused is name)
+        await pilot.press("x", "enter")
+        await settle(pilot)
+        assert ctl.rewinds == []
+        assert ctl.names
+        assert app.screen is modal
+
+
+async def test_esc_on_the_stop_question_keeps_the_rewind_running():
+    from sandroid.tui.modals import ConfirmModal
+
+    ctl = FakeController()
+    ctl.is_replaying = True
+    modal = ReviewModal(_rec(), ctl)
+    app = Host(modal)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await until(pilot, lambda: app.screen is modal)
+        await settle(pilot)
+        assert modal.query_one("#rewind", Button).disabled  # running
+        modal.query_one("#close", Button).press()  # Close behaves like Esc
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        assert hasattr(type(app.screen), "action_cancel")
+        await pilot.press("escape")
+        await until(pilot, lambda: app.screen is modal)
+        assert not ctl.stopped
+        assert not ctl.closed
+
+
+async def test_huge_diff_lines_are_clipped_in_the_review():
+    from sandroid.tui.modals.review_modal import _clip_lines
+
+    text = "+ " + "x" * 200_000 + "\n" + "\n".join(f"+ {i}" for i in range(500))
+    clipped = _clip_lines(text)
+    assert len(clipped) < 5_000
+    assert clipped.splitlines()[-1].startswith("…")
+
+    class Results(FakeController):
+        def results(self, rec):
+            res = rewind.FileResult(rec.selected[0], "v1", "v2", "v3",
+                                    text, text, rewind.DIFFERENT)  # fmt: skip
+            res.only_run = [text.splitlines()[0]]
+            return {"files": [res], "flows": []}
+
+    rec = _rec()
+    rec.selected = [rec.changed[0]["path"]]
+    rec.runs = [{"n": 2, "kind": "rewind-replay", "result": "replayed"}]
+    modal = ReviewModal(rec, Results())
+    app = Host(modal)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await until(pilot, lambda: app.screen is modal)
+        await until(pilot, lambda: modal.query("#review-results Static"))
+        longest = max(
+            len(str(s.render())) for s in modal.query("#review-results Static")
+        )
+        assert longest < 20_000
+
+
+def test_tls_failure_rows_read_as_plain_words():
+    rec = _rec(requests=False)
+    rec.requests = rewind.requests_in(
+        [{"src": "net", "kind": "tls-fail", "seq": 3, "data": {"host": "h"}}]
+    )
+    assert rec.requests[0]["kind"] == "tls-fail"
+    assert rewind.request_text(rec.requests[0]) == "TLS failed  h"
+
+
+def _warnings(controller) -> list[str]:
+    out: list[str] = []
+    controller._log_warning = out.append
+    return out
+
+
+def test_r_during_a_rewind_or_while_stopping_starts_nothing(controller):
+    warned = _warnings(controller)
+    controller._rec = _rec()
+    for state in ("running", "stopping", "saving"):
+        controller._state = state
+        assert controller.toggle_recording() is False
+        assert controller.state == state
+    assert controller.spawned == []
+    assert "A rewind is still running" in warned[0]
+
+
+def test_rewind_problem_while_recording_says_stop_first(controller):
+    old = _rec()
+    controller._rec = old
+    controller._state = "saving"
+    assert "Stop the recording first" in controller.rewind_problem()
+    # Once recording, the current recording has not stopped yet.
+    new = _rec()
+    new.stopped = None
+    controller._rec = new
+    controller._state = "recording"
+    assert "Stop the recording first" in controller.rewind_problem()
+
+
+def test_p_during_recording_does_not_open_review(controller):
+    pushed: list = []
+    controller._push_modal = lambda modal, cb: pushed.append(modal)
+    rec = _rec()
+    rec.stopped = None
+    controller._rec = rec
+    controller._state = "recording"
+    assert controller.open_review() is False
+    assert pushed == []
+
+
+def _emu(created: list, deleted: list, ok: bool = True):
+    class Emu:
+        def create_snapshot(self, name, serial=None):
+            created.append((name, serial))
+            return ok
+
+        def delete_snapshot(self, name, serial=None):
+            deleted.append((name, serial))
+            return True
+
+    return Emu()
+
+
+def _start_fakes(controller, monkeypatch, created, deleted, capture_error=None):
+    from sandroid import services
+
+    monkeypatch.setattr(
+        services, "get_emulator_service", lambda: _emu(created, deleted)
+    )
+    monkeypatch.setattr(rewind, "disk_problem", lambda _f: None)
+    monkeypatch.setattr(controller, "_active_device_name", lambda: None)
+    monkeypatch.setattr(controller, "_begin_capture", lambda rec: capture_error)
+    monkeypatch.setattr(controller, "_start_ticker", lambda rec: None)
+
+
+def test_physical_device_records_without_a_start_point(controller, monkeypatch):
+    created: list = []
+    deleted: list = []
+    _start_fakes(controller, monkeypatch, created, deleted)
+    previous = _rec()  # an emulator recording with a start point
+    controller._rec = previous
+    rec = _rec(emulator=False)
+    rec.rec_id = "rec-2"
+    rec.start_point = {}
+    rec.stopped = None
+    controller._state = "saving"
+    result = controller._start_worker(rec)
+    assert result["success"] is True
+    assert result["start_point"] is None
+    assert created == []
+    assert deleted == []  # the old start point is kept
+    assert controller.state == "recording"
+    assert controller.recording is rec
+    rec.stopped = 2.0
+    controller._state = "idle"
+    assert "physical devices have no snapshots" in controller.rewind_problem()
+
+
+def test_failed_capture_deletes_the_new_start_point(controller, monkeypatch):
+    created: list = []
+    deleted: list = []
+    _start_fakes(controller, monkeypatch, created, deleted,
+                 capture_error="Could not start the recording: no input.")  # fmt: skip
+    previous = _rec()
+    controller._rec = previous
+    rec = _rec()
+    rec.rec_id = "rec-2"
+    rec.start_point = {}
+    controller._state = "saving"
+    result = controller._start_worker(rec)
+    assert result["success"] is False
+    assert controller.state == "idle"
+    assert controller.recording is previous
+    assert len(created) == 1
+    # Only the new, unused start point goes; the previous one stays.
+    assert deleted == [created[0]]
+    assert previous.start_point_name == "sandroid_rec_20261120_133600"
+
+
+def test_a_new_recording_closes_the_old_review(controller, monkeypatch):
+    created: list = []
+    deleted: list = []
+    _start_fakes(controller, monkeypatch, created, deleted)
+
+    class OldReview:
+        dismissed = False
+        rec = None
+
+        def close_for_new_recording(self):
+            self.dismissed = True
+
+    old = OldReview()
+    controller._review = old
+    controller._rec = _rec()
+    rec = _rec()
+    rec.rec_id = "rec-2"
+    rec.start_point = {}
+    controller._state = "saving"
+    assert controller._start_worker(rec)["success"] is True
+    assert old.dismissed
+    assert controller._review is None
+
+
+def test_open_review_replaces_a_review_of_an_older_recording(controller):
+    pushed: list = []
+    controller._push_modal = lambda modal, cb: pushed.append(modal)
+    first = _rec()
+    controller._rec = first
+    assert controller.open_review() is True
+    second = _rec()
+    second.rec_id = "rec-2"
+    controller._rec = second
+    assert controller.open_review() is True
+    assert [m.rec for m in pushed] == [first, second]
+    assert controller._review is pushed[-1]
+
+
+def test_late_writes_wait_out_a_rewind_or_a_new_recording(controller, monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(controller, "_collect_changes",
+                        lambda rec, name: calls.append(name))  # fmt: skip
+    rec = _rec()
+    controller._rec = rec
+    for state in ("running", "saving"):
+        controller._state = state
+        controller._late_writes(rec, wait=0)
+    assert calls == []
+    controller._state = "idle"
+    controller._late_writes(rec, wait=0)
+    assert calls == ["files_late.tsv"]
+
+
+def _capture_fakes(controller, monkeypatch, lists):
+    from types import SimpleNamespace
+
+    import sandroid.tui.utils.recording_wrapper as rw
+
+    class Wrapper:
+        def __init__(self, **_kw):
+            pass
+
+        def start(self):
+            return True
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(rw, "RecordingWrapper", Wrapper)
+    monkeypatch.setattr(type(controller), "_wait_tracking",
+                        staticmethod(lambda serial, timeout=5.0: True))  # fmt: skip
+    monkeypatch.setattr(type(controller), "_emit_phase",
+                        staticmethod(lambda *a, **k: 7))  # fmt: skip
+    controller._get_task_service = lambda: SimpleNamespace(
+        register=lambda **_k: None, unregister=lambda _n: None
+    )
+    monkeypatch.setattr(rewind, "timeline_size", lambda: 0)
+    monkeypatch.setattr(rewind, "lines_between", lambda *a, **k: [])
+    monkeypatch.setattr(controller, "_file_list", lambda rec, name: lists.pop(0))
+
+
+def test_late_list_is_diffed_against_its_own_start_list(controller, monkeypatch):
+    F = rewind.FileFact
+    a_start = {"/data/data/org.x/a": F(1, 1, "t1")}
+    b_start = {"/data/data/org.x/a": F(2, 2, "t2"), "/data/data/org.x/b": F(1, 1, "t")}
+    a_late = {"/data/data/org.x/a": F(2, 2, "t2"), "/data/data/org.x/b": F(1, 1, "t")}
+    lists = [a_start, b_start, a_late]
+    _capture_fakes(controller, monkeypatch, lists)
+    a, b = _rec(), _rec()
+    b.rec_id = "rec-2"
+    assert controller._begin_capture(a) is None
+    assert controller._begin_capture(b) is None  # a newer recording starts
+    controller._collect_changes(a, "files_late.tsv")
+    assert {(e["path"], e["state"]) for e in a.changed} == {
+        ("/data/data/org.x/a", "changed"),
+        ("/data/data/org.x/b", "new"),
+    }
+
+
+def test_a_failed_first_list_does_not_make_every_file_new(controller, monkeypatch):
+    F = rewind.FileFact
+    stop = {f"/data/data/org.x/f{i}": F(1, 1, "t") for i in range(5)}
+    _capture_fakes(controller, monkeypatch, [None, stop])
+    rec = _rec()
+    assert controller._begin_capture(rec) is None
+    controller._collect_changes(rec, "files_stop.tsv")
+    assert rec.changed == []
+
+
+def test_stop_worker_failure_still_returns_to_idle(controller, monkeypatch):
+    from types import SimpleNamespace
+
+    def boom(rec, name):
+        raise RuntimeError("list failed")
+
+    controller._collect_changes = boom
+    controller._late_writes = lambda rec, wait=None: None
+    controller._get_task_service = lambda: SimpleNamespace(unregister=lambda _n: None)
+    monkeypatch.setattr(type(controller), "_emit_phase",
+                        staticmethod(lambda *a, **k: 3))  # fmt: skip
+    indicator: list = []
+    controller._set_recording_indicator = indicator.append
+    rec = _rec()
+    controller._rec = rec
+    controller._state = "stopping"
+    controller._stop_worker(rec, open_review=False)
+    assert controller.state == "idle"
+    assert indicator == [False]
+
+
+def test_rewind_worker_failure_never_leaves_it_running(controller):
+    def broken(*_a):
+        raise RuntimeError("no deps")
+
+    controller._deps = broken
+    indicator: list = []
+    controller._set_replay_indicator = indicator.append
+    controller._state = "running"
+    out = controller._rewind_worker(_rec(), True, controller.view)
+    assert out["success"] is False
+    assert controller.state == "idle"
+    assert indicator == [False]
+
+
+def test_snapshot_load_failure_resumes_the_monitor_and_pulls_nothing(
+    controller, monkeypatch
+):
+    from sandroid import services
+
+    class Emu:
+        def load_snapshot(self, name, serial=None):
+            return False
+
+    monkeypatch.setattr(services, "get_emulator_service", lambda: Emu())
+    monkeypatch.setattr(rewind.RewindRunner, "_emit", lambda self, *a, **k: 1)
+    monkeypatch.setattr(controller, "_stop_monitor_before_revert", lambda: "cfg")
+    monkeypatch.setattr(controller, "_persist", lambda rec, out: None)
+    resumed: list = []
+    toasts: list = []
+    controller._resume_monitor = lambda cfg: resumed.append(cfg) or True
+    controller._notify = lambda message, severity: toasts.append(message)
+    rec = _rec()
+    rec.selected = [rec.changed[0]["path"]]
+    controller._rec = rec
+    controller._state = "running"
+    out = controller._rewind_worker(rec, False, controller.view)
+    assert out["success"] is False
+    assert "The device was not changed." in out["error"]
+    assert controller.view.pulls == []
+    assert resumed == ["cfg"]
+    assert any("not changed" in t for t in toasts)
+    assert controller.state == "idle"
+
+
+def test_requests_are_compared_only_after_rewind_and_replay(controller, monkeypatch):
+    rec = _rec()
+    rec.selected_flows = [dict(rec.requests[0])]
+    replay_line = {"src": "net", "kind": "flow", "seq": 50, "ref": {"id": "f50"},
+                   "data": {"method": "POST", "host": "c.example", "path": "/v1",
+                            "status": 500}}  # fmt: skip
+    monkeypatch.setattr(rewind, "lines_between", lambda *a, **k: [replay_line])
+    monkeypatch.setattr(rewind, "flow_detail_reader", lambda: (lambda _i: None))
+    rec.runs = [{"n": 2, "kind": "rewind", "seq": {"start": 40, "end": 60}}]
+    assert controller.results(rec)["flows"] == []
+    assert "Replay" not in controller.run_requests(rec)
+    rec.runs.append({"n": 3, "kind": "rewind-replay", "seq": {"start": 40, "end": 60}})
+    (flow,) = controller.results(rec)["flows"]
+    assert flow.found == "found in the replay"
+    assert flow.status == "different"
+    assert flow.body == "not captured"
+    monkeypatch.setattr(rewind, "lines_between", lambda *a, **k: [])
+    (flow,) = controller.results(rec)["flows"]
+    assert flow.found == "not seen in the replay"
+
+
+# -- Files lens pulls for a role --------------------------------------------------
+
+
+@pytest.fixture
+def role_view(tmp_path, monkeypatch):
+    from sandroid.core import watchlist_store
+    from sandroid.services.file_extraction_service import (
+        ExtractionResult,
+        FileExtractionService,
+    )
+    from sandroid.tui.widgets.watchlist_view import WatchlistView
+
+    monkeypatch.setenv(watchlist_store.FILES_DIR_ENV, str(tmp_path / "files"))
+    state: dict[str, Any] = {"facts": {}, "error": "File not found on device"}
+
+    def pull(self, remote_path, local_path, compute_hash=False):
+        return ExtractionResult(remote_path, local_path, False, error=state["error"])
+
+    monkeypatch.setattr(FileExtractionService, "pull_file", pull)
+    monkeypatch.setattr(WatchlistView, "_device_facts",
+                        staticmethod(lambda paths: state["facts"]))  # fmt: skip
+    monkeypatch.setattr(WatchlistView, "_device_clock", staticmethod(lambda: None))
+    view = WatchlistView()
+    view.state = state
+    return view
+
+
+def test_pull_role_says_absent_only_when_the_file_is_missing(role_view):
+    path = "/data/data/org.x/files/new.json"
+    assert role_view.pull_role(path, "before", "rec-1", 2) == ("absent", None)
+    # The device did not answer: an error, never "not on the device".
+    role_view.state["error"] = "error: device 'emulator-5560' not found"
+    version, error = role_view.pull_role(path, "before", "rec-1", 2)
+    assert version is None
+    assert "not found" in error
+    role_view.state["error"] = "Permission denied"
+    assert role_view.pull_role(path, "before", "rec-1", 2) == (
+        None,
+        "Permission denied",
+    )
+
+
+def test_a_failed_load_still_allows_after(controller):
+    rec = _rec()
+    rec.runs = [{"n": 2, "kind": "rewind", "result": "stopped", "loaded": False}]
+    controller._rec = rec
+    path = rec.changed[0]["path"]
+    controller.select_file(path, True)
+    assert controller.view.pulls == [(path, "after", 1)]
+
+
+async def test_results_are_computed_off_the_ui_thread():
+    import threading
+
+    seen: list[bool] = []
+
+    class Slow(FakeController):
+        def results(self, rec):
+            seen.append(threading.current_thread() is threading.main_thread())
+            return {"files": [], "flows": []}
+
+    rec = _rec()
+    rec.runs = [{"n": 2, "kind": "rewind", "result": "rewound", "loaded": True}]
+    modal = ReviewModal(rec, Slow())
+    app = Host(modal)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await until(pilot, lambda: seen)
+        assert seen == [False]
+        await until(
+            pilot,
+            lambda: "Results of the last Rewind"
+            in " ".join(str(w.render()) for w in modal.query("#review-results Static")),
+        )

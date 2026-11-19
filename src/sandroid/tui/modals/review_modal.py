@@ -121,10 +121,15 @@ class ReviewModal(ForensicModal[None]):
     }
     """
 
+    # Enter in the name field must never press Rewind + Replay (the primary
+    # button): that would revert the device while the user types a name.
+    ENTER_SUBMITS_FROM_INPUT = False
+
     def __init__(self, rec: Any, controller: Any) -> None:
         super().__init__()
         self.rec = rec
         self.controller = controller
+        self._results_gen = 0
         self._file_state: dict[str, str] = {}
         self._filling = False
         self._building = False
@@ -282,15 +287,39 @@ class ReviewModal(ForensicModal[None]):
         )
 
     def _fill_results(self) -> None:
+        """Compare the copies on a worker (structured diffs of large files,
+        timeline and flow reads never run on the UI thread), then show them.
+        """
+        box = self.query_one("#review-results", Vertical)
+        rec = self.rec
+        self._results_gen += 1
+        gen = self._results_gen
+        if not rec.runs:
+            box.remove_children()
+            return
+        if not box.children:
+            box.mount(Static("Comparing the copies", classes="review-hint"))
+        controller = self.controller
+
+        def work() -> None:
+            try:
+                res = controller.results(rec)
+                per_run = controller.run_requests(rec)
+            except Exception:
+                logger.debug("results failed", exc_info=True)
+                res, per_run = None, {}
+            with contextlib.suppress(Exception):
+                self.app.call_from_thread(self._show_results, gen, res, per_run)
+
+        self.run_worker(work, name="review_results", thread=True, exclusive=False)
+
+    def _show_results(self, gen: int, res: Any, per_run: dict) -> None:
+        if gen != self._results_gen or not self.is_mounted:
+            return  # a newer refresh is on its way
         box = self.query_one("#review-results", Vertical)
         box.remove_children()
         rec = self.rec
-        if not rec.runs:
-            return
-        try:
-            res = self.controller.results(rec)
-        except Exception:
-            logger.debug("results failed", exc_info=True)
+        if res is None or not rec.runs:
             return
         last = rec.runs[-1]
         word = "Rewind + Replay" if last.get("kind") == "rewind-replay" else "Rewind"
@@ -304,7 +333,7 @@ class ReviewModal(ForensicModal[None]):
         for fr in res["files"]:
             widgets.extend(self._file_widgets(fr))
         widgets.extend(self._flow_widgets(res["flows"]))
-        widgets.extend(self._request_widgets())
+        widgets.extend(self._request_widgets(per_run))
         box.mount_all(widgets)
 
     @staticmethod
@@ -343,7 +372,8 @@ class ReviewModal(ForensicModal[None]):
             extra = [f"only in your run: {ln}" for ln in fr.only_run[:20]]
             extra += [f"only in the replay: {ln}" for ln in fr.only_replay[:20]]
             if extra:
-                out.append(Static(escape("\n".join(extra)), classes="review-hint"))
+                text = _clip_lines("\n".join(extra))
+                out.append(Static(escape(text), classes="review-hint"))
         out.append(Static(fr.verdict, classes=cls))
         return out
 
@@ -386,14 +416,11 @@ class ReviewModal(ForensicModal[None]):
             out.append(row)
         return out
 
-    def _request_widgets(self) -> list[Any]:
+    @staticmethod
+    def _request_widgets(per_run: dict) -> list[Any]:
         from sandroid.core import rewind
 
-        try:
-            per_run = self.controller.run_requests(self.rec)
-        except Exception:
-            return []
-        if not any(per_run.values()):
+        if not any((per_run or {}).values()):
             return []
         cols = []
         for title, reqs in per_run.items():
@@ -483,6 +510,14 @@ class ReviewModal(ForensicModal[None]):
             if self.controller.start_rewind(replay=bid == "rewind-replay"):
                 self.set_progress("Going back to the start point")
 
+    def close_for_new_recording(self) -> None:
+        """A new recording started: this Review shows an older one. Close it
+        when it is on top (never pop a screen above it).
+        """
+        with contextlib.suppress(Exception):
+            if self.is_attached and self.app.screen is self:
+                self._dismiss_with_refresh(None)
+
     def action_cancel(self) -> None:
         """Esc: close, or ask to stop a running rewind (sync, see the base)."""
         if getattr(self.controller, "is_replaying", False):
@@ -506,8 +541,19 @@ class ReviewModal(ForensicModal[None]):
         self._dismiss_with_refresh(None)
 
 
+#: Characters of one diff line the Review shows (a minified file is one line).
+LINE_CHARS = 400
+
+
+def _clip_line(line: str) -> str:
+    if len(line) <= LINE_CHARS:
+        return line
+    return line[:LINE_CHARS] + f"… ({len(line) - LINE_CHARS} more characters)"
+
+
 def _clip_lines(text: str, limit: int = 60) -> str:
     lines = (text or "").splitlines()
+    shown = [_clip_line(ln) for ln in lines[:limit]]
     if len(lines) <= limit:
-        return "\n".join(lines)
-    return "\n".join(lines[:limit]) + f"\n… {len(lines) - limit} more lines"
+        return "\n".join(shown)
+    return "\n".join(shown) + f"\n… {len(lines) - limit} more lines"

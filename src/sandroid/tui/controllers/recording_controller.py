@@ -168,6 +168,8 @@ class RecordingController:
         self._last_run_id: str | None = None
         #: AI resource-arbiter owner whose WORLD lease a Rewind holds.
         self._replay_owner_id: str | None = None
+        #: rec_id -> the first file list (None: it failed).
+        self._start_facts: dict[str, dict | None] = {}
 
     # -- plumbing -------------------------------------------------------------
 
@@ -265,9 +267,18 @@ class RecordingController:
             stdout, stderr = Adb.send_adb_command(
                 device_shell_command(command), serial=serial, timeout=60
             )
-            err = str(stderr or "")
-            if "device offline" in err or "not found" in err.split(":")[0]:
-                raise RuntimeError(err.strip() or "device not found")
+            err = str(stderr or "").strip()
+            low = err.lower()
+            # adb's own failures (not the device command's stderr): the
+            # device is gone, or the call hung.
+            if (
+                low.startswith("error:")
+                and any(
+                    w in low
+                    for w in ("not found", "offline", "no devices", "unauthorized")
+                )
+            ) or low.startswith(("command timed out", "oserror")):
+                raise RuntimeError(err or "the device did not answer")
             return stdout if isinstance(stdout, str) else str(stdout or "")
 
         return run
@@ -396,6 +407,15 @@ class RecordingController:
             logger.exception("Starting the recording failed")
             error = f"Could not start the recording: {exc}"
         if error is not None:
+            # A start point saved for a recording that never started is
+            # used by nothing: delete it (never the previous one).
+            self._delete_start_point(rec)
+            wrapper, self._wrapper = self._wrapper, None
+            if wrapper is not None:  # capture failed after the lease
+                with contextlib.suppress(Exception):
+                    wrapper.stop()
+                with contextlib.suppress(Exception):
+                    self._get_task_service().unregister("recording")
             self._set_state("idle")
             self._status(None)
             self._ui(self._log_error, error)
@@ -403,6 +423,9 @@ class RecordingController:
             return {"success": False, "message": error}
         previous, self._rec = self._rec, rec
         self._set_state("recording")
+        # A Review still open shows the previous recording; its buttons
+        # and selections would act on this one.
+        self._ui(self._close_review)
         self._ui(self._set_recording_indicator, True)
         self._replace_start_point(previous, rec)
         with contextlib.suppress(Exception):
@@ -461,7 +484,9 @@ class RecordingController:
         folder.mkdir(parents=True, exist_ok=True)
         start = self._file_list(rec, "files_start.tsv")
         rec.file_lists["start"] = "files_start.tsv" if start is not None else ""
-        self._start_facts = start or {}
+        # Per recording: the late-writes refresh of an older recording may
+        # still run when a newer one starts. None: the list failed.
+        self._start_facts[rec.rec_id] = start
         wrapper = RecordingWrapper(
             output_file=str(folder / "recording.getevent.txt"), serial=rec.serial
         )
@@ -529,6 +554,30 @@ class RecordingController:
         with contextlib.suppress(Exception):
             rewind.write_file_list(rewind.recording_dir(rec.rec_id) / name, facts)
         return facts
+
+    def _delete_start_point(self, rec: Any) -> None:
+        """Delete ``rec``'s own start point (``sandroid_rec_*`` only)."""
+        from sandroid.core import rewind
+
+        name = rec.start_point_name
+        if not rewind.is_start_point_name(name):
+            return
+        try:
+            from sandroid.services import get_emulator_service
+
+            ok = bool(get_emulator_service().delete_snapshot(name, rec.serial))
+        except Exception:
+            logger.debug("deleting the unused start point failed", exc_info=True)
+            ok = False
+        rec.start_point["deleted"] = ok
+        if ok:
+            rec.start_point["saved_ok"] = False
+
+    def _close_review(self) -> None:
+        """Close the open Review (UI thread); a new recording started."""
+        review, self._review = self._review, None
+        if review is not None and hasattr(review, "close_for_new_recording"):
+            self._guarded(review.close_for_new_recording)
 
     def _replace_start_point(self, previous: Any, rec: Any) -> None:
         """Delete the previous start point unless it is pinned (only
@@ -641,7 +690,7 @@ class RecordingController:
         stop = self._file_list(rec, list_name)
         if stop is not None:
             rec.file_lists["stop"] = list_name
-        start = getattr(self, "_start_facts", None)
+        start = self._start_facts.get(rec.rec_id)
         if start is None and rec.file_lists.get("start"):
             start = _read_tsv(rewind.recording_dir(rec.rec_id) / "files_start.tsv")
         listed = (
@@ -690,7 +739,9 @@ class RecordingController:
 
         self._ui(self._review_refresh, rec, True)
         time.sleep(rewind.LATE_WRITES_S if wait is None else wait)
-        if self._rec is not rec or rec.runs:
+        # Not while a Rewind runs (the list would read the start point and
+        # empty the Review) or a new recording is starting.
+        if self._rec is not rec or _rewound(rec) or self._state != "idle":
             self._ui(self._review_refresh, rec, False)
             return
         with contextlib.suppress(Exception):
@@ -711,6 +762,10 @@ class RecordingController:
         if self._rec is None or self._rec.stopped is None:
             self._toast("Nothing recorded yet. Press r to record.", "warning")
             return False
+        if self._review is not None and getattr(self._review, "rec", None) is not (
+            self._rec
+        ):
+            self._close_review()  # it shows an older recording
         if self._review is not None or self._push_modal is None:
             return self._review is not None
         from sandroid.tui.modals.review_modal import ReviewModal
@@ -752,16 +807,18 @@ class RecordingController:
     def rewind_problem(self, rec: Any = None) -> str | None:
         """Why Rewind cannot run now (plain words), or None."""
         rec = rec or self._rec
+        # The state first: while recording, the current recording has not
+        # stopped yet, which is not "nothing recorded".
+        if self._state == "running":
+            return "A rewind is already running."
+        if self._state != "idle":
+            return "Stop the recording first (press r)."
         if rec is None or rec.stopped is None:
             return "Nothing recorded yet."
         if not rec.emulator:
             return "Rewind needs an emulator: physical devices have no snapshots."
         if not rec.start_point_name:
             return "The start point is gone. Record again to rewind."
-        if self._state == "running":
-            return "A rewind is already running."
-        if self._state != "idle":
-            return "Stop the recording first (press r)."
         device = self._active_device()
         if device is None:
             return "No device connected."
@@ -794,7 +851,7 @@ class RecordingController:
         if view is not None:
             with contextlib.suppress(Exception):
                 view.add_path(path, pull_first=False)
-        if rec.runs:
+        if _rewound(rec):
             # The device is no longer after the action: no After any more.
             self._review_file_state(
                 path, "selected (After exists only before a rewind)"
@@ -1218,7 +1275,7 @@ class RecordingController:
             rec.selected.append(path)
             if view is not None:
                 self._ui(lambda p=path: view.add_path(p, pull_first=False))
-                if not rec.runs:
+                if not _rewound(rec):
                     self._pull_after(rec, view, path)
         started = self._call_from_thread(
             lambda: self.start_rewind(replay, owner_id=owner_id)
@@ -1296,6 +1353,13 @@ class RecordingController:
 
         self._push_modal(ExportModal(), on_export_result)
         return True
+
+
+def _rewound(rec: Any) -> bool:
+    """A run of ``rec`` reached its start point (the device left the
+    after-the-action state). A failed load or an Esc before it did not.
+    """
+    return any(run.get("loaded", True) for run in rec.runs)
 
 
 def _read_tsv(path: Any) -> dict | None:

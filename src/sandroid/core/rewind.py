@@ -727,10 +727,10 @@ def _diff_lines(path: str, old: str | None, new: str | None) -> tuple[list[str],
     """Plain diff body lines from version ``old`` to ``new`` and a note."""
     from sandroid.core import file_inspect
 
-    if old == new and old is not None:
-        return [], "no change"
     if old in (None, ABSENT) and new in (None, ABSENT):
         return [], "not on the device"
+    if old == new:
+        return [], "no change"
     if old == ABSENT:
         return [], "new file (did not exist before)"
     if new == ABSENT:
@@ -851,6 +851,8 @@ class RunOutcome:
     seq: dict[str, int | None] = field(default_factory=dict)
     monitor_config: Any = None
     paused: list[int] = field(default_factory=list)
+    #: The start point was loaded (the device left the after-the-action state).
+    loaded: bool = False
 
 
 class RewindRunner:
@@ -952,6 +954,7 @@ class RewindRunner:
                     "Could not go back to the start point: the emulator refused "
                     "to load it. The device was not changed."
                 )
+            out.loaded = True
             self.deps.clock_fix()
             self.deps.after_load()
             self._check()
@@ -1015,6 +1018,7 @@ class RewindRunner:
                 "error": out.error,
                 "stopped_at_step": out.stopped_at_step,
                 "steps": out.steps,
+                "loaded": out.loaded,
             }
             rec.runs.append(run)
             summary = {

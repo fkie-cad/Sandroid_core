@@ -787,8 +787,9 @@ async def test_took_is_the_run_time_and_dialogs_name_the_run_number() -> None:
 
 @pytest.mark.asyncio
 async def test_scope_pill_follows_the_recorder_and_the_player() -> None:
-    """M-25: REC never showed (the Record dialog was the active screen, so the
-    update was dropped). M-26: REPLAY stayed after the run ended.
+    """M-25: the recording state never showed (a dialog was the active
+    screen, so the update was dropped). M-26: the rewind state stayed after
+    the run ended. Rewind shows plain words, no symbols.
     """
     from sandroid.tui.modals import ConfirmModal
 
@@ -801,18 +802,19 @@ async def test_scope_pill_follows_the_recorder_and_the_player() -> None:
         app.push_screen(ConfirmModal(title="stand-in for the Record dialog"))
         await settle(pilot)
         app._set_status_bar_mode(recording=True)  # capture started
-        assert header.pill_text == "● REC"
+        assert header.pill_text == "Recording"
         app._set_status_bar_mode(recording=False)  # stopped / cancelled
         assert header.pill_text == "● LIVE"
         app.pop_screen()
         await settle(pilot)
 
+        # Rewind: the controller's plain status line, no symbols.
         app._set_status_bar_mode(replaying=True)
-        assert header.pill_text == "● REPLAY"
-        app._set_replay_phase("replay 1/2")
-        assert header.pill_text == "● REPLAY · replay 1/2"
+        assert header.pill_text == "Rewind running"
+        app._set_replay_phase("Going back to the start point")
+        assert header.pill_text == "Going back to the start point"
         app._set_replay_phase("dry run")
-        assert header.pill_text == "● REPLAY · dry run"
+        assert header.pill_text == "dry run"
         assert "dry run" in str(
             ms.query_one("#runs-panel").query_one("#runs-empty").render()
         )

@@ -623,6 +623,9 @@ class StepReplayer:
         deadline = self._mono() + self.element_wait_s
         last_bounds = None
         why = "the UI helper is not running"
+        current = self.helper() if callable(self.helper) else self.helper
+        if current is None:
+            return None, why  # no helper (the replay already waited for it)
         while True:
             if self.cancelled():
                 raise StepStoppedError("you pressed Esc")
@@ -686,7 +689,11 @@ class StepReplayer:
             return {"way": way, "reason": reason, "x": x, "y": y}
         if kind == "swipe":
             start, x1, y1 = self._xy(step), data.get("x1"), data.get("y1")
-            if start is None or not isinstance(x1, (int, float)):
+            if (
+                start is None
+                or not isinstance(x1, (int, float))
+                or not isinstance(y1, (int, float))
+            ):
                 raise StepStoppedError("the swipe's path is unknown")
             dur = max(100, int(data.get("dur_ms") or 300))
             self._run(f"input swipe {start[0]} {start[1]} {int(x1)} {int(y1)} {dur}")
@@ -781,7 +788,14 @@ class StepReplayer:
             entry = {"i": step.i, "seq": step.seq, "what": step.what}
             try:
                 self._wait(gap)
-                res = self.do_step(step)
+                try:
+                    res = self.do_step(step)
+                except StepStoppedError:
+                    raise
+                except Exception as exc:  # a bad recorded step, not a crash
+                    logger.debug("replay: step %s failed", step.i, exc_info=True)
+                    why = f"the step could not be done ({exc})"
+                    raise StepStoppedError(why) from exc
             except StepStoppedError as exc:
                 reason = str(exc)
                 entry.update(way=WAY_FAILED, reason=reason)
