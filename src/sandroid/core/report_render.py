@@ -1016,6 +1016,8 @@ class PdfRenderer:
                 right.append(Paragraph(f"Screen: {_txt(screen)}", self.small))
         for line in effect_lines(step):
             right.append(Paragraph(_txt(_clip(line, 1500)), self.small))
+        if step.get("shot_note"):
+            right.append(Paragraph(f"<i>{_txt(step['shot_note'])}</i>", self.small))
         thumbs = self._thumbs(step.get("shots") or [], right)
         if thumbs is not None:
             row = [left, right, thumbs]
@@ -1232,6 +1234,8 @@ class MarkdownRenderer:
                 self.out.append(f"  - Screen: {_md(screen)}")
         for effect in effect_lines(step):
             self.out.append(f"  - {_md(_clip(effect, 1500))}")
+        if step.get("shot_note"):
+            self.out.append(f"  - *{_md(step['shot_note'])}*")
         if step.get("shots"):
             self.out += self._shot_lines(step["shots"], indent="  ")
 

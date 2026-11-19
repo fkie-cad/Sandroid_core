@@ -1505,6 +1505,102 @@ def test_a_before_shot_captured_after_the_finger_up_is_dropped(env, cfg):
         assert wait_for(lambda: of(lines, "input"))
         time.sleep(0.3)
     assert not of(lines, "shot", "before_tap")
+    assert of(lines, "input", "tap")[0]["data"]["before_shot"] == "late"
+
+
+def test_a_before_shot_queued_behind_a_settle_sample_is_late(env, cfg):
+    """E2E round 6 #18 (FULL) / #80 (Record): the helper serialises its
+    requests, and the before-tap capture waited behind a screen-change
+    sample (#18: a 166 ms hash sample begun 3 ms after the finger-down; #80:
+    a fallback PNG capture, 670 ms encode). Captured after the finger-up
+    (+28 / +696 ms), it was dropped and the tap line said nothing. Now it
+    says ``before_shot: "late"`` (the capture may show the screen after the
+    tap, so it is still not stored).
+    """
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        g = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        t_dev0, t_host0 = 100.0, time.monotonic()
+        busy = threading.Lock()  # the helper: one request at a time
+
+        def serial_shot(*, hash_only=False, timeout=5.0):
+            with busy:
+                cap = (t_dev0 + time.monotonic() - t_host0) * 1000.0
+                if hash_only:  # the settle sample, slow under load
+                    time.sleep(0.5)
+                    return ShotResult(cap, 1080, 2424, "h-old", 3.0, None, None)
+                return ShotResult(cap, 1080, 2424, "h-before", 14.0, PNG_A, "/x")
+
+        h.shot = serial_shot
+        sample = svc._shot_lane.submit(svc._shot_seen, h, hash_only=True)
+        time.sleep(0.03)  # the sample is running at the finger-down
+        g.feed(*tap_lines(t_dev0 + time.monotonic() - t_host0, dur=0.15))
+        assert wait_for(lambda: of(lines, "input"))
+        assert sample.result(timeout=2.0).hash == "h-old"
+        time.sleep(0.2)
+    tap = of(lines, "input", "tap")[0]
+    assert tap["data"]["before_shot"] == "late"
+    assert not of(lines, "shot", "before_tap")
+
+
+BEFORE_SHOT_STATES = {"taken", "skipped", "late", "failed", "no_helper", "off"}
+
+
+def _pointer_inputs(lines):
+    return [
+        x for x in of(lines, "input") if x["kind"] not in ("key", "text", "confirm")
+    ]
+
+
+@pytest.mark.parametrize("mode", ["full", "invisible", "off"])
+def test_every_pointer_input_says_what_became_of_its_before_shot(env, cfg, mode):
+    """Every tap / long_press / swipe / gesture line carries
+    ``data.before_shot``; ``taken`` ones (and only they) have a before-tap
+    shot line with ``ref.of`` = the input.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg, mode=mode)
+        ge.feed(*(FIX / "ge_gestures.txt").read_text().splitlines())
+        assert wait_for(lambda: len(of(lines, "input")) >= 27, timeout=10.0)
+        time.sleep(0.3)
+        svc.stop()
+    inputs = _pointer_inputs(lines)
+    assert {"tap", "long_press", "swipe"} <= {x["kind"] for x in inputs}
+    states = {x["seq"]: x["data"].get("before_shot") for x in inputs}
+    assert set(states.values()) <= BEFORE_SHOT_STATES
+    shot_of = {x["ref"]["of"] for x in of(lines, "shot", "before_tap")}
+    assert shot_of == {seq for seq, st in states.items() if st == "taken"}
+    if mode == "off":
+        assert set(states.values()) == {"no_helper"}
+    else:
+        assert "taken" in states.values()
+
+
+def test_before_shot_off_and_failed(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        cfg.shot_before_tap = False
+        ge.feed(*tap_lines(1.0))
+        assert wait_for(lambda: len(of(lines, "input")) == 1)
+        cfg.shot_before_tap = True
+
+        def broken(*, hash_only=False, timeout=5.0):
+            raise OSError("helper socket closed")
+
+        h.shot = broken
+        ge.feed(*tap_lines(2.0))
+        assert wait_for(lambda: len(of(lines, "input")) == 2)
+        h.shot = lambda **kw: ShotResult(500.0, 1080, 2424, "h", 9.0, None, None)
+        ge.feed(*tap_lines(3.0))
+        assert wait_for(lambda: of(lines, "shot", "before_tap"))
+    taps = of(lines, "input", "tap")
+    assert [t["data"]["before_shot"] for t in taps] == ["off", "failed", "failed"]
+    failed = of(lines, "shot", "before_tap")  # the helper answered: a warn line
+    assert [(x["ref"]["of"], x["level"]) for x in failed] == [(taps[2]["seq"], "warn")]
 
 
 def test_sha_dedupe_is_per_folder(tmp_path, cfg):

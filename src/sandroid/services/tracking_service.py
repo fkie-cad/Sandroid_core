@@ -13,9 +13,11 @@ Tracking turns the device's raw input and UI into ``input``, ``screen``,
   (``dev_mono``, the device CLOCK_MONOTONIC shared with the UI helper).
 * At finger-down the UI helper (:mod:`sandroid.core.uihelper`) is asked
   ``node_at`` (and a before-tap screenshot); the input line goes out at UP
-  after waiting at most :data:`NODE_WAIT_S` for the element, never for the
-  screenshot or the a11y confirmation, which follow as their own lines with
-  ``ref.of`` = the input seq.
+  after waiting at most :data:`NODE_WAIT_S` for the element and (usually
+  already back) at most :data:`BEFORE_TAP_WAIT_S` for the before-tap capture,
+  whose fate it states in ``data.before_shot`` (taken / skipped / late /
+  failed / no_helper / off); never for the a11y confirmation. Shots and
+  confirmations follow as their own lines with ``ref.of`` = the input seq.
 * Helper a11y events give ``input/text`` (coalesced per field; ``sensitive``
   for password fields; the summary never carries the text), ``input/confirm``
   and ``screen/window``; a logcat reader gives ``screen/activity`` when the
@@ -23,8 +25,8 @@ Tracking turns the device's raw input and UI into ``input``, ``screen``,
 * Screenshots are stored once per content (sha256) and timeline folder
   under ``tracking/shots/<seq>_<trigger>.png`` (``<sha16>_<trigger>.png``
   while the timeline holds lines back and the seq is not known yet). A
-  before-tap capture is taken only when none is in flight and dropped when
-  it was captured after the finger-up.
+  before-tap capture is taken only when none is in flight and dropped
+  (``before_shot: "late"``) when it was captured after the finger-up.
 * Privacy: taps (and their shots) while a password field has the focus, on
   a password field or on the keyboard are ``sensitive`` (masked by readers,
   never suppressed); a keyboard key's label is never written.
@@ -41,9 +43,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
-import functools
 import hashlib
-import io
 import logging
 import os
 import queue
@@ -58,6 +58,12 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from sandroid.core.frames import (  # R1 metric, re-exported
+    SAME_MAX_DIFF,
+    frame_distance,
+    same_screen,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -104,26 +110,8 @@ INPUT_SKEW_S = 1.0
 BEFORE_TAP_FRAME_S = 0.25
 #: How long a screen-change decision waits for a before-tap capture.
 BEFORE_TAP_WAIT_S = 2.0
-#: R1 perceptual "same screen" (:func:`frame_distance`): a grayscale
-#: thumbnail about this many px wide (an integer box reduction) ...
-SAME_THUMB_W = 96
-#: ... blurred with this Gaussian radius (thumbnail px) ...
-SAME_BLUR = 2.0
-#: ... without the outer edge columns (scrollbars) and the top strip
-#: (status bar: clock, icons), as fractions of the frame ...
-SAME_EDGE = 0.04
-SAME_TOP = 0.06
-#: ... compared at the best of these shifts (thumbnail px, x and y: about
-#: +-11 / +-55 px on a 1080-wide frame -- a content nudge, a scroll offset).
-SAME_SHIFT = (1, 5)
-#: A final frame whose distance to the before-tap frame (mean absolute grey
-#: difference, 0-255) is at most this is the previous screen. Calibrated on
-#: the 88 shots of E2E rounds 1-5 (DESIGN_FINAL §12 R1): same screen and
-#: state <= 0.51 (748 pairs; round 5 #66 vs #65: 0.07), different screens
-#: >= 3.48 (2892 pairs; a blank frame vs a sparse list, >= 4.8 otherwise);
-#: synthetic scroll offsets up to 50 px <= 1.28. Near the log-midpoint
-#: (1.34), above the scroll offsets: 2.3x below the closest different pair.
-SAME_MAX_DIFF = 1.5
+#: R1 perceptual "same screen": :mod:`sandroid.core.frames` (one
+#: implementation, shared with the report's R4 gap-fill).
 #: Device and host lags that differ by more than this are from different
 #: clock epochs (snapshot load): only the host lag counts.
 CLOCK_SANE_MS = 5_000.0
@@ -637,68 +625,6 @@ def _config() -> Any:
         return TrackingConfig()
 
 
-@functools.lru_cache(maxsize=4)
-def _screen_thumb(png: bytes) -> Any:
-    """The blurred grayscale thumbnail :func:`frame_distance` compares
-    (:data:`SAME_THUMB_W` .. :data:`SAME_TOP`); None when ``png`` does not
-    decode. Cached: a before-tap frame serves every line of its change.
-    """
-    try:
-        from PIL import Image, ImageFilter
-
-        with Image.open(io.BytesIO(png)) as im:
-            gray = im.convert("L")
-    except Exception:
-        return None
-    w, h = gray.size
-    if w < 16 or h < 16:
-        return None
-    edge = round(w * SAME_EDGE)
-    gray = gray.crop((edge, round(h * SAME_TOP), w - edge, h))
-    gray = gray.reduce(max(1, round(w / SAME_THUMB_W)))
-    return gray.filter(ImageFilter.GaussianBlur(SAME_BLUR))
-
-
-def frame_distance(png_a: bytes, png_b: bytes) -> float | None:
-    """R1: how far apart two screenshots look -- the mean absolute grey
-    difference (0-255) of their thumbnails (:func:`_screen_thumb`) at the
-    best alignment within :data:`SAME_SHIFT`. Blur and the shifts absorb what
-    changes on a screen that stays put: a scrollbar fading, content moving a
-    pixel or two, a small scroll offset; the crop drops the status bar.
-    None when either frame does not decode or the sizes differ.
-    """
-    from PIL import ImageChops, ImageStat
-
-    a, b = _screen_thumb(png_a), _screen_thumb(png_b)
-    if a is None or b is None or a.size != b.size:
-        return None
-    w, h = a.size
-    sx, sy = SAME_SHIFT
-    best: float | None = None
-    for dy in range(-sy, sy + 1):
-        for dx in range(-sx, sx + 1):
-            box_a = (max(0, dx), max(0, dy), w + min(0, dx), h + min(0, dy))
-            box_b = (max(0, -dx), max(0, -dy), w + min(0, -dx), h + min(0, -dy))
-            diff = ImageChops.difference(a.crop(box_a), b.crop(box_b))
-            mean = float(ImageStat.Stat(diff).mean[0])
-            best = mean if best is None else min(best, mean)
-    return best
-
-
-def same_screen(png_a: bytes | None, png_b: bytes | None) -> bool:
-    """R1: the two screenshots show the same screen (:func:`frame_distance`
-    at most :data:`SAME_MAX_DIFF`). False when either cannot be compared.
-    """
-    if not png_a or not png_b:
-        return False
-    try:
-        d = frame_distance(png_a, png_b)
-    except Exception as exc:
-        logger.debug(f"tracking: frame distance failed: {exc}")
-        return False
-    return d is not None and d <= SAME_MAX_DIFF
-
-
 def _short_cls(cls: str | None) -> str:
     return (cls or "").rsplit(".", 1)[-1] or "?"
 
@@ -1130,7 +1056,9 @@ class _Pending:
     node: Future | None = None
     shot: Future | None = None
     t0: float = 0.0
-    shot_skipped: bool = False
+    #: ``data.before_shot`` decided at finger-down (``off`` / ``no_helper`` /
+    #: ``skipped``); None: a capture was started, its result decides.
+    shot_state: str | None = None
 
 
 @dataclass
@@ -1734,6 +1662,10 @@ class TrackingService:
         """Start the node lookup and the before-tap capture (returned)."""
         helper = self._helper_up()
         if helper is None:
+            self._pending[g.gid] = _Pending(
+                t0=time.monotonic(),
+                shot_state="no_helper" if _config().shot_before_tap else "off",
+            )
             return None
         p = _Pending(t0=time.monotonic())
         full = str(getattr(helper, "mode", self._mode)) == "full"
@@ -1748,7 +1680,10 @@ class TrackingService:
             p.node = self._node_lane.submit(self._node_late, helper, g)
         if _config().shot_before_tap:
             p.shot = self._pre_shot(helper)
-            p.shot_skipped = p.shot is None
+            if p.shot is None:
+                p.shot_state = "skipped"  # one was still in flight
+        else:
+            p.shot_state = "off"
         self._pending[g.gid] = p
         return p.shot
 
@@ -1857,8 +1792,8 @@ class TrackingService:
         }
         if g.dropped:
             data["dropped"] = True  # events were lost: the end is a guess
-        if pending is not None and pending.shot_skipped:
-            data["before_shot"] = "skipped"  # one was still in flight
+        t_up = g.t_up if g.t_up is not None else g.t_down
+        before_res, data["before_shot"] = self._before_state(pending, cfg, t_up)
         if kind == "gesture":
             data["pointers"] = g.pointers
         if kind == "swipe":
@@ -1931,11 +1866,8 @@ class TrackingService:
         }
         self._confirm_input(rec)
         before = pending.shot if pending is not None else None
-        t_up = g.t_up if g.t_up is not None else g.t_down
-        if before is not None:
-            self._store_lane.submit(
-                self._before_shot, before, seq, kind, t_up, sensitive
-            )
+        if before_res is not None:
+            self._store_lane.submit(self._before_shot, before_res, seq, kind, sensitive)
         if cfg.shot_after_tap and kind in ("tap", "long_press"):
             self._shot_lane.submit(
                 self._after_tap, gen, seq, kind, before, t_up, sensitive
@@ -3065,27 +2997,45 @@ class TrackingService:
         except (AttributeError, TypeError, ValueError):
             return False
 
-    def _before_shot(
-        self,
-        fut: Future,
-        of: int,
-        kind: str,
-        t_up: float | None = None,
-        sensitive: bool = False,
-    ) -> None:
-        """Store the before-tap capture. A capture taken after the tap's
-        finger-up (the helper was slow) is dropped: it would show the screen
-        after the tap under a "before" label; the after-tap shot covers it.
+    def _before_state(
+        self, pending: _Pending | None, cfg: Any, t_up: float | None
+    ) -> tuple[Any, str]:
+        """The input line's ``data.before_shot`` and the capture to store:
+        ``taken`` (stored, its shot line has ``ref.of`` = the input),
+        ``skipped`` (one was still in flight), ``late`` (captured after the
+        finger-up, or not back within :data:`BEFORE_TAP_WAIT_S` of it: the
+        helper was busy, e.g. with a screen-change sample; dropped, it could
+        show the screen after the tap), ``failed`` (the capture errored; a
+        ``failed`` shot line when the helper answered), ``no_helper`` (no
+        helper at finger-down) or ``off`` (``shot_before_tap`` off).
         """
+        if pending is None:  # never seen at finger-down
+            return None, "no_helper" if cfg.shot_before_tap else "off"
+        if pending.shot_state is not None:
+            return None, pending.shot_state
+        if pending.shot is None:
+            return None, "failed"
         try:
-            res = fut.result(timeout=10.0)
+            res = pending.shot.result(timeout=BEFORE_TAP_WAIT_S)
+        except FutureTimeout:
+            return None, "late"
         except Exception:
-            res = None
+            return None, "failed"
         if res is None:
-            return
+            return None, "failed"
         if self._late(res, t_up):
-            logger.debug(f"Tracking: before-tap shot of #{of} was late, dropped")
-            return
+            logger.debug("Tracking: a before-tap shot was late, dropped")
+            return None, "late"
+        if not getattr(res, "png", None):
+            return res, "failed"
+        return res, "taken"
+
+    def _before_shot(
+        self, res: Any, of: int, kind: str, sensitive: bool = False
+    ) -> None:
+        """Store the before-tap capture ``res`` (on time, see
+        :meth:`_before_state`) as the shot line of input ``of``.
+        """
         self._store("before_tap", res.png, of=of, via="helper", w=res.w, h=res.h,
                     cap_ms=res.cap_ms, dev_mono=res.t_mono_ms / 1000.0, t=None,
                     error=res.error, extra={"input": kind},
