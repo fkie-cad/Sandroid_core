@@ -942,6 +942,8 @@ def test_the_doorbell_is_gated_and_carries_no_lines(timeline_sink):
     from sandroid.core.events import EventBus, EventType
 
     service, _path = timeline_sink
+    # A fresh bus: subscribers left by earlier (e.g. TUI) tests would open the gate.
+    EventBus.reset()
     bus = EventBus.get()
     service.emit("input", "tap", summary="unheard")
     assert service.flush(3.0)
