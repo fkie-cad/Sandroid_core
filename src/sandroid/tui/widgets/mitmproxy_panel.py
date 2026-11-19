@@ -1,8 +1,8 @@
 """Non-visual controller that hosts and observes a mitmweb subprocess.
 
 The Network lens (:class:`~sandroid.tui.widgets.network_panel.NetworkPanel`)
-owns everything on screen: the flow table, the caption (``mitm ● :<port> ·
-CA ✓``, the configured ``mitmproxy.proxy_port``), the empty-state hint and the "Capture status" Inspector page. This
+owns everything on screen: the flow table, the caption (``Mitmproxy on
+:<port> · CA installed``, the configured ``mitmproxy.proxy_port``), the empty-state hint and the "Capture status" Inspector page. This
 widget is mounted *hidden* inside the lens and keeps all of the proxy
 plumbing it always had -- start/stop, Device Proxy, CA injection, SSL unpin,
 addons, reachability probes, focus-lane cleanup -- so none of that logic
@@ -591,21 +591,25 @@ class MitmproxyPanel(Widget):
     # -- compact status for the lens -----------------------------------------
 
     def status_caption(self) -> str:
-        """One calm caption fragment, e.g. ``mitm ● :8090 · device ✓ · CA ✓``.
+        """One calm caption fragment in words and theme colours, e.g.
+        ``Mitmproxy on :8090 · device routed · CA installed``.
 
         The port is the live process's, else the configured
         ``mitmproxy.proxy_port`` -- never a hard-coded default.
         """
+        from sandroid.tui.themes import lens_palette
+
+        pal = lens_palette()
         st = self._service.state
         if not self._service.is_running():
-            return "[#5b6479]mitm ○ off[/]"
-        parts = [f"[#4ade80]mitm ●[/] :{st.proxy_port}"]
+            return f"[{pal.dim}]Mitmproxy off[/]"
+        parts = [f"[{pal.ok}]Mitmproxy on[/] :{st.proxy_port}"]
         if self._proxy_state == "ours" and self._reach_state == "unreachable":
-            parts.append("[#fb7185]device ✗[/]")
+            parts.append(f"[{pal.bad}]device can't reach it[/]")
         elif self._proxy_state == "ours":
-            parts.append("device ✓")
+            parts.append("device routed")
         elif self._proxy_state == "other":
-            parts.append("[#5b6479]device → ext[/]")
+            parts.append(f"[{pal.dim}]device on another proxy[/]")
         try:
             from sandroid.core.proxy_manager import get_focus_manager
 
@@ -613,10 +617,12 @@ class MitmproxyPanel(Widget):
         except Exception:
             routes = {}
         if routes:
-            parts.append(f"apps {len(routes)}")
-        parts.append("CA ✓" if self._ca_ok else "[#5b6479]CA ○[/]")
+            parts.append(f"app proxies {len(routes)}")
+        parts.append(
+            "CA installed" if self._ca_ok else f"[{pal.dim}]CA not installed[/]"
+        )
         if self._service.ssl_unpin_is_active():
-            parts.append("unpin ✓")
+            parts.append("unpin on")
         return " · ".join(parts)
 
     def empty_hint(self) -> tuple[str, str]:

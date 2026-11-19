@@ -17,15 +17,16 @@ Data flow
   at the bottom and follows them while *live* (``follow.py``, the same rules
   as the Timeline and Files lenses): ↑, PgUp, Home, a wheel up or a click on
   a row above the newest one stop following (capturing goes on), ``End``
-  resumes; opening a flow in the Inspector stops it too, so a user who
-  scrolled or selected a row is never yanked. The caption says ``live`` or
-  ``scrolled back · 12 new below · End = live``.
-* ``[TLS_FAIL]`` lines become ✗ rows at once; the addon also writes them to
+  resumes (an open flow Inspector then follows the newest flow), so a user
+  who scrolled or selected a row is never yanked. The caption title says
+  ``live`` or ``scrolled back · 12 new below · End = live``.
+* ``[TLS_FAIL]`` lines become "TLS failed" rows at once; the addon also writes them to
   ``flows.jsonl`` (``kind: "tls"``, no detail file), and the poll pairs that
   record with the stdout row instead of adding it twice. While the lens is
   not in view they count into the lens-bar badge (``⚑N``) until the lens is
   activated again.
-  Errored flows come from ``flows.jsonl`` (their ``error`` field) as ✗ rows.
+  Errored flows come from ``flows.jsonl`` (their ``error`` field) as
+  "error" rows.
 
 Filters: ``/`` text (host, path, app, recipient, status; Esc clears it),
 ``T`` (target) spotlight app only, ``N`` show OS noise (connectivity checks,
@@ -37,7 +38,8 @@ counts ("38 of 412").
 Proxy & friTap plumbing: :class:`MitmproxyPanel` and :class:`FriTapPanel` are
 mounted hidden inside this lens as controllers; this lens binds their keys
 (``Ctrl+D`` device proxy, ``Ctrl+N`` CA, ``Ctrl+P`` unpin, ...) and shows
-their state in the caption (``mitm ● :<port> · device ✓ · CA ✓ · friTap ●``,
+their state in the caption (``Mitmproxy on :<port> · device routed · CA
+installed · friTap on``,
 ``<port>`` = the configured ``mitmproxy.proxy_port``)
 and on the "Capture status" Inspector page (``I``; ``h`` opens its friTap
 tab). Their log lines go to the ActivityLog drawer (`` ` ``).
@@ -75,6 +77,7 @@ from textual.containers import Vertical
 from textual.widget import Widget
 from textual.widgets import DataTable, Input, Static
 
+from sandroid.tui.themes import lens_palette
 from sandroid.tui.utils.ui_thread import in_app_context
 from sandroid.tui.widgets.follow import Follow
 from sandroid.tui.widgets.fritap_panel import FriTapPanel
@@ -669,7 +672,7 @@ class FlowTable(DataTable):
 
     BINDINGS = [
         Binding("home", "scroll_top", "First row", show=False),
-        Binding("end", "scroll_bottom", "Last row + follow", show=False),
+        Binding("end", "scroll_bottom", "Newest row, live", show=False),
     ]
 
     def _panel(self) -> NetworkPanel | None:
@@ -1106,8 +1109,11 @@ class NetworkPanel(Widget):
     def _add_live(self, rows: list[FlowRow]) -> None:
         self._live.extend(rows)
         if len(self._live) > self.MAX_ROWS + 200:
+            passing = sum(1 for row in rows if self._passes(row))
             self._live = self._live[-self.MAX_ROWS :]
             self._rebuild_if_live()
+            if not self.in_review:
+                self._follow.added(passing)
         elif not self.in_review:
             self._append_rows(rows)
         self._do_refresh_status()
@@ -1150,12 +1156,12 @@ class NetworkPanel(Widget):
         """What ``/`` matches: host, path, method, app, recipient, status.
 
         The status column's words are included, so ``/404``, ``/tls`` or
-        ``/✗`` (every failed row) work too.
+        ``/error`` (every errored flow) work too.
         """
         if row.kind == "tls":
-            status = f"✗ tls failed {row.reason}"
+            status = f"tls failed {row.reason}"
         elif row.error:
-            status = f"✗ {_short_error(row.error)} error"
+            status = f"error {_short_error(row.error)}"
         else:
             status = str(row.status) if row.status is not None else ""
         hay = f"{row.method} {row.host}{row.path} {row.app} {row.recipient[0]} {status}"
@@ -1194,7 +1200,7 @@ class NetworkPanel(Widget):
         avail = self.size.width or 120
         who = 18 if avail >= 110 else (16 if avail >= 58 else 12)
         cols = [("time", "Time", 8), ("who", "Recipient", who)]
-        cols += [("req", "Request", 0), ("status", "Status", 9), ("size", "Size", 10)]
+        cols += [("req", "Request", 0), ("status", "Status", 11), ("size", "Size", 10)]
         if avail < 76:
             cols = [c for c in cols if c[0] != "size"]
         if avail < 58:
@@ -1218,7 +1224,7 @@ class NetworkPanel(Widget):
             req.append("TLS ", style="#8f9bb3")
             host_w = req_w - 4 - (len(tag) + 1 if tag else 0)
             req.append(_ellipsize(row.host, host_w), style="#e5e9f0")
-            status = Text("✗ TLS", style="bold #fb7185")
+            status = Text("TLS failed", style=f"bold {lens_palette().bad}")
             size = Text("")
         else:
             if tag:
@@ -1230,7 +1236,9 @@ class NetworkPanel(Widget):
             else:
                 req = smart_request(row.method, row.host, row.path, req_w)
             if row.error:
-                status = Text(f"✗ {_short_error(row.error)}", style="#fb7185")
+                status = Text(
+                    f"error {_short_error(row.error)}", style=lens_palette().bad
+                )
             elif row.status is None:
                 status = Text("…", style="#5b6479")
             else:
@@ -1326,6 +1334,9 @@ class NetworkPanel(Widget):
             elif target is not None:
                 table.move_cursor(row=target, animate=False)
             else:
+                # Back at the newest row (the kept flow is gone): live again.
+                if not self.in_review:
+                    self._follow.resume()
                 table.move_cursor(row=len(rows) - 1, animate=False)
                 table.scroll_end(animate=False)
         self._update_empty()
@@ -1341,11 +1352,13 @@ class NetworkPanel(Widget):
         except Exception:
             return
         if self.size.width != self._width or not self._net_layout:
+            passing = sum(1 for row in rows if self._passes(row))
             self._rebuild()
+            self._follow.added(passing)
             return
+        # While live an open flow Inspector follows the newest flow too (End
+        # is the user's choice; ↑ / a click above stops it).
         self._check_follow(table)
-        if self._follow.live and self._inspecting_flow():
-            self._follow.stop()  # the open flow stays selected
         added = 0
         self._noise_hidden += self._count_noise(rows)
         for row in rows:
@@ -1522,13 +1535,17 @@ class NetworkPanel(Widget):
         if self.in_review:
             label = escape(self._scope_label or "run")
             note = self._review_note_short()
-            return f"[#fbbf24]◆ {label}[/]" + (f" · {note}" if note else "")
+            warn = lens_palette().warn
+            return f"[{warn}]review {label}[/]" + (f" · {note}" if note else "")
         mitm = self.mitm
         title = mitm.status_caption() if mitm is not None else ""
         fritap = self.fritap
         token = fritap.caption_token() if fritap is not None else ""
         if token:
             title += f" · {token}"
+        if self._live:
+            # Follow state: in ONE place, the title (as in every lens).
+            title = f"{self._follow.text} · {title}"
         return title
 
     def _review_note_short(self) -> str:
@@ -1546,8 +1563,6 @@ class NetworkPanel(Widget):
         if not total:
             return ""
         parts = []
-        if not self.in_review:
-            parts.append(self._follow.text)
         if self._shown != total:
             parts.append(f"{self._shown} of {total}")
         else:
@@ -1568,7 +1583,7 @@ class NetworkPanel(Widget):
         if self._filter:
             parts.append(f"“{escape(self._filter)}”")
         if self._shown:
-            parts.append("⏎ inspect")
+            parts.append("Enter inspects")
         return " · ".join(parts)
 
     def _do_refresh_status(self) -> None:
@@ -1813,11 +1828,12 @@ class NetworkPanel(Widget):
             if row.app:
                 grid.add_row("app", Text(row.app))
             grid.add_row(
-                "result", Text(f"✗ TLS failed ({row.reason})", style="#fb7185")
+                "result",
+                Text(f"TLS failed ({row.reason})", style=lens_palette().bad),
             )
             why = _TLS_REASONS.get(row.reason, _TLS_REASONS["tls"])
             return InspectorContent(
-                title=f"✗ TLS · {label}",
+                title=f"TLS failed · {label}",
                 subtitle=escape(row.host),
                 sections=[
                     ("", grid),
@@ -1853,7 +1869,9 @@ class NetworkPanel(Widget):
                 ),
             )
         if row.error:
-            grid.add_row("result", Text(f"✗ {row.error}", style="#fb7185"))
+            grid.add_row(
+                "result", Text(f"error: {row.error}", style=lens_palette().bad)
+            )
         elif row.status is not None:
             grid.add_row(
                 "status",

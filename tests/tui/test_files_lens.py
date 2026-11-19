@@ -12,6 +12,7 @@ a class-level ``FileExtractionService.pull_file`` fake.
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -111,6 +112,14 @@ class _Harness(App):
 
     def resume_monitor_after_playback(self, config) -> None:
         self.resume_calls.append(config)
+
+
+_FOLLOW = re.compile(r"^(?:live|scrolled back(?: · [\d,]+ new below)? · End = live) · ")
+
+
+def _title(panel: FilesPanel) -> str:
+    """The caption title without the follow state in front of it."""
+    return _FOLLOW.sub("", panel.caption()[0], count=1)
 
 
 def _keys(panel: FilesPanel) -> list[str]:
@@ -749,7 +758,7 @@ async def test_review_scope_shows_the_runs_files_and_live_comes_back(
         panel.post_message(ScopeChanged(None))
         await pilot.pause()
         assert [r.key for r in panel._rows] == [f"{ROOT}/files/live"]
-        assert panel.caption()[0] == "monitor off"  # back to live, monitor off
+        assert _title(panel) == "monitor off"  # back to live, monitor off
 
 
 @pytest.mark.asyncio
@@ -1195,14 +1204,14 @@ async def test_marks_show_only_activity_since_and_step_through_segments() -> Non
         assert _row(panel, PREFS).stats.count == 1  # reset per segment
         assert _row(panel, DB).dim
         assert panel._path_cell(_row(panel, DB)).spans[-1].style == "#5b6479"
-        assert panel.caption()[0] == "since mark 1 'tap login' · 10:40:10"
+        assert _title(panel) == "since Note 1 'tap login' · 10:40:10"
 
         panel.table.focus()
         await pilot.press("A")  # everything again
         await pilot.pause()
         assert set(_keys(panel)) == {DB, new, PREFS, AAID}
         assert _row(panel, PREFS).stats.count == 2
-        assert panel.caption()[0] == "monitor off"
+        assert _title(panel) == "monitor off"
         await pilot.press("A")
         await pilot.pause()
         assert panel.segment == 1
@@ -1212,16 +1221,16 @@ async def test_marks_show_only_activity_since_and_step_through_segments() -> Non
             _items(_fse("FSE_CONTENT_MODIFIED", AAID)), now=T0 + timedelta(seconds=35)
         )
         assert _keys(panel) == [DB, AAID]
-        assert panel.caption()[0] == "since mark 2 · 10:40:30"
+        assert _title(panel) == "since Note 2 · 10:40:30"
         await pilot.press("less_than_sign")
         await pilot.pause()
         assert _keys(panel) == [DB, PREFS, new]
-        assert panel.caption()[0] == ("mark 1 'tap login' → mark 2 · 10:40:10–10:40:30")
+        assert _title(panel) == ("Note 1 'tap login' → Note 2 · 10:40:10–10:40:30")
         await pilot.press("less_than_sign")
         await pilot.pause()
         assert set(_keys(panel)) == {DB, PREFS, AAID}
         assert _row(panel, AAID).stats.ops == {"create": 1}
-        assert panel.caption()[0] == "before mark 1 'tap login' · until 10:40:10"
+        assert _title(panel) == "before Note 1 'tap login' · until 10:40:10"
         await pilot.press("less_than_sign")  # stays at the first segment
         await pilot.press("greater_than_sign", "greater_than_sign")
         await pilot.pause()
@@ -1231,17 +1240,17 @@ async def test_marks_show_only_activity_since_and_step_through_segments() -> Non
         events = _plain(_tab(panel._inspector_for(_row(panel, AAID)), "Events"))
         lines = [ln.strip() for ln in events.splitlines() if ln.strip()]
         assert lines[0].startswith("10:40:35")
-        assert lines[1] == "── mark 2 · 10:40:30 ──"
-        assert lines[2] == "── mark 1 'tap login' · 10:40:10 ──"
+        assert lines[1] == "── Note 2 · 10:40:30 ──"
+        assert lines[2] == "── Note 1 'tap login' · 10:40:10 ──"
         assert lines[3].startswith("10:40:00")
         # A file first touched after a mark ends with that mark.
         panel._segment = None
         panel.refresh_rows()
         events = _plain(_tab(panel._inspector_for(_row(panel, new)), "Events"))
         lines = [ln.strip() for ln in events.splitlines() if ln.strip()]
-        assert lines[0] == "── mark 2 · 10:40:30 ──"
+        assert lines[0] == "── Note 2 · 10:40:30 ──"
         assert lines[1].startswith("10:40:25")
-        assert lines[2] == "── mark 1 'tap login' · 10:40:10 ──"
+        assert lines[2] == "── Note 1 'tap login' · 10:40:10 ──"
         assert len(lines) == 3
 
 
@@ -1276,12 +1285,12 @@ async def test_B_asks_for_a_note_text_empty_enter_keeps_asking_esc_cancels(
         assert panel.marks == []
         await pilot.press(*"first", "enter")
         await settle(pilot)
-        assert [m.label() for m in panel.marks] == ["mark 1 'first'"]
+        assert [m.label() for m in panel.marks] == ["Note 1 'first'"]
         await pilot.press("B")
         await settle(pilot)
         await pilot.press(*"login", "enter")
         await settle(pilot)
-        assert [m.label() for m in panel.marks] == ["mark 1 'first'", "mark 2 'login'"]
+        assert [m.label() for m in panel.marks] == ["Note 1 'first'", "Note 2 'login'"]
         await pilot.press("B")
         await settle(pilot)
         await pilot.press("escape")  # no mark
@@ -1332,11 +1341,11 @@ async def test_marks_are_a_shell_concept_logged_and_sent_to_every_lens(
         await settle(pilot)
         await pilot.press(*"tap login", "enter")
         await settle(pilot)
-        assert [m.label() for m in ms.marks] == ["mark 1 'tap login'"]
-        assert "mark 1 'tap login'" in ms.query_one("#log-ticker").last_line
+        assert [m.label() for m in ms.marks] == ["Note 1 'tap login'"]
+        assert "Note 1 'tap login'" in ms.query_one("#log-ticker").last_line
         assert panel.segment == 1
         assert ms.query_one("#lens-host").border_title.startswith(
-            "Files · since mark 1 'tap login' · "
+            "Files · since Note 1 'tap login' · "
         )
         mark = ms.add_mark("from elsewhere")
         await settle(pilot)
@@ -2098,7 +2107,7 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
         assert pattern in {m.key for m in fold.members}
         cell = panel._path_cell(fold).plain
         if size[0] >= 200:
-            assert cell == "★ 21 watched · idle since mark 1"
+            assert cell == "★ 21 watched · idle since Note 1 'tap login'"
         else:
             assert cell.startswith("★ 21 ")
         assert str(panel._mark_cell(fold)) == "▸"
@@ -2233,7 +2242,7 @@ async def test_caption_names_the_scope_following_and_how_to_stop() -> None:
         await pilot.pause()
         panel.refresh_rows()
         title, info = panel.caption()
-        assert title == "LIVE"
+        assert title == "monitor on"
         assert info.startswith(f"App {PKG} · 2 proc · following · o stops")
         watch.lost_events = 7
         assert "7 events lost" in panel.caption()[1]
@@ -2398,7 +2407,7 @@ async def test_a_restart_before_a_files_first_event_shows_in_its_events() -> Non
         assert lines[1:] == [
             f"── {text} ──",
             f"── {PKG} exited · PID 4665 ──",
-            "── mark 1 'search' · 10:40:00 ──",
+            "── Note 1 'search' · 10:40:00 ──",
         ]  # the follow note (info) and the restart before the mark are not
 
 
@@ -2451,12 +2460,12 @@ async def test_title_is_not_live_while_the_monitor_is_off_or_stopping() -> None:
     async with app.run_test() as pilot:
         panel = app.query_one(FilesPanel)
         await pilot.pause()
-        assert panel.caption()[0] == "monitor off"
+        assert _title(panel) == "monitor off"
         device = _Device({10: AppProcess(10, 10100, PKG)})
         watch = _register_watched_monitor(device, mode="pid", follow=True)
         watch.seed({10: [10]}, watch.initial_processes())
         panel.refresh_rows()
-        assert panel.caption()[0] == "LIVE"
+        assert _title(panel) == "monitor on"
         watch.stopping = True  # o pressed: at once, before the device work
         panel.refresh_rows()
         title, info = panel.caption()
@@ -2511,7 +2520,7 @@ async def test_newest_change_is_at_the_bottom_and_followed_until_moving_up() -> 
         assert _keys(panel) == [DB, AAID, PREFS]  # newest last
         assert panel.following
         assert panel._cursor_key() == PREFS
-        assert "· live" in panel.caption()[1]
+        assert panel.caption()[0] == "live · monitor off"
         # A change moves its row to the bottom; following keeps up with it.
         panel.ingest(
             _items(_fse("FSE_CONTENT_MODIFIED", DB)), now=T0 + timedelta(seconds=5)
@@ -2523,18 +2532,19 @@ async def test_newest_change_is_at_the_bottom_and_followed_until_moving_up() -> 
         await settle(pilot)
         assert not panel.following
         assert panel._cursor_key() == PREFS
-        assert "scrolled back · 0 new below · End = live" in panel.caption()[1]
+        assert panel.caption()[0] == "scrolled back · End = live · monitor off"
         panel.ingest(
             _items(_fse("FSE_CONTENT_MODIFIED", AAID)), now=T0 + timedelta(seconds=9)
         )
         assert _keys(panel) == [PREFS, DB, AAID]
         assert panel._cursor_key() == PREFS  # the view stays put
-        assert "scrolled back · 1 new below · End = live" in panel.caption()[1]
+        assert panel.caption()[0].startswith("scrolled back · 1 new below · End = live")
+        assert "live" not in panel.caption()[1]  # one place: the title
         await pilot.press("end")
         await settle(pilot)
         assert panel.following
         assert panel._cursor_key() == AAID
-        assert "· live" in panel.caption()[1]
+        assert panel.caption()[0].startswith("live · ")
         # A click on a row above the newest one stops following too.
         await pilot.click("#files-table", offset=(5, 0))
         await settle(pilot)
@@ -2543,4 +2553,104 @@ async def test_newest_change_is_at_the_bottom_and_followed_until_moving_up() -> 
         # Sorted by name / count there is no "newest": no follow wording.
         await pilot.press("O")
         await settle(pilot)
-        assert "live" not in panel.caption()[1]
+        assert panel.caption()[0] == "monitor off"
+
+
+async def _three_changes(app):
+    panel = app.query_one(FilesPanel)
+    for k, path in enumerate((DB, AAID, PREFS)):
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", path)), now=T0 + timedelta(seconds=k)
+        )
+    _keys(panel)
+    return panel
+
+
+@pytest.mark.asyncio
+async def test_a_second_up_keeps_counting_what_arrived_below() -> None:
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = await _three_changes(app)
+        panel.table.focus()
+        await pilot.press("up")
+        await settle(pilot)
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", DB)), now=T0 + timedelta(seconds=9)
+        )
+        _keys(panel)
+        assert panel.caption()[0].startswith("scrolled back · 1 new below")
+        await pilot.press("up")  # already scrolled back: the count stays
+        await settle(pilot)
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", AAID)), now=T0 + timedelta(seconds=12)
+        )
+        _keys(panel)
+        assert panel.caption()[0].startswith("scrolled back · 2 new below")
+
+
+@pytest.mark.asyncio
+async def test_end_resumes_with_a_file_open_in_the_inspector() -> None:
+    """End is the user's choice: it resumes, and an open Inspector then
+    follows the newest row (no automatic stop for an open Inspector).
+    """
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = await _three_changes(app)
+        panel.table.focus()
+        await pilot.press("up")
+        await settle(pilot)
+        assert not panel.following
+        await pilot.press("end")
+        await settle(pilot)
+        assert panel.following
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", DB)), now=T0 + timedelta(seconds=9)
+        )
+        _keys(panel)
+        assert panel.following
+        assert panel._cursor_key() == DB
+
+
+@pytest.mark.asyncio
+async def test_moving_in_name_order_leaves_follow_for_the_recent_order() -> None:
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = await _three_changes(app)
+        panel.table.focus()
+        await pilot.press("O")  # by name: no newest row, no follow logic
+        await settle(pilot)
+        panel.table.move_cursor(row=0)
+        await settle(pilot)
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", DB)), now=T0 + timedelta(seconds=5)
+        )
+        await pilot.press("O", "O")  # back to recent
+        await settle(pilot)
+        assert panel.following
+        assert panel._cursor_key() == DB
+
+
+@pytest.mark.asyncio
+async def test_pinned_changes_are_not_new_below_and_live_resumes_after_review(
+    tmp_path,
+) -> None:
+    get_forensic_service().add_spotlight_file(PREFS)  # ★, pinned on top
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = await _three_changes(app)
+        panel.table.focus()
+        await pilot.press("up")
+        await settle(pilot)
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", PREFS)), now=T0 + timedelta(seconds=9)
+        )
+        _keys(panel)
+        assert panel.caption()[0].startswith("scrolled back · End = live")
+        assert not panel.following
+        from sandroid.tui.widgets.lens_shell import ScopeChanged
+
+        panel.post_message(ScopeChanged(str(tmp_path / "run"), "Run #1"))
+        await settle(pilot)
+        panel.post_message(ScopeChanged(None))
+        await settle(pilot)
+        assert panel.following

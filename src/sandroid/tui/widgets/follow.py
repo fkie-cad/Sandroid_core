@@ -8,9 +8,9 @@ The rules are the same in all three live lists:
   auto-scroll -- recording never pauses, only the view stays where it is;
 * ``End`` resumes.
 
-The caption / chip says ``live`` while following and
-``scrolled back · 12 new below · End = live`` otherwise
-(:func:`follow_text`). :class:`Follow` is the small state object each lens
+Each lens shows it in ONE place, its caption title: ``live`` while
+following, ``scrolled back · 12 new below · End = live`` otherwise
+(``scrolled back · End = live`` while nothing new arrived; :func:`follow_text`). :class:`Follow` is the small state object each lens
 keeps; the lens decides what counts as "new" (lines, flows, changed files).
 """
 
@@ -21,9 +21,13 @@ LIVE_TEXT = "live"
 
 
 def follow_text(live: bool, new_below: int = 0) -> str:
-    """``live`` or ``scrolled back · 12 new below · End = live``."""
+    """``live``, ``scrolled back · 12 new below · End = live`` or (nothing
+    new yet) ``scrolled back · End = live``.
+    """
     if live:
         return LIVE_TEXT
+    if new_below <= 0:
+        return "scrolled back · End = live"
     return f"scrolled back · {new_below:,} new below · End = live"
 
 

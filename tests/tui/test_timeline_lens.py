@@ -176,7 +176,7 @@ async def test_footer_on_the_timeline_lens_has_at_most_seven_keys(
         assert 0 < len(keys) <= SandroidFooter.MAX_KEYS
         labels = [k.description for k in keys]
         assert labels[:2] == ["Record", "Play/Replay"]
-        assert "Follow" in labels
+        assert "Live" in labels
 
 
 def _binding_keys(cls) -> dict[str, set[str]]:
@@ -327,7 +327,7 @@ async def test_live_lines_arrive_through_tail_and_late_lines_keep_the_viewport(
         top_after = lens._row_at_display(int(view.scroll_offset.y))
         assert top_after.seq == top_before.seq  # viewport kept
         assert lens.late_above == 1
-        assert "1 late lines above" in lens.caption()[1]
+        assert "1 late line above" in lens.caption()[1]
 
 
 async def test_follow_pauses_on_up_and_resumes_with_end_or_space(
@@ -345,7 +345,7 @@ async def test_follow_pauses_on_up_and_resumes_with_end_or_space(
         lens.release_pending(now=time.time() + 1)
         assert lens.cursor_row.seq == 49  # stays put
         assert lens.caption()[0] == "scrolled back · 1 new below · End = live"
-        assert "scrolled back · 1 new below · End = live" in _chips(lens)
+        assert "live" not in _chips(lens)  # one place: the caption title
         await pilot.press("end")
         assert lens.following
         assert lens.cursor_row.seq == 51
@@ -490,7 +490,7 @@ async def test_separators_hidden_rows_and_N(install_fakes) -> None:
             strip = lens.strip_for(vi + lens._display_offset(), 140)
             return "".join(seg.text for seg in strip)
 
-        assert "snapshot loaded · world 1 · snapshot 'clean'" in text(4)
+        assert "snapshot 'clean' · world 1" in text(4)
         assert "clock epoch 2 · clock jump" in text(6)
         assert "Section 1 'cookies'" in text(7)
         assert "replay started · Play 'login'" in text(8)
@@ -498,7 +498,7 @@ async def test_separators_hidden_rows_and_N(install_fakes) -> None:
             assert not set(text(seq)) & set("⟲⏱▶▷◉⚑─⇢↓↑‖")
         assert "reconnected +1.0s" in text(10)
         assert text(12)[3] == "!"  # warn flag in the gutter
-        assert "│" in text(9)[:4]  # inside label 1
+        assert "│" in text(9)[:4]  # inside Section 1
         lens.app.notify = lambda *a, **k: None
         await pilot.press("N")
         assert {2, 3, 11} <= {r.seq for r in lens.visible_rows}
@@ -846,9 +846,9 @@ async def test_label_keys_nest_close_stop_and_esc_writes_nothing(install_fakes) 
         assert type(app.screen).__name__ == "MainScreen"
         # The marks are the Files projection of the labels.
         assert [m.label() for m in ms.marks][:3] == [
-            "label 1 'cookies'",
-            "after label 1",
-            "label 4 'next'",
+            "Section 1 'cookies'",
+            "after Section 1",
+            "Section 4 'next'",
         ]
         # t is the key press, not the Enter.
         start = labels.calls[0]
@@ -878,8 +878,8 @@ async def test_B_is_global_in_every_lens_and_the_name_is_typed_into_the_prompt(
         await settle(pilot)
         assert fakes.labels.history()[-1].name == "a+b-c#B5"
         assert ms.active_lens == "timeline"
-        assert "mark 1 'app'" in ms.query_one("#log-ticker").last_line or (
-            "label 6" in ms.query_one("#log-ticker").last_line
+        assert "Note 1 'app'" in ms.query_one("#log-ticker").last_line or (
+            "Section 6" in ms.query_one("#log-ticker").last_line
         )
 
 
@@ -925,7 +925,7 @@ async def test_label_keys_do_nothing_under_a_modal(install_fakes) -> None:
         assert fakes.labels.history() == []
 
 
-async def test_files_lens_segments_follow_labels_and_keeps_mark_wording(
+async def test_files_lens_segments_follow_labels_in_note_and_section_wording(
     install_fakes,
 ) -> None:
     from sandroid.tui.controllers.monitor_controller import build_monitor_item
@@ -961,17 +961,17 @@ async def test_files_lens_segments_follow_labels_and_keeps_mark_wording(
         assert [m.kind for m in files.marks] == ["start", "end", "point"]
         assert files.segment == 3
         t = lambda s: (t0 + timedelta(seconds=s)).strftime("%H:%M:%S")  # noqa: E731
-        assert files._segment_title() == f"since mark 2 'tap' · {t(30)}"
+        assert files._segment_title() == f"since Note 2 'tap' · {t(30)}"
         files._segment = 2
         assert files._segment_title() == (
-            f"after label 1 (no label) → mark 2 'tap' · {t(20)}–{t(30)}"
+            f"after Section 1 (no section) → Note 2 'tap' · {t(20)}–{t(30)}"
         )
         files._segment = 1
         assert files._segment_title() == (
-            f"label 1 'cookies' → after label 1 · {t(10)}–{t(20)}"
+            f"Section 1 'cookies' → after Section 1 · {t(10)}–{t(20)}"
         )
         files._segment = 0
-        assert files._segment_title() == f"before label 1 'cookies' · until {t(10)}"
+        assert files._segment_title() == f"before Section 1 'cookies' · until {t(10)}"
         # A / < > still navigate the segments on top of the label model.
         files.table.focus()
         files._segment = 3
@@ -1015,10 +1015,10 @@ def test_marks_changed_carries_pending_and_mark_wording() -> None:
     when = datetime(2026, 11, 19, 10, 0, 0)
     msg = MarksChanged([], None, pending=when)
     assert msg.pending == when
-    assert Mark(3, when, "tap").label() == "mark 3 'tap'"
-    assert Mark(3, when).label() == "mark 3"
-    assert Mark(7, when, "x", "start").label() == "label 7 'x'"
-    assert Mark(7, when, "x", "end").label() == "after label 7"
+    assert Mark(3, when, "tap").label() == "Note 3 'tap'"
+    assert Mark(3, when).label() == "Note 3"
+    assert Mark(7, when, "x", "start").label() == "Section 7 'x'"
+    assert Mark(7, when, "x", "end").label() == "after Section 7"
 
 
 async def test_without_the_timeline_labels_stay_in_memory(monkeypatch) -> None:
@@ -1030,7 +1030,7 @@ async def test_without_the_timeline_labels_stay_in_memory(monkeypatch) -> None:
         await boot(app, pilot)
         ms = app.screen
         await _label(pilot, "B", "x")
-        assert [m.label() for m in ms.marks] == ["mark 1 'x'"]
+        assert [m.label() for m in ms.marks] == ["Note 1 'x'"]
         assert any("Timeline unavailable" in m for m in _messages(app))
         await pilot.press("minus")
         await settle(pilot)
@@ -1125,7 +1125,7 @@ async def test_doorbell_rebuilds_marks_for_labels_added_elsewhere(
             SimpleNamespace(data={"op": "lines", "srcs": ["label"], "last_seq": 1})
         )
         await settle(pilot)
-        assert [m.label() for m in ms.marks] == ["mark 1 'from the AI'"]
+        assert [m.label() for m in ms.marks] == ["Note 1 'from the AI'"]
         assert ms.lens_widget("files").segment == 1
 
 
@@ -1321,9 +1321,9 @@ async def test_real_labels_are_written_as_timeline_lines(tmp_path) -> None:
         await pilot.press("minus")
         await settle(pilot)
         assert [m.label() for m in ms.marks] == [
-            "label 1 'cookies'",
-            "mark 2 'tap'",
-            "after label 1",
+            "Section 1 'cookies'",
+            "Note 2 'tap'",
+            "after Section 1",
         ]
         assert svc.flush(2.0)
         kinds = [
@@ -1636,29 +1636,29 @@ async def test_rebind_rebuilds_marks_per_sink_and_refreshes_the_watchlist(
         files = ms.lens_widget("files")
         bind(folder_a, labels_a)
         await settle(pilot)
-        assert [m.label() for m in ms.marks] == ["mark 1 'in A'"]
+        assert [m.label() for m in ms.marks] == ["Note 1 'in A'"]
         assert [m.name for m in files.watchlist.marks] == ["in A"]
         bind(folder_b, labels_b)
         await settle(pilot)
-        assert [m.label() for m in ms.marks] == ["mark 1 'in B'"]
+        assert [m.label() for m in ms.marks] == ["Note 1 'in B'"]
         assert [m.name for m in files.watchlist.marks] == ["in B"]
         # back to the already-open A: its own labels again
         bind(folder_a, labels_a)
         await settle(pilot)
-        assert [m.label() for m in ms.marks] == ["mark 1 'in A'"]
+        assert [m.label() for m in ms.marks] == ["Note 1 'in A'"]
         assert [m.name for m in files.watchlist.marks] == ["in A"]
         # a label doorbell from another sink at the same version still
         # rebuilds (the cache key is (sink, version), not the version)
         bind(folder_b, labels_b, op="lines")
         await settle(pilot)
-        assert [m.label() for m in ms.marks] == ["mark 1 'in B'"]
+        assert [m.label() for m in ms.marks] == ["Note 1 'in B'"]
         # a session-id-only payload works too
         svc.folder, svc.labels = None, labels_a
         ms._handle_timeline_event(
             SimpleNamespace(data={"op": "bound", "session_id": "s-a"})
         )
         await settle(pilot)
-        assert [m.label() for m in ms.marks] == ["mark 1 'in A'"]
+        assert [m.label() for m in ms.marks] == ["Note 1 'in A'"]
 
 
 # --------------------------------------------------------------------------
@@ -1680,6 +1680,16 @@ def _typed_lines() -> list[dict]:
         make_line(9, t + 80, "sandroid", "policy", summary="policy changed"),
         make_line(10, t + 90, "files", "create", summary="CREATE b", pkg="com.y"),
     ]
+
+
+def _user_tint(pal) -> str:
+    """The user-input row background: ``user`` blended into ``bg``."""
+    from textual.color import Color
+
+    from sandroid.tui.widgets.timeline_lens import _TINT_AMOUNT
+
+    blend = Color.parse(pal.bg).blend(Color.parse(pal.user), _TINT_AMOUNT)
+    return blend.hex.lower()
 
 
 def _row_text(lens, vi: int, width: int = 160) -> str:
@@ -1737,7 +1747,7 @@ async def test_types_are_plain_words_coloured_from_the_theme_tokens(
         rows = [r.seq for r in lens.display_rows]
         vi = {seq: rows.index(seq) for seq in rows}
         assert word_color(vi[1]) == pal.user  # the user's own input: accent
-        assert bg(vi[1]).triplet.hex == pal.band.lower()  # ... on the band tint
+        assert bg(vi[1]).triplet.hex == _user_tint(pal)  # ... on its accent's tint
         assert word_color(vi[3]) == pal.screen.lower()  # screen: 2nd accent
         assert word_color(vi[4]) == pal.screen.lower()  # screenshot too
         assert word_color(vi[5]) == pal.muted  # request: muted type word
@@ -1773,14 +1783,14 @@ async def test_a_theme_switch_recolors_the_timeline(install_fakes) -> None:
         def tap_bg() -> str:
             return _segments(lens, 1)[-1].style.bgcolor.triplet.hex.upper()
 
-        assert tap_bg() == DEFAULT_THEME.lens.band.upper()
+        assert tap_bg() == _user_tint(DEFAULT_THEME.lens).upper()
         app._apply_theme(LIGHT_THEME, get_theme_css_path("light"))
         await settle(pilot)
-        assert tap_bg() == LIGHT_THEME.lens.band.upper()
+        assert tap_bg() == _user_tint(LIGHT_THEME.lens).upper()
         assert lens.view.styles.background.hex.upper() == LIGHT_THEME.lens.bg
         app._apply_theme(DEFAULT_THEME, get_theme_css_path("default"))
         await settle(pilot)
-        assert tap_bg() == DEFAULT_THEME.lens.band.upper()
+        assert tap_bg() == _user_tint(DEFAULT_THEME.lens).upper()
 
 
 def test_every_theme_has_readable_type_tokens() -> None:
@@ -1814,7 +1824,7 @@ async def test_type_bar_lists_types_with_counts_hides_on_click_and_picks_an_app(
         assert "app all 4 · org.x 3 · com.y 1" in text
         # A click on "file" hides the file rows; its count stays in the bar.
         k = next(i for i, item in enumerate(bar.items) if item[1] == "file")
-        x0 = next(h[0] for h in bar._hits if h[2] == k)
+        x0 = next(h[1] for h in bar._hits if h[3] == k and h[0] == 0)
         await pilot.click("#tl-types", offset=(x0 + 1, 0))
         await settle(pilot)
         assert lens.hidden_types == {"file"}
@@ -2008,7 +2018,8 @@ async def test_z_or_a_click_on_the_header_folds_a_section(install_fakes) -> None
         assert lens.cursor_row.seq == 2
         assert not lens.following
         text = _row_text(lens, 1)
-        assert "Section 1 'Login' · 2:14 · 5 lines (2 taps, 1 file, 1 request)" in text
+        # Lines without separators, the user's actions first.
+        assert "Section 1 'Login' · 2:14 · 4 lines (2 taps, 1 request, 1 file)" in text
         await pilot.press("z")  # unfolds again
         assert [r.seq for r in lens.display_rows] == [1, 2, 3, 4, 5, 6, 7, 8]
         lens.click_line(1 + lens._display_offset())  # the header row folds
@@ -2031,7 +2042,6 @@ async def test_follow_a_click_above_the_newest_stops_end_resumes(
         lens = await _loaded_lens(pilot, app)
         assert lens.following
         assert lens.caption()[0] == "live"
-        assert "live" in _chips(lens)
         last = len(lens.display_rows) - 1
         lens.click_line(last + lens._display_offset())  # the newest row: stays
         assert lens.following
@@ -2201,10 +2211,259 @@ def test_random_live_and_late_lines_keep_folds_and_counts_exact(monkeypatch) -> 
             seq += 1
             anchor = rnd.choice(lens.rows)
             late_t = anchor.t + rnd.choice([-0.3, 0.05, 0.2, 1.0])
-            lens.insert_rows(
-                [line(rnd, seq, late_t, anchor.epoch + rnd.choice([0, -1]))]
-            )
+            if open_labels and rnd.random() < 0.2:
+                # A late section end (# / + / - write at the key press).
+                data = {"number": open_labels.pop()}
+                late = row_from_line(make_line(seq, late_t, "label", "end", data=data))
+            elif rnd.random() < 0.15:
+                number += 1
+                data = {"number": number, "name": f"s{number}", "depth": 0}
+                late = row_from_line(
+                    make_line(seq, late_t, "label", "start", data=data)
+                )
+                if rnd.random() < 0.5:
+                    lens._folded_sections.add(number)
+            else:
+                late = line(rnd, seq, late_t, anchor.epoch + rnd.choice([0, -1]))
+            lens.insert_rows([late])
         patched = (list(lens._view), dict(lens.type_counts), dict(lens.pkg_counts))
         lens._rebuild_view(keep=False)
         rebuilt = (lens._view, lens.type_counts, lens.pkg_counts)
         assert patched == rebuilt, trial
+
+
+# --------------------------------------------------------------------------
+# review fixes
+# --------------------------------------------------------------------------
+
+
+def _section_rows(gap: float = 3.0) -> list:
+    t0 = NOW - 1000
+    data = {"number": 1, "name": "a", "depth": 0}
+    rows = [row_from_line(make_line(1, t0, "label", "start", data=data))]
+    for k in range(10):
+        rows.append(row_from_line(make_line(2 + k, t0 + 1 + k * gap, "net", "flow")))
+    return rows
+
+
+def test_a_late_section_end_cuts_a_folded_open_section() -> None:
+    """A late end row (written at the key press) lands inside the folded,
+    still open section: the fold ends there, the rest shows again.
+    """
+    rows = _section_rows()
+    lens = TimelineLens()
+    lens._apply_rows(rows, 0)
+    lens._folded_sections.add(1)
+    lens._build_display()
+    assert len(lens._view) == 1
+    lens._follow = False
+    end_t = rows[0].t + 1 + 5 * 3 + 0.5
+    end = row_from_line(make_line(500, end_t, "label", "end", data={"number": 1}))
+    lens.insert_rows([end])
+    patched = list(lens._view)
+    lens._rebuild_view(keep=False)
+    assert patched == lens._view
+    assert len(lens._view) == 1 + 4  # the fold, then the 4 rows after its end
+
+
+def test_hash_typed_late_starts_a_new_section_outside_the_fold() -> None:
+    """``#`` with a name typed for a few seconds: its end + start rows arrive
+    late, after newer lines; the new section is not swallowed by the fold.
+    """
+    rows = _section_rows(gap=1.0)
+    lens = TimelineLens()
+    lens._apply_rows(rows, 0)
+    lens._folded_sections.add(1)
+    lens._build_display()
+    press = rows[0].t + 6.5
+    start2 = {"number": 2, "name": "Login", "depth": 0}
+    lens.insert_rows(
+        [
+            row_from_line(make_line(50, press, "label", "end", data={"number": 1})),
+            row_from_line(make_line(51, press, "label", "start", data=start2)),
+        ]
+    )
+    lens.insert_rows([row_from_line(make_line(52, rows[0].t + 20, "net", "flow"))])
+    patched = list(lens._view)
+    lens._rebuild_view(keep=False)
+    assert patched == lens._view
+    assert 51 in {r.seq for r in lens.display_rows}  # Section 2 is shown
+
+
+def test_new_below_counts_a_batch_with_a_late_line() -> None:
+    t0 = NOW - 1000
+    rows = [row_from_line(make_line(i + 1, t0 + i * 3)) for i in range(20)]
+    lens = TimelineLens()
+    lens._apply_rows(rows, 0)
+    lens._follow = False
+    last_t = rows[-1].t
+    late = row_from_line(make_line(100, last_t - 1.0, "net", "flow"))
+    newer = [
+        row_from_line(make_line(101 + k, last_t + 10 + k * 3, "net", "flow"))
+        for k in range(4)
+    ]
+    lens.insert_rows([late, *newer])
+    assert lens._new_below == 4  # the 4 below the newest; the late one is above
+
+
+async def test_J_stops_following_so_the_next_line_does_not_move_away(
+    install_fakes,
+) -> None:
+    lines = _lines(30, NOW - 200)
+    lines.append(make_line(31, NOW - 5, "net", "flow", ref={"of": 3}))
+    fakes = install_fakes(lines)
+    app = _LensHarness()
+    async with app.run_test(size=(140, 20)) as pilot:
+        lens = await _loaded_lens(pilot, app)
+        assert lens.following
+        assert lens.cursor_row.seq == 31
+        assert lens.jump(lens.cursor_row) is True
+        assert lens.cursor_row.seq == 3
+        assert not lens.following
+        fakes.service.emit("net", "flow", summary="GET later")
+        lens._poll()
+        lens.release_pending(now=time.time() + 1)
+        assert lens.cursor_row.seq == 3
+
+
+def test_app_filter_keeps_an_unbalanced_query_as_typed() -> None:
+    lens = TimelineLens()
+    lens._apply_rows([row_from_line(make_line(1, NOW - 10, pkg="org.x"))], 0)
+    lens.set_filter('src:files "half quote -pkg:old')
+    lens.set_app("org.x")
+    assert lens.query_text == 'src:files "half quote pkg:org.x'
+    lens.set_app(None)
+    assert lens.query_text == 'src:files "half quote'
+
+
+async def test_app_filter_updates_an_open_filter_input(install_fakes) -> None:
+    install_fakes(_typed_lines())
+    app = _LensHarness()
+    async with app.run_test(size=(170, 30)) as pilot:
+        lens = await _loaded_lens(pilot, app)
+        await pilot.press("slash", *"src:net")
+        await settle(pilot)
+        lens.pick_bar_item(("app", "org.x", 2, None))
+        await settle(pilot)
+        field = lens.query_one("#tl-filter")
+        assert field.value == "src:net pkg:org.x"
+        assert lens.query_text == "src:net pkg:org.x"
+
+
+def test_rows_show_no_leading_symbols_and_failed_runs_say_so() -> None:
+    t = NOW - 300
+    lines = [
+        make_line(1, t, "screen", "activity", summary="→ org.x/.MainActivity"),
+        make_line(2, t + 5, "input", "confirm", summary="✓ click #5"),
+        make_line(3, t + 10, "run", "record-start", summary="● REC · login"),
+        make_line(4, t + 20, "run", "play-start", summary="▷ Play · login"),
+        make_line(5, t + 30, "run", "play-end", summary="■ Play done · 3 changed"),
+        make_line(
+            6,
+            t + 40,
+            "run",
+            "play-end",
+            summary="■ Play ended · adb gone",
+            data={"error": "adb gone", "failed": True},
+        ),
+    ]
+    lens = TimelineLens()
+    lens._apply_rows([row_from_line(line) for line in lines], 0)
+    text = {r.seq: _row_text(lens, vi) for vi, r in enumerate(lens.display_rows)}
+    assert " org.x/.MainActivity" in text[1]
+    assert "→" not in text[1]
+    assert "click #5" in text[2]
+    assert "✓" not in text[2]
+    assert "recording started · login" in text[3]
+    assert "replay started · login" in text[4]
+    assert "replay finished · 3 changed" in text[5]
+    assert "replay failed · adb gone" in text[6]
+    from sandroid.tui.themes import DEFAULT_LENS
+
+    body = [s for s in _segments(lens, 5) if "failed" in s.text][0]
+    assert body.style.color.triplet.hex == DEFAULT_LENS.bad
+
+
+def test_masked_and_uncertain_lines_use_words_and_colour_not_symbols(
+    monkeypatch,
+) -> None:
+    import sandroid.tui.widgets.timeline_lens as tl
+    from sandroid.tui.themes import DEFAULT_LENS
+
+    monkeypatch.setattr(tl, "should_mask_ui", lambda: True)
+    lines = [
+        make_line(1, NOW - 50, "input", "text", summary="typed ***", sensitive=True),
+        make_line(2, NOW - 40, "screen", "activity", summary="x", t_err_ms=900.0),
+    ]
+    lens = TimelineLens()
+    lens._apply_rows([row_from_line(line) for line in lines], 0)
+    masked, uncertain = _row_text(lens, 0), _row_text(lens, 1)
+    assert " masked " in masked
+    assert "▒" not in masked
+    assert "~" not in uncertain[:6]
+    time_seg = _segments(lens, 1)[2]
+    assert time_seg.style.color.triplet.hex == DEFAULT_LENS.warn
+
+
+def test_palettes_built_elsewhere_get_user_and_screen_defaults() -> None:
+    from dataclasses import asdict
+
+    from sandroid.tui.themes import DEFAULT_LENS, LensPalette
+
+    fields = asdict(DEFAULT_LENS)
+    fields.pop("user")
+    fields.pop("screen")
+    pal = LensPalette(**fields)
+    assert pal.user == pal.accent
+    assert pal.screen == pal.title
+    assert pal.css_variables()["lens-user"] == pal.accent
+
+
+def test_type_tokens_meet_their_contrast_floors_in_every_theme() -> None:
+    """``user`` on its row tint and ``screen`` on bg / panel / cursor: >= 4.5;
+    under the focused cursor >= 3; the row text on the tint >= 4.5.
+    """
+    from textual.color import Color
+
+    from sandroid.tui.themes import THEMES
+    from sandroid.tui.widgets.timeline_lens import _TINT_AMOUNT
+
+    def lum(hexv: str) -> float:
+        c = Color.parse(hexv)
+        rgb = [v / 255 for v in (c.r, c.g, c.b)]
+        lin = [v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in rgb]
+        return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+    def ratio(a: str, b: str) -> float:
+        hi, lo = sorted((lum(a), lum(b)), reverse=True)
+        return (hi + 0.05) / (lo + 0.05)
+
+    for name, theme in THEMES.items():
+        p = theme.lens
+        tint = Color.parse(p.bg).blend(Color.parse(p.user), _TINT_AMOUNT).hex
+        assert ratio(p.user, tint) >= 4.5, name
+        assert ratio(p.text, tint) >= 4.5, name
+        assert ratio(p.user, p.cursor_focus) >= 3, name
+        for surface in (p.bg, p.panel, p.cursor):
+            assert ratio(p.screen, surface) >= 4.5, (name, surface)
+        assert ratio(p.screen, p.cursor_focus) >= 3, name
+
+
+async def test_an_open_inspector_follows_the_newest_line_while_live(
+    install_fakes,
+) -> None:
+    fakes = install_fakes(_lines(20, NOW - 200))
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        await pilot.press("5")
+        lens = ms.lens_widget("timeline")
+        await until(pilot, lambda: len(lens.rows) == 20)
+        await pilot.press("enter")
+        await until(pilot, lambda: ms.inspector_is_open)
+        assert ms.inspector_content.key[2] == 20
+        assert lens.following
+        fakes.service.emit("net", "flow", summary="GET newest")
+        lens._poll()
+        lens.release_pending(now=time.time() + 1)
+        await until(pilot, lambda: ms.inspector_content.key[2] == 21)

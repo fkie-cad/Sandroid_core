@@ -312,12 +312,12 @@ class Mark:
     seq: int | None = None
 
     def label(self) -> str:
-        """``mark 3 'tap login'`` (point), ``label 7 'x'`` (start) or
-        ``after label 7`` (end); the name is left out when empty.
+        """``Note 3 'tap login'`` (point), ``Section 7 'x'`` (start) or
+        ``after Section 7`` (end); the name is left out when empty.
         """
         if self.kind == "end":
-            return f"after label {self.number}"
-        word = "label" if self.kind == "start" else "mark"
+            return f"after Section {self.number}"
+        word = "Section" if self.kind == "start" else "Note"
         named = f" '{self.name}'" if self.name else ""
         return f"{word} {self.number}{named}"
 
@@ -645,10 +645,12 @@ class ShellHeader(Header):
         ``off_wall`` of the last sample; the timeline's writer thread takes
         the periodic samples):
 
-        * within 1 s of the host, dimmed: ``dev 17:16:02 ✓``
-        * more than 1 s off, amber: ``dev 16:01:02 -75 min ⚠``
+        * within 1 s of the host, dimmed: ``dev 17:16:02 in sync``
+        * more than 1 s off, amber: ``dev 16:01:02 75 min behind`` (or
+          ``ahead``)
         * no sample of the current world yet (startup, or after a snapshot
-          load / cold boot, when the old offset is stale), dimmed: ``dev ?``
+          load / cold boot, when the old offset is stale), dimmed:
+          ``dev time unknown``
 
         Hidden without a target device. Returns the text shown.
         """
@@ -663,16 +665,16 @@ class ShellHeader(Header):
         if not serial:
             text, state = "", ""
         elif sample is None or sample.get("off_wall") is None:
-            text, state = "dev ?", "-unknown"
+            text, state = "dev time unknown", "-unknown"
         else:
             when = datetime.fromtimestamp(now - sample["off_wall"])
             if device_clock.notable(sample):
-                offset = device_clock.format_offset(
-                    device_clock.device_minus_host(sample)
-                )
-                text, state = f"dev {when:%H:%M:%S} {offset} ⚠", "-off"
+                ahead = device_clock.device_minus_host(sample) or 0.0
+                offset = device_clock.format_offset(abs(ahead)).lstrip("+−-")
+                side = "ahead" if ahead > 0 else "behind"
+                text, state = f"dev {when:%H:%M:%S} {offset} {side}", "-off"
             else:
-                text, state = f"dev {when:%H:%M:%S} ✓", "-sync"
+                text, state = f"dev {when:%H:%M:%S} in sync", "-sync"
         try:
             label = self.query_one("#device-clock", Static)
             label.update(text)

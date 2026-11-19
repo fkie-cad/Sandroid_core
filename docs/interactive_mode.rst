@@ -143,15 +143,22 @@ Network (2)
 Who is the app talking to, and what did it send? One flow table
 (time, recipient, request, status, size) read from the embedded
 ``mitmweb``'s flow log; ``Enter`` on a row opens Summary / Request /
-Response in the Inspector. TLS failures and errored flows show as ✗ rows
-(a ``⚑N`` badge on the lens counts TLS failures you have not seen yet).
-``/`` filters by host, path, app or status (``/404``, ``/tls``, ``/✗``
-for every failed row; ``Esc`` clears the filter), ``T`` shows only the
+Response in the Inspector. TLS failures and errored flows say so in the
+status column (``TLS failed`` / ``error reset``, in the error colour; a
+``⚑N`` badge on the lens counts TLS failures you have not seen yet). New
+flows appear at the bottom; while *live* the newest flow stays selected
+(and an open Inspector follows it); ↑, PgUp, Home, a wheel up or a click
+above the newest row stop following (capturing goes on), ``End`` resumes.
+The caption title starts with ``live`` or ``scrolled back · 12 new below ·
+End = live``, then the capture state in words (``Mitmproxy on :8080 ·
+device routed · CA installed · friTap on``).
+``/`` filters by host, path, app or status (``/404``, ``/tls``, ``/error``
+for every errored flow; ``Esc`` clears the filter), ``T`` shows only the
 spotlight (target) app's flows, ``N`` shows OS background traffic
 (connectivity checks, Play services and Google's ``*-pa.googleapis.com``
 APIs, Sandroid's own ``mitm.it`` probe), hidden by default; the caption
 says how many flows it hides (``N: 163 OS noise hidden``). ``Home`` /
-``End`` jump to the first / last flow. Compressed bodies (gzip, br,
+``End`` jump to the first / newest flow (``End``: live again). Compressed bodies (gzip, br,
 deflate, zstd) are shown decoded; the Inspector notes the encoding. TLS
 failures are kept in the flow log too, so a later session or a reviewed run
 still shows them. In REVIEW scope the table shows the reviewed
@@ -230,7 +237,15 @@ Files (3)
 ~~~~~~~~~
 
 One table of what the app writes, one row per file (★, path, ops
-``C``/``M``/``R``/``D``/``A``, count, last time). ``o`` starts/stops the
+``C``/``M``/``R``/``D``/``A``, count, last time), oldest first: a file that
+changes moves to the bottom (watched ★ rows stay pinned on top). While
+*live* the cursor sticks to that newest row; ↑, PgUp, Home, a wheel up or a
+click on a row above it stop following (the monitor keeps recording), and
+``End`` resumes -- also with a file open in the Inspector, which then
+follows the newest row. The caption title says ``live`` or ``scrolled back
+· 3 new below · End = live`` (unpinned rows that changed since), then
+``monitor on`` / ``monitor off``; it applies to the default "recent" order
+only (Shift+``O`` sorts by name or count). ``o`` starts/stops the
 file monitor: the default ``kprobe`` backend uses kernel tracefs kprobes
 (per-process and child-tree attribution, path-scoped capture, nothing pushed
 to the device) and falls back to ``fsmon`` automatically
@@ -310,23 +325,25 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   so an analyst can judge it. Each
   ``acquisition.json`` and ``checks.jsonl`` line carries the
   ``device_clock`` sample of its pull; when the device clock is more than
-  1 s off, the Inspector (Summary, Versions) and the header (``device
-  17:16:02 −75 min ⚠``, amber) show it.
+  1 s off, the Inspector (Summary, Versions) and the header (``dev
+  16:01:02 75 min behind``, amber; ``dev 17:16:02 in sync`` dimmed
+  otherwise) show it.
 - **Session-start baselines**: watches persist across sessions, pulled
   versions do not. When the file monitor starts, each watched file of the
   monitored app is pulled once (``trigger: session-start``; at most 50, the
   rest named in the log), so the first change has a version to diff
   against; an unchanged file only gets a ``checks.jsonl`` line.
-- **Marks and labels**: ``B`` (any lens) drops a mark (optional name; ⏎ on
-  an empty name keeps it unnamed, Esc drops none); a top-level label's start
-  (``#``) and end (``-``) are boundaries too (segments ``label 7 'x'`` and
-  ``after label 7 (no label)``). The table then shows only the activity
-  since that mark (★ rows with activity in it stay on top; the idle ★ rows
-  fold into one row, ``▸ ★ 21 watched · idle since mark 3``, that ⏎ or →
-  opens and ← folds); ``A`` toggles everything / since the last mark (4 or
+- **Notes and sections**: ``B`` (any lens) adds a Note (it asks for the
+  note's text, which it needs: an empty Enter keeps asking, Esc adds
+  none); a Section's start (``#``) and end (``-``) are boundaries too
+  (segments ``Section 7 'x'`` and ``after Section 7 (no section)``). The
+  table then shows only the activity since that note or section (★ rows
+  with activity in it stay on top; the idle ★ rows fold into one row,
+  ``▸ ★ 21 watched · idle since Note 3 'x'``, that ⏎ or → opens and ←
+  folds); ``A`` toggles everything / since the last note or section (4 or
   more never-touched ★ rows fold there too) and ``<``/``>`` step through
   the segments. The caption names the segment, the log and the Inspector's
-  Events tab show the marks as separator lines.
+  Events tab show the notes and sections as separator lines.
 - **Hidden and grouped rows**: by default only OS paths (``/proc/``,
   ``/system/``, ``/data/dalvik-cache/``, ``/data/app/`` ...) and rows with
   only OPEN/CLOSE are hidden -- never the app's own data, nor
@@ -354,7 +371,7 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   ``*`` makes the selected version the base the others are diffed against
   (``*`` on it again clears it). These keys work only while the Inspector
   is open and are bound nowhere else, so they never collide with the lens's
-  ``B`` / ``A`` / ``<`` / ``>`` mark keys; ``{`` ``}`` pair with ``[`` ``]``
+  ``B`` / ``A`` / ``<`` / ``>`` note and section keys; ``{`` ``}`` pair with ``[`` ``]``
   (tabs).
 
   *Content* is a first look inside the selected version's local copy:
@@ -489,7 +506,8 @@ colours.
 The **type bar** above the list lists every type present in its colour with
 its count (``tap 21 · typed 2 · screen 76 · request 445 · file 3,084``) and
 then the apps present: a click on a type hides / shows it, a click on an app
-shows only its lines (the ``pkg:`` filter; ``all`` for every app). ``t``
+shows only its lines (the ``pkg:`` filter; ``all`` for every app; the apps
+have their own second line). ``t``
 reaches it from the keyboard (←/→, ``Space``; ``t`` or ``Esc`` back). It
 combines with the ``/`` filter.
 
@@ -502,20 +520,25 @@ click on a section's header row folds the section into one row (``Section 3
 apply before folding.
 
 Separators mark what changes how to read the lines after them, in plain
-words: ``snapshot loaded · world 3`` (a world change: snapshot load, cold
-boot, a device clock that went backwards), ``clock epoch 2``, ``Section`` /
-``Sub-section`` / ``End section`` / ``Note``, ``recording started`` /
-``replay started`` runs, ``restarted`` (Sandroid), Tracking and intervention
-(e.g. accessibility helper) on/off. Clock samples, count lines and a quick
+words: ``snapshot 'clean' loaded · world 3`` (a world change: snapshot
+load, cold boot, a device clock that went backwards), ``clock epoch 2``,
+``Section`` / ``Sub-section … in Section 1`` / ``End section`` / ``Note``,
+``recording started`` / ``replay started`` / ``replay finished`` runs (a
+failed one says ``replay failed`` / ``recording failed`` in the error
+colour), ``restarted`` (Sandroid), Tracking and intervention (e.g.
+accessibility helper) on/off. No row starts with a symbol; a masked line
+says ``masked`` in its kind column, an uncertain device time shows as an
+amber time. Clock samples, count lines and a quick
 device reconnect are hidden until ``N``.
 
 ===================  ========================================================
 Key (Timeline lens)  Action
 ===================  ========================================================
-``Space``            Follow on / off: ``live`` sticks to the newest line; ↑
+``Space``            Live on / off: ``live`` sticks to the newest line; ↑
                      or a click above it stops that (recording goes on):
-                     ``scrolled back · 23 new below · End = live``. The
-                     Files and Network lenses follow the same way
+                     ``scrolled back · 23 new below · End = live`` in the
+                     caption title. The Files and Network lenses follow
+                     the same way
 ``End`` / ``Home``   Newest + follow / oldest (at the top: load older lines)
 ``t``                Type bar: ←/→, ``Space`` hides / shows a type or picks
                      an app

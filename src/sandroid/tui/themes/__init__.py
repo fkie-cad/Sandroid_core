@@ -63,9 +63,14 @@ PARENT_DIR = THEMES_DIR.parent
 #   band_focus         header band of the focused section
 #   stripe             zebra stripe of the longer tables (permissions, ...)
 #   user               Timeline lens: the type word of the user's own input
-#                      (tap, typed, key ...); those rows are tinted ``band``
+#                      (tap, typed, key ...); those rows are tinted with it
+#                      (13 % into ``bg``). >= 4.5:1 on ``bg``, the panel, the
+#                      cursor and that tint, >= 3:1 on ``cursor_focus``
 #   screen             Timeline lens: the type word of screen changes and
-#                      screenshots (a second accent, apart from ``user``)
+#                      screenshots (a second accent, apart from ``user``);
+#                      same contrast floors (without the tint)
+#   (``user`` / ``screen`` default to ``accent`` / ``title`` when a palette
+#   built elsewhere leaves them out.)
 #   cursor_keeps_colors  (bool, not a CSS variable) True: a cell keeps its
 #                      own color under the row cursor (``dangerous`` stays
 #                      amber) instead of taking the cursor text color.
@@ -114,9 +119,17 @@ class LensPalette:
     band: str
     band_focus: str
     stripe: str
-    user: str
-    screen: str
+    #: Default "" = ``accent`` / ``title`` (``__post_init__``), so a palette
+    #: built without them (another branch, an old caller) still works.
+    user: str = ""
+    screen: str = ""
     cursor_keeps_colors: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.user:
+            object.__setattr__(self, "user", self.accent)
+        if not self.screen:
+            object.__setattr__(self, "screen", self.title)
 
     def css_variables(self) -> dict[str, str]:
         """The tokens as Textual CSS variables (``{"lens-bg": "#050811", ...}``)."""
@@ -687,7 +700,7 @@ HIGH_CONTRAST_THEME = Theme(
         band_focus="#00006E",
         stripe="#0E0E0E",
         user="#00FFFF",
-        screen="#FF00FF",
+        screen="#FF66FF",  # >= 4.5:1 on the #333333 cursor too
     ),
 )
 
@@ -815,7 +828,7 @@ NORD_THEME = Theme(
         band_focus="#4C566A",
         stripe="#323845",
         user="#88C0D0",
-        screen="#B48EAD",
+        screen="#D8B4D0",  # lighter aurora purple: >= 4.5:1 on the panel
     ),
 )
 
@@ -944,8 +957,8 @@ SOLARIZED_THEME = Theme(
         band="#063440",
         band_focus="#0E4A58",
         stripe="#03303B",
-        user="#268BD2",
-        screen="#D33682",
+        user="#55A5E4",  # lighter than Solarized blue: >= 4.5:1 on its tint
+        screen="#EE7AB0",  # lighter magenta: >= 4.5:1 on bg / panel / cursor
     ),
 )
 

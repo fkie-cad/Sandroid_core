@@ -10,7 +10,7 @@ config modal, task registration, the paused-spawn guard, and dual-path cleanup
 — all on a worker thread so the UI never blocks.
 
 Mounted *hidden* inside the Network lens (like ``MitmproxyPanel``): the lens
-shows friTap's state in its caption (``friTap ●``) and on the friTap tab of its
+shows friTap's state in its caption (``friTap on``) and on the friTap tab of its
 "Capture status" Inspector page (``h`` or ``I``), built from
 :meth:`FriTapPanel.status_rows` and the bounded ``recent_lines`` tail. friTap's
 output itself reaches the ActivityLog drawer through ``MainScreen``'s generic
@@ -232,21 +232,26 @@ class FriTapPanel(Widget):
             return "stopped", ""
 
     def caption_token(self) -> str:
-        """The lens caption's friTap fragment ("" while cleanly stopped)."""
+        """The lens caption's friTap fragment ("" while cleanly stopped), in
+        words and theme colours.
+        """
+        from sandroid.tui.themes import lens_palette
+
+        pal = lens_palette()
         running = self.is_running()
         phase, _detail = self._phase()
         if phase == "starting" and not running:
-            return "[#facc15]friTap ◌ starting[/]"
+            return f"[{pal.warn}]friTap starting[/]"
         if phase == "stopping":
-            return "[#facc15]friTap ◌ stopping[/]"
+            return f"[{pal.warn}]friTap stopping[/]"
         if phase == "failed" and not running:
             # e.g. an agent stuck in a frozen app: not a clean stop.
-            return "[#fb7185]friTap ✗ failed[/]"
+            return f"[{pal.bad}]friTap failed[/]"
         if not running:
             return ""
         if phase == "hung":
-            return "[#fbbf24]friTap ▲ app not responding[/]"
-        return "[#4ade80]friTap ●[/]"
+            return f"[{pal.warn}]friTap app not responding[/]"
+        return f"[{pal.ok}]friTap on[/]"
 
     @staticmethod
     def _mark(ok: bool) -> str:

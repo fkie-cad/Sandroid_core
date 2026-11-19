@@ -208,17 +208,22 @@ def mask_line(line: dict) -> dict:
 
 
 def label_event_text(event: Any) -> str:
-    """``label 7 'x'`` / ``after label 7`` / ``mark 9 'x'`` for a LabelEvent."""
+    """``Section 7 'x'`` / ``Sub-section 8 'y' in Section 7`` / ``End
+    section 7 'x'`` / ``Note 9 'x'`` for a LabelEvent.
+    """
     kind = getattr(event, "kind", "point")
     number = getattr(event, "number", 0)
     name = getattr(event, "name", "") or ""
+    named = f" '{name}'" if name else ""
+    sub = bool(getattr(event, "depth", 0))
     if kind == "end":
-        return f"end of label {number}" + (f" '{name}'" if name else "")
-    word = "mark" if kind == "point" else "label"
-    text = f"{word} {number}" + (f" '{name}'" if name else "")
+        return f"End {'sub-section' if sub else 'section'} {number}{named}"
+    if kind == "point":
+        return f"Note {number}{named}"
+    text = f"{'Sub-section' if sub else 'Section'} {number}{named}"
     parent = getattr(event, "parent", None)
-    if kind == "start" and parent is not None:
-        text += f" (in {parent})"
+    if parent is not None:
+        text += f" in Section {parent}"
     return text
 
 
@@ -378,6 +383,8 @@ class Query:
 
 
 _TERM = re.compile(r"(-?)([a-z]+):(.+)")
+#: A ``pkg:`` / ``-pkg:`` term in the raw query text (the app filter).
+_PKG_TERM = re.compile(r"(?:^|(?<=\s))-?pkg:\S+")
 
 
 def parse_query(text: str) -> Query:
@@ -425,7 +432,8 @@ _ST_SPEC: dict[str, tuple[str, dict[str, Any]]] = {
     "warn": ("warn", {"bold": True}),
     "error": ("bad", {"bold": True}),
     "clock": ("muted", {}),
-    "masked": ("muted", {}),
+    "masked": ("muted", {"italic": True}),
+    "uncertain": ("warn", {}),
     "world": ("accent", {"bold": True}),
     "epoch": ("warn", {}),
     "label": ("title", {"bold": True}),
@@ -434,7 +442,7 @@ _ST_SPEC: dict[str, tuple[str, dict[str, Any]]] = {
     "tracking": ("ok", {"bold": True}),
     "intervention": ("warn", {"bold": True}),
     "note": ("dim", {"italic": True}),
-    "fold": ("label", {}),
+    "fold": ("muted", {}),
 }
 _ST: dict[str, Style] = {}
 _BG_SEL = Style()
@@ -454,11 +462,11 @@ _USER_INPUT: dict[str, Any] = {
     "word": "user",
     "fg": "text",
     "bold": True,
-    "bg": "band",
+    "tint": "user",
     "kind": False,
 }
 _TYPE_STYLE: dict[tuple[str, str] | str, dict[str, Any]] = {
-    # The user's own actions: the brightest rows, on the band tint.
+    # The user's own actions: the brightest rows, on a tint of their accent.
     ("input", "tap"): {"name": "tap", **_USER_INPUT},
     ("input", "long_press"): {"name": "long press", **_USER_INPUT},
     ("input", "swipe"): {"name": "swipe", **_USER_INPUT},
@@ -471,7 +479,7 @@ _TYPE_STYLE: dict[tuple[str, str] | str, dict[str, Any]] = {
     "screen": {"name": "screen", "word": "screen"},
     "shot": {"name": "screenshot", "word": "screen"},
     # Network: a muted type word.
-    ("net", "flow"): {"name": "request", "word": "muted", "kind": False},
+    ("net", "flow"): {"name": "request", "word": "muted", "fg": "muted", "kind": False},
     ("net", "tls-fail"): {"name": "TLS failed", "word": "warn", "kind": False},
     "net": {"name": "network", "word": "muted"},
     # Files: the whole row dimmed, except the evidence pulls and checks.
@@ -611,9 +619,44 @@ _RUN_WORD = {
 _LEAD_SYMBOL = re.compile(r"^[^\w'\"(\[#]+\s+")
 
 
+def _late_text(n: int) -> str:
+    """``1 late line above`` / ``3 late lines above``."""
+    return f"{n:,} late line{'s' if n != 1 else ''} above"
+
+
 def _plain_summary(text: str) -> str:
-    """``text`` without a leading symbol (separators read as plain words)."""
+    """``text`` without a leading symbol (rows read as plain words)."""
     return _LEAD_SYMBOL.sub("", text, count=1)
+
+
+#: What a run line's summary starts with once its symbol is gone
+#: (``REC · login``, ``Play done · 3 changed``): the plain word says it.
+_RUN_LEAD = re.compile(
+    r"^(?:REC(?: stopped)?|Play(?: done| ended)?|recording)(?:\s*·\s*|$)"
+)
+
+
+def _run_failed(row: Row) -> bool:
+    """A run line that reports a failure (data, or its level)."""
+    data = row.data or {}
+    if data.get("failed") or row.level in ("warn", "error"):
+        return True
+    error = data.get("error")
+    return bool(error) and error != "Replay cancelled"
+
+
+def _run_text(row: Row, summary: str) -> str:
+    """``recording started · login`` / ``replay finished · 3 changed`` /
+    ``replay failed · <error>``.
+    """
+    rest = _RUN_LEAD.sub("", summary, count=1).strip()
+    word = _RUN_WORD.get(row.kind, "run")
+    if _run_failed(row):
+        word = "recording failed" if row.kind.startswith("record") else "replay failed"
+        error = (row.data or {}).get("error")
+        if error and str(error) not in rest:
+            rest = f"{rest} · {error}" if rest else str(error)
+    return f"{word} · {rest}" if rest else word
 
 
 _sync_styles()
@@ -781,7 +824,8 @@ class TimelineView(ScrollView, can_focus=True, inherit_bindings=False):
 
 class TypeBar(Widget, can_focus=True):
     """The type bar: every type present with its count, in its colour (a
-    legend and a filter), then the apps present (one or all).
+    legend and a filter); below it, on its own line, the apps present (one
+    or all), so the app filter is always on screen and clickable.
 
     A click on a word hides / shows that type or picks that app. With the
     keyboard (``t`` in the lens): ←/→ move, Space or Enter toggles, ↓ / ``t``
@@ -799,7 +843,8 @@ class TypeBar(Widget, can_focus=True):
 
     DEFAULT_CSS = """
     TypeBar {
-        height: 1;
+        height: auto;
+        max-height: 2;
         padding: 0 1;
         background: $lens-panel;
     }
@@ -811,8 +856,8 @@ class TypeBar(Widget, can_focus=True):
         #: is ``type`` / ``app`` / ``all``.
         self.items: list[tuple[str, str, int, tuple[str, str] | None]] = []
         self.index = 0
-        #: ``(x0, x1, item index)`` of the last render.
-        self._hits: list[tuple[int, int, int]] = []
+        #: ``(line, x0, x1, item index)`` of the last render.
+        self._hits: list[tuple[int, int, int, int]] = []
 
     def _lens(self) -> TimelineLens | None:
         for node in self.ancestors:
@@ -830,21 +875,23 @@ class TypeBar(Widget, can_focus=True):
                     self.index = k
                     break
         self.index = max(0, min(self.index, len(self.items) - 1))
-        self.refresh()
+        self.refresh(layout=True)
 
     def render(self) -> Text:
         lens = self._lens()
         _sync_styles()
         pal = lens_palette()
-        text = Text(no_wrap=True, overflow="ellipsis")
+        lines = [
+            Text(no_wrap=True, overflow="ellipsis"),
+            Text(no_wrap=True, overflow="ellipsis"),
+        ]
         self._hits = []
         focused = self.has_focus
         sel_bg = Style(bgcolor=pal.cursor_focus)
-        first_app = True
         for k, (kind, word, count, key) in enumerate(self.items):
+            y = 0 if kind == "type" else 1
+            text = lines[y]
             if kind == "type":
-                if k:
-                    text.append(" · ", style=_ST["dim"])
                 hidden = lens is not None and word in lens.hidden_types
                 if hidden:
                     style = Style(color=pal.dim, strike=True)
@@ -852,13 +899,7 @@ class TypeBar(Widget, can_focus=True):
                 else:
                     style = type_word_style(*key) if key else _ST["src"]
                     count_style = _ST["dim"]
-                label = [(word, style), (f" {count:,}", count_style)]
             else:
-                if first_app:
-                    text.append("    app ", style=_ST["dim"])
-                    first_app = False
-                else:
-                    text.append(" · ", style=_ST["dim"])
                 picked = lens is not None and lens.app_pick == (
                     None if kind == "all" else word.lower()
                 )
@@ -867,29 +908,36 @@ class TypeBar(Widget, can_focus=True):
                     if picked
                     else Style(color=pal.muted)
                 )
-                label = [(word, style), (f" {count:,}", _ST["dim"])]
+                count_style = _ST["dim"]
+            if text.cell_len:
+                text.append(" · ", style=_ST["dim"])
+            elif y == 1:
+                text.append("app ", style=_ST["dim"])
             x0 = text.cell_len
-            for part, part_style in label:
+            for part, part_style in ((word, style), (f" {count:,}", count_style)):
                 if focused and k == self.index:
                     part_style = part_style + sel_bg
                 text.append(part, style=part_style)
-            self._hits.append((x0, text.cell_len, k))
+            self._hits.append((y, x0, text.cell_len, k))
         if not self.items:
-            text.append("no types yet", style=_ST["dim"])
-        return text
+            lines[0].append("no types yet", style=_ST["dim"])
+        if not lines[1].cell_len:
+            return lines[0]
+        return Text("\n").join(lines)
 
-    def item_at(self, x: int) -> int | None:
-        for x0, x1, k in self._hits:
-            if x0 <= x < x1:
+    def item_at(self, x: int, y: int = 0) -> int | None:
+        for line, x0, x1, k in self._hits:
+            if line == y and x0 <= x < x1:
                 return k
         return None
 
     def on_click(self, event) -> None:
         try:
-            x = event.get_content_offset(self).x
+            offset = event.get_content_offset(self)
+            x, y = offset.x, offset.y
         except Exception:
-            x = getattr(event, "x", 0)
-        k = self.item_at(int(x)) if x is not None else None
+            x, y = getattr(event, "x", 0), getattr(event, "y", 0)
+        k = self.item_at(int(x), int(y)) if x is not None and y is not None else None
         lens = self._lens()
         if k is None or lens is None:
             return
@@ -926,8 +974,8 @@ class TimelineLens(Vertical):
     can_focus = True
 
     BINDINGS = [
-        Binding("space", "toggle_follow", "Follow", key_display="␣"),
-        Binding("end", "newest", "Newest + follow", show=False),
+        Binding("space", "toggle_follow", "Live", key_display="␣"),
+        Binding("end", "newest", "Newest row, live", show=False),
         Binding("home", "oldest", "Oldest / load more", show=False),
         Binding("slash", "filter", "Filter", show=False),
         Binding("t", "types", "Type bar: hide / show types, pick an app", show=False),
@@ -1073,7 +1121,10 @@ class TimelineLens(Vertical):
             return super().focus(scroll_visible)
 
     def _main_screen(self):
-        screen = getattr(self, "screen", None)
+        try:
+            screen = self.screen
+        except Exception:  # not mounted (NoScreen)
+            return None
         return screen if hasattr(screen, "set_lens_caption") else None
 
     # -- public state (tests, other lenses) ------------------------------------
@@ -1431,10 +1482,19 @@ class TimelineLens(Vertical):
             self._strips.clear()
             self._view_seq_cache = None
         else:
+            old_last = self._rows[-1].key
             for r in new:
                 self._insert_one(r)
             self._strips.clear()
             self._view_seq_cache = None
+            if not self._follow:
+                self._fs.added(
+                    sum(
+                        1
+                        for r in new
+                        if r.key > old_last and self._view_index(r.seq) is not None
+                    )
+                )
             if top_row is not None and not self._follow:
                 before = self._view_index(top_row.seq)
                 late = sum(
@@ -1454,6 +1514,8 @@ class TimelineLens(Vertical):
             self._cursor = max(0, len(self._view) - 1)
             self._new_below = 0
         self._sync_view(scroll_to_cursor=self._follow, end=self._follow)
+        if self._follow and self.is_mounted:
+            self._follow_inspector()  # an open Inspector follows the newest
 
     def _insert_one(self, row: Row) -> None:
         """Bisect-insert one late row and patch the view in place.
@@ -1940,7 +2002,9 @@ class TimelineLens(Vertical):
         if not visible and not next_changed:
             return
         vis = self._vis
-        if not vis:
+        if not vis or self._rows[pos].src == "label":
+            # A late section row (# / + write theirs at the key press, after
+            # the name prompt) moves a section's ends: regroup it all.
             self._build_display()
             return
         before = bisect.bisect_left(vis, pos) - 1
@@ -2055,19 +2119,22 @@ class TimelineLens(Vertical):
             else:
                 stats = None
         if stats is None:
-            stats = {"a": {}, "b": {}}
+            stats = {"a": {}, "b": {}, "n": {"lines": 0}}
             fold.stats_n = 0
         rows, vis = self._rows, self._vis
-        a, b = stats["a"], stats["b"]
+        a, b, lines = stats["a"], stats["b"], stats["n"]
         for j in range(start, hi + 1):
-            row = rows[vis[j]]
+            i = vis[j]
+            row = rows[i]
             if fold.kind == "burst":
                 a[row.kind] = a.get(row.kind, 0) + 1
                 folder = _folder_of(row.summary)
                 b[folder] = b.get(folder, 0) + 1
-            elif not row.sep:
+            elif not row.sep and not self._epoch_sep(i):
+                # A section counts its lines, not its separators.
                 word = type_word(row.src, row.kind)
                 a[word] = a.get(word, 0) + 1
+                lines["lines"] += 1
         fold.stats = stats
         fold.stats_n = hi - first + 1
         fold.stats_last = fold.last
@@ -2107,10 +2174,13 @@ class TimelineLens(Vertical):
         )
         word = "Sub-section" if span and span[2] else "Section"
         name = f" '{keys[2]}'" if keys[2] else ""
-        types = ", ".join(_plural(w, n) for w, n in ranked[:3])
-        if len(ranked) > 3:
+        # The user's actions first (the type bar's order), not the biggest.
+        ordered = sorted(stats.get("a", {}).items(), key=_type_order)
+        types = ", ".join(_plural(w, n) for w, n in ordered[:3])
+        if len(ordered) > 3:
             types += " …"
-        lines = f"{fold.n:,} line{'s' if fold.n != 1 else ''}"
+        n = stats.get("n", {}).get("lines", 0)
+        lines = f"{n:,} line{'s' if n != 1 else ''}"
         text = f"{word} {fold.number}{name} · {dur} · {lines}"
         return text + (f" ({types})" if types else "")
 
@@ -2316,16 +2386,17 @@ class TimelineLens(Vertical):
         return self._rows[~v].t
 
     def _gutter(self, row: Row) -> tuple[str, str]:
-        """The flag column: ``!`` warn / error, ``▒`` masked, ``~`` clock."""
+        """The flag column: ``!`` for a warning / error line (an uncertain
+        device time colours the time cell, a masked line says "masked").
+        """
         if row.level == "error":
             return "!", "error"
         if row.level == "warn":
             return "!", "warn"
-        if row.sensitive and should_mask_ui() and row.seq != self._revealed:
-            return "▒", "masked"
-        if "~" in row.flags:
-            return "~", "clock"
         return " ", "gutter"
+
+    def _masked(self, row: Row) -> bool:
+        return row.sensitive and should_mask_ui() and row.seq != self._revealed
 
     def _render_row(self, vi: int, width: int, selected: bool) -> Strip:
         index = self._view[vi]
@@ -2347,12 +2418,17 @@ class TimelineLens(Vertical):
         # Fixed columns: up to 3 label-depth bars, then the flag, then a gap.
         segments.append(Segment(("│" * depth).ljust(3), st("gutter")))
         segments.append(Segment(flag + " ", st(flag_style)))
-        segments.append(Segment(_clock(row.t) + " ", st("time")))
+        # An uncertain device time (converted, or a large error) colours the
+        # time cell instead of a symbol.
+        time_style = st("uncertain") if "~" in row.flags else st("time")
+        segments.append(Segment(_clock(row.t) + " ", time_style))
         used = 4 + 1 + 13
         sep = row.sep or ("epoch" if self._epoch_sep(index) else "")
         if sep:
             text = self._separator_text(row, sep)
             body = _fit(text, max(0, width - used))
+            if sep == "run" and _run_failed(row):
+                sep = "error"
             segments.append(Segment(body, st(sep)))
             return Strip(segments).adjust_cell_length(width, bg)
         if width >= 80:
@@ -2370,12 +2446,17 @@ class TimelineLens(Vertical):
             )
         )
         kind = "" if spec.get("kind") is False else row.kind.replace("_", " ")
-        segments.append(Segment(_fit(kind, 11) + " ", st("kind")))
+        masked = self._masked(row)
+        if masked:
+            kind = "masked"
+        segments.append(
+            Segment(_fit(kind, 11) + " ", st("masked") if masked else st("kind"))
+        )
         used += 23
         if width >= 100:
             segments.append(Segment(_fit(row.actor, 6) + " ", st("actor")))
             used += 7
-        summary = row.summary
+        summary = _plain_summary(row.summary)
         if row.seq in self._open_members:
             summary = "  " + summary
         if row.n:
@@ -2430,17 +2511,15 @@ class TimelineLens(Vertical):
     def _separator_text(self, row: Row, sep: str) -> str:
         summary = _plain_summary(row.summary)
         if sep == "world":
-            what = {
-                "snapshot": "snapshot loaded",
-                "device": "device booted",
-            }.get(row.src, "world changed")
-            return f"{what} · world {row.world} · {summary}"
+            if not summary:
+                summary = "device booted" if row.src == "device" else "world changed"
+            return f"{summary} · world {row.world}"
         if sep == "epoch":
             return f"clock epoch {row.epoch} · {summary}"
         if sep == "label":
             return self._label_text(row, summary)
         if sep == "run":
-            return f"{_RUN_WORD.get(row.kind, 'run')} · {summary}"
+            return _run_text(row, summary)
         if sep == "resume":
             return f"restarted · {summary}"
         if sep == "tracking":
@@ -2471,7 +2550,7 @@ class TimelineLens(Vertical):
             took = f" · {dur:.1f} s" if isinstance(dur, (int, float)) else ""
             return f"{indent}End {word.lower()} {number}{named}{took}"
         parent = data.get("parent")
-        inside = f" in {parent}" if depth and parent is not None else ""
+        inside = f" in Section {parent}" if depth and parent is not None else ""
         return f"{indent}{word} {number}{named}{inside}"
 
     # -- view sync, cursor -------------------------------------------------------------
@@ -2615,13 +2694,8 @@ class TimelineLens(Vertical):
         if banner:
             text.append(f"{banner}  ", style=Style(color=pal.warn, bold=True))
         text.append(self.chip_text())
-        follow = self._fs.text
-        text.append(
-            f"   {follow}",
-            style=Style(color=pal.ok if self._follow else pal.warn),
-        )
         if self._late_above:
-            text.append(f"   {self._late_above} late lines above", style=_ST["clock"])
+            text.append(f"   {_late_text(self._late_above)}", style=_ST["clock"])
         chips.update(text)
         self._update_type_bar()
 
@@ -2665,15 +2739,26 @@ class TimelineLens(Vertical):
         self._refilter()
 
     def set_app(self, pkg: str | None) -> None:
-        """Only ``pkg``'s rows (None: every app), as the query's ``pkg:``."""
-        try:
-            tokens = shlex.split(self._query.text)
-        except ValueError:
-            tokens = self._query.text.split()
-        kept = [t for t in tokens if not re.fullmatch(r"-?pkg:.*", t)]
+        """Only ``pkg``'s rows (None: every app), as the query's ``pkg:``.
+
+        Only the ``pkg:`` / ``-pkg:`` terms are rewritten; the rest of the
+        query stays as typed (an unbalanced quote included). An open ``/``
+        input shows the new query.
+        """
+        text = _PKG_TERM.sub(" ", self._query.text).strip()
+        text = re.sub(r"[ ]{2,}", " ", text) if '"' not in text else text
         if pkg:
-            kept.append(f"pkg:{pkg}")
-        self.set_filter(shlex.join(kept) if kept else "")
+            term = f"pkg:{pkg}"
+            text = f"{text} {term}" if text else term
+        try:
+            field = self.query_one("#tl-filter", _TLInput)
+        except Exception:
+            field = None
+        if field is not None and field.has_class("-shown"):
+            with self.prevent(Input.Changed):
+                field.value = text
+            field.cursor_position = len(text)
+        self.set_filter(text)
 
     def caption(self) -> tuple[str, str]:
         if self._review_run is not None:
@@ -2682,10 +2767,10 @@ class TimelineLens(Vertical):
             title = self._fs.text
         info = (
             f"{len(self._vis):,} of {len(self._rows):,} lines · Enter inspects "
-            "or opens a fold · z folds the section · t types"
+            "or opens a fold · z folds the section · click a type to hide it"
         )
         if self._late_above:
-            info = f"{self._late_above} late lines above · " + info
+            info = f"{_late_text(self._late_above)} · " + info
         return title, info
 
     def _update_caption(self) -> None:
@@ -3033,6 +3118,8 @@ class TimelineLens(Vertical):
             return bool(select(str(ref["run"]))) if select else False
         if row.ref_of is not None:
             if self._select_seq(row.ref_of, expand=True):
+                if self._cursor < len(self._view) - 1:
+                    self.pause_follow()  # the next line must not move it
                 return True
             if row.ref_of in self._by_seq:
                 self.app.notify("That line is hidden by the filter (Esc).", timeout=3)

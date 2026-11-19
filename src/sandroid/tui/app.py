@@ -1449,7 +1449,7 @@ class SandroidTUI(App):
         else:
             prompt = InputModal(
                 title=title,
-                placeholder="name (optional) · Enter keeps · Esc cancels",
+                placeholder="name (optional) · Enter starts it · Esc cancels",
             )
         self.push_screen(prompt, done)
 

@@ -1379,16 +1379,13 @@ class MainScreen(Screen):
 
         boundary = event.kind == "point" or getattr(event, "depth", 0) == 0
         mark = Mark.from_event(event)
-        self._log_label(
-            mark.label() if event.kind == "point" else label_event_text(event),
-            datetime.fromtimestamp(float(event.t)),
-            icon={"start": "▶ ", "end": "■ "}.get(event.kind, ""),
-        )
+        self._log_label(label_event_text(event), datetime.fromtimestamp(float(event.t)))
         self._post_marks(mark if boundary else None)
         self._refresh_label_note()
         return mark
 
-    def _log_label(self, text: str, when, icon: str = "") -> None:
+    def _log_label(self, text: str, when) -> None:
+        """``Section 7 'x' · 10:42:07`` in the log (bold, the notice colour)."""
         try:
             from rich.markup import escape
 
@@ -1396,7 +1393,7 @@ class MainScreen(Screen):
 
             color = fixed_color("notice")
             self.query_one("#activity-log", ActivityLog).write(
-                f"[bold {color}]── {icon}{escape(text)} · {when:%H:%M:%S} ──[/]"
+                f"[bold {color}]{escape(text)} · {when:%H:%M:%S}[/]"
             )
         except Exception:
             pass
