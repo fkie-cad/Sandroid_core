@@ -29,6 +29,13 @@ class FakePrivacy:
         self.revision = 0
         #: tags_for_flow calls (tests check rows look up once).
         self.tag_calls = 0
+        #: Device paths with kept versions (``has_versions``).
+        self.version_paths: set[str] = set()
+
+    def has_versions(self, device_path) -> bool:
+        from sandroid.core.adb_utils import canonical_device_path
+
+        return canonical_device_path(device_path) in self.version_paths
 
     def has_hits(self) -> bool:
         return bool(self._hits)

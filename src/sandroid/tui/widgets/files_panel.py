@@ -1829,9 +1829,15 @@ class FilesPanel(Widget):
         self._post(self._refresh_inspector)
 
     def _unpulled_text(self, row: _Row) -> Text | None:
-        """Why a row has no versions (not watched / a pattern), else None."""
+        """Why a row has no versions (not watched / a pattern), else None.
+
+        A file with kept versions shows them whether or not it is starred:
+        the identity profile's auto-watch pulls unstarred app files.
+        """
         wl = self._watchlist_or_none()
         if wl is not None and row.key in wl.rows:
+            return None
+        if not row.pattern and self._has_versions(row.key):
             return None
         if row.pattern:
             return Text("Pull a matching file to see its versions.", style=_DIM)
@@ -1839,6 +1845,20 @@ class FilesPanel(Widget):
             ("Watch (", _DIM), ("w", "bold"), (") and pull (", _DIM),
             ("u", "bold"), (") to diff this file — every pull is kept as a version.", _DIM),
         )  # fmt: skip
+
+    @staticmethod
+    def _has_versions(path: str) -> bool:
+        """``path`` has kept versions this session (no I/O: the privacy
+        scan's in-memory index of pulled files).
+        """
+        from .network_panel import privacy_service
+
+        service = privacy_service()
+        check = getattr(service, "has_versions", None)
+        try:
+            return bool(check is not None and check(path))
+        except Exception:
+            return False
 
     def _versions_tab(self, row: _Row) -> list:
         reason = self._unpulled_text(row)

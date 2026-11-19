@@ -933,3 +933,24 @@ def test_attach_identity_reads_the_markers_off_the_calling_thread(svc, monkeypat
     assert calls[0] == (False, me)
     assert calls[1][0] is True
     assert calls[1][1] != me
+
+
+def test_has_versions_knows_pulled_files_without_io(svc, folder, flow_dir):
+    """The Files lens asks whether an unstarred file has kept versions."""
+    assert not svc.has_versions(PREFS)
+    v1 = _version(PREFS, 1, {"ids.xml": f"<string>{AD_ID}</string>".encode()})
+    svc.submit_version(PREFS, v1, 1)  # no markers yet: still a pulled file
+    assert svc.has_versions(PREFS.replace("/data/data/", "/data/user/0/"))
+    svc.set_markers(FP, MARKERS)
+    svc.submit_version(PREFS, v1, 1)
+    assert svc.flush()
+    # A restart reads the coverage ledger of the session.
+    again = ps.PrivacyScanService(
+        folder_fn=lambda: folder, flow_dir_fn=lambda: flow_dir
+    )
+    try:
+        again.load_session(folder)
+        assert wait_for(lambda: again.has_versions(PREFS))
+        assert not again.has_versions("/data/data/com.fittrack.app/other.xml")
+    finally:
+        again.close()

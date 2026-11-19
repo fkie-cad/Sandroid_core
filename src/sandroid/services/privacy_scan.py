@@ -773,6 +773,9 @@ class PrivacyScanService:
         self._by_flow: dict[str, list[HitRecord]] = {}
         self._by_file: dict[str, list[HitRecord]] = {}
         self._covered: set[tuple[str, str, int]] = set()
+        #: Canonical device paths with kept versions in this session (pulls
+        #: submitted here, and the coverage ledger of a loaded session).
+        self._version_paths: set[str] = set()
         self._seen: set[tuple] = set()
         self._emitted: set[tuple] = set()
         self._version_sets: dict[tuple[str, str, str], frozenset] = {}
@@ -955,6 +958,8 @@ class PrivacyScanService:
         package: str | None = None,
     ) -> None:
         """Queue a kept version (main file + ``-wal``/``-journal``)."""
+        with self._lock:
+            self._version_paths.add(_canonical(device_path))
         snap = self._snapshot()
         if snap is None:
             return
@@ -1109,6 +1114,13 @@ class PrivacyScanService:
         with self._lock:
             return run_hits(self._hits, scope)
 
+    def has_versions(self, device_path: str) -> bool:
+        """``device_path`` (any alias) has kept versions in the loaded
+        session (a pull this session, or one in its coverage ledger); no I/O.
+        """
+        with self._lock:
+            return _canonical(device_path) in self._version_paths
+
     def has_hits(self) -> bool:
         """The loaded session has any hit record (cheap: no copy, no lock)."""
         return bool(self._hits)
@@ -1187,6 +1199,7 @@ class PrivacyScanService:
         self._by_flow = {}
         self._by_file = {}
         self._covered = set()
+        self._version_paths = set()
         self._seen = set()
         self._emitted = set()
         self._version_sets = {}
@@ -1399,9 +1412,13 @@ class PrivacyScanService:
             if (rec := HitRecord.from_json(line)) is not None
         ]
         covered = set()
+        version_paths = set()
         for line in _read_jsonl(privacy / COVERAGE_FILE):
-            if line.get("skip") in (None, "unscannable") and line.get("key"):
-                covered.add((str(line["key"]), str(line.get("fp")), line.get("engine")))
+            key = str(line.get("key") or "")
+            if key.startswith("file:") and "@" in key:
+                version_paths.add(_canonical(key[5:].rpartition("@")[0]))
+            if line.get("skip") in (None, "unscannable") and key:
+                covered.add((key, str(line.get("fp")), line.get("engine")))
         with self._lock:
             if self._folder is not None and folder != self._folder:
                 self._flow_dir = None  # the old session's mitmproxy folder
@@ -1419,6 +1436,7 @@ class PrivacyScanService:
             self._version_sets = {}
             self._file_last = {}
             self._covered = covered
+            self._version_paths |= version_paths
             for rec in hits:
                 self._index(rec)
                 key = _novelty_key(rec)
@@ -2203,6 +2221,15 @@ def current_timeline_folder() -> Path | None:
         return timeline.timeline_folder()
     except Exception:
         return None
+
+
+def _canonical(device_path: str) -> str:
+    try:
+        from sandroid.core.adb_utils import canonical_device_path
+
+        return canonical_device_path(device_path)
+    except Exception:
+        return device_path
 
 
 def _novelty_key(rec: HitRecord) -> tuple:
