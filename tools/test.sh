@@ -5,12 +5,18 @@
 #   tools/test.sh full                 merge gate: parallel pass without perf and
 #                                      quarantine tests, then a serial perf pass
 #   tools/test.sh <path|nodeid>...     just these, serially (fast to start)
+#   tools/test.sh --update-slow [JUNIT...]
+#                                      rewrite tests/slow_tests.txt (the `slow`
+#                                      tier) from the newest full run's parallel
+#                                      pass: tests over SANDROID_TEST_SLOW_S
+#                                      seconds (default 1.0); runs no tests
 #
 # Options (before or after the mode):
 #   -n N        pytest-xdist workers (default 4 for quick/full, 1 for paths).
 #               N is a request: the run takes what is free of the host-wide
 #               worker budget (SANDROID_TEST_SLOTS, default 8) and never
-#               fewer than 1. Do not use "auto".
+#               fewer than 1. "auto" (one per CPU, no slot budget) is
+#               accepted only when CI is set (CI runners are not shared).
 #   -- ARGS     everything after -- goes to pytest unchanged
 #
 # Exit codes: 0 pass, 1 fail, 3 flaky (failed, then passed when the failed
@@ -25,11 +31,16 @@
 # TMPDIR, ANDROID_HOME pointing nowhere and stub adb/emulator/frida/... first
 # on PATH. Bytecode is cached per checkout (PYTHONPYCACHEPREFIX), which cuts
 # collection from ~45 s to ~10 s. JUnit XML and logs: .test-results/latest/.
+# With CI set, bytecode goes to the usual __pycache__ dirs instead (the venv
+# is fresh there and uv compiles it, UV_COMPILE_BYTECODE=1), and with
+# GITHUB_STEP_SUMMARY set the summary is also appended to that file.
 #
 # Environment: SANDROID_TEST_CACHE (default ~/.cache/sandroid-tests),
 # SANDROID_TEST_PYTHON (default python3.13), SANDROID_TEST_SLOTS (8),
 # SANDROID_TEST_SLOT_WAIT (seconds to wait for the full -n before starting
-# with fewer, default 20).
+# with fewer, default 20), SANDROID_TEST_SLOW_S (--update-slow threshold).
+# SANDROID_TESTS_STRICT_DEVICE and SANDROID_TESTS_BLOCKED_LOG are passed on
+# to tests/conftest.py's device guard.
 #
 # Plain bash 3.2 (macOS) compatible; no flock needed.
 
@@ -54,22 +65,28 @@ while [ $# -gt 0 ]; do
         -n) [ $# -ge 2 ] || die "-n needs a number"; NREQ=$2; shift 2 ;;
         -n*) NREQ=${1#-n}; shift ;;
         --) shift; PASS=("$@"); break ;;
-        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
-        quick|full)
+        -h|--help) sed -n '2,/^# Plain bash/p' "$0"; exit 0 ;;
+        quick|full|--update-slow)
             [ -z "$MODE" ] || die "give one mode"
-            MODE=$1; shift ;;
+            MODE=${1#--}; shift ;;
         -*) die "unknown option $1 (pytest options go after --)" ;;
         *) TARGETS+=("$1"); shift ;;
     esac
 done
-if [ ${#TARGETS[@]} -gt 0 ]; then
+if [ ${#TARGETS[@]} -gt 0 ] && [ "$MODE" != update-slow ]; then
     [ -z "$MODE" ] || die "give either a mode or paths, not both"
     MODE=paths
 fi
 MODE=${MODE:-quick}
+# CI runners are not shared: no host-wide slot budget there.
+IN_CI=""
+[ -n "${CI:-}" ] && [ "${CI:-}" != false ] && IN_CI=1
 case $NREQ in
     "") if [ "$MODE" = paths ]; then NREQ=1; else NREQ=4; fi ;;
-    *[!0-9]*|0) die "-n takes a positive number (no 'auto': the host is shared)" ;;
+    auto)
+        [ -n "$IN_CI" ] || die "-n auto only with CI set (this host's workers are shared; give a number)"
+        NREQ=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2) ;;
+    *[!0-9]*|0) die "-n takes a positive number (or 'auto' with CI set)" ;;
 esac
 
 # ------------------------------------------------------------------ helpers
@@ -116,6 +133,51 @@ find_python() {
 }
 
 PY=$(find_python) || die "Python 3.13 not found (set SANDROID_TEST_PYTHON)"
+
+# ------------------------------------------------------ --update-slow mode
+if [ "$MODE" = update-slow ]; then
+    if [ ${#TARGETS[@]} -eq 0 ]; then
+        # Newest full run's parallel pass (run dirs sort by start time).
+        SRC=$(ls -1d "$WT"/.test-results/2*-*/junit-parallel.xml 2>/dev/null | sort | tail -n 1)
+        [ -n "$SRC" ] || die "no full run in $WT/.test-results; run tools/test.sh full first"
+        TARGETS=("$SRC")
+    fi
+    "$PY" -I - "$WT/tests/slow_tests.txt" "${SANDROID_TEST_SLOW_S:-1.0}" \
+        "${TARGETS[@]}" <<'EOF'
+import os, sys, xml.etree.ElementTree as ET
+
+out, threshold, files = sys.argv[1], float(sys.argv[2]), sys.argv[3:]
+
+def nodeid(tc):  # as in summarize() below
+    f, cls, name = tc.get("file") or "", tc.get("classname") or "", tc.get("name")
+    mod = f[:-3].replace("/", ".") if f.endswith(".py") else ""
+    rest = cls[len(mod) + 1:] if mod and cls.startswith(mod + ".") else ""
+    parts = [f or cls] + (rest.split(".") if rest else []) + [name]
+    return "::".join(p for p in parts if p)
+
+slow, total = {}, 0
+for path in files:
+    for tc in ET.parse(path).getroot().iter("testcase"):
+        total += 1
+        t = float(tc.get("time") or 0)
+        if t > threshold and "::" in nodeid(tc):
+            slow[nodeid(tc)] = max(t, slow.get(nodeid(tc), 0.0))
+if not total:
+    sys.exit(f"tools/test.sh: no test cases in {', '.join(files)}")
+srcs = ", ".join(os.path.relpath(p, os.path.dirname(os.path.dirname(out))) for p in files)
+with open(out, "w", encoding="utf-8") as fh:
+    fh.write(
+        "# The `slow` tier: tests over %.1f s in the parallel pass of a\n"
+        "# `tools/test.sh full` run. `tools/test.sh quick` skips them; tests/conftest.py\n"
+        "# marks them. Regenerate with `tools/test.sh --update-slow` after a full run\n"
+        "# (do not edit by hand). Source: %s\n" % (threshold, srcs)
+    )
+    fh.writelines(f"{n}\n" for n in sorted(slow))
+print(f"   {len(slow)} of {total} tests over {threshold:g} s -> {out}")
+EOF
+    exit $?
+fi
+
 command -v uv >/dev/null 2>&1 || die "uv not found (https://docs.astral.sh/uv/)"
 [ -f "$CONSTRAINTS" ] || die "missing $CONSTRAINTS"
 
@@ -186,6 +248,10 @@ release_slots() {
 
 acquire_slots() {  # $1 = wanted; takes up to that many, at least one
     local want=$1 start=$SECONDS told=0 i
+    if [ -n "$IN_CI" ]; then  # not shared: take what was asked for
+        NHELD=$want
+        return 0
+    fi
     [ "$want" -le "$MAX_SLOTS" ] || want=$MAX_SLOTS
     while :; do
         i=1
@@ -259,6 +325,14 @@ ls -1d "$RESULTS_ROOT"/2*-* 2>/dev/null | sort | sed -e :a -e '$d;N;2,10ba' -e '
 
 PYC="$CACHE/pyc/$(printf '%s' "$WT" | hash16)"
 case $(uname -s) in Darwin) LOCALE=en_US.UTF-8 ;; *) LOCALE=C.UTF-8 ;; esac
+EXTRA_ENV=()
+# In CI the prefix would start empty and hide the bytecode uv compiled into
+# the fresh venv; there the checkout's __pycache__ dirs are fine.
+[ -n "$IN_CI" ] || EXTRA_ENV+=(PYTHONPYCACHEPREFIX="$PYC")
+for var in SANDROID_TESTS_STRICT_DEVICE SANDROID_TESTS_BLOCKED_LOG; do
+    eval "val=\${$var:-}"
+    [ -z "$val" ] || EXTRA_ENV+=("$var=$val")
+done
 
 pytest_run() {  # $1 = log name; rest = pytest args. Tees the output; returns rc.
     local name=$1
@@ -270,8 +344,8 @@ pytest_run() {  # $1 = log name; rest = pytest args. Tees the output; returns rc
                 PATH="$RUN/stubs:$RUN/py/bin:$VENV/bin:/usr/bin:/bin" \
                 TERM=xterm-256color LANG=$LOCALE LC_ALL=$LOCALE PYTHONUTF8=1 \
                 ANDROID_HOME=/nonexistent ANDROID_SDK_ROOT=/nonexistent \
-                PYTHONPATH="$WT/src" PYTHONPYCACHEPREFIX="$PYC" \
-                SDROID_STUB_LOG="$OUT/stub-calls.log" \
+                PYTHONPATH="$WT/src" SDROID_STUB_LOG="$OUT/stub-calls.log" \
+                ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
                 "$RUN/py/bin/python" -m pytest -c "$WT/pyproject.toml" --rootdir "$WT" \
                 -p no:cacheprovider -o junit_family=xunit1 \
                 --junitxml="$OUT/junit-$name.xml" "$@"
@@ -383,7 +457,7 @@ esac
 
 echo
 say "summary ($MODE, $N worker(s), $((SECONDS - START)) s wall)"
-summarize "${JUNITS[@]}"
+summarize "${JUNITS[@]}" | tee "$OUT/summary.txt"
 SUMRC=$?
 FINAL=$RC
 if [ $RC -eq 1 ] && [ $SUMRC -eq 0 ] && [ -s "$OUT/failed.txt" ]; then
@@ -423,4 +497,25 @@ if [ -s "$OUT/stub-calls.log" ]; then
     say "$(wc -l <"$OUT/stub-calls.log" | tr -d ' ') call(s) reached the stub adb/emulator/frida (see $OUT/stub-calls.log)"
 fi
 say "results: $OUT  ->  exit $FINAL"
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+        case $FINAL in 0) verdict=passed ;; 3) verdict="flaky (exit 3)" ;; *) verdict="FAILED (exit $FINAL)" ;; esac
+        echo "### tools/test.sh $MODE: $verdict"
+        echo
+        echo "Python $PYVER, $N worker(s), $((SECONDS - START)) s wall"
+        echo
+        echo '```'
+        cat "$OUT/summary.txt" 2>/dev/null
+        if [ "$FINAL" -eq 3 ]; then
+            echo
+            echo "flaky (failed in the run, passed when rerun alone):"
+            sed 's/^/  /' "$OUT/failed-first.txt"
+        elif [ -f "$OUT/failed-first.txt" ]; then
+            echo
+            echo "still failing when rerun alone:"
+            sed 's/^/  /' "$OUT/failed.txt"
+        fi
+        echo '```'
+    } >>"$GITHUB_STEP_SUMMARY"
+fi
 exit $FINAL

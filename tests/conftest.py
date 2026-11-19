@@ -42,8 +42,14 @@ every run its own) and removed when the session ends.
 
 The session also refuses to start when ``import sandroid`` resolves outside
 this checkout's ``src/`` (a venv bound to another worktree would otherwise
-silently test that worktree's code), and every test restores the
-AndroidFridaManager class attributes Sandroid patches at runtime.
+silently test that worktree's code), every test restores the
+AndroidFridaManager class attributes Sandroid patches at runtime, and every
+test starts and ends with the process-wide singletons reset (service
+instances, the cached config, the TUI controller registry).
+
+Tests listed in ``tests/slow_tests.txt`` (node IDs, regenerated with
+``tools/test.sh --update-slow``) get the ``slow`` marker, which
+``tools/test.sh quick`` deselects.
 
 Run the suite with ``tools/test.sh`` (see its header for modes).
 """
@@ -146,6 +152,10 @@ _afm_pristine: tuple[type, dict[str, Any]] | None = None
 
 #: Where this checkout's sources live; ``import sandroid`` must resolve here.
 _SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+
+#: Node IDs of tests over 1 s in the last ``full`` run's parallel pass (one
+#: per line, ``#`` comments); ``tools/test.sh --update-slow`` rewrites it.
+_SLOW_LIST = Path(__file__).with_name("slow_tests.txt")
 
 
 # --------------------------------------------------------------------------
@@ -380,6 +390,59 @@ def _restore_afm_class():
             delattr(afm_cls, attr)
 
 
+#: The config ``get_config()`` loads in the hermetic session (loaded once).
+_pristine_config: Any = None
+
+
+def _reset_module_singletons(*, fresh_config: bool) -> None:
+    """Drop the process-wide singletons a test may have created or replaced.
+
+    Only modules that are already imported are touched (importing them here
+    would cost time and run their import-time code for every test). With
+    ``fresh_config`` the config singleton becomes a copy of the session's
+    pristine config instead of being cleared: a test then never pays for (or
+    races with) a lazy config load in the middle of its own timing.
+    """
+    global _pristine_config
+    services = sys.modules.get("sandroid.services")
+    if services is not None:
+        services.reset_services()
+    registry = sys.modules.get("sandroid.services.service_registry")
+    if registry is not None:
+        registry.ServiceRegistry.reset()
+    config_mod = sys.modules.get("sandroid.config")
+    if config_mod is not None:
+        config_mod.reset_config_cache()
+        if fresh_config:
+            if _pristine_config is None:
+                _pristine_config = config_mod.get_config().model_copy(deep=True)
+            config_mod.set_config(_pristine_config.model_copy(deep=True))
+    controllers = sys.modules.get("sandroid.tui.controller_registry")
+    if controllers is not None:
+        controllers._monitor_controller = None
+        controllers._recording_controller = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_singletons():
+    """Every test starts with fresh singletons and leaves none behind.
+
+    ``sandroid.services``' factory cache and ``ServiceRegistry``, the
+    ``get_config()`` cache (``sandroid.config``) and the TUI controller
+    registry are module globals: whatever one test leaves there (a service
+    built against its mocks, a config it changed or pointed at its
+    ``tmp_path``, an app's controller) would otherwise be what the next test
+    on the same xdist worker gets. Before the test the services and
+    controllers are cleared and the config is a fresh copy of the default
+    one; this also holds when a ``monkeypatch`` undo that runs after this
+    fixture's teardown puts an older value back. After the test everything
+    is cleared.
+    """
+    _reset_module_singletons(fresh_config=True)
+    yield
+    _reset_module_singletons(fresh_config=False)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _sandroid_tmp_cwd(request):
     """Run the session from a scratch directory (``./results`` etc. land there)."""
@@ -488,7 +551,22 @@ def timeline_sink(tmp_path):
     return service, folder / _real_tl.FILE_NAME
 
 
+def _slow_node_ids() -> frozenset[str]:
+    try:
+        text = _SLOW_LIST.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return frozenset()
+    ids = (line.split("#", 1)[0].strip() for line in text.splitlines())
+    return frozenset(i for i in ids if i)
+
+
 def pytest_collection_modifyitems(config, items):
+    slow = _slow_node_ids()
+    if slow:
+        for item in items:
+            # The exact node id, or the test function for all its parameters.
+            if item.nodeid in slow or item.nodeid.split("[", 1)[0] in slow:
+                item.add_marker(pytest.mark.slow)
     for item in items:
         for mark in item.iter_markers("quarantine"):
             if not (mark.kwargs.get("reason") and mark.kwargs.get("issue")):

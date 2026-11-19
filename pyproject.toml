@@ -201,7 +201,7 @@ python_functions = ["test_*"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
-    "slow: marks tests as slow (tools/test.sh quick skips them)",
+    "slow: over 1 s; applied from tests/slow_tests.txt (tools/test.sh --update-slow), skipped by tools/test.sh quick",
     "perf: wall-clock performance budgets; tools/test.sh full runs them serially after the parallel pass",
     "quarantine(reason, issue): known-flaky test, deselected by tools/test.sh until the issue is fixed (both arguments required)",
     "integration: marks tests as integration tests",
