@@ -1374,3 +1374,39 @@ def test_lists_script_reads_only_the_lists():
     assert "@@list:calls@@" in script
     assert "abx2xml" not in script
     assert ident.lists_script([TOKEN + "\n"]).count("@@list:") == 0
+
+
+# ---------------------------------------------------------------------------
+# after a framework restart: frida-server, then the proxy check
+# ---------------------------------------------------------------------------
+
+
+def test_after_restart_runs_the_proxy_check(monkeypatch):
+    calls = []
+    module = types.ModuleType("sandroid.services.proxy_restore")
+
+    def restore_proxy_infra(serial, *, cause, fresh_boot):
+        calls.append((serial, cause, fresh_boot))
+
+    module.restore_proxy_infra = restore_proxy_infra
+    monkeypatch.setitem(sys.modules, "sandroid.services.proxy_restore", module)
+    monkeypatch.setattr(
+        ident, "_restart_frida_after_framework", lambda s: calls.append(("frida", s))
+    )
+    assert IdentityService()._after_restart is ident._after_framework_restart
+    ident._after_framework_restart(SERIAL)
+    assert calls == [("frida", SERIAL), (SERIAL, "framework_restart", False)]
+
+
+def test_after_restart_tolerates_a_missing_or_failing_proxy_check(monkeypatch):
+    monkeypatch.setitem(sys.modules, "sandroid.services.proxy_restore", None)
+    ident._restore_proxy_after_framework(SERIAL)  # no module: a no-op
+
+    module = types.ModuleType("sandroid.services.proxy_restore")
+
+    def boom(serial, *, cause, fresh_boot):
+        raise RuntimeError("device gone")
+
+    module.restore_proxy_infra = boom
+    monkeypatch.setitem(sys.modules, "sandroid.services.proxy_restore", module)
+    ident._restore_proxy_after_framework(SERIAL)  # swallowed

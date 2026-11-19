@@ -2102,6 +2102,29 @@ def _restart_frida_after_framework(serial: str) -> None:
         logger.warning("identity: frida-server restart failed", exc_info=True)
 
 
+def _restore_proxy_after_framework(serial: str) -> None:
+    """Let the proxy check its device state after a framework restart window.
+
+    The proxy's CA and gost survive the restart; this cheap check (a no-op
+    when healthy) re-adds ``adb reverse`` and repairs a lane if needed. The
+    proxy service may not exist in this build. Never raises.
+    """
+    try:
+        from sandroid.services.proxy_restore import restore_proxy_infra
+    except ImportError:
+        return
+    try:
+        restore_proxy_infra(serial, cause="framework_restart", fresh_boot=False)
+    except Exception:
+        logger.debug("identity: proxy check after the restart failed", exc_info=True)
+
+
+def _after_framework_restart(serial: str) -> None:
+    """Bring frida-server and the proxy back after a framework restart window."""
+    _restart_frida_after_framework(serial)
+    _restore_proxy_after_framework(serial)
+
+
 class IdentityService:
     """Identity profile library, apply pipeline and marker source."""
 
@@ -2120,7 +2143,7 @@ class IdentityService:
         self._clock: Callable[[], float] = time.monotonic
         #: Called with the serial once the framework is back after a restart
         #: window (default: restart a running frida-server).
-        self._after_restart: Callable[[str], None] = _restart_frida_after_framework
+        self._after_restart: Callable[[str], None] = _after_framework_restart
 
     # -- library ----------------------------------------------------------
 
