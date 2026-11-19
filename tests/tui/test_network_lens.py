@@ -1402,3 +1402,27 @@ def test_profile_tint_style_is_cached():
     first = np_mod._bg_style(np_mod.profile_tint())
     assert np_mod._bg_style(np_mod.profile_tint()) is first
     assert first.bgcolor is not None
+
+
+def test_markers_sharing_a_tag_show_it_once():
+    from sandroid.services.privacy_scan import TagInfo
+
+    def tag(marker_id, word, party="unknown"):
+        return TagInfo(
+            tag=word,
+            label=word,
+            marker_id=marker_id,
+            party=party,
+            direction="sent",
+            encoded=False,
+            approx=False,
+            confidence="high",
+        )
+
+    tags = [
+        tag("gaid", "AdID"),
+        tag("gps.latitude", "GPS"),
+        tag("gps.longitude", "GPS"),
+    ]
+    assert np_mod.tags_plain(tags) == "AdID, GPS"
+    assert np_mod.tag_words(tags).plain == "AdID, GPS"

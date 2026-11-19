@@ -787,10 +787,24 @@ def profile_tint(role: str = "warn", amount: float = 0.13) -> str:
     return _blend(pal.bg, getattr(pal, role), amount)
 
 
+def _distinct_tags(tags: Any) -> list:
+    """One tag per shown word: markers can share one (GPS latitude and
+    longitude are both ``GPS``); the first, strongest, one stays.
+    """
+    seen: set[str] = set()
+    out = []
+    for tag in tags or ():
+        word = str(tag.tag or tag.label)
+        if word not in seen:
+            seen.add(word)
+            out.append(tag)
+    return out
+
+
 def tag_words(tags: Any, width: int | None = None) -> Text:
     """``Ad ID, GPS, Email`` coloured by party (strongest first)."""
     text = Text(no_wrap=True, overflow="ellipsis")
-    for i, tag in enumerate(tags or ()):
+    for i, tag in enumerate(_distinct_tags(tags)):
         if i:
             text.append(", ")
         text.append(str(tag.tag or tag.label), style=party_color(tag.party))
@@ -800,7 +814,7 @@ def tag_words(tags: Any, width: int | None = None) -> Text:
 
 
 def tags_plain(tags: Any) -> str:
-    return ", ".join(str(t.tag or t.label) for t in tags or ())
+    return ", ".join(str(t.tag or t.label) for t in _distinct_tags(tags))
 
 
 def _clean(text: str) -> str:
