@@ -417,6 +417,10 @@ def _reset_module_singletons(*, fresh_config: bool) -> None:
             if _pristine_config is None:
                 _pristine_config = config_mod.get_config().model_copy(deep=True)
             config_mod.set_config(_pristine_config.model_copy(deep=True))
+    # The device-prepared step: off, no serial state (hooks stay registered).
+    device_prep = sys.modules.get("sandroid.core.device_prep")
+    if device_prep is not None:
+        device_prep.reset()
     controllers = sys.modules.get("sandroid.tui.controller_registry")
     if controllers is not None:
         controllers._monitor_controller = None

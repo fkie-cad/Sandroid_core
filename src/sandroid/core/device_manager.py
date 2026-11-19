@@ -10,7 +10,15 @@ import threading
 import time
 from collections.abc import Callable
 
+from . import device_prep
 from .device import Device, DeviceCapability, parse_adb_devices
+
+# The device-prepared hook API lives in ``core/device_prep.py``; re-exported
+# here (``DeviceManager`` owns the attach/reconnect path that triggers it).
+from .device_prep import (
+    register_device_prepared_hook,
+    unregister_device_prepared_hook,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +108,12 @@ class DeviceManager:
         self._ambiguous_serials: tuple[str, ...] = ()
         self._on_device_change_callbacks: list[Callable[[Device], None]] = []
         self._on_devices_updated_callbacks: list[Callable[[list[Device]], None]] = []
+        self._on_device_prepared_callbacks: list[Callable[[Device, object], None]] = []
+        # The active device is missing from `adb devices` while it is being
+        # prepared (``adb root`` restarts adbd) since this monotonic time.
+        self._prep_absent_since: float | None = None
+        # The last enumeration failed: the next good one re-prepares.
+        self._enum_bailed = False
         # Serializes refresh_devices() across background poll threads; must be
         # reentrant (a callback chain may re-enter on the same thread).
         self._lock = threading.RLock()
@@ -161,6 +175,20 @@ class DeviceManager:
         # (re)populated this pass without a disconnect or auto-select, so the
         # post-lock notify section can fire a one-off repaint (see part B below).
         active_metadata_device: Device | None = None
+        # The device-prepared step (core/device_prep.py) is consulted here,
+        # never under the lock: whether it runs for the active serial and the
+        # adb transport it last prepared.
+        active_before = self._active_device
+        prep_serial = active_before.serial if active_before else None
+        prep_busy = bool(prep_serial and device_prep.is_preparing(prep_serial))
+        prep_transport = (
+            device_prep.prepared_transport(prep_serial) if prep_serial else None
+        )
+        # Set to the active serial when its adb transport changed (offline ->
+        # device, a new transport_id, back after a failed enumeration): the
+        # device-prepared step is requested after the lock is released.
+        reprepare: str | None = None
+        lost_serial: str | None = None
 
         with self._lock:
             output, error = Adb.send_adb_command("devices -l")
@@ -175,6 +203,7 @@ class DeviceManager:
             # device list still has non-empty output and proceeds normally.
             if error and ("error" in error.lower() or not output.strip()):
                 logger.warning(f"Skipping device refresh — ADB failed: {error}")
+                self._enum_bailed = True
                 # Returning from within `with` releases the lock correctly.
                 return list(self._devices.values())
 
@@ -189,11 +218,28 @@ class DeviceManager:
                 model = entry.props.get("model", "")
                 product = entry.props.get("product", "")
                 device_name = entry.props.get("device", "")
+                transport_id = entry.props.get("transport_id", "")
 
                 # Check if device already exists
                 if serial in self._devices:
                     device = self._devices[serial]
+                    if (
+                        serial == prep_serial
+                        and device is self._active_device
+                        and state == "device"
+                        and (
+                            device.state != "device"
+                            or self._enum_bailed
+                            or (
+                                transport_id
+                                and prep_transport is not None
+                                and transport_id != prep_transport
+                            )
+                        )
+                    ):
+                        reprepare = serial
                     device.state = state
+                    device.transport_id = transport_id
                     # Update model/name if we got new info
                     if model and not device.model:
                         device.model = model
@@ -224,6 +270,7 @@ class DeviceManager:
                         name=product or device_name or "",
                         state=state,
                         model=model,
+                        transport_id=transport_id,
                     )
                     # Populate additional info for new devices -- but only
                     # for ready ones. Stale/offline/unauthorized entries (e.g.
@@ -246,12 +293,26 @@ class DeviceManager:
             # NOT null the device (broadening to "present but state != device"
             # would flap on every boot). We may note a lingering non-ready
             # state but never act on it.
-            if self._active_device and self._active_device.serial not in new_devices:
+            self._enum_bailed = False
+            missing = (
+                self._active_device is not None
+                and self._active_device.serial not in new_devices
+            )
+            if missing and self._within_prep_grace(prep_busy, prep_serial):
+                # Being prepared: ``adb root`` restarts adbd, so the device
+                # drops out of `adb devices` for a moment. Not lost (yet).
+                self._active_device.state = "offline"
+                new_devices[self._active_device.serial] = self._active_device
+                missing = False
+            elif not missing:
+                self._prep_absent_since = None
+            if missing:
                 logger.warning(
                     f"Active device {self._active_device.serial} disconnected"
                 )
                 lost_serial = self._active_device.serial
                 self._active_device = None
+                self._prep_absent_since = None
                 try:
                     from .timeline import get_timeline
 
@@ -290,6 +351,11 @@ class DeviceManager:
         # while holding the lock, a UI-thread refresh_devices() waiting on
         # the lock would deadlock the event loop.
 
+        if lost_serial:
+            device_prep.note_detached(lost_serial)
+        elif reprepare and self._active_device is not None:
+            device_prep.request_prepare(reprepare, "transport", manager=self)
+
         # Notify list listeners.
         for callback in self._on_devices_updated_callbacks:
             try:
@@ -320,6 +386,19 @@ class DeviceManager:
             self.auto_select_device()
 
         return list(self._devices.values())
+
+    def _within_prep_grace(self, prep_busy: bool, serial: str | None) -> bool:
+        """Lock held: the active serial is missing while being prepared, for
+        at most :data:`device_prep.LOSS_GRACE_S` seconds.
+        """
+        if not prep_busy or self._active_device is None:
+            return False
+        if self._active_device.serial != serial:
+            return False
+        now = time.monotonic()
+        if self._prep_absent_since is None:
+            self._prep_absent_since = now
+        return now - self._prep_absent_since < device_prep.LOSS_GRACE_S
 
     def _populate_device_info(self, device: Device) -> None:
         """Populate additional device information via ADB.
@@ -541,7 +620,9 @@ class DeviceManager:
 
         # Reset state if switching to a different device
         if self._active_device and self._active_device.serial != serial:
-            self._reset_device_state(previous_serial=self._active_device.serial)
+            previous = self._active_device.serial
+            device_prep.note_detached(previous)
+            self._reset_device_state(previous_serial=previous)
 
         self._active_device = device
         self._last_active_serial = serial
@@ -581,15 +662,13 @@ class DeviceManager:
         except Exception as e:
             logger.debug(f"Could not bind the session timeline: {e}")
 
-        # First device-clock sample of this device (session timeline) and,
-        # with ``emulator.sync_device_clock`` on, the session-start clock
-        # sync (it waits for startup's SELinux step), off-thread.
-        try:
-            from . import device_clock
-
-            device_clock.after_device_connect_async(serial)
-        except Exception as e:
-            logger.debug(f"Could not sample the device clock: {e}")
+        # The device-prepared step (off-thread): boot check, device-clock
+        # connect sample, adb root + SELinux Permissive, device_prepared
+        # hooks, then the on_device_prepared listeners (Frida / app work).
+        # While it is off (paths that never prepare devices) only the
+        # device-clock connect sample runs, as before.
+        if not device_prep.request_prepare(serial, "attach", manager=self):
+            device_prep.connect_clock_only(serial)
 
         # Notify listeners
         for callback in self._on_device_change_callbacks:
@@ -736,6 +815,30 @@ class DeviceManager:
             callback: Function to call with the new Device
         """
         self._on_device_change_callbacks.append(callback)
+
+    def on_device_prepared(self, callback: Callable[[Device, object], None]) -> None:
+        """Register a callback for "the active device is prepared".
+
+        Called as ``callback(device, result)`` (``result``: a
+        :class:`~sandroid.core.device_prep.PrepResult`) on the prepare
+        worker thread, after root/SELinux and the ``device_prepared`` hooks
+        -- the point from which Frida and app work may touch the device.
+        Also fired when a run found the device already prepared, and once
+        after a snapshot load that re-attached it (``result.kind ==
+        "held"``). Marshal UI work to the UI thread.
+
+        Args:
+            callback: Function to call with the device and the result
+        """
+        self._on_device_prepared_callbacks.append(callback)
+
+    def _fire_device_prepared(self, device: Device | None, result: object) -> None:
+        """Call the :meth:`on_device_prepared` listeners (never raises)."""
+        for callback in list(self._on_device_prepared_callbacks):
+            try:
+                callback(device, result)
+            except Exception as e:
+                logger.warning(f"Device prepared callback failed: {e}")
 
     def on_devices_updated(self, callback: Callable[[list[Device]], None]) -> None:
         """Register a callback for device list updates.
