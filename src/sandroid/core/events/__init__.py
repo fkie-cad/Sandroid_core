@@ -84,7 +84,9 @@ class EventType(Enum):
     # Session timeline doorbell (core/timeline.py): published by the writer
     # thread, only when someone subscribes, at most 4/s per timeline file.
     # Payload {"op": "lines"|"bound"|"closed"|"locked", "dev", "folder",
-    # "first_seq", "last_seq", "srcs": [...]} -- never the lines themselves
+    # "session_id", "labels_version", "active", "first_seq", "last_seq",
+    # "srcs": [...]} -- "bound" on every change of the active sink; never the
+    # lines themselves
     # (read them with get_timeline().tail()). Subscribers hop to the UI with
     # UiDispatcher.post / call_later, never call_from_thread.
     TIMELINE_EVENT = auto()
