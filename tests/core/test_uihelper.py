@@ -1,0 +1,782 @@
+"""The UI helper host module (``core/uihelper.py``) against a scripted fake helper.
+
+:class:`FakeHelper` stands in for ``adb -s S shell <helper>``: its stdout and
+stderr are real ``os.pipe`` ends (read by the module's reader threads), and each
+command written to its stdin is answered by a scripted handler. One-shot adb
+calls go to :class:`FakeAdb` (``Adb.send_adb_command`` patched). The supervisor
+gets a fake sleep and clock, so no test waits for a real back-off. Nothing runs
+adb or touches a device.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import stat
+import subprocess
+import threading
+import time
+import zipfile
+from importlib import resources
+from pathlib import Path
+
+import pytest
+
+from sandroid.core import uihelper
+from sandroid.core.adb import Adb
+from sandroid.core.uihelper import Mode, UiHelper
+
+SERIAL = "emu-1"
+REPO = Path(__file__).resolve().parents[2]
+PNG = uihelper._PNG_MAGIC + b"fake-png-body"
+
+
+# --------------------------------------------------------------------- fakes
+
+
+def wait_for(pred, timeout: float = 3.0) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if pred():
+            return True
+        time.sleep(0.005)
+    return pred()
+
+
+class _Stdin:
+    def __init__(self, proc: FakeHelper) -> None:
+        self.proc = proc
+        self.closed = False
+
+    def write(self, data: bytes) -> int:
+        if self.closed or self.proc.returncode is not None:
+            raise BrokenPipeError("helper gone")
+        for line in data.decode().splitlines():
+            self.proc.on_command(line)
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        if not self.proc.hang_on_eof:
+            self.proc.emit({"type": "bye"})
+            self.proc.die(0)
+
+
+class FakeHelper:
+    """Scripted ``adb shell`` running the helper (protocol 2)."""
+
+    def __init__(
+        self,
+        argv: list[str],
+        *,
+        pid: int = 4242,
+        flags: int = 1,
+        connect: str = "connected",
+        hang_on_eof: bool = False,
+        silent: frozenset[str] = frozenset(),
+    ) -> None:
+        self.argv = argv
+        self.pid = pid
+        self.hang_on_eof = hang_on_eof
+        self.silent = silent  # commands that never get a reply (timeouts)
+        self.commands: list[str] = []
+        self.returncode: int | None = None
+        self.killed = False
+        self._exited = threading.Event()
+        self._wlock = threading.Lock()
+        r, w = os.pipe()
+        self.stdout = os.fdopen(r, "rb")
+        self._out = os.fdopen(w, "wb", buffering=0)
+        er, ew = os.pipe()
+        self.stderr = os.fdopen(er, "rb")
+        self._err = os.fdopen(ew, "wb", buffering=0)
+        self.stdin = _Stdin(self)
+        mode = "invisible" if flags == 2 else "full"
+        self.emit(
+            {
+                "type": "hello",
+                "version": "1.0.0",
+                "protocol": 2,
+                "pid": pid,
+                "mode": mode,
+                "flags": flags,
+                "t_mono_ms": 1000.0,
+                "display": {"w": 1080, "h": 2424, "rotation": 0},
+            }
+        )
+        if connect:
+            self.emit({"type": "status", "state": connect, "reason": "start"})
+
+    # -- scripting --
+    def emit(self, obj: dict | str) -> None:
+        raw = obj if isinstance(obj, str) else json.dumps(obj)
+        with self._wlock:
+            if not self._out.closed:
+                self._out.write(raw.encode() + b"\n")
+
+    def die(self, rc: int = 1) -> None:
+        if self.returncode is None:
+            self.returncode = rc
+        self._exited.set()
+        with self._wlock:
+            for f in (self._out, self._err):
+                if not f.closed:
+                    f.close()
+
+    def on_command(self, line: str) -> None:
+        self.commands.append(line)
+        tok = line.split()
+        rid = next((t[3:] for t in tok if t.startswith("id=")), None)
+        kv = dict(t.split("=", 1) for t in tok[1:] if "=" in t)
+        name = tok[0]
+        if name in self.silent:
+            return
+        if name == "ping":
+            self.emit(
+                {"type": "pong", "id": rid, "t_mono_ms": 5000.0, "connected": True}
+            )
+        elif name == "node_at":
+            self.emit(
+                {
+                    "type": "node_at",
+                    "id": rid,
+                    "x": int(tok[1]),
+                    "y": int(tok[2]),
+                    "cached": {"hit": {"text": "Old"}},
+                    "live": {"target": {"text": "Btn", "rid": "a:id/b"}},
+                }
+            )
+        elif name == "dump":
+            self.emit(
+                {
+                    "type": "dump",
+                    "id": rid,
+                    "nodes": 3,
+                    "max_nodes": int(kv["max_nodes"]),
+                    "windows": [{"id": 1, "root": {"cls": "FrameLayout"}}],
+                }
+            )
+        elif name == "windows":
+            self.emit({"type": "windows", "id": rid, "windows": [{"id": 7}]})
+        elif name == "shot":
+            reply = {
+                "type": "shot",
+                "id": rid,
+                "t_mono_ms": 1234.5,
+                "w": 1080,
+                "h": 2424,
+                "hash": "0badf00d",
+                "cap_ms": 14.2,
+                "png_ms": 0.0 if "hash_only" in kv else 80.0,
+            }
+            if "path" in kv and "hash_only" not in kv:
+                reply["path"] = kv["path"]
+            self.emit(reply)
+        else:
+            self.emit({"type": "error", "id": rid, "error": f"unknown: {name}"})
+
+    # -- Popen surface --
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        if not self._exited.wait(timeout):
+            raise subprocess.TimeoutExpired(self.argv, timeout)
+        assert self.returncode is not None
+        return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+        self.die(-9)
+
+    terminate = kill
+
+
+class FakeFetch:
+    """``adb exec-out cat <png>``."""
+
+    def __init__(self, argv: list[str], data: bytes) -> None:
+        self.argv = argv
+        self.data = data
+        self.returncode: int | None = None
+
+    def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+        self.returncode = 0 if self.data else 1
+        return self.data, b"" if self.data else b"No such file"
+
+    def kill(self) -> None:
+        pass
+
+
+class FakePopen:
+    """Popen factory: helper shells and screenshot fetches, all recorded."""
+
+    def __init__(self, **helper_kw) -> None:
+        self.helper_kw = helper_kw
+        self.helpers: list[FakeHelper] = []
+        self.fetches: list[FakeFetch] = []
+        self.fetch_data = PNG
+        self.order: list[str] = []
+        self.next_kw: list[dict] = []  # per-spawn overrides, consumed in order
+
+    def __call__(self, argv, **kw):
+        if "exec-out" in argv:
+            f = FakeFetch(argv, self.fetch_data)
+            self.fetches.append(f)
+            self.order.append("fetch " + argv[-1])
+            return f
+        opts = dict(self.helper_kw)
+        if self.next_kw:
+            opts.update(self.next_kw.pop(0))
+        h = FakeHelper(argv, **opts)
+        self.helpers.append(h)
+        return h
+
+    @property
+    def current(self) -> FakeHelper:
+        return self.helpers[-1]
+
+
+class FakeAdb:
+    """``Adb.send_adb_command`` stand-in: records (command, serial)."""
+
+    def __init__(self, popen: FakePopen | None = None) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+        self.device_jar_sha = uihelper.JAR_SHA256
+        self.push_result_sha = uihelper.JAR_SHA256
+        self.settings = {
+            "accessibility_enabled": "0",
+            "enabled_accessibility_services": "null",
+        }
+        self.popen = popen
+
+    def __call__(self, command: str, serial: str | None = None, timeout: float = 30):
+        self.calls.append((command, serial))
+        if self.popen is not None:
+            self.popen.order.append(command)
+        if command.startswith("shell sha256sum "):
+            sha = self.device_jar_sha
+            if not sha:
+                return "", f"sha256sum: {uihelper.REMOTE_JAR}: No such file"
+            return f"{sha}  {uihelper.REMOTE_JAR}\n", ""
+        if command.startswith("push "):
+            self.device_jar_sha = self.push_result_sha
+            return "1 file pushed.\n", ""
+        if command.startswith("shell settings get secure "):
+            return self.settings.get(command.rsplit(maxsplit=1)[-1], "null") + "\n", ""
+        if command.startswith("shell settings put secure "):
+            _, _, _, _, key, val = command.split()
+            self.settings[key] = val
+            return "", ""
+        return "", ""
+
+    def commands(self, prefix: str = "") -> list[str]:
+        return [c for c, _ in self.calls if c.startswith(prefix)]
+
+
+@pytest.fixture
+def adb(monkeypatch):
+    monkeypatch.setattr(Adb, "ADB_PATH", "/sdk/adb")
+    fake = FakeAdb()
+    monkeypatch.setattr(Adb, "send_adb_command", fake)
+    return fake
+
+
+class Recorder:
+    def __init__(self) -> None:
+        self.statuses: list[tuple[str, dict]] = []
+        self.events: list[tuple[dict, float]] = []
+
+    def on_status(self, state: str, info: dict) -> None:
+        self.statuses.append((state, info))
+
+    def on_event(self, line: dict, host_recv: float) -> None:
+        self.events.append((line, host_recv))
+
+    def states(self) -> list[str]:
+        return [s for s, _ in self.statuses]
+
+
+def make_helper(adb: FakeAdb, mode: Mode = Mode.FULL, **kw):
+    popen = kw.pop("popen", None) or FakePopen(flags=2 if mode is Mode.INVISIBLE else 1)
+    adb.popen = popen
+    rec = Recorder()
+    sleeps: list[float] = []
+    h = UiHelper(
+        SERIAL,
+        mode,
+        on_event=rec.on_event,
+        on_status=rec.on_status,
+        popen=popen,
+        sleep=kw.pop("sleep", sleeps.append),
+        clock=kw.pop("clock", lambda: 0.0),
+        **kw,
+    )
+    return h, popen, rec, sleeps
+
+
+# --------------------------------------------------------------- build / jar
+
+
+def test_committed_jar_matches_jar_sha256():
+    data = uihelper.jar_path().read_bytes()
+    assert hashlib.sha256(data).hexdigest() == uihelper.JAR_SHA256
+    assert len(uihelper.JAR_SHA256) == 64
+    assert "<" not in uihelper.JAR_SHA256
+
+
+def test_sources_match_source_sha256():
+    # A Java change without a rebuild (and new constants) fails here.
+    src = REPO / "tools" / "uihelper" / "src"
+    assert sorted(p.name for p in src.rglob("*.java")) == [
+        "Main.java",
+        "Snapshots.java",
+        "TouchWatch.java",
+        "Tree.java",
+        "Uia.java",
+    ]
+    assert uihelper.source_sha256(src) == uihelper.SOURCE_SHA256
+
+
+def test_source_sha256_definition(tmp_path):
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "Y.java").write_bytes(b"class Y {}")
+    (tmp_path / "A.java").write_bytes(b"class A {}")
+    (tmp_path / "notes.txt").write_bytes(b"ignored")
+    want = hashlib.sha256(b"A.java\0class A {}\0b/Y.java\0class Y {}\0").hexdigest()
+    assert uihelper.source_sha256(tmp_path) == want
+
+
+def test_jar_resolves_through_importlib_resources():
+    res = resources.files("sandroid").joinpath("assets", "uihelper", "uihelper.jar")
+    assert res.is_file()
+    assert uihelper.jar_path() == Path(str(res))
+    with zipfile.ZipFile(uihelper.jar_path()) as z:
+        assert "classes.dex" in z.namelist()
+
+
+def test_build_info():
+    assert uihelper.build_info() == {
+        "version": "1.0.0",
+        "protocol": 2,
+        "jar_sha256": uihelper.JAR_SHA256,
+        "source_sha256": uihelper.SOURCE_SHA256,
+    }
+
+
+def test_java_constants_match_python():
+    main = (REPO / "tools/uihelper/src/sandroid/uihelper/Main.java").read_text()
+    assert f'VERSION = "{uihelper.HELPER_VERSION}"' in main
+    assert f"PROTOCOL = {uihelper.PROTOCOL};" in main
+
+
+# ---------------------------------------------------------------- ensure_jar
+
+
+def test_ensure_jar_skips_when_device_hash_matches(adb):
+    assert uihelper.ensure_jar(SERIAL) is True
+    assert adb.commands() == [f"shell sha256sum {uihelper.REMOTE_JAR}"]
+    assert all(s == SERIAL for _, s in adb.calls)
+
+
+def test_ensure_jar_pushes_and_verifies_on_mismatch(adb):
+    adb.device_jar_sha = ""  # absent on the device
+    assert uihelper.ensure_jar(SERIAL) is True
+    jar = uihelper.REMOTE_JAR
+    assert adb.commands() == [
+        f"shell sha256sum {jar}",
+        f"shell rm -f {jar}",
+        f"push {uihelper.quote_host_arg(str(uihelper.jar_path()))} {jar}",
+        f"shell sha256sum {jar}",
+        f"shell chmod 644 {jar}",
+    ]
+    assert all(s == SERIAL for _, s in adb.calls)
+
+
+def test_ensure_jar_fails_when_verify_mismatches(adb, caplog):
+    adb.device_jar_sha = "0" * 64
+    adb.push_result_sha = "1" * 64
+    with caplog.at_level(logging.WARNING, logger="sandroid.core.uihelper"):
+        assert uihelper.ensure_jar(SERIAL) is False
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert SERIAL in warnings[0].getMessage()
+    assert not adb.commands("shell chmod")
+    assert all(s == SERIAL for _, s in adb.calls)
+
+
+# ------------------------------------------------------------ helper_command
+
+
+@pytest.mark.parametrize("mode", [Mode.FULL, Mode.INVISIBLE])
+def test_helper_command_shape(mode):
+    c = uihelper.helper_command(mode)
+    assert c.startswith(uihelper.ZYGOTE_ENV + "; ")
+    assert "BOOTCLASSPATH" in c
+    assert "/proc/$ZP/environ" in c
+    assert f"CLASSPATH={uihelper.REMOTE_JAR} exec app_process / " in c
+    assert c.endswith(f"sandroid.uihelper.Main mode={mode.value}")
+    assert uihelper.helper_command("invisible", jar="/x.jar").endswith("mode=invisible")
+
+
+def test_spawn_uses_serial_argv(adb):
+    h, popen, rec, _ = make_helper(adb)
+    assert h.start() is True
+    assert popen.helpers[0].argv == [
+        "/sdk/adb",
+        "-s",
+        SERIAL,
+        "shell",
+        uihelper.helper_command(Mode.FULL),
+    ]
+    assert rec.states() == ["connected"]
+    info = rec.statuses[0][1]
+    assert info["pid"] == 4242
+    assert info["flags"] == 1
+    assert info["a11y_before"] == {
+        "accessibility_enabled": "0",
+        "enabled_accessibility_services": None,
+    }
+    assert h.alive
+    assert h.hello["mode"] == "full"
+    h.stop()
+
+
+def test_start_fails_without_jar(adb):
+    adb.device_jar_sha = ""
+    adb.push_result_sha = "f" * 64
+    h, popen, rec, _ = make_helper(adb)
+    assert h.start() is False
+    assert h.last_error == "jar"
+    assert not popen.helpers
+    assert rec.states() == []
+
+
+def test_start_busy(adb):
+    popen = FakePopen(connect="busy")
+    h, popen, rec, _ = make_helper(adb, popen=popen)
+    assert h.start(timeout=2) is False
+    assert rec.states() == ["busy"]
+    assert h.last_error == "busy"
+    assert popen.current.stdin.closed
+    assert not h.alive
+
+
+def test_start_timeout_returns_false(adb):
+    popen = FakePopen(connect="")
+    h, popen, rec, _ = make_helper(adb, popen=popen)
+    assert h.start(timeout=0.2) is False
+    assert h.last_error == "timeout"
+    assert rec.states() == []
+
+
+# ----------------------------------------------------------- request / reply
+
+
+def test_request_reply_by_id_and_unsolicited_events(adb, tmp_path):
+    log = tmp_path / "raw" / "helper.jsonl"
+    h, popen, rec, _ = make_helper(adb, raw_log=log)
+    assert h.start()
+    fake = popen.current
+    fake.emit({"type": "ev", "ev": "CLICKED", "t_mono_ms": 1500})
+    fake.emit({"type": "pong", "id": "nobody-asked"})
+    r = h.request("ping")
+    assert r["type"] == "pong"
+    assert r["id"] == "r1"
+    assert r["_host_recv"] >= r["_host_send"]
+    assert fake.commands == ["ping id=r1"]
+    assert wait_for(lambda: len(rec.events) >= 4)
+    types = [e["type"] for e, _ in rec.events]
+    assert types[:4] == ["hello", "status", "ev", "pong"]
+    assert all(isinstance(t, float) for _, t in rec.events)
+    h.stop()
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+    rows = log.read_text().splitlines()
+    t, raw = rows[0].split("\t", 1)
+    assert float(t) > 0
+    assert json.loads(raw)["type"] == "hello"
+    assert any(json.loads(r.split("\t", 1)[1]).get("id") == "r1" for r in rows)
+    assert json.loads(rows[-1].split("\t", 1)[1])["type"] == "bye"
+
+
+def test_timeout_returns_none_without_raising(adb):
+    popen = FakePopen(silent=frozenset({"windows", "ping"}))
+    h, popen, rec, _ = make_helper(adb, popen=popen)
+    assert h.start()
+    assert h.windows(timeout=0.05) is None
+    assert h.ping(timeout=0.05) is None
+    assert h.request("windows", timeout=0.05) is None
+    assert h._waiters == {}
+    h.stop()
+
+
+def test_malformed_lines_do_not_kill_reader(adb):
+    h, popen, rec, _ = make_helper(adb)
+    assert h.start()
+    fake = popen.current
+    for junk in ("not json", "[1, 2]", "\x00\x01", '{"type": "ev", "id": ', "42"):
+        fake.emit(junk)
+    fake._out.write(b"\xff\xfe broken utf8\n")
+    assert h.ping()["connected"] is True
+    assert h.alive
+    h.stop()
+
+
+def test_callback_exception_does_not_kill_reader(adb):
+    h, popen, rec, _ = make_helper(adb)
+
+    def boom(line, t):
+        raise RuntimeError("callback bug")
+
+    h._on_event = boom
+    assert h.start()
+    popen.current.emit({"type": "ev", "ev": "CLICKED"})
+    assert h.ping() is not None
+    h.stop()
+
+
+def test_queries_parse_replies(adb):
+    h, popen, rec, _ = make_helper(adb)
+    assert h.start()
+    fake = popen.current
+    r = h.node_at(5, 6, t_mono_ms=1234.56)
+    assert fake.commands[-1].startswith("node_at 5 6 both t=1234.6 id=")
+    assert r["live"]["target"]["rid"] == "a:id/b"
+    assert r["cached"]["hit"]["text"]
+    r = h.node_at(1, 2)
+    assert fake.commands[-1].startswith("node_at 1 2 both id=")
+    d = h.dump(max_nodes=99)
+    assert d["max_nodes"] == 99
+    assert d["windows"][0]["root"]["cls"] == "FrameLayout"
+    assert h.windows() == [{"id": 7}]
+    p = h.ping()
+    assert p["t_mono_ms"] == 5000.0
+    assert p["connected"] is True
+    assert p["rtt_ms"] >= 0
+    assert p["host_mid"] > 1e9
+    s = h.shot(hash_only=True)
+    assert s == uihelper.ShotResult(1234.5, 1080, 2424, "0badf00d", 14.2, None, None)
+    assert fake.commands[-1].startswith("shot hash_only=1 id=")
+    assert not popen.fetches
+    h.stop()
+
+
+def test_error_reply_returns_none(adb):
+    h, popen, rec, _ = make_helper(adb)
+    assert h.start()
+    popen.current.on_command = lambda line: popen.current.emit(
+        {"type": "error", "id": line.split("id=")[1], "error": "not_connected"}
+    )
+    assert h.node_at(1, 1) is None
+    assert h.shot() is None
+    h.stop()
+
+
+def test_invisible_mode_short_circuits_a11y_queries(adb):
+    h, popen, rec, _ = make_helper(adb, Mode.INVISIBLE)
+    assert h.start()
+    fake = popen.current
+    assert fake.argv[-1].endswith("mode=invisible")
+    assert h.node_at(1, 2) is None
+    assert h.dump() is None
+    assert h.windows() is None
+    assert fake.commands == []  # no round trip
+    assert h.shot(hash_only=True).hash == "0badf00d"
+    # INVISIBLE never reads or touches the a11y settings.
+    assert not adb.commands("shell settings")
+    assert rec.statuses[0][1]["flags"] == 2
+    h.stop()
+    assert not adb.commands("shell settings")
+
+
+def test_shot_fetches_with_exec_out_cat_then_rm(adb):
+    h, popen, rec, _ = make_helper(adb)
+    assert h.start()
+    s1 = h.shot()
+    s2 = h.shot()
+    assert s1.png == PNG
+    assert s1.error is None
+    assert s1.w == 1080
+    assert s1.remote_path.startswith(uihelper.REMOTE_SHOT_DIR + "/")
+    assert s1.remote_path.endswith(".png")
+    assert s1.remote_path != s2.remote_path
+    f = popen.fetches[0]
+    assert f.argv == ["/sdk/adb", "-s", SERIAL, "exec-out", "cat", s1.remote_path]
+    cmds = popen.order
+    mk = f"shell mkdir -p {uihelper.REMOTE_SHOT_DIR}"
+    assert cmds.count(mk) == 1  # once
+    i = cmds.index(f"fetch {s1.remote_path}")
+    assert cmds[i + 1] == f"shell rm -f {s1.remote_path}"
+    assert cmds.index(mk) < i
+    assert any(
+        c.startswith(f"shot path={s1.remote_path} id=") for c in popen.current.commands
+    )
+    assert all(s == SERIAL for _, s in adb.calls)
+    h.stop()
+
+
+def test_shot_fetch_failure_keeps_capture(adb):
+    h, popen, rec, _ = make_helper(adb)
+    assert h.start()
+    popen.fetch_data = b""
+    s = h.shot()
+    assert s.png is None
+    assert "fetch failed" in s.error
+    assert s.hash == "0badf00d"
+    assert adb.commands(f"shell rm -f {s.remote_path}")
+    h.stop()
+
+
+# ---------------------------------------------------------- restart and stop
+
+
+def test_eof_lost_then_restarted(adb):
+    h, popen, rec, sleeps = make_helper(adb)
+    assert h.start()
+    popen.current.die(137)
+    assert wait_for(lambda: rec.states() == ["connected", "lost", "restarted"])
+    assert sleeps == [1.0]
+    assert rec.statuses[1][1]["rc"] == 137
+    assert len(popen.helpers) == 2
+    assert h.alive
+    # the restart re-checked the jar (a snapshot load may have wiped it)
+    assert len(adb.commands("shell sha256sum")) == 2
+    assert h.ping() is not None
+    h.stop()
+    assert rec.states()[-1] == "stopped"
+
+
+def test_pending_request_fails_fast_on_death(adb):
+    popen = FakePopen(silent=frozenset({"dump"}))
+    h, popen, rec, _ = make_helper(adb, popen=popen)
+    assert h.start()
+    threading.Timer(0.05, popen.current.die).start()
+    t0 = time.monotonic()
+    assert h.dump(timeout=10) is None
+    assert time.monotonic() - t0 < 3
+    h.stop()
+
+
+def test_five_deaths_go_down(adb):
+    h, popen, rec, sleeps = make_helper(adb)
+    assert h.start()
+    for n in range(1, 5):
+        popen.current.die()
+        assert wait_for(lambda n=n: rec.states().count("restarted") == n)
+    popen.current.die()
+    assert wait_for(lambda: rec.states()[-1:] == ["down"])
+    assert rec.states() == ["connected"] + ["lost", "restarted"] * 4 + ["lost", "down"]
+    assert sleeps == [1.0, 2.0, 4.0, 8.0]
+    assert len(popen.helpers) == 5
+    assert not h.alive
+    time.sleep(0.05)
+    assert len(popen.helpers) == 5  # no more restarts
+    h.stop()
+    assert rec.states()[-1] == "stopped"
+
+
+def test_failed_restarts_count_as_deaths(adb):
+    h, popen, rec, sleeps = make_helper(adb)
+    assert h.start()
+    popen.next_kw = [{"connect": "busy"}] * 10  # every restart finds it busy
+    popen.current.die()
+    assert wait_for(lambda: rec.states()[-1:] == ["down"])
+    assert rec.states() == ["connected", "lost", "down"]
+    assert sleeps == [1.0, 2.0, 4.0, 8.0]
+    h.stop()
+
+
+def test_stable_run_resets_backoff(adb):
+    now = [0.0]
+    h, popen, rec, sleeps = make_helper(adb, clock=lambda: now[0])
+    assert h.start()
+    for n in range(1, 8):
+        now[0] += 61.0  # each run lasted longer than the death window
+        popen.current.die()
+        assert wait_for(lambda n=n: rec.states().count("restarted") == n)
+    assert sleeps == [1.0] * 7
+    assert "down" not in rec.states()
+    h.stop()
+
+
+def test_backoff_grows_and_caps_at_ten(adb):
+    now = [0.0]
+    h, popen, rec, sleeps = make_helper(adb, clock=lambda: now[0])
+    assert h.start()
+    for n in range(1, 7):
+        now[0] += 20.0  # deaths spread out: never 5 inside 60 s
+        popen.current.die()
+        assert wait_for(lambda n=n: rec.states().count("restarted") == n)
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 10.0, 10.0]
+    h.stop()
+
+
+def test_stop_during_backoff_does_not_restart(adb):
+    gate = threading.Event()
+    h, popen, rec, _ = make_helper(adb, sleep=lambda s: gate.wait(2))
+    assert h.start()
+    popen.current.die()
+    assert wait_for(lambda: "lost" in rec.states())
+    stopper = threading.Thread(target=h.stop)
+    stopper.start()
+    assert wait_for(lambda: h._stopping)
+    gate.set()
+    stopper.join(3)
+    assert "restarted" not in rec.states()
+    assert rec.states()[-1] == "stopped"
+    assert len(popen.helpers) == 1
+
+
+def test_stop_kills_pid_when_helper_hangs(adb):
+    popen = FakePopen(hang_on_eof=True, pid=777)
+    h, popen, rec, _ = make_helper(adb, popen=popen)
+    assert h.start()
+    h.stop(timeout=0.1)
+    assert adb.commands("shell kill 777")
+    assert popen.current.killed
+    assert ("shell kill 777", SERIAL) in adb.calls
+    assert rec.states() == ["connected", "stopped"]
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "restored"),
+    [
+        ("0", "1", True),
+        ("null", "1", True),
+        ("1", "1", False),  # was on before (a real a11y service): leave it
+        ("0", "0", False),  # the system already reset it
+    ],
+)
+def test_stop_restores_accessibility_enabled(adb, before, after, restored):
+    adb.settings["accessibility_enabled"] = before
+    h, popen, rec, _ = make_helper(adb)
+    assert h.start()
+    adb.settings["accessibility_enabled"] = after
+    h.stop()
+    puts = adb.commands("shell settings put")
+    if restored:
+        assert puts == ["shell settings put secure accessibility_enabled 0"]
+    else:
+        assert puts == []
+    assert rec.statuses[-1][0] == "stopped"
+    assert rec.statuses[-1][1]["a11y_restored"] is restored
+    assert all(s == SERIAL for _, s in adb.calls)
+
+
+def test_stop_before_start_is_noop(adb):
+    h, popen, rec, _ = make_helper(adb)
+    h.stop()
+    assert rec.states() == []
+    assert adb.calls == []
+
+
+def test_requires_serial():
+    with pytest.raises(ValueError):
+        UiHelper("")
