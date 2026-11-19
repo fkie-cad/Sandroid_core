@@ -1107,7 +1107,11 @@ def _cov_integrity(ctx: ReportContext) -> list[str]:
 def _cov_clock(ctx: ReportContext) -> list[str]:
     lines = ctx.scoped
     if not lines:
-        return ["No timeline lines are in scope."]
+        return [
+            "No timeline lines are in scope.",
+            *_clock_sync_sentences(ctx.lines),
+            CLOCK_CAVEAT,
+        ]
     n = len(lines)
     none = sum(1 for ln in lines if ln.get("clk") == "none")
     dev = sum(1 for ln in lines if ln.get("clk") in ("dev_mono", "dev_wall"))
@@ -1156,6 +1160,71 @@ def _cov_clock(ctx: ReportContext) -> list[str]:
             f"{_plural(len(epochs), 'clock epoch')}, "
             f"{_plural(jumps, 'clock jump')}."
         )
+    items += _clock_sync_sentences(ctx.lines)
+    items.append(CLOCK_CAVEAT)
+    return items
+
+
+#: The method caveat on device times, stated in every report.
+CLOCK_CAVEAT = (
+    "File and database timestamps are device-clock values; after a snapshot "
+    "reset device wall times can repeat, so such a value may not map to a "
+    "single real time. Every clock jump and sync is recorded in the timeline."
+)
+
+#: ``clock`` sample reasons that carry ``data.sync_policy`` (the effective
+#: ``emulator.sync_device_clock`` setting at that moment).
+_SYNC_TRIGGER_REASONS = ("snapshot-load", "device-connect")
+
+
+def _clock_sync_sentences(lines: list[dict]) -> list[str]:
+    """Whether the device clock was synced to host time (whole session).
+
+    The policy comes from ``data.sync_policy`` on the trigger samples
+    (``snapshot-load``, ``device-connect``); a sync is a ``clock/sync`` line
+    (``data.trigger`` ``session-start`` | ``snapshot-load``, ``ok``, ``sets``).
+    Timelines written before the policy was recorded have neither field: a
+    sync line there was always a snapshot-load sync.
+    """
+    clock = [ln for ln in lines if ln.get("src") == "clock"]
+    policy = [
+        _data(ln)["sync_policy"]
+        for ln in clock
+        if _data(ln).get("reason") in _SYNC_TRIGGER_REASONS
+        and isinstance(_data(ln).get("sync_policy"), bool)
+    ]
+    syncs = [ln for ln in clock if ln.get("kind") == "sync"]
+    failed = sum(1 for ln in syncs if not _data(ln).get("ok"))
+    at_start = sum(1 for ln in syncs if _data(ln).get("trigger") == "session-start")
+    after_load = len(syncs) - at_start
+    stem = "Device clock synced to host at session start and after snapshot loads"
+    if policy:
+        if all(policy):
+            answer = "yes"
+        elif not any(policy):
+            answer = "no"
+        else:
+            answer = "partly (the setting changed during the session)"
+        items = [f"{stem}: {answer}."]
+    elif syncs:
+        items = [
+            f"{stem}: after snapshot loads (this timeline does not record the "
+            "setting itself)."
+        ]
+    else:
+        items = [f"{stem}: not recorded in this timeline."]
+    if syncs:
+        detail = (
+            f"{_plural(len(syncs), 'clock sync')} "
+            f"({at_start} at session start, {after_load} after snapshot loads)"
+        )
+        if failed:
+            detail += f", {failed} failed (the offset was recorded instead)"
+        items.append(detail + ".")
+    elif policy and any(policy):
+        items.append(
+            "No sync was needed: the device clock was within 1 s of the host each time."
+        )
     return items
 
 
@@ -1195,6 +1264,8 @@ def build_coverage(ctx: ReportContext) -> dict:
                 "warn",
             )
         )
+        blocks.append(_heading("Clock quality", 2))
+        blocks.append({"type": "list", "items": [CLOCK_CAVEAT]})
         blocks.append(_heading("Masking", 2))
         blocks.append({"type": "list", "items": _cov_masking(ctx)})
         return {"blocks": blocks}
