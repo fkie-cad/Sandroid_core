@@ -61,15 +61,16 @@ def test_spawn_app_of_another_package_drops_the_attach_record():
     assert svc.get_app() is None
 
 
-def test_spawn_app_of_the_same_package_keeps_it_without_its_pid():
-    """Re-picking the attached app: its activity stays, its PID is stale."""
+def test_spawn_app_of_the_same_package_keeps_it_with_its_pid():
+    """⇧C re-pick of the attached app keeps its PID, so Space re-checks it."""
     svc = SpotlightService()
     svc.set_app(A, activity_name=".Main", pid=1)
 
     svc.set_spawn_app(A)
 
     assert svc.get_effective_package() == A
-    assert svc.get_pid() is None
+    assert svc.is_spawn_mode() is True
+    assert svc.get_pid() == 1
     assert svc.get_activity_name() == ".Main"
     svc.set_pid(2)
     assert svc.get_pid() == 2
@@ -89,6 +90,19 @@ def test_spawn_app_paused_uses_the_same_selection_rules(monkeypatch):
     assert svc.get_auto_resume() is False
     assert svc.get_app() is None
     assert svc.get_pid() is None
+
+
+def test_spawn_app_paused_of_the_same_package_drops_the_old_pid(monkeypatch):
+    """A fresh spawn of the attached app: the old process's PID is stale."""
+    monkeypatch.setattr(SpotlightService, "_spawn_listeners", [])
+    svc = SpotlightService(job_manager_factory=_FakeJobManager)
+    svc.set_app(A, activity_name=".Main", pid=1)
+
+    svc.spawn_app_paused(A)
+
+    assert svc.get_effective_package() == A
+    assert svc.get_pid() is None
+    assert svc.get_activity_name() == ".Main"
 
 
 def test_pid_getters_ignore_an_attach_record_of_another_package():

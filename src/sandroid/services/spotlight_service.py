@@ -426,7 +426,7 @@ class SpotlightService:
             ValueError: *package_name* is not a valid Android package name.
         """
         validate_package_name(package_name)
-        previous = self._select_spawn_package(package_name, auto_resume)
+        previous = self._select_spawn_package(package_name, auto_resume, keep_pid=True)
 
         self._logger.info(f"Set spawn app: {package_name} (auto_resume: {auto_resume})")
 
@@ -437,17 +437,22 @@ class SpotlightService:
             pid=None,
         )
 
-    def _select_spawn_package(self, package_name: str, auto_resume: bool) -> str | None:
+    def _select_spawn_package(
+        self, package_name: str, auto_resume: bool, *, keep_pid: bool = False
+    ) -> str | None:
         """Make *package_name* the spawn target (spawn mode on).
 
-        Shared by :meth:`set_spawn_app` and :meth:`spawn_app_paused`. A new
-        spawn target means any prior PID is stale: the spawn PID is reset, an
-        attach record of another package is dropped, and one of the same
-        package keeps its activity but loses its PID.
+        Shared by :meth:`set_spawn_app` and :meth:`spawn_app_paused`. The
+        spawn PID is reset and an attach record of another package is
+        dropped. An attach record of the same package keeps its activity; it
+        keeps its PID only with *keep_pid* (a ⇧C re-pick of the running app,
+        so Space still re-checks the PID instead of killing it by a spawn).
 
         Args:
             package_name: Package name to spawn.
             auto_resume: Whether to auto-resume after hooks load.
+            keep_pid: Keep a same-package attach record's PID. False when a
+                new process was just spawned (that PID is stale).
 
         Returns:
             The previous spawn package, or None.
@@ -456,7 +461,7 @@ class SpotlightService:
             previous = self._spawn_package
             if self._current_app and self._current_app.package_name != package_name:
                 self._current_app = None
-            elif self._current_app:
+            elif self._current_app and not keep_pid:
                 self._current_app.pid = None
             self._spawn_package = package_name
             self._spawn_pid = None
