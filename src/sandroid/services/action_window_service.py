@@ -142,17 +142,28 @@ class ActionWindowService:
             The action time that was set.
 
         Raises:
-            SystemExit: If the device time cannot be fetched.
+            DeviceTimeError: If the device time cannot be fetched (adb error
+                or no number in the output). Never ``SystemExit``: this runs on
+                worker threads (Play), where that would end the whole TUI.
         """
+        from sandroid.core.exceptions import DeviceTimeError
+
         adb = self._get_adb()
         output, error = adb.send_adb_command("shell date +%s")
 
         if error:
-            self._logger.critical(f"Could not grab time from emulator: {error.strip()}")
-            raise SystemExit(1)
+            self._logger.error(f"Could not grab time from emulator: {error.strip()}")
+            raise DeviceTimeError(f"Could not read the device time: {error.strip()}")
+        try:
+            action_time = int(str(output).strip())
+        except ValueError:
+            self._logger.error(f"Unexpected device time: {output!r}")
+            raise DeviceTimeError(
+                f"Unexpected device time output: {str(output).strip()[:80]!r}"
+            ) from None
 
         with self._lock:
-            self._action_time = int(output.strip())
+            self._action_time = action_time
             self._filesystem_checked = False
             self._changed_files_cache = {}
 

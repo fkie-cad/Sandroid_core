@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from sandroid.analysis.filters import DEFAULT_SYSTEM_NOISE_PATTERNS, SystemNoiseFilter
 from sandroid.analysis.run_config import ProgressUpdate, RunResult, StepError
 from sandroid.core.events.events import AnalysisCompleted, AnalysisStarted
+from sandroid.core.exceptions import DeviceTimeError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -182,6 +183,15 @@ class LoadSnapshotStep(Step):
             _reset_network(ctx)
 
 
+def _set_action_time(ctx: EngineContext) -> None:
+    """``ctx.toolbox.set_action_time()``, retried while adb is not ready
+    after a snapshot load; ``FatalStepError`` when it stays unreadable.
+    """
+    from sandroid.features.player import set_action_time_after_load
+
+    set_action_time_after_load(ctx.toolbox)
+
+
 def _network_reset_mode(config: Any) -> str:
     """``network_reset_after_snapshot`` of the run config, else of ``[analysis]``."""
     value = getattr(config, "network_reset_after_snapshot", None)
@@ -280,7 +290,7 @@ class ActionStep(Step):
         # processes/sockets and the changed-files scan have a duration to work
         # against (Risk 5). Duration is set once (subsequent runs reuse it).
         window = int(ctx.config.capture_window or 0)
-        ctx.toolbox.set_action_time()
+        _set_action_time(ctx)
         ctx.action_window_service.set_duration(window)
         if window > 0:
             time.sleep(window)
@@ -500,8 +510,9 @@ class DryRunBeginStep(Step):
     def run(self, ctx: EngineContext) -> None:
         logger.info("Dry run: measuring background noise (snapshot state, no replay)")
         ctx.action_window_service.start_dry_run()
-        # Reset the action time to "now" on the device for the noise window.
-        ctx.toolbox.set_action_time()
+        # Reset the action time to "now" on the device for the noise window
+        # (right after a snapshot load: adb may still be authorizing).
+        _set_action_time(ctx)
 
 
 class DryRunSleepStep(Step):
@@ -1218,7 +1229,9 @@ class AnalysisEngine:
                 if step.path_sensitive:
                     self._guard_device()
                 step.run(ctx)
-            except FatalStepError as exc:
+            except (FatalStepError, DeviceTimeError) as exc:
+                # No device time: the action window would be stale, so the
+                # run stops (a CLI then exits non-zero on result.error).
                 result.error = str(exc)
                 logger.error("Fatal step %s: %s", step.label, exc)
                 break

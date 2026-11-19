@@ -35,6 +35,16 @@ class MultipleDevicesError(DeviceNotAvailableError):
         )
 
 
+class DeviceTimeError(SandroidError, RuntimeError):
+    """The device time (``adb shell date +%s``) could not be read.
+
+    Typical right after a snapshot load, while adb still reports the device
+    as "authorizing". A normal exception (never ``SystemExit``): it is raised
+    on worker threads, where ``SystemExit`` would end the whole TUI. A CLI
+    reports it and exits non-zero at the top level.
+    """
+
+
 class APKDownloadError(SandroidError):
     """Base exception for APK download errors."""
 

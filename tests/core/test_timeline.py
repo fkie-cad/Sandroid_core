@@ -1093,7 +1093,58 @@ def test_emergency_cleanup_and_the_launcher_close_the_timeline(monkeypatch):
     monkeypatch.setattr(qc, "shutdown_network", lambda timeout=0: None)
     qc.emergency_cleanup()
     launcher._close_timeline()
-    assert calls == [("forced-exit", 1.0), ("quit", 1.5)]
+    launcher._close_timeline("crash")
+    assert calls == [("forced-exit", 1.0), ("exit", 1.5), ("crash", 1.5)]
+
+
+def test_the_close_reason_after_the_tui_is_honest(monkeypatch):
+    """E2E crash: a worker's SystemExit(1) ended the TUI and the timeline
+    said ``closed (quit)``. A normal quit closes it as "quit" itself; what
+    the launcher or atexit closes is "exit", or "crash" when it was one.
+    """
+    import sys
+
+    from sandroid.tui import launcher
+
+    assert launcher.exit_close_reason(0) == "exit"
+    assert launcher.exit_close_reason(None) == "exit"
+    assert launcher.exit_close_reason(1) == "crash"
+    monkeypatch.delattr(sys, "last_exc", raising=False)
+    monkeypatch.delattr(sys, "last_value", raising=False)
+    assert timeline._atexit_reason() == "exit"
+    monkeypatch.setattr(sys, "last_value", RuntimeError("boom"), raising=False)
+    assert timeline._atexit_reason() == "crash"
+
+
+def test_run_tui_closes_the_timeline_as_crash_when_app_run_raises(monkeypatch):
+    from sandroid.tui import app as tui_app
+    from sandroid.tui import launcher
+    from sandroid.tui.controllers import quit_controller as qc
+
+    class CrashingApp:
+        return_code = None
+
+        def __init__(self, **kw):
+            pass
+
+        def run(self):
+            raise SystemExit(1)  # a worker's SystemExit, as in the E2E crash
+
+    reasons = []
+    monkeypatch.setattr(tui_app, "SandroidTUI", CrashingApp)
+    monkeypatch.setattr(launcher.atexit, "register", lambda fn: None)
+    monkeypatch.setattr(launcher.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(launcher, "reset_terminal", lambda: None)
+    monkeypatch.setattr(qc, "enable_hard_exit", lambda enabled=True: None)
+    monkeypatch.setattr(qc, "mark_app_returned", lambda: None)
+    monkeypatch.setattr(
+        launcher,
+        "_shutdown_services",
+        lambda task, capture, close_reason="exit": reasons.append(close_reason),
+    )
+    with pytest.raises(SystemExit):
+        launcher.run_tui(startup_config=None)
+    assert reasons == ["crash"]
 
 
 def test_close_is_idempotent_and_bounded(timeline_sink):

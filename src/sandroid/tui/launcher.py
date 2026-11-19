@@ -125,17 +125,33 @@ def run_tui(
     if immediate_exit:
         signal.signal(signal.SIGINT, signal_handler)
 
+    # The timeline's close reason when the quit itself did not close it: an
+    # app.run() that raised (e.g. SystemExit from a worker) or returned a
+    # non-zero code is a crash, never a "quit".
+    close_reason = "crash"
     try:
         logger.debug("starting TUI app.run()")
         app.run()
-        return app.return_code or 0
+        rc = app.return_code or 0
+        close_reason = exit_close_reason(rc)
+        return rc
     finally:
         mark_app_returned()
         reset_terminal()
-        _shutdown_services(get_task_service, get_network_capture_service)
+        _shutdown_services(get_task_service, get_network_capture_service, close_reason)
 
 
-def _shutdown_services(get_task_service, get_network_capture_service) -> None:
+def exit_close_reason(code: object) -> str:
+    """The timeline close reason for a process exit code: ``"exit"`` for
+    0/None, ``"crash"`` otherwise (a normal quit closes it as ``"quit"``
+    before this).
+    """
+    return "exit" if code in (0, None) else "crash"
+
+
+def _shutdown_services(
+    get_task_service, get_network_capture_service, close_reason: str = "exit"
+) -> None:
     """Run all post-TUI cleanup steps."""
     # First: stop any replay still tapping on the device. Its worker thread
     # outlives the app (crash or quit) and used to keep replaying for minutes.
@@ -148,14 +164,14 @@ def _shutdown_services(get_task_service, get_network_capture_service) -> None:
         lambda: _stop_network_capture(get_network_capture_service), timeout=3.0
     )
     # The session timeline last (idempotent: a no-op after the quit closed it).
-    _cleanup_with_timeout(_close_timeline, timeout=2.0)
+    _cleanup_with_timeout(lambda: _close_timeline(close_reason), timeout=2.0)
     _reset_tui_mode()
 
 
-def _close_timeline() -> None:
+def _close_timeline(reason: str = "exit") -> None:
     from sandroid.core.timeline import close_timeline
 
-    close_timeline("quit", 1.5)
+    close_timeline(reason, 1.5)
 
 
 def _shutdown_network() -> None:
