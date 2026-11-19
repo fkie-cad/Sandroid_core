@@ -580,7 +580,6 @@ ShellHeader #timeline-banner {
     color: #FDBA74;
 }
 
-ShellHeader #device-clock,
 ShellHeader #label-note {
     color: #FFD27A;
 }

@@ -567,7 +567,6 @@ ShellHeader {
     color: #F2B84B;
 }
 
-#device-clock,
 #label-note {
     color: #E6CD5A;
 }

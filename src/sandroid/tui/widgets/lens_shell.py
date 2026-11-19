@@ -465,7 +465,7 @@ class ShellHeader(Header):
         display: none;
         width: auto;
         padding: 0 1 0 0;
-        color: #5b6479;
+        color: $lens-dim;
     }
     ShellHeader #device-clock.-sync,
     ShellHeader #device-clock.-unknown {
@@ -473,7 +473,7 @@ class ShellHeader(Header):
     }
     ShellHeader #device-clock.-off {
         display: block;
-        color: #fbbf24;
+        color: $lens-warn;
     }
     ShellHeader #label-note,
     ShellHeader #tracking-dot,
