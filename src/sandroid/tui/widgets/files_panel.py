@@ -2496,6 +2496,7 @@ class FilesPanel(Widget):
                     watched=r.watched is not None,
                     review_kind=r.review_kind,
                     scope=self._scope,
+                    diff=r.review_diff,
                 )
                 for r in self._review_rows
             ]

@@ -27,6 +27,7 @@ from test_files_lens import (
     _fse,
     _Harness,
     _items,
+    _run_dir,
 )
 from test_network_lens import (
     _SPECS,
@@ -564,3 +565,43 @@ async def test_files_row_source_snapshot(store):
         rows = await asyncio.to_thread(store.snapshot_rows, "files")
         assert {r["key"] for r in rows if r["shown"]} == {PREFS}
     assert not store.has_row_source("files")
+
+
+async def test_network_review_snapshot_points_at_the_run_bundle(flow_dir, store):
+    from sandroid.tui.widgets.network_panel import FlowRow
+
+    bundle = flow_dir.parent / "run" / "network"
+    records = write_flows(bundle, time.time() - 500)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _network(app, pilot, flow_dir)
+        panel._scope = "/runs/run-1"
+        panel._review = [FlowRow.from_record(r, bundle) for r in records]
+        panel._rebuild()
+        rows = await asyncio.to_thread(store.snapshot_rows, "network")
+        by_key = {r["key"]: r for r in rows}
+        assert by_key["flow-2"]["flow_dir"] == str(bundle)
+        assert by_key["flow-2"]["scope"] == "/runs/run-1"
+        assert by_key["flow-2"]["error"] is None
+        assert by_key["flow-6"]["error"] == "Connection reset by peer"
+
+
+async def test_files_review_snapshot_carries_the_diff_head(store, tmp_path):
+    from sandroid.tui.widgets.highlight_bar import DIFF_HEAD_CAP, diff_head
+    from sandroid.tui.widgets.lens_shell import ScopeChanged
+
+    run_dir = _run_dir(tmp_path)
+    app = _Harness()
+    async with app.run_test(size=WIDE) as pilot:
+        panel = app.query_one(FilesPanel)
+        panel.post_message(ScopeChanged(str(run_dir), "Run #3"))
+        await until(pilot, lambda: panel._review_record is not None)
+        rows = await asyncio.to_thread(store.snapshot_rows, "files")
+        by_key = {r["key"]: r for r in rows}
+        prefs = by_key[PREFS]
+        assert prefs["review_kind"] == "changed"
+        assert prefs["scope"] == str(run_dir)
+        assert "a=false" in prefs["diff_head"]
+        assert by_key[AAID]["diff_head"] is None
+    head = diff_head(["x" * 4000])
+    assert len(head) == DIFF_HEAD_CAP

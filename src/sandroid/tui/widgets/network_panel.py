@@ -2532,7 +2532,11 @@ class NetworkPanel(Widget):
         ``shown`` = passes the lens's current filters. Rows without a flow id
         (stdout-only TLS failures) cannot be highlighted and are left out.
         """
-        return [flow_snapshot(r, self._passes(r)) for r in self._model() if r.flow_id]
+        return [
+            flow_snapshot(r, self._passes(r), self._scope)
+            for r in self._model()
+            if r.flow_id
+        ]
 
     def _leave_highlight_filter(self) -> bool:
         if not self._hl.leave_filter():

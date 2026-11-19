@@ -538,8 +538,12 @@ class HighlightBar(Static):
 # --------------------------------------------------------------------------
 
 
-def flow_snapshot(row: Any, shown: bool) -> dict:
-    """One Network row (``FlowRow``) for the AI tools; key = flow id."""
+def flow_snapshot(row: Any, shown: bool, scope: str | None = None) -> dict:
+    """One Network row (``FlowRow``) for the AI tools; key = flow id.
+
+    ``flow_dir`` is where ``details/<id>.json`` lives: the session's flow
+    log live, the run bundle's ``network/`` folder in REVIEW.
+    """
     if row.kind == "tls":
         kind = "tls"
     elif row.error:
@@ -563,6 +567,8 @@ def flow_snapshot(row: Any, shown: bool) -> dict:
         "req_bytes": row.req_bytes,
         "resp_bytes": row.resp_bytes,
         "kind": kind,
+        "error": row.error,
+        "scope": scope,
         "phase": row.phase,
         "time": row.ts,
         "flow_dir": str(flow_dir) if flow_dir is not None else None,
@@ -585,10 +591,12 @@ def file_snapshot(
     watched: bool = False,
     review_kind: str | None = None,
     scope: str | None = None,
+    diff: list[str] | str | None = None,
 ) -> dict:
     """One Files row for the AI tools; key = canonical device path.
 
-    ``first`` / ``last`` are epoch seconds (None when unknown).
+    ``first`` / ``last`` are epoch seconds (None when unknown). ``diff``
+    (REVIEW: the run's diff lines) becomes ``diff_head``, capped.
     """
     from .monitor_view import OPS, app_package
 
@@ -616,7 +624,20 @@ def file_snapshot(
         "app": app_package(path) or "",
         "review_kind": review_kind,
         "scope": scope,
+        "diff_head": diff_head(diff),
     }
+
+
+#: ``diff_head`` cap (characters).
+DIFF_HEAD_CAP = 1500
+
+
+def diff_head(diff: list[str] | str | None, cap: int = DIFF_HEAD_CAP) -> str | None:
+    """The head of a run's diff for one file (None: no diff)."""
+    if not diff:
+        return None
+    text = diff if isinstance(diff, str) else "\n".join(str(line) for line in diff)
+    return text if len(text) <= cap else text[: cap - 1] + "…"
 
 
 __all__ = [
