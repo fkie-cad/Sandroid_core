@@ -758,6 +758,8 @@ AI Chat (``[ai]``) -- EXPERIMENTAL
    #               mask_at = 0.50, summarize_at = 0.85, output_reserve_tokens
    # [ai.agents]   gateway_concurrency = 4, researcher_max = 3,
    #               operator_max = 1, max_auto_wakes = 3
+   # [ai.row_classify]  concurrency = 2, batch_rows = 40, batch_tokens = 24000,
+   #               max_rows = 1000, max_tokens = 4096 (classify_rows)
 
    # Always-available host directory for the AI's file tools. Bare relative
    # paths given to list_host_dir/read_host_file/push_path/install_apk are

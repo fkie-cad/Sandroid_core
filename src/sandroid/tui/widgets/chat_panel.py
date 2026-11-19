@@ -96,6 +96,7 @@ from sandroid.tui.widgets.chat_view import (
     format_retry,
     format_tokens,
     humanize_tool_name,
+    progress_text,
 )
 from sandroid.tui.widgets.tool_permission_prompt import ToolPermissionPrompt
 
@@ -1717,6 +1718,12 @@ class ChatPanel(Widget):
         if isinstance(block, ToolBlock):
             apply_tool_result(block, p)
         self._set_state("thinking")
+
+    def _on_tool_progress(self, ev: AgentEvent, p: dict) -> None:
+        """A long call's progress on its chip (``classifying 120/412 ...``)."""
+        block = self._transcript().block(f"tool:{ev.turn_id}:{p.get('call_id', '')}")
+        if isinstance(block, ToolBlock) and block.running:
+            block.set_progress(progress_text(p))
 
     def _on_approval_request(self, ev: AgentEvent, p: dict) -> None:
         rid = p.get("request_id")

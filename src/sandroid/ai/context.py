@@ -227,6 +227,31 @@ def _describe_app_proxies() -> str | None:
         return None
 
 
+def _describe_lens_highlights() -> str | None:
+    """Describe the AI highlight sets of the Network/Files lenses, if any.
+
+    In-memory read of the highlight store (no files, no device). Omitted when
+    there is no set.
+    """
+    try:
+        from sandroid.services.row_highlights import get_row_highlights
+
+        store = get_row_highlights()
+        sets = store.sets()
+        if not sets:
+            return None
+        parts = []
+        for hs in sets:
+            mode = "filter" if store.filter_set(hs.lens) == hs.id else "highlight"
+            state = "" if hs.complete else ", partial"
+            parts.append(
+                f'{hs.lens.capitalize()} "{hs.label}" {mode} {hs.count}{state} ({hs.id})'
+            )
+        return "Lens highlights: " + "; ".join(parts) + "."
+    except Exception:
+        return None
+
+
 # One helper per cheap, in-memory state source -- see the module docstring
 # for the rules every helper follows.
 _DESCRIBERS: tuple[Callable[[], str | None], ...] = (
@@ -239,6 +264,7 @@ _DESCRIBERS: tuple[Callable[[], str | None], ...] = (
     _describe_spotlight_files,
     _describe_mitmproxy,
     _describe_app_proxies,
+    _describe_lens_highlights,
 )
 
 

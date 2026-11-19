@@ -22,7 +22,9 @@ from sandroid.ai.client import ModelProfile, StreamChunk, ToolCallDelta, Usage
 from sandroid.ai.loop import (
     RunContext,
     ToolExecutor,
+    current_call_id,
     repair_tool_pairs,
+    report_tool_progress,
     run_turn,
     tool_time_remaining,
 )
@@ -258,6 +260,39 @@ def test_tool_sees_the_time_left_before_the_executor_gives_up(perm_store, arbite
     assert call(executor(reg), "probe").status == "ok"
     assert 25 < seen["left"] <= 30
     assert tool_time_remaining() is None
+
+
+def test_tool_progress_carries_the_call_id_and_is_throttled(perm_store, arbiter):
+    events = []
+    seen = {}
+
+    def busy():
+        seen["call_id"] = current_call_id()
+        sent = [report_tool_progress(0, 10, matched=0, note="classifying", force=True)]
+        sent.append(report_tool_progress(5, 10, matched=1, note="classifying"))
+        sent.append(report_tool_progress(10, 10, matched=2, note="done", force=True))
+        seen["sent"] = sent
+        return {"ok": True}
+
+    reg = make_registry(busy=(busy, (), 30))
+    ex = executor(reg, agent_id="orchestrator", sink=events.append)
+    assert call(ex, "busy", call_id="call-42").status == "ok"
+    assert seen["call_id"] == "call-42"
+    assert seen["sent"] == [True, False, True]  # the middle one is throttled
+    progress = [e for e in events if e.type == "tool_progress"]
+    assert [e.payload["call_id"] for e in progress] == ["call-42", "call-42"]
+    assert progress[0].payload == {
+        "call_id": "call-42",
+        "done": 0,
+        "total": 10,
+        "matched": 0,
+        "note": "classifying",
+    }
+    types = [e.type for e in events]
+    assert types.index("tool_call") < types.index("tool_progress")
+    # Outside a tool call it is a no-op.
+    assert report_tool_progress(1, 2) is False
+    assert current_call_id() is None
 
 
 # -- result fallbacks and history repair ----------------------------------------------

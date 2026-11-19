@@ -124,6 +124,20 @@ def _live_ai_config() -> Any:
     return None
 
 
+def _bind_row_highlights(root: Path) -> None:
+    """Point the lens highlight store at this session folder (session switch).
+
+    The store keeps ``<root>/ai/highlights.json``; the same root again is a
+    no-op. Never raises.
+    """
+    try:
+        from sandroid.services.row_highlights import get_row_highlights
+
+        get_row_highlights().bind_folder(root)
+    except Exception:
+        logger.debug("binding row highlights failed", exc_info=True)
+
+
 def new_thread_id() -> str:
     """Return a fresh, sortable thread id (``t-YYYYmmdd-HHMMSS-xxxx``)."""
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
@@ -548,6 +562,8 @@ class AgentSession:
         )
         self.prompt_hash = hashlib.sha256(self.system_prompt.encode()).hexdigest()
         self.result_store = get_result_store(self.root)
+        if kind == "chat" and depth == 0 and self.root is not None:
+            _bind_row_highlights(self.root)
         self.meter = self._make_meter()
         self.loaded = LoadedTools()
         self.messages: list[dict] = [{"role": "system", "content": self.system_prompt}]

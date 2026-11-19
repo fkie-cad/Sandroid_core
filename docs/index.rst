@@ -107,6 +107,7 @@ Developer Documentation
    development/contributing
    development/architecture
    development/ai_foundations
+   development/ai_row_highlights
    development/testing
    development/migration_guide
 

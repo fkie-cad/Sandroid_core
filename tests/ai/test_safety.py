@@ -378,11 +378,14 @@ def test_tools_named_like_mutations_are_never_read_only():
         "inject_", "push_", "kill_", "delete_", "load_", "restart_",
         "enable_", "disable_", "create_", "launch_",
     )  # fmt: skip
+    # Tools that only change what a lens shows (no device or file state).
+    view_only = {"clear_highlights"}
     registry = get_tool_registry()
     offenders = [
         name
         for name in registry.names()
         if name.startswith(mutating_prefixes)
+        and name not in view_only
         and registry.get_spec(name).risk == RiskTier.READ_ONLY
     ]
     assert offenders == []

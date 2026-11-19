@@ -113,8 +113,11 @@ ORCHESTRATOR_AGENT_TOOLS: tuple[str, ...] = (
 AGENT_TOOL_NAMES = frozenset(ORCHESTRATOR_AGENT_TOOLS)
 
 #: Tools that refuse to run outside the orchestrator's own turn (they could
-#: restart the app the analyst is watching); hidden from subagents.
-ORCHESTRATOR_ONLY_TOOL_NAMES = frozenset({"start_spotlight_app"})
+#: restart the app the analyst is watching, or change the lens view the
+#: analyst is looking at); hidden from subagents.
+ORCHESTRATOR_ONLY_TOOL_NAMES = frozenset(
+    {"start_spotlight_app", "classify_rows", "highlight_rows", "clear_highlights"}
+)
 
 #: Tools that hold a device lease across an asynchronous completion (released
 #: by a detached worker, not when the dispatch returns). A subagent's

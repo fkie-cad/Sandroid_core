@@ -498,6 +498,46 @@ async def test_failed_tool_call_shows_an_error_chip(sessions):
         assert "not_loaded" in tool.chip.plain
 
 
+async def test_tool_progress_updates_the_running_chip(sessions):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _push(
+            pilot,
+            panel,
+            ev(
+                "tool_call",
+                call_id="c7",
+                name="classify_rows",
+                args={"lens": "network"},
+            ),
+            ev(
+                "tool_progress",
+                call_id="c7",
+                done=120,
+                total=412,
+                matched=9,
+                note="classifying",
+            ),
+        )
+        (tool,) = _blocks(panel, ToolBlock)
+        assert tool.running
+        assert tool.chip is None
+        assert tool.progress.plain == "└ classifying 120/412 · 9 matched"
+        assert "classifying 120/412 · 9 matched" in tool.render().plain
+        # A subagent's progress and a later result: the result chip wins.
+        await _push(
+            pilot,
+            panel,
+            ev("tool_progress", who="a-re-xxxxxx", call_id="c7", done=1, total=2),
+            ev("tool_result", call_id="c7", status="ok", summary="9 of 412"),
+            ev("tool_progress", call_id="c7", done=412, total=412, matched=9),
+        )
+        assert tool.progress is None
+        assert "9 of 412" in tool.chip.plain
+        assert "classifying" not in tool.render().plain
+
+
 async def test_spawn_agent_shows_the_full_task(sessions):
     app = _Harness()
     async with app.run_test(size=(100, 40)) as pilot:

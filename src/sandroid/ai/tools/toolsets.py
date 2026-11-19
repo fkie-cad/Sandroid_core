@@ -72,6 +72,10 @@ TOOLSET_DESCRIPTIONS: dict[str, str] = {
     "emulator": "snapshots and emulator restart/kill",
     "monitor": "file-system monitor: live changes and per-file diffs",
     "recording": "record and replay device input, past runs and their diffs",
+    "lenses": (
+        "find, AI-classify, highlight and filter rows in the Network and Files "
+        "lenses"
+    ),
     "agents": "subagents (orchestrator only)",
 }
 
@@ -184,6 +188,13 @@ TOOLSET_TABLE: dict[str, ToolsetEntry] = {
     "get_replay_status": _e("recording"),
     "list_recent_runs": _e("recording"),
     "get_run_detail": _e("recording"),
+    # lenses (AI row highlights). classify_rows runs batched model requests,
+    # bounded by its own deadline handling (tool_time_remaining).
+    "find_rows": _e("lenses", core=True, timeout_s=60),
+    "classify_rows": _e("lenses", core=True, timeout_s=_LONG),
+    "highlight_rows": _e("lenses", core=True, timeout_s=30),
+    "clear_highlights": _e("lenses", core=True, timeout_s=30),
+    "get_rows": _e("lenses"),
     # agents (ai/agents.py; registered lazily by orchestrator_extra_tools, so
     # they may be absent). spawn_agent's risk depends on its profile (operator spawns ask,
     # researcher spawns do not), so remembered rules are keyed by profile; with

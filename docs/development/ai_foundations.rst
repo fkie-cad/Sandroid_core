@@ -146,6 +146,9 @@ Every event is ``AgentEvent{type, agent_id, parent_id, thread_id, turn_id, seq, 
 | ``tool_result``                  | call_id, status (ok/error/denied/cancelled/timeout),          |
 |                                  | error_code, summary, bytes, result_id, truncated, duration_ms |
 +----------------------------------+---------------------------------------------------------------+
+| ``tool_progress``                | call_id, done, total, matched, note (from the tool's helper   |
+|                                  | thread, at most 1/s; see :doc:`ai_row_highlights`)            |
++----------------------------------+---------------------------------------------------------------+
 | ``usage``                        | prompt, completion, reasoning, cumulative, context_used,      |
 |                                  | context_window                                                |
 +----------------------------------+---------------------------------------------------------------+
@@ -271,9 +274,9 @@ Hooks:
 
   - Initial sets: ``core``, ``device``, ``apps``, ``processes``, ``files``, ``network``, ``proxy``,
     ``certs``, ``frida``, ``capture``, ``emulator``, ``monitor``, ``recording``, plus
-    ``mcp:<server>``.
-  - ``core`` holds about 15–20 tools: state/spotlight, device and app info, foreground
-    app, package details, screenshot, flows summary and the like.
+    ``mcp:<server>``. Later: ``lenses`` (AI row highlights, :doc:`ai_row_highlights`).
+  - ``core`` holds about 15–22 tools: state/spotlight, device and app info, foreground
+    app, package details, screenshot, flows summary, the four lens-row tools and the like.
 
 - **``tool_search(query)``:**
 

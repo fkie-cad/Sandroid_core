@@ -61,12 +61,13 @@ def test_every_table_name_is_registered_except_optional_agent_tools():
     assert stale == []
 
 
-def test_every_core_name_exists_and_core_size_is_15_to_20():
+def test_every_core_name_exists_and_core_size_is_15_to_22():
+    # 22: the four lens-row tools (find/classify/highlight/clear) are core.
     registered = set(get_tool_registry().names())
     core = core_tool_names()
     assert set(core) <= registered
     assert set(META_TOOL_NAMES) <= set(core)
-    assert 15 <= len(core) <= 20
+    assert 15 <= len(core) <= 22
 
 
 def test_toolsets_are_known_and_registered_specs_carry_them():

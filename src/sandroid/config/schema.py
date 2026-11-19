@@ -460,6 +460,41 @@ class AIAgentsConfig(BaseModel):
     )
 
 
+class AIRowClassifyConfig(BaseModel):
+    """The batched row classifier of ``classify_rows`` (``ai.row_classify``)."""
+
+    concurrency: int = Field(
+        default=2,
+        ge=1,
+        le=8,
+        description=(
+            "Classifier requests in flight (each takes a non-reserved gateway "
+            "slot, so the chat keeps its own)"
+        ),
+    )
+    batch_rows: int = Field(
+        default=40, ge=1, le=200, description="Rows per classifier request"
+    )
+    batch_tokens: int = Field(
+        default=24_000,
+        ge=1000,
+        le=200_000,
+        description="Approximate row-digest tokens per classifier request",
+    )
+    max_rows: int = Field(
+        default=1000,
+        ge=1,
+        le=2000,
+        description=(
+            "Default row limit of one classify_rows call (the tool's max_rows "
+            "can raise it up to 2000)"
+        ),
+    )
+    max_tokens: int = Field(
+        default=4096, ge=256, le=32_768, description="Output tokens per request"
+    )
+
+
 class AIConfig(BaseModel):
     """Chat/agent LLM connection config (EXPERIMENTAL feature, off by default).
 
@@ -610,6 +645,7 @@ class AIConfig(BaseModel):
     budgets: AIBudgetsConfig = Field(default_factory=AIBudgetsConfig)
     context: AIContextConfig = Field(default_factory=AIContextConfig)
     agents: AIAgentsConfig = Field(default_factory=AIAgentsConfig)
+    row_classify: AIRowClassifyConfig = Field(default_factory=AIRowClassifyConfig)
 
     @property
     def mascot_style(self) -> str:

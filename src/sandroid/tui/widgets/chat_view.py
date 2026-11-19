@@ -375,6 +375,29 @@ def format_chip(
     return Content.assemble(*parts)
 
 
+def format_progress(text: str) -> Content:
+    """A running call's progress line: ``└ classifying 120/412 · 9 matched``."""
+    return Content.assemble(("└ ", "$chat-muted"), (text, "$chat-muted"))
+
+
+def progress_text(payload: Mapping[str, Any]) -> str:
+    """Chip text of a ``tool_progress`` payload.
+
+    ``{"note": "classifying", "done": 120, "total": 412, "matched": 9}`` ->
+    ``"classifying 120/412 · 9 matched"``.
+    """
+    note = str(payload.get("note") or "working")
+    done = payload.get("done")
+    total = payload.get("total")
+    text = note
+    if isinstance(done, int):
+        text += f" {done}/{total}" if isinstance(total, int) else f" {done}"
+    matched = payload.get("matched")
+    if isinstance(matched, int):
+        text += f" · {matched} matched"
+    return text
+
+
 def format_card_title(
     role: str,
     agent_id: str,
@@ -923,6 +946,9 @@ class ToolBlock(Widget, TranscriptBlock):
         #: The analyst's answer to this call's approval (shown above the chip).
         self.decision: Content | None = None
         self.decision_approved: bool | None = None
+        #: Live progress of a long call (``└ classifying 120/412 · 9 matched``),
+        #: shown while it runs; replaced by the chip.
+        self.progress: Content | None = None
         self.running = running
         self._spin = 0
         self._timer = None
@@ -982,8 +1008,21 @@ class ToolBlock(Widget, TranscriptBlock):
         """Any chip line (e.g. ``└ ◆ r2 running · see agents bar``)."""
         self.chip = chip if isinstance(chip, Content) else Content(chip)
         self.ok = ok
+        self.progress = None
         self._stop()
         self.refresh(layout=True)
+
+    def set_progress(self, text: str) -> None:
+        """Progress of the running call (``└ classifying 120/412 · 9 matched``).
+
+        Ignored once the call has its chip.
+        """
+        if self.chip is not None or not text:
+            return
+        line = format_progress(text)
+        grew = self.progress is None
+        self.progress = line
+        self.refresh(layout=grew)
 
     def call_line(self, width: int | None = None) -> Content:
         width = width or self.content_size.width or 100
@@ -1003,10 +1042,16 @@ class ToolBlock(Widget, TranscriptBlock):
             lines.append(Content.assemble("  ", self.decision))
         if self.chip is not None:
             lines.append(Content.assemble("  ", self.chip))
+        elif self.progress is not None:
+            lines.append(Content.assemble("  ", self.progress))
         return Content("\n").join(lines)
 
     def get_content_height(self, container, viewport, width: int) -> int:
-        return 1 + (self.decision is not None) + (self.chip is not None)
+        return (
+            1
+            + (self.decision is not None)
+            + (self.chip is not None or self.progress is not None)
+        )
 
 
 class AgentCard(Widget, TranscriptBlock, can_focus=True):
@@ -1604,12 +1649,14 @@ __all__ = [
     "format_empty_state",
     "format_header",
     "format_meter",
+    "format_progress",
     "format_retry",
     "format_tokens",
     "humanize_tool_name",
     "mascot_frames",
     "meter_glyph",
     "meter_style",
+    "progress_text",
     "resolve_mascot_style",
     "ruled",
 ]

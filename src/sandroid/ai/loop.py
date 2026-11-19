@@ -80,6 +80,7 @@ EVENT_TYPES = frozenset(
         "approval_request",
         "approval_resolved",
         "tool_result",
+        "tool_progress",
         "usage",
         "compaction",
         "agent_spawned",
@@ -137,8 +138,11 @@ class AgentEvent:
 class EventSink(Protocol):
     """Receives :class:`AgentEvent` objects.
 
-    Called on the turn's worker thread (never on a tool helper thread), in
-    order. It must not block; a UI sink marshals to its own thread and
+    Called on the turn's worker thread, in order -- except
+    ``tool_progress``, which a long tool reports from its helper thread
+    (:func:`report_tool_progress`), between its ``tool_call`` and
+    ``tool_result``. Subagent events are forwarded from their own threads
+    too. It must not block; a UI sink marshals to its own thread and
     coalesces deltas. Exceptions are logged and ignored.
     """
 
@@ -291,6 +295,63 @@ def current_run_context() -> RunContext | None:
 _tool_deadline: ContextVar[float | None] = ContextVar(
     "sandroid_ai_tool_deadline", default=None
 )
+
+
+#: ``(call_id, run context)`` of the tool call running in this context.
+_current_call: ContextVar[tuple[str, RunContext] | None] = ContextVar(
+    "sandroid_ai_current_call", default=None
+)
+
+#: ``tool_progress`` events are sent at most this often per call (seconds).
+PROGRESS_INTERVAL_S = 1.0
+
+_progress_lock = threading.Lock()
+#: call_id -> monotonic time of its last ``tool_progress`` event.
+_progress_last: dict[str, float] = {}
+
+
+def current_call_id() -> str | None:
+    """The id of the tool call running in this context, if any."""
+    current = _current_call.get()
+    return current[0] if current is not None else None
+
+
+def report_tool_progress(
+    done: int,
+    total: int | None = None,
+    *,
+    matched: int | None = None,
+    note: str = "",
+    force: bool = False,
+) -> bool:
+    """Send a ``tool_progress`` event for the running tool call (any thread).
+
+    Throttled to one event per :data:`PROGRESS_INTERVAL_S` per call (unless
+    *force*). A no-op outside a tool call. Payload: ``{call_id, name?, done,
+    total, matched, note}``.
+
+    Returns:
+        Whether an event was sent.
+    """
+    current = _current_call.get()
+    if current is None:
+        return False
+    call_id, ctx = current
+    now = time.monotonic()
+    with _progress_lock:
+        last = _progress_last.get(call_id)
+        if not force and last is not None and now - last < PROGRESS_INTERVAL_S:
+            return False
+        _progress_last[call_id] = now
+    ctx.emit(
+        "tool_progress",
+        call_id=call_id,
+        done=int(done),
+        total=None if total is None else int(total),
+        matched=None if matched is None else int(matched),
+        note=str(note or ""),
+    )
+    return True
 
 
 def tool_time_remaining() -> float | None:
@@ -619,7 +680,7 @@ class ToolExecutor:
                 )
             handle = claimed
         try:
-            result, exc = self._dispatch(spec, args, handle)
+            result, exc = self._dispatch(spec, args, handle, call_id=call_id)
         except BaseException:
             # The dispatch machinery itself failed (e.g. no thread): the
             # tool never ran, so its leases are rolled back now.
@@ -718,7 +779,12 @@ class ToolExecutor:
         )
 
     def _dispatch(
-        self, spec: ToolSpec, args: dict, handle: LeaseHandle | None
+        self,
+        spec: ToolSpec,
+        args: dict,
+        handle: LeaseHandle | None,
+        *,
+        call_id: str = "",
     ) -> tuple[Any, BaseException | None]:
         """Run the tool on a helper thread; return ``(result, exception)``."""
         ctx = self.ctx
@@ -733,6 +799,7 @@ class ToolExecutor:
             from sandroid.core.timeline import acting_as
 
             _tool_deadline.set(deadline)
+            _current_call.set((call_id, ctx) if call_id else None)
             result: Any = None
             error: BaseException | None = None
             try:
@@ -740,6 +807,9 @@ class ToolExecutor:
                     result = registry.dispatch(spec.name, args)
             except BaseException as exc:  # reported to the model
                 error = exc
+            if call_id:
+                with _progress_lock:
+                    _progress_last.pop(call_id, None)
             with lock:
                 state["done"] = True
                 state["result"] = result
@@ -1433,9 +1503,11 @@ __all__ = [
     "ToolOutcome",
     "TurnResult",
     "build_request_messages",
+    "current_call_id",
     "current_run_context",
     "install_permission_resolver",
     "repair_tool_pairs",
+    "report_tool_progress",
     "run_turn",
     "summarize_result",
     "tool_time_remaining",
