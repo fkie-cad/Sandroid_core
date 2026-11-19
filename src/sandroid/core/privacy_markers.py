@@ -314,7 +314,15 @@ def _encoded_needles(marker: Marker, form: str, name: str) -> list[Needle]:
             )
     out += _base64_needles(marker, raw, name, confidence)
 
-    cases = {form: name, form.lower(): f"lower({name})", form.upper(): f"upper({name})"}
+    # The plainest label wins when cases coincide (a value without letters):
+    # a later case never replaces an earlier one's label.
+    cases: dict[str, str] = {}
+    for text, case_name in (
+        (form, name),
+        (form.lower(), f"lower({name})"),
+        (form.upper(), f"upper({name})"),
+    ):
+        cases.setdefault(text, case_name)
     for text, case_name in cases.items():
         data = text.encode("utf-8")
         for algo in _HASHES:

@@ -198,8 +198,12 @@ def test_flow_scan_parts_echo_and_timeline(svc, flow_dir, folder):
     # Records on disk mirror memory; the ledger has one line per scan.
     written = (folder / "privacy" / "hits.jsonl").read_text().splitlines()
     assert len(written) == len(hits)
-    coverage = (folder / "privacy" / "coverage.jsonl").read_text().splitlines()
-    assert len(coverage) == 2
+    coverage = _coverage(folder)
+    assert len([c for c in coverage if c["skip"] != "markers"]) == 2
+    # The marker set both scans name is defined once.
+    defined = [c for c in coverage if c["skip"] == "markers"]
+    assert [c["set"] for c in defined] == [coverage[1]["set"]]
+    assert coverage[1]["set"] == coverage[2]["set"]
 
 
 def test_live_flow_ref_points_at_the_net_line(svc, flow_dir):
@@ -465,6 +469,11 @@ def test_wal_member_and_new_vs_repeat(svc):
     assert svc.tags_for_file(DB)[0].party == "stored"
 
 
+def _item_lines(folder: Path) -> list[dict]:
+    """Coverage lines of scanned items (not the marker set definitions)."""
+    return [c for c in _coverage(folder) if c.get("skip") != "markers"]
+
+
 def test_retro_scan_is_idempotent_per_fingerprint(svc, flow_dir, folder):
     _standard_flow(flow_dir)
     _version(PREFS, 1, {"ids.xml": f"<string>{AD_ID}</string>".encode()})
@@ -476,6 +485,8 @@ def test_retro_scan_is_idempotent_per_fingerprint(svc, flow_dir, folder):
     assert {h.source["type"] for h in first} == {"flow", "file"}
     coverage_file = folder / "privacy" / "coverage.jsonl"
     n_cov = len(coverage_file.read_text().splitlines())
+    n_items = len(_item_lines(folder))
+    assert n_items == 2
 
     # A fresh service (restart) loads the ledger: nothing is scanned again.
     again = ps.PrivacyScanService(
@@ -486,20 +497,235 @@ def test_retro_scan_is_idempotent_per_fingerprint(svc, flow_dir, folder):
         assert again.flush()
         assert len(again.hits()) == len(first)
         assert len(coverage_file.read_text().splitlines()) == n_cov
-        # A re-apply of the same profile (markers from the profile at
-        # startup, then the apply adds the Android ID) rescans nothing.
-        extra = Marker("android_id", "3f9a1c07deadbeef", kind="hex_id", label="AID")
-        again.set_markers(FP, [*MARKERS, extra])
+        # The same markers again (another apply of the profile): nothing.
+        again.set_markers(FP, list(MARKERS))
         assert again.flush()
-        assert len(again.hits()) == len(first)
         assert len(coverage_file.read_text().splitlines()) == n_cov
-        # A new profile rescans everything once.
+        # A new profile rescans everything once (the marker set is the
+        # same, so it is not defined again).
         again.set_markers("fp-2", MARKERS)
         assert again.flush()
         assert len([h for h in again.hits() if h.fp == "fp-2"]) == len(first)
-        assert len(coverage_file.read_text().splitlines()) == 2 * n_cov
+        assert len(_item_lines(folder)) == 2 * n_items
+        assert len(coverage_file.read_text().splitlines()) == n_cov + n_items
     finally:
         again.close()
+
+
+SSAID = "3f9a1c07deadbeef"
+SSAID_MARKER = Marker(
+    "android_id@com.fittrack.app", SSAID, kind="hex_id", label="Android ID"
+)
+GROWN = [*MARKERS, SSAID_MARKER]
+
+
+def _ssaid_flow(flow_dir: Path, seq: int) -> dict:
+    """A flow that sends the advertising ID and the per-app Android ID."""
+    rec = _rec(seq, path=f"/v1/collect?aid={AD_ID}&ssaid={SSAID}")
+    _write_flow(flow_dir, rec, _detail(rec["id"], req=b"{}"))
+    return rec
+
+
+def _spy_needles(monkeypatch) -> list[list[str]]:
+    """The marker ids of every build_needles call of the scan service."""
+    calls: list[list[str]] = []
+    real = ps.build_needles
+
+    def spy(markers):
+        markers = list(markers)
+        calls.append([m.id for m in markers])
+        return real(markers)
+
+    monkeypatch.setattr(ps, "build_needles", spy)
+    return calls
+
+
+def test_grown_marker_set_runs_a_delta_pass(svc, flow_dir, folder, monkeypatch):
+    """Same fingerprint, more markers (the apply adds the per-app Android
+    IDs): the flows and versions already scanned are rescanned for the new
+    markers only, once, without duplicate records or timeline lines.
+    """
+    _ssaid_flow(flow_dir, 1)
+    vdir = _version(PREFS, 1, {"ids.xml": f"<a>{AD_ID}</a><b>{SSAID}</b>".encode()})
+    with timeline.capture() as lines:
+        svc.set_markers(FP, MARKERS)  # the startup markers: no Android ID
+        assert svc.flush()
+        before = svc.hits()
+        assert {h.marker_id for h in before} == {"ad_id"}
+        n_lines = len(_privacy_lines(lines))
+        n_items = len(_item_lines(folder))
+        calls = _spy_needles(monkeypatch)
+        svc.set_markers(FP, GROWN)  # the apply: same profile, more markers
+        assert svc.flush()
+    # The delta needles are built from the new marker only.
+    assert calls[-1] == [SSAID_MARKER.id]
+    hits = svc.hits()
+    new = [h for h in hits if h.marker_id == SSAID_MARKER.id]
+    assert {h.source["type"] for h in new} == {"flow", "file"}
+    assert all(h.fp == FP and h.retro for h in new)
+    assert len(hits) == len(before) + len(new)
+    keys = [
+        (h.source.get("flow_id"), h.source.get("version"), h.part, h.marker_id)
+        + (h.transform,)
+        for h in hits
+    ]
+    assert len(keys) == len(set(keys))
+    # One timeline line per new finding, none again for the old ones.
+    added = _privacy_lines(lines)[n_lines:]
+    assert sorted(line["kind"] for line in added) == ["sent", "stored"]
+    assert {line["data"]["marker_id"] for line in added} == {SSAID_MARKER.id}
+    # The header counts include the delta's findings (same fingerprint).
+    summary = svc.summary()
+    assert summary.values_found == 2
+    assert summary.hits_total == len(hits)
+    # Each item got one delta line naming a set of only the new marker.
+    delta = _item_lines(folder)[n_items:]
+    assert sorted(c["key"] for c in delta) == [
+        f"file:{PREFS}@{vdir.name}",
+        "flow:f1",
+    ]
+    assert all(c["delta"] and c["fp"] == FP for c in delta)
+    defined = {
+        c["set"]: c["markers"] for c in _coverage(folder) if c["skip"] == "markers"
+    }
+    assert len(defined[delta[0]["set"]]) == 1
+
+    # A rescan of the same version (coverage dropped) records nothing twice.
+    with svc._lock:
+        svc._covered.discard((f"file:{PREFS}@{vdir.name}", FP, ps.ENGINE_VERSION))
+    with timeline.capture() as again_lines:
+        svc.submit_version(PREFS, vdir, None)
+        assert svc.flush()
+    assert len(svc.hits()) == len(hits)
+    assert _privacy_lines(again_lines) == []
+
+    # A restart loads the ledger: neither the startup markers nor the apply
+    # repeat the finished delta pass.
+    n_cov = len(_coverage(folder))
+    fresh = ps.PrivacyScanService(
+        folder_fn=lambda: folder, flow_dir_fn=lambda: flow_dir
+    )
+    try:
+        fresh.set_markers(FP, MARKERS)
+        assert fresh.flush()
+        fresh.set_markers(FP, GROWN)
+        assert fresh.flush()
+        assert len(fresh.hits()) == len(svc.hits())
+        assert len(_coverage(folder)) == n_cov
+    finally:
+        fresh.close()
+
+
+def test_restart_then_apply_rescans_flows_seen_with_the_startup_markers(
+    folder, flow_dir
+):
+    """The reported case: after a restart the startup markers lack the
+    recorded Android IDs; flows captured until the apply are rescanned for
+    them, flows scanned with them before the restart are not.
+    """
+    first = ps.PrivacyScanService(
+        folder_fn=lambda: folder, flow_dir_fn=lambda: flow_dir
+    )
+    try:
+        _ssaid_flow(flow_dir, 1)
+        first.set_markers(FP, GROWN)
+        assert first.flush()
+        assert SSAID_MARKER.id in {h.marker_id for h in first.hits_for_flow("f1")}
+        n_f1 = len(first.hits_for_flow("f1"))
+    finally:
+        first.close()
+    n_items = len(_item_lines(folder))
+    svc = ps.PrivacyScanService(folder_fn=lambda: folder, flow_dir_fn=lambda: flow_dir)
+    try:
+        svc.set_markers(FP, MARKERS)  # startup_markers(profile)
+        assert svc.flush()
+        rec = _ssaid_flow(flow_dir, 2)
+        svc.submit_flow(rec, flow_dir, 2)  # live, before the apply
+        assert svc.flush()
+        assert {h.marker_id for h in svc.hits_for_flow("f2")} == {"ad_id"}
+        svc.set_markers(FP, GROWN)  # the apply: same fingerprint
+        assert svc.flush()
+        assert {h.marker_id for h in svc.hits_for_flow("f2")} == {
+            "ad_id",
+            SSAID_MARKER.id,
+        }
+        assert len(svc.hits_for_flow("f1")) == n_f1
+        lines = _item_lines(folder)[n_items:]
+        assert [(c["key"], bool(c.get("delta"))) for c in lines] == [
+            ("flow:f2", False),
+            ("flow:f2", True),
+        ]
+    finally:
+        svc.close()
+
+
+def test_changed_marker_value_runs_a_delta_pass(svc, flow_dir, folder, monkeypatch):
+    old = Marker(SSAID_MARKER.id, "0123456789abcdef", kind="hex_id", label="AID")
+    _ssaid_flow(flow_dir, 1)
+    svc.set_markers(FP, [*MARKERS, old])
+    assert svc.flush()
+    assert SSAID_MARKER.id not in {h.marker_id for h in svc.hits()}
+    calls = _spy_needles(monkeypatch)
+    svc.set_markers(FP, GROWN)  # the same marker id, a new value
+    assert svc.flush()
+    assert calls[-1] == [SSAID_MARKER.id]
+    assert SSAID_MARKER.id in {h.marker_id for h in svc.hits_for_flow("f1")}
+    assert [c["key"] for c in _item_lines(folder) if c.get("delta")] == ["flow:f1"]
+
+
+def test_removed_markers_are_not_rescanned(svc, flow_dir, folder):
+    """Fewer markers under the same fingerprint: no rescan, the removed
+    markers are no longer looked for; adding them back rescans only what
+    was scanned without them.
+    """
+    _ssaid_flow(flow_dir, 1)
+    svc.set_markers(FP, GROWN)
+    assert svc.flush()
+    n_hits = len(svc.hits())
+    n_cov = len(_coverage(folder))
+    svc.set_markers(FP, MARKERS)
+    assert svc.flush()
+    assert len(svc.hits()) == n_hits
+    assert len(_coverage(folder)) == n_cov
+    assert SSAID_MARKER.id not in svc._markers
+    rec = _ssaid_flow(flow_dir, 2)
+    svc.submit_flow(rec, flow_dir, 2)
+    assert svc.flush()
+    assert {h.marker_id for h in svc.hits_for_flow("f2")} == {"ad_id"}
+    n_items = len(_item_lines(folder))
+    svc.set_markers(FP, GROWN)
+    assert svc.flush()
+    assert [c["key"] for c in _item_lines(folder)[n_items:]] == ["flow:f2"]
+    assert SSAID_MARKER.id in {h.marker_id for h in svc.hits_for_flow("f2")}
+
+
+def test_older_ledger_lines_cover_every_marker(folder, flow_dir):
+    """A coverage line without a marker set (written before sets were
+    recorded) still means: scanned for that fingerprint, no rescan.
+    """
+    _ssaid_flow(flow_dir, 1)
+    privacy = folder / "privacy"
+    privacy.mkdir(parents=True)
+    legacy = {
+        "v": 1,
+        "at": 1.0,
+        "key": "flow:f1",
+        "fp": FP,
+        "engine": ps.ENGINE_VERSION,
+        "skip": None,
+        "retro": True,
+    }
+    (privacy / "coverage.jsonl").write_text(json.dumps(legacy) + "\n")
+    svc = ps.PrivacyScanService(folder_fn=lambda: folder, flow_dir_fn=lambda: flow_dir)
+    try:
+        svc.set_markers(FP, MARKERS)
+        assert svc.flush()
+        svc.set_markers(FP, GROWN)
+        assert svc.flush()
+        assert svc.hits() == []
+        assert _coverage(folder) == [legacy]
+    finally:
+        svc.close()
 
 
 def test_read_hits_and_run_hits(svc, flow_dir, folder, tmp_path):
