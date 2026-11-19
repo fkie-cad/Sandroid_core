@@ -959,19 +959,34 @@ def test_the_doorbell_is_gated_and_carries_no_lines(timeline_sink):
     try:
         time.sleep(0.3)  # past the rate limit
         service.emit("input", "tap", summary="heard")
-        service.labels.point("p")
+        point = service.labels.point("p")
         assert service.flush(3.0)
         assert rang.wait(3.0)
+        # The first ring may cover only "heard" (written before the point
+        # existed); the ring covering the point's line follows within the
+        # rate limit (the writer publishes a pending ring on every tick).
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not any(
+            (p.get("last_seq") or 0) >= point.seq for p in got
+        ):
+            time.sleep(0.02)
     finally:
         bus.unsubscribe(EventType.TIMELINE_EVENT, handler)
-    payload = got[0]
+    payload = next(p for p in got if (p.get("last_seq") or 0) >= point.seq)
+    # A ring that covers a label line carries that label's version or newer
+    # (the bump and the line are queued under one lock).
+    assert all(
+        p["labels_version"] == service.labels.version
+        for p in got
+        if (p.get("last_seq") or 0) >= point.seq
+    )
     assert set(payload) == {"op", "dev", "folder", "session_id", "labels_version",
                             "active", "first_seq", "last_seq", "srcs"}  # fmt: skip
     assert payload["op"] == "lines"
     assert payload["active"] is True
     assert payload["labels_version"] == service.labels.version
     assert payload["dev"] == SERIAL
-    assert "input" in payload["srcs"]
+    assert "input" in {src for p in got for src in p["srcs"]}
 
 
 def test_acting_as_scopes_the_actor_to_the_thread():

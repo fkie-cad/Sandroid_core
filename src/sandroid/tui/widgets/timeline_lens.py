@@ -1593,8 +1593,12 @@ class TimelineLens(Vertical):
         """Unmask ``seq`` until the selection changes; recorded on the timeline.
 
         The reveal ends on any selection change (cursor, follow, filter,
-        reload, a new sink), not only on a cursor key.
+        reload, a new sink), not only on a cursor key. Follow is paused
+        first: the reveal's own audit line (and any live line) would move
+        a following cursor and end the reveal at once.
         """
+        if self._follow:
+            self.pause_follow()
         self._revealed = seq
         row = self._by_seq.get(seq)
         svc = timeline_service()
