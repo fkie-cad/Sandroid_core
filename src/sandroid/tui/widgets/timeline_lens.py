@@ -1200,11 +1200,13 @@ class TimelineLens(Vertical):
         if width >= 80:
             prev = self._rows[self._view[vi - 1]] if vi > 0 else None
             delta = format_delta(row.t - prev.t) if prev is not None else ""
-            segments.append(Segment(_fit(delta, 7), st("delta")))
+            segments.append(Segment(_fit(delta, 6) + " ", st("delta")))
             used += 7
-        segments.append(Segment(_fit(row.src, 8), st("src")))
-        segments.append(Segment(_fit(row.kind, 11), st("kind")))
-        used += 19
+        # Every column ends in a gap: a full-width value ("sandroid",
+        # "record-start") must never run into the next one.
+        segments.append(Segment(_fit(row.src, 8) + " ", st("src")))
+        segments.append(Segment(_fit(row.kind, 11) + " ", st("kind")))
+        used += 21
         if width >= 100:
             segments.append(Segment(_fit(row.actor, 6) + " ", st("actor")))
             used += 7

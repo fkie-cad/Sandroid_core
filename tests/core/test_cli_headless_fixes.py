@@ -265,6 +265,7 @@ def test_initialize_core_prepare_runs_before_toolbox_init(monkeypatch):
         initializer, "prepare_device", lambda console=None: order.append("prep")
     )
     monkeypatch.setattr(initializer, "require_device", lambda: order.append("require"))
+    monkeypatch.setattr(initializer, "refuse_ambiguous_device", lambda: None)
     monkeypatch.setattr(Toolbox, "config", None, raising=False)
 
     initializer.initialize_core(SimpleNamespace(), prepare=True)
@@ -308,6 +309,7 @@ def test_headless_initialize_keeps_supplied_config(monkeypatch):
     from sandroid.core import initializer
 
     monkeypatch.setattr(initializer, "require_device", lambda: None)
+    monkeypatch.setattr(initializer, "refuse_ambiguous_device", lambda: None)
 
     cfg = SimpleNamespace(emulator=SimpleNamespace(device_name="My_AVD"))
     api = SandroidHeadlessAPI(config=cfg)

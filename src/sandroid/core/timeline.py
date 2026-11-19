@@ -1505,7 +1505,8 @@ class TimelineService:
 
     def reload_policy(self, reason: str = "settings", actor: str | None = None) -> None:
         """Re-read ``timeline.*``/``tracking.*``; a ``sandroid/policy`` line
-        with the ``changed`` diff on every open sink.
+        with the ``changed`` diff on every open sink. A Settings save that
+        changes no policy value writes no line.
         """
         tl, tr = _policy_sections()
         with self._lock:
@@ -1520,6 +1521,8 @@ class TimelineService:
                         changed[f"{prefix}.{key}"] = [old.get(key), new.get(key)]
             self._policy = Policy(tl)
             self._policy_doc = (tl, tr)
+            if reason == "settings" and not changed:
+                return
             for sink in self._open_sinks():
                 self._emit_policy(sink, reason, actor, changed)
 

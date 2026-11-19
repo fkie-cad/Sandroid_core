@@ -40,6 +40,33 @@ def apply_serial_selection(serial: str | None = None) -> str | None:
     return wanted
 
 
+def refuse_ambiguous_device() -> None:
+    """Refuse to guess when several devices are online and none is pinned.
+
+    Read-only: lists ``adb devices`` (untargeted) and nothing else. With an
+    explicit pin (``--serial`` / ``emulator.serial`` / ``ANDROID_SERIAL``, or
+    an adb target already chosen) or fewer than two online devices it
+    returns; otherwise it raises before any device is prepared.
+
+    Raises:
+        MultipleDevicesError: Two or more devices in state ``device`` and no
+            explicit selection.
+    """
+    from sandroid.core.adb import Adb
+    from sandroid.core.exceptions import MultipleDevicesError
+    from sandroid.services.setup_checks import list_adb_devices
+
+    if Adb.selected_serial():
+        return
+    online = [serial for serial, state in list_adb_devices(Adb) if state == "device"]
+    if len(online) > 1:
+        logger.error(
+            "More than one device is connected (%s) and none was selected",
+            ", ".join(online),
+        )
+        raise MultipleDevicesError(online)
+
+
 def describe_device_problem(dm: Any = None) -> str | None:
     """Why no usable device is selected, or None if one is.
 
@@ -236,6 +263,10 @@ def initialize_core(
         DeviceNotAvailableError: With ``require`` and no usable device. Raised
             before ``Toolbox.init()``, so no FridaManager is created for (and
             no device work reaches) another device.
+        MultipleDevicesError: Always (whatever ``require`` says) when two or
+            more devices are online and none is pinned; see
+            :func:`refuse_ambiguous_device`. Also raised before
+            ``Toolbox.init()``.
 
     Example:
         >>> from sandroid.config import ConfigLoader
@@ -254,6 +285,9 @@ def initialize_core(
     # Toolbox.init() uses DeviceManager which depends on Adb being initialized
     Adb.init()
     apply_serial_selection(getattr(emulator_cfg, "serial", None))
+    # Never guess among several devices: the next steps (adb root, SELinux
+    # permissive, FridaManager / frida-server) change the device.
+    refuse_ambiguous_device()
     if prepare if require is None else require:
         require_device()
     if prepare:
