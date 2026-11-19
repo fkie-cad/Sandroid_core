@@ -59,7 +59,7 @@ seconds since the previous line of that serial; ``jump_wall_s`` /
 whatever took it. ``snapshot`` names the snapshot of a ``snapshot-load`` /
 ``sync`` line; a ``sync`` line also has ``trigger`` (``snapshot-load`` /
 ``session-start``), ``before_off_wall``, ``after_off_wall``, ``ok``,
-``command`` and ``sets`` (``date`` commands issued). The ``snapshot-load``
+``command`` and ``sets`` (time suggestions and ``date`` commands issued). The ``snapshot-load``
 and ``device-connect`` lines carry ``sync_policy`` (the setting then).
 Times are ISO 8601 with milliseconds and the UTC offset
 (:func:`watchlist_store.iso_tz`); the format grows additively and readers
@@ -868,6 +868,63 @@ def _run_set(
         return None
 
 
+def suggestion_command(host_now: float, off_mono: float) -> str:
+    """``cmd time_detector suggest_telephony_time`` with the pair computed
+    on the host (integer ms; the device shell's ``$(( ))`` is 32-bit):
+    ``unix_epoch_time`` = host now, ``elapsed_realtime`` = the device's
+    CLOCK_BOOTTIME then (= CLOCK_MONOTONIC on the emulator: the guest never
+    suspends) = host now - ``off_mono``. The pair describes one instant, so
+    the adb latency does not matter.
+    """
+    epoch_ms = round(host_now * 1000)
+    elapsed_ms = round((host_now - off_mono) * 1000)
+    return (
+        "cmd time_detector suggest_telephony_time --slot_index 0 "
+        f"--elapsed_realtime {elapsed_ms} --unix_epoch_time {epoch_ms}"
+    )
+
+
+def _run_suggest(serial: str | None, send: Send | None) -> str | None:
+    """Inject a telephony time suggestion (over the persistent shell, else
+    one-shot ``send``) from the current-world sample's ``off_mono``.
+    Returns the command when the detector reports it ``injected``; ``None``
+    without a current-world ``off_mono`` (no root), or when ``cmd`` is
+    missing or fails.
+    """
+    from sandroid.core.adb_utils import device_shell_command
+
+    key = _key(serial)
+    lines: list[str] | None = None
+    command = None
+    with _shell_lock(key):
+        sample = last_sample(serial, current_world=True)
+        off_mono = (sample or {}).get("off_mono")
+        if not isinstance(off_mono, (int, float)):
+            return None
+        try:
+            command = suggestion_command(_now(), off_mono)
+            lines, _t0, _t1 = _shell(serial).query(f"{command} 2>&1; echo {_END}")
+        except (ShellDeadError, OSError, ValueError, SystemExit) as exc:
+            logger.debug(
+                "device clock: shell suggestion for %s failed: %s", serial, exc
+            )
+            _SHELLS.pop(key, None)
+    if lines is None:
+        try:
+            command = suggestion_command(_now(), off_mono)
+            stdout, _stderr = (send or _default_send(serial))(
+                device_shell_command(f"{command} 2>&1")
+            )
+            lines = str(stdout or "").splitlines()
+        except (Exception, SystemExit):
+            logger.debug("device clock: one-shot suggestion failed", exc_info=True)
+            return None
+    if any("injected" in line for line in lines):
+        return command
+    logger.debug("device clock: time suggestion not taken: %s", lines)
+    return None
+
+
 def _applied(before: dict, after: dict) -> bool:
     """The wall offset moved more than the measurements' error: a ``date``
     took effect (whether or not it landed within tolerance).
@@ -880,7 +937,13 @@ def sync(serial: str | None = None, send: Send | None = None) -> dict | None:
     """Set the device wall clock to the host clock and measure again.
 
     Over the persistent shell (``send``: the one-shot fallback when it is
-    dead). The fractional ``date -u @S.fff`` first; the next form / ``su 0``
+    dead). First a telephony time suggestion (:func:`suggestion_command`;
+    with root CLOCK_MONOTONIC only): ``date`` alone does not stick, since
+    after a snapshot load time_detector still holds the snapshot's stale
+    NITZ suggestion and re-applies it on the next time suggestion. When it
+    is not taken (no ``cmd``, ignored below the detector's threshold, off
+    by more than :data:`SYNC_TOLERANCE_S`): ``date``, the fractional
+    ``date -u @S.fff`` first; the next form / ``su 0``
     only when the previous command evidently did not apply (the offset did
     not move); one corrective retry when it applied but missed
     :data:`SYNC_TOLERANCE_S`. Returns the last sample with ``ok``
@@ -903,9 +966,23 @@ def _sync(
         before = _measure(serial, samples=SAMPLES_QUICK)
         if before is None:
             return None
-    steps = [(prefix, form) for prefix in _SET_PREFIXES for form in _SET_FORMS]
     sets, step, landed, retried = 0, 0, None, False
     reference, after = before, None
+    # 1. A telephony time suggestion: it also replaces the snapshot's stale
+    # NITZ suggestion that time_detector would otherwise re-apply later.
+    command = _run_suggest(serial, send)
+    if command is not None:
+        sets += 1
+        after = _measure(serial, samples=SAMPLES_QUICK)
+        if after is None:
+            return None
+        if abs(after["off_wall"]) <= SYNC_TOLERANCE_S:
+            return {**after, "ok": True, "command": command, "sets": sets}
+        if _applied(reference, after):
+            landed = command
+        reference = after  # ignored / imprecise: ``date`` below
+    # 2. ``date`` (no root CLOCK_MONOTONIC, no ``cmd``, or not taken).
+    steps = [(prefix, form) for prefix in _SET_PREFIXES for form in _SET_FORMS]
     while step < len(steps):
         command = _run_set(serial, *steps[step], send)
         sets += command is not None
@@ -1159,6 +1236,7 @@ __all__ = [
     "record_async",
     "reset",
     "seed",
+    "suggestion_command",
     "sync",
     "sync_enabled",
     "to_host_time",

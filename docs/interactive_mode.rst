@@ -289,7 +289,9 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   ``jump_mono_s``), so every clock change of the session is visible.
   ``off_mono`` is null without root (``mono_note`` says why). With
   ``emulator.sync_device_clock`` on (default) the device wall clock is set
-  to host time at session start and after a load, and a ``sync`` line
+  to host time at session start and after a load (a telephony time
+  suggestion to Android's time detector, which also replaces the
+  snapshot's stale one; ``date`` when that is not taken), and a ``sync`` line
   records ``trigger`` (``session-start`` / ``snapshot-load``),
   ``before_off_wall`` / ``after_off_wall`` / ``ok`` / ``sets``; the
   ``device-connect`` and ``snapshot-load`` lines record the setting as

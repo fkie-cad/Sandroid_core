@@ -45,7 +45,10 @@ class FakeDevice:
     that work (``"@"`` / ``"mmdd"``); ``su``: whether ``su 0`` works. A
     ``date`` that works sets the wall clock to its epoch (plus the next of
     ``set_errors``, an imprecise landing) when it runs, 5 ms after it was
-    sent. ``selinux``: what ``getenforce`` prints.
+    sent. ``selinux``: what ``getenforce`` prints. ``detector``: how
+    ``cmd time_detector suggest_telephony_time`` behaves: ``"missing"`` (no
+    such service; the default, so the ``date`` path is tested), ``"apply"``
+    (sets the wall clock from the pair) or ``"ignore"`` (injected, no change).
     """
 
     def __init__(self, behind=4500.0, mono=1000.0, root=True) -> None:
@@ -60,6 +63,19 @@ class FakeDevice:
         self.commands: list[str] = []
         self.set_errors: list[float] = []
         self.selinux = "Permissive"
+        self.detector = "missing"
+
+    def apply_suggestion(self, command: str, at: float) -> list[str]:
+        """Run a telephony time suggestion at host time ``at``."""
+        if self.detector == "missing":
+            return ["cmd: Can't find service: time_detector"]
+        if self.detector == "apply":
+            elapsed = int(re.search(r"--elapsed_realtime (\d+)", command)[1])
+            epoch = int(re.search(r"--unix_epoch_time (\d+)", command)[1])
+            dev_mono = at - self.mono_off  # BOOTTIME == MONOTONIC here
+            wall = epoch / 1000 + (dev_mono - elapsed / 1000)
+            self.behind = at - wall
+        return ["Suggestion TelephonyTimeSuggestion{...} injected."]
 
     def apply_date(self, command: str, at: float) -> None:
         """Run a ``date -u`` set command at host time ``at``."""
@@ -76,6 +92,10 @@ class FakeDevice:
         if command.startswith(("getenforce", "echo ")):
             self.host += 0.01
             lines = [self.selinux] if command.startswith("getenforce") else []
+            return lines, self.host - 0.01, self.host
+        if command.startswith("cmd time_detector"):
+            lines = self.apply_suggestion(command, self.host + 0.005)
+            self.host += 0.01
             return lines, self.host - 0.01, self.host
         if "date -u" in command:
             self.apply_date(command, self.host + 0.005)
@@ -512,6 +532,97 @@ def test_su_is_tried_when_the_plain_date_does_not_apply(device):
     assert synced["ok"] is True
     assert synced["sets"] == 4  # 3 plain forms did nothing, then su 0
     assert synced["command"].startswith("su 0 date -u @")
+
+
+# -- time_detector suggestion (primary sync method) ------------------------------
+
+_SUGGEST = re.compile(
+    r"cmd time_detector suggest_telephony_time --slot_index 0 "
+    r"--elapsed_realtime (\d+) --unix_epoch_time (\d+)"
+)
+
+
+def test_the_suggestion_pair_is_computed_on_the_host_in_integer_ms():
+    host_now = 1_763_470_123.4567
+    off_mono = 1_763_469_000.0  # device CLOCK_MONOTONIC = 1123.4567 s
+    command = device_clock.suggestion_command(host_now, off_mono)
+    match = _SUGGEST.fullmatch(command)
+    assert match
+    assert int(match[1]) == 1_123_457  # elapsed_realtime: BOOTTIME ms
+    assert int(match[2]) == 1_763_470_123_457  # unix_epoch_time: host ms
+    # Plain integer literals: no shell arithmetic or substitution on the
+    # device (mksh's $(( )) is 32-bit).
+    assert "$" not in command
+    assert "`" not in command
+
+
+def test_the_sync_injects_a_telephony_suggestion_first(device):
+    device.detector = "apply"
+    device_clock.after_snapshot_load("clean", SERIAL)
+    sync = _lines()[-1]
+    assert sync["ok"] is True
+    assert sync["sets"] == 1
+    assert _SUGGEST.fullmatch(sync["command"])
+    assert abs(sync["after_off_wall"]) < 0.002
+    (sent,) = [c for c in device.commands if c.startswith("cmd time_detector")]
+    assert "$" not in sent
+    assert not any("date -u" in c for c in device.commands)
+    # The pair is one instant on the host's clock and the current sample's
+    # off_mono: the elapsed time is the device's monotonic time then.
+    elapsed, epoch = (int(x) for x in _SUGGEST.match(sent).groups())
+    assert (epoch - elapsed) / 1000 == pytest.approx(device.mono_off, abs=2e-3)
+
+
+def test_an_ignored_suggestion_falls_back_to_date(device):
+    device.detector = "ignore"  # e.g. below the detector's own threshold
+    synced = device_clock.sync(SERIAL)
+    assert synced["ok"] is True
+    assert synced["sets"] == 2  # the suggestion and one date
+    assert re.fullmatch(r"date -u @\d+\.\d{3}", synced["command"])
+    kinds = [
+        c.split()[0] for c in device.commands if "time_detector" in c or "date -u" in c
+    ]
+    assert kinds == ["cmd", "date"]
+
+
+def test_a_missing_time_detector_uses_date_only(device):
+    synced = device_clock.sync(SERIAL)  # detector "missing"
+    assert (synced["ok"], synced["sets"]) == (True, 1)
+    assert synced["command"].startswith("date -u @")
+
+
+def test_without_root_monotonic_only_date_is_used(device):
+    device.root = False  # no /proc/timer_list: no off_mono
+    device.su = True
+    device.detector = "apply"
+    synced = device_clock.sync(SERIAL)
+    assert synced["ok"] is True
+    assert synced["command"].startswith("su 0 date -u @")
+    assert not any(c.startswith("cmd time_detector") for c in device.commands)
+
+
+def test_no_suggestion_from_a_sample_of_the_previous_world(device):
+    device.detector = "apply"
+    device_clock.measure(SERIAL)
+    device.host += 1
+    device_clock.begin_epoch(SERIAL)  # the old off_mono is stale now
+    assert device_clock._run_suggest(SERIAL, None) is None
+    assert not any(c.startswith("cmd time_detector") for c in device.commands)
+
+
+def test_the_recording_offset_ignores_a_sample_of_the_previous_world(device):
+    import threading
+    from types import SimpleNamespace
+
+    from sandroid.tui.utils.recording_wrapper import RecordingWrapper
+
+    wrapper = SimpleNamespace(_lock=threading.Lock(), _offset=None, _serial=SERIAL)
+    device_clock.measure(SERIAL)
+    offset = RecordingWrapper._clock_offset(wrapper)
+    assert offset == pytest.approx(-device.mono_off, abs=1e-3)
+    device.host += 1
+    device_clock.begin_epoch(SERIAL)
+    assert RecordingWrapper._clock_offset(wrapper) is None
 
 
 # -- session start (device connect) ---------------------------------------------
