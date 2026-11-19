@@ -819,15 +819,25 @@ def _intervals(
     return out
 
 
-def _shots_dropped(stop: Mapping[str, Any] | None) -> int:
-    """Screen-change shots Tracking dropped as late or superseded
-    (``tracking/stop`` ``data.shots_dropped``; DESIGN_FINAL §12): they were
-    never stored, so no step shows an image of a later screen.
+def _shots_dropped(stop: Mapping[str, Any] | None) -> tuple[int, int]:
+    """Screen-change shots Tracking dropped (``tracking/stop``
+    ``data.shots_dropped``; DESIGN_FINAL §12): ``(late or superseded,
+    unverified)``. They were never stored, so no step shows an image of a
+    later screen (late, superseded) or of the previous one (unverified: the
+    new screen had not drawn within the wait).
     """
     counts = _data(stop).get("shots_dropped") if stop else None
     if not isinstance(counts, Mapping):
-        return 0
-    return sum(int(n) for n in counts.values() if isinstance(n, int))
+        return 0, 0
+    later = unverified = 0
+    for reason, n in counts.items():
+        if not isinstance(n, int):
+            continue
+        if reason == "unverified":
+            unverified += n
+        else:
+            later += n
+    return later, unverified
 
 
 def _cov_tracking(ctx: ReportContext) -> list[str]:
@@ -854,13 +864,20 @@ def _cov_tracking(ctx: ReportContext) -> list[str]:
             f"Tracking was on from {_clock(start.get('t'))} to {_until(end)}"
             + (f" ({detail})." if detail else ".")
         )
-        dropped = _shots_dropped(end)
+        dropped, unverified = _shots_dropped(end)
         if dropped:
             items.append(
                 f"{_plural(dropped, 'screen-change screenshot')} "
                 f"{'was' if dropped == 1 else 'were'} not taken: the next input "
                 "or a newer screen came first, so the image would have shown "
                 "a later screen."
+            )
+        if unverified:
+            items.append(
+                f"{_plural(unverified, 'screen-change screenshot')} "
+                f"{'was' if unverified == 1 else 'were'} not kept: the device "
+                "still showed the previous screen when the wait ended, so the "
+                "image would not have shown the new one."
             )
     if not items:
         items.append(
