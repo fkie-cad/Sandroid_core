@@ -82,11 +82,13 @@ class FakeHelper:
         connect: str = "connected",
         hang_on_eof: bool = False,
         silent: frozenset[str] = frozenset(),
+        shot_error: str | None = None,
     ) -> None:
         self.argv = argv
         self.pid = pid
         self.hang_on_eof = hang_on_eof
         self.silent = silent  # commands that never get a reply (timeouts)
+        self.shot_error = shot_error  # every shot answers this error
         self.commands: list[str] = []
         self.returncode: int | None = None
         self.killed = False
@@ -166,6 +168,10 @@ class FakeHelper:
             )
         elif name == "windows":
             self.emit({"type": "windows", "id": rid, "windows": [{"id": 7}]})
+        elif name == "shot" and self.shot_error:
+            self.emit(
+                {"type": "error", "id": rid, "cmd": "shot", "error": self.shot_error}
+            )
         elif name == "shot":
             reply = {
                 "type": "shot",
@@ -741,6 +747,107 @@ def test_backoff_grows_and_caps_at_ten(adb):
         assert wait_for(lambda n=n: rec.states().count("restarted") == n)
     assert sleeps == [1.0, 2.0, 4.0, 8.0, 10.0, 10.0]
     h.stop()
+
+
+# ----------------------------------------- the system server restarted under it
+
+#: Every shot's answer once the system server restarted under the helper (a
+#: real session, after the CA injection's Zygote restart).
+DEAD_SYSTEM = "DeadSystemRuntimeException: android.os.DeadSystemException"
+
+
+def _reconnect_in_place(fake: FakeHelper) -> None:
+    """The helper's watchdog saw UiAutomation drop and reconnected it."""
+    fake.emit({"type": "status", "state": "lost", "reason": "watchdog"})
+    fake.emit({"type": "status", "state": "connected", "reason": "reconnect"})
+
+
+@pytest.mark.parametrize("mode", [Mode.FULL, Mode.INVISIBLE])
+def test_a_dead_system_shot_error_replaces_the_helper_process(adb, mode):
+    """A Zygote restart killed the system server under the helper. Node
+    queries worked again after the in-place reconnect, but every shot failed
+    with DeadSystemException for the rest of the session (26 before-tap
+    shots in a row). The first such error now replaces the process.
+    """
+    popen = FakePopen(flags=2 if mode is Mode.INVISIBLE else 1)
+    popen.next_kw = [{"shot_error": DEAD_SYSTEM}]
+    h, popen, rec, sleeps = make_helper(adb, mode, popen=popen)
+    assert h.start()
+    stale = popen.current
+    assert h.shot() is None
+    assert wait_for(lambda: rec.states() == ["connected", "lost", "restarted"])
+    assert rec.statuses[1][1]["reason"] == "system_restart"
+    assert stale.stdin.closed  # it exited on EOF
+    assert not stale.killed
+    assert len(popen.helpers) == 2
+    assert sleeps == [1.0]
+    assert h.shot().png == PNG
+    h.stop()
+
+
+def test_a_reconnect_in_place_probes_and_replaces_a_stale_process(adb):
+    """The in-place reconnect is the first sign: a hash-only probe finds the
+    stale process before a real shot can fail.
+    """
+    popen = FakePopen()
+    popen.next_kw = [{"shot_error": DEAD_SYSTEM}]
+    h, popen, rec, _ = make_helper(adb, popen=popen)
+    assert h.start()
+    stale = popen.current
+    _reconnect_in_place(stale)
+    assert wait_for(lambda: rec.states() == ["connected", "lost", "restarted"])
+    assert [c.split(" id=")[0] for c in stale.commands] == ["shot hash_only=1"]
+    assert rec.statuses[1][1]["reason"] == "system_restart"
+    assert h.shot().png == PNG
+    h.stop()
+
+
+def test_a_reconnect_in_place_with_a_live_system_keeps_the_process(adb):
+    h, popen, rec, _ = make_helper(adb)
+    assert h.start()
+    fake = popen.current
+    _reconnect_in_place(fake)
+    assert wait_for(
+        lambda: any(c.startswith("shot hash_only=1") for c in fake.commands)
+    )
+    assert h.ping() is not None  # replies are read in order: the probe's first
+    assert rec.states() == ["connected"]
+    assert len(popen.helpers) == 1
+    h.stop()
+
+
+def test_a_refused_reconnect_in_place_replaces_the_process(adb):
+    """Dev3 under load: the Zygote restart took 37 s, the watchdog's connect
+    timed out but registered anyway, and every later reconnect was "already
+    registered" (busy): all requests "not connected" for good.
+    """
+    h, popen, rec, _ = make_helper(adb)
+    assert h.start()
+    stale = popen.current
+    stale.emit({"type": "status", "state": "lost", "reason": "watchdog"})
+    stale.emit({"type": "status", "state": "error", "reason": "reconnect",
+                "detail": "RuntimeException: TimeoutException"})  # fmt: skip
+    stale.emit({"type": "status", "state": "busy", "reason": "reconnect",
+                "detail": "IllegalStateException: already registered"})  # fmt: skip
+    assert wait_for(lambda: rec.states() == ["connected", "lost", "restarted"])
+    assert rec.statuses[1][1]["reason"] == "reconnect_busy"
+    assert stale.stdin.closed
+    assert h.node_at(1, 2) is not None
+    h.stop()
+
+
+def test_no_replacement_once_a_quit_suppressed_restarts(adb):
+    popen = FakePopen()
+    popen.next_kw = [{"shot_error": DEAD_SYSTEM}]
+    h, popen, rec, _ = make_helper(adb, popen=popen)
+    assert h.start()
+    h.suppress_restarts()
+    assert h.shot() is None
+    assert h.ping() is not None  # the error was handled: nothing replaced it
+    assert not popen.current.stdin.closed
+    assert len(popen.helpers) == 1
+    h.stop()
+    assert rec.states() == ["connected", "stopped"]
 
 
 def test_stop_during_backoff_does_not_restart(adb):

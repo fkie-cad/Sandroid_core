@@ -84,6 +84,48 @@ allow_remote = false
 # Mask the content of sensitive session-timeline lines (typed text, TLS keys)
 # in what the AI reads.
 mask_sensitive = false
+# Chat mascot: auto | blocks | ascii | off (show_chat_mascot = false also hides it).
+# chat_mascot = "auto"
+#
+# Model profile: matched by model name (DeepSeek-V4* -> 262k window, multiple
+# system messages, reasoning echo, streamed usage). Unknown models get a
+# conservative profile: first system message only, inline <think> tags moved
+# to reasoning, 32k window. Override with a built-in name or per field:
+# profile = "deepseek-v4"                 # or "default"
+# profile_overrides = { stream_usage = true, system_mode = "multi" }
+# context_window = 131072                 # tokens; unset = the profile's
+#
+# Request parameters (unset = server default):
+# max_tokens = 8192
+# temperature = 0.6
+# top_p = 0.95
+# tool_choice = "auto"                    # auto | none | required (if supported)
+# extra_body = { chat_template_kwargs = { thinking = true } }
+# request_timeout = [10, 120]             # connect, read (silence between chunks)
+# retry_max = 4                           # before the first content only; 1/2/4/8 s
+#
+# [ai.budgets]                            # per turn; 0 = off for tokens/wall
+# chat_max_rounds = 25
+# chat_max_tokens = 3000000               # prompt + completion over the turn
+# chat_max_wall_s = 1800
+# agent_max_rounds = 20
+# agent_max_tokens = 1500000
+# agent_max_wall_s = 900
+#
+# [ai.context]
+# result_cap_tokens = 8000                # larger tool results -> preview + R-id
+# turn_result_budget_tokens = 25000       # tool-result tokens per assistant message
+# mask_at = 0.50                          # mask old tool results at this context use
+# keep_recent_results = 10
+# summarize_at = 0.85                     # summarise older history at this use
+# summary_keep_tokens = 40000             # recent tokens kept verbatim
+# output_reserve_tokens = 32000
+#
+# [ai.agents]
+# gateway_concurrency = 4                 # concurrent LLM requests (1 kept for chat)
+# researcher_max = 3
+# operator_max = 1
+# max_auto_wakes = 3                      # chat wake-ups by agent results per message
 
 [report]
 generate_pdf = false
@@ -101,7 +143,7 @@ formats = ["pdf", "md"]
 # hash-chained JSON line per event (labels, file monitor, device clock,
 # snapshots, record/play phases, ...). label, sandroid, clock, snapshot,
 # device and run lines are always written.
-sources = { files = true, monitor = true, net = true, input = true, screen = true, shot = true }
+sources = { files = true, monitor = true, net = true, input = true, screen = true, shot = true, ai = true }
 kinds_off = []                          # "src.kind" or "src.*": not written
 count_only = ["files.open", "files.close"]  # only counted (<src>/count lines)
 files_attrs = "app_dirs"                # app_dirs | lines | counts

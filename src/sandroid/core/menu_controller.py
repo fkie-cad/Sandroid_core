@@ -463,33 +463,34 @@ class MenuController:
                 description=f"Show the {label} lens (full width; Enter = details)",
                 inline_text=f"[{key}] {label} lens",
             )
-        # ===== Labels + Tracking (session timeline; TUI-only) =====
+        # ===== Sections, notes + Tracking (session timeline; TUI-only) =====
         # Every lens; the palette dispatches these directly (app.py).
         for name, display, key, description in (
             (
                 "label_start",
-                "Start a label",
+                "Start a section",
                 "number_sign",
-                "Start a top-level label at the key press (closes open labels); "
+                "Start a section at the key press (ends the open sections); "
                 "asks for an optional name",
             ),
             (
                 "label_sub",
-                "Start a sub-label",
+                "Start a sub-section",
                 "plus",
-                "A label inside the open one (a sibling of an open sub-label)",
+                "A section inside the open one (a sibling of an open sub-section)",
             ),
             (
                 "label_stop",
-                "Stop the label",
+                "End the section",
                 "minus",
-                "End the innermost open label",
+                "End the innermost open section",
             ),
             (
                 "label_point",
-                "Mark (point label)",
+                "Note",
                 "B",
-                "A named point in time; the Files lens segments by it",
+                "A note at the key press (asks for its text); the Files lens "
+                "segments by it",
             ),
             (
                 "tracking_toggle",
@@ -507,6 +508,16 @@ class MenuController:
                 description=description,
                 inline_text=display,
             )
+        self._register(
+            "toggle_chat",
+            "AI chat",
+            "ctrl+y",
+            ActionCategory.NAVIGATION,
+            ["forensic", "malware", "security"],
+            description="Open the AI chat under the lens (focus it; again: "
+            "close). Shift+Up/Down sizes it, Esc goes back to the lens",
+            inline_text="[^Y] AI chat",
+        )
         self._register(
             "toggle_log",
             "Toggle log drawer",

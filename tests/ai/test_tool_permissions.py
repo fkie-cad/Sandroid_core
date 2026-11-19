@@ -1,227 +1,658 @@
-"""Unit tests for sandroid.ai.tool_permissions.
+"""Unit tests for sandroid.ai.tool_permissions (rules, modes, migration, broker).
 
-Every test builds its own fresh ``ToolPermissionStore`` backed by a temp file
-(``tmp_path``, never the real ``~/.config/sandroid`` location) and
-monkeypatches ``tool_permissions.get_tool_permission_store`` to return it, so
-``resolve_tool_policy`` -- which calls that accessor internally -- consults
-the test's isolated store rather than the process-wide singleton. This
-mirrors ``test_loop.py``'s ``monkeypatch.setattr(loop_module,
-"get_tool_registry", lambda: registry)`` pattern.
+Every store is backed by a file under ``tmp_path`` -- never the real
+``~/.config/sandroid`` (the test session also points ``XDG_CONFIG_HOME`` at a
+temp dir).
 """
+
+import os
+import threading
+import time
+import tomllib
 
 import pytest
 
-import sandroid.ai.tool_permissions as tool_permissions_module
+import sandroid.ai.tool_permissions as tp
 from sandroid.ai.tool_permissions import (
+    ApprovalBroker,
+    Decision,
+    PermissionRule,
+    RuleSyntaxError,
     ToolPermissionStore,
+    describe_rule,
+    get_approval_broker,
     get_tool_permission_store,
     resolve_tool_policy,
+    suggest_rule,
 )
 from sandroid.ai.tools.registry import RiskTier
 
+R, C, RO, NX = (
+    RiskTier.REVERSIBLE,
+    RiskTier.CONSEQUENTIAL,
+    RiskTier.READ_ONLY,
+    RiskTier.NOT_EXPOSED,
+)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_singletons():
+    tp.reset_for_tests()
+    yield
+    tp.reset_for_tests()
+
+
+def _write(path, text):
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _store(tmp_path, text=None, arg_dep=()):
+    path = tmp_path / "ai_tool_permissions.toml"
+    if text is not None:
+        _write(path, text)
+    return ToolPermissionStore(path=path, arg_dependent=lambda n: n in arg_dep)
+
+
+def _data(store):
+    return tomllib.loads(store.path.read_text(encoding="utf-8"))
+
+
+# -- rule parsing -------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "tool", "constraints"),
+    [
+        ("launch_app", "launch_app", ()),
+        ("  launch_app  ", "launch_app", ()),
+        ("mcp:srv:do_thing", "mcp:srv:do_thing", ()),
+        (
+            "kill_process(package=com.example.*)",
+            "kill_process",
+            (("package", "com.example.*"),),
+        ),
+        ("t( a = x , b=y )", "t", (("a", "x"), ("b", "y"))),
+        ('t(a="x, (y)=z")', "t", (("a", "x, (y)=z"),)),
+        ('t(a="q\\"\\\\")', "t", (("a", 'q"\\'),)),
+    ],
+)
+def test_rule_parse(text, tool, constraints):
+    rule = PermissionRule.parse(text)
+    assert rule.tool == tool
+    assert rule.constraints == constraints
+    # canonical form round-trips
+    assert PermissionRule.parse(str(rule)) == rule
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "(a=b)",
+        "t(",
+        "t()",
+        "t(a)",
+        "t(a=)",
+        't(a="x)',
+        "t(a=b,a=c)",
+        "t x",
+        "t(a=b))",
+    ],
+)
+def test_rule_parse_rejects_garbage(text):
+    with pytest.raises(RuleSyntaxError):
+        PermissionRule.parse(text)
+
+
+def test_rule_matching_globs_and_types():
+    rule = PermissionRule.parse("t(package=com.example.*, force=true, n=4?)")
+    assert rule.matches("t", {"package": "com.example.app", "force": True, "n": 42})
+    assert not rule.matches("t", {"package": "com.other", "force": True, "n": 42})
+    assert not rule.matches("t", {"package": "com.example.a", "force": False, "n": 42})
+    assert not rule.matches(
+        "other", {"package": "com.example.a", "force": True, "n": 42}
+    )
+    # case-sensitive on every platform
+    assert not PermissionRule.parse("t(p=COM.*)").matches("t", {"p": "com.x"})
+
+
+@pytest.mark.parametrize("missing", [{}, {"package": None}, {"package": ""}])
+def test_constrained_rule_never_matches_a_missing_argument(missing):
+    assert not PermissionRule.parse("t(package=*)").matches("t", missing)
+
+
+def test_bare_rule_matches_any_arguments():
+    assert PermissionRule.parse("t").matches("t", {"x": 1})
+    assert PermissionRule.parse("t").matches("t", None)
+
+
+def test_suggest_rule():
+    assert suggest_rule("launch_app", {"package": "a"}) == "launch_app"
+    # argument-dependent: names the key argument, glob-escaped
+    assert (
+        suggest_rule("kill_process", {"package": "a.b*"}, permission_key="package")
+        == "kill_process(package=a.b[*])"
+    )
+    rule = PermissionRule.parse(
+        suggest_rule("kill_process", {"package": "a.b*"}, permission_key="package")
+    )
+    assert rule.matches("kill_process", {"package": "a.b*"})
+    assert not rule.matches("kill_process", {"package": "a.bc"})
+    # missing key argument or no key -> nothing can be remembered
+    assert suggest_rule("kill_process", {}, permission_key="package") is None
+    assert suggest_rule("clear", {}, can_remember_choice=False) is None
+    # values needing quotes round-trip
+    text = suggest_rule("push_path", {"path": "/a,b (c)"}, permission_key="path")
+    assert PermissionRule.parse(text).matches("push_path", {"path": "/a,b (c)"})
+
+
+def test_describe_rule():
+    assert describe_rule("install_apk") == "Install APK"
+    assert describe_rule("kill_process(package=com.x)") == (
+        "Kill Process with package = com.x"
+    )
+    assert describe_rule("kill_process(package=com.*)") == (
+        "Kill Process with package matching com.*"
+    )
+    assert describe_rule("k(p=a[*])") == "K with p = a*"
+    assert describe_rule("not valid (") == "not valid ("
+
+
+# -- resolution order -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("file", "tool", "risk", "args", "outcome", "reason"),
+    [
+        # 1. NOT_EXPOSED beats everything, even allow_all + allow rule
+        ('mode="allow_all"\nallow=["t"]', "t", NX, {}, "deny", "not_exposed"),
+        # 2. deny beats allow_all and allow and READ_ONLY
+        ('mode="allow_all"\nallow=["t"]\ndeny=["t"]', "t", C, {}, "deny", "deny_rule"),
+        ('deny=["t"]', "t", RO, {}, "deny", "deny_rule"),
+        ('deny=["t(p=a*)"]', "t", RO, {"p": "abc"}, "deny", "deny_rule"),
+        ('deny=["t(p=a*)"]', "t", RO, {"p": "xyz"}, "allow", "read_only"),
+        # 3. allow_all
+        ('mode="allow_all"', "t", C, {}, "allow", "allow_all"),
+        # 4. allow rule
+        ('allow=["t"]', "t", C, {}, "allow", "allow_rule"),
+        ('allow=["t(p=a*)"]', "t", C, {"p": "abc"}, "allow", "allow_rule"),
+        ('allow=["t(p=a*)"]', "t", C, {"p": "zzz"}, "ask", "ask"),
+        # 5. READ_ONLY
+        ("", "t", RO, {}, "allow", "read_only"),
+        # 6. ask
+        ("", "t", R, {}, "ask", "ask"),
+        ("", "t", C, {}, "ask", "ask"),
+        ('allow=["other"]', "t", C, {}, "ask", "ask"),
+    ],
+)
+def test_resolution_order(tmp_path, file, tool, risk, args, outcome, reason):
+    store = _store(tmp_path, file)
+    res = store.resolve(tool, risk, args)
+    assert (res.outcome, res.reason) == (outcome, reason)
+
+
+def test_ask_carries_suggested_rule(tmp_path):
+    store = _store(tmp_path)
+    assert store.resolve("t", C, {}).suggested_rule == "t"
+    res = store.resolve("k", C, {"package": "com.x"}, permission_key="package")
+    assert res.suggested_rule == "k(package=com.x)"
+
+
+def test_bare_allow_rule_ignored_for_argument_dependent_tools(tmp_path, caplog):
+    store = _store(tmp_path, 'allow=["k", "k(package=com.x)"]', arg_dep={"k"})
+    assert any("ignored" in w for w in store.warnings())
+    # via permission_key
+    assert (
+        store.resolve("k", C, {"package": "other"}, permission_key="package").outcome
+        == "ask"
+    )
+    # via can_remember_choice=False
+    assert (
+        store.resolve("k", C, {"package": "other"}, can_remember_choice=False).outcome
+        == "ask"
+    )
+    # the constrained rule still applies
+    assert store.resolve("k", C, {"package": "com.x"}, permission_key="package").allowed
+    # constrained rule never matches the missing argument (spotlight fallback)
+    assert store.resolve("k", C, {}, permission_key="package").outcome == "ask"
+    assert "Ignoring allow rule" in caplog.text
+
+
+def test_bare_deny_rule_applies_to_argument_dependent_tools(tmp_path):
+    store = _store(tmp_path, 'deny=["k"]')
+    assert store.resolve("k", C, {"package": "x"}, permission_key="package").denied
+
+
+def test_add_allow_rule_rejects_bare_rule_for_argument_dependent_tool(tmp_path):
+    store = _store(tmp_path, arg_dep={"k"})
+    with pytest.raises(ValueError):
+        store.add_allow_rule("k")
+    with pytest.raises(ValueError):
+        store.add_allow_rule("j", argument_dependent=True)
+    assert store.add_allow_rule("k(package=com.x)") == "k(package=com.x)"
+    with pytest.raises(RuleSyntaxError):
+        store.add_allow_rule("k(")
+
+
+def test_invalid_rules_are_skipped_with_warnings_and_bad_deny_fails_closed(tmp_path):
+    store = _store(tmp_path, 'mode="weird"\nallow=["ok", "bad(", 3]\ndeny=["kill(p=x"]')
+    assert store.mode == "ask"
+    assert store.allow_rules() == ["ok"]
+    assert store.deny_rules() == ["kill"]
+    assert len(store.warnings()) == 4
+    assert store.resolve("kill", RO, {"p": "y"}).denied
+
+
+# -- modes ------------------------------------------------------------------
+
+
+def test_session_mode_override_is_not_persisted(tmp_path):
+    store = _store(tmp_path, 'mode="ask"')
+    assert store.toggle_session_allow_all() == "allow_all"
+    assert store.resolve("t", C).reason == "allow_all"
+    assert _data(store)["mode"] == "ask"
+    assert ToolPermissionStore(store.path).mode == "ask"
+    assert store.toggle_session_allow_all() == "ask"
+    store.set_session_mode(None)
+    assert store.mode == "ask"
+    with pytest.raises(ValueError):
+        store.set_session_mode("yolo")
+
+
+def test_set_mode_persists(tmp_path):
+    store = _store(tmp_path)
+    store.set_mode("allow_all")
+    assert _data(store)["mode"] == "allow_all"
+    assert ToolPermissionStore(store.path).mode == "allow_all"
+
+
+# -- persistence --------------------------------------------------------------
+
+
+def test_missing_file_is_ask_and_created_on_first_write(tmp_path):
+    store = _store(tmp_path)
+    assert store.mode == "ask"
+    assert store.allow_rules() == []
+    assert not store.path.exists()
+    store.add_allow_rule("t")
+    assert _data(store) == {"mode": "ask", "allow": ["t"], "deny": []}
+    assert oct(store.path.stat().st_mode & 0o777) == "0o600"
+
+
+def test_write_preserves_unknown_keys_and_hand_edits(tmp_path):
+    store = _store(
+        tmp_path, '# keep me\nmode = "ask"\nallow = ["a"]\ndeny = []\nfoo = 1\n'
+    )
+    # someone edits the file after the store loaded it
+    _write(store.path, store.path.read_text() + 'bar = "x"\n')
+    store.add_allow_rule("b")
+    data = _data(store)
+    assert data["allow"] == ["a", "b"]
+    assert data["foo"] == 1
+    assert data["bar"] == "x"
+    if tp._tomlkit is not None:
+        assert "# keep me" in store.path.read_text()
+
+
+def test_atomic_write_leaves_no_temp_files_and_survives_failed_replace(
+    tmp_path, monkeypatch
+):
+    store = _store(tmp_path, 'allow = ["a"]\n')
+    store.add_allow_rule("b")
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []
+
+    original = store.path.read_text()
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tp.os, "replace", boom)
+    store.add_allow_rule("c")  # falls back to session-only
+    assert store.path.read_text() == original
+    assert "c" in store.allow_rules()
+    assert [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_concurrent_writes_do_not_lose_rules(tmp_path):
+    store = _store(tmp_path)
+    threads = [
+        threading.Thread(target=store.add_allow_rule, args=(f"t{i}",))
+        for i in range(20)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(_data(store)["allow"]) == sorted(f"t{i}" for i in range(20))
+
+
+def test_two_stores_on_one_file_merge_writes(tmp_path):
+    a = _store(tmp_path)
+    b = ToolPermissionStore(a.path)
+    a.add_allow_rule("x")
+    b.add_allow_rule("y")
+    assert _data(a)["allow"] == ["x", "y"]
+
+
+def test_parse_error_fails_closed_and_preserves_file(tmp_path):
+    text = 'mode = "allow_all"\nallow = ["t"\n'  # broken
+    store = _store(tmp_path, text)
+    assert store.load_error
+    assert not store.writable
+    assert store.mode == "ask"
+    assert store.resolve("t", C).outcome == "ask"
+    # remembering keeps the rule for the session but never rewrites the file
+    store.add_allow_rule("t")
+    store.set_mode("allow_all")
+    store.add_deny_rule("z")
+    assert store.path.read_text() == text
+    assert store.resolve("z", RO).denied
+
+
+def test_remove_rule(tmp_path):
+    store = _store(tmp_path, 'allow=["a", "k(p=1)"]\ndeny=["d"]')
+    assert store.remove_rule("allow", "k( p=1 )")
+    assert store.remove_rule("deny", "d")
+    assert not store.remove_rule("deny", "d")
+    assert _data(store)["allow"] == ["a"]
+    assert _data(store)["deny"] == []
+
+
+# -- legacy migration ---------------------------------------------------------
+
+
+LEGACY = (
+    'allowed = ["launch_app", "install_apk"]\nnever = ["clear_app_data"]\nfoo = 1\n'
+)
+
+
+def test_legacy_migration_is_in_memory_only(tmp_path):
+    store = _store(tmp_path, LEGACY, arg_dep={"install_apk"})
+    # Loading never writes: same bytes, no lock file, no backup.
+    assert store.path.read_text() == LEGACY
+    assert not (tmp_path / "ai_tool_permissions.toml.lock").exists()
+    assert not (tmp_path / "ai_tool_permissions.toml.bak-legacy").exists()
+    assert store.allow_rules() == ["launch_app"]  # bare arg-dependent name dropped
+    assert store.deny_rules() == []  # never is NOT migrated
+    assert store.mode == "ask"
+    assert store.resolve("clear_app_data", C).outcome == "ask"
+    assert store.resolve("launch_app", C).allowed
+    assert store.resolve("install_apk", C, permission_key="path").outcome == "ask"
+    # one-time "previous declines (not enforced)" notice, acknowledged in
+    # memory only
+    assert store.legacy_declines() == ["clear_app_data"]
+    assert store.legacy_notice_pending()
+    store.acknowledge_legacy_notice()
+    assert not store.legacy_notice_pending()
+    assert store.path.read_text() == LEGACY
+
+
+def test_legacy_file_first_write_preserves_legacy_keys_and_backs_up(tmp_path):
+    store = _store(tmp_path, LEGACY, arg_dep={"install_apk"})
+    store.acknowledge_legacy_notice()
+    store.add_allow_rule("kill_process(package=com.x)")
+    backup = tmp_path / "ai_tool_permissions.toml.bak-legacy"
+    assert backup.read_text() == LEGACY
+    data = _data(store)
+    # Older installs read these: untouched.
+    assert data["allowed"] == ["launch_app", "install_apk"]
+    assert data["never"] == ["clear_app_data"]
+    assert data["foo"] == 1
+    # The migration is materialised, the file marked migrated.
+    assert data["allow"] == ["launch_app", "kill_process(package=com.x)"]
+    assert data["deny"] == []
+    assert data["mode"] == "ask"
+    assert data["version"] == 2
+    assert "legacy_declines" not in data
+    assert data["legacy_declines_notified"] is True
+    again = ToolPermissionStore(store.path, arg_dependent=lambda n: n == "install_apk")
+    assert again.legacy_declines() == ["clear_app_data"]
+    assert not again.legacy_notice_pending()
+    # The backup is written once, never overwritten.
+    store.set_mode("allow_all")
+    assert backup.read_text() == LEGACY
+
+
+def test_migrated_file_never_reinterprets_legacy_keys(tmp_path):
+    store = _store(tmp_path, LEGACY, arg_dep={"install_apk"})
+    store.set_mode("ask")  # first explicit write
+    assert store.remove_rule("allow", "launch_app")
+    data = _data(store)
+    assert data["allow"] == []
+    assert data["allowed"] == ["launch_app", "install_apk"]
+    # A removed rule does not come back from the preserved legacy key.
+    again = ToolPermissionStore(store.path, arg_dependent=lambda n: n == "install_apk")
+    assert again.allow_rules() == []
+    assert again.resolve("launch_app", C).outcome == "ask"
+    assert again.deny_rules() == []
+
+
+def test_legacy_acknowledgement_alone_never_writes(tmp_path):
+    store = _store(tmp_path, LEGACY)
+    before = store.path.stat().st_mtime_ns, store.path.stat().st_ino
+    store.acknowledge_legacy_notice()
+    store.set_session_mode("allow_all")
+    store.mark_never("x")
+    ToolPermissionStore(store.path)
+    assert (store.path.stat().st_mtime_ns, store.path.stat().st_ino) == before
+    assert store.path.read_text() == LEGACY
+
+
+def test_new_file_gets_no_legacy_bookkeeping(tmp_path):
+    store = _store(tmp_path)
+    store.acknowledge_legacy_notice()
+    store.add_allow_rule("t")
+    data = _data(store)
+    assert data["allow"] == ["t"]
+    assert not {"legacy_declines", "legacy_declines_notified", "allowed"} & set(data)
+    assert not (tmp_path / "ai_tool_permissions.toml.bak-legacy").exists()
+
+
+def test_legacy_migration_merges_with_new_keys_and_is_idempotent(tmp_path):
+    text = 'mode="allow_all"\nallow=["x"]\nallowed=["x","y"]\nnever=[]\n'
+    store = _store(tmp_path, text)
+    assert store.allow_rules() == ["x", "y"]
+    assert store.mode == "allow_all"
+    assert not store.legacy_notice_pending()
+    ToolPermissionStore(store.path)
+    assert store.path.read_text() == text
+
+
+def test_legacy_migration_of_corrupt_file_does_not_touch_it(tmp_path):
+    text = 'allowed = ["a"\n'
+    store = _store(tmp_path, text)
+    assert store.load_error
+    assert store.path.read_text() == text
+
+
+def test_legacy_migration_uses_registry_resolver_by_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(tp, "_registry_argument_dependent", lambda n: n == "push_path")
+    path = _write(tmp_path / "p.toml", 'allowed = ["push_path", "ok"]\n')
+    assert ToolPermissionStore(path).allow_rules() == ["ok"]
+    tp.set_argument_dependency_resolver(lambda n: n == "ok")
+    path2 = _write(tmp_path / "p2.toml", 'allowed = ["push_path", "ok"]\n')
+    assert ToolPermissionStore(path2).allow_rules() == ["push_path"]
+
+
+# -- legacy shims (current loop / chat panel) -----------------------------------
+
+
+def test_legacy_shims(tmp_path, monkeypatch):
+    store = _store(tmp_path, arg_dep={"argy"})
+    monkeypatch.setattr(tp, "_tool_permission_store", store)
+    assert get_tool_permission_store() is store
+    assert resolve_tool_policy("t", R) == "ask"
+    store.mark_allowed("t")
+    assert store.is_allowed("t")
+    assert resolve_tool_policy("t", R) == "allowed"
+    assert _data(store)["allow"] == ["t"]
+    # mark_never is session-only now
+    store.mark_never("u")
+    assert store.is_never("u")
+    assert resolve_tool_policy("u", R) == "never"
+    assert _data(store)["deny"] == []
+    assert not ToolPermissionStore(store.path).is_never("u")
+    # arg-dependent: mark_allowed refuses; stale bare rule never bypasses asking
+    store.mark_allowed("argy")
+    assert not store.is_allowed("argy")
+    assert resolve_tool_policy("x", R, can_remember_choice=False) == "ask"
+    assert resolve_tool_policy("x", NX) == "never"
+
+
+def test_singletons_and_reset(tmp_path, monkeypatch):
+    monkeypatch.setattr(tp, "_default_permissions_path", lambda: tmp_path / "s.toml")
+    assert get_tool_permission_store() is get_tool_permission_store()
+    broker = get_approval_broker()
+    assert broker is get_approval_broker()
+    pending = broker.submit(agent_id="a", agent_label="A", tool="t", args={}, risk=C)
+    tp.reset_for_tests()
+    assert pending.done
+    assert pending.decision.by == "cancelled"
+    assert get_approval_broker() is not broker
+
+
+# -- ApprovalBroker -------------------------------------------------------------
+
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
-    """A fresh store backed by a temp file, wired up as the module singleton."""
-    instance = ToolPermissionStore(path=tmp_path / "ai_tool_permissions.toml")
-    monkeypatch.setattr(tool_permissions_module, "_tool_permission_store", None)
-    monkeypatch.setattr(
-        tool_permissions_module, "get_tool_permission_store", lambda: instance
-    )
-    return instance
+def broker(tmp_path):
+    store = _store(tmp_path, arg_dep={"k"})
+    return ApprovalBroker(store, timeout_s=5)
 
 
-# -- ToolPermissionStore: round-trip + basic semantics -----------------------
-
-
-def test_store_starts_empty_when_file_absent(tmp_path):
-    fresh = ToolPermissionStore(path=tmp_path / "does_not_exist.toml")
-    assert not fresh.is_allowed("some_tool")
-    assert not fresh.is_never("some_tool")
-
-
-def test_store_roundtrips_allowed_and_never_through_a_temp_file(tmp_path):
-    path = tmp_path / "ai_tool_permissions.toml"
-    first = ToolPermissionStore(path=path)
-    first.mark_allowed("install_apk")
-    first.mark_never("clear_app_data")
-
-    # A brand-new instance reading the same path must see the persisted state.
-    second = ToolPermissionStore(path=path)
-    assert second.is_allowed("install_apk")
-    assert not second.is_never("install_apk")
-    assert second.is_never("clear_app_data")
-    assert not second.is_allowed("clear_app_data")
-
-
-def test_mark_allowed_clears_a_conflicting_never_entry(tmp_path):
-    store = ToolPermissionStore(path=tmp_path / "perms.toml")
-    store.mark_never("uninstall_apk")
-    assert store.is_never("uninstall_apk")
-
-    store.mark_allowed("uninstall_apk")
-
-    assert store.is_allowed("uninstall_apk")
-    assert not store.is_never("uninstall_apk")
-
-
-def test_mark_never_clears_a_conflicting_allowed_entry(tmp_path):
-    store = ToolPermissionStore(path=tmp_path / "perms.toml")
-    store.mark_allowed("uninstall_apk")
-    assert store.is_allowed("uninstall_apk")
-
-    store.mark_never("uninstall_apk")
-
-    assert store.is_never("uninstall_apk")
-    assert not store.is_allowed("uninstall_apk")
-
-
-def test_corrupt_file_is_swallowed_and_store_starts_empty(tmp_path):
-    path = tmp_path / "corrupt.toml"
-    path.write_text("this is not valid TOML {{{", encoding="utf-8")
-
-    fresh = ToolPermissionStore(path=path)
-
-    assert not fresh.is_allowed("anything")
-    assert not fresh.is_never("anything")
-
-
-def test_get_tool_permission_store_is_a_singleton(monkeypatch, tmp_path):
-    monkeypatch.setattr(tool_permissions_module, "_tool_permission_store", None)
-    monkeypatch.setattr(
-        tool_permissions_module,
-        "_default_permissions_path",
-        lambda: tmp_path / "singleton.toml",
-    )
-    first = get_tool_permission_store()
-    second = get_tool_permission_store()
-    assert first is second
-
-
-# -- resolve_tool_policy: derivation against an empty store ------------------
-
-
-def test_read_only_derives_allowed_with_empty_store(store):
-    assert resolve_tool_policy("get_status", RiskTier.READ_ONLY) == "allowed"
-
-
-def test_reversible_derives_ask_with_empty_store(store):
-    assert resolve_tool_policy("install_apk", RiskTier.REVERSIBLE) == "ask"
-
-
-def test_consequential_derives_ask_with_empty_store(store):
-    assert resolve_tool_policy("clear_app_data", RiskTier.CONSEQUENTIAL) == "ask"
-
-
-def test_not_exposed_is_always_never_with_empty_store(store):
-    assert resolve_tool_policy("secret_tool", RiskTier.NOT_EXPOSED) == "never"
-
-
-# -- resolve_tool_policy: an explicit store entry wins over the risk default -
-
-
-def test_store_never_wins_over_read_only_default_of_allowed(store):
-    """A READ_ONLY tool would default to "allowed" -- an explicit "never" in
-    the store must still override that default.
-    """
-    store.mark_never("get_status")
-
-    assert resolve_tool_policy("get_status", RiskTier.READ_ONLY) == "never"
-
-
-def test_store_allowed_wins_over_reversible_default_of_ask(store):
-    """A REVERSIBLE tool would default to "ask" -- an explicit "allowed" in
-    the store must override that default.
-    """
-    store.mark_allowed("install_apk")
-
-    assert resolve_tool_policy("install_apk", RiskTier.REVERSIBLE) == "allowed"
-
-
-def test_store_allowed_wins_over_consequential_default_of_ask(store):
-    store.mark_allowed("clear_app_data")
-
-    assert resolve_tool_policy("clear_app_data", RiskTier.CONSEQUENTIAL) == "allowed"
-
-
-def test_store_never_wins_over_reversible_default_of_ask(store):
-    store.mark_never("install_apk")
-
-    assert resolve_tool_policy("install_apk", RiskTier.REVERSIBLE) == "never"
-
-
-# -- resolve_tool_policy: NOT_EXPOSED is unconditional -----------------------
-
-
-def test_not_exposed_is_never_even_when_store_says_allowed(store):
-    """Defense in depth: even if the store somehow has an "allowed" entry for
-    a NOT_EXPOSED tool's name (e.g. left over from before it was
-    reclassified), the gate must still refuse it outright.
-    """
-    store.mark_allowed("secret_tool")
-
-    assert resolve_tool_policy("secret_tool", RiskTier.NOT_EXPOSED) == "never"
-
-
-def test_not_exposed_is_never_even_when_store_says_never(store):
-    store.mark_never("secret_tool")
-
-    assert resolve_tool_policy("secret_tool", RiskTier.NOT_EXPOSED) == "never"
-
-
-# -- resolve_tool_policy: can_remember_choice=False bypasses the store -------
-
-
-def test_can_remember_choice_false_still_asks_despite_a_stored_allowed_entry(store):
-    """This is the fixed 3-arg signature's whole point, and the exact bug an
-    earlier draft of this plan shipped: a tool marked can_remember_choice=False
-    (its risk lives in its *arguments*, not its identity, e.g.
-    invoke_exported_component) must NEVER silently bypass re-asking just
-    because the store happens to have a stale/pre-existing "allowed" entry
-    under that same tool name.
-    """
-    store.mark_allowed("invoke_exported_component")
-
-    result = resolve_tool_policy(
-        "invoke_exported_component",
-        RiskTier.CONSEQUENTIAL,
-        can_remember_choice=False,
+def _submit(broker, tool="t", agent="orchestrator", args=None, **kw):
+    return broker.submit(
+        agent_id=agent, agent_label=agent, tool=tool, args=args or {}, risk=C, **kw
     )
 
-    assert result == "ask"
 
-
-def test_can_remember_choice_false_asks_even_for_read_only_risk(store):
-    """can_remember_choice=False must win even against RiskTier.READ_ONLY's
-    normal "allowed" default -- the check happens strictly before the
-    risk-tier fallback, per the plan's fixed 3-step order.
-    """
-    result = resolve_tool_policy(
-        "some_tool", RiskTier.READ_ONLY, can_remember_choice=False
+def test_broker_fifo_and_listener(broker):
+    events = []
+    remove = broker.add_listener(
+        lambda kind, req, dec: events.append((kind, req.tool, dec))
     )
+    a = _submit(broker, "a")
+    b = _submit(broker, "b", agent="operator a-op-1")
+    assert [r.tool for r in broker.pending()] == ["a", "b"]
+    assert broker.head().tool == "a"
+    assert broker.resolve(a.request.request_id, "once")
+    assert broker.head().tool == "b"
+    assert broker.resolve(b.request.request_id, Decision("no", note="use adb instead"))
+    assert not broker.resolve(b.request.request_id, "once")  # first answer wins
+    assert a.wait().choice == "once"
+    assert b.wait() == Decision("no", note="use adb instead")
+    assert [e[0] for e in events] == ["added", "added", "resolved", "resolved"]
+    remove()
+    _submit(broker)
+    assert len(events) == 4
 
-    assert result == "ask"
+
+def test_broker_blocking_request_across_threads(broker):
+    result = {}
+
+    def worker():
+        result["d"] = broker.request(
+            agent_id="x", agent_label="X", tool="t", args={}, risk=C
+        )
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while broker.head() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    broker.resolve(broker.head().request_id, "no", note=" stop ")
+    thread.join(5)
+    assert result["d"] == Decision("no", note="stop")
 
 
-def test_can_remember_choice_false_does_not_even_consult_the_store_for_never(store):
-    """Symmetric to the "allowed" case: a stored "never" entry doesn't matter
-    either -- can_remember_choice=False always resolves to "ask", not "never".
-    """
-    store.mark_never("invoke_exported_component")
-
-    result = resolve_tool_policy(
-        "invoke_exported_component",
-        RiskTier.CONSEQUENTIAL,
-        can_remember_choice=False,
+def test_broker_timeout_counts_as_no(broker):
+    events = []
+    broker.add_listener(lambda kind, req, dec: events.append(kind))
+    decision = broker.request(
+        agent_id="x", agent_label="X", tool="t", args={}, risk=C, timeout_s=0.05
     )
+    assert decision == Decision("no", by="timeout")
+    assert broker.pending() == []
+    assert events == ["added", "resolved"]
 
-    assert result == "ask"
+
+def test_broker_default_timeout_is_300s():
+    assert ApprovalBroker().timeout_s == 300.0
 
 
-def test_can_remember_choice_true_is_the_default(store):
-    """Sanity check for the signature's default value: omitting the argument
-    entirely behaves like explicitly passing True.
-    """
-    store.mark_allowed("install_apk")
+def test_broker_cancel_event_and_cancel(broker):
+    cancel = threading.Event()
+    cancel.set()
+    d = broker.request(
+        agent_id="x", agent_label="X", tool="t", args={}, risk=C, cancel_event=cancel
+    )
+    assert d.by == "cancelled"
+    assert d.choice == "no"
+    p = _submit(broker)
+    assert broker.cancel(p.request.request_id)
+    assert p.wait().by == "cancelled"
+    assert not broker.cancel(p.request.request_id)
 
-    assert resolve_tool_policy("install_apk", RiskTier.REVERSIBLE) == "allowed"
+
+def test_broker_cancel_agent_only_hits_that_agent(broker):
+    a1 = _submit(broker, agent="a")
+    b1 = _submit(broker, agent="b")
+    a2 = _submit(broker, agent="a")
+    assert broker.cancel_agent("a") == 2
+    assert a1.done
+    assert a2.done
+    assert not b1.done
+    assert broker.cancel_all() == 1
+
+
+def test_broker_always_persists_rule_and_auto_resolves_matching(broker):
+    store = broker._get_store()
+    first = _submit(broker, "t", suggested_rule="t")
+    second = _submit(broker, "t", agent="operator")
+    other = _submit(broker, "u")
+    broker.resolve(first.request.request_id, "always")
+    assert first.wait() == Decision("always", remembered_rule="t")
+    assert store.allow_rules() == ["t"]
+    assert second.done
+    assert second.decision.by == "rule"
+    assert not other.done
+    assert store.resolve("t", C).allowed
+
+
+def test_broker_always_with_constrained_rule(broker):
+    store = broker._get_store()
+    rule = suggest_rule("k", {"package": "com.x"}, permission_key="package")
+    first = _submit(
+        broker,
+        "k",
+        args={"package": "com.x"},
+        suggested_rule=rule,
+        argument_dependent=True,
+    )
+    same = _submit(broker, "k", args={"package": "com.x"}, argument_dependent=True)
+    diff = _submit(broker, "k", args={"package": "com.y"}, argument_dependent=True)
+    broker.resolve(first.request.request_id, "always")
+    assert first.wait().remembered_rule == "k(package=com.x)"
+    assert same.done
+    assert not diff.done
+    assert store.allow_rules() == ["k(package=com.x)"]
+
+
+def test_broker_always_without_rule_degrades_to_once(broker):
+    store = broker._get_store()
+    p = _submit(broker, "k", argument_dependent=True)  # no suggestion
+    broker.resolve(p.request.request_id, "always")
+    assert p.wait().choice == "once"
+    bare = _submit(broker, "k", suggested_rule="k", argument_dependent=True)
+    broker.resolve(bare.request.request_id, "always")  # bare rule rejected
+    assert bare.wait().choice == "once"
+    assert store.allow_rules() == []
+
+
+def test_broker_listener_errors_do_not_break_resolution(broker):
+    broker.add_listener(lambda *a: 1 / 0)
+    p = _submit(broker)
+    broker.resolve(p.request.request_id, "once")
+    assert p.wait().approved

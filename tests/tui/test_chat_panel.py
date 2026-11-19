@@ -1,76 +1,1184 @@
-"""Headless smoke tests for the Chat tab (ChatPanel + main_screen wiring).
+"""The AI chat panel (``sandroid.tui.widgets.chat_panel``) over the runtime.
 
-Uses Textual's own headless harness (``App.run_test()``) to mount ChatPanel
-without a real terminal. There is no prior use of ``run_test()``/Textual's
-test harness anywhere else in this repo's test suite (grepped, none found),
-so this is a new pattern here -- but it's the standard, documented way to
-drive a Textual app/widget in a test, and the only way to confirm
-``ChatPanel.compose()``/``on_mount()`` actually run end-to-end without
-raising (as opposed to just importing the module).
-
-Does not touch ADB at all. ChatPanel's ``compose()``/``on_mount()`` only
-*read* ``Toolbox.config.ai`` (best-effort, for the header and the data-egress
-notice -- a missing config just renders the "not configured" state), so this
-mounts cleanly with zero fixtures.
+The panel renders :class:`~sandroid.ai.loop.AgentEvent` objects and forwards
+input, approvals and slash commands. Most tests drive it with a scripted fake
+session (events pushed through the real sink); a few run a real
+:class:`~sandroid.ai.session.AgentSession` with a scripted fake client. No
+network, no device.
 """
 
-import asyncio
-import functools
+from __future__ import annotations
+
 import threading
-import time as time_module
+import time
 from types import SimpleNamespace
 
 import pytest
-from pilot_helpers import until
-from rich.markdown import Markdown
-from rich.text import Text
+from pilot_helpers import settle, until
 from textual.app import App, ComposeResult
-from textual.css.query import NoMatches
-from textual.widgets import Button, Input, RichLog, Static
+from textual.widgets import Input, Static
 
+import sandroid.ai.tool_permissions as perms
 import sandroid.tui.widgets.chat_panel as chat_panel_module
-from sandroid.ai.subtasks import CompletionRecord
-from sandroid.ai.tools.registry import RiskTier, ToolSpec
+from sandroid.ai.client import ModelProfile, StreamChunk, ToolCallDelta, Usage
+from sandroid.ai.loop import AgentEvent, Budgets
+from sandroid.ai.session import AgentSession, list_threads
+from sandroid.ai.tool_permissions import ALLOW_ALL_NOTICE, ToolPermissionStore
+from sandroid.ai.tools.registry import RiskTier
+from sandroid.core.toolbox import Toolbox
 from sandroid.tui.screens.main_screen import MainScreen
 from sandroid.tui.widgets.chat_panel import (
+    AgentsBar,
+    AgentTranscriptModal,
+    AgentTranscriptView,
     ChatPanel,
-    ChatTurnHandle,
-    _ChatLog,
-    _SubtaskOutputModal,
+    coalesce_events,
+    egress_banner_lines,
+    format_thread_row,
+    render_agent_transcript,
+    unwrap_call,
+)
+from sandroid.tui.widgets.chat_view import (
+    AgentCard,
+    BudgetNotice,
+    ChatMascot,
+    ChatTranscript,
+    CompactionRule,
+    EmptyState,
+    NoticeLine,
+    ReasoningLine,
+    ReplyBlock,
+    ToolBlock,
+    UserBlock,
 )
 from sandroid.tui.widgets.tool_permission_prompt import ToolPermissionPrompt
 
+LOCAL = "http://127.0.0.1:8000/v1"
+REMOTE = "https://llm.example.com/v1"
 
-class _ChatPanelHarness(App):
-    """Minimal host app: just enough DOM for ChatPanel to mount standalone."""
 
+# =============================================================================
+# Fakes and fixtures
+# =============================================================================
+
+
+def _ai(**overrides):
+    values = {
+        "base_url": LOCAL,
+        "api_key": "test-key-1234",
+        "model": "fake-model",
+        "allow_remote": False,
+        "chat_mascot": "blocks",
+        "show_chat_mascot": True,
+        "show_verbose_thinking": False,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+@pytest.fixture
+def ai_on(monkeypatch):
+    cfg = _ai()
+    monkeypatch.setattr(Toolbox, "config", SimpleNamespace(ai=cfg), raising=False)
+    return cfg
+
+
+@pytest.fixture
+def perm_store(tmp_path, monkeypatch):
+    store = ToolPermissionStore(path=tmp_path / "perms.toml")
+    monkeypatch.setattr(perms, "_tool_permission_store", store)
+    return store
+
+
+@pytest.fixture(autouse=True)
+def _no_grace(monkeypatch):
+    monkeypatch.setattr(ChatPanel, "APPROVAL_INPUT_GRACE_S", 0.0)
+
+
+class FakeMeter:
+    used = 41_000
+    window = 262_144
+    input_limit = 230_144
+    last_prompt_tokens = 40_000
+
+
+class FakeSession:
+    """Stands in for the orchestrator's AgentSession."""
+
+    def __init__(self, sink, thread_id="t-1"):
+        self.sink = sink
+        self.thread_id = thread_id
+        self.running = False
+        self.closed = False
+        self.persistent = True
+        self.model = "fake-model"
+        self.title = "first question"
+        self.meter = FakeMeter()
+        self.budgets = Budgets(max_rounds=25)
+        self.totals = {"prompt_tokens": 1200, "completion_tokens": 80, "requests": 3}
+        self.thread_path = None
+        self.messages: list[dict] = []
+        self.tools: list[dict] = []
+        self.submitted: list[str] = []
+        self.continued: list[int | None] = []
+        self.cancelled = 0
+        self.compact_focus: list[str | None] = []
+        self.client = SimpleNamespace(
+            health=lambda: SimpleNamespace(
+                ok=True,
+                ping_ms=12.0,
+                max_input_tokens=262_144,
+                model_listed=True,
+                error=None,
+            )
+        )
+
+    def submit_user_message(self, text, **_):
+        self.submitted.append(text)
+
+    def continue_turn(self, extra_rounds=None):
+        self.continued.append(extra_rounds)
+
+    def cancel(self, clear_queue=True):
+        self.cancelled += 1
+        self.running = False
+
+    def close(self, reason="new"):
+        from sandroid.ai.session import SessionBusyError
+
+        if self.running:
+            raise SessionBusyError("busy")
+        self.closed = True
+
+    def context_breakdown(self):
+        return {
+            "system": 3000,
+            "tools_schema": 9000,
+            "ambient": 500,
+            "history": 8000,
+            "tool_results": 20000,
+            "summaries": 0,
+            "reasoning": 500,
+        }
+
+    def compact_now(self, focus=None):
+        self.compact_focus.append(focus)
+        self.sink(
+            ev("compaction", kind="summary", tokens_before=182_000, tokens_after=41_000)
+        )
+        return SimpleNamespace(changed=True)
+
+
+class FakeManager:
+    """Stands in for the AgentManager."""
+
+    def __init__(self):
+        self.rows: list[dict] = []
+        self.events: dict[str, list] = {}
+        self.cancelled: list[str] = []
+        self.cancel_all_calls = 0
+        self.sent: list[tuple[str, str]] = []
+        self.noted = 0
+        self.listeners: list = []
+
+    def list(self, parent=None, *, live_only=False):
+        return list(self.rows)
+
+    def info(self, agent_id):
+        for row in self.rows:
+            if row["agent_id"] == agent_id:
+                return {**row, "task": "check the hosts", "transcript_path": None}
+        return None
+
+    def transcript_events(self, agent_id):
+        return list(self.events.get(agent_id, []))
+
+    def add_listener(self, cb):
+        self.listeners.append(cb)
+        return lambda: self.listeners.remove(cb)
+
+    def cancel(self, agent_id):
+        self.cancelled.append(agent_id)
+        return True
+
+    def cancel_all(self, parent=None):
+        self.cancel_all_calls += 1
+        return 0
+
+    def send(self, agent_id, text, *, parent=None):
+        self.sent.append((agent_id, text))
+        return {"agent_id": agent_id, "delivery": "next_round"}
+
+    def running_count(self, parent=None):
+        return sum(1 for r in self.rows if r["status"] in ("queued", "running"))
+
+    def note_analyst_message(self, parent):
+        self.noted += 1
+        return 0
+
+    def reconcile_leases(self):
+        pass
+
+    def usage_totals(self, parent=None):
+        return {"prompt_tokens": 500, "completion_tokens": 50}
+
+
+@pytest.fixture
+def manager(monkeypatch):
+    fake = FakeManager()
+    monkeypatch.setattr(chat_panel_module, "get_agent_manager", lambda: fake)
+    return fake
+
+
+@pytest.fixture
+def sessions(monkeypatch, ai_on):
+    """Patch the session factory; returns the list of opened fakes."""
+    opened: list[FakeSession] = []
+
+    def factory(*, sink, thread_id=None):
+        session = FakeSession(sink, thread_id or f"t-{len(opened) + 1}")
+        opened.append(session)
+        return session
+
+    monkeypatch.setattr(chat_panel_module, "open_orchestrator_session", factory)
+    return opened
+
+
+def ev(type_, who="orchestrator", turn_id="u1", **payload):
+    """An AgentEvent from agent *who* (the payload may carry its own agent_id)."""
+    if "agent_id" in payload and who == "orchestrator":
+        who = payload["agent_id"]
+    return AgentEvent(type_, who, None, "t-1", turn_id, 0, time.time(), payload)
+
+
+class _Harness(App):
     def compose(self) -> ComposeResult:
         yield ChatPanel(id="chat-panel")
 
 
+async def _panel(pilot) -> ChatPanel:
+    await settle(pilot)
+    return pilot.app.query_one(ChatPanel)
+
+
+async def _push(pilot, panel: ChatPanel, *events) -> None:
+    for event in events:
+        panel._sink(event)
+    await until(pilot, lambda: not panel._events and panel._drain_timer is None)
+    await settle(pilot)
+
+
+def _blocks(panel: ChatPanel, kind=None) -> list:
+    blocks = panel.query_one(ChatTranscript).blocks
+    return [b for b in blocks if kind is None or isinstance(b, kind)]
+
+
+def _notices(panel: ChatPanel) -> str:
+    return "\n".join(b.text for b in _blocks(panel, NoticeLine))
+
+
+async def _send(pilot, panel: ChatPanel, text: str) -> None:
+    field = panel.query_one("#chat-input", Input)
+    field.focus()
+    field.value = text
+    await pilot.press("enter")
+    # Opening / resuming a thread and listing threads run on workers.
+    await until(pilot, lambda: not panel.io_pending)
+    await settle(pilot)
+
+
+# =============================================================================
+# Mount, banner, header
+# =============================================================================
+
+
 @pytest.mark.smoke
-async def test_chat_panel_mounts_without_error():
-    app = _ChatPanelHarness()
-    async with app.run_test() as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        assert isinstance(panel, ChatPanel)
-        # compose() produced its children with no exception raised.
+async def test_mounts_with_the_kept_ids_banner_and_empty_state(ai_on):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        assert isinstance(app.query_one("#chat-log"), ChatTranscript)
+        assert isinstance(app.query_one("#chat-mascot"), ChatMascot)
+        assert app.query_one("#chat-input", Input).border_subtitle
         assert app.query_one("#chat-header") is not None
-        assert app.query_one("#chat-log") is not None
-        assert app.query_one("#chat-input") is not None
-        # The mascot is a sibling of #chat-input-bar (not nested inside
-        # it) -- it's positioned on top of the bar via CSS layering, not
-        # laid out as one of the bar's own row children.
-        assert app.query_one("#chat-input-bar") is not None
-        assert app.query_one("#chat-mascot") is not None
-        await pilot.pause()
+        banner = app.query_one(".chat-banner", Static)
+        text = banner.plain_text
+        assert "EXPERIMENTAL" in text
+        assert "fake-model" in text
+        assert app.query(EmptyState)
+        assert panel.session is None  # opened on the first message
+        header = app.query_one("#chat-header").render().plain
+        assert "idle" in header
+        assert "EXPERIMENTAL" in header
 
 
-def test_chat_tab_registered_in_tool_tabs():
-    """Chat is not a lens -- it lives in the right-hand side slot (see
-    ``MainScreen.toggle_chat_panel``) -- so it must never appear in the lens
-    registry / ``_TOOL_TABS``.
-    """
+async def test_not_configured_shows_off_state(monkeypatch):
+    monkeypatch.setattr(
+        Toolbox, "config", SimpleNamespace(ai=_ai(base_url=None)), raising=False
+    )
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _panel(pilot)
+        assert "not configured" in app.query_one("#chat-header").render().plain
+        assert "not configured" in app.query_one(".chat-banner").plain_text
+
+
+async def test_remote_endpoint_is_refused_before_opening_a_session(
+    monkeypatch, sessions
+):
+    monkeypatch.setattr(
+        Toolbox, "config", SimpleNamespace(ai=_ai(base_url=REMOTE)), raising=False
+    )
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "hello")
+        assert sessions == []
+        assert "not on this machine" in _notices(panel)
+        assert panel.state == "error"
+        # The text stays in the box: nothing was sent.
+        assert panel.query_one("#chat-input", Input).value == "hello"
+
+
+async def test_allow_all_mode_shows_in_banner_and_header(ai_on, perm_store):
+    perm_store.set_session_mode("allow_all")
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _panel(pilot)
+        banner = app.query_one(".chat-banner").plain_text
+        assert ALLOW_ALL_NOTICE in banner
+        assert "always ask" not in banner
+        assert "allow all" in app.query_one("#chat-header").render().plain
+
+
+def test_banner_lines_swap_the_approval_line_in_allow_all_mode():
+    from sandroid.ai.safety import get_ai_settings
+
+    settings = get_ai_settings(_ai())
+    ask = egress_banner_lines(settings, "ask")
+    allow = egress_banner_lines(settings, "allow_all")
+    assert any(line.startswith("Device-changing tools always ask") for line in ask)
+    assert not any(line.startswith("Device-changing tools") for line in allow)
+    assert ALLOW_ALL_NOTICE in allow[-1]
+
+
+async def test_legacy_declines_notice_is_shown_once(ai_on, tmp_path, monkeypatch):
+    path = tmp_path / "perms.toml"
+    path.write_text('never = ["kill_process"]\n')
+    store = ToolPermissionStore(path=path)
+    monkeypatch.setattr(perms, "_tool_permission_store", store)
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _panel(pilot)
+        notices = [
+            n.text for n in app.query(NoticeLine) if "no longer enforced" in n.text
+        ]
+        assert len(notices) == 1
+        assert "kill_process" in notices[0]
+    assert not store.legacy_notice_pending()
+
+
+# =============================================================================
+# Sending and rendering events
+# =============================================================================
+
+
+async def test_send_opens_a_session_and_renders_the_turn(sessions, manager):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "What is it sending?")
+        assert len(sessions) == 1
+        session = sessions[0]
+        assert session.submitted == ["What is it sending?"]
+        assert manager.noted == 1
+        assert panel.query_one("#chat-input", Input).value == ""
+        assert not app.query(EmptyState)
+        session.running = True
+        await _push(
+            pilot,
+            panel,
+            ev("turn_start", mode="chat"),
+            ev("request_start", iteration=1),
+            ev("reasoning_delta", text="Let me look."),
+            ev("tool_call", call_id="c1", name="list_flows", args={"package": "x"}),
+            ev(
+                "tool_result",
+                call_id="c1",
+                name="list_flows",
+                status="ok",
+                result_id="R17",
+                summary="12 rows",
+                duration_ms=400,
+            ),
+            ev("text_delta", text="It talks to "),
+            ev("text_delta", text="**tracker.example**."),
+            ev("usage", context_used=41_000, context_window=262_144),
+        )
+        session.running = False
+        await _push(pilot, panel, ev("turn_end", reason="completed", rounds=2))
+        user, thought, tool, reply = (
+            _blocks(panel, UserBlock),
+            _blocks(panel, ReasoningLine),
+            _blocks(panel, ToolBlock),
+            _blocks(panel, ReplyBlock),
+        )
+        assert user[0].text == "What is it sending?"
+        assert not thought[0].running
+        assert "R17" in tool[0].chip.plain
+        assert "12 rows" in tool[0].chip.plain
+        await until(pilot, lambda: reply[0].text == "It talks to **tracker.example**.")
+        assert panel.state == "idle"
+        header = app.query_one("#chat-header").render().plain
+        assert "41k/262k" in header
+
+
+async def test_deltas_from_a_worker_thread_are_coalesced(sessions):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        words = [f"w{i} " for i in range(300)]
+
+        def produce():
+            for word in words:
+                panel._sink(ev("text_delta", text=word))
+
+        thread = threading.Thread(target=produce)
+        thread.start()
+        thread.join()
+        await until(pilot, lambda: not panel._events and panel._drain_timer is None)
+        await settle(pilot)
+        replies = _blocks(panel, ReplyBlock)
+        assert len(replies) == 1
+        await until(pilot, lambda: replies[0].text == "".join(words))
+        assert panel.drain_count <= 5
+
+
+def test_coalesce_merges_runs_of_deltas_per_agent():
+    events = [
+        ev("text_delta", text="a"),
+        ev("text_delta", text="b"),
+        ev("reasoning_delta", text="r"),
+        ev("text_delta", text="c"),
+        ev("text_delta", agent_id="a-re-xxxxxx", text="z"),
+    ]
+    merged = coalesce_events(events)
+    assert [(e.type, e.payload["text"]) for e in merged] == [
+        ("text_delta", "ab"),
+        ("reasoning_delta", "r"),
+        ("text_delta", "c"),
+        ("text_delta", "z"),
+    ]
+
+
+async def test_failed_tool_call_shows_an_error_chip(sessions):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _push(
+            pilot,
+            panel,
+            ev(
+                "tool_call",
+                call_id="c1",
+                name="call_tool",
+                args={"name": "get_tls_keys", "arguments": "{}"},
+            ),
+            ev(
+                "tool_result",
+                call_id="c1",
+                status="error",
+                error_code="not_loaded",
+                summary="load it with tool_search",
+            ),
+        )
+        (tool,) = _blocks(panel, ToolBlock)
+        assert tool.tool_name == "get_tls_keys"  # call_tool is unwrapped
+        assert tool.ok is False
+        assert "not_loaded" in tool.chip.plain
+
+
+async def test_spawn_agent_shows_the_full_task(sessions):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        task = "Check every host in R3 against the tracker list " * 3
+        await _push(
+            pilot,
+            panel,
+            ev(
+                "tool_call",
+                call_id="c9",
+                name="spawn_agent",
+                args={"profile": "researcher", "task": task},
+            ),
+        )
+        assert task.strip() in _notices(panel)
+
+
+async def test_errors_retries_and_compaction(sessions):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _push(
+            pilot,
+            panel,
+            ev("retry", attempt=2, max_attempts=4, delay_s=4, reason="HTTP 503"),
+        )
+        assert panel.state == "retrying"
+        await _push(pilot, panel, ev("retry", attempt=3, max_attempts=4, delay_s=8))
+        retries = [n for n in _blocks(panel, NoticeLine) if "Retr" in n.text]
+        assert len(retries) == 1
+        assert "3/4" in retries[0].text
+        await _push(
+            pilot,
+            panel,
+            ev(
+                "compaction",
+                kind="mask",
+                tokens_before=140_000,
+                tokens_after=90_000,
+                ids=["R1", "R2"],
+            ),
+            ev("error", kind="interrupted", message="stream dropped"),
+        )
+        (rule,) = _blocks(panel, CompactionRule)
+        assert "2 results masked" in rule.label
+        assert "⟲1" in app.query_one("#chat-header").render().plain
+        assert "stream dropped" in _notices(panel)
+        assert panel.state == "error"
+
+
+async def test_mascot_follows_the_panel_state(sessions):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        mascot = app.query_one("#chat-mascot", ChatMascot)
+        assert mascot.state == "idle"
+        await _push(pilot, panel, ev("reasoning_delta", text="x"))
+        assert mascot.state == "thinking"
+        await _push(pilot, panel, ev("text_delta", text="y"))
+        assert mascot.state == "streaming"
+        await _push(
+            pilot, panel, ev("tool_call", call_id="c", name="list_flows", args={})
+        )
+        assert mascot.state == "tool"
+        await _push(pilot, panel, ev("error", message="boom"))
+        assert mascot.state == "error"
+        await _push(pilot, panel, ev("turn_end", reason="completed", rounds=1))
+        assert mascot.state == "idle"
+
+
+async def test_mascot_off_hides_it_on_refresh_header(ai_on):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        mascot = app.query_one("#chat-mascot", ChatMascot)
+        assert mascot.display
+        ai_on.show_chat_mascot = False
+        panel.refresh_header()
+        await settle(pilot)
+        assert not mascot.display
+
+
+# =============================================================================
+# Approvals
+# =============================================================================
+
+
+def _submit(tool="kill_process", label="Sandroid AI", agent_id="orchestrator"):
+    broker = perms.get_approval_broker()
+    return broker.submit(
+        agent_id=agent_id,
+        agent_label=label,
+        tool=tool,
+        args={"package_name": "com.example"},
+        risk=RiskTier.REVERSIBLE,
+        suggested_rule=f"{tool}(package_name=com.example)",
+        description="Kill a process.",
+        argument_dependent=True,
+    )
+
+
+def _request_event(pending, agent_id="orchestrator"):
+    r = pending.request
+    return ev(
+        "approval_request",
+        agent_id=agent_id,
+        request_id=r.request_id,
+        agent_label=r.agent_label,
+        tool=r.tool,
+        args=dict(r.args),
+    )
+
+
+def _resolved_event(pending, agent_id="orchestrator"):
+    d = pending.decision
+    return ev(
+        "approval_resolved",
+        agent_id=agent_id,
+        request_id=pending.request.request_id,
+        tool=pending.request.tool,
+        decision=d.choice,
+        note=d.note,
+        remembered_rule=d.remembered_rule,
+        by=d.by,
+    )
+
+
+@pytest.mark.parametrize(
+    ("keys", "choice", "note"),
+    [
+        (["1"], "once", None),
+        (["2"], "always", None),
+        (["3", "u", "s", "e", " ", "x", "enter"], "no", "use x"),
+        (["escape"], "no", None),
+    ],
+)
+async def test_approval_card_answers_the_broker(
+    sessions, perm_store, keys, choice, note
+):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        pending = _submit()
+        await _push(pilot, panel, _request_event(pending))
+        prompt = panel.pending_prompt()
+        assert isinstance(prompt, ToolPermissionPrompt)
+        assert panel.state == "approval"
+        assert app.query_one("#chat-mascot", ChatMascot).state == "approval"
+        await until(pilot, lambda: prompt.has_focus)
+        for key in keys:
+            await pilot.press(key)
+        await settle(pilot)
+        await until(pilot, lambda: pending.done)  # resolved on a worker
+        assert pending.decision.choice == choice
+        assert pending.decision.note == note
+        assert panel.pending_prompt() is None
+        assert not app.query(ToolPermissionPrompt)
+        await until(pilot, lambda: app.focused is not None)
+        assert app.focused.id == "chat-input"
+        await _push(pilot, panel, _resolved_event(pending))
+        line = _notices(panel)
+        assert ("allowed" if choice != "no" else "declined") in line
+        if note:
+            assert note in line
+
+
+async def test_approvals_queue_one_card_at_a_time(sessions, perm_store):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        first = _submit()
+        second = _submit(
+            tool="uninstall_apk", label="operator a-op-abcdef", agent_id="a-op-abcdef"
+        )
+        await _push(
+            pilot,
+            panel,
+            _request_event(first),
+            _request_event(second, agent_id="a-op-abcdef"),
+        )
+        assert len(app.query(ToolPermissionPrompt)) == 1
+        assert panel._prompt_rid == first.request.request_id
+        # The first one times out elsewhere: the card moves on.
+        perms.get_approval_broker().cancel(first.request.request_id)
+        await _push(pilot, panel, _resolved_event(first))
+        await until(pilot, lambda: panel._prompt_rid == second.request.request_id)
+        assert len(app.query(ToolPermissionPrompt)) == 1
+
+
+# =============================================================================
+# Threads: Ctrl+L, /new, /threads
+# =============================================================================
+
+
+async def test_ctrl_l_closes_the_thread_and_clears_the_transcript(sessions, manager):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "hello")
+        old = panel.session
+        await _push(pilot, panel, ev("text_delta", text="hi"))
+        await pilot.press("ctrl+l")
+        await settle(pilot)
+        await until(pilot, lambda: old.closed)  # closed on a worker
+        assert manager.cancel_all_calls == 1
+        assert panel.session is None
+        assert _blocks(panel) == []
+        assert app.query(EmptyState)
+        assert app.query(".chat-banner")
+        await _send(pilot, panel, "again")
+        assert len(sessions) == 2
+        assert sessions[1].submitted == ["again"]
+
+
+async def test_new_thread_is_refused_while_a_turn_runs(sessions, manager):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "hello")
+        panel.session.running = True
+        await _send(pilot, panel, "/new")
+        assert not panel.session.closed
+        assert "Ctrl+X" in _notices(panel)
+        assert _blocks(panel, UserBlock)
+        # A second message is refused too, and stays in the box.
+        await _send(pilot, panel, "more")
+        assert panel.session.submitted == ["hello"]
+        assert panel.query_one("#chat-input", Input).value == "more"
+
+
+async def test_ctrl_x_cancels_the_turn_and_its_agents(sessions, manager):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "hello")
+        panel.session.running = True
+        panel.query_one("#chat-input", Input).focus()
+        await pilot.press("ctrl+x")
+        await settle(pilot)
+        assert panel.session.cancelled == 1
+        assert manager.cancel_all_calls == 1
+
+
+def _script(*replies):
+    return list(replies)
+
+
+def _usage():
+    return Usage(100, 10, 0, 110)
+
+
+def _text(text):
+    return [
+        StreamChunk("text", text=text),
+        StreamChunk("done", finish_reason="stop", usage=_usage()),
+    ]
+
+
+def _tool(name, raw, call_id="call_1"):
+    return [
+        StreamChunk("tool_call", tool_call=ToolCallDelta(0, call_id, name, raw)),
+        StreamChunk("done", finish_reason="tool_calls", usage=_usage()),
+    ]
+
+
+class ScriptedClient:
+    model = "fake-model"
+    profile = ModelProfile(
+        name="test",
+        context_window=262_144,
+        system_mode="multi",
+        think_tags=False,
+        echo_reasoning="all",
+        stream_usage=True,
+        tool_choice_none=True,
+    )
+
+    def __init__(self, script):
+        self.script = list(script)
+
+    def stream(self, messages, tools=None, **_):
+        yield from self.script.pop(0)
+
+    def health(self):
+        return SimpleNamespace(
+            ok=True, ping_ms=5.0, max_input_tokens=None, model_listed=True, error=None
+        )
+
+
+def _real_factory(monkeypatch, root, scripts):
+    """Real AgentSessions in *root*; each open/resume takes the next script."""
+
+    def factory(*, sink, thread_id=None):
+        kwargs = {
+            "root": root,
+            "client": ScriptedClient(scripts.pop(0) if scripts else []),
+            "sink": sink,
+            "task_registrar": None,
+            "ambient_provider": lambda: "",
+        }
+        if thread_id:
+            return AgentSession.resume(thread_id, **kwargs)
+        return AgentSession.open_new(**kwargs)
+
+    monkeypatch.setattr(chat_panel_module, "open_orchestrator_session", factory)
+    monkeypatch.setattr(chat_panel_module, "list_threads", lambda: list_threads(root))
+
+
+async def test_real_session_streams_and_threads_resume_with_history(
+    ai_on, perm_store, tmp_path, monkeypatch
+):
+    scripts = [
+        _script(_tool("no_such_tool", "{}"), _text("Found **nothing**.")),
+        _script(),
+        _script(),
+    ]
+    _real_factory(monkeypatch, tmp_path, scripts)
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "first question")
+        session = panel.session
+        await until(pilot, lambda: not session.running)
+        await until(pilot, lambda: not panel._events and panel._drain_timer is None)
+        await settle(pilot)
+        (tool,) = _blocks(panel, ToolBlock)
+        assert tool.ok is False
+        assert "unknown_tool" in tool.chip.plain
+        (reply,) = _blocks(panel, ReplyBlock)
+        await until(pilot, lambda: reply.text == "Found **nothing**.")
+        assert panel.state == "idle"
+        first_id = session.thread_id
+
+        await pilot.press("ctrl+l")
+        await settle(pilot)
+        await until(pilot, lambda: session.closed)  # closed on a worker
+        assert panel.session is None
+        threads = list_threads(tmp_path)
+        assert [t["thread_id"] for t in threads] == [first_id]
+
+        await _send(pilot, panel, "/threads 1")
+        await until(pilot, lambda: panel.session is not None)
+        assert panel.session.thread_id == first_id
+        users = [b.text for b in _blocks(panel, UserBlock)]
+        assert users == ["first question"]
+        (tool,) = _blocks(panel, ToolBlock)
+        assert tool.tool_name == "no_such_tool"
+        assert tool.ok is False
+        assert [b.text for b in _blocks(panel, ReplyBlock)] == ["Found **nothing**."]
+        assert "Resumed" in _notices(panel)
+
+
+async def test_threads_picker_lists_and_resumes(sessions, monkeypatch):
+    rows = [
+        {
+            "thread_id": "t-b",
+            "title": "second",
+            "updated": "2026-11-19T10:00:00+00:00",
+            "turns": 2,
+        },
+        {
+            "thread_id": "t-a",
+            "title": "first",
+            "updated": "2026-11-18T10:00:00+00:00",
+            "turns": 1,
+        },
+    ]
+    monkeypatch.setattr(chat_panel_module, "list_threads", lambda: rows)
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "/threads")
+        await until(pilot, lambda: type(app.screen).__name__ == "ThreadPickerModal")
+        await pilot.press("down", "enter")
+        await until(pilot, lambda: panel.session is not None)
+        assert panel.session.thread_id == "t-a"
+
+
+def test_thread_rows_read_well():
+    row = format_thread_row(
+        2,
+        {"thread_id": "t-x", "title": "hosts", "updated": None, "turns": 1},
+        current="t-x",
+    )
+    assert row.startswith("2. hosts")
+    assert "1 turn" in row
+    assert "current" in row
+
+
+# =============================================================================
+# Slash commands
+# =============================================================================
+
+
+async def test_slash_shows_a_hint_list(sessions):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        field = panel.query_one("#chat-input", Input)
+        field.focus()
+        await pilot.press("slash")
+        await settle(pilot)
+        hints = panel.query_one("#chat-hints", Static)
+        assert hints.display
+        assert "/threads" in str(hints.render())
+        await pilot.press("t")
+        await settle(pilot)
+        assert "/compact" not in str(hints.render())
+        field.value = "hello"
+        await settle(pilot)
+        assert not hints.display
+
+
+async def test_compact_runs_off_the_ui_thread_and_renders_the_rule(sessions):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "/compact")
+        assert "Nothing to compact" in _notices(panel)
+        await _send(pilot, panel, "hello")
+        await _send(pilot, panel, "/compact keep the hosts")
+        await until(
+            pilot, lambda: panel._busy is None and _blocks(panel, CompactionRule)
+        )
+        assert panel.session.compact_focus == ["keep the hosts"]
+        assert "182k → 41k" in _blocks(panel, CompactionRule)[0].label
+        assert panel.state == "idle"
+
+
+async def test_context_shows_the_breakdown(sessions, manager):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "hello")
+        await _send(pilot, panel, "/context")
+        text = _notices(panel)
+        assert "41k/262k" in text
+        assert "Tool results" in text
+        assert "20k" in text
+        assert "Session" in text
+        assert "Agents" in text
+
+
+async def test_permissions_shows_rules_and_toggles_allow_all(sessions, perm_store):
+    perm_store.add_allow_rule("launch_app")
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "/permissions")
+        assert "Approval mode: ask" in _notices(panel)
+        assert "launch_app" in _notices(panel)
+        await _send(pilot, panel, "/permissions allow_all")
+        assert perm_store.mode == "allow_all"
+        assert perm_store.file_mode == "ask"  # session only
+        await settle(pilot)
+        assert ALLOW_ALL_NOTICE in app.query_one(".chat-banner").plain_text
+        await _send(pilot, panel, "/permissions ask")
+        assert perm_store.mode == "ask"
+
+
+async def test_doctor_reports_the_health_check(sessions):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "hello")
+        await _send(pilot, panel, "/doctor")
+        await until(pilot, lambda: "Endpoint OK" in _notices(panel))
+        assert "ping 12 ms" in _notices(panel)
+
+
+async def test_unknown_command_lists_the_commands(sessions):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "/frobnicate")
+        assert "Unknown command" in _notices(panel)
+        assert sessions == []
+
+
+# =============================================================================
+# Agents
+# =============================================================================
+
+
+def _agent_row(status="running", agent_id="a-re-abcdef"):
+    return {
+        "agent_id": agent_id,
+        "profile": "researcher",
+        "title": "check hosts",
+        "status": status,
+        "elapsed_s": 12.0,
+        "usage": {"prompt_tokens": 9000, "completion_tokens": 200},
+    }
+
+
+async def test_agent_card_bar_and_transcript_modal(sessions, manager):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "spawn one")
+        manager.rows = [_agent_row()]
+        manager.events["a-re-abcdef"] = [
+            ev(
+                "tool_call",
+                agent_id="a-re-abcdef",
+                call_id="c1",
+                name="list_flows",
+                args={},
+            ),
+            ev(
+                "tool_result",
+                agent_id="a-re-abcdef",
+                call_id="c1",
+                status="ok",
+                result_id="R4",
+                summary="3 rows",
+            ),
+            ev("text_delta", agent_id="a-re-abcdef", text="Two trackers."),
+        ]
+        await _push(
+            pilot,
+            panel,
+            ev(
+                "agent_spawned",
+                **_agent_row(),
+                task="check the hosts",
+            ),
+            # Subagent internals never reach the main transcript.
+            ev("text_delta", agent_id="a-re-abcdef", text="secret"),
+        )
+        (card,) = _blocks(panel, AgentCard)
+        assert card.status == "running"
+        assert card.role == "researcher"
+        assert not _blocks(panel, ReplyBlock)
+        bar = panel.query_one("#chat-agents-bar", AgentsBar)
+        assert bar.display
+        assert "a-re-abcdef" in bar.render().plain
+        assert "◆1" in app.query_one("#chat-header").render().plain
+
+        panel.query_one("#chat-input", Input).focus()
+        await pilot.press("up")
+        await settle(pilot)
+        assert bar.has_focus
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, AgentTranscriptModal))
+        modal = app.screen
+        view = modal.query_one("#agent-transcript", AgentTranscriptView)
+        (tool,) = [b for b in view.blocks if isinstance(b, ToolBlock)]
+        assert tool.label == "List Flows"
+        assert "R4" in tool.chip.plain
+        await until(
+            pilot,
+            lambda: any(
+                isinstance(b, ReplyBlock) and "Two trackers." in b.text
+                for b in view.blocks
+            ),
+        )
+        assert "Two trackers." in modal.transcript_text()
+        modal.query_one("#agent-message", Input).value = "also check DNS"
+        modal.query_one("#agent-message", Input).focus()
+        await pilot.press("enter")
+        await settle(pilot)
+        assert manager.sent == [("a-re-abcdef", "also check DNS")]
+        await pilot.click("#agent-cancel")
+        await settle(pilot)
+        assert manager.cancelled == ["a-re-abcdef"]
+        await pilot.press("escape")
+        await until(pilot, lambda: not isinstance(app.screen, AgentTranscriptModal))
+
+        manager.rows = [_agent_row("complete")]
+        await _push(
+            pilot,
+            panel,
+            ev(
+                "agent_result",
+                **{**_agent_row("complete"), "summary": "Two trackers found."},
+                claims=[{"text": "tracker.example gets the IMEI", "evidence": ["R4"]}],
+                delivery=None,
+            ),
+        )
+        assert card.status == "done"
+        assert card.claims == [("tracker.example gets the IMEI", ["R4"])]
+        assert "Two trackers found." in card.summary
+
+        # Clicking the card opens its transcript too.
+        card.post_message(AgentCard.Open(card))
+        await until(pilot, lambda: isinstance(app.screen, AgentTranscriptModal))
+        app.screen.action_cancel()
+        await until(pilot, lambda: not isinstance(app.screen, AgentTranscriptModal))
+
+
+async def test_agents_command_lists_and_opens(sessions, manager):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "/agents")
+        assert "No agents" in _notices(panel)
+        await _send(pilot, panel, "hello")
+        manager.rows = [_agent_row("complete")]
+        await _send(pilot, panel, "/agents")
+        assert "1. researcher a-re-abcdef" in _notices(panel)
+        await _send(pilot, panel, "/agents 1")
+        await until(pilot, lambda: isinstance(app.screen, AgentTranscriptModal))
+        assert app.screen.agent_id == "a-re-abcdef"
+
+
+def test_agent_transcript_renders_file_records():
+    records = [
+        {"type": "msg", "role": "user", "kind": "user", "text": "Check the hosts"},
+        {
+            "type": "msg",
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "function": {
+                        "name": "call_tool",
+                        "arguments": '{"name": "list_flows", "arguments": {"limit": 5}}',
+                    },
+                }
+            ],
+        },
+        {
+            "type": "msg",
+            "role": "tool",
+            "tool_call_id": "c1",
+            "status": "ok",
+            "result_id": "R2",
+        },
+        {"type": "msg", "role": "assistant", "content": "Done."},
+    ]
+    text = render_agent_transcript(records=records)
+    assert text.splitlines() == [
+        "› Check the hosts",
+        "● List Flows  limit=5",
+        "  └ ✓ R2",
+        "Done.",
+    ]
+
+
+def test_unwrap_call_parses_string_arguments():
+    assert unwrap_call("call_tool", {"name": "x", "arguments": '{"a": 1}'}) == (
+        "x",
+        {"a": 1},
+    )
+    assert unwrap_call("list_flows", None) == ("list_flows", {})
+
+
+# =============================================================================
+# Budget
+# =============================================================================
+
+
+async def test_budget_notice_continue_grants_more_rounds(sessions, manager):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "dig deep")
+        await _push(
+            pilot,
+            panel,
+            ev("budget_exhausted", kind="rounds", can_continue=True),
+            ev("turn_end", reason="max_rounds", rounds=26, budget_kind="rounds"),
+        )
+        (notice,) = _blocks(panel, BudgetNotice)
+        assert notice.grant == 25
+        await pilot.click("#budget-continue")
+        await settle(pilot)
+        assert panel.session.continued == [25]
+        assert notice.choice == "continue"
+        assert manager.noted == 2
+
+
+# =============================================================================
+# Dock integration
+# =============================================================================
+
+
+def test_chat_is_not_a_lens():
     from sandroid.tui.widgets.lens_shell import LENSES
 
     assert "tab-chat" not in MainScreen._TOOL_TABS
@@ -79,1458 +1187,475 @@ def test_chat_tab_registered_in_tool_tabs():
 
 @pytest.mark.smoke
 async def test_toggle_chat_panel_shows_and_hides_the_dock():
-    """``Ctrl+Y`` (``MainScreen.toggle_chat_panel``) opens the chat in the
-    side slot (focusing ``#chat-input``) and closes it again (focus back to
-    the active lens).
-    """
     app = App()
     screen = MainScreen()
     async with app.run_test() as pilot:
         await app.push_screen(screen)
         await pilot.pause()
-
-        dock = screen.query_one("#chat-dock")
-        assert not dock.display or not screen.chat_is_open
-        assert screen.side_slot_mode is None
-
+        assert screen.chat_mode == "closed"
         screen.toggle_chat_panel()
         await pilot.pause()
-
         assert screen.chat_is_open
-        assert screen.query_one("#side-slot").has_class("-open", "-chat")
-        assert isinstance(app.focused, Input)
+        assert app.focused is not None
+        assert app.focused.id == "chat-input"
+        screen.toggle_chat_panel()
+        await pilot.pause()
+        assert screen.chat_mode == "closed"
+
+
+# =============================================================================
+# Regressions: E2E + verifier findings (fix pass B)
+# =============================================================================
+
+BRACKETS = ["[x]", "[/]", "[bold]", "[Black on black]", "[A-Z]{3}"]
+
+
+async def test_bracket_text_is_shown_verbatim_and_never_crashes(
+    sessions, manager, monkeypatch
+):
+    """``/threads`` crashed with MarkupError on a ``[`` in a title; model and
+    user text anywhere must be plain text.
+    """
+    from textual.widgets import OptionList
+
+    rows = [
+        {"thread_id": f"t-{i}", "title": f"list {b} please", "turns": 1}
+        for i, b in enumerate(BRACKETS)
+    ]
+    monkeypatch.setattr(chat_panel_module, "list_threads", lambda: rows)
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "hello [bold]x[/] [x]")
+        (user,) = _blocks(panel, UserBlock)
+        assert "hello [bold]x[/] [x]" in str(user.render())
+        await _push(
+            pilot,
+            panel,
+            ev("tool_call", call_id="c1", name="run_x", args={"q": "[/] [A-Z]"}),
+            ev(
+                "tool_result",
+                call_id="c1",
+                status="error",
+                error_code="bad_args",
+                summary="bad_args: [Black on black] gone",
+                duration_ms=5,
+            ),
+            ev("warning", message="[/] careful"),
+            ev("error", message="[bold]boom[/]"),
+        )
+        (tool,) = _blocks(panel, ToolBlock)
+        assert "[/] [A-Z]" in tool.call_line(200).plain
+        assert "[Black on black] gone" in tool.chip.plain
+        notices = _notices(panel)
+        assert "[/] careful" in notices
+        assert "[bold]boom[/]" in notices
+        await _send(pilot, panel, "/threads")
+        await until(pilot, lambda: type(app.screen).__name__ == "ThreadPickerModal")
+        options = app.screen.query_one(OptionList)
+        await settle(pilot)  # rendering the rows must not raise
+        shown = [str(options.get_option_at_index(i).prompt) for i in range(len(rows))]
+        for bracket, text in zip(BRACKETS, shown, strict=True):
+            assert f"list {bracket} please" in text
+        app.screen.action_cancel()
+        await settle(pilot)
+
+
+async def test_approval_answer_sits_on_the_call_above_a_clean_chip(
+    sessions, perm_store
+):
+    """E2E: ``✗ denied: denied: …`` and the decline line after the chip."""
+    app = _Harness()
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "kill it")
+        pending = _submit()
+        await _push(
+            pilot,
+            panel,
+            ev(
+                "tool_call",
+                call_id="c1",
+                name="kill_process",
+                args={"package_name": "com.example"},
+            ),
+            _request_event(pending),
+        )
+        prompt = panel.pending_prompt()
+        await until(pilot, lambda: prompt.has_focus)
+        await pilot.press("3", *"use chrome", "enter")
+        await until(pilot, lambda: pending.done)
+        await _push(
+            pilot,
+            panel,
+            _resolved_event(pending),
+            ev(
+                "tool_result",
+                call_id="c1",
+                name="kill_process",
+                status="denied",
+                error_code="denied",
+                summary="denied: The analyst declined kill_process. "
+                "Their note: use chrome",
+                duration_ms=22_000,
+            ),
+        )
+        (tool,) = _blocks(panel, ToolBlock)
+        lines = tool.render().plain.splitlines()
+        assert len(lines) == 3
+        assert "declined by you · use chrome" in lines[1]
+        assert lines[2].strip() == "└ ✗ denied · 22s"
+        assert "declined" not in _notices(panel)  # no extra line after the chip
+    assert chat_panel_module.strip_code_prefix("cancelled", "cancelled: x") == "x"
+    assert chat_panel_module.strip_code_prefix("denied", "other") == "other"
+
+
+async def test_resume_shows_the_threads_context_use_at_once(sessions, monkeypatch):
+    """E2E: the meter read ``○ 0/262k`` after /threads until the next request."""
+    monkeypatch.setattr(FakeMeter, "used", 0)
+    monkeypatch.setattr(
+        FakeMeter, "estimate", lambda self, messages, tools: 55_000, raising=False
+    )
+    monkeypatch.setattr(
+        chat_panel_module,
+        "list_threads",
+        lambda: [{"thread_id": "t-old", "title": "old", "turns": 3}],
+    )
+    app = _Harness()
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "/threads t-old")
+        await until(pilot, lambda: panel.session is not None)
+        await settle(pilot)
+        assert "55k/262k" in app.query_one("#chat-header").render().plain
+    records = [
+        {"type": "usage", "prompt": 1000, "completion": 10},
+        {"type": "usage", "prompt": 30_000, "completion": 500},
+    ]
+    no_estimate = SimpleNamespace(meter=SimpleNamespace(), messages=[], tools=[])
+    assert chat_panel_module.resumed_context_used(no_estimate, records) == 30_500
+    assert chat_panel_module.resumed_context_used(no_estimate, []) is None
+
+
+async def test_late_events_of_a_closed_thread_are_dropped(sessions, manager):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "hello")
+        old = sessions[0]
+        # Queued but not drained yet when Ctrl+L clears the view...
+        old.sink(ev("text_delta", text="late reply"))
+        assert panel.new_thread()
+        await settle(pilot)
+        # ...and emitted afterwards by the winding-down old thread.
+        old.sink(ev("tool_call", call_id="c9", name="list_flows", args={}))
+        old.sink(ev("approval_request", request_id="ap-x", tool="kill_process"))
+        await until(pilot, lambda: not panel._events and panel._drain_timer is None)
+        await settle(pilot)
+        assert _blocks(panel) == []
+        assert panel.pending_prompt() is None
+        await _send(pilot, panel, "again")
+        await _push(pilot, panel, ev("text_delta", text="new reply"))
+        (reply,) = _blocks(panel, ReplyBlock)
+        await until(pilot, lambda: reply.text == "new reply")
+
+
+async def test_thread_and_approval_disk_work_runs_off_the_ui_thread(
+    ai_on, perm_store, manager, monkeypatch
+):
+    on_ui: dict[str, bool] = {}
+
+    def mark(name):
+        on_ui[name] = threading.current_thread() is threading.main_thread()
+
+    class _Session(FakeSession):
+        def close(self, reason="new"):
+            mark("close")
+            super().close(reason)
+
+    def factory(*, sink, thread_id=None):
+        mark(f"open:{thread_id}")
+        return _Session(sink, thread_id or "t-new")
+
+    def listing():
+        mark("list")
+        return [{"thread_id": "t-old", "title": "old", "turns": 1}]
+
+    monkeypatch.setattr(chat_panel_module, "open_orchestrator_session", factory)
+    monkeypatch.setattr(chat_panel_module, "list_threads", listing)
+    broker = perms.get_approval_broker()
+    real_resolve = broker.resolve
+
+    def resolve(*args, **kwargs):
+        mark("resolve")
+        return real_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(broker, "resolve", resolve)
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "hello")
+        pending = _submit()
+        await _push(pilot, panel, _request_event(pending))
+        await until(pilot, lambda: panel.pending_prompt().has_focus)
+        await pilot.press("2")
+        await until(pilot, lambda: pending.done)
+        await _send(pilot, panel, "/threads")
+        await until(pilot, lambda: type(app.screen).__name__ == "ThreadPickerModal")
+        await pilot.press("enter")
+        await until(pilot, lambda: panel.session is not None and not panel.io_pending)
+    assert set(on_ui) == {"open:None", "resolve", "list", "close", "open:t-old"}
+    assert not any(on_ui.values()), on_ui
+
+
+async def test_page_keys_scroll_the_transcript_from_the_input(sessions):
+    app = _Harness()
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _panel(pilot)
+        for i in range(80):
+            panel._notice(f"line {i}")
+        await settle(pilot)
+        log = panel.query_one(ChatTranscript)
+        field = panel.query_one("#chat-input", Input)
+        field.focus()
+        log.scroll_end(animate=False, immediate=True)
+        await settle(pilot)
+        bottom = log.scroll_y
+        assert bottom > 0
+        await pilot.press("pageup")
+        await settle(pilot)
+        assert log.scroll_y < bottom
+        await pilot.press("ctrl+home")
+        await settle(pilot)
+        assert log.scroll_y == 0
+        await pilot.press("pagedown")
+        await settle(pilot)
+        assert log.scroll_y > 0
+        await pilot.press("ctrl+end")
+        await settle(pilot)
+        assert log.scroll_y == log.max_scroll_y
+        assert field.has_focus
+
+
+async def test_typing_on_the_agents_bar_goes_to_the_input(sessions, manager):
+    """E2E: keys typed with the agents bar focused ran the App's hotkeys."""
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "spawn")
+        manager.rows = [_agent_row()]
+        panel._refresh_agents()
+        field = panel.query_one("#chat-input", Input)
+        field.focus()
+        await pilot.press("up")
+        await settle(pilot)
+        assert panel.query_one(AgentsBar).has_focus
+        await pilot.press("h", "i")
+        await settle(pilot)
+        assert field.has_focus
+        assert field.value == "hi"
+
+
+async def test_closing_the_agent_modal_returns_to_the_chat_input(sessions, manager):
+    """E2E: focus came back to the agents bar (Ctrl+Y then closed the chat)."""
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "spawn")
+        manager.rows = [_agent_row()]
+        panel._refresh_agents()
+        panel.query_one("#chat-input", Input).focus()
+        await pilot.press("up", "enter")
+        await until(pilot, lambda: isinstance(app.screen, AgentTranscriptModal))
+        await pilot.press("escape")
+        await until(pilot, lambda: not isinstance(app.screen, AgentTranscriptModal))
+        await until(pilot, lambda: app.focused is not None)
+        await settle(pilot)
         assert app.focused.id == "chat-input"
 
-        screen.toggle_chat_panel()
-        await pilot.pause()
 
-        assert screen.side_slot_mode is None
-        assert not screen.query_one("#side-slot").has_class("-open")
-        assert app.focused is not None
-        assert app.focused.id == "spotlight-panel"
-
-
-def test_chat_panel_seeds_orchestrator_system_prompt():
-    """Regression test for a real bug found by review: the top-level chat
-    loop never actually sent a system prompt, so the model had no idea it
-    was Sandroid's assistant or that tool results are sample data.
-    """
-    from sandroid.ai.prompts import ORCHESTRATOR_SYSTEM_PROMPT
-
-    panel = ChatPanel(id="chat-panel")
-    assert panel._messages == [
-        {"role": "system", "content": ORCHESTRATOR_SYSTEM_PROMPT}
-    ]
-
-
-@pytest.mark.smoke
-async def test_ctrl_l_resets_conversation_history_too():
-    """Ctrl+X/L UX fix: clearing the screen but not `self._messages` left
-    the model "remembering" things no longer visible, with no way to tell
-    what it still knows. Clearing must reset both together.
-    """
-    from sandroid.ai.prompts import ORCHESTRATOR_SYSTEM_PROMPT
-
-    app = _ChatPanelHarness()
-    async with app.run_test() as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        panel._messages.append({"role": "user", "content": "hello"})
-        panel._messages.append({"role": "assistant", "content": "hi there"})
-        assert len(panel._messages) == 3
-
-        panel.action_clear_log()
-        await pilot.pause()
-
-        assert panel._messages == [
-            {"role": "system", "content": ORCHESTRATOR_SYSTEM_PROMPT}
-        ]
-
-
-@pytest.mark.smoke
-async def test_ctrl_l_refused_while_a_turn_is_in_progress():
-    """Clearing mid-turn would just get silently undone: `_run_turn_sync`
-    commits its own `turn_messages` copy back to `self._messages` when the
-    in-flight turn finishes, resurrecting exactly what was just cleared.
-    """
-    app = _ChatPanelHarness()
-    async with app.run_test() as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        panel._messages.append({"role": "user", "content": "hello"})
-        panel._turn_in_progress = True
-
-        panel.action_clear_log()
-        await pilot.pause()
-
-        assert len(panel._messages) == 2  # unchanged -- clear was refused
-
-
-@pytest.mark.smoke
-async def test_ambient_block_reaches_the_turn_but_never_persists(monkeypatch):
-    """Regression test for the ambient-context wiring (``ai/context.py``):
-    ``build_ambient_block()`` is merged into the SAME system message as
-    ``ORCHESTRATOR_SYSTEM_PROMPT`` for the turn actually sent to the model
-    (never as a second, separate system message -- the real backend only
-    attends to the first system-role message in the list, see
-    ``_run_turn_sync``), but must never survive into ``self._messages``
-    afterward, which must keep carrying the pure, unmodified prompt. Runs
-    the real ``_run_turn_sync`` worker-thread method (via
-    ``run_worker(thread=True)``, same as ``on_input_submitted`` does), with
-    ``build_ambient_block`` and ``run_agent_turn`` monkeypatched so no real
-    network/tool call happens.
-    """
-    from sandroid.ai.prompts import ORCHESTRATOR_SYSTEM_PROMPT
-
-    sentinel = "SENTINEL-AMBIENT-BLOCK-content"
-    monkeypatch.setattr(chat_panel_module, "build_ambient_block", lambda: sentinel)
-
-    captured_calls = []
-
-    def fake_run_agent_turn(
-        messages,
-        tools,
-        client,
-        cancel_event,
-        on_event=None,
-        approve=None,
-        owner_id=None,
-        **kwargs,
-    ):
-        captured_calls.append(list(messages))
-        return "assistant reply"
-
-    monkeypatch.setattr(chat_panel_module, "run_agent_turn", fake_run_agent_turn)
-
-    app = _ChatPanelHarness()
-    async with app.run_test() as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        handle = ChatTurnHandle()
-
-        worker = panel.run_worker(
-            functools.partial(
-                panel._run_turn_sync, "hello", handle, "http://x", "k", "m"
-            ),
-            name="chat_turn",
-            thread=True,
-        )
-        await worker.wait()
-        await pilot.pause()
-
-        assert captured_calls, "run_agent_turn was never invoked"
-        sent_messages = captured_calls[0]
-        assert sentinel in sent_messages[0]["content"], (
-            "the ambient block must reach the model for this turn, merged "
-            "into the first (system) message's own content"
-        )
-        assert sent_messages[0]["role"] == "system"
-        assert ORCHESTRATOR_SYSTEM_PROMPT in sent_messages[0]["content"], (
-            "the merged system message must still carry the orchestrator "
-            "prompt alongside the ambient block"
-        )
-        # Only ONE system message is ever sent -- never a second, separate
-        # one -- since the real backend silently ignores any system message
-        # past the first.
-        assert sum(1 for m in sent_messages if m["role"] == "system") == 1
-        assert not any(sentinel in m.get("content", "") for m in panel._messages), (
-            "the ambient block must never persist into self._messages"
-        )
-        assert panel._messages[0] == {
-            "role": "system",
-            "content": ORCHESTRATOR_SYSTEM_PROMPT,
-        }, "self._messages[0] must remain the pure, unmodified system prompt"
-
-
-# -- Task 1: Markdown rendering ------------------------------------------
-
-
-def test_finalized_assistant_reply_renders_as_markdown():
-    """Regression test for the reported bug: `**Emulator status**` showing
-    up on screen with literal asterisks. The model's reply is real
-    Markdown, not Rich console markup, so a finalized reply must become a
-    ``rich.markdown.Markdown`` renderable -- never an escaped plain string
-    with the Markdown syntax still in it.
-    """
-    panel = ChatPanel(id="chat-panel")
-    panel._live_text = "**Emulator status**\n- running\n- rooted"
-    panel._finalize_live()
-
-    markdown_entries = [
-        line for line in panel._history_lines if isinstance(line, Markdown)
-    ]
-    assert len(markdown_entries) == 1
-    assert markdown_entries[0].markup == "**Emulator status**\n- running\n- rooted"
-
-    # The old bug: an escaped markup string with the literal `**` still in
-    # it. No history entry should look like that.
-    assert not any(
-        isinstance(line, str) and "**Emulator status**" in line
-        for line in panel._history_lines
+class _LongAgentManager(FakeManager):
+    TASK = "Task: produce an accurate summary of the exported surface.\n\n" + "\n".join(
+        f"{i}. step number {i} with plenty of words" for i in range(60)
     )
-    # live buffer was folded away
-    assert panel._live_text == ""
-
-
-def test_tool_call_lines_stay_plain_markup():
-    """Only LLM-authored prose gets the Markdown treatment, and only the
-    user's own echoed input gets the highlight-band ``Text`` treatment (see
-    the "Task 4" tests below) -- tool-call announcements and errors are our
-    own UI chrome and stay simple Rich console-markup strings.
-    """
-    panel = ChatPanel(id="chat-panel")
-    panel._append_ui_event(
-        {"type": "tool_call_done", "name": "list_packages", "arguments": {}}
+    TABLE = "| package | perms |\n|---|---|\n" + "\n".join(
+        f"| com.app{i} | CAMERA |" for i in range(40)
     )
 
-    assert all(isinstance(line, str) for line in panel._history_lines)
-
-
-# -- Task 2: verbose thinking toggle --------------------------------------
-
-
-def test_reasoning_collapses_to_thought_for_line_by_default(monkeypatch):
-    """Default (show_verbose_thinking=False, and also true if config isn't
-    set at all): once real text starts after a reasoning phase, the raw
-    reasoning text must NOT appear in the transcript -- only a compact
-    "Thought for Ns" summary, timed with `time.monotonic()`.
-    """
-    from sandroid.core.toolbox import Toolbox
-
-    monkeypatch.setattr(
-        Toolbox,
-        "config",
-        SimpleNamespace(ai=SimpleNamespace(show_verbose_thinking=False)),
-        raising=False,
-    )
-    ticks = iter([100.0, 104.0])
-    monkeypatch.setattr(time_module, "monotonic", lambda: next(ticks))
-
-    panel = ChatPanel(id="chat-panel")
-    panel._append_ui_event(
-        {"type": "reasoning_delta", "content": "Let me think about this..."}
-    )
-    panel._append_ui_event({"type": "text_delta", "content": "Here's the answer."})
-
-    assert any(
-        isinstance(line, str) and "Thought for 4s" in line
-        for line in panel._history_lines
-    )
-    assert not any(
-        "Let me think about this" in str(getattr(line, "markup", line))
-        for line in panel._history_lines
-    )
-    assert panel._live_reasoning == ""
-    assert panel._reasoning_started_at is None
-
-
-def test_reasoning_kept_verbatim_as_markdown_when_verbose(monkeypatch):
-    """With show_verbose_thinking=True, the full reasoning text is kept
-    (as Markdown, like the final reply) -- no collapsed summary line.
-    """
-    from sandroid.core.toolbox import Toolbox
-
-    monkeypatch.setattr(
-        Toolbox,
-        "config",
-        SimpleNamespace(ai=SimpleNamespace(show_verbose_thinking=True)),
-        raising=False,
-    )
-
-    panel = ChatPanel(id="chat-panel")
-    panel._append_ui_event(
-        {"type": "reasoning_delta", "content": "Let me think about this..."}
-    )
-    panel._append_ui_event({"type": "text_delta", "content": "Here's the answer."})
-
-    assert any(
-        isinstance(line, Markdown) and line.markup == "Let me think about this..."
-        for line in panel._history_lines
-    )
-    assert not any(
-        isinstance(line, str) and "Thought for" in line for line in panel._history_lines
-    )
-
-
-def test_reasoning_before_a_tool_call_also_collapses(monkeypatch):
-    """The reasoning-phase-ended heuristic must also fire for
-    reasoning -> tool_call_done (not just reasoning -> text_delta).
-    """
-    from sandroid.core.toolbox import Toolbox
-
-    monkeypatch.setattr(
-        Toolbox,
-        "config",
-        SimpleNamespace(ai=SimpleNamespace(show_verbose_thinking=False)),
-        raising=False,
-    )
-    ticks = iter([50.0, 52.0])
-    monkeypatch.setattr(time_module, "monotonic", lambda: next(ticks))
-
-    panel = ChatPanel(id="chat-panel")
-    panel._append_ui_event({"type": "reasoning_delta", "content": "hmm"})
-    panel._append_ui_event(
-        {"type": "tool_call_done", "name": "list_packages", "arguments": {}}
-    )
-
-    assert any(
-        isinstance(line, str) and "Thought for 2s" in line
-        for line in panel._history_lines
-    )
-
-
-# -- Task 3: chat mascot ---------------------------------------------------
-
-
-@pytest.mark.smoke
-async def test_mascot_animates_while_streaming_and_idles_when_done():
-    app = _ChatPanelHarness()
-    async with app.run_test() as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        mascot = app.query_one("#chat-mascot", Static)
-        assert panel._mascot_timer is None  # nothing wasted while idle
-
-        panel._header_state = "streaming"
-        panel.refresh_header()
-        await pilot.pause()
-        assert panel._mascot_timer is not None
-        assert mascot.display is True
-
-        panel._header_state = "idle"
-        panel.refresh_header()
-        await pilot.pause()
-        assert panel._mascot_timer is None  # stopped, not just paused
-
-
-@pytest.mark.smoke
-async def test_mascot_hidden_and_not_animated_when_setting_off(monkeypatch):
-    from sandroid.core.toolbox import Toolbox
-
-    monkeypatch.setattr(
-        Toolbox,
-        "config",
-        SimpleNamespace(ai=SimpleNamespace(show_chat_mascot=False)),
-        raising=False,
-    )
-
-    app = _ChatPanelHarness()
-    async with app.run_test() as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        mascot = app.query_one("#chat-mascot", Static)
-
-        panel._header_state = "streaming"
-        panel.refresh_header()
-        await pilot.pause()
-
-        assert mascot.display is False
-        assert panel._mascot_timer is None
-
-
-@pytest.mark.smoke
-async def test_mascot_overlaps_input_bar_near_the_right_edge():
-    """Regression test for the requested layout: the mascot must stand ON
-    the input bar (its feet on the bar's top rim, body rising above it into
-    the transcript), near the panel's right edge -- not live beside it in its
-    own column, and not sink down over the text field.
-
-    Uses real computed regions from Textual's layout engine (available even
-    headless, with no real terminal) rather than just checking CSS text, so
-    this actually fails if the positioning regresses to a side-by-side
-    layout or drifts off the bar entirely.
-    """
-    app = _ChatPanelHarness()
-    async with app.run_test(size=(100, 30)) as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        mascot = app.query_one("#chat-mascot", Static)
-        bar = app.query_one("#chat-input-bar")
-        await pilot.pause()
-
-        # Genuine overlap: the mascot's region and the input bar's region
-        # actually intersect on screen (not just adjacent columns).
-        assert mascot.region.overlaps(bar.region)
-
-        # "Near the right side": flush with the panel's own right edge.
-        assert mascot.region.right == panel.region.right
-
-        # "Standing on top of"/"rising above" the bar's own top border: the
-        # mascot starts above the bar's top and its feet just reach the bar's
-        # top rim -- overlapping exactly that top row, without sinking into
-        # the row below (which is where the user's typed text lives).
-        assert mascot.region.y < bar.region.y
-        assert mascot.region.bottom >= bar.region.y + 1
-        assert mascot.region.bottom <= bar.region.y + 2
-
-
-@pytest.mark.smoke
-async def test_mascot_does_not_block_clicks_on_chat_input():
-    """Regression test for a real bug found while implementing the overlap:
-    an earlier version made the mascot's own hit-test region span the full
-    width of the input bar (to right-align its content), which -- since
-    Textual's mouse targeting is purely region-based, with no
-    "click-through" for a widget's blank cells -- silently ate every click
-    meant for the Input underneath it. The mascot must stay small/auto-
-    sized so only clicks on its own glyphs are captured by it.
-    """
-    app = _ChatPanelHarness()
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.click("#chat-input", offset=(5, 1))
-        assert isinstance(app.focused, Input)
-
-
-def test_mascot_idle_frame_is_a_real_crop_of_the_logo():
-    """The mascot must genuinely be a small version of the real Sandroid
-    logo -- not a hand-drawn approximation (three earlier attempts at drawing
-    new glyphs failed to read as the robot). Assert each idle-frame row is a
-    verbatim substring of the matching SANDROID_LOGO line (i.e. an actual
-    crop of the same asset the startup banner renders) and pure Braille.
-    """
-    from sandroid.core.console import SANDROID_LOGO
-    from sandroid.tui.widgets.chat_panel import _MASCOT_IDLE_FRAME
-
-    logo_lines = SANDROID_LOGO.splitlines()
-    assert len(_MASCOT_IDLE_FRAME) == 5
-    for i, row in enumerate(_MASCOT_IDLE_FRAME):
-        assert len(row) == 16
-        # a real, contiguous crop of the actual logo line (the head region)
-        assert row in logo_lines[i]
-        # every cell is a Braille-pattern block (U+2800..U+28FF), like the logo
-        assert all(0x2800 <= ord(ch) <= 0x28FF for ch in row)
-
-
-def test_mascot_talk_frames_are_the_same_figure_subtly_moving():
-    """The "talking" animation must stay recognizably the same little robot,
-    just moving: frame 0 is the resting pose, and every other frame differs
-    from idle by a single row (a blink or an antenna sway), never a redraw,
-    and keeps the exact frame dimensions so it doesn't jitter/resize.
-    """
-    from sandroid.tui.widgets.chat_panel import (
-        _MASCOT_IDLE_FRAME,
-        _MASCOT_TALK_FRAMES,
-    )
-
-    assert _MASCOT_TALK_FRAMES[0] == _MASCOT_IDLE_FRAME
-    for frame in _MASCOT_TALK_FRAMES:
-        assert len(frame) == len(_MASCOT_IDLE_FRAME)
-        assert all(
-            len(row) == len(_MASCOT_IDLE_FRAME[i]) for i, row in enumerate(frame)
-        )
-    for frame in _MASCOT_TALK_FRAMES[1:]:
-        differing = [i for i in range(len(frame)) if frame[i] != _MASCOT_IDLE_FRAME[i]]
-        assert len(differing) == 1
-
-
-@pytest.mark.smoke
-async def test_mascot_blends_into_log_with_no_visible_box():
-    """Regression test for the reported "it's in a box" bug. Textual
-    composites sibling layers front-to-back with no per-cell transparency, so
-    the mascot always paints its whole region -- meaning its background MUST
-    equal #chat-log's, or it shows as a lighter rectangle ("a box") over the
-    darker transcript. Assert (a) the styles agree and (b) the actually
-    composited cells the mascot covers over the log all carry the log's own
-    background colour, i.e. the box is genuinely invisible.
-    """
-    app = _ChatPanelHarness()
-    async with app.run_test(size=(100, 30)) as pilot:
-        log = app.query_one("#chat-log", RichLog)
-        for i in range(60):
-            log.write(f"line {i} " + "x" * 80)
-        mascot = app.query_one("#chat-mascot", Static)
-        log_region = app.query_one("#chat-log").region
-        await pilot.pause()
-
-        # (a) the invariant that prevents the box, at the style level
-        assert mascot.styles.background == log.styles.background
-
-        # (b) the same invariant, in the actually composited pixels
-        strips = app.screen._compositor.render_strips()
-
-        def bg_at(x: int, y: int):
-            cx = 0
-            for seg in strips[y]:
-                for _ in seg.text:
-                    if cx == x:
-                        return seg.style.bgcolor if seg.style else None
-                    cx += 1
+    def info(self, agent_id):
+        row = super().info(agent_id)
+        if row is None:
             return None
-
-        mr = mascot.region
-        # a reference log background, well away from the mascot's columns
-        ref = bg_at(1, mr.y)
-        assert ref is not None
-        for y in range(mr.y, min(mr.bottom, log_region.bottom)):
-            for x in range(mr.x, mr.right):
-                assert bg_at(x, y) == ref, f"box edge visible at ({x}, {y})"
+        return {
+            **row,
+            "task": self.TASK,
+            "result": {"summary": "Result: " + self.TABLE},
+        }
 
 
-# -- Task 4: Claude-Code-style user input highlight (round-3 variant I) ---
-
-
-def test_format_user_line_returns_highlighted_text_not_markup_string():
-    """The user's echoed input must be a `>`-prefixed, bold `rich.text.Text`
-    carrying a lighter background highlight style -- not the old colored
-    heavy-angle-quote-plus-"You:" console-markup string. This is the one
-    and only change this variant makes; everything else
-    (assistant/reasoning/tool-call rendering) stays exactly as baseline.
-    """
-    panel = ChatPanel(id="chat-panel")  # unmounted: no #chat-log width yet
-    rendered = panel._format_user_line("hello there")
-
-    assert isinstance(rendered, Text)
-    assert rendered.plain == "> hello there"
-    assert "bold" in rendered.style
-    assert "on #1c2333" in rendered.style
-    # no leftover trace of the old blue label/glyph scheme
-    old_glyph = "❯"  # HEAVY RIGHT-POINTING ANGLE QUOTATION MARK ORNAMENT
-    assert "You:" not in rendered.plain
-    assert old_glyph not in rendered.plain
-
-
-@pytest.mark.smoke
-async def test_user_line_highlight_band_spans_full_log_width():
-    """The whole point of this variant: the lighter background must stretch
-    the full row, not just hug the typed characters -- so the rendered
-    `Text`'s cell length has to match the log's own current content width.
-    """
-    app = _ChatPanelHarness()
-    async with app.run_test(size=(100, 30)) as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        log = app.query_one("#chat-log", RichLog)
-        await pilot.pause()
-
-        rendered = panel._format_user_line("hi")
-
-        assert isinstance(rendered, Text)
-        assert rendered.cell_len == log.scrollable_content_region.width
-        assert rendered.plain.startswith("> hi")
-        assert rendered.plain == rendered.plain.rstrip() + " " * (
-            log.scrollable_content_region.width - len(rendered.plain.rstrip())
-        )
-
-
-def test_format_user_line_prefixes_only_the_first_row_of_pasted_text():
-    """A pasted multi-line message must only get the `>` echo marker once,
-    on its first physical line -- matching a blockquote-style echo -- while
-    every row still individually carries the highlight style so a multi-line
-    paste doesn't lose the band partway through.
-    """
-    panel = ChatPanel(id="chat-panel")
-    rendered = panel._format_user_line("first line\nsecond line")
-
-    assert isinstance(rendered, Text)
-    assert rendered.plain == "> first line\nsecond line"
-
-
-@pytest.mark.smoke
-async def test_on_input_submitted_pushes_a_text_renderable_for_the_user_line(
-    monkeypatch,
+@pytest.mark.parametrize("size", [(120, 45), (200, 110), (90, 24)])
+async def test_agent_modal_keeps_input_and_buttons_on_screen(
+    sessions, monkeypatch, size
 ):
-    """Integration point for the extracted method: submitting a message must
-    push whatever `_format_user_line` builds (a `Text`), not the old inline
-    f-string, into history -- verifying the wiring, not just the formatter
-    in isolation. `_run_turn_sync` is stubbed out so this only exercises the
-    synchronous, UI-thread half of `on_input_submitted` -- no real worker
-    thread/network call.
+    """E2E bug 2: the unbounded meta pushed transcript, input and buttons off
+    screen; Markdown tables were flattened; "Task: Task:".
     """
-    from sandroid.core.toolbox import Toolbox
-
-    monkeypatch.setattr(
-        Toolbox,
-        "config",
-        SimpleNamespace(
-            ai=SimpleNamespace(base_url="http://127.0.0.1:1/v1", api_key="k", model="m")
-        ),
-        raising=False,
-    )
-
-    app = _ChatPanelHarness()
-    async with app.run_test(size=(100, 30)) as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        monkeypatch.setattr(panel, "_run_turn_sync", lambda *a, **kw: None)
-
-        input_widget = app.query_one("#chat-input", Input)
-        input_widget.value = "hello"
-        await pilot.pause()
-        input_widget.post_message(Input.Submitted(input_widget, "hello"))
-        await pilot.pause()
-
-        user_lines = [line for line in panel._history_lines if isinstance(line, Text)]
-        assert len(user_lines) == 1
-        assert user_lines[0].plain.startswith("> hello")
-
-
-# -- Tool-permission gate (approve_tool_call) ------------------------------
-
-#: Both tests below need `_run_turn_sync` to actually run on a background OS
-#: thread (so `approve_tool_call`'s blocking wait doesn't freeze the event
-#: loop), but deliberately use a bare `threading.Thread` instead of this
-#: file's usual `panel.run_worker(..., thread=True)`. A repeatable
-#: investigation (see task notes) found that Textual's own Worker/
-#: WorkerManager bookkeeping, when combined with a worker callable that makes
-#: *multiple, blocking* `call_from_thread` round-trips into the app while the
-#: test's own coroutine is concurrently polling the DOM, intermittently wedges
-#: the app's event loop hard enough that even `asyncio.wait_for`'s
-#: cancellation is never delivered -- a genuine, pre-existing hazard in
-#: combining `run_worker(thread=True)` with this brand-new
-#: blocks-on-a-cross-thread-round-trip pattern, not a bug in
-#: `approve_tool_call` itself (confirmed independently reproducible with a
-#: minimal, ChatPanel-free widget). A bare `Thread` runs the exact same
-#: `_run_turn_sync` method on the exact same kind of real OS thread `approve_
-#: tool_call` is written to expect, without going through that flaky
-#: machinery -- reliable across 15+ repeated manual runs, vs. failing roughly
-#: a third of the time via `run_worker`. Flagged for separate follow-up.
-
-
-async def _wait_for_thread_done(
-    thread: threading.Thread, max_wait: float = 10.0
-) -> bool:
-    """Cooperatively wait for `thread` to finish without blocking the loop.
-
-    Polls `thread.is_alive()` with short `asyncio.sleep`s (never a blocking
-    `Thread.join()`) so that if something ever goes wrong, the *surrounding*
-    `asyncio.wait_for(...)` in the calling test can still deliver its
-    cancellation -- a synchronous `join()` would have no await point for
-    that cancellation to land on, defeating the whole safety net.
-
-    Returns:
-        True once `thread` has finished; False if `max_wait` elapsed first.
-    """
-    deadline = time_module.monotonic() + max_wait
-    while thread.is_alive():
-        if time_module.monotonic() > deadline:
-            return False
-        await asyncio.sleep(0.05)
-    return True
-
-
-@pytest.mark.smoke
-async def test_approve_tool_call_resolves_via_real_button_click(monkeypatch):
-    """End-to-end regression test for the tool-permission gate: a pending
-    tool call blocks the worker thread until a real button click on the
-    mounted ``ToolPermissionPrompt`` resolves it.
-
-    Sequencing is critical here. The fake ``run_agent_turn`` below calls the
-    panel's real ``approve_tool_call`` closure directly -- on a real
-    background thread, simulating exactly what ``ai.loop._dispatch_one``
-    does for a real "ask"-policy tool call. That closure blocks on a local
-    ``threading.Event`` that only a button click (handled on the app's
-    event-loop thread) can set. So this test MUST poll for the mounted
-    prompt's own button and click it BEFORE awaiting the thread -- awaiting
-    it first (this file's more common ``run_worker``/``wait()`` pattern)
-    would deadlock, since nothing would ever click the button to unblock it.
-    There is no ``pytest-timeout`` configured in this repo, so the whole
-    scenario is additionally wrapped in ``asyncio.wait_for`` as a
-    belt-and-braces guard: a sequencing mistake fails fast with a
-    ``TimeoutError`` instead of hanging the suite.
-    """
-    captured: dict[str, str] = {}
-
-    spec = ToolSpec(
-        name="dangerous_tool",
-        description="Does something dangerous.",
-        parameters={"type": "object", "properties": {}, "required": []},
-        func=lambda: None,
-        risk=RiskTier.REVERSIBLE,
-    )
-
-    def fake_run_agent_turn(
-        messages,
-        tools,
-        client,
-        cancel_event,
-        on_event=None,
-        approve=None,
-        owner_id=None,
-        **kwargs,
-    ):
-        assert approve is not None, "approve_tool_call was not passed through"
-        captured["choice"] = approve(spec, {"target": "thing"})
-        return "assistant reply"
-
-    monkeypatch.setattr(chat_panel_module, "run_agent_turn", fake_run_agent_turn)
-
-    async def scenario() -> None:
-        app = _ChatPanelHarness()
-        async with app.run_test(size=(100, 30)) as pilot:
-            panel = app.query_one("#chat-panel", ChatPanel)
-            handle = ChatTurnHandle()
-
-            thread = threading.Thread(
-                target=panel._run_turn_sync,
-                args=("hello", handle, "http://x", "k", "m"),
-                daemon=True,
-            )
-            thread.start()
-
-            # Poll for the prompt's OWN button (not just its parent
-            # container) FIRST: mounting the container is awaited, but its
-            # composed children (the buttons) can lag a beat behind that --
-            # polling for the button itself is the only fully reliable
-            # "ready to click" signal. Also wait for the header state, not
-            # just the button: `approve_tool_call` mounts the widget and
-            # flips the header state inside the SAME awaited coroutine, but
-            # `Widget.mount()` has its own internal await points, so the
-            # button can become queryable a beat before that coroutine
-            # actually resumes past its `await self.mount(...)` to set the
-            # header state -- wait for both together rather than assume
-            # they land in the same tick. And wait until it is laid out:
-            # pilot.click() hits the button's top-left cell, which belongs to
-            # another widget while the fresh button still has an empty region.
-            def ready() -> Button | None:
-                try:
-                    candidate = app.query_one("#btn-once", Button)
-                except NoMatches:
-                    return None
-                if panel._header_state != "awaiting-approval":
-                    return None
-                region = candidate.region
-                if not region.area:
-                    return None
-                hit, _ = app.get_widget_at(region.x, region.y)
-                return candidate if hit is candidate else None
-
-            await until(pilot, ready, msg="ToolPermissionPrompt's button never ready")
-            assert panel._header_state == "awaiting-approval"
-
-            # ONLY NOW simulate the click -- this is what sets the local
-            # Event the background thread is blocked waiting on.
-            clicked = await pilot.click("#btn-once")
-            assert clicked
-
-            # Wait for the thread AFTER the click, never before -- and
-            # cooperatively (never a blocking Thread.join()), so this
-            # test's own asyncio.wait_for can still cancel it if wrong.
-            finished = await _wait_for_thread_done(thread)
-            assert finished, "background thread never finished after the click"
-            await pilot.pause()
-
-            assert captured.get("choice") == "once"
-            # The prompt is unmounted and the header state restored once
-            # the approval is resolved.
-            with pytest.raises(NoMatches):
-                app.query_one(ToolPermissionPrompt)
-            assert panel._header_state != "awaiting-approval"
-
-    await asyncio.wait_for(scenario(), timeout=60)
-
-
-@pytest.mark.smoke
-async def test_approve_tool_call_never_hangs_returns_cancelled_on_stop(monkeypatch):
-    """A Stop (Ctrl+X, i.e. the turn's own ``cancel_event``) must unblock a
-    pending approval as ``"cancelled"`` -- never a permanent "never" -- so
-    hitting Stop while a prompt is up can't silently blacklist whatever tool
-    happened to be pending. No button is ever clicked in this test; the
-    cancel_event alone must be enough to resolve the wait within a couple of
-    poll ticks, so this also indirectly proves the wait loop's cancellation
-    check actually runs. Wrapped in ``asyncio.wait_for`` for the same
-    hang-safety reason as the sibling test above.
-    """
-    captured: dict[str, str] = {}
-
-    spec = ToolSpec(
-        name="dangerous_tool",
-        description="Does something dangerous.",
-        parameters={"type": "object", "properties": {}, "required": []},
-        func=lambda: None,
-        risk=RiskTier.REVERSIBLE,
-    )
-
-    def fake_run_agent_turn(
-        messages,
-        tools,
-        client,
-        cancel_event,
-        on_event=None,
-        approve=None,
-        owner_id=None,
-        **kwargs,
-    ):
-        assert approve is not None
-        captured["choice"] = approve(spec, {"target": "thing"})
-        return ""
-
-    monkeypatch.setattr(chat_panel_module, "run_agent_turn", fake_run_agent_turn)
-
-    async def scenario() -> None:
-        app = _ChatPanelHarness()
-        async with app.run_test(size=(100, 30)) as pilot:
-            panel = app.query_one("#chat-panel", ChatPanel)
-            handle = ChatTurnHandle()
-
-            thread = threading.Thread(
-                target=panel._run_turn_sync,
-                args=("hello", handle, "http://x", "k", "m"),
-                daemon=True,
-            )
-            thread.start()
-
-            await until(
-                pilot,
-                lambda: app.query("#btn-once"),
-                msg="ToolPermissionPrompt's button never mounted",
-            )
-
-            # Simulate Ctrl+X: set the turn's cancel_event directly, exactly
-            # what ChatPanel.action_stop_turn does via `handle.stop()`.
-            handle.stop()
-
-            finished = await _wait_for_thread_done(thread)
-            assert finished, "background thread never finished after cancel_event.set()"
-            await pilot.pause()
-
-            assert captured.get("choice") == "cancelled"
-            with pytest.raises(NoMatches):
-                app.query_one(ToolPermissionPrompt)
-
-    await asyncio.wait_for(scenario(), timeout=60)
-
-
-# -- Phase 3/4: async-subtask integration ---------------------------------
-#
-# These drive the completion scheduler (Phase 3) and the collapsible,
-# selection-aware subtask status bar (Phase 4) against a stub SubtaskManager
-# -- no real threads or network. On completion a subtask pushes ONE compact,
-# clickable ``↳ Subtask … finished.`` line into the transcript and stashes its
-# full output for click-to-reveal (see ``ChatPanel.action_reveal_subtask``),
-# AND re-enters the orchestrator with the COMPLETE result as a HIDDEN injected
-# turn: the model is notified and gets the full output, but that raw blob is
-# never rendered as a visible transcript line -- only the compact line(s) and
-# the orchestrator's own reply show. The tests below guard exactly that -- the
-# compact line appears, the output is stored, a hidden turn carrying the full
-# result IS launched, that full result stays out of the visible history, and
-# staleness/cancellation suppress both the line AND the turn. The completion
-# tests that assert on the injected turn run the real ``_launch_turn`` /
-# ``_run_turn_sync`` with ``run_agent_turn`` monkeypatched so no real network/
-# tool call happens; they capture the messages that reach ``run_agent_turn``
-# to prove the full result is in the injected user message yet absent from the
-# visible transcript.
-
-
-class _StubSubtaskManager:
-    """Minimal SubtaskManager stand-in for the Phase 3/4 ChatPanel tests.
-
-    Records spawn/cancel/stop calls and lets a test inject completion records
-    and a running-row snapshot, with no real threads, arbiter, or network.
-    Only the surface ChatPanel actually calls is implemented.
-    """
-
-    def __init__(self) -> None:
-        self._completed: list[CompletionRecord] = []
-        self._running_rows: list[dict] = []
-        self.cancelled: list[str] = []
-        self.stop_all_calls = 0
-        self.on_complete = None
-        self.epoch_probe = None
-
-    def configure(self, *, client_factory=None, epoch_probe=None, on_complete=None):
-        if epoch_probe is not None:
-            self.epoch_probe = epoch_probe
-        if on_complete is not None:
-            self.on_complete = on_complete
-
-    def take_all_completed(self) -> list[CompletionRecord]:
-        drained = list(self._completed)
-        self._completed.clear()
-        return drained
-
-    def running(self) -> list[dict]:
-        return [dict(row) for row in self._running_rows]
-
-    def active_owner_ids(self) -> set[str]:
-        return {row["subtask_id"] for row in self._running_rows}
-
-    def cancel(self, subtask_id: str) -> bool:
-        self.cancelled.append(subtask_id)
-        return True
-
-    def stop_all(self) -> None:
-        self.stop_all_calls += 1
-
-    # -- test helpers --
-    def add_completion(self, subtask_id, label, result, epoch, privileged=False):
-        self._completed.append(
-            CompletionRecord(
-                subtask_id=subtask_id,
-                label=label,
-                privileged=privileged,
-                result=result,
-                epoch=epoch,
-            )
-        )
-
-    def set_running(self, rows: list[dict]) -> None:
-        self._running_rows = rows
-
-
-@pytest.fixture
-def stub_manager(monkeypatch):
-    """Point ChatPanel at a stub SubtaskManager and reset the real singletons.
-
-    Resetting ``subtasks._subtask_manager`` / ``arbiter._arbiter`` before and
-    after keeps the process-wide singletons from leaking configured callbacks
-    or leases across tests.
-    """
-    import sandroid.ai.arbiter as arbiter_mod
-    import sandroid.ai.subtasks as subtasks_mod
-
-    subtasks_mod._subtask_manager = None
-    arbiter_mod._arbiter = None
-    stub = _StubSubtaskManager()
-    monkeypatch.setattr(chat_panel_module, "get_subtask_manager", lambda: stub)
-    yield stub
-    subtasks_mod._subtask_manager = None
-    arbiter_mod._arbiter = None
-
-
-def _completion_lines(panel: ChatPanel) -> list[str]:
-    """The compact ``↳ Subtask … finished.`` lines currently in the transcript."""
-    return [
-        line
-        for line in panel._history_lines
-        if isinstance(line, str) and "finished." in line
+    manager = _LongAgentManager()
+    monkeypatch.setattr(chat_panel_module, "get_agent_manager", lambda: manager)
+    manager.rows = [_agent_row("complete")]
+    manager.events["a-re-abcdef"] = [
+        ev("text_delta", agent_id="a-re-abcdef", text=_LongAgentManager.TABLE),
+        ev("turn_end", agent_id="a-re-abcdef", reason="completed", rounds=3),
     ]
+    app = _Harness()
+    async with app.run_test(size=size) as pilot:
+        panel = await _panel(pilot)
+        panel.open_agent("a-re-abcdef")
+        await until(pilot, lambda: isinstance(app.screen, AgentTranscriptModal))
+        modal = app.screen
+        await settle(pilot)
+        height = app.size.height
+        for selector in ("#agent-message", "#agent-cancel", "#agent-close"):
+            region = modal.query_one(selector).region
+            assert region.height > 0, selector
+            assert region.bottom <= height, (selector, region, height)
+        meta = modal.query_one("#agent-meta", Static)
+        assert meta.region.height <= 4
+        meta_text = str(meta.render())
+        assert "Task: Task:" not in meta_text
+        assert "produce an accurate summary" in meta_text
+        view = modal.query_one("#agent-transcript", AgentTranscriptView)
+        assert view.region.height >= 3
+        await until(pilot, lambda: view.query("MarkdownTable"))  # not flattened
+        await settle(pilot)
+        view.scroll_home(animate=False, immediate=True)
+        await settle(pilot)
+        if view.max_scroll_y > 0:
+            await pilot.press("pagedown")
+            await settle(pilot)
+            assert view.scroll_y > 0
+            await pilot.press("pageup")
+            await settle(pilot)
+            assert view.scroll_y == 0
+        await pilot.press("ctrl+t")
+        await settle(pilot)
+        assert modal.has_class("-details")
+        details = str(modal.query_one("#agent-details-text", Static).render())
+        assert "step number 59" in details
+        assert modal.query_one("#agent-message").region.bottom <= height
+        modal.action_cancel()
+        await settle(pilot)
 
 
-def _history_text(panel: ChatPanel) -> str:
-    """All visible transcript text joined, whatever the renderable's type.
-
-    History lines are a mix of plain markup strings (chrome), ``Text`` (the
-    echoed user band), and ``Markdown`` (LLM prose); flatten each to its own
-    text so a test can assert a raw subtask result never appears *anywhere*
-    on screen.
-    """
-    parts: list[str] = []
-    for line in panel._history_lines:
-        if isinstance(line, Markdown):
-            parts.append(line.markup)
-        elif isinstance(line, Text):
-            parts.append(line.plain)
-        elif isinstance(line, str):
-            parts.append(line)
-    return "\n".join(parts)
-
-
-async def _wait_for_turn_done(panel: ChatPanel, captured: list) -> None:
-    """Cooperatively wait for one injected turn's worker to finish.
-
-    ``_drain_completions`` launches the turn via ``_launch_turn`` ->
-    ``run_worker(thread=True)``; the worker sets ``_turn_in_progress`` back to
-    ``False`` (and populates ``captured`` via the monkeypatched
-    ``run_agent_turn``) once it finishes. Poll for both with short
-    ``asyncio.sleep``s so ``call_from_thread`` callbacks keep draining.
-    """
-    for _ in range(300):
-        if captured and not panel._turn_in_progress:
-            return
-        await asyncio.sleep(0.02)
-
-
-@pytest.mark.smoke
-async def test_completion_while_idle_pushes_line_and_launches_hidden_turn(
-    stub_manager, monkeypatch
-):
-    """Idle + one finished subtask -> (a) exactly one compact, clickable
-    ``↳ Subtask … finished.`` line (a period, no result text inline), (b) the
-    full output stashed for reveal, (c) ONE orchestrator turn launched whose
-    injected user message carries the FULL result text, and (d) that full
-    result NEVER appears as a visible transcript line (it is fed hidden).
-    """
-    from sandroid.core.toolbox import Toolbox
-
-    monkeypatch.setattr(
-        Toolbox,
-        "config",
-        SimpleNamespace(
-            ai=SimpleNamespace(base_url="http://127.0.0.1:1/v1", api_key="k", model="m")
-        ),
-        raising=False,
-    )
-    monkeypatch.setattr(chat_panel_module, "build_ambient_block", lambda: "")
-
-    captured_calls: list[list[dict]] = []
-
-    def fake_run_agent_turn(messages, *args, **kwargs):
-        captured_calls.append(list(messages))
-        return "orchestrator reply"
-
-    monkeypatch.setattr(chat_panel_module, "run_agent_turn", fake_run_agent_turn)
-
-    app = _ChatPanelHarness()
-    async with app.run_test(size=(100, 30)) as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        stub_manager.add_completion("s1", "probe", "found 3 things", epoch=0)
-
-        panel._drain_completions()
-        await _wait_for_turn_done(panel, captured_calls)
-        await pilot.pause()
-
-        # (a) exactly one compact, clickable completion line
-        lines = _completion_lines(panel)
-        assert len(lines) == 1
-        line = lines[0]
-        assert "s1" in line
-        assert "probe" in line
-        assert line.rstrip().endswith("finished.[/][/]")  # a period, not a colon
-        assert "found 3 things" not in line  # no result text dumped inline
-        assert "@click=reveal_subtask('s1')" in line
-
-        # (b) the full output stashed for click-to-reveal, keyed by subtask id
-        assert panel._subtask_outputs == {"s1": "found 3 things"}
-
-        # (c) ONE orchestrator turn launched; its injected user message carries
-        #     the subtask's FULL result verbatim (so the model is notified).
-        assert len(captured_calls) == 1
-        user_msgs = [m for m in captured_calls[0] if m["role"] == "user"]
-        assert len(user_msgs) == 1
-        assert "found 3 things" in user_msgs[0]["content"]
-        assert "s1" in user_msgs[0]["content"]
-
-        # the injected result also persists into self._messages for context
-        assert any("found 3 things" in m.get("content", "") for m in panel._messages)
-
-        # (d) but the raw result is NOT present anywhere in the visible history
-        assert "found 3 things" not in _history_text(panel)
-        assert panel._turn_in_progress is False
-
-
-@pytest.mark.smoke
-async def test_completion_during_turn_defers_then_surfaces_and_launches(
-    stub_manager, monkeypatch
-):
-    """A completion arriving mid-turn is NOT surfaced immediately (and stays
-    queued, not lost); after ``_finish_turn`` flips the turn off it surfaces
-    exactly once AND launches exactly one hidden orchestrator turn.
-    """
-    from sandroid.core.toolbox import Toolbox
-
-    monkeypatch.setattr(
-        Toolbox,
-        "config",
-        SimpleNamespace(
-            ai=SimpleNamespace(base_url="http://127.0.0.1:1/v1", api_key="k", model="m")
-        ),
-        raising=False,
-    )
-    monkeypatch.setattr(chat_panel_module, "build_ambient_block", lambda: "")
-
-    captured_calls: list[list[dict]] = []
-
-    def fake_run_agent_turn(messages, *args, **kwargs):
-        captured_calls.append(list(messages))
-        return "orchestrator reply"
-
-    monkeypatch.setattr(chat_panel_module, "run_agent_turn", fake_run_agent_turn)
-
-    app = _ChatPanelHarness()
-    async with app.run_test(size=(100, 30)) as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        panel._turn_in_progress = True
-        stub_manager.add_completion("s1", "probe", "done", epoch=0)
-
-        panel._drain_completions()
-        assert _completion_lines(panel) == []  # deferred while a turn is running
-        assert len(stub_manager._completed) == 1  # left queued, not drained
-        assert captured_calls == []  # and nothing launched yet
-
-        panel._finish_turn()  # flips _turn_in_progress off, then re-drains
-        await _wait_for_turn_done(panel, captured_calls)
-        await pilot.pause()
-
-        lines = _completion_lines(panel)
-        assert len(lines) == 1
-        assert "s1" in lines[0]
-        assert panel._subtask_outputs == {"s1": "done"}
-        # exactly one hidden turn, carrying the full result, nothing leaked
-        assert len(captured_calls) == 1
-        user_msgs = [m for m in captured_calls[0] if m["role"] == "user"]
-        assert len(user_msgs) == 1
-        assert "done" in user_msgs[0]["content"]
-        assert "done" not in _history_text(panel)
-
-
-@pytest.mark.smoke
-async def test_two_completions_push_two_lines_and_one_batched_hidden_turn(
-    stub_manager, monkeypatch
-):
-    """Two fresh completions -> two compact lines (neither lost), two stored
-    outputs, and ONE batched hidden orchestrator turn whose injected user
-    message carries BOTH results (nothing lost, nothing dumped visibly).
-    """
-    from sandroid.core.toolbox import Toolbox
-
-    monkeypatch.setattr(
-        Toolbox,
-        "config",
-        SimpleNamespace(
-            ai=SimpleNamespace(base_url="http://127.0.0.1:1/v1", api_key="k", model="m")
-        ),
-        raising=False,
-    )
-    monkeypatch.setattr(chat_panel_module, "build_ambient_block", lambda: "")
-
-    captured_calls: list[list[dict]] = []
-
-    def fake_run_agent_turn(messages, *args, **kwargs):
-        captured_calls.append(list(messages))
-        return "orchestrator reply"
-
-    monkeypatch.setattr(chat_panel_module, "run_agent_turn", fake_run_agent_turn)
-
-    app = _ChatPanelHarness()
-    async with app.run_test(size=(100, 30)) as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        stub_manager.add_completion("s1", "alpha", "resultA", epoch=0)
-        stub_manager.add_completion("s2", "beta", "resultB", epoch=0)
-
-        panel._drain_completions()
-        await _wait_for_turn_done(panel, captured_calls)
-        await pilot.pause()
-
-        lines = _completion_lines(panel)
-        assert len(lines) == 2
-        joined = "\n".join(lines)
-        assert "s1" in joined
-        assert "s2" in joined
-        assert "alpha" in joined
-        assert "beta" in joined
-        assert panel._subtask_outputs == {"s1": "resultA", "s2": "resultB"}
-
-        # exactly ONE batched turn, its injected user message carrying BOTH
-        # full results (neither dropped when they arrive in the same batch)
-        assert len(captured_calls) == 1
-        user_msgs = [m for m in captured_calls[0] if m["role"] == "user"]
-        assert len(user_msgs) == 1
-        assert "resultA" in user_msgs[0]["content"]
-        assert "resultB" in user_msgs[0]["content"]
-
-        # neither raw result leaks into the visible transcript
-        history_text = _history_text(panel)
-        assert "resultA" not in history_text
-        assert "resultB" not in history_text
-
-
-def test_stale_epoch_completion_is_dropped(stub_manager):
-    """A completion whose epoch predates a Ctrl+L clear (epoch bumped) is
-    dropped -- no line, no stored output, and NO orchestrator turn.
-    """
-    panel = ChatPanel(id="chat-panel")
-    launches: list = []
-    panel._launch_turn = lambda *a, **kw: launches.append((a, kw))
-    panel._epoch = 1  # conversation was cleared since the subtask was spawned
-    stub_manager.add_completion("s1", "probe", "stale result", epoch=0)
-    panel._drain_completions()
-
-    assert _completion_lines(panel) == []
-    assert panel._subtask_outputs == {}
-    assert launches == []  # a stale result must never re-enter the orchestrator
-
-
-def test_cancelled_completion_is_skipped(stub_manager):
-    """An analyst-cancelled subtask still enqueues a record (to free its lease)
-    but must NOT surface a completion line, stash its partial/empty result, or
-    launch an orchestrator turn.
-    """
-    panel = ChatPanel(id="chat-panel")
-    launches: list = []
-    panel._launch_turn = lambda *a, **kw: launches.append((a, kw))
-    stub_manager._completed.append(
-        CompletionRecord(
-            subtask_id="s1",
-            label="probe",
-            privileged=False,
-            result="partial",
-            epoch=0,
-            cancelled=True,
-        )
-    )
-    panel._drain_completions()
-
-    assert _completion_lines(panel) == []
-    assert panel._subtask_outputs == {}
-    assert launches == []
-
-
-@pytest.mark.smoke
-async def test_reveal_subtask_opens_a_modal_with_the_stored_output(stub_manager):
-    """Invoking ``action_reveal_subtask`` (what a click on the compact line
-    ultimately does) surfaces that subtask's stored full output in a
-    dismissable modal; an unknown id is a graceful no-op.
-    """
-    app = _ChatPanelHarness()
-    async with app.run_test(size=(100, 30)) as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        # Only the compact-line/stash half of _drain_completions is under test
-        # here -- neutralize the injected orchestrator turn it now also fires.
-        panel._launch_turn = lambda *a, **kw: None
-        stub_manager.add_completion("s1", "probe", "the full findings", epoch=0)
-        panel._drain_completions()
-        await pilot.pause()
-
-        # unknown id -> graceful no-op, no modal pushed
-        panel.action_reveal_subtask("nope")
-        await pilot.pause()
-        assert not isinstance(app.screen, _SubtaskOutputModal)
-
-        # known id -> the modal is pushed, carrying the stored output verbatim
-        panel.action_reveal_subtask("s1")
-        await pilot.pause()
-        assert isinstance(app.screen, _SubtaskOutputModal)
-        assert app.screen.output_text == "the full findings"
-        assert app.screen.subtask_id == "s1"
-
-
-@pytest.mark.smoke
-async def test_click_link_on_chat_log_delegates_reveal_to_the_panel(stub_manager):
-    """The transcript log (``_ChatLog``) carries the ``@click`` action and
-    forwards it up to its owning ChatPanel -- so a click on the compact line
-    reaches ``ChatPanel.action_reveal_subtask``. Exercising the log's own
-    action method proves that dispatch path lands on the panel.
-    """
-    app = _ChatPanelHarness()
-    async with app.run_test(size=(100, 30)) as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        log = app.query_one("#chat-log", _ChatLog)
-        # Only the compact-line/stash half of _drain_completions is under test
-        # here -- neutralize the injected orchestrator turn it now also fires.
-        panel._launch_turn = lambda *a, **kw: None
-        stub_manager.add_completion("s1", "probe", "delegated output", epoch=0)
-        panel._drain_completions()
-        await pilot.pause()
-
-        log.action_reveal_subtask("s1")
-        await pilot.pause()
-
-        assert isinstance(app.screen, _SubtaskOutputModal)
-        assert app.screen.output_text == "delegated output"
-
-
-def test_ctrl_l_clears_stashed_subtask_outputs(stub_manager):
-    """Ctrl+L (``action_clear_log``) drops stashed subtask outputs too, so a
-    cleared conversation can't keep revealing outputs it no longer shows.
-    """
-    panel = ChatPanel(id="chat-panel")
-    # Only the stash-then-clear behavior is under test here -- neutralize the
-    # injected orchestrator turn _drain_completions now also fires (and which
-    # would otherwise reach run_worker on this unmounted panel).
-    panel._launch_turn = lambda *a, **kw: None
-    stub_manager.add_completion("s1", "probe", "keep me? no", epoch=0)
-    panel._drain_completions()
-    assert panel._subtask_outputs == {"s1": "keep me? no"}
-
-    panel.action_clear_log()
-    assert panel._subtask_outputs == {}
-
-
-def test_ctrl_x_cancels_selected_subtask_not_the_turn(stub_manager):
-    """Ctrl+X with a subtask selected cancels THAT subtask and leaves the
-    active turn running.
-    """
-    panel = ChatPanel(id="chat-panel")
-    stub_manager.set_running(
-        [
-            {
-                "subtask_id": "s1",
-                "label": "probe",
-                "privileged": False,
-                "elapsed": 2.0,
-                "last_activity": None,
-            }
+async def test_agent_cards_update_live_while_running(sessions, manager):
+    """E2E bug 3: the card stayed at "0 tok" with a frozen timer and spinner."""
+    app = _Harness()
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "spawn")
+        row = {**_agent_row(), "usage": {}, "elapsed_s": 3.0}
+        manager.rows = [row]
+        await _push(pilot, panel, ev("agent_spawned", **row))
+        (card,) = _blocks(panel, AgentCard)
+        assert card.spinning
+        manager.rows = [{**row, "elapsed_s": 75.0}]
+        manager.events["a-re-abcdef"] = [
+            ev("usage", agent_id="a-re-abcdef", prompt=1200, completion=34),
+            ev("usage", agent_id="a-re-abcdef", prompt=1300, completion=10),
         ]
-    )
-    panel._selected_subtask_id = "s1"
-    handle = ChatTurnHandle()
-    panel._active_handle = handle
-
-    panel.action_stop_turn()
-
-    assert stub_manager.cancelled == ["s1"]
-    assert not handle.cancel_event.is_set()  # the reply was NOT stopped
-    assert panel._selected_subtask_id is None
-
-
-def test_ctrl_x_with_no_selection_stops_the_turn(stub_manager):
-    """Ctrl+X with nothing selected preserves the original behavior: stop the
-    active turn, cancel no subtask.
-    """
-    panel = ChatPanel(id="chat-panel")
-    panel._selected_subtask_id = None
-    handle = ChatTurnHandle()
-    panel._active_handle = handle
-
-    panel.action_stop_turn()
-
-    assert handle.cancel_event.is_set()
-    assert stub_manager.cancelled == []
+        panel._tick()
+        assert card.tokens == 2544
+        assert card.elapsed == 75.0
+        title = card.border_title
+        assert "1:15" in title
+        assert "2.5k tok" in title
+        await until(pilot, lambda: card.border_title != title)  # spins
+        manager.rows = [{**row, "status": "complete", "usage": {"prompt_tokens": 2600}}]
+        panel._tick()
+        assert card.status == "done"
+        assert not card.spinning
+        assert card.tokens == 2600
 
 
-@pytest.mark.smoke
-async def test_subtask_bar_hides_shows_count_and_lists_rows(stub_manager):
-    """The bar hides at 0 subtasks, shows a count collapsed, lists rows when
-    expanded, and gates the mascot off whenever it is shown.
-    """
-    app = _ChatPanelHarness()
-    async with app.run_test(size=(100, 30)) as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        bar = app.query_one("#chat-subtask-bar", Static)
-        mascot = app.query_one("#chat-mascot", Static)
-        await pilot.pause()
-
-        # 0 rows -> hidden (on_mount already refreshed against the empty stub)
-        assert bar.display is False
-
-        # collapsed: a count line, privileged note, mascot gated off
-        stub_manager.set_running(
-            [
+def test_history_chips_show_summary_time_and_the_approval():
+    records = [
+        {"type": "msg", "role": "user", "kind": "user", "text": "go"},
+        {
+            "type": "msg",
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
                 {
-                    "subtask_id": "s1",
-                    "label": "probe",
-                    "privileged": False,
-                    "elapsed": 1.0,
-                    "last_activity": "list_processes",
-                },
-                {
-                    "subtask_id": "s2",
-                    "label": "deep",
-                    "privileged": True,
-                    "elapsed": 5.0,
-                    "last_activity": None,
-                },
-            ]
-        )
-        panel._refresh_subtask_bar()
-        await pilot.pause()
-        assert bar.display is True
-        collapsed = bar.content.plain
-        assert "2 subtasks running" in collapsed
-        assert "privileged" in collapsed
-        assert mascot.display is False  # gated off while the bar is shown
-
-        # expanded: header + one row per subtask
-        panel.action_subtasks_up()
-        await pilot.pause()
-        assert panel._subtasks_expanded is True
-        assert panel._selected_subtask_id == "s1"
-        expanded = bar.content.plain
-        assert "s1" in expanded
-        assert "s2" in expanded
-        assert "probe" in expanded
-        assert "deep" in expanded
-
-        # back to 0 -> hidden again, mascot restored
-        stub_manager.set_running([])
-        panel._refresh_subtask_bar()
-        await pilot.pause()
-        assert bar.display is False
-        assert mascot.display is True
-
-
-# -- safety defaults: not-configured state, egress notice, redaction ---------
-
-
-def _log_text(app) -> str:
-    log = app.query_one("#chat-log", RichLog)
-    return "\n".join(strip.text for strip in log.lines)
-
-
-def _set_ai(monkeypatch, **ai) -> None:
-    from sandroid.core.toolbox import Toolbox
-
-    monkeypatch.setattr(
-        Toolbox, "config", SimpleNamespace(ai=SimpleNamespace(**ai)), raising=False
+                    "id": "c1",
+                    "function": {
+                        "name": "kill_process",
+                        "arguments": '{"package_name": "x"}',
+                    },
+                }
+            ],
+        },
+        {
+            "type": "approval",
+            "tool": "kill_process",
+            "decision": "no",
+            "by": "user",
+            "note": "use chrome",
+        },
+        {
+            "type": "msg",
+            "role": "tool",
+            "tool_call_id": "c1",
+            "status": "denied",
+            "error_code": "denied",
+            "summary": "denied: The analyst declined kill_process.",
+            "ms": 2200,
+        },
+        {
+            "type": "msg",
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "c2", "function": {"name": "list_flows", "arguments": "{}"}}
+            ],
+        },
+        {
+            "type": "msg",
+            "role": "tool",
+            "tool_call_id": "c2",
+            "status": "ok",
+            "result_id": "R4",
+            "summary": "12 rows",
+            "duration_ms": 400,
+        },
+        {
+            "type": "msg",
+            "role": "tool",
+            "tool_call_id": "c3",
+            "status": "ok",
+        },
+    ]
+    tools = [
+        w
+        for w, _ in chat_panel_module.history_blocks(records)
+        if isinstance(w, ToolBlock)
+    ]
+    killed, listed = tools
+    assert "declined by you · use chrome" in killed.decision.plain
+    assert killed.chip.plain == "└ ✗ denied · 2.2s"
+    assert listed.chip.plain == "└ ✓ R4 · 12 rows · 0.4s"
+    # Without timing in the record there is no made-up "0s".
+    bare = chat_panel_module.history_blocks(
+        [records[4], {**records[5], "summary": None, "duration_ms": None}]
     )
+    assert [w for w, _ in bare if isinstance(w, ToolBlock)][0].chip.plain == "└ ✓ R4"
 
 
-async def test_unconfigured_chat_shows_clear_state_and_sends_nothing(monkeypatch):
-    """AI is off unless configured: a clear notice instead of an error, and
-    submitting never reaches the model.
-    """
-    _set_ai(monkeypatch)  # no base_url/api_key/model
-    called = []
-    monkeypatch.setattr(
-        chat_panel_module, "run_agent_turn", lambda *a, **kw: called.append(a)
-    )
+def test_banner_wraps_with_a_hanging_indent():
+    from sandroid.ai.safety import get_ai_settings
 
-    app = _ChatPanelHarness()
-    async with app.run_test(size=(120, 40)) as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        await pilot.pause()
-        header = str(app.query_one("#chat-header", Static).content)
-        assert "not configured" in header
-        log_text = _log_text(app)
-        assert "EXPERIMENTAL" in log_text
-        assert "not configured" in log_text
-
-        panel._launch_turn("hello")
-        await pilot.pause()
-        assert panel._turn_in_progress is False
-        assert called == []
-        assert any(
-            isinstance(line, str) and "not configured" in line
-            for line in panel._history_lines
-        )
-
-
-async def test_remote_endpoint_refused_without_allow_remote(monkeypatch):
-    _set_ai(monkeypatch, base_url="https://api.example.com/v1", api_key="k", model="m")
-    called = []
-    monkeypatch.setattr(
-        chat_panel_module, "run_agent_turn", lambda *a, **kw: called.append(a)
-    )
-
-    app = _ChatPanelHarness()
-    async with app.run_test(size=(120, 40)) as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        panel._launch_turn("hello")
-        await pilot.pause()
-        assert called == []
-        assert panel._turn_in_progress is False
-        assert any(
-            isinstance(line, str) and "allow_remote" in line
-            for line in panel._history_lines
-        )
-        assert "blocked" in str(app.query_one("#chat-header", Static).content)
-
-
-async def test_egress_notice_names_endpoint_and_model_before_first_message(
-    monkeypatch,
-):
-    _set_ai(
-        monkeypatch,
-        base_url="http://localhost:11434/v1",
-        api_key="k-secret-value",
-        model="qwen2.5",
-    )
-    app = _ChatPanelHarness()
-    async with app.run_test(size=(160, 40)) as pilot:
-        panel = app.query_one("#chat-panel", ChatPanel)
-        await pilot.pause()
-        log_text = _log_text(app)
-        assert "EXPERIMENTAL" in log_text
-        assert "http://localhost:11434/v1" in log_text
-        assert "qwen2.5" in log_text
-        assert "k-secret-value" not in log_text
-        header = str(app.query_one("#chat-header", Static).content)
-        assert "EXPERIMENTAL" in header
-        assert "qwen2.5" in header
-
-        # The notice is UI-only: never part of the conversation history.
-        assert panel._history_lines == []
-        assert all("EXPERIMENTAL" not in m["content"] for m in panel._messages)
-
-        # It survives Ctrl+L.
-        panel.action_clear_log()
-        await pilot.pause()
-        assert "http://localhost:11434/v1" in _log_text(app)
-
-
-def test_turn_errors_are_redacted(monkeypatch):
-    _set_ai(
-        monkeypatch,
-        base_url="http://localhost:11434/v1",
-        api_key="k-secret-value",
-        model="m",
-    )
-    panel = ChatPanel()
-    panel._report_turn_error("AI backend error: bad key k-secret-value")
-    panel._append_ui_event(
-        {"type": "error", "message": "Authorization: Bearer k-secret-value"}
-    )
-    text = "\n".join(str(line) for line in panel._history_lines)
-    assert "k-secret-value" not in text
-    assert "***" in text
+    settings = get_ai_settings(_ai())
+    lines = chat_panel_module.format_banner(settings, "ask", width=40).plain.split("\n")
+    assert lines[0].startswith("⚠ ")
+    assert all(line.startswith("  ") for line in lines[1:])
+    assert all(len(line) <= 40 for line in lines)
+    assert len(lines) > len(egress_banner_lines(settings, "ask"))  # it wrapped

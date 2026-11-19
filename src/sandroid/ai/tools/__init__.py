@@ -11,7 +11,9 @@ importing :mod:`sandroid.ai.tools.app_lifecycle`,
 :mod:`sandroid.ai.tools.network_query`,
 :mod:`sandroid.ai.tools.process_control`,
 :mod:`sandroid.ai.tools.recording_control`, and
-:mod:`sandroid.ai.tools.session_control`). It does NOT start the MCP
+:mod:`sandroid.ai.tools.session_control`), plus the meta tools
+``tool_search``/``call_tool``/``read_result`` from
+:mod:`sandroid.ai.tools.meta`. It does NOT start the MCP
 client or bridge MCP tools -- that is an app-lifecycle action for the caller
 (start :class:`~sandroid.ai.mcp_client.MCPClientManager`, then call
 :func:`bridge_mcp_tools` once), since it requires a running, connected
@@ -27,6 +29,7 @@ from sandroid.ai.tools import (
     file_transfer,
     flow_query,
     host_files,
+    meta,
     monitor_control,
     network_query,
     process_control,

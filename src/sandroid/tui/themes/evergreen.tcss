@@ -45,7 +45,8 @@ MainScreen {
     border: round #364036;
 }
 
-/* Right-hand side slot: Inspector or AI chat (one at a time) */
+/* Right-hand side slot: Inspector (the AI chat docks under the lens and
+   styles itself from $lens-* tokens, see main_screen.ChatDock) */
 Inspector {
     background: #1F2520;
     border: round #364036;
@@ -55,12 +56,6 @@ Inspector {
 
 Inspector:focus-within {
     border: round #CDAEE6;
-}
-
-#chat-dock {
-    background: #1F2520;
-    border: round #364036;
-    border-title-color: #CDAEE6;
 }
 
 /* Log ticker (newest line) + bottom drawer (` toggles) */
@@ -456,9 +451,9 @@ Button.-primary {
     color: #B2AB97;
 }
 
-/* ========== Lens Bar & Chat Panel Theming ========== */
-/* Overrides MainScreen/ChatPanel's Python DEFAULT_CSS (see the comments
-   there) so the lens bar and AI chat panel follow this theme instead
+/* ========== Lens Bar Theming ========== */
+/* Overrides MainScreen's Python DEFAULT_CSS (see the comments
+   there) so the lens bar follows this theme instead
    of staying frozen on the default Midnight Cyan hardcoded values. */
 
 #lens-bar {
@@ -483,30 +478,6 @@ Button.-primary {
 .lens-tab.-active {
     color: #1A1F1B;
     background: #B99AD8;
-}
-
-ChatPanel {
-    background: #1F2520;
-}
-
-ChatPanel > #chat-header {
-    color: #CDAEE6;
-}
-
-ChatPanel > #chat-log {
-    background: #1A1F1B;
-}
-
-ChatPanel > #chat-input-bar > #chat-input {
-    border: solid #364036;
-    background: #1A1F1B;
-}
-
-ChatPanel > #chat-mascot {
-    /* MUST equal #chat-log's background above -- see the comment on
-       ChatPanel > #chat-mascot in chat_panel.py for why. */
-    background: #1A1F1B;
-    color: #CDAEE6;
 }
 
 /* runs lens */

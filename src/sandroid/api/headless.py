@@ -926,25 +926,28 @@ class SandroidHeadlessAPI(SandroidAPI):
         """
         self._event_handlers.append(handler)
 
-        # Also subscribe to EventBus if available
+        # Also subscribe to the EventBus. It has no wildcard subscription, so
+        # the handler is registered once per EventType (and removed the same
+        # way); the bus instance is captured so unsubscribe hits the same one.
+        bus = None
+        event_types: list[Any] = []
         try:
-            from sandroid.core.events import EventBus
+            from sandroid.core.events import EventBus, EventType
 
             bus = EventBus.get()
-            bus.subscribe_all(handler)
+            event_types = list(EventType)
+            for event_type in event_types:
+                bus.subscribe(event_type, handler)
         except (ImportError, RuntimeError):
             pass
 
         def unsubscribe() -> None:
             if handler in self._event_handlers:
                 self._event_handlers.remove(handler)
-            try:
-                from sandroid.core.events import EventBus
-
-                bus = EventBus.get()
-                bus.unsubscribe_all(handler)
-            except (ImportError, RuntimeError):
-                pass
+            if bus is None:
+                return
+            for event_type in event_types:
+                bus.unsubscribe(event_type, handler)
 
         return unsubscribe
 

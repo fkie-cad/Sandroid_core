@@ -17,10 +17,10 @@ Design rules (see each ``_describe_*`` helper below):
   deliberately *not* sources here (the former needs a slow ``dumpsys
   window`` call, the latter shells out over the emulator's telnet console
   with no caching).
-- **Never persisted**: callers must rebuild this fresh every turn and must
-  never let it leak into stored conversation history, or it goes stale and
-  accumulates (see ``chat_panel.py``'s identity-based filter and a subtask's
-  one-shot splice).
+- **Built once per user turn**: :class:`sandroid.ai.session.AgentSession`
+  builds it fresh for every analyst message and inserts it right before that
+  message (kept in the request history for a stable prefix, persisted as an
+  ``ambient`` record, never sent to the timeline).
 - **Explicit state for boolean facts**: for a fact that's a direct yes/no
   question a user can ask ("is mitmproxy running?", "is a Frida session
   attached?", "is it recording?", "what's the current spotlight app?"), the

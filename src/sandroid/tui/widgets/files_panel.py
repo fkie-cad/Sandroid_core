@@ -1,12 +1,22 @@
 """Files lens: one table of live file activity, with watch marks.
 
 One question per screen -- *what is the app writing, and what changed in
-it?* -- answered by ONE full-width table, collapsed per file::
+it?* -- answered by ONE full-width table, collapsed per file, newest at the
+bottom (watched ★ rows pinned on top)::
 
-    ★ shared_prefs/consent.xml    M    3x  10:42:07
     ★ databases/app.db            CM  11x  10:42:05
-    ▸ cache/ · 340 files          CM 412x  10:41:58   (a cache group, ⏎/→ opens)
+    ★ shared_prefs/consent.xml    M    3x  10:42:07
       files/aaid.txt              C    1x  10:40:12
+    ▸ cache/ · 340 files          CM 412x  10:41:58   (a cache group, ⏎/→ opens)
+
+**Follow** (the Timeline / Network rules, ``follow.py``; the default
+"recent" order): a file that changes moves to the bottom and, while *live*,
+the cursor sticks to that newest row. ↑, PgUp, Home, a wheel up or a click
+on a row above the newest one stop following (the monitor keeps recording),
+``End`` resumes, also with a file open in the Inspector (which then follows
+the newest row); the caption title says ``live`` or ``scrolled back · 3 new
+below · End = live`` (unpinned rows that changed since; ★ rows stay on top).
+The frame title says ``monitor on`` / ``monitor off`` for the monitor.
 
 Rows come from the file monitor (``o`` starts/stops it): each
 ``TASK_OUTPUT``/``source="monitor"`` batch is folded into
@@ -112,6 +122,7 @@ from sandroid.core.file_diff import is_legacy_markup_line
 from sandroid.tui.utils.ui_thread import UiDispatcher
 
 from . import file_inspect
+from .follow import Follow
 from .lens_shell import InspectorContent, Mark, SessionMarks, ShellHeader, is_shown
 from .monitor_view import (
     OPS,
@@ -401,6 +412,40 @@ class _FilesTable(ProfileTintMixin, DataTable):
         parent = self.parent
         return parent if isinstance(parent, FilesPanel) else None
 
+    # Moving up stops following the newest row; End resumes (follow.py).
+
+    def _follow(self, live: bool) -> None:
+        panel = self._panel()
+        if panel is not None:
+            panel.set_following(live)
+
+    def action_cursor_up(self) -> None:
+        super().action_cursor_up()
+        self._follow(False)
+
+    def action_page_up(self) -> None:
+        super().action_page_up()
+        self._follow(False)
+
+    def action_scroll_top(self) -> None:
+        super().action_scroll_top()
+        self._follow(False)
+
+    def action_scroll_bottom(self) -> None:
+        super().action_scroll_bottom()
+        self._follow(True)
+
+    def on_click(self, event) -> None:
+        try:
+            row = event.style.meta.get("row")
+        except Exception:
+            row = None
+        if isinstance(row, int) and 0 <= row < self.row_count - 1:
+            self._follow(False)
+
+    def on_mouse_scroll_up(self, _event) -> None:
+        self._follow(False)
+
     def action_cursor_right(self) -> None:
         """→ opens a cache group row (the table never scrolls sideways)."""
         panel = self._panel()
@@ -487,9 +532,24 @@ class FilesPanel(Widget):
         Binding("U", "pull_all", "Pull all watched", show=False),
         Binding("slash", "filter", "Filter", show=False),
         Binding("n", "add_path", "Watch a path…", show=False),
-        Binding("A", "toggle_since_mark", "All / since the last mark", show=False),
-        Binding("less_than_sign", "step_mark(-1)", "Earlier mark segment", show=False),
-        Binding("greater_than_sign", "step_mark(1)", "Later mark segment", show=False),
+        Binding(
+            "A",
+            "toggle_since_mark",
+            "All / since the last note or section",
+            show=False,
+        ),
+        Binding(
+            "less_than_sign",
+            "step_mark(-1)",
+            "Earlier note / section segment",
+            show=False,
+        ),
+        Binding(
+            "greater_than_sign",
+            "step_mark(1)",
+            "Later note / section segment",
+            show=False,
+        ),
         Binding("N", "toggle_noise", "Show everything (raw)", show=False),
         Binding("R", "noise_rules", "Hide / group rules…", show=False),
         Binding("full_stop", "toggle_full_paths", "Full paths", show=False),
@@ -602,6 +662,12 @@ class FilesPanel(Widget):
         self._event_handlers: list = []
         self._main_loop = None
         self._ui = UiDispatcher()
+        #: Follow the newest row (``follow.py``; the "recent" order only) and
+        #: the paths that changed since following stopped.
+        self._follow = Follow()
+        self._new_keys: set[str] = set()
+        #: The last refresh put the cursor on the newest row (following).
+        self._followed_last = False
         self._privacy_table: DataTable | None = None
         self._privacy_feed = PrivacyFeed(
             self, self._privacy_flush, lambda rec: rec.device_path
@@ -719,6 +785,9 @@ class FilesPanel(Widget):
         self._review_error = None
         if self._scope is not None:
             self._start_review_load(self._scope)
+        else:  # back to LIVE: follow the newest row again
+            self._follow.resume()
+            self._new_keys.clear()
         self._dirty = True
         self.refresh_rows()
         self.refresh_bindings()
@@ -810,6 +879,8 @@ class FilesPanel(Widget):
         now = now or datetime.now()
         batch = list(batch)
         touched = self.activity.ingest(batch, now=now)
+        if touched and not self._follow.live:
+            self._new_keys.update(touched)
         writes = self.activity.writes
         if writes:
             wl = self._watchlist_or_none()
@@ -998,13 +1069,17 @@ class FilesPanel(Widget):
             last = row.stats.last if row.stats else None
             return (last is None, -(last.timestamp() if last else 0), row.key)
 
+        def newest_last(row: _Row):
+            last = row.stats.last if row.stats else None
+            return (last is not None, last.timestamp() if last else 0, row.key)
+
         def order(row: _Row):
             if self._sort == "name":
                 return _natural_key(app_relative(row.group or row.key))
             if self._sort == "count":
                 count = row.stats.count if row.stats else 0
                 return (-count, *recency(row))
-            return recency(row)
+            return newest_last(row)
 
         pinned_rows = sorted(
             (r for r in pinned.values() if self._matches(r)), key=order
@@ -1017,7 +1092,8 @@ class FilesPanel(Widget):
         if len(idle) >= limit:
             active = [r for r in pinned_rows if r.stats is not None]
             fold = _Row(key=IDLE_FOLD, group=IDLE_FOLD, members=idle, fold=True)
-            pinned_rows = [*active, fold]
+            # Newest last: the idle fold above the ★ rows that changed.
+            pinned_rows = [fold, *active] if self._sort == "recent" else [*active, fold]
         rows = pinned_rows + sorted(rest, key=order)
         out: list[_Row] = []
         for row in rows:
@@ -1188,6 +1264,33 @@ class FilesPanel(Widget):
         except Exception:
             return None
 
+    @property
+    def follow_applies(self) -> bool:
+        """Follow the newest row: the live table in the "recent" order."""
+        return not self.review and self._sort == "recent"
+
+    @property
+    def following(self) -> bool:
+        return self._follow.live
+
+    def set_following(self, live: bool) -> None:
+        """Stop following (a move up) or resume it (End: the newest row).
+
+        End always resumes, also with a file open in the Inspector: while
+        live the Inspector follows the newest row.
+        """
+        if live:
+            changed = self._follow.resume()
+            self._new_keys.clear()
+            if changed or self.follow_applies:
+                self.refresh_rows()
+        else:
+            changed = self._follow.stop()
+            if changed:  # a 2nd ↑ keeps what arrived since the first
+                self._new_keys.clear()
+        if changed:
+            self._update_caption()
+
     def current_row(self) -> _Row | None:
         key = self._cursor_key()
         for row in self._rows:
@@ -1252,18 +1355,20 @@ class FilesPanel(Widget):
         return package if own and package != own else None
 
     def _idle_label(self) -> str:
-        """``idle since mark 3`` / ``idle mark 1 → 2`` / ``idle`` (no marks)."""
+        """``idle since Note 3`` / ``idle Note 1 → Section 2`` / ``idle``
+        (no notes or sections).
+        """
         seg, marks = self._segment, self._marks
         if seg is None or not marks:
             return "idle"
         if seg == 0:
-            return "idle before mark 1"
+            return f"idle before {marks[0].label()}"
         if seg >= len(marks):
-            return f"idle since mark {seg}"
-        return f"idle mark {seg} → {seg + 1}"
+            return f"idle since {marks[seg - 1].label()}"
+        return f"idle {marks[seg - 1].label()} → {marks[seg].label()}"
 
     def _fold_cell(self, row: _Row) -> Text:
-        """``★ 21 watched · idle since mark 3`` (shortest form on a narrow
+        """``★ 21 watched · idle since Note 3`` (shortest form on a narrow
         table: ``★ 21 watched · idle``, ``★ 21 idle``).
         """
         n = len(row.members)
@@ -1395,6 +1500,19 @@ class FilesPanel(Widget):
         keep = self._cursor_key()
         keep_index = table.cursor_row if table.row_count else 0
         keep_scroll = table.scroll_y
+        if (
+            self._follow.live
+            and self.follow_applies
+            and self._followed_last
+            and table.row_count
+            and table.cursor_row < table.row_count - 1
+        ):
+            # The cursor was moved off the newest row (a jump, a select):
+            # stop following, never yank it back.
+            self._follow.stop()
+            self._new_keys.clear()
+        follow = self.follow_applies and self._follow.live
+        self._followed_last = follow
         self._ensure_columns(table)
         rows = (
             [r for r in self._review_rows if self._matches(r)]
@@ -1402,6 +1520,17 @@ class FilesPanel(Widget):
             else self._live_rows()
         )
         self._rows = rows
+        if self.follow_applies and not self._follow.live:
+            # Rows that changed since: the unpinned ones (they move below);
+            # a pinned ★ row stays on top and is no "new below".
+            new = self._new_keys
+            self._follow.new_below = sum(
+                1
+                for r in rows
+                if r.watched is None
+                and not r.fold
+                and (r.key in new or any(m.key in new for m in r.members))
+            )
         with self.app.batch_update():
             table.clear()
             order = ("mark", "path", "ops", "count", "last", "ident")
@@ -1409,7 +1538,9 @@ class FilesPanel(Widget):
             for row in rows:
                 cells = (*self._cells(row), self._privacy_cell(row))
                 table.add_row(*(cells[i] for i in picks), key=row.key)
-            if rows:
+            if rows and follow:
+                table.move_cursor(row=len(rows) - 1, animate=False)
+            elif rows:
                 index = keep_index
                 if keep is not None:
                     try:
@@ -1481,7 +1612,7 @@ class FilesPanel(Widget):
             if self._segment is not None:
                 title = self._segment_title()
             else:
-                title = "LIVE" if running else "monitor off"
+                title = "monitor on" if running else "monitor off"
             wl = self._watchlist_or_none()
             n_groups = sum(1 for r in rows if r.group is not None and not r.fold)
             n_paths = sum(
@@ -1502,7 +1633,7 @@ class FilesPanel(Widget):
             if self._sort != "recent":
                 parts.append(f"by {self._sort}")
             if self._segment is not None:
-                parts.append("A all · </> marks")
+                parts.append("A all · </> notes and sections")
             watching = wl is not None and wl.has_watches
             if not running and watching:
                 parts.append("monitor off — watched files not tracked · o starts it")
@@ -1523,6 +1654,9 @@ class FilesPanel(Widget):
                         parts.insert(0, title)
                     title = blind
                 parts = list(status) + parts
+            if self.follow_applies and rows:
+                # Follow state: in ONE place, the title (as in every lens).
+                title = f"{self._follow.text} · {title}"
         if self._filter:
             parts.insert(0, f"/{self._filter}")
         return title, " · ".join(parts)
@@ -1570,7 +1704,7 @@ class FilesPanel(Widget):
         """Caption title of the viewed segment.
 
         A segment that starts at a label's end has no label:
-        ``after label 7 (no label)``; points keep ``mark N``.
+        ``after Section 7 (no section)``; notes keep ``Note N``.
         """
         seg = self._segment
         marks = self._marks
@@ -1580,7 +1714,7 @@ class FilesPanel(Widget):
             return f"before {marks[0].label()} · until {marks[0].when:%H:%M:%S}"
         start = marks[seg - 1]
         after_end = getattr(start, "kind", "point") == "end"
-        head = f"{start.label()} (no label)" if after_end else start.label()
+        head = f"{start.label()} (no section)" if after_end else start.label()
         if seg >= len(marks):
             if after_end:
                 return f"{head} · {start.when:%H:%M:%S}"
@@ -1667,6 +1801,7 @@ class FilesPanel(Widget):
             row = self._row_for(path)
         if row is None:
             return False
+        self.set_following(False)
         try:
             self.table.move_cursor(row=self.table.get_row_index(path), animate=False)
         except Exception:
@@ -1713,6 +1848,7 @@ class FilesPanel(Widget):
             self._expanded.add(folder)
         else:
             self._expanded.discard(folder)
+        self.set_following(False)
         self.refresh_rows()
         try:
             key = next(r.key for r in self._rows if r.group == folder)
@@ -2314,7 +2450,10 @@ class FilesPanel(Widget):
     def action_toggle_since_mark(self) -> None:
         """``A``: everything ↔ since the last mark."""
         if not self._marks:
-            self.app.notify("No marks yet — B drops one.", severity="warning")
+            self.app.notify(
+                "No notes or sections yet — B adds a note, # starts a section.",
+                severity="warning",
+            )
             return
         self._segment = None if self._segment is not None else len(self._marks)
         self.refresh_rows()
@@ -2322,7 +2461,10 @@ class FilesPanel(Widget):
     def action_step_mark(self, delta: int) -> None:
         """``<``/``>``: the segment before / after the viewed one."""
         if not self._marks:
-            self.app.notify("No marks yet — B drops one.", severity="warning")
+            self.app.notify(
+                "No notes or sections yet — B adds a note, # starts a section.",
+                severity="warning",
+            )
             return
         last = len(self._marks)
         current = last if self._segment is None else self._segment

@@ -38,7 +38,8 @@ everything else out of the way until you ask for it:
   the scope pill (``● LIVE``; ``● REC`` while recording; ``● REPLAY ·
   <phase>`` while a Play runs -- ``loading snapshot``, ``replay 1/2``,
   ``settle 8s``, ``dry run``, ``analysing``; ``◆ REVIEW #<n> <label>`` while
-  reviewing a run), the innermost open label (``▶ 7 'accept cookies' 0:12``),
+  reviewing a run), the innermost open section (``Section 7 'accept cookies'
+  0:12``; a new note shows ``Note 8 'text'`` there for 5 s),
   ``◉ TRK`` while Tracking runs, ``⚠ timeline locked (…)`` / ``⚠ timeline
   failed`` when this window records no timeline, and the clock.
 - **Status strip** (one or two rows): app state and pid, frida-server, active
@@ -51,8 +52,8 @@ everything else out of the way until you ask for it:
   ``Esc`` closes it. Switching to another lens closes it too.
 - **Log ticker** (one row): the newest activity-log line. The backtick key
   opens the **log drawer** with the full activity log.
-- **AI Chat** (optional, ``Ctrl+Y``, experimental) opens in the same
-  right-hand slot as the Inspector: see :ref:`ai-chat`.
+- **AI Chat** (optional, ``Ctrl+Y``, experimental) docks under the lens,
+  beside the Inspector: see :ref:`ai-chat`.
 
 Navigation
 ~~~~~~~~~~
@@ -67,23 +68,25 @@ Key                         Action
 Backtick (grave accent)     Toggle the log drawer
 ``S`` (or ``0``)            Snapshot picker
 ``r`` / ``p``               Record / Play (replay + diff) -- from any lens
-``#``                       Start a label (closes open labels; name prompt)
-``+``                       Start a sub-label (name prompt)
-``-``                       Stop the innermost label
-``B`` (Shift+B)             Mark: a named point in time (name prompt)
+``#``                       Section: start one (ends open sections; name)
+``+``                       Sub-section: start one (name prompt)
+``-``                       End section: ends the innermost one
+``B`` (Shift+B)             Note: a point in time (asks for its text)
 ``Ctrl+T``                  Tracking on/off (input + screens into the timeline)
 ``L`` (Shift+L)             Back to LIVE while reviewing a run (``◆ REVIEW``)
 ``?``                       Help & keybinding editor (all actions by category)
 ``Ctrl+Shift+P``            Command palette (fuzzy-search any action)
-``Ctrl+Y``                  AI Chat in the right-hand slot
+``Ctrl+Y``                  AI Chat under the lens (focus it; again: close)
+``Shift+Up``/``Down``       AI Chat size: 30% / 50% / 70% / max
 ``Ctrl+B``                  Focus the active lens (e.g. after the chat)
 ``,``                       Settings
 ``D`` (Shift+D)             Switch device
 ``q`` / ``Ctrl+C``          Quit (asks first; ``Ctrl+Q`` too)
 ==========================  ==================================================
 
-``Esc`` closes the Inspector / AI Chat first, then the log drawer, then
-clears an applied lens filter; it never quits. The quit dialog always comes
+``Esc`` in the AI Chat goes back to the lens; otherwise it closes the
+Inspector first, then the log drawer, then the AI Chat, then clears an
+applied lens filter; it never quits. The quit dialog always comes
 first and lists what quitting stops (mitmweb, friTap, the file monitor, a
 recording, ...) and that it clears the device proxy Sandroid set. After the
 confirm the dialog stays up as "Quitting Sandroid…" and ignores keys until
@@ -142,15 +145,22 @@ Network (2)
 Who is the app talking to, and what did it send? One flow table
 (time, recipient, request, status, size) read from the embedded
 ``mitmweb``'s flow log; ``Enter`` on a row opens Summary / Request /
-Response in the Inspector. TLS failures and errored flows show as ✗ rows
-(a ``⚑N`` badge on the lens counts TLS failures you have not seen yet).
-``/`` filters by host, path, app or status (``/404``, ``/tls``, ``/✗``
-for every failed row; ``Esc`` clears the filter), ``T`` shows only the
+Response in the Inspector. TLS failures and errored flows say so in the
+status column (``TLS failed`` / ``error reset``, in the error colour; a
+``⚑N`` badge on the lens counts TLS failures you have not seen yet). New
+flows appear at the bottom; while *live* the newest flow stays selected
+(and an open Inspector follows it); ↑, PgUp, Home, a wheel up or a click
+above the newest row stop following (capturing goes on), ``End`` resumes.
+The caption title starts with ``live`` or ``scrolled back · 12 new below ·
+End = live``, then the capture state in words (``Mitmproxy on :8080 ·
+device routed · CA installed · friTap on``).
+``/`` filters by host, path, app or status (``/404``, ``/tls``, ``/error``
+for every errored flow; ``Esc`` clears the filter), ``T`` shows only the
 spotlight (target) app's flows, ``N`` shows OS background traffic
 (connectivity checks, Play services and Google's ``*-pa.googleapis.com``
 APIs, Sandroid's own ``mitm.it`` probe), hidden by default; the caption
 says how many flows it hides (``N: 163 OS noise hidden``). ``Home`` /
-``End`` jump to the first / last flow. Compressed bodies (gzip, br,
+``End`` jump to the first / newest flow (``End``: live again). Compressed bodies (gzip, br,
 deflate, zstd) are shown decoded; the Inspector notes the encoding. TLS
 failures are kept in the flow log too, so a later session or a reviewed run
 still shows them. In REVIEW scope the table shows the reviewed
@@ -229,7 +239,15 @@ Files (3)
 ~~~~~~~~~
 
 One table of what the app writes, one row per file (★, path, ops
-``C``/``M``/``R``/``D``/``A``, count, last time). ``o`` starts/stops the
+``C``/``M``/``R``/``D``/``A``, count, last time), oldest first: a file that
+changes moves to the bottom (watched ★ rows stay pinned on top). While
+*live* the cursor sticks to that newest row; ↑, PgUp, Home, a wheel up or a
+click on a row above it stop following (the monitor keeps recording), and
+``End`` resumes -- also with a file open in the Inspector, which then
+follows the newest row. The caption title says ``live`` or ``scrolled back
+· 3 new below · End = live`` (unpinned rows that changed since), then
+``monitor on`` / ``monitor off``; it applies to the default "recent" order
+only (Shift+``O`` sorts by name or count). ``o`` starts/stops the
 file monitor: the default ``kprobe`` backend uses kernel tracefs kprobes
 (per-process and child-tree attribution, path-scoped capture, nothing pushed
 to the device) and falls back to ``fsmon`` automatically
@@ -309,23 +327,25 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   so an analyst can judge it. Each
   ``acquisition.json`` and ``checks.jsonl`` line carries the
   ``device_clock`` sample of its pull; when the device clock is more than
-  1 s off, the Inspector (Summary, Versions) and the header (``device
-  17:16:02 −75 min ⚠``, amber) show it.
+  1 s off, the Inspector (Summary, Versions) and the header (``dev
+  16:01:02 75 min behind``, amber; ``dev 17:16:02 in sync`` dimmed
+  otherwise) show it.
 - **Session-start baselines**: watches persist across sessions, pulled
   versions do not. When the file monitor starts, each watched file of the
   monitored app is pulled once (``trigger: session-start``; at most 50, the
   rest named in the log), so the first change has a version to diff
   against; an unchanged file only gets a ``checks.jsonl`` line.
-- **Marks and labels**: ``B`` (any lens) drops a mark (optional name; ⏎ on
-  an empty name keeps it unnamed, Esc drops none); a top-level label's start
-  (``#``) and end (``-``) are boundaries too (segments ``label 7 'x'`` and
-  ``after label 7 (no label)``). The table then shows only the activity
-  since that mark (★ rows with activity in it stay on top; the idle ★ rows
-  fold into one row, ``▸ ★ 21 watched · idle since mark 3``, that ⏎ or →
-  opens and ← folds); ``A`` toggles everything / since the last mark (4 or
+- **Notes and sections**: ``B`` (any lens) adds a Note (it asks for the
+  note's text, which it needs: an empty Enter keeps asking, Esc adds
+  none); a Section's start (``#``) and end (``-``) are boundaries too
+  (segments ``Section 7 'x'`` and ``after Section 7 (no section)``). The
+  table then shows only the activity since that note or section (★ rows
+  with activity in it stay on top; the idle ★ rows fold into one row,
+  ``▸ ★ 21 watched · idle since Note 3 'x'``, that ⏎ or → opens and ←
+  folds); ``A`` toggles everything / since the last note or section (4 or
   more never-touched ★ rows fold there too) and ``<``/``>`` step through
   the segments. The caption names the segment, the log and the Inspector's
-  Events tab show the marks as separator lines.
+  Events tab show the notes and sections as separator lines.
 - **Hidden and grouped rows**: by default only OS paths (``/proc/``,
   ``/system/``, ``/data/dalvik-cache/``, ``/data/app/`` ...) and rows with
   only OPEN/CLOSE are hidden -- never the app's own data, nor
@@ -353,7 +373,7 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   ``*`` makes the selected version the base the others are diffed against
   (``*`` on it again clears it). These keys work only while the Inspector
   is open and are bound nowhere else, so they never collide with the lens's
-  ``B`` / ``A`` / ``<`` / ``>`` mark keys; ``{`` ``}`` pair with ``[`` ``]``
+  ``B`` / ``A`` / ``<`` / ``>`` note and section keys; ``{`` ``}`` pair with ``[`` ``]``
   (tabs).
 
   *Content* is a first look inside the selected version's local copy:
@@ -473,23 +493,58 @@ Everything the session recorded, one line per event and newest at the
 bottom: file events, monitor notes, clock samples, snapshot loads, labels,
 runs, Tracking input and screens, network flows. It reads the device folder's
 ``timeline.jsonl`` (the newest 20,000 lines first; ``Home`` at the top loads
-older pages) and follows new lines live while it is shown. Columns: label
+older pages) and follows new lines live while it is shown. Columns: section
 depth (``│``) and a flag (``!`` warning, ``~`` uncertain device time, ``▒``
-masked), time, the step to the previous row, source, kind, actor and the
-summary (``×n`` for coalesced or counted lines, ``⇢`` when ``J`` can jump).
+masked), time, the step to the previous row, the type in plain words
+(``tap``, ``long press``, ``swipe``, ``typed``, ``key``, ``screen``,
+``screenshot``, ``request``, ``TLS failed``, ``file``, ``clock``,
+``system`` ...), kind, actor and the summary (``· n times`` for coalesced or
+counted lines). Colour, brightness and a background tint tell the types
+apart (from the theme): your own input is the brightest row on a tinted
+band, screens and screenshots have a second accent, requests a muted type
+word, file, clock and system rows are dimmed; warnings and errors keep their
+colours.
 
-Separators mark what changes how to read the lines after them: ``⟲`` a world
-change (snapshot load, cold boot, a device clock that went backwards), ``⏱``
-a device clock epoch, ``▶ ■ ◆`` labels, ``● REC`` / ``▷ Play`` runs, ``⋯``
-a restarted Sandroid, Tracking and intervention (e.g. accessibility helper)
-on/off. Clock samples, count lines and a quick device reconnect are hidden
-until ``N``.
+The **type bar** above the list lists every type present in its colour with
+its count (``tap 21 · typed 2 · screen 76 · request 445 · file 3,084``) and
+then the apps present: a click on a type hides / shows it, a click on an app
+shows only its lines (the ``pkg:`` filter; ``all`` for every app; the apps
+have their own second line). ``t``
+reaches it from the keyboard (←/→, ``Space``; ``t`` or ``Esc`` back). It
+combines with the ``/`` filter.
+
+**Folding** (view only; the rows, the Inspector, ``J``/``V`` and reports keep
+every line): consecutive file rows of one app less than 2 s apart fold into
+one row (``file · org.x · 214 changes (88 modify, 61 create, 40 rename …) in
+cache2, databases``); ``Enter`` or a click opens / closes it. ``z`` or a
+click on a section's header row folds the section into one row (``Section 3
+'Login' · 2:14 · 412 lines (12 taps, 300 files, 80 requests)``). Filters
+apply before folding.
+
+Separators mark what changes how to read the lines after them, in plain
+words: ``snapshot 'clean' loaded · world 3`` (a world change: snapshot
+load, cold boot, a device clock that went backwards), ``clock epoch 2``,
+``Section`` / ``Sub-section … in Section 1`` / ``End section`` / ``Note``,
+``recording started`` / ``replay started`` / ``replay finished`` runs (a
+failed one says ``replay failed`` / ``recording failed`` in the error
+colour), ``restarted`` (Sandroid), Tracking and intervention (e.g.
+accessibility helper) on/off. No row starts with a symbol; a masked line
+says ``masked`` in its kind column, an uncertain device time shows as an
+amber time. Clock samples, count lines and a quick
+device reconnect are hidden until ``N``.
 
 ===================  ========================================================
 Key (Timeline lens)  Action
 ===================  ========================================================
-``Space``            Follow on / off (↑ pauses: ``‖ paused · 23 new ↓``)
+``Space``            Live on / off: ``live`` sticks to the newest line; ↑
+                     or a click above it stops that (recording goes on):
+                     ``scrolled back · 23 new below · End = live`` in the
+                     caption title. The Files and Network lenses follow
+                     the same way
 ``End`` / ``Home``   Newest + follow / oldest (at the top: load older lines)
+``t``                Type bar: ←/→, ``Space`` hides / shows a type or picks
+                     an app
+``z``                Fold / unfold the section around the cursor
 ``/``                Filter: ``src:files,label`` ``-src:clock``
                      ``kind:modify`` ``actor:user`` ``phase:replay``
                      ``run:<id>`` ``world:3`` ``pkg:x`` ``level:warn`` and
@@ -497,7 +552,7 @@ Key (Timeline lens)  Action
                      as chips with the count; ``Esc`` clears it
 ``N``                Show / hide clock samples, counts, reconnects
 ``Enter``            Inspector: *Line* (envelope, data, follow-ups, enclosing
-                     labels), *JSON*, *Ref* (the referenced line, file with
+                     sections), *JSON*, *Ref* (the referenced line, file with
                      sha256 check, diff, run), *Chain* (hash, previous hash,
                      a one-line verify)
 ``J``                Jump to the source: a pulled file (Files, Versions
@@ -510,13 +565,14 @@ Key (Timeline lens)  Action
 In REVIEW scope the lens shows the reviewed run's lines (an implicit
 ``run:<id>`` chip) plus the separators inside its time window.
 
-**Labels** (any lens): ``#`` starts a top-level label and ends every open
-one; ``+`` starts a sub-label inside the open label (or a sibling of an open
-sub-label; with nothing open it starts a top-level label); ``-`` ends the
-innermost label; ``B`` drops a point. ``#``, ``+`` and ``B`` take their time
-when the key is pressed and ask for an optional name; ``Esc`` writes nothing.
-Labels survive snapshot loads and are ended when Sandroid quits or the device
-changes.
+**Sections and notes** (any lens; the timeline's labels): ``#`` starts a
+Section and ends every open one; ``+`` starts a Sub-section inside the open
+section (or a sibling of an open sub-section; with nothing open it starts a
+section); ``-`` ends the innermost section (End section); ``B`` drops a Note.
+``#``, ``+`` and ``B`` take their time when the key is pressed; ``#`` and
+``+`` ask for an optional name, ``B`` for the note's text, which it needs (an
+empty ``Enter`` keeps asking); ``Esc`` writes nothing. Sections survive
+snapshot loads and are ended when Sandroid quits or the device changes.
 
 **Masking**: lines marked sensitive (typed text, passwords) are shown
 masked in the lens, exports and reports while ``timeline.mask_sensitive`` is
@@ -557,11 +613,18 @@ Press ``?`` for the authoritative, up-to-date list.
 AI Chat (EXPERIMENTAL)
 ----------------------
 
-``Ctrl+Y`` opens a chat in the right-hand slot, backed by any OpenAI-compatible chat-completions
-endpoint. The assistant can query the device and drive ~76 Sandroid tools
+``Ctrl+Y`` opens a chat docked under the lens (``Ctrl+Y`` again focuses it,
+then closes it; ``Esc`` goes back to the lens), backed by any OpenAI-compatible
+chat-completions endpoint. ``Shift+Up`` / ``Shift+Down`` step its size through
+30%, 50%, 70% and max; dragging its top border resizes it and a double-click
+there toggles max. The size is remembered in ``tui.chat_dock``. The assistant can query the device and drive ~80 Sandroid tools
 (app lifecycle, flows, certificates, file transfer, monitor, record/replay),
-spawn background subtasks, and use tools from configured MCP servers. Each
-state-changing tool call asks for approval (once / always / never).
+start ``researcher`` / ``operator`` subagents (cards in the chat, the agents
+bar opens their transcripts), and use tools from configured MCP servers. Each
+state-changing tool call asks for approval (Yes / Yes, don't ask again / No
+with a note). ``Ctrl+L`` starts a new thread, ``Ctrl+X`` stops a reply and its
+subagents, and ``/`` lists the slash commands (``/threads``, ``/compact``,
+``/context``, ``/permissions``, ``/agents``, ``/doctor``).
 
 .. warning::
 

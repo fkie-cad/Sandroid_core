@@ -325,7 +325,8 @@ async def test_option_selected_in_active_lens_opens_inspector(monkeypatch) -> No
         assert ms.inspector_content.title == "a run"
 
 
-async def test_chat_and_inspector_share_the_side_slot() -> None:
+async def test_chat_docks_under_the_lens_beside_the_inspector() -> None:
+    """The chat docks under the lens; the Inspector keeps the right side."""
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         await boot(app, pilot)
@@ -335,22 +336,28 @@ async def test_chat_and_inspector_share_the_side_slot() -> None:
         await pilot.press("ctrl+y")
         await settle(pilot)
         assert ms.chat_is_open
-        assert not ms.inspector_is_open
+        assert ms.inspector_is_open
         assert is_shown(ms.query_one("#chat-dock"))
-        assert not is_shown(ms.query_one("#inspector"))
+        assert is_shown(ms.query_one("#inspector"))
+        assert ms.query_one("#chat-dock").parent.id == "left-col"
         ms.open_inspector(_content(title="back"))
         await settle(pilot)
         assert ms.inspector_is_open
-        assert not ms.chat_is_open
-        await pilot.press("ctrl+y")
-        await settle(pilot)
-        # Esc closes the chat even with the chat input focused.
+        assert ms.chat_is_open
         assert app.focused is not None
         assert app.focused.id == "chat-input"
+        # Esc in the chat goes to the lens first; the chat stays open.
+        await pilot.press("escape")
+        await settle(pilot)
+        assert ms.chat_is_open
+        assert ms.lens_widget() in app.focused.ancestors_with_self
         await pilot.press("escape")
         await settle(pilot)
         assert ms.side_slot_mode is None
-        assert ms.lens_widget() in app.focused.ancestors_with_self
+        assert ms.chat_is_open
+        await pilot.press("escape")
+        await settle(pilot)
+        assert not ms.chat_is_open
 
 
 async def test_esc_in_watchlist_input_still_leaves_the_input() -> None:
@@ -557,7 +564,9 @@ async def test_layout_degrades_gracefully(width) -> None:
         ms.open_inspector(_content())
         await settle(pilot)
         assert ms.query_one("#lens-host").size.width >= 40
-        assert ms.query_one("#side-slot").size.width >= 56 or width >= 140
+        slot = ms.query_one("#side-slot").size.width
+        # Below 120 columns (-narrow) the Inspector takes 45%, else 40% / 56+.
+        assert slot == (45 if width < 120 else max(56, round(width * 0.4)))
 
 
 def test_filter_keys_are_consistent_across_lenses() -> None:
@@ -992,17 +1001,20 @@ async def test_chat_banner_wraps_to_the_panel_width() -> None:
     """M5: the privacy warning was wrapped at the hidden panel's width and
     clipped at the visible panel's edge.
     """
-    from textual.widgets import RichLog
-
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         await boot(app, pilot)
         await pilot.press("ctrl+y")
         await settle(pilot)
-        log = app.screen.query_one("#chat-log", RichLog)
+        log = app.screen.query_one("#chat-log")
+        banner = app.screen.query_one(".chat-banner")
         width = log.scrollable_content_region.width
-        assert log.lines
-        assert max(line.cell_length for line in log.lines) <= width
+        assert 0 < banner.size.width <= width
+        # Wrapped, not clipped: every line of the notice fits the width.
+        lines = banner.render().plain.splitlines()
+        assert lines
+        assert banner.size.height >= len(lines)
+        assert banner.content_region.right <= log.scrollable_content_region.right
 
 
 async def test_ui_callbacks_from_threads_can_start_timers() -> None:

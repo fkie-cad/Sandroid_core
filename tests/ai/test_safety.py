@@ -12,7 +12,7 @@ import pytest
 import requests
 
 from sandroid.ai import safety
-from sandroid.ai.client import OpenAIClient
+from sandroid.ai.client import OpenAICompatClient
 from sandroid.ai.errors import AIClientError
 from sandroid.ai.safety import (
     API_KEY_ENV_VAR,
@@ -149,20 +149,15 @@ def test_build_client_refuses_unconfigured_and_remote():
         build_client(AISettings())
     with pytest.raises(AIClientError, match="allow_remote"):
         build_client(get_ai_settings(_ai(base_url=REMOTE)))
-    assert isinstance(build_client(get_ai_settings(_ai())), OpenAIClient)
+    assert isinstance(build_client(get_ai_settings(_ai())), OpenAICompatClient)
 
 
-def test_subtask_default_client_factory_applies_policy(monkeypatch):
-    from sandroid.ai import subtasks
-    from sandroid.core.toolbox import Toolbox
+def test_session_client_applies_policy(monkeypatch):
+    from sandroid.ai.session import build_session_client
 
-    monkeypatch.setattr(
-        Toolbox, "config", SimpleNamespace(ai=_ai(base_url=REMOTE)), raising=False
-    )
     with pytest.raises(AIClientError):
-        subtasks._default_client_factory()
-    monkeypatch.setattr(Toolbox, "config", SimpleNamespace(ai=_ai()), raising=False)
-    assert isinstance(subtasks._default_client_factory(), OpenAIClient)
+        build_session_client(_ai(base_url=REMOTE))
+    assert isinstance(build_session_client(_ai()), OpenAICompatClient)
 
 
 # -- egress notice -------------------------------------------------------------
@@ -266,11 +261,13 @@ def test_client_error_message_never_contains_key(monkeypatch):
         )
 
     monkeypatch.setattr(requests, "post", boom)
-    client = OpenAIClient(LOCAL, KEY, "m")
-    events = list(client.chat([{"role": "user", "content": "hi"}]))
-    assert events[-1]["type"] == "error"
-    assert KEY not in events[-1]["message"]
-    assert "AI backend request failed" in events[-1]["message"]
+    from sandroid.ai.client import ClientOptions
+
+    client = OpenAICompatClient(LOCAL, KEY, "m", options=ClientOptions(retry_max=0))
+    chunks = list(client.stream([{"role": "user", "content": "hi"}]))
+    assert chunks[-1].kind == "error"
+    assert KEY not in chunks[-1].error.message
+    assert "AI backend request failed" in chunks[-1].error.message
     assert KEY not in repr(client)
 
 
@@ -331,13 +328,13 @@ _STATE_CHANGING_TOOLS = {
     "set_app_proxy_quic_blocking",
     "set_device_proxy",
     "set_spotlight_app",
-    "spawn_privileged_subtask",
     "start_device_recording",
     "start_file_monitor",
     "start_frida_server",
     "start_mitmproxy",
     "start_replay",
     "start_screen_recording",
+    "start_spotlight_app",
     "start_ssl_unpin",
     "stop_device_recording",
     "stop_file_monitor",
@@ -404,23 +401,23 @@ def test_destructive_tools_cannot_be_remembered():
         "uninstall_apk",
         "inject_ca_certificate",
         "push_path",
-        "spawn_privileged_subtask",
     ):
         assert registry.get_spec(name).can_remember_choice is False, name
 
 
-def test_ask_without_ui_is_refused():
+def test_ask_without_ui_is_refused(empty_permission_store):
     """A state-changing call with no approval UI must never run."""
-    import json
-
     import sandroid.ai
-    from sandroid.ai.loop import _dispatch_one
+    from sandroid.ai.loop import RunContext, ToolExecutor
+    from sandroid.ai.results import ResultStore, TurnBudget
     from sandroid.ai.tools.registry import get_tool_registry
 
-    out = json.loads(
-        _dispatch_one(get_tool_registry(), "uninstall_apk", {"package": "x.y"})
+    ctx = RunContext(approval_mode="deny", store=ResultStore(None))
+    ctx.exposed = frozenset(get_tool_registry().names())
+    outcome = ToolExecutor(ctx).execute(
+        "c1", "uninstall_apk", '{"package_name": "x.y"}', budget=TurnBudget()
     )
-    assert "needs confirmation" in out["error"]
+    assert outcome.status == "denied"
 
 
 # -- experimental labels ---------------------------------------------------------

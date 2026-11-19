@@ -1,20 +1,22 @@
 """Unit tests for sandroid.tui.widgets.tool_permission_prompt.
 
-Uses Textual's own headless harness (``App.run_test()``) to mount the
-widget standalone, mirroring the ``_ChatPanelHarness`` pattern already
-established in ``tests/tui/test_chat_panel.py`` -- there is no bare
-Widget-only test convention elsewhere in this repo yet, but ``run_test()``
-is the standard, documented way to drive a widget in a test.
+The card is mounted standalone in a bare Textual ``App`` (``run_test()``).
+Keyboard tests pass ``input_grace_s=0`` so keys act immediately; one test
+checks the grace period itself.
 """
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Button, Label, Static
+from textual.widgets import Input, Label, Static
 
+from sandroid.ai.tool_permissions import ApprovalRequest, Decision
 from sandroid.ai.tools.registry import RiskTier, ToolSpec
 from sandroid.tui.widgets.tool_permission_prompt import (
+    _DESCRIPTION_MAX_LEN,
+    ApprovalOption,
     ToolPermissionPrompt,
     _format_args_preview,
+    _truncate,
 )
 
 
@@ -31,146 +33,346 @@ def _make_spec(name="install_apk", can_remember_choice=True, **overrides):
     return ToolSpec(**defaults)
 
 
-class _PromptHarness(App):
-    """Minimal host app: just enough DOM for the prompt to mount standalone."""
+class _Harness(App):
+    """Minimal host app: just enough DOM for the card to mount standalone."""
 
-    def __init__(self, spec, arguments, on_choice):
+    def __init__(self, *args, **kwargs):
         super().__init__()
-        self._spec = spec
-        self._arguments = arguments
-        self._on_choice = on_choice
+        self._args = args
+        self._kwargs = kwargs
 
     def compose(self) -> ComposeResult:
-        yield ToolPermissionPrompt(self._spec, self._arguments, self._on_choice)
+        yield ToolPermissionPrompt(*self._args, **self._kwargs)
 
 
-# -- button rendering ---------------------------------------------------
+def _new(decisions, **kw):
+    """A card on the new contract (on_decision), keys active at once."""
+    kw.setdefault("input_grace_s", 0)
+    spec = kw.pop("spec", _make_spec())
+    return _Harness(spec, kw.pop("arguments", {}), on_decision=decisions.append, **kw)
+
+
+def _ids(app):
+    return [b.id for b in app.query(ApprovalOption)]
+
+
+def _label(app, button_id):
+    return app.query_one(f"#{button_id}", ApprovalOption).label
+
+
+def _highlighted(app):
+    return [o.id for o in app.query(ApprovalOption) if o.has_class("-highlighted")]
+
+
+# -- rendering -------------------------------------------------------------
 
 
 @pytest.mark.smoke
-async def test_renders_three_buttons_when_can_remember_choice_true():
-    spec = _make_spec(can_remember_choice=True)
-    app = _PromptHarness(spec, {"apk_path": "/tmp/app.apk"}, lambda choice: None)
+async def test_three_options_with_rule_description_and_agent_label():
+    app = _new([], agent_label="operator a-op-3f9c")
     async with app.run_test() as pilot:
         await pilot.pause()
-        ids = {b.id for b in app.query(Button)}
-        assert ids == {"btn-once", "btn-always", "btn-never"}
+        assert _ids(app) == ["btn-once", "btn-always", "btn-never"]
+        assert _label(app, "btn-once") == "1  Yes"
+        assert _label(app, "btn-always") == "2  Yes, don't ask again for Install APK"
+        assert _label(app, "btn-never") == "3  No, and tell it what to do instead…"
+        title = str(app.query_one(".tool-permission-title", Label).render())
+        assert title == "⚠ operator a-op-3f9c wants to run Install APK"
+        tier = str(app.query_one(".tool-permission-tier", Label).render())
+        assert tier == "reversible"
+        assert app.query_one(ToolPermissionPrompt).has_focus
 
 
 @pytest.mark.smoke
-async def test_renders_two_buttons_when_can_remember_choice_false():
-    spec = _make_spec(can_remember_choice=False)
-    app = _PromptHarness(spec, {}, lambda choice: None)
+async def test_argument_dependent_tool_without_key_has_no_remember_option():
+    app = _new([], spec=_make_spec(can_remember_choice=False))
     async with app.run_test() as pilot:
         await pilot.pause()
-        ids = {b.id for b in app.query(Button)}
-        assert ids == {"btn-once", "btn-never"}
+        assert _ids(app) == ["btn-once", "btn-never"]
+        assert _label(app, "btn-never").startswith("2  No")
 
 
 @pytest.mark.smoke
-async def test_never_button_label_is_decline_when_cannot_remember_choice():
-    spec = _make_spec(can_remember_choice=False)
-    app = _PromptHarness(spec, {}, lambda choice: None)
+async def test_argument_dependent_tool_with_key_names_the_argument():
+    app = _new(
+        [],
+        spec=_make_spec(name="kill_process", can_remember_choice=False),
+        arguments={"package": "com.example.app"},
+        permission_key="package",
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
-        never_button = app.query_one("#btn-never", Button)
-        assert str(never_button.label) == "Decline"
+        assert _label(app, "btn-always") == (
+            "2  Yes, don't ask again for Kill Process with package = com.example.app"
+        )
+        assert app.query_one(ToolPermissionPrompt).suggested_rule == (
+            "kill_process(package=com.example.app)"
+        )
 
 
 @pytest.mark.smoke
-async def test_never_button_label_is_never_when_can_remember_choice():
-    spec = _make_spec(can_remember_choice=True)
-    app = _PromptHarness(spec, {}, lambda choice: None)
+async def test_built_from_a_broker_request():
+    request = ApprovalRequest(
+        request_id="ap-1",
+        agent_id="a-op-1",
+        agent_label="operator a-op-1",
+        tool="clear_app_data",
+        args={"package": "com.x"},
+        risk=RiskTier.CONSEQUENTIAL,
+        suggested_rule="clear_app_data(package=com.x)",
+        description="Wipe the app's data.",
+    )
+    decisions = []
+    app = _Harness(request=request, on_decision=decisions.append, input_grace_s=0)
     async with app.run_test() as pilot:
         await pilot.pause()
-        never_button = app.query_one("#btn-never", Button)
-        assert str(never_button.label) == "Never"
+        title = str(app.query_one(".tool-permission-title", Label).render())
+        assert title == "⚠ operator a-op-1 wants to run Clear App Data"
+        assert app.query_one(".tool-permission-tier").has_class("-consequential")
+        message = str(app.query_one(".tool-permission-message", Label).render())
+        assert "Wipe the app's data." in message
+        assert "com.x" in message
+        await pilot.press("2")
+        assert decisions == [
+            Decision("always", remembered_rule="clear_app_data(package=com.x)")
+        ]
 
 
-# -- button presses call on_choice with the right string ----------------
+# -- keys ------------------------------------------------------------------
 
 
 @pytest.mark.smoke
-async def test_run_once_button_calls_on_choice_with_once():
-    choices = []
-    spec = _make_spec(can_remember_choice=True)
-    app = _PromptHarness(spec, {}, choices.append)
+@pytest.mark.parametrize(("key", "choice"), [("1", "once"), ("2", "always")])
+async def test_number_keys(key, choice):
+    decisions = []
+    app = _new(decisions)
     async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press(key)
+        assert [d.choice for d in decisions] == [choice]
+        await pilot.press("1")  # answered once only
+        assert len(decisions) == 1
+
+
+@pytest.mark.smoke
+async def test_arrows_and_enter():
+    decisions = []
+    app = _new(decisions)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("down", "down", "down", "up", "enter")
+        assert decisions == [Decision("always", remembered_rule="install_apk")]
+
+
+@pytest.mark.smoke
+async def test_escape_is_no():
+    decisions = []
+    app = _new(decisions)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("escape")
+        assert decisions == [Decision("no")]
+
+
+@pytest.mark.smoke
+async def test_option_three_reveals_note_and_enter_submits_it():
+    decisions = []
+    app = _new(decisions)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        note = app.query_one("#tool-permission-note", Input)
+        assert not note.display
+        await pilot.press("3")
+        await pilot.pause()
+        assert decisions == []
+        assert note.display
+        assert note.has_focus
+        await pilot.press(*"use 1 adb")
+        await pilot.press("enter")
+        assert decisions == [Decision("no", note="use 1 adb")]
+
+
+@pytest.mark.smoke
+async def test_empty_note_is_plain_no_and_escape_keeps_typed_note():
+    decisions = []
+    app = _new(decisions)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("3", "enter")
+        assert decisions == [Decision("no")]
+    decisions.clear()
+    app = _new(decisions)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("3", "x", "escape")
+        assert decisions == [Decision("no", note="x")]
+
+
+@pytest.mark.smoke
+async def test_keys_are_ignored_during_grace_period_but_clicks_work():
+    decisions = []
+    app = _new(decisions, input_grace_s=60)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("1", "enter")
+        assert decisions == []
         await pilot.click("#btn-once")
-        assert choices == ["once"]
+        assert decisions == [Decision("once")]
+
+
+def test_action_cancel_is_sync():
+    import inspect
+
+    assert not inspect.iscoroutinefunction(ToolPermissionPrompt.action_cancel)
+
+
+# -- look: one selected option, distinct note state ----------------------------
 
 
 @pytest.mark.smoke
-async def test_allow_always_button_calls_on_choice_with_always():
-    choices = []
-    spec = _make_spec(can_remember_choice=True)
-    app = _PromptHarness(spec, {}, choices.append)
-    async with app.run_test() as pilot:
-        await pilot.click("#btn-always")
-        assert choices == ["always"]
-
-
-@pytest.mark.smoke
-async def test_never_button_calls_on_choice_with_never():
-    choices = []
-    spec = _make_spec(can_remember_choice=True)
-    app = _PromptHarness(spec, {}, choices.append)
-    async with app.run_test() as pilot:
-        await pilot.click("#btn-never")
-        assert choices == ["never"]
-
-
-@pytest.mark.smoke
-async def test_decline_button_calls_on_choice_with_never_when_cannot_remember():
-    """Even relabeled "Decline", the button's id/choice string stays "never"
-    -- only the label changes for can_remember_choice=False tools.
-    """
-    choices = []
-    spec = _make_spec(can_remember_choice=False)
-    app = _PromptHarness(spec, {}, choices.append)
-    async with app.run_test() as pilot:
-        await pilot.click("#btn-never")
-        assert choices == ["never"]
-
-
-@pytest.mark.smoke
-async def test_allow_always_button_absent_so_cannot_be_clicked():
-    """Regression guard: with can_remember_choice=False there must be no
-    #btn-always in the DOM at all (not just visually hidden).
-    """
-    spec = _make_spec(can_remember_choice=False)
-    app = _PromptHarness(spec, {}, lambda choice: None)
+async def test_only_the_selected_option_is_highlighted_and_marked():
+    app = _new([])
     async with app.run_test() as pilot:
         await pilot.pause()
-        with pytest.raises(Exception):
-            app.query_one("#btn-always", Button)
+        assert _highlighted(app) == ["btn-once"]
+        options = list(app.query(ApprovalOption))
+        backgrounds = [o.styles.background for o in options]
+        assert backgrounds[0] != backgrounds[1]
+        assert backgrounds[1] == backgrounds[2]  # the others stay plain
+        assert str(options[0].render()).startswith("› ")
+        assert str(options[1].render()).startswith("  ")
+        await pilot.press("down")
+        assert _highlighted(app) == ["btn-always"]
+        assert str(options[1].render()).startswith("› ")
 
 
-# -- args preview formatting (plan's exact inline spec) ------------------
+@pytest.mark.smoke
+async def test_note_state_is_visually_distinct():
+    app = _new([])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        card = app.query_one(ToolPermissionPrompt)
+        hint = app.query_one(".tool-permission-hint", Label)
+        before = str(hint.render())
+        await pilot.press("3")
+        await pilot.pause()
+        assert card.noting
+        assert _highlighted(app) == ["btn-never"]
+        assert str(hint.render()) != before
+        assert "note" in str(hint.render())
+
+
+@pytest.mark.smoke
+async def test_stray_letters_are_swallowed_while_the_card_has_focus():
+    """A word typed on (meant for the chat input) never reaches App hotkeys."""
+    fired = []
+
+    class _App(_Harness):
+        BINDINGS = [("s", "hotkey", "Hotkey")]
+
+        def action_hotkey(self):
+            fired.append("s")
+
+    decisions = []
+    app = _App(_make_spec(), {}, on_decision=decisions.append, input_grace_s=0)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.query_one(ToolPermissionPrompt).has_focus
+        await pilot.press("s", "x")
+        assert fired == []
+        assert decisions == []
+        await pilot.press("1")
+        assert [d.choice for d in decisions] == ["once"]
+
+
+@pytest.mark.smoke
+async def test_does_not_take_focus_from_outside_its_parent():
+    from textual.containers import Vertical
+
+    class _App(App):
+        def compose(self):
+            yield Input(id="elsewhere")
+            yield Vertical(id="panel")
+
+    app = _App()
+    async with app.run_test() as pilot:
+        app.query_one("#elsewhere", Input).focus()
+        await pilot.pause()
+        card = ToolPermissionPrompt(_make_spec(), {}, input_grace_s=0)
+        await app.query_one("#panel").mount(card)
+        await pilot.pause()
+        await pilot.pause()
+        assert app.query_one("#elsewhere", Input).has_focus
+        assert not card.may_take_focus()
+        await pilot.press("enter")
+        assert not card.decided
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ls [Black on black]; rm -rf /data/data/com.victim",
+        "[A-Z]{3}",
+        "[/][#000000 on #000000]hidden[/]",
+        "[bold]x[/bold] [x] [/]",
+    ],
+)
+async def test_model_text_is_never_parsed_as_markup(value):
+    """``rich.markup.escape`` does not match Textual 8's parser
+    (escape_probe2): ``[Black on black]`` hid text, ``[A-Z]`` vanished.
+    """
+    request = ApprovalRequest(
+        request_id="ap-9",
+        agent_id="a-op-1",
+        agent_label=f"agent {value}",
+        tool="run_shell",
+        args={"command": value},
+        risk=RiskTier.CONSEQUENTIAL,
+        suggested_rule=None,
+        description=f"Runs {value}.",
+    )
+    app = _Harness(request=request, on_decision=lambda d: None, input_grace_s=0)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        message = app.query_one(".tool-permission-message", Label).render()
+        title = app.query_one(".tool-permission-title", Label).render()
+        assert value in str(title)
+        assert f"Runs {value}." in str(message)
+        # No span hides anything (no style other than the card's own).
+        for span in message.spans:
+            assert "on #000000" not in str(span.style)
+
+
+def test_needs_spec_or_request():
+    with pytest.raises(ValueError):
+        ToolPermissionPrompt()
+
+
+# -- args preview / helpers --------------------------------------------------------
+
+
+def test_exported_helpers():
+    assert _DESCRIPTION_MAX_LEN == 150
+    assert _truncate("abcdef", 3) == "abc…"
+    assert _truncate("ab", 3) == "ab"
 
 
 def test_args_preview_is_sorted_json():
-    preview = _format_args_preview({"b": 2, "a": 1})
-    assert preview == '{"a": 1, "b": 2}'
+    assert _format_args_preview({"b": 2, "a": 1}) == '{"a": 1, "b": 2}'
 
 
 def test_args_preview_truncates_long_arguments_with_ellipsis():
-    long_value = "x" * 400
-    preview = _format_args_preview({"payload": long_value})
-
-    assert len(preview) == 301  # 300 chars + the trailing ellipsis char
+    preview = _format_args_preview({"payload": "x" * 400})
+    assert len(preview) == 301
     assert preview.endswith("…")
-
-
-# -- full arguments / markup safety ---------------------------------------
 
 
 @pytest.mark.smoke
 async def test_long_arguments_are_flagged_and_shown_in_full():
-    """A payload past the 300-char preview must not be hidden from the user."""
     tail = "; touch /tmp/PWNED #"
     arguments = {"path": "/data/" + "a" * 400 + tail}
-    app = _PromptHarness(_make_spec(), arguments, lambda choice: None)
+    app = _Harness(_make_spec(), arguments, on_decision=lambda d: None)
     async with app.run_test() as pilot:
         await pilot.pause()
         message = str(app.query_one(".tool-permission-message", Label).render())
@@ -180,14 +382,20 @@ async def test_long_arguments_are_flagged_and_shown_in_full():
 
 
 @pytest.mark.smoke
-async def test_short_arguments_have_no_full_args_panel_and_markup_is_escaped():
+async def test_markup_in_arguments_and_rule_is_escaped():
     arguments = {"name": "[/][#000000 on #000000]hidden[/]"}
-    app = _PromptHarness(_make_spec(), arguments, lambda choice: None)
+    app = _new(
+        [],
+        spec=_make_spec(name="kill_process", can_remember_choice=False),
+        arguments={**arguments, "package": "[b]x[/b]"},
+        permission_key="package",
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         message = str(app.query_one(".tool-permission-message", Label).render())
-        assert "[#000000 on #000000]hidden" in message
+        assert "[/][#000000 on #000000]hidden[/]" in message
         assert not app.query("#tool-permission-args")
+        assert "[b]x[/b]" in _label(app, "btn-always")
 
 
 @pytest.mark.smoke
@@ -199,7 +407,7 @@ async def test_omitted_package_shows_resolved_spotlight_app(monkeypatch):
         def get_effective_package():
             return "com.example.target"
 
-    monkeypatch.setattr(services, "get_spotlight_service", lambda: _Spot())
+    monkeypatch.setattr(services, "get_spotlight_service", _Spot)
     spec = _make_spec(
         name="enable_app_proxy",
         parameters={
@@ -208,7 +416,7 @@ async def test_omitted_package_shows_resolved_spotlight_app(monkeypatch):
             "required": [],
         },
     )
-    app = _PromptHarness(spec, {}, lambda choice: None)
+    app = _Harness(spec, {}, on_decision=lambda d: None)
     async with app.run_test() as pilot:
         await pilot.pause()
         message = str(app.query_one(".tool-permission-message", Label).render())

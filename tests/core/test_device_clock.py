@@ -883,14 +883,14 @@ def test_header_always_shows_the_device_time(device, target):
 
     header = ShellHeader()
     now = device.host
-    assert header.update_device_clock(now) == "dev ?"  # no sample yet
+    assert header.update_device_clock(now) == "dev time unknown"  # no sample
     device_clock.measure(SERIAL)
     when = datetime.fromtimestamp(now - 4500.0)
-    assert header.update_device_clock(now) == f"dev {when:%H:%M:%S} −75 min ⚠"
+    assert header.update_device_clock(now) == f"dev {when:%H:%M:%S} 75 min behind"
     device.behind = 0.4
     device_clock.measure(SERIAL)
     when = datetime.fromtimestamp(now - device_clock.last_sample(SERIAL)["off_wall"])
-    assert header.update_device_clock(now) == f"dev {when:%H:%M:%S} ✓"
+    assert header.update_device_clock(now) == f"dev {when:%H:%M:%S} in sync"
 
 
 def test_header_hides_the_device_time_without_a_target(device, monkeypatch):
@@ -905,13 +905,13 @@ def test_header_hides_the_stale_offset_after_a_world_change(device, target):
 
     header = ShellHeader()
     device_clock.measure(SERIAL)
-    assert "−75 min" in header.update_device_clock(device.host)
+    assert "75 min behind" in header.update_device_clock(device.host)
     device.host += 1
     device_clock.begin_epoch(SERIAL)  # a snapshot load: no fresh sample yet
-    assert header.update_device_clock(device.host) == "dev ?"
+    assert header.update_device_clock(device.host) == "dev time unknown"
     device.behind = 9000.0
     device_clock.measure(SERIAL)
-    assert "−150 min" in header.update_device_clock(device.host)
+    assert "150 min behind" in header.update_device_clock(device.host)
 
 
 def test_the_timeline_writer_samples_the_clock_every_clock_every_s(
@@ -960,7 +960,7 @@ async def test_header_device_clock_is_dim_until_off_then_amber(device, target):
         label = header.query_one("#device-clock", Static)
         header.update_device_clock()
         await pilot.pause()
-        assert label.has_class("-unknown")  # no sample yet: "dev ?", dimmed
+        assert label.has_class("-unknown")  # no sample yet: "dev time unknown", dimmed
         assert label.styles.display == "block"
         assert label.styles.color.hex.lower() == "#5b6479"
         device_clock.measure(SERIAL)
@@ -970,7 +970,7 @@ async def test_header_device_clock_is_dim_until_off_then_amber(device, target):
         assert not label.has_class("-unknown")
         assert label.styles.display == "block"
         assert label.styles.color.hex.lower() == "#fbbf24"
-        assert "−75 min ⚠" in str(label.render())
+        assert "75 min behind" in str(label.render())
         device.behind = 0.2
         device_clock.measure(SERIAL)
         header.update_device_clock()
@@ -978,7 +978,7 @@ async def test_header_device_clock_is_dim_until_off_then_amber(device, target):
         assert label.has_class("-sync")
         assert not label.has_class("-off")
         assert label.styles.color.hex.lower() == "#5b6479"
-        assert str(label.render()).endswith("✓")
+        assert str(label.render()).endswith("in sync")
 
 
 def test_a_sample_measured_before_a_world_change_stays_in_the_old_world(

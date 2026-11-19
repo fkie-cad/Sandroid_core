@@ -14,7 +14,8 @@ started/connected.
 **Safety default:** every bridged tool is registered as
 :attr:`~sandroid.ai.tools.registry.RiskTier.CONSEQUENTIAL`, so the permission
 gate asks the analyst before each call (until they choose "allow always" for
-that tool). Sandroid cannot know what an external server's tool does -- its
+that tool). Bridged tools form the toolset ``mcp:<server>``: never core,
+found via ``tool_search`` and called via ``call_tool``. Sandroid cannot know what an external server's tool does -- its
 self-description is untrusted -- so it must never auto-run like a verified
 read-only native tool.
 """
@@ -44,13 +45,20 @@ def bridge_mcp_tools() -> None:
     manager = get_mcp_client_manager()
     registry = get_tool_registry()
     for server_name, tools in manager.list_all_tools().items():
+        current = set()
         for tool in tools:
-            _register_one(registry, manager, server_name, tool)
+            current.add(_register_one(registry, manager, server_name, tool))
+        # A re-bridge (e.g. after list_changed) drops tools the server no
+        # longer offers, so tool_search never returns a vanished tool.
+        prefix = f"mcp:{server_name}:"
+        for name in registry.names():
+            if name.startswith(prefix) and name not in current:
+                registry.unregister(name)
 
 
 def _register_one(
     registry: ToolRegistry, manager: MCPClientManager, server_name: str, tool
-) -> None:
+) -> str:
     qualified_name = f"mcp:{server_name}:{tool.name}"
 
     def dispatch(**arguments):
@@ -68,8 +76,12 @@ def _register_one(
             # Unknown external code: always behind the approval gate.
             risk=RiskTier.CONSEQUENTIAL,
             category="mcp",
+            # Searchable as its own toolset; never in the fixed tools array.
+            toolset=f"mcp:{server_name}",
+            core=False,
         )
     )
+    return qualified_name
 
 
 def _unwrap_call_tool_result(qualified_name: str, result):

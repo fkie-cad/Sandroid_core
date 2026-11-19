@@ -74,7 +74,7 @@ _MONITOR_VISIBILITY_LABELS = {
 # ``tui.monitor_event_visibility``; per-source switches use ``__`` after the
 # field name so ``_id_to_key`` never makes a 3-part key of them.
 _TIMELINE_SOURCES_PREFIX = "setting-timeline--sources__"
-_TIMELINE_SOURCE_ORDER = ("files", "monitor", "net", "input", "screen", "shot")
+_TIMELINE_SOURCE_ORDER = ("files", "monitor", "net", "input", "screen", "shot", "ai")
 _TIMELINE_LIST_IDS = {
     "setting-timeline--kinds_off": "timeline.kinds_off",
     "setting-timeline--count_only": "timeline.count_only",

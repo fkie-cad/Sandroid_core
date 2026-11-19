@@ -14,15 +14,19 @@ Data flow
   one ``stat``. A ``[FLOW]`` line from mitmweb's stdout triggers an early
   poll so new rows show up promptly.
 * The in-memory model is bounded (``MAX_ROWS``); the table appends new rows
-  at the bottom and only follows them while the cursor sits on the last row
-  and no flow is open in the Inspector -- a user who scrolled or selected a
-  row is never yanked.
-* ``[TLS_FAIL]`` lines become ✗ rows at once; the addon also writes them to
+  at the bottom and follows them while *live* (``follow.py``, the same rules
+  as the Timeline and Files lenses): ↑, PgUp, Home, a wheel up or a click on
+  a row above the newest one stop following (capturing goes on), ``End``
+  resumes (an open flow Inspector then follows the newest flow), so a user
+  who scrolled or selected a row is never yanked. The caption title says
+  ``live`` or ``scrolled back · 12 new below · End = live``.
+* ``[TLS_FAIL]`` lines become "TLS failed" rows at once; the addon also writes them to
   ``flows.jsonl`` (``kind: "tls"``, no detail file), and the poll pairs that
   record with the stdout row instead of adding it twice. While the lens is
   not in view they count into the lens-bar badge (``⚑N``) until the lens is
   activated again.
-  Errored flows come from ``flows.jsonl`` (their ``error`` field) as ✗ rows.
+  Errored flows come from ``flows.jsonl`` (their ``error`` field) as
+  "error" rows.
 
 Filters: ``/`` text (host, path, app, recipient, status; Esc clears it),
 ``T`` (target) spotlight app only, ``N`` show OS noise (connectivity checks,
@@ -43,7 +47,8 @@ second).
 Proxy & friTap plumbing: :class:`MitmproxyPanel` and :class:`FriTapPanel` are
 mounted hidden inside this lens as controllers; this lens binds their keys
 (``Ctrl+D`` device proxy, ``Ctrl+N`` CA, ``Ctrl+P`` unpin, ...) and shows
-their state in the caption (``mitm ● :<port> · device ✓ · CA ✓ · friTap ●``,
+their state in the caption (``Mitmproxy on :<port> · device routed · CA
+installed · friTap on``,
 ``<port>`` = the configured ``mitmproxy.proxy_port``)
 and on the "Capture status" Inspector page (``I``; ``h`` opens its friTap
 tab). Their log lines go to the ActivityLog drawer (`` ` ``).
@@ -85,7 +90,9 @@ from textual.containers import Vertical
 from textual.widget import Widget
 from textual.widgets import DataTable, Input, Static
 
+from sandroid.tui.themes import lens_palette
 from sandroid.tui.utils.ui_thread import UiDispatcher, in_app_context
+from sandroid.tui.widgets.follow import Follow
 from sandroid.tui.widgets.fritap_panel import FriTapPanel
 from sandroid.tui.widgets.lens_shell import InspectorContent, is_shown
 from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
@@ -1073,17 +1080,58 @@ class FlowTable(ProfileTintMixin, DataTable):
     Rows in ``profile_keys`` (flows carrying identity-profile values) get a
     faint warn-coloured background (``_get_row_style``, Textual 8.2's row
     style hook; the cursor row keeps the cursor colour).
+
+    Moving up (↑, PgUp, Home, a wheel up, a click above the newest row) stops
+    following the newest flow; End resumes (``follow.py``).
     """
 
     BINDINGS = [
         Binding("home", "scroll_top", "First row", show=False),
-        Binding("end", "scroll_bottom", "Last row", show=False),
+        Binding("end", "scroll_bottom", "Newest row, live", show=False),
     ]
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         #: Row keys of flows that carry identity-profile values.
         self.profile_keys = set()
+
+    def _panel(self) -> NetworkPanel | None:
+        for node in self.ancestors:
+            if isinstance(node, NetworkPanel):
+                return node
+        return None
+
+    def _follow(self, live: bool) -> None:
+        panel = self._panel()
+        if panel is not None:
+            panel.set_following(live)
+
+    def action_cursor_up(self) -> None:
+        super().action_cursor_up()
+        self._follow(False)
+
+    def action_page_up(self) -> None:
+        super().action_page_up()
+        self._follow(False)
+
+    def action_scroll_top(self) -> None:
+        super().action_scroll_top()
+        self._follow(False)
+
+    def action_scroll_bottom(self) -> None:
+        super().action_scroll_bottom()
+        self._follow(True)
+
+    def on_click(self, event) -> None:
+        try:
+            row = event.style.meta.get("row")
+        except Exception:
+            row = None
+        if isinstance(row, int) and 0 <= row < self.row_count - 1:
+            self._follow(False)
+
+    def on_mouse_scroll_up(self, _event) -> None:
+        self._follow(False)
 
 
 class NetworkPanel(Widget):
@@ -1248,6 +1296,8 @@ class NetworkPanel(Widget):
         self._tags_cache: dict[str, list] = {}
         self._tags_rev: Any = None
         self._tags_owner: Any = None
+        #: Follow the newest flow (``follow.py``); live rows only.
+        self._follow = Follow()
 
     # -- compose / mount -------------------------------------------------
 
@@ -1503,8 +1553,11 @@ class NetworkPanel(Widget):
     def _add_live(self, rows: list[FlowRow]) -> None:
         self._live.extend(rows)
         if len(self._live) > self.MAX_ROWS + 200:
+            passing = sum(1 for row in rows if self._passes(row))
             self._live = self._live[-self.MAX_ROWS :]
             self._rebuild_if_live()
+            if not self.in_review:
+                self._follow.added(passing)
         elif not self.in_review:
             self._append_rows(rows)
         self._do_refresh_status()
@@ -1548,12 +1601,12 @@ class NetworkPanel(Widget):
         """What ``/`` matches: host, path, method, app, recipient, status.
 
         The status column's words are included, so ``/404``, ``/tls`` or
-        ``/✗`` (every failed row) work too.
+        ``/error`` (every errored flow) work too.
         """
         if row.kind == "tls":
-            status = f"✗ tls failed {row.reason}"
+            status = f"tls failed {row.reason}"
         elif row.error:
-            status = f"✗ {_short_error(row.error)} error"
+            status = f"error {_short_error(row.error)}"
         else:
             status = str(row.status) if row.status is not None else ""
         hay = f"{row.method} {row.host}{row.path} {row.app} {row.recipient[0]} {status}"
@@ -1594,7 +1647,7 @@ class NetworkPanel(Widget):
         who = 18 if avail >= 110 else (16 if avail >= 58 else 12)
         cols = [("time", "Time", 8), ("who", "Recipient", who)]
         cols += self._privacy_columns(avail)
-        cols += [("req", "Request", 0), ("status", "Status", 9), ("size", "Size", 10)]
+        cols += [("req", "Request", 0), ("status", "Status", 11), ("size", "Size", 10)]
         if avail < 76:
             cols = [c for c in cols if c[0] != "size"]
         if avail < 58:
@@ -1618,7 +1671,7 @@ class NetworkPanel(Widget):
             req.append("TLS ", style="#8f9bb3")
             host_w = req_w - 4 - (len(tag) + 1 if tag else 0)
             req.append(_ellipsize(row.host, host_w), style="#e5e9f0")
-            status = Text("✗ TLS", style="bold #fb7185")
+            status = Text("TLS failed", style=f"bold {lens_palette().bad}")
             size = Text("")
         else:
             if tag:
@@ -1630,7 +1683,9 @@ class NetworkPanel(Widget):
             else:
                 req = smart_request(row.method, row.host, row.path, req_w)
             if row.error:
-                status = Text(f"✗ {_short_error(row.error)}", style="#fb7185")
+                status = Text(
+                    f"error {_short_error(row.error)}", style=lens_palette().bad
+                )
             elif row.status is None:
                 status = Text("…", style="#5b6479")
             else:
@@ -1665,6 +1720,32 @@ class NetworkPanel(Widget):
         """True when the cursor sits on the last row (or there is none)."""
         return table.row_count == 0 or table.cursor_row >= table.row_count - 1
 
+    @property
+    def following(self) -> bool:
+        """The table sticks to the newest flow (``live``)."""
+        return self._follow.live
+
+    def set_following(self, live: bool) -> None:
+        """Stop following (a move up) or resume it (End: the newest row)."""
+        if live:
+            changed = self._follow.resume()
+            try:
+                table = self.table
+                if table.row_count:
+                    table.move_cursor(row=table.row_count - 1, animate=False)
+                    table.scroll_end(animate=False)
+            except Exception:
+                pass
+        else:
+            changed = self._follow.stop()
+        if changed:
+            self._do_refresh_status()
+
+    def _check_follow(self, table: DataTable) -> None:
+        """The cursor left the newest row some other way: stop following."""
+        if self._follow.live and table.row_count and not self._at_tail(table):
+            self._follow.stop()
+
     def _rebuild(self, *, to_top: bool = False) -> None:
         """Re-render the table from the current model + filters.
 
@@ -1677,7 +1758,9 @@ class NetworkPanel(Widget):
             return
         self._focus_app = self._spotlight_package()
         keep = None
-        if table.row_count and not self._at_tail(table):
+        if not to_top:
+            self._check_follow(table)
+        if table.row_count and not self._follow.live:
             keep = self._cursor_key()
         layout = self._columns(table)
         rows = [r for r in self._model() if self._passes(r)]
@@ -1699,6 +1782,9 @@ class NetworkPanel(Widget):
             elif target is not None:
                 table.move_cursor(row=target, animate=False)
             else:
+                # Back at the newest row (the kept flow is gone): live again.
+                if not self.in_review:
+                    self._follow.resume()
                 table.move_cursor(row=len(rows) - 1, animate=False)
                 table.scroll_end(animate=False)
         self._update_empty()
@@ -1714,19 +1800,25 @@ class NetworkPanel(Widget):
         except Exception:
             return
         if self.size.width != self._width or not self._net_layout:
+            passing = sum(1 for row in rows if self._passes(row))
             self._rebuild()
+            self._follow.added(passing)
             return
-        follow = self._at_tail(table) and not self._inspecting_flow()
-        added = False
+        # While live an open flow Inspector follows the newest flow too (End
+        # is the user's choice; ↑ / a click above stops it).
+        self._check_follow(table)
+        added = 0
         self._noise_hidden += self._count_noise(rows)
         for row in rows:
             if self._passes(row):
                 table.add_row(*self._cells(row, self._net_layout), key=row.key)
                 self._shown += 1
-                added = True
-        if added and follow:
+                added += 1
+        if added and self._follow.live:
             table.move_cursor(row=table.row_count - 1, animate=False)
             table.scroll_end(animate=False)
+        else:
+            self._follow.added(added)
         self._update_empty()
 
     def _cursor_key(self) -> str | None:
@@ -1893,13 +1985,17 @@ class NetworkPanel(Widget):
         if self.in_review:
             label = escape(self._scope_label or "run")
             note = self._review_note_short()
-            return f"[#fbbf24]◆ {label}[/]" + (f" · {note}" if note else "")
+            warn = lens_palette().warn
+            return f"[{warn}]review {label}[/]" + (f" · {note}" if note else "")
         mitm = self.mitm
         title = mitm.status_caption() if mitm is not None else ""
         fritap = self.fritap
         token = fritap.caption_token() if fritap is not None else ""
         if token:
             title += f" · {token}"
+        if self._live:
+            # Follow state: in ONE place, the title (as in every lens).
+            title = f"{self._follow.text} · {title}"
         return title
 
     def _review_note_short(self) -> str:
@@ -1938,7 +2034,7 @@ class NetworkPanel(Widget):
         if self._filter:
             parts.append(f"“{escape(self._filter)}”")
         if self._shown:
-            parts.append("⏎ inspect")
+            parts.append("Enter inspects")
         return " · ".join(parts)
 
     def _do_refresh_status(self) -> None:
@@ -1988,6 +2084,7 @@ class NetworkPanel(Widget):
         self._show_all_phases = False
         if run_id is None:
             self._review_loading = False
+            self._follow.resume()
             self._rebuild()
             self._do_refresh_status()
             return
@@ -2184,7 +2281,10 @@ class NetworkPanel(Widget):
         if cursor:
             try:
                 table = self.table
-                table.move_cursor(row=table.get_row_index(row.key), animate=False)
+                index = table.get_row_index(row.key)
+                if index < table.row_count - 1:
+                    self._follow.stop()
+                table.move_cursor(row=index, animate=False)
             except Exception:
                 pass
         ms = self._main_screen()
@@ -2214,11 +2314,12 @@ class NetworkPanel(Widget):
             if row.app:
                 grid.add_row("app", Text(row.app))
             grid.add_row(
-                "result", Text(f"✗ TLS failed ({row.reason})", style="#fb7185")
+                "result",
+                Text(f"TLS failed ({row.reason})", style=lens_palette().bad),
             )
             why = _TLS_REASONS.get(row.reason, _TLS_REASONS["tls"])
             return InspectorContent(
-                title=f"✗ TLS · {label}",
+                title=f"TLS failed · {label}",
                 subtitle=escape(row.host),
                 sections=[
                     ("", grid),
@@ -2254,7 +2355,9 @@ class NetworkPanel(Widget):
                 ),
             )
         if row.error:
-            grid.add_row("result", Text(f"✗ {row.error}", style="#fb7185"))
+            grid.add_row(
+                "result", Text(f"error: {row.error}", style=lens_palette().bad)
+            )
         elif row.status is not None:
             grid.add_row(
                 "status",
@@ -2526,6 +2629,7 @@ class NetworkPanel(Widget):
         if seqs:
             self._floor_seq = max(self._floor_seq, *seqs)
         self._live = []
+        self._follow.resume()
         self._rebuild()
         self._do_refresh_status()
 

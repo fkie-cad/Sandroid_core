@@ -62,6 +62,15 @@ PARENT_DIR = THEMES_DIR.parent
 #   band               section header band (top border of each section)
 #   band_focus         header band of the focused section
 #   stripe             zebra stripe of the longer tables (permissions, ...)
+#   user               Timeline lens: the type word of the user's own input
+#                      (tap, typed, key ...); those rows are tinted with it
+#                      (13 % into ``bg``). >= 4.5:1 on ``bg``, the panel, the
+#                      cursor and that tint, >= 3:1 on ``cursor_focus``
+#   screen             Timeline lens: the type word of screen changes and
+#                      screenshots (a second accent, apart from ``user``);
+#                      same contrast floors (without the tint)
+#   (``user`` / ``screen`` default to ``accent`` / ``title`` when a palette
+#   built elsewhere leaves them out.)
 #   cursor_keeps_colors  (bool, not a CSS variable) True: a cell keeps its
 #                      own color under the row cursor (``dangerous`` stays
 #                      amber) instead of taking the cursor text color.
@@ -110,7 +119,17 @@ class LensPalette:
     band: str
     band_focus: str
     stripe: str
+    #: Default "" = ``accent`` / ``title`` (``__post_init__``), so a palette
+    #: built without them (another branch, an old caller) still works.
+    user: str = ""
+    screen: str = ""
     cursor_keeps_colors: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.user:
+            object.__setattr__(self, "user", self.accent)
+        if not self.screen:
+            object.__setattr__(self, "screen", self.title)
 
     def css_variables(self) -> dict[str, str]:
         """The tokens as Textual CSS variables (``{"lens-bg": "#050811", ...}``)."""
@@ -153,6 +172,8 @@ DEFAULT_LENS = LensPalette(
     band="#0f1c33",
     band_focus="#173560",
     stripe="#0a1121",
+    user="#38bdf8",
+    screen="#c4b5fd",
 )
 
 
@@ -199,9 +220,8 @@ class Theme:
     logo_color: str = "#00ff00"  # Main logo color (bright green by default)
     logo_text_color: str = "#ffffff"  # "Sandroid" text in logo (white by default)
 
-    # AI Chat panel colors (see tui/widgets/chat_panel.py) -- these back
-    # inline Rich-markup colors built in Python (NOT CSS chrome, which is
-    # themed separately via the .tcss files' ChatPanel/#chat-* selectors).
+    # AI chat colors -- exposed to the chat widgets as the ``$chat-*`` CSS
+    # variables (see :func:`chat_css_variables`; the chat has no .tcss rules).
     # No existing field above was a good semantic fit for any of these, so
     # they're their own fields; every theme below sets its own value.
     tool_color: str = "#a78bfa"  # Tool-call bullet/label (purple by default)
@@ -345,6 +365,8 @@ DARK_THEME = Theme(
         band="#1A1A1A",
         band_focus="#2E2540",
         stripe="#111111",
+        user="#03DAC6",
+        screen="#BB86FC",
     ),
 )
 
@@ -408,6 +430,8 @@ LIGHT_THEME = Theme(
         band="#EDF2F8",
         band_focus="#D3E5FA",
         stripe="#F6F8FB",
+        user="#1565C0",
+        screen="#7B1FA2",
     ),
     status_colors={
         "running": "#2E7D32",
@@ -487,6 +511,8 @@ PAPER_THEME = Theme(
         band="#EEE7D7",
         band_focus="#DDE8EB",
         stripe="#F7F3EA",
+        user="#1C5D7C",
+        screen="#6A4A86",
     ),
     status_colors={
         "running": PAPER_OK,
@@ -581,6 +607,8 @@ DAYLIGHT_THEME = Theme(
         band="#EDF0F8",
         band_focus="#E0E4FF",
         stripe="#F7F9FC",
+        user="#4338E0",
+        screen="#0F766E",
     ),
     status_colors={
         "running": DAYLIGHT_OK,
@@ -670,6 +698,8 @@ HIGH_CONTRAST_THEME = Theme(
         band="#1A1A1A",
         band_focus="#00006E",
         stripe="#0E0E0E",
+        user="#00FFFF",
+        screen="#FF66FF",  # >= 4.5:1 on the #333333 cursor too
     ),
 )
 
@@ -732,6 +762,8 @@ CYBERPUNK_THEME = Theme(
         band="#1E0B3A",
         band_focus="#3A1660",
         stripe="#130630",
+        user="#00FFFF",
+        screen="#FF00FF",
     ),
 )
 
@@ -794,6 +826,8 @@ NORD_THEME = Theme(
         band="#3B4252",
         band_focus="#4C566A",
         stripe="#323845",
+        user="#88C0D0",
+        screen="#D8B4D0",  # lighter aurora purple: >= 4.5:1 on the panel
     ),
 )
 
@@ -856,6 +890,8 @@ DRACULA_THEME = Theme(
         band="#323444",
         band_focus="#44475A",
         stripe="#2C2E3B",
+        user="#8BE9FD",
+        screen="#FF79C6",
     ),
 )
 
@@ -920,6 +956,8 @@ SOLARIZED_THEME = Theme(
         band="#063440",
         band_focus="#0E4A58",
         stripe="#03303B",
+        user="#55A5E4",  # lighter than Solarized blue: >= 4.5:1 on its tint
+        screen="#EE7AB0",  # lighter magenta: >= 4.5:1 on bg / panel / cursor
     ),
 )
 
@@ -993,6 +1031,8 @@ GRAPHITE_LENS = LensPalette(
     band="#26272B",
     band_focus="#35302A",
     stripe="#1E1F22",
+    user="#F0A15C",
+    screen="#C8A2E8",
     cursor_keeps_colors=True,
 )
 
@@ -1055,6 +1095,8 @@ DEEP_SEA_LENS = LensPalette(
     band="#1D2C3A",
     band_focus="#22405A",
     stripe="#17242F",
+    user="#5CD0DA",
+    screen="#B9A4F0",
     cursor_keeps_colors=True,
 )
 
@@ -1117,6 +1159,8 @@ EVERGREEN_LENS = LensPalette(
     band="#242B25",
     band_focus="#2F3D2C",
     stripe="#1D231E",
+    user="#CDAEE6",
+    screen="#8CC4E0",
     cursor_keeps_colors=True,
 )
 
@@ -1303,13 +1347,36 @@ def build_textual_theme(theme: Theme) -> TextualTheme:
             **base.variables,
             **theme.textual_variables,
             **theme.lens.css_variables(),
+            **chat_css_variables(theme),
         },
     )
 
 
+def chat_css_variables(theme: Theme) -> dict[str, str]:
+    """The ``$chat-*`` variables of ``theme`` (AI chat transcript colors).
+
+    Built from existing :class:`Theme` fields, so every theme gets them:
+    ``chat-user-band`` (the user line's band), ``chat-reply`` (assistant
+    text), ``chat-tool`` (tool calls), ``chat-wait`` (waiting on the user),
+    ``chat-muted`` (idle / secondary text) and ``chat-brand`` (the mascot:
+    the lens accent, softer than the logo colour and readable on every
+    theme's lens background).
+    """
+    return {
+        "chat-user-band": theme.user_highlight_background,
+        "chat-reply": theme.assistant_reply_color,
+        "chat-tool": theme.tool_color,
+        "chat-wait": theme.waiting_color,
+        "chat-muted": theme.muted_status_color,
+        "chat-brand": theme.lens.accent,
+    }
+
+
 def lens_css_defaults() -> dict[str, str]:
-    """The ``$lens-*`` variables of the default theme (fallback values)."""
-    return DEFAULT_LENS.css_variables()
+    """The ``$lens-*`` and ``$chat-*`` variables of the default theme
+    (fallback values for Textual themes that are not ours).
+    """
+    return {**DEFAULT_LENS.css_variables(), **chat_css_variables(DEFAULT_THEME)}
 
 
 def _active_theme() -> Theme | None:
@@ -1415,6 +1482,7 @@ __all__ = [
     "LensPalette",
     "Theme",
     "build_textual_theme",
+    "chat_css_variables",
     "fixed_color",
     "get_all_themes",
     "get_available_theme_css_files",

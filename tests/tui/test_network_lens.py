@@ -384,11 +384,11 @@ async def test_flows_fill_the_table_noise_hidden(flow_dir):
         await pilot.press("N")
         await settle(pilot)
         assert panel.table.row_count == total
-        # error row shows a ✗ marker
+        # an errored flow says so in words
         cells = [
             str(panel.table.get_row_at(i)[3]) for i in range(panel.table.row_count)
         ]
-        assert any(c.startswith("✗") for c in cells)
+        assert any(c.startswith("error") for c in cells)
 
 
 async def test_new_rows_do_not_yank_a_moved_cursor(flow_dir):
@@ -470,7 +470,7 @@ async def test_tls_failure_row_and_badge(flow_dir):
         await settle(pilot)
         assert ms.query_one("#lens-bar").badge("network") is None
         last = panel.table.get_row_at(panel.table.row_count - 1)
-        assert "✗ TLS" in str(last[3])
+        assert "TLS failed" in str(last[3])
         content = panel.flow_content(tls[0])
         assert "pinning" in str(content.sections[1][1])
 
@@ -687,7 +687,7 @@ async def test_filter_matches_status_and_esc_clears_it(flow_dir):
         assert not panel.query_one("#net-filter").has_class("-open")
         assert app.focused is panel.table
         # an applied filter with the input closed: Esc clears it too
-        panel.set_filter("✗")
+        panel.set_filter("error")
         await settle(pilot)
         assert panel.table.row_count == 1  # the reset upload
         await pilot.press("escape")
@@ -876,7 +876,7 @@ async def test_fritap_caption_follows_its_lifecycle(flow_dir, monkeypatch):
             await until(pilot, lambda: "starting" in ms._lens_captions["network"][0])
             running["on"] = True
             fritap_mod.set_lifecycle("running", "org.wikipedia")
-            await until(pilot, lambda: "friTap ●" in ms._lens_captions["network"][0])
+            await until(pilot, lambda: "friTap on" in ms._lens_captions["network"][0])
             fritap_mod.set_lifecycle("hung", "org.wikipedia is not responding")
             await until(
                 pilot, lambda: "not responding" in ms._lens_captions["network"][0]
@@ -893,7 +893,7 @@ async def test_fritap_caption_follows_its_lifecycle(flow_dir, monkeypatch):
             # like a clean stop); only the tab said "✗ failed".
             fritap_mod.set_lifecycle("failed", "agent stuck in org.wikipedia")
             await until(
-                pilot, lambda: "friTap ✗ failed" in ms._lens_captions["network"][0]
+                pilot, lambda: "friTap failed" in ms._lens_captions["network"][0]
             )
         finally:
             fritap_mod.set_lifecycle("stopped", "")
@@ -928,7 +928,7 @@ def test_ssl_unpin_indicator_follows_the_hooked_process(monkeypatch):
     monkeypatch.setattr(mitm._service, "_bypass_service", lambda: svc)
 
     assert svc.reconcile_liveness() == []  # alive: nothing changes
-    assert "unpin ✓" in mitm.status_caption()
+    assert "unpin on" in mitm.status_caption()
 
     # The Zygote restart: the session detaches, the app comes back as 8593.
     jm.has_active_session = lambda: False
@@ -1163,6 +1163,76 @@ def test_network_tab_ctrl_p_disarms_an_armed_ssl_unpin(monkeypatch):
 
     assert svc.armed_categories() == []
     assert lines == ["[INFO] SSL pinning bypass disarmed"]
+
+
+async def test_follow_live_stops_on_up_or_a_click_and_end_resumes(flow_dir):
+    """The shared follow rules: newest flow at the bottom and selected while
+    live; ↑ or a click above it stops that (capturing goes on: the caption
+    counts what arrived below); End resumes.
+    """
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        table = panel.table
+        assert panel.following
+        assert ms._lens_captions["network"][0].startswith("live · ")
+        table.focus()
+        await pilot.press("up")
+        await settle(pilot)
+        assert not panel.following
+        title = ms._lens_captions["network"][0]
+        assert title.startswith("scrolled back · End = live · ")
+        row = table.cursor_row
+        count = table.row_count
+        write_flows(flow_dir, time.time(), specs=_SPECS[1:3], start_seq=100)
+        panel.poll_now()
+        await until(pilot, lambda: table.row_count == count + 2)
+        await settle(pilot)
+        assert table.cursor_row == row
+        title = ms._lens_captions["network"][0]
+        assert title.startswith("scrolled back · 2 new below · End = live · ")
+        await pilot.press("end")
+        await settle(pilot)
+        assert panel.following
+        assert table.cursor_row == table.row_count - 1
+        assert ms._lens_captions["network"][0].startswith("live · ")
+        # A click on a row above the newest one stops following.
+        await pilot.click("#net-flows", offset=(4, 2))
+        await settle(pilot)
+        assert not panel.following
+        assert table.cursor_row < table.row_count - 1
+
+
+async def test_a_rebuild_that_loses_the_kept_flow_is_live_again(flow_dir):
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        panel.table.focus()
+        await pilot.press("up")
+        await settle(pilot)
+        assert not panel.following
+        panel.set_filter("no-such-flow-anywhere")
+        await settle(pilot)
+        panel.set_filter("")
+        await settle(pilot)
+        assert panel.table.cursor_row == panel.table.row_count - 1
+        assert panel.following
+        assert ms._lens_captions["network"][0].startswith("live · ")
+
+
+async def test_new_below_counts_rows_through_a_width_rebuild(flow_dir):
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        panel.table.focus()
+        await pilot.press("up")
+        await settle(pilot)
+        panel._width = -1  # the next batch takes the rebuild path
+        count = panel.table.row_count
+        write_flows(flow_dir, time.time(), specs=_SPECS[1:3], start_seq=100)
+        panel.poll_now()
+        await until(pilot, lambda: panel.table.row_count == count + 2)
+        assert panel._follow.new_below == 2
 
 
 # --------------------------------------------------------------------------

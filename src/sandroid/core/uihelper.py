@@ -66,8 +66,11 @@ REMOTE_SHOT_DIR = "/data/local/tmp/sandroid-shots"
 
 #: Rooted images whose adb shell lacks the zygote env (BOOTCLASSPATH etc.) need
 #: it imported before app_process can boot the runtime (a no-op otherwise).
+#: ``pidof`` lists several PIDs while an app launches (forked zygote64
+#: children share the env): use the first one.
 ZYGOTE_ENV = (
     'if [ -z "$BOOTCLASSPATH" ]; then ZP=$(pidof zygote64 || pidof zygote); '
+    "ZP=${ZP%% *}; "
     "for kv in $(tr '\\0' '\\n' < /proc/$ZP/environ | grep -vE '^ANDROID_SOCKET_'); "
     'do export "$kv"; done; fi'
 )
@@ -84,6 +87,14 @@ DEATH_WINDOW_S = 60.0
 #: than :data:`DEATH_WINDOW_S` / :data:`MAX_DEATHS`, so the window alone would
 #: retry forever).
 MAX_FAILED_RESTARTS = 5
+
+#: An error reply naming this exception: the device's system server died under
+#: the helper (a Zygote restart, e.g. by the CA injection). The helper's
+#: watchdog reconnects UiAutomation in place, so node queries work again, but
+#: the process keeps framework handles into the dead system server
+#: (``DisplayManagerGlobal``): every ``takeScreenshot()`` fails with this from
+#: then on. Only a fresh process recovers, see :meth:`UiHelper._recycle`.
+DEAD_SYSTEM = "DeadSystemException"
 
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _STDERR_TAIL = 50
@@ -274,6 +285,8 @@ class _Gen:
         self.status_detail: str | None = None
         self.connected_at: float | None = None
         self.reader: threading.Thread | None = None
+        #: Why the host is replacing this process (see UiHelper._recycle).
+        self.recycle: str | None = None
 
 
 class UiHelper:
@@ -285,7 +298,10 @@ class UiHelper:
         on_event: ``(line, host_recv)`` for every unsolicited line (hello,
             status, ev, touch, touch_node, bye ...). Runs on the reader thread.
         on_status: ``(state, info)`` with state ``connected``, ``lost``,
-            ``restarted``, ``down``, ``busy`` or ``stopped``.
+            ``restarted``, ``down``, ``busy`` or ``stopped``. ``lost`` has a
+            ``reason`` when the host replaced a stale process:
+            ``system_restart`` (see :data:`DEAD_SYSTEM`) or ``reconnect_busy``
+            (its in-place reconnect was refused, see :meth:`_recycle`).
         raw_log: Append every stdout line as ``<host_recv>\\t<raw>`` (mode 0600).
         popen: ``subprocess.Popen`` stand-in (tests).
         adb_argv: argv prefix for the persistent shell and the screenshot fetch;
@@ -804,6 +820,17 @@ class UiHelper:
                 g.outcome = state
                 g.status_detail = d.get("detail")
                 g.state.set()
+        elif typ == "status" and g.outcome == "connected":
+            # The helper's watchdog lost UiAutomation and reconnects in place.
+            if d.get("state") == "connected":
+                self._probe(g)
+            elif d.get("state") == "busy":
+                # "already registered": a connect that timed out on the
+                # helper's side registered anyway (seen while the system
+                # server restarted); only the process's death frees it.
+                self._recycle(g, "reconnect_busy", str(d.get("detail")))
+        elif typ == "error" and DEAD_SYSTEM in str(d.get("error") or ""):
+            self._recycle(g, "system_restart", f"{d.get('cmd')}: {d.get('error')}")
         rid = d.get("id")
         if rid is not None:
             with self._lock:
@@ -850,7 +877,10 @@ class UiHelper:
             ):
                 self._consecutive = 0  # it had been stable: start the back-off over
         rc = g.proc.poll()
-        self._status("lost", {**self._info(), "rc": rc})
+        info = {**self._info(), "rc": rc}
+        if g.recycle is not None:
+            info["reason"] = g.recycle
+        self._status("lost", info)
         with self._lock:
             # Started under the lock: stop() always sees (and joins) a started
             # supervisor, or bumps the epoch first so none starts.
@@ -864,6 +894,54 @@ class UiHelper:
             )
             self._supervisor = sup
             sup.start()
+
+    def _probe(self, g: _Gen) -> None:
+        """The helper reconnected UiAutomation in place (its watchdog saw the
+        connection drop). When the system server restarted, its process is
+        stale (see :data:`DEAD_SYSTEM`): one hash-only shot tells, and its
+        error reply recycles the process at once, before a real shot fails.
+        Off the reader thread, which must stay free to read that reply.
+        """
+        if self._gen is not g:
+            return
+        logger.debug(f"UI helper on {self.serial}: reconnected in place, probing")
+        threading.Thread(
+            target=self.request,
+            args=("shot hash_only=1", 5.0),
+            name="uihelper-probe",
+            daemon=True,
+        ).start()
+
+    def _recycle(self, g: _Gen, reason: str, detail: str) -> None:
+        """Replace generation ``g``, stale since its system server restarted
+        (``reason`` ``system_restart``) or stuck reconnecting in place
+        (``reconnect_busy``).
+
+        Its stdin is closed off the reader thread; the exit then takes the
+        usual path (``lost`` with that ``reason``, the supervisor's back-off,
+        a fresh process, ``restarted``). Once per process; never while
+        stopping or quitting.
+        """
+        with self._lock:
+            if (
+                g.recycle is not None
+                or self._gen is not g
+                or g.epoch != self._epoch
+                or self._state != "running"
+                or self._no_restart
+            ):
+                return
+            g.recycle = reason
+        logger.warning(
+            f"UI helper on {self.serial}: stale after a lost UiAutomation "
+            f"({reason}: {detail}); restarting the helper"
+        )
+        threading.Thread(
+            target=self._terminate,
+            args=(g, 2.0),
+            name="uihelper-recycle",
+            daemon=True,
+        ).start()
 
     # -- internals: supervision -----------------------------------------------
 

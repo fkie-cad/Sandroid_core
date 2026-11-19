@@ -49,7 +49,8 @@ MainScreen {
     border: round #1f2d4d;
 }
 
-/* Right-hand side slot: Inspector or AI chat (one at a time) */
+/* Right-hand side slot: Inspector (the AI chat docks under the lens and
+   styles itself from $lens-* tokens, see main_screen.ChatDock) */
 Inspector {
     background: #080c18;
     border: round #1f2d4d;
@@ -59,12 +60,6 @@ Inspector {
 
 Inspector:focus-within {
     border: round #38bdf8;
-}
-
-#chat-dock {
-    background: #080c18;
-    border: round #1f2d4d;
-    border-title-color: #4ade80;
 }
 
 /* Log ticker (newest line) + bottom drawer (` toggles) */
@@ -562,12 +557,12 @@ Button.-secondary:hover {
      .logo-text { color: #268BD2; }
 */
 
-/* ========== Lens Bar & Chat Panel Theming ========== */
-/* These override MainScreen/ChatPanel's Python DEFAULT_CSS (see the comments
+/* ========== Lens Bar Theming ========== */
+/* These override MainScreen's Python DEFAULT_CSS (see the comments
    there) -- a matching selector in a loaded .tcss file always beats a
    widget's own DEFAULT_CSS in Textual's cascade, so these rules are what
-   actually determines the lens bar and AI chat panel colors at
-   runtime. The values below are identical to the old DEFAULT_CSS hardcoded
+   actually determines the lens bar colors at runtime. The AI chat uses
+   theme variables only ($lens-*, $chat-*). The values below are identical to the old DEFAULT_CSS hardcoded
    hex, preserving the existing Midnight Cyan look as the "default" theme. */
 
 #lens-bar {
@@ -592,30 +587,6 @@ Button.-secondary:hover {
 .lens-tab.-active {
     color: #06121f;
     background: #38bdf8;
-}
-
-ChatPanel {
-    background: #080c18;
-}
-
-ChatPanel > #chat-header {
-    color: #38bdf8;
-}
-
-ChatPanel > #chat-log {
-    background: #050811;
-}
-
-ChatPanel > #chat-input-bar > #chat-input {
-    border: solid #1f2d4d;
-    background: #0a1124;
-}
-
-ChatPanel > #chat-mascot {
-    /* MUST equal #chat-log's background above -- see the comment on
-       ChatPanel > #chat-mascot in chat_panel.py for why. */
-    background: #050811;
-    color: #38bdf8;
 }
 
 /* runs lens */

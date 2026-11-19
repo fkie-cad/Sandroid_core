@@ -8,9 +8,11 @@ Layout (top to bottom, see ``MainScreen.compose``)::
     LensBar       #lens-bar       1 App  2 Network  3 Files  4 Sessions  5 Timeline
                                   6 Identity
     #workspace    Horizontal
-      #lens-host  framed ContentSwitcher #lens-body holding the six lenses
-      #side-slot  right-hand slot: Inspector #inspector  OR  chat #chat-dock
-    LogTicker     #log-ticker     newest log line + "` log" hint
+      #left-col   Vertical
+        #lens-host  framed ContentSwitcher #lens-body holding the six lenses
+        #chat-dock  the AI chat under the lens (Ctrl+Y; hidden while closed)
+      #side-slot  right-hand slot: Inspector #inspector
+    LogTicker     #log-ticker     newest log line + "^Y AI · ` log" hint
     LogDrawer     #log-drawer     hidden; ` toggles it; holds ActivityLog #activity-log
     SandroidFooter
 
@@ -153,11 +155,14 @@ Scope (LIVE / REVIEW)
 
 Marks and labels
 ----------------
-Labels live in the session timeline (``sandroid.core.timeline``, ``Labels``):
-``#`` starts a top-level label (closing every open one), ``+`` a sub-label
-(or a sibling of the innermost sub-label), ``-`` stops the innermost one and
-``B`` drops a point -- App keys, in every lens, each asking for an optional
-name (``InputModal``; Esc writes nothing).
+Labels live in the session timeline (``sandroid.core.timeline``, ``Labels``);
+the UI calls them Section, Sub-section, End section and Note: ``#`` starts a
+Section (a top-level label, closing every open one), ``+`` a Sub-section (or a
+sibling of the innermost one), ``-`` ends the innermost one and ``B`` drops a
+Note (a point) -- App keys, in every lens. ``#`` / ``+`` ask for an optional
+name, ``B`` for the note's text, which it needs (``InputModal``; Esc writes
+nothing). The header shows the open section, and a new note for
+``NOTE_FLASH_S`` seconds (``ShellHeader.flash_label_note``).
 
 * ``MainScreen.marks`` -- a :class:`SessionMarks` *view* rebuilt from
   ``labels.boundaries()``: top-level label starts, top-level label ends and
@@ -206,6 +211,10 @@ if TYPE_CHECKING:
     from rich.console import RenderableType
     from textual.app import ComposeResult
     from textual.widget import Widget
+
+#: Seconds the header shows a new note (``Note 4 'text'``) before it returns
+#: to the open section.
+NOTE_FLASH_S = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -309,12 +318,12 @@ class Mark:
     seq: int | None = None
 
     def label(self) -> str:
-        """``mark 3 'tap login'`` (point), ``label 7 'x'`` (start) or
-        ``after label 7`` (end); the name is left out when empty.
+        """``Note 3 'tap login'`` (point), ``Section 7 'x'`` (start) or
+        ``after Section 7`` (end); the name is left out when empty.
         """
         if self.kind == "end":
-            return f"after label {self.number}"
-        word = "label" if self.kind == "start" else "mark"
+            return f"after Section {self.number}"
+        word = "Section" if self.kind == "start" else "Note"
         named = f" '{self.name}'" if self.name else ""
         return f"{word} {self.number}{named}"
 
@@ -526,6 +535,8 @@ class ShellHeader(Header):
         #: lens; shown instead of the plain "● LIVE" pill.
         self._live_note: str | None = None
         self._label_note: str | None = None
+        #: ``(text, until)``: a new note shown instead of the open section.
+        self._flash: tuple[str, float] | None = None
         self._tracking = False
         self._privacy: tuple[str | None, str] = (None, "")
         self._banner: str | None = None
@@ -559,7 +570,7 @@ class ShellHeader(Header):
         label.set_class(bool(text), "-on")
 
     def set_label_note(self, text: str | None) -> None:
-        """The innermost open label, e.g. ``▶ 7 'accept cookies' 0:12``."""
+        """The innermost open section, e.g. ``Section 7 'accept cookies' 0:12``."""
         text = text or None
         if text != self._label_note:
             self._label_note = text
@@ -613,6 +624,16 @@ class ShellHeader(Header):
             text, kind = None, ""
         self.set_privacy(text, kind)
 
+    def flash_label_note(
+        self, text: str, seconds: float = NOTE_FLASH_S, now: float | None = None
+    ) -> None:
+        """Show ``text`` (``Note 4 'text'``) for ``seconds``, then the open
+        section again.
+        """
+        now = time.time() if now is None else now
+        self._flash = (text, now + seconds)
+        self.set_label_note(text)
+
     @property
     def label_note(self) -> str | None:
         return self._label_note
@@ -645,7 +666,10 @@ class ShellHeader(Header):
                 inner = spans[-1]
                 elapsed = max(0, int(now - float(inner.t)))
                 named = f" '{inner.name}'" if inner.name else ""
-                note = f"▶ {inner.number}{named} {elapsed // 60}:{elapsed % 60:02d}"
+                word = "Sub-section" if getattr(inner, "depth", 0) else "Section"
+                note = (
+                    f"{word} {inner.number}{named} {elapsed // 60}:{elapsed % 60:02d}"
+                )
             try:
                 status = svc.status()
             except Exception:
@@ -656,6 +680,11 @@ class ShellHeader(Header):
                 banner = f"⚠ timeline locked ({who})" if who else "⚠ timeline locked"
             elif state == "failed":
                 banner = "⚠ timeline failed"
+        if self._flash is not None:
+            if now < self._flash[1]:
+                note = self._flash[0]
+            else:
+                self._flash = None
         self.set_label_note(note)
         self.set_timeline_banner(banner)
         active = False
@@ -673,10 +702,12 @@ class ShellHeader(Header):
         ``off_wall`` of the last sample; the timeline's writer thread takes
         the periodic samples):
 
-        * within 1 s of the host, dimmed: ``dev 17:16:02 ✓``
-        * more than 1 s off, amber: ``dev 16:01:02 -75 min ⚠``
+        * within 1 s of the host, dimmed: ``dev 17:16:02 in sync``
+        * more than 1 s off, amber: ``dev 16:01:02 75 min behind`` (or
+          ``ahead``)
         * no sample of the current world yet (startup, or after a snapshot
-          load / cold boot, when the old offset is stale), dimmed: ``dev ?``
+          load / cold boot, when the old offset is stale), dimmed:
+          ``dev time unknown``
 
         Hidden without a target device. Returns the text shown.
         """
@@ -691,16 +722,16 @@ class ShellHeader(Header):
         if not serial:
             text, state = "", ""
         elif sample is None or sample.get("off_wall") is None:
-            text, state = "dev ?", "-unknown"
+            text, state = "dev time unknown", "-unknown"
         else:
             when = datetime.fromtimestamp(now - sample["off_wall"])
             if device_clock.notable(sample):
-                offset = device_clock.format_offset(
-                    device_clock.device_minus_host(sample)
-                )
-                text, state = f"dev {when:%H:%M:%S} {offset} ⚠", "-off"
+                ahead = device_clock.device_minus_host(sample) or 0.0
+                offset = device_clock.format_offset(abs(ahead)).lstrip("+−-")
+                side = "ahead" if ahead > 0 else "behind"
+                text, state = f"dev {when:%H:%M:%S} {offset} {side}", "-off"
             else:
-                text, state = f"dev {when:%H:%M:%S} ✓", "-sync"
+                text, state = f"dev {when:%H:%M:%S} in sync", "-sync"
         try:
             label = self.query_one("#device-clock", Static)
             label.update(text)
@@ -1136,7 +1167,11 @@ def humanize_log_line(line: str) -> str:
 
 
 class LogTicker(Horizontal):
-    """One row: the newest meaningful log line, plus a dim "` log" hint."""
+    """One row: the newest meaningful log line, plus a dim key hint."""
+
+    #: The hint (AI chat + log drawer keys), drawer closed / open.
+    HINT = "^Y AI · ` log"
+    HINT_OPEN = "^Y AI · ` close log"
 
     DEFAULT_CSS = """
     LogTicker {
@@ -1155,15 +1190,22 @@ class LogTicker(Horizontal):
         color: #5b6479;
         padding: 0 0 0 2;
     }
+    LogTicker #log-ticker-hint.-attention {
+        color: #f0b429;
+        text-style: bold;
+    }
     """
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.last_line = ""
+        self._drawer_open = False
+        #: A badge shown before the hint (e.g. "⚠ approval needed · ^Y").
+        self.attention: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("", id="log-ticker-line")
-        yield Static("` log", id="log-ticker-hint")
+        yield Static(self.HINT, id="log-ticker-hint")
 
     def show_line(self, content: Any) -> None:
         """Mirror one ActivityLog line (markup string or renderable)."""
@@ -1190,10 +1232,22 @@ class LogTicker(Horizontal):
             pass
 
     def set_drawer_open(self, is_open: bool) -> None:
+        self._drawer_open = is_open
+        self._sync_hint()
+
+    def set_attention(self, text: str | None) -> None:
+        """Show ``text`` as a badge before the key hint (None clears it)."""
+        self.attention = text or None
+        self._sync_hint()
+
+    def _sync_hint(self) -> None:
+        hint = self.HINT_OPEN if self._drawer_open else self.HINT
+        if self.attention:
+            hint = f"{self.attention} · {hint}"
         try:
-            self.query_one("#log-ticker-hint", Static).update(
-                "` close log" if is_open else "` log"
-            )
+            label = self.query_one("#log-ticker-hint", Static)
+            label.update(Content(hint))
+            label.set_class(bool(self.attention), "-attention")
         except Exception:
             pass
 
