@@ -2318,6 +2318,35 @@ def test_restart_keeps_the_bypasses_armed_before_the_dialog(
     assert log == [("spawn", {"ssl"})]
 
 
+def test_restart_keeps_bypasses_turned_on_live(env, monkeypatch):
+    """Ctrl+P on the running app (active, not armed), then ⇧R: still on."""
+    from sandroid.core.adb import Adb
+
+    log: list = []
+    _ladder(env, monkeypatch, log)
+    monkeypatch.setattr(app_start.time, "sleep", lambda s: None)
+    monkeypatch.setattr(Adb, "force_stop", staticmethod(lambda pkg: None))
+    env.bypass._armed = {"root"}
+    env.bypass._active = {"ssl"}
+
+    assert app_start.restart_app() == (True, "ok")
+    assert log == [("spawn", {"ssl", "root"})]
+
+
+def test_respawn_teardown_keeps_live_bypasses_armed(env, monkeypatch):
+    """A tool's confirmed respawn re-applies what was on live, too."""
+    from sandroid.core.adb import Adb
+
+    monkeypatch.setattr(app_start.time, "sleep", lambda s: None)
+    monkeypatch.setattr(Adb, "force_stop", staticmethod(lambda pkg: None))
+    env.bypass._active = {"ssl"}
+
+    app_start.respawn_teardown(PKG)
+
+    assert env.bypass.armed_categories() == ["ssl"]
+    assert env.bypass.active_categories() == []
+
+
 def test_a_recovery_timeout_still_stops_the_launched_apps_tools(env, monkeypatch):
     other = "org.example.other"
     env.tasks = [SimpleNamespace(name="dexray", app_name=other, display_name="Dexray")]

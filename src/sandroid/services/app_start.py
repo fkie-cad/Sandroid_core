@@ -1464,6 +1464,12 @@ def respawn_teardown(package: str) -> None:
     spotlight.begin_restart(package)
     time.sleep(0.5)  # let the process die so the session connection breaks
     stop_app_tools(package)
+    try:
+        # Bypasses turned on live (Ctrl+P) join the armed set, as on ⇧K:
+        # the new process gets everything that was on.
+        _bypass().keep_armed_and_forget()
+    except Exception as exc:
+        logger.warning("Keeping the live bypasses armed failed: %s", exc)
     drop_session(_job_manager())
 
 
@@ -1765,9 +1771,9 @@ def restart_app(paused: bool = False, *, consent: bool = False) -> tuple[bool, s
         pkg = spotlight.get_effective_package()
         if not pkg:
             return False, _no_app("Restart").reason
-        # The armed set now: a selection change during the dialog disarms.
+        # Armed or on live, now: a selection change during the dialog disarms.
         bypass = _bypass()
-        armed = bypass.armed_categories()
+        armed = bypass.on_categories()
         try:
             plans = _collect_pre_spawn(pkg, pkg)
             _confirm_pre_spawn(plans, pkg, pkg, consent)
