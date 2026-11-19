@@ -819,6 +819,17 @@ def _intervals(
     return out
 
 
+def _shots_dropped(stop: Mapping[str, Any] | None) -> int:
+    """Screen-change shots Tracking dropped as late or superseded
+    (``tracking/stop`` ``data.shots_dropped``; DESIGN_FINAL §12): they were
+    never stored, so no step shows an image of a later screen.
+    """
+    counts = _data(stop).get("shots_dropped") if stop else None
+    if not isinstance(counts, Mapping):
+        return 0
+    return sum(int(n) for n in counts.values() if isinstance(n, int))
+
+
 def _cov_tracking(ctx: ReportContext) -> list[str]:
     lines = [ln for ln in ctx.lines if ln.get("src") == "tracking"]
     spans = _intervals(
@@ -843,6 +854,14 @@ def _cov_tracking(ctx: ReportContext) -> list[str]:
             f"Tracking was on from {_clock(start.get('t'))} to {_until(end)}"
             + (f" ({detail})." if detail else ".")
         )
+        dropped = _shots_dropped(end)
+        if dropped:
+            items.append(
+                f"{_plural(dropped, 'screen-change screenshot')} "
+                f"{'was' if dropped == 1 else 'were'} not taken: the next input "
+                "or a newer screen came first, so the image would have shown "
+                "a later screen."
+            )
     if not items:
         items.append(
             "Tracking was off for the whole report window: no taps, typed text, "

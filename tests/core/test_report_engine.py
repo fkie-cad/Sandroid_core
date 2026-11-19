@@ -1043,6 +1043,31 @@ class TestCoverage:
             "Nothing to show"
         )
 
+    def test_dropped_screen_shots_are_stated_not_shown(self, tmp_path, fake_timeline):
+        """DESIGN_FINAL §12 (F2 under load): Tracking drops a screen-change
+        shot that would be taken after the next input or a newer screen; the
+        report says how many, and no step shows an image for them.
+        """
+        tl = TimelineFixture(tmp_path / "dev")
+        tl.add(0, "sandroid", "open", data={"session_id": SESSION_ID})
+        tl.add(1, "tracking", "start", "tracking on", actor="user",
+               data={"mode": "full", "reason": "user"})  # fmt: skip
+        win = tl.add(2, "screen", "window", "→ com.x/.Home", actor="app",
+                     data={"pkg": "com.x", "cls": "com.x.Home", "via": "a11y"})  # fmt: skip
+        tl.add(9, "tracking", "stop", "tracking off", actor="user",
+               data={"reason": "user",
+                     "shots_dropped": {"late": 2, "superseded": 1}})  # fmt: skip
+        tl.write()
+        doc = report_engine.build_report(
+            timeline=tl.path,
+            seal=_fake_seal_file(tl.path),
+            scope=report_engine.ReportScope(),
+            bundle_dir=None,
+        )
+        text = "\n".join(_sentences(doc))
+        assert "3 screen-change screenshots were not taken: the next input" in text
+        assert _step(doc, win)["shots"] == []
+
     def test_no_timeline_is_stated(self, tmp_path):
         doc = report_engine.build_report(
             timeline=None, seal=None, scope=report_engine.ReportScope(), bundle_dir=None
