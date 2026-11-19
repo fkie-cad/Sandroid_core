@@ -858,6 +858,46 @@ async def test_a_poll_keeps_the_scroll_position_and_the_cursor() -> None:
         assert section.cursor_row == 160
 
 
+async def test_theme_switch_recolors_the_lens_css_and_rich_text(fake):
+    """Settings preview / revert re-colors the sections and the panel live."""
+    from sandroid.tui.themes import (
+        DEFAULT_LENS,
+        DEFAULT_THEME,
+        LIGHT_THEME,
+        get_theme_css_path,
+    )
+
+    def dangerous_style(perms: LensSection) -> str:
+        index = next(
+            i for i, r in enumerate(perms.rows_shown) if r.key.endswith("CAMERA")
+        )
+        return str(perms.get_row_at(index)[1].style)
+
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(pilot, lambda: _loaded(sections))
+        perms = sections.section("permissions")
+        body = ms.query_one("#spotlight-body")
+        assert dangerous_style(perms) == DEFAULT_LENS.warn
+        assert perms.styles.background.hex.lower() == DEFAULT_LENS.bg
+
+        app._apply_theme(LIGHT_THEME, get_theme_css_path("light"))
+        await _settle(pilot)
+        light = LIGHT_THEME.lens
+        assert app.theme == "sandroid-light"
+        assert perms.styles.background.hex.upper() == light.bg
+        assert dangerous_style(perms) == light.warn
+        assert light.title in str(body.content)
+        assert DEFAULT_LENS.title not in str(body.content)
+
+        app._apply_theme(DEFAULT_THEME, get_theme_css_path("default"))
+        await _settle(pilot)
+        assert dangerous_style(perms) == DEFAULT_LENS.warn
+        assert perms.styles.background.hex.lower() == DEFAULT_LENS.bg
+
+
 async def test_trackers_re_read_the_cache_when_static_analysis_ends(fake):
     """'press a' must go away once ``a`` recorded an Insight result."""
     from sandroid.core.events.events import AnalysisCompleted

@@ -38,6 +38,7 @@ from textual.widgets import Input, Static
 
 from sandroid.tui.modals.base import FridaModal as _FridaModalBase
 from sandroid.tui.modals.objection_modal import BYPASS_KEYS
+from sandroid.tui.themes import lens_palette
 from sandroid.tui.utils.ui_thread import UiDispatcher
 from sandroid.tui.widgets.app_lens import LENS_ID, AppLensSections
 
@@ -143,53 +144,54 @@ class SpotlightPanel(Widget):
     SpotlightPanel {
         layout: vertical;
         height: 1fr;
-        background: #080c18;
+        background: $lens-panel;
     }
     SpotlightPanel > #spotlight-header {
         height: 1;
-        color: #38bdf8;
+        color: $lens-accent;
         text-style: bold;
         padding: 0 1;
     }
     SpotlightPanel > #spotlight-scroll {
         height: 1fr;
-        background: #050811;
+        background: $lens-bg;
         padding: 0 1;
         scrollbar-size-vertical: 1;
     }
     SpotlightPanel #spotlight-body {
         height: auto;
         margin: 0 0 1 0;
-        background: #050811;
+        background: $lens-bg;
+        color: $lens-text;
     }
     SpotlightPanel > #app-filter {
         display: none;
         height: 1;
         border: none;
         padding: 0 1;
-        background: #0b1628;
-        color: #e5e9f0;
+        background: $lens-input-bg;
+        color: $lens-input-text;
     }
     SpotlightPanel > #app-filter.-open {
         display: block;
     }
     SpotlightPanel > #app-filter:focus {
         border: none;
-        background: #11203a;
+        background: $lens-input-focus-bg;
     }
     SpotlightPanel > #spotlight-actions {
         height: 1;
         dock: bottom;
-        background: #0b1628;
+        background: $lens-action-bg;
     }
     SpotlightPanel .act-cell {
         width: auto;
         padding: 0 1;
-        color: #93a4c3;
+        color: $lens-action-text;
     }
     SpotlightPanel .act-cell:hover {
-        background: #1f2937;
-        color: #7dd3fc;
+        background: $lens-action-hover-bg;
+        color: $lens-action-hover-text;
         text-style: bold;
     }
     """
@@ -285,6 +287,10 @@ class SpotlightPanel(Widget):
     def on_mount(self) -> None:
         self._subscribe_events()
         self.refresh_panel()
+        try:
+            self.app.theme_changed_signal.subscribe(self, self._repaint_text)
+        except Exception:
+            logger.debug("Spotlight panel: no theme signal", exc_info=True)
         # Event-driven transitions cover the common cases; this slow poll is
         # the safety net that catches the app dying on its own. Stopped in
         # on_unmount; each tick is a no-op when no app is selected or the
@@ -410,9 +416,10 @@ class SpotlightPanel(Widget):
         ]
 
     def _render_header(self) -> str:
+        c = lens_palette()
         package = self._current_package()
         if not package:
-            return "[#fb7185]○ no app[/] — press [b]c[/] (attach) / [b]⇧C[/] (spawn)"
+            return f"[{c.bad}]○ no app[/] — press [b]c[/] (attach) / [b]⇧C[/] (spawn)"
 
         pid = self._safe_pid()
         paused = self._is_paused()
@@ -420,26 +427,27 @@ class SpotlightPanel(Widget):
         on = self._on_categories()
 
         if paused and pid:
-            state = f"[#fbbf24]◐ paused[/] PID [b]{pid}[/]"
+            state = f"[{c.warn}]◐ paused[/] PID [b]{pid}[/]"
         elif pid:
-            state = f"[#4ade80]● running[/] PID [b]{pid}[/]"
+            state = f"[{c.ok}]● running[/] PID [b]{pid}[/]"
         elif self._restarting():
-            state = "[#fbbf24]◌ restarting…[/]"
+            state = f"[{c.warn}]◌ restarting…[/]"
         else:
-            state = "[#fb7185]○ not running[/]"
+            state = f"[{c.bad}]○ not running[/]"
 
         bypass_tag = (
-            f"[#4ade80]bypass: {','.join(on)}[/]" if on else "[#5b6479]bypass: none[/]"
+            f"[{c.ok}]bypass: {','.join(on)}[/]" if on else f"[{c.dim}]bypass: none[/]"
         )
         return f"{state}  [b]{package}[/]  hooks: [b]{len(hooks)}[/]  {bypass_tag}"
 
     def _render_body(self) -> str:
+        c = lens_palette()
         spotlight = self._spotlight()
         package = self._current_package()
 
         if not package:
             return (
-                "[#5b6479]No spotlight app selected.\n\n"
+                f"[{c.dim}]No spotlight app selected.\n\n"
                 "Press [b]c[/] to attach to the focused app, or [b]Shift+C[/] to "
                 "pick an app to spawn with hooks from the start.[/]"
             )
@@ -453,7 +461,7 @@ class SpotlightPanel(Widget):
             activity = spotlight.get_activity_name() or "—"
         except Exception:
             activity = "—"
-        lines.append(f"[#7dd3fc bold]App[/]  activity {escape(str(activity))}")
+        lines.append(f"[{c.title} bold]App[/]  activity {escape(str(activity))}")
 
         # 2. Active hooks (filtered to this app)
         hooks = self._hooks_for_app(package)
@@ -462,8 +470,8 @@ class SpotlightPanel(Widget):
             for t in hooks
         ]
         lines.append(
-            f"[#7dd3fc bold]Active hooks[/] ([b]{len(hooks)}[/])  "
-            + ("  ".join(f"[#4ade80]●[/] {n}" for n in names) or "[#5b6479]none[/]")
+            f"[{c.title} bold]Active hooks[/] ([b]{len(hooks)}[/])  "
+            + ("  ".join(f"[{c.ok}]●[/] {n}" for n in names) or f"[{c.dim}]none[/]")
         )
 
         # 3. Immediate bypass toggles (armed | active)
@@ -471,19 +479,19 @@ class SpotlightPanel(Widget):
         if self._compact:
             # Narrow lens (e.g. 100x30 with the Inspector open): one line.
             names = [c for _k, c, _l in _BYPASS_TOGGLES if c in on]
-            state = f"[#4ade80]{','.join(names)}[/]" if names else "[#5b6479]none[/]"
+            state = f"[{c.ok}]{','.join(names)}[/]" if names else f"[{c.dim}]none[/]"
             lines.append(
-                f"[#7dd3fc bold]b bypass:[/] {state} "
-                f"[#5b6479](b then 1-{len(_BYPASS_TOGGLES)})[/]"
+                f"[{c.title} bold]b bypass:[/] {state} "
+                f"[{c.dim}](b then 1-{len(_BYPASS_TOGGLES)})[/]"
             )
             return "\n".join(lines)
         lines.append(
-            "[#7dd3fc bold]Bypass[/] [#5b6479](b then 1-6 · armed applies on Start)[/]"
+            f"[{c.title} bold]Bypass[/] [{c.dim}](b then 1-6 · armed applies on Start)[/]"
         )
         toggle_cells = []
         for key, category, label in _BYPASS_TOGGLES:
             is_on = category in on
-            color = "#4ade80" if is_on else "#5b6479"
+            color = c.ok if is_on else c.dim
             mark = "●" if is_on else "○"
             toggle_cells.append(f"[{color}][b]{key}[/] {mark} {label}[/]")
         lines.append("  " + "   ".join(toggle_cells))
@@ -497,16 +505,22 @@ class SpotlightPanel(Widget):
         if self._is_paused():
             return "␣ Resume"
         if self._safe_pid():
-            return "[#5b6479]● running[/]"
+            return f"[{lens_palette().dim}]● running[/]"
         return "␣ Start"
 
-    def refresh_panel(self) -> None:
+    def _repaint_text(self, _theme: object = None) -> None:
+        """Re-render the header, body and primary cell (also on theme change:
+        their markup colors come from the theme's lens tokens).
+        """
         try:
             self.query_one("#spotlight-header", Static).update(self._render_header())
             self.query_one("#spotlight-body", Static).update(self._render_body())
             self.query_one("#act-primary", Static).update(self._primary_label())
         except Exception:
             pass
+
+    def refresh_panel(self) -> None:
+        self._repaint_text()
         package = self._current_package()
         sections = self._sections()
         if sections is not None:
@@ -1392,10 +1406,11 @@ class BypassChordModal(_FridaModalBase):
 
         from sandroid.tui.modals.base import KeyHintFooter
 
+        c = lens_palette()
         rows = []
         for key, category, label in _BYPASS_TOGGLES:
             is_on = category in self._on
-            mark = "[#4ade80]● on [/]" if is_on else "[#5b6479]○ off[/]"
+            mark = f"[{c.ok}]● on [/]" if is_on else f"[{c.dim}]○ off[/]"
             rows.append(f"  [b]{key}[/]  {mark}  {label}")
         rows.append("")
         rows.append("  [b]o[/]  Objection shell [dim](b b works too)[/dim]")

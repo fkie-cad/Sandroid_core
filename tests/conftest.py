@@ -337,6 +337,28 @@ def _no_device_clock():
     device_clock.SHELL_FACTORY, device_clock._default_send = saved
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _lens_theme_variables():
+    """Bare test ``App``s know the App lens's ``$lens-*`` CSS variables.
+
+    The lens widgets' DEFAULT_CSS uses them; ``SandroidTUI`` provides them
+    (registered themes + ``get_theme_variable_defaults``), a plain
+    ``textual.app.App`` harness would fail to parse that CSS without this.
+    """
+    from textual.app import App
+
+    from sandroid.tui.themes import lens_css_defaults
+
+    original = App.get_theme_variable_defaults
+
+    def with_lens(self) -> dict[str, str]:
+        return {**lens_css_defaults(), **original(self)}
+
+    App.get_theme_variable_defaults = with_lens
+    yield
+    App.get_theme_variable_defaults = original
+
+
 @pytest.fixture(autouse=True)
 def _isolated_watchlist_dir(tmp_path, monkeypatch):
     """Give every test its own Files-lens watchlist + pulled-files directory.
