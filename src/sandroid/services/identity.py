@@ -95,6 +95,11 @@ NEEDS_RESTART = "needs a framework restart"
 PROVIDER_DOWN = "its content provider did not answer (not up yet)"
 #: Waits before re-reading lists whose provider was not up (about 10 s).
 PROVIDER_WAITS_S = (1.0, 1.5, 2.0, 2.5, 3.0)
+#: The whole provider wait never takes longer than this (a framework restart
+#: can leave the device overloaded; adb calls then hang, see the light probe).
+PROVIDER_WAIT_DEADLINE_S = 20.0
+#: One light provider probe (lists only) gives up after this many seconds.
+PROVIDER_PROBE_TIMEOUT_S = 8.0
 _OK = "sandroid-identity-ok"
 
 #: Framework restart: wait this long for a new system_server.
@@ -1677,6 +1682,28 @@ def preflight_script(
     return "\n".join(lines)
 
 
+def lists_script(tokens: Iterable[str], numbers: Iterable[str] = ()) -> str:
+    """A light re-read of the content-provider lists only (no packages.xml,
+    settings or dumpsys): the provider wait after a framework restart.
+    Its output parses with :func:`parse_preflight` (lists and ``ok`` only).
+    """
+    tokens = [t for t in tokens if TOKEN_RE.fullmatch(t)]
+    numbers = [n for n in numbers if _PHONE_RE.fullmatch(n)]
+    lines = [f"echo {PREFLIGHT_TAG}"]
+    for name, (uri, proj, col) in _LIST_QUERY.items():
+        if not tokens:
+            break
+        where = _where_like(col, tokens)
+        if name == "calls" and numbers:
+            where += " OR number IN (" + ",".join(f"'{n}'" for n in numbers) + ")"
+        lines.append(
+            f"echo @@list:{name}@@; ({ZYGOTE_PREFIX}; content query --uri {uri}"
+            f" --projection {':'.join(proj)} --where {_q(where)} 2>/dev/null)"
+        )
+    lines.append("echo @@end@@")
+    return "\n".join(lines)
+
+
 def _sections(text: str) -> dict[str, str]:
     out: dict[str, list[str]] = {}
     current: list[str] | None = None
@@ -2089,6 +2116,7 @@ class IdentityService:
         self._applied: dict[str, _Applied] = {}
         self._hook_installed = False
         self._sleep: Callable[[float], None] = time.sleep
+        self._clock: Callable[[], float] = time.monotonic
         self._clock: Callable[[], float] = time.monotonic
         #: Called with the serial once the framework is back after a restart
         #: window (default: restart a running frida-server).
@@ -2831,11 +2859,28 @@ class IdentityService:
                     return True
             return False
 
+        deadline = self._clock() + PROVIDER_WAIT_DEADLINE_S
+        tokens = [profile.token, *profile.retired_tokens]
+        script = lists_script(tokens, call_numbers(profile))
         for delay in PROVIDER_WAITS_S:
             if not waiting(state, verified):
                 break
+            if self._clock() + delay + 1.0 > deadline:
+                break
             self._sleep(delay)
-            state = self.preflight(serial, pkgs, profile)
+            left = deadline - self._clock()
+            if left < 1.0:
+                break
+            # Lists only, with a short timeout: an overloaded device (ANRs
+            # after the restart) must not hold an app start for minutes.
+            out = _Device(serial).shell(
+                script, timeout=min(PROVIDER_PROBE_TIMEOUT_S, left)
+            )
+            probe = parse_preflight(serial, out)
+            if not probe.ok:
+                logger.info("identity: provider probe got no answer; stop waiting")
+                break
+            state = replace(state, lists=probe.lists, lists_unread=probe.lists_unread)
             verified = self._plan(profile, state, pkgs)
         return state, verified
 

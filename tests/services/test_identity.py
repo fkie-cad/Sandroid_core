@@ -1315,3 +1315,62 @@ def test_sim_properties_are_set_natively_off_the_emulator(service, device, monke
     assert plan.infos["sim_operator"].status == "verified"
     assert plan.infos["sim_operator"].provider == "native"
     assert device.props["gsm.sim.operator.alpha"] == "Telekom 3f9a1c07"
+
+
+def test_provider_wait_is_bounded_on_an_overloaded_device(service, device):
+    """After the restart adb calls hang (ANR storm): the wait uses a light
+    lists-only probe with a short timeout, stops at the first unanswered
+    probe and never exceeds PROVIDER_WAIT_DEADLINE_S, so an app start is
+    not held for minutes. Unanswered lists stay pending, not failed.
+    """
+    now = [1000.0]
+    service._clock = lambda: now[0]
+    service._sleep = lambda s: now.__setitem__(0, now[0] + s)
+    real_shell = device._shell
+    probes: list[str] = []
+    restarted = [False]
+
+    def shell(script: str) -> str:
+        if script.startswith("start") or "\nstart" in script:
+            restarted[0] = True
+            device.providers_down = 99
+        if restarted[0] and "@@list:" in script and "@@props@@" not in script:
+            probes.append(script)
+            now[0] += ident.PROVIDER_PROBE_TIMEOUT_S  # adb timed out
+            return ""
+        return real_shell(script)
+
+    device._shell = shell
+    timeouts: list[float] = []
+    real_send = ident._send
+
+    def send(command, serial, timeout=60):
+        if "@@list:" in command and "@@props@@" not in command:
+            timeouts.append(timeout)
+        return real_send(command, serial, timeout)
+
+    ident._send = send
+    try:
+        start = now[0]
+        plan = service.apply(SERIAL, "com.example.app")
+    finally:
+        ident._send = real_send
+    assert len(probes) == 1  # stopped at the first unanswered probe
+    assert timeouts
+    assert max(timeouts) <= ident.PROVIDER_PROBE_TIMEOUT_S
+    assert now[0] - start <= ident.PROVIDER_WAIT_DEADLINE_S + 60  # + restart
+    for script in probes:  # light: no packages.xml, settings or dumpsys
+        assert "packages.xml" not in script
+        assert "dumpsys" not in script
+    for name in ("contacts", "sms", "calls"):
+        assert plan.infos[name].status != "failed", plan.infos[name]
+
+
+def test_lists_script_reads_only_the_lists():
+    script = ident.lists_script([TOKEN], ["+4930123456"])
+    assert script.startswith(f"echo {PREFLIGHT_TAG}")
+    assert script.rstrip().endswith("echo @@end@@")
+    assert "@@list:contacts@@" in script
+    assert "@@list:calls@@" in script
+    assert "abx2xml" not in script
+    assert ident.lists_script([TOKEN + "\n"]).count("@@list:") == 0
