@@ -1655,9 +1655,15 @@ class MainScreen(Screen):
             pass
         if showing:
             try:
-                self.query_one("#activity-log", ActivityLog).scroll_end(animate=False)
+                log = self.query_one("#activity-log", ActivityLog)
             except Exception:
-                pass
+                log = None
+            if log is not None:
+                log.scroll_end(animate=False)
+                # Lines written while the drawer was closed are only kept;
+                # render them once the drawer has its width again. A Resize
+                # alone is not reliable here (it can arrive before layout).
+                log.reflow_when_shown()
         else:
             focused = self.focused
             if focused is None or drawer in focused.ancestors or focused is drawer:

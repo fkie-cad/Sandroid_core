@@ -228,6 +228,19 @@ class ActivityLog(RichLog):
     def on_show(self, _event) -> None:
         self.call_after_refresh(self._reflow_if_needed)
 
+    def reflow_when_shown(self, tries: int = 5) -> None:
+        """Render kept lines as soon as the log has a width again.
+
+        The owner calls this when it shows the log (the drawer opens). It
+        retries after each refresh until layout gave the log a width, so a
+        line written while hidden can never be lost.
+        """
+        if self._content_width() > 0:
+            self._reflow_if_needed()
+            return
+        if tries > 0:
+            self.call_after_refresh(self.reflow_when_shown, tries - 1)
+
     def _reflow_if_needed(self) -> None:
         width_now = self._content_width()
         if width_now > 0 and (
