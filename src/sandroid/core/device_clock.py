@@ -386,9 +386,13 @@ def _measure(
             _FAILED[key] = _now()
             return None
         best = {"serial": serial, **best}
-        _LAST[key] = best
         _FAILED.pop(key, None)
-        _add_to_epochs(key, best)
+        if _add_to_epochs(key, best):
+            _LAST[key] = best
+        else:
+            # Measured before a world change that began meanwhile: it
+            # describes the old world (not the newest sample, no epoch).
+            best["_stale"] = True
     return dict(best)
 
 
@@ -411,16 +415,22 @@ def last_sample(serial: str | None = None) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def _add_to_epochs(key: str, sample: dict) -> None:
+def _add_to_epochs(key: str, sample: dict) -> bool:
     """Fold a sample into the serial's monotonic epochs (``_LOCK`` held).
 
     An epoch is a stretch with one ``off_mono`` (within :data:`JUMP_S`);
     a snapshot load or reboot moves ``off_mono`` and starts the next one.
+    A sample measured before :func:`begin_epoch` closed the newest epoch
+    (it finished late) is stale: it never reopens or extends an epoch.
+    Returns False for a stale sample.
     """
+    epochs = _EPOCHS.setdefault(key, [])
+    closes = [e["closed_host"] for e in epochs if "closed_host" in e]
+    if closes and sample.get("_host", math.inf) < max(closes):
+        return False
     off, mono = sample["off_mono"], sample["dev_mono"]
     if off is None:
-        return
-    epochs = _EPOCHS.setdefault(key, [])
+        return True
     entry = {"off_mono": off, "err_ms": sample["err_ms"], "mono": mono,
              "host": sample["_host"]}  # fmt: skip
     if (
@@ -429,8 +439,9 @@ def _add_to_epochs(key: str, sample: dict) -> None:
         and abs(epochs[-1]["off_mono"] - off) <= JUMP_S
     ):
         epochs[-1].update(entry)  # the latest sample tracks the drift
-        return
+        return True
     epochs.append({**entry, "first_mono": mono, "first_host": sample["_host"]})
+    return True
 
 
 def to_host_time(
@@ -590,8 +601,18 @@ def _note(sample: dict, reason: str, always: bool, **extra) -> dict | None:
     keys; ``None``: skipped). ``sample["_host"]`` (if present) is its time.
     """
     host = sample.get("_host")
+    stale = bool(sample.get("_stale"))
     sample = _public(sample)
     key = _key(sample.get("serial"))
+    if stale:
+        # From before a world change that began while it was measured: no
+        # jump against the new world's offsets, the reference stays.
+        if not always:
+            return None
+        entry = {**sample, "reason": reason, "jump": False, "stale": True}
+        entry.update(extra)
+        _append(entry, host)
+        return entry
     with _LOCK:
         previous = _LOGGED.get(key)
         wall = _moved(sample["off_wall"], previous[0]) if previous else None

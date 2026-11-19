@@ -25,6 +25,7 @@ import atexit
 import bisect
 import contextlib
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -93,6 +94,14 @@ _monotonic: Callable[[], float] = time.monotonic
 
 _ACTOR: ContextVar[str | None] = ContextVar("sandroid_timeline_actor", default=None)
 
+#: Plausible line times (epoch s): 1970 .. 2100. A ``t`` outside (e.g. ms
+#: passed as s) is not used: the line falls back to ``t_rx`` (``clk: none``).
+T_MIN = 0.0
+T_MAX = 4_102_444_800.0
+#: Label versions are unique across every timeline file of the process, so a
+#: (folder, version) or a bare version never collides after a device switch.
+_LABEL_VERSIONS = itertools.count(1)
+
 
 # ---------------------------------------------------------------------------
 # small helpers
@@ -119,6 +128,36 @@ def _instant(value: Any) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def _t_ok(value: Any) -> bool:
+    """``value`` is a finite epoch inside [:data:`T_MIN`, :data:`T_MAX`]."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and T_MIN <= value <= T_MAX
+    )
+
+
+def _valid_instant(value: Any) -> float | None:
+    """:func:`_instant` when it is a plausible line time, else None."""
+    try:
+        number = _instant(value)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return number if _t_ok(number) else None
+
+
+def _note_data(fields: dict, key: str, value: Any) -> None:
+    """Add ``key`` to the line's ``data`` (wrapping a non-dict ``data``)."""
+    data = fields.get("data")
+    if data is None:
+        fields["data"] = {key: value}
+    elif isinstance(data, dict):
+        data[key] = value
+    else:
+        fields["data"] = {"value": data, key: value}
 
 
 def _clean_str(text: str) -> str:
@@ -186,6 +225,41 @@ def timeline_folder() -> Path:
     from sandroid.core import watchlist_store
 
     return watchlist_store.files_root().parent
+
+
+def session_folder() -> Path | None:
+    """The live session's folder (``results/<session>/``), or None.
+
+    In order: the pulled-files override (tests: ``files_root().parent.parent``,
+    as :func:`timeline_folder`), the initialization service's session (or
+    its device folder's parent), ``$SESSION_PATH``, then ``$RESULTS_PATH``
+    while no device folder exists (the initialization service points it at
+    the session until a device is chosen). Never ``./results`` or the cwd.
+    """
+    from sandroid.core import watchlist_store
+
+    try:
+        if os.environ.get(watchlist_store.FILES_DIR_ENV):
+            return timeline_folder().parent.absolute()
+    except Exception:
+        pass
+    try:
+        from sandroid.services import get_initialization_service
+
+        service = get_initialization_service()
+        session = service.get_session_path()
+        if session:
+            return Path(session).expanduser().absolute()
+        device_path = service.get_device_path()
+        if device_path:
+            return Path(device_path).expanduser().absolute().parent
+    except Exception:
+        logger.debug("timeline: no initialized session", exc_info=True)
+    for name in ("SESSION_PATH", "RESULTS_PATH"):
+        value = os.environ.get(name)
+        if value:
+            return Path(value).expanduser().absolute()
+    return None
 
 
 @contextlib.contextmanager
@@ -347,6 +421,9 @@ class TailResult:
     lines: list[dict]
     last_seq: int
     gap: bool
+    #: File offset of each line in ``lines`` (parallel list; None: no file,
+    #: e.g. a capture sink).
+    offsets: list[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -403,6 +480,9 @@ class _Item:
     seq: int | None = None
     #: Explicit (world, epoch, phase, run) for transition lines.
     state: tuple | None = None
+    #: ``(t, n)`` of this line's own transition: its state is re-read from
+    #: the transitions at write time (a later-inserted earlier one counts).
+    trans: tuple | None = None
     #: Label bookkeeping (to patch seqs on adoption).
     label: LabelEvent | None = None
     bulk: bool = False
@@ -415,7 +495,11 @@ class _LabelState:
         self.next_number = 1
         self.stack: list[LabelEvent] = []
         self.history: list[LabelEvent] = []
-        self.version = 0
+        self.version = next(_LABEL_VERSIONS)
+
+    def bump(self) -> None:
+        """A new version (unique in the process, see ``_LABEL_VERSIONS``)."""
+        self.version = next(_LABEL_VERSIONS)
 
 
 @dataclass
@@ -455,11 +539,20 @@ class _Sink:
         self.epoch = 0
         self.phase = "live"
         self.run: str | None = None
-        self.transitions: list[tuple] = []  # (t, n, world, epoch, phase, run)
+        #: (t, n, world, epoch, phase, run), sorted by (t, n); the state is
+        #: the fold of every transition's delta in t order (see
+        #: :meth:`add_transition`).
+        self.transitions: list[tuple] = []
+        self.trans_delta: dict[int, tuple] = {}
         #: State before the first transition (a resumed file's world/epoch).
         self.base: tuple = (0, 0, "live", None)
+        #: The emit-order state at the last transition (its delta's origin).
+        self.last_snap: tuple = self.base
+        self.last_key: tuple | None = None
         self.trans_n = 0
         self.after_world = False
+        #: ``t`` of the newest world change (clock samples before it are stale).
+        self.world_t: float | None = None
         self.last_clock_mono: float | None = None
         self.labels = _LabelState()
         self.counts: dict[str, dict[str, int]] = {}
@@ -496,10 +589,38 @@ class _Sink:
         return (self.world, self.epoch, self.phase, self.run)
 
     def add_transition(self, t: float) -> tuple:
+        """Record the change since the last transition at ``t``.
+
+        The delta (world/epoch increments, a phase/run set) is stored, and
+        the snapshots from the insertion point on are re-folded in t order,
+        so a transition inserted with an earlier ``t`` never leaves later
+        ones stale. Returns the state at this transition (t order);
+        :attr:`last_key` is its ``(t, n)``.
+        """
         self.trans_n += 1
-        entry = (t, self.trans_n, *self.snapshot())
-        bisect.insort(self.transitions, entry)
-        return self.snapshot()
+        now = self.snapshot()
+        w0, e0, p0, r0 = self.last_snap
+        w1, e1, p1, r1 = now
+        pr = (p1, r1) if (p1, r1) != (p0, r0) else None
+        self.trans_delta[self.trans_n] = (w1 - w0, e1 - e0, pr)
+        self.last_snap = now
+        key = (t, self.trans_n)
+        i = bisect.bisect_left(self.transitions, key)
+        self.transitions.insert(i, (*key, *now))
+        self._refold(i)
+        self.last_key = key
+        return self.transitions[i][2:]
+
+    def _refold(self, start: int) -> None:
+        state = self.transitions[start - 1][2:] if start > 0 else self.base
+        for j in range(start, len(self.transitions)):
+            t, n = self.transitions[j][:2]
+            dw, de, pr = self.trans_delta[n]
+            world, epoch, phase, run = state
+            if pr is not None:
+                phase, run = pr
+            state = (world + dw, epoch + de, phase, run)
+            self.transitions[j] = (t, n, *state)
 
     def note_drop(self, src: str, reason: str) -> None:
         if self.drops_t0 is None:
@@ -521,6 +642,14 @@ def _state_at(transitions: list[tuple], t: float,
     if i == 0:
         return base
     return transitions[i - 1][2:]
+
+
+def _state_of(transitions: list[tuple], key: tuple) -> tuple | None:
+    """The state of the transition ``key`` = ``(t, n)`` (None: not found)."""
+    i = bisect.bisect_left(transitions, key)
+    if i < len(transitions) and transitions[i][:2] == key:
+        return transitions[i][2:]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -616,6 +745,7 @@ class TimelineService:
         self._thread: threading.Thread | None = None
         self._stop = False
         self._closed = False
+        self._close_reason: str | None = None
         self._ever_bound = False
         self._policy = Policy()
         self._policy_doc = _policy_sections()
@@ -644,8 +774,8 @@ class TimelineService:
             sink = self._sinks.get(folder)
             previous = self._active
             if sink is not None and sink.state in ("locked", "failed", "closed"):
-                if sink.state == "locked":
-                    return self._status_of(sink)
+                # A locked folder is tried again (the other process may have
+                # quit); failed/closed ones are reopened.
                 self._sinks.pop(folder, None)
                 sink = None
             if previous is not None and previous is not sink:
@@ -664,10 +794,15 @@ class TimelineService:
             if serial:
                 self._by_serial[serial] = sink
                 sink.serials.add(serial)
+            # Re-activating an already-open sink: no "bound" from the writer,
+            # so ring it here (the UI rekeys its marks on folder + version).
+            reactivated = not open_new and previous is not sink and sink.state == "open"
             self._active = sink
             self._ever_bound = True
             if open_new:
                 self._commands.append(lambda s=sink: self._open_sink(s))
+        if reactivated:
+            self._doorbell(sink, "bound")
         if open_new:
             self._ensure_thread()
             self._kick.set()
@@ -783,11 +918,23 @@ class TimelineService:
         if nonfinite:
             fields.setdefault("data", {})["_nonfinite"] = nonfinite
         if t is not None:
-            fields["t"] = _instant(t)
+            when = _valid_instant(t)
+            if when is not None:
+                fields["t"] = when
+            else:
+                # Unusable (e.g. ms passed as s): received time, flagged.
+                if fields["clk"] == "host":
+                    fields["clk"] = "none"
+                if fields["level"] == "info":
+                    fields["level"] = "warn"
+                _note_data(fields, "_bad_t", _clean_str(repr(t))[:64])
         for key, value in (("dev_mono", dev_mono), ("dev_wall", dev_wall),
                            ("t_err_ms", t_err_ms)):  # fmt: skip
             if value is not None:
-                number = _instant(value)
+                try:
+                    number = _instant(value)
+                except (OverflowError, OSError, ValueError):
+                    number = None
                 if number is not None:
                     fields[key] = number
         if dev_mono is not None and "dev_mono" in fields and clk == "host":
@@ -854,13 +1001,14 @@ class TimelineService:
         return src == "clock" and kind in ("jump", "sync")
 
     def _enqueue(self, sink: _Sink, fields: dict, *, t_rx: float,
-                 state: tuple | None = None,
-                 label: LabelEvent | None = None) -> int | None:  # fmt: skip
+                 state: tuple | None = None, label: LabelEvent | None = None,
+                 trans: tuple | None = None) -> int | None:  # fmt: skip
         """Lock held: assign the seq and queue the line (or buffer it)."""
         fields.setdefault("actor", "sandroid")
         fields.setdefault("level", "info")
         fields.setdefault("clk", "host")
-        item = _Item(fields, t_rx, time.monotonic(), state=state, label=label)
+        item = _Item(fields, t_rx, time.monotonic(), state=state, label=label,
+                     trans=trans)  # fmt: skip
         if sink.state in ("detached", "opening"):
             self._bookkeep(sink, item)
             sink.buffer.append(item)
@@ -879,8 +1027,15 @@ class TimelineService:
             return
         if fields["src"] == "clock":
             data = fields.get("data") or {}
+            if not isinstance(data, Mapping):
+                return
             mono = data.get("dev_mono")
             t = fields.get("t") or item.t_rx
+            if sink.world_t is not None and t < sink.world_t:
+                # Measured before the newest world change (emitted late): it
+                # describes the old world; it must not clear the barrier, move
+                # the rewind reference or count a second change.
+                return
             if (
                 isinstance(mono, (int, float))
                 and sink.last_clock_mono is not None
@@ -892,6 +1047,7 @@ class TimelineService:
                 sink.world += 1
                 sink.epoch += 1
                 sink.after_world = True
+                sink.world_t = t
                 state = sink.add_transition(t)
                 world = _Item({
                     "src": "sandroid", "kind": "world", "actor": "sandroid",
@@ -899,7 +1055,8 @@ class TimelineService:
                     "summary": "⟲ world change inferred · device clock went back",
                     "data": {"cause": "mono-rewind", "world_before": before},
                     **({"dev": fields["dev"]} if "dev" in fields else {}),
-                }, item.t_rx, item.mono, state=state)  # fmt: skip
+                }, item.t_rx, item.mono, state=state,
+                   trans=sink.last_key)  # fmt: skip
                 if sink.state in ("detached", "opening"):
                     sink.buffer.append(world)
                 else:
@@ -909,6 +1066,7 @@ class TimelineService:
             if data.get("jump") and not sink.after_world:
                 sink.epoch += 1
                 item.state = sink.add_transition(t)
+                item.trans = sink.last_key
             sink.after_world = False
 
     def _assign(self, sink: _Sink, item: _Item) -> int:
@@ -1044,19 +1202,24 @@ class TimelineService:
                 self._count(sink, fields)
                 return None
             key_dev = fields.get("dev") or sink.serial
-            # Another op on a path with a pending modify: that modify first.
+            # Another op on a path (or rename target) with a pending modify:
+            # those modifies first, oldest first.
             if kind != "modify":
-                for key in list(self._coalesce_paths.get((key_dev, path), ())):
+                keys = set(self._coalesce_paths.get((key_dev, path), ()))
+                if new_path:
+                    keys |= self._coalesce_paths.get((key_dev, new_path), set())
+                for key in self._by_first(keys):
                     self._emit_coalesced(key)
             window = self._policy.coalesce_s
+            when = fields.get("t") or t_rx
             if kind == "modify" and window > 0 and sink.state in ("open", "capture"):
                 key = (key_dev, path, pid)
                 pending = self._coalesce.get(key)
                 if pending is not None:
                     pending.n += 1
-                    pending.last = max(pending.last, fields["t"])
+                    pending.last = max(pending.last, when)
                     return None
-                self._coalesce[key] = _Coalesced(fields["t"], fields["t"], 1, fields)
+                self._coalesce[key] = _Coalesced(when, when, 1, fields)
                 self._coalesce_paths.setdefault((key_dev, path), set()).add(key)
                 return None
             return self._accept(sink, fields, t_rx)
@@ -1082,10 +1245,19 @@ class TimelineService:
         if sink is not None:
             self._accept(sink, fields, time.time())
 
+    def _by_first(self, keys: Collection[tuple]) -> list[tuple]:
+        """Pending coalescer ``keys`` ordered by their first event."""
+        return sorted(
+            (k for k in keys if k in self._coalesce),
+            key=lambda k: (self._coalesce[k].first, self._coalesce[k].last),
+        )
+
     def _flush_coalescer(self, now: float | None = None) -> None:
-        """Lock held: flush expired (``now``) or all (``None``) windows."""
+        """Lock held: flush expired (``now``) or all (``None``) windows,
+        oldest first.
+        """
         window = self._policy.coalesce_s
-        for key in list(self._coalesce):
+        for key in self._by_first(list(self._coalesce)):
             pending = self._coalesce.get(key)
             if pending is None:
                 continue
@@ -1130,8 +1302,11 @@ class TimelineService:
             sink.world += 1
             sink.epoch += 1
             sink.after_world = True
-            state = sink.add_transition(fields.get("t") or t_rx)
-            return self._enqueue(sink, fields, t_rx=t_rx, state=state)
+            when = fields.get("t") or t_rx
+            sink.world_t = when if sink.world_t is None else max(sink.world_t, when)
+            state = sink.add_transition(when)
+            return self._enqueue(sink, fields, t_rx=t_rx, state=state,
+                                 trans=sink.last_key)  # fmt: skip
 
     def set_phase(self, phase: str, run: str | None = None, *, kind: str = "phase",
                   summary: str | None = None, t: TimeLike = None,
@@ -1162,11 +1337,12 @@ class TimelineService:
                 fields["summary"] = f"phase · {before} → {phase}"
             if sink.state in ("open", "capture"):
                 self._flush_counts(sink, t_rx)
-            state = None
+            state = trans = None
             if (phase, run) != (sink.phase, sink.run):
                 sink.phase, sink.run = phase, run
                 state = sink.add_transition(fields.get("t") or t_rx)
-            return self._enqueue(sink, fields, t_rx=t_rx, state=state)
+                trans = sink.last_key
+            return self._enqueue(sink, fields, t_rx=t_rx, state=state, trans=trans)
 
     def current_phase(self, dev: str | None = None) -> tuple[str, str | None]:
         """``(phase, run)`` of the sink of ``dev`` (default: active)."""
@@ -1193,7 +1369,7 @@ class TimelineService:
             fields["ref"] = {"of": event.of}
         state = sink.labels
         state.history.append(event)
-        state.version += 1
+        state.bump()
         if sink.state in ("open", "capture"):
             self._flush_counts(sink, time.time())
         self._enqueue(sink, fields, t_rx=time.time(), label=event)
@@ -1266,7 +1442,7 @@ class TimelineService:
         return sink
 
     def _label_start(self, name, level, t, actor, source) -> LabelEvent | None:
-        when = _instant(t) or time.time()
+        when = _valid_instant(t) or time.time()
         who = actor if actor in ACTORS else current_actor()
         name = _clean_str(name or "")
         with self._lock:
@@ -1287,7 +1463,7 @@ class TimelineService:
             return self._start_locked(sink, name, None, 0, when, who, source)
 
     def _label_stop(self, t, actor) -> LabelEvent | None:
-        when = _instant(t) or time.time()
+        when = _valid_instant(t) or time.time()
         who = actor if actor in ACTORS else current_actor()
         with self._lock:
             sink = self._label_ok()
@@ -1296,7 +1472,7 @@ class TimelineService:
             return self._end_locked(sink, "stop", when, who)
 
     def _label_point(self, name, t, actor, source) -> LabelEvent:
-        when = _instant(t) or time.time()
+        when = _valid_instant(t) or time.time()
         who = actor if actor in ACTORS else current_actor()
         name = _clean_str(name or "")
         with self._lock:
@@ -1313,7 +1489,7 @@ class TimelineService:
             return state.history[-1]
 
     def _label_end_all(self, ended_by, t, actor) -> list[LabelEvent]:
-        when = _instant(t) or time.time()
+        when = _valid_instant(t) or time.time()
         with self._lock:
             sink = self._label_ok()
             if sink is None:
@@ -1412,7 +1588,9 @@ class TimelineService:
             done = (
                 self._stop
                 and not self._commands
-                and all(s.state != "open" for s in self._sinks.values())
+                and all(
+                    s.state not in ("open", "opening") for s in self._sinks.values()
+                )
             )
             if done:
                 self._thread = None
@@ -1460,7 +1638,9 @@ class TimelineService:
         finished: list[tuple[dict, int]] = []
         ends: dict[int, int] = {}
         for item in batch:
-            line, raw, prev_h = _finalize(sink, item, transitions, prev_h, offset)
+            # Never raises: one bad item cannot lose the batch or leave a gap.
+            line, raw, prev_h = _finalize_safe(sink, item, transitions, prev_h,
+                                               offset)  # fmt: skip
             finished.append((line, offset))
             buf += raw
             offset += len(raw)
@@ -1554,15 +1734,29 @@ class TimelineService:
                 return
             sink.bell = None
             sink.bell_at = time.monotonic()
-        _publish({"op": "lines", "dev": sink.serial, "folder": str(sink.folder),
-                  "first_seq": bell["first_seq"], "last_seq": bell["last_seq"],
-                  "srcs": sorted(bell["srcs"])})  # fmt: skip
+            payload = self._bell_payload(sink, "lines")
+        payload.update(first_seq=bell["first_seq"], last_seq=bell["last_seq"],
+                       srcs=sorted(bell["srcs"]))  # fmt: skip
+        _publish(payload)
 
-    @staticmethod
-    def _doorbell(sink: _Sink, op: str) -> None:
-        _publish({"op": op, "dev": sink.serial, "folder": str(sink.folder),
-                  "first_seq": None, "last_seq": sink.written_seq or None,
-                  "srcs": []})  # fmt: skip
+    def _bell_payload(self, sink: _Sink, op: str) -> dict:
+        """The doorbell envelope (lock held or taken): ``op``, ``dev``,
+        ``folder``, ``session_id``, ``labels_version`` (unique in the
+        process), ``active`` (``sink`` is the active one now), ``first_seq``,
+        ``last_seq``, ``srcs``.
+        """
+        with self._lock:
+            return {
+                "op": op, "dev": sink.serial, "folder": str(sink.folder),
+                "session_id": sink.session_id,
+                "labels_version": sink.labels.version,
+                "active": self._active is sink,
+                "first_seq": None, "last_seq": sink.written_seq or None,
+                "srcs": [],
+            }  # fmt: skip
+
+    def _doorbell(self, sink: _Sink, op: str) -> None:
+        _publish(self._bell_payload(sink, op))
 
     # -- open / resume -------------------------------------------------------
 
@@ -1575,6 +1769,7 @@ class TimelineService:
                 sink.state = "failed"
             logger.warning("Session timeline %s: cannot open (%s)", sink.path, exc)
             self._release(sink)
+            self._doorbell(sink, "bound")  # every active change rings "bound"
         finally:
             sink.opened.set()
 
@@ -1589,12 +1784,14 @@ class TimelineService:
                 sink.state = "locked"
                 sink.locked_by = holder
                 sink.buffer.clear()
-            logger.warning(
-                "Timeline locked by %s (another Sandroid on this folder): this "
-                "window records no timeline.",
-                holder or "another process",
+            self._warn_once(
+                f"locked:{folder}:{holder}",
+                f"Timeline locked by {holder or 'another process'} (another "
+                "Sandroid on this folder): this window records no timeline.",
             )
             self._doorbell(sink, "locked")
+            # The active sink changed all the same (to one without a file).
+            self._doorbell(sink, "bound")
             return
         sink.lock_fd = lock_fd
         fd = os.open(sink.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
@@ -1603,7 +1800,9 @@ class TimelineService:
             sink.path.chmod(0o600)
         size = os.fstat(fd).st_size
         resume = _scan_for_resume(sink.path) if size > 0 else None
-        if resume is not None and resume["torn"] is not None:
+        if resume is not None and resume["newline"]:
+            # Close the last line: a torn fragment (declared in the resume
+            # line) or a complete line that only lacked its newline (adopted).
             os.write(fd, b"\n")
             resume["size"] += 1
         if resume is not None and resume.get("clock") and sink.serial:
@@ -1649,10 +1848,14 @@ class TimelineService:
             sink.offset = resume["size"]
             sink.written_seq = sink.fsynced_seq = resume["last_seq"]
             sink.world, sink.epoch = resume["world"], resume["epoch"]
-            sink.base = (sink.world, sink.epoch, "live", None)
+            sink.base = sink.last_snap = (sink.world, sink.epoch, "live", None)
             self._restore_labels(sink, resume["labels"])
             gap = resume.get("last_t")
             level = "info" if resume["verified"] and not resume["torn"] else "warn"
+            extra = {}
+            if resume.get("adopted") is not None:
+                # The last line lacked only its newline: adopted, not torn.
+                extra["adopted_tail"] = resume["adopted"]
             self._enqueue(sink, {
                 "src": "sandroid", "kind": "resume", "actor": "sandroid",
                 "level": level,
@@ -1660,7 +1863,7 @@ class TimelineService:
                 "data": {"prev_seq": resume["last_seq"], "prev_h": resume["last_h"],
                          "verified": resume["verified"], "torn": resume["torn"],
                          "unclean": resume["unclean"], "pid": os.getpid(),
-                         "gap_s": round(now - gap, 3) if gap else None},
+                         "gap_s": round(now - gap, 3) if gap else None, **extra},
             }, t_rx=now)  # fmt: skip
             self._emit_policy(sink, "resume", "sandroid")
             if sink.labels.stack:
@@ -1679,6 +1882,11 @@ class TimelineService:
         if sink.folder is not None and sink.folder != self._root_folder():
             self._emit_connect(sink)
         sink.last_clock_tick = _monotonic()
+        if self._closed:
+            # close() ran while this sink was still opening: close it now.
+            self._flush_coalescer(None)
+            self._close_sink_locked(sink, self._close_reason or "quit", time.time())
+            self._kick.set()
 
     def _restore_labels(self, sink: _Sink, events: list[LabelEvent]) -> None:
         state = sink.labels
@@ -1689,7 +1897,7 @@ class TimelineService:
                 state.stack.append(event)
             elif event.kind == "end":
                 state.stack = [s for s in state.stack if s.number != event.number]
-        state.version += 1
+        state.bump()
 
     def _adopt(self, sink: _Sink, items: list[_Item]) -> None:
         """Lock held: write buffered must-keep lines into ``sink``,
@@ -1723,29 +1931,33 @@ class TimelineService:
                     ]
                 item.label = new
             if item.fields["src"] == "clock":
-                item.state = None
+                item.state = item.trans = None
                 self._bookkeep(sink, item)
             elif item.state is not None:
                 # A world/phase change while detached: rebase it on this file.
                 _world, _epoch, phase, run = item.state
+                when = item.fields.get("t") or item.t_rx
                 if item.fields["src"] == "run":
                     sink.phase, sink.run = phase, run
                 else:
                     sink.world += 1
                     sink.epoch += 1
                     sink.after_world = True
-                item.state = sink.add_transition(item.fields.get("t") or item.t_rx)
+                    sink.world_t = when
+                item.state = sink.add_transition(when)
+                item.trans = sink.last_key
             seq = self._assign(sink, item)
             if event is not None and event.kind == "start":
                 starts[item.label.number] = seq
             sink.adopted += 1
-        sink.labels.version += 1
+        sink.labels.bump()
 
     def _root_folder(self) -> Path | None:
-        try:
-            return timeline_folder().parent.absolute()
-        except Exception:
-            return None
+        """The session folder (``<session>/timeline.jsonl`` holds the lines
+        made while no device was ever bound). Never the shared ``results/``
+        or the working directory: None when the session is unknown.
+        """
+        return session_folder()
 
     # -- control -------------------------------------------------------------
 
@@ -1797,35 +2009,25 @@ class TimelineService:
                 self._flush_coalescer(None)
                 if fallback and not self._ever_bound:
                     self._bind_root_fallback()
+                self._close_reason = reason
                 for sink in list(self._sinks.values()):
-                    if sink.state != "open" or sink.closing:
-                        continue
-                    self._flush_counts(sink, now)
-                    if sink.drops_t0 is not None:
-                        self._flush_drops(sink, now)
-                    ended = self._label_end_all_locked(sink, "close", now, "sandroid")
-                    self._enqueue(sink, {
-                        "src": "sandroid", "kind": "close", "actor": "sandroid",
-                        "summary": f"timeline closed ({reason})",
-                        "data": {"reason": reason, "lines": sink.next_seq,
-                                 "bytes": None, "dropped_total": sink.dropped_total,
-                                 "counted_total": sink.counted_total,
-                                 "labels_closed": [e.number for e in ended]},
-                    }, t_rx=now)  # fmt: skip
-                    sink.closing = True
-                    sink.close_reason = reason
-                    sink.full_fsync = True
+                    self._close_sink_locked(sink, reason, now)
             self._stop = True
             thread = self._thread
-            pending = [s for s in self._sinks.values() if s.state == "open"]
+            # A sink still opening is closed by _register when it opens.
+            pending = [
+                s for s in self._sinks.values() if s.state in ("open", "opening")
+            ]  # fmt: skip
             if not pending:
                 return True
-        if thread is None:
+        if thread is None or not thread.is_alive():
             self._ensure_thread()
         self._kick.set()
         deadline = time.monotonic() + timeout
         with self._lock:
-            while any(s.state == "open" for s in self._sinks.values()):
+            while any(
+                s.state in ("open", "opening") for s in self._sinks.values()
+            ):  # fmt: skip
                 left = deadline - time.monotonic()
                 if left <= 0:
                     logger.warning("Session timeline: close did not finish in "
@@ -1834,6 +2036,28 @@ class TimelineService:
                 self._kick.set()
                 self._written.wait(min(left, TICK_S))
         return True
+
+    def _close_sink_locked(self, sink: _Sink, reason: str, now: float) -> None:
+        """Lock held: counts, drops, open labels and the ``sandroid/close``
+        line of one open sink; the writer then finishes it.
+        """
+        if sink.state != "open" or sink.closing:
+            return
+        self._flush_counts(sink, now)
+        if sink.drops_t0 is not None:
+            self._flush_drops(sink, now)
+        ended = self._label_end_all_locked(sink, "close", now, "sandroid")
+        self._enqueue(sink, {
+            "src": "sandroid", "kind": "close", "actor": "sandroid",
+            "summary": f"timeline closed ({reason})",
+            "data": {"reason": reason, "lines": sink.next_seq,
+                     "bytes": None, "dropped_total": sink.dropped_total,
+                     "counted_total": sink.counted_total,
+                     "labels_closed": [e.number for e in ended]},
+        }, t_rx=now)  # fmt: skip
+        sink.closing = True
+        sink.close_reason = reason
+        sink.full_fsync = True
 
     def _bind_root_fallback(self) -> None:
         """Lock held: buffered user/ai lines with no device ever bound go to
@@ -1868,13 +2092,17 @@ class TimelineService:
                 return TailResult([], after_seq, False)
             ring = list(sink.ring)
             last = sink.written_seq
+            has_file = sink.path is not None
         if not ring:
-            return TailResult([], max(after_seq, last), False)
+            return TailResult([], max(after_seq, last), False,
+                              [] if has_file else None)  # fmt: skip
         first = ring[0][0]["seq"]
         gap = after_seq + 1 < first and after_seq < last
-        lines = [line for line, _o in ring if line["seq"] > after_seq][:limit]
+        pairs = [(line, o) for line, o in ring if line["seq"] > after_seq][:limit]
+        lines = [line for line, _o in pairs]
+        offsets = [o for _line, o in pairs] if has_file else None
         last_seq = lines[-1]["seq"] if lines else max(after_seq, last)
-        return TailResult(lines, last_seq, gap)
+        return TailResult(lines, last_seq, gap, offsets)
 
     def seal(self, *, by: str, dev: str | None = None, report: str | None = None,
              timeout: float = 5.0) -> Seal | None:  # fmt: skip
@@ -1945,8 +2173,8 @@ class TimelineService:
     # -- capture (tests) -----------------------------------------------------
 
     def _finalize_capture(self, sink: _Sink, item: _Item) -> None:
-        line, _raw, sink.prev_h = _finalize(sink, item, sink.transitions,
-                                            sink.prev_h, sink.offset)  # fmt: skip
+        line, _raw, sink.prev_h = _finalize_safe(sink, item, sink.transitions,
+                                                 sink.prev_h, sink.offset)  # fmt: skip
         sink.offset += len(_raw)
         sink.lines += 1
         sink.written_seq = line["seq"]
@@ -1966,11 +2194,14 @@ class TimelineService:
 # ---------------------------------------------------------------------------
 
 
-def _convert_time(fields: dict, t_rx: float) -> tuple[float, str, float | None]:
-    """``(t, clk, t_err_ms)`` per the time model (§3)."""
+def _convert_time(fields: dict, t_rx: float,
+                  serial: str | None = None) -> tuple[float, str, float | None]:  # fmt: skip
+    """``(t, clk, t_err_ms)`` per the time model (§3); ``serial``: the
+    sink's device when the line names none.
+    """
     clk = fields.get("clk", "host")
     src_err = fields.get("t_err_ms")
-    dev = fields.get("dev")
+    dev = fields.get("dev") or serial
     if clk == "dev_mono" and "dev_mono" in fields:
         try:
             from sandroid.core import device_clock
@@ -2005,8 +2236,16 @@ def _convert_time(fields: dict, t_rx: float) -> tuple[float, str, float | None]:
 def _finalize(sink: _Sink, item: _Item, transitions: list[tuple], prev_h: str,
               offset: int) -> tuple[dict, bytes, str]:  # fmt: skip
     fields = item.fields
-    t, clk, t_err = _convert_time(fields, item.t_rx)
-    world, epoch, phase, run = item.state or _state_at(transitions, t, sink.base)
+    t, clk, t_err = _convert_time(fields, item.t_rx, sink.serial)
+    bad_t = None
+    if not _t_ok(t):
+        # A converted time outside the plausible range: the received time.
+        bad_t = repr(t)[:64]
+        t, clk, t_err = item.t_rx, "none", None
+    state = _state_of(transitions, item.trans) if item.trans is not None else None
+    world, epoch, phase, run = (
+        state or item.state or _state_at(transitions, t, sink.base)
+    )
     line: dict[str, Any] = {
         "v": SCHEMA,
         "seq": item.seq,
@@ -2038,6 +2277,14 @@ def _finalize(sink: _Sink, item: _Item, transitions: list[tuple], prev_h: str,
         summary = summary[: SUMMARY_MAX - 1] + "…"
     line["summary"] = summary
     data = fields.get("data")
+    if bad_t is not None:
+        line["level"] = "error" if line["level"] == "error" else "warn"
+        if data is None:
+            data = {"_bad_t": bad_t}
+        elif isinstance(data, Mapping):
+            data = {**data, "_bad_t": bad_t}
+        else:
+            data = {"value": data, "_bad_t": bad_t}
     if data is not None:
         if fields["src"] == "sandroid" and fields["kind"] == "close":
             data = {**data, "bytes": offset}
@@ -2052,6 +2299,56 @@ def _finalize(sink: _Sink, item: _Item, transitions: list[tuple], prev_h: str,
     if fields.get("sensitive"):
         line["sensitive"] = True
     body = canonical(line)
+    h = line_hash(prev_h, body)
+    line["h"] = h
+    return line, _splice(body, h), h
+
+
+def _finalize_safe(sink: _Sink, item: _Item, transitions: list[tuple],
+                   prev_h: str, offset: int) -> tuple[dict, bytes, str]:  # fmt: skip
+    """:func:`_finalize`, never raising: a line that cannot be finalized is
+    written as a ``level: "error"`` line with the same seq, src and kind
+    (``clk: "none"``, ``data._finalize_error``) so the chain has no gap.
+    """
+    try:
+        return _finalize(sink, item, transitions, prev_h, offset)
+    except Exception as exc:
+        logger.warning("timeline: line %s (%s/%s) could not be written as "
+                       "emitted: %s", item.seq, item.fields.get("src"),
+                       item.fields.get("kind"), exc)  # fmt: skip
+        error = _clean_str(f"{type(exc).__name__}: {exc}")[:500]
+    fields = item.fields
+    try:
+        state = item.state or _state_at(transitions, item.t_rx, sink.base)
+        world, epoch, phase, run = state
+        line: dict[str, Any] = {
+            "v": SCHEMA, "seq": item.seq, "t": _iso(item.t_rx),
+            "t_rx": _iso(item.t_rx), "clk": "none",
+            "mono": round(item.mono - sink.open_mono, 3),
+            "world": int(world), "epoch": int(epoch),
+            "phase": str(phase), "run": None if run is None else str(run),
+            "src": str(fields.get("src") or "sandroid"),
+            "kind": str(fields.get("kind") or "error"),
+            "actor": str(fields.get("actor") or "sandroid"),
+            "dev": None if fields.get("dev", sink.serial) is None
+            else str(fields.get("dev", sink.serial)),
+            "level": "error",
+            "summary": _clean_str(str(fields.get("summary") or ""))[:SUMMARY_MAX],
+            "data": {"_finalize_error": error},
+        }  # fmt: skip
+        if fields.get("sensitive"):
+            line["sensitive"] = True
+        body = canonical(line)
+    except Exception:
+        line = {
+            "v": SCHEMA, "seq": item.seq, "t": _iso(item.t_rx),
+            "t_rx": _iso(item.t_rx), "clk": "none", "mono": 0.0, "world": 0,
+            "epoch": 0, "phase": "live", "run": None, "src": "sandroid",
+            "kind": "error", "actor": "sandroid", "dev": None, "level": "error",
+            "summary": "a timeline line could not be written",
+            "data": {"_finalize_error": error},
+        }  # fmt: skip
+        body = canonical(line)
     h = line_hash(prev_h, body)
     line["h"] = h
     return line, _splice(body, h), h
@@ -2207,17 +2504,65 @@ def _parse(raw: bytes) -> dict | None:
     return obj if isinstance(obj, dict) else None
 
 
+def _chains(raw: bytes, prev_raw: bytes | None) -> bool:
+    """``raw`` is a complete line chained onto ``prev_raw`` (None: ``raw``
+    is the first line, checked against the genesis of its own session).
+    """
+    split, obj = _split_h(raw), _parse(raw)
+    if split is None or obj is None or not isinstance(obj.get("seq"), int):
+        return False
+    if prev_raw is None:
+        session = (obj.get("data") or {}).get("session_id")
+        if obj.get("seq") != 1 or not isinstance(session, str):
+            return False
+        prev_h = genesis(session)
+    else:
+        prev_split, prev = _split_h(prev_raw), _parse(prev_raw)
+        prev_seq = prev.get("seq") if prev is not None else None
+        if prev_split is None or not isinstance(prev_seq, int):
+            return False
+        if obj["seq"] != prev_seq + 1:
+            return False
+        prev_h = prev_split[1]
+    return line_hash(prev_h, split[0]) == split[1]
+
+
 def _scan_for_resume(path: Path) -> dict:
-    """What a resume needs from an existing file (see §6.3)."""
+    r"""What a resume needs from an existing file (see §6.3).
+
+    The labels (the full history) and the highest world/epoch need every
+    line, so the file is read whole (one sequential read; ~0.8 s for
+    150 MB), not backwards.
+
+    The tail: a final fragment without a newline that is a complete line
+    chaining onto the last one (a crash right before its ``\n``) is adopted
+    (``newline``: the opener appends the ``\n``). Any other fragment is
+    torn: closed with a newline and declared in the resume line. A final
+    newline-terminated line without a valid ``h`` suffix (a torn fragment
+    closed by an earlier resume that crashed before its resume line) is
+    declared torn as well.
+    """
     data = path.read_bytes()
     size = len(data)
     torn = None
+    newline = False
+    adopted = None
     end = data.rfind(b"\n") + 1
+    lines = data[:end].split(b"\n")[:-1] if end else []
     if end < size:
         fragment = data[end:]
-        torn = {"offset": end, "bytes": len(fragment),
+        if _chains(fragment, lines[-1] if lines else None):
+            adopted = end
+            lines.append(fragment)
+        else:
+            torn = {"offset": end, "bytes": len(fragment),
+                    "sha256": hashlib.sha256(fragment).hexdigest()}  # fmt: skip
+        newline = True
+    elif len(lines) >= 2 and _split_h(lines[-1]) is None and _parse(lines[-2]):
+        fragment = lines[-1]
+        torn = {"offset": end - len(fragment) - 1, "bytes": len(fragment),
                 "sha256": hashlib.sha256(fragment).hexdigest()}  # fmt: skip
-    lines = data[:end].split(b"\n")[:-1] if end else []
+        lines.pop()
     first = _parse(lines[0]) if lines else None
     session = ((first or {}).get("data") or {}).get("session_id")
     gen = genesis(session) if isinstance(session, str) else ""
@@ -2263,6 +2608,8 @@ def _scan_for_resume(path: Path) -> dict:
         "last_t": _instant(last.get("t")),
         "verified": verified,
         "torn": torn,
+        "newline": newline,
+        "adopted": adopted,
         "unclean": not (last.get("src") == "sandroid" and last.get("kind") == "close"),
         "size": size,
         "world": world,

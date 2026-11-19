@@ -201,6 +201,18 @@ def _timeline_rel(target: Path) -> str:
         return str(target)
 
 
+def _pull_serial() -> str | None:
+    """The device a pull on this thread talks to (the adb target, pinned
+    per thread by ``Adb.targeting``): the ``dev`` of its timeline line.
+    """
+    try:
+        from sandroid.core.adb import Adb
+
+        return Adb.get_target_device()
+    except Exception:
+        return None
+
+
 def timeline_pull(
     path: str,
     trigger: str,
@@ -260,6 +272,7 @@ def timeline_pull(
             ref=ref,
             pkg=watchlist_store.package_of(path),
             level="info" if ok else "warn",
+            dev=_pull_serial(),
         )
     except Exception:
         logger.debug("timeline: files/pull line failed", exc_info=True)
@@ -281,6 +294,7 @@ def timeline_check(path: str, trigger: str, same_as: str, note: str) -> int | No
             data={"path": path, "same_as": same_as, "trigger": trigger, "note": note},
             ref={"path": _timeline_rel(checks), "lens": "files"},
             pkg=watchlist_store.package_of(path),
+            dev=_pull_serial(),
         )
     except Exception:
         logger.debug("timeline: files/check line failed", exc_info=True)

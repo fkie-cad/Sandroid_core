@@ -33,7 +33,7 @@ import importlib
 import json
 import logging
 import os
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -171,6 +171,8 @@ class ReportContext:
     scoped: list[dict[str, Any]] = field(default_factory=list)
     by_src: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     labels: list[LabelSpan] = field(default_factory=list)
+    #: :class:`_LabelIndex` of ``labels`` (built on first use).
+    label_index: Any = None
     #: ``(first, last)`` instant of the scope (``None`` without lines).
     span: tuple[float, float] | None = None
     bundle: dict[str, Any] | None = None
@@ -509,25 +511,68 @@ def _build_labels(lines: Iterable[Mapping[str, Any]]) -> list[LabelSpan]:
     return order
 
 
+class _LabelIndex:
+    """The innermost open span per stretch between span boundaries.
+
+    A sweep over the sorted start/end keys ``(ts, seq)``: between two
+    consecutive keys the set of open spans is constant, so a lookup is one
+    bisect (instead of a scan of every span per line).
+    """
+
+    def __init__(self, labels: list[LabelSpan]) -> None:
+        self.labels = labels
+        self.by_number = {s.number: s for s in labels}
+        events: list[tuple[tuple[float, int], int, int]] = []
+        spans = [s for s in labels if s.kind == "span"]
+        for i, s in enumerate(spans):
+            events.append(((s.ts, s.seq), 1, i))
+            if s.end_ts is not None:
+                events.append(((s.end_ts, s.end_seq or 0), 0, i))
+        events.sort(key=lambda e: e[0])
+        self.keys: list[tuple[float, int]] = []
+        self.inner: list[LabelSpan | None] = []
+        open_now: set[int] = set()
+        j = 0
+        while j < len(events):
+            key = events[j][0]
+            while j < len(events) and events[j][0] == key:
+                _key, is_start, i = events[j]
+                if is_start:
+                    open_now.add(i)
+                else:
+                    open_now.discard(i)
+                j += 1
+            # A span that starts and ends at the same key is never open.
+            live = [
+                spans[i]
+                for i in open_now
+                if spans[i].end_ts is None
+                or (spans[i].end_ts, spans[i].end_seq or 0) > key
+            ]
+            self.keys.append(key)
+            self.inner.append(
+                max(live, key=lambda s: (s.depth, s.ts, s.seq)) if live else None
+            )
+
+    def path(self, ts: float, seq: int) -> list[int]:
+        i = bisect_right(self.keys, (ts, seq)) - 1
+        inner = self.inner[i] if i >= 0 else None
+        if inner is None:
+            return []
+        path = [inner.number]
+        parent = inner.parent
+        while parent is not None and parent in self.by_number and len(path) < 32:
+            path.insert(0, parent)
+            parent = self.by_number[parent].parent
+        return path
+
+
 def _label_path(ctx: ReportContext, ts: float, seq: int) -> list[int]:
     """Label numbers (outer -> inner) of the spans open at ``(ts, seq)``."""
-    open_spans = [
-        s
-        for s in ctx.labels
-        if s.kind == "span"
-        and (s.ts, s.seq) <= (ts, seq)
-        and (s.end_ts is None or (ts, seq) < (s.end_ts, s.end_seq or 0))
-    ]
-    if not open_spans:
-        return []
-    inner = max(open_spans, key=lambda s: (s.depth, s.ts, s.seq))
-    by_number = {s.number: s for s in ctx.labels}
-    path = [inner.number]
-    parent = inner.parent
-    while parent is not None and parent in by_number and len(path) < 32:
-        path.insert(0, parent)
-        parent = by_number[parent].parent
-    return path
+    index = ctx.label_index
+    if index is None or index.labels is not ctx.labels:
+        index = ctx.label_index = _LabelIndex(ctx.labels)
+    return index.path(ts, seq)
 
 
 # ---------------------------------------------------------------------------
@@ -2069,13 +2114,103 @@ def report_formats(config: Any = None) -> tuple[str, ...]:
     return tuple(str(f).lower() for f in formats)
 
 
-def annotate_rerender(doc: dict, reason: str) -> dict:
+#: Step keys that carry a sensitive line's content (masked on a re-render).
+_SENSITIVE_STEP_KEYS = ("target", "element", "element_class", "xy", "to_xy", "key")
+
+
+def _mask_copied(node: Any) -> int:
+    """Mask every ``sensitive`` transcript step under ``node`` in place (as
+    :func:`_step` does for a masked line); returns how many were masked.
+    """
+    count = 0
+    if isinstance(node, dict):
+        if node.get("sensitive") and node.get("type") == "transcript_step":
+            for key in _SENSITIVE_STEP_KEYS:
+                node.pop(key, None)
+            node["element"] = None
+            if "text" in node or node.get("kind") == "text":
+                node["text"] = None
+                node["text_masked"] = True
+            if node.get("src") == "screen":
+                node["screen"] = {"summary": node.get("summary")}
+            node["masked"] = True
+            count += 1
+        for value in node.values():
+            count += _mask_copied(value)
+    elif isinstance(node, list):
+        for value in node:
+            count += _mask_copied(value)
+    return count
+
+
+def _unverified_copy(doc: dict, reason: str) -> None:
+    """The copied seal section and integrity sentences: the chain was not
+    re-checked now (they stated the original report's result).
+    """
+    seal = doc.get("seal")
+    if isinstance(seal, dict):
+        doc["seal"] = {
+            **seal,
+            "verified": None,
+            "verified_originally": seal.get("verified"),
+        }
+    note = f"Not re-checked: {reason.rstrip('.')}."
+    for section in doc.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for block in section.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "kv":
+                for row in block.get("rows") or []:
+                    if isinstance(row, list) and row and row[0] == "Chain verified":
+                        was = row[1] if len(row) > 1 else None
+                        row[1:] = [f"not re-checked (was {was!s} originally)"]
+            elif block.get("type") == "list" and section.get("id") == "coverage":
+                block["items"] = [
+                    f"{item} (as of the original report; not re-checked)"
+                    if isinstance(item, str) and item.startswith("The hash chain")
+                    else item
+                    for item in block.get("items") or []
+                ]
+        if section.get("id") == "seal":
+            section.setdefault("blocks", []).insert(0, _text(note, "warn"))
+
+
+def annotate_rerender(
+    doc: dict, reason: str, *, mask_sensitive: bool | None = None
+) -> dict:
     """Mark a report copied from an earlier ``report.json``.
 
     Used when the timeline can no longer be read (missing or changed): the
-    coverage section then states that the data was not re-derived.
+    coverage section then states that the data was not re-derived, the seal
+    no longer claims a verified chain (it was not re-checked) and the
+    current masking setting (``mask_sensitive``; None:
+    ``should_mask("report")``) is applied to the copied transcript.
     """
     doc = copy.deepcopy(doc)
+    if mask_sensitive is None:
+        tl = _timeline_module()
+        try:
+            mask_sensitive = bool(tl.should_mask("report")) if tl else False
+        except Exception:
+            mask_sensitive = False
+    masking = doc.get("masking") if isinstance(doc.get("masking"), dict) else {}
+    was_masked = bool(masking.get("sensitive_masked"))
+    mask_note = ""
+    if mask_sensitive and not was_masked:
+        n = _mask_copied(doc.get("sections") or [])
+        doc["masking"] = {**masking, "sensitive_masked": True, "masked_on_copy": n}
+        mask_note = (
+            f" Sensitive values were masked in this copy ({_plural(n, 'step')}), "
+            "as timeline.mask_sensitive is now on."
+        )
+    elif was_masked and not mask_sensitive:
+        mask_note = (
+            " Sensitive values stay masked: the original report masked them and "
+            "the timeline cannot be re-read."
+        )
+    _unverified_copy(doc, reason)
     original = doc.get("generated_at")
     doc["regenerated"] = {
         "from": "report.json",
@@ -2089,7 +2224,8 @@ def annotate_rerender(doc: dict, reason: str) -> dict:
     note = _text(
         f"{reason.rstrip('.')}. The transcript and the coverage below could not be "
         "re-derived from the timeline; they are copied from the original "
-        f"report.json (generated {original}).",
+        f"report.json (generated {original}). The hash chain was not "
+        f"re-checked.{mask_note}",
         "warn",
     )
     sections = doc.setdefault("sections", [])

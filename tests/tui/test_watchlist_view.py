@@ -687,9 +687,13 @@ async def test_pulls_and_checks_are_session_timeline_lines(
     import hashlib
     from types import SimpleNamespace
 
+    from sandroid.core.adb import Adb
+
     service, timeline_path = timeline_sink
     folder = timeline_path.parent
     content = {PATH_A: "v1\n"}
+    # The pulls talk to the bound device: every line names it in ``dev``.
+    monkeypatch.setattr(Adb, "_target_device", "emulator-test")
     monkeypatch.setattr(FileExtractionService, "pull_file", _fake_pull_file(content))
     monkeypatch.setattr(watchlist_store, "files_root", lambda: folder / "files")
     app = _WatchlistHarness()
@@ -744,8 +748,27 @@ async def test_pulls_and_checks_are_session_timeline_lines(
     assert (failed["kind"], failed["level"]) == ("pull", "warn")
     assert failed["data"]["ok"] is False
     assert failed["data"]["error"]
+    assert {x["dev"] for x in lines} == {"emulator-test"}
     # The acquisition record names the active label with its kind and seq.
     record = watchlist_store.version_record(v2)
     assert record["mark"]["number"] == 3
     assert record["mark"]["kind"] == "start"
     assert record["mark"]["seq"] == 17
+
+
+def test_pull_and_check_lines_name_the_pulled_device(monkeypatch) -> None:
+    """``files/pull`` and ``files/check`` carry ``dev`` (the adb target the
+    pull talked to), so they never fall into another device's timeline.
+    """
+    from sandroid.core import timeline
+    from sandroid.core.adb import Adb
+    from sandroid.tui.widgets import watchlist_view
+
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    with timeline.capture() as lines:
+        watchlist_view.timeline_pull(PATH_A, "manual", ok=False, error="boom")
+        watchlist_view.timeline_check(PATH_A, "manual", "v001", "no change")
+    assert [(x["kind"], x["dev"]) for x in lines] == [
+        ("pull", "emulator-5556"),
+        ("check", "emulator-5556"),
+    ]

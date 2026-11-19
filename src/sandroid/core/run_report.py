@@ -78,9 +78,14 @@ HASH_ALGORITHMS: tuple[str, ...] = ("md5", "sha256")
 
 #: Files that are still being written after the manifest is created (the log
 #: receives the manifest hash itself; the session timeline keeps growing), so
-#: they cannot be part of it. Patterns without ``/`` match the file name,
-#: patterns with ``/`` the end of the relative path. A live timeline's prefix
-#: seal is recorded in ``manifest.json["timeline_seals"]`` instead.
+#: they cannot be part of it. Log patterns match the file name. The session
+#: timeline patterns match only the real sink locations (see
+#: :func:`_sink_live`): ``timeline.jsonl`` and ``tracking/raw/*`` of a folder
+#: holding a ``.timeline.lock``, at the root or one folder below (a session
+#: folder's device folders); any other file of that name is hashed. A live
+#: timeline's prefix seal is recorded in ``manifest.json["timeline_seals"]``
+#: and every raw file's prefix in ``manifest.json["raw_prefixes"]``;
+#: :func:`verify_hash_manifest` re-checks both.
 LIVE_FILE_PATTERNS: tuple[str, ...] = (
     "sandroid*.log",
     "sandroid*.log.*",
@@ -595,20 +600,77 @@ class ManifestInfo:
     excluded: list[dict[str, str]] = field(default_factory=list)
 
 
-def _live_pattern(rel: str, patterns: tuple[str, ...]) -> str | None:
-    """The first pattern ``rel`` matches (name or path suffix), else None."""
+TIMELINE_LOCK_NAME = ".timeline.lock"
+RAW_PATTERN = "tracking/raw/*"
+#: The patterns that only match a real timeline sink (not by file name).
+_SINK_PATTERNS = frozenset({TIMELINE_FILE_NAME, TIMELINE_LOCK_NAME, RAW_PATTERN})
+
+
+def _sink_live(root: Path, rel: str) -> str | None:
+    """The sink pattern of ``rel`` when it is a live file of a real timeline
+    sink, else None.
+
+    A sink folder is ``root`` itself or one folder below it (``root`` is a
+    device folder or a session folder) that holds ``.timeline.lock``; its
+    ``timeline.jsonl``, its lock and its ``tracking/raw/...`` are live.
+    """
+    parts = rel.split("/")
+    for depth in (0, 1):
+        rest = parts[depth:]
+        if not rest or (depth and not parts[0]):
+            continue
+        folder = root.joinpath(*parts[:depth])
+        if rest == [TIMELINE_LOCK_NAME]:
+            return TIMELINE_LOCK_NAME
+        if not (folder / TIMELINE_LOCK_NAME).is_file():
+            continue
+        if rest == [TIMELINE_FILE_NAME]:
+            return TIMELINE_FILE_NAME
+        if len(rest) >= 3 and rest[:2] == ["tracking", "raw"]:
+            return RAW_PATTERN
+    return None
+
+
+def _live_pattern(
+    rel: str, patterns: tuple[str, ...], root: Path | None = None
+) -> str | None:
+    """The first pattern ``rel`` matches, else None.
+
+    Patterns without ``/`` match the file name, patterns with ``/`` the end
+    of the relative path, except the session timeline's
+    (``timeline.jsonl``, ``.timeline.lock``, ``tracking/raw/*``), which only
+    match a real sink under ``root`` (:func:`_sink_live`).
+    """
     name = rel.rsplit("/", 1)[-1]
     for pat in patterns:
+        if pat in _SINK_PATTERNS:
+            continue
         if "/" in pat:
             if fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(rel, f"*/{pat}"):
                 return pat
         elif fnmatch.fnmatch(name, pat):
             return pat
+    if root is not None and _SINK_PATTERNS.intersection(patterns):
+        hit = _sink_live(root, rel)
+        if hit is not None and hit in patterns:
+            return hit
     return None
 
 
-def _is_live_file(rel: str) -> bool:
-    return _live_pattern(rel, LIVE_FILE_PATTERNS) is not None
+def _is_live_file(rel: str, root: Path | None = None) -> bool:
+    return _live_pattern(rel, LIVE_FILE_PATTERNS, root) is not None
+
+
+def _prefix_entry(full: Path, rel: str) -> dict[str, Any]:
+    """``{rel, bytes, sha256}`` of the current content of a live file."""
+    from sandroid.core import report_engine
+
+    size = full.stat().st_size
+    return {
+        "rel": rel,
+        "bytes": size,
+        "sha256": report_engine.sha256_prefix(full, size),
+    }
 
 
 def _timeline_prefix_seal(full: Path, rel: str) -> dict[str, Any]:
@@ -661,8 +723,10 @@ def write_hash_manifest(
 
     Args:
         result_dir: The run's result folder.
-        exclude_patterns: Basename glob patterns of files still being written
-            (logs). They are listed under ``excluded`` instead of hashed.
+        exclude_patterns: Patterns of files still being written (logs by
+            name; the session timeline only at its real sink location, see
+            :data:`LIVE_FILE_PATTERNS`). They are listed under ``excluded``
+            instead of hashed.
 
     Returns:
         A :class:`ManifestInfo`.
@@ -671,10 +735,11 @@ def write_hash_manifest(
     files: list[dict[str, Any]] = []
     excluded: list[dict[str, str]] = []
     timeline_seals: list[dict[str, Any]] = []
+    raw_prefixes: list[dict[str, Any]] = []
     for full, rel in _iter_result_files(root):
         if rel in (MANIFEST_NAME, SHA256SUMS_NAME):
             continue
-        pattern = _live_pattern(rel, exclude_patterns)
+        pattern = _live_pattern(rel, exclude_patterns, root)
         if pattern is not None:
             excluded.append(
                 {
@@ -689,6 +754,12 @@ def write_hash_manifest(
                     timeline_seals.append(_timeline_prefix_seal(full, rel))
                 except OSError as exc:
                     timeline_seals.append({"rel": rel, "seal_error": str(exc)})
+            elif pattern == RAW_PATTERN and not full.is_symlink():
+                # Raw evidence is append-only: its current prefix is sealed.
+                try:
+                    raw_prefixes.append(_prefix_entry(full, rel))
+                except OSError as exc:
+                    raw_prefixes.append({"rel": rel, "seal_error": str(exc)})
             continue
         if full.is_symlink():
             excluded.append({"path": rel, "reason": f"symlink to {full.readlink()}"})
@@ -715,6 +786,8 @@ def write_hash_manifest(
     }
     if timeline_seals:
         manifest["timeline_seals"] = timeline_seals
+    if raw_prefixes:
+        manifest["raw_prefixes"] = raw_prefixes
     manifest_path = root / MANIFEST_NAME
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
@@ -842,10 +915,58 @@ def verify_hash_manifest(result_dir: str | os.PathLike[str]) -> ManifestCheck:
         | ({MANIFEST_NAME} if sums_lost else set())
     )
     for _full, rel in _iter_result_files(root):
-        if rel in listed or _is_live_file(rel):
+        if rel in listed or _is_live_file(rel, root):
             continue
         check.unlisted.append(rel)
+    if manifest_path.is_file():
+        _verify_prefixes(root, manifest_path, check)
     return check
+
+
+def _verify_prefixes(root: Path, manifest_path: Path, check: ManifestCheck) -> None:
+    """Re-check the sealed prefixes of the live files (``timeline_seals``,
+    ``raw_prefixes``): sha256 of ``file[0:bytes]``. A file that is gone is
+    missing; one that is shorter or whose prefix changed is mismatched.
+    """
+    from sandroid.core import report_engine
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return  # unreadable: already reported through SHA256SUMS
+    if not isinstance(manifest, dict):
+        return
+    entries = [
+        *(manifest.get("timeline_seals") or []),
+        *(manifest.get("raw_prefixes") or []),
+    ]
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get("rel"):
+            continue
+        rel, digest = str(entry["rel"]), entry.get("sha256")
+        if not isinstance(digest, str):
+            continue  # recorded with a seal_error: nothing to compare
+        path = root / rel
+        if not path.is_file():
+            if rel not in check.missing:
+                check.missing.append(rel)
+            continue
+        try:
+            n_bytes = int(entry.get("bytes") or 0)
+            same = path.stat().st_size >= n_bytes and (
+                report_engine.sha256_prefix(path, n_bytes) == digest.lower()
+            )
+        except (OSError, TypeError, ValueError):
+            same = False
+        if not same:
+            logger.error(
+                "%s changed: the SHA-256 of its first %s bytes no longer "
+                "matches the manifest",
+                rel,
+                entry.get("bytes"),
+            )
+            if rel not in check.mismatched:
+                check.mismatched.append(rel)
 
 
 # ---------------------------------------------------------------------------
@@ -1390,8 +1511,15 @@ def report_from_folder(
         data = json.loads(written["json"].read_text(encoding="utf-8"))
         written["pdf"] = report_render.render_pdf(data, pdf, base_dir=out_dir)
     except BaseException:
-        # Do not leave half-written reports behind (they did not exist before).
-        for path in (*written.values(), pdf):
+        # Do not leave half-written reports behind (they did not exist before:
+        # the stem is free or the default names were checked). write_report
+        # may fail after writing the JSON, before it returns anything.
+        for path in (
+            *written.values(),
+            pdf,
+            out_dir / f"{stem}.json",
+            out_dir / f"{stem}.md",
+        ):
             Path(path).unlink(missing_ok=True)
         raise
     outcome = ReportFromFolderOutcome(

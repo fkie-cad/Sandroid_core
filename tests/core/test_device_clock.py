@@ -474,3 +474,38 @@ async def test_header_device_clock_is_amber_and_hidden_when_close(device, target
         assert label.styles.display == "block"
         assert label.styles.color.hex.lower() == "#fbbf24"
         assert "−75 min ⚠" in str(label.render())
+
+
+def test_a_sample_measured_before_a_world_change_stays_in_the_old_world(
+    monkeypatch, device
+):
+    """A measurement that finishes after ``begin_epoch`` (a snapshot load
+    started meanwhile) neither reopens the closed epoch nor becomes the
+    newest sample or the jump reference; its line is marked stale.
+    """
+    device_clock.record("device-connect", SERIAL)
+    logged = dict(device_clock._LOGGED)
+    last = device_clock.last_sample(SERIAL)
+    real_best = device_clock._best
+
+    def best_then_load(*args):
+        sample = real_best(*args)
+        device.host += 1.0
+        device.mono_off += 300.0  # the load moved the clocks
+        device_clock.begin_epoch(SERIAL)
+        return sample
+
+    monkeypatch.setattr(device_clock, "_best", best_then_load)
+    line = device_clock.record("periodic", SERIAL)
+    assert line["stale"] is True
+    assert line["jump"] is False
+    assert logged == device_clock._LOGGED
+    assert device_clock.last_sample(SERIAL) == last
+    (epoch,) = device_clock._EPOCHS[SERIAL]
+    assert "closed_host" in epoch  # still closed: fresh times stay unmapped
+    assert device_clock.to_host_time(SERIAL, 5000.0) is None
+    # Direct: a late sample from before the barrier is refused.
+    with device_clock._LOCK:
+        assert not device_clock._add_to_epochs(SERIAL, {
+            "off_mono": epoch["off_mono"], "dev_mono": 1.0, "err_ms": 1.0,
+            "_host": epoch["closed_host"] - 0.5})  # fmt: skip
