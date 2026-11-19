@@ -298,7 +298,7 @@ def _phrase(transform: str) -> str:
         return f"{inner} {verb} to {places} decimals"
     if name == "e7":
         return f"{inner} times 10 million"
-    if name in ("double_le", "double_be", "float_le"):
+    if name in ("double_le", "double_be"):
         size = "float" if name.startswith("float") else "double"
         return f"{inner} as a binary {size}"
     if name == "url":
