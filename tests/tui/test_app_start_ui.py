@@ -8,8 +8,7 @@ by condition (no fixed sleeps).
 
 from __future__ import annotations
 
-import time
-
+from pilot_helpers import settle, until
 from textual.app import App
 
 from sandroid import services
@@ -22,22 +21,16 @@ from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
 PKG = "org.wikipedia"
 
 
-async def _until(pilot, cond, timeout: float = 10.0):
-    deadline = time.monotonic() + timeout
-    while not cond():
-        assert time.monotonic() < deadline, "condition not met"
-        await pilot.pause(0.01)
-
-
 class _Harness(App):
     def compose(self):
         yield SpotlightPanel(id="spotlight")
 
 
-def _panel_env(monkeypatch, *, pid=77):
+def _panel_env(monkeypatch, *, pid=77, tools=()):
     svc = SpotlightService(job_manager_factory=lambda: None)
     svc.set_app(PKG, pid=pid)
     monkeypatch.setattr(services, "get_spotlight_service", lambda: svc)
+    monkeypatch.setattr(app_start, "app_tools", lambda package: tuple(tools))
     monkeypatch.setattr(app_lens.AppLensSections, "track", lambda *a, **k: None)
     monkeypatch.setattr(SpotlightPanel, "_poll_running_state", lambda self: None)
     ran: list[str] = []
@@ -50,7 +43,7 @@ def _panel_env(monkeypatch, *, pid=77):
 
 
 async def test_shift_p_on_a_running_app_asks_and_no_keeps_it(monkeypatch):
-    _svc, ran = _panel_env(monkeypatch)
+    _svc, ran = _panel_env(monkeypatch, tools=("Dexray-Intercept", "FriTap"))
     monkeypatch.setattr(
         app_start,
         "probe_liveness",
@@ -60,13 +53,14 @@ async def test_shift_p_on_a_running_app_asks_and_no_keeps_it(monkeypatch):
     async with app.run_test(size=(120, 30)) as pilot:
         panel = app.query_one(SpotlightPanel)
         panel.action_start_paused()
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
         modal = app.screen
         assert modal.title_text == f"Restart {PKG} paused?"
         assert "(pid 77)" in modal.message_text
+        assert modal.message_text.endswith("This stops: Dexray-Intercept, FriTap.")
         assert modal.guard_typing is True
         await pilot.press("n")
-        await _until(pilot, lambda: not isinstance(app.screen, ConfirmModal))
+        await until(pilot, lambda: not isinstance(app.screen, ConfirmModal))
         assert ran == []  # kept running
 
 
@@ -80,22 +74,53 @@ async def test_shift_p_on_a_stopped_app_starts_paused_without_asking(monkeypatch
     app = _Harness()
     async with app.run_test(size=(120, 30)) as pilot:
         app.query_one(SpotlightPanel).action_start_paused()
-        await _until(pilot, lambda: ran == ["start-paused"])
+        await until(pilot, lambda: ran == ["start-paused"])
         assert not isinstance(app.screen, ConfirmModal)
 
 
-async def test_emulator_bypass_on_a_running_app_offers_a_restart(monkeypatch):
-    _svc, ran = _panel_env(monkeypatch)
+class _EmulatorBypass:
+    """BypassService double: toggling the emulator category goes live."""
+
+    def __init__(self):
+        self.on: set[str] = set()
+
+    def on_categories(self):
+        return sorted(self.on)
+
+    def toggle(self, category):
+        self.on.add(category)
+        return True, "Emulator (exp.) active"
+
+    def is_active(self, category):
+        return category in self.on
+
+    def applies_at_spawn(self, category):
+        return category == "emulator"
+
+    def display_name(self, category):
+        return "Emulator (exp.)"
+
+
+async def test_b_emulator_on_a_running_app_offers_a_restart(monkeypatch):
+    """The b toggle → worker → _post → restart offer, listing the tools."""
+    _svc, ran = _panel_env(monkeypatch, tools=("FriTap",))
+    bypass = _EmulatorBypass()
+    monkeypatch.setattr(SpotlightPanel, "_bypass", staticmethod(lambda: bypass))
+    monkeypatch.setattr(
+        SpotlightPanel, "_frida_server_running", staticmethod(lambda: True)
+    )
     app = _Harness()
     async with app.run_test(size=(120, 30)) as pilot:
+        await settle(pilot)
         panel = app.query_one(SpotlightPanel)
-        panel._offer_restart_for("emulator")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        panel.action_toggle_bypass("emulator")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
         assert app.screen.title_text == f"Restart {PKG} now?"
         assert app.screen.yes_label == "Restart"
         assert app.screen.no_label == "Keep running"
+        assert app.screen.message_text.endswith("This stops: FriTap.")
         await pilot.press("n")
-        await _until(pilot, lambda: not isinstance(app.screen, ConfirmModal))
+        await until(pilot, lambda: not isinstance(app.screen, ConfirmModal))
         assert ran == []
 
 
@@ -126,7 +151,7 @@ async def test_objection_warns_while_spawn_would_restart_the_app() -> None:
 
     app = Harness()
     async with app.run_test(size=(100, 30)) as pilot:
-        await _until(pilot, lambda: isinstance(app.screen, ObjectionModal))
+        await until(pilot, lambda: isinstance(app.screen, ObjectionModal))
         modal = app.screen
         assert modal.config.spawn_mode is False  # running: attach by default
         assert modal._warning_text() == ""

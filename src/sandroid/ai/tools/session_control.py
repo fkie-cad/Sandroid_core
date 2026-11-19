@@ -186,23 +186,34 @@ def get_spotlight_app() -> dict[str, Any]:
 
 
 def _in_subtask() -> bool:
-    """True when the current tool call runs inside an AI subtask."""
+    """True when the current tool call runs inside an AI subtask.
+
+    Fails closed: when the owner or the subtask set cannot be read, the call
+    counts as a subtask's.
+    """
     try:
         from sandroid.ai.loop import _current_owner_id
-        from sandroid.ai.subtasks import get_subtask_manager
 
         owner = _current_owner_id.get()
-        return owner is not None and owner in get_subtask_manager().active_owner_ids()
     except Exception:
-        return False
+        return True
+    if owner is None:
+        return False  # not a chat turn (direct call, test)
+    try:
+        from sandroid.ai.subtasks import get_subtask_manager
+
+        return owner in get_subtask_manager().active_owner_ids()
+    except Exception:
+        return True
 
 
 @sandroid_tool(
     name="start_spotlight_app",
     description=(
         "Start, resume or restart the spotlight app with the armed bypasses. "
-        "fresh=true RESTARTS a running app (force-stop + spawn); without it a "
-        "running app is left alone. paused=true holds the new process paused "
+        "fresh=true RESTARTS a running app (force-stop + spawn) and STOPS the "
+        "tools running on it (friTap, Dexray, ...; armed bypasses are "
+        "re-applied); without it a running app is left alone. paused=true holds the new process paused "
         "until resumed (Android ends the hold after about 10 s). The analyst "
         "approves every call."
     ),
@@ -239,9 +250,9 @@ def start_spotlight_app(fresh: bool = False, paused: bool = False) -> dict[str, 
     Real integration points: :func:`sandroid.services.app_start.start_app`,
     :func:`~sandroid.services.app_start.restart_app` and
     :func:`~sandroid.services.app_start.resume_app` -- the same code the App
-    lens keys run. The approval gate is the consent for ``fresh``; a
-    restart is refused inside a subtask (a privileged subtask is blanket
-    approved, so it would kill the app without a per-call prompt).
+    lens keys run. The approval gate is the consent for ``fresh``. The tool
+    is refused inside a subtask (a privileged subtask is blanket approved,
+    so it could restart the app without a per-call prompt).
 
     Args:
         fresh: Restart a running app.
@@ -252,11 +263,18 @@ def start_spotlight_app(fresh: bool = False, paused: bool = False) -> dict[str, 
         "pid": int | None, "message": str}``.
 
     Raises:
-        ToolExecutionError: No spotlight app is selected, or a restart was
-            asked for inside a subtask.
+        ToolExecutionError: No spotlight app is selected, or the call runs
+            inside a subtask.
     """
     from sandroid.services import app_start, get_spotlight_service
 
+    if _in_subtask():
+        # Orchestrator-only (like start_replay): a subtask could otherwise
+        # restart the app in two steps (kill_process, then this).
+        raise ToolExecutionError(
+            "start_spotlight_app is not allowed inside a subtask; ask the "
+            "orchestrator/analyst to start the app"
+        )
     service = get_spotlight_service()
     package = service.get_effective_package()
     if not package:
@@ -270,11 +288,6 @@ def start_spotlight_app(fresh: bool = False, paused: bool = False) -> dict[str, 
             False, service, f"could not tell whether {package} is running"
         )
     running = pid is not None or held
-    if fresh and running and _in_subtask():
-        raise ToolExecutionError(
-            "start_spotlight_app(fresh=true) restarts a running app and is not "
-            "allowed inside a subtask; ask the orchestrator/analyst to do it"
-        )
     if held and not fresh:
         if paused:
             return _start_result(False, service, f"{package} is already paused")

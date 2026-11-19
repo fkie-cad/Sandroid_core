@@ -954,6 +954,7 @@ class SpotlightPanel(Widget):
         from sandroid.tui.modals import ConfirmModal
 
         name = self._bypass().display_name(category)
+        stops = self._restart_stops(package)
 
         def on_result(yes: bool | None) -> None:
             if yes:
@@ -965,7 +966,7 @@ class SpotlightPanel(Widget):
                 message=(
                     f"{name} is active, but checks {package} ran at startup "
                     "missed it. Restart the app so they see it too? No keeps "
-                    "it running as it is."
+                    f"it running as it is.{stops}"
                 ),
                 yes_label="Restart",
                 no_label="Keep running",
@@ -973,6 +974,16 @@ class SpotlightPanel(Widget):
             ),
             on_result,
         )
+
+    @staticmethod
+    def _restart_stops(package: str) -> str:
+        """`` This stops: …`` -- the tools a restart of ``package`` stops."""
+        from sandroid.services import app_start
+
+        try:
+            return app_start.stops_sentence(app_start.app_tools(package))
+        except Exception:
+            return ""
 
     # -- lifecycle actions (main-thread entry points) ---------------------
 
@@ -1129,7 +1140,7 @@ class SpotlightPanel(Widget):
                     f"{package} is running (pid {pid}). Start paused "
                     "force-stops it and starts it again, held paused with the "
                     "armed bypasses until ␣ (Android ends the hold after "
-                    "about 10 s)."
+                    f"about 10 s).{self._restart_stops(package)}"
                 ),
                 yes_label="Restart paused",
                 no_label="Keep running",

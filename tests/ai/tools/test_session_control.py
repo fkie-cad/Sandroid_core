@@ -349,11 +349,12 @@ def test_start_spotlight_app_without_an_app_raises(lifecycle):
         session_control.start_spotlight_app()
 
 
-def test_start_spotlight_app_fresh_inside_a_subtask_refuses(lifecycle, monkeypatch):
+@pytest.mark.parametrize("fresh", [True, False])
+def test_start_spotlight_app_inside_a_subtask_refuses(lifecycle, monkeypatch, fresh):
+    """Orchestrator-only: closes kill_process + start_spotlight_app."""
     from sandroid.ai import subtasks
 
-    lifecycle.live["value"] = (lifecycle.app_start.Liveness.RUNNING, 77)
-    lifecycle.spot.pid = 77
+    lifecycle.live["value"] = (lifecycle.app_start.Liveness.NOT_RUNNING, None)
     monkeypatch.setattr(
         subtasks,
         "get_subtask_manager",
@@ -362,10 +363,32 @@ def test_start_spotlight_app_fresh_inside_a_subtask_refuses(lifecycle, monkeypat
     token = ai_loop._current_owner_id.set("sub-1")
     try:
         with pytest.raises(ToolExecutionError, match="subtask"):
-            session_control.start_spotlight_app(fresh=True)
+            session_control.start_spotlight_app(fresh=fresh)
     finally:
         ai_loop._current_owner_id.reset(token)
     assert lifecycle.calls == []
+
+
+def test_in_subtask_fails_closed(monkeypatch):
+    from sandroid.ai import subtasks
+
+    def _broken():
+        raise RuntimeError("no manager")
+
+    monkeypatch.setattr(subtasks, "get_subtask_manager", _broken)
+    token = ai_loop._current_owner_id.set("someone")
+    try:
+        assert session_control._in_subtask() is True
+    finally:
+        ai_loop._current_owner_id.reset(token)
+    assert session_control._in_subtask() is False  # no chat turn at all
+
+
+def test_start_spotlight_app_says_it_stops_the_running_tools():
+    from sandroid.ai.tools.registry import get_tool_registry
+
+    spec = get_tool_registry().get_spec("start_spotlight_app")
+    assert "STOPS the tools running on it" in spec.description
 
 
 # =============================================================================
