@@ -1124,7 +1124,13 @@ def test_install_hook_is_a_no_op_without_app_start(service, monkeypatch):
 def test_markers_contract(service, device, monkeypatch):
     seen: list = []
     service.add_markers_listener(lambda fp, markers: seen.append((fp, markers)))
-    assert service.active_markers() is None  # nothing applied yet
+    # Nothing applied yet: the markers come from the profile (no Android ID:
+    # it needs the app's signer).
+    fp0, before = service.active_markers()
+    assert fp0 == ident.fingerprint(service.active_profile())
+    assert seen[-1] == (fp0, before)  # the first read notifies the scan
+    assert {"gaid", "gps.latitude"} <= {m.id for m in before}
+    assert not [m for m in before if m.id.startswith("android_id")]
     service.apply(SERIAL, "com.example.app")
     fp, markers = service.active_markers()
     assert seen[-1] == (fp, markers)
@@ -1155,6 +1161,40 @@ def test_markers_contract(service, device, monkeypatch):
     # mode off -> None
     monkeypatch.setattr(service.config(), "mode", "off")
     assert service.active_markers() is None
+
+
+def test_restart_in_a_new_session_scans_without_a_re_apply(
+    service, device, env, monkeypatch
+):
+    """A TUI restart starts a new session: the markers come from the profile
+    and the Android ID from the newest apply on this device in another
+    session (nothing is applied to the device).
+    """
+    monkeypatch.setenv("SDROID_FILES_DIR", str(env / "s1" / "dev" / "files"))
+    service.apply(SERIAL, "com.example.app")
+    fp, applied = service.active_markers()
+    by_id = {m.id: m for m in applied}
+    monkeypatch.setenv("SDROID_FILES_DIR", str(env / "s2" / "dev" / "files"))
+    device.calls.clear()
+    fresh = IdentityService()
+    fp2, markers = fresh.active_markers()
+    assert (fp2, markers) == (fp, applied)  # the same profile: its markers
+    assert device.calls == []  # nothing went to the device
+    # The profile changed since: values from it, the Android ID derived
+    # from the token and the signer the earlier apply recorded.
+    profile = service.active_profile()
+    profile.values["device_name"].value = "Changed Phone"
+    service.save(profile)
+    changed = IdentityService()
+    fp3, markers = changed.active_markers()
+    assert fp3 != fp
+    new_by_id = {m.id: m for m in markers}
+    assert new_by_id["android_id"].value == by_id["android_id"].value
+    assert new_by_id["device_name"].value == "Changed Phone"
+    assert device.calls == []
+    # Another profile's apply is not used.
+    monkeypatch.setattr(service.config(), "profile", "nope")
+    assert IdentityService().active_markers() is None
 
 
 def test_describe_lists_per_value_metadata(env):

@@ -843,15 +843,32 @@ class PrivacyScanService:
             if self._identity is not service:
                 service.add_markers_listener(self._on_identity_markers)
                 self._identity = service
-            active = service.active_markers()
+            active = service.active_markers(load=False)
         except Exception:
             logger.debug("privacy scan: identity service failed", exc_info=True)
             return False
         if active:
             self.set_markers(active[0], active[1])
-        else:
-            self.set_markers(None, [])
+            return True
+        self.set_markers(None, [])
+        # The first read (the session's apply record, else the profile) is
+        # file I/O and this runs on the UI thread at startup: read it on a
+        # thread; the service notifies its listeners (this one) when it
+        # finds markers.
+        threading.Thread(
+            target=self._load_identity,
+            args=(service,),
+            name="privacy-identity",
+            daemon=True,
+        ).start()
         return True
+
+    @staticmethod
+    def _load_identity(service: Any) -> None:
+        try:
+            service.active_markers()
+        except Exception:
+            logger.debug("privacy scan: identity markers failed", exc_info=True)
 
     def _on_identity_markers(self, fp: str | None, markers: list[Marker]) -> None:
         try:

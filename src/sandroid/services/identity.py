@@ -46,6 +46,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from glob import escape as glob_escape
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -2270,22 +2271,40 @@ class IdentityService:
     # -- markers ------------------------------------------------------------
 
     def active_markers(self, *, load: bool = True) -> tuple[str, list[Marker]] | None:
-        """``(fingerprint, markers)`` of the profile applied in this session,
-        ``None`` when the mode is off or nothing was applied yet.
+        """``(fingerprint, markers)`` of the active profile, ``None`` when the
+        mode is off (or no profile is set).
+
+        The first call reads the session's newest frozen apply; without one
+        (a TUI restart) the markers come from the profile
+        (:func:`startup_markers`), so the scan runs from the start without
+        re-applying anything to the device.
 
         Args:
             load: Read the session's newest frozen apply the first time
                 (file I/O); ``False`` only answers from memory (UI thread).
         """
-        if self.config().mode != "profile":
+        cfg = self.config()
+        if cfg.mode != "profile":
             return None
+        loaded = False
         with self._lock:
             if self._active is None and not self._loaded_frozen and load:
                 self._loaded_frozen = True
                 self._active = _load_latest_frozen()
-            if self._active is None:
-                return None
-            return self._active[0], list(self._active[1])
+                if self._active is None and cfg.profile:
+                    try:
+                        self._active = startup_markers(self.load(cfg.profile))
+                    except (ProfileError, TemplateError, ValueError):
+                        logger.warning(
+                            "identity: profile %r has no markers", cfg.profile
+                        )
+                loaded = self._active is not None
+            active = self._active
+        if loaded:
+            self._notify_markers()
+        if active is None:
+            return None
+        return active[0], list(active[1])
 
     # -- statuses -----------------------------------------------------------
 
@@ -3397,6 +3416,33 @@ def _tomlable(value: Any) -> Any:
     return value
 
 
+#: Frozen apply records of other sessions looked at, at most (newest first).
+STARTUP_RECORDS_MAX = 200
+
+
+def _frozen_markers(data: dict[str, Any]) -> list[Marker]:
+    return [
+        Marker(
+            m["id"],
+            m["value"],
+            m.get("kind", "text"),
+            m.get("label", ""),
+            tuple(m.get("forms") or ()),
+            m.get("group", ""),
+            m.get("tag", ""),
+        )
+        for m in data.get("markers") or []
+    ]
+
+
+def _read_frozen(path: Path) -> dict[str, Any] | None:
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _load_latest_frozen() -> tuple[str, list[Marker]] | None:
     """The newest frozen apply of the live session (after a TUI restart)."""
     try:
@@ -3407,24 +3453,87 @@ def _load_latest_frozen() -> tuple[str, list[Marker]] | None:
     except Exception:
         return None
     for path in reversed(files):
+        data = _read_frozen(path)
+        if data is None:
+            continue
         try:
-            data = tomllib.loads(path.read_text(encoding="utf-8"))
-            markers = [
-                Marker(
-                    m["id"],
-                    m["value"],
-                    m.get("kind", "text"),
-                    m.get("label", ""),
-                    tuple(m.get("forms") or ()),
-                    m.get("group", ""),
-                    m.get("tag", ""),
-                )
-                for m in data.get("markers") or []
-            ]
-            return str(data.get("fingerprint") or ""), markers
-        except (OSError, ValueError, KeyError, TypeError):
+            return str(data.get("fingerprint") or ""), _frozen_markers(data)
+        except (KeyError, TypeError):
             continue
     return None
+
+
+def _latest_frozen_elsewhere(profile_id: str) -> dict[str, Any] | None:
+    """The newest frozen apply of ``profile_id`` on this device in another
+    session (``<results>/<session>/<device folder>/identity/*.toml``).
+    """
+    try:
+        from sandroid.core.timeline import timeline_folder
+
+        here = timeline_folder()
+        pattern = f"*/{glob_escape(here.name)}/identity/[0-9]*.toml"
+        files = [p for p in here.parent.parent.glob(pattern) if p.parent.parent != here]
+    except Exception:
+        return None
+
+    def mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    for path in sorted(files, key=mtime, reverse=True)[:STARTUP_RECORDS_MAX]:
+        data = _read_frozen(path)
+        profile = (data or {}).get("profile") or {}
+        if isinstance(profile, dict) and profile.get("id") == profile_id:
+            return data
+    return None
+
+
+def startup_markers(profile: Profile) -> tuple[str, list[Marker]]:
+    """``(fingerprint, markers)`` of ``profile`` without an apply in this
+    session (a TUI restart with the mode on): nothing is applied to the
+    device.
+
+    The values come from the profile itself. An Android ID is per app and
+    signing certificate (``ssaid_for(token, seed, signer)``), so it needs the
+    app's signer: that comes from the newest apply of this profile on this
+    device in another session. When that apply had the same fingerprint its
+    markers are used as they are.
+    """
+    fp = fingerprint(profile)
+    record = _latest_frozen_elsewhere(profile.id)
+    if record is not None and str(record.get("fingerprint") or "") == fp:
+        try:
+            return fp, _frozen_markers(record)
+        except (KeyError, TypeError):
+            pass
+    ssaids: dict[str, str] = {}
+    primary = None
+    vs = profile.values.get("android_id")
+    entries = (record or {}).get("ssaid") or {}
+    if vs is not None and vs.enabled and isinstance(entries, dict):
+        applied_primary = next(
+            (
+                m.get("value")
+                for m in (record or {}).get("markers") or []
+                if isinstance(m, dict) and m.get("id") == vs.id
+            ),
+            None,
+        )
+        for pkg, entry in sorted(entries.items()):
+            if not isinstance(entry, dict):
+                continue
+            pinfo = PackageInfo(pkg, None, str(entry.get("signer") or ""))
+            try:
+                value = IdentityService._ssaid_value(profile, vs, pkg, pinfo)
+            except (TemplateError, ValueError):
+                value = None
+            if value:
+                ssaids[pkg] = value
+                if entry.get("value") == applied_primary:
+                    primary = pkg
+    return fp, markers_for(profile, ssaids, primary)
 
 
 def get_identity_service() -> IdentityService:

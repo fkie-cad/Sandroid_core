@@ -486,6 +486,13 @@ def test_retro_scan_is_idempotent_per_fingerprint(svc, flow_dir, folder):
         assert again.flush()
         assert len(again.hits()) == len(first)
         assert len(coverage_file.read_text().splitlines()) == n_cov
+        # A re-apply of the same profile (markers from the profile at
+        # startup, then the apply adds the Android ID) rescans nothing.
+        extra = Marker("android_id", "3f9a1c07deadbeef", kind="hex_id", label="AID")
+        again.set_markers(FP, [*MARKERS, extra])
+        assert again.flush()
+        assert len(again.hits()) == len(first)
+        assert len(coverage_file.read_text().splitlines()) == n_cov
         # A new profile rescans everything once.
         again.set_markers("fp-2", MARKERS)
         assert again.flush()
@@ -890,3 +897,39 @@ def test_net_flow_source_sinks_get_none_when_policy_drops_the_line(tmp_path, flo
         ts.NetFlowSource.remove_sink(sink)
     assert lines == []
     assert got == [("f1", None)]
+
+
+def test_attach_identity_reads_the_markers_off_the_calling_thread(svc, monkeypatch):
+    """Startup (UI thread): the first marker read is file I/O, so it runs on
+    a thread; the identity service's notification turns the scan on.
+    """
+    import threading
+
+    from sandroid.services import identity
+
+    calls: list = []
+
+    class _Identity:
+        def __init__(self) -> None:
+            self.listeners: list = []
+
+        def add_markers_listener(self, cb) -> None:
+            self.listeners.append(cb)
+
+        def active_markers(self, *, load=True):
+            calls.append((load, threading.current_thread().name))
+            if not load:
+                return None
+            for cb in self.listeners:
+                cb(FP, MARKERS)
+            return FP, MARKERS
+
+    fake = _Identity()
+    monkeypatch.setattr(identity, "get_identity_service", lambda: fake)
+    assert svc.attach_identity()
+    assert wait_for(lambda: svc.is_active)
+    assert svc.fingerprint == FP
+    me = threading.current_thread().name
+    assert calls[0] == (False, me)
+    assert calls[1][0] is True
+    assert calls[1][1] != me
