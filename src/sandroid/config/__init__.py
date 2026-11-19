@@ -97,6 +97,10 @@ class ConfigUpdateError(ValueError):
     """Raised by update_config() when the requested changes are invalid."""
 
 
+#: Deprecated dotted keys update_config() still takes -> their new names.
+_DEPRECATED_KEYS = {"emulator.sync_clock_after_snapshot": "emulator.sync_device_clock"}
+
+
 def update_config(
     updates: dict[str, Any], persist: bool = True
 ) -> tuple[SandroidConfig, Path | None]:
@@ -129,7 +133,7 @@ def update_config(
     candidate_dict = live.model_dump()
     applied: list[tuple[str, ...]] = []
     for key, value in updates.items():
-        parts = tuple(key.split("."))
+        parts = tuple(_DEPRECATED_KEYS.get(key, key).split("."))
         if len(parts) == 1:
             if parts[0] not in type(live).model_fields:
                 continue

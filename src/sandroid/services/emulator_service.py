@@ -718,17 +718,19 @@ class EmulatorService:
             # was sometimes too short (a race) and often too long (needless
             # latency on a device that recovers quickly).
             self._wait_for_device_ready(adb, serial)
+            # The snapshot also restores the kernel's SELinux mode. One saved
+            # before startup's ``setenforce 0`` comes back Enforcing, and then
+            # root binder calls (settings, dumpsys, screencap, frida) fail with
+            # FAILED_TRANSACTION until Sandroid is restarted. Re-apply it
+            # first: the clock step's root reads of /proc/timer_list and its
+            # ``date`` may be denied under Enforcing.
+            self._restore_selinux_permissive(adb, serial)
             # A snapshot restores the guest clock to the moment it was saved,
             # so every revert rewinds device time (minutes after a few
             # replays), skewing file timestamps / the timeline against the
             # host. Record the offset in the session timeline and, with
-            # ``emulator.sync_clock_after_snapshot`` on, set it to host time.
+            # ``emulator.sync_device_clock`` on, set it to host time.
             self._record_device_clock(adb, name, serial)
-            # The snapshot also restores the kernel's SELinux mode. One saved
-            # before startup's ``setenforce 0`` comes back Enforcing, and then
-            # root binder calls (settings, dumpsys, screencap, frida) fail with
-            # FAILED_TRANSACTION until Sandroid is restarted. Re-apply it.
-            self._restore_selinux_permissive(adb, serial)
             # ...and the device settings, including ``http_proxy``: a
             # snapshot saved without the proxy drops mitmproxy's device
             # proxy, so the replays were never intercepted. Re-apply it.
@@ -747,7 +749,8 @@ class EmulatorService:
     ) -> None:
         """Best-effort: :func:`sandroid.core.device_clock.after_snapshot_load`
         (``snapshot-load`` sample, the optional clock sync, the warnings).
-        Never raises.
+        The service's adb is only the one-shot fallback of the ``date``
+        commands (the persistent clock shell runs them). Never raises.
         """
         try:
             from sandroid.core import device_clock

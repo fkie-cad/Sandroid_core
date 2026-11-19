@@ -19,10 +19,11 @@ device_name = "Pixel_6_Pro_API_31"
 # Sandroid stops the emulator ("kill") or only warns ("warn"). 0 disables it.
 max_host_memory_gb = 10
 memory_guard_action = "kill"
-# After every snapshot load, set the device clock to host time (root `date`)
-# when it is more than 1 s off; the offset is recorded in the session timeline
-# either way.
-sync_clock_after_snapshot = true
+# At session start and after every snapshot load, set the device clock to
+# host time (root `date`) when it is more than 1 s off; the offset is recorded
+# in the session timeline either way. (Old name, still read:
+# sync_clock_after_snapshot.)
+sync_device_clock = true
 
 [frida]
 server_auto_start = true

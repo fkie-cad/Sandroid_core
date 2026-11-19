@@ -456,7 +456,7 @@ def test_the_config_listener_writes_a_policy_line(monkeypatch):
     monkeypatch.setattr(config_mod, "_config_instance", SandroidConfig())
     with timeline.capture() as lines:
         config_mod.update_config({"timeline.count_window_s": 7.0}, persist=False)
-        config_mod.update_config({"emulator.sync_clock_after_snapshot": False},
+        config_mod.update_config({"emulator.sync_device_clock": False},
                                  persist=False)  # fmt: skip
     (policy,) = lines
     assert (policy["src"], policy["kind"]) == ("sandroid", "policy")

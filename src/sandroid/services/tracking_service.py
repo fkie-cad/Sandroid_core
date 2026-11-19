@@ -3136,6 +3136,7 @@ class TrackingService:
         while deadline is None or time.monotonic() < deadline:
             if deadline is None and ready():  # type: ignore[misc]
                 deadline = time.monotonic() + wait_ms / 1000.0
+                prev = None  # stability counts from here (see below)
             if not full_next:
                 time.sleep(cfg.settle_interval_ms / 1000.0)
             if abort is not None and abort():
@@ -3149,10 +3150,15 @@ class TrackingService:
             h1 = time.time()
             if r is None:
                 break
-            stable = r.hash == prev
-            prev = r.hash
             if deadline is None and ready():  # type: ignore[misc]
                 deadline = time.monotonic() + wait_ms / 1000.0
+                # Stability counts from here: a frame sampled while the
+                # references were pending (e.g. a ripple that the late
+                # pre-change hash also saw) must not settle the wait with
+                # the first sample after them.
+                prev = None
+            stable = r.hash == prev
+            prev = r.hash
             if deadline is None:
                 stable = False  # no decision before the references are in
                 continue

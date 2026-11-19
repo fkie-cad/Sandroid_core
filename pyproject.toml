@@ -80,7 +80,7 @@ dependencies = [
     "rich>=13.0.0",
     "wcwidth>=0.2.13",
     "thefuzz>=0.22.1",
-    "textual>=6.2,<9",  # tested on 6.2.1 and 8.2.8
+    "textual>=8.2,<9",  # tested on 8.2.x
     # The default TUI imports the AI chat panel, which needs the MCP client.
     # mcp 2.x renamed FastMCP and changed the client API -> stay on 1.x.
     "mcp>=1.9.0,<2",

@@ -1179,6 +1179,109 @@ class TestGapFillRefusesThePreviousScreen:
 # ---------------------------------------------------------------------------
 
 
+class TestClockSync:
+    """Coverage → Clock quality: the clock-sync policy line and the caveat."""
+
+    STEM = "Device clock synced to host at session start and after snapshot loads"
+
+    def _text(self, tmp_path, *clock_lines) -> str:
+        tl = TimelineFixture(tmp_path / "dev")
+        tl.add(0, "sandroid", "open", data={"session_id": SESSION_ID})
+        for sec, kind, data in clock_lines:
+            tl.add(sec, "clock", kind, data=data)
+        tl.write()
+        doc = report_engine.build_report(
+            timeline=tl.path,
+            seal=_fake_seal_file(tl.path),
+            scope=report_engine.ReportScope(),
+            bundle_dir=None,
+        )
+        return "\n".join(_sentences(doc))
+
+    def test_policy_on_and_syncs_counted(self, tmp_path, fake_timeline):
+        text = self._text(
+            tmp_path,
+            (1, "sample", {"reason": "device-connect", "sync_policy": True}),
+            (
+                2,
+                "sync",
+                {"reason": "sync", "trigger": "session-start", "ok": True, "sets": 1},
+            ),
+            (
+                5,
+                "jump",
+                {"reason": "snapshot-load", "sync_policy": True, "snapshot": "clean"},
+            ),
+            (
+                6,
+                "sync",
+                {
+                    "reason": "sync",
+                    "trigger": "snapshot-load",
+                    "snapshot": "clean",
+                    "ok": False,
+                    "sets": 1,
+                },
+            ),
+        )
+        assert f"{self.STEM}: yes." in text
+        assert (
+            "2 clock syncs (1 at session start, 1 after snapshot loads), "
+            "1 failed (the offset was recorded instead)." in text
+        )
+        assert report_engine.CLOCK_CAVEAT in text
+
+    def test_policy_on_without_needed_sync(self, tmp_path, fake_timeline):
+        text = self._text(
+            tmp_path,
+            (1, "sample", {"reason": "device-connect", "sync_policy": True}),
+        )
+        assert f"{self.STEM}: yes." in text
+        assert "No sync was needed" in text
+
+    def test_policy_off(self, tmp_path, fake_timeline):
+        text = self._text(
+            tmp_path,
+            (1, "sample", {"reason": "device-connect", "sync_policy": False}),
+        )
+        assert f"{self.STEM}: no." in text
+        assert "No sync was needed" not in text
+
+    def test_policy_changed(self, tmp_path, fake_timeline):
+        text = self._text(
+            tmp_path,
+            (1, "sample", {"reason": "device-connect", "sync_policy": True}),
+            (5, "jump", {"reason": "snapshot-load", "sync_policy": False}),
+        )
+        assert f"{self.STEM}: partly" in text
+
+    def test_legacy_shape(self, tmp_path, fake_timeline):
+        """a080e46 lines: no sync_policy, no trigger -> snapshot-load syncs."""
+        text = self._text(
+            tmp_path,
+            (5, "jump", {"reason": "snapshot-load", "snapshot": "clean"}),
+            (6, "sync", {"reason": "sync", "snapshot": "clean", "ok": True}),
+        )
+        assert f"{self.STEM}: after snapshot loads" in text
+        assert "1 clock sync (0 at session start, 1 after snapshot loads)." in text
+
+    def test_nothing_recorded(self, tmp_path, fake_timeline):
+        text = self._text(tmp_path)
+        assert f"{self.STEM}: not recorded in this timeline." in text
+        assert report_engine.CLOCK_CAVEAT in text
+
+    def test_caveat_without_timeline_lines(self):
+        ctx = report_engine.ReportContext(
+            scope=report_engine.ReportScope(),
+            options=report_engine.ReportOptions(),
+            masked=False,
+            generated_at="2026-11-19T12:00:00+00:00",
+        )
+        doc = report_engine.build_coverage(ctx)
+        items = [i for b in doc["blocks"] if b["type"] == "list" for i in b["items"]]
+        assert report_engine.CLOCK_CAVEAT in items
+
+
 class TestCoverage:
     def test_sentences_for_each_interval_type(self, session):
         text = "\n".join(_sentences(_build(session)))

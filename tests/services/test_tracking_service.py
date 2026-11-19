@@ -2780,6 +2780,37 @@ def test_a_transition_back_to_the_old_screen_is_no_fallback(env, cfg):
     assert all(f.startswith("fade-") for f in stats["full"])
 
 
+def test_stability_counts_only_from_samples_after_the_references(env):
+    """The settle wait may not end on a frame it saw while the old-screen
+    references were pending: the first sample after them is compared with
+    nothing, not with a pending-phase sample (deterministic version of the
+    race behind the ripple test above: two samples of a short ripple, one
+    on each side of ``ready()``, used to settle the wait on the ripple).
+    """
+    svc = env[0]
+    frames = iter(["ripple", "ripple", "fade-1", "home", "home", "home"])
+    sampled: list[str] = []
+
+    class _Helper:
+        def shot(self, *, hash_only=False, timeout=5.0):
+            f = next(frames, "home")
+            sampled.append(f)
+            return ShotResult(1000.0, 1080, 2424, f, 3.0, None, None)
+
+    cfg = SimpleNamespace(settle_interval_ms=1, settle_max_ms=200)
+    st = svc._settle_change(
+        _Helper(),
+        cfg,
+        lambda: {"home"},
+        max_ms=200.0,
+        ready=lambda: len(sampled) >= 2,  # the references arrive with sample 2
+        fresh=lambda frame: True,
+    )
+    assert sampled[:2] == ["ripple", "ripple"]
+    assert st["last"] != "ripple" or not st["stable"]
+    assert len(sampled) > 2  # the second ripple sample did not end the wait
+
+
 def test_a_settling_screen_with_a_fallback_survives_a_newer_screen(env, cfg):
     """A newer screen supersedes a still-settling one: its fallback, taken
     before the newer event, is stored; the newer screen gets its own shot.
