@@ -30,7 +30,6 @@ def test_from_sandroid_config_defaults_map_correctly():
     assert rc.show_deleted == cfg.analysis.show_deleted_files
     assert rc.hash_files == cfg.analysis.hash_files
     assert rc.pull_apk == cfg.analysis.list_apks
-    assert rc.screenshot_interval == cfg.analysis.screenshot_interval
     assert rc.whitelist is None
     assert rc.results_path == str(cfg.paths.results_path)
     assert rc.raw_results_path == str(cfg.paths.raw_results_path)
@@ -64,7 +63,6 @@ def test_from_sandroid_config_non_default_fields():
             show_deleted_files=True,
             hash_files=True,
             list_apks=True,
-            screenshot_interval=7,
         ),
         paths=PathConfig(
             results_path="/tmp/results", raw_results_path="/tmp/results/raw"
@@ -80,7 +78,6 @@ def test_from_sandroid_config_non_default_fields():
     assert rc.show_deleted is True
     assert rc.hash_files is True
     assert rc.pull_apk is True
-    assert rc.screenshot_interval == 7
     # whitelist carries the file path as a string.
     assert rc.whitelist == "/tmp/whitelist.txt"
     assert rc.results_path == str(cfg.paths.results_path)
@@ -137,19 +134,6 @@ def test_from_analysis_config_field_maps():
     assert rc.pull_apk is True
     assert rc.noise_filter is True
     assert rc.whitelist == ["a", "b"]
-
-
-def test_from_analysis_config_screenshot_gated_by_take_screenshots():
-    """screenshot_interval is None unless take_screenshots is set."""
-    off = RunConfig.from_analysis_config(
-        AnalysisConfig(take_screenshots=False, screenshot_interval=9)
-    )
-    assert off.screenshot_interval is None
-
-    on = RunConfig.from_analysis_config(
-        AnalysisConfig(take_screenshots=True, screenshot_interval=9)
-    )
-    assert on.screenshot_interval == 9
 
 
 # ---------------------------------------------------------------------------

@@ -250,9 +250,6 @@ class AnalysisConfig(BaseModel):
             "app always is)"
         ),
     )
-    screenshot_interval: int | None = Field(
-        default=None, ge=1, description="Screenshot interval in seconds"
-    )
     hash_files: bool = Field(
         default=False, description="Generate MD5 hashes of changed/new files"
     )

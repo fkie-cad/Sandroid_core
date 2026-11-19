@@ -304,51 +304,48 @@ Memory dumping and analysis using Frida.
    # Dump process memory
    fridump.dump_process("com.target.app")
 
-PDF Report Generation
----------------------
+Report Engine
+-------------
 
-.. automodule:: sandroid.core.pdf_report
+.. automodule:: sandroid.core.report_engine
    :members:
    :undoc-members:
    :show-inheritance:
 
-Professional PDF report generation from analysis results.
-
-**Key Features:**
-
-- Comprehensive report formatting
-- Visual chart generation
-- Evidence documentation
-- Template customization
+JSON-first report engine: builds ``report.json`` from the sealed session
+timeline (transcript steps with Tracking screenshots, coverage, the legacy
+results tables and the seal). ``report.md`` and the optional PDF are
+rendered from ``report.json`` alone.
 
 **Basic Usage:**
 
 .. code-block:: python
 
-   from sandroid.core.pdf_report import PDFReport
+   from pathlib import Path
 
-   # Initialize report generator
-   report_gen = PDFReport()
+   from sandroid.core.report_engine import build_report, write_report
 
-   # Generate report from analysis results
-   report_gen.generate_report(analysis_results, "forensic_report.pdf")
+   # Build the report document (scope: see scope_for_run)
+   doc = build_report(
+       timeline=timeline_path,
+       seal=seal,
+       scope=scope,
+       bundle_dir=Path(result_dir),
+   )
 
-Timeline Generation
--------------------
+   # Write report.json and render report.md / report.pdf from it
+   written = write_report(doc, Path(result_dir), formats=("json", "md", "pdf"))
 
-.. automodule:: sandroid.core.timeline_generator
+Report Rendering
+----------------
+
+.. automodule:: sandroid.core.report_render
    :members:
    :undoc-members:
    :show-inheritance:
 
-Timeline analysis and visualization of events during analysis.
-
-**Key Features:**
-
-- Event timeline construction
-- Temporal analysis
-- Activity correlation
-- Visual timeline generation
+Markdown and PDF renderers for a ``report.json`` document
+(``render_markdown``, ``render_pdf``).
 
 Integration Examples
 --------------------

@@ -73,7 +73,7 @@ Usage Instructions
    # 4. Press Enter to complete analysis
 
    # Command-line analysis
-   sandroid --number 2 --screenshot 5
+   sandroid --number 2
 
 **Expected Artifacts:**
 
@@ -309,7 +309,7 @@ Automated Testing
    adb install ground_truth.apk
 
    # Run Sandroid analysis
-   sandroid --headless --mode forensic -n 2 --screenshot 10 -f ground_truth_results.json
+   sandroid --headless --mode forensic -n 2 -f ground_truth_results.json
 
    # Launch Ground Truth during analysis
    adb shell am start -n de.fkie.ground_truth/.MainActivity
@@ -382,7 +382,7 @@ Troubleshooting
 .. code-block:: bash
 
    # Enable debug logging
-   SANDROID_LOG_LEVEL=DEBUG sandroid --network --screenshot 5
+   SANDROID_LOG_LEVEL=DEBUG sandroid --network
 
    # Monitor logs
    tail -f ~/.cache/sandroid/logs/sandroid.log

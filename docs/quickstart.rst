@@ -105,11 +105,16 @@ Analysis options given on the command line pre-configure the session::
    # Repeat the action twice to filter noise more aggressively
    sandroid --number 2
 
-   # Network monitoring with screenshots every 5 seconds
-   sandroid --network --screenshot 5
+   # Network monitoring
+   sandroid --network
 
    # Everything, plus a PDF report
-   sandroid --network --sockets --screenshot 3 --hash --apk --report
+   sandroid --network --sockets --hash --apk --report
+
+Screenshots are not taken on a timer: turn on Tracking in the TUI
+(``Ctrl+T``) and it takes them before taps and on screen changes (the
+``[tracking]`` options ``shot_before_tap``, ``shot_screen_change``,
+``shot_after_tap``, ``shot_label``); ``s`` adds one by hand.
 
 For fully non-interactive runs use ``--headless`` (see :doc:`command_line_usage`)::
 
@@ -142,7 +147,6 @@ Create ``~/.config/sandroid/sandroid.toml``::
    capture_processes = true
    capture_sockets = true
    show_deleted_files = true
-   screenshot_interval = 5
    hash_files = true
    list_apks = true
 
@@ -159,7 +163,7 @@ Common Workflows
 
 2. **Start Analysis**::
 
-      sandroid --trigdroid com.suspicious.app --network --screenshot 3
+      sandroid --trigdroid com.suspicious.app --network
 
 3. **Inspect the app** in the TUI: set it as Spotlight app, enable the Frida
    bypasses it needs, route it through mitmproxy (**Network -> Mitmproxy**,
@@ -178,7 +182,10 @@ Common Workflows
 
 2. **Test Your App**::
 
-      sandroid --screenshot 2
+      sandroid
+
+   Press ``Ctrl+T`` to turn on Tracking: taps, typed text and screenshots
+   are recorded on the session timeline.
 
 3. **Monitor Specific App**: press ``c`` (attach) or ``C`` (spawn) to make the
    foreground/selected app the Spotlight app.
@@ -193,9 +200,11 @@ Every session writes to ``./results/<YYYYmmdd_HHMMSS>/`` (``paths.results_path``
 - ``sandroid.json`` -- analysis results (see below)
 - ``sandroid.log`` / ``sandroid_error.log`` -- execution logs
 - ``<device name>/`` -- per-device raw data: ``raw/`` (pulled files,
-  ``recording.txt``, screenshots, network traces), ``spotlight_files/``,
-  ``fritap/``, ``dexray_insight/``, ``timeline.png``
-- ``sandroid.pdf`` -- generated report (with ``--report``)
+  ``recording.getevent.txt``, screenshots, network traces),
+  ``tracking/shots/`` (Tracking screenshots), ``spotlight_files/``,
+  ``fritap/``, ``dexray_insight/``
+- ``report.json`` / ``report.md`` -- the report (plus
+  ``Sandroid_Forensic_Report.pdf`` with ``--report``)
 
 Record/Play run bundles are kept under ``<results_path>/runs/<run_id>/``.
 

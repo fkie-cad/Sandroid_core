@@ -730,7 +730,6 @@ class InitializationService:
             show_deleted=False,
             processes=True,
             sockets=False,
-            screenshot=0,
             trigdroid=None,
             trigdroid_ccf=None,
             hash=False,
@@ -865,13 +864,6 @@ class InitializationService:
             action="store_true",
             dest="sockets",
             help="Monitor listening sockets during the action",
-        )
-        parser.add_argument(
-            "--screenshot",
-            type=int,
-            metavar="INTERVAL",
-            help="Take a screenshot each INTERVAL seconds",
-            default=0,
         )
         parser.add_argument(
             "--trigdroid",

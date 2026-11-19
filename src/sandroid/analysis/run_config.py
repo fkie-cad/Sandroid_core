@@ -112,7 +112,6 @@ class RunConfig:
         pull_apk: Pull APKs from the device and hash them.
         whitelist: Path to a whitelist file (annotated ``list[str] | None`` per
             spec; see notes).
-        screenshot_interval: Seconds between automated screenshots, or ``None``.
         action: The ``Functionality`` to perform each run (``Player`` /
             ``Trigdroid``), or ``None`` for a pure forensic run.
         recording_path: Absolute path to a recording; when set with
@@ -142,7 +141,6 @@ class RunConfig:
     hash_files: bool = False
     pull_apk: bool = False
     whitelist: list[str] | None = None
-    screenshot_interval: int | None = None
     action: Functionality | None = None
     recording_path: str | None = None
     capture_window: int = 0
@@ -212,7 +210,6 @@ class RunConfig:
             hash_files=analysis.hash_files,
             pull_apk=analysis.list_apks,
             whitelist=str(whitelist_file) if whitelist_file else None,
-            screenshot_interval=analysis.screenshot_interval,
             action=action,
             recording_path=recording_path,
             results_path=str(cfg.paths.results_path),
@@ -257,9 +254,6 @@ class RunConfig:
             hash_files=ac.hash_files,
             pull_apk=ac.pull_apk,
             whitelist=whitelist,
-            screenshot_interval=(
-                ac.screenshot_interval if ac.take_screenshots else None
-            ),
             capture_window=ac.capture_window,
             action=action,
             recording_path=recording_path,
@@ -376,10 +370,10 @@ class RunResult:
     ``other_data`` must already be **list-wrapped** exactly as the legacy
     ``Toolbox.submit_other_data`` produced it: each sub-value is a list, e.g.
     ``{"Artifact Hashes": [hashes], "APK Hashes": [apks],
-    "Timeline Data": [timeline]}``. Consumers (``pdf_report``,
-    ``timeline_generator``) index ``[0]`` into these, so the engine populates
-    ``other_data`` in that wrapped form and ``to_json_dict`` passes it through
-    unchanged.
+    "Timeline Data": [timeline]}``. The report engine
+    (:mod:`sandroid.core.report_engine`) unwraps these into ``report.json``, so
+    the engine populates ``other_data`` in that wrapped form and
+    ``to_json_dict`` passes it through unchanged.
 
     Attributes:
         device_name: Device the analysis ran against.

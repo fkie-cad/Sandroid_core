@@ -270,9 +270,6 @@ Analysis (``[analysis]``)
    # Packages whose files are never filtered as noise
    protected_packages = []
 
-   # Screenshot interval in seconds
-   # screenshot_interval = <not set>
-
    # Generate MD5 hashes of changed/new files
    hash_files = false
 
@@ -490,7 +487,8 @@ Tracking (``[tracking]``)
    # Start Tracking with every recording
    auto_on_record = true
 
-   # Screenshot triggers
+   # Screenshot triggers (taken while Tracking is on, Ctrl+T; stored under
+   # tracking/shots/ of the session device folder; the s key adds one)
    shot_before_tap = true
    shot_screen_change = true
    shot_after_tap = false
@@ -828,8 +826,6 @@ Use double underscores (``__``) for nested values:
    export SANDROID_ANALYSIS__SHOW_DELETED_FILES=true
    export SANDROID_ANALYSIS__HASH_FILES=true
 
-   export SANDROID_ANALYSIS__SCREENSHOT_INTERVAL=5
-
    # AI Chat (experimental) and reporting
    export SANDROID_AI__BASE_URL=http://localhost:11434/v1
    export SANDROID_AI__MODEL=qwen2.5:14b
@@ -884,7 +880,11 @@ Configuration Templates
    capture_network = true
    show_deleted_files = true
    hash_files = true
-   screenshot_interval = 5
+
+   [tracking]
+   # Screenshots before each tap and on every screen change
+   shot_before_tap = true
+   shot_screen_change = true
 
    [trigdroid]
    enabled = true
@@ -907,7 +907,6 @@ Configuration Templates
    number_of_runs = 1
    capture_processes = false
    capture_network = false
-   screenshot_interval = 10
 
    [paths]
    results_path = "./dev_results/"
@@ -926,7 +925,10 @@ Configuration Templates
    number_of_runs = 1
    capture_processes = true
    capture_network = true
-   screenshot_interval = 30
+
+   [tracking]
+   # Fewer screenshots: only before taps
+   shot_screen_change = false
 
 Environment-Specific Configuration
 ----------------------------------
@@ -1095,7 +1097,6 @@ Integration with Tools
      run: |
        sandroid-config init
        sandroid-config set -k analysis.number_of_runs -v 2
-       sandroid-config set -k analysis.screenshot_interval -v 10
 
    - name: Run Analysis
      env:

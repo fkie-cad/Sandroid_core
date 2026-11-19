@@ -21,7 +21,7 @@ Features
    - ADB interface for device communication
    - Android emulator management
    - APK installation and analysis
-   - Automated screenshot capture
+   - Tracking: taps, gestures, typed text and screenshots on a timeline
 
 🛡️ **Security Analysis**
    - Malware behavior monitoring
@@ -57,7 +57,7 @@ Quick Start
    sandroid
 
    # Command-line mode
-   sandroid --network --screenshot 5 --report
+   sandroid --network --report
 
 Getting Started
 ===============

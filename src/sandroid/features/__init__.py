@@ -1,7 +1,7 @@
 """Sandroid Features Module.
 
-Provides functionality components: screenshot capture, event recording/replay,
-and TrigDroid malware trigger analysis.
+Provides functionality components: event recording/replay and TrigDroid
+malware trigger analysis.
 """
 
 from .functionality import Functionality

@@ -89,10 +89,10 @@ This approach lets you test the modern system while keeping the legacy system wo
    # Test with identical parameters
 
    # Legacy way:
-   ./sandroid -n 2 --network --screenshot 5
+   ./sandroid -n 2 --network
 
    # Modern way:
-   sandroid --number 2 --network --screenshot 5
+   sandroid --number 2 --network
 
    # Compare results - they should be identical
 
@@ -153,12 +153,14 @@ If you have custom code importing Sandroid modules:
    # Old imports (still work via compatibility layer):
    from src.utils.toolbox import Toolbox
    from src.datagather.changedfiles import ChangedFiles
-   from src.functionality.screenshot import Screenshot
 
    # New imports (recommended):
    from sandroid.core.toolbox import Toolbox
    from sandroid.analysis.changedfiles import ChangedFiles
-   from sandroid.features.screenshot import Screenshot
+
+   # Removed: the periodic screenshot feature (Screenshot, --screenshot,
+   # analysis.screenshot_interval). Screenshots are now taken by Tracking
+   # (Ctrl+T in the TUI, the [tracking] shot_* options).
 
 Development Workflow Migration
 -------------------------------
@@ -425,7 +427,7 @@ Validation and Testing
    sandroid-config show  # Should display configuration
 
    # 4. Analysis capability
-   sandroid -n 2 --screenshot 10  # Should run without errors
+   sandroid -n 2  # Should run without errors
 
    # 5. Compatibility
    ./sandroid --help  # Legacy script should still work
