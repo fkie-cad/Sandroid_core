@@ -70,6 +70,8 @@ def _profile(**kw) -> Profile:
 def service(env, monkeypatch):
     svc = IdentityService()
     svc._sleep = lambda s: None
+    svc.restarts_seen = []
+    svc._after_restart = svc.restarts_seen.append
     profile = svc.save(_profile())
     from sandroid.config import get_config
 
@@ -807,6 +809,13 @@ def test_never_launched_app_of_the_same_signer_gets_a_preadded_row(service, devi
     service.apply(SERIAL, "com.other.app")
     assert device.ssaid["com.other.app"] != ssaid["com.example.app"]
     assert device.pid == 1003  # one framework restart per new app
+
+
+def test_frida_server_is_restarted_after_the_framework_window(service, device):
+    service.apply(SERIAL, "com.example.app")
+    assert service.restarts_seen == [SERIAL]
+    service.apply(SERIAL, "com.example.app")  # nothing to do: no restart
+    assert service.restarts_seen == [SERIAL]
 
 
 def test_zygote_env_prefixes_content_and_abx_commands(service, device):

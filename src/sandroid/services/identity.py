@@ -1991,6 +1991,23 @@ class _Applied:
     frozen: str = ""  # fingerprint+statuses digest of the last freeze
 
 
+def _restart_frida_after_framework(serial: str) -> None:
+    """Restart a running frida-server after a framework restart window.
+
+    It still talks to the dead system_server (``DeadSystemException`` on the
+    next spawn), as after the CA injection's Zygote restart. Never raises.
+    """
+    try:
+        from sandroid.core.frida_manager import (
+            restart_frida_server_after_system_restart,
+        )
+
+        restarted, reason = restart_frida_server_after_system_restart()
+        logger.info("identity: after the framework restart on %s: %s", serial, reason)
+    except Exception:
+        logger.warning("identity: frida-server restart failed", exc_info=True)
+
+
 class IdentityService:
     """Identity profile library, apply pipeline and marker source."""
 
@@ -2006,6 +2023,9 @@ class IdentityService:
         self._hook_installed = False
         self._sleep: Callable[[float], None] = time.sleep
         self._clock: Callable[[], float] = time.monotonic
+        #: Called with the serial once the framework is back after a restart
+        #: window (default: restart a running frida-server).
+        self._after_restart: Callable[[str], None] = _restart_frida_after_framework
 
     # -- library ----------------------------------------------------------
 
@@ -2707,7 +2727,8 @@ class IdentityService:
         )
         if not state.system_server:
             dev.shell("start")
-            self._wait_framework(dev, "")
+            if self._wait_framework(dev, ""):
+                self._after_restart(state.serial)
         dev.shell(f"rm -f {RESTART_MARKER}")
 
     def _run_live(
@@ -2940,6 +2961,7 @@ class IdentityService:
         if not self._wait_framework(dev, state.system_server):
             return False
         dev.shell(f"rm -f {RESTART_MARKER}")
+        self._after_restart(state.serial)
         return True
 
     def _wait_framework(self, dev: _Device, old_pid: str) -> bool:
