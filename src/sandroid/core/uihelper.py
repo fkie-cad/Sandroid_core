@@ -57,9 +57,9 @@ HELPER_VERSION = "1.1.0"
 PROTOCOL = 2
 
 #: sha256 of ``src/sandroid/assets/uihelper/uihelper.jar`` (printed by build.sh).
-JAR_SHA256 = "a4b3b021bad567fa6c71cf95c3aed88be869f4d8944b1b92c95dd14299b36943"
+JAR_SHA256 = "4f0f7842fa922c003ad691687ba7be2ac8abce6ebbc4b5c6bd50775701b2e5bc"
 #: :func:`source_sha256` of ``tools/uihelper/src`` the jar was built from.
-SOURCE_SHA256 = "13f46f56c523851787d824352076b05ad5c19a0c8f2bb94945a574c33ac05469"
+SOURCE_SHA256 = "09de116aeb6d4d2798cfab80df54857c08fa4910038d170e244a830f3f1242c9"
 
 #: Device folder for screenshots in flight (each is fetched, then removed).
 REMOTE_SHOT_DIR = "/data/local/tmp/sandroid-shots"

@@ -318,7 +318,9 @@ final class Tree {
 
     /**
      * Nothing under the finger but the web container itself: a WebView,
-     * a document root or Firefox's engineView (Gecko builds the tree lazily).
+     * a document root, Firefox's engineView (Gecko builds the tree lazily),
+     * or Chrome's compositor view without its web content (Chrome drops the
+     * page's tree while no accessibility client asked for a while).
      */
     static boolean bareWeb(SNode h) {
         if (h == null) {
@@ -327,7 +329,19 @@ final class Tree {
         if ("android.webkit.WebView".equals(h.cls) || webDocument(h)) {
             return true;
         }
-        return h.rid != null && h.rid.endsWith(":id/engineView");
+        if (h.rid != null && h.rid.endsWith(":id/engineView")) {
+            return true;
+        }
+        if (h.engine != null) {
+            return false;
+        }
+        SNode s = h;
+        for (int i = 0; i < 3 && s != null; i++, s = s.parent) {
+            if (s.rid != null && s.rid.endsWith(":id/compositor_view_holder")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static SWindow copyWindow(AccessibilityWindowInfo w) {
