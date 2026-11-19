@@ -2250,11 +2250,19 @@ class NetworkPanel(Widget):
             # Not loaded yet: a hidden lens polls only while it is shown.
             # Poll now and put the cursor on the flow once it is listed; the
             # record (if any) opens it in the meantime.
+            # False when nothing could be opened yet, so the caller can fall
+            # back (the cursor still lands on the flow once it is listed).
             self._pending_reveal = (flow_id, record)
             self.poll_now()
-            row = self._record_row(flow_id, record)
+            row = self._listed_flow(flow_id)
             if row is not None:
-                self._show_flow(row, cursor=False)
+                self._pending_reveal = None
+                self._show_flow(row)
+                return True
+            row = self._record_row(flow_id, record)
+            if row is None:
+                return False
+            self._show_flow(row, cursor=False)
             return True
         row = self._record_row(flow_id, record)
         if row is None:

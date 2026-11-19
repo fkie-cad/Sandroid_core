@@ -1510,7 +1510,10 @@ async def test_reveal_lands_on_a_flow_the_hidden_lens_has_not_loaded(flow_dir):
         write_flows(flow_dir, time.time(), specs=_SPECS[1:2], start_seq=200)
         assert panel._listed_flow("flow-200") is None  # hidden: not polled
         ms.switch_lens("network")
-        assert panel.reveal_flow("flow-200")
+        # Nothing to open yet (no record): False, so a caller can fall back;
+        # the lens polls and still puts the cursor on the flow once listed.
+        assert not panel.reveal_flow("flow-200")
+        assert panel._pending_reveal is not None
         await until(
             pilot,
             lambda: getattr(ms.inspector_content, "key", None) == "network:row:f200",
