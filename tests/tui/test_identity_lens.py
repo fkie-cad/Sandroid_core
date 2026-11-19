@@ -755,3 +755,47 @@ async def test_caption_uses_the_service_times(fakes) -> None:
         await until(pilot, lambda: lens.applied_at)
         assert lens.applied_at == applied_at
         assert lens.verified_at == applied_at
+
+
+async def test_caption_shows_an_apply_made_outside_the_lens(fakes) -> None:
+    """An apply before an app start, or one an earlier TUI process left in
+    the device record: the service's times reach the footer.
+    """
+    real = fakes.ident.real
+    real._hydrated.add(SERIAL)  # no background device read
+    fakes.ident.last_apply = real.last_apply
+    fp = identity_mod.fingerprint(fakes.ident.profile)
+    applied_at = 1_700_000_000.0
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        lens = await _open_lens(app, pilot)
+
+        def info() -> str:
+            return lens.screen._lens_captions["identity"][1] or ""
+
+        await until(pilot, lambda: "not applied in this session" in info())
+        # Another profile's apply does not count.
+        real._applied[SERIAL] = identity_mod._Applied(
+            fingerprint="other", applied_at=applied_at
+        )
+        il.REFRESH_MIN_S = 0.0
+        try:
+            threading.Thread(
+                target=fakes.ident.listeners[0], args=(fakes.ident.statuses(),)
+            ).start()
+            await settle(pilot)
+            assert "not applied in this session" in info()
+            # The service applied this profile (the lens did nothing).
+            real._applied[SERIAL] = identity_mod._Applied(
+                fingerprint=fp, applied_at=applied_at, verified_at=applied_at
+            )
+            threading.Thread(
+                target=fakes.ident.listeners[0], args=(fakes.ident.statuses(),)
+            ).start()
+            stamp = f"{il.datetime.fromtimestamp(applied_at):%H:%M:%S}"
+            await until(pilot, lambda: f"applied {stamp}" in info())
+        finally:
+            il.REFRESH_MIN_S = 1.0
+        assert f"verified {stamp}" in info()
+        assert "not applied" not in info()
+        assert lens.applied_at is None

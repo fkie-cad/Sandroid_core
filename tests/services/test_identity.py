@@ -185,6 +185,7 @@ class FakeDevice:
             SSAID_FILE: b"ABX\0" + SSAID_XML.encode(),
             GAID_FILE: GAID_XML.encode(),
             APPSET_FILE: b"\x0a\x249b1e2a40-0000-4000-8000-000000000001\x10",
+            ident.BOOT_ID_FILE: b"boot-1\n",
         }
         #: owner / mode / SELinux label per file (``stat``, ``chown``, ``mv``).
         self.meta: dict[str, dict[str, str]] = {
@@ -213,6 +214,10 @@ class FakeDevice:
         #: Preflights whose list providers are not up yet (no answer).
         self.providers_down = 0
         self.emu_state: dict[str, str] = {}
+        #: Reads of the device record (``identity.applied``); while
+        #: ``record_down`` they get no answer.
+        self.record_reads = 0
+        self.record_down = False
 
     # -- transport --------------------------------------------------------
 
@@ -244,7 +249,14 @@ class FakeDevice:
         if script.startswith("pidof system_server"):
             return f"{self.pid}\npackage:/system/framework/framework-res.apk\n"
         zygote = script.startswith(ZYGOTE_PREFIX)
-        if not (zygote and script.count("\n") == 1 and "abx2xml" in script):
+        record_read = script.startswith("echo @@applied@@")
+        if record_read:
+            self.record_reads += 1
+            if self.record_down:
+                return ""  # no answer (adb timed out)
+        if not record_read and not (
+            zygote and script.count("\n") == 1 and "abx2xml" in script
+        ):
             self.writes.append(script)
         out: list[str] = []
         env: dict[str, str] = {}
@@ -334,6 +346,8 @@ class FakeDevice:
             return ""
         if name in ("restorecon", "am"):
             return ""
+        if name == "cat":
+            return self.fs.get(argv[1], b"").decode().strip()
         if name == "stop":
             self.running = False
             return ""
@@ -408,6 +422,7 @@ class FakeDevice:
         lines += ["@@root@@", "0", "@@resetprop@@", "/debug_ramdisk/resetprop"]
         lines += ["@@system_server@@", str(self.pid) if self.running else ""]
         lines += ["@@marker@@", self.fs.get(RESTART_MARKER, b"").decode()]
+        lines += ["@@boot_id@@", self.fs[ident.BOOT_ID_FILE].decode().strip()]
         lines += [
             "@@gms@@",
             "package:/system/priv-app/GmsCore.apk" if self.running else "",
@@ -1212,6 +1227,45 @@ def test_install_hook_is_a_no_op_without_app_start(service, monkeypatch):
     assert service.install_pre_spawn_hook() is False
 
 
+def test_applied_state_follows_the_current_profile_and_serial(
+    service, device, monkeypatch, tmp_path
+):
+    from sandroid.core.adb import Adb
+
+    # One level deeper: other tests' "other sessions on this device" glob
+    # (tmp_path.parent/*/session) must not pick up this test's applies.
+    monkeypatch.setenv("SDROID_FILES_DIR", str(tmp_path / "own" / "session" / "files"))
+    monkeypatch.setattr(Adb, "get_target_device", classmethod(lambda cls: SERIAL))
+    pkg = "com.example.app"
+    assert service.applied_state(pkg) == "not_applied"
+    service.apply(SERIAL, pkg)
+    monkeypatch.setattr(ident, "_send", lambda *a, **k: pytest.fail("device read"))
+
+    assert service.applied_state(pkg) == "applied"
+    assert service.applied_state(pkg, SERIAL) == "applied"
+    assert service.applied_state(pkg, "emulator-5582") == "not_applied"
+    assert service.applied_state("com.other.app") == "not_applied"
+
+    monkeypatch.setattr(ident, "_send", device)
+    # Switch to another profile -> not applied; back -> applied again.
+    original = service.config().profile
+    other = service.save(_profile(id="other-profile"))
+    monkeypatch.setattr(service.config(), "profile", other.id)
+    assert service.applied_state(pkg) == "not_applied"
+    monkeypatch.setattr(service.config(), "profile", original)
+    assert service.applied_state(pkg) == "applied"
+
+    # Regenerate: same id, new fingerprint -> not applied any more.
+    service.regenerate(original)
+    assert service.applied_state(pkg) == "not_applied"
+
+    # Identity mode off, or an unusable profile: no state at all.
+    monkeypatch.setattr(service.config(), "profile", "missing")
+    assert service.applied_state(pkg) is None
+    monkeypatch.setattr(service.config(), "mode", "off")
+    assert service.applied_state(pkg) is None
+
+
 # ---------------------------------------------------------------------------
 # markers contract
 # ---------------------------------------------------------------------------
@@ -1374,3 +1428,214 @@ def test_lists_script_reads_only_the_lists():
     assert "@@list:calls@@" in script
     assert "abx2xml" not in script
     assert ident.lists_script([TOKEN + "\n"]).count("@@list:") == 0
+
+
+# ---------------------------------------------------------------------------
+# device record (identity.applied): survives a TUI restart
+# ---------------------------------------------------------------------------
+
+PKG = "com.example.app"
+
+
+def _record(device) -> dict:
+    return ident.json.loads(device.fs[ident.APPLIED_FILE])
+
+
+def _fresh() -> IdentityService:
+    """A new service on the same library and device: a TUI restart."""
+    svc = IdentityService()
+    svc._sleep = lambda s: None
+    svc._after_restart = lambda serial: None
+    return svc
+
+
+def test_apply_writes_the_device_record(service, device):
+    service.apply(SERIAL, PKG)
+    record = _record(device)
+    profile = service.active_profile()
+    assert record["format"] == ident.APPLIED_FORMAT
+    assert record["profile"] == profile.id
+    assert record["fingerprint"] == ident.fingerprint(profile)
+    assert record["boot_id"] == "boot-1"
+    assert record["done"] == [PKG]
+    assert record["ssaids"] == {PKG: device.ssaid[PKG]}
+    assert record["framework"] == {"locale": False}
+    assert record["at"] > 0
+    assert device.meta[ident.APPLIED_FILE]["owner"] == ident.APPLIED_OWNER
+    # Updated per package (the second app joins the record).
+    service.apply(SERIAL, "com.other.app")
+    record = _record(device)
+    assert record["done"] == [PKG, "com.other.app"]
+    assert set(record["ssaids"]) == {PKG, "com.other.app"}
+    # Nothing new: nothing written (and no write outside apply).
+    device.writes.clear()
+    service.apply(SERIAL, PKG)
+    service.verify(SERIAL)
+    assert device.writes == []
+
+
+def test_a_fresh_service_reads_the_record_before_a_start(service, device, app_start):
+    service.apply(SERIAL, PKG)
+    fresh = _fresh()
+    device.calls.clear()
+    device.writes.clear()
+    assert fresh.pre_spawn(PKG) is None
+    assert len(device.calls) == 1  # one cheap read, nothing else
+    assert device.record_reads == 1
+    assert device.writes == []
+    assert fresh.applied_state(PKG) == "applied"
+    # A package the record does not know needs an apply (its Android ID).
+    plan = fresh.pre_spawn("com.other.app")
+    assert plan is not None
+    assert plan.disruptive
+
+
+def test_the_record_is_the_truth_after_a_snapshot_load(service, device, app_start):
+    service.apply(SERIAL, PKG)
+    assert service.pre_spawn(PKG) is None
+    # A snapshot from before the apply: no record (memory still says done).
+    saved = device.fs.pop(ident.APPLIED_FILE)
+    plan = service.pre_spawn(PKG)
+    assert plan is not None
+    assert plan.disruptive
+    assert service.applied_state(PKG) == "not_applied"
+    device.fs[ident.APPLIED_FILE] = saved
+    assert service.pre_spawn(PKG) is None
+
+
+def test_without_an_answer_pre_spawn_falls_back_to_memory(service, device, app_start):
+    service.apply(SERIAL, PKG)
+    device.record_down = True
+    assert service.pre_spawn(PKG) is None
+    plan = _fresh().pre_spawn(PKG)
+    assert plan is not None
+    assert plan.disruptive  # nothing known: conservative
+
+
+def test_a_reboot_makes_the_package_pending_but_not_disruptive(
+    service, device, app_start
+):
+    service.apply(SERIAL, PKG)
+    pid = device.pid
+    device.fs[ident.BOOT_ID_FILE] = b"boot-2\n"
+    for svc in (service, _fresh()):
+        plan = svc.pre_spawn(PKG)
+        assert plan is not None
+        # The Android ID (a file) and the locale (persistent) are still there.
+        assert not plan.disruptive
+    plan.apply()
+    assert device.pid == pid  # no framework restart
+    assert _record(device)["boot_id"] == "boot-2"
+    assert service.pre_spawn(PKG) is None
+
+
+def test_a_reboot_loses_volatile_framework_values(service, device, app_start):
+    profile = service.active_profile()
+    profile.values["build_model"].enabled = True
+    service.save(profile)
+    service.apply(SERIAL, PKG)
+    assert _record(device)["framework"] == {"build_model": True, "locale": False}
+    assert _fresh().pre_spawn(PKG) is None
+    device.fs[ident.BOOT_ID_FILE] = b"boot-2\n"
+    device.props["ro.product.model"] = "sdk_gphone64_arm64"  # resetprop is gone
+    fresh = _fresh()
+    plan = fresh.pre_spawn(PKG)
+    assert plan is not None
+    assert plan.disruptive
+    assert set(fresh._applied[SERIAL].settled) == {"locale"}
+
+
+def test_a_new_fingerprint_means_not_applied(service, device, app_start):
+    service.apply(SERIAL, PKG)
+    service.regenerate(service.config().profile)
+    fresh = _fresh()
+    plan = fresh.pre_spawn(PKG)
+    assert plan is not None
+    assert plan.disruptive
+    assert fresh.applied_state(PKG) == "not_applied"
+
+
+def test_disruptive_only_while_a_framework_value_is_pending(service, device, app_start):
+    device.ignore.add("device_name")  # a live value fails: the app is not done
+    service.apply(SERIAL, PKG)
+    assert _record(device)["done"] == []
+    for svc in (service, _fresh()):
+        plan = svc.pre_spawn(PKG)
+        assert plan is not None
+        assert not plan.disruptive  # Android ID and locale are on the device
+        assert svc.pre_spawn("com.other.app").disruptive  # a new Android ID
+    # An interrupted restart window: the next apply restarts.
+    device.fs[RESTART_MARKER] = b"x 1 android_id"
+    assert service.pre_spawn(PKG).disruptive
+
+
+def test_applied_state_hydrates_in_the_background(
+    service, device, app_start, monkeypatch
+):
+    service.apply(SERIAL, PKG)
+    fresh = _fresh()
+    heard: list = []
+    fresh.add_status_listener(heard.append)
+    threads: list = []
+    gate = ident.threading.Event()
+    real_send = ident._send
+
+    def send(command, serial, timeout=60):
+        threads.append(ident.threading.current_thread())
+        assert gate.wait(5)
+        return real_send(command, serial, timeout)
+
+    monkeypatch.setattr(ident, "_send", send)
+    # Memory only: the answer comes at once, before the device was read.
+    assert fresh.applied_state(PKG) == "not_applied"
+    assert fresh.applied_state(PKG) == "not_applied"  # one read at a time
+    gate.set()
+    fresh._join_hydration(5)
+    assert len(threads) == 1
+    assert threads
+    assert ident.threading.main_thread() not in threads
+    assert len(heard) == 1  # the answer changed
+    assert fresh.applied_state(PKG) == "applied"
+    assert fresh.last_apply(SERIAL)[0] == _record(device)["at"]
+    # Once per serial.
+    fresh._join_hydration(5)
+    assert device.record_reads == 1
+
+
+def test_a_hydration_never_overwrites_a_newer_apply(service, device):
+    read = service._read_record(SERIAL)  # before the apply: no record
+    assert read is not None
+    assert read.record is None
+    service.apply(SERIAL, PKG)
+    assert service._hydrate(SERIAL, read, gen=0) is False
+    assert PKG in service._applied[SERIAL].done
+
+
+def test_last_apply_follows_apply_and_verify(service, device, monkeypatch):
+    fp = ident.fingerprint(service.active_profile())
+    assert service.last_apply(SERIAL, fp) is None
+    service._join_hydration(5)
+    now = [1000.0]
+    monkeypatch.setattr(ident.time, "time", lambda: now[0])
+    service.apply(SERIAL, PKG)
+    assert service.last_apply(SERIAL, fp) == (1000.0, 1000.0)
+    now[0] = 2000.0
+    service.verify(SERIAL)
+    assert service.last_apply(SERIAL, fp) == (1000.0, 2000.0)
+    assert service.last_apply(SERIAL, "other-fingerprint") is None
+
+
+def test_applied_record_parse_rejects_garbage():
+    assert ident.parse_applied_record("") is None
+    assert ident.parse_applied_record("{") is None
+    assert ident.parse_applied_record('{"format": "other"}') is None
+    mem = ident._Applied(fingerprint="f", done={PKG}, seeded={PKG})
+    mem.ssaids = {PKG: "3f9a1c07deadbeef", "com.old": "x"}
+    mem.settled = {"locale": False}
+    record = ident.applied_record("p", mem, "boot", 12.5)
+    assert ident.parse_applied_record(ident.json.dumps(record)) == record
+    assert record["ssaids"] == {PKG: "3f9a1c07deadbeef"}  # only seeded ones
+    bad = dict(record, done=[1])
+    assert ident.parse_applied_record(ident.json.dumps(bad)) is None
+    newer = dict(record, version=2)
+    assert ident.parse_applied_record(ident.json.dumps(newer)) is None

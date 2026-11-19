@@ -1109,15 +1109,37 @@ class IdentityLens(Vertical):
                 mode = "off"
         name = profile.name or profile.id
         title = f"{name} rev {profile.revision}, mode {mode}"
+        applied_at, verified_at = self._apply_times(ident, profile)
         bits = []
-        if self.applied_at:
-            bits.append(f"applied {datetime.fromtimestamp(self.applied_at):%H:%M:%S}")
-        if self.verified_at:
-            bits.append(f"verified {datetime.fromtimestamp(self.verified_at):%H:%M:%S}")
+        if applied_at:
+            bits.append(f"applied {datetime.fromtimestamp(applied_at):%H:%M:%S}")
+        if verified_at:
+            bits.append(f"verified {datetime.fromtimestamp(verified_at):%H:%M:%S}")
         if not bits:
             bits.append("not applied in this session")
         bits.append("enter inspect")
         ms.set_lens_caption(LENS_ID, title=title, info=", ".join(bits))
+
+    def _apply_times(self, ident: Any, profile: Any) -> tuple[float, float]:
+        """``(applied_at, verified_at)``: the newer of this lens's own times
+        and the service's (an apply before an app start, or one from an
+        earlier TUI process found in the device record), for this profile.
+        """
+        applied_at = self.applied_at or 0.0
+        verified_at = self.verified_at or 0.0
+        serial = _target_serial()
+        last = getattr(ident, "last_apply", None)
+        if serial and last is not None:
+            try:
+                from sandroid.services.identity import fingerprint
+
+                times = last(serial, fingerprint(profile))
+            except Exception:
+                times = None
+            if times:
+                applied_at = max(applied_at, times[0] or 0.0)
+                verified_at = max(verified_at, times[1] or 0.0)
+        return applied_at, verified_at
 
     def failed_count(self) -> int:
         return sum(1 for r in self.rows if r.info.status == "failed")
