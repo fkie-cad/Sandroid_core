@@ -396,7 +396,13 @@ async def test_found_column_reflects_hits_and_tints_rows(fakes) -> None:
         )
         il.REFRESH_MIN_S = 0.0
         try:
-            threading.Thread(target=fakes.privacy.listeners[0], args=(None,)).start()
+            # Like the real service: every registered listener hears the hit
+            # (the Network lens's privacy feed registers one too).
+            def _notify() -> None:
+                for cb in list(fakes.privacy.listeners):
+                    cb(None)
+
+            threading.Thread(target=_notify).start()
             await until(
                 pilot, lambda: _cell(lens, "timezone", "found") == "1 recipient"
             )
