@@ -120,6 +120,12 @@ class RunRecord:
     #: privacy findings are, ``<folder>/privacy/hits.jsonl``). Empty for
     #: runs saved before it was stored.
     timeline_folder: str = ""
+    #: ``[start, stop]`` (epoch s) of the recording this run replays: the
+    #: run's privacy findings cover it as well as the Play
+    #: (:class:`~sandroid.services.privacy_scan.RunScope`). Empty when
+    #: unknown (runs saved before it was stored, a Play without a recording
+    #: of this session).
+    record_window: list[float] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -270,6 +276,7 @@ def _summary_from_record(record: RunRecord) -> dict[str, Any]:
         "error": record.error,
         "counts": dict(record.counts),
         "timeline_folder": record.timeline_folder,
+        "record_window": list(record.record_window),
     }
 
 

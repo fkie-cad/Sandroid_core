@@ -1307,16 +1307,6 @@ class DiffsView(FilesSubViewBase):
 
     # -- Privacy tab (identity profile values found during the run) ---------
 
-    @staticmethod
-    def _epoch(iso: str | None) -> float | None:
-        if not iso:
-            return None
-        try:
-            dt = datetime.fromisoformat(str(iso))
-        except (TypeError, ValueError):
-            return None
-        return (dt if dt.tzinfo else dt.astimezone()).timestamp()
-
     def _privacy_hits(self, s: dict[str, Any]) -> tuple[list | None, str]:
         """``(hits of the run, what an empty list means)``; hits are None
         while another session's findings are still being read.
@@ -1326,16 +1316,13 @@ class DiffsView(FilesSubViewBase):
         findings (cached). A run without one (saved before runs stored it)
         can only be matched against the loaded session.
         """
-        from sandroid.services.privacy_scan import run_hits
+        from sandroid.services.privacy_scan import run_hits, run_scope_of
 
         from .network_panel import privacy_service
 
-        start = self._epoch(s.get("recorded_at"))
-        end = self._epoch(s.get("completed_at")) or start
-        if start is None or end is None:
+        scope = run_scope_of(s)
+        if scope is None:
             return [], _PRIVACY_NOT_ACTIVE
-        end = max(start, end)
-        run_id = s.get("run_id")
         folder = str(s.get("timeline_folder") or "")
         service = privacy_service()
         live = getattr(service, "folder", None) if service is not None else None
@@ -1348,15 +1335,11 @@ class DiffsView(FilesSubViewBase):
                 return None, _PRIVACY_LOADING
             records, scanned = cached
             why = _PRIVACY_NONE if scanned else _PRIVACY_NOT_ACTIVE
-            return run_hits(records, run_id, start, end), why
+            return run_hits(records, scope), why
         if service is None:
             return [], _PRIVACY_NOT_ACTIVE
         try:
-            by_run = getattr(service, "hits_for_run", None)
-            if by_run is not None:
-                hits = list(by_run(run_id, start, end))
-            else:
-                hits = list(service.hits_between(start, end))
+            hits = list(service.hits_for_run(scope))
             has_hits = getattr(service, "has_hits", None)
             known = bool(
                 service.is_active

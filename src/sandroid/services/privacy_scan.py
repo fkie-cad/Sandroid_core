@@ -1087,12 +1087,10 @@ class PrivacyScanService:
         with self._lock:
             return [h for h in self._hits if h.t is not None and t0 <= h.t <= t1]
 
-    def hits_for_run(self, run_id: str | None, t0: float, t1: float) -> list[HitRecord]:
-        """The loaded session's hits of one run: in ``[t0, t1]`` or attributed
-        to ``run_id`` (the end-of-run sweep, found after the run's end).
-        """
+    def hits_for_run(self, scope: RunScope) -> list[HitRecord]:
+        """The loaded session's hits of one run (see :class:`RunScope`)."""
         with self._lock:
-            return run_hits(self._hits, run_id, t0, t1)
+            return run_hits(self._hits, scope)
 
     def has_hits(self) -> bool:
         """The loaded session has any hit record (cheap: no copy, no lock)."""
@@ -2065,16 +2063,92 @@ def _part_words(part: str) -> str:
         return part_label(part)
 
 
-def run_hits(
-    records: list[HitRecord], run_id: str | None, t0: float, t1: float
-) -> list[HitRecord]:
-    """The records of one run: in ``[t0, t1]`` or attributed to ``run_id``."""
-    return [
-        h
-        for h in records
-        if (h.t is not None and t0 <= h.t <= t1)
-        or (run_id and h.source.get("run_id") == run_id)
-    ]
+@dataclass(frozen=True)
+class RunScope:
+    """Which findings belong to one run (the run report and the Sessions
+    lens Privacy tab both use this one definition).
+
+    A run is the recording it replays plus its Play: a finding belongs to
+    the run when its item happened in the recording window (``record-start``
+    to ``record-stop``) or in the Play window (Play start to the run's
+    completion), or when it carries the run's id (the end-of-run sweep,
+    found after the run's end). Overlapping windows are merged.
+
+    Attributes:
+        run_id: The run's id (sweep records carry it), or None.
+        windows: ``(t0, t1)`` epoch windows, sorted, not overlapping.
+    """
+
+    run_id: str | None
+    windows: tuple[tuple[float, float], ...] = ()
+
+    def covers(self, rec: HitRecord) -> bool:
+        """``rec`` belongs to the run."""
+        if self.run_id and rec.source.get("run_id") == self.run_id:
+            return True
+        t = rec.t
+        return t is not None and any(a <= t <= b for a, b in self.windows)
+
+
+def run_scope(
+    run_id: str | None,
+    play: tuple[float | None, float | None] | None,
+    record: Any = None,
+) -> RunScope:
+    """The :class:`RunScope` of a run from its Play window and the window of
+    the recording it replays (either may be missing or partial).
+    """
+    windows: list[tuple[float, float]] = []
+    for window in (record, play):
+        if not isinstance(window, (list, tuple)) or len(window) != 2:
+            continue
+        a, b = window
+        if not isinstance(a, (int, float)):
+            continue
+        b = b if isinstance(b, (int, float)) else a
+        windows.append((float(a), float(max(a, b))))
+    windows.sort()
+    merged: list[tuple[float, float]] = []
+    for a, b in windows:
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return RunScope(run_id or None, tuple(merged))
+
+
+def run_scope_of(summary: Any) -> RunScope | None:
+    """The :class:`RunScope` of a run summary / :class:`RunRecord` (its
+    ``recorded_at`` / ``completed_at`` Play window and ``record_window``),
+    or None without a Play start.
+    """
+
+    def get(name: str) -> Any:
+        if isinstance(summary, dict):
+            return summary.get(name)
+        return getattr(summary, name, None)
+
+    def epoch(value: Any) -> float | None:
+        if not value:
+            return None
+        try:
+            from datetime import datetime
+
+            dt = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
+        return (dt if dt.tzinfo else dt.astimezone()).timestamp()
+
+    start = epoch(get("recorded_at"))
+    if start is None:
+        return None
+    end = epoch(get("completed_at"))
+    return run_scope(get("run_id"), (start, end), get("record_window"))
+
+
+def run_hits(records: list[HitRecord], scope: RunScope) -> list[HitRecord]:
+    """The records of one run (see :class:`RunScope`)."""
+    return [h for h in records if scope.covers(h)]
 
 
 def read_hits(folder: Path | str) -> tuple[list[HitRecord], bool]:

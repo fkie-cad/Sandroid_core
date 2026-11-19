@@ -126,6 +126,9 @@ def test_record_start_stop_and_result_lines() -> None:
     assert result["data"]["cancelled"] is True
     assert result["ref"] == {"of": stop["seq"]}
     assert controller._tl_record_range == [start["seq"], stop["seq"]]
+    # The recording's host window: part of every run that replays it.
+    t0, t1 = controller._tl_record_window
+    assert t0 <= t1
 
 
 def test_esc_on_the_record_settings_writes_no_result_line() -> None:

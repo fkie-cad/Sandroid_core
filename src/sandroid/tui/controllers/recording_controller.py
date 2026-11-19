@@ -270,6 +270,11 @@ class RecordingController:
         self._tl_recording = False
         self._tl_record_stop: int | None = None
         self._tl_record_range: list[int] | None = None
+        #: Host epoch of the open recording's start, and the last
+        #: recording's ``[start, stop]`` -- part of every run that replays it
+        #: (the run's privacy scope, ``RunRecord.record_window``).
+        self._tl_record_t0: float | None = None
+        self._tl_record_window: list[float] | None = None
         #: A record-start was written that has no record-result yet (Esc on
         #: the Record-settings form never started one: no result line).
         self._tl_result_due = False
@@ -1265,6 +1270,7 @@ class RecordingController:
         if active and not self._tl_recording:
             label = self._current_recording_label or ""
             self._tl_recording = True
+            self._tl_record_t0 = time.time()
             self._tl_result_due = True
             self._tl_record_start = service.set_phase(
                 "record",
@@ -1291,6 +1297,8 @@ class RecordingController:
             )
             if start is not None and self._tl_record_stop is not None:
                 self._tl_record_range = [start, self._tl_record_stop]
+            if self._tl_record_t0 is not None:
+                self._tl_record_window = [self._tl_record_t0, time.time()]
 
     def _timeline_record_result(
         self, *, events: Any, duration_s: Any, completed: bool, cancelled: bool
@@ -1579,6 +1587,9 @@ class RecordingController:
             record.timeline_folder = str(folder) if folder is not None else ""
         except Exception:
             logger.debug("Could not note the run's timeline folder", exc_info=True)
+        if self._tl_record_window:
+            # The recording this Play replays: part of the run's scope.
+            record.record_window = list(self._tl_record_window)
 
         saved_run_id: str | None = run_id
         try:

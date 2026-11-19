@@ -45,8 +45,8 @@ class FakePrivacy:
     def hits_between(self, t0, t1):
         return [h for h in self._hits if h.t is not None and t0 <= h.t <= t1]
 
-    def hits_for_run(self, run_id, t0, t1):
-        return privacy_scan.run_hits(self._hits, run_id, t0, t1)
+    def hits_for_run(self, scope):
+        return privacy_scan.run_hits(self._hits, scope)
 
     def tags_for_flow(self, flow_id):
         self.tag_calls += 1

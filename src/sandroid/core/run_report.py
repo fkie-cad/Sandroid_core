@@ -1074,6 +1074,20 @@ def _write_timeline_seal(root: Path, timeline: Path, seal: Any, scope: Any) -> P
     return path
 
 
+def _flush_privacy_scan(timeout: float = 5.0) -> None:
+    """Let the privacy scan finish the queued flows and files (bounded), so
+    the report's privacy section sees the run's last findings. Never raises.
+    """
+    try:
+        from sandroid.services.privacy_scan import _existing_service
+
+        service = _existing_service()
+        if service is not None and service.is_active:
+            service.flush(timeout)
+    except Exception:
+        logger.debug("privacy scan flush before the report failed", exc_info=True)
+
+
 def _write_run_report(
     root: Path,
     outcome: FinalizeOutcome,
@@ -1087,6 +1101,7 @@ def _write_run_report(
     from sandroid.core import report_engine, report_render
 
     doc = None
+    _flush_privacy_scan()
     try:
         timeline, seal, note = _seal_timeline_for_report(root)
         scope = report_engine.ReportScope()

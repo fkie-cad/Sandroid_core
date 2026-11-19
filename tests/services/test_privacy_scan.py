@@ -504,8 +504,11 @@ def test_read_hits_and_run_hits(svc, flow_dir, folder, tmp_path):
     assert [r.to_json() for r in records] == [h.to_json() for h in svc.hits()]
     assert ps.read_hits(tmp_path / "nowhere") == ([], False)
     t = 1_700_000_001.0
-    assert ps.run_hits(records, None, t - 1, t + 1) == records
-    assert ps.run_hits(records, "run-x", 0, 1) == []
+    assert ps.run_hits(records, ps.run_scope(None, (t - 1, t + 1))) == records
+    assert ps.run_hits(records, ps.run_scope("run-x", (0, 1))) == []
+    # The recording window the run replays counts too.
+    both = ps.run_scope("run-x", (0, 1), record=(t - 1, t + 1))
+    assert ps.run_hits(records, both) == records
 
 
 # ------------------------------------------------------------ session switch
@@ -679,8 +682,8 @@ def test_sweep_keeps_only_files_with_hits(svc, folder, monkeypatch):
     # Found after the run's end, still the run's: it carries the run id.
     assert hit.source["run_id"] == "run-7"
     assert svc.hits_between(0, 1) == []
-    assert svc.hits_for_run("run-7", 0, 1) == [hit]
-    assert svc.hits_for_run("run-8", 0, 1) == []
+    assert svc.hits_for_run(ps.run_scope("run-7", (0, 1))) == [hit]
+    assert svc.hits_for_run(ps.run_scope("run-8", (0, 1))) == []
     (line,) = _privacy_lines(lines)
     assert line["data"]["run_id"] == "run-7"
     kept = [p.name for p in (folder / "privacy" / "sweep").rglob("*") if p.is_file()]

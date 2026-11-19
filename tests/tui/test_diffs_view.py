@@ -1101,3 +1101,38 @@ async def test_privacy_tab_includes_the_end_of_run_sweep(monkeypatch) -> None:
         text = _text_of(dict(view._run_content(run_id).tabs)["Privacy"])
         assert "s.xml" in text
         assert "o.xml" not in text
+
+
+@pytest.mark.asyncio
+async def test_privacy_tab_two_runs_leaking_the_same_value(monkeypatch) -> None:
+    """Both runs show a value both leaked (the timeline line is written once
+    per session; the tab counts every hit). The run's recording window
+    counts as well as its Play.
+    """
+    import privacy_fakes
+    from privacy_fakes import flow_hit
+
+    first, second = "20260101_000000_aaaaab", "20260101_000001_aaaaac"
+    hits = [
+        flow_hit("flow-rec", t=_at(1), tl_seq=41),  # recording of run 1
+        flow_hit("flow-p1", t=_at(5)),  # Play of run 1
+        flow_hit("flow-p2", t=_at(22)),  # Play of run 2 (no line any more)
+    ]
+    privacy_fakes.install(monkeypatch, hits)
+    _save(
+        first,
+        recorded_at="2026-07-21T10:04:00",
+        completed_at="2026-07-21T10:10:00",
+        record_window=[_at(0), _at(3)],
+    )
+    _save(second, recorded_at="2026-07-21T10:20:00", completed_at="2026-07-21T10:25:00")
+    app = _DiffsHarness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        view = app.query_one(DiffsView)
+        await until(pilot, lambda: view._summary(second) is not None)
+        assert view._summary(first)["record_window"] == [_at(0), _at(3)]
+        for run_id, at in ((first, "10:01:00"), (second, "10:22:00")):
+            text = _text_of(dict(view._run_content(run_id).tabs)["Privacy"])
+            assert "1 profile value sent to 1 recipient" in text, run_id
+            # The first hit in the run's scope (the recording's, for run 1).
+            assert f"request body, {at}" in text, (run_id, text)

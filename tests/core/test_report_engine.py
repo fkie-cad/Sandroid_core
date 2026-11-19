@@ -894,6 +894,83 @@ class TestPrivacy:
             in text
         )
 
+    def test_every_run_counts_its_hits_not_only_the_first_line(self, session):
+        """A value leaked in two runs of one session is in both run reports
+        (the timeline line is written once per session, the store keeps
+        every hit); the run scope spans the recording and the Play.
+        """
+        from sandroid.services.privacy_scan import HitRecord
+
+        def hit(sec, *, tl_seq=None, run_id=None, host="graph.facebook.com"):
+            label = "Meta" if host == "graph.facebook.com" else host
+            source = {"type": "flow", "flow_id": f"f{sec}", "host": host}
+            if run_id:
+                source["run_id"] = run_id
+            return HitRecord(
+                v=1, at=0.0, t=(BASE + timedelta(seconds=sec)).timestamp(),
+                fp="fp", engine=1, marker_id="adid", label="Ad ID", tag="Ad ID",
+                kind="uuid", transform="value", confidence="high", part="url",
+                direction="sent", count=1, offsets=(0,), snippet=("", "x", ""),
+                source=source,
+                recipient={"label": label, "party": "third", "host": host},
+                tl_seq=tl_seq,
+            )  # fmt: skip
+
+        tl = session.tl
+        first = _privacy_line(tl, 20, "sent", "Ad ID", "value", part="url",
+                              host="graph.facebook.com", recipient="Meta",
+                              party="third")  # fmt: skip
+        play2 = tl.add(150, "run", "play-start", "play 2", data={"bundle": "x"})
+        tl.add(170, "run", "play-end", "play 2 done", ref={"of": play2})
+        tl.write()
+        privacy = session.tl.folder / "privacy"
+        privacy.mkdir()
+        records = [
+            hit(20, tl_seq=first),  # during the recording (run 1 replays it)
+            hit(50),  # between the runs: in neither run
+            hit(160, host="ads.example.net"),  # during run 2's Play
+        ]
+        (privacy / "hits.jsonl").write_text(
+            "".join(json.dumps(r.to_json()) + "\n" for r in records)
+        )
+        run1 = report_engine.scope_for_run(session.tl.path, RUN_ID)
+        run2 = report_engine.ReportScope(
+            kind="run",
+            run_id="run-2",
+            window=(
+                (BASE + timedelta(seconds=150)).timestamp(),
+                (BASE + timedelta(seconds=170)).timestamp(),
+            ),
+        )
+
+        def intro(scope):
+            doc = _build(session, scope=scope, sections=("privacy",))
+            return _section(doc, "privacy")["blocks"][0]["text"]
+
+        assert intro(run1).startswith(
+            f"1 profile value left the device to 1 recipient, the first at "
+            f"12:00:20 (line {first})."
+        )
+        # Run 2 has no privacy line of its own; its hit still counts.
+        text2 = intro(run2)
+        assert text2.startswith(
+            "1 profile value left the device to 1 recipient, the first at 12:02:40."
+        ), text2
+        # An end-of-run sweep hit attributed to run 2 counts in run 2 only.
+        records.append(hit(400, run_id="run-2", host="sweep.example.org"))
+        (privacy / "hits.jsonl").write_text(
+            "".join(json.dumps(r.to_json()) + "\n" for r in records)
+        )
+        assert "to 2 recipients" in intro(run2)
+        assert "to 1 recipient," in intro(run1)
+        # The whole session counts every hit.
+        assert "to 3 recipients" in intro(report_engine.ReportScope())
+        # A store without a hit in scope: nothing left the device.
+        (privacy / "hits.jsonl").write_text("")
+        assert intro(run1).startswith(
+            "No profile value left the device in this report's scope."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Transcript

@@ -1284,9 +1284,13 @@ def build_coverage(ctx: ReportContext) -> dict:
 # Section: privacy (identity-profile values leaving the device)
 # ---------------------------------------------------------------------------
 #
-# Built from the ``privacy/sent`` and ``privacy/stored`` lines the privacy
-# scan writes (one per new value x encoding x recipient domain / file) and
-# the ``identity/applied`` line that names how many values were seeded.
+# Built from the privacy scan's finding store (``privacy/hits.jsonl`` of the
+# timeline folder: every hit, also a repeat of one seen in an earlier run of
+# the session) within the run's scope (:class:`~sandroid.services.
+# privacy_scan.RunScope`: the recording it replays, its Play and its sweep),
+# and the ``identity/applied`` line that names how many values were seeded.
+# The ``privacy/sent|stored`` timeline lines are written once per finding
+# per session, so they are only the fallback for a folder without the store.
 
 #: Evidence rows listed at most (the timeline keeps every line).
 MAX_PRIVACY_EVIDENCE = 60
@@ -1400,6 +1404,21 @@ def _applied_markers(ctx: ReportContext) -> int | None:
     return count
 
 
+def _has_finding_store(ctx: ReportContext) -> bool:
+    """The timeline folder has the privacy scan's finding store."""
+    if ctx.timeline_dir is None:
+        return False
+    try:
+        from sandroid.services import privacy_scan
+
+        folder = ctx.timeline_dir / privacy_scan.FOLDER_NAME
+        return (folder / privacy_scan.HITS_FILE).is_file() or (
+            folder / privacy_scan.COVERAGE_FILE
+        ).is_file()
+    except Exception:
+        return False
+
+
 def _privacy_first(lines: list[dict[str, Any]]) -> dict[tuple, dict[str, Any]]:
     """First line per (value, recipient or file, transform), in time order."""
     first: dict[tuple, dict[str, Any]] = {}
@@ -1414,9 +1433,106 @@ def _privacy_first(lines: list[dict[str, Any]]) -> dict[tuple, dict[str, Any]]:
     return first
 
 
+def _run_scope(ctx: ReportContext) -> Any:
+    """The privacy :class:`RunScope` of a run report (None: whole session).
+
+    The Play window is the scope's ``window``; the recording it replays is
+    the time span of the ``seq_range`` lines (``record-start`` to
+    ``record-stop``).
+    """
+    from sandroid.services.privacy_scan import run_scope
+
+    scope = ctx.scope
+    if scope.kind != "run" or not (scope.window or scope.seq_range):
+        return None
+    record = None
+    if scope.seq_range:
+        a, b = scope.seq_range
+        stamps = [
+            ln["_ts"]
+            for ln in ctx.lines
+            if isinstance(ln.get("seq"), int)
+            and a <= ln["seq"] <= b
+            and ln.get("_ts") is not None
+        ]
+        if stamps:
+            record = (min(stamps), max(stamps))
+    return run_scope(scope.run_id, scope.window, record)
+
+
+def _hit_line(hit: Any) -> dict[str, Any]:
+    """A hit record in the shape of its ``privacy/*`` line (for the tables)."""
+    src = hit.source or {}
+    rcpt = hit.recipient or {}
+    data: dict[str, Any] = {
+        "marker_id": hit.marker_id,
+        "label": hit.label,
+        "transform": hit.transform,
+        "part": hit.part,
+    }
+    if hit.direction == "sent":
+        data.update(
+            host=src.get("host"),
+            recipient=rcpt.get("label"),
+            party=rcpt.get("party"),
+        )
+    else:
+        data["path"] = src.get("device_path")
+    return {
+        "src": "privacy",
+        "kind": hit.direction,
+        "t": hit.t,
+        "_ts": hit.t,
+        "seq": hit.tl_seq,
+        "data": data,
+    }
+
+
+def _privacy_lines(ctx: ReportContext) -> list[dict[str, Any]]:
+    """The scope's findings as line-shaped dicts: every hit of the finding
+    store in the scope, else (no store) the scope's ``privacy/*`` lines.
+    """
+    store = None
+    if ctx.timeline_dir is not None:
+        try:
+            from sandroid.services import privacy_scan
+
+            path = ctx.timeline_dir / privacy_scan.FOLDER_NAME
+            if (path / privacy_scan.HITS_FILE).is_file():
+                store, _scanned = privacy_scan.read_hits(ctx.timeline_dir)
+        except Exception:
+            logger.debug("Report: privacy findings unreadable", exc_info=True)
+            store = None
+    if store is None:
+        return [
+            ln for ln in ctx.by_src.get("privacy", []) if not _data(ln).get("_masked")
+        ]
+    scope = _run_scope(ctx)
+    return sorted(
+        (
+            _hit_line(hit)
+            for hit in store
+            if hit.direction in ("sent", "stored")
+            and (scope is None or scope.covers(hit))
+        ),
+        key=_sort_key,
+    )
+
+
 def build_privacy(ctx: ReportContext) -> dict:
     """Which identity-profile values left the device, to whom and how."""
-    lines = [ln for ln in ctx.by_src.get("privacy", []) if not _data(ln).get("_masked")]
+    lines = _privacy_lines(ctx)
+    if not lines and not ctx.by_src.get("privacy") and not _has_finding_store(ctx):
+        return {
+            "blocks": [
+                _text(
+                    ctx.notes[0]
+                    if ctx.notes
+                    else "Nothing to show: the report scope has no privacy lines "
+                    "(was an identity profile active?)."
+                )
+            ]
+        }
     sent = [ln for ln in lines if ln.get("kind") == "sent"]
     stored = [ln for ln in lines if ln.get("kind") == "stored"]
     blocks: list[dict] = []
@@ -1432,10 +1548,11 @@ def build_privacy(ctx: ReportContext) -> dict:
         first = sent[0]
         of = f" of {total}" if total is not None else ""
         third = sum(1 for p in recipients.values() if p == "third")
+        line_no = f" (line {first['seq']})" if first.get("seq") is not None else ""
         text = (
             f"{len(values)}{of} profile value{'s' if len(values) != 1 else ''} "
             f"left the device to {_plural(len(recipients), 'recipient')}, the "
-            f"first at {_clock(first.get('t'))} (line {first.get('seq')})."
+            f"first at {_clock(first.get('t'))}{line_no}."
         )
         if third:
             text += f" {third} of the recipients are known third parties."
@@ -1490,7 +1607,7 @@ def build_privacy(ctx: ReportContext) -> dict:
                 part_words(str(d.get("part") or "")),
                 transform_words(str(d.get("transform") or "value")),
                 _clock(line.get("t")),
-                str(line.get("seq")),
+                str(line["seq"]) if line.get("seq") is not None else "",
             ]
         )
     blocks.append(
@@ -2337,7 +2454,6 @@ SECTION_PLAN: tuple[SectionSpec, ...] = (
         "privacy",
         "Identity data leaving the device",
         build_privacy,
-        requires_src=frozenset({"privacy"}),
     ),
     SectionSpec(
         "transcript",
