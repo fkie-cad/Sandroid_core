@@ -35,7 +35,10 @@ Usage:
 """
 
 import threading
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
+
+if TYPE_CHECKING:
+    from .identity import IdentityService
 
 # ---------------------------------------------------------------------------
 # Service singleton registry & factory
@@ -337,6 +340,13 @@ def get_device_settings_service() -> "DeviceSettingsService":
     return _get_or_create(_create_device_settings_service)
 
 
+def get_identity_service() -> "IdentityService":
+    """Get or create the IdentityService singleton (identity profiles)."""
+    from .identity import get_identity_service as _get_identity_service
+
+    return _get_identity_service()
+
+
 def reset_services() -> None:
     """Reset all service singletons (useful for testing).
 
@@ -459,6 +469,7 @@ __all__ = [
     "get_forensic_apk_service",
     "get_forensic_service",
     "get_frida_session_service",
+    "get_identity_service",
     "get_initialization_service",
     "get_network_capture_service",
     "get_objection_service",
