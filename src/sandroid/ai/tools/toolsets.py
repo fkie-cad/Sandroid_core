@@ -110,10 +110,11 @@ TOOLSET_TABLE: dict[str, ToolsetEntry] = {
     "list_installed_packages": _e("apps", core=True),
     "get_package_details": _e("apps", core=True),
     "get_package_pid": _e("apps", core=True),
-    # Pre-start steps (identity framework restart, recovery, a confirm
-    # dialog) can take minutes; the tools answer ``pending`` before the
-    # executor deadline, so these are upper bounds, not expected durations.
-    "launch_app": _e("apps", core=True, timeout_s=300),
+    # Pre-start steps can take minutes: a confirm dialog (up to 300 s), the
+    # identity framework restart window (180 s), recovery (90 s) and the
+    # spawn ladder (~30 s). The executor's timeout/abandon path stays in
+    # charge (leases are held until the call really ends).
+    "launch_app": _e("apps", core=True, timeout_s=_LONG),
     "start_spotlight_app": _e("apps", timeout_s=_LONG),
     "is_package_installed": _e("apps"),
     "list_exported_components": _e("apps"),
