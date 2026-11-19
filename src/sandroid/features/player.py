@@ -17,6 +17,47 @@ from .functionality import Functionality
 
 logger = getLogger(__name__)
 
+#: One recorded input event, either format:
+#:
+#: * ``recording.getevent.txt`` (raw ``getevent -t``):
+#:   ``[   26404.737324] /dev/input/event1: 0003 0039 ffffffff`` -- device
+#:   seconds, hex type/code/value;
+#: * legacy ``recording.txt``: ``<epoch ms> <device> <type> <code> <value>``
+#:   (decimal).
+STORE_LINE_RE = re.compile(
+    r"\[\s*(?P<gts>\d+\.\d+)\]\s+(?P<gdev>/dev/\S+):\s+"
+    r"(?P<gtype>[0-9a-fA-F]{4})\s+(?P<gcode>[0-9a-fA-F]{4})\s+"
+    r"(?P<gvalue>[0-9a-fA-F]{8})\s*$"
+    r"|(?P<ts>\S+) (?P<dev>\S+) (?P<type>\S+) (?P<code>\S+) (?P<value>\S+)$"
+)
+
+
+def parse_store_line(line: str) -> tuple[float, str, str, str, str] | None:
+    """``(ts_ms, device, type, code, value)`` of a recording line, or None.
+
+    getevent lines are converted exactly like the legacy recorder did
+    (``int(hex, 16)``, unsigned) so both formats yield the same ``sendevent``
+    arguments; ``ts_ms`` is device seconds x 1000 there and host epoch ms in
+    legacy lines (the player only uses differences).
+    """
+    m = STORE_LINE_RE.match(line.strip())
+    if m is None:
+        return None
+    if m["gts"] is not None:
+        return (
+            float(m["gts"]) * 1000.0,
+            m["gdev"],
+            str(int(m["gtype"], 16)),
+            str(int(m["gcode"], 16)),
+            str(int(m["gvalue"], 16)),
+        )
+    try:
+        ts = float(m["ts"])
+    except ValueError:
+        return None
+    return ts, m["dev"], m["type"], m["code"], m["value"]
+
+
 #: Process-wide "stop replaying" flag. Set by :meth:`Player.cancel_all` (TUI
 #: stop/quit) and checked before every event and during every inter-event
 #: wait, so a replay stops within one event instead of tapping on for minutes.
@@ -40,15 +81,16 @@ def _raise_cancelled() -> None:
 class Player(Functionality):
     """Replays previously recorded touch/input events on an Android device.
 
-    Reads events from a recording file produced by :class:`Recorder` and
-    sends them to the device via ``adb shell sendevent``, preserving the
+    Reads events from a recording (``recording.getevent.txt`` written by
+    Record, or a legacy ``recording.txt``) and sends them to the device via ``adb shell sendevent``, preserving the
     original timing between events.
 
     Attributes:
-        STORE_LINE_RE: Pattern matching stored event lines (timestamp, device, type, code, data).
+        STORE_LINE_RE: Pattern matching a stored event line of either format
+            (see :func:`parse_store_line`).
     """
 
-    STORE_LINE_RE = re.compile(r"(\S+) (\S+) (\S+) (\S+) (\S+)$")
+    STORE_LINE_RE = STORE_LINE_RE
 
     @staticmethod
     def cancel_all() -> None:
@@ -69,7 +111,8 @@ class Player(Functionality):
         """Initialize the player.
 
         Args:
-            recording_path: Absolute path to the ``recording.txt`` to replay.
+            recording_path: Absolute path to the recording to replay
+                (``recording.getevent.txt`` or a legacy ``recording.txt``).
                 This is how the recording is supplied and is immune to the
                 device-switch re-derivation bug (see module notes). May be
                 left ``None`` here and passed to :meth:`perform` instead, but
@@ -129,15 +172,15 @@ class Player(Functionality):
         try:
             with open(recording_file, encoding="utf-8") as fp:
                 for line in fp:
-                    match = self.STORE_LINE_RE.match(line.strip())
-                    if match is None:
-                        logger.warning(
-                            f"Skipping malformed line in recording: {line.strip()}"
-                        )
+                    parsed = parse_store_line(line)
+                    if parsed is None:
+                        if line.strip():
+                            logger.warning(
+                                f"Skipping malformed line in recording: {line.strip()}"
+                            )
                         continue
 
-                    ts, dev, etype, ecode, data = match.groups()
-                    ts = float(ts)
+                    ts, dev, etype, ecode, data = parsed
 
                     if last_ts and (ts - last_ts) > 0:
                         delta_second = (ts - last_ts) / 1000

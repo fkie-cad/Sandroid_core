@@ -22,6 +22,12 @@ class Recorder(Functionality):
 
     Events are written to a timestamped text file for later replay by :class:`Player`.
 
+    Legacy: this writes the old ``recording.txt`` format
+    (``<epoch ms> <device> <type> <code> <value>``) and is not used by the
+    TUI or the headless modes. Record now leases Tracking's shared
+    ``getevent -t`` stream (:mod:`sandroid.services.tracking_service`) and
+    writes ``recording.getevent.txt``; :class:`Player` replays both formats.
+
     Attributes:
         EVENT_LINE_RE: Pattern matching raw getevent output lines.
     """

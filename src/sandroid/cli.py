@@ -653,7 +653,9 @@ def resolve_recording(action_path: str) -> tuple[str | None, str | None]:
 
     path = Path(action_path)
     if path.is_dir():
-        path = path / "recording.txt"
+        from .core.run_bundle import recording_path
+
+        path = recording_path(path)
     if not path.is_file():
         return None, f"No recording found: {path}"
     try:
@@ -666,7 +668,7 @@ def resolve_recording(action_path: str) -> tuple[str | None, str | None]:
         return None, f"Cannot read {path}: {e}"
     if not lines:
         return None, f"Recording is empty: {path}"
-    if lines[0].startswith(("{", "[")):
+    if lines[0].startswith(("{", "[")) and not Player.STORE_LINE_RE.match(lines[0]):
         return None, (
             f"{path} is a JSON file. JSON action files cannot be replayed; pass "
             "a recording.txt from a run bundle (or the bundle folder) instead."

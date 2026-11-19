@@ -647,18 +647,21 @@ class RecordingController:
         Returns:
             True if recording file exists
         """
-        raw_results_path = os.getenv("RAW_RESULTS_PATH", "./")
-        recording_file = os.path.join(raw_results_path, "recording.txt")
-        return os.path.exists(recording_file)
+        return os.path.exists(self.get_recording_path())
 
     def get_recording_path(self) -> str:
         """Get the path to the recording file.
 
+        Record writes ``recording.getevent.txt`` (a raw ``getevent -t``
+        slice); the legacy ``recording.txt`` is never written any more.
+
         Returns:
             Path to recording file
         """
+        from sandroid.core.run_bundle import RECORDING_FILENAME
+
         raw_results_path = os.getenv("RAW_RESULTS_PATH", "./")
-        return os.path.join(raw_results_path, "recording.txt")
+        return os.path.join(raw_results_path, RECORDING_FILENAME)
 
     def start_playback(self, label: str | None = None) -> bool:
         """Start playback and analysis.
@@ -724,14 +727,17 @@ class RecordingController:
     def recording_seconds(path: str) -> float | None:
         """Length of a recording (first to last input event), or None.
 
-        The recording is ``<epoch ms> <device> <type> <code> <value>`` lines.
+        Both formats: raw ``getevent -t`` lines (``recording.getevent.txt``)
+        and legacy ``<epoch ms> <device> <type> <code> <value>`` lines.
         """
+        from sandroid.features.player import parse_store_line
+
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
                 stamps = [
-                    int(line.split(None, 1)[0])
-                    for line in f
-                    if line.strip() and line.split(None, 1)[0].isdigit()
+                    parsed[0]
+                    for parsed in (parse_store_line(line) for line in f)
+                    if parsed is not None
                 ]
         except OSError:
             return None

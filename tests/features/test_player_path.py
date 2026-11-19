@@ -96,3 +96,69 @@ def test_missing_recording_raises_runtime_error(tmp_path, sent, _neutralize_tool
 
     with pytest.raises(RuntimeError, match="Recording file not found"):
         Player(recording_path=str(missing)).perform()
+
+
+def _events():
+    """The same five events: device seconds, type, code, value (hex/unsigned)."""
+    return [
+        (26404.737324, 3, 0x39, 0),
+        (26404.737324, 3, 0x35, 0x238D),
+        (26404.737324, 0, 0, 0),
+        (26404.763419, 3, 0x39, 0xFFFFFFFF),
+        (26404.763419, 0, 0, 0),
+    ]
+
+
+def test_getevent_and_legacy_recordings_replay_identically(
+    tmp_path, sent, _neutralize_toolbox, monkeypatch
+):
+    """``recording.getevent.txt`` (raw ``getevent -t``) and a legacy
+    ``recording.txt`` of the same events give the same sendevent calls and
+    the same waits (the legacy recorder converted hex with ``int(x, 16)``).
+    """
+    new = tmp_path / "recording.getevent.txt"
+    _write_recording(
+        new,
+        *(
+            f"[{t:15.6f}] /dev/input/event1: {a:04x} {b:04x} {c:08x}"
+            for t, a, b, c in _events()
+        ),
+    )
+    legacy = tmp_path / "recording.txt"
+    _write_recording(
+        legacy,
+        *(
+            f"{round(t * 1000)} /dev/input/event1 {a} {b} {c}"
+            for t, a, b, c in _events()
+        ),
+    )
+    waits: list[float] = []
+    monkeypatch.setattr(player_module._cancel_event, "wait", waits.append)
+
+    Player(recording_path=str(new)).perform()
+    sent_new, waits_new = list(sent), list(waits)
+    sent.clear()
+    waits.clear()
+    Player(recording_path=str(legacy)).perform()
+
+    assert sent_new == sent
+    assert sent_new[3] == "shell sendevent /dev/input/event1 3 57 4294967295"
+    assert [round(w, 3) for w in waits_new] == [round(w, 3) for w in waits] == [0.026]
+
+
+def test_store_line_re_matches_both_formats():
+    """``cli.resolve_recording`` validates lines with ``STORE_LINE_RE.match``."""
+    assert Player.STORE_LINE_RE.match(
+        "[   26404.737324] /dev/input/event1: 0003 0039 ffffffff"
+    )
+    assert Player.STORE_LINE_RE.match("1700000000000 /dev/input/event1 3 57 0")
+    assert not Player.STORE_LINE_RE.match("add device 1: /dev/input/event0")
+    assert player_module.parse_store_line(
+        "[ 1.500000] /dev/input/event2: 0001 009e 00000001"
+    ) == (
+        1500.0,
+        "/dev/input/event2",
+        "1",
+        "158",
+        "1",
+    )

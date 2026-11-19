@@ -953,6 +953,8 @@ class MitmproxyService:
         self._proc: subprocess.Popen | None = None
         self._reader_thread: threading.Thread | None = None
         self._listeners: list[Callable[[str], None]] = []
+        #: Session-timeline ``net/flow`` lines while mitmweb runs (WP4).
+        self._net_source: Any = None
         self._state = MitmproxyState()
         self._addon_path: str | None = None
         # User-supplied addon configuration. ``_user_addons_dir`` is the
@@ -1731,6 +1733,7 @@ class MitmproxyService:
                 daemon=True,
             )
             self._reader_thread.start()
+            self._start_net_source()
 
             self._emit(
                 f"[INFO] mitmweb started "
@@ -1775,6 +1778,7 @@ class MitmproxyService:
                 logger.debug("Focus teardown on stop failed: %s", exc)
 
             self._state.running = False
+            self._stop_net_source()
             self._emit("[INFO] Stopping mitmweb...")
 
             try:
@@ -1788,6 +1792,30 @@ class MitmproxyService:
                 self._cleanup_addon()
 
             self._emit("[INFO] mitmweb stopped")
+
+    def _start_net_source(self) -> None:
+        """One ``net/flow`` timeline line per finished flow (never raises)."""
+        self._stop_net_source()
+        try:
+            from sandroid.services.tracking_service import NetFlowSource
+
+            source = NetFlowSource()
+            source.start()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("net flow source failed to start: %s", exc)
+            return
+        self._net_source = source
+        self.add_listener(source.on_line)
+
+    def _stop_net_source(self) -> None:
+        source, self._net_source = self._net_source, None
+        if source is None:
+            return
+        self.remove_listener(source.on_line)
+        try:
+            source.stop()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("net flow source failed to stop: %s", exc)
 
     def _signal_group(self, proc, sig: int) -> bool:
         """Signal mitmweb's process group (True) or report it can't (False)."""

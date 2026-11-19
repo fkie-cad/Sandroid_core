@@ -414,8 +414,10 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         self._timer: Timer | None = None
         self._live_event_lines: list[str] = []
         self._max_live_lines = 100
+        from sandroid.core.run_bundle import RECORDING_FILENAME
+
         self._output_file = os.path.join(
-            os.getenv("RAW_RESULTS_PATH", "./"), "recording.txt"
+            os.getenv("RAW_RESULTS_PATH", "./"), RECORDING_FILENAME
         )
         self._auto_start = auto_start
         self._default_label = default_label

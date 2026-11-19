@@ -5,8 +5,9 @@ recording that produced it, and the raw pull tree. These tests exercise the
 public API against a throwaway ``tmp_path`` (both the fake config's
 ``paths.results_path`` and ``RESULTS_PATH`` point at it, since
 ``run_history._results_path()`` is config-first): ``create_bundle`` makes the
-directory + ``raw/``; ``import_recording`` copies ``recording.txt`` and returns
-an absolute path; ``write_manifest`` round-trips through ``run_history``; and
+directory + ``raw/``; ``import_recording`` copies the recording (``recording.getevent.txt``; a
+legacy ``recording.txt`` keeps its name) and returns an absolute path;
+``recording_path`` prefers the new name; ``write_manifest`` round-trips through ``run_history``; and
 ``run_history.delete_run`` removes the whole bundle.
 """
 
@@ -71,18 +72,47 @@ class TestCreateBundle:
         assert run_bundle.bundle_dir("some_run") == tmp_path / "runs" / "some_run"
 
 
+GETEVENT_LINE = "[   26404.737324] /dev/input/event1: 0003 0039 00000000\n"
+
+
 class TestImportRecording:
     def test_import_recording_copies_and_returns_absolute_path(self, tmp_path):
-        live = tmp_path / "live" / "recording.txt"
+        live = tmp_path / "live" / "recording.getevent.txt"
         live.parent.mkdir(parents=True)
-        live.write_text("12345 dev EV_KEY 1 1\n", encoding="utf-8")
+        live.write_text(GETEVENT_LINE, encoding="utf-8")
 
         returned = run_bundle.import_recording("20260722_100000_cccccc", live)
 
         assert Path(returned).is_absolute()
-        dst = tmp_path / "runs" / "20260722_100000_cccccc" / "recording.txt"
+        dst = tmp_path / "runs" / "20260722_100000_cccccc" / "recording.getevent.txt"
+        assert Path(returned) == dst.resolve()
+        assert dst.read_text(encoding="utf-8") == GETEVENT_LINE
+        assert not (dst.parent / "recording.txt").exists()
+
+    def test_import_keeps_a_legacy_recording_txt(self, tmp_path):
+        live = tmp_path / "live" / "recording.txt"
+        live.parent.mkdir(parents=True)
+        live.write_text("12345 dev EV_KEY 1 1\n", encoding="utf-8")
+
+        returned = run_bundle.import_recording("20260722_100000_cccccd", live)
+
+        dst = tmp_path / "runs" / "20260722_100000_cccccd" / "recording.txt"
         assert Path(returned) == dst.resolve()
         assert dst.read_text(encoding="utf-8") == "12345 dev EV_KEY 1 1\n"
+
+    def test_recording_path_prefers_the_new_name(self, tmp_path):
+        assert run_bundle.RECORDING_FILENAME == "recording.getevent.txt"
+        assert run_bundle.LEGACY_RECORDING_FILENAME == "recording.txt"
+        # nothing there: the new name
+        assert (
+            run_bundle.recording_path(tmp_path) == tmp_path / "recording.getevent.txt"
+        )
+        (tmp_path / "recording.txt").write_text("1 d 0 0 0\n")
+        assert run_bundle.recording_path(tmp_path) == tmp_path / "recording.txt"
+        (tmp_path / "recording.getevent.txt").write_text(GETEVENT_LINE)
+        assert run_bundle.recording_path(str(tmp_path)) == (
+            tmp_path / "recording.getevent.txt"
+        )
 
     def test_import_recording_creates_bundle_if_absent(self, tmp_path):
         live = tmp_path / "recording.txt"

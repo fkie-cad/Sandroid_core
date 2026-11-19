@@ -76,8 +76,22 @@ class ScreenshotController:
         """Show screenshot modal for filename input.
 
         Opens the ScreenshotModal and handles the result callback by
-        taking a screenshot via EmulatorService.
+        taking a screenshot via EmulatorService. While Tracking is on, ``s``
+        instead records a ``shot/manual`` timeline line at once (the capture
+        runs on a Tracking worker thread; t = the key press).
         """
+        import time
+
+        try:
+            from sandroid.services import tracking_service
+        except Exception:  # pragma: no cover - tracking always importable
+            tracking_service = None
+        if tracking_service is not None and tracking_service.is_active():
+            pressed = time.time()
+            if tracking_service.get_tracking().manual_shot(t=pressed):
+                self._log_success("Screenshot recorded (Tracking)")
+                return
+
         from sandroid.tui.modals import ScreenshotModal, ScreenshotResult
 
         def on_screenshot_result(result: ScreenshotResult | None) -> None:

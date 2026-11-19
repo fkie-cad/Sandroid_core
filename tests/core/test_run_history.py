@@ -485,3 +485,19 @@ class TestReviewScopeHelpers:
     def test_load_run_dir_raises_for_missing_run(self, tmp_path):
         with pytest.raises(run_history.RunHistoryError):
             run_history.load_run_dir(tmp_path / "missing")
+
+
+class TestRecordingDigest:
+    def test_digest_reads_the_getevent_recording_then_the_legacy_one(self, tmp_path):
+        import hashlib
+
+        assert run_history.recording_digest(None) is None
+        assert run_history.recording_digest(tmp_path) is None
+        (tmp_path / "recording.txt").write_bytes(b"legacy")
+        assert run_history.recording_digest(tmp_path) == (
+            hashlib.sha256(b"legacy").hexdigest()
+        )
+        (tmp_path / "recording.getevent.txt").write_bytes(b"new")
+        assert run_history.recording_digest(str(tmp_path)) == (
+            hashlib.sha256(b"new").hexdigest()
+        )
