@@ -878,18 +878,26 @@ def target(monkeypatch):
     monkeypatch.setattr(Adb, "get_target_device", classmethod(lambda cls: SERIAL))
 
 
-def test_header_shows_device_time_only_when_off(device, target):
+def test_header_always_shows_the_device_time(device, target):
     from sandroid.tui.widgets.lens_shell import ShellHeader
 
     header = ShellHeader()
     now = device.host
-    assert header.update_device_clock(now) == ""  # no sample yet
+    assert header.update_device_clock(now) == "dev ?"  # no sample yet
     device_clock.measure(SERIAL)
     when = datetime.fromtimestamp(now - 4500.0)
-    assert header.update_device_clock(now) == f"device {when:%H:%M:%S} −75 min ⚠"
+    assert header.update_device_clock(now) == f"dev {when:%H:%M:%S} −75 min ⚠"
     device.behind = 0.4
     device_clock.measure(SERIAL)
-    assert header.update_device_clock(now) == ""
+    when = datetime.fromtimestamp(now - device_clock.last_sample(SERIAL)["off_wall"])
+    assert header.update_device_clock(now) == f"dev {when:%H:%M:%S} ✓"
+
+
+def test_header_hides_the_device_time_without_a_target(device, monkeypatch):
+    from sandroid.tui.widgets.lens_shell import ShellHeader
+
+    monkeypatch.setattr(Adb, "get_target_device", classmethod(lambda cls: None))
+    assert ShellHeader().update_device_clock(device.host) == ""
 
 
 def test_header_hides_the_stale_offset_after_a_world_change(device, target):
@@ -900,7 +908,7 @@ def test_header_hides_the_stale_offset_after_a_world_change(device, target):
     assert "−75 min" in header.update_device_clock(device.host)
     device.host += 1
     device_clock.begin_epoch(SERIAL)  # a snapshot load: no fresh sample yet
-    assert header.update_device_clock(device.host) == ""
+    assert header.update_device_clock(device.host) == "dev ?"
     device.behind = 9000.0
     device_clock.measure(SERIAL)
     assert "−150 min" in header.update_device_clock(device.host)
@@ -937,7 +945,7 @@ def test_the_timeline_writer_samples_the_clock_every_clock_every_s(
 
 
 @pytest.mark.asyncio
-async def test_header_device_clock_is_amber_and_hidden_when_close(device, target):
+async def test_header_device_clock_is_dim_until_off_then_amber(device, target):
     from textual.app import App, ComposeResult
     from textual.widgets import Static
 
@@ -952,14 +960,25 @@ async def test_header_device_clock_is_amber_and_hidden_when_close(device, target
         label = header.query_one("#device-clock", Static)
         header.update_device_clock()
         await pilot.pause()
-        assert label.styles.display == "none"
+        assert label.has_class("-unknown")  # no sample yet: "dev ?", dimmed
+        assert label.styles.display == "block"
+        assert label.styles.color.hex.lower() == "#5b6479"
         device_clock.measure(SERIAL)
         header.update_device_clock()
         await pilot.pause()
         assert label.has_class("-off")
+        assert not label.has_class("-unknown")
         assert label.styles.display == "block"
         assert label.styles.color.hex.lower() == "#fbbf24"
         assert "−75 min ⚠" in str(label.render())
+        device.behind = 0.2
+        device_clock.measure(SERIAL)
+        header.update_device_clock()
+        await pilot.pause()
+        assert label.has_class("-sync")
+        assert not label.has_class("-off")
+        assert label.styles.color.hex.lower() == "#5b6479"
+        assert str(label.render()).endswith("✓")
 
 
 def test_a_sample_measured_before_a_world_change_stays_in_the_old_world(

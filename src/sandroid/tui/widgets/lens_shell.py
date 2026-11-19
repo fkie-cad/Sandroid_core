@@ -463,10 +463,15 @@ class ShellHeader(Header):
         display: none;
         width: auto;
         padding: 0 1 0 0;
-        color: #fbbf24;
+        color: #5b6479;
+    }
+    ShellHeader #device-clock.-sync,
+    ShellHeader #device-clock.-unknown {
+        display: block;
     }
     ShellHeader #device-clock.-off {
         display: block;
+        color: #fbbf24;
     }
     ShellHeader #label-note,
     ShellHeader #tracking-dot,
@@ -606,13 +611,17 @@ class ShellHeader(Header):
         self.set_tracking(active)
 
     def update_device_clock(self, now: float | None = None) -> str:
-        """The device's wall time beside the host clock, in amber, only while
-        the last device clock sample is more than 1 s off the host:
-        ``device 17:16:02 -75 min ⚠``. Computed as host now - ``off_wall``
-        (no adb call, display only: the timeline's writer thread takes the
-        periodic samples). Hidden after a snapshot load / cold boot until
-        the first sample of the new world (the old offset is stale).
-        Returns the text shown.
+        """The device's wall time beside the host clock, always while a
+        device is targeted (display only, no adb call: host now -
+        ``off_wall`` of the last sample; the timeline's writer thread takes
+        the periodic samples):
+
+        * within 1 s of the host, dimmed: ``dev 17:16:02 ✓``
+        * more than 1 s off, amber: ``dev 16:01:02 -75 min ⚠``
+        * no sample of the current world yet (startup, or after a snapshot
+          load / cold boot, when the old offset is stale), dimmed: ``dev ?``
+
+        Hidden without a target device. Returns the text shown.
         """
         from sandroid.core import device_clock
         from sandroid.core.adb import Adb
@@ -622,15 +631,24 @@ class ShellHeader(Header):
         sample = (
             device_clock.last_sample(serial, current_world=True) if serial else None
         )
-        text = ""
-        if device_clock.notable(sample):
+        if not serial:
+            text, state = "", ""
+        elif sample is None or sample.get("off_wall") is None:
+            text, state = "dev ?", "-unknown"
+        else:
             when = datetime.fromtimestamp(now - sample["off_wall"])
-            offset = device_clock.format_offset(device_clock.device_minus_host(sample))
-            text = f"device {when:%H:%M:%S} {offset} ⚠"
+            if device_clock.notable(sample):
+                offset = device_clock.format_offset(
+                    device_clock.device_minus_host(sample)
+                )
+                text, state = f"dev {when:%H:%M:%S} {offset} ⚠", "-off"
+            else:
+                text, state = f"dev {when:%H:%M:%S} ✓", "-sync"
         try:
             label = self.query_one("#device-clock", Static)
             label.update(text)
-            label.set_class(bool(text), "-off")
+            for cls in ("-sync", "-off", "-unknown"):
+                label.set_class(cls == state, cls)
         except Exception:
             pass
         return text
