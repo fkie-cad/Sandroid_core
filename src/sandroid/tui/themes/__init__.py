@@ -10,14 +10,127 @@ theme key: it toggles Tracking (session timeline).
 Each theme has a corresponding CSS file in this directory.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
+
+from textual._context import active_app
+from textual.theme import BUILTIN_THEMES
+from textual.theme import Theme as TextualTheme
 
 # Directory containing theme CSS files
 THEMES_DIR = Path(__file__).parent
 
 # Parent directory for default theme CSS
 PARENT_DIR = THEMES_DIR.parent
+
+
+# ========== App lens color tokens ==========
+#
+# One token set per Sandroid theme colors the App lens (``LensSection``
+# tables, the ``SpotlightPanel`` status/bypass rows and action row, the
+# ``Inspector``). Each token is used in two ways, both fed from here:
+#
+# * CSS: every token is a Textual CSS variable ``$lens-<name>`` (underscores
+#   become dashes, e.g. ``cursor_focus`` -> ``$lens-cursor-focus``) on the
+#   Textual theme ``sandroid-<theme name>`` that ``SandroidTUI`` registers
+#   per Sandroid theme (see :func:`build_textual_theme`).
+# * Python/Rich: :func:`lens_palette` returns the palette of the running
+#   app's current theme (``lens_palette().warn`` etc.).
+#
+# Tokens (role -> where it shows today):
+#   bg                 lens background: section tables, spotlight scroll area
+#   panel              panel background: spotlight header line behind the scroll
+#   text               primary text: section cells without their own color
+#   label              row-label text: key column of key/value rows (identity...)
+#   dim                dim text: placeholders, "none", secondary cell values
+#   muted              muted text: Inspector subtitle, tab strip, headings
+#   title              section titles + spotlight row headings ("App", "Bypass")
+#   accent             accent: spotlight header line, active Inspector tab
+#   accent_text        text drawn on ``accent`` (active Inspector tab)
+#   ok / warn / bad    status colors (granted / dangerous / denied ...)
+#   rule               section separator line (top border of each section)
+#   rule_focus         top border of the focused section
+#   header             table column header text
+#   cursor             row cursor background, section not focused
+#   cursor_focus       row cursor background, section focused
+#   action_bg/_text    spotlight action row ("Start  R restart ...")
+#   action_hover_bg/_text   an action cell under the mouse
+#   input_bg/_focus_bg/_text  the row filter input ("/")
+#
+# Add a theme: give its ``Theme(...)`` a ``lens=LensPalette(...)``; it is
+# registered automatically (``THEMES``). Retune: change the value here.
+# New token: add a field to ``LensPalette`` AND a value in every palette
+# below, then use ``$lens-<name>`` in a DEFAULT_CSS or ``lens_palette().<name>``
+# in Python. An App hosting lens widgets must provide the variables:
+# ``SandroidTUI`` does (``get_theme_variable_defaults`` + registered themes);
+# ``tests/conftest.py`` adds the defaults to bare test ``App``s.
+
+
+@dataclass(frozen=True)
+class LensPalette:
+    """App lens color tokens (see the table above). Hex strings."""
+
+    bg: str
+    panel: str
+    text: str
+    label: str
+    dim: str
+    muted: str
+    title: str
+    accent: str
+    accent_text: str
+    ok: str
+    warn: str
+    bad: str
+    rule: str
+    rule_focus: str
+    header: str
+    cursor: str
+    cursor_focus: str
+    action_bg: str
+    action_text: str
+    action_hover_bg: str
+    action_hover_text: str
+    input_bg: str
+    input_focus_bg: str
+    input_text: str
+
+    def css_variables(self) -> dict[str, str]:
+        """The tokens as Textual CSS variables (``{"lens-bg": "#050811", ...}``)."""
+        return {
+            "lens-" + f.name.replace("_", "-"): getattr(self, f.name)
+            for f in fields(self)
+        }
+
+
+# Midnight Cyan: the exact colors the lens hardcoded before tokens existed
+# (``text`` is textual-dark's ``$foreground``, which the tables inherited).
+DEFAULT_LENS = LensPalette(
+    bg="#050811",
+    panel="#080c18",
+    text="#e0e0e0",
+    label="#5b6479",
+    dim="#5b6479",
+    muted="#8f9bb3",
+    title="#7dd3fc",
+    accent="#38bdf8",
+    accent_text="#06121f",
+    ok="#4ade80",
+    warn="#fbbf24",
+    bad="#fb7185",
+    rule="#1f2d4d",
+    rule_focus="#38bdf8",
+    header="#5b6479",
+    cursor="#0b1628",
+    cursor_focus="#1d3557",
+    action_bg="#0b1628",
+    action_text="#93a4c3",
+    action_hover_bg="#1f2937",
+    action_hover_text="#7dd3fc",
+    input_bg="#0b1628",
+    input_focus_bg="#11203a",
+    input_text="#e5e9f0",
+)
 
 
 @dataclass
@@ -74,6 +187,9 @@ class Theme:
     waiting_color: str = "#fbbf24"  # "waiting on you" amber (distinct from warning)
     muted_status_color: str = "#5b6479"  # Idle/muted chat status text
 
+    # App lens color tokens (see LensPalette above).
+    lens: LensPalette = field(default_factory=lambda: DEFAULT_LENS)
+
 
 # ========== Fixed Semantic Colors ==========
 # These colors do NOT change with theme - they provide consistent status recognition
@@ -124,6 +240,7 @@ DEFAULT_THEME = Theme(
     assistant_reply_color="#4ade80",  # soft green -- exact reproduction
     waiting_color="#fbbf24",  # amber -- exact reproduction
     muted_status_color="#5b6479",  # muted gray -- exact reproduction
+    lens=DEFAULT_LENS,
 )
 
 DARK_THEME = Theme(
@@ -158,6 +275,32 @@ DARK_THEME = Theme(
     # theme's warning (#FFB74D, more orange)
     muted_status_color="#757575",  # == text_muted, == this theme's
     # .tool-tab inactive color -- consistent with the chrome
+    lens=LensPalette(
+        bg="#0A0A0A",
+        panel="#121212",
+        text="#E0E0E0",
+        label="#9E9E9E",
+        dim="#8A8A8A",
+        muted="#9E9E9E",
+        title="#BB86FC",
+        accent="#03DAC6",
+        accent_text="#000000",
+        ok="#81C784",
+        warn="#FFB74D",
+        bad="#CF6679",
+        rule="#333333",
+        rule_focus="#BB86FC",
+        header="#8A8A8A",
+        cursor="#1E1E1E",
+        cursor_focus="#383838",
+        action_bg="#1E1E1E",
+        action_text="#BDBDBD",
+        action_hover_bg="#333333",
+        action_hover_text="#BB86FC",
+        input_bg="#1E1E1E",
+        input_focus_bg="#2A2A2A",
+        input_text="#E0E0E0",
+    ),
 )
 
 LIGHT_THEME = Theme(
@@ -192,6 +335,32 @@ LIGHT_THEME = Theme(
     # theme's warning (#F57C00, more orange), still readable on white
     muted_status_color="#757575",  # == text_muted, == this theme's
     # .tool-tab inactive color -- consistent with the chrome
+    lens=LensPalette(
+        bg="#FFFFFF",
+        panel="#FAFAFA",
+        text="#212121",
+        label="#5F6368",
+        dim="#6B6B6B",
+        muted="#5F6368",
+        title="#0D47A1",
+        accent="#1976D2",
+        accent_text="#FFFFFF",
+        ok="#2E7D32",
+        warn="#B45309",
+        bad="#C62828",
+        rule="#D0D7DE",
+        rule_focus="#1976D2",
+        header="#6B6B6B",
+        cursor="#EEF3F8",
+        cursor_focus="#BBDEFB",
+        action_bg="#E3F2FD",
+        action_text="#37474F",
+        action_hover_bg="#BBDEFB",
+        action_hover_text="#0D47A1",
+        input_bg="#F5F5F5",
+        input_focus_bg="#E3F2FD",
+        input_text="#212121",
+    ),
 )
 
 HIGH_CONTRAST_THEME = Theme(
@@ -226,6 +395,32 @@ HIGH_CONTRAST_THEME = Theme(
     # theme's pure-yellow warning, still maximally visible on black
     muted_status_color="#CCCCCC",  # == text_muted, == this theme's
     # .tool-tab inactive color -- consistent with the chrome
+    lens=LensPalette(
+        bg="#000000",
+        panel="#000000",
+        text="#FFFFFF",
+        label="#E0E0E0",
+        dim="#CCCCCC",
+        muted="#E0E0E0",
+        title="#FFFF00",
+        accent="#00FFFF",
+        accent_text="#000000",
+        ok="#00FF00",
+        warn="#FFFF00",
+        bad="#FF5555",
+        rule="#FFFFFF",
+        rule_focus="#FFFF00",
+        header="#00FFFF",
+        cursor="#333333",
+        cursor_focus="#0000CC",
+        action_bg="#1A1A1A",
+        action_text="#FFFFFF",
+        action_hover_bg="#FFFF00",
+        action_hover_text="#000000",
+        input_bg="#1A1A1A",
+        input_focus_bg="#333333",
+        input_text="#FFFFFF",
+    ),
 )
 
 CYBERPUNK_THEME = Theme(
@@ -259,6 +454,32 @@ CYBERPUNK_THEME = Theme(
     # warning (#FF9900) and accent/security (#FFFF00)
     muted_status_color="#8B8B8B",  # == text_muted, == this theme's
     # .tool-tab inactive color -- consistent with the chrome
+    lens=LensPalette(
+        bg="#0D0221",
+        panel="#1A0A2E",
+        text="#F0F0F0",
+        label="#B0A8C8",
+        dim="#9A92B0",
+        muted="#B0A8C8",
+        title="#00FFFF",
+        accent="#FF00FF",
+        accent_text="#0D0221",
+        ok="#00FF9F",
+        warn="#FFCC00",
+        bad="#FF3366",
+        rule="#3A1660",
+        rule_focus="#FF00FF",
+        header="#9A92B0",
+        cursor="#1A0A2E",
+        cursor_focus="#3A1660",
+        action_bg="#2A1040",
+        action_text="#D0C8E0",
+        action_hover_bg="#3A1660",
+        action_hover_text="#00FFFF",
+        input_bg="#1A0A2E",
+        input_focus_bg="#2A1040",
+        input_text="#F0F0F0",
+    ),
 )
 
 NORD_THEME = Theme(
@@ -292,6 +513,32 @@ NORD_THEME = Theme(
     # distinct from this theme's warning (#EBCB8B, aurora yellow)
     muted_status_color="#4C566A",  # == text_muted, == this theme's
     # .tool-tab inactive color -- consistent with the chrome
+    lens=LensPalette(
+        bg="#2E3440",
+        panel="#3B4252",
+        text="#ECEFF4",
+        label="#A3ADC2",
+        dim="#8892A6",
+        muted="#A3ADC2",
+        title="#88C0D0",
+        accent="#88C0D0",
+        accent_text="#2E3440",
+        ok="#A3BE8C",
+        warn="#EBCB8B",
+        bad="#E0828A",
+        rule="#4C566A",
+        rule_focus="#88C0D0",
+        header="#81A1C1",
+        cursor="#3B4252",
+        cursor_focus="#4C566A",
+        action_bg="#434C5E",
+        action_text="#D8DEE9",
+        action_hover_bg="#4C566A",
+        action_hover_text="#88C0D0",
+        input_bg="#3B4252",
+        input_focus_bg="#434C5E",
+        input_text="#ECEFF4",
+    ),
 )
 
 DRACULA_THEME = Theme(
@@ -325,6 +572,32 @@ DRACULA_THEME = Theme(
     # deliberate duplicate rather than an invented, non-canonical hex
     muted_status_color="#6272A4",  # == text_muted, == this theme's
     # .tool-tab inactive color -- consistent with the chrome
+    lens=LensPalette(
+        bg="#282A36",
+        panel="#2F3240",
+        text="#F8F8F2",
+        label="#A9B1D6",
+        dim="#8A93C0",
+        muted="#A9B1D6",
+        title="#BD93F9",
+        accent="#8BE9FD",
+        accent_text="#282A36",
+        ok="#50FA7B",
+        warn="#FFB86C",
+        bad="#FF5555",
+        rule="#44475A",
+        rule_focus="#BD93F9",
+        header="#8A93C0",
+        cursor="#343746",
+        cursor_focus="#4D5066",
+        action_bg="#343746",
+        action_text="#C8CCE0",
+        action_hover_bg="#44475A",
+        action_hover_text="#BD93F9",
+        input_bg="#343746",
+        input_focus_bg="#44475A",
+        input_text="#F8F8F2",
+    ),
 )
 
 SOLARIZED_THEME = Theme(
@@ -360,6 +633,32 @@ SOLARIZED_THEME = Theme(
     # distinct from this theme's warning (#B58900, yellow)
     muted_status_color="#586E75",  # == text_muted, == this theme's
     # .tool-tab inactive color -- consistent with the chrome
+    lens=LensPalette(
+        bg="#002B36",
+        panel="#073642",
+        text="#93A1A1",
+        label="#839496",
+        dim="#6C8189",
+        muted="#839496",
+        title="#2AA198",
+        accent="#268BD2",
+        accent_text="#FDF6E3",
+        ok="#859900",
+        warn="#B58900",
+        bad="#DC322F",
+        rule="#244F5A",
+        rule_focus="#268BD2",
+        header="#6C8189",
+        cursor="#073642",
+        cursor_focus="#174E5C",
+        action_bg="#073642",
+        action_text="#93A1A1",
+        action_hover_bg="#174E5C",
+        action_hover_text="#FDF6E3",
+        input_bg="#073642",
+        input_focus_bg="#174E5C",
+        input_text="#93A1A1",
+    ),
 )
 
 # Theme registry
@@ -471,6 +770,62 @@ $logo-text-color: {theme.logo_text_color};
 """
 
 
+# ========== Textual themes + lens palette lookup ==========
+
+#: Prefix of the Textual theme registered per Sandroid theme.
+TEXTUAL_THEME_PREFIX = "sandroid-"
+
+
+def textual_theme_name(theme_name: str) -> str:
+    """Name of the Textual theme registered for Sandroid theme ``theme_name``."""
+    return f"{TEXTUAL_THEME_PREFIX}{theme_name}"
+
+
+def build_textual_theme(theme: Theme) -> TextualTheme:
+    """The Textual theme carrying ``theme``'s lens tokens as CSS variables.
+
+    It is a copy of ``textual-dark`` (or ``textual-light`` for a light theme)
+    that only ADDS the ``$lens-*`` variables, so Textual's own widgets
+    (inputs, footers, scrollbars, ...) look exactly as they did when the app
+    switched between those two built-in themes.
+
+    Args:
+        theme: The Sandroid theme.
+
+    Returns:
+        A Textual theme named :func:`textual_theme_name` ``(theme.name)``.
+    """
+    base = BUILTIN_THEMES["textual-dark" if theme.is_dark else "textual-light"]
+    return replace(
+        base,
+        name=textual_theme_name(theme.name),
+        variables={**base.variables, **theme.lens.css_variables()},
+    )
+
+
+def lens_css_defaults() -> dict[str, str]:
+    """The ``$lens-*`` variables of the default theme (fallback values)."""
+    return DEFAULT_LENS.css_variables()
+
+
+def lens_palette() -> LensPalette:
+    """The lens palette of the running app's current theme.
+
+    Read at render time by the Rich styles built in Python, so a re-render
+    after a theme change picks up the new colors. Outside a running app, or
+    under a Textual theme that is not one of ours (a bare test ``App``), it
+    is :data:`DEFAULT_LENS`.
+    """
+    try:
+        name = active_app.get().theme
+    except Exception:
+        return DEFAULT_LENS
+    if not name.startswith(TEXTUAL_THEME_PREFIX):
+        return DEFAULT_LENS
+    theme = THEMES.get(name[len(TEXTUAL_THEME_PREFIX) :])
+    return theme.lens if theme is not None else DEFAULT_LENS
+
+
 # ========== CSS Path Functions ==========
 
 
@@ -517,6 +872,7 @@ def get_available_theme_css_files() -> dict[str, Path]:
 __all__ = [
     "CYBERPUNK_THEME",
     "DARK_THEME",
+    "DEFAULT_LENS",
     "DEFAULT_THEME",
     "DRACULA_THEME",
     "FIXED_COLORS",
@@ -525,15 +881,21 @@ __all__ = [
     "NORD_THEME",
     "PARENT_DIR",
     "SOLARIZED_THEME",
+    "TEXTUAL_THEME_PREFIX",
     "THEMES",
     "THEMES_DIR",
     "THEME_ORDER",
+    "LensPalette",
     "Theme",
+    "build_textual_theme",
     "get_all_themes",
     "get_available_theme_css_files",
     "get_next_theme",
     "get_previous_theme",
     "get_theme",
     "get_theme_css_path",
+    "lens_css_defaults",
+    "lens_palette",
+    "textual_theme_name",
     "theme_to_css_vars",
 ]

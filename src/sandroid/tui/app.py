@@ -61,7 +61,13 @@ from sandroid.tui.modal_manager import ModalManager
 from sandroid.tui.screens.command_palette import CommandPalette
 from sandroid.tui.screens.help_screen import LEGACY_BINDING_IDS, HelpScreen
 from sandroid.tui.screens.main_screen import MainScreen
-from sandroid.tui.themes import THEMES, get_theme
+from sandroid.tui.themes import (
+    THEMES,
+    build_textual_theme,
+    get_theme,
+    lens_css_defaults,
+    textual_theme_name,
+)
 from sandroid.tui.utils import copy_to_clipboard
 from sandroid.tui.widgets import ActivityLog
 
@@ -306,6 +312,10 @@ class SandroidTUI(App):
         # etc. -- was a no-op, and every theme rendered identically (only
         # each widget's own hardcoded Python `DEFAULT_CSS` ever applied).
         super().__init__(css_path=self._sandroid_css_path, **kwargs)
+        # One Textual theme per Sandroid theme: textual-dark/-light plus the
+        # App lens's ``$lens-*`` tokens (themes/__init__.py, LensPalette).
+        for sandroid_theme in THEMES.values():
+            self.register_theme(build_textual_theme(sandroid_theme))
 
         # Key serializer (see on_event): the key being handled, when it was
         # routed, the screen it was routed on, and the keys waiting for it.
@@ -536,6 +546,10 @@ class SandroidTUI(App):
                 logger.warning("CSS content empty, loading default")
                 self._css_content = load_css_content(DEFAULT_CSS_PATH)
         return self._css_content
+
+    def get_theme_variable_defaults(self) -> dict[str, str]:
+        """Default ``$lens-*`` values, for Textual themes that are not ours."""
+        return {**super().get_theme_variable_defaults(), **lens_css_defaults()}
 
     @property
     def sandroid_css_path(self) -> Path:
@@ -1785,12 +1799,12 @@ class SandroidTUI(App):
         """Apply a theme to the app.
 
         Args:
-            theme: Theme to apply -- controls Textual's own binary
-                dark/light flag (``self.dark``/``self.theme``), which is a
-                much narrower thing than swapping which ``.tcss`` FILE is
-                loaded (our themes only differ by literal hex values inside
-                ``styles.tcss``/``themes/*.tcss``, not by Textual's design
-                tokens).
+            theme: Theme to apply -- selects its registered Textual theme
+                (``self.theme``: textual-dark/-light plus the App lens's
+                ``$lens-*`` tokens), which is a much narrower thing than
+                swapping which ``.tcss`` FILE is loaded (the chrome colors
+                are literal hex values inside ``styles.tcss``/
+                ``themes/*.tcss``, not Textual design tokens).
             css_path: If given, also swap the live stylesheet to this
                 theme's ``.tcss`` file via :meth:`_reload_theme_css` -- used
                 by the Settings preview/revert path, where the user has
@@ -1803,11 +1817,16 @@ class SandroidTUI(App):
                 wrongly clobber that override.
         """
         self.dark = theme.is_dark
+        # Our registered Textual theme (textual-dark/-light + the lens tokens).
+        # Setting it re-resolves every ``$lens-*`` in the CSS and publishes
+        # ``theme_changed_signal``, on which the lens re-renders its Rich text.
+        name = textual_theme_name(theme.name)
         try:
-            if hasattr(self, "theme"):
-                self.theme = "textual-dark" if theme.is_dark else "textual-light"
+            if name not in self.available_themes:
+                name = "textual-dark" if theme.is_dark else "textual-light"
+            self.theme = name
         except Exception:
-            pass
+            logger.debug("Could not set the Textual theme", exc_info=True)
 
         if css_path is not None:
             self._reload_theme_css(css_path)

@@ -195,6 +195,8 @@ from textual.message import Message
 from textual.widgets import Header, Static
 from textual.widgets._header import HeaderClock, HeaderTitle
 
+from sandroid.tui.themes import lens_palette
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Mapping, Sequence
 
@@ -795,18 +797,18 @@ class Inspector(Vertical):
     DEFAULT_CSS = """
     Inspector {
         height: 1fr;
-        border: round #1f2d4d;
-        border-title-color: #7dd3fc;
-        border-subtitle-color: #5b6479;
-        background: #050811;
+        border: round $lens-rule;
+        border-title-color: $lens-title;
+        border-subtitle-color: $lens-dim;
+        background: $lens-bg;
         padding: 0 1;
     }
     Inspector:focus-within {
-        border: round #38bdf8;
+        border: round $lens-rule-focus;
     }
     Inspector #inspector-subtitle {
         height: auto;
-        color: #8f9bb3;
+        color: $lens-muted;
     }
     Inspector #inspector-tabs {
         height: 1;
@@ -839,6 +841,16 @@ class Inspector(Vertical):
         super().__init__(**kwargs)
         self.content: InspectorContent | None = None
         self.tab_index = 0
+
+    def on_mount(self) -> None:
+        try:
+            self.app.theme_changed_signal.subscribe(self, self._repaint_for_theme)
+        except Exception:
+            pass
+
+    def _repaint_for_theme(self, _theme: Any = None) -> None:
+        """Re-render the tab strip and headings (lens token colors)."""
+        self._show_content()
 
     def compose(self) -> ComposeResult:
         yield Static("", id="inspector-subtitle")
@@ -876,11 +888,16 @@ class Inspector(Vertical):
         except Exception:
             pass
         self.set_class(bool(content.tabs), "-tabbed")
+        c = lens_palette()
         if content.tabs:
             self.tab_index %= len(content.tabs)
             strip = Text()
             for i, (name, _sections) in enumerate(content.tabs):
-                style = "bold #06121f on #38bdf8" if i == self.tab_index else "#8f9bb3"
+                style = (
+                    f"bold {c.accent_text} on {c.accent}"
+                    if i == self.tab_index
+                    else c.muted
+                )
                 strip.append(f" {name} ", style=style)
                 strip.append("  ")
             try:
@@ -895,7 +912,7 @@ class Inspector(Vertical):
             if parts:
                 parts.append(Text(""))
             if heading:
-                parts.append(Text(heading, style="bold #8f9bb3"))
+                parts.append(Text(heading, style=f"bold {c.muted}"))
             parts.append(_as_renderable(body))
         try:
             self.query_one("#inspector-body", Static).update(Group(*parts))

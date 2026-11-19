@@ -62,6 +62,7 @@ from rich.text import Text
 from textual.containers import Vertical
 from textual.widgets import DataTable
 
+from sandroid.tui.themes import LensPalette, lens_palette
 from sandroid.tui.utils.ui_thread import UiDispatcher
 from sandroid.tui.widgets.lens_shell import InspectorContent, is_shown
 
@@ -105,10 +106,14 @@ SECTIONS: tuple[tuple[str, str], ...] = (
 )
 SECTION_TITLES = dict(SECTIONS)
 
-_DIM = "#5b6479"
-_OK = "#4ade80"
-_WARN = "#fbbf24"
-_BAD = "#fb7185"
+
+def _c() -> LensPalette:
+    """The current theme's lens colors (``themes.LensPalette``), read per
+    render so a theme change re-colors the rows (see ``_repaint_for_theme``).
+    """
+    return lens_palette()
+
+
 _ROUTE_LABELS = {
     "h": "h friTap",
     "b1": "b1 ssl",
@@ -350,7 +355,7 @@ def _to_dict(obj: Any) -> Any:
 
 def _grid(pairs: Iterable[tuple[str, Any]]) -> Table:
     grid = Table.grid(padding=(0, 2))
-    grid.add_column(style=_DIM, no_wrap=True)
+    grid.add_column(style=_c().label, no_wrap=True)
     grid.add_column(overflow="fold")
     for key, value in pairs:
         grid.add_row(key, value if isinstance(value, Text) else _t(value))
@@ -362,7 +367,7 @@ def _kv(key: str, label: str, value: Any, *, style: str = "", **extra: Any) -> R
     value_text = value if isinstance(value, Text) else _t(value, style)
     return Row(
         key=key,
-        cells=(_t(label, _DIM), value_text),
+        cells=(_t(label, _c().label), value_text),
         title=label,
         evidence=extra.pop("evidence", None) or [("", _grid([(label, value_text)]))],
         raw=extra.pop("raw", None),
@@ -370,8 +375,10 @@ def _kv(key: str, label: str, value: Any, *, style: str = "", **extra: Any) -> R
     )
 
 
-def _placeholder(key: str, text: str, width: int, style: str = _DIM) -> Row:
-    cells = (_t(text, style),) + tuple(_t("") for _ in range(width - 1))
+def _placeholder(key: str, text: str, width: int, style: str | None = None) -> Row:
+    cells = (_t(text, _c().dim if style is None else style),) + tuple(
+        _t("") for _ in range(width - 1)
+    )
     return Row(key=f"_{key}", cells=cells, inspectable=False)
 
 
@@ -459,7 +466,7 @@ def build_identity(f: AppFacts) -> SectionData:
                 "signer",
                 "signer",
                 static_note(f) or "no certificate",
-                style=_DIM,
+                style=_c().dim,
                 raw=d.get("signing_info"),
             )
         )
@@ -499,7 +506,9 @@ def build_identity(f: AppFacts) -> SectionData:
         rows.append(_kv("apk", "APK", value, evidence=evidence, raw=splits))
     else:
         rows.append(
-            _kv("apk", "APK", static_note(f) or d.get("apk_path") or "?", style=_DIM)
+            _kv(
+                "apk", "APK", static_note(f) or d.get("apk_path") or "?", style=_c().dim
+            )
         )
     key = getattr(static, "key", None) if static is not None else None
     if ov:
@@ -510,7 +519,7 @@ def build_identity(f: AppFacts) -> SectionData:
         style = ""
     else:
         cache = static_note(f) or "?"
-        style = _WARN if f.static_state == "analysing" else _DIM
+        style = _c().warn if f.static_state == "analysing" else _c().dim
     rows.append(
         _kv(
             "cache",
@@ -552,7 +561,7 @@ def build_identity(f: AppFacts) -> SectionData:
                 )
                 for s in svc_list
             ]
-            or [("", _t("no running services", _DIM))],
+            or [("", _t("no running services", _c().dim))],
             raw=_to_dict(services),
         )
     )
@@ -584,26 +593,28 @@ def _manifest_perm_line(name: str) -> str:
 def _op_cell(ops: list[Any]) -> Text:
     """``allow · 5m ago ✗2h`` -- effective mode, last access, last reject."""
     if not ops:
-        return _t("—", _DIM)
+        return _t("—", _c().dim)
 
     def age(o: Any) -> float:
         return o.last_access_ago_s if o.last_access_ago_s is not None else 1e12
 
     op = min(ops, key=age)  # the most recent access
     mode = op.mode or "?"
-    style = _OK if mode in _LOOSE else (_BAD if mode in ("deny", "ignore") else "")
+    style = (
+        _c().ok if mode in _LOOSE else (_c().bad if mode in ("deny", "ignore") else "")
+    )
     text = Text(mode, style=style)
     if any(o.running for o in ops):
-        text.append(" ● now", style=f"bold {_WARN}")
+        text.append(" ● now", style=f"bold {_c().warn}")
     elif op.last_access_ago_s is not None:
         text.append(f" · {ago(op.last_access_ago_s)}")
     elif op.last_access:
         text.append(f" · {_cut(op.last_access, 12)}")
     rejects = [o.last_reject_ago_s for o in ops if o.last_reject_ago_s is not None]
     if rejects:
-        text.append(f" ✗{ago(min(rejects)).replace(' ago', '')}", style=_BAD)
+        text.append(f" ✗{ago(min(rejects)).replace(' ago', '')}", style=_c().bad)
     elif any(o.last_reject for o in ops):
-        text.append(" ✗", style=_BAD)
+        text.append(" ✗", style=_c().bad)
     return text
 
 
@@ -649,36 +660,36 @@ def _op_evidence(op: Any) -> Table:
 
 def _grant_cell(g: Any, ops: list[Any]) -> Text:
     if g.granted is None:
-        return _t("req → ?", _DIM)
+        return _t("req → ?", _c().dim)
     if g.granted and getattr(g, "revoked", False):
-        text = Text("req → ", style=_DIM)
-        text.append("✓ revoked", style=_BAD)
+        text = Text("req → ", style=_c().dim)
+        text.append("✓ revoked", style=_c().bad)
         return text
     if not g.granted:
-        text = Text("req → ✗", style=_DIM)
+        text = Text("req → ✗", style=_c().dim)
     else:
-        text = Text("req → ", style=_DIM)
-        text.append("✓", style=_OK)
+        text = Text("req → ", style=_c().dim)
+        text.append("✓", style=_c().ok)
         if any(o.mode == "foreground" for o in ops):
-            text.append(" while-in-use", style=_WARN)
+            text.append(" while-in-use", style=_c().warn)
         elif "ONE_TIME" in (g.flags or []):
-            text.append(" once", style=_WARN)
+            text.append(" once", style=_c().warn)
         elif g.kind == "install":
-            text.append(" install", style=_DIM)
+            text.append(" install", style=_c().dim)
     return text
 
 
 def _perm_note(g: Any, ops: list[Any]) -> tuple[str, str]:
     """``(note, style)`` for a permission row."""
     notes = []
-    style = _DIM
+    style = _c().dim
     used = [o for o in ops if o.last_access_ago_s is not None]
     if any(o.running for o in ops):
         notes.append("in use now")
-        style = _WARN
+        style = _c().warn
     elif used and min(o.last_access_ago_s for o in used) <= RECENT_SECONDS:
         notes.append("used recently")
-        style = _WARN
+        style = _c().warn
     elif (
         g.granted
         and g.protection == "dangerous"
@@ -702,10 +713,10 @@ def _perm_note(g: Any, ops: list[Any]) -> tuple[str, str]:
 
 def _grant_glyph(g: Any) -> Text:
     if g.granted is None:
-        return _t("?", _DIM)
+        return _t("?", _c().dim)
     if g.granted and getattr(g, "revoked", False):
-        return _t("✓⊘", _BAD)
-    return _t("✓", _OK) if g.granted else _t("✗", _DIM)
+        return _t("✓⊘", _c().bad)
+    return _t("✓", _c().ok) if g.granted else _t("✗", _c().dim)
 
 
 def _use_glyph(ops: list[Any]) -> Text:
@@ -714,20 +725,20 @@ def _use_glyph(ops: list[Any]) -> Text:
         return _t("")
     ages = [o.last_access_ago_s for o in ops if o.last_access_ago_s is not None]
     if any(o.running for o in ops) or (ages and min(ages) <= RECENT_SECONDS):
-        return _t("●", _WARN)
+        return _t("●", _c().warn)
     if any(o.last_access for o in ops):
-        return _t("●", _DIM)
-    return _t("○", _DIM)
+        return _t("●", _c().dim)
+    return _t("○", _c().dim)
 
 
 def _last_use(ops: list[Any]) -> Text:
     if any(o.running for o in ops):
-        return _t("now", f"bold {_WARN}")
+        return _t("now", f"bold {_c().warn}")
     ages = [o.last_access_ago_s for o in ops if o.last_access_ago_s is not None]
     if ages:
         return _t(ago(min(ages)))
     raw = next((o.last_access for o in ops if o.last_access), None)
-    return _t(_cut(raw, 12)) if raw else _t("—", _DIM)
+    return _t(_cut(raw, 12)) if raw else _t("—", _c().dim)
 
 
 def _compact_perm(name: str, grant: Text, ops: list[Any]) -> tuple[Any, ...]:
@@ -773,7 +784,7 @@ def build_permissions(f: AppFacts) -> SectionData:
         if "no recorded use" in note:
             unused += 1
         prot_style = (
-            _WARN if prot == "dangerous" else (_DIM if prot == "normal" else "")
+            _c().warn if prot == "dangerous" else (_c().dim if prot == "normal" else "")
         )
         evidence: list[tuple[str, Any]] = [
             ("Manifest", _t(_manifest_perm_line(g.name))),
@@ -804,7 +815,9 @@ def build_permissions(f: AppFacts) -> SectionData:
         for op in g_ops:
             evidence.append((f"AppOps {op.op}", _op_evidence(op)))
         if not g_ops:
-            evidence.append(("AppOps", _t("no AppOps op for this permission", _DIM)))
+            evidence.append(
+                ("AppOps", _t("no AppOps op for this permission", _c().dim))
+            )
         rows.append(
             Row(
                 key=f"perm:{g.name}",
@@ -853,14 +866,14 @@ def build_permissions(f: AppFacts) -> SectionData:
                 key=f"op:{op.op}",
                 cells=(
                     _t(_cut(op.op, 30)),
-                    _t("op", _DIM),
-                    _t("—", _DIM),
+                    _t("op", _c().dim),
+                    _t("—", _c().dim),
                     _op_cell([op]),
-                    _t(_cut(note, 22), _WARN if used else _DIM),
+                    _t(_cut(note, 22), _c().warn if used else _c().dim),
                 ),
                 title=op.op,
                 subtitle="AppOps op without a requested permission",
-                compact=_compact_perm(op.op, _t("op", _DIM), [op]),
+                compact=_compact_perm(op.op, _t("op", _c().dim), [op]),
                 evidence=[(f"AppOps {op.op}", _op_evidence(op))],
                 raw={"appops": [_to_dict(op)]},
             )
@@ -868,12 +881,17 @@ def build_permissions(f: AppFacts) -> SectionData:
     if not getattr(state, "ok", True):
         rows.insert(
             0,
-            _placeholder("perm-reason", f"⚠ {state.reason or 'unavailable'}", 5, _BAD),
+            _placeholder(
+                "perm-reason", f"⚠ {state.reason or 'unavailable'}", 5, _c().bad
+            ),
         )
     if appops is not None and not getattr(appops, "ok", True):
         rows.append(
             _placeholder(
-                "appops-reason", f"AppOps: {appops.reason or 'unavailable'}", 5, _DIM
+                "appops-reason",
+                f"AppOps: {appops.reason or 'unavailable'}",
+                5,
+                _c().dim,
             )
         )
     requested = sum(1 for g in grants if g.requested)
@@ -956,7 +974,7 @@ def build_exposure(f: AppFacts) -> SectionData:
     ov = _overview(f)
     note = static_note(f)
     if note:
-        style = _WARN if f.static_state == "analysing" else _DIM
+        style = _c().warn if f.static_state == "analysing" else _c().dim
         return SectionData(cols, [_placeholder("static", note, 4, style)], note)
     comps = ov.get("components") if isinstance(ov.get("components"), dict) else {}
     rows: list[Row] = []
@@ -979,7 +997,7 @@ def build_exposure(f: AppFacts) -> SectionData:
                 guard = _t(_cut(_short_perm(perms[0]), 26))
             else:
                 unguarded += 1
-                guard = _t("no permission", _WARN)
+                guard = _t("no permission", _c().warn)
             filters = comp.get("intent_filters") or []
             actions = [a for flt in filters for a in flt.get("actions") or []]
             if kind == "providers":
@@ -996,10 +1014,10 @@ def build_exposure(f: AppFacts) -> SectionData:
                 Row(
                     key=f"comp:{kind}:{name}",
                     cells=(
-                        _t(_KIND_SINGULAR[kind], _DIM),
+                        _t(_KIND_SINGULAR[kind], _c().dim),
                         _t(_cut(_short_component(name, f.package), 40)),
                         guard,
-                        _t(_cut(filt_text, 30), _DIM),
+                        _t(_cut(filt_text, 30), _c().dim),
                     ),
                     title=_short_component(name, f.package),
                     subtitle=escape(name),
@@ -1043,13 +1061,13 @@ def build_exposure(f: AppFacts) -> SectionData:
             Row(
                 key=f"link:{i}:{url}",
                 cells=(
-                    _t("deep link", _DIM),
+                    _t("deep link", _c().dim),
                     _t(_cut(url, 40)),
                     _t(
                         "exported" if link.get("exported") else "not exported",
-                        "" if link.get("exported") else _DIM,
+                        "" if link.get("exported") else _c().dim,
                     ),
-                    _t(_cut(_short_component(comp, f.package), 30), _DIM),
+                    _t(_cut(_short_component(comp, f.package), 30), _c().dim),
                 ),
                 title=url,
                 subtitle=escape(comp),
@@ -1083,8 +1101,8 @@ def _short_action(action: str) -> str:
 
 def _yes_no(value: Any, *, bad_when: bool | None = None) -> Text:
     if value is None:
-        return _t("?", _DIM)
-    style = _BAD if bad_when is not None and bool(value) == bad_when else ""
+        return _t("?", _c().dim)
+    style = _c().bad if bad_when is not None and bool(value) == bad_when else ""
     return _t("yes" if value else "no", style)
 
 
@@ -1093,7 +1111,7 @@ def build_manifest(f: AppFacts) -> SectionData:
     ov = _overview(f)
     note = static_note(f)
     if note:
-        style = _WARN if f.static_state == "analysing" else _DIM
+        style = _c().warn if f.static_state == "analysing" else _c().dim
         return SectionData(
             cols, [_placeholder("static", note, 2, style)], note, show_header=False
         )
@@ -1138,8 +1156,8 @@ def build_manifest(f: AppFacts) -> SectionData:
     clear_text = _yes_no(clear, bad_when=True)
     domains = list(nsc.get("cleartext_domains") or [])
     if domains:
-        clear_text.append(f" + {len(domains)} domain(s)", style=_WARN)
-    clear_text.append(f"  {nsc.get('cleartext_source') or ''}", style=_DIM)
+        clear_text.append(f" + {len(domains)} domain(s)", style=_c().warn)
+    clear_text.append(f"  {nsc.get('cleartext_source') or ''}", style=_c().dim)
     rows.append(
         _kv(
             "cleartext",
@@ -1168,13 +1186,13 @@ def build_manifest(f: AppFacts) -> SectionData:
     )
     user_ca = nsc.get("trust_user_ca")
     ca_domains = list(nsc.get("trust_user_ca_domains") or [])
-    ca_text = _t("yes" if user_ca else "no", _OK if user_ca else "")
+    ca_text = _t("yes" if user_ca else "no", _c().ok if user_ca else "")
     if ca_domains:
-        ca_text.append(f" · scoped: {_cut(', '.join(ca_domains), 40)}", style=_OK)
+        ca_text.append(f" · scoped: {_cut(', '.join(ca_domains), 40)}", style=_c().ok)
     elif nsc.get("trust_user_ca_debug_only"):
-        ca_text.append(" · debug-overrides only (app not debuggable)", style=_DIM)
+        ca_text.append(" · debug-overrides only (app not debuggable)", style=_c().dim)
     if nsc.get("trust_user_ca_source"):
-        ca_text.append(f"  {nsc.get('trust_user_ca_source')}", style=_DIM)
+        ca_text.append(f"  {nsc.get('trust_user_ca_source')}", style=_c().dim)
     rows.append(
         _kv(
             "user_ca",
@@ -1204,12 +1222,12 @@ def build_manifest(f: AppFacts) -> SectionData:
     if pins:
         pin_domains = sorted({d for p in pins for d in p.get("domains") or []})
         pin_text = _t(
-            f"{len(pins)} pin-set(s): {_cut(', '.join(pin_domains), 50)}", _WARN
+            f"{len(pins)} pin-set(s): {_cut(', '.join(pin_domains), 50)}", _c().warn
         )
     else:
-        pin_text = _t("none in the NSC", _DIM)
+        pin_text = _t("none in the NSC", _c().dim)
     if nsc.get("override_pins"):
-        pin_text.append(" · overridePins", style=_OK)
+        pin_text.append(" · overridePins", style=_c().ok)
     rows.append(
         _kv(
             "pins",
@@ -1227,15 +1245,15 @@ def build_manifest(f: AppFacts) -> SectionData:
                 )
                 for p in pins
             ]
-            or [("", _t("no <pin-set> in the network security config", _DIM))],
+            or [("", _t("no <pin-set> in the network security config", _c().dim))],
             raw=pins,
         )
     )
     tls = [d for d in f.defences if getattr(d, "category", "") == "tls_stack"]
     if tls:
-        tls_text = _t(", ".join(d.title for d in tls), _WARN)
+        tls_text = _t(", ".join(d.title for d in tls), _c().warn)
     else:
-        tls_text = _t("no bundled native TLS lib found", _DIM)
+        tls_text = _t("no bundled native TLS lib found", _c().dim)
     libs = list(ov.get("native_libs") or [])
     rows.append(
         _kv(
@@ -1246,7 +1264,7 @@ def build_manifest(f: AppFacts) -> SectionData:
                 (d.title, _t("\n".join(d.evidence) + (f"\n{d.hint}" if d.hint else "")))
                 for d in tls
             ]
-            + [("native libs", _t(", ".join(libs) or "none", _DIM))],
+            + [("native libs", _t(", ".join(libs) or "none", _c().dim))],
             raw={"tls_stacks": [_to_dict(d) for d in tls], "native_libs": libs},
         )
     )
@@ -1278,7 +1296,7 @@ def build_trackers(f: AppFacts) -> SectionData:
         text = note or ANALYSIS_HINT
         return SectionData(
             cols,
-            [_placeholder("hint", text, 4, _WARN if note else _DIM)],
+            [_placeholder("hint", text, 4, _c().warn if note else _c().dim)],
             note or "no Insight result",
         )
     libs_block = insight.get("library_detection")
@@ -1302,10 +1320,10 @@ def build_trackers(f: AppFacts) -> SectionData:
             Row(
                 key=f"trk:{i}:{name}",
                 cells=(
-                    _t(_cut(name, 30), _WARN),
-                    _t(_cut(str(trk.get("category") or "tracker"), 18), _DIM),
-                    _t(_cut(str(trk.get("version") or "—"), 12), _DIM),
-                    _t(_cut(str(domains or trk.get("website") or "—"), 20), _DIM),
+                    _t(_cut(name, 30), _c().warn),
+                    _t(_cut(str(trk.get("category") or "tracker"), 18), _c().dim),
+                    _t(_cut(str(trk.get("version") or "—"), 12), _c().dim),
+                    _t(_cut(str(domains or trk.get("website") or "—"), 20), _c().dim),
                 ),
                 title=name,
                 subtitle="tracker (Insight)",
@@ -1324,10 +1342,10 @@ def build_trackers(f: AppFacts) -> SectionData:
             Row(
                 key=f"sdk:{i}:{name}",
                 cells=(
-                    _t(_cut(name, 30), _WARN if tracker else ""),
-                    _t(_cut(cat, 18), _DIM),
-                    _t(_cut(str(lib.get("version") or "—"), 12), _DIM),
-                    _t(_cut(str(lib.get("vendor") or "—"), 20), _DIM),
+                    _t(_cut(name, 30), _c().warn if tracker else ""),
+                    _t(_cut(cat, 18), _c().dim),
+                    _t(_cut(str(lib.get("version") or "—"), 12), _c().dim),
+                    _t(_cut(str(lib.get("vendor") or "—"), 20), _c().dim),
                 ),
                 title=name,
                 subtitle=escape(str(lib.get("package_name") or "")),
@@ -1344,7 +1362,7 @@ def build_trackers(f: AppFacts) -> SectionData:
             0,
             Row(
                 key="sdk:framework",
-                cells=(_t(str(framework)), _t("framework", _DIM), _t(""), _t("")),
+                cells=(_t(str(framework)), _t("framework", _c().dim), _t(""), _t("")),
                 title=str(framework),
                 evidence=[("", _t("cross-platform framework (Insight)"))],
                 raw={"cross_platform_framework": framework},
@@ -1377,7 +1395,7 @@ def build_data(f: AppFacts) -> SectionData:
     def size(kb: int | None, reason: str | None) -> Text:
         text = _t(_size_text(kb, reason))
         if reason:
-            text.append(f"  {reason}", style=_DIM)
+            text.append(f"  {reason}", style=_c().dim)
         return text
 
     data_dir = getattr(fp, "data_dir", None)
@@ -1413,7 +1431,7 @@ def build_data(f: AppFacts) -> SectionData:
     ]
     if fp.shared_prefs_count is None and fp.databases_count is None:
         why = fp.private_reason or fp.reason or "needs root"
-        rows.append(_kv("files", "prefs / dbs", f"? ({why})", style=_DIM, raw=raw))
+        rows.append(_kv("files", "prefs / dbs", f"? ({why})", style=_c().dim, raw=raw))
     else:
         rows.append(
             _kv(
@@ -1427,14 +1445,20 @@ def build_data(f: AppFacts) -> SectionData:
             )
         )
     rows.append(
-        _kv("root", "read as", fp.root_method or "shell (no root)", style=_DIM, raw=raw)
+        _kv(
+            "root",
+            "read as",
+            fp.root_method or "shell (no root)",
+            style=_c().dim,
+            raw=raw,
+        )
     )
     rows.append(
         _kv(
             "files_lens",
             "files",
             "3 → Files lens (watch, pull, diff)",
-            style=_DIM,
+            style=_c().dim,
             evidence=[
                 (
                     "",
@@ -1498,7 +1522,7 @@ def build_defences(f: AppFacts) -> SectionData:
     cols = ("conf.", "suspected defence", "evidence", "route")
     note = static_note(f)
     if note:
-        style = _WARN if f.static_state == "analysing" else _DIM
+        style = _c().warn if f.static_state == "analysing" else _c().dim
         return SectionData(cols, [_placeholder("static", note, 4, style)], note)
     rows: list[Row] = []
     defences = [d for d in f.defences if getattr(d, "category", "") != "tls_stack"]
@@ -1510,14 +1534,17 @@ def build_defences(f: AppFacts) -> SectionData:
         title = d.title + (" (eases analysis)" if d.weakness else "")
         if d.weakness:
             weak += 1
-        conf_style = {"high": _BAD, "medium": _WARN}.get(d.confidence, _DIM)
+        conf_style = {"high": _c().bad, "medium": _c().warn}.get(d.confidence, _c().dim)
         rows.append(
             Row(
                 key=f"def:{d.id}",
                 cells=(
-                    _t(_CONF.get(d.confidence, "?"), _OK if d.weakness else conf_style),
-                    _t(_cut(title, 30), _OK if d.weakness else ""),
-                    _t(_cut(first, 34) + more, _DIM),
+                    _t(
+                        _CONF.get(d.confidence, "?"),
+                        _c().ok if d.weakness else conf_style,
+                    ),
+                    _t(_cut(title, 30), _c().ok if d.weakness else ""),
+                    _t(_cut(first, 34) + more, _c().dim),
                     _t(_cut(route_text(d.routes), 24)),
                 ),
                 title=d.title,
@@ -1533,7 +1560,7 @@ def build_defences(f: AppFacts) -> SectionData:
                         _t(
                             "Suspected from static facts only; not observed at "
                             f"runtime. Confidence: {d.confidence}.",
-                            _DIM,
+                            _c().dim,
                         ),
                     ),
                 ],
@@ -1572,13 +1599,13 @@ def row_content(section: str, row: Row) -> InspectorContent:
             raw, "json", theme="ansi_dark", word_wrap=True, background_color="default"
         )
         if row.raw is not None
-        else _t("no raw data for this row", _DIM)
+        else _t("no raw data for this row", _c().dim)
     )
     return InspectorContent(
         title=f"{SECTION_TITLES.get(section, section).split(' (')[0]} · {row.title}",
         subtitle=row.subtitle,
         tabs=(
-            ("Evidence", row.evidence or [("", _t("—", _DIM))]),
+            ("Evidence", row.evidence or [("", _t("—", _c().dim))]),
             ("Raw", [("", raw_body)]),
         ),
         footer="u refresh",
@@ -1600,14 +1627,15 @@ class LensSection(DataTable):
         max-height: 60vh;
         margin: 0;
         border: none;
-        border-top: solid #1f2d4d;
-        border-title-color: #7dd3fc;
+        border-top: solid $lens-rule;
+        border-title-color: $lens-title;
         border-title-style: bold;
-        background: #050811;
+        background: $lens-bg;
+        color: $lens-text;
         scrollbar-size-vertical: 1;
     }
     LensSection:focus {
-        border-top: heavy #38bdf8;
+        border-top: heavy $lens-rule-focus;
     }
     LensSection.-folded {
         height: 1;
@@ -1615,16 +1643,16 @@ class LensSection(DataTable):
         overflow-y: hidden;
     }
     LensSection > .datatable--header {
-        background: #050811;
-        color: #5b6479;
+        background: $lens-bg;
+        color: $lens-header;
         text-style: none;
     }
     LensSection > .datatable--cursor {
-        background: #0b1628;
+        background: $lens-cursor;
         text-style: none;
     }
     LensSection:focus > .datatable--cursor {
-        background: #1d3557;
+        background: $lens-cursor-focus;
     }
     """
 
@@ -1785,6 +1813,15 @@ class LensSection(DataTable):
             # size is known (rows added or removed: clamped to the new end).
             self.call_after_refresh(self._restore_scroll, scroll_x, scroll_y)
 
+    def forget_render(self) -> None:
+        """Make the next :meth:`show` rebuild every cell.
+
+        ``show`` skips or patches rows whose plain text is unchanged; after a
+        theme change only the styles differ, so the cache must go.
+        """
+        self._signature = None
+        self._shape = None
+
     def set_compact(self, compact: bool) -> None:
         """Use the section's narrow column set (if it has one)."""
         if compact == self.compact:
@@ -1897,6 +1934,16 @@ class AppLensSections(Vertical):
             self._poll_timer = self.set_interval(RUNTIME_MIN_INTERVAL, self._poll_tick)
         except Exception:
             self._poll_timer = None
+        try:
+            self.app.theme_changed_signal.subscribe(self, self._repaint_for_theme)
+        except Exception:
+            logger.debug("App lens: no theme signal", exc_info=True)
+
+    def _repaint_for_theme(self, _theme: Any = None) -> None:
+        """Re-render the rows: their Rich colors come from the theme's tokens."""
+        for section in self.sections():
+            section.forget_render()
+        self._render_sections()
 
     def on_unmount(self) -> None:
         self.shutdown()
@@ -2370,7 +2417,7 @@ class AppLensSections(Vertical):
                 logger.debug("App lens section %s failed", section_id, exc_info=True)
                 data = SectionData(
                     ("",),
-                    [_placeholder("error", f"could not render: {exc}", 1, _BAD)],
+                    [_placeholder("error", f"could not render: {exc}", 1, _c().bad)],
                     "error",
                 )
             widget.show(data, self._filter)
