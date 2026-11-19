@@ -1686,14 +1686,36 @@ class DeviceState:
     lists: dict[str, list[dict[str, str]]] = field(default_factory=dict)
 
 
+def _settings_document(xml_text: str) -> tuple[ET.Element, ET.Element] | None:
+    """Parse a settings file as ``(document, settings element)``, or None.
+
+    Android 14+ writes a second top-level element after ``</settings>``
+    (``<namespaceHashes />``), which is not well-formed XML on its own, so
+    the top-level elements are parsed inside a wrapper ``document``.
+    """
+    body = re.sub(r"^\s*<\?xml[^>]*\?>", "", xml_text)
+    try:
+        document = ET.fromstring(  # noqa: S314 - device file
+            f"<sandroid-document>{body}</sandroid-document>".encode()
+        )
+    except ET.ParseError:
+        return None
+    root = document.find("settings")
+    if root is None:
+        root = next(iter(document), None)
+    if root is None:
+        return None
+    return document, root
+
+
 def _parse_ssaid(xml_text: str) -> dict[str, tuple[str, str]]:
     out: dict[str, tuple[str, str]] = {}
     if not xml_text.strip():
         return out
-    try:
-        root = ET.fromstring(xml_text.encode("utf-8"))  # noqa: S314 - device file
-    except ET.ParseError:
+    parsed = _settings_document(xml_text)
+    if parsed is None:
         return out
+    _document, root = parsed
     for row in root.iter("setting"):
         pkg = row.get("package") or ""
         if pkg and pkg != "android":
@@ -3243,11 +3265,15 @@ def _timeline_rel(path: Path) -> str:
 
 
 def _edit_ssaid(xml_text: str, desired: dict[str, dict[str, Any]]) -> str | None:
-    """Set (or add) the SSAID rows of ``desired`` (``{pkg: {uid, value}}``)."""
-    try:
-        root = ET.fromstring(xml_text.encode("utf-8"))  # noqa: S314 - device file
-    except ET.ParseError:
+    """Set (or add) the SSAID rows of ``desired`` (``{pkg: {uid, value}}``).
+
+    Other top-level elements (``<namespaceHashes />``) are written back as
+    they were.
+    """
+    parsed = _settings_document(xml_text)
+    if parsed is None:
         return None
+    document, root = parsed
     rows = {r.get("package"): r for r in root.iter("setting") if r.get("package")}
     ids = [r.get("id") or "" for r in root.iter("setting")]
     # A malformed id is skipped (never reused: new ids only go up).
@@ -3267,9 +3293,11 @@ def _edit_ssaid(xml_text: str, desired: dict[str, dict[str, Any]]) -> str | None
         row.set("name", entry["uid"])
         row.set("value", entry["value"])
         row.set("defaultValue", entry["value"])
-    root.tail = None
-    body = ET.tostring(root, encoding="unicode")
-    return "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n" + body + "\n"
+    top = list(document)
+    for element in top:
+        element.tail = "\n"
+    body = "".join(ET.tostring(element, encoding="unicode") for element in top)
+    return "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n" + body
 
 
 def frozen_record(

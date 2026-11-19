@@ -888,6 +888,21 @@ def test_malformed_ssaid_rows_do_not_break_the_edit(service, device):
     assert ident._edit_ssaid("<settings", {}) is None
 
 
+def test_ssaid_file_with_namespace_hashes_is_edited(service, device):
+    # Android 14+ (abx2xml): a second top-level element after </settings>.
+    xml = SSAID_XML + "<namespaceHashes />"
+    device.fs[SSAID_FILE] = b"ABX\0" + xml.encode()
+    assert ident._parse_ssaid(xml)["com.example.app"][1] == "1111222233334444"
+    plan = service.apply(SERIAL, "com.example.app")
+    assert plan.infos["android_id"].status == "verified"
+    written = device.fs[SSAID_FILE].removeprefix(b"ABX\0").decode()
+    assert written.rstrip().endswith("</settings>\n<namespaceHashes />")
+    edited = ident._edit_ssaid(xml, {"com.new": {"uid": "1", "value": "ab"}})
+    assert edited is not None
+    assert 'package="com.new"' in edited
+    assert "<namespaceHashes />" in edited
+
+
 def test_ssaid_write_goes_through_a_sibling_temp_file_and_mv(service, device):
     before = dict(device.meta[SSAID_FILE])
     service.apply(SERIAL, "com.example.app")
