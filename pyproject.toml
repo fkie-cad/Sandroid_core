@@ -152,6 +152,7 @@ sandroid = [
     "templates/*.html",
     "assets/*.png",
     "assets/*.jpg",
+    "assets/uihelper/*.jar",
     "tui/*.tcss",
     "tui/themes/*.tcss",
 ]
