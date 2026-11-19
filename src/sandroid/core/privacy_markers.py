@@ -72,6 +72,8 @@ class Marker:
         group: Markers sharing a group (e.g. ``"gps"`` for latitude and
             longitude) raise each other's confidence when both are found in
             the same haystack.
+        tag: Short display tag for row markers, e.g. ``"AdID"`` (defaults to
+            ``label``).
     """
 
     id: str
@@ -80,12 +82,15 @@ class Marker:
     label: str = ""
     forms: tuple[str, ...] = ()
     group: str = ""
+    tag: str = ""
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
             raise ValueError(f"unknown marker kind {self.kind!r}")
         if not self.label:
             object.__setattr__(self, "label", self.id)
+        if not self.tag:
+            object.__setattr__(self, "tag", self.label)
 
 
 @dataclass(frozen=True)
@@ -116,6 +121,7 @@ class MarkerHit:
         marker_id: :attr:`Marker.id`.
         kind: :attr:`Marker.kind`.
         label: :attr:`Marker.label`.
+        tag: :attr:`Marker.tag`.
         transform: How the value was encoded where it was found.
         confidence: ``"high"``, ``"medium"`` or ``"low"``.
         offset: Byte offset of the match in the haystack.
@@ -125,6 +131,7 @@ class MarkerHit:
     marker_id: str
     kind: str
     label: str
+    tag: str
     transform: str
     confidence: str
     offset: int
@@ -416,6 +423,7 @@ def _find_all(
                     marker_id=marker.id,
                     kind=marker.kind,
                     label=marker.label,
+                    tag=marker.tag,
                     transform=needle.transform,
                     confidence=needle.confidence,
                     offset=index,
