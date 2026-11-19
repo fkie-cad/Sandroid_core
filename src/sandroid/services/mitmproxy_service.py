@@ -1778,7 +1778,6 @@ class MitmproxyService:
                 logger.debug("Focus teardown on stop failed: %s", exc)
 
             self._state.running = False
-            self._stop_net_source()
             self._emit("[INFO] Stopping mitmweb...")
 
             try:
@@ -1786,6 +1785,9 @@ class MitmproxyService:
             except Exception as exc:
                 logger.warning("Error stopping mitmweb: %s", exc)
             finally:
+                # After mitmweb is gone: its last flows are in flows.jsonl and
+                # the source's final poll writes them (stop() drains once).
+                self._stop_net_source()
                 self._proc = None
                 self._state.pid = None
                 self._web_token = None

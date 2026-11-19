@@ -366,6 +366,77 @@ async def test_enter_on_focused_stop_still_saves() -> None:
     assert results[0].cancelled is False
 
 
+class _RestartingWrapper(_FakeWrapper):
+    """The shared getevent is restarting: not running, lease still held."""
+
+    is_running = False
+    holds_lease = True
+
+    def stop(self) -> int:
+        self.holds_lease = False
+        return super().stop()
+
+
+@pytest.mark.asyncio
+async def test_discard_releases_the_lease_while_getevent_restarts() -> None:
+    """``_cancel`` gated on ``is_running`` and leaked the getevent lease
+    during the stream's restart back-off.
+    """
+    from sandroid.tui.modals.recording_modal import RecordingModal
+
+    app = App()
+    results: list = []
+    async with app.run_test() as pilot:
+        modal = RecordingModal()
+        await app.push_screen(modal, results.append)
+        await pilot.pause()
+        wrapper = _RestartingWrapper()
+        modal._wrapper = wrapper
+        modal._cancel()
+        await pilot.pause()
+    assert wrapper.stopped
+    assert results[0].cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_live_events_never_wait_for_the_ui_thread(monkeypatch) -> None:
+    """The live display used the blocking ``call_from_thread`` on the shared
+    getevent reader; now it posts and returns at once.
+    """
+    from textual.widgets import Static
+
+    from sandroid.tui.modals.recording_modal import RecordingModal
+
+    app = App()
+    async with app.run_test() as pilot:
+        modal = RecordingModal()
+        await app.push_screen(modal)
+        await pilot.pause()
+        modal.show_live_events = True
+
+        def forbidden(*_a, **_k):
+            raise AssertionError("blocking call_from_thread")
+
+        monkeypatch.setattr(app, "call_from_thread", forbidden)
+        took: list[float] = []
+
+        def reader() -> None:
+            t0 = time.monotonic()
+            for i in range(50):
+                modal._on_event(f"/dev/input/event1: 0003 0035 {i:08x}")
+            took.append(time.monotonic() - t0)
+
+        t = threading.Thread(target=reader)
+        t.start()
+        t.join(2.0)
+        await pilot.pause()
+        await pilot.pause()
+        text = str(modal.query_one("#live-events-log", Static).render())
+    assert took
+    assert took[0] < 0.5
+    assert "00000031" in text  # the last line made it to the display
+
+
 def test_controller_does_not_play_a_cancelled_recording(monkeypatch, tmp_path):
     from sandroid.tui.modals.recording_modal import RecordingResult
 

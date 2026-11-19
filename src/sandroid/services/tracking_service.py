@@ -20,8 +20,14 @@ Tracking turns the device's raw input and UI into ``input``, ``screen``,
   for password fields; the summary never carries the text), ``input/confirm``
   and ``screen/window``; a logcat reader gives ``screen/activity`` when the
   helper cannot.
-* Screenshots are stored once per content (sha256) under
-  ``tracking/shots/<seq>_<trigger>.png``.
+* Screenshots are stored once per content (sha256) and timeline folder
+  under ``tracking/shots/<seq>_<trigger>.png`` (``<sha16>_<trigger>.png``
+  while the timeline holds lines back and the seq is not known yet). A
+  before-tap capture is taken only when none is in flight and dropped when
+  it was captured after the finger-up.
+* Privacy: taps (and their shots) while a password field has the focus, on
+  a password field or on the keyboard are ``sensitive`` (masked by readers,
+  never suppressed); a keyboard key's label is never written.
 
 :class:`NetFlowSource` (independent of the Tracking toggle) turns every
 finished mitmproxy flow into one ``net/flow`` / ``net/tls-fail`` line.
@@ -78,6 +84,14 @@ NET_DEBOUNCE_S = 0.2
 NET_TAGS = ("[FLOW]|", "[TLS_FAIL]|", "[FLOW_ERR]|")
 #: getevent restart back-off while a lease is held.
 RESTART_BACKOFF_S = (1.0, 2.0, 4.0, 8.0, 10.0)
+#: How long a new session's start waits for the previous helper to stop.
+HELPER_STOP_WAIT_S = 20.0
+#: A new contact after this long without any event of its node closes a
+#: gesture whose finger-up was lost (another slot still looks held).
+GESTURE_IDLE_S = 10.0
+#: After ``SYN_DROPPED`` events are ignored up to the next ``SYN_REPORT``;
+#: an event this much later ends that early (the report itself was lost).
+DROP_RESYNC_S = 0.5
 
 #: ``[   26404.737324] /dev/input/event1: 0003 0039 00000000``
 GE_LINE = re.compile(
@@ -91,6 +105,7 @@ LOGCAT_ACTIVITY = re.compile(
 )
 
 EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
+SYN_REPORT, SYN_DROPPED = 0, 3
 ABS_MT_SLOT, ABS_MT_X, ABS_MT_Y, ABS_MT_TRACKING_ID = 0x2F, 0x35, 0x36, 0x39
 
 #: Named non-character keys. Character keys (a host keyboard typing into the
@@ -139,18 +154,22 @@ def parse_getevent(line: str) -> tuple[float, str | None, int, int, int] | None:
 class Gesture:
     """One finger-down .. last-finger-up (or one key press), raw units.
 
-    ``x0/y0`` are the MT values at down, ``x1/y1`` at up; ``path`` holds
-    ``(x, y, t_s)`` samples of the first pointer.
+    ``x0/y0`` are the MT values at down (an axis the kernel has not reported
+    since the stream started is ``None`` until its first value arrives, which
+    then becomes the origin), ``x1/y1`` the last values; ``path`` holds
+    ``(x, y, t_s)`` samples of the first pointer with both axes known.
+    ``dropped``: the kernel dropped events (``SYN_DROPPED``), or the gesture
+    was closed by a new contact; its end is not the real finger-up.
     """
 
     dev: str
     t_down: float
     line_a: int
     slot: int = 0
-    x0: int = 0
-    y0: int = 0
-    x1: int = 0
-    y1: int = 0
+    x0: int | None = None
+    y0: int | None = None
+    x1: int | None = None
+    y1: int | None = None
     uncertain: bool = False
     t_up: float | None = None
     line_b: int | None = None
@@ -159,6 +178,12 @@ class Gesture:
     key_code: int | None = None
     host_recv: float = 0.0
     gid: int = 0
+    dropped: bool = False
+
+    @property
+    def xy_known(self) -> bool:
+        """Both axes of the origin were seen."""
+        return self.x0 is not None and self.y0 is not None
 
 
 @dataclass
@@ -176,10 +201,21 @@ class _DevState:
         self.frame_start: int | None = None
         self.downs: dict[int, float] = {}
         self.ups: dict[int, float] = {}
+        self.lost: set[int] = set()  # active slots that got a new tracking id
         self.moved: set[int] = set()
         self.active: set[int] = set()
         self.gesture: Gesture | None = None
         self.keys: dict[int, tuple[float, int]] = {}
+        self.dropping: float | None = None  # SYN_DROPPED time while skipping
+        self.last_ts: float | None = None
+        self.stale = False
+
+
+def _is_btn(code: int) -> bool:
+    """``BTN_*`` codes (BTN_TOUCH, BTN_TOOL_*, gamepad, trigger-happy);
+    ``KEY_*`` above 0xff (KEY_APPSELECT = 580 ...) are real keys.
+    """
+    return 0x100 <= code <= 0x15F or 0x2C0 <= code <= 0x2FF
 
 
 class TouchDecoder:
@@ -188,7 +224,16 @@ class TouchDecoder:
     Multitouch protocol B per device node; a gesture opens at the first
     tracking id and closes when no slot is active any more. ``uncertain`` is
     set when X or Y of the pointer was never seen since the stream (re)started
-    (the kernel does not repeat unchanged axis values).
+    (the kernel does not repeat unchanged axis values): such an axis is
+    ``None``, never 0. One decoder lives as long as its getevent stream (axis
+    values seen while Tracking was off still count).
+
+    Lost events: ``SYN_DROPPED`` closes the open gesture (``dropped``) and
+    every event up to the next ``SYN_REPORT`` is ignored (at most
+    :data:`DROP_RESYNC_S`); all contacts and axis values are forgotten. A new tracking id on a slot that is still
+    active (its finger-up was lost) closes the open gesture first, and so
+    does a new contact after :data:`GESTURE_IDLE_S` without any event while
+    another slot still looks held.
     """
 
     def __init__(self) -> None:
@@ -210,41 +255,83 @@ class TouchDecoder:
         ts, dev, typ, code, val = parsed
         dev = dev or "-"
         st = self._devs.setdefault(dev, _DevState())
+        idle = None if st.last_ts is None else ts - st.last_ts
+        st.last_ts = ts
+        if st.dropping is not None:
+            if typ == EV_SYN and code == SYN_REPORT:
+                st.dropping = None
+                return []
+            if ts - st.dropping < DROP_RESYNC_S:
+                return []
+            st.dropping = None  # a later frame: the report never came
+        if typ == EV_SYN and code == SYN_DROPPED:
+            return self._dropped(st, ts, line_no)
         if st.frame_start is None:
             st.frame_start = line_no
         if typ == EV_ABS:
-            self._abs(st, ts, code, val)
+            self._abs(st, ts, code, val, idle)
             return []
         if typ == EV_KEY:
             return self._key(st, dev, ts, code, val, line_no)
-        if typ == EV_SYN and code == 0:
+        if typ == EV_SYN and code == SYN_REPORT:
             return self._syn(st, dev, ts, line_no)
         return []
 
+    def _dropped(self, st: _DevState, ts: float, line_no: int) -> list[DecodedEvent]:
+        out: list[DecodedEvent] = []
+        g = st.gesture
+        if g is not None:
+            g.dropped = g.uncertain = True
+            g.t_up = ts
+            g.line_b = line_no
+            out.append(DecodedEvent("end", g))
+        st.gesture = None
+        st.dropping = ts
+        for s in st.slots.values():
+            s.update(tid=-1, x=None, y=None)
+        st.active.clear()
+        st.downs.clear()
+        st.ups.clear()
+        st.lost.clear()
+        st.moved.clear()
+        st.keys.clear()
+        st.frame_start = None
+        st.stale = False
+        return out
+
     @staticmethod
-    def _abs(st: _DevState, ts: float, code: int, val: int) -> None:
+    def _abs(st: _DevState, ts: float, code: int, val: int, idle: float | None) -> None:
         if code == ABS_MT_SLOT:
             st.slot = val
             return
-        s = st.slots.setdefault(st.slot, {"x": 0, "y": 0, "tid": -1})
+        s = st.slots.setdefault(st.slot, {"x": None, "y": None, "tid": -1})
         if code == ABS_MT_TRACKING_ID:
             if val >= 0:
+                if s["tid"] >= 0 and val != s["tid"] and st.slot in st.active:
+                    st.lost.add(st.slot)  # its finger-up never came
+                elif (
+                    st.gesture is not None
+                    and st.slot not in st.active
+                    and idle is not None
+                    and idle >= GESTURE_IDLE_S
+                ):
+                    st.stale = True  # another slot looks held for ever
                 s["tid"] = val
                 st.downs[st.slot] = ts
             elif s["tid"] >= 0:
                 s["tid"] = -1
                 st.ups[st.slot] = ts
         elif code == ABS_MT_X:
-            s["x"], s["sx"] = val, True
+            s["x"] = val
             st.moved.add(st.slot)
         elif code == ABS_MT_Y:
-            s["y"], s["sy"] = val, True
+            s["y"] = val
             st.moved.add(st.slot)
 
     def _key(
         self, st: _DevState, dev: str, ts: float, code: int, val: int, line_no: int
     ) -> list[DecodedEvent]:
-        if code >= 0x100:  # BTN_* (BTN_TOUCH on the touch node, ...)
+        if _is_btn(code):  # BTN_TOUCH on the touch node, ...
             return []
         if val == 1:
             st.keys[code] = (ts, line_no)
@@ -264,40 +351,85 @@ class TouchDecoder:
         )
         return [DecodedEvent("key", g)]
 
+    @staticmethod
+    def _track(g: Gesture, s: dict, ts: float) -> None:
+        """Follow the gesture's pointer: the first value of an axis unseen
+        at down becomes its origin; path samples need both axes.
+        """
+        if g.x0 is None and s.get("x") is not None:
+            g.x0 = s["x"]
+        if g.y0 is None and s.get("y") is not None:
+            g.y0 = s["y"]
+        g.x1 = s["x"] if s.get("x") is not None else g.x1
+        g.y1 = s["y"] if s.get("y") is not None else g.y1
+        if g.x1 is not None and g.y1 is not None:
+            g.path.append((g.x1, g.y1, ts))
+
+    def _close(
+        self, st: _DevState, ts: float, line_no: int, out: list[DecodedEvent]
+    ) -> None:
+        """End the open gesture early (lost finger-up)."""
+        g = st.gesture
+        if g is None:
+            return
+        g.dropped = True
+        g.t_up = ts
+        g.line_b = max(g.line_a, (st.frame_start or line_no) - 1)
+        out.append(DecodedEvent("end", g))
+        st.gesture = None
+
     def _syn(
         self, st: _DevState, dev: str, ts: float, line_no: int
     ) -> list[DecodedEvent]:
         out: list[DecodedEvent] = []
+        if st.lost or st.stale:
+            st.active -= st.lost
+            if st.stale:
+                st.active.clear()
+            if st.gesture is not None and (
+                st.stale or st.gesture.slot in st.lost or not st.active
+            ):
+                st.active.clear()
+                self._close(st, ts, line_no, out)
+            st.lost.clear()
+            st.stale = False
         for slot, t_down in sorted(st.downs.items()):
             s = st.slots.get(slot, {})
             st.active.add(slot)
             if st.gesture is None:
                 self._gid += 1
+                x, y = s.get("x"), s.get("y")
                 st.gesture = Gesture(
                     dev=dev,
                     t_down=t_down,
                     line_a=st.frame_start if st.frame_start is not None else line_no,
                     slot=slot,
-                    x0=s.get("x", 0),
-                    y0=s.get("y", 0),
-                    x1=s.get("x", 0),
-                    y1=s.get("y", 0),
-                    uncertain=not (s.get("sx") and s.get("sy")),
+                    x0=x,
+                    y0=y,
+                    x1=x,
+                    y1=y,
+                    uncertain=x is None or y is None,
                     gid=self._gid,
                 )
-                st.gesture.path.append((s.get("x", 0), s.get("y", 0), t_down))
+                if x is not None and y is not None:
+                    st.gesture.path.append((x, y, t_down))
                 out.append(DecodedEvent("down", st.gesture))
             st.gesture.pointers = max(st.gesture.pointers, len(st.active))
         g = st.gesture
         if g is not None and g.slot in st.moved and g.slot not in st.downs:
-            s = st.slots.get(g.slot, {})
-            g.x1, g.y1 = s.get("x", g.x1), s.get("y", g.y1)
-            g.path.append((g.x1, g.y1, ts))
+            self._track(g, st.slots.get(g.slot, {}), ts)
         for slot in st.ups:
             st.active.discard(slot)
             if g is not None and slot == g.slot:
                 s = st.slots.get(slot, {})
-                g.x1, g.y1 = s.get("x", g.x1), s.get("y", g.y1)
+                if g.x0 is None and s.get("x") is not None:
+                    g.x0 = s["x"]
+                if g.y0 is None and s.get("y") is not None:
+                    g.y0 = s["y"]
+                if s.get("x") is not None:
+                    g.x1 = s["x"]
+                if s.get("y") is not None:
+                    g.y1 = s["y"]
         if g is not None and st.ups and not st.active:
             g.t_up = ts
             g.line_b = line_no
@@ -526,9 +658,16 @@ class GeteventStream:
 
     Leases are counted: :meth:`TrackingService.getevent` takes one, every
     :meth:`release` gives one back; the last release kills exactly the device
-    pid this stream started (never a pattern kill). Every line goes to
-    :attr:`raw_path` (0600) before subscribers see ``(line, line_no,
-    host_recv)``; ``line_no`` continues the existing file's count.
+    pid this stream started (never a pattern kill, and only while that pid
+    is still a getevent). Every line goes to :attr:`raw_path` (0600) before
+    subscribers see ``(line, line_no, host_recv)``; ``line_no`` continues the
+    existing file's count. The stream's ONE :class:`TouchDecoder` sees every
+    line for the stream's whole life; :meth:`subscribe_events` subscribers get
+    what it decodes. Subscribers run on the reader thread and must not block.
+
+    ``registry_lock`` (the service's lock) makes the last :meth:`release`
+    and the unregistering atomic against a new lease; a released stream is
+    closed for good (:meth:`acquire` refuses it).
     """
 
     def __init__(
@@ -541,6 +680,7 @@ class GeteventStream:
         argv: list[str] | None = None,
         on_closed: Callable[[GeteventStream], None] | None = None,
         backoff: tuple[float, ...] = RESTART_BACKOFF_S,
+        registry_lock: Any = None,
     ) -> None:
         self.serial = serial
         self.raw_path = Path(raw_path)
@@ -549,8 +689,12 @@ class GeteventStream:
         self._argv = argv
         self._on_closed = on_closed
         self._backoff = backoff
+        self._registry_lock = registry_lock
         self._lock = threading.Lock()
         self._subs: list[Callable[[str, int, float], None]] = []
+        self._esubs: list[Callable[[list[DecodedEvent], float], None]] = []
+        self.decoder = TouchDecoder()
+        self._closed = False
         self._refs = 0
         self._n = 0
         self._fh: Any = None
@@ -564,8 +708,12 @@ class GeteventStream:
     # -- leases --------------------------------------------------------------
 
     def acquire(self) -> bool:
-        """Take a lease; the first one starts getevent. False on failure."""
+        """Take a lease; the first one starts getevent. False on failure or
+        once the last lease was released (the stream is closed for good).
+        """
         with self._lock:
+            if self._closed:
+                return False
             self._refs += 1
             if self._refs > 1:
                 return True
@@ -587,17 +735,23 @@ class GeteventStream:
         return True
 
     def release(self) -> None:
-        """Give one lease back; the last one stops the reader (background)."""
-        with self._lock:
-            if self._refs <= 0:
-                return
-            self._refs -= 1
-            if self._refs:
-                return
-            self._stop.set()
-            proc, pid = self._proc, self._pid
-        if self._on_closed is not None:
-            self._on_closed(self)
+        """Give one lease back; the last one stops the reader (background).
+
+        The last release closes the stream and unregisters it in one step
+        under the registry lock, so a concurrent lease never revives it.
+        """
+        with self._registry_lock or contextlib.nullcontext():
+            with self._lock:
+                if self._refs <= 0:
+                    return
+                self._refs -= 1
+                if self._refs:
+                    return
+                self._closed = True
+                self._stop.set()
+                proc, pid = self._proc, self._pid
+            if self._on_closed is not None:
+                self._on_closed(self)
         self._teardown = threading.Thread(
             target=self._kill,
             args=(proc, pid),
@@ -636,10 +790,47 @@ class GeteventStream:
 
         return unsubscribe
 
+    def subscribe_events(
+        self, cb: Callable[[list[DecodedEvent], float], None]
+    ) -> Callable[[], None]:
+        """Call ``cb(events, host_recv)`` for every line the stream's decoder
+        turned into events (reader thread; ``cb`` must not block).
+        """
+        with self._lock:
+            self._esubs.append(cb)
+
+        def unsubscribe() -> None:
+            with self._lock, contextlib.suppress(ValueError):
+                self._esubs.remove(cb)
+
+        return unsubscribe
+
     def line_no(self) -> int:
         """Lines in :attr:`raw_path` so far (the last line's number)."""
         with self._lock:
             return self._n
+
+    def retarget(self, raw_path: Path) -> bool:
+        """Write the raw log to ``raw_path`` from now on (the timeline folder
+        changed while a lease kept the stream alive); line numbers continue
+        that file's count. True when the path changed.
+        """
+        raw_path = Path(raw_path)
+        with self._lock:
+            if raw_path == self.raw_path or self._closed:
+                return False
+            old_path, old_fh, old_n = self.raw_path, self._fh, self._n
+            self.raw_path = raw_path
+            try:
+                self._open_raw()
+            except OSError as exc:
+                logger.warning(f"Tracking: cannot write {raw_path}: {exc}")
+                self.raw_path, self._fh, self._n = old_path, old_fh, old_n
+                return False
+            if old_fh is not None:
+                with contextlib.suppress(OSError):
+                    old_fh.close()
+        return True
 
     # -- internals -----------------------------------------------------------
 
@@ -721,13 +912,29 @@ class GeteventStream:
                         self._n += 1
                         n = self._n
                         subs = list(self._subs)
+                        esubs = list(self._esubs)
                     for cb in subs:
                         try:
                             cb(line, n, host)
                         except Exception:
                             logger.debug("getevent subscriber failed", exc_info=True)
+                    try:
+                        events = self.decoder.feed(line, n)
+                    except Exception:
+                        logger.debug("getevent decode failed", exc_info=True)
+                        events = []
+                    if not events:
+                        continue
+                    for ecb in esubs:
+                        try:
+                            ecb(events, host)
+                        except Exception:
+                            logger.debug("getevent subscriber failed", exc_info=True)
             with contextlib.suppress(Exception):
                 proc.wait(timeout=1.0)
+            with self._lock:
+                if self._proc is proc and proc.poll() is not None:
+                    self._pid = None  # dead: the pid may be reused
             if self._stop.is_set():
                 break
             delay = self._backoff[min(attempt, len(self._backoff) - 1)]
@@ -747,12 +954,16 @@ class GeteventStream:
                     logger.debug(f"getevent respawn failed: {exc}")
 
     def _kill(self, proc: Any, pid: int | None) -> None:
-        target = str(pid) if pid else f"$(cat {PIDFILE})"
+        # Only a pid that is still a getevent: a dead one may have been reused.
+        src = str(pid) if pid else f"$(cat {PIDFILE} 2>/dev/null)"
+        target = str(pid) if pid else "$p"
         self._run(
             [
                 *_base_argv(self.serial),
                 "shell",
-                f"kill {target} 2>/dev/null; rm -f {PIDFILE}",
+                f'p={src}; [ -n "$p" ] && grep -q getevent '
+                f"/proc/$p/cmdline 2>/dev/null && kill {target} 2>/dev/null; "
+                f"rm -f {PIDFILE}",
             ],
             timeout=5.0,
         )
@@ -796,6 +1007,20 @@ class _Pending:
     node: Future | None = None
     shot: Future | None = None
     t0: float = 0.0
+    shot_skipped: bool = False
+
+
+@dataclass
+class _HelperSession:
+    """What one helper's callbacks are bound to: a stale session's events
+    are ignored, its status lines still describe that session.
+    """
+
+    gen: int
+    serial: str
+    mode: str
+    helper: Any = None
+    intervention_on: bool = False
 
 
 class TrackingService:
@@ -825,6 +1050,8 @@ class TrackingService:
         self._folder_fn = folder_fn or self._timeline_folder
         self._clock_record = clock_record or self._record_clock
         self._lock = threading.RLock()
+        #: Serialises start()/stop(); never held by state() (the header).
+        self._op_lock = threading.Lock()
         self._streams: dict[str, GeteventStream] = {}
         self._closing: dict[str, GeteventStream] = {}
         # session state (guarded by _lock)
@@ -839,14 +1066,19 @@ class TrackingService:
         self._shots = 0
         self._keys_other = 0
         self._gen = 0
+        self._session_gen = 0
         self._stream: GeteventStream | None = None
         self._unsub: Callable[[], None] | None = None
         self._helper: Any = None
         self._helper_stop: threading.Thread | None = None
-        self._intervention_on = False
+        self._session: _HelperSession | None = None
         self._logcat: Any = None
         self._bell_handler: Callable[..., None] | None = None
-        self._decoder = TouchDecoder()
+        #: A password field has the input focus (FOCUSED/TEXT_CHANGED).
+        self._pw_focus = False
+        self._pre_lock = threading.Lock()
+        self._pre_inflight = 0
+        self._rot_pending = False
         self.geometry = Geometry()
         self._geometry_ready = threading.Event()
         self._pending: dict[int, _Pending] = {}
@@ -858,7 +1090,9 @@ class TrackingService:
         self._activities: list[dict] = []
         self._screen_req: dict | None = None
         self._label_seen = 0
-        self._sha: dict[str, tuple[str, int]] = {}
+        #: sha256 -> (ref path, seq) per shots folder (a new session or
+        #: device writes into another folder: its own files, its own dedupe).
+        self._sha: dict[str, dict[str, tuple[str, int | None]]] = {}
         self._sha_lock = threading.Lock()
         self._ticker: threading.Thread | None = None
         self._tick_stop = threading.Event()
@@ -868,6 +1102,7 @@ class TrackingService:
         self._order_lane = _Lane("tracking-order")
         self._shot_lane = _Lane("tracking-shot")
         self._store_lane = _Lane("tracking-store")
+        self._probe_lane = _Lane("tracking-probe")
 
     # -- defaults --------------------------------------------------------------
 
@@ -935,21 +1170,27 @@ class TrackingService:
             RuntimeError: getevent could not be started.
         """
         with self._lock:
-            closing = self._closing.pop(serial, None)
-        if closing is not None:
+            closing = self._closing.get(serial)
+        if closing is not None:  # never under the lock: up to 5 s
             closing.wait_closed()
+            with self._lock:
+                if self._closing.get(serial) is closing:
+                    del self._closing[serial]
+        raw = self._folder_fn(serial) / RAW_DIR / GETEVENT_FILE
         with self._lock:
             stream = self._streams.get(serial)
             if stream is None:
-                raw = self._folder_fn(serial) / RAW_DIR / GETEVENT_FILE
                 stream = GeteventStream(
                     serial,
                     raw,
                     popen=self._popen,
                     run=self._run,
                     on_closed=self._stream_closed,
+                    registry_lock=self._lock,
                 )
                 self._streams[serial] = stream
+            else:  # kept alive (e.g. by Record) across a session change
+                stream.retarget(raw)
             if not stream.acquire():
                 if stream.leases == 0:
                     self._streams.pop(serial, None)
@@ -988,6 +1229,12 @@ class TrackingService:
             return False
         return self.start(serial, reason="user", actor=actor)
 
+    @property
+    def session_gen(self) -> int | None:
+        """The running session's generation (None when off)."""
+        with self._lock:
+            return self._session_gen if self._active else None
+
     def start(
         self,
         serial: str | None = None,
@@ -1002,18 +1249,42 @@ class TrackingService:
         if not serial:
             logger.warning("Tracking: no device")
             return False
+        with self._op_lock:
+            with self._lock:
+                if self._active:
+                    return self._serial == serial
+            return self._start(serial, reason, actor) is not None
+
+    def start_session(
+        self, serial: str | None = None, *, reason: str, actor: str | None = None
+    ) -> int | None:
+        """Start Tracking only when it is off: the new session's generation,
+        or None (already on, no device, no getevent). For a caller that must
+        later stop exactly the session it started (``stop(only_gen=...)``).
+        """
+        serial = self._resolve_serial(serial)
+        if not serial:
+            return None
+        with self._op_lock:
+            with self._lock:
+                if self._active:
+                    return None
+            return self._start(serial, reason, actor)
+
+    def _start(self, serial: str, reason: str, actor: str | None) -> int | None:
+        """``_op_lock`` held, Tracking off. The state lock is never held while
+        getevent starts (it may wait for a closing stream).
+        """
+        cfg = _config()
+        folder = self._folder_fn(serial)
+        try:
+            stream = self.getevent(serial)
+        except RuntimeError as exc:
+            logger.warning(f"Tracking: {exc}")
+            return None
         with self._lock:
-            if self._active:
-                return self._serial == serial
-            cfg = _config()
-            folder = self._folder_fn(serial)
-            try:
-                stream = self.getevent(serial)
-            except RuntimeError as exc:
-                logger.warning(f"Tracking: {exc}")
-                return False
             self._gen += 1
-            gen = self._gen
+            gen = self._session_gen = self._gen
             self._active = True
             self._serial = serial
             self._folder = folder
@@ -1022,7 +1293,6 @@ class TrackingService:
             self._since = time.time()
             self._reason = reason
             self._inputs = self._shots = self._keys_other = 0
-            self._decoder = TouchDecoder()
             self.geometry = Geometry()
             self._geometry_ready.clear()
             self._pending.clear()
@@ -1032,7 +1302,8 @@ class TrackingService:
             self._last_screen = None
             self._activities = []
             self._screen_req = None
-            self._intervention_on = False
+            self._session = None
+            self._pw_focus = False
             self._label_seen = self._timeline_last_seq()
             self._stream = stream
         _emit(
@@ -1045,7 +1316,7 @@ class TrackingService:
             data={"mode": self._mode, "helper": self._helper_state, "reason": reason},
             dev=serial,
         )
-        self._unsub = stream.subscribe(self._on_getevent)
+        self._unsub = stream.subscribe_events(self._on_events)
         self._subscribe_bell()
         self._tick_stop.clear()
         self._ticker = threading.Thread(
@@ -1058,12 +1329,28 @@ class TrackingService:
             name="tracking-start",
             daemon=True,
         ).start()
-        return True
+        return gen
 
-    def stop(self, *, reason: str = "user", actor: str | None = None) -> None:
-        """Turn Tracking off (pending gestures are written first)."""
+    def stop(
+        self,
+        *,
+        reason: str = "user",
+        actor: str | None = None,
+        only_gen: int | None = None,
+    ) -> None:
+        """Turn Tracking off (pending gestures are written first).
+
+        With ``only_gen``: only when that session is still the running one
+        (Record never stops a session the user restarted meanwhile).
+        """
+        with self._op_lock:
+            self._stop(reason, actor, only_gen)
+
+    def _stop(self, reason: str, actor: str | None, only_gen: int | None) -> None:
         with self._lock:
             if not self._active:
+                return
+            if only_gen is not None and only_gen != self._session_gen:
                 return
             self._active = False
             self._gen += 1
@@ -1071,6 +1358,7 @@ class TrackingService:
             unsub, self._unsub = self._unsub, None
             stream, self._stream = self._stream, None
             helper, self._helper = self._helper, None
+            sess, self._session = self._session, None
             logcat, self._logcat = self._logcat, None
         self._tick_stop.set()
         if unsub is not None:
@@ -1103,7 +1391,7 @@ class TrackingService:
         if helper is not None:
             self._helper_stop = threading.Thread(
                 target=self._stop_helper,
-                args=(helper,),
+                args=(helper, sess),
                 name="tracking-helper-stop",
                 daemon=True,
             )
@@ -1135,6 +1423,11 @@ class TrackingService:
     # -- bootstrap (background) --------------------------------------------------
 
     def _bootstrap(self, gen: int, serial: str, folder: Path) -> None:
+        # The previous session's helper must be gone (and a11y restored)
+        # before the new one reads ``a11y_before``.
+        prev = self._helper_stop
+        if prev is not None and prev is not threading.current_thread():
+            prev.join(HELPER_STOP_WAIT_S)
         self._clock_record("tracking-start", serial)
         try:
             self._probe_geometry(serial)
@@ -1144,17 +1437,20 @@ class TrackingService:
             self._start_logcat(gen, serial)
         if self._mode == "off" or self._gen != gen:
             return
+        sess = _HelperSession(gen=gen, serial=serial, mode=self._mode)
         helper = self._helper_factory(
             serial,
             self._mode,
-            self._on_helper_event,
-            self._on_helper_status,
+            lambda d, host_recv: self._on_helper_event(d, host_recv, sess),
+            lambda state, info: self._on_helper_status(state, info, sess),
             folder / RAW_DIR / HELPER_FILE,
         )
+        sess.helper = helper
         with self._lock:
             if self._gen != gen:
                 return
             self._helper = helper
+            self._session = sess
         ok = False
         try:
             ok = bool(helper.start())
@@ -1165,6 +1461,7 @@ class TrackingService:
             with self._lock:
                 if self._helper is helper:
                     self._helper = None
+                    self._session = None
                     if self._helper_state != "busy":
                         self._helper_state = "failed"
             if err != "busy":
@@ -1179,7 +1476,7 @@ class TrackingService:
                 )
             return
         if self._gen != gen:  # stopped while the helper was starting
-            self._stop_helper(helper)
+            self._stop_helper(helper, sess)
             return
         self._apply_display(getattr(helper, "hello", None))
 
@@ -1217,25 +1514,26 @@ class TrackingService:
                 geo.width, geo.height = (h, w) if rot % 2 else (w, h)
             geo.rotation = rot
 
-    def _stop_helper(self, helper: Any) -> None:
+    def _stop_helper(self, helper: Any, sess: _HelperSession | None = None) -> None:
         try:
             helper.stop()
         except Exception:
             logger.debug("tracking: helper stop failed", exc_info=True)
-        if self._intervention_on:  # no "stopped" status came (fake/old helper)
-            self._intervention(False, {})
+        if sess is not None and sess.intervention_on:
+            # no "stopped" status came (fake/old helper)
+            self._intervention(False, {}, sess)
 
     # -- getevent -> input ------------------------------------------------------
 
-    def _on_getevent(self, line: str, line_no: int, host_recv: float) -> None:
-        """Reader thread: decode and queue, never block."""
-        for ev in self._decoder.feed(line, line_no):
+    def _on_events(self, events: list[DecodedEvent], host_recv: float) -> None:
+        """Reader thread (the stream's decoder): queue, never block."""
+        gen = self._gen
+        for ev in events:
             g = ev.gesture
             g.host_recv = host_recv
             if ev.kind == "down":
                 self._at_down(g)
             else:
-                gen = self._gen
                 self._order_lane.submit(self._finish, gen, g)
 
     def _helper_up(self) -> Any:
@@ -1250,16 +1548,35 @@ class TrackingService:
             return
         p = _Pending(t0=time.monotonic())
         full = str(getattr(helper, "mode", self._mode)) == "full"
-        if full and self._geometry_ready.is_set():
+        # An axis never seen is unknown, not 0: no node_at at a made-up spot
+        # (the a11y CLICKED can still name the target, see _match).
+        if full and g.xy_known and self._geometry_ready.is_set():
             x, y = self.geometry.to_px(g.dev, g.x0, g.y0)
             p.node = self._node_lane.submit(
                 helper.node_at, x, y, t_mono_ms=round(g.t_down * 1000.0, 1)
             )
-        elif full:
+        elif full and g.xy_known:
             p.node = self._node_lane.submit(self._node_late, helper, g)
         if _config().shot_before_tap:
-            p.shot = self._pre_lane.submit(helper.shot)
+            p.shot = self._pre_shot(helper)
+            p.shot_skipped = p.shot is None
         self._pending[g.gid] = p
+
+    def _pre_shot(self, helper: Any) -> Future | None:
+        """A before-tap capture, unless one is still in flight: fast taps
+        would queue captures that land long after their taps.
+        """
+        with self._pre_lock:
+            if self._pre_inflight:
+                return None
+            self._pre_inflight += 1
+        fut = self._pre_lane.submit(helper.shot)
+        fut.add_done_callback(self._pre_done)
+        return fut
+
+    def _pre_done(self, _fut: Future) -> None:
+        with self._pre_lock:
+            self._pre_inflight = max(0, self._pre_inflight - 1)
 
     def _node_late(self, helper: Any, g: Gesture) -> dict | None:
         self._geometry_ready.wait(1.0)
@@ -1320,13 +1637,16 @@ class TrackingService:
             return
         self._geometry_ready.wait(1.0)
         geo = self.geometry
-        x, y = geo.to_px(g.dev, g.x0, g.y0)
-        x1, y1 = geo.to_px(g.dev, g.x1, g.y1)
         sw, sh = geo.screen
+        known = g.xy_known
+        x = y = x1 = y1 = None
         moved = 0.0
-        for a, b, _t in [*g.path, (g.x1, g.y1, 0.0)]:
-            px, py = geo.to_px(g.dev, a, b)
-            moved = max(moved, ((px - x) ** 2 + (py - y) ** 2) ** 0.5)
+        if known:  # never an unseen axis as 0 (position, movement, node_at)
+            x, y = geo.to_px(g.dev, g.x0, g.y0)
+            x1, y1 = geo.to_px(g.dev, g.x1, g.y1)
+            for a, b, _t in [*g.path, (g.x1, g.y1, 0.0)]:
+                px, py = geo.to_px(g.dev, a, b)
+                moved = max(moved, ((px - x) ** 2 + (py - y) ** 2) ** 0.5)
         if g.pointers > 1:
             kind = "gesture"
         elif moved <= cfg.swipe_slop_px:
@@ -1336,8 +1656,8 @@ class TrackingService:
         data: dict[str, Any] = {
             "x": x,
             "y": y,
-            "rx": round(x / sw, 4) if sw else None,
-            "ry": round(y / sh, 4) if sh else None,
+            "rx": round(x / sw, 4) if sw and x is not None else None,
+            "ry": round(y / sh, 4) if sh and y is not None else None,
             "screen": [sw, sh],
             "rotation": geo.rotation,
             "dur_ms": dur_ms,
@@ -1345,6 +1665,10 @@ class TrackingService:
             "xy_uncertain": g.uncertain,
             "helper": self._helper_label(),
         }
+        if g.dropped:
+            data["dropped"] = True  # events were lost: the end is a guess
+        if pending is not None and pending.shot_skipped:
+            data["before_shot"] = "skipped"  # one was still in flight
         if kind == "gesture":
             data["pointers"] = g.pointers
         if kind == "swipe":
@@ -1353,6 +1677,7 @@ class TrackingService:
         target = None
         answer: dict = {}
         pkg = None
+        ime = False
         if pending is not None and pending.node is not None:
             try:
                 reply = pending.node.result(timeout=NODE_WAIT_S)
@@ -1362,10 +1687,27 @@ class TrackingService:
                 data["node_timeout"] = True
             except Exception:
                 reply = None
+            if isinstance(reply, dict):
+                self._apply_display(reply)
             target, answer = self._target(reply)
             pkg = answer.get("pkg") if answer else None
+            ime = self._ime_hit(reply)
+        # Privacy: a tap while a password field has the focus, on a password
+        # field, or on the keyboard is sensitive (masked by readers, never
+        # suppressed); a keyboard key never names its label.
+        pw = self._pw_focus or bool(target and target.get("password"))
+        sensitive = pw or ime
+        if ime:
+            data["ime"] = True
+            if target is not None:
+                target["text"] = target["desc"] = None
         data["target"] = target
-        summary = self._input_summary(kind, data, target, answer)
+        if ime:
+            summary = f"{kind.replace('_', ' ')} on keyboard" + (
+                " (password field)" if pw else ""
+            )
+        else:
+            summary = self._input_summary(kind, data, target, answer)
         seq = _emit(
             "input",
             kind,
@@ -1376,6 +1718,7 @@ class TrackingService:
             pkg=pkg,
             data=data,
             ref={"raw": raw},
+            sensitive=sensitive,
             dev=serial,
         )
         if seq is None:
@@ -1390,13 +1733,22 @@ class TrackingService:
             "up_ms": (g.t_up or g.t_down) * 1000.0,
             "host": time.time(),
             "confirmed": False,
+            # no node_at was possible at down: the a11y click names it
+            "uncertain": g.uncertain and target is None,
+            "sensitive": sensitive,
+            "ime": ime,
         }
         self._confirm_input(rec)
         before = pending.shot if pending is not None else None
+        t_up = g.t_up if g.t_up is not None else g.t_down
         if before is not None:
-            self._store_lane.submit(self._before_shot, before, seq, kind)
+            self._store_lane.submit(
+                self._before_shot, before, seq, kind, t_up, sensitive
+            )
         if cfg.shot_after_tap and kind in ("tap", "long_press"):
-            self._shot_lane.submit(self._after_tap, gen, seq, kind, before)
+            self._shot_lane.submit(
+                self._after_tap, gen, seq, kind, before, t_up, sensitive
+            )
 
     @staticmethod
     def _path(g: Gesture, geo: Geometry) -> list[list[float]]:
@@ -1441,6 +1793,17 @@ class TrackingService:
         return None, {}
 
     @staticmethod
+    def _ime_hit(reply: dict | None) -> bool:
+        """The touched window is the input method (the keyboard)."""
+        for source in ("cached", "live"):
+            answer = (reply or {}).get(source)
+            if isinstance(answer, dict):
+                win = answer.get("window")
+                if isinstance(win, dict) and win.get("type") == "ime":
+                    return True
+        return False
+
+    @staticmethod
     def _input_summary(kind: str, data: dict, target: dict | None, answer: dict) -> str:
         word = kind.replace("_", " ")
         if kind == "gesture":
@@ -1459,12 +1822,24 @@ class TrackingService:
             return f"{text} on '{name}'" if name else text
         if name:
             return f"{word} '{name}' ({_short_cls(target.get('cls'))})"
+        if data.get("x") is None or data.get("y") is None:
+            return f"{word} · position unknown"
         return f"{word} at {data['x']},{data['y']}"
 
     # -- helper events ----------------------------------------------------------
 
-    def _on_helper_event(self, d: dict, host_recv: float) -> None:
+    def _current(self, sess: _HelperSession | None) -> bool:
+        """``sess`` is the running session's helper (not a stale one)."""
+        if sess is None:
+            return True
+        return sess.gen == self._gen and self._helper is sess.helper
+
+    def _on_helper_event(
+        self, d: dict, host_recv: float, sess: _HelperSession | None = None
+    ) -> None:
         """Helper reader thread: bookkeeping and non-blocking emits only."""
+        if not self._current(sess):
+            return  # a stopped session's helper
         typ = d.get("type")
         if typ == "hello":
             self._apply_display(d)
@@ -1475,8 +1850,13 @@ class TrackingService:
         if ev in ("CLICKED", "LONG_CLICKED"):
             self._on_click(d, host_recv)
         elif ev == "TEXT_CHANGED":
+            if d.get("password") or (d.get("src") or {}).get("password"):
+                self._pw_focus = True
             self._on_text(d, host_recv)
         elif ev == "FOCUSED":
+            self._pw_focus = bool(
+                d.get("password") or (d.get("src") or {}).get("password")
+            )
             self._flush_text()
         elif ev == "WINDOW_STATE_CHANGED":
             self._flush_text()
@@ -1512,6 +1892,8 @@ class TrackingService:
             <= rec["up_ms"] + CONFIRM_WINDOW_MS
         ):
             return False
+        if rec["target"] is None and rec.get("uncertain"):
+            return True  # position unknown: the click names the target
         return _same_node(rec["target"], click["node"])
 
     def _confirm_input(self, rec: dict) -> None:
@@ -1529,6 +1911,18 @@ class TrackingService:
                 return
             rec["confirmed"] = click["used"] = True
         node = click["node"] or {}
+        data: dict[str, Any] = {
+            "a11y": click["ev"],
+            "node": {
+                "rid": node.get("rid"),
+                "text": None if _private(node) or rec.get("ime") else node.get("text"),
+                "cls": node.get("cls"),
+            },
+        }
+        if rec["target"] is None and rec.get("uncertain"):
+            # The tap's position was unknown: this is its target.
+            data["node"]["bounds"] = node.get("bounds")
+            data["target_of_input"] = True
         _emit(
             "input",
             "confirm",
@@ -1536,15 +1930,9 @@ class TrackingService:
             actor="app",
             clk="dev_mono",
             dev_mono=click["t_ms"] / 1000.0,
-            data={
-                "a11y": click["ev"],
-                "node": {
-                    "rid": node.get("rid"),
-                    "text": None if _private(node) else node.get("text"),
-                    "cls": node.get("cls"),
-                },
-            },
+            data=data,
             ref={"of": rec["seq"]},
+            sensitive=bool(rec.get("sensitive")),
             dev=self._serial,
         )
 
@@ -1640,6 +2028,7 @@ class TrackingService:
     def _on_window(self, d: dict, host_recv: float) -> None:
         pkg, cls, title = d.get("pkg"), d.get("cls"), d.get("text")
         self._last_window_host = host_recv
+        self._refresh_rotation()
         self._emit_screen(
             "window",
             pkg=pkg,
@@ -1754,7 +2143,44 @@ class TrackingService:
         with self._lock:
             self._activities.append(act)
 
+    def _refresh_rotation(self) -> None:
+        """Re-read the rotation after a screen change (one probe at a time):
+        the helper's ``display`` (``windows`` reply), else ``dumpsys input``.
+        """
+        with self._pre_lock:
+            if self._rot_pending:
+                return
+            self._rot_pending = True
+        self._probe_lane.submit(self._probe_rotation, self._gen)
+
+    def _probe_rotation(self, gen: int) -> None:
+        try:
+            if gen != self._gen or not self._serial:
+                return
+            helper = self._helper_up()
+            fn = getattr(helper, "display", None) if helper is not None else None
+            disp = None
+            if callable(fn):
+                with contextlib.suppress(Exception):
+                    disp = fn()
+            if isinstance(disp, dict) and isinstance(disp.get("rotation"), int):
+                self._apply_display({"display": disp})
+                return
+            rc, out = self._adb(
+                self._serial,
+                "shell",
+                "dumpsys input | grep -m1 SurfaceOrientation",
+                timeout=10.0,
+            )
+            m = re.search(r"SurfaceOrientation:\s*(\d)", out.decode("utf-8", "replace"))
+            if rc == 0 and m and gen == self._gen:
+                self.geometry.rotation = int(m[1])
+        finally:
+            with self._pre_lock:
+                self._rot_pending = False
+
     def _emit_activity(self, act: dict) -> None:
+        self._refresh_rotation()
         self._emit_screen(
             "activity",
             pkg=act["pkg"],
@@ -1802,11 +2228,18 @@ class TrackingService:
 
     # -- helper status ---------------------------------------------------------------
 
-    def _on_helper_status(self, state: str, info: dict) -> None:
-        serial = self._serial
-        mode = info.get("mode", self._mode)
+    def _on_helper_status(
+        self, state: str, info: dict, sess: _HelperSession | None = None
+    ) -> None:
+        serial = sess.serial if sess is not None else self._serial
+        mode = info.get("mode", sess.mode if sess is not None else self._mode)
+        current = self._current(sess)
+        if not current and state not in ("stopped", "down"):
+            return  # a stale helper: only its end still counts
         with self._lock:
-            if state in ("connected", "restarted"):
+            if not current:
+                pass  # the new session's state is not this helper's
+            elif state in ("connected", "restarted"):
                 self._helper_state = "connected"
             elif state == "busy":
                 self._helper_state = "busy"
@@ -1841,16 +2274,25 @@ class TrackingService:
             dev=serial,
         )
         if state in ("connected", "restarted"):
-            self._intervention(True, info)
+            self._intervention(True, info, sess)
         elif state in ("down", "stopped"):
-            self._intervention(False, info)
+            self._intervention(False, info, sess)
 
-    def _intervention(self, on: bool, info: dict) -> None:
+    def _intervention(
+        self, on: bool, info: dict, sess: _HelperSession | None = None
+    ) -> None:
+        """One ``sandroid/intervention`` line per change of THIS helper
+        session (an old session's "off" is written even after a restart).
+        """
+        if sess is None:
+            sess = self._session
+        if sess is None:
+            return
         with self._lock:
-            if on == self._intervention_on:
+            if on == sess.intervention_on:
                 return
-            self._intervention_on = on
-            mode = info.get("mode", self._mode)
+            sess.intervention_on = on
+            mode = info.get("mode", sess.mode)
         full = mode == "full"
         what = "a11y_helper" if full else "ui_helper_invisible"
         detail: dict[str, Any] = {"flags": info.get("flags", 1 if full else 2)}
@@ -1877,7 +2319,7 @@ class TrackingService:
                 "detectable": full,
                 "detail": detail,
             },
-            dev=self._serial,
+            dev=sess.serial,
         )
 
     # -- doorbell (label shots) -----------------------------------------------------
@@ -1958,6 +2400,7 @@ class TrackingService:
         t: float | None = None,
         actor: str = "sandroid",
         extra: dict | None = None,
+        sensitive: bool = False,
     ) -> int | None:
         """Capture now (helper, else screencap) and write the shot line."""
         if gen != self._gen:
@@ -1972,12 +2415,25 @@ class TrackingService:
             if res is not None:
                 return self._store(trigger, res.png, of=of, via="helper", w=res.w, h=res.h,
                                    cap_ms=res.cap_ms, dev_mono=res.t_mono_ms / 1000.0,
-                                   t=t, actor=actor, error=res.error, extra=extra)  # fmt: skip
+                                   t=t, actor=actor, error=res.error, extra=extra,
+                                   sensitive=sensitive)  # fmt: skip
         png, t_host, cap, err = self._screencap()
         w, h = self.geometry.screen
         return self._store(trigger, png, of=of, via="screencap", w=w, h=h, cap_ms=cap,
                            dev_mono=None, t=t if t is not None else t_host,
-                           actor=actor, error=err, extra=extra)  # fmt: skip
+                           actor=actor, error=err, extra=extra,
+                           sensitive=sensitive)  # fmt: skip
+
+    def _sink_buffering(self) -> bool:
+        """The timeline holds lines back (no session folder yet): a line's
+        seq is unknown when it is emitted.
+        """
+        try:
+            from sandroid.core import timeline
+
+            return timeline.get_timeline().status(self._serial).state == "detached"
+        except Exception:
+            return False
 
     def _store(
         self,
@@ -1994,8 +2450,14 @@ class TrackingService:
         actor: str = "sandroid",
         error: str | None = None,
         extra: dict | None = None,
+        sensitive: bool = False,
     ) -> int | None:
-        """sha256-dedup the PNG into ``tracking/shots`` and emit the line."""
+        """sha256-dedup the PNG into ``tracking/shots`` and emit the line.
+
+        ``sensitive`` (or a focused password field) marks the line; the image
+        is still stored (masking is the readers' job).
+        """
+        sensitive = sensitive or self._pw_focus
         data: dict[str, Any] = {
             "trigger": trigger,
             "w": w,
@@ -2029,26 +2491,47 @@ class TrackingService:
         if png is None:
             data["error"] = error or "no image"
             return self._emit_shot(trigger, summary + " · failed", data, ref, time_kw,
-                                   actor, level="warn")  # fmt: skip
+                                   actor, level="warn", sensitive=sensitive)  # fmt: skip
         sha = hashlib.sha256(png).hexdigest()
         ref["sha256"] = sha
         shots = self._shots_dir()
         with self._sha_lock:
-            known = self._sha.get(sha)
+            known_shas = self._sha.setdefault(str(shots), {})
+            known = known_shas.get(sha)
             if known is not None:
                 ref["path"] = known[0]
                 data["dup_of"] = known[1]
-                return self._emit_shot(trigger, f"{summary} (same as #{known[1]})", data,
-                                       ref, time_kw, actor)  # fmt: skip
+                same = f"same as #{known[1]}" if known[1] is not None else "same image"
+                return self._emit_shot(trigger, f"{summary} ({same})", data, ref,
+                                       time_kw, actor, sensitive=sensitive)  # fmt: skip
             incoming = shots / ".incoming"
             incoming.mkdir(parents=True, exist_ok=True)
             tmp = incoming / f"{uuid.uuid4().hex}.png"
             tmp.write_bytes(png)
+            if self._sink_buffering():
+                # The line is kept back and gets its seq later: a file name
+                # that does not depend on it, stored before the line exists.
+                name = f"{SHOTS_DIR}/{sha[:16]}_{trigger}.png"
+                try:
+                    tmp.replace(self._folder_path(shots, name))
+                except OSError as exc:
+                    logger.warning(f"Tracking: cannot store screenshot {name}: {exc}")
+                ref["path"] = name
+                seq = self._emit_shot(trigger, summary, data, ref, time_kw, actor,
+                                      sensitive=sensitive)  # fmt: skip
+                known_shas[sha] = (name, seq)
+                return seq
             ref["path"] = f"{SHOTS_DIR}/{{seq}}_{trigger}.png"
-            seq = self._emit_shot(trigger, summary, data, ref, time_kw, actor)
+            seq = self._emit_shot(trigger, summary, data, ref, time_kw, actor,
+                                  sensitive=sensitive)  # fmt: skip
             if seq is None:
-                with contextlib.suppress(OSError):
-                    tmp.unlink()
+                if self._sink_buffering():
+                    # Buffered after all (the session closed meanwhile): the
+                    # line will be written, so its image must stay.
+                    logger.debug(f"Tracking: screenshot kept as {tmp}")
+                else:
+                    with contextlib.suppress(OSError):
+                        tmp.unlink()
                 return None
             final = shots / f"{seq}_{trigger}.png"
             try:
@@ -2056,10 +2539,16 @@ class TrackingService:
             except OSError as exc:
                 logger.warning(f"Tracking: cannot store screenshot {final}: {exc}")
                 return seq
-            self._sha[sha] = (f"{SHOTS_DIR}/{seq}_{trigger}.png", seq)
+            known_shas[sha] = (f"{SHOTS_DIR}/{seq}_{trigger}.png", seq)
         return seq
 
-    def _emit_shot(self, trigger, summary, data, ref, time_kw, actor, level="info"):
+    @staticmethod
+    def _folder_path(shots: Path, rel: str) -> Path:
+        """``rel`` (``tracking/shots/...``) inside the folder of ``shots``."""
+        return shots / rel[len(SHOTS_DIR) + 1 :]
+
+    def _emit_shot(self, trigger, summary, data, ref, time_kw, actor, level="info",
+                   sensitive=False):  # fmt: skip
         seq = _emit(
             "shot",
             trigger,
@@ -2068,6 +2557,7 @@ class TrackingService:
             data=data,
             ref=ref or None,
             level=level,
+            sensitive=sensitive,
             dev=self._serial,
             **time_kw,
         )
@@ -2076,16 +2566,39 @@ class TrackingService:
                 self._shots += 1
         return seq
 
-    def _before_shot(self, fut: Future, of: int, kind: str) -> None:
+    @staticmethod
+    def _late(res: Any, t_up: float | None) -> bool:
+        """Captured after the finger went up: not a before-tap image."""
+        try:
+            return t_up is not None and float(res.t_mono_ms) / 1000.0 > t_up
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    def _before_shot(
+        self,
+        fut: Future,
+        of: int,
+        kind: str,
+        t_up: float | None = None,
+        sensitive: bool = False,
+    ) -> None:
+        """Store the before-tap capture. A capture taken after the tap's
+        finger-up (the helper was slow) is dropped: it would show the screen
+        after the tap under a "before" label; the after-tap shot covers it.
+        """
         try:
             res = fut.result(timeout=10.0)
         except Exception:
             res = None
         if res is None:
             return
+        if self._late(res, t_up):
+            logger.debug(f"Tracking: before-tap shot of #{of} was late, dropped")
+            return
         self._store("before_tap", res.png, of=of, via="helper", w=res.w, h=res.h,
                     cap_ms=res.cap_ms, dev_mono=res.t_mono_ms / 1000.0, t=None,
-                    error=res.error, extra={"input": kind})  # fmt: skip
+                    error=res.error, extra={"input": kind},
+                    sensitive=sensitive)  # fmt: skip
 
     def _settle(self, helper: Any, cfg: Any) -> tuple[str | None, bool, float]:
         """hash_only shots until two match or ``settle_max_ms``:
@@ -2107,25 +2620,36 @@ class TrackingService:
             prev = r.hash
         return prev, False, round((time.monotonic() - t0) * 1000.0, 1)
 
-    def _after_tap(self, gen: int, of: int, kind: str, before: Future | None) -> None:
+    def _after_tap(
+        self,
+        gen: int,
+        of: int,
+        kind: str,
+        before: Future | None,
+        t_up: float | None = None,
+        sensitive: bool = False,
+    ) -> None:
         cfg = _config()
         if gen != self._gen or not cfg.shot_after_tap:
             return
         helper = self._helper_up()
         if helper is None:
             time.sleep(cfg.settle_interval_ms / 1000.0)
-            self._take("after_tap", of=of, gen=gen, extra={"input": kind})
+            self._take("after_tap", of=of, gen=gen, extra={"input": kind},
+                       sensitive=sensitive)  # fmt: skip
             return
         last, stable, waited = self._settle(helper, cfg)
         before_hash = None
         if before is not None:
             with contextlib.suppress(Exception):
                 res = before.result(timeout=2.0)
-                before_hash = res.hash if res is not None else None
+                if res is not None and not self._late(res, t_up):
+                    before_hash = res.hash
         if last is not None and last == before_hash:
             return  # the tap changed nothing on screen
         self._take("after_tap", of=of, gen=gen,
-                   extra={"input": kind, "stable": stable, "settle_ms": waited})  # fmt: skip
+                   extra={"input": kind, "stable": stable, "settle_ms": waited},
+                   sensitive=sensitive)  # fmt: skip
 
     def _screen_shot(self, gen: int) -> None:
         cfg = _config()
