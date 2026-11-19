@@ -151,7 +151,8 @@ preset = "default"
 [tui]
 # TUI (Terminal User Interface) settings
 # Theme for TUI mode
-# Available themes: default, dark, light, high_contrast, cyberpunk, nord, dracula, solarized
+# Available themes: default, dark, light, high_contrast, cyberpunk, nord, dracula, solarized,
+#   graphite, deep_sea, evergreen
 theme = "default"
 # Show theme name in status bar (disabled by default)
 show_theme_indicator = false

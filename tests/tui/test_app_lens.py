@@ -898,6 +898,64 @@ async def test_theme_switch_recolors_the_lens_css_and_rich_text(fake):
         assert perms.styles.background.hex.lower() == DEFAULT_LENS.bg
 
 
+async def test_dense_dark_theme_keeps_cell_colors_under_the_cursor(fake):
+    """Graphite: a cell keeps its own color on the cursor row; default: not."""
+    from sandroid.tui.themes import (
+        DEFAULT_THEME,
+        GRAPHITE_THEME,
+        get_theme_css_path,
+    )
+
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(pilot, lambda: _loaded(sections))
+        perms = sections.section("permissions")
+        assert perms.cursor_foreground_priority == "css"
+
+        app._apply_theme(GRAPHITE_THEME, get_theme_css_path("graphite"))
+        await _settle(pilot)
+        assert app.theme == "sandroid-graphite"
+        assert perms.cursor_foreground_priority == "renderable"
+        assert perms.styles.background.hex.upper() == GRAPHITE_THEME.lens.bg
+        footer_key = app.theme_variables["footer-key-foreground"].upper()
+        assert footer_key == GRAPHITE_THEME.lens.title
+
+        app._apply_theme(DEFAULT_THEME, get_theme_css_path("default"))
+        await _settle(pilot)
+        assert perms.cursor_foreground_priority == "css"
+
+
+def test_dense_dark_themes_meet_their_contrast_floors():
+    """Body text >= 7:1, every text tier >= 4.5:1, also on the cursor rows."""
+    from sandroid.tui.themes import THEMES, get_theme_css_path
+
+    def lum(hexv: str) -> float:
+        rgb = [int(hexv.lstrip("#")[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+        lin = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+        return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+    def ratio(a: str, b: str) -> float:
+        hi, lo = sorted((lum(a), lum(b)), reverse=True)
+        return (hi + 0.05) / (lo + 0.05)
+
+    for name in ("graphite", "deep_sea", "evergreen"):
+        theme = THEMES[name]
+        p = theme.lens
+        assert get_theme_css_path(name).name == f"{name}.tcss"
+        assert p.cursor_keeps_colors
+        assert lum(p.bg) < lum(p.panel) < lum(p.cursor_focus)
+        assert lum(p.text) > lum(p.label) > lum(p.dim)
+        for surface in (p.bg, p.panel, p.cursor, p.cursor_focus):
+            assert ratio(p.text, surface) >= 7, (name, surface)
+            for tier in ("label", "dim", "muted", "header", "ok", "warn", "bad"):
+                assert ratio(getattr(p, tier), surface) >= 4.5, (name, tier)
+        band = theme.textual_variables["footer-background"]
+        assert ratio(theme.text_muted, band) >= 4.5, name
+        assert ratio(p.accent_text, p.accent) >= 4.5, name
+
+
 async def test_trackers_re_read_the_cache_when_static_analysis_ends(fake):
     """'press a' must go away once ``a`` recorded an Insight result."""
     from sandroid.core.events.events import AnalysisCompleted

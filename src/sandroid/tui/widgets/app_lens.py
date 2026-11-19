@@ -1772,6 +1772,13 @@ class LensSection(DataTable):
         """Render ``data`` (rows matching ``filter_text``); keeps the cursor."""
         self.data = data
         self._filter_text = filter_text
+        # The theme decides whether a cell keeps its own color under the
+        # row cursor ("renderable") or takes the cursor text color ("css").
+        priority = "renderable" if _c().cursor_keeps_colors else "css"
+        if priority != self.cursor_foreground_priority:
+            self.cursor_foreground_priority = priority
+            self._clear_caches()
+            self.refresh()
         rows = self._visible_rows(data, filter_text)
         self._update_title()
         columns = self._columns_for(data)

@@ -32,6 +32,9 @@ THEME_REGISTRY: list[tuple[str, str, str]] = [
     ("nord", "Nord/Arctic", "Arctic, north-bluish colors"),
     ("dracula", "Dracula", "Popular dark purple/green theme"),
     ("solarized", "Solarized Dark", "Classic Solarized color scheme"),
+    ("graphite", "Graphite", "Neutral charcoal, copper accent (dense data)"),
+    ("deep_sea", "Deep Sea", "Blue-slate, sea-glass accent (dense data)"),
+    ("evergreen", "Evergreen", "Moss grey, cream text, heather accent (dense data)"),
 ]
 
 VALID_THEME_IDS: set[str] = {t[0] for t in THEME_REGISTRY}
