@@ -138,6 +138,37 @@ def test_header_wide_and_compact_goldens() -> None:
     assert "$chat-muted" in {s.style for s in idle.spans}
 
 
+@pytest.mark.parametrize("width", [140, 110, 90, 70, 60, 50])
+def test_header_drops_the_model_first_and_keeps_both_markers(width) -> None:
+    """§8: REMOTE and EXPERIMENTAL stay whole at every width (E2E saw
+    ``E…``); the model goes first, then the meter's window, then the detail
+    is cut.
+    """
+    model = "deepseek-ai/DeepSeek-V4.1-Flash"
+    header = format_header(
+        "approval",
+        detail="Kill Process",
+        model=model,
+        remote=True,
+        experimental=True,
+        used=49_000,
+        window=262_144,
+        width=width,
+    )
+    plain = header.plain
+    assert header.cell_length == width
+    assert " REMOTE EXPERIMENTAL " in plain
+    assert "E…" not in plain
+    assert plain.rstrip().endswith("19%")
+    if width >= 110:
+        assert model in plain
+        assert "49k/262k" in plain
+    if width <= 90:
+        assert model not in plain
+    if width <= 60:
+        assert "Kill" not in plain or "…" in plain
+
+
 def test_tool_name_args_and_chip_goldens() -> None:
     assert humanize_tool_name("list_flows") == "List Flows"
     assert humanize_tool_name("get_tls_keys") == "Get TLS Keys"
@@ -560,7 +591,23 @@ async def test_empty_state_widget_and_all_blocks_mount_in_every_theme() -> None:
             band = app.query_one(UserBlock).styles.background.hex.upper()
             assert band == THEMES[name].user_highlight_background.upper()
             mascot = app.query_one(ChatMascot)
-            assert mascot.styles.color.hex.upper() == THEMES[name].logo_color.upper()
+            # The softer lens accent (the logo colour was harsh, e.g. #00ff00).
+            accent = THEMES[name].lens.accent.upper()
+            assert mascot.styles.color.hex.upper() == accent
+            assert _contrast(accent, THEMES[name].lens.bg) >= 4.0, name
+
+
+def _contrast(a: str, b: str) -> float:
+    """WCAG contrast ratio of two ``#rrggbb`` colours."""
+
+    def lum(hex_: str) -> float:
+        h = hex_.lstrip("#")
+        rgb = [int(h[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+        lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+        return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+    hi, lo = sorted((lum(a), lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
 
 
 async def test_transcript_starts_at_the_top_then_follows_the_end() -> None:

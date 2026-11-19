@@ -1358,7 +1358,9 @@ def chat_css_variables(theme: Theme) -> dict[str, str]:
     Built from existing :class:`Theme` fields, so every theme gets them:
     ``chat-user-band`` (the user line's band), ``chat-reply`` (assistant
     text), ``chat-tool`` (tool calls), ``chat-wait`` (waiting on the user),
-    ``chat-muted`` (idle / secondary text) and ``chat-brand`` (the mascot).
+    ``chat-muted`` (idle / secondary text) and ``chat-brand`` (the mascot:
+    the lens accent, softer than the logo colour and readable on every
+    theme's lens background).
     """
     return {
         "chat-user-band": theme.user_highlight_background,
@@ -1366,7 +1368,7 @@ def chat_css_variables(theme: Theme) -> dict[str, str]:
         "chat-tool": theme.tool_color,
         "chat-wait": theme.waiting_color,
         "chat-muted": theme.muted_status_color,
-        "chat-brand": theme.logo_color,
+        "chat-brand": theme.lens.accent,
     }
 
 

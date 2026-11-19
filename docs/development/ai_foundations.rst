@@ -509,7 +509,11 @@ reached through a small ``session_root()`` helper so it can move later.
   system, tools schema, ambient, history, tool results, summaries, last request,
   session totals), ``/permissions``, ``/agents``, ``/doctor``.
 - The agents bar replaces the subtask bar. Enter opens the agent's transcript, with
-  cancel and send.
+  cancel and send: a compact header (profile, status, time, live tokens, first line of
+  task and result; Ctrl+T shows them in full), the transcript as chat blocks (Markdown
+  kept) filling the rest, and the input and buttons always on screen; PageUp/PageDown
+  and Ctrl+Home/End scroll it. Closing it returns the focus to the chat input. Keys
+  typed on the agents bar go to the input.
 - Layout and look of the chat dock, placement and hotkey: see §6.
 
 .. _4-removed:
@@ -603,8 +607,13 @@ renders live in the session scratchpad (``ui-dock/mockups.txt``, ``ui-look/mock_
 
 - **Mouse.** Dragging the top border resizes and snaps to the presets. A double-click
   toggles max.
-- **Persistence.** The split is persisted in ``TUIConfig.chat_dock`` (ratio,
-  maximized) through ``ConfigLoader.load_and_update_section``. The chat always starts
+- **Persistence.** The split (ratio, maximized) is remembered in the UI-state file
+  ``$XDG_CONFIG_HOME/sandroid/tui_state.json`` (``sandroid.config.ui_state``; 0600,
+  written atomically), never in a config file: going through
+  ``ConfigLoader.load_and_update_section`` once rewrote the first config file found with
+  the whole merged config, API key included. ``TUIConfig.chat_dock`` is only the
+  first-run default. (``load_and_update_section`` itself now writes only the keys it is
+  given and refuses ``ai.api_key`` and ``credentials.*``.) The chat always starts
   closed.
 - **Narrow terminals.** Below 120 columns, add the screen class ``-narrow`` with
   ``#side-slot{width:45%;min-width:0}``. While the chat is open, the log drawer gets
@@ -665,8 +674,17 @@ renders live in the session scratchpad (``ui-dock/mockups.txt``, ``ui-look/mock_
     - ``2 Yes, don't ask again for <rule>``
     - ``3 No, and tell it what to do instead…`` (opens a note Input)
 
-  - Keys 1–3, ↑↓ and Enter; Esc means No. Once answered, it collapses into one
-    transcript line.
+  - Keys 1–3, ↑↓ and Enter; Esc means No. Once answered, the answer is shown on the
+    tool call it belongs to, above its result chip (subagent approvals: one transcript
+    line).
+  - Only the selected option has the cursor background and a ``›`` marker; while the
+    note input is open the card and its hint switch to ``$chat-wait``.
+  - Focus: the card takes the focus only when the focus already is in the chat (or
+    nowhere); stray letters are swallowed while it has it. A closed dock opens
+    unfocused; then, and whenever the focus is elsewhere, a toast and the ticker badge
+    ``⚠ approval needed · ^Y`` say so, and Ctrl+Y focuses the card.
+  - All model text is ``Content`` (never markup): ``rich.markup.escape`` does not match
+    Textual 8's parser.
 
 - **Below the scroll area:** the agents bar (one line) and the input row
   (``Ask Sandroid… / for commands``, subtitle ``⏎ send · ^X stop``) with the mascot

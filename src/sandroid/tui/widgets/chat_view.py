@@ -210,38 +210,71 @@ def format_header(
 ) -> Content:
     """The one-row chat header, ``width`` cells wide.
 
-    ``● tool · List Flows · deepseek-v3 REMOTE ...... ◔ 41k/262k 16%  ⟲1  ◆2``.
-    At :data:`HEADER_COMPACT_WIDTH` columns or less the model is dropped and
-    the meter is short; the left part is cut with "…" when it does not fit.
+    ``● tool · List Flows · deepseek-v3 REMOTE EXPERIMENTAL ... ◔ 41k/262k 16%``.
+    When it does not fit, parts go in this order: the model, the meter's
+    window (``◔ 41k 16%``), then the detail is cut with "…". ``REMOTE`` and
+    ``EXPERIMENTAL`` always stay whole (§8); at :data:`HEADER_COMPACT_WIDTH`
+    columns or less the model is never shown.
     """
     label, dot_style = HEADER_STATES.get(state, (state, "$chat-muted"))
-    compact = width <= HEADER_COMPACT_WIDTH
-    left_parts: list[str | tuple[str, str] | Content] = [
-        ("●", dot_style),
-        " ",
-        (label, dot_style),
-    ]
-    if detail:
-        left_parts += [(" · ", "$chat-muted"), detail]
-    if model and not compact:
-        left_parts += [(" · ", "$chat-muted"), (model, "$chat-muted")]
+
+    markers: list[Any] = []
     if remote:
-        left_parts += [" ", ("REMOTE", "bold $lens-warn")]
-    if experimental and not compact:
-        left_parts += [" ", ("EXPERIMENTAL", "$lens-warn")]
-    left = Content.assemble(" ", *left_parts)
-    right_parts: list[str | tuple[str, str] | Content] = []
-    if used is not None or window:
-        right_parts.append(format_meter(used, window, compact=compact))
-    sep = " " if compact else "  "
-    if compactions:
-        right_parts += [sep, (f"⟲{compactions}", "$chat-muted")]
-    if agents:
-        right_parts += [sep, (f"◆{agents}", "$chat-tool")]
-    right = Content.assemble(*right_parts, " ")
+        markers += [" ", ("REMOTE", "bold $lens-warn")]
+    if experimental:
+        markers += [" ", ("EXPERIMENTAL", "$lens-warn")]
+    tail = Content.assemble(*markers)
+
+    def right_side(compact: bool) -> Content:
+        parts: list[Any] = []
+        if used is not None or window:
+            parts.append(format_meter(used, window, compact=compact))
+        sep = " " if compact else "  "
+        if compactions:
+            parts += [sep, (f"⟲{compactions}", "$chat-muted")]
+        if agents:
+            parts += [sep, (f"◆{agents}", "$chat-tool")]
+        return Content.assemble(*parts, " ")
+
+    head = Content.assemble(" ", ("●", dot_style), " ", (label, dot_style))
+    detail_part = (
+        Content.assemble((" · ", "$chat-muted"), detail) if detail else Content("")
+    )
+    model_part = (
+        Content.assemble((" · ", "$chat-muted"), (model, "$chat-muted"))
+        if model
+        else Content("")
+    )
+    allow_model = width > HEADER_COMPACT_WIDTH
+    attempts = [
+        # (show model, compact meter)
+        (allow_model, width <= HEADER_COMPACT_WIDTH),
+        (False, width <= HEADER_COMPACT_WIDTH),
+        (False, True),
+    ]
+    for show_model, compact in attempts:
+        right = right_side(compact)
+        left = Content.assemble(
+            head, detail_part, model_part if show_model else Content(""), tail
+        )
+        room = width - right.cell_length - 1
+        if left.cell_length <= room:
+            gap = max(1, width - left.cell_length - right.cell_length)
+            return Content.assemble(left, " " * gap, right)
+    # Still too wide: cut the detail (then the label), keep the markers whole.
+    keep = Content.assemble(head, tail)
     room = width - right.cell_length - 1
-    if left.cell_length > room:
-        left = left.truncate(max(1, room), ellipsis=True)
+    if keep.cell_length < room and detail:
+        detail_room = room - keep.cell_length
+        left = Content.assemble(
+            head, detail_part.truncate(max(1, detail_room), ellipsis=True), tail
+        )
+    elif tail.cell_length < room:
+        left = Content.assemble(
+            head.truncate(max(1, room - tail.cell_length), ellipsis=True), tail
+        )
+    else:
+        left = keep.truncate(max(1, room), ellipsis=True)
     gap = max(1, width - left.cell_length - right.cell_length)
     return Content.assemble(left, " " * gap, right)
 
@@ -887,6 +920,9 @@ class ToolBlock(Widget, TranscriptBlock):
         self.glyph = glyph or ("◆" if name == "spawn_agent" else "●")
         self.chip: Content | None = None
         self.ok: bool | None = None
+        #: The analyst's answer to this call's approval (shown above the chip).
+        self.decision: Content | None = None
+        self.decision_approved: bool | None = None
         self.running = running
         self._spin = 0
         self._timer = None
@@ -934,6 +970,14 @@ class ToolBlock(Widget, TranscriptBlock):
             format_chip(ok=False, code=code, message=message, elapsed=elapsed), ok=False
         )
 
+    def set_decision(
+        self, text: str, *, style: str = "$chat-muted", approved: bool = True
+    ) -> None:
+        """Show the approval answer (``✓ allowed by you``) under the call."""
+        self.decision = Content.assemble(("⚠ ", "$chat-wait"), (text, style))
+        self.decision_approved = approved
+        self.refresh(layout=True)
+
     def set_chip(self, chip: Content | str, *, ok: bool | None = True) -> None:
         """Any chip line (e.g. ``└ ◆ r2 running · see agents bar``)."""
         self.chip = chip if isinstance(chip, Content) else Content(chip)
@@ -954,13 +998,15 @@ class ToolBlock(Widget, TranscriptBlock):
         return Content.assemble(*parts)
 
     def render(self) -> Content:
-        line = self.call_line()
-        if self.chip is None:
-            return line
-        return Content.assemble(line, "\n  ", self.chip)
+        lines = [self.call_line()]
+        if self.decision is not None:
+            lines.append(Content.assemble("  ", self.decision))
+        if self.chip is not None:
+            lines.append(Content.assemble("  ", self.chip))
+        return Content("\n").join(lines)
 
     def get_content_height(self, container, viewport, width: int) -> int:
-        return 1 if self.chip is None else 2
+        return 1 + (self.decision is not None) + (self.chip is not None)
 
 
 class AgentCard(Widget, TranscriptBlock, can_focus=True):
@@ -1020,17 +1066,49 @@ class AgentCard(Widget, TranscriptBlock, can_focus=True):
         self.summary = summary
         self.claims: list[tuple[str, list[str]]] = [(t, list(r)) for t, r in claims]
         self.border_subtitle = "Enter open"
+        self._spin = 0
+        self._timer = None
         self._sync_title()
+
+    #: Seconds per spinner frame while the agent runs.
+    SPIN_INTERVAL = 0.25
+
+    def on_mount(self) -> None:
+        self._sync_spinner(mounted=True)
 
     def update_card(self, **fields: Any) -> None:
         """Change any of ``status``, ``elapsed``, ``tokens``, ``summary``, ``claims``."""
+        changed = False
         for key in ("status", "elapsed", "tokens", "summary"):
-            if key in fields:
+            if key in fields and getattr(self, key) != fields[key]:
                 setattr(self, key, fields[key])
+                changed = True
         if "claims" in fields:
-            self.claims = [(t, list(r)) for t, r in fields["claims"]]
+            claims = [(t, list(r)) for t, r in fields["claims"]]
+            changed = changed or claims != self.claims
+            self.claims = claims
+        if not changed:
+            return
         self._sync_title()
+        self._sync_spinner()
         self.refresh(layout=True)
+
+    @property
+    def spinning(self) -> bool:
+        """The status spinner animates (the agent runs)."""
+        return self._timer is not None
+
+    def _sync_spinner(self, mounted: bool = False) -> None:
+        running = self.status == "running"
+        if running and self._timer is None and (mounted or self.is_mounted):
+            self._timer = self.set_interval(self.SPIN_INTERVAL, self._tick)
+        elif not running and self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def _tick(self) -> None:
+        self._spin += 1
+        self._sync_title()
 
     def _sync_title(self) -> None:
         self.border_title = format_card_title(
@@ -1039,6 +1117,7 @@ class AgentCard(Widget, TranscriptBlock, can_focus=True):
             self.status,
             elapsed=self.elapsed,
             tokens=self.tokens,
+            spinner=SPINNER[self._spin % len(SPINNER)],
         )
 
     def body(self, width: int) -> Content:

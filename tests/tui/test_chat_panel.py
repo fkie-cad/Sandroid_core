@@ -30,6 +30,7 @@ from sandroid.tui.screens.main_screen import MainScreen
 from sandroid.tui.widgets.chat_panel import (
     AgentsBar,
     AgentTranscriptModal,
+    AgentTranscriptView,
     ChatPanel,
     coalesce_events,
     egress_banner_lines,
@@ -116,6 +117,8 @@ class FakeSession:
         self.budgets = Budgets(max_rounds=25)
         self.totals = {"prompt_tokens": 1200, "completion_tokens": 80, "requests": 3}
         self.thread_path = None
+        self.messages: list[dict] = []
+        self.tools: list[dict] = []
         self.submitted: list[str] = []
         self.continued: list[int | None] = []
         self.cancelled = 0
@@ -279,6 +282,8 @@ async def _send(pilot, panel: ChatPanel, text: str) -> None:
     field.focus()
     field.value = text
     await pilot.press("enter")
+    # Opening / resuming a thread and listing threads run on workers.
+    await until(pilot, lambda: not panel.io_pending)
     await settle(pilot)
 
 
@@ -297,7 +302,7 @@ async def test_mounts_with_the_kept_ids_banner_and_empty_state(ai_on):
         assert app.query_one("#chat-input", Input).border_subtitle
         assert app.query_one("#chat-header") is not None
         banner = app.query_one(".chat-banner", Static)
-        text = str(banner.render())
+        text = banner.plain_text
         assert "EXPERIMENTAL" in text
         assert "fake-model" in text
         assert app.query(EmptyState)
@@ -315,7 +320,7 @@ async def test_not_configured_shows_off_state(monkeypatch):
     async with app.run_test(size=(100, 40)) as pilot:
         await _panel(pilot)
         assert "not configured" in app.query_one("#chat-header").render().plain
-        assert "not configured" in str(app.query_one(".chat-banner").render())
+        assert "not configured" in app.query_one(".chat-banner").plain_text
 
 
 async def test_remote_endpoint_is_refused_before_opening_a_session(
@@ -340,7 +345,7 @@ async def test_allow_all_mode_shows_in_banner_and_header(ai_on, perm_store):
     app = _Harness()
     async with app.run_test(size=(100, 40)) as pilot:
         await _panel(pilot)
-        banner = str(app.query_one(".chat-banner").render())
+        banner = app.query_one(".chat-banner").plain_text
         assert ALLOW_ALL_NOTICE in banner
         assert "always ask" not in banner
         assert "allow all" in app.query_one("#chat-header").render().plain
@@ -646,7 +651,7 @@ async def test_approval_card_answers_the_broker(
         for key in keys:
             await pilot.press(key)
         await settle(pilot)
-        assert pending.done
+        await until(pilot, lambda: pending.done)  # resolved on a worker
         assert pending.decision.choice == choice
         assert pending.decision.note == note
         assert panel.pending_prompt() is None
@@ -697,7 +702,7 @@ async def test_ctrl_l_closes_the_thread_and_clears_the_transcript(sessions, mana
         await _push(pilot, panel, ev("text_delta", text="hi"))
         await pilot.press("ctrl+l")
         await settle(pilot)
-        assert old.closed
+        await until(pilot, lambda: old.closed)  # closed on a worker
         assert manager.cancel_all_calls == 1
         assert panel.session is None
         assert _blocks(panel) == []
@@ -829,7 +834,7 @@ async def test_real_session_streams_and_threads_resume_with_history(
 
         await pilot.press("ctrl+l")
         await settle(pilot)
-        assert session.closed
+        await until(pilot, lambda: session.closed)  # closed on a worker
         assert panel.session is None
         threads = list_threads(tmp_path)
         assert [t["thread_id"] for t in threads] == [first_id]
@@ -949,7 +954,7 @@ async def test_permissions_shows_rules_and_toggles_allow_all(sessions, perm_stor
         assert perm_store.mode == "allow_all"
         assert perm_store.file_mode == "ask"  # session only
         await settle(pilot)
-        assert ALLOW_ALL_NOTICE in str(app.query_one(".chat-banner").render())
+        assert ALLOW_ALL_NOTICE in app.query_one(".chat-banner").plain_text
         await _send(pilot, panel, "/permissions ask")
         assert perm_store.mode == "ask"
 
@@ -1040,10 +1045,18 @@ async def test_agent_card_bar_and_transcript_modal(sessions, manager):
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(app.screen, AgentTranscriptModal))
         modal = app.screen
-        text = str(modal.query_one("#agent-transcript").render())
-        assert "List Flows" in text
-        assert "R4" in text
-        assert "Two trackers." in text
+        view = modal.query_one("#agent-transcript", AgentTranscriptView)
+        (tool,) = [b for b in view.blocks if isinstance(b, ToolBlock)]
+        assert tool.label == "List Flows"
+        assert "R4" in tool.chip.plain
+        await until(
+            pilot,
+            lambda: any(
+                isinstance(b, ReplyBlock) and "Two trackers." in b.text
+                for b in view.blocks
+            ),
+        )
+        assert "Two trackers." in modal.transcript_text()
         modal.query_one("#agent-message", Input).value = "also check DNS"
         modal.query_one("#agent-message", Input).focus()
         await pilot.press("enter")
@@ -1188,3 +1201,461 @@ async def test_toggle_chat_panel_shows_and_hides_the_dock():
         screen.toggle_chat_panel()
         await pilot.pause()
         assert screen.chat_mode == "closed"
+
+
+# =============================================================================
+# Regressions: E2E + verifier findings (fix pass B)
+# =============================================================================
+
+BRACKETS = ["[x]", "[/]", "[bold]", "[Black on black]", "[A-Z]{3}"]
+
+
+async def test_bracket_text_is_shown_verbatim_and_never_crashes(
+    sessions, manager, monkeypatch
+):
+    """``/threads`` crashed with MarkupError on a ``[`` in a title; model and
+    user text anywhere must be plain text.
+    """
+    from textual.widgets import OptionList
+
+    rows = [
+        {"thread_id": f"t-{i}", "title": f"list {b} please", "turns": 1}
+        for i, b in enumerate(BRACKETS)
+    ]
+    monkeypatch.setattr(chat_panel_module, "list_threads", lambda: rows)
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "hello [bold]x[/] [x]")
+        (user,) = _blocks(panel, UserBlock)
+        assert "hello [bold]x[/] [x]" in str(user.render())
+        await _push(
+            pilot,
+            panel,
+            ev("tool_call", call_id="c1", name="run_x", args={"q": "[/] [A-Z]"}),
+            ev(
+                "tool_result",
+                call_id="c1",
+                status="error",
+                error_code="bad_args",
+                summary="bad_args: [Black on black] gone",
+                duration_ms=5,
+            ),
+            ev("warning", message="[/] careful"),
+            ev("error", message="[bold]boom[/]"),
+        )
+        (tool,) = _blocks(panel, ToolBlock)
+        assert "[/] [A-Z]" in tool.call_line(200).plain
+        assert "[Black on black] gone" in tool.chip.plain
+        notices = _notices(panel)
+        assert "[/] careful" in notices
+        assert "[bold]boom[/]" in notices
+        await _send(pilot, panel, "/threads")
+        await until(pilot, lambda: type(app.screen).__name__ == "ThreadPickerModal")
+        options = app.screen.query_one(OptionList)
+        await settle(pilot)  # rendering the rows must not raise
+        shown = [str(options.get_option_at_index(i).prompt) for i in range(len(rows))]
+        for bracket, text in zip(BRACKETS, shown, strict=True):
+            assert f"list {bracket} please" in text
+        app.screen.action_cancel()
+        await settle(pilot)
+
+
+async def test_approval_answer_sits_on_the_call_above_a_clean_chip(
+    sessions, perm_store
+):
+    """E2E: ``✗ denied: denied: …`` and the decline line after the chip."""
+    app = _Harness()
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "kill it")
+        pending = _submit()
+        await _push(
+            pilot,
+            panel,
+            ev(
+                "tool_call",
+                call_id="c1",
+                name="kill_process",
+                args={"package_name": "com.example"},
+            ),
+            _request_event(pending),
+        )
+        prompt = panel.pending_prompt()
+        await until(pilot, lambda: prompt.has_focus)
+        await pilot.press("3", *"use chrome", "enter")
+        await until(pilot, lambda: pending.done)
+        await _push(
+            pilot,
+            panel,
+            _resolved_event(pending),
+            ev(
+                "tool_result",
+                call_id="c1",
+                name="kill_process",
+                status="denied",
+                error_code="denied",
+                summary="denied: The analyst declined kill_process. "
+                "Their note: use chrome",
+                duration_ms=22_000,
+            ),
+        )
+        (tool,) = _blocks(panel, ToolBlock)
+        lines = tool.render().plain.splitlines()
+        assert len(lines) == 3
+        assert "declined by you · use chrome" in lines[1]
+        assert lines[2].strip() == "└ ✗ denied · 22s"
+        assert "declined" not in _notices(panel)  # no extra line after the chip
+    assert chat_panel_module.strip_code_prefix("cancelled", "cancelled: x") == "x"
+    assert chat_panel_module.strip_code_prefix("denied", "other") == "other"
+
+
+async def test_resume_shows_the_threads_context_use_at_once(sessions, monkeypatch):
+    """E2E: the meter read ``○ 0/262k`` after /threads until the next request."""
+    monkeypatch.setattr(FakeMeter, "used", 0)
+    monkeypatch.setattr(
+        FakeMeter, "estimate", lambda self, messages, tools: 55_000, raising=False
+    )
+    monkeypatch.setattr(
+        chat_panel_module,
+        "list_threads",
+        lambda: [{"thread_id": "t-old", "title": "old", "turns": 3}],
+    )
+    app = _Harness()
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "/threads t-old")
+        await until(pilot, lambda: panel.session is not None)
+        await settle(pilot)
+        assert "55k/262k" in app.query_one("#chat-header").render().plain
+    records = [
+        {"type": "usage", "prompt": 1000, "completion": 10},
+        {"type": "usage", "prompt": 30_000, "completion": 500},
+    ]
+    no_estimate = SimpleNamespace(meter=SimpleNamespace(), messages=[], tools=[])
+    assert chat_panel_module.resumed_context_used(no_estimate, records) == 30_500
+    assert chat_panel_module.resumed_context_used(no_estimate, []) is None
+
+
+async def test_late_events_of_a_closed_thread_are_dropped(sessions, manager):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "hello")
+        old = sessions[0]
+        # Queued but not drained yet when Ctrl+L clears the view...
+        old.sink(ev("text_delta", text="late reply"))
+        assert panel.new_thread()
+        await settle(pilot)
+        # ...and emitted afterwards by the winding-down old thread.
+        old.sink(ev("tool_call", call_id="c9", name="list_flows", args={}))
+        old.sink(ev("approval_request", request_id="ap-x", tool="kill_process"))
+        await until(pilot, lambda: not panel._events and panel._drain_timer is None)
+        await settle(pilot)
+        assert _blocks(panel) == []
+        assert panel.pending_prompt() is None
+        await _send(pilot, panel, "again")
+        await _push(pilot, panel, ev("text_delta", text="new reply"))
+        (reply,) = _blocks(panel, ReplyBlock)
+        await until(pilot, lambda: reply.text == "new reply")
+
+
+async def test_thread_and_approval_disk_work_runs_off_the_ui_thread(
+    ai_on, perm_store, manager, monkeypatch
+):
+    on_ui: dict[str, bool] = {}
+
+    def mark(name):
+        on_ui[name] = threading.current_thread() is threading.main_thread()
+
+    class _Session(FakeSession):
+        def close(self, reason="new"):
+            mark("close")
+            super().close(reason)
+
+    def factory(*, sink, thread_id=None):
+        mark(f"open:{thread_id}")
+        return _Session(sink, thread_id or "t-new")
+
+    def listing():
+        mark("list")
+        return [{"thread_id": "t-old", "title": "old", "turns": 1}]
+
+    monkeypatch.setattr(chat_panel_module, "open_orchestrator_session", factory)
+    monkeypatch.setattr(chat_panel_module, "list_threads", listing)
+    broker = perms.get_approval_broker()
+    real_resolve = broker.resolve
+
+    def resolve(*args, **kwargs):
+        mark("resolve")
+        return real_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(broker, "resolve", resolve)
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "hello")
+        pending = _submit()
+        await _push(pilot, panel, _request_event(pending))
+        await until(pilot, lambda: panel.pending_prompt().has_focus)
+        await pilot.press("2")
+        await until(pilot, lambda: pending.done)
+        await _send(pilot, panel, "/threads")
+        await until(pilot, lambda: type(app.screen).__name__ == "ThreadPickerModal")
+        await pilot.press("enter")
+        await until(pilot, lambda: panel.session is not None and not panel.io_pending)
+    assert set(on_ui) == {"open:None", "resolve", "list", "close", "open:t-old"}
+    assert not any(on_ui.values()), on_ui
+
+
+async def test_page_keys_scroll_the_transcript_from_the_input(sessions):
+    app = _Harness()
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _panel(pilot)
+        for i in range(80):
+            panel._notice(f"line {i}")
+        await settle(pilot)
+        log = panel.query_one(ChatTranscript)
+        field = panel.query_one("#chat-input", Input)
+        field.focus()
+        log.scroll_end(animate=False, immediate=True)
+        await settle(pilot)
+        bottom = log.scroll_y
+        assert bottom > 0
+        await pilot.press("pageup")
+        await settle(pilot)
+        assert log.scroll_y < bottom
+        await pilot.press("ctrl+home")
+        await settle(pilot)
+        assert log.scroll_y == 0
+        await pilot.press("pagedown")
+        await settle(pilot)
+        assert log.scroll_y > 0
+        await pilot.press("ctrl+end")
+        await settle(pilot)
+        assert log.scroll_y == log.max_scroll_y
+        assert field.has_focus
+
+
+async def test_typing_on_the_agents_bar_goes_to_the_input(sessions, manager):
+    """E2E: keys typed with the agents bar focused ran the App's hotkeys."""
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "spawn")
+        manager.rows = [_agent_row()]
+        panel._refresh_agents()
+        field = panel.query_one("#chat-input", Input)
+        field.focus()
+        await pilot.press("up")
+        await settle(pilot)
+        assert panel.query_one(AgentsBar).has_focus
+        await pilot.press("h", "i")
+        await settle(pilot)
+        assert field.has_focus
+        assert field.value == "hi"
+
+
+async def test_closing_the_agent_modal_returns_to_the_chat_input(sessions, manager):
+    """E2E: focus came back to the agents bar (Ctrl+Y then closed the chat)."""
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "spawn")
+        manager.rows = [_agent_row()]
+        panel._refresh_agents()
+        panel.query_one("#chat-input", Input).focus()
+        await pilot.press("up", "enter")
+        await until(pilot, lambda: isinstance(app.screen, AgentTranscriptModal))
+        await pilot.press("escape")
+        await until(pilot, lambda: not isinstance(app.screen, AgentTranscriptModal))
+        await until(pilot, lambda: app.focused is not None)
+        await settle(pilot)
+        assert app.focused.id == "chat-input"
+
+
+class _LongAgentManager(FakeManager):
+    TASK = "Task: produce an accurate summary of the exported surface.\n\n" + "\n".join(
+        f"{i}. step number {i} with plenty of words" for i in range(60)
+    )
+    TABLE = "| package | perms |\n|---|---|\n" + "\n".join(
+        f"| com.app{i} | CAMERA |" for i in range(40)
+    )
+
+    def info(self, agent_id):
+        row = super().info(agent_id)
+        if row is None:
+            return None
+        return {
+            **row,
+            "task": self.TASK,
+            "result": {"summary": "Result: " + self.TABLE},
+        }
+
+
+@pytest.mark.parametrize("size", [(120, 45), (200, 110), (90, 24)])
+async def test_agent_modal_keeps_input_and_buttons_on_screen(
+    sessions, monkeypatch, size
+):
+    """E2E bug 2: the unbounded meta pushed transcript, input and buttons off
+    screen; Markdown tables were flattened; "Task: Task:".
+    """
+    manager = _LongAgentManager()
+    monkeypatch.setattr(chat_panel_module, "get_agent_manager", lambda: manager)
+    manager.rows = [_agent_row("complete")]
+    manager.events["a-re-abcdef"] = [
+        ev("text_delta", agent_id="a-re-abcdef", text=_LongAgentManager.TABLE),
+        ev("turn_end", agent_id="a-re-abcdef", reason="completed", rounds=3),
+    ]
+    app = _Harness()
+    async with app.run_test(size=size) as pilot:
+        panel = await _panel(pilot)
+        panel.open_agent("a-re-abcdef")
+        await until(pilot, lambda: isinstance(app.screen, AgentTranscriptModal))
+        modal = app.screen
+        await settle(pilot)
+        height = app.size.height
+        for selector in ("#agent-message", "#agent-cancel", "#agent-close"):
+            region = modal.query_one(selector).region
+            assert region.height > 0, selector
+            assert region.bottom <= height, (selector, region, height)
+        meta = modal.query_one("#agent-meta", Static)
+        assert meta.region.height <= 4
+        meta_text = str(meta.render())
+        assert "Task: Task:" not in meta_text
+        assert "produce an accurate summary" in meta_text
+        view = modal.query_one("#agent-transcript", AgentTranscriptView)
+        assert view.region.height >= 3
+        await until(pilot, lambda: view.query("MarkdownTable"))  # not flattened
+        await settle(pilot)
+        view.scroll_home(animate=False, immediate=True)
+        await settle(pilot)
+        if view.max_scroll_y > 0:
+            await pilot.press("pagedown")
+            await settle(pilot)
+            assert view.scroll_y > 0
+            await pilot.press("pageup")
+            await settle(pilot)
+            assert view.scroll_y == 0
+        await pilot.press("ctrl+t")
+        await settle(pilot)
+        assert modal.has_class("-details")
+        details = str(modal.query_one("#agent-details-text", Static).render())
+        assert "step number 59" in details
+        assert modal.query_one("#agent-message").region.bottom <= height
+        modal.action_cancel()
+        await settle(pilot)
+
+
+async def test_agent_cards_update_live_while_running(sessions, manager):
+    """E2E bug 3: the card stayed at "0 tok" with a frozen timer and spinner."""
+    app = _Harness()
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "spawn")
+        row = {**_agent_row(), "usage": {}, "elapsed_s": 3.0}
+        manager.rows = [row]
+        await _push(pilot, panel, ev("agent_spawned", **row))
+        (card,) = _blocks(panel, AgentCard)
+        assert card.spinning
+        manager.rows = [{**row, "elapsed_s": 75.0}]
+        manager.events["a-re-abcdef"] = [
+            ev("usage", agent_id="a-re-abcdef", prompt=1200, completion=34),
+            ev("usage", agent_id="a-re-abcdef", prompt=1300, completion=10),
+        ]
+        panel._tick()
+        assert card.tokens == 2544
+        assert card.elapsed == 75.0
+        title = card.border_title
+        assert "1:15" in title
+        assert "2.5k tok" in title
+        await until(pilot, lambda: card.border_title != title)  # spins
+        manager.rows = [{**row, "status": "complete", "usage": {"prompt_tokens": 2600}}]
+        panel._tick()
+        assert card.status == "done"
+        assert not card.spinning
+        assert card.tokens == 2600
+
+
+def test_history_chips_show_summary_time_and_the_approval():
+    records = [
+        {"type": "msg", "role": "user", "kind": "user", "text": "go"},
+        {
+            "type": "msg",
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "function": {
+                        "name": "kill_process",
+                        "arguments": '{"package_name": "x"}',
+                    },
+                }
+            ],
+        },
+        {
+            "type": "approval",
+            "tool": "kill_process",
+            "decision": "no",
+            "by": "user",
+            "note": "use chrome",
+        },
+        {
+            "type": "msg",
+            "role": "tool",
+            "tool_call_id": "c1",
+            "status": "denied",
+            "error_code": "denied",
+            "summary": "denied: The analyst declined kill_process.",
+            "ms": 2200,
+        },
+        {
+            "type": "msg",
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "c2", "function": {"name": "list_flows", "arguments": "{}"}}
+            ],
+        },
+        {
+            "type": "msg",
+            "role": "tool",
+            "tool_call_id": "c2",
+            "status": "ok",
+            "result_id": "R4",
+            "summary": "12 rows",
+            "duration_ms": 400,
+        },
+        {
+            "type": "msg",
+            "role": "tool",
+            "tool_call_id": "c3",
+            "status": "ok",
+        },
+    ]
+    tools = [
+        w
+        for w, _ in chat_panel_module.history_blocks(records)
+        if isinstance(w, ToolBlock)
+    ]
+    killed, listed = tools
+    assert "declined by you · use chrome" in killed.decision.plain
+    assert killed.chip.plain == "└ ✗ denied · 2.2s"
+    assert listed.chip.plain == "└ ✓ R4 · 12 rows · 0.4s"
+    # Without timing in the record there is no made-up "0s".
+    bare = chat_panel_module.history_blocks(
+        [records[4], {**records[5], "summary": None, "duration_ms": None}]
+    )
+    assert [w for w, _ in bare if isinstance(w, ToolBlock)][0].chip.plain == "└ ✓ R4"
+
+
+def test_banner_wraps_with_a_hanging_indent():
+    from sandroid.ai.safety import get_ai_settings
+
+    settings = get_ai_settings(_ai())
+    lines = chat_panel_module.format_banner(settings, "ask", width=40).plain.split("\n")
+    assert lines[0].startswith("⚠ ")
+    assert all(line.startswith("  ") for line in lines[1:])
+    assert all(len(line) <= 40 for line in lines)
+    assert len(lines) > len(egress_banner_lines(settings, "ask"))  # it wrapped

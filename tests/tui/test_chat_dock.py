@@ -29,6 +29,12 @@ def _app():
     return SandroidTUI()
 
 
+@pytest.fixture(autouse=True)
+def _private_config_home(tmp_path, monkeypatch):
+    """Each test gets its own config dir (the UI-state file lives there)."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+
 @pytest.fixture
 def saved(monkeypatch):
     """Record ``tui.chat_dock`` writes instead of touching the config file."""
@@ -430,18 +436,50 @@ async def test_saved_size_is_used_and_chat_starts_closed(saved) -> None:
         await until(pilot, lambda: saved == [(0.3, False)])
 
 
-async def test_saved_size_really_reaches_the_config_file() -> None:
-    """Unmocked: the write lands in ``tui.chat_dock`` of the (test) config."""
-    from sandroid.config.loader import ConfigLoader
+async def test_saved_size_goes_to_the_ui_state_file_not_the_config(
+    tmp_path, monkeypatch
+) -> None:
+    """Unmocked: the size lands in ``tui_state.json`` (0600); a project
+    ``sandroid.toml`` with an API key is left byte-for-byte alone (it used to
+    become a dump of the whole merged config, key included).
+    """
+    import json
+    import stat
 
+    from sandroid.config.ui_state import ui_state_path
+
+    project = tmp_path / "project"
+    project.mkdir()
+    toml = project / "sandroid.toml"
+    original = '[ai]\napi_key = "sk-secret-123"\nmodel = "m"\n'
+    toml.write_text(original)
+    toml.chmod(0o644)
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("SANDROID_AI__API_KEY", "sk-env-456")
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         ms = await boot(app, pilot)
         await pilot.press("ctrl+y")
         await pilot.press("shift+down")
         await settle(pilot)
-        await until(pilot, lambda: app.sandroid_config.tui.chat_dock.ratio == 0.3)
-        assert ConfigLoader().load().tui.chat_dock.ratio == 0.3
+        path = ui_state_path()
+        await until(pilot, path.exists)
+        await until(
+            pilot,
+            lambda: json.loads(path.read_text()).get("chat_dock", {}).get("ratio")
+            == 0.3,
+        )
+        assert ms.chat_ratio == 0.3
+    assert toml.read_text() == original
+    assert stat.S_IMODE(toml.stat().st_mode) == 0o644
+    state = path.read_text()
+    assert "sk-" not in state
+    assert json.loads(state) == {"chat_dock": {"ratio": 0.3, "maximized": False}}
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    # The next run picks it up.
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
         assert ms.chat_ratio == 0.3
 
 
@@ -473,3 +511,120 @@ async def test_dock_frame_follows_every_theme() -> None:
             )
             await pilot.press("ctrl+y")
             await settle(pilot)
+
+
+# --------------------------------------------------------------------------
+# approvals arriving while the analyst works elsewhere
+# --------------------------------------------------------------------------
+
+
+def _approval(tmp_path, monkeypatch):
+    """A pending approval and the event that announces it."""
+    import time
+
+    import sandroid.ai.tool_permissions as perms
+    from sandroid.ai.loop import AgentEvent
+    from sandroid.ai.tool_permissions import ToolPermissionStore
+    from sandroid.ai.tools.registry import RiskTier
+    from sandroid.tui.widgets.chat_panel import ChatPanel
+
+    monkeypatch.setattr(
+        perms, "_tool_permission_store", ToolPermissionStore(path=tmp_path / "p.toml")
+    )
+    monkeypatch.setattr(ChatPanel, "APPROVAL_INPUT_GRACE_S", 0.0)
+    pending = perms.get_approval_broker().submit(
+        agent_id="a-re-1",
+        agent_label="researcher a-re-1",
+        tool="kill_app",
+        args={"package": "com.x"},
+        risk=RiskTier.CONSEQUENTIAL,
+    )
+    event = AgentEvent(
+        "approval_request",
+        "a-re-1",
+        None,
+        "t-1",
+        "",
+        0,
+        time.time(),
+        {"request_id": pending.request.request_id, "tool": "kill_app"},
+    )
+    return pending, event
+
+
+async def test_approval_in_a_closed_dock_shows_without_stealing_focus(
+    tmp_path, monkeypatch
+) -> None:
+    """Verifier repro: the card focused itself in the hidden dock and the
+    next Enter (meant for the lens) approved it.
+    """
+    pending, event = _approval(tmp_path, monkeypatch)
+    app = _app()
+    toasts: list[str] = []
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        monkeypatch.setattr(app, "notify", lambda message, **kw: toasts.append(message))
+        ms._chat_max_pref = True  # last chosen "max": must still open split
+        ms.lens_widget().focus()
+        await settle(pilot)
+        lens_focus = app.focused
+        assert not ms.chat_is_open
+        panel = ms.query_one("#chat-panel")
+        panel._sink(event)
+        await until(pilot, lambda: panel.pending_prompt() is not None)
+        await settle(pilot)
+        prompt = panel.pending_prompt()
+        assert ms.chat_is_open  # opened, so the card is visible
+        assert ms.chat_mode == "split"  # the lens with the focus stays visible
+        assert app.focused is lens_focus
+        assert not ms.chat_has_focus
+        assert toasts
+        assert "Ctrl+Y" in toasts[0]
+        ticker = ms.query_one("#log-ticker")
+        assert ticker.attention
+        assert "approval" in ticker.attention
+        await pilot.press("enter")
+        await settle(pilot)
+        assert not pending.done
+        # Ctrl+Y goes to the card (not just the input); then 1 = Yes.
+        await pilot.press("ctrl+y")
+        await settle(pilot)
+        assert prompt.has_focus
+        await pilot.press("1")
+        await until(pilot, lambda: pending.done)
+        assert pending.decision.choice == "once"
+        await until(pilot, lambda: not ticker.attention)
+
+
+async def test_approval_while_typing_in_the_chat_swallows_stray_letters(
+    tmp_path, monkeypatch
+) -> None:
+    """Verifier repro: the card took the focus from the input and the rest of
+    the typed word ran App hotkeys (``s`` = screenshot).
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    pending, event = _approval(tmp_path, monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        SandroidTUI, "action_screenshot", lambda self: calls.append("screenshot")
+    )
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        await pilot.press("ctrl+y")
+        await settle(pilot)
+        assert app.focused.id == "chat-input"
+        panel = ms.query_one("#chat-panel")
+        panel._sink(event)
+        await until(pilot, lambda: panel.pending_prompt() is not None)
+        prompt = panel.pending_prompt()
+        await until(pilot, lambda: prompt.has_focus)
+        await pilot.press("s", "a", "q")
+        await settle(pilot)
+        assert calls == []
+        assert not pending.done
+        assert ms.chat_is_open
+        await pilot.press("escape")  # Esc = No
+        await until(pilot, lambda: pending.done)
+        assert pending.decision.choice == "no"

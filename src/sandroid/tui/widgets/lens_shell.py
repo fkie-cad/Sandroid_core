@@ -1124,11 +1124,18 @@ class LogTicker(Horizontal):
         color: #5b6479;
         padding: 0 0 0 2;
     }
+    LogTicker #log-ticker-hint.-attention {
+        color: #f0b429;
+        text-style: bold;
+    }
     """
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.last_line = ""
+        self._drawer_open = False
+        #: A badge shown before the hint (e.g. "⚠ approval needed · ^Y").
+        self.attention: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("", id="log-ticker-line")
@@ -1159,10 +1166,22 @@ class LogTicker(Horizontal):
             pass
 
     def set_drawer_open(self, is_open: bool) -> None:
+        self._drawer_open = is_open
+        self._sync_hint()
+
+    def set_attention(self, text: str | None) -> None:
+        """Show ``text`` as a badge before the key hint (None clears it)."""
+        self.attention = text or None
+        self._sync_hint()
+
+    def _sync_hint(self) -> None:
+        hint = self.HINT_OPEN if self._drawer_open else self.HINT
+        if self.attention:
+            hint = f"{self.attention} · {hint}"
         try:
-            self.query_one("#log-ticker-hint", Static).update(
-                self.HINT_OPEN if is_open else self.HINT
-            )
+            label = self.query_one("#log-ticker-hint", Static)
+            label.update(Content(hint))
+            label.set_class(bool(self.attention), "-attention")
         except Exception:
             pass
 

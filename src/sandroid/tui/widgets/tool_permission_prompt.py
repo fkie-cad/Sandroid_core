@@ -11,15 +11,20 @@ description and an arguments preview, then three options:
 Keys: ``1``-``3`` pick an option, ``↑``/``↓`` + ``Enter`` select, ``Esc``
 answers No. Keyboard input is ignored for a short grace period after the
 card appears, so keys typed into the chat input a moment earlier cannot
-approve anything. Mouse clicks work at once.
+approve anything. Mouse clicks work at once. Other printable keys are
+swallowed while the card has the focus, so a typed word never reaches the
+App's one-letter hotkeys.
 
-Two callback contracts:
+The card takes the focus on mount only when the focus already is inside its
+parent (the chat panel) or nowhere, and only while it is visible: an approval
+arriving while the analyst works in a lens must not capture the next Enter.
+The answer goes to ``on_decision(Decision)`` (choice ``once``/``always``/
+``no`` plus the note).
 
-* ``on_decision(Decision)`` (new runtime): choice ``once``/``always``/``no``
-  plus the note.
-* ``on_choice(str)`` (current chat panel, kept until the WP6 cut-over):
-  ``"once"``/``"always"``/``"never"``. In this legacy-only mode "No" answers
-  at once, without the note input, because the old loop cannot carry a note.
+Every model-controlled string (tool name, description, arguments, the rule)
+is put into :class:`~textual.content.Content` as plain text, never parsed as
+markup: Textual 8's markup parser does not honour ``rich.markup.escape``
+(``[Black on black]`` still hides text, ``[A-Z]`` disappears).
 
 Inside the real app the App's priority ``escape`` binding fires before this
 widget's own one; the screen's Esc handler should call
@@ -28,15 +33,16 @@ widget's own one; the screen's Esc handler should call
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from typing import TYPE_CHECKING, Any
 
-from rich.markup import escape
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
-from textual.widgets import Button, Input, Label, Static
+from textual.message import Message
+from textual.widgets import Input, Label, Static
 
 from sandroid.ai.tool_permissions import (
     ApprovalRequest,
@@ -50,6 +56,7 @@ from sandroid.ai.tools.registry import RiskTier, ToolSpec
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
+    from textual import events
     from textual.app import ComposeResult
 
 #: Truncation ceiling for the args-preview JSON blob.
@@ -121,15 +128,92 @@ _TIER_LABELS = {
     RiskTier.NOT_EXPOSED: "not exposed",
 }
 
-#: Legacy ``on_choice`` strings per new choice.
-_LEGACY_CHOICE = {"once": "once", "always": "always", "no": "never"}
+#: Option widget id per choice (kept from the Button era).
+_OPTION_IDS = {"once": "btn-once", "always": "btn-always", "no": "btn-never"}
+
+#: Hint line, normally and while the note input is open.
+HINT = "1-3 or ↑↓ Enter · Esc = No"
+HINT_NOTE = "Enter sends No with this note · empty = just No · Esc = No"
+
+
+def approval_title(agent_label: str, tool: str) -> Content:
+    """``⚠ <agent> wants to run <Tool>`` (§6)."""
+    return Content.assemble(
+        ("⚠ ", "bold $lens-warn"),
+        (agent_label, "bold"),
+        " wants to run ",
+        (humanize_tool_name(tool), "bold"),
+    )
+
+
+def approval_message(
+    tool: str,
+    description: str,
+    arguments: Mapping[str, Any],
+    note: str | None = None,
+) -> Content:
+    """Tool, description, args preview (or the TRUNCATED flag) and a note.
+
+    Plain text only: nothing here is parsed as markup.
+    """
+    args_full = _format_args_full(arguments)
+    truncated = (
+        len(json.dumps(dict(sorted(arguments.items())), default=str))
+        > _ARGS_PREVIEW_MAX_LEN
+    )
+    parts: list[Any] = [(tool, "bold")]
+    description = _truncate(description or "", _DESCRIPTION_MAX_LEN)
+    if description:
+        parts += [" — ", description]
+    parts.append("\n")
+    if truncated:
+        parts.append(
+            (
+                "args TRUNCATED in this line — review the FULL arguments "
+                f"below ({len(args_full)} chars)",
+                "bold $lens-warn",
+            )
+        )
+    else:
+        parts += [("args: ", "$lens-dim"), _format_args_preview(arguments)]
+    if note:
+        parts += ["\n", (note, "bold")]
+    return Content.assemble(*parts)
+
+
+class ApprovalOption(Static):
+    """One option row of the card (not a Button: the themes' ``Button``
+    rules painted every option in the accent colour).
+    """
+
+    class Pressed(Message):
+        """The option was clicked."""
+
+        def __init__(self, option: ApprovalOption) -> None:
+            super().__init__()
+            self.option = option
+
+    def __init__(self, label: str, choice: str, **kwargs: Any) -> None:
+        super().__init__("", **kwargs)
+        self.label = label
+        self.choice = choice
+        self.can_focus = False
+
+    def render(self) -> Content:
+        selected = self.has_class("-highlighted")
+        marker = ("› ", "bold") if selected else "  "
+        return Content.assemble(marker, self.label)
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.post_message(self.Pressed(self))
 
 
 class ToolPermissionPrompt(Vertical, can_focus=True):
     """Approval card for one pending tool call (see the module docstring).
 
-    Option buttons keep the ids ``btn-once``, ``btn-always`` and
-    ``btn-never``; the note input is ``#tool-permission-note``.
+    Option rows keep the ids ``btn-once``, ``btn-always`` and ``btn-never``;
+    the note input is ``#tool-permission-note``.
     """
 
     BINDINGS = [
@@ -164,7 +248,6 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
     ToolPermissionPrompt .tool-permission-title {
         width: 1fr;
         color: $lens-title;
-        text-style: bold;
     }
     ToolPermissionPrompt .tool-permission-tier {
         width: auto;
@@ -192,37 +275,38 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
         height: auto;
         margin-top: 1;
     }
-    ToolPermissionPrompt Button.tool-permission-option {
+    ToolPermissionPrompt ApprovalOption {
         width: 1fr;
         height: 1;
-        min-width: 0;
-        margin: 0;
         padding: 0 1;
-        border: none;
-        text-align: left;
-        content-align: left middle;
-        text-style: none;
         background: $lens-panel;
         color: $lens-text;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
-    ToolPermissionPrompt Button.tool-permission-option:hover {
+    ToolPermissionPrompt ApprovalOption:hover {
         background: $lens-action-hover-bg;
         color: $lens-action-hover-text;
     }
-    ToolPermissionPrompt Button.tool-permission-option.-highlighted {
+    ToolPermissionPrompt ApprovalOption.-highlighted {
         background: $lens-cursor;
-        color: $lens-text;
         text-style: bold;
     }
-    ToolPermissionPrompt:focus-within Button.tool-permission-option.-highlighted {
+    ToolPermissionPrompt:focus ApprovalOption.-highlighted {
         background: $lens-cursor-focus;
+    }
+    ToolPermissionPrompt.-noting ApprovalOption.-highlighted {
+        background: $lens-panel;
+        color: $chat-wait;
     }
     ToolPermissionPrompt #tool-permission-note {
         margin-top: 1;
+        border: tall $chat-wait;
         background: $lens-input-bg;
         color: $lens-input-text;
     }
     ToolPermissionPrompt #tool-permission-note:focus {
+        border: tall $lens-accent;
         background: $lens-input-focus-bg;
     }
     ToolPermissionPrompt .-hidden {
@@ -232,20 +316,22 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
         width: 1fr;
         color: $lens-dim;
     }
+    ToolPermissionPrompt.-noting .tool-permission-hint {
+        color: $chat-wait;
+    }
     """
 
     def __init__(
         self,
         spec: ToolSpec | None = None,
         arguments: Mapping[str, Any] | None = None,
-        on_choice: Callable[[str], None] | None = None,
         *,
         request: ApprovalRequest | None = None,
         on_decision: Callable[[Decision], None] | None = None,
         agent_label: str | None = None,
         suggested_rule: str | None = None,
         permission_key: str | None = None,
-        ask_note: bool | None = None,
+        ask_note: bool = True,
         auto_focus: bool = True,
         input_grace_s: float = _INPUT_GRACE_S,
         name: str | None = None,
@@ -255,20 +341,19 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
         """Build the card.
 
         Args:
-            spec: The tool spec (legacy path; optional with ``request``).
+            spec: The tool spec (optional with ``request``).
             arguments: The call's arguments (defaults to ``request.args``).
-            on_choice: Legacy callback, ``"once"``/``"always"``/``"never"``.
             request: The broker request; supplies tool, args, risk, agent
                 label, description and suggested rule.
-            on_decision: New callback receiving a :class:`Decision`.
+            on_decision: Receives the :class:`Decision`.
             agent_label: Who asks (overrides ``request.agent_label``).
             suggested_rule: Rule for option 2 (overrides the request's).
                 Without either, it is derived with
                 :func:`~sandroid.ai.tool_permissions.suggest_rule`.
             permission_key: Used for that derivation only.
-            ask_note: Whether "No" reveals the note input. Defaults to True
-                when ``on_decision`` is given, else False.
-            auto_focus: Focus the card on mount.
+            ask_note: Whether "No" reveals the note input first.
+            auto_focus: May take the focus on mount (see the module
+                docstring for when it actually does).
             input_grace_s: Keyboard grace period after mounting.
             name: Widget name.
             id: Widget ID.
@@ -284,7 +369,6 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
             if arguments is not None
             else (dict(request.args) if request is not None else {})
         )
-        self._on_choice = on_choice
         self._on_decision = on_decision
         self._tool = spec.name if spec is not None else request.tool  # type: ignore[union-attr]
         self._risk = spec.risk if spec is not None else request.risk  # type: ignore[union-attr]
@@ -306,7 +390,7 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
                 can_remember_choice=spec.can_remember_choice,
             )
         self._suggested_rule = suggested_rule
-        self._ask_note = (on_decision is not None) if ask_note is None else ask_note
+        self._ask_note = ask_note
         self._auto_focus = auto_focus
         self._input_grace_s = input_grace_s
         self._mounted_at = 0.0
@@ -322,6 +406,19 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
     @property
     def decided(self) -> bool:
         return self._decided
+
+    @property
+    def tool(self) -> str:
+        return self._tool
+
+    @property
+    def agent_label(self) -> str:
+        return self._agent_label
+
+    @property
+    def noting(self) -> bool:
+        """The note input is open (option 3 was chosen once)."""
+        return self.has_class("-noting")
 
     def _choices(self) -> list[str]:
         choices = ["once"]
@@ -343,35 +440,24 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
 
     def compose(self) -> ComposeResult:
         """Build the header, details, options and the (hidden) note input."""
-        args_preview = _format_args_preview(self._arguments)
         args_full = _format_args_full(self._arguments)
         truncated = (
             len(json.dumps(dict(sorted(self._arguments.items())), default=str))
             > _ARGS_PREVIEW_MAX_LEN
         )
         tier = _TIER_LABELS.get(self._risk, str(self._risk))
-        headline = f"{self._agent_label} wants to run {humanize_tool_name(self._tool)}"
-        # Everything model-controlled is markup-escaped: a ``[/]`` or
-        # ``[#000000 on #000000]`` inside an argument must not hide text.
-        if truncated:
-            args_text = (
-                "args TRUNCATED in this line — review the FULL arguments "
-                f"below ({len(args_full)} chars)"
-            )
-        else:
-            args_text = f"args: {escape(args_preview)}"
-        description = _truncate(self._description, _DESCRIPTION_MAX_LEN)
-        message = f"[bold]{escape(self._tool)}[/]"
-        if description:
-            message += f" — {escape(description)}"
-        message += f"\n{args_text}"
-        note = _spotlight_default_note(self._spec, self._arguments)
-        if note:
-            message += f"\n[b]{escape(note)}[/b]"
-
+        message = approval_message(
+            self._tool,
+            self._description,
+            self._arguments,
+            _spotlight_default_note(self._spec, self._arguments),
+        )
         with Vertical(classes="tool-permission-body"):
             with Horizontal(classes="tool-permission-head"):
-                yield Label(Content(headline), classes="tool-permission-title")
+                yield Label(
+                    approval_title(self._agent_label, self._tool),
+                    classes="tool-permission-title",
+                )
                 yield Label(
                     Content(tier),
                     classes=f"tool-permission-tier -{tier.replace(' ', '-')}",
@@ -379,35 +465,41 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
             yield Label(message, classes="tool-permission-message")
             if truncated:
                 with VerticalScroll(classes="tool-permission-args"):
-                    yield Static(args_full, markup=False, id="tool-permission-args")
-        ids = {"once": "btn-once", "always": "btn-always", "no": "btn-never"}
+                    yield Static(Content(args_full), id="tool-permission-args")
         with Vertical(classes="tool-permission-options"):
             for index, choice in enumerate(self._choices()):
-                button = Button(
-                    Content(self._option_label(index + 1, choice)),
-                    id=ids[choice],
-                    classes="tool-permission-option"
-                    + (" -highlighted" if index == 0 else ""),
-                    compact=True,
+                yield ApprovalOption(
+                    self._option_label(index + 1, choice),
+                    choice,
+                    id=_OPTION_IDS[choice],
+                    classes="-highlighted" if index == 0 else None,
                 )
-                button.can_focus = False
-                yield button
         yield Input(
             placeholder="Tell it what to do instead (Enter sends, empty = just No)",
             id="tool-permission-note",
             classes="-hidden",
         )
-        yield Label(
-            Content("1-3 or ↑↓ Enter · Esc = No"), classes="tool-permission-hint"
-        )
+        yield Label(Content(HINT), classes="tool-permission-hint")
 
     def on_mount(self) -> None:
         self._mounted_at = time.monotonic()
         if self._auto_focus:
             self.call_after_refresh(self._focus_self)
 
+    def may_take_focus(self) -> bool:
+        """Visible, and the focus is nowhere or already inside the parent."""
+        if self._decided or not self.is_attached:
+            return False
+        if not all(node.display for node in self.ancestors_with_self):
+            return False
+        focused = self.screen.focused
+        if focused is None:
+            return True
+        parent = self.parent
+        return parent is not None and parent in focused.ancestors_with_self
+
     def _focus_self(self) -> None:
-        if not self._decided and self.is_attached:
+        if self.may_take_focus():
             self.focus()
 
     # -- keyboard -------------------------------------------------------------
@@ -415,16 +507,29 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
     def _in_grace(self) -> bool:
         return time.monotonic() - self._mounted_at < self._input_grace_s
 
-    def _buttons(self) -> list[Button]:
-        return list(self.query("Button.tool-permission-option").results(Button))
+    def _options(self) -> list[ApprovalOption]:
+        return list(self.query(ApprovalOption).results(ApprovalOption))
 
     def _set_highlight(self, index: int) -> None:
-        buttons = self._buttons()
-        if not buttons:
+        options = self._options()
+        if not options:
             return
-        self._highlight = max(0, min(index, len(buttons) - 1))
-        for i, button in enumerate(buttons):
-            button.set_class(i == self._highlight, "-highlighted")
+        self._highlight = max(0, min(index, len(options) - 1))
+        for i, option in enumerate(options):
+            option.set_class(i == self._highlight, "-highlighted")
+
+    def on_key(self, event: events.Key) -> None:
+        """Swallow stray printable keys while the card itself has the focus.
+
+        ``1``-``3`` stay bindings; anything else typed here (e.g. the rest of
+        a word meant for the chat input) must not reach the App's one-letter
+        hotkeys. The note input handles its own typing.
+        """
+        if self._decided or self.screen.focused is not self:
+            return
+        if event.is_printable and event.character not in ("1", "2", "3"):
+            event.stop()
+            event.prevent_default()
 
     def action_move(self, delta: int) -> None:
         """Move the highlighted option."""
@@ -455,14 +560,9 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
 
     # -- mouse / note -----------------------------------------------------------
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Map the clicked option's ID to its choice."""
-        choice = {"btn-once": "once", "btn-always": "always", "btn-never": "no"}.get(
-            event.button.id or ""
-        )
-        if choice is None:
-            return
+    def on_approval_option_pressed(self, event: ApprovalOption.Pressed) -> None:
         event.stop()
+        choice = event.option.choice
         self._set_highlight(self._choices().index(choice))
         self._choose(choice)
 
@@ -488,6 +588,11 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
             note = self.query_one("#tool-permission-note", Input)
             if note.has_class("-hidden"):
                 note.remove_class("-hidden")
+                self.add_class("-noting")
+                with contextlib.suppress(Exception):
+                    self.query_one(".tool-permission-hint", Label).update(
+                        Content(HINT_NOTE)
+                    )
                 note.focus()
                 return
             self._finish("no", note.value)
@@ -502,5 +607,3 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
         if self._on_decision is not None:
             remembered = self._suggested_rule if choice == "always" else None
             self._on_decision(Decision(choice, note=note, remembered_rule=remembered))  # type: ignore[arg-type]
-        if self._on_choice is not None:
-            self._on_choice(_LEGACY_CHOICE[choice])

@@ -1207,10 +1207,14 @@ class MainScreen(Screen):
             return "small window · ^Y close"
         return f"{round(self._chat_ratio * 100)}% · ⇧↑↓ size · ^Y close"
 
-    def open_chat(self, focus: bool = True) -> None:
-        """Open the chat dock (max if that was the last choice)."""
+    def open_chat(self, focus: bool = True, *, split: bool = False) -> None:
+        """Open the chat dock (max if that was the last choice).
+
+        ``split`` opens it split even then: used when the chat opens by
+        itself (an approval) and the lens must stay visible with its focus.
+        """
         if not self.chat_is_open:
-            self._chat_mode = "max" if self._chat_max_pref else "split"
+            self._chat_mode = "max" if self._chat_max_pref and not split else "split"
             self._apply_chat_layout()
             self.refresh_bindings()
             panel = self._chat_panel()
@@ -1279,12 +1283,22 @@ class MainScreen(Screen):
             return None
 
     def _focus_chat_input(self) -> None:
-        widget = self._chat_input()
+        """Focus the chat: a waiting approval card first, else the input."""
+        panel = self._chat_panel()
+        target = getattr(panel, "focus_target", None)
+        widget = target() if callable(target) else self._chat_input()
         if widget is not None:
             try:
                 widget.focus()
             except Exception:
                 pass
+
+    def set_chat_attention(self, text: str | None) -> None:
+        """Badge outside the dock (the ticker hint), e.g. an approval waits."""
+        try:
+            self.query_one("#log-ticker", LogTicker).set_attention(text)
+        except Exception:
+            pass
 
     def _scroll_chat_home(self) -> None:
         """Scroll the transcript to its top (the egress banner)."""
@@ -1358,16 +1372,30 @@ class MainScreen(Screen):
         self._persist_chat_dock()
 
     def _load_chat_dock_prefs(self) -> None:
-        """Read ``tui.chat_dock`` (split share + "open maximized")."""
+        """Read the dock size: the remembered UI state, else ``tui.chat_dock``.
+
+        The size the user last chose lives in the UI-state file
+        (:mod:`sandroid.config.ui_state`); ``tui.chat_dock`` in the config
+        is only the default for a first run.
+        """
+        prefs: object = None
         try:
-            prefs = self.app.sandroid_config.tui.chat_dock
+            from sandroid.config.ui_state import load_ui_state
+
+            prefs = load_ui_state().get("chat_dock")
         except Exception:
-            return
+            logger.debug("reading the UI state failed", exc_info=True)
+        if not isinstance(prefs, dict):
+            try:
+                cfg = self.app.sandroid_config.tui.chat_dock
+                prefs = {"ratio": cfg.ratio, "maximized": cfg.maximized}
+            except Exception:
+                return
         try:
-            self._chat_ratio = snap_chat_ratio(float(prefs.ratio))
-            self._chat_max_pref = bool(prefs.maximized)
+            self._chat_ratio = snap_chat_ratio(float(prefs.get("ratio", 0.5)))
+            self._chat_max_pref = bool(prefs.get("maximized", False))
         except Exception:
-            logger.debug("bad tui.chat_dock", exc_info=True)
+            logger.debug("bad chat dock state", exc_info=True)
 
     def _persist_chat_dock(self) -> None:
         """Remember the dock size (off the UI thread)."""
@@ -1381,14 +1409,15 @@ class MainScreen(Screen):
         )
 
     def _write_chat_dock_prefs(self, ratio: float, maximized: bool) -> None:
-        """Save ``tui.chat_dock`` (runs on a worker thread)."""
-        try:
-            from sandroid.config.loader import ConfigLoader
+        """Save the dock size to the UI-state file (runs on a worker thread).
 
-            updated, _ = ConfigLoader().load_and_update_section(
-                "tui", {"chat_dock": {"ratio": ratio, "maximized": maximized}}
-            )
-            self.app._sandroid_config = updated
+        Never through the config loader: that path rewrote a config file
+        with the whole merged configuration, API key included.
+        """
+        try:
+            from sandroid.config.ui_state import update_ui_state
+
+            update_ui_state("chat_dock", {"ratio": ratio, "maximized": maximized})
         except Exception as exc:
             logger.warning(f"Could not save the chat dock size: {exc}")
 

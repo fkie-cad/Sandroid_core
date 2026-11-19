@@ -1,7 +1,9 @@
 """Configuration loader for Sandroid with support for multiple formats and XDG directories."""
 
+import contextlib
 import json
 import os
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,41 @@ from platformdirs import site_config_dir, user_config_dir
 from pydantic import ValidationError
 
 from .schema import SandroidConfig
+
+
+def atomic_write_bytes(
+    path: str | Path,
+    data: bytes,
+    *,
+    new_mode: int = 0o600,
+    mode: int | None = None,
+) -> None:
+    """Replace ``path`` with ``data`` atomically (temp file + ``os.replace``).
+
+    An existing file keeps its permission bits; a new file gets ``new_mode``
+    (owner-only by default: config files may hold credentials). ``mode``
+    forces the bits either way. The parent directory is created when
+    missing.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if mode is None:
+        try:
+            mode = path.stat().st_mode & 0o7777
+        except FileNotFoundError:
+            mode = new_mode
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        Path(tmp).chmod(mode)
+        Path(tmp).replace(path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 class ConfigLoader:
@@ -150,16 +187,15 @@ class ConfigLoader:
                 current[parts[-1]] = value
 
         fmt = self._suffix_to_format(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
         if fmt == "toml":
-            with open(path, "wb") as f:
-                tomli_w.dump(data, f)
+            payload = tomli_w.dumps(data).encode("utf-8")
         elif fmt == "yaml":
-            with open(path, "w", encoding="utf-8") as f:
-                yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+            payload = yaml.safe_dump(
+                data, default_flow_style=False, sort_keys=False
+            ).encode("utf-8")
         else:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, default=str)
+            payload = json.dumps(data, indent=2, default=str).encode("utf-8")
+        atomic_write_bytes(path, payload)
         return path
 
     def _load_toml(self, path: Path) -> dict[str, Any]:
@@ -464,22 +500,68 @@ class ConfigLoader:
         target = self.resolve_save_target(config_path)
         return self.save_config(config, target, self._suffix_to_format(target))
 
+    #: ``(section, key)`` pairs that are never written by
+    #: :meth:`load_and_update_section`; ``"*"`` covers a whole section.
+    _NEVER_PERSISTED = frozenset({("ai", "api_key"), ("credentials", "*")})
+
+    @classmethod
+    def _is_secret_key(cls, section: str, key: str) -> bool:
+        return (section, key) in cls._NEVER_PERSISTED or (
+            section,
+            "*",
+        ) in cls._NEVER_PERSISTED
+
     def load_and_update_section(
         self, section: str, updates: dict[str, Any]
     ) -> tuple[SandroidConfig, Path]:
-        """Load config, update a section dict, validate, and save."""
+        """Validate ``section`` updates and write only those keys to disk.
+
+        The updates are validated against the whole merged configuration
+        (files, environment), but only ``section.<key>`` for each key in
+        ``updates`` is written into the save target (see
+        :meth:`resolve_save_target`): the file keeps its own content and
+        permissions, and nothing else -- no defaults, no other sections, no
+        values that came from environment variables or other files -- is
+        copied into it. Secrets (``ai.api_key``, ``credentials.*``) are
+        never written this way.
+
+        Returns:
+            ``(updated merged config, path written)``.
+
+        Raises:
+            ValueError: A secret key, a key the section does not have, or an
+                invalid value. Nothing is written in that case.
+        """
+        for key in updates:
+            if self._is_secret_key(section, key):
+                raise ValueError(f"refusing to persist the secret {section}.{key}")
         try:
             current_config = self.load()
         except FileNotFoundError:
             current_config = SandroidConfig()
 
+        section_model = getattr(current_config, section, None)
+        if section not in SandroidConfig.model_fields or not hasattr(
+            section_model, "model_fields"
+        ):
+            raise ValueError(f"unknown config section {section!r}")
+        unknown = [
+            key for key in updates if key not in type(section_model).model_fields
+        ]
+        if unknown:
+            raise ValueError(f"unknown {section} keys: {', '.join(unknown)}")
         config_dict = current_config.model_dump()
-        if section not in config_dict:
-            config_dict[section] = {}
         config_dict[section].update(updates)
 
         updated_config = SandroidConfig(**config_dict)
-        saved_path = self.detect_and_save(updated_config)
+        section_model = getattr(updated_config, section)
+        serialised = {
+            f"{section}.{key}": section_model.model_dump(
+                mode="json", include={key}
+            ).get(key)
+            for key in updates
+        }
+        saved_path = self.update_file_keys(self.resolve_save_target(), serialised)
         return updated_config, saved_path
 
     def create_default_config(self, config_file: str | Path | None = None) -> Path:

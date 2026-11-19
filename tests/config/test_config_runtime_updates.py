@@ -372,3 +372,83 @@ def test_cli_results_copied_to_full_f_path(xdg, tmp_path):
     # A bare file name keeps the old behaviour: only the session copy.
     assert _deliver_to_requested_path(written, Path("out.json")) == written
     assert not (work / "out.json").exists()
+
+
+# -- load_and_update_section: only the given keys, never secrets ---------------
+
+
+def test_section_update_writes_only_its_keys_and_keeps_the_file(xdg, monkeypatch):
+    """A project ``sandroid.toml`` holding an API key must not become a dump
+    of the whole merged config (defaults, env secrets, other sections).
+    """
+    import stat
+
+    _user_dir, work = xdg
+    project = work / "sandroid.toml"
+    project.write_text('# my project\n[ai]\napi_key = "sk-file-key"\nmodel = "m"\n')
+    project.chmod(0o640)
+    monkeypatch.setenv("SANDROID_CREDENTIALS__CUSTOM_API_KEYS__X", "sk-env-cred")
+    monkeypatch.setenv("SANDROID_AI__BASE_URL", "https://env.example/v1")
+
+    updated, path = ConfigLoader().load_and_update_section(
+        "tui", {"snapshot_save_mode": "overwrite"}
+    )
+
+    assert path == project
+    assert updated.tui.snapshot_save_mode == "overwrite"
+    data = _read_toml(project)
+    assert data == {
+        "ai": {"api_key": "sk-file-key", "model": "m"},
+        "tui": {"snapshot_save_mode": "overwrite"},
+    }
+    text = project.read_text()
+    assert "sk-env-cred" not in text
+    assert "env.example" not in text
+    assert stat.S_IMODE(project.stat().st_mode) == 0o640
+
+
+def test_section_update_never_writes_secrets(xdg):
+    _user_dir, _work = xdg
+    loader = ConfigLoader()
+    with pytest.raises(ValueError, match="secret"):
+        loader.load_and_update_section("ai", {"api_key": "sk-x"})
+    with pytest.raises(ValueError, match="secret"):
+        loader.load_and_update_section("credentials", {"custom_api_keys": {"a": "b"}})
+    with pytest.raises(ValueError, match="unknown"):
+        loader.load_and_update_section("tui", {"no_such_key": 1})
+    assert not _user_dir.exists() or not any(_user_dir.iterdir())
+
+
+def test_section_update_new_user_file_is_private(xdg):
+    import stat
+
+    user_dir, _work = xdg
+    _cfg, path = ConfigLoader().load_and_update_section(
+        "tui", {"snapshot_slots": {"avd": {"1": "tag"}}}
+    )
+    assert path == user_dir / "sandroid.toml"
+    assert _read_toml(path) == {"tui": {"snapshot_slots": {"avd": {"1": "tag"}}}}
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_ui_state_file_is_private_atomic_and_separate(xdg):
+    import stat
+
+    from sandroid.config.ui_state import load_ui_state, ui_state_path, update_ui_state
+
+    user_dir, _work = xdg
+    path = update_ui_state("chat_dock", {"ratio": 0.7, "maximized": True})
+    assert path == ui_state_path() == user_dir / "tui_state.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    update_ui_state("other", 1)
+    assert load_ui_state() == {
+        "chat_dock": {"ratio": 0.7, "maximized": True},
+        "other": 1,
+    }
+    update_ui_state("other", None)
+    assert load_ui_state() == {"chat_dock": {"ratio": 0.7, "maximized": True}}
+    assert [p.name for p in user_dir.iterdir()] == ["tui_state.json"]  # no temp left
+    # Never discovered as a config file.
+    assert path not in ConfigLoader()._config_files
+    path.write_text("not json")
+    assert load_ui_state() == {}

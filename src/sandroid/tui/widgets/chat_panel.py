@@ -76,6 +76,7 @@ from sandroid.ai.tool_permissions import (
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
 from sandroid.tui.widgets.chat_view import (
     AGENT_STATUS,
+    SPINNER,
     AgentCard,
     BudgetNotice,
     ChatHeader,
@@ -101,6 +102,7 @@ from sandroid.tui.widgets.tool_permission_prompt import ToolPermissionPrompt
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
+    from textual import events
     from textual.app import ComposeResult
 
     from sandroid.ai.loop import AgentEvent
@@ -225,8 +227,8 @@ def egress_banner_lines(settings: Any, mode: str) -> list[str]:
     return lines
 
 
-def format_banner(settings: Any, mode: str) -> Content:
-    """The banner at the top of the transcript (theme variables only)."""
+def banner_lines(settings: Any, mode: str) -> list[tuple[str, str]]:
+    """The banner's ``(text, style)`` lines (theme variables only)."""
     lines = egress_banner_lines(settings, mode)
     if not settings.is_configured:
         body = "$chat-muted"
@@ -234,11 +236,55 @@ def format_banner(settings: Any, mode: str) -> Content:
         body = "$lens-warn"
     else:
         body = "$lens-bad"
-    parts: list[Any] = [("⚠ " + lines[0], "bold $lens-warn")]
+    out = [(lines[0], "bold $lens-warn")]
     for line in lines[1:]:
-        style = "bold $lens-bad" if line.startswith("Approval mode") else body
-        parts += ["\n", ("  " + line, style)]
-    return Content.assemble(*parts)
+        out.append(
+            (line, "bold $lens-bad" if line.startswith("Approval mode") else body)
+        )
+    return out
+
+
+def format_banner(settings: Any, mode: str, width: int | None = None) -> Content:
+    """The banner at the top of the transcript.
+
+    ``⚠`` hangs in the first two columns: every line, and every wrapped
+    continuation of a line, starts in column 3. With ``width`` the lines are
+    wrapped here (the hanging indent); without, they are left long.
+    """
+    out: list[Content] = []
+    for index, (text, style) in enumerate(banner_lines(settings, mode)):
+        lead = Content.styled("⚠ ", "bold $lens-warn") if index == 0 else Content("  ")
+        body = Content.styled(text, style)
+        chunks = body.wrap(max(8, width - 2)) if width else [body]
+        for n, chunk in enumerate(chunks):
+            out.append(Content.assemble(lead if n == 0 else Content("  "), chunk))
+    return Content("\n").join(out)
+
+
+class ChatBanner(Static):
+    """The egress banner, wrapped with a hanging indent under the ``⚠``.
+
+    ``plain_text`` is the unwrapped text (tests, copy).
+    """
+
+    def __init__(self, settings: Any, mode: str, **kwargs: Any) -> None:
+        super().__init__("", **kwargs)
+        self._settings = settings
+        self._mode = mode
+
+    def set_banner(self, settings: Any, mode: str) -> None:
+        self._settings, self._mode = settings, mode
+        self.refresh(layout=True)
+
+    @property
+    def plain_text(self) -> str:
+        return format_banner(self._settings, self._mode).plain
+
+    def render(self) -> Content:
+        return format_banner(self._settings, self._mode, self.content_size.width or 80)
+
+    def get_content_height(self, container: Any, viewport: Any, width: int) -> int:
+        return len(format_banner(self._settings, self._mode, width).plain.split("\n"))
 
 
 def unwrap_call(name: str, args: Any) -> tuple[str, dict]:
@@ -275,7 +321,9 @@ def format_when(stamp: str | None) -> str:
 
 
 def format_thread_row(index: int, entry: dict, *, current: str | None = None) -> str:
-    """``1. title · 2026-11-19 14:03 · 3 turns``."""
+    """``1. title · 2026-11-19 14:03 · 3 turns`` (plain text: show it as
+    :class:`~textual.content.Content`, never as markup -- titles are user text).
+    """
     title = entry.get("title") or "(untitled)"
     turns = int(entry.get("turns") or 0)
     text = (
@@ -427,6 +475,77 @@ def render_agent_transcript(
     return "\n".join(lines)
 
 
+def live_agent_tokens(
+    row: dict | None, events: Iterable[AgentEvent] = ()
+) -> int | None:
+    """An agent's tokens so far, including the run in progress.
+
+    ``row["usage"]`` (``AgentManager.info``) is only summed when a run ends;
+    the ``usage`` events in its transcript buffer count every request as it
+    happens. The larger of the two is right whether a run is in progress or
+    not (and when the bounded buffer dropped old events).
+    """
+    base = agent_tokens((row or {}).get("usage")) or 0
+    live = 0
+    for ev in events:
+        if ev.type == "usage":
+            p = ev.payload or {}
+            live += int(p.get("prompt") or 0) + int(p.get("completion") or 0)
+    total = max(base, live)
+    return total or None
+
+
+def strip_code_prefix(code: str | None, message: str | None) -> str | None:
+    """``("denied", "denied: The analyst ...")`` -> ``"The analyst ..."``."""
+    if not message or not code:
+        return message
+    prefix = f"{code}:"
+    if message.startswith(prefix):
+        return message[len(prefix) :].strip() or None
+    return message
+
+
+def approval_decision_text(p: dict) -> tuple[str, str, bool]:
+    """The one-line answer to an approval: ``(text, style, approved)``."""
+    decision, by = p.get("decision"), p.get("by")
+    if decision in ("once", "always"):
+        text = "✓ allowed"
+        if p.get("remembered_rule"):
+            text += f" · remembered {p['remembered_rule']}"
+        elif by == "rule":
+            text += " by a rule"
+        elif by == "user":
+            text += " by you"
+        return text, "$chat-muted", True
+    reason = {"timeout": " (no answer)", "cancelled": " (cancelled)"}.get(by or "", "")
+    text = f"✗ declined{reason}"
+    if by == "user" and not reason:
+        text = "✗ declined by you"
+    if p.get("note"):
+        text += f" · {p['note']}"
+    return text, "$lens-warn", False
+
+
+def apply_tool_result(block: ToolBlock, p: dict) -> None:
+    """Fill a :class:`ToolBlock`'s chip from a ``tool_result`` payload.
+
+    The error message loses a repeated ``code:`` prefix; after a declined
+    approval (shown on the block already) only the code and time remain.
+    """
+    ms = p.get("duration_ms")
+    elapsed = ms / 1000 if isinstance(ms, int | float) else None
+    if p.get("status") == "ok":
+        block.set_result(
+            ref=p.get("result_id"), summary=p.get("summary"), elapsed=elapsed
+        )
+        return
+    code = p.get("error_code") or p.get("status")
+    message = strip_code_prefix(code, p.get("summary") or None)
+    if getattr(block, "decision_approved", None) is False:
+        message = None
+    block.set_error(code, message, elapsed=elapsed)
+
+
 def coalesce_events(events: Iterable[AgentEvent]) -> list[AgentEvent]:
     """Merge runs of text / reasoning deltas of one agent into one event."""
     out: list[AgentEvent] = []
@@ -488,7 +607,11 @@ class AgentsBar(Static, can_focus=True):
             self.agent_id = agent_id
 
     class Leave(Message):
-        """Focus should go back to the chat input."""
+        """Focus should go back to the chat input (with ``text`` typed)."""
+
+        def __init__(self, text: str = "") -> None:
+            super().__init__()
+            self.text = text
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__("", **kwargs)
@@ -533,6 +656,13 @@ class AgentsBar(Static, can_focus=True):
     def on_blur(self) -> None:
         self.refresh()
 
+    def on_key(self, event: events.Key) -> None:
+        """Typing here goes to the chat input, never to the App's hotkeys."""
+        if event.is_printable and event.character:
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.Leave(event.character))
+
     def action_move(self, delta: int) -> None:
         if self.rows:
             self.selected = (self.selected + delta) % len(self.rows)
@@ -550,35 +680,264 @@ class AgentsBar(Static, can_focus=True):
         self.action_open()
 
 
+def _first_line(text: str | None) -> str:
+    for line in str(text or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def _strip_label(text: str, label: str) -> str:
+    """``"Task: do x"`` -> ``"do x"`` for ``label="Task"`` (no "Task: Task:")."""
+    head = f"{label.lower()}:"
+    stripped = text.lstrip()
+    if stripped.lower().startswith(head):
+        return stripped[len(head) :].strip()
+    return text
+
+
+def format_agent_meta(info: dict, *, tokens: int | None = None) -> Content:
+    """The compact header of the agent modal (at most four rows).
+
+    ``researcher · ⠋ running · 1:02 · 9.2k tok · 4 rounds``, then the first
+    line of the task, of the result and of an error.
+    """
+    status = card_status(info.get("status"))
+    label, style = AGENT_STATUS.get(status, (str(info.get("status")), "$chat-muted"))
+    head: list[Any] = [(str(info.get("profile") or "?"), "bold"), " · ", (label, style)]
+    elapsed = format_elapsed(info.get("elapsed_s"))
+    if elapsed:
+        head += [(" · ", "$chat-muted"), elapsed]
+    if tokens is None:
+        tokens = agent_tokens(info.get("usage"))
+    if tokens:
+        head += [(" · ", "$chat-muted"), f"{format_tokens(tokens)} tok"]
+    if info.get("rounds"):
+        head += [(" · ", "$chat-muted"), f"{info['rounds']} rounds"]
+    lines = [Content.assemble(*head)]
+    task = _strip_label(_first_line(info.get("task")), "Task")
+    if task:
+        lines.append(Content.assemble(("Task ", "$chat-muted"), task))
+    result = info.get("result") or {}
+    summary = _strip_label(_first_line(result.get("summary")), "Result")
+    if summary:
+        lines.append(Content.assemble(("Result ", "$chat-muted"), summary))
+    error = _first_line(result.get("error"))
+    if error:
+        lines.append(Content.assemble(("Error ", "$lens-bad"), error))
+    return Content("\n").join(lines)
+
+
+def format_agent_details(info: dict) -> Content:
+    """The expanded header: the whole task and the whole result."""
+    parts: list[Content] = []
+    if info.get("task"):
+        parts.append(Content.styled("Task", "bold $chat-muted"))
+        parts.append(Content(str(info["task"]).strip()))
+    result = info.get("result") or {}
+    if result.get("summary"):
+        parts.append(Content.styled("Result", "bold $chat-muted"))
+        parts.append(Content(str(result["summary"]).strip()))
+    if result.get("error"):
+        parts.append(Content.styled("Error", "bold $lens-bad"))
+        parts.append(Content(str(result["error"]).strip()))
+    return Content("\n").join(parts)
+
+
+class AgentTranscriptView(ChatTranscript):
+    """A subagent's transcript as chat blocks (Markdown replies, tool chips).
+
+    :meth:`show_events` renders the live event buffer incrementally (only
+    the events after the last one seen); :meth:`show_records` renders the
+    persisted thread of an agent known only from disk.
+    """
+
+    DEFAULT_CSS = """
+    AgentTranscriptView {
+        height: 1fr;
+        background: $lens-bg;
+    }
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.source: str | None = None
+        self._last: AgentEvent | None = None
+        self._records = 0
+        self._reply: ReplyBlock | None = None
+        self._reasoning: ReasoningLine | None = None
+
+    def reset(self) -> None:
+        self._finish_stream()
+        self.clear_blocks()
+        self.source, self._last, self._records = None, None, 0
+
+    def _finish_stream(self) -> None:
+        if self._reasoning is not None and self._reasoning.running:
+            self._reasoning.finish()
+        self._reasoning = None
+        reply = self._reply
+        if reply is not None and not reply.finished:
+            reply.call_later(reply.finish)
+        self._reply = None
+
+    def show_events(self, events: list[AgentEvent]) -> None:
+        start = 0
+        if self.source == "events" and self._last is not None:
+            for index in range(len(events) - 1, -1, -1):
+                if events[index] is self._last:
+                    start = index + 1
+                    break
+            else:
+                self.reset()
+        elif self.source != "events":
+            self.reset()
+        self.source = "events"
+        if start >= len(events):
+            return
+        self._last = events[-1]
+        for event in coalesce_events(events[start:]):
+            try:
+                self._apply(event)
+            except Exception:
+                logger.debug("agent transcript event failed", exc_info=True)
+
+    def show_records(self, records: list[dict]) -> None:
+        if self.source == "records" and self._records == len(records):
+            return
+        self.reset()
+        self.source, self._records = "records", len(records)
+        for widget, key in history_blocks(records):
+            self.add_block(widget, key=key)
+
+    def _apply(self, ev: AgentEvent) -> None:
+        p = ev.payload or {}
+        kind = ev.type
+        if kind == "reasoning_delta":
+            if self._reasoning is None or not self._reasoning.running:
+                self._reasoning = self.add_block(ReasoningLine())  # type: ignore[assignment]
+            self._reasoning.append(str(p.get("text", "")))  # type: ignore[union-attr]
+        elif kind == "text_delta":
+            if self._reasoning is not None and self._reasoning.running:
+                self._reasoning.finish()
+            if self._reply is None:
+                self._reply = self.add_block(ReplyBlock())  # type: ignore[assignment]
+            self._reply.feed(str(p.get("text", "")))  # type: ignore[union-attr]
+        elif kind == "tool_call":
+            self._finish_stream()
+            name, args = unwrap_call(str(p.get("name", "")), p.get("args"))
+            call_id = str(p.get("call_id", ""))
+            self.add_block(
+                ToolBlock(name, args, call_id=call_id),
+                key=f"tool:{ev.turn_id}:{call_id}",
+            )
+        elif kind == "tool_result":
+            block = self.block(f"tool:{ev.turn_id}:{p.get('call_id', '')}")
+            if isinstance(block, ToolBlock):
+                apply_tool_result(block, p)
+        elif kind == "approval_request":
+            tool = humanize_tool_name(str(p.get("tool", "")))
+            self.add_block(
+                NoticeLine(f"⚠ waiting for your approval: {tool}", style="$chat-wait")
+            )
+        elif kind == "approval_resolved":
+            text, style, _ok = approval_decision_text(p)
+            tool = humanize_tool_name(str(p.get("tool", "")))
+            self.add_block(NoticeLine(f"{tool}: {text}", style=style))
+        elif kind == "retry":
+            text = format_retry(
+                float(p.get("delay_s") or 0),
+                int(p.get("attempt") or 1),
+                int(p.get("max_attempts") or 1),
+                p.get("reason"),
+            )
+            self.add_block(NoticeLine(text, style="$lens-warn"))
+        elif kind == "error":
+            self._finish_stream()
+            message = redact_secrets(p.get("message") or p.get("kind") or "error")
+            self.add_block(NoticeLine(f"✗ {message}", style="$lens-bad"))
+        elif kind == "turn_end":
+            self._finish_stream()
+            rounds = int(p.get("rounds") or 0)
+            self.add_block(
+                NoticeLine(
+                    f"── turn {p.get('reason')} · {rounds} round"
+                    + ("s" if rounds != 1 else ""),
+                    style="$chat-muted",
+                )
+            )
+
+
 class AgentTranscriptModal(ForensicModal[None]):
     """A subagent's transcript, live, with cancel and send-message.
 
-    Live events come from :meth:`AgentManager.transcript_events` (deltas
-    included) and a manager listener; an agent known only from disk shows its
-    ``transcript.jsonl``. Esc closes (sync ``action_cancel``).
+    Layout: a compact header (profile, status, time, tokens, the first line
+    of the task and result; Ctrl+T or a click shows them in full), the
+    transcript as chat blocks taking the remaining height (PageUp/PageDown,
+    Ctrl+Home/End scroll it from the input), then the input and the buttons,
+    which always stay visible. Live events come from
+    :meth:`AgentManager.transcript_events` (deltas included) and a manager
+    listener; an agent known only from disk shows its ``transcript.jsonl``.
+    Esc closes (sync ``action_cancel``).
     """
 
     ENTER_SUBMITS_FROM_INPUT = False
     AUTO_FOCUS = "#agent-message"
 
+    BINDINGS = [
+        Binding("pageup", "scroll_transcript('page_up')", "Scroll up", show=False),
+        Binding(
+            "pagedown", "scroll_transcript('page_down')", "Scroll down", show=False
+        ),
+        Binding("ctrl+home", "scroll_transcript('home')", "Top", show=False),
+        Binding("ctrl+end", "scroll_transcript('end')", "End", show=False),
+        Binding("ctrl+t", "toggle_details", "Full task", show=False),
+    ]
+
     DEFAULT_CSS = """
     AgentTranscriptModal .modal-container {
-        width: 110;
+        width: 120;
         max-width: 95%;
+        height: 90%;
         max-height: 90%;
+        padding: 0 1;
+    }
+    AgentTranscriptModal .modal-title {
+        height: 1;
+        margin: 0;
     }
     AgentTranscriptModal #agent-meta {
-        color: $lens-dim;
-        margin-bottom: 1;
-    }
-    AgentTranscriptModal #agent-transcript-scroll {
         height: auto;
-        max-height: 26;
-        margin-bottom: 1;
-        background: $lens-bg;
+        max-height: 4;
+        color: $lens-text;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+        background: $lens-panel;
+        padding: 0 1;
+    }
+    AgentTranscriptModal #agent-meta:hover {
+        background: $lens-action-hover-bg;
+    }
+    AgentTranscriptModal #agent-details {
+        display: none;
+        height: auto;
+        max-height: 40%;
+        background: $lens-panel;
+        padding: 0 1;
+    }
+    AgentTranscriptModal.-details #agent-details {
+        display: block;
     }
     AgentTranscriptModal #agent-transcript {
-        padding: 0 1;
+        height: 1fr;
+        min-height: 3;
+        margin: 1 0 0 0;
+    }
+    AgentTranscriptModal #agent-message {
+        margin: 1 0 0 0;
+    }
+    AgentTranscriptModal .button-row {
+        margin-top: 0;
     }
     """
 
@@ -609,17 +968,23 @@ class AgentTranscriptModal(ForensicModal[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="modal-container"):
-            yield Label(f"◆ Agent {self.agent_id}", classes="modal-title")
+            yield Label(Content(f"◆ Agent {self.agent_id}"), classes="modal-title")
             yield Static("", id="agent-meta")
-            with VerticalScroll(id="agent-transcript-scroll"):
-                yield Static("", id="agent-transcript")
+            with VerticalScroll(id="agent-details"):
+                yield Static("", id="agent-details-text")
+            yield AgentTranscriptView(id="agent-transcript")
             yield Input(
                 placeholder="Message this agent (Enter sends)", id="agent-message"
             )
             with Horizontal(classes="button-row"):
                 yield Button("Cancel agent", id="agent-cancel")
                 yield Button("Close", id="agent-close", classes="-primary")
-            yield KeyHintFooter(hints={"button": "[dim]Enter=Send  Esc=Close[/dim]"})
+            yield KeyHintFooter(
+                hints={
+                    "button": "[dim]Enter=Send  PgUp/PgDn=Scroll  "
+                    "^T=Full task  Esc=Close[/dim]"
+                }
+            )
 
     def on_mount(self) -> None:
         try:
@@ -627,6 +992,8 @@ class AgentTranscriptModal(ForensicModal[None]):
         except Exception:
             logger.debug("agent listener failed", exc_info=True)
         self.render_transcript()
+        # Elapsed time and tokens move while the agent runs.
+        self.set_interval(1.0, self._render_meta)
 
     def on_unmount(self) -> None:
         if self._remove_listener is not None:
@@ -656,23 +1023,26 @@ class AgentTranscriptModal(ForensicModal[None]):
             self._pending = False
         self.render_transcript()
 
-    def transcript_text(self) -> str:
-        """The rendered transcript (live events, else the file)."""
-        events = []
+    def _events(self) -> list[AgentEvent]:
         with contextlib.suppress(Exception):
-            events = self.manager.transcript_events(self.agent_id)
-        if events:
-            return render_agent_transcript(events)
-        info = self._info() or {}
+            return list(self.manager.transcript_events(self.agent_id))
+        return []
+
+    def _records(self, info: dict) -> list[dict]:
         path = info.get("transcript_path")
         if path:
             with contextlib.suppress(Exception):
                 from pathlib import Path
 
-                return render_agent_transcript(
-                    records=ConversationStore.read(Path(path))
-                )
-        return ""
+                return ConversationStore.read(Path(path))
+        return []
+
+    def transcript_text(self) -> str:
+        """The transcript as plain text (live events, else the file)."""
+        events = self._events()
+        if events:
+            return render_agent_transcript(events)
+        return render_agent_transcript(records=self._records(self._info() or {}))
 
     def _info(self) -> dict | None:
         try:
@@ -680,30 +1050,61 @@ class AgentTranscriptModal(ForensicModal[None]):
         except Exception:
             return None
 
-    def render_transcript(self) -> None:
-        info = self._info() or {}
-        meta = [
-            f"{info.get('profile', '?')} · "
-            + AGENT_STATUS.get(
-                card_status(info.get("status")), (str(info.get("status")), "")
-            )[0]
-        ]
-        if info.get("elapsed_s") is not None:
-            meta[0] += f" · {format_elapsed(info.get('elapsed_s'))}"
-        if info.get("task"):
-            meta.append(f"Task: {info['task']}")
-        result = info.get("result") or {}
-        if result.get("summary"):
-            meta.append(f"Result: {result['summary']}")
+    def _render_meta(
+        self, info: dict | None = None, events: list | None = None
+    ) -> None:
+        info = info if info is not None else (self._info() or {})
+        if events is None:
+            events = self._events()
+        tokens = live_agent_tokens(info, events)
         try:
-            self.query_one("#agent-meta", Static).update(Content("\n".join(meta)))
-            text = self.transcript_text() or "(no transcript yet)"
-            self.query_one("#agent-transcript", Static).update(Content(text))
+            self.query_one("#agent-meta", Static).update(
+                format_agent_meta(info, tokens=tokens)
+            )
+            self.query_one("#agent-details-text", Static).update(
+                format_agent_details(info)
+            )
             self.query_one("#agent-cancel", Button).disabled = info.get(
                 "status"
             ) not in ("queued", "running")
         except Exception:
+            logger.debug("agent meta render failed", exc_info=True)
+
+    def render_transcript(self) -> None:
+        info = self._info() or {}
+        events = self._events()
+        self._render_meta(info, events)
+        try:
+            view = self.query_one("#agent-transcript", AgentTranscriptView)
+            if events:
+                view.show_events(events)
+            else:
+                view.show_records(self._records(info))
+        except Exception:
             logger.debug("agent transcript render failed", exc_info=True)
+
+    def on_click(self, event: events.Click) -> None:
+        if getattr(event.widget, "id", None) == "agent-meta":
+            self.action_toggle_details()
+
+    def action_toggle_details(self) -> None:
+        """Ctrl+T / click on the header: show the whole task and result."""
+        self.toggle_class("-details")
+
+    def action_scroll_transcript(self, where: str) -> None:
+        """PageUp/PageDown/Ctrl+Home/Ctrl+End: scroll the transcript."""
+        try:
+            view = self.query_one("#agent-transcript", AgentTranscriptView)
+        except Exception:
+            return
+        scroll = {
+            "page_up": view.scroll_page_up,
+            "page_down": view.scroll_page_down,
+            "home": view.scroll_home,
+            "end": view.scroll_end,
+        }.get(where)
+        if scroll is not None:
+            scroll(animate=False)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
@@ -724,9 +1125,13 @@ class AgentTranscriptModal(ForensicModal[None]):
         try:
             self.manager.send(self.agent_id, text, parent=self.parent_session)
             event.input.value = ""
-            self.notify(f"Sent to {self.agent_id}", timeout=2)
+            self.notify(f"Sent to {self.agent_id}", timeout=2, markup=False)
         except Exception as exc:
-            self.notify(f"Could not send: {redact_secrets(exc)}", severity="error")
+            self.notify(
+                f"Could not send: {redact_secrets(exc)}",
+                severity="error",
+                markup=False,
+            )
         self.render_transcript()
 
     def action_cancel(self) -> None:
@@ -763,7 +1168,8 @@ class ThreadPickerModal(ForensicModal[str | None]):
             yield OptionList(
                 *[
                     Option(
-                        format_thread_row(i, t, current=self.current),
+                        # Titles are user text: never parsed as markup.
+                        Content(format_thread_row(i, t, current=self.current)),
                         id=str(t.get("thread_id")),
                     )
                     for i, t in enumerate(self.threads, 1)
@@ -810,6 +1216,7 @@ class ChatPanel(Widget):
         height: auto;
         padding: 0 1;
         margin: 0 0 1 0;
+        text-wrap: nowrap;
     }
     ChatPanel .chat-intro-notice {
         margin: 0 0 1 0;
@@ -845,7 +1252,17 @@ class ChatPanel(Widget):
         # Bare Up is unbound in the Input and app-wide (Shift+Up sizes the
         # dock), so it bubbles here from the input.
         Binding("up", "focus_agents", "Agents", show=False),
+        # Unbound in the Input too: scroll the transcript from the input.
+        Binding("pageup", "scroll_transcript('page_up')", "Scroll up", show=False),
+        Binding(
+            "pagedown", "scroll_transcript('page_down')", "Scroll down", show=False
+        ),
+        Binding("ctrl+home", "scroll_transcript('home')", "Top", show=False),
+        Binding("ctrl+end", "scroll_transcript('end')", "Bottom", show=False),
     ]
+
+    #: The StatusBar/ticker badge while an approval waits.
+    ATTENTION = "⚠ approval needed · ^Y"
 
     #: Keyboard grace of the approval card (tests set 0).
     APPROVAL_INPUT_GRACE_S: float | None = None
@@ -869,8 +1286,16 @@ class ChatPanel(Widget):
         super().__init__(**kwargs)
         self.can_focus = True
         self._session: AgentSession | None = None
+        # Each thread the panel shows gets a generation; a session's sink is
+        # bound to the generation it was opened in, so late events of a
+        # closed thread (Ctrl+L, /threads) are dropped, not rendered.
+        self._generation = 0
+        # Disk work (open/resume/close a thread, list threads, resolve an
+        # approval) runs on worker threads; this counts the ones in flight.
+        self._io_pending = 0
+        self._opening = False
         # Sink queue (any thread) -> drained on the UI thread.
-        self._events: deque[AgentEvent] = deque()
+        self._events: deque[tuple[int, AgentEvent]] = deque()
         self._events_lock = threading.Lock()
         self._drain_posted = False
         self._drain_timer = None
@@ -887,7 +1312,7 @@ class ChatPanel(Widget):
         self._window: int | None = None
         self._has_blocks = False
         self._intro: list[Widget] = []
-        self._banner: Static | None = None
+        self._banner: ChatBanner | None = None
         self._banner_key: tuple | None = None
         self._empty: EmptyState | None = None
         self._busy: str | None = None
@@ -896,6 +1321,9 @@ class ChatPanel(Widget):
         self._approvals: list[str] = []
         self._prompt: ToolPermissionPrompt | None = None
         self._prompt_rid: str | None = None
+        # Approval request id -> the orchestrator's ToolBlock it belongs to
+        # (the answer is shown on that block, before its result chip).
+        self._approval_blocks: dict[str, ToolBlock] = {}
 
     # -- properties -----------------------------------------------------------------
 
@@ -911,9 +1339,28 @@ class ChatPanel(Widget):
 
     @property
     def running(self) -> bool:
-        """A turn runs or is queued (or ``/compact`` works)."""
+        """A turn runs or is queued (or ``/compact`` works, or a thread opens)."""
         session = self._session
-        return self._busy is not None or bool(session is not None and session.running)
+        return (
+            self._busy is not None
+            or self._opening
+            or bool(session is not None and session.running)
+        )
+
+    @property
+    def io_pending(self) -> int:
+        """Worker jobs (thread open/resume/close, approvals) still in flight."""
+        return self._io_pending
+
+    def focus_target(self) -> Widget | None:
+        """Where Ctrl+Y puts the focus: a waiting approval card, else the input."""
+        prompt = self._prompt
+        if prompt is not None and not prompt.decided and prompt.is_attached:
+            if prompt.noting:
+                with contextlib.suppress(Exception):
+                    return prompt.query_one("#tool-permission-note", Input)
+            return prompt
+        return self._input()
 
     def _transcript(self) -> ChatTranscript:
         return self.query_one("#chat-log", ChatTranscript)
@@ -932,7 +1379,13 @@ class ChatPanel(Widget):
         yield AgentsBar(id="chat-agents-bar")
         yield Static("", id="chat-hints")
         with MascotRow(id="chat-input-bar"):
-            yield Input(placeholder="Ask Sandroid… / for commands", id="chat-input")
+            # No select-all on focus: coming back to the chat (Ctrl+Y, the
+            # agents bar, a modal) must not let the next key replace a draft.
+            yield Input(
+                placeholder="Ask Sandroid… / for commands",
+                id="chat-input",
+                select_on_focus=False,
+            )
             yield ChatMascot(id="chat-mascot")
 
     def on_mount(self) -> None:
@@ -959,8 +1412,8 @@ class ChatPanel(Widget):
         """Mount the egress banner (+ legacy notice, + empty state)."""
         transcript = self._transcript()
         settings = get_ai_settings()
-        self._banner = Static(
-            format_banner(settings, self._permission_mode()), classes="chat-banner"
+        self._banner = ChatBanner(
+            settings, self._permission_mode(), classes="chat-banner"
         )
         self._banner_key = None
         widgets: list[Widget] = [self._banner]
@@ -1053,7 +1506,7 @@ class ChatPanel(Widget):
         if self._banner is not None and banner_key != self._banner_key:
             self._banner_key = banner_key
             with contextlib.suppress(Exception):
-                self._banner.update(format_banner(settings, mode))
+                self._banner.set_banner(settings, mode)
         self._sync_mascot(state)
 
     def _sync_mascot(self, state: str | None = None) -> None:
@@ -1116,10 +1569,24 @@ class ChatPanel(Widget):
 
     # -- the event sink (any thread) ------------------------------------------------
 
-    def _sink(self, event: AgentEvent) -> None:
-        """Queue *event* for the UI thread; never blocks, never raises."""
+    def _sink_for(self, generation: int) -> Callable[[AgentEvent], None]:
+        """The sink of a session opened now (bound to this generation)."""
+
+        def sink(event: AgentEvent) -> None:
+            self._sink(event, generation)
+
+        return sink
+
+    def _sink(self, event: AgentEvent, generation: int | None = None) -> None:
+        """Queue *event* for the UI thread; never blocks, never raises.
+
+        ``generation`` is the thread generation the emitting session belongs
+        to (``None``: the current one); stale generations are dropped.
+        """
+        if generation is None:
+            generation = self._generation
         with self._events_lock:
-            self._events.append(event)
+            self._events.append((generation, event))
             if self._drain_posted:
                 return
             self._drain_posted = True
@@ -1157,10 +1624,12 @@ class ChatPanel(Widget):
     def _drain(self) -> None:
         self._drain_timer = None
         with self._events_lock:
-            events = list(self._events)
+            queued = list(self._events)
             self._events.clear()
             self._drain_posted = False
         self._last_drain = time.monotonic()
+        # Late events of a closed thread (Ctrl+L, /threads) are dropped.
+        events = [ev for gen, ev in queued if gen == self._generation]
         if not events:
             return
         self.drain_count += 1
@@ -1245,25 +1714,30 @@ class ChatPanel(Widget):
 
     def _on_tool_result(self, ev: AgentEvent, p: dict) -> None:
         block = self._transcript().block(f"tool:{ev.turn_id}:{p.get('call_id', '')}")
-        elapsed = (p.get("duration_ms") or 0) / 1000
         if isinstance(block, ToolBlock):
-            if p.get("status") == "ok":
-                block.set_result(
-                    ref=p.get("result_id"), summary=p.get("summary"), elapsed=elapsed
-                )
-            else:
-                block.set_error(
-                    p.get("error_code") or p.get("status"),
-                    p.get("summary") or None,
-                    elapsed=elapsed,
-                )
+            apply_tool_result(block, p)
         self._set_state("thinking")
 
     def _on_approval_request(self, ev: AgentEvent, p: dict) -> None:
         rid = p.get("request_id")
         if rid and rid not in self._approvals:
             self._approvals.append(rid)
+        if rid and ev.agent_id == ORCHESTRATOR_ID:
+            block = self._running_tool_block(str(p.get("tool", "")))
+            if block is not None:
+                self._approval_blocks[rid] = block
         self._show_next_approval()
+
+    def _running_tool_block(self, tool: str) -> ToolBlock | None:
+        """The newest still-running orchestrator call of *tool*."""
+        for block in reversed(self._transcript().blocks):
+            if (
+                isinstance(block, ToolBlock)
+                and block.running
+                and block.tool_name == tool
+            ):
+                return block
+        return None
 
     def _on_approval_resolved(self, ev: AgentEvent, p: dict) -> None:
         rid = p.get("request_id")
@@ -1271,25 +1745,16 @@ class ChatPanel(Widget):
             "Sandroid AI" if ev.agent_id == ORCHESTRATOR_ID else ev.agent_id
         )
         tool = humanize_tool_name(str(p.get("tool", "")))
-        decision, by = p.get("decision"), p.get("by")
-        if decision in ("once", "always"):
-            text = f"✓ {tool} allowed"
-            if p.get("remembered_rule"):
-                text += f" · remembered {p['remembered_rule']}"
-            elif by == "rule":
-                text += " by a rule"
-            style = "$chat-muted"
+        text, style, approved = approval_decision_text(p)
+        block = self._approval_blocks.pop(rid, None) if rid else None
+        if block is not None and block.is_attached and block.chip is None:
+            # On the call itself, above its result chip.
+            block.set_decision(text, style=style, approved=approved)
         else:
-            reason = {"timeout": " (no answer)", "cancelled": " (cancelled)"}.get(
-                by or "", ""
-            )
-            text = f"✗ {tool} declined{reason}"
-            if p.get("note"):
-                text += f" · {p['note']}"
-            style = "$lens-warn"
-        if ev.agent_id != ORCHESTRATOR_ID:
-            text += f" · {label}"
-        self._notice(text, style=style)
+            line = f"{tool}: {text}"
+            if ev.agent_id != ORCHESTRATOR_ID:
+                line += f" · {label}"
+            self._notice(line, style=style)
         if rid in self._approvals:
             self._approvals.remove(rid)
         if rid is not None and rid == self._prompt_rid:
@@ -1365,11 +1830,11 @@ class ChatPanel(Widget):
     def _on_agent_status(self, ev: AgentEvent, p: dict) -> None:
         card = self._transcript().block(f"agent:{p.get('agent_id') or ev.agent_id}")
         if isinstance(card, AgentCard):
-            card.update_card(
-                status=card_status(p.get("status")),
-                elapsed=p.get("elapsed_s"),
-                tokens=agent_tokens(p.get("usage")),
-            )
+            status = card_status(p.get("status"))
+            tokens = agent_tokens(p.get("usage"))
+            if status == "running" and card.tokens and (tokens or 0) < card.tokens:
+                tokens = card.tokens  # the live count from the tick is newer
+            card.update_card(status=status, elapsed=p.get("elapsed_s"), tokens=tokens)
         self._refresh_agents()
 
     def _on_agent_result(self, ev: AgentEvent, p: dict) -> None:
@@ -1422,20 +1887,78 @@ class ChatPanel(Widget):
                 **kwargs,
             )
             self._prompt, self._prompt_rid = prompt, rid
+            focus_now = self._reveal_for_approval(request)
             self.mount(prompt, before=self.query_one("#chat-input-bar"))
+            if focus_now:
+                self.call_after_refresh(prompt.focus)
             self._set_state("approval", humanize_tool_name(request.tool))
             return
 
+    def _reveal_for_approval(self, request: Any) -> bool:
+        """Make a new approval impossible to miss, without stealing focus.
+
+        A closed dock opens (unfocused, split: the lens keeps its focus and
+        stays visible). The card takes the focus only when it already is in
+        the chat (or nowhere); otherwise a toast and the ticker badge say
+        that an answer is needed and how to get there.
+
+        Returns True when the card must be focused explicitly: the window is
+        too short for a split, so the chat covers the lens that has the focus.
+        """
+        screen = self.screen
+        was_open = bool(getattr(screen, "chat_is_open", True))
+        if not was_open:
+            opener = getattr(screen, "open_chat", None)
+            if callable(opener):
+                with contextlib.suppress(Exception):
+                    opener(focus=False, split=True)
+        focused = screen.focused
+        takes_focus = focused is None or self in focused.ancestors_with_self
+        # Just opened over the lens (window too short for a split).
+        covered = (
+            not was_open
+            and not takes_focus
+            and bool(getattr(screen, "chat_is_maximized", False))
+        )
+        if not was_open or not takes_focus:
+            label = getattr(request, "agent_label", "") or "Sandroid AI"
+            tool = humanize_tool_name(str(getattr(request, "tool", "")))
+            with contextlib.suppress(Exception):
+                self.app.notify(
+                    f"{label} wants to run {tool}. "
+                    "Answer it in the AI chat (Ctrl+Y).",
+                    title="Approval needed",
+                    severity="warning",
+                    timeout=8,
+                    markup=False,
+                )
+        self._set_attention(True)
+        return covered
+
+    def _set_attention(self, on: bool) -> None:
+        """Show / clear the "approval needed" badge outside the dock."""
+        hook = getattr(self.screen, "set_chat_attention", None)
+        if callable(hook):
+            with contextlib.suppress(Exception):
+                hook(self.ATTENTION if on else None)
+
     def _on_decision(self, rid: str, decision: Decision) -> None:
-        """The card was answered: tell the broker, close the card."""
-        try:
-            get_approval_broker().resolve(rid, decision)
-        except Exception:
-            logger.exception("resolving approval %s failed", rid)
+        """The card was answered: close it; tell the broker off the UI thread.
+
+        ``broker.resolve("always")`` writes the permission file (lock +
+        fsync), so it runs on a worker.
+        """
         if rid in self._approvals:
             self._approvals.remove(rid)
         if rid == self._prompt_rid:
             self._close_prompt()
+        broker = get_approval_broker()
+
+        def done(_result: Any, error: BaseException | None) -> None:
+            if error is not None:
+                logger.error("resolving approval %s failed: %s", rid, error)
+
+        self._in_worker(lambda: broker.resolve(rid, decision), done, "chat-approval")
 
     def _close_prompt(self) -> None:
         prompt, self._prompt, self._prompt_rid = self._prompt, None, None
@@ -1450,6 +1973,7 @@ class ChatPanel(Widget):
         if self._approvals:
             self._show_next_approval()
         if self._prompt is None:
+            self._set_attention(False)
             session = self._session
             self._set_state(
                 "thinking" if session is not None and session.running else "idle"
@@ -1496,8 +2020,49 @@ class ChatPanel(Widget):
         if self.send_message(text):
             event.input.value = ""
 
+    # -- worker jobs ----------------------------------------------------------------
+
+    def _in_worker(
+        self,
+        work: Callable[[], Any],
+        done: Callable[[Any, BaseException | None], None],
+        group: str,
+    ) -> None:
+        """Run *work* on a worker thread, then ``done(result, error)`` here."""
+        self._io_pending += 1
+
+        def run() -> None:
+            result: Any = None
+            error: BaseException | None = None
+            try:
+                result = work()
+            except BaseException as exc:
+                error = exc
+            self._post_ui(self._worker_done, done, result, error)
+
+        try:
+            self.run_worker(run, thread=True, group=group, exit_on_error=False)
+        except Exception:
+            self._io_pending -= 1
+            raise
+
+    def _worker_done(
+        self,
+        done: Callable[[Any, BaseException | None], None],
+        result: Any,
+        error: BaseException | None,
+    ) -> None:
+        self._io_pending = max(0, self._io_pending - 1)
+        done(result, error)
+
+    # -- sending --------------------------------------------------------------------
+
     def send_message(self, text: str) -> bool:
-        """Send an analyst message; False when refused (the text stays)."""
+        """Send an analyst message; False when refused (the text stays).
+
+        Without an open thread, the thread is opened on a worker (disk) and
+        the message follows once it is there.
+        """
         text = text.strip()
         if not text:
             return False
@@ -1507,51 +2072,65 @@ class ChatPanel(Widget):
                 style="$lens-warn",
             )
             return False
-        session = self._ensure_session()
-        if session is None:
+        session = self._session
+        if session is not None and not session.closed:
+            self._add(UserBlock(text))
+            self._submit(session, text)
+            return True
+        settings = get_ai_settings()
+        if settings.problem:
+            self._notice(redact_secrets(settings.problem), style="$lens-bad")
+            self._set_state("off" if not settings.is_configured else "error")
             return False
+        self._opening = True
         self._add(UserBlock(text))
+        self._set_state("thinking")
+        sink = self._sink_for(self._generation)
+        self._in_worker(
+            lambda: open_orchestrator_session(sink=sink),
+            lambda session, error: self._opened_for_message(session, error, text),
+            "chat-session",
+        )
+        return True
+
+    def _submit(self, session: AgentSession, text: str) -> None:
         self._set_state("thinking")
         try:
             session.submit_user_message(text)
         except Exception as exc:
             self._notice(f"✗ {redact_secrets(exc)}", style="$lens-bad")
             self._set_state("error")
-            return True
+            return
         with contextlib.suppress(Exception):
             get_agent_manager().note_analyst_message(session)
-        return True
 
-    def _ensure_session(self) -> AgentSession | None:
-        session = self._session
-        if session is not None and not session.closed:
-            return session
-        settings = get_ai_settings()
-        if settings.problem:
-            self._notice(redact_secrets(settings.problem), style="$lens-bad")
-            self._set_state("off" if not settings.is_configured else "error")
-            return None
-        try:
-            session = open_orchestrator_session(sink=self._sink)
-        except AIClientError as exc:
-            self._notice(f"✗ {redact_secrets(exc)}", style="$lens-bad")
+    def _opened_for_message(
+        self, session: AgentSession | None, error: BaseException | None, text: str
+    ) -> None:
+        self._opening = False
+        if error is not None or session is None:
+            if isinstance(error, AIClientError):
+                message = f"✗ {redact_secrets(error)}"
+            else:
+                logger.error("Opening the AI thread failed: %s", error)
+                message = f"✗ Could not open the AI thread: {redact_secrets(error)}"
+            self._notice(message, style="$lens-bad")
             self._set_state("error")
-            return None
-        except Exception as exc:
-            logger.exception("Opening the AI thread failed")
-            self._notice(
-                f"✗ Could not open the AI thread: {redact_secrets(exc)}",
-                style="$lens-bad",
-            )
-            self._set_state("error")
-            return None
+            field = self._input()
+            if field is not None and not field.value:
+                field.value = text  # nothing was sent: give the text back
+            return
+        self._adopt(session)
+        self._submit(session, text)
+
+    def _adopt(self, session: AgentSession) -> None:
+        """Make *session* the panel's thread."""
         self._session = session
         if not session.persistent:
             self._notice(
                 "No analysis session: this thread is kept in memory only.",
                 style="$chat-muted",
             )
-        return session
 
     # -- actions --------------------------------------------------------------------
 
@@ -1577,7 +2156,11 @@ class ChatPanel(Widget):
         self.new_thread()
 
     def new_thread(self) -> bool:
-        """``/new``: refused while a turn runs; else close and clear."""
+        """``/new``: refused while a turn runs; else close and clear.
+
+        The old thread is closed on a worker (it writes its close record and
+        the thread index); its late events are dropped (new generation).
+        """
         if self.running:
             self._notice(
                 "Can't start a new thread while a reply is running. "
@@ -1585,29 +2168,23 @@ class ChatPanel(Widget):
                 style="$lens-warn",
             )
             return False
-        if not self._close_session():
-            return False
+        self._detach_session()
         self._reset_view()
         return True
 
-    def _close_session(self) -> bool:
-        session = self._session
-        if session is None:
-            return True
-        with contextlib.suppress(Exception):
-            get_agent_manager().cancel_all(session)
-        try:
-            session.close("new")
-        except SessionBusyError:
-            self._notice(
-                "The thread is busy. Press Ctrl+X to stop it first.",
-                style="$lens-warn",
+    def _detach_session(self) -> AgentSession | None:
+        """Leave the current thread: new generation, close it off the UI thread."""
+        session, self._session = self._session, None
+        self._generation += 1
+        if session is not None:
+            self._in_worker(
+                lambda: close_thread(session), self._closed_done, "chat-session"
             )
-            return False
-        except Exception:
-            logger.exception("Closing the AI thread failed")
-        self._session = None
-        return True
+        return session
+
+    def _closed_done(self, _result: Any, error: BaseException | None) -> None:
+        if error is not None:
+            logger.error("Closing the AI thread failed: %s", error)
 
     def _reset_view(self) -> None:
         """Empty the transcript and the per-thread view state."""
@@ -1616,6 +2193,13 @@ class ChatPanel(Widget):
                 self._prompt.remove()
         self._prompt = self._prompt_rid = None
         self._approvals.clear()
+        self._approval_blocks.clear()
+        self._set_attention(False)
+        with self._events_lock:
+            # Queued events of earlier generations are stale now.
+            kept = [(g, ev) for g, ev in self._events if g == self._generation]
+            self._events.clear()
+            self._events.extend(kept)
         self._reply = self._reasoning = None
         self._compactions = 0
         self._used = self._window = None
@@ -1641,6 +2225,20 @@ class ChatPanel(Widget):
         field = self._input()
         if field is not None:
             field.focus()
+            if message.text:
+                field.insert_text_at_cursor(message.text)
+
+    def action_scroll_transcript(self, where: str) -> None:
+        """PageUp/PageDown/Ctrl+Home/Ctrl+End from the input: scroll."""
+        transcript = self._transcript()
+        scroll = {
+            "page_up": transcript.scroll_page_up,
+            "page_down": transcript.scroll_page_down,
+            "home": transcript.scroll_home,
+            "end": transcript.scroll_end,
+        }.get(where)
+        if scroll is not None:
+            scroll(animate=False)
 
     def on_agent_card_open(self, message: AgentCard.Open) -> None:
         message.stop()
@@ -1650,11 +2248,30 @@ class ChatPanel(Widget):
         """Show an agent's transcript (cancel / send from there)."""
         modal = AgentTranscriptModal(agent_id, parent=self._session)
         try:
-            self.app.push_screen(modal)
+            self.app.push_screen(modal, self._after_agent_modal)
         except Exception:
             logger.debug("opening the agent transcript failed", exc_info=True)
             return None
         return modal
+
+    def _after_agent_modal(self, _result: Any = None) -> None:
+        """Back from an agent's transcript: the chat input has the focus.
+
+        (Not the agents bar: from there Ctrl+Y closed the chat and typed
+        letters ran the App's hotkeys.)
+        """
+
+        def refocus() -> None:
+            field = self._input()
+            if (
+                field is not None
+                and field.is_attached
+                and self.app.screen is self.screen
+            ):
+                with contextlib.suppress(Exception):
+                    field.focus()
+
+        self.call_after_refresh(refocus)
 
     def on_budget_notice_continue(self, message: BudgetNotice.Continue) -> None:
         message.stop()
@@ -1679,11 +2296,12 @@ class ChatPanel(Widget):
     # -- housekeeping ---------------------------------------------------------------
 
     def _tick(self) -> None:
-        """1 s timer: leases, agents bar, stale approval cards, header."""
+        """1 s timer: leases, agents bar + cards, stale approval cards, header."""
         manager = get_agent_manager()
         with contextlib.suppress(Exception):
             manager.reconcile_leases()
-        self._refresh_agents()
+        rows = self._refresh_agents()
+        self._update_agent_cards(rows, manager)
         rid = self._prompt_rid
         if rid is not None and get_approval_broker().get(rid) is None:
             if rid in self._approvals:
@@ -1705,9 +2323,38 @@ class ChatPanel(Widget):
         except Exception:
             return []
 
-    def _refresh_agents(self) -> None:
+    def _refresh_agents(self) -> list[dict]:
+        rows = self._agent_rows()
         with contextlib.suppress(Exception):
-            self.query_one("#chat-agents-bar", AgentsBar).set_rows(self._agent_rows())
+            self.query_one("#chat-agents-bar", AgentsBar).set_rows(rows)
+        return rows
+
+    def _update_agent_cards(self, rows: list[dict], manager: Any) -> None:
+        """Live status, time and tokens on the cards of running agents.
+
+        ``agent_status`` events only come at tool results, and the agent's
+        usage is only summed when a run ends; the cards follow the 1 s tick.
+        """
+        try:
+            transcript = self._transcript()
+        except Exception:
+            return
+        for row in rows:
+            card = transcript.block(f"agent:{row.get('agent_id')}")
+            if not isinstance(card, AgentCard):
+                continue
+            status = card_status(row.get("status"))
+            if status not in ("running", "queued", "waiting") and card.status == status:
+                continue
+            events: list = []
+            if status in ("running", "queued", "waiting"):
+                with contextlib.suppress(Exception):
+                    events = manager.transcript_events(str(row.get("agent_id")))
+            card.update_card(
+                status=status,
+                elapsed=row.get("elapsed_s"),
+                tokens=live_agent_tokens(row, events),
+            )
 
     # -- slash commands -------------------------------------------------------------
 
@@ -1746,12 +2393,21 @@ class ChatPanel(Widget):
         self.new_thread()
 
     def _cmd_threads(self, arg: str) -> None:
+        """``/threads [n|id]``: the thread list is read on a worker."""
+        self._in_worker(
+            lambda: [t for t in list_threads() if t.get("kind", "chat") == "chat"],
+            lambda threads, error: self._threads_listed(arg, threads, error),
+            "chat-session",
+        )
+
+    def _threads_listed(
+        self, arg: str, threads: list[dict] | None, error: BaseException | None
+    ) -> None:
         current = self._session.thread_id if self._session is not None else None
-        try:
-            threads = [t for t in list_threads() if t.get("kind", "chat") == "chat"]
-        except Exception as exc:
-            self._notice(f"✗ {redact_secrets(exc)}", style="$lens-bad")
+        if error is not None:
+            self._notice(f"✗ {redact_secrets(error)}", style="$lens-bad")
             return
+        threads = threads or []
         if not threads:
             self._notice("No earlier threads in this analysis session.")
             return
@@ -1777,7 +2433,11 @@ class ChatPanel(Widget):
         self.app.push_screen(ThreadPickerModal(threads, current=current), picked)
 
     def resume_thread(self, thread_id: str) -> bool:
-        """Close the current thread and reopen *thread_id* with its history."""
+        """Close the current thread and reopen *thread_id* with its history.
+
+        Closing, opening and reading the thread file run on a worker; the
+        history is rendered when they are done. Returns False when refused.
+        """
         if self._session is not None and self._session.thread_id == thread_id:
             self._notice("That is the current thread.")
             return False
@@ -1792,32 +2452,56 @@ class ChatPanel(Widget):
         if settings.problem:
             self._notice(redact_secrets(settings.problem), style="$lens-bad")
             return False
-        if not self._close_session():
-            return False
-        try:
-            session = open_orchestrator_session(sink=self._sink, thread_id=thread_id)
-        except Exception as exc:
-            self._reset_view()
+        old, self._session = self._session, None
+        self._generation += 1
+        self._opening = True
+        sink = self._sink_for(self._generation)
+
+        def work() -> tuple[AgentSession, list[dict], int | None]:
+            if old is not None:
+                close_thread(old)
+            session = open_orchestrator_session(sink=sink, thread_id=thread_id)
+            records: list[dict] = []
+            path = getattr(session, "thread_path", None)
+            if path is not None:
+                with contextlib.suppress(Exception):
+                    records = ConversationStore.read(path)
+            return session, records, resumed_context_used(session, records)
+
+        self._in_worker(
+            work,
+            lambda result, error: self._resumed(thread_id, result, error),
+            "chat-session",
+        )
+        return True
+
+    def _resumed(
+        self,
+        thread_id: str,
+        result: tuple[AgentSession, list[dict], int | None] | None,
+        error: BaseException | None,
+    ) -> None:
+        self._opening = False
+        self._reset_view()
+        if error is not None or result is None:
             self._notice(
-                f"✗ Could not resume {thread_id}: {redact_secrets(exc)}",
+                f"✗ Could not resume {thread_id}: {redact_secrets(error)}",
                 style="$lens-bad",
             )
-            return False
-        self._reset_view()
+            return
+        session, records, used = result
         self._session = session
-        self._render_history(session)
+        self._render_history(records)
+        if used is not None:
+            self._used = used
+        with contextlib.suppress(Exception):
+            self._window = int(session.meter.window) or None
         title = session.title or thread_id
         self._notice(f"↺ Resumed “{title}”")
         self.refresh_header()
-        return True
 
-    def _render_history(self, session: AgentSession) -> None:
+    def _render_history(self, records: list[dict]) -> None:
         """Rebuild the blocks of a resumed thread from its records."""
-        path = getattr(session, "thread_path", None)
-        records: list[dict] = []
-        if path is not None:
-            with contextlib.suppress(Exception):
-                records = ConversationStore.read(path)
         for widget, key in history_blocks(records):
             self._add(widget, key=key)
         self._compactions = sum(1 for r in records if r.get("type") == "compaction")
@@ -1946,12 +2630,65 @@ def format_health(report: Any) -> tuple[str, str]:
     return f"✗ Endpoint check failed: {error}", "$lens-bad"
 
 
+def close_thread(session: Any) -> None:
+    """Cancel a thread's agents and close it (worker thread: disk writes).
+
+    A turn that is still winding down after Ctrl+X gets a few seconds.
+    """
+    with contextlib.suppress(Exception):
+        get_agent_manager().cancel_all(session)
+    try:
+        session.close("new")
+    except SessionBusyError:
+        with contextlib.suppress(Exception):
+            session.cancel()
+        wait = getattr(session, "wait_idle", None)
+        if callable(wait):
+            wait(5.0)
+        session.close("new")
+
+
+def resumed_context_used(session: Any, records: Iterable[dict]) -> int | None:
+    """Context use of a resumed thread (the meter starts empty otherwise).
+
+    The meter's estimate of the rebuilt history, else the last ``usage``
+    record (prompt + completion tokens).
+    """
+    estimate = getattr(getattr(session, "meter", None), "estimate", None)
+    if callable(estimate):
+        try:
+            value = int(estimate(list(session.messages), session.tools))
+        except Exception:
+            value = 0
+        if value > 0:
+            return value
+    last = None
+    for rec in records:
+        if rec.get("type") == "usage":
+            last = rec
+    if last is None:
+        return None
+    total = int(last.get("prompt") or 0) + int(last.get("completion") or 0)
+    return total or None
+
+
 def history_blocks(records: Iterable[dict]) -> list[tuple[Widget, str | None]]:
-    """Blocks of a resumed thread: user, replies, tool calls + chips, rules."""
+    """Blocks of a resumed thread: user, replies, tool calls + chips, rules.
+
+    Tool chips show the summary and time when the record has them; an
+    approval record is shown on the call it answered.
+    """
     blocks: list[tuple[Widget, str | None]] = []
     tools: dict[str, ToolBlock] = {}
     for rec in records:
         rtype = rec.get("type")
+        if rtype == "approval":
+            for block in reversed(list(tools.values())):
+                if block.chip is None and block.tool_name == rec.get("tool"):
+                    text, style, approved = approval_decision_text(rec)
+                    block.set_decision(text, style=style, approved=approved)
+                    break
+            continue
         if rtype == "compaction":
             events = rec.get("events") or [{}]
             last = events[-1] if isinstance(events[-1], dict) else {}
@@ -1991,11 +2728,16 @@ def history_blocks(records: Iterable[dict]) -> list[tuple[Widget, str | None]]:
             block = tools.get(str(rec.get("tool_call_id", "")))
             if block is None:
                 continue
-            status = rec.get("status", "ok")
-            if status == "ok":
-                block.set_result(ref=rec.get("result_id"))
-            else:
-                block.set_error(str(status))
+            apply_tool_result(
+                block,
+                {
+                    "status": rec.get("status", "ok"),
+                    "result_id": rec.get("result_id"),
+                    "summary": rec.get("summary"),
+                    "error_code": rec.get("error_code"),
+                    "duration_ms": rec.get("duration_ms", rec.get("ms")),
+                },
+            )
     return blocks
 
 
@@ -2003,14 +2745,20 @@ __all__ = [
     "SLASH_HELP",
     "SYSTEM_PROMPT",
     "AgentTranscriptModal",
+    "AgentTranscriptView",
     "AgentsBar",
+    "ChatBanner",
     "ChatPanel",
     "ThreadPickerModal",
     "agent_tokens",
+    "apply_tool_result",
+    "approval_decision_text",
     "card_claims",
     "card_status",
+    "close_thread",
     "coalesce_events",
     "egress_banner_lines",
+    "format_agent_meta",
     "format_agent_row",
     "format_banner",
     "format_context",
@@ -2018,7 +2766,10 @@ __all__ = [
     "format_permissions",
     "format_thread_row",
     "history_blocks",
+    "live_agent_tokens",
     "open_orchestrator_session",
     "render_agent_transcript",
+    "resumed_context_used",
+    "strip_code_prefix",
     "unwrap_call",
 ]
