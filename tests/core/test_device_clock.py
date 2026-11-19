@@ -383,7 +383,10 @@ def test_snapshot_load_with_sync_on_sets_the_clock(device, caplog):
     public = {k: v for k, v in final.items() if k not in ("serial", "host_at")}
     assert public == {k: v for k, v in sync.items() if k != "kind"}
     assert "_host" not in final
-    assert caplog.records == []
+    # No time_detector here: ``date`` set it, which Android may undo later.
+    assert sync["set_by"] == "date"
+    assert [r.message for r in caplog.records if "stale time" in r.message]
+    assert len(caplog.records) == 1
 
 
 def test_sync_falls_back_to_the_mmdd_form(device):
@@ -556,12 +559,15 @@ def test_the_suggestion_pair_is_computed_on_the_host_in_integer_ms():
     assert "`" not in command
 
 
-def test_the_sync_injects_a_telephony_suggestion_first(device):
+def test_the_sync_injects_a_telephony_suggestion_first(device, caplog):
     device.detector = "apply"
-    device_clock.after_snapshot_load("clean", SERIAL)
+    with caplog.at_level(logging.WARNING, logger="sandroid.core.device_clock"):
+        device_clock.after_snapshot_load("clean", SERIAL)
     sync = _lines()[-1]
     assert sync["ok"] is True
     assert sync["sets"] == 1
+    assert sync["set_by"] == "time_detector"  # sticks: no "may undo" warning
+    assert not [r for r in caplog.records if "stale time" in r.message]
     assert _SUGGEST.fullmatch(sync["command"])
     assert abs(sync["after_off_wall"]) < 0.002
     (sent,) = [c for c in device.commands if c.startswith("cmd time_detector")]
@@ -586,7 +592,7 @@ def test_an_ignored_suggestion_falls_back_to_date(device):
 
 
 def test_a_missing_time_detector_uses_date_only(device):
-    synced = device_clock.sync(SERIAL)  # detector "missing"
+    synced = device_clock.sync(SERIAL)  # detector "missing": not counted
     assert (synced["ok"], synced["sets"]) == (True, 1)
     assert synced["command"].startswith("date -u @")
 
@@ -606,7 +612,7 @@ def test_no_suggestion_from_a_sample_of_the_previous_world(device):
     device_clock.measure(SERIAL)
     device.host += 1
     device_clock.begin_epoch(SERIAL)  # the old off_mono is stale now
-    assert device_clock._run_suggest(SERIAL, None) is None
+    assert device_clock._run_suggest(SERIAL, None) == (None, False)
     assert not any(c.startswith("cmd time_detector") for c in device.commands)
 
 

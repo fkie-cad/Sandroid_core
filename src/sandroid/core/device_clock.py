@@ -884,12 +884,13 @@ def suggestion_command(host_now: float, off_mono: float) -> str:
     )
 
 
-def _run_suggest(serial: str | None, send: Send | None) -> str | None:
+def _run_suggest(serial: str | None, send: Send | None) -> tuple[str | None, bool]:
     """Inject a telephony time suggestion (over the persistent shell, else
     one-shot ``send``) from the current-world sample's ``off_mono``.
-    Returns the command when the detector reports it ``injected``; ``None``
-    without a current-world ``off_mono`` (no root), or when ``cmd`` is
-    missing or fails.
+    Returns ``(command, injected)``: ``command`` is the command sent
+    (``None`` when nothing was sent: no current-world ``off_mono``, i.e. no
+    root, or the one-shot send failed), ``injected`` whether the detector
+    reported it ``injected`` (``cmd`` missing or failing: ``False``).
     """
     from sandroid.core.adb_utils import device_shell_command
 
@@ -900,7 +901,7 @@ def _run_suggest(serial: str | None, send: Send | None) -> str | None:
         sample = last_sample(serial, current_world=True)
         off_mono = (sample or {}).get("off_mono")
         if not isinstance(off_mono, (int, float)):
-            return None
+            return None, False
         try:
             command = suggestion_command(_now(), off_mono)
             lines, _t0, _t1 = _shell(serial).query(f"{command} 2>&1; echo {_END}")
@@ -918,11 +919,22 @@ def _run_suggest(serial: str | None, send: Send | None) -> str | None:
             lines = str(stdout or "").splitlines()
         except (Exception, SystemExit):
             logger.debug("device clock: one-shot suggestion failed", exc_info=True)
-            return None
+            return None, False
     if any("injected" in line for line in lines):
-        return command
+        return command, True
     logger.debug("device clock: time suggestion not taken: %s", lines)
-    return None
+    return command, False
+
+
+def sync_method(command: str | None) -> str | None:
+    """How a sync set the clock: ``"time_detector"`` (a telephony time
+    suggestion; it replaces the stale snapshot suggestion, so it sticks),
+    ``"date"`` (Android may re-apply the snapshot's stale time on its next
+    time suggestion) or ``None`` (nothing applied).
+    """
+    if not command:
+        return None
+    return "time_detector" if command.startswith("cmd time_detector") else "date"
 
 
 def _applied(before: dict, after: dict) -> bool:
@@ -948,7 +960,9 @@ def sync(serial: str | None = None, send: Send | None = None) -> dict | None:
     not move); one corrective retry when it applied but missed
     :data:`SYNC_TOLERANCE_S`. Returns the last sample with ``ok``
     (``|off_wall| <= SYNC_TOLERANCE_S``), the ``command`` that applied and
-    ``sets`` (commands issued), ``None`` if the device never answered.
+    ``sets`` (time suggestions the detector took plus ``date`` commands
+    issued; a suggestion that ``cmd`` rejected or lacks is not counted),
+    ``None`` if the device never answered.
     Writes nothing; see :func:`after_snapshot_load`. CLOCK_MONOTONIC is
     untouched.
     """
@@ -970,8 +984,8 @@ def _sync(
     reference, after = before, None
     # 1. A telephony time suggestion: it also replaces the snapshot's stale
     # NITZ suggestion that time_detector would otherwise re-apply later.
-    command = _run_suggest(serial, send)
-    if command is not None:
+    command, injected = _run_suggest(serial, send)
+    if injected:
         sets += 1
         after = _measure(serial, samples=SAMPLES_QUICK)
         if after is None:
@@ -1026,7 +1040,9 @@ def _sync_and_note(
 ) -> dict | None:
     """:func:`_sync` from ``before``, then its ``reason: "sync"`` line
     (``trigger``, ``before_off_wall`` / ``after_off_wall`` / ``ok`` /
-    ``command`` / ``sets``). A failed sync is warned about once per device.
+    ``command`` / ``sets`` / ``set_by``, see :func:`sync_method`). A failed
+    sync, and one that only ``date`` applied, is warned about once per
+    device.
     Returns the line (``None``: the device did not answer).
     """
     synced = _sync(serial, send, before)
@@ -1035,6 +1051,7 @@ def _sync_and_note(
         ok = bool(synced.pop("ok"))
         command = synced.pop("command", None)
         sets = synced.pop("sets", 0)
+        set_by = sync_method(command)
         final = _note(
             synced,
             "sync",
@@ -1045,8 +1062,18 @@ def _sync_and_note(
             ok=ok,
             command=command,
             sets=sets,
+            set_by=set_by,
             **extra,
-        ) or {**_public(synced), "ok": ok}
+        ) or {**_public(synced), "ok": ok, "set_by": set_by}
+        if ok and set_by == "date":
+            warn_once(
+                "sync-date",
+                serial,
+                f"Device clock set to host time {where} with `date` (Android's "
+                f"time service did not take the suggestion): Android may reset "
+                f"it to the snapshot's stale time on its next network-time "
+                f"update. Clock jumps are recorded in the session timeline.",
+            )
     if final is None or not final.get("ok"):
         warn_once(
             "sync",
