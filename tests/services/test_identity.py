@@ -98,6 +98,61 @@ GAID_XML = (
 )
 
 
+SYSTEM_LABEL = "u:object_r:system_data_file:s0"
+APP_LABEL = "u:object_r:app_data_file:s0"
+
+
+def _segments(line: str):
+    """``(simple command, operator after it)`` of one shell line: split at
+    ``&&``, ``||`` and ``;`` outside quotes and ``$(...)``.
+    """
+    seg, quote, depth, i = "", "", 0, 0
+    while i < len(line):
+        ch, two = line[i], line[i : i + 2]
+        if quote:
+            quote = "" if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif two == "$(":
+            depth += 1
+        elif ch == ")" and depth:
+            depth -= 1
+        elif not depth and two in ("&&", "||"):
+            yield seg.strip(), two
+            seg, i = "", i + 2
+            continue
+        elif not depth and ch == ";":
+            yield seg.strip(), ";"
+            seg, i = "", i + 1
+            continue
+        seg += ch
+        i += 1
+    if seg.strip():
+        yield seg.strip(), None
+
+
+def _expand(text: str, env: dict) -> str:
+    """``$NAME`` / ``${NAME:-default}`` outside single quotes."""
+    parts = re.split(r"('[^']*')", text)
+
+    def sub(m: re.Match) -> str:
+        if m.group(1):
+            return env.get(m.group(1)) or m.group(2)
+        return env.get(m.group(3), "")
+
+    pattern = r"\$\{(\w+):-([^}]*)\}|\$(\w+)"
+    return "".join(p if p.startswith("'") else re.sub(pattern, sub, p) for p in parts)
+
+
+def _test(args: list[str]) -> bool:
+    """``[ -n X ]``, ``[ X -gt Y ]`` (integers only, like the real one)."""
+    if args[0] == "-n":
+        return bool(args[1])
+    left, op, right = args
+    assert op == "-gt", args
+    return left.isdigit() and right.isdigit() and int(left) > int(right)
+
+
 class FakeDevice:
     """Answers the commands :mod:`identity` sends (monkeypatched ``_send``).
 
@@ -129,6 +184,16 @@ class FakeDevice:
             GAID_FILE: GAID_XML.encode(),
             APPSET_FILE: b"\x0a\x249b1e2a40-0000-4000-8000-000000000001\x10",
         }
+        #: owner / mode / SELinux label per file (``stat``, ``chown``, ``mv``).
+        self.meta: dict[str, dict[str, str]] = {
+            SSAID_FILE: {"owner": "1000:1000", "mode": "600", "label": SYSTEM_LABEL},
+            GAID_FILE: {"owner": "10050:10050", "mode": "660", "label": APP_LABEL},
+            APPSET_FILE: {"owner": "10050:10050", "mode": "600", "label": APP_LABEL},
+        }
+        #: Commands that fail (exit status 1, no effect).
+        self.fail_cmds: set[str] = set()
+        self.fail_raw_insert = False  # a raw_contacts insert silently does nothing
+        self.sync_insert = False  # a sync adapter inserts a contact concurrently
         self.packages = {
             "com.example.app": (10123, CERT),
             "com.example.two": (10124, CERT),  # same signer, never launched
@@ -148,7 +213,7 @@ class FakeDevice:
         assert serial == SERIAL, "every call names the device"
         self.calls.append(command)
         if self.crash_when_stopped and not self.running:
-            self.crash_when_stopped = False
+            self.crash_when_stopped -= 1  # True: the next call only
             raise RuntimeError("adb connection lost")
         argv = shlex.split(command)
         if argv[0] == "push":
@@ -175,25 +240,64 @@ class FakeDevice:
         if not (zygote and script.count("\n") == 1 and "abx2xml" in script):
             self.writes.append(script)
         out: list[str] = []
-        rid = ""
+        env: dict[str, str] = {}
         for line in script.splitlines():
             if line.startswith("[ -r "):
                 continue
-            if line.startswith("RID=$("):
-                rid = str(self.next_id - 1)
-                continue
-            line = line.replace('"$RID"', rid)
-            lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
-            lexer.whitespace_split = True
-            cmd: list[str] = []
-            for tok in [*list(lexer), ";"]:
-                if tok in (";", "&&"):
-                    if cmd:
-                        out.append(self._run(cmd, zygote))
-                    cmd = []
-                else:
-                    cmd.append(tok)
+            ok, op = True, None
+            for seg, nxt in _segments(line):
+                if op in (None, ";") or (op == "&&") == ok:
+                    text, ok = self._segment(seg, env, zygote)
+                    if text:
+                        out.append(text)
+                op = nxt
         return "\n".join(o for o in out if o)
+
+    def _segment(self, seg: str, env: dict, zygote: bool) -> tuple[str, bool]:
+        """One simple command: ``(output, exit ok)``."""
+        assign = re.fullmatch(r"(\w+)=(.*)", seg, re.S)
+        if assign:
+            name, expr = assign.groups()
+            if expr.startswith("$(") and expr.endswith(")"):
+                env[name] = self._capture(expr[2:-1], env, zygote)
+            else:
+                env[name] = (shlex.split(_expand(expr, env)) or [""])[0]
+            return "", True
+        argv = shlex.split(_expand(seg, env))
+        if argv[0] == "[":
+            return "", _test(argv[1:-1])
+        if argv[0] in self.fail_cmds:
+            return "", False
+        return self._run(argv, zygote), True
+
+    def _capture(self, inner: str, env: dict, zygote: bool) -> str:
+        """``$(cmd | sed ...)``: ``stat`` and ``content query`` + sed."""
+        stages = [s.strip() for s in re.split(r"(?<!\|)\|(?!\|)", inner)]
+        argv = shlex.split(_expand(stages[0], env))
+        if argv[0] == "stat":
+            meta = self.meta.get(argv[3]) if argv[3] in self.fs else None
+            if meta is None:
+                return ""
+            return {"%u:%g": meta["owner"], "%a": meta["mode"], "%C": meta["label"]}[
+                argv[2]
+            ]
+        assert argv[:2] == ["content", "query"], argv
+        if not zygote:
+            return ""
+        assert argv[argv.index("--uri") + 1] == ident._RAW_CONTACTS
+        ids = sorted(c["id"] for c in self.contacts)
+        if "--where" in argv:
+            floor = int(argv[argv.index("--where") + 1].split(">")[1])
+            ids = [i for i in ids if i > floor]
+        if "--sort" in argv and argv[argv.index("--sort") + 1] == "_id DESC":
+            ids.reverse()
+        for stage in stages[1:]:
+            script = shlex.split(stage)[-1]
+            assert stage.startswith("sed -n"), stage
+            assert "_id=" in script, stage
+            if script.startswith("1"):
+                ids = ids[:1]
+        return "\n".join(str(i) for i in ids)
 
     # -- commands -----------------------------------------------------------
 
@@ -206,12 +310,22 @@ class FakeDevice:
             return " ".join(argv[1:])
         if name == "cat" and ">" in argv:
             self.fs[argv[3]] = self.fs[argv[1]]
+            self.meta[argv[3]] = {"owner": "0:0", "mode": "644", "label": "new"}
+            return ""
+        if name == "mv":
+            src, dst = argv[-2:]
+            self.fs[dst] = self.fs.pop(src)
+            self.meta[dst] = self.meta.pop(src)
+            return ""
+        if name in ("chown", "chmod", "chcon"):
+            key = {"chown": "owner", "chmod": "mode", "chcon": "label"}[name]
+            self.meta[argv[2]][key] = argv[1]
             return ""
         if name == "rm":
             for path in argv[2:]:
                 self.fs.pop(path, None)
             return ""
-        if name in ("chown", "chmod", "restorecon", "am"):
+        if name in ("restorecon", "am"):
             return ""
         if name == "stop":
             self.running = False
@@ -255,8 +369,12 @@ class FakeDevice:
             return ""
         assert op == "insert"
         if uri.endswith("/raw_contacts"):
-            self.contacts.append({"id": self.next_id})
-            self.next_id += 1
+            if not self.fail_raw_insert:
+                self.contacts.append({"id": self.next_id})
+                self.next_id += 1
+            if self.sync_insert:
+                self.contacts.append({"id": self.next_id, "name": "Synced Person"})
+                self.next_id += 1
         elif uri.endswith("/data"):
             row = next(
                 c for c in self.contacts if str(c["id"]) == binds["raw_contact_id"]
@@ -492,6 +610,48 @@ def test_markers_must_be_distinct_and_not_contain_each_other():
     assert any("same value" in i.message for i in errors), errors
 
 
+@pytest.mark.parametrize("duration", [-1, "12s", 1.5, True, 2**31, "\u0663"])
+def test_validation_rejects_a_bad_call_duration(duration):
+    profile = _profile()
+    profile.calls[0]["duration"] = duration
+    paths = [i.path for i in ident.validate(profile) if i.severity == "error"]
+    assert paths == ["calls.0.duration"]
+
+
+def test_validation_accepts_call_durations_in_seconds():
+    profile = _profile()
+    profile.calls[0]["duration"] = "17"
+    profile.calls[1].pop("duration", None)
+    assert not [i for i in ident.validate(profile) if i.severity == "error"]
+
+
+def test_validators_reject_a_trailing_newline():
+    bad = _profile()
+    bad.token = TOKEN + "\n"
+    assert [i.path for i in ident.validate(bad)] == ["token"]
+    bad = _profile()
+    bad.id = "mara-de\n"
+    assert "id" in [i.path for i in ident.validate(bad)]
+    for kind, value, provider in [
+        ("gaid", "3f9a1c07-6c1e-4b7a-9f2d-08e5d1c4a9b3\n", "native"),
+        ("phone_number", "+4915201234567\n", "hook"),
+        ("phone_number", "1520123\u0664", "native"),
+        ("locale", "de-DE\n", "native"),
+        ("account", "a@b.de\n", "hook"),
+        ("imei", "49015420323751\u0668", "hook"),
+    ]:
+        found = ident._check_value(kind, value, provider, "")
+        assert [m for sev, m in found if sev == "error"], (kind, value)
+    profile = _profile()
+    profile.contacts[0]["phone"] = "+4917012345\n"
+    profile.contacts[0]["email"] = "x.{token}@example.org\n"
+    paths = {i.path for i in ident.validate(profile) if i.severity == "error"}
+    assert {"contacts.0.phone", "contacts.0.email"} <= paths
+    with pytest.raises(ProfileError):
+        ident._profile_path("mara\n")
+    assert TOKEN not in ident.preflight_script([], [TOKEN + "\n"])
+
+
 def test_validation_flags_structure_errors():
     profile = _profile()
     profile.values["gaid"] = ValueSpec("gaid", value="x", derive="uuid")
@@ -660,7 +820,7 @@ def test_zygote_env_prefixes_content_and_abx_commands(service, device):
 
 
 def test_crash_after_stop_resumes(service, device):
-    device.crash_when_stopped = True
+    device.crash_when_stopped = 2  # the link stays down for the `start` too
     with pytest.raises(RuntimeError, match="adb connection lost"):
         service.apply(SERIAL, "com.example.app")
     assert not device.running
@@ -673,6 +833,121 @@ def test_crash_after_stop_resumes(service, device):
     assert device.ssaid["com.example.app"].startswith("3f9a1c07")
     recover = [x for x in lines if x["kind"] == "restart"]
     assert recover[0]["data"]["recovery"] is True
+
+
+def _cmds(device) -> list[list[str]]:
+    """Every simple command sent, in order (``shell`` scripts split up)."""
+    out = []
+    for call in device.calls:
+        argv = shlex.split(call)
+        if argv[0] != "shell":
+            continue
+        for line in argv[1].splitlines():
+            out += [shlex.split(seg) for seg, _op in _segments(line) if seg]
+    return out
+
+
+def test_an_error_in_the_restart_window_still_starts_the_framework(service, device):
+    device.crash_when_stopped = True  # one dropped call, then adb is back
+    with pytest.raises(RuntimeError, match="adb connection lost"):
+        service.apply(SERIAL, "com.example.app")
+    cmds = _cmds(device)
+    assert cmds.index(["start"]) > cmds.index(["stop"])
+    assert device.running
+    assert RESTART_MARKER not in device.fs  # the framework is back
+    assert device.ssaid["com.example.app"] == "1111222233334444"  # untouched
+    st = {s.id: s for s in service.statuses()}
+    assert st["android_id"].status == "failed"
+    assert st["android_id"].reason.startswith("restart window aborted")
+
+
+def test_a_host_error_while_writing_still_starts_the_framework(
+    service, device, monkeypatch
+):
+    real_mkstemp = ident.tempfile.mkstemp
+
+    def no_temp(*a, **k):
+        if device.running:
+            return real_mkstemp(*a, **k)
+        raise OSError("disk full")  # only inside the restart window
+
+    monkeypatch.setattr(ident.tempfile, "mkstemp", no_temp)
+    with pytest.raises(OSError, match="disk full"):
+        service.apply(SERIAL, "com.example.app")
+    assert device.running
+    assert ["start"] in _cmds(device)
+    assert RESTART_MARKER not in device.fs
+
+
+def test_malformed_ssaid_rows_do_not_break_the_edit(service, device):
+    xml = SSAID_XML.replace('id="1"', 'id="x1"')
+    device.fs[SSAID_FILE] = b"ABX\0" + xml.encode()
+    plan = service.apply(SERIAL, "com.example.app")
+    assert plan.infos["android_id"].status == "verified"
+    assert ident._edit_ssaid(xml, {"com.new": {"uid": "1", "value": "ab"}})
+    assert ident._edit_ssaid("<settings", {}) is None
+
+
+def test_ssaid_write_goes_through_a_sibling_temp_file_and_mv(service, device):
+    before = dict(device.meta[SSAID_FILE])
+    service.apply(SERIAL, "com.example.app")
+    script = next(w for w in device.writes if "xml2abx" in w)
+    assert f"> {SSAID_FILE} " not in script  # never truncated in place
+    tmp = re.search(rf"> ({re.escape(SSAID_FILE)}\.sandroid-[0-9a-f]+)", script)
+    assert tmp
+    assert f"mv -f {tmp.group(1)} {SSAID_FILE}" in script
+    assert f'chcon "$L" {tmp.group(1)}' in script
+    assert device.meta[SSAID_FILE] == before  # owner, mode, label copied
+    assert not [p for p in device.fs if ".sandroid-" in p]
+
+
+def test_a_failed_label_copy_leaves_the_ssaid_file_alone(service, device):
+    original = device.fs[SSAID_FILE]
+    device.fail_cmds.add("chcon")
+    plan = service.apply(SERIAL, "com.example.app")
+    assert plan.infos["android_id"].status == "failed"
+    assert device.fs[SSAID_FILE] == original
+    assert not [p for p in device.fs if ".sandroid-" in p]  # temp file removed
+    assert device.running
+
+
+@pytest.mark.parametrize("trouble", ["fail_raw_insert", "sync_insert"])
+def test_contact_rows_never_attach_to_another_contact(service, device, trouble):
+    real = {"id": 50, "name": "Real Person", "phone": "+4917000000"}
+    device.contacts.append(dict(real))
+    setattr(device, trouble, True)
+    plan = service.apply(SERIAL, "com.example.app")
+    info = plan.infos["contacts"]
+    assert info.status == "failed"
+    assert "contacts.0" in info.reason
+    assert device.contacts[0] == real
+    assert not [c for c in device.contacts if "email" in c]  # no data rows
+    script = next(w for w in device.writes if "raw_contacts" in w)
+    inserts = [ln for ln in script.splitlines() if "content insert" in ln]
+    assert inserts
+    assert all(" && " in ln and " || echo " in ln for ln in inserts)
+    assert '[ "$NEW" -gt "$MAX" ]' in script
+
+
+def test_contacts_are_seeded_when_others_exist(service, device):
+    device.contacts.append({"id": 50, "name": "Real Person"})
+    device.next_id = 51
+    plan = service.apply(SERIAL, "com.example.app")
+    assert plan.infos["contacts"].status == "verified"
+    assert device.contacts[0] == {"id": 50, "name": "Real Person"}
+    assert len(device.contacts) == 4
+
+
+def test_statuses_name_their_profile_fingerprint_and_time(service, device):
+    before = ident.time.time()
+    plan = service.apply(SERIAL, "com.example.app")
+    statuses = service.statuses()
+    assert statuses
+    for info in statuses:
+        assert info.profile_id == plan.profile_id == "mara-de"
+        assert info.fingerprint == plan.fingerprint
+        assert info.at >= before
+    assert plan.infos["gaid"].at == statuses[0].at
 
 
 def test_no_restart_mode_leaves_framework_values_pending(service, device):
