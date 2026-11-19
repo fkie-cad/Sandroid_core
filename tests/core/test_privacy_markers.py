@@ -180,3 +180,30 @@ def test_scan_is_fast_enough_for_flow_bodies():
     start = time.perf_counter()
     needles.scan(body)
     assert time.perf_counter() - start < 0.5
+
+
+def test_uuid_as_raw_16_bytes_and_base64_of_them():
+    import uuid
+
+    needles = build_needles([Marker("ad_id", AD_ID, kind="uuid")])
+    raw = uuid.UUID(AD_ID).bytes
+    assert _transforms(needles.scan(b"\x0a\x10" + raw + b"\x18"), "ad_id") == {
+        "bytes(value)"
+    }
+    assert _transforms(needles.scan(base64.b64encode(b"\x0a\x10" + raw)), "ad_id") == {
+        "base64(bytes(value))"
+    }
+
+
+def test_coordinate_as_protobuf_double():
+    import struct
+
+    needles = build_needles([Marker("lat", "50.734170", kind="latitude")])
+    proto = b"\x09" + struct.pack("<d", 50.73417)  # field 1, wire type 1 (64-bit)
+    assert _transforms(needles.scan(proto), "lat") == {"double_le(value)"}
+
+
+def test_max_needle_len_for_chunk_overlap():
+    needles = build_needles([Marker("email", EMAIL, kind="email")])
+    assert needles.max_needle_len == max(len(n.pattern) for n in needles.needles)
+    assert build_needles([]).max_needle_len == 0

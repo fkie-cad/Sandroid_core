@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import struct
 import urllib.parse
+import uuid
 from dataclasses import dataclass, replace
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import TYPE_CHECKING
@@ -148,6 +150,11 @@ class NeedleSet:
         return len(self._folded) + len(self._exact)
 
     @property
+    def max_needle_len(self) -> int:
+        """Longest pattern; chunked callers overlap chunks by this minus one."""
+        return max((len(n.pattern) for n in self.needles), default=0)
+
+    @property
     def needles(self) -> tuple[Needle, ...]:
         """All needles, case-insensitive ones first."""
         return self._folded + self._exact
@@ -231,6 +238,19 @@ def _needles_for(marker: Marker) -> list[Needle]:
     needles: list[Needle] = []
     for form, name in _plain_forms(marker):
         needles.extend(_encoded_needles(marker, form, name))
+    if marker.kind == "uuid":
+        needles.extend(_uuid_binary_needles(marker))
+    return needles
+
+
+def _uuid_binary_needles(marker: Marker) -> list[Needle]:
+    """The 16 raw bytes of a UUID (protobuf ``bytes`` fields, binary files)."""
+    try:
+        raw = uuid.UUID(marker.value.strip()).bytes
+    except ValueError:
+        return []
+    needles = [Needle(raw, False, marker, "bytes(value)", "high")]
+    needles += _base64_needles(marker, raw, "bytes(value)", "high")
     return needles
 
 
@@ -369,6 +389,12 @@ def _coordinate_needles(marker: Marker) -> list[Needle]:
         raw = text.encode("ascii")
         needles.append(Needle(raw, True, marker, transform, confidence))
         needles += _base64_needles(marker, raw, transform, confidence)
+    # Binary IEEE-754 forms (protobuf/FlatBuffers doubles and floats). Only
+    # the exact seeded value can match, so these are strong evidence.
+    exact = float(number)
+    for fmt, name in (("<d", "double_le"), (">d", "double_be"), ("<f", "float_le")):
+        raw = struct.pack(fmt, exact)
+        needles.append(Needle(raw, False, marker, f"{name}(value)", "high"))
     return needles
 
 
