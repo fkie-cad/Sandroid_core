@@ -562,7 +562,143 @@ reached through a small ``session_root()`` helper so it can move later.
 6. Chat dock UI
 ---------------
 
-See the UI addendum appended after design review.
+Two UI design passes on 2026-11-19 produced this section. The mockups and headless
+renders live in the session scratchpad (``ui-dock/mockups.txt``, ``ui-look/mock_transcript.txt``,
+``ui-look/mascots.py``).
+
+**Hotkey**
+
+- Keep **Ctrl+Y**; there is no collision in Textual 8.2.7 or the app.
+- Change it to ``Binding("ctrl+y", "toggle_chat", "AI chat", show=False, id="toggle_chat")``
+  so ``tui.keybindings`` can rebind it.
+- Register a ``toggle_chat`` action in ``menu_controller.py`` (NAVIGATION category,
+  ``[^Y] AI chat``) so it appears in the command palette and the keymap editor.
+- Show the hint ``^Y AI`` in the LogTicker, and update the help text, which still says
+  "side panel".
+
+**Placement**
+
+- The chat docks in the **bottom half of the left column**, under the lens. The
+  Inspector stays on the right, and the two can be open at the same time.
+- Compose: ``#workspace > [Vertical#left-col > (#lens-host, ChatDock#chat-dock > ChatPanel), #side-slot > Inspector]``.
+  ChatPanel is composed once and never unmounts.
+- State:
+
+  - ``_chat_mode`` is one of ``closed``, ``split`` or ``max``.
+  - ``_chat_ratio`` takes the presets 0.3, 0.5 or 0.7 (default 0.5).
+  - ``_side_mode`` is ``inspector`` or None.
+
+- **Sizing.** Chat rows are ``clamp(round(H*ratio), 10, H-6)``. When ``H < 16``, the
+  layout switches to an effective max. Inline height is always reset when switching to
+  max.
+- **Keys.**
+
+  - **Shift+Up / Shift+Down** step through 0.3, 0.5, 0.7 and max. Ctrl+Up/Down are
+    avoided because macOS uses them for Mission Control.
+  - **Esc** in the dock focuses the lens, and the chat stays open.
+  - **Ctrl+Y** opens the chat and focuses the input. If the chat is open but not
+    focused, it focuses it. If it is open and focused, it closes it.
+  - The ``handle_escape`` order is: dock focus → lens, then Inspector, then log
+    drawer, then chat.
+
+- **Mouse.** Dragging the top border resizes and snaps to the presets. A double-click
+  toggles max.
+- **Persistence.** The split is persisted in ``TUIConfig.chat_dock`` (ratio,
+  maximized) through ``ConfigLoader.load_and_update_section``. The chat always starts
+  closed.
+- **Narrow terminals.** Below 120 columns, add the screen class ``-narrow`` with
+  ``#side-slot{width:45%;min-width:0}``. While the chat is open, the log drawer gets
+  ``max-height:30%``.
+- On first open, scroll to the top so the egress banner is visible.
+
+**Look**
+
+- **Theme tokens only.** Use the ``$lens-*`` tokens, plus six new variables built in
+  ``themes/__init__.py`` ``build_textual_theme`` from existing ``Theme`` fields:
+
+  - ``chat-user-band``
+  - ``chat-reply``
+  - ``chat-tool``
+  - ``chat-wait``
+  - ``chat-muted``
+  - ``chat-brand``
+
+  Delete the hard-coded ``#chat-*``/ChatPanel rules from ``styles.tcss`` and the 13
+  ``themes/*.tcss`` files.
+- **Dock frame.**
+
+  - Border ``round $lens-rule``; under ``:focus-within`` it becomes ``$lens-rule-focus``.
+  - Title ``▚▄▄▞ Sandroid AI`` in ``$lens-accent``.
+  - Subtitle ``50% · ⇧↑↓ size · ^Y close``.
+
+- **Transcript.** Replace the RichLog with ``ChatTranscript(VerticalScroll)``, holding one
+  widget per block keyed by turn, call or agent id:
+
+  - ``UserBlock``: the full-width band, "Variant I".
+  - ``ReplyBlock``: ``Markdown`` fed by ``get_stream()``, so only the live block
+    re-renders.
+  - ``ReasoningLine``: ``✧ Thinking… 3s`` / ``✧ Thought for 4s``.
+  - ``ToolBlock``:
+
+    - The call line is ``● Name args``, with a spinner while running.
+    - The result chip ``└ ✓ R17 · 12 rows · 0.4s`` or ``└ ✗ code: message`` is filled
+      in place.
+
+  - ``AgentCard``: a round border, the title ``◆ researcher r2 · ✓ done · 38s · 9.2k tok``,
+    and claims shown as R-id chips.
+  - ``CompactionRule``: ``─ ⟲ compacted · 182k → 41k ─``.
+  - ``NoticeLine``: ``↻ Retrying in 4s · attempt 2/5``, updated in place.
+  - ``BudgetNotice`` with ``[Continue] [Stop]``.
+
+  Every block is ``width: 1fr``; message boxes use the full width. At most about 300
+  blocks stay mounted, and older turns fold into ``▸ N earlier turns``.
+- **Header** (one row): state dot, state, model, ``REMOTE`` / ``EXPERIMENTAL``, then
+  ``◔ 41k/262k 16%``. The glyph steps through ○◔◑◕●. The colour is ``$lens-dim`` below
+  50%, ``$lens-warn`` from 50% and ``$lens-bad`` from 85%. After that come ``⟲n`` and
+  ``◆n``. At 60 columns the model is dropped. Updates are throttled to 10 Hz or less.
+- **Approval card.** It is pinned above the input.
+
+  - Title: ``⚠ <agent> wants to run <Tool>``.
+  - Options:
+
+    - ``1 Yes``
+    - ``2 Yes, don't ask again for <rule>``
+    - ``3 No, and tell it what to do instead…`` (opens a note Input)
+
+  - Keys 1–3, ↑↓ and Enter; Esc means No. Once answered, it collapses into one
+    transcript line.
+
+- **Below the scroll area:** the agents bar (one line) and the input row
+  (``Ask Sandroid… / for commands``, subtitle ``⏎ send · ^X stop``) with the mascot
+  beside it. Typing ``/`` shows a slash-command hint list.
+- **Empty state.** Mascot C (the head standing in a ``╘═══════╛`` sandbox tray), plus
+  the model, endpoint and egress notice, two example prompts and the slash commands.
+- **Mascot B, "Blockhead".** It is 9×3 and drawn with half and quadrant blocks. It sits
+  in a normal ``Horizontal`` beside the 3-row input, with no overlay layer.
+
+  ::
+
+       ▚   ▞
+      ▄█████▄
+     ▐█▄███▄█▌
+
+  The states and the ASCII fallback are in ``ui-look/mascots.py``:
+
+  - idle blink
+  - thinking eye-scan
+  - streaming antennae
+  - tool squint
+  - approval in ``$chat-wait``
+  - error with ``x`` eyes
+
+  ``ai.chat_mascot`` is one of ``auto``, ``blocks``, ``ascii`` or ``off``, and the old
+  ``show_chat_mascot`` is kept as an alias. ``auto`` chooses ASCII when the encoding is
+  not UTF-8 or ``TERM`` is ``linux``, ``vt100`` or ``dumb``. The mascot is hidden below
+  50 columns, and its timer runs only in animated states. The Braille mascot, overlay
+  layer and ``_log_full`` gating are deleted. The startup logo is unchanged.
+- **Files.** The block widgets, pure formatters and ``ChatMascot`` go in one new module,
+  ``tui/widgets/chat_view.py``. The approval card replaces the body of
+  ``tool_permission_prompt.py``.
 
 .. _7-verification:
 
