@@ -16,7 +16,7 @@ import pytest
 
 from sandroid.ai import agents, loop
 from sandroid.ai.agents import Gateway, GatewayClient
-from sandroid.ai.client import StreamChunk, Usage
+from sandroid.ai.client import StreamChunk, StreamError, Usage
 from sandroid.ai.loop import RunContext
 from sandroid.ai.tools import lens_rows
 from sandroid.ai.tools.registry import RiskTier, ToolError, get_tool_registry
@@ -209,7 +209,7 @@ def test_mutating_tools_refuse_in_a_subagent(store, flow_dir):
     [
         ({"method": ["post"]}, ["a1", "a3"]),
         ({"method": "GET"}, ["a2"]),
-        ({"host_glob": ["*.example.com"]}, ["a1", "tls-4"]),
+        ({"host_glob": ["*.example.com"]}, ["a1"]),
         ({"path_glob": ["/v1/*"]}, ["a1"]),
         ({"path_glob": ["img.png"]}, ["a2"]),
         ({"url_regex": r"track\?imei=\d+"}, ["a1"]),
@@ -218,8 +218,8 @@ def test_mutating_tools_refuse_in_a_subagent(store, flow_dir):
         ({"content_type_glob": "*json*"}, ["a1"]),
         ({"app": "com.other"}, ["a3"]),
         ({"min_bytes": 1000}, ["a2"]),
-        ({"max_bytes": 110}, ["a3", "tls-4"]),
-        ({"kind": "tls"}, ["tls-4"]),
+        ({"max_bytes": 110}, ["a3"]),
+        ({"kind": "flow"}, ["a1", "a2", "a3"]),
         ({"text": "OTHER.NET"}, ["a3"]),
         ({"body_contains": "alice@"}, ["a1"]),
         ({"body_contains": "hunter2", "method": ["POST"]}, ["a3"]),
@@ -231,9 +231,9 @@ def test_find_rows_network_predicates(store, flow_dir, where, expected):
     result = lens_rows.find_rows("network", where)
     assert result["source"] == "flow_log"
     assert result["keys"] == expected
-    assert result["scanned"] == 4
+    assert result["scanned"] == 3  # the TLS failure row (no flow id in the lens)
     assert result["matched"] == len(expected)
-    assert f"{len(expected)} of 4 network rows" in result["summary"]
+    assert f"{len(expected)} of 3 network rows" in result["summary"]
     assert "highlight_id" not in result
 
 
@@ -258,18 +258,19 @@ def test_find_rows_apply_creates_extends_and_filters(store, flow_dir):
     assert hs.origin == "structural"
     assert hs.label == "POST requests"
     assert set(hs.reasons) == {"a1", "a3"}
-    assert hs.basis["through_seq"] == 4
+    assert hs.basis["through_seq"] == 3
     assert store.filter_set("network") is None
-    assert "Highlighted 2 of 4" in result["summary"]
+    assert "Highlighted 2 of 3" in result["summary"]
     more = lens_rows.find_rows(
-        "network", {"kind": "tls"}, apply="filter", highlight_id=hid
+        "network", {"method": ["GET"]}, apply="filter", highlight_id=hid
     )
     assert more["highlight_id"] == hid
-    assert set(store.keys(hid)) == {"a1", "a3", "tls-4"}
+    assert set(store.keys(hid)) == {"a1", "a3", "a2"}
     assert store.filter_set("network") == hid
     # Session persistence: <session>/ai/highlights.json
     path = store.path
     assert path is not None
+    assert store.flush()
     assert path.is_file()
     nothing = lens_rows.find_rows("network", {"method": ["PUT"]}, apply="highlight")
     assert nothing["highlight_id"] is None
@@ -410,7 +411,7 @@ def test_files_fallback_from_the_monitor_history(store, monkeypatch):
 
 # -- classify_rows -------------------------------------------------------------------------------
 
-_KEY_RE = re.compile(r'<row key="([^"]*)">')
+_KEY_RE = re.compile(r'<row id="([^"]*)">')
 
 
 class PiiClient:
@@ -428,10 +429,10 @@ class PiiClient:
             self.calls.append(messages)
         content = messages[1]["content"]
         matches = []
-        for block in content.split("<row key=")[1:]:
-            key = json.loads(block.split(">", 1)[0])
+        for block in content.split("<row id=")[1:]:
+            rid = json.loads(block.split(">", 1)[0])
             if "@" in block or "pass=" in block:
-                matches.append({"key": key, "reason": "body holds personal data"})
+                matches.append({"id": rid, "reason": "body holds personal data"})
         if self.cancel_after is not None:
             self.cancel_after.set()
         yield StreamChunk("text", text=json.dumps({"matches": matches}))
@@ -469,9 +470,9 @@ def test_classify_rows_highlights_live_and_reports(
     added: list[dict] = []
     real_add = store.add
 
-    def spy_add(set_id, reasons):
+    def spy_add(set_id, reasons, **kw):
         added.append(dict(reasons))
-        return real_add(set_id, reasons)
+        return real_add(set_id, reasons, **kw)
 
     monkeypatch.setattr(store, "add", spy_add)
     result = lens_rows.classify_rows(
@@ -529,7 +530,7 @@ def test_classify_rows_limits(store, flow_dir, run_ctx, monkeypatch):
         lens_rows.classify_rows("network", "pii", max_rows=2)
     assert err.value.code == "invalid_arguments"
     assert "narrow with where" in err.value.hint
-    assert err.value.details["candidates"] == 4
+    assert err.value.details["candidates"] == 3
     with pytest.raises(ToolError):
         lens_rows.classify_rows("network", "pii", max_rows=5000)
     with pytest.raises(ToolError):
@@ -655,7 +656,7 @@ def test_get_rows_pages_and_reads_keys(store, flow_dir):
     page = lens_rows.get_rows("network", limit=2)
     assert [r["key"] for r in page["rows"]] == ["a1", "a2"]
     assert page["next_cursor"] == 2
-    assert page["total"] == 4
+    assert page["total"] == 3
     assert page["rows"][0]["highlights"] == [hs.id]
     assert "[Bearer, 13 chars]" in page["rows"][0]["digest"]
     assert page["rows"][1]["content"] == "binary"
@@ -694,3 +695,335 @@ def test_chat_session_binds_the_store_to_its_folder(store, tmp_path):
     other = tmp_path / "other-session"
     _bind_row_highlights(other)
     assert store.folder == other.absolute()
+
+
+# -- verifier findings: backend errors -------------------------------------------------------
+
+
+class _Cfg:
+    concurrency = 1
+    batch_rows = 1
+    batch_tokens = 24000
+    max_rows = 1000
+    max_tokens = 4096
+
+
+class ErrClient:
+    """Fails every request (or only rows whose digest contains ``fail_on``)."""
+
+    model = "fake"
+
+    def __init__(self, message="HTTP 429 rate limited", fail_on=None):
+        self.message = message
+        self.fail_on = fail_on
+        self.calls = 0
+        self.ok = PiiClient()
+
+    def stream(self, messages, tools=None, **kwargs):
+        self.calls += 1
+        if self.fail_on is None or self.fail_on in messages[1]["content"]:
+            yield StreamChunk("error", error=StreamError("http", self.message))
+            return
+        yield from self.ok.stream(messages, tools, **kwargs)
+
+
+@pytest.fixture
+def one_row_batches(monkeypatch):
+    from sandroid.ai import row_classifier
+
+    monkeypatch.setattr(row_classifier, "TRANSPORT_RETRY_S", 0.0)
+    monkeypatch.setattr(lens_rows, "_row_classify_cfg", lambda: _Cfg)
+
+
+def test_classify_rows_backend_failure_is_an_error_not_zero_found(
+    store, flow_dir, run_ctx, monkeypatch, one_row_batches
+):
+    client = ErrClient()
+    _use_client(monkeypatch, client)
+    with pytest.raises(ToolError) as err:
+        lens_rows.classify_rows("network", "personal data", where={"kind": ["flow"]})
+    assert err.value.code == "backend_error"
+    assert "HTTP 429 rate limited" in err.value.message
+    assert "none of the 3 network rows could be judged" in err.value.message
+    assert err.value.details["stop_reason"] == "backend_error"
+    assert client.calls == 3  # 1st batch twice, 2nd once: three in a row stop it
+    assert store.sets() == []  # no empty "complete" set left behind
+
+
+def test_classify_rows_reports_rows_it_could_not_judge(
+    store, flow_dir, run_ctx, monkeypatch, one_row_batches
+):
+    _use_client(monkeypatch, ErrClient("HTTP 500 boom", fail_on="other.net"))
+    result = lens_rows.classify_rows(
+        "network", "personal data", where={"kind": ["flow"]}
+    )
+    assert result["scanned"] == 2  # the errored row is not "scanned"
+    assert result["skipped"] == {"errors": 1, "not_reached": 0, "unknown_ids": 0}
+    assert result["partial"] is True
+    assert result["backend_error"] == "HTTP 500 boom"
+    assert "1 rows could not be judged (backend error: HTTP 500 boom)" in (
+        result["summary"]
+    )
+    hs = store.get(result["highlight_id"])
+    assert hs.complete is False
+    assert hs.stats["errors"] == 1
+    assert set(hs.reasons) == {"a1"}
+
+
+# -- verifier findings: the set goes away mid-run ----------------------------------------------
+
+
+def test_classify_rows_survives_the_analyst_clearing_the_set(
+    store, flow_dir, run_ctx, monkeypatch
+):
+    class ClearingClient(PiiClient):
+        def stream(self, messages, tools=None, **kw):
+            store.clear("network")  # the analyst pressed X
+            yield from super().stream(messages, tools, **kw)
+
+    _use_client(monkeypatch, ClearingClient())
+    result = lens_rows.classify_rows(
+        "network", "personal data", where={"kind": ["flow"]}
+    )
+    assert result["highlight_id"] is None
+    assert result["note"] == lens_rows.NOTE_CLEARED
+    assert result["matched"] == 2  # the stats survive
+    assert result["scanned"] == 3
+    assert {v["key"] for v in result["verdicts"]} == {"a1", "a3"}
+    assert "cleared by the analyst" in result["summary"]
+    assert store.sets() == []
+
+
+def test_find_and_highlight_rows_survive_a_cleared_set(store, flow_dir, monkeypatch):
+    hid = lens_rows.find_rows("network", {"method": ["POST"]}, apply="highlight")[
+        "highlight_id"
+    ]
+    real_add = store.add
+
+    def add_after_clear(set_id, reasons, **kw):
+        store.clear("network")
+        return real_add(set_id, reasons, **kw)
+
+    monkeypatch.setattr(store, "add", add_after_clear)
+    found = lens_rows.find_rows(
+        "network", {"method": ["GET"]}, apply="filter", highlight_id=hid
+    )
+    assert found["highlight_id"] is None
+    assert found["note"] == lens_rows.NOTE_CLEARED
+    assert found["matched"] == 1
+    hid2 = store.create("network", "again", reasons={"a1": ""}).id
+    picked = lens_rows.highlight_rows("network", keys=["a2"], highlight_id=hid2)
+    assert picked["highlight_id"] is None
+    assert picked["note"] == lens_rows.NOTE_CLEARED
+
+
+def test_classify_rows_stops_on_a_session_switch(
+    store, flow_dir, run_ctx, monkeypatch, tmp_path, one_row_batches
+):
+    other = tmp_path / "other_session"
+    prepared = rh.HighlightStore()
+    prepared.bind_folder(other)
+    prepared.create("network", "unrelated", reasons={"zzz": "old"})
+    assert prepared.flush()
+
+    class SwitchingClient(PiiClient):
+        def stream(self, messages, tools=None, **kw):
+            if not self.calls:
+                store.bind_folder(other)  # the analyst opened another session
+            yield from super().stream(messages, tools, **kw)
+
+    client = SwitchingClient()
+    _use_client(monkeypatch, client)
+    result = lens_rows.classify_rows(
+        "network", "personal data", where={"kind": ["flow"]}
+    )
+    assert result["stop_reason"] == "session_switched"
+    assert result["partial"] is True
+    assert result["highlight_id"] is None
+    assert result["note"] == lens_rows.NOTE_SWITCHED
+    assert len(client.calls) == 1  # the remaining batches were dropped
+    assert result["matched"] == 1
+    assert result["scanned"] == 1
+    # The new session's h1 is untouched, in memory and on disk.
+    assert [(s.id, s.label, list(s.reasons)) for s in store.sets()] == [
+        ("h1", "unrelated", ["zzz"])
+    ]
+    assert store.flush()
+    data = json.loads((other / "ai" / "highlights.json").read_text())
+    assert [(s["id"], s["label"], list(s["reasons"])) for s in data["sets"]] == [
+        ("h1", "unrelated", ["zzz"])
+    ]
+
+
+# -- verifier findings: "N new since" basis ----------------------------------------------------
+
+
+def test_classify_rows_new_since_basis_covers_every_row_of_the_view(
+    store, flow_dir, run_ctx, monkeypatch
+):
+    from sandroid.tui.widgets.highlight_bar import HighlightView
+
+    _use_client(monkeypatch, PiiClient())
+    # Only a1 (seq 1) is a candidate; a2 and a3 already existed.
+    result = lens_rows.classify_rows(
+        "network", "personal data", where={"host_glob": ["api.*"]}
+    )
+    hs = store.get(result["highlight_id"])
+    assert hs.basis["through_seq"] == 3
+    view = HighlightView("network")
+    rows = [("a1", True, 1, 1001.5), ("a2", True, 2, 1002.5), ("a3", True, 3, 1003.5)]
+    view.measure(iter(rows), live=True)
+    assert view.counts[hs.id].new == 0
+    view.measure(iter([*rows, ("a9", True, 4, 1004.5)]), live=True)
+    assert view.counts[hs.id].new == 1
+
+
+# -- verifier findings: where -------------------------------------------------------------------
+
+
+def test_where_regex_is_guarded_and_bad_regex_is_explained(store, flow_dir):
+    with pytest.raises(ToolError) as err:
+        lens_rows.find_rows("network", {"body_contains": "(a+)+$", "regex": True})
+    assert err.value.code == "invalid_arguments"
+    assert "refused" in err.value.message
+    with pytest.raises(ToolError) as err:
+        lens_rows.find_rows("network", {"text": "([a-z]", "regex": True})
+    assert "not a valid regular expression" in err.value.message
+    assert "regex=true" in err.value.hint
+    ok = lens_rows.find_rows("network", {"body_contains": r"pass=\w+", "regex": True})
+    assert ok["keys"] == ["a3"]
+
+
+def test_where_haystack_is_capped(store, monkeypatch):
+    from sandroid.ai import row_classifier
+
+    store.register_row_source("files", lambda: FILE_ROWS, None)
+    big = "x" * (lens_rows.HAYSTACK_CAP + 10) + "needle"
+    monkeypatch.setattr(
+        row_classifier,
+        "local_file_content",
+        lambda key: (big if key.endswith(".xml") else "needle", "content"),
+    )
+    for regex in (False, True):
+        result = lens_rows.find_rows(
+            "files", {"content_contains": "needle", "regex": regex}
+        )
+        assert result["keys"] == ["/data/data/com.x/databases/c.db"]
+
+
+def test_tls_rows_are_never_rows_of_the_tools(store, flow_dir):
+    with pytest.raises(ToolError) as err:
+        lens_rows.find_rows("network", {"kind": ["tls"]})
+    assert "flow, error" in err.value.message
+    assert "tls" not in lens_rows._WHERE_PROP["description"]
+    rows, source = lens_rows.collect_rows("network")
+    assert source == "flow_log"
+    assert "tls-4" not in {r["key"] for r in rows}
+    lens = [{"flow_id": "x1", "kind": "tls", "shown": True, "host": "h"}]
+    store.register_row_source("network", lambda: lens, None)
+    assert lens_rows.collect_rows("network") == ([], "lens")
+
+
+@pytest.mark.parametrize(
+    ("pattern", "canonical"),
+    [
+        ("/data/user/0/com.x/shared_prefs/*", "/data/data/com.x/shared_prefs/*"),
+        ("/storage/emulated/0/Down*", "/sdcard/Down*"),
+        ("/data/user/0/com.x/a.xml", "/data/data/com.x/a.xml"),
+        ("/data/data/com.x/*.db", "/data/data/com.x/*.db"),
+        ("*.xml", "*.xml"),
+        ("databases/*", "databases/*"),
+    ],
+)
+def test_path_glob_takes_the_canonical_form(pattern, canonical):
+    assert lens_rows.canonical_glob(pattern) == canonical
+
+
+def test_files_path_glob_matches_alias_paths(store):
+    store.register_row_source("files", lambda: FILE_ROWS, None)
+    result = lens_rows.find_rows(
+        "files", {"path_glob": ["/data/user/0/com.x/shared_prefs/*"]}
+    )
+    assert result["keys"] == ["/data/data/com.x/shared_prefs/p.xml"]
+
+
+# -- verifier findings: highlight_rows edge cases and caps ---------------------------------------
+
+
+def test_highlight_rows_refuses_remove_and_replace_that_change_nothing(store, flow_dir):
+    for action in ("remove", "replace"):
+        with pytest.raises(ToolError) as err:
+            lens_rows.highlight_rows("network", keys=["a1"], action=action)
+        assert "needs highlight_id" in err.value.message
+    assert store.sets() == []
+    hid = lens_rows.highlight_rows("network", keys=["a1", "a3"], label="x")[
+        "highlight_id"
+    ]
+    with pytest.raises(ToolError) as err:
+        lens_rows.highlight_rows(
+            "network", keys=["nope"], highlight_id=hid, action="replace"
+        )
+    assert err.value.details["unknown_keys"] == ["nope"]
+    with pytest.raises(ToolError) as err:
+        lens_rows.highlight_rows(
+            "network", keys=["a2"], highlight_id=hid, action="remove"
+        )
+    assert err.value.details["unknown_keys"] == ["a2"]
+    with pytest.raises(ToolError):
+        lens_rows.highlight_rows("network", highlight_id=hid, action="replace")
+    assert sorted(store.keys(hid)) == ["a1", "a3"]  # nothing was wiped
+
+
+def test_the_row_cap_is_reported_not_silent(store, flow_dir, monkeypatch):
+    monkeypatch.setattr(rh, "MAX_KEYS_PER_SET", 2)
+    monkeypatch.setattr(lens_rows, "MAX_KEYS_PER_SET", 2)
+    with pytest.raises(ToolError) as err:
+        lens_rows.find_rows("network", {"kind": ["flow"]}, apply="highlight")
+    assert "holds at most 2 rows" in err.value.message
+    assert "Narrow `where`" in err.value.hint
+    assert store.sets() == []
+    hid = lens_rows.highlight_rows("network", keys=["a1"], label="x")["highlight_id"]
+    added = lens_rows.highlight_rows("network", keys=["a2", "a3"], highlight_id=hid)
+    assert added["total"] == 2
+    assert added["truncated_by_cap"] == 1
+    assert "1 rows not added" in added["summary"]
+    store.remove_keys(hid, ["a2"])
+    found = lens_rows.find_rows(
+        "network", {"kind": ["flow"]}, apply="highlight", highlight_id=hid
+    )
+    assert found["truncated_by_cap"] == 1
+    assert "1 matching rows not added" in found["summary"]
+    assert len(store.keys(hid)) == 2
+
+
+def test_classify_rows_reports_the_cap_in_summary_and_stats(
+    store, flow_dir, run_ctx, monkeypatch
+):
+    monkeypatch.setattr(rh, "MAX_KEYS_PER_SET", 2)
+    monkeypatch.setattr(lens_rows, "MAX_KEYS_PER_SET", 2)
+    hid = store.create("network", "full", reasons={"zz": "", "a2": ""}).id
+    _use_client(monkeypatch, PiiClient())
+    result = lens_rows.classify_rows("network", "pii", highlight_id=hid)
+    assert result["truncated_by_cap"] == 2
+    assert "2 matches not added" in result["summary"]
+    assert store.get(hid).stats["truncated_by_cap"] == 2
+
+
+# -- verifier findings: bounded result --------------------------------------------------------------
+
+
+def test_classify_rows_result_holds_at_most_max_verdicts(
+    store, flow_dir, run_ctx, monkeypatch
+):
+    from sandroid.ai.results import ResultStore, shape_result
+
+    monkeypatch.setattr(lens_rows, "MAX_VERDICTS", 1)
+    _use_client(monkeypatch, PiiClient())
+    result = lens_rows.classify_rows("network", "personal data")
+    assert len(result["verdicts"]) == 1
+    assert result["verdicts_truncated"] == 1
+    assert len(store.keys(result["highlight_id"])) == 2  # the set has all
+    # The result still goes through the result store and its preview.
+    stored = ResultStore(None).put("classify_rows", {}, result)
+    shaped = json.loads(shape_result(result, stored.id, cap_tokens=50))
+    assert shaped.get("_rid") == stored.id or stored.id in json.dumps(shaped)

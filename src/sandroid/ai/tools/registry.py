@@ -65,6 +65,7 @@ TOOL_ERROR_CODES = frozenset(
         "cancelled",
         "device_unavailable",
         "tool_failed",
+        "backend_error",
     }
 )
 

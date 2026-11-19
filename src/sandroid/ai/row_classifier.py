@@ -4,24 +4,33 @@ Two parts, both without Textual:
 
 * **Digests**: one compact text per lens row (a Network flow, a Files path)
   that both ``get_rows`` and the classifier send to the model. Network:
-  a summary line, query parameters, headers (auth and cookie values reduced
-  to their type and length), the request body (at most 1.5 KB) and the
-  response body (at most 1 KB), JSON minified and form bodies split into
-  fields, binary bodies as ``[binary 34 kB image/png]``; about 3 KB per row.
-  Files: path, app, ops, count, processes, times, and -- only when a local
-  kept version exists -- a text head or the SQLite table list plus a diff
-  head. With ``ai.mask_sensitive`` on, every digest goes through
-  :func:`~sandroid.ai.safety.redact_secrets`.
+  a summary line, query parameters, headers, the request body (at most
+  1.5 KB) and the response body (at most 1 KB), JSON minified and form
+  bodies split into fields, binary bodies as ``[binary 34 kB image/png]``;
+  about 3 KB per row. Headers, query parameters and JSON / form fields whose
+  *name* looks secret (auth, token, key, secret, session, cookie, password,
+  signature) are always reduced to their type and length. Files: path, app,
+  ops, count, processes, times, and -- only when a local kept version
+  exists -- a text head or the SQLite table list plus a diff head. With
+  ``ai.mask_sensitive`` on, every digest also goes through
+  :func:`~sandroid.ai.safety.redact_secrets`; if that fails, the digest is
+  withheld (fails closed).
 * **Classifier** (:class:`RowClassifier`): sends the digests in batches (at
   most ``batch_rows`` rows or about ``batch_tokens`` tokens) to the chat
   session's model through a non-reserved gateway client, ``concurrency``
   requests at a time. Every request starts with the same bytes (the system
   prompt, then the lens and the criterion), so the backend's prefix cache
-  helps; only the row block differs. The model answers strict JSON; a
-  malformed answer is retried once, then the batch is halved once, then its
-  rows count as errors. ``cancel_event`` and the deadline stop it between
-  (and inside) requests; finished batches are reported as they complete
-  (``on_batch``), so a stopped run leaves a partial result.
+  helps; only the row block differs. Rows carry short per-batch ids
+  (``r1``..``rN``, mapped back to keys) and ``<``/``>`` inside a digest are
+  escaped, so captured data cannot close or open a row. The model answers
+  strict JSON; a malformed answer is retried once, then the batch is halved
+  once, then its rows count as errors. A transport failure (HTTP,
+  connection, stream) is retried once after a short pause and never
+  halved; three in a row stop the whole run (``backend_error``). Errored
+  rows are not "scanned"; any error makes the run partial. ``cancel_event``
+  and the deadline stop it between (and inside) requests; finished batches
+  are reported as they complete (``on_batch``), so a stopped run leaves a
+  partial result.
 """
 
 from __future__ import annotations
@@ -63,7 +72,12 @@ FILE_HEAD_CAP = 1500
 #: Diff head of a kept file version.
 DIFF_HEAD_CAP = 800
 
-#: Header values never sent: reduced to their type and length.
+#: Names (headers, query parameters, JSON / form fields) whose values are
+#: never sent: reduced to their type and length.
+_SECRET_NAME_RE = re.compile(
+    r"auth|token|key|secret|session|cookie|password|signature", re.IGNORECASE
+)
+#: Header values never sent (besides :data:`_SECRET_NAME_RE` matches).
 _SECRET_HEADERS = frozenset(
     {
         "authorization",
@@ -90,6 +104,12 @@ STOP_SCHEDULING_S = 30.0
 ABORT_S = 8.0
 #: Words in a verdict reason.
 REASON_WORDS = 20
+#: Pause before the one retry of a request that failed in transport.
+TRANSPORT_RETRY_S = 1.0
+#: Consecutive transport failures that stop the whole run.
+MAX_CONSECUTIVE_TRANSPORT_ERRORS = 3
+#: Placeholder of a digest whose secret redaction failed.
+WITHHELD = "[digest withheld: secret redaction failed]"
 #: Coordinator poll interval (seconds).
 _POLL_S = 0.1
 
@@ -148,9 +168,68 @@ def reduce_secret(name: str, value: str) -> str:
     return f"[value, {len(value)} chars]"
 
 
+def is_secret_name(name: Any) -> bool:
+    """Whether a header / parameter / field name looks like it holds a secret."""
+    name = str(name)
+    return name.lower() in _SECRET_HEADERS or bool(_SECRET_NAME_RE.search(name))
+
+
+def reduce_value(value: Any) -> str:
+    """``[number, 6 chars]`` / ``[jwt, 180 chars]``: a value's type and length."""
+    if isinstance(value, bool) or value is None:
+        kind, text = "literal", json.dumps(value)
+    elif isinstance(value, int | float):
+        kind, text = "number", str(value)
+    elif isinstance(value, dict):
+        kind, text = "object", json.dumps(value, ensure_ascii=False)
+    elif isinstance(value, list):
+        kind, text = "array", json.dumps(value, ensure_ascii=False)
+    else:
+        text = str(value)
+        if text.isdigit():
+            kind = "number"
+        elif text.startswith("eyJ") and text.count(".") == 2:
+            kind = "jwt"
+        elif len(text) >= 8 and re.fullmatch(r"[0-9a-fA-F]+", text):
+            kind = "hex"
+        else:
+            kind = "text"
+    return f"[{kind}, {len(text)} chars]"
+
+
+def _reduce_json(value: Any) -> Any:
+    """A copy of parsed JSON with secret-named fields reduced."""
+    if isinstance(value, dict):
+        return {
+            k: reduce_value(v) if is_secret_name(k) else _reduce_json(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_reduce_json(v) for v in value]
+    return value
+
+
+def _param_value(name: str, value: str) -> str:
+    return reduce_value(value) if is_secret_name(name) else _cap(value, FIELD_CAP)
+
+
+def reduce_url(target: str) -> str:
+    """*target* with the values of secret-named query parameters reduced."""
+    head, sep, query = str(target).partition("?")
+    if not sep:
+        return head
+    pairs = parse_qsl(query, keep_blank_values=True)
+    if not pairs:
+        return target
+    reduced = "&".join(
+        f"{k}={reduce_value(v) if is_secret_name(k) else v}" for k, v in pairs
+    )
+    return f"{head}?{reduced}"
+
+
 def _header_line(name: str, value: Any) -> str:
     name = str(name)
-    if name.lower() in _SECRET_HEADERS:
+    if is_secret_name(name):
         return f"{name}: {reduce_secret(name, str(value))}"
     return f"{name}: {_cap(str(value), FIELD_CAP)}"
 
@@ -205,15 +284,17 @@ def body_text(body: Any, ctype: str, cap: int) -> tuple[str | None, str]:
     lowered = ctype_short.lower()
     stripped = text.lstrip()
     if "json" in lowered or stripped[:1] in ("{", "["):
-        with contextlib.suppress(ValueError):
+        with contextlib.suppress(ValueError, RecursionError):
             text = json.dumps(
-                json.loads(text), separators=(",", ":"), ensure_ascii=False
+                _reduce_json(json.loads(text)),
+                separators=(",", ":"),
+                ensure_ascii=False,
             )
     elif "x-www-form-urlencoded" in lowered:
         with contextlib.suppress(ValueError):
             fields_ = parse_qsl(text, keep_blank_values=True)
             if fields_:
-                text = "; ".join(f"{k}={_cap(v, FIELD_CAP)}" for k, v in fields_)
+                text = "; ".join(f"{k}={_param_value(k, v)}" for k, v in fields_)
     if "\x00" in text:
         return f"[binary {_human_bytes(size)} {ctype_short}]".strip(), "binary"
     capped, cut = _cap_bytes(text, cap)
@@ -227,7 +308,7 @@ def network_summary(row: Mapping[str, Any]) -> str:
     method = row.get("method") or "?"
     target = row.get("url") or f"{row.get('host') or '?'}{row.get('path') or ''}"
     status = row.get("status")
-    parts = [f"{method} {_cap(str(target), 160)}"]
+    parts = [f"{method} {_cap(reduce_url(str(target)), 160)}"]
     if status not in (None, ""):
         parts[0] += f" {status}"
     if row.get("kind") and row.get("kind") != "flow":
@@ -245,7 +326,7 @@ def _query_line(row: Mapping[str, Any]) -> str | None:
     pairs = parse_qsl(query, keep_blank_values=True)
     if not pairs:
         return None
-    return "query: " + "; ".join(f"{k}={_cap(v, FIELD_CAP)}" for k, v in pairs[:30])
+    return "query: " + "; ".join(f"{k}={_param_value(k, v)}" for k, v in pairs[:30])
 
 
 @dataclass
@@ -317,17 +398,20 @@ def network_digest(
     text = "\n".join(lines)
     if mask:
         text = _mask(text)
+        kind = "metadata" if text == WITHHELD else kind
     text, _ = _cap_bytes(text, row_cap)
     return Digest(key, text, kind)
 
 
 def _mask(text: str) -> str:
+    """``redact_secrets(text)``; fails closed (:data:`WITHHELD`) when it raises."""
     try:
         from sandroid.ai.safety import redact_secrets
 
         return redact_secrets(text)
     except Exception:
-        return text
+        logger.warning("secret redaction failed; a row digest was withheld")
+        return WITHHELD
 
 
 def _ts(value: Any) -> str:
@@ -457,6 +541,7 @@ def files_digest(
     text = "\n".join(lines)
     if mask:
         text = _mask(text)
+        kind = "metadata" if text == WITHHELD else kind
     text, _ = _cap_bytes(text, row_cap)
     return Digest(key, text, kind)
 
@@ -477,11 +562,24 @@ class Verdict:
 
 @dataclass
 class BatchResult:
-    """One finished batch."""
+    """One finished batch.
+
+    Attributes:
+        keys: Every row key of the batch.
+        verdicts: Matches and uncertain rows.
+        judged: Rows the model judged (not errored, not cancelled).
+        errors: Rows that could not be judged (bad replies, transport).
+        unknown_ids: Ids in the reply that are not rows of the batch.
+        error: Short text of the last transport error, if any.
+        cancelled: The batch (or its second half) was stopped.
+    """
 
     keys: list[str]
     verdicts: list[Verdict] = field(default_factory=list)
+    judged: int = 0
     errors: int = 0
+    unknown_ids: int = 0
+    error: str | None = None
     bytes_sent: int = 0
     tokens: int = 0
     cancelled: bool = False
@@ -489,16 +587,24 @@ class BatchResult:
 
 @dataclass
 class ClassifyOutcome:
-    """The whole run."""
+    """The whole run.
+
+    ``scanned`` counts judged rows only; ``errors`` rows that could not be
+    judged. ``partial`` is set when the run stopped early or any row errored.
+    ``stop_reason``: ``cancelled``, ``deadline``, ``backend_error`` (three
+    transport failures in a row) or ``session_switched``.
+    """
 
     verdicts: list[Verdict] = field(default_factory=list)
     scanned: int = 0
     errors: int = 0
+    unknown_ids: int = 0
+    error: str | None = None
     bytes_sent: int = 0
     model_tokens: int = 0
     requests: int = 0
     partial: bool = False
-    stop_reason: str | None = None  # "cancelled" / "deadline"
+    stop_reason: str | None = None
 
     @property
     def matched(self) -> list[Verdict]:
@@ -510,7 +616,11 @@ class ClassifyOutcome:
 
 
 class ModelReplyError(Exception):
-    """A request failed or its answer was not the expected JSON."""
+    """The answer was not the expected JSON (retried, then the batch halved)."""
+
+
+class TransportError(Exception):
+    """The request failed in transport: HTTP, connection or stream error."""
 
 
 def classifier_prefix(lens: str, criterion: str) -> str:
@@ -523,12 +633,21 @@ def classifier_prefix(lens: str, criterion: str) -> str:
     )
 
 
+def row_ids(n: int) -> list[str]:
+    """The per-batch row ids ``r1``..``rN`` the model answers with."""
+    return [f"r{i}" for i in range(1, n + 1)]
+
+
+def _escape_row_text(text: str) -> str:
+    """``<`` / ``>`` as ``&lt;`` / ``&gt;``: captured data cannot forge a row."""
+    return text.replace("<", "&lt;").replace(">", "&gt;")
+
+
 def rows_block(digests: Sequence[Digest]) -> str:
-    """The row part of a request."""
+    """The row part of a request (rows ``r1``..``rN``, data escaped)."""
     parts = []
-    for d in digests:
-        key = json.dumps(d.key, ensure_ascii=False)
-        parts.append(f"<row key={key}>\n{d.text}\n</row>")
+    for rid, d in zip(row_ids(len(digests)), digests, strict=True):
+        parts.append(f'<row id="{rid}">\n{_escape_row_text(d.text)}\n</row>')
     return "\n".join(parts)
 
 
@@ -557,8 +676,23 @@ def _clip_reason(text: Any) -> str:
 _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
 
 
-def parse_reply(text: str, keys: Sequence[str]) -> list[Verdict]:
-    """Parse ``{"matches": [...], "uncertain": [...]}``; unknown keys dropped.
+def _reply_id(item: Any) -> tuple[str, Any]:
+    """``(id, reason)`` of one reply entry (``"r3"``, ``{"id": "r3"}``, ...)."""
+    if isinstance(item, dict):
+        raw = item.get("id", item.get("key", ""))
+        reason = item.get("reason", "")
+    else:
+        raw, reason = item, ""
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        raw = f"r{raw}"
+    return str(raw or "").strip().lower(), reason
+
+
+def parse_reply_counted(text: str, keys: Sequence[str]) -> tuple[list[Verdict], int]:
+    """``(verdicts, unknown ids)`` of ``{"matches": [...], "uncertain": [...]}``.
+
+    The reply names rows by their batch ids (``r1`` = ``keys[0]``); ids that
+    are not rows of the batch are counted, duplicates ignored.
 
     Raises:
         ModelReplyError: Not a JSON object of that shape.
@@ -575,25 +709,30 @@ def parse_reply(text: str, keys: Sequence[str]) -> list[Verdict]:
         raise ModelReplyError("reply is not {matches: [...]}")
     if "matches" not in data and "uncertain" not in data:
         raise ModelReplyError("reply has no matches list")
-    allowed = set(keys)
+    by_id = dict(zip(row_ids(len(keys)), keys, strict=True))
     seen: set[str] = set()
+    unknown = 0
     out: list[Verdict] = []
     for field_name, match in (("matches", True), ("uncertain", "uncertain")):
         items = data.get(field_name) or []
         if not isinstance(items, list):
             continue
         for item in items:
-            if isinstance(item, str):
-                key, reason = item, ""
-            elif isinstance(item, dict):
-                key, reason = str(item.get("key", "")), item.get("reason", "")
-            else:
+            rid, reason = _reply_id(item)
+            key = by_id.get(rid)
+            if key is None:
+                unknown += 1
                 continue
-            if key not in allowed or key in seen:
+            if key in seen:
                 continue
             seen.add(key)
             out.append(Verdict(key, match, _clip_reason(reason)))
-    return out
+    return out, unknown
+
+
+def parse_reply(text: str, keys: Sequence[str]) -> list[Verdict]:
+    """The verdicts of a reply (:func:`parse_reply_counted` without the count)."""
+    return parse_reply_counted(text, keys)[0]
 
 
 def make_batches(
@@ -608,7 +747,7 @@ def make_batches(
     current: list[Digest] = []
     used = 0
     for d in digests:
-        size = len(d.text) + len(d.key) + 24
+        size = len(d.text) + 24
         if current and (len(current) >= batch_rows or used + size > budget_chars):
             batches.append(current)
             current, used = [], 0
@@ -617,6 +756,11 @@ def make_batches(
     if current:
         batches.append(current)
     return batches
+
+
+def _short_error(err: Any) -> str:
+    text = " ".join(str(getattr(err, "message", None) or err or "error").split())
+    return text if len(text) <= 120 else text[:119] + "…"
 
 
 class RowClassifier:
@@ -650,7 +794,8 @@ class RowClassifier:
             deadline: ``time.monotonic()`` by which the run must have
                 returned (``None``: none).
             on_batch: Called on the calling thread after each finished batch
-                with the batch and the running outcome.
+                with the batch and the running outcome; it may call
+                :meth:`halt`.
         """
         self.client = client
         self.lens = lens
@@ -664,14 +809,26 @@ class RowClassifier:
         self.on_batch = on_batch
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self._halt_reason: str | None = None
+        self._transport_streak = 0
+        self.last_error: str | None = None
         self.requests = 0
 
     # -- run ----------------------------------------------------------------------
+
+    def halt(self, reason: str) -> None:
+        """Stop the run for *reason* (``backend_error``, ``session_switched``)."""
+        with self._lock:
+            if self._halt_reason is None:
+                self._halt_reason = reason
+        self._stop.set()
 
     def _left(self) -> float | None:
         return None if self.deadline is None else self.deadline - time.monotonic()
 
     def _should_stop_scheduling(self) -> str | None:
+        if self._halt_reason is not None:
+            return self._halt_reason
         if self.cancel_event.is_set():
             return "cancelled"
         left = self._left()
@@ -707,6 +864,8 @@ class RowClassifier:
                 done, _ = wait(
                     list(in_flight), timeout=_POLL_S, return_when=FIRST_COMPLETED
                 )
+                if self._halt_reason is not None:
+                    outcome.stop_reason = outcome.stop_reason or self._halt_reason
                 if self.cancel_event.is_set():
                     self._stop.set()
                     outcome.stop_reason = outcome.stop_reason or "cancelled"
@@ -726,20 +885,29 @@ class RowClassifier:
         finally:
             self._stop.set()
             pool.shutdown(wait=True, cancel_futures=True)
+        if self._halt_reason is not None:
+            outcome.stop_reason = outcome.stop_reason or self._halt_reason
         outcome.requests = self.requests
-        outcome.partial = outcome.stop_reason is not None
+        outcome.error = outcome.error or self.last_error
+        outcome.partial = outcome.stop_reason is not None or outcome.errors > 0
         return outcome
 
     def _merge(self, outcome: ClassifyOutcome, result: BatchResult) -> None:
         outcome.bytes_sent += result.bytes_sent
         outcome.model_tokens += result.tokens
-        if result.cancelled:
-            outcome.stop_reason = outcome.stop_reason or "cancelled"
-            return
-        outcome.scanned += len(result.keys)
+        outcome.scanned += result.judged
         outcome.errors += result.errors
+        outcome.unknown_ids += result.unknown_ids
+        if result.error:
+            outcome.error = result.error
         outcome.verdicts.extend(result.verdicts)
-        if self.on_batch is not None:
+        if result.cancelled:
+            outcome.stop_reason = (
+                outcome.stop_reason or self._halt_reason or "cancelled"
+            )
+        if self.on_batch is not None and (
+            result.judged or result.errors or not result.cancelled
+        ):
             try:
                 self.on_batch(result, outcome)
             except Exception:
@@ -750,10 +918,16 @@ class RowClassifier:
     def _classify_batch(self, batch: list[Digest]) -> BatchResult:
         result = BatchResult(keys=[d.key for d in batch])
         try:
-            result.verdicts = self._attempt_twice(batch, result)
+            result.verdicts = self._attempt_with_retry(batch, result)
+            result.judged = len(batch)
             return result
         except _CancelledError:
             result.cancelled = True
+            return result
+        except TransportError as exc:
+            # Never halve on transport trouble: smaller requests do not help.
+            result.errors = len(batch)
+            result.error = str(exc)
             return result
         except ModelReplyError:
             pass
@@ -764,21 +938,45 @@ class RowClassifier:
         verdicts: list[Verdict] = []
         for half in (batch[:mid], batch[mid:]):
             try:
-                verdicts.extend(self._attempt_twice(half, result))
+                verdicts.extend(self._attempt_with_retry(half, result))
+                result.judged += len(half)
             except _CancelledError:
-                result.cancelled = True
-                return result
+                result.cancelled = True  # keep the first half's verdicts
+                break
+            except TransportError as exc:
+                result.errors += len(half)
+                result.error = str(exc)
             except ModelReplyError:
                 result.errors += len(half)
         result.verdicts = verdicts
         return result
 
-    def _attempt_twice(self, batch: list[Digest], acc: BatchResult) -> list[Verdict]:
+    def _attempt_with_retry(
+        self, batch: list[Digest], acc: BatchResult
+    ) -> list[Verdict]:
+        """A bad reply: one strict retry. A transport error: one paused retry."""
         try:
             return self._attempt(batch, acc, strict=False)
         except ModelReplyError as first:
             logger.debug("classifier reply rejected, retrying: %s", first)
             return self._attempt(batch, acc, strict=True)
+        except TransportError as first:
+            logger.debug("classifier request failed, retrying once: %s", first)
+            if self._stop.wait(TRANSPORT_RETRY_S):
+                raise _CancelledError from first
+            return self._attempt(batch, acc, strict=False)
+
+    def _transport_failed(self, message: str) -> None:
+        with self._lock:
+            self._transport_streak += 1
+            self.last_error = message
+            halt = self._transport_streak >= MAX_CONSECUTIVE_TRANSPORT_ERRORS
+        if halt:
+            self.halt("backend_error")
+
+    def _transport_ok(self) -> None:
+        with self._lock:
+            self._transport_streak = 0
 
     def _attempt(
         self, batch: list[Digest], acc: BatchResult, *, strict: bool
@@ -786,46 +984,62 @@ class RowClassifier:
         if self._stop.is_set():
             raise _CancelledError
         messages = build_messages(self.lens, self.criterion, batch, strict=strict)
-        acc.bytes_sent += sum(
-            len(str(m.get("content", "")).encode("utf-8")) for m in messages
-        )
-        with self._lock:
-            self.requests += 1
+        size = sum(len(str(m.get("content", "")).encode("utf-8")) for m in messages)
+        sent = False
         text_parts: list[str] = []
         terminal = None
-        stream = self.client.stream(
-            messages,
-            None,
-            temperature=0.0,
-            max_tokens=self.max_tokens,
-            cancel_event=self._stop,
-        )
         try:
-            for chunk in stream:
-                kind = getattr(chunk, "kind", None)
-                if kind == "text":
-                    text_parts.append(chunk.text)
-                usage = getattr(chunk, "usage", None)
-                if usage is not None:
-                    acc.tokens += int(getattr(usage, "prompt_tokens", 0) or 0) + int(
-                        getattr(usage, "completion_tokens", 0) or 0
-                    )
-                if kind in ("done", "error", "cancelled"):
-                    terminal = chunk
-                    break
-        finally:
-            close = getattr(stream, "close", None)
-            if close is not None:
-                with contextlib.suppress(Exception):
-                    close()
+            stream = self.client.stream(
+                messages,
+                None,
+                temperature=0.0,
+                max_tokens=self.max_tokens,
+                cancel_event=self._stop,
+            )
+            try:
+                for chunk in stream:
+                    kind = getattr(chunk, "kind", None)
+                    if not sent and kind != "cancelled":
+                        # The gateway slot was acquired: the request went out.
+                        sent = True
+                        acc.bytes_sent += size
+                        with self._lock:
+                            self.requests += 1
+                    if kind == "text":
+                        text_parts.append(chunk.text)
+                    usage = getattr(chunk, "usage", None)
+                    if usage is not None:
+                        acc.tokens += int(
+                            getattr(usage, "prompt_tokens", 0) or 0
+                        ) + int(getattr(usage, "completion_tokens", 0) or 0)
+                    if kind in ("done", "error", "cancelled"):
+                        terminal = chunk
+                        break
+            finally:
+                close = getattr(stream, "close", None)
+                if close is not None:
+                    with contextlib.suppress(Exception):
+                        close()
+        except Exception as exc:  # a client that raises instead of an error chunk
+            if self._stop.is_set():
+                raise _CancelledError from exc
+            message = _short_error(exc)
+            self._transport_failed(message)
+            raise TransportError(message) from exc
         kind = getattr(terminal, "kind", None)
         # A reply that completed before the stop is kept (its rows count).
         if kind == "cancelled" or (terminal is None and self._stop.is_set()):
             raise _CancelledError
         if kind == "error":
-            err = getattr(terminal, "error", None)
-            raise ModelReplyError(f"request failed: {getattr(err, 'message', err)}")
-        return parse_reply("".join(text_parts), [d.key for d in batch])
+            message = _short_error(getattr(terminal, "error", None))
+            self._transport_failed(message)
+            raise TransportError(message)
+        self._transport_ok()
+        verdicts, unknown = parse_reply_counted(
+            "".join(text_parts), [d.key for d in batch]
+        )
+        acc.unknown_ids += unknown
+        return verdicts
 
 
 class _CancelledError(Exception):
@@ -840,6 +1054,7 @@ __all__ = [
     "Digest",
     "ModelReplyError",
     "RowClassifier",
+    "TransportError",
     "Verdict",
     "body_text",
     "build_messages",
@@ -852,6 +1067,10 @@ __all__ = [
     "network_digest",
     "network_summary",
     "parse_reply",
+    "parse_reply_counted",
     "reduce_secret",
+    "reduce_url",
+    "reduce_value",
+    "row_ids",
     "rows_block",
 ]

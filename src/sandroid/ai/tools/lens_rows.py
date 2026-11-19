@@ -34,7 +34,9 @@ from typing import Any
 from sandroid.ai.tools.registry import RiskTier, ToolError, sandroid_tool
 from sandroid.services.row_highlights import (
     LENSES,
+    MAX_KEYS_PER_SET,
     HighlightError,
+    StaleGenerationError,
     get_row_highlights,
     normalize_key,
 )
@@ -52,6 +54,20 @@ MAX_GET_KEYS = 20
 MAX_GET_LIMIT = 50
 #: Sampled reasons in a ``classify_rows`` result.
 MAX_SAMPLES = 12
+#: Verdicts in a ``classify_rows`` result (the set keeps all matches).
+MAX_VERDICTS = 200
+#: Characters of a body / file content a ``where`` predicate looks at.
+HAYSTACK_CAP = 64 * 1024
+#: Seconds one regex may spend on one row (windowed search).
+REGEX_ROW_BUDGET_S = 0.25
+#: ``kind`` values of Network rows (stdout TLS rows have no flow id).
+NETWORK_KINDS = ("flow", "error")
+#: Notes when the highlight set went away during a call.
+NOTE_CLEARED = "set was cleared by the analyst during the scan"
+NOTE_SWITCHED = (
+    "the analysis session changed during the scan; nothing was highlighted in "
+    "the new session"
+)
 
 _OP_LETTERS = (
     ("CREATE", "C"),
@@ -75,7 +91,7 @@ _WHERE_PROP = {
         "Row filter, all fields ANDed. Network: method[], host_glob[], "
         "path_glob[], url_regex, status (e.g. [200, '4xx']), "
         "content_type_glob, app, min_bytes, max_bytes, kind "
-        "(flow/tls/error), text, body_contains, header_contains. Files: "
+        "(flow/error), text, body_contains, header_contains. Files: "
         "path_glob[], ops (letters CMDRA), process, app, watched, min_count, "
         "review_kind (changed/new/deleted), text, content_contains (local "
         "copies only). regex=true makes text/*_contains regular expressions."
@@ -184,8 +200,8 @@ def _normalize_row(lens: str, row: Mapping[str, Any]) -> dict | None:
     out = dict(row)
     if lens == "network":
         fid = row.get("flow_id")
-        if not fid:
-            return None  # stdout TLS rows (t<n>) cannot be highlighted
+        if not fid or row.get("kind") == "tls":
+            return None  # TLS failure rows have no flow id in the lens
         out["key"] = str(fid)
     else:
         path = str(row.get("path") or row.get("key") or "")
@@ -209,8 +225,8 @@ def _flow_log_rows() -> list[dict]:
     rows = []
     for rec in records:
         fid = rec.get("id")
-        if not fid:
-            continue
+        if not fid or rec.get("kind") == "tls":
+            continue  # the lens shows TLS failures without a flow id
         kind = rec.get("kind") or ("error" if rec.get("error") else "flow")
         host = rec.get("host") or "?"
         path = rec.get("path") or ""
@@ -367,6 +383,7 @@ class _Details:
 
 
 def _flow_text(detail: Mapping[str, Any] | None, *, bodies: bool) -> str:
+    """Bodies or headers of a flow, each body capped at :data:`HAYSTACK_CAP`."""
     if not detail:
         return ""
     parts: list[str] = []
@@ -374,13 +391,13 @@ def _flow_text(detail: Mapping[str, Any] | None, *, bodies: bool) -> str:
         for side in ("request_body", "response_body"):
             body = detail.get(side)
             if isinstance(body, dict) and body.get("encoding") != "base64":
-                parts.append(str(body.get("content") or ""))
+                parts.append(str(body.get("content") or "")[:HAYSTACK_CAP])
     else:
         for side in ("request_headers", "response_headers"):
             for item in detail.get(side) or []:
                 with contextlib.suppress(TypeError, IndexError):
                     parts.append(f"{item[0]}: {item[1]}")
-    return "\n".join(parts)
+    return "\n".join(parts)[: 2 * HAYSTACK_CAP]
 
 
 # =============================================================================
@@ -423,16 +440,45 @@ _FILES_WHERE = frozenset(
 Predicate = Callable[[dict], bool]
 
 
+def _compile_regex(text: str, field: str) -> re.Pattern[str]:
+    """A guarded regex (``read_result``'s ReDoS rules), or invalid_arguments."""
+    from sandroid.ai.results import _grep_pattern
+
+    try:
+        re.compile(text)
+    except re.error as exc:
+        raise _invalid(
+            f"where.{field} is not a valid regular expression: {exc}",
+            hint="Fix the pattern, or drop regex=true for a literal search.",
+        ) from exc
+    pattern = _grep_pattern(text)
+    if isinstance(pattern, str):
+        raise _invalid(
+            f"where.{field} was refused: {pattern}",
+            hint="Use a simpler pattern or a literal (regex=false).",
+        )
+    return pattern
+
+
 def _matcher(value: Any, regex: bool, field: str) -> Callable[[str], bool]:
+    """Case-insensitive literal or guarded regex test of one row's text.
+
+    The text is capped at :data:`HAYSTACK_CAP`; a regex searches it in
+    bounded windows with a per-row time budget.
+    """
     text = str(value)
     if regex:
-        try:
-            pattern = re.compile(text, re.IGNORECASE)
-        except re.error as exc:
-            raise _invalid(f"where.{field} is not a valid regex: {exc}") from exc
-        return lambda s: bool(pattern.search(s or ""))
+        from sandroid.ai.results import _grep_line
+
+        pattern = _compile_regex(text, field)
+
+        def search(s: str | None) -> bool:
+            hay = (s or "")[:HAYSTACK_CAP]
+            return _grep_line(pattern, hay, time.monotonic() + REGEX_ROW_BUDGET_S)
+
+        return search
     low = text.lower()
-    return lambda s: low in (s or "").lower()
+    return lambda s: low in (s or "")[:HAYSTACK_CAP].lower()
 
 
 def _int(value: Any, field: str) -> int:
@@ -457,6 +503,31 @@ def _status_ok(status: Any, specs: list) -> bool:
 def _glob_any(value: str, patterns: list[str]) -> bool:
     value = (value or "").lower()
     return any(fnmatch.fnmatchcase(value, str(p).lower()) for p in patterns)
+
+
+_GLOB_CHARS = re.compile(r"[*?\[]")
+
+
+def canonical_glob(pattern: str) -> str:
+    """*pattern* with its literal directory prefix in canonical form.
+
+    ``/data/user/0/com.x/*.db`` -> ``/data/data/com.x/*.db`` and
+    ``/storage/emulated/0/Down*`` -> ``/sdcard/Down*``, so globs match the
+    canonical Files keys.
+    """
+    pattern = str(pattern)
+    if not pattern.startswith("/"):
+        return pattern
+    m = _GLOB_CHARS.search(pattern)
+    literal = pattern if m is None else pattern[: m.start()]
+    cut = literal.rfind("/")
+    head, rest = pattern[: cut + 1], pattern[cut + 1 :]
+    if not head.strip("/"):
+        return pattern
+    canon = normalize_key("files", head)
+    if m is None and not rest:
+        return canon  # a plain directory or file path
+    return canon.rstrip("/") + "/" + rest
 
 
 def _path_glob_any(path: str, patterns: list[str]) -> bool:
@@ -568,6 +639,13 @@ def _network_pred(
             cheap.append(lambda r: size(r) <= limit)
     elif field == "kind":
         kinds = {str(k).lower() for k in _as_list(value)}
+        bad = sorted(kinds - set(NETWORK_KINDS))
+        if bad:
+            raise _invalid(
+                f"where.kind must be one of {', '.join(NETWORK_KINDS)} "
+                f"(got {', '.join(bad)})",
+                hint="TLS failure rows have no flow id and cannot be highlighted.",
+            )
         cheap.append(lambda r: str(r.get("kind") or "flow").lower() in kinds)
     elif field == "text":
         m = _matcher(value, regex, field)
@@ -589,7 +667,7 @@ def _files_pred(
     costly: list[Predicate],
 ) -> None:
     if field == "path_glob":
-        pats = [str(p) for p in _as_list(value)]
+        pats = [canonical_glob(str(p)) for p in _as_list(value)]
         cheap.append(lambda r: _path_glob_any(str(r.get("key") or ""), pats))
     elif field == "ops":
         letters = {c for c in str(value).upper() if c.isalpha()}
@@ -621,7 +699,9 @@ def _files_pred(
         )
     elif field == "content_contains":
         m = _matcher(value, regex, field)
-        costly.append(lambda r: m(details.file(str(r.get("key")))[0] or ""))
+        costly.append(
+            lambda r: m((details.file(str(r.get("key")))[0] or "")[:HAYSTACK_CAP])
+        )
 
 
 def _filter(rows: list[dict], preds: list[Predicate]) -> list[dict]:
@@ -647,14 +727,21 @@ def _row_line(lens: str, row: Mapping[str, Any]) -> str:
     return network_summary(row) if lens == "network" else files_summary(row)
 
 
-def _basis(lens: str, rows: list[dict], evaluated: int) -> dict:
+def _basis(
+    lens: str, rows: list[dict], evaluated: int, at: float | None = None
+) -> dict:
+    """``{"judged_at", "through_seq", "evaluated"}`` for "N new since".
+
+    *rows* must be ALL scoped rows of the view (not only the candidates):
+    a row that existed when the rows were collected (*at*) is never "new".
+    """
     seqs = []
     for r in rows:
         with contextlib.suppress(TypeError, ValueError):
             if r.get("seq") is not None:
                 seqs.append(int(r["seq"]))
     return {
-        "judged_at": time.time(),
+        "judged_at": time.time() if at is None else at,
         "through_seq": max(seqs) if lens == "network" and seqs else None,
         "evaluated": evaluated,
     }
@@ -676,6 +763,7 @@ def _create_set(
     basis: dict,
     complete: bool,
     filter: bool,
+    generation: int | None = None,
 ) -> str:
     try:
         hs = store.create(
@@ -688,13 +776,49 @@ def _create_set(
             basis=basis,
             complete=complete,
             filter=filter,
+            generation=generation,
         )
+    except StaleGenerationError as exc:
+        raise ToolError(
+            "tool_failed", NOTE_SWITCHED, retryable=True, hint="Run it again."
+        ) from exc
     except HighlightError as exc:
         raise _invalid(
             str(exc),
             hint="clear_highlights(highlight_id=...) or pass highlight_id to extend one.",
         ) from exc
     return hs.id
+
+
+def _add_capped(
+    store: Any, set_id: str, reasons: Mapping[str, str], generation: int | None
+) -> int:
+    """Add rows up to the set's cap; returns how many new rows did not fit.
+
+    Raises:
+        HighlightError: The set is gone (or the session switched).
+    """
+    hs = store.get(set_id)
+    if hs is None:
+        raise HighlightError(f"unknown highlight set {set_id!r}")
+    room = MAX_KEYS_PER_SET - hs.count
+    new = [k for k in reasons if k not in hs.reasons]
+    dropped = max(0, len(new) - max(0, room))
+    if dropped:
+        skip = set(new[len(new) - dropped :])
+        reasons = {k: v for k, v in reasons.items() if k not in skip}
+    if reasons:
+        store.add(set_id, reasons, generation=generation)
+    return dropped
+
+
+def _set_lost(store: Any, set_id: str | None, generation: int) -> str:
+    """The note for a set that a mutation could not reach."""
+    if store.generation != generation:
+        return NOTE_SWITCHED
+    if set_id is not None and store.get(set_id) is not None:
+        return f"highlight set {set_id} could not be updated"
+    return NOTE_CLEARED
 
 
 def _existing_set(store: Any, lens: str, set_id: str) -> Any:
@@ -763,6 +887,7 @@ def find_rows(
     details = _Details()
     preds, summary = compile_where(lens, where, details)
     rows, source = collect_rows(lens)
+    collected_at = time.time()
     scoped = _scoped(rows, scope)
     matches = _filter(scoped, preds)
     by_key = {r["key"]: r for r in scoped}
@@ -776,19 +901,31 @@ def find_rows(
         "summary": f"{len(matches)} of {len(scoped)} {lens} rows match"
         + (f" ({summary})" if summary else ""),
     }
+    if apply != "none" and len(matches) > MAX_KEYS_PER_SET and not highlight_id:
+        raise _invalid(
+            f"{len(matches)} of {len(scoped)} {lens} rows match; a highlight set "
+            f"holds at most {MAX_KEYS_PER_SET} rows",
+            hint="Narrow `where` (e.g. host_glob, method, status, app, path_glob) "
+            "so fewer rows match, then apply again.",
+            matched=len(matches),
+        )
     if apply != "none" and matches:
         store = _store()
+        gen = store.generation
         reason = f"matches {summary}" if summary else "matched by find_rows"
         reasons = dict.fromkeys(keys, reason)
+        set_id: str | None
+        dropped = 0
         if highlight_id:
             hs = _existing_set(store, lens, highlight_id)
-            try:
-                store.add(hs.id, reasons)
-            except HighlightError as exc:
-                raise _invalid(str(exc)) from exc
             set_id = hs.id
-            if apply == "filter":
-                store.set_filter(lens, set_id)
+            try:
+                dropped = _add_capped(store, set_id, reasons, gen)
+                if apply == "filter":
+                    store.set_filter(lens, set_id, generation=gen)
+            except HighlightError:
+                result["note"] = _set_lost(store, set_id, gen)
+                set_id = None
         else:
             set_id = _create_set(
                 store,
@@ -798,20 +935,33 @@ def find_rows(
                 origin="structural",
                 query=summary,
                 scope=matches[0].get("scope"),
-                basis=_basis(lens, scoped, len(scoped)),
+                basis=_basis(lens, scoped, len(scoped), collected_at),
                 complete=True,
                 filter=apply == "filter",
+                generation=gen,
             )
         result["highlight_id"] = set_id
         result["mode"] = apply
-        result["summary"] = (
-            f"{'Filtered to' if apply == 'filter' else 'Highlighted'} "
-            f"{len(matches)} of {len(scoped)} {lens} rows ({set_id})"
-        )
-        _audit(
-            f"{result['summary']}: {label or summary}",
-            {"lens": lens, "set": set_id, "matched": len(matches), "where": summary},
-        )
+        if set_id is not None:
+            result["summary"] = (
+                f"{'Filtered to' if apply == 'filter' else 'Highlighted'} "
+                f"{len(matches) - dropped} of {len(scoped)} {lens} rows ({set_id})"
+            )
+            if dropped:
+                result["truncated_by_cap"] = dropped
+                result["summary"] += (
+                    f"; {dropped} matching rows not added: a highlight set holds "
+                    f"at most {MAX_KEYS_PER_SET} rows"
+                )
+            _audit(
+                f"{result['summary']}: {label or summary}",
+                {
+                    "lens": lens,
+                    "set": set_id,
+                    "matched": len(matches),
+                    "where": summary,
+                },
+            )
     elif apply != "none":
         result["highlight_id"] = None
         result["note"] = "nothing matched; no highlight set was created"
@@ -946,6 +1096,7 @@ def classify_rows(
     details = _Details()
     preds, where_summary = compile_where(lens, where, details)
     rows, source = collect_rows(lens)
+    collected_at = time.time()
     scoped = _scoped(rows, scope)
     by_key = {r["key"]: r for r in scoped}
     unknown: list[str] = []
@@ -965,6 +1116,7 @@ def classify_rows(
             rows=len(scoped),
         )
     store = _store()
+    gen = store.generation
     existing = _existing_set(store, lens, highlight_id) if highlight_id else None
 
     base: dict[str, Any] = {
@@ -1015,7 +1167,10 @@ def classify_rows(
     if apply != "none":
         if existing is not None:
             set_id = existing.id
-            store.finish(set_id, complete=False)
+            try:
+                store.finish(set_id, complete=False, generation=gen)
+            except HighlightError as exc:
+                raise _invalid(str(exc)) from exc
         else:
             set_id = _create_set(
                 store,
@@ -1025,9 +1180,10 @@ def classify_rows(
                 origin="ai",
                 query=query + (f" where {where_summary}" if where_summary else ""),
                 scope=candidates[0].get("scope"),
-                basis=_basis(lens, candidates, 0),
+                basis=_basis(lens, scoped, 0, collected_at),
                 complete=False,
                 filter=False,
+                generation=gen,
             )
             created = True
 
@@ -1037,13 +1193,28 @@ def classify_rows(
     deadline = None if left is None else time.monotonic() + left
     total = len(digests)
     report_tool_progress(0, total, matched=0, note="classifying", force=True)
+    state: dict[str, Any] = {"set_id": set_id, "note": None, "cap_dropped": 0}
+    classifier: rc.RowClassifier | None = None
+
+    def lose_set() -> None:
+        if state["note"] is None:
+            state["note"] = _set_lost(store, state["set_id"], gen)
+        state["set_id"] = None
 
     def on_batch(batch: rc.BatchResult, outcome: rc.ClassifyOutcome) -> None:
-        if set_id is not None:
+        if store.generation != gen:
+            # The analyst switched sessions: drop the remaining batches.
+            lose_set()
+            if classifier is not None:
+                classifier.halt("session_switched")
+        sid = state["set_id"]
+        if sid is not None:
             found = {v.key: v.reason for v in batch.verdicts if v.match is True}
             if found:
-                with contextlib.suppress(HighlightError):
-                    store.add(set_id, found)
+                try:
+                    state["cap_dropped"] += _add_capped(store, sid, found, gen)
+                except HighlightError:
+                    lose_set()
         report_tool_progress(
             outcome.scanned, total, matched=len(outcome.matched), note="classifying"
         )
@@ -1075,27 +1246,64 @@ def classify_rows(
         "matched": len(matched_keys),
         "uncertain": len(outcome.uncertain),
         "errors": outcome.errors,
+        "unknown_ids": outcome.unknown_ids,
         "metadata_only": metadata_only,
         "bytes_sent": outcome.bytes_sent,
         "candidates": total,
     }
-    if set_id is not None:
-        current = store.get(set_id)
-        if created and current is not None and not current.reasons:
-            store.remove(set_id)
-            set_id = None
-        else:
-            store.finish(
-                set_id,
-                complete=not outcome.partial,
-                stats=stats,
-                basis=_basis(lens, candidates, outcome.scanned),
-            )
-            if apply == "filter":
-                store.set_filter(lens, set_id)
+    if state["cap_dropped"]:
+        stats["truncated_by_cap"] = state["cap_dropped"]
+    judged_nothing = outcome.scanned == 0 and outcome.errors > 0
+    if state["set_id"] is not None:
+        sid = state["set_id"]
+        try:
+            current = store.get(sid)
+            if store.generation != gen or current is None:
+                lose_set()
+            elif created and (not current.reasons or judged_nothing):
+                store.remove(sid, generation=gen)  # nothing to show
+                state["set_id"] = None
+            else:
+                store.finish(
+                    sid,
+                    complete=not outcome.partial,
+                    stats=stats,
+                    basis=_basis(lens, scoped, outcome.scanned, collected_at),
+                    generation=gen,
+                )
+                if apply == "filter":
+                    store.set_filter(lens, sid, generation=gen)
+        except HighlightError:
+            lose_set()
+    set_id = state["set_id"]
+
+    error_text = (
+        f"backend error: {outcome.error}"
+        if outcome.error
+        else "the model's replies were not the required JSON"
+    )
+    if judged_nothing:
+        _audit(
+            f"classify_rows failed ({error_text}): {query}",
+            {"lens": lens, "query": query, "errors": outcome.errors},
+        )
+        raise ToolError(
+            "backend_error",
+            f"none of the {total} {lens} rows could be judged "
+            f"({outcome.errors} errored; {error_text})",
+            retryable=True,
+            hint="Try again later or with fewer rows (where / max_rows); "
+            "find_rows needs no model.",
+            details={
+                "stop_reason": outcome.stop_reason,
+                "errors": outcome.errors,
+                "requests": outcome.requests,
+                "bytes_sent": outcome.bytes_sent,
+            },
+        )
 
     hidden = _hidden(by_key, matched_keys)
-    stopped = f", stopped early ({outcome.stop_reason})" if outcome.partial else ""
+    stopped = f", stopped early ({outcome.stop_reason})" if outcome.stop_reason else ""
     verb = "Filtered to" if apply == "filter" else "Highlighted"
     if apply == "none" or set_id is None:
         verb = "Found"
@@ -1104,6 +1312,17 @@ def classify_rows(
         f"(candidates {total}; {hidden} hidden by your lens filters; "
         f"{metadata_only} judged from metadata only{stopped})"
     )
+    if outcome.errors:
+        summary += f"; {outcome.errors} rows could not be judged ({error_text})"
+    if outcome.unknown_ids:
+        summary += f"; the model named {outcome.unknown_ids} unknown row id(s)"
+    if state["cap_dropped"]:
+        summary += (
+            f"; {state['cap_dropped']} matches not added: a highlight set holds "
+            f"at most {MAX_KEYS_PER_SET} rows"
+        )
+    if state["note"]:
+        summary += f"; {state['note']}"
     samples = [
         {
             "key": v.key,
@@ -1111,6 +1330,9 @@ def classify_rows(
             "reason": v.reason,
         }
         for v in outcome.matched[:MAX_SAMPLES]
+    ]
+    verdicts = [
+        {"key": v.key, "match": v.match, "reason": v.reason} for v in outcome.verdicts
     ]
     base.update(
         summary=summary,
@@ -1124,16 +1346,25 @@ def classify_rows(
         hidden_by_lens_filters=hidden,
         judged_on_metadata_only=metadata_only,
         binary_only=binary_only,
-        skipped={"errors": outcome.errors, "not_reached": total - outcome.scanned},
+        skipped={
+            "errors": outcome.errors,
+            "not_reached": total - outcome.scanned - outcome.errors,
+            "unknown_ids": outcome.unknown_ids,
+        },
         bytes_sent=outcome.bytes_sent,
         model_tokens=outcome.model_tokens,
         requests=outcome.requests,
         samples=samples,
-        verdicts=[
-            {"key": v.key, "match": v.match, "reason": v.reason}
-            for v in outcome.verdicts
-        ],
+        verdicts=verdicts[:MAX_VERDICTS],
     )
+    if outcome.error:
+        base["backend_error"] = outcome.error
+    if len(verdicts) > MAX_VERDICTS:
+        base["verdicts_truncated"] = len(verdicts) - MAX_VERDICTS
+    if state["cap_dropped"]:
+        base["truncated_by_cap"] = state["cap_dropped"]
+    if state["note"]:
+        base["note"] = state["note"]
     _audit(
         f"{summary}: {query}" + (f" ({set_id})" if set_id else ""),
         {
@@ -1142,6 +1373,7 @@ def classify_rows(
             "query": query,
             "matched": len(matched_keys),
             "scanned": outcome.scanned,
+            "errors": outcome.errors,
             "partial": outcome.partial,
             "bytes_sent": outcome.bytes_sent,
         },
@@ -1220,10 +1452,20 @@ def highlight_rows(
             f"at most {MAX_HIGHLIGHT_KEYS} keys per call",
             hint="Use find_rows or classify_rows with apply for many rows.",
         )
+    if action in ("remove", "replace") and not highlight_id:
+        raise _invalid(
+            f"action={action} needs highlight_id (the set to change)",
+            hint="Omit action (add) to create a set, or pass highlight_id.",
+        )
+    if action in ("remove", "replace") and not key_list:
+        raise _invalid(f"action={action} needs keys")
+    if reasons is not None and not isinstance(reasons, dict):
+        raise _invalid("reasons must be an object {key: reason}")
     reason_map = {
         normalize_key(lens, k): str(v) for k, v in dict(reasons or {}).items()
     }
     store = _store()
+    gen = store.generation
     existing = _existing_set(store, lens, highlight_id) if highlight_id else None
     if existing is None and not key_list:
         raise _invalid("give keys (and a label) to create a highlight set")
@@ -1231,13 +1473,28 @@ def highlight_rows(
     unknown: list[str] = []
     known = key_list
     by_key: dict[str, dict] = {}
-    if key_list and action != "remove":
+    if action == "remove" and existing is not None:
+        known = [k for k in key_list if k in existing.reasons]
+        unknown = [k for k in key_list if k not in existing.reasons]
+    elif key_list:
         rows, _source = collect_rows(lens)
         by_key = {r["key"]: r for r in rows}
         known = [k for k in key_list if k in by_key]
         unknown = [k for k in key_list if k not in by_key]
     applied = {k: reason_map.get(k) or "picked by the assistant" for k in known}
+    if action in ("remove", "replace") and not known:
+        where_ = f"set {highlight_id}" if action == "remove" else "the lens"
+        raise _invalid(
+            f"none of the keys is in {where_}; nothing was changed "
+            f"(action={action} would apply 0 rows)",
+            hint="Copy keys exactly from find_rows / get_rows.",
+            unknown_keys=unknown[:MAX_RETURNED_KEYS],
+            unknown_count=len(unknown),
+        )
 
+    note: str | None = None
+    dropped = 0
+    set_id: str | None
     try:
         if existing is None:
             if not applied:
@@ -1261,38 +1518,58 @@ def highlight_rows(
                 basis=_basis(lens, list(by_key.values()), len(applied)),
                 complete=True,
                 filter=mode == "filter",
+                generation=gen,
             )
             total = len(applied)
         else:
             set_id = existing.id
             if action == "remove":
-                total = store.remove_keys(set_id, key_list)
+                total = store.remove_keys(set_id, known, generation=gen)
             elif action == "replace":
-                total = (
-                    store.replace_keys(set_id, applied) if key_list else existing.count
-                )
+                total = store.replace_keys(set_id, applied, generation=gen)
             else:
-                total = store.add(set_id, applied) if applied else existing.count
+                if applied:
+                    dropped = _add_capped(store, set_id, applied, gen)
+                current = store.get(set_id)
+                total = current.count if current is not None else 0
             if label:
-                store.update_meta(set_id, label=label)
+                store.update_meta(set_id, label=label, generation=gen)
             if mode == "filter":
-                store.set_filter(lens, set_id)
+                store.set_filter(lens, set_id, generation=gen)
             elif mode == "highlight" and store.filter_set(lens) == set_id:
-                store.set_filter(lens, None)
+                store.set_filter(lens, None, generation=gen)
     except HighlightError as exc:
-        raise _invalid(str(exc)) from exc
+        if store.generation == gen and (
+            existing is None or store.get(existing.id) is not None
+        ):
+            raise _invalid(str(exc)) from exc
+        note = _set_lost(store, existing.id if existing else None, gen)
+        set_id, total = None, 0
 
     hidden = _hidden(by_key, list(applied)) if by_key else 0
-    result = {
+    result: dict[str, Any] = {
         "highlight_id": set_id,
-        "applied": len(applied) if action != "remove" else len(key_list),
+        "applied": len(known) - dropped,
         "action": action if existing is not None else "create",
-        "mode": "filter" if store.filter_set(lens) == set_id else "highlight",
+        "mode": (
+            "filter"
+            if set_id is not None and store.filter_set(lens) == set_id
+            else "highlight"
+        ),
         "total": total,
         "unknown_keys": unknown[:MAX_RETURNED_KEYS],
         "unknown_count": len(unknown),
         "hidden_by_lens_filters": hidden,
     }
+    if dropped:
+        result["truncated_by_cap"] = dropped
+        result["summary"] = (
+            f"{dropped} rows not added: a highlight set holds at most "
+            f"{MAX_KEYS_PER_SET} rows"
+        )
+    if note:
+        result["note"] = note
+        return result
     _audit(
         f"highlight_rows {result['action']} {set_id}: {result['applied']} row(s)",
         {"lens": lens, "set": set_id, "action": result["action"], "total": total},
