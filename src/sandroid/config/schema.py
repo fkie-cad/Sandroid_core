@@ -823,7 +823,7 @@ class TUIConfig(BaseModel):
 #: Timeline sources the policy can never turn off (mirrors
 #: ``sandroid.core.timeline.ALWAYS_ON``).
 TIMELINE_ALWAYS_ON = frozenset(
-    {"label", "sandroid", "clock", "snapshot", "device", "run"}
+    {"label", "sandroid", "clock", "snapshot", "device", "run", "identity", "privacy"}
 )
 _SRC_KIND_RE = re.compile(r"^[a-z][a-z0-9_-]{0,15}\.([a-z][a-z0-9_-]{0,23}|\*)$")
 
