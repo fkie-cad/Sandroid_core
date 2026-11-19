@@ -374,10 +374,14 @@ def test_writes_happen_off_the_caller_and_outside_the_lock(
     real = loader.atomic_write_bytes
 
     def slow_write(path, data, **kw):
+        # Only this store's file: a writer thread of another store (an
+        # earlier test in the same process) may still flush meanwhile.
+        if not str(path).startswith(str(tmp_path)):
+            return real(path, data, **kw)
         writing.set()
         assert gate.wait(5.0)
         written.append(json.loads(data))
-        real(path, data, **kw)
+        return real(path, data, **kw)
 
     monkeypatch.setattr(loader, "atomic_write_bytes", slow_write)
     store = HighlightStore()
