@@ -81,7 +81,7 @@ COMMAND_KEYS: set[str] = {
     "b",  # Objection interactive shell
     "O",  # Objection resume session
     # Device commands
-    "D",  # Device selector
+    "D",  # Devices screen
     # IO commands
     "x",  # Export action
     "i",  # Import action

@@ -1,172 +1,26 @@
-"""Android environment detection and management for Sandroid configuration."""
+"""Android SDK/adb/emulator path detection for ``sandroid-config init``.
+
+Discovery itself lives in :mod:`sandroid.core.emulator` (the one
+emulator/AVD backend); this module only reports what it found and asks for
+missing paths. AVDs are picked and started in the TUI's Devices screen.
+"""
 
 import os
-import platform
-import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
 from rich.console import Console
-from rich.prompt import Confirm, Prompt
-from rich.table import Table
+from rich.prompt import Prompt
 
 from sandroid.core.emulator import (
-    API_TO_ANDROID_VERSION,
-    avd_info,
-    avd_snapshots,
-    list_avds,
+    adb_binary,
+    avd_home,
+    emulator_binary,
     looks_like_sdk,
-    rename_avd,
+    sdk_root,
 )
-from sandroid.core.emulator import AvdSnapshot as SnapshotInfo
-from sandroid.core.emulator import adb_binary as find_adb_path
-from sandroid.core.emulator import avd_home as find_existing_avd_home
-from sandroid.core.emulator import emulator_binary as find_emulator_path
-from sandroid.core.emulator import sdk_root as find_existing_sdk
 
 console = Console()
-
-# The discovery/catalogue helpers above are thin re-exports of
-# sandroid.core.emulator (the one emulator/AVD backend), kept for the old CLI
-# and modals until they are removed.
-
-
-def list_available_avds(
-    emulator_path: Path | None = None, sdk_path: Path | None = None
-) -> list[str]:
-    """List installed AVDs (see :func:`sandroid.core.emulator.list_avds`)."""
-    return list_avds(binary=emulator_path)
-
-
-def get_avd_info(avd_name: str) -> dict[str, str]:
-    """AVD facts as a dict (see :func:`sandroid.core.emulator.avd_info`)."""
-    info = avd_info(avd_name)
-    return {
-        "android_version": info.android_version,
-        "api_level": str(info.api_level) if info.api_level else "?",
-        "device_name": info.device_name,
-    }
-
-
-def get_avd_snapshots_from_filesystem(avd_name: str) -> list[SnapshotInfo]:
-    """Snapshots on disk (see :func:`sandroid.core.emulator.avd_snapshots`)."""
-    return avd_snapshots(avd_name)
-
-
-def is_windows() -> bool:
-    """Check if running on Windows."""
-    return platform.system().lower().startswith("win")
-
-
-def is_macos() -> bool:
-    """Check if running on macOS."""
-    return platform.system().lower() == "darwin"
-
-
-def is_linux() -> bool:
-    """Check if running on Linux."""
-    return platform.system().lower() == "linux"
-
-
-def run_cmd(
-    cmd: list[str], env=None, input_text: str | None = None
-) -> tuple[int, str, str]:
-    """Run command and return exit code, stdout, stderr.
-
-    Only executes commands from a whitelist of known safe Android SDK tools.
-    """
-    if not cmd:
-        return 1, "", "Empty command provided"
-
-    # Whitelist of allowed commands for Android environment detection
-    allowed_commands = {
-        "emulator",
-        "emulator.exe",
-        "adb",
-        "adb.exe",
-        "sdkmanager",
-        "sdkmanager.bat",
-        "avdmanager",
-        "avdmanager.bat",
-    }
-
-    command_name = Path(cmd[0]).name
-    if command_name not in allowed_commands:
-        return (
-            1,
-            "",
-            f"Command '{command_name}' not in allowed list: {', '.join(allowed_commands)}",
-        )
-
-    try:
-        input_bytes = input_text.encode() if input_text else None
-        res = subprocess.run(
-            cmd, input=input_bytes, env=env, capture_output=True, check=False
-        )
-        stdout = res.stdout.decode(errors="replace")
-        stderr = res.stderr.decode(errors="replace")
-        return res.returncode, stdout, stderr
-    except FileNotFoundError:
-        return 127, "", f"Executable not found: {cmd[0]}"
-    except Exception as e:
-        return 1, "", f"{e.__class__.__name__}: {e}"
-
-
-def validate_avd_name(name: str) -> bool:
-    """Validate AVD name according to Android requirements."""
-    if not name or not name.strip():
-        return False
-
-    # AVD names should be ASCII alphanumeric with underscores and hyphens
-    if not re.match(r"^[A-Za-z0-9_\-]+$", name):
-        console.print(
-            f"[red]Invalid AVD name '{name}' - use only letters, numbers, underscores, and hyphens[/red]"
-        )
-        return False
-
-    # Avoid reserved names and overly long names
-    if len(name) > 50:
-        console.print(f"[red]AVD name '{name}' too long - maximum 50 characters[/red]")
-        return False
-
-    reserved_names = {
-        "con",
-        "prn",
-        "aux",
-        "nul",
-        "com1",
-        "com2",
-        "com3",
-        "com4",
-        "lpt1",
-        "lpt2",
-    }
-    if name.lower() in reserved_names:
-        console.print(
-            f"[red]AVD name '{name}' is reserved - choose a different name[/red]"
-        )
-        return False
-
-    return True
-
-
-def validate_api_level(api_str: str) -> int | None:
-    """Validate and return Android API level."""
-    try:
-        api_level = int(api_str)
-        if api_level < 21:
-            console.print(
-                f"[yellow]Warning: API level {api_level} is very old and may not work properly[/yellow]"
-            )
-        elif api_level > 36:
-            console.print(
-                f"[yellow]Warning: API level {api_level} may not be available yet[/yellow]"
-            )
-        return api_level
-    except ValueError:
-        console.print(f"[red]Invalid API level '{api_str}' - must be a number[/red]")
-        return None
 
 
 def validate_path(
@@ -196,68 +50,28 @@ def validate_path(
 
 
 def detect_android_environment() -> dict[str, Any]:
-    """Detect current Android development environment setup."""
+    """Detect the Android SDK, adb, emulator and AVD home paths.
+
+    Returns:
+        Dict with ``sdk_path``, ``adb_path``, ``emulator_path``, ``avd_home``
+        (each a ``Path`` or ``None``) and ``environment_ready``.
+    """
     console.print("[bold blue]Detecting Android development environment...[/bold blue]")
 
-    environment = {
-        "sdk_path": None,
-        "adb_path": None,
-        "emulator_path": None,
-        "avd_home": None,
-        "available_avds": [],
-        "environment_ready": False,
+    found = {
+        "sdk_path": ("Android SDK", sdk_root()),
+        "adb_path": ("ADB", adb_binary()),
+        "emulator_path": ("Android Emulator", emulator_binary()),
+        "avd_home": ("AVD Home", avd_home()),
     }
-
-    # Detect SDK
-    sdk_path = find_existing_sdk()
-    if sdk_path:
-        console.print(f"[green]✓[/green] Found Android SDK: {sdk_path}")
-        environment["sdk_path"] = sdk_path
-    else:
-        console.print("[yellow]![/yellow] Android SDK not detected")
-
-    # Detect ADB
-    adb_path = find_adb_path()
-    if adb_path:
-        console.print(f"[green]✓[/green] Found ADB: {adb_path}")
-        environment["adb_path"] = adb_path
-    else:
-        console.print("[yellow]![/yellow] ADB not found in PATH or SDK")
-
-    # Detect Emulator
-    emulator_path = find_emulator_path()
-    if emulator_path:
-        console.print(f"[green]✓[/green] Found Android Emulator: {emulator_path}")
-        environment["emulator_path"] = emulator_path
-    else:
-        console.print("[yellow]![/yellow] Android Emulator not found")
-
-    # Detect AVD Home
-    avd_home = find_existing_avd_home()
-    if avd_home:
-        console.print(f"[green]✓[/green] Found AVD Home: {avd_home}")
-        environment["avd_home"] = avd_home
-
-        # List available AVDs
-        avds = list_available_avds(emulator_path, sdk_path)
-        if avds:
-            console.print(f"[green]✓[/green] Found {len(avds)} AVDs: {', '.join(avds)}")
-            environment["available_avds"] = avds
+    environment: dict[str, Any] = {}
+    for key, (label, path) in found.items():
+        environment[key] = path
+        if path:
+            console.print(f"[green]✓[/green] Found {label}: {path}")
         else:
-            console.print("[yellow]![/yellow] No AVDs found")
-    else:
-        console.print("[yellow]![/yellow] AVD Home directory not found")
-
-    # Check if environment is ready
-    environment["environment_ready"] = all(
-        (
-            environment["sdk_path"],
-            environment["adb_path"],
-            environment["emulator_path"],
-            environment["avd_home"],
-        )
-    )
-
+            console.print(f"[yellow]![/yellow] {label} not found")
+    environment["environment_ready"] = all(path for _label, path in found.values())
     return environment
 
 
@@ -339,62 +153,6 @@ def prompt_for_missing_paths(environment: dict[str, Any]) -> dict[str, Any]:
     return updated_env
 
 
-def select_or_create_avd(environment: dict[str, Any]) -> tuple[str | None, bool]:
-    """Let user select existing AVD or create new one.
-
-    Returns:
-        Tuple of (selected_avd_name, should_create_new)
-    """
-    avds = environment.get("available_avds", [])
-
-    if avds:
-        console.print(f"\n[bold blue]Found {len(avds)} existing AVDs[/bold blue]")
-
-        # Show AVDs in a table
-        table = Table(title="Available Android Virtual Devices")
-        table.add_column("Index", style="cyan", no_wrap=True)
-        table.add_column("AVD Name", style="magenta")
-
-        for i, avd in enumerate(avds, 1):
-            table.add_row(str(i), avd)
-
-        console.print(table)
-
-        # Add options for selection
-        options = [f"{i}. {avd}" for i, avd in enumerate(avds, 1)]
-        options.append(f"{len(avds) + 1}. Create new 'sandroid' AVD")
-        options.append(f"{len(avds) + 2}. Skip AVD configuration")
-
-        console.print("\n[bold]Choose an option:[/bold]")
-        for option in options:
-            console.print(f"  {option}")
-
-        while True:
-            choice = Prompt.ask(f"Enter choice [1-{len(options)}]", default="1")
-
-            try:
-                choice_num = int(choice)
-                if 1 <= choice_num <= len(avds):
-                    selected_avd = avds[choice_num - 1]
-                    console.print(f"[green]✓[/green] Selected AVD: {selected_avd}")
-                    return selected_avd, False
-                if choice_num == len(avds) + 1:
-                    return "sandroid", True
-                if choice_num == len(avds) + 2:
-                    console.print("[yellow]Skipping AVD configuration[/yellow]")
-                    return None, False
-                console.print("[red]Invalid choice, please try again[/red]")
-            except ValueError:
-                console.print("[red]Please enter a number[/red]")
-
-    else:
-        console.print("\n[bold yellow]No existing AVDs found[/bold yellow]")
-
-        if Confirm.ask("Create new 'sandroid' AVD?", default=True):
-            return "sandroid", True
-        return None, False
-
-
 def print_missing_tools_warning(environment: dict[str, Any]):
     """Print warning about missing Android tools and their impact."""
     missing_tools = []
@@ -434,51 +192,22 @@ def print_missing_tools_warning(environment: dict[str, Any]):
         console.print("  sandroid-config set emulator.avd_home /path/to/avd")
 
 
-def setup_android_environment(skip_setup: bool = False) -> dict[str, Any]:
-    """Complete Android environment setup workflow.
+def setup_android_environment(interactive: bool = True) -> dict[str, Any]:
+    """Detect the Android tool paths, asking for missing ones if *interactive*.
 
     Args:
-        skip_setup: If True, only detect environment without user prompts
+        interactive: Prompt for paths that could not be detected.
 
     Returns:
-        Dictionary with Android environment configuration
+        Dict as returned by :func:`detect_android_environment`.
     """
-    if skip_setup:
-        console.print("[yellow]Skipping Android environment setup[/yellow]")
-        return detect_android_environment()
-
-    # Detect current environment
     environment = detect_android_environment()
-
-    # If environment is already complete, just confirm with user
     if environment["environment_ready"]:
         console.print(
             "\n[bold green]✓ Android development environment looks good![/bold green]"
         )
-
-        if environment["available_avds"]:
-            selected_avd, should_create = select_or_create_avd(environment)
-            environment["selected_avd"] = selected_avd
-            environment["should_create_avd"] = should_create
-
         return environment
-
-    # Prompt for missing paths
-    environment = prompt_for_missing_paths(environment)
-
-    # Refresh AVD list after configuration
-    if environment.get("emulator_path") and environment.get("sdk_path"):
-        environment["available_avds"] = list_available_avds(
-            environment["emulator_path"], environment["sdk_path"]
-        )
-
-    # Select or create AVD
-    if environment.get("available_avds") or environment.get("avd_home"):
-        selected_avd, should_create = select_or_create_avd(environment)
-        environment["selected_avd"] = selected_avd
-        environment["should_create_avd"] = should_create
-
-    # Print warnings for any remaining missing tools
+    if interactive:
+        environment = prompt_for_missing_paths(environment)
     print_missing_tools_warning(environment)
-
     return environment

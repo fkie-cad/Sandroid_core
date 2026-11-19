@@ -450,7 +450,6 @@ class SandroidTUI(App):
             log_warning=cb.log_warning,
             log_error=cb.log_error,
             push_modal=cb.push_modal,
-            schedule_timer=self.set_timer,
             refresh_ui=cb.force_ui_refresh,
             call_from_thread=cb.call_from_thread,
             on_emulator_ready=self._on_emulator_ready,

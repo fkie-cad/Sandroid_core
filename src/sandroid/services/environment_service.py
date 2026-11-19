@@ -207,7 +207,8 @@ class EnvironmentService:
             result.adb_available = True  # ADB exists but no device
             result.message = (
                 "No devices/emulators connected. "
-                "Connect a device via USB or start an AVD with: sandroid-config avd start"
+                "Connect a device via USB or start an AVD in the Devices screen "
+                "(press D) or with: sandroid --avd NAME"
             )
 
             if auto_start_emulator:

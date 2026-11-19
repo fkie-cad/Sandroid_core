@@ -14,9 +14,7 @@ emulator:
   # sdk_path: ~/Android/Sdk  # Optional: auto-detected if not provided
   # adb_path: ~/Android/Sdk/platform-tools/adb  # Optional: auto-detected if not provided
   # avd_home: ~/.android/avd  # Optional: auto-detected if not provided
-  # selected_avd: sandroid  # Optional: AVD name for Sandroid analysis
-  avd_headless: false  # Start AVD with UI by default
-  avd_auto_start: false  # Don't auto-start AVD by default
+  avd_headless: false  # First launch of an AVD with UI (Devices screen remembers per AVD)
   # Set the device clock to host time at session start and after snapshot
   # loads when it is more than 1 s off (old name: sync_clock_after_snapshot)
   sync_device_clock: true

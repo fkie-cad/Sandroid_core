@@ -15,12 +15,26 @@ Starting the TUI
    sandroid --network                    # pre-configure analysis options
    sandroid --log                        # also print log messages to the terminal
    sandroid -s emulator-5556             # use this device (adb serial)
+   sandroid --avd Pixel_6_Pro_API_34     # start/reuse this AVD, then use it
 
 The startup screen checks adb, the device, root and SELinux. If that fails it
 says why (e.g. ``Device 'emulator-5556' not found`` with the devices adb does
-list) and only these keys work: ``r`` retries, ``d`` opens the device
-selector (the device you pick is used for this session), ``q`` quits with exit
-status 2.
+list) and only these keys work: ``r`` retries, ``d`` opens the Devices
+screen (the device you pick or start there is used for this session), ``q``
+quits with exit status 2.
+
+**Devices screen.** Opens by itself at startup when no device (or more than
+one, without ``--serial``/``--avd``) is connected, after a disconnect that does
+not reconnect, and with ``D`` any time. *Running* lists every device adb sees
+(serial, AVD, model, API, booting/ready/offline/unauthorized, root): ``⏎``
+attaches it, ``x`` stops an emulator (``emu kill`` for that serial only),
+``R`` restarts it with the same options, ``a`` runs ``adb connect
+host:port``. *Available AVDs* lists the AVDs that are not running: ``⏎``
+starts one with its remembered options (the last-used AVD is preselected),
+``c`` cold boot, ``n`` from a snapshot, ``w`` wipe data (asks first), ``h``
+toggles headless, ``e`` renames it. Launch options are remembered per AVD in
+``~/.config/sandroid/devices.json``; ``emulator.avd_headless`` is only the
+first-launch default.
 
 .. note::
 
@@ -80,7 +94,7 @@ Backtick (grave accent)     Toggle the log drawer
 ``Shift+Up``/``Down``       AI Chat size: 30% / 50% / 70% / max
 ``Ctrl+B``                  Focus the active lens (e.g. after the chat)
 ``,``                       Settings
-``D`` (Shift+D)             Switch device
+``D`` (Shift+D)             Devices screen (attach / start / stop devices)
 ``q`` / ``Ctrl+C``          Quit (asks first; ``Ctrl+Q`` too)
 ==========================  ==================================================
 
@@ -658,7 +672,7 @@ Troubleshooting
 
 - **frida-server does not start**: check root (``adb root && adb shell id``)
   and see :ref:`device-requirements`.
-- **No device detected**: ``adb devices``; switch devices with ``D``.
+- **No device detected**: ``adb devices``; open the Devices screen with ``D``.
 - **TUI rendering issues**: run with ``--log`` and check
   ``results/<timestamp>/sandroid.log``.
 - See :doc:`troubleshooting` for more.

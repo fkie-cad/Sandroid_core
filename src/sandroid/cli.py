@@ -80,6 +80,16 @@ def __getattr__(name: str):
     ),
 )
 @click.option(
+    "--avd",
+    metavar="NAME",
+    default=None,
+    help=(
+        "Use Android Virtual Device NAME: reuse its running emulator or start "
+        "it (with its remembered Devices-screen options) and wait for the "
+        "boot. Cannot be combined with --serial."
+    ),
+)
+@click.option(
     "--file", "-f", type=click.Path(), help="Save output to the specified file"
 )
 @click.option(
@@ -283,6 +293,7 @@ def main(
     config: str | None,
     environment: str | None,
     serial: str | None,
+    avd: str | None,
     file: str | None,
     loglevel: str | None,
     number: int | None,
@@ -342,6 +353,11 @@ def main(
             "CCF utility is not available with the current TrigDroid API). "
             "Configure TrigDroid via the [trigdroid] section of the config "
             "file instead (sandroid-config show / set)."
+        )
+
+    if avd and serial:
+        raise click.UsageError(
+            "--avd and --serial both choose the device; give only one of them."
         )
 
     # --- Offline report generation (no config/device needed) ---------------
@@ -448,8 +464,9 @@ def main(
             config_file=config, environment=environment, cli_overrides=cli_overrides
         )
 
-        # Device selection precedence: --serial > $ANDROID_SERIAL > config.
-        if not serial and os.environ.get("ANDROID_SERIAL"):
+        # Device selection precedence:
+        # --serial / --avd > $ANDROID_SERIAL > config.
+        if not serial and not avd and os.environ.get("ANDROID_SERIAL"):
             sandroid_config.emulator.serial = os.environ["ANDROID_SERIAL"]
 
         # Make get_config() (run history/bundles, services) return this exact
@@ -457,6 +474,10 @@ def main(
         from .config import set_config
 
         set_config(sandroid_config, source_file=config)
+
+        if avd:
+            # Uses the configured SDK/adb paths, hence after set_config().
+            sandroid_config.emulator.serial = _boot_avd(avd, console)
 
         # Re-initialize console with the configured theme preset
         SandroidConsole.initialize(sandroid_config.theme.preset)
@@ -582,6 +603,40 @@ def main(
     except Exception as e:
         console.print(f"[error]Error: {e}[/error]")
         sys.exit(1)
+
+
+def _boot_avd(avd: str, console) -> str:
+    """Serial of a ready emulator running AVD *avd* (``--avd``).
+
+    Reuses a running emulator of that AVD or starts it with the options
+    remembered by the Devices screen, showing the boot progress. Exits with
+    status 1 when the AVD is unknown or does not boot.
+    """
+    from .core import emulator
+    from .core.exceptions import EmulatorLaunchError
+
+    known = emulator.list_avds()
+    if known and avd not in known:
+        console.print(
+            f"[error]Unknown AVD '{avd}'. Available: {', '.join(known)}[/error]"
+        )
+        sys.exit(1)
+
+    with console.status(f"Starting AVD '{avd}'...") as status:
+
+        def _progress(state: str, elapsed: float) -> None:
+            status.update(f"AVD '{avd}': {state} ({elapsed:.0f}s)")
+
+        try:
+            serial = emulator.ensure_avd_running(avd, on_progress=_progress)
+        except EmulatorLaunchError as e:
+            serial = None
+            error = str(e)
+    if serial is None:
+        console.print(f"[error]Could not start AVD '{avd}': {error}[/error]")
+        sys.exit(1)
+    console.print(f"[success]AVD '{avd}' is ready as {serial}[/success]")
+    return serial
 
 
 def _run_proxy_command(

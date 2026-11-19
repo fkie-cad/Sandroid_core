@@ -58,17 +58,12 @@ class EmulatorConfig(BaseModel):
         default=None,
         description="Android AVD home directory (auto-detected if not provided)",
     )
-    selected_avd: str | None = Field(
-        default=None,
-        description="AVD name to use for Sandroid analysis",
-    )
     avd_headless: bool = Field(
         default=False,
-        description="Start AVD in headless mode (no UI)",
-    )
-    avd_auto_start: bool = Field(
-        default=False,
-        description="Automatically start AVD when needed",
+        description=(
+            "Start an AVD headless (no window) the first time it is launched "
+            "from the Devices screen; afterwards its remembered option wins"
+        ),
     )
     max_host_memory_gb: float = Field(
         default=10.0,

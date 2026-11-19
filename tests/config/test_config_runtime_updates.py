@@ -291,7 +291,7 @@ def test_config_init_without_output_refuses_to_overwrite(xdg):
     user_file = user_dir / "sandroid.toml"
     user_file.write_text('log_level = "DEBUG"\n')
 
-    result = CliRunner().invoke(config_main, ["init", "--yes", "--skip-avd-setup"])
+    result = CliRunner().invoke(config_main, ["init", "--yes", "--skip-android-setup"])
 
     assert result.exit_code == 1
     assert "already exists" in result.output
@@ -302,6 +302,53 @@ def test_config_init_without_output_refuses_to_overwrite(xdg):
     )
     assert forced.exit_code == 0, forced.output
     assert user_file.read_text() != 'log_level = "DEBUG"\n'
+
+
+def test_config_init_only_detects_android_paths(xdg, monkeypatch):
+    """Init writes the detected tool paths and never picks or starts an AVD."""
+    from sandroid.config import android_env
+    from sandroid.config.cli import main as config_main
+
+    monkeypatch.setattr(android_env, "sdk_root", lambda: Path("/sdk"))
+    monkeypatch.setattr(android_env, "adb_binary", lambda: Path("/sdk/adb"))
+    monkeypatch.setattr(android_env, "emulator_binary", lambda: None)
+    monkeypatch.setattr(android_env, "avd_home", lambda: Path("/avd"))
+    out = xdg[1] / "init.toml"
+
+    result = CliRunner().invoke(config_main, ["init", "--yes", "-o", str(out)])
+
+    assert result.exit_code == 0, result.output
+    emulator = _read_toml(out)["emulator"]
+    assert emulator["sdk_path"] == "/sdk"
+    assert emulator["adb_path"] == "/sdk/adb"
+    assert emulator["avd_home"] == "/avd"
+    assert "android_emulator_path" not in emulator
+    assert "selected_avd" not in emulator
+    assert "avd_auto_start" not in emulator
+    assert "Devices screen" in result.output
+
+
+def test_removed_device_commands_and_old_avd_keys(xdg):
+    """``avd``/``devices`` are gone; configs that still set the old keys load."""
+    from sandroid.config.cli import main as config_main
+
+    for args in (["avd", "list"], ["devices"]):
+        result = CliRunner().invoke(config_main, args)
+        assert result.exit_code == 2
+        assert "No such command" in result.output
+
+    user_dir, _ = xdg
+    user_dir.mkdir(parents=True)
+    (user_dir / "sandroid.toml").write_text(
+        "[emulator]\n"
+        'selected_avd = "Pixel_9"\n'
+        "avd_auto_start = true\n"
+        "avd_headless = true\n"
+    )
+    emulator = ConfigLoader().load().emulator
+    assert emulator.avd_headless is True
+    assert not hasattr(emulator, "selected_avd")
+    assert not hasattr(emulator, "avd_auto_start")
 
 
 # -- B11: positional KEY [VALUE] for set/get -----------------------------------

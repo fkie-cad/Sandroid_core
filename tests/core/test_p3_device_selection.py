@@ -749,3 +749,102 @@ def test_cli_headless_passes_unset_flags_as_none(monkeypatch):
     assert calls["capture_network"] is None
     assert calls["compute_hashes"] is None
     assert calls["track_deleted"] is None
+
+
+# ---------------------------------------------------------------------------
+# sandroid --avd NAME
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def avd_cli(fake_adb, tmp_path, monkeypatch):
+    """Run ``sandroid`` with a config, fake emulator backend and fake TUI."""
+    from sandroid import cli_modes
+    from sandroid.core import emulator
+
+    work = tmp_path / "work"
+    work.mkdir()
+    results = tmp_path / "results"
+    (work / "sandroid.toml").write_text(
+        "[paths]\n"
+        f'results_path = "{results.as_posix()}"\n'
+        f'raw_results_path = "{(results / "raw").as_posix()}"\n'
+        "[emulator]\n"
+        f'adb_path = "{fake_adb.path.as_posix()}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    _restore_cli_globals(monkeypatch)
+
+    state = SimpleNamespace(booted=[], tui_serial=[], avds=["Pixel_9", "Other"])
+
+    def fake_ensure(avd, *, on_progress=None, **kwargs):
+        state.booted.append(avd)
+        if on_progress is not None:
+            on_progress("booting", 3.0)
+        if isinstance(state.result, Exception):
+            raise state.result
+        return state.result
+
+    state.result = "emulator-5560"
+    monkeypatch.setattr(emulator, "ensure_avd_running", fake_ensure)
+    monkeypatch.setattr(emulator, "list_avds", lambda *a, **k: list(state.avds))
+    monkeypatch.setattr(
+        cli_modes,
+        "start_interactive_mode",
+        lambda cfg, *a, **k: state.tui_serial.append(cfg.emulator.serial),
+    )
+
+    def run(args):
+        from click.testing import CliRunner
+
+        from sandroid.cli import main
+
+        return CliRunner().invoke(main, args)
+
+    state.run = run
+    return state
+
+
+def test_cli_avd_and_serial_are_mutually_exclusive(avd_cli):
+    res = avd_cli.run(["--avd", "Pixel_9", "--serial", "emulator-5554"])
+
+    assert res.exit_code == 2, res.output
+    assert "--avd and --serial" in res.output
+    assert avd_cli.booted == []
+    assert avd_cli.tui_serial == []
+
+
+def test_cli_avd_boots_and_pins_its_serial_over_android_serial(avd_cli, monkeypatch):
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-5554")
+
+    res = avd_cli.run(["--avd", "Pixel_9"])
+
+    assert res.exit_code == 0, res.output
+    assert avd_cli.booted == ["Pixel_9"]
+    assert avd_cli.tui_serial == ["emulator-5560"]
+    assert "ready as emulator-5560" in res.output
+
+
+def test_cli_avd_launch_failure_exits_before_any_mode(avd_cli):
+    from sandroid.core.exceptions import EmulatorLaunchError
+
+    avd_cli.result = EmulatorLaunchError("crashed during startup (log: /x.log)")
+
+    res = avd_cli.run(["--avd", "Pixel_9"])
+
+    assert res.exit_code == 1, res.output
+    assert "Could not start AVD 'Pixel_9'" in res.output
+    assert "/x.log" in res.output
+    assert avd_cli.tui_serial == []
+
+
+def test_cli_avd_unknown_name_lists_the_known_ones(avd_cli):
+    res = avd_cli.run(["--avd", "Nope"])
+
+    assert res.exit_code == 1, res.output
+    assert "Unknown AVD 'Nope'" in res.output
+    assert "Pixel_9, Other" in res.output
+    assert avd_cli.booted == []
+    assert avd_cli.tui_serial == []

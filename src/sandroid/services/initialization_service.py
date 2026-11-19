@@ -796,7 +796,8 @@ class InitializationService:
         except RuntimeError as e:
             self._logger.error(
                 f"{e}\n"
-                "Hint: Start an AVD with 'sandroid-config avd start' "
+                "Hint: Start an AVD in the Devices screen (press D) or with "
+                "'sandroid --avd NAME', "
                 "or connect a physical device via USB."
             )
             return None

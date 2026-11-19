@@ -81,7 +81,7 @@ class SnapshotsPanel(Widget):
         r: refresh the list
 
     The keys are deliberately **lowercase**. App-level priority bindings fire
-    App-first regardless of focus (e.g. ``D`` opens the device selector), so an
+    App-first regardless of focus (e.g. ``D`` opens the Devices screen), so an
     uppercase ``D`` here would be dead. Lowercase c/l/d/r map to non-priority
     app bindings, and a focused descendant's ancestor (this panel) wins the
     non-priority pass — so these shadow the globals only while the snapshots

@@ -31,7 +31,7 @@ Whether you're investigating malicious apps, assessing security flaws, or collec
 - **A rooted Android emulator (AVD).** Sandroid needs root on the device (it runs `adb root`, pushes and starts `frida-server`, and sets SELinux to *permissive* with `setenforce 0` itself). Two setups are known to work:
   - a **Google APIs** system image (`google_apis`, *not* `google_apis_playstore`) — `adb root` works out of the box; or
   - a **Google Play** system image rooted with [rootAVD](https://gitlab.com/newbit/rootAVD) (Magisk) **plus the Magisk `adb_root` module**, so that `adbd` itself runs as root. This is how the Sandroid team's own AVDs are set up.
-- **AVD snapshots** must be enabled — the record/play workflow and the snapshot picker (`S`) rely on them. Do **not** start the emulator with `-no-snapshot`; if you do not want the emulator to overwrite its quick-boot snapshot on exit use `-no-snapshot-save` (or simply start it via `sandroid-config avd start`).
+- **AVD snapshots** must be enabled — the record/play workflow and the snapshot picker (`S`) rely on them. Do **not** start the emulator with `-no-snapshot`; if you do not want the emulator to overwrite its quick-boot snapshot on exit use `-no-snapshot-save` (or simply start it from Sandroid's Devices screen, `D`, or with `sandroid --avd NAME`, which never pass `-no-snapshot`).
 - **Physical devices** are only partially supported: they must be rooted, and everything that relies on the emulator (snapshots, emulator-console network capture/degradation, `-no-snapshot-*` boot modes) is unavailable.
 - Linux and macOS are the primary platforms; Windows works best via WSL2.
 
@@ -41,14 +41,15 @@ Whether you're investigating malicious apps, assessing security flaws, or collec
 # Install from PyPI
 pip install sandroid
 
-# Initialize configuration (detects the Android SDK and lets you pick/create an AVD)
+# Initialize configuration (detects the Android SDK, adb and the emulator)
 sandroid-config init
 
-# Start your AVD (keeps snapshots enabled)
-sandroid-config avd start
-
-# Launch the interactive TUI
+# Launch the interactive TUI; with no device running, the Devices screen
+# opens so you can start an AVD (snapshots stay enabled)
 sandroid
+
+# ...or boot/reuse a specific AVD first
+sandroid --avd Pixel_6_Pro_API_31
 ```
 
 See [SETUP.md](SETUP.md) for all installation possibilities.
@@ -68,7 +69,7 @@ Sandroid's default interface is an interactive terminal UI (Textual) built aroun
 
 **Snapshots** are a picker, not a tab: `S` (or `0`) lists the AVD's snapshots — create (`c`), load (`Enter`/`l`, confirmed), delete (`d`), assign to a slot (`a`), load slot `1`–`8` (confirmed), and `s` then a digit saves the current state into a slot (8 slots per AVD). `Ctrl+1`–`Ctrl+8` save into a slot directly, but `Ctrl`+digit only reaches Sandroid in terminals with the kitty keyboard protocol (kitty, WezTerm, foot, Ghostty, recent iTerm2).
 
-`?` opens the **help & keybinding editor** (every action grouped by category; rebind any key with live conflict detection, persisted to `tui.keybindings`), `Ctrl+Shift+P` opens the **command palette**, `D` switches devices and `q` (or `Ctrl+C` / `Ctrl+Q`) quits after a confirmation; quitting stops mitmweb and friTap and clears the device proxy Sandroid set, and never hangs on a tool that does not stop. Common operations are a single keypress (e.g. `y` proxy settings, `w` network capture, `o` file monitor, `f` frida-server, `s` screenshot, `n` install APK, `Ctrl+P` toggle SSL unpinning).
+`?` opens the **help & keybinding editor** (every action grouped by category; rebind any key with live conflict detection, persisted to `tui.keybindings`), `Ctrl+Shift+P` opens the **command palette**, `D` opens the **Devices screen** (attach a running device, start/stop/restart/rename AVDs with remembered boot options, `adb connect`) and `q` (or `Ctrl+C` / `Ctrl+Q`) quits after a confirmation; quitting stops mitmweb and friTap and clears the device proxy Sandroid set, and never hangs on a tool that does not stop. Common operations are a single keypress (e.g. `y` proxy settings, `w` network capture, `o` file monitor, `f` frida-server, `s` screenshot, `n` install APK, `Ctrl+P` toggle SSL unpinning).
 
 > The 2.0 "views" (Forensic / Malware / Security, switched with `TAB`) are gone — all actions live in one flat catalog. Fully non-interactive runs are available via `--headless`.
 
@@ -129,6 +130,10 @@ Dexray & Advanced Tools:
   --fridump PACKAGE               Dump memory of PACKAGE using Fridump
   --duration SECONDS              Network capture duration (headless, default: 60)
   --with-fritap PACKAGE           Combine network capture with FriTap keylog
+
+Device Selection:
+  -s, --serial SERIAL             ADB serial of the device to use
+  --avd NAME                      Start (or reuse) AVD NAME and use it
 
 Device Management:
   --proxy IP:PORT                 Set HTTP proxy on device
@@ -309,13 +314,6 @@ Configuration files (`sandroid.toml`, also `.yaml`/`.yml`/`.json`) are discovere
 ### sandroid-config Subcommands
 
 ```bash
-# AVD Management
-sandroid-config avd list          # List available AVDs
-sandroid-config avd start         # Start an AVD (interactive or --avd-name, --boot-mode)
-sandroid-config avd stop          # Stop running AVDs
-sandroid-config avd rename        # Rename an AVD
-sandroid-config avd create        # Create a new AVD
-
 # TUI Theme
 sandroid-config theme list        # List available themes
 sandroid-config theme set <id>    # Set TUI theme
@@ -327,10 +325,11 @@ sandroid-config ioc set-path <p>  # Set IOC file/directory path
 sandroid-config ioc set-url <url> # Set IOC download URL
 sandroid-config ioc download      # Download IOC files
 sandroid-config ioc validate      # Validate IOC files
-
-# Device Management
-sandroid-config devices           # List connected devices
 ```
+
+Devices and AVDs are managed in the TUI's **Devices screen** (`D`) or with
+`sandroid --avd NAME`; the former `sandroid-config` AVD and device commands
+were removed (see [MIGRATION.md](MIGRATION.md)).
 
 ## Screenshots
 

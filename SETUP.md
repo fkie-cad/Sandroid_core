@@ -22,11 +22,14 @@ pip install sandroid
 sandroid-config init
 ```
 
-The `sandroid-config init` command now provides:
-- 🔍 **Automatic Android SDK detection**
-- 📱 **AVD discovery and configuration**
-- ⚙️ **Interactive setup** with validation
+The `sandroid-config init` command provides:
+- 🔍 **Automatic Android SDK, adb and emulator detection**
+- ⚙️ **Interactive setup** with validation (TUI theme, MVT)
 - 🎯 **Smart path detection** with user overrides
+
+Picking and starting an AVD is not part of `init`: run `sandroid` and use the
+**Devices screen** (it opens by itself when no device is running; `D` later),
+or start Sandroid with `sandroid --avd NAME`.
 - ✅ **Ready-to-use configuration**
 
 ## 📋 Interactive Setup Experience
@@ -42,43 +45,20 @@ $ sandroid-config init
 ✓ Found ADB: /opt/homebrew/bin/adb
 ✓ Found Android Emulator: /Users/user/Android/Sdk/emulator/emulator
 ✓ Found AVD Home: /Users/user/.android/avd
-✓ Found 3 AVDs: Pixel_6_Pro_API_31, Test_Device, sandroid_avd
 
-📱 Found 3 existing AVDs
-┏━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┓
-┃ Index ┃ AVD Name            ┃
-┡━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━┩
-│ 1     │ Pixel_6_Pro_API_31  │
-│ 2     │ Test_Device         │
-│ 3     │ sandroid_avd        │
-└───────┴─────────────────────┘
+✓ Android development environment looks good!
 
-Choose an option:
-  1. Pixel_6_Pro_API_31
-  2. Test_Device
-  3. sandroid_avd
-  4. Create new 'sandroid' AVD
-  5. Skip AVD configuration
-
-Enter choice [1-5]: 1
-✓ Selected AVD: Pixel_6_Pro_API_31
-
-Start AVD 'Pixel_6_Pro_API_31' with UI by default? [Y/n]: Y
-Automatically start AVD when Sandroid needs it? [y/N]: n
-
-✅ Configuration created successfully!
-📍 Location: ~/.config/sandroid/sandroid.toml
-📱 Configured AVD: Pixel_6_Pro_API_31
-
-🚀 Start AVD 'Pixel_6_Pro_API_31' now? [y/N]: y
-✓ AVD 'Pixel_6_Pro_API_31' starting in background...
+✓ Configuration created successfully!
+Location: ~/.config/sandroid/sandroid.toml
 
 Next steps:
 • Use sandroid-config show to view your configuration
-• Use sandroid-config avd list to see available AVDs
-• Use sandroid-config avd start to start your configured AVD
-• Run sandroid to begin Android forensic analysis
+• Run sandroid to start Sandroid (TUI)
+• Start or pick an emulator in the TUI's Devices screen (D) or with sandroid --avd NAME
 ```
+
+Skip the detection with `--skip-android-setup` (`--skip-avd-setup` still works),
+or answer nothing with `--yes`.
 
 ## 🛠️ Detailed Setup
 
@@ -188,8 +168,8 @@ adb root && adb shell id    # must report uid=0(root)
 The record/play workflow and the Snapshots tab rely on **AVD snapshots**.
 Keep snapshots enabled: do **not** start the emulator with `-no-snapshot`. If
 you do not want the emulator to overwrite its quick-boot snapshot on exit, use
-`-no-snapshot-save`, or start it via `sandroid-config avd start`
-(`--boot-mode default|cold|snapshot|wipe`).
+`-no-snapshot-save`, or start it from Sandroid's Devices screen (`D`), which
+offers normal, cold, from-snapshot and wipe boots and never disables snapshots.
 
 ### Physical devices
 
@@ -198,40 +178,27 @@ monitoring, proxies), but everything that relies on the emulator is
 unavailable: snapshots (and therefore record/play baselines), emulator-console
 network capture and `--degrade-network`.
 
-## 📱 AVD Management
+## 📱 Devices and AVDs
 
-Sandroid now includes comprehensive AVD management commands:
+Devices and AVDs are managed inside the TUI, in the **Devices screen**. It
+opens by itself at startup when no device (or more than one) is connected, and
+`D` opens it any time:
 
-### List Available AVDs
-```bash
-# Show all available Android Virtual Devices
-sandroid-config avd list
-```
+- **Running** devices (serial, AVD, model, API, boot state, root) — `⏎`
+  attaches one; `x` stops an emulator, `R` restarts it; `a` runs
+  `adb connect host:port`.
+- **Available AVDs** — `⏎` starts one with its remembered options, `c` cold
+  boot, `n` boot from a snapshot, `w` wipe data (asks first), `h` toggles
+  headless (remembered per AVD), `e` renames a stopped AVD.
 
-### Start an AVD
-```bash
-# Start your configured AVD (from sandroid-config init)
-sandroid-config avd start
-
-# Start a specific AVD with UI
-sandroid-config avd start --avd-name Pixel_6_Pro_API_31
-
-# Start in headless mode (no UI - good for CI/CD)
-sandroid-config avd start --headless
-```
-
-### Stop Running AVDs
-```bash
-# Stop all running emulators
-sandroid-config avd stop
-```
+From the command line, `sandroid --avd NAME` reuses the running emulator of
+that AVD or starts it (with the remembered options) and waits for the boot
+before Sandroid starts; it cannot be combined with `--serial`.
 
 ### Create New AVD
 ```bash
-# Create a new AVD (basic - for complex setup use Android Studio)
-sandroid-config avd create --name my-avd --api-level 34
-
-# For full AVD creation with system image installation
+# Create an AVD with Android Studio's Device Manager, or with the helper
+# (installs the system image as well)
 python deploy/create_avd.py
 ```
 
@@ -256,10 +223,9 @@ sandroid-config set -k emulator.sdk_path -v "/path/to/Android/Sdk"
 sandroid-config set -k emulator.adb_path -v "/path/to/adb"
 sandroid-config set -k emulator.android_emulator_path -v "/path/to/emulator"
 
-# Configure AVD settings
-sandroid-config set -k emulator.selected_avd -v "Pixel_6_Pro_API_31"
+# Start AVDs headless the first time they are launched (the Devices
+# screen remembers the choice per AVD afterwards)
 sandroid-config set -k emulator.avd_headless -v true
-sandroid-config set -k emulator.avd_auto_start -v false
 
 # Set other analysis options
 sandroid-config set -k analysis.number_of_runs -v 3
@@ -320,11 +286,12 @@ sandroid-config set -k emulator.avd_home -v "/path/to/avd"
 
 **Problem: AVD won't start**
 ```bash
-# Check AVD exists
-sandroid-config avd list
+# Check the AVD exists
+emulator -list-avds
 
-# Try starting manually with debug info
-sandroid-config avd start --avd-name YourAVD
+# Start it through Sandroid; a failed launch names the emulator log
+# (~/.cache/sandroid/emulator/)
+sandroid --avd YourAVD
 
 # Check emulator path is correct
 sandroid-config show
@@ -344,10 +311,11 @@ sandroid-config init --force
 sandroid-config paths
 ```
 
-### Skip AVD Setup
+### Skip Android Path Detection
 ```bash
-# If you want to configure Android environment separately
-sandroid-config init --skip-avd-setup
+# If you want to configure the Android paths separately
+# (--skip-avd-setup is an alias)
+sandroid-config init --skip-android-setup
 ```
 
 ## 🔧 Advanced Setup
@@ -403,24 +371,19 @@ cd docs && make html
 ### Basic Malware Analysis
 
 ```bash
-# Start your configured AVD
-sandroid-config avd start
+# Start (or reuse) your AVD and run analysis with network monitoring
+sandroid --avd YourAVD --network --screenshot 5 --report
 
-# Run analysis with network monitoring
-sandroid --network --screenshot 5 --report
-
-# Or use interactive mode
+# Or use interactive mode (start the AVD in the Devices screen)
 sandroid
 ```
 
 ### Automated Analysis Pipeline
 
 ```bash
-# Headless analysis for CI/CD
-sandroid-config avd start --headless
-
-# Run comprehensive analysis
-sandroid -f malware-analysis.json \
+# Headless analysis for CI/CD: --avd boots the AVD first (set
+# emulator.avd_headless = true to launch it without a window)
+sandroid --avd YourAVD -f malware-analysis.json \
   --network \
   --screenshot 3 \
   --trigdroid com.malware.example \
@@ -448,10 +411,10 @@ After setup, verify everything works:
 sandroid-config validate
 
 # List available AVDs
-sandroid-config avd list
+emulator -list-avds
 
-# Test AVD startup
-sandroid-config avd start --avd-name YourAVD
+# Test AVD startup (exits with the reason if it fails)
+sandroid --avd YourAVD
 
 # Verify device connectivity
 adb devices
@@ -471,7 +434,7 @@ sandroid --help
 ## 🆘 Getting Help
 
 - **Configuration Issues**: Use `sandroid-config validate` for detailed error messages
-- **AVD Problems**: Try `sandroid-config avd list` and `sandroid-config avd start`
+- **AVD Problems**: Open the Devices screen (`D`) or try `sandroid --avd NAME`; a failed launch names the emulator log
 - **Documentation**: Full documentation available in the `docs/` directory
 - **Issue Reporting**: Report bugs at the project's GitHub issue tracker
 

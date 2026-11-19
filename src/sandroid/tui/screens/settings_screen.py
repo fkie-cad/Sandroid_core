@@ -383,13 +383,6 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 config.emulator.avd_headless, "setting-emulator--avd_headless"
             )
 
-        # AVD Auto-Start
-        with Horizontal(classes="setting-row"):
-            yield Label("AVD Auto-Start:", classes="setting-label")
-            yield from self._switch_with_state(
-                config.emulator.avd_auto_start, "setting-emulator--avd_auto_start"
-            )
-
         # Device clock sync at session start and after a snapshot load
         # (offsets go to the session timeline either way)
         with Horizontal(classes="setting-row"):

@@ -149,14 +149,9 @@ Emulator (``[emulator]``)
    # Android AVD home directory (auto-detected if not provided)
    # avd_home = <not set>
 
-   # AVD name to use for Sandroid analysis
-   # selected_avd = <not set>
-
-   # Start AVD in headless mode (no UI)
+   # Start an AVD headless (no window) the first time it is launched from
+   # the Devices screen; afterwards its remembered option wins
    avd_headless = false
-
-   # Automatically start AVD when needed
-   avd_auto_start = false
 
    # Host-memory guard for the active emulator (GB, 0 disables it)
    max_host_memory_gb = 10

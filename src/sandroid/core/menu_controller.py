@@ -877,7 +877,7 @@ class MenuController:
             return True
 
         if action_name == "device_selector":
-            # Device selector is handled by the view layer (TUI)
+            # The Devices screen is handled by the view layer (TUI)
             return True
 
         # Route directly to command system if key is a command key

@@ -17,7 +17,6 @@ Usage:
         log_info=activity_log.log_info,
         log_warning=activity_log.log_warning,
         push_modal=app.push_screen,
-        schedule_timer=app.set_timer,
         refresh_ui=app.refresh_ui,
     )
 
@@ -98,7 +97,6 @@ class DeviceController:
             log_info=print,
             log_warning=lambda msg: print(f"WARN: {msg}"),
             push_modal=lambda modal, cb: cb(None),
-            schedule_timer=lambda secs, fn: fn(),
             refresh_ui=lambda: None,
         )
 
@@ -115,7 +113,6 @@ class DeviceController:
         log_warning: Callable[[str], None] | None = None,
         log_error: Callable[[str], None] | None = None,
         push_modal: Callable[[Any, Callable], None] | None = None,
-        schedule_timer: Callable[[float, Callable], None] | None = None,
         refresh_ui: Callable[[], None] | None = None,
         toolbox: Any | None = None,
         call_from_thread: Callable[..., Any] | None = None,
@@ -129,7 +126,6 @@ class DeviceController:
             log_warning: Callback for warning-level logging to UI
             log_error: Callback for error-level logging to UI
             push_modal: Callback to push a modal screen with result callback
-            schedule_timer: Callback to schedule a timed function call
             refresh_ui: Callback to force UI refresh after state changes
             toolbox: Optional Toolbox reference (defaults to imported Toolbox)
             call_from_thread: Callback to marshal a function call onto the
@@ -151,7 +147,6 @@ class DeviceController:
         self._log_warning = log_warning or self._default_log
         self._log_error = log_error or self._default_log
         self._push_modal = push_modal
-        self._schedule_timer = schedule_timer
         self._refresh_ui = refresh_ui
         self._toolbox = toolbox
         self._call_from_thread = call_from_thread or (lambda fn, *args: fn(*args))
@@ -284,8 +279,6 @@ class DeviceController:
         avd_name: str | None,
         options: Any,
         restart_serial: str | None = None,
-        notify: Callable[[str], Any] | None = None,
-        call_from_thread: Callable[..., Any] | None = None,
         on_launched: Callable[[bool, str], Any] | None = None,
     ) -> Any:
         """Worker: launch (or restart) an emulator, wait for its boot, attach.
@@ -300,9 +293,6 @@ class DeviceController:
             options: :class:`~sandroid.core.emulator.AvdLaunchOptions`.
             restart_serial: Restart this emulator (same AVD, same port)
                 instead of launching *avd_name*.
-            notify: Optional toast callback (UI thread).
-            call_from_thread: Marshals onto the UI thread (default: the
-                controller's).
             on_launched: UI-thread callback ``(ok, message)`` once the
                 emulator process started (or failed to).
 
@@ -313,7 +303,7 @@ class DeviceController:
         from sandroid.core import emulator
         from sandroid.core.exceptions import EmulatorLaunchError
 
-        ui = call_from_thread or self._call_from_thread
+        ui = self._call_from_thread
 
         def say(fn: Callable[..., Any] | None, *args: Any) -> None:
             if fn is None:
@@ -341,7 +331,6 @@ class DeviceController:
         verb = "restarting" if restart_serial else "starting"
         msg = f"AVD '{launch.avd}' {verb} as {launch.serial} ({launch.options.boot})"
         say(self._log_info, msg + "...")
-        say(notify, msg + "...")
         say(on_launched, True, msg)
 
         if not emulator.wait_until_ready(launch.serial):

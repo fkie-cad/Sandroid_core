@@ -584,7 +584,8 @@ class SetupService:
             result.success = False
             result.message = (
                 "No devices/emulators connected. "
-                "Connect a device via USB or start an AVD with: sandroid-config avd start"
+                "Connect a device via USB or start an AVD in the Devices screen "
+                "(press D) or with: sandroid --avd NAME"
             )
             return False
 

@@ -138,10 +138,7 @@ def _show_config_rich(config: SandroidConfig) -> None:
         table.add_row("ADB Path", str(config.emulator.adb_path))
     if config.emulator.avd_home:
         table.add_row("AVD Home", str(config.emulator.avd_home))
-    if config.emulator.selected_avd:
-        table.add_row("Selected AVD", config.emulator.selected_avd)
     table.add_row("AVD Headless", str(config.emulator.avd_headless))
-    table.add_row("AVD Auto-Start", str(config.emulator.avd_auto_start))
 
     console.print(table)
 

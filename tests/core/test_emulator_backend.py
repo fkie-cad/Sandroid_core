@@ -258,15 +258,6 @@ def test_avd_info_and_snapshots_through_redirect(no_config, tmp_path, monkeypatc
         "clean",
     ]
 
-    from sandroid.config import android_env
-
-    assert android_env.get_avd_info("Pixel_API_35") == {
-        "android_version": "15",
-        "api_level": "35",
-        "device_name": "pixel_8",
-    }
-    assert len(android_env.get_avd_snapshots_from_filesystem("Pixel_API_35")) == 2
-
 
 def test_avd_info_falls_back_to_ini_target(no_config, tmp_path, monkeypatch):
     home = tmp_path / "avd"

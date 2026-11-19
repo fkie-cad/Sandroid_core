@@ -1,7 +1,30 @@
 # Migration Guide
 
+- [Upgrading to the Devices screen (unreleased)](#upgrading-to-the-devices-screen-unreleased)
 - [Upgrading from 2.0.x to 2.1](#upgrading-from-20x-to-21)
 - [Migrating from the legacy installation](#migrating-from-the-legacy-installation)
+
+## Upgrading to the Devices screen (unreleased)
+
+Device and AVD management moved from `sandroid-config` into the TUI.
+
+### Breaking changes
+
+| Removed | Use instead |
+|---|---|
+| `sandroid-config avd list` | Devices screen (`D`, *Available AVDs*) or `emulator -list-avds` |
+| `sandroid-config avd start [--avd-name N] [--headless] [--boot-mode M]` | `sandroid --avd N` (remembered options; headless on first launch from `emulator.avd_headless`), or `⏎` / `c` cold / `n` snapshot / `w` wipe / `h` headless in the Devices screen |
+| `sandroid-config avd stop` | `x` on the emulator in the Devices screen (stops that emulator only) or `adb -s emulator-5554 emu kill` |
+| `sandroid-config avd rename` | `e` on a stopped AVD in the Devices screen |
+| `sandroid-config avd create` | Android Studio's Device Manager or `python deploy/create_avd.py` |
+| `sandroid-config devices` | Devices screen (`D`, *Running*) or `adb devices -l` |
+| `sandroid-config init` AVD selection/start prompts | `init` only detects the SDK/adb/emulator paths; pick the AVD in the Devices screen (it opens at startup when no device runs). `--skip-avd-setup` still works as an alias of `--skip-android-setup`. |
+| `emulator.selected_avd`, `emulator.avd_auto_start` | Removed; old configs still load (the keys are ignored). For a scripted start use `sandroid --avd NAME`; the last-used AVD is preselected in the Devices screen. |
+
+Launch options chosen in the Devices screen (headless, boot mode, snapshot)
+are remembered per AVD in `~/.config/sandroid/devices.json`.
+
+---
 
 ## Upgrading from 2.0.x to 2.1
 

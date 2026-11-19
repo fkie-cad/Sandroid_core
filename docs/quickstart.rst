@@ -23,8 +23,9 @@ Basic Usage
 
 **2. Start Your Android Emulator**::
 
-   # Easiest: start the configured AVD (snapshots stay enabled)
-   sandroid-config avd start
+   # Easiest: let Sandroid start it (snapshots stay enabled) -- either
+   # run "sandroid" and pick the AVD in the Devices screen, or
+   sandroid --avd Pixel_6_Pro_API_34
 
    # ...or start it manually
    emulator -list-avds
