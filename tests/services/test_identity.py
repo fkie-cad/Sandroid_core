@@ -897,9 +897,18 @@ def test_service_is_registered_and_reset(env):
 # ---------------------------------------------------------------------------
 
 
-def test_preflight_is_one_adb_call(service, device):
+def _reads(device) -> list[str]:
+    """The identity reads among ``device.calls`` (not the record reads)."""
+    return [c for c in device.calls if "@@applied@@" not in c]
+
+
+def test_preflight_is_two_adb_calls(service, device):
     plan = service.plan(SERIAL, "com.example.app")
-    assert len(device.calls) == 1
+    reads = _reads(device)
+    assert len(reads) == 2  # the values, then the lists
+    assert "@@list:" not in reads[0]
+    assert "@@props@@" not in reads[1]
+    assert device.record_reads == 1  # once per serial: a persona it names
     assert not device.writes
     assert plan.disruptive
     assert {"android_id", "gaid", "device_name", "contacts"} <= set(plan.todo)
@@ -983,7 +992,7 @@ def test_apply_seeds_everything_and_second_apply_writes_nothing(service, device)
     with timeline.capture() as lines2:
         again = service.apply(SERIAL, "com.example.app")
     assert device.writes == []
-    assert len(device.calls) == 1
+    assert len(device.calls) == 2  # one read (values, lists)
     assert not lines2
     assert again.infos["phone_number"].status == "pending"
 
@@ -997,7 +1006,7 @@ def test_ensure_applied_is_nothing_with_identity_mode_off(service, device, monke
     monkeypatch.setattr(get_config().identity, "mode", "profile")
     monkeypatch.setattr(get_config().identity, "profile", "")
     assert service.ensure_applied(SERIAL) is None
-    assert device.calls == []
+    assert _reads(device) == []  # the record only (it may name a persona)
 
 
 def _restart_policy(monkeypatch, policy: str) -> None:
@@ -1021,7 +1030,7 @@ def test_ensure_applied_applies_then_costs_one_read_and_no_writes(
     again = service.ensure_applied(SERIAL)
     assert again is not None
     assert device.writes == []
-    assert len(device.calls) == 1  # one preflight
+    assert len(device.calls) == 2  # one read (values, lists)
     assert again.infos["device_name"].status == "verified"
     assert service._time_left() is None  # the budget ends with the call
 
@@ -1070,7 +1079,7 @@ def test_ensure_applied_names_a_running_apply(service, device):
             ident.IdentityApplyError, match="another identity apply is running"
         ):
             service.ensure_applied(SERIAL, budget_s=0.01)
-    assert device.calls == []
+    assert _reads(device) == []
 
 
 def test_a_started_window_waits_the_full_restart_timeout(service, device, monkeypatch):
@@ -1602,7 +1611,14 @@ def test_frozen_timeline_data_stays_small_with_300_apps_and_50_contacts(
     assert len(record["lists"]["contacts"]) == 50
 
 
-def test_missing_device_answer_fails_closed(service, monkeypatch):
+def test_missing_device_answer_fails_closed(service, device, monkeypatch):
+    # Not even the device record: the profile is unknown, nothing is applied.
+    monkeypatch.setattr(ident, "_send", lambda *a, **k: ("", "device offline"))
+    with pytest.raises(ident.IdentityApplyError, match=ident.RECORD_UNREAD):
+        service.apply(SERIAL, "com.example.app")
+    # The record was read, then the device stops answering: values fail.
+    monkeypatch.setattr(ident, "_send", device)
+    service.plan(SERIAL)
     monkeypatch.setattr(ident, "_send", lambda *a, **k: ("", "device offline"))
     plan = service.apply(SERIAL, "com.example.app")
     assert plan.infos["gaid"].status == "failed"
@@ -1842,10 +1858,11 @@ def test_sim_properties_are_set_natively_off_the_emulator(service, device, monke
 
 
 def test_provider_wait_is_bounded_on_an_overloaded_device(service, device):
-    """After the restart adb calls hang (ANR storm): the wait uses a light
-    lists-only probe with a short timeout, stops at the first unanswered
-    probe and never exceeds PROVIDER_WAIT_DEADLINE_S, so an app start is
-    not held for minutes. Unanswered lists stay pending, not failed.
+    """After the restart the lists reads hang (ANR storm): the verify read's
+    lists part times out, no provider probe follows it, and the wait never
+    exceeds PROVIDER_WAIT_DEADLINE_S, so an app start is not held for
+    minutes. Unanswered lists stay pending, not failed. (Providers that
+    answer but are not up yet: test_list_read_back_waits_for_the_providers.)
     """
     now = [1000.0]
     service._clock = lambda: now[0]
@@ -1879,9 +1896,10 @@ def test_provider_wait_is_bounded_on_an_overloaded_device(service, device):
         plan = service.apply(SERIAL, "com.example.app")
     finally:
         ident._send = real_send
-    assert len(probes) == 1  # stopped at the first unanswered probe
-    assert timeouts
-    assert max(timeouts) <= ident.PROVIDER_PROBE_TIMEOUT_S
+    # The verify read's lists got no answer at all: no probe follows it.
+    assert len(probes) == 1
+    # Lists reads before and after the restart, no provider probe.
+    assert timeouts == [ident.PREFLIGHT_LISTS_TIMEOUT_S] * 2
     assert now[0] - start <= ident.PROVIDER_WAIT_DEADLINE_S + 60  # + restart
     for script in probes:  # light: no packages.xml, settings or dumpsys
         assert "packages.xml" not in script
@@ -2596,6 +2614,10 @@ def _record(device) -> dict:
     return ident.json.loads(device.fs[ident.APPLIED_FILE])
 
 
+def _put_record(device, record: dict) -> None:
+    device.fs[ident.APPLIED_FILE] = (ident.json.dumps(record) + "\n").encode()
+
+
 def _fresh() -> IdentityService:
     """A new service on the same library and device: a TUI restart."""
     svc = IdentityService()
@@ -2635,6 +2657,7 @@ def test_a_fresh_service_reads_the_record_before_a_start(service, device, app_st
     fresh = _fresh()
     device.calls.clear()
     device.writes.clear()
+    device.record_reads = 0
     assert fresh.pre_start(PKG) is None
     assert len(device.calls) == 1  # one cheap read, nothing else
     assert device.record_reads == 1
@@ -2668,9 +2691,10 @@ def test_without_an_answer_pre_spawn_applies(service, device, app_start):
     assert plan is not None
     assert not plan.disruptive
     assert plan.description == "apply identity profile mara-de"
-    plan = _fresh().pre_start(PKG)
-    assert plan is not None
-    assert plan.disruptive  # nothing known: conservative
+    # A fresh process cannot tell the device's profile without its record
+    # (it may name a persona): the start is refused, nothing is guessed.
+    with pytest.raises(ident.IdentityApplyError, match=ident.RECORD_UNREAD):
+        _fresh().pre_start(PKG)
 
 
 def test_a_reboot_makes_the_package_pending_but_not_disruptive(
@@ -2734,6 +2758,7 @@ def test_applied_state_hydrates_in_the_background(
     service, device, app_start, monkeypatch
 ):
     service.apply(SERIAL, PKG)
+    device.record_reads = 0
     fresh = _fresh()
     heard: list = []
     fresh.add_status_listener(heard.append)
@@ -2843,10 +2868,12 @@ def test_a_start_never_restarts_unannounced(service, device, app_start):
 
 def test_hydration_backs_off_while_an_apply_runs(service, device):
     read = service._read_record(SERIAL)
-    with service._apply_lock:
-        assert service._hydrate(SERIAL, read, gen=0) is False
+    service._applying.add(SERIAL)  # an apply on this device
+    assert service._hydrate(SERIAL, read, gen=0) is False
     assert SERIAL not in service._hydrated
-    service._hydrate(SERIAL, read, gen=0)
+    service._applying.discard(SERIAL)
+    with service._apply_lock:  # an apply on another device: no matter
+        service._hydrate(SERIAL, read, gen=0)
     assert SERIAL in service._hydrated
 
 
@@ -3304,3 +3331,628 @@ def test_the_old_pre_spawn_names_are_gone():
     for name in ("pre_spawn", "install_pre_spawn_hook", "uninstall_pre_spawn_hook"):
         assert not hasattr(ident.IdentityService, name), name
     assert not hasattr(ident, "_pre_spawn_plan_cls")
+
+
+# ---------------------------------------------------------------------------
+# the profile of a device: its launch persona, else the active profile
+# ---------------------------------------------------------------------------
+
+
+def _launched_as(monkeypatch, persona: str, serial: str = SERIAL) -> None:
+    """``serial`` is Sandroid's live launch, started as ``persona``."""
+    from sandroid.core import emulator
+
+    records = {serial: {"launch_id": "L1", "meta": {ident.PERSONA_META_KEY: persona}}}
+    monkeypatch.setattr(emulator, "launch_record", lambda s: records.get(s))
+
+
+def _persona(service) -> Profile:
+    return service.save(_profile(id="persona-anna", seed="hex:" + "22" * 32))
+
+
+def test_the_persona_meta_key_is_the_world_modules():
+    from sandroid.world import persona
+
+    assert ident.PERSONA_META_KEY == persona.META_KEY
+
+
+def test_launch_persona_id_reads_the_launch_record(monkeypatch):
+    from sandroid.core import emulator
+
+    for record in (None, {}, {"meta": None}, {"meta": {"persona_id": 7}}):
+        monkeypatch.setattr(emulator, "launch_record", lambda s, r=record: r)
+        assert ident.launch_persona_id(SERIAL) == ""
+
+    def broken(serial):
+        raise RuntimeError("registry gone")
+
+    monkeypatch.setattr(emulator, "launch_record", broken)
+    assert ident.launch_persona_id(SERIAL) == ""
+    _launched_as(monkeypatch, "anna")
+    assert ident.launch_persona_id(SERIAL) == "anna"
+    assert ident.launch_persona_id(None) == ""
+    assert ident.launch_persona_id("emulator-5582") == ""
+
+
+def test_a_persona_launch_runs_its_own_profile(service, device, monkeypatch):
+    active = service.config().profile
+    persona = _persona(service)
+    assert ident.fingerprint(persona) != ident.fingerprint(service.load(active))
+    assert service.profile_id_for(SERIAL) == active
+    _launched_as(monkeypatch, persona.id)
+    assert service.profile_id_for(SERIAL) == persona.id
+    assert service.profile_for(SERIAL).id == persona.id
+    assert service.profile_id_for("emulator-5582") == active  # another device
+    plan = service.ensure_applied(SERIAL)
+    assert plan is not None
+    assert plan.fingerprint == ident.fingerprint(persona)
+    assert service.plan(SERIAL).fingerprint == ident.fingerprint(persona)
+    assert service.verify(SERIAL).fingerprint == ident.fingerprint(persona)
+    assert service.config().profile == active  # never switched
+    # Identity mode off is off everywhere, persona launches too.
+    monkeypatch.setattr(service.config(), "mode", "off")
+    assert service.profile_id_for(SERIAL) == ""
+    assert service.ensure_applied(SERIAL) is None
+
+
+def test_a_missing_persona_profile_is_never_replaced_by_the_active_one(
+    service, device, monkeypatch
+):
+    _launched_as(monkeypatch, "gone")
+    with pytest.raises(ident.ProfileError):
+        service.ensure_applied(SERIAL)
+    with pytest.raises(ident.ProfileError):
+        service.apply(SERIAL)
+    assert device.writes == []
+
+
+def test_applied_state_and_pre_start_follow_the_persona(
+    service, device, app_start, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SDROID_FILES_DIR", str(tmp_path / "own" / "session" / "files"))
+    pkg = "com.example.app"
+    service.apply(SERIAL, pkg)
+    assert service.applied_state(pkg) == "applied"
+    assert service.pre_start(pkg) is None
+    persona = _persona(service)
+    _launched_as(monkeypatch, persona.id)
+    # The active profile's apply is not the persona's.
+    assert service.applied_state(pkg) == "not_applied"
+    plan = service.pre_start(pkg)
+    assert plan is not None
+    plan.apply()
+    assert service.applied_state(pkg) == "applied"
+    assert service.pre_start(pkg) is None
+    assert service.statuses()[0].fingerprint == ident.fingerprint(persona)
+
+
+# ---------------------------------------------------------------------------
+# a loaded device: the read in two parts, one more try for the values
+# ---------------------------------------------------------------------------
+
+
+def _hanging(device, *, values: int = 0, lists: bool = False) -> list[str]:
+    """The first ``values`` value reads and (``lists``) every lists read
+    get no answer (adb timed out). Returns the scripts that hung.
+    """
+    real = device._shell
+    hung: list[str] = []
+    left = [values]
+
+    def shell(script: str) -> str:
+        if "@@props@@" in script and left[0] > 0:
+            left[0] -= 1
+            hung.append(script)
+            return ""
+        if lists and "@@list:" in script and "@@props@@" not in script:
+            hung.append(script)
+            return ""
+        return real(script)
+
+    device._shell = shell
+    return hung
+
+
+def test_the_values_read_gets_one_more_try(service, device):
+    hung = _hanging(device, values=1)
+    state = service.preflight(SERIAL, ("com.example.app",), service.active_profile())
+    assert len(hung) == 1
+    assert state.ok
+    assert "com.example.app" in state.packages
+    assert not state.lists_unread
+
+
+def test_a_device_that_does_not_answer_twice_is_not_read_further(service, device):
+    _hanging(device, values=2)
+    state = service.preflight(SERIAL, ("com.example.app",), service.active_profile())
+    assert not state.ok
+    assert len(device.calls) == 2  # two values reads, no lists read
+    assert all("@@props@@" in c for c in device.calls)
+
+
+def test_hanging_providers_leave_the_lists_pending_not_the_apply_failed(
+    service, device, app_start
+):
+    _hanging(device, lists=True)
+    plan = service.pre_start("com.example.app")
+    plan.apply()  # does not raise: the Android ID and the rest verified
+    st = {i.id: (i.status, i.reason) for i in service.statuses()}
+    assert st["android_id"][0] == "verified"
+    assert st["device_name"][0] == "verified"
+    for name in ("contacts", "sms", "calls"):
+        assert st[name] == ("pending", ident.PROVIDER_DOWN)
+
+
+def test_a_persona_stays_the_devices_profile_after_a_tui_restart(
+    service, device, app_start, monkeypatch
+):
+    from sandroid.core import emulator
+
+    persona = _persona(service)
+    _launched_as(monkeypatch, persona.id)
+    service.apply(SERIAL, PKG)
+    assert _record(device)["persona"] == persona.id
+    # A TUI restart: Sandroid's launch record of the emulator is gone.
+    monkeypatch.setattr(emulator, "launch_record", lambda s: None)
+    fresh = _fresh()
+    assert fresh.profile_id_for(SERIAL) == service.config().profile  # not read yet
+    plan = fresh.ensure_applied(SERIAL)
+    assert plan.fingerprint == ident.fingerprint(persona)  # the record says so
+    assert fresh.persona_of(SERIAL) == persona.id
+    assert fresh.pre_start(PKG) is None  # already the persona's
+    # Even when memory cannot take the record (an apply on another device).
+    other = _fresh()
+    with other._apply_lock:
+        assert other._profile_id_now(SERIAL) == persona.id
+    # A plain apply of another profile ends the persona.
+    service.apply(SERIAL, PKG, profile=service.active_profile(), replace=True)
+    assert "persona" not in _record(device)
+
+
+def test_a_new_active_profile_keeps_a_persona_devices_markers(
+    service, device, app_start, monkeypatch
+):
+    persona = _persona(service)
+    _launched_as(monkeypatch, persona.id)
+    service.apply(SERIAL, PKG)
+    fp = service.active_markers()[0]
+    assert fp == ident.fingerprint(persona)
+    other = service.save(_profile(id="other-profile", seed="hex:" + "33" * 32))
+    service.set_active(profile_id=other.id)
+    assert service.active_markers()[0] == fp  # the device still runs the persona
+    # Without a persona the device follows the switch (markers wait for it).
+    from sandroid.core import emulator
+
+    monkeypatch.setattr(emulator, "launch_record", lambda s: None)
+    with service._lock:
+        service._applied[SERIAL].persona = ""
+    service.set_active(profile_id=persona.id)
+    assert service.active_markers(load=False) is None
+
+
+def test_an_unanswered_read_back_leaves_written_values_applied(
+    service, device, app_start
+):
+    real = device._shell
+    values_reads = [0]
+
+    def shell(script: str) -> str:
+        if "@@props@@" in script:
+            values_reads[0] += 1
+            if values_reads[0] > 1:  # every read after the first one hangs
+                return ""
+        return real(script)
+
+    device._shell = shell
+    plan = service.pre_start(PKG)
+    plan.apply()  # no "device did not answer" failure for what was written
+    st = {i.id: (i.status, i.reason) for i in service.statuses()}
+    assert st["device_name"] == ("applied", ident.READBACK_NO_ANSWER)
+    assert st["android_id"] == ("applied", ident.READBACK_NO_ANSWER)
+    assert service.applied_state(PKG) == "not_applied"  # verified next time
+
+
+def test_the_retry_is_skipped_when_the_budget_cannot_hold_it(service, device):
+    hung = _hanging(device, values=2)
+    with pytest.raises(ident.IdentityApplyError, match="did not answer"):
+        service.ensure_applied(SERIAL, budget_s=ident.PREFLIGHT_RETRY_MIN_LEFT_S - 1)
+    assert len(hung) == 1  # no second try under the budget
+
+
+def test_each_read_stages_packages_xml_in_its_own_file():
+    script = ident.preflight_script(["com.example.app"], [TOKEN])
+    assert f"{ident.STAGE_DIR}/packages.$$.xml" in script
+    assert f"{ident.STAGE_DIR}/packages.xml" not in script
+
+
+def _persona_device(service, device, monkeypatch) -> Profile:
+    """A persona applied by Sandroid's launch, then a TUI restart (the
+    launch record is gone; only the device record names the persona).
+    """
+    from sandroid.core import emulator
+
+    persona = _persona(service)
+    _launched_as(monkeypatch, persona.id)
+    service.apply(SERIAL, PKG)
+    monkeypatch.setattr(emulator, "launch_record", lambda s: None)
+    return persona
+
+
+def test_an_app_start_keeps_the_persona_while_another_device_applies(
+    service, device, app_start, monkeypatch
+):
+    persona = _persona_device(service, device, monkeypatch)
+    fresh = _fresh()
+    with fresh._apply_lock:  # device prep on another device
+        fresh._applying.add("emulator-5582")
+        plan = fresh.pre_start("com.other.app")
+    assert "persona-anna" in plan.description
+    fresh._applying.discard("emulator-5582")
+    plan.apply()
+    assert _record(device)["persona"] == persona.id
+    assert _record(device)["profile"] == persona.id
+
+
+def test_an_unread_record_never_lets_the_active_profile_over_a_persona(
+    service, device, app_start, monkeypatch
+):
+    _persona_device(service, device, monkeypatch)
+    before = dict(_record(device))
+    device.record_down = True
+    fresh = _fresh()
+    with pytest.raises(ident.IdentityApplyError, match=ident.RECORD_UNREAD):
+        fresh.ensure_applied(SERIAL)
+    with pytest.raises(ident.IdentityApplyError, match=ident.RECORD_UNREAD):
+        fresh.pre_start(PKG)
+    assert _record(device) == before
+
+
+def test_a_restored_device_reads_its_persona_again(service, device, monkeypatch):
+    _persona_device(service, device, monkeypatch)
+    assert service.persona_of(SERIAL)
+    service.forget(SERIAL, restored=True)
+    assert service.persona_of(SERIAL) == ""  # until the record is read again
+    assert service._profile_id_now(SERIAL) == "persona-anna"
+
+
+def test_a_snapshot_load_during_the_record_read_is_read_again(
+    service, device, app_start, monkeypatch
+):
+    """First contact after a TUI restart: the record read returns the
+    plain record, then a persona snapshot loads (forget restored). That
+    read is stale: it is read again, never trusted.
+    """
+    persona = _persona_device(service, device, monkeypatch)
+    persona_record = dict(_record(device))
+    plain = {k: v for k, v in persona_record.items() if k != "persona"}
+    plain["profile"] = service.config().profile
+    _put_record(device, plain)  # the device before the load
+    fresh = _fresh()
+    real = fresh._read_record
+    loads = [0]
+
+    def read_then_load(serial, package=None, **kw):
+        out = real(serial, package, **kw)
+        if not loads[0]:
+            loads[0] = 1
+            _put_record(device, persona_record)  # the persona snapshot
+            fresh.forget(serial, restored=True)
+        return out
+
+    fresh._read_record = read_then_load
+    assert fresh.pre_start(PKG) is None  # the loaded persona: already applied
+    assert fresh.profile_id_for(SERIAL) == persona.id
+    plan = fresh.pre_start("com.other.app")
+    assert "persona-anna" in plan.description
+    plan.apply()
+    assert _record(device)["persona"] == persona.id
+
+
+def test_a_device_that_keeps_changing_during_the_read_is_refused(
+    service, device, monkeypatch
+):
+    _persona_device(service, device, monkeypatch)
+    fresh = _fresh()
+    real = fresh._read_record
+
+    def read_then_load(serial, package=None, **kw):
+        out = real(serial, package, **kw)
+        fresh.forget(serial, restored=True)
+        return out
+
+    fresh._read_record = read_then_load
+    with pytest.raises(ident.IdentityApplyError, match=ident.RECORD_UNREAD):
+        fresh.ensure_applied(SERIAL)
+
+
+def test_the_persona_the_device_holds_beats_a_plain_launch(
+    service, device, monkeypatch
+):
+    """A persona snapshot (or a restart of a persona device) in a launch
+    without a persona: the device holds the persona's data, so it stays.
+    """
+    from sandroid.core import emulator
+
+    persona = _persona_device(service, device, monkeypatch)
+    monkeypatch.setattr(
+        emulator, "launch_record", lambda s: {"launch_id": "L2", "meta": {}}
+    )
+    fresh = _fresh()
+    plan = fresh.ensure_applied(SERIAL)
+    assert plan.fingerprint == ident.fingerprint(persona)
+    assert _record(device)["persona"] == persona.id
+    # Only an explicit apply of another profile ends it.
+    fresh.apply(SERIAL, PKG, profile=fresh.active_profile(), replace=True)
+    assert "persona" not in _record(device)
+
+
+def test_a_persona_build_without_a_launch_records_the_persona(service, device):
+    persona = _persona(service)
+    service.apply(SERIAL, PKG, profile=persona, as_persona=True)
+    assert _record(device)["persona"] == persona.id
+    assert service.persona_of(SERIAL) == persona.id
+
+
+def test_a_snapshot_load_during_an_apply_keeps_the_applied_persona(
+    service, device, monkeypatch
+):
+    persona = _persona_device(service, device, monkeypatch)
+    fresh = _fresh()
+    real_emit = fresh._emit
+
+    def emit(kind, *args, **kwargs):
+        if kind == "verify":
+            fresh.forget(SERIAL, restored=True)  # a load during the apply
+        return real_emit(kind, *args, **kwargs)
+
+    fresh._emit = emit
+    fresh.apply(SERIAL, PKG)
+    assert _record(device).get("persona") == persona.id
+
+
+def test_a_phone_never_waits_for_the_record(service, device, monkeypatch):
+    device.record_down = True
+    assert not service._needs_record("R58M123ABC")
+    assert service.persona_of("R58M123ABC") == ""
+    assert service._profile_id_now("R58M123ABC") == service.config().profile
+
+
+def test_an_app_start_refuses_when_the_device_changed_profile_meanwhile(
+    service, device, app_start, monkeypatch
+):
+    persona = _persona(service)
+    plan = service.pre_start(PKG)  # the active profile
+    with service._lock:
+        service._applied[SERIAL].persona = persona.id  # a persona load meanwhile
+    with pytest.raises(ident.IdentityApplyError, match="start again"):
+        plan.apply()
+
+
+# ---------------------------------------------------------------------------
+# decided under the apply lock; restores during an apply; markers
+# ---------------------------------------------------------------------------
+
+
+def _plain_record(service, device) -> dict:
+    """The persona device's record as a plain (active profile) one."""
+    rec = {k: v for k, v in _record(device).items() if k != "persona"}
+    rec["profile"] = service.config().profile
+    return rec
+
+
+def test_a_persona_load_before_the_apply_lock_is_seen_under_it(
+    service, device, monkeypatch
+):
+    persona = _persona_device(service, device, monkeypatch)
+    persona_rec = dict(_record(device))
+    _put_record(device, _plain_record(service, device))
+    fresh = _fresh()
+    fresh.plan(SERIAL)  # memory: the plain device
+    assert fresh.profile_id_for(SERIAL) == fresh.config().profile
+    # The persona snapshot loads while ensure_applied waits for the lock.
+    _put_record(device, persona_rec)
+    fresh.forget(SERIAL, restored=True)
+    plan = fresh.ensure_applied(SERIAL)
+    assert plan.fingerprint == ident.fingerprint(persona)
+    assert _record(device)["persona"] == persona.id
+
+
+def test_an_app_start_planned_before_a_persona_load_refuses(
+    service, device, app_start, monkeypatch
+):
+    _persona_device(service, device, monkeypatch)
+    persona_rec = dict(_record(device))
+    _put_record(device, _plain_record(service, device))
+    fresh = _fresh()
+    plan = fresh.pre_start("com.other.app")  # the active profile
+    assert "mara-de" in plan.description
+    _put_record(device, persona_rec)  # loaded while the start is confirmed
+    fresh.forget(SERIAL, restored=True)
+    with pytest.raises(ident.IdentityApplyError, match="start again"):
+        plan.apply()
+    assert _record(device) == persona_rec
+
+
+def test_a_plain_launch_never_decides_for_an_unread_record(
+    service, device, monkeypatch
+):
+    from sandroid.core import emulator
+
+    _persona_device(service, device, monkeypatch)
+    monkeypatch.setattr(
+        emulator, "launch_record", lambda s: {"launch_id": "L3", "meta": {}}
+    )
+    device.record_down = True
+    fresh = _fresh()
+    with pytest.raises(ident.IdentityApplyError, match=ident.RECORD_UNREAD):
+        fresh.ensure_applied(SERIAL)
+
+
+def test_a_persona_loaded_during_an_apply_is_not_overwritten_in_the_record(
+    service, device, monkeypatch
+):
+    _persona_device(service, device, monkeypatch)
+    persona_rec = dict(_record(device))
+    _put_record(device, _plain_record(service, device))
+    fresh = _fresh()
+    real_emit = fresh._emit
+
+    def emit(kind, *args, **kwargs):
+        if kind == "verify":  # the persona snapshot loads during the apply
+            _put_record(device, persona_rec)
+            fresh.forget(SERIAL, restored=True)
+        return real_emit(kind, *args, **kwargs)
+
+    fresh._emit = emit
+    fresh.apply(SERIAL, "com.other.app")  # the active profile, decided first
+    assert _record(device) == persona_rec  # its results are not recorded
+    assert "com.other.app" not in fresh._applied[SERIAL].done
+
+
+def test_a_failed_write_keeps_a_persona_devices_record(service, device, monkeypatch):
+    persona = _persona_device(service, device, monkeypatch)
+    before = dict(_record(device))
+
+    def broken(*a, **k):
+        return "read-only file system"
+
+    monkeypatch.setattr(ident._Device, "write", broken)
+    device.fs[ident.BOOT_ID_FILE] = b"boot-2\n"  # a reboot: the record is rewritten
+    service.apply(SERIAL, PKG)
+    assert _record(device) == before  # not removed: it names the persona
+    assert SERIAL in service._record_dirty
+    assert service.persona_of(SERIAL) == persona.id
+
+
+def test_startup_markers_follow_the_persona_the_record_names(
+    service, device, app_start, monkeypatch, tmp_path
+):
+    from sandroid.core.adb import Adb
+
+    persona = _persona_device(service, device, monkeypatch)
+    monkeypatch.setattr(Adb, "_target_device", SERIAL)  # the UI's target
+    # A new session: no frozen apply to take the markers from.
+    monkeypatch.setenv("SDROID_FILES_DIR", str(tmp_path / "new" / "session" / "files"))
+    fresh = _fresh()
+    fp, _markers = fresh.active_markers()
+    assert fp == ident.fingerprint(fresh.active_profile())  # record not read yet
+    assert fresh.pre_start(PKG) is None  # reads the record: the persona, done
+    assert fresh.active_markers()[0] == ident.fingerprint(persona)
+
+
+def test_a_restore_during_an_apply_stops_its_writes(service, device, monkeypatch):
+    service.apply(SERIAL, PKG)
+    device.props["persist.sys.locale"] = "en-US"
+    device.fs[ident.BOOT_ID_FILE] = b"boot-2\n"
+    service.forget(SERIAL, restored=True)
+    real = service._run_live
+    ran: list[str] = []
+
+    def live(dev, profile, step, info, mem):
+        ran.append(step.value_id)
+        if len(ran) == 1:
+            service.forget(SERIAL, restored=True)  # a snapshot load meanwhile
+        return real(dev, profile, step, info, mem)
+
+    monkeypatch.setattr(service, "_run_live", live)
+    before = dict(_record(device))
+    plan = service.apply(SERIAL, "com.other.app")
+    assert len(ran) == 1  # nothing more written into the loaded state
+    assert any(i.reason == ident.RESTORED_DURING for i in plan.infos.values())
+    assert _record(device) == before  # not recorded
+    assert service._applied[SERIAL].distrust
+    # The next read of the restored record does not trust its "done".
+    service._take_record(SERIAL)
+    assert PKG not in service._applied[SERIAL].done
+    assert not service._applied[SERIAL].distrust
+
+
+def test_a_dirty_record_is_not_read_again(service, device):
+    service.apply(SERIAL, PKG)
+    service.forget(SERIAL)  # a device switch
+    service._record_dirty.add(SERIAL)
+    device.record_reads = 0
+    device.record_down = True  # memory is newer anyway: no read, no refusal
+    service._take_record(SERIAL)
+    assert device.record_reads == 0
+
+
+def test_ensure_applied_without_any_profile_returns_at_once(
+    service, device, monkeypatch
+):
+    service.plan(SERIAL)  # the record is read: it names no persona
+    monkeypatch.setattr(service.config(), "profile", "")
+    with service._apply_lock:  # another device's apply
+        assert service.ensure_applied(SERIAL, budget_s=0.01) is None
+
+
+def test_an_app_start_whose_apply_was_restored_refuses(
+    service, device, app_start, monkeypatch
+):
+    plan = service.pre_start(PKG)
+    real = service._run_live
+    ran: list[str] = []
+
+    def live(dev, profile, step, info, mem):
+        ran.append(step.value_id)
+        if len(ran) == 1:
+            service.forget(SERIAL, restored=True)
+        return real(dev, profile, step, info, mem)
+
+    monkeypatch.setattr(service, "_run_live", live)
+    with pytest.raises(ident.IdentityApplyError, match="restored during"):
+        plan.apply()
+
+
+def test_a_restore_while_another_apply_runs_never_skips_an_app_start(
+    service, device, app_start
+):
+    service.apply(SERIAL, PKG)
+    assert service.pre_start(PKG) is None  # done
+    service._applying.add(SERIAL)  # device prep applies right now
+    try:
+        service.forget(SERIAL, restored=True)  # a snapshot load meanwhile
+        assert service.pre_start(PKG) is not None  # "done" was the old state's
+    finally:
+        service._applying.discard(SERIAL)
+
+
+def test_distrust_ends_with_a_restored_state_without_a_record(service, device):
+    service.apply(SERIAL, PKG)
+    with service._lock:
+        service._applied[SERIAL].distrust = True
+    del device.fs[ident.APPLIED_FILE]  # the loaded snapshot has no record
+    service.forget(SERIAL, restored=True)
+    service._take_record(SERIAL)
+    assert not service._applied[SERIAL].distrust
+
+
+def test_a_restore_during_the_record_write_distrusts_it(service, device, monkeypatch):
+    service.apply(SERIAL, PKG)
+    device.fs[ident.BOOT_ID_FILE] = b"boot-2\n"  # the record will be rewritten
+    real = service._write_record
+
+    def write_then_load(serial, record):
+        out = real(serial, record)
+        service.forget(serial, restored=True)  # loaded while it was written
+        return out
+
+    monkeypatch.setattr(service, "_write_record", write_then_load)
+    service.apply(SERIAL, PKG)
+    assert service._applied[SERIAL].distrust
+    assert PKG not in service._applied[SERIAL].done
+
+
+def test_a_restore_during_the_read_back_refuses_the_app_start(
+    service, device, app_start, monkeypatch
+):
+    plan = service.pre_start(PKG)
+    real = service._await_providers
+
+    def wait(*args, **kwargs):
+        service.forget(SERIAL, restored=True)  # loaded after the last step
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_await_providers", wait)
+    with pytest.raises(ident.IdentityApplyError, match="restored during"):
+        plan.apply()

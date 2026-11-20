@@ -517,24 +517,37 @@ def _no_sim_reason(profile: Profile) -> str:
     return NO_SIM_VALUE
 
 
-def _active_sim() -> tuple[str, SimValues | None, str] | None:
-    """The active profile: ``(id, SIM values, why none)``.
+def _persona_of(meta: Any) -> str:
+    """The persona a launch's ``meta`` names (``""``: none)."""
+    from sandroid.services.identity import PERSONA_META_KEY
 
-    ``None`` when identity mode is off. Otherwise the SIM values are
-    ``None`` when the profile is unusable or sets no SIM at launch, with
-    the reason as third item (``""`` when there are values).
+    value = meta.get(PERSONA_META_KEY) if hasattr(meta, "get") else None
+    return value if isinstance(value, str) else ""
+
+
+def _active_sim(persona: str = "") -> tuple[str, SimValues | None, str] | None:
+    """The launch's profile: ``(id, SIM values, why none)``.
+
+    The profile is ``persona`` when the launch was started as one, else
+    the active profile. ``None`` when identity mode is off or no profile
+    applies. Otherwise the SIM values are ``None`` when the profile is
+    unusable or sets no SIM at launch, with the reason as third item
+    (``""`` when there are values).
     """
     from sandroid.services.identity import ProfileError, get_identity_service
 
     service = get_identity_service()
     cfg = service.config()
-    if cfg.mode != "profile" or not cfg.profile:
+    if cfg.mode != "profile":
+        return None
+    profile_id = persona or str(cfg.profile or "")
+    if not profile_id:
         return None
     try:
-        profile = service.load(cfg.profile)
+        profile = service.load(profile_id)
     except ProfileError as exc:
-        logger.warning(f"identity SIM: active profile unusable: {exc}")
-        return (cfg.profile, None, f"{PROFILE_UNUSABLE}: {exc}")
+        logger.warning(f"identity SIM: profile {profile_id!r} unusable: {exc}")
+        return (profile_id, None, f"{PROFILE_UNUSABLE}: {exc}")
     values = sim_values(profile)
     if values is None:
         return (profile.id, None, _no_sim_reason(profile))
@@ -832,13 +845,17 @@ def pre_launch(context: LaunchContext) -> tuple[str, ...]:
     logged). Raises only when the private directory cannot be written (the
     launch then fails closed).
 
+    The SIM is the launch persona's (``context.meta``, see
+    :data:`~sandroid.services.identity.PERSONA_META_KEY`) when the launch
+    was started as one, else the active profile's.
+
     Whenever identity mode is on, the launch record gets
     ``hooks.identity_sim``: ``{"profile", "values", "sysdir"}`` when the
     emulator starts with the profile's SIM, else ``{"profile", "skipped":
     <reason>}`` (nothing only when the identity settings cannot be read).
     """
     try:
-        found = _active_sim()
+        found = _active_sim(_persona_of(context.meta))
     except Exception:
         logger.warning(
             "identity SIM: cannot read the active profile; the SIM identity of "
@@ -951,7 +968,10 @@ NO_IMAGE = "the AVD has no system image directory"
 ALREADY_RUNNING = "another instance of the AVD runs without this SIM"
 NO_SIM_VALUE = "the profile sets no SIM value at launch"
 PROFILE_UNUSABLE = "the profile cannot be loaded"
-NOT_ACTIVE = "this profile is not the active one"
+NOT_ACTIVE = "this profile is not the one this emulator runs"
+PERSONA_SIM_ACTIVE = (
+    "a restart starts this persona emulator with the active profile's SIM"
+)
 
 
 @dataclass(frozen=True)
@@ -1043,6 +1063,18 @@ def running_sim(serial: str, avd_name: str = "") -> SimValues | None:
     return found.sim if found is not None else None
 
 
+def _restart_profile_id(service: Any, serial: str) -> str:
+    """The profile whose SIM a restart of ``serial`` from Sandroid sets.
+
+    A restart passes its launch's ``meta`` on (pre-launch hooks see it as
+    ``context.meta``): only that persona counts, not one the device record
+    names (a launch without a live record, e.g. after a TUI restart).
+    """
+    from sandroid.services.identity import launch_persona_id
+
+    return launch_persona_id(serial) or str(service.config().profile or "")
+
+
 def restart_blocker(running: RunningEmulator | None, profile: Profile) -> str:
     """Why restarting this emulator from Sandroid would not set ``profile``'s
     SIM values (``""``: a restart sets them).
@@ -1056,10 +1088,12 @@ def restart_blocker(running: RunningEmulator | None, profile: Profile) -> str:
     try:
         from sandroid.services.identity import get_identity_service
 
-        cfg = get_identity_service().config()
-        if cfg.mode != "profile":
+        service = get_identity_service()
+        if service.config().mode != "profile":
             return MODE_OFF
-        if cfg.profile != profile.id:
+        if _restart_profile_id(service, running.serial) != profile.id:
+            if service.profile_id_for(running.serial) == profile.id:
+                return PERSONA_SIM_ACTIVE  # this Sandroid cannot pass it on
             return NOT_ACTIVE
     except Exception:
         logger.debug("identity SIM: config unavailable", exc_info=True)
