@@ -1226,7 +1226,7 @@ async def test_marks_show_only_activity_since_and_step_through_segments() -> Non
         await pilot.press("less_than_sign")
         await pilot.pause()
         assert _keys(panel) == [DB, PREFS, new]
-        assert _title(panel) == ("Note 1 'tap login' → Note 2 · 10:40:10–10:40:30")
+        assert _title(panel) == ("Note 1 'tap login' to Note 2 · 10:40:10–10:40:30")
         await pilot.press("less_than_sign")
         await pilot.pause()
         assert set(_keys(panel)) == {DB, PREFS, AAID}

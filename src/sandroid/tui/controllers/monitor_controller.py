@@ -289,7 +289,7 @@ def _split_dir_filename(path: str) -> tuple[str, str]:
 
     Used by :func:`build_monitor_item` for MonitorView's own
     grouping/breadcrumb pass (Part B) -- the view groups consecutive items
-    by exact ``directory`` match and renders a ``▸ <directory>/`` breadcrumb
+    by exact ``directory`` match and renders a ``<directory>/`` breadcrumb
     for runs of 2+. ``directory`` has no trailing slash (the view adds its
     own when rendering the breadcrumb); a bare filename with no ``/`` at
     all yields an empty directory string (never groups into a breadcrumb

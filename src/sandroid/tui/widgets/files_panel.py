@@ -1530,7 +1530,7 @@ class FilesPanel(Widget):
         return package if own and package != own else None
 
     def _idle_label(self) -> str:
-        """``idle since Note 3`` / ``idle Note 1 → Section 2`` / ``idle``
+        """``idle since Note 3`` / ``idle Note 1 to Section 2`` / ``idle``
         (no notes or sections).
         """
         seg, marks = self._segment, self._marks
@@ -1540,7 +1540,7 @@ class FilesPanel(Widget):
             return f"idle before {marks[0].label()}"
         if seg >= len(marks):
             return f"idle since {marks[seg - 1].label()}"
-        return f"idle {marks[seg - 1].label()} → {marks[seg].label()}"
+        return f"idle {marks[seg - 1].label()} to {marks[seg].label()}"
 
     def _fold_cell(self, row: _Row) -> Text:
         """``★ 21 watched · idle since Note 3`` (shortest form on a narrow
@@ -1911,7 +1911,7 @@ class FilesPanel(Widget):
                 return f"{head} · {start.when:%H:%M:%S}"
             return f"since {head} · {start.when:%H:%M:%S}"
         end = marks[seg]
-        return f"{head} → {end.label()} · {start.when:%H:%M:%S}–{end.when:%H:%M:%S}"
+        return f"{head} to {end.label()} · {start.when:%H:%M:%S}–{end.when:%H:%M:%S}"
 
     def _set_marks(self, marks: list[Mark], follow: bool = True) -> None:
         """Adopt the session's marks; ``follow`` jumps to the newest segment."""
