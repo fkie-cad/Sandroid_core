@@ -1583,13 +1583,19 @@ def test_the_toggle_runs_once_per_launch_and_a_mismatch_fails(
         f"the device still reports {STOCK_SIM['imsi']} after the airplane mode toggle"
     )
     assert device.airplane == ["enable", "disable"]
-    # Later applies neither toggle nor wait again.
+    assert plan.infos["imsi"].sim_launch
+    # A failed SIM value does not block app starts and the app counts as
+    # done: no re-apply on the next start.
+    assert "com.example.app" in service._applied[SERIAL].done
+    assert service.pre_spawn("com.example.app") is None
+    # Later applies neither toggle nor wait again, and do not raise.
     device.airplane.clear()
     device.calls.clear()
-    with pytest.raises(ident.IdentityApplyError):
-        service.pre_spawn("com.example.app").apply()
+    service.pre_spawn("com.example.two").apply()
     assert not device.airplane
     assert not [c for c in device.calls if "@@ssaid@@" not in c and "@@props@@" in c]
+    assert service.statuses()
+    assert {i.id: i.status for i in service.statuses()}["imsi"] == "failed"
     # A new launch of the emulator (new launch token): one toggle again.
     device.token = "launch-2"  # noqa: S105 - a launch id, not a secret
     device.modem = {"imsi": sim.imsi, "iccid": sim.iccid, "msisdn": sim.phone}
@@ -1808,3 +1814,10 @@ def test_phone_markers_carry_the_number_the_sim_carries(number, value, forms):
     digits, international = ident.identity_sim.msisdn_digits(number, "49")
     assert international
     assert "+" + digits == value
+
+
+def test_the_emulator_phone_number_fallback_is_no_sim_launch_value(service, device):
+    # adb emu phonenumber can be retried: its failure still blocks as before.
+    plan = service.plan(SERIAL, "com.example.app")
+    assert not plan.infos["phone_number"].sim_launch
+    assert plan.infos["imsi"].sim_launch

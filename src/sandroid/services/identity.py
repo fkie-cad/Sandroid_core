@@ -2052,6 +2052,9 @@ class ValueInfo:
     profile_id: str = ""
     fingerprint: str = ""
     at: float = 0.0
+    #: Set when the emulator's start sets the value (its SIM card): a failure
+    #: never blocks an app start (restarting the app cannot fix it).
+    sim_launch: bool = False
 
 
 @dataclass
@@ -2815,6 +2818,7 @@ class IdentityService:
         """
         spec = REGISTRY[vs.kind]
         vid, desired = vs.id, info.rendered
+        info.sim_launch = True
         current, verified = self._current(vs.kind, state, desired, mem, vid, cc)
         info.current = current
         info.mechanism = spec.emulator_mechanism
@@ -2855,8 +2859,10 @@ class IdentityService:
         if vs.kind == "phone_number":
             if mem.emu.get(vid) == desired:
                 info.status, info.reason = "applied", ""
+                info.sim_launch = False
                 return
             if _ascii_digits(desired) and len(desired) <= 11:
+                info.sim_launch = False
                 # adb emu phonenumber takes at most 11 digits, no '+'.
                 plan.steps.append(Step(vid, "none", desired, current))
                 return
@@ -3127,6 +3133,7 @@ class IdentityService:
             if steps[vid].via == "sim":
                 mode = "strict"
             info.current = after.current
+            info.sim_launch = after.sim_launch
             if after.per_app:
                 info.per_app = after.per_app
             if after.status == "verified":
@@ -3608,10 +3615,12 @@ class IdentityService:
             for pkg, entry in info.per_app.items():
                 if entry.get("status") == "verified" and entry.get("value"):
                     ssaids[pkg] = entry["value"]
+        # A failed SIM value (set at the emulator's start) does not keep the
+        # app from being done: re-applying on every start cannot fix it.
         bad = [
             i
             for i in plan.infos.values()
-            if i.status == "failed"
+            if (i.status == "failed" and not i.sim_launch)
             or (
                 i.status == "pending"
                 and i.reason not in (NEEDS_RESTART, NEEDS_EMULATOR_START)
@@ -3793,7 +3802,11 @@ class IdentityService:
 
         def run() -> None:
             plan = self.apply(serial, package, allow_restart=allow, profile=profile)
-            failed = [i for i in plan.infos.values() if i.status == "failed"]
+            failed = [
+                i
+                for i in plan.infos.values()
+                if i.status == "failed" and not i.sim_launch
+            ]
             if failed:
                 raise IdentityApplyError(
                     f"identity profile {profile.id!r}: {failed[0].label}: {failed[0].reason}"
