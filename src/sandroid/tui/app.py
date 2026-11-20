@@ -2164,12 +2164,13 @@ class SandroidTUI(App):
     # -- Vim-style scrolling --------------------------------------------------
 
     def _scroll_log(self, method_name: str, *args, **kwargs) -> None:
+        # The log lives on the main screen: ``self.query_one`` searches the
+        # App's default screen and never found it, so these keys did nothing.
         try:
-            getattr(self.query_one("#activity-log", ActivityLog), method_name)(
-                *args, **kwargs
-            )
+            log = self.screen.query_one("#activity-log", ActivityLog)
         except Exception:
-            pass
+            return
+        getattr(log, method_name)(*args, **kwargs)
 
     def action_scroll_down(self) -> None:
         self._scroll_log("scroll_down_line")

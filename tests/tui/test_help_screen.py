@@ -10,7 +10,7 @@ from __future__ import annotations
 import importlib
 
 import pytest
-from pilot_helpers import boot, settle
+from pilot_helpers import boot, settle, until
 
 from sandroid.tui.screens import help_screen as hs
 
@@ -216,3 +216,28 @@ async def test_help_lists_the_previously_missing_rows_from_every_lens(size) -> N
             assert max(len(r) for r in rows) <= width
             await pilot.press("escape")
             await settle(pilot)
+
+
+async def test_log_scroll_keys_reach_the_log_on_the_main_screen() -> None:
+    """j / Ctrl+D / Home / End scroll the log drawer (the App looked the log
+    up on its default screen and the keys silently did nothing).
+    """
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.widgets import ActivityLog
+
+    app = SandroidTUI()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await boot(app, pilot)
+        ms = app.screen
+        log = ms.query_one("#activity-log", ActivityLog)
+        ms.toggle_log_drawer()
+        await settle(pilot)
+        for i in range(200):
+            log.log_info(f"line {i}")
+        await settle(pilot)
+        app.action_scroll_bottom()
+        await until(pilot, lambda: log.scroll_y > 10)
+        app.action_scroll_top()
+        await until(pilot, lambda: log.scroll_y < 1)
+        app.action_scroll_half_down()
+        await until(pilot, lambda: log.scroll_y > 5)
