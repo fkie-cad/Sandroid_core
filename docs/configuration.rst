@@ -527,10 +527,41 @@ Identity profile (``[identity]``)
 An identity profile is a named set of distinctive fake values (Android ID,
 advertising ID, device name, phone number, location, contacts, SMS, call
 log, ...) seeded on the emulator, so the privacy scan can find them in
-traffic and pulled files and name the value that leaked. Profiles are TOML
-files in ``~/.config/sandroid/profiles/<id>.toml`` (or
+traffic and pulled files and name the value that leaked. Profiles are YAML
+files in ``~/.config/sandroid/profiles/<id>.yaml`` (or
 ``$XDG_CONFIG_HOME/sandroid/profiles/``); the Identity lens (``6``) creates,
-edits, imports and exports them and writes the keys below.
+edits, imports and exports them and writes the keys below. Sandroid keeps
+your comments and key order when it saves a profile.
+
+A profile may build on another one with ``extends: builtin:<id>`` (the
+profiles shipped with Sandroid, one per country preset) or
+``extends: <profile id>``: it then holds only the keys it changes. Its
+``owner`` (``first``, ``last``, ``phone``, ``email``) can be used in value
+templates as ``{owner.first}`` and so on; the owner's names must not contain
+the profile's token. The ``world:`` section describes generated phone
+contents; ``seed: auto`` there gets a fresh seed on the first save.
+
+Profiles from older versions (schema 1, ``<id>.toml``) are converted to YAML
+once, the first time the library is read; the old file stays as
+``<id>.toml.bak``. Their values, and with them the markers of earlier
+applies, stay the same. Import also accepts such a TOML file.
+
+.. code-block:: yaml
+
+   format: sandroid-identity
+   schema: 2
+   id: mara-de
+   name: Mara Kessler (DE)
+   extends: builtin:de
+   token: 3f9a1c07
+   seed: hex:...            # 64 hex digits
+   revision: 3
+   created: 2026-11-19T10:00:00+01:00
+   retired_tokens: []
+   owner: {first: Mara, last: Kessler, phone: "+4915204902863"}
+   values:
+     gps: {value: "52.516375, 13.397874"}   # only what differs from builtin:de
+   world: {seed: auto, size: medium, country: de}
 
 .. code-block:: toml
 

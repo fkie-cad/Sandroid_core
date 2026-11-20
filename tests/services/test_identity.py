@@ -630,14 +630,24 @@ def device(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_toml_round_trip_keeps_everything():
+def test_yaml_round_trip_keeps_everything():
     profile = _profile(notes="note")
     profile.values["gaid"].extra["future_key"] = 7
     text = profile.dumps()
     back = Profile.loads(text)
     assert back.to_dict() == profile.to_dict()
+    assert back.to_v2() == profile.to_v2()
     assert back.dumps() == text
     assert back.created == profile.created
+    assert ident.fingerprint(back) == ident.fingerprint(profile)
+
+
+def test_v1_toml_text_still_loads():
+    profile = _profile(notes="note")
+    text = ident.tomli_w.dumps(profile.to_dict())
+    back = Profile.loads(text)
+    assert back.schema == ident.SCHEMA_V1
+    assert back.to_dict() == profile.to_dict()
     assert ident.fingerprint(back) == ident.fingerprint(profile)
 
 
@@ -647,11 +657,15 @@ def test_newer_schema_and_wrong_format_are_refused(env):
         Profile.from_dict({**data, "schema": ident.SCHEMA + 1})
     with pytest.raises(ProfileError, match="format"):
         Profile.from_dict({**data, "format": "other"})
-    path = env / "new.toml"
+    path = env / "new.yaml"
     path.write_text(Profile.loads(_profile().dumps()).dumps().replace(
-        "schema = 1", "schema = 2"), encoding="utf-8")  # fmt: skip
+        "schema: 2", "schema: 3"), encoding="utf-8")  # fmt: skip
     with pytest.raises(ProfileError, match="newer"):
         IdentityService().import_profile(path)
+    toml = env / "new.toml"
+    toml.write_text(ident.tomli_w.dumps({**data, "schema": 2}), encoding="utf-8")
+    with pytest.raises(ProfileError, match="schema 2"):
+        IdentityService().import_profile(toml)
 
 
 @pytest.mark.parametrize(
@@ -840,30 +854,31 @@ def test_library_crud_and_import_never_overwrites(env):
     assert created.revision == 1
     assert [p.id for p in svc.list_profiles()] == [created.id]
     exported = svc.export_profile(created.id, env)
+    assert exported.name == f"{created.id}.yaml"
     assert exported.read_bytes() == ident.profiles_dir().joinpath(
-        f"{created.id}.toml").read_bytes()  # fmt: skip
+        f"{created.id}.yaml").read_bytes()  # fmt: skip
     # identical content -> no-op
     assert svc.import_profile(exported) == (created.id, "identical")
     # same id, other content -> <id>-2 (the original stays)
     changed = Profile.loads(exported.read_text(encoding="utf-8"))
     changed.notes = "edited elsewhere"
-    other = env / "other.toml"
+    other = env / "other.yaml"
     other.write_text(changed.dumps(), encoding="utf-8")
     assert svc.import_profile(other) == (f"{created.id}-2", "renamed")
     assert svc.load(created.id).notes == ""
     assert svc.load(f"{created.id}-2").notes == "edited elsewhere"
     # a new id is written verbatim
-    fresh = env / "fresh.toml"
-    fresh.write_text(changed.dumps().replace(f'id = "{created.id}"', 'id = "fresh"'),
+    fresh = env / "fresh.yaml"
+    fresh.write_text(changed.dumps().replace(f"id: {created.id}", "id: fresh"),
                      encoding="utf-8")  # fmt: skip
     assert svc.import_profile(fresh) == ("fresh", "imported")
-    assert (ident.profiles_dir() / "fresh.toml").read_bytes() == fresh.read_bytes()
+    assert (ident.profiles_dir() / "fresh.yaml").read_bytes() == fresh.read_bytes()
     dup = svc.duplicate("fresh")
     assert dup.id == "fresh-copy"
     assert dup.token != changed.token
     renamed = svc.rename("fresh-copy", "Copy", new_id="copy")
     assert renamed.id == "copy"
-    assert not (ident.profiles_dir() / "fresh-copy.toml").exists()
+    assert not (ident.profiles_dir() / "fresh-copy.yaml").exists()
     svc.delete("copy")
     assert "copy" not in {p.id for p in svc.list_profiles()}
 

@@ -175,7 +175,7 @@ logcat_screen_backup = true
 [identity]
 # Identity profile: distinctive fake values (Android ID, advertising ID, phone,
 # GPS, contacts, ...) seeded on the emulator so privacy scans can find them.
-# Profiles live in ~/.config/sandroid/profiles/<id>.toml.
+# Profiles live in ~/.config/sandroid/profiles/<id>.yaml (comments kept).
 profile = ""                            # id of the active profile
 mode = "off"                            # off | profile
 restart = "ask"                         # framework restart (SSAID/locale): ask | always | never

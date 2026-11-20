@@ -8,9 +8,12 @@ attribute every hit to the value that leaked.
 
 The module has four layers:
 
-* **Profile model** -- a TOML file per profile in the library
-  (``$XDG_CONFIG_HOME/sandroid/profiles/<id>.toml``): parsing, templates,
-  validation, the built-in generator, import/export.
+* **Profile model** -- a YAML file per profile in the library
+  (``$XDG_CONFIG_HOME/sandroid/profiles/<id>.yaml``, schema 2; the file
+  format, ``extends`` overlays and built-in profiles live in
+  :mod:`sandroid.services.identity_store`): parsing, templates, validation,
+  the built-in generator, import/export and the one-time conversion of
+  schema 1 TOML profiles.
 * **Kind registry** (:data:`REGISTRY`) -- what the code knows per value kind:
   provider, restart class, app permission, mechanism and read-back. It is
   not user-editable.
@@ -29,6 +32,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import copy
 import hashlib
 import hmac
 import json
@@ -55,6 +59,8 @@ import tomli_w
 
 from sandroid.core.privacy_markers import Marker
 from sandroid.services import identity_sim
+from sandroid.services import identity_store as store
+from sandroid.services.identity_store import ProfileError
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +69,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 FORMAT = "sandroid-identity"
-#: Profile schema this code writes; a newer one is refused on load/import.
-SCHEMA = 1
+#: Profile schema this code writes (YAML); a newer one is refused on
+#: load/import. Schema 1 (TOML) profiles are read and converted once.
+SCHEMA = 2
+#: The TOML schema of the first profiles (and of frozen apply records'
+#: embedded profile, which stays in this shape).
+SCHEMA_V1 = 1
 #: Validators: always ``fullmatch`` (``^...$`` with ``match`` lets a trailing
 #: newline through).
 TOKEN_RE = re.compile(r"[0-9a-f]{8,32}")
@@ -197,10 +207,6 @@ def _call_duration(value: Any) -> int | None:
     else:
         return None
     return seconds if 0 <= seconds <= _INT_MAX else None
-
-
-class ProfileError(ValueError):
-    """A profile file cannot be read, imported or saved."""
 
 
 class IdentityApplyError(RuntimeError):
@@ -628,7 +634,13 @@ class ValueSpec:
 
 @dataclass
 class Profile:
-    """An identity profile (one TOML file in the library)."""
+    """An identity profile (one YAML file in the library), as resolved: its
+    ``extends`` parents merged in.
+
+    ``owner`` (first, last, phone, email) and ``world`` (the phone-contents
+    spec :mod:`sandroid.world` reads) are plain dicts; ``world`` is passed
+    through untouched and is never part of :func:`fingerprint`.
+    """
 
     id: str
     name: str = ""
@@ -645,6 +657,15 @@ class Profile:
     retired_tokens: list[str] = field(default_factory=list)
     schema: int = SCHEMA
     extra: dict[str, Any] = field(default_factory=dict)
+    extends: str = ""
+    owner: dict[str, Any] = field(default_factory=dict)
+    world: dict[str, Any] = field(default_factory=dict)
+    #: The loaded YAML document (the file's own keys, with comments), the
+    #: merged parents it was resolved against and the resolved profile at
+    #: load (:meth:`to_v2`): a save patches only what changed since.
+    _doc: Any = field(default=None, repr=False, compare=False)
+    _base: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+    _loaded: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
     @property
     def seed_bytes(self) -> bytes:
@@ -659,10 +680,22 @@ class Profile:
         """``{"contacts": [...], "sms": [...], "calls": [...]}``."""
         return {"contacts": self.contacts, "sms": self.sms, "calls": self.calls}
 
+    def copy(self) -> Profile:
+        """A deep copy without the YAML document (a draft to try edits on)."""
+        clone = replace(self, _doc=None, _base=None, _loaded=None)
+        for name in ("values", "contacts", "sms", "calls", "retired_tokens"):
+            setattr(clone, name, copy.deepcopy(getattr(self, name)))
+        for name in ("extra", "owner", "world"):
+            setattr(clone, name, copy.deepcopy(getattr(self, name)))
+        return clone
+
     def to_dict(self) -> dict[str, Any]:
+        """The schema 1 shape (what a frozen apply record embeds): no
+        ``owner``, ``world`` or ``extends``, lists at the top level.
+        """
         out: dict[str, Any] = {
             "format": FORMAT,
-            "schema": self.schema,
+            "schema": SCHEMA_V1,
             "id": self.id,
             "name": self.name,
             "revision": self.revision,
@@ -682,21 +715,59 @@ class Profile:
                 out[name] = [dict(item) for item in items]
         return out
 
+    def to_v2(self) -> dict[str, Any]:
+        """The resolved profile in the schema 2 (YAML) shape, plain values."""
+        out: dict[str, Any] = {
+            "format": FORMAT,
+            "schema": SCHEMA,
+            "id": self.id,
+            "name": self.name,
+        }
+        if self.extends:
+            out["extends"] = self.extends
+        if self.preset:
+            out["preset"] = self.preset
+        out["token"] = self.token
+        out["seed"] = self.seed
+        out["revision"] = self.revision
+        if self.created is not None:
+            out["created"] = self.created
+        out["retired_tokens"] = list(self.retired_tokens)
+        if self.owner:
+            out["owner"] = copy.deepcopy(self.owner)
+        out["values"] = {vid: v.to_dict() for vid, v in self.values.items()}
+        lists = {
+            name: [dict(item) for item in items]
+            for name, items in self.lists().items()
+            if items
+        }
+        if lists:
+            out["lists"] = lists
+        if self.world:
+            out["world"] = copy.deepcopy(self.world)
+        out["notes"] = self.notes
+        out.update(copy.deepcopy(self.extra))
+        return out
+
     def dumps(self) -> str:
-        """The profile as TOML text."""
-        return tomli_w.dumps(self.to_dict())
+        """The profile as standalone schema 2 YAML (parents merged in)."""
+        data = self.to_v2()
+        data.pop("extends", None)
+        return store.dump_yaml(store.to_node(data))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Profile:
-        """Build a profile from parsed TOML.
+        """Build a profile from a parsed schema 1 (TOML) or a resolved
+        schema 2 (YAML, plain) mapping.
 
         Raises:
-            ProfileError: Wrong ``format``, newer ``schema`` or no ``id``.
+            ProfileError: Wrong ``format``, newer ``schema``, no ``id`` or a
+                section of the wrong type.
         """
         if data.get("format") != FORMAT:
             raise ProfileError(f"not a {FORMAT} file (format={data.get('format')!r})")
         schema = data.get("schema")
-        if not isinstance(schema, int) or schema < 1:
+        if not isinstance(schema, int) or isinstance(schema, bool) or schema < 1:
             raise ProfileError(f"invalid schema {schema!r}")
         if schema > SCHEMA:
             raise ProfileError(
@@ -707,7 +778,19 @@ class Profile:
             raise ProfileError("profile has no id")
         values_raw = data.get("values") or {}
         if not isinstance(values_raw, dict):
-            raise ProfileError("[values] must be a table")
+            raise ProfileError("values must be a table")
+        if schema >= 2:
+            lists_raw = data.get("lists") or {}
+            if not isinstance(lists_raw, dict):
+                raise ProfileError("lists must be a mapping")
+        else:
+            lists_raw = data
+        owner = data.get("owner") or {}
+        if not isinstance(owner, dict):
+            raise ProfileError("owner must be a mapping (first, last, phone, email)")
+        world = data.get("world") or {}
+        if not isinstance(world, dict):
+            raise ProfileError("world must be a mapping")
         known = {
             "format",
             "schema",
@@ -724,8 +807,22 @@ class Profile:
             "sms",
             "calls",
             "retired_tokens",
+            "extends",
+            "owner",
+            "world",
+            "lists",
         }
         created = data.get("created")
+        if isinstance(created, str):
+            with contextlib.suppress(ValueError):
+                created = datetime.fromisoformat(created)
+
+        def items(name: str) -> list[dict[str, Any]]:
+            raw = lists_raw.get(name) or []
+            if not isinstance(raw, list):
+                raise ProfileError(f"{name} must be a list")
+            return [dict(x) for x in raw if isinstance(x, dict)]
+
         return cls(
             id=pid,
             name=str(data.get("name") or ""),
@@ -741,31 +838,90 @@ class Profile:
                 )
                 for vid, v in values_raw.items()
             },
-            contacts=[
-                dict(x) for x in data.get("contacts") or [] if isinstance(x, dict)
-            ],
-            sms=[dict(x) for x in data.get("sms") or [] if isinstance(x, dict)],
-            calls=[dict(x) for x in data.get("calls") or [] if isinstance(x, dict)],
+            contacts=items("contacts"),
+            sms=items("sms"),
+            calls=items("calls"),
             retired_tokens=[str(t) for t in data.get("retired_tokens") or []],
             schema=schema,
             extra={k: v for k, v in data.items() if k not in known},
+            extends=str(data.get("extends") or ""),
+            owner=dict(owner),
+            world=dict(world),
         )
 
     @classmethod
-    def loads(cls, text: str) -> Profile:
-        """Parse TOML text (raises :class:`ProfileError`)."""
-        try:
-            data = tomllib.loads(text)
-        except tomllib.TOMLDecodeError as exc:
-            raise ProfileError(f"invalid TOML: {exc}") from exc
-        return cls.from_dict(data)
+    def loads(cls, text: str, *, self_ref: str = "") -> Profile:
+        """Parse a profile file: schema 2 YAML (its ``extends`` chain
+        resolved from the built-ins and the library, the document kept for a
+        save) or schema 1 TOML.
+
+        Args:
+            text: The file's text.
+            self_ref: The library id the file is stored under (cycle check;
+                default: its ``id``).
+
+        Raises:
+            ProfileError: Unreadable, wrong format, newer schema, or a broken
+                ``extends`` chain.
+        """
+        data = _toml_profile(text)
+        if data is not None:
+            if data.get("schema") != SCHEMA_V1:
+                raise ProfileError(
+                    f"profile schema {data.get('schema')!r} in TOML: only schema "
+                    f"1 profiles are TOML (schema {SCHEMA} is YAML)"
+                )
+            return cls.from_dict(data)
+        doc = store.load_yaml(text)
+        own = store.plain(doc)
+        base = store.parents_of(
+            own, _lookup_parent, self_ref or str(own.get("id") or "")
+        )
+        profile = cls.from_dict(store.merge(base, own))
+        profile._doc, profile._base = doc, base
+        profile._loaded = profile.to_v2()
+        return profile
+
+
+def _toml_profile(text: str) -> dict[str, Any] | None:
+    """The parsed TOML of a schema 1 profile (None when ``text`` is no TOML)."""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return None
+    return data if data.get("format") == FORMAT else None
+
+
+def _lookup_parent(ref: str) -> dict[str, Any]:
+    """The own keys of an ``extends`` parent (built-in or library profile).
+
+    Raises:
+        ProfileError: Unknown or unreadable.
+    """
+    if ref.startswith(store.BUILTIN_PREFIX):
+        return store.load_builtin(ref[len(store.BUILTIN_PREFIX) :])
+    if not ID_RE.fullmatch(ref):
+        raise ProfileError(f"extends {ref!r}: not 'builtin:<id>' or a profile id")
+    _migrate_library()
+    try:
+        text = _profile_path(ref).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ProfileError(f"extends {ref!r}: no such profile") from exc
+    own = store.plain(store.load_yaml(text))
+    if own.get("format") != FORMAT:
+        raise ProfileError(f"extends {ref!r}: not a {FORMAT} file")
+    return own
 
 
 # ---------------------------------------------------------------------------
 # templates and derivation
 # ---------------------------------------------------------------------------
 
-_PLACEHOLDER_RE = re.compile(r"\{\{|\}\}|\{([a-z_]+)(?::(\d+))?\}")
+_PLACEHOLDER_RE = re.compile(r"\{\{|\}\}|\{([a-z_]+(?:\.[a-z_]+)?)(?::(\d+))?\}")
+#: The owner fields a template may use as ``{owner.<field>}``.
+OWNER_FIELDS = ("first", "last", "phone", "email")
+#: E.164: ``+``, no leading zero, at most 15 digits (7 at least here).
+_E164_RE = re.compile(r"\+[1-9][0-9]{6,14}")
 
 
 class TemplateError(ValueError):
@@ -837,15 +993,33 @@ def ssaid_for(token: str, seed: bytes, scope_key: str) -> str:
     return (token[:8] + tail)[:16]
 
 
-def render_template(template: str, *, token: str, seed: bytes, key: str) -> str:
-    """Render ``{token}``, ``{digits:N}``, ``{hex:N}``, ``{luhn}``, ``{uuid}``.
+def render_template(
+    template: str,
+    *,
+    token: str,
+    seed: bytes,
+    key: str,
+    owner: dict[str, str] | None = None,
+) -> str:
+    """Render ``{token}``, ``{digits:N}``, ``{hex:N}``, ``{luhn}``, ``{uuid}``
+    and ``{owner.first}``, ``{owner.last}``, ``{owner.phone}``,
+    ``{owner.email}``.
 
     ``{luhn}`` is the Luhn digit of all digits rendered before it; ``{{`` and
     ``}}`` are literal braces. The result depends only on ``(template,
-    token, seed, key)``.
+    token, seed, key, owner)``.
+
+    Args:
+        template: The template text.
+        token: The profile token.
+        seed: The profile seed (bytes).
+        key: Stream key (the value id): the same digits for the same key.
+        owner: The rendered owner fields (:func:`render_owner`); None: an
+            ``{owner.*}`` placeholder is an error (owner fields themselves).
 
     Raises:
-        TemplateError: Unknown placeholder or a stray brace.
+        TemplateError: Unknown placeholder, a missing owner field or a stray
+            brace.
     """
     stream = _Stream(seed, key)
     out: list[str] = []
@@ -873,6 +1047,12 @@ def render_template(template: str, *, token: str, seed: bytes, key: str) -> str:
             out.append(luhn_check_digit("".join(out)))
         elif name == "uuid":
             out.append(token_uuid(token, seed, key))
+        elif name.startswith("owner.") and name[6:] in OWNER_FIELDS and not arg:
+            if owner is None:
+                raise TemplateError(f"{whole} cannot be used here")
+            if not owner.get(name[6:]):
+                raise TemplateError(f"{whole}: the profile owner has no {name[6:]}")
+            out.append(owner[name[6:]])
         else:
             raise TemplateError(f"unknown placeholder {whole}")
     tail = template[pos:]
@@ -880,6 +1060,32 @@ def render_template(template: str, *, token: str, seed: bytes, key: str) -> str:
         raise TemplateError(f"unbalanced brace in {template!r}")
     out.append(tail)
     return "".join(out)
+
+
+def render_owner(profile: Profile) -> dict[str, str]:
+    """The profile owner with ``phone`` and ``email`` rendered (they may be
+    templates; ``first`` and ``last`` are plain text). Only text fields of
+    :data:`OWNER_FIELDS` are returned. This is what the world module gets.
+
+    Raises:
+        TemplateError: A broken owner template.
+    """
+    out: dict[str, str] = {}
+    for key in OWNER_FIELDS:
+        raw = profile.owner.get(key)
+        if not isinstance(raw, str) or not raw:
+            continue
+        out[key] = (
+            raw
+            if key in ("first", "last")
+            else render_template(
+                raw,
+                token=profile.token,
+                seed=profile.seed_bytes,
+                key=f"owner.{key}",
+            )
+        )
+    return out
 
 
 def render_value(profile: Profile, vs: ValueSpec) -> str | None:
@@ -892,7 +1098,11 @@ def render_value(profile: Profile, vs: ValueSpec) -> str | None:
         return vs.value
     if vs.template is not None:
         return render_template(
-            vs.template, token=profile.token, seed=profile.seed_bytes, key=vs.id
+            vs.template,
+            token=profile.token,
+            seed=profile.seed_bytes,
+            key=vs.id,
+            owner=render_owner(profile) if "{owner." in vs.template else {},
         )
     if vs.derive == "uuid":
         return token_uuid(profile.token, profile.seed_bytes, vs.id)
@@ -902,6 +1112,7 @@ def render_value(profile: Profile, vs: ValueSpec) -> str | None:
 def render_lists(profile: Profile) -> dict[str, list[dict[str, Any]]]:
     """Every list item with its string fields rendered (others as is)."""
     out: dict[str, list[dict[str, Any]]] = {}
+    owner: dict[str, str] | None = None
     for name, items in profile.lists().items():
         spec = LISTS[name]
         rendered = []
@@ -909,11 +1120,14 @@ def render_lists(profile: Profile) -> dict[str, list[dict[str, Any]]]:
             row = dict(item)
             for fname in spec.fields:
                 if isinstance(row.get(fname), str):
+                    if owner is None and "{owner." in row[fname]:
+                        owner = render_owner(profile)
                     row[fname] = render_template(
                         row[fname],
                         token=profile.token,
                         seed=profile.seed_bytes,
                         key=f"{name}.{i}.{fname}",
+                        owner=owner or {},
                     )
             rendered.append(row)
         out[name] = rendered
@@ -1069,7 +1283,75 @@ def _norm_marker(m: Marker) -> list[str]:
 
 
 def validate(profile: Profile) -> list[Issue]:
-    """Every problem of ``profile``; errors block apply, drafts may be saved."""
+    """Every problem of ``profile``; errors block apply, drafts may be saved.
+
+    Covers the values and lists, the ``owner`` and the shape of ``world``
+    (types, enums and known keys only: the world module owns its meaning).
+    """
+    issues = _validate_values(profile)
+    issues += _owner_issues(profile)
+    issues += [Issue(*i) for i in store.world_issues(profile.world)]
+    return issues
+
+
+def _owner_issues(profile: Profile) -> list[Issue]:
+    """The owner: plain first and last names without any token (the world
+    uses them verbatim), an E.164 phone, an e-mail address.
+    """
+    owner = profile.owner
+    if not owner:
+        return [
+            Issue(
+                "warning",
+                "owner",
+                "no owner: a world needs the owner's first and last name",
+            )
+        ]
+    out: list[Issue] = []
+    for key in owner:
+        if key not in OWNER_FIELDS:
+            out.append(Issue("warning", f"owner.{key}", f"unknown owner key {key!r}"))
+    tokens = [t for t in (profile.token, *profile.retired_tokens) if t]
+    for key in ("first", "last"):
+        value = owner.get(key)
+        path = f"owner.{key}"
+        if not isinstance(value, str) or not value.strip():
+            out.append(Issue("error", path, f"the owner needs a {key} name"))
+            continue
+        if "{" in value or "}" in value:
+            out.append(Issue("error", path, "plain text only (no placeholders)"))
+        hit = next((t for t in tokens if t.casefold() in value.casefold()), None)
+        if hit:
+            what = "the token" if hit == profile.token else "a retired token"
+            out.append(
+                Issue(
+                    "error",
+                    path,
+                    f"contains {what}: the world uses the owner's name verbatim",
+                )
+            )
+    for key in ("phone", "email"):
+        if key in owner and not isinstance(owner[key], str):
+            out.append(Issue("error", f"owner.{key}", f"{key} must be text"))
+    if len(profile.seed_bytes) != 32 or not TOKEN_RE.fullmatch(profile.token):
+        return out  # phone and e-mail templates need a token and a seed
+    try:
+        rendered = render_owner(profile)
+    except TemplateError as exc:
+        return [*out, Issue("error", "owner", str(exc))]
+    phone = rendered.get("phone")
+    if phone is not None and not _E164_RE.fullmatch(phone):
+        out.append(
+            Issue("error", "owner.phone", "phone must be E.164: '+' and 7-15 digits")
+        )
+    email = rendered.get("email")
+    if email is not None and not _EMAIL_RE.fullmatch(email):
+        out.append(Issue("error", "owner.email", "not an e-mail address"))
+    return out
+
+
+def _validate_values(profile: Profile) -> list[Issue]:
+    """The id, token, seed, values, lists and marker clashes."""
     issues: list[Issue] = []
 
     def add(sev: str, path: str, msg: str) -> None:
@@ -1306,7 +1588,7 @@ def markers_for(
     def add(m: Marker) -> None:
         if m.value and (not dedupe or m.value not in seen):
             seen.add(m.value)
-            out.append(m)
+            out.append(replace(m, origin="canary"))  # a seeded canary value
 
     for vid, vs in profile.values.items():
         spec = vs.spec
@@ -1498,6 +1780,11 @@ def generate_profile(
         )
     ]
     pid = profile_id or f"{first.lower()}-{preset}"
+    cc = CALLING_CODES.get(preset, "")
+    owner = {"first": first, "last": last}
+    if cc:
+        owner["phone"] = f"+{cc}{people['line']}"
+    owner["email"] = f"{first.lower()}.{last.lower()}.{{token}}@example.org"
     profile = Profile(
         id=pid,
         name=name or f"{first} {last} ({preset.upper()})",
@@ -1510,13 +1797,246 @@ def generate_profile(
         contacts=contacts,
         sms=sms,
         calls=calls,
+        owner=owner,
     )
-    # Random digits can collide (two equal phone numbers): draw again.
+    _draw_until_valid(profile)
+    return profile
+
+
+def _draw_until_valid(profile: Profile) -> None:
+    """Random digits can collide (two equal phone numbers): draw again."""
     for _ in range(20):
         if not any(i.severity == "error" for i in validate(profile)):
             break
         _regenerate(profile, retire=False)
+
+
+def builtin_profiles() -> list[tuple[str, str]]:
+    """``(id, name)`` of the profiles shipped in the package."""
+    out = []
+    for bid in store.builtin_ids():
+        try:
+            out.append((bid, str(store.load_builtin(bid).get("name") or bid)))
+        except ProfileError:
+            logger.warning("identity: built-in profile %s unreadable", bid)
+    return out
+
+
+def profile_from_builtin(
+    builtin_id: str, *, name: str = "", profile_id: str = ""
+) -> Profile:
+    """A new profile that extends ``builtin:<builtin_id>`` (not saved).
+
+    It gets its own token, seed and GPS fix (around the built-in's); every
+    other key is inherited, so its file holds only those and the leaf keys.
+
+    Raises:
+        ProfileError: No such built-in profile.
+    """
+    ref = store.BUILTIN_PREFIX + builtin_id
+    base = store.parents_of({"extends": ref}, _lookup_parent)
+    owner = base.get("owner") if isinstance(base.get("owner"), dict) else {}
+    first = str(owner.get("first") or "")
+    last = str(owner.get("last") or "")
+    stem = re.sub(r"[^a-z0-9._-]", "", first.lower())
+    pid = profile_id or (f"{stem}-{builtin_id}" if stem else builtin_id)
+    own = {
+        "format": FORMAT,
+        "schema": SCHEMA,
+        "id": pid,
+        "name": name or (f"{first} {last} ({builtin_id.upper()})".strip()),
+        "extends": ref,
+        "token": secrets.token_hex(4),
+        "seed": "hex:" + secrets.token_hex(32),
+        "revision": 0,
+        "created": datetime.now().astimezone().replace(microsecond=0),
+        "retired_tokens": [],
+    }
+    profile = Profile.from_dict(store.merge(base, own))
+    profile._base = base
+    gps = profile.values.get("gps")
+    if gps is not None and gps.value:
+        with contextlib.suppress(ValueError):
+            lat, lon, _alt = split_gps(gps.value)
+            rnd = secrets.SystemRandom()
+            gps.value = f"{_jitter(float(lat), rnd)}, {_jitter(float(lon), rnd)}"
+    _draw_until_valid(profile)
     return profile
+
+
+# ---------------------------------------------------------------------------
+# schema 1 (TOML) conversion
+# ---------------------------------------------------------------------------
+
+_V1_KEYS = frozenset(
+    {
+        "format",
+        "schema",
+        "id",
+        "name",
+        "revision",
+        "token",
+        "seed",
+        "created",
+        "preset",
+        "notes",
+        "values",
+        "contacts",
+        "sms",
+        "calls",
+        "retired_tokens",
+    }
+)
+_MIGRATE_LOCK = threading.Lock()
+
+
+def _raw_toml_scalar(text: str, key: str) -> str:
+    """The literal text of a top-level ``key = value`` line ("" if none)."""
+    pattern = re.compile(rf"{re.escape(key)}\s*=\s*([^#]*?)\s*(#.*)?")
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            break
+        match = pattern.fullmatch(stripped)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _token_only(template: str) -> bool:
+    """True when ``template``'s only placeholder is ``{token}``."""
+    names = {m.group(1) for m in _PLACEHOLDER_RE.finditer(template) if m.group(1)}
+    return names <= {"token"}
+
+
+def _owner_from_v1(profile: Profile) -> dict[str, str]:
+    """An owner for a schema 1 profile: the name from its account e-mail
+    (``first.last.<token>@...``) or the preset's people, the phone from the
+    phone number value (E.164), the e-mail from the account value.
+    """
+    people = _PEOPLE.get(profile.preset, _PEOPLE["en"])
+    first, last = people["owner"]
+    tokens = [t.casefold() for t in (profile.token, *profile.retired_tokens) if t]
+    owner: dict[str, str] = {}
+    for vs in sorted(profile.values.values(), key=lambda v: v.kind != "account"):
+        spec = vs.spec
+        if spec is None or spec.marker != "email":
+            continue
+        try:
+            rendered = render_value(profile, vs)
+        except (TemplateError, ValueError):
+            continue
+        if not rendered or not _EMAIL_RE.fullmatch(rendered):
+            continue
+        tmpl = vs.template
+        owner["email"] = tmpl if tmpl and _token_only(tmpl) else rendered
+        parts = [
+            p
+            for p in re.split(r"[._+-]", rendered.partition("@")[0])
+            if p.isalpha() and not any(t in p.casefold() for t in tokens)
+        ]
+        if len(parts) >= 2:
+            first, last = parts[0].title(), parts[1].title()
+        break
+    for vs in profile.values.values():
+        if vs.kind != "phone_number":
+            continue
+        try:
+            rendered = render_value(profile, vs)
+        except (TemplateError, ValueError):
+            continue
+        if rendered and _PHONE_RE.fullmatch(rendered):
+            phone, _forms = _phone_marker_value(
+                rendered, CALLING_CODES.get(profile.preset, "")
+            )
+            if _E164_RE.fullmatch(phone):
+                owner["phone"] = phone
+        break
+    return {
+        "first": first,
+        "last": last,
+        **{k: owner[k] for k in ("phone", "email") if k in owner},
+    }
+
+
+def migrate_v1_text(text: str) -> str:
+    """A schema 1 TOML profile as schema 2 YAML text.
+
+    Token, seed, retired tokens, revision and creation time are copied
+    exactly (the creation time keeps its literal text), values and lists as
+    they are, so :func:`fingerprint` stays the same. An ``owner`` is derived
+    (:func:`_owner_from_v1`).
+
+    Raises:
+        ProfileError: Not a schema 1 TOML profile.
+    """
+    data = _toml_profile(text)
+    if data is None:
+        raise ProfileError("not a schema 1 TOML identity profile")
+    if data.get("schema") != SCHEMA_V1:
+        raise ProfileError(f"TOML profile with schema {data.get('schema')!r}")
+    profile = Profile.from_dict(data)
+    own: dict[str, Any] = {"format": FORMAT, "schema": SCHEMA, "id": profile.id}
+    for key in ("name", "preset", "token", "seed", "revision"):
+        if key in data:
+            own[key] = data[key]
+    own["retired_tokens"] = list(data.get("retired_tokens") or [])
+    own["owner"] = _owner_from_v1(profile)
+    own["values"] = data.get("values") or {}
+    lists = {name: data[name] for name in LISTS if data.get(name)}
+    if lists:
+        own["lists"] = lists
+    if "notes" in data:
+        own["notes"] = data["notes"]
+    own.update({k: v for k, v in data.items() if k not in _V1_KEYS})
+    doc = store.to_node(own)
+    if "created" in data:
+        raw = _raw_toml_scalar(text, "created")
+        node = store.timestamp_node(raw) if raw else None
+        pos = list(doc).index("retired_tokens")
+        doc.insert(
+            pos,
+            "created",
+            node if node is not None else store.to_node(data["created"]),
+        )
+    doc.yaml_set_start_comment(
+        f"Identity profile, schema {SCHEMA}, converted from a schema 1 TOML "
+        "file (kept next to it as .toml.bak).\nComments added here are kept "
+        "when Sandroid saves the profile."
+    )
+    return store.dump_yaml(doc)
+
+
+def _migrate_library() -> list[str]:
+    """Convert the library's schema 1 TOML profiles to YAML, once.
+
+    ``<id>.toml`` becomes ``<id>.yaml`` and is renamed ``<id>.toml.bak``.
+    Idempotent; when both files exist the YAML wins and the TOML is left
+    alone. A TOML that cannot be converted stays (it is listed with its
+    error).
+
+    Returns:
+        The converted ids.
+    """
+    directory = profiles_dir()
+    done: list[str] = []
+    with _MIGRATE_LOCK:
+        for path in sorted(directory.glob("*.toml")):
+            if path.name.startswith(".") or not ID_RE.fullmatch(path.stem):
+                continue
+            target = directory / f"{path.stem}.yaml"
+            if target.exists():
+                continue
+            try:
+                text = migrate_v1_text(path.read_text(encoding="utf-8"))
+            except (OSError, ProfileError) as exc:
+                logger.warning("identity: cannot convert %s: %s", path.name, exc)
+                continue
+            _atomic_write_text(target, text)
+            path.replace(path.with_name(path.name + ".bak"))
+            logger.info("identity: converted %s to %s", path.name, target.name)
+            done.append(path.stem)
+    return done
 
 
 # ---------------------------------------------------------------------------
@@ -1542,9 +2062,20 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 def _profile_path(pid: str) -> Path:
+    """``<library>/<pid>.yaml``."""
     if not ID_RE.fullmatch(pid):
         raise ProfileError(f"invalid profile id {pid!r}")
-    return profiles_dir() / f"{pid}.toml"
+    return profiles_dir() / f"{pid}.yaml"
+
+
+def _v1_path(pid: str) -> Path:
+    """``<library>/<pid>.toml`` (a schema 1 profile not converted yet)."""
+    return _profile_path(pid).with_suffix(".toml")
+
+
+def new_world_seed() -> str:
+    """A fresh ``world.seed`` (``hex:`` and 64 hex digits)."""
+    return "hex:" + secrets.token_hex(32)
 
 
 @dataclass(frozen=True)
@@ -1558,6 +2089,7 @@ class ProfileInfo:
     preset: str
     path: Path
     error: str = ""  # unreadable / newer schema
+    extends: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -2562,51 +3094,95 @@ class IdentityService:
     # -- library ----------------------------------------------------------
 
     def list_profiles(self) -> list[ProfileInfo]:
-        """Every profile in the library, by id."""
+        """Every profile in the library, by id (schema 1 TOML profiles are
+        converted to YAML first).
+        """
+        _migrate_library()
+        directory = profiles_dir()
+        paths = {p.stem: p for p in directory.glob("*.yaml")}
+        for path in directory.glob("*.toml"):  # left: could not convert
+            paths.setdefault(path.stem, path)
         out = []
-        for path in sorted(profiles_dir().glob("*.toml")):
+        for stem, path in sorted(paths.items()):
             if path.name.startswith("."):
                 continue
             try:
-                p = Profile.loads(path.read_text(encoding="utf-8"))
+                p = Profile.loads(path.read_text(encoding="utf-8"), self_ref=stem)
                 out.append(
-                    ProfileInfo(p.id, p.name, p.revision, p.token, p.preset, path)
+                    ProfileInfo(
+                        p.id, p.name, p.revision, p.token, p.preset, path, "", p.extends
+                    )
                 )
             except (OSError, ProfileError) as exc:
-                out.append(ProfileInfo(path.stem, path.stem, 0, "", "", path, str(exc)))
+                out.append(ProfileInfo(stem, stem, 0, "", "", path, str(exc)))
         return out
 
     def load(self, profile_id: str) -> Profile:
-        """Load one profile (raises :class:`ProfileError`)."""
+        """Load one profile, its ``extends`` chain resolved (raises
+        :class:`ProfileError`). A schema 1 TOML profile is converted first.
+        """
         path = _profile_path(profile_id)
+        if not path.exists():
+            _migrate_library()
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as exc:
             raise ProfileError(f"no profile {profile_id!r}") from exc
-        return Profile.loads(text)
+        return Profile.loads(text, self_ref=profile_id)
 
-    def save(self, profile: Profile) -> Profile:
-        """Save ``profile`` (drafts with errors too); bumps ``revision``."""
+    def save(self, profile: Profile, *, bump: bool = True) -> Profile:
+        """Save ``profile`` (drafts with errors too); bumps ``revision``.
+
+        The file keeps its comments and key order: only what changed since
+        the profile was loaded is written, and inherited keys only when they
+        now differ from the parents. A ``world.seed`` of ``auto`` is
+        resolved to a fresh seed here, once.
+        """
         if not ID_RE.fullmatch(profile.id):
             raise ProfileError(f"invalid profile id {profile.id!r}")
-        profile.revision += 1
+        if bump:
+            profile.revision += 1
         if profile.created is None:
             profile.created = datetime.now().astimezone().replace(microsecond=0)
-        _atomic_write_text(_profile_path(profile.id), profile.dumps())
+        if store.world_seed_pending(profile.world):
+            profile.world["seed"] = new_world_seed()
+        base = (
+            store.parents_of({"extends": profile.extends}, _lookup_parent, profile.id)
+            if profile.extends
+            else {}
+        )
+        new = profile.to_v2()
+        if profile._doc is None:
+            doc = store.to_node(store.own_view(new, base))
+        else:
+            doc = profile._doc
+            store.apply_changes(doc, profile._loaded or {}, new, base)
+        _atomic_write_text(_profile_path(profile.id), store.dump_yaml(doc))
+        profile.schema = SCHEMA
+        profile._doc, profile._base, profile._loaded = doc, base, new
         return profile
 
     def create(
         self, preset: str = "de", *, name: str = "", profile_id: str = ""
     ) -> Profile:
-        """Generate and save a new profile from a country preset."""
-        profile = generate_profile(preset, name=name, profile_id=profile_id)
+        """Create and save a new profile from a built-in profile (one per
+        country preset), or generate a standalone one from a preset that has
+        no built-in.
+        """
+        if preset in store.builtin_ids():
+            profile = profile_from_builtin(preset, name=name, profile_id=profile_id)
+        else:
+            profile = generate_profile(preset, name=name, profile_id=profile_id)
         profile.id = self._free_id(profile.id)
         return self.save(profile)
 
     def duplicate(
         self, profile_id: str, new_id: str = "", *, fresh: bool = True
     ) -> Profile:
-        """Copy a profile; ``fresh`` gives the copy its own token and seed."""
+        """Copy a profile (its file's comments too); ``fresh`` gives the copy
+        its own token and seed. The copy's ``world.seed`` is reset to
+        ``auto`` (a new world seed at its first save).
+        """
         profile = self.load(profile_id)
         profile.id = self._free_id(new_id or f"{profile_id}-copy")
         profile.name = f"{profile.name} (copy)"
@@ -2614,14 +3190,28 @@ class IdentityService:
         profile.retired_tokens = []
         if fresh:
             _regenerate(profile, retire=False)
+        if profile.world:
+            profile.world["seed"] = "auto"
         return self.save(profile)
+
+    def resolve_world_seed(self, profile_id: str) -> str:
+        """The profile's ``world.seed``; ``auto`` is replaced by a fresh seed
+        and written back once (comments kept, revision unchanged).
+
+        Returns:
+            ``hex:...``, or ``""`` when the profile has no ``world``.
+        """
+        profile = self.load(profile_id)
+        if store.world_seed_pending(profile.world):
+            self.save(profile, bump=False)
+        return str(profile.world.get("seed") or "")
 
     def rename(self, profile_id: str, name: str, new_id: str = "") -> Profile:
         """Change the display name (and, with ``new_id``, the file/id)."""
         profile = self.load(profile_id)
         profile.name = name
         if new_id and new_id != profile_id:
-            if _profile_path(new_id).exists():
+            if _profile_path(new_id).exists() or _v1_path(new_id).exists():
                 raise ProfileError(f"profile {new_id!r} exists")
             profile.id = new_id
             self.save(profile)
@@ -2632,8 +3222,11 @@ class IdentityService:
         return self.save(profile)
 
     def delete(self, profile_id: str) -> None:
-        """Delete a profile file (frozen session copies stay)."""
+        """Delete a profile file (frozen session copies and a ``.toml.bak``
+        stay).
+        """
         _profile_path(profile_id).unlink(missing_ok=True)
+        _v1_path(profile_id).unlink(missing_ok=True)
 
     def regenerate(self, profile_id: str) -> Profile:
         """Fresh token and seed; the old token is retired (its rows are removed
@@ -2644,48 +3237,71 @@ class IdentityService:
         return self.save(profile)
 
     def import_profile(self, source: str | Path) -> tuple[str, str]:
-        """Import a profile file; never overwrites.
+        """Import a profile file (schema 2 YAML, or schema 1 TOML, which is
+        converted); never overwrites.
 
         Returns:
-            ``(id, outcome)`` with outcome ``imported`` (verbatim),
-            ``renamed`` (same id, other content -> ``<id>-2``) or
-            ``identical`` (no-op).
+            ``(id, outcome)`` with outcome ``imported`` (verbatim; a TOML
+            file converted), ``renamed`` (same id, other content ->
+            ``<id>-2``) or ``identical`` (no-op).
 
         Raises:
-            ProfileError: Unreadable, wrong format or a newer schema.
+            ProfileError: Unreadable, wrong format, a newer schema or an
+                ``extends`` parent that is not in the library.
         """
         try:
             text = Path(source).read_text(encoding="utf-8")
         except OSError as exc:
             raise ProfileError(f"cannot read {source}: {exc}") from exc
+        if _toml_profile(text) is not None:
+            text = migrate_v1_text(text)
         profile = Profile.loads(text)
         if not ID_RE.fullmatch(profile.id):
             raise ProfileError(f"invalid profile id {profile.id!r}")
+        _migrate_library()
         target = _profile_path(profile.id)
-        if not target.exists():
+        if not target.exists() and not _v1_path(profile.id).exists():
             _atomic_write_text(target, text)
+            self._settle_world_seed(profile.id)
             return profile.id, "imported"
+        auto = store.world_seed_pending(profile.world)
         try:
             existing = self.load(profile.id)
         except ProfileError:
             existing = None
-        if existing is not None and _canonical(existing) == _canonical(profile):
+        if existing is not None and _canonical(existing, auto) == _canonical(
+            profile, auto
+        ):
             return profile.id, "identical"
         for other in self.list_profiles():
             if other.error:
                 continue
             with contextlib.suppress(ProfileError):
-                if _canonical(self.load(other.id)) == _canonical(
-                    replace(profile, id=other.id)
+                if _canonical(self.load(other.id), auto) == _canonical(
+                    replace(profile, id=other.id), auto
                 ):
                     return other.id, "identical"
-        profile.id = self._free_id(profile.id)
-        _atomic_write_text(_profile_path(profile.id), profile.dumps())
-        return profile.id, "renamed"
+        new_id = self._free_id(profile.id)
+        doc = store.load_yaml(text)
+        doc["id"] = new_id
+        _atomic_write_text(_profile_path(new_id), store.dump_yaml(doc))
+        self._settle_world_seed(new_id)
+        return new_id, "renamed"
+
+    def _settle_world_seed(self, profile_id: str) -> None:
+        """Resolve an imported profile's ``world.seed: auto`` (best effort)."""
+        try:
+            self.resolve_world_seed(profile_id)
+        except ProfileError:
+            logger.warning("identity: world seed of %s not resolved", profile_id)
 
     def export_profile(self, profile_id: str, dest: str | Path) -> Path:
-        """Copy the profile file verbatim to ``dest`` (a file or a folder)."""
+        """Copy the profile's YAML file verbatim to ``dest`` (a file or a
+        folder).
+        """
         src = _profile_path(profile_id)
+        if not src.exists():
+            _migrate_library()
         if not src.exists():
             raise ProfileError(f"no profile {profile_id!r}")
         target = Path(dest)
@@ -2693,6 +3309,10 @@ class IdentityService:
             target = target / src.name
         target.write_bytes(src.read_bytes())
         return target
+
+    def builtins(self) -> list[tuple[str, str]]:
+        """:func:`builtin_profiles`."""
+        return builtin_profiles()
 
     def validate(self, profile: Profile) -> list[Issue]:
         """:func:`validate`."""
@@ -2704,11 +3324,14 @@ class IdentityService:
         return list(infos.values())
 
     def _free_id(self, base: str) -> str:
-        if not _profile_path(base).exists():
+        def taken(pid: str) -> bool:
+            return _profile_path(pid).exists() or _v1_path(pid).exists()
+
+        if not taken(base):
             return base
         stem = re.sub(r"-\d+$", "", base)
         n = 2
-        while _profile_path(f"{stem}-{n}").exists():
+        while taken(f"{stem}-{n}"):
             n += 1
         return f"{stem}-{n}"
 
@@ -4840,11 +5463,21 @@ def _regenerate(profile: Profile, *, retire: bool) -> None:
                 for key, val in item.items():
                     if isinstance(val, str):
                         item[key] = val.replace(old, profile.token)
+        for key in ("phone", "email"):
+            val = profile.owner.get(key)
+            if isinstance(val, str):
+                profile.owner[key] = val.replace(old, profile.token)
 
 
-def _canonical(profile: Profile) -> str:
-    data = profile.to_dict()
+def _canonical(profile: Profile, ignore_world_seed: bool = False) -> str:
+    """The profile's content as text (without its revision) for comparing
+    two profiles; ``ignore_world_seed`` leaves ``world.seed`` out (an
+    import that still says ``auto``).
+    """
+    data = profile.to_v2()
     data.pop("revision", None)
+    if ignore_world_seed and isinstance(data.get("world"), dict):
+        data["world"].pop("seed", None)
     return json.dumps(data, sort_keys=True, default=str)
 
 
@@ -5169,8 +5802,10 @@ __all__ = [
     "CALLING_CODES",
     "FORMAT",
     "LISTS",
+    "OWNER_FIELDS",
     "REGISTRY",
     "SCHEMA",
+    "SCHEMA_V1",
     "DeviceState",
     "IdentityApplyError",
     "IdentityPlan",
@@ -5183,6 +5818,7 @@ __all__ = [
     "TemplateError",
     "ValueInfo",
     "ValueSpec",
+    "builtin_profiles",
     "fingerprint",
     "frozen_record",
     "generate_profile",
@@ -5190,11 +5826,15 @@ __all__ = [
     "luhn_check_digit",
     "luhn_ok",
     "markers_for",
+    "migrate_v1_text",
+    "new_world_seed",
     "parse_preflight",
     "preflight_script",
+    "profile_from_builtin",
     "profiles_dir",
     "read_frozen_markers",
     "render_lists",
+    "render_owner",
     "render_template",
     "render_value",
     "ssaid_for",

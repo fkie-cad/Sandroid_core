@@ -1832,7 +1832,8 @@ class IdentityLens(Vertical):
         derived = vs.derive is not None and vs.value is None and vs.template is None
         message = (
             "A plain value, or a template with {token}, {digits:N}, {hex:N}, "
-            "{luhn} or {uuid}."
+            "{luhn}, {uuid} or an owner field: {owner.first}, {owner.last}, "
+            "{owner.phone}, {owner.email}."
         )
         if derived:
             message += " Empty keeps it derived per app."
@@ -1854,9 +1855,7 @@ class IdentityLens(Vertical):
             if not text.strip() and not derived:
                 return "A value is needed."
             try:
-                from sandroid.services.identity import Profile
-
-                draft = Profile.loads(profile.dumps())
+                draft = profile.copy()
             except Exception:
                 draft = None
             if draft is None or ident is None:
@@ -1985,11 +1984,18 @@ class IdentityLens(Vertical):
                 ("use", info.id, f"Use {info.name or info.id}  [{info.id}]{tag}")
             )
         try:
-            from sandroid.services.device_settings_service import COUNTRY_PRESETS
-
-            presets = [(k, v.name) for k, v in COUNTRY_PRESETS.items()]
+            presets = ident.builtins()
         except Exception:
-            presets = [("de", "Germany")]
+            presets = []
+        if not presets:
+            try:
+                from sandroid.services.device_settings_service import (
+                    COUNTRY_PRESETS,
+                )
+
+                presets = [(k, v.name) for k, v in COUNTRY_PRESETS.items()]
+            except Exception:
+                presets = [("de", "Germany")]
         for key, name in presets:
             options.append(("new", key, f"New profile from preset: {name}"))
         if active:
@@ -2120,7 +2126,7 @@ class IdentityLens(Vertical):
         self.app.push_screen(
             InputModal(
                 title="Import identity profile",
-                message="Path of a profile file (.toml).",
+                message="Path of a profile file (.yaml, or an older .toml).",
                 default=str(Path.cwd()) + "/",
             ),
             done,
