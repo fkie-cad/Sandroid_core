@@ -2942,10 +2942,6 @@ def _pre_start_plan_cls() -> type:
     return PreStartPlan
 
 
-#: Deprecated alias (app_start's pre-start step was called pre-spawn hook).
-_pre_spawn_plan_cls = _pre_start_plan_cls
-
-
 def _list_sig(name: str, row: dict[str, Any], when: int | None = None) -> tuple:
     """What identifies one list item on the device.
 
@@ -5783,11 +5779,6 @@ class IdentityService:
             if self._hook_installed:
                 unregister_pre_start_step(self.pre_start)
                 self._hook_installed = False
-
-    # Deprecated aliases (one round, until every caller uses the pre-start names).
-    pre_spawn = pre_start
-    install_pre_spawn_hook = install_pre_start_step
-    uninstall_pre_spawn_hook = uninstall_pre_start_step
 
 
 # ---------------------------------------------------------------------------

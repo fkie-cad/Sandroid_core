@@ -3298,3 +3298,9 @@ def test_default_configs_carry_the_same_identity_section():
     toml_section = tomllib.loads((config / "default.toml").read_text())["identity"]
     yaml_section = yaml.safe_load((config / "default.yaml").read_text())["identity"]
     assert yaml_section == toml_section
+
+
+def test_the_old_pre_spawn_names_are_gone():
+    for name in ("pre_spawn", "install_pre_spawn_hook", "uninstall_pre_spawn_hook"):
+        assert not hasattr(ident.IdentityService, name), name
+    assert not hasattr(ident, "_pre_spawn_plan_cls")
