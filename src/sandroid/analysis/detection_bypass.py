@@ -2620,11 +2620,13 @@ class BypassService:
     def add_state_listener(self, cb: Callable[[], None]) -> None:
         """Call ``cb()`` after every change of the armed or active set.
 
-        Runs on the thread that made the change (often a worker), possibly
-        while this service holds its lock: keep it short and non-blocking,
-        marshal to the UI thread, and read the new state with
-        :meth:`on_categories` / :meth:`armed_categories` /
-        :meth:`active_categories` from there. Errors are logged, not raised.
+        Runs on whichever thread made the change: a worker, or the UI thread
+        itself (a new app selection disarms from UI code). Keep it short and
+        non-blocking and post to the UI without assuming the thread (e.g.
+        ``call_later`` / ``post_message``, or a dispatcher that runs inline
+        on the UI thread; ``call_from_thread`` raises there). Read the new
+        state with :meth:`on_categories` / :meth:`armed_categories` /
+        :meth:`active_categories`. Errors are logged, not raised.
         """
         with self._listeners_lock:
             if cb not in self._state_listeners:

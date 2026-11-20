@@ -131,9 +131,17 @@ def app_not_responding(package: str | None) -> bool | None:
 
 
 class FriTapTargetError(RuntimeError):
-    """The target can't take friTap right now (user-actionable, no traceback)."""
+    """The target can't take friTap right now (user-actionable, no traceback).
+
+    ``reason`` is the resolver's machine-readable refusal code (e.g.
+    ``"busy"``), or None.
+    """
 
     expected = True
+
+    def __init__(self, message: str = "", reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def _device_key() -> str:
@@ -568,7 +576,7 @@ class FriTap(DataGatherBase):
             java_agent=True,
         )
         if decision.action == StartAction.REFUSE:
-            raise FriTapTargetError(decision.reason)
+            raise FriTapTargetError(decision.reason, reason=decision.code or None)
         # Refuse a second friTap agent in one process.
         self._check_attach_target(decision)
 
@@ -1465,10 +1473,22 @@ def start_fritap_keys(package: str | None = None, serial: str | None = None):
 
     Returns:
         A :class:`~sandroid.services.app_start.StartResult` ``(ok, message)``
-        with ``.reason``: ``"busy"``, ``"declined"``, ``"needs_consent"``
-        from the resolver, ``"not_selected"`` (no or another spotlight app),
-        ``"other_device"``, or None.
+        with ``.reason``: ``"not_selected"`` (no or another spotlight app),
+        ``"other_device"``, ``"busy"`` (another start, or friTap runs on
+        another app), the resolver's code when it refuses (e.g. ``"busy"``,
+        ``"needs_consent"``, ``"declined"``), or None. Never raises.
     """
+    from sandroid.services.app_start import StartResult
+
+    try:
+        return _start_fritap_keys(package, serial)
+    except Exception as exc:  # never raise into a control's worker
+        logger.warning("friTap (keys only) failed: %s", exc)
+        reason = getattr(exc, "reason", None) or getattr(exc.__cause__, "reason", None)
+        return StartResult(False, f"friTap not started: {exc}", reason)
+
+
+def _start_fritap_keys(package: str | None, serial: str | None):
     from sandroid.core.adb import Adb
     from sandroid.services import get_spotlight_service, get_task_service
     from sandroid.services.app_start import StartResult
@@ -1500,8 +1520,8 @@ def start_fritap_keys(package: str | None = None, serial: str | None = None):
         try:
             started = fritap.start(interactive=False)
         except Exception as exc:
-            reason = getattr(exc.__cause__, "reason", None) or getattr(
-                exc, "reason", None
+            reason = getattr(exc, "reason", None) or getattr(
+                exc.__cause__, "reason", None
             )
             return StartResult(False, f"friTap not started: {exc}", reason)
         if not started:

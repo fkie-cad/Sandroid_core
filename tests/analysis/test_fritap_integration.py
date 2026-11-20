@@ -871,3 +871,32 @@ def test_keys_only_passes_the_resolver_reason_and_stop_works(monkeypatch):
     assert fritap_mod.start_fritap_keys()[0] is True  # already runs there
     assert fritap_mod.stop_fritap() is True
     assert state.stopped == ["fritap"]
+
+
+def test_keys_only_reports_the_resolvers_code_and_another_app(monkeypatch):
+    state = _keys_env(monkeypatch)
+
+    def _start(self, interactive=True):
+        raise fritap_mod.FriTapTargetError("another start", reason="busy")
+
+    monkeypatch.setattr(fritap_mod.FriTap, "__init__", lambda self: None)
+    monkeypatch.setattr(fritap_mod.FriTap, "start", _start)
+    r = fritap_mod.start_fritap_keys()
+    assert (r[0], r.reason) == (False, "busy")
+
+    state.tasks = [types.SimpleNamespace(name="fritap", app_name="org.other")]
+    r = fritap_mod.start_fritap_keys()
+    assert (r[0], r.reason) == (False, "busy")
+    assert "another app" in r[1]
+
+
+def test_keys_only_never_raises(monkeypatch):
+    _keys_env(monkeypatch)
+
+    def _boom(self):
+        raise RuntimeError("no job manager")
+
+    monkeypatch.setattr(fritap_mod.FriTap, "__init__", _boom)
+    r = fritap_mod.start_fritap_keys()
+    assert r[0] is False
+    assert "no job manager" in r[1]
