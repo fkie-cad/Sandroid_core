@@ -1390,11 +1390,8 @@ def part_words(part: str) -> str:
     return f"{words} {name}".strip()
 
 
-def _applied_values(ctx: ReportContext) -> tuple[str, list[Any]] | None:
-    """``(fingerprint, markers)`` of the profile seeded in the scope: the
-    frozen record of the last ``identity/applied`` line up to the end of the
-    scope (None without one, or when its record cannot be read).
-    """
+def _last_applied(ctx: ReportContext) -> dict[str, Any] | None:
+    """The last ``identity/applied`` line up to the end of the scope."""
     end = ctx.span[1] if ctx.span else None
     last = None
     for line in ctx.lines:
@@ -1403,6 +1400,28 @@ def _applied_values(ctx: ReportContext) -> tuple[str, list[Any]] | None:
         if end is not None and line.get("_ts") is not None and line["_ts"] > end:
             break
         last = line
+    return last
+
+
+def _applied_total(last: dict[str, Any] | None) -> int | None:
+    """Values seeded by the ``identity/applied`` line ``last`` (its marker
+    count; for a line whose frozen record cannot be read), or None.
+    """
+    d = _data(last) if last is not None else {}
+    if isinstance(d.get("markers"), int):
+        return d["markers"]
+    if isinstance(d.get("values"), dict):
+        return len(d["values"])
+    return None
+
+
+def _applied_values(
+    ctx: ReportContext, last: dict[str, Any] | None
+) -> tuple[str, list[Any]] | None:
+    """``(fingerprint, markers)`` of the profile seeded in the scope: the
+    frozen record of ``last`` (the last ``identity/applied`` line; None
+    without one, or when its record cannot be read).
+    """
     rel = _ref(last).get("path") if last is not None else None
     if not rel or ctx.timeline_dir is None:
         return None
@@ -1568,21 +1587,37 @@ def build_privacy(ctx: ReportContext) -> dict:
                 )
             ]
         }
+    # The profile applied last in the scope: its findings are counted and
+    # listed, other profiles' findings get one line of their own.
+    last = _last_applied(ctx)
+    applied = _applied_values(ctx, last)
+    fp = (applied[0] if applied else "") or (
+        str(_data(last).get("fingerprint") or "") if last is not None else ""
+    )
+    others = 0
+    if fp:
+        mine = [ln for ln in lines if _data(ln).get("fp") in (None, "", fp)]
+        others = len(lines) - len(mine)
+        lines = mine
     sent = [ln for ln in lines if ln.get("kind") == "sent"]
     stored = [ln for ln in lines if ln.get("kind") == "stored"]
     blocks: list[dict] = []
-    # The same count as the header's PRIVACY piece: seeded values found (any
-    # direction) out of the profile's values, grouped and mapped alike.
-    applied = _applied_values(ctx)
     values = sorted({str(_data(ln).get("label") or "?") for ln in sent})
     text = ""
     left = len(values)
+    # The same count as the header's PRIVACY piece: seeded values found (any
+    # direction) out of the profile's values, grouped and mapped alike.
     if applied is not None:
         found, total = _value_counts(applied, lines)
         left = _value_counts(applied, sent)[0]
+    else:  # no frozen record: labels of the findings, the marker count
+        found = len({str(_data(ln).get("label") or "?") for ln in lines})
+        total = _applied_total(last)
+    if total is not None:
         text = (
-            f"{found} of {total} profile value{'s' if total != 1 else ''} "
-            f"{'was' if found == 1 else 'were'} found in this report's scope. "
+            f"{found} of {total} value{'s' if total != 1 else ''} of this "
+            f"profile {'was' if found == 1 else 'were'} found in this report's "
+            "scope. "
         )
     recipients: dict[str, str] = {}
     for line in sent:
@@ -1614,6 +1649,14 @@ def build_privacy(ctx: ReportContext) -> dict:
         "rounded); a blank cell means the value was not seen going there."
     )
     blocks.append(_text(text))
+    if others:
+        blocks.append(
+            _text(
+                f"{_plural(others, 'finding')} of other identity profiles in this "
+                f"scope {'is' if others == 1 else 'are'} not counted or listed "
+                "here."
+            )
+        )
     if not sent and not stored:
         return {"blocks": blocks}
     first = _privacy_first(sent + stored)

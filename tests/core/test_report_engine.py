@@ -851,8 +851,9 @@ class TestPrivacy:
         ids = [s["id"] for s in doc["sections"]]
         assert ids.index("privacy") == ids.index("coverage") + 1
         intro = section["blocks"][0]["text"]
-        # No frozen apply record to count against: no "n of m" total.
+        # No frozen apply record: the found labels of the applied line's count.
         assert intro.startswith(
+            "3 of 5 values of this profile were found in this report's scope. "
             "3 profile values left the device to 2 recipients, the first at "
             f"12:00:10 (line {sent})."
         )
@@ -977,12 +978,22 @@ class TestPrivacy:
             service.close()
         assert (summary.values_found, summary.values_total) == (3, 4)
         doc = _build(session, scope=report_engine.ReportScope(), sections=("privacy",))
-        intro = _section(doc, "privacy")["blocks"][0]["text"]
+        blocks = _section(doc, "privacy")["blocks"]
+        intro = blocks[0]["text"]
         assert intro.startswith(
-            f"{summary.values_found} of {summary.values_total} profile values were "
-            "found in this report's scope. 2 profile values left the device to "
-            "1 recipient,"
+            f"{summary.values_found} of {summary.values_total} values of this "
+            "profile were found in this report's scope. 2 profile values left "
+            "the device to 1 recipient,"
         ), intro
+        # The tables list this profile's findings only, like the counts; the
+        # other profile's finding gets a line of its own.
+        assert blocks[1]["text"] == (
+            "1 finding of other identity profiles in this scope is not counted "
+            "or listed here."
+        )
+        tables = [b for b in blocks if b["type"] == "table"]
+        assert tables[0]["columns"] == ["Recipient", "Advertising ID", "GPS"]
+        assert all(row[0] != "Email" for row in tables[1]["rows"])
 
     def test_every_run_counts_its_hits_not_only_the_first_line(self, session):
         """A value leaked in two runs of one session is in both run reports
