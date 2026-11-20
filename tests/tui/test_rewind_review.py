@@ -1132,7 +1132,77 @@ async def test_review_results_say_the_replay_diverged():
 
         await until(pilot, lambda: "diverged" in text())
         body = text()
-        assert "Results of the last Rewind + Replay (diverged)" in body
+        assert "Results of the last Rewind + Replay (diverged at step 2)" in body
         assert "The replay diverged at step 2 of 3: field text differs" in body
         assert "diverged: field text differs" in body
         assert "Done" not in body
+
+
+def test_unchecked_steps_are_never_reported_as_success(controller, monkeypatch):
+    from types import SimpleNamespace
+
+    from sandroid.core import run_history
+    from sandroid.tui.widgets import diffs_view, timeline_lens
+    from sandroid.tui.widgets.diffs_view import DiffsView
+
+    saved: list = []
+    monkeypatch.setattr(run_history, "save_run", saved.append)
+    monkeypatch.setattr(
+        "sandroid.core.timeline.timeline_folder", lambda: rewind.recordings_root()
+    )
+    report = {
+        "steps": [
+            {"i": 1, "seq": 3, "what": "tap 'spi' (View)", "way": "by position",
+             "reason": "not found", "check": "unchecked"},
+            {"i": 2, "seq": 4, "what": "tap at 539,1826 on spiegel.de",
+             "way": "by position", "reason": "element off-screen",
+             "check": "unchecked"},
+        ],
+        "stopped_at_step": None, "error": None, "diverged_at_step": None,
+        "diverged": None, "unchecked_steps": [1, 2],
+    }  # fmt: skip
+    controller._deps = lambda rec, view, replay: rewind.RewindDeps(
+        load_snapshot=lambda name, serial: True,
+        shell=lambda cmd: "",
+        pull=lambda path, role, rec_id, run: rewind.PullOutcome(f"v-{role}"),
+        replay=lambda rec, runner: report,
+        emit=lambda *a, **k: 1,
+    )
+    success: list[str] = []
+    warnings: list[str] = []
+    toasts: list[tuple[str, str]] = []
+    controller._log_success = success.append
+    controller._log_warning = warnings.append
+    controller._notify = lambda message, severity: toasts.append((message, severity))
+    rec = _rec()
+    rec.selected = [rec.changed[0]["path"]]
+    controller._rec = rec
+    controller._state = "running"
+    out = controller._rewind_worker(rec, True, controller.view)
+
+    assert out["success"] is False
+    assert out["result"] == "unchecked"
+    assert out["unchecked_steps"] == [1, 2]
+    assert success == []
+    assert any(w.startswith("Replay done, 2 steps unchecked") for w in warnings)
+    assert toasts
+    assert all(sev == "warning" for _m, sev in toasts)
+    record = saved[0]
+    assert record.result == "unchecked"
+    assert record.unchecked_count == 2
+    assert record.rewind["result_words"] == "done, 2 steps unchecked"
+    summary = run_history._summary_from_record(record)
+    problem = DiffsView._problem(SimpleNamespace(_facts={}), summary)
+    assert problem == ("done, 2 steps unchecked", diffs_view._WARN)
+    fake = SimpleNamespace(_short_path=DiffsView._short_path)
+    sections = dict(DiffsView._rewind_sections(fake, record))
+    assert "done, 2 steps unchecked" in sections["Replay steps unchecked"].plain
+    assert "by position (element off-screen), unchecked" in (
+        sections["Replayed steps"].plain
+    )
+    assert controller.review_dict(rec)["runs"][-1]["unchecked_steps"] == [1, 2]
+    # the timeline colours such a run line as a warning, a diverged one as bad
+    row = SimpleNamespace(data={"result": "unchecked", "rec_id": "r"}, level="info")
+    assert timeline_lens._run_failed(row)
+    row = SimpleNamespace(data={"result": "replayed", "rec_id": "r"}, level="info")
+    assert not timeline_lens._run_failed(row)

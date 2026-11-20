@@ -1081,6 +1081,11 @@ class RecordingController:
                 words = rewind.diverged_words(outcome)
                 self._ui(self._log_warning, words)
                 self._toast(words, "warning")
+            elif outcome.result == rewind.UNCHECKED:
+                # Not a success either: some steps were not confirmed.
+                words = rewind.unchecked_words(outcome)
+                self._ui(self._log_warning, words)
+                self._toast(words, "warning")
             elif outcome.result in ("replayed", "rewound"):
                 done = (
                     "Done. The device shows the replayed result."
@@ -1102,6 +1107,7 @@ class RecordingController:
             "error": None if outcome is None else outcome.error,
             "result": None if outcome is None else outcome.result,
             "diverged_at_step": None if outcome is None else outcome.diverged_at_step,
+            "unchecked_steps": [] if outcome is None else list(outcome.unchecked_steps),
         }
 
     def _resume_after(self, config: Any) -> None:
@@ -1327,12 +1333,17 @@ class RecordingController:
                 mode=outcome.mode,
                 rec_id=rec.rec_id,
                 result=outcome.result or "stopped",
+                unchecked_count=len(outcome.unchecked_steps),
                 verdicts=verdicts,
                 rewind={
                     "steps": outcome.steps,
                     "stopped_at_step": outcome.stopped_at_step,
                     "diverged_at_step": outcome.diverged_at_step,
                     "diverged": outcome.diverged,
+                    "unchecked_steps": outcome.unchecked_steps,
+                    "result_words": rewind.result_words(
+                        rec.runs[-1] if rec.runs else None
+                    ),
                     "note": rewind.diverged_note(rec.runs[-1] if rec.runs else None),
                     "flows": flows,
                     "requests": requests,
@@ -1463,6 +1474,7 @@ class RecordingController:
                         "error",
                         "diverged_at_step",
                         "diverged",
+                        "unchecked_steps",
                         "run_id",
                     )
                 }

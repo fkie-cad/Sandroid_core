@@ -343,7 +343,9 @@ class ReviewModal(ForensicModal[None]):
             return
         last = rec.runs[-1]
         word = "Rewind + Replay" if last.get("kind") == "rewind-replay" else "Rewind"
-        result = last.get("result") or ""
+        from sandroid.core import rewind as _rewind
+
+        result = _rewind.result_words(last) if last.get("result") else ""
         widgets: list[Any] = [
             Static(f"Results of the last {word} ({result})", classes="review-section")
         ]
@@ -361,6 +363,9 @@ class ReviewModal(ForensicModal[None]):
                 )
             )
             widgets.append(Static(escape(words), classes="review-warn"))
+        elif last.get("result") == "unchecked":
+            note = _rewind.diverged_note(last)
+            widgets.append(Static(escape(note), classes="review-warn"))
         widgets.extend(self._step_widgets(last))
         for fr in res["files"]:
             widgets.extend(self._file_widgets(fr))
@@ -378,6 +383,8 @@ class ReviewModal(ForensicModal[None]):
             way = s.get("way") or ""
             if way in ("failed", "diverged"):
                 way = f"{way}: {s.get('reason')}"
+            elif s.get("check") == "unchecked" and s.get("reason"):
+                way = f"{way} ({s.get('reason')}), unchecked"
             lines.append(f"  step {s.get('i')}: {s.get('what')} · {way}")
         return [Static("Replayed steps", classes="review-section"),
                 Static(escape("\n".join(lines)))]  # fmt: skip

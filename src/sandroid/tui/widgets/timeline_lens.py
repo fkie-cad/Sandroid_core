@@ -651,6 +651,8 @@ def _run_failed(row: Row) -> bool:
     data = row.data or {}
     if data.get("failed") or row.level in ("warn", "error"):
         return True
+    if data.get("result") in ("diverged", "unchecked"):
+        return True  # a Rewind + Replay that did not reach your run
     error = data.get("error")
     return bool(error) and error != "Replay cancelled"
 
@@ -2449,7 +2451,8 @@ class TimelineLens(Vertical):
             text = self._separator_text(row, sep)
             body = _fit(text, max(0, width - used))
             if sep == "run" and _run_failed(row):
-                sep = "error"
+                unchecked = (row.data or {}).get("result") == "unchecked"
+                sep = "warn" if unchecked else "error"
             segments.append(Segment(body, st(sep)))
             return Strip(segments).adjust_cell_length(width, bg)
         if width >= 80:

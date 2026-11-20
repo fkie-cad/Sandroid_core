@@ -970,6 +970,10 @@ class DiffsView(FilesSubViewBase):
         steps = len(errors.get("steps") or [])
         if s.get("result") == "diverged":
             return "diverged", _BAD  # the replay did not reach your run
+        if s.get("result") == "unchecked":
+            from sandroid.core import rewind
+
+            return rewind.result_words(s), _WARN  # done, N steps unchecked
         if s.get("error") or errors.get("fatal"):
             if s.get("error") == "Replay cancelled" or s.get("mode"):
                 return "stopped", _WARN  # a Rewind stops, it never aborts
@@ -1301,6 +1305,11 @@ class DiffsView(FilesSubViewBase):
             if info.get("note"):
                 body.append(f"\n{info['note']}")
             out.append(("The replay diverged", body))
+        elif info.get("unchecked_steps"):
+            body = Text(str(info.get("result_words") or "unchecked"), style=_WARN)
+            if info.get("note"):
+                body.append(f"\n{info['note']}")
+            out.append(("Replay steps unchecked", body))
         if verdicts:
             body = Text()
             for path, verdict in verdicts.items():
@@ -1321,9 +1330,12 @@ class DiffsView(FilesSubViewBase):
                 way = st.get("way") or ""
                 if way in ("failed", "diverged"):
                     way = f"{way}: {st.get('reason')}"
+                elif st.get("check") == "unchecked" and st.get("reason"):
+                    way = f"{way} ({st.get('reason')}), unchecked"
                 body.append(f"{st.get('i')}. {st.get('what')}  ")
                 bad = way.startswith(("failed", "diverged"))
-                body.append(way, style=_BAD if bad else _MUTED)
+                warn = st.get("check") == "unchecked"
+                body.append(way, style=_BAD if bad else _WARN if warn else _MUTED)
             out.append(("Replayed steps", body))
         flows = info.get("flows") or []
         if flows:

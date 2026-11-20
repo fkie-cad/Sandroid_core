@@ -140,6 +140,8 @@ class RunRecord:
     #: replay did not reach what your run did) or ``stopped``; empty for a
     #: batch Play and runs saved before it was stored.
     result: str = ""
+    #: How many steps of that replay were unchecked (``result`` unchecked).
+    unchecked_count: int = 0
     #: Per selected file: its result word (``same change in the replay`` ...).
     verdicts: dict[str, str] = field(default_factory=dict)
     #: Rewind details: ``steps`` (way per step), ``stopped_at_step``,
@@ -299,6 +301,7 @@ def _summary_from_record(record: RunRecord) -> dict[str, Any]:
         "mode": record.mode,
         "rec_id": record.rec_id,
         "result": record.result,
+        "unchecked_count": record.unchecked_count,
     }
 
 
