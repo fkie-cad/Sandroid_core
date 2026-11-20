@@ -171,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("prepare", help="seed a world onto a clean device")
     p.add_argument("--serial", required=True)
     _owner_args(p)
-    p.add_argument("--anchor", help="ISO time; default the device clock")
+    p.add_argument("--anchor", help="ISO time; default now (host clock)")
     p.add_argument("--force-cleanup", action="store_true")
     p.set_defaults(func=cmd_prepare)
 

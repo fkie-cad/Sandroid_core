@@ -87,7 +87,7 @@ CHUNKS = {"contacts": 25, "events": 50, "calls": 100, "sms": 50}
 CHUNK_TIMEOUT_S = 600.0
 #: Free space needed besides the photos (KiB).
 MIN_FREE_KIB = 64 * 1024
-#: Warn when the device clock (the default anchor) is this far off the host.
+#: Warn when the device clock is this far off the host clock (the default anchor).
 CLOCK_SKEW_WARN_S = 300
 #: MediaStore datetaken may differ this much from our capture time (ms).
 DATETAKEN_TOLERANCE_MS = 1500
@@ -324,6 +324,11 @@ def persona_snapshot_name(persona_id: str, world_fp: str, identity_fp: str) -> s
 
 
 # ------------------------------------------------------------------- utils
+
+
+def _host_now() -> float:
+    """The host's clock (Unix seconds): the default anchor."""
+    return time.time()
 
 
 def _now_iso() -> str:
@@ -702,17 +707,17 @@ class _Run:
         self.cleanup_from = stamp if isinstance(stamp, dict) else {}
 
     def _anchor(self, device_now: str) -> None:
+        host = _host_now()
+        if device_now.isdigit() and abs(int(device_now) - host) > CLOCK_SKEW_WARN_S:
+            self.report.warn(
+                f"the device clock is {(int(device_now) - host) / 60:+.0f} min off "
+                "the host clock"
+            )
         if self.anchor_in is not None:
             a = self.anchor_in
             a = a.replace(tzinfo=self.tz) if a.tzinfo is None else a.astimezone(self.tz)
         else:
-            secs = int(device_now) if device_now.isdigit() else int(time.time())
-            if abs(secs - time.time()) > CLOCK_SKEW_WARN_S:
-                self.report.warn(
-                    f"the device clock is {(secs - time.time()) / 60:+.0f} min off the "
-                    "host; the world is anchored at the device's time"
-                )
-            a = dt.datetime.fromtimestamp(secs, self.tz)
+            a = dt.datetime.fromtimestamp(int(host), dt.UTC).astimezone(self.tz)
         self.anchor = a.replace(microsecond=0)
         self.report.anchor = self.anchor.isoformat()
 
@@ -1208,7 +1213,7 @@ def prepare(
     Args:
         serial: The device; every adb call is pinned to it.
         manifest: The world (``world_fp`` must verify).
-        anchor: When the world is seeded; default the device's clock. A naive
+        anchor: When the world is seeded; default the host's clock (now). A naive
             datetime is taken in the world's time zone.
         progress: Called with ``(step, done, total)`` while lists are seeded.
         force_cleanup: Remove an interrupted run's items (from its host

@@ -419,13 +419,18 @@ def test_api_level_must_match_target_sdk() -> None:
         _run(m, dev)
 
 
-def test_default_anchor_is_the_device_clock(manifest) -> None:
+def test_default_anchor_is_the_host_clock(manifest, monkeypatch) -> None:
+    host = int(ANCHOR.timestamp())
+    monkeypatch.setattr(pr, "_host_now", lambda: float(host))
     dev = FakeDevice()
-    dev.now = int(ANCHOR.timestamp()) - 400 * 86400  # a stale snapshot clock
+    dev.now = host - 400 * 86400  # a stale snapshot clock
     report = pr.prepare(SERIAL, manifest, device=dev, packs=PACKS)
-    want = dt.datetime.fromtimestamp(dev.now, ZoneInfo("Europe/Berlin"))
-    assert report.anchor == want.isoformat()
-    assert any("device clock" in w for w in report.warnings)
+    assert report.anchor == ANCHOR.isoformat()
+    assert any("device clock is" in w for w in report.warnings)
+    dev = FakeDevice()
+    dev.now = host + 60
+    report = pr.prepare(SERIAL, manifest, device=dev, packs=PACKS)
+    assert not any("device clock" in w for w in report.warnings)
 
 
 def test_a_tampered_manifest_is_refused(manifest) -> None:
