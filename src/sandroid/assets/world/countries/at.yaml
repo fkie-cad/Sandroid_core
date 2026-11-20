@@ -1,0 +1,732 @@
+# Sandroid world pack: country at. Sources: at.SOURCES.md
+pack: country
+schema: 1
+country: at
+name: Austria
+languages: {de: 1.0}
+timezones: [Europe/Vienna]
+date_format: dd.MM.yyyy
+time_format: HH:mm
+currency: {code: EUR, symbol: €, format: '€ 49,90'}
+phone:
+  country_code: '43'
+  trunk_prefix: '0'
+  national_format_examples: [0664 1234567, 0676 1234567, 01 5123456, 0316 123456]
+  mobile:
+    realistic:
+      - {prefix: '664', length: 10, operator: A1}
+      - {prefix: '680', length: 10, operator: A1}
+      - {prefix: '681', length: 10, operator: A1}
+      - {prefix: '688', length: 10, operator: A1}
+      - {prefix: '650', length: 10, operator: Magenta}
+      - {prefix: '676', length: 10, operator: Magenta}
+      - {prefix: '660', length: 10, operator: Drei}
+      - {prefix: '699', length: 10, operator: Drei}
+      - {prefix: '677', length: 10, operator: HoT}
+      - {prefix: '670', length: 10, operator: spusu}
+    unallocated:
+      - {prefix: '652', length: 10, note: whole code marked 'nicht zugeteilt' in RTR Open Data tn-dienste (published 2026-11-19), source: S3}
+      - {prefix: '673', length: 10, note: whole code marked 'nicht zugeteilt' in RTR Open Data tn-dienste (published 2026-11-19), source: S3}
+      - {prefix: '674', length: 10, note: whole code marked 'nicht zugeteilt' in RTR Open Data tn-dienste (published 2026-11-19), source: S3}
+      - {prefix: '675', length: 10, note: whole code marked 'nicht zugeteilt' in RTR Open Data tn-dienste (published 2026-11-19), source: S3}
+      - {prefix: '679', length: 10, note: whole code marked 'nicht zugeteilt' in RTR Open Data tn-dienste (published 2026-11-19), source: S3}
+      - {prefix: '682', length: 10, note: whole code marked 'nicht zugeteilt' in RTR Open Data tn-dienste (published 2026-11-19), source: S3}
+      - {prefix: '683', length: 10, note: whole code marked 'nicht zugeteilt' in RTR Open Data tn-dienste (published 2026-11-19), source: S3}
+      - {prefix: '684', length: 10, note: whole code marked 'nicht zugeteilt' in RTR Open Data tn-dienste (published 2026-11-19), source: S3}
+      - {prefix: '685', length: 10, note: whole code marked 'nicht zugeteilt' in RTR Open Data tn-dienste (published 2026-11-19), source: S3}
+      - {prefix: '687', length: 10, note: whole code marked 'nicht zugeteilt' in RTR Open Data tn-dienste (published 2026-11-19), source: S3}
+      - {prefix: '691', length: 10, note: whole code marked 'nicht zugeteilt' in RTR Open Data tn-dienste (published 2026-11-19), source: S3}
+      - {prefix: '692', length: 10, note: whole code marked 'nicht zugeteilt' in RTR Open Data tn-dienste (published 2026-11-19), source: S3}
+      - {prefix: '694', length: 10, note: whole code marked 'nicht zugeteilt' in RTR Open Data tn-dienste (published 2026-11-19), source: S3}
+      - {prefix: '695', length: 10, note: whole code marked 'nicht zugeteilt' in RTR Open Data tn-dienste (published 2026-11-19), source: S3}
+    fiction: null
+  landline:
+    cities:
+      - {city: Wien, area_code: '1', subscriber_length: 7}
+      - {city: Graz, area_code: '316', subscriber_length: 6}
+      - {city: Linz, area_code: '732', subscriber_length: 6}
+      - {city: Salzburg, area_code: '662', subscriber_length: 6}
+      - {city: Innsbruck, area_code: '512', subscriber_length: 6}
+      - {city: Klagenfurt, area_code: '463', subscriber_length: 6}
+      - {city: Villach, area_code: '4242', subscriber_length: 6}
+      - {city: Wels, area_code: '7242', subscriber_length: 5}
+      - {city: St. Pölten, area_code: '2742', subscriber_length: 6}
+      - {city: Dornbirn, area_code: '5572', subscriber_length: 5}
+      - {city: Wiener Neustadt, area_code: '2622', subscriber_length: 5}
+      - {city: Steyr, area_code: '7252', subscriber_length: 5}
+      - {city: Feldkirch, area_code: '5522', subscriber_length: 5}
+      - {city: Bregenz, area_code: '5574', subscriber_length: 5}
+      - {city: Leoben, area_code: '3842', subscriber_length: 5}
+    fiction: null
+  validation_note: 'fiction is null: Austria has no official fiction/drama range (KEM-V 2009 has no such section, RTR publishes none); use the unallocated codes for safe synthetic numbers. phonenumbers 9.0.43 treats every unallocated code above as valid MOBILE (no carrier). Its carrier data is stale for 0659/0669/0657/0653 (labels them A1 although RTR lists 0659 and 0669 as unallocated), so those codes were left out. AT mobile NSN is 10-13 digits (3-digit code + 7-10 digit subscriber part, KEM-V §61); 10 is typical for people.'
+carriers:
+  - {name: A1, sim_operator: A1, mccmnc: '23201', share: 0.362}
+  - {name: Magenta, sim_operator: Magenta, mccmnc: '23203', share: 0.249}
+  - {name: Drei, sim_operator: 3 AT, mccmnc: '23205', share: 0.201}
+  - {name: HoT, sim_operator: HoT, mccmnc: '23207', share: 0.099}
+  - {name: spusu, sim_operator: spusu, mccmnc: '23217', share: 0.055}
+cities:
+  - {name: Wien, lat: 48.2082, lon: 16.3738, population: 2010000, area_code: '1', postcodes: ['1010', '1020', '1030', '1040', '1050', '1060', '1070', '1080', '1090', '1100', '1120', '1150', '1160', '1180', '1190', '1210', '1220'], districts: [Innere Stadt, Leopoldstadt, Landstraße, Wieden, Margareten, Mariahilf, Neubau, Josefstadt, Alsergrund, Favoriten, Ottakring, Döbling, Floridsdorf, Donaustadt]}
+  - {name: Graz, lat: 47.0707, lon: 15.4395, population: 300000, area_code: '316', postcodes: ['8010', '8020', '8036', '8041', '8042', '8045'], districts: [Innere Stadt, Lend, Gries, Geidorf, St. Leonhard, Jakomini]}
+  - {name: Linz, lat: 48.3069, lon: 14.2858, population: 210000, area_code: '732', postcodes: ['4020', '4030', '4040'], districts: [Innere Stadt, Urfahr, Ebelsberg, Kleinmünchen]}
+  - {name: Salzburg, lat: 47.8095, lon: 13.055, population: 157000, area_code: '662', postcodes: ['5020', '5023', '5026'], districts: [Altstadt, Lehen, Maxglan, Parsch, Gneis]}
+  - {name: Innsbruck, lat: 47.2692, lon: 11.4041, population: 131000, area_code: '512', postcodes: ['6020'], districts: [Altstadt, Wilten, Pradl, Hötting, Reichenau]}
+  - {name: Klagenfurt, lat: 46.6247, lon: 14.3053, population: 105000, area_code: '463', postcodes: ['9020'], districts: [Innere Stadt, St. Ruprecht, Waidmannsdorf, Annabichl]}
+  - {name: Villach, lat: 46.6103, lon: 13.8558, population: 65000, area_code: '4242', postcodes: ['9500'], districts: [Innere Stadt, Lind, Auen, Landskron]}
+  - {name: Wels, lat: 48.1575, lon: 14.0289, population: 64000, area_code: '7242', postcodes: ['4600'], districts: [Innenstadt, Vogelweide, Lichtenegg]}
+  - {name: St. Pölten, lat: 48.2047, lon: 15.6256, population: 57000, area_code: '2742', postcodes: ['3100'], districts: [Innenstadt, Spratzern, Wagram]}
+  - {name: Dornbirn, lat: 47.4125, lon: 9.7417, population: 51000, area_code: '5572', postcodes: ['6850'], districts: [Markt, Hatlerdorf, Haselstauden]}
+  - {name: Wiener Neustadt, lat: 47.815, lon: 16.2465, population: 48000, area_code: '2622', postcodes: ['2700'], districts: [Innere Stadt, Zehnergürtel]}
+  - {name: Steyr, lat: 48.04, lon: 14.4213, population: 38000, area_code: '7252', postcodes: ['4400'], districts: [Innere Stadt, Ennsleite, Tabor]}
+  - {name: Feldkirch, lat: 47.237, lon: 9.598, population: 35000, area_code: '5522', postcodes: ['6800'], districts: [Altenstadt, Tosters, Nofels]}
+  - {name: Bregenz, lat: 47.5031, lon: 9.7471, population: 30000, area_code: '5574', postcodes: ['6900'], districts: [Oberstadt, Vorkloster, Rieden]}
+  - {name: Leoben, lat: 47.3765, lon: 15.0914, population: 25000, area_code: '3842', postcodes: ['8700'], districts: [Innenstadt, Göss, Donawitz]}
+streets: [Hauptstraße, Bahnhofstraße, Kirchengasse, Schulgasse, Dorfstraße, Feldgasse, Wiener Straße, Grazer Straße, Linzer Straße, Salzburger Straße, Mühlgasse, Bachgasse, Kirchenplatz, Hauptplatz, Schulstraße, Gartengasse, Waldgasse, Lindengasse, Wiesengasse, Neubaugasse, Mariahilfer Straße, Landstraßer Hauptstraße, Favoritenstraße, Praterstraße, Sonnenweg, Birkenweg, Rosengasse, Mozartstraße, Kaiserstraße, Erzherzog-Johann-Straße, Andreas-Hofer-Straße, Dr.-Karl-Renner-Straße, Florianigasse, Am Anger, Angergasse, Feldweg, Siedlungsstraße, Hofgasse, Kirchweg, Brunnengasse, Annenstraße, Herrengasse, Landstraße, Museumstraße, Maria-Theresien-Straße, Leopoldstraße, Schmiedgasse, Josefigasse, Industriestraße, Gewerbestraße, Ringstraße, Sportplatzstraße, Bergstraße, Kreuzgasse, Quellenstraße]
+address_format: '{street} {number}, {postcode} {city}'
+places:
+  - {category: park, name: Prater, city: Wien, lat: 48.2161, lon: 16.3956}
+  - {category: park, name: Schlosspark Schönbrunn, city: Wien, lat: 48.1848, lon: 16.3123}
+  - {category: park, name: Stadtpark, city: Wien, lat: 48.2047, lon: 16.3806}
+  - {category: park, name: Augarten, city: Wien, lat: 48.226, lon: 16.376}
+  - {category: park, name: Mirabellgarten, city: Salzburg, lat: 47.8056, lon: 13.0419}
+  - {category: park, name: Stadtpark Graz, city: Graz, lat: 47.0748, lon: 15.4444}
+  - {category: park, name: Donaupark, city: Wien, lat: 48.24, lon: 16.4178}
+  - {category: landmark, name: Stephansdom, city: Wien, lat: 48.2085, lon: 16.373}
+  - {category: landmark, name: Schloss Schönbrunn, city: Wien, lat: 48.1845, lon: 16.3119}
+  - {category: landmark, name: Belvedere, city: Wien, lat: 48.1942, lon: 16.3803}
+  - {category: landmark, name: Hofburg, city: Wien, lat: 48.2064, lon: 16.3653}
+  - {category: landmark, name: Uhrturm, city: Graz, lat: 47.0736, lon: 15.4377}
+  - {category: landmark, name: Festung Hohensalzburg, city: Salzburg, lat: 47.795, lon: 13.0472}
+  - {category: landmark, name: Goldenes Dachl, city: Innsbruck, lat: 47.2686, lon: 11.3933}
+  - {category: landmark, name: Riesenrad, city: Wien, lat: 48.2167, lon: 16.3959}
+  - {category: landmark, name: Stift Melk, city: Melk, lat: 48.2281, lon: 15.3339}
+  - {category: station, name: Wien Hauptbahnhof, city: Wien, lat: 48.1867, lon: 16.38}
+  - {category: station, name: Wien Westbahnhof, city: Wien, lat: 48.1967, lon: 16.3378}
+  - {category: station, name: Graz Hauptbahnhof, city: Graz, lat: 47.0722, lon: 15.4172}
+  - {category: station, name: Linz Hauptbahnhof, city: Linz, lat: 48.2906, lon: 14.2911}
+  - {category: station, name: Salzburg Hauptbahnhof, city: Salzburg, lat: 47.8131, lon: 13.0467}
+  - {category: station, name: Innsbruck Hauptbahnhof, city: Innsbruck, lat: 47.2639, lon: 11.4008}
+  - {category: airport, name: Flughafen Wien-Schwechat, city: Schwechat, lat: 48.1103, lon: 16.5697}
+  - {category: airport, name: Flughafen Graz, city: Feldkirchen bei Graz, lat: 46.9931, lon: 15.4392}
+  - {category: airport, name: Flughafen Salzburg, city: Salzburg, lat: 47.7944, lon: 13.0033}
+  - {category: airport, name: Flughafen Innsbruck, city: Innsbruck, lat: 47.2603, lon: 11.3439}
+  - {category: beach, name: Gänsehäufel, city: Wien, lat: 48.2281, lon: 16.4306}
+  - {category: beach, name: Strandbad Wörthersee, city: Klagenfurt, lat: 46.6195, lon: 14.261}
+  - {category: beach, name: Donauinsel, city: Wien, lat: 48.2333, lon: 16.4}
+  - {category: mountain, name: Großglockner, city: Heiligenblut, lat: 47.0749, lon: 12.6952}
+  - {category: mountain, name: Schneeberg, city: Puchberg am Schneeberg, lat: 47.7758, lon: 15.8075}
+  - {category: mountain, name: Dachstein, city: Ramsau am Dachstein, lat: 47.4753, lon: 13.6064}
+  - {category: mountain, name: Schöckl, city: Graz, lat: 47.2011, lon: 15.4756}
+  - {category: mountain, name: Hafelekarspitze, city: Innsbruck, lat: 47.3128, lon: 11.3863}
+  - {category: mountain, name: Kahlenberg, city: Wien, lat: 48.2833, lon: 16.3333}
+  - {category: museum, name: Kunsthistorisches Museum, city: Wien, lat: 48.2039, lon: 16.3616}
+  - {category: museum, name: Naturhistorisches Museum, city: Wien, lat: 48.2052, lon: 16.3599}
+  - {category: museum, name: Albertina, city: Wien, lat: 48.2047, lon: 16.3683}
+  - {category: museum, name: Ars Electronica Center, city: Linz, lat: 48.3097, lon: 14.2844}
+  - {category: museum, name: Kunsthaus Graz, city: Graz, lat: 47.0714, lon: 15.4341}
+  - {category: stadium, name: Ernst-Happel-Stadion, city: Wien, lat: 48.2072, lon: 16.4208}
+  - {category: stadium, name: Allianz Stadion, city: Wien, lat: 48.1978, lon: 16.2653}
+  - {category: stadium, name: Red Bull Arena, city: Wals-Siezenheim, lat: 47.8164, lon: 12.9983}
+  - {category: market, name: Naschmarkt, city: Wien, lat: 48.1989, lon: 16.3636}
+  - {category: market, name: Brunnenmarkt, city: Wien, lat: 48.212, lon: 16.3358}
+  - {category: lake, name: Wörthersee, city: Klagenfurt, lat: 46.6195, lon: 14.261}
+  - {category: lake, name: Attersee, city: Attersee, lat: 47.915, lon: 13.541}
+  - {category: lake, name: Neusiedler See, city: Neusiedl am See, lat: 47.948, lon: 16.841}
+  - {category: lake, name: Wolfgangsee, city: St. Wolfgang im Salzkammergut, lat: 47.739, lon: 13.448}
+  - {category: lake, name: Traunsee, city: Gmunden, lat: 47.918, lon: 13.799}
+  - {category: lake, name: Alte Donau, city: Wien, lat: 48.2322, lon: 16.4278}
+names:
+  culture: at
+  female:
+    - {name: Julia, w: 1.0}
+    - {name: Anna, w: 0.737}
+    - {name: Lisa, w: 0.711}
+    - {name: Katharina, w: 0.709}
+    - {name: Maria, w: 0.6}
+    - {name: Sarah, w: 0.595}
+    - {name: Melanie, w: 0.52}
+    - {name: Elisabeth, w: 0.5}
+    - {name: Andrea, w: 0.5}
+    - {name: Stefanie, w: 0.448}
+    - {name: Sandra, w: 0.445}
+    - {name: Sabrina, w: 0.431}
+    - {name: Laura, w: 0.429}
+    - {name: Christina, w: 0.405}
+    - {name: Claudia, w: 0.4}
+    - {name: Christine, w: 0.4}
+    - {name: Monika, w: 0.4}
+    - {name: Brigitte, w: 0.4}
+    - {name: Lena, w: 0.392}
+    - {name: Nicole, w: 0.377}
+    - {name: Daniela, w: 0.36}
+    - {name: Martina, w: 0.35}
+    - {name: Sabine, w: 0.35}
+    - {name: Karin, w: 0.35}
+    - {name: Susanne, w: 0.35}
+    - {name: Magdalena, w: 0.348}
+    - {name: Nina, w: 0.347}
+    - {name: Sophie, w: 0.334}
+    - {name: Verena, w: 0.331}
+    - {name: Jasmin, w: 0.325}
+    - {name: Johanna, w: 0.32}
+    - {name: Barbara, w: 0.3}
+    - {name: Eva, w: 0.3}
+    - {name: Petra, w: 0.3}
+    - {name: Gabriele, w: 0.3}
+    - {name: Ingrid, w: 0.3}
+    - {name: Nadine, w: 0.293}
+    - {name: Carina, w: 0.287}
+    - {name: Vanessa, w: 0.278}
+    - {name: Tanja, w: 0.273}
+    - {name: Bianca, w: 0.261}
+    - {name: Kerstin, w: 0.261}
+    - {name: Hannah, w: 0.26}
+    - {name: Leonie, w: 0.257}
+    - {name: Theresa, w: 0.257}
+    - {name: Michaela, w: 0.256}
+    - {name: Silvia, w: 0.25}
+    - {name: Renate, w: 0.25}
+    - {name: Helga, w: 0.25}
+    - {name: Margit, w: 0.25}
+    - {name: Ulrike, w: 0.25}
+    - {name: Viktoria, w: 0.242}
+    - {name: Jennifer, w: 0.236}
+    - {name: Lea, w: 0.229}
+    - {name: Alexandra, w: 0.228}
+    - {name: Isabella, w: 0.222}
+    - {name: Marlene, w: 0.212}
+    - {name: Katrin, w: 0.207}
+    - {name: Tamara, w: 0.203}
+    - {name: Erika, w: 0.2}
+    - {name: Edith, w: 0.2}
+    - {name: Waltraud, w: 0.2}
+    - {name: Gertraud, w: 0.2}
+    - {name: Hermine, w: 0.2}
+    - {name: Theresia, w: 0.2}
+    - {name: Herta, w: 0.2}
+    - {name: Bettina, w: 0.2}
+    - {name: Selina, w: 0.198}
+    - {name: Lara, w: 0.191}
+    - {name: Anja, w: 0.188}
+    - {name: Michelle, w: 0.187}
+    - {name: Denise, w: 0.185}
+    - {name: Marie, w: 0.183}
+    - {name: Sophia, w: 0.18}
+    - {name: Elena, w: 0.177}
+    - {name: Cornelia, w: 0.176}
+    - {name: Victoria, w: 0.174}
+    - {name: Kathrin, w: 0.167}
+    - {name: Emma, w: 0.162}
+    - {name: Valentina, w: 0.162}
+    - {name: Simone, w: 0.161}
+    - {name: Manuela, w: 0.156}
+    - {name: Stephanie, w: 0.156}
+    - {name: Alina, w: 0.147}
+    - {name: Jana, w: 0.143}
+    - {name: Sonja, w: 0.141}
+    - {name: Hanna, w: 0.141}
+    - {name: Birgit, w: 0.137}
+    - {name: Franziska, w: 0.133}
+    - {name: Miriam, w: 0.132}
+    - {name: Sara, w: 0.128}
+    - {name: Natalie, w: 0.126}
+    - {name: Jessica, w: 0.125}
+    - {name: Jacqueline, w: 0.124}
+    - {name: Elfriede, w: 0.12}
+    - {name: Anneliese, w: 0.12}
+    - {name: Rosemarie, w: 0.12}
+    - {name: Gertrude, w: 0.12}
+    - {name: Christa, w: 0.12}
+    - {name: Roswitha, w: 0.12}
+    - {name: Hildegard, w: 0.12}
+    - {name: Josefa, w: 0.12}
+    - {name: Friederike, w: 0.12}
+    - {name: Patricia, w: 0.117}
+    - {name: Emilia, w: 0.114}
+    - {name: Yvonne, w: 0.108}
+    - {name: Mia, w: 0.106}
+    - {name: Ines, w: 0.105}
+    - {name: Pia, w: 0.105}
+    - {name: Elisa, w: 0.104}
+    - {name: Angelika, w: 0.101}
+    - {name: Chiara, w: 0.099}
+    - {name: Marina, w: 0.098}
+    - {name: Antonia, w: 0.095}
+    - {name: Iris, w: 0.092}
+    - {name: Veronika, w: 0.092}
+    - {name: Helena, w: 0.092}
+    - {name: Amelie, w: 0.091}
+    - {name: Janine, w: 0.091}
+    - {name: Melissa, w: 0.091}
+    - {name: Carmen, w: 0.091}
+    - {name: Caroline, w: 0.09}
+    - {name: Doris, w: 0.09}
+    - {name: Linda, w: 0.089}
+    - {name: Larissa, w: 0.088}
+    - {name: Rebecca, w: 0.088}
+    - {name: Corinna, w: 0.087}
+    - {name: Emily, w: 0.083}
+    - {name: Teresa, w: 0.083}
+    - {name: Anita, w: 0.082}
+    - {name: Nora, w: 0.082}
+    - {name: Tina, w: 0.082}
+    - {name: Marion, w: 0.082}
+    - {name: Clara, w: 0.08}
+    - {name: Lina, w: 0.078}
+    - {name: Romana, w: 0.075}
+    - {name: Katja, w: 0.075}
+    - {name: Kristina, w: 0.075}
+    - {name: Judith, w: 0.074}
+    - {name: Annika, w: 0.073}
+    - {name: Valerie, w: 0.073}
+    - {name: Nadja, w: 0.072}
+    - {name: Natascha, w: 0.071}
+    - {name: Angelina, w: 0.07}
+    - {name: Luisa, w: 0.07}
+    - {name: Klara, w: 0.068}
+    - {name: Celina, w: 0.066}
+    - {name: Paula, w: 0.065}
+    - {name: Eva-Maria, w: 0.064}
+    - {name: Bernadette, w: 0.063}
+    - {name: Olivia, w: 0.061}
+    - {name: Nathalie, w: 0.059}
+    - {name: Ramona, w: 0.059}
+  male:
+    - {name: Michael, w: 1.0}
+    - {name: Daniel, w: 0.819}
+    - {name: Lukas, w: 0.808}
+    - {name: Thomas, w: 0.79}
+    - {name: Stefan, w: 0.759}
+    - {name: Florian, w: 0.731}
+    - {name: Alexander, w: 0.714}
+    - {name: Andreas, w: 0.633}
+    - {name: Christoph, w: 0.625}
+    - {name: Markus, w: 0.614}
+    - {name: Patrick, w: 0.61}
+    - {name: Manuel, w: 0.595}
+    - {name: David, w: 0.58}
+    - {name: Martin, w: 0.54}
+    - {name: Christian, w: 0.523}
+    - {name: Dominik, w: 0.522}
+    - {name: Peter, w: 0.5}
+    - {name: Josef, w: 0.5}
+    - {name: Wolfgang, w: 0.5}
+    - {name: Franz, w: 0.5}
+    - {name: Johann, w: 0.5}
+    - {name: Philipp, w: 0.494}
+    - {name: Sebastian, w: 0.453}
+    - {name: Gerhard, w: 0.45}
+    - {name: Maximilian, w: 0.427}
+    - {name: Tobias, w: 0.414}
+    - {name: Matthias, w: 0.403}
+    - {name: Simon, w: 0.394}
+    - {name: Fabian, w: 0.391}
+    - {name: Robert, w: 0.35}
+    - {name: Gerald, w: 0.35}
+    - {name: Harald, w: 0.35}
+    - {name: Karl, w: 0.35}
+    - {name: Herbert, w: 0.35}
+    - {name: Helmut, w: 0.35}
+    - {name: Johannes, w: 0.35}
+    - {name: Julian, w: 0.342}
+    - {name: Jakob, w: 0.336}
+    - {name: Paul, w: 0.31}
+    - {name: Manfred, w: 0.3}
+    - {name: Reinhard, w: 0.3}
+    - {name: Werner, w: 0.3}
+    - {name: Walter, w: 0.3}
+    - {name: Marcel, w: 0.293}
+    - {name: Mario, w: 0.291}
+    - {name: Felix, w: 0.288}
+    - {name: Benjamin, w: 0.286}
+    - {name: Bernhard, w: 0.26}
+    - {name: Erich, w: 0.25}
+    - {name: Alfred, w: 0.25}
+    - {name: Friedrich, w: 0.25}
+    - {name: Hubert, w: 0.25}
+    - {name: Kevin, w: 0.244}
+    - {name: Elias, w: 0.238}
+    - {name: Raphael, w: 0.234}
+    - {name: Rene, w: 0.227}
+    - {name: Jonas, w: 0.213}
+    - {name: Marco, w: 0.213}
+    - {name: Hannes, w: 0.2}
+    - {name: Anton, w: 0.2}
+    - {name: Leopold, w: 0.2}
+    - {name: Günter, w: 0.2}
+    - {name: Günther, w: 0.2}
+    - {name: Kurt, w: 0.2}
+    - {name: Ernst, w: 0.2}
+    - {name: Heinz, w: 0.2}
+    - {name: Rudolf, w: 0.2}
+    - {name: Alois, w: 0.2}
+    - {name: Ewald, w: 0.2}
+    - {name: Gottfried, w: 0.2}
+    - {name: Moritz, w: 0.185}
+    - {name: Georg, w: 0.178}
+    - {name: Christopher, w: 0.17}
+    - {name: Mathias, w: 0.166}
+    - {name: Leon, w: 0.165}
+    - {name: Nico, w: 0.159}
+    - {name: Oliver, w: 0.151}
+    - {name: Niklas, w: 0.147}
+    - {name: Samuel, w: 0.14}
+    - {name: Clemens, w: 0.137}
+    - {name: Luca, w: 0.135}
+    - {name: Noah, w: 0.123}
+    - {name: Jan, w: 0.122}
+    - {name: Ferdinand, w: 0.12}
+    - {name: Siegfried, w: 0.12}
+    - {name: Engelbert, w: 0.12}
+    - {name: Hermann, w: 0.12}
+    - {name: Rupert, w: 0.12}
+    - {name: Wilhelm, w: 0.12}
+    - {name: Adolf, w: 0.12}
+    - {name: Erwin, w: 0.12}
+    - {name: Otto, w: 0.12}
+    - {name: Jürgen, w: 0.117}
+    - {name: Gabriel, w: 0.114}
+    - {name: Valentin, w: 0.109}
+    - {name: Roman, w: 0.109}
+    - {name: Lorenz, w: 0.107}
+    - {name: Philip, w: 0.103}
+    - {name: Pascal, w: 0.095}
+    - {name: Stephan, w: 0.093}
+    - {name: Gregor, w: 0.088}
+    - {name: Benedikt, w: 0.087}
+    - {name: Roland, w: 0.084}
+    - {name: Adrian, w: 0.08}
+    - {name: Dominic, w: 0.078}
+    - {name: Leo, w: 0.077}
+    - {name: Richard, w: 0.075}
+    - {name: Sascha, w: 0.074}
+    - {name: Fabio, w: 0.07}
+    - {name: Lucas, w: 0.07}
+    - {name: Armin, w: 0.069}
+    - {name: Max, w: 0.067}
+    - {name: Kilian, w: 0.066}
+    - {name: Matteo, w: 0.066}
+    - {name: Klaus, w: 0.06}
+    - {name: Jonathan, w: 0.06}
+    - {name: Marc, w: 0.06}
+    - {name: Sandro, w: 0.059}
+    - {name: Andre, w: 0.059}
+    - {name: Marvin, w: 0.056}
+    - {name: Emil, w: 0.055}
+    - {name: Nicolas, w: 0.055}
+    - {name: Bernd, w: 0.054}
+    - {name: Konstantin, w: 0.054}
+    - {name: Emanuel, w: 0.054}
+    - {name: Nikolaus, w: 0.052}
+    - {name: Luis, w: 0.051}
+    - {name: Robin, w: 0.051}
+    - {name: Tim, w: 0.048}
+    - {name: Patrik, w: 0.046}
+    - {name: Rafael, w: 0.045}
+    - {name: Laurenz, w: 0.043}
+    - {name: Erik, w: 0.043}
+    - {name: Timo, w: 0.042}
+    - {name: Leonhard, w: 0.042}
+    - {name: Ben, w: 0.041}
+    - {name: Vincent, w: 0.038}
+    - {name: Theo, w: 0.037}
+    - {name: Gernot, w: 0.037}
+    - {name: Bastian, w: 0.036}
+    - {name: Liam, w: 0.035}
+    - {name: Christof, w: 0.033}
+    - {name: Oskar, w: 0.033}
+    - {name: Marcus, w: 0.033}
+    - {name: Theodor, w: 0.032}
+    - {name: Aaron, w: 0.032}
+    - {name: Luka, w: 0.031}
+    - {name: Marko, w: 0.031}
+    - {name: Eric, w: 0.03}
+    - {name: Dennis, w: 0.03}
+    - {name: Finn, w: 0.03}
+    - {name: Constantin, w: 0.029}
+    - {name: Adam, w: 0.029}
+  surnames:
+    - {name: Gruber, w: 1.0}
+    - {name: Huber, w: 0.574}
+    - {name: Wagner, w: 0.415}
+    - {name: Müller, w: 0.33}
+    - {name: Pichler, w: 0.276}
+    - {name: Moser, w: 0.238}
+    - {name: Steiner, w: 0.211}
+    - {name: Mayer, w: 0.189}
+    - {name: Berger, w: 0.172}
+    - {name: Hofer, w: 0.158}
+    - {name: Eder, w: 0.147}
+    - {name: Bauer, w: 0.137}
+    - {name: Winkler, w: 0.128}
+    - {name: Schmid, w: 0.121}
+    - {name: Weber, w: 0.115}
+    - {name: Fuchs, w: 0.109}
+    - {name: Maier, w: 0.104}
+    - {name: Schwarz, w: 0.099}
+    - {name: Schneider, w: 0.095}
+    - {name: Reiter, w: 0.091}
+    - {name: Leitner, w: 0.088}
+    - {name: Mayr, w: 0.084}
+    - {name: Fischer, w: 0.081}
+    - {name: Schmidt, w: 0.079}
+    - {name: Wimmer, w: 0.076}
+    - {name: Egger, w: 0.074}
+    - {name: Baumgartner, w: 0.072}
+    - {name: Brunner, w: 0.07}
+    - {name: Wallner, w: 0.068}
+    - {name: Auer, w: 0.066}
+    - {name: Aigner, w: 0.064}
+    - {name: Wolf, w: 0.062}
+    - {name: Binder, w: 0.061}
+    - {name: Ebner, w: 0.06}
+    - {name: Schuster, w: 0.058}
+    - {name: Lang, w: 0.057}
+    - {name: Lechner, w: 0.056}
+    - {name: Haas, w: 0.054}
+    - {name: Wieser, w: 0.053}
+    - {name: Strasser, w: 0.052}
+    - {name: Stadler, w: 0.051}
+    - {name: Haider, w: 0.05}
+    - {name: Weiss, w: 0.049}
+    - {name: Holzer, w: 0.048}
+    - {name: Koller, w: 0.048}
+    - {name: Mair, w: 0.047}
+    - {name: Riegler, w: 0.046}
+    - {name: Maurer, w: 0.045}
+    - {name: Lehner, w: 0.044}
+    - {name: Winter, w: 0.044}
+    - {name: Pfeiffer, w: 0.031}
+    - {name: Hofmann, w: 0.031}
+    - {name: Graf, w: 0.031}
+    - {name: Kogler, w: 0.031}
+    - {name: Hauser, w: 0.031}
+    - {name: Steindl, w: 0.031}
+    - {name: Krenn, w: 0.031}
+    - {name: Hölzl, w: 0.031}
+    - {name: Knapp, w: 0.031}
+    - {name: Hackl, w: 0.031}
+    - {name: Karner, w: 0.031}
+    - {name: Schweiger, w: 0.031}
+    - {name: Fink, w: 0.031}
+    - {name: Rainer, w: 0.031}
+    - {name: Kainz, w: 0.031}
+    - {name: Seidl, w: 0.031}
+    - {name: Hofbauer, w: 0.031}
+    - {name: Unger, w: 0.031}
+    - {name: Platzer, w: 0.031}
+    - {name: Ortner, w: 0.031}
+    - {name: Nagl, w: 0.031}
+    - {name: Posch, w: 0.031}
+    - {name: Prinz, w: 0.031}
+    - {name: Kofler, w: 0.031}
+    - {name: Kurz, w: 0.031}
+    - {name: Thaler, w: 0.031}
+    - {name: Brandstätter, w: 0.031}
+    - {name: Novak, w: 0.031}
+    - {name: Horvath, w: 0.031}
+    - {name: Nowak, w: 0.031}
+    - {name: Kovacs, w: 0.031}
+    - {name: Hammer, w: 0.031}
+    - {name: Hartl, w: 0.031}
+    - {name: Lackner, w: 0.031}
+    - {name: Fasching, w: 0.031}
+    - {name: Gratzer, w: 0.031}
+    - {name: Schuh, w: 0.031}
+    - {name: Brandl, w: 0.031}
+    - {name: Stocker, w: 0.031}
+    - {name: Gassner, w: 0.031}
+    - {name: Leitgeb, w: 0.031}
+    - {name: Pirker, w: 0.031}
+    - {name: Jäger, w: 0.031}
+    - {name: Zauner, w: 0.031}
+    - {name: Wurm, w: 0.031}
+    - {name: Hofstätter, w: 0.031}
+    - {name: Stangl, w: 0.031}
+    - {name: Bichler, w: 0.031}
+    - {name: Grabner, w: 0.031}
+    - {name: Kaiser, w: 0.031}
+    - {name: Hahn, w: 0.031}
+    - {name: Lindner, w: 0.031}
+    - {name: Klein, w: 0.031}
+    - {name: Hofmeister, w: 0.031}
+    - {name: Ofner, w: 0.031}
+    - {name: Pölzl, w: 0.031}
+    - {name: Rauch, w: 0.031}
+    - {name: Schober, w: 0.031}
+    - {name: Eichinger, w: 0.031}
+    - {name: Sommer, w: 0.031}
+    - {name: Lorenz, w: 0.031}
+    - {name: Hirsch, w: 0.031}
+    - {name: Fellner, w: 0.031}
+    - {name: Pammer, w: 0.031}
+    - {name: Wiesinger, w: 0.031}
+    - {name: Kerschbaumer, w: 0.031}
+    - {name: Schwaiger, w: 0.031}
+    - {name: Fritz, w: 0.031}
+    - {name: Hager, w: 0.031}
+    - {name: Kranz, w: 0.031}
+    - {name: Reisinger, w: 0.031}
+    - {name: Zeilinger, w: 0.031}
+    - {name: Moritz, w: 0.031}
+    - {name: Neuhold, w: 0.031}
+    - {name: Url, w: 0.031}
+    - {name: Kern, w: 0.031}
+    - {name: Schauer, w: 0.031}
+    - {name: Weinberger, w: 0.031}
+    - {name: Pucher, w: 0.031}
+    - {name: Trummer, w: 0.031}
+    - {name: Gangl, w: 0.031}
+    - {name: Pototschnig, w: 0.031}
+    - {name: Kollmann, w: 0.031}
+    - {name: Stummer, w: 0.031}
+    - {name: Kleindienst, w: 0.031}
+    - {name: Weißensteiner, w: 0.031}
+    - {name: Schrott, w: 0.031}
+    - {name: Wieland, w: 0.031}
+    - {name: Buchner, w: 0.031}
+    - {name: Mühlbacher, w: 0.031}
+    - {name: Pranger, w: 0.031}
+    - {name: Kröpfl, w: 0.031}
+    - {name: Weinzettl, w: 0.031}
+    - {name: Haslinger, w: 0.031}
+    - {name: Huemer, w: 0.031}
+    - {name: Stöger, w: 0.031}
+    - {name: Gasser, w: 0.031}
+    - {name: Rieder, w: 0.031}
+    - {name: Doppler, w: 0.031}
+    - {name: Kastner, w: 0.031}
+    - {name: Zechner, w: 0.031}
+    - {name: Hödl, w: 0.031}
+    - {name: Wagenhofer, w: 0.031}
+    - {name: Gschwandtner, w: 0.031}
+    - {name: Pilz, w: 0.031}
+    - {name: Hölzlwimmer, w: 0.031}
+    - {name: Plank, w: 0.031}
+    - {name: Mader, w: 0.031}
+    - {name: Bruckner, w: 0.031}
+    - {name: Strobl, w: 0.031}
+    - {name: Kugler, w: 0.031}
+    - {name: Fröhlich, w: 0.031}
+    - {name: Dorfer, w: 0.031}
+    - {name: Zangerl, w: 0.031}
+    - {name: Raffl, w: 0.031}
+    - {name: Hechenberger, w: 0.031}
+    - {name: Mayrhofer, w: 0.031}
+    - {name: Neumayer, w: 0.031}
+    - {name: Pernkopf, w: 0.031}
+    - {name: Ploner, w: 0.031}
+    - {name: Schneeberger, w: 0.031}
+    - {name: Danner, w: 0.031}
+    - {name: Kalcher, w: 0.031}
+    - {name: Tschernutter, w: 0.031}
+    - {name: Feichtinger, w: 0.031}
+    - {name: Grill, w: 0.031}
+    - {name: Lugger, w: 0.031}
+    - {name: Ertl, w: 0.031}
+    - {name: Kreuzer, w: 0.031}
+    - {name: Stelzer, w: 0.031}
+    - {name: Sturm, w: 0.031}
+    - {name: Scheiber, w: 0.031}
+    - {name: Kuchler, w: 0.031}
+    - {name: Rausch, w: 0.031}
+  nicknames: {Johann: Hans, Johannes: Hannes, Josef: Sepp, Franz: Franzi, Alexander: Alex, Christian: Chris, Katharina: Kathi, Elisabeth: Lisi, Theresa: Resi, Magdalena: Leni, Maximilian: Max, Andreas: Andi, Stefanie: Steffi, Michael: Michi, Wolfgang: Wolfi, Florian: Flo, Barbara: Babsi, Gabriele: Gabi, Dominik: Domi, Sebastian: Basti}
+  display: '{first} {last}'
+# Shares = share of contacts from that diaspora/minority (official origin statistics, see SOURCES).
+# Cultures without a pack in this project (not listed as data): sh (Bosnian/Serbian/Croatian; non-EU ex-Yugoslavia incl. 2nd gen) 0.068, ro 0.016, hu 0.011, ar (Syria) 0.011, uk 0.010, pl 0.008, ru 0.005, fa/prs (Afghanistan) 0.005, sq (Kosovo) 0.004
+cultures:
+  - {culture: tr, share: 0.033}
+  - {culture: de, share: 0.03}
+  - {culture: it, share: 0.004}
+email:
+  domains:
+    - {domain: gmail.com, share: 0.4}
+    - {domain: gmx.at, share: 0.15}
+    - {domain: gmx.net, share: 0.05}
+    - {domain: hotmail.com, share: 0.06}
+    - {domain: outlook.com, share: 0.04}
+    - {domain: aon.at, share: 0.06}
+    - {domain: icloud.com, share: 0.07}
+    - {domain: chello.at, share: 0.03}
+    - {domain: a1.net, share: 0.03}
+    - {domain: yahoo.com, share: 0.03}
+    - {domain: web.de, share: 0.02}
+    - {domain: live.at, share: 0.02}
+  patterns: ['{first}.{last}', '{first}{last}', '{f}.{last}', '{first}.{last}{yy}', '{first}{yy}', '{f}{last}', '{last}.{first}', '{first}_{last}']
+services:
+  - {sender: Post AT, kind: courier, sender_type: alphanumeric}
+  - {sender: DPD, kind: courier, sender_type: alphanumeric}
+  - {sender: GLS, kind: courier, sender_type: alphanumeric}
+  - {sender: DHL, kind: courier, sender_type: alphanumeric}
+  - {sender: Erste Bank, kind: bank, sender_type: alphanumeric}
+  - {sender: Raiffeisen, kind: bank, sender_type: alphanumeric}
+  - {sender: BAWAG, kind: bank, sender_type: alphanumeric}
+  - {sender: BankAustria, kind: bank, sender_type: alphanumeric}
+  - {sender: A1, kind: telecom, sender_type: alphanumeric}
+  - {sender: Magenta, kind: telecom, sender_type: alphanumeric}
+  - {sender: Drei, kind: telecom, sender_type: alphanumeric}
+  - {sender: Google, kind: otp_service, sender_type: alphanumeric}
+  - {sender: PayPal, kind: otp_service, sender_type: alphanumeric}
+  - {sender: A-Trust, kind: government, sender_type: alphanumeric}
+  - {sender: +431..., kind: doctor, sender_type: number}
+  - {sender: +43316..., kind: doctor, sender_type: number}
+  - {sender: Apotheke, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: foodora, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Lieferando, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Uber, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: Bolt, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: Austrian, kind: airline, sender_type: alphanumeric}
+  - {sender: OEBB, kind: rail, sender_type: alphanumeric}
+  - {sender: willhaben, kind: retail, sender_type: alphanumeric}
+  - {sender: Amazon, kind: retail, sender_type: alphanumeric}
+  - {sender: BILLA, kind: retail, sender_type: alphanumeric}
+  - {sender: WienEnergie, kind: utility, sender_type: alphanumeric}
+holidays:
+  - {date: 01-01, name: Neujahr}
+  - {date: 01-06, name: Heilige Drei Könige}
+  - {rule: easter-2, name: Karfreitag, observance: true}
+  - {rule: easter+0, name: Ostersonntag}
+  - {rule: easter+1, name: Ostermontag}
+  - {date: 05-01, name: Staatsfeiertag}
+  - {rule: easter+39, name: Christi Himmelfahrt}
+  - {rule: easter+50, name: Pfingstmontag}
+  - {rule: easter+60, name: Fronleichnam}
+  - {date: 08-15, name: Mariä Himmelfahrt}
+  - {date: 10-26, name: Nationalfeiertag}
+  - {date: 11-01, name: Allerheiligen}
+  - {date: 12-08, name: Mariä Empfängnis}
+  - {date: 12-24, name: Heiliger Abend, observance: true}
+  - {date: 12-25, name: Christtag}
+  - {date: 12-26, name: Stefanitag}
+  - {date: 12-31, name: Silvester, observance: true}
+popular_apps:
+  - {package: com.whatsapp, name: WhatsApp, category: messaging}
+  - {package: org.telegram.messenger, name: Telegram, category: messaging}
+  - {package: com.google.android.apps.maps, name: Google Maps, category: transport}
+  - {package: com.ubercab, name: Uber, category: transport}
+  - {package: com.amazon.mShop.android.shopping, name: Amazon Shopping, category: shopping}
+  - {package: com.paypal.android.p2pmobile, name: PayPal, category: banking}
+  - {package: org.thoughtcrime.securesms, name: Signal, category: messaging}
+  - {package: at.erstebank.george, name: George, category: banking}
+  - {package: at.rsg.pfp, name: Mein ELBA, category: banking}
+  - {package: com.bawagpsk.bawagpsk, name: BAWAG, category: banking}
+  - {package: com.bankaustria.android.olb, name: Bank Austria MobileBanking, category: banking}
+  - {package: de.number26.android, name: N26, category: banking}
+  - {package: at.oebb.ts, name: ÖBB Tickets, category: transport}
+  - {package: at.wienerlinien.wienmobillab, name: WienMobil, category: transport}
+  - {package: taxi.android.client, name: FREENOW, category: transport}
+  - {package: at.willhaben, name: willhaben, category: shopping}
+  - {package: at.billa.service, name: BILLA, category: shopping}
+  - {package: at.joeclub.app.joecard, name: jö Bonus Club, category: shopping}
+  - {package: de.zalando.mobile, name: Zalando, category: shopping}
+  - {package: at.post.app, name: Österreichische Post, category: shopping}
+  - {package: at.orf.news, name: ORF.at News, category: news}
+  - {package: derstandard.at.istandardx, name: DER STANDARD, category: news}
+  - {package: at.krone, name: Krone, category: news}
+  - {package: at.mjam, name: foodora, category: food}
+  - {package: com.yopeso.lieferando, name: Lieferando, category: food}
+  - {package: at.gv.oe.app, name: Digitales Amt / ID Austria, category: government}
+  - {package: at.itsv.mobile.meinesvstatus, name: MeineSV, category: health}
+  - {package: at.mobilkom.android.meina1, name: Mein A1, category: telecom}
+  - {package: at.tmobile.android.myt, name: Mein Magenta, category: telecom}
+  - {package: de.wetteronline.wetterapp, name: WetterOnline, category: weather}

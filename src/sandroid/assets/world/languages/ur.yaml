@@ -1,0 +1,264 @@
+# Urdu language pack. Personal texts are mostly Roman Urdu (the default way people text
+# in Pakistan); entries tagged `script: Arab` are in Urdu (Nastaliq) script.
+# Pakistani service SMS are mostly English, telecom promos often Roman Urdu or Urdu script.
+# `emoji: true` marks threads/entries containing emoji.
+# Proposed (not yet in schema v1): `script` tag, service kinds `mobile_money`, `loan`,
+# placeholders `{balance}`, `{fee}`, list values in `call_names`. See SOURCES.md.
+pack: language
+schema: 1
+lang: ur
+name: اردو (Roman Urdu)
+threads:
+  family:
+    - {msgs: [[p, "Beta khana kha liya?"], [o, "Ji ammi kha liya"], [p, "Kya khaya"], [o, "Daal chawal bana liye thay"], [p, "Acha. Abbu ko call kar lena wo pooch rahe thay"]]}
+    - {msgs: [[p, "Kab tak aao ge"], [o, "Eid se 2 din pehle in sha Allah"], [p, "Ticket kara li?"], [o, "Ji kal kara li"]]}
+    - {emoji: true, msgs: [[p, "Happy birthday meri jaan 🎂 Allah lambi umar de"], [o, "Thank you ammi ❤️"], [p, "Shaam ko video call karna"]]}
+    - {msgs: [[o, "Pohanch gaya hun"], [p, "Shukar hai. Araam karo ab"]]}
+    - {script: Arab, msgs: [[p, "بیٹا دوائی لے لی؟"], [o, "جی امی لے لی"], [p, "ٹھنڈ میں باہر مت جانا"]]}
+    - {msgs: [[p, "Bhai abbu ka number band aa raha"], [o, "Charging pe hoga, main ne abhi baat ki"], [p, "Ok shukriya"]]}
+    - {msgs: [[p, "Baji ki mehndi ki date fix ho gayi"], [o, "Kab hai?"], [p, "{date}. Chuttiyan pehle se le lena"], [o, "Ji office mein bata dunga"]]}
+    - {emoji: true, msgs: [[p, "Kal wali pics bhejo"], [o, "Bhej di hain"], [p, "Bohat pyari ayi hain 😍"]]}
+    - {msgs: [[p, "Bijli ka bill jama karwa diya?"], [o, "Ji app se kar diya"], [p, "Jazak Allah"]]}
+    - {script: Arab, emoji: true, msgs: [[p, "عید مبارک 🌙"], [o, "آپ کو بھی خیر مبارک چاچو"]]}
+  partner:
+    - {msgs: [[p, "Kahan ho"], [o, "Raste mein hun, 15 min"], [p, "Aate hue doodh aur double roti le aana"], [o, "Theek hai"]]}
+    - {emoji: true, msgs: [[p, "Miss kar rahi hun 🥺"], [o, "Main bhi jaan ❤️"], [p, "Jaldi aa jao"]]}
+    - {msgs: [[o, "Aaj bahar khana khayen?"], [p, "Haan please aaj pakane ka mood nahi"], [o, "8 baje tayyar rehna"]]}
+    - {emoji: true, msgs: [[p, "Late ho jaunga meeting lambi ho gayi"], [o, "Hmm 😒"], [p, "Ice cream le aunga"], [o, "😂 acha theek hai"]]}
+    - {msgs: [[o, "Meri chabiyan dekhi?"], [p, "TV ke paas table pe hain"], [o, "Mil gayin shukriya"]]}
+    - {msgs: [[p, "Ammi Sunday ko aa rahi hain"], [o, "Acha main station se le aunga"]]}
+    - {msgs: [[p, "Ghar pohanch gaye?"], [o, "Haan abhi"], [p, "Ok gn"]]}
+    - {msgs: [[p, "Gas ka bill aya hai is dafa zyada"], [o, "Kitna?"], [p, "{amount}"], [o, "Kal jama kara deta hun"]]}
+  friend:
+    - {msgs: [[p, "Yaar kidhar hai"], [o, "Bas 5 min"], [p, "Tera 5 min matlab aadha ghanta"], [o, "Arey pohanch gaya bas"]]}
+    - {emoji: true, msgs: [[p, "Aaj match dekhne aa raha?"], [o, "Haan pakka"], [p, "Samosay le aana 😂"]]}
+    - {emoji: true, msgs: [[o, "Happy birthday yaar 🎉 treat kab hai"], [p, "Thanks bhai. Saturday ko"], [o, "Done"]]}
+    - {msgs: [[p, "Yaar notes bhej de kal walay"], [o, "Abhi bhejta hun"], [p, "Shukriya yaar"]]}
+    - {msgs: [[p, "Murree ka plan pakka?"], [o, "Haan bas gaari ka intezam karna hai"], [p, "Meri gaari le chalte hain"]]}
+    - {emoji: true, msgs: [[p, "Group mein dekha {first} ne kya bheja 😂😂"], [o, "Hahaha pagal hai wo"]]}
+    - {msgs: [[o, "Yaar 2000 bhej sakta hai? kal wapas kar dunga"], [p, "Bhej diye"], [o, "Thanks bhai"]]}
+    - {msgs: [[p, "Interview kaisa gaya"], [o, "Acha gaya, agle hafte batayenge"], [p, "Best of luck yaar"]]}
+    - {msgs: [[p, "Chai pe chalein?"], [o, "Haan 10 min mein neeche aata hun"]]}
+    - {script: Arab, msgs: [[p, "کل ملتے ہیں پھر"], [o, "ہاں پکا، شام 6 بجے"]]}
+  colleague:
+    - {msgs: [[p, "Sir aaj ki meeting 3 bajay shift ho gayi"], [o, "Ok noted"]]}
+    - {msgs: [[p, "Report bhej di?"], [o, "Ji email kar di 10 min pehle"], [p, "Thanks"]]}
+    - {msgs: [[o, "Aaj ghar se kaam kar raha hun, kuch urgent ho to call kar lena"], [p, "Ok sure"]]}
+    - {msgs: [[p, "Lunch pe chalein?"], [o, "Haan 1:30 pe, namaz ke baad"]]}
+    - {msgs: [[o, "Traffic mein phansa hun, 15 min late"], [p, "Koi masla nahi"]]}
+    - {msgs: [[p, "Kal client visit hai, formal aana"], [o, "Ji yaad hai"]]}
+    - {msgs: [[p, "Leave approve hui?"], [o, "Abhi tak nahi, manager ko reminder bheja hai"]]}
+    - {msgs: [[p, "Please presentation shaam tak share kar dein"], [o, "Ji 5 bajay tak bhej dunga"]]}
+  neighbor:
+    - {msgs: [[p, "Assalam o alaikum, aap ka parcel aya tha humne rakh liya"], [o, "Walaikum assalam, shukriya aunty, shaam ko le lunga"]]}
+    - {msgs: [[p, "Kal subah 10 se 2 bijli band rahegi, loadshedding schedule aya hai"], [o, "Acha shukriya batane ka"]]}
+    - {msgs: [[p, "Aap ki gaari gate ke aage khari hai, thori hata dein?"], [o, "Sorry abhi hatata hun"]]}
+    - {script: Arab, msgs: [[p, "السلام علیکم، کل محلے کی میٹنگ ہے مغرب کے بعد"], [o, "وعلیکم السلام، ٹھیک ہے آ جائیں گے"]]}
+    - {emoji: true, msgs: [[p, "Eid Mubarak 🌙"], [o, "Khair Mubarak, sheer khurma bhijwa rahe hain"]]}
+    - {msgs: [[p, "Paani ki motor kharab hai, plumber aa raha hai"], [o, "Acha theek hai"]]}
+    - {msgs: [[o, "Bhai sahab aap ke yahan gas aa rahi hai?"], [p, "Nahi subah se pressure bohat kam hai"]]}
+    - {msgs: [[p, "Doodh wala aaj nahi aya, aap ke paas extra hai?"], [o, "Haan aik packet hai, le jayen"]]}
+service_sms:
+  courier:
+    - "Dear Customer, your shipment {tracking} is out for delivery today. Please keep {amount} ready for COD. -{courier}"
+    - "Your order from {shop} has been dispatched. CN# {tracking}. Track on {courier} website."
+    - "{courier}: Delivery attempt unsuccessful for CN {tracking}. Rider will try again on {date}."
+    - "Your shipment {tracking} has been delivered at {time}. Thank you."
+    - "Aap ka parcel {tracking} aaj deliver hoga. Rider {first} aap se rabta karega."
+  bank:
+    - "Dear Customer, {amount} has been debited from your A/C ****{digits:4} on {date} at {time} for IBFT to {first} {last}. Avl Bal: {balance}. -{bank}"
+    - "Dear Customer, your A/C ****{digits:4} has been credited with {amount} on {date}. Avl Bal: {balance}."
+    - "Your OTP for online transaction of {amount} at {shop} is {digits:6}. Do not share with anyone. -{bank}"
+    - "Cash withdrawal of {amount} from ATM using card ****{digits:4} on {date}. Avl Bal: {balance}."
+    - "{bank} kabhi bhi aap se PIN, OTP ya password nahi poochta. Kisi ko na batayen."
+    - {text: "محترم صارف، آپ کے اکاؤنٹ ****{digits:4} میں {amount} جمع ہو گئے ہیں۔ -{bank}", script: Arab}
+  telecom:
+    - "Sirf {amount} mein 10GB internet aur 1000 mins hasil karein, 30 din ke liye. Dial *{digits:3}#"
+    - "Aap ka balance {balance} hai. Validity {date} tak."
+    - "Recharge successful. {amount} credited. Your balance is {balance}."
+    - "Aap ka internet bundle 80% istemal ho chuka hai. Mazeed MBs ke liye *{digits:3}# dial karein."
+    - "Advance balance {amount} aap ke account mein add kar diya gaya hai. Agle recharge par {fee} service charges ke sath kaat liya jayega."
+    - {text: "خوشخبری! صرف {amount} میں ہفتہ بھر انٹرنیٹ حاصل کریں۔ ڈائل کریں *{digits:3}#", script: Arab}
+  otp_service:
+    - "{digits:6} is your verification code. Do not share it with anyone."
+    - "<#> Your code is {digits:6} {code}"
+    - "Your OTP is {digits:4}. It is valid for 5 minutes."
+    - "Use {digits:6} to verify your mobile number."
+    - "Aap ka verification code {digits:6} hai. Ye code kisi ko na batayen."
+  doctor:
+    - "Your appointment is confirmed for {date} at {time}. Token # {digits:2}. Please arrive 15 min early."
+    - "Reminder: aap ka doctor ke sath appointment kal {time} bajay hai."
+    - "Your lab report is ready. View online with MR# {digits:7}."
+    - "Please come fasting for your test on {date}."
+    - {text: "آپ کی ڈاکٹر سے ملاقات {date} کو {time} بجے ہے۔", script: Arab}
+  pharmacy:
+    - "Your medicine order #{digits:7} is confirmed. Delivery by {date}. Total {amount}."
+    - "Your order is out for delivery. Rider {first} will contact you."
+    - "Reminder: aap ki monthly medicines ka waqt ho gaya hai. Abhi order karein."
+    - "Order {code} delivered. Shukriya."
+    - "Your prescription has been verified for order {code}."
+  delivery_food:
+    - "Your order from {shop} is on its way! Rider {first} will reach in {digits:2} mins."
+    - "Order #{digits:6} confirmed. Total {amount}. Cash on delivery."
+    - "Your order has been delivered. Enjoy your meal!"
+    - "Bhook lagi hai? {shop} par aaj 40% off. Abhi order karein!"
+    - "Your rider has arrived. Please collect your order."
+  ride_hailing:
+    - "Your captain {first} is arriving in a white car {code}. ETA 4 min."
+    - "Your captain has arrived at the pickup location."
+    - "Ride completed. Fare {amount}. Shukriya!"
+    - "Your ride PIN is {digits:4}. Share with captain at start."
+    - "Your ride has been cancelled. Please request again."
+  airline:
+    - "Online check-in is now open for your flight to {city} on {date}. PNR {code}."
+    - "Your flight to {city} is scheduled at {time}. Please report 3 hours before for international flights."
+    - "Flight delayed: new departure time {time}. We regret the inconvenience."
+    - "Booking confirmed. PNR {code}. Departure {date} {time}."
+    - "Boarding gate {digits:2} for flight to {city}. Gate closes at {time}."
+  rail:
+    - "Your seat is reserved. PNR {digits:8}, Train {digits:3} Up, {date} {time}, Coach {digits:1} Seat {digits:2}."
+    - "Train {digits:3} Dn is running late by {digits:2} min."
+    - "Your ticket PNR {digits:8} has been cancelled. Refund {amount}."
+    - "Reminder: your train to {city} departs tomorrow at {time}."
+    - "Booking confirmed. Ticket no {code}. Total {amount}."
+  government:
+    - "Your CNIC application {code} is ready for collection from the {city} centre."
+    - "Your passport application tracking ID {digits:12} is under process."
+    - "Aap ki SIMs ki tadaad janne ke liye apna CNIC number 668 par bhejein."
+    - "Your vehicle token tax is due. Pay online before {date} to avoid penalty."
+    - "Your tax return for tax year 2026 has been received. Ref {code}."
+  retail:
+    - "Thank you for shopping at {shop}! Bill {amount}. Points earned {digits:3}."
+    - "Mega Sale! Flat 50% off at {shop}. Sirf {date} tak. T&C apply"
+    - "Your order {code} has been delivered."
+    - "Your refund of {amount} for order {code} has been processed."
+    - "Eid collection a gayi hai! {shop} par visit karein."
+  utility:
+    - "Your electricity bill ref {digits:14} amount {amount} due date {date}. Pay on time to avoid surcharge."
+    - "Shutdown notice: {date} ko {time} se bijli band rahegi maintenance ki wajah se."
+    - "Your gas bill of {amount} is due on {date}. Consumer # {digits:10}."
+    - "Payment of {amount} received against ref {digits:14}. Thank you."
+    - "Paani ki supply kal subah {time} tak band rahegi."
+  mobile_money:
+    - "Trx ID {digits:11}. You have received {amount} from {first} {last} on {date} at {time}. Your new balance is {balance}."
+    - "Trx ID {digits:11}. You have sent {amount} to {first} {last} on {date} at {time}. Fee {fee}. Your new balance is {balance}."
+    - "{amount} has been paid to {shop}. Trx ID {digits:11}. Balance {balance}."
+    - "Mobile load of {amount} successful. Trx ID {digits:11}."
+    - "Aap ne {first} {last} ko {amount} bheje hain. Trx ID {digits:11}. Naya balance {balance}."
+  loan:
+    - "Dear Customer, your loan installment of {amount} is due on {date}. Please pay on time."
+    - "Your loan of {amount} has been disbursed to your wallet."
+    - "Aap ki qist {amount} {date} tak ada karni hai. Waqt par ada karein."
+    - "Your loan is overdue. Pay {amount} today to avoid late charges."
+    - "Thank you for repayment of {amount}. Remaining balance {balance}."
+calendar:
+  - {title: "Dentist", minutes: 45, kind: appointment}
+  - {title: "Doctor appointment", minutes: 30, kind: appointment}
+  - {title: "Blood test", minutes: 30, kind: appointment}
+  - {title: "Bank jana", minutes: 60, kind: appointment}
+  - {title: "NADRA office", minutes: 120, kind: appointment}
+  - {title: "Passport office", minutes: 120, kind: appointment}
+  - {title: "PTM school", minutes: 60, kind: appointment}
+  - {title: "Gaari service", minutes: 120, kind: appointment}
+  - {title: "Daily standup", minutes: 15, kind: work}
+  - {title: "Client call", minutes: 60, kind: work}
+  - {title: "Team meeting", minutes: 60, kind: work}
+  - {title: "Appraisal meeting", minutes: 45, kind: work}
+  - {title: "Interview - {first} {last}", minutes: 45, kind: work}
+  - {title: "Project deadline", all_day: true, kind: work}
+  - {title: "Training", minutes: 180, kind: work}
+  - {title: "Dinner with {first}", minutes: 120, kind: social}
+  - {title: "{first} ki shadi", all_day: true, kind: social}
+  - {title: "Mehndi", minutes: 240, kind: social}
+  - {title: "Baraat", minutes: 240, kind: social}
+  - {title: "Walima", minutes: 180, kind: social}
+  - {title: "Iftar at {first}'s", minutes: 120, kind: social}
+  - {title: "Jumma", minutes: 60, kind: social}
+  - {title: "Dawat", minutes: 180, kind: social}
+  - {title: "Cricket", minutes: 180, kind: sport}
+  - {title: "Gym", minutes: 60, kind: sport}
+  - {title: "Morning walk", minutes: 45, kind: sport}
+  - {title: "Futsal", minutes: 60, kind: sport}
+  - {title: "Badminton", minutes: 60, kind: sport}
+  - {title: "Flight to {city}", minutes: 120, kind: travel}
+  - {title: "Train to {city}", minutes: 480, kind: travel}
+  - {title: "{city} trip", all_day: true, kind: travel}
+  - {title: "Gaon jana", all_day: true, kind: travel}
+  - {title: "Bus to {city}", minutes: 300, kind: travel}
+  - {title: "{first} ki salgirah", all_day: true, kind: birthday}
+  - {title: "{first} bday", all_day: true, kind: birthday}
+  - {title: "Birthday {first}", all_day: true, kind: birthday}
+  - {title: "Ammi abbu anniversary", all_day: true, kind: birthday}
+  - {title: "سالگرہ {first}", all_day: true, kind: birthday, script: Arab}
+  - {title: "Kiraya dena", all_day: true, kind: reminder}
+  - {title: "Bijli ka bill", all_day: true, kind: reminder}
+  - {title: "Gas bill", all_day: true, kind: reminder}
+  - {title: "School fees", all_day: true, kind: reminder}
+  - {title: "Load karwana", minutes: 15, kind: reminder}
+  - {title: "Committee ki qist", all_day: true, kind: reminder}
+  - {title: "Zakat hisaab", all_day: true, kind: reminder}
+files:
+  - {name: "Invoice_{digits:8}.pdf", kind: invoice}
+  - {name: "Electricity_Bill_{date}.pdf", kind: invoice}
+  - {name: "Gas_Bill_{date}.pdf", kind: invoice}
+  - {name: "Receipt_{shop}.pdf", kind: invoice}
+  - {name: "Rent_Agreement_{last}.pdf", kind: contract}
+  - {name: "Offer_Letter_{last}.pdf", kind: contract}
+  - {name: "Appointment_Letter.pdf", kind: contract}
+  - {name: "Salary_Slip_{date}.pdf", kind: payslip}
+  - {name: "Payslip_{date}.pdf", kind: payslip}
+  - {name: "Tax_Certificate_2026.pdf", kind: tax}
+  - {name: "Bank_Statement_{date}.pdf", kind: statement}
+  - {name: "Account_Statement_{digits:4}.pdf", kind: statement}
+  - {name: "CNIC_front.jpg", kind: id_document}
+  - {name: "CNIC_back.jpg", kind: id_document}
+  - {name: "Passport_{first}.pdf", kind: id_document}
+  - {name: "Driving_License.jpg", kind: id_document}
+  - {name: "CV_{first}_{last}.pdf", kind: cv}
+  - {name: "{first}_Resume_updated.docx", kind: cv}
+  - {name: "E-Ticket_{code}.pdf", kind: ticket}
+  - {name: "Boarding_Pass_{code}.pdf", kind: ticket}
+  - {name: "Health_Card.pdf", kind: insurance}
+  - {name: "Policy_{digits:8}.pdf", kind: insurance}
+  - {name: "Lab_Report_{date}.pdf", kind: medical}
+  - {name: "Prescription.jpg", kind: medical}
+  - {name: "Fee_Challan_{date}.pdf", kind: invoice}
+  - {name: "Matric_Certificate.pdf", kind: education}
+  - {name: "Degree_Transcript.pdf", kind: education}
+  - {name: "Shadi_card_{first}.pdf", kind: personal}
+  - {name: "Project_Report_final.docx", kind: work}
+  - {name: "IMG-{date}-WA{digits:4}.jpg", kind: image}
+  - {name: "Screenshot_{date}.png", kind: image}
+notes:
+  - "Sabzi: aloo, pyaz, tamatar, dhaniya, hari mirch"
+  - "Doodh, double roti, anday"
+  - "Wifi password {code}"
+  - "{first} ko {amount} dene hain"
+  - "{first} se {amount} lene hain"
+  - "Committee: {amount} har mahine, meri bari 7th"
+  - "Kiraya {amount} - 5 tareekh tak"
+  - "Electrician ka number"
+  - "PNR {code}"
+  - "Maasi: is mahine 3 chuttiyan"
+  - "Dhobi: 10 kapre diye"
+  - "IBAN {code}"
+  - "Gift for {first} - watch?"
+  - "Locker code {digits:4}"
+  - "Packing: charger, kapre, dawai, CNIC"
+  - "Doctor ne kaha subah shaam 1-1 goli"
+  - "Kal karna: bank, load, courier"
+  - {text: "سودا: آٹا، چاول، دال، گھی، چینی", script: Arab}
+  - "Tracking {tracking}"
+  - "Movies list from {first}"
+call_names:
+  mom: [Ammi, Ammi Jaan, Amma, Mama, Mummy, امی]
+  dad: [Abbu, Abbu Jaan, Abba, Papa, Baba, ابو]
+  partner: [Jaan, "Hubby ❤️", Wifey, Begum, Baby]
+  grandma: [Dadi, Nani, Dadi Jaan, Nano]
+  grandpa: [Dada, Nana, Dada Abbu, Nana Abbu]
+  sister: [Baji, Api, Aapi, "{first} Baji", Gudiya]
+  brother: [Bhai, Bhai Jaan, "{first} Bhai", Chotu]
+  aunt: ["{first} Phuppo", "{first} Khala", "{first} Chachi", "{first} Mumani"]
+  uncle: ["{first} Chachu", "{first} Mamu", "{first} Khalu", "{first} Taya"]
+  son: ["{first}"]
+  daughter: ["{first}"]

@@ -1,0 +1,265 @@
+# Nigerian Pidgin language pack. Personal texts are Naija Pidgin mixed with English and
+# a few common Yoruba/Igbo particles (jare, biko, sha, o). Nigerian service SMS (bank
+# alerts, OTPs, telecom, delivery) are written in English in reality, so service_sms
+# here is English in Nigerian formats, with Pidgin only where senders actually use it
+# (some telecom/retail promos, rider messages).
+# `emoji: true` marks threads/entries containing emoji.
+# Proposed (not yet in schema v1): service kinds `mobile_money`, `loan`,
+# placeholders `{balance}`, `{fee}`, list values in `call_names`. See SOURCES.md.
+pack: language
+schema: 1
+lang: pcm
+name: Naijá (Nigerian Pidgin)
+threads:
+  family:
+    - {msgs: [[p, "Good morning my pikin. You don chop?"], [o, "Morning mummy. I don chop"], [p, "Wetin you chop"], [o, "Bread and tea"], [p, "Eat better food o. Call your daddy, he dey ask of you"]]}
+    - {msgs: [[p, "You go come house for Christmas abi?"], [o, "Yes ma, I go come {date}"], [p, "You don book bus?"], [o, "I go book am this week"]]}
+    - {emoji: true, msgs: [[p, "Happy birthday my dear 🎂 God go continue to bless you"], [o, "Amen. Thank you mummy ❤️"], [p, "Call me this evening"]]}
+    - {msgs: [[o, "I don reach"], [p, "Thank God. Go rest"]]}
+    - {msgs: [[p, "Abeg you don send the money for your brother school fees?"], [o, "Yes ma I send am this morning"], [p, "Ok I see the alert. God bless you"]]}
+    - {emoji: true, msgs: [[p, "Send me the pictures from yesterday"], [o, "I don send am"], [p, "E fine well well 😍"]]}
+    - {msgs: [[p, "Daddy say make you call am when you free"], [o, "Ok I go call am for evening"]]}
+    - {msgs: [[p, "NEPA take light since morning, generator no get fuel"], [o, "Ehya. I go send money make una buy fuel"], [p, "Thank you my son"]]}
+    - {emoji: true, msgs: [[p, "Una happy new month 🙏"], [o, "Thank you aunty, same to you"]]}
+  partner:
+    - {msgs: [[p, "Where you dey"], [o, "I dey road, 20 mins"], [p, "Abeg buy bread and egg for road"], [o, "No wahala"]]}
+    - {emoji: true, msgs: [[p, "I miss you 🥺"], [o, "I miss you pass baby ❤️"], [p, "Come home quick"]]}
+    - {msgs: [[o, "Make we go chop outside today?"], [p, "Yes o, I no fit cook today"], [o, "Be ready by 7"]]}
+    - {emoji: true, msgs: [[p, "Sorry I go late, this meeting no wan end"], [o, "Hmm 😒"], [p, "I go buy suya for you"], [o, "😂 ok I don forgive you"]]}
+    - {msgs: [[p, "You don buy light?"], [o, "Yes I buy token this morning"], [p, "Thank you dear"]]}
+    - {msgs: [[o, "You see my car key?"], [p, "E dey for table near TV"], [o, "I don see am thanks"]]}
+    - {msgs: [[p, "You don reach house?"], [o, "Yes just now"], [p, "Ok goodnight"]]}
+    - {msgs: [[p, "Abeg send me 5k for data and transport"], [o, "I don send am"], [p, "Thank you love"]]}
+  friend:
+    - {msgs: [[p, "Guy how far"], [o, "I dey o. You nko?"], [p, "I dey kampe. Wetin be the plan for Saturday?"], [o, "Make we link up for {place} by 4"]]}
+    - {emoji: true, msgs: [[p, "Where you dey?"], [o, "5 mins"], [p, "Your 5 mins na 1 hour 😂"], [o, "I don reach, I dey outside"]]}
+    - {emoji: true, msgs: [[o, "HBD my guy 🎉🎂 when we dey chop the money"], [p, "Thank you bro. Saturday"], [o, "Sharp"]]}
+    - {msgs: [[p, "Abeg send me yesterday note"], [o, "Hold on"], [p, "Thank you jare"]]}
+    - {emoji: true, msgs: [[p, "You see wetin {first} post for group? 😂😂"], [o, "Omo that guy no well"]]}
+    - {msgs: [[o, "Bros abeg borrow me 10k, I go return am Friday"], [p, "I don send am"], [o, "God bless you"]]}
+    - {msgs: [[p, "How the interview go"], [o, "E go well sha, dem say dem go call next week"], [p, "E go be well"]]}
+    - {emoji: true, msgs: [[p, "You dey watch the match tonight?"], [o, "Sure, for the viewing centre"], [p, "Oya I go meet you there ⚽"]]}
+    - {msgs: [[p, "Wetin dey happen for your side"], [o, "Nothing much, just work work"], [p, "Make we hang out this weekend"]]}
+  colleague:
+    - {msgs: [[p, "Good morning. Please the 10am meeting don shift to 2pm"], [o, "Ok noted, thank you"]]}
+    - {msgs: [[p, "You don send the report?"], [o, "Yes I send am to your email this morning"], [p, "Thank you"]]}
+    - {msgs: [[o, "I dey work from home today, call me if anything urgent"], [p, "Ok no wahala"]]}
+    - {msgs: [[p, "Lunch?"], [o, "Yes 1pm, make we go the buka"]]}
+    - {msgs: [[o, "Traffic hold me for Third Mainland, I go late 30 mins"], [p, "No wahala, we go start"]]}
+    - {msgs: [[p, "Tomorrow client dey come, dress corporate o"], [o, "I remember"]]}
+    - {msgs: [[p, "Good afternoon. Please kindly send the presentation before close of work"], [o, "Ok I will send it by 4pm"]]}
+    - {msgs: [[p, "Dem don approve your leave?"], [o, "Not yet, I don remind oga"]]}
+  neighbor:
+    - {msgs: [[p, "Good evening. Delivery man bring your package, e dey with me"], [o, "Thank you ma, I go come collect am"]]}
+    - {msgs: [[p, "Landlord say make everybody pay for the security levy this month, {amount}"], [o, "Ok I go pay tomorrow"]]}
+    - {msgs: [[p, "Abeg your car block the gate, you fit move am?"], [o, "Sorry, I dey come now"]]}
+    - {msgs: [[p, "Una get light for your side?"], [o, "No o since morning"], [p, "Na the whole street then"]]}
+    - {emoji: true, msgs: [[p, "Merry Christmas neighbour 🎄"], [o, "Merry Christmas to you too. I go send rice come"]]}
+    - {msgs: [[p, "Water no dey run, the pump spoil"], [o, "Hmm. Make we contribute fix am"]]}
+    - {msgs: [[o, "Abeg you see my dog? E be brown"], [p, "I see am near the junction this morning"]]}
+    - {msgs: [[p, "Environmental sanitation na Saturday, 7 to 10"], [o, "Ok thanks for the info"]]}
+service_sms:
+  courier:
+    - "Your shipment {tracking} is out for delivery today. Please keep your phone on. -{courier}"
+    - "Your order from {shop} has been shipped. Tracking ID: {tracking}"
+    - "{courier}: We attempted delivery of {tracking} but could not reach you. We will try again on {date}."
+    - "Your package {tracking} has been delivered. Thank you."
+    - "Hello, na {first} be this, your dispatch rider. I dey come with your package {tracking}."
+  bank:
+    - "Acct: {digits:3}XXXX{digits:3}\nAmt: {amount} DR\nDesc: POS/{shop}\nDate: {date} {time}\nAvail Bal: {balance}"
+    - "Acct: {digits:3}XXXX{digits:3}\nAmt: {amount} CR\nDesc: TRF FROM {first} {last}\nDate: {date}\nAvail Bal: {balance}"
+    - "Debit\nAmt: {amount}\nAcc: {digits:3}**{digits:3}\nDesc: NIP TRF TO {first} {last}\nTime: {date} {time}\nAvail Bal: {balance}"
+    - "Your OTP for the transaction is {digits:6}. It expires in 5 minutes. Do not disclose your OTP to anyone. -{bank}"
+    - "{bank} will NEVER ask for your PIN, OTP or BVN. Do not share them with anyone."
+    - "Txn: Credit\nAc: {digits:2}XXX{digits:3}\nAmt: {amount}\nDes: Salary\nDate: {date}\nBal: {balance}"
+  telecom:
+    - "Recharge successful! You have recharged {amount}. Your new balance is {balance}."
+    - "You have successfully subscribed to 10GB monthly plan. Expires {date}. Dial *{digits:3}# to check balance."
+    - "Your data plan don almost finish. Dial *{digits:3}# to buy more data."
+    - "You have borrowed {amount} airtime. {fee} service fee will be deducted on your next recharge."
+    - "You have received {amount} airtime from {digits:11}."
+    - "Enjoy 2X data on every recharge this weekend! Dial *{digits:3}# now. T&C apply."
+  otp_service:
+    - "{digits:6} is your verification code. Do not share this code with anyone."
+    - "<#> Your OTP is {digits:6}. {code}"
+    - "Your one-time password is {digits:4}. Valid for 10 minutes."
+    - "Use {digits:6} to verify your phone number."
+    - "Your login code is {digits:6}. If you did not request this, ignore this message."
+  doctor:
+    - "Reminder: Your hospital appointment is on {date} at {time}. Please come with your hospital card."
+    - "Your appointment has been confirmed for {date} at {time}."
+    - "Your test results are ready. Please visit the clinic."
+    - "Please come fasting for your test on {date}."
+    - "Your appointment for {date} has been rescheduled. Please call to confirm a new time."
+  pharmacy:
+    - "Your order #{digits:7} is confirmed. Delivery on {date}. Total {amount}."
+    - "Your medication is out for delivery."
+    - "Reminder: it's time to refill your monthly medication."
+    - "Your prescription for order {code} is ready for pickup."
+    - "Order {code} delivered. Thank you."
+  delivery_food:
+    - "Your order from {shop} is on the way! Rider {first} will arrive in {digits:2} mins."
+    - "Order #{digits:6} confirmed. Total {amount}."
+    - "Your order has been delivered. Enjoy!"
+    - "Hungry? Get 30% off at {shop} today only."
+    - "Rider don reach your gate. Abeg come collect your food."
+  ride_hailing:
+    - "Your driver {first} is arriving in a silver car {code}. ETA 5 min."
+    - "Your driver has arrived at the pickup location."
+    - "Trip completed. Fare: {amount}. Thank you for riding!"
+    - "Your ride PIN is {digits:4}. Share with the driver at pickup."
+    - "Your bike has been booked. Rider {first} is on the way."
+  airline:
+    - "Online check-in is now open for your flight to {city} on {date}. Booking ref {code}."
+    - "Your flight to {city} is now boarding at gate {digits:1}."
+    - "We regret to inform you that your flight to {city} has been delayed. New departure time {time}."
+    - "Booking confirmed. Ref {code}. Departure {date} {time}."
+    - "Please arrive at the airport at least 2 hours before departure."
+  rail:
+    - "Your train ticket is confirmed. Ref {code}. {city} departure {date} {time}. Coach {digits:1} Seat {digits:2}."
+    - "Train to {city} is delayed by approx {digits:2} minutes."
+    - "Reminder: your train to {city} departs tomorrow at {time}."
+    - "Your bus ticket to {city} on {date} is confirmed. Seat {digits:2}. Report 30 mins before departure."
+    - "Booking {code} cancelled. Refund of {amount} is being processed."
+  government:
+    - "Your NIN verification code is {digits:6}. Do not share."
+    - "Your application {code} has been received and is being processed."
+    - "Your document is ready for collection at the {city} office."
+    - "Your driver's licence is ready for collection. Ref {code}."
+    - "Reminder: your vehicle papers expire on {date}. Renew to avoid penalty."
+  retail:
+    - "Thank you for shopping at {shop}! You earned {digits:3} points."
+    - "MEGA SALE! Up to 50% off at {shop} till {date}."
+    - "Your order {code} has been shipped."
+    - "Your refund of {amount} for order {code} has been processed."
+    - "Black Friday don land! Shop now at {shop}."
+  utility:
+    - "Token: {digits:4}-{digits:4}-{digits:4}-{digits:4}-{digits:4}\nUnits: {digits:2}.{digits:1}kWh\nAmt: {amount}\nMeter: {digits:11}"
+    - "Dear customer, your electricity bill of {amount} is due on {date}. Account {digits:10}."
+    - "Planned outage: power supply will be interrupted on {date} from {time} for maintenance."
+    - "Payment of {amount} received. Ref {code}. Thank you."
+    - "Your prepaid meter purchase of {amount} was successful. Ref {code}."
+  mobile_money:
+    - "Transfer of {amount} to {first} {last} was successful. Ref: {code}. Bal: {balance}"
+    - "You have received {amount} from {first} {last}. Ref: {code}. Wallet balance: {balance}"
+    - "Payment of {amount} to {shop} successful. Fee: {fee}. Bal: {balance}"
+    - "Airtime purchase of {amount} successful."
+    - "Your wallet has been credited with {amount} via bank transfer. Bal: {balance}"
+  loan:
+    - "Your loan repayment of {amount} is due on {date}. Please fund your account to avoid late fees."
+    - "Congratulations! Your loan of {amount} has been disbursed to your account."
+    - "Your loan is overdue. Kindly repay {amount} today to avoid penalty charges."
+    - "Thank you for your repayment of {amount}. Outstanding balance: {balance}."
+    - "You qualify for a loan of up to {amount}. Dial *{digits:3}# to apply."
+calendar:
+  - {title: "Dentist", minutes: 45, kind: appointment}
+  - {title: "Hospital appointment", minutes: 120, kind: appointment}
+  - {title: "Blood test", minutes: 30, kind: appointment}
+  - {title: "Bank", minutes: 120, kind: appointment}
+  - {title: "Passport office", minutes: 240, kind: appointment}
+  - {title: "NIN enrolment", minutes: 240, kind: appointment}
+  - {title: "PTA meeting", minutes: 120, kind: appointment}
+  - {title: "Mechanic", minutes: 180, kind: appointment}
+  - {title: "Barbing", minutes: 30, kind: appointment}
+  - {title: "Make hair", minutes: 240, kind: appointment}
+  - {title: "Team meeting", minutes: 60, kind: work}
+  - {title: "Client meeting", minutes: 60, kind: work}
+  - {title: "Daily standup", minutes: 15, kind: work}
+  - {title: "Interview - {first} {last}", minutes: 45, kind: work}
+  - {title: "Report deadline", all_day: true, kind: work}
+  - {title: "Training", minutes: 180, kind: work}
+  - {title: "Dinner with {first}", minutes: 120, kind: social}
+  - {title: "{first} wedding", all_day: true, kind: social}
+  - {title: "Introduction ceremony", all_day: true, kind: social}
+  - {title: "Owambe", minutes: 300, kind: social}
+  - {title: "Church service", minutes: 180, kind: social}
+  - {title: "Vigil", minutes: 360, kind: social}
+  - {title: "Jumat", minutes: 60, kind: social}
+  - {title: "Thanksgiving service", minutes: 180, kind: social}
+  - {title: "Football", minutes: 90, kind: sport}
+  - {title: "Gym", minutes: 60, kind: sport}
+  - {title: "Jogging", minutes: 45, kind: sport}
+  - {title: "Match viewing", minutes: 120, kind: sport}
+  - {title: "Flight to {city}", minutes: 60, kind: travel}
+  - {title: "Travel to {city}", all_day: true, kind: travel}
+  - {title: "Go village", all_day: true, kind: travel}
+  - {title: "Bus to {city}", minutes: 480, kind: travel}
+  - {title: "Airport pick up {first}", minutes: 120, kind: travel}
+  - {title: "{first} birthday", all_day: true, kind: birthday}
+  - {title: "{first} bday party", minutes: 240, kind: birthday}
+  - {title: "Mummy birthday", all_day: true, kind: birthday}
+  - {title: "Wedding anniversary", all_day: true, kind: birthday}
+  - {title: "Pay rent", all_day: true, kind: reminder}
+  - {title: "Buy light", minutes: 15, kind: reminder}
+  - {title: "School fees", all_day: true, kind: reminder}
+  - {title: "Ajo contribution", all_day: true, kind: reminder}
+  - {title: "Loan repayment", all_day: true, kind: reminder}
+  - {title: "Send money home", minutes: 15, kind: reminder}
+  - {title: "Renew vehicle papers", all_day: true, kind: reminder}
+  - {title: "Buy data", minutes: 15, kind: reminder}
+files:
+  - {name: "Invoice_{digits:8}.pdf", kind: invoice}
+  - {name: "Receipt_{shop}_{date}.pdf", kind: invoice}
+  - {name: "Transaction_Receipt_{date}.pdf", kind: invoice}
+  - {name: "Tenancy_Agreement_{last}.pdf", kind: contract}
+  - {name: "Employment_Letter_{last}.pdf", kind: contract}
+  - {name: "Offer_Letter.pdf", kind: contract}
+  - {name: "Payslip_{date}.pdf", kind: payslip}
+  - {name: "Tax_Clearance_Certificate.pdf", kind: tax}
+  - {name: "Account_Statement_{date}.pdf", kind: statement}
+  - {name: "Bank_Statement_6months.pdf", kind: statement}
+  - {name: "NIN_Slip.pdf", kind: id_document}
+  - {name: "National_ID_{first}.jpg", kind: id_document}
+  - {name: "International_Passport.pdf", kind: id_document}
+  - {name: "Drivers_Licence.jpg", kind: id_document}
+  - {name: "Voters_Card.jpg", kind: id_document}
+  - {name: "Birth_Certificate.pdf", kind: id_document}
+  - {name: "CV_{first}_{last}.pdf", kind: cv}
+  - {name: "{first}_CV_updated.docx", kind: cv}
+  - {name: "E-Ticket_{code}.pdf", kind: ticket}
+  - {name: "Boarding_Pass_{code}.pdf", kind: ticket}
+  - {name: "HMO_Card.jpg", kind: insurance}
+  - {name: "Insurance_Certificate_{digits:8}.pdf", kind: insurance}
+  - {name: "Lab_Result_{date}.pdf", kind: medical}
+  - {name: "Prescription.jpg", kind: medical}
+  - {name: "School_Fees_Receipt.pdf", kind: invoice}
+  - {name: "WAEC_Result.pdf", kind: education}
+  - {name: "Degree_Certificate.pdf", kind: education}
+  - {name: "NYSC_Certificate.pdf", kind: education}
+  - {name: "Wedding_IV_{first}.pdf", kind: personal}
+  - {name: "Monthly_Report_final.docx", kind: work}
+  - {name: "IMG-{date}-WA{digits:4}.jpg", kind: image}
+  - {name: "Screenshot_{date}.png", kind: image}
+notes:
+  - "Market: rice, beans, tomatoes, pepper, onions, palm oil, stock cubes"
+  - "Wifi password {code}"
+  - "I owe {first} {amount}"
+  - "{first} owe me {amount}"
+  - "Rent {amount} - due Jan"
+  - "Acct no {digits:10}"
+  - "Booking ref {code}"
+  - "Ajo: my turn na March"
+  - "Carry: charger, ID card, umbrella, power bank"
+  - "Gift for {first} - perfume?"
+  - "Drugs: 2 times daily after food"
+  - "Tomorrow: bank, buy light, send package"
+  - "Tracking {tracking}"
+  - "Movies to watch from {first}"
+  - "Electrician number"
+  - "Meter no {digits:11}"
+  - "Fuel generator Sunday"
+  - "Jollof: rice, tomato paste, pepper, onion, curry, thyme"
+  - "Salary 25th"
+  - "Light token {digits:4}-{digits:4}-{digits:4}-{digits:4}-{digits:4}"
+call_names:
+  mom: [Mummy, Mama, Mum, "Mummy ❤️", Mommy]
+  dad: [Daddy, Papa, Dad, Pops, "My Daddy"]
+  partner: [Baby, "My Love ❤️", Hubby, Wifey, Bae, Dearest]
+  grandma: [Grandma, Mama Nla, Nne Ochie]
+  grandpa: [Grandpa, Baba Agba, Nna Ochie]
+  sister: ["Sis {first}", "Aunty {first}", "Big Sis"]
+  brother: ["Bro {first}", "Brother {first}", "Big Bro"]
+  aunt: ["Aunty {first}"]
+  uncle: ["Uncle {first}"]
+  son: ["{first}"]
+  daughter: ["{first}"]

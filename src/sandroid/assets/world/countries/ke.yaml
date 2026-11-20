@@ -1,0 +1,981 @@
+# Kenya country pack (schema v1). Sources: ke.SOURCES.md (S1..Sn).
+# Context: Kenya is a key market in research on predatory digital-lending apps that
+# harvest SMS (M-PESA confirmations), contacts and call logs. Sender IDs, mobile-money
+# and lender entries below are therefore modelled with extra care.
+pack: country
+schema: 1
+country: ke
+name: Kenya
+# Locally written SMS/chat text is heavily code-switched English/Swahili ("Swanglish")
+# with Sheng slang among under-40s and urban users. `sw` here includes Sheng.
+# Bank/M-PESA/government service SMS are almost always English.
+languages: {en: 0.5, sw: 0.5}
+timezones: [Africa/Nairobi]
+# People mostly write d/M/yy or dd/MM/yyyy; M-PESA confirmations use "on 12/3/26 at 4:15 PM".
+date_format: "dd/MM/yyyy"
+time_format: "h:mm a"     # 12-hour clock dominates in SMS ("4:15 PM", "saa nne" in Swahili time)
+currency: {code: KES, symbol: "KSh", format: "KSh 1,250.00"}   # M-PESA style: "Ksh1,250.00"
+phone:
+  country_code: "254"
+  trunk_prefix: "0"
+  national_format_examples: ["0712 345678", "0733 456789", "0110 123456", "020 2345678"]
+  mobile:
+    # NSN is always 9 digits (S1, S2). Entries are listed at 3-digit NDC granularity so that
+    # uniform sampling over the list approximates subscription shares (S5): Safaricom 58,
+    # Airtel 28, Equitel 2, Telkom 1 entries -> ~65 % / 31 % / 2 % / 1 %.
+    # Small allocations deliberately left out of `realistic` (real but tiny): 744 Homeland
+    # Media, 747 Jamii Telecoms, 749 IEBC KIEMS kits, 760 Mobile Pay, 761 Eferio, 120 Jambo,
+    # 124 Infura, 126 Hidiga, 128 Webtribe, 130 NRG Media, 100-108 Airtel (new, low fill),
+    # 116-119/140-146/180-182 Safaricom (new, low fill), 770-779 Telkom except one.
+    realistic:
+      # Safaricom: 58 prefixes
+      - {prefix: "700", length: 9, operator: Safaricom}
+      - {prefix: "701", length: 9, operator: Safaricom}
+      - {prefix: "702", length: 9, operator: Safaricom}
+      - {prefix: "703", length: 9, operator: Safaricom}
+      - {prefix: "704", length: 9, operator: Safaricom}
+      - {prefix: "705", length: 9, operator: Safaricom}
+      - {prefix: "706", length: 9, operator: Safaricom}
+      - {prefix: "707", length: 9, operator: Safaricom}
+      - {prefix: "708", length: 9, operator: Safaricom}
+      - {prefix: "709", length: 9, operator: Safaricom}
+      - {prefix: "710", length: 9, operator: Safaricom}
+      - {prefix: "711", length: 9, operator: Safaricom}
+      - {prefix: "712", length: 9, operator: Safaricom}
+      - {prefix: "713", length: 9, operator: Safaricom}
+      - {prefix: "714", length: 9, operator: Safaricom}
+      - {prefix: "715", length: 9, operator: Safaricom}
+      - {prefix: "716", length: 9, operator: Safaricom}
+      - {prefix: "717", length: 9, operator: Safaricom}
+      - {prefix: "718", length: 9, operator: Safaricom}
+      - {prefix: "719", length: 9, operator: Safaricom}
+      - {prefix: "720", length: 9, operator: Safaricom}
+      - {prefix: "721", length: 9, operator: Safaricom}
+      - {prefix: "722", length: 9, operator: Safaricom}
+      - {prefix: "723", length: 9, operator: Safaricom}
+      - {prefix: "724", length: 9, operator: Safaricom}
+      - {prefix: "725", length: 9, operator: Safaricom}
+      - {prefix: "726", length: 9, operator: Safaricom}
+      - {prefix: "727", length: 9, operator: Safaricom}
+      - {prefix: "728", length: 9, operator: Safaricom}
+      - {prefix: "729", length: 9, operator: Safaricom}
+      - {prefix: "740", length: 9, operator: Safaricom}
+      - {prefix: "741", length: 9, operator: Safaricom}
+      - {prefix: "742", length: 9, operator: Safaricom}
+      - {prefix: "743", length: 9, operator: Safaricom}
+      - {prefix: "745", length: 9, operator: Safaricom}
+      - {prefix: "746", length: 9, operator: Safaricom}
+      - {prefix: "748", length: 9, operator: Safaricom}
+      - {prefix: "757", length: 9, operator: Safaricom}
+      - {prefix: "758", length: 9, operator: Safaricom}
+      - {prefix: "759", length: 9, operator: Safaricom}
+      - {prefix: "768", length: 9, operator: Safaricom}
+      - {prefix: "769", length: 9, operator: Safaricom}
+      - {prefix: "790", length: 9, operator: Safaricom}
+      - {prefix: "791", length: 9, operator: Safaricom}
+      - {prefix: "792", length: 9, operator: Safaricom}
+      - {prefix: "793", length: 9, operator: Safaricom}
+      - {prefix: "794", length: 9, operator: Safaricom}
+      - {prefix: "795", length: 9, operator: Safaricom}
+      - {prefix: "796", length: 9, operator: Safaricom}
+      - {prefix: "797", length: 9, operator: Safaricom}
+      - {prefix: "798", length: 9, operator: Safaricom}
+      - {prefix: "799", length: 9, operator: Safaricom}
+      - {prefix: "110", length: 9, operator: Safaricom}
+      - {prefix: "111", length: 9, operator: Safaricom}
+      - {prefix: "112", length: 9, operator: Safaricom}
+      - {prefix: "113", length: 9, operator: Safaricom}
+      - {prefix: "114", length: 9, operator: Safaricom}
+      - {prefix: "115", length: 9, operator: Safaricom}
+      # Airtel: 28 prefixes
+      - {prefix: "730", length: 9, operator: Airtel}
+      - {prefix: "731", length: 9, operator: Airtel}
+      - {prefix: "732", length: 9, operator: Airtel}
+      - {prefix: "733", length: 9, operator: Airtel}
+      - {prefix: "734", length: 9, operator: Airtel}
+      - {prefix: "735", length: 9, operator: Airtel}
+      - {prefix: "736", length: 9, operator: Airtel}
+      - {prefix: "737", length: 9, operator: Airtel}
+      - {prefix: "738", length: 9, operator: Airtel}
+      - {prefix: "739", length: 9, operator: Airtel}
+      - {prefix: "750", length: 9, operator: Airtel}
+      - {prefix: "751", length: 9, operator: Airtel}
+      - {prefix: "752", length: 9, operator: Airtel}
+      - {prefix: "753", length: 9, operator: Airtel}
+      - {prefix: "754", length: 9, operator: Airtel}
+      - {prefix: "755", length: 9, operator: Airtel}
+      - {prefix: "756", length: 9, operator: Airtel}
+      - {prefix: "762", length: 9, operator: Airtel}
+      - {prefix: "780", length: 9, operator: Airtel}
+      - {prefix: "781", length: 9, operator: Airtel}
+      - {prefix: "782", length: 9, operator: Airtel}
+      - {prefix: "783", length: 9, operator: Airtel}
+      - {prefix: "784", length: 9, operator: Airtel}
+      - {prefix: "785", length: 9, operator: Airtel}
+      - {prefix: "786", length: 9, operator: Airtel}
+      - {prefix: "787", length: 9, operator: Airtel}
+      - {prefix: "788", length: 9, operator: Airtel}
+      - {prefix: "789", length: 9, operator: Airtel}
+      # Finserve Africa (Equitel, MVNO on Airtel's network): 763-766 assigned
+      - {prefix: "763", length: 9, operator: Equitel}
+      - {prefix: "765", length: 9, operator: Equitel}
+      # Telkom Kenya: 770-779 assigned, share has collapsed to ~0.7 % (S5)
+      - {prefix: "772", length: 9, operator: Telkom}
+    unallocated:
+      # Whole 3-digit NDCs inside the mobile "01" space (S1 section 1.3) that are NOT assigned
+      # in the CA plan of April 2026 (S1) nor in the April 2024 plan (S2), are not among the
+      # Safaricom 0118/0119/014x/018x prefixes announced in Aug 2026 (S3), and are NOT valid
+      # in libphonenumber 9.0.43 (is_valid_number=False, type UNKNOWN).
+      # Avoided on purpose: 147-149 and 183-189 (CA may fill them next; libphonenumber already
+      # treats 140-146 and 18x as mobile), 131-139 (libphonenumber treats 135-139 as mobile).
+      - {prefix: "150", length: 9, note: "NDC 150 unassigned per CA numbering plan April 2026", source: S1}
+      - {prefix: "160", length: 9, note: "NDC 160 unassigned per CA numbering plan April 2026", source: S1}
+      - {prefix: "170", length: 9, note: "NDC 170 unassigned per CA numbering plan April 2026", source: S1}
+      - {prefix: "175", length: 9, note: "NDC 175 unassigned per CA numbering plan April 2026", source: S1}
+      - {prefix: "192", length: 9, note: "NDC 192 unassigned per CA numbering plan April 2026 (199 is the CA test NDC, avoid)", source: S1}
+      - {prefix: "122", length: 9, note: "NDC 122 unassigned (120/124/126/128 are MVNO allocations) per CA plan April 2026", source: S1}
+    # Kenya has no official drama/fiction range. The closest thing is NDC 199 (01 99 xxx xxx),
+    # which the April 2026 plan (S1) lists as a "shared resource for internal use for purposes
+    # of network testing, experimentation and research" -- a test range, not a drama range,
+    # and test SIMs may exist on live networks. Not used as fiction.
+    fiction: null
+  landline:
+    # Area codes per CA plan (S1 section 1.2). Fixed NSN is mostly 9 digits (2-digit area code
+    # + 7-digit subscriber). Landlines are rare in personal contact lists today.
+    cities:
+      - {city: Nairobi, area_code: "20", subscriber_length: 7}
+      - {city: Mombasa, area_code: "41", subscriber_length: 7}
+      - {city: Kisumu, area_code: "57", subscriber_length: 7}
+      - {city: Nakuru, area_code: "51", subscriber_length: 7}
+      - {city: Eldoret, area_code: "53", subscriber_length: 7}
+      - {city: Thika, area_code: "66", subscriber_length: 7}
+      - {city: Kisii, area_code: "58", subscriber_length: 7}
+      - {city: Kakamega, area_code: "56", subscriber_length: 7}
+      - {city: Malindi, area_code: "42", subscriber_length: 7}
+      - {city: Meru, area_code: "64", subscriber_length: 7}
+    fiction: null
+  validation_note: >-
+    libphonenumber 9.0.43 KE mobile pattern is (?:1(?:0[0-8]|[18]\d|2[014]|3[05-9]|4[0-6])|7\d\d)\d{6}:
+    every 07xx NDC is valid MOBILE (including 749 IEBC and 767, which the April 2026 CA plan
+    no longer lists as assigned); the unallocated prefixes 150/160/170/175/192/122 return
+    is_valid_number=False and type UNKNOWN, so apps using libphonenumber will reject them.
+    NDC 199 (CA test resource) is also invalid in libphonenumber. No fiction range exists.
+carriers:
+  # Shares: CA Sector Statistics Q3 FY2025/26 (Jan-Mar 2026) for Safaricom/Airtel/Telkom,
+  # Q2 FY2025/26 for Finserve (S5). MNCs per CA plan section 7.3 (S1).
+  # sim_operator = SIM/network display name as typically shown on Android (S7, best effort).
+  - {name: Safaricom, sim_operator: "Safaricom", mccmnc: "63902", share: 0.689}
+  - {name: Airtel, sim_operator: "Airtel", mccmnc: "63903", share: 0.276}
+  - {name: Equitel, sim_operator: "Equitel", mccmnc: "63906", share: 0.019}   # Finserve Africa (MNC 06), MVNO on Airtel
+  - {name: Telkom, sim_operator: "Telkom KE", mccmnc: "63907", share: 0.007}
+cities:
+  # 2019 census urban-centre populations (KNBS via S6); coordinates are city centres.
+  # Kenyan postal codes belong to post offices; most people use "P.O. Box nnn-<code>".
+  - {name: Nairobi, lat: -1.2864, lon: 36.8172, population: 4397073, area_code: "20",
+     postcodes: ["00100", "00200", "00800"],
+     districts: [CBD, Westlands, Kilimani, Kileleshwa, Lavington, Karen, Langata, South B, South C, Eastleigh, Embakasi, Kasarani, Roysambu, Kibera, Kawangware, Donholm, Buruburu, Umoja, Kayole, Githurai, Zimmerman, Kahawa West, Parklands, Ngara, Pipeline, Utawala]}
+  - {name: Mombasa, lat: -4.0435, lon: 39.6682, population: 1208333, area_code: "41",
+     postcodes: ["80100"], districts: [Old Town, Nyali, Bamburi, Kisauni, Likoni, Tudor, Changamwe, Mikindani, Shanzu, Kongowea]}
+  - {name: Nakuru, lat: -0.3031, lon: 36.0800, population: 570674, area_code: "51",
+     postcodes: ["20100"], districts: [Milimani, Section 58, Lanet, Shabab, Kaptembwo, London, Free Area]}
+  - {name: Ruiru, lat: -1.1466, lon: 36.9609, population: 490120, area_code: "66",
+     postcodes: ["00232"], districts: [Kimbo, Membley, Kahawa Sukari, Gwa Kairu]}
+  - {name: Eldoret, lat: 0.5143, lon: 35.2698, population: 475716, area_code: "53",
+     postcodes: ["30100"], districts: [Elgon View, Pioneer, Langas, Kapsoya, Huruma, Annex]}
+  - {name: Kisumu, lat: -0.0917, lon: 34.7680, population: 397957, area_code: "57",
+     postcodes: ["40100"], districts: [Milimani, Nyalenda, Manyatta, Kondele, Mamboleo, Nyamasaria]}
+  - {name: Kikuyu, lat: -1.2463, lon: 36.6629, population: 323881, area_code: "67",
+     postcodes: ["00902"], districts: [Kikuyu Town, Kinoo, Muguga, Thogoto]}
+  - {name: Ngong, lat: -1.3527, lon: 36.6681, population: 279757, area_code: "45",
+     postcodes: ["00208"], districts: [Ngong Town, Kibiko, Matasia, Embulbul]}
+  - {name: Athi River, lat: -1.4560, lon: 36.9780, population: 258498, area_code: "45",
+     postcodes: ["00204"], districts: [Mavoko, Syokimau, Mlolongo, Greatwall]}   # census unit "Mavoko"
+  - {name: Thika, lat: -1.0333, lon: 37.0693, population: 251407, area_code: "66",
+     postcodes: ["01000"], districts: [Section 9, Makongeni, Landless, Ngoingwa, Kiganjo]}
+  - {name: Naivasha, lat: -0.7167, lon: 36.4333, population: 198444, area_code: "50",
+     postcodes: ["20117"], districts: [Naivasha Town, Karagita, Kihoto, Mai Mahiu]}
+  - {name: Kitale, lat: 1.0157, lon: 35.0062, population: 162560, area_code: "54",
+     postcodes: ["30200"], districts: [Milimani, Kipsongo, Section Six]}
+  - {name: Kitengela, lat: -1.4736, lon: 36.9617, population: 154643, area_code: "45",
+     postcodes: ["00241"], districts: [Kitengela Town, Yukos, Milimani, Noonkopir]}
+  - {name: Malindi, lat: -3.2192, lon: 40.1169, population: 119859, area_code: "42",
+     postcodes: ["80200"], districts: [Shella, Casuarina, Barani, Kisumu Ndogo]}
+  - {name: Kisii, lat: -0.6817, lon: 34.7667, population: 112417, area_code: "58",
+     postcodes: ["40200"], districts: [Jogoo, Nyanchwa, Daraja Mbili, Mwembe]}
+  - {name: Kakamega, lat: 0.2827, lon: 34.7519, population: 107227, area_code: "56",
+     postcodes: ["50100"], districts: [Milimani, Amalemba, Lurambi, Shirere]}
+  - {name: Meru, lat: 0.0471, lon: 37.6496, population: 80191, area_code: "64",
+     postcodes: ["60200"], districts: [Makutano, Gakoromone, Kinoru]}
+# Common road/street names across Nairobi, Mombasa, Kisumu, Nakuru, Eldoret (S8, OSM ODbL).
+# Most residential addresses are descriptive ("Kileleshwa, off Othaya Road, House 12").
+streets: [Moi Avenue, Kenyatta Avenue, Haile Selassie Avenue, Uhuru Highway, Ngong Road, Waiyaki Way,
+  Thika Road, Mombasa Road, Jogoo Road, Langata Road, Kiambu Road, Limuru Road, Argwings Kodhek Road,
+  Lenana Road, Riverside Drive, Muthaiga Road, Kimathi Street, Tom Mboya Street, Luthuli Avenue,
+  Biashara Street, Koinange Street, Moktar Daddah Street, Kaunda Street, Standard Street,
+  Muindi Mbingu Street, Ronald Ngala Street, River Road, Accra Road, Latema Road, Racecourse Road,
+  Murang'a Road, Juja Road, Outer Ring Road, Kangundo Road, Magadi Road, Lusaka Road, Enterprise Road,
+  Likoni Road, Nyerere Avenue, Digo Road, Nkrumah Road, Links Road, Malindi Road, Oginga Odinga Street,
+  Jomo Kenyatta Highway, Uganda Road, Nandi Road, Kenyatta Highway, Mama Ngina Street, Wabera Street,
+  Harry Thuku Road, General Mathenge Drive, Peponi Road, Mpaka Road, Rhapta Road, Parklands Road,
+  Ojijo Road, Chiromo Road, Wood Avenue, Dennis Pritt Road, Ralph Bunche Road, Valley Road,
+  Kindaruma Road, James Gichuru Road, Gitanga Road, Naivasha Road, Kirichwa Road, Dagoretti Road,
+  Karen Road, Mbagathi Way, Bunyala Road, Lunga Lunga Road, Othaya Road, Station Road, Market Street,
+  Hospital Road, Church Road, School Road, Kasarani Mwiki Road, Eastern Bypass, Northern Bypass,
+  Southern Bypass, Kenneth Matiba Road, Prof. Wangari Maathai Road, Ring Road Kilimani,
+  Ring Road Westlands, Ole Sangale Road, Garden Estate Road, Kenol Road, Kericho Road, Kisii Road]
+# Postal form (dominant in documents, bank and government records):
+#   "P.O. Box {number}-{postcode}, {city}"   e.g. "P.O. Box 4521-00100, Nairobi"
+# Physical form (deliveries, Glovo/Jumia): "{street}, {district}, {city}" (schema has one slot only).
+address_format: "P.O. Box {number}-{postcode}, {city}"
+places:
+  # Coordinates from OpenStreetMap Nominatim (S8, ODbL), checked against names; public places only.
+  - {category: park, name: Uhuru Park, city: Nairobi, lat: -1.2899, lon: 36.8167}
+  - {category: park, name: Central Park, city: Nairobi, lat: -1.2848, lon: 36.8152}
+  - {category: park, name: Karura Forest, city: Nairobi, lat: -1.2387, lon: 36.8326}
+  - {category: park, name: Nairobi National Park, city: Nairobi, lat: -1.3863, lon: 36.8737}
+  - {category: park, name: Nairobi Arboretum, city: Nairobi, lat: -1.2773, lon: 36.7999}
+  - {category: park, name: Jeevanjee Gardens, city: Nairobi, lat: -1.2813, lon: 36.8197}
+  - {category: park, name: City Park, city: Nairobi, lat: -1.2636, lon: 36.8300}
+  - {category: park, name: Uhuru Gardens, city: Nairobi, lat: -1.3259, lon: 36.7993}
+  - {category: park, name: Mama Ngina Waterfront, city: Mombasa, lat: -4.0782, lon: 39.6680}
+  - {category: park, name: Haller Park, city: Mombasa, lat: -4.0159, lon: 39.7216}
+  - {category: park, name: Kisumu Impala Sanctuary, city: Kisumu, lat: -0.1148, lon: 34.7444}
+  - {category: park, name: Hell's Gate National Park, city: Naivasha, lat: -0.8896, lon: 36.3188}
+  - {category: park, name: Kakamega Forest, city: Kakamega, lat: 0.2560, lon: 34.8754}
+  - {category: landmark, name: KICC, city: Nairobi, lat: -1.2885, lon: 36.8234}
+  - {category: landmark, name: August 7th Memorial Park, city: Nairobi, lat: -1.2890, lon: 36.8269}
+  - {category: landmark, name: Bomas of Kenya, city: Nairobi, lat: -1.3376, lon: 36.7687}
+  - {category: landmark, name: Giraffe Centre, city: Nairobi, lat: -1.3766, lon: 36.7446}
+  - {category: landmark, name: Mombasa Tusks, city: Mombasa, lat: -4.0616, lon: 39.6661}
+  - {category: landmark, name: Fort Jesus, city: Mombasa, lat: -4.0626, lon: 39.6796}
+  - {category: landmark, name: Kit Mikayi, city: Kisumu, lat: -0.1177, lon: 34.5407}
+  - {category: station, name: Nairobi Terminus (SGR), city: Nairobi, lat: -1.3554, lon: 36.8981}
+  - {category: station, name: Nairobi Central Railway Station, city: Nairobi, lat: -1.2916, lon: 36.8286}
+  - {category: station, name: Mombasa Terminus (SGR), city: Mombasa, lat: -4.0214, lon: 39.5794}
+  - {category: station, name: Nakuru Railway Station, city: Nakuru, lat: -0.2837, lon: 36.0780}
+  - {category: airport, name: Jomo Kenyatta International Airport, city: Nairobi, lat: -1.3169, lon: 36.9289}
+  - {category: airport, name: Wilson Airport, city: Nairobi, lat: -1.3241, lon: 36.8112}
+  - {category: airport, name: Moi International Airport, city: Mombasa, lat: -4.0265, lon: 39.6007}
+  - {category: airport, name: Kisumu International Airport, city: Kisumu, lat: -0.0874, lon: 34.7288}
+  - {category: airport, name: Eldoret International Airport, city: Eldoret, lat: 0.4044, lon: 35.2333}
+  - {category: beach, name: Diani Beach, city: Diani, lat: -4.3125, lon: 39.5794}
+  - {category: beach, name: Nyali Beach, city: Mombasa, lat: -4.0473, lon: 39.7106}
+  - {category: beach, name: Bamburi Beach, city: Mombasa, lat: -3.9906, lon: 39.7373}
+  - {category: beach, name: Jomo Kenyatta Public Beach, city: Mombasa, lat: -4.0055, lon: 39.7278}
+  - {category: beach, name: Dunga Beach, city: Kisumu, lat: -0.1446, lon: 34.7367}
+  - {category: mountain, name: Mount Kenya, city: Nanyuki, lat: -0.1527, lon: 37.3092}
+  - {category: mountain, name: Mount Longonot, city: Naivasha, lat: -0.9162, lon: 36.4473}
+  - {category: mountain, name: Menengai Crater, city: Nakuru, lat: -0.2020, lon: 36.0703}
+  - {category: museum, name: Nairobi National Museum, city: Nairobi, lat: -1.2739, lon: 36.8150}
+  - {category: museum, name: Karen Blixen Museum, city: Nairobi, lat: -1.3520, lon: 36.7125}
+  - {category: museum, name: Nairobi Railway Museum, city: Nairobi, lat: -1.2936, lon: 36.8226}
+  - {category: museum, name: Kisumu Museum, city: Kisumu, lat: -0.1078, lon: 34.7629}
+  - {category: stadium, name: Moi International Sports Centre Kasarani, city: Nairobi, lat: -1.2275, lon: 36.8902}
+  - {category: stadium, name: Nyayo National Stadium, city: Nairobi, lat: -1.3041, lon: 36.8247}
+  - {category: stadium, name: Kipchoge Keino Stadium, city: Eldoret, lat: 0.5261, lon: 35.2801}
+  - {category: market, name: City Market, city: Nairobi, lat: -1.2837, lon: 36.8195}
+  - {category: market, name: Gikomba Market, city: Nairobi, lat: -1.2863, lon: 36.8415}
+  - {category: market, name: Toi Market, city: Nairobi, lat: -1.3072, lon: 36.7795}
+  - {category: market, name: Wakulima Market (Marikiti), city: Nairobi, lat: -1.2876, lon: 36.8324}
+  - {category: market, name: Kongowea Market, city: Mombasa, lat: -4.0398, lon: 39.6832}
+  - {category: lake, name: Lake Naivasha, city: Naivasha, lat: -0.7586, lon: 36.3554}
+  - {category: lake, name: Lake Nakuru, city: Nakuru, lat: -0.3647, lon: 36.0884}
+  - {category: lake, name: Lake Bogoria, city: Marigat, lat: 0.2710, lon: 36.1018}
+names:
+  culture: ke
+  female:
+    - {name: "Mary", w: 3.0}
+    - {name: "Grace", w: 2.5}
+    - {name: "Faith", w: 2.6}
+    - {name: "Mercy", w: 2.6}
+    - {name: "Esther", w: 1.8}
+    - {name: "Jane", w: 1.8}
+    - {name: "Ann", w: 2.0}
+    - {name: "Joyce", w: 1.6}
+    - {name: "Lucy", w: 1.6}
+    - {name: "Elizabeth", w: 1.5}
+    - {name: "Margaret", w: 1.4}
+    - {name: "Catherine", w: 1.4}
+    - {name: "Caroline", w: 1.6}
+    - {name: "Sharon", w: 1.8}
+    - {name: "Diana", w: 1.2}
+    - {name: "Purity", w: 1.4}
+    - {name: "Beatrice", w: 1.2}
+    - {name: "Ruth", w: 1.0}
+    - {name: "Nancy", w: 1.4}
+    - {name: "Winnie", w: 0.9}
+    - {name: "Rose", w: 1.2}
+    - {name: "Susan", w: 1.3}
+    - {name: "Alice", w: 1.1}
+    - {name: "Eunice", w: 1.1}
+    - {name: "Irene", w: 1.2}
+    - {name: "Janet", w: 1.0}
+    - {name: "Lilian", w: 1.0}
+    - {name: "Agnes", w: 1.0}
+    - {name: "Joy", w: 1.0}
+    - {name: "Brenda", w: 1.4}
+    - {name: "Cynthia", w: 1.0}
+    - {name: "Naomi", w: 0.9}
+    - {name: "Sarah", w: 1.0}
+    - {name: "Josephine", w: 1.0}
+    - {name: "Christine", w: 1.1}
+    - {name: "Monica", w: 0.8}
+    - {name: "Veronica", w: 0.8}
+    - {name: "Gladys", w: 0.8}
+    - {name: "Pauline", w: 0.8}
+    - {name: "Emily", w: 0.7}
+    - {name: "Dorcas", w: 0.7}
+    - {name: "Rebecca", w: 0.7}
+    - {name: "Judith", w: 0.7}
+    - {name: "Damaris", w: 0.6}
+    - {name: "Phyllis", w: 0.6}
+    - {name: "Everlyne", w: 0.7}
+    - {name: "Maureen", w: 1.0}
+    - {name: "Linet", w: 0.6}
+    - {name: "Edith", w: 0.5}
+    - {name: "Hellen", w: 0.8}
+    - {name: "Stella", w: 0.7}
+    - {name: "Ivy", w: 0.7}
+    - {name: "Mitchelle", w: 0.6}
+    - {name: "Sheila", w: 0.7}
+    - {name: "Tabitha", w: 0.5}
+    - {name: "Teresia", w: 0.6}
+    - {name: "Lydia", w: 0.7}
+    - {name: "Charity", w: 0.8}
+    - {name: "Peris", w: 0.5}
+    - {name: "Hannah", w: 0.6}
+    - {name: "Rachael", w: 0.6}
+    - {name: "Priscilla", w: 0.5}
+    - {name: "Jacinta", w: 0.5}
+    - {name: "Millicent", w: 0.5}
+    - {name: "Fridah", w: 0.6}
+    - {name: "Doreen", w: 0.5}
+    - {name: "Velma", w: 0.4}
+    - {name: "Vivian", w: 0.6}
+    - {name: "Gloria", w: 0.5}
+    - {name: "Angela", w: 0.7}
+    - {name: "Jackline", w: 0.7}
+    - {name: "Rosemary", w: 0.6}
+    - {name: "Martha", w: 0.6}
+    - {name: "Leah", w: 0.5}
+    - {name: "Abigail", w: 0.5}
+    - {name: "Tracy", w: 0.6}
+    - {name: "Valentine", w: 0.4}
+    - {name: "Wendy", w: 0.4}
+    - {name: "Precious", w: 0.4}
+    - {name: "Bridget", w: 0.4}
+    - {name: "Sylvia", w: 0.6}
+    - {name: "Evelyn", w: 0.5}
+    - {name: "Florence", w: 0.6}
+    - {name: "Michelle", w: 0.5}
+    - {name: "Lucia", w: 0.3}
+    - {name: "Salome", w: 0.4}
+    - {name: "Mildred", w: 0.3}
+    - {name: "Consolata", w: 0.3}
+    - {name: "Imani", w: 0.4}
+    - {name: "Neema", w: 0.5}
+    - {name: "Zawadi", w: 0.4}
+    - {name: "Wanjiru", w: 1.0}
+    - {name: "Wanjiku", w: 1.0}
+    - {name: "Wambui", w: 0.8}
+    - {name: "Njeri", w: 0.8}
+    - {name: "Nyambura", w: 0.5}
+    - {name: "Wairimu", w: 0.6}
+    - {name: "Wangari", w: 0.5}
+    - {name: "Wangui", w: 0.5}
+    - {name: "Muthoni", w: 0.6}
+    - {name: "Njoki", w: 0.6}
+    - {name: "Wanjira", w: 0.3}
+    - {name: "Akinyi", w: 0.8}
+    - {name: "Achieng", w: 0.9}
+    - {name: "Atieno", w: 0.9}
+    - {name: "Adhiambo", w: 0.7}
+    - {name: "Awino", w: 0.4}
+    - {name: "Anyango", w: 0.5}
+    - {name: "Auma", w: 0.3}
+    - {name: "Nafula", w: 0.5}
+    - {name: "Nekesa", w: 0.5}
+    - {name: "Nanjala", w: 0.4}
+    - {name: "Naliaka", w: 0.4}
+    - {name: "Chebet", w: 0.6}
+    - {name: "Jepkoech", w: 0.4}
+    - {name: "Jeptoo", w: 0.3}
+    - {name: "Jelagat", w: 0.3}
+    - {name: "Cherono", w: 0.4}
+    - {name: "Chepkoech", w: 0.3}
+    - {name: "Chelangat", w: 0.3}
+    - {name: "Mwende", w: 0.5}
+    - {name: "Mutheu", w: 0.4}
+    - {name: "Ndinda", w: 0.3}
+    - {name: "Kanini", w: 0.2}
+    - {name: "Mumbua", w: 0.3}
+    - {name: "Moraa", w: 0.5}
+    - {name: "Kemunto", w: 0.3}
+    - {name: "Kwamboka", w: 0.3}
+    - {name: "Nyaboke", w: 0.3}
+    - {name: "Kerubo", w: 0.3}
+    - {name: "Kendi", w: 0.3}
+    - {name: "Makena", w: 0.4}
+    - {name: "Kawira", w: 0.3}
+    - {name: "Nkatha", w: 0.2}
+    - {name: "Naserian", w: 0.2}
+    - {name: "Halima", w: 0.3}
+    - {name: "Fatuma", w: 0.5}
+    - {name: "Amina", w: 0.5}
+    - {name: "Mwanaisha", w: 0.2}
+    - {name: "Zainab", w: 0.3}
+    - {name: "Rehema", w: 0.3}
+    - {name: "Mwanajuma", w: 0.2}
+  male:
+    - {name: "John", w: 3.0}
+    - {name: "Peter", w: 2.6}
+    - {name: "Joseph", w: 2.6}
+    - {name: "James", w: 2.2}
+    - {name: "David", w: 2.4}
+    - {name: "Daniel", w: 2.2}
+    - {name: "Samuel", w: 2.0}
+    - {name: "Paul", w: 1.8}
+    - {name: "Stephen", w: 1.8}
+    - {name: "Brian", w: 2.4}
+    - {name: "Kevin", w: 2.2}
+    - {name: "Dennis", w: 1.8}
+    - {name: "Collins", w: 1.6}
+    - {name: "Victor", w: 1.6}
+    - {name: "Felix", w: 1.2}
+    - {name: "Evans", w: 1.2}
+    - {name: "George", w: 1.4}
+    - {name: "Charles", w: 1.4}
+    - {name: "Francis", w: 1.4}
+    - {name: "Patrick", w: 1.4}
+    - {name: "Michael", w: 1.6}
+    - {name: "Moses", w: 1.2}
+    - {name: "Simon", w: 1.2}
+    - {name: "Anthony", w: 1.2}
+    - {name: "Robert", w: 1.0}
+    - {name: "Eric", w: 1.0}
+    - {name: "Erick", w: 0.8}
+    - {name: "Kennedy", w: 1.0}
+    - {name: "Geoffrey", w: 0.8}
+    - {name: "Isaac", w: 1.0}
+    - {name: "Martin", w: 0.9}
+    - {name: "Duncan", w: 0.8}
+    - {name: "Ian", w: 0.9}
+    - {name: "Alex", w: 0.9}
+    - {name: "Benson", w: 0.7}
+    - {name: "Wilson", w: 0.7}
+    - {name: "Nicholas", w: 0.8}
+    - {name: "Edwin", w: 0.9}
+    - {name: "Gideon", w: 0.7}
+    - {name: "Emmanuel", w: 1.1}
+    - {name: "Timothy", w: 0.8}
+    - {name: "Joshua", w: 0.9}
+    - {name: "Allan", w: 0.8}
+    - {name: "Mark", w: 0.8}
+    - {name: "Elijah", w: 0.6}
+    - {name: "Philip", w: 0.6}
+    - {name: "Fredrick", w: 0.7}
+    - {name: "Vincent", w: 0.8}
+    - {name: "Amos", w: 0.6}
+    - {name: "Josphat", w: 0.5}
+    - {name: "Bernard", w: 0.6}
+    - {name: "Boniface", w: 0.5}
+    - {name: "Cyrus", w: 0.4}
+    - {name: "Wycliffe", w: 0.6}
+    - {name: "Job", w: 0.4}
+    - {name: "Hillary", w: 0.6}
+    - {name: "Caleb", w: 0.6}
+    - {name: "Lawrence", w: 0.5}
+    - {name: "Antony", w: 0.6}
+    - {name: "Edward", w: 0.5}
+    - {name: "Ezekiel", w: 0.4}
+    - {name: "Gilbert", w: 0.5}
+    - {name: "Harrison", w: 0.4}
+    - {name: "Henry", w: 0.6}
+    - {name: "Jackson", w: 0.6}
+    - {name: "Julius", w: 0.5}
+    - {name: "Kelvin", w: 0.8}
+    - {name: "Lewis", w: 0.4}
+    - {name: "Mathew", w: 0.6}
+    - {name: "Nelson", w: 0.5}
+    - {name: "Oscar", w: 0.5}
+    - {name: "Silas", w: 0.4}
+    - {name: "Titus", w: 0.4}
+    - {name: "Douglas", w: 0.5}
+    - {name: "Enock", w: 0.5}
+    - {name: "Festus", w: 0.4}
+    - {name: "Fred", w: 0.5}
+    - {name: "Gabriel", w: 0.5}
+    - {name: "Jacob", w: 0.6}
+    - {name: "Japheth", w: 0.4}
+    - {name: "Kenneth", w: 0.6}
+    - {name: "Morris", w: 0.4}
+    - {name: "Newton", w: 0.4}
+    - {name: "Raymond", w: 0.4}
+    - {name: "Solomon", w: 0.5}
+    - {name: "Stanley", w: 0.5}
+    - {name: "Benard", w: 0.4}
+    - {name: "Clinton", w: 0.4}
+    - {name: "Derrick", w: 0.5}
+    - {name: "Elvis", w: 0.4}
+    - {name: "Ryan", w: 0.3}
+    - {name: "Sammy", w: 0.4}
+    - {name: "Calvin", w: 0.3}
+    - {name: "Abel", w: 0.3}
+    - {name: "Kamau", w: 0.7}
+    - {name: "Mwangi", w: 0.7}
+    - {name: "Njoroge", w: 0.5}
+    - {name: "Kariuki", w: 0.4}
+    - {name: "Kimani", w: 0.4}
+    - {name: "Maina", w: 0.5}
+    - {name: "Otieno", w: 0.7}
+    - {name: "Ochieng", w: 0.7}
+    - {name: "Odhiambo", w: 0.5}
+    - {name: "Omondi", w: 0.5}
+    - {name: "Onyango", w: 0.4}
+    - {name: "Wafula", w: 0.4}
+    - {name: "Wekesa", w: 0.3}
+    - {name: "Barasa", w: 0.3}
+    - {name: "Kiprono", w: 0.4}
+    - {name: "Kiprotich", w: 0.3}
+    - {name: "Kipchumba", w: 0.2}
+    - {name: "Kibet", w: 0.4}
+    - {name: "Cheruiyot", w: 0.3}
+    - {name: "Mutua", w: 0.5}
+    - {name: "Musyoka", w: 0.3}
+    - {name: "Kioko", w: 0.3}
+    - {name: "Mutuma", w: 0.2}
+    - {name: "Gitonga", w: 0.2}
+    - {name: "Mohamed", w: 0.6}
+    - {name: "Hassan", w: 0.4}
+    - {name: "Ali", w: 0.4}
+    - {name: "Abdi", w: 0.3}
+    - {name: "Omar", w: 0.3}
+    - {name: "Juma", w: 0.5}
+    - {name: "Baraka", w: 0.4}
+    - {name: "Kahindi", w: 0.2}
+    - {name: "Charo", w: 0.2}
+    - {name: "Said", w: 0.2}
+    - {name: "Bakari", w: 0.2}
+    - {name: "Rashid", w: 0.2}
+  surnames:
+    - {name: "Mwangi", w: 3.2}
+    - {name: "Kamau", w: 3.0}
+    - {name: "Njoroge", w: 2.0}
+    - {name: "Kariuki", w: 2.0}
+    - {name: "Kimani", w: 2.0}
+    - {name: "Maina", w: 2.0}
+    - {name: "Wanjiku", w: 1.6}
+    - {name: "Wambui", w: 1.2}
+    - {name: "Wanjiru", w: 1.3}
+    - {name: "Njeri", w: 1.0}
+    - {name: "Waweru", w: 1.2}
+    - {name: "Ndungu", w: 1.4}
+    - {name: "Gitau", w: 1.0}
+    - {name: "Kinyua", w: 0.8}
+    - {name: "Macharia", w: 1.2}
+    - {name: "Mburu", w: 1.2}
+    - {name: "Muriuki", w: 0.8}
+    - {name: "Mugo", w: 0.8}
+    - {name: "Karanja", w: 1.2}
+    - {name: "Kiarie", w: 0.7}
+    - {name: "Ngugi", w: 1.0}
+    - {name: "Nyambura", w: 0.7}
+    - {name: "Githinji", w: 0.8}
+    - {name: "Wairimu", w: 0.7}
+    - {name: "Muthoni", w: 0.7}
+    - {name: "Njuguna", w: 1.0}
+    - {name: "Gathoni", w: 0.4}
+    - {name: "Wachira", w: 0.8}
+    - {name: "Chege", w: 0.8}
+    - {name: "Kahiga", w: 0.4}
+    - {name: "Mbugua", w: 0.8}
+    - {name: "Kuria", w: 0.6}
+    - {name: "Irungu", w: 0.6}
+    - {name: "Ndirangu", w: 0.5}
+    - {name: "Wanyoike", w: 0.4}
+    - {name: "Kibe", w: 0.4}
+    - {name: "Muchiri", w: 0.5}
+    - {name: "Thuo", w: 0.4}
+    - {name: "Gichuki", w: 0.5}
+    - {name: "Kamande", w: 0.5}
+    - {name: "Mbuthia", w: 0.4}
+    - {name: "Gakuru", w: 0.3}
+    - {name: "Kinuthia", w: 0.5}
+    - {name: "Mwaura", w: 0.6}
+    - {name: "Muriithi", w: 0.5}
+    - {name: "Wahome", w: 0.5}
+    - {name: "Waithaka", w: 0.5}
+    - {name: "Kagiri", w: 0.3}
+    - {name: "Gathogo", w: 0.3}
+    - {name: "Ngari", w: 0.4}
+    - {name: "Otieno", w: 3.4}
+    - {name: "Ochieng", w: 2.8}
+    - {name: "Odhiambo", w: 2.6}
+    - {name: "Onyango", w: 2.5}
+    - {name: "Omondi", w: 2.4}
+    - {name: "Owino", w: 1.4}
+    - {name: "Ouma", w: 1.5}
+    - {name: "Okoth", w: 1.2}
+    - {name: "Oduor", w: 1.0}
+    - {name: "Achieng", w: 1.6}
+    - {name: "Atieno", w: 1.5}
+    - {name: "Akinyi", w: 1.3}
+    - {name: "Adhiambo", w: 1.3}
+    - {name: "Awino", w: 0.8}
+    - {name: "Anyango", w: 0.8}
+    - {name: "Auma", w: 0.6}
+    - {name: "Okello", w: 0.6}
+    - {name: "Opiyo", w: 0.8}
+    - {name: "Odera", w: 0.5}
+    - {name: "Oloo", w: 0.6}
+    - {name: "Owuor", w: 0.8}
+    - {name: "Oketch", w: 0.6}
+    - {name: "Ogola", w: 0.6}
+    - {name: "Obiero", w: 0.4}
+    - {name: "Okumu", w: 0.5}
+    - {name: "Ojwang", w: 0.6}
+    - {name: "Oyoo", w: 0.4}
+    - {name: "Odongo", w: 0.5}
+    - {name: "Okeyo", w: 0.4}
+    - {name: "Ogutu", w: 0.5}
+    - {name: "Aoko", w: 0.3}
+    - {name: "Ouko", w: 0.4}
+    - {name: "Okinda", w: 0.3}
+    - {name: "Nyakach", w: 0.2}
+    - {name: "Wafula", w: 1.6}
+    - {name: "Wekesa", w: 1.4}
+    - {name: "Barasa", w: 1.2}
+    - {name: "Simiyu", w: 1.0}
+    - {name: "Wanjala", w: 1.0}
+    - {name: "Nyongesa", w: 0.9}
+    - {name: "Wanyama", w: 1.0}
+    - {name: "Wanyonyi", w: 0.9}
+    - {name: "Masinde", w: 0.6}
+    - {name: "Makokha", w: 0.6}
+    - {name: "Shikuku", w: 0.5}
+    - {name: "Khaemba", w: 0.5}
+    - {name: "Wamalwa", w: 0.5}
+    - {name: "Mukhwana", w: 0.4}
+    - {name: "Nafula", w: 0.8}
+    - {name: "Nekesa", w: 0.7}
+    - {name: "Nanjala", w: 0.6}
+    - {name: "Naliaka", w: 0.5}
+    - {name: "Wangila", w: 0.4}
+    - {name: "Wabwire", w: 0.4}
+    - {name: "Wesonga", w: 0.4}
+    - {name: "Shiundu", w: 0.3}
+    - {name: "Kweyu", w: 0.3}
+    - {name: "Makhanu", w: 0.3}
+    - {name: "Ambani", w: 0.4}
+    - {name: "Shitanda", w: 0.3}
+    - {name: "Mulama", w: 0.3}
+    - {name: "Atieli", w: 0.2}
+    - {name: "Mmasi", w: 0.2}
+    - {name: "Lusweti", w: 0.3}
+    - {name: "Sifuna", w: 0.3}
+    - {name: "Munyasia", w: 0.2}
+    - {name: "Kiprono", w: 1.0}
+    - {name: "Kipchumba", w: 0.6}
+    - {name: "Kiprotich", w: 0.8}
+    - {name: "Kipkemboi", w: 0.5}
+    - {name: "Cheruiyot", w: 1.0}
+    - {name: "Kibet", w: 1.1}
+    - {name: "Kiprop", w: 1.0}
+    - {name: "Rotich", w: 1.0}
+    - {name: "Chebet", w: 1.1}
+    - {name: "Koech", w: 1.0}
+    - {name: "Langat", w: 1.0}
+    - {name: "Kirui", w: 0.8}
+    - {name: "Kemboi", w: 0.7}
+    - {name: "Mutai", w: 0.8}
+    - {name: "Ruto", w: 0.9}
+    - {name: "Too", w: 0.4}
+    - {name: "Sang", w: 0.6}
+    - {name: "Korir", w: 0.9}
+    - {name: "Kosgei", w: 0.6}
+    - {name: "Kiplagat", w: 0.6}
+    - {name: "Tanui", w: 0.6}
+    - {name: "Bett", w: 0.6}
+    - {name: "Chepkoech", w: 0.6}
+    - {name: "Jepkoech", w: 0.5}
+    - {name: "Jeptoo", w: 0.4}
+    - {name: "Cherono", w: 0.5}
+    - {name: "Chelangat", w: 0.4}
+    - {name: "Kipkorir", w: 0.5}
+    - {name: "Kiptoo", w: 0.6}
+    - {name: "Chirchir", w: 0.5}
+    - {name: "Yegon", w: 0.5}
+    - {name: "Ngetich", w: 0.5}
+    - {name: "Biwott", w: 0.4}
+    - {name: "Kipkoech", w: 0.5}
+    - {name: "Sigei", w: 0.3}
+    - {name: "Kipruto", w: 0.5}
+    - {name: "Tuwei", w: 0.3}
+    - {name: "Kimutai", w: 0.5}
+    - {name: "Keter", w: 0.4}
+    - {name: "Kirwa", w: 0.3}
+    - {name: "Lagat", w: 0.4}
+    - {name: "Maritim", w: 0.3}
+    - {name: "Kipngetich", w: 0.4}
+    - {name: "Mutua", w: 1.6}
+    - {name: "Musyoka", w: 1.0}
+    - {name: "Mwendwa", w: 0.8}
+    - {name: "Kioko", w: 0.8}
+    - {name: "Mutinda", w: 0.7}
+    - {name: "Nzioka", w: 0.4}
+    - {name: "Mulwa", w: 0.6}
+    - {name: "Kilonzo", w: 0.5}
+    - {name: "Mbithi", w: 0.4}
+    - {name: "Musau", w: 0.5}
+    - {name: "Wambua", w: 0.7}
+    - {name: "Nzomo", w: 0.4}
+    - {name: "Kyalo", w: 0.5}
+    - {name: "Mumo", w: 0.5}
+    - {name: "Muli", w: 0.5}
+    - {name: "Ndambuki", w: 0.3}
+    - {name: "Mwikali", w: 0.4}
+    - {name: "Mutheu", w: 0.4}
+    - {name: "Ndinda", w: 0.4}
+    - {name: "Mumbua", w: 0.4}
+    - {name: "Nduku", w: 0.4}
+    - {name: "Makau", w: 0.4}
+    - {name: "Nthenge", w: 0.3}
+    - {name: "Kimeu", w: 0.4}
+    - {name: "Munyao", w: 0.4}
+    - {name: "Mutiso", w: 0.4}
+    - {name: "Mwangangi", w: 0.4}
+    - {name: "Maingi", w: 0.3}
+    - {name: "Kituku", w: 0.3}
+    - {name: "Nyamweya", w: 0.4}
+    - {name: "Onyancha", w: 0.5}
+    - {name: "Mogaka", w: 0.5}
+    - {name: "Ondieki", w: 0.4}
+    - {name: "Moraa", w: 0.6}
+    - {name: "Kemunto", w: 0.4}
+    - {name: "Kwamboka", w: 0.4}
+    - {name: "Nyaboke", w: 0.4}
+    - {name: "Kerubo", w: 0.4}
+    - {name: "Ombati", w: 0.4}
+    - {name: "Momanyi", w: 0.4}
+    - {name: "Nyakundi", w: 0.4}
+    - {name: "Mokaya", w: 0.3}
+    - {name: "Ogeto", w: 0.3}
+    - {name: "Bosire", w: 0.4}
+    - {name: "Ongeri", w: 0.3}
+    - {name: "Mose", w: 0.3}
+    - {name: "Omwenga", w: 0.3}
+    - {name: "Onsongo", w: 0.3}
+    - {name: "Nyang'au", w: 0.3}
+    - {name: "Matara", w: 0.2}
+    - {name: "Mutuma", w: 0.4}
+    - {name: "Kirimi", w: 0.4}
+    - {name: "Gitonga", w: 0.5}
+    - {name: "Mwiti", w: 0.4}
+    - {name: "Kinoti", w: 0.3}
+    - {name: "Murithi", w: 0.4}
+    - {name: "Kendi", w: 0.3}
+    - {name: "Makena", w: 0.4}
+    - {name: "Kawira", w: 0.3}
+    - {name: "Nkatha", w: 0.3}
+    - {name: "Mugambi", w: 0.4}
+    - {name: "Mutembei", w: 0.3}
+    - {name: "Koome", w: 0.3}
+    - {name: "Njeru", w: 0.4}
+    - {name: "Ireri", w: 0.3}
+    - {name: "Nyaga", w: 0.3}
+    - {name: "Kahindi", w: 0.3}
+    - {name: "Charo", w: 0.4}
+    - {name: "Kazungu", w: 0.4}
+    - {name: "Baya", w: 0.4}
+    - {name: "Karisa", w: 0.4}
+    - {name: "Katana", w: 0.4}
+    - {name: "Kenga", w: 0.3}
+    - {name: "Chengo", w: 0.3}
+    - {name: "Masha", w: 0.3}
+    - {name: "Ngala", w: 0.3}
+    - {name: "Mwamburi", w: 0.3}
+    - {name: "Mwadime", w: 0.2}
+    - {name: "Mwakio", w: 0.2}
+    - {name: "Mohamed", w: 1.0}
+    - {name: "Hassan", w: 0.5}
+    - {name: "Ali", w: 0.6}
+    - {name: "Omar", w: 0.4}
+    - {name: "Juma", w: 0.8}
+    - {name: "Athman", w: 0.2}
+    - {name: "Said", w: 0.3}
+    - {name: "Salim", w: 0.3}
+    - {name: "Bakari", w: 0.2}
+    - {name: "Abdalla", w: 0.3}
+    - {name: "Lemayian", w: 0.2}
+    - {name: "Saitoti", w: 0.2}
+    - {name: "Parsimei", w: 0.15}
+    - {name: "Tipis", w: 0.15}
+    - {name: "Koikai", w: 0.15}
+    - {name: "Leshan", w: 0.15}
+    - {name: "Ekal", w: 0.2}
+    - {name: "Ekidor", w: 0.1}
+    - {name: "Lokale", w: 0.15}
+    - {name: "Ewoi", w: 0.1}
+    - {name: "Lokorio", w: 0.1}
+  # Sheng-style short forms (-o / -yo endings) are how friends are commonly saved.
+  nicknames: {Kevin: Kevo, Brian: Brayo, Collins: Collo, Dennis: Denno, Stephen: Stevo,
+    Fredrick: Fredo, Michael: Mike, Samuel: Sam, Daniel: Dan, Patrick: Pato, Nicholas: Nick,
+    Benson: Ben, Kennedy: Ken, Anthony: Tony, Joseph: Joe, Francis: Franco, Emmanuel: Emmah,
+    Edwin: Eddie, Victor: Vic, Elizabeth: Liz, Margaret: Maggie, Catherine: Cate,
+    Josephine: Josie, Christine: Chris, Jacqueline: Jackie, Jackline: Jackie, Maureen: Mau,
+    Ochieng: Ochi, Mwangi: Mwas, Kimani: Kim, Otieno: Otis, Kiprono: Kip}
+  # Contacts are typically saved "{first} {last}" with the Christian name first and the
+  # ethnic/family name second ("Brian Otieno", "Faith Wanjiku"). Very common extras that the
+  # schema cannot express (proposed: `display_variants` with weights):
+  #  - teknonyms: "Mama Wanjiru", "Mama Brayo", "Baba Otieno", "Mama Kevo"
+  #  - role/trade tags: "Mama Mboga", "Boda Peter", "Fundi Juma", "Landlord", "Caretaker",
+  #    "John Mpesa Agent", "Mama Mboga Kiosk", "Peter Mjengo", "Kinyozi", "Mechanic Ochi"
+  #  - place/context tags: "Kevo Campo", "Faith Church", "Wanjiru Chama", "Sam Work",
+  #    "Ann Ruiru", "Denno Shags" (shags = upcountry home)
+  #  - family: "Mum", "Mathe", "Dad", "Buda", "Shosh", "Guka", "Cucu", "Bro", "Sis",
+  #    "Auntie Grace", "Uncle Sam", "Cuz Brian", "Hubby", "Wifey", "Bae"
+  #  - duplicates for second SIM: "Kevo Saf", "Kevo Airtel", "Mum 2"
+  display: "{first} {last}"
+cultures:
+  # KNBS 2019 Census Vol. IV ethnic affiliation (S4). Shares of 47.56 M.
+  - {culture: so, share: 0.058}    # Somali (2,780,502), incl. Kenyan Somali of the north-east and Eastleigh
+  - {culture: in, share: 0.0019}   # Kenyan Asians + non-citizen Asians (90,527), predominantly Indian-origin
+  - {culture: ar, share: 0.0012}   # Kenyan Arabs (59,021), coast
+  - {culture: gb, share: 0.0015}   # Kenyan Europeans + non-citizen Europeans (69,621), largely British
+email:
+  # Authored estimate: Gmail dominates (Android-first market); Yahoo persists among 35+.
+  domains:
+    - {domain: gmail.com, share: 0.82}
+    - {domain: yahoo.com, share: 0.08}
+    - {domain: outlook.com, share: 0.03}
+    - {domain: hotmail.com, share: 0.03}
+    - {domain: icloud.com, share: 0.02}
+    - {domain: ymail.com, share: 0.01}
+  patterns: ["{first}{last}", "{first}.{last}", "{first}{last}{yy}", "{last}{first}", "{f}{last}",
+             "{first}{digits:3}", "{first}.{last}{yy}", "{first}_{last}"]
+services:
+  # Alphanumeric sender IDs in Kenya are max 11 chars, no spaces (S9). Spellings are the
+  # common ones observed in Kenyan inboxes (authored, best effort; S9 confirms MPESA,
+  # Safaricom, JUMIA). Kinds are restricted to schema v1; the comment gives the proposed
+  # finer kind (see report: mobile_money, lender, betting).
+  # --- mobile money (proposed kind: mobile_money) ---
+  - {sender: MPESA, kind: bank, sender_type: alphanumeric}          # M-PESA confirmations, Fuliza, Lipa na M-PESA; THE key harvest target
+  - {sender: M-SHWARI, kind: bank, sender_type: alphanumeric}       # Safaricom/NCBA savings & loan
+  - {sender: AIRTELMONEY, kind: bank, sender_type: alphanumeric}    # Airtel Money
+  - {sender: T-KASH, kind: bank, sender_type: alphanumeric}         # Telkom T-Kash
+  # --- banks ---
+  - {sender: EquityBank, kind: bank, sender_type: alphanumeric}
+  - {sender: KCB, kind: bank, sender_type: alphanumeric}
+  - {sender: Co-opBank, kind: bank, sender_type: alphanumeric}
+  - {sender: NCBA, kind: bank, sender_type: alphanumeric}
+  - {sender: ABSA_KENYA, kind: bank, sender_type: alphanumeric}
+  - {sender: FamilyBank, kind: bank, sender_type: alphanumeric}
+  - {sender: StanbicBank, kind: bank, sender_type: alphanumeric}
+  - {sender: Timiza, kind: bank, sender_type: alphanumeric}         # Absa micro-loan wallet
+  # --- digital lenders (proposed kind: lender); repayment reminders, often several per day ---
+  - {sender: Tala, kind: bank, sender_type: alphanumeric}
+  - {sender: Branch, kind: bank, sender_type: alphanumeric}
+  - {sender: Zenka, kind: bank, sender_type: alphanumeric}
+  - {sender: ZashLoan, kind: bank, sender_type: alphanumeric}
+  - {sender: M-KOPA, kind: bank, sender_type: alphanumeric}
+  - {sender: Watu, kind: bank, sender_type: alphanumeric}
+  - {sender: HustlerFund, kind: government, sender_type: alphanumeric}   # state Financial Inclusion Fund (USSD *254#)
+  - {sender: "+254 7...", kind: bank, sender_type: number}          # unlicensed lenders / debt collectors text from plain mobile numbers
+  # --- telecom ---
+  - {sender: Safaricom, kind: telecom, sender_type: alphanumeric}
+  - {sender: Airtel, kind: telecom, sender_type: alphanumeric}
+  - {sender: Telkom, kind: telecom, sender_type: alphanumeric}
+  - {sender: Equitel, kind: telecom, sender_type: alphanumeric}
+  # --- OTP ---
+  - {sender: Google, kind: otp_service, sender_type: alphanumeric}
+  - {sender: "+254 7...", kind: otp_service, sender_type: number}   # many OTPs (WhatsApp, apps) arrive from long numbers
+  # --- utilities ---
+  - {sender: KPLC, kind: utility, sender_type: alphanumeric}        # Kenya Power prepaid token / outage notices
+  - {sender: NCWSC, kind: utility, sender_type: alphanumeric}       # Nairobi City Water & Sewerage
+  - {sender: ZukuFiber, kind: utility, sender_type: alphanumeric}   # home internet/TV
+  # --- government ---
+  - {sender: eCitizen, kind: government, sender_type: alphanumeric}
+  - {sender: KRA, kind: government, sender_type: alphanumeric}
+  - {sender: SHA, kind: government, sender_type: alphanumeric}      # Social Health Authority (replaced NHIF Oct 2024)
+  - {sender: NTSA, kind: government, sender_type: alphanumeric}
+  - {sender: HELB, kind: government, sender_type: alphanumeric}
+  - {sender: NSSF, kind: government, sender_type: alphanumeric}
+  # --- courier / delivery ---
+  - {sender: JUMIA, kind: courier, sender_type: alphanumeric}
+  - {sender: Kilimall, kind: courier, sender_type: alphanumeric}
+  - {sender: G4S, kind: courier, sender_type: alphanumeric}
+  - {sender: PostaKenya, kind: courier, sender_type: alphanumeric}
+  - {sender: Glovo, kind: delivery_food, sender_type: alphanumeric}
+  # --- transport ---
+  - {sender: Uber, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: Bolt, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: Little, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: KenyaAirway, kind: airline, sender_type: alphanumeric}
+  - {sender: JamboJet, kind: airline, sender_type: alphanumeric}
+  - {sender: KenyaRail, kind: rail, sender_type: alphanumeric}      # Madaraka Express (SGR) bookings
+  # --- retail / pharmacy / health ---
+  - {sender: NAIVAS, kind: retail, sender_type: alphanumeric}
+  - {sender: QUICKMART, kind: retail, sender_type: alphanumeric}
+  - {sender: CARREFOUR, kind: retail, sender_type: alphanumeric}
+  - {sender: GOODLIFE, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: "+254 20...", kind: doctor, sender_type: number}       # clinic / hospital reception line
+  # --- betting (proposed kind: betting); extremely common in Kenyan inboxes ---
+  - {sender: BETIKA, kind: retail, sender_type: alphanumeric}
+  - {sender: SPORTPESA, kind: retail, sender_type: alphanumeric}
+holidays:
+  # Public Holidays Act (Cap. 110) as amended 2024 (S10). Eid al-Fitr is a public holiday but
+  # follows the lunar calendar (no schema rule; proposed `rule: hijri+10-01`). Eid al-Adha is
+  # gazetted ad hoc. Sunday holidays move to Monday (no schema rule).
+  - {date: "01-01", name: "New Year's Day"}
+  - {rule: easter-2, name: Good Friday}
+  - {rule: easter+1, name: Easter Monday}
+  - {date: "05-01", name: Labour Day}
+  - {date: "06-01", name: Madaraka Day}
+  - {date: "10-10", name: Mazingira Day}
+  - {date: "10-20", name: Mashujaa Day}
+  - {date: "12-12", name: Jamhuri Day}
+  - {date: "12-25", name: Christmas Day}
+  - {date: "12-26", name: Boxing Day}
+popular_apps:
+  # Every package verified on Google Play (gl=KE) on 2026-11-20 (S11): HTTP 200, title and
+  # developer shown in ke.SOURCES.md. Categories beyond the schema's list: social,
+  # entertainment, betting.
+  - {package: com.safaricom.mpesa.lifestyle, name: "M-PESA (My OneApp)", category: banking}
+  - {package: com.airtel.africa.selfcare, name: My Airtel, category: banking}
+  - {package: ke.co.equitygroup.equitymobile, name: Equity Mobile, category: banking}
+  - {package: com.kcb.mobilebanking.android.mbp, name: KCB Mobile, category: banking}
+  - {package: com.mcoopcash.retail6, name: Co-op Bank Mobile, category: banking}
+  - {package: com.nicbank.android, name: NCBA NOW, category: banking}
+  - {package: com.loopdfs.consumer, name: NCBA Loop, category: banking}
+  - {package: ke.co.absa.digitalwallet, name: Timiza, category: banking}
+  - {package: com.mode.familykenya.ui, name: "PesaPap (Family Bank)", category: banking}
+  - {package: com.inventureaccess.safarirahisi, name: Tala, category: finance}
+  - {package: com.branch_international.branch.branch_demo_android, name: Branch, category: finance}
+  - {package: com.zenkafinance.microloans, name: Zenka, category: finance}
+  - {package: com.kopakash, name: Zash Loan, category: finance}
+  - {package: ke.zk.pesa.loanapp, name: ZK Pesa, category: finance}
+  - {package: com.mkopa.app, name: M-KOPA, category: finance}
+  - {package: com.watuke.app, name: Watu, category: finance}
+  - {package: com.whatsapp, name: WhatsApp, category: messaging}
+  - {package: org.telegram.messenger, name: Telegram, category: messaging}
+  - {package: com.facebook.katana, name: Facebook, category: social}
+  - {package: com.instagram.android, name: Instagram, category: social}
+  - {package: com.zhiliaoapp.musically, name: TikTok, category: social}
+  - {package: com.twitter.android, name: X, category: social}
+  - {package: com.ubercab, name: Uber, category: transport}
+  - {package: ee.mtakso.client, name: Bolt, category: transport}
+  - {package: com.craftsilicon.littlecabrider, name: Little, category: transport}
+  - {package: com.kenyaairways.prodapp, name: Kenya Airways, category: transport}
+  - {package: com.glovo, name: Glovo, category: food}
+  - {package: com.jumia.android, name: Jumia, category: shopping}
+  - {package: net.kilimall.shop, name: Kilimall, category: shopping}
+  - {package: com.naivas.online, name: Naivas Online, category: shopping}
+  - {package: newsapp.citizentv.royalmedia.citizentvnews, name: Citizen Digital, category: news}
+  - {package: ke.go.ecitizen, name: eCitizen, category: government}
+  - {package: com.kra.mservices, name: KRA M-Service, category: government}
+  - {package: ke.go.ntsa, name: NTSA, category: government}
+  - {package: ke.go.dha.afyangu, name: "Afyangu (SHA)", category: health}
+  - {package: com.app.betika.android, name: Betika, category: betting}
+  - {package: com.pevans.sportpesa.ke, name: SportPesa, category: betting}
+  - {package: com.afmobi.boomplayer, name: Boomplay, category: entertainment}
+  - {package: com.opera.mini.native, name: Opera Mini, category: entertainment}

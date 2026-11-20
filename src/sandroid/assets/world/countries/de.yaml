@@ -1,0 +1,749 @@
+# Sandroid world pack: country de. Sources: de.SOURCES.md
+pack: country
+schema: 1
+country: de
+name: Germany
+languages: {de: 1.0}
+timezones: [Europe/Berlin]
+date_format: dd.MM.yyyy
+time_format: HH:mm
+currency: {code: EUR, symbol: €, format: '49,99 €'}
+phone:
+  country_code: '49'
+  trunk_prefix: '0'
+  national_format_examples: [0171 2345678, 0151 23456789, 030 12345678, 089 1234567]
+  mobile:
+    realistic:
+      - {prefix: '1511', length: 11, operator: Telekom}
+      - {prefix: '1512', length: 11, operator: Telekom}
+      - {prefix: '1514', length: 11, operator: Telekom}
+      - {prefix: '1515', length: 11, operator: Telekom}
+      - {prefix: '1516', length: 11, operator: Telekom}
+      - {prefix: '1517', length: 11, operator: Telekom}
+      - {prefix: '160', length: 10, operator: Telekom}
+      - {prefix: '170', length: 10, operator: Telekom}
+      - {prefix: '171', length: 10, operator: Telekom}
+      - {prefix: '175', length: 10, operator: Telekom}
+      - {prefix: '1520', length: 11, operator: Vodafone}
+      - {prefix: '1522', length: 11, operator: Vodafone}
+      - {prefix: '1523', length: 11, operator: Vodafone}
+      - {prefix: '1525', length: 11, operator: Vodafone}
+      - {prefix: '1526', length: 11, operator: Vodafone}
+      - {prefix: '162', length: 10, operator: Vodafone}
+      - {prefix: '172', length: 10, operator: Vodafone}
+      - {prefix: '173', length: 10, operator: Vodafone}
+      - {prefix: '174', length: 10, operator: Vodafone}
+      - {prefix: '1573', length: 11, operator: O2}
+      - {prefix: '1575', length: 11, operator: O2}
+      - {prefix: '1577', length: 11, operator: O2}
+      - {prefix: '1578', length: 11, operator: O2}
+      - {prefix: '1579', length: 11, operator: O2}
+      - {prefix: '1590', length: 11, operator: O2}
+      - {prefix: '163', length: 10, operator: O2}
+      - {prefix: '177', length: 10, operator: O2}
+      - {prefix: '178', length: 10, operator: O2}
+      - {prefix: '179', length: 10, operator: O2}
+      - {prefix: '176', length: 11, operator: O2}
+      - {prefix: '1555', length: 11, operator: 1&1}
+      - {prefix: '1556', length: 11, operator: 1&1}
+      - {prefix: '1521', length: 11, operator: Lycamobile}
+    unallocated:
+      - {prefix: '1504', length: 11, note: '(0)15-040..049 listed free by BNetzA (Freie RNB, 09.03.2022) and absent from the allocated-block list (Stand 25.08.2025)', source: 'S3,S4'}
+      - {prefix: '1505', length: 11, note: '(0)15-050..059 listed free by BNetzA (Freie RNB, 09.03.2022) and absent from the allocated-block list (Stand 25.08.2025)', source: 'S3,S4'}
+      - {prefix: '1506', length: 11, note: '(0)15-060..069 listed free by BNetzA (Freie RNB, 09.03.2022) and absent from the allocated-block list (Stand 25.08.2025)', source: 'S3,S4'}
+      - {prefix: '1507', length: 11, note: '(0)15-070..079 listed free by BNetzA (Freie RNB, 09.03.2022) and absent from the allocated-block list (Stand 25.08.2025)', source: 'S3,S4'}
+      - {prefix: '1508', length: 11, note: '(0)15-080..089 listed free by BNetzA (Freie RNB, 09.03.2022) and absent from the allocated-block list (Stand 25.08.2025)', source: 'S3,S4'}
+      - {prefix: '1509', length: 11, note: '(0)15-090..099 listed free by BNetzA (Freie RNB, 09.03.2022) and absent from the allocated-block list (Stand 25.08.2025)', source: 'S3,S4'}
+      - {prefix: '1584', length: 11, note: '(0)15-840..849 listed free by BNetzA (Freie RNB, 09.03.2022) and absent from the allocated-block list (Stand 25.08.2025)', source: 'S3,S4'}
+      - {prefix: '1585', length: 11, note: '(0)15-850..859 listed free by BNetzA (Freie RNB, 09.03.2022) and absent from the allocated-block list (Stand 25.08.2025)', source: 'S3,S4'}
+      - {prefix: '1586', length: 11, note: '(0)15-860..869 listed free by BNetzA (Freie RNB, 09.03.2022) and absent from the allocated-block list (Stand 25.08.2025)', source: 'S3,S4'}
+      - {prefix: '1587', length: 11, note: '(0)15-870..879 listed free by BNetzA (Freie RNB, 09.03.2022) and absent from the allocated-block list (Stand 25.08.2025)', source: 'S3,S4'}
+    fiction:
+      - {range: 1713920000-1713920099, note: 'BNetzA drama numbers, (0)171 39200 00-99'}
+      - {range: 17604069000-17604069099, note: 'BNetzA drama numbers, (0)176 040690 00-99'}
+      - {range: 15228817386-15228817386, note: BNetzA drama number (single)}
+      - {range: 15228895456-15228895456, note: BNetzA drama number (single)}
+      - {range: 15254599371-15254599371, note: BNetzA drama number (single)}
+      - {range: 1729925904-1729925904, note: BNetzA drama number (single)}
+      - {range: 1729968532-1729968532, note: BNetzA drama number (single)}
+      - {range: 1729973185-1729973186, note: BNetzA drama numbers (two singles)}
+      - {range: 1729980752-1729980752, note: BNetzA drama number (single)}
+      - {range: 1749091317-1749091317, note: BNetzA drama number (single)}
+      - {range: 1749464308-1749464308, note: BNetzA drama number (single)}
+  landline:
+    cities:
+      - {city: Berlin, area_code: '30', subscriber_length: 8}
+      - {city: Hamburg, area_code: '40', subscriber_length: 8}
+      - {city: München, area_code: '89', subscriber_length: 8}
+      - {city: Köln, area_code: '221', subscriber_length: 7}
+      - {city: Frankfurt am Main, area_code: '69', subscriber_length: 8}
+      - {city: Stuttgart, area_code: '711', subscriber_length: 7}
+      - {city: Düsseldorf, area_code: '211', subscriber_length: 7}
+      - {city: Leipzig, area_code: '341', subscriber_length: 7}
+      - {city: Dortmund, area_code: '231', subscriber_length: 7}
+      - {city: Essen, area_code: '201', subscriber_length: 7}
+      - {city: Bremen, area_code: '421', subscriber_length: 7}
+      - {city: Dresden, area_code: '351', subscriber_length: 7}
+      - {city: Hannover, area_code: '511', subscriber_length: 7}
+      - {city: Nürnberg, area_code: '911', subscriber_length: 7}
+      - {city: Freiburg im Breisgau, area_code: '761', subscriber_length: 7}
+    fiction:
+      - {range: 3023125000-3023125999, note: BNetzA drama numbers Berlin 030 23125 000-999}
+      - {range: 6990009000-6990009999, note: BNetzA drama numbers Frankfurt 069 90009 000-999}
+      - {range: 4066969000-4066969999, note: BNetzA drama numbers Hamburg 040 66969 000-999}
+      - {range: 2214710000-2214710999, note: BNetzA drama numbers Köln 0221 4710 000-999}
+      - {range: 8999998000-8999998999, note: BNetzA drama numbers München 089 99998 000-999}
+  validation_note: 'phonenumbers 9.0.43: unallocated (0)1504x-1509x and (0)1584x-1587x parse as valid MOBILE (libphonenumber accepts all of 015[0-9]); (0)153x/(0)154x were NOT used because libphonenumber rejects them. All drama numbers (mobile and landline) parse as valid MOBILE / FIXED_LINE. Mobile number portability means the prefix does not prove the current operator.'
+carriers:
+  - {name: Telekom, sim_operator: Telekom.de, mccmnc: '26201', share: 0.34}
+  - {name: O2, sim_operator: o2 - de, mccmnc: '26203', share: 0.33}
+  - {name: Vodafone, sim_operator: Vodafone.de, mccmnc: '26202', share: 0.27}
+  - {name: 1&1, sim_operator: 1&1, mccmnc: '26223', share: 0.06}
+cities:
+  - {name: Berlin, lat: 52.52, lon: 13.405, population: 3760000, area_code: '30', postcodes: ['10115', '10178', '10243', '10437', '10551', '10969', '12043', '12555', '13353', '14057'], districts: [Mitte, Kreuzberg, Friedrichshain, Prenzlauer Berg, Neukölln, Charlottenburg, Schöneberg, Spandau, Pankow, Moabit]}
+  - {name: Hamburg, lat: 53.5511, lon: 9.9937, population: 1910000, area_code: '40', postcodes: ['20095', '20249', '20357', '21073', '22041', '22301', '22765'], districts: [Altona, Eimsbüttel, St. Pauli, Winterhude, Barmbek, Wandsbek, Harburg, Ottensen, Eppendorf]}
+  - {name: München, lat: 48.1374, lon: 11.5755, population: 1510000, area_code: '89', postcodes: ['80331', '80469', '80634', '80796', '81369', '81541', '81667'], districts: [Altstadt-Lehel, Schwabing, Maxvorstadt, Haidhausen, Sendling, Giesing, Pasing, Bogenhausen, Neuhausen]}
+  - {name: Köln, lat: 50.9375, lon: 6.9603, population: 1090000, area_code: '221', postcodes: ['50667', '50672', '50733', '50823', '50937', '51063', '51103'], districts: [Innenstadt, Ehrenfeld, Nippes, Deutz, Lindenthal, Sülz, Kalk, Mülheim]}
+  - {name: Frankfurt am Main, lat: 50.1109, lon: 8.6821, population: 770000, area_code: '69', postcodes: ['60311', '60313', '60316', '60385', '60487', '60594'], districts: [Innenstadt, Sachsenhausen, Bornheim, Nordend, Bockenheim, Gallus, Westend]}
+  - {name: Stuttgart, lat: 48.7758, lon: 9.1829, population: 630000, area_code: '711', postcodes: ['70173', '70176', '70182', '70190', '70372', '70469'], districts: [Mitte, West, Bad Cannstatt, Feuerbach, Vaihingen, Degerloch]}
+  - {name: Düsseldorf, lat: 51.2277, lon: 6.7735, population: 630000, area_code: '211', postcodes: ['40210', '40211', '40213', '40223', '40476', '40545'], districts: [Altstadt, Pempelfort, Bilk, Oberkassel, Flingern, Derendorf]}
+  - {name: Leipzig, lat: 51.3397, lon: 12.3731, population: 620000, area_code: '341', postcodes: ['04103', 04109, '04155', 04229, '04275', '04315'], districts: [Zentrum, Connewitz, Plagwitz, Gohlis, Südvorstadt, Reudnitz]}
+  - {name: Dortmund, lat: 51.5136, lon: 7.4653, population: 600000, area_code: '231', postcodes: ['44135', '44137', '44139', '44141', '44225', '44339'], districts: [Innenstadt-West, Innenstadt-Nord, Hörde, Aplerbeck, Hombruch]}
+  - {name: Essen, lat: 51.4556, lon: 7.0116, population: 580000, area_code: '201', postcodes: ['45127', '45128', '45130', '45138', '45147', '45259'], districts: [Rüttenscheid, Altenessen, Steele, Kettwig, Frohnhausen]}
+  - {name: Bremen, lat: 53.0793, lon: 8.8017, population: 570000, area_code: '421', postcodes: ['28195', '28203', '28209', '28211', '28215', '28259'], districts: [Mitte, Neustadt, Schwachhausen, Findorff, Vegesack, Ostertor]}
+  - {name: Dresden, lat: 51.0504, lon: 13.7373, population: 560000, area_code: '351', postcodes: ['01067', 01069, 01097, 01099, '01277', 01309], districts: [Altstadt, Neustadt, Blasewitz, Striesen, Pieschen, Plauen]}
+  - {name: Hannover, lat: 52.3759, lon: 9.732, population: 540000, area_code: '511', postcodes: ['30159', '30161', '30163', '30169', '30173', '30451'], districts: [Mitte, List, Linden, Südstadt, Oststadt, Döhren]}
+  - {name: Nürnberg, lat: 49.4521, lon: 11.0767, population: 530000, area_code: '911', postcodes: ['90402', '90403', '90408', '90419', '90429', '90459'], districts: [Altstadt, St. Johannis, Gostenhof, Südstadt, Maxfeld]}
+  - {name: Freiburg im Breisgau, lat: 47.999, lon: 7.8421, population: 237000, area_code: '761', postcodes: ['79098', '79100', '79102', '79104', '79106', '79110'], districts: [Altstadt, Wiehre, Herdern, Stühlinger, Vauban]}
+streets: [Hauptstraße, Schulstraße, Gartenstraße, Bahnhofstraße, Dorfstraße, Bergstraße, Birkenweg, Lindenstraße, Kirchstraße, Waldstraße, Ringstraße, Schillerstraße, Goethestraße, Wiesenweg, Am Sportplatz, Jahnstraße, Mühlenweg, Amselweg, Buchenweg, Rosenstraße, Feldstraße, Friedhofstraße, Eichenweg, Lindenweg, Wiesenstraße, Mozartstraße, Ahornweg, Kirchweg, Industriestraße, Am Bahnhof, Mittelstraße, Talstraße, Poststraße, Raiffeisenstraße, Blumenstraße, Beethovenstraße, Uhlandstraße, Tulpenweg, Finkenweg, Breslauer Straße, Kantstraße, Marktplatz, Marktstraße, Neue Straße, Parkstraße, Sonnenweg, Erlenweg, Fliederweg, Brunnenstraße, Kiefernweg, Lessingstraße, Mühlenstraße, Fasanenweg, Drosselweg, Tannenweg, Danziger Straße, Königsberger Straße, Friedrichstraße, Wilhelmstraße, Kastanienallee, Bismarckstraße, Lerchenweg, Meisenweg, Steinweg, Am Markt, Kirchplatz]
+address_format: '{street} {number}, {postcode} {city}'
+places:
+  - {category: park, name: Tiergarten, city: Berlin, lat: 52.5139, lon: 13.3569}
+  - {category: park, name: Englischer Garten, city: München, lat: 48.1528, lon: 11.5919}
+  - {category: park, name: Planten un Blomen, city: Hamburg, lat: 53.5611, lon: 9.9834}
+  - {category: park, name: Palmengarten, city: Frankfurt am Main, lat: 50.1236, lon: 8.6556}
+  - {category: park, name: Großer Garten, city: Dresden, lat: 51.0375, lon: 13.7631}
+  - {category: park, name: Clara-Zetkin-Park, city: Leipzig, lat: 51.3306, lon: 12.3567}
+  - {category: park, name: Tempelhofer Feld, city: Berlin, lat: 52.476, lon: 13.395}
+  - {category: landmark, name: Brandenburger Tor, city: Berlin, lat: 52.5163, lon: 13.3777}
+  - {category: landmark, name: Kölner Dom, city: Köln, lat: 50.9414, lon: 6.9583}
+  - {category: landmark, name: Marienplatz, city: München, lat: 48.1373, lon: 11.5755}
+  - {category: landmark, name: Elbphilharmonie, city: Hamburg, lat: 53.5414, lon: 9.9842}
+  - {category: landmark, name: Frauenkirche, city: Dresden, lat: 51.0519, lon: 13.7417}
+  - {category: landmark, name: Römerberg, city: Frankfurt am Main, lat: 50.1103, lon: 8.6822}
+  - {category: landmark, name: Schloss Neuschwanstein, city: Schwangau, lat: 47.5575, lon: 10.7494}
+  - {category: landmark, name: Reichstagsgebäude, city: Berlin, lat: 52.5186, lon: 13.3761}
+  - {category: landmark, name: Heidelberger Schloss, city: Heidelberg, lat: 49.41, lon: 8.716}
+  - {category: station, name: Berlin Hauptbahnhof, city: Berlin, lat: 52.525, lon: 13.3694}
+  - {category: station, name: Hamburg Hauptbahnhof, city: Hamburg, lat: 53.5528, lon: 10.0064}
+  - {category: station, name: München Hauptbahnhof, city: München, lat: 48.1408, lon: 11.555}
+  - {category: station, name: Köln Hauptbahnhof, city: Köln, lat: 50.9425, lon: 6.9581}
+  - {category: station, name: Frankfurt (Main) Hauptbahnhof, city: Frankfurt am Main, lat: 50.1069, lon: 8.6625}
+  - {category: station, name: Leipzig Hauptbahnhof, city: Leipzig, lat: 51.3453, lon: 12.3822}
+  - {category: airport, name: Flughafen BER, city: Schönefeld, lat: 52.3667, lon: 13.5033}
+  - {category: airport, name: Flughafen Frankfurt, city: Frankfurt am Main, lat: 50.0333, lon: 8.5706}
+  - {category: airport, name: Flughafen München, city: Freising, lat: 48.3539, lon: 11.7861}
+  - {category: airport, name: Flughafen Hamburg, city: Hamburg, lat: 53.6303, lon: 9.9911}
+  - {category: airport, name: Flughafen Düsseldorf, city: Düsseldorf, lat: 51.2894, lon: 6.7667}
+  - {category: beach, name: Strand Warnemünde, city: Rostock, lat: 54.18, lon: 12.08}
+  - {category: beach, name: Westerland, city: Sylt, lat: 54.9077, lon: 8.3088}
+  - {category: beach, name: Timmendorfer Strand, city: Timmendorfer Strand, lat: 53.9944, lon: 10.7825}
+  - {category: beach, name: Binz, city: Binz, lat: 54.401, lon: 13.611}
+  - {category: mountain, name: Zugspitze, city: Garmisch-Partenkirchen, lat: 47.4211, lon: 10.9853}
+  - {category: mountain, name: Brocken, city: Wernigerode, lat: 51.8006, lon: 10.6172}
+  - {category: mountain, name: Feldberg, city: Feldberg (Schwarzwald), lat: 47.8786, lon: 8.0111}
+  - {category: museum, name: Pergamonmuseum, city: Berlin, lat: 52.521, lon: 13.396}
+  - {category: museum, name: Deutsches Museum, city: München, lat: 48.13, lon: 11.5833}
+  - {category: museum, name: Mercedes-Benz Museum, city: Stuttgart, lat: 48.7886, lon: 9.2338}
+  - {category: museum, name: Miniatur Wunderland, city: Hamburg, lat: 53.5439, lon: 9.9889}
+  - {category: stadium, name: Allianz Arena, city: München, lat: 48.2188, lon: 11.6248}
+  - {category: stadium, name: Signal Iduna Park, city: Dortmund, lat: 51.4925, lon: 7.4517}
+  - {category: stadium, name: Olympiastadion, city: Berlin, lat: 52.5147, lon: 13.2394}
+  - {category: market, name: Viktualienmarkt, city: München, lat: 48.1353, lon: 11.5761}
+  - {category: market, name: Fischmarkt, city: Hamburg, lat: 53.5456, lon: 9.9543}
+  - {category: lake, name: Wannsee, city: Berlin, lat: 52.4433, lon: 13.1614}
+  - {category: lake, name: Außenalster, city: Hamburg, lat: 53.565, lon: 10.01}
+  - {category: lake, name: Starnberger See, city: Starnberg, lat: 47.998, lon: 11.341}
+  - {category: lake, name: Bodensee, city: Konstanz, lat: 47.66, lon: 9.178}
+  - {category: lake, name: Tegernsee, city: Tegernsee, lat: 47.711, lon: 11.758}
+names:
+  culture: de
+  female:
+    - {name: Sabine, w: 1.0}
+    - {name: Petra, w: 1.0}
+    - {name: Andrea, w: 1.0}
+    - {name: Claudia, w: 1.0}
+    - {name: Susanne, w: 1.0}
+    - {name: Nicole, w: 1.0}
+    - {name: Stefanie, w: 1.0}
+    - {name: Julia, w: 0.7}
+    - {name: Katrin, w: 0.7}
+    - {name: Anja, w: 0.7}
+    - {name: Melanie, w: 0.7}
+    - {name: Sandra, w: 0.7}
+    - {name: Christina, w: 0.7}
+    - {name: Sarah, w: 0.7}
+    - {name: Laura, w: 0.7}
+    - {name: Lisa, w: 0.7}
+    - {name: Anna, w: 0.7}
+    - {name: Katharina, w: 0.7}
+    - {name: Martina, w: 0.7}
+    - {name: Monika, w: 0.7}
+    - {name: Birgit, w: 0.7}
+    - {name: Heike, w: 0.7}
+    - {name: Karin, w: 0.7}
+    - {name: Ursula, w: 0.7}
+    - {name: Gabriele, w: 0.7}
+    - {name: Kerstin, w: 0.7}
+    - {name: Tanja, w: 0.7}
+    - {name: Daniela, w: 0.7}
+    - {name: Silke, w: 0.7}
+    - {name: Jessica, w: 0.45}
+    - {name: Jennifer, w: 0.45}
+    - {name: Vanessa, w: 0.45}
+    - {name: Lena, w: 0.45}
+    - {name: Kathrin, w: 0.45}
+    - {name: Christine, w: 0.45}
+    - {name: Renate, w: 0.45}
+    - {name: Brigitte, w: 0.45}
+    - {name: Ute, w: 0.45}
+    - {name: Angelika, w: 0.45}
+    - {name: Elke, w: 0.45}
+    - {name: Simone, w: 0.45}
+    - {name: Bianca, w: 0.45}
+    - {name: Nadine, w: 0.45}
+    - {name: Jana, w: 0.45}
+    - {name: Franziska, w: 0.45}
+    - {name: Annika, w: 0.45}
+    - {name: Michelle, w: 0.45}
+    - {name: Manuela, w: 0.45}
+    - {name: Marion, w: 0.45}
+    - {name: Sonja, w: 0.45}
+    - {name: Yvonne, w: 0.45}
+    - {name: Cornelia, w: 0.45}
+    - {name: Barbara, w: 0.45}
+    - {name: Maria, w: 0.45}
+    - {name: Elisabeth, w: 0.45}
+    - {name: Alexandra, w: 0.45}
+    - {name: Carolin, w: 0.45}
+    - {name: Miriam, w: 0.45}
+    - {name: Nina, w: 0.45}
+    - {name: Johanna, w: 0.45}
+    - {name: Leonie, w: 0.45}
+    - {name: Hannah, w: 0.45}
+    - {name: Marie, w: 0.45}
+    - {name: Sophie, w: 0.45}
+    - {name: Lea, w: 0.45}
+    - {name: Emilia, w: 0.35}
+    - {name: Emma, w: 0.344}
+    - {name: Sophia, w: 0.332}
+    - {name: Clara, w: 0.277}
+    - {name: Mia, w: 0.255}
+    - {name: Ingrid, w: 0.25}
+    - {name: Helga, w: 0.25}
+    - {name: Doris, w: 0.25}
+    - {name: Diana, w: 0.25}
+    - {name: Anke, w: 0.25}
+    - {name: Antje, w: 0.25}
+    - {name: Bettina, w: 0.25}
+    - {name: Jacqueline, w: 0.25}
+    - {name: Janina, w: 0.25}
+    - {name: Carina, w: 0.25}
+    - {name: Jasmin, w: 0.25}
+    - {name: Svenja, w: 0.25}
+    - {name: Saskia, w: 0.25}
+    - {name: Natalie, w: 0.25}
+    - {name: Kristina, w: 0.25}
+    - {name: Juliane, w: 0.25}
+    - {name: Ramona, w: 0.25}
+    - {name: Mandy, w: 0.25}
+    - {name: Tatjana, w: 0.25}
+    - {name: Ines, w: 0.25}
+    - {name: Dagmar, w: 0.25}
+    - {name: Gisela, w: 0.25}
+    - {name: Ilse, w: 0.25}
+    - {name: Heidi, w: 0.25}
+    - {name: Rita, w: 0.25}
+    - {name: Iris, w: 0.25}
+    - {name: Regina, w: 0.25}
+    - {name: Sylvia, w: 0.25}
+    - {name: Beate, w: 0.25}
+    - {name: Anne, w: 0.25}
+    - {name: Charlotte, w: 0.25}
+    - {name: Helena, w: 0.223}
+    - {name: Luisa, w: 0.221}
+    - {name: Ella, w: 0.216}
+    - {name: Lara, w: 0.216}
+    - {name: Amelie, w: 0.208}
+    - {name: Mila, w: 0.202}
+    - {name: Paula, w: 0.182}
+    - {name: Nora, w: 0.182}
+    - {name: Lina, w: 0.18}
+    - {name: Antonia, w: 0.168}
+    - {name: Emily, w: 0.162}
+    - {name: Marlene, w: 0.156}
+    - {name: Valentina, w: 0.156}
+    - {name: Mathilda, w: 0.152}
+    - {name: Elisa, w: 0.15}
+    - {name: Olivia, w: 0.148}
+    - {name: Elena, w: 0.142}
+    - {name: Sofia, w: 0.138}
+    - {name: Lilly, w: 0.138}
+    - {name: Romy, w: 0.136}
+    - {name: Theresa, w: 0.134}
+    - {name: Magdalena, w: 0.134}
+    - {name: Maja, w: 0.134}
+    - {name: Ida, w: 0.134}
+    - {name: Sara, w: 0.132}
+    - {name: Hanna, w: 0.131}
+    - {name: Isabella, w: 0.131}
+    - {name: Matilda, w: 0.119}
+    - {name: Carlotta, w: 0.115}
+    - {name: Victoria, w: 0.109}
+    - {name: Alma, w: 0.109}
+    - {name: Lia, w: 0.107}
+    - {name: Aurelia, w: 0.101}
+    - {name: Klara, w: 0.097}
+    - {name: Paulina, w: 0.097}
+    - {name: Leni, w: 0.095}
+    - {name: Maya, w: 0.095}
+    - {name: Greta, w: 0.093}
+    - {name: Alina, w: 0.093}
+    - {name: Frida, w: 0.093}
+    - {name: Josephine, w: 0.089}
+  male:
+    - {name: Thomas, w: 1.0}
+    - {name: Michael, w: 1.0}
+    - {name: Andreas, w: 1.0}
+    - {name: Stefan, w: 1.0}
+    - {name: Christian, w: 1.0}
+    - {name: Markus, w: 1.0}
+    - {name: Peter, w: 0.7}
+    - {name: Klaus, w: 0.7}
+    - {name: Jürgen, w: 0.7}
+    - {name: Frank, w: 0.7}
+    - {name: Matthias, w: 0.7}
+    - {name: Martin, w: 0.7}
+    - {name: Alexander, w: 0.7}
+    - {name: Daniel, w: 0.7}
+    - {name: Sebastian, w: 0.7}
+    - {name: Tobias, w: 0.7}
+    - {name: Jan, w: 0.7}
+    - {name: Wolfgang, w: 0.7}
+    - {name: Uwe, w: 0.7}
+    - {name: Ralf, w: 0.7}
+    - {name: Dirk, w: 0.7}
+    - {name: Sven, w: 0.7}
+    - {name: Florian, w: 0.7}
+    - {name: Hans, w: 0.45}
+    - {name: Dieter, w: 0.45}
+    - {name: Manfred, w: 0.45}
+    - {name: Werner, w: 0.45}
+    - {name: Bernd, w: 0.45}
+    - {name: Torsten, w: 0.45}
+    - {name: Jens, w: 0.45}
+    - {name: Oliver, w: 0.45}
+    - {name: Marco, w: 0.45}
+    - {name: Dennis, w: 0.45}
+    - {name: Patrick, w: 0.45}
+    - {name: Philipp, w: 0.45}
+    - {name: Tim, w: 0.45}
+    - {name: Kevin, w: 0.45}
+    - {name: Marcel, w: 0.45}
+    - {name: Sascha, w: 0.45}
+    - {name: Holger, w: 0.45}
+    - {name: Rainer, w: 0.45}
+    - {name: Jörg, w: 0.45}
+    - {name: Karl-Heinz, w: 0.45}
+    - {name: Heinz, w: 0.45}
+    - {name: Helmut, w: 0.45}
+    - {name: Gerhard, w: 0.45}
+    - {name: Günter, w: 0.45}
+    - {name: Horst, w: 0.45}
+    - {name: Volker, w: 0.45}
+    - {name: Carsten, w: 0.45}
+    - {name: Björn, w: 0.45}
+    - {name: Nils, w: 0.45}
+    - {name: Simon, w: 0.45}
+    - {name: Johannes, w: 0.45}
+    - {name: Benjamin, w: 0.45}
+    - {name: Dominik, w: 0.45}
+    - {name: Fabian, w: 0.45}
+    - {name: Niklas, w: 0.45}
+    - {name: Lukas, w: 0.45}
+    - {name: Jonas, w: 0.45}
+    - {name: Christoph, w: 0.45}
+    - {name: Mario, w: 0.45}
+    - {name: Robert, w: 0.45}
+    - {name: René, w: 0.45}
+    - {name: Steffen, w: 0.45}
+    - {name: Thorsten, w: 0.45}
+    - {name: André, w: 0.45}
+    - {name: Heiko, w: 0.45}
+    - {name: Kai, w: 0.45}
+    - {name: Maximilian, w: 0.35}
+    - {name: Felix, w: 0.323}
+    - {name: Norbert, w: 0.25}
+    - {name: Walter, w: 0.25}
+    - {name: Reinhard, w: 0.25}
+    - {name: Udo, w: 0.25}
+    - {name: Detlef, w: 0.25}
+    - {name: Lars, w: 0.25}
+    - {name: Timo, w: 0.25}
+    - {name: Marc, w: 0.25}
+    - {name: Max, w: 0.25}
+    - {name: Moritz, w: 0.25}
+    - {name: Leon, w: 0.25}
+    - {name: Paul, w: 0.25}
+    - {name: Julian, w: 0.25}
+    - {name: David, w: 0.25}
+    - {name: Erik, w: 0.25}
+    - {name: Hendrik, w: 0.25}
+    - {name: Mike, w: 0.25}
+    - {name: Rolf, w: 0.25}
+    - {name: Bernhard, w: 0.25}
+    - {name: Georg, w: 0.25}
+    - {name: Josef, w: 0.25}
+    - {name: Karl, w: 0.25}
+    - {name: Ulrich, w: 0.25}
+    - {name: Hartmut, w: 0.25}
+    - {name: Lothar, w: 0.25}
+    - {name: Gerd, w: 0.25}
+    - {name: Joachim, w: 0.25}
+    - {name: Hans-Peter, w: 0.25}
+    - {name: Kurt, w: 0.25}
+    - {name: Mathias, w: 0.25}
+    - {name: Pascal, w: 0.25}
+    - {name: Jannik, w: 0.25}
+    - {name: Marvin, w: 0.25}
+    - {name: Luca, w: 0.25}
+    - {name: Anton, w: 0.239}
+    - {name: Jakob, w: 0.232}
+    - {name: Emil, w: 0.229}
+    - {name: Noah, w: 0.224}
+    - {name: Valentin, w: 0.2}
+    - {name: Leo, w: 0.198}
+    - {name: Vincent, w: 0.185}
+    - {name: Elias, w: 0.176}
+    - {name: Luis, w: 0.155}
+    - {name: Oskar, w: 0.152}
+    - {name: Theo, w: 0.152}
+    - {name: Samuel, w: 0.148}
+    - {name: Louis, w: 0.144}
+    - {name: Ferdinand, w: 0.13}
+    - {name: Jonathan, w: 0.123}
+    - {name: Theodor, w: 0.123}
+    - {name: Leopold, w: 0.12}
+    - {name: Ludwig, w: 0.118}
+    - {name: Liam, w: 0.118}
+    - {name: Levi, w: 0.115}
+    - {name: Ben, w: 0.109}
+    - {name: Gabriel, w: 0.109}
+    - {name: Henri, w: 0.1}
+    - {name: Julius, w: 0.097}
+    - {name: Raphael, w: 0.097}
+    - {name: Leonard, w: 0.094}
+    - {name: Linus, w: 0.091}
+    - {name: Matteo, w: 0.091}
+    - {name: Finn, w: 0.089}
+    - {name: Mateo, w: 0.089}
+    - {name: Adrian, w: 0.085}
+    - {name: Konstantin, w: 0.085}
+    - {name: Emilio, w: 0.085}
+    - {name: Adam, w: 0.08}
+    - {name: Benedikt, w: 0.079}
+    - {name: Luka, w: 0.079}
+    - {name: Rafael, w: 0.073}
+    - {name: Carlo, w: 0.073}
+    - {name: Nicolas, w: 0.071}
+  surnames:
+    - {name: Müller, w: 1.0}
+    - {name: Schmidt, w: 0.574}
+    - {name: Schneider, w: 0.415}
+    - {name: Fischer, w: 0.33}
+    - {name: Weber, w: 0.276}
+    - {name: Meyer, w: 0.238}
+    - {name: Wagner, w: 0.211}
+    - {name: Schulz, w: 0.189}
+    - {name: Bauer, w: 0.172}
+    - {name: Becker, w: 0.158}
+    - {name: Meier, w: 0.147}
+    - {name: Hoffmann, w: 0.137}
+    - {name: Koch, w: 0.128}
+    - {name: Klein, w: 0.121}
+    - {name: Richter, w: 0.115}
+    - {name: Wolf, w: 0.109}
+    - {name: Schwarz, w: 0.104}
+    - {name: Schäfer, w: 0.099}
+    - {name: Huber, w: 0.095}
+    - {name: Neumann, w: 0.091}
+    - {name: Maier, w: 0.088}
+    - {name: Mayer, w: 0.084}
+    - {name: Schröder, w: 0.081}
+    - {name: Braun, w: 0.079}
+    - {name: Berger, w: 0.076}
+    - {name: Schmid, w: 0.074}
+    - {name: Zimmermann, w: 0.072}
+    - {name: Schmitz, w: 0.07}
+    - {name: Schmitt, w: 0.068}
+    - {name: Hofmann, w: 0.066}
+    - {name: Krüger, w: 0.064}
+    - {name: Hartmann, w: 0.062}
+    - {name: Werner, w: 0.061}
+    - {name: Fuchs, w: 0.06}
+    - {name: Lange, w: 0.058}
+    - {name: Lehmann, w: 0.057}
+    - {name: König, w: 0.056}
+    - {name: Kaiser, w: 0.054}
+    - {name: Krause, w: 0.053}
+    - {name: Walter, w: 0.052}
+    - {name: Schulze, w: 0.051}
+    - {name: Lang, w: 0.05}
+    - {name: Keller, w: 0.049}
+    - {name: Peters, w: 0.048}
+    - {name: Herrmann, w: 0.048}
+    - {name: Winkler, w: 0.047}
+    - {name: Frank, w: 0.046}
+    - {name: Sommer, w: 0.045}
+    - {name: Steiner, w: 0.044}
+    - {name: Jung, w: 0.044}
+    - {name: Köhler, w: 0.043}
+    - {name: Baumann, w: 0.042}
+    - {name: Winter, w: 0.042}
+    - {name: Roth, w: 0.041}
+    - {name: Vogel, w: 0.041}
+    - {name: Scholz, w: 0.04}
+    - {name: Möller, w: 0.039}
+    - {name: Gruber, w: 0.039}
+    - {name: Graf, w: 0.038}
+    - {name: Schubert, w: 0.038}
+    - {name: Engel, w: 0.037}
+    - {name: Schuster, w: 0.037}
+    - {name: Stein, w: 0.036}
+    - {name: Friedrich, w: 0.036}
+    - {name: Beck, w: 0.035}
+    - {name: Hahn, w: 0.035}
+    - {name: Lorenz, w: 0.035}
+    - {name: Martin, w: 0.034}
+    - {name: Peter, w: 0.034}
+    - {name: Simon, w: 0.033}
+    - {name: Moser, w: 0.033}
+    - {name: Albrecht, w: 0.033}
+    - {name: Franke, w: 0.032}
+    - {name: Günther, w: 0.032}
+    - {name: Haas, w: 0.032}
+    - {name: Ludwig, w: 0.031}
+    - {name: Schumacher, w: 0.031}
+    - {name: Kraus, w: 0.031}
+    - {name: Thomas, w: 0.03}
+    - {name: Vogt, w: 0.03}
+    - {name: Jäger, w: 0.03}
+    - {name: Kaufmann, w: 0.029}
+    - {name: Heinrich, w: 0.029}
+    - {name: Weiß, w: 0.029}
+    - {name: Schreiber, w: 0.029}
+    - {name: Brunner, w: 0.028}
+    - {name: Hansen, w: 0.028}
+    - {name: Maus, w: 0.028}
+    - {name: Otto, w: 0.028}
+    - {name: Böhm, w: 0.027}
+    - {name: Bergmann, w: 0.027}
+    - {name: Paul, w: 0.027}
+    - {name: Brandt, w: 0.027}
+    - {name: Seidel, w: 0.026}
+    - {name: Kern, w: 0.026}
+    - {name: Hofer, w: 0.026}
+    - {name: Krämer, w: 0.026}
+    - {name: Dietrich, w: 0.026}
+    - {name: Arnold, w: 0.025}
+    - {name: Jansen, w: 0.025}
+    - {name: Kramer, w: 0.025}
+    - {name: Franz, w: 0.025}
+    - {name: Ernst, w: 0.025}
+    - {name: Kuhn, w: 0.024}
+    - {name: Lindner, w: 0.024}
+    - {name: Horn, w: 0.024}
+    - {name: Ziegler, w: 0.024}
+    - {name: Maurer, w: 0.024}
+    - {name: Ritter, w: 0.023}
+    - {name: Schulte, w: 0.023}
+    - {name: Pohl, w: 0.023}
+    - {name: Sauer, w: 0.023}
+    - {name: Pfeiffer, w: 0.023}
+    - {name: Busch, w: 0.023}
+    - {name: Voigt, w: 0.022}
+    - {name: Seifert, w: 0.022}
+    - {name: Bachmann, w: 0.022}
+    - {name: Wolff, w: 0.022}
+    - {name: Kühn, w: 0.018}
+    - {name: Thiel, w: 0.018}
+    - {name: Fiedler, w: 0.018}
+    - {name: Ebert, w: 0.018}
+    - {name: Brandl, w: 0.018}
+    - {name: Schütz, w: 0.018}
+    - {name: Wendt, w: 0.018}
+    - {name: Kuhlmann, w: 0.018}
+    - {name: Bock, w: 0.018}
+    - {name: Böttcher, w: 0.018}
+    - {name: Menzel, w: 0.018}
+    - {name: Kurz, w: 0.018}
+    - {name: Heinze, w: 0.018}
+    - {name: Seidl, w: 0.018}
+    - {name: Nowak, w: 0.018}
+    - {name: Kraft, w: 0.018}
+    - {name: Schilling, w: 0.018}
+    - {name: Hesse, w: 0.018}
+    - {name: Sander, w: 0.018}
+    - {name: Rieger, w: 0.018}
+    - {name: Wolter, w: 0.018}
+    - {name: Marx, w: 0.018}
+    - {name: Lenz, w: 0.018}
+    - {name: Stark, w: 0.018}
+    - {name: Hein, w: 0.018}
+    - {name: Ullrich, w: 0.018}
+    - {name: Kolb, w: 0.018}
+    - {name: Reuter, w: 0.018}
+    - {name: Thiele, w: 0.018}
+    - {name: Hoppe, w: 0.018}
+    - {name: Riedel, w: 0.018}
+    - {name: Gerlach, w: 0.018}
+    - {name: Engelhardt, w: 0.018}
+    - {name: Fritz, w: 0.018}
+    - {name: Schenk, w: 0.018}
+    - {name: Dietz, w: 0.018}
+    - {name: Wirth, w: 0.018}
+    - {name: Pietsch, w: 0.018}
+    - {name: Schröter, w: 0.018}
+    - {name: Hübner, w: 0.018}
+    - {name: Petersen, w: 0.018}
+    - {name: Frey, w: 0.018}
+    - {name: Schramm, w: 0.018}
+    - {name: Lutz, w: 0.018}
+    - {name: Walther, w: 0.018}
+    - {name: Lehner, w: 0.018}
+    - {name: Schuhmacher, w: 0.018}
+    - {name: Wiegand, w: 0.018}
+    - {name: Kunz, w: 0.018}
+    - {name: Behrens, w: 0.018}
+    - {name: Pfeifer, w: 0.018}
+    - {name: Barth, w: 0.018}
+    - {name: Unger, w: 0.018}
+    - {name: Siebert, w: 0.018}
+    - {name: Heinemann, w: 0.018}
+    - {name: Lorenzen, w: 0.018}
+    - {name: Kirchner, w: 0.018}
+  nicknames: {Alexander: Alex, Christian: Chris, Stefanie: Steffi, Katharina: Kathi, Daniel: Dani, Johannes: Jo, Michael: Micha, Sebastian: Basti, Tobias: Tobi, Maximilian: Max, Matthias: Matze, Andreas: Andi, Susanne: Susi, Gabriele: Gabi, Franziska: Franzi, Jennifer: Jenny, Christina: Tina, Thomas: Tom, Benjamin: Ben, Florian: Flo, Dominik: Domi, Nicole: Nici, Elisabeth: Lisa, Wolfgang: Wolfi}
+  display: '{first} {last}'
+# Shares = share of contacts from that diaspora/minority (official origin statistics, see SOURCES).
+# Cultures without a pack in this project (not listed as data): pl 0.024, ru (Russia+Kazakhstan, Russian-speaking) 0.034, ar (Syria/Iraq/Egypt) 0.022, uk 0.014, ro 0.013, sh (Bosnian/Croatian/Serbian/Macedonian) 0.017, sq (Kosovo) 0.007, el 0.0045, fa/prs (Afghanistan) 0.0056, ma 0.003, zh 0.0026
+cultures:
+  - {culture: tr, share: 0.031}
+  - {culture: it, share: 0.008}
+  - {culture: in, share: 0.0035}
+  - {culture: pk, share: 0.002}
+  - {culture: gb, share: 0.0015}
+email:
+  domains:
+    - {domain: gmail.com, share: 0.36}
+    - {domain: web.de, share: 0.17}
+    - {domain: gmx.de, share: 0.14}
+    - {domain: gmx.net, share: 0.05}
+    - {domain: t-online.de, share: 0.07}
+    - {domain: outlook.de, share: 0.04}
+    - {domain: hotmail.de, share: 0.03}
+    - {domain: icloud.com, share: 0.06}
+    - {domain: yahoo.de, share: 0.03}
+    - {domain: freenet.de, share: 0.02}
+    - {domain: posteo.de, share: 0.01}
+    - {domain: outlook.com, share: 0.02}
+  patterns: ['{first}.{last}', '{first}{last}', '{first}.{last}{yy}', '{f}{last}', '{first}{yy}', '{f}.{last}', '{last}.{first}', '{first}_{last}', '{first}{last}{nn}']
+services:
+  - {sender: DHL, kind: courier, sender_type: alphanumeric}
+  - {sender: Hermes, kind: courier, sender_type: alphanumeric}
+  - {sender: DPD, kind: courier, sender_type: alphanumeric}
+  - {sender: GLS, kind: courier, sender_type: alphanumeric}
+  - {sender: Sparkasse, kind: bank, sender_type: alphanumeric}
+  - {sender: Volksbank, kind: bank, sender_type: alphanumeric}
+  - {sender: ING, kind: bank, sender_type: alphanumeric}
+  - {sender: N26, kind: bank, sender_type: alphanumeric}
+  - {sender: Telekom, kind: telecom, sender_type: alphanumeric}
+  - {sender: Vodafone, kind: telecom, sender_type: alphanumeric}
+  - {sender: o2, kind: telecom, sender_type: alphanumeric}
+  - {sender: Google, kind: otp_service, sender_type: alphanumeric}
+  - {sender: PayPal, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Microsoft, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Doctolib, kind: doctor, sender_type: alphanumeric}
+  - {sender: +4930..., kind: doctor, sender_type: number}
+  - {sender: +4989..., kind: doctor, sender_type: number}
+  - {sender: Apotheke, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: Lieferando, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Wolt, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Uber, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: FREENOW, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: Lufthansa, kind: airline, sender_type: alphanumeric}
+  - {sender: Eurowings, kind: airline, sender_type: alphanumeric}
+  - {sender: DB Bahn, kind: rail, sender_type: alphanumeric}
+  - {sender: Buergeramt, kind: government, sender_type: alphanumeric}
+  - {sender: Amazon, kind: retail, sender_type: alphanumeric}
+  - {sender: Zalando, kind: retail, sender_type: alphanumeric}
+  - {sender: MediaMarkt, kind: retail, sender_type: alphanumeric}
+  - {sender: Stadtwerke, kind: utility, sender_type: alphanumeric}
+holidays:
+  - {date: 01-01, name: Neujahr}
+  - {date: 01-06, name: Heilige Drei Könige, regional: true}
+  - {date: 02-14, name: Valentinstag, observance: true}
+  - {rule: easter-2, name: Karfreitag}
+  - {rule: easter+0, name: Ostersonntag, observance: true}
+  - {rule: easter+1, name: Ostermontag}
+  - {date: 05-01, name: Tag der Arbeit}
+  - {rule: easter+39, name: Christi Himmelfahrt}
+  - {rule: easter+50, name: Pfingstmontag}
+  - {rule: easter+60, name: Fronleichnam, regional: true}
+  - {date: 08-15, name: Mariä Himmelfahrt, regional: true}
+  - {date: 10-03, name: Tag der Deutschen Einheit}
+  - {date: 10-31, name: Reformationstag, regional: true}
+  - {date: 11-01, name: Allerheiligen, regional: true}
+  - {date: 12-24, name: Heiligabend, observance: true}
+  - {date: 12-25, name: 1. Weihnachtstag}
+  - {date: 12-26, name: 2. Weihnachtstag}
+  - {date: 12-31, name: Silvester, observance: true}
+popular_apps:
+  - {package: com.whatsapp, name: WhatsApp, category: messaging}
+  - {package: org.telegram.messenger, name: Telegram, category: messaging}
+  - {package: com.google.android.apps.maps, name: Google Maps, category: transport}
+  - {package: com.ubercab, name: Uber, category: transport}
+  - {package: com.amazon.mShop.android.shopping, name: Amazon Shopping, category: shopping}
+  - {package: com.paypal.android.p2pmobile, name: PayPal, category: banking}
+  - {package: org.thoughtcrime.securesms, name: Signal, category: messaging}
+  - {package: com.starfinanz.smob.android.sfinanzstatus, name: Sparkasse, category: banking}
+  - {package: de.fiduciagad.banking.vr, name: VR Banking, category: banking}
+  - {package: de.ingdiba.bankingapp, name: ING Banking, category: banking}
+  - {package: com.dkbcodefactory.banking, name: DKB, category: banking}
+  - {package: de.number26.android, name: N26, category: banking}
+  - {package: de.commerzbanking.mobil, name: Commerzbank, category: banking}
+  - {package: de.comdirect.app, name: comdirect, category: banking}
+  - {package: de.traderepublic.app, name: Trade Republic, category: banking}
+  - {package: de.hafas.android.db, name: DB Navigator, category: transport}
+  - {package: taxi.android.client, name: FREENOW, category: transport}
+  - {package: de.flixbus.app, name: FlixBus, category: transport}
+  - {package: de.eos.uptrade.android.fahrinfo.berlin, name: BVG Fahrinfo, category: transport}
+  - {package: de.zalando.mobile, name: Zalando, category: shopping}
+  - {package: com.ebay.kleinanzeigen, name: Kleinanzeigen, category: shopping}
+  - {package: de.cellular.ottohybrid, name: OTTO, category: shopping}
+  - {package: com.lidl.eci.lidlplus, name: Lidl Plus, category: shopping}
+  - {package: de.payback.client.android, name: PAYBACK, category: shopping}
+  - {package: de.dhl.paket, name: Post & DHL, category: shopping}
+  - {package: de.tagesschau, name: tagesschau, category: news}
+  - {package: de.spiegel.android.app.spon, name: DER SPIEGEL, category: news}
+  - {package: com.netbiscuits.bild.android, name: BILD, category: news}
+  - {package: com.netbiscuits.kicker, name: kicker, category: news}
+  - {package: com.yopeso.lieferando, name: Lieferando, category: food}
+  - {package: de.rewe.app.mobile, name: REWE, category: food}
+  - {package: com.governikus.ausweisapp2, name: AusweisApp, category: government}
+  - {package: de.materna.bbk.mobile.app, name: NINA, category: government}
+  - {package: de.tk.tkapp, name: TK-App, category: health}
+  - {package: fr.doctolib.www, name: Doctolib, category: health}
+  - {package: de.web.mobile.android.mail, name: WEB.DE Mail, category: mail}
+  - {package: de.gmx.mobile.android.mail, name: GMX Mail, category: mail}
+  - {package: de.wetteronline.wetterapp, name: WetterOnline, category: weather}
+  - {package: de.telekom.android.customercenter, name: MeinMagenta, category: telecom}

@@ -1,0 +1,750 @@
+# Sandroid world pack: country 'br' (Brazil), schema v1. Generated 2026-11-20 by agent countries-2.
+# Sources and licences: br.SOURCES.md (source ids S1.. are referenced in phone entries).
+pack: country
+schema: 1
+country: br
+name: Brazil
+languages: {pt-BR: 0.985, es: 0.005, en: 0.01}
+timezones: [
+  America/Sao_Paulo, America/Bahia, America/Fortaleza, America/Recife, America/Belem,
+  America/Manaus, America/Cuiaba, America/Rio_Branco, America/Noronha
+]
+date_format: dd/MM/yyyy
+time_format: "HH:mm"
+currency: {code: BRL, symbol: R$, format: "R$ 49,90"}
+phone:
+  country_code: '55'
+  trunk_prefix: '0'
+  national_format_examples: [(11) 98765-4321, (21) 99876-5432, (11) 3456-7890, 11 98765-4321]
+  mobile:
+    realistic:
+      - {prefix: '119', length: 11, operator: null, city: São Paulo}
+      - {prefix: '219', length: 11, operator: null, city: Rio de Janeiro}
+      - {prefix: '619', length: 11, operator: null, city: Brasília}
+      - {prefix: '859', length: 11, operator: null, city: Fortaleza}
+      - {prefix: '719', length: 11, operator: null, city: Salvador}
+      - {prefix: '319', length: 11, operator: null, city: Belo Horizonte}
+      - {prefix: '929', length: 11, operator: null, city: Manaus}
+      - {prefix: '419', length: 11, operator: null, city: Curitiba}
+      - {prefix: '819', length: 11, operator: null, city: Recife}
+      - {prefix: '629', length: 11, operator: null, city: Goiânia}
+      - {prefix: '519', length: 11, operator: null, city: Porto Alegre}
+      - {prefix: '919', length: 11, operator: null, city: Belém}
+      - {prefix: '199', length: 11, operator: null, city: Campinas}
+      - {prefix: '989', length: 11, operator: null, city: São Luís}
+      - {prefix: '489', length: 11, operator: null, city: Florianópolis}
+      - {prefix: '659', length: 11, operator: null, city: Cuiabá}
+      - {prefix: '849', length: 11, operator: null, city: Natal}
+      - {prefix: '689', length: 11, operator: null, city: Rio Branco}
+    unallocated:
+      - {prefix: '209', length: 11, note: 'CN (DDD) 20 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '239', length: 11, note: 'CN (DDD) 23 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '259', length: 11, note: 'CN (DDD) 25 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '269', length: 11, note: 'CN (DDD) 26 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '299', length: 11, note: 'CN (DDD) 29 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '309', length: 11, note: 'CN (DDD) 30 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '369', length: 11, note: 'CN (DDD) 36 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '399', length: 11, note: 'CN (DDD) 39 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '409', length: 11, note: 'CN (DDD) 40 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '509', length: 11, note: 'CN (DDD) 50 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '529', length: 11, note: 'CN (DDD) 52 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '569', length: 11, note: 'CN (DDD) 56 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '579', length: 11, note: 'CN (DDD) 57 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '589', length: 11, note: 'CN (DDD) 58 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '599', length: 11, note: 'CN (DDD) 59 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '609', length: 11, note: 'CN (DDD) 60 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '709', length: 11, note: 'CN (DDD) 70 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '729', length: 11, note: 'CN (DDD) 72 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '769', length: 11, note: 'CN (DDD) 76 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '789', length: 11, note: 'CN (DDD) 78 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '809', length: 11, note: 'CN (DDD) 80 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+      - {prefix: '909', length: 11, note: 'CN (DDD) 90 is not designated to any area in Anatel''s numbering plan; libphonenumber 9.0.43: INVALID', source: S3}
+    fiction: null
+  landline:
+    cities:
+      - {city: São Paulo, area_code: '11', subscriber_length: 8}
+      - {city: Rio de Janeiro, area_code: '21', subscriber_length: 8}
+      - {city: Brasília, area_code: '61', subscriber_length: 8}
+      - {city: Fortaleza, area_code: '85', subscriber_length: 8}
+      - {city: Salvador, area_code: '71', subscriber_length: 8}
+      - {city: Belo Horizonte, area_code: '31', subscriber_length: 8}
+      - {city: Manaus, area_code: '92', subscriber_length: 8}
+      - {city: Curitiba, area_code: '41', subscriber_length: 8}
+      - {city: Recife, area_code: '81', subscriber_length: 8}
+      - {city: Goiânia, area_code: '62', subscriber_length: 8}
+      - {city: Porto Alegre, area_code: '51', subscriber_length: 8}
+      - {city: Belém, area_code: '91', subscriber_length: 8}
+      - {city: Campinas, area_code: '19', subscriber_length: 8}
+      - {city: São Luís, area_code: '98', subscriber_length: 8}
+      - {city: Florianópolis, area_code: '48', subscriber_length: 8}
+      - {city: Cuiabá, area_code: '65', subscriber_length: 8}
+      - {city: Natal, area_code: '84', subscriber_length: 8}
+      - {city: Rio Branco, area_code: '68', subscriber_length: 8}
+    fiction: null
+  validation_note: 'Mobile = 2-digit CN (DDD) + 9 + 8 digits (ninth digit mandatory nationwide since 2016). libphonenumber accepts every 9xxxxxxxx subscriber number under the 67 designated CNs, so no unallocated block inside a real DDD could be confirmed: Anatel/ABR Telecom do not publish a downloadable prefix-assignment table (only an interactive lookup). The ''unallocated'' entries therefore use the 22 two-digit CNs that are not designated at all (structurally valid 11-digit numbers, guaranteed unreachable, but INVALID in libphonenumber). No official fiction range exists. Operator cannot be derived from the prefix (portability since 2008-2009).'
+carriers:
+  - {name: Vivo, sim_operator: VIVO, mccmnc: '72406', share: 0.39}
+  - {name: Claro, sim_operator: Claro BR, mccmnc: '72405', share: 0.34}
+  - {name: TIM, sim_operator: TIM, mccmnc: '72404', share: 0.25}
+  - {name: Algar, sim_operator: Algar Telecom, mccmnc: '72432', share: 0.02}
+cities:
+  - {name: São Paulo, state: SP, lat: -23.5505, lon: -46.6333, population: 11450000, timezone: America/Sao_Paulo, area_code: '11', postcodes: ["01001-000", "01310-100", "04538-133", "05407-002", "02011-000", "03310-000", "04101-300"], districts: [Pinheiros, Vila Mariana, Mooca, Santana, Itaquera, Lapa, Tatuapé, Butantã]}
+  - {name: Rio de Janeiro, state: RJ, lat: -22.9068, lon: -43.1729, population: 6210000, timezone: America/Sao_Paulo, area_code: '21', postcodes: ["20040-002", "22020-001", "22410-003", "20550-013", "22631-000", "21040-360"], districts: [Copacabana, Tijuca, Botafogo, Barra da Tijuca, Méier, Campo Grande, Ipanema]}
+  - {name: Brasília, state: DF, lat: -15.7939, lon: -47.8828, population: 2820000, timezone: America/Sao_Paulo, area_code: '61', postcodes: ["70040-010", "70390-025", "71925-000", "72015-000"], districts: [Asa Sul, Asa Norte, Águas Claras, Taguatinga, Lago Sul, Ceilândia]}
+  - {name: Fortaleza, state: CE, lat: -3.7319, lon: -38.5267, population: 2430000, timezone: America/Fortaleza, area_code: '85', postcodes: ["60060-170", "60160-230", "60811-341", "60415-000"], districts: [Aldeota, Meireles, Messejana, Benfica, Montese]}
+  - {name: Salvador, state: BA, lat: -12.9777, lon: -38.5016, population: 2420000, timezone: America/Bahia, area_code: '71', postcodes: ["40020-000", "40140-110", "41820-020", "40301-155"], districts: [Barra, Pituba, Rio Vermelho, Itapuã, Liberdade, Brotas]}
+  - {name: Belo Horizonte, state: MG, lat: -19.9167, lon: -43.9345, population: 2320000, timezone: America/Sao_Paulo, area_code: '31', postcodes: ["30130-000", "30140-071", "30380-000", "31270-901"], districts: [Savassi, Funcionários, Pampulha, Santa Tereza, Lourdes, Venda Nova]}
+  - {name: Manaus, state: AM, lat: -3.119, lon: -60.0217, population: 2060000, timezone: America/Manaus, area_code: '92', postcodes: ["69005-010", "69053-000", "69083-000", "69057-002"], districts: [Centro, Adrianópolis, Ponta Negra, Cidade Nova, Parque 10]}
+  - {name: Curitiba, state: PR, lat: -25.4284, lon: -49.2733, population: 1770000, timezone: America/Sao_Paulo, area_code: '41', postcodes: ["80010-000", "80240-000", "80420-000", "81070-000"], districts: [Batel, Água Verde, Centro Cívico, Portão, Boqueirão, Santa Felicidade]}
+  - {name: Recife, state: PE, lat: -8.0476, lon: -34.877, population: 1490000, timezone: America/Recife, area_code: '81', postcodes: ["50010-000", "51020-000", "52050-000", "50710-000"], districts: [Boa Viagem, Casa Forte, Graças, Madalena, Várzea]}
+  - {name: Goiânia, state: GO, lat: -16.6869, lon: -49.2648, population: 1440000, timezone: America/Sao_Paulo, area_code: '62', postcodes: ["74015-010", "74110-010", "74215-010", "74663-520"], districts: [Setor Bueno, Setor Oeste, Setor Marista, Jardim Goiás]}
+  - {name: Porto Alegre, state: RS, lat: -30.0346, lon: -51.2177, population: 1330000, timezone: America/Sao_Paulo, area_code: '51', postcodes: ["90010-000", "90035-000", "90450-000", "91330-000"], districts: [Moinhos de Vento, Cidade Baixa, Menino Deus, Petrópolis, Restinga]}
+  - {name: Belém, state: PA, lat: -1.4558, lon: -48.4902, population: 1300000, timezone: America/Belem, area_code: '91', postcodes: ["66010-000", "66035-000", "66055-000", "66085-000"], districts: [Nazaré, Umarizal, Marco, Batista Campos, Pedreira]}
+  - {name: Campinas, state: SP, lat: -22.9099, lon: -47.0626, population: 1140000, timezone: America/Sao_Paulo, area_code: '19', postcodes: ["13010-000", "13025-000", "13083-000"], districts: [Cambuí, Barão Geraldo, Taquaral, Centro]}
+  - {name: São Luís, state: MA, lat: -2.5307, lon: -44.3068, population: 1040000, timezone: America/Fortaleza, area_code: '98', postcodes: ["65010-000", "65075-000", "65076-000"], districts: [Centro Histórico, Renascença, Cohama, Ponta d'Areia]}
+  - {name: Florianópolis, state: SC, lat: -27.5954, lon: -48.548, population: 540000, timezone: America/Sao_Paulo, area_code: '48', postcodes: ["88010-000", "88015-000", "88036-000", "88062-000"], districts: [Centro, Trindade, Lagoa da Conceição, Ingleses, Campeche]}
+  - {name: Cuiabá, state: MT, lat: -15.6014, lon: -56.0979, population: 650000, timezone: America/Cuiaba, area_code: '65', postcodes: ["78005-000", "78043-000", "78048-000"], districts: [Centro, Jardim das Américas, Goiabeiras]}
+  - {name: Natal, state: RN, lat: -5.7945, lon: -35.211, population: 750000, timezone: America/Fortaleza, area_code: '84', postcodes: ["59010-000", "59020-000", "59064-000"], districts: [Ponta Negra, Petrópolis, Tirol, Lagoa Nova]}
+  - {name: Rio Branco, state: AC, lat: -9.9754, lon: -67.8249, population: 365000, timezone: America/Rio_Branco, area_code: '68', postcodes: ["69900-000", "69908-000", "69915-000"], districts: [Centro, Bosque, Estação Experimental]}
+streets: [
+  Rua São José, Rua Santo Antônio, Rua Sete de Setembro, Rua XV de Novembro, Rua Tiradentes,
+  Rua Duque de Caxias, Rua Rui Barbosa, Rua Marechal Deodoro, Rua Floriano Peixoto,
+  Rua Dom Pedro II, Rua Getúlio Vargas, Avenida Brasil, Avenida Paulista, Avenida Getúlio Vargas,
+  Avenida Presidente Vargas, Rua Bahia, Rua Pernambuco, Rua Paraná, Rua Minas Gerais,
+  Rua Rio de Janeiro, Rua Amazonas, Rua Goiás, Rua da Paz, Rua das Flores, Rua das Palmeiras,
+  Rua dos Ipês, Rua das Acácias, Rua Bela Vista, Rua Boa Vista, Rua Primavera, Rua do Comércio,
+  Rua da Matriz, Rua Castro Alves, Rua Machado de Assis, Rua José de Alencar, Rua Santos Dumont,
+  Rua Barão do Rio Branco, Avenida Rio Branco, Rua Princesa Isabel, Rua Benjamin Constant,
+  Rua Visconde de Mauá, Rua Treze de Maio, Rua Primeiro de Maio, Rua Quinze de Agosto,
+  Avenida Independência, Rua São Paulo, Rua Santa Catarina, Rua Espírito Santo, Rua Ceará,
+  Rua Alagoas, Rua Sergipe, Rua Piauí, Avenida Atlântica, Rua Augusta, Rua da Consolação,
+  Rua Voluntários da Pátria, Avenida Afonso Pena, Rua Padre Anchieta, Rua Coronel Fernandes,
+  Travessa São Pedro, Rua Projetada, Rua A, Rua B
+]
+address_format: '{street}, {number} - {district}, {city} - {state}, {postcode}'
+places:
+  - {category: park, name: Parque Ibirapuera, city: São Paulo, lat: -23.5874, lon: -46.6576}
+  - {category: park, name: Parque Villa-Lobos, city: São Paulo, lat: -23.5466, lon: -46.7225}
+  - {category: park, name: Aterro do Flamengo, city: Rio de Janeiro, lat: -22.9356, lon: -43.1737}
+  - {category: park, name: Parque da Cidade Sarah Kubitschek, city: Brasília, lat: -15.7998, lon: -47.9078}
+  - {category: park, name: Parque Barigui, city: Curitiba, lat: -25.4227, lon: -49.3104}
+  - {category: park, name: Parque Farroupilha (Redenção), city: Porto Alegre, lat: -30.0384, lon: -51.2155}
+  - {category: park, name: Parque Municipal Américo Renné Giannetti, city: Belo Horizonte, lat: -19.9246, lon: -43.9346}
+  - {category: landmark, name: Cristo Redentor, city: Rio de Janeiro, lat: -22.9519, lon: -43.2105}
+  - {category: landmark, name: Pão de Açúcar, city: Rio de Janeiro, lat: -22.9492, lon: -43.1545}
+  - {category: landmark, name: Escadaria Selarón, city: Rio de Janeiro, lat: -22.9154, lon: -43.1791}
+  - {category: landmark, name: MASP / Avenida Paulista, city: São Paulo, lat: -23.5614, lon: -46.6559}
+  - {category: landmark, name: Catedral de Brasília, city: Brasília, lat: -15.7983, lon: -47.8755}
+  - {category: landmark, name: Pelourinho, city: Salvador, lat: -12.9714, lon: -38.5088}
+  - {category: landmark, name: Elevador Lacerda, city: Salvador, lat: -12.974, lon: -38.513}
+  - {category: landmark, name: Teatro Amazonas, city: Manaus, lat: -3.1303, lon: -60.0234}
+  - {category: landmark, name: Jardim Botânico de Curitiba, city: Curitiba, lat: -25.443, lon: -49.2389}
+  - {category: station, name: Estação da Luz, city: São Paulo, lat: -23.5347, lon: -46.6354}
+  - {category: station, name: Terminal Rodoviário Tietê, city: São Paulo, lat: -23.5163, lon: -46.625}
+  - {category: station, name: Estação Sé (Metrô), city: São Paulo, lat: -23.5503, lon: -46.6339}
+  - {category: station, name: Central do Brasil, city: Rio de Janeiro, lat: -22.9031, lon: -43.191}
+  - {category: station, name: Rodoviária do Plano Piloto, city: Brasília, lat: -15.7936, lon: -47.8829}
+  - {category: airport, name: Aeroporto Internacional de Guarulhos, city: Guarulhos, lat: -23.4356, lon: -46.4731}
+  - {category: airport, name: Aeroporto de Congonhas, city: São Paulo, lat: -23.6261, lon: -46.6564}
+  - {category: airport, name: Aeroporto Internacional do Galeão, city: Rio de Janeiro, lat: -22.809, lon: -43.2506}
+  - {category: airport, name: Aeroporto Santos Dumont, city: Rio de Janeiro, lat: -22.9105, lon: -43.1631}
+  - {category: airport, name: Aeroporto Internacional de Brasília, city: Brasília, lat: -15.8697, lon: -47.9208}
+  - {category: airport, name: Aeroporto Internacional de Confins, city: Confins, lat: -19.6244, lon: -43.9719}
+  - {category: beach, name: Praia de Copacabana, city: Rio de Janeiro, lat: -22.9711, lon: -43.1822}
+  - {category: beach, name: Praia de Ipanema, city: Rio de Janeiro, lat: -22.9868, lon: -43.2045}
+  - {category: beach, name: Praia de Iracema, city: Fortaleza, lat: -3.7195, lon: -38.513}
+  - {category: beach, name: Praia de Boa Viagem, city: Recife, lat: -8.1196, lon: -34.8985}
+  - {category: beach, name: Porto da Barra, city: Salvador, lat: -13.0036, lon: -38.5328}
+  - {category: beach, name: Praia de Ponta Negra, city: Natal, lat: -5.8817, lon: -35.1663}
+  - {category: beach, name: Praia da Joaquina, city: Florianópolis, lat: -27.629, lon: -48.449}
+  - {category: mountain, name: Pedra da Gávea, city: Rio de Janeiro, lat: -22.9978, lon: -43.2845}
+  - {category: mountain, name: Pico do Jaraguá, city: São Paulo, lat: -23.456, lon: -46.766}
+  - {category: mountain, name: Serra do Curral, city: Belo Horizonte, lat: -19.956, lon: -43.922}
+  - {category: mountain, name: Morro da Urca, city: Rio de Janeiro, lat: -22.9513, lon: -43.163}
+  - {category: museum, name: Museu do Amanhã, city: Rio de Janeiro, lat: -22.8944, lon: -43.1795}
+  - {category: museum, name: Pinacoteca de São Paulo, city: São Paulo, lat: -23.5343, lon: -46.6339}
+  - {category: museum, name: Museu Oscar Niemeyer, city: Curitiba, lat: -25.4101, lon: -49.2672}
+  - {category: museum, name: Museu do Futebol, city: São Paulo, lat: -23.5475, lon: -46.665}
+  - {category: stadium, name: Maracanã, city: Rio de Janeiro, lat: -22.9121, lon: -43.2302}
+  - {category: stadium, name: Estádio do Morumbi, city: São Paulo, lat: -23.6001, lon: -46.7195}
+  - {category: stadium, name: Neo Química Arena, city: São Paulo, lat: -23.5453, lon: -46.4742}
+  - {category: stadium, name: Allianz Parque, city: São Paulo, lat: -23.5275, lon: -46.6783}
+  - {category: stadium, name: Mineirão, city: Belo Horizonte, lat: -19.8658, lon: -43.9711}
+  - {category: stadium, name: Arena Fonte Nova, city: Salvador, lat: -12.9787, lon: -38.5043}
+  - {category: market, name: Mercado Municipal de São Paulo, city: São Paulo, lat: -23.5417, lon: -46.6295}
+  - {category: market, name: Mercado Central, city: Belo Horizonte, lat: -19.9228, lon: -43.9435}
+  - {category: market, name: Mercado Ver-o-Peso, city: Belém, lat: -1.4525, lon: -48.5035}
+  - {category: market, name: Mercado Modelo, city: Salvador, lat: -12.9735, lon: -38.5137}
+  - {category: market, name: Mercado Público, city: Porto Alegre, lat: -30.0274, lon: -51.2283}
+  - {category: lake, name: Lagoa Rodrigo de Freitas, city: Rio de Janeiro, lat: -22.9724, lon: -43.2134}
+  - {category: lake, name: Lago Paranoá, city: Brasília, lat: -15.79, lon: -47.83}
+  - {category: lake, name: Lagoa da Pampulha, city: Belo Horizonte, lat: -19.851, lon: -43.978}
+  - {category: lake, name: Lagoa da Conceição, city: Florianópolis, lat: -27.59, lon: -48.473}
+names:
+  culture: br
+  female:
+    - {name: Maria, w: 1.0}
+    - {name: Ana, w: 0.2593}
+    - {name: Francisca, w: 0.0624}
+    - {name: Adriana, w: 0.0553}
+    - {name: Márcia, w: 0.054}
+    - {name: Juliana, w: 0.052}
+    - {name: Patrícia, w: 0.0513}
+    - {name: Antônia, w: 0.0507}
+    - {name: Fernanda, w: 0.0485}
+    - {name: Aline, w: 0.0475}
+    - {name: Sandra, w: 0.047}
+    - {name: Jéssica, w: 0.0426}
+    - {name: Luciana, w: 0.0417}
+    - {name: Camila, w: 0.0414}
+    - {name: Bruna, w: 0.0402}
+    - {name: Amanda, w: 0.039}
+    - {name: Vanessa, w: 0.0387}
+    - {name: Vera, w: 0.0359}
+    - {name: Cláudia, w: 0.035}
+    - {name: Letícia, w: 0.0346}
+    - {name: Sônia, w: 0.0341}
+    - {name: Eliane, w: 0.0335}
+    - {name: Simone, w: 0.0333}
+    - {name: Renata, w: 0.0328}
+    - {name: Cristiane, w: 0.032}
+    - {name: Rita, w: 0.0319}
+    - {name: Mariana, w: 0.0315}
+    - {name: Gabriela, w: 0.0308}
+    - {name: Rosângela, w: 0.0305}
+    - {name: Luana, w: 0.0305}
+    - {name: Carla, w: 0.0302}
+    - {name: Júlia, w: 0.0301}
+    - {name: Larissa, w: 0.029}
+    - {name: Natália, w: 0.029}
+    - {name: Jaqueline, w: 0.029}
+    - {name: Daniela, w: 0.0284}
+    - {name: Andréia, w: 0.0284}
+    - {name: Débora, w: 0.0283}
+    - {name: Josefa, w: 0.0281}
+    - {name: Marlene, w: 0.028}
+    - {name: Fabiana, w: 0.028}
+    - {name: Beatriz, w: 0.0278}
+    - {name: Aparecida, w: 0.0269}
+    - {name: Lúcia, w: 0.0268}
+    - {name: Rosa, w: 0.0262}
+    - {name: Raquel, w: 0.026}
+    - {name: Vitória, w: 0.0247}
+    - {name: Elaine, w: 0.0247}
+    - {name: Raimunda, w: 0.0245}
+    - {name: Terezinha, w: 0.0244}
+    - {name: Sueli, w: 0.0235}
+    - {name: Regina, w: 0.0235}
+    - {name: Daiane, w: 0.023}
+    - {name: Rafaela, w: 0.0229}
+    - {name: Alessandra, w: 0.0228}
+    - {name: Joana, w: 0.0223}
+    - {name: Luzia, w: 0.022}
+    - {name: Silvana, w: 0.0219}
+    - {name: Viviane, w: 0.0218}
+    - {name: Priscila, w: 0.0213}
+    - {name: Isabel, w: 0.0206}
+    - {name: Tatiane, w: 0.0202}
+    - {name: Marli, w: 0.02}
+    - {name: Fátima, w: 0.0192}
+    - {name: Michele, w: 0.0188}
+    - {name: Bianca, w: 0.0187}
+    - {name: Caroline, w: 0.0186}
+    - {name: Sara, w: 0.0184}
+    - {name: Tereza, w: 0.0177}
+    - {name: Marina, w: 0.0176}
+    - {name: Andrea, w: 0.0171}
+    - {name: Luiza, w: 0.017}
+    - {name: Tânia, w: 0.0168}
+    - {name: Carolina, w: 0.0166}
+    - {name: Isabela, w: 0.0164}
+    - {name: Helena, w: 0.0161}
+    - {name: Laura, w: 0.0155}
+    - {name: Bárbara, w: 0.0149}
+    - {name: Sabrina, w: 0.0146}
+    - {name: Alice, w: 0.0143}
+    - {name: Tatiana, w: 0.0139}
+    - {name: Milena, w: 0.0127}
+    - {name: Marcela, w: 0.0124}
+    - {name: Elizabete, w: 0.0118}
+    - {name: Elza, w: 0.0117}
+    - {name: Laís, w: 0.011}
+    - {name: Eduarda, w: 0.0105}
+    - {name: Lívia, w: 0.0103}
+    - {name: Benedita, w: 0.0099}
+    - {name: Sebastiana, w: 0.0099}
+    - {name: Brenda, w: 0.0093}
+    - {name: Lorena, w: 0.0092}
+    - {name: Kelly, w: 0.0089}
+    - {name: Conceição, w: 0.0086}
+    - {name: Nair, w: 0.0085}
+    - {name: Cecília, w: 0.0081}
+    - {name: Ester, w: 0.0077}
+    - {name: Lara, w: 0.0074}
+    - {name: Nicole, w: 0.007}
+    - {name: Yasmin, w: 0.0069}
+    - {name: Rebeca, w: 0.0069}
+    - {name: Clarice, w: 0.0064}
+    - {name: Mariane, w: 0.0061}
+    - {name: Clara, w: 0.006}
+    - {name: Isadora, w: 0.0057}
+    - {name: Alana, w: 0.0053}
+    - {name: Luísa, w: 0.0053}
+    - {name: Catarina, w: 0.0049}
+    - {name: Sofia, w: 0.0048}
+    - {name: Heloísa, w: 0.0048}
+    - {name: Manuela, w: 0.0046}
+    - {name: Elisa, w: 0.0045}
+    - {name: Alzira, w: 0.0045}
+    - {name: Melissa, w: 0.0033}
+    - {name: Olívia, w: 0.003}
+    - {name: Sarah, w: 0.0027}
+    - {name: Isabella, w: 0.0027}
+    - {name: Giovanna, w: 0.0026}
+    - {name: Evelyn, w: 0.0023}
+    - {name: Emilly, w: 0.002}
+    - {name: Lavínia, w: 0.0019}
+    - {name: Ísis, w: 0.0017}
+    - {name: Alícia, w: 0.0017}
+    - {name: Graça, w: 0.0015}
+    - {name: Sophia, w: 0.0014}
+    - {name: Eloá, w: 0.0013}
+    - {name: Aurora, w: 0.0013}
+    - {name: Alexia, w: 0.0012}
+    - {name: Gabrielly, w: 0.001}
+    - {name: Valentina, w: 0.001}
+    - {name: Pietra, w: 0.0009}
+    - {name: Ágatha, w: 0.0009}
+    - {name: Jade, w: 0.0009}
+    - {name: Maysa, w: 0.0008}
+    - {name: Esther, w: 0.0008}
+    - {name: Luara, w: 0.0008}
+    - {name: Isabelly, w: 0.0007}
+    - {name: Melina, w: 0.0007}
+    - {name: Nina, w: 0.0007}
+    - {name: Luna, w: 0.0006}
+    - {name: Mirella, w: 0.0006}
+    - {name: Stephany, w: 0.0005}
+    - {name: Stella, w: 0.0005}
+    - {name: Maitê, w: 0.0005}
+    - {name: Emanuelly, w: 0.0004}
+    - {name: Allana, w: 0.0003}
+    - {name: Kamilly, w: 0.0003}
+    - {name: Manuella, w: 0.0003}
+    - {name: Mariah, w: 0.0003}
+    - {name: Liz, w: 0.0003}
+  male:
+    - {name: José, w: 1.0}
+    - {name: João, w: 0.4768}
+    - {name: Antônio, w: 0.4451}
+    - {name: Francisco, w: 0.3107}
+    - {name: Carlos, w: 0.2627}
+    - {name: Paulo, w: 0.2568}
+    - {name: Marcos, w: 0.1981}
+    - {name: Luiz, w: 0.1902}
+    - {name: Pedro, w: 0.188}
+    - {name: Lucas, w: 0.1784}
+    - {name: Luis, w: 0.1608}
+    - {name: Rafael, w: 0.143}
+    - {name: Gabriel, w: 0.134}
+    - {name: Marcelo, w: 0.1293}
+    - {name: Daniel, w: 0.1213}
+    - {name: Bruno, w: 0.1153}
+    - {name: Rodrigo, w: 0.1102}
+    - {name: Eduardo, w: 0.1061}
+    - {name: Raimundo, w: 0.1059}
+    - {name: André, w: 0.1051}
+    - {name: Fábio, w: 0.1023}
+    - {name: Felipe, w: 0.1021}
+    - {name: Fernando, w: 0.1007}
+    - {name: Manoel, w: 0.0969}
+    - {name: Leonardo, w: 0.094}
+    - {name: Leandro, w: 0.0937}
+    - {name: Márcio, w: 0.0885}
+    - {name: Mateus, w: 0.0881}
+    - {name: Anderson, w: 0.0868}
+    - {name: Ricardo, w: 0.0867}
+    - {name: Tiago, w: 0.0866}
+    - {name: Jorge, w: 0.0843}
+    - {name: Roberto, w: 0.0811}
+    - {name: Alexandre, w: 0.0811}
+    - {name: Gustavo, w: 0.0809}
+    - {name: Edson, w: 0.0804}
+    - {name: Guilherme, w: 0.0801}
+    - {name: Sebastião, w: 0.0766}
+    - {name: Diego, w: 0.076}
+    - {name: Sérgio, w: 0.0756}
+    - {name: Cláudio, w: 0.0657}
+    - {name: Luciano, w: 0.0628}
+    - {name: Vitor, w: 0.0621}
+    - {name: Thiago, w: 0.0598}
+    - {name: Geraldo, w: 0.0576}
+    - {name: Alex, w: 0.0563}
+    - {name: Matheus, w: 0.053}
+    - {name: Vinícius, w: 0.0481}
+    - {name: Mário, w: 0.0468}
+    - {name: Samuel, w: 0.0459}
+    - {name: Cícero, w: 0.045}
+    - {name: Igor, w: 0.0435}
+    - {name: Manuel, w: 0.0413}
+    - {name: Danilo, w: 0.0407}
+    - {name: Davi, w: 0.0382}
+    - {name: Henrique, w: 0.0368}
+    - {name: Miguel, w: 0.0363}
+    - {name: Benedito, w: 0.0347}
+    - {name: Valdir, w: 0.0347}
+    - {name: Caio, w: 0.0345}
+    - {name: Nelson, w: 0.0344}
+    - {name: Joaquim, w: 0.0332}
+    - {name: Severino, w: 0.0286}
+    - {name: Renan, w: 0.0283}
+    - {name: Luan, w: 0.027}
+    - {name: Wesley, w: 0.0263}
+    - {name: Everton, w: 0.0261}
+    - {name: Diogo, w: 0.0257}
+    - {name: Osvaldo, w: 0.0244}
+    - {name: Cleiton, w: 0.0232}
+    - {name: Vicente, w: 0.0204}
+    - {name: Murilo, w: 0.0179}
+    - {name: Arthur, w: 0.0176}
+    - {name: Augusto, w: 0.0172}
+    - {name: Breno, w: 0.0168}
+    - {name: Josué, w: 0.0159}
+    - {name: Otávio, w: 0.0152}
+    - {name: Nicolas, w: 0.0147}
+    - {name: Wellington, w: 0.0141}
+    - {name: Emanuel, w: 0.0132}
+    - {name: Yuri, w: 0.0112}
+    - {name: Erick, w: 0.0105}
+    - {name: Cauã, w: 0.0101}
+    - {name: Jefferson, w: 0.01}
+    - {name: Raul, w: 0.0093}
+    - {name: Bernardo, w: 0.0085}
+    - {name: Juan, w: 0.0065}
+    - {name: Kaique, w: 0.006}
+    - {name: Enzo, w: 0.0057}
+    - {name: Levi, w: 0.0057}
+    - {name: Heitor, w: 0.0054}
+    - {name: Isaque, w: 0.0054}
+    - {name: Ian, w: 0.0051}
+    - {name: Kevin, w: 0.0049}
+    - {name: Yago, w: 0.0043}
+    - {name: Isaac, w: 0.0041}
+    - {name: Ryan, w: 0.0041}
+    - {name: Yan, w: 0.0037}
+    - {name: Cauê, w: 0.0035}
+    - {name: Bento, w: 0.0032}
+    - {name: Thales, w: 0.0029}
+    - {name: Pietro, w: 0.0028}
+    - {name: Léo, w: 0.0027}
+    - {name: Nathan, w: 0.0024}
+    - {name: Thomas, w: 0.0022}
+    - {name: Antony, w: 0.0017}
+    - {name: Bryan, w: 0.0017}
+    - {name: Benício, w: 0.0015}
+    - {name: Lorenzo, w: 0.0011}
+    - {name: Brayan, w: 0.0011}
+    - {name: Henry, w: 0.001}
+    - {name: Lucca, w: 0.0009}
+    - {name: Anthony, w: 0.0008}
+    - {name: Benjamin, w: 0.0008}
+    - {name: Calebe, w: 0.0008}
+    - {name: Luigi, w: 0.0007}
+    - {name: Valentim, w: 0.0007}
+    - {name: Dante, w: 0.0007}
+    - {name: Rael, w: 0.0007}
+    - {name: Benjamim, w: 0.0006}
+    - {name: Théo, w: 0.0006}
+    - {name: Mathias, w: 0.0006}
+    - {name: Enrico, w: 0.0005}
+    - {name: Otto, w: 0.0005}
+    - {name: Oliver, w: 0.0005}
+    - {name: Caleb, w: 0.0003}
+    - {name: Ravi, w: 0.0002}
+    - {name: Asafe, w: 0.0002}
+    - {name: Theodoro, w: 0.0001}
+    - {name: Noah, w: 0.0001}
+    - {name: Dom, w: 0.0001}
+    - {name: Gael, w: 0.0001}
+    - {name: Matteo, w: 0.0001}
+    - {name: Ravy, w: 0.0001}
+    - {name: Apollo, w: 0.0001}
+    - {name: Liam, w: 0.0001}
+    - {name: Rhavi, w: 0.0001}
+  surnames:
+    - {name: Silva, w: 1.0}
+    - {name: Santos, w: 0.6279}
+    - {name: Oliveira, w: 0.3441}
+    - {name: Souza, w: 0.2703}
+    - {name: Pereira, w: 0.2024}
+    - {name: Ferreira, w: 0.183}
+    - {name: Lima, w: 0.1791}
+    - {name: Alves, w: 0.1701}
+    - {name: Rodrigues, w: 0.1595}
+    - {name: Costa, w: 0.1428}
+    - {name: Sousa, w: 0.141}
+    - {name: Gomes, w: 0.1281}
+    - {name: Ribeiro, w: 0.1173}
+    - {name: Martins, w: 0.1081}
+    - {name: Carvalho, w: 0.1002}
+    - {name: Almeida, w: 0.0934}
+    - {name: Lopes, w: 0.0873}
+    - {name: Soares, w: 0.082}
+    - {name: Fernandes, w: 0.0773}
+    - {name: Vieira, w: 0.073}
+    - {name: Barbosa, w: 0.0692}
+    - {name: Rocha, w: 0.0658}
+    - {name: Dias, w: 0.0626}
+    - {name: Nascimento, w: 0.0598}
+    - {name: Andrade, w: 0.0571}
+    - {name: Moreira, w: 0.0547}
+    - {name: Nunes, w: 0.0525}
+    - {name: Marques, w: 0.0504}
+    - {name: Machado, w: 0.0485}
+    - {name: Mendes, w: 0.0468}
+    - {name: Freitas, w: 0.0451}
+    - {name: Cardoso, w: 0.0436}
+    - {name: Ramos, w: 0.0421}
+    - {name: Gonçalves, w: 0.0407}
+    - {name: Santana, w: 0.0395}
+    - {name: Teixeira, w: 0.0383}
+    - {name: Araújo, w: 0.0371}
+    - {name: Cruz, w: 0.0361}
+    - {name: Moura, w: 0.035}
+    - {name: Campos, w: 0.0341}
+    - {name: Miranda, w: 0.0332}
+    - {name: Xavier, w: 0.0323}
+    - {name: Assis, w: 0.0315}
+    - {name: Mota, w: 0.0307}
+    - {name: Braga, w: 0.0299}
+    - {name: Cordeiro, w: 0.0292}
+    - {name: Castro, w: 0.0285}
+    - {name: Pinto, w: 0.0279}
+    - {name: Correia, w: 0.0273}
+    - {name: Batista, w: 0.0267}
+    - {name: Monteiro, w: 0.0261}
+    - {name: Reis, w: 0.0255}
+    - {name: Farias, w: 0.025}
+    - {name: Cavalcante, w: 0.0245}
+    - {name: Melo, w: 0.024}
+    - {name: Borges, w: 0.0235}
+    - {name: Rezende, w: 0.0231}
+    - {name: Pires, w: 0.0226}
+    - {name: Fonseca, w: 0.0222}
+    - {name: Medeiros, w: 0.0218}
+    - {name: Nogueira, w: 0.0214}
+    - {name: Leite, w: 0.021}
+    - {name: Sales, w: 0.0207}
+    - {name: Barros, w: 0.0203}
+    - {name: Guimarães, w: 0.02}
+    - {name: Coelho, w: 0.0196}
+    - {name: Jesus, w: 0.0193}
+    - {name: Duarte, w: 0.019}
+    - {name: Siqueira, w: 0.0187}
+    - {name: Peixoto, w: 0.0184}
+    - {name: Macedo, w: 0.0181}
+    - {name: Brito, w: 0.0178}
+    - {name: Moraes, w: 0.0176}
+    - {name: Bezerra, w: 0.0173}
+    - {name: Queiroz, w: 0.0171}
+    - {name: Azevedo, w: 0.0168}
+    - {name: Matos, w: 0.0166}
+    - {name: Vasconcelos, w: 0.0163}
+    - {name: Tavares, w: 0.0161}
+    - {name: Morais, w: 0.0159}
+    - {name: Lacerda, w: 0.0157}
+    - {name: Aguiar, w: 0.0155}
+    - {name: Prado, w: 0.0153}
+    - {name: Paiva, w: 0.0151}
+    - {name: Bastos, w: 0.0149}
+    - {name: Amaral, w: 0.0147}
+    - {name: Magalhães, w: 0.0145}
+    - {name: Rangel, w: 0.0143}
+    - {name: Domingues, w: 0.0141}
+    - {name: Bueno, w: 0.014}
+    - {name: Viana, w: 0.0138}
+    - {name: Pacheco, w: 0.0136}
+    - {name: Lemos, w: 0.0135}
+    - {name: Silveira, w: 0.0133}
+    - {name: Camargo, w: 0.0132}
+    - {name: Portela, w: 0.013}
+    - {name: Neves, w: 0.0129}
+    - {name: Bento, w: 0.0127}
+    - {name: Diniz, w: 0.0126}
+    - {name: Vaz, w: 0.0124}
+    - {name: Rios, w: 0.0123}
+    - {name: Valente, w: 0.0122}
+    - {name: Figueiredo, w: 0.012}
+    - {name: Sampaio, w: 0.0119}
+    - {name: Cunha, w: 0.0118}
+    - {name: Antunes, w: 0.0117}
+    - {name: Caldeira, w: 0.0115}
+    - {name: Cabral, w: 0.0114}
+    - {name: Freire, w: 0.0113}
+    - {name: Pimentel, w: 0.0112}
+    - {name: Lins, w: 0.0111}
+    - {name: Brandão, w: 0.011}
+    - {name: Toledo, w: 0.0109}
+    - {name: Aragão, w: 0.0108}
+    - {name: Menezes, w: 0.0107}
+    - {name: Saraiva, w: 0.0106}
+    - {name: Holanda, w: 0.0105}
+    - {name: Paixão, w: 0.0104}
+    - {name: Damasceno, w: 0.0103}
+    - {name: Conceição, w: 0.0102}
+    - {name: Gouveia, w: 0.0101}
+    - {name: Galvão, w: 0.01}
+    - {name: Rosa, w: 0.0099}
+    - {name: Leal, w: 0.0098}
+    - {name: Calixto, w: 0.0097}
+    - {name: Chaves, w: 0.0096}
+    - {name: Sobrinho, w: 0.0096}
+    - {name: Muniz, w: 0.0095}
+    - {name: Esteves, w: 0.0094}
+    - {name: Leão, w: 0.0093}
+    - {name: Garcia, w: 0.0092}
+    - {name: Mello, w: 0.0092}
+    - {name: Simões, w: 0.0091}
+    - {name: Abreu, w: 0.009}
+    - {name: Fontes, w: 0.0089}
+    - {name: Carneiro, w: 0.0089}
+    - {name: Falcão, w: 0.0088}
+    - {name: Tomaz, w: 0.0087}
+    - {name: Honorato, w: 0.0087}
+    - {name: Bispo, w: 0.0086}
+    - {name: Godoy, w: 0.0085}
+    - {name: Quintino, w: 0.0085}
+    - {name: Bittencourt, w: 0.0084}
+    - {name: Schmidt, w: 0.0083}
+    - {name: Müller, w: 0.0083}
+    - {name: Rossi, w: 0.0082}
+    - {name: Ferrari, w: 0.0081}
+    - {name: Yamamoto, w: 0.0081}
+    - {name: Nakamura, w: 0.008}
+    - {name: Haddad, w: 0.008}
+    - {name: Salomão, w: 0.0079}
+  nicknames:
+    José: Zé
+    Francisco: Chico
+    Antônio: Toninho
+    Eduardo: Dudu
+    Luiz: Lu
+    Rafael: Rafa
+    Gabriel: Gabi
+    Gabriela: Gabi
+    Fernanda: Nanda
+    Fernando: Nando
+    Roberto: Beto
+    Alberto: Beto
+    Paulo: Paulinho
+    Carlos: Cacá
+    Juliana: Ju
+    Patrícia: Pati
+    Mariana: Mari
+    Daniela: Dani
+    Daniel: Dani
+    Leonardo: Léo
+    Guilherme: Gui
+    Vinícius: Vini
+    Rodrigo: Digo
+    Raimundo: Mundinho
+    Felipe: Lipe
+    Isabela: Isa
+    Letícia: Lelê
+    Vitória: Vivi
+  display: '{first} {last}'
+cultures: []
+email:
+  domains:
+    - {domain: gmail.com, share: 0.63}
+    - {domain: hotmail.com, share: 0.17}
+    - {domain: outlook.com, share: 0.06}
+    - {domain: yahoo.com.br, share: 0.05}
+    - {domain: icloud.com, share: 0.05}
+    - {domain: bol.com.br, share: 0.02}
+    - {domain: uol.com.br, share: 0.01}
+    - {domain: live.com, share: 0.01}
+  patterns: [
+    '{first}.{last}', '{first}{last}', '{first}{last}{yy}', '{first}_{last}', '{f}{last}{nn}',
+    '{first}{nn}'
+  ]
+services:
+  - {sender: Correios, kind: courier, sender_type: shortcode}
+  - {sender: Mercado Livre, kind: courier, sender_type: shortcode}
+  - {sender: Shopee, kind: courier, sender_type: shortcode}
+  - {sender: Amazon, kind: courier, sender_type: shortcode}
+  - {sender: Loggi, kind: courier, sender_type: shortcode}
+  - {sender: Nubank, kind: bank, sender_type: shortcode}
+  - {sender: Itaú, kind: bank, sender_type: shortcode}
+  - {sender: Bradesco, kind: bank, sender_type: shortcode}
+  - {sender: Banco do Brasil, kind: bank, sender_type: shortcode}
+  - {sender: CAIXA, kind: bank, sender_type: shortcode}
+  - {sender: Santander, kind: bank, sender_type: shortcode}
+  - {sender: Vivo, kind: telecom, sender_type: shortcode}
+  - {sender: Claro, kind: telecom, sender_type: shortcode}
+  - {sender: TIM, kind: telecom, sender_type: shortcode}
+  - {sender: Google, kind: otp_service, sender_type: shortcode}
+  - {sender: gov.br, kind: otp_service, sender_type: shortcode}
+  - {sender: iFood, kind: otp_service, sender_type: shortcode}
+  - {sender: "+5511...", kind: doctor, sender_type: number}
+  - {sender: Drogasil, kind: pharmacy, sender_type: shortcode}
+  - {sender: Drogaria São Paulo, kind: pharmacy, sender_type: shortcode}
+  - {sender: iFood, kind: delivery_food, sender_type: shortcode}
+  - {sender: '99', kind: ride_hailing, sender_type: shortcode}
+  - {sender: Uber, kind: ride_hailing, sender_type: shortcode}
+  - {sender: LATAM, kind: airline, sender_type: shortcode}
+  - {sender: GOL, kind: airline, sender_type: shortcode}
+  - {sender: Azul, kind: airline, sender_type: shortcode}
+  - {sender: Receita Federal, kind: government, sender_type: shortcode}
+  - {sender: Detran, kind: government, sender_type: shortcode}
+  - {sender: Magalu, kind: retail, sender_type: shortcode}
+  - {sender: Casas Bahia, kind: retail, sender_type: shortcode}
+  - {sender: Enel, kind: utility, sender_type: shortcode}
+  - {sender: Sabesp, kind: utility, sender_type: shortcode}
+  - {sender: Cemig, kind: utility, sender_type: shortcode}
+holidays:
+  - {date: "01-01", name: Confraternização Universal}
+  - {rule: easter-48, name: "Carnaval (segunda, ponto facultativo)"}
+  - {rule: easter-47, name: "Carnaval (terça, ponto facultativo)"}
+  - {rule: easter-2, name: Sexta-feira Santa}
+  - {date: "04-21", name: Tiradentes}
+  - {date: "05-01", name: Dia do Trabalho}
+  - {rule: easter+60, name: Corpus Christi (ponto facultativo)}
+  - {date: "09-07", name: Independência do Brasil}
+  - {date: "10-12", name: Nossa Senhora Aparecida}
+  - {date: "11-02", name: Finados}
+  - {date: "11-15", name: Proclamação da República}
+  - {date: "11-20", name: Dia Nacional de Zumbi e da Consciência Negra}
+  - {date: "12-25", name: Natal}
+popular_apps:
+  - {package: com.whatsapp, name: WhatsApp, category: messaging}
+  - {package: com.nu.production, name: Nubank, category: banking}
+  - {package: br.com.bb.android, name: Banco do Brasil, category: banking}
+  - {package: com.itau, name: Itaú, category: banking}
+  - {package: com.bradesco, name: Bradesco, category: banking}
+  - {package: br.gov.caixa.tem, name: CAIXA Tem, category: banking}
+  - {package: br.com.gabba.Caixa, name: CAIXA, category: banking}
+  - {package: com.santander.app, name: Santander, category: banking}
+  - {package: br.com.intermedium, name: Inter, category: banking}
+  - {package: com.c6bank.app, name: C6 Bank, category: banking}
+  - {package: com.picpay, name: PicPay, category: banking}
+  - {package: com.mercadopago.wallet, name: Mercado Pago, category: banking}
+  - {package: com.ubercab, name: Uber, category: transport}
+  - {package: com.taxis99, name: '99', category: transport}
+  - {package: br.com.voeazul, name: Azul, category: transport}
+  - {package: com.mercadolibre, name: Mercado Livre, category: shopping}
+  - {package: com.shopee.br, name: Shopee, category: shopping}
+  - {package: com.luizalabs.mlapp, name: Magalu, category: shopping}
+  - {package: com.schibsted.bomnegocio.androidApp, name: OLX, category: shopping}
+  - {package: br.com.netshoes.app, name: Netshoes, category: shopping}
+  - {package: com.globo.g1.app, name: g1, category: news}
+  - {package: com.globo.globotv, name: Globoplay, category: news}
+  - {package: com.kwai.video, name: Kwai, category: news}
+  - {package: br.com.brainweb.ifood, name: iFood, category: food}
+  - {package: br.gov.meugovbr, name: gov.br, category: government}
+  - {package: br.gov.dataprev.meuinss, name: Meu INSS, category: government}
+  - {package: br.gov.serpro.cnhe, name: CNH do Brasil, category: government}
+  - {package: br.com.correios.preatendimento, name: Correios, category: government}
+  - {package: br.gov.datasus.cnsdigital, name: Meu SUS Digital, category: health}
+  - {package: br.com.vivo, name: Vivo, category: telecom}
+  - {package: br.com.timbrasil.meutim, name: Meu TIM, category: telecom}

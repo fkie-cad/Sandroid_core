@@ -1,0 +1,869 @@
+# Sandroid world pack: country 'gb' (United Kingdom), schema v1. Generated 2026-11-20 by agent countries-2.
+# Sources and licences: gb.SOURCES.md (source ids S1.. are referenced in phone entries).
+pack: country
+schema: 1
+country: gb
+name: United Kingdom
+languages: {en: 0.985, cy: 0.01, gd: 0.001, pl: 0.004}
+timezones: [Europe/London]
+date_format: dd/MM/yyyy
+time_format: "HH:mm"
+currency: {code: GBP, symbol: £, format: £49.99}
+phone:
+  country_code: '44'
+  trunk_prefix: '0'
+  national_format_examples: [07700 900123, 020 7946 0123, 0121 496 0123, 01632 960123]
+  mobile:
+    realistic:
+      - {prefix: '71', length: 10, operator: null, note: Ofcom allocates 07 blocks of 100k numbers; mobile number portability means the prefix does not reveal the network}
+      - {prefix: '73', length: 10, operator: null, note: Ofcom allocates 07 blocks of 100k numbers; mobile number portability means the prefix does not reveal the network}
+      - {prefix: '74', length: 10, operator: null, note: Ofcom allocates 07 blocks of 100k numbers; mobile number portability means the prefix does not reveal the network}
+      - {prefix: '75', length: 10, operator: null, note: Ofcom allocates 07 blocks of 100k numbers; mobile number portability means the prefix does not reveal the network}
+      - {prefix: '77', length: 10, operator: null, note: Ofcom allocates 07 blocks of 100k numbers; mobile number portability means the prefix does not reveal the network}
+      - {prefix: '78', length: 10, operator: null, note: Ofcom allocates 07 blocks of 100k numbers; mobile number portability means the prefix does not reveal the network}
+      - {prefix: '79', length: 10, operator: null, note: Ofcom allocates 07 blocks of 100k numbers; mobile number portability means the prefix does not reveal the network}
+      - {prefix: '72', length: 10, operator: null, note: "072x opened 2020s, fewer subscribers"}
+    unallocated:
+      - {prefix: '77002', length: 10, note: excluded from libphonenumber 9.0.43 GB mobile metadata (INVALID); Ofcom S7 status not verified (ofcom.org.uk blocked automated download), source: S3}
+      - {prefix: '77004', length: 10, note: excluded from libphonenumber 9.0.43 GB mobile metadata (INVALID); Ofcom S7 status not verified (ofcom.org.uk blocked automated download), source: S3}
+      - {prefix: '77005', length: 10, note: excluded from libphonenumber 9.0.43 GB mobile metadata (INVALID); Ofcom S7 status not verified (ofcom.org.uk blocked automated download), source: S3}
+      - {prefix: '77006', length: 10, note: excluded from libphonenumber 9.0.43 GB mobile metadata (INVALID); Ofcom S7 status not verified (ofcom.org.uk blocked automated download), source: S3}
+      - {prefix: '79113', length: 10, note: excluded from libphonenumber 9.0.43 GB mobile metadata (INVALID); Ofcom S7 status not verified (ofcom.org.uk blocked automated download), source: S3}
+      - {prefix: '79114', length: 10, note: excluded from libphonenumber 9.0.43 GB mobile metadata (INVALID); Ofcom S7 status not verified (ofcom.org.uk blocked automated download), source: S3}
+      - {prefix: '79115', length: 10, note: excluded from libphonenumber 9.0.43 GB mobile metadata (INVALID); Ofcom S7 status not verified (ofcom.org.uk blocked automated download), source: S3}
+      - {prefix: '79116', length: 10, note: excluded from libphonenumber 9.0.43 GB mobile metadata (INVALID); Ofcom S7 status not verified (ofcom.org.uk blocked automated download), source: S3}
+    fiction:
+      - {range: "7700900000-7700900999", note: Ofcom numbers for TV and radio drama (mobile)}
+  landline:
+    cities:
+      - {city: London, area_code: '20', subscriber_length: 8}
+      - {city: Birmingham, area_code: '121', subscriber_length: 7}
+      - {city: Manchester, area_code: '161', subscriber_length: 7}
+      - {city: Leeds, area_code: '113', subscriber_length: 7}
+      - {city: Glasgow, area_code: '141', subscriber_length: 7}
+      - {city: Liverpool, area_code: '151', subscriber_length: 7}
+      - {city: Sheffield, area_code: '114', subscriber_length: 7}
+      - {city: Bristol, area_code: '117', subscriber_length: 7}
+      - {city: Edinburgh, area_code: '131', subscriber_length: 7}
+      - {city: Cardiff, area_code: '29', subscriber_length: 8}
+      - {city: Newcastle upon Tyne, area_code: '191', subscriber_length: 7}
+      - {city: Belfast, area_code: '28', subscriber_length: 8}
+      - {city: Nottingham, area_code: '115', subscriber_length: 7}
+      - {city: Leicester, area_code: '116', subscriber_length: 7}
+      - {city: Southampton, area_code: '23', subscriber_length: 8}
+      - {city: Brighton, area_code: '1273', subscriber_length: 6}
+      - {city: Oxford, area_code: '1865', subscriber_length: 6}
+      - {city: Cambridge, area_code: '1223', subscriber_length: 6}
+    fiction:
+      - {range: "1134960000-1134960999", note: "Ofcom drama range, Leeds"}
+      - {range: "1144960000-1144960999", note: "Ofcom drama range, Sheffield"}
+      - {range: "1154960000-1154960999", note: "Ofcom drama range, Nottingham"}
+      - {range: "1164960000-1164960999", note: "Ofcom drama range, Leicester"}
+      - {range: "1174960000-1174960999", note: "Ofcom drama range, Bristol"}
+      - {range: "1184960000-1184960999", note: "Ofcom drama range, Reading"}
+      - {range: "1214960000-1214960999", note: "Ofcom drama range, Birmingham"}
+      - {range: "1314960000-1314960999", note: "Ofcom drama range, Edinburgh"}
+      - {range: "1414960000-1414960999", note: "Ofcom drama range, Glasgow"}
+      - {range: "1514960000-1514960999", note: "Ofcom drama range, Liverpool"}
+      - {range: "1614960000-1614960999", note: "Ofcom drama range, Manchester"}
+      - {range: "2079460000-2079460999", note: "Ofcom drama range, London"}
+      - {range: "1914980000-1914980999", note: "Ofcom drama range, Tyneside/Durham/Sunderland"}
+      - {range: "2896496000-2896496999", note: "Ofcom drama range, Northern Ireland"}
+      - {range: "2920180000-2920180999", note: "Ofcom drama range, Cardiff"}
+      - {range: "1632960000-1632960999", note: "Ofcom drama range, no area (fictional 01632)"}
+      - {range: "8081570000-8081570999", note: "Ofcom drama range, freephone 0808 157"}
+      - {range: "9098790000-9098790999", note: "Ofcom drama range, premium rate 0909 879"}
+      - {range: "3069990000-3069990999", note: "Ofcom drama range, UK-wide 0306 999"}
+  validation_note: 'libphonenumber 9.0.43: 07700 900xxx drama numbers are INVALID (the 077009 block is excluded); the geographic drama ranges (e.g. 020 7946 0xxx, 0113 496 0xxx, 028 9649 6xxx) are VALID FIXED_LINE, 01632 960xxx is INVALID, 0808 157 = TOLL_FREE, 0909 879 = PREMIUM_RATE, 0306 999 = UAN. The ''unallocated'' blocks are the only 5-digit 07[1-9] blocks libphonenumber rejects (all others are valid MOBILE), which mirrors Ofcom''s ''Free/Protected'' status at the time the metadata was built; re-check against Ofcom S7.csv before relying on them. 07624 is Isle of Man (region IM). Operator cannot be inferred from the prefix in the UK (porting, MVNOs).'
+carriers:
+  - {name: EE, sim_operator: EE, mccmnc: '23430', share: 0.24}
+  - {name: O2, sim_operator: O2 - UK, mccmnc: '23410', share: 0.19}
+  - {name: Vodafone, sim_operator: vodafone UK, mccmnc: '23415', share: 0.17}
+  - {name: Three, sim_operator: '3', mccmnc: '23420', share: 0.12}
+  - {name: Tesco Mobile, sim_operator: Tesco Mobile, mccmnc: '23410', share: 0.07}
+  - {name: giffgaff, sim_operator: giffgaff, mccmnc: '23410', share: 0.06}
+  - {name: Sky Mobile, sim_operator: Sky, mccmnc: '23457', share: 0.06}
+  - {name: Virgin Mobile, sim_operator: Virgin, mccmnc: '23410', share: 0.04}
+  - {name: Lebara, sim_operator: Lebara, mccmnc: '23415', share: 0.03}
+  - {name: Lyca Mobile, sim_operator: Lycamobile, mccmnc: '23426', share: 0.02}
+cities:
+  - {name: London, lat: 51.5074, lon: -0.1278, population: 8900000, area_code: '20', postcodes: [E1, E14, N1, N7, NW1, NW6, SE1, SE15, SW2, SW11, SW18, W2, W12, EC1V, WC1H], districts: [Camden, Hackney, Islington, Brixton, Clapham, Shoreditch, Peckham, Stratford, Ealing, Wimbledon, Greenwich]}
+  - {name: Birmingham, lat: 52.4862, lon: -1.8904, population: 1150000, area_code: '121', postcodes: [B1, B5, B13, B15, B17, B23, B29, B30], districts: [Edgbaston, Moseley, Digbeth, Harborne, Selly Oak, Erdington, Kings Heath]}
+  - {name: Manchester, lat: 53.4808, lon: -2.2426, population: 570000, area_code: '161', postcodes: [M1, M4, M13, M14, M15, M20, M21, M40], districts: [Northern Quarter, Didsbury, Chorlton, Fallowfield, Ancoats, Hulme, Withington]}
+  - {name: Leeds, lat: 53.8008, lon: -1.5491, population: 820000, area_code: '113', postcodes: [LS1, LS2, LS6, LS7, LS8, LS11, LS16], districts: [Headingley, Chapel Allerton, Roundhay, Hyde Park, Kirkstall, Holbeck]}
+  - {name: Glasgow, lat: 55.8642, lon: -4.2518, population: 635000, area_code: '141', postcodes: [G1, G2, G3, G11, G12, G31, G41, G42], districts: [Merchant City, West End, Finnieston, Partick, Dennistoun, Shawlands, Govanhill]}
+  - {name: Liverpool, lat: 53.4084, lon: -2.9916, population: 490000, area_code: '151', postcodes: [L1, L3, L8, L15, L17, L18, L4], districts: [Baltic Triangle, Toxteth, Wavertree, Allerton, Anfield, Aigburth]}
+  - {name: Sheffield, lat: 53.3811, lon: -1.4701, population: 560000, area_code: '114', postcodes: [S1, S2, S7, S10, S11, S6], districts: [Kelham Island, Ecclesall, Crookes, Walkley, Nether Edge, Hillsborough]}
+  - {name: Bristol, lat: 51.4545, lon: -2.5879, population: 480000, area_code: '117', postcodes: [BS1, BS2, BS3, BS5, BS6, BS7, BS8, BS16], districts: [Clifton, Bedminster, Stokes Croft, Easton, Redland, Southville, Bishopston]}
+  - {name: Edinburgh, lat: 55.9533, lon: -3.1883, population: 515000, area_code: '131', postcodes: [EH1, EH3, EH6, EH7, EH9, EH10, EH11], districts: [Old Town, New Town, Leith, Marchmont, Morningside, Stockbridge, Portobello]}
+  - {name: Cardiff, lat: 51.4816, lon: -3.1791, population: 370000, area_code: '29', postcodes: [CF10, CF11, CF14, CF23, CF24, CF5], districts: [Cathays, Canton, Roath, Pontcanna, Grangetown, Cardiff Bay]}
+  - {name: Newcastle upon Tyne, lat: 54.9783, lon: -1.6178, population: 300000, area_code: '191', postcodes: [NE1, NE2, NE3, NE4, NE6], districts: [Jesmond, Heaton, Gosforth, Ouseburn, Fenham]}
+  - {name: Belfast, lat: 54.5973, lon: -5.9301, population: 345000, area_code: '28', postcodes: [BT1, BT5, BT7, BT9, BT12, BT15], districts: [Cathedral Quarter, Ormeau, Stranmillis, Titanic Quarter, Ballyhackamore]}
+  - {name: Nottingham, lat: 52.9548, lon: -1.1581, population: 325000, area_code: '115', postcodes: [NG1, NG2, NG3, NG5, NG7, NG9], districts: [Lace Market, Hockley, Sherwood, West Bridgford, Beeston, Lenton]}
+  - {name: Leicester, lat: 52.6369, lon: -1.1398, population: 370000, area_code: '116', postcodes: [LE1, LE2, LE3, LE4, LE5], districts: [Clarendon Park, Belgrave, Highfields, Westcotes, Evington]}
+  - {name: Southampton, lat: 50.9097, lon: -1.4044, population: 250000, area_code: '23', postcodes: [SO14, SO15, SO16, SO17, SO19], districts: [Portswood, Shirley, Ocean Village, Bitterne, Highfield]}
+  - {name: Brighton, lat: 50.8225, lon: -0.1372, population: 280000, area_code: '1273', postcodes: [BN1, BN2, BN3], districts: [Kemptown, North Laine, Hove, Hanover, Preston Park]}
+  - {name: Oxford, lat: 51.752, lon: -1.2577, population: 165000, area_code: '1865', postcodes: [OX1, OX2, OX3, OX4], districts: [Jericho, Summertown, Cowley, Headington]}
+  - {name: Cambridge, lat: 52.2053, lon: 0.1218, population: 145000, area_code: '1223', postcodes: [CB1, CB2, CB3, CB4, CB5], districts: [Mill Road, Chesterton, Newnham, Cherry Hinton, Romsey]}
+streets: [
+  High Street, Station Road, Main Street, Park Road, Church Road, Church Street, London Road,
+  Victoria Road, Green Lane, Manor Road, Church Lane, Park Avenue, The Avenue, The Crescent,
+  Queens Road, New Road, Grange Road, Kings Road, Kingsway, Windsor Road, Highfield Road,
+  Mill Lane, Alexandra Road, York Road, St John's Road, Main Road, Broadway, King Street,
+  The Green, Springfield Road, George Street, Park Lane, Victoria Street, Albert Road, Queensway,
+  New Street, Queen Street, West Street, North Street, Manchester Road, The Grove, Richmond Road,
+  Grove Road, South Street, School Lane, The Drive, North Road, Stanley Road, Chester Road,
+  Mill Road, Cedar Avenue, Oak Avenue, Orchard Close, Elm Grove, Meadow Way, Beech Road,
+  Chapel Street, Mount Pleasant, Market Street, Bridge Street, Castle Street, Water Lane,
+  Moor Lane, Clarence Road, Albert Street, Cromwell Road, Hill Street, Woodland Road, Sandy Lane,
+  Brook Street, Kingston Road, Nelson Street, Wellington Road
+]
+address_format: '{number} {street}, {city} {postcode}'
+places:
+  - {category: park, name: Hyde Park, city: London, lat: 51.5073, lon: -0.1657}
+  - {category: park, name: Regent's Park, city: London, lat: 51.5313, lon: -0.157}
+  - {category: park, name: Hampstead Heath, city: London, lat: 51.5608, lon: -0.163}
+  - {category: park, name: Heaton Park, city: Manchester, lat: 53.534, lon: -2.253}
+  - {category: park, name: Roundhay Park, city: Leeds, lat: 53.8389, lon: -1.4972}
+  - {category: park, name: Sefton Park, city: Liverpool, lat: 53.3818, lon: -2.9367}
+  - {category: park, name: Kelvingrove Park, city: Glasgow, lat: 55.8689, lon: -4.2851}
+  - {category: park, name: Bute Park, city: Cardiff, lat: 51.4875, lon: -3.1859}
+  - {category: landmark, name: Tower Bridge, city: London, lat: 51.5055, lon: -0.0754}
+  - {category: landmark, name: Elizabeth Tower (Big Ben), city: London, lat: 51.5007, lon: -0.1246}
+  - {category: landmark, name: Trafalgar Square, city: London, lat: 51.508, lon: -0.1281}
+  - {category: landmark, name: Edinburgh Castle, city: Edinburgh, lat: 55.9486, lon: -3.1999}
+  - {category: landmark, name: Royal Liver Building, city: Liverpool, lat: 53.4058, lon: -2.9959}
+  - {category: landmark, name: Angel of the North, city: Gateshead, lat: 54.9141, lon: -1.5893}
+  - {category: landmark, name: Clifton Suspension Bridge, city: Bristol, lat: 51.4549, lon: -2.6278}
+  - {category: landmark, name: Stonehenge, city: Amesbury, lat: 51.1789, lon: -1.8262}
+  - {category: station, name: London King's Cross, city: London, lat: 51.5308, lon: -0.1238}
+  - {category: station, name: London Paddington, city: London, lat: 51.5154, lon: -0.1755}
+  - {category: station, name: London Waterloo, city: London, lat: 51.5032, lon: -0.1123}
+  - {category: station, name: Birmingham New Street, city: Birmingham, lat: 52.4778, lon: -1.899}
+  - {category: station, name: Manchester Piccadilly, city: Manchester, lat: 53.4774, lon: -2.2309}
+  - {category: station, name: Leeds, city: Leeds, lat: 53.7955, lon: -1.5481}
+  - {category: station, name: Glasgow Central, city: Glasgow, lat: 55.859, lon: -4.2577}
+  - {category: station, name: Edinburgh Waverley, city: Edinburgh, lat: 55.952, lon: -3.189}
+  - {category: airport, name: Heathrow Airport, city: London, lat: 51.47, lon: -0.4543}
+  - {category: airport, name: Gatwick Airport, city: Crawley, lat: 51.1537, lon: -0.1821}
+  - {category: airport, name: Manchester Airport, city: Manchester, lat: 53.3537, lon: -2.275}
+  - {category: airport, name: Edinburgh Airport, city: Edinburgh, lat: 55.95, lon: -3.3725}
+  - {category: airport, name: Birmingham Airport, city: Birmingham, lat: 52.4539, lon: -1.748}
+  - {category: beach, name: Brighton Beach, city: Brighton, lat: 50.8194, lon: -0.1364}
+  - {category: beach, name: Bournemouth Beach, city: Bournemouth, lat: 50.7165, lon: -1.8752}
+  - {category: beach, name: Blackpool Central Beach, city: Blackpool, lat: 53.8144, lon: -3.056}
+  - {category: beach, name: Fistral Beach, city: Newquay, lat: 50.417, lon: -5.1003}
+  - {category: beach, name: Portobello Beach, city: Edinburgh, lat: 55.9547, lon: -3.112}
+  - {category: mountain, name: Yr Wyddfa (Snowdon), city: Llanberis, lat: 53.0685, lon: -4.0763}
+  - {category: mountain, name: Ben Nevis, city: Fort William, lat: 56.7969, lon: -5.0036}
+  - {category: mountain, name: Scafell Pike, city: Wasdale, lat: 54.4542, lon: -3.2116}
+  - {category: mountain, name: Arthur's Seat, city: Edinburgh, lat: 55.9441, lon: -3.1618}
+  - {category: mountain, name: Pen y Fan, city: Brecon, lat: 51.8838, lon: -3.4369}
+  - {category: museum, name: British Museum, city: London, lat: 51.5194, lon: -0.127}
+  - {category: museum, name: Natural History Museum, city: London, lat: 51.4967, lon: -0.1764}
+  - {category: museum, name: Tate Modern, city: London, lat: 51.5076, lon: -0.0994}
+  - {category: museum, name: National Museum of Scotland, city: Edinburgh, lat: 55.9469, lon: -3.19}
+  - {category: museum, name: Science and Industry Museum, city: Manchester, lat: 53.4771, lon: -2.2546}
+  - {category: stadium, name: Wembley Stadium, city: London, lat: 51.556, lon: -0.2796}
+  - {category: stadium, name: Old Trafford, city: Manchester, lat: 53.4631, lon: -2.2913}
+  - {category: stadium, name: Anfield, city: Liverpool, lat: 53.4308, lon: -2.9608}
+  - {category: stadium, name: Etihad Stadium, city: Manchester, lat: 53.4831, lon: -2.2004}
+  - {category: stadium, name: Celtic Park, city: Glasgow, lat: 55.8497, lon: -4.2055}
+  - {category: stadium, name: Principality Stadium, city: Cardiff, lat: 51.4782, lon: -3.1826}
+  - {category: market, name: Borough Market, city: London, lat: 51.5055, lon: -0.091}
+  - {category: market, name: Camden Market, city: London, lat: 51.5414, lon: -0.146}
+  - {category: market, name: Kirkgate Market, city: Leeds, lat: 53.7973, lon: -1.5409}
+  - {category: market, name: Bullring Markets, city: Birmingham, lat: 52.476, lon: -1.893}
+  - {category: lake, name: Windermere (Bowness Bay), city: Bowness-on-Windermere, lat: 54.3634, lon: -2.9187}
+  - {category: lake, name: Loch Lomond (Balloch), city: Balloch, lat: 56.0037, lon: -4.585}
+  - {category: lake, name: Derwentwater, city: Keswick, lat: 54.596, lon: -3.14}
+  - {category: lake, name: The Serpentine, city: London, lat: 51.5051, lon: -0.1665}
+names:
+  culture: gb
+  female:
+    - {name: Sarah, w: 1.0}
+    - {name: Susan, w: 0.9327}
+    - {name: Rebecca, w: 0.629}
+    - {name: Emma, w: 0.3649}
+    - {name: Claire, w: 0.3444}
+    - {name: Laura, w: 0.3312}
+    - {name: Margaret, w: 0.3276}
+    - {name: Julie, w: 0.3254}
+    - {name: Lauren, w: 0.3175}
+    - {name: Jessica, w: 0.2912}
+    - {name: Linda, w: 0.2651}
+    - {name: Christine, w: 0.2626}
+    - {name: Charlotte, w: 0.2589}
+    - {name: Karen, w: 0.2577}
+    - {name: Nicola, w: 0.2481}
+    - {name: Sophie, w: 0.2284}
+    - {name: Emily, w: 0.224}
+    - {name: Hannah, w: 0.222}
+    - {name: Elizabeth, w: 0.2203}
+    - {name: Patricia, w: 0.2103}
+    - {name: Helen, w: 0.2092}
+    - {name: Jacqueline, w: 0.2054}
+    - {name: Amy, w: 0.1985}
+    - {name: Gemma, w: 0.1889}
+    - {name: Chloe, w: 0.1822}
+    - {name: Rachel, w: 0.1739}
+    - {name: Samantha, w: 0.1716}
+    - {name: Lucy, w: 0.1676}
+    - {name: Lisa, w: 0.1676}
+    - {name: Jane, w: 0.1588}
+    - {name: Katie, w: 0.1587}
+    - {name: Deborah, w: 0.1557}
+    - {name: Jennifer, w: 0.1509}
+    - {name: Victoria, w: 0.1495}
+    - {name: Janet, w: 0.1493}
+    - {name: Mary, w: 0.1446}
+    - {name: Joanne, w: 0.1427}
+    - {name: Olivia, w: 0.1397}
+    - {name: Michelle, w: 0.1328}
+    - {name: Carol, w: 0.1273}
+    - {name: Catherine, w: 0.126}
+    - {name: Tracey, w: 0.1256}
+    - {name: Megan, w: 0.123}
+    - {name: Louise, w: 0.1211}
+    - {name: Angela, w: 0.118}
+    - {name: Ann, w: 0.1116}
+    - {name: Amanda, w: 0.1116}
+    - {name: Sharon, w: 0.1031}
+    - {name: Caroline, w: 0.1005}
+    - {name: Sandra, w: 0.1004}
+    - {name: Diane, w: 0.0994}
+    - {name: Holly, w: 0.0972}
+    - {name: Alison, w: 0.0961}
+    - {name: Anne, w: 0.0941}
+    - {name: Anna, w: 0.0926}
+    - {name: Bethany, w: 0.0897}
+    - {name: Grace, w: 0.0882}
+    - {name: Amelia, w: 0.0879}
+    - {name: Maria, w: 0.0858}
+    - {name: Abigail, w: 0.0848}
+    - {name: Alice, w: 0.0842}
+    - {name: Ellie, w: 0.0841}
+    - {name: Zoe, w: 0.0828}
+    - {name: Natalie, w: 0.0819}
+    - {name: Gillian, w: 0.078}
+    - {name: Georgia, w: 0.0768}
+    - {name: Tracy, w: 0.0768}
+    - {name: Ella, w: 0.0737}
+    - {name: Katherine, w: 0.0726}
+    - {name: Barbara, w: 0.072}
+    - {name: Lily, w: 0.0708}
+    - {name: Jade, w: 0.0706}
+    - {name: Clare, w: 0.0694}
+    - {name: Eleanor, w: 0.0691}
+    - {name: Kelly, w: 0.0686}
+    - {name: Sally, w: 0.0685}
+    - {name: Danielle, w: 0.0681}
+    - {name: Jean, w: 0.0679}
+    - {name: Wendy, w: 0.0677}
+    - {name: Natasha, w: 0.0668}
+    - {name: Stephanie, w: 0.0663}
+    - {name: Molly, w: 0.0653}
+    - {name: Hayley, w: 0.0649}
+    - {name: Heather, w: 0.0649}
+    - {name: Kathryn, w: 0.0623}
+    - {name: Pauline, w: 0.0622}
+    - {name: Donna, w: 0.062}
+    - {name: Mia, w: 0.0602}
+    - {name: Elaine, w: 0.0598}
+    - {name: Dawn, w: 0.0586}
+    - {name: Alexandra, w: 0.0573}
+    - {name: Georgina, w: 0.0552}
+    - {name: Shannon, w: 0.0544}
+    - {name: Valerie, w: 0.0543}
+    - {name: Ruby, w: 0.0538}
+    - {name: Maureen, w: 0.0534}
+    - {name: Ruth, w: 0.0522}
+    - {name: Kirsty, w: 0.0519}
+    - {name: Marie, w: 0.0519}
+    - {name: Pamela, w: 0.0516}
+    - {name: Fiona, w: 0.0508}
+    - {name: Leah, w: 0.0502}
+    - {name: Daisy, w: 0.0499}
+    - {name: Suzanne, w: 0.0486}
+    - {name: Denise, w: 0.0484}
+    - {name: Lesley, w: 0.0483}
+    - {name: Julia, w: 0.048}
+    - {name: Isabella, w: 0.0479}
+    - {name: Jasmine, w: 0.0478}
+    - {name: Kerry, w: 0.0473}
+    - {name: Joanna, w: 0.0466}
+    - {name: Kate, w: 0.0466}
+    - {name: Amber, w: 0.0466}
+    - {name: Paige, w: 0.0464}
+    - {name: Sara, w: 0.0455}
+    - {name: Kathleen, w: 0.045}
+    - {name: Leanne, w: 0.0449}
+    - {name: Evie, w: 0.0437}
+    - {name: Lorraine, w: 0.0428}
+    - {name: Nicole, w: 0.0423}
+    - {name: Poppy, w: 0.0423}
+    - {name: Melanie, w: 0.0422}
+    - {name: Ava, w: 0.042}
+    - {name: Rachael, w: 0.0419}
+    - {name: Freya, w: 0.0418}
+    - {name: Melissa, w: 0.0417}
+    - {name: Millie, w: 0.0407}
+    - {name: Phoebe, w: 0.0403}
+    - {name: Andrea, w: 0.0397}
+    - {name: Isla, w: 0.0394}
+    - {name: Isabelle, w: 0.039}
+    - {name: Jodie, w: 0.0389}
+    - {name: Caitlin, w: 0.0389}
+    - {name: Erin, w: 0.0387}
+    - {name: Rosie, w: 0.0386}
+    - {name: Judith, w: 0.0385}
+    - {name: Courtney, w: 0.0384}
+    - {name: Aimee, w: 0.0381}
+    - {name: Sophia, w: 0.0373}
+    - {name: Imogen, w: 0.0372}
+    - {name: Teresa, w: 0.0363}
+    - {name: Paula, w: 0.0361}
+    - {name: Cheryl, w: 0.0354}
+    - {name: Carole, w: 0.0336}
+    - {name: Harriet, w: 0.0335}
+    - {name: Chelsea, w: 0.0334}
+    - {name: Naomi, w: 0.0333}
+    - {name: Yvonne, w: 0.0331}
+    - {name: Abbie, w: 0.033}
+    - {name: Beverley, w: 0.0325}
+    - {name: Janice, w: 0.032}
+    - {name: Stacey, w: 0.0316}
+    - {name: Rosemary, w: 0.0309}
+    - {name: Shirley, w: 0.0309}
+    - {name: Kimberley, w: 0.0308}
+    - {name: Sheila, w: 0.0292}
+    - {name: Joan, w: 0.0291}
+    - {name: Francesca, w: 0.029}
+    - {name: Kim, w: 0.0288}
+    - {name: Hollie, w: 0.0288}
+  male:
+    - {name: David, w: 1.0}
+    - {name: Paul, w: 0.6233}
+    - {name: James, w: 0.5769}
+    - {name: Christopher, w: 0.528}
+    - {name: Thomas, w: 0.5272}
+    - {name: John, w: 0.4745}
+    - {name: Michael, w: 0.3977}
+    - {name: Andrew, w: 0.355}
+    - {name: Mark, w: 0.3446}
+    - {name: Daniel, w: 0.3235}
+    - {name: Jack, w: 0.2713}
+    - {name: Matthew, w: 0.2575}
+    - {name: Stephen, w: 0.25}
+    - {name: Robert, w: 0.2419}
+    - {name: Richard, w: 0.2373}
+    - {name: Peter, w: 0.2045}
+    - {name: William, w: 0.191}
+    - {name: Joshua, w: 0.1693}
+    - {name: Anthony, w: 0.1491}
+    - {name: Joseph, w: 0.1469}
+    - {name: Adam, w: 0.1462}
+    - {name: Ryan, w: 0.1455}
+    - {name: Samuel, w: 0.1416}
+    - {name: Alexander, w: 0.1383}
+    - {name: George, w: 0.1374}
+    - {name: Benjamin, w: 0.1335}
+    - {name: Oliver, w: 0.1322}
+    - {name: Ian, w: 0.1305}
+    - {name: Luke, w: 0.1279}
+    - {name: Simon, w: 0.1231}
+    - {name: Alan, w: 0.1144}
+    - {name: Harry, w: 0.1119}
+    - {name: Steven, w: 0.1097}
+    - {name: Jonathan, w: 0.1009}
+    - {name: Nicholas, w: 0.0971}
+    - {name: Philip, w: 0.0932}
+    - {name: Lewis, w: 0.0896}
+    - {name: Martin, w: 0.0896}
+    - {name: Lee, w: 0.0889}
+    - {name: Kevin, w: 0.0874}
+    - {name: Edward, w: 0.0867}
+    - {name: Liam, w: 0.0841}
+    - {name: Brian, w: 0.0808}
+    - {name: Jordan, w: 0.0792}
+    - {name: Jamie, w: 0.0789}
+    - {name: Gary, w: 0.0772}
+    - {name: Jake, w: 0.074}
+    - {name: Charles, w: 0.0738}
+    - {name: Charlie, w: 0.0735}
+    - {name: Jacob, w: 0.0721}
+    - {name: Callum, w: 0.072}
+    - {name: Nathan, w: 0.0713}
+    - {name: Stuart, w: 0.0699}
+    - {name: Colin, w: 0.069}
+    - {name: Timothy, w: 0.068}
+    - {name: Graham, w: 0.0679}
+    - {name: Neil, w: 0.0658}
+    - {name: Patrick, w: 0.0655}
+    - {name: Keith, w: 0.0651}
+    - {name: Connor, w: 0.0628}
+    - {name: Craig, w: 0.0616}
+    - {name: Jason, w: 0.0582}
+    - {name: Sean, w: 0.0575}
+    - {name: Ben, w: 0.0549}
+    - {name: Aaron, w: 0.0537}
+    - {name: Scott, w: 0.0537}
+    - {name: Darren, w: 0.0532}
+    - {name: Ethan, w: 0.0524}
+    - {name: Alfie, w: 0.0508}
+    - {name: Barry, w: 0.0508}
+    - {name: Dylan, w: 0.0504}
+    - {name: Adrian, w: 0.0502}
+    - {name: Henry, w: 0.0502}
+    - {name: Kenneth, w: 0.0502}
+    - {name: Dean, w: 0.0481}
+    - {name: Nigel, w: 0.0478}
+    - {name: Kieran, w: 0.0469}
+    - {name: Cameron, w: 0.0457}
+    - {name: Max, w: 0.0456}
+    - {name: Raymond, w: 0.0449}
+    - {name: Carl, w: 0.0442}
+    - {name: Bradley, w: 0.0433}
+    - {name: Shaun, w: 0.0431}
+    - {name: Gareth, w: 0.0427}
+    - {name: Trevor, w: 0.0398}
+    - {name: Alex, w: 0.0395}
+    - {name: Kyle, w: 0.0383}
+    - {name: Wayne, w: 0.0371}
+    - {name: Dominic, w: 0.0368}
+    - {name: Sam, w: 0.0367}
+    - {name: Malcolm, w: 0.0357}
+    - {name: Terence, w: 0.0355}
+    - {name: Phillip, w: 0.0354}
+    - {name: Oscar, w: 0.0343}
+    - {name: Roger, w: 0.0335}
+    - {name: Ashley, w: 0.0331}
+    - {name: Karl, w: 0.033}
+    - {name: Noah, w: 0.0329}
+    - {name: Archie, w: 0.0317}
+    - {name: Geoffrey, w: 0.0311}
+    - {name: Derek, w: 0.031}
+    - {name: Louis, w: 0.0308}
+    - {name: Tyler, w: 0.0306}
+    - {name: Leo, w: 0.0304}
+    - {name: Reece, w: 0.0296}
+    - {name: Tony, w: 0.0285}
+    - {name: Robin, w: 0.0284}
+    - {name: Brandon, w: 0.0284}
+    - {name: Rhys, w: 0.0281}
+    - {name: Lucas, w: 0.0279}
+    - {name: Harrison, w: 0.0278}
+    - {name: Ross, w: 0.0271}
+    - {name: Shane, w: 0.0271}
+    - {name: Isaac, w: 0.0269}
+    - {name: Arthur, w: 0.0267}
+    - {name: Leon, w: 0.0264}
+    - {name: Jeremy, w: 0.0264}
+    - {name: Owen, w: 0.0262}
+    - {name: Gregory, w: 0.026}
+    - {name: Terry, w: 0.026}
+    - {name: Logan, w: 0.0256}
+    - {name: Russell, w: 0.0256}
+    - {name: Toby, w: 0.0255}
+    - {name: Antony, w: 0.0252}
+    - {name: Ronald, w: 0.0249}
+    - {name: Joe, w: 0.0247}
+    - {name: Martyn, w: 0.0242}
+    - {name: Harvey, w: 0.0238}
+    - {name: Roy, w: 0.0234}
+    - {name: Leslie, w: 0.0232}
+    - {name: Clive, w: 0.0231}
+    - {name: Jeffrey, w: 0.0227}
+    - {name: Mason, w: 0.0226}
+    - {name: Riley, w: 0.0225}
+    - {name: Elliot, w: 0.0221}
+    - {name: Frederick, w: 0.022}
+    - {name: Christian, w: 0.022}
+    - {name: Eric, w: 0.0217}
+    - {name: Marcus, w: 0.0215}
+    - {name: Francis, w: 0.0211}
+    - {name: Gordon, w: 0.021}
+    - {name: Freddie, w: 0.0208}
+    - {name: Finley, w: 0.0206}
+    - {name: Douglas, w: 0.0197}
+    - {name: Joel, w: 0.0195}
+    - {name: Marc, w: 0.0192}
+    - {name: Garry, w: 0.019}
+    - {name: Billy, w: 0.0189}
+    - {name: Vincent, w: 0.0189}
+    - {name: Justin, w: 0.0187}
+    - {name: Allan, w: 0.0181}
+    - {name: Stewart, w: 0.0181}
+    - {name: Gerald, w: 0.0179}
+    - {name: Theo, w: 0.0177}
+    - {name: Julian, w: 0.0177}
+    - {name: Jayden, w: 0.0177}
+    - {name: Danny, w: 0.0177}
+    - {name: Stanley, w: 0.0172}
+    - {name: Sebastian, w: 0.0171}
+    - {name: Gavin, w: 0.0171}
+  surnames:
+    - {name: Smith, w: 1.0}
+    - {name: Jones, w: 0.5548}
+    - {name: Williams, w: 0.393}
+    - {name: Taylor, w: 0.3078}
+    - {name: Brown, w: 0.2546}
+    - {name: Davies, w: 0.2181}
+    - {name: Evans, w: 0.1913}
+    - {name: Wilson, w: 0.1708}
+    - {name: Thomas, w: 0.1545}
+    - {name: Johnson, w: 0.1413}
+    - {name: Roberts, w: 0.1303}
+    - {name: Robinson, w: 0.121}
+    - {name: Thompson, w: 0.113}
+    - {name: Wright, w: 0.1061}
+    - {name: Walker, w: 0.1001}
+    - {name: White, w: 0.0947}
+    - {name: Edwards, w: 0.09}
+    - {name: Hughes, w: 0.0857}
+    - {name: Green, w: 0.0819}
+    - {name: Hall, w: 0.0784}
+    - {name: Lewis, w: 0.0752}
+    - {name: Harris, w: 0.0723}
+    - {name: Clarke, w: 0.0696}
+    - {name: Jackson, w: 0.0671}
+    - {name: Wood, w: 0.0648}
+    - {name: Turner, w: 0.0627}
+    - {name: Martin, w: 0.0607}
+    - {name: Cooper, w: 0.0589}
+    - {name: Hill, w: 0.0571}
+    - {name: Ward, w: 0.0555}
+    - {name: Morris, w: 0.054}
+    - {name: Moore, w: 0.0526}
+    - {name: Clark, w: 0.0512}
+    - {name: Lee, w: 0.0499}
+    - {name: King, w: 0.0487}
+    - {name: Baker, w: 0.0475}
+    - {name: Harrison, w: 0.0465}
+    - {name: Morgan, w: 0.0454}
+    - {name: Allen, w: 0.0444}
+    - {name: James, w: 0.0435}
+    - {name: Scott, w: 0.0426}
+    - {name: Phillips, w: 0.0417}
+    - {name: Watson, w: 0.0409}
+    - {name: Davis, w: 0.0401}
+    - {name: Parker, w: 0.0393}
+    - {name: Price, w: 0.0386}
+    - {name: Bennett, w: 0.0379}
+    - {name: Young, w: 0.0372}
+    - {name: Griffiths, w: 0.0366}
+    - {name: Mitchell, w: 0.036}
+    - {name: Kelly, w: 0.0354}
+    - {name: Cook, w: 0.0348}
+    - {name: Carter, w: 0.0342}
+    - {name: Richardson, w: 0.0337}
+    - {name: Bailey, w: 0.0332}
+    - {name: Collins, w: 0.0327}
+    - {name: Bell, w: 0.0322}
+    - {name: Shaw, w: 0.0317}
+    - {name: Murphy, w: 0.0312}
+    - {name: Miller, w: 0.0308}
+    - {name: Cox, w: 0.0304}
+    - {name: Richards, w: 0.03}
+    - {name: Marshall, w: 0.0296}
+    - {name: Anderson, w: 0.0292}
+    - {name: Simpson, w: 0.0288}
+    - {name: Ellis, w: 0.0284}
+    - {name: Adams, w: 0.028}
+    - {name: Wilkinson, w: 0.0277}
+    - {name: Foster, w: 0.0274}
+    - {name: Chapman, w: 0.027}
+    - {name: Powell, w: 0.0267}
+    - {name: Webb, w: 0.0264}
+    - {name: Rogers, w: 0.0261}
+    - {name: Gray, w: 0.0258}
+    - {name: Mason, w: 0.0255}
+    - {name: Hunt, w: 0.0252}
+    - {name: Campbell, w: 0.0249}
+    - {name: Matthews, w: 0.0246}
+    - {name: Owen, w: 0.0244}
+    - {name: Palmer, w: 0.0241}
+    - {name: Holmes, w: 0.0239}
+    - {name: Mills, w: 0.0236}
+    - {name: Barnes, w: 0.0234}
+    - {name: Knight, w: 0.0231}
+    - {name: Lloyd, w: 0.0229}
+    - {name: Butler, w: 0.0227}
+    - {name: Russell, w: 0.0225}
+    - {name: Barker, w: 0.0222}
+    - {name: Fisher, w: 0.022}
+    - {name: Stevens, w: 0.0218}
+    - {name: Jenkins, w: 0.0216}
+    - {name: Murray, w: 0.0214}
+    - {name: Dixon, w: 0.0212}
+    - {name: Harvey, w: 0.021}
+    - {name: Graham, w: 0.0208}
+    - {name: Pearson, w: 0.0207}
+    - {name: Fletcher, w: 0.0205}
+    - {name: Walsh, w: 0.0203}
+    - {name: Gibson, w: 0.0201}
+    - {name: Howard, w: 0.02}
+    - {name: Andrews, w: 0.0198}
+    - {name: Stewart, w: 0.0196}
+    - {name: Elliott, w: 0.0195}
+    - {name: Reynolds, w: 0.0193}
+    - {name: Saunders, w: 0.0191}
+    - {name: Payne, w: 0.019}
+    - {name: Fox, w: 0.0188}
+    - {name: Ford, w: 0.0187}
+    - {name: Pearce, w: 0.0185}
+    - {name: Day, w: 0.0184}
+    - {name: Brooks, w: 0.0183}
+    - {name: West, w: 0.0181}
+    - {name: Lawrence, w: 0.018}
+    - {name: Cole, w: 0.0178}
+    - {name: Atkinson, w: 0.0177}
+    - {name: Bradley, w: 0.0176}
+    - {name: Spencer, w: 0.0175}
+    - {name: Gill, w: 0.0173}
+    - {name: Dawson, w: 0.0172}
+    - {name: Ball, w: 0.0171}
+    - {name: Burton, w: 0.017}
+    - {name: O'Brien, w: 0.0168}
+    - {name: Watts, w: 0.0167}
+    - {name: Rose, w: 0.0166}
+    - {name: Booth, w: 0.0165}
+    - {name: Perry, w: 0.0164}
+    - {name: Ryan, w: 0.0163}
+    - {name: Grant, w: 0.0162}
+    - {name: Wells, w: 0.0161}
+    - {name: Armstrong, w: 0.016}
+    - {name: Francis, w: 0.0159}
+    - {name: Rees, w: 0.0158}
+    - {name: Hayes, w: 0.0157}
+    - {name: Hart, w: 0.0156}
+    - {name: Hudson, w: 0.0155}
+    - {name: Newman, w: 0.0154}
+    - {name: Barrett, w: 0.0153}
+    - {name: Webster, w: 0.0152}
+    - {name: Hunter, w: 0.0151}
+    - {name: Gregory, w: 0.015}
+    - {name: Carr, w: 0.0149}
+    - {name: Lowe, w: 0.0148}
+    - {name: Page, w: 0.0147}
+    - {name: Marsh, w: 0.0146}
+    - {name: Riley, w: 0.0145}
+    - {name: Dunn, w: 0.0145}
+    - {name: Woods, w: 0.0144}
+    - {name: Parsons, w: 0.0143}
+    - {name: Berry, w: 0.0142}
+    - {name: Stone, w: 0.0141}
+    - {name: Reid, w: 0.0141}
+    - {name: Holland, w: 0.014}
+    - {name: Hawkins, w: 0.0139}
+    - {name: Harding, w: 0.0138}
+    - {name: Porter, w: 0.0137}
+    - {name: Robertson, w: 0.0137}
+    - {name: Newton, w: 0.0136}
+    - {name: Oliver, w: 0.0135}
+    - {name: Reed, w: 0.0135}
+    - {name: Kennedy, w: 0.0134}
+    - {name: Williamson, w: 0.0133}
+    - {name: Bird, w: 0.0132}
+    - {name: Gardner, w: 0.0132}
+    - {name: Dean, w: 0.0131}
+    - {name: Lane, w: 0.013}
+    - {name: Cooke, w: 0.013}
+    - {name: Bates, w: 0.0129}
+    - {name: Henderson, w: 0.0128}
+    - {name: Parry, w: 0.0128}
+    - {name: Burgess, w: 0.0127}
+    - {name: Bishop, w: 0.0126}
+    - {name: Walton, w: 0.0126}
+    - {name: Burns, w: 0.0125}
+    - {name: Nicholson, w: 0.0125}
+    - {name: Shepherd, w: 0.0124}
+    - {name: Ross, w: 0.0123}
+    - {name: Cross, w: 0.0123}
+    - {name: Long, w: 0.0122}
+    - {name: Freeman, w: 0.0122}
+    - {name: Warren, w: 0.0121}
+    - {name: Nicholls, w: 0.012}
+    - {name: Hamilton, w: 0.012}
+    - {name: Byrne, w: 0.0119}
+    - {name: Sutton, w: 0.0119}
+    - {name: McDonald, w: 0.0118}
+    - {name: Yates, w: 0.0118}
+    - {name: Hodgson, w: 0.0117}
+    - {name: Robson, w: 0.0117}
+    - {name: Curtis, w: 0.0116}
+    - {name: Hopkins, w: 0.0116}
+    - {name: O'Connor, w: 0.0115}
+    - {name: Harper, w: 0.0115}
+    - {name: Coleman, w: 0.0114}
+    - {name: Watkins, w: 0.0114}
+    - {name: Moss, w: 0.0113}
+    - {name: McCarthy, w: 0.0113}
+    - {name: Chambers, w: 0.0112}
+    - {name: Griffin, w: 0.0112}
+    - {name: Sharp, w: 0.0111}
+    - {name: Hardy, w: 0.0111}
+    - {name: Wheeler, w: 0.011}
+    - {name: Potter, w: 0.011}
+    - {name: Osborne, w: 0.0109}
+    - {name: Johnston, w: 0.0109}
+    - {name: Gordon, w: 0.0108}
+    - {name: Doyle, w: 0.0108}
+    - {name: Wallace, w: 0.0108}
+    - {name: George, w: 0.0107}
+    - {name: Jordan, w: 0.0107}
+    - {name: Hutchinson, w: 0.0106}
+    - {name: Rowe, w: 0.0106}
+    - {name: Burke, w: 0.0105}
+    - {name: May, w: 0.0105}
+    - {name: Pritchard, w: 0.0105}
+    - {name: Gilbert, w: 0.0104}
+    - {name: Willis, w: 0.0104}
+    - {name: Higgins, w: 0.0103}
+    - {name: Read, w: 0.0103}
+    - {name: Miles, w: 0.0102}
+    - {name: Stevenson, w: 0.0102}
+    - {name: Stephenson, w: 0.0102}
+    - {name: Hammond, w: 0.0101}
+    - {name: Arnold, w: 0.0101}
+    - {name: Buckley, w: 0.0101}
+    - {name: Walters, w: 0.01}
+  nicknames:
+    Christopher: Chris
+    Matthew: Matt
+    Michael: Mike
+    Robert: Rob
+    William: Will
+    Thomas: Tom
+    James: Jamie
+    Daniel: Dan
+    Jonathan: Jon
+    Samuel: Sam
+    Benjamin: Ben
+    Joseph: Joe
+    Andrew: Andy
+    Richard: Rich
+    Elizabeth: Liz
+    Katherine: Kate
+    Catherine: Cath
+    Rebecca: Becky
+    Victoria: Vicky
+    Jennifer: Jen
+    Samantha: Sam
+    Charlotte: Charlie
+    Alexandra: Alex
+    Margaret: Maggie
+    Nicholas: Nick
+    Stephen: Steve
+    Anthony: Tony
+    Edward: Ed
+  display: '{first} {last}'
+cultures:
+  - {culture: in, share: 0.031}
+  - {culture: pk, share: 0.027}
+  - {culture: it, share: 0.0046}
+  - {culture: ng, share: 0.0045}
+  - {culture: us, share: 0.0034}
+  - {culture: de, share: 0.002}
+email:
+  domains:
+    - {domain: gmail.com, share: 0.38}
+    - {domain: hotmail.co.uk, share: 0.13}
+    - {domain: outlook.com, share: 0.09}
+    - {domain: icloud.com, share: 0.1}
+    - {domain: yahoo.co.uk, share: 0.08}
+    - {domain: btinternet.com, share: 0.07}
+    - {domain: live.co.uk, share: 0.04}
+    - {domain: sky.com, share: 0.04}
+    - {domain: hotmail.com, share: 0.03}
+    - {domain: aol.com, share: 0.02}
+    - {domain: virginmedia.com, share: 0.02}
+  patterns: [
+    '{first}.{last}', '{first}{last}', '{f}{last}', '{first}{last}{nn}', '{first}.{last}{yy}',
+    '{first}_{last}'
+  ]
+services:
+  - {sender: Royal Mail, kind: courier, sender_type: alphanumeric}
+  - {sender: Evri, kind: courier, sender_type: alphanumeric}
+  - {sender: DPD, kind: courier, sender_type: alphanumeric}
+  - {sender: Amazon, kind: courier, sender_type: alphanumeric}
+  - {sender: Yodel, kind: courier, sender_type: alphanumeric}
+  - {sender: HSBC UK, kind: bank, sender_type: alphanumeric}
+  - {sender: Barclays, kind: bank, sender_type: alphanumeric}
+  - {sender: Lloyds, kind: bank, sender_type: alphanumeric}
+  - {sender: NatWest, kind: bank, sender_type: alphanumeric}
+  - {sender: Monzo, kind: bank, sender_type: alphanumeric}
+  - {sender: Nationwide, kind: bank, sender_type: alphanumeric}
+  - {sender: EE, kind: telecom, sender_type: alphanumeric}
+  - {sender: O2, kind: telecom, sender_type: alphanumeric}
+  - {sender: Vodafone, kind: telecom, sender_type: alphanumeric}
+  - {sender: Google, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Microsoft, kind: otp_service, sender_type: alphanumeric}
+  - {sender: GOV.UK, kind: otp_service, sender_type: alphanumeric}
+  - {sender: NHS, kind: doctor, sender_type: alphanumeric}
+  - {sender: "+44113...", kind: doctor, sender_type: number}
+  - {sender: Boots, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: Deliveroo, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Just Eat, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Uber, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: British Airways, kind: airline, sender_type: alphanumeric}
+  - {sender: easyJet, kind: airline, sender_type: alphanumeric}
+  - {sender: Trainline, kind: rail, sender_type: alphanumeric}
+  - {sender: Avanti, kind: rail, sender_type: alphanumeric}
+  - {sender: HMRC, kind: government, sender_type: alphanumeric}
+  - {sender: DVLA, kind: government, sender_type: alphanumeric}
+  - {sender: Tesco, kind: retail, sender_type: alphanumeric}
+  - {sender: Argos, kind: retail, sender_type: alphanumeric}
+  - {sender: Octopus, kind: utility, sender_type: alphanumeric}
+  - {sender: British Gas, kind: utility, sender_type: alphanumeric}
+  - {sender: Thames Water, kind: utility, sender_type: alphanumeric}
+holidays:
+  - {date: "01-01", name: New Year's Day}
+  - {date: "01-02", name: 2nd January (Scotland)}
+  - {date: "03-17", name: St Patrick's Day (Northern Ireland)}
+  - {rule: easter-2, name: Good Friday}
+  - {rule: easter+1, name: Easter Monday (not Scotland)}
+  - {rule: "05-mon#1", name: Early May bank holiday}
+  - {rule: "05-mon#-1", name: Spring bank holiday}
+  - {date: "07-12", name: Battle of the Boyne (Northern Ireland)}
+  - {rule: "08-mon#1", name: Summer bank holiday (Scotland)}
+  - {rule: "08-mon#-1", name: "Summer bank holiday (England, Wales, NI)"}
+  - {date: "11-30", name: St Andrew's Day (Scotland)}
+  - {date: "12-25", name: Christmas Day}
+  - {date: "12-26", name: Boxing Day}
+popular_apps:
+  - {package: com.whatsapp, name: WhatsApp, category: messaging}
+  - {package: uk.co.hsbc.hsbcukmobilebanking, name: HSBC UK, category: banking}
+  - {package: com.barclays.android.barclaysmobilebanking, name: Barclays, category: banking}
+  - {package: com.grppl.android.shell.CMBlloydsTSB73, name: Lloyds Bank, category: banking}
+  - {package: com.grppl.android.shell.halifax, name: Halifax, category: banking}
+  - {package: com.rbs.mobile.android.natwest, name: NatWest, category: banking}
+  - {package: uk.co.santander.santanderUK, name: Santander UK, category: banking}
+  - {package: co.uk.getmondo, name: Monzo, category: banking}
+  - {package: com.starlingbank.android, name: Starling, category: banking}
+  - {package: co.uk.Nationwide.Mobile, name: Nationwide, category: banking}
+  - {package: com.revolut.revolut, name: Revolut, category: banking}
+  - {package: com.thetrainline, name: Trainline, category: transport}
+  - {package: uk.co.nationalrail.google, name: National Rail, category: transport}
+  - {package: com.citymapper.app.release, name: Citymapper, category: transport}
+  - {package: com.ubercab, name: Uber, category: transport}
+  - {package: com.ryanair.cheapflights, name: Ryanair, category: transport}
+  - {package: com.ba.mobile, name: British Airways, category: transport}
+  - {package: com.tesco.grocery.view, name: "Tesco Grocery & Clubcard", category: shopping}
+  - {package: com.sainsburys.gol, name: Sainsbury's, category: shopping}
+  - {package: com.asos.app, name: ASOS, category: shopping}
+  - {package: com.homeretailgroup.argos.android, name: Argos, category: shopping}
+  - {package: fr.vinted, name: Vinted, category: shopping}
+  - {package: com.rightmove.android, name: Rightmove, category: shopping}
+  - {package: bbc.mobile.news.uk, name: BBC News, category: news}
+  - {package: bbc.iplayer.android, name: BBC iPlayer, category: news}
+  - {package: com.guardian, name: The Guardian, category: news}
+  - {package: com.deliveroo.orderapp, name: Deliveroo, category: food}
+  - {package: com.justeat.app.uk, name: Just Eat, category: food}
+  - {package: com.ubercab.eats, name: Uber Eats, category: food}
+  - {package: uk.co.dominos.android, name: Domino's, category: food}
+  - {package: com.nhs.online.nhsonline, name: NHS App, category: health}
+  - {package: com.boots.flagship.android, name: Boots, category: health}
+  - {package: uk.gov.hmrc.ptcalc, name: HMRC, category: government}
+  - {package: uk.co.ee.myee, name: EE, category: telecom}
+  - {package: uk.co.o2.android.myo2, name: My O2, category: telecom}

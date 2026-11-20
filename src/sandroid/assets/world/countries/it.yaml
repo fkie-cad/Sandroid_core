@@ -1,0 +1,802 @@
+# Sandroid world pack: country it. Sources: it.SOURCES.md
+pack: country
+schema: 1
+country: it
+name: Italy
+languages: {it: 1.0}
+timezones: [Europe/Rome]
+date_format: dd/MM/yyyy
+time_format: HH:mm
+currency: {code: EUR, symbol: €, format: '49,99 €'}
+phone:
+  country_code: '39'
+  trunk_prefix: ''
+  national_format_examples: [333 123 4567, 347 1234567, 06 1234 5678, 02 1234 5678]
+  mobile:
+    realistic:
+      - {prefix: '330', length: 10, operator: TIM}
+      - {prefix: '331', length: 10, operator: TIM}
+      - {prefix: '333', length: 10, operator: TIM}
+      - {prefix: '334', length: 10, operator: TIM}
+      - {prefix: '335', length: 10, operator: TIM}
+      - {prefix: '336', length: 10, operator: TIM}
+      - {prefix: '337', length: 10, operator: TIM}
+      - {prefix: '338', length: 10, operator: TIM}
+      - {prefix: '339', length: 10, operator: TIM}
+      - {prefix: '360', length: 10, operator: TIM}
+      - {prefix: '366', length: 10, operator: TIM}
+      - {prefix: '368', length: 10, operator: TIM}
+      - {prefix: '340', length: 10, operator: Vodafone}
+      - {prefix: '342', length: 10, operator: Vodafone}
+      - {prefix: '343', length: 10, operator: Vodafone}
+      - {prefix: '345', length: 10, operator: Vodafone}
+      - {prefix: '346', length: 10, operator: Vodafone}
+      - {prefix: '347', length: 10, operator: Vodafone}
+      - {prefix: '348', length: 10, operator: Vodafone}
+      - {prefix: '349', length: 10, operator: Vodafone}
+      - {prefix: '377', length: 10, operator: Vodafone}
+      - {prefix: '320', length: 10, operator: WindTre}
+      - {prefix: '324', length: 10, operator: WindTre}
+      - {prefix: '327', length: 10, operator: WindTre}
+      - {prefix: '328', length: 10, operator: WindTre}
+      - {prefix: '329', length: 10, operator: WindTre}
+      - {prefix: '380', length: 10, operator: WindTre}
+      - {prefix: '388', length: 10, operator: WindTre}
+      - {prefix: '389', length: 10, operator: WindTre}
+      - {prefix: '391', length: 10, operator: WindTre}
+      - {prefix: '392', length: 10, operator: WindTre}
+      - {prefix: '393', length: 10, operator: WindTre}
+      - {prefix: '3513', length: 10, operator: iliad}
+      - {prefix: '3514', length: 10, operator: iliad}
+      - {prefix: '3515', length: 10, operator: iliad}
+      - {prefix: '3516', length: 10, operator: iliad}
+      - {prefix: '3517', length: 10, operator: iliad}
+      - {prefix: '3518', length: 10, operator: iliad}
+      - {prefix: '3519', length: 10, operator: iliad}
+      - {prefix: '3520', length: 10, operator: iliad}
+      - {prefix: '3711', length: 10, operator: PosteMobile}
+      - {prefix: '3713', length: 10, operator: PosteMobile}
+      - {prefix: '3714', length: 10, operator: PosteMobile}
+      - {prefix: '3715', length: 10, operator: PosteMobile}
+      - {prefix: '3716', length: 10, operator: PosteMobile}
+    unallocated:
+      - {prefix: '321', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '325', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '326', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '332', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '354', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '356', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '357', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '358', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '359', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '361', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '364', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '365', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '367', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '369', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '372', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '384', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '385', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '386', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '387', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '394', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '395', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '396', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '398', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+      - {prefix: '399', length: 10, note: 3XY code with no assignee in MIMIT 'File_assegnati_2.xlsx' (updated 2026-09-15), source: S3}
+    fiction: null
+  landline:
+    cities:
+      - {city: Roma, area_code: '06', subscriber_length: 8}
+      - {city: Milano, area_code: '02', subscriber_length: 8}
+      - {city: Napoli, area_code: 081, subscriber_length: 7}
+      - {city: Torino, area_code: '011', subscriber_length: 7}
+      - {city: Palermo, area_code: 091, subscriber_length: 7}
+      - {city: Genova, area_code: '010', subscriber_length: 7}
+      - {city: Bologna, area_code: '051', subscriber_length: 7}
+      - {city: Firenze, area_code: '055', subscriber_length: 7}
+      - {city: Bari, area_code: 080, subscriber_length: 7}
+      - {city: Catania, area_code: 095, subscriber_length: 7}
+      - {city: Venezia, area_code: '041', subscriber_length: 7}
+      - {city: Verona, area_code: '045', subscriber_length: 7}
+      - {city: Padova, area_code: 049, subscriber_length: 7}
+      - {city: Trieste, area_code: '040', subscriber_length: 7}
+      - {city: Brescia, area_code: '030', subscriber_length: 7}
+      - {city: Cagliari, area_code: '070', subscriber_length: 7}
+    fiction: null
+  validation_note: 'Italy has no trunk prefix: landline area codes keep their leading 0 inside the national significant number (+39 06 ...), so area_code includes the 0. Mobile NSN is 10 digits (older 9-digit numbers exist). Unallocated: 30x is reserved for future use and rejected by libphonenumber, so it is NOT listed; the listed 3XY codes have no assignee but phonenumbers 9.0.43 accepts them as valid MOBILE (its carrier table even shows stale labels for some). fiction is null: AGCOM plan 8/15/CIR has no fiction/drama range.'
+carriers:
+  - {name: Vodafone, sim_operator: vodafone IT, mccmnc: '22210', share: 0.252}
+  - {name: WindTre, sim_operator: WINDTRE, mccmnc: '22288', share: 0.236}
+  - {name: TIM, sim_operator: TIM, mccmnc: '22201', share: 0.223}
+  - {name: iliad, sim_operator: iliad, mccmnc: '22250', share: 0.161}
+  - {name: PosteMobile, sim_operator: PosteMobile, mccmnc: '22233', share: 0.056}
+  - {name: CoopVoce, sim_operator: CoopVoce, mccmnc: '22253', share: 0.03}
+cities:
+  - {name: Roma, lat: 41.9028, lon: 12.4964, population: 2750000, area_code: '06', postcodes: [00118, '00153', 00184, 00185, 00186, 00187, 00192, 00198], districts: [Trastevere, Monti, Prati, Testaccio, San Lorenzo, Pigneto, Parioli, Esquilino]}
+  - {name: Milano, lat: 45.4642, lon: 9.19, population: 1370000, area_code: '02', postcodes: ['20121', '20122', '20123', '20124', '20135', '20143', '20144', '20154'], districts: [Brera, Navigli, Porta Romana, Isola, Città Studi, NoLo, Porta Venezia, CityLife]}
+  - {name: Napoli, lat: 40.8518, lon: 14.2681, population: 910000, area_code: 081, postcodes: ['80121', '80122', '80127', '80132', '80134', '80138', '80142'], districts: [Chiaia, Vomero, Posillipo, Centro Storico, Quartieri Spagnoli, Fuorigrotta]}
+  - {name: Torino, lat: 45.0703, lon: 7.6869, population: 850000, area_code: '011', postcodes: ['10121', '10122', '10123', '10124', '10128', '10138', '10153'], districts: [Centro, San Salvario, Crocetta, Vanchiglia, Borgo Po, Aurora]}
+  - {name: Palermo, lat: 38.1157, lon: 13.3615, population: 630000, area_code: 091, postcodes: ['90133', '90134', '90138', '90139', '90141', '90144'], districts: [Kalsa, Politeama, Libertà, Mondello, Albergheria]}
+  - {name: Genova, lat: 44.4056, lon: 8.9463, population: 560000, area_code: '010', postcodes: ['16121', '16123', '16124', '16128', '16145'], districts: [Centro Storico, Foce, Albaro, Sampierdarena, Nervi]}
+  - {name: Bologna, lat: 44.4949, lon: 11.3426, population: 390000, area_code: '051', postcodes: ['40121', '40123', '40124', '40125', '40126', '40137'], districts: [Centro, Bolognina, Santo Stefano, Saragozza, San Donato]}
+  - {name: Firenze, lat: 43.7696, lon: 11.2558, population: 360000, area_code: '055', postcodes: ['50121', '50122', '50123', '50125', '50133', '50134'], districts: [Centro Storico, Oltrarno, Campo di Marte, Novoli, Rifredi]}
+  - {name: Bari, lat: 41.1171, lon: 16.8719, population: 316000, area_code: 080, postcodes: ['70121', '70122', '70123', '70124', '70126'], districts: [Bari Vecchia, Murat, Poggiofranco, Carrassi, Japigia]}
+  - {name: Catania, lat: 37.5079, lon: 15.083, population: 300000, area_code: 095, postcodes: ['95121', '95124', '95128', '95129', '95131'], districts: [Centro, Ognina, Picanello, Borgo]}
+  - {name: Verona, lat: 45.4384, lon: 10.9916, population: 255000, area_code: '045', postcodes: ['37121', '37122', '37123', '37129', '37131'], districts: [Centro Storico, Borgo Trento, Veronetta, San Zeno, Borgo Roma]}
+  - {name: Venezia, lat: 45.4408, lon: 12.3155, population: 250000, area_code: '041', postcodes: ['30121', '30122', '30123', '30124', '30125', '30171', '30172'], districts: [Cannaregio, Castello, Dorsoduro, San Marco, San Polo, Mestre]}
+  - {name: Padova, lat: 45.4064, lon: 11.8768, population: 207000, area_code: 049, postcodes: ['35121', '35122', '35123', '35127', '35131'], districts: [Centro, Arcella, Portello, Santa Rita]}
+  - {name: Trieste, lat: 45.6495, lon: 13.7768, population: 200000, area_code: '040', postcodes: ['34121', '34122', '34123', '34133'], districts: [Borgo Teresiano, San Giacomo, Barcola, Città Vecchia]}
+  - {name: Brescia, lat: 45.5416, lon: 10.2118, population: 199000, area_code: '030', postcodes: ['25121', '25122', '25124', '25128'], districts: [Centro Storico, Carmine, Lamarmora, Mompiano]}
+  - {name: Cagliari, lat: 39.2238, lon: 9.1217, population: 148000, area_code: '070', postcodes: [09121, 09124, 09126, 09127, 09131], districts: [Castello, Marina, Stampace, Villanova, Poetto]}
+streets: [Via Roma, Via Giuseppe Garibaldi, Via Guglielmo Marconi, Via Giuseppe Mazzini, Via Dante Alighieri, Via Vittorio Emanuele II, Via Giacomo Matteotti, Via Cavour, Via Alessandro Manzoni, Via Giuseppe Verdi, Piazza della Repubblica, Via XX Settembre, Via IV Novembre, Via Antonio Gramsci, Via della Libertà, Via Nazionale, Via Umberto I, Via Leonardo da Vinci, Via Galileo Galilei, Via Cesare Battisti, Via John Fitzgerald Kennedy, Via Aldo Moro, Via Don Giovanni Minzoni, Via Piave, Via Trieste, Via Trento, Via San Francesco, Via Milano, Via Torino, Via Napoli, Via Venezia, Via Firenze, Via Bologna, Via della Stazione, Via Silvio Pellico, Via Vincenzo Gioberti, Via Giovanni Pascoli, Via Giosuè Carducci, Via Michelangelo Buonarroti, Via Raffaello Sanzio, Via Giuseppe Di Vittorio, Via Sandro Pertini, Via Papa Giovanni XXIII, Via Martiri della Libertà, Corso Italia, Corso Vittorio Emanuele, Corso Garibaldi, Piazza Garibaldi, Piazza del Popolo, Piazza Duomo, Via del Corso, Via Toledo, Via Chiaia, Via Po, Via dei Mille, Via dell'Indipendenza, Via San Giovanni Bosco, Viale Europa, Via Montenapoleone, Via Appia Nuova]
+address_format: '{street} {number}, {postcode} {city}'
+places:
+  - {category: park, name: Villa Borghese, city: Roma, lat: 41.9142, lon: 12.4922}
+  - {category: park, name: Parco Sempione, city: Milano, lat: 45.4729, lon: 9.1769}
+  - {category: park, name: Giardino di Boboli, city: Firenze, lat: 43.7625, lon: 11.2483}
+  - {category: park, name: Parco del Valentino, city: Torino, lat: 45.054, lon: 7.686}
+  - {category: park, name: Villa Comunale, city: Napoli, lat: 40.8339, lon: 14.2353}
+  - {category: park, name: Giardini Margherita, city: Bologna, lat: 44.4835, lon: 11.3533}
+  - {category: landmark, name: Colosseo, city: Roma, lat: 41.8903, lon: 12.4922}
+  - {category: landmark, name: Duomo di Milano, city: Milano, lat: 45.4642, lon: 9.1914}
+  - {category: landmark, name: Torre di Pisa, city: Pisa, lat: 43.7231, lon: 10.3964}
+  - {category: landmark, name: Fontana di Trevi, city: Roma, lat: 41.9008, lon: 12.4831}
+  - {category: landmark, name: Ponte Vecchio, city: Firenze, lat: 43.768, lon: 11.2532}
+  - {category: landmark, name: Piazza San Marco, city: Venezia, lat: 45.4339, lon: 12.3381}
+  - {category: landmark, name: Ponte di Rialto, city: Venezia, lat: 45.438, lon: 12.336}
+  - {category: landmark, name: Pantheon, city: Roma, lat: 41.8986, lon: 12.4768}
+  - {category: landmark, name: Mole Antonelliana, city: Torino, lat: 45.0689, lon: 7.6931}
+  - {category: landmark, name: Castel dell'Ovo, city: Napoli, lat: 40.8278, lon: 14.2481}
+  - {category: station, name: Roma Termini, city: Roma, lat: 41.9008, lon: 12.5019}
+  - {category: station, name: Milano Centrale, city: Milano, lat: 45.4861, lon: 9.2036}
+  - {category: station, name: Napoli Centrale, city: Napoli, lat: 40.8525, lon: 14.2719}
+  - {category: station, name: Firenze Santa Maria Novella, city: Firenze, lat: 43.7761, lon: 11.2481}
+  - {category: station, name: Venezia Santa Lucia, city: Venezia, lat: 45.4408, lon: 12.3208}
+  - {category: station, name: Bologna Centrale, city: Bologna, lat: 44.5058, lon: 11.3417}
+  - {category: airport, name: Aeroporto di Fiumicino, city: Fiumicino, lat: 41.8003, lon: 12.2389}
+  - {category: airport, name: Aeroporto di Malpensa, city: Ferno, lat: 45.63, lon: 8.7231}
+  - {category: airport, name: Aeroporto di Linate, city: Milano, lat: 45.4494, lon: 9.2783}
+  - {category: airport, name: Aeroporto di Napoli-Capodichino, city: Napoli, lat: 40.8844, lon: 14.2908}
+  - {category: airport, name: Aeroporto di Venezia Marco Polo, city: Venezia, lat: 45.5053, lon: 12.3519}
+  - {category: airport, name: Aeroporto di Catania, city: Catania, lat: 37.4667, lon: 15.0639}
+  - {category: beach, name: Spiaggia di Mondello, city: Palermo, lat: 38.2008, lon: 13.3231}
+  - {category: beach, name: Lido di Venezia, city: Venezia, lat: 45.4006, lon: 12.3606}
+  - {category: beach, name: Spiaggia di Rimini, city: Rimini, lat: 44.0594, lon: 12.5683}
+  - {category: beach, name: Poetto, city: Cagliari, lat: 39.2017, lon: 9.1608}
+  - {category: beach, name: Spiaggia Grande, city: Positano, lat: 40.628, lon: 14.485}
+  - {category: beach, name: Viareggio, city: Viareggio, lat: 43.8667, lon: 10.2333}
+  - {category: mountain, name: Etna, city: Nicolosi, lat: 37.755, lon: 14.995}
+  - {category: mountain, name: Vesuvio, city: Ercolano, lat: 40.8214, lon: 14.4261}
+  - {category: mountain, name: Tre Cime di Lavaredo, city: Auronzo di Cadore, lat: 46.6167, lon: 12.3}
+  - {category: mountain, name: Gran Sasso, city: L'Aquila, lat: 42.4692, lon: 13.5656}
+  - {category: mountain, name: Marmolada, city: Canazei, lat: 46.4347, lon: 11.8508}
+  - {category: museum, name: Galleria degli Uffizi, city: Firenze, lat: 43.7683, lon: 11.2553}
+  - {category: museum, name: Galleria Borghese, city: Roma, lat: 41.9142, lon: 12.4922}
+  - {category: museum, name: Museo Egizio, city: Torino, lat: 45.0683, lon: 7.6844}
+  - {category: museum, name: Pinacoteca di Brera, city: Milano, lat: 45.4719, lon: 9.1881}
+  - {category: museum, name: Museo Archeologico Nazionale, city: Napoli, lat: 40.8536, lon: 14.2506}
+  - {category: stadium, name: Stadio Olimpico, city: Roma, lat: 41.9339, lon: 12.4547}
+  - {category: stadium, name: San Siro, city: Milano, lat: 45.4781, lon: 9.1239}
+  - {category: stadium, name: Stadio Diego Armando Maradona, city: Napoli, lat: 40.828, lon: 14.193}
+  - {category: stadium, name: Allianz Stadium, city: Torino, lat: 45.1094, lon: 7.6411}
+  - {category: market, name: Mercato di Porta Palazzo, city: Torino, lat: 45.0768, lon: 7.6836}
+  - {category: market, name: Campo de' Fiori, city: Roma, lat: 41.8957, lon: 12.472}
+  - {category: market, name: Mercato Centrale, city: Firenze, lat: 43.7767, lon: 11.2533}
+  - {category: market, name: Mercato di Ballarò, city: Palermo, lat: 38.1124, lon: 13.3594}
+  - {category: lake, name: Lago di Garda, city: Sirmione, lat: 45.492, lon: 10.608}
+  - {category: lake, name: Lago di Como, city: Bellagio, lat: 45.987, lon: 9.261}
+  - {category: lake, name: Lago Maggiore, city: Stresa, lat: 45.884, lon: 8.534}
+  - {category: lake, name: Lago Trasimeno, city: Castiglione del Lago, lat: 43.126, lon: 12.051}
+names:
+  culture: it
+  female:
+    - {name: Maria, w: 1.0}
+    - {name: Francesca, w: 1.0}
+    - {name: Anna, w: 1.0}
+    - {name: Laura, w: 1.0}
+    - {name: Giulia, w: 1.0}
+    - {name: Sara, w: 1.0}
+    - {name: Chiara, w: 1.0}
+    - {name: Paola, w: 1.0}
+    - {name: Valentina, w: 1.0}
+    - {name: Elena, w: 0.55}
+    - {name: Silvia, w: 0.55}
+    - {name: Alessandra, w: 0.55}
+    - {name: Federica, w: 0.55}
+    - {name: Martina, w: 0.55}
+    - {name: Giovanna, w: 0.55}
+    - {name: Roberta, w: 0.55}
+    - {name: Barbara, w: 0.55}
+    - {name: Cristina, w: 0.55}
+    - {name: Elisa, w: 0.55}
+    - {name: Simona, w: 0.55}
+    - {name: Monica, w: 0.55}
+    - {name: Antonella, w: 0.55}
+    - {name: Daniela, w: 0.55}
+    - {name: Rosa, w: 0.55}
+    - {name: Angela, w: 0.55}
+    - {name: Stefania, w: 0.55}
+    - {name: Claudia, w: 0.55}
+    - {name: Teresa, w: 0.55}
+    - {name: Giuseppina, w: 0.55}
+    - {name: Lucia, w: 0.55}
+    - {name: Alessia, w: 0.55}
+    - {name: Serena, w: 0.55}
+    - {name: Ilaria, w: 0.55}
+    - {name: Valeria, w: 0.55}
+    - {name: Giorgia, w: 0.55}
+    - {name: Sofia, w: 0.25}
+    - {name: Aurora, w: 0.25}
+    - {name: Ginevra, w: 0.25}
+    - {name: Alice, w: 0.25}
+    - {name: Beatrice, w: 0.25}
+    - {name: Emma, w: 0.25}
+    - {name: Greta, w: 0.25}
+    - {name: Camilla, w: 0.25}
+    - {name: Noemi, w: 0.25}
+    - {name: Arianna, w: 0.25}
+    - {name: Marta, w: 0.25}
+    - {name: Gaia, w: 0.25}
+    - {name: Veronica, w: 0.25}
+    - {name: Michela, w: 0.25}
+    - {name: Manuela, w: 0.25}
+    - {name: Patrizia, w: 0.25}
+    - {name: Rita, w: 0.25}
+    - {name: Carla, w: 0.25}
+    - {name: Franca, w: 0.25}
+    - {name: Luisa, w: 0.25}
+    - {name: Graziella, w: 0.25}
+    - {name: Carmela, w: 0.25}
+    - {name: Caterina, w: 0.25}
+    - {name: Concetta, w: 0.25}
+    - {name: Antonietta, w: 0.25}
+    - {name: Margherita, w: 0.25}
+    - {name: Lorenza, w: 0.25}
+    - {name: Debora, w: 0.25}
+    - {name: Erika, w: 0.25}
+    - {name: Jessica, w: 0.25}
+    - {name: Irene, w: 0.25}
+    - {name: Elisabetta, w: 0.25}
+    - {name: Marina, w: 0.25}
+    - {name: Raffaella, w: 0.25}
+    - {name: Sabrina, w: 0.25}
+    - {name: Tiziana, w: 0.25}
+    - {name: Cinzia, w: 0.25}
+    - {name: Loredana, w: 0.25}
+    - {name: Annalisa, w: 0.25}
+    - {name: Vincenza, w: 0.25}
+    - {name: Gabriella, w: 0.25}
+    - {name: Rossella, w: 0.25}
+    - {name: Anna Maria, w: 0.25}
+    - {name: Maria Grazia, w: 0.25}
+    - {name: Nicoletta, w: 0.25}
+    - {name: Benedetta, w: 0.25}
+    - {name: Ludovica, w: 0.25}
+    - {name: Matilde, w: 0.25}
+    - {name: Vittoria, w: 0.25}
+    - {name: Rebecca, w: 0.25}
+    - {name: Miriam, w: 0.12}
+    - {name: Lisa, w: 0.12}
+    - {name: Angelica, w: 0.12}
+    - {name: Eleonora, w: 0.12}
+    - {name: Marika, w: 0.12}
+    - {name: Ornella, w: 0.12}
+    - {name: Rosaria, w: 0.12}
+    - {name: Filomena, w: 0.12}
+    - {name: Assunta, w: 0.12}
+    - {name: Pasqualina, w: 0.12}
+    - {name: Luciana, w: 0.12}
+    - {name: Mirella, w: 0.12}
+    - {name: Nadia, w: 0.12}
+    - {name: Emanuela, w: 0.12}
+    - {name: Sonia, w: 0.12}
+    - {name: Katia, w: 0.12}
+    - {name: Lara, w: 0.12}
+    - {name: Viola, w: 0.12}
+    - {name: Bianca, w: 0.12}
+    - {name: Nicole, w: 0.12}
+    - {name: Asia, w: 0.12}
+    - {name: Adele, w: 0.12}
+    - {name: Agnese, w: 0.12}
+    - {name: Carolina, w: 0.12}
+    - {name: Letizia, w: 0.12}
+    - {name: Diana, w: 0.12}
+    - {name: Pamela, w: 0.12}
+    - {name: Samanta, w: 0.12}
+  male:
+    - {name: Giuseppe, w: 1.0}
+    - {name: Marco, w: 1.0}
+    - {name: Francesco, w: 1.0}
+    - {name: Antonio, w: 1.0}
+    - {name: Giovanni, w: 1.0}
+    - {name: Andrea, w: 1.0}
+    - {name: Alessandro, w: 1.0}
+    - {name: Luca, w: 1.0}
+    - {name: Roberto, w: 1.0}
+    - {name: Paolo, w: 1.0}
+    - {name: Mario, w: 0.55}
+    - {name: Luigi, w: 0.55}
+    - {name: Stefano, w: 0.55}
+    - {name: Massimo, w: 0.55}
+    - {name: Davide, w: 0.55}
+    - {name: Matteo, w: 0.55}
+    - {name: Simone, w: 0.55}
+    - {name: Lorenzo, w: 0.55}
+    - {name: Fabio, w: 0.55}
+    - {name: Salvatore, w: 0.55}
+    - {name: Vincenzo, w: 0.55}
+    - {name: Angelo, w: 0.55}
+    - {name: Michele, w: 0.55}
+    - {name: Domenico, w: 0.55}
+    - {name: Pietro, w: 0.55}
+    - {name: Carlo, w: 0.55}
+    - {name: Daniele, w: 0.55}
+    - {name: Federico, w: 0.55}
+    - {name: Riccardo, w: 0.55}
+    - {name: Gabriele, w: 0.55}
+    - {name: Nicola, w: 0.55}
+    - {name: Claudio, w: 0.55}
+    - {name: Giorgio, w: 0.55}
+    - {name: Emanuele, w: 0.55}
+    - {name: Alberto, w: 0.55}
+    - {name: Maurizio, w: 0.55}
+    - {name: Franco, w: 0.55}
+    - {name: Sergio, w: 0.55}
+    - {name: Leonardo, w: 0.25}
+    - {name: Tommaso, w: 0.25}
+    - {name: Edoardo, w: 0.25}
+    - {name: Mattia, w: 0.25}
+    - {name: Diego, w: 0.25}
+    - {name: Filippo, w: 0.25}
+    - {name: Christian, w: 0.25}
+    - {name: Giacomo, w: 0.25}
+    - {name: Samuele, w: 0.25}
+    - {name: Enrico, w: 0.25}
+    - {name: Gianluca, w: 0.25}
+    - {name: Raffaele, w: 0.25}
+    - {name: Bruno, w: 0.25}
+    - {name: Fabrizio, w: 0.25}
+    - {name: Ivan, w: 0.25}
+    - {name: Mirko, w: 0.25}
+    - {name: Manuel, w: 0.25}
+    - {name: Emilio, w: 0.25}
+    - {name: Enzo, w: 0.25}
+    - {name: Renato, w: 0.25}
+    - {name: Luciano, w: 0.25}
+    - {name: Gianni, w: 0.25}
+    - {name: Aldo, w: 0.25}
+    - {name: Piero, w: 0.25}
+    - {name: Sandro, w: 0.25}
+    - {name: Valerio, w: 0.25}
+    - {name: Cristian, w: 0.25}
+    - {name: Dario, w: 0.25}
+    - {name: Alessio, w: 0.25}
+    - {name: Jacopo, w: 0.25}
+    - {name: Nicolò, w: 0.25}
+    - {name: Elia, w: 0.25}
+    - {name: Marcello, w: 0.25}
+    - {name: Gennaro, w: 0.25}
+    - {name: Ciro, w: 0.25}
+    - {name: Rocco, w: 0.25}
+    - {name: Pasquale, w: 0.25}
+    - {name: Cosimo, w: 0.25}
+    - {name: Carmine, w: 0.25}
+    - {name: Armando, w: 0.25}
+    - {name: Ugo, w: 0.25}
+    - {name: Umberto, w: 0.25}
+    - {name: Sebastiano, w: 0.25}
+    - {name: Gaetano, w: 0.25}
+    - {name: Giancarlo, w: 0.25}
+    - {name: Gianfranco, w: 0.25}
+    - {name: Vittorio, w: 0.25}
+    - {name: Fausto, w: 0.25}
+    - {name: Ernesto, w: 0.25}
+    - {name: Alfredo, w: 0.25}
+    - {name: Mauro, w: 0.25}
+    - {name: Ettore, w: 0.25}
+    - {name: Tiziano, w: 0.25}
+    - {name: Valentino, w: 0.25}
+    - {name: Achille, w: 0.12}
+    - {name: Arturo, w: 0.12}
+    - {name: Orlando, w: 0.12}
+    - {name: Silvio, w: 0.12}
+    - {name: Tullio, w: 0.12}
+    - {name: Rino, w: 0.12}
+    - {name: Oreste, w: 0.12}
+    - {name: Adriano, w: 0.12}
+    - {name: Guido, w: 0.12}
+    - {name: Lucio, w: 0.12}
+    - {name: Nando, w: 0.12}
+    - {name: Corrado, w: 0.12}
+    - {name: Massimiliano, w: 0.12}
+    - {name: Gianmarco, w: 0.12}
+    - {name: Pierpaolo, w: 0.12}
+    - {name: Gianpaolo, w: 0.12}
+    - {name: Michelangelo, w: 0.12}
+    - {name: Thomas, w: 0.12}
+    - {name: Kevin, w: 0.12}
+    - {name: Cesare, w: 0.12}
+    - {name: Biagio, w: 0.12}
+    - {name: Calogero, w: 0.12}
+    - {name: Liam, w: 0.12}
+  surnames:
+    - {name: Rossi, w: 1.0}
+    - {name: Ferrari, w: 0.574}
+    - {name: Russo, w: 0.415}
+    - {name: Esposito, w: 0.33}
+    - {name: Bianchi, w: 0.276}
+    - {name: Romano, w: 0.238}
+    - {name: Gallo, w: 0.211}
+    - {name: Toscano, w: 0.189}
+    - {name: Fontana, w: 0.172}
+    - {name: Conti, w: 0.158}
+    - {name: Ricci, w: 0.147}
+    - {name: Bruno, w: 0.137}
+    - {name: De Luca, w: 0.128}
+    - {name: Moretti, w: 0.121}
+    - {name: Marino, w: 0.115}
+    - {name: Greco, w: 0.109}
+    - {name: Barbieri, w: 0.104}
+    - {name: Lombardi, w: 0.099}
+    - {name: Giordano, w: 0.095}
+    - {name: Cassano, w: 0.091}
+    - {name: Colombo, w: 0.088}
+    - {name: Mancini, w: 0.084}
+    - {name: Longo, w: 0.081}
+    - {name: Leone, w: 0.079}
+    - {name: Martinelli, w: 0.076}
+    - {name: Marchetti, w: 0.074}
+    - {name: Martini, w: 0.072}
+    - {name: Galli, w: 0.07}
+    - {name: Gatti, w: 0.068}
+    - {name: Mariani, w: 0.066}
+    - {name: Ferrara, w: 0.064}
+    - {name: Santoro, w: 0.062}
+    - {name: Marini, w: 0.061}
+    - {name: Bianco, w: 0.06}
+    - {name: Conte, w: 0.058}
+    - {name: Serra, w: 0.057}
+    - {name: Farina, w: 0.056}
+    - {name: Gentile, w: 0.054}
+    - {name: Caruso, w: 0.053}
+    - {name: Morelli, w: 0.052}
+    - {name: Ferri, w: 0.051}
+    - {name: Testa, w: 0.05}
+    - {name: Ferraro, w: 0.049}
+    - {name: Pellegrini, w: 0.048}
+    - {name: Grassi, w: 0.048}
+    - {name: Rossetti, w: 0.047}
+    - {name: D'Angelo, w: 0.046}
+    - {name: Bernardi, w: 0.045}
+    - {name: Mazza, w: 0.044}
+    - {name: Rizzi, w: 0.044}
+    - {name: Natale, w: 0.043}
+    - {name: Rizzo, w: 0.042}
+    - {name: Sanna, w: 0.016}
+    - {name: Piras, w: 0.015}
+    - {name: Fabbri, w: 0.015}
+    - {name: Pinna, w: 0.015}
+    - {name: Messina, w: 0.015}
+    - {name: Proietti, w: 0.015}
+    - {name: De Santis, w: 0.015}
+    - {name: Trevisan, w: 0.014}
+    - {name: De Angelis, w: 0.014}
+    - {name: Innocenti, w: 0.014}
+    - {name: Ferrero, w: 0.014}
+    - {name: Melis, w: 0.014}
+    - {name: Gori, w: 0.014}
+    - {name: Sartori, w: 0.014}
+    - {name: Parodi, w: 0.014}
+    - {name: Rosso, w: 0.014}
+    - {name: Furlan, w: 0.014}
+    - {name: Montanari, w: 0.014}
+    - {name: Lombardo, w: 0.014}
+    - {name: Costa, w: 0.014}
+    - {name: Carta, w: 0.014}
+    - {name: Manca, w: 0.014}
+    - {name: Lorusso, w: 0.014}
+    - {name: Pace, w: 0.014}
+    - {name: Romeo, w: 0.014}
+    - {name: Magnani, w: 0.014}
+    - {name: Moro, w: 0.014}
+    - {name: Mair, w: 0.014}
+    - {name: Favre, w: 0.014}
+    - {name: Di Marco, w: 0.014}
+    - {name: Sala, w: 0.014}
+    - {name: Coppola, w: 0.014}
+    - {name: Di Iorio, w: 0.014}
+    - {name: Mantovani, w: 0.014}
+    - {name: Cattaneo, w: 0.014}
+    - {name: Cerise, w: 0.014}
+    - {name: Di Paolo, w: 0.014}
+    - {name: Carraro, w: 0.014}
+    - {name: Grieco, w: 0.014}
+    - {name: Lai, w: 0.014}
+    - {name: Hofer, w: 0.014}
+    - {name: Visintin, w: 0.014}
+    - {name: Villa, w: 0.014}
+    - {name: Marinelli, w: 0.014}
+    - {name: Bionaz, w: 0.014}
+    - {name: Pavan, w: 0.014}
+    - {name: D'Alessandro, w: 0.014}
+    - {name: Bruzzone, w: 0.013}
+    - {name: Giusti, w: 0.013}
+    - {name: Pichler, w: 0.013}
+    - {name: Rosati, w: 0.013}
+    - {name: Boscolo, w: 0.013}
+    - {name: Telesca, w: 0.013}
+    - {name: Fiorucci, w: 0.013}
+    - {name: Fabbro, w: 0.013}
+    - {name: Vuillermoz, w: 0.013}
+    - {name: Colangelo, w: 0.013}
+    - {name: Casadei, w: 0.013}
+    - {name: Ferraris, w: 0.013}
+    - {name: Grasso, w: 0.013}
+    - {name: Semeraro, w: 0.013}
+    - {name: Kofler, w: 0.013}
+    - {name: Di Pietro, w: 0.013}
+    - {name: Di Francesco, w: 0.013}
+    - {name: Mauro, w: 0.013}
+    - {name: Brambilla, w: 0.013}
+    - {name: Perri, w: 0.013}
+    - {name: De Rosa, w: 0.013}
+    - {name: Bucci, w: 0.013}
+    - {name: Rosset, w: 0.013}
+    - {name: Vianello, w: 0.013}
+    - {name: Deiana, w: 0.013}
+    - {name: Canepa, w: 0.013}
+    - {name: Meloni, w: 0.013}
+    - {name: Negri, w: 0.013}
+    - {name: Fumagalli, w: 0.013}
+    - {name: Mignogna, w: 0.013}
+    - {name: Perrone, w: 0.013}
+    - {name: Cerutti, w: 0.013}
+    - {name: Baldi, w: 0.013}
+    - {name: Tomasi, w: 0.013}
+    - {name: Blanc, w: 0.013}
+    - {name: Ferretti, w: 0.013}
+    - {name: Arena, w: 0.013}
+    - {name: Rinaldi, w: 0.013}
+    - {name: Pastorino, w: 0.013}
+    - {name: Donati, w: 0.013}
+    - {name: Riva, w: 0.013}
+    - {name: Loi, w: 0.013}
+    - {name: Zuliani, w: 0.013}
+    - {name: Gruber, w: 0.013}
+    - {name: Sorrentino, w: 0.013}
+    - {name: Fabris, w: 0.013}
+    - {name: Di Girolamo, w: 0.013}
+    - {name: Romagnoli, w: 0.013}
+    - {name: Mecca, w: 0.013}
+    - {name: Traverso, w: 0.013}
+    - {name: Vitali, w: 0.013}
+    - {name: Pession, w: 0.013}
+    - {name: Pugliese, w: 0.013}
+    - {name: Venturi, w: 0.013}
+    - {name: Basso, w: 0.013}
+    - {name: Palladino, w: 0.013}
+    - {name: Repetto, w: 0.013}
+    - {name: Sabatini, w: 0.013}
+    - {name: Bertini, w: 0.013}
+    - {name: Barbero, w: 0.013}
+    - {name: Mura, w: 0.013}
+    - {name: Ceccarelli, w: 0.013}
+    - {name: Foti, w: 0.013}
+    - {name: Fusco, w: 0.013}
+    - {name: Palmisano, w: 0.013}
+    - {name: Cossu, w: 0.013}
+    - {name: Corti, w: 0.013}
+    - {name: Montemurro, w: 0.013}
+    - {name: Procopio, w: 0.013}
+    - {name: Grillo, w: 0.013}
+    - {name: Santarossa, w: 0.013}
+    - {name: Lanteri, w: 0.013}
+    - {name: Zunino, w: 0.013}
+    - {name: Locatelli, w: 0.013}
+    - {name: Gusmeroli, w: 0.013}
+    - {name: Capriotti, w: 0.013}
+    - {name: Bruni, w: 0.013}
+    - {name: Cingolani, w: 0.013}
+    - {name: Mosca, w: 0.013}
+    - {name: Vitale, w: 0.013}
+    - {name: Vella, w: 0.013}
+    - {name: Amico, w: 0.013}
+    - {name: Giunta, w: 0.013}
+    - {name: Occhipinti, w: 0.013}
+    - {name: Giacalone, w: 0.013}
+    - {name: Salvadori, w: 0.013}
+    - {name: Pardini, w: 0.013}
+    - {name: Da Rold, w: 0.013}
+    - {name: Casagrande, w: 0.013}
+    - {name: Zanella, w: 0.013}
+    - {name: Di Giovanni, w: 0.013}
+    - {name: Talarico, w: 0.013}
+    - {name: Carvelli, w: 0.013}
+    - {name: Morabito, w: 0.013}
+    - {name: Galati, w: 0.013}
+    - {name: Napolitano, w: 0.013}
+    - {name: Monti, w: 0.013}
+    - {name: Balboni, w: 0.013}
+    - {name: Vascotto, w: 0.013}
+    - {name: Fiorini, w: 0.013}
+    - {name: Rota, w: 0.013}
+    - {name: Marziali, w: 0.013}
+    - {name: Musso, w: 0.013}
+    - {name: Acquadro, w: 0.013}
+    - {name: Fiore, w: 0.013}
+    - {name: Iacono, w: 0.013}
+    - {name: Brogi, w: 0.013}
+    - {name: De Col, w: 0.013}
+    - {name: Schiavon, w: 0.013}
+    - {name: Zanatta, w: 0.013}
+    - {name: Sabia, w: 0.013}
+    - {name: Panzeri, w: 0.013}
+    - {name: Grange, w: 0.013}
+    - {name: Visentin, w: 0.013}
+    - {name: Izzo, w: 0.013}
+    - {name: Diana, w: 0.013}
+    - {name: Di Carlo, w: 0.013}
+    - {name: Carlucci, w: 0.013}
+    - {name: Gamberini, w: 0.013}
+    - {name: Favaro, w: 0.013}
+    - {name: D'Amico, w: 0.013}
+    - {name: Stigliano, w: 0.013}
+    - {name: Gigliotti, w: 0.013}
+    - {name: Ierardi, w: 0.013}
+    - {name: Tripodi, w: 0.013}
+    - {name: Iannaccone, w: 0.013}
+    - {name: Ruggiero, w: 0.013}
+    - {name: Corradi, w: 0.013}
+    - {name: Casadio, w: 0.013}
+    - {name: Marchesan, w: 0.013}
+    - {name: Bortolin, w: 0.013}
+    - {name: Degrassi, w: 0.013}
+    - {name: Forte, w: 0.013}
+    - {name: Cozzani, w: 0.013}
+    - {name: Belotti, w: 0.013}
+    - {name: Zani, w: 0.013}
+    - {name: Molteni, w: 0.013}
+    - {name: Vailati, w: 0.013}
+    - {name: Pini, w: 0.013}
+    - {name: Macchi, w: 0.013}
+    - {name: Angelini, w: 0.013}
+    - {name: Luciani, w: 0.013}
+    - {name: Salvucci, w: 0.013}
+    - {name: Lanza, w: 0.013}
+    - {name: Giraudo, w: 0.013}
+    - {name: Zagaria, w: 0.013}
+    - {name: Spano, w: 0.013}
+    - {name: Licata, w: 0.013}
+    - {name: Falzone, w: 0.013}
+    - {name: Pappalardo, w: 0.013}
+    - {name: Gagliano, w: 0.013}
+    - {name: Licitra, w: 0.013}
+    - {name: Campisi, w: 0.013}
+    - {name: Nocentini, w: 0.013}
+    - {name: Lucchesi, w: 0.013}
+    - {name: Mosti, w: 0.013}
+    - {name: Guerrini, w: 0.013}
+    - {name: Bristot, w: 0.013}
+    - {name: Masiero, w: 0.013}
+    - {name: Crepaldi, w: 0.013}
+    - {name: Scarpa, w: 0.013}
+    - {name: Righetti, w: 0.013}
+    - {name: Murgia, w: 0.013}
+    - {name: Iezzi, w: 0.013}
+    - {name: Mancuso, w: 0.013}
+    - {name: Tassone, w: 0.013}
+    - {name: De Lucia, w: 0.013}
+    - {name: Nanni, w: 0.013}
+    - {name: Venturelli, w: 0.013}
+    - {name: Carini, w: 0.013}
+  nicknames: {Giuseppe: Peppe, Francesco: Ciccio, Alessandro: Ale, Salvatore: Totò, Giovanni: Gianni, Antonio: Toni, Vincenzo: Enzo, Domenico: Mimmo, Gennaro: Rino, Federico: Fede, Francesca: Fra, Alessandra: Ale, Valentina: Vale, Giuseppina: Pina, Elisabetta: Betta, Federica: Fede, Massimiliano: Max, Roberto: Robi, Martina: Marti, Margherita: Ghita}
+  display: '{first} {last}'
+# Shares = share of contacts from that diaspora/minority (official origin statistics, see SOURCES).
+# Cultures without a pack in this project (not listed as data): ro 0.018, sq 0.007, ma 0.007, zh 0.005, uk 0.005, bn (Bangladesh) 0.004, ar-EG 0.003, tn 0.002, sn 0.002, es-PE/es-EC (Peru/Ecuador; the es pack could stand in) 0.003, si/ta (Sri Lanka) 0.002, mo/ro (Moldova) 0.0016
+cultures:
+  - {culture: in, share: 0.003}
+  - {culture: pk, share: 0.003}
+  - {culture: ph, share: 0.0026}
+  - {culture: ng, share: 0.0022}
+email:
+  domains:
+    - {domain: gmail.com, share: 0.45}
+    - {domain: libero.it, share: 0.14}
+    - {domain: hotmail.it, share: 0.07}
+    - {domain: outlook.it, share: 0.04}
+    - {domain: yahoo.it, share: 0.06}
+    - {domain: virgilio.it, share: 0.04}
+    - {domain: alice.it, share: 0.03}
+    - {domain: tiscali.it, share: 0.02}
+    - {domain: icloud.com, share: 0.05}
+    - {domain: live.it, share: 0.03}
+    - {domain: tim.it, share: 0.02}
+    - {domain: pec.it, share: 0.01}
+  patterns: ['{first}.{last}', '{first}{last}', '{f}.{last}', '{first}.{last}{yy}', '{first}{last}{nn}', '{last}.{first}', '{first}_{last}', '{first}{yy}']
+services:
+  - {sender: PosteInfo, kind: courier, sender_type: alphanumeric}
+  - {sender: BRT, kind: courier, sender_type: alphanumeric}
+  - {sender: GLS, kind: courier, sender_type: alphanumeric}
+  - {sender: SDA, kind: courier, sender_type: alphanumeric}
+  - {sender: Intesa SP, kind: bank, sender_type: alphanumeric}
+  - {sender: UniCredit, kind: bank, sender_type: alphanumeric}
+  - {sender: Fineco, kind: bank, sender_type: alphanumeric}
+  - {sender: BancoBPM, kind: bank, sender_type: alphanumeric}
+  - {sender: TIM, kind: telecom, sender_type: alphanumeric}
+  - {sender: Vodafone, kind: telecom, sender_type: alphanumeric}
+  - {sender: WINDTRE, kind: telecom, sender_type: alphanumeric}
+  - {sender: iliad, kind: telecom, sender_type: alphanumeric}
+  - {sender: Google, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Satispay, kind: otp_service, sender_type: alphanumeric}
+  - {sender: PosteID, kind: otp_service, sender_type: alphanumeric}
+  - {sender: INPS, kind: government, sender_type: alphanumeric}
+  - {sender: CUP, kind: doctor, sender_type: alphanumeric}
+  - {sender: +3906..., kind: doctor, sender_type: number}
+  - {sender: +3902..., kind: doctor, sender_type: number}
+  - {sender: Farmacia, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: Glovo, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Deliveroo, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: JustEat, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: FreeNow, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: ITA Airways, kind: airline, sender_type: alphanumeric}
+  - {sender: Ryanair, kind: airline, sender_type: alphanumeric}
+  - {sender: Trenitalia, kind: rail, sender_type: alphanumeric}
+  - {sender: Italo, kind: rail, sender_type: alphanumeric}
+  - {sender: Amazon, kind: retail, sender_type: alphanumeric}
+  - {sender: Esselunga, kind: retail, sender_type: alphanumeric}
+  - {sender: Enel, kind: utility, sender_type: alphanumeric}
+  - {sender: Hera, kind: utility, sender_type: alphanumeric}
+holidays:
+  - {date: 01-01, name: Capodanno}
+  - {date: 01-06, name: Epifania}
+  - {date: 02-14, name: San Valentino, observance: true}
+  - {rule: easter+0, name: Pasqua}
+  - {rule: easter+1, name: Lunedì dell'Angelo (Pasquetta)}
+  - {date: 04-25, name: Festa della Liberazione}
+  - {date: 05-01, name: Festa dei Lavoratori}
+  - {date: 06-02, name: Festa della Repubblica}
+  - {date: 06-29, name: Santi Pietro e Paolo (Roma), regional: true}
+  - {date: 08-15, name: Ferragosto}
+  - {date: 10-04, name: San Francesco d'Assisi}
+  - {date: 11-01, name: Ognissanti}
+  - {date: 12-07, name: Sant'Ambrogio (Milano), regional: true}
+  - {date: 12-08, name: Immacolata Concezione}
+  - {date: 12-24, name: Vigilia di Natale, observance: true}
+  - {date: 12-25, name: Natale}
+  - {date: 12-26, name: Santo Stefano}
+  - {date: 12-31, name: San Silvestro, observance: true}
+popular_apps:
+  - {package: com.whatsapp, name: WhatsApp, category: messaging}
+  - {package: org.telegram.messenger, name: Telegram, category: messaging}
+  - {package: com.google.android.apps.maps, name: Google Maps, category: transport}
+  - {package: com.ubercab, name: Uber, category: transport}
+  - {package: com.amazon.mShop.android.shopping, name: Amazon Shopping, category: shopping}
+  - {package: com.paypal.android.p2pmobile, name: PayPal, category: banking}
+  - {package: com.posteitaliane.spim, name: Poste Italiane, category: banking}
+  - {package: posteitaliane.posteapp.appposteid, name: PosteID, category: government}
+  - {package: com.latuabancaperandroid, name: Intesa Sanpaolo Mobile, category: banking}
+  - {package: com.unicredit, name: UniCredit, category: banking}
+  - {package: com.fineco.it, name: Fineco, category: banking}
+  - {package: com.lynxspa.bancopopolare, name: YouApp Banco BPM, category: banking}
+  - {package: it.gruppobper.ams.android.bper, name: BPER Banca, category: banking}
+  - {package: com.satispay.customer, name: Satispay, category: banking}
+  - {package: com.lynxspa.prontotreno, name: Trenitalia, category: transport}
+  - {package: it.italotreno, name: Italo Treno, category: transport}
+  - {package: com.ryanair.cheapflights, name: Ryanair, category: transport}
+  - {package: ur7OWf.mobile, name: ITA Airways, category: transport}
+  - {package: it.subito, name: Subito, category: shopping}
+  - {package: it.esselunga.mobile, name: Esselunga, category: shopping}
+  - {package: com.paperlit.android.repubblica, name: la Repubblica, category: news}
+  - {package: it.rcs.corriere, name: Corriere della Sera, category: news}
+  - {package: com.glovo, name: Glovo, category: food}
+  - {package: com.justeat.app.it, name: Just Eat, category: food}
+  - {package: com.deliveroo.orderapp, name: Deliveroo, category: food}
+  - {package: it.pagopa.io.app, name: IO, category: government}
+  - {package: it.inps.mobile.app.servizi.activity, name: INPS Mobile, category: government}
+  - {package: it.telecomitalia.centodiciannove, name: MyTIM, category: telecom}
+  - {package: it.vodafone.my190, name: My Vodafone, category: telecom}
+  - {package: it.wind.myWind, name: WINDTRE, category: telecom}
+  - {package: it.iliad, name: iliad, category: telecom}
+  - {package: com.ilmeteo.android.ilmeteo, name: iLMeteo, category: weather}
+  - {package: it.enel, name: Enel Energia, category: utility}

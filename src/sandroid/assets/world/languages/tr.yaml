@@ -1,0 +1,463 @@
+# Language pack: Turkish (tr). Schema v1, see ../PACK_SCHEMA.md.
+# All texts authored (AI-written), see tr.SOURCES.md.
+# Conventions: friends/family/partner use "sen"; neighbours mix "siz" and "sen";
+# services use formal "siz" forms.
+# Placeholders never carry Turkish case suffixes (vowel harmony is unknown at
+# generation time): sentences are built as "saat {time}", "{date} tarihinde",
+# "{place} önünde", "{city} tarafında", "{partner_first} ile".
+# `emoji: true` sits on the thread and means "at least one message in this thread
+# contains emoji" (schema v1 has no per-message flag; messages are [speaker, text]).
+pack: language
+schema: 1
+lang: tr
+name: Türkçe
+
+threads:
+  family:
+    - msgs:
+        - [p, "Pazar günü yemeğe geliyor musun?"]
+        - [o, "Gelirim anne, saat kaçta"]
+        - [p, "12 gibi. {partner_first} ile gelin"]
+        - [o, "Tamam 👍"]
+      emoji: true
+    - msgs:
+        - [p, "Eve vardın mı yavrum"]
+        - [o, "Vardım anne merak etme"]
+        - [p, "Tamam iyi geceler 🙏"]
+      emoji: true
+    - msgs:
+        - [p, "Babanın doğum günü {day} günü unutma"]
+        - [o, "Unutmadım ya 😅"]
+        - [o, "Hediyeyi aldım bile"]
+        - [p, "Ne aldın"]
+        - [o, "Söylemem sürpriz"]
+      emoji: true
+    - msgs:
+        - [p, "Müsait olunca bi ara beni"]
+        - [o, "Bir şey mi oldu?"]
+        - [p, "Yok yok bayram için konuşcaz"]
+        - [o, "Tamam akşam ararım"]
+    - msgs:
+        - [p, "Telefonda mesajlaşma uygulaması kayboldu ekrandan"]
+        - [o, "Anne nasıl kayboldu"]
+        - [p, "Bilmiyorum bastım bi yere gitti"]
+        - [o, "Hafta sonu gelince bakarım tamam mı"]
+        - [p, "Tamam canım sağol"]
+    - msgs:
+        - [p, "Doğum günün kutlu olsun kuzum 🎂❤️ nice senelere"]
+        - [o, "Sağol anneciğim ❤️"]
+      emoji: true
+    - msgs:
+        - [p, "{date} tarihinde {city} tarafına geliyorum, akşam boş musun"]
+        - [o, "Tabi abi! Otobüs kaçta iniyor"]
+        - [p, "Saat {time} gibi"]
+        - [o, "Ben alırım seni terminalden"]
+    - msgs:
+        - [p, "Teyzenlere uğradın mı"]
+        - [o, "Cumartesi gidecem"]
+        - [p, "Elin boş gitme bak"]
+        - [o, "Tamam anne 🙄"]
+      emoji: true
+    - msgs:
+        - [p, "Sana {amount} attım biletler için"]
+        - [o, "Gerek yoktu ya baba"]
+        - [p, "Olsun"]
+    - msgs:
+        - [p, "Kek fırında. Kaçta burdasınız"]
+        - [o, "Trafikteyiz yarım saat daha"]
+        - [p, "Acele etmeyin yavaş gelin"]
+    - msgs:
+        - [p, "Bayramınız mübarek olsun 🌷"]
+        - [o, "Seninde bayramın mübarek olsun abla, ellerinden öperim"]
+      emoji: true
+
+  partner:
+    - msgs:
+        - [p, "Gelirken bişey alayım mı"]
+        - [o, "Ekmek ve süt al aşkım"]
+        - [p, "Tmm"]
+    - msgs:
+        - [p, "10 dk ya ordayım"]
+        - [o, "Ok"]
+    - msgs:
+        - [o, "Bugün geç çıkacam toplantı uzadı"]
+        - [p, "Offf 😕 kaçta gibi"]
+        - [o, "Saat {time} gibi"]
+        - [p, "Tamam ben yiyorum o zaman sana ayırırım"]
+        - [o, "Sen bi tanesin ❤️"]
+      emoji: true
+    - msgs:
+        - [p, "Anahtar sende mi"]
+        - [o, "Yok dolabın üstünde"]
+        - [p, "Yok burda"]
+        - [p, "Tamam buldum montun cebindeymiş 🙈"]
+      emoji: true
+    - msgs:
+        - [p, "Yarın saat {time} dişçi unutma"]
+        - [o, "Ne dişçisi"]
+        - [p, "Senin randevun!!"]
+        - [o, "Aa tamam iyi ki söyledin"]
+    - msgs:
+        - [o, "Akşam sinemaya gidelim mi"]
+        - [p, "Olur hangi film"]
+        - [o, "Farketmez sen seç"]
+        - [p, "Tamam atıyorum şimdi"]
+    - msgs:
+        - [p, "Seni özledim 💕"]
+        - [o, "Ben de seni. 2 gün kaldı"]
+        - [p, "Çok uzun"]
+      emoji: true
+    - msgs:
+        - [p, "{courier} kargosunu komşudan alabilir misin ben yetişemiyorum"]
+        - [o, "Alırım"]
+    - msgs:
+        - [o, "Vardın mı"]
+        - [p, "Vardım, otobüs sadece 20 dk rötar yaptı sjsjsj"]
+        - [o, "Neredeyse dakik yani 😄"]
+      emoji: true
+    - msgs:
+        - [p, "Akşam ne yiyoruz"]
+        - [o, "Pizza söyleyelim mi"]
+        - [p, "Yine mi 😂"]
+        - [o, "Tamam tamam makarna yaparım"]
+      emoji: true
+    - msgs:
+        - [p, "İyi geceler aşkım"]
+        - [o, "İyi geceler canım 😘"]
+      emoji: true
+
+  friend:
+    - msgs:
+        - [p, "Slm nbr ya görüşemiyoz hiç"]
+        - [o, "Iyi sen? Yoğunluk işte"]
+        - [p, "Aynen bende. Bi kahve içelim artık"]
+        - [o, "Kesin, haftaya?"]
+        - [p, "Perşembe ya da cuma olur"]
+        - [o, "Cuma tmm"]
+    - msgs:
+        - [p, "Kanka bu akşam var mısın"]
+        - [o, "Nereye"]
+        - [p, "{place} civarında, saat {time} gibi"]
+        - [o, "Varım 🍻"]
+      emoji: true
+    - msgs:
+        - [p, "Doğum günün kutlu olsun kanka 🎉🎂 nice yaşlara"]
+        - [o, "Eyv kanka 🙏"]
+      emoji: true
+    - msgs:
+        - [p, "Cumartesiden fotoları atar mısın"]
+        - [o, "Atarım akşam"]
+        - [p, "Tşkler"]
+    - msgs:
+        - [p, "Kusura bakma 15 dk geç kalcam"]
+        - [o, "Sorun yok"]
+        - [p, "Bana da bi çay söyle"]
+    - msgs:
+        - [o, "Şarj aletim sende kaldı mı"]
+        - [p, "Aa evet sorry 😅 getiriyorum yarın"]
+      emoji: true
+    - msgs:
+        - [p, "{day} günü kimler geliyo"]
+        - [o, "Ben, Elif bi de belki Burak"]
+        - [p, "Tmm ben çiğköfte getiririm"]
+        - [o, "Süpersin"]
+    - msgs:
+        - [p, "Dünkü maçı izledin mi"]
+        - [o, "Izledim kanka sinir oldum"]
+        - [p, "O son dakika golü yaa 😤"]
+        - [o, "Bi dahakine beraber izleyelim"]
+      emoji: true
+    - msgs:
+        - [p, "{city} tarafında iyi bi berber biliyo musun"]
+        - [o, "Benim gittiğim var merkezde, numarasını atıyorum"]
+        - [p, "Saol abi"]
+    - msgs:
+        - [o, "Yarın sabah koşuya çıkalım mı"]
+        - [p, "Kaçta"]
+        - [o, "7de {place} önünde"]
+        - [p, "Off tamam ama 5 km max"]
+    - msgs:
+        - [p, "Eve geldim, çok iyiydi bu akşam"]
+        - [o, "Aynen ya yine yapalım 😄"]
+      emoji: true
+    - msgs:
+        - [p, "Napıyon"]
+        - [o, "Hiç evdeyim sen"]
+        - [p, "Bende. Sıkıldım çıkalım mı"]
+        - [o, "Hadi 20 dk ya aşağıdayım"]
+
+  colleague:
+    - msgs:
+        - [p, "Merhaba {owner_first}, bugün ofiste misin?"]
+        - [o, "Merhaba, bugün evden çalışıyorum"]
+        - [p, "Tamam dosyaları mail atıyorum o zaman"]
+        - [o, "Teşekkürler"]
+    - msgs:
+        - [p, "Saat {time} toplantısı yarına ertelendi"]
+        - [o, "Tamam, haber verdiğin için sağol"]
+    - msgs:
+        - [p, "Bugün hastayım gelemiyorum, ekibe iletebilir misin"]
+        - [o, "Tabi, geçmiş olsun!"]
+        - [p, "Sağol"]
+    - msgs:
+        - [p, "Öğle yemeği?"]
+        - [o, "Olur, 12:30 aşağıda?"]
+        - [p, "👍"]
+      emoji: true
+    - msgs:
+        - [o, "Trafikteyim 15 dk gecikicem"]
+        - [p, "Sorun değil başlıyoruz biz"]
+    - msgs:
+        - [p, "Dünkü sunumu atabilir misin"]
+        - [o, "Ortak klasörde, Projeler altında"]
+        - [p, "Buldum tşk"]
+    - msgs:
+        - [p, "{day} günkü teslimi unutmadın dimi"]
+        - [o, "Yok bitirmek üzereyim"]
+    - msgs:
+        - [p, "Serkan Bey ayrılıyor, hediye için toplanıyoruz. 200 TL, katılır mısın"]
+        - [o, "Tabi yarın veririm"]
+    - msgs:
+        - [p, "İyi tatiller! Keyfini çıkar 🌴"]
+        - [o, "Teşekkürler! 2 hafta sonra görüşürüz"]
+      emoji: true
+    - msgs:
+        - [p, "Yarın otopark kapalı mı biliyor musun"]
+        - [o, "Evet tadilat var, metroyla gel bence"]
+        - [p, "Tamam sağol"]
+    - msgs:
+        - [p, "Kolay gelsin, rapor hazır mı acaba"]
+        - [o, "Kolay gelsin, öğleden sonra gönderiyorum"]
+
+  neighbor:
+    - msgs:
+        - [p, "Merhaba ben yan daireden {first}. Kargonuzu ben aldım"]
+        - [o, "Çok teşekkür ederim, akşam gelip alırım"]
+    - msgs:
+        - [p, "Merhaba, hafta sonu yokuz çiçeklere su verebilir misiniz"]
+        - [o, "Tabii ki, anahtar her zamanki yerde mi"]
+        - [p, "Evet çok teşekkürler 🙏"]
+      emoji: true
+    - msgs:
+        - [p, "Bilginize: {day} günü saat 10 ile 12 arası binada su kesintisi olacakmış"]
+        - [o, "Haber verdiğiniz için teşekkürler"]
+    - msgs:
+        - [p, "Arabanızın farları açık kalmış 😉"]
+        - [o, "Aa çok sağolun hemen iniyorum"]
+      emoji: true
+    - msgs:
+        - [p, "Kızımızın doğum günü var cumartesi, biraz ses olabilir şimdiden kusura bakmayın"]
+        - [o, "Ne kusuru, iyi eğlenceler"]
+    - msgs:
+        - [o, "Merhaba, sizde de sıcak su yok mu"]
+        - [p, "Bizde de yok, yöneticiye haber verdim"]
+        - [o, "Tamam teşekkürler"]
+    - msgs:
+        - [p, "Matkabınız var mı acaba, ödünç alabilir miyim"]
+        - [o, "Var tabii, gelip alabilirsiniz"]
+        - [p, "Süper 5 dk ya geliyorum"]
+    - msgs:
+        - [p, "Aidat bu ay {amount}, yöneticinin hesabına yatırıyoruz"]
+        - [o, "Tamam bugün gönderirim"]
+    - msgs:
+        - [p, "İyi akşamlar, kediniz yine bizim balkonda 😄"]
+        - [o, "Ay kusura bakmayın 🙈 hemen geliyorum"]
+      emoji: true
+    - msgs:
+        - [p, "Kapıya börek bıraktım afiyet olsun"]
+        - [o, "Ellerinize sağlık çok naziksiniz"]
+
+service_sms:
+  courier:
+    - "{tracking} numaralı gönderiniz bugün dağıtıma çıkmıştır."
+    - "{courier}: {tracking} takip numaralı gönderiniz komşunuza teslim edilmiştir."
+    - "Gönderiniz {tracking} şubede sizi bekliyor. Teslim kodu: {code}"
+    - "Sayın alıcı, {tracking} numaralı gönderiniz adreste kimse bulunamadığı için teslim edilemedi. Yeni teslim tarihi: {date}"
+    - "{courier}: {tracking} numaralı gönderiniz yola çıktı. Tahmini teslim: {day}."
+    - "{tracking} numaralı gönderiniz teslim edilmiştir. Bizi tercih ettiğiniz için teşekkür ederiz."
+  bank:
+    - "{bank}: {amount} tutarındaki işleminiz için doğrulama kodunuz {digits:6}. Bu kodu kimseyle paylaşmayınız."
+    - "{bank}: İnternet bankacılığı giriş şifreniz: {digits:6}. B{digits:3}"
+    - "{bank}: {date} tarihinde {shop} işyerinde kartınızla {amount} harcama yapılmıştır."
+    - "{bank}: Hesabınıza {amount} tutarında havale/EFT gelmiştir."
+    - "{bank}: Yeni kartınız adresinize gönderilmiştir. Kart şifrenizi ATM'lerden oluşturabilirsiniz."
+    - "Bankamız sizden asla telefon veya SMS ile şifre talep etmez. {bank}"
+  otp_service:
+    - "Doğrulama kodunuz: {digits:6}. Bu kodu kimseyle paylaşmayınız."
+    - "Tek kullanımlık şifreniz: {digits:6}"
+    - "Giriş kodunuz {digits:4}. Kod 3 dakika geçerlidir."
+    - "{digits:6} kodu ile hesabınızı doğrulayabilirsiniz. Bu işlemi siz yapmadıysanız dikkate almayınız."
+    - "Şifre sıfırlama kodunuz: {digits:6}"
+  telecom:
+    - "Değerli abonemiz, kalan bakiyeniz {amount}."
+    - "Paketinizdeki internetin %80'ini kullandınız. Ek paket için EK yazıp 3000'e gönderin."
+    - "İnternet paketiniz bitmiştir. Ek paket almadığınız sürece internet kullanımınız ücretlendirilecektir."
+    - "{amount} tutarındaki yükleme işleminiz başarıyla gerçekleşmiştir."
+    - "Yurt dışına hoş geldiniz. Roaming paketleri için *123# arayınız."
+    - "{date} tarihli faturanız {amount}. Son ödeme tarihinden önce ödemeyi unutmayınız."
+  doctor:
+    - "Sayın hasta, {date} tarihinde saat {time} randevunuz bulunmaktadır. Kimliğinizi yanınızda getirmeyi unutmayınız."
+    - "Randevu hatırlatma: {day}, {date}, saat {time}. İptal için lütfen 24 saat önce bilgi veriniz."
+    - "{date} saat {time} diş hekimi randevunuz onaylanmıştır."
+    - "{date} tarihli randevunuz ertelenmiştir. Lütfen yeni randevu için bizi arayınız."
+    - "Tahlil sonuçlarınız çıkmıştır. Kontrol randevusu için polikliniğe başvurunuz."
+  pharmacy:
+    - "Siparişiniz saat {time} itibarıyla eczanemizden teslim alınabilir."
+    - "Reçeteniz hazırlanmıştır. {date} tarihine kadar eczanemizden alabilirsiniz. Kod: {code}"
+    - "Eczanemizde eksik olan ürünleriniz gelmiştir."
+    - "Reçeteniz eczanemize ulaşmıştır. Hazır olduğunda size haber vereceğiz."
+    - "Siparişiniz {code} bugün saat 19:00'a kadar teslim alınabilir. Sağlıklı günler dileriz."
+  delivery_food:
+    - "{shop} siparişiniz onaylandı. Tahmini teslim saati {time}."
+    - "Siparişiniz yola çıktı! Kuryeniz yaklaşık 10 dakika içinde kapınızda."
+    - "Kuryeniz kapınızda. Afiyet olsun!"
+    - "Üzgünüz, {shop} siparişiniz yaklaşık 15 dakika gecikecek."
+    - "{code} numaralı siparişiniz iptal edildi. {amount} tutarındaki iade kartınıza yansıtılacaktır."
+  ride_hailing:
+    - "Sürücünüz yola çıktı, yaklaşık 4 dakika içinde yanınızda."
+    - "Sürücünüz geldi. Plaka: {code}"
+    - "Yolculuk doğrulama kodunuz: {digits:4}"
+    - "Yolculuğunuz tamamlandı. Tutar: {amount}. Detaylar uygulamada."
+    - "Saat {time} yolculuğunuz planlandı. Alış noktası: {place}"
+  airline:
+    - "{code} sefer sayılı {date} tarihli uçuşunuz için online check-in açılmıştır."
+    - "{code} uçuşunuzun kapısı değişmiştir. Yeni kapı: {digits:3}"
+    - "{code} uçuşunuz rötarlıdır. Yeni kalkış saati: {time}."
+    - "{code} uçuşunuz için biniş saat {time} itibarıyla başlamaktadır."
+    - "Rezervasyonunuz onaylanmıştır. PNR: {code}, {date}. İyi yolculuklar dileriz."
+  rail:
+    - "{date} tarihli bilet işleminiz tamamlanmıştır. PNR: {code}"
+    - "{city} yönündeki treniniz yaklaşık 15 dakika gecikmeli hareket edecektir."
+    - "Sayın yolcumuz, vagon {digits:1}, koltuk {digits:2}. İyi yolculuklar dileriz."
+    - "Saat {time} hareketli seferiniz iptal edilmiştir. Bilet bedeliniz iade edilecektir."
+    - "Seferinize 1 saat kalmıştır. Lütfen istasyonda hazır bulununuz."
+  government:
+    - "Kimlik kartınız hazırlanmıştır. Randevu alarak nüfus müdürlüğünden teslim alabilirsiniz."
+    - "{date} tarihinde saat {time} randevunuz oluşturulmuştur. Randevu no: {code}"
+    - "Başvurunuz {code} alınmış olup işleme konulmuştur."
+    - "Pasaportunuz adresinize gönderilmiştir. Gönderi takip no: {tracking}"
+    - "Adınıza yeni bir tebligat bulunmaktadır. Görüntülemek için sisteme giriş yapınız."
+  retail:
+    - "{code} numaralı siparişiniz kargoya verilmiştir. {shop}"
+    - "{shop}: Siparişiniz mağazada teslime hazır. Teslim kodu {digits:6}"
+    - "Sadece bugün tüm ürünlerde %20 indirim! {shop} SMS almamak için RET yazıp 3434'e gönderin. Mersis: {digits:16}"
+    - "{shop} iadeniz alınmıştır. {amount} tutarındaki iadeniz 3-5 iş günü içinde kartınıza yansıyacaktır."
+    - "{shop}: Bir sonraki alışverişinizde geçerli indirim kodunuz: {code} B{digits:3}"
+  utility:
+    - "{date} son ödeme tarihli elektrik faturanız {amount}."
+    - "Sayın abonemiz, doğalgaz faturanız {amount} tutarında düzenlenmiştir."
+    - "{date} tarihinde 09:00-12:00 arası planlı elektrik kesintisi yapılacaktır."
+    - "Su faturanızın son ödeme tarihi {date}. Tutar: {amount}"
+    - "Sayaç değişimi için {date} tarihinde 08:00-12:00 arası adresinize gelinecektir."
+
+calendar:
+  - {title: "Diş hekimi", minutes: 45, kind: appointment}
+  - {title: "Aile hekimi", minutes: 20, kind: appointment}
+  - {title: "Kuaför", minutes: 60, kind: appointment}
+  - {title: "Berber", minutes: 30, kind: appointment}
+  - {title: "Göz doktoru", minutes: 30, kind: appointment}
+  - {title: "Nüfus müdürlüğü randevu", minutes: 30, kind: appointment}
+  - {title: "Araç muayenesi", minutes: 60, kind: appointment}
+  - {title: "Veli toplantısı", minutes: 90, kind: appointment}
+  - {title: "Noter", minutes: 30, kind: appointment}
+  - {title: "Ekip toplantısı", minutes: 60, kind: work}
+  - {title: "Haftalık toplantı", minutes: 30, kind: work}
+  - {title: "{first} ile birebir", minutes: 30, kind: work}
+  - {title: "Müşteri ziyareti {city}", minutes: 120, kind: work}
+  - {title: "Sunum", minutes: 60, kind: work}
+  - {title: "Performans görüşmesi", minutes: 60, kind: work}
+  - {title: "Teklif son gün", all_day: true, kind: work}
+  - {title: "Yılbaşı şirket yemeği", minutes: 240, kind: work}
+  - {title: "{first} ile akşam yemeği", minutes: 120, kind: social}
+  - {title: "{first} ile kahve", minutes: 60, kind: social}
+  - {title: "Mangal", minutes: 240, kind: social}
+  - {title: "Okey akşamı", minutes: 180, kind: social}
+  - {title: "Sinema", minutes: 150, kind: social}
+  - {title: "Konser {place}", minutes: 180, kind: social}
+  - {title: "Kahvaltı {place}", minutes: 120, kind: social}
+  - {title: "Düğün {first}", all_day: true, kind: social}
+  - {title: "Kına gecesi", minutes: 240, kind: social}
+  - {title: "Spor salonu", minutes: 90, kind: sport}
+  - {title: "Koşu", minutes: 45, kind: sport}
+  - {title: "Halı saha", minutes: 90, kind: sport}
+  - {title: "Pilates", minutes: 60, kind: sport}
+  - {title: "Yüzme", minutes: 60, kind: sport}
+  - {title: "{city} uçuşu", minutes: 120, kind: travel}
+  - {title: "Otobüs {city}", minutes: 300, kind: travel}
+  - {title: "Tatil", all_day: true, kind: travel}
+  - {title: "Otel giriş {city}", minutes: 30, kind: travel}
+  - {title: "{first} doğum günü", all_day: true, kind: birthday}
+  - {title: "Doğum günü {first}", all_day: true, kind: birthday}
+  - {title: "Annemin doğum günü", all_day: true, kind: birthday}
+  - {title: "Kira öde", all_day: true, kind: reminder}
+  - {title: "Aidat yatır", all_day: true, kind: reminder}
+  - {title: "Kasko yenile", all_day: true, kind: reminder}
+  - {title: "Lastik değişimi", minutes: 60, kind: reminder}
+  - {title: "İade kargoya ver", minutes: 15, kind: reminder}
+  - {title: "{first} için hediye al", all_day: true, kind: reminder}
+  - {title: "Çiçekleri sula", minutes: 10, kind: reminder}
+
+files:
+  - {name: "Fatura_{digits:10}.pdf", kind: invoice}
+  - {name: "e-Arsiv_Fatura_{code}.pdf", kind: invoice}
+  - {name: "elektrik_faturasi.pdf", kind: invoice}
+  - {name: "Kira_Sozlesmesi_{last}.pdf", kind: contract}
+  - {name: "Is_Sozlesmesi_imzali.pdf", kind: contract}
+  - {name: "Abonelik_sozlesmesi.pdf", kind: contract}
+  - {name: "Maas_Bordrosu_{digits:6}.pdf", kind: payslip}
+  - {name: "bordro_mart.pdf", kind: payslip}
+  - {name: "Hesap_Ozeti_{digits:4}.pdf", kind: statement}
+  - {name: "Kredi_Karti_Ekstresi.pdf", kind: statement}
+  - {name: "Vergi_Levhasi.pdf", kind: tax}
+  - {name: "SGK_Hizmet_Dokumu.pdf", kind: form}
+  - {name: "CV_{last}.pdf", kind: cv}
+  - {name: "Ozgecmis.docx", kind: cv}
+  - {name: "On_Yazi.docx", kind: cv}
+  - {name: "Biniş_Kartı_{code}.pdf", kind: ticket}
+  - {name: "Otobus_Bileti_{city}.pdf", kind: ticket}
+  - {name: "Konser_Bileti.pdf", kind: ticket}
+  - {name: "Rezervasyon_{code}.pdf", kind: ticket}
+  - {name: "Kasko_Policesi.pdf", kind: insurance}
+  - {name: "Trafik_Sigortasi_Police.pdf", kind: insurance}
+  - {name: "DASK_Police.pdf", kind: insurance}
+  - {name: "Fesih_Dilekcesi.pdf", kind: letter}
+  - {name: "Dilekce.docx", kind: letter}
+  - {name: "Ogrenci_Belgesi.pdf", kind: form}
+  - {name: "Ikametgah_Belgesi.pdf", kind: form}
+  - {name: "Basvuru_Formu_doldurulmus.pdf", kind: form}
+  - {name: "Camasir_Makinesi_Kullanim_Kilavuzu.pdf", kind: manual}
+  - {name: "Garanti_Belgesi_TV.pdf", kind: receipt}
+  - {name: "Dekont_{digits:8}.pdf", kind: receipt}
+  - {name: "Taranmis_Belge_{digits:4}.pdf", kind: scan}
+  - {name: "Mercimek_Corbasi_Tarifi.pdf", kind: other}
+
+notes:
+  - "Market: süt, ekmek, yumurta, peynir"
+  - "Domates, salatalık, zeytin, çay, deterjan, peçete"
+  - "Misafir wifi şifre: misafir{digits:4}"
+  - "Ev sahibi IBAN TR{digits:2} {digits:4} {digits:4} {digits:4} {digits:4} {digits:4} {digits:2}"
+  - "Dişçi {date} {time}"
+  - "{first} hediye: kitap, mum, parfüm"
+  - "Kargo teslim kodu {code}"
+  - "Bavul: şarj aleti, pasaport, güneş kremi, mayo"
+  - "Annemi ara"
+  - "Kiralık araç plakası {code}"
+  - "Mercimek çorbası: 1 su bardağı mercimek, 1 soğan, 1 havuç, salça"
+  - "Rezervasyon {place} saat {time}"
+  - "Elektrik sayacı {digits:5}"
+  - "Yöneticiyi ara kombi için"
+  - "İzlenecek diziler"
+  - "Buluşma yeri: {place}"
+  - "Müşteri no {digits:8}"
+  - "Uçuş {code} {date} {time}"
+  - "Yapılacaklar: vergi, araç muayenesi, kreş kaydı"
+  - "Bayram alışverişi listesi"
+  - "{city} otel adresi"
+  - "{first} {amount} geri ver"
+
+call_names:
+  mom: Annem
+  dad: Babam
+  grandma: Anneannem
+  grandpa: Dedem
+  partner: Aşkım

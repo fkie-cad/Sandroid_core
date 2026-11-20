@@ -1,0 +1,457 @@
+# Language pack: Dutch (nl). Schema v1, see ../PACK_SCHEMA.md.
+# All texts authored (AI-written), see nl.SOURCES.md.
+# Conventions: friends/family/partner/neighbours use "je/jij"; banks, government,
+# doctors and utilities use "u"; apps, delivery and OTP services often use "je"
+# (as real Dutch services do).
+# `emoji: true` sits on the thread and means "at least one message in this thread
+# contains emoji" (schema v1 has no per-message flag; messages are [speaker, text]).
+pack: language
+schema: 1
+lang: nl
+name: Nederlands
+
+threads:
+  family:
+    - msgs:
+        - [p, "Kom je zondag eten? Opa en oma komen ook"]
+        - [o, "Ja leuk! Hoe laat?"]
+        - [p, "Rond 5 uur. Neem {partner_first} mee hoor"]
+        - [o, "Doe ik 👍"]
+      emoji: true
+    - msgs:
+        - [p, "Ben je al thuis?"]
+        - [o, "Ja net binnen"]
+        - [p, "Fijn. Slaap lekker xx"]
+    - msgs:
+        - [p, "Heb je mijn appje gezien over de verjaardag van tante Ria?"]
+        - [o, "Nee sorry, wanneer is het?"]
+        - [p, "{day} om 3 uur, bij haar thuis"]
+        - [o, "Ok ik kom, neem wel taart mee"]
+    - msgs:
+        - [p, "Kun je me ff bellen als je tijd hebt?"]
+        - [o, "Is er iets?"]
+        - [p, "Nee hoor niks ergs, gaat over de vakantie"]
+        - [o, "Ok bel je vanavond"]
+    - msgs:
+        - [p, "De tv doet het weer niet. Hoe moest dat ook alweer met die afstandsbediening"]
+        - [o, "Op 'source' drukken en dan HDMI 1"]
+        - [p, "Gelukt! Je bent een schat"]
+        - [o, "😂"]
+      emoji: true
+    - msgs:
+        - [p, "Gefeliciteerd lieverd!! 🎉🎂 Fijne dag vandaag"]
+        - [o, "Dankjewel mam ❤️"]
+      emoji: true
+    - msgs:
+        - [p, "Ik ben {date} in {city}, zullen we samen lunchen?"]
+        - [o, "Ja gezellig! Waar?"]
+        - [p, "Zeg jij het maar, jij kent het daar beter"]
+        - [o, "Bij {place} zit een leuk tentje, 12 uur?"]
+        - [p, "Top"]
+    - msgs:
+        - [p, "Heb je nog die ladder van papa? Wij hebben hem nodig zaterdag"]
+        - [o, "Staat in de schuur, haal maar op"]
+    - msgs:
+        - [p, "Kerst dit jaar bij ons of bij jullie?"]
+        - [o, "Bij jullie toch? Wij deden vorig jaar"]
+        - [p, "Klopt haha. Prima"]
+    - msgs:
+        - [p, "Ik heb {amount} overgemaakt voor het cadeau van oma"]
+        - [o, "Thx! Ik bestel het vandaag"]
+    - msgs:
+        - [p, "Staan in de file bij de afrit, wordt half uurtje later"]
+        - [o, "Geen probleem, rij voorzichtig"]
+        - [p, "😘"]
+      emoji: true
+
+  partner:
+    - msgs:
+        - [p, "Moet ik nog iets meenemen van de supermarkt?"]
+        - [o, "Melk, brood en kaas"]
+        - [p, "Ok"]
+    - msgs:
+        - [p, "Ben er zo"]
+        - [o, "👍"]
+      emoji: true
+    - msgs:
+        - [o, "Wordt later vandaag, overleg loopt uit"]
+        - [p, "Balen 😕 hoe laat ongeveer?"]
+        - [o, "Rond {time}"]
+        - [p, "Ok dan eet ik vast. Bewaar wat voor je"]
+        - [o, "Lief ❤️"]
+      emoji: true
+    - msgs:
+        - [p, "Heb jij de sleutels van de fiets?"]
+        - [o, "Nee die hangen aan het haakje"]
+        - [p, "Hangen er niet..."]
+        - [p, "Laat maar, zaten in mijn jaszak 🙈"]
+      emoji: true
+    - msgs:
+        - [p, "Niet vergeten: tandarts morgen {time}"]
+        - [o, "O ja shit, was ik echt vergeten"]
+        - [p, "Weet ik 😏"]
+      emoji: true
+    - msgs:
+        - [o, "Zin om vanavond naar de film te gaan?"]
+        - [p, "Jaa welke"]
+        - [o, "Maakt me niet uit, kies jij maar"]
+        - [p, "Ok stuur zo ff wat"]
+    - msgs:
+        - [p, "Mis je xx"]
+        - [o, "Ik jou ook. Nog 2 nachtjes"]
+        - [p, "Te lang 💕"]
+      emoji: true
+    - msgs:
+        - [p, "Kun jij het pakketje van {courier} bij de buren ophalen? Ik red het niet"]
+        - [o, "Is goed"]
+    - msgs:
+        - [o, "Goed aangekomen?"]
+        - [p, "Jep, trein had maar 20 min vertraging haha"]
+        - [o, "Bijna op tijd dus"]
+    - msgs:
+        - [p, "Wat eten we vanavond"]
+        - [o, "Pizza?"]
+        - [p, "Alweer 😂"]
+        - [o, "Ok ok dan maak ik pasta"]
+      emoji: true
+    - msgs:
+        - [p, "Welterusten schat"]
+        - [o, "Slaap lekker xx"]
+
+  friend:
+    - msgs:
+        - [p, "Hoi! Hoe is het? Lang niks gehoord"]
+        - [o, "Hee! Goed hoor, druk druk. Met jou?"]
+        - [p, "Zelfde haha. Moeten echt weer eens afspreken"]
+        - [o, "Idd! Volgende week?"]
+        - [p, "Do of vr kan ik"]
+        - [o, "Vr is top"]
+    - msgs:
+        - [p, "Kom je vanavond ook?"]
+        - [o, "Waar gaan jullie heen"]
+        - [p, "{place}, vanaf {time}"]
+        - [o, "Ben erbij 🍻"]
+      emoji: true
+    - msgs:
+        - [p, "Hvj!! 🥳🎉 Maak er een mooie dag van"]
+        - [o, "Dankjee 🥰"]
+      emoji: true
+    - msgs:
+        - [p, "Wil je de foto's van zaterdag ff sturen?"]
+        - [o, "Ja doe ik vanavond"]
+        - [p, "Thx"]
+    - msgs:
+        - [p, "Sorry kom 10 min later"]
+        - [o, "Geen stress"]
+        - [p, "Bestel je vast een koffie voor me? Cappuccino"]
+        - [o, "Ok top"]
+    - msgs:
+        - [o, "Heb jij nog mijn oplader?"]
+        - [p, "Ohja sorry 😅 neem ik mee"]
+      emoji: true
+    - msgs:
+        - [p, "Wie komen er allemaal {day}?"]
+        - [o, "Ik, Sanne en wss Jeroen"]
+        - [p, "Ok ik neem salade mee"]
+        - [o, "Lekker"]
+    - msgs:
+        - [p, "Zag je de wedstrijd gisteren"]
+        - [o, "Jaaa niet normaal"]
+        - [p, "Die laatste goal 😱"]
+        - [o, "Volgende keer samen kijken"]
+      emoji: true
+    - msgs:
+        - [p, "Weet jij een goede kapper in {city}?"]
+        - [o, "Ik ga altijd naar eentje in het centrum, stuur je zo het nummer"]
+        - [p, "Top dankje"]
+    - msgs:
+        - [o, "Morgen hardlopen?"]
+        - [p, "Hoe laat"]
+        - [o, "7 uur bij {place}"]
+        - [p, "Pff ok maar max 5 km"]
+    - msgs:
+        - [p, "Thuis! Was echt gezellig vanavond"]
+        - [o, "Zeker, snel weer 😄"]
+      emoji: true
+    - msgs:
+        - [p, "Heb jij dat betaalverzoek van het etentje al betaald?"]
+        - [o, "Nee vergeten, doe ik nu"]
+
+  colleague:
+    - msgs:
+        - [p, "Hoi {owner_first}, ben je vandaag op kantoor?"]
+        - [o, "Nee vandaag thuis"]
+        - [p, "Ok dan mail ik je de stukken"]
+        - [o, "Dankje"]
+    - msgs:
+        - [p, "Het overleg van {time} is verplaatst naar morgen"]
+        - [o, "Ok bedankt voor het laten weten"]
+    - msgs:
+        - [p, "Ik ben ziek vandaag, wil jij het even doorgeven aan het team?"]
+        - [o, "Doe ik, beterschap!"]
+        - [p, "Dank je"]
+    - msgs:
+        - [p, "Lunchen?"]
+        - [o, "Ja, 12:30 beneden?"]
+        - [p, "👍"]
+      emoji: true
+    - msgs:
+        - [o, "Sta in de file op de A12, ben 15 min later"]
+        - [p, "Geen probleem, we beginnen vast"]
+    - msgs:
+        - [p, "Kun je me de presentatie van gisteren sturen?"]
+        - [o, "Staat op de gedeelde schijf, map Projecten"]
+        - [p, "Gevonden, thx!"]
+    - msgs:
+        - [p, "Denk je aan de deadline van {day}?"]
+        - [o, "Ja, ben bijna klaar"]
+    - msgs:
+        - [p, "We zamelen in voor het afscheid van Marieke, doe je mee? 10 euro"]
+        - [o, "Ja natuurlijk, geef ik je morgen"]
+    - msgs:
+        - [p, "Fijne vakantie! Geniet ervan 🌴☀️"]
+        - [o, "Dank je! Tot over 2 weken"]
+      emoji: true
+    - msgs:
+        - [p, "Weet jij of de parkeergarage morgen dicht is?"]
+        - [o, "Ja ivm onderhoud, pak de trein maar"]
+        - [p, "Ok thx"]
+    - msgs:
+        - [p, "Vrijdagmiddagborrel om 4 uur, kom je ook?"]
+        - [o, "Ik schuif aan 🍺"]
+      emoji: true
+
+  neighbor:
+    - msgs:
+        - [p, "Goedemiddag, met {first} van hiernaast. Ik heb een pakketje voor u aangenomen"]
+        - [o, "Wat fijn, dank u wel! Ik kom het vanavond halen"]
+    - msgs:
+        - [p, "Hoi, zou jij dit weekend onze planten water willen geven? We zijn weg"]
+        - [o, "Ja hoor, geen probleem. Sleutel zoals altijd?"]
+        - [p, "Ja, super bedankt 🙏"]
+      emoji: true
+    - msgs:
+        - [p, "Even ter info: {day} wordt de cv-ketel in het hele blok gecontroleerd, tussen 8 en 12"]
+        - [o, "Dank voor de info!"]
+    - msgs:
+        - [p, "Je autolampen staan nog aan 😉"]
+        - [o, "Oh dank je!! Ben zo beneden"]
+      emoji: true
+    - msgs:
+        - [p, "We hebben zaterdag een feestje in de tuin, kan iets luider worden. Jullie zijn welkom!"]
+        - [o, "Leuk, misschien wippen we even aan"]
+    - msgs:
+        - [o, "Hoi, hebben jullie ook geen warm water?"]
+        - [p, "Nee wij ook niet. Ik heb de verhuurder al gebeld"]
+        - [o, "Ok dank je"]
+    - msgs:
+        - [p, "Heb jij toevallig een boormachine te leen?"]
+        - [o, "Ja, kom maar halen"]
+        - [p, "Top, ben er over 5 min"]
+    - msgs:
+        - [p, "Morgen wordt het papier opgehaald, niet vergeten de container buiten te zetten"]
+        - [o, "Thx, doe ik zo"]
+    - msgs:
+        - [p, "Goedenavond, uw kat zit weer bij ons op het balkon 😄"]
+        - [o, "Oh nee 🙈 ik kom haar halen"]
+      emoji: true
+    - msgs:
+        - [p, "Zullen we volgende week samen de heg snoeien? Dan huren we 1 heggenschaar"]
+        - [o, "Goed plan, zaterdagochtend?"]
+        - [p, "Prima"]
+
+service_sms:
+  courier:
+    - "Je pakket {tracking} wordt vandaag tussen {time} bezorgd."
+    - "{courier}: je pakket {tracking} is bezorgd bij de buren."
+    - "Je pakket {tracking} ligt klaar bij het afhaalpunt. Ophaalcode: {code}"
+    - "We hebben je pakket {tracking} vandaag niet kunnen bezorgen. Nieuwe poging op {date}."
+    - "{courier}: je zending {tracking} is onderweg. Verwachte bezorging: {day}."
+    - "Je pakket {tracking} ligt in de pakketautomaat. Code: {digits:6}. Ophalen voor {date}."
+  bank:
+    - "{bank}: uw verificatiecode is {digits:6}. Deel deze code nooit met anderen, ook niet met de bank."
+    - "Uw code voor de overboeking van {amount}: {digits:6}"
+    - "{bank}: betaling van {amount} bij {shop} op {date}. Niet herkend? Bel ons direct."
+    - "{bank}: uw nieuwe betaalpas is onderweg. De pincode ontvangt u apart per post."
+    - "{bank}: bevestig het inloggen op een nieuw apparaat met code {digits:6}."
+    - "{bank} vraagt u nooit om uw code door te geven via sms of telefoon."
+  otp_service:
+    - "{digits:6} is je verificatiecode. Deel deze met niemand."
+    - "Je code is: {digits:6}"
+    - "Je inlogcode: {digits:4}. Geldig voor 10 minuten."
+    - "Gebruik {digits:6} om je account te bevestigen. Heb je dit niet aangevraagd? Negeer dan dit bericht."
+    - "Code {digits:6} om je wachtwoord te herstellen. Niet delen."
+  telecom:
+    - "Je beltegoed is {amount}. Opwaarderen kan via de app."
+    - "Je hebt 80% van je data verbruikt. Extra bundel? Stuur DATA naar 1200."
+    - "Je databundel is op. Je surft nu met beperkte snelheid tot het einde van de maand."
+    - "Je opwaardering van {amount} is gelukt."
+    - "Welkom in het buitenland! Binnen de EU bel, sms en internet je tegen Nederlands tarief."
+    - "Je rekening van {amount} staat klaar in Mijn omgeving."
+  doctor:
+    - "Herinnering: u heeft een afspraak bij de huisarts op {date} om {time}."
+    - "Herinnering afspraak tandarts {day} {date} om {time}. Verhinderd? Meld u 24 uur van tevoren af."
+    - "Uw afspraak op {date} om {time} is bevestigd. Tandartspraktijk"
+    - "Uw afspraak op {date} moet helaas worden verzet. Wilt u ons terugbellen?"
+    - "De uitslag is binnen. U kunt de praktijk bellen voor een belafspraak."
+  pharmacy:
+    - "Uw medicijnen liggen vanaf {time} voor u klaar. Uw apotheek"
+    - "Uw herhaalrecept staat klaar. Ophalen kan vanaf {date}. Afhaalcode: {code}"
+    - "Uw bestelling ligt klaar in de afhaalkluis. Code: {digits:6}"
+    - "Uw apotheek: uw bestelling is binnen en ligt tot {date} voor u klaar."
+    - "Wij hebben uw recept ontvangen. U krijgt bericht zodra het klaarligt."
+  delivery_food:
+    - "Je bestelling bij {shop} is bevestigd. Verwachte bezorging: {time}."
+    - "Je eten is onderweg! De bezorger is er over ca. 10 minuten."
+    - "De bezorger staat voor de deur. Eet smakelijk!"
+    - "Je bestelling bij {shop} is helaas ca. 15 minuten later."
+    - "Bestelling {code} is geannuleerd. {amount} wordt teruggestort."
+  ride_hailing:
+    - "Je chauffeur is onderweg en is er over ca. 4 minuten."
+    - "Je chauffeur staat klaar. Kenteken: {code}"
+    - "Je pincode voor de rit: {digits:4}"
+    - "Bedankt voor je rit! Totaal: {amount}. Bon staat in de app."
+    - "Je rit om {time} is gereserveerd. Ophalen bij: {place}"
+  airline:
+    - "Inchecken voor vlucht {code} op {date} is geopend. Instapkaart in de app."
+    - "Gatewijziging vlucht {code}: nieuwe gate D{digits:2}."
+    - "Vlucht {code} heeft vertraging. Nieuwe vertrektijd: {time}."
+    - "Boarding vlucht {code} start om {time}. Ga naar de gate."
+    - "Boekingsbevestiging {code}: {city}, {date}. Goede reis!"
+  rail:
+    - "Je e-ticket voor {date} naar {city}: boekingsnummer {code}."
+    - "Je trein naar {city} heeft vandaag ca. 15 minuten vertraging."
+    - "Spoorwijziging: je trein naar {city} vertrekt vandaag van spoor {digits:1}."
+    - "Werkzaamheden op {date}: er rijden bussen in plaats van treinen richting {city}."
+    - "Je trein van {time} naar {city} rijdt niet. Bekijk de reisplanner voor alternatieven."
+  government:
+    - "Uw paspoort ligt klaar bij de gemeente. Maak een afspraak om het op te halen."
+    - "Bevestiging afspraak gemeente: {date} om {time}. Zaaknummer {code}."
+    - "Herinnering: uw afspraak bij het gemeentehuis op {date} om {time}. Neem een geldig legitimatiebewijs mee."
+    - "Uw aanvraag {code} is ontvangen en wordt in behandeling genomen."
+    - "Er staat een nieuw bericht voor u klaar in uw berichtenbox. Log in om het te lezen."
+  retail:
+    - "Je bestelling {code} bij {shop} is verzonden."
+    - "{shop}: je bestelling ligt klaar in de winkel. Afhaalnummer {digits:6}"
+    - "Alleen vandaag: 20% korting op alles bij {shop}. Afmelden? Sms STOP naar 4411"
+    - "Je retour bij {shop} is ontvangen. {amount} wordt binnen 3-5 dagen teruggestort."
+    - "{shop}: je kortingscode voor je volgende aankoop: {code}"
+  utility:
+    - "Uw termijnbedrag van {amount} wordt op {date} afgeschreven."
+    - "Wilt u uw meterstanden doorgeven voor {date}?"
+    - "Gepland onderhoud op {date} van 9 tot 12 uur. Mogelijk geen stroom in uw straat."
+    - "Uw jaarafrekening staat klaar. U krijgt {amount} terug."
+    - "Afspraak vervanging meter: {date} tussen 8 en 12 uur."
+
+calendar:
+  - {title: "Tandarts", minutes: 30, kind: appointment}
+  - {title: "Huisarts", minutes: 15, kind: appointment}
+  - {title: "Kapper", minutes: 45, kind: appointment}
+  - {title: "Opticien", minutes: 30, kind: appointment}
+  - {title: "Gemeente paspoort ophalen", minutes: 30, kind: appointment}
+  - {title: "APK garage", minutes: 90, kind: appointment}
+  - {title: "Ouderavond school", minutes: 90, kind: appointment}
+  - {title: "Fysio", minutes: 30, kind: appointment}
+  - {title: "Hypotheekadviseur", minutes: 60, kind: appointment}
+  - {title: "Teamoverleg", minutes: 60, kind: work}
+  - {title: "Weekstart", minutes: 30, kind: work}
+  - {title: "1-op-1 {first}", minutes: 30, kind: work}
+  - {title: "Klantafspraak {city}", minutes: 120, kind: work}
+  - {title: "Sprint review", minutes: 60, kind: work}
+  - {title: "Functioneringsgesprek", minutes: 60, kind: work}
+  - {title: "Deadline offerte", all_day: true, kind: work}
+  - {title: "Vrijdagmiddagborrel", minutes: 120, kind: work}
+  - {title: "Personeelsuitje", all_day: true, kind: work}
+  - {title: "Eten met {first}", minutes: 120, kind: social}
+  - {title: "Koffie {first}", minutes: 60, kind: social}
+  - {title: "BBQ bij {first}", minutes: 240, kind: social}
+  - {title: "Spelletjesavond", minutes: 180, kind: social}
+  - {title: "Bios", minutes: 150, kind: social}
+  - {title: "Concert {place}", minutes: 180, kind: social}
+  - {title: "Borrel {place}", minutes: 120, kind: social}
+  - {title: "Bruiloft {first}", all_day: true, kind: social}
+  - {title: "Sportschool", minutes: 75, kind: sport}
+  - {title: "Hardlopen", minutes: 45, kind: sport}
+  - {title: "Voetbaltraining", minutes: 90, kind: sport}
+  - {title: "Hockey", minutes: 90, kind: sport}
+  - {title: "Zwemmen", minutes: 60, kind: sport}
+  - {title: "Padel", minutes: 60, kind: sport}
+  - {title: "Vlucht naar {city}", minutes: 120, kind: travel}
+  - {title: "Trein naar {city}", minutes: 120, kind: travel}
+  - {title: "Vakantie", all_day: true, kind: travel}
+  - {title: "Hotel {city} inchecken", minutes: 30, kind: travel}
+  - {title: "Verjaardag {first}", all_day: true, kind: birthday}
+  - {title: "{first} jarig", all_day: true, kind: birthday}
+  - {title: "Mama jarig", all_day: true, kind: birthday}
+  - {title: "Container buiten zetten", minutes: 10, kind: reminder}
+  - {title: "Huur overmaken", all_day: true, kind: reminder}
+  - {title: "Belastingaangifte doen", all_day: true, kind: reminder}
+  - {title: "Zorgverzekering overstappen", all_day: true, kind: reminder}
+  - {title: "Pakket terugsturen", minutes: 15, kind: reminder}
+  - {title: "Cadeau {first} kopen", all_day: true, kind: reminder}
+  - {title: "Planten water geven", minutes: 10, kind: reminder}
+
+files:
+  - {name: "Factuur_{digits:8}.pdf", kind: invoice}
+  - {name: "factuur_{date}.pdf", kind: invoice}
+  - {name: "Factuur loodgieter.pdf", kind: invoice}
+  - {name: "Huurcontract_{last}.pdf", kind: contract}
+  - {name: "Arbeidsovereenkomst_getekend.pdf", kind: contract}
+  - {name: "Abonnement_mobiel.pdf", kind: contract}
+  - {name: "Loonstrook_{digits:6}.pdf", kind: payslip}
+  - {name: "Loonstrook_maart.pdf", kind: payslip}
+  - {name: "Rekeningafschrift_{digits:4}.pdf", kind: statement}
+  - {name: "Jaaroverzicht_2025.pdf", kind: statement}
+  - {name: "Voorlopige_aanslag_2026.pdf", kind: tax}
+  - {name: "Jaaropgaaf_2025.pdf", kind: tax}
+  - {name: "CV_{last}.pdf", kind: cv}
+  - {name: "Sollicitatiebrief.docx", kind: cv}
+  - {name: "Motivatiebrief_{last}.pdf", kind: cv}
+  - {name: "Instapkaart_{code}.pdf", kind: ticket}
+  - {name: "E-ticket_{city}.pdf", kind: ticket}
+  - {name: "Concertkaarten.pdf", kind: ticket}
+  - {name: "Boekingsbevestiging_{code}.pdf", kind: ticket}
+  - {name: "Polisblad_autoverzekering.pdf", kind: insurance}
+  - {name: "Zorgpolis_2026.pdf", kind: insurance}
+  - {name: "Opzegging_sportschool.pdf", kind: letter}
+  - {name: "Bevestiging_opzegging.pdf", kind: letter}
+  - {name: "Inschrijving_bevestiging.pdf", kind: form}
+  - {name: "Aanvraagformulier_ingevuld.pdf", kind: form}
+  - {name: "Machtiging_incasso.pdf", kind: form}
+  - {name: "Handleiding_wasmachine.pdf", kind: manual}
+  - {name: "Kassabon_{digits:6}.pdf", kind: receipt}
+  - {name: "Garantiebewijs_tv.pdf", kind: receipt}
+  - {name: "Jaarafrekening_energie_2025.pdf", kind: invoice}
+  - {name: "Scan_{digits:4}.pdf", kind: scan}
+  - {name: "Recept_stamppot.pdf", kind: other}
+
+notes:
+  - "Boodschappen: melk, brood, kaas, eieren"
+  - "Hagelslag, pindakaas, appels, wc-papier, afwasmiddel"
+  - "Wifi gast: Gast_{digits:4}"
+  - "IBAN verhuurder NL{digits:2} ABCD {digits:4} {digits:4} {digits:2}"
+  - "Tandarts {date} {time}"
+  - "Cadeau-ideeën {first}: boek, kaars, bon"
+  - "Pakket ophalen, code {code}"
+  - "Paklijst: oplader, paspoort, zonnebrand, zwembroek"
+  - "Mama terugbellen"
+  - "Kenteken huurauto {code}"
+  - "Pannenkoeken: 250g bloem, 2 eieren, 500ml melk, snufje zout"
+  - "Tafel gereserveerd {place} {time}"
+  - "Meterstand gas {digits:5}"
+  - "Verhuurder bellen over de verwarming"
+  - "Series nog kijken"
+  - "Afspreken bij {place}"
+  - "Klantnummer {digits:8}"
+  - "Vlucht {code} {date} {time}"
+  - "To do: belasting, APK auto, opvang aanmelden"
+  - "Fiets naar de fietsenmaker"
+  - "Adres hotel in {city}"
+  - "{amount} terug naar {first}"
+
+call_names:
+  mom: Mama
+  dad: Papa
+  grandma: Oma
+  grandpa: Opa
+  partner: Schat

@@ -1,0 +1,1007 @@
+# Nigeria country pack. Sources: see ng.SOURCES.md (S1..S12).
+pack: country
+schema: 1
+country: ng
+name: Nigeria
+# Locally written text: Nigerian English with heavy Nigerian Pidgin code-switching ("abeg",
+# "how far", "no wahala") is the norm in SMS across all groups; Hausa dominates written chat in
+# the north, Yoruba/Igbo appear mostly as greetings and phrases mixed into English.
+# Pidgin (BCP-47 "pcm") is folded into `en` here; a separate pcm language pack is proposed.
+languages: {en: 0.86, ha: 0.07, yo: 0.04, ig: 0.03}
+timezones: [Africa/Lagos]          # WAT, UTC+1, no DST
+date_format: "dd/MM/yyyy"
+time_format: "h:mm a"              # 12-hour clock dominates in everyday writing ("4:30pm")
+currency: {code: NGN, symbol: "₦", format: "₦4,500.00"}   # bank alerts often write "NGN4,500.00"; casual SMS "N4,500" / "4k"
+phone:
+  country_code: "234"
+  trunk_prefix: "0"
+  national_format_examples: ["0803 123 4567", "0812 345 6789", "0201 234 5678", "02064 23 4567"]
+  mobile:
+    # NCC Mobile Number Allocation Table "as at December 2023" (S1) and NCC ITU-T E.129
+    # notification of existing mobile E.164 numbers (S2). All mobile NSNs are 10 digits.
+    # Mobile number portability exists, so a prefix only shows the ORIGINAL operator.
+    realistic:
+      - {prefix: "703", length: 10, operator: MTN}
+      - {prefix: "704", length: 10, operator: MTN}
+      - {prefix: "706", length: 10, operator: MTN}
+      - {prefix: "707", length: 10, operator: MTN}
+      - {prefix: "803", length: 10, operator: MTN}
+      - {prefix: "806", length: 10, operator: MTN}
+      - {prefix: "810", length: 10, operator: MTN}
+      - {prefix: "813", length: 10, operator: MTN}
+      - {prefix: "814", length: 10, operator: MTN}
+      - {prefix: "816", length: 10, operator: MTN}
+      - {prefix: "903", length: 10, operator: MTN}
+      - {prefix: "906", length: 10, operator: MTN}
+      - {prefix: "913", length: 10, operator: MTN}
+      - {prefix: "916", length: 10, operator: MTN}
+      - {prefix: "701", length: 10, operator: Airtel}
+      - {prefix: "708", length: 10, operator: Airtel}
+      - {prefix: "802", length: 10, operator: Airtel}
+      - {prefix: "808", length: 10, operator: Airtel}
+      - {prefix: "812", length: 10, operator: Airtel}
+      - {prefix: "901", length: 10, operator: Airtel}
+      - {prefix: "902", length: 10, operator: Airtel}
+      - {prefix: "904", length: 10, operator: Airtel}
+      - {prefix: "907", length: 10, operator: Airtel}
+      - {prefix: "911", length: 10, operator: Airtel}
+      - {prefix: "912", length: 10, operator: Airtel}
+      - {prefix: "705", length: 10, operator: Glo}
+      - {prefix: "805", length: 10, operator: Glo}
+      - {prefix: "807", length: 10, operator: Glo}
+      - {prefix: "811", length: 10, operator: Glo}
+      - {prefix: "815", length: 10, operator: Glo}
+      - {prefix: "905", length: 10, operator: Glo}
+      - {prefix: "915", length: 10, operator: Glo}
+      - {prefix: "809", length: 10, operator: "T2 (ex-9mobile/EMTS)"}
+      - {prefix: "817", length: 10, operator: "T2 (ex-9mobile/EMTS)"}
+      - {prefix: "818", length: 10, operator: "T2 (ex-9mobile/EMTS)"}
+      - {prefix: "908", length: 10, operator: "T2 (ex-9mobile/EMTS)"}
+      - {prefix: "909", length: 10, operator: "T2 (ex-9mobile/EMTS)"}
+      # Not listed: 0702 (split Smile/Visafone/ICN blocks, partly withdrawn), 0801 (MAFAB block
+      # 0801 0xx), 0804 (M-Tel, defunct), 0914 (in S2 but no operator in S1), 071x/072x (MVNO
+      # NDCs notified to ITU in Jan 2024, S3; blocks being assigned to MVNOs e.g. 0712).
+    unallocated:
+      - {prefix: "819", length: 10, note: "NCC table (S1): 0819 000-099 'Withdrawn', rest 'Available'; absent from NCC ITU notification (S2). libphonenumber: INVALID.", source: S1}
+      - {prefix: "917", length: 10, note: "Not in NCC allocation table (S1) nor in NCC ITU notification of mobile NDCs (S2). libphonenumber: INVALID.", source: S1}
+      - {prefix: "918", length: 10, note: "Not in S1 nor S2. libphonenumber: INVALID.", source: S1}
+      - {prefix: "919", length: 10, note: "Not in S1 nor S2. libphonenumber: INVALID.", source: S1}
+      - {prefix: "709", length: 10, note: "NCC table (S1): whole 0709 'Withdrawn' (ex-Multilinks CDMA); absent from S2. libphonenumber still says valid MOBILE, so it looks fully realistic. Could be re-issued later.", source: S1}
+      - {prefix: "910", length: 10, note: "Not in S1 nor S2 (lower confidence: libphonenumber already classifies 0910 as valid MOBILE, may anticipate an allocation).", source: S2}
+    fiction: null   # Nigeria/NCC publishes no reserved drama/fiction number range (none found in S1-S3, S4).
+  landline:
+    # Since 2023 fixed numbers are 10-digit: "0" + "2" + old area code + subscriber (Lagos 01xxxxxxx -> 0201 xxx xxxx). S3, S5.
+    cities:
+      - {city: Lagos, area_code: "201", subscriber_length: 7}
+      - {city: Ibadan, area_code: "202", subscriber_length: 7}
+      - {city: Abuja, area_code: "209", subscriber_length: 7}
+      - {city: Kano, area_code: "2064", subscriber_length: 6}
+      - {city: Port Harcourt, area_code: "2084", subscriber_length: 6}
+      - {city: Enugu, area_code: "2042", subscriber_length: 6}
+      - {city: Benin City, area_code: "2052", subscriber_length: 6}
+      - {city: Kaduna, area_code: "2062", subscriber_length: 6}
+      - {city: Jos, area_code: "2073", subscriber_length: 6}
+      - {city: Ilorin, area_code: "2031", subscriber_length: 6}
+      - {city: Abeokuta, area_code: "2039", subscriber_length: 6}
+      - {city: Onitsha, area_code: "2046", subscriber_length: 6}
+      - {city: Aba, area_code: "2082", subscriber_length: 6}
+      - {city: Owerri, area_code: "2083", subscriber_length: 6}
+      - {city: Calabar, area_code: "2087", subscriber_length: 6}
+      - {city: Uyo, area_code: "2085", subscriber_length: 6}
+      - {city: Maiduguri, area_code: "2076", subscriber_length: 6}
+      - {city: Warri, area_code: "2053", subscriber_length: 6}
+    fiction: null
+  validation_note: >-
+    phonenumbers 9.0.43: all realistic prefixes valid MOBILE; 0819/0917/0918/0919 INVALID (good
+    test of validators); 0709 and 0910 still valid MOBILE although not allocated per NCC. 0700 is
+    UAN/vanity and 0800 toll-free, not mobile. Landline area codes 201..2087 in new 10-digit form
+    validate as FIXED_LINE; the legacy 8-digit forms (e.g. 01 2345678) no longer validate.
+    Fixed lines are rare in personal phone books; mobile numbers dominate contacts.
+carriers:
+  # NCC subscriber data, Dec 2025 (S6). 9mobile was rebranded T2 in 2025; MCC-MNC unchanged.
+  - {name: MTN, sim_operator: "MTN NG", mccmnc: "62130", share: 0.52}
+  - {name: Airtel, sim_operator: "Airtel NG", mccmnc: "62120", share: 0.34}
+  - {name: Glo, sim_operator: "glo", mccmnc: "62150", share: 0.12}
+  - {name: T2, sim_operator: "T2", mccmnc: "62160", share: 0.02}   # SIM SPN may still read "9mobile" on older SIMs
+cities:
+  # Population = approximate metro/urban estimates (UN WUP / citypopulation, S7), used as weights only.
+  # Legacy 6-digit NIPOST postcodes given only where verified (S8); postcodes are rarely written
+  # in Nigerian addresses and were superseded by 11-char NDAPS codes on 2026-10-01.
+  - {name: Lagos, lat: 6.5244, lon: 3.3792, population: 15900000, area_code: "201", postcodes: ["100001"],
+     districts: [Ikeja, Surulere, Yaba, Lekki, Victoria Island, Ikoyi, Ajah, Gbagada, Ikorodu, Festac, Agege, Magodo]}
+  - {name: Kano, lat: 12.0022, lon: 8.5920, population: 4600000, area_code: "2064",
+     districts: [Sabon Gari, Nassarawa GRA, Fagge, Tarauni, Gwale, Bompai]}
+  - {name: Ibadan, lat: 7.3775, lon: 3.9470, population: 3900000, area_code: "202",
+     districts: [Bodija, Challenge, Dugbe, Mokola, Agodi, Ring Road, Akobo]}
+  - {name: Abuja, lat: 9.0765, lon: 7.3986, population: 4000000, area_code: "209", postcodes: ["900001"],
+     districts: [Garki, Wuse, Maitama, Asokoro, Gwarinpa, Kubwa, Lugbe, Jabi, Lokogoma]}
+  - {name: Port Harcourt, lat: 4.8156, lon: 7.0498, population: 3500000, area_code: "2084", postcodes: ["500001"],
+     districts: [Old GRA, D-Line, Rumuokoro, Trans-Amadi, Rumuola, Choba, Woji]}
+  - {name: Benin City, lat: 6.3350, lon: 5.6037, population: 1900000, area_code: "2052",
+     districts: [GRA, Ugbowo, Uselu, Sapele Road, Ikpoba Hill]}
+  - {name: Onitsha, lat: 6.1460, lon: 6.7880, population: 1600000, area_code: "2046",
+     districts: [Fegge, GRA, Odoakpu, Woliwo]}
+  - {name: Aba, lat: 5.1066, lon: 7.3667, population: 1100000, area_code: "2082",
+     districts: [Ogbor Hill, Ariaria, Osisioma, Asa Road]}
+  - {name: Kaduna, lat: 10.5105, lon: 7.4165, population: 1300000, area_code: "2062",
+     districts: [Barnawa, Malali, Ungwan Rimi, Sabon Tasha, Kawo]}
+  - {name: Ilorin, lat: 8.4966, lon: 4.5426, population: 1100000, area_code: "2031",
+     districts: [GRA, Tanke, Fate, Taiwo Road]}
+  - {name: Jos, lat: 9.8965, lon: 8.8583, population: 1000000, area_code: "2073",
+     districts: [Rayfield, Bukuru, Terminus, Anglo Jos]}
+  - {name: Enugu, lat: 6.4584, lon: 7.5464, population: 900000, area_code: "2042", postcodes: ["400001"],
+     districts: [Independence Layout, New Haven, Trans-Ekulu, Ogui, GRA, Abakpa]}
+  - {name: Uyo, lat: 5.0377, lon: 7.9128, population: 1100000, area_code: "2085",
+     districts: [Ewet Housing, Shelter Afrique, Itam]}
+  - {name: Maiduguri, lat: 11.8311, lon: 13.1510, population: 900000, area_code: "2076",
+     districts: [GRA, Bulumkutu, Gwange, Old Maiduguri]}
+  - {name: Warri, lat: 5.5167, lon: 5.7500, population: 900000, area_code: "2053",
+     districts: [Effurun, Ekpan, Okumagba, GRA]}
+  - {name: Abeokuta, lat: 7.1475, lon: 3.3619, population: 650000, area_code: "2039",
+     districts: [Oke-Ilewo, Kuto, Ibara, Asero]}
+  - {name: Owerri, lat: 5.4850, lon: 7.0350, population: 600000, area_code: "2083", postcodes: ["460001"],
+     districts: [New Owerri, Ikenegbu, World Bank, Aladinma]}
+  - {name: Calabar, lat: 4.9757, lon: 8.3417, population: 600000, area_code: "2087",
+     districts: [Marian, Ekorinim, State Housing, Big Qua]}
+streets:
+  # Common/typical street names; real names that occur in several cities plus generic ones.
+  - Ahmadu Bello Way
+  - Murtala Mohammed Way
+  - Obafemi Awolowo Way
+  - Nnamdi Azikiwe Street
+  - Tafawa Balewa Road
+  - Herbert Macaulay Way
+  - Ikorodu Road
+  - Allen Avenue
+  - Adeola Odeku Street
+  - Awolowo Road
+  - Bode Thomas Street
+  - Opebi Road
+  - Toyin Street
+  - Isaac John Street
+  - Kingsway Road
+  - Admiralty Way
+  - Ozumba Mbadiwe Avenue
+  - Akin Adesola Street
+  - Ajose Adeogun Street
+  - Adeniran Ogunsanya Street
+  - Oba Akran Avenue
+  - Kudirat Abiola Way
+  - Agege Motor Road
+  - Ojuelegba Road
+  - Lagos Street
+  - Aminu Kano Crescent
+  - Adetokunbo Ademola Crescent
+  - Gimbiya Street
+  - Ademola Adetokunbo Street
+  - Yakubu Gowon Way
+  - Independence Way
+  - Constitution Road
+  - Ali Akilu Road
+  - Bompai Road
+  - Zoo Road
+  - Ring Road
+  - Iwo Road
+  - Oyo Road
+  - Ogui Road
+  - Okpara Avenue
+  - Zik Avenue
+  - Chime Avenue
+  - Aba Road
+  - Ikwerre Road
+  - Olu Obasanjo Road
+  - Trans-Amadi Road
+  - Wetheral Road
+  - Douglas Road
+  - Okigwe Road
+  - Sapele Road
+  - Akpakpava Road
+  - Uselu-Lagos Road
+  - Oron Road
+  - Ikot Ekpene Road
+  - Ndidem Usang Iso Road
+  - Calabar Road
+  - Airport Road
+  - Station Road
+  - Church Street
+  - Mission Road
+  - Market Road
+  - Hospital Road
+  - School Road
+  - Stadium Road
+  - Bank Road
+  - Club Road
+  - Old Airport Road
+  - Broad Street
+  - Marina Road
+  - Palace Road
+  - Ibrahim Taiwo Road
+  - Sultan Road
+  - Lafia Road
+  - Emir's Road
+  - Ahmed Talib Avenue
+  - Abeokuta Expressway
+  - Ago Palace Way
+  - Bourdillon Road
+  - Glover Road
+  - Moshood Abiola Way
+address_format: "No. {number}, {street}, {city}"   # district usually added: "No. 12, Allen Avenue, Ikeja, Lagos"; postcode rarely written
+places:
+  # Coordinates from Wikidata P625 / Wikipedia (S9). Public places only.
+  - {category: park, name: Lekki Conservation Centre, city: Lagos, lat: 6.4364, lon: 3.5356}
+  - {category: park, name: Freedom Park, city: Lagos, lat: 6.4489, lon: 3.3965}
+  - {category: park, name: Millennium Park, city: Abuja, lat: 9.0707, lon: 7.4994}
+  - {category: park, name: Agodi Gardens, city: Ibadan, lat: 7.4069, lon: 3.8992}
+  - {category: park, name: Port Harcourt Pleasure Park, city: Port Harcourt, lat: 4.8322, lon: 7.0066}
+  - {category: park, name: Jos Wildlife Park, city: Jos, lat: 9.8853, lon: 8.8486}
+  - {category: park, name: Yankari Game Reserve, city: Bauchi, lat: 9.7544, lon: 10.5103}
+  - {category: park, name: Old Oyo National Park, city: Oyo, lat: 8.6667, lon: 3.9833}
+  - {category: landmark, name: Aso Rock, city: Abuja, lat: 9.0833, lon: 7.5361}
+  - {category: landmark, name: Abuja National Mosque, city: Abuja, lat: 9.0608, lon: 7.4925}
+  - {category: landmark, name: National Christian Centre, city: Abuja, lat: 9.0514, lon: 7.4947}
+  - {category: landmark, name: Abuja City Gate, city: Abuja, lat: 9.0354, lon: 7.4483}
+  - {category: landmark, name: Zuma Rock, city: Madalla, lat: 9.1303, lon: 7.2339}
+  - {category: landmark, name: Lekki-Ikoyi Link Bridge, city: Lagos, lat: 6.4502, lon: 3.4558}
+  - {category: landmark, name: Third Mainland Bridge, city: Lagos, lat: 6.5000, lon: 3.4014}
+  - {category: landmark, name: Tafawa Balewa Square, city: Lagos, lat: 6.4472, lon: 3.4014}
+  - {category: landmark, name: National Theatre, city: Lagos, lat: 6.4764, lon: 3.3694}
+  - {category: landmark, name: Eko Atlantic, city: Lagos, lat: 6.4000, lon: 3.4050}
+  - {category: landmark, name: Cocoa House, city: Ibadan, lat: 7.3881, lon: 3.8787}
+  - {category: landmark, name: University of Ibadan, city: Ibadan, lat: 7.4417, lon: 3.9000}
+  - {category: landmark, name: Kajuru Castle, city: Kaduna, lat: 10.3126, lon: 7.6793}
+  - {category: mountain, name: Olumo Rock, city: Abeokuta, lat: 7.1673, lon: 3.3426}
+  - {category: mountain, name: Idanre Hill, city: Idanre, lat: 7.1110, lon: 5.1070}
+  - {category: mountain, name: Obudu Mountain Resort, city: Obudu, lat: 6.3867, lon: 9.3739}
+  - {category: mountain, name: Mambilla Plateau, city: Gembu, lat: 7.3298, lon: 11.7224}
+  - {category: beach, name: Elegushi Beach, city: Lagos, lat: 6.4221, lon: 3.4866}
+  - {category: beach, name: Tarkwa Bay Beach, city: Lagos, lat: 6.4014, lon: 3.3956}
+  - {category: beach, name: Bar Beach, city: Lagos, lat: 6.4220, lon: 3.4334}
+  - {category: museum, name: Nigerian National Museum, city: Lagos, lat: 6.4428, lon: 3.4029}
+  - {category: museum, name: Nike Art Gallery, city: Lagos, lat: 6.4315, lon: 3.4819}
+  - {category: museum, name: Olusegun Obasanjo Presidential Library, city: Abeokuta, lat: 7.1257, lon: 3.3619}
+  - {category: stadium, name: Teslim Balogun Stadium, city: Lagos, lat: 6.4994, lon: 3.3608}
+  - {category: stadium, name: National Stadium Surulere, city: Lagos, lat: 6.4971, lon: 3.3649}
+  - {category: stadium, name: Moshood Abiola National Stadium, city: Abuja, lat: 9.0379, lon: 7.4534}
+  - {category: stadium, name: Godswill Akpabio International Stadium, city: Uyo, lat: 5.0064, lon: 7.8861}
+  - {category: stadium, name: Ahmadu Bello Stadium, city: Kaduna, lat: 10.4975, lon: 7.3817}
+  - {category: stadium, name: Yakubu Gowon Stadium, city: Port Harcourt, lat: 4.8248, lon: 7.0216}
+  - {category: market, name: Balogun Market, city: Lagos, lat: 6.4559, lon: 3.3851}
+  - {category: market, name: Onitsha Main Market, city: Onitsha, lat: 6.1525, lon: 6.7750}
+  - {category: market, name: Ariaria International Market, city: Aba, lat: 5.1207, lon: 7.3357}
+  - {category: market, name: Kurmi Market, city: Kano, lat: 12.0000, lon: 8.5167}
+  - {category: airport, name: Murtala Muhammed International Airport, city: Lagos, lat: 6.5772, lon: 3.3211}
+  - {category: airport, name: Nnamdi Azikiwe International Airport, city: Abuja, lat: 9.0068, lon: 7.2632}
+  - {category: airport, name: Mallam Aminu Kano International Airport, city: Kano, lat: 12.0475, lon: 8.5244}
+  - {category: airport, name: Port Harcourt International Airport, city: Port Harcourt, lat: 5.0153, lon: 6.9500}
+  - {category: airport, name: Akanu Ibiam International Airport, city: Enugu, lat: 6.4739, lon: 7.5611}
+  - {category: lake, name: Jabi Lake, city: Abuja, lat: 9.0732, lon: 7.4204}
+  - {category: lake, name: Lagos Lagoon, city: Lagos, lat: 6.5016, lon: 3.5225}
+  - {category: lake, name: Oguta Lake, city: Oguta, lat: 5.7067, lon: 6.7925}
+  - {category: lake, name: Kainji Lake, city: New Bussa, lat: 10.3667, lon: 4.5500}
+  # No `station` entries: rail stations (Lagos-Ibadan SGR, Abuja-Kaduna) had no verifiable coordinates in S9.
+names:
+  # No official given-name/surname frequency statistics exist for Nigeria (NPC/NBS publish none).
+  # Pool is AUTHORED from general knowledge, partly drafted from Faker en_NG/yo_NG/ig_NG/ha_NG (MIT);
+  # weights are rough relative frequencies, blended for the national mix (Hausa-Fulani ~36%,
+  # Yoruba ~15%, Igbo ~15%, many others; CIA World Factbook 2018, S10), shifted toward the south
+  # because smartphone ownership is higher there. Christian/English given names ("Blessing",
+  # "Emmanuel") are used across southern and Middle-Belt groups; Muslim/Arabic given names
+  # across the north and among Yoruba Muslims.
+  # LIMITATION: one pool cannot keep ethnic coherence (a Hausa given name with an Igbo surname is
+  # unrealistic). See the report: proposed `names.groups`.
+  # Contact-saving conventions (for the language pack / generator): parents as "Mummy"/"Daddy"
+  # (also "Mum", "Mama", "Baba" in Yoruba homes, "Mama"/"Papa" in Igbo homes, "Umma"/"Abba" in
+  # Hausa homes); teknonyms "Iya Bisi", "Baba Tunde", "Mama Chidi"; honorifics "Alhaji Musa",
+  # "Hajia Amina", "Mallam Sani", "Chief Okafor", "Pastor Femi", "Engr Kunle", "Dr Ada";
+  # seniority "Bro Chidi", "Sis Ngozi", "Aunty Bimpe", "Uncle Segun", "Oga Emeka"; service
+  # contacts by trade: "Emeka Mechanic", "Tunde Vulcanizer", "Mama Put", "Musa Gate", "Bola Tailor",
+  # "Kola Landlord", "POS Lady", "Keke Driver"; and church/school tags: "Ngozi RCCG", "Femi UNILAG".
+  # People typically carry several given names (e.g. "Oluwaseun Michael Adeyemi", "Chukwuemeka
+  # John Okafor"); the contact shows only the one in use.
+  culture: ng
+  female:
+    - {name: Blessing, w: 1.0}
+    - {name: Fatima, w: 1.0}
+    - {name: Aisha, w: 0.9}
+    - {name: Grace, w: 0.9}
+    - {name: Favour, w: 0.8}
+    - {name: Joy, w: 0.8}
+    - {name: Mary, w: 0.8}
+    - {name: Zainab, w: 0.8}
+    - {name: Esther, w: 0.7}
+    - {name: Faith, w: 0.7}
+    - {name: Mercy, w: 0.7}
+    - {name: Hauwa, w: 0.7}
+    - {name: Amina, w: 0.7}
+    - {name: Chioma, w: 0.7}
+    - {name: Patience, w: 0.6}
+    - {name: Gift, w: 0.6}
+    - {name: Precious, w: 0.6}
+    - {name: Deborah, w: 0.6}
+    - {name: Maryam, w: 0.6}
+    - {name: Hadiza, w: 0.6}
+    - {name: Ngozi, w: 0.6}
+    - {name: Chiamaka, w: 0.6}
+    - {name: Tolulope, w: 0.6}
+    - {name: Temitope, w: 0.6}
+    - {name: Damilola, w: 0.6}
+    - {name: Comfort, w: 0.5}
+    - {name: Peace, w: 0.5}
+    - {name: Elizabeth, w: 0.5}
+    - {name: Sarah, w: 0.5}
+    - {name: Victoria, w: 0.5}
+    - {name: Jennifer, w: 0.5}
+    - {name: Halima, w: 0.5}
+    - {name: Khadija, w: 0.5}
+    - {name: Funmilayo, w: 0.5}
+    - {name: Yetunde, w: 0.5}
+    - {name: Bukola, w: 0.5}
+    - {name: Funke, w: 0.5}
+    - {name: Kemi, w: 0.5}
+    - {name: Adaeze, w: 0.5}
+    - {name: Nneka, w: 0.5}
+    - {name: Amaka, w: 0.5}
+    - {name: Ifeoma, w: 0.5}
+    - {name: Chidinma, w: 0.5}
+    - {name: Nkechi, w: 0.5}
+    - {name: Ruth, w: 0.4}
+    - {name: Rebecca, w: 0.4}
+    - {name: Gloria, w: 0.4}
+    - {name: Juliet, w: 0.4}
+    - {name: Stella, w: 0.4}
+    - {name: Janet, w: 0.4}
+    - {name: Christiana, w: 0.4}
+    - {name: Glory, w: 0.4}
+    - {name: Rukayya, w: 0.4}
+    - {name: Hafsat, w: 0.4}
+    - {name: Bilkisu, w: 0.4}
+    - {name: Safiya, w: 0.4}
+    - {name: Sadiya, w: 0.4}
+    - {name: Binta, w: 0.4}
+    - {name: Aminat, w: 0.4}
+    - {name: Folake, w: 0.4}
+    - {name: Bisola, w: 0.4}
+    - {name: Omolara, w: 0.4}
+    - {name: Abimbola, w: 0.4}
+    - {name: Ayomide, w: 0.4}
+    - {name: Opeyemi, w: 0.4}
+    - {name: Simisola, w: 0.4}
+    - {name: Toyin, w: 0.4}
+    - {name: Kehinde, w: 0.4}
+    - {name: Taiwo, w: 0.4}
+    - {name: Chinwe, w: 0.4}
+    - {name: Ogechi, w: 0.4}
+    - {name: Chinyere, w: 0.4}
+    - {name: Amarachi, w: 0.4}
+    - {name: Ifunanya, w: 0.4}
+    - {name: Ijeoma, w: 0.4}
+    - {name: Oluchi, w: 0.4}
+    - {name: Chisom, w: 0.4}
+    - {name: Florence, w: 0.3}
+    - {name: Margaret, w: 0.3}
+    - {name: Vivian, w: 0.3}
+    - {name: Rita, w: 0.3}
+    - {name: Princess, w: 0.3}
+    - {name: Success, w: 0.3}
+    - {name: Promise, w: 0.3}
+    - {name: Hannah, w: 0.3}
+    - {name: Lydia, w: 0.3}
+    - {name: Rose, w: 0.3}
+    - {name: Martha, w: 0.3}
+    - {name: Cynthia, w: 0.3}
+    - {name: Jamila, w: 0.3}
+    - {name: Rabi, w: 0.3}
+    - {name: "Asma'u", w: 0.3}
+    - {name: Ummi, w: 0.3}
+    - {name: Salamatu, w: 0.3}
+    - {name: Zulaihat, w: 0.3}
+    - {name: Habiba, w: 0.3}
+    - {name: Sumayya, w: 0.3}
+    - {name: Kafayat, w: 0.3}
+    - {name: Rukayat, w: 0.3}
+    - {name: Nafisa, w: 0.3}
+    - {name: Hussaina, w: 0.3}
+    - {name: Titilayo, w: 0.3}
+    - {name: Moyosore, w: 0.3}
+    - {name: Ronke, w: 0.3}
+    - {name: Morenike, w: 0.3}
+    - {name: Yewande, w: 0.3}
+    - {name: Modupe, w: 0.3}
+    - {name: Bolanle, w: 0.3}
+    - {name: Omowunmi, w: 0.3}
+    - {name: Iyabo, w: 0.3}
+    - {name: Adenike, w: 0.3}
+    - {name: Busayo, w: 0.3}
+    - {name: Ifeoluwa, w: 0.3}
+    - {name: Mojisola, w: 0.3}
+    - {name: Folasade, w: 0.3}
+    - {name: Eniola, w: 0.3}
+    - {name: Uchechi, w: 0.3}
+    - {name: Obianuju, w: 0.3}
+    - {name: Onyinyechi, w: 0.3}
+    - {name: Ebere, w: 0.3}
+    - {name: Chinelo, w: 0.3}
+    - {name: Nkiruka, w: 0.3}
+    - {name: Uju, w: 0.3}
+    - {name: Nnenna, w: 0.3}
+    - {name: Efe, w: 0.3}
+    - {name: Ese, w: 0.3}
+    - {name: Dorcas, w: 0.2}
+    - {name: Agnes, w: 0.2}
+    - {name: Balaraba, w: 0.2}
+    - {name: Lami, w: 0.2}
+    - {name: Basirat, w: 0.2}
+    - {name: Abosede, w: 0.2}
+    - {name: Adunni, w: 0.2}
+    - {name: Wuraola, w: 0.2}
+    - {name: Kosisochukwu, w: 0.2}
+    - {name: Ezinne, w: 0.2}
+    - {name: Adanna, w: 0.2}
+    - {name: Akudo, w: 0.2}
+    - {name: Ivie, w: 0.2}
+    - {name: Eki, w: 0.2}
+    - {name: Itohan, w: 0.2}
+    - {name: Mfon, w: 0.2}
+    - {name: Ekaette, w: 0.2}
+    - {name: Idara, w: 0.2}
+    - {name: Uduak, w: 0.2}
+    - {name: Ebiere, w: 0.2}
+    - {name: Doosuur, w: 0.1}
+    - {name: Mnena, w: 0.1}
+  male:
+    - {name: Muhammad, w: 1.0}
+    - {name: Mohammed, w: 1.0}
+    - {name: Emmanuel, w: 1.0}
+    - {name: Ibrahim, w: 0.9}
+    - {name: David, w: 0.9}
+    - {name: John, w: 0.8}
+    - {name: Samuel, w: 0.8}
+    - {name: Daniel, w: 0.8}
+    - {name: Michael, w: 0.8}
+    - {name: Abubakar, w: 0.8}
+    - {name: Musa, w: 0.8}
+    - {name: Abdullahi, w: 0.8}
+    - {name: Joseph, w: 0.7}
+    - {name: Usman, w: 0.7}
+    - {name: Yusuf, w: 0.7}
+    - {name: Peter, w: 0.6}
+    - {name: Victor, w: 0.6}
+    - {name: Joshua, w: 0.6}
+    - {name: Sunday, w: 0.6}
+    - {name: Aliyu, w: 0.6}
+    - {name: Umar, w: 0.6}
+    - {name: Sani, w: 0.6}
+    - {name: Suleiman, w: 0.6}
+    - {name: Ahmed, w: 0.6}
+    - {name: Oluwaseun, w: 0.6}
+    - {name: Chinedu, w: 0.6}
+    - {name: Emeka, w: 0.6}
+    - {name: Paul, w: 0.5}
+    - {name: James, w: 0.5}
+    - {name: Godwin, w: 0.5}
+    - {name: Stephen, w: 0.5}
+    - {name: Moses, w: 0.5}
+    - {name: Kingsley, w: 0.5}
+    - {name: Anthony, w: 0.5}
+    - {name: Bello, w: 0.5}
+    - {name: Haruna, w: 0.5}
+    - {name: Aminu, w: 0.5}
+    - {name: Mustapha, w: 0.5}
+    - {name: Babatunde, w: 0.5}
+    - {name: Segun, w: 0.5}
+    - {name: Tunde, w: 0.5}
+    - {name: Femi, w: 0.5}
+    - {name: Adewale, w: 0.5}
+    - {name: Tobi, w: 0.5}
+    - {name: Adebayo, w: 0.5}
+    - {name: Chukwuemeka, w: 0.5}
+    - {name: Obinna, w: 0.5}
+    - {name: Ifeanyi, w: 0.5}
+    - {name: Godspower, w: 0.4}
+    - {name: Henry, w: 0.4}
+    - {name: Charles, w: 0.4}
+    - {name: Augustine, w: 0.4}
+    - {name: Christopher, w: 0.4}
+    - {name: Solomon, w: 0.4}
+    - {name: Isaac, w: 0.4}
+    - {name: Gabriel, w: 0.4}
+    - {name: Patrick, w: 0.4}
+    - {name: Francis, w: 0.4}
+    - {name: Kelvin, w: 0.4}
+    - {name: Collins, w: 0.4}
+    - {name: Prince, w: 0.4}
+    - {name: Wisdom, w: 0.4}
+    - {name: Innocent, w: 0.4}
+    - {name: Lucky, w: 0.4}
+    - {name: Ismail, w: 0.4}
+    - {name: Nasiru, w: 0.4}
+    - {name: Kabiru, w: 0.4}
+    - {name: Shehu, w: 0.4}
+    - {name: Bashir, w: 0.4}
+    - {name: Idris, w: 0.4}
+    - {name: Garba, w: 0.4}
+    - {name: Lawal, w: 0.4}
+    - {name: Abdulrahman, w: 0.4}
+    - {name: Hassan, w: 0.4}
+    - {name: Yakubu, w: 0.4}
+    - {name: Adamu, w: 0.4}
+    - {name: Olumide, w: 0.4}
+    - {name: Ayodele, w: 0.4}
+    - {name: Olamide, w: 0.4}
+    - {name: Kunle, w: 0.4}
+    - {name: Gbenga, w: 0.4}
+    - {name: Damilare, w: 0.4}
+    - {name: Ademola, w: 0.4}
+    - {name: Kayode, w: 0.4}
+    - {name: Taiwo, w: 0.4}
+    - {name: Kehinde, w: 0.4}
+    - {name: Abiodun, w: 0.4}
+    - {name: Chukwudi, w: 0.4}
+    - {name: Nnamdi, w: 0.4}
+    - {name: Ikenna, w: 0.4}
+    - {name: Uchenna, w: 0.4}
+    - {name: Chidi, w: 0.4}
+    - {name: Kelechi, w: 0.4}
+    - {name: Chijioke, w: 0.4}
+    - {name: Okechukwu, w: 0.4}
+    - {name: Ebuka, w: 0.4}
+    - {name: Chigozie, w: 0.4}
+    - {name: Tochukwu, w: 0.4}
+    - {name: Friday, w: 0.3}
+    - {name: Monday, w: 0.3}
+    - {name: Richard, w: 0.3}
+    - {name: Felix, w: 0.3}
+    - {name: Benjamin, w: 0.3}
+    - {name: Promise, w: 0.3}
+    - {name: Destiny, w: 0.3}
+    - {name: Goodluck, w: 0.3}
+    - {name: Samson, w: 0.3}
+    - {name: Timothy, w: 0.3}
+    - {name: Matthew, w: 0.3}
+    - {name: Philip, w: 0.3}
+    - {name: Andrew, w: 0.3}
+    - {name: Gideon, w: 0.3}
+    - {name: Elijah, w: 0.3}
+    - {name: Jude, w: 0.3}
+    - {name: Hussaini, w: 0.3}
+    - {name: Jamilu, w: 0.3}
+    - {name: Danjuma, w: 0.3}
+    - {name: Murtala, w: 0.3}
+    - {name: Tijjani, w: 0.3}
+    - {name: Auwal, w: 0.3}
+    - {name: Saidu, w: 0.3}
+    - {name: Abdulkadir, w: 0.3}
+    - {name: Salisu, w: 0.3}
+    - {name: Rabiu, w: 0.3}
+    - {name: Hamza, w: 0.3}
+    - {name: Rasheed, w: 0.3}
+    - {name: Kazeem, w: 0.3}
+    - {name: Akeem, w: 0.3}
+    - {name: Taofeek, w: 0.3}
+    - {name: Ridwan, w: 0.3}
+    - {name: Lukman, w: 0.3}
+    - {name: Sodiq, w: 0.3}
+    - {name: Bayo, w: 0.3}
+    - {name: Dapo, w: 0.3}
+    - {name: Akinwale, w: 0.3}
+    - {name: Wale, w: 0.3}
+    - {name: Opeyemi, w: 0.3}
+    - {name: Oladele, w: 0.3}
+    - {name: Olawale, w: 0.3}
+    - {name: Yinka, w: 0.3}
+    - {name: Lanre, w: 0.3}
+    - {name: Dayo, w: 0.3}
+    - {name: Bolaji, w: 0.3}
+    - {name: Nonso, w: 0.3}
+    - {name: Chibuike, w: 0.3}
+    - {name: Ugochukwu, w: 0.3}
+    - {name: Obiora, w: 0.3}
+    - {name: Onyekachi, w: 0.3}
+    - {name: Ekene, w: 0.3}
+    - {name: Kenechukwu, w: 0.3}
+    - {name: Arinze, w: 0.3}
+    - {name: Ovie, w: 0.3}
+    - {name: Nathaniel, w: 0.2}
+    - {name: Somto, w: 0.2}
+    - {name: Chimezie, w: 0.2}
+    - {name: Osagie, w: 0.2}
+    - {name: Efosa, w: 0.2}
+    - {name: Osaze, w: 0.2}
+    - {name: Tamuno, w: 0.2}
+    - {name: Ebi, w: 0.2}
+    - {name: Terver, w: 0.2}
+    - {name: Ime, w: 0.2}
+    - {name: Etim, w: 0.2}
+    - {name: Edet, w: 0.2}
+    - {name: Aondona, w: 0.1}
+  surnames:
+    # Hausa/northern surnames are frequently the father's given name (patronymic use).
+    - {name: Mohammed, w: 1.0}
+    - {name: Ibrahim, w: 0.9}
+    - {name: Abubakar, w: 0.8}
+    - {name: Musa, w: 0.8}
+    - {name: Abdullahi, w: 0.8}
+    - {name: Usman, w: 0.7}
+    - {name: Bello, w: 0.7}
+    - {name: Yusuf, w: 0.7}
+    - {name: Aliyu, w: 0.6}
+    - {name: Umar, w: 0.6}
+    - {name: Sani, w: 0.6}
+    - {name: Adeyemi, w: 0.6}
+    - {name: Adebayo, w: 0.6}
+    - {name: Ojo, w: 0.6}
+    - {name: Okafor, w: 0.6}
+    - {name: Okeke, w: 0.6}
+    - {name: Eze, w: 0.6}
+    - {name: Suleiman, w: 0.5}
+    - {name: Garba, w: 0.5}
+    - {name: Lawal, w: 0.5}
+    - {name: Adamu, w: 0.5}
+    - {name: Yakubu, w: 0.5}
+    - {name: Ahmed, w: 0.5}
+    - {name: Afolabi, w: 0.5}
+    - {name: Ajayi, w: 0.5}
+    - {name: Balogun, w: 0.5}
+    - {name: Alabi, w: 0.5}
+    - {name: Okonkwo, w: 0.5}
+    - {name: Nwosu, w: 0.5}
+    - {name: Okoro, w: 0.5}
+    - {name: Chukwu, w: 0.5}
+    - {name: Okoye, w: 0.5}
+    - {name: Ugwu, w: 0.5}
+    - {name: Haruna, w: 0.4}
+    - {name: Idris, w: 0.4}
+    - {name: Mustapha, w: 0.4}
+    - {name: Isah, w: 0.4}
+    - {name: Shehu, w: 0.4}
+    - {name: Hassan, w: 0.4}
+    - {name: Audu, w: 0.4}
+    - {name: Ogunleye, w: 0.4}
+    - {name: Oladipo, w: 0.4}
+    - {name: Akinola, w: 0.4}
+    - {name: Bakare, w: 0.4}
+    - {name: Adeleke, w: 0.4}
+    - {name: Olawale, w: 0.4}
+    - {name: Ayodele, w: 0.4}
+    - {name: Adewale, w: 0.4}
+    - {name: Salami, w: 0.4}
+    - {name: Adeniyi, w: 0.4}
+    - {name: Adekunle, w: 0.4}
+    - {name: Olatunji, w: 0.4}
+    - {name: Owolabi, w: 0.4}
+    - {name: Babalola, w: 0.4}
+    - {name: Nwachukwu, w: 0.4}
+    - {name: Obi, w: 0.4}
+    - {name: Nwankwo, w: 0.4}
+    - {name: Anyanwu, w: 0.4}
+    - {name: Igwe, w: 0.4}
+    - {name: Ogbonna, w: 0.4}
+    - {name: Okorie, w: 0.4}
+    - {name: Njoku, w: 0.4}
+    - {name: Bassey, w: 0.4}
+    - {name: Akpan, w: 0.4}
+    - {name: Udoh, w: 0.4}
+    - {name: Abdulkadir, w: 0.3}
+    - {name: Tijani, w: 0.3}
+    - {name: Salisu, w: 0.3}
+    - {name: Ismail, w: 0.3}
+    - {name: Kabir, w: 0.3}
+    - {name: Nuhu, w: 0.3}
+    - {name: Jibrin, w: 0.3}
+    - {name: Dauda, w: 0.3}
+    - {name: Hussaini, w: 0.3}
+    - {name: Aminu, w: 0.3}
+    - {name: Bashir, w: 0.3}
+    - {name: Danjuma, w: 0.3}
+    - {name: Yahaya, w: 0.3}
+    - {name: Olaniyan, w: 0.3}
+    - {name: Ogunbiyi, w: 0.3}
+    - {name: Fashola, w: 0.3}
+    - {name: Ogundipe, w: 0.3}
+    - {name: Akinwale, w: 0.3}
+    - {name: Oyewole, w: 0.3}
+    - {name: Ilori, w: 0.3}
+    - {name: Oyebanji, w: 0.3}
+    - {name: Akande, w: 0.3}
+    - {name: Ogunsola, w: 0.3}
+    - {name: Adeola, w: 0.3}
+    - {name: Babatunde, w: 0.3}
+    - {name: Adegoke, w: 0.3}
+    - {name: Ogundele, w: 0.3}
+    - {name: Olayinka, w: 0.3}
+    - {name: Oladele, w: 0.3}
+    - {name: Afolayan, w: 0.3}
+    - {name: Ayinde, w: 0.3}
+    - {name: Akintola, w: 0.3}
+    - {name: Williams, w: 0.3}
+    - {name: Johnson, w: 0.3}
+    - {name: Ogunyemi, w: 0.3}
+    - {name: Akinyemi, w: 0.3}
+    - {name: Adesanya, w: 0.3}
+    - {name: Ajibade, w: 0.3}
+    - {name: Popoola, w: 0.3}
+    - {name: Oseni, w: 0.3}
+    - {name: Raji, w: 0.3}
+    - {name: Onyeka, w: 0.3}
+    - {name: Nwafor, w: 0.3}
+    - {name: Ibe, w: 0.3}
+    - {name: Nnaji, w: 0.3}
+    - {name: Ezeh, w: 0.3}
+    - {name: Agu, w: 0.3}
+    - {name: Onwuka, w: 0.3}
+    - {name: Okpara, w: 0.3}
+    - {name: Uche, w: 0.3}
+    - {name: Obiora, w: 0.3}
+    - {name: Nwoye, w: 0.3}
+    - {name: Ani, w: 0.3}
+    - {name: Udeh, w: 0.3}
+    - {name: Nwogu, w: 0.3}
+    - {name: Onuoha, w: 0.3}
+    - {name: Opara, w: 0.3}
+    - {name: Asogwa, w: 0.3}
+    - {name: Mbah, w: 0.3}
+    - {name: Odo, w: 0.3}
+    - {name: Nnadi, w: 0.3}
+    - {name: Chukwuma, w: 0.3}
+    - {name: Nweke, w: 0.3}
+    - {name: Onah, w: 0.3}
+    - {name: Osagie, w: 0.3}
+    - {name: Omoregie, w: 0.3}
+    - {name: Effiong, w: 0.3}
+    - {name: Etim, w: 0.3}
+    - {name: Essien, w: 0.3}
+    - {name: Ekpo, w: 0.3}
+    - {name: Edet, w: 0.3}
+    - {name: Okon, w: 0.3}
+    - {name: Umoh, w: 0.3}
+    - {name: Zakari, w: 0.2}
+    - {name: Gambo, w: 0.2}
+    - {name: Muazu, w: 0.2}
+    - {name: Inuwa, w: 0.2}
+    - {name: Sadiq, w: 0.2}
+    - {name: Tanko, w: 0.2}
+    - {name: Kabiru, w: 0.2}
+    - {name: Shuaibu, w: 0.2}
+    - {name: Mahmud, w: 0.2}
+    - {name: Abdulrahman, w: 0.2}
+    - {name: Mamman, w: 0.2}
+    - {name: Baba, w: 0.2}
+    - {name: Babangida, w: 0.2}
+    - {name: Fasanya, w: 0.2}
+    - {name: Okunola, w: 0.2}
+    - {name: Oyeleke, w: 0.2}
+    - {name: Odukoya, w: 0.2}
+    - {name: Coker, w: 0.2}
+    - {name: Thomas, w: 0.2}
+    - {name: Lawson, w: 0.2}
+    - {name: Martins, w: 0.2}
+    - {name: Oyeniyi, w: 0.2}
+    - {name: Oyekanmi, w: 0.2}
+    - {name: Ogunlade, w: 0.2}
+    - {name: Fagbemi, w: 0.2}
+    - {name: Odunsi, w: 0.2}
+    - {name: Ezeani, w: 0.2}
+    - {name: Iwu, w: 0.2}
+    - {name: Ugochukwu, w: 0.2}
+    - {name: Ekwueme, w: 0.2}
+    - {name: Oti, w: 0.2}
+    - {name: Uzor, w: 0.2}
+    - {name: Ikechukwu, w: 0.2}
+    - {name: Madu, w: 0.2}
+    - {name: Ogbu, w: 0.2}
+    - {name: Igbinedion, w: 0.2}
+    - {name: Osaghae, w: 0.2}
+    - {name: Aigbe, w: 0.2}
+    - {name: Inyang, w: 0.2}
+    - {name: Ita, w: 0.2}
+    - {name: Archibong, w: 0.2}
+    - {name: Agbo, w: 0.2}
+    - {name: Adah, w: 0.2}
+    - {name: Attah, w: 0.2}
+    - {name: Modu, w: 0.2}
+    - {name: Bukar, w: 0.2}
+    - {name: Kyari, w: 0.2}
+    - {name: Ehigiator, w: 0.1}
+    - {name: Iyamu, w: 0.1}
+    - {name: Akpofure, w: 0.1}
+    - {name: Odiete, w: 0.1}
+    - {name: Dikibo, w: 0.1}
+    - {name: Iorfa, w: 0.1}
+    - {name: Akaa, w: 0.1}
+    - {name: Goni, w: 0.1}
+    - {name: Jalo, w: 0.1}
+  nicknames:
+    Oluwaseun: Seun
+    Babatunde: Tunde
+    Chukwuemeka: Emeka
+    Chinedu: Nedu
+    Abdullahi: Abdul
+    Abdulrahman: Abdul
+    Ibrahim: Ibro
+    Olumide: Mide
+    Temitope: Tope
+    Damilola: Dami
+    Damilare: Dami
+    Tolulope: Tolu
+    Abimbola: Bimbo
+    Funmilayo: Funmi
+    Adebayo: Bayo
+    Ayodele: Dele
+    Adewale: Wale
+    Kehinde: Kenny
+    Elizabeth: Liz
+    Christiana: Christy
+    Victoria: Vicky
+    Jennifer: Jenny
+    Chiamaka: Amaka
+    Ifeoma: Ify
+    Obianuju: Uju
+    Okechukwu: Okey
+    Ikenna: Ike
+    Uchenna: Uche
+    Chigozie: Gozie
+    Tochukwu: Tochi
+    Kenechukwu: Kene
+    Emmanuel: Emma
+    Samuel: Sammy
+    Daniel: Dan
+    Kingsley: King
+    Christopher: Chris
+    Anthony: Tony
+    Benjamin: Ben
+    Joseph: Joe
+    Fatima: Fati
+    Zainab: Zee
+    Khadija: Dija
+    Ademola: Demola
+    Folasade: Sade
+  display: "{first} {last}"   # many contacts saved by first name + context instead, see comment above
+cultures:
+  # Foreign-born residents only (~1.31M = 0.63% in 2020, UN DESA via S11). Nigerian ethnic groups
+  # are part of the majority pool above, not separate cultures. Lebanese (~30k), Chinese and Indian
+  # communities exist but each is <0.02% (no official count), so omitted.
+  - {culture: bj, share: 0.0018}
+  - {culture: gh, share: 0.0012}
+  - {culture: ml, share: 0.0008}
+  - {culture: tg, share: 0.0008}
+email:
+  domains:
+    - {domain: gmail.com, share: 0.76}
+    - {domain: yahoo.com, share: 0.14}
+    - {domain: outlook.com, share: 0.03}
+    - {domain: hotmail.com, share: 0.03}
+    - {domain: icloud.com, share: 0.02}
+    - {domain: ymail.com, share: 0.02}
+  patterns: ["{first}{last}", "{first}.{last}", "{first}{last}{yy}", "{last}{first}", "{f}{last}", "{first}_{last}", "{first}{yy}"]
+services:
+  # Sender IDs as observed on Nigerian phones (bank/fintech alerts use alphanumeric IDs of max 11
+  # chars). AUTHORED from common knowledge, not individually verified; see SOURCES.
+  # Banks
+  - {sender: GTBank, kind: bank, sender_type: alphanumeric}
+  - {sender: AccessBank, kind: bank, sender_type: alphanumeric}
+  - {sender: ZenithBank, kind: bank, sender_type: alphanumeric}
+  - {sender: FirstBank, kind: bank, sender_type: alphanumeric}
+  - {sender: UBA, kind: bank, sender_type: alphanumeric}
+  - {sender: Fidelity, kind: bank, sender_type: alphanumeric}
+  - {sender: FCMB, kind: bank, sender_type: alphanumeric}
+  - {sender: StanbicIBTC, kind: bank, sender_type: alphanumeric}
+  - {sender: Sterling, kind: bank, sender_type: alphanumeric}
+  - {sender: Ecobank, kind: bank, sender_type: alphanumeric}
+  - {sender: ALAT, kind: bank, sender_type: alphanumeric}
+  - {sender: UnionBank, kind: bank, sender_type: alphanumeric}
+  # Mobile money / fintech wallets (licensed MMOs/PSBs/MFBs)
+  - {sender: OPay, kind: bank, sender_type: alphanumeric}
+  - {sender: PalmPay, kind: bank, sender_type: alphanumeric}
+  - {sender: Moniepoint, kind: bank, sender_type: alphanumeric}
+  - {sender: Kuda, kind: bank, sender_type: alphanumeric}
+  - {sender: MoMoPSB, kind: bank, sender_type: alphanumeric}
+  # Digital lenders (kind "bank" is the closest schema kind; reminders/dunning SMS come from these)
+  - {sender: FairMoney, kind: bank, sender_type: alphanumeric}
+  - {sender: Carbon, kind: bank, sender_type: alphanumeric}
+  - {sender: Branch, kind: bank, sender_type: alphanumeric}
+  - {sender: PalmCredit, kind: bank, sender_type: alphanumeric}
+  - {sender: Renmoney, kind: bank, sender_type: alphanumeric}
+  - {sender: Aella, kind: bank, sender_type: alphanumeric}
+  - {sender: QuickCheck, kind: bank, sender_type: alphanumeric}
+  - {sender: OKash, kind: bank, sender_type: alphanumeric}
+  # Telecom
+  - {sender: MTN, kind: telecom, sender_type: alphanumeric}
+  - {sender: Airtel, kind: telecom, sender_type: alphanumeric}
+  - {sender: Glo, kind: telecom, sender_type: alphanumeric}
+  - {sender: 9mobile, kind: telecom, sender_type: alphanumeric}   # now T2; older SIMs still see 9mobile
+  - {sender: "131", kind: telecom, sender_type: number}           # MTN info/service short code
+  # OTP / platforms
+  - {sender: Paystack, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Flutterwave, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Remita, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Google, kind: otp_service, sender_type: alphanumeric}
+  - {sender: WhatsApp, kind: otp_service, sender_type: alphanumeric}
+  - {sender: FACEBOOK, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Telegram, kind: otp_service, sender_type: alphanumeric}
+  # Government
+  - {sender: NIMC, kind: government, sender_type: alphanumeric}
+  - {sender: FRSC, kind: government, sender_type: alphanumeric}
+  - {sender: JAMB, kind: government, sender_type: alphanumeric}
+  - {sender: INEC, kind: government, sender_type: alphanumeric}
+  - {sender: FIRS, kind: government, sender_type: alphanumeric}
+  - {sender: NCC, kind: government, sender_type: alphanumeric}
+  # Utilities and pay-TV (prepaid meter tokens arrive by SMS)
+  - {sender: IKEDC, kind: utility, sender_type: alphanumeric}
+  - {sender: EKEDC, kind: utility, sender_type: alphanumeric}
+  - {sender: AEDC, kind: utility, sender_type: alphanumeric}
+  - {sender: BuyPower, kind: utility, sender_type: alphanumeric}
+  - {sender: DStv, kind: utility, sender_type: alphanumeric}
+  - {sender: GOtv, kind: utility, sender_type: alphanumeric}
+  # Couriers, food, rides, travel, retail, health
+  - {sender: GIGL, kind: courier, sender_type: alphanumeric}
+  - {sender: DHL, kind: courier, sender_type: alphanumeric}
+  - {sender: Kwik, kind: courier, sender_type: alphanumeric}
+  - {sender: Chowdeck, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Glovo, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Bolt, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: Uber, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: inDrive, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: AirPeace, kind: airline, sender_type: alphanumeric}
+  - {sender: IbomAir, kind: airline, sender_type: alphanumeric}
+  - {sender: ArikAir, kind: airline, sender_type: alphanumeric}
+  - {sender: NRC, kind: rail, sender_type: alphanumeric}          # Nigerian Railway Corporation e-ticketing
+  - {sender: Jumia, kind: retail, sender_type: alphanumeric}
+  - {sender: Konga, kind: retail, sender_type: alphanumeric}
+  - {sender: Shoprite, kind: retail, sender_type: alphanumeric}
+  - {sender: HealthPlus, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: MedPlus, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: "+23480...", kind: doctor, sender_type: number}      # clinics/hospitals text from staff mobile numbers
+holidays:
+  # Federal public holidays (S12). Islamic holidays (Eid al-Fitr 2 days, Eid al-Adha 2 days,
+  # Eid-el-Maulud) follow the Hijri calendar and are declared by the FG each year; the schema
+  # cannot express them (proposed rule form e.g. "hijri:10-01").
+  - {date: "01-01", name: "New Year's Day"}
+  - {date: "05-01", name: "Workers' Day"}
+  - {date: "06-12", name: "Democracy Day"}
+  - {date: "10-01", name: "Independence Day"}
+  - {date: "12-25", name: "Christmas Day"}
+  - {date: "12-26", name: "Boxing Day"}
+  - {rule: easter-2, name: "Good Friday"}
+  - {rule: easter+1, name: "Easter Monday"}
+popular_apps:
+  # All package ids verified on play.google.com (HTTP 200, gl=ng) on 2026-11-20 (S13).
+  - {package: com.gtbank.gtworldv1, name: GTWorld, category: banking}
+  - {package: com.accessbank.nextgen, name: Access More, category: banking}
+  - {package: com.zenithBank.eazymoney, name: Zenith Bank Mobile App, category: banking}
+  - {package: com.firstbank.firstmobile, name: FirstMobile, category: banking}
+  - {package: com.uba.vericash, name: UBA Mobile Banking, category: banking}
+  - {package: com.wemabank.alat.prod, name: ALAT, category: banking}
+  - {package: team.opay.pay, name: OPay, category: finance}
+  - {package: com.transsnet.palmpay, name: PalmPay, category: finance}
+  - {package: com.moniepoint.personal, name: Moniepoint Personal Banking, category: banking}
+  - {package: com.kudabank.app, name: Kuda, category: banking}
+  - {package: com.mtngroupfintech.consumerapp, name: MoMo PSB NG, category: finance}
+  - {package: ng.com.fairmoney.fairmoney, name: FairMoney, category: finance}
+  - {package: com.lenddo.mobile.paylater, name: Carbon, category: finance}
+  - {package: com.branch_international.branch.branch_demo_android, name: Branch, category: finance}
+  - {package: com.transsnetfinancial.palmcredit, name: Palmcredit, category: finance}
+  - {package: com.renmoney.android, name: Renmoney, category: finance}
+  - {package: com.aella.comportal, name: Aella, category: finance}
+  - {package: io.quickcheck.loans, name: QuickCheck, category: finance}
+  - {package: com.loan.cash.credit.okash.nigeria, name: OKash, category: finance}
+  - {package: com.piggybankng.piggy, name: PiggyVest, category: finance}
+  - {package: com.whatsapp, name: WhatsApp, category: messaging}
+  - {package: com.truecaller, name: Truecaller, category: messaging}
+  - {package: org.telegram.messenger, name: Telegram, category: messaging}
+  - {package: com.facebook.katana, name: Facebook, category: social}
+  - {package: com.instagram.android, name: Instagram, category: social}
+  - {package: com.zhiliaoapp.musically, name: TikTok, category: social}
+  - {package: ee.mtakso.client, name: Bolt, category: transport}
+  - {package: com.ubercab, name: Uber, category: transport}
+  - {package: sinet.startup.inDriver, name: inDrive, category: transport}
+  - {package: com.jumia.android, name: Jumia, category: shopping}
+  - {package: com.konga.androida, name: Konga, category: shopping}
+  - {package: ng.jiji.app, name: Jiji Nigeria, category: shopping}
+  - {package: com.chowdeck.com, name: Chowdeck, category: food}
+  - {package: com.naij.android, name: Legit.ng, category: news}
+  - {package: com.ninauth.mobile, name: NINAuth (NIMC), category: government}
+  - {package: ng.mtn.nextgen, name: myMTN NG, category: telecom}
+  - {package: com.airtel.africa.selfcare, name: My Airtel, category: telecom}
+  - {package: com.reliancehmo.app, name: Reliance Care, category: health}
+  - {package: com.afmobi.boomplayer, name: Boomplay, category: music}
+  - {package: com.sportybet.android.gp, name: SportyBet, category: entertainment}

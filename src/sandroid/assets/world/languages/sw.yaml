@@ -1,0 +1,265 @@
+# Swahili language pack. Untagged entries are everyday Swahili usable in Kenya and
+# Tanzania; entries tagged `regions: [ke]` use Nairobi Sheng / Kenyan code-switching
+# (niaje, poa, maze, form, doh, mbogi, buda, mathe), `regions: [tz]` Tanzanian usage.
+# Kenyan service SMS are mostly English; the Swahili variants here mirror the
+# Swahili-language setting of mobile money and telecom services.
+# `emoji: true` marks threads/entries containing emoji.
+# Proposed (not yet in schema v1): `regions` tag, service kinds `mobile_money`, `loan`,
+# placeholders `{balance}`, `{fee}`, list values in `call_names`. See SOURCES.md.
+pack: language
+schema: 1
+lang: sw
+name: Kiswahili
+threads:
+  family:
+    - {msgs: [[p, "Habari mwanangu, umekula?"], [o, "Nzuri mama, nimekula"], [p, "Umekula nini"], [o, "Ugali na sukuma"], [p, "Sawa, pumzika"]]}
+    - {msgs: [[p, "Utakuja nyumbani Krismasi?"], [o, "Ndio mama, nitafika {date}"], [p, "Utapanda gari gani"], [o, "Basi la asubuhi"]]}
+    - {emoji: true, msgs: [[p, "Heri ya siku ya kuzaliwa mwanangu 🎂 Mungu akubariki"], [o, "Asante sana mama ❤️"], [p, "Nipigie jioni"]]}
+    - {msgs: [[o, "Nimefika salama"], [p, "Asante Mungu. Pumzika sasa"]]}
+    - {msgs: [[p, "Umetuma pesa ya karo ya mdogo wako?"], [o, "Ndio nimetuma asubuhi, angalia"], [p, "Nimeipata asante"]]}
+    - {regions: [ke], msgs: [[p, "Buda anauliza kama utakuja ocha wikendi"], [o, "Nitakuja Sato"], [p, "Poa, atafurahi"]]}
+    - {emoji: true, msgs: [[p, "Tuma picha za jana"], [o, "Nimetuma"], [p, "Zimetoka poa sana 😍"]]}
+    - {msgs: [[p, "Shangazi anaumwa kidogo, mpigie umjulie hali"], [o, "Sawa nitampigia leo"]]}
+    - {regions: [tz], msgs: [[p, "Shikamoo baba"], [o, "Marahaba mwanangu. Mambo ya kazi?"], [p, "Safi tu baba"]]}
+  partner:
+    - {msgs: [[p, "Uko wapi"], [o, "Niko njiani, dakika 20"], [p, "Ukija ununue maziwa na mkate"], [o, "Sawa"]]}
+    - {emoji: true, msgs: [[p, "Nakumiss 🥺"], [o, "Nakumiss zaidi mpenzi ❤️"], [p, "Rudi haraka"]]}
+    - {msgs: [[o, "Tukule nje leo?"], [p, "Eeh tafadhali, sina nguvu ya kupika"], [o, "Saa moja uwe tayari"]]}
+    - {emoji: true, msgs: [[p, "Samahani nitachelewa, mkutano umeenda mrefu"], [o, "Mmh 😒"], [p, "Nitakuletea chips"], [o, "😂 sawa basi"]]}
+    - {msgs: [[p, "Umelipa stima?"], [o, "Ndio nimenunua tokens asubuhi"], [p, "Asante babe"]]}
+    - {msgs: [[o, "Umeona funguo zangu?"], [p, "Ziko kwa meza karibu na TV"], [o, "Nimezipata asante"]]}
+    - {regions: [ke], msgs: [[p, "Babe nitumie doh ya mat, sina kitu"], [o, "Nimekutumia 200"], [p, "Asante sana"]]}
+    - {msgs: [[p, "Umefika nyumbani?"], [o, "Ndio sasa hivi"], [p, "Sawa usiku mwema"]]}
+  friend:
+    - {regions: [ke], msgs: [[p, "Niaje msee"], [o, "Poa sana, wewe?"], [p, "Fiti. Form ni gani leo?"], [o, "Tukutane {place} saa kumi"]]}
+    - {regions: [ke], msgs: [[p, "Uko wapi maze"], [o, "Dakika tano"], [p, "Dakika tano zako ni saa nzima 😂"], [o, "Nimefika manze niko nje"]], emoji: true}
+    - {emoji: true, msgs: [[o, "Happy birthday bro 🎉🎂 sherehe ni lini"], [p, "Asante sana. Jumamosi"], [o, "Tutakuwepo"]]}
+    - {msgs: [[p, "Nitumie notes za jana tafadhali"], [o, "Subiri kidogo"], [p, "Asante sana"]]}
+    - {regions: [ke], emoji: true, msgs: [[p, "Umeona {first} ametuma nini kwa group 😂😂"], [o, "Wueh huyo jamaa ni noma"]]}
+    - {regions: [ke], msgs: [[o, "Bro nisaidie 500 nitakurudishia Friday"], [p, "Nimekutumia"], [o, "Asante mzae"]]}
+    - {msgs: [[p, "Interview ilienda aje?"], [o, "Vizuri, watanijulisha wiki ijayo"], [p, "Kila la heri"]]}
+    - {regions: [ke], emoji: true, msgs: [[p, "Mbogi inaenda Naivasha wikendi, uko ndani?"], [o, "Niko ndani sana"], [p, "Poa tuma 2k ya contribution 👌"]]}
+    - {regions: [tz], msgs: [[p, "Mambo vipi"], [o, "Poa, wewe je?"], [p, "Safi. Tuonane jioni?"], [o, "Sawa saa kumi na mbili"]]}
+    - {msgs: [[p, "Twende tukanywe chai"], [o, "Sawa nakuja dakika kumi"]]}
+  colleague:
+    - {msgs: [[p, "Habari, mkutano wa saa nne umesogezwa hadi saa nane"], [o, "Sawa nimepokea, asante"]]}
+    - {msgs: [[p, "Umetuma ripoti?"], [o, "Ndio nimeituma kwa email asubuhi"], [p, "Asante"]]}
+    - {msgs: [[o, "Leo nafanyia kazi nyumbani, kama kuna jambo la dharura nipigie"], [p, "Sawa"]]}
+    - {msgs: [[p, "Twende lunch?"], [o, "Sawa saa saba"]]}
+    - {msgs: [[o, "Nimekwama kwa jam, nitachelewa dakika 15"], [p, "Hakuna shida, tutaanza"]]}
+    - {msgs: [[p, "Kesho kuna mteja anakuja, vaa rasmi"], [o, "Sawa nimekumbuka"]]}
+    - {msgs: [[p, "Tafadhali tuma presentation kabla ya saa kumi na moja"], [o, "Sawa nitatuma saa kumi"]]}
+    - {msgs: [[p, "Likizo yako imeidhinishwa?"], [o, "Bado, nimemkumbusha boss"]]}
+  neighbor:
+    - {msgs: [[p, "Habari jirani, kifurushi chako kililetwa, nimekiweka"], [o, "Asante sana, nitakuja kukichukua jioni"]]}
+    - {msgs: [[p, "Tangazo: maji yatakatwa kesho kuanzia saa mbili hadi saa kumi"], [o, "Asante kwa taarifa"]]}
+    - {msgs: [[p, "Gari lako limefunga geti, unaweza kulisogeza?"], [o, "Samahani, nalisogeza sasa"]]}
+    - {msgs: [[p, "Kwenu pia hakuna stima?"], [o, "Ndio tangu asubuhi"], [p, "Basi ni mtaa mzima"]]}
+    - {emoji: true, msgs: [[p, "Krismasi njema jirani 🎄"], [o, "Na kwako pia, tutawaletea chapati"]]}
+    - {msgs: [[p, "Mchango wa usalama mwezi huu ni {amount}"], [o, "Sawa nitatuma leo"]]}
+    - {msgs: [[o, "Umeona paka wangu? Ni mweupe"], [p, "Nilimwona karibu na duka asubuhi"]]}
+    - {msgs: [[p, "Caretaker anasema tanki la maji litasafishwa kesho"], [o, "Sawa, tutaweka maji ya akiba"]]}
+service_sms:
+  courier:
+    - "Kifurushi chako {tracking} kiko njiani na kitafikishwa leo."
+    - "{courier}: Kifurushi {tracking} kimefika {city}. Kichukue ndani ya siku 5 kwa nambari {digits:6}."
+    - "Agizo lako kutoka {shop} limetumwa. Nambari ya ufuatiliaji: {tracking}"
+    - "Hatukuweza kuwasilisha kifurushi {tracking}. Tutajaribu tena tarehe {date}."
+    - "Your parcel {tracking} has been delivered. Thank you for using {courier}."
+  bank:
+    - "{bank}: Nambari yako ya siri ya mara moja (OTP) ni {digits:6}. Usimpe mtu yeyote."
+    - "{bank}: Akaunti yako ****{digits:4} imetolewa {amount} tarehe {date}. Salio: {balance}."
+    - "{bank}: Akaunti yako ****{digits:4} imepokea {amount} kutoka {first} {last}. Salio: {balance}."
+    - "Dear Customer, your account ****{digits:4} has been debited with {amount} on {date}. Avail bal: {balance}."
+    - "{bank} haitakuuliza PIN au OTP yako kwa simu. Jihadhari na matapeli."
+  telecom:
+    - "Umenunua bundle ya 1GB kwa {amount}. Inaisha {date} saa {time}."
+    - "Salio lako la muda wa maongezi ni {balance}."
+    - "Umepokea muda wa maongezi wa {amount} kutoka kwa {first} {last}."
+    - "Umekopa {amount}. Itakatwa utakapoweka salio, pamoja na ada ya {fee}."
+    - "Ofa! Pata 10GB kwa {amount} kwa siku 30. Piga *{digits:3}# sasa."
+    - "Bundle yako ya data imebaki 100MB. Nunua zaidi kupitia *{digits:3}#."
+  otp_service:
+    - "{digits:6} ni nambari yako ya uthibitisho. Usimpe mtu yeyote."
+    - "<#> Your code is {digits:6}. {code}"
+    - "Nambari yako ya kuthibitisha ni {digits:4}. Itaisha baada ya dakika 5."
+    - "Use {digits:6} to verify your phone number."
+    - "Tumia {digits:6} kuingia kwenye akaunti yako."
+  doctor:
+    - "Ukumbusho: miadi yako na daktari ni tarehe {date} saa {time}."
+    - "Your appointment is confirmed for {date} at {time}. Please arrive 15 minutes early."
+    - "Majibu ya vipimo vyako yako tayari. Tafadhali fika kliniki."
+    - "Tafadhali usile chochote saa 8 kabla ya kipimo tarehe {date}."
+    - "Miadi yako ya {date} imeahirishwa. Piga simu kupanga upya."
+  pharmacy:
+    - "Agizo lako la dawa #{digits:7} limethibitishwa. Jumla {amount}."
+    - "Dawa zako zimetumwa na zitafika leo."
+    - "Ukumbusho: ni wakati wa kujaza tena dawa zako za kila mwezi."
+    - "Your prescription order {code} is ready for pickup at {shop}."
+    - "Agizo {code} limewasilishwa. Asante."
+  delivery_food:
+    - "Agizo lako kutoka {shop} liko njiani! Rider {first} atafika baada ya dakika {digits:2}."
+    - "Order #{digits:6} confirmed. Total {amount}."
+    - "Agizo lako limefika. Furahia mlo wako!"
+    - "Njaa? Punguzo la 40% kwa {shop} leo tu!"
+    - "Rider amefika, tafadhali chukua agizo lako."
+  ride_hailing:
+    - "Dereva {first} anakuja. Nambari ya gari {code}. Atafika baada ya dakika 4."
+    - "Dereva amefika mahali pa kuchukuliwa."
+    - "Safari imekamilika. Nauli {amount}. Asante!"
+    - "Your ride code is {digits:4}."
+    - "Boda yako imeagizwa. Mpanda {first} anakuja."
+  airline:
+    - "Check-in ya mtandaoni imefunguliwa kwa safari yako ya {city} tarehe {date}. Booking ref {code}."
+    - "Your flight to {city} is now boarding at gate {digits:1}."
+    - "Samahani, ndege yako ya {city} imechelewa. Muda mpya wa kuondoka {time}."
+    - "Booking confirmed. Ref {code}. Departure {date} {time}."
+    - "Boarding pass yako imetumwa kwa barua pepe."
+  rail:
+    - "Tiketi yako imethibitishwa. Ref {code}. Treni ya {city} {date} saa {time}. Behewa {digits:1} kiti {digits:2}."
+    - "Your train ticket {code} is confirmed. Total {amount}."
+    - "Ukumbusho: treni yako ya {city} inaondoka kesho saa {time}."
+    - "Treni ya {city} imechelewa takriban dakika {digits:2}."
+    - "Tiketi {code} imeghairiwa. Marejesho ya {amount} yatashughulikiwa."
+  government:
+    - "Ombi lako {code} limepokelewa na linashughulikiwa."
+    - "Kitambulisho chako kiko tayari kuchukuliwa katika ofisi ya {city}."
+    - "Ukumbusho: mwisho wa kuwasilisha ritani ya kodi ni {date}."
+    - "Your application {code} has been approved. Visit the {city} office with your ID."
+    - "Nambari yako ya uthibitisho ni {digits:6}. Usimpe mtu."
+  retail:
+    - "Asante kwa kununua {shop}! Umepata pointi {digits:3}."
+    - "OFA! Punguzo hadi 50% {shop} hadi {date}."
+    - "Agizo lako {code} limetumwa."
+    - "Your refund of {amount} for order {code} has been processed."
+    - "Black Friday imefika! Tembelea {shop}."
+  utility:
+    - "Token: {digits:4}-{digits:4}-{digits:4}-{digits:4}-{digits:4}\nUnits: {digits:2}.{digits:1}\nAmt: {amount}\nMtr: {digits:11}"
+    - "Bili yako ya maji ni {amount}, mwisho wa kulipa {date}."
+    - "Taarifa: umeme utakatwa tarehe {date} kuanzia saa {time} kwa matengenezo."
+    - "Malipo ya {amount} yamepokelewa. Ref {code}. Asante."
+    - "Your water bill of {amount} is due on {date}. Acc {digits:8}."
+  mobile_money:
+    - "{code} Imethibitishwa. {amount} imetumwa kwa {first} {last} tarehe {date} saa {time}. Salio lako jipya ni {balance}. Gharama ya kutuma ni {fee}."
+    - "{code} Imethibitishwa. Umepokea {amount} kutoka kwa {first} {last} tarehe {date} saa {time}. Salio lako jipya ni {balance}."
+    - "{code} Imethibitishwa. {amount} imelipwa kwa {shop} tarehe {date} saa {time}. Salio lako jipya ni {balance}."
+    - "{code} Confirmed. You bought {amount} of airtime on {date} at {time}. New balance is {balance}."
+    - "{code} Confirmed. {amount} sent to {first} {last} on {date} at {time}. New balance is {balance}. Transaction cost, {fee}."
+    - "{code} Imethibitishwa. Umetoa {amount} kwa wakala tarehe {date} saa {time}. Salio lako jipya ni {balance}."
+  loan:
+    - "Mkopo wako wa {amount} unadaiwa tarehe {date}. Lipa kwa wakati kudumisha kikomo chako."
+    - "Hongera! Mkopo wa {amount} umetumwa kwa akaunti yako."
+    - "Mkopo wako umepita muda. Tafadhali lipa {amount} leo kuepuka adhabu."
+    - "Asante kwa kulipa {amount}. Deni lililobaki ni {balance}."
+    - "Unastahili mkopo hadi {amount}. Piga *{digits:3}# kuomba."
+calendar:
+  - {title: "Daktari wa meno", minutes: 45, kind: appointment}
+  - {title: "Hospitali - kliniki", minutes: 60, kind: appointment}
+  - {title: "Vipimo vya damu", minutes: 30, kind: appointment}
+  - {title: "Benki", minutes: 60, kind: appointment}
+  - {title: "Ofisi ya pasipoti", minutes: 180, kind: appointment}
+  - {title: "Mkutano wa wazazi shule", minutes: 120, kind: appointment}
+  - {title: "Service ya gari", minutes: 120, kind: appointment}
+  - {title: "Kinyozi", minutes: 30, kind: appointment}
+  - {title: "Saluni", minutes: 180, kind: appointment}
+  - {title: "Mkutano wa timu", minutes: 60, kind: work}
+  - {title: "Client meeting", minutes: 60, kind: work}
+  - {title: "Daily standup", minutes: 15, kind: work}
+  - {title: "Interview - {first} {last}", minutes: 45, kind: work}
+  - {title: "Deadline ya ripoti", all_day: true, kind: work}
+  - {title: "Training", minutes: 180, kind: work}
+  - {title: "Chakula cha jioni na {first}", minutes: 120, kind: social}
+  - {title: "Harusi ya {first}", all_day: true, kind: social}
+  - {title: "Chama", minutes: 120, kind: social}
+  - {title: "Kanisa", minutes: 150, kind: social}
+  - {title: "Ibada", minutes: 120, kind: social}
+  - {title: "Ruracio", all_day: true, kind: social, regions: [ke]}
+  - {title: "Send-off ya {first}", minutes: 240, kind: social}
+  - {title: "Harambee", minutes: 180, kind: social}
+  - {title: "Mpira", minutes: 90, kind: sport}
+  - {title: "Gym", minutes: 60, kind: sport}
+  - {title: "Kukimbia asubuhi", minutes: 45, kind: sport}
+  - {title: "Match - nyumbani", minutes: 120, kind: sport}
+  - {title: "Safari ya ndege {city}", minutes: 60, kind: travel}
+  - {title: "Safari ya {city}", all_day: true, kind: travel}
+  - {title: "Kwenda ushago", all_day: true, kind: travel, regions: [ke]}
+  - {title: "Basi kwenda {city}", minutes: 360, kind: travel}
+  - {title: "Treni {city}", minutes: 300, kind: travel}
+  - {title: "Kumpokea {first} uwanja wa ndege", minutes: 90, kind: travel}
+  - {title: "Siku ya kuzaliwa {first}", all_day: true, kind: birthday}
+  - {title: "{first} bday", all_day: true, kind: birthday}
+  - {title: "Birthday ya mama", all_day: true, kind: birthday}
+  - {title: "Anniversary", all_day: true, kind: birthday}
+  - {title: "Kulipa kodi ya nyumba", all_day: true, kind: reminder}
+  - {title: "Kununua tokens", minutes: 15, kind: reminder}
+  - {title: "Karo ya shule", all_day: true, kind: reminder}
+  - {title: "Mchango wa chama", all_day: true, kind: reminder}
+  - {title: "Kulipa mkopo", all_day: true, kind: reminder}
+  - {title: "Kutuma pesa nyumbani", minutes: 15, kind: reminder}
+  - {title: "Bili ya maji", all_day: true, kind: reminder}
+files:
+  - {name: "Invoice_{digits:8}.pdf", kind: invoice}
+  - {name: "Risiti_{shop}_{date}.pdf", kind: invoice}
+  - {name: "Receipt_{date}.pdf", kind: invoice}
+  - {name: "Tenancy_Agreement_{last}.pdf", kind: contract}
+  - {name: "Mkataba_wa_Kazi_{last}.pdf", kind: contract}
+  - {name: "Offer_Letter.pdf", kind: contract}
+  - {name: "Payslip_{date}.pdf", kind: payslip}
+  - {name: "Tax_Return_2025.pdf", kind: tax}
+  - {name: "Bank_Statement_{date}.pdf", kind: statement}
+  - {name: "Mobile_Money_Statement_{date}.pdf", kind: statement}
+  - {name: "ID_front.jpg", kind: id_document}
+  - {name: "ID_back.jpg", kind: id_document}
+  - {name: "Kitambulisho_{first}.jpg", kind: id_document}
+  - {name: "Passport_{first}.pdf", kind: id_document}
+  - {name: "Driving_Licence.pdf", kind: id_document}
+  - {name: "Good_Conduct_Certificate.pdf", kind: government}
+  - {name: "CV_{first}_{last}.pdf", kind: cv}
+  - {name: "{first}_CV_2026.docx", kind: cv}
+  - {name: "E-Ticket_{code}.pdf", kind: ticket}
+  - {name: "Boarding_Pass_{code}.pdf", kind: ticket}
+  - {name: "Insurance_Card.jpg", kind: insurance}
+  - {name: "Policy_{digits:8}.pdf", kind: insurance}
+  - {name: "Lab_Results_{date}.pdf", kind: medical}
+  - {name: "Prescription.jpg", kind: medical}
+  - {name: "Fee_Structure_2026.pdf", kind: education}
+  - {name: "KCSE_Certificate.pdf", kind: education, regions: [ke]}
+  - {name: "Degree_Certificate.pdf", kind: education}
+  - {name: "Mwaliko_Harusi_{first}.pdf", kind: personal}
+  - {name: "Chama_Contributions.xlsx", kind: personal}
+  - {name: "Ripoti_ya_Mwezi.docx", kind: work}
+  - {name: "IMG-{date}-WA{digits:4}.jpg", kind: image}
+  - {name: "Screenshot_{date}.png", kind: image}
+notes:
+  - "Sokoni: unga, sukuma, nyanya, vitunguu, mafuta, sukari"
+  - "Wifi password {code}"
+  - "Deni kwa {first} {amount}"
+  - "{first} ananidai {amount}"
+  - "Kodi {amount} kila tarehe 5"
+  - "Till number {digits:6}"
+  - "Paybill {digits:6} acc {digits:8}"
+  - "Chama: zamu yangu mwezi ujao"
+  - "Beba: chaja, kitambulisho, mwavuli"
+  - "Zawadi ya {first} - saa?"
+  - "Dawa: mara 3 kwa siku baada ya chakula"
+  - "Kesho: benki, kununua tokens, kutuma kifurushi"
+  - "Tracking {tracking}"
+  - "Movies za kuangalia (kutoka kwa {first})"
+  - "Nambari ya fundi wa stima"
+  - "Locker {digits:4}"
+  - "Booking ref {code}"
+  - "Pilau: mchele, nyama, pilau masala, vitunguu"
+  - {text: "Form ya wikendi: Sato mbogi, Sunday kanisa", regions: [ke]}
+  - "Mshahara tarehe 28"
+call_names:
+  mom: [Mama, Mum, Mathe, "Mama {first}", Mummy]
+  dad: [Baba, Dad, Buda, "Baba {first}", Mzee]
+  partner: [Babe, Mpenzi, "Love ❤️", Hubby, Wifey, Bae]
+  grandma: [Shosho, Bibi, Cucu, Nyanya]
+  grandpa: [Guka, Babu, Mzee]
+  sister: ["Sis {first}", "Dada {first}", Siste]
+  brother: ["Bro {first}", "Kaka {first}", Bro]
+  aunt: ["Shangazi {first}", "Auntie {first}", "Mama mdogo"]
+  uncle: ["Uncle {first}", "Mjomba {first}", "Baba mdogo"]
+  son: ["{first}"]
+  daughter: ["{first}"]

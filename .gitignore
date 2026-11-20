@@ -26,6 +26,10 @@ dump/
 # misc
 *.tar.gz
 *.md
+# world packs ship their sources, edit log and schema
+!src/sandroid/assets/world/**/*.md
+!src/sandroid/assets/world/*.md
+!src/sandroid/world/*.md
 
 # venv
 env/
