@@ -1703,6 +1703,54 @@ def test_a_snapshot_with_the_old_sim_gets_one_airplane_toggle(service, device):
     assert not device.airplane
 
 
+def test_a_launch_checked_with_airplane_mode_on_is_not_planned_again(
+    service, device, app_start
+):
+    """Airplane mode on: the apply checks the launch (no toggle) and later
+    starts do not plan again for it.
+    """
+    profile = service.active_profile()
+    for vid in ("android_id", "locale"):
+        profile.values[vid].enabled = False
+    service.save(profile)
+    _launched(service, device)
+    device.props["ro.boot.qemu.avd_name"] = "Dev1"
+    device.settings["airplane_mode_on"] = "1"
+    plan = service.pre_spawn("com.example.app")
+    assert plan is not None
+    plan.apply()
+    assert not device.airplane
+    for _ in range(3):
+        assert service.pre_spawn("com.example.app") is None
+
+
+def test_a_new_launch_with_a_same_country_sim_is_due(service, device, app_start):
+    """The guest's MCC/MNC already matches (same country), yet the guest
+    still has another profile's IMSI: a new launch with this profile's SIM
+    is checked once all the same.
+    """
+    profile = service.active_profile()
+    for vid in ("android_id", "locale"):
+        profile.values[vid].enabled = False
+    service.save(profile)
+    sim = _launched(service, device)
+    device.props["ro.boot.qemu.avd_name"] = "Dev1"
+    device.props["gsm.sim.operator.numeric"] = sim.mccmnc
+    service.apply(SERIAL, "com.example.app")
+    assert service.pre_spawn("com.example.app") is None
+    device.token = "launch-2"  # noqa: S105 - a launch id, not a secret
+    device.sim = {
+        **dict(STOCK_SIM),
+        "imsi": sim.mccmnc + "0000000000"[: 15 - len(sim.mccmnc)],
+    }
+    device.airplane.clear()
+    plan = service.pre_spawn("com.example.app")
+    assert plan is not None
+    plan.apply()
+    assert device.airplane == ["enable", "disable"]
+    assert service.pre_spawn("com.example.app") is None
+
+
 def test_rows_without_a_step_show_the_device_after_the_toggle(service, device):
     """The SIM operator name (hook-only, no step) changes with the toggle:
     the apply reports what the device shows afterwards.

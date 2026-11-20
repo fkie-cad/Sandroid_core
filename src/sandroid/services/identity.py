@@ -2131,6 +2131,9 @@ class IdentityPlan:
     steps: list[Step] = field(default_factory=list)
     infos: dict[str, ValueInfo] = field(default_factory=dict)
     recovery: bool = False  # a restart window was interrupted
+    #: The emulator launch whose SIM this plan checked (serial, boot id,
+    #: launch token), None when the emulator did not start with its SIM.
+    sim_key: tuple[str, str, str] | None = None
 
     @property
     def restart(self) -> str:
@@ -2319,7 +2322,6 @@ class _RecordRead:
     boot_id: str
     marker: str  # the restart marker's content ("" when there is none)
     install: str = ""  # ``uid:inode`` of the package asked for ("" = none)
-    sim_numeric: str = ""  # gsm.sim.operator.numeric ("" = none, unknown)
     avd_name: str = ""  # ro.boot.qemu.avd_name ("" = not an emulator, unknown)
 
 
@@ -2415,8 +2417,6 @@ def record_script(package: str | None = None) -> str:
         "echo @@marker@@",
         f"cat {RESTART_MARKER} 2>/dev/null",
         "echo",
-        "echo @@sim_numeric@@",
-        "getprop gsm.sim.operator.numeric",
         "echo @@avd_name@@",
         "getprop ro.boot.qemu.avd_name",
     ]
@@ -2517,6 +2517,8 @@ class IdentityService:
         self._sim_toggles: dict[tuple[str, str, str], str] = {}
         #: Launches whose toggle got no answer once (one more try each).
         self._sim_retry: set[tuple[str, str, str]] = set()
+        #: Emulator launches an apply checked the SIM of (see _sim_due).
+        self._sim_checked: set[tuple[str, str, str]] = set()
         #: Serials whose device record was read (memory hydrated), the time
         #: of the last background read per serial, and the running ones.
         self._hydrated: set[str] = set()
@@ -3048,7 +3050,7 @@ class IdentityService:
         has the old SIM cached again while boot id and launch token stay.
         """
         with self._lock:
-            for store in (self._sim_toggles, self._sim_retry):
+            for store in (self._sim_toggles, self._sim_retry, self._sim_checked):
                 for key in list(store):
                     if serial is None or key[0] == serial:
                         if isinstance(store, dict):
@@ -3103,6 +3105,7 @@ class IdentityService:
         if launched:
             readable = vs.kind == "sim_mccmnc" or state.sim_read
             key = self._sim_key(state, emu)
+            plan.sim_key = key
             with self._lock:
                 toggled = self._sim_toggles.get(key)
                 retry = key in self._sim_retry
@@ -3411,7 +3414,11 @@ class IdentityService:
             if vid not in steps:
                 # No step of its own; after the SIM toggle the device may
                 # report something new for it too (the SIM operator name).
-                if sim and after.current != info.current:
+                if (
+                    sim
+                    and (after.sim_launch or info.kind == "sim_operator")
+                    and after.current != info.current
+                ):
                     info.current = after.current
                     info.status, info.reason = after.status, after.reason
                 continue
@@ -3997,26 +4004,32 @@ class IdentityService:
                     mem.observed = False  # the record is the truth again
         self._notify_status()
 
-    def _sim_due(self, serial: str, profile: Profile, read: _RecordRead) -> bool:
-        """The emulator started with the profile's SIM, the guest still shows
-        another SIM MCC/MNC, and no SIM refresh ran for this launch yet (a
-        quickboot snapshot whose record already says done: the one airplane
-        toggle is still due). Host-side file reads only.
+    def _sim_due(self, serial: str, profile: Profile, read: _RecordRead | None) -> bool:
+        """The emulator started with the profile's SIM and no apply checked it
+        for this launch yet (a quickboot snapshot whose record already says
+        done keeps the old SIM until the one airplane toggle), or a toggle
+        got no answer and is retried. Host-side file reads only.
         """
-        if not read.sim_numeric or not read.avd_name:
+        if read is None or not read.avd_name or not read.boot_id:
             return False
         try:
             sim = identity_sim.sim_values(profile)
-            if sim is None or not sim.mccmnc or sim.mccmnc == read.sim_numeric:
+            if sim is None:
                 return False
             emu = identity_sim.running_emulator(serial, read.avd_name)
         except Exception:
             logger.debug("identity: SIM launch check failed", exc_info=True)
             return False
-        if emu is None or emu.sim is None or emu.sim.mccmnc != sim.mccmnc:
-            return False  # not started with it: a restart is needed, not a toggle
+        if emu is None or emu.sim is None:
+            return False
+        if any(
+            emu.sim.value_of(kind) != sim.value_of(kind)
+            for kind in ("imsi", "iccid", "phone_number", "sim_mccmnc")
+        ):
+            return False  # started with another SIM: a restart sets it, no toggle
+        key = (serial, read.boot_id, emu.token)
         with self._lock:
-            return (serial, read.boot_id, emu.token) not in self._sim_toggles
+            return key not in self._sim_checked or key in self._sim_retry
 
     def _read_record(
         self, serial: str, package: str | None = None
@@ -4040,7 +4053,6 @@ class IdentityService:
             sec.get("boot_id", ""),
             sec.get("marker", ""),
             install if re.fullmatch(r"\d+:\d+", install) else "",
-            sim_numeric=sec.get("sim_numeric", "").strip(),
             avd_name=sec.get("avd_name", "").strip(),
         )
 
@@ -4219,6 +4231,9 @@ class IdentityService:
         package: str | None,
     ) -> None:
         mem = self._applied[plan.serial]
+        if plan.sim_key is not None:
+            with self._lock:
+                self._sim_checked.add(plan.sim_key)
         info = plan.infos.get("android_id")
         ssaids = dict(mem.ssaids)
         if info is not None:
@@ -4477,7 +4492,6 @@ class IdentityService:
         read = self._read_record(serial, package)
         if read is not None:
             self._hydrate(serial, read, gen)
-        sim_due = read is not None and self._sim_due(serial, profile, read)
         # An interrupted restart window: the next apply resumes it.
         recovery = read is not None and bool(read.marker)
         with self._lock:
@@ -4496,17 +4510,12 @@ class IdentityService:
                 mem.installs.pop(package, None)
             # Without an answer from the device the memory may be stale (a
             # snapshot load, a reinstall): apply rather than skip.
-            if (
-                ours
-                and package in mem.done
-                and not recovery
-                and read is not None
-                and not sim_due
-            ):
-                return None
+            skip = ours and package in mem.done and not recovery and read is not None
             seeded = ours and package in mem.seeded
             settled = set(mem.settled) if ours else set()
             unappliable = set(mem.unappliable) if ours else set()
+        if skip and not self._sim_due(serial, profile, read):
+            return None
         # Only values a restart can really apply here count.
         needs_fw = recovery or any(
             vs.enabled
