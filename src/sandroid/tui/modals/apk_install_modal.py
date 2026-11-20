@@ -262,9 +262,15 @@ class APKInstallModal(ExtractionModal[APKInstallResult]):
                 yield LoadingSpinner(
                     message="Searching for APKs...", id="search-spinner"
                 )
-                yield Label("○ F-Droid", id="source-fdroid", classes="source-status")
-                yield Label("○ APKPure", id="source-apkpure", classes="source-status")
-                yield Label("○ Aptoide", id="source-aptoide", classes="source-status")
+                yield Label(
+                    "F-Droid waiting", id="source-fdroid", classes="source-status"
+                )
+                yield Label(
+                    "APKPure waiting", id="source-apkpure", classes="source-status"
+                )
+                yield Label(
+                    "Aptoide waiting", id="source-aptoide", classes="source-status"
+                )
 
             # Download progress section (hidden by default)
             with Vertical(id="download-progress-container", classes="hidden"):
@@ -488,7 +494,7 @@ class APKInstallModal(ExtractionModal[APKInstallResult]):
                 try:
                     label = self.query_one(f"#{widget_id}", Label)
                     label.remove_class("active", "done", "error")
-                    label.update(f"○ {display_name}")
+                    label.update(f"{display_name} waiting")
                 except Exception:
                     pass
         except Exception:
@@ -529,14 +535,14 @@ class APKInstallModal(ExtractionModal[APKInstallResult]):
             label.remove_class("active", "done", "error")
             if status == "searching":
                 label.add_class("active")
-                label.update(f"● {display_name} searching...")
+                label.update(f"{display_name} searching")
             elif status == "done":
                 label.add_class("done")
-                label.update(f"✓ {display_name}")
+                label.update(f"{display_name} found")
             elif status in ("not_found", "error"):
                 label.add_class("error")
-                icon = "✗" if status == "error" else "–"
-                label.update(f"{icon} {display_name}")
+                word = "failed" if status == "error" else "not found"
+                label.update(f"{display_name} {word}")
         except Exception:
             pass
 
