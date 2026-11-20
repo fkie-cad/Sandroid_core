@@ -1,7 +1,7 @@
 Features API
 ============
 
-The Sandroid features API provides functionality modules for enhanced analysis capabilities. These modules extend the core analysis with specialized features like recording and playback.
+The Sandroid features API provides functionality modules for enhanced analysis capabilities. These modules extend the core analysis with specialized features; recording and replay are done by Rewind.
 
 Base Functionality Class
 -------------------------
@@ -18,86 +18,33 @@ All feature modules inherit from Functionality, which provides the common interf
 - ``cleanup()`` - Clean up resources after execution
 - ``get_status()`` - Get current feature status
 
-Action Recording and Playback
-------------------------------
+Rewind
+------
 
-Action Recorder
-~~~~~~~~~~~~~~~
+Rewind replaced the old record & replay batch in the TUI. ``r`` saves a
+start point (an emulator snapshot named ``sandroid_rec_<YYYYmmdd_HHMMSS>``)
+and records; ``r`` again stops and opens the Review list of new, changed and
+deleted files and the requests seen. Selecting a file copies it as *After*.
+**Rewind** loads the start point and copies *Before*; **Rewind + Replay**
+also repeats the recorded steps and copies *After (replay)*. Each recording
+lives in ``<session device folder>/recordings/rec-*/`` with its
+``recording.json``. ``x`` exports a recording (with its copied files and,
+when it still exists, its start point) and ``i`` imports it again.
 
-.. automodule:: sandroid.features.recorder
+.. automodule:: sandroid.core.rewind
    :members:
-   :undoc-members:
-   :show-inheritance:
 
-Records user interactions and device events for later playback.
+Replay of input events
+~~~~~~~~~~~~~~~~~~~~~~
 
-**Key Features:**
-
-- Touch event recording
-- Screen interaction capture
-- Timing information preservation
-- Action sequence optimization
-
-**Usage Example:**
-
-.. code-block:: python
-
-   from sandroid.features.recorder import Recorder
-
-   # Initialize recorder
-   recorder = Recorder()
-
-   # Start recording user interactions
-   recorder.run()
-
-   # Record for specific duration
-   import time
-   print("Recording started. Interact with the device...")
-   time.sleep(60)  # Record for 1 minute
-
-   # Stop and save recording
-   recorder.cleanup()
-
-   # Export recorded actions
-   recorder.export_actions("user_interaction_sequence.json")
-
-Action Player
-~~~~~~~~~~~~~
+:class:`sandroid.features.player.Player` sends recorded input events back to
+the device. Rewind + Replay and the headless ``--import-action`` batch use
+it.
 
 .. automodule:: sandroid.features.player
    :members:
-   :undoc-members:
+   :exclude-members: STORE_LINE_RE
    :show-inheritance:
-
-Replays previously recorded action sequences.
-
-**Key Features:**
-
-- Precise action replay
-- Timing accuracy
-- Error handling during playback
-- Playback speed control
-
-**Usage Example:**
-
-.. code-block:: python
-
-   from sandroid.features.player import Player
-
-   # Initialize player
-   player = Player()
-
-   # Load action sequence
-   player.load_actions("user_interaction_sequence.json")
-
-   # Play back actions
-   player.run()
-
-   # Monitor playback status
-   while player.is_playing():
-       status = player.get_status()
-       print(f"Playback progress: {status['progress']}%")
-       time.sleep(1)
 
 Screenshots
 -----------
@@ -119,48 +66,6 @@ There is no trigger feature module: the TrigDroid integration
 Sandroid. Scripted device events (sensors, network toggles, battery, ...)
 will come as playbooks; until then use
 :class:`sandroid.services.device_settings_service.DeviceSettingsService`.
-
-Feature Integration Examples
-----------------------------
-
-**Interactive Session Recording:**
-
-.. code-block:: python
-
-   from sandroid.features.recorder import Recorder
-   from sandroid.features.player import Player
-
-   def record_and_replay_session():
-       """Record user session and replay for consistency testing"""
-
-       recorder = Recorder()
-
-       # Phase 1: Record user session
-       print("=== Recording Phase ===")
-       recorder.run()
-
-       print("Please interact with the device. Press Enter when done...")
-       input()
-
-       # Save recording
-       actions_file = recorder.export_actions("session_recording.json")
-       recorder.cleanup()
-
-       print(f"Session recorded to: {actions_file}")
-
-       # Phase 2: Replay recorded session
-       print("=== Replay Phase ===")
-       player = Player()
-       player.load_actions(actions_file)
-
-       # Replay the session
-       player.run()
-
-       # Wait for replay completion
-       while player.is_playing():
-           time.sleep(1)
-
-       print("Session replay completed")
 
 Error Handling and Recovery
 ---------------------------

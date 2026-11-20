@@ -278,9 +278,9 @@ ELEMENT_WAIT_S = 10.0
 ELEMENT_POLL_S = 0.3
 #: Longest recorded pause that is waited before a step (s).
 MAX_GAP_S = 10.0
-#: Waits after the last step before After (replay) is pulled (s): at least
-#: this, else as long as your run went on after its last step (apps write and
-#: send later), at most :data:`MAX_TAIL_S`.
+#: Waits after the last step before the replay's After copy is pulled (s): at
+#: least this, else as long as your run went on after its last step (apps
+#: write and send later), at most :data:`MAX_TAIL_S`.
 SETTLE_AFTER_S = 3.0
 MAX_TAIL_S = 120.0
 
