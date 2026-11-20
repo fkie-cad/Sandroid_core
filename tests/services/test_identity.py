@@ -100,6 +100,26 @@ GAID_XML = (
 )
 
 
+STOCK_SIM = {
+    "imsi": "310260000000000",
+    "iccid": "89860318640220133897",
+    "msisdn": "+15555215580",
+}
+
+
+def _parcel(text: str) -> str:
+    """A ``service call ... s16`` reply carrying ``text`` (as the device prints)."""
+    data = (0).to_bytes(4, "little") + len(text).to_bytes(4, "little")
+    data += text.encode("utf-16-le") + b"\0\0"
+    data += b"\0" * (-len(data) % 4)
+    words = [int.from_bytes(data[i : i + 4], "little") for i in range(0, len(data), 4)]
+    rows = []
+    for i in range(0, len(words), 4):
+        chunk = " ".join(f"{w:08x}" for w in words[i : i + 4])
+        rows.append(f"  0x{i * 4:08x}: {chunk:<35} '................'")
+    return "Result: Parcel(\n" + "\n".join(rows) + ")"
+
+
 SYSTEM_LABEL = "u:object_r:system_data_file:s0"
 APP_LABEL = "u:object_r:app_data_file:s0"
 
@@ -177,10 +197,21 @@ class FakeDevice:
             "persist.sys.timezone": "America/Los_Angeles",
             "gsm.sim.operator.alpha": "T-Mobile",
             "gsm.sim.operator.numeric": "310260",
+            "gsm.operator.alpha": "T-Mobile",
+            "gsm.operator.numeric": "310260",
             "ro.boot.qemu.avd_name": "Dev1",
             "sys.boot_completed": "1",
         }
-        self.settings = {"device_name": "sdk_gphone64", "auto_time_zone": "1"}
+        self.settings = {
+            "device_name": "sdk_gphone64",
+            "auto_time_zone": "1",
+            "airplane_mode_on": "0",
+        }
+        #: The SIM the guest reports (``service call iphonesubinfo``) and the
+        #: one the modem holds (the guest reads it after an airplane toggle).
+        self.sim = dict(STOCK_SIM)
+        self.modem = dict(STOCK_SIM)
+        self.airplane: list[str] = []
         self.fs: dict[str, bytes] = {
             SSAID_FILE: b"ABX\0" + SSAID_XML.encode(),
             GAID_FILE: GAID_XML.encode(),
@@ -231,6 +262,7 @@ class FakeDevice:
             self.writes.append(command)
             if argv[1] == "phonenumber":
                 self.emu_state["phone"] = argv[2]
+                self.sim["msisdn"] = self.modem["msisdn"] = argv[2]
             elif argv[1:3] == ["geo", "fix"]:
                 self.emu_state["geo"] = " ".join(argv[3:])
             return "OK\n", ""
@@ -239,6 +271,9 @@ class FakeDevice:
         return self._shell(argv[1]), ""
 
     def _shell(self, script: str) -> str:
+        light = "@@ssaid@@" not in script and "iphonesubinfo" in script
+        if PREFLIGHT_TAG in script and light:
+            return self._sim_read()
         if PREFLIGHT_TAG in script:
             return self._preflight(script)
         if script.startswith("pidof system_server"):
@@ -344,6 +379,14 @@ class FakeDevice:
             if argv[3] not in self.ignore:
                 self.settings[argv[3]] = argv[4]
             return ""
+        if name == "cmd" and argv[1:3] == ["connectivity", "airplane-mode"]:
+            self.airplane.append(argv[3])
+            self.settings["airplane_mode_on"] = "1" if argv[3] == "enable" else "0"
+            if argv[3] == "disable":
+                self.sim = dict(self.modem)  # the radio reads the SIM again
+            return ""
+        if name == "sleep":
+            return ""
         if name == "cmd" and argv[1:3] == ["alarm", "set-timezone"]:
             self.props["persist.sys.timezone"] = argv[3]
             return ""
@@ -423,6 +466,8 @@ class FakeDevice:
             base64.b64encode(self.fs.get(APPSET_FILE, b"")).decode(),
         ]
         lines.append("@@location@@")
+        if "iphonesubinfo" in script:
+            lines += self._sim_sections()
         lines.append("@@uids@@")
         lines += [f"package:{p} uid:{u}" for p, (u, _c) in self.packages.items()]
         for pkg, (_uid, cert) in self.packages.items():
@@ -467,6 +512,21 @@ class FakeDevice:
         lines.append("@@end@@")
         return "\n".join(lines) + "\n"
 
+    def _sim_sections(self) -> list[str]:
+        if self.props["ro.build.version.sdk"] != "35":
+            return []  # unknown transaction codes: the script reads nothing
+        out = []
+        for key in ("imsi", "iccid", "msisdn"):
+            out += [f"@@sim:{key}@@", _parcel(self.sim.get(key, ""))]
+        return out
+
+    def _sim_read(self) -> str:
+        lines = [PREFLIGHT_TAG, "@@props@@"]
+        lines += [f"{k}={v}" for k, v in self.props.items() if k.startswith("gsm.")]
+        lines += self._sim_sections()
+        lines.append("@@end@@")
+        return "\n".join(lines) + "\n"
+
     @property
     def ssaid(self) -> dict[str, str]:
         return {
@@ -481,6 +541,11 @@ class FakeDevice:
 def device(monkeypatch):
     fake = FakeDevice()
     monkeypatch.setattr(ident, "_send", fake)
+    # The emulator was not launched with the profile's SIM (no host files).
+    fake.launched = None
+    monkeypatch.setattr(
+        ident.identity_sim, "running_sim", lambda serial, avd="": fake.launched
+    )
     return fake
 
 
@@ -530,8 +595,10 @@ def test_newer_schema_and_wrong_format_are_refused(env):
         ("imsi", "262011234567890", "hook", True),
         ("imsi", "310261234567890", "hook", False),
         ("phone_number", "15201234567", "native", True),
-        ("phone_number", "152012345678", "native", False),
-        ("phone_number", "+4915201234567", "native", False),
+        ("phone_number", "152012345678", "native", True),
+        ("phone_number", "+4915201234567", "native", True),
+        ("phone_number", "+49152012345678901", "native", False),
+        ("phone_number", "0152-0123", "native", False),
         ("phone_number", "+4915201234567", "hook", True),
         ("gps", "52.520008, 13.404954", "native", True),
         ("gps", "91.000001, 13.404954", "native", False),
@@ -765,15 +832,20 @@ def test_apply_seeds_everything_and_second_apply_writes_nothing(service, device)
         "calls",
     ):
         assert st[vid] == ("verified", ""), (vid, st[vid])  # fmt: skip
-    # The emulator radio resets the SIM properties: hook-only, not failed,
-    # and nothing is written for them.
-    for vid in ("sim_operator", "sim_mccmnc"):
-        assert st[vid] == ("hook-only", ident.EMULATOR_RADIO_RESETS), vid
-        assert plan.infos[vid].provider == "hook"
+    # The SIM operator name comes from the emulator's carrier: hook-only.
+    assert st["sim_operator"] == ("hook-only", ident.EMULATOR_SIM_OPERATOR)
+    assert plan.infos["sim_operator"].provider == "hook"
     assert plan.infos["sim_operator"].current == "T-Mobile"
+    # The emulator was not started with the profile's SIM: pending until it
+    # restarts, nothing written (no setprop, no airplane toggle).
+    for vid in ("imsi", "iccid", "sim_mccmnc"):
+        assert st[vid] == ("pending", ident.NEEDS_EMULATOR_START), vid
+        assert plan.infos[vid].mechanism == ident.SIM_MECHANISM
+    assert plan.infos["imsi"].current == STOCK_SIM["imsi"]
     assert device.props["gsm.sim.operator.alpha"] == "T-Mobile"
-    assert not [w for w in device.writes if "gsm.sim" in w]
-    assert st["phone_number"] == ("applied", "")
+    assert not [w for w in device.writes if "gsm.sim" in w or "airplane" in w]
+    # The phone number fits adb emu phonenumber: the fallback, read back.
+    assert st["phone_number"] == ("verified", "")
     assert st["gps"] == ("applied", "unverified")  # no app ran a GPS session
     assert st["imei"][0] == "hook-only"
     assert st["build_model"] == ("skipped", "disabled")
@@ -809,7 +881,8 @@ def test_apply_seeds_everything_and_second_apply_writes_nothing(service, device)
     record = ident.tomllib.loads(frozen.read_text(encoding="utf-8"))
     assert record["ssaid"]["com.example.app"]["value"] == android_id
     assert record["ssaid"]["com.example.app"]["before"] == "1111222233334444"
-    assert record["values"]["phone_number"]["before"] == "15555215580"
+    assert record["values"]["phone_number"]["before"] == "+15555215580"
+    assert record["values"]["imsi"]["before"] == STOCK_SIM["imsi"]
     assert record["values"]["device_name"]["before"] == "sdk_gphone64"
     assert record["profile"]["token"] == profile.token
     # second apply: one read, no writes, no second freeze
@@ -820,7 +893,7 @@ def test_apply_seeds_everything_and_second_apply_writes_nothing(service, device)
     assert device.writes == []
     assert len(device.calls) == 1
     assert not lines2
-    assert again.infos["phone_number"].status == "applied"
+    assert again.infos["phone_number"].status == "verified"
 
 
 def service_folder(applied_line: dict) -> Path:
@@ -1410,3 +1483,145 @@ def test_after_restart_tolerates_a_missing_or_failing_proxy_check(monkeypatch):
     module.restore_proxy_infra = boom
     monkeypatch.setitem(sys.modules, "sandroid.services.proxy_restore", module)
     ident._restore_proxy_after_framework(SERIAL)  # swallowed
+
+
+# ---------------------------------------------------------------------------
+# SIM identity (set when the emulator starts, see identity_sim)
+# ---------------------------------------------------------------------------
+
+
+def _profile_sim(service) -> ident.identity_sim.SimValues:
+    """What the active profile's SIM carries (as the launch hook builds it)."""
+    sim = ident.identity_sim.sim_values(service.active_profile())
+    assert sim is not None
+    return sim
+
+
+def _sim_infos(plan) -> dict[str, tuple[str, str]]:
+    return {
+        vid: (plan.infos[vid].status, plan.infos[vid].reason)
+        for vid in ("imsi", "iccid", "sim_mccmnc", "phone_number")
+    }
+
+
+def test_sim_values_the_device_reports_are_verified_without_writes(service, device):
+    sim = _profile_sim(service)
+    device.sim = device.modem = {
+        "imsi": sim.imsi,
+        "iccid": sim.iccid,
+        "msisdn": sim.phone,
+    }
+    device.props["gsm.sim.operator.numeric"] = sim.mccmnc
+    plan = service.apply(SERIAL, "com.example.app")
+    assert set(_sim_infos(plan).values()) == {("verified", "")}
+    assert sim.phone.startswith("+49")  # the national number got +49
+    assert not device.airplane
+    assert not [w for w in device.writes if "phonenumber" in w]
+
+
+def test_a_snapshot_with_the_old_sim_gets_one_airplane_toggle(service, device):
+    sim = _profile_sim(service)
+    # Launched with the profile's SIM; the guest kept the old one cached.
+    device.launched = sim
+    device.modem = {"imsi": sim.imsi, "iccid": sim.iccid, "msisdn": sim.phone}
+    with timeline.capture() as lines:
+        plan = service.apply(SERIAL, "com.example.app")
+    infos = _sim_infos(plan)
+    assert infos["imsi"] == ("verified", ""), infos
+    assert infos["iccid"] == ("verified", "")
+    assert infos["phone_number"] == ("verified", "")
+    assert device.airplane == ["enable", "disable"]  # once, restored to off
+    assert device.settings["airplane_mode_on"] == "0"
+    assert not [w for w in device.writes if "phonenumber" in w]
+    assert ("identity", "sim") in [(x["src"], x["kind"]) for x in lines]
+    # The fake radio does not update the operator property: read-back fails.
+    assert infos["sim_mccmnc"][0] == "failed"
+    # Second apply: the SIM is read back, no second toggle.
+    device.props["gsm.sim.operator.numeric"] = sim.mccmnc
+    device.airplane.clear()
+    again = service.apply(SERIAL, "com.example.app")
+    assert set(_sim_infos(again).values()) == {("verified", "")}
+    assert not device.airplane
+
+
+def test_airplane_mode_that_was_on_stays_on(service, device):
+    sim = _profile_sim(service)
+    device.launched = sim
+    device.modem = {"imsi": sim.imsi, "iccid": sim.iccid, "msisdn": sim.phone}
+    device.settings["airplane_mode_on"] = "1"
+    plan = service.apply(SERIAL, "com.example.app")
+    assert plan.infos["imsi"].status == "verified"
+    assert device.airplane == ["disable", "enable"]
+    assert device.settings["airplane_mode_on"] == "1"
+
+
+def test_a_sim_the_emulator_did_not_start_with_stays_pending(service, device):
+    profile = service.active_profile()
+    profile.values["phone_number"].template = "+49152{digits:8}"
+    service.save(profile)
+    plan = service.apply(SERIAL, "com.example.app")
+    infos = _sim_infos(plan)
+    # Too long for adb emu phonenumber: only the emulator start sets it.
+    assert set(infos.values()) == {("pending", ident.NEEDS_EMULATOR_START)}
+    assert not device.airplane
+    assert not [w for w in device.writes if "phonenumber" in w]
+    # Pending until the emulator restarts: no re-apply on every app start.
+    assert "com.example.app" in service._applied[SERIAL].done
+
+
+def test_without_a_sim_read_back_the_launch_values_count_as_applied(service, device):
+    device.props["ro.build.version.sdk"] = "36"  # transaction codes unknown
+    device.launched = _profile_sim(service)
+    # The operator property is readable everywhere and already matches.
+    device.props["gsm.sim.operator.numeric"] = device.launched.mccmnc
+    plan = service.apply(SERIAL, "com.example.app")
+    assert plan.infos["imsi"].status == "applied"
+    assert plan.infos["imsi"].reason == ident.SIM_NOT_READ
+    assert plan.infos["iccid"].reason == ident.SIM_NOT_READ
+    assert not device.airplane
+
+
+def test_sim_values_are_hook_only_on_a_real_device(service, device, monkeypatch):
+    parse = ident.parse_preflight
+
+    def real_device(serial, text):
+        state = parse(serial, text)
+        state.emulator = False
+        return state
+
+    monkeypatch.setattr(ident, "parse_preflight", real_device)
+    plan = service.plan(SERIAL, "com.example.app")
+    for vid in ("imsi", "iccid"):
+        assert plan.infos[vid].status == "hook-only"
+        assert plan.infos[vid].reason == "a real SIM card cannot be changed"
+        assert plan.infos[vid].provider == "hook"
+
+
+def test_network_operator_name_carrying_the_sim_operator_is_noted(service, device):
+    device.props["gsm.operator.alpha"] = "Telekom 3f9a1c07"
+    plan = service.plan(SERIAL, "com.example.app")
+    info = plan.infos["sim_operator"]
+    assert info.status == "hook-only"
+    assert info.reason.endswith(ident.NETWORK_OPERATOR_CARRIES)
+
+
+def test_imei_says_why_it_is_hook_only(env):
+    infos = {i.id: i for i in IdentityService().describe(_profile())}
+    assert infos["imei"].reason == "the emulator's modem reports a fixed IMEI"
+    assert infos["imsi"].provider == "native"
+
+
+def test_preflight_reads_the_sim_on_known_api_levels():
+    script = ident.preflight_script([], [TOKEN])
+    assert "35) echo @@sim:imsi@@; service call iphonesubinfo 8 s16" in script
+    assert "service call iphonesubinfo 12 s16" in script
+    assert "service call iphonesubinfo 15 s16" in script
+    state = ident.parse_preflight(
+        SERIAL,
+        "\n".join(
+            [PREFLIGHT_TAG, "@@sim:iccid@@", _parcel("8949012345678901234"),
+             "@@sim:msisdn@@", "Result: Parcel(ffffffb5 '....')", "@@end@@"]
+        ),
+    )  # fmt: skip
+    assert state.sim == {"iccid": "8949012345678901234"}
+    assert state.sim_read

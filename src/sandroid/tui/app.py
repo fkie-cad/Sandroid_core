@@ -720,6 +720,14 @@ class SandroidTUI(App):
             get_identity_service().install_pre_spawn_hook()
         except Exception as exc:
             logger.debug(f"Failed to install the identity pre-spawn hook: {exc}")
+        # Identity profile SIM card: emulator launch hooks (idempotent; the
+        # CLI registers them first, this covers other entry points).
+        try:
+            from sandroid.services.identity_sim import install_launch_hooks
+
+            install_launch_hooks()
+        except Exception as exc:
+            logger.debug(f"Failed to install the identity SIM launch hooks: {exc}")
         self.call_later(self._check_devices_on_startup)
         self.call_later(self._show_welcome_if_first_run)
         # Pre-initialize command registry and package cache in background

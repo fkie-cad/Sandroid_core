@@ -475,6 +475,15 @@ def main(
 
         set_config(sandroid_config, source_file=config)
 
+        # Emulator launch hooks (identity profile SIM card), registered before
+        # any launch path (--avd below, Devices hub, restarts) can run.
+        try:
+            from .services.identity_sim import install_launch_hooks
+
+            install_launch_hooks()
+        except Exception as e:
+            logger.debug(f"Failed to install the identity SIM launch hooks: {e}")
+
         if avd:
             # Uses the configured SDK/adb paths, hence after set_config().
             sandroid_config.emulator.serial = _boot_avd(avd, console)
