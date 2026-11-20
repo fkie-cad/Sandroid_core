@@ -1437,6 +1437,9 @@ class TrackingService:
         self._pw_focus = False
         self._pre_lock = threading.Lock()
         self._pre_inflight = 0
+        #: The Tracking run (``_session_gen``) whose screencap fallback was
+        #: already logged: once per run.
+        self._screencap_noted = -1
         self._rot_pending = False
         self.geometry = Geometry()
         self._geometry_ready = threading.Event()
@@ -3809,17 +3812,66 @@ class TrackingService:
         helper = self._helper_up()
         if helper is not None:
             res = None
+            why = "the UI helper did not capture"
             try:
                 res = self._shot_seen(helper)
             except Exception as exc:
                 logger.debug(f"tracking shot failed: {exc}")
+                why = f"the UI helper's capture failed ({exc})"
             if res is not None:
                 return self._helper_cap(res, t)
+        else:
+            why = self._no_helper_why()
+        self._note_screencap(why)
         png, t_host, cap, err = self._screencap()
         w, h = self.geometry.screen
         return {"png": png, "via": "screencap", "w": w, "h": h, "cap_ms": cap,
                 "dev_mono": None, "t": t if t is not None else t_host,
                 "error": err, "hash": None}  # fmt: skip
+
+    def _no_helper_why(self) -> str:
+        """Why there is no running UI helper now, in plain words."""
+        if self._mode == "off":
+            return "the UI helper is off (tracking helper_mode = off)"
+        why = {
+            "starting": "the UI helper has not started yet",
+            "failed": "the UI helper failed to start",
+            "busy": "another UiAutomation client holds the device",
+            "lost": "the UI helper was lost and is restarting",
+            "restarted": "the UI helper is restarting",
+            "down": "the UI helper gave up after repeated crashes",
+            "stopped": "the UI helper was stopped",
+        }.get(self._helper_state, "the UI helper is not running")
+        return f"{why} ({self._mode} mode)"
+
+    def _note_screencap(self, why: str) -> None:
+        """Say once per Tracking run that screenshots fall back to ``adb
+        exec-out screencap`` and why: an INFO log line and a
+        ``tracking/helper`` timeline line.
+        """
+        with self._lock:
+            run = self._session_gen
+            if self._screencap_noted == run:
+                return
+            self._screencap_noted = run
+            state, mode, serial = self._helper_state, self._mode, self._serial
+        logger.info(
+            f"Tracking: taking screenshots with adb screencap instead of the "
+            f"UI helper: {why}"
+        )
+        _emit(
+            "tracking",
+            "helper",
+            summary=f"screenshots via adb screencap · {why}",
+            actor="sandroid",
+            data={
+                "helper": state,
+                "mode": mode,
+                "fallback": "screencap",
+                "reason": why,
+            },
+            dev=serial,
+        )
 
     @staticmethod
     def _helper_cap(res: Any, t: float | None = None) -> dict[str, Any]:

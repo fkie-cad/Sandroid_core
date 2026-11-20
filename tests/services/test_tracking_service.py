@@ -841,6 +841,99 @@ def test_no_helper_fallback_and_manual_shot(env, cfg):
     assert cap[0][:3] == [cap[0][0], "-s", SERIAL]
 
 
+def _fallback_lines(lines):
+    return [x for x in of(lines, "tracking", "helper") if x["data"].get("fallback")]
+
+
+def test_screencap_fallback_is_said_once_per_run_with_why(env, cfg, caplog):
+    import logging
+
+    svc, popen, _run, helpers, _tmp = env
+    caplog.set_level(logging.INFO, logger=ts.__name__)
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg, mode="off")
+        for _ in range(2):
+            svc.manual_shot()
+        assert wait_for(lambda: len(of(lines, "shot", "manual")) == 2)
+        svc.stop()
+        start(svc, popen, helpers, cfg, mode="off")  # a new run says it again
+        svc.manual_shot()
+        assert wait_for(lambda: len(of(lines, "shot", "manual")) == 3)
+    notes = _fallback_lines(lines)
+    assert len(notes) == 2
+    assert notes[0]["data"] == {
+        "helper": "off",
+        "mode": "off",
+        "fallback": "screencap",
+        "reason": "the UI helper is off (tracking helper_mode = off)",
+    }
+    assert notes[0]["level"] == "info"
+    assert "adb screencap" in notes[0]["summary"]
+    logged = [
+        r for r in caplog.records if "screenshots with adb screencap" in r.message
+    ]
+    assert len(logged) == 2
+    assert all(r.levelno == logging.INFO for r in logged)
+    assert "helper is off" in logged[0].message
+
+
+def test_screencap_fallback_names_a_failed_helper_capture(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg, mode="invisible")
+
+        def broken(*, hash_only=False, timeout=5.0):
+            raise OSError("helper socket closed")
+
+        helpers[0].shot = broken
+        svc.manual_shot()
+        assert wait_for(lambda: of(lines, "shot", "manual"))
+    assert of(lines, "shot", "manual")[0]["data"]["via"] == "screencap"
+    (note,) = _fallback_lines(lines)
+    assert note["data"]["reason"] == (
+        "the UI helper's capture failed (helper socket closed)"
+    )
+
+
+def test_screencap_fallback_names_a_helper_that_failed_to_start(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg, mode="invisible")
+        helpers[0].alive = False
+        with svc._lock:
+            svc._helper_state = "failed"
+        svc.manual_shot()
+        assert wait_for(lambda: of(lines, "shot", "manual"))
+    (note,) = _fallback_lines(lines)
+    assert note["data"]["reason"] == "the UI helper failed to start (invisible mode)"
+
+
+def test_report_says_when_screenshots_fell_back_to_screencap():
+    from sandroid.core import report_engine
+
+    lines = [
+        {"src": "tracking", "kind": "helper", "t": "2026-11-20T10:00:00Z",
+         "data": {"helper": "failed", "mode": "invisible",
+                  "fallback": "screencap",
+                  "reason": "the UI helper failed to start (invisible mode)"}},
+        {"src": "tracking", "kind": "helper", "t": "2026-11-20T10:00:05Z",
+         "data": {"helper": "connected", "mode": "invisible"}},
+    ]  # fmt: skip
+    ctx = report_engine.ReportContext(
+        scope=report_engine.ReportScope(),
+        options=report_engine.ReportOptions(),
+        masked=False,
+        generated_at="2026-11-20T10:01:00+00:00",
+        lines=lines,
+    )
+    items = report_engine._cov_tracking(ctx)
+    fallback = [x for x in items if "adb screencap" in x]
+    assert len(fallback) == 1
+    assert fallback[0].endswith(": the UI helper failed to start (invisible mode).")
+    assert not any("was failed" in x for x in items)
+    assert any("was connected" in x for x in items)
+
+
 def test_failed_capture_is_a_warn_line_without_path(env, cfg):
     svc, popen, run, helpers, _tmp = env
     run.screencap = None
