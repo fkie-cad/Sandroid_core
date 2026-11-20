@@ -1,9 +1,15 @@
 """Sandroid's "lived-in world": data packs and the deterministic generator.
 
-Phase 1 is host-only: :func:`generate` builds a :class:`WorldManifest` (a
-social graph plus contacts, SMS, calls, calendar, photo metadata, files and
-notes) from a :class:`WorldSpec`, the owner's name and the packs in
-``sandroid/assets/world``. Nothing here talks to a device.
+:func:`generate` builds a :class:`WorldManifest` (a social graph plus
+contacts, SMS, calls, calendar, photo metadata, files and notes) from a
+:class:`WorldSpec`, the owner's name and the packs in
+``sandroid/assets/world``; it never talks to a device.
+
+Seeding a device lives in submodules that are not imported here:
+:mod:`sandroid.world.prepare` (the Prepare pipeline, ledger and stamp),
+:mod:`sandroid.world.photos` (photo cache and the EXIF privacy step),
+:mod:`sandroid.world.helper` (the on-device world helper) and
+``python -m sandroid.world`` (developer entry point).
 
 Example::
 
