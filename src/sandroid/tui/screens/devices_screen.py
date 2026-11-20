@@ -786,16 +786,6 @@ _STATE_STYLE = {
     RowState.OTHER: "dim",
 }
 
-_STATE_GLYPH = {
-    RowState.READY: "●",
-    RowState.BOOTING: "◐",
-    RowState.OFFLINE: "✕",
-    RowState.UNAUTHORIZED: "!",
-    RowState.NO_PERMISSIONS: "!",
-    RowState.UNPROBED: "◌",
-    RowState.OTHER: "?",
-}
-
 #: Actions that need a row of the given kind (see ``check_action``).
 _DEVICE_ACTIONS = frozenset({"attach"})
 _EMULATOR_ACTIONS = frozenset({"stop", "restart"})
@@ -1299,7 +1289,7 @@ class DevicesScreen(ModalScreen[str | None]):
                 return Text("running elsewhere", style=_c("warn"))
             return Text("stopped", style=_c("dim"))
         if row.active:
-            return Text("ready ◀ active", style=f"bold {_c('ok')}")
+            return Text("ready, active", style=f"bold {_c('ok')}")
         label = row.state.value
         if row.state is RowState.BOOTING:
             elapsed = format_elapsed(self._elapsed(row))
@@ -1313,13 +1303,16 @@ class DevicesScreen(ModalScreen[str | None]):
     def _cells(self, row: DeviceRow | AvdRow) -> tuple[Any, ...]:
         dim = Text("–", style=_c("dim"))
         if isinstance(row, AvdRow):
+            # The State column says it in words and colour; the mark column
+            # keeps only the last-used star (the user's exception to the
+            # no-glyph rule).
             if row.running_elsewhere:
-                glyph, name_style = Text("◌", style=_c("warn")), _c("dim")
+                mark, name_style = Text(""), _c("dim")
             else:
-                glyph = Text("★" if row.last_used else "○", style=_c("dim"))
+                mark = Text("★" if row.last_used else "", style=_c("dim"))
                 name_style = "bold" if row.last_used else ""
             return (
-                glyph,
+                mark,
                 Text(row.name, style=name_style),
                 Text(str(row.api)) if row.api else dim,
                 self._state_cell(row),
@@ -1330,7 +1323,7 @@ class DevicesScreen(ModalScreen[str | None]):
         if not row.is_emulator:
             name.append(" · network" if row.network else " · USB", style=_c("dim"))
         return (
-            Text(_STATE_GLYPH[row.state], style=_c(_STATE_STYLE[row.state])),
+            Text(""),
             name,
             Text(str(row.api)) if row.api else dim,
             self._state_cell(row),
