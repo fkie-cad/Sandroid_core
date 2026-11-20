@@ -3827,7 +3827,10 @@ def test_a_failed_write_keeps_a_persona_devices_record(service, device, monkeypa
 def test_startup_markers_follow_the_persona_the_record_names(
     service, device, app_start, monkeypatch, tmp_path
 ):
+    from sandroid.core.adb import Adb
+
     persona = _persona_device(service, device, monkeypatch)
+    monkeypatch.setattr(Adb, "_target_device", SERIAL)  # the UI's target
     # A new session: no frozen apply to take the markers from.
     monkeypatch.setenv("SDROID_FILES_DIR", str(tmp_path / "new" / "session" / "files"))
     fresh = _fresh()
@@ -3835,3 +3838,49 @@ def test_startup_markers_follow_the_persona_the_record_names(
     assert fp == ident.fingerprint(fresh.active_profile())  # record not read yet
     assert fresh.pre_start(PKG) is None  # reads the record: the persona, done
     assert fresh.active_markers()[0] == ident.fingerprint(persona)
+
+
+def test_a_restore_during_an_apply_stops_its_writes(service, device, monkeypatch):
+    service.apply(SERIAL, PKG)
+    device.props["persist.sys.locale"] = "en-US"
+    device.fs[ident.BOOT_ID_FILE] = b"boot-2\n"
+    service.forget(SERIAL, restored=True)
+    real = service._run_live
+    ran: list[str] = []
+
+    def live(dev, profile, step, info, mem):
+        ran.append(step.value_id)
+        if len(ran) == 1:
+            service.forget(SERIAL, restored=True)  # a snapshot load meanwhile
+        return real(dev, profile, step, info, mem)
+
+    monkeypatch.setattr(service, "_run_live", live)
+    before = dict(_record(device))
+    plan = service.apply(SERIAL, "com.other.app")
+    assert len(ran) == 1  # nothing more written into the loaded state
+    assert any(i.reason == ident.RESTORED_DURING for i in plan.infos.values())
+    assert _record(device) == before  # not recorded
+    assert service._applied[SERIAL].distrust
+    # The next read of the restored record does not trust its "done".
+    service._take_record(SERIAL)
+    assert PKG not in service._applied[SERIAL].done
+    assert not service._applied[SERIAL].distrust
+
+
+def test_a_dirty_record_is_not_read_again(service, device):
+    service.apply(SERIAL, PKG)
+    service.forget(SERIAL)  # a device switch
+    service._record_dirty.add(SERIAL)
+    device.record_reads = 0
+    device.record_down = True  # memory is newer anyway: no read, no refusal
+    service._take_record(SERIAL)
+    assert device.record_reads == 0
+
+
+def test_ensure_applied_without_any_profile_returns_at_once(
+    service, device, monkeypatch
+):
+    service.plan(SERIAL)  # the record is read: it names no persona
+    monkeypatch.setattr(service.config(), "profile", "")
+    with service._apply_lock:  # another device's apply
+        assert service.ensure_applied(SERIAL, budget_s=0.01) is None
