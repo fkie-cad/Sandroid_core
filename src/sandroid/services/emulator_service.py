@@ -1244,14 +1244,17 @@ class EmulatorService:
         )
         # A cold boot wiped the CA mounts, gost, the lane rules and adb
         # reverse. DeviceManager's device-prepared hook (fresh_boot=True)
-        # restores them when it exists AND device preparation is enabled
-        # (checked now, not at import); otherwise restore here.
+        # restores them when it exists, device preparation is enabled
+        # (checked now, not at import) AND this is the active device (the
+        # step only prepares that one); otherwise restore here.
         try:
             from sandroid.services import proxy_restore
 
             # TODO(device-prepared-hook): drop this call once DeviceManager's
             # register_device_prepared_hook is on main and always enabled.
-            if not proxy_restore.device_prepared_hook_active():
+            if not (
+                proxy_restore.device_prepared_hook_active() and is_active_serial(serial)
+            ):
                 proxy_restore.restore_proxy_infra(serial, "cold-boot", fresh_boot=True)
         except Exception as exc:
             self._logger.warning(f"Proxy restore after the restart failed: {exc}")

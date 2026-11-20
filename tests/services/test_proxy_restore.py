@@ -231,8 +231,15 @@ def test_restart_relies_on_the_hook_only_while_device_prep_is_on(monkeypatch, en
     svc = es.EmulatorService()
     svc._get_adb = lambda: SimpleNamespace(get_target_device=lambda: SERIAL)
     state["on"] = enabled  # read at call time, not at registration
+    monkeypatch.setattr(es, "is_active_serial", lambda s: True)
     assert svc.restart() is True
     assert calls == ([] if enabled else [(SERIAL, "cold-boot")])
+    # The step prepares only the ACTIVE device: restarting another emulator
+    # restores at once even while the step is on.
+    calls.clear()
+    monkeypatch.setattr(es, "is_active_serial", lambda s: False)
+    assert svc.restart() is True
+    assert calls == [(SERIAL, "cold-boot")]
 
 
 # -- EmulatorService.load_snapshot ---------------------------------------------------
