@@ -74,6 +74,9 @@ dependencies = [
     "dexray-intercept>=1.0.1.9,<2",
     "tomli-w>=1.0.0",
     "pyyaml>=6.0",
+    # sandroid.world.generator.phone_check validates generated E.164 numbers
+    # with libphonenumber; the "lite" build has no geocoder/carrier data.
+    "phonenumberslite>=8.13",
     "pydantic>=2.0.0",
     "platformdirs>=3.0.0",
     "rich>=13.0.0",
@@ -158,6 +161,14 @@ sandroid = [
     "assets/*.png",
     "assets/*.jpg",
     "assets/uihelper/*.jar",
+    "assets/world/*.md",
+    "assets/world/countries/*.yaml",
+    "assets/world/countries/*.md",
+    "assets/world/languages/*.yaml",
+    "assets/world/languages/*.md",
+    "assets/world/photos/*.yaml",
+    "assets/world/photos/*.md",
+    "world/*.md",
     "tui/*.tcss",
     "tui/themes/*.tcss",
 ]
