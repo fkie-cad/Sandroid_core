@@ -140,3 +140,11 @@ def test_currency_and_date_formats() -> None:
     assert format_date(day, "dd.MM.yyyy") == "07.03.2026"
     assert format_date(day, "d/M/yy") == "7/3/26"
     assert format_date(day, "h:mm a") == "4:05 PM"
+
+
+@pytest.mark.parametrize("pid", ["../x", "a/b", "UPPER", "-lead", "x y", "x\0"])
+def test_photo_ids_must_be_path_safe(pid: str) -> None:
+    pack = BUILTIN.photos()
+    data = {**pack.data, "photos": [{**pack.data["photos"][0], "id": pid}]}
+    report = validate_pack(data, pack_id="photos")
+    assert any(".id" in e for e in report.errors), report.errors

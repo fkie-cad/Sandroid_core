@@ -34,7 +34,8 @@ from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from sandroid.world.packs import BUILTIN_DIR, photo_cache_dir
+from sandroid._version import __version__
+from sandroid.world.packs import BUILTIN_DIR, PHOTO_ID_RE, photo_cache_dir
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -50,7 +51,7 @@ PHOTOS_DIR_ENV = "SDROID_WORLD_PHOTOS_DIR"
 #: The authored screenshots shipped in the package (no URL).
 SCREENSHOT_DIR = BUILTIN_DIR / "photos" / "screenshots"
 #: Generic User-Agent for the downloads (no personal data).
-USER_AGENT = "Sandroid-world-photos/1.0 (python-urllib)"
+USER_AGENT = f"SandroidWorld/{__version__} (+https://pypi.org/project/sandroid/)"
 #: Seconds between two requests (at most one per second).
 MIN_REQUEST_INTERVAL_S = 1.0
 #: Attempts per photo (429 and 5xx are retried, honouring Retry-After).
@@ -61,13 +62,7 @@ MAX_RETRY_AFTER_S = 120.0
 JPEG_QUALITY = 90
 
 # EXIF tags
-_MAKE, _MODEL, _ORIENTATION, _DATETIME, _SOFTWARE = (
-    0x010F,
-    0x0110,
-    0x0112,
-    0x0132,
-    0x0131,
-)
+_MAKE, _MODEL, _ORIENTATION, _DATETIME = 0x010F, 0x0110, 0x0112, 0x0132
 _EXIF_IFD, _GPS_IFD = 0x8769, 0x8825
 
 
@@ -86,11 +81,14 @@ class PhotoFetch:
         paths: Photo id -> a verified local file.
         failed: Photo id -> why it is missing.
         downloaded: Ids fetched over the network in this call.
+        stopped: Why all downloads stopped (the server keeps refusing with
+            HTTP 429), else None.
     """
 
     paths: dict[str, Path] = field(default_factory=dict)
     failed: dict[str, str] = field(default_factory=dict)
     downloaded: list[str] = field(default_factory=list)
+    stopped: str | None = None
 
 
 def file_sha256(path: Path) -> str:
@@ -191,6 +189,9 @@ def ensure_photos(
         pid = str(entry["id"])
         want = str(entry.get("sha256") or "").lower()
         found = None
+        if not PHOTO_ID_RE.fullmatch(pid):
+            result.failed[pid] = "invalid photo id"
+            continue
         for cand in _local_candidates(entry, cache):
             if cand.is_file():
                 if want and file_sha256(cand) == want:
@@ -208,12 +209,19 @@ def ensure_photos(
                 result.failed[pid] = "no sha256 in the photo pack"
             elif not download:
                 result.failed[pid] = "not in the cache"
+            elif fetcher.stopped:
+                result.failed[pid] = f"downloads stopped: {fetcher.stopped}"
             else:
                 try:
                     found = fetcher.fetch(str(url), cache / cache_name(entry), want)
                     result.downloaded.append(pid)
                 except PhotoError as exc:
                     result.failed[pid] = str(exc)
+                    if fetcher.stopped:
+                        result.stopped = fetcher.stopped
+                        logger.warning(
+                            f"world photos: all downloads stopped ({fetcher.stopped})"
+                        )
         if found is not None:
             result.paths[pid] = found
         if progress:
@@ -236,6 +244,8 @@ class _Downloader:
         self.clock = clock
         self.min_interval = min_interval
         self.last: float | None = None
+        #: Set after an unrecoverable 429: no further request is made.
+        self.stopped: str | None = None
 
     def _pace(self) -> None:
         if self.last is not None:
@@ -270,6 +280,8 @@ class _Downloader:
                     wait = _retry_after(exc.headers.get("Retry-After"))
                     error = f"HTTP {exc.code}"
                     if wait > MAX_RETRY_AFTER_S:
+                        if exc.code == 429:
+                            self.stopped = f"HTTP 429, Retry-After {wait:.0f}s"
                         raise PhotoError(f"{error}: Retry-After {wait:.0f}s") from exc
                     self.sleep(max(wait, self.min_interval))
                     continue
@@ -283,6 +295,8 @@ class _Downloader:
                 return dest
             part.unlink()
             error = f"sha256 mismatch ({got[:12]})"
+        if error == "HTTP 429":  # throttled on every attempt
+            self.stopped = f"HTTP 429 after {MAX_ATTEMPTS} attempts"
         raise PhotoError(error)
 
 
@@ -350,7 +364,7 @@ def import_photos(
         if not path.is_file():
             continue
         entry = by_sha.get(file_sha256(path))
-        if entry is None:
+        if entry is None or not PHOTO_ID_RE.fullmatch(str(entry["id"])):
             result.unknown.append(path.name)
             continue
         dest = cache / cache_name(entry)
@@ -524,6 +538,16 @@ def screenshot_exif(taken_ms: int, tz: dt.tzinfo, size: tuple[int, int]) -> byte
     return exif.tobytes()
 
 
+def strip_jfif(jpeg: bytes) -> bytes:
+    """Drop the JFIF APP0 segment libjpeg writes: Pixel camera JPEGs start
+    with the APP1 Exif segment right after SOI.
+    """
+    if jpeg[:4] == b"\xff\xd8\xff\xe0" and jpeg[6:11] == b"JFIF\x00":
+        length = int.from_bytes(jpeg[4:6], "big")
+        return jpeg[:2] + jpeg[4 + length :]
+    return jpeg
+
+
 def _srgb_pixels(im: Any) -> Any:
     """Return the first frame as a fresh RGB image (orientation applied,
     converted to sRGB when it carried another ICC profile, no metadata).
@@ -613,7 +637,9 @@ def process_photo(
             lon=lon,
             size=clean.size,
         )
-        clean.save(dest, format="JPEG", quality=JPEG_QUALITY, exif=data)
+        out = io.BytesIO()
+        clean.save(out, format="JPEG", quality=JPEG_QUALITY, exif=data)
+        dest.write_bytes(strip_jfif(out.getvalue()))
     return ProcessedPhoto(
         id=str(record["id"]),
         path=dest,

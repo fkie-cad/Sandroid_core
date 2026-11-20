@@ -313,6 +313,7 @@ class _Server:
         self.files = files
         self.requests: list[dict] = []
         self.throttle: dict[str, int] = {}
+        self.retry_after = "7"
         srv = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -325,7 +326,7 @@ class _Server:
                 if srv.throttle.get(name, 0) > 0:
                     srv.throttle[name] -= 1
                     self.send_response(429)
-                    self.send_header("Retry-After", "7")
+                    self.send_header("Retry-After", srv.retry_after)
                     self.end_headers()
                     return
                 body = srv.files.get(name)
@@ -461,3 +462,76 @@ def test_retry_after_parsing() -> None:
     future = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=30)
     when = future.strftime("%a, %d %b %Y %H:%M:%S GMT")
     assert 20 < ph._retry_after(when) <= 31
+
+
+def test_jpegs_start_with_exif_like_a_pixel(leaky_jpeg: Path, tmp_path: Path) -> None:
+    data = ph.process_photo(leaky_jpeg, REC, BERLIN, tmp_path / "out").path.read_bytes()
+    assert data[:4] == b"\xff\xd8\xff\xe1"  # SOI, then APP1 Exif
+    assert data[6:12] == b"Exif\x00\x00"
+    assert b"JFIF" not in data
+    assert ph.strip_jfif(b"\xff\xd8\xff\xe1rest") == b"\xff\xd8\xff\xe1rest"
+
+
+def test_invalid_photo_ids_are_refused(tmp_path: Path) -> None:
+    data = _jpeg()
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    result = ph.ensure_photos(
+        [{**_entry("../../etc/x", data), "url": "http://127.0.0.1:9/x"}],
+        cache,
+        download=True,
+    )
+    assert result.failed == {"../../etc/x": "invalid photo id"}
+    folder = tmp_path / "in"
+    folder.mkdir()
+    (folder / "a.jpg").write_bytes(data)
+    imp = ph.import_photos(folder, cache, [_entry("Bad/Id", data)])
+    assert imp.imported == []
+    assert imp.unknown == ["a.jpg"]
+    assert list(cache.iterdir()) == []
+
+
+def test_user_agent_is_generic() -> None:
+    from sandroid._version import __version__
+
+    assert (
+        f"SandroidWorld/{__version__} (+https://pypi.org/project/sandroid/)"
+    ) == ph.USER_AGENT
+
+
+def test_a_long_retry_after_stops_all_downloads(server, tmp_path: Path) -> None:
+    a, b = _jpeg(colour=(1, 1, 1)), _jpeg(colour=(2, 2, 2))
+    server.files.update({"a.jpg": a, "b.jpg": b})
+    server.throttle["a.jpg"] = 1
+    server.retry_after = "3600"
+    clock = _Clock()
+    result = ph.ensure_photos(
+        [
+            _entry("wm-a", a, server.url + "a.jpg"),
+            _entry("wm-b", b, server.url + "b.jpg"),
+        ],
+        tmp_path / "cache",
+        sleep=clock.sleep,
+        clock=clock.now,
+    )
+    assert result.stopped == "HTTP 429, Retry-After 3600s"
+    assert result.failed["wm-b"].startswith("downloads stopped")
+    assert [r["path"] for r in server.requests] == ["a.jpg"]  # b never asked
+
+
+def test_exhausted_429_retries_stop_all_downloads(server, tmp_path: Path) -> None:
+    a, b = _jpeg(colour=(3, 3, 3)), _jpeg(colour=(4, 4, 4))
+    server.files.update({"a.jpg": a, "b.jpg": b})
+    server.throttle["a.jpg"] = 99
+    clock = _Clock()
+    result = ph.ensure_photos(
+        [
+            _entry("wm-a", a, server.url + "a.jpg"),
+            _entry("wm-b", b, server.url + "b.jpg"),
+        ],
+        tmp_path / "cache",
+        sleep=clock.sleep,
+        clock=clock.now,
+    )
+    assert result.stopped == f"HTTP 429 after {ph.MAX_ATTEMPTS} attempts"
+    assert "b.jpg" not in [r["path"] for r in server.requests]

@@ -29,6 +29,8 @@ import yaml
 SCHEMA_VERSIONS = (1, 1.1, "1", "1.1")
 
 BUILTIN_DIR = Path(__file__).resolve().parent.parent / "assets" / "world"
+#: A photo id: it names files in the photo cache, so no path characters.
+PHOTO_ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 PACK_KINDS = ("countries", "languages", "photos")
 
 #: Service kinds known to the generator. Unknown kinds only warn.
@@ -1128,6 +1130,8 @@ def _validate_photos(c: _Checker, d: dict[str, Any]) -> None:
             c.err(p, "must be a mapping")
             continue
         pid = c.require(ph, "id", str, p)
+        if pid is not None and not PHOTO_ID_RE.fullmatch(pid):
+            c.err(f"{p}.id", f"invalid id {pid!r} (a-z, 0-9, '_', '-')")
         if pid in seen:
             c.err(f"{p}.id", f"duplicate id {pid!r}")
         seen.add(pid or "")
