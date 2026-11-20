@@ -728,6 +728,157 @@ def test_older_ledger_lines_cover_every_marker(folder, flow_dir):
         svc.close()
 
 
+SSAID_B = "5c0ffee0b0b0cafe"
+
+
+def test_renamed_marker_ids_across_two_applies(svc, flow_dir, folder, monkeypatch):
+    """Older apply records named the applied app's Android ID ``android_id``
+    and the others ``android_id@<pkg>``: an apply for app B renames A's
+    marker. Coverage and findings follow the value, not the id: A's value
+    is not recorded again, B's value is found in a flow that also holds A's
+    (whose old hit has B's new id), and the timeline gets one line for B.
+    """
+    rec = _rec(1, path=f"/c?a={SSAID}&b={SSAID_B}")
+    _write_flow(flow_dir, rec, _detail("f1", req=b"{}"))
+    apply_a = [*MARKERS, Marker("android_id", SSAID, kind="hex_id", label="AID")]
+    apply_b = [
+        *MARKERS,
+        Marker("android_id", SSAID_B, kind="hex_id", label="AID"),
+        Marker("android_id@a", SSAID, kind="hex_id", label="AID (a)"),
+    ]
+    with timeline.capture() as lines:
+        svc.set_markers(FP, apply_a)
+        assert svc.flush()
+        first = svc.hits_for_flow("f1")
+        n_lines = len(_privacy_lines(lines))
+        calls = _spy_needles(monkeypatch)
+        svc.set_markers(FP, apply_b)
+        assert svc.flush()
+    # Only B's value was new: the delta looked for it alone.
+    assert calls[-1] == ["android_id"]
+    hits = svc.hits_for_flow("f1")
+    values = sorted(h.snippet[1] for h in hits if h.marker_id.startswith("android"))
+    assert values == sorted([SSAID, SSAID_B])
+    assert len(hits) == len(first) + 1
+    assert len({(h.part, h.value_key, h.transform) for h in hits}) == len(hits)
+    added = _privacy_lines(lines)[n_lines:]
+    assert len(added) == 1
+    assert added[0]["data"]["marker_id"] == "android_id"
+    # The header counts the seeded values, each once.
+    summary = svc.summary()
+    assert (summary.values_total, summary.values_found) == (5, 2)
+    # Back to the first naming: nothing is new.
+    n_cov = len(_coverage(folder))
+    svc.set_markers(FP, apply_a + [Marker("android_id@b", SSAID_B, kind="hex_id")])
+    assert svc.flush()
+    assert len(svc.hits_for_flow("f1")) == len(hits)
+    assert len(_coverage(folder)) == n_cov
+
+
+def test_coverage_shares_one_marker_set_per_item(svc, flow_dir, folder):
+    """Each covered item keeps the (shared) digests of the marker sets it
+    was scanned for, not a copy of the markers; a reload shares them too.
+    """
+    for seq in (1, 2, 3):
+        _ssaid_flow(flow_dir, seq)
+    svc.set_markers(FP, MARKERS)
+    assert svc.flush()
+    svc.set_markers(FP, GROWN)
+    assert svc.flush()
+
+    def sets(service) -> list[tuple[str, ...]]:
+        keys = [(f"flow:f{i}", FP, ps.ENGINE_VERSION) for i in (1, 2, 3)]
+        return [service._covered_markers[key] for key in keys]
+
+    first = sets(svc)
+    assert all(len(names) == 2 for names in first)
+    assert all(isinstance(n, str) for names in first for n in names)
+    for names in first[1:]:
+        assert all(a is b for a, b in zip(names, first[0], strict=True))
+    fresh = ps.PrivacyScanService(
+        folder_fn=lambda: folder, flow_dir_fn=lambda: flow_dir
+    )
+    try:
+        fresh.load_session(folder)
+        loaded = sets(fresh)
+        assert loaded == first
+        for names in loaded[1:]:
+            assert all(a is b for a, b in zip(names, loaded[0], strict=True))
+    finally:
+        fresh.close()
+
+
+def test_sweep_items_keep_no_marker_sets(svc, folder):
+    item = ps._SweepItem(
+        build_needles(MARKERS), FP, 0.0, mset="abc", sweep_id="s", member="m"
+    )
+    svc._folder = folder
+    svc._ledger(item)
+    entry = (item.key(), FP, ps.ENGINE_VERSION)
+    assert entry in svc._covered
+    assert entry not in svc._covered_markers
+
+
+def test_older_line_plus_set_line_still_covers_every_marker(folder, flow_dir):
+    """An item with an older (set-less) line stays covered for every marker,
+    whichever order its lines come in.
+    """
+    _ssaid_flow(flow_dir, 1)
+    _ssaid_flow(flow_dir, 2)
+    small = ps._set_digest({ps._marker_digest(MARKERS[0])})
+    base = {"v": 1, "at": 1.0, "fp": FP, "engine": ps.ENGINE_VERSION, "skip": None}
+    lines = [
+        {**base, "key": f"markers:{small}", "skip": "markers", "set": small,
+         "markers": [ps._marker_digest(MARKERS[0])]},
+        {**base, "key": "flow:f1"},
+        {**base, "key": "flow:f1", "set": small},
+        {**base, "key": "flow:f2", "set": small},
+        {**base, "key": "flow:f2"},
+    ]  # fmt: skip
+    (folder / "privacy").mkdir(parents=True)
+    (folder / "privacy" / "coverage.jsonl").write_text(
+        "".join(json.dumps(line) + "\n" for line in lines)
+    )
+    svc = ps.PrivacyScanService(folder_fn=lambda: folder, flow_dir_fn=lambda: flow_dir)
+    try:
+        svc.set_markers(FP, GROWN)
+        assert svc.flush()
+        assert svc.hits() == []
+        assert len(_coverage(folder)) == len(lines)
+    finally:
+        svc.close()
+    covered: set = set()
+    names: dict = {}
+    entry = ("flow:f3", FP, 1)
+    ps._note_cover(covered, names, entry, "s1")
+    ps._note_cover(covered, names, entry, None)
+    ps._note_cover(covered, names, entry, "s2")
+    assert entry in covered
+    assert entry not in names
+
+
+def test_delta_pass_scans_whole_marker_groups(svc, flow_dir, monkeypatch):
+    """A changed latitude is rescanned with its longitude, so the pair's
+    proximity boost still applies; the longitude is not recorded again.
+    """
+    rec = _rec(1, path="/geo?ll=52.5200,13.4050")  # 4 places: medium alone
+    _write_flow(flow_dir, rec, _detail("f1", req=b"{}"))
+    old_lat = Marker("lat", "48.137154", kind="latitude", group="gps", tag="GPS")
+    svc.set_markers(FP, [MARKERS[0], MARKERS[1], old_lat, MARKERS[3]])
+    assert svc.flush()
+    lon_hits = [h for h in svc.hits_for_flow("f1") if h.marker_id == "lon"]
+    assert lon_hits
+    calls = _spy_needles(monkeypatch)
+    svc.set_markers(FP, MARKERS)
+    assert svc.flush()
+    assert sorted(calls[-1]) == ["lat", "lon"]
+    hits = svc.hits_for_flow("f1")
+    assert [h for h in hits if h.marker_id == "lon"] == lon_hits
+    lat = [h for h in hits if h.marker_id == "lat"]
+    assert lat
+    assert {h.confidence for h in lat} == {"high"}  # boosted by the pair
+
+
 def test_read_hits_and_run_hits(svc, flow_dir, folder, tmp_path):
     _standard_flow(flow_dir)
     svc.set_markers(FP, MARKERS)

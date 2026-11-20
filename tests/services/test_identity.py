@@ -1232,8 +1232,9 @@ def test_markers_contract(service, device, monkeypatch):
     assert seen[-1] == (fp, markers)
     assert all(isinstance(m, Marker) for m in markers)
     by_id = {m.id: m for m in markers}
-    assert by_id["android_id"].value == device.ssaid["com.example.app"]
-    assert by_id["android_id"].tag == "AndroidID"
+    aid = by_id["android_id@com.example.app"]  # per app, whichever is applied
+    assert aid.value == device.ssaid["com.example.app"]
+    assert aid.tag == "AndroidID"
     assert by_id["gaid"].kind == "uuid"
     assert by_id["gaid"].label == "Advertising ID"
     assert by_id["gaid"].tag == "AdID"
@@ -1285,7 +1286,8 @@ def test_restart_in_a_new_session_scans_without_a_re_apply(
     fp3, markers = changed.active_markers()
     assert fp3 != fp
     new_by_id = {m.id: m for m in markers}
-    assert new_by_id["android_id"].value == by_id["android_id"].value
+    aid = "android_id@com.example.app"
+    assert new_by_id[aid].value == by_id[aid].value
     assert new_by_id["device_name"].value == "Changed Phone"
     assert device.calls == []
     # Another profile's apply is not used.
@@ -1374,3 +1376,39 @@ def test_lists_script_reads_only_the_lists():
     assert "@@list:calls@@" in script
     assert "abx2xml" not in script
     assert ident.lists_script([TOKEN + "\n"]).count("@@list:") == 0
+
+
+def test_android_id_markers_keep_their_id_whichever_app_was_applied():
+    """A per-app Android ID is always ``android_id@<package>``: an apply for
+    another app reorders the markers but renames none (the privacy scan
+    keys its coverage and findings on them).
+    """
+    profile = _profile()
+    ssaids = {"com.a": "1111aaaa2222bbbb", "com.b": "3333cccc4444dddd"}
+
+    def android_ids(markers: list[Marker]) -> list[tuple[str, str]]:
+        return [(m.id, m.value) for m in markers if m.id.startswith("android_id")]
+
+    first = android_ids(ident.markers_for(profile, ssaids, "com.a"))
+    second = android_ids(ident.markers_for(profile, ssaids, "com.b"))
+    assert first == [
+        ("android_id@com.a", "1111aaaa2222bbbb"),
+        ("android_id@com.b", "3333cccc4444dddd"),
+    ]
+    assert second == first[::-1]  # the applied app first
+
+
+def test_older_frozen_records_get_the_per_app_android_id():
+    """Records frozen before the per-app ids gave the applied app's Android
+    ID the plain id: it is read back as ``android_id@<package>``.
+    """
+    record = {
+        "ssaid": {"com.a": {"value": "1111aaaa2222bbbb", "signer": "x"}},
+        "markers": [
+            {"id": "android_id", "value": "1111aaaa2222bbbb", "kind": "hex_id"},
+            {"id": "android_id@com.b", "value": "3333cccc4444dddd", "kind": "hex_id"},
+            {"id": "label", "value": "1111aaaa2222bbbb", "kind": "text"},
+        ],
+    }
+    ids = [m.id for m in ident._frozen_markers(record)]
+    assert ids == ["android_id@com.a", "android_id@com.b", "label"]
