@@ -341,23 +341,17 @@ def test_stale_frida_server_is_detected_and_restarted_at_startup(monkeypatch):
     assert resets == [1]
 
 
-def test_restart_after_system_restart_only_when_running(monkeypatch):
+def test_dead_post_ca_restart_helper_is_gone():
+    """The post-CA frida restart moved into the identity/proxy restart window.
+
+    ``restart_frida_server_after_system_restart`` (and its private
+    ``_wait_for_system_server`` poll) had no caller left; stale servers are
+    handled by ``auto_start_frida_server``'s start-time check instead.
+    """
     from sandroid.core import frida_manager as fm_mod
 
-    monkeypatch.setattr(fm_mod, "_wait_for_system_server", lambda: True)
-    monkeypatch.setattr(fm_mod, "reset_frida_handles", lambda: None)
-    fm = _RestartableFM(frida_start=1, system_start=2)
-    assert fm_mod.restart_frida_server_after_system_restart(fm) == (
-        True,
-        "frida-server restarted",
-    )
-    assert fm.calls == ["restart"]
-
-    idle = _ServerFM(running=False)
-    ok, reason = fm_mod.restart_frida_server_after_system_restart(idle)
-    assert not ok
-    assert reason == "frida-server not running"
-    assert idle.calls == []
+    assert not hasattr(fm_mod, "restart_frida_server_after_system_restart")
+    assert not hasattr(fm_mod, "_wait_for_system_server")
 
 
 # -- M6: frida-server relaunch took two zygote PIDs ------------------------
