@@ -210,6 +210,10 @@ _ROW_TEXT: dict[tuple[str, str], str] = {
     ("Devices screen (D)", "escape"): "Close (an open snapshot list first)",
     ("Devices screen (D)", "ctrl+c"): "Quit (at startup: stop the start)",
     ("Proxy settings (y)", "r"): "Remove CA (asks first)",
+    ("Inspector (while open)", "left"): "Previous tab (unless the focus uses Left)",
+    ("Inspector (while open)", "right"): "Next tab (unless the focus uses Right)",
+    ("Inspector (while open)", "left_square_bracket"): "Previous tab (always)",
+    ("Inspector (while open)", "right_square_bracket"): "Next tab (always)",
     ("Static analysis (a)", "enter"): "Start the analysis (Esc cancels)",
     ("Static analysis (a)", "p"): "Switch the analysis profile (privacy, generic)",
     ("Static analysis (a)", "t"): "Trackers on / off",
@@ -246,6 +250,15 @@ _HAND_SECTIONS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
         ("Ctrl+D / U", "Log half a page down / up", ("ctrl+d", "ctrl+u")),
         ("Shift+Y", "Copy the whole log", ("Y",)),
     ],
+    "Review (p)": [
+        ("Space", "Select a file or request to compare", ("space",)),
+        (
+            "Enter",
+            "Rewind, or Rewind + Replay (requests are compared after a replay)",
+            ("enter",),
+        ),
+        ("Esc", "Close (asks once when nothing is selected)", ("escape",)),
+    ],
 }
 #: Main-screen bindings with this description prefix size the AI chat:
 #: listed in the AI chat section.
@@ -253,6 +266,7 @@ _CHAT_PREFIX = "AI chat "
 #: Sections for the AI chat dock and the log drawer, after the global
 #: action categories (in this order).
 _DOCK_SECTIONS = (
+    "Review (p)",
     "AI chat",
     "AI chat › approval prompt",
     "AI chat › agents bar",
@@ -708,7 +722,7 @@ class HelpScreen(ModalScreen):
 
         # -- collect: global action rows, panel sections ---------------------
         def action_order(a: Action):
-            # The demo/main flow (Record, Play) leads, digit keys (the lenses
+            # The main flow (Record, Review) leads, digit keys (the lenses
             # 1-6) follow in key order; the rest alphabetical.
             return (
                 a.name not in ("record", "play"),

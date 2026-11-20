@@ -74,8 +74,21 @@ def test_reserved_holds_the_main_screen_wide_keys() -> None:
 
 
 def test_row_text_only_rewords_real_bindings() -> None:
+    # Main-screen bindings with the Inspector prefix are listed (and
+    # reworded) under "Inspector (while open)".
+    moved = {
+        k
+        for _s, d, raw in hs._panel_binding_rows(
+            "sandroid.tui.screens.main_screen", "MainScreen"
+        )
+        if d.startswith(hs._INSPECTOR_PREFIX)
+        for k in raw
+    }
     for (heading, key), _text in hs._ROW_TEXT.items():
-        assert key in _section_raw_keys(heading), (heading, key)
+        keys = _section_raw_keys(heading)
+        if heading == "Inspector (while open)":
+            keys |= moved
+        assert key in keys, (heading, key)
 
 
 def test_hand_written_sections_cover_the_real_keys() -> None:
