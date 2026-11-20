@@ -823,14 +823,31 @@ class DeviceManager:
         :class:`~sandroid.core.device_prep.PrepResult`) on the prepare
         worker thread, after root/SELinux and the ``device_prepared`` hooks
         -- the point from which Frida and app work may touch the device.
-        Also fired when a run found the device already prepared, and once
-        after a snapshot load that re-attached it (``result.kind ==
-        "held"``). Marshal UI work to the UI thread.
+        Also fired after a run that failed (``result.kind == "failed"``:
+        the work goes on, as before the step existed), once after a
+        snapshot load that re-attached it (``"held"``), and for a run that
+        found the device already prepared when the listeners have not seen
+        that yet (``"unchanged"``, e.g. switched away and back); never for
+        an aborted run. Marshal UI work to the UI thread.
 
         Args:
             callback: Function to call with the device and the result
         """
         self._on_device_prepared_callbacks.append(callback)
+
+    def remove_device_prepared_listener(
+        self, callback: Callable[[Device, object], None]
+    ) -> bool:
+        """Unregister an :meth:`on_device_prepared` callback.
+
+        Returns:
+            False when it was not registered.
+        """
+        try:
+            self._on_device_prepared_callbacks.remove(callback)
+        except ValueError:
+            return False
+        return True
 
     def _fire_device_prepared(self, device: Device | None, result: object) -> None:
         """Call the :meth:`on_device_prepared` listeners (never raises)."""

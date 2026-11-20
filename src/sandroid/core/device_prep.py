@@ -11,16 +11,23 @@ fixed order::
     1. classify    boot_id / ro.runtime.firstboot / uptime (one adb call):
                    ``first`` (new to this process), ``new-world`` (rebooted:
                    a timeline world change before anything else),
-                   ``reattach`` (same boot, new adb transport) or
+                   ``reattach`` (same boot, new adb transport; also a
+                   retry when root / SELinux failed last time) or
                    ``unchanged`` (nothing to do)
     2. clock       ``device_clock.after_device_connect``
     3. root        ``adb root`` (by ``Device.root_kind``), ``setenforce 0``,
-                   then the waiting session-start clock sync
+                   then the waiting session-start clock sync; the adb
+                   transport is read here (after adb root's adbd restart)
     4. hooks       :func:`register_device_prepared_hook` callbacks,
                    ``hook(serial, fresh_boot)`` (e.g. the proxy restore)
     5. done        record the boot + transport, release waiters, fire
                    ``DeviceManager.on_device_prepared`` listeners (Frida,
                    app work)
+
+The listeners also get ``failed`` runs (and ``held`` after a snapshot
+load that dropped a re-attach), never ``aborted`` ones; an ``unchanged``
+run reaches them only when they have not seen this prepared state yet
+(e.g. after a switch away and back).
 
 Only the active serial is ever prepared (requests for other serials are
 ignored), so the ``--serial`` pin rules and other sessions' devices stay
@@ -31,7 +38,8 @@ check); everything else keeps today's behaviour.
 Public API: :func:`register_device_prepared_hook`,
 :func:`unregister_device_prepared_hook`, :func:`request_prepare`,
 :func:`ensure_prepared`, :func:`wait_prepared`, :func:`is_preparing`,
-:func:`hold`, :func:`note_adb_server_restart`, :func:`set_enabled`.
+:func:`hold`, :func:`note_adb_server_restart`, :func:`note_world_recorded`,
+:func:`set_enabled`, :func:`is_enabled`.
 """
 
 from __future__ import annotations
@@ -62,6 +70,14 @@ SETTLE_STABLE_S = 1.0
 REATTACH_MIN_INTERVAL_S = 5.0
 #: Uptime this far below the recorded one is a rewind (a new world).
 UPTIME_REWIND_S = 2.0
+#: Two boot starts (host monotonic - device uptime) this close are the
+#: same world (adb latency jitter).
+BOOT_START_TOLERANCE_S = 2.0
+#: Seconds the first run waits for a connect clock sample that started
+#: while the step was off (before its ``adb root`` restarts adbd).
+CONNECT_JOIN_S = 15.0
+#: The thread name of ``device_clock.after_device_connect_async``.
+_CLOCK_CONNECT_THREAD = "device-clock-connect"
 #: Seconds a preparing active device may be missing from ``adb devices``
 #: (``adb root`` restarts adbd) before the device manager declares it lost.
 LOSS_GRACE_S = 20.0
@@ -147,17 +163,19 @@ class PrepResult:
 
     @property
     def has_problems(self) -> bool:
-        """Root or SELinux failed, or a hook failed."""
+        """The run failed, root or SELinux failed, or a hook failed."""
         root_bad = self.root == "failed"
         selinux_bad = self.selinux_check is not None and not self.selinux_check.passed
-        return bool(self.hook_errors) or root_bad or selinux_bad
+        failed = self.kind == "failed"
+        return bool(self.hook_errors) or root_bad or selinux_bad or failed
 
     def summary(self) -> str:
         """One activity-log line, e.g. ``Prepared emulator-5554 (reboot):
         root ✓ SELinux Permissive ✓ hooks 1/1, 3.2 s``.
         """
         if not self.ran:
-            return f"Device {self.serial}: preparation {self.kind}"
+            why = f" ({self.error})" if self.error else ""
+            return f"Device {self.serial}: preparation {self.kind}{why}"
         label = _KIND_LABEL.get(self.kind, self.kind)
         root = {
             "ok": "root ✓",
@@ -207,6 +225,11 @@ class _Serial:
     last_reattach: float = float("-inf")
     connect_started: bool = False
     world_token: str | None = None
+    #: Boot start (host monotonic - uptime) of the last world change.
+    world_boot_start: float | None = None
+    #: The listeners have seen the current prepared state (an ``unchanged``
+    #: run then does not fire them again); cleared on detach.
+    delivered: bool = False
     held: int = 0
     held_dropped: bool = False
     progress: list[Callable[[str], None]] = field(default_factory=list)
@@ -404,6 +427,7 @@ def note_detached(serial: str) -> None:
         state = _STATES.get(serial)
         if state is not None:
             state.gen += 1
+            state.delivered = False
             _IDLE.notify_all()
 
 
@@ -419,6 +443,31 @@ def note_adb_server_restart() -> None:
     serial = _active_serial()
     if serial:
         request_prepare(serial, "adb-server")
+
+
+def note_world_recorded(serial: str) -> None:
+    """The caller recorded the world change of ``serial``'s current boot
+    itself (``EmulatorService.restart``'s cold boot while the step did not
+    prepare it): a later run that finds this boot new records no second
+    one (it still re-prepares the device). Blocks for one adb call.
+    """
+    with _LOCK:
+        state = _STATES.get(serial)
+        if state is None or state.record is None:
+            return  # a first run records no world change anyway
+    try:
+        from sandroid.core.adb import Adb
+
+        with Adb.targeting(serial):
+            token, uptime = _read_boot_info(serial)
+    except Exception:
+        logger.debug("device prep: reading the boot failed", exc_info=True)
+        return
+    if token is None:
+        return
+    with _LOCK:
+        state.world_token = token
+        state.world_boot_start = _boot_start(uptime)
 
 
 def is_preparing(serial: str | None = None) -> bool:
@@ -595,8 +644,16 @@ def hold(serial: str | None, cause: str = "snapshot-load") -> Iterator[None]:
             last = state.held == 0
             dropped = last and state.held_dropped
             known = state.record is not None
-        if last and known and _ENABLED:
-            _record_after_hold(serial, state, dropped, cause)
+        if last and _ENABLED:
+            if known:
+                _record_after_hold(serial, state, dropped, cause)
+            elif dropped:
+                # Never prepared: nothing to record, but the re-attach the
+                # hold dropped still reaches the listeners (Frida / app).
+                manager = state.manager or _peek_manager()
+                if _active_serial(manager) == serial:
+                    held = PrepResult(serial, "held", reason=cause)
+                    _deliver(state, manager, serial, held)
 
 
 def _record_after_hold(serial: str, state: _Serial, dropped: bool, cause: str) -> None:
@@ -618,10 +675,12 @@ def _record_after_hold(serial: str, state: _Serial, dropped: bool, cause: str) -
             token, uptime, transport, old.root, old.root_check, old.selinux_check
         )
         if token:
+            # The load recorded its own world change ("snapshot-load").
             state.world_token = token
+            state.world_boot_start = _boot_start(uptime)
         manager = state.manager or _peek_manager()
     if dropped and _active_serial(manager) == serial:
-        _fire_listeners(manager, serial, PrepResult(serial, "held", reason=cause))
+        _deliver(state, manager, serial, PrepResult(serial, "held", reason=cause))
 
 
 # ------------------------------------------------------------------ worker
@@ -633,10 +692,10 @@ def _worker(serial: str) -> None:
 
     ident = threading.get_ident()
     with _LOCK:
-        _PREP_THREADS.add(ident)
         state = _STATES.get(serial)
-    if state is None:
-        return
+        if state is None:
+            return
+        _PREP_THREADS.add(ident)
     idle = False
     try:
         while not idle:
@@ -653,9 +712,14 @@ def _worker(serial: str) -> None:
                 with Adb.targeting(serial):
                     result = _run(serial, state, reason, gen, manager)
             except (Exception, SystemExit) as e:
-                logger.warning(f"Preparing {serial} failed: {e}", exc_info=True)
-                result = PrepResult(serial, "failed", reason=reason, error=str(e))
-            result.duration_s = time.monotonic() - t0
+                logger.debug(f"Preparing {serial} raised", exc_info=True)
+                if _alive(serial, state, gen, manager):
+                    result = PrepResult(serial, "failed", reason=reason, error=str(e))
+                    _finish(serial, state, manager, result, t0)
+                else:
+                    result = PrepResult(serial, "aborted", reason=reason)
+            if not result.duration_s:
+                result.duration_s = time.monotonic() - t0
             with _LOCK:
                 state.result = result
                 transport_only = state.pending == "transport"
@@ -707,9 +771,10 @@ def _run(
     serial: str, state: _Serial, reason: str, gen: int, manager: Any
 ) -> PrepResult:
     """One prepare run (worker thread, adb pinned to ``serial``)."""
+    t0 = time.monotonic()
 
     def alive() -> bool:
-        return _ENABLED and state.gen == gen and _active_serial(manager) == serial
+        return _alive(serial, state, gen, manager)
 
     def aborted() -> PrepResult:
         logger.info(f"Preparing {serial} aborted (device lost or switched)")
@@ -719,29 +784,39 @@ def _run(
     if not _settle(serial, lambda: not alive()):
         if not alive():
             return aborted()
-        return PrepResult(
+        result = PrepResult(
             serial, "failed", reason=reason, error="device did not become ready"
         )
+        _finish(serial, state, manager, result, t0)
+        return result
     if not alive():
         return aborted()
 
     _stage(state, "checking the boot")
     token, uptime = _read_boot_info(serial)
+    boot_start = _boot_start(uptime)
     transport, _ready = _read_transport(serial)
     with _LOCK:
         record = state.record
     kind = _classify(record, token, uptime, transport)
-    if kind == "unchanged":
+    if kind == "unchanged" and record is not None:
+        if not alive():
+            return aborted()
+        with _LOCK:
+            if uptime is not None:
+                # Same boot: keep the rewind check against a current uptime.
+                record.uptime = uptime
+            deliver = not state.delivered
         result = PrepResult(
             serial,
             "unchanged",
             reason=reason,
             boot_token=token,
-            root=record.root if record else "",
-            root_check=record.root_check if record else None,
-            selinux_check=record.selinux_check if record else None,
+            root=record.root,
+            root_check=record.root_check,
+            selinux_check=record.selinux_check,
         )
-        _finish(serial, state, manager, result)
+        _finish(serial, state, manager, result, t0, deliver=deliver)
         return result
     fresh_boot = kind != "reattach"
     if kind == "reattach":
@@ -749,7 +824,7 @@ def _run(
         if wait > 0 and _sleep_unless(lambda: not alive(), wait):
             return aborted()
     if kind == "new-world":
-        _world_change(serial, state, token, reason)
+        _world_change(serial, state, token, boot_start, reason)
     if not alive():
         return aborted()
 
@@ -757,7 +832,10 @@ def _run(
     with _LOCK:
         skip_connect = kind == "first" and state.connect_started
         state.connect_started = False
-    if not skip_connect:
+    if skip_connect:
+        # Sampled when the step was off: let it finish before adb root.
+        _join_connect_sample(CONNECT_JOIN_S)
+    else:
         _clock_connect(serial)
     if not alive():
         return aborted()
@@ -770,6 +848,10 @@ def _run(
     selinux_check = _selinux_step(serial)
     if not alive():
         return aborted()
+    # The transport after adb root's adbd restart, BEFORE the hooks: a
+    # reset during the hooks (after the proxy re-added ``adb reverse``) is
+    # then a real one and causes exactly one more run.
+    transport, _ready = _read_transport(serial)
 
     _stage(state, "hooks")
     total, errors = _run_hooks(serial, fresh_boot)
@@ -777,7 +859,6 @@ def _run(
         return aborted()
 
     _stage(state, "finishing")
-    transport, _ready = _read_transport(serial)  # after adb root
     with _LOCK:
         state.record = _Record(
             token, uptime, transport, root, root_check, selinux_check
@@ -796,18 +877,43 @@ def _run(
         hooks_total=total,
         hook_errors=errors,
     )
-    _finish(serial, state, manager, result)
+    _finish(serial, state, manager, result, t0)
     return result
 
 
-def _finish(serial: str, state: _Serial, manager: Any, result: PrepResult) -> None:
+def _alive(serial: str, state: _Serial, gen: int, manager: Any) -> bool:
+    """The run may go on: step on, no detach / hold since, still active."""
+    return _ENABLED and state.gen == gen and _active_serial(manager) == serial
+
+
+def _finish(
+    serial: str,
+    state: _Serial,
+    manager: Any,
+    result: PrepResult,
+    t0: float,
+    *,
+    deliver: bool = True,
+) -> None:
+    """Store, log and (``deliver``) hand ``result`` to the listeners."""
+    result.duration_s = time.monotonic() - t0
     with _LOCK:
         state.result = result
-    if result.ran:
+    if result.ran or result.kind == "failed":
         log = logger.warning if result.has_problems else logger.info
         log(result.summary())
         for error in result.hook_errors:
             logger.warning(f"device_prepared hook failed on {serial}: {error}")
+    if deliver:
+        _deliver(state, manager, serial, result)
+
+
+def _deliver(state: _Serial, manager: Any, serial: str, result: PrepResult) -> None:
+    """Fire the listeners; remember whether they now saw a prepared state
+    (a ``failed`` run's listeners see the next ``unchanged`` run again).
+    """
+    with _LOCK:
+        state.delivered = result.prepared or result.kind == "held"
     _fire_listeners(manager, serial, result)
 
 
@@ -842,19 +948,44 @@ def _classify(
         and uptime + UPTIME_REWIND_S < record.uptime
     ):
         return "new-world"
-    if transport and transport == record.transport_id:
+    if transport and transport == record.transport_id and _record_ok(record):
         return "unchanged"
+    # A new transport -- or root / SELinux failed last time: try again.
     return "reattach"
 
 
-def _world_change(serial: str, state: _Serial, token: str | None, reason: str) -> None:
+def _record_ok(record: _Record) -> bool:
+    """The recorded root and SELinux steps did not fail."""
+    selinux = record.selinux_check
+    selinux_bad = selinux is not None and not getattr(selinux, "passed", True)
+    return record.root != "failed" and not selinux_bad
+
+
+def _boot_start(uptime: float | None) -> float | None:
+    """When the device's boot started, in host monotonic time (None unknown)."""
+    return None if uptime is None else time.monotonic() - uptime
+
+
+def _world_change(
+    serial: str,
+    state: _Serial,
+    token: str | None,
+    boot_start: float | None,
+    reason: str,
+) -> None:
     """The device rebooted: a new world on the session timeline (it starts
-    a new device-clock epoch), once per boot.
+    a new device-clock epoch), once per world -- the boot (token) and its
+    start time, since an uptime rewind keeps the boot_id.
     """
     with _LOCK:
         if token is not None and state.world_token == token:
-            return
+            old = state.world_boot_start
+            if boot_start is None or old is None:
+                return
+            if abs(boot_start - old) <= BOOT_START_TOLERANCE_S:
+                return
         state.world_token = token
+        state.world_boot_start = boot_start
     try:
         from sandroid.core.timeline import get_timeline
 
@@ -945,6 +1076,16 @@ def _read_transport(serial: str) -> tuple[str, bool]:
         if entry.serial == serial:
             return entry.props.get("transport_id", ""), entry.state == "device"
     return "", False
+
+
+def _join_connect_sample(timeout: float) -> None:
+    """Wait (bounded) for a running ``after_device_connect_async`` sample:
+    startup selected the device while the step was off.
+    """
+    deadline = time.monotonic() + timeout
+    for thread in threading.enumerate():
+        if thread.name == _CLOCK_CONNECT_THREAD and thread.is_alive():
+            thread.join(max(0.0, deadline - time.monotonic()))
 
 
 def _clock_connect(serial: str) -> None:
@@ -1061,6 +1202,7 @@ __all__ = [
     "last_result",
     "note_adb_server_restart",
     "note_detached",
+    "note_world_recorded",
     "prepared_transport",
     "preparing_stage",
     "register_device_prepared_hook",

@@ -283,6 +283,7 @@ def test_critical_setup_warns_when_sqldiff_is_missing(monkeypatch):
     import threading
 
     service._lock = threading.RLock()
+    service._check_lock = threading.Lock()
     service._run_critical_checks = lambda **kw: SetupResult(success=True)
     monkeypatch.setattr(setup_checks.shutil, "which", lambda name: None)
     result = SetupService.check_critical_setup(service)

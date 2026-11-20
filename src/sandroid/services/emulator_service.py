@@ -1268,6 +1268,14 @@ class EmulatorService:
                 dev=serial,
                 data={"avd": launch.avd, "ok": True},
             )
+            # ...and once only: a later attach of this boot (the step was
+            # on but did not prepare it) records no second "reboot".
+            try:
+                from sandroid.core import device_prep
+
+                device_prep.note_world_recorded(serial)
+            except Exception as exc:
+                self._logger.debug(f"Could not note the cold boot: {exc}")
         # A cold boot wiped the CA mounts, gost, the lane rules and adb
         # reverse. DeviceManager's device-prepared hook (fresh_boot=True)
         # restores them when it exists, device preparation is enabled

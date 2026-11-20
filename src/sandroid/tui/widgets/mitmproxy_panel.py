@@ -234,8 +234,9 @@ class MitmproxyPanel(Widget):
     def _subscribe_device_changes(self) -> None:
         """Re-probe after a device reconnect (once per panel; best-effort).
 
-        DeviceManager has no unregister, so the callback checks
-        ``_unmounted`` and becomes a no-op once the panel is gone.
+        DeviceManager has no unregister for change callbacks, so the
+        callback checks ``_unmounted`` and becomes a no-op once the panel is
+        gone; the prepared listener is removed on unmount.
         """
         if self._device_cb_registered:
             return
@@ -248,14 +249,16 @@ class MitmproxyPanel(Widget):
             # A (re)connected device is re-probed once it is prepared (root,
             # SELinux, the proxy restore hooks), not while that still runs.
             if service.has_device_manager():
-                register = getattr(
-                    service.get_device_manager(), "on_device_prepared", None
-                )
+                manager = service.get_device_manager()
+                register = getattr(manager, "on_device_prepared", None)
                 if callable(register):
-                    register(
-                        lambda device, _result: self._on_device_change(device, True)
-                    )
+
+                    def prepared(device, _result) -> None:
+                        self._on_device_change(device, True)
+
+                    register(prepared)
                     self._prepared_cb_registered = True
+                    self._prepared_cb = (manager, prepared)
         except Exception as exc:
             logger.debug("mitm panel device-change subscription failed: %s", exc)
 
@@ -336,8 +339,20 @@ class MitmproxyPanel(Widget):
 
         threading.Thread(target=_run, name="mitm-reverse-cleanup", daemon=True).start()
 
+    def _unsubscribe_device_prepared(self) -> None:
+        """Drop the ``on_device_prepared`` listener (best-effort)."""
+        manager, callback = getattr(self, "_prepared_cb", (None, None))
+        self._prepared_cb = (None, None)
+        remove = getattr(manager, "remove_device_prepared_listener", None)
+        if callable(remove):
+            try:
+                remove(callback)
+            except Exception:
+                pass
+
     def on_unmount(self) -> None:
         self._unmounted = True
+        self._unsubscribe_device_prepared()
         self._cancel_reprobe()
         try:
             self._service.remove_listener(self._on_service_line)

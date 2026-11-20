@@ -293,6 +293,10 @@ class SetupService:
         self._logger = logger
         self._last_result: SetupResult | None = None
         self._lock = Lock()
+        # Serializes check runs. Not ``_lock``: the critical checks may wait
+        # minutes for the device-prepared step, and the state readers
+        # (get_last_result, get_status_dict) must not wait with them.
+        self._check_lock = Lock()
 
     def _get_adb(self) -> AdbProtocol:
         """Get ADB interface, falling back to global if not injected.
@@ -339,13 +343,13 @@ class SetupService:
         Returns:
             SetupResult with validation details.
         """
-        with self._lock:
+        with self._check_lock:  # not _lock: see __init__
             result = self._run_critical_checks(
                 enable_root=enable_root,
                 set_selinux_permissive=set_selinux_permissive,
                 auto_start_emulator=auto_start_emulator,
             )
-
+        with self._lock:
             if not result.success:
                 self._last_result = result
                 return result
@@ -392,13 +396,13 @@ class SetupService:
         Returns:
             SetupResult with critical validation details only.
         """
-        with self._lock:
+        with self._check_lock:  # not _lock: see __init__
             result = self._run_critical_checks(
                 enable_root=enable_root,
                 set_selinux_permissive=set_selinux_permissive,
                 auto_start_emulator=False,
             )
-
+        with self._lock:
             if result.success:
                 result.message = "Critical setup validated (tool checks deferred)"
                 # Mark tool availability as not yet checked

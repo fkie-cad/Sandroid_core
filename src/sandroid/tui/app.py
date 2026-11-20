@@ -936,10 +936,10 @@ class SandroidTUI(App):
 
     def _report_device_prepared(self, result) -> None:
         """Prepare worker: one activity-log line per run that prepared the
-        device; a toast after a reboot or on a problem (once per device and
-        boot).
+        device or failed; a toast after a reboot or on a problem (once per
+        device and boot).
         """
-        if getattr(result, "ran", False):
+        if getattr(result, "ran", False) or getattr(result, "kind", "") == "failed":
             self._run_on_ui(self._show_device_prepared, result)
         else:
             self._run_on_ui(self._update_status_bar)
