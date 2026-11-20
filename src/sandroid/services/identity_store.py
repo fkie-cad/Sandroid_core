@@ -524,31 +524,93 @@ def _patch_list(
     path: tuple[Any, ...],
     shared: set[int],
 ) -> None:
-    """Edit ``seq`` in place from ``before`` to ``after``: changed items
-    field by field, new items appended, surplus items removed.
+    """Edit ``seq`` in place from ``before`` to ``after``.
+
+    Items are matched by content (:func:`_match_items`), so a deleted item
+    takes its comments with it; a matched item that changed is edited field
+    by field, a new one is inserted where it belongs.
     """
     if not seq and _flow(path):
         seq.fa.set_flow_style()  # it was ``[]``: stay on one line
-    for i, item in enumerate(after):
+    sibling = seq[0] if seq else None
+    match = _match_items(before, after)
+    kept = sorted(j for j in match if j is not None)
+    for j in sorted(set(range(len(seq))) - set(kept), reverse=True):
+        del seq[j]  # CommentedSeq moves the comments of later items along
+    order = [j for j in match if j is not None]
+    if order != kept:  # reordered: put the kept nodes in their new order
+        nodes = dict(zip(kept, list(seq), strict=True))
+        for k, j in enumerate(order):
+            seq[k] = nodes[j]
+    for i, j in enumerate(match):
+        if j is None:
+            node = to_node(after[i], (*path, i))
+            if isinstance(node, CommentedMap) and isinstance(sibling, CommentedMap):
+                node.fa._flow_style = sibling.fa.flow_style()  # like its siblings
+            seq.insert(i, node)
+    for i, j in enumerate(match):
+        if j is None or before[j] == after[i]:
+            continue
         sub = (*path, i)
-        if i >= len(seq):
-            node = to_node(item, sub)
-            first = seq[0] if seq else None
-            if isinstance(node, CommentedMap) and isinstance(first, CommentedMap):
-                node.fa._flow_style = first.fa.flow_style()  # like its siblings
-            seq.append(node)
-            continue
-        old_item = before[i] if i < len(before) else _MISSING
-        if old_item == item:
-            continue
-        if isinstance(item, dict) and isinstance(seq[i], dict):
+        if isinstance(after[i], dict) and isinstance(seq[i], dict):
             node = _own_node(seq, i, shared)
-            prior = old_item if isinstance(old_item, dict) else {}
-            apply_changes(node, prior, item, {}, sub, shared)
+            prior = before[j] if isinstance(before[j], dict) else {}
+            apply_changes(node, prior, after[i], {}, sub, shared)
         else:
-            seq[i] = to_node(item, sub)
-    while len(seq) > len(after):
-        del seq[-1]
+            seq[i] = to_node(after[i], sub)
+
+
+#: Fields that name a list item (contacts, SMS, calls): an item whose other
+#: fields changed is still the same item.
+ITEM_KEYS = ("name", "address", "number", "body")
+
+
+def _match_items(before: list[Any], after: list[Any]) -> list[int | None]:
+    """For each item of ``after``, the index of the ``before`` item it is
+    (None: a new item). Identical items first, then items with the same
+    :data:`ITEM_KEYS` field, then the rest by position.
+    """
+    match: list[int | None] = [None] * len(after)
+    used: set[int] = set()
+
+    def pair(test: Callable[[Any, Any], bool]) -> None:
+        for i, item in enumerate(after):
+            if match[i] is not None:
+                continue
+            j = next(
+                (j for j, b in enumerate(before) if j not in used and test(b, item)),
+                None,
+            )
+            if j is not None:
+                match[i] = j
+                used.add(j)
+
+    pair(lambda b, a: b == a)
+    for key in ITEM_KEYS:
+        pair(
+            lambda b, a, key=key: isinstance(b, dict)
+            and isinstance(a, dict)
+            and bool(a.get(key))
+            and b.get(key) == a.get(key)
+        )
+
+    # By position: next to a matched neighbour first, then in order.
+    def take(i: int, j: int | None) -> None:
+        if j is not None and 0 <= j < len(before) and j not in used:
+            match[i] = j
+            used.add(j)
+
+    for i in range(1, len(after)):
+        if match[i] is None and match[i - 1] is not None:
+            take(i, match[i - 1] + 1)
+    for i in range(len(after) - 2, -1, -1):
+        if match[i] is None and match[i + 1] is not None:
+            take(i, match[i + 1] - 1)
+    free = [j for j in range(len(before)) if j not in used]
+    for i in range(len(after)):
+        if match[i] is None and free:
+            take(i, free.pop(0))
+    return match
 
 
 # ---------------------------------------------------------------------------
