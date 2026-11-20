@@ -75,6 +75,7 @@ from sandroid.ai.tool_permissions import (
 )
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
 from sandroid.tui.widgets.chat_view import (
+    AGENT_DOTS,
     AGENT_STATUS,
     CHIP_CODE_WORDS,
     AgentCard,
@@ -97,6 +98,7 @@ from sandroid.tui.widgets.chat_view import (
     format_tokens,
     humanize_tool_name,
     progress_text,
+    status_dot,
 )
 from sandroid.tui.widgets.tool_permission_prompt import ToolPermissionPrompt
 
@@ -401,6 +403,7 @@ def format_agent_row(index: int, row: dict) -> str:
     """``1. researcher a-re-3f9c2k · done · 38s · 9.2k tok · <title>``."""
     status = card_status(row.get("status"))
     label = AGENT_STATUS.get(status, (status, ""))[0]
+    label = status_dot(AGENT_DOTS, status) + label
     parts = [f"{index}. {row.get('profile')} {row.get('agent_id')}", label]
     elapsed = format_elapsed(row.get("elapsed_s"))
     if elapsed:
@@ -658,11 +661,12 @@ class AgentsBar(Static, can_focus=True):
             if elapsed and status in ("running", "queued"):
                 label += f" {elapsed}"
             name = f"{row.get('profile')} {row.get('agent_id')} · "
+            dot = status_dot(AGENT_DOTS, status)
             if self.has_focus and index == self.selected:
-                parts.append((name + label, "reverse bold"))
+                parts.append((name + dot + label, "reverse bold"))
             else:
-                # The words carry the state, in its colour.
-                parts += [(name, "$chat-muted"), (label, style)]
+                # The dot and the words carry the state, in its colour.
+                parts += [(name, "$chat-muted"), (dot, style), (label, style)]
         hint = "  Left/Right select · Enter open" if self.has_focus else "  Up select"
         parts.append((hint, "$chat-muted"))
         return Content.assemble(*parts)
@@ -721,7 +725,12 @@ def format_agent_meta(info: dict, *, tokens: int | None = None) -> Content:
     """
     status = card_status(info.get("status"))
     label, style = AGENT_STATUS.get(status, (str(info.get("status")), "$chat-muted"))
-    head: list[Any] = [(str(info.get("profile") or "?"), "bold"), " · ", (label, style)]
+    head: list[Any] = [
+        (str(info.get("profile") or "?"), "bold"),
+        " · ",
+        (status_dot(AGENT_DOTS, status), style),
+        (label, style),
+    ]
     elapsed = format_elapsed(info.get("elapsed_s"))
     if elapsed:
         head += [(" · ", "$chat-muted"), elapsed]

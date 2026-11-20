@@ -19,6 +19,7 @@ from textual.widgets import Button, Static
 from sandroid.tui.widgets.chat_view import (
     ASCII_FRAMES,
     BLOCK_FRAMES,
+    HEADER_STATES,
     MASCOT_STATES,
     AgentCard,
     BudgetNotice,
@@ -117,12 +118,12 @@ def test_header_wide_and_compact_goldens() -> None:
     }
     wide = format_header("tool", width=100, **fields)
     assert wide.cell_length == 100
-    assert wide.plain.startswith(" tool · List Flows · deepseek-v3 @ fhgenie REMOTE ")
+    assert wide.plain.startswith(" ● tool · List Flows · deepseek-v3 @ fhgenie REMOTE ")
     assert wide.plain.endswith("41k/262k 16%  1 compacted  2 agents ")
     narrow = format_header("tool", width=60, **fields)
     assert narrow.cell_length == 60
     assert "deepseek" not in narrow.plain
-    assert narrow.plain.startswith(" tool · List Flows REMOTE ")
+    assert narrow.plain.startswith(" ● tool · List Flows REMOTE ")
     assert narrow.plain.endswith("41k 16% 1 compacted 2 agents ")
     # Too long for the row: the left part is cut, the meter stays.
     tight = format_header("tool", detail="x" * 80, width=40, used=1, window=10)
@@ -130,8 +131,22 @@ def test_header_wide_and_compact_goldens() -> None:
     assert "…" in tight.plain
     assert tight.plain.rstrip().endswith("10%")
     idle = format_header(width=30)
-    assert idle.plain.startswith(" idle")
+    assert idle.plain.startswith(" ○ idle")
     assert "$chat-muted" in {s.style for s in idle.spans}
+    # The dot sits before the word, in the state's colour; error has none.
+    for state, word, dot in (
+        ("thinking", "thinking", "●"),
+        ("approval", "waiting on you", "◌"),
+        ("compacting", "compacting", "◌"),
+        ("off", "not configured", "○"),
+        ("error", "error", None),
+    ):
+        head = format_header(state, width=60)
+        assert head.plain.startswith(f" {dot} {word}" if dot else f" {word}")
+        dot_styles = {
+            str(s.style) for s in head.spans if head.plain[s.start : s.end] == f"{dot} "
+        }
+        assert dot_styles == ({HEADER_STATES[state][1]} if dot else set())
 
 
 @pytest.mark.parametrize("width", [140, 110, 90, 70, 60, 50])
@@ -229,7 +244,7 @@ def test_card_rule_and_notice_goldens() -> None:
     assert title.plain == "researcher r2 · done · 38s · 9.2k tok"
     assert "$lens-ok" in {s.style for s in title.spans}
     running = format_card_title("explorer", "r1", "running")
-    assert running.plain == "explorer r1 · running"
+    assert running.plain == "explorer r1 · ● running"
     assert "$lens-accent" in {s.style for s in running.spans}
     assert format_compaction(182_000, 41_000, 14) == (
         "compacted · 182k → 41k · 14 results masked"
@@ -252,6 +267,8 @@ def test_formatters_use_theme_variables_only() -> None:
         format_chip(ref="R1", summary="s", elapsed=1),
         format_chip(ok=False, code="c", message="m"),
         format_card_title("r", "a1", "failed", elapsed=1, tokens=1),
+        format_card_title("r", "a1", "queued"),
+        format_header("idle"),
         format_args({"a": "b"}),
         format_empty_state(80, model="m", endpoint="e", remote=True),
     ]
@@ -422,7 +439,7 @@ async def test_blocks_render_and_update_in_place() -> None:
         assert t.current_turn == 1
         assert tool.running
         assert tool.size.height == 2  # the call, then "running" (a word)
-        assert str(tool.render()).splitlines()[1] == "  running"
+        assert str(tool.render()).splitlines()[1] == "  ● running"
         assert tool.call_line().plain.startswith("List Flows")
         tool.set_result(ref="R17", summary="12 rows", elapsed=0.4)
         thought.finish(4)

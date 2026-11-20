@@ -74,6 +74,19 @@ HEADER_STATES: dict[str, tuple[str, str]] = {
     "off": ("not configured", "$chat-muted"),
 }
 
+#: Header state -> status dot before its word (● active, ○ idle / off,
+#: ◌ waiting / pending). A state without one ("error") shows the word alone.
+HEADER_DOTS: dict[str, str] = {
+    "idle": "○",
+    "off": "○",
+    "thinking": "●",
+    "streaming": "●",
+    "tool": "●",
+    "approval": "◌",
+    "compacting": "◌",
+    "retrying": "◌",
+}
+
 #: Words shown upper-case in humanized tool names.
 _ACRONYMS = frozenset(
     [
@@ -117,6 +130,17 @@ AGENT_STATUS: dict[str, tuple[str, str]] = {
     "failed": ("failed", "$lens-bad"),
     "cancelled": ("cancelled", "$chat-muted"),
 }
+
+#: Agent status -> status dot before its word. Finished agents (done,
+#: failed, cancelled) show the word alone.
+AGENT_DOTS: dict[str, str] = {"queued": "◌", "running": "●", "waiting": "◌"}
+
+
+def status_dot(dots: dict[str, str], key: str) -> str:
+    """``"● "`` for a state with a dot in ``dots``, else ``""``."""
+    dot = dots.get(key)
+    return f"{dot} " if dot else ""
+
 
 #: Error codes shown as another word on a result chip.
 CHIP_CODE_WORDS = {
@@ -232,7 +256,9 @@ def format_header(
             parts += [sep, (f"{agents} agent{plural}", "$chat-tool")]
         return Content.assemble(*parts, " ")
 
-    head = Content.assemble(" ", (label, state_style))
+    head = Content.assemble(
+        " ", (status_dot(HEADER_DOTS, state), state_style), (label, state_style)
+    )
     detail_part = (
         Content.assemble((" · ", "$chat-muted"), detail) if detail else Content("")
     )
@@ -404,6 +430,7 @@ def format_card_title(
     parts: list[str | tuple[str, str]] = [
         (f"{role} {agent_id}", "bold"),
         (" · ", "$chat-muted"),
+        (status_dot(AGENT_DOTS, status), style),
         (label, style),
     ]
     if elapsed is not None:
@@ -1032,7 +1059,7 @@ class ToolBlock(Widget, TranscriptBlock):
         elif self.progress is not None:
             lines.append(Content.assemble("  ", self.progress))
         elif self.running:
-            lines.append(Content.assemble("  ", ("running", "$lens-accent")))
+            lines.append(Content.assemble("  ", ("● running", "$lens-accent")))
         return Content("\n").join(lines)
 
     def get_content_height(self, container, viewport, width: int) -> int:
@@ -1578,12 +1605,14 @@ class EmptyState(Static):
 
 
 __all__ = [
+    "AGENT_DOTS",
     "AGENT_STATUS",
     "ASCII_FRAMES",
     "BLOCK_FRAMES",
     "CHIP_CODE_WORDS",
     "CHIP_WARN_CODES",
     "EXAMPLE_PROMPTS",
+    "HEADER_DOTS",
     "HEADER_STATES",
     "MASCOT_STATES",
     "MAX_BLOCKS",
@@ -1621,4 +1650,5 @@ __all__ = [
     "progress_text",
     "resolve_mascot_style",
     "ruled",
+    "status_dot",
 ]

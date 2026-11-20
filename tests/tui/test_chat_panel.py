@@ -1544,16 +1544,26 @@ async def test_agents_bar_states_are_words_in_their_colour():
         await settle(pilot)
         bar.set_rows([row("running", elapsed_s=17)])
         text = bar.render().plain
-        assert "researcher a1 · running 17s" in text
+        assert "researcher a1 · ● running 17s" in text
         assert not any(ch in text for ch in "⠋⠙◆✓✗◼")
         assert styled(bar, "running") == {"$lens-accent"}
+        assert styled(bar, "● ") == {"$lens-accent"}  # the dot, in its colour
+        for status, word, style in (
+            ("queued", "◌ queued", "$chat-muted"),
+            ("waiting", "◌ awaiting approval", "$chat-wait"),
+        ):
+            bar.set_rows([row(status)])
+            assert f"researcher a1 · {word}" in bar.render().plain
+            assert styled(bar, word[:2]) == {style}
         for status, word, style in (
             ("complete", "done", "$lens-ok"),
             ("failed", "failed", "$lens-bad"),
             ("cancelled", "cancelled", "$chat-muted"),
         ):
             bar.set_rows([row(status)])
-            assert f"researcher a1 · {word}" in bar.render().plain
+            text = bar.render().plain
+            assert f"researcher a1 · {word}" in text  # finished: no dot
+            assert not any(dot in text for dot in "●○◌")
             assert styled(bar, word) == {style}
 
 
