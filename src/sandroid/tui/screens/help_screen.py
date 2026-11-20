@@ -7,9 +7,11 @@ applied LIVE via :meth:`textual.app.App.set_keymap`.
 
 Order: the keys of the lens ``?`` was pressed in come first (the list opens
 there), then the Inspector's, then the global keys (General, lens
-navigation, main screen, the action categories), then the other lenses and
-the snapshot picker. A lens key that shadows a global key (Files ``w``/``n``/
-``O``, App ``b``, Sessions ``n``) is listed with its lens meaning and marked
+navigation, main screen, the action categories), then the AI chat dock
+(input, approval prompt, agents bar, slash commands) and the log drawer,
+then the other lenses, the snapshot picker and the Devices screen. A lens
+key that shadows a global key (Files ``w``/``n``/``O``, App ``b``, Sessions
+``n``) is listed with its lens meaning and marked
 "overrides global …"; the global row says which lens uses the key for
 something else -- the same key never appears twice without that context.
 """
@@ -64,6 +66,21 @@ RESERVED: set[str] = {
     "backspace",
     "delete",
     "ctrl+r",
+    # Main-screen keys that work whatever has focus (MainScreen BINDINGS,
+    # app.py ``0``): a rebound action on them would never run there.
+    "0",  # app: snapshot picker (same as S)
+    "L",  # main screen: back to live from a reviewed run
+    "left_square_bracket",  # [ ] Inspector tabs
+    "right_square_bracket",
+    "left_curly_bracket",  # { } * Inspector content (versions, tables, base)
+    "right_curly_bracket",
+    "asterisk",
+    "left",  # Inspector tabs (priority while it is open), type / agents bars
+    "right",
+    "shift+left",  # previous / next lens (lens host, main screen, Files)
+    "shift+right",
+    "shift+up",  # AI chat size while it is open
+    "shift+down",
 }
 
 # Category display order for the editor.
@@ -98,6 +115,10 @@ _PANEL_SECTIONS: list[tuple[str, str, str]] = [
         "SnapshotPickerModal",
     ),
     ("Snapshot picker (S)", "sandroid.tui.widgets.snapshots_panel", "SnapshotsPanel"),
+    ("Timeline lens › t type bar", "sandroid.tui.widgets.timeline_lens", "TypeBar"),
+    ("AI chat", "sandroid.tui.widgets.chat_panel", "ChatPanel"),
+    ("AI chat › agents bar", "sandroid.tui.widgets.chat_panel", "AgentsBar"),
+    ("Devices screen (D)", "sandroid.tui.screens.devices_screen", "DevicesScreen"),
 ]
 
 #: Lens id -> the ``_PANEL_SECTIONS`` headings that belong to that lens.
@@ -106,7 +127,7 @@ _LENS_SECTIONS: dict[str, tuple[str, ...]] = {
     "network": ("Network lens",),
     "files": ("Files lens",),
     "runs": ("Sessions lens",),
-    "timeline": ("Timeline lens",),
+    "timeline": ("Timeline lens", "Timeline lens › t type bar"),
     "identity": ("Identity lens",),
 }
 #: Display-only rows listed first in a lens's section: keys the lens gets
@@ -140,8 +161,92 @@ _LENS_EXTRA_ROWS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
             "Move (up stops following the newest line; End = live)",
             ("up", "down"),
         ),
+        (
+            "Esc",
+            "Close the / filter, leave the type bar, clear the filter, "
+            "then show hidden types again",
+            ("escape",),
+        ),
+    ],
+    "Timeline lens › t type bar": [
+        ("Esc", "Back to the list", ("escape",)),
+    ],
+    "AI chat": [
+        ("Enter", "Send the message", ("enter",)),
+        ("/", "Slash command (the list is below)", ("slash",)),
+        ("Esc", "Back to the lens (the chat stays open)", ("escape",)),
+    ],
+    "Devices screen (D)": [
+        ("Enter", "Attach a running device / start a stopped AVD", ("enter",)),
     ],
 }
+#: Longer help text for terse footer labels: ``(heading, raw key) -> text``.
+#: Only the wording comes from here; the key itself must be in the class's
+#: BINDINGS (a test checks it), so a removed binding drops its row.
+_ROW_TEXT: dict[tuple[str, str], str] = {
+    ("Main screen", "L"): "Back to live (while reviewing a run)",
+    ("Timeline lens", "slash"): (
+        "Filter: words, src: kind: actor: phase: run: world: pkg: level: (-src: hides)"
+    ),
+    ("AI chat", "ctrl+x"): "Stop the turn and its agents",
+    ("AI chat", "ctrl+l"): "New thread (not while a turn runs)",
+    ("AI chat", "up"): "To the agents bar (when the thread has agents)",
+    ("AI chat", "pageup"): "Scroll the transcript up",
+    ("AI chat", "pagedown"): "Scroll the transcript down",
+    ("AI chat", "ctrl+home"): "Top of the transcript",
+    ("AI chat", "ctrl+end"): "End of the transcript",
+    ("Devices screen (D)", "c"): "Cold boot on / off (else a quick boot)",
+    ("Devices screen (D)", "n"): "Snapshot to boot from…",
+    ("Devices screen (D)", "h"): "Headless on / off (no emulator window)",
+    ("Devices screen (D)", "s"): "Save state on exit on / off",
+    ("Devices screen (D)", "w"): "Wipe data on the next start (once)",
+    ("Devices screen (D)", "e"): "Rename the AVD…",
+    ("Devices screen (D)", "x"): "Stop the emulator… (asks first)",
+    ("Devices screen (D)", "R"): "Restart the emulator",
+    ("Devices screen (D)", "a"): "adb connect host:port…",
+    ("Devices screen (D)", "ctrl+r"): "Refresh (rescan the AVDs)",
+    ("Devices screen (D)", "escape"): "Close (an open snapshot list first)",
+    ("Devices screen (D)", "ctrl+c"): "Quit (at startup: stop the start)",
+}
+#: Sections listed by hand: keys handled outside BINDINGS (the log is a
+#: plain RichLog) or whose BINDINGS labels say nothing ("Option 1"). A test
+#: checks that the raw keys cover the class's real bindings.
+_HAND_SECTIONS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
+    "AI chat › approval prompt": [
+        ("1", "Yes (this call)", ("1",)),
+        (
+            "2",
+            "Yes, don't ask again for the offered rule (without a rule: No)",
+            ("2",),
+        ),
+        ("3", "No, and tell it what to do instead (type, then Enter)", ("3",)),
+        ("↑ / ↓", "Move between the options", ("up", "down")),
+        ("Enter", "Pick the highlighted option", ("enter",)),
+        ("Esc", "No (with the note typed so far)", ("escape",)),
+    ],
+    "Log drawer": [
+        ("`", "Open / close the drawer (Esc closes it too)", ("grave_accent",)),
+        (
+            "↑/↓/PgUp/PgDn",
+            "Scroll the log (click into it first)",
+            ("up", "down", "pageup", "pagedown"),
+        ),
+        ("Home / End", "Oldest / newest line (click into it first)", ("home", "end")),
+        ("Shift+Y", "Copy the whole log", ("Y",)),
+    ],
+}
+#: Main-screen bindings with this description prefix size the AI chat:
+#: listed in the AI chat section.
+_CHAT_PREFIX = "AI chat "
+#: Sections for the AI chat dock and the log drawer, after the global
+#: action categories (in this order).
+_DOCK_SECTIONS = (
+    "AI chat",
+    "AI chat › approval prompt",
+    "AI chat › agents bar",
+    "AI chat › slash commands",
+    "Log drawer",
+)
 #: Headings of the global (works everywhere) panel sections.
 _GLOBAL_PANEL_SECTIONS = ("Lens navigation", "Main screen")
 #: Main-screen bindings with this description prefix are Inspector keys
@@ -156,7 +261,7 @@ _GENERAL_KEYS: list[tuple[str, str]] = [
     ("ctrl+b", "Focus the lens (back from the chat or Inspector)"),
     ("comma", "Settings"),
     ("0", "Snapshot picker (same as S)"),
-    ("ctrl+p", "SSL unpinning on/off"),
+    ("ctrl+p", "SSL unpinning on/off (armed until the app runs)"),
     ("Y", "Copy the log"),
     ("ctrl+c", "Quit (asks first, like q)"),
     ("ctrl+q", "Quit (asks first, like q)"),
@@ -225,6 +330,15 @@ def _panel_binding_rows(
         else:
             rows.append((" / ".join(keys), desc, tuple(raw[desc])))
     return rows
+
+
+def _slash_rows() -> list[tuple[str, str, tuple[str, ...]]]:
+    """The chat's slash commands, from its own ``SLASH_HELP`` (best effort)."""
+    try:
+        from sandroid.tui.widgets.chat_panel import SLASH_HELP
+    except Exception:
+        return []
+    return [(name, _cap(text), ()) for name, text in SLASH_HELP.items()]
 
 
 def _cap(text: str) -> str:
@@ -610,15 +724,26 @@ class HelpScreen(ModalScreen):
         for heading, module, cls_name in _PANEL_SECTIONS:
             rows = _panel_binding_rows(module, cls_name)
             if heading == "Main screen":
-                inspector = [r for r in rows if r[1].startswith(_INSPECTOR_PREFIX)]
-                rows = [r for r in rows if r not in inspector]
-                sections.setdefault("Inspector (while open)", []).extend(
-                    (k, _cap(d[len(_INSPECTOR_PREFIX) :]), raw)
-                    for k, d, raw in inspector
-                )
+                for prefix, target in (
+                    (_INSPECTOR_PREFIX, "Inspector (while open)"),
+                    (_CHAT_PREFIX, "AI chat"),
+                ):
+                    moved = [r for r in rows if r[1].startswith(prefix)]
+                    rows = [r for r in rows if r not in moved]
+                    sections.setdefault(target, []).extend(
+                        (k, _cap(d[len(prefix) :]), raw) for k, d, raw in moved
+                    )
             sections.setdefault(heading, []).extend(rows)
         for heading, extra in _LENS_EXTRA_ROWS.items():
             sections[heading] = [*extra, *sections.get(heading, [])]
+        for heading, hand in _HAND_SECTIONS.items():
+            sections[heading] = list(hand)
+        sections["AI chat › slash commands"] = _slash_rows()
+        for heading, rows in sections.items():
+            sections[heading] = [
+                (shown, _ROW_TEXT.get((heading, raw[0]), desc) if raw else desc, raw)
+                for shown, desc, raw in rows
+            ]
 
         # A lens key that is also a global key: the lens meaning wins while
         # the lens has focus -- say so on both rows.
@@ -718,6 +843,8 @@ class HelpScreen(ModalScreen):
                     # Not rebindable: dim (the detail pane says "fixed").
                     add(Option(f"[dim]{label}[/]", disabled=True))
 
+        for heading in _DOCK_SECTIONS:
+            panel_section(heading)
         shown_lens_headings = {h for hs in _LENS_SECTIONS.values() for h in hs}
         for headings in _LENS_SECTIONS.values():
             if headings == current:
@@ -728,6 +855,7 @@ class HelpScreen(ModalScreen):
             if (
                 heading in shown_lens_headings
                 or heading in _GLOBAL_PANEL_SECTIONS
+                or heading in _DOCK_SECTIONS
                 or heading in ("Inspector (while open)",)
             ):
                 continue
@@ -781,12 +909,19 @@ class HelpScreen(ModalScreen):
         if action_id.startswith(_PANEL_PREFIX):
             # The id carries the key as displayed (merged rows: "o / b").
             heading, _, key = action_id[len(_PANEL_PREFIX) :].partition("|")
-            where = (
-                "Works everywhere on the main screen."
-                if heading == "General"
-                else "Works only while this lens / view has focus "
-                "(1-6 or Shift+←/→ switch lenses)."
-            )
+            if heading == "General":
+                where = "Works everywhere on the main screen."
+            elif heading.startswith("AI chat"):
+                where = "Works in the AI chat (Ctrl+Y opens it)."
+            elif heading == "Log drawer":
+                where = "Works on the log drawer (` opens it)."
+            elif heading.startswith("Devices screen"):
+                where = "Works on the Devices screen (Shift+D opens it)."
+            else:
+                where = (
+                    "Works only while this lens / view has focus "
+                    "(1-6 or Shift+←/→ switch lenses)."
+                )
             override = self._overrides.get((heading, key))
             if override:
                 where += (
