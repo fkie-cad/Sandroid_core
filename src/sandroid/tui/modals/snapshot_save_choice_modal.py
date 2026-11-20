@@ -312,7 +312,7 @@ class SnapshotPickerModal(ForensicModal[None]):
     """
 
     #: Hint line for the picker (the panel's own action row shows c/l/d/a).
-    HINT = "[dim]⏎ load · 1-8 load slot · s save to slot · Esc close[/dim]"
+    HINT = "[dim]Enter load · 1-8 load slot · s save to slot · Esc close[/dim]"
 
     def __init__(self, then=None, **kwargs) -> None:
         super().__init__(**kwargs)

@@ -100,7 +100,7 @@ RUNNING_ELSEWHERE_HELP = (
 UNPROBED_HELP = (
     "In use · not probed: this session is pinned to another serial, so this "
     "device was never asked anything -- it is most likely another session's "
-    "(its AVD shows as running elsewhere). ⏎ attaches it only after you "
+    "(its AVD shows as running elsewhere). Enter attaches it only after you "
     "confirm."
 )
 
@@ -1559,7 +1559,7 @@ class DevicesScreen(ModalScreen[str | None]):
             if row.running_elsewhere:
                 text.append(RUNNING_ELSEWHERE_HELP, style=_c("warn"))
                 return text
-            text.append("⏎ starts it with these options", style=_c("text"))
+            text.append("Enter starts it with these options", style=_c("text"))
             if row.name in self._wipe:
                 text.append(" -- and wipes its data first (asks)", style=_c("warn"))
             text.append(". Changes are saved for this AVD at once; ", style=_c("text"))
@@ -1586,7 +1586,7 @@ class DevicesScreen(ModalScreen[str | None]):
         elif row.active:
             text.append("The active device of this session.", style=_c("ok"))
         else:
-            text.append("⏎ attaches it to this session.", style=_c("text"))
+            text.append("Enter attaches it to this session.", style=_c("text"))
         if not row.is_emulator:
             kind = "Network device" if row.network else "Physical device"
             text.append(f"\n{kind}: no launch options.", style=_c("dim"))
