@@ -515,12 +515,16 @@ def _is_logical_failure(result: Any) -> bool:
             result.get("error")
             or result.get("success") is False
             or result.get("started") is False
+            or result.get("refused")
         )
     )
 
 
 def _outcome_words(result: dict) -> str | None:
     """Why a logically failed result failed, in words (or None)."""
+    refused = result.get("refused")
+    if isinstance(refused, str) and refused.strip():
+        return f"refused: {refused}"
     outcome = result.get("result")
     if outcome == "diverged":
         step = result.get("diverged_at_step")

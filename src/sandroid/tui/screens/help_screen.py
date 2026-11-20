@@ -209,6 +209,7 @@ _ROW_TEXT: dict[tuple[str, str], str] = {
     ("Devices screen (D)", "ctrl+r"): "Refresh (rescan the AVDs)",
     ("Devices screen (D)", "escape"): "Close (an open snapshot list first)",
     ("Devices screen (D)", "ctrl+c"): "Quit (at startup: stop the start)",
+    ("Devices screen (D)", "p"): "Pin / unpin snapshots (pinned: kept)",
     ("Proxy settings (y)", "r"): "Remove CA (asks first)",
     ("Inspector (while open)", "left"): "Previous tab (unless the focus uses Left)",
     ("Inspector (while open)", "right"): "Next tab (unless the focus uses Right)",

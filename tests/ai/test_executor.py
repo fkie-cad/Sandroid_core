@@ -417,3 +417,16 @@ def test_orchestrator_prompt_says_never_retry_a_declined_start():
         assert code in TOOL_ERROR_CODES
     assert "never retry it unless asked" in flat
     assert "ask them" in flat
+
+
+def test_policy_refused_snapshot_reads_as_refused_and_prompt_says_no_retry():
+    """create/delete_snapshot add "refused" (startup's snapshot policy)."""
+    from sandroid.ai.loop import _is_logical_failure, summarize_result
+    from sandroid.ai.prompts import ORCHESTRATOR_PROMPT_V2
+
+    result = {"deleted": False, "name": "clean_8g", "refused": "pinned snapshot"}
+    assert _is_logical_failure(result)
+    assert summarize_result(result) == "refused: pinned snapshot"
+    assert summarize_result({"deleted": True, "name": "x"}) == "2 fields"
+    assert '"refused" key' in ORCHESTRATOR_PROMPT_V2
+    assert "do not retry" in ORCHESTRATOR_PROMPT_V2

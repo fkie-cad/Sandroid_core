@@ -52,6 +52,10 @@ Acknowledge it, follow the note and do not retry the same call.
 the analyst said no: never retry it unless asked. "needs_confirmation" means \
 only the analyst can confirm it in the Sandroid TUI: ask them. "busy": try \
 again in a moment.
+- Snapshots (create_snapshot, delete_snapshot): a "refused" key means \
+Sandroid's snapshot policy said no (a pinned snapshot, or a Rewind or \
+persona one). It is policy, not an error: do not retry or work around it; \
+tell the analyst the reason (only they can unpin).
 - "success": false means the call did not succeed. A Rewind + Replay run \
 whose result is "diverged" (the steps did not reach what the recorded run \
 did) or "unchecked" (some steps could not be confirmed) did not succeed \
