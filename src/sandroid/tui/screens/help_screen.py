@@ -232,16 +232,8 @@ _HAND_SECTIONS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
             ("up", "down", "pageup", "pagedown"),
         ),
         ("Home / End", "Oldest / newest line (click into it first)", ("home", "end")),
-        (
-            "j / Ctrl+J, Ctrl+K",
-            "Scroll the log down / up a line (where no lens uses the key)",
-            ("j", "ctrl+j", "ctrl+k"),
-        ),
-        (
-            "Ctrl+D / Ctrl+U",
-            "Scroll the log half a page down / up",
-            ("ctrl+d", "ctrl+u"),
-        ),
+        ("j / Ctrl+K", "Log a line down / up (also Ctrl+J)", ("j", "ctrl+j", "ctrl+k")),
+        ("Ctrl+D / U", "Log half a page down / up", ("ctrl+d", "ctrl+u")),
         ("Shift+Y", "Copy the whole log", ("Y",)),
     ],
 }

@@ -92,7 +92,10 @@ def test_hand_written_sections_cover_the_real_keys() -> None:
     app_actions = {b.key: b.action for b in SandroidTUI.BINDINGS}
     assert app_actions["grave_accent"] == "toggle_log"
     assert app_actions["Y"] == "copy_log"
-    assert log_keys - {"grave_accent", "Y"} <= _binding_keys(ActivityLog)
+    # The vim-style keys are App bindings that scroll the log (_scroll_log).
+    app_scroll = {k for k, a in app_actions.items() if a.startswith("scroll_")}
+    assert {"j", "ctrl+j", "ctrl+k", "ctrl+d", "ctrl+u"} <= app_scroll
+    assert log_keys - {"grave_accent", "Y"} <= _binding_keys(ActivityLog) | app_scroll
 
 
 def test_extra_rows_name_real_keys() -> None:
@@ -219,7 +222,7 @@ async def test_help_lists_the_previously_missing_rows_from_every_lens(size) -> N
 
 
 async def test_log_scroll_keys_reach_the_log_on_the_main_screen() -> None:
-    """j / Ctrl+D / Home / End scroll the log drawer (the App looked the log
+    """The vim-style keys scroll the log drawer (the App looked the log
     up on its default screen and the keys silently did nothing).
     """
     from sandroid.tui.app import SandroidTUI
@@ -234,7 +237,7 @@ async def test_log_scroll_keys_reach_the_log_on_the_main_screen() -> None:
         await settle(pilot)
         for i in range(200):
             log.log_info(f"line {i}")
-        await settle(pilot)
+        await until(pilot, lambda: log.max_scroll_y > 20)
         app.action_scroll_bottom()
         await until(pilot, lambda: log.scroll_y > 10)
         app.action_scroll_top()
