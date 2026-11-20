@@ -665,6 +665,54 @@ def test_mitm_port_shown_is_the_configured_one(monkeypatch):
     assert ProxyManager.get_default_config().port == 8090
 
 
+def test_capture_status_is_dots_and_words(monkeypatch):
+    """● on / ○ off / ◌ pending before the state word, in the state's lens
+    colour; no ✓ ✗ → and no ^N / ^P key glyphs.
+    """
+    from rich.text import Text
+
+    from sandroid.services.mitmproxy_service import MitmproxyService
+    from sandroid.tui.themes import lens_palette
+    from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
+
+    pal = lens_palette()
+    service = MitmproxyService()
+    panel = MitmproxyPanel()
+    panel._service = service
+    monkeypatch.setattr(service, "ssl_unpin_is_active", lambda: False)
+
+    def plain(markup: str) -> str:
+        return Text.from_markup(markup).plain
+
+    monkeypatch.setattr(service, "is_running", lambda: False)
+    assert plain(panel.status_caption()) == "Mitmproxy ○ off"
+    rows = dict(panel.status_rows())
+    assert plain(rows["Mitmproxy web interface"]).startswith("○ stopped")
+    assert plain(rows["CA"]) == "○ not installed  Ctrl+N"
+    assert plain(rows["Chrome CT"]) == "○ off"
+    assert plain(rows["SSL unpin"]) == "○ off  Ctrl+P"
+
+    monkeypatch.setattr(service, "is_running", lambda: True)
+    panel._ca_ok = panel._ct_ok = True
+    panel._proxy_state, panel._proxy_addr = "ours", "10.0.2.2:8080"
+    caption = panel.status_caption()
+    assert f"[{pal.ok}]Mitmproxy ● on[/]" in caption
+    assert f"CA [{pal.ok}]● installed[/]" in caption
+    rows = dict(panel.status_rows())
+    assert rows["CA"].startswith(f"[{pal.ok}]● installed[/]")
+    assert plain(rows["Chrome CT"]) == "● bypassed"
+    assert plain(rows["routing"]) == "● Device proxy on: our Mitmproxy 10.0.2.2:8080"
+    panel._reach_state = "checking"
+    assert plain(dict(panel.status_rows())["routing"]).startswith("◌ re-checking")
+    panel._reach_state = "unreachable"
+    routing = plain(dict(panel.status_rows())["routing"])
+    assert routing == "Device proxy to our Mitmproxy 10.0.2.2:8080, unreachable"
+    panel._proxy_state = "none"
+    assert plain(dict(panel.status_rows())["routing"]) == "○ Device proxy off"
+    text = " ".join(plain(value) for _label, value in panel.status_rows())
+    assert not set("✓✗→▲^") & set(text.replace("→ web", "")), text
+
+
 def test_network_keys_are_words(monkeypatch):
     """Hints and key lists name keys in words (Ctrl+D, Shift+C, Space)."""
     import re
@@ -1105,10 +1153,12 @@ async def test_fritap_caption_follows_its_lifecycle(flow_dir, monkeypatch):
         monkeypatch.setattr(fritap, "is_running", lambda: running["on"])
         try:
             fritap_mod.set_lifecycle("starting", "org.wikipedia")
-            await until(pilot, lambda: "starting" in ms._lens_captions["network"][0])
+            await until(
+                pilot, lambda: "friTap ◌ starting" in ms._lens_captions["network"][0]
+            )
             running["on"] = True
             fritap_mod.set_lifecycle("running", "org.wikipedia")
-            await until(pilot, lambda: "friTap on" in ms._lens_captions["network"][0])
+            await until(pilot, lambda: "friTap ● on" in ms._lens_captions["network"][0])
             fritap_mod.set_lifecycle("hung", "org.wikipedia is not responding")
             await until(
                 pilot, lambda: "not responding" in ms._lens_captions["network"][0]
@@ -1116,7 +1166,9 @@ async def test_fritap_caption_follows_its_lifecycle(flow_dir, monkeypatch):
             head = dict(fritap.status_rows())["friTap"]
             assert "h stops friTap" in head
             fritap_mod.set_lifecycle("stopping", "org.wikipedia")
-            await until(pilot, lambda: "stopping" in ms._lens_captions["network"][0])
+            await until(
+                pilot, lambda: "friTap ◌ stopping" in ms._lens_captions["network"][0]
+            )
             running["on"] = False
             fritap_mod.set_lifecycle("stopped", "agent still unloading")
             await until(pilot, lambda: "friTap" not in ms._lens_captions["network"][0])
@@ -1160,7 +1212,9 @@ def test_ssl_unpin_indicator_follows_the_hooked_process(monkeypatch):
     monkeypatch.setattr(mitm._service, "_bypass_service", lambda: svc)
 
     assert svc.reconcile_liveness() == []  # alive: nothing changes
-    assert "unpin on" in mitm.status_caption()
+    from rich.text import Text
+
+    assert "unpin ● on" in Text.from_markup(mitm.status_caption()).plain
 
     # The Zygote restart: the session detaches, the app comes back as 8593.
     jm.has_active_session = lambda: False
@@ -1929,6 +1983,8 @@ async def test_caption_follows_ca_removal_and_app_proxy_changes(flow_dir, monkey
     """
     import threading
 
+    from rich.text import Text
+
     from sandroid.core import proxy_manager as pm
 
     routes: dict[str, str] = {"org.mozilla.firefox": "ours"}
@@ -1957,10 +2013,10 @@ async def test_caption_follows_ca_removal_and_app_proxy_changes(flow_dir, monkey
         panel.refresh_header()
 
         def title() -> str:
-            return ms._lens_captions["network"][0] or ""
+            return Text.from_markup(ms._lens_captions["network"][0] or "").plain
 
         assert "app proxies 1" in title()
-        assert "CA installed" in title()
+        assert "CA ● installed" in title()
 
         def publish(fn, *args) -> None:
             worker = threading.Thread(target=fn, args=args)
@@ -1969,11 +2025,11 @@ async def test_caption_follows_ca_removal_and_app_proxy_changes(flow_dir, monkey
 
         device["ca"] = False
         publish(pm.publish_ca_change, None, False)
-        await until(pilot, lambda: "CA not installed" in title())
+        await until(pilot, lambda: "CA ○ not installed" in title())
         await until(pilot, lambda: not mitm._state_probe_busy)
         assert probes
         assert "MainThread" not in probes  # the device read is off-thread
-        assert "CA not installed" in title()
+        assert "CA ○ not installed" in title()
 
         routes.clear()
         publish(pm.FocusManager._publish_health, None)
@@ -1981,8 +2037,8 @@ async def test_caption_follows_ca_removal_and_app_proxy_changes(flow_dir, monkey
 
         device["ca"] = True
         publish(pm.publish_ca_change, None, True)
-        await until(pilot, lambda: "CA installed" in title())
-        assert "CA not installed" not in title()
+        await until(pilot, lambda: "CA ● installed" in title())
+        assert "CA ○ not installed" not in title()
 
 
 async def test_ca_change_of_another_device_leaves_the_caption(flow_dir, monkeypatch):

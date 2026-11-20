@@ -703,7 +703,9 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                     TabPane("Device", id="tab-device"),
                     VerticalScroll(classes="tab-scroll"),
                 ):
-                    yield Static("Checking…", id="device-status", classes="status-line")
+                    yield Static(
+                        "◌ Checking…", id="device-status", classes="status-line"
+                    )
                     with RadioSet(id="device-radio-set"):
                         yield RadioButton(
                             "Off — no device proxy",
@@ -782,7 +784,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                     yield Static("Checking...", id="device-info", classes="device-info")
                     yield Label("System trust store", classes="section-header")
                     yield Static(
-                        "Checking...", id="zygote-status", classes="zygote-status"
+                        "◌ Checking...", id="zygote-status", classes="zygote-status"
                     )
                     with Horizontal(classes="button-row"):
                         yield Button("Push CA", id="btn-push-ca", classes="-secondary")
@@ -917,7 +919,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
         ``call_from_thread``.
         """
         status_widget = self.query_one("#device-status", Static)
-        status_widget.update("[dim]Checking…[/dim]")
+        status_widget.update("[$lens-dim]◌ Checking…[/]")
 
         def worker() -> None:
             try:
@@ -956,7 +958,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
 
         if state == "ours":
             status_widget.update(
-                f"[green]Device proxy on:[/green] our Mitmproxy at [bold]{addr}[/bold]"
+                f"[$lens-ok]● Device proxy on:[/] our Mitmproxy at [bold]{addr}[/bold]"
             )
             if addr.startswith("127.0.0.1:"):
                 self._select_device_radio("device-radio-reverse")
@@ -964,7 +966,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                 self._select_device_radio("device-radio-ours")
         elif state == "external":
             status_widget.update(
-                f"[#6ba3ff]Device proxy on:[/] external proxy at [bold]{addr}[/bold]"
+                f"[$lens-accent]● Device proxy on:[/] external proxy at [bold]{addr}[/bold]"
             )
             try:
                 self.query_one("#device-ext-input", Input).value = addr
@@ -972,7 +974,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                 pass
             self._select_device_radio("device-radio-external")
         else:
-            status_widget.update("[#5b6479]Device proxy off[/]")
+            status_widget.update("[$lens-dim]○ Device proxy off[/]")
             self._select_device_radio("device-radio-off")
 
     def _select_device_radio(self, radio_id: str) -> None:
@@ -1252,18 +1254,18 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
             return
         if status.verdict == "injected":
             status_widget.update(
-                f"[$success]Installed[/] in Zygote and the running apps "
+                f"[$success]● Installed[/] in Zygote and the running apps "
                 f"(hash {status.cert_hash})"
             )
         elif status.verdict == "partial":
             status_widget.update(
-                f"[$success]Installed[/] for new apps; [$warning]{status.lacking} "
+                f"[$success]● Installed[/] for new apps; [$warning]{status.lacking} "
                 "running app namespace(s) lack it[/] (I installs it there)"
             )
         elif status.error_message:
             status_widget.update(f"[$warning]{status.error_message}[/]")
         else:
-            status_widget.update("[$warning]Not installed[/]  (I installs it)")
+            status_widget.update("[$warning]○ Not installed[/]  (I installs it)")
 
     def _get_selected_ca_path(self) -> Path | None:
         """Get the currently selected CA certificate path."""
@@ -1361,7 +1363,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
         }
         try:
             self.query_one("#zygote-status", Static).update(
-                f"[$text-muted]{labels.get(kind, 'Working…')}[/]"
+                f"[$text-muted]◌ {labels.get(kind, 'Working…')}[/]"
             )
         except NoMatches:
             pass

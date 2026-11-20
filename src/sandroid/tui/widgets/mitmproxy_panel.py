@@ -611,24 +611,29 @@ class MitmproxyPanel(Widget):
         """
         if not self._service.is_running():
             return ""
+        from sandroid.tui.themes import lens_palette
+
+        pal = lens_palette()
 
         # Device part.
         if self._proxy_state == "ours" and self._reach_state == "unreachable":
             # The load-bearing fix: the proxy IS set to ours, but the device
             # can't reach it — show red instead of a lying green.
             device = (
-                f"[#fb7185]✗ Device → mitmproxy {self._proxy_addr} (unreachable)[/]"
+                f"[{pal.bad}]Device proxy to our Mitmproxy {self._proxy_addr}, "
+                "unreachable[/]"
             )
         elif self._proxy_state == "ours" and self._reach_state == "checking":
             device = (
-                f"[#facc15]◌ Device → our mitmproxy {self._proxy_addr} (re-checking)[/]"
+                f"[{pal.warn}]◌ re-checking: Device proxy to our Mitmproxy "
+                f"{self._proxy_addr}[/]"
             )
         elif self._proxy_state == "ours":
-            device = f"[#4ade80]● Device → our mitmproxy {self._proxy_addr}[/]"
+            device = f"[{pal.ok}]● Device proxy on: our Mitmproxy {self._proxy_addr}[/]"
         elif self._proxy_state == "other":
-            device = f"[#7dd3fc]● Device → {self._proxy_addr} [#5b6479](external)[/][/]"
+            device = f"[{pal.accent}]● Device proxy on: external {self._proxy_addr}[/]"
         else:
-            device = "[#5b6479]○ Device off[/]"
+            device = f"[{pal.dim}]○ Device proxy off[/]"
 
         # Apps part — only when there are app proxies.
         apps = ""
@@ -642,14 +647,12 @@ class MitmproxyPanel(Widget):
             ours = sum(1 for target in routes.values() if target == "ours")
             ext = len(routes) - ours
             if ours:
-                apps += f"  [#22d3ee]· Apps {ours} → mitmproxy[/]"
+                apps += f"  [{pal.accent}]· Apps to our Mitmproxy {ours}[/]"
             if ext:
-                apps += f"  [#7dd3fc]· {ext} → ext[/]"
+                apps += f"  [{pal.title}]· Apps to an external proxy {ext}[/]"
         problems = self._lane_problems()
         if problems:
-            from sandroid.tui.themes import lens_palette
-
-            apps += f"  [{lens_palette().warn}]{escape(problems)}[/]"
+            apps += f"  [{pal.warn}]{escape(problems)}[/]"
 
         return f"{device}{apps}"
 
@@ -777,8 +780,8 @@ class MitmproxyPanel(Widget):
         pal = lens_palette()
         st = self._service.state
         if not self._service.is_running():
-            return f"[{pal.dim}]Mitmproxy off[/]"
-        parts = [f"[{pal.ok}]Mitmproxy on[/] :{st.proxy_port}"]
+            return f"[{pal.dim}]Mitmproxy ○ off[/]"
+        parts = [f"[{pal.ok}]Mitmproxy ● on[/] :{st.proxy_port}"]
         if self._proxy_state == "ours" and self._reach_state == "unreachable":
             parts.append(f"[{pal.bad}]device can't reach it[/]")
         elif self._proxy_state == "ours":
@@ -797,10 +800,12 @@ class MitmproxyPanel(Widget):
         if problems:
             parts.append(f"[{pal.warn}]{escape(problems)}[/]")
         parts.append(
-            "CA installed" if self._ca_ok else f"[{pal.dim}]CA not installed[/]"
+            f"CA [{pal.ok}]● installed[/]"
+            if self._ca_ok
+            else f"[{pal.dim}]CA ○ not installed[/]"
         )
         if self._service.ssl_unpin_is_active():
-            parts.append("unpin on")
+            parts.append(f"unpin [{pal.ok}]● on[/]")
         return " · ".join(parts)
 
     def empty_hint(self) -> tuple[str, str]:
@@ -840,16 +845,19 @@ class MitmproxyPanel(Widget):
 
     def status_rows(self) -> list[tuple[str, str]]:
         """``[(label, markup)]`` for the "Capture status" Inspector page."""
+        from sandroid.tui.themes import lens_palette
+
+        pal = lens_palette()
         st = self._service.state
         running = self._service.is_running()
         rows = [
             (
-                "mitmweb",
+                "Mitmproxy web interface",
                 (
-                    f"[#4ade80]● running[/]  {st.listen_host}:{st.proxy_port} → "
+                    f"[{pal.ok}]● running[/]  {st.listen_host}:{st.proxy_port} → "
                     f"web :{st.web_port}"
                     if running
-                    else f"[#5b6479]○ stopped[/]  (port {st.proxy_port})"
+                    else f"[{pal.dim}]○ stopped[/]  (port {st.proxy_port})"
                 ),
             )
         ]
@@ -860,20 +868,23 @@ class MitmproxyPanel(Widget):
             (
                 "CA",
                 (
-                    "[#4ade80]✓[/] in the system trust store"
+                    f"[{pal.ok}]● installed[/] in the system trust store"
                     if self._ca_ok
-                    else "[#5b6479]○ not installed[/]  ^N"
+                    else f"[{pal.dim}]○ not installed[/]  Ctrl+N"
                 ),
             )
         )
         rows.append(
-            ("Chrome CT", "[#4ade80]✓[/] bypassed" if self._ct_ok else "[#5b6479]○[/]")
+            (
+                "Chrome CT",
+                f"[{pal.ok}]● bypassed[/]" if self._ct_ok else f"[{pal.dim}]○ off[/]",
+            )
         )
         if self._service.ssl_unpin_is_active():
             target = escape(self._service.ssl_unpin_target() or "")
-            rows.append(("SSL unpin", f"[#4ade80]✓[/] {target}"))
+            rows.append(("SSL unpin", f"[{pal.ok}]● on[/] {target}"))
         else:
-            rows.append(("SSL unpin", "[#5b6479]○ off[/]  ^P"))
+            rows.append(("SSL unpin", f"[{pal.dim}]○ off[/]  Ctrl+P"))
         try:
             addon_count = len(self._service.get_enabled_addons())
         except Exception:
@@ -881,7 +892,7 @@ class MitmproxyPanel(Widget):
         if addon_count:
             rows.append(("addons", str(addon_count)))
         if st.verbose:
-            rows.append(("verbose", "[#facc15]on[/]"))
+            rows.append(("verbose", f"[{pal.warn}]● on[/]"))
         if running:
             rows.append(("flows seen", str(st.flows_seen)))
         if st.tls_failures:

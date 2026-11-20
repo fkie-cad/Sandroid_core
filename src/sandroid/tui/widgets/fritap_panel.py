@@ -241,9 +241,9 @@ class FriTapPanel(Widget):
         running = self.is_running()
         phase, _detail = self._phase()
         if phase == "starting" and not running:
-            return f"[{pal.warn}]friTap starting[/]"
+            return f"[{pal.warn}]friTap ◌ starting[/]"
         if phase == "stopping":
-            return f"[{pal.warn}]friTap stopping[/]"
+            return f"[{pal.warn}]friTap ◌ stopping[/]"
         if phase == "failed" and not running:
             # e.g. an agent stuck in a frozen app: not a clean stop.
             return f"[{pal.bad}]friTap failed[/]"
@@ -251,13 +251,19 @@ class FriTapPanel(Widget):
             return ""
         if phase == "hung":
             return f"[{pal.warn}]friTap app not responding[/]"
-        return f"[{pal.ok}]friTap on[/]"
+        return f"[{pal.ok}]friTap ● on[/]"
 
     @staticmethod
     def _mark(ok: bool) -> str:
-        return "[#4ade80]✓[/]" if ok else "[#5b6479]○[/]"
+        from sandroid.tui.themes import lens_palette
+
+        pal = lens_palette()
+        return f"[{pal.ok}]● written[/]" if ok else f"[{pal.dim}]○ off[/]"
 
     def _render_header(self) -> str:
+        from sandroid.tui.themes import lens_palette
+
+        pal = lens_palette()
         task = None
         running = False
         try:
@@ -284,29 +290,29 @@ class FriTapPanel(Widget):
                 problem = None
             if isinstance(problem, str) and problem:
                 # Don't claim "running" for a job whose app/agent died.
-                head = f"[#fbbf24]▲ not capturing[/] ({problem[:60]})   [b]{app}[/]"
+                head = f"[{pal.warn}]not capturing[/] ({problem[:60]})   [b]{app}[/]"
             else:
-                head = f"[#4ade80]● running[/]   [b]{app}[/]"
+                head = f"[{pal.ok}]● running[/]   [b]{app}[/]"
             if mode:
                 head += f"  [#5b6479]{mode}[/]"
             if pid:
                 head += f"  [#5b6479]pid {pid}[/]"
         else:
-            head = "[#fb7185]○ stopped[/]"
+            head = f"[{pal.bad}]○ stopped[/]"
         phase, detail = self._phase()
         if phase == "starting" and not running:
-            head = "[#facc15]◌ starting[/] (attaching, loading the agent)"
+            head = f"[{pal.warn}]◌ starting[/] (attaching, loading the agent)"
         elif phase == "stopping":
-            head = "[#facc15]◌ stopping[/] (unloading the agent)"
+            head = f"[{pal.warn}]◌ stopping[/] (unloading the agent)"
         elif phase == "hung" and running:
             head = (
-                f"[#fbbf24]▲ {escape(detail or 'app not responding')}[/] — "
+                f"[{pal.warn}]{escape(detail or 'app not responding')}[/] — "
                 "h stops friTap"
             )
         elif phase == "failed" and not running:
-            head = f"[#fb7185]✗ failed[/] {escape(detail[:80])}"
+            head = f"[{pal.bad}]failed[/] {escape(detail[:80])}"
         elif phase == "stopped" and not running and detail:
-            head = f"[#fb7185]○ stopped[/] [#5b6479]({escape(detail)})[/]"
+            head = f"[{pal.bad}]○ stopped[/] [{pal.dim}]({escape(detail)})[/]"
 
         checks = []
         if running:
@@ -368,7 +374,15 @@ class FriTapPanel(Widget):
             net_on = bool(get_network_capture_service().is_capturing())
         except Exception:
             net_on = False
-        rows.append(("pcap", "[#4ade80]●[/] capturing" if net_on else "[#5b6479]○[/]"))
+        from sandroid.tui.themes import lens_palette
+
+        pal = lens_palette()
+        rows.append(
+            (
+                "pcap",
+                f"[{pal.ok}]● capturing[/]" if net_on else f"[{pal.dim}]○ off[/]",
+            )
+        )
         err = f"[#fb7185]{self._errors}[/]" if self._errors else "0"
         rows.append(
             ("seen", f"keys {self._keys} · data {self._datalog} · errors {err}")
