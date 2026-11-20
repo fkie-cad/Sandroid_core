@@ -173,6 +173,7 @@ sandroid = [
     "assets/world/languages/*.md",
     "assets/world/photos/*.yaml",
     "assets/world/photos/*.md",
+    "assets/world/photos/screenshots/*.png",
     "world/*.md",
     "tui/*.tcss",
     "tui/themes/*.tcss",
