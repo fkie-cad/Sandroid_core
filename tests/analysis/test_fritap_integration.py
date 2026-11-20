@@ -792,3 +792,82 @@ def test_current_session_detach_is_published_for_the_frida_pill():
         ("process-terminated", False),
         ("connection-terminated", True),
     ]
+
+
+# -- keys-only start for the Network method control ------------------------------
+
+
+def _keys_env(monkeypatch, *, spotlight="com.example.app", active="emu-1", tasks=()):
+    from sandroid import services
+    from sandroid.core.adb import Adb
+
+    state = types.SimpleNamespace(registered=[], stopped=[], tasks=list(tasks))
+    fake_tasks = types.SimpleNamespace(
+        is_running=lambda name: any(t.name == name for t in state.tasks),
+        get_running_tasks=lambda: list(state.tasks),
+        register=lambda **kw: state.registered.append(kw),
+        stop=lambda name: state.stopped.append(name) or True,
+    )
+    monkeypatch.setattr(services, "get_task_service", lambda: fake_tasks)
+    monkeypatch.setattr(
+        services,
+        "get_spotlight_service",
+        lambda: types.SimpleNamespace(get_effective_package=lambda: spotlight),
+    )
+    monkeypatch.setattr(Adb, "get_target_device", classmethod(lambda c: active))
+    return state
+
+
+def test_keys_only_refuses_another_app_or_device(monkeypatch):
+    _keys_env(monkeypatch)
+    r = fritap_mod.start_fritap_keys("org.other")
+    assert (r[0], r.reason) == (False, "not_selected")
+    r = fritap_mod.start_fritap_keys(serial="emu-2")
+    assert (r[0], r.reason) == (False, "other_device")
+
+
+def test_keys_only_starts_without_a_dialog_and_registers(monkeypatch):
+    state = _keys_env(monkeypatch)
+    seen: list = []
+
+    def _start(self, interactive=True):
+        seen.append(interactive)
+        self.app_package, self.process_id = "com.example.app", 77
+        return True
+
+    monkeypatch.setattr(fritap_mod.FriTap, "__init__", lambda self: None)
+    monkeypatch.setattr(fritap_mod.FriTap, "start", _start)
+    monkeypatch.setattr(fritap_mod.FriTap, "target_gone", None, raising=False)
+    monkeypatch.setattr(fritap_mod.FriTap, "start_note", "", raising=False)
+
+    r = fritap_mod.start_fritap_keys("com.example.app")
+
+    assert r[0] is True
+    assert seen == [False]  # no configuration dialog: keys and JSON only
+    assert state.registered[0]["name"] == "fritap"
+    assert state.registered[0]["app_name"] == "com.example.app"
+
+
+def test_keys_only_passes_the_resolver_reason_and_stop_works(monkeypatch):
+    from sandroid.services.app_start import AppStartError
+
+    state = _keys_env(monkeypatch)
+
+    def _start(self, interactive=True):
+        try:
+            raise AppStartError("busy", reason="busy")
+        except AppStartError as e:
+            raise fritap_mod.FriTapTargetError(str(e)) from e
+
+    monkeypatch.setattr(fritap_mod.FriTap, "__init__", lambda self: None)
+    monkeypatch.setattr(fritap_mod.FriTap, "start", _start)
+    r = fritap_mod.start_fritap_keys()
+    assert (r[0], r.reason) == (False, "busy")
+    assert state.registered == []
+
+    state.tasks = [types.SimpleNamespace(name="fritap", app_name="com.example.app")]
+    assert fritap_mod.fritap_running("com.example.app")
+    assert not fritap_mod.fritap_running("org.other")
+    assert fritap_mod.start_fritap_keys()[0] is True  # already runs there
+    assert fritap_mod.stop_fritap() is True
+    assert state.stopped == ["fritap"]

@@ -1423,3 +1423,120 @@ class FriTap(DataGatherBase):
 
     def pretty_print(self):
         """Not implemented"""
+
+
+# -- non-interactive "keys only" control (the Network method control) --------
+
+_KEYS_LOCK = threading.Lock()
+
+
+def fritap_running(package: str | None = None) -> bool:
+    """True while a friTap task runs (on ``package``, when one is given)."""
+    from sandroid.services import get_task_service
+
+    try:
+        svc = get_task_service()
+        if not svc.is_running("fritap"):
+            return False
+        if package is None:
+            return True
+        return any(
+            getattr(t, "name", "") == "fritap"
+            and getattr(t, "app_name", None) == package
+            for t in svc.get_running_tasks()
+        )
+    except Exception:
+        return False
+
+
+def start_fritap_keys(package: str | None = None, serial: str | None = None):
+    """Start friTap on the spotlight app, keys only: no dialog, no pcap.
+
+    Writes the TLS keylog and the JSON log; no network capture. Goes through
+    the app-start resolver like the ``h`` key: attaches to a running app,
+    starts a stopped one (with the pre-start steps), never restarts a
+    running app. Blocking: call it on a worker thread, never the UI thread.
+
+    Args:
+        package: Must be the spotlight app when given (None: the spotlight
+            app).
+        serial: Must be the active device when given (friTap's Frida session
+            belongs to it).
+
+    Returns:
+        A :class:`~sandroid.services.app_start.StartResult` ``(ok, message)``
+        with ``.reason``: ``"busy"``, ``"declined"``, ``"needs_consent"``
+        from the resolver, ``"not_selected"`` (no or another spotlight app),
+        ``"other_device"``, or None.
+    """
+    from sandroid.core.adb import Adb
+    from sandroid.services import get_spotlight_service, get_task_service
+    from sandroid.services.app_start import StartResult
+
+    spotlight = get_spotlight_service().get_effective_package()
+    if not spotlight or (package and package != spotlight):
+        return StartResult(
+            False,
+            f"friTap not started: {package or 'no app'} is not the selected app",
+            "not_selected",
+        )
+    active = Adb.get_target_device()
+    if serial and active and serial != active:
+        return StartResult(
+            False,
+            f"friTap not started: {serial} is not the active device ({active})",
+            "other_device",
+        )
+    if not _KEYS_LOCK.acquire(blocking=False):
+        return StartResult(False, "friTap is already starting", "busy")
+    try:
+        if fritap_running(spotlight):
+            return StartResult(True, f"friTap already runs on {spotlight}")
+        if fritap_running():
+            return StartResult(
+                False, "friTap runs on another app: stop it first", "busy"
+            )
+        fritap = FriTap()
+        try:
+            started = fritap.start(interactive=False)
+        except Exception as exc:
+            reason = getattr(exc.__cause__, "reason", None) or getattr(
+                exc, "reason", None
+            )
+            return StartResult(False, f"friTap not started: {exc}", reason)
+        if not started:
+            return StartResult(False, "friTap not started")
+        if fritap.target_gone:
+            return StartResult(
+                False, f"friTap not started: the app is gone ({fritap.target_gone})"
+            )
+        try:
+            get_task_service().register(
+                name="fritap",
+                display_name="FriTap",
+                instance=fritap,
+                stop_callback=fritap.stop,
+                app_name=fritap.app_package,
+                target_pid=fritap.process_id,
+            )
+        except Exception as exc:
+            logger.warning("friTap runs but its task was not registered: %s", exc)
+        note = f"; {fritap.start_note}" if fritap.start_note else ""
+        return StartResult(
+            True,
+            f"friTap (keys only) started for {fritap.app_package} "
+            f"(pid {fritap.process_id}){note}",
+        )
+    finally:
+        _KEYS_LOCK.release()
+
+
+def stop_fritap() -> bool:
+    """Stop the running friTap task (any mode). True when one was stopped."""
+    from sandroid.services import get_task_service
+
+    try:
+        return bool(get_task_service().stop("fritap"))
+    except Exception as exc:
+        logger.warning("Stopping friTap failed: %s", exc)
+        return False
