@@ -422,7 +422,7 @@ async def test_network_highlight_words_take_the_light_theme_colours(flow_dir, st
 async def test_network_identity_and_highlight_columns_together(
     flow_dir, store, monkeypatch
 ):
-    """With the privacy scan on the same registry: Identity after Recipient,
+    """With the privacy scan on the same registry: Identity in its agreed place,
     Highlight last, the AI tint wins a row that has both, and a privacy hit
     redraws through the privacy feed only (no whole-lens AI redraw).
     """
@@ -440,7 +440,10 @@ async def test_network_identity_and_highlight_columns_together(
         store.create("network", "POST trackers", reasons={"flow-2": "POST"})
         await until(pilot, lambda: "hl" in _cols(table))
         cols = _cols(table)
-        assert cols.index("who") + 1 == cols.index("ident")
+        # Time | App | Recipient | Request | TLS | Identity | Status | Size
+        order = ["time", "app", "who", "req", "tls", "ident", "status", "size"]
+        assert [c for c in cols if c != "hl"] == [c for c in order if c in cols]
+        assert "ident" in cols
         assert cols[-1] == "hl"
         assert _cell(table, "f2", "ident") == "Ad ID"
         assert _cell(table, "f2", "hl") == "POST trackers"

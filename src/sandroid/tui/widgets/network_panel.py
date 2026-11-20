@@ -1,8 +1,10 @@
 """Network lens: who is the app talking to, and what did it send?
 
-One full-width flow table (``#net-flows``, five columns: time · recipient ·
-request · status · size) fed from the structured flow log the embedded
-mitmweb addon writes (``<raw_results>/mitm_flows/flows.jsonl``, read through
+One full-width flow table (``#net-flows``; columns Time, App, Recipient,
+Request, TLS, Identity, Status, Size; narrow widths drop Size, TLS, Time and
+App in that order so Request stays readable) fed from the structured flow
+log the embedded mitmweb addon writes
+(``<raw_results>/mitm_flows/flows.jsonl``, read through
 :mod:`sandroid.services.mitmproxy_flow_log`). Details live only in the
 Inspector (Enter on a row): Summary / Request / Response.
 
@@ -23,8 +25,8 @@ Data flow
 * ``[TLS_FAIL]`` lines become "TLS failed" rows at once; the addon also writes them to
   ``flows.jsonl`` (``kind: "tls"``, no detail file), and the poll pairs that
   record with the stdout row instead of adding it twice. While the lens is
-  not in view they count into the lens-bar badge (``⚑N``) until the lens is
-  activated again.
+  not in view they count into the lens-bar badge (``27 TLS failed``) until
+  the lens is activated again.
   Errored flows come from ``flows.jsonl`` (their ``error`` field) as
   "error" rows.
 
@@ -123,6 +125,11 @@ LENS_ID = "network"
 
 #: Inspector key of the "Capture status" page (mitmproxy + friTap tabs).
 STATUS_KEY = "network:capture-status"
+#: A narrow lens drops columns (this order, first goes first) until Request
+#: has this many cells; Time | App | Recipient | Request | TLS | Identity |
+#: Status | Size is the full order.
+REQUEST_MIN_WIDTH = 26
+LAYOUT_DROP_ORDER = ("size", "tls", "time", "app")
 
 # --------------------------------------------------------------------------
 # recipients + OS noise
@@ -402,7 +409,69 @@ def _short_error(error: str) -> str:
     ):
         if needle in e:
             return word
-    return "error"
+    return ""
+
+
+def error_status(error: str | None) -> str:
+    """The Status words of an errored flow: ``error timeout``, or ``error``
+    alone when the reason is not one of the known kinds (never twice).
+    """
+    word = _short_error(error or "")
+    return f"error {word}" if word else "error"
+
+
+def cell_size(n: int) -> str:
+    """``human_size`` for the Size cell: no decimal from 100 on (fits 16)."""
+    if n < 1024:
+        return f"{n} B"
+    value, unit = n / 1024, "KB"
+    if value >= 1024:
+        value, unit = value / 1024, "MB"
+    return f"{value:.1f} {unit}" if value < 100 else f"{value:.0f} {unit}"
+
+
+def size_words(row: FlowRow) -> str:
+    """The Size cell: ``sent 2.0 KB`` (a request body), else
+    ``received 5.0 KB``; nothing when neither is known.
+    """
+    if row.req_bytes:
+        return f"sent {cell_size(row.req_bytes)}"
+    if row.resp_bytes:
+        return f"received {cell_size(row.resp_bytes)}"
+    return ""
+
+
+def tls_word(row: FlowRow) -> str:
+    """The TLS cell, from what the flow log records (never guessed).
+
+    ``TLS failed`` for a failed handshake row, ``TLS`` when mitmproxy saw the
+    flow over https / wss, ``plain`` over http / ws, nothing when the record
+    has no protocol (older flow logs).
+    """
+    if row.kind == "tls":
+        return "TLS failed"
+    proto = (row.protocol or "").strip().upper()
+    if proto.startswith("HTTPS") or proto == "WSS":
+        return "TLS"
+    if proto.startswith("HTTP") or proto == "WS":
+        return "plain"
+    return ""
+
+
+def app_label(package: str, width: int) -> str:
+    """The App cell: the package, or its trailing name parts when it does
+    not fit (``com.ebay.kleinanzeigen`` -> ``kleinanzeigen``), cut without
+    a glyph; nothing for a flow with no app.
+    """
+    package = package or ""
+    if width <= 0 or len(package) <= width:
+        return package
+    parts = package.split(".")
+    for i in range(1, len(parts)):
+        tail = ".".join(parts[i:])
+        if len(tail) <= width:
+            return tail
+    return parts[-1][:width]
 
 
 _TLS_REASONS = {
@@ -1447,7 +1516,7 @@ class NetworkPanel(Widget):
             self._unseen_tls += 1
             ms = self._main_screen()
             if ms is not None:
-                ms.set_lens_badge(LENS_ID, f"⚑{self._unseen_tls}")
+                ms.set_lens_badge(LENS_ID, f"{self._unseen_tls} TLS failed")
 
     def _claim_live_tls(self, row: FlowRow) -> bool:
         """A persisted TLS failure that is already on screen (from mitmweb's
@@ -1555,7 +1624,7 @@ class NetworkPanel(Widget):
         if row.kind == "tls":
             status = f"tls failed {row.reason}"
         elif row.error:
-            status = f"error {_short_error(row.error)}"
+            status = error_status(row.error)
         else:
             status = str(row.status) if row.status is not None else ""
         hay = f"{row.method} {row.host}{row.path} {row.app} {row.recipient[0]} {status}"
@@ -1589,27 +1658,43 @@ class NetworkPanel(Widget):
     def _layout(self) -> list[tuple[str, str, int]]:
         """``[(key, label, width)]`` of the visible columns for this width.
 
-        Five columns when there is room; a narrow lens (e.g. 100 columns
-        with the Inspector open) drops Size, then Time, so Request keeps a
-        readable width instead of scrolling sideways.
+        Time | App | Recipient | Request | TLS | Identity | Status | Size when
+        there is room; a narrow lens (e.g. 100 columns with the Inspector
+        open) drops Size, then TLS, then Time, then App (``LAYOUT_DROP_ORDER``)
+        until Request has ``REQUEST_MIN_WIDTH`` cells, instead of scrolling
+        sideways. Identity keeps its own rule (``_privacy_columns``).
         """
         avail = self.size.width or 120
         who = 18 if avail >= 110 else (16 if avail >= 58 else 12)
-        cols = [("time", "Time", 8), ("who", "Recipient", who)]
+        app = 20 if avail >= 140 else 14
+        cols = [
+            ("time", "Time", 8),
+            ("app", "App", app),
+            ("who", "Recipient", who),
+            ("req", "Request", 0),
+            ("tls", "TLS", 10),
+        ]
         cols += self._privacy_columns(avail)
-        cols += [("req", "Request", 0), ("status", "Status", 11), ("size", "Size", 10)]
-        if avail < 76:
-            cols = [c for c in cols if c[0] != "size"]
-        if avail < 58:
-            cols = [c for c in cols if c[0] != "time"]
-        # 2 cells padding per column + 1 scrollbar column
-        fixed = sum(w for _, _, w in cols) + 2 * len(cols) + 1
-        # The Highlight column only while Request keeps a readable width
-        # (with the Identity column too, a ~100 column lens has no room).
-        if self._hl.show_column(avail) and avail - fixed - (HL_WIDTH + 2) >= 24:
-            cols.append(("hl", "Highlight", HL_WIDTH))
-            fixed += HL_WIDTH + 2
-        req = max(12, avail - fixed)
+        cols += [("status", "Status", 13), ("size", "Size", 16)]
+
+        def fixed_of(columns: list[tuple[str, str, int]]) -> int:
+            # 2 cells padding per column + 1 scrollbar column
+            return sum(w for _, _, w in columns) + 2 * len(columns) + 1
+
+        for key in LAYOUT_DROP_ORDER:
+            if avail - fixed_of(cols) >= REQUEST_MIN_WIDTH:
+                break
+            cols = [c for c in cols if c[0] != key]
+        # The Highlight column (AI highlights exist) may take Size's place,
+        # but only while Request keeps a readable width (with the Identity
+        # column too, a ~100 column lens has no room).
+        if self._hl.show_column(avail):
+            with_hl = [*cols, ("hl", "Highlight", HL_WIDTH)]
+            if avail - fixed_of(with_hl) < REQUEST_MIN_WIDTH:
+                with_hl = [c for c in with_hl if c[0] != "size"]
+            if avail - fixed_of(with_hl) >= REQUEST_MIN_WIDTH:
+                cols = with_hl
+        req = max(12, avail - fixed_of(cols))
         return [(k, label, w or req) for k, label, w in cols]
 
     def _cells(self, row: FlowRow, layout: list[tuple[str, str, int]]) -> list[Text]:
@@ -1620,6 +1705,20 @@ class NetworkPanel(Widget):
         )
         label, known = row.recipient
         who = Text(_ellipsize(label, who_w), style=lens_palette().text)
+        app = Text(
+            app_label(row.app, widths.get("app", 0)),
+            style=lens_palette().muted,
+            no_wrap=True,
+            overflow="crop",
+        )
+        tls = tls_word(row)
+        tls_cell = Text(
+            tls,
+            style={
+                "TLS failed": f"bold {lens_palette().bad}",
+                "plain": lens_palette().warn,
+            }.get(tls, lens_palette().muted),
+        )
         tag = _phase_tag(row.phase) if self.in_review else ""
         if row.kind == "tls":
             req = Text(no_wrap=True, overflow="ellipsis")
@@ -1640,11 +1739,9 @@ class NetworkPanel(Widget):
             else:
                 req = smart_request(row.method, row.host, row.path, req_w)
             if row.error:
-                status = Text(
-                    f"error {_short_error(row.error)}", style=lens_palette().bad
-                )
+                status = Text(error_status(row.error), style=lens_palette().bad)
             elif row.status is None:
-                status = Text("…", style=lens_palette().dim)
+                status = Text("")  # no response (yet): nothing, not a glyph
             else:
                 code = int(row.status)
                 color = lens_palette().muted
@@ -1653,14 +1750,20 @@ class NetworkPanel(Widget):
                 elif code >= 500:
                     color = lens_palette().bad
                 status = Text(str(code), style=color)
-            if row.req_bytes:
-                size = Text(f"↑ {human_size(row.req_bytes)}", style=lens_palette().text)
-            elif row.resp_bytes:
-                size = Text(f"↓ {human_size(row.resp_bytes)}", style=lens_palette().dim)
-            else:
-                size = Text("–", style=lens_palette().dim)
+            size = Text(
+                size_words(row),
+                style=lens_palette().text if row.req_bytes else lens_palette().dim,
+            )
         size.justify = "right"
-        cells = {"time": t, "who": who, "req": req, "status": status, "size": size}
+        cells = {
+            "time": t,
+            "app": app,
+            "who": who,
+            "req": req,
+            "tls": tls_cell,
+            "status": status,
+            "size": size,
+        }
         cells["ident"] = self._privacy_cell(row, widths.get("ident", 0))
         if "hl" in widths:
             cells["hl"] = self._hl.cell(row.flow_id)

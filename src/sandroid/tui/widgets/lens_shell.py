@@ -42,7 +42,7 @@ To replace a lens body, keep the widget id (or change it here *and* in
 * ``switch_lens(lens_id)`` / ``cycle_lens(delta)`` / ``active_lens`` (id) /
   ``lens_widget(lens_id)`` / ``is_lens_active(lens_id)``.
 * ``set_lens_badge(lens_id, text | None)`` -- alert badge after the lens
-  name in the lens bar, e.g. ``set_lens_badge("network", "⚑2")``.
+  name in the lens bar, e.g. ``set_lens_badge("network", "27 TLS failed")``.
 * ``set_lens_caption(lens_id, title=None, info=None)`` -- the lens frame
   shows ``"<Label> · <title>"`` top-left and ``info`` top-right (e.g.
   ``"10 of 247 events"``) while that lens is active.
