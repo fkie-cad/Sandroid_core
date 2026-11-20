@@ -3505,7 +3505,7 @@ def test_a_persona_stays_the_devices_profile_after_a_tui_restart(
     with other._apply_lock:
         assert other._profile_id_now(SERIAL) == persona.id
     # A plain apply of another profile ends the persona.
-    service.apply(SERIAL, PKG, profile=service.active_profile())
+    service.apply(SERIAL, PKG, profile=service.active_profile(), replace=True)
     assert "persona" not in _record(device)
 
 
@@ -3682,7 +3682,7 @@ def test_the_persona_the_device_holds_beats_a_plain_launch(
     assert plan.fingerprint == ident.fingerprint(persona)
     assert _record(device)["persona"] == persona.id
     # Only an explicit apply of another profile ends it.
-    fresh.apply(SERIAL, PKG, profile=fresh.active_profile())
+    fresh.apply(SERIAL, PKG, profile=fresh.active_profile(), replace=True)
     assert "persona" not in _record(device)
 
 
@@ -3724,5 +3724,114 @@ def test_an_app_start_refuses_when_the_device_changed_profile_meanwhile(
     plan = service.pre_start(PKG)  # the active profile
     with service._lock:
         service._applied[SERIAL].persona = persona.id  # a persona load meanwhile
-    with pytest.raises(ident.IdentityApplyError, match="start the app again"):
+    with pytest.raises(ident.IdentityApplyError, match="start again"):
         plan.apply()
+
+
+# ---------------------------------------------------------------------------
+# decided under the apply lock; restores during an apply; markers
+# ---------------------------------------------------------------------------
+
+
+def _plain_record(service, device) -> dict:
+    """The persona device's record as a plain (active profile) one."""
+    rec = {k: v for k, v in _record(device).items() if k != "persona"}
+    rec["profile"] = service.config().profile
+    return rec
+
+
+def test_a_persona_load_before_the_apply_lock_is_seen_under_it(
+    service, device, monkeypatch
+):
+    persona = _persona_device(service, device, monkeypatch)
+    persona_rec = dict(_record(device))
+    _put_record(device, _plain_record(service, device))
+    fresh = _fresh()
+    fresh.plan(SERIAL)  # memory: the plain device
+    assert fresh.profile_id_for(SERIAL) == fresh.config().profile
+    # The persona snapshot loads while ensure_applied waits for the lock.
+    _put_record(device, persona_rec)
+    fresh.forget(SERIAL, restored=True)
+    plan = fresh.ensure_applied(SERIAL)
+    assert plan.fingerprint == ident.fingerprint(persona)
+    assert _record(device)["persona"] == persona.id
+
+
+def test_an_app_start_planned_before_a_persona_load_refuses(
+    service, device, app_start, monkeypatch
+):
+    _persona_device(service, device, monkeypatch)
+    persona_rec = dict(_record(device))
+    _put_record(device, _plain_record(service, device))
+    fresh = _fresh()
+    plan = fresh.pre_start("com.other.app")  # the active profile
+    assert "mara-de" in plan.description
+    _put_record(device, persona_rec)  # loaded while the start is confirmed
+    fresh.forget(SERIAL, restored=True)
+    with pytest.raises(ident.IdentityApplyError, match="start again"):
+        plan.apply()
+    assert _record(device) == persona_rec
+
+
+def test_a_plain_launch_never_decides_for_an_unread_record(
+    service, device, monkeypatch
+):
+    from sandroid.core import emulator
+
+    _persona_device(service, device, monkeypatch)
+    monkeypatch.setattr(
+        emulator, "launch_record", lambda s: {"launch_id": "L3", "meta": {}}
+    )
+    device.record_down = True
+    fresh = _fresh()
+    with pytest.raises(ident.IdentityApplyError, match=ident.RECORD_UNREAD):
+        fresh.ensure_applied(SERIAL)
+
+
+def test_a_persona_loaded_during_an_apply_is_not_overwritten_in_the_record(
+    service, device, monkeypatch
+):
+    _persona_device(service, device, monkeypatch)
+    persona_rec = dict(_record(device))
+    _put_record(device, _plain_record(service, device))
+    fresh = _fresh()
+    real_emit = fresh._emit
+
+    def emit(kind, *args, **kwargs):
+        if kind == "verify":  # the persona snapshot loads during the apply
+            _put_record(device, persona_rec)
+            fresh.forget(SERIAL, restored=True)
+        return real_emit(kind, *args, **kwargs)
+
+    fresh._emit = emit
+    fresh.apply(SERIAL, "com.other.app")  # the active profile, decided first
+    assert _record(device) == persona_rec  # its results are not recorded
+    assert "com.other.app" not in fresh._applied[SERIAL].done
+
+
+def test_a_failed_write_keeps_a_persona_devices_record(service, device, monkeypatch):
+    persona = _persona_device(service, device, monkeypatch)
+    before = dict(_record(device))
+
+    def broken(*a, **k):
+        return "read-only file system"
+
+    monkeypatch.setattr(ident._Device, "write", broken)
+    device.fs[ident.BOOT_ID_FILE] = b"boot-2\n"  # a reboot: the record is rewritten
+    service.apply(SERIAL, PKG)
+    assert _record(device) == before  # not removed: it names the persona
+    assert SERIAL in service._record_dirty
+    assert service.persona_of(SERIAL) == persona.id
+
+
+def test_startup_markers_follow_the_persona_the_record_names(
+    service, device, app_start, monkeypatch, tmp_path
+):
+    persona = _persona_device(service, device, monkeypatch)
+    # A new session: no frozen apply to take the markers from.
+    monkeypatch.setenv("SDROID_FILES_DIR", str(tmp_path / "new" / "session" / "files"))
+    fresh = _fresh()
+    fp, _markers = fresh.active_markers()
+    assert fp == ident.fingerprint(fresh.active_profile())  # record not read yet
+    assert fresh.pre_start(PKG) is None  # reads the record: the persona, done
+    assert fresh.active_markers()[0] == ident.fingerprint(persona)
