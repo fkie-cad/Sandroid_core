@@ -49,7 +49,9 @@ Design notes:
 
 import logging
 import threading
-from dataclasses import dataclass
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,10 @@ logger = logging.getLogger(__name__)
 #: Owner-id prefix of leases held outside the AI (TUI operations). The AI's
 #: lease reconcile only knows AI owners, so it never drops these.
 EXTERNAL_OWNER_PREFIX = "tui:"
+
+#: Age (seconds) after which :meth:`DeviceResourceArbiter.reconcile` logs a
+#: warning, once per lease, about an external (``tui:``) lease it keeps.
+EXTERNAL_LEASE_WARN_S = 15 * 60
 
 
 class ResourceId(Enum):
@@ -125,12 +131,18 @@ class _Lease:
             succeeds; a legacy :meth:`DeviceResourceArbiter.claim` keeps it.
         dropped: The owner released it while a call still used it; it goes
             away when the last such call settles.
+        acquired_at: ``time.monotonic()`` (the arbiter's clock) when
+            ``owner`` got it.
+        age_warned: :meth:`DeviceResourceArbiter.reconcile` already warned
+            that this (external) lease is old.
     """
 
     owner: str
     inflight: int = 0
     keep: bool = True
     dropped: bool = False
+    acquired_at: float = field(default_factory=time.monotonic)
+    age_warned: bool = False
 
 
 @dataclass(eq=False)
@@ -182,8 +194,10 @@ class DeviceResourceArbiter:
           they exit, even after :meth:`forget_subtask`.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._lock = threading.Lock()
+        #: Monotonic clock for lease ages (tests pass a fake).
+        self._clock = clock
         self._leases: dict[ResourceId, _Lease] = {}
         self._live_subtasks: set[str] = set()
         #: child owner -> parent owner (synchronous subagents only).
@@ -353,7 +367,10 @@ class DeviceResourceArbiter:
             lease = self._leases.get(resource)
             if lease is None:
                 self._leases[resource] = _Lease(
-                    owner, inflight=1 if track else 0, keep=not track
+                    owner,
+                    inflight=1 if track else 0,
+                    keep=not track,
+                    acquired_at=self._clock(),
                 )
                 newly.add(resource)
                 continue
@@ -362,6 +379,8 @@ class DeviceResourceArbiter:
                 lease.owner = owner
                 lease.dropped = False
                 lease.keep = not track
+                lease.acquired_at = self._clock()
+                lease.age_warned = False
                 newly.add(resource)
             elif not track:
                 lease.keep = True
@@ -533,8 +552,11 @@ class DeviceResourceArbiter:
                 (e.g. the orchestrator plus every live subagent). Owners
                 outside the AI (``tui:...``, e.g. the TUI's Zygote-restart
                 fallback) are never dropped here: the AI does not know them,
-                and they release their own leases in a ``finally``.
+                and they release their own leases in a ``finally``. One
+                older than :data:`EXTERNAL_LEASE_WARN_S` is kept but logged
+                once (owner, resource, age): a ``finally`` that never ran.
         """
+        old: list[tuple[str, str, float]] = []
         with self._lock:
             live = set(live_owner_ids) | {
                 o for o, n in self._abandoned.items() if n > 0
@@ -546,6 +568,24 @@ class DeviceResourceArbiter:
                 and not lease.owner.startswith(EXTERNAL_OWNER_PREFIX)
             ]:
                 self._drop_locked(resource)
+            now = self._clock()
+            for resource, lease in self._leases.items():
+                if (
+                    lease.owner.startswith(EXTERNAL_OWNER_PREFIX)
+                    and not lease.dropped
+                    and not lease.age_warned
+                    and now - lease.acquired_at >= EXTERNAL_LEASE_WARN_S
+                ):
+                    lease.age_warned = True
+                    old.append((lease.owner, resource.value, now - lease.acquired_at))
+        for owner, resource_name, age in old:
+            logger.warning(
+                "Lease %s held by %s for %.0f min; kept (external owners "
+                "release their own leases)",
+                resource_name,
+                owner,
+                age / 60,
+            )
 
 
 _arbiter: DeviceResourceArbiter | None = None
