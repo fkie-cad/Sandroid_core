@@ -1224,7 +1224,7 @@ def file_result(
         elif replay == before:
             res.verdict = UNCHANGED
         else:
-            _compare(rec, path, res, run_lines, rep_lines)
+            _compare(rec, path, res, run_lines, rep_lines, secrets)
     except Exception as exc:  # a result view must never crash
         logger.debug("rewind: file result failed", exc_info=True)
         res.error = str(exc)
@@ -1238,7 +1238,8 @@ def run_windows(rec: Recording, path: str) -> tuple[Any, Any]:
     replay_verdict.RunWindow` (None when unknown).
 
     Your run: record start to Stop (or to when ``path``'s After was copied,
-    if later). The replay: its first step to its end (After (replay) copied).
+    if later). The replay: the latest one that copied After (replay), from
+    its first step to its end. Rule 2 measures both from their step 1.
     """
     from sandroid.core.replay_verdict import RunWindow
 
@@ -1250,14 +1251,21 @@ def run_windows(rec: Recording, path: str) -> tuple[Any, Any]:
     if start is not None:
         ends = [e for e in (num(rec.stopped), num(rec.after_at.get(path))) if e]
         run = RunWindow(start, max(ends + [start]))
-    last = next(
-        (r for r in reversed(rec.runs) if r.get("kind") == "rewind-replay"), None
-    )
+    replays = [r for r in rec.runs if r.get("kind") == "rewind-replay"]
+    # Runs saved before ``replay_copied`` existed: the latest replay.
+    copied = [r for r in replays if r.get("replay_copied", True)]
+    last = (copied or replays or [None])[-1]
     replay = None
     if last is not None:
         r_start = num(last.get("replay_started")) or num(last.get("started"))
         if r_start is not None:
-            replay = RunWindow(r_start, max(num(last.get("ended")) or 0.0, r_start))
+            replay = RunWindow(
+                r_start,
+                max(num(last.get("ended")) or 0.0, r_start),
+                num(last.get("first_step_at")),
+            )
+        if run is not None:
+            run = RunWindow(run.start, run.end, num(last.get("recorded_first_step_at")))
     return run, replay
 
 
@@ -1275,10 +1283,16 @@ def _compare(
     res: FileResult,
     run_lines: list[str],
     rep_lines: list[str],
+    secrets: Collection[str] = (),
 ) -> None:
     """The verdict from the Files lens's smart diff of the three copies."""
     from sandroid.core import replay_verdict
 
+    if res.before is None or res.after is None:
+        # Before not copied (it is not "a new file"), or selected late: no
+        # After from your run.
+        res.verdict = NOT_COMPARED
+        return
     copies = []
     for version in (res.before, res.after, res.after_replay):
         if version in (None, ABSENT):
@@ -1290,11 +1304,8 @@ def _compare(
             res.error = "a copy of this file is missing"
             return
         copies.append(local)
-    if res.after is None:  # selected late: no After from your run
-        res.verdict = NOT_COMPARED
-        return
     run, replay = run_windows(rec, path)
-    cmp = replay_verdict.compare(*copies, run=run, replay_run=replay)
+    cmp = replay_verdict.compare(*copies, run=run, replay_run=replay, secrets=secrets)
     res.verdict = _OUTCOME_WORDS[cmp.outcome]
     res.compared = cmp.compared
     res.volatile = [v.as_dict() for v in cmp.volatile]
@@ -1307,16 +1318,15 @@ def _compare(
 
 
 def _hide_values(res: FileResult, secrets: Collection[str]) -> None:
-    """Mask what was typed into sensitive fields in every shown value."""
-    from sandroid.core.replay_verdict import hide, hide_value
+    """Mask what was typed into sensitive fields in the diff texts (the
+    compared fields were masked before they were cut to length).
+    """
+    from sandroid.core.replay_verdict import hide
 
     res.action_text = hide(res.action_text, secrets)
     res.replay_text = hide(res.replay_text, secrets)
     res.only_run = [hide(ln, secrets) for ln in res.only_run]
     res.only_replay = [hide(ln, secrets) for ln in res.only_replay]
-    for v in res.volatile:
-        v["your_run"] = hide_value(v["your_run"], secrets)
-        v["replay"] = hide_value(v["replay"], secrets)
 
 
 def sensitive_texts(rec: Recording) -> frozenset[str]:
@@ -1347,14 +1357,16 @@ SECRET_MIN_LEN = 3
 
 def hidden_texts(rec: Recording | None, reader: str = "ui") -> frozenset[str]:
     """:func:`sensitive_texts` while masking is on for ``reader`` (``ui``:
-    ``timeline.mask_sensitive``; ``ai``: ``ai.mask_sensitive``), else none.
+    ``timeline.mask_sensitive``; ``ai``: ``ai.mask_sensitive``; ``any``:
+    either, for what both read later, like run.json), else none.
     """
     if rec is None:
         return frozenset()
     try:
         from sandroid.core.timeline import should_mask
 
-        if not should_mask(reader):  # type: ignore[arg-type]
+        readers = ("ui", "ai") if reader == "any" else (reader,)
+        if not any(should_mask(r) for r in readers):  # type: ignore[arg-type]
             return frozenset()
         return sensitive_texts(rec)
     except Exception:
@@ -1471,6 +1483,11 @@ class RunOutcome:
     paused: list[int] = field(default_factory=list)
     #: The start point was loaded (the device left the after-the-action state).
     loaded: bool = False
+    #: When step 1 ran in the replay and in your run (wall clock, epoch s).
+    first_step_at: float | None = None
+    recorded_first_step_at: float | None = None
+    #: This run copied After (replay) (its window is the one compared).
+    replay_copied: bool = False
 
 
 def unchecked_words(out: RunOutcome) -> str:
@@ -1635,6 +1652,8 @@ class RewindRunner:
             out.diverged_at_step = report.get("diverged_at_step")
             out.diverged = report.get("diverged")
             out.unchecked_steps = list(report.get("unchecked_steps") or [])
+            out.first_step_at = report.get("first_step_at")
+            out.recorded_first_step_at = report.get("recorded_first_step_at")
             self._emit(
                 "setup",
                 f"{rec.rec_id}#{n}",
@@ -1643,6 +1662,7 @@ class RewindRunner:
                 data={"rec_id": rec.rec_id, "run": n},
             )
             errors = self.pull_role("after_replay", n)
+            out.replay_copied = True
             for path, err in errors.items():
                 self.deps.progress(f"Could not copy {path}: {err}.")
             if report.get("error"):
@@ -1682,6 +1702,9 @@ class RewindRunner:
                 "unchecked_steps": out.unchecked_steps,
                 "steps": out.steps,
                 "loaded": out.loaded,
+                "first_step_at": out.first_step_at,
+                "recorded_first_step_at": out.recorded_first_step_at,
+                "replay_copied": out.replay_copied,
             }
             rec.runs.append(run)
             summary = {

@@ -1537,4 +1537,4 @@ def test_volatile_verdicts_reach_run_json_recording_json_and_the_ai(
     assert entry["volatile_fields"] == [_VOLATILE]
     assert entry["compared"] == "field by field"
     assert ai["runs"][-1]["verdicts"] == {path: rewind.VOLATILE}
-    assert readers == ["ui", "ai"]
+    assert readers == ["any", "ai"]

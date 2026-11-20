@@ -81,6 +81,9 @@ class Blob:
 
     size: int
     head: bytes = b""
+    #: sha256 of the whole value (computed diffs only; not stored, not
+    #: compared): lets the Rewind verdict tell two same-size BLOBs apart.
+    digest: str = field(default="", compare=False, repr=False)
 
     def __str__(self) -> str:
         return f"<blob {self.size} B>"
@@ -143,6 +146,8 @@ class KeyChange:
     old: Any = None
     new: Any = None
     type: str = ""
+    #: The old side's type of a ``changed`` key (not stored in diff.json).
+    old_type: str = ""
 
 
 @dataclass
@@ -491,7 +496,7 @@ def _qi(name: str) -> str:
 
 def _cell(value: Any) -> Any:
     if isinstance(value, bytes):
-        return Blob(len(value), value[:32])
+        return Blob(len(value), value[:32], hashlib.sha256(value).hexdigest())
     return value
 
 
@@ -770,7 +775,12 @@ def _key_changes(
         elif old[key] != new[key]:
             changes.append(
                 KeyChange(
-                    key, "changed", old=old[key][1], new=new[key][1], type=new[key][0]
+                    key,
+                    "changed",
+                    old=old[key][1],
+                    new=new[key][1],
+                    type=new[key][0],
+                    old_type=old[key][0],
                 )
             )
     order = {"changed": 0, "added": 1, "removed": 2}

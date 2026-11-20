@@ -546,9 +546,11 @@ Files lens's diff (SQLite cells by table, row key and column, preference keys,
 JSON paths, text line blocks). A field both runs changed to different values
 is *volatile* only when a rule explains it, never by its name: a **time of
 its own run** (each value lies in its run, give or take 10 s), the **same
-distance from its run** (e.g. a cookie that expires a year after its run) or a
-**freshly generated ID** (same length and characters, random looking, and
-neither value was in Before). Volatile fields are always listed with both
+distance from its run** (measured from each run's first step, e.g. a cookie
+that expires a year after its run) or a **freshly generated ID** (a UUID, or
+16+ characters of one kind mixing letters and digits, random looking, the two
+differing almost everywhere, and neither value was in Before). Columns added
+to a table are compared byte for byte. Volatile fields are always listed with both
 values and their rule, in the warning colour; ``replay changed it
 differently`` is shown as a failure. Files without fields (binary, unknown)
 are ``compared byte for byte``. While ``timeline.mask_sensitive`` (or

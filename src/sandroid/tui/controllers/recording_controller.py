@@ -1279,8 +1279,9 @@ class RecordingController:
             [rec.stopped or 0.0] + [rec.after_at.get(p, 0.0) for p in rec.selected]
         )
         tail = (until - last_t) if (until and last_t) else None
+        first_t = min((t for t in (_step_time(st) for st in steps) if t), default=None)
         try:
-            return StepReplayer(
+            report = StepReplayer(
                 tail_s=tail,
                 shell=runner.deps.shell,
                 helper=helper,
@@ -1289,6 +1290,8 @@ class RecordingController:
                 emit=emit,
                 raw_lines=_raw_reader(),
             ).run(steps)
+            # When your run did step 1: the verdict's rule 2 measures from it.
+            return {**report, "recorded_first_step_at": first_t}
         finally:
             if own_gen is not None and tracking is not None:
                 with contextlib.suppress(Exception):
@@ -1395,7 +1398,9 @@ class RecordingController:
         from sandroid.core.timeline import timeline_folder
 
         try:
-            res = self.results(rec)
+            # run.json is read by the Sessions lens and the AI: masked when
+            # either reader masks.
+            res = self.results(rec, reader="any")
             files: list[Any] = []
             new, deleted, verdicts, volatile = [], [], {}, {}
             for fr in res["files"]:

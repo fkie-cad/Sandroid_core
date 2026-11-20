@@ -256,7 +256,7 @@ def start_replay(
         "rule: time of its own run, same distance from its run, freshly "
         "generated ID), 'replay changed it differently' (see "
         "'only_in_your_run' / 'only_in_the_replay') or 'replay did not "
-        "change it'."
+        "change it' ('could not compare' when a copy is missing)."
     ),
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.READ_ONLY,

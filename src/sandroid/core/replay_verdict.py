@@ -46,8 +46,11 @@ if TYPE_CHECKING:
 SLACK_S = 10.0
 #: Rule 3 (freshly generated IDs). One switch, so the rule can be dropped.
 FRESH_IDS = True
-#: Shortest value rule 3 takes for an ID.
-ID_MIN_LEN = 8
+#: Shortest value rule 3 takes for an ID (a UUID always qualifies). Shorter
+#: values (phone numbers, user names, words) are too often real data.
+ID_MIN_LEN = 16
+#: Least Shannon entropy (bits per character) of a random-looking ID.
+ID_MIN_BITS = 2.5
 #: Changed rows per table a verdict reads (the Files lens keeps fewer).
 VERDICT_ROW_LIMIT = 20_000
 #: Longest value shown in a result line.
@@ -90,15 +93,25 @@ class RunWindow:
 
     start: float
     end: float
+    #: Where rule 2 measures from: the run's first step (else ``start``).
+    anchor: float | None = None
+
+    @property
+    def origin(self) -> float:
+        return self.start if self.anchor is None else self.anchor
 
 
 @dataclass
 class Change:
-    """One changed location: plain words for it, its old and new value."""
+    """One changed location: plain words for it, its old and new value
+    (``new_type``: a preference's tag, ``int`` / ``string`` ...).
+    """
 
     where: str
     old: Any
     new: Any
+    old_type: str = ""
+    new_type: str = ""
 
 
 @dataclass
@@ -145,6 +158,10 @@ def _sqlite_changes(diff: file_inspect.StructuredDiff) -> dict[tuple, Change] | 
     for table in diff.tables:
         if table.truncated:
             return None
+        if table.note not in ("", "new table", "table dropped"):
+            # Columns added/dropped (their values are not in the diff) or a
+            # table that could not be diffed: no fields to compare.
+            return None
         if table.note:
             out[("table", table.name)] = Change(
                 f"table {table.name}", ABSENT, table.note
@@ -171,7 +188,9 @@ def _key_changes(diff: file_inspect.StructuredDiff) -> dict[tuple, Change]:
     for kc in diff.keys:
         old = ABSENT if kc.op == "added" else kc.old
         new = ABSENT if kc.op == "removed" else kc.new
-        out[("key", kc.key)] = Change(f"{word} {kc.key}", old, new)
+        old_type = "" if kc.op == "added" else (kc.old_type or kc.type)
+        new_type = "" if kc.op == "removed" else kc.type
+        out[("key", kc.key)] = Change(f"{word} {kc.key}", old, new, old_type, new_type)
     return out
 
 
@@ -309,20 +328,25 @@ def _same_class(a: str, b: str) -> bool:
 
 
 def _random_looking(value: str) -> bool:
+    if char_class(value) == "UUID":
+        return True
     if len(value) < ID_MIN_LEN:
         return False
-    letters = value.replace("-", "").replace("_", "").rstrip("=")
-    if letters.isalpha() and (
-        letters.islower() or letters.isupper() or letters.istitle()
-    ):
-        return False  # a word, not an ID
-    # Not one or two characters repeated (``00000001``, ``abababab``).
-    return len(set(value)) >= max(3, min(len(value), 16) // 3)
+    # Letters and digits mixed: not a number (phone, counter) nor a word.
+    if not any(c.isdigit() for c in value) or not any(c.isalpha() for c in value):
+        return False
+    # Not a few characters repeated (``x...x1a``): bits per character.
+    counts = [value.count(c) for c in set(value)]
+    bits = -sum(n / len(value) * math.log2(n / len(value)) for n in counts)
+    return bits >= ID_MIN_BITS
 
 
 def is_fresh_id(a: str, b: str, before: Callable[[], bytes]) -> bool:
     """Rule 3: ``a`` and ``b`` look like two freshly generated IDs."""
     if len(a) != len(b) or not _same_class(a, b):
+        return False
+    # Two independent IDs differ almost everywhere, not in one character.
+    if sum(x != y for x, y in zip(a, b, strict=True)) * 2 < len(a):
         return False
     if not (_random_looking(a) and _random_looking(b)):
         return False
@@ -336,6 +360,7 @@ class _Context:
     replay: RunWindow | None
     before: Callable[[], bytes]
     fresh_ids: bool
+    secrets: Collection[str] = ()
 
 
 def _in_window(t: float, w: RunWindow) -> bool:
@@ -347,7 +372,7 @@ def _scalar_rule(a: Any, b: Any, ctx: _Context) -> str | None:
     if ta is not None and tb is not None and ctx.run and ctx.replay:
         if _in_window(ta, ctx.run) and _in_window(tb, ctx.replay):
             return RULE_OWN_RUN
-        if abs((ta - ctx.run.start) - (tb - ctx.replay.start)) <= SLACK_S:
+        if abs((ta - ctx.run.origin) - (tb - ctx.replay.origin)) <= SLACK_S:
             return RULE_SAME_DISTANCE
     if (
         ctx.fresh_ids
@@ -422,19 +447,46 @@ def _join_rules(rules: list[str]) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def value_text(value: Any) -> str:
-    """A value as one short line (``not there`` for an absent side)."""
+def value_text(value: Any, secrets: Collection[str] = ()) -> str:
+    """A value as one short line (``not there`` for an absent side); a
+    secret is masked before the value is cut.
+    """
     if value is ABSENT:
         return "not there"
     if isinstance(value, tuple):
         text = " | ".join(value)
     else:
         text = file_inspect.format_value(value)
+    text = hide(text, secrets)
     return text if len(text) <= VALUE_MAX else text[: VALUE_MAX - 1] + "…"
 
 
-def _change_line(c: Change) -> str:
-    return f"{c.where}: {value_text(c.old)} to {value_text(c.new)}"
+def _shown(value: Any, secrets: Collection[str]) -> str:
+    """A volatile field's value: :data:`HIDDEN` when it holds a secret."""
+    if value is ABSENT:
+        return value_text(value)
+    full = " | ".join(value) if isinstance(value, tuple) else str(value)
+    return HIDDEN if hide(full, secrets) != full else value_text(value)
+
+
+def _change_line(c: Change, secrets: Collection[str] = ()) -> str:
+    where = hide(c.where, secrets)
+    return f"{where}: {value_text(c.old, secrets)} to {value_text(c.new, secrets)}"
+
+
+def _same(x: Any, y: Any) -> bool:
+    """Equal values of one type; BLOBs by their whole content."""
+    if type(x) is not type(y) or x != y:
+        return False
+    if isinstance(x, file_inspect.Blob):
+        return x.digest == y.digest
+    return True
+
+
+def _volatile(where: str, a: Any, b: Any, rule: str, ctx: _Context) -> Volatile:
+    return Volatile(
+        hide(where, ctx.secrets), _shown(a, ctx.secrets), _shown(b, ctx.secrets), rule
+    )
 
 
 def _companions(path: Path) -> list[Path]:
@@ -504,17 +556,18 @@ def _new_file(after: Path, replay: Path, ctx: _Context) -> Comparison:
     if diff is None:
         return _byte_comparison(None, after, replay)
     res = Comparison(SAME)
+    sec = ctx.secrets
     for c in diff.values():
-        rule = volatile_rule(c.old, c.new, ctx)
+        same_type = c.old_type == c.new_type
+        rule = volatile_rule(c.old, c.new, ctx) if same_type else None
         if rule:
-            res.volatile.append(
-                Volatile(c.where, value_text(c.old), value_text(c.new), rule)
-            )
+            res.volatile.append(_volatile(c.where, c.old, c.new, rule, ctx))
             continue
+        where = hide(c.where, sec)
         if c.old is not ABSENT:
-            res.only_run.append(f"{c.where}: {value_text(c.old)}")
+            res.only_run.append(f"{where}: {value_text(c.old, sec)}")
         if c.new is not ABSENT:
-            res.only_replay.append(f"{c.where}: {value_text(c.new)}")
+            res.only_replay.append(f"{where}: {value_text(c.new, sec)}")
     res.outcome = (
         DIFFERENT
         if res.only_run or res.only_replay
@@ -531,18 +584,21 @@ def compare(
     run: RunWindow | None = None,
     replay_run: RunWindow | None = None,
     fresh_ids: bool | None = None,
+    secrets: Collection[str] = (),
 ) -> Comparison:
     """The verdict of one file from its three local copies.
 
     ``None`` for a copy means the file was not on the device. ``run`` and
     ``replay_run`` are the two runs' windows (rules 1 and 2 need both);
-    ``fresh_ids`` overrides :data:`FRESH_IDS`.
+    ``fresh_ids`` overrides :data:`FRESH_IDS`; ``secrets`` are masked in
+    every value shown (before it is cut to length).
     """
     ctx = _Context(
         run,
         replay_run,
         _bytes_of(before),
         FRESH_IDS if fresh_ids is None else fresh_ids,
+        secrets,
     )
     if before is None and after is not None and replay is not None:
         return _new_file(after, replay, ctx)
@@ -552,24 +608,23 @@ def compare(
     if not rep_set:
         return Comparison(SAME if not run_set else UNCHANGED)
     res = Comparison(SAME)
+    sec = ctx.secrets
     for loc in list(run_set) + [k for k in rep_set if k not in run_set]:
         a, r = run_set.get(loc), rep_set.get(loc)
         if r is None:
-            res.only_run.append(_change_line(a))
+            res.only_run.append(_change_line(a, sec))
         elif a is None:
-            res.only_replay.append(_change_line(r))
-        elif a.old != r.old or type(a.old) is not type(r.old):
-            res.only_run.append(_change_line(a))
-            res.only_replay.append(_change_line(r))
-        elif a.new == r.new and type(a.new) is type(r.new):
+            res.only_replay.append(_change_line(r, sec))
+        elif not _same(a.old, r.old) or a.old_type != r.old_type:
+            res.only_run.append(_change_line(a, sec))
+            res.only_replay.append(_change_line(r, sec))
+        elif _same(a.new, r.new) and a.new_type == r.new_type:
             continue
-        elif rule := volatile_rule(a.new, r.new, ctx):
-            res.volatile.append(
-                Volatile(a.where, value_text(a.new), value_text(r.new), rule)
-            )
+        elif a.new_type == r.new_type and (rule := volatile_rule(a.new, r.new, ctx)):
+            res.volatile.append(_volatile(a.where, a.new, r.new, rule, ctx))
         else:
-            res.only_run.append(_change_line(a))
-            res.only_replay.append(_change_line(r))
+            res.only_run.append(_change_line(a, sec))
+            res.only_replay.append(_change_line(r, sec))
     if res.only_run or res.only_replay:
         res.outcome = DIFFERENT
     elif res.volatile:
@@ -588,8 +643,3 @@ def hide(text: str, secrets: Collection[str]) -> str:
         if s:
             text = text.replace(s, MASK)
     return text
-
-
-def hide_value(text: str, secrets: Collection[str]) -> str:
-    """A shown value: :data:`HIDDEN` when it holds a secret."""
-    return HIDDEN if any(s and s in text for s in secrets) else text

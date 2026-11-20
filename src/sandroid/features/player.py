@@ -1635,6 +1635,9 @@ class StepReplayer:
             "diverged_at_step": None,
             "diverged": None,
             "unchecked_steps": [],
+            # Wall-clock time of step 1 (the Rewind verdict measures a
+            # value's distance from its run from here).
+            "first_step_at": None,
         }
         for step in steps:
             gap = 0.0
@@ -1649,6 +1652,8 @@ class StepReplayer:
             entry = {"i": step.i, "seq": step.seq, "what": step.what}
             try:
                 self._wait(gap)
+                if div["first_step_at"] is None:
+                    div["first_step_at"] = time.time()
                 try:
                     res = self.do_step(step)
                 except StepStoppedError:

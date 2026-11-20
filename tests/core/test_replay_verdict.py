@@ -432,10 +432,17 @@ def test_fresh_id_needs_class_length_randomness_and_no_trace_in_before():
 
     assert rv.is_fresh_id(UUID_A, UUID_B, empty)
     assert rv.is_fresh_id("9f86d081884c7d65", "2c26b46b68ffc68f", empty)
-    assert rv.is_fresh_id("aZ3_x-Q9pL0w", "Kd8sV2mQ7rTn", empty)  # b64url ~ alnum
+    assert rv.is_fresh_id("aZ3_x-Q9pL0wYt5e", "Kd8sV2mQ7rTnB4xa", empty)  # b64url
     assert not rv.is_fresh_id("1234567", "7654321", empty)  # digits, short
     assert not rv.is_fresh_id("password", "username", empty)  # words
     assert not rv.is_fresh_id("00000001", "00000002", empty)  # not random
+    # Real data that only looks random: phone numbers, names, words, dates.
+    assert not rv.is_fresh_id("015112345678", "017198765432", empty)
+    assert not rv.is_fresh_id("4915112345678901", "4917198765432109", empty)
+    assert not rv.is_fresh_id("PlayingState", "PausedStates", empty)
+    assert not rv.is_fresh_id("alice1985", "mallory77", empty)
+    assert not rv.is_fresh_id("2026-11-20", "2026-11-21", empty)
+    assert not rv.is_fresh_id("StateIdleStateIdle", "StateBusyStateBusy", empty)
     assert not rv.is_fresh_id("abc12345", "abc1234", empty)  # length
     assert not rv.is_fresh_id(UUID_A, "9f86d081884c7d659f86d081884c7d659f86", empty)
     assert not rv.is_fresh_id(UUID_A, UUID_B, UUID_A.encode)
@@ -450,3 +457,127 @@ def test_no_rule_for_names_alone():
     assert rv.volatile_rule(int(T0 + 1), int(T1 + 1), ctx) == rv.RULE_OWN_RUN
     # Times far from both runs, at different distances: no rule.
     assert rv.volatile_rule(int(T0 - 5000), int(T0 - 9000), ctx) is None
+
+
+# ---------------------------------------------------------------------------
+# review findings
+# ---------------------------------------------------------------------------
+
+
+def test_blobs_that_differ_after_their_first_bytes_are_different(files_root):
+    schema = "create table b (id integer primary key, data blob)"
+    head = b"H" * 40
+
+    def blob(name: str, tail: bytes) -> str:
+        con = sqlite3.connect(_folder(PATH_DB, name) / "app.db")
+        con.execute(schema)
+        con.execute("insert into b values (1, ?)", (head + tail,))
+        con.commit()
+        con.close()
+        return name
+
+    before, after, replay = (
+        blob("v001", b"0000"),
+        blob("v002", b"AAAA"),
+        blob("v003", b"BBBB"),
+    )
+    res = rewind.file_result(_rec(PATH_DB, before, after, replay), PATH_DB)
+    assert res.verdict == rewind.DIFFERENT
+    same = blob("v004", b"AAAA")
+    assert rewind.file_result(_rec(PATH_DB, before, after, same), PATH_DB).verdict == (
+        rewind.SAME
+    )
+
+
+def test_a_column_both_runs_added_is_compared_byte_for_byte(files_root):
+    base = ["create table u (id integer primary key, name text)", "insert into u values (1, 'a')"]  # fmt: skip
+    before = _db("v001", base)
+    add = "alter table u add column role text"
+    after = _db("v002", [*base, add, "update u set role = 'ADMIN'"])
+    replay = _db("v003", [*base, add, "update u set role = 'GUEST'"])
+    res = rewind.file_result(_rec(PATH_DB, before, after, replay), PATH_DB)
+    assert res.verdict == rewind.DIFFERENT
+    assert res.compared == "byte for byte"
+
+
+def test_a_preference_of_another_type_is_different(files_root):
+    before = _version(PATH_PREFS, "v001", _prefs(""))
+    after = _version(PATH_PREFS, "v002", _prefs('<int name="k" value="5" />\n'))
+    replay = _version(PATH_PREFS, "v003", _prefs('<string name="k">5</string>\n'))
+    res = rewind.file_result(_rec(PATH_PREFS, before, after, replay), PATH_PREFS)
+    assert res.verdict == rewind.DIFFERENT
+
+
+def test_a_secret_is_masked_before_a_long_value_is_cut(files_root):
+    secret = "hunter2-supersecret"  # noqa: S105 (typed text, not a credential)
+    before = _version(PATH_PREFS, "v001", _prefs('<string name="n">0</string>\n'))
+    long_a = "x" * 110 + secret + "a"
+    long_b = "x" * 110 + secret + "b"
+    after = _version(
+        PATH_PREFS, "v002", _prefs(f'<string name="n">{long_a}</string>\n')
+    )
+    replay = _version(
+        PATH_PREFS, "v003", _prefs(f'<string name="n">{long_b}</string>\n')
+    )
+    rec = _rec(PATH_PREFS, before, after, replay)
+    res = rewind.file_result(rec, PATH_PREFS, secrets={secret})
+    assert res.verdict == rewind.DIFFERENT
+    shown = "\n".join(rewind.result_lines(res))
+    assert "hunter2" not in shown
+
+
+def test_a_before_that_was_not_copied_is_not_a_new_file(files_root):
+    after = _version(PATH_JSON, "v001", json.dumps({"id": UUID_A}).encode())
+    replay = _version(PATH_JSON, "v002", json.dumps({"id": UUID_B}).encode())
+    rec = _rec(PATH_JSON, "v-x", after, replay)
+    rec.versions[PATH_JSON]["before"] = None  # the Before copy failed
+    res = rewind.file_result(rec, PATH_JSON)
+    assert res.verdict == rewind.NOT_COMPARED
+
+
+def test_rule_two_measures_both_runs_from_their_first_step(files_root):
+    schema = "create table cookies (name text primary key, expiry int)"
+    before = _db("v001", [schema])
+    # You waited 40 s before step 1; the replay ran step 1 at once.
+    after = _db("v002", [schema, f"insert into cookies values ('s', {int(T0 + 45 + YEAR)})"])  # fmt: skip
+    replay = _db("v003", [schema, f"insert into cookies values ('s', {int(T1 + 6 + YEAR)})"])  # fmt: skip
+    rec = _rec(PATH_DB, before, after, replay)
+    assert rewind.file_result(rec, PATH_DB).verdict == rewind.DIFFERENT
+    rec.runs[-1].update(recorded_first_step_at=T0 + 40, first_step_at=T1 + 1)
+    res = rewind.file_result(rec, PATH_DB)
+    assert res.verdict == rewind.VOLATILE
+    assert res.volatile[0]["rule"] == rv.RULE_SAME_DISTANCE
+
+
+def test_the_window_is_the_replay_that_copied_after_replay():
+    rec = rewind.Recording(rec_id="rec-1", name="R", pkg="p", serial="s")
+    rec.started, rec.stopped = T0, T0 + 60
+    rec.runs = [
+        {"kind": "rewind-replay", "replay_started": T1, "ended": T1 + 60,
+         "replay_copied": True},
+        {"kind": "rewind-replay", "replay_started": T1 + 900, "ended": T1 + 905,
+         "replay_copied": False},
+    ]  # fmt: skip
+    _run, replay = rewind.run_windows(rec, PATH_DB)
+    assert replay.start == T1
+
+
+def test_the_player_reports_when_step_one_ran():
+    from sandroid.features.player import StepReplayer, extract_steps
+
+    tap = {"seq": 1, "src": "input", "kind": "tap", "t": 100.0,
+           "data": {"x": 5, "y": 5}, "summary": "tap"}  # fmt: skip
+    clock = [0.0]
+
+    def sleep(sec: float) -> None:
+        clock[0] += sec
+
+    rep = StepReplayer(
+        shell=lambda c: "",
+        helper=None,
+        sleep=sleep,
+        monotonic=lambda: clock[0],
+        tail_s=0.0,
+    )
+    out = rep.run(extract_steps([tap]))
+    assert isinstance(out["first_step_at"], float)
