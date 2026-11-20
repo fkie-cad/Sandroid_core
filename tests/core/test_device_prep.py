@@ -190,7 +190,7 @@ def test_first_attach_runs_every_step_in_order(rig):
     assert result.boot_token == BOOT_A
     # The record is taken after adb root (its adbd restart = transport 2).
     assert device_prep.prepared_transport(SERIAL) == "2"
-    assert "Prepared emulator-5554 (attach): root ok, SELinux Permissive" in (
+    assert "Prepared emulator-5554 (attach): root ok; SELinux Permissive" in (
         result.summary()
     )
 
@@ -1723,7 +1723,7 @@ def test_a_new_launch_id_is_a_new_world_even_with_the_same_boot(
 ):
     from sandroid.core import emulator
 
-    launch = SimpleNamespace(launch_id="aaa", started_at=-1e9)
+    launch = SimpleNamespace(launch_id="aaa", started_at=-1e9, alive=True)
     monkeypatch.setattr(emulator, "get_launch", lambda serial: launch)
     monkeypatch.setattr(emulator, "note_boot", lambda *a: None)
     _run()
@@ -1734,3 +1734,71 @@ def test_a_new_launch_id_is_a_new_world_even_with_the_same_boot(
     result = device_prep.last_result(SERIAL)
     assert result.kind == "new-world"
     assert result.launch_id == "bbb"
+
+
+def test_a_snapshot_load_on_our_launch_keeps_the_record_unchanged(
+    rig, identity, monkeypatch
+):
+    from sandroid.core import emulator
+
+    launch = SimpleNamespace(launch_id="aaa", started_at=-1e9, alive=True)
+    monkeypatch.setattr(emulator, "get_launch", lambda serial: launch)
+    monkeypatch.setattr(emulator, "note_boot", lambda *a: None)
+    device_prep.register_device_prepared_hook(_hook(rig.fake))
+    _run()
+    with device_prep.hold(SERIAL, "snapshot-load"):
+        rig.fake.boot_id = BOOT_B
+    start = len(rig.fake.events)
+    _run("attach")
+    assert ("hook", SERIAL, True) not in _since(rig.fake.events, start)
+    assert device_prep.last_result(SERIAL).kind == "unchanged"
+
+
+def test_a_detach_ends_the_wait_for_a_long_stage(rig, identity):
+    started = threading.Event()
+    release = threading.Event()
+
+    def long_stage(serial, fresh_boot, budget_s):
+        started.set()
+        release.wait(10)
+
+    device_prep.register_prepare_stage("long", long_stage, order=1, budget_s=30)
+    try:
+        assert device_prep.request_prepare(SERIAL, "attach")
+        assert started.wait(5)
+        device_prep.note_detached(SERIAL)
+        t0 = time.monotonic()
+        assert device_prep.wait_prepared(SERIAL, 5)
+        assert time.monotonic() - t0 < 3
+        assert device_prep.last_result(SERIAL).kind == "aborted"
+    finally:
+        release.set()
+        device_prep.unregister_prepare_stage("long")
+
+
+def test_expected_pending_identity_values_are_information(rig, identity):
+    from sandroid.services import identity as identity_mod
+
+    infos = {
+        "a": SimpleNamespace(status="applied", reason=""),
+        "b": SimpleNamespace(status="pending", reason="no target app yet"),
+        "c": SimpleNamespace(
+            status="pending", reason=identity_mod.NEEDS_EMULATOR_START
+        ),
+        "d": SimpleNamespace(status="skipped", reason="off"),
+    }
+    identity.plan = SimpleNamespace(infos=infos)
+    _run()
+    (result,) = rig.results
+    assert result.stage_notes == [
+        (
+            "identity",
+            "info",
+            "1 set, 1 per app, set at app start, 1 set when the emulator starts",
+        )
+    ]
+    infos["e"] = SimpleNamespace(status="pending", reason=identity_mod.OUT_OF_TIME)
+    rig.fake.boot_id = BOOT_B
+    _run("transport")
+    assert rig.results[-1].stage_notes[0][1] == "warning"
+    assert "1 not done in time" in rig.results[-1].stage_notes[0][2]

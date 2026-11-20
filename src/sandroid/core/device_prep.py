@@ -82,6 +82,9 @@ PrepStage = Callable[[str, bool, float], Any]
 HOOK_TIMEOUT_S = 60.0
 #: Budget of the built-in identity stage (a framework window included).
 IDENTITY_BUDGET_S = 240.0
+#: A framework window that started near the end of the budget still waits
+#: the identity service's full restart timeout (RESTART_TIMEOUT_S, 180 s).
+IDENTITY_OVERRUN_S = 190.0
 #: Seconds a stage may overrun its budget before the step goes on.
 STAGE_GRACE_S = 10.0
 #: Seconds the settle step waits for a booting device.
@@ -210,7 +213,7 @@ class PrepResult:
 
     def summary(self) -> str:
         """One activity-log line, e.g. ``Prepared emulator-5554 (reboot):
-        root ok, SELinux Permissive, identity: 9 set, hooks 1/1, 3.2 s``.
+        root ok; SELinux Permissive; identity: 9 set; hooks 1/1; 3.2 s``.
         """
         if not self.ran:
             why = f" ({self.error})" if self.error else ""
@@ -231,7 +234,7 @@ class PrepResult:
             good = self.hooks_total - len(self.hook_errors)
             parts.append(f"hooks {good}/{self.hooks_total}")
         return (
-            f"Prepared {self.serial} ({label}): {', '.join(parts)}, "
+            f"Prepared {self.serial} ({label}): {'; '.join(parts)}; "
             f"{self.duration_s:.1f} s"
         )
 
@@ -250,6 +253,8 @@ class _StageSpec:
     fn: PrepStage
     order: int
     budget_s: float
+    #: Extra seconds the stage may legitimately run past its budget.
+    overrun_s: float = 0.0
 
 
 @dataclass
@@ -347,13 +352,19 @@ IDENTITY_STAGE_ORDER = 20
 
 
 def register_prepare_stage(
-    name: str, stage: PrepStage, *, order: int, budget_s: float
+    name: str,
+    stage: PrepStage,
+    *,
+    order: int,
+    budget_s: float,
+    overrun_s: float = 0.0,
 ) -> None:
     """Run ``stage(serial, fresh_boot, budget_s)`` before the hooks.
 
     Blocking stages run in ``order`` (lowest first; the identity stage is
     :data:`IDENTITY_STAGE_ORDER`), each in its own thread with the adb
-    target pinned, for at most ``budget_s`` + :data:`STAGE_GRACE_S`; the
+    target pinned, for at most ``budget_s`` + ``overrun_s`` (what the stage
+    may legitimately run past its budget) + :data:`STAGE_GRACE_S`; the
     app-start / Frida gates wait for them. A stage returns ``None``, an info
     text or a :class:`StageNote`; an exception or an overrun is a warning in
     the result, the log and the timeline, and the step goes on. Registering
@@ -361,7 +372,7 @@ def register_prepare_stage(
     """
     if not callable(stage):
         raise TypeError("stage must be callable")
-    spec = _StageSpec(name, stage, int(order), float(budget_s))
+    spec = _StageSpec(name, stage, int(order), float(budget_s), float(overrun_s))
     with _HOOKS_LOCK:
         _STAGES[:] = [s for s in _STAGES if s.name != name]
         _STAGES.append(spec)
@@ -407,6 +418,7 @@ def reset(*, hooks: bool = False) -> None:
         for state in _STATES.values():
             state.gen += 1
             state.running = False
+            state.stage_deadline = None
         _STATES.clear()
         _WARNED_NO_ROOT.clear()
         _ENABLED = False
@@ -531,6 +543,7 @@ def note_detached(serial: str) -> None:
         if state is not None:
             state.gen += 1
             state.delivered = False
+            state.stage_deadline = None  # its waiters need not wait for it
             _IDLE.notify_all()
 
 
@@ -739,6 +752,7 @@ def hold(serial: str | None, cause: str = "snapshot-load") -> Iterator[None]:
         state = _state(serial)
         state.held += 1
         state.gen += 1
+        state.stage_deadline = None
         if state.held == 1:
             state.held_dropped = False
         _IDLE.notify_all()
@@ -787,6 +801,7 @@ def _record_after_hold(serial: str, state: _Serial, dropped: bool, cause: str) -
             old.selinux_check,
             boot_start=boot_start,
             recorded_at=read_at,
+            launch_id=_launch_id(serial),
         )
         if token:
             # The load recorded its own world change ("snapshot-load").
@@ -1160,7 +1175,9 @@ def _launch_id(serial: str) -> str | None:
         launch = emulator.get_launch(serial)
     except Exception:
         return None
-    value = getattr(launch, "launch_id", None) if launch is not None else None
+    if launch is None or not getattr(launch, "alive", True):
+        return None  # an exited launch: another emulator may use the port
+    value = getattr(launch, "launch_id", None)
     return value if isinstance(value, str) else None
 
 
@@ -1480,16 +1497,26 @@ def _run_stages(
                 with _LOCK:
                     _PREP_THREADS.discard(ident)
 
-        limit = spec.budget_s + STAGE_GRACE_S
+        limit = spec.budget_s + spec.overrun_s + STAGE_GRACE_S
+        end = time.monotonic() + limit
         with _LOCK:
-            state.stage_deadline = time.monotonic() + limit
+            state.stage_deadline = end
         thread = threading.Thread(
             target=target, name=f"device-prep-{spec.name}-{serial}", daemon=True
         )
         thread.start()
-        thread.join(limit)
+        # In slices: a detach / hold / switch ends the wait (the run aborts;
+        # the stage thread finishes on its own).
+        while thread.is_alive() and alive():
+            left = end - time.monotonic()
+            if left <= 0:
+                break
+            thread.join(min(left, 0.5))
         with _LOCK:
-            state.stage_deadline = None
+            if state.stage_deadline == end:
+                state.stage_deadline = None
+        if not alive():
+            break
         if thread.is_alive():
             note = StageNote("warning", f"still running after {limit:g} s")
         elif "error" in box:
@@ -1528,29 +1555,41 @@ def _identity_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
     ``never`` framework values wait for the first app start (info, not a
     warning); a value that failed or did not fit the budget is a warning.
     """
-    from sandroid.services.identity import NEEDS_RESTART, get_identity_service
+    from sandroid.services import identity
 
-    plan = get_identity_service().ensure_applied(serial, budget_s=budget_s)
+    plan = identity.get_identity_service().ensure_applied(serial, budget_s=budget_s)
     if plan is None:
         return None
-    counts: dict[str, int] = {}
-    waiting = 0
+    # Pending for an expected reason is information; only failed values
+    # and ones the budget cut off are a warning.
+    later = {
+        identity.NEEDS_RESTART: "wait for a restart (asked at app start)",
+        identity.NEEDS_EMULATOR_START: "set when the emulator starts",
+        "no target app yet": "per app, set at app start",
+        "not installed": "per app, set at app start",
+    }
+    done = 0
+    info_parts: dict[str, int] = {}
+    warn_parts: dict[str, int] = {}
     for info in getattr(plan, "infos", {}).values():
         status = getattr(info, "status", "")
-        if status == "pending" and getattr(info, "reason", "") == NEEDS_RESTART:
-            waiting += 1
+        reason = getattr(info, "reason", "") or ""
+        if status in ("applied", "verified"):
+            done += 1
+        elif status in ("skipped", "hook-only"):
             continue
-        counts[status] = counts.get(status, 0) + 1
-    done = counts.pop("applied", 0) + counts.pop("verified", 0)
-    counts.pop("skipped", None)
-    counts.pop("hook-only", None)
+        elif status == "pending" and reason in later:
+            info_parts[later[reason]] = info_parts.get(later[reason], 0) + 1
+        elif status == "pending" and reason != identity.OUT_OF_TIME:
+            key = f"pending ({reason})" if reason else "pending"
+            info_parts[key] = info_parts.get(key, 0) + 1
+        else:
+            key = "not done in time" if reason == identity.OUT_OF_TIME else status
+            warn_parts[key] = warn_parts.get(key, 0) + 1
     parts = [f"{done} set"]
-    if waiting:
-        parts.append(f"{waiting} wait for a restart (asked at app start)")
-    problems = {k: v for k, v in counts.items() if v}
-    parts += [f"{v} {k}" for k, v in sorted(problems.items())]
-    level = "warning" if problems else "info"
-    return StageNote(level, ", ".join(parts))
+    parts += [f"{n} {text}" for text, n in info_parts.items()]
+    parts += [f"{n} {text}" for text, n in warn_parts.items()]
+    return StageNote("warning" if warn_parts else "info", ", ".join(parts))
 
 
 register_prepare_stage(
@@ -1558,6 +1597,7 @@ register_prepare_stage(
     _identity_stage,
     order=IDENTITY_STAGE_ORDER,
     budget_s=IDENTITY_BUDGET_S,
+    overrun_s=IDENTITY_OVERRUN_S,
 )
 
 
@@ -1566,6 +1606,7 @@ __all__ = [
     "GATE_TIMEOUT_S",
     "HOOK_TIMEOUT_S",
     "IDENTITY_BUDGET_S",
+    "IDENTITY_OVERRUN_S",
     "IDENTITY_STAGE_ORDER",
     "LOSS_GRACE_S",
     "STAGE_GRACE_S",

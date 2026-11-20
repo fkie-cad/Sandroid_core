@@ -1358,7 +1358,7 @@ class EmulatorService:
                 "cold-boot",
                 src="device",
                 kind="boot",
-                summary=f"⟲ emulator {launch.avd} cold-booted",
+                summary=f"emulator {launch.avd} cold-booted",
                 dev=serial,
                 data={"avd": launch.avd, "ok": True},
             )

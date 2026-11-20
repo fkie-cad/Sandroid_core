@@ -1151,6 +1151,7 @@ class EmulatorLaunch:
         meta: What the caller passed to :func:`launch_avd` (``meta=``, e.g.
             the persona).
         info: Host facts read at the launch (see :func:`launch_record`).
+        started_wall: ``time.time()`` of the launch.
         boot_id: The guest boot id once the device was first prepared.
         first_uptime: The guest uptime (s) then.
     """
@@ -1168,6 +1169,8 @@ class EmulatorLaunch:
     info: dict[str, Any] = field(default_factory=dict, compare=False)
     boot_id: str | None = None
     first_uptime: float | None = None
+    started_wall: float = field(default_factory=time.time, compare=False)
+    boot_noted: bool = field(default=False, compare=False, repr=False)
     cancel: threading.Event = field(
         default_factory=threading.Event, compare=False, repr=False
     )
@@ -1633,7 +1636,7 @@ def _spawn_launch(
             started_at=time.monotonic(),
             context=context,
             hook_args=hook_args,
-            meta=dict(meta or {}),
+            meta=_json_copy(meta or {}),
             info=_launch_info(binary, context.avd_dir, command),
         )
         with _LAUNCH_LOCK:
@@ -1689,20 +1692,24 @@ def launch_record(serial: str) -> dict[str, Any] | None:
     ``boot_id`` and ``first_uptime``.
     """
     launch = get_launch(serial)
-    if launch is None:
+    if launch is None or not launch.alive:
         return None
     return _record_dict(launch)
 
 
+def _json_copy(value: Any) -> Any:
+    """A deep, JSON-ready copy (non-JSON values become strings)."""
+    return json.loads(json.dumps(value, default=str))
+
+
 def _record_dict(launch: EmulatorLaunch) -> dict[str, Any]:
     opts = launch.options
-    started = time.time() - (time.monotonic() - launch.started_at)
     record: dict[str, Any] = {
         "launch_id": launch.launch_id,
         "avd": launch.avd,
         "serial": launch.serial,
         "port": launch.port,
-        "started": round(started, 3),
+        "started": round(launch.started_wall, 3),
         "options": {
             "headless": opts.headless,
             "boot": opts.boot,
@@ -1711,13 +1718,13 @@ def _record_dict(launch: EmulatorLaunch) -> dict[str, Any]:
             "wipe_once": opts.wipe_once,
             "extra_args": list(opts.extra_args),
         },
-        "meta": dict(launch.meta),
-        "hooks": dict(launch.context.record) if launch.context else {},
+        "meta": launch.meta,
+        "hooks": launch.context.record if launch.context else {},
         "boot_id": launch.boot_id,
         "first_uptime": launch.first_uptime,
     }
     record.update(launch.info)
-    return record
+    return _json_copy(record)  # nothing the caller changes reaches the launch
 
 
 def note_boot(serial: str, boot_id: str | None, uptime: float | None) -> None:
@@ -1726,8 +1733,9 @@ def note_boot(serial: str, boot_id: str | None, uptime: float | None) -> None:
     """
     with _LAUNCH_LOCK:
         launch = _LAUNCHES.get(serial)
-        if launch is None or launch.boot_id is not None:
+        if launch is None or launch.boot_noted or not launch.alive:
             return
+        launch.boot_noted = True
         launch.boot_id = boot_id
         launch.first_uptime = uptime
 
@@ -2170,7 +2178,7 @@ def restart_emulator(
             )
         time.sleep(0.5)
     # The same persona etc. as before: a restart keeps the caller's meta.
-    meta = dict(old.meta) if old is not None else None
+    meta = _json_copy(old.meta) if old is not None else None
     return launch_avd(avd, options, port=port, adb=adb, meta=meta)
 
 
@@ -2220,6 +2228,7 @@ def ensure_avd_running(
     on_progress: Callable[[BootState, float], None] | None = None,
     options: AvdLaunchOptions | None = None,
     adb: Any = None,
+    meta: dict[str, Any] | None = None,
 ) -> str:
     """Serial of a ready emulator running AVD *avd*, starting it if needed.
 
@@ -2230,7 +2239,8 @@ def ensure_avd_running(
     is awaited. Running -> its serial is found by :func:`_find_running_avd`
     (our launch, the pinned serial, the AVD's last port; other sessions'
     emulators only as a last resort) and awaited; no pre-launch hook runs
-    for a running AVD.
+    for a running AVD. *meta* goes into the launch record of a new launch
+    (see :func:`launch_avd`).
 
     Raises:
         EmulatorLaunchError: The launch failed, it did not boot in time, or
@@ -2254,7 +2264,7 @@ def ensure_avd_running(
         raise EmulatorLaunchError(
             f"Emulator {serial} ({avd}) did not become ready within {timeout:g}s"
         )
-    launch = launch_avd(avd, options or remembered_options(avd), adb=adb)
+    launch = launch_avd(avd, options or remembered_options(avd), adb=adb, meta=meta)
     remember_launch(avd, launch.options)
     if not wait_until_ready(launch.serial, timeout, on_progress, adb=adb):
         raise EmulatorLaunchError(
