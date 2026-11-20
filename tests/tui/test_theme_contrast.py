@@ -131,3 +131,13 @@ def test_the_watched_row_tint_is_one_the_contrast_test_covers() -> None:
     from sandroid.tui.widgets.files_panel import WATCHED_TINT
 
     assert WATCHED_TINT in TINTS
+
+
+def test_the_files_op_letters_use_checked_text_tokens() -> None:
+    """The ops column (C M R D A o) is drawn in lens tokens this test checks."""
+    from sandroid.tui.widgets.monitor_view import OP_TOKENS, OPS, op_color
+
+    assert set(OP_TOKENS) == set(OPS)
+    assert set(OP_TOKENS.values()) <= set(LENS_TEXT) | set(LENS_QUIET)
+    assert op_color("create") == THEMES["default"].lens.ok  # outside an app
+    assert op_color("unknown") is None

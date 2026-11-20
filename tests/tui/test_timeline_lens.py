@@ -1793,6 +1793,18 @@ async def test_a_theme_switch_recolors_the_timeline(install_fakes) -> None:
         await settle(pilot)
         assert typed_bg() == _user_tint(LIGHT_THEME.lens, "typed").upper()
         assert lens.view.styles.background.hex.upper() == LIGHT_THEME.lens.bg
+        # The Line API draws no widget background: an untinted row and the
+        # empty area below the rows get the view's (not the terminal's).
+        for y in (4, lens.view.size.height - 1):
+            backgrounds = {
+                seg.style.bgcolor.triplet.hex.upper()
+                for seg in lens.view.render_line(y)
+                if seg.style is not None and seg.style.bgcolor is not None
+            }
+            assert backgrounds == {LIGHT_THEME.lens.bg}, (y, backgrounds)
+            assert all(
+                seg.style and seg.style.bgcolor for seg in lens.view.render_line(y)
+            )
         app._apply_theme(DEFAULT_THEME, get_theme_css_path("default"))
         await settle(pilot)
         assert typed_bg() == _user_tint(DEFAULT_THEME.lens, "typed").upper()

@@ -812,9 +812,14 @@ class TimelineView(ScrollView, can_focus=True, inherit_bindings=False):
     def render_line(self, y: int) -> Strip:
         lens = self._lens()
         width = self.scrollable_content_region.width or self.size.width
+        # The Line API draws no widget background: a segment without its own
+        # (an untinted row, the empty area) would show the terminal's default
+        # background -- dark behind a light theme's ink. The view's own
+        # colours fill in what a segment leaves unset.
+        base = self.rich_style
         if lens is None:
-            return Strip.blank(width)
-        return lens.strip_for(int(self.scroll_offset.y) + y, width)
+            return Strip.blank(width, base)
+        return lens.strip_for(int(self.scroll_offset.y) + y, width).apply_style(base)
 
     def action_cursor(self, delta: int) -> None:
         lens = self._lens()

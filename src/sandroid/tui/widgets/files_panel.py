@@ -151,6 +151,7 @@ from .monitor_view import (
     SegmentStats,
     app_package,
     app_relative,
+    op_color,
     smart_truncate,
 )
 from .network_panel import (
@@ -205,6 +206,10 @@ def _state_star(state: RowState | None) -> str | None:
         return None
     token, bold = spec
     return f"bold {_c(token)}" if bold else _c(token)
+
+
+#: A run's file change kind -> its op category (letter and colour).
+_REVIEW_OP = {"changed": "modify", "new": "create", "deleted": "delete"}
 
 
 class _Sep(NamedTuple):
@@ -1632,11 +1637,8 @@ class FilesPanel(Widget):
 
     def _cells(self, row: _Row) -> tuple:
         if row.review_kind is not None:
-            letter, color = {
-                "changed": OPS["modify"],
-                "new": OPS["create"],
-                "deleted": OPS["delete"],
-            }[row.review_kind]
+            cat = _REVIEW_OP[row.review_kind]
+            letter, color = OPS[cat][0], op_color(cat)
             return (
                 self._mark_cell(row),
                 self._path_cell(row),
@@ -2388,7 +2390,7 @@ class FilesPanel(Widget):
             if act.moved_to:
                 grid.add_row("now", Text(f"renamed to {app_relative(act.moved_to)}"))
             elif act.deleted:
-                grid.add_row("now", Text("deleted", style=OPS["delete"][1]))
+                grid.add_row("now", Text("deleted", style=op_color("delete")))
         else:
             grid.add_row("activity", Text("none seen yet", style=_c("dim")))
         sections: list = [("", grid)]
@@ -2479,7 +2481,9 @@ class FilesPanel(Widget):
                 out.append("\n")
             out.append(_fmt_time(ev.when), style=_c("dim"))
             out.append("  ")
-            out.append(f"{ev.label or '?':<7}", style=ev.color or "")
+            out.append(
+                f"{ev.label or '?':<7}", style=op_color(ev.category) or ev.color or ""
+            )
             extra = []
             if ev.via:
                 extra.append(ev.via)
@@ -2507,11 +2511,8 @@ class FilesPanel(Widget):
     def _review_summary(self, row: _Row) -> list:
         grid = self._grid()
         word = {"changed": "changed", "new": "new file", "deleted": "deleted"}
-        letter, color = {
-            "changed": OPS["modify"],
-            "new": OPS["create"],
-            "deleted": OPS["delete"],
-        }[row.review_kind or "changed"]
+        cat = _REVIEW_OP[row.review_kind or "changed"]
+        letter, color = OPS[cat][0], op_color(cat)
         grid.add_row(
             "change",
             Text(f"{letter} {word[row.review_kind or 'changed']}", style=color),
