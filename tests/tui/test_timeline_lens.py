@@ -2726,3 +2726,20 @@ async def test_J_on_privacy_lines_reaches_the_flow_or_file(
             # ... the file by the scan record of the line
             ("files", "/data/data/x/databases/a.db", "v002"),
         ]
+
+
+def test_the_inspector_says_a_legacy_label_line_in_words() -> None:
+    """A timeline written before the plain-word summaries (``▶ 1 'x'``)
+    reads ``Section 1 'x'`` in the Inspector, as its row does.
+    """
+    row = row_from_line(
+        make_line(
+            1, NOW - 10, "label", "start", summary="▶ 1 'cookies'",
+            data={"number": 1, "name": "cookies", "depth": 0},
+        )
+    )  # fmt: skip
+    lens = TimelineLens()
+    lens._apply_rows([row], 0)
+    assert lens._words(row, row.summary) == "Section 1 'cookies'"
+    other = row_from_line(make_line(2, NOW - 5, "device", "boot", summary="⟲ booted"))
+    assert lens._words(other, other.summary) == "booted"

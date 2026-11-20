@@ -40,7 +40,7 @@ wait ``HOLD_S`` in a hold so a line that is written a little late (device
 time converted to host time) still lands in time order. A line that lands
 above the viewport while not following keeps the viewport still (the caption
 says "1 late lines above"). While hidden only a 1 s tick updates the badge
-(``lines dropped``, ``locked`` or ``failed``, in the warning colour).
+(``dropped``, ``locked`` or ``failed``, in the warning colour).
 
 **Follow** (shared with the Files and Network lenses, ``follow.py``): new
 lines appear at the bottom; while ``live`` the view sticks to the newest row;
@@ -769,7 +769,7 @@ class _Fold:
 def _folder_of(summary: str) -> str:
     """``cache2`` from ``MODIFY cache2/entries/AB12 · main`` (a files line)."""
     text = summary
-    for cut in (" · ", " → "):
+    for cut in (" · ", " to ", " → "):  # " → ": files lines written before
         at = text.find(cut)
         if at >= 0:
             text = text[:at]
@@ -2431,6 +2431,15 @@ class TimelineLens(Vertical):
     def _masked(self, row: Row) -> bool:
         return row.sensitive and should_mask_ui() and row.seq != self._revealed
 
+    def _words(self, row: Row, summary: str) -> str:
+        """A summary in plain words for the Inspector: a label line as the
+        rows say it (``Section 3 'x'``, also for a legacy ``▶ 3 'x'``), any
+        other without a leading symbol.
+        """
+        if row.src == "label":
+            return self._label_text(row, _plain_summary(summary)).strip()
+        return _plain_summary(summary)
+
     def _shown_summary(self, row: Row) -> str:
         """The summary as shown: a masked line's summary never quotes text."""
         if row.masked_summary and self._masked(row):
@@ -2836,7 +2845,7 @@ class TimelineLens(Vertical):
             return state
         dropped = getattr(status, "dropped", None) or {}
         if any(v for v in dropped.values() if isinstance(v, int)):
-            return "lines dropped"
+            return "dropped"
         return None
 
     def _badge_tick(self) -> None:
@@ -3375,7 +3384,7 @@ class TimelineLens(Vertical):
         shown = source.get("summary") if line is not None else None
         sections: list = [
             ("Envelope", grid),
-            ("Summary", Text(_plain_summary(str(shown or self._shown_summary(row))))),
+            ("Summary", Text(self._words(row, str(shown or self._shown_summary(row))))),
         ]
         data = source.get("data") if line is not None else row.data
         if isinstance(data, dict) and data:
@@ -3396,7 +3405,7 @@ class TimelineLens(Vertical):
                     "Follow-ups",
                     Text(
                         "\n".join(
-                            f"#{r.seq} {r.src}/{r.kind} {_plain_summary(r.summary)}"
+                            f"#{r.seq} {r.src}/{r.kind} {self._words(r, r.summary)}"
                             for r in follow
                         )
                     ),
@@ -3457,7 +3466,7 @@ class TimelineLens(Vertical):
             target = self._by_seq.get(of)
             text = (
                 f"#{of} {target.src}/{target.kind} · "
-                f"{_plain_summary(self._shown_summary(target))}"
+                f"{self._words(target, self._shown_summary(target))}"
                 if target is not None
                 else f"#{of} (not loaded)"
             )

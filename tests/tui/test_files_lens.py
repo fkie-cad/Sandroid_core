@@ -1020,9 +1020,9 @@ async def test_renamed_and_deleted_rows_say_so(monkeypatch) -> None:
         await pilot.pause()
         _keys(panel)
         rows = {row.key: row for row in panel._rows}
-        assert panel._path_cell(rows[old]).plain.endswith("b.txt → c.txt")
+        assert panel._path_cell(rows[old]).plain.endswith("b.txt renamed to c.txt")
         panel._path_width = 10  # narrow (beside the Inspector at 80 columns)
-        assert panel._path_cell(rows[old]).plain.endswith(" →")
+        assert panel._path_cell(rows[old]).plain.endswith(" renamed")
         assert "→" not in panel._path_cell(rows[AAID]).plain
         panel._path_width = 60
         summary = _plain(_tab(panel._inspector_for(rows[old]), "Summary"))
@@ -2762,3 +2762,26 @@ async def test_a_changed_watched_file_moves_down_keeps_its_star_and_a_tint() -> 
         await until(pilot, lambda: panel._cursor_key() == PREFS)
         assert panel.following
         assert tint(PREFS) == expected
+
+
+async def test_an_idle_watched_file_with_only_hidden_opens_is_not_new_below() -> None:
+    """A ★ file that only saw OPEN events (hidden) stays idle on top: it
+    must not count as "new below" while scrolled back.
+    """
+    get_forensic_service().add_spotlight_file(PREFS)
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        for k, path in enumerate((DB, AAID)):
+            panel.ingest(
+                _items(_fse("FSE_CONTENT_MODIFIED", path)),
+                now=T0 + timedelta(seconds=k),
+            )
+        _keys(panel)
+        panel.table.focus()
+        await pilot.press("up")
+        await settle(pilot)
+        panel.ingest(_items(_fse("FSE_OPEN", PREFS)), now=T0 + timedelta(seconds=9))
+        assert _keys(panel)[0] == PREFS  # idle: still on top
+        _keys(panel)
+        assert panel.caption()[0].startswith("scrolled back · End = live")

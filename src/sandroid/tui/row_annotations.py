@@ -407,7 +407,9 @@ class AnnotationTintMixin:
 
     It uses Textual 8.2's private row style hook ``_get_row_style``; the
     cursor row keeps the cursor colour. Compose other row-style mixins by
-    making them annotation providers, not by a second override.
+    making them annotation providers, not by a second override. (Exception:
+    the Files table's own ``_get_row_style`` adds the changed-★ tint after
+    this one, only where no annotation tints the row.)
     """
 
     annotation_lens: str = ""

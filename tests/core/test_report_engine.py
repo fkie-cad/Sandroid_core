@@ -1566,7 +1566,7 @@ class TestCoverage:
             "File modifications were coalesced within 1000 ms windows for the whole "
             "timeline.",
             "The policy changed at 12:00:25 (settings, by user): "
-            "tracking.shot_before_tap True → False.",
+            "tracking.shot_before_tap True to False.",
             "142 bulk lines were dropped and are missing from the timeline "
             "(files: 140, monitor: 2; reasons queue-full: 130, no-device: 12).",
             "The timeline was resumed at 12:01:20 after an unclean shutdown, 42 s later.",

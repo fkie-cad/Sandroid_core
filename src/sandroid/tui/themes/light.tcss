@@ -94,11 +94,11 @@ ActivityLog {
 
 ShellHeader #scope-pill.-review {
     color: #FFFFFF;
-    background: #A94E09;
+    background: #9C4808;
 }
 
 ShellHeader #scope-pill.-rec {
-    color: #C62828;
+    color: #B92525;
 }
 
 ShellHeader #scope-pill.-blind,
@@ -107,11 +107,11 @@ ShellHeader #timeline-banner {
 }
 
 ShellHeader #label-note {
-    color: #A94E09;
+    color: #9C4808;
 }
 
 ShellHeader #tracking-dot {
-    color: #2E7D32;
+    color: #296E2C;
 }
 
 /* Help screen overlay */

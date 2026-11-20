@@ -188,7 +188,14 @@ def _c(token: str) -> str:
 
 #: The row tint of a ★ file that changed (it moved down among the other
 #: rows): (lens token, blend amount). The ★'s own colour, lightly.
-WATCHED_TINT = ("title", 0.10)
+WATCHED_TINT = ("title", 0.08)
+
+
+@functools.lru_cache(maxsize=64)
+def _bg(colour: str) -> Style:
+    """A background-only style (cached: built for every rendered line)."""
+    return Style(bgcolor=colour)
+
 
 #: The ★ colour of a watched file by its pull state (token, bold); others
 #: ``title``. Colour, not a symbol, says changed / failed / settling.
@@ -501,7 +508,7 @@ class _FilesTable(AnnotationTintMixin, DataTable):
         annotated = self.annotation_key(key)
         if annotated and self._annotation_tint(annotated):
             return style
-        return style + Style(bgcolor=row_tint(WATCHED_TINT[0], WATCHED_TINT[1]))
+        return style + _bg(row_tint(WATCHED_TINT[0], WATCHED_TINT[1]))
 
     def on_resize(self, event) -> None:
         """The table's own width changed (the Inspector closed or opened, a
@@ -1590,8 +1597,9 @@ class FilesPanel(Widget):
     def _path_cell_inner(self, row: _Row, indent: int = 0) -> Text:
         act = row.activity
         moved = act.moved_to if act is not None else None
-        # "old.txt → new.txt": the renamed-away row says where the file went.
-        suffix = f" → {moved.rsplit('/', 1)[-1]}" if moved else ""
+        # "old.txt renamed to new.txt": the renamed-away row says where the
+        # file went.
+        suffix = f" renamed to {moved.rsplit('/', 1)[-1]}" if moved else ""
         shown = row.key if self._full_paths else app_relative(row.key)
         # Short paths drop /data/data/<pkg>/: name the package whenever it
         # is not the monitored app's -- always in REVIEW, where a run lists
@@ -1600,8 +1608,8 @@ class FilesPanel(Widget):
         if not self._full_paths:
             width = self._path_width - len(suffix) - indent
             if suffix and width < 12:
-                suffix = " →"
-                width = self._path_width - 2
+                suffix = " renamed"
+                width = self._path_width - len(suffix)
             if owner:
                 owner = smart_truncate(owner, max(6, min(len(owner), width // 2)))
                 width -= len(owner) + 2
@@ -1695,13 +1703,16 @@ class FilesPanel(Widget):
             rows = self._live_rows()
         self._rows = rows
         if self.follow_applies and not self._follow.live:
-            # Rows that changed since: the unpinned ones (they move below);
-            # a pinned ★ row stays on top and is no "new below".
+            # Rows that changed since (they move below), ★ rows included; an
+            # idle ★ row (hidden OPENs only: no stats) stays on top and is no
+            # "new below".
             new = self._new_keys
             self._follow.new_below = sum(
                 1
                 for r in rows
-                if not r.fold and (r.key in new or any(m.key in new for m in r.members))
+                if not r.fold
+                and not (r.watched and r.stats is None)
+                and (r.key in new or any(m.key in new for m in r.members))
             )
         with self.app.batch_update():
             table.clear()

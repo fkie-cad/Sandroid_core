@@ -822,7 +822,7 @@ class TimelineService:
         self._label_end_all_locked(old, "device_switch", t, "sandroid")
         self._enqueue(old, {
             "src": "device", "kind": "switch", "actor": "sandroid",
-            "summary": f"device switch → {new_serial}", "data": {"to": new_serial},
+            "summary": f"device switch to {new_serial}", "data": {"to": new_serial},
         }, t_rx=t)  # fmt: skip
 
     def _emit_connect(self, sink: _Sink, *, serial_changed: bool = False) -> None:
@@ -1184,7 +1184,7 @@ class TimelineService:
         rel = _app_relative(path)
         summary = f"{label} {rel}"
         if new_path:
-            summary += f" → {_app_relative(new_path)}"
+            summary += f" to {_app_relative(new_path)}"
         if process:
             summary += f" · {process}"
         fields = self._fields("files", kind, summary, actor, data, None, t, "host",
@@ -1338,7 +1338,7 @@ class TimelineService:
                 fields["data"].setdefault("from", before)
                 fields["data"].setdefault("to", phase)
             if not fields["summary"]:
-                fields["summary"] = f"phase · {before} → {phase}"
+                fields["summary"] = f"phase · {before} to {phase}"
             if sink.state in ("open", "capture"):
                 self._flush_counts(sink, t_rx)
             state = trans = None

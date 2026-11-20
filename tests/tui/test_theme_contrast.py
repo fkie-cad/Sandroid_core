@@ -32,8 +32,10 @@ THEME_QUIET = ("text_muted", "muted_status_color")
 TINTS = (
     ("user", 0.13), ("typed", 0.13), ("warn", 0.13), ("accent", 0.13),
     ("highlight_1", 0.18), ("highlight_2", 0.18), ("highlight_3", 0.18),
-    ("highlight_4", 0.18), ("title", 0.10),
+    ("highlight_4", 0.18), ("title", 0.08), ("ok", 0.13), ("bad", 0.13),
 )  # fmt: skip
+#: Tokens drawn on those tints too: the Files ops letters (C M R D A).
+ON_TINTS = ("ok", "screen", "warn", "bad", "title")
 
 LIGHT = sorted(name for name, theme in THEMES.items() if not theme.is_dark)
 DARK = sorted(name for name, theme in THEMES.items() if theme.is_dark)
@@ -99,6 +101,15 @@ def test_light_theme_text_tokens_are_readable_everywhere(name: str) -> None:
         for quiet in LENS_QUIET:
             what = f"lens.{quiet} on the {token} tint"
             _check(failures, what, getattr(p, quiet), tint, 3)
+        for other in ON_TINTS:
+            what = f"lens.{other} on the {token} tint"
+            _check(failures, what, getattr(p, other), tint, 4.5)
+    # The focused cursor / header chip (Timeline cursor row, Inspector lists):
+    # the floor the user / screen tokens already meet under the cursor.
+    for surface in ("cursor_focus", "band_focus"):
+        for token in LENS_TEXT:
+            what = f"lens.{token} on {surface}"
+            _check(failures, what, getattr(p, token), getattr(p, surface), 3)
     assert not failures, "\n".join(failures)
 
 

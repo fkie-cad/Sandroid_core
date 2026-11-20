@@ -468,9 +468,9 @@ LIGHT_THEME = Theme(
         title="#0D47A1",
         accent="#1669BC",
         accent_text="#FFFFFF",
-        ok="#2E7D32",
-        warn="#A94E09",
-        bad="#C62828",
+        ok="#296E2C",
+        warn="#9C4808",
+        bad="#B92525",
         rule="#D0D7DE",
         rule_focus="#1669BC",
         header="#6B6B6B",
@@ -492,14 +492,14 @@ LIGHT_THEME = Theme(
         shot="#AD1457",
     ),
     status_colors={
-        "running": "#2E7D32",
-        "stopped": "#C62828",
-        "error": "#C62828",
-        "warning_status": "#A94E09",
+        "running": "#296E2C",
+        "stopped": "#B92525",
+        "error": "#B92525",
+        "warning_status": "#9C4808",
         "spawn_mode": "#007782",
-        "attach_mode": "#2E7D32",
-        "paused": "#A94E09",
-        "notice": "#A94E09",
+        "attach_mode": "#296E2C",
+        "paused": "#9C4808",
+        "notice": "#9C4808",
     },
 )
 
@@ -510,8 +510,8 @@ LIGHT_THEME = Theme(
 # petrol grey, not a lighter ink, so the key column reads as labels.
 PAPER_INK = "#1F1C17"
 PAPER_PETROL = "#1C5D7C"
-PAPER_OK = "#2D6A2F"
-PAPER_WARN = "#8F5600"
+PAPER_OK = "#2D692F"
+PAPER_WARN = "#875100"
 PAPER_BAD = "#A3302A"
 
 PAPER_THEME = Theme(
@@ -608,9 +608,9 @@ PAPER_THEME = Theme(
 # are deep indigo bars (daylight.tcss) that hold their weight on a projector.
 DAYLIGHT_INK = "#0A1222"
 DAYLIGHT_INDIGO = "#4338E0"
-DAYLIGHT_OK = "#0B7A3B"
-DAYLIGHT_WARN = "#A05300"
-DAYLIGHT_BAD = "#C21A30"
+DAYLIGHT_OK = "#0A6F36"
+DAYLIGHT_WARN = "#954D00"
+DAYLIGHT_BAD = "#BE192F"
 
 DAYLIGHT_THEME = Theme(
     name="daylight",
@@ -668,7 +668,7 @@ DAYLIGHT_THEME = Theme(
         band_focus="#E0E4FF",
         stripe="#F7F9FC",
         user="#4338E0",
-        screen="#0F766E",
+        screen="#0E6C65",
         typed="#0369A1",
         shot="#A21CAF",
     ),
@@ -1393,6 +1393,10 @@ $logo-text-color: {theme.logo_text_color};
 
 # ========== Textual themes + lens palette lookup ==========
 
+#: textual-light's orange ``$accent`` (#ffa62b, 1.7:1 on white) darkened to
+#: >= 4.5:1 on every light surface, same hue.
+LIGHT_TEXTUAL_ACCENT = "#9D5B00"
+
 #: Prefix of the Textual theme registered per Sandroid theme.
 TEXTUAL_THEME_PREFIX = "sandroid-"
 
@@ -1407,9 +1411,12 @@ def build_textual_theme(theme: Theme) -> TextualTheme:
 
     It is a copy of ``textual-dark`` (or ``textual-light`` for a light theme)
     that ADDS the ``$lens-*`` variables, so Textual's own widgets (inputs,
-    footers, scrollbars, ...) look exactly as they did when the app switched
-    between those two built-in themes -- unless the theme sets
-    ``textual_variables``, which override those base values.
+    footers, scrollbars, ...) look as they did when the app switched between
+    those two built-in themes -- unless the theme sets ``textual_variables``,
+    which override those base values. A light theme also replaces
+    textual-light's ``accent`` / ``warning`` / ``success`` / ``error``
+    (about 2:1 on white) with readable shades, app-wide: every
+    ``$accent`` / ``[$warning]`` text in modals, the chat and the App lens.
 
     Args:
         theme: The Sandroid theme.
@@ -1421,10 +1428,11 @@ def build_textual_theme(theme: Theme) -> TextualTheme:
     if not theme.is_dark:
         # textual-light's amber accent / warning and light green success are
         # ~2:1 on white; ``[$warning]`` / ``color: $success`` text in the
-        # modals must stay readable, so a light theme uses its own shades.
+        # modals must stay readable, so a light theme uses its own shades
+        # (the accent keeps textual-light's orange hue, darkened to 4.6:1).
         base = replace(
             base,
-            accent=theme.lens.accent,
+            accent=LIGHT_TEXTUAL_ACCENT,
             warning=theme.lens.warn,
             success=theme.lens.ok,
             error=theme.lens.bad,

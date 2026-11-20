@@ -120,10 +120,10 @@ async def test_lens_badge_and_caption() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await boot(app, pilot)
         ms = app.screen
-        ms.set_lens_badge("network", "2 TLS failed")
+        ms.set_lens_badge("network", "2 TLS")
         ms.set_lens_caption("network", "flows", "10 of 247")
         await settle(pilot)
-        assert "2 TLS failed" in str(ms.query_one("#lens-tab-network").render())
+        assert "2 TLS" in str(ms.query_one("#lens-tab-network").render())
         host = ms.query_one("#lens-host")
         assert host.border_title == ""  # app lens: no caption set
         await pilot.press("2")
@@ -134,7 +134,7 @@ async def test_lens_badge_and_caption() -> None:
         assert host.border_subtitle == "10 of 247"
         ms.set_lens_badge("network", None)
         await settle(pilot)
-        assert "TLS failed" not in str(ms.query_one("#lens-tab-network").render())
+        assert "TLS" not in str(ms.query_one("#lens-tab-network").render())
 
 
 async def test_lens_activation_hook_is_called(monkeypatch) -> None:
