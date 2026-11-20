@@ -1045,7 +1045,13 @@ async def test_a_started_avd_keeps_the_cursor_as_its_running_row() -> None:
             ours=True,
             launch_options=IDLE.options,
         )
-        screen._apply(HubSnapshot(devices=(running,), avds=(OTHER,), taken_at=1.0))
+        started = HubSnapshot(devices=(running,), avds=(OTHER,), taken_at=1.0)
+        # Through the collector, not screen._apply: a booting row starts the
+        # 2 s boot poll, which must collect the same world again (a fixed
+        # sleep raced under load and the poll put the old snapshot back).
+        screen._collect_fn = lambda force_avds=False: started
+        screen.request_refresh()
+        await until(pilot, lambda: screen.snapshot is started)
         await settle(pilot)
         assert screen.current_row() == running
         assert "read-only" in _box(screen)["title"]
