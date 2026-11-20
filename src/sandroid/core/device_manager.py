@@ -656,6 +656,11 @@ class DeviceManager:
             Toolbox.changed_files_cache = {}
             Toolbox._timestamps_shadow_dict_list = []
 
+            # The identity profile state is per device: read it again.
+            from sandroid.services.identity import get_identity_service
+
+            get_identity_service().forget()
+
             logger.info("Device state has been reset")
 
         except Exception as e:

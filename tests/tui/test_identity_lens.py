@@ -60,6 +60,9 @@ class FakeIdentity:
         self.verified: list[str] = []
         self.disruptive = False
         self.block: threading.Event | None = None
+        #: What ``last_apply`` answers (the service keeps every apply/verify).
+        self.times: tuple[float, float] | None = None
+        self.clock = 1_700_000_000.0
         self.status_over: dict[str, str] = {
             "gaid": "verified",
             "device_name": "applied",
@@ -147,13 +150,18 @@ class FakeIdentity:
             self.block.wait(10)
         return self._plan()
 
+    def last_apply(self, serial, fp=None):
+        return self.times
+
     def apply(self, serial, package=None, allow_restart=None):
         self.applied.append((serial, package, allow_restart))
+        self.times = (self.clock, self.clock)
         over = dict.fromkeys(self.status_over, "verified")
         return self._plan(over)
 
     def verify(self, serial):
         self.verified.append(serial)
+        self.times = ((self.times or (0.0, 0.0))[0], self.clock)
         return self._plan()
 
 
@@ -738,23 +746,25 @@ async def test_statuses_of_another_profile_are_ignored(fakes) -> None:
 
 
 async def test_caption_uses_the_service_times(fakes) -> None:
-    applied_at = 1_700_000_000.0
-    real_plan = fakes.ident._plan
-
-    def stamped(over=None):
-        plan = real_plan(over)
-        for info in plan.infos.values():
-            info.profile_id, info.at = plan.profile_id, applied_at
-        return plan
-
-    fakes.ident._plan = stamped
+    applied_at = fakes.ident.clock
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         lens = await _open_lens(app, pilot)
+
+        def info() -> str:
+            return lens.screen._lens_captions["identity"][1] or ""
+
+        await until(pilot, lambda: "not applied yet" in info())
         await pilot.press("space")
-        await until(pilot, lambda: lens.applied_at)
-        assert lens.applied_at == applied_at
-        assert lens.verified_at == applied_at
+        stamp = f"{il.datetime.fromtimestamp(applied_at):%H:%M:%S}"
+        await until(pilot, lambda: f"applied {stamp}" in info())
+        assert f"verified {stamp}" in info()
+        fakes.ident.clock += 3600
+        await pilot.press("v")
+        later = f"{il.datetime.fromtimestamp(applied_at + 3600):%H:%M:%S}"
+        await until(pilot, lambda: f"verified {later}" in info())
+        assert f"applied {stamp}" in info()
+        assert not hasattr(lens, "applied_at")  # the service is the only source
 
 
 async def test_caption_shows_an_apply_made_outside_the_lens(fakes) -> None:
@@ -773,7 +783,7 @@ async def test_caption_shows_an_apply_made_outside_the_lens(fakes) -> None:
         def info() -> str:
             return lens.screen._lens_captions["identity"][1] or ""
 
-        await until(pilot, lambda: "not applied in this session" in info())
+        await until(pilot, lambda: "not applied yet" in info())
         # Another profile's apply does not count.
         real._applied[SERIAL] = identity_mod._Applied(
             fingerprint="other", applied_at=applied_at
@@ -784,7 +794,7 @@ async def test_caption_shows_an_apply_made_outside_the_lens(fakes) -> None:
                 target=fakes.ident.listeners[0], args=(fakes.ident.statuses(),)
             ).start()
             await settle(pilot)
-            assert "not applied in this session" in info()
+            assert "not applied yet" in info()
             # The service applied this profile (the lens did nothing).
             real._applied[SERIAL] = identity_mod._Applied(
                 fingerprint=fp, applied_at=applied_at, verified_at=applied_at
@@ -798,4 +808,3 @@ async def test_caption_shows_an_apply_made_outside_the_lens(fakes) -> None:
             il.REFRESH_MIN_S = 1.0
         assert f"verified {stamp}" in info()
         assert "not applied" not in info()
-        assert lens.applied_at is None

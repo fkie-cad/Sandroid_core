@@ -94,7 +94,7 @@ BOOT_ID_FILE = "/proc/sys/kernel/random/boot_id"
 #: Owner of :data:`APPLIED_FILE` (shell, so a non-root adbd can read it).
 APPLIED_OWNER = "2000:2000"
 #: The record read before an app start gives up after this many seconds.
-RECORD_READ_TIMEOUT_S = 5.0
+RECORD_READ_TIMEOUT_S = 3.0
 #: A failed background read of the record is tried again after this long.
 HYDRATE_RETRY_S = 30.0
 SSAID_FILE = "/data/system/users/0/settings_ssaid.xml"
@@ -105,6 +105,10 @@ GAID_FILE = f"{GAID_DIR}/adid_settings.xml"
 APPSET_FILE = f"/data/data/{GMS}/files/appset/shared/pvids.pb"
 PREFLIGHT_TAG = "@@identity-preflight@@"
 NEEDS_RESTART = "needs a framework restart"
+NOT_ROOT = "adbd is not root"
+NO_RESETPROP = "resetprop (Magisk) missing"
+#: Failures no apply can fix on this device as it is (no step is planned).
+STRUCTURAL = (NOT_ROOT, NO_RESETPROP)
 PROVIDER_DOWN = "its content provider did not answer (not up yet)"
 #: Waits before re-reading lists whose provider was not up (about 10 s).
 PROVIDER_WAITS_S = (1.0, 1.5, 2.0, 2.5, 3.0)
@@ -1623,6 +1627,13 @@ def call_numbers(profile: Profile) -> list[str]:
     return sorted(n for n in numbers if _PHONE_RE.fullmatch(n))
 
 
+def _install_cmd(pkg: str) -> str:
+    """Prints ``<uid>:<inode>`` of the app's data directory: a reinstall
+    gives a new directory (and usually a new uid), and a new Android ID.
+    """
+    return f"stat -c %u:%i /data/data/{pkg} 2>/dev/null"
+
+
 def preflight_script(
     packages: Iterable[str], tokens: Iterable[str], numbers: Iterable[str] = ()
 ) -> str:
@@ -1669,6 +1680,7 @@ def preflight_script(
         lines.append("echo @@uids@@; pm list packages -U 2>/dev/null")
         for pkg in pkgs:
             rx = pkg.replace(".", "\\.")
+            lines.append(f"echo @@inst:{pkg}@@; {_install_cmd(pkg)}")
             # The certificate from packages.xml; the framework's short
             # signature hash (dumpsys) only when that fails.
             lines += [
@@ -1784,6 +1796,8 @@ class DeviceState:
     #: Lists whose provider did not answer (no row, no "No result found."):
     #: not up yet, e.g. right after a framework restart.
     lists_unread: set[str] = field(default_factory=set)
+    #: Package -> ``uid:inode`` of its data directory (see :func:`_install_cmd`).
+    installs: dict[str, str] = field(default_factory=dict)
 
 
 def _settings_document(xml_text: str) -> tuple[ET.Element, ET.Element] | None:
@@ -1883,6 +1897,9 @@ def parse_preflight(serial: str, text: str) -> DeviceState:
             if not signer and m_hash:
                 signer = "sighash:" + m_hash.group(1)
             state.packages[pkg] = PackageInfo(pkg, uid, signer)
+        elif key.startswith("inst:"):
+            if re.fullmatch(r"\d+:\d+", body):
+                state.installs[key[5:]] = body
         elif key.startswith("list:"):
             name = key[5:]
             rows = parse_rows(body, _LIST_QUERY[name][1])
@@ -2104,8 +2121,13 @@ class _Applied:
     befores: dict[str, str] = field(default_factory=dict)  # also "ssaid:<pkg>"
     befores_done: bool = False
     frozen: str = ""  # fingerprint+statuses digest of the last freeze
-    #: Packages whose Android ID was verified with ``fingerprint``.
-    seeded: set[str] = field(default_factory=set)
+    #: Package -> Android ID verified with ``fingerprint``.
+    seeded: dict[str, str] = field(default_factory=dict)
+    #: Package -> ``uid:inode`` of its data directory when it was seeded.
+    installs: dict[str, str] = field(default_factory=dict)
+    #: Framework-restart value ids that fail structurally here
+    #: (:data:`STRUCTURAL`, skipped, hook-only): no restart can apply them.
+    unappliable: set[str] = field(default_factory=set)
     #: Framework-restart values other than the Android ID that are on the
     #: device: value id -> volatile (the device forgets it on reboot).
     settled: dict[str, bool] = field(default_factory=dict)
@@ -2124,35 +2146,54 @@ class _RecordRead:
     record: dict[str, Any] | None  # None: missing or unreadable
     boot_id: str
     marker: str  # the restart marker's content ("" when there is none)
+    install: str = ""  # ``uid:inode`` of the package asked for ("" = none)
 
 
 def applied_record(
-    profile_id: str, mem: _Applied, boot_id: str, at: float
+    profile_id: str, fp: str, mem: _Applied, boot_id: str, at: float
 ) -> dict[str, Any]:
     """The device record (:data:`APPLIED_FILE`) for ``mem``.
 
     Keys: ``format``, ``version``, ``profile``, ``fingerprint``, ``boot_id``
     (kernel boot id of the apply), ``at`` (epoch s), ``done`` (packages fully
     applied), ``ssaids`` (package -> Android ID verified with this
-    fingerprint) and ``framework`` (framework-restart value id -> volatile).
+    fingerprint), ``installs`` (package -> ``uid:inode`` of its data
+    directory when it was seeded), ``framework`` (framework-restart value id
+    on the device -> volatile) and ``unappliable`` (framework-restart value
+    ids no restart can apply here).
     """
+    seeded = sorted(mem.seeded)
     return {
         "format": APPLIED_FORMAT,
         "version": 1,
         "profile": profile_id,
-        "fingerprint": mem.fingerprint,
+        "fingerprint": fp,
         "boot_id": boot_id,
         "at": round(at, 3),
         "done": sorted(mem.done),
-        "ssaids": {p: mem.ssaids[p] for p in sorted(mem.seeded) if p in mem.ssaids},
+        "ssaids": {p: mem.seeded[p] for p in seeded},
+        "installs": {p: mem.installs[p] for p in seeded if p in mem.installs},
         "framework": dict(sorted(mem.settled.items())),
+        "unappliable": sorted(mem.unappliable),
     }
 
 
 def _record_sig(record: dict[str, Any]) -> str:
-    """Content signature of a record, without its time stamp."""
-    body = {k: v for k, v in record.items() if k != "at"}
+    """Content signature of a record; the time counts to the second (a later
+    apply rewrites the record, sub-second noise does not).
+    """
+    body = dict(record, at=int(record.get("at") or 0))
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+
+
+def _str_map(value: Any) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(k, str) and isinstance(v, str) for k, v in value.items()
+    )
+
+
+def _str_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(v, str) for v in value)
 
 
 def parse_applied_record(text: str) -> dict[str, Any] | None:
@@ -2163,38 +2204,41 @@ def parse_applied_record(text: str) -> dict[str, Any] | None:
         return None
     if not isinstance(data, dict) or data.get("format") != APPLIED_FORMAT:
         return None
-    done, ssaids, fw = data.get("done"), data.get("ssaids"), data.get("framework")
+    fw = data.get("framework")
     if (
         data.get("version") != 1
         or not isinstance(data.get("fingerprint"), str)
         or not isinstance(data.get("boot_id"), str)
         or not isinstance(data.get("at"), int | float)
-        or not isinstance(done, list)
-        or not all(isinstance(p, str) for p in done)
-        or not isinstance(ssaids, dict)
-        or not all(isinstance(v, str) for v in ssaids.values())
+        or not _str_list(data.get("done"))
+        or not _str_map(data.get("ssaids"))
+        or not _str_map(data.get("installs"))
         or not isinstance(fw, dict)
         or not all(isinstance(v, bool) for v in fw.values())
+        or not _str_list(data.get("unappliable"))
     ):
         return None
     return data
 
 
-def record_script() -> str:
-    """One cheap read: the device record, the boot id and the restart marker."""
-    return "\n".join(
-        [
-            "echo @@applied@@",
-            f"cat {APPLIED_FILE} 2>/dev/null",
-            "echo",
-            "echo @@boot_id@@",
-            f"cat {BOOT_ID_FILE} 2>/dev/null",
-            "echo @@marker@@",
-            f"cat {RESTART_MARKER} 2>/dev/null",
-            "echo",
-            "echo @@end@@",
-        ]
-    )
+def record_script(package: str | None = None) -> str:
+    """One cheap read: the device record, the boot id, the restart marker
+    and (with ``package``) that app's install identity.
+    """
+    lines = [
+        "echo @@applied@@",
+        f"cat {APPLIED_FILE} 2>/dev/null",
+        "echo",
+        "echo @@boot_id@@",
+        f"cat {BOOT_ID_FILE} 2>/dev/null",
+        "echo @@marker@@",
+        f"cat {RESTART_MARKER} 2>/dev/null",
+        "echo",
+    ]
+    if package and re.fullmatch(r"[A-Za-z0-9_.]+", package):
+        lines += ["echo @@install@@", _install_cmd(package)]
+    lines.append("echo @@end@@")
+    return "\n".join(lines)
 
 
 def _knowledge(mem: _Applied) -> tuple:
@@ -2202,9 +2246,11 @@ def _knowledge(mem: _Applied) -> tuple:
     return (
         mem.fingerprint,
         frozenset(mem.done),
-        frozenset(mem.seeded),
+        frozenset(mem.seeded.items()),
         tuple(sorted(mem.settled.items())),
+        frozenset(mem.unappliable),
         mem.applied_at,
+        mem.verified_at,
     )
 
 
@@ -2241,7 +2287,13 @@ class IdentityService:
         #: of the last background read per serial, and the running ones.
         self._hydrated: set[str] = set()
         self._hydrate_tried: dict[str, float] = {}
+        self._hydrating: set[str] = set()
         self._hydrate_threads: dict[str, threading.Thread] = {}
+        #: Serials whose device record could neither be written nor removed:
+        #: it may be stale, so hydration ignores it until a write succeeds.
+        self._record_dirty: set[str] = set()
+        #: Wall clock of the apply/verify times (tests replace it).
+        self._now: Callable[[], float] = time.time
         self._hook_installed = False
         self._sleep: Callable[[float], None] = time.sleep
         self._clock: Callable[[], float] = time.monotonic
@@ -2634,7 +2686,8 @@ class IdentityService:
             mem = self._applied.setdefault(state.serial, _Applied())
             if mem.fingerprint != fp:
                 mem.fingerprint, mem.emu, mem.done = fp, {}, set()
-                mem.seeded, mem.settled = set(), {}
+                mem.seeded, mem.installs, mem.settled = {}, {}, {}
+                mem.unappliable = set()
                 mem.applied_at = mem.verified_at = 0.0
                 mem.gen += 1
             if state.ok and state.boot_id and mem.boot_id not in ("", state.boot_id):
@@ -2660,7 +2713,7 @@ class IdentityService:
                 info.current = self._current(vs.kind, state, "", mem, vid)[0]
                 continue
             if spec.needs_root and not state.root:
-                info.status, info.reason = "failed", "adbd is not root"
+                info.status, info.reason = "failed", NOT_ROOT
                 continue
             if spec.needs_emulator and not state.emulator:
                 info.status, info.reason = "skipped", "not an emulator"
@@ -2682,7 +2735,7 @@ class IdentityService:
             elif vs.kind == "app_set_id" and state.appset is None:
                 info.status, info.reason = "skipped", "no App Set ID store yet"
             elif vs.kind == "build_model" and not state.resetprop:
-                info.status, info.reason = "failed", "resetprop (Magisk) missing"
+                info.status, info.reason = "failed", NO_RESETPROP
             else:
                 plan.steps.append(Step(vid, spec.restart, desired, current))
         for name, items in render_lists(profile).items():
@@ -2690,7 +2743,7 @@ class IdentityService:
             if info is None:
                 continue
             if not state.root:
-                info.status, info.reason = "failed", "adbd is not root"
+                info.status, info.reason = "failed", NOT_ROOT
                 continue
             if name in state.lists_unread:
                 # Inserting blind would duplicate rows that are there.
@@ -3306,7 +3359,7 @@ class IdentityService:
         pkgs = self._packages(serial, None)
         state = self.preflight(serial, pkgs, profile)
         plan = self._plan(profile, state, pkgs)
-        now = time.time()
+        now = self._now()
         if state.ok:
             with self._lock:
                 mem = self._applied.setdefault(serial, _Applied())
@@ -3358,39 +3411,84 @@ class IdentityService:
                 return None
             return mem.applied_at, mem.verified_at
 
-    def _read_record(self, serial: str) -> _RecordRead | None:
+    def forget(self, serial: str | None = None) -> None:
+        """Memory of ``serial`` (default: every device) may be stale.
+
+        Called after a snapshot load and when the active device changes:
+        the apply times are dropped and the device record is read again
+        (in the background, or by the next app start). Never blocks.
+        """
+        with self._lock:
+            serials = [serial] if serial else list(self._applied)
+            for s in serials:
+                self._hydrated.discard(s)
+                self._hydrate_tried.pop(s, None)
+                mem = self._applied.get(s)
+                if mem is not None:
+                    mem.applied_at = mem.verified_at = 0.0
+        self._notify_status()
+
+    def _read_record(
+        self, serial: str, package: str | None = None
+    ) -> _RecordRead | None:
         """One cheap read of the device record (None when the device did not
         answer: any error, a timeout).
         """
         try:
-            out = _Device(serial).shell(record_script(), timeout=RECORD_READ_TIMEOUT_S)
+            out = _Device(serial).shell(
+                record_script(package), timeout=RECORD_READ_TIMEOUT_S
+            )
         except Exception:
             logger.debug("identity: device record read failed", exc_info=True)
             return None
         sec = _sections(out or "")
         if "end" not in sec:
             return None
+        install = sec.get("install", "")
         return _RecordRead(
             parse_applied_record(sec.get("applied", "")),
             sec.get("boot_id", ""),
             sec.get("marker", ""),
+            install if re.fullmatch(r"\d+:\d+", install) else "",
         )
 
     def _write_record(self, serial: str, record: dict[str, Any]) -> bool:
-        """Write the device record atomically (True on success)."""
+        """Write the device record atomically (True on success).
+
+        When the write fails the record is removed (the device then reads
+        as unknown); when even that fails, the record is marked dirty and
+        hydration ignores it until a write succeeds.
+        """
         data = (json.dumps(record, indent=1, sort_keys=True) + "\n").encode()
+        dev = _Device(serial)
         try:
-            err = _Device(serial).write(APPLIED_FILE, data, chown=APPLIED_OWNER)
+            err = dev.write(APPLIED_FILE, data, chown=APPLIED_OWNER)
         except Exception as exc:
             err = str(exc) or type(exc).__name__
-        if err:
-            logger.warning(f"identity: device record not written: {err}")
-            return False
+        if not err:
+            with self._lock:
+                mem = self._applied.get(serial)
+                if mem is not None:
+                    mem.record_sig = _record_sig(record)
+                self._record_dirty.discard(serial)
+            return True
+        logger.warning(f"identity: device record not written: {err}")
+        try:
+            removed = _OK in dev.shell(
+                f"rm -f {APPLIED_FILE} && echo {_OK}", timeout=RECORD_READ_TIMEOUT_S
+            )
+        except Exception:
+            removed = False
         with self._lock:
             mem = self._applied.get(serial)
             if mem is not None:
-                mem.record_sig = _record_sig(record)
-        return True
+                mem.record_sig = ""
+            if removed:
+                self._record_dirty.discard(serial)
+            else:
+                logger.warning("identity: stale device record ignored until rewritten")
+                self._record_dirty.add(serial)
+        return False
 
     def _hydrate(self, serial: str, read: _RecordRead, gen: int) -> bool:
         """Replace what memory knows about ``serial`` by the device record.
@@ -3415,31 +3513,38 @@ class IdentityService:
         rec = read.record
         with self._lock:
             mem = self._applied.setdefault(serial, _Applied())
-            if mem.gen != gen:
-                return False
+            if mem.gen != gen or self._apply_lock.locked():
+                return False  # an apply is running or was: memory is newer
+            if serial in self._record_dirty:
+                return False  # the record may be stale: memory is newer
             self._hydrated.add(serial)
             before = _knowledge(mem)
             if read.boot_id and mem.boot_id not in ("", read.boot_id):
                 mem.emu = {}
             if rec is None:
-                mem.done, mem.seeded, mem.settled = set(), set(), {}
+                mem.done, mem.seeded, mem.installs = set(), {}, {}
+                mem.settled, mem.unappliable = {}, set()
+                mem.applied_at = mem.verified_at = 0.0
                 mem.record_sig = ""
             else:
+                if rec["fingerprint"] == mem.fingerprint or not mem.fingerprint:
+                    # Same profile (or nothing known): the markers may use them.
+                    mem.ssaids.update(rec["ssaids"])
                 if rec["fingerprint"] != mem.fingerprint:
                     mem.fingerprint, mem.emu = rec["fingerprint"], {}
                     mem.applied_at = mem.verified_at = 0.0
                 same_boot = bool(read.boot_id) and rec["boot_id"] == read.boot_id
                 mem.done = set(rec["done"]) if same_boot else set()
-                mem.seeded = set(rec["ssaids"])
-                mem.ssaids.update(rec["ssaids"])
+                mem.seeded = dict(rec["ssaids"])
+                mem.installs = dict(rec["installs"])
                 mem.settled = {
                     vid: bool(vol)
                     for vid, vol in rec["framework"].items()
                     if same_boot or not vol
                 }
+                mem.unappliable = set(rec["unappliable"])
                 mem.record_sig = _record_sig(rec)
-                if not mem.applied_at:
-                    mem.applied_at = float(rec["at"])
+                mem.applied_at = max(mem.applied_at, float(rec["at"]))
             if read.boot_id:
                 mem.boot_id = read.boot_id
             changed = before != _knowledge(mem)
@@ -3454,21 +3559,30 @@ class IdentityService:
         read is tried again after :data:`HYDRATE_RETRY_S`.
         """
         with self._lock:
-            if serial in self._hydrated or serial in self._hydrate_threads:
+            if serial in self._hydrated or serial in self._hydrating:
                 return
             now = self._clock()
             tried = self._hydrate_tried.get(serial)
             if tried is not None and now - tried < HYDRATE_RETRY_S:
                 return
             self._hydrate_tried[serial] = now
-            thread = threading.Thread(
-                target=self._hydrate_worker,
-                args=(serial,),
-                name=f"identity-record-{serial}",
-                daemon=True,
-            )
-            self._hydrate_threads[serial] = thread
-        thread.start()
+            self._hydrating.add(serial)
+        thread = threading.Thread(
+            target=self._hydrate_worker,
+            args=(serial,),
+            name=f"identity-record-{serial}",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except Exception:
+            logger.warning("identity: device record read not started", exc_info=True)
+            with self._lock:
+                self._hydrating.discard(serial)
+            return
+        with self._lock:
+            if serial in self._hydrating:  # not finished already
+                self._hydrate_threads[serial] = thread
 
     def _hydrate_worker(self, serial: str) -> None:
         try:
@@ -3483,6 +3597,7 @@ class IdentityService:
             logger.debug("identity: device record hydration failed", exc_info=True)
         finally:
             with self._lock:
+                self._hydrating.discard(serial)
                 self._hydrate_threads.pop(serial, None)
 
     def _join_hydration(self, timeout: float | None = None) -> None:
@@ -3490,7 +3605,8 @@ class IdentityService:
         with self._lock:
             threads = list(self._hydrate_threads.values())
         for thread in threads:
-            thread.join(timeout)
+            if thread.ident is not None:  # started
+                thread.join(timeout)
 
     # -- P7 freeze ----------------------------------------------------------
 
@@ -3510,42 +3626,34 @@ class IdentityService:
             for pkg, entry in info.per_app.items():
                 if entry.get("status") == "verified" and entry.get("value"):
                     ssaids[pkg] = entry["value"]
-        bad = [
-            i
-            for i in plan.infos.values()
-            if i.status == "failed"
-            or (i.status == "pending" and i.reason != NEEDS_RESTART)
-        ]
-        now = time.time()
+        # Done means really seeded: nothing failed or pending (also not a
+        # framework value whose restart was declined or not allowed) and the
+        # app's Android ID verified with this profile.
+        bad = [i for i in plan.infos.values() if i.status in ("failed", "pending")]
+        wants_ssaid = info is not None and info.enabled and info.provider == "native"
+        now = self._now()
+        write = False
         with self._lock:
             mem.ssaids = ssaids
-            if package and not bad:
-                mem.done.add(package)
-            elif package:
-                mem.done.discard(package)
-            for pkg, entry in (info.per_app if info is not None else {}).items():
-                if entry.get("status") == "verified" and entry.get("value"):
-                    mem.seeded.add(pkg)
-                else:
-                    mem.seeded.discard(pkg)
-            for vid, vinfo in plan.infos.items():
-                spec = REGISTRY.get(vinfo.kind)
-                if spec is None or spec.restart != "framework":
-                    continue
-                if vinfo.kind == "android_id":  # per package: ``seeded``
-                    continue
-                if vinfo.status in ("verified", "applied"):
-                    mem.settled[vid] = spec.volatile
-                else:
-                    mem.settled.pop(vid, None)
-            if state.ok:
-                mem.boot_id = state.boot_id
-                mem.applied_at = mem.verified_at = now
-            mem.gen += 1
-            record = applied_record(plan.profile_id, mem, mem.boot_id, now)
-            write = state.ok and _record_sig(record) != mem.record_sig
+            if mem.fingerprint == plan.fingerprint:
+                self._learn(mem, plan, state)
+                seeded = not wants_ssaid or (package or "") in mem.seeded
+                if package and not bad and seeded:
+                    mem.done.add(package)
+                elif package:
+                    mem.done.discard(package)
+                if state.ok:
+                    mem.boot_id = state.boot_id
+                    mem.applied_at = mem.verified_at = now
+                mem.gen += 1
+                record = applied_record(
+                    plan.profile_id, plan.fingerprint, mem, mem.boot_id, now
+                )
+                write = state.ok and _record_sig(record) != mem.record_sig
         if write:
             self._write_record(plan.serial, record)
+            with self._lock:
+                mem.gen += 1  # a read that started before the write is stale
         self._publish(plan, now)
         digest = hashlib.sha256(
             json.dumps(
@@ -3591,6 +3699,40 @@ class IdentityService:
         )
         if changed:
             self._notify_markers()
+
+    @staticmethod
+    def _learn(mem: _Applied, plan: IdentityPlan, state: DeviceState) -> None:
+        """What ``plan`` proves about the device: seeded Android IDs, settled
+        and structurally unappliable framework values (lock held).
+        """
+        info = plan.infos.get("android_id")
+        for pkg, entry in (info.per_app if info is not None else {}).items():
+            if entry.get("status") == "verified" and entry.get("value"):
+                mem.seeded[pkg] = entry["value"]
+                if pkg in state.installs:
+                    mem.installs[pkg] = state.installs[pkg]
+                else:
+                    mem.installs.pop(pkg, None)
+            else:
+                mem.seeded.pop(pkg, None)
+                mem.installs.pop(pkg, None)
+        for vid, vinfo in plan.infos.items():
+            spec = REGISTRY.get(vinfo.kind)
+            if spec is None or spec.restart != "framework":
+                continue
+            structural = vinfo.status in ("skipped", "hook-only") or (
+                vinfo.status == "failed" and vinfo.reason in STRUCTURAL
+            )
+            if structural:
+                mem.unappliable.add(vid)
+            else:
+                mem.unappliable.discard(vid)
+            if vinfo.kind == "android_id":  # per package: ``seeded``
+                continue
+            if vinfo.status in ("verified", "applied"):
+                mem.settled[vid] = spec.volatile
+            else:
+                mem.settled.pop(vid, None)
 
     def _freeze(
         self,
@@ -3731,7 +3873,7 @@ class IdentityService:
         with self._lock:
             mem = self._applied.get(serial)
             gen = mem.gen if mem is not None else 0
-        read = self._read_record(serial)
+        read = self._read_record(serial, package)
         if read is not None:
             self._hydrate(serial, read, gen)
         # An interrupted restart window: the next apply resumes it.
@@ -3739,15 +3881,25 @@ class IdentityService:
         with self._lock:
             mem = self._applied.get(serial)
             ours = mem is not None and mem.fingerprint == fp
+            if ours and read is not None:
+                known = mem.installs.get(package, "")
+                if not read.install or known != read.install:
+                    # Reinstalled (or gone): a new Android ID, nothing done.
+                    mem.done.discard(package)
+                    mem.seeded.pop(package, None)
+                    mem.installs.pop(package, None)
             if ours and package in mem.done and not recovery:
                 return None
             seeded = ours and package in mem.seeded
             settled = set(mem.settled) if ours else set()
+            unappliable = set(mem.unappliable) if ours else set()
+        # Only values a restart can really apply here count.
         needs_fw = recovery or any(
             vs.enabled
             and vs.effective_provider == "native"
             and vs.spec is not None
             and vs.spec.restart == "framework"
+            and vid not in unappliable
             and (not seeded if vs.kind == "android_id" else vid not in settled)
             for vid, vs in profile.values.items()
         )
@@ -3763,7 +3915,11 @@ class IdentityService:
         )
 
         def run() -> None:
-            plan = self.apply(serial, package, allow_restart=allow, profile=profile)
+            # Never an unannounced restart: a value that turns out to need
+            # one stays pending (the app is not done) and the next start asks.
+            plan = self.apply(
+                serial, package, allow_restart=allow and needs_fw, profile=profile
+            )
             failed = [i for i in plan.infos.values() if i.status == "failed"]
             if failed:
                 raise IdentityApplyError(

@@ -30,6 +30,7 @@ from sandroid.services.identity import (
 )
 
 SERIAL = "emulator-5580"
+NOW = 1_700_000_000.0  # the services' wall clock (apply / verify times)
 TOKEN = "3f9a1c07"  # noqa: S105 - a canary token, not a secret
 OTHER = "ab12cd34"
 CERT = "3082" + "ab" * 40  # a fake DER certificate (hex)
@@ -70,6 +71,7 @@ def _profile(**kw) -> Profile:
 def service(env, monkeypatch):
     svc = IdentityService()
     svc._sleep = lambda s: None
+    svc._now = lambda: NOW
     svc.restarts_seen = []
     svc._after_restart = svc.restarts_seen.append
     profile = svc.save(_profile())
@@ -204,6 +206,8 @@ class FakeDevice:
         }
         for i in range(n_packages):
             self.packages[f"com.bulk.p{i}"] = (11000 + i, CERT)
+        #: Inode of each app's data directory (a reinstall gets a new one).
+        self.inodes = {pkg: 5000 + i for i, pkg in enumerate(self.packages)}
         self.contacts: list[dict] = []
         self.sms: list[dict] = []
         self.call_log: list[dict] = []
@@ -218,6 +222,8 @@ class FakeDevice:
         #: ``record_down`` they get no answer.
         self.record_reads = 0
         self.record_down = False
+        self.root = True  # adbd runs as root
+        self.resetprop = True  # Magisk's resetprop is installed
 
     # -- transport --------------------------------------------------------
 
@@ -348,6 +354,8 @@ class FakeDevice:
             return ""
         if name == "cat":
             return self.fs.get(argv[1], b"").decode().strip()
+        if name == "stat" and argv[3].startswith("/data/data/"):
+            return self.install(argv[3].removeprefix("/data/data/"))
         if name == "stop":
             self.running = False
             return ""
@@ -419,7 +427,8 @@ class FakeDevice:
         assert ZYGOTE_PREFIX in script
         lines = [PREFLIGHT_TAG, "@@props@@"]
         lines += [f"{k}={v}" for k, v in self.props.items()]
-        lines += ["@@root@@", "0", "@@resetprop@@", "/debug_ramdisk/resetprop"]
+        lines += ["@@root@@", "0" if self.root else "2000"]
+        lines += ["@@resetprop@@", "/debug_ramdisk/resetprop" if self.resetprop else ""]
         lines += ["@@system_server@@", str(self.pid) if self.running else ""]
         lines += ["@@marker@@", self.fs.get(RESTART_MARKER, b"").decode()]
         lines += ["@@boot_id@@", self.fs[ident.BOOT_ID_FILE].decode().strip()]
@@ -443,6 +452,8 @@ class FakeDevice:
         for pkg, (_uid, cert) in self.packages.items():
             if f"@@pkg:{pkg}@@" in script:
                 lines += [f"@@pkg:{pkg}@@", f'cert index="3" key="{cert}"']
+            if f"@@inst:{pkg}@@" in script:
+                lines += [f"@@inst:{pkg}@@", self.install(pkg)]
         if "@@list:" in script and self.providers_down:
             # Not up yet: ``content query`` fails (stderr is dropped).
             self.providers_down -= 1
@@ -481,6 +492,22 @@ class FakeDevice:
                 lines.append(ident._NO_RESULT)
         lines.append("@@end@@")
         return "\n".join(lines) + "\n"
+
+    def install(self, pkg: str) -> str:
+        """``uid:inode`` of the app's data directory (``""`` when absent)."""
+        if pkg not in self.packages:
+            return ""
+        return f"{self.packages[pkg][0]}:{self.inodes[pkg]}"
+
+    def reinstall(self, pkg: str) -> None:
+        """Uninstall and install again: same uid, new data directory and a
+        new Android ID (the framework drops the old one).
+        """
+        self.inodes[pkg] += 1000
+        xml = self.fs[SSAID_FILE].removeprefix(b"ABX\0").decode()
+        xml = re.sub(rf'value="[0-9a-f]+" package="{re.escape(pkg)}"',
+                     f'value="9999888877776666" package="{pkg}"', xml)  # fmt: skip
+        self.fs[SSAID_FILE] = b"ABX\0" + xml.encode()
 
     @property
     def ssaid(self) -> dict[str, str]:
@@ -1004,6 +1031,7 @@ def test_contacts_are_seeded_when_others_exist(service, device):
 
 
 def test_statuses_name_their_profile_fingerprint_and_time(service, device):
+    service._now = ident.time.time  # the real clock
     before = ident.time.time()
     plan = service.apply(SERIAL, "com.example.app")
     statuses = service.statuses()
@@ -1219,7 +1247,12 @@ def test_restart_never_makes_the_plan_non_disruptive(service, device, app_start,
     assert not plan.disruptive
     plan.apply()
     assert device.pid == 1000
-    assert service.pre_spawn("com.example.app") is None
+    # The Android ID and the locale stayed pending: not done, so every start
+    # tries again (never a restart while the policy says never).
+    again = service.pre_spawn("com.example.app")
+    assert again is not None
+    assert not again.disruptive
+    assert service.applied_state("com.example.app") == "not_applied"
 
 
 def test_install_hook_is_a_no_op_without_app_start(service, monkeypatch):
@@ -1445,6 +1478,7 @@ def _fresh() -> IdentityService:
     """A new service on the same library and device: a TUI restart."""
     svc = IdentityService()
     svc._sleep = lambda s: None
+    svc._now = lambda: NOW
     svc._after_restart = lambda serial: None
     return svc
 
@@ -1616,7 +1650,7 @@ def test_last_apply_follows_apply_and_verify(service, device, monkeypatch):
     assert service.last_apply(SERIAL, fp) is None
     service._join_hydration(5)
     now = [1000.0]
-    monkeypatch.setattr(ident.time, "time", lambda: now[0])
+    service._now = lambda: now[0]
     service.apply(SERIAL, PKG)
     assert service.last_apply(SERIAL, fp) == (1000.0, 1000.0)
     now[0] = 2000.0
@@ -1629,13 +1663,296 @@ def test_applied_record_parse_rejects_garbage():
     assert ident.parse_applied_record("") is None
     assert ident.parse_applied_record("{") is None
     assert ident.parse_applied_record('{"format": "other"}') is None
-    mem = ident._Applied(fingerprint="f", done={PKG}, seeded={PKG})
+    mem = ident._Applied(fingerprint="f", done={PKG})
+    mem.seeded = {PKG: "3f9a1c07deadbeef"}
+    mem.installs = {PKG: "10123:5000"}
     mem.ssaids = {PKG: "3f9a1c07deadbeef", "com.old": "x"}
     mem.settled = {"locale": False}
-    record = ident.applied_record("p", mem, "boot", 12.5)
+    mem.unappliable = {"build_model"}
+    record = ident.applied_record("p", "f", mem, "boot", 12.5)
     assert ident.parse_applied_record(ident.json.dumps(record)) == record
     assert record["ssaids"] == {PKG: "3f9a1c07deadbeef"}  # only seeded ones
+    assert record["installs"] == {PKG: "10123:5000"}
+    assert record["unappliable"] == ["build_model"]
+    # Sub-second noise is the same record; a later second is a new one.
+    sig = ident._record_sig(record)
+    assert ident._record_sig(dict(record, at=12.9)) == sig
+    assert ident._record_sig(dict(record, at=13.0)) != sig
+    assert (
+        ident.parse_applied_record(ident.json.dumps(dict(record, installs=[]))) is None
+    )
     bad = dict(record, done=[1])
     assert ident.parse_applied_record(ident.json.dumps(bad)) is None
     newer = dict(record, version=2)
     assert ident.parse_applied_record(ident.json.dumps(newer)) is None
+
+
+# ---------------------------------------------------------------------------
+# device record: review round (false "applied" paths)
+# ---------------------------------------------------------------------------
+
+
+def test_a_start_never_restarts_unannounced(service, device, app_start):
+    """The record says the locale is on the device, so the start is not
+    announced as disruptive; the device disagrees (someone changed it). The
+    apply then does no restart: the locale stays pending, the app is not
+    done, and the next start asks.
+    """
+    service.apply(SERIAL, PKG)
+    pid = device.pid
+    device.fs[ident.BOOT_ID_FILE] = b"boot-2\n"  # reboot: done is gone
+    device.props["persist.sys.locale"] = "en-US"
+    plan = service.pre_spawn(PKG)
+    assert not plan.disruptive
+    plan.apply()  # the locale stays pending: no failure, no restart
+    assert device.pid == pid  # no framework restart
+    assert device.props["persist.sys.locale"] == "en-US"
+    assert PKG not in _record(device)["done"]
+    assert "locale" not in _record(device)["framework"]
+    assert service.pre_spawn(PKG).disruptive
+
+
+def test_hydration_backs_off_while_an_apply_runs(service, device):
+    read = service._read_record(SERIAL)
+    with service._apply_lock:
+        assert service._hydrate(SERIAL, read, gen=0) is False
+    assert SERIAL not in service._hydrated
+    service._hydrate(SERIAL, read, gen=0)
+    assert SERIAL in service._hydrated
+
+
+def test_finish_skips_the_record_of_another_fingerprint(service, device, monkeypatch):
+    """A plan of another profile reset memory while the apply ran: neither
+    memory nor the device record take this apply's results.
+    """
+    real_emit = service._emit
+
+    def emit(kind, *args, **kwargs):
+        if kind == "verify":
+            service._applied[SERIAL].fingerprint = "other-profile"
+        return real_emit(kind, *args, **kwargs)
+
+    monkeypatch.setattr(service, "_emit", emit)
+    service.apply(SERIAL, PKG)
+    assert ident.APPLIED_FILE not in device.fs
+    assert service._applied[SERIAL].done == set()
+
+
+def test_gen_moves_after_the_record_write(service, device, monkeypatch):
+    seen: list[int] = []
+    real_write = service._write_record
+
+    def write(serial, record):
+        seen.append(service._applied[serial].gen)
+        return real_write(serial, record)
+
+    monkeypatch.setattr(service, "_write_record", write)
+    service.apply(SERIAL, PKG)
+    assert seen
+    # A read that began before (or during) the write backs off.
+    assert service._applied[SERIAL].gen > seen[-1]
+    read = ident._RecordRead(None, "boot-1", "")
+    assert service._hydrate(SERIAL, read, gen=seen[-1]) is False
+    assert PKG in service._applied[SERIAL].done
+
+
+def test_hydration_merges_ssaids_only_for_the_same_fingerprint(service):
+    record = ident.applied_record(
+        "p",
+        "fp-b",
+        ident._Applied(seeded={PKG: "bbbb"}, installs={PKG: "1:2"}),
+        "boot-1",
+        NOW,
+    )
+    read = ident._RecordRead(record, "boot-1", "")
+    service._applied[SERIAL] = ident._Applied(fingerprint="fp-a", ssaids={PKG: "aaaa"})
+    service._hydrate(SERIAL, read, gen=0)
+    mem = service._applied[SERIAL]
+    assert mem.ssaids == {PKG: "aaaa"}  # profile A's value stays for the markers
+    assert mem.seeded == {PKG: "bbbb"}
+    assert mem.fingerprint == "fp-b"
+    # A fresh process (nothing known) or the same profile: merged.
+    service._applied[SERIAL] = ident._Applied()
+    service._hydrate(SERIAL, read, gen=0)
+    assert service._applied[SERIAL].ssaids == {PKG: "bbbb"}
+
+
+def test_a_failed_record_write_removes_or_marks_the_record(service, device, app_start):
+    service.apply(SERIAL, PKG)
+    now = [NOW]
+    service._now = lambda: now[0]
+    # The write fails, the removal works: the device reads as unknown.
+    device.fail_cmds.add("mv")
+    now[0] += 10
+    service.apply(SERIAL, PKG)
+    assert ident.APPLIED_FILE not in device.fs
+    assert SERIAL not in service._record_dirty
+    fresh = _fresh()
+    assert fresh.pre_spawn(PKG) is not None
+    # Even the removal fails: the stale record is ignored until a write works.
+    stale = ident.json.dumps(
+        dict(_stale_record(service), done=[PKG, "com.other.app"])
+    ).encode()
+    device.fs[ident.APPLIED_FILE] = stale
+    device.fail_cmds.add("rm")
+    now[0] += 10
+    service.apply(SERIAL, PKG)
+    assert device.fs[ident.APPLIED_FILE] == stale
+    assert SERIAL in service._record_dirty
+    service.pre_spawn("com.other.app")
+    assert "com.other.app" not in service._applied[SERIAL].done
+    assert service.applied_state("com.other.app") == "not_applied"
+    device.fail_cmds.clear()
+    now[0] += 10
+    service.apply(SERIAL, PKG)
+    assert SERIAL not in service._record_dirty
+    assert _record(device)["done"] == [PKG]
+
+
+def _stale_record(service) -> dict:
+    mem = service._applied[SERIAL]
+    return ident.applied_record("p", mem.fingerprint, mem, mem.boot_id, NOW)
+
+
+def test_a_reinstalled_app_is_not_done_and_not_seeded(service, device, app_start):
+    service.apply(SERIAL, PKG)
+    assert _record(device)["installs"] == {PKG: device.install(PKG)}
+    device.reinstall(PKG)
+    for svc in (service, _fresh()):
+        plan = svc.pre_spawn(PKG)
+        assert plan is not None
+        assert plan.disruptive  # its new Android ID needs a restart
+        assert PKG not in svc._applied[SERIAL].seeded
+    plan.apply()
+    assert device.ssaid[PKG].startswith(TOKEN)
+    assert service.pre_spawn(PKG) is None
+
+
+def test_done_needs_the_android_id_seeded(service, device, app_start):
+    service.apply(SERIAL, PKG, allow_restart=False)
+    record = _record(device)
+    assert record["done"] == []
+    assert record["ssaids"] == {}
+    assert "locale" not in record["framework"]
+    plan = _fresh().pre_spawn(PKG)
+    assert plan.disruptive
+
+
+def test_structural_failures_do_not_make_starts_disruptive(service, device, app_start):
+    profile = service.active_profile()
+    profile.values["build_model"].enabled = True
+    service.save(profile)
+    device.resetprop = False
+    plan = service.apply(SERIAL, PKG)
+    assert plan.infos["build_model"].reason == ident.NO_RESETPROP
+    assert _record(device)["unappliable"] == ["build_model"]
+    for svc in (service, _fresh()):
+        again = svc.pre_spawn(PKG)
+        assert again is not None  # build_model failed: not done
+        assert not again.disruptive  # but no restart can apply it here
+    # resetprop appears: the next apply plans it again (a start asks then).
+    device.resetprop = True
+    service.apply(SERIAL, PKG, allow_restart=False)
+    assert service._applied[SERIAL].unappliable == set()
+    assert service.pre_spawn(PKG).disruptive
+
+
+def test_no_root_makes_no_start_disruptive(service, device, app_start):
+    device.root = False
+    service.apply(SERIAL, PKG)
+    assert {"android_id", "locale"} <= service._applied[SERIAL].unappliable
+    assert not service.pre_spawn(PKG).disruptive
+
+
+def test_forget_drops_the_times_and_reads_the_record_again(service, device):
+    service.apply(SERIAL, PKG)
+    fp = ident.fingerprint(service.active_profile())
+    heard: list = []
+    service.add_status_listener(heard.append)
+    service._hydrated.add(SERIAL)
+    service.forget(SERIAL)
+    assert heard
+    assert service._applied[SERIAL].applied_at == 0.0
+    assert SERIAL not in service._hydrated
+    # The next look reads the record again (in the background).
+    service.last_apply(SERIAL, fp)
+    service._join_hydration(5)
+    assert service.last_apply(SERIAL, fp) == (NOW, 0.0)
+    # A record that is gone (a snapshot from before): no times at all.
+    del device.fs[ident.APPLIED_FILE]
+    service.forget()
+    service.last_apply(SERIAL, fp)
+    service._join_hydration(5)
+    assert service.last_apply(SERIAL, fp) is None
+    assert service.applied_state(PKG) == "not_applied"
+
+
+def test_snapshot_loads_and_device_switches_forget(monkeypatch):
+    from sandroid.services import emulator_service
+
+    calls: list = []
+    fake = types.SimpleNamespace(forget=lambda serial=None: calls.append(serial))
+    monkeypatch.setattr(ident, "get_identity_service", lambda: fake)
+    monkeypatch.setattr(
+        "sandroid.core.timeline.get_timeline",
+        lambda: types.SimpleNamespace(on_world_change=lambda *a, **k: None),
+    )
+    emulator_service._world_change("snapshot-load", src="snapshot", dev=SERIAL)
+    emulator_service._world_change("cold-boot", src="device", dev=None)
+    assert calls == [SERIAL, None]
+
+    from sandroid import services
+    from sandroid.core.device_manager import DeviceManager
+
+    stub = types.SimpleNamespace(stop_all=lambda: None, reset=lambda: None)
+    monkeypatch.setattr(services, "get_task_service", lambda: stub)
+    monkeypatch.setattr(services, "get_spotlight_service", lambda: stub)
+    manager = DeviceManager.__new__(DeviceManager)
+    manager._reset_device_state()
+    assert calls == [SERIAL, None, None]
+
+
+def test_a_thread_that_does_not_start_is_not_registered(service, monkeypatch):
+    class NoStart(ident.threading.Thread):
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(ident.threading, "Thread", NoStart)
+    service._ensure_hydrated(SERIAL)
+    assert service._hydrate_threads == {}
+    assert service._hydrating == set()
+    # An unstarted thread in the table does not break the join.
+    service._hydrate_threads[SERIAL] = NoStart(target=lambda: None)
+    service._join_hydration(1)
+
+
+def test_a_later_apply_rewrites_the_record_time(service, device):
+    now = [NOW]
+    service._now = lambda: now[0]
+    service.apply(SERIAL, PKG)
+    assert _record(device)["at"] == NOW
+    device.writes.clear()
+    now[0] = NOW + 0.4  # the same second: nothing written
+    service.apply(SERIAL, PKG)
+    assert device.writes == []
+    now[0] = NOW + 5
+    service.apply(SERIAL, PKG)
+    assert _record(device)["at"] == NOW + 5
+    assert all("identity.applied" in w for w in device.writes)  # only the record
+
+
+def test_the_start_read_is_one_short_round_trip(
+    service, device, app_start, monkeypatch
+):
+    service.apply(SERIAL, PKG)
+    timeouts: list = []
+    real_send = ident._send
+
+    def send(command, serial, timeout=60):
+        timeouts.append(timeout)
+        return real_send(command, serial, timeout)
+
+    monkeypatch.setattr(ident, "_send", send)
+    assert _fresh().pre_spawn(PKG) is None
+    assert len(timeouts) == 1
+    assert timeouts[0] <= 3
