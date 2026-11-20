@@ -969,6 +969,9 @@ ALREADY_RUNNING = "another instance of the AVD runs without this SIM"
 NO_SIM_VALUE = "the profile sets no SIM value at launch"
 PROFILE_UNUSABLE = "the profile cannot be loaded"
 NOT_ACTIVE = "this profile is not the one this emulator runs"
+PERSONA_SIM_ACTIVE = (
+    "a restart starts this persona emulator with the active profile's SIM"
+)
 
 
 @dataclass(frozen=True)
@@ -1093,6 +1096,8 @@ def restart_blocker(running: RunningEmulator | None, profile: Profile) -> str:
         if service.config().mode != "profile":
             return MODE_OFF
         if _restart_profile_id(service, running.serial) != profile.id:
+            if service.profile_id_for(running.serial) == profile.id:
+                return PERSONA_SIM_ACTIVE  # this Sandroid cannot pass it on
             return NOT_ACTIVE
     except Exception:
         logger.debug("identity SIM: config unavailable", exc_info=True)

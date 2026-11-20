@@ -168,9 +168,14 @@ PROVIDER_PROBE_TIMEOUT_S = 8.0
 #: force-stop or a framework restart, the read can take minutes: the values
 #: get one more try before the device counts as not answering; lists that
 #: do not answer stay unread (pending, never inserted blind).
-PREFLIGHT_TIMEOUT_S = 90.0
-PREFLIGHT_RETRY_TIMEOUT_S = 90.0
-PREFLIGHT_LISTS_TIMEOUT_S = 60.0
+PREFLIGHT_TIMEOUT_S = 75.0
+PREFLIGHT_RETRY_TIMEOUT_S = 60.0
+PREFLIGHT_LISTS_TIMEOUT_S = 45.0
+#: Under a budget (:meth:`IdentityService.ensure_applied`) the values read
+#: is tried again only with at least this much left (the verify needs time).
+PREFLIGHT_RETRY_MIN_LEFT_S = 90.0
+#: The written values whose read-back got no answer (not failed).
+READBACK_NO_ANSWER = "written; the device did not answer the read-back"
 _OK = "sandroid-identity-ok"
 
 #: Framework restart: wait this long for a new system_server.
@@ -2612,7 +2617,9 @@ def preflight_script(
     tokens = [t for t in tokens if TOKEN_RE.fullmatch(t)]
     numbers = [n for n in numbers if _PHONE_RE.fullmatch(n)]
     pkgs = [p for p in packages if re.fullmatch(r"[A-Za-z0-9_.]+", p)]
-    px = f"{STAGE_DIR}/packages.xml"
+    # Per run ($$: the shell's pid): a timed-out earlier read that still
+    # runs on the device never removes this read's copy.
+    px = f"{STAGE_DIR}/packages.$$.xml"
     lines = [
         f"echo {PREFLIGHT_TAG}",
         f"mkdir -p {STAGE_DIR} 2>/dev/null",
@@ -3122,6 +3129,10 @@ class _Applied:
     applied_at: float = 0.0  # epoch s of the last apply (0 = unknown)
     verified_at: float = 0.0  # epoch s of the last read-back
     record_sig: str = ""  # signature of the record on the device
+    #: The profile was applied as the device's persona (its launch was
+    #: started as one): it stays the device's profile when no launch record
+    #: says so any more (a TUI restart, a snapshot of the persona).
+    persona: str = ""
     #: Bumped whenever an apply changes this; a racing hydration backs off.
     gen: int = 0
 
@@ -3149,10 +3160,11 @@ def applied_record(
     fingerprint), ``installs`` (package -> ``uid:inode`` of its data
     directory when it was seeded), ``framework`` (framework-restart value id
     on the device -> volatile) and ``unappliable`` (framework-restart value
-    ids no restart can apply here).
+    ids no restart can apply here); ``persona`` (the profile id, only
+    when it was applied as the device's persona).
     """
     seeded = sorted(mem.seeded)
-    return {
+    record = {
         "format": APPLIED_FORMAT,
         "version": 1,
         "profile": profile_id,
@@ -3166,6 +3178,9 @@ def applied_record(
         "framework": dict(sorted(mem.settled.items())),
         "unappliable": sorted(mem.unappliable),
     }
+    if mem.persona:
+        record["persona"] = mem.persona
+    return record
 
 
 def _record_sig(record: dict[str, Any]) -> str:
@@ -3211,6 +3226,7 @@ def parse_applied_record(text: str) -> dict[str, Any] | None:
         or not isinstance(fw, dict)
         or not all(isinstance(v, bool) for v in fw.values())
         or not _str_list(data.get("unappliable"))
+        or not isinstance(data.get("persona", ""), str)
     ):
         return None
     return data
@@ -3747,9 +3763,17 @@ class IdentityService:
             updates["identity.mode"] = mode
         if restart is not None:
             updates["identity.restart"] = restart
-        before = self.config().mode, self.config().profile
+        from sandroid.core.adb import Adb
+
+        try:
+            target = Adb.get_target_device()
+        except Exception:
+            target = None
+        before = self.config().mode, self.profile_id_for(target)
         update_config(updates)
-        if (self.config().mode, self.config().profile) != before:
+        # The markers follow what the target device runs: a persona device
+        # keeps its persona (and its markers) when the active profile changes.
+        if (self.config().mode, self.profile_id_for(target)) != before:
             with self._lock:
                 self._active = None
                 self._loaded_frozen = True  # a new choice: wait for an apply
@@ -3773,7 +3797,39 @@ class IdentityService:
         cfg = self.config()
         if cfg.mode != "profile":
             return ""
-        return launch_persona_id(serial) or str(cfg.profile or "")
+        return self.persona_of(serial) or str(cfg.profile or "")
+
+    def persona_of(self, serial: str | None) -> str:
+        """The persona ``serial`` runs (``""``: none): its launch's, else
+        the one the device record names (a TUI restart, a persona
+        snapshot). From memory only (cheap, any thread).
+        """
+        persona = launch_persona_id(serial)
+        if persona or not serial:
+            return persona
+        with self._lock:
+            mem = self._applied.get(serial)
+            return mem.persona if mem is not None else ""
+
+    def _profile_id_now(self, serial: str | None) -> str:
+        """:meth:`profile_id_for` after reading the device record once
+        (worker thread): a persona that only the record names is known.
+        """
+        if serial and self.config().mode == "profile" and not launch_persona_id(serial):
+            with self._lock:
+                known = serial in self._hydrated
+                mem = self._applied.get(serial)
+                gen = mem.gen if mem is not None else 0
+            if not known:
+                read = self._read_record(serial)
+                if read is not None:
+                    self._hydrate(serial, read, gen)
+                    # Also when memory did not take the record (an apply on
+                    # another device holds the lock): the persona it names.
+                    persona = (read.record or {}).get("persona")
+                    if isinstance(persona, str) and persona:
+                        return persona
+        return self.profile_id_for(serial)
 
     def profile_for(self, serial: str | None) -> Profile | None:
         """The profile of :meth:`profile_id_for` (``None``: none applies).
@@ -3834,6 +3890,16 @@ class IdentityService:
 
     # -- markers ------------------------------------------------------------
 
+    def _target_profile_id(self) -> str:
+        """:meth:`profile_id_for` of the target device (memory only)."""
+        try:
+            from sandroid.core.adb import Adb
+
+            target = Adb.get_target_device()
+        except Exception:
+            target = None
+        return self.profile_id_for(target)
+
     def active_markers(self, *, load: bool = True) -> tuple[str, list[Marker]] | None:
         """``(fingerprint, markers)`` of the active profile, ``None`` when the
         mode is off (or no profile is set).
@@ -3855,12 +3921,13 @@ class IdentityService:
             if self._active is None and not self._loaded_frozen and load:
                 self._loaded_frozen = True
                 self._active = _load_latest_frozen()
-                if self._active is None and cfg.profile:
+                startup_id = self._target_profile_id()
+                if self._active is None and startup_id:
                     try:
-                        self._active = startup_markers(self.load(cfg.profile))
+                        self._active = startup_markers(self.load(startup_id))
                     except (ProfileError, TemplateError, ValueError):
                         logger.warning(
-                            "identity: profile %r has no markers", cfg.profile
+                            "identity: profile %r has no markers", startup_id
                         )
                 loaded = self._active is not None
             active = self._active
@@ -3955,7 +4022,7 @@ class IdentityService:
         )
         if not state.ok:
             left = self._time_left()
-            if left is not None and left < 10.0:
+            if left is not None and left < PREFLIGHT_RETRY_MIN_LEFT_S:
                 return state
             logger.info(f"identity: {serial} did not answer the read; trying again")
             state = parse_preflight(
@@ -4031,8 +4098,11 @@ class IdentityService:
         return self._apply_lock.locked()
 
     def _require_profile(self, serial: str | None = None) -> Profile:
-        """The profile of ``serial`` (:meth:`profile_for`), else raise."""
-        profile = self.profile_for(serial)
+        """The profile of ``serial`` (:meth:`profile_for`, after one read of
+        the device record), else raise.
+        """
+        profile_id = self._profile_id_now(serial)
+        profile = self.load(profile_id) if profile_id else None
         if profile is None:
             raise ProfileError("no active identity profile (mode off or none chosen)")
         return profile
@@ -4561,6 +4631,17 @@ class IdentityService:
             self._framework_window(dev, profile, state, fw, plan)
         # P6: verify with the same batched read
         state2 = self.preflight(serial, pkgs, profile)
+        if not state2.ok:
+            # Written, but the read-back got no answer (a loaded device):
+            # applied, not verified -- never "failed" for what was written.
+            for vid in steps:
+                info = plan.infos[vid]
+                if info.status == "failed" or info.reason.startswith(NOT_RESTARTED):
+                    continue
+                if info.status in ("pending", "applied", "verified"):
+                    info.status, info.reason = "applied", READBACK_NO_ANSWER
+            self._finish(profile, plan, state2, wrote=True, package=package)
+            return plan
         verified = self._plan(profile, state2, pkgs)
         state2, verified = self._await_providers(
             serial, pkgs, profile, state2, verified, steps, restarted=bool(fw)
@@ -4645,7 +4726,7 @@ class IdentityService:
                 apply held the device past the budget.
         """
         cfg = self.config()
-        if not self.profile_id_for(serial):
+        if not self._profile_id_now(serial):
             return None
         profile = self._require_profile(serial)
         errors = [i for i in validate(profile) if i.severity == "error"]
@@ -5437,6 +5518,7 @@ class IdentityService:
             if rec is None:
                 mem.done, mem.seeded, mem.installs = set(), {}, {}
                 mem.settled, mem.unappliable = {}, set()
+                mem.persona = ""
                 mem.applied_at = mem.verified_at = 0.0
                 mem.record_sig = ""
             else:
@@ -5463,6 +5545,7 @@ class IdentityService:
                     unappliable &= mem.unappliable
                 mem.unappliable = unappliable
                 mem.record_sig = _record_sig(rec)
+                mem.persona = str(rec.get("persona") or "")
                 mem.applied_at = max(mem.applied_at, float(rec["at"]))
                 mem.verified_at = max(mem.verified_at, float(rec["verified_at"]))
             if read.boot_id:
@@ -5567,6 +5650,8 @@ class IdentityService:
         with self._lock:
             mem.ssaids = ssaids
             if mem.fingerprint == plan.fingerprint:
+                persona = launch_persona_id(plan.serial) or mem.persona
+                mem.persona = plan.profile_id if plan.profile_id == persona else ""
                 self._learn(mem, plan, state)
                 seeded = not wants_ssaid or (package or "") in mem.seeded
                 if package and not bad and seeded:
@@ -5789,21 +5874,26 @@ class IdentityService:
         serial = Adb.get_target_device()
         if not serial:
             return None
-        profile_id = self.profile_id_for(serial)
-        if not profile_id:
-            return None
-        try:
-            profile = self.load(profile_id)
-        except ProfileError as exc:
-            logger.warning(f"identity: profile {profile_id!r} unusable: {exc}")
-            return None
-        fp = fingerprint(profile)
         with self._lock:
             mem = self._applied.get(serial)
             gen = mem.gen if mem is not None else 0
         read = self._read_record(serial, package)
         if read is not None:
             self._hydrate(serial, read, gen)
+        profile_id = self.profile_id_for(serial)  # after the record: persona
+        if not profile_id:
+            return None
+        try:
+            profile = self.load(profile_id)
+        except ProfileError as exc:
+            logger.warning(f"identity: profile {profile_id!r} unusable: {exc}")
+            if self.persona_of(serial) == profile_id:
+                raise IdentityApplyError(
+                    f"the persona profile {profile_id!r} of {serial} cannot be "
+                    f"loaded: {exc}"
+                ) from exc
+            return None
+        fp = fingerprint(profile)
         # An interrupted restart window: the next apply resumes it.
         recovery = read is not None and bool(read.marker)
         with self._lock:

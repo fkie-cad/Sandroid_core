@@ -166,11 +166,24 @@ def _spotlight() -> Any | None:
 
 
 def _launch_persona() -> str:
-    """The persona the target device was launched as (``""``: none)."""
+    """The persona the target device runs (``""``: none): its launch's, or
+    the one its identity record names. From memory, any thread.
+    """
+    ident = identity_service()
+    if ident is None:
+        return ""
     try:
-        from sandroid.services.identity import launch_persona_id
+        return str(ident.persona_of(_target_serial()) or "")
+    except Exception:
+        return ""
 
-        return launch_persona_id(_target_serial())
+
+def _device_profile_id(ident: Any) -> str:
+    """The profile the lens shows: the target device's persona, else the
+    active profile (also with identity mode off).
+    """
+    try:
+        return _launch_persona() or str(ident.config().profile or "")
     except Exception:
         return ""
 
@@ -229,13 +242,8 @@ def privacy_indicator() -> tuple[str | None, str]:
     total = int(getattr(summary, "values_total", 0) or 0)
     if found > 0:
         return f"PRIVACY {found}/{total} found", "found"
-    profile_id = ""
     ident = identity_service()
-    if ident is not None:
-        try:
-            profile_id = str(ident.config().profile or "")
-        except Exception:
-            profile_id = ""
+    profile_id = _device_profile_id(ident) if ident is not None else ""
     return (f"PRIVACY {profile_id}" if profile_id else "PRIVACY on"), ""
 
 
@@ -706,6 +714,8 @@ class IdentityLens(Vertical):
         #: A profile read is running in a worker; only the newest one counts.
         self._loading = False
         self._reload_seq = 0
+        #: Profile id the lens last reloaded for on a device change.
+        self._followed = ""
         #: (package, pid) of the spotlight app that ran during the last apply.
         self._stale_app: tuple[str, int] | None = None
         self._inspector_sig: tuple | None = None
@@ -836,7 +846,24 @@ class IdentityLens(Vertical):
 
     def _tick(self) -> None:
         self._update_notice()
+        self._follow_device()
         self._auto_read()
+
+    def _follow_device(self) -> None:
+        """Reload once when the target device runs another profile than the
+        one shown (another target, a persona launch, a TUI restart's record).
+        """
+        if self._loading or self.profile is None:
+            return
+        ident = identity_service()
+        if ident is None:
+            return
+        wanted = _device_profile_id(ident)
+        if not wanted or wanted == self.profile.id or wanted == self._followed:
+            return
+        self._followed = wanted  # one reload per change (a missing profile)
+        self._statuses.clear()
+        self.reload()
 
     # -- data -----------------------------------------------------------------
 
@@ -2082,6 +2109,21 @@ class IdentityLens(Vertical):
             chosen,
         )
 
+    def _notify_active(self, text: str, active: str) -> None:
+        """Toast a new active profile; on a persona emulator, say that the
+        emulator keeps its persona (space applies the persona there).
+        """
+        persona = _launch_persona()
+        if persona and persona != active:
+            first = text.removesuffix("; space applies it.").rstrip(".")
+            self.app.notify(
+                f"{first}. This emulator keeps {persona}, the persona it was "
+                "started as; other devices use the new profile.",
+                timeout=5,
+            )
+        else:
+            self.app.notify(text, timeout=4)
+
     def _profile_choice(self, action: str, arg: str) -> None:
         from sandroid.tui.modals.confirm_modal import ConfirmModal
 
@@ -2092,27 +2134,19 @@ class IdentityLens(Vertical):
             if action == "use":
                 ident.set_active(profile_id=arg)
                 self._statuses.clear()
-                persona = _launch_persona()
-                if persona and persona != arg:
-                    self.app.notify(
-                        f"Active identity profile: {arg}. This emulator keeps "
-                        f"{persona}, the persona it was started as.",
-                        timeout=5,
-                    )
-                else:
-                    self.app.notify(f"Active identity profile: {arg}.", timeout=3)
+                self._notify_active(f"Active identity profile: {arg}.", arg)
             elif action == "new":
                 profile = ident.create(arg)
                 ident.set_active(profile_id=profile.id)
                 self._statuses.clear()
-                self.app.notify(
-                    f"Created profile '{profile.id}'; space applies it.", timeout=4
+                self._notify_active(
+                    f"Created profile '{profile.id}'; space applies it.", profile.id
                 )
             elif action == "duplicate":
                 profile = ident.duplicate(arg)
                 ident.set_active(profile_id=profile.id)
                 self._statuses.clear()
-                self.app.notify(f"Duplicated as '{profile.id}'.", timeout=3)
+                self._notify_active(f"Duplicated as '{profile.id}'.", profile.id)
             elif action == "rename":
 
                 def renamed(name: Any) -> None:
@@ -2243,10 +2277,7 @@ def _read_library(ident: Any) -> tuple[int, Any, str]:
         count = len(ident.list_profiles())
     except Exception:
         count = 0
-    try:
-        profile_id = _launch_persona() or str(ident.config().profile or "")
-    except Exception:
-        profile_id = ""
+    profile_id = _device_profile_id(ident)
     profile, error = None, ""
     if profile_id:
         try:

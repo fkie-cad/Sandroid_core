@@ -719,7 +719,8 @@ def test_restart_blocker_follows_the_launch_persona(avd, profile_env, monkeypatc
     monkeypatch.setattr(sim, "_context_has_meta", lambda: True)
     assert sim.restart_blocker(running, persona) == ""
     assert sim.restart_blocker(running, active) == sim.NOT_ACTIVE
-    # They do not (an older emulator module): a restart sets the active one's.
+    # They do not (an older emulator module): a restart sets the active one's,
+    # and the persona's SIM says so.
     monkeypatch.setattr(sim, "_context_has_meta", lambda: False)
-    assert sim.restart_blocker(running, persona) == sim.NOT_ACTIVE
+    assert sim.restart_blocker(running, persona) == sim.PERSONA_SIM_ACTIVE
     assert sim.restart_blocker(running, active) == ""

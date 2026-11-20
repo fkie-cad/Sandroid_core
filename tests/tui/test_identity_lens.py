@@ -914,3 +914,18 @@ async def test_caption_shows_an_apply_made_outside_the_lens(fakes) -> None:
             il.REFRESH_MIN_S = 1.0
         assert f"verified {stamp}" in info()
         assert "not applied" not in info()
+
+
+def test_the_lens_shows_the_target_devices_persona(fakes) -> None:
+    fakes.privacy.active = True
+    assert il._device_profile_id(fakes.ident) == "mara-de"
+    assert il.privacy_indicator() == ("PRIVACY mara-de", "")
+    fakes.ident.persona_of = lambda serial: "anna-persona" if serial == SERIAL else ""
+    assert il._launch_persona() == "anna-persona"
+    assert il._device_profile_id(fakes.ident) == "anna-persona"
+    assert il.privacy_indicator() == ("PRIVACY anna-persona", "")
+    assert il._is_launch_persona("anna-persona")
+    assert not il._is_launch_persona("mara-de")
+    # The read never fails the lens: no persona then.
+    fakes.ident.persona_of = lambda serial: 1 / 0
+    assert il._device_profile_id(fakes.ident) == "mara-de"

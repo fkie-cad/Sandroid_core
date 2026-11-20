@@ -897,11 +897,18 @@ def test_service_is_registered_and_reset(env):
 # ---------------------------------------------------------------------------
 
 
+def _reads(device) -> list[str]:
+    """The identity reads among ``device.calls`` (not the record reads)."""
+    return [c for c in device.calls if "@@applied@@" not in c]
+
+
 def test_preflight_is_two_adb_calls(service, device):
     plan = service.plan(SERIAL, "com.example.app")
-    assert len(device.calls) == 2  # the values, then the lists
-    assert "@@list:" not in device.calls[0]
-    assert "@@props@@" not in device.calls[1]
+    reads = _reads(device)
+    assert len(reads) == 2  # the values, then the lists
+    assert "@@list:" not in reads[0]
+    assert "@@props@@" not in reads[1]
+    assert device.record_reads == 1  # once per serial: a persona it names
     assert not device.writes
     assert plan.disruptive
     assert {"android_id", "gaid", "device_name", "contacts"} <= set(plan.todo)
@@ -999,7 +1006,7 @@ def test_ensure_applied_is_nothing_with_identity_mode_off(service, device, monke
     monkeypatch.setattr(get_config().identity, "mode", "profile")
     monkeypatch.setattr(get_config().identity, "profile", "")
     assert service.ensure_applied(SERIAL) is None
-    assert device.calls == []
+    assert _reads(device) == []  # the record only (it may name a persona)
 
 
 def _restart_policy(monkeypatch, policy: str) -> None:
@@ -1072,7 +1079,7 @@ def test_ensure_applied_names_a_running_apply(service, device):
             ident.IdentityApplyError, match="another identity apply is running"
         ):
             service.ensure_applied(SERIAL, budget_s=0.01)
-    assert device.calls == []
+    assert _reads(device) == []
 
 
 def test_a_started_window_waits_the_full_restart_timeout(service, device, monkeypatch):
@@ -1844,10 +1851,11 @@ def test_sim_properties_are_set_natively_off_the_emulator(service, device, monke
 
 
 def test_provider_wait_is_bounded_on_an_overloaded_device(service, device):
-    """After the restart adb calls hang (ANR storm): the wait uses a light
-    lists-only probe with a short timeout, stops at the first unanswered
-    probe and never exceeds PROVIDER_WAIT_DEADLINE_S, so an app start is
-    not held for minutes. Unanswered lists stay pending, not failed.
+    """After the restart the lists reads hang (ANR storm): the verify read's
+    lists part times out, no provider probe follows it, and the wait never
+    exceeds PROVIDER_WAIT_DEADLINE_S, so an app start is not held for
+    minutes. Unanswered lists stay pending, not failed. (Providers that
+    answer but are not up yet: test_list_read_back_waits_for_the_providers.)
     """
     now = [1000.0]
     service._clock = lambda: now[0]
@@ -2638,6 +2646,7 @@ def test_a_fresh_service_reads_the_record_before_a_start(service, device, app_st
     fresh = _fresh()
     device.calls.clear()
     device.writes.clear()
+    device.record_reads = 0
     assert fresh.pre_start(PKG) is None
     assert len(device.calls) == 1  # one cheap read, nothing else
     assert device.record_reads == 1
@@ -2737,6 +2746,7 @@ def test_applied_state_hydrates_in_the_background(
     service, device, app_start, monkeypatch
 ):
     service.apply(SERIAL, PKG)
+    device.record_reads = 0
     fresh = _fresh()
     heard: list = []
     fresh.add_status_listener(heard.append)
@@ -3457,3 +3467,83 @@ def test_hanging_providers_leave_the_lists_pending_not_the_apply_failed(
     assert st["device_name"][0] == "verified"
     for name in ("contacts", "sms", "calls"):
         assert st[name] == ("pending", ident.PROVIDER_DOWN)
+
+
+def test_a_persona_stays_the_devices_profile_after_a_tui_restart(
+    service, device, app_start, monkeypatch
+):
+    from sandroid.core import emulator
+
+    persona = _persona(service)
+    _launched_as(monkeypatch, persona.id)
+    service.apply(SERIAL, PKG)
+    assert _record(device)["persona"] == persona.id
+    # A TUI restart: Sandroid's launch record of the emulator is gone.
+    monkeypatch.setattr(emulator, "launch_record", lambda s: None)
+    fresh = _fresh()
+    assert fresh.profile_id_for(SERIAL) == service.config().profile  # not read yet
+    plan = fresh.ensure_applied(SERIAL)
+    assert plan.fingerprint == ident.fingerprint(persona)  # the record says so
+    assert fresh.persona_of(SERIAL) == persona.id
+    assert fresh.pre_start(PKG) is None  # already the persona's
+    # Even when memory cannot take the record (an apply on another device).
+    other = _fresh()
+    with other._apply_lock:
+        assert other._profile_id_now(SERIAL) == persona.id
+    # A plain apply of another profile ends the persona.
+    service.apply(SERIAL, PKG, profile=service.active_profile())
+    assert "persona" not in _record(device)
+
+
+def test_a_new_active_profile_keeps_a_persona_devices_markers(
+    service, device, app_start, monkeypatch
+):
+    persona = _persona(service)
+    _launched_as(monkeypatch, persona.id)
+    service.apply(SERIAL, PKG)
+    fp = service.active_markers()[0]
+    assert fp == ident.fingerprint(persona)
+    other = service.save(_profile(id="other-profile", seed="hex:" + "33" * 32))
+    service.set_active(profile_id=other.id)
+    assert service.active_markers()[0] == fp  # the device still runs the persona
+    # Without a persona the device follows the switch (markers wait for it).
+    monkeypatch.setattr(ident, "launch_persona_id", lambda serial: "")
+    with service._lock:
+        service._applied[SERIAL].persona = ""
+    service.set_active(profile_id=persona.id)
+    assert service.active_markers(load=False) is None
+
+
+def test_an_unanswered_read_back_leaves_written_values_applied(
+    service, device, app_start
+):
+    real = device._shell
+    values_reads = [0]
+
+    def shell(script: str) -> str:
+        if "@@props@@" in script:
+            values_reads[0] += 1
+            if values_reads[0] > 1:  # every read after the first one hangs
+                return ""
+        return real(script)
+
+    device._shell = shell
+    plan = service.pre_start(PKG)
+    plan.apply()  # no "device did not answer" failure for what was written
+    st = {i.id: (i.status, i.reason) for i in service.statuses()}
+    assert st["device_name"] == ("applied", ident.READBACK_NO_ANSWER)
+    assert st["android_id"] == ("applied", ident.READBACK_NO_ANSWER)
+    assert service.applied_state(PKG) == "not_applied"  # verified next time
+
+
+def test_the_retry_is_skipped_when_the_budget_cannot_hold_it(service, device):
+    hung = _hanging(device, values=2)
+    with pytest.raises(ident.IdentityApplyError, match="did not answer"):
+        service.ensure_applied(SERIAL, budget_s=ident.PREFLIGHT_RETRY_MIN_LEFT_S - 1)
+    assert len(hung) == 1  # no second try under the budget
+
+
+def test_each_read_stages_packages_xml_in_its_own_file():
+    script = ident.preflight_script(["com.example.app"], [TOKEN])
+    assert f"{ident.STAGE_DIR}/packages.$$.xml" in script
+    assert f"{ident.STAGE_DIR}/packages.xml" not in script
