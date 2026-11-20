@@ -372,7 +372,7 @@ class RecordingWrapper:
         else:
             logger.warning(
                 "Record: device time unknown, no start/stop markers "
-                "(Play starts at the first touch)"
+                "(the replay starts at the first touch)"
             )
         tmp = Path(f"{self.output_file_path}.part")
         with open(tmp, "w", encoding="utf-8") as fh:

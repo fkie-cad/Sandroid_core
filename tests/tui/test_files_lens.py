@@ -663,7 +663,8 @@ async def test_backend_and_playback_notices_and_their_lifetimes() -> None:
         panel.notify_pid_mode_fallback("/data/data/x")
         assert "PID mode unavailable" in panel.notice
         panel.notify_monitor_stopped_for_playback()
-        assert "Play" in panel.notice
+        assert "Rewind" in panel.notice
+        assert "Play" not in panel.notice
         panel._on_monitor_lifecycle(EventType.TASK_STARTED)
         assert panel.notice == ""
 

@@ -1023,3 +1023,21 @@ async def test_companion_rows_keep_their_own_names():
         prompts = [str(sel.get_option_at_index(i).prompt) for i in range(2)]
         assert "c.sqlite-wal" in prompts[1]
         assert "its database" in prompts[1]
+
+
+def test_run_kind_and_stop_words_follow_the_phase(controller):
+    """The running run is named Rewind or Replay (no "Play" wording)."""
+    statuses: list[str | None] = []
+    controller._status = statuses.append
+    assert controller.run_kind is None
+    controller._set_state("running")
+    controller._run_replays = False
+    assert controller.run_kind == "Rewind"
+    controller.stop_rewind()
+    assert statuses[-1] == "Stopping the rewind"
+    controller._run_replays = True
+    assert controller.run_kind == "Replay"
+    controller.stop_rewind()
+    assert statuses[-1] == "Stopping the replay"
+    controller._set_state("idle")
+    assert controller.run_kind is None

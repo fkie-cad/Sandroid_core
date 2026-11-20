@@ -1,6 +1,6 @@
 """Runs lens: "which runs do I have, and what did each change?"
 
-Every completed Play is one row of a full-width table (newest first):
+Every completed Rewind run is one row of a full-width table (newest first):
 ``#`` · run label · when · how long · what changed. Details are on demand:
 Enter opens the run in the Inspector (Summary / Changes / Report / Privacy
 tabs), and
@@ -22,7 +22,7 @@ focus. ``n`` renames only while the runs table has focus with a run
 highlighted, and only after a confirm; anywhere else it falls through
 (``SkipAction``) to the GLOBAL ``n`` = Install APK (``app.py``'s
 ``action_install_apk``, id ``"new_apk"``). ``v``, ``=``, ``z`` and ``P`` are
-unbound globally. Record ``r`` / Play ``p`` are global app keys.
+unbound globally. Record ``r`` / Review ``p`` are global app keys.
 
 Privacy tab: the identity-profile values the privacy scan found during the
 run (its time window, plus the end-of-run sweep's records that carry the run
@@ -359,24 +359,34 @@ class DiffsView(FilesSubViewBase):
         """Called when the Runs lens becomes active."""
         self._reload_index()
 
-    def set_play_phase(self, phase: str | None) -> None:
-        """A Play's phase (app.py); shown in the caption and the empty state."""
+    def set_run_phase(self, phase: str | None, kind: str | None = None) -> None:
+        """The Record / Rewind status line (app.py), in the caption and the
+        empty state.
+
+        Args:
+            phase: The controller's plain status line, or None when nothing
+                runs.
+            kind: ``"Rewind"`` or ``"Replay"`` while a Rewind (or Rewind +
+                Replay) runs, else None (a recording's line says what it is).
+        """
         self._play_phase = phase
         self._update_caption()
         try:
             empty = self.query_one("#runs-empty", Static)
         except Exception:
             return
-        if phase:
-            empty.update(
-                Text.assemble(
-                    ("Play running · ", "bold #fb7185"),
-                    (f"{phase}\n\n", "bold #8f9bb3"),
-                    ("the run appears here when its analysis is done", _DIM),
-                )
-            )
-        else:
-            empty.update(self._empty_text())
+        empty.update(self.phase_text(phase, kind) if phase else self._empty_text())
+
+    @staticmethod
+    def phase_text(phase: str, kind: str | None = None) -> Text:
+        """The empty state while ``phase`` runs (``"Rewind running · ..."``)."""
+        if not kind:
+            return Text(phase, style="bold #8f9bb3")
+        return Text.assemble(
+            (f"{kind} running · ", "bold #fb7185"),
+            (f"{phase}\n\n", "bold #8f9bb3"),
+            ("the run appears here when the rewind is done", _DIM),
+        )
 
     @staticmethod
     def _empty_text() -> Text:
@@ -385,7 +395,7 @@ class DiffsView(FilesSubViewBase):
             ("r", "bold"),
             (" record a flow  ·  ", _DIM),
             ("p", "bold"),
-            (" replay it", _DIM),
+            (" review it", _DIM),
         )
 
     def glance_fragment(self) -> str:

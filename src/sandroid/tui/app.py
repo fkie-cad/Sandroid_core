@@ -2617,7 +2617,7 @@ class SandroidTUI(App):
         self._widget_refresh_controller.refresh_status_bar()
 
     def _set_replay_phase(self, phase: str | None) -> None:
-        """The running Play's phase (pill + status strip); None when over."""
+        """The Record / Rewind status line (pill + status strip); None when over."""
         ms = self._main_screen_in_stack()
         if ms is None:
             return
@@ -2629,8 +2629,9 @@ class SandroidTUI(App):
         ms.refresh_scope_pill()
         try:
             runs = ms.lens_widget("runs")
-            if runs is not None and hasattr(runs, "set_play_phase"):
-                runs.set_play_phase(phase or None)
+            if runs is not None and hasattr(runs, "set_run_phase"):
+                kind = getattr(self._recording_controller, "run_kind", None)
+                runs.set_run_phase(phase or None, kind if phase else None)
         except Exception:
             logger.debug("Runs lens phase update failed", exc_info=True)
         self._widget_refresh_controller.refresh_status_bar()

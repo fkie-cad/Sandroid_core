@@ -163,6 +163,8 @@ class RecordingController:
         self._rec: Any = None  # core.rewind.Recording
         self._wrapper: Any = None
         self._cancel = threading.Event()
+        #: The running run replays the steps (Rewind + Replay), not only Rewind.
+        self._run_replays = False
         self._review: Any = None  # the open ReviewModal
         self._tick_stop = threading.Event()
         self._last_run_id: str | None = None
@@ -305,6 +307,13 @@ class RecordingController:
     @property
     def state(self) -> str:
         return self._state
+
+    @property
+    def run_kind(self) -> str | None:
+        """``"Replay"`` (Rewind + Replay) or ``"Rewind"`` while one runs."""
+        if self._state != "running":
+            return None
+        return "Replay" if self._run_replays else "Rewind"
 
     @property
     def recording(self) -> Any:
@@ -980,6 +989,7 @@ class RecordingController:
             return False
         rec = self._rec
         view = self._watchlist() if self._watchlist else None
+        self._run_replays = bool(replay)
         self._set_state("running")
         self._replay_owner_id = owner_id
         self._cancel.clear()
@@ -992,7 +1002,9 @@ class RecordingController:
         if self._state != "running":
             return False
         self._cancel.set()
-        self._status("Stopping the replay")
+        self._status(
+            "Stopping the replay" if self._run_replays else "Stopping the rewind"
+        )
         return True
 
     stop_playback = stop_rewind

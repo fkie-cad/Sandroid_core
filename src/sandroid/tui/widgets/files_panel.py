@@ -995,9 +995,10 @@ class FilesPanel(Widget):
             return ""
 
     def notify_monitor_stopped_for_playback(self) -> None:
-        """Play's snapshot revert auto-stopped the monitor (app.py callback)."""
+        """Rewind's start point load auto-stopped the monitor (app.py callback)."""
         self._set_notice(
-            "Monitor stopped — it can't survive Play's revert.", "playback"
+            "Monitor stopped: it cannot run while Rewind loads the start point.",
+            "playback",
         )
         self.refresh_rows()
 

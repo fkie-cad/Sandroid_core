@@ -1172,3 +1172,34 @@ async def test_privacy_tab_names_each_stored_file_once(monkeypatch) -> None:
         ]
         assert text.count("Email") == 1
         assert "Stored on the device" not in text
+
+
+@pytest.mark.asyncio
+async def test_run_phase_uses_rewind_words() -> None:
+    """A Rewind's phase reads "Rewind running", a Rewind + Replay's "Replay
+    running"; a recording's line stands alone; the word "Play" never shows.
+    """
+    app = _DiffsHarness()
+    async with app.run_test() as pilot:
+        view = app.query_one(DiffsView)
+        empty = view.query_one("#runs-empty")
+        view.set_run_phase("Loading the start point", "Rewind")
+        await settle(pilot)
+        text = str(empty.render())
+        assert text.startswith("Rewind running · Loading the start point")
+        assert "Play" not in text
+        view.set_run_phase("Replaying step 2 of 5", "Replay")
+        await settle(pilot)
+        assert str(empty.render()).startswith("Replay running · Replaying step 2")
+        view.set_run_phase("Recording 'Recording 10:00' · 0:05 · press r to stop")
+        await settle(pilot)
+        text = str(empty.render())
+        assert text.startswith("Recording 'Recording 10:00'")
+        assert "running" not in text
+        view.set_run_phase(None)
+        await settle(pilot)
+        text = str(empty.render())
+        assert "No runs yet" in text
+        assert "review it" in text
+        assert "Play" not in text
+        assert "replay it" not in text
