@@ -144,6 +144,9 @@ class Recording:
     requests: list[dict[str, Any]] = field(default_factory=list)
     #: Selected requests (their Review rows); compared after Rewind + Replay.
     selected_flows: list[dict[str, Any]] = field(default_factory=list)
+    #: When each file's After was copied (epoch s): the replay waits as long
+    #: after its last step, so both copies see the app write for as long.
+    after_at: dict[str, float] = field(default_factory=dict)
 
     @property
     def start_point_name(self) -> str | None:

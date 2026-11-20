@@ -505,9 +505,12 @@ class ReviewModal(ForensicModal[None]):
             for idx in range(sel.option_count):
                 option = sel.get_option_at_index(idx)
                 if main_database(option.value) == path:
+                    # Each row keeps its own name and size (a -wal row stays
+                    # the -wal row; it only shows that its database is
+                    # watched).
                     entry = next(
-                        (e for e in self.rec.changed if e.get("path") == path),
-                        {"path": path, "state": ""},
+                        (e for e in self.rec.changed if e.get("path") == option.value),
+                        {"path": option.value, "state": ""},
                     )
                     sel.replace_option_prompt_at_index(idx, self._file_prompt(entry))
 

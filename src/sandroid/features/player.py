@@ -282,7 +282,7 @@ MAX_GAP_S = 10.0
 #: this, else as long as your run went on after its last step (apps write and
 #: send later), at most :data:`MAX_TAIL_S`.
 SETTLE_AFTER_S = 3.0
-MAX_TAIL_S = 30.0
+MAX_TAIL_S = 120.0
 
 WAY_ELEMENT = "by element"
 WAY_POSITION = "by position"

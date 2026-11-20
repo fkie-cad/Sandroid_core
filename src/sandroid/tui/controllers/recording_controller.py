@@ -931,6 +931,7 @@ class RecordingController:
             self._review_buttons()
         if version is not None or error is None:
             rec.set_role(path, "after", version)
+            rec.after_at[path] = time.time()
             with contextlib.suppress(Exception):
                 rewind.save_recording(rec)
         if error:
@@ -1145,7 +1146,12 @@ class RecordingController:
             return get_timeline().emit(*args, **kw)
 
         last_t = max((t for t in (_step_time(st) for st in steps) if t), default=None)
-        tail = (rec.stopped - last_t) if (rec.stopped and last_t) else None
+        # Wait as long after the last step as your run did before its copies:
+        # until Stop, or until the latest After was copied (selected later).
+        until = max(
+            [rec.stopped or 0.0] + [rec.after_at.get(p, 0.0) for p in rec.selected]
+        )
+        tail = (until - last_t) if (until and last_t) else None
         try:
             return StepReplayer(
                 tail_s=tail,

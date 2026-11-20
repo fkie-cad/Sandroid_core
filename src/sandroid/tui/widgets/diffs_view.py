@@ -1102,7 +1102,7 @@ class DiffsView(FilesSubViewBase):
         end = self._parse(s.get("completed_at"))
         when = self._format_when(s.get("recorded_at"))
         if start is not None and end is not None:
-            when = f"{start.strftime('%a %d %b %Y · %H:%M')} → {end.strftime('%H:%M')}"
+            when = f"{start.strftime('%a %d %b %Y · %H:%M')} to {end.strftime('%H:%M')}"
         grid.add_row("Run", Text(f"#{self._run_number(run_id)} · {run_id}"))
         grid.add_row("When", when)
         grid.add_row("Took", self._format_duration(self._run_seconds(s)))

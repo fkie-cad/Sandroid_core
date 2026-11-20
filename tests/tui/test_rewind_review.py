@@ -975,3 +975,51 @@ def test_load_timeout_with_the_device_offline_is_not_reported_as_unchanged(
         deps.load_snapshot("sandroid_rec_20261120_133600", "emulator-5560")
     monkeypatch.setattr(rc, "_device_ready", lambda serial: True)
     assert deps.load_snapshot("sandroid_rec_20261120_133600", "emulator-5560") is False
+
+
+def test_replay_waits_until_the_latest_after_copy(controller, monkeypatch):
+    seen: dict = {}
+
+    class Rep:
+        def __init__(self, **kw):
+            seen["tail"] = kw.get("tail_s")
+
+        def run(self, steps):
+            return {"steps": [], "stopped_at_step": None, "error": None}
+
+    import sandroid.features.player as player_mod
+
+    monkeypatch.setattr(player_mod, "StepReplayer", Rep)
+    tap = {"src": "input", "kind": "tap", "seq": 3, "t": 100.0, "actor": "user",
+           "data": {"x": 1, "y": 2}}  # fmt: skip
+    monkeypatch.setattr(rewind, "lines_between", lambda *a, **k: [tap])
+    monkeypatch.setattr(
+        "sandroid.services.tracking_service.get_tracking",
+        lambda: (_ for _ in ()).throw(RuntimeError("no tracking")),
+    )
+    rec = _rec()
+    rec.stopped = 115.0
+    rec.selected = ["/data/data/org.x/databases/c.sqlite"]
+    rec.after_at = {"/data/data/org.x/databases/c.sqlite": 143.0}
+    runner = type("R", (), {"start_seq": 9, "deps": type("D", (), {"shell": None})()})()
+    controller._replay(rec, runner)
+    assert seen["tail"] == pytest.approx(43.0)
+
+
+async def test_companion_rows_keep_their_own_names():
+    rec = _rec()
+    rec.changed = [
+        {"path": "/data/data/org.x/c.sqlite", "state": "changed", "size": 98304},
+        {"path": "/data/data/org.x/c.sqlite-wal", "state": "changed", "size": 7},
+    ]
+    rec.selected = ["/data/data/org.x/c.sqlite"]
+    modal = ReviewModal(rec, FakeController())
+    app = Host(modal)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await until(pilot, lambda: app.screen is modal)
+        modal.set_file_state("/data/data/org.x/c.sqlite", "After saved")
+        await settle(pilot)
+        sel = modal.query_one("#review-files", SelectionList)
+        prompts = [str(sel.get_option_at_index(i).prompt) for i in range(2)]
+        assert "c.sqlite-wal" in prompts[1]
+        assert "its database" in prompts[1]
