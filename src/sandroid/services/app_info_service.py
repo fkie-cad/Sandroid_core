@@ -574,7 +574,11 @@ def permission_counts(
     ``None`` without a decoded manifest.
     """
     grants = list(getattr(state, "permissions", None) or [])
-    requested: int | None = sum(1 for g in grants if g.requested) or None
+    # A real 0 (dumpsys read, the app requests nothing) stays 0; None only
+    # when dumpsys could not be read.
+    requested: int | None = (
+        sum(1 for g in grants if g.requested) if getattr(state, "ok", False) else None
+    )
     api_level = getattr(state, "api_level", None)
     if requested is None and isinstance(api_level, int) and api_level > 0:
         if manifest_permission_names(overview) is not None:

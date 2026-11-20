@@ -1505,8 +1505,7 @@ def build_trackers(f: AppFacts) -> SectionData:
             0,
             _placeholder(
                 "no-trackers",
-                "trackers not analysed (the last static analysis ran with "
-                "trackers off)",
+                "trackers not analysed in the last static analysis",
                 4,
             ),
         )
@@ -1518,10 +1517,10 @@ def build_trackers(f: AppFacts) -> SectionData:
         summary = "no trackers"
     if analysed and previous:
         summary += " (from the previous run)"
-    summary += f" · {len(libs)} SDK" + "s" * (len(libs) != 1)
+    summary += f", {len(libs)} SDK" + "s" * (len(libs) != 1)
     if cats:
         top = sorted(cats.items(), key=lambda kv: -kv[1])[:3]
-        summary += " · " + ", ".join(f"{n} {c}" for c, n in top)
+        summary += ", " + ", ".join(f"{n} {c}" for c, n in top)
     return SectionData(cols, rows, summary + " (Insight, cached)", zebra=True)
 
 

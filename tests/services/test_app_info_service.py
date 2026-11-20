@@ -2708,3 +2708,14 @@ def test_static_analysis_without_spotlight_fails_cleanly(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     assert analyzer._analyze_device_apk(time.time()) is False
     assert analyzer.last_results == {"error": "no spotlight app selected"}
+
+
+def test_permission_counts_keep_a_real_zero():
+    from types import SimpleNamespace
+
+    from sandroid.services.app_info_service import permission_counts
+
+    read = SimpleNamespace(ok=True, permissions=[], api_level=35)
+    assert permission_counts(read)[0] == 0  # read; the app requests nothing
+    unread = SimpleNamespace(ok=False, permissions=[], api_level=None)
+    assert permission_counts(unread)[0] is None  # dumpsys not read

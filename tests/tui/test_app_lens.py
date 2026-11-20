@@ -462,7 +462,7 @@ def test_trackers_render_insight_tracker_rows() -> None:
     assert "Google AdMob" in texts[0]
     assert "googleads.g" in texts[0]
     assert any("Firebase Analytics" in t for t in texts)
-    assert section.summary.startswith("1 tracker · 3 SDKs")
+    assert section.summary.startswith("1 tracker, 3 SDKs")
 
 
 def test_revoked_grant_and_de_storage_are_shown() -> None:
@@ -1259,7 +1259,7 @@ def test_trackers_say_not_analysed_when_the_run_had_trackers_off() -> None:
         trackers_from_previous_run=False,
     )
     section = build_trackers(AppFacts(package=PKG, static=static))
-    assert section.summary.startswith("trackers not analysed · 3 SDKs")
+    assert section.summary.startswith("trackers not analysed, 3 SDKs")
     assert section.rows[0].text.startswith("trackers not analysed")
     assert not section.rows[0].inspectable
     assert "no trackers" not in section.summary
@@ -1270,7 +1270,7 @@ def test_trackers_say_not_analysed_when_the_run_had_trackers_off() -> None:
         options={"profile": "privacy", "trackers": True},
     )
     summary = build_trackers(AppFacts(package=PKG, static=analysed)).summary
-    assert summary.startswith("no trackers · 3 SDKs")
+    assert summary.startswith("no trackers, 3 SDKs")
 
 
 def test_trackers_carried_over_say_from_the_previous_run() -> None:
@@ -1285,7 +1285,7 @@ def test_trackers_carried_over_say_from_the_previous_run() -> None:
         trackers_from_previous_run=True,
     )
     section = build_trackers(AppFacts(package=PKG, static=static))
-    assert section.summary.startswith("1 tracker (from the previous run) · 3 SDKs")
+    assert section.summary.startswith("1 tracker (from the previous run), 3 SDKs")
     assert "Google AdMob" in section.rows[0].text
 
 

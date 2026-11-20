@@ -134,6 +134,10 @@ def duration_words(seconds: float) -> str:
     return f"{minutes} min {rest} s" if rest else f"{minutes} min"
 
 
+#: A static analysis without an end event is forgotten after this long.
+_STATIC_RUN_MAX_S = 2 * 3600.0
+
+
 class SpotlightPanel(Widget):
     """Bottom-left panel: spotlight app status + live state + actions.
 
@@ -812,6 +816,7 @@ class SpotlightPanel(Widget):
         package = data.get("package") or None
         apk = data.get("apk") or None
         key = str(apk or package or "")
+        self._expire_static_runs()
         if state == "started":
             self._static_runs[key] = {
                 "package": package,
@@ -821,7 +826,7 @@ class SpotlightPanel(Widget):
             }
             if self._static_timer is None:
                 try:
-                    self._static_timer = self.set_interval(1.0, self._repaint_header)
+                    self._static_timer = self.set_interval(1.0, self._static_tick)
                 except Exception:
                     self._static_timer = None
             self._repaint_header()
@@ -848,8 +853,26 @@ class SpotlightPanel(Widget):
         elif state == "failed":
             error = str(data.get("error") or "unknown error")
             self._notify(f"Static analysis failed{suffix}: {error}", "warning")
-        elif state == "cancelled":
+        elif state == "cancelled" and run is not None:
+            # Esc in the options dialog cancels before any run started:
+            # nothing to report then.
             self._notify(f"Static analysis cancelled{suffix}", "information")
+
+    def _expire_static_runs(self) -> None:
+        """Forget runs that never ended (their process died): 2 h at most."""
+        now = time.monotonic()
+        for key in [
+            k
+            for k, r in self._static_runs.items()
+            if now - r["since"] > _STATIC_RUN_MAX_S
+        ]:
+            del self._static_runs[key]
+        if not self._static_runs:
+            self._stop_static_timer()
+
+    def _static_tick(self) -> None:
+        self._expire_static_runs()
+        self._repaint_header()
 
     def _repaint_header(self) -> None:
         try:
