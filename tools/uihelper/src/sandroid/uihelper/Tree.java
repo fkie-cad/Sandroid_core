@@ -512,6 +512,20 @@ final class Tree {
         return fallback;
     }
 
+    /**
+     * The deepest node under (x,y) following only the top-most sibling at
+     * every level. Web content hit-tests this way: an element painted on top
+     * takes the tap whether or not it listens for it (a cookie banner over a
+     * button), unlike a native view that lets an unclickable overlay pass.
+     */
+    static SNode topmost(SNode n, int x, int y, int textMax) {
+        for (SNode[] cand = under(n, x, y, textMax); cand.length > 0;
+                cand = under(n, x, y, textMax)) {
+            n = cand[0];
+        }
+        return n;
+    }
+
     static SNode target(SNode deep) {
         for (SNode s = deep; s != null; s = s.parent) {
             if (s.actionable()) {

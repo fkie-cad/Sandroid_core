@@ -1600,6 +1600,76 @@ def test_a_partly_visible_element_verifies_when_your_spot_is_visible():
     assert all(int(c.split()[3]) < 2424 for c in log)
 
 
+class WebCoverHelper(FakeHelper):
+    """The real helper's hit rule on a page: the actionable button wins the
+    ``hit`` even under an unclickable page element, which it reports as
+    ``top`` (device check: a fixed div over part of a button in Firefox).
+    """
+
+    def __init__(self, reply, button, cover, send_top=True):
+        super().__init__([reply])
+        self.button, self.cover, self.send_top = button, cover, send_top
+
+    def node_at(self, x, y, *, mode="both", timeout=1.0, t_mono_ms=None):
+        self.hits.append((x, y))
+        live = {"hit": self.button, "target": self.button, "window": {"id": 1}}
+        b = self.cover["bounds"]
+        if self.send_top and b[0] <= x < b[2] and b[1] <= y < b[3]:
+            live["top"] = self.cover
+        return {"type": "node_at", "live": live}
+
+
+def _web_cover_case(cover_bounds, send_top=True):
+    gecko = {"engine": "gecko", "role": "button"}
+    button = _node("Target", rid="target", bounds=(42, 1016, 1038, 1381), web=gecko)
+    cover = _node("Cover notice", cls="android.view.View", bounds=cover_bounds,
+                  web={"engine": "gecko", "role": "alert"})  # fmt: skip
+    helper = WebCoverHelper(_web_dump(button, cover), button, cover, send_top)
+    target = {"text": "Target", "web": {"html_id": "target", "raw_role": "button"},
+              "bounds": [42, 1016, 1038, 1381]}  # fmt: skip
+    log: list[str] = []
+    rep, _ = _replayer(helper, log)
+    report = rep.run(
+        extract_steps([_tap(target=target, x=250, y=1200, screen=_SCREEN)])
+    )
+    return report["steps"][0], log, helper
+
+
+def test_a_web_element_partly_under_a_page_element_is_tapped_where_visible():
+    # the cover hides your spot (left 60 %): another spot of the button
+    step, log, helper = _web_cover_case((38, 1012, 636, 1385))
+    assert (step["way"], step["check"]) == ("by element", "verified")
+    assert step["reason"] == "your spot was covered, tapped another spot of it"
+    (tap,) = log
+    assert int(tap.split()[2]) >= 636  # right of the cover
+    assert helper.hits[0] == (250, 1200)  # your spot was tested first
+    # fully covered: by position, unchecked
+    step, log, _ = _web_cover_case((34, 1008, 1046, 1389))
+    assert (step["way"], step["reason"], step["check"]) == (
+        "by position", "element covered", "unchecked",
+    )  # fmt: skip
+    assert log == ["input tap 250 1200"]
+    # visible (or an older helper that names no top node): your spot
+    step, log, _ = _web_cover_case((38, 1012, 636, 1385), send_top=False)
+    assert (step["way"], step["check"], log) == (
+        "by element", "verified", ["input tap 250 1200"],
+    )  # fmt: skip
+
+
+def test_a_top_node_inside_the_web_element_is_the_element():
+    gecko = {"engine": "gecko", "role": "button"}
+    label = _node("Target", cls="android.view.View", bounds=(400, 1150, 700, 1250),
+                  web={"engine": "gecko", "role": "text leaf"})  # fmt: skip
+    button = _node(rid="target", bounds=(42, 1016, 1038, 1381), web=gecko,
+                   kids=[label])  # fmt: skip
+    helper = WebCoverHelper(_web_dump(button), button, label)
+    target = {"web": {"html_id": "target"}, "bounds": [42, 1016, 1038, 1381]}
+    log: list[str] = []
+    rep, _ = _replayer(helper, log)
+    step = rep.run(extract_steps([_tap(target=target, x=540, y=1200, screen=_SCREEN)]))
+    assert (step["steps"][0]["check"], log) == ("verified", ["input tap 540 1200"])
+
+
 def test_a_weak_recorded_target_goes_by_position_unchecked():
     target = {"label": "spi", "rid": "mozac.awesomebar.suggestion",
               "stale_possible": True}  # fmt: skip

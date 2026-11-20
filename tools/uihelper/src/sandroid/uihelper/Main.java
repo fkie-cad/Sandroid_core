@@ -1100,6 +1100,13 @@ public final class Main {
         r.putOpt("pkg", h.pkg != null ? h.pkg : sw.root.pkg);
         r.put("hit", Tree.nodeJson(h).put("depth", h.depth));
         r.put("path", Tree.path(h));
+        // Web content: the element on top at this spot when it is not the
+        // hit (an unclickable overlay the hit rule above looks through).
+        Tree.SNode top = Tree.topmost(sw.root, x, y, tm);
+        if (top != h && top.engine != null) {
+            r.put("top", Tree.nodeJson(top).put("depth", top.depth));
+            r.put("top_path", Tree.path(top));
+        }
         if (t != null) {
             r.put("target", Tree.nodeJson(t).put("depth", t.depth));
         }

@@ -613,7 +613,9 @@ def hit_is_element(
     """The live hit test ``live`` (a ``node_at`` ``live`` answer) shows the
     matched element as the topmost at the tested spot: the element itself,
     or a node inside it with no other control inside it taking the tap.
-    A node of another window (a dialog, the keyboard) is never it.
+    A node of another window (a dialog, the keyboard) is never it, nor a
+    web element under another page element (``live.top``, the helper's
+    top-most node there when it is not the hit).
     """
     if not isinstance(live, dict) or not isinstance(live.get("hit"), dict):
         return False
@@ -623,6 +625,14 @@ def hit_is_element(
     if win is not None and own is not None and win != own:
         return False
     node = item["node"]
+    top = live.get("top")
+    if isinstance(top, dict) and isinstance(node.get("web"), dict):
+        # Web content takes the tap at the element painted on top, even one
+        # that does not listen for it (a banner over part of a button).
+        if not (
+            _same_node(top, node) or _inner_of(top, item, items, live.get("top_path"))
+        ):
+            return False
     if _same_node(tgt, node) or _same_node(hit, node):
         return True
     if not _inner_of(hit, item, items, live.get("path")):
