@@ -4875,6 +4875,19 @@ def _read_frozen(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def read_frozen_markers(path: Path | str) -> tuple[str, list[Marker]] | None:
+    """``(fingerprint, markers)`` of a frozen apply record (the ``ref`` of an
+    ``identity/applied`` line), or None when it cannot be read. File I/O.
+    """
+    data = _read_frozen(Path(path))
+    if data is None:
+        return None
+    try:
+        return str(data.get("fingerprint") or ""), _frozen_markers(data)
+    except (KeyError, TypeError):
+        return None
+
+
 def _load_latest_frozen() -> tuple[str, list[Marker]] | None:
     """The newest frozen apply of the live session (after a TUI restart)."""
     try:
@@ -5006,6 +5019,7 @@ __all__ = [
     "parse_preflight",
     "preflight_script",
     "profiles_dir",
+    "read_frozen_markers",
     "render_lists",
     "render_template",
     "render_value",

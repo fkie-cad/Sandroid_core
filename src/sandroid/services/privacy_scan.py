@@ -868,13 +868,11 @@ class PrivacyScanService:
             if mset is not None and digests is not None:
                 self._marker_sets[mset] = digests
             self._needles = needles
-            digest_of = {m.id: _marker_digest(m) for m in self._markers.values()}
+            digest_of, value_key = value_keys(self._markers.values())
             remap = digest_of != self._digest_of
             self._digest_of = digest_of
             self._aliases = {}
-            self._value_key = {
-                d: (self._markers[mid].group or d) for mid, d in self._digest_of.items()
-            }
+            self._value_key = value_key
             self._values_total = len(set(self._value_key.values()))
             if remap:
                 # Older records (no value key) resolve through the active
@@ -1586,37 +1584,15 @@ class PrivacyScanService:
         )
 
     def _legacy_vkey(self, marker_id: str, label: str) -> str | None:
-        """The active marker an older record (no value key) belongs to.
-
-        Its id when that is still active; else, for an id that became
-        per-app (``android_id`` -> ``android_id@<pkg>``), the active marker
-        of the package its label names (``"Android ID (<pkg>)"``; none when
-        that package has no active marker); for a label without a package,
-        the one with the same label, else the only one of that id.
+        """The active marker an older record (no value key) belongs to
+        (:func:`legacy_value_key`, cached per active marker set).
         """
-        digest = self._digest_of.get(marker_id)
-        if digest is not None:
-            return digest
         key = (marker_id, label)
         if key in self._aliases:
             return self._aliases[key]
-        prefix = f"{marker_id}@"
-        ids = [mid for mid in self._digest_of if mid.startswith(prefix)]
-        pkg = _label_package(label)
-        pick = None
-        if pkg:
-            # The label names its app: that app's marker or none (never
-            # another app's Android ID).
-            if prefix + pkg in self._digest_of:
-                pick = prefix + pkg
-        else:
-            same = [mid for mid in ids if self._markers[mid].label == label]
-            if len(same) == 1:
-                pick = same[0]
-            elif len(ids) == 1:
-                pick = ids[0]
-        found = self._digest_of[pick] if pick is not None else None
-        self._aliases[key] = found
+        found = legacy_value_key(marker_id, label, self._digest_of, self._markers)
+        if marker_id not in self._digest_of:
+            self._aliases[key] = found
         return found
 
     def _known_keys(self, rec: HitRecord) -> tuple[str, ...]:
@@ -2554,6 +2530,85 @@ def _vkeys(needles: NeedleSet) -> dict[str, str]:
 _LABEL_PACKAGE_RE = re.compile(r"\(([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)\)\s*$")
 
 
+def value_keys(markers: Iterable[Marker]) -> tuple[dict[str, str], dict[str, str]]:
+    """``(marker id -> value key, value key -> seeded value)`` of ``markers``.
+
+    The value key is the marker's digest (:func:`_marker_digest`); a seeded
+    value is its group, else the key itself (GPS latitude + longitude, or
+    one contact's fields, count once).
+    """
+    markers = list(markers)
+    digest_of = {m.id: _marker_digest(m) for m in markers}
+    by_id = {m.id: m for m in markers}
+    value_of = {d: (by_id[mid].group or d) for mid, d in digest_of.items()}
+    return digest_of, value_of
+
+
+def legacy_value_key(
+    marker_id: str,
+    label: str,
+    digest_of: dict[str, str],
+    markers: dict[str, Marker],
+) -> str | None:
+    """The value key of the marker an older record (no value key) belongs to.
+
+    Its id when that is still a marker; else, for an id that became per-app
+    (``android_id`` -> ``android_id@<pkg>``), the marker of the package its
+    label names (``"Android ID (<pkg>)"``; none when that package has no
+    marker); for a label without a package, the one with the same label,
+    else the only one of that id.
+    """
+    digest = digest_of.get(marker_id)
+    if digest is not None:
+        return digest
+    prefix = f"{marker_id}@"
+    ids = [mid for mid in digest_of if mid.startswith(prefix)]
+    pkg = _label_package(label)
+    pick = None
+    if pkg:
+        # The label names its app: that app's marker or none (never another
+        # app's Android ID).
+        if prefix + pkg in digest_of:
+            pick = prefix + pkg
+    else:
+        same = [mid for mid in ids if markers[mid].label == label]
+        if len(same) == 1:
+            pick = same[0]
+        elif len(ids) == 1:
+            pick = ids[0]
+    return digest_of[pick] if pick is not None else None
+
+
+def count_values(
+    markers: Iterable[Marker], hits: Iterable[Any], fp: str | None = None
+) -> tuple[int, int]:
+    """``(values found, values total)``: what the header's PRIVACY piece shows.
+
+    Distinct seeded values of ``markers`` (see :func:`value_keys`) with at
+    least one of ``hits`` (any direction; older records mapped through
+    :func:`legacy_value_key`), and all of them. With ``fp``, only hits of
+    that profile fingerprint count. The service's summary counts the same.
+    """
+    markers = list(markers)
+    by_id = {m.id: m for m in markers}
+    digest_of, value_of = value_keys(markers)
+    found: set[str] = set()
+    for hit in hits:
+        if fp is not None and getattr(hit, "fp", None) != fp:
+            continue
+        marker_id = str(getattr(hit, "marker_id", "") or "")
+        key = (
+            getattr(hit, "value_key", None)
+            or legacy_value_key(
+                marker_id, str(getattr(hit, "label", "") or ""), digest_of, by_id
+            )
+            or f"id:{marker_id}"
+        )
+        if key in value_of:
+            found.add(value_of[key])
+    return len(found), len(set(value_of.values()))
+
+
 def _label_package(label: str) -> str | None:
     """``"Android ID (com.example.app)"`` -> ``com.example.app``."""
     match = _LABEL_PACKAGE_RE.search(label or "")
@@ -3183,10 +3238,12 @@ __all__ = [
     "annotations_provider",
     "body_bytes",
     "classify_party",
+    "count_values",
     "current_timeline_folder",
     "get_privacy_scan_service",
     "is_approx",
     "is_encoded",
+    "legacy_value_key",
     "party_role",
     "party_words",
     "read_hits",
@@ -3201,4 +3258,5 @@ __all__ = [
     "sweep_after_run",
     "unregister_annotations",
     "unwrap_compressed",
+    "value_keys",
 ]

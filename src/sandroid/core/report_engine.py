@@ -1292,7 +1292,8 @@ def build_coverage(ctx: ReportContext) -> dict:
 # timeline folder: every hit, also a repeat of one seen in an earlier run of
 # the session) within the run's scope (:class:`~sandroid.services.
 # privacy_scan.RunScope`: the recording it replays, its Play and its sweep),
-# and the ``identity/applied`` line that names how many values were seeded.
+# and the frozen record of the ``identity/applied`` line (the seeded values,
+# counted like the header's PRIVACY piece: :func:`privacy_scan.count_values`).
 # The ``privacy/sent|stored`` timeline lines are written once per finding
 # per session, so they are only the fallback for a folder without the store.
 
@@ -1389,23 +1390,56 @@ def part_words(part: str) -> str:
     return f"{words} {name}".strip()
 
 
-def _applied_markers(ctx: ReportContext) -> int | None:
-    """Values the identity profile seeded (the last ``identity/applied``
-    line up to the end of the scope), or None without one.
+def _applied_values(ctx: ReportContext) -> tuple[str, list[Any]] | None:
+    """``(fingerprint, markers)`` of the profile seeded in the scope: the
+    frozen record of the last ``identity/applied`` line up to the end of the
+    scope (None without one, or when its record cannot be read).
     """
     end = ctx.span[1] if ctx.span else None
-    count = None
+    last = None
     for line in ctx.lines:
         if line.get("src") != "identity" or line.get("kind") != "applied":
             continue
         if end is not None and line.get("_ts") is not None and line["_ts"] > end:
             break
-        d = _data(line)
-        if isinstance(d.get("markers"), int):
-            count = d["markers"]
-        elif isinstance(d.get("values"), dict):
-            count = len(d["values"])
-    return count
+        last = line
+    rel = _ref(last).get("path") if last is not None else None
+    if not rel or ctx.timeline_dir is None:
+        return None
+    try:
+        from sandroid.services.identity import read_frozen_markers
+
+        frozen = read_frozen_markers(ctx.timeline_dir / str(rel))
+    except Exception:
+        logger.debug("Report: frozen identity record unreadable", exc_info=True)
+        return None
+    if frozen is None:
+        return None
+    fp = str(_data(last).get("fingerprint") or frozen[0] or "")
+    return fp, frozen[1]
+
+
+def _value_counts(
+    applied: tuple[str, list[Any]], lines: list[dict[str, Any]]
+) -> tuple[int, int]:
+    """``(values found, values total)`` of ``lines`` counted as the header's
+    PRIVACY piece counts them (:func:`privacy_scan.count_values`).
+    """
+    from types import SimpleNamespace
+
+    from sandroid.services.privacy_scan import count_values
+
+    fp, markers = applied
+    hits = [
+        SimpleNamespace(
+            fp=_data(ln).get("fp"),
+            marker_id=_data(ln).get("marker_id"),
+            label=_data(ln).get("label"),
+            value_key=_data(ln).get("value_key"),
+        )
+        for ln in lines
+    ]
+    return count_values(markers, hits, fp or None)
 
 
 def _has_finding_store(ctx: ReportContext) -> bool:
@@ -1473,6 +1507,8 @@ def _hit_line(hit: Any) -> dict[str, Any]:
         "label": hit.label,
         "transform": hit.transform,
         "part": hit.part,
+        "fp": hit.fp,
+        "value_key": hit.value_key,
     }
     if hit.direction == "sent":
         data.update(
@@ -1513,12 +1549,7 @@ def _privacy_lines(ctx: ReportContext) -> list[dict[str, Any]]:
         ]
     scope = _run_scope(ctx)
     return sorted(
-        (
-            _hit_line(hit)
-            for hit in store
-            if hit.direction in ("sent", "stored")
-            and (scope is None or scope.covers(hit))
-        ),
+        (_hit_line(hit) for hit in store if scope is None or scope.covers(hit)),
         key=_sort_key,
     )
 
@@ -1540,8 +1571,19 @@ def build_privacy(ctx: ReportContext) -> dict:
     sent = [ln for ln in lines if ln.get("kind") == "sent"]
     stored = [ln for ln in lines if ln.get("kind") == "stored"]
     blocks: list[dict] = []
-    total = _applied_markers(ctx)
+    # The same count as the header's PRIVACY piece: seeded values found (any
+    # direction) out of the profile's values, grouped and mapped alike.
+    applied = _applied_values(ctx)
     values = sorted({str(_data(ln).get("label") or "?") for ln in sent})
+    text = ""
+    left = len(values)
+    if applied is not None:
+        found, total = _value_counts(applied, lines)
+        left = _value_counts(applied, sent)[0]
+        text = (
+            f"{found} of {total} profile value{'s' if total != 1 else ''} "
+            f"{'was' if found == 1 else 'were'} found in this report's scope. "
+        )
     recipients: dict[str, str] = {}
     for line in sent:
         d = _data(line)
@@ -1550,18 +1592,17 @@ def build_privacy(ctx: ReportContext) -> dict:
             recipients[name] = str(d.get("party") or "unknown")
     if sent:
         first = sent[0]
-        of = f" of {total}" if total is not None else ""
         third = sum(1 for p in recipients.values() if p == "third")
         line_no = f" (line {first['seq']})" if first.get("seq") is not None else ""
-        text = (
-            f"{len(values)}{of} profile value{'s' if len(values) != 1 else ''} "
+        text += (
+            f"{left} profile value{'s' if left != 1 else ''} "
             f"left the device to {_plural(len(recipients), 'recipient')}, the "
             f"first at {_clock(first.get('t'))}{line_no}."
         )
         if third:
             text += f" {third} of the recipients are known third parties."
     else:
-        text = "No profile value left the device in this report's scope."
+        text += "No profile value left the device in this report's scope."
     stored_values = {str(_data(ln).get("label") or "?") for ln in stored}
     if stored_values:
         text += (
