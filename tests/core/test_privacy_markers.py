@@ -5,14 +5,21 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import random
+import threading
 import time
 import urllib.parse
 
 import pytest
 
+from sandroid.core import privacy_markers
 from sandroid.core.privacy_markers import (
+    MAX_HITS_PER_NEEDLE,
     MIN_NEEDLE_LEN,
     Marker,
+    Needle,
+    NeedleSet,
+    _reference_scan,
     build_needles,
     snippet,
 )
@@ -20,6 +27,19 @@ from sandroid.core.privacy_markers import (
 AD_ID = "cafe0001-7f3a-4000-8000-c0ffee00a1d0"
 EMAIL = "Canary.7f3a9c2e@example.org"
 PHONE = "+4930555012345"
+
+
+@pytest.fixture(autouse=True)
+def _same_hits_as_the_reference_loop(monkeypatch):
+    """Every scan in this module also runs the old per-needle find loop."""
+    automaton_scan = NeedleSet.scan
+
+    def checked(self, data):
+        hits = automaton_scan(self, data)
+        assert hits == _reference_scan(self, data)
+        return hits
+
+    monkeypatch.setattr(NeedleSet, "scan", checked)
 
 
 def _transforms(hits, marker_id):
@@ -284,3 +304,157 @@ def test_base64_never_raises_confidence():
     assert base64_low
     # 3 decimals is "low"; a short base64 fragment of it stays low.
     assert {n.confidence for n in base64_low} == {"low"}
+
+
+# ------------------------------------------------- automaton vs. find loop
+
+
+def _marker(mid="m", **kw):
+    return Marker(mid, "v", **kw)
+
+
+def test_automaton_matches_overlapping_contained_and_nul_needles():
+    a, b = _marker("a"), _marker("b", group="g")
+    c = _marker("c", group="g")
+    needles = NeedleSet(
+        [
+            Needle(b"abab", True, a, "t1", "high"),
+            Needle(b"ababab", True, a, "t2", "medium"),  # contains t1, overlaps
+            Needle(b"bab", True, a, "t3", "low"),  # inside both
+            Needle(b"ABAB", False, a, "t4", "high"),  # exact twin of t1
+            Needle(b"abab", False, a, "t5", "low"),  # exact, same as folded t1
+            Needle(b"abab", True, b, "t6", "medium"),  # same pattern, other marker
+            Needle(b"\0\0ab\0", False, c, "t7", "high"),
+            Needle(b"\0ab", False, c, "t8", "low"),  # NUL prefix of nothing
+            Needle(b"zzzzzz", True, b, "t9", "low"),  # never present
+            # Exact ties: the earlier needle's hit wins and comes first.
+            Needle(b"q1q1q1", True, c, "f", "high"),
+            Needle(b"q1q1q1", False, c, "e", "high"),
+            Needle(b"q1q1q1", True, b, "other", "high"),
+        ]
+    )
+    data = b"xABABABab\0\0ab\0ababa" + b"\0" * 3 + b"abAB:q1q1q1"
+
+    hits = needles.scan(data)  # the autouse fixture compares with the loop
+
+    assert {h.transform for h in hits} >= {"t2", "t6", "t7"}
+    # "f" beats its exact twin "e"; marker b's hits come first (t6 precedes
+    # every needle of marker c), so "other" sorts before "f".
+    tied = [h.transform for h in hits if h.offset == len(data) - 6]
+    assert tied == ["other", "f"]
+
+
+def test_equal_hits_of_two_markers_keep_the_needle_order():
+    x, y = _marker("x"), _marker("y")
+    needles = NeedleSet(
+        [
+            Needle(b"zzzzzz", True, y, "late", "high"),  # found after "qqqqqq"
+            Needle(b"qqqqqq", True, x, "x", "high"),
+            Needle(b"qqqqqq", True, y, "y", "high"),
+        ]
+    )
+
+    hits = needles.scan(b"qqqqqq zzzzzz")
+
+    # y's first needle comes first, so y's hit at offset 0 sorts first.
+    assert [h.marker_id for h in hits] == ["y", "x", "y"]
+
+
+def test_automaton_caps_each_needle_at_the_first_occurrences():
+    m = _marker("m")
+    needles = NeedleSet(
+        [
+            Needle(b"aaaaaa", True, m, "run", "low"),
+            Needle(b"aaaaaaaa", False, _marker("n"), "longer", "high"),
+            Needle(b"bAbAbA", False, m, "alt", "high"),
+        ]
+    )
+    data = b"A" * 300 + b"bAbA" * 200 + b"a" * 70
+
+    hits = needles.scan(data)
+
+    longer = [h.offset for h in hits if h.transform == "longer"]
+    assert longer == list(range(1100, 1100 + MAX_HITS_PER_NEEDLE))  # exact case
+    alt = [h.offset for h in hits if h.transform == "alt"]
+    assert len(alt) == MAX_HITS_PER_NEEDLE
+    assert alt == list(range(300, 300 + 2 * MAX_HITS_PER_NEEDLE, 2))
+    run = [h.offset for h in hits if h.transform == "run"]
+    assert run == list(range(MAX_HITS_PER_NEEDLE))
+
+
+def _random_markers(rng):
+    hexd = "0123456789abcdef"
+    markers = []
+    for i in range(rng.randint(1, 12)):
+        kind = rng.choice(privacy_markers.KINDS)
+        if kind == "uuid":
+            value = "-".join(
+                "".join(rng.choice(hexd) for _ in range(n)) for n in (8, 4, 4, 4, 12)
+            )
+        elif kind == "phone":
+            value = "+49" + "".join(rng.choice("0123456789") for _ in range(10))
+        elif kind == "mac":
+            value = ":".join(rng.choice(hexd) + rng.choice(hexd) for _ in range(6))
+        elif kind in ("latitude", "longitude"):
+            value = f"{rng.uniform(-80, 80):.6f}"
+        elif kind == "email":
+            value = f"Can.{rng.getrandbits(32):08x}@ex.org"
+        else:
+            # Short, repetitive values: many overlapping and nested needles.
+            alphabet = rng.choice(["ab", "aB0", "xyz", "0123456789", "Aé1"])
+            value = "".join(rng.choice(alphabet) for _ in range(rng.randint(4, 12)))
+        group = rng.choice(["", "", "gps", "g2"])
+        markers.append(Marker(f"m{i}", value, kind=kind, group=group))
+        if rng.random() < 0.2:  # the same value under another id (filler)
+            markers.append(Marker(f"d{i}", value, kind=kind, group=group))
+    return markers
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_automaton_equals_find_loop_on_random_markers_and_haystacks(seed):
+    rng = random.Random(seed)  # noqa: S311 - reproducible test data
+    needles = build_needles(_random_markers(rng))
+    patterns = [n.pattern for n in needles.needles] or [b"none"]
+    noise = bytes(range(256)) + b"abAB0123456789xyz" * 8
+    for _ in range(5):
+        parts = []
+        for _ in range(rng.randint(0, 120)):
+            pick = rng.random()
+            if pick < 0.5:
+                pattern = rng.choice(patterns)
+                if rng.random() < 0.5:
+                    pattern = pattern.upper()
+                if rng.random() < 0.3:  # truncated: a prefix, not a match
+                    pattern = pattern[: rng.randint(1, len(pattern))]
+                parts.append(pattern * rng.choice([1, 1, 1, 2, 60]))
+            else:
+                parts.append(
+                    bytes(rng.choice(noise) for _ in range(rng.randint(0, 40)))
+                )
+        needles.scan(b"".join(parts))  # compared by the autouse fixture
+
+
+def test_automata_are_built_once_and_shared_by_threads():
+    needles = build_needles(
+        [Marker("email", EMAIL, kind="email"), Marker("ad", AD_ID, kind="uuid")]
+    )
+    body = (b"x=" + EMAIL.lower().encode() + b"&g=" + AD_ID.encode() + b";") * 50
+    expected = _reference_scan(needles, body)
+    results, built = [], set()
+    barrier = threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        hits = needles.scan(body)
+        built.add(id(needles._compiled()))
+        results.append(hits)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(built) == 1
+    assert len(results) == 8
+    assert all(r == expected for r in results)
