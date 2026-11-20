@@ -433,6 +433,15 @@ class GuardObservation:
         """The Android users whose apps the Kill switch covers (>= user 0)."""
         return sorted(set(self.users) | {0})
 
+    def ks_users(self, family: str = "4") -> set[int]:
+        """Android users whose app range has a jump to the Kill switch."""
+        users = set()
+        for line in self.jumps.get(family, []):
+            m = re.search(r"--uid-owner (\d+)-(\d+)", line)
+            if m:
+                users.add(int(m.group(1)) // PER_USER_RANGE)
+        return users
+
 
 def parse_guard_observation(output: str) -> GuardObservation:
     """Parse the guard script's ``observe`` output (pure; never raises)."""
@@ -836,6 +845,11 @@ class GuardView:
     installed: bool = False
     #: The Kill switch also covers IPv6 (False: the device has no ip6tables).
     ipv6: bool = True
+    #: Android users the Kill switch does not cover yet (created after it).
+    uncovered_users: tuple[int, ...] = ()
+    #: Why the naming failed: "relay_down" (proxy connections are refused
+    #: until the repair), "jump_missing" (unnamed, traffic flows) or "".
+    naming_problem: str = ""
 
 
 _SIDECAR_LOCK = threading.Lock()
@@ -953,6 +967,17 @@ class DeviceGuard:
         self._repair_at: dict[str | None, float] = {}
         #: serial -> the relay lock rules failed (the kernel refused them).
         self._lock_failed: dict[str | None, bool] = {}
+        #: Quit started: nothing is installed any more (no proxy-write
+        #: follow-up, no relay launch, no chains), only removed.
+        self._closing = False
+
+    def begin_shutdown(self) -> None:
+        """From now on refuse every install (quit); teardown still works."""
+        self._closing = True
+
+    @property
+    def closing(self) -> bool:
+        return self._closing
 
     # -- cached reads (UI thread) -------------------------------------------
 
@@ -1252,7 +1277,11 @@ class DeviceGuard:
             if obs is None:
                 return replace(self.view_cached(serial), checked=False)
             view = self._read_view(serial, obs)
-            why = self._repair_reason(serial, obs, view) if repair else ""
+            why = (
+                self._repair_reason(serial, obs, view)
+                if repair and not self._closing
+                else ""
+            )
             if why:
                 self._repair_at[serial] = time.monotonic()
                 logger.info(
@@ -1303,9 +1332,23 @@ class DeviceGuard:
             attribution, named = "off", 0
         ks = obs.kill_switch_on
         detail = prev.detail
-        if attribution == "failed" and obs.dp_uids and not obs.relay_running:
-            detail = "identity relay down: proxy connections fail until it is repaired"
+        naming_problem = ""
+        if attribution == "failed":
+            if obs.dp_uids and not (
+                obs.relay_running and set(obs.dp_uids.values()) <= obs.listening
+            ):
+                naming_problem = "relay_down"
+                detail = (
+                    "identity relay down: proxy connections fail until it is repaired"
+                )
+            elif obs.dp_uids and not _dp_jump_present(obs):
+                naming_problem = "jump_missing"
+        uncovered: tuple[int, ...] = ()
+        if ks:
+            uncovered = tuple(sorted(set(obs.user_ids()) - obs.ks_users("4")))
         return GuardView(
+            uncovered_users=uncovered,
+            naming_problem=naming_problem,
             installed=bool(ks or obs.dp_exists or obs.rl_exists or obs.relays),
             endpoint=obs.proxy,
             kill_switch=ks,
@@ -1321,10 +1364,18 @@ class DeviceGuard:
     def _repair_reason(
         self, serial: str | None, obs: GuardObservation, view: GuardView
     ) -> str:
-        """Why the app naming of our proxy needs a repair now ("" = it does not)."""
+        """Why the guard needs a repair now ("" = it does not): an Android
+        user the Kill switch does not cover yet, or the app naming of our
+        proxy.
+        """
         proxy = obs.proxy
         if proxy is None or not proxy.is_ipv4:
             return ""
+        last = self._repair_at.get(serial)
+        backoff = last is not None and time.monotonic() - last < self.REPAIR_BACKOFF
+        if view.uncovered_users and self.kill_switch_wanted(serial) and not backoff:
+            users = ", ".join(str(u) for u in view.uncovered_users)
+            return f"the Kill switch does not cover Android user {users} yet"
         if self._named_for.get(serial) != proxy and not (obs.dp_uids or obs.relays):
             return ""  # not naming for this proxy (external, or never set up)
         groups = app_uid_groups(obs.packages) if obs.packages is not None else None
@@ -1338,8 +1389,7 @@ class DeviceGuard:
                 return ""
         elif view.attribution == "on":
             return ""
-        last = self._repair_at.get(serial)
-        if last is not None and time.monotonic() - last < self.REPAIR_BACKOFF:
+        if backoff:
             return ""
         if view.attribution == "failed":
             if obs.dp_uids and not obs.relay_running:
@@ -1362,6 +1412,9 @@ class DeviceGuard:
         Returns:
             True when something was removed.
         """
+        # First: no apply, repair or proxy-write follow-up installs anything
+        # again (an apply still running when quit starts).
+        self._closing = True
         if not self._lock.acquire(timeout=-1 if lock_timeout is None else lock_timeout):
             logger.warning(
                 "Kill switch teardown on %s skipped: the guard is busy", serial
@@ -1407,7 +1460,12 @@ class DeviceGuard:
         lock, then the proxy-port chain, then a flush of connections the
         chain did not see.
         """
+        if self._closing:
+            logger.info("Device guard on %s: quitting, nothing is installed", serial)
+            return self.view_cached(serial)
         with self._lock, Adb.targeting(serial):
+            if self._closing:  # the teardown started while we waited
+                return self.view_cached(serial)
             view = self._apply_locked(serial, endpoint, ours, obs)
             self._views[serial] = view
         self._publish(serial)

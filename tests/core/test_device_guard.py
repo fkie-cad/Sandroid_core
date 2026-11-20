@@ -813,3 +813,26 @@ def test_restore_keeps_ours_for_the_prepared_endpoint(guard, monkeypatch):
     # Another endpoint written by hand: no longer assumed ours.
     guard.after_device_proxy_write(SERIAL, "10.0.2.2:9999")
     assert not guard._wanted[SERIAL].ours
+
+
+def test_new_android_user_is_covered_by_the_repair(guard, monkeypatch):
+    """B2: a user created after the Kill switch went on is seen on the
+    refresh (users re-read) and its jump is added.
+    """
+    device = _Device(_text(*_ks_lines(), "USER 0", "USER 11", ip6=False))
+    monkeypatch.setattr(guard, "_script", device)
+    guard._wanted[SERIAL] = dg._Wanted(kill_switch=True, endpoint=SLIRP)
+    view = guard.refresh(SERIAL)
+    assert view.uncovered_users == (11,)
+    guard.refresh(SERIAL, repair=True)
+    assert any("--uid-owner 1110000-1129999" in c for c in device.commands())
+
+
+def test_naming_problem_tells_dead_relay_from_missing_jump(guard, monkeypatch):
+    """B4: the real effect, not only "apps not named"."""
+    no_relay = [x for x in _healthy_naming() if not x.startswith(("RELAY", "LISTEN"))]
+    _naming_guard(guard, monkeypatch, _text(*no_relay))
+    assert guard.refresh(SERIAL).naming_problem == "relay_down"
+    no_jump = [x for x in _healthy_naming() if not x.startswith("NATOUT")]
+    _naming_guard(guard, monkeypatch, _text(*no_jump))
+    assert guard.refresh(SERIAL).naming_problem == "jump_missing"

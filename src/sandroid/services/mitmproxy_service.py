@@ -2124,10 +2124,19 @@ class MitmproxyService:
         proxy: the other order would leave apps with no network at all.
         """
         try:
+            from sandroid.services.network_method import peek_network_method_service
+
+            method = peek_network_method_service()
+            if method is not None:
+                method.close(timeout=1.0)  # no apply re-installs behind us
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Network method close on shutdown failed: %s", exc)
+        try:
             from sandroid.core.device_guard import peek_device_guard
 
             guard = peek_device_guard()
             if guard is not None:
+                guard.begin_shutdown()
                 # A quit already tore the guard down (nothing left) or is
                 # still at it on an abandoned thread: never wait long for
                 # the guard here, mitmweb must be killed either way.

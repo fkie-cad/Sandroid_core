@@ -119,6 +119,9 @@ def shutdown_network(timeout: float = 4.0) -> None:
     Touches only an mitmproxy service that exists already (no new one is
     created on the way out).
     """
+    # First the Network method: an apply in flight must not re-install the
+    # proxy, relay or chains behind the teardown (it stops between steps).
+    run_bounded("network method", lambda: _close_network_method(timeout - 0.5), timeout)
     run_bounded("kill switch", _teardown_device_guard, timeout)
     try:
         from sandroid.services import mitmproxy_service as ms
@@ -130,6 +133,15 @@ def shutdown_network(timeout: float = 4.0) -> None:
     run_bounded("mitmproxy", lambda: svc.shutdown(timeout=min(2.0, timeout)), timeout)
 
 
+def _close_network_method(timeout: float) -> None:
+    """Stop the Network method service; wait (bounded) for an apply."""
+    from sandroid.services.network_method import peek_network_method_service
+
+    service = peek_network_method_service()
+    if service is not None:
+        service.close(timeout=max(0.5, timeout))
+
+
 def _teardown_device_guard() -> None:
     """Remove the Kill switch and the app naming before the device proxy goes
     (the other order leaves apps with no network). Only an existing guard.
@@ -139,6 +151,7 @@ def _teardown_device_guard() -> None:
     guard = peek_device_guard()
     if guard is None:
         return
+    guard.begin_shutdown()  # nothing is installed any more from here on
     for serial in guard.serials_with_state():
         # Never past the step's own bound waiting for a busy guard; the
         # teardown itself does its adb work without the guard lock.
