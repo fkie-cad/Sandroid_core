@@ -338,7 +338,7 @@ class StatusBar(Static):
         # Frida / app actions wait for it.
         if self.device_prep_stage:
             segs.append(
-                f"[{paused}]◌ Preparing device…[/] "
+                f"[{paused}]Preparing device…[/] "
                 f"[{muted}]{escape(self.device_prep_stage)}[/]"
             )
 
