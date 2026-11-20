@@ -663,10 +663,25 @@ def flow_snapshot(row: Any, shown: bool, scope: str | None = None) -> dict:
     }
 
 
+def _own_reads(act: Any) -> int:
+    """Events of the AI's own device reads (``read_device_files``)."""
+    from sandroid.ai.device_files import is_own_read_process
+
+    return sum(
+        int(n or 0)
+        for name, n in (getattr(act, "processes", None) or {}).items()
+        if is_own_read_process(name)
+    )
+
+
 def _processes(act: Any) -> list[str]:
+    from sandroid.ai.device_files import is_own_read_process
+
     procs: dict[str, int] = {}
     for name, n in (getattr(act, "processes", None) or {}).items():
         head = str(name).split(" · ", 1)[0]
+        if is_own_read_process(head):
+            continue  # the AI's own reads (head / cat / stat / su)
         procs[head] = procs.get(head, 0) + n
     return [name for name, _n in sorted(procs.items(), key=lambda kv: -kv[1])[:3]]
 
@@ -704,7 +719,7 @@ def file_snapshot(
         "shown": bool(shown),
         "path": path,
         "ops": ops,
-        "count": int(getattr(act, "count", 0) or 0),
+        "count": max(0, int(getattr(act, "count", 0) or 0) - _own_reads(act)),
         "processes": _processes(act) if act is not None else [],
         "first": first.timestamp() if first is not None else None,
         "last": last.timestamp() if last is not None else None,

@@ -208,6 +208,9 @@ class DeviceResourceArbiter:
         self._abandoned: dict[str, int] = {}
         #: forgotten subagents kept live until their abandoned calls exit.
         self._pending_forget: set[str] = set()
+        #: Bumped every time a WORLD lease is newly taken (snapshot restore,
+        #: emulator restart): device-derived caches compare it.
+        self._world_epoch = 0
 
     # -- registration -----------------------------------------------------------
 
@@ -386,7 +389,14 @@ class DeviceResourceArbiter:
                 lease.keep = True
             if track:
                 lease.inflight += 1
+        if ResourceId.WORLD in newly:
+            self._world_epoch += 1
         return LeaseHandle(owner, resources, frozenset(newly))
+
+    def world_epoch(self) -> int:
+        """How many times a WORLD lease was taken (device state may differ)."""
+        with self._lock:
+            return self._world_epoch
 
     def _conflict_locked(
         self, owner: str, resources: frozenset[ResourceId], mine: set[str]

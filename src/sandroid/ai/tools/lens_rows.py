@@ -82,6 +82,11 @@ MAX_VERDICTS = 200
 HAYSTACK_CAP = 64 * 1024
 #: Seconds one regex may spend on one row (windowed search).
 REGEX_ROW_BUDGET_S = 0.25
+#: Characters of a file's full local text ``content_contains`` searches (the
+#: decoded text of a read is at most 1 MB; its last diff is searched apart).
+CONTENT_SEARCH_CAP = 2 * 1024 * 1024
+#: Ops letters of content changes (open/access/close-nowrite are noise).
+_CHANGE_OPS = frozenset("CMDRA")
 #: ``kind`` values of Network rows (TLS failures: key ``tls_row_key``).
 NETWORK_KINDS = ("flow", "error", "tls")
 #: Seconds between a stdout TLS line and its flow-log record (pairing).
@@ -130,7 +135,8 @@ _WHERE_PROP = {
         "review_kind (changed/new/deleted), text, content_contains (local "
         "copies only: kept watchlist versions and files read with "
         "read_device_files; searches the full text, secret-named values "
-        "too). regex=true makes text/*_contains regular expressions."
+        "too, except with ai.mask_sensitive on: masked text, no regex). "
+        "regex=true makes text/*_contains regular expressions."
     ),
 }
 
@@ -441,6 +447,28 @@ def _flow_log_tls_row(rec: Mapping[str, Any], flow_dir: Path) -> dict | None:
     }
 
 
+def _is_noise(event_type: Any) -> bool:
+    """OPEN / ACCESS / CLOSE without a write: no content change (the AI's own
+    reads show up like this, too).
+    """
+    name = str(event_type or "").upper()
+    if "WRITE" in name or "MODIFY" in name:
+        return False
+    return any(t in name for t in ("OPEN", "ACCESS", "CLOSE"))
+
+
+def change_time(row: Mapping[str, Any]) -> Any:
+    """The row's last CONTENT change (``last_change``, else ``last`` when it
+    has change ops), None for open/read-only rows: reads (the AI's own too)
+    must not make cached content stale.
+    """
+    if "last_change" in row:
+        return row.get("last_change")
+    if _CHANGE_OPS & set(str(row.get("ops") or "").upper()):
+        return row.get("last")
+    return None
+
+
 def _op_letter(event_type: Any) -> str:
     name = str(event_type or "").upper()
     for token, letter in _OP_LETTERS:
@@ -468,11 +496,13 @@ def _monitor_rows() -> list[dict]:
         def package_of(_p: str) -> str | None:
             return None
 
+    from sandroid.ai.device_files import is_own_read_process
+
     rows: dict[str, dict] = {}
     for ev in events:
         raw = ev.get("path")
-        if not raw:
-            continue
+        if not raw or is_own_read_process(ev.get("process")):
+            continue  # no path, or the AI's own read (read_device_files)
         key = normalize_key("files", raw)
         row = rows.get(key)
         ts = ev.get("timestamp")
@@ -490,19 +520,24 @@ def _monitor_rows() -> list[dict]:
                 "processes": [],
                 "first": ts,
                 "last": ts,
+                "last_change": None,
                 "watched": False,
                 "app": app,
                 "review_kind": None,
                 "scope": None,
             }
-        letter = _op_letter(ev.get("event_type"))
-        if letter not in row["ops"]:
-            row["ops"] += letter
+        noise = _is_noise(ev.get("event_type"))
+        if not noise:
+            letter = _op_letter(ev.get("event_type"))
+            if letter not in row["ops"]:
+                row["ops"] += letter
+            row["last_change"] = ts
         row["count"] += 1
         proc = ev.get("process")
         if proc and proc not in row["processes"] and len(row["processes"]) < 3:
             row["processes"].append(proc)
-        row["last"] = ts
+        if not noise or row["last_change"] is None:
+            row["last"] = ts
     noisy = _files_noise()
     for row in rows.values():
         row["shown"] = not noisy(row["key"])
@@ -731,14 +766,24 @@ class _Details:
     kept watchlist version and a ``read_device_files`` cache entry).
     :meth:`file` is the reduced digest part the model may see;
     :meth:`haystack` the full local text ``content_contains`` searches here,
-    never sent (so a token under a secret-named key is still found).
+    never sent (so a token under a secret-named key is still found; with
+    ``ai.mask_sensitive`` on, the masked reduced text instead).
+    :meth:`missing` / :meth:`unreadable` are cheap (no rendering).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, masked: bool | None = None) -> None:
         self._flows: dict[str, Any] = {}
         self._files: dict[str, Any] = {}
+        self._states: dict[str, str | None] = {}
+        self._companion: dict[str, float] = {}
         self._default_dir: Path | None = None
         self._serial: list[str | None] = []
+        if masked is None:
+            from sandroid.ai import row_classifier as rc
+
+            masked = rc.mask_enabled()
+        #: ``ai.mask_sensitive``: content_contains searches masked text only.
+        self.masked = bool(masked)
 
     def flow(self, row: Mapping[str, Any]) -> dict | None:
         if row.get("kind") == "tls":
@@ -768,36 +813,101 @@ class _Details:
         self._flows[fid] = detail
         return detail
 
-    def _content(self, key: str, last: Any = None) -> Any:
+    def set_rows(self, rows: list[dict]) -> None:
+        """Note the rows' SQLite companions (``x.db-wal`` ...): their content
+        changes count for their database's content.
+        """
+        from sandroid.ai.device_files import _as_float, db_base
+
+        for row in rows:
+            base = db_base(str(row.get("key") or ""))
+            t = _as_float(change_time(row))
+            if base and t is not None:
+                self._companion[base] = max(self._companion.get(base, t), t)
+
+    def _serial_now(self) -> str | None:
+        if not self._serial:
+            try:
+                from sandroid.ai.device_files import current_serial
+
+                self._serial.append(current_serial())
+            except Exception:
+                self._serial.append(None)
+        return self._serial[0]
+
+    def _key_last(self, row: Mapping[str, Any]) -> tuple[str, Any]:
+        """``(content key, last content change)``: a companion row stands
+        for its database; the database's changes include its companions'.
+        """
+        from sandroid.ai.device_files import _as_float, db_base
+
+        key = str(row.get("key") or "")
+        key = db_base(key) or key
+        times = [
+            t
+            for t in (_as_float(change_time(row)), self._companion.get(key))
+            if t is not None
+        ]
+        return key, (max(times) if times else None)
+
+    def _content(self, row: Mapping[str, Any]) -> Any:
+        key, last = self._key_last(row)
         if key not in self._files:
             from sandroid.ai import row_classifier as rc
 
-            if not self._serial:
-                try:
-                    from sandroid.ai.device_files import current_serial
-
-                    self._serial.append(current_serial())
-                except Exception:
-                    self._serial.append(None)
             self._files[key] = rc.file_content(
-                key, row_last=last, serial=self._serial[0]
+                key, row_last=last, serial=self._serial_now()
             )
         return self._files[key]
 
-    def file(self, key: str, last: Any = None) -> tuple[str | None, str]:
+    def file(self, row: Mapping[str, Any]) -> tuple[str | None, str]:
         """``(digest text, kind)`` of a Files row's local content."""
-        got = self._content(key, last)
+        got = self._content(row)
         return got.digest, got.kind
 
-    def haystack(self, key: str, last: Any = None) -> str:
-        """The full local text of a Files row (searched, never sent)."""
-        return self._content(key, last).match or ""
+    def haystack(self, row: Mapping[str, Any]) -> str:
+        """The local text ``content_contains`` searches (never sent): the
+        full decoded text, or with ``ai.mask_sensitive`` on only the reduced
+        and masked text (no yes/no oracle over hidden values).
+        """
+        got = self._content(row)
+        if self.masked:
+            from sandroid.ai import row_classifier as rc
+
+            return rc._mask(getattr(got, "reduced", "") or "")
+        return got.match or ""
+
+    def diff_text(self, row: Mapping[str, Any]) -> str:
+        """A kept version's last diff, searched apart from the content."""
+        if self.masked:
+            return ""  # the reduced diff is part of haystack()
+        return getattr(self._content(row), "diff", "") or ""
+
+    def _state(self, row: Mapping[str, Any]) -> str | None:
+        key, last = self._key_last(row)
+        if key not in self._states:
+            from sandroid.ai import row_classifier as rc
+
+            self._states[key] = rc.content_state(
+                key, row_last=last, serial=self._serial_now()
+            )
+        return self._states[key]
 
     def missing(self, row: Mapping[str, Any]) -> bool:
-        """A live Files row without local content (a device read would help)."""
+        """A live Files row without local content (a device read would help).
+
+        Cheap: cache meta and watchlist presence only, nothing is rendered.
+        """
         if row.get("scope") is not None:
             return False  # review rows: the device now is not the run
-        return self.file(str(row.get("key")), row.get("last"))[1] == "metadata"
+        return self._state(row) is None
+
+    def unreadable(self, row: Mapping[str, Any]) -> str | None:
+        """Why ``read_device_files`` could not read the row (else None)."""
+        if row.get("scope") is not None:
+            return None
+        state = self._state(row) or ""
+        return state.split(":", 1)[1] if state.startswith("unreadable:") else None
 
 
 def _flow_text(detail: Mapping[str, Any] | None, *, bodies: bool) -> str:
@@ -911,6 +1021,42 @@ def _matcher(value: Any, regex: bool, field: str) -> Callable[[str], bool]:
         return search
     low = text.lower()
     return lambda s: low in (s or "")[:HAYSTACK_CAP].lower()
+
+
+def _content_matcher(value: Any, regex: bool, masked: bool) -> Callable[[str], bool]:
+    """``content_contains``: the whole local text (up to
+    :data:`CONTENT_SEARCH_CAP`), a regex line by line in bounded windows.
+
+    Raises:
+        ToolError: A regex while ``ai.mask_sensitive`` is on (it would be a
+            character-by-character oracle over masked values).
+    """
+    text = str(value)
+    if not regex:
+        low = text.lower()
+        return lambda s: low in (s or "")[:CONTENT_SEARCH_CAP].lower()
+    if masked:
+        raise _invalid(
+            "content_contains cannot be a regular expression while "
+            "ai.mask_sensitive is on",
+            hint="Search a literal (regex=false); masked values are not searched.",
+        )
+    from sandroid.ai.results import _grep_line
+
+    pattern = _compile_regex(text, "content_contains")
+    width = 60_000
+
+    def search(s: str | None) -> bool:
+        deadline = time.monotonic() + REGEX_ROW_BUDGET_S
+        for line in (s or "")[:CONTENT_SEARCH_CAP].splitlines():
+            for start in range(0, max(len(line), 1), width):
+                if _grep_line(pattern, line[start : start + width + 500], deadline):
+                    return True
+                if time.monotonic() > deadline:
+                    return False
+        return False
+
+    return search
 
 
 def _int(value: Any, field: str) -> int:
@@ -1182,8 +1328,8 @@ def _files_pred(
             )
         )
     elif field == "content_contains":
-        m = _matcher(value, regex, field)
-        costly.append(lambda r: m(details.haystack(str(r.get("key")), r.get("last"))))
+        m = _content_matcher(value, regex, details.masked)
+        costly.append(lambda r: m(details.haystack(r)) or m(details.diff_text(r)))
 
 
 def _filter(rows: list[dict], preds: list[Predicate]) -> list[dict]:
@@ -1314,19 +1460,31 @@ def _content_missing(
     result: dict[str, Any], rows: list[dict], details: _Details, tool: str
 ) -> None:
     """``content_missing`` + hint: live Files rows judged / searched without
-    content because nothing of them was read from the device yet.
+    content because nothing of them was read from the device yet; and
+    ``content_unreadable`` {reason: n}: rows ``read_device_files`` could not
+    read (gone, permission denied, too big ...), never worth reading again.
     """
     missing = 0
+    unreadable: dict[str, int] = {}
     for row in rows:
-        with contextlib.suppress(Exception):
-            missing += bool(details.missing(row))
+        try:
+            reason = details.unreadable(row)
+            if reason:
+                unreadable[reason] = unreadable.get(reason, 0) + 1
+            elif details.missing(row):
+                missing += 1
+        except Exception:
+            logger.debug("content state failed", exc_info=True)
+    if unreadable:
+        result["content_unreadable"] = unreadable
     if not missing:
         return
     result["content_missing"] = missing
     result["content_hint"] = (
         f"{missing} of these files have no local content yet (never read "
-        "from the device); call read_device_files(where=...) with the same "
-        f"where, then run {tool} again"
+        "from the device); call read_device_files with the same where "
+        "WITHOUT content_contains (it ignores it), then run "
+        f"{tool} again"
     )
 
 
@@ -1548,6 +1706,7 @@ def find_rows(
     preds, summary = compile_where(lens, where, details)
     got = _collect(lens)
     rows, source, max_seq = got.rows, got.source, got.max_seq
+    details.set_rows(rows)
     collected_at = time.time()
     scoped = _scoped(rows, scope)
     # The hidden matches are counted, never listed (scope="shown"), so the
@@ -1841,6 +2000,7 @@ def classify_rows(
     preds, where_summary = compile_where(lens, where, details)
     got = _collect(lens)
     rows, source, max_seq = got.rows, got.source, got.max_seq
+    details.set_rows(rows)
     collected_at = time.time()
     scoped = _scoped(rows, scope)
     all_by_key = {r["key"]: r for r in rows}
@@ -1923,7 +2083,7 @@ def classify_rows(
                 rc.files_digest(
                     row,
                     mask=mask,
-                    content=details.file(row["key"], row.get("last")),
+                    content=details.file(row),
                 )
             )
     metadata_only = sum(1 for d in digests if d.kind == "metadata")
@@ -2524,7 +2684,8 @@ def get_rows(
         page = rows[cursor : cursor + limit]
         next_cursor = cursor + limit if cursor + limit < len(rows) else None
     mask = rc.mask_enabled()
-    details = _Details()
+    details = _Details(masked=mask)
+    details.set_rows(got.rows)
     out = []
     for row in page:
         item: dict[str, Any] = {
@@ -2542,7 +2703,7 @@ def get_rows(
                     row,
                     mask=mask,
                     row_cap=max_bytes,
-                    content=details.file(row["key"], row.get("last")),
+                    content=details.file(row),
                 )
             item["digest"] = digest.text
             item["content"] = digest.kind

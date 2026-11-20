@@ -941,7 +941,7 @@ def test_where_haystack_is_capped(store, monkeypatch):
     from sandroid.ai import row_classifier
 
     store.register_row_source("files", lambda: FILE_ROWS, None)
-    big = "x" * (lens_rows.HAYSTACK_CAP + 10) + "needle"
+    big = "x" * (lens_rows.CONTENT_SEARCH_CAP + 10) + "needle"
     monkeypatch.setattr(
         row_classifier,
         "file_content",
@@ -1690,3 +1690,27 @@ def test_a_hidden_lens_of_an_old_flow_dir_is_not_the_view(tmp_path, monkeypatch)
     got = lens_rows._collect("network")
     assert got.source == "flow_log"
     assert {r.get("host") for r in got.rows} == {"new.device"}
+
+
+def test_content_contains_searches_past_64_kb_and_the_diff_apart(store, monkeypatch):
+    from sandroid.ai import row_classifier
+
+    store.register_row_source("files", lambda: FILE_ROWS, None)
+    long_text = "x" * 300_000 + " needle-1 " + '{"a":"' + "y" * 100_000 + 'z2"}'
+    monkeypatch.setattr(
+        row_classifier,
+        "file_content",
+        lambda key, **kw: row_classifier.FileContent(
+            "d", long_text, "content", diff="+ token-42"
+        ),
+    )
+    for regex in (False, True):
+        hits = lens_rows.find_rows(
+            "files", {"content_contains": "needle-1", "regex": regex}, scope="all"
+        )
+        assert len(hits["keys"]) == 2
+    assert len(lens_rows.find_rows("files", {"content_contains": "token-42"})["keys"])
+    one_line = lens_rows.find_rows(
+        "files", {"content_contains": r"y{5}z2", "regex": True}, scope="all"
+    )
+    assert len(one_line["keys"]) == 2  # a match deep inside one long line

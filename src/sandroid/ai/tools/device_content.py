@@ -2,17 +2,25 @@
 
 Toolset ``lenses``. The Files lens tools (``find_rows`` ``content_contains``,
 ``classify_rows``, ``get_rows``) only see local content: a kept watchlist
-version or what this tool read. It selects rows exactly like ``find_rows``
-(``where``, ``scope``, ``keys``), reads each file from the ONE device it
-pinned at the start (:mod:`sandroid.ai.device_files`) and caches the result
-in ``<session>/ai/content_cache/``. It returns counts, never content: the
-content reaches the model only through the Files digests (reduced, capped).
+version or what this tool read. It selects rows like ``find_rows``
+(``where``, ``scope``, ``keys``) with the structural fields only
+(``content_contains`` is ignored: there is no content to match yet), reads
+each file from the ONE device it pinned at the start
+(:mod:`sandroid.ai.device_files`) and caches the result in
+``<session>/ai/content_cache/``. A SQLite companion row (``-wal``, ``-shm``,
+``-journal``) is read as its database. Files that cannot be read get a
+negative cache entry, so the lens tools report them as
+``content_unreadable`` instead of missing. Rows recorded on another device
+than the one it would read are refused. It returns counts, never content:
+the content reaches the model only through the Files digests (reduced,
+capped).
 
 ``REVERSIBLE`` with ``can_remember_choice``: it pulls app-private data to show
 it to a remote model, so the analyst approves it (once, or "allow always"),
 like ``pull_path``. It claims no device lease and writes nothing on the
 device or in the watchlist; while a WORLD lease is held (snapshot restore,
-emulator restart) it answers ``busy``.
+emulator restart) it answers ``busy``, and a WORLD lease taken mid-run
+stops it (``stop_reason`` ``busy``, partial).
 """
 
 from __future__ import annotations
@@ -46,6 +54,8 @@ SKIP_REASONS = (
     "cancelled",
     "error",
 )
+#: ``where`` fields that read local content: ignored here (there is none yet).
+CONTENT_WHERE = ("content_contains",)
 
 
 def _audit(summary: str, data: dict) -> None:
@@ -118,9 +128,10 @@ _DESCRIPTION = (
             "where": {
                 "type": "object",
                 "description": (
-                    "Row filter, the same fields as find_rows on the files "
-                    "lens: path_glob[], ops, process, app, watched, "
-                    "min_count, text, content_contains, regex."
+                    "Row filter, the same structural fields as find_rows on "
+                    "the files lens: path_glob[], ops, process, app, "
+                    "watched, min_count, text, regex. content_contains is "
+                    "ignored (there is no local content to match yet)."
                 ),
             },
             "scope": {
@@ -203,6 +214,7 @@ def read_device_files(
         _filter,
         _invalid,
         _scoped,
+        change_time,
         compile_where,
     )
     from sandroid.services.row_highlights import normalize_key
@@ -243,7 +255,11 @@ def read_device_files(
             hint="Open or start a session first.",
         )
 
-    preds, where_summary = compile_where("files", where, _Details())
+    # Structural fields only: content_contains needs the content this call
+    # is about to read (it would select nothing).
+    ignored = [f for f in CONTENT_WHERE if (where or {}).get(f) not in (None, "")]
+    structural = {k: v for k, v in (where or {}).items() if k not in CONTENT_WHERE}
+    preds, where_summary = compile_where("files", structural, _Details(masked=False))
     got = _collect("files")
     rows = _scoped(got.rows, scope)
     unknown: list[str] = []
@@ -257,17 +273,26 @@ def read_device_files(
     skipped_keys: dict[str, list[str]] = {}
 
     def skip(reason: str, key: str) -> None:
-        skipped[reason] += 1
+        skipped[reason] = skipped.get(reason, 0) + 1
         listed = skipped_keys.setdefault(reason, [])
         if len(listed) < MAX_SKIPPED_KEYS:
             listed.append(key)
 
-    candidates = []
+    # A SQLite companion row (x.db-wal, -shm, -journal) stands for its
+    # database: one read, its content change counts for the database.
+    targets: dict[str, Any] = {}
     for row in matched:
         if row.get("scope") is not None:
             skip("review_row", row["key"])
-        else:
-            candidates.append(row)
+            continue
+        key = str(row["key"])
+        path = df.db_base(key) or key
+        t = df._as_float(change_time(row))
+        if path not in targets:
+            targets[path] = t
+        elif t is not None:
+            targets[path] = max(t, targets[path] or t)
+    candidates = list(targets.items())
 
     result: dict[str, Any] = {
         "serial": None,
@@ -280,17 +305,28 @@ def read_device_files(
     }
     if where_summary:
         result["where"] = where_summary
+    if ignored:
+        result["ignored_where"] = ignored
     if unknown:
         result["unknown_keys"] = unknown[:MAX_SKIPPED_KEYS]
     keys_read: list[str] = []
 
     if candidates:
-        serial = df.current_serial()
+        serial, recorded = df.read_target()
         if not serial:
             raise ToolError(
-                "no_device",
+                "device_unavailable",
                 "no device is selected, so there is nothing to read from",
                 hint="Select a device (or start the file monitor) first.",
+            )
+        if recorded and recorded != serial:
+            raise ToolError(
+                "device_unavailable",
+                f"the Files rows were recorded on {recorded}, but the device "
+                f"that would be read is {serial}",
+                hint=f"Select {recorded} again (or start the monitor on "
+                f"{serial}) and read then; reading {serial} would mix devices.",
+                details={"reason": "wrong_device", "recorded": recorded},
             )
         result["serial"] = serial
         ctx = current_run_context()
@@ -307,8 +343,11 @@ def read_device_files(
                 return "cancelled"
             if deadline is not None and time.monotonic() > deadline:
                 return "deadline"
+            if df.world_busy():
+                return "busy"
             return None
 
+        written: list[Any] = []
         _read_rows(
             df.DeviceFileReader(serial, should_stop=should_stop),
             root,
@@ -316,6 +355,7 @@ def read_device_files(
             result,
             skip,
             keys_read,
+            written,
             should_stop=should_stop,
             progress=report_tool_progress,
             only_missing=bool(only_missing),
@@ -326,7 +366,7 @@ def read_device_files(
             sqlite=sqlite,
         )
         try:
-            df.evict(root)
+            df.evict(root, keep=written)
         except Exception:
             logger.debug("content cache eviction failed", exc_info=True)
 
@@ -347,6 +387,8 @@ def read_device_files(
         + (f"; stopped early: {result['stop_reason']}" if result["partial"] else "")
         + ")"
     )
+    if ignored:
+        summary += "; content_contains was ignored (nothing local to match yet)"
     if result["read"] or result["cached"]:
         summary += "; find_rows content_contains / classify_rows now see them"
     result = {"summary": summary, **result}
@@ -368,24 +410,14 @@ def read_device_files(
     return result
 
 
-def _is_local(entry: Any, serial: str, st: Any, last: Any, only_missing: bool) -> bool:
-    """A valid cache entry (same device mtime/size/serial, no later write),
-    or with *only_missing* a kept watchlist version as new as the row.
-    """
-    if entry is not None and entry.valid(
-        row_last=last, serial=serial, mtime=st.mtime, size=st.size
-    ):
-        return True
-    return only_missing and _watchlist_fresh(st.path, last)
-
-
 def _read_rows(
     reader: Any,
     root: Any,
-    candidates: list[dict],
+    candidates: list[tuple[str, Any]],
     result: dict[str, Any],
     skip: Any,
     keys_read: list[str],
+    written: list[Any],
     *,
     should_stop: Any,
     progress: Any,
@@ -396,71 +428,120 @@ def _read_rows(
     total_cap: int,
     sqlite: str,
 ) -> None:
-    """Stat every candidate once, then read them one by one (in place)."""
+    """Stat every candidate once, then read them one by one (in place).
+
+    *candidates*: ``(path, last content change)``. Unreadable files get a
+    negative cache entry; valid entries (positive or negative) are not read
+    again.
+    """
     from sandroid.ai import device_files as df
 
     total = len(candidates)
     progress(0, total, note="reading", force=True)
-    paths = [str(r["key"]) for r in candidates]
-    wals = [p + "-wal" for p in paths if df.is_db_name(p)]
-    stats = reader.stat(paths + wals)
+    entries = {path: df.load_entry(path, root) for path, _t in candidates}
+    wals = [
+        p + "-wal"
+        for p, e in entries.items()
+        if df.is_db_name(p) or (e is not None and e.meta.get("label") == "sqlite")
+    ]
+    stats = reader.stat([p for p, _t in candidates] + wals)
     reads = 0
-    for i, row in enumerate(candidates):
-        path = str(row["key"])
+
+    def remember(path: str, status: str, st: Any, wal: Any, last: Any) -> None:
+        try:
+            entry = df.remember_unreadable(
+                root,
+                reader,
+                path,
+                status,
+                st,
+                wal=wal,
+                row_last=last,
+                cap=per_file,
+                sqlite=sqlite,
+            )
+            written.append(entry.dir)
+        except Exception:
+            logger.debug("negative cache entry failed", exc_info=True)
+
+    def stop_here(i: int, reason: str) -> None:
+        result["stop_reason"] = reason
+        for rest, _t in candidates[i:]:
+            skip("cancelled", rest)
+
+    for i, (path, last) in enumerate(candidates):
         stop = should_stop()
         if stop:
-            result["stop_reason"] = stop
-            for rest in candidates[i:]:
-                skip("cancelled", str(rest["key"]))
+            stop_here(i, stop)
             break
         st = stats.get(path) or df.Stat(path, error="error")
+        wal = stats.get(path + "-wal")
+        entry = entries.get(path)
         if st.error:
             skip(st.error, path)
+            if st.error in df.NEGATIVE_STATUSES:
+                remember(path, st.error, st, wal, last)
         elif not st.regular:
             skip("not_regular", path)
-        else:
-            last = row.get("last")
-            if not refresh and _is_local(
-                df.load_entry(path, root), reader.serial, st, last, only_missing
-            ):
-                result["cached"] += 1
-            elif reads >= max_files:
-                skip("budget", path)
-                result["stop_reason"] = "max_files"
+            remember(path, "not_regular", st, wal, last)
+        elif (
+            not refresh
+            and entry is not None
+            and entry.valid(
+                row_last=last,
+                serial=reader.serial,
+                mtime=st.mtime,
+                size=st.size,
+                wal=wal,
+                cap=per_file,
+                sqlite=sqlite,
+            )
+        ):
+            if entry.negative:
+                skip(entry.status, path)
             else:
-                wal = stats.get(path + "-wal")
-                need = df.expected_bytes(path, st, wal, per_file)
-                left = total_cap - result["bytes_read"]
-                if need > left:
-                    skip("budget", path)
+                result["cached"] += 1
+        elif only_missing and not refresh and _watchlist_fresh(path, last):
+            result["cached"] += 1
+        elif df.db_too_big(path, st, wal) and sqlite != "skip":
+            skip("too_big", path)
+            remember(path, "too_big", st, wal, last)
+        elif reads >= max_files:
+            skip("budget", path)
+            result["stop_reason"] = "max_files"
+        else:
+            need = df.expected_bytes(path, st, wal, per_file, sqlite)
+            left = total_cap - result["bytes_read"]
+            if need > left:
+                skip("budget", path)
+            else:
+                try:
+                    outcome = df.read_into_cache(
+                        reader,
+                        root,
+                        path,
+                        st,
+                        wal=wal,
+                        row_last=last,
+                        cap=per_file,
+                        sqlite=sqlite,
+                        budget_left=left,
+                    )
+                except Exception:
+                    logger.warning("reading %s failed", path, exc_info=True)
+                    outcome = df.FileOutcome("error")
+                reads += 1
+                result["bytes_read"] += outcome.bytes_read
+                if outcome.entry is not None:
+                    written.append(outcome.entry.dir)
+                if outcome.status == "read":
+                    result["read"] += 1
+                    keys_read.append(path)
+                elif outcome.status in ("cancelled", "deadline", "busy"):
+                    stop_here(i, outcome.status)
+                    break
                 else:
-                    try:
-                        outcome = df.read_into_cache(
-                            reader,
-                            root,
-                            path,
-                            st,
-                            wal=wal,
-                            row_last=last,
-                            cap=per_file,
-                            sqlite=sqlite,
-                            budget_left=left,
-                        )
-                    except Exception:
-                        logger.warning("reading %s failed", path, exc_info=True)
-                        outcome = df.FileOutcome("error")
-                    reads += 1
-                    result["bytes_read"] += outcome.bytes_read
-                    if outcome.status == "read":
-                        result["read"] += 1
-                        keys_read.append(path)
-                    elif outcome.status in ("cancelled", "deadline"):
-                        result["stop_reason"] = outcome.status
-                        for rest in candidates[i:]:
-                            skip("cancelled", str(rest["key"]))
-                        break
-                    else:
-                        skip(outcome.status, path)
+                    skip(outcome.status, path)
         progress(i + 1, total, note="reading")
     progress(total, total, note="read", force=True)
 

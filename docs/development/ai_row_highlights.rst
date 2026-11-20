@@ -457,11 +457,20 @@ Reading file content from the device
 
 ``ai/tools/device_content.py`` + ``ai/device_files.py``. The lens tools
 never touch the device; this one reads the selected Files rows' content into
-the session's content cache so they can use it. It selects rows exactly like
+the session's content cache so they can use it. It selects rows like
 ``find_rows`` (``_collect``, ``compile_where``, ``_scoped``; ``keys``
-narrows further) and skips review rows (``scope`` set: the device now is not
-the run). It returns counts, never content: content reaches the model only
-through the Files digests above.
+narrows further) with the structural fields only: ``content_contains`` is
+ignored (``ignored_where``), as there is no content to match yet. It skips
+review rows (``scope`` set: the device now is not the run) and reads a
+SQLite companion row (``x.db-wal``, ``-shm``, ``-journal``) as its database.
+It returns counts, never content: content reaches the model only through
+the Files digests above.
+
+Lens tool results then say ``content_missing: N`` (no local content yet;
+decided from cache meta and watchlist presence, nothing rendered) and
+``content_unreadable: {reason: N}`` (rows the tool could not read: they
+carry a negative cache entry and are never worth reading again, e.g. an
+editor's temp file that is gone).
 
 - **Approval.** ``RiskTier.REVERSIBLE`` with ``can_remember_choice``: it
   pulls app-private data in order to show it to a remote model, so the
@@ -471,10 +480,18 @@ through the Files digests above.
 - **One device.** The serial is fixed once per call (the running monitor's
   ``timeline_serial``, else ``Adb.selected_serial()``) and every argv is
   ``Adb.base_argv(serial)``; the shared target is never read again or
-  changed, so a device switch mid-run cannot redirect a read.
+  changed, so a device switch mid-run cannot redirect a read. The last
+  monitor device is remembered: when the rows were recorded on another
+  device than the one that would be read, the call is refused
+  (``device_unavailable``, ``details.reason = "wrong_device"``).
+- **One shell string.** Every device command (probe, stat, head, cat, the
+  su forms) is ONE argv element after ``exec-out`` with shlex-quoted paths:
+  with several arguments adb 36 escapes each one, so quotes and redirects
+  would reach the command literally.
 - **Root.** Probed once per call: ``exec-out id -u`` = 0 reads directly;
-  else ``su 0`` (5 s probe), else ``su -c``; else no root, and ``/data``
-  paths come back ``permission_denied``.
+  else ``su 0`` (5 s probe), else ``su -c`` (su's own stderr redirected
+  outside the quoted command, so Magisk notices never reach the bytes);
+  else no root, and ``/data`` paths come back ``permission_denied``.
 - **Reads.** One batched ``stat -c '%s|%Y|%F|%n'`` (50 paths per call;
   error lines become ``gone`` / ``permission_denied``, directories
   ``not_regular``), then per file ``exec-out head -c N+1`` (argv, binary
@@ -489,7 +506,18 @@ through the Files digests above.
   bytes (``budget`` skips). Progress: ``reading 12/40``.
 - **Leases.** None are claimed (reads change nothing). While someone holds
   the WORLD lease (snapshot restore, emulator restart) the tool answers
-  ``busy``.
+  ``busy``; a WORLD lease taken mid-run stops it (``stop_reason`` ``busy``).
+  The arbiter counts WORLD acquisitions (``world_epoch``); cache entries
+  carry the epoch (per process) and are stale once it moved, so lookups
+  never serve content from before a restore without a device call.
+  Snapshot loads that bypass the arbiter (the TUI's own Rewind) are caught
+  by the next read's stat, not by lens lookups.
+- **Own reads.** The monitor sees ``head`` / ``cat`` / ``stat`` / ``su`` on
+  the app's files as open/access events. They are not content changes
+  (staleness uses the row's last content change, ``last_change`` or
+  ``last`` with change ops), and the AI tool rows leave those processes out
+  of ``processes`` and ``count``. The Files lens's own "by" column still
+  lists them.
 - **Audit.** One ``ai/files_read`` timeline line with the counts.
 
 The cache: ``<session>/ai/content_cache/<sha1(path)>/`` (folders 0700, files
@@ -501,8 +529,13 @@ unreduced: searched locally by ``content_contains``, never sent) and
 ``digest.txt`` (the reduced rendering). An entry is stale when the row's
 ``last`` is newer than the one it was read for (the monitor saw a write),
 when the batched stat shows another mtime or size, when it came from another
-serial, or with ``refresh=true``; ``only_missing`` (default) also skips files
-whose kept watchlist version is as new as the row. A session switch is a
+serial, after a WORLD lease, when a ``-wal``'s mtime or size changed, when a
+bigger ``max_bytes_per_file`` (for a truncated read) or ``sqlite="sample"``
+after ``tables`` / ``skip`` is asked for, or with ``refresh=true``;
+``only_missing`` (default) also skips files whose kept watchlist version is
+as new as the row. Rendered kept watchlist versions are cached in memory
+(32 versions), so repeated searches over watched databases do not render
+them again. A session switch is a
 different folder. At most 64 MB per session, oldest ``read_at`` evicted
 first. The tool never writes the watchlist, the forensic service or the
 privacy scan.
@@ -520,11 +553,20 @@ Privacy rules:
   whether ``ai.mask_sensitive`` is on or not.
 - File content the same way, always: prefs keys (``auth_token = [jwt, 180
   chars]``), JSON keys, SQLite column names and ``name=value`` lines of
-  text files whose name matches; XML or JSON that does not parse (a
-  truncated head) is reduced by pattern. ``content_contains`` searches the
-  full local text (``match.txt`` / the kept copy), so "files containing
-  this token" still finds a token stored under a secret-named key, while
-  the model only ever gets the reduced digest.
+  text files whose name matches (also ``export NAME=`` and quoted names);
+  a key/value table's value cell by the name in its ``key`` / ``name``
+  cell; JSON inside a prefs value or a SQLite cell by its own keys; any
+  JWT-shaped value whatever its name. XML or JSON that does not parse (a
+  truncated head) is reduced by pattern (element tags, ``name=`` /
+  ``key=`` attributes, every JSON value shape, cut-off values), then by
+  ``redact_secrets``. Device text in a digest is framed in ``<content>`` /
+  ``<diff>`` with ``<``/``>`` escaped and names/values kept on one line, so
+  it cannot forge digest lines. ``content_contains`` searches the full local
+  text (``match.txt`` / the kept copy, up to 2 MB; the last diff apart), so
+  "files containing this token" still finds a token stored under a
+  secret-named key, while the model only ever gets the reduced digest. With
+  ``ai.mask_sensitive`` on it searches only the reduced, masked text and
+  refuses ``regex`` (no character-by-character oracle).
 - With ``ai.mask_sensitive`` on, every digest runs through
   :func:`~sandroid.ai.safety.redact_secrets`; if that raises, the digest is
   replaced by ``[digest withheld: secret redaction failed]`` (fails closed)

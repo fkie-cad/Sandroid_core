@@ -52,6 +52,9 @@ class FakeStream:
         self.closed = False
         self.delay = 0.0
 
+    def close(self) -> None:
+        self.closed = True
+
     def read1(self, n: int) -> bytes:
         if self.delay:
             time.sleep(self.delay)
@@ -623,3 +626,274 @@ def test_watchlist_and_forensics_are_never_touched(tmp_path, monkeypatch):
     for word in ("watchlist_store", "get_forensic_service", "privacy_scan"):
         assert f"import {word}" not in source
         assert f"{word}." not in source
+
+
+# --------------------------------------------------------------------------
+# fix round: privacy reductions
+# --------------------------------------------------------------------------
+
+
+def test_json_inside_a_prefs_value_is_reduced():
+    prefs = (
+        '<map><string name="user_profile">'
+        + json.dumps({"name": "bob", "access_token": JWT, "n": {"api_key": 7}})
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        + "</string></map>"
+    ).encode()
+    r = rc.render_content("/data/data/com.x/shared_prefs/p.xml", prefs)
+    assert '"name":"bob"' in r.digest
+    assert JWT not in r.digest
+    assert '"api_key":"[number, 1 chars]"' in r.digest
+    assert JWT in r.match
+
+
+def test_sqlite_key_value_rows_reduce_by_the_row_name(tmp_path):
+    db = tmp_path / "kv.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE kv (key TEXT, value TEXT)")
+    conn.executemany(
+        "INSERT INTO kv VALUES (?, ?)",
+        [
+            ("auth_token", "s3cr3t-value-1"),
+            ("theme", "dark"),
+            ("cfg", '{"api_key": 1}'),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    r = rc.render_content("/x/kv.db", db=db)
+    assert "key=auth_token; value=[text, 14 chars]" in r.digest
+    assert "key=theme; value=dark" in r.digest
+    assert '"api_key":"[number, 1 chars]"' in r.digest  # JSON inside a cell
+    assert "s3cr3t-value-1" not in r.digest
+    assert "s3cr3t-value-1" in r.match
+
+
+def test_truncated_json_reduces_every_secret_value_shape():
+    head = (
+        b'{"password": 12345678, "session": {"a": 1, "b": [2, 3]}, '
+        b'"keys": ["k1", "k2"], "ok": "fine", "token": "abc-unterminated'
+    )
+    r = rc.render_content("/sdcard/a.json", head)
+    for secret in ("12345678", '"a": 1', "k1", "abc-unterminated"):
+        assert secret not in r.digest, secret
+    assert '"ok": "fine"' in r.digest
+    assert "abc-unterminated" in r.match
+
+
+def test_non_prefs_xml_reduces_by_tag_and_key_attribute():
+    xml = (
+        b"<config><apiKey>K-1234</apiKey><host>x.example</host>"
+        b'<entry key="password">hunter2</entry>'
+        b'<item name="secret" value="trunc-abc'
+    )
+    r = rc.render_content("/sdcard/c.xml", xml)
+    for secret in ("K-1234", "hunter2", "trunc-abc"):
+        assert secret not in r.digest, secret
+    assert "<host>x.example</host>" in r.digest
+    assert "hunter2" in r.match
+
+
+def test_kv_lines_quoted_and_exported_names_and_bare_jwts(monkeypatch):
+    text = (
+        "export API_TOKEN=abc123\n"
+        '"password": "pw-1"\n'
+        "note = hello\n"
+        f"bearer was {JWT} yesterday\n"
+    ).encode()
+    r = rc.render_content("/sdcard/env.sh", text)
+    for secret in ("abc123", "pw-1", JWT):
+        assert secret not in r.digest, secret
+    assert "note = hello" in r.digest
+    assert f"[jwt, {len(JWT)} chars]" in r.digest
+    for secret in ("abc123", "pw-1", JWT):
+        assert secret in r.match
+
+
+def test_last_resort_redaction_runs_on_unparsed_heads(monkeypatch):
+    seen = []
+
+    def redact(text):
+        seen.append(text)
+        return text.replace("AKIA0000", "[masked]")
+
+    monkeypatch.setattr("sandroid.ai.safety.redact_secrets", redact)
+    r = rc.render_content("/sdcard/log.txt", b"aws AKIA0000 here")
+    assert seen
+    assert "[masked]" in r.digest
+    assert "AKIA0000" in r.match
+    prefs = rc.render_content("/x.xml", PREFS)  # parsed: name reductions only
+    assert prefs.label == "prefs"
+
+
+def test_pref_names_cannot_forge_lines():
+    prefs = b'<map><string name="a&#10;last diff: x">v&#10;w</string></map>'
+    r = rc.render_content("/x.xml", prefs)
+    assert "\n" not in r.digest
+    assert "a\\nlast diff: x = v\\nw" in r.digest
+
+
+# --------------------------------------------------------------------------
+# fix round: reader / cache
+# --------------------------------------------------------------------------
+
+
+def test_parse_stat_prefers_the_exact_path_and_keeps_good_lines():
+    paths = ["/d/x.db", "/d/x.db-wal"]
+    text = (
+        "1|1700000001|regular file|/d/x.db\n"
+        "stat: '/d/x.db-wal': No such file or directory\n"
+    )
+    out = df.parse_stat(text, paths)
+    assert out["/d/x.db"].regular
+    assert out["/d/x.db-wal"].error == "gone"
+    # An error line never overwrites a path that parsed.
+    again = df.parse_stat(
+        "1|1700000001|regular file|/d/x.db\nstat: '/d/x.db': I/O error\n", paths
+    )
+    assert again["/d/x.db"].regular
+
+
+def test_probe_and_stat_stop_on_cancel_without_a_run():
+    flag = threading.Event()
+
+    def popen(argv, **kw):
+        proc = FakeProc(argv, None)  # never ends
+        proc.stdout.delay = 0.01
+        proc.stdout.chunk = 1
+        flag.set()
+        return proc
+
+    reader = df.DeviceFileReader(
+        SERIAL, popen=popen, should_stop=lambda: "cancelled" if flag.is_set() else None
+    )
+    t0 = time.monotonic()
+    assert reader.probe_root() == "none"
+    assert reader.stat(["/sdcard/a"])["/sdcard/a"].error == "error"
+    assert time.monotonic() - t0 < 2
+
+
+def test_stream_closes_stdout():
+    dev = FakeDevice({"/sdcard/a": b"abc"})
+    dev.reader().head("/sdcard/a", 10)
+    assert dev.procs[-1].stdout.closed
+
+
+def test_root_probe_redirects_su_stderr():
+    dev = FakeDevice({}, adbd_root=False)
+    dev.reader().probe_root()
+    probes = [c[4] for c in dev.calls]
+    assert probes == [
+        "id -u",
+        "su 0 id -u 2>/dev/null",
+        "su -c 'id -u 2>/dev/null' 2>/dev/null",
+    ]
+
+
+def test_wal_change_makes_the_db_entry_stale(tmp_path):
+    main, wal = _wal_db(tmp_path)
+    path = "/data/data/com.x/databases/app.db"
+    dev = FakeDevice({path: main, path + "-wal": wal})
+    root = tmp_path / "c"
+    reader = dev.reader()
+    stats = reader.stat([path, path + "-wal"])
+    df.read_into_cache(reader, root, path, stats[path], wal=stats[path + "-wal"])
+    entry = df.load_entry(path, root)
+    st, w = stats[path], stats[path + "-wal"]
+    assert entry.valid(mtime=st.mtime, size=st.size, wal=w)
+    dev.mtimes[path + "-wal"] += 5
+    w2 = dev.reader().stat([path + "-wal"])[path + "-wal"]
+    assert not entry.valid(mtime=st.mtime, size=st.size, wal=w2)
+    assert not entry.valid(mtime=st.mtime, size=st.size, wal=None)
+
+
+def test_cap_and_sqlite_mode_in_validity(tmp_path):
+    root = tmp_path / "c"
+    path = "/sdcard/big.txt"
+    dev = FakeDevice({path: b"x" * 500})
+    out = _read(dev, root, path, cap=100)
+    assert out.entry.meta["truncated"] is True
+    assert out.entry.valid(cap=100)
+    assert not out.entry.valid(cap=1000)
+    main, _wal = _wal_db(tmp_path)
+    db = "/d/a.db"
+    tables = _read(FakeDevice({db: main}), root, db, sqlite="tables").entry
+    assert tables.valid(sqlite="tables")
+    assert not tables.valid(sqlite="sample")
+    skipped = _read(FakeDevice({db: main}), root, db, sqlite="skip")
+    assert skipped.status == "sqlite_skipped"
+    assert skipped.entry.negative
+    assert not skipped.entry.valid(sqlite="sample")
+
+
+def test_not_sqlite_db_cut_to_cap_is_truncated(tmp_path):
+    path = "/d/notes.db"
+    dev = FakeDevice({path: b"plain text " * 100})
+    out = _read(dev, tmp_path / "c", path, cap=50)
+    assert out.status == "read"
+    assert out.entry.meta["truncated"] is True
+
+
+def test_deleted_between_stat_and_read_is_gone(tmp_path):
+    path = "/sdcard/a.txt"
+    dev = FakeDevice({path: b"abc"})
+    reader = dev.reader()
+    st = reader.stat([path])[path]
+    del dev.files[path]
+    out = df.read_into_cache(reader, tmp_path / "c", path, st)
+    assert out.status == "gone"
+    assert out.entry.negative
+
+
+def test_world_lease_since_the_read_invalidates(tmp_path, monkeypatch):
+    from sandroid.ai import arbiter as arb
+
+    arb.reset_for_tests()
+    root = tmp_path / "c"
+    path = "/sdcard/a.txt"
+    _read(FakeDevice({path: b"abc"}), root, path)
+    assert df.lookup(path, root=root) is not None
+    a = arb.get_arbiter()
+    a.claim("restorer", frozenset({arb.ResourceId.WORLD}))
+    a.release_all("restorer")
+    assert df.lookup(path, root=root) is None
+    arb.reset_for_tests()
+
+
+def test_recorded_serial_is_remembered(monkeypatch):
+    monkeypatch.setattr(df, "_LAST_MONITOR_SERIAL", ["emulator-A"])
+    monkeypatch.setattr(df, "selected_serial", lambda: "emulator-B")
+    assert df.read_target() == ("emulator-B", "emulator-A")
+    assert df.current_serial() == "emulator-A"
+
+
+def test_eviction_keeps_the_running_calls_entries(tmp_path):
+    root = tmp_path / "c"
+    e = df.write_entry(
+        root, "/a", {"read_at": 1.0}, digest="", match="", files={"raw.bin": b"x" * 99}
+    )
+    assert df.evict(root, cap=0, keep=[e.dir]) == 0
+    assert df.load_entry("/a", root) is not None
+    assert df.evict(root, cap=0) == 1
+
+
+def test_kept_version_renders_are_cached(tmp_path, monkeypatch):
+    from sandroid.core import watchlist_store
+
+    version = tmp_path / "v001"
+    version.mkdir()
+    (version / "a.xml").write_bytes(PREFS)
+    monkeypatch.setattr(watchlist_store, "version_dirs", lambda p: [version])
+    monkeypatch.setattr(watchlist_store, "version_file", lambda v, p: version / "a.xml")
+    monkeypatch.setattr(watchlist_store, "version_diff", lambda v: None)
+    calls = []
+    real = rc._render_local
+    monkeypatch.setattr(rc, "_render_local", lambda *a: calls.append(1) or real(*a))
+    rc._LOCAL_RENDERS.clear()
+    for _ in range(3):
+        assert "user_id = u-4711" in rc.file_content("/data/data/com.x/a.xml").digest
+    assert len(calls) == 1
+    # content_state never renders.
+    monkeypatch.setattr(rc, "_render_local", lambda *a: 1 / 0)
+    assert rc.content_state("/data/data/com.x/a.xml") == "watchlist"

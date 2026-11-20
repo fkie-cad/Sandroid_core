@@ -31,9 +31,15 @@ Cache (``<session>/ai/content_cache/<sha1(path)>/``, folder 0700, files
 device mtime and size, ``read_at``, kind, truncated), ``raw.bin`` (or
 ``db`` + ``db-wal``), ``match.txt`` (the full decoded text, searched
 locally, never sent to the model) and ``digest.txt`` (the reduced
-rendering). An entry is stale when the row's ``last`` is newer than the one
-it was read for, the device mtime or size differ, or it came from another
-serial; at most 64 MB per session, oldest ``read_at`` evicted first.
+rendering). An entry is stale when the row's last content change is newer
+than the one it was read for, the device mtime or size (of the file, and of
+a database's ``-wal``) differ, it came from another serial, a WORLD lease
+was taken since (snapshot restore, emulator restart: the arbiter's epoch,
+per process), or a bigger cap / fuller SQLite mode is asked for; at most
+64 MB per session, oldest ``read_at`` evicted first (never an entry of the
+running call). Files that cannot be read (gone, not a regular file,
+permission denied, too big, SQLite skipped) get a small *negative* entry
+(status + stat), so the lens tools stop calling them missing.
 """
 
 from __future__ import annotations
@@ -49,6 +55,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -91,21 +98,35 @@ _DB_WAL = "db-wal"
 
 _CACHE_LOCK = threading.Lock()
 
+#: Statuses kept as negative cache entries (nothing to show, do not re-read).
+NEGATIVE_STATUSES = (
+    "gone",
+    "not_regular",
+    "permission_denied",
+    "too_big",
+    "sqlite_skipped",
+)
+#: Process names of this module's own device reads (exec-out head / cat /
+#: stat / su / id): the monitor sees them on the app's files; the AI tool
+#: rows leave them out of "by" and the event count.
+OWN_READ_PROCESSES = frozenset({"head", "cat", "stat", "su", "id"})
 
-def _default_run(argv: list[str], timeout: float) -> tuple[int, bytes, bytes]:
-    try:
-        proc = subprocess.run(  # argv, no shell
-            argv,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return -1, b"", b"timed out"
-    except (OSError, ValueError) as exc:
-        return -1, b"", str(exc).encode()
-    return proc.returncode, proc.stdout or b"", proc.stderr or b""
+
+def is_own_read_process(name: Any) -> bool:
+    """Whether a monitor event's process is one of our own reads."""
+    head = str(name or "").split(" · ", 1)[0].strip().lower()
+    return head.rsplit("/", 1)[-1] in OWN_READ_PROCESSES
+
+
+#: SQLite companion files whose rows stand for their database.
+COMPANION_SUFFIXES = ("-wal", "-shm", "-journal")
+#: Bytes of probe / stat output kept.
+OUTPUT_CAP = 4 * 1024 * 1024
+#: This process (WORLD epochs are per process).
+_PROCESS_TOKEN = uuid.uuid4().hex[:12]
+#: The last device a running file monitor recorded (rows stay that device's
+#: after the monitor stops).
+_LAST_MONITOR_SERIAL: list[str] = []
 
 
 # =============================================================================
@@ -127,6 +148,17 @@ def world_busy() -> bool:
         return False
 
 
+def world_token() -> str:
+    """``<process>:<WORLD epoch>``: changes whenever a WORLD lease is taken."""
+    try:
+        from sandroid.ai.arbiter import get_arbiter
+
+        epoch = get_arbiter().world_epoch()
+    except Exception:
+        epoch = -1
+    return f"{_PROCESS_TOKEN}:{epoch}"
+
+
 def monitor_serial() -> str | None:
     """The device the running file monitor records (its ``timeline_serial``)."""
     try:
@@ -139,20 +171,51 @@ def monitor_serial() -> str | None:
         serial = getattr(getattr(task, "instance", None), "timeline_serial", None)
     except Exception:
         return None
-    return serial if isinstance(serial, str) and serial else None
+    if not (isinstance(serial, str) and serial):
+        return None
+    _LAST_MONITOR_SERIAL[:] = [serial]
+    return serial
 
 
-def current_serial() -> str | None:
-    """The monitor's device, else ``Adb.selected_serial()`` (read once)."""
-    serial = monitor_serial()
-    if serial:
-        return serial
+def recorded_serial() -> str | None:
+    """The device the Files rows were recorded on, when known: the running
+    monitor's, else the last one a monitor recorded in this process.
+    """
+    return monitor_serial() or (
+        _LAST_MONITOR_SERIAL[0] if _LAST_MONITOR_SERIAL else None
+    )
+
+
+def selected_serial() -> str | None:
     try:
         from sandroid.core.adb import Adb
 
         return Adb.selected_serial()
     except Exception:
         return None
+
+
+def current_serial() -> str | None:
+    """The device whose cache entries count (rows' device, else selected)."""
+    return recorded_serial() or selected_serial()
+
+
+def read_target() -> tuple[str | None, str | None]:
+    """``(device to read, device the rows were recorded on or None)``.
+
+    The running monitor's device, else the selected one; the caller refuses
+    when the rows were recorded on another device.
+    """
+    target = monitor_serial() or selected_serial()
+    return target, recorded_serial()
+
+
+def db_base(path: str) -> str | None:
+    """``x.db`` for ``x.db-wal`` / ``-shm`` / ``-journal`` (else None)."""
+    for suffix in COMPANION_SUFFIXES:
+        if path.endswith(suffix) and is_db_name(path[: -len(suffix)]):
+            return path[: -len(suffix)]
+    return None
 
 
 # =============================================================================
@@ -193,9 +256,12 @@ class DeviceFileReader:
 
     Args:
         serial: The device; every argv starts ``[adb, -s, serial]``.
-        run: ``run(argv, timeout) -> (rc, stdout, stderr)`` (tests: fakes).
+        run: ``run(argv, timeout) -> (rc, stdout, stderr)`` for the probe and
+            stat (tests: fakes); default: a polled stream like the reads
+            (cancel, deadline and WORLD stop it too).
         popen: ``subprocess.Popen``-like, for the capped streams.
-        should_stop: Returns ``"cancelled"`` / ``"deadline"`` to stop a read.
+        should_stop: Returns ``"cancelled"`` / ``"deadline"`` / ``"busy"`` to
+            stop a read.
     """
 
     def __init__(
@@ -212,12 +278,18 @@ class DeviceFileReader:
             raise ValueError("a device serial is required")
         self.serial = serial
         self.base = Adb.base_argv(serial)
-        self._run = run or _default_run
+        self._run = run
         self._popen = popen or subprocess.Popen
         self._should_stop = should_stop or (lambda: None)
         self.mode: str | None = None
 
     # -- argv ---------------------------------------------------------------
+
+    def _call(self, argv: list[str], timeout: float) -> bytes:
+        """Stdout of a short command (probe, stat)."""
+        if self._run is not None:
+            return self._run(argv, timeout)[1]
+        return self._stream(argv, OUTPUT_CAP, timeout).data
 
     def argv(self, words: list[str]) -> list[str]:
         """``exec-out`` argv for *words* (already quoted for the device shell).
@@ -244,25 +316,22 @@ class DeviceFileReader:
         """``root`` / ``su`` / ``su_c`` / ``none``, probed once."""
         if self.mode is not None:
             return self.mode
-        out = self._stdout([*self.base, "exec-out", "id -u"], PROBE_TIMEOUT_S)
+        out = self._call([*self.base, "exec-out", "id -u"], PROBE_TIMEOUT_S)
         if out.strip() == b"0":
             self.mode = "root"
             return self.mode
-        out = self._stdout(
+        out = self._call(
             [*self.base, "exec-out", "su 0 id -u 2>/dev/null"], SU_PROBE_TIMEOUT_S
         )
         if out.strip() == b"0":
             self.mode = "su"
             return self.mode
-        out = self._stdout(
+        out = self._call(
             [*self.base, "exec-out", "su -c 'id -u 2>/dev/null' 2>/dev/null"],
             SU_PROBE_TIMEOUT_S,
         )
         self.mode = "su_c" if out.strip() == b"0" else "none"
         return self.mode
-
-    def _stdout(self, argv: list[str], timeout: float) -> bytes:
-        return self._run(argv, timeout)[1]
 
     # -- stat ---------------------------------------------------------------
 
@@ -282,8 +351,10 @@ class DeviceFileReader:
                 *[shlex.quote(p) for p in batch],
                 "2>&1",
             ]
-            _rc, stdout, _err = self._run(self.argv(words), STAT_TIMEOUT_S)
+            stdout = self._call(self.argv(words), STAT_TIMEOUT_S)
             out.update(parse_stat(stdout.decode("utf-8", "replace"), batch))
+        for path in todo:  # a stopped call: the rest is unknown
+            out.setdefault(path, Stat(path, error="error"))
         return out
 
     # -- reads --------------------------------------------------------------
@@ -349,12 +420,20 @@ class DeviceFileReader:
         with contextlib.suppress(Exception):
             proc.wait(timeout=2.0)
         thread.join(1.0)
+        close = getattr(proc.stdout, "close", None)
+        if close is not None:
+            with contextlib.suppress(Exception):
+                close()
         data = bytes(buf[: cap + 1])
         return ReadResult(data, over=len(data) > cap, stop=stop, killed=killed)
 
 
 def parse_stat(text: str, paths: list[str]) -> dict[str, Stat]:
-    """Parse ``stat -c '%s|%Y|%F|%n' ... 2>&1`` output for *paths*."""
+    """Parse ``stat -c '%s|%Y|%F|%n' ... 2>&1`` output for *paths*.
+
+    A successful line always wins; an error line names its path exactly
+    (``'x.db'`` is not ``'x.db-wal'``), else the longest path it contains.
+    """
     wanted = set(paths)
     out: dict[str, Stat] = {}
     for line in text.splitlines():
@@ -362,8 +441,8 @@ def parse_stat(text: str, paths: list[str]) -> dict[str, Stat]:
         if not line:
             continue
         if line.startswith("stat:"):
-            path = _quoted_path(line, wanted)
-            if path is None:
+            path = _error_path(line, paths)
+            if path is None or (path in out and out[path].error is None):
                 continue
             low = line.lower()
             if "no such file" in low or "not a directory" in low:
@@ -387,21 +466,16 @@ def parse_stat(text: str, paths: list[str]) -> dict[str, Stat]:
     return out
 
 
-def _quoted_path(line: str, wanted: set[str]) -> str | None:
-    for quote in ("'", "‘", '"'):
-        start = line.find(quote)
-        if start < 0:
-            continue
-        close = {"'": "'", "‘": "’", '"': '"'}[quote]
-        end = line.rfind(close)
-        if end > start:
-            candidate = line[start + 1 : end]
-            if candidate in wanted:
-                return candidate
-    for path in wanted:
-        if path in line:
-            return path
-    return None
+def _error_path(line: str, paths: list[str]) -> str | None:
+    exact = [
+        p
+        for p in paths
+        if f"'{p}'" in line or f"\u2018{p}\u2019" in line or f'"{p}"' in line
+    ]
+    if exact:
+        return max(exact, key=len)
+    loose = [p for p in paths if p in line]
+    return max(loose, key=len) if loose else None
 
 
 # =============================================================================
@@ -439,6 +513,9 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
+_UNSET: Any = object()
+
+
 @dataclass
 class CacheEntry:
     """One cached file (see the module docstring)."""
@@ -454,6 +531,15 @@ class CacheEntry:
     @property
     def kind(self) -> str:
         return str(self.meta.get("kind") or "metadata")
+
+    @property
+    def status(self) -> str:
+        return str(self.meta.get("status") or "read")
+
+    @property
+    def negative(self) -> bool:
+        """Nothing could be read (gone, permission denied, too big ...)."""
+        return self.status in NEGATIVE_STATUSES
 
     def digest(self) -> str:
         try:
@@ -474,22 +560,51 @@ class CacheEntry:
         serial: str | None = None,
         mtime: int | None = None,
         size: int | None = None,
+        wal: Any = _UNSET,
+        cap: int | None = None,
+        sqlite: str | None = None,
     ) -> bool:
-        """Whether this entry still stands for the device file."""
-        if serial and self.meta.get("serial") and self.meta["serial"] != serial:
+        """Whether this entry still stands for the device file.
+
+        *row_last*: the row's last content change; *mtime* / *size* / *wal*
+        (the ``-wal`` :class:`Stat` or None): the batched stat; *cap* and
+        *sqlite*: what the caller wants (a bigger cap for a truncated read,
+        ``sample`` after ``tables`` or after a skip, is stale).
+        """
+        meta = self.meta
+        if serial and meta.get("serial") and meta["serial"] != serial:
             return False
-        if mtime is not None and self.meta.get("mtime") != mtime:
+        if meta.get("world") and meta["world"] != world_token():
             return False
-        if size is not None and self.meta.get("size") != size:
+        if mtime is not None and meta.get("mtime") != mtime:
             return False
+        if size is not None and meta.get("size") != size:
+            return False
+        if wal is not _UNSET and meta.get("label") == "sqlite":
+            now = _wal_meta(wal)
+            if (meta.get("wal_mtime"), meta.get("wal_size") or 0) != now:
+                return False
+        if cap is not None and meta.get("truncated") and cap > (meta.get("cap") or 0):
+            return False
+        if sqlite is not None:
+            if self.status == "sqlite_skipped" and sqlite != "skip":
+                return False
+            if meta.get("sqlite") == "tables" and sqlite == "sample":
+                return False
         last = _as_float(row_last)
         if last is not None:
-            seen = _as_float(self.meta.get("row_last"))
+            seen = _as_float(meta.get("row_last"))
             if seen is None:
                 seen = self.read_at
             if last > seen:
                 return False
         return True
+
+
+def _wal_meta(wal: Any) -> tuple[int | None, int]:
+    if wal is None or not getattr(wal, "regular", False):
+        return None, 0
+    return wal.mtime, wal.size or 0
 
 
 def load_entry(path: str, root: Path | None = None) -> CacheEntry | None:
@@ -581,8 +696,9 @@ def _entry_size(d: Path) -> int:
     return total
 
 
-def evict(root: Path, cap: int = CACHE_CAP_BYTES) -> int:
-    """Remove the oldest entries (by ``read_at``) until *root* is within *cap*.
+def evict(root: Path, cap: int = CACHE_CAP_BYTES, keep: Iterable[Path] = ()) -> int:
+    """Remove the oldest entries (by ``read_at``) until *root* is within *cap*
+    (bytes on disk). Entries in *keep* (the running call's) stay.
 
     Returns:
         Entries removed.
@@ -590,6 +706,7 @@ def evict(root: Path, cap: int = CACHE_CAP_BYTES) -> int:
     with _CACHE_LOCK:
         if not root.is_dir():
             return 0
+        kept = {Path(k) for k in keep}
         entries: list[tuple[float, int, Path]] = []
         for d in root.iterdir():
             if not d.is_dir():
@@ -605,6 +722,8 @@ def evict(root: Path, cap: int = CACHE_CAP_BYTES) -> int:
         for _t, size, d in sorted(entries, key=lambda e: e[0]):
             if total <= cap:
                 break
+            if d in kept:
+                continue
             shutil.rmtree(d, ignore_errors=True)
             total -= size
             removed += 1
@@ -634,16 +753,69 @@ def is_db_name(path: str) -> bool:
     return path.lower().endswith(DB_SUFFIXES)
 
 
-def expected_bytes(path: str, st: Stat, wal: Stat | None, cap: int) -> int:
+def expected_bytes(
+    path: str, st: Stat, wal: Stat | None, cap: int, sqlite: str = "sample"
+) -> int:
     """Device bytes reading *path* is expected to take (budget check)."""
     size = st.size or 0
     if is_db_name(path):
+        if sqlite == "skip":
+            return 0
         return size + ((wal.size or 0) if wal is not None and wal.regular else 0)
     return min(size, cap + 1)
 
 
+def db_too_big(path: str, st: Stat, wal: Stat | None) -> bool:
+    """A database (by name) whose main file plus ``-wal`` exceed the copy cap."""
+    if not is_db_name(path):
+        return False
+    return (st.size or 0) + _wal_meta(wal)[1] > DB_COPY_CAP
+
+
 def _stop_status(stop: str | None) -> str:
-    return stop if stop in ("cancelled", "deadline") else "error"
+    return stop if stop in ("cancelled", "deadline", "busy") else "error"
+
+
+def _meta(
+    reader: Any,
+    st: Stat | None,
+    wal: Stat | None,
+    row_last: Any,
+    cap: int,
+    sqlite: str,
+) -> dict[str, Any]:
+    wal_mtime, wal_size = _wal_meta(wal)
+    return {
+        "serial": getattr(reader, "serial", None),
+        "row_last": _as_float(row_last),
+        "mtime": st.mtime if st is not None else None,
+        "size": st.size if st is not None else None,
+        "wal_mtime": wal_mtime,
+        "wal_size": wal_size,
+        "read_at": time.time(),
+        "root_mode": getattr(reader, "mode", None),
+        "world": world_token(),
+        "cap": cap,
+        "sqlite": sqlite,
+    }
+
+
+def remember_unreadable(
+    root: Path,
+    reader: Any,
+    path: str,
+    status: str,
+    st: Stat | None,
+    *,
+    wal: Stat | None = None,
+    row_last: Any = None,
+    cap: int = DEFAULT_BYTES_PER_FILE,
+    sqlite: str = "sample",
+) -> CacheEntry:
+    """A negative entry: *path* could not be read (*status*), nothing to show."""
+    meta = _meta(reader, st, wal, row_last, cap, sqlite)
+    meta.update(kind="metadata", label=status, status=status, truncated=False)
+    return write_entry(root, path, meta, digest="", match="")
 
 
 def read_into_cache(
@@ -658,40 +830,62 @@ def read_into_cache(
     sqlite: str = "sample",
     budget_left: int | None = None,
 ) -> FileOutcome:
-    """Read one regular file (stat *st*) and write its cache entry."""
+    """Read one regular file (stat *st*) and write its cache entry.
+
+    Unreadable outcomes (gone, permission denied, too big, SQLite skipped)
+    write a negative entry.
+    """
     from sandroid.ai.row_classifier import render_content
+
+    def negative(status: str, used: int) -> FileOutcome:
+        entry = remember_unreadable(
+            root,
+            reader,
+            path,
+            status,
+            st,
+            wal=wal,
+            row_last=row_last,
+            cap=cap,
+            sqlite=sqlite,
+        )
+        return FileOutcome(status, used, entry)
+
+    def empty_status() -> str:
+        again = reader.stat([path]).get(path)
+        return (
+            "gone"
+            if again is not None and again.error == "gone"
+            else ("permission_denied")
+        )
 
     used = 0
     data = b""
     truncated = False
     is_db = is_db_name(path)
+    if is_db and sqlite == "skip":
+        return negative("sqlite_skipped", used)
     if not is_db:
         got = reader.head(path, cap)
         used += len(got.data)
         if got.stop:
             return FileOutcome(_stop_status(got.stop), used)
         if not got.data and (st.size or 0) > 0:
-            return FileOutcome("permission_denied", used)
+            return negative(empty_status(), used)
         data = got.data[:cap]
         truncated = got.over or (st.size or 0) > cap
         is_db = data.startswith(_SQLITE_MAGIC)
-    meta: dict[str, Any] = {
-        "serial": reader.serial,
-        "row_last": _as_float(row_last),
-        "mtime": st.mtime,
-        "size": st.size,
-        "read_at": time.time(),
-        "root_mode": reader.mode,
-    }
+        if is_db and sqlite == "skip":
+            return negative("sqlite_skipped", used)
+    meta = _meta(reader, st, wal, row_last, cap, sqlite)
     if is_db:
-        if sqlite == "skip":
-            return FileOutcome("sqlite_skipped", used)
         if wal is None:
             wal = reader.stat([path + "-wal"]).get(path + "-wal")
-        wal_size = (wal.size or 0) if wal is not None and wal.regular else 0
+            meta = _meta(reader, st, wal, row_last, cap, sqlite)
+        wal_size = _wal_meta(wal)[1]
         total = (st.size or 0) + wal_size
         if total > DB_COPY_CAP:
-            return FileOutcome("too_big", used)
+            return negative("too_big", used)
         if budget_left is not None and used + total > budget_left:
             return FileOutcome("budget", used)
         main = reader.cat(path, DB_COPY_CAP)
@@ -699,16 +893,27 @@ def read_into_cache(
         if main.stop:
             return FileOutcome(_stop_status(main.stop), used)
         if main.over:
-            return FileOutcome("too_big", used)
+            return negative("too_big", used)
         if not main.data.startswith(_SQLITE_MAGIC):
             if not main.data and total:
-                return FileOutcome("permission_denied", used)
+                return negative(empty_status(), used)
             rendered = render_content(path, main.data[:cap], size=st.size)
-            meta.update(kind=rendered.kind, label=rendered.label, truncated=False)
-            entry = write_entry(
-                root, path, meta, digest=rendered.digest, match=rendered.match
-            )
             status = "binary" if rendered.kind == "binary" else "read"
+            meta.update(
+                kind=rendered.kind,
+                label=rendered.label,
+                truncated=len(main.data) > cap,
+                status=status,
+            )
+            files = {} if rendered.kind == "binary" else {_RAW: main.data[:cap]}
+            entry = write_entry(
+                root,
+                path,
+                meta,
+                digest=rendered.digest,
+                match=rendered.match,
+                files=files,
+            )
             return FileOutcome(status, used, entry)
         files = {_DB: main.data}
         if wal_size:
@@ -717,44 +922,50 @@ def read_into_cache(
             if wal_got.stop:
                 return FileOutcome(_stop_status(wal_got.stop), used)
             if wal_got.over:
-                return FileOutcome("too_big", used)
+                return negative("too_big", used)
             files[_DB_WAL] = wal_got.data
         with tempfile.TemporaryDirectory(prefix="sandroid-dbread-") as tmp:
             for name, blob in files.items():
                 (Path(tmp) / name).write_bytes(blob)
             rendered = render_content(path, db=Path(tmp) / _DB, sqlite=sqlite)
+        status = "binary" if rendered.kind == "binary" else "read"
         meta.update(
-            kind=rendered.kind, label=rendered.label, truncated=False, wal=wal_size
+            kind=rendered.kind, label=rendered.label, truncated=False, status=status
         )
         entry = write_entry(
             root, path, meta, digest=rendered.digest, match=rendered.match, files=files
         )
-        return FileOutcome(
-            "binary" if rendered.kind == "binary" else "read", used, entry
-        )
+        return FileOutcome(status, used, entry)
     rendered = render_content(path, data, size=st.size)
-    meta.update(kind=rendered.kind, label=rendered.label, truncated=truncated)
+    status = "binary" if rendered.kind == "binary" else "read"
+    meta.update(
+        kind=rendered.kind, label=rendered.label, truncated=truncated, status=status
+    )
     files = {} if rendered.kind == "binary" else {_RAW: data}
     entry = write_entry(
         root, path, meta, digest=rendered.digest, match=rendered.match, files=files
     )
-    return FileOutcome("binary" if rendered.kind == "binary" else "read", used, entry)
+    return FileOutcome(status, used, entry)
 
 
 __all__ = [
     "CACHE_CAP_BYTES",
     "DB_COPY_CAP",
+    "NEGATIVE_STATUSES",
     "CacheEntry",
     "DeviceFileReader",
     "FileOutcome",
     "Stat",
     "cache_root",
     "current_serial",
+    "db_base",
     "evict",
     "load_entry",
     "lookup",
     "parse_stat",
     "read_into_cache",
+    "read_target",
+    "remember_unreadable",
     "world_busy",
     "write_entry",
 ]

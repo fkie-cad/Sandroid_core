@@ -46,6 +46,7 @@ import logging
 import re
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -521,6 +522,76 @@ def _pref_value(el: Any) -> Any:
     return el.get("value", el.text or "")
 
 
+def _one_line(text: Any) -> str:
+    """*text* on one line (a name or value cannot forge digest lines)."""
+    return str(text).replace("\r", "\\r").replace("\n", "\\n")
+
+
+#: A JSON Web Token anywhere in a text (reduced whatever its name).
+_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*")
+
+
+def _reduce_jwts(text: str) -> str:
+    return _JWT_RE.sub(lambda m: reduce_value(m.group(0)), text)
+
+
+def _reduce_json_file(value: Any, depth: int = 0) -> Any:
+    """:func:`_reduce_json` for file content: also JSON inside string values
+    and JWT-shaped strings under any name.
+    """
+    if isinstance(value, dict):
+        return {
+            k: reduce_value(v) if is_secret_name(k) else _reduce_json_file(v, depth)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_reduce_json_file(v, depth) for v in value]
+    if isinstance(value, str):
+        return _reduce_scalar(value, depth + 1)
+    return value
+
+
+def _reduce_scalar(value: str, depth: int = 0) -> str:
+    """A value under a harmless name: embedded JSON reduced by its own keys,
+    else the free-text reductions (k=v, XML, JSON fragments, JWTs).
+    """
+    text = str(value)
+    stripped = text.strip()
+    if depth < 4 and stripped[:1] in ("{", "[") and len(stripped) <= RENDER_CAP:
+        try:
+            parsed = json.loads(stripped)
+        except (ValueError, RecursionError):
+            parsed = None
+        if isinstance(parsed, dict | list):
+            try:
+                return json.dumps(
+                    _reduce_json_file(parsed, depth),
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+            except (ValueError, RecursionError):
+                pass
+    return _reduce_free_text(text)
+
+
+def _reduce_free_text(text: str) -> str:
+    """Every pattern reduction for text that did not parse."""
+    return _reduce_jwts(_reduce_kv_text(_reduce_json_text(_reduce_xml_text(text))))
+
+
+def _last_resort(text: str) -> str:
+    """``redact_secrets`` over a head that did not parse (on top of the
+    name reductions); left as is when it fails (mask on still fails closed).
+    """
+    try:
+        from sandroid.ai.safety import redact_secrets
+
+        return redact_secrets(text)
+    except Exception:
+        logger.debug("last-resort redaction failed", exc_info=True)
+        return text
+
+
 def _prefs_lines(root: Any) -> tuple[list[str], list[str]]:
     """``(digest_lines, match_lines)`` of a SharedPreferences ``<map>``."""
     digest: list[str] = []
@@ -533,35 +604,43 @@ def _prefs_lines(root: Any) -> tuple[list[str], list[str]]:
         shown = ", ".join(value) if isinstance(value, list) else str(value)
         match.append(f"{name} = {shown}")
         if is_secret_name(name):
-            digest.append(f"{name} = {reduce_value(value)}")
+            digest.append(f"{_one_line(name)} = {reduce_value(value)}")
         else:
-            digest.append(f"{name} = {_cap(shown, VALUE_CAP)}")
+            reduced = _reduce_scalar(shown)
+            digest.append(f"{_one_line(name)} = {_one_line(_cap(reduced, VALUE_CAP))}")
     return digest, match
 
 
-_XML_ATTR_SECRET_RE = re.compile(
-    r"""(<(?P<tag>[\w:.-]+)\b[^>]*?\bname\s*=\s*["'](?P<name>[^"']*)["'][^>]*?"""
-    r""">)(?P<body>[^<]*)"""
+_XML_NAMED_BODY_RE = re.compile(
+    r"""(<(?P<tag>[\w:.-]+)\b[^<>]*?\b(?:name|key)\s*=\s*["'](?P<name>[^"']*)["']"""
+    r"""[^<>]*?>)(?P<body>[^<]*)"""
 )
+_XML_TAG_BODY_RE = re.compile(r"(<(?P<tag>[\w:.-]+)(?:\s[^<>]*)?>)(?P<body>[^<]*)")
 _XML_VALUE_ATTR_RE = re.compile(
-    r"""(<[\w:.-]+\b[^>]*?\bname\s*=\s*["'](?P<name>[^"']*)["'][^>]*?\bvalue\s*=\s*)"""
-    r"""(?P<q>["'])(?P<value>[^"']*)(?P=q)"""
+    r"""(<[\w:.-]+\b[^<>]*?\b(?:name|key)\s*=\s*["'](?P<name>[^"']*)["'][^<>]*?"""
+    r"""\bvalue\s*=\s*)(?P<q>["'])(?P<value>[^"'<>]*)(?:(?P=q)|$)"""
 )
-_JSON_PAIR_RE = re.compile(
-    r'"(?P<name>(?:[^"\\]|\\.)*)"\s*:\s*"(?P<value>(?:[^"\\]|\\.)*)"'
-)
+_JSON_KEY_RE = re.compile(r'"(?P<name>(?:[^"\\]|\\.)*)"\s*:\s*')
+_JSON_SCALAR_RE = re.compile(r"[^,}\]\s]*")
 _KV_LINE_RE = re.compile(
-    r"^(?P<lead>\s*(?P<name>[\w.\-]+)\s*[=:]\s*)(?P<value>.+?)\s*$"
+    r"^(?P<lead>\s*(?:export\s+)?(?P<q>[\"']?)(?P<name>[\w.\-]+)(?P=q)\s*[=:]\s*)"
+    r"(?P<value>.+?)\s*$"
 )
 
 
 def _reduce_xml_text(text: str) -> str:
-    """Secret-named element bodies / ``value`` attributes reduced (regex; for
-    XML that does not parse, e.g. a truncated head).
+    """XML that does not parse (a truncated head) or is not prefs: bodies of
+    secret-named elements (by ``name=`` / ``key=`` attribute or by tag) and
+    their ``value=`` attributes (also cut off without a closing quote).
     """
 
-    def body(m: re.Match[str]) -> str:
+    def named(m: re.Match[str]) -> str:
         if is_secret_name(m.group("name")) and m.group("body").strip():
+            return m.group(1) + reduce_value(m.group("body"))
+        return m.group(0)
+
+    def tagged(m: re.Match[str]) -> str:
+        if is_secret_name(_local_name(m.group("tag"))) and m.group("body").strip():
             return m.group(1) + reduce_value(m.group("body"))
         return m.group(0)
 
@@ -571,22 +650,76 @@ def _reduce_xml_text(text: str) -> str:
             return f"{m.group(1)}{q}{reduce_value(m.group('value'))}{q}"
         return m.group(0)
 
-    return _XML_VALUE_ATTR_RE.sub(attr, _XML_ATTR_SECRET_RE.sub(body, text))
+    text = _XML_NAMED_BODY_RE.sub(named, text)
+    text = _XML_TAG_BODY_RE.sub(tagged, text)
+    return _XML_VALUE_ATTR_RE.sub(attr, text)
+
+
+def _json_value_end(text: str, i: int) -> int:
+    """End of the JSON value starting at *i* (the text's end if cut off)."""
+    n = len(text)
+    if i >= n:
+        return i
+    c = text[i]
+    if c == '"':
+        j = i + 1
+        while j < n:
+            if text[j] == "\\":
+                j += 2
+            elif text[j] == '"':
+                return j + 1
+            else:
+                j += 1
+        return n
+    if c in "{[":
+        depth, j, in_str = 0, i, False
+        while j < n:
+            ch = text[j]
+            if in_str:
+                if ch == "\\":
+                    j += 1
+                elif ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch in "{[":
+                depth += 1
+            elif ch in "}]":
+                depth -= 1
+                if depth == 0:
+                    return j + 1
+            j += 1
+        return n
+    m = _JSON_SCALAR_RE.match(text, i)
+    return m.end() if m else i
 
 
 def _reduce_json_text(text: str) -> str:
-    """Secret-named ``"key": "value"`` pairs reduced (JSON that does not parse)."""
-
-    def pair(m: re.Match[str]) -> str:
-        if is_secret_name(m.group("name")):
-            return f'"{m.group("name")}":"{reduce_value(m.group("value"))}"'
-        return m.group(0)
-
-    return _JSON_PAIR_RE.sub(pair, text)
+    """JSON that does not parse: the values (strings, numbers, objects,
+    arrays, also cut off at the end) of secret-named keys reduced.
+    """
+    out: list[str] = []
+    pos = 0
+    for m in _JSON_KEY_RE.finditer(text):
+        if m.start() < pos or not is_secret_name(m.group("name")):
+            continue
+        start = m.end()
+        end = _json_value_end(text, start)
+        if end <= start:
+            continue
+        raw = text[start:end]
+        value = raw[1:-1] if raw[:1] == '"' and raw.endswith('"') else raw
+        out.append(text[pos:start])
+        out.append(f'"{reduce_value(value.lstrip(chr(34)))}"')
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def _reduce_kv_text(text: str) -> str:
-    """``name=value`` / ``name: value`` lines with secret names reduced."""
+    """``name=value`` / ``name: value`` lines (also ``export NAME=`` and a
+    quoted name) with secret names reduced.
+    """
     out = []
     for line in text.split("\n"):
         m = _KV_LINE_RE.match(line)
@@ -618,7 +751,7 @@ def _render_xml_root(root: Any, raw_text: str, label: str) -> Rendered:
             "content",
             "prefs" if label == "xml" else f"{label}/prefs",
         )
-    return Rendered(_reduce_xml_text(raw_text), raw_text, "content", label)
+    return Rendered(_reduce_free_text(raw_text), raw_text, "content", label)
 
 
 def _render_abx(data: bytes) -> Rendered | None:
@@ -648,21 +781,26 @@ def _render_text(path: str, data: bytes) -> Rendered:
         root = _parse_xml(data)
         if root is not None:
             return _render_xml_root(root, text, "xml")
-        return Rendered(_reduce_xml_text(text), text, "content", "xml")
+        return Rendered(_last_resort(_reduce_free_text(text)), text, "content", "xml")
     if stripped[:1] in ("{", "["):
         try:
             parsed = json.loads(stripped)
         except (ValueError, RecursionError):
-            return Rendered(_reduce_json_text(text), text, "content", "json")
-        try:
-            digest = json.dumps(
-                _reduce_json(parsed), separators=(",", ":"), ensure_ascii=False
-            )
-            match = json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
-        except (ValueError, RecursionError):
-            return Rendered(_reduce_json_text(text), text, "content", "json")
-        return Rendered(digest, match, "content", "json")
-    return Rendered(_reduce_kv_text(text), text, "content", "text")
+            parsed = _UNPARSED
+        if parsed is not _UNPARSED:
+            try:
+                digest = json.dumps(
+                    _reduce_json_file(parsed), separators=(",", ":"), ensure_ascii=False
+                )
+                match = json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+                return Rendered(digest, match, "content", "json")
+            except (ValueError, RecursionError):
+                pass
+        return Rendered(_last_resort(_reduce_free_text(text)), text, "content", "json")
+    return Rendered(_last_resort(_reduce_free_text(text)), text, "content", "text")
+
+
+_UNPARSED: Any = object()
 
 
 def _gunzip(data: bytes, cap: int) -> tuple[bytes, bool] | None:
@@ -731,10 +869,45 @@ def _sqlite_render(db: Path, mode: str) -> Rendered:
             conn.close()
 
 
+#: Column names that hold the NAME of a key/value row (not reduced by their
+#: own name; the row's value cells are reduced by the name they hold).
+_NAME_COLUMNS = frozenset(
+    {
+        "key",
+        "name",
+        "k",
+        "pref",
+        "pref_key",
+        "prefkey",
+        "setting",
+        "property",
+        "field",
+        "param",
+        "item",
+        "attribute",
+    }
+)
+
+
+def _sample_cell(column: str, value: Any, row_name: str | None) -> str:
+    if column.lower() in _NAME_COLUMNS:
+        return _one_line(_cap(_reduce_scalar(str(value)), SQLITE_CELL_CAP))
+    if is_secret_name(column) or (row_name is not None and is_secret_name(row_name)):
+        return reduce_value(value)
+    if isinstance(value, str):
+        value = _reduce_scalar(value)
+    return _one_line(_cap(str(value), SQLITE_CELL_CAP))
+
+
 def _sample_rows(
     cur: Any, name: str, cols: list[str], digest: list[str], match: list[str]
 ) -> None:
-    """Sample rows (reduced) into *digest*, rows (full) into *match*."""
+    """Sample rows (reduced) into *digest*, rows (full) into *match*.
+
+    Key/value tables: a row's value cells are reduced when its name cell
+    (a ``key`` / ``name`` ... column) looks secret.
+    """
+    name_idx = next((i for i, c in enumerate(cols) if c.lower() in _NAME_COLUMNS), None)
     match_len = sum(len(m) for m in match)
     for i, row in enumerate(cur):
         cells = [_cell(v) for v in row]
@@ -744,16 +917,15 @@ def _sample_rows(
             match.append(f"{name}: {full}")
             match_len += len(full)
         if i < SQLITE_SAMPLE_ROWS:
+            row_name = (
+                str(cells[name_idx])
+                if name_idx is not None and name_idx < len(cells)
+                else None
+            )
             digest.append(
                 "  "
                 + "; ".join(
-                    f"{c}="
-                    + (
-                        reduce_value(v)
-                        if is_secret_name(c)
-                        else _cap(str(v), SQLITE_CELL_CAP)
-                    )
-                    for c, v in pairs
+                    f"{_one_line(c)}={_sample_cell(c, v, row_name)}" for c, v in pairs
                 )
             )
         elif match_len >= HAYSTACK_RENDER_CAP:
@@ -796,7 +968,7 @@ def _sqlite_lines(conn: Any, mode: str) -> Rendered:
         sampled = [n for n in names if counts.get(n)][:SQLITE_SAMPLE_TABLES]
         for name in sampled:
             cols = columns.get(name) or []
-            digest.append(f"{name}: " + ", ".join(cols))
+            digest.append(f"{_one_line(name)}: " + _one_line(", ".join(cols)))
             try:
                 cur = conn.execute(f"SELECT * FROM {_quote_ident(name)}")
             except sqlite3.Error:
@@ -865,11 +1037,17 @@ class FileContent:
     """Local content of one Files row (see :func:`file_content`).
 
     Attributes:
-        digest: The content part of the row digest (reduced, capped), or None.
-        match: The full local text ``content_contains`` searches.
+        digest: The content part of the row digest (reduced, capped, device
+            text framed in ``<content>`` / ``<diff>`` with ``<``/``>``
+            escaped), or None.
+        match: The full local text ``content_contains`` searches (never sent).
         kind: ``content``, ``binary`` or ``metadata`` (nothing local).
         source: ``device`` (``read_device_files`` cache), ``watchlist`` or None.
         at: Epoch seconds of the read / pull.
+        reduced: The full reduced text (what is searched with mask on).
+        diff: The kept version's last diff (searched on its own).
+        unreadable: Why ``read_device_files`` could not read it (``gone``,
+            ``permission_denied``, ``too_big`` ...), else None.
     """
 
     digest: str | None
@@ -877,6 +1055,9 @@ class FileContent:
     kind: str
     source: str | None = None
     at: float | None = None
+    reduced: str = ""
+    diff: str = ""
+    unreadable: str | None = None
 
 
 def _clock(ts: float | None) -> str:
@@ -884,6 +1065,41 @@ def _clock(ts: float | None) -> str:
         return time.strftime("%H:%M", time.localtime(float(ts or 0)))
     except (TypeError, ValueError, OverflowError, OSError):
         return "?"
+
+
+def _escape(text: str) -> str:
+    """``<`` / ``>`` escaped: device text cannot close its frame or forge
+    the lines around it (as the classifier escapes rows).
+    """
+    return text.replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _framed(header: str, body: str) -> str:
+    return f"{header}:\n<content>\n{_escape(body)}\n</content>"
+
+
+#: Rendered kept watchlist versions (immutable once kept), newest last.
+_LOCAL_RENDERS: OrderedDict[tuple, Rendered | None] = OrderedDict()
+_LOCAL_RENDERS_MAX = 32
+_LOCAL_RENDERS_LOCK = threading.Lock()
+
+
+def _render_local_cached(path: str, local: Path) -> Rendered | None:
+    try:
+        st = local.stat()
+        key = (str(local), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+    with _LOCAL_RENDERS_LOCK:
+        if key in _LOCAL_RENDERS:
+            _LOCAL_RENDERS.move_to_end(key)
+            return _LOCAL_RENDERS[key]
+    rendered = _render_local(path, local)
+    with _LOCAL_RENDERS_LOCK:
+        _LOCAL_RENDERS[key] = rendered
+        while len(_LOCAL_RENDERS) > _LOCAL_RENDERS_MAX:
+            _LOCAL_RENDERS.popitem(last=False)
+    return rendered
 
 
 def _watchlist_content(path: str) -> tuple[Callable[[], FileContent], float] | None:
@@ -907,23 +1123,34 @@ def _watchlist_content(path: str) -> tuple[Callable[[], FileContent], float] | N
         except Exception:
             return FileContent(None, "", "metadata")
         lines: list[str] = []
+        reduced: list[str] = []
         kind = "metadata"
         match = ""
         if local.is_file():
-            rendered = _render_local(path, local)
+            rendered = _render_local_cached(path, local)
             if rendered is not None:
                 head, _ = _cap_bytes(rendered.digest, FILE_HEAD_CAP)
                 lines.append(
-                    f"content (kept copy {_clock(at)}, {rendered.label}): {head}"
+                    _framed(f"content (kept copy {_clock(at)}, {rendered.label})", head)
                 )
+                reduced.append(rendered.digest)
                 match = rendered.match
                 kind = rendered.kind
         if diff:
-            capped, _ = _cap_bytes(diff, DIFF_HEAD_CAP)
-            lines.append(f"last diff: {capped}")
-            match = f"{match}\n{diff}" if match else diff
+            small = _last_resort(_reduce_free_text(diff))
+            capped, _ = _cap_bytes(small, DIFF_HEAD_CAP)
+            lines.append(f"last diff: <diff>{_escape(capped)}</diff>")
+            reduced.append(small)
             kind = "content" if kind == "metadata" else kind
-        return FileContent("\n".join(lines) or None, match, kind, "watchlist", at)
+        return FileContent(
+            "\n".join(lines) or None,
+            match,
+            kind,
+            "watchlist",
+            at,
+            reduced="\n".join(reduced),
+            diff=diff or "",
+        )
 
     return render, at
 
@@ -937,8 +1164,11 @@ def _render_local(path: str, local: Path) -> Rendered | None:
         return None
     if head.startswith(_SQLITE_MAGIC):
         wal = local.with_name(local.name + "-wal")
-        total = size + (wal.stat().st_size if wal.is_file() else 0)
-        if total <= SQLITE_COPY_CAP:
+        try:
+            wal_size = wal.stat().st_size if wal.is_file() else 0
+        except OSError:
+            wal_size = 0
+        if size + wal_size <= SQLITE_COPY_CAP:
             return render_content(path, db=local)
         tables = _sqlite_tables(local) or []
         text = "sqlite tables: " + (", ".join(tables[:60]) or "(none)")
@@ -971,15 +1201,49 @@ def _sqlite_tables(path: Path) -> list[str] | None:
         conn.close()
 
 
+def _has_kept_version(path: str) -> bool:
+    try:
+        from sandroid.core import watchlist_store
+
+        return bool(watchlist_store.version_dirs(path))
+    except Exception:
+        return False
+
+
+def content_state(
+    path: str, *, row_last: Any = None, serial: str | None = None
+) -> str | None:
+    """What local content *path* has, cheaply (nothing is rendered).
+
+    ``device`` (a valid cache entry), ``watchlist`` (a kept version),
+    ``unreadable:<status>`` (``read_device_files`` could not read it and no
+    kept version exists) or None (nothing: a device read would help).
+    """
+    entry = None
+    try:
+        from sandroid.ai import device_files
+
+        entry = device_files.lookup(path, row_last=row_last, serial=serial)
+    except Exception:
+        logger.debug("content cache lookup failed", exc_info=True)
+    if entry is not None and not entry.negative:
+        return "device"
+    if _has_kept_version(path):
+        return "watchlist"
+    if entry is not None:
+        return f"unreadable:{entry.status}"
+    return None
+
+
 def file_content(
     path: str, *, row_last: Any = None, serial: str | None = None
 ) -> FileContent:
     """Local content of *path*: the newest kept watchlist version or a valid
     ``read_device_files`` cache entry, whichever is newer.
 
-    Never touches the device. A cache entry is valid while the row's
-    ``last`` is not newer than when it was read and it was read from
-    *serial* (when given).
+    Never touches the device. A cache entry is valid while the row's last
+    content change is not newer than when it was read, it was read from
+    *serial* (when given) and no WORLD lease was taken since.
     """
     cached = None
     try:
@@ -989,8 +1253,21 @@ def file_content(
     except Exception:
         logger.debug("content cache lookup failed", exc_info=True)
     kept = _watchlist_content(path)
+    if cached is not None and cached.negative:
+        if kept is not None:
+            return kept[0]()
+        return FileContent(
+            f"content not readable from device ({cached.status}, "
+            f"{_clock(cached.read_at)})",
+            "",
+            "metadata",
+            "device",
+            cached.read_at,
+            unreadable=cached.status,
+        )
     if cached is not None and (kept is None or cached.read_at >= kept[1]):
-        digest, _ = _cap_bytes(cached.digest(), FILE_HEAD_CAP)
+        full = cached.digest()
+        digest, _ = _cap_bytes(full, FILE_HEAD_CAP)
         trunc = " (head)" if cached.meta.get("truncated") else ""
         header = (
             f"content read from device {_clock(cached.read_at)} "
@@ -998,11 +1275,12 @@ def file_content(
             f"{_human_bytes(cached.meta.get('size'))}{trunc})"
         )
         return FileContent(
-            f"{header}:\n{digest}",
+            _framed(header, digest),
             cached.match(),
             cached.kind,
             "device",
             cached.read_at,
+            reduced=full,
         )
     if kept is not None:
         return kept[0]()

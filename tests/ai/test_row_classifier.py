@@ -609,7 +609,7 @@ def test_local_file_content_reads_kept_versions(tmp_path, monkeypatch):
     text, kind = rc.local_file_content("/data/data/com.x/a.xml")
     assert kind == "content"
     assert "a@b.c" in text
-    assert "last diff: + email" in text
+    assert "last diff: <diff>+ email" in text
     assert len(text) < rc.FILE_HEAD_CAP + rc.DIFF_HEAD_CAP + 100
 
     import sqlite3
