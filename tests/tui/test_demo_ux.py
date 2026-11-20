@@ -802,7 +802,6 @@ def test_key_labels_are_words_in_both_styles() -> None:
 
 async def test_header_breadcrumb_uses_plain_separators() -> None:
     """``Sandroid / device / app   snapshot name``: no ○ ▸ ◇ glyphs."""
-
     from sandroid.tui.app import SandroidTUI
     from sandroid.tui.widgets.lens_shell import ShellHeader
 
