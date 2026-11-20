@@ -1251,14 +1251,47 @@ def after_device_connect_async(serial: str | None = None) -> None:
     _background(after_device_connect, "device-clock-connect", _target(serial))
 
 
-def after_selinux_step(serial: str | None = None) -> None:
-    """Startup's SELinux step is done: run a session-start sync that waited
-    for it (on a daemon thread; nothing to do without one).
+def after_selinux_step(
+    serial: str | None = None, wait: float | None = None
+) -> dict | None:
+    """The SELinux step is done: run a session-start sync that waited for it.
+
+    Args:
+        serial: The device (default: the adb target).
+        wait: ``None`` (startup's caller): fire and forget, on a daemon
+            thread; returns ``None``. A number (the device-prepared step,
+            never on the UI thread): wait up to ``wait`` seconds for the
+            sync and return its ``sync`` line -- ``None`` at once when
+            nothing waits for this device, and ``None`` on a timeout (the
+            sync then goes on in the background).
+
+    Never raises.
     """
+    target = _target(serial)
     with _LOCK:
         if not _PENDING_SYNC:
-            return
-    _background(_session_start_sync, "device-clock-sync", _target(serial))
+            return None
+        if wait is not None and _key(target) not in _PENDING_SYNC:
+            return None
+    if wait is None:
+        _background(_session_start_sync, "device-clock-sync", target)
+        return None
+    box: list[dict | None] = []
+
+    def run() -> None:
+        try:
+            box.append(_session_start_sync(target))
+        except (Exception, SystemExit):
+            logger.debug("device clock: session-start sync failed", exc_info=True)
+
+    try:
+        thread = threading.Thread(target=run, name="device-clock-sync", daemon=True)
+        thread.start()
+        thread.join(max(0.0, wait))
+    except Exception:
+        logger.debug("device clock: could not run the sync", exc_info=True)
+        return None
+    return box[0] if box else None
 
 
 def reset() -> None:

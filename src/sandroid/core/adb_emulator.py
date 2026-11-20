@@ -1,8 +1,8 @@
 """ADB emulator-specific operations.
 
 Provides functions for interacting with the Android emulator via telnet
-console commands, including geo-location, sensor control, snapshot
-management, and network capture.
+console commands, including geo-location, snapshot management, and
+network capture.
 """
 
 from __future__ import annotations
@@ -194,52 +194,8 @@ def get_avd_snapshots(
 
 
 # ---------------------------------------------------------------------------
-# Geo / Sensor control
+# Geo location / network info
 # ---------------------------------------------------------------------------
-
-
-def set_geo_fix(
-    send_telnet: Callable[[str], tuple[str, str]],
-    lon: float,
-    lat: float,
-) -> tuple[str, str]:
-    """Set GPS coordinates on the emulator via telnet.
-
-    Args:
-        send_telnet: Callable that sends a telnet command.
-        lon: Longitude value.
-        lat: Latitude value.
-
-    Returns:
-        A tuple of (stdout, stderr).
-    """
-    logger.debug(f"Setting geo fix: lon={lon}, lat={lat}")
-    stdout, stderr = send_telnet(f"geo fix {lon} {lat}")
-    if stderr:
-        logger.error(f"Failed to set geo fix: {stderr}")
-    return stdout, stderr
-
-
-def set_sensor_value(
-    send_telnet: Callable[[str], tuple[str, str]],
-    sensor: str,
-    values: str,
-) -> tuple[str, str]:
-    """Set a sensor value on the emulator via telnet.
-
-    Args:
-        send_telnet: Callable that sends a telnet command.
-        sensor: Sensor name (e.g., ``'acceleration'``).
-        values: Colon-separated sensor values (e.g., ``'0:9.8:0'``).
-
-    Returns:
-        A tuple of (stdout, stderr).
-    """
-    logger.debug(f"Setting sensor '{sensor}' to values: {values}")
-    stdout, stderr = send_telnet(f"sensor set {sensor} {values}")
-    if stderr:
-        logger.error(f"Failed to set sensor value: {stderr}")
-    return stdout, stderr
 
 
 def get_geo_location(

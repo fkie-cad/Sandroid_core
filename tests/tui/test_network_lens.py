@@ -454,6 +454,46 @@ async def test_enter_opens_inspector_with_tabs(flow_dir):
         assert ms.inspector_content.key == "network:row:f2"
 
 
+async def test_a_late_flow_goes_to_its_start_time(flow_dir):
+    """A flow is read when it finishes, a TLS failure at once: a long request
+    that started before the failure still shows above it (time order).
+    """
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        panel.mitm._append_line("[TLS_FAIL]|10:00:00|pinned.example.com|cert|" + PKG)
+        await until(pilot, lambda: any(r.kind == "tls" for r in panel._live))
+        count = panel.table.row_count
+        late_host = _SPECS[1][1]
+        write_flows(flow_dir, time.time() - 30, specs=_SPECS[1:2], start_seq=100)
+        panel.poll_now()
+        await until(pilot, lambda: panel.table.row_count == count + 1)
+        stamps = [r.ts for r in panel._live]
+        assert stamps == sorted(stamps)
+        keys = [
+            panel.table.coordinate_to_cell_key((i, 0))[0].value
+            for i in range(count + 1)
+        ]
+        rows = [panel._row_by_key(k) for k in keys]
+        assert rows[-1].kind == "tls"
+        assert rows[-2].host == late_host
+        assert rows[-2].kind != "tls"
+
+
+async def test_a_late_flow_keeps_a_moved_cursor_on_its_flow(flow_dir):
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        panel.table.move_cursor(row=1)
+        await settle(pilot)
+        key = panel._cursor_key()
+        count = panel.table.row_count
+        write_flows(flow_dir, time.time() - 200, specs=_SPECS[1:2], start_seq=100)
+        panel.poll_now()
+        await until(pilot, lambda: panel.table.row_count == count + 1)
+        assert panel._cursor_key() == key
+
+
 async def test_tls_failure_row_and_badge(flow_dir):
     app = _app()
     async with app.run_test(size=SIZE) as pilot:

@@ -1018,3 +1018,164 @@ def test_a_sample_measured_before_a_world_change_stays_in_the_old_world(
         assert not device_clock._add_to_epochs(SERIAL, {
             "off_mono": epoch["off_mono"], "dev_mono": 1.0, "err_ms": 1.0,
             "_host": epoch["closed_host"] - 0.5})  # fmt: skip
+
+
+# -- after_selinux_step(wait=) and the device-prepared step -------------------
+
+
+def test_after_selinux_step_with_wait_returns_the_sync_line(device):
+    device.selinux = "Enforcing"
+    assert device_clock.after_device_connect(SERIAL) is None  # sync waits
+    device.selinux = "Permissive"
+    line = device_clock.after_selinux_step(SERIAL, wait=5)
+    assert (line["reason"], line["trigger"], line["ok"]) == (
+        "sync",
+        "session-start",
+        True,
+    )
+    assert device_clock.after_selinux_step(SERIAL, wait=5) is None  # once
+
+
+def test_after_selinux_step_with_wait_and_nothing_pending_is_none_at_once(
+    monkeypatch,
+):
+    started: list = []
+    monkeypatch.setattr(
+        device_clock, "_session_start_sync", lambda *a: started.append(a)
+    )
+    assert device_clock.after_selinux_step(SERIAL, wait=5) is None
+    device_clock._PENDING_SYNC.add("other-serial")  # another device waits
+    assert device_clock.after_selinux_step(SERIAL, wait=5) is None
+    assert started == []
+
+
+def test_after_selinux_step_wait_times_out_while_the_sync_goes_on(monkeypatch):
+    import threading
+
+    release = threading.Event()
+    done: list = []
+
+    def slow_sync(serial, *args):
+        release.wait(5)
+        done.append(serial)
+        return {"reason": "sync"}
+
+    monkeypatch.setattr(device_clock, "_session_start_sync", slow_sync)
+    device_clock._PENDING_SYNC.add(SERIAL)
+    assert device_clock.after_selinux_step(SERIAL, wait=0.05) is None
+    syncing = [t for t in threading.enumerate() if t.name == "device-clock-sync"]
+    assert syncing
+    assert syncing[0].is_alive()
+    release.set()
+    syncing[0].join(5)
+    assert done == [SERIAL]
+
+
+class _PrepAdb:
+    """adb as the device-prepared step sees it (boot id, transport, root)."""
+
+    BOOT = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+
+    def __init__(self, clock_device: FakeDevice) -> None:
+        self.clock = clock_device
+        self.boot_id = self.BOOT
+        self.uptime = 500.0
+        self.transport = 1
+
+    def send(self, command: str, serial=None, timeout=30):
+        from sandroid.core import device_prep
+
+        if command == "devices -l":
+            return (
+                f"List of devices attached\n{SERIAL} device "
+                f"transport_id:{self.transport}\n",
+                "",
+            )
+        if command == device_prep.BOOT_INFO_COMMAND:
+            return f"{self.boot_id}\n\n{self.uptime} 1.0\n", ""
+        if command == "root":
+            return "adbd is already running as root\n", ""
+        if command == "shell id":
+            return "uid=0(root)\n", ""
+        if command == "shell getenforce":
+            return self.clock.selinux + "\n", ""
+        if command == "shell setenforce 0":
+            self.clock.selinux = "Permissive"
+        return "", ""
+
+
+def test_reconnect_after_reboot_starts_a_new_clock_world(monkeypatch, device):
+    """The device-prepared step after a reboot: the world change (and its
+    clock barrier) comes BEFORE the device-connect sample, the newest
+    current-world sample is never the pre-reboot one, and the session-start
+    sync that waited for SELinux is released by the step's SELinux step.
+    """
+    from sandroid.core import device_prep
+    from sandroid.core.device import Device
+    from sandroid.core.device_manager import DeviceManager
+    from sandroid.services import setup_checks
+
+    device_prep.reset(hooks=True)
+    adb = _PrepAdb(device)
+    monkeypatch.setattr(
+        Adb, "send_adb_command", classmethod(lambda cls, c, **kw: adb.send(c))
+    )
+    monkeypatch.setattr(Adb, "_target_device", SERIAL)
+    monkeypatch.setattr(device_prep, "_settle", lambda serial, cancel: True)
+    monkeypatch.setattr(setup_checks.time, "sleep", lambda s: None)
+    manager = DeviceManager()
+    active = Device(serial=SERIAL, state="device", root_kind="adbd root")
+    manager._devices = {SERIAL: active}
+    manager._active_device = active
+    monkeypatch.setattr(DeviceManager, "_instance", manager)
+    hook_saw: list = []
+    device_prep.register_device_prepared_hook(
+        lambda serial, fresh: hook_saw.append(
+            (fresh, [x["reason"] for x in _lines()][-1])
+        )
+    )
+    device_prep.set_enabled(True)
+    try:
+        device.selinux = "Enforcing"
+        assert device_prep.ensure_prepared(SERIAL, 10).kind == "first"
+        assert [x["reason"] for x in _lines()] == ["device-connect", "sync"]
+        before = device_clock.last_sample(SERIAL, current_world=True)
+        assert before is not None
+
+        # The device reboots: new boot_id, CLOCK_MONOTONIC from zero, the
+        # wall clock off again and SELinux back to Enforcing.
+        device.host += 60.0
+        device.mono_off = device.host - 20.0
+        device.behind = 4500.0
+        device.selinux = "Enforcing"
+        adb.boot_id = "11111111-2222-3333-4444-555555555555"
+        adb.uptime = 20.0
+        adb.transport = 2
+        start = len(_CAPTURED)
+        result = device_prep.ensure_prepared(SERIAL, 10)
+        assert result.kind == "new-world"
+        assert result.fresh_boot is True
+
+        lines = _CAPTURED[start:]
+        kinds = [(x["src"], x["kind"]) for x in lines]
+        boot = kinds.index(("device", "boot"))
+        connect = next(
+            i
+            for i, x in enumerate(lines)
+            if x["data"].get("reason") == "device-connect"
+        )
+        assert boot < connect
+        assert lines[boot]["data"]["cause"] == "reboot"
+        assert lines[boot]["world"] == lines[boot]["data"]["world_before"] + 1
+        after = device_clock.last_sample(SERIAL, current_world=True)
+        assert after is not None
+        assert after != before
+        assert after["off_mono"] == pytest.approx(device.mono_off, abs=1e-3)
+        # The waiting session-start sync ran before the hooks.
+        assert [x["data"].get("reason") for x in lines if x["src"] == "clock"][
+            -1
+        ] == "sync"
+        assert hook_saw[-1] == (True, "sync")
+        assert not device_clock._PENDING_SYNC
+    finally:
+        device_prep.reset(hooks=True)

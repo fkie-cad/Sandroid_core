@@ -386,11 +386,14 @@ def restore_selinux_on_quit(adb: Any = None) -> list[str]:
     return restored
 
 
-def check_and_set_selinux(adb: Any) -> SetupCheckResult:
+def check_and_set_selinux(adb: Any, *, notify_clock: bool = True) -> SetupCheckResult:
     """Check and set SELinux to permissive mode.
 
     Args:
         adb: ADB interface with send_adb_command method
+        notify_clock: Release a waiting session-start clock sync afterwards
+            (``device_clock.after_selinux_step``, in the background). The
+            device-prepared step passes False and waits for it itself.
 
     Returns:
         SetupCheckResult with check status
@@ -437,6 +440,8 @@ def check_and_set_selinux(adb: Any) -> SetupCheckResult:
     # A session-start device clock sync waits for this step (root ``date``
     # and /proc/timer_list may be denied under Enforcing); it runs now, in
     # the background, whatever the outcome (a failed sync is warned about).
+    if not notify_clock:
+        return check
     try:
         from sandroid.core import device_clock
 
