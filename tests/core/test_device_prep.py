@@ -1097,6 +1097,31 @@ def test_restart_of_a_non_active_device_has_a_single_world_change(rig, monkeypat
     assert _worlds(rig.fake.events) == []
 
 
+def test_the_proxy_restore_hook_registers_with_the_step(rig, monkeypatch):
+    """sandroid-proxy's guard (services/proxy_restore.py) registers its
+    restore through this module and gets ``fresh_boot`` from the step;
+    restart() skips its own restore only while the step is on.
+    """
+    from sandroid.services import proxy_restore
+
+    calls: list = []
+    monkeypatch.setattr(proxy_restore, "_HOOK_INSTALLED", False)
+    monkeypatch.setattr(proxy_restore, "_anything_desired", lambda serial: True)
+    monkeypatch.setattr(
+        proxy_restore,
+        "restore_proxy_infra",
+        lambda serial, cause, **kw: calls.append((serial, cause, kw["fresh_boot"])),
+    )
+    assert proxy_restore.device_prepared_hook_active()
+    assert [proxy_restore._device_prepared_hook] == device_prep._HOOKS
+    _run()
+    rig.fake.transport += 1
+    _run("transport")
+    assert calls == [(SERIAL, "cold-boot", True), (SERIAL, "reconnect", False)]
+    device_prep.set_enabled(False)
+    assert not proxy_restore.device_prepared_hook_active()
+
+
 def test_restart_records_the_cold_boot_itself_while_the_step_is_off(rig, monkeypatch):
     import sandroid.core.emulator as emulator_mod
     from sandroid.services import emulator_service
@@ -1285,6 +1310,7 @@ def test_mitm_panel_drops_its_prepared_listener_on_unmount(rig, monkeypatch):
         ),
         _on_service_line=None,
         _remove_our_reverse=lambda: None,
+        _release_app_proxies_async=lambda: None,
     )
     panel._unsubscribe_device_prepared = (
         lambda: MitmproxyPanel._unsubscribe_device_prepared(panel)
