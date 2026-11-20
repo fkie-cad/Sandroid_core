@@ -1111,6 +1111,65 @@ def test_a_framework_that_came_back_late_still_gets_the_frida_recovery(
     assert any(x["data"].get("recovery") for x in lines if x["kind"] == "restart")
 
 
+def test_a_down_framework_is_started_even_while_an_app_start_runs(
+    service, device, app_start
+):
+    """No app start gets far without the framework: ``start`` regardless of
+    the lifecycle lock; only the Frida recovery waits for it (marker kept).
+    """
+    device.crash_when_stopped = 2  # the link stays down for the `start` too
+    with pytest.raises(RuntimeError, match="adb connection lost"):
+        service.apply(SERIAL, "com.example.app")
+    assert not device.running
+    assert RESTART_MARKER in device.fs
+    app_start.busy = True
+    service.apply(SERIAL, "com.example.app")
+    assert device.running  # started although the lock was refused
+    assert RESTART_MARKER in device.fs  # the recovery is still owed
+    assert service.restarts_seen == []
+    app_start.busy = False
+    service.apply(SERIAL, "com.example.app")
+    assert service.restarts_seen  # recovered (this boot, a new system_server)
+    assert RESTART_MARKER not in device.fs
+
+
+@pytest.mark.parametrize(
+    ("fields", "recovers"),
+    [
+        ("", False),  # an older marker without boot id and PID
+        ("boot=other-boot pid=999", False),  # written in another boot
+        ("boot={boot} pid={pid}", False),  # the same system_server: no restart
+        ("boot={boot} pid=999", True),  # restarted in this boot, unrecovered
+    ],
+)
+def test_a_marker_recovers_only_an_unrecovered_restart_of_this_boot(
+    service, device, fields, recovers
+):
+    boot = device.fs[ident.BOOT_ID_FILE].decode().strip()
+    stamp = f"fp 1700000000 android_id {fields}".format(boot=boot, pid=device.pid)
+    device.fs[RESTART_MARKER] = stamp.encode()
+    state = service.preflight(SERIAL, (), service.active_profile())
+    assert state.marker.strip() == stamp.strip()
+    pid = device.pid
+    service._recover(ident._Device(SERIAL), state)
+    assert RESTART_MARKER not in device.fs
+    assert device.pid == pid  # never restarted
+    assert service.restarts_seen == ([SERIAL] if recovers else [])
+
+
+def test_the_restart_marker_names_the_boot_and_the_old_system_server(
+    service, device, monkeypatch
+):
+    monkeypatch.setattr(service, "_wait_framework", lambda dev, old: False)
+    pid = device.pid
+    service.apply(SERIAL, "com.example.app")
+    boot = device.fs[ident.BOOT_ID_FILE].decode().strip()
+    assert ident._marker_fields(device.fs[RESTART_MARKER].decode()) == (
+        boot,
+        str(pid),
+    )
+
+
 def test_recovery_waits_while_an_app_start_holds_the_lifecycle_lock(
     service, device, monkeypatch, app_start
 ):

@@ -3680,28 +3680,19 @@ class IdentityService:
     def _recover(self, dev: _Device, state: DeviceState) -> None:
         """A restart window was interrupted: bring the framework back.
 
-        Two cases leave the marker: the window broke off with the framework
-        down (``start`` it, wait, recover), or ``_end_window`` timed out and
-        the framework came back late (it is up now, but the Frida and proxy
-        recovery never ran: run it). Like the window itself it holds the
-        app-start lifecycle lock; when an app start holds it, the marker
-        stays for the next apply.
+        The framework is down (the window broke off): ``start`` it and wait,
+        whatever holds the app-start lifecycle lock (no app start gets far
+        without it). The framework is up: the marker is stale unless it was
+        written in this boot (its ``boot=``) before a system_server that is
+        gone now (its ``pid=``), i.e. ``_end_window`` stopped waiting and
+        the framework came back late, unrecovered. The Frida/proxy recovery
+        (:attr:`_after_restart`) then holds the lifecycle lock like the
+        window itself; refused, the marker stays for the next apply. A stale
+        marker (another boot, the same system_server, or an older marker
+        without these fields) is only removed.
         """
         from sandroid.services.app_start import AppStartError, lifecycle_lock
 
-        guard = contextlib.ExitStack()
-        try:
-            guard.enter_context(lifecycle_lock(0.0))
-        except AppStartError as exc:
-            logger.info(
-                f"identity: interrupted framework restart on {state.serial} "
-                f"left for the next apply: {exc}"
-            )
-            return
-        with guard:
-            self._recover_locked(dev, state)
-
-    def _recover_locked(self, dev: _Device, state: DeviceState) -> None:
         self._emit(
             "restart",
             "identity: resuming an interrupted framework restart",
@@ -3710,14 +3701,30 @@ class IdentityService:
             level="warn",
             data={"marker": state.marker[:200], "recovery": True},
         )
+        boot, old_pid = _marker_fields(state.marker)
         if not state.system_server:
             dev.shell("start")
-            if self._wait_framework(dev, ""):
-                self._after_restart(state.serial, None)
-        else:
-            # The framework came back after the window stopped waiting.
-            self._after_restart(state.serial, None)
-        dev.shell(f"rm -f {RESTART_MARKER}")
+            if not self._wait_framework(dev, ""):
+                return  # still down: the marker stays, the next apply resumes
+        elif not (boot and old_pid and boot == state.boot_id) or (
+            state.system_server == old_pid
+        ):
+            dev.shell(f"rm -f {RESTART_MARKER}")
+            return
+        guard = contextlib.ExitStack()
+        try:
+            guard.enter_context(lifecycle_lock(0.0))
+        except AppStartError as exc:
+            logger.info(
+                f"identity: Frida recovery after the framework restart on "
+                f"{state.serial} left for the next apply: {exc}"
+            )
+            return
+        with guard:
+            self._after_restart(
+                state.serial, int(old_pid) if old_pid.isdigit() else None
+            )
+            dev.shell(f"rm -f {RESTART_MARKER}")
 
     def _run_sim(
         self,
@@ -3994,7 +4001,11 @@ class IdentityService:
             level="warn",
             data={"values": [s.value_id for s in steps]},
         )
-        stamp = f"{plan.fingerprint} {int(time.time())} {','.join(s.value_id for s in steps)}"
+        stamp = (
+            f"{plan.fingerprint} {int(time.time())} "
+            f"{','.join(s.value_id for s in steps)} "
+            f"boot={state.boot_id or '-'} pid={state.system_server or '-'}"
+        )
         dev.shell(f"echo {_q(stamp)} > {RESTART_MARKER}")
         dev.shell("stop")
         error: BaseException | None = None
@@ -4787,6 +4798,16 @@ def _counts(infos: dict[str, ValueInfo]) -> dict[str, int]:
     for info in infos.values():
         out[info.status] = out.get(info.status, 0) + 1
     return out
+
+
+def _marker_fields(marker: str) -> tuple[str, str]:
+    """``(boot id, system_server PID)`` a restart marker was written with
+    (``""`` each when it has none: an older marker).
+    """
+    boot = re.search(r"\bboot=(\S+)", marker or "")
+    pid = re.search(r"\bpid=(\d+)", marker or "")
+    value = boot.group(1) if boot else ""
+    return ("" if value == "-" else value), (pid.group(1) if pid else "")
 
 
 def _timeline_rel(path: Path) -> str:
