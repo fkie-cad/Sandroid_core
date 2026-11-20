@@ -1,0 +1,263 @@
+# Bahasa Indonesia language pack. Personal texts use everyday chat Indonesian
+# (gak/ga, udh, blm, aja, bgt, wkwk, otw, gpp, mksh) with some Jakarta slang;
+# service SMS use the formal register real Indonesian senders use.
+# `emoji: true` marks threads/entries containing emoji.
+# Proposed (not yet in schema v1): service kinds `mobile_money`, `loan`,
+# placeholders `{balance}`, `{fee}`, list values in `call_names`. See SOURCES.md.
+pack: language
+schema: 1.1
+lang: id
+name: Bahasa Indonesia
+threads:
+  family:
+    - {msgs: [[p, "Nak udah makan blm?"], [o, "Udah ma barusan"], [p, "Makan apa"], [o, "Nasi goreng"], [p, "Ya udah jgn lupa istirahat"]]}
+    - {msgs: [[p, "Lebaran pulang kan?"], [o, "Iya ma, tiket udh dpt"], [p, "Alhamdulillah. Naik apa"], [o, "Kereta, tgl {date}"]]}
+    - {emoji: true, msgs: [[p, "Selamat ulang tahun ya nak 🎂 semoga sehat selalu dan makin sukses"], [o, "Aamiin makasih bu 🙏❤️"], [p, "Nanti malem vc ya"]]}
+    - {msgs: [[o, "Udah nyampe ma"], [p, "Alhamdulillah. Istirahat dulu"]]}
+    - {msgs: [[p, "Dek hp papa gak aktif ya?"], [o, "Lagi dicas kayaknya, td aku udh telp"], [p, "Oke deh"]]}
+    - {emoji: true, msgs: [[p, "Kirim foto yg kemarin dong"], [o, "Udah ya"], [p, "Bagus bgt 😍"]]}
+    - {msgs: [[p, "Mas jadi transfer buat bayar listrik?"], [o, "Udah tadi pagi, cek aja"], [p, "Ok udah masuk mksh"]]}
+    - {msgs: [[p, "Besok arisan keluarga di rumah tante jam 10"], [o, "Iya insyaallah dateng"], [p, "Ajak {partner_first} ya"]]}
+    - {emoji: true, msgs: [[p, "Mohon maaf lahir dan batin ya nak 🙏"], [o, "Sama2 pa, mohon maaf lahir batin juga"]]}
+  partner:
+    - {msgs: [[p, "Yang dmn?"], [o, "Masih di kantor, bentar lg pulang"], [p, "Nitip gorengan ya"], [o, "Siap"]]}
+    - {emoji: true, msgs: [[p, "Kangen 🥺"], [o, "Aku jg kangen sayang ❤️"], [p, "Cepet pulang"]]}
+    - {msgs: [[o, "Malem ini makan di luar yuk"], [p, "Ayo, aku lg males masak"], [o, "Jam 7 ya siap2"]]}
+    - {emoji: true, msgs: [[p, "Maaf ya telat, macet parah"], [o, "Gpp hati2 di jalan"], [p, "Iya sayang 😘"]]}
+    - {msgs: [[p, "Token listrik udh mau abis"], [o, "Oke aku beliin skrg"], [p, "Mksh"]]}
+    - {msgs: [[o, "Kunci motor liat gak?"], [p, "Di meja deket tv"], [o, "Oh iya ketemu"]]}
+    - {msgs: [[p, "Udah sampe rumah?"], [o, "Udah barusan"], [p, "Oke met tidur"]]}
+    - {emoji: true, msgs: [[p, "Liat deh ini lucu bgt 😍"], [o, "Beli aja"], [p, "Lg diskon jg wkwk"]]}
+  friend:
+    - {msgs: [[p, "Bro dmn?"], [o, "Otw 5 menit"], [p, "5 menit lo kan sejam wkwk"], [o, "Beneran ini udh deket"]]}
+    - {emoji: true, msgs: [[p, "Nanti malem nobar gak?"], [o, "Gas"], [p, "Di {place} ya jam 7 ⚽"]]}
+    - {emoji: true, msgs: [[o, "Hbd bro 🎉 traktiran kapan nih"], [p, "Wkwk mksh. Sabtu deh"], [o, "Mantap"]]}
+    - {msgs: [[p, "Eh catetan kemarin kirim dong"], [o, "Bentar ya"], [p, "Makasih bestie"]]}
+    - {msgs: [[p, "Jadi ke Bandung gak sih"], [o, "Jadi lah, tinggal cari penginapan"], [p, "Buruan ntar mahal"]]}
+    - {emoji: true, msgs: [[p, "Liat grup gak {first} kirim apaan 😂😂"], [o, "Wkwkwk parah"]]}
+    - {msgs: [[o, "Bro pinjem 200 dulu dong, besok gw ganti"], [p, "Udah gw tf"], [o, "Mksh bro"]]}
+    - {msgs: [[p, "Gmn interview nya?"], [o, "Lumayan sih, katanya minggu depan dikabarin"], [p, "Semoga lolos ya"]]}
+    - {msgs: [[p, "Ngopi yuk"], [o, "Yuk, jam 4 di tempat biasa"]]}
+  colleague:
+    - {msgs: [[p, "Pak, meeting jam 10 diundur jd jam 2"], [o, "Oke noted, mksh"]]}
+    - {msgs: [[p, "Mbak laporan udh dikirim?"], [o, "Udah saya email tadi pagi"], [p, "Siap mksh"]]}
+    - {msgs: [[o, "Hari ini saya WFH ya, kalau ada yg urgent telp aja"], [p, "Baik"]]}
+    - {msgs: [[p, "Makan siang bareng?"], [o, "Yuk jam 12 di lobby"]]}
+    - {msgs: [[o, "Maaf telat 15 menit, kena macet"], [p, "Gpp, kita mulai dulu ya"]]}
+    - {msgs: [[p, "Besok ada kunjungan klien, pakai batik ya"], [o, "Siap"]]}
+    - {msgs: [[p, "Tolong bahan presentasi dikirim sebelum jam 5 ya"], [o, "Baik pak, saya kirim jam 4"]]}
+    - {msgs: [[p, "Cuti kamu udah di-approve?"], [o, "Belum, udh saya ingetin atasan"]]}
+  neighbor:
+    - {msgs: [[p, "Permisi, td ada paket buat mbak, saya simpenin"], [o, "Wah makasih bu, nanti sore saya ambil"]]}
+    - {msgs: [[p, "Info: besok kerja bakti jam 7 pagi"], [o, "Siap pak RT"]]}
+    - {msgs: [[p, "Mas motornya nutupin pager, bisa digeser?"], [o, "Maaf pak, saya geser skrg"]]}
+    - {msgs: [[p, "Air PDAM mati jg gak di rumah?"], [o, "Iya dari pagi"], [p, "Oh berarti satu komplek"]]}
+    - {emoji: true, msgs: [[p, "Selamat Idul Fitri ya, mohon maaf lahir batin 🙏"], [o, "Sama2 bu, maaf lahir batin juga"]]}
+    - {msgs: [[p, "Iuran keamanan bulan ini {amount} ya"], [o, "Oke nanti saya transfer"]]}
+    - {msgs: [[o, "Bu kucing saya ada yg liat gak? Warna oren"], [p, "Td di depan rumah saya, kayaknya ke arah warung"]]}
+    - {msgs: [[p, "Besok ada fogging jam 4 sore, jendela ditutup ya"], [o, "Oke mksh infonya"]]}
+service_sms:
+  courier:
+    - "Paket Anda dgn no resi {tracking} sedang dibawa kurir dan akan diantar hari ini."
+    - "{courier}: Paket {tracking} telah diterima oleh YBS pada {date} {time}."
+    - "Pesanan Anda dari {shop} telah dikirim. No resi: {tracking}"
+    - "Kurir kami gagal mengantar paket {tracking}. Pengiriman ulang dijadwalkan {date}."
+    - "Paket {tracking} sudah tiba di gudang {city} dan akan segera diantar."
+  bank:
+    - "JANGAN BERIKAN KODE INI KEPADA SIAPAPUN termasuk pihak bank. Kode OTP Anda: {digits:6}. Berlaku 3 menit."
+    - "{bank}: Transfer {amount} ke {first} {last} BERHASIL pada {date} {time}. Ref {digits:12}."
+    - "{bank}: Dana masuk {amount} dari {first} {last} pada {date}. Saldo: {balance}"
+    - "Transaksi kartu debit {digits:4} sebesar {amount} di {shop} pada {date} {time}."
+    - "Hati-hati penipuan! {bank} tidak pernah meminta PIN, OTP, atau password melalui telepon/SMS."
+    - "{bank}: Tagihan kartu kredit Anda {amount} jatuh tempo {date}. Pembayaran minimum {balance}."
+  telecom:
+    - "Isi ulang pulsa {amount} berhasil. Sisa pulsa {balance}. Masa aktif s.d. {date}."
+    - "Sisa kuota internet Anda tinggal 500MB. Beli paket di *{digits:3}# sekarang!"
+    - "Paket internet 30GB 30 hari Anda aktif s.d. {date}. Cek kuota di *{digits:3}#"
+    - "Promo spesial! Kuota 25GB cuma {amount}. Tekan *{digits:3}*{digits:2}# sekarang. S&K berlaku."
+    - "Masa aktif kartu Anda akan berakhir {date}. Segera isi ulang agar nomor tetap aktif."
+    - "Selamat! Anda mendapat bonus kuota 2GB berlaku 3 hari."
+  otp_service:
+    - "{digits:6} adalah kode verifikasi Anda. Jangan berikan kode ini kepada siapa pun."
+    - "<#> Kode OTP Anda: {digits:6}. {code}"
+    - "Kode verifikasi: {digits:4}. Berlaku 5 menit. JANGAN BAGIKAN kode ini."
+    - "Gunakan kode {digits:6} untuk masuk ke akun Anda."
+    - "RAHASIA! Kode verifikasi Anda {digits:6}. Waspada penipuan."
+  doctor:
+    - "Pengingat: Jadwal kontrol Anda di poli pada {date} pukul {time}. No antrean {digits:2}."
+    - "Pendaftaran berhasil. Silakan datang 30 menit sebelum jadwal {time}."
+    - "Hasil lab Anda sudah dapat diambil. Kode {code}."
+    - "Mohon puasa 10 jam sebelum pemeriksaan pada {date}."
+    - "Jadwal dokter pada {date} dibatalkan. Silakan daftar ulang."
+  pharmacy:
+    - "Pesanan obat #{digits:8} dikonfirmasi. Estimasi tiba {date}. Total {amount}."
+    - "Pesanan Anda sedang dikirim oleh kurir."
+    - "Waktunya tebus resep bulanan Anda. Pesan sekarang, gratis ongkir!"
+    - "Resep Anda untuk pesanan {code} sudah diverifikasi apoteker."
+    - "Pesanan {code} telah diterima. Terima kasih."
+  delivery_food:
+    - "Pesanan Anda dari {shop} sedang diantar. Driver {first} tiba dlm {digits:2} menit."
+    - "Pesanan #{digits:6} dikonfirmasi. Total {amount}."
+    - "Pesanan sudah sampai. Selamat menikmati!"
+    - "Lapar? Diskon 50% di {shop} khusus hari ini!"
+    - "Driver sudah sampai di lokasi Anda."
+  ride_hailing:
+    - "Driver {first} menuju lokasi jemput. Plat {code}. Tiba 3 menit."
+    - "Driver sudah tiba di titik jemput."
+    - "Perjalanan selesai. Tarif {amount}. Terima kasih!"
+    - "Kode PIN perjalanan Anda: {digits:4}"
+    - "Pesanan ojek Anda dibatalkan oleh driver. Sedang mencari driver lain."
+  airline:
+    - "Check-in online untuk penerbangan ke {city} {date} sudah dibuka. Kode booking {code}."
+    - "Penerbangan Anda ke {city} boarding pukul {time} di gate {digits:1}."
+    - "Mohon maaf, penerbangan Anda ke {city} mengalami keterlambatan. Jadwal baru {time}."
+    - "Pemesanan berhasil. Kode booking {code}. Berangkat {date} {time}."
+    - "E-boarding pass Anda telah dikirim ke email."
+  rail:
+    - "Kode booking {code}. KA tujuan {city} {date} {time}. Kereta {digits:1} kursi {digits:1}A. Tunjukkan KTP saat boarding."
+    - "Pemesanan tiket kereta berhasil. Kode booking {code}. Total {amount}."
+    - "Pengingat: kereta Anda ke {city} berangkat besok pukul {time}."
+    - "Pembatalan tiket {code} berhasil. Pengembalian dana {amount} diproses 30 hari."
+    - "Mohon maaf, KA tujuan {city} terlambat sekitar {digits:2} menit."
+  government:
+    - "Permohonan Anda dengan nomor {code} sedang diproses."
+    - "Dokumen Anda sudah dapat diambil di kantor {city}."
+    - "Batas lapor SPT Tahunan {date}. Segera laporkan secara online."
+    - "Kode verifikasi akun Anda: {digits:6}. Jangan berikan kepada siapapun."
+    - "Pajak kendaraan Anda jatuh tempo {date}. Bayar online agar tidak kena denda."
+  retail:
+    - "Terima kasih telah berbelanja di {shop}. Anda mendapat {digits:3} poin."
+    - "PROMO GAJIAN! Diskon s.d. 70% di {shop}. Berlaku s.d. {date}."
+    - "Pesanan {code} sudah dikirim."
+    - "Pengembalian dana {amount} untuk pesanan {code} berhasil."
+    - "Flash sale jam 12.12 nanti! Cek di {shop}."
+  utility:
+    - "Token listrik: {digits:4}-{digits:4}-{digits:4}-{digits:4}-{digits:4}. {digits:2},{digits:1} kWh. Total {amount}."
+    - "Tagihan listrik bulan ini {amount}. Jatuh tempo {date}."
+    - "Pemberitahuan pemadaman listrik {date} pukul {time} karena pemeliharaan jaringan."
+    - "Tagihan air {amount} jatuh tempo {date}. No pelanggan {digits:8}."
+    - "Pembayaran {amount} berhasil. Ref {code}."
+  mobile_money:
+    - "Kamu menerima {amount} dari {first} {last}. Saldo: {balance}. ID transaksi {digits:12}."
+    - "Transfer {amount} ke {first} {last} berhasil. Biaya admin {fee}. Saldo {balance}."
+    - "Pembayaran {amount} ke {shop} berhasil. Saldo {balance}."
+    - "Top up {amount} berhasil. Saldo kamu sekarang {balance}."
+    - "Pembayaran QRIS {amount} di {shop} berhasil. Ref {digits:12}."
+  loan:
+    - "Tagihan Anda sebesar {amount} jatuh tempo {date}. Bayar tepat waktu untuk menjaga skor kredit."
+    - "Pinjaman {amount} telah dicairkan ke rekening Anda."
+    - "Tagihan Anda telah melewati jatuh tempo. Segera bayar {amount} untuk menghindari denda."
+    - "Terima kasih, pembayaran cicilan {amount} sudah kami terima. Sisa tagihan {balance}."
+    - "Limit pinjaman Anda naik menjadi {amount}. Ajukan sekarang!"
+calendar:
+  - {title: "Dokter gigi", minutes: 45, kind: appointment}
+  - {title: "Kontrol dokter", minutes: 60, kind: appointment}
+  - {title: "Cek lab", minutes: 30, kind: appointment}
+  - {title: "Ke bank", minutes: 60, kind: appointment}
+  - {title: "Perpanjang SIM", minutes: 120, kind: appointment}
+  - {title: "Bikin paspor", minutes: 180, kind: appointment}
+  - {title: "Ambil rapor anak", minutes: 60, kind: appointment}
+  - {title: "Servis motor", minutes: 90, kind: appointment}
+  - {title: "Potong rambut", minutes: 30, kind: appointment}
+  - {title: "Daily standup", minutes: 15, kind: work}
+  - {title: "Meeting klien", minutes: 60, kind: work}
+  - {title: "Rapat tim", minutes: 60, kind: work}
+  - {title: "Presentasi proyek", minutes: 90, kind: work}
+  - {title: "Interview {first} {last}", minutes: 45, kind: work}
+  - {title: "Deadline laporan", all_day: true, kind: work}
+  - {title: "Training", minutes: 180, kind: work}
+  - {title: "Makan malam sama {first}", minutes: 120, kind: social}
+  - {title: "Nikahan {first}", all_day: true, kind: social}
+  - {title: "Arisan", minutes: 180, kind: social}
+  - {title: "Bukber", minutes: 120, kind: social}
+  - {title: "Halal bihalal", minutes: 180, kind: social}
+  - {title: "Pengajian", minutes: 120, kind: social}
+  - {title: "Ibadah minggu", minutes: 120, kind: social}
+  - {title: "Nonton bareng", minutes: 180, kind: social}
+  - {title: "Reuni SMA", minutes: 240, kind: social}
+  - {title: "Futsal", minutes: 90, kind: sport}
+  - {title: "Gym", minutes: 60, kind: sport}
+  - {title: "Jogging CFD", minutes: 60, kind: sport}
+  - {title: "Badminton", minutes: 90, kind: sport}
+  - {title: "Renang", minutes: 60, kind: sport}
+  - {title: "Penerbangan ke {city}", minutes: 120, kind: travel}
+  - {title: "Kereta ke {city}", minutes: 300, kind: travel}
+  - {title: "Mudik", all_day: true, kind: travel}
+  - {title: "Liburan {city}", all_day: true, kind: travel}
+  - {title: "Jemput {first} di bandara", minutes: 90, kind: travel}
+  - {title: "Ultah {first}", all_day: true, kind: birthday}
+  - {title: "Ulang tahun {first}", all_day: true, kind: birthday}
+  - {title: "Anniversary", all_day: true, kind: birthday}
+  - {title: "Ultah mama", all_day: true, kind: birthday}
+  - {title: "Bayar kos", all_day: true, kind: reminder}
+  - {title: "Bayar listrik", all_day: true, kind: reminder}
+  - {title: "Bayar BPJS", all_day: true, kind: reminder}
+  - {title: "Cicilan motor", all_day: true, kind: reminder}
+  - {title: "Isi pulsa", minutes: 15, kind: reminder}
+  - {title: "Bayar SPP", all_day: true, kind: reminder}
+  - {title: "Transfer ke ortu", minutes: 15, kind: reminder}
+files:
+  - {name: "Invoice_{digits:8}.pdf", kind: invoice}
+  - {name: "Struk_{shop}_{date}.pdf", kind: invoice}
+  - {name: "Tagihan_Listrik_{date}.pdf", kind: invoice}
+  - {name: "Kwitansi_{date}.pdf", kind: invoice}
+  - {name: "Surat_Perjanjian_Sewa_{last}.pdf", kind: contract}
+  - {name: "Kontrak_Kerja_{last}.pdf", kind: contract}
+  - {name: "Offering_Letter.pdf", kind: contract}
+  - {name: "Slip_Gaji_{date}.pdf", kind: payslip}
+  - {name: "Bukti_Potong_PPh21_2025.pdf", kind: tax}
+  - {name: "SPT_Tahunan_2025.pdf", kind: tax}
+  - {name: "Mutasi_Rekening_{date}.pdf", kind: statement}
+  - {name: "e-Statement_{date}.pdf", kind: statement}
+  - {name: "KTP_{first}.jpg", kind: id_document}
+  - {name: "Kartu_Keluarga.pdf", kind: id_document}
+  - {name: "NPWP.jpg", kind: id_document}
+  - {name: "SIM_C.jpg", kind: id_document}
+  - {name: "CV_{first}_{last}.pdf", kind: cv}
+  - {name: "Surat_Lamaran_{first}.docx", kind: cv}
+  - {name: "E-Tiket_{code}.pdf", kind: ticket}
+  - {name: "Boarding_Pass_{code}.pdf", kind: ticket}
+  - {name: "Kartu_BPJS.jpg", kind: insurance}
+  - {name: "Polis_Asuransi_{digits:8}.pdf", kind: insurance}
+  - {name: "Hasil_Lab_{date}.pdf", kind: medical}
+  - {name: "Resep_dokter.jpg", kind: medical}
+  - {name: "Bukti_Transfer_{date}.jpg", kind: invoice}
+  - {name: "Ijazah_S1.pdf", kind: education}
+  - {name: "Transkrip_Nilai.pdf", kind: education}
+  - {name: "Undangan_Nikah_{first}.pdf", kind: personal}
+  - {name: "Laporan_Bulanan_final.docx", kind: work}
+  - {name: "IMG-{date}-WA{digits:4}.jpg", kind: image}
+  - {name: "Screenshot_{date}.png", kind: image}
+notes:
+  - "Belanja: telur, beras 5kg, minyak, gula, kecap"
+  - "Password wifi {code}"
+  - "Utang ke {first} {amount}"
+  - "{first} pinjem {amount}"
+  - "Token listrik beli tgl 1"
+  - "Kos {amount} tiap tgl 5"
+  - "No rek {digits:10}"
+  - "Kode booking {code}"
+  - "Arisan: giliran aku bulan depan"
+  - "Bawa: charger, KTP, payung"
+  - "Kado buat {first} - jam tangan?"
+  - "Parkir lantai B2 dekat lift"
+  - "Obat: 3x1 sesudah makan"
+  - "Besok: bank, servis motor, kirim paket"
+  - "Resi {tracking}"
+  - "Film rekomendasi dari {first}"
+  - "Nomor tukang AC"
+  - "Kode loker {digits:4}"
+  - "Cicilan HP sisa 4 bulan"
+  - "Resep: bawang merah 5, bawang putih 3, cabe 10"
+call_names:
+  mom: [Mama, Ibu, Mamah, Bunda, Umi, Mak]
+  dad: [Papa, Bapak, Ayah, Abi, Bapak Tercinta]
+  partner: [Sayang, "Ayang ❤️", Beb, Suamiku, Istriku, Cinta]
+  grandma: [Nenek, Oma, Eyang Putri, Mbah Uti]
+  grandpa: [Kakek, Opa, Eyang Kakung, Mbah Kung]
+  sister: ["Kak {first}", "Mbak {first}", "Dek {first}", Teteh]
+  brother: ["Mas {first}", "Bang {first}", "Dek {first}", Aa]
+  aunt: ["Tante {first}", "Bude {first}", "Bulik {first}"]
+  uncle: ["Om {first}", "Pakde {first}", "Paklik {first}"]
+  son: ["{first}", "Adek"]
+  daughter: ["{first}", "Adek"]

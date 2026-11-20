@@ -1,0 +1,305 @@
+# English language pack. One pack for all English-writing countries.
+# Optional `regions: [us, gb, in, ke, ng, ph]` on a thread or a service/calendar/file/note
+# entry marks wording that only fits those countries; untagged entries fit everywhere.
+# `emoji: true` marks threads/entries that contain emoji (strip or skip for live SMS).
+# Proposed (not yet in schema v1): service kinds `mobile_money`, `loan`;
+# placeholders `{balance}`, `{fee}`; list values in `call_names`. See SOURCES.md.
+pack: language
+schema: 1.1
+lang: en
+name: English
+threads:
+  family:
+    - {msgs: [[p, "Are you coming Sunday? Dinner at 6"], [o, "Yes should be there by 6:30"], [p, "Ok bring {partner_first}"], [o, "Will do"]]}
+    - {msgs: [[p, "Call me when you get a sec"], [o, "In a meeting, call u at lunch"], [p, "No rush its nothing bad"]]}
+    - {emoji: true, msgs: [[p, "Happy birthday sweetheart!! Love you so much ❤️❤️"], [o, "Thanks mom love you too"], [p, "Did you get the card"], [o, "Yes it was lovely x"]]}
+    - {msgs: [[o, "Landed"], [p, "Thank god. Text when ur home"], [o, "Will do"]]}
+    - {regions: [gb], msgs: [[p, "Did you remember to ring your nan"], [o, "Oh no I forgot, will do it tonight"], [p, "She was asking after you"], [o, "Ringing her now"]]}
+    - {regions: [us], msgs: [[p, "Dad says can you pick up the turkey from {shop} on your way"], [o, "Sure what time do they close"], [p, "8 I think"], [o, "ok on it"]]}
+    - {regions: [in], msgs: [[p, "Beta did you eat"], [o, "Yes mummy"], [p, "What did you eat"], [o, "Dal rice, dont worry"], [p, "Ok take care. Call papa also he is asking"]]}
+    - {regions: [ng], msgs: [[p, "Good morning my dear. How was your night"], [o, "Morning mummy, fine thank you"], [p, "Please don't forget to send the money for your brother's school fees"], [o, "I will send it before 12 ma"]]}
+    - {regions: [ph], emoji: true, msgs: [[p, "Anak where are you na?"], [o, "Otw ma, traffic"], [p, "Ok ingat 🙏"]]}
+    - {regions: [ke], msgs: [[p, "Habari. Did you reach safely"], [o, "Yes I reached, the matatu was full but ok"], [p, "Good. Greet {partner_first}"]]}
+    - {msgs: [[o, "Can you send me grandma's soup recipe"], [p, "Its in my head lol I'll write it down tonight"], [o, "Thanks"]]}
+    - {emoji: true, msgs: [[p, "Group pic from today"], [p, "Everyone looks great except your uncle 😂"], [o, "Haha he always closes his eyes"]]}
+  partner:
+    - {msgs: [[p, "Do we need anything from the shop"], [o, "Milk and bread. And toilet paper"], [p, "Got it"]]}
+    - {emoji: true, msgs: [[p, "Running late, sorry 😩"], [o, "No worries, I'll start cooking"], [p, "Ur the best"]]}
+    - {msgs: [[o, "What time are you home"], [p, "Around 7"], [o, "Ok I'll order food"], [p, "Pizza pls"]]}
+    - {emoji: true, msgs: [[p, "Miss you"], [o, "Miss you more ❤️"], [p, "2 more days"]]}
+    - {msgs: [[p, "Did u pay the electric bill"], [o, "Yes this morning"], [p, "Thank you"]]}
+    - {msgs: [[o, "Babe have you seen my keys"], [p, "Kitchen counter next to the fruit bowl"], [o, "Found them thx"]]}
+    - {regions: [gb], msgs: [[p, "Fancy a takeaway tonight"], [o, "Go on then. Curry?"], [p, "Yes. Usual?"], [o, "Yep"]]}
+    - {regions: [us], msgs: [[p, "Can you grab gas on your way back, I'm almost on empty"], [o, "Sure"]]}
+    - {emoji: true, msgs: [[p, "Look what I found 😍"], [o, "Omg we need that"], [p, "It's on sale too"], [o, "Buy it"]]}
+    - {msgs: [[o, "Movie tonight?"], [p, "Yes but something light pls"], [o, "Comedy it is"]]}
+    - {msgs: [[p, "Leaving work now"], [o, "Ok see u soon"]]}
+  friend:
+    - {emoji: true, msgs: [[p, "Are we still on for tonight"], [o, "Yesss 8 at {place}?"], [p, "Perfect see u there 🍻"]]}
+    - {msgs: [[p, "u up?"], [o, "Yeah whats up"], [p, "Can't sleep. Saw the new episode?"], [o, "Not yet no spoilers!!"]]}
+    - {emoji: true, msgs: [[o, "Happy birthday!! Have an amazing day 🎉🎂"], [p, "Thank youuu"], [o, "Drinks this weekend on me"]]}
+    - {msgs: [[p, "Can I borrow your drill this weekend"], [o, "Sure come grab it Saturday"], [p, "Legend"]]}
+    - {emoji: true, msgs: [[p, "LMAO did you see what {first} posted"], [o, "Nooo what"], [p, "Check the group chat 💀"]]}
+    - {msgs: [[o, "Sorry missed your call"], [p, "No worries just wanted to catch up"], [o, "Call you tomorrow?"], [p, "Sounds good"]]}
+    - {regions: [gb], msgs: [[p, "Pub quiz Thursday? We need a 4th"], [o, "Im in"], [p, "Cheers mate"]]}
+    - {regions: [us], msgs: [[p, "Game's at 7 wanna come over"], [o, "Down. I'll bring chips"], [p, "Bet"]]}
+    - {regions: [in], msgs: [[p, "Bro where are you"], [o, "5 mins"], [p, "Ur 5 mins means 30 lol"], [o, "Reached reached"]]}
+    - {regions: [ng], emoji: true, msgs: [[p, "Guy how far"], [o, "I dey o. You?"], [p, "We still dey go Saturday abi"], [o, "Sure 💯"]]}
+    - {regions: [ph], msgs: [[p, "Hey sis free ka ba this weekend"], [o, "Yes! Where u wanna go"], [p, "Mall then dinner?"], [o, "G"]]}
+    - {regions: [ke], msgs: [[p, "Sasa. Uko town?"], [o, "Yes near {place}"], [p, "Lets meet in 20"], [o, "Poa"]]}
+    - {msgs: [[p, "How did the interview go"], [o, "Good I think? They said they'll call next week"], [p, "Fingers crossed"]]}
+  colleague:
+    - {msgs: [[p, "Hi, are you joining the 10am call?"], [o, "Yes, 2 mins"], [p, "Thanks"]]}
+    - {msgs: [[p, "Running 10 min late, traffic"], [o, "No problem, I'll let them know"]]}
+    - {msgs: [[o, "Could you send me the latest version of the report"], [p, "Sent to your email"], [o, "Got it, thanks"]]}
+    - {msgs: [[p, "Are you in the office today?"], [o, "Working from home today"], [p, "Ok can we do a quick call at 3"], [o, "Sure"]]}
+    - {emoji: true, msgs: [[p, "Lunch?"], [o, "Yes starving"], [p, "Meet at the lift in 5 👍"]]}
+    - {msgs: [[p, "Heads up, the client moved the meeting to {day}"], [o, "Thanks for letting me know"]]}
+    - {msgs: [[o, "Feeling unwell, won't make it in today. Will check emails"], [p, "Take care, feel better"]]}
+    - {regions: [in], msgs: [[p, "Sir please share the PPT before EOD"], [o, "Will share by 5"], [p, "Noted, thanks"]]}
+    - {regions: [gb], msgs: [[p, "Are you around for a quick chat about the rota"], [o, "Yep give me 10"]]}
+    - {regions: [ng], msgs: [[p, "Good afternoon. Please the documents for the audit, have you submitted?"], [o, "Yes I submitted them this morning"], [p, "Ok thank you"]]}
+    - {msgs: [[p, "Can you cover my shift on {day}"], [o, "I can do the morning only"], [p, "That works, thanks so much"]]}
+  neighbor:
+    - {msgs: [[p, "Hi, it's {first} from next door. A parcel came for you, I've got it"], [o, "Thanks so much, I'll pop by later"]]}
+    - {msgs: [[p, "Your car lights are on"], [o, "Oh thanks!"]]}
+    - {msgs: [[o, "We're having a small party Saturday, sorry in advance for the noise"], [p, "No worries, have fun"]]}
+    - {msgs: [[p, "Is your water off as well?"], [o, "Yes since this morning"], [p, "Ok so its the whole street"]]}
+    - {regions: [gb], msgs: [[p, "Bins go out tonight, it's recycling this week"], [o, "Cheers for the reminder"]]}
+    - {regions: [us], msgs: [[p, "Hey, we're going out of town this weekend, would you mind grabbing our mail"], [o, "Of course, have a good trip"]]}
+    - {regions: [ke, ng], msgs: [[p, "Good evening, the caretaker says water tank will be cleaned tomorrow"], [o, "Ok thanks for telling me"]]}
+    - {msgs: [[p, "Have you seen a grey cat around? Ours didn't come home"], [o, "Not today but I'll keep an eye out"], [p, "Thank you"]]}
+    - {msgs: [[o, "Could I borrow your ladder for 10 minutes"], [p, "Sure, it's in the garage, I'll open it"]]}
+service_sms:
+  courier:
+    - "Your parcel {tracking} is out for delivery today. Track: {courier} app"
+    - "{courier}: Your package {tracking} will be delivered on {date} between {time}."
+    - "We missed you. Your parcel {tracking} could not be delivered. It will be re-attempted on {date}."
+    - "Your order from {shop} has been shipped. Tracking no: {tracking}"
+    - "Delivered: Your parcel {tracking} was left in a safe place at {time}."
+    - {text: "Your shipment {tracking} is out for delivery. Delivery OTP: {digits:4}. Share only with the delivery agent.", regions: [in]}
+    - {text: "Your parcel {tracking} has arrived at the {city} pick-up point. Collect within 5 days with code {digits:6}.", regions: [ke, ng, ph]}
+    - {text: "{courier}: your parcel {tracking} is due today. Driver: {first}. 1hr window {time}.", regions: [gb]}
+  bank:
+    - "{bank}: {digits:6} is your one-time password. Do not share it with anyone. Bank staff will never ask for it."
+    - "A purchase of {amount} was made with your card ending {digits:4} at {shop} on {date}."
+    - "{bank}: Your account ending {digits:4} has been credited with {amount}. Avail bal: {balance}."
+    - "Did you attempt a payment of {amount} at {shop}? Reply YES or NO."
+    - "{bank}: Your statement is ready. Log in to the app to view it."
+    - {text: "{amount} debited from A/c XX{digits:4} on {date} to VPA {first}@upi UPI Ref {digits:12}. Not you? Call 1800{digits:7}", regions: [in]}
+    - {text: "{amount} credited to A/c XX{digits:4} on {date} by UPI. Avl Bal {balance}. -{bank}", regions: [in]}
+    - {text: "Acct: {digits:3}XXXX{digits:3}\nAmt: {amount} DR\nDesc: POS {shop}\nDate: {date}\nAvail Bal: {balance}", regions: [ng]}
+    - {text: "Acct: {digits:3}XXXX{digits:3}\nAmt: {amount} CR\nDesc: TRF FROM {first} {last}\nAvail Bal: {balance}", regions: [ng]}
+    - {text: "{bank}: You've paid {amount} to {first} {last}. If this wasn't you, call us on the number on the back of your card.", regions: [gb]}
+    - {text: "{bank} Alert: Card ending {digits:4} was used for {amount} at {shop}. Reply STOP to opt out.", regions: [us]}
+  telecom:
+    - "You have used 80% of your data bundle. Buy more data to stay connected."
+    - "Your bill of {amount} is due on {date}. Pay in the app to avoid service interruption."
+    - "Welcome! Your number is now active. Dial *{digits:3}# to check your balance."
+    - "Recharge successful. You have received {amount} airtime. New balance: {balance}."
+    - {text: "Get 10GB for 30 days at only {amount}! Dial *{digits:3}*{digits:2}# now. T&Cs apply.", regions: [ke, ng, ph, in]}
+    - {text: "Dear customer, your pack expires on {date}. Recharge now to continue enjoying unlimited calls and 1.5GB/day.", regions: [in]}
+    - {text: "You have borrowed {amount} airtime. It will be deducted on your next recharge plus service fee.", regions: [ng, ke]}
+    - {text: "Your monthly allowance has reset. You have unlimited mins & texts and 30GB data until {date}.", regions: [gb, us]}
+  otp_service:
+    - "{digits:6} is your verification code. Don't share this code with anyone."
+    - "Your login code is {digits:6}. It expires in 10 minutes."
+    - "Use {digits:4} to verify your phone number."
+    - "<#> Your code is {digits:6}\n{code}"
+    - "{digits:6} is your security code. If you didn't request it, ignore this message."
+    - "{digits:6} is your code. It expires in 5 minutes."
+  doctor:
+    - "Reminder: your appointment at the clinic is on {date} at {time}. Reply C to cancel."
+    - "Your doctor's appointment has been confirmed for {day} {date} at {time}. Please arrive 10 minutes early."
+    - "Your test results are ready. Please call the clinic to book a follow-up."
+    - {text: "Your GP surgery: your appointment is on {date} at {time}. If you can no longer attend, please call to cancel.", regions: [gb]}
+    - {text: "Appointment reminder for {date} at {time}. Please bring your insurance card and photo ID. Reply Y to confirm.", regions: [us]}
+  pharmacy:
+    - "Your prescription is ready for collection."
+    - "Your order {code} has been dispatched and will arrive by {date}."
+    - "Reminder: your repeat prescription is due for renewal."
+    - {text: "Your prescription is ready for pickup at {shop}. Pickup by {date}. Reply STOP to opt out.", regions: [us]}
+    - {text: "Order #{digits:8} confirmed. Medicines will be delivered by {date}. Total: {amount}", regions: [in]}
+  delivery_food:
+    - "Your order from {shop} is on its way! Estimated arrival {time}."
+    - "Your rider {first} has picked up your order."
+    - "Your order has been delivered. Enjoy your meal!"
+    - "Order #{digits:6} confirmed. Total: {amount}."
+    - "Your delivery code is {digits:4}. Share it with the rider on arrival."
+  ride_hailing:
+    - "Your driver {first} is arriving in 3 min. Plate {code}."
+    - "Your driver has arrived."
+    - "Your trip receipt: {amount}. Thanks for riding!"
+    - "{digits:4} is your ride verification code."
+    - {text: "Your ride OTP is {digits:4}. Share it with the driver at the start of the trip.", regions: [in]}
+  airline:
+    - "Check-in is now open for your flight to {city}. Booking ref {code}."
+    - "Your flight to {city} on {date} is boarding from gate {digits:2} at {time}."
+    - "Flight update: your flight to {city} is delayed. New departure {time}."
+    - "Booking confirmed. Ref {code}. Departure {date} {time}."
+    - "Your boarding pass is ready. Seat {digits:2}C."
+  rail:
+    - "Your ticket is confirmed. Booking ref {code}. Departure {date} {time}."
+    - "Your train to {city} is running approx 15 minutes late."
+    - "Platform change: your train to {city} now departs from platform {digits:1}."
+    - {text: "PNR {digits:10}, Train {digits:5}, DOJ {date}, SL S{digits:1} {digits:2}. Chart prepared.", regions: [in]}
+    - {text: "Your e-ticket for {date} is attached in the app. Coach {digits:1}, seat {digits:2}.", regions: [gb, us]}
+  government:
+    - "Your application {code} has been received and is being processed."
+    - "Your document is ready for collection at the {city} office."
+    - "Reminder: your tax return is due on {date}."
+    - {text: "OTP for Aadhaar authentication is {digits:6}. Valid for 10 minutes.", regions: [in]}
+    - {text: "Your NIN verification code is {digits:6}. Do not share.", regions: [ng]}
+    - {text: "Your vehicle tax is due on {date}. Renew online to avoid a penalty.", regions: [gb]}
+  retail:
+    - "Thanks for shopping at {shop}! You earned {digits:3} points."
+    - "Your order {code} has been confirmed. Total {amount}."
+    - "Flash sale: up to 50% off this weekend only at {shop}. Reply STOP to opt out."
+    - "Your order is ready for pickup at {shop} {city}."
+    - "Your refund of {amount} has been processed."
+  utility:
+    - "Your electricity bill of {amount} is due on {date}."
+    - "Planned water maintenance in {city} on {date} from {time}. We apologise for any inconvenience."
+    - "Thank you, your payment of {amount} has been received. Ref {code}."
+    - {text: "Token: {digits:4}-{digits:4}-{digits:4}-{digits:4}-{digits:4}\nUnits: {digits:2}.{digits:1}kWh\nAmt: {amount}\nMtr: {digits:11}", regions: [ke, ng]}
+    - {text: "Your gas and electricity bill of {amount} is ready. It will be paid by Direct Debit on {date}.", regions: [gb]}
+  mobile_money:
+    - {text: "{code} Confirmed. {amount} sent to {first} {last} on {date} at {time}. New balance is {balance}. Transaction cost, {fee}.", regions: [ke]}
+    - {text: "{code} Confirmed. You have received {amount} from {first} {last} on {date} at {time}. New balance is {balance}.", regions: [ke]}
+    - {text: "{code} Confirmed. {amount} paid to {shop}. on {date} at {time}. New balance is {balance}.", regions: [ke]}
+    - {text: "You have received {amount} from {first} {last}. Your new balance is {balance}. Ref. No. {digits:13}.", regions: [ph]}
+    - {text: "You have sent {amount} to {first} {last} on {date} {time}. Ref. No. {digits:13}.", regions: [ph]}
+    - {text: "Transfer of {amount} to {first} {last} successful. Ref: {code}. Bal: {balance}", regions: [ng]}
+    - {text: "{amount} sent to {first} via UPI. Ref No {digits:12}.", regions: [in]}
+  loan:
+    - "Reminder: your loan instalment of {amount} is due on {date}. Pay on time to keep your credit limit."
+    - "Your loan of {amount} has been approved and sent to your account."
+    - "Your loan is overdue. Please repay {amount} today to avoid extra charges."
+    - "Thank you for your repayment of {amount}. Outstanding balance: {balance}."
+    - {text: "You qualify for a loan of up to {amount}. Dial *{digits:3}# to apply.", regions: [ke, ng]}
+calendar:
+  - {title: "Dentist", minutes: 45, kind: appointment}
+  - {title: "Doctor's appt", minutes: 30, kind: appointment}
+  - {title: "GP appointment", minutes: 15, kind: appointment, regions: [gb]}
+  - {title: "Eye test", minutes: 30, kind: appointment}
+  - {title: "Haircut", minutes: 45, kind: appointment}
+  - {title: "Car service", minutes: 120, kind: appointment}
+  - {title: "Vet - vaccination", minutes: 30, kind: appointment}
+  - {title: "Parent-teacher meeting", minutes: 30, kind: appointment}
+  - {title: "Bank appointment", minutes: 30, kind: appointment}
+  - {title: "Team standup", minutes: 15, kind: work}
+  - {title: "1:1 with {first}", minutes: 30, kind: work}
+  - {title: "Client call", minutes: 60, kind: work}
+  - {title: "Project review", minutes: 60, kind: work}
+  - {title: "Quarterly planning", minutes: 120, kind: work}
+  - {title: "Interview - {first} {last}", minutes: 45, kind: work}
+  - {title: "Training session", minutes: 180, kind: work}
+  - {title: "Submit expenses", minutes: 15, kind: work}
+  - {title: "Dinner with {first}", minutes: 120, kind: social}
+  - {title: "Drinks @ {place}", minutes: 180, kind: social}
+  - {title: "Brunch", minutes: 90, kind: social}
+  - {title: "{first}'s wedding", all_day: true, kind: social}
+  - {title: "BBQ at {first}'s", minutes: 240, kind: social}
+  - {title: "Movie night", minutes: 150, kind: social}
+  - {title: "Book club", minutes: 90, kind: social}
+  - {title: "Church", minutes: 120, kind: social, regions: [us, ng, ph, ke]}
+  - {title: "Gym", minutes: 60, kind: sport}
+  - {title: "Football", minutes: 90, kind: sport}
+  - {title: "5-a-side", minutes: 60, kind: sport, regions: [gb]}
+  - {title: "Yoga", minutes: 60, kind: sport}
+  - {title: "Morning run", minutes: 45, kind: sport}
+  - {title: "Swimming", minutes: 60, kind: sport}
+  - {title: "Cricket nets", minutes: 120, kind: sport, regions: [in, gb]}
+  - {title: "Basketball", minutes: 90, kind: sport, regions: [us, ph]}
+  - {title: "Flight to {city}", minutes: 150, kind: travel}
+  - {title: "Train to {city}", minutes: 180, kind: travel}
+  - {title: "Trip to {city}", all_day: true, kind: travel}
+  - {title: "Airport pickup {first}", minutes: 60, kind: travel}
+  - {title: "Hotel check-in", minutes: 30, kind: travel}
+  - {title: "{first}'s birthday", all_day: true, kind: birthday}
+  - {title: "Birthday {first}", all_day: true, kind: birthday}
+  - {title: "{first} bday party", minutes: 180, kind: birthday}
+  - {title: "Mom's birthday", all_day: true, kind: birthday}
+  - {title: "Anniversary", all_day: true, kind: birthday}
+  - {title: "Pay rent", all_day: true, kind: reminder}
+  - {title: "Bins out", minutes: 15, kind: reminder, regions: [gb]}
+  - {title: "Trash day", minutes: 15, kind: reminder, regions: [us]}
+  - {title: "Renew insurance", all_day: true, kind: reminder}
+  - {title: "Call mom", minutes: 15, kind: reminder}
+  - {title: "School fees due", all_day: true, kind: reminder, regions: [ng, ke, in, ph]}
+  - {title: "Pick up kids", minutes: 30, kind: reminder}
+  - {title: "Pay electricity bill", all_day: true, kind: reminder}
+files:
+  - {name: "Invoice_{date}.pdf", kind: invoice}
+  - {name: "invoice-{digits:6}.pdf", kind: invoice}
+  - {name: "Receipt_{shop}_{date}.pdf", kind: invoice}
+  - {name: "Order_{digits:8}.pdf", kind: invoice}
+  - {name: "Tenancy_Agreement_{last}.pdf", kind: contract, regions: [gb, ke, ng]}
+  - {name: "Lease_Agreement_signed.pdf", kind: contract, regions: [us, ph]}
+  - {name: "Rent_Agreement_{city}.pdf", kind: contract, regions: [in]}
+  - {name: "Employment_Contract_{last}.pdf", kind: contract}
+  - {name: "Offer_Letter.pdf", kind: contract}
+  - {name: "Payslip_{date}.pdf", kind: payslip}
+  - {name: "Salary_Slip_{date}.pdf", kind: payslip, regions: [in]}
+  - {name: "Bank_Statement_{date}.pdf", kind: statement}
+  - {name: "Statement_{digits:4}_{date}.pdf", kind: statement}
+  - {name: "CV_{first}_{last}.pdf", kind: cv}
+  - {name: "Resume_{last}_2026.docx", kind: cv, regions: [us, ph]}
+  - {name: "Boarding_Pass_{code}.pdf", kind: ticket}
+  - {name: "E-Ticket_{code}.pdf", kind: ticket}
+  - {name: "Booking_Confirmation_{code}.pdf", kind: ticket}
+  - {name: "Insurance_Policy_{digits:8}.pdf", kind: insurance}
+  - {name: "Car_Insurance_Renewal.pdf", kind: insurance}
+  - {name: "Lab_Report_{date}.pdf", kind: medical}
+  - {name: "Prescription_{date}.jpg", kind: medical}
+  - {name: "passport_scan.jpg", kind: id_document}
+  - {name: "ID_front.jpg", kind: id_document}
+  - {name: "Aadhaar_card.pdf", kind: id_document, regions: [in]}
+  - {name: "PAN_card.jpg", kind: id_document, regions: [in]}
+  - {name: "Utility_Bill_{date}.pdf", kind: invoice}
+  - {name: "Tax_Return_2025.pdf", kind: tax}
+  - {name: "P60_2026.pdf", kind: tax, regions: [gb]}
+  - {name: "W-2_2025.pdf", kind: tax, regions: [us]}
+  - {name: "School_Fees_Receipt.pdf", kind: invoice, regions: [ng, ke, in, ph]}
+  - {name: "Meeting_Notes_{date}.docx", kind: work}
+  - {name: "Presentation_final_v3.pptx", kind: work}
+  - {name: "Budget_2026.xlsx", kind: work}
+  - {name: "Wedding_Invite_{first}.pdf", kind: personal}
+  - {name: "recipe_banana_bread.pdf", kind: personal}
+  - {name: "IMG-{date}-WA{digits:4}.jpg", kind: image}
+  - {name: "Screenshot_{date}.png", kind: image}
+notes:
+  - "Shopping: milk, eggs, bread, onions, washing up liquid"
+  - "Wifi password: {code}"
+  - "Call plumber re kitchen tap"
+  - "Gift ideas: {first} - book? scarf?"
+  - "Parking level 3 bay 42"
+  - "Pay {first} back {amount}"
+  - "Gym: Mon legs, Wed upper, Fri cardio"
+  - "Pick up dry cleaning Thurs"
+  - "Ref no {code}"
+  - "Books to read: ..."
+  - "Meeting notes - follow up with finance re budget"
+  - "Locker code {digits:4}"
+  - "Dentist on {day} at {time}"
+  - "Packing list: charger, passport, adapter, sunscreen"
+  - "Ask landlord about the boiler"
+  - "Shows to watch - from {first}"
+  - "Recipe: 2 cups flour, 1 cup sugar, 2 eggs, 180C 35 min"
+  - "To do: renew licence, book car service, cancel trial"
+  - "Flight {code} {date} {time}"
+  - "Tracking {tracking}"
+  - {text: "Bal to collect from {first}: {amount}", regions: [ng, ke, in, ph]}
+  - {text: "Load {amount} for mama", regions: [ph]}
+call_names:
+  mom: [Mom, Mum, Mummy, Mama, Ma, Mother]
+  dad: [Dad, Daddy, Papa, Pa, Father]
+  partner: [Babe, Baby, Hubby, Wifey, "Love ❤️", My Love]
+  grandma: [Grandma, Nan, Nana, Granny]
+  grandpa: [Grandpa, Grandad, Pops]
+  sister: [Sis, "{first} Sis"]
+  brother: [Bro, "{first} Bro"]
+  aunt: ["Aunty {first}", "Auntie {first}"]
+  uncle: ["Uncle {first}"]
+  son: ["{first}"]
+  daughter: ["{first}"]

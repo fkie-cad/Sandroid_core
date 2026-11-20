@@ -1615,8 +1615,20 @@ class TimelineService:
                 return False
             if now_mono - sink.last_clock_tick < every:
                 return False
-            sink.last_clock_tick = now_mono
             serial = sink.serial
+        try:
+            from sandroid.core import device_prep
+
+            preparing = device_prep.is_preparing(serial)
+        except Exception:
+            preparing = False
+        if preparing:
+            # A (re)started device: the device-prepared step writes its world
+            # change before its own clock sample; a periodic sample first
+            # would add an inferred "clock went back" one. Next tick.
+            return False
+        with self._lock:
+            sink.last_clock_tick = now_mono
         try:
             from sandroid.core import device_clock
 

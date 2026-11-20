@@ -99,6 +99,9 @@ class StatusBar(Static):
         self.frida_available_check = False
         self._frida_version_mismatch: bool | None = None  # None = not checked yet
         self._frida_last_status: str = ""  # Track status transitions
+        #: Stage of a running device-prepared step ("" when none), see
+        #: core/device_prep.py; read on the 1.5 s poll.
+        self.device_prep_stage = ""
         super().__init__(**kwargs)
 
     def on_mount(self) -> None:
@@ -310,6 +313,14 @@ class StatusBar(Static):
         stop = fixed_color("stopped")
         paused = fixed_color("paused")
         segs: list[str] = []
+
+        # The device is being prepared (root, SELinux, proxy restore):
+        # Frida / app actions wait for it.
+        if self.device_prep_stage:
+            segs.append(
+                f"[{paused}]◌ Preparing device…[/] "
+                f"[{muted}]{escape(self.device_prep_stage)}[/]"
+            )
 
         # App state (package itself is in the header breadcrumb).
         if self.spotlight_app and self.spotlight_app != "None":
@@ -662,6 +673,16 @@ class StatusBar(Static):
             self.app_proxies = {}
             self.app_proxy_problems = {}
 
+    def _read_device_prep_stage(self) -> None:
+        """Stage of a running device-prepared step (in-process, no ADB)."""
+        try:
+            from sandroid.core import device_prep
+
+            running = device_prep.preparing_stage()
+        except Exception:
+            running = None
+        self.device_prep_stage = running[1] if running else ""
+
     def _poll_capture_state(self) -> None:
         """Keep the Mitmproxy/Proxy glance rows live.
 
@@ -675,13 +696,16 @@ class StatusBar(Static):
             self.mitmweb_address,
             tuple(sorted(self.app_proxies.items())),
             tuple(sorted(self.app_proxy_problems.items())),
+            self.device_prep_stage,
         )
         self._read_capture_state()
+        self._read_device_prep_stage()
         after = (
             self.mitmweb_running,
             self.mitmweb_address,
             tuple(sorted(self.app_proxies.items())),
             tuple(sorted(self.app_proxy_problems.items())),
+            self.device_prep_stage,
         )
         if after != before:
             self.refresh()

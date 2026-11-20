@@ -851,8 +851,10 @@ class TestPrivacy:
         ids = [s["id"] for s in doc["sections"]]
         assert ids.index("privacy") == ids.index("coverage") + 1
         intro = section["blocks"][0]["text"]
+        # No frozen apply record: the found labels of the applied line's count.
         assert intro.startswith(
-            "3 of 5 profile values left the device to 2 recipients, the first at "
+            "3 of 5 values of this profile were found in this report's scope. "
+            "3 profile values left the device to 2 recipients, the first at "
             f"12:00:10 (line {sent})."
         )
         assert "1 of the recipients are known third parties" in intro
@@ -893,6 +895,105 @@ class TestPrivacy:
             f"  - Profile values: 1 finding(s): Ad ID sent to Meta, hashed (#{sent})"
             in text
         )
+
+    def test_report_counts_the_values_the_header_counts(self, session):
+        """The report's "n of m found" is the header's PRIVACY n/m: values
+        found (any direction, a group counts once, older records mapped to
+        their marker, other profiles' hits left out) of the seeded values.
+        """
+        import tomli_w
+
+        from sandroid.core.privacy_markers import Marker
+        from sandroid.services import privacy_scan as ps
+        from sandroid.services.privacy_scan import HitRecord
+
+        markers = [
+            Marker("advertising_id", "3b9f0c1d-1111-2222-3333-444455556666",
+                   "uuid", "Advertising ID", (), "", "Ad ID"),
+            Marker("gps.latitude", "52.520008", "text", "GPS", (), "gps", "GPS"),
+            Marker("gps.longitude", "13.404954", "text", "GPS", (), "gps", "GPS"),
+            Marker("email", "jane.canary@example.org", "email", "Email", (), "",
+                   "Email"),
+            Marker("android_id@com.x", "3f9a1c07aa55bb66", "hex_id",
+                   "Android ID (com.x)", (), "", "Android ID"),
+        ]  # fmt: skip
+        digest_of, _groups = ps.value_keys(markers)
+
+        def hit(sec, marker_id, label, direction, *, fp="fpA", vkey=True):
+            source = (
+                {"type": "flow", "flow_id": f"f{sec}", "host": "graph.facebook.com"}
+                if direction != "stored"
+                else {"type": "file", "device_path": "/data/data/com.x/p.xml"}
+            )
+            return HitRecord(
+                v=1, at=0.0, t=(BASE + timedelta(seconds=sec)).timestamp(),
+                fp=fp, engine=1, marker_id=marker_id, label=label, tag=label,
+                kind="text", transform="value", confidence="high", part="url",
+                direction=direction, count=1, offsets=(0,),
+                snippet=("", "x", ""), source=source,
+                recipient=(
+                    {"label": "Meta", "party": "third", "host": "graph.facebook.com"}
+                    if direction == "sent"
+                    else None
+                ),
+                value_key=digest_of.get(marker_id) if vkey else None,
+            )  # fmt: skip
+
+        records = [
+            hit(20, "advertising_id", "Advertising ID", "sent"),
+            hit(21, "gps.latitude", "GPS", "received"),  # found, not sent
+            hit(22, "gps.longitude", "GPS", "sent"),  # the same value: GPS
+            # An older record (no value key, the plain Android ID id).
+            hit(23, "android_id", "Android ID (com.x)", "stored", vkey=False),
+            hit(24, "email", "Email", "sent", fp="fpOld"),  # another profile
+        ]
+        folder = session.tl.folder
+        (folder / "identity").mkdir()
+        record = {
+            "fingerprint": "fpA",
+            "markers": [
+                {"id": m.id, "value": m.value, "kind": m.kind, "label": m.label,
+                 "forms": list(m.forms), "group": m.group, "tag": m.tag}
+                for m in markers
+            ],
+        }  # fmt: skip
+        (folder / "identity" / "001-mara-r1.toml").write_text(tomli_w.dumps(record))
+        session.tl.add(
+            1, "identity", "applied", "identity applied",
+            data={"fingerprint": "fpA", "markers": len(markers)},
+            ref={"path": "identity/001-mara-r1.toml", "sha256": "x"},
+        )  # fmt: skip
+        session.tl.write()
+        (folder / "privacy").mkdir()
+        (folder / "privacy" / "hits.jsonl").write_text(
+            "".join(json.dumps(r.to_json()) + "\n" for r in records)
+        )
+        # The header: the privacy scan service over the same records.
+        service = ps.PrivacyScanService(folder_fn=lambda: folder)
+        try:
+            service.load_session(folder)
+            service.set_markers("fpA", markers)
+            summary = service.summary()
+        finally:
+            service.close()
+        assert (summary.values_found, summary.values_total) == (3, 4)
+        doc = _build(session, scope=report_engine.ReportScope(), sections=("privacy",))
+        blocks = _section(doc, "privacy")["blocks"]
+        intro = blocks[0]["text"]
+        assert intro.startswith(
+            f"{summary.values_found} of {summary.values_total} values of this "
+            "profile were found in this report's scope. 2 profile values left "
+            "the device to 1 recipient,"
+        ), intro
+        # The tables list this profile's findings only, like the counts; the
+        # other profile's finding gets a line of its own.
+        assert blocks[1]["text"] == (
+            "1 finding of other identity profiles in this scope is not counted "
+            "or listed here."
+        )
+        tables = [b for b in blocks if b["type"] == "table"]
+        assert tables[0]["columns"] == ["Recipient", "Advertising ID", "GPS"]
+        assert all(row[0] != "Email" for row in tables[1]["rows"])
 
     def test_every_run_counts_its_hits_not_only_the_first_line(self, session):
         """A value leaked in two runs of one session is in both run reports

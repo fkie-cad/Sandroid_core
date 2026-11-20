@@ -1,0 +1,740 @@
+# Sandroid world pack: country ch. Sources: ch.SOURCES.md
+pack: country
+schema: 1.1
+country: ch
+name: Switzerland
+languages: {de: 0.62, fr: 0.23, it: 0.08, en: 0.07}
+timezones: [Europe/Zurich]
+date_format: dd.MM.yyyy
+time_format: HH:mm
+currency: {code: CHF, symbol: CHF, format: CHF 49.90}
+phone:
+  country_code: '41'
+  trunk_prefix: '0'
+  national_format_examples: [079 123 45 67, 076 123 45 67, 044 123 45 67, 022 123 45 67]
+  mobile:
+    realistic:
+      - {prefix: '79', length: 9, operator: Swisscom}
+      - {prefix: '75', length: 9, operator: Swisscom}
+      - {prefix: '76', length: 9, operator: Sunrise}
+      - {prefix: '78', length: 9, operator: Salt}
+      - {prefix: '77', length: 9, operator: 'mixed (Swisscom, Sunrise, Lycamobile, others)'}
+    unallocated: null
+    fiction: null
+  landline:
+    cities:
+      - {city: Zürich, area_code: '44', subscriber_length: 7}
+      - {city: Genève, area_code: '22', subscriber_length: 7}
+      - {city: Basel, area_code: '61', subscriber_length: 7}
+      - {city: Lausanne, area_code: '21', subscriber_length: 7}
+      - {city: Bern, area_code: '31', subscriber_length: 7}
+      - {city: Winterthur, area_code: '52', subscriber_length: 7}
+      - {city: Luzern, area_code: '41', subscriber_length: 7}
+      - {city: St. Gallen, area_code: '71', subscriber_length: 7}
+      - {city: Lugano, area_code: '91', subscriber_length: 7}
+      - {city: Biel/Bienne, area_code: '32', subscriber_length: 7}
+      - {city: Thun, area_code: '33', subscriber_length: 7}
+      - {city: Fribourg, area_code: '26', subscriber_length: 7}
+      - {city: Neuchâtel, area_code: '32', subscriber_length: 7}
+      - {city: Sion, area_code: '27', subscriber_length: 7}
+      - {city: Chur, area_code: '81', subscriber_length: 7}
+      - {city: Bellinzona, area_code: '91', subscriber_length: 7}
+    fiction: null
+  validation_note: 'unallocated is null: BAKOM publishes allocated/free E.164 blocks only through an interactive search (egov.swiss number-block search) with no download, and it could not be queried from here. Candidate codes 068/069/072/073 (opened for mobile in numbering plan SR 784.101.113/2.2 ed. 8) are NOT used because nothing confirms they are free and libphonenumber already maps them to Swisscom. fiction is null: Switzerland has no official fiction range; in 2021 BAKOM advised media to use numbers that cannot be dialled, e.g. too short (079 123 45 = NSN 7 digits; phonenumbers 9.0.43: not possible, UNKNOWN). Mobile NSN is always 9 digits; libphonenumber accepts all 07[5-9] numbers as MOBILE.'
+carriers:
+  - {name: Swisscom, sim_operator: Swisscom, mccmnc: '22801', share: 0.531}
+  - {name: Sunrise, sim_operator: Sunrise, mccmnc: '22802', share: 0.236}
+  - {name: Salt, sim_operator: Salt, mccmnc: '22803', share: 0.177}
+cities:
+  - {name: Zürich, lat: 47.3769, lon: 8.5417, population: 443000, area_code: '44', postcodes: ['8001', '8002', '8003', '8004', '8005', '8006', '8008', '8032', '8037', '8045', '8050', '8055'], districts: [Altstadt, Wiedikon, Aussersihl, Industriequartier, Oerlikon, Hottingen, Wipkingen, Seefeld, Altstetten]}
+  - {name: Genève, lat: 46.2044, lon: 6.1432, population: 205000, area_code: '22', postcodes: ['1201', '1202', '1203', '1204', '1205', '1206', '1207', '1208'], districts: [Pâquis, Eaux-Vives, Plainpalais, Champel, Servette, Jonction, Vieille-Ville]}
+  - {name: Basel, lat: 47.5596, lon: 7.5886, population: 175000, area_code: '61', postcodes: ['4051', '4052', '4053', '4055', '4056', '4057', '4058'], districts: [Grossbasel, Kleinbasel, Gundeldingen, St. Johann, Matthäus, Bachletten]}
+  - {name: Bern, lat: 46.948, lon: 7.4474, population: 146000, area_code: '31', postcodes: ['3005', '3007', '3008', '3011', '3012', '3013', '3014', '3018'], districts: [Altstadt, Länggasse, Breitenrain, Kirchenfeld, Bümpliz, Mattenhof, Lorraine]}
+  - {name: Lausanne, lat: 46.5197, lon: 6.6323, population: 143000, area_code: '21', postcodes: ['1003', '1004', '1005', '1006', '1007', '1010', '1018'], districts: [Ouchy, Flon, Sous-Gare, Chailly, La Sallaz, Montriond]}
+  - {name: Winterthur, lat: 47.4988, lon: 8.7237, population: 120000, area_code: '52', postcodes: ['8400', '8404', '8406', '8408'], districts: [Altstadt, Töss, Seen, Oberwinterthur, Veltheim, Wülflingen]}
+  - {name: Luzern, lat: 47.0502, lon: 8.3093, population: 86000, area_code: '41', postcodes: ['6003', '6004', '6005', '6006'], districts: [Altstadt, Wesemlin, Tribschen, Littau, Maihof]}
+  - {name: St. Gallen, lat: 47.4245, lon: 9.3767, population: 77000, area_code: '71', postcodes: ['9000', '9008', '9010', '9011', '9014'], districts: [Altstadt, St. Fiden, Rotmonten, Lachen, Bruggen]}
+  - {name: Lugano, lat: 46.0037, lon: 8.9511, population: 63000, area_code: '91', postcodes: ['6900', '6906', '6912', '6962'], districts: [Centro, Besso, Molino Nuovo, Cassarate, Viganello, Pregassona]}
+  - {name: Biel/Bienne, lat: 47.1368, lon: 7.2468, population: 56000, area_code: '32', postcodes: ['2502', '2503', '2504', '2505'], districts: [Altstadt, Madretsch, Mett, Bözingen]}
+  - {name: Thun, lat: 46.758, lon: 7.628, population: 44000, area_code: '33', postcodes: ['3600', '3604', '3608'], districts: [Innenstadt, Dürrenast, Strättligen]}
+  - {name: Neuchâtel, lat: 46.99, lon: 6.9293, population: 45000, area_code: '32', postcodes: ['2000'], districts: [Centre-ville, La Coudre, Serrières, Peseux]}
+  - {name: Fribourg, lat: 46.8065, lon: 7.162, population: 39000, area_code: '26', postcodes: ['1700'], districts: [Bourg, Auge, Neuveville, Pérolles, Schoenberg]}
+  - {name: Bellinzona, lat: 46.1928, lon: 9.017, population: 44000, area_code: '91', postcodes: ['6500'], districts: [Centro, Daro, Ravecchia, Giubiasco]}
+  - {name: Chur, lat: 46.8508, lon: 9.532, population: 38000, area_code: '81', postcodes: ['7000'], districts: [Altstadt, Masans, Lacuna]}
+  - {name: Sion, lat: 46.2331, lon: 7.3606, population: 35000, area_code: '27', postcodes: ['1950', '1951'], districts: [Vieille Ville, Champsec, Bramois]}
+streets: [Bahnhofstrasse, Hauptstrasse, Dorfstrasse, Kirchweg, Schulstrasse, Industriestrasse, Gartenstrasse, Kirchgasse, Oberdorfstrasse, Seestrasse, Rosenweg, Bergstrasse, Feldstrasse, Poststrasse, Lindenstrasse, Mühleweg, Sonnenbergstrasse, Langstrasse, Badenerstrasse, Seefeldstrasse, Zürcherstrasse, Bernstrasse, Baslerstrasse, Luzernerstrasse, Spitalgasse, Marktgasse, Kramgasse, Freie Strasse, Unterdorfstrasse, Schützenstrasse, Rue de la Gare, Route de Lausanne, Rue du Lac, Chemin des Vignes, Rue Centrale, Avenue de la Gare, Rue du Marché, Chemin du Moulin, Rue de l'Eglise, Grand-Rue, Rue du Rhône, Rue de Carouge, Avenue de France, Avenue du Léman, Chemin des Fleurs, Route de Genève, Via Cantonale, Via San Gottardo, Via Nassa, Via Lugano, Via alla Chiesa, Via Stazione, Via Cantonale Vecchia, Via Ronco]
+address_format: '{street} {number}, {postcode} {city}'
+places:
+  - {category: park, name: Parc des Bastions, city: Genève, lat: 46.2, lon: 6.145}
+  - {category: park, name: Zürichhorn, city: Zürich, lat: 47.3536, lon: 8.5522}
+  - {category: park, name: Lindenhof, city: Zürich, lat: 47.37, lon: 8.542}
+  - {category: park, name: Rosengarten, city: Bern, lat: 46.951, lon: 7.4604}
+  - {category: park, name: Parco Ciani, city: Lugano, lat: 46.0043, lon: 8.9586}
+  - {category: park, name: Parc de Mon Repos, city: Lausanne, lat: 46.5189, lon: 6.6427}
+  - {category: landmark, name: Jet d'Eau, city: Genève, lat: 46.2072, lon: 6.1561}
+  - {category: landmark, name: Kapellbrücke, city: Luzern, lat: 47.0517, lon: 8.3075}
+  - {category: landmark, name: Zytglogge, city: Bern, lat: 46.9481, lon: 7.4478}
+  - {category: landmark, name: Grossmünster, city: Zürich, lat: 47.3701, lon: 8.544}
+  - {category: landmark, name: Château de Chillon, city: Veytaux, lat: 46.4142, lon: 6.9275}
+  - {category: landmark, name: Bundeshaus, city: Bern, lat: 46.9467, lon: 7.4442}
+  - {category: landmark, name: Rheinfall, city: Neuhausen am Rheinfall, lat: 47.6772, lon: 8.6158}
+  - {category: landmark, name: Castelgrande, city: Bellinzona, lat: 46.1932, lon: 9.0203}
+  - {category: station, name: Zürich HB, city: Zürich, lat: 47.3782, lon: 8.5402}
+  - {category: station, name: Bahnhof Bern, city: Bern, lat: 46.9488, lon: 7.4391}
+  - {category: station, name: Basel SBB, city: Basel, lat: 47.547, lon: 7.59}
+  - {category: station, name: Genève-Cornavin, city: Genève, lat: 46.2102, lon: 6.1424}
+  - {category: station, name: Bahnhof Luzern, city: Luzern, lat: 47.0502, lon: 8.3102}
+  - {category: station, name: Gare de Lausanne, city: Lausanne, lat: 46.5168, lon: 6.6291}
+  - {category: airport, name: Flughafen Zürich, city: Kloten, lat: 47.4647, lon: 8.5492}
+  - {category: airport, name: Aéroport de Genève, city: Genève, lat: 46.2376, lon: 6.1092}
+  - {category: airport, name: Aeroporto di Lugano, city: Agno, lat: 46.0036, lon: 8.9103}
+  - {category: beach, name: Lido Locarno, city: Locarno, lat: 46.16, lon: 8.803}
+  - {category: beach, name: Seebad Utoquai, city: Zürich, lat: 47.3636, lon: 8.5364}
+  - {category: beach, name: Plage de Vidy, city: Lausanne, lat: 46.5147, lon: 6.6022}
+  - {category: mountain, name: Matterhorn, city: Zermatt, lat: 45.9764, lon: 7.6586}
+  - {category: mountain, name: Jungfraujoch, city: Fieschertal, lat: 46.5472, lon: 7.9806}
+  - {category: mountain, name: Pilatus, city: Luzern, lat: 46.9739, lon: 8.2411}
+  - {category: mountain, name: Rigi, city: Rigi Kulm, lat: 47.0567, lon: 8.4856}
+  - {category: mountain, name: Uetliberg, city: Zürich, lat: 47.3494, lon: 8.4914}
+  - {category: mountain, name: Säntis, city: Schwägalp, lat: 47.2494, lon: 9.3433}
+  - {category: museum, name: Verkehrshaus, city: Luzern, lat: 47.0528, lon: 8.3358}
+  - {category: museum, name: Kunsthaus Zürich, city: Zürich, lat: 47.3703, lon: 8.5481}
+  - {category: museum, name: Landesmuseum, city: Zürich, lat: 47.3792, lon: 8.5397}
+  - {category: museum, name: Musée Olympique, city: Lausanne, lat: 46.5086, lon: 6.6339}
+  - {category: museum, name: Fondation Beyeler, city: Riehen, lat: 47.5881, lon: 7.6511}
+  - {category: stadium, name: St. Jakob-Park, city: Basel, lat: 47.5417, lon: 7.6203}
+  - {category: stadium, name: Stadion Wankdorf, city: Bern, lat: 46.9631, lon: 7.4647}
+  - {category: stadium, name: Letzigrund, city: Zürich, lat: 47.3828, lon: 8.5042}
+  - {category: stadium, name: Stade de Genève, city: Genève, lat: 46.1778, lon: 6.1275}
+  - {category: market, name: Plaine de Plainpalais, city: Genève, lat: 46.1939, lon: 6.1414}
+  - {category: market, name: Marktplatz Basel, city: Basel, lat: 47.5581, lon: 7.5878}
+  - {category: lake, name: Zürichsee, city: Zürich, lat: 47.366, lon: 8.541}
+  - {category: lake, name: Lac Léman, city: Lausanne, lat: 46.506, lon: 6.627}
+  - {category: lake, name: Vierwaldstättersee, city: Luzern, lat: 47.052, lon: 8.31}
+  - {category: lake, name: Lago di Lugano, city: Lugano, lat: 46.004, lon: 8.952}
+  - {category: lake, name: Thunersee, city: Thun, lat: 46.688, lon: 7.678}
+  - {category: lake, name: Oeschinensee, city: Kandersteg, lat: 46.4983, lon: 7.7269}
+names:
+  culture: ch
+  female:
+    - {name: Maria, w: 1.0}
+    - {name: Sandra, w: 0.557}
+    - {name: Monika, w: 0.481}
+    - {name: Claudia, w: 0.481}
+    - {name: Nicole, w: 0.45}
+    - {name: Ursula, w: 0.442}
+    - {name: Barbara, w: 0.43}
+    - {name: Andrea, w: 0.424}
+    - {name: Anna, w: 0.421}
+    - {name: Daniela, w: 0.404}
+    - {name: Silvia, w: 0.373}
+    - {name: Elisabeth, w: 0.359}
+    - {name: Christine, w: 0.358}
+    - {name: Karin, w: 0.351}
+    - {name: Ruth, w: 0.35}
+    - {name: Verena, w: 0.315}
+    - {name: Brigitte, w: 0.303}
+    - {name: Susanne, w: 0.303}
+    - {name: Marianne, w: 0.295}
+    - {name: Sarah, w: 0.293}
+    - {name: Manuela, w: 0.283}
+    - {name: Laura, w: 0.279}
+    - {name: Esther, w: 0.257}
+    - {name: Anita, w: 0.254}
+    - {name: Marie, w: 0.253}
+    - {name: Katharina, w: 0.246}
+    - {name: Rita, w: 0.241}
+    - {name: Beatrice, w: 0.235}
+    - {name: Sonja, w: 0.225}
+    - {name: Doris, w: 0.221}
+    - {name: Cornelia, w: 0.22}
+    - {name: Franziska, w: 0.219}
+    - {name: Erika, w: 0.217}
+    - {name: Gabriela, w: 0.215}
+    - {name: Martina, w: 0.213}
+    - {name: Yvonne, w: 0.212}
+    - {name: Fabienne, w: 0.212}
+    - {name: Patricia, w: 0.212}
+    - {name: Sabrina, w: 0.212}
+    - {name: Nathalie, w: 0.209}
+    - {name: Alexandra, w: 0.208}
+    - {name: Sara, w: 0.207}
+    - {name: Isabelle, w: 0.205}
+    - {name: Corinne, w: 0.203}
+    - {name: Heidi, w: 0.2}
+    - {name: Margrit, w: 0.199}
+    - {name: Jacqueline, w: 0.197}
+    - {name: Irene, w: 0.196}
+    - {name: Melanie, w: 0.194}
+    - {name: Nadine, w: 0.187}
+    - {name: Angela, w: 0.179}
+    - {name: Julia, w: 0.174}
+    - {name: Jessica, w: 0.173}
+    - {name: Vanessa, w: 0.167}
+    - {name: Rosmarie, w: 0.166}
+    - {name: Eva, w: 0.166}
+    - {name: Caroline, w: 0.165}
+    - {name: Tanja, w: 0.164}
+    - {name: Regula, w: 0.161}
+    - {name: Sabine, w: 0.158}
+    - {name: Petra, w: 0.156}
+    - {name: Catherine, w: 0.153}
+    - {name: Anne, w: 0.149}
+    - {name: Stefanie, w: 0.148}
+    - {name: Carmen, w: 0.148}
+    - {name: Simone, w: 0.146}
+    - {name: Céline, w: 0.145}
+    - {name: Nadia, w: 0.145}
+    - {name: Tamara, w: 0.145}
+    - {name: Denise, w: 0.143}
+    - {name: Jasmin, w: 0.141}
+    - {name: Elena, w: 0.141}
+    - {name: Edith, w: 0.141}
+    - {name: Chantal, w: 0.14}
+    - {name: Marina, w: 0.137}
+    - {name: Christina, w: 0.133}
+    - {name: Susanna, w: 0.131}
+    - {name: Rosa, w: 0.126}
+    - {name: Rahel, w: 0.126}
+    - {name: Sophie, w: 0.125}
+    - {name: Michelle, w: 0.123}
+    - {name: Nina, w: 0.122}
+    - {name: Therese, w: 0.116}
+    - {name: Diana, w: 0.116}
+    - {name: Anja, w: 0.116}
+    - {name: Jennifer, w: 0.116}
+    - {name: Bettina, w: 0.114}
+    - {name: Eveline, w: 0.113}
+    - {name: Judith, w: 0.113}
+    - {name: Lea, w: 0.109}
+    - {name: Janine, w: 0.108}
+    - {name: Michèle, w: 0.107}
+    - {name: Maja, w: 0.107}
+    - {name: Mirjam, w: 0.104}
+    - {name: Lisa, w: 0.104}
+    - {name: Nadja, w: 0.103}
+    - {name: Stephanie, w: 0.101}
+    - {name: Lara, w: 0.1}
+    - {name: Valérie, w: 0.098}
+    - {name: Pia, w: 0.097}
+    - {name: Astrid, w: 0.096}
+    - {name: Ramona, w: 0.096}
+    - {name: Françoise, w: 0.096}
+    - {name: Priska, w: 0.095}
+    - {name: Cristina, w: 0.095}
+    - {name: Renate, w: 0.095}
+    - {name: Bernadette, w: 0.094}
+    - {name: Eliane, w: 0.093}
+    - {name: Monique, w: 0.092}
+    - {name: Monica, w: 0.091}
+    - {name: Alice, w: 0.091}
+    - {name: Brigitta, w: 0.091}
+    - {name: Sonia, w: 0.09}
+    - {name: Dominique, w: 0.09}
+    - {name: Gertrud, w: 0.09}
+    - {name: Patrizia, w: 0.089}
+    - {name: Stéphanie, w: 0.089}
+    - {name: Aline, w: 0.088}
+    - {name: Carla, w: 0.088}
+    - {name: Christiane, w: 0.087}
+    - {name: Linda, w: 0.087}
+    - {name: Regina, w: 0.085}
+    - {name: Johanna, w: 0.085}
+    - {name: Véronique, w: 0.084}
+    - {name: Chiara, w: 0.084}
+    - {name: Marion, w: 0.083}
+    - {name: Beatrix, w: 0.082}
+    - {name: Iris, w: 0.082}
+    - {name: Lucia, w: 0.081}
+    - {name: Sibylle, w: 0.08}
+    - {name: Isabel, w: 0.08}
+    - {name: Katja, w: 0.079}
+    - {name: Miriam, w: 0.079}
+    - {name: Valentina, w: 0.079}
+    - {name: Adelheid, w: 0.078}
+    - {name: Charlotte, w: 0.078}
+    - {name: Sylvie, w: 0.078}
+    - {name: Madeleine, w: 0.078}
+    - {name: Myriam, w: 0.078}
+    - {name: Jana, w: 0.077}
+    - {name: Selina, w: 0.077}
+    - {name: Jeannette, w: 0.076}
+    - {name: Vera, w: 0.075}
+    - {name: Rebecca, w: 0.074}
+    - {name: Olivia, w: 0.073}
+    - {name: Helena, w: 0.072}
+    - {name: Michaela, w: 0.071}
+    - {name: Deborah, w: 0.071}
+    - {name: Elsbeth, w: 0.071}
+    - {name: Francesca, w: 0.07}
+    - {name: Magdalena, w: 0.069}
+    - {name: Marlise, w: 0.068}
+    - {name: Martine, w: 0.067}
+    - {name: Julie, w: 0.067}
+    - {name: Florence, w: 0.067}
+    - {name: Christa, w: 0.067}
+    - {name: Dora, w: 0.066}
+    - {name: Corina, w: 0.066}
+    - {name: Carole, w: 0.066}
+    - {name: Sandrine, w: 0.066}
+  male:
+    - {name: Daniel, w: 1.0}
+    - {name: Thomas, w: 0.85}
+    - {name: Peter, w: 0.79}
+    - {name: Christian, w: 0.668}
+    - {name: Michael, w: 0.653}
+    - {name: Andreas, w: 0.65}
+    - {name: Martin, w: 0.644}
+    - {name: Markus, w: 0.614}
+    - {name: Hans, w: 0.57}
+    - {name: Marco, w: 0.526}
+    - {name: Patrick, w: 0.517}
+    - {name: Stefan, w: 0.508}
+    - {name: David, w: 0.473}
+    - {name: Urs, w: 0.417}
+    - {name: Bruno, w: 0.394}
+    - {name: Marcel, w: 0.372}
+    - {name: Pascal, w: 0.369}
+    - {name: Roland, w: 0.354}
+    - {name: René, w: 0.349}
+    - {name: Simon, w: 0.343}
+    - {name: Beat, w: 0.339}
+    - {name: Marc, w: 0.336}
+    - {name: Roger, w: 0.307}
+    - {name: Walter, w: 0.294}
+    - {name: Christoph, w: 0.289}
+    - {name: André, w: 0.279}
+    - {name: Nicolas, w: 0.278}
+    - {name: Rolf, w: 0.269}
+    - {name: Adrian, w: 0.267}
+    - {name: Antonio, w: 0.25}
+    - {name: Reto, w: 0.247}
+    - {name: Luca, w: 0.245}
+    - {name: Michel, w: 0.244}
+    - {name: Werner, w: 0.235}
+    - {name: Philippe, w: 0.235}
+    - {name: Lukas, w: 0.232}
+    - {name: Matthias, w: 0.231}
+    - {name: Samuel, w: 0.231}
+    - {name: Robert, w: 0.229}
+    - {name: Kurt, w: 0.228}
+    - {name: Philipp, w: 0.226}
+    - {name: Fabian, w: 0.225}
+    - {name: Stephan, w: 0.223}
+    - {name: Mario, w: 0.217}
+    - {name: Paul, w: 0.215}
+    - {name: Heinz, w: 0.215}
+    - {name: Rudolf, w: 0.208}
+    - {name: Jean, w: 0.208}
+    - {name: Florian, w: 0.206}
+    - {name: Alexander, w: 0.206}
+    - {name: Jürg, w: 0.204}
+    - {name: Josef, w: 0.196}
+    - {name: Benjamin, w: 0.19}
+    - {name: Roman, w: 0.188}
+    - {name: Kevin, w: 0.188}
+    - {name: Jan, w: 0.178}
+    - {name: Pierre, w: 0.176}
+    - {name: Dominik, w: 0.174}
+    - {name: Tobias, w: 0.173}
+    - {name: Giuseppe, w: 0.173}
+    - {name: Sandro, w: 0.172}
+    - {name: Oliver, w: 0.171}
+    - {name: Olivier, w: 0.17}
+    - {name: Fabio, w: 0.167}
+    - {name: Alain, w: 0.165}
+    - {name: Claudio, w: 0.15}
+    - {name: Alfred, w: 0.15}
+    - {name: Anton, w: 0.149}
+    - {name: Alexandre, w: 0.149}
+    - {name: Ulrich, w: 0.148}
+    - {name: Ernst, w: 0.144}
+    - {name: Francesco, w: 0.14}
+    - {name: Eric, w: 0.136}
+    - {name: Jonas, w: 0.136}
+    - {name: Raphael, w: 0.134}
+    - {name: Franz, w: 0.133}
+    - {name: Bernhard, w: 0.133}
+    - {name: Yves, w: 0.133}
+    - {name: Alessandro, w: 0.129}
+    - {name: Christophe, w: 0.129}
+    - {name: Felix, w: 0.127}
+    - {name: Roberto, w: 0.124}
+    - {name: Julien, w: 0.124}
+    - {name: Andrea, w: 0.123}
+    - {name: Ivan, w: 0.123}
+    - {name: Sven, w: 0.122}
+    - {name: Laurent, w: 0.122}
+    - {name: Stéphane, w: 0.119}
+    - {name: Richard, w: 0.117}
+    - {name: Remo, w: 0.116}
+    - {name: Dario, w: 0.114}
+    - {name: Claude, w: 0.112}
+    - {name: Cédric, w: 0.111}
+    - {name: Johann, w: 0.11}
+    - {name: Max, w: 0.108}
+    - {name: Vincent, w: 0.108}
+    - {name: Frédéric, w: 0.106}
+    - {name: Sébastien, w: 0.106}
+    - {name: Erich, w: 0.106}
+    - {name: Sebastian, w: 0.104}
+    - {name: Giovanni, w: 0.104}
+    - {name: Thierry, w: 0.103}
+    - {name: Gabriel, w: 0.103}
+    - {name: Jonathan, w: 0.102}
+    - {name: Nicola, w: 0.102}
+    - {name: François, w: 0.101}
+    - {name: Fritz, w: 0.1}
+    - {name: Robin, w: 0.098}
+    - {name: Karl, w: 0.096}
+    - {name: Jörg, w: 0.093}
+    - {name: Mathias, w: 0.092}
+    - {name: Sascha, w: 0.09}
+    - {name: Guido, w: 0.09}
+    - {name: Joël, w: 0.09}
+    - {name: Joel, w: 0.089}
+    - {name: Hugo, w: 0.087}
+    - {name: Denis, w: 0.087}
+    - {name: Bernard, w: 0.086}
+    - {name: Dominique, w: 0.086}
+    - {name: Stefano, w: 0.086}
+    - {name: Patrik, w: 0.085}
+    - {name: Michele, w: 0.084}
+    - {name: Albert, w: 0.084}
+    - {name: Davide, w: 0.083}
+    - {name: Salvatore, w: 0.083}
+    - {name: Dominic, w: 0.082}
+    - {name: Yannick, w: 0.08}
+    - {name: Armin, w: 0.079}
+    - {name: Erwin, w: 0.079}
+    - {name: Silvan, w: 0.077}
+    - {name: Alex, w: 0.077}
+    - {name: Frank, w: 0.077}
+    - {name: Matteo, w: 0.076}
+    - {name: Jacques, w: 0.076}
+    - {name: Jérôme, w: 0.076}
+    - {name: Tim, w: 0.076}
+    - {name: Valentin, w: 0.075}
+    - {name: Jakob, w: 0.074}
+    - {name: Johannes, w: 0.074}
+    - {name: Lars, w: 0.074}
+    - {name: Nico, w: 0.074}
+    - {name: Angelo, w: 0.073}
+    - {name: Diego, w: 0.072}
+    - {name: Daniele, w: 0.071}
+    - {name: Noah, w: 0.07}
+    - {name: Paolo, w: 0.068}
+    - {name: Lucas, w: 0.068}
+    - {name: Julian, w: 0.066}
+    - {name: Raphaël, w: 0.066}
+    - {name: Mauro, w: 0.065}
+    - {name: Manfred, w: 0.064}
+    - {name: Vincenzo, w: 0.063}
+    - {name: Renato, w: 0.063}
+    - {name: Mike, w: 0.063}
+    - {name: Georg, w: 0.062}
+  surnames:
+    - {name: Müller, w: 1.0}
+    - {name: Meier, w: 0.613}
+    - {name: Schmid, w: 0.571}
+    - {name: Keller, w: 0.435}
+    - {name: Weber, w: 0.379}
+    - {name: Schneider, w: 0.358}
+    - {name: Huber, w: 0.339}
+    - {name: Meyer, w: 0.327}
+    - {name: Steiner, w: 0.325}
+    - {name: Fischer, w: 0.284}
+    - {name: Gerber, w: 0.282}
+    - {name: Baumann, w: 0.271}
+    - {name: Brunner, w: 0.271}
+    - {name: Frei, w: 0.263}
+    - {name: Zimmermann, w: 0.261}
+    - {name: Moser, w: 0.257}
+    - {name: Graf, w: 0.244}
+    - {name: Widmer, w: 0.238}
+    - {name: Wyss, w: 0.235}
+    - {name: Roth, w: 0.216}
+    - {name: Baumgartner, w: 0.205}
+    - {name: Bucher, w: 0.204}
+    - {name: Bachmann, w: 0.203}
+    - {name: Suter, w: 0.202}
+    - {name: Berger, w: 0.192}
+    - {name: Kaufmann, w: 0.191}
+    - {name: Studer, w: 0.191}
+    - {name: Lüthi, w: 0.188}
+    - {name: Bühler, w: 0.184}
+    - {name: Kunz, w: 0.18}
+    - {name: Lehmann, w: 0.179}
+    - {name: Hofer, w: 0.174}
+    - {name: Marti, w: 0.172}
+    - {name: Koch, w: 0.163}
+    - {name: Arnold, w: 0.163}
+    - {name: Christen, w: 0.162}
+    - {name: Frey, w: 0.156}
+    - {name: Wüthrich, w: 0.154}
+    - {name: Egli, w: 0.15}
+    - {name: Zürcher, w: 0.144}
+    - {name: Fuchs, w: 0.143}
+    - {name: Gasser, w: 0.139}
+    - {name: Pfister, w: 0.138}
+    - {name: Stalder, w: 0.138}
+    - {name: Martin, w: 0.136}
+    - {name: Koller, w: 0.136}
+    - {name: Schweizer, w: 0.136}
+    - {name: Peter, w: 0.133}
+    - {name: Bieri, w: 0.13}
+    - {name: Maurer, w: 0.13}
+    - {name: Kohler, w: 0.13}
+    - {name: Wenger, w: 0.129}
+    - {name: Furrer, w: 0.125}
+    - {name: Burri, w: 0.125}
+    - {name: Michel, w: 0.123}
+    - {name: Vogel, w: 0.121}
+    - {name: Leuenberger, w: 0.119}
+    - {name: Schär, w: 0.118}
+    - {name: Egger, w: 0.117}
+    - {name: Hofmann, w: 0.116}
+    - {name: Rüegg, w: 0.116}
+    - {name: Hunziker, w: 0.113}
+    - {name: Ammann, w: 0.113}
+    - {name: Hess, w: 0.112}
+    - {name: Hug, w: 0.112}
+    - {name: Schuler, w: 0.112}
+    - {name: Tanner, w: 0.112}
+    - {name: Kälin, w: 0.112}
+    - {name: Sutter, w: 0.11}
+    - {name: Wagner, w: 0.11}
+    - {name: Gisler, w: 0.11}
+    - {name: Blaser, w: 0.108}
+    - {name: Schmidt, w: 0.107}
+    - {name: Hauser, w: 0.106}
+    - {name: Favre, w: 0.104}
+    - {name: Hartmann, w: 0.103}
+    - {name: Flückiger, w: 0.1}
+    - {name: Lang, w: 0.1}
+    - {name: Senn, w: 0.099}
+    - {name: Stucki, w: 0.099}
+    - {name: Siegenthaler, w: 0.098}
+    - {name: Zbinden, w: 0.097}
+    - {name: Fankhauser, w: 0.097}
+    - {name: Sommer, w: 0.097}
+    - {name: Odermatt, w: 0.096}
+    - {name: Zaugg, w: 0.095}
+    - {name: Scherrer, w: 0.095}
+    - {name: Imhof, w: 0.094}
+    - {name: Küng, w: 0.093}
+    - {name: Portmann, w: 0.093}
+    - {name: Vogt, w: 0.091}
+    - {name: Schärer, w: 0.091}
+    - {name: Schwarz, w: 0.09}
+    - {name: Ackermann, w: 0.09}
+    - {name: Scheidegger, w: 0.09}
+    - {name: Jost, w: 0.088}
+    - {name: Schenk, w: 0.087}
+    - {name: Liechti, w: 0.087}
+    - {name: Rey, w: 0.086}
+    - {name: Kuhn, w: 0.085}
+    - {name: Schumacher, w: 0.085}
+    - {name: Hofstetter, w: 0.084}
+    - {name: Hasler, w: 0.083}
+    - {name: Weiss, w: 0.082}
+    - {name: Staub, w: 0.082}
+    - {name: Seiler, w: 0.082}
+    - {name: Giger, w: 0.082}
+    - {name: Stocker, w: 0.08}
+    - {name: Röthlisberger, w: 0.08}
+    - {name: Wolf, w: 0.08}
+    - {name: Herzog, w: 0.079}
+    - {name: Haas, w: 0.079}
+    - {name: Lüscher, w: 0.079}
+    - {name: Schnyder, w: 0.079}
+    - {name: Wittwer, w: 0.078}
+    - {name: Schwab, w: 0.078}
+    - {name: Betschart, w: 0.078}
+    - {name: Fässler, w: 0.077}
+    - {name: Marty, w: 0.076}
+    - {name: Stöckli, w: 0.076}
+    - {name: Zehnder, w: 0.076}
+    - {name: Stadelmann, w: 0.076}
+    - {name: Käser, w: 0.075}
+    - {name: Schaller, w: 0.074}
+    - {name: Weibel, w: 0.074}
+    - {name: Bühlmann, w: 0.074}
+    - {name: Kaiser, w: 0.074}
+    - {name: Häfliger, w: 0.073}
+    - {name: Steiger, w: 0.073}
+    - {name: Ulrich, w: 0.072}
+    - {name: Näf, w: 0.072}
+    - {name: Rohner, w: 0.072}
+    - {name: Beck, w: 0.072}
+    - {name: Rohrer, w: 0.072}
+    - {name: Gloor, w: 0.072}
+    - {name: Rossi, w: 0.071}
+    - {name: Stettler, w: 0.071}
+    - {name: Lutz, w: 0.071}
+    - {name: Stutz, w: 0.07}
+    - {name: Bosshard, w: 0.07}
+    - {name: Mäder, w: 0.07}
+    - {name: Walker, w: 0.07}
+    - {name: Steffen, w: 0.07}
+    - {name: Meister, w: 0.07}
+    - {name: Bernasconi, w: 0.07}
+    - {name: Lanz, w: 0.07}
+    - {name: Aeschlimann, w: 0.07}
+    - {name: Brügger, w: 0.07}
+    - {name: Jenni, w: 0.069}
+    - {name: Eichenberger, w: 0.069}
+    - {name: Grob, w: 0.069}
+    - {name: Sigrist, w: 0.069}
+    - {name: Blum, w: 0.068}
+    - {name: Tobler, w: 0.068}
+    - {name: Ziegler, w: 0.067}
+    - {name: Siegrist, w: 0.067}
+    - {name: Sieber, w: 0.067}
+    - {name: Kessler, w: 0.067}
+    - {name: Kuster, w: 0.066}
+    - {name: Bolliger, w: 0.066}
+    - {name: Locher, w: 0.065}
+    - {name: Krebs, w: 0.065}
+    - {name: Graber, w: 0.065}
+    - {name: Schmutz, w: 0.064}
+    - {name: Bischof, w: 0.064}
+    - {name: Wicki, w: 0.064}
+    - {name: Mathys, w: 0.064}
+    - {name: Probst, w: 0.063}
+    - {name: Schütz, w: 0.063}
+    - {name: Bösch, w: 0.063}
+    - {name: Braun, w: 0.063}
+    - {name: Benz, w: 0.063}
+    - {name: Steinmann, w: 0.063}
+    - {name: Hürlimann, w: 0.063}
+    - {name: Friedli, w: 0.063}
+    - {name: Nussbaumer, w: 0.063}
+    - {name: Walther, w: 0.062}
+    - {name: Zwahlen, w: 0.062}
+    - {name: Reber, w: 0.062}
+    - {name: Mathis, w: 0.061}
+    - {name: Ott, w: 0.061}
+    - {name: König, w: 0.061}
+    - {name: Hostettler, w: 0.061}
+    - {name: Stauffer, w: 0.061}
+    - {name: Erni, w: 0.061}
+    - {name: Schüpbach, w: 0.061}
+    - {name: Haller, w: 0.061}
+    - {name: Jäger, w: 0.06}
+    - {name: Niederberger, w: 0.06}
+    - {name: Hänni, w: 0.06}
+    - {name: Eugster, w: 0.059}
+    - {name: Willi, w: 0.059}
+    - {name: Bürki, w: 0.059}
+    - {name: Walter, w: 0.059}
+    - {name: Rochat, w: 0.059}
+    - {name: Iten, w: 0.059}
+    - {name: Jäggi, w: 0.059}
+    - {name: Bärtschi, w: 0.058}
+    - {name: Trachsel, w: 0.058}
+    - {name: Gut, w: 0.058}
+    - {name: Heiniger, w: 0.058}
+    - {name: Felder, w: 0.058}
+    - {name: Schönenberger, w: 0.057}
+    - {name: Aebi, w: 0.057}
+    - {name: Glauser, w: 0.057}
+    - {name: Merz, w: 0.057}
+    - {name: Bürgi, w: 0.057}
+    - {name: Achermann, w: 0.057}
+  nicknames: {Christian: Chrigi, Daniel: Dani, Andreas: Andi, Stefan: Stefu, Thomas: Thomi, Barbara: Babs, Elisabeth: Lisbeth, Ursula: Ursi, Beatrice: Bea, Alexander: Alex, Nicolas: Nico, Francesco: Cesco, Giuseppe: Peppino, Alessandro: Ale, Christophe: Chris, Samuel: Sämi, Matthias: Mätthu, Regula: Reggi}
+  display: '{first} {last}'
+# Shares = share of contacts from that diaspora/minority (official origin statistics, see SOURCES).
+# Cultures without a pack in this project (not listed as data): pt 0.028, sq (Kosovo/North Macedonia Albanians) 0.019, sh (Serbian/Croatian/Bosnian) 0.012, ta (Sri Lankan Tamil, share not verified), ti (Eritrea, share not verified)
+cultures:
+  - {culture: it, share: 0.039}
+  - {culture: de, share: 0.037}
+  - {culture: fr, share: 0.018}
+  - {culture: es, share: 0.011}
+  - {culture: tr, share: 0.008}
+email:
+  domains:
+    - {domain: gmail.com, share: 0.4}
+    - {domain: bluewin.ch, share: 0.17}
+    - {domain: gmx.ch, share: 0.08}
+    - {domain: hotmail.com, share: 0.06}
+    - {domain: outlook.com, share: 0.04}
+    - {domain: icloud.com, share: 0.08}
+    - {domain: sunrise.ch, share: 0.03}
+    - {domain: yahoo.com, share: 0.03}
+    - {domain: hispeed.ch, share: 0.02}
+    - {domain: proton.me, share: 0.03}
+    - {domain: hotmail.ch, share: 0.02}
+    - {domain: gmx.net, share: 0.02}
+  patterns: ['{first}.{last}', '{first}{last}', '{f}.{last}', '{first}.{last}{yy}', '{f}{last}', '{first}{yy}', '{last}.{first}', '{first}_{last}']
+services:
+  - {sender: Post CH, kind: courier, sender_type: alphanumeric}
+  - {sender: DPD, kind: courier, sender_type: alphanumeric}
+  - {sender: DHL, kind: courier, sender_type: alphanumeric}
+  - {sender: Planzer, kind: courier, sender_type: alphanumeric}
+  - {sender: UBS, kind: bank, sender_type: alphanumeric}
+  - {sender: PostFinance, kind: bank, sender_type: alphanumeric}
+  - {sender: Raiffeisen, kind: bank, sender_type: alphanumeric}
+  - {sender: ZKB, kind: bank, sender_type: alphanumeric}
+  - {sender: TWINT, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Swisscom, kind: telecom, sender_type: alphanumeric}
+  - {sender: Sunrise, kind: telecom, sender_type: alphanumeric}
+  - {sender: Salt, kind: telecom, sender_type: alphanumeric}
+  - {sender: Google, kind: otp_service, sender_type: alphanumeric}
+  - {sender: SwissID, kind: otp_service, sender_type: alphanumeric}
+  - {sender: +4144..., kind: doctor, sender_type: number}
+  - {sender: +4122..., kind: doctor, sender_type: number}
+  - {sender: Amavita, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: Just Eat, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Uber Eats, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Uber, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: SWISS, kind: airline, sender_type: alphanumeric}
+  - {sender: SBB CFF FFS, kind: rail, sender_type: alphanumeric}
+  - {sender: Galaxus, kind: retail, sender_type: alphanumeric}
+  - {sender: Migros, kind: retail, sender_type: alphanumeric}
+  - {sender: Coop, kind: retail, sender_type: alphanumeric}
+  - {sender: ewz, kind: utility, sender_type: alphanumeric}
+holidays:
+  - {date: 01-01, name: Neujahr / Nouvel An / Capodanno}
+  - {date: 01-02, name: Berchtoldstag, regional: true}
+  - {rule: easter-2, name: Karfreitag / Vendredi saint, regional: true}
+  - {rule: easter+1, name: Ostermontag / Lundi de Pâques}
+  - {date: 05-01, name: Tag der Arbeit, regional: true}
+  - {rule: easter+39, name: Auffahrt / Ascension}
+  - {rule: easter+50, name: Pfingstmontag / Lundi de Pentecôte}
+  - {rule: easter+60, name: Fronleichnam / Fête-Dieu, regional: true}
+  - {date: 08-01, name: Bundesfeiertag / Fête nationale}
+  - {date: 08-15, name: Mariä Himmelfahrt / Assomption, regional: true}
+  - {date: 11-01, name: Allerheiligen / Toussaint, regional: true}
+  - {date: 12-08, name: Mariä Empfängnis / Immacolata, regional: true}
+  - {date: 12-24, name: Heiligabend, observance: true}
+  - {date: 12-25, name: Weihnachten / Noël / Natale}
+  - {date: 12-26, name: Stephanstag / Saint-Étienne, regional: true}
+  - {date: 12-31, name: Silvester, observance: true}
+popular_apps:
+  - {package: com.whatsapp, name: WhatsApp, category: messaging}
+  - {package: org.telegram.messenger, name: Telegram, category: messaging}
+  - {package: com.google.android.apps.maps, name: Google Maps, category: transport}
+  - {package: com.ubercab, name: Uber, category: transport}
+  - {package: com.amazon.mShop.android.shopping, name: Amazon Shopping, category: shopping}
+  - {package: com.paypal.android.p2pmobile, name: PayPal, category: banking}
+  - {package: com.ubs.swidKXJ.android, name: UBS, category: banking}
+  - {package: ch.postfinance.android, name: PostFinance, category: banking}
+  - {package: ch.raiffeisen.android, name: Raiffeisen E-Banking, category: banking}
+  - {package: ch.zkb.slv.mobile.client.android, name: ZKB Mobile Banking, category: banking}
+  - {package: ch.twint.payment, name: TWINT, category: banking}
+  - {package: ch.sbb.mobile.android.b2c, name: SBB Mobile, category: transport}
+  - {package: com.nth.swisspost, name: Post-App, category: shopping}
+  - {package: ch.migros.app, name: Migros, category: shopping}
+  - {package: ch.coop.coopapp, name: Coop, category: shopping}
+  - {package: com.galaxusapp, name: Galaxus, category: shopping}
+  - {package: com.qxl.Client, name: Ricardo, category: shopping}
+  - {package: ch.srf.mobile, name: SRF News, category: news}
+  - {package: ch.iAgentur.i20Min, name: 20 Minuten, category: news}
+  - {package: com.eat.ch, name: Just Eat, category: food}
+  - {package: com.ubercab.eats, name: Uber Eats, category: food}
+  - {package: com.swisssign.swissid.mobile, name: SwissID, category: government}
+  - {package: ch.admin.meteoswiss, name: MeteoSwiss, category: weather}
+  - {package: com.swisscom.myswisscom, name: My Swisscom, category: telecom}
+  - {package: com.yoc.swiss.swiss, name: SWISS, category: transport}
+  - {package: org.thoughtcrime.securesms, name: Signal, category: messaging}

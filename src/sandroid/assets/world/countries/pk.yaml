@@ -1,0 +1,889 @@
+# Pakistan country pack (schema v1). Sources: pk.SOURCES.md (S1..S20).
+# Context: Pakistan is a key market in research on predatory nano-loan apps that harvest
+# SMS / contacts / call logs; mobile-money (JazzCash, easypaisa) and bank senders are
+# therefore modelled in detail under `services`.
+pack: country
+schema: 1.1
+country: pk
+name: Pakistan
+# Locally written text: SMS between people is overwhelmingly ROMAN URDU (Urdu in Latin
+# script, heavy English code-switching: "kal office ke baad milte hain, ok?"). Nastaliq
+# (Urdu script) SMS are rare. `ur` here therefore means Roman Urdu; the ur language pack
+# should be written in Latin script. Punjabi/Pashto/Sindhi chat is also typed in Roman
+# script and mixed into Roman Urdu; no separate share is given for them.
+languages: {ur: 0.7, en: 0.3}
+timezones: [Asia/Karachi]          # single zone, UTC+5, no DST
+date_format: "dd/MM/yyyy"          # also common: "12-11-2026", bank SMS "12-Nov-26"
+time_format: "hh:mm a"             # 12-hour clock is the everyday norm ("08:30 PM")
+# Banks/JazzCash write "Rs.1,250" or "PKR 1,250.00"; people write "1250 rs" / "15k" / "2 lac".
+currency: {code: PKR, symbol: "Rs", format: "Rs. 4,999"}
+phone:
+  country_code: "92"
+  trunk_prefix: "0"
+  national_format_examples: ["0300 1234567", "0333-5123456", "021 34567890", "042 35761234", "051 2345678"]
+  mobile:
+    # Mobile NSN = 10 digits: 3 + X (operator block) + Z + 7-digit subscriber (S1, S2).
+    # Operator per block from libphonenumber carrier metadata (S4) cross-checked with S2/S3.
+    realistic:
+      - {prefix: "30", length: 10, operator: Jazz}            # 0300-0309 (ex-Mobilink)
+      - {prefix: "32", length: 10, operator: Jazz}            # 0320-0329 (ex-Warid, merged into Jazz 2017)
+      - {prefix: "31", length: 10, operator: Zong}            # 0310-0319 (CMPak)
+      - {prefix: "370", length: 10, operator: Zong}           # 037 series, newest Zong block (S2)
+      - {prefix: "371", length: 10, operator: Zong}
+      - {prefix: "330", length: 10, operator: Ufone}          # 0330-0337, 0339 (PTML); 0338 not valid in libphonenumber
+      - {prefix: "331", length: 10, operator: Ufone}
+      - {prefix: "332", length: 10, operator: Ufone}
+      - {prefix: "333", length: 10, operator: Ufone}
+      - {prefix: "334", length: 10, operator: Ufone}
+      - {prefix: "335", length: 10, operator: Ufone}
+      - {prefix: "336", length: 10, operator: Ufone}
+      - {prefix: "337", length: 10, operator: Ufone}
+      - {prefix: "339", length: 10, operator: Ufone}
+      - {prefix: "34", length: 10, operator: Telenor}         # 0340-0349; Telenor Pakistan amalgamated into PTML (Ufone's company) July 2026, brand still in use (S7)
+      - {prefix: "355", length: 10, operator: SCO}            # Special Communications Organization (AJK / Gilgit-Baltistan)
+    unallocated:
+      # PTA's numbering plan (ITU communication 9.XI.2021, S1) reserves mobile NDCs 3A with
+      # A = 0-6. Blocks 035x (except 0355) and 036x (except 0364, ex-Instaphone, defunct
+      # since 2008) are inside the planned mobile range but carry no operator assignment in
+      # any source found, and libphonenumber 9.0.43 rejects them (S4). No public PTA
+      # allocation table could be fetched (pta.gov.pk refused connections), so these are
+      # "unallocated per best available evidence", not regulator-certified.
+      - {prefix: "350", length: 10, note: "inside PTA mobile plan (3A, A=0-6), no operator assigned; libphonenumber: invalid", source: S1}
+      - {prefix: "351", length: 10, note: "as 0350", source: S1}
+      - {prefix: "352", length: 10, note: "as 0350", source: S1}
+      - {prefix: "353", length: 10, note: "as 0350", source: S1}
+      - {prefix: "354", length: 10, note: "as 0350", source: S1}
+      - {prefix: "356", length: 10, note: "as 0350 (0355 is SCO)", source: S1}
+      - {prefix: "357", length: 10, note: "as 0350", source: S1}
+      - {prefix: "358", length: 10, note: "as 0350", source: S1}
+      - {prefix: "359", length: 10, note: "as 0350", source: S1}
+      - {prefix: "360", length: 10, note: "inside PTA mobile plan, no operator assigned; libphonenumber: invalid", source: S1}
+      - {prefix: "361", length: 10, note: "as 0360", source: S1}
+      - {prefix: "362", length: 10, note: "as 0360", source: S1}
+      - {prefix: "363", length: 10, note: "as 0360", source: S1}
+      - {prefix: "365", length: 10, note: "as 0360 (0364 = ex-Instaphone, avoided)", source: S1}
+      - {prefix: "366", length: 10, note: "as 0360", source: S1}
+      - {prefix: "367", length: 10, note: "as 0360", source: S1}
+      - {prefix: "368", length: 10, note: "as 0360", source: S1}
+      - {prefix: "369", length: 10, note: "as 0360", source: S1}
+    fiction: null   # PTA publishes no fiction/drama number range (none found in S1, S2, S3)
+  landline:
+    # ITU/PTA S1: NDC 21 (Karachi) and 42 (Lahore) have 8-digit subscriber numbers,
+    # other 2-digit NDCs 7 digits, 3-digit NDCs 6 digits (some 5).
+    cities:
+      - {city: Karachi, area_code: "21", subscriber_length: 8}
+      - {city: Lahore, area_code: "42", subscriber_length: 8}
+      - {city: Islamabad, area_code: "51", subscriber_length: 7}
+      - {city: Rawalpindi, area_code: "51", subscriber_length: 7}
+      - {city: Faisalabad, area_code: "41", subscriber_length: 7}
+      - {city: Multan, area_code: "61", subscriber_length: 7}
+      - {city: Hyderabad, area_code: "22", subscriber_length: 7}
+      - {city: Peshawar, area_code: "91", subscriber_length: 7}
+      - {city: Quetta, area_code: "81", subscriber_length: 7}
+      - {city: Gujranwala, area_code: "55", subscriber_length: 7}
+      - {city: Sialkot, area_code: "52", subscriber_length: 7}
+      - {city: Sargodha, area_code: "48", subscriber_length: 7}
+      - {city: Bahawalpur, area_code: "62", subscriber_length: 7}
+      - {city: Sukkur, area_code: "71", subscriber_length: 7}
+      - {city: Larkana, area_code: "74", subscriber_length: 7}
+      - {city: Gujrat, area_code: "53", subscriber_length: 7}
+      - {city: Mardan, area_code: "937", subscriber_length: 6}
+      - {city: Abbottabad, area_code: "992", subscriber_length: 6}
+    fiction: null
+  validation_note: >-
+    libphonenumber 9.0.43 (S4): 030x/031x/032x/034x/037x valid MOBILE; 033x valid except
+    0338; 0355 valid (SCO), 0364 valid (Instaphone, historical). 0350-0354, 0356-0363 and
+    0365-0369 are INVALID (good: well-formed but non-routable test numbers). It also accepts
+    0372-0379 as Zong although sources only confirm 0370/0371, so those were left out of both
+    lists. Landlines: 2-digit NDCs accept both 7- and 8-digit subscribers; Karachi/Lahore 8.
+carriers:
+  # MCC 410. Shares approximate (pre-merger subscriber split reported early 2026, S7):
+  # Jazz ~38 %, Zong ~26 %, PTML (Ufone + Telenor) ~35 %, SCO ~1 %.
+  # Ufone and Telenor are one company (PTML) since July 2026 but still separate brands and
+  # network codes; a rebrand (e&/Etisalat) was blocked/pending as of Oct 2026 (S7).
+  - {name: Jazz, sim_operator: "Jazz", mccmnc: "41001", share: 0.38}
+  - {name: Zong, sim_operator: "Zong", mccmnc: "41004", share: 0.26}
+  - {name: Telenor, sim_operator: "Telenor", mccmnc: "41006", share: 0.20}
+  - {name: Ufone, sim_operator: "Ufone", mccmnc: "41003", share: 0.15}
+  - {name: SCO, sim_operator: "SCO", mccmnc: "41005", share: 0.01}
+cities:
+  # Populations: 2023 census city populations (PBS via S5). Postcodes: Pakistan Post GPO
+  # codes (5 digits), authored from general knowledge, approximate per district.
+  - {name: Karachi, lat: 24.8607, lon: 67.0011, population: 18868021, area_code: "21",
+     postcodes: ["74200", "75600", "75300", "75500", "74700"],
+     districts: [Clifton, DHA, Gulshan-e-Iqbal, Gulistan-e-Jauhar, North Nazimabad, PECHS, Saddar, Korangi, Malir, Nazimabad]}
+  - {name: Lahore, lat: 31.5204, lon: 74.3587, population: 13004135, area_code: "42",
+     postcodes: ["54000", "54660", "54700", "54792", "54782"],
+     districts: [Gulberg, DHA, Model Town, Johar Town, Iqbal Town, Shadman, Samanabad, Wapda Town, Bahria Town, Cantt]}
+  - {name: Faisalabad, lat: 31.4504, lon: 73.1350, population: 3691999, area_code: "41",
+     postcodes: ["38000", "38090"], districts: [Peoples Colony, Madina Town, Gulberg, Jinnah Colony, Satiana Road]}
+  - {name: Rawalpindi, lat: 33.5651, lon: 73.0169, population: 3357612, area_code: "51",
+     postcodes: ["46000", "46300"], districts: [Saddar, Satellite Town, Westridge, Chaklala, Bahria Town, Gulraiz]}
+  - {name: Gujranwala, lat: 32.1877, lon: 74.1945, population: 2511118, area_code: "55",
+     postcodes: ["52250"], districts: [Satellite Town, Model Town, Peoples Colony, DC Colony]}
+  - {name: Multan, lat: 30.1575, lon: 71.5249, population: 2215381, area_code: "61",
+     postcodes: ["60000"], districts: [Cantt, Gulgasht Colony, Shah Rukn-e-Alam Colony, Bosan Road, New Multan]}
+  - {name: Hyderabad, lat: 25.3960, lon: 68.3578, population: 1921275, area_code: "22",
+     postcodes: ["71000"], districts: [Latifabad, Qasimabad, Hirabad, Saddar]}
+  - {name: Peshawar, lat: 34.0151, lon: 71.5249, population: 1905975, area_code: "91",
+     postcodes: ["25000", "25100"], districts: [Hayatabad, University Town, Saddar, Gulbahar, Warsak Road]}
+  - {name: Quetta, lat: 30.1798, lon: 66.9750, population: 1565546, area_code: "81",
+     postcodes: ["87300"], districts: [Jinnah Town, Satellite Town, Cantt, Samungli Road]}
+  - {name: Islamabad, lat: 33.6844, lon: 73.0479, population: 1108872, area_code: "51",
+     postcodes: ["44000"], districts: [F-6, F-7, F-8, F-10, F-11, G-9, G-11, I-8, E-11, Blue Area]}
+  - {name: Sargodha, lat: 32.0836, lon: 72.6711, population: 975886, area_code: "48",
+     postcodes: ["40100"], districts: [Satellite Town, Cantt, University Road]}
+  - {name: Sialkot, lat: 32.4945, lon: 74.5229, population: 911817, area_code: "52",
+     postcodes: ["51310"], districts: [Cantt, Model Town, Paris Road]}
+  - {name: Bahawalpur, lat: 29.3956, lon: 71.6836, population: 903795, area_code: "62",
+     postcodes: ["63100"], districts: [Model Town, Satellite Town, Cantt]}
+  - {name: Gujrat, lat: 32.5736, lon: 74.0790, population: 574240, area_code: "53",
+     postcodes: ["50700"], districts: [Shadman Colony, Rehman Shaheed Road]}
+  - {name: Sukkur, lat: 27.7052, lon: 68.8574, population: 563851, area_code: "71",
+     postcodes: ["65200"], districts: [Old Sukkur, New Sukkur, Barrage Colony]}
+  - {name: Larkana, lat: 27.5570, lon: 68.2264, population: 551716, area_code: "74",
+     postcodes: ["77150"], districts: [Sachal Colony, Shaikh Zaid Colony]}
+  - {name: Mardan, lat: 34.1986, lon: 72.0404, population: 368302, area_code: "937",
+     postcodes: ["23200"], districts: [Sheikh Maltoon Town, Cantt]}
+  - {name: Abbottabad, lat: 34.1688, lon: 73.2215, population: 234395, area_code: "992",
+     postcodes: ["22010"], districts: [Jinnahabad, Supply, Cantt]}
+# Pakistani addresses are usually "House 12, Street 5, Block D, <area>" or a named road;
+# numbered streets ("Street 5", "Gali No. 3") are therefore included alongside named roads.
+streets:
+  - Mall Road
+  - Jinnah Road
+  - M.A. Jinnah Road
+  - Allama Iqbal Road
+  - Liaquat Road
+  - Shahrah-e-Faisal
+  - Shahrah-e-Quaideen
+  - Shahrah-e-Pakistan
+  - University Road
+  - Railway Road
+  - Circular Road
+  - Main Boulevard
+  - Ferozepur Road
+  - GT Road
+  - Canal Road
+  - Club Road
+  - Kashmir Road
+  - Murree Road
+  - Saddar Road
+  - College Road
+  - Hospital Road
+  - Church Road
+  - Masjid Road
+  - Bank Road
+  - Station Road
+  - Airport Road
+  - Cantt Road
+  - Jail Road
+  - Queens Road
+  - Davis Road
+  - Abbott Road
+  - McLeod Road
+  - Zafar Ali Road
+  - Sir Syed Road
+  - Quaid-e-Azam Road
+  - Fatima Jinnah Road
+  - Tipu Sultan Road
+  - Multan Road
+  - Raiwind Road
+  - Sargodha Road
+  - Lahore Road
+  - Peshawar Road
+  - Bund Road
+  - Khayaban-e-Ittehad
+  - Khayaban-e-Iqbal
+  - Khayaban-e-Sir Syed
+  - Service Road
+  - Main Market Road
+  - Defence Road
+  - Shami Road
+  - Garden Road
+  - Link Road
+  - Model Town Link Road
+  - Street 1
+  - Street 2
+  - Street 3
+  - Street 5
+  - Street 7
+  - Street 9
+  - Street 12
+  - Street 14
+  - Street 21
+  - Gali No. 2
+  - Gali No. 4
+  - Gali No. 6
+address_format: "House {number}, {street}, {city} {postcode}"
+places:
+  # Coordinates from Wikidata (CC0, S6) unless marked "approx".
+  - {category: landmark, name: Faisal Mosque, city: Islamabad, lat: 33.7297, lon: 73.0372}
+  - {category: landmark, name: Pakistan Monument, city: Islamabad, lat: 33.6933, lon: 73.0683}
+  - {category: mountain, name: Daman-e-Koh, city: Islamabad, lat: 33.7399, lon: 73.0556}
+  - {category: park, name: Fatima Jinnah Park, city: Islamabad, lat: 33.7017, lon: 73.0247}
+  - {category: park, name: Shakarparian, city: Islamabad, lat: 33.6886, lon: 73.0828}
+  - {category: lake, name: Rawal Lake, city: Islamabad, lat: 33.7025, lon: 73.1261}
+  - {category: museum, name: Lok Virsa Museum, city: Islamabad, lat: 33.6833, lon: 73.0667}
+  - {category: airport, name: Islamabad International Airport, city: Islamabad, lat: 33.5536, lon: 72.8347}
+  - {category: park, name: Ayub National Park, city: Rawalpindi, lat: 33.5708, lon: 73.0806}
+  - {category: stadium, name: Rawalpindi Cricket Stadium, city: Rawalpindi, lat: 33.6515, lon: 73.0761}
+  - {category: landmark, name: Badshahi Mosque, city: Lahore, lat: 31.5881, lon: 74.3094}
+  - {category: landmark, name: Lahore Fort, city: Lahore, lat: 31.5903, lon: 74.3097}
+  - {category: landmark, name: Minar-e-Pakistan, city: Lahore, lat: 31.5925, lon: 74.3094}
+  - {category: park, name: Greater Iqbal Park, city: Lahore, lat: 31.5914, lon: 74.3088}
+  - {category: park, name: Shalimar Gardens, city: Lahore, lat: 31.5834, lon: 74.3798}
+  - {category: park, name: Bagh-e-Jinnah, city: Lahore, lat: 31.5537, lon: 74.3313}
+  - {category: museum, name: Lahore Museum, city: Lahore, lat: 31.5682, lon: 74.3082}
+  - {category: stadium, name: Gaddafi Stadium, city: Lahore, lat: 31.5133, lon: 74.3333}
+  - {category: market, name: Anarkali Bazaar, city: Lahore, lat: 31.5667, lon: 74.3161}
+  - {category: airport, name: Allama Iqbal International Airport, city: Lahore, lat: 31.5214, lon: 74.4025}
+  - {category: landmark, name: Wagah Border, city: Lahore, lat: 31.6046, lon: 74.5724}
+  - {category: landmark, name: Mazar-e-Quaid, city: Karachi, lat: 24.8753, lon: 67.0408}
+  - {category: beach, name: Clifton Beach, city: Karachi, lat: 24.7800, lon: 67.0400}
+  - {category: beach, name: Hawke's Bay Beach, city: Karachi, lat: 24.8602, lon: 66.8637}
+  - {category: park, name: Bagh Ibne Qasim, city: Karachi, lat: 24.8099, lon: 67.0251}
+  - {category: landmark, name: Frere Hall, city: Karachi, lat: 24.8475, lon: 67.0328}
+  - {category: museum, name: National Museum of Pakistan, city: Karachi, lat: 24.8526, lon: 67.0179}
+  - {category: market, name: Empress Market, city: Karachi, lat: 24.8625, lon: 67.0294}
+  - {category: stadium, name: National Stadium Karachi, city: Karachi, lat: 24.8961, lon: 67.0814}
+  - {category: airport, name: Jinnah International Airport, city: Karachi, lat: 24.9067, lon: 67.1608}
+  - {category: market, name: Qissa Khwani Bazaar, city: Peshawar, lat: 34.0075, lon: 71.5714}
+  - {category: museum, name: Peshawar Museum, city: Peshawar, lat: 34.0077, lon: 71.5583}
+  - {category: station, name: Peshawar Cantonment Railway Station, city: Peshawar, lat: 34.0028, lon: 71.5506}
+  - {category: airport, name: Bacha Khan International Airport, city: Peshawar, lat: 33.9939, lon: 71.5147}
+  - {category: landmark, name: Tomb of Shah Rukn-e-Alam, city: Multan, lat: 30.1989, lon: 71.4714}
+  - {category: landmark, name: Ghanta Ghar Multan, city: Multan, lat: 30.1986, lon: 71.4678}
+  - {category: station, name: Multan Cantonment Railway Station, city: Multan, lat: 30.1810, lon: 71.4454}
+  - {category: stadium, name: Multan Cricket Stadium, city: Multan, lat: 30.1708, lon: 71.5247}
+  - {category: landmark, name: Faisalabad Clock Tower, city: Faisalabad, lat: 31.4187, lon: 73.0791}
+  - {category: station, name: Hyderabad Junction Railway Station, city: Hyderabad, lat: 25.3819, lon: 68.3752}
+  - {category: museum, name: Sindh Museum, city: Hyderabad, lat: 25.3850, lon: 68.3377}
+  - {category: lake, name: Hanna Lake, city: Quetta, lat: 30.2561, lon: 67.0997}
+  - {category: landmark, name: Noor Mahal, city: Bahawalpur, lat: 29.3794, lon: 71.6681}
+  - {category: landmark, name: Sukkur Barrage, city: Sukkur, lat: 27.6833, lon: 68.8500}
+  - {category: mountain, name: Murree, city: Murree, lat: 33.9042, lon: 73.3903}
+  - {category: mountain, name: Nathia Gali, city: Abbottabad, lat: 34.0689, lon: 73.3990}
+  - {category: lake, name: Lake Saiful Muluk, city: Naran, lat: 34.8767, lon: 73.6942}
+  - {category: lake, name: Attabad Lake, city: Hunza, lat: 36.3368, lon: 74.8675}
+  - {category: landmark, name: Khewra Salt Mine, city: Khewra, lat: 32.6531, lon: 73.0100}
+  - {category: landmark, name: Rohtas Fort, city: Jhelum, lat: 32.9653, lon: 73.5764}
+  - {category: landmark, name: Mohenjo-daro, city: Larkana, lat: 27.3292, lon: 68.1389}
+names:
+  culture: pk
+  # No official given-name or surname frequency statistics are published for Pakistan
+  # (NADRA/PBS release none). Pools and weights below are AUTHORED from general knowledge
+  # of naming in Punjabi, Urdu-speaking, Pashtun, Sindhi and Baloch families, mixing older
+  # (Parveen, Nasreen, Aslam, Pervaiz) and younger (Hoorain, Inaya, Ayaan, Rayyan)
+  # generations; weights are rough tiers (1.0 very common ... 0.1 rare). Faker en_PK was
+  # inspected and rejected (unweighted, sourced from a baby-name site, mostly male).
+  #
+  # Conventions:
+  # - Many men carry "Muhammad" (or Ghulam/Abdul + second element) as a first element but are
+  #   called by the second name; compound entries below are full given names as written on
+  #   the CNIC, and `nicknames` maps them to the name used in a contacts list.
+  # - Women usually have no family surname; they carry father's/husband's given name or a
+  #   clan name (Bibi, Begum, Khatoon are given-name suffixes, mostly older/rural women).
+  # - Contacts are saved by first name + context, not formal "First Last": "Ammi", "Abbu",
+  #   "Abbu Jaan", "Bhai Jaan", "Baji", "Khala", "Phuppo", "Chachu", "Mamu", "Nano", "Dadi",
+  #   "Ali Bhai", "Usman Office", "Bilal Uni", "Sana Cousin", "Imran Electrician",
+  #   "Javed Plumber", "Rizwan Jazz Franchise", "Ahmed Jutt", "Saima Baji". The generator's
+  #   display formats cannot express this context suffix yet (see report).
+  female:
+    - {name: Ayesha, w: 1.0}
+    - {name: Fatima, w: 1.0}
+    - {name: Zainab, w: 0.9}
+    - {name: Maryam, w: 0.8}
+    - {name: Khadija, w: 0.6}
+    - {name: Hira, w: 0.7}
+    - {name: Sana, w: 0.8}
+    - {name: Saba, w: 0.6}
+    - {name: Amna, w: 0.7}
+    - {name: Rabia, w: 0.6}
+    - {name: Sadia, w: 0.6}
+    - {name: Nadia, w: 0.5}
+    - {name: Asma, w: 0.6}
+    - {name: Sobia, w: 0.4}
+    - {name: Sidra, w: 0.7}
+    - {name: Iqra, w: 0.8}
+    - {name: Mehwish, w: 0.5}
+    - {name: Rubina, w: 0.4}
+    - {name: Shazia, w: 0.5}
+    - {name: Nazia, w: 0.4}
+    - {name: Farah, w: 0.4}
+    - {name: Uzma, w: 0.4}
+    - {name: Samina, w: 0.5}
+    - {name: Shabana, w: 0.4}
+    - {name: Naseem, w: 0.4}
+    - {name: Parveen, w: 0.6}
+    - {name: Nasreen, w: 0.5}
+    - {name: Shamim, w: 0.3}
+    - {name: Razia, w: 0.4}
+    - {name: Rukhsana, w: 0.4}
+    - {name: Tahira, w: 0.4}
+    - {name: Shaista, w: 0.3}
+    - {name: Kausar, w: 0.4}
+    - {name: Zubaida, w: 0.3}
+    - {name: Bushra, w: 0.5}
+    - {name: Saima, w: 0.6}
+    - {name: Farzana, w: 0.4}
+    - {name: Shagufta, w: 0.3}
+    - {name: Naila, w: 0.3}
+    - {name: Kiran, w: 0.5}
+    - {name: Aqsa, w: 0.6}
+    - {name: Anum, w: 0.5}
+    - {name: Areeba, w: 0.5}
+    - {name: Alishba, w: 0.5}
+    - {name: Hareem, w: 0.4}
+    - {name: Eman, w: 0.6}
+    - {name: Hoorain, w: 0.4}
+    - {name: Anaya, w: 0.4}
+    - {name: Inaya, w: 0.4}
+    - {name: Zara, w: 0.5}
+    - {name: Zoya, w: 0.4}
+    - {name: Hania, w: 0.5}
+    - {name: Mahnoor, w: 0.6}
+    - {name: Laiba, w: 0.5}
+    - {name: Noor, w: 0.5}
+    - {name: Mehak, w: 0.4}
+    - {name: Arooj, w: 0.3}
+    - {name: Javeria, w: 0.4}
+    - {name: Hafsa, w: 0.5}
+    - {name: Sumaira, w: 0.3}
+    - {name: Rida, w: 0.4}
+    - {name: Tayyaba, w: 0.4}
+    - {name: Fiza, w: 0.3}
+    - {name: Huma, w: 0.3}
+    - {name: Lubna, w: 0.3}
+    - {name: Sehrish, w: 0.4}
+    - {name: Madiha, w: 0.4}
+    - {name: Maira, w: 0.3}
+    - {name: Komal, w: 0.3}
+    - {name: Sundas, w: 0.3}
+    - {name: Nimra, w: 0.5}
+    - {name: Zunaira, w: 0.3}
+    - {name: Tehreem, w: 0.3}
+    - {name: Haleema, w: 0.4}
+    - {name: Aleena, w: 0.3}
+    - {name: Minahil, w: 0.4}
+    - {name: Abeeha, w: 0.3}
+    - {name: Ramsha, w: 0.3}
+    - {name: Amina, w: 0.5}
+    - {name: Nusrat, w: 0.3}
+    - {name: Ghazala, w: 0.3}
+    - {name: Yasmin, w: 0.3}
+    - {name: Sajida, w: 0.3}
+    - {name: Abida, w: 0.3}
+    - {name: Zahida, w: 0.3}
+    - {name: Shahida, w: 0.4}
+    - {name: Rehana, w: 0.3}
+    - {name: Naheed, w: 0.3}
+    - {name: Fouzia, w: 0.3}
+    - {name: Shaheen, w: 0.3}
+    - {name: Rizwana, w: 0.3}
+    - {name: Musarrat, w: 0.2}
+    - {name: Gulnaz, w: 0.2}
+    - {name: Sughra, w: 0.2}
+    - {name: Kulsoom, w: 0.3}
+    - {name: Sakina, w: 0.3}
+    - {name: Rashida, w: 0.3}
+    - {name: Nargis, w: 0.2}
+    - {name: Gulalai, w: 0.15}     # Pashto
+    - {name: Palwasha, w: 0.15}    # Pashto
+    - {name: Shazma, w: 0.1}       # Pashto
+    - {name: Bakhtawar, w: 0.15}   # Sindhi
+    - {name: Marvi, w: 0.1}        # Sindhi
+    - {name: Hani, w: 0.1}         # Baloch
+    - {name: Mahgul, w: 0.08}     # Baloch
+    - {name: Sughran Bibi, w: 0.1} # older rural, with "Bibi" suffix
+    - {name: Hajra Bibi, w: 0.1}
+    - {name: Razia Begum, w: 0.1}
+    - {name: Pooja, w: 0.05}       # Hindu minority (Sindh)
+    - {name: Sharon, w: 0.05}      # Christian minority (Punjab)
+    - {name: Saira, w: 0.3}
+    - {name: Afshan, w: 0.2}
+    - {name: Ambreen, w: 0.3}
+    - {name: Mariam, w: 0.3}
+  male:
+    - {name: Muhammad Ali, w: 0.8}
+    - {name: Muhammad Usman, w: 0.6}
+    - {name: Muhammad Bilal, w: 0.6}
+    - {name: Muhammad Imran, w: 0.5}
+    - {name: Muhammad Asif, w: 0.5}
+    - {name: Muhammad Akram, w: 0.4}
+    - {name: Muhammad Iqbal, w: 0.4}
+    - {name: Muhammad Hamza, w: 0.4}
+    - {name: Muhammad Ahmed, w: 0.4}
+    - {name: Muhammad Shahid, w: 0.3}
+    - {name: Muhammad Arshad, w: 0.3}
+    - {name: Muhammad Rizwan, w: 0.3}
+    - {name: Ghulam Abbas, w: 0.3}
+    - {name: Ghulam Mustafa, w: 0.3}
+    - {name: Ghulam Hussain, w: 0.2}
+    - {name: Abdul Rehman, w: 0.5}
+    - {name: Abdul Ghaffar, w: 0.2}
+    - {name: Abdul Qadir, w: 0.2}
+    - {name: Allah Ditta, w: 0.15}
+    - {name: Ali Raza, w: 0.4}
+    - {name: Ali Hassan, w: 0.3}
+    - {name: Ali, w: 0.9}
+    - {name: Ahmed, w: 0.9}
+    - {name: Hassan, w: 0.7}
+    - {name: Hussain, w: 0.5}
+    - {name: Usman, w: 0.8}
+    - {name: Bilal, w: 0.8}
+    - {name: Hamza, w: 0.9}
+    - {name: Umar, w: 0.7}
+    - {name: Abdullah, w: 0.8}
+    - {name: Zain, w: 0.5}
+    - {name: Fahad, w: 0.5}
+    - {name: Faisal, w: 0.5}
+    - {name: Imran, w: 0.6}
+    - {name: Kamran, w: 0.5}
+    - {name: Asif, w: 0.5}
+    - {name: Arif, w: 0.4}
+    - {name: Tariq, w: 0.5}
+    - {name: Khalid, w: 0.4}
+    - {name: Shahid, w: 0.5}
+    - {name: Zahid, w: 0.4}
+    - {name: Sajid, w: 0.4}
+    - {name: Majid, w: 0.3}
+    - {name: Wajid, w: 0.3}
+    - {name: Naveed, w: 0.5}
+    - {name: Javed, w: 0.5}
+    - {name: Pervaiz, w: 0.4}
+    - {name: Tanveer, w: 0.4}
+    - {name: Nadeem, w: 0.4}
+    - {name: Waseem, w: 0.5}
+    - {name: Saleem, w: 0.4}
+    - {name: Aslam, w: 0.4}
+    - {name: Akram, w: 0.3}
+    - {name: Anwar, w: 0.3}
+    - {name: Rashid, w: 0.4}
+    - {name: Rizwan, w: 0.5}
+    - {name: Irfan, w: 0.5}
+    - {name: Adnan, w: 0.5}
+    - {name: Farhan, w: 0.5}
+    - {name: Salman, w: 0.5}
+    - {name: Junaid, w: 0.5}
+    - {name: Waqas, w: 0.6}
+    - {name: Waqar, w: 0.4}
+    - {name: Shoaib, w: 0.5}
+    - {name: Haris, w: 0.5}
+    - {name: Saad, w: 0.5}
+    - {name: Talha, w: 0.5}
+    - {name: Huzaifa, w: 0.5}
+    - {name: Ayaan, w: 0.5}
+    - {name: Rayyan, w: 0.4}
+    - {name: Muhammad, w: 0.8}
+    - {name: Danish, w: 0.4}
+    - {name: Owais, w: 0.4}
+    - {name: Sohail, w: 0.4}
+    - {name: Babar, w: 0.3}
+    - {name: Asad, w: 0.5}
+    - {name: Atif, w: 0.4}
+    - {name: Mohsin, w: 0.4}
+    - {name: Nauman, w: 0.4}
+    - {name: Yasir, w: 0.4}
+    - {name: Amir, w: 0.4}
+    - {name: Zubair, w: 0.4}
+    - {name: Noman, w: 0.4}
+    - {name: Shahzad, w: 0.4}
+    - {name: Shakeel, w: 0.3}
+    - {name: Jamil, w: 0.3}
+    - {name: Iqbal, w: 0.3}
+    - {name: Rafiq, w: 0.3}
+    - {name: Riaz, w: 0.3}
+    - {name: Mushtaq, w: 0.3}
+    - {name: Ishtiaq, w: 0.3}
+    - {name: Ijaz, w: 0.3}
+    - {name: Aftab, w: 0.3}
+    - {name: Khurram, w: 0.4}
+    - {name: Kashif, w: 0.4}
+    - {name: Raheel, w: 0.3}
+    - {name: Adeel, w: 0.4}
+    - {name: Ahsan, w: 0.4}
+    - {name: Ammar, w: 0.3}
+    - {name: Hasnain, w: 0.3}
+    - {name: Mustafa, w: 0.4}
+    - {name: Murtaza, w: 0.3}
+    - {name: Ibrahim, w: 0.5}
+    - {name: Yousaf, w: 0.4}
+    - {name: Ismail, w: 0.3}
+    - {name: Zeeshan, w: 0.5}
+    - {name: Arslan, w: 0.4}
+    - {name: Sheraz, w: 0.3}
+    - {name: Shahzeb, w: 0.3}
+    - {name: Jahangir, w: 0.2}
+    - {name: Sikandar, w: 0.2}
+    - {name: Mumtaz, w: 0.2}
+    - {name: Fazal, w: 0.2}
+    - {name: Inam, w: 0.2}
+    - {name: Wali, w: 0.15}         # Pashto
+    - {name: Gul Khan, w: 0.15}     # Pashto
+    - {name: Sher Ali, w: 0.15}     # Pashto
+    - {name: Zarak, w: 0.1}         # Pashto
+    - {name: Bakht Zada, w: 0.1}    # Pashto
+    - {name: Noor Muhammad, w: 0.2}
+    - {name: Dost Muhammad, w: 0.1} # Baloch
+    - {name: Jamal, w: 0.15}
+    - {name: Ghulam Hyder, w: 0.15} # Sindhi
+    - {name: Ramesh, w: 0.05}       # Hindu minority
+    - {name: Pervez Masih, w: 0.05} # Christian minority
+    - {name: Zohaib, w: 0.3}
+    - {name: Moiz, w: 0.3}
+    - {name: Shayan, w: 0.3}
+    - {name: Taimoor, w: 0.3}
+  surnames:
+    # Mixture of (a) clan/biradari names, (b) Sayyid/Arab-descent titles used as surnames,
+    # (c) father's given name used as surname, (d) Pashtun tribe, Sindhi and Baloch names,
+    # (e) small Christian/Hindu shares. Weights authored.
+    - {name: Khan, w: 1.0}
+    - {name: Ahmed, w: 0.8}
+    - {name: Ali, w: 0.7}
+    - {name: Hussain, w: 0.7}
+    - {name: Malik, w: 0.7}
+    - {name: Shah, w: 0.6}
+    - {name: Butt, w: 0.6}
+    - {name: Chaudhry, w: 0.6}
+    - {name: Sheikh, w: 0.5}
+    - {name: Qureshi, w: 0.5}
+    - {name: Siddiqui, w: 0.5}
+    - {name: Awan, w: 0.5}
+    - {name: Rajput, w: 0.4}
+    - {name: Jutt, w: 0.5}
+    - {name: Arain, w: 0.4}
+    - {name: Gujjar, w: 0.4}
+    - {name: Mughal, w: 0.4}
+    - {name: Mirza, w: 0.4}
+    - {name: Baig, w: 0.4}
+    - {name: Raja, w: 0.4}
+    - {name: Abbasi, w: 0.4}
+    - {name: Kiyani, w: 0.3}
+    - {name: Satti, w: 0.2}
+    - {name: Syed, w: 0.4}
+    - {name: Bukhari, w: 0.3}
+    - {name: Gillani, w: 0.3}
+    - {name: Rizvi, w: 0.3}
+    - {name: Naqvi, w: 0.3}
+    - {name: Zaidi, w: 0.3}
+    - {name: Kazmi, w: 0.3}
+    - {name: Jafri, w: 0.2}
+    - {name: Hashmi, w: 0.3}
+    - {name: Ansari, w: 0.3}
+    - {name: Farooqi, w: 0.2}
+    - {name: Usmani, w: 0.2}
+    - {name: Alvi, w: 0.2}
+    - {name: Hassan, w: 0.4}
+    - {name: Raza, w: 0.4}
+    - {name: Abbas, w: 0.4}
+    - {name: Haider, w: 0.4}
+    - {name: Iqbal, w: 0.5}
+    - {name: Akhtar, w: 0.5}
+    - {name: Javed, w: 0.4}
+    - {name: Aslam, w: 0.4}
+    - {name: Akram, w: 0.4}
+    - {name: Anwar, w: 0.4}
+    - {name: Rashid, w: 0.3}
+    - {name: Saleem, w: 0.3}
+    - {name: Nawaz, w: 0.4}
+    - {name: Shahid, w: 0.3}
+    - {name: Zafar, w: 0.3}
+    - {name: Mehmood, w: 0.5}
+    - {name: Mahmood, w: 0.3}
+    - {name: Masood, w: 0.3}
+    - {name: Farooq, w: 0.4}
+    - {name: Tariq, w: 0.3}
+    - {name: Ashraf, w: 0.4}
+    - {name: Rafiq, w: 0.3}
+    - {name: Riaz, w: 0.3}
+    - {name: Ijaz, w: 0.3}
+    - {name: Aziz, w: 0.3}
+    - {name: Latif, w: 0.3}
+    - {name: Hanif, w: 0.3}
+    - {name: Yousaf, w: 0.3}
+    - {name: Ilyas, w: 0.3}
+    - {name: Ismail, w: 0.2}
+    - {name: Rehman, w: 0.4}
+    - {name: Ullah, w: 0.3}
+    - {name: Din, w: 0.2}
+    - {name: Bashir, w: 0.3}
+    - {name: Nazir, w: 0.3}
+    - {name: Saeed, w: 0.3}
+    - {name: Rasheed, w: 0.2}
+    - {name: Majeed, w: 0.2}
+    - {name: Hameed, w: 0.2}
+    - {name: Qadir, w: 0.2}
+    - {name: Sadiq, w: 0.2}
+    - {name: Siddique, w: 0.3}
+    - {name: Shafiq, w: 0.2}
+    - {name: Sharif, w: 0.3}
+    - {name: Nadeem, w: 0.2}
+    - {name: Naeem, w: 0.2}
+    - {name: Waheed, w: 0.2}
+    - {name: Younas, w: 0.2}
+    - {name: Zahid, w: 0.2}
+    - {name: Arshad, w: 0.3}
+    - {name: Asghar, w: 0.2}
+    - {name: Akbar, w: 0.2}
+    - {name: Bhatti, w: 0.4}
+    - {name: Cheema, w: 0.3}
+    - {name: Warraich, w: 0.3}
+    - {name: Bajwa, w: 0.3}
+    - {name: Gondal, w: 0.2}
+    - {name: Tarar, w: 0.2}
+    - {name: Virk, w: 0.2}
+    - {name: Sandhu, w: 0.2}
+    - {name: Randhawa, w: 0.2}
+    - {name: Ghuman, w: 0.2}
+    - {name: Sial, w: 0.2}
+    - {name: Tiwana, w: 0.1}
+    - {name: Dogar, w: 0.2}
+    - {name: Kamboh, w: 0.2}
+    - {name: Khokhar, w: 0.3}
+    - {name: Janjua, w: 0.2}
+    - {name: Minhas, w: 0.2}
+    - {name: Lodhi, w: 0.2}
+    - {name: Niazi, w: 0.3}
+    - {name: Dar, w: 0.3}
+    - {name: Lone, w: 0.1}
+    - {name: Mir, w: 0.2}
+    - {name: Wani, w: 0.1}
+    - {name: Durrani, w: 0.2}
+    - {name: Afridi, w: 0.3}
+    - {name: Yousafzai, w: 0.3}
+    - {name: Khattak, w: 0.3}
+    - {name: Bangash, w: 0.2}
+    - {name: Marwat, w: 0.2}
+    - {name: Wazir, w: 0.2}
+    - {name: Mehsud, w: 0.2}
+    - {name: Orakzai, w: 0.2}
+    - {name: Mohmand, w: 0.2}
+    - {name: Shinwari, w: 0.2}
+    - {name: Achakzai, w: 0.1}
+    - {name: Kakar, w: 0.2}
+    - {name: Tareen, w: 0.2}
+    - {name: Swati, w: 0.2}
+    - {name: Jadoon, w: 0.2}
+    - {name: Tanoli, w: 0.2}
+    - {name: Baloch, w: 0.4}
+    - {name: Bugti, w: 0.1}
+    - {name: Marri, w: 0.1}
+    - {name: Mengal, w: 0.1}
+    - {name: Rind, w: 0.15}
+    - {name: Raisani, w: 0.1}
+    - {name: Magsi, w: 0.1}
+    - {name: Jamali, w: 0.15}
+    - {name: Leghari, w: 0.15}
+    - {name: Mazari, w: 0.1}
+    - {name: Khosa, w: 0.15}
+    - {name: Soomro, w: 0.2}
+    - {name: Memon, w: 0.4}
+    - {name: Bhutto, w: 0.15}
+    - {name: Shaikh, w: 0.3}
+    - {name: Junejo, w: 0.15}
+    - {name: Chandio, w: 0.15}
+    - {name: Mahar, w: 0.15}
+    - {name: Jatoi, w: 0.15}
+    - {name: Talpur, w: 0.1}
+    - {name: Abro, w: 0.1}
+    - {name: Lashari, w: 0.15}
+    - {name: Kalhoro, w: 0.1}
+    - {name: Pathan, w: 0.2}
+    - {name: Rana, w: 0.3}
+    - {name: Chohan, w: 0.2}
+    - {name: Hayat, w: 0.2}
+    - {name: Khalid, w: 0.2}
+    - {name: Imran, w: 0.2}
+    - {name: Asif, w: 0.2}
+    - {name: Rauf, w: 0.2}
+    - {name: Hafeez, w: 0.2}
+    - {name: Kareem, w: 0.2}
+    - {name: Jamil, w: 0.2}
+    - {name: Ghani, w: 0.15}
+    - {name: Lakhani, w: 0.1}       # Gujarati-origin Karachi community
+    - {name: Dawood, w: 0.1}
+    - {name: Rajpar, w: 0.1}
+    - {name: Masih, w: 0.15}        # Christian minority
+    - {name: Gill, w: 0.15}         # Christian and Jat
+    - {name: Kumar, w: 0.05}        # Hindu minority (Sindh)
+    - {name: Lal, w: 0.04}
+    - {name: Meghwar, w: 0.03}
+    - {name: Kohli, w: 0.03}
+  nicknames:
+    Muhammad Ali: Ali
+    Muhammad Usman: Usman
+    Muhammad Bilal: Bilal
+    Muhammad Imran: Imran
+    Muhammad Asif: Asif
+    Muhammad Hamza: Hamza
+    Muhammad Ahmed: Ahmed
+    Muhammad Rizwan: Rizwan
+    Ghulam Abbas: Abbas
+    Ghulam Mustafa: Mustafa
+    Abdul Rehman: Rehman
+    Abdullah: Abdu
+    Ali Raza: Ali
+    Kashif: Kashi
+    Saad: Saadi
+    Fatima: Fati
+    Ayesha: Ashi
+    Zainab: Zaini
+    Mehwish: Mehu
+    Muhammad: Mani
+  display: "{first} {last}"
+cultures:
+  # Afghans: UNHCR counted ~2.0 M Afghans of all statuses in Pakistan in Dec 2025 and ~0.84 M
+  # PoR card holders in Apr 2026 after mass returns/deportations (S8) => ~0.7 % of
+  # 241.5 M (2023 census). Pakistani Pashtun/Baloch/Sindhi/Christian/Hindu citizens are
+  # modelled inside the majority pools above, not as separate cultures.
+  - {culture: af, share: 0.007}
+email:
+  domains:
+    - {domain: gmail.com, share: 0.82}
+    - {domain: yahoo.com, share: 0.08}
+    - {domain: hotmail.com, share: 0.05}
+    - {domain: outlook.com, share: 0.04}
+  patterns: ["{first}{last}", "{first}.{last}", "{first}{last}{yy}", "{first}{yy}", "{f}{last}", "{first}_{last}"]
+services:
+  # Pakistan mixes alphanumeric masks (bank short names, brands) and numeric SHORT CODES
+  # (3-5 digits, e.g. 8558, 3737, 6222). The schema has no `shortcode` sender_type, so short
+  # codes are `number` without "+". Mobile-money wallets use kind `bank` (schema has no
+  # `mobile_money` kind). Confidence per sender in pk.SOURCES.md.
+  # -- mobile money / branchless banking
+  - {sender: "8558", kind: mobile_money, sender_type: shortcode}            # JazzCash transaction receipts (S10)
+  - {sender: "3737", kind: mobile_money, sender_type: shortcode}            # easypaisa (S11)
+  - {sender: "JazzCash", kind: mobile_money, sender_type: alphanumeric}  # promos / OTP mask
+  - {sender: "easypaisa", kind: mobile_money, sender_type: alphanumeric}
+  - {sender: "SadaPay", kind: mobile_money, sender_type: alphanumeric}
+  - {sender: "NayaPay", kind: mobile_money, sender_type: alphanumeric}
+  - {sender: "UPaisa", kind: mobile_money, sender_type: alphanumeric}
+  # -- banks (SBP/NTISB: genuine bank alerts carry the bank short name or a 4-digit short code, S12)
+  - {sender: "6222", kind: bank, sender_type: shortcode}            # MCB Bank official short code (S13)
+  - {sender: "HBL", kind: bank, sender_type: alphanumeric}
+  - {sender: "UBL", kind: bank, sender_type: alphanumeric}
+  - {sender: "MeezanBank", kind: bank, sender_type: alphanumeric}
+  - {sender: "ABL", kind: bank, sender_type: alphanumeric}       # Allied Bank
+  - {sender: "BankAlfalah", kind: bank, sender_type: alphanumeric}
+  - {sender: "NBP", kind: bank, sender_type: alphanumeric}       # National Bank of Pakistan
+  - {sender: "BankIslami", kind: bank, sender_type: alphanumeric}
+  - {sender: "FaysalBank", kind: bank, sender_type: alphanumeric}
+  # -- nano-lending (SECP-whitelisted apps, S9); repayment reminders/OTPs from masks
+  - {sender: "Paisayaar", kind: lender, sender_type: alphanumeric}   # lender (no `lender` kind in schema v1)
+  - {sender: "SmartQarza", kind: lender, sender_type: alphanumeric}   # lender (no `lender` kind in schema v1)
+  - {sender: "Aitemaad", kind: lender, sender_type: alphanumeric}   # lender (no `lender` kind in schema v1)
+  # -- telecom
+  - {sender: "Jazz", kind: telecom, sender_type: alphanumeric}
+  - {sender: "ZONG", kind: telecom, sender_type: alphanumeric}
+  - {sender: "Ufone", kind: telecom, sender_type: alphanumeric}
+  - {sender: "Telenor", kind: telecom, sender_type: alphanumeric}
+  - {sender: "PTCL", kind: telecom, sender_type: alphanumeric}
+  # -- government (consumer short codes)
+  - {sender: "8484", kind: government, sender_type: shortcode}      # PTA DIRBS device/IMEI status (S14)
+  - {sender: "668", kind: government, sender_type: shortcode}       # PTA: SIMs registered on a CNIC (S14)
+  - {sender: "8400", kind: government, sender_type: shortcode}      # NADRA CNIC tracking (widely reported, unverified)
+  - {sender: "9966", kind: government, sender_type: shortcode}      # FBR Active Taxpayer List check (widely reported, unverified)
+  - {sender: "8300", kind: government, sender_type: shortcode}      # ECP voter info (widely reported, unverified)
+  # -- OTP
+  - {sender: "Google", kind: otp_service, sender_type: alphanumeric}
+  # -- courier
+  - {sender: "TCS", kind: courier, sender_type: alphanumeric}
+  - {sender: "Leopards", kind: courier, sender_type: alphanumeric}
+  - {sender: "Trax", kind: courier, sender_type: alphanumeric}
+  - {sender: "M&P", kind: courier, sender_type: alphanumeric}
+  - {sender: "PostEx", kind: courier, sender_type: alphanumeric}
+  # -- shopping / food / transport
+  - {sender: "Daraz", kind: retail, sender_type: alphanumeric}
+  - {sender: "Khaadi", kind: retail, sender_type: alphanumeric}
+  - {sender: "GulAhmed", kind: retail, sender_type: alphanumeric}
+  - {sender: "Outfitters", kind: retail, sender_type: alphanumeric}
+  - {sender: "Imtiaz", kind: retail, sender_type: alphanumeric}
+  - {sender: "foodpanda", kind: delivery_food, sender_type: alphanumeric}
+  - {sender: "Careem", kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: "inDrive", kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: "Bykea", kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: "Yango", kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: "PIA", kind: airline, sender_type: alphanumeric}
+  - {sender: "airblue", kind: airline, sender_type: alphanumeric}
+  - {sender: "SereneAir", kind: airline, sender_type: alphanumeric}
+  - {sender: "Bookme", kind: rail, sender_type: alphanumeric}    # sells Pakistan Railways tickets
+  # -- utilities (bill alerts)
+  - {sender: "K-Electric", kind: utility, sender_type: alphanumeric}
+  - {sender: "LESCO", kind: utility, sender_type: alphanumeric}
+  - {sender: "IESCO", kind: utility, sender_type: alphanumeric}
+  - {sender: "SNGPL", kind: utility, sender_type: alphanumeric}
+  - {sender: "SSGC", kind: utility, sender_type: alphanumeric}
+  # -- health (private clinics/pharmacies text from ordinary landline/mobile numbers)
+  - {sender: "Marham", kind: doctor, sender_type: alphanumeric}
+  - {sender: "oladoc", kind: doctor, sender_type: alphanumeric}
+  - {sender: "+9242...", kind: doctor, sender_type: number}
+  - {sender: "+9221...", kind: pharmacy, sender_type: number}
+holidays:
+  # Gazetted federal holidays (S15). Fixed-date (Gregorian):
+  - {date: "02-05", name: Kashmir Solidarity Day}
+  - {date: "03-23", name: Pakistan Day}
+  - {date: "05-01", name: Labour Day}
+  - {date: "05-28", name: Youm-e-Takbeer}
+  - {date: "08-14", name: Independence Day}
+  - {date: "11-09", name: Iqbal Day}
+  - {date: "12-25", name: Quaid-e-Azam Day}
+  # Islamic (Hijri) holidays move ~11 days earlier each year. The schema only defines
+  # Easter-relative rules; "hijri:MM-DD" below is the schema v1.1 rule syntax (Umm al-Qura /
+  # tabular calendar, Pakistan's moon-sighting committee can shift by +-1 day).
+  - {rule: "hijri:10-01", name: Eid ul Fitr}
+  - {rule: "hijri:10-02", name: Eid ul Fitr (2nd day)}
+  - {rule: "hijri:10-03", name: Eid ul Fitr (3rd day)}
+  - {rule: "hijri:12-10", name: Eid ul Adha}
+  - {rule: "hijri:12-11", name: Eid ul Adha (2nd day)}
+  - {rule: "hijri:12-12", name: Eid ul Adha (3rd day)}
+  - {rule: "hijri:01-09", name: Ashura (9 Muharram)}
+  - {rule: "hijri:01-10", name: Ashura (10 Muharram)}
+  - {rule: "hijri:03-12", name: Eid Milad-un-Nabi}
+popular_apps:
+  # All package ids verified on play.google.com (gl=pk) on 2026-11-20 (S16).
+  # finance / mobile money
+  - {package: com.techlogix.mobilinkcustomer, name: JazzCash, category: banking}
+  - {package: pk.com.telenor.phoenix, name: easypaisa, category: banking}
+  - {package: com.sadapay.app, name: SadaPay, category: banking}
+  - {package: com.nayapay.app, name: NayaPay, category: banking}
+  - {package: pk.upaisa.com, name: UPaisa, category: banking}
+  - {package: com.hbl.android.hblmobilebanking, name: HBL Mobile, category: banking}
+  - {package: invo8.meezan.mb, name: Meezan Mobile App, category: banking}
+  - {package: app.com.brd, name: UBL Digital, category: banking}
+  - {package: com.mcb.mcblive, name: MCB Live, category: banking}
+  - {package: com.ofss.digx.mobile.android.allied, name: myABL, category: banking}
+  - {package: com.base.bankalfalah, name: Alfa by Bank Alfalah, category: banking}
+  - {package: com.finja.simsim, name: ABHI Bank, category: banking}
+  # SECP-whitelisted nano-lending apps (S9); developer names match the licensed NBFCs
+  - {package: com.personale.credit.carry.cash.loan.paisaya, name: Paisayaar, category: finance}
+  - {package: com.creditcat.tech.app, name: SmartQarza, category: finance}
+  - {package: com.aitemaad.safe.money.credit.cash.easy.loan, name: Aitemaad, category: finance}
+  - {package: com.fauricash.credit.loan, name: Fauri Cash, category: finance}
+  - {package: com.loan.easy.cash.pakcredit.paisa.dhan.tez.dhan, name: PakCredit, category: finance}
+  # telecom self-care
+  - {package: com.jazz.jazzworld, name: Jazz World, category: telecom}
+  - {package: com.zong.customercare, name: My Zong, category: telecom}
+  - {package: com.telenor.pakistan.mytelenor, name: My Telenor, category: telecom}
+  - {package: com.ufoneselfcare, name: UPTCL (Ufone), category: telecom}
+  # messaging / social
+  - {package: com.whatsapp, name: WhatsApp, category: messaging}
+  - {package: com.imo.android.imoim, name: imo, category: messaging}
+  - {package: com.zhiliaoapp.musically, name: TikTok, category: social}
+  - {package: com.kwai.bulldog, name: SnackVideo, category: social}
+  # shopping / food / transport
+  - {package: com.daraz.android, name: Daraz, category: shopping}
+  - {package: com.olx.pk, name: OLX Pakistan, category: shopping}
+  - {package: com.pakwheels, name: PakWheels, category: shopping}
+  - {package: com.global.foodpanda.android, name: foodpanda, category: food}
+  - {package: com.careem.acma, name: Careem, category: transport}
+  - {package: sinet.startup.inDriver, name: inDrive, category: transport}
+  - {package: com.bykea.pk, name: Bykea, category: transport}
+  - {package: com.macropaks.bookme, name: Bookme, category: transport}
+  # government / news / health
+  - {package: pk.gov.nadra.pakid, name: Pak Identity, category: government}
+  - {package: com.govpk.citizensportal, name: Pakistan Citizen Portal, category: government}
+  - {package: pk.gov.dirbs.dvs_public_pta, name: PTA DVS, category: government}
+  - {package: com.snr, name: Geo News, category: news}
+  - {package: com.aryservices.arynews.en, name: ARY News, category: news}
+  - {package: controllers.marham.marhammed, name: Marham, category: health}
+  - {package: com.mediconnect.oladoc, name: oladoc, category: health}

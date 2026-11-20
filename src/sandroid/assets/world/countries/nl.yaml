@@ -1,0 +1,706 @@
+# Sandroid world pack: country nl. Sources: nl.SOURCES.md
+pack: country
+schema: 1.1
+country: nl
+name: Netherlands
+languages: {nl: 1.0}
+timezones: [Europe/Amsterdam]
+date_format: dd-MM-yyyy
+time_format: HH:mm
+currency: {code: EUR, symbol: €, format: '€ 49,99'}
+phone:
+  country_code: '31'
+  trunk_prefix: '0'
+  national_format_examples: [06 12345678, 06-12345678, 020 123 4567, 010 123 4567]
+  mobile:
+    realistic:
+      - {prefix: '610', length: 9, operator: KPN}
+      - {prefix: '612', length: 9, operator: KPN}
+      - {prefix: '613', length: 9, operator: KPN}
+      - {prefix: '616', length: 9, operator: KPN}
+      - {prefix: '617', length: 9, operator: KPN}
+      - {prefix: '620', length: 9, operator: KPN}
+      - {prefix: '622', length: 9, operator: KPN}
+      - {prefix: '623', length: 9, operator: KPN}
+      - {prefix: '630', length: 9, operator: KPN}
+      - {prefix: '651', length: 9, operator: KPN}
+      - {prefix: '653', length: 9, operator: KPN}
+      - {prefix: '611', length: 9, operator: Vodafone}
+      - {prefix: '615', length: 9, operator: Vodafone}
+      - {prefix: '621', length: 9, operator: Vodafone}
+      - {prefix: '627', length: 9, operator: Vodafone}
+      - {prefix: '629', length: 9, operator: Vodafone}
+      - {prefix: '631', length: 9, operator: Vodafone}
+      - {prefix: '646', length: 9, operator: Vodafone}
+      - {prefix: '650', length: 9, operator: Vodafone}
+      - {prefix: '652', length: 9, operator: Vodafone}
+      - {prefix: '654', length: 9, operator: Vodafone}
+      - {prefix: '655', length: 9, operator: Vodafone}
+      - {prefix: '614', length: 9, operator: Odido}
+      - {prefix: '618', length: 9, operator: Odido}
+      - {prefix: '624', length: 9, operator: Odido}
+      - {prefix: '628', length: 9, operator: Odido}
+      - {prefix: '634', length: 9, operator: Odido}
+      - {prefix: '636', length: 9, operator: Odido}
+      - {prefix: '638', length: 9, operator: Odido}
+      - {prefix: '640', length: 9, operator: Odido}
+      - {prefix: '641', length: 9, operator: Odido}
+      - {prefix: '642', length: 9, operator: Odido}
+      - {prefix: '643', length: 9, operator: Odido}
+      - {prefix: '648', length: 9, operator: Odido}
+      - {prefix: '684', length: 9, operator: Lycamobile}
+      - {prefix: '685', length: 9, operator: Lycamobile}
+    unallocated:
+      - {prefix: '6325', length: 9, note: 'gap in ACM number register: 0632460000-0632999999 not allocated', source: S3}
+      - {prefix: '6326', length: 9, note: 'gap in ACM number register: 0632460000-0632999999 not allocated', source: S3}
+      - {prefix: '6327', length: 9, note: 'gap in ACM number register: 0632460000-0632999999 not allocated', source: S3}
+      - {prefix: '6328', length: 9, note: 'gap in ACM number register: 0632460000-0632999999 not allocated', source: S3}
+      - {prefix: '6329', length: 9, note: 'gap in ACM number register: 0632460000-0632999999 not allocated', source: S3}
+      - {prefix: '6563', length: 9, note: 'gap in ACM number register: 0656270000-0656999999 not allocated', source: S3}
+      - {prefix: '6564', length: 9, note: 'gap in ACM number register: 0656270000-0656999999 not allocated', source: S3}
+      - {prefix: '6565', length: 9, note: 'gap in ACM number register: 0656270000-0656999999 not allocated', source: S3}
+      - {prefix: '6566', length: 9, note: 'gap in ACM number register: 0656270000-0656999999 not allocated', source: S3}
+      - {prefix: '6567', length: 9, note: 'gap in ACM number register: 0656270000-0656999999 not allocated', source: S3}
+      - {prefix: '6568', length: 9, note: 'gap in ACM number register: 0656270000-0656999999 not allocated', source: S3}
+      - {prefix: '6569', length: 9, note: 'gap in ACM number register: 0656270000-0656999999 not allocated', source: S3}
+      - {prefix: '6880', length: 9, note: 'gap in ACM number register: 0688000000-0688799999 not allocated', source: S3}
+      - {prefix: '6881', length: 9, note: 'gap in ACM number register: 0688000000-0688799999 not allocated', source: S3}
+      - {prefix: '6882', length: 9, note: 'gap in ACM number register: 0688000000-0688799999 not allocated', source: S3}
+      - {prefix: '6883', length: 9, note: 'gap in ACM number register: 0688000000-0688799999 not allocated', source: S3}
+      - {prefix: '6884', length: 9, note: 'gap in ACM number register: 0688000000-0688799999 not allocated', source: S3}
+      - {prefix: '6885', length: 9, note: 'gap in ACM number register: 0688000000-0688799999 not allocated', source: S3}
+      - {prefix: '6886', length: 9, note: 'gap in ACM number register: 0688000000-0688799999 not allocated', source: S3}
+      - {prefix: '6887', length: 9, note: 'gap in ACM number register: 0688000000-0688799999 not allocated', source: S3}
+    fiction: null
+  landline:
+    cities:
+      - {city: Amsterdam, area_code: '20', subscriber_length: 7}
+      - {city: Rotterdam, area_code: '10', subscriber_length: 7}
+      - {city: Den Haag, area_code: '70', subscriber_length: 7}
+      - {city: Utrecht, area_code: '30', subscriber_length: 7}
+      - {city: Eindhoven, area_code: '40', subscriber_length: 7}
+      - {city: Groningen, area_code: '50', subscriber_length: 7}
+      - {city: Tilburg, area_code: '13', subscriber_length: 7}
+      - {city: Almere, area_code: '36', subscriber_length: 7}
+      - {city: Breda, area_code: '76', subscriber_length: 7}
+      - {city: Nijmegen, area_code: '24', subscriber_length: 7}
+      - {city: Arnhem, area_code: '26', subscriber_length: 7}
+      - {city: Haarlem, area_code: '23', subscriber_length: 7}
+      - {city: Enschede, area_code: '53', subscriber_length: 7}
+      - {city: Maastricht, area_code: '43', subscriber_length: 7}
+      - {city: Leiden, area_code: '71', subscriber_length: 7}
+      - {city: Zwolle, area_code: '38', subscriber_length: 7}
+    fiction: null
+  validation_note: 'ACM register (nummers_csv.zip, file dated 2026-11-16) lists only allocated (''Toegekend'') blocks; a gap may also be in cool-down (''Afkoelen'') or blocked, but is not assigned to any operator. phonenumbers 9.0.43 treats all samples in these gaps as valid MOBILE (its carrier lookup even names an operator for 0656/0680, which is stale). fiction is null: the Dutch Nummerplan has no fiction/test/demo category and ACM reserves no media range. Mobile numbers are 06 + 8 digits (NSN 9).'
+carriers:
+  - {name: KPN, sim_operator: KPN, mccmnc: '20408', share: 0.36}
+  - {name: Odido, sim_operator: Odido, mccmnc: '20416', share: 0.35}
+  - {name: Vodafone, sim_operator: vodafone NL, mccmnc: '20404', share: 0.29}
+cities:
+  - {name: Amsterdam, lat: 52.3676, lon: 4.9041, population: 930000, area_code: '20', postcodes: [1012 JS, 1013 AL, 1015 BK, 1017 PT, 1018 DA, 1054 HJ, 1071 XX, 1073 AK, 1091 GH, 1094 TL], districts: [Centrum, De Pijp, Jordaan, Oost, West, Noord, Zuid, Nieuw-West, Zuidoost, Oud-West]}
+  - {name: Rotterdam, lat: 51.9244, lon: 4.4777, population: 670000, area_code: '10', postcodes: [3011 AA, 3012 CL, 3014 DA, 3021 JA, 3031 AB, 3061 AA, 3071 BA, 3083 AA], districts: [Centrum, Kralingen, Delfshaven, Noord, Feijenoord, Hillegersberg, Charlois, Kop van Zuid]}
+  - {name: Den Haag, lat: 52.0705, lon: 4.3007, population: 560000, area_code: '70', postcodes: [2511 BT, 2513 AA, 2514 EA, 2517 KJ, 2525 AA, 2562 AA, 2586 AA], districts: [Centrum, Scheveningen, Statenkwartier, Duinoord, Laak, Escamp, Segbroek, Bezuidenhout]}
+  - {name: Utrecht, lat: 52.0907, lon: 5.1214, population: 370000, area_code: '30', postcodes: [3511 AA, 3512 JE, 3521 AA, 3532 AA, 3581 AA, 3583 AA], districts: [Binnenstad, Oost, Lombok, Wittevrouwen, Leidsche Rijn, Zuilen, Overvecht]}
+  - {name: Eindhoven, lat: 51.4416, lon: 5.4697, population: 245000, area_code: '40', postcodes: [5611 AA, 5612 AA, 5615 AA, 5622 AA, 5643 AA], districts: [Centrum, Strijp, Woensel, Stratum, Gestel]}
+  - {name: Groningen, lat: 53.2194, lon: 6.5665, population: 240000, area_code: '50', postcodes: [9711 AA, 9712 AA, 9714 AA, 9718 AA, 9725 AA, 9741 AA], districts: [Centrum, Oosterpoort, Schildersbuurt, Paddepoel, Helpman, Zernike]}
+  - {name: Tilburg, lat: 51.5555, lon: 5.0913, population: 227000, area_code: '13', postcodes: [5011 AA, 5017 AA, 5038 AA, 5041 AA, 5046 AA], districts: [Centrum, Oud-Noord, Reeshof, Oud-Zuid]}
+  - {name: Almere, lat: 52.3508, lon: 5.2647, population: 225000, area_code: '36', postcodes: [1315 AA, 1325 AA, 1335 AA, 1361 AA], districts: [Almere Stad, Almere Buiten, Almere Haven, Almere Poort]}
+  - {name: Breda, lat: 51.5719, lon: 4.7683, population: 186000, area_code: '76', postcodes: [4811 AA, 4818 AA, 4835 AA], districts: [Centrum, Princenhage, Ginneken, Haagse Beemden]}
+  - {name: Nijmegen, lat: 51.8126, lon: 5.8372, population: 182000, area_code: '24', postcodes: [6511 AA, 6521 AA, 6531 AA, 6541 AA], districts: [Centrum, Oost, Lindenholt, Dukenburg, Lent]}
+  - {name: Arnhem, lat: 51.9851, lon: 5.8987, population: 166000, area_code: '26', postcodes: [6811 AA, 6821 AA, 6824 AA, 6832 AA], districts: [Centrum, Spijkerkwartier, Presikhaaf, Schuytgraaf]}
+  - {name: Haarlem, lat: 52.3874, lon: 4.6462, population: 165000, area_code: '23', postcodes: [2011 AA, 2012 AA, 2021 AA, 2031 AA], districts: [Centrum, Noord, Schalkwijk, Zuid-West]}
+  - {name: Enschede, lat: 52.2215, lon: 6.8937, population: 161000, area_code: '53', postcodes: [7511 AA, 7514 AA, 7521 AA], districts: [Centrum, Roombeek, Hengelosestraat]}
+  - {name: Leiden, lat: 52.1601, lon: 4.497, population: 127000, area_code: '71', postcodes: [2311 AA, 2312 AA, 2313 AA, 2321 AA], districts: [Binnenstad, Merenwijk, Stevenshof, Roomburg]}
+  - {name: Maastricht, lat: 50.8514, lon: 5.691, population: 121000, area_code: '43', postcodes: [6211 AA, 6221 AA, 6229 AA], districts: [Binnenstad, Wyck, Jekerkwartier, Randwyck]}
+  - {name: Zwolle, lat: 52.5168, lon: 6.083, population: 132000, area_code: '38', postcodes: [8011 AA, 8021 AA, 8031 AA], districts: [Binnenstad, Assendorp, Stadshagen]}
+streets: [Kerkstraat, Schoolstraat, Molenstraat, Dorpsstraat, Molenweg, Julianastraat, Wilhelminastraat, Beatrixstraat, Stationsweg, Stationsstraat, Kastanjelaan, Eikenlaan, Parallelweg, Prins Bernhardstraat, Oranjestraat, Nieuwstraat, Marktstraat, Industrieweg, Sportlaan, Lindenlaan, Beukenlaan, Irenestraat, Emmastraat, Prinses Margrietstraat, Hoofdstraat, Kanaalweg, Dijkstraat, Raadhuisstraat, Torenstraat, Havenstraat, Kerkweg, Spoorstraat, Hoogstraat, Achterweg, Brink, Vondelstraat, Rembrandtlaan, Van Goghstraat, Mozartlaan, Tulpstraat, Rozenstraat, Esdoornlaan, Berkenlaan, Populierenlaan, Akkerstraat, Kalverstraat, Prinsengracht, Keizersgracht, Herengracht, Coolsingel, Oudegracht, Willemstraat, Burgstraat, Kloosterstraat, Ringweg]
+address_format: '{street} {number}, {postcode} {city}'
+places:
+  - {category: park, name: Vondelpark, city: Amsterdam, lat: 52.358, lon: 4.868}
+  - {category: park, name: Westerpark, city: Amsterdam, lat: 52.3861, lon: 4.8775}
+  - {category: park, name: Het Park, city: Rotterdam, lat: 51.9069, lon: 4.4703}
+  - {category: park, name: Zuiderpark, city: Den Haag, lat: 52.0558, lon: 4.2856}
+  - {category: park, name: Wilhelminapark, city: Utrecht, lat: 52.0875, lon: 5.1411}
+  - {category: park, name: Noorderplantsoen, city: Groningen, lat: 53.2236, lon: 6.5556}
+  - {category: park, name: Keukenhof, city: Lisse, lat: 52.2713, lon: 4.5464}
+  - {category: landmark, name: Domtoren, city: Utrecht, lat: 52.0906, lon: 5.1214}
+  - {category: landmark, name: Erasmusbrug, city: Rotterdam, lat: 51.9092, lon: 4.4867}
+  - {category: landmark, name: Kinderdijk, city: Kinderdijk, lat: 51.8886, lon: 4.6347}
+  - {category: landmark, name: Binnenhof, city: Den Haag, lat: 52.0796, lon: 4.313}
+  - {category: landmark, name: Dam, city: Amsterdam, lat: 52.3731, lon: 4.8928}
+  - {category: landmark, name: Euromast, city: Rotterdam, lat: 51.9061, lon: 4.4658}
+  - {category: landmark, name: Zaanse Schans, city: Zaandam, lat: 52.4739, lon: 4.8164}
+  - {category: station, name: Amsterdam Centraal, city: Amsterdam, lat: 52.3783, lon: 4.9}
+  - {category: station, name: Rotterdam Centraal, city: Rotterdam, lat: 51.9244, lon: 4.4694}
+  - {category: station, name: Utrecht Centraal, city: Utrecht, lat: 52.0892, lon: 5.1097}
+  - {category: station, name: Den Haag Centraal, city: Den Haag, lat: 52.0817, lon: 4.3292}
+  - {category: station, name: Eindhoven Centraal, city: Eindhoven, lat: 51.4428, lon: 5.4803}
+  - {category: airport, name: Schiphol, city: Haarlemmermeer, lat: 52.3, lon: 4.765}
+  - {category: airport, name: Eindhoven Airport, city: Eindhoven, lat: 51.45, lon: 5.3744}
+  - {category: airport, name: Rotterdam The Hague Airport, city: Rotterdam, lat: 51.9569, lon: 4.4403}
+  - {category: beach, name: Scheveningen, city: Den Haag, lat: 52.1081, lon: 4.2731}
+  - {category: beach, name: Zandvoort, city: Zandvoort, lat: 52.3667, lon: 4.5333}
+  - {category: beach, name: Egmond aan Zee, city: Egmond aan Zee, lat: 52.6167, lon: 4.6167}
+  - {category: beach, name: Bloemendaal aan Zee, city: Bloemendaal, lat: 52.395, lon: 4.5378}
+  - {category: mountain, name: Vaalserberg, city: Vaals, lat: 50.7547, lon: 6.0208}
+  - {category: mountain, name: Posbank, city: Rheden, lat: 52.0286, lon: 6.0211}
+  - {category: museum, name: Rijksmuseum, city: Amsterdam, lat: 52.36, lon: 4.8853}
+  - {category: museum, name: Van Gogh Museum, city: Amsterdam, lat: 52.3583, lon: 4.8811}
+  - {category: museum, name: Mauritshuis, city: Den Haag, lat: 52.0804, lon: 4.3143}
+  - {category: museum, name: NEMO, city: Amsterdam, lat: 52.3741, lon: 4.9123}
+  - {category: museum, name: Kröller-Müller Museum, city: Otterlo, lat: 52.0958, lon: 5.8169}
+  - {category: stadium, name: Johan Cruijff ArenA, city: Amsterdam, lat: 52.3142, lon: 4.9419}
+  - {category: stadium, name: De Kuip, city: Rotterdam, lat: 51.8939, lon: 4.5231}
+  - {category: stadium, name: Philips Stadion, city: Eindhoven, lat: 51.4417, lon: 5.4675}
+  - {category: market, name: Albert Cuypmarkt, city: Amsterdam, lat: 52.356, lon: 4.8954}
+  - {category: market, name: Markthal, city: Rotterdam, lat: 51.9201, lon: 4.4869}
+  - {category: lake, name: Loosdrechtse Plassen, city: Loosdrecht, lat: 52.1975, lon: 5.0686}
+  - {category: lake, name: Kralingse Plas, city: Rotterdam, lat: 51.9361, lon: 4.5153}
+  - {category: lake, name: Sloterplas, city: Amsterdam, lat: 52.3647, lon: 4.8169}
+  - {category: lake, name: Veluwemeer, city: Harderwijk, lat: 52.35, lon: 5.615}
+names:
+  culture: nl
+  female:
+    - {name: Lisa, w: 1.0}
+    - {name: Anne, w: 1.0}
+    - {name: Sanne, w: 1.0}
+    - {name: Laura, w: 1.0}
+    - {name: Linda, w: 1.0}
+    - {name: Monique, w: 1.0}
+    - {name: Sandra, w: 1.0}
+    - {name: Anouk, w: 1.0}
+    - {name: Femke, w: 1.0}
+    - {name: Kim, w: 1.0}
+    - {name: Emma, w: 0.55}
+    - {name: Julia, w: 0.55}
+    - {name: Sophie, w: 0.55}
+    - {name: Eva, w: 0.55}
+    - {name: Lotte, w: 0.55}
+    - {name: Iris, w: 0.55}
+    - {name: Esther, w: 0.55}
+    - {name: Marieke, w: 0.55}
+    - {name: Petra, w: 0.55}
+    - {name: Ingrid, w: 0.55}
+    - {name: Ellen, w: 0.55}
+    - {name: Yvonne, w: 0.55}
+    - {name: Mirjam, w: 0.55}
+    - {name: Karin, w: 0.55}
+    - {name: Wendy, w: 0.55}
+    - {name: Marloes, w: 0.55}
+    - {name: Saskia, w: 0.55}
+    - {name: Anja, w: 0.55}
+    - {name: Inge, w: 0.55}
+    - {name: Marjolein, w: 0.55}
+    - {name: Ilse, w: 0.55}
+    - {name: Manon, w: 0.55}
+    - {name: Nicole, w: 0.55}
+    - {name: Danielle, w: 0.55}
+    - {name: Chantal, w: 0.55}
+    - {name: Kelly, w: 0.55}
+    - {name: Fleur, w: 0.55}
+    - {name: Lieke, w: 0.55}
+    - {name: Romy, w: 0.55}
+    - {name: Britt, w: 0.55}
+    - {name: Tess, w: 0.25}
+    - {name: Noa, w: 0.25}
+    - {name: Mila, w: 0.25}
+    - {name: Zoë, w: 0.25}
+    - {name: Sara, w: 0.25}
+    - {name: Isa, w: 0.25}
+    - {name: Nina, w: 0.25}
+    - {name: Fenna, w: 0.25}
+    - {name: Lynn, w: 0.25}
+    - {name: Evi, w: 0.25}
+    - {name: Roos, w: 0.25}
+    - {name: Merel, w: 0.25}
+    - {name: Floor, w: 0.25}
+    - {name: Maaike, w: 0.25}
+    - {name: Esmee, w: 0.25}
+    - {name: Demi, w: 0.25}
+    - {name: Naomi, w: 0.25}
+    - {name: Charlotte, w: 0.25}
+    - {name: Elise, w: 0.25}
+    - {name: Amber, w: 0.25}
+    - {name: Jasmijn, w: 0.25}
+    - {name: Renske, w: 0.25}
+    - {name: Judith, w: 0.25}
+    - {name: Sabine, w: 0.25}
+    - {name: Marleen, w: 0.25}
+    - {name: Annelies, w: 0.25}
+    - {name: Hanneke, w: 0.25}
+    - {name: Marja, w: 0.25}
+    - {name: Els, w: 0.25}
+    - {name: Wilma, w: 0.25}
+    - {name: Ans, w: 0.25}
+    - {name: Gerda, w: 0.25}
+    - {name: Tineke, w: 0.25}
+    - {name: Joke, w: 0.25}
+    - {name: Ria, w: 0.25}
+    - {name: Annet, w: 0.25}
+    - {name: Marian, w: 0.25}
+    - {name: Jolanda, w: 0.25}
+    - {name: Ineke, w: 0.25}
+    - {name: Astrid, w: 0.25}
+    - {name: Bianca, w: 0.25}
+    - {name: Miranda, w: 0.25}
+    - {name: Patricia, w: 0.25}
+    - {name: Simone, w: 0.25}
+    - {name: Carla, w: 0.25}
+    - {name: Nathalie, w: 0.25}
+    - {name: Martine, w: 0.25}
+    - {name: Mariska, w: 0.25}
+    - {name: Suzanne, w: 0.25}
+    - {name: Annemiek, w: 0.25}
+    - {name: Truus, w: 0.12}
+    - {name: Riet, w: 0.12}
+    - {name: Corrie, w: 0.12}
+    - {name: Nel, w: 0.12}
+    - {name: Mieke, w: 0.12}
+    - {name: Thea, w: 0.12}
+    - {name: Lies, w: 0.12}
+    - {name: Puck, w: 0.12}
+    - {name: Yara, w: 0.12}
+    - {name: Liv, w: 0.12}
+    - {name: Saar, w: 0.12}
+    - {name: Olivia, w: 0.12}
+    - {name: Julie, w: 0.12}
+    - {name: Sofie, w: 0.12}
+    - {name: Mette, w: 0.12}
+    - {name: Lieve, w: 0.12}
+    - {name: Nienke, w: 0.12}
+    - {name: Eline, w: 0.12}
+    - {name: Anna, w: 0.12}
+    - {name: Maria, w: 0.12}
+    - {name: Rianne, w: 0.12}
+    - {name: Willemijn, w: 0.12}
+    - {name: Myrthe, w: 0.12}
+    - {name: Loes, w: 0.12}
+    - {name: Hester, w: 0.12}
+    - {name: Jet, w: 0.12}
+    - {name: Daphne, w: 0.12}
+    - {name: Silvia, w: 0.12}
+    - {name: Agnes, w: 0.12}
+    - {name: Hilde, w: 0.12}
+  male:
+    - {name: Jan, w: 1.0}
+    - {name: Peter, w: 1.0}
+    - {name: Mark, w: 1.0}
+    - {name: Dennis, w: 1.0}
+    - {name: Martijn, w: 1.0}
+    - {name: Jeroen, w: 1.0}
+    - {name: Thomas, w: 1.0}
+    - {name: Tim, w: 1.0}
+    - {name: Kevin, w: 1.0}
+    - {name: Bas, w: 1.0}
+    - {name: Hans, w: 0.55}
+    - {name: Kees, w: 0.55}
+    - {name: Henk, w: 0.55}
+    - {name: Willem, w: 0.55}
+    - {name: Wim, w: 0.55}
+    - {name: Rob, w: 0.55}
+    - {name: Ruud, w: 0.55}
+    - {name: Marco, w: 0.55}
+    - {name: Michel, w: 0.55}
+    - {name: Sander, w: 0.55}
+    - {name: Erik, w: 0.55}
+    - {name: Bart, w: 0.55}
+    - {name: Niels, w: 0.55}
+    - {name: Rick, w: 0.55}
+    - {name: Stefan, w: 0.55}
+    - {name: Robin, w: 0.55}
+    - {name: Joost, w: 0.55}
+    - {name: Frank, w: 0.55}
+    - {name: Paul, w: 0.55}
+    - {name: Patrick, w: 0.55}
+    - {name: Richard, w: 0.55}
+    - {name: Maarten, w: 0.55}
+    - {name: Wouter, w: 0.55}
+    - {name: Pieter, w: 0.55}
+    - {name: Koen, w: 0.55}
+    - {name: Vincent, w: 0.55}
+    - {name: Jasper, w: 0.55}
+    - {name: Daan, w: 0.55}
+    - {name: Lars, w: 0.55}
+    - {name: Jesse, w: 0.55}
+    - {name: Ruben, w: 0.55}
+    - {name: Thijs, w: 0.55}
+    - {name: Bram, w: 0.55}
+    - {name: Sem, w: 0.55}
+    - {name: Lucas, w: 0.55}
+    - {name: Milan, w: 0.55}
+    - {name: Piet, w: 0.25}
+    - {name: Gerrit, w: 0.25}
+    - {name: Klaas, w: 0.25}
+    - {name: Cor, w: 0.25}
+    - {name: Bert, w: 0.25}
+    - {name: Ton, w: 0.25}
+    - {name: Gert, w: 0.25}
+    - {name: Johan, w: 0.25}
+    - {name: Edwin, w: 0.25}
+    - {name: Ronald, w: 0.25}
+    - {name: René, w: 0.25}
+    - {name: Robert, w: 0.25}
+    - {name: Arjan, w: 0.25}
+    - {name: Michiel, w: 0.25}
+    - {name: Remco, w: 0.25}
+    - {name: Roel, w: 0.25}
+    - {name: Tom, w: 0.25}
+    - {name: Sven, w: 0.25}
+    - {name: Luuk, w: 0.25}
+    - {name: Max, w: 0.25}
+    - {name: Finn, w: 0.25}
+    - {name: Noah, w: 0.25}
+    - {name: Levi, w: 0.25}
+    - {name: Sam, w: 0.25}
+    - {name: Julian, w: 0.25}
+    - {name: Stijn, w: 0.25}
+    - {name: Jens, w: 0.25}
+    - {name: Gijs, w: 0.25}
+    - {name: Jelle, w: 0.25}
+    - {name: Mees, w: 0.25}
+    - {name: Teun, w: 0.25}
+    - {name: Ties, w: 0.25}
+    - {name: Dirk, w: 0.25}
+    - {name: Hendrik, w: 0.25}
+    - {name: Freek, w: 0.25}
+    - {name: Floris, w: 0.25}
+    - {name: Rutger, w: 0.25}
+    - {name: Hugo, w: 0.25}
+    - {name: Olivier, w: 0.25}
+    - {name: Niek, w: 0.25}
+    - {name: Wessel, w: 0.25}
+    - {name: Joris, w: 0.25}
+    - {name: Guus, w: 0.25}
+    - {name: Jordy, w: 0.25}
+    - {name: Mike, w: 0.25}
+    - {name: Sjoerd, w: 0.25}
+    - {name: Rens, w: 0.25}
+    - {name: Tijmen, w: 0.25}
+    - {name: Ivo, w: 0.25}
+    - {name: Erwin, w: 0.25}
+    - {name: Marcel, w: 0.25}
+    - {name: Ferry, w: 0.25}
+    - {name: Arie, w: 0.25}
+    - {name: Leon, w: 0.25}
+    - {name: Gerard, w: 0.25}
+    - {name: Jaap, w: 0.25}
+    - {name: Theo, w: 0.12}
+    - {name: Harry, w: 0.12}
+    - {name: Fred, w: 0.12}
+    - {name: Hidde, w: 0.12}
+    - {name: Siem, w: 0.12}
+    - {name: Bob, w: 0.12}
+    - {name: Boaz, w: 0.12}
+    - {name: Jurre, w: 0.12}
+    - {name: Thom, w: 0.12}
+    - {name: Youri, w: 0.12}
+    - {name: Raymond, w: 0.12}
+    - {name: Joop, w: 0.12}
+    - {name: Dick, w: 0.12}
+    - {name: Rinus, w: 0.12}
+    - {name: Frits, w: 0.12}
+    - {name: Herman, w: 0.12}
+    - {name: Albert, w: 0.12}
+    - {name: Jos, w: 0.12}
+    - {name: Huub, w: 0.12}
+    - {name: Kas, w: 0.12}
+    - {name: Luca, w: 0.12}
+    - {name: Adam, w: 0.12}
+    - {name: Mats, w: 0.12}
+    - {name: Jurjen, w: 0.12}
+    - {name: Sietse, w: 0.12}
+    - {name: Wiebe, w: 0.12}
+    - {name: Stan, w: 0.12}
+    - {name: Joep, w: 0.12}
+    - {name: Thijmen, w: 0.12}
+    - {name: Matthijs, w: 0.12}
+  surnames:
+    - {name: de Jong, w: 1.0}
+    - {name: Jansen, w: 0.875}
+    - {name: de Vries, w: 0.845}
+    - {name: van den Berg, w: 0.695}
+    - {name: van Dijk, w: 0.669}
+    - {name: Bakker, w: 0.657}
+    - {name: Janssen, w: 0.64}
+    - {name: Visser, w: 0.589}
+    - {name: Smit, w: 0.503}
+    - {name: Meijer, w: 0.48}
+    - {name: de Boer, w: 0.457}
+    - {name: Mulder, w: 0.43}
+    - {name: de Groot, w: 0.43}
+    - {name: Bos, w: 0.422}
+    - {name: Vos, w: 0.36}
+    - {name: Peters, w: 0.357}
+    - {name: Hendriks, w: 0.349}
+    - {name: van Leeuwen, w: 0.333}
+    - {name: Dekker, w: 0.331}
+    - {name: Brouwer, w: 0.303}
+    - {name: de Wit, w: 0.288}
+    - {name: Dijkstra, w: 0.279}
+    - {name: Smits, w: 0.275}
+    - {name: de Graaf, w: 0.251}
+    - {name: van der Meer, w: 0.247}
+    - {name: van der Linden, w: 0.241}
+    - {name: Kok, w: 0.241}
+    - {name: Jacobs, w: 0.241}
+    - {name: de Haan, w: 0.239}
+    - {name: Vermeulen, w: 0.238}
+    - {name: van den Heuvel, w: 0.238}
+    - {name: van der Veen, w: 0.229}
+    - {name: van den Broek, w: 0.22}
+    - {name: de Bruijn, w: 0.211}
+    - {name: de Bruin, w: 0.209}
+    - {name: van der Heijden, w: 0.204}
+    - {name: Schouten, w: 0.204}
+    - {name: van Beek, w: 0.198}
+    - {name: Willems, w: 0.197}
+    - {name: van Vliet, w: 0.195}
+    - {name: van de Ven, w: 0.188}
+    - {name: Hoekstra, w: 0.186}
+    - {name: Maas, w: 0.186}
+    - {name: Verhoeven, w: 0.184}
+    - {name: Koster, w: 0.184}
+    - {name: van Dam, w: 0.182}
+    - {name: van der Wal, w: 0.181}
+    - {name: Prins, w: 0.178}
+    - {name: Blom, w: 0.174}
+    - {name: Huisman, w: 0.174}
+    - {name: Peeters, w: 0.167}
+    - {name: de Jonge, w: 0.166}
+    - {name: Kuipers, w: 0.166}
+    - {name: van Veen, w: 0.164}
+    - {name: Post, w: 0.161}
+    - {name: Kuiper, w: 0.16}
+    - {name: Veenstra, w: 0.157}
+    - {name: Kramer, w: 0.156}
+    - {name: van den Brink, w: 0.156}
+    - {name: Scholten, w: 0.152}
+    - {name: van Wijk, w: 0.151}
+    - {name: Postma, w: 0.149}
+    - {name: Martens, w: 0.146}
+    - {name: Vink, w: 0.144}
+    - {name: de Ruiter, w: 0.142}
+    - {name: Timmermans, w: 0.139}
+    - {name: Groen, w: 0.138}
+    - {name: Gerritsen, w: 0.137}
+    - {name: Jonker, w: 0.136}
+    - {name: van Loon, w: 0.136}
+    - {name: Boer, w: 0.135}
+    - {name: van der Velde, w: 0.135}
+    - {name: Willemsen, w: 0.133}
+    - {name: Smeets, w: 0.133}
+    - {name: de Lange, w: 0.131}
+    - {name: de Vos, w: 0.131}
+    - {name: Bosch, w: 0.13}
+    - {name: van Dongen, w: 0.129}
+    - {name: Schipper, w: 0.128}
+    - {name: de Koning, w: 0.128}
+    - {name: van der Laan, w: 0.127}
+    - {name: Koning, w: 0.127}
+    - {name: van der Velden, w: 0.126}
+    - {name: Driessen, w: 0.125}
+    - {name: van Doorn, w: 0.125}
+    - {name: Hermans, w: 0.123}
+    - {name: Evers, w: 0.122}
+    - {name: van den Bosch, w: 0.121}
+    - {name: van der Meulen, w: 0.119}
+    - {name: Hofman, w: 0.119}
+    - {name: Bosman, w: 0.118}
+    - {name: Wolters, w: 0.118}
+    - {name: Sanders, w: 0.118}
+    - {name: van der Horst, w: 0.118}
+    - {name: Mol, w: 0.118}
+    - {name: Kuijpers, w: 0.118}
+    - {name: Molenaar, w: 0.118}
+    - {name: van de Pol, w: 0.117}
+    - {name: de Leeuw, w: 0.117}
+    - {name: Verbeek, w: 0.113}
+    - {name: Zwart, w: 0.068}
+    - {name: Wijnands, w: 0.068}
+    - {name: van Rijn, w: 0.068}
+    - {name: Wouters, w: 0.068}
+    - {name: Tromp, w: 0.068}
+    - {name: Bouwman, w: 0.068}
+    - {name: de Wilde, w: 0.068}
+    - {name: Brink, w: 0.068}
+    - {name: Lammers, w: 0.068}
+    - {name: Hoogendoorn, w: 0.068}
+    - {name: Snijders, w: 0.068}
+    - {name: Koopmans, w: 0.068}
+    - {name: Wijnen, w: 0.068}
+    - {name: Pol, w: 0.068}
+    - {name: Verbruggen, w: 0.068}
+    - {name: Gijsbers, w: 0.068}
+    - {name: Kloosterman, w: 0.068}
+    - {name: Westerhof, w: 0.068}
+    - {name: Hoek, w: 0.068}
+    - {name: Rutten, w: 0.068}
+    - {name: Beekman, w: 0.068}
+    - {name: Verhoef, w: 0.068}
+    - {name: de Kok, w: 0.068}
+    - {name: van Es, w: 0.068}
+    - {name: Hoogland, w: 0.068}
+    - {name: Kroon, w: 0.068}
+    - {name: van Os, w: 0.068}
+    - {name: Pronk, w: 0.068}
+    - {name: Ruiter, w: 0.068}
+    - {name: Steenbergen, w: 0.068}
+    - {name: Verschoor, w: 0.068}
+    - {name: Wagenaar, w: 0.068}
+    - {name: Zijlstra, w: 0.068}
+    - {name: Bijl, w: 0.068}
+    - {name: Boersma, w: 0.068}
+    - {name: Bouma, w: 0.068}
+    - {name: de Jager, w: 0.068}
+    - {name: de Rooij, w: 0.068}
+    - {name: Geerts, w: 0.068}
+    - {name: Hendriksen, w: 0.068}
+    - {name: Heijnen, w: 0.068}
+    - {name: Huijbers, w: 0.068}
+    - {name: Jongeneel, w: 0.068}
+    - {name: Kamphuis, w: 0.068}
+    - {name: Klein, w: 0.068}
+    - {name: Kooistra, w: 0.068}
+    - {name: Langeveld, w: 0.068}
+    - {name: Maassen, w: 0.068}
+    - {name: Mulders, w: 0.068}
+    - {name: Nijhuis, w: 0.068}
+    - {name: Oosterhuis, w: 0.068}
+    - {name: Pauwels, w: 0.068}
+    - {name: Ploeg, w: 0.068}
+    - {name: Reijnders, w: 0.068}
+    - {name: Roelofs, w: 0.068}
+    - {name: Sluiter, w: 0.068}
+    - {name: Spijkerman, w: 0.068}
+    - {name: Stam, w: 0.068}
+    - {name: Teunissen, w: 0.068}
+    - {name: van den Akker, w: 0.068}
+    - {name: van der Ploeg, w: 0.068}
+    - {name: van der Zee, w: 0.068}
+    - {name: van Ham, w: 0.068}
+    - {name: van Hout, w: 0.068}
+    - {name: van Kampen, w: 0.068}
+    - {name: van Rooij, w: 0.068}
+    - {name: Veldhuis, w: 0.068}
+    - {name: Verhagen, w: 0.068}
+    - {name: Vonk, w: 0.068}
+    - {name: Wiersma, w: 0.068}
+    - {name: Wijngaarden, w: 0.068}
+    - {name: Zuidema, w: 0.068}
+    - {name: de Bakker, w: 0.068}
+    - {name: Haverkamp, w: 0.068}
+    - {name: Hulst, w: 0.068}
+    - {name: Jansma, w: 0.068}
+    - {name: Leenders, w: 0.068}
+    - {name: Meulenbelt, w: 0.068}
+    - {name: Nieuwenhuis, w: 0.068}
+    - {name: Overbeek, w: 0.068}
+    - {name: Pieters, w: 0.068}
+    - {name: Schaap, w: 0.068}
+    - {name: Terpstra, w: 0.068}
+    - {name: van Gelder, w: 0.068}
+    - {name: van Zanten, w: 0.068}
+    - {name: Visscher, w: 0.068}
+  nicknames: {Johannes: Hans, Cornelis: Kees, Hendrik: Henk, Willem: Wim, Pieter: Piet, Gerardus: Gerard, Robert: Rob, Jacobus: Jaap, Martijn: Tijn, Alexander: Lex, Johanna: Anneke, Maria: Ria, Wilhelmina: Willy, Elisabeth: Lies, Catharina: Karin}
+  display: '{first} {last}'
+# Shares = share of contacts from that diaspora/minority (official origin statistics, see SOURCES).
+# Cultures without a pack in this project (not listed as data): ma 0.024, sr (Surinamese, Dutch-speaking; Hindustani/Creole/Javanese names) 0.020, ar (Syria/Iraq) 0.016, pl 0.014, pap (Dutch Caribbean) 0.011, uk 0.008, zh 0.006, ro 0.004, sh 0.0055
+cultures:
+  - {culture: tr, share: 0.026}
+  - {culture: de, share: 0.019}
+  - {culture: id, share: 0.019}
+  - {culture: gb, share: 0.0057}
+  - {culture: in, share: 0.0055}
+  - {culture: it, share: 0.0042}
+  - {culture: es, share: 0.0036}
+  - {culture: br, share: 0.0028}
+  - {culture: pk, share: 0.002}
+email:
+  domains:
+    - {domain: gmail.com, share: 0.45}
+    - {domain: hotmail.com, share: 0.12}
+    - {domain: outlook.com, share: 0.06}
+    - {domain: live.nl, share: 0.05}
+    - {domain: hotmail.nl, share: 0.03}
+    - {domain: ziggo.nl, share: 0.07}
+    - {domain: kpnmail.nl, share: 0.05}
+    - {domain: icloud.com, share: 0.07}
+    - {domain: planet.nl, share: 0.02}
+    - {domain: home.nl, share: 0.02}
+    - {domain: xs4all.nl, share: 0.02}
+    - {domain: yahoo.com, share: 0.02}
+  patterns: ['{first}{last}', '{first}.{last}', '{f}{last}', '{first}{yy}', '{first}.{last}{yy}', '{f}.{last}', '{first}_{last}', '{first}{last}{nn}']
+services:
+  - {sender: PostNL, kind: courier, sender_type: alphanumeric}
+  - {sender: DHL, kind: courier, sender_type: alphanumeric}
+  - {sender: DPD, kind: courier, sender_type: alphanumeric}
+  - {sender: ING, kind: bank, sender_type: alphanumeric}
+  - {sender: Rabobank, kind: bank, sender_type: alphanumeric}
+  - {sender: ABN AMRO, kind: bank, sender_type: alphanumeric}
+  - {sender: bunq, kind: bank, sender_type: alphanumeric}
+  - {sender: KPN, kind: telecom, sender_type: alphanumeric}
+  - {sender: Vodafone, kind: telecom, sender_type: alphanumeric}
+  - {sender: Odido, kind: telecom, sender_type: alphanumeric}
+  - {sender: Google, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Tikkie, kind: otp_service, sender_type: alphanumeric}
+  - {sender: DigiD, kind: government, sender_type: alphanumeric}
+  - {sender: Gemeente, kind: government, sender_type: alphanumeric}
+  - {sender: +3120..., kind: doctor, sender_type: number}
+  - {sender: +3110..., kind: doctor, sender_type: number}
+  - {sender: Apotheek, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: Thuisbezorg, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Uber Eats, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Uber, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: Bolt, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: KLM, kind: airline, sender_type: alphanumeric}
+  - {sender: Transavia, kind: airline, sender_type: alphanumeric}
+  - {sender: NS, kind: rail, sender_type: alphanumeric}
+  - {sender: bol, kind: retail, sender_type: alphanumeric}
+  - {sender: Coolblue, kind: retail, sender_type: alphanumeric}
+  - {sender: AH, kind: retail, sender_type: alphanumeric}
+  - {sender: Eneco, kind: utility, sender_type: alphanumeric}
+  - {sender: Vattenfall, kind: utility, sender_type: alphanumeric}
+holidays:
+  - {date: 01-01, name: Nieuwjaarsdag}
+  - {date: 02-14, name: Valentijnsdag, observance: true}
+  - {rule: easter-2, name: Goede Vrijdag, observance: true}
+  - {rule: easter+0, name: Eerste Paasdag}
+  - {rule: easter+1, name: Tweede Paasdag}
+  - {date: 04-27, name: Koningsdag}
+  - {date: 05-04, name: Dodenherdenking, observance: true}
+  - {date: 05-05, name: Bevrijdingsdag}
+  - {rule: easter+39, name: Hemelvaartsdag}
+  - {rule: easter+49, name: Eerste Pinksterdag}
+  - {rule: easter+50, name: Tweede Pinksterdag}
+  - {date: 12-05, name: Sinterklaasavond, observance: true}
+  - {date: 12-25, name: Eerste Kerstdag}
+  - {date: 12-26, name: Tweede Kerstdag}
+  - {date: 12-31, name: Oudejaarsavond, observance: true}
+popular_apps:
+  - {package: com.whatsapp, name: WhatsApp, category: messaging}
+  - {package: org.telegram.messenger, name: Telegram, category: messaging}
+  - {package: com.google.android.apps.maps, name: Google Maps, category: transport}
+  - {package: com.ubercab, name: Uber, category: transport}
+  - {package: com.amazon.mShop.android.shopping, name: Amazon Shopping, category: shopping}
+  - {package: com.paypal.android.p2pmobile, name: PayPal, category: banking}
+  - {package: com.ing.mobile, name: ING, category: banking}
+  - {package: nl.rabomobiel, name: Rabo App, category: banking}
+  - {package: com.abnamro.nl.mobile.payments, name: ABN AMRO, category: banking}
+  - {package: com.bunq.android, name: bunq, category: banking}
+  - {package: com.abnamro.nl.tikkie, name: Tikkie, category: banking}
+  - {package: nl.ns.android.activity, name: NS, category: transport}
+  - {package: com.afklm.mobile.android.gomobile.klm, name: KLM, category: transport}
+  - {package: com.mttnow.droid.transavia, name: Transavia, category: transport}
+  - {package: com.bol.shop, name: bol, category: shopping}
+  - {package: com.icemobile.albertheijn, name: Albert Heijn, category: shopping}
+  - {package: eu.coolblue.shop, name: Coolblue, category: shopping}
+  - {package: nl.marktplaats.android, name: Marktplaats, category: shopping}
+  - {package: nl.tpp.mobile.android, name: PostNL, category: shopping}
+  - {package: nl.nos.app, name: NOS, category: news}
+  - {package: nl.telegraaf, name: De Telegraaf, category: news}
+  - {package: com.takeaway.android, name: Thuisbezorgd.nl, category: food}
+  - {package: nl.rijksoverheid.digid.pub, name: DigiD, category: government}
+  - {package: com.supportware.Buienradar, name: Buienradar, category: weather}
+  - {package: nl.kpn.mijn, name: MijnKPN, category: telecom}
+  - {package: nl.oberon.tmobile.my, name: Odido, category: telecom}
+  - {package: com.vodafone.android, name: Vodafone & Ziggo, category: telecom}

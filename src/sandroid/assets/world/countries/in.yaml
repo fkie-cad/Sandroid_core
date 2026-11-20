@@ -1,0 +1,792 @@
+# Sandroid world pack: country 'in' (India), schema v1. Generated 2026-11-20 by agent countries-2.
+# Sources and licences: in.SOURCES.md (source ids S1.. are referenced in phone entries).
+pack: country
+schema: 1.1
+country: in
+name: India
+languages:
+  hi: 0.3
+  hi-Latn: 0.12
+  en: 0.18
+  bn: 0.07
+  mr: 0.06
+  te: 0.06
+  ta: 0.05
+  gu: 0.035
+  kn: 0.035
+  ml: 0.025
+  pa: 0.02
+  ur: 0.02
+  or: 0.015
+timezones: [Asia/Kolkata]
+date_format: dd/MM/yyyy
+time_format: "h:mm a"
+currency: {code: INR, symbol: ₹, format: "₹1,499"}
+phone:
+  country_code: '91'
+  trunk_prefix: '0'
+  national_format_examples: [98765 43210, +91 98765 43210, 011 2345 6789, 022 2345 6789, 080 4123 4567]
+  mobile:
+    realistic:
+      - {prefix: '987', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '981', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '991', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '998', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '999', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '990', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '982', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '970', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '961', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '945', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '935', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '930', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '920', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '910', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '900', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '895', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '889', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '880', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '860', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '810', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '800', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '799', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '789', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '750', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '740', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '730', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '700', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '705', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '709', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '690', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '660', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '639', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '630', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '620', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '600', length: 10, operator: null, note: 3-digit lead of a mobile series; series are allotted per operator and licensed service area (LSA); MNP since 2011}
+      - {prefix: '92430', length: 10, operator: Jio, note: "DoT MSC allotment, Madhya Pradesh LSA"}
+      - {prefix: '92431', length: 10, operator: Jio, note: "DoT MSC allotment, Madhya Pradesh LSA"}
+      - {prefix: '92230', length: 10, operator: Jio, note: "DoT MSC allotment, Maharashtra LSA"}
+      - {prefix: '92231', length: 10, operator: Jio, note: "DoT MSC allotment, Maharashtra LSA"}
+    unallocated: null
+    fiction: null
+  landline:
+    cities:
+      - {city: Mumbai, area_code: '22', subscriber_length: 8}
+      - {city: Delhi, area_code: '11', subscriber_length: 8}
+      - {city: Bengaluru, area_code: '80', subscriber_length: 8}
+      - {city: Hyderabad, area_code: '40', subscriber_length: 8}
+      - {city: Ahmedabad, area_code: '79', subscriber_length: 8}
+      - {city: Chennai, area_code: '44', subscriber_length: 8}
+      - {city: Kolkata, area_code: '33', subscriber_length: 8}
+      - {city: Pune, area_code: '20', subscriber_length: 8}
+      - {city: Jaipur, area_code: '141', subscriber_length: 7}
+      - {city: Lucknow, area_code: '522', subscriber_length: 7}
+      - {city: Kanpur, area_code: '512', subscriber_length: 7}
+      - {city: Nagpur, area_code: '712', subscriber_length: 7}
+      - {city: Patna, area_code: '612', subscriber_length: 7}
+      - {city: Indore, area_code: '731', subscriber_length: 7}
+      - {city: Kochi, area_code: '484', subscriber_length: 7}
+      - {city: Chandigarh, area_code: '172', subscriber_length: 7}
+      - {city: Guwahati, area_code: '361', subscriber_length: 7}
+      - {city: Bhubaneswar, area_code: '674', subscriber_length: 7}
+    fiction: null
+  validation_note: 'Mobile = 10 digits starting 6-9. libphonenumber 9.0.43 treats every 4-digit series 6000-9999 as valid MOBILE, so it cannot separate allotted from unallotted series. DoT publishes MSC/series allotments only as individual PDF letters (dot.gov.in ''Allotment of MSC codes'') with no consolidated register or list of free series, so no unallocated block could be stated with confidence: unallocated is null. Level 5 is used for 13-digit M2M numbers (not 10-digit). No official fiction/drama range exists in India. Prefix does not identify the operator (MNP, circle-specific allotments).'
+carriers:
+  - {name: Jio, sim_operator: Jio 4G, mccmnc: '405857', share: 0.41}
+  - {name: Airtel, sim_operator: airtel, mccmnc: '40410', share: 0.34}
+  - {name: Vi, sim_operator: Vi India, mccmnc: '40420', share: 0.17}
+  - {name: BSNL, sim_operator: BSNL Mobile, mccmnc: '40438', share: 0.08}
+cities:
+  - {name: Mumbai, state: Maharashtra, lat: 19.076, lon: 72.8777, population: 12440000, area_code: '22', postcodes: ['400001', '400050', '400053', '400058', '400069', '400076', '400097', '400101'], districts: [Andheri, Bandra, Dadar, Borivali, Powai, Malad, Colaba, Goregaon, Thane]}
+  - {name: Delhi, state: Delhi, lat: 28.6139, lon: 77.209, population: 16790000, area_code: '11', postcodes: ['110001', '110016', '110017', '110024', '110025', '110034', '110048', '110085', '110092'], districts: [Connaught Place, Lajpat Nagar, Saket, Rohini, Dwarka, Karol Bagh, Mayur Vihar, Hauz Khas]}
+  - {name: Bengaluru, state: Karnataka, lat: 12.9716, lon: 77.5946, population: 8440000, area_code: '80', postcodes: ['560001', '560034', '560038', '560066', '560068', '560076', '560095', '560102'], districts: [Koramangala, Indiranagar, Whitefield, HSR Layout, Jayanagar, Marathahalli, BTM Layout, Electronic City]}
+  - {name: Hyderabad, state: Telangana, lat: 17.385, lon: 78.4867, population: 6810000, area_code: '40', postcodes: ['500001', '500016', '500032', '500034', '500072', '500081', '500084'], districts: [Banjara Hills, Jubilee Hills, Gachibowli, Madhapur, Kukatpally, Secunderabad, Begumpet]}
+  - {name: Ahmedabad, state: Gujarat, lat: 23.0225, lon: 72.5714, population: 5580000, area_code: '79', postcodes: ['380001', '380006', '380009', '380015', '380054', '380058'], districts: [Navrangpura, Satellite, Bopal, Maninagar, Vastrapur, Paldi]}
+  - {name: Chennai, state: Tamil Nadu, lat: 13.0827, lon: 80.2707, population: 4650000, area_code: '44', postcodes: ['600001', '600017', '600020', '600028', '600040', '600041', '600096'], districts: [T. Nagar, Adyar, Anna Nagar, Velachery, Mylapore, Tambaram, Porur]}
+  - {name: Kolkata, state: West Bengal, lat: 22.5726, lon: 88.3639, population: 4500000, area_code: '33', postcodes: ['700001', '700019', '700029', '700064', '700091', '700156'], districts: [Salt Lake, Park Street, Ballygunge, New Town, Behala, Dum Dum, Howrah]}
+  - {name: Pune, state: Maharashtra, lat: 18.5204, lon: 73.8567, population: 3120000, area_code: '20', postcodes: ['411001', '411004', '411007', '411014', '411038', '411045', '411057'], districts: [Kothrud, Hinjewadi, Baner, Viman Nagar, Hadapsar, Shivajinagar, Aundh]}
+  - {name: Jaipur, state: Rajasthan, lat: 26.9124, lon: 75.7873, population: 3050000, area_code: '141', postcodes: ['302001', '302004', '302015', '302017', '302021'], districts: [Malviya Nagar, Vaishali Nagar, Mansarovar, C-Scheme, Raja Park]}
+  - {name: Lucknow, state: Uttar Pradesh, lat: 26.8467, lon: 80.9462, population: 2820000, area_code: '522', postcodes: ['226001', '226010', '226012', '226016', '226024'], districts: [Gomti Nagar, Hazratganj, Aliganj, Indira Nagar, Alambagh]}
+  - {name: Patna, state: Bihar, lat: 25.5941, lon: 85.1376, population: 1680000, area_code: '612', postcodes: ['800001', '800013', '800014', '800020'], districts: [Boring Road, Kankarbagh, Rajendra Nagar, Patliputra]}
+  - {name: Indore, state: Madhya Pradesh, lat: 22.7196, lon: 75.8577, population: 1960000, area_code: '731', postcodes: ['452001', '452010', '452016', '452018'], districts: [Vijay Nagar, Palasia, Rajwada, Bhawarkua]}
+  - {name: Kochi, state: Kerala, lat: 9.9312, lon: 76.2673, population: 600000, area_code: '484', postcodes: ['682001', '682016', '682020', '682024', '682030'], districts: [Ernakulam, Kakkanad, Edappally, Fort Kochi, Vyttila]}
+  - {name: Chandigarh, state: Chandigarh, lat: 30.7333, lon: 76.7794, population: 1050000, area_code: '172', postcodes: ['160017', '160022', '160036', '160047'], districts: [Sector 17, Sector 22, Sector 35, Manimajra]}
+  - {name: Guwahati, state: Assam, lat: 26.1445, lon: 91.7362, population: 960000, area_code: '361', postcodes: ['781001', '781005', '781006', '781028'], districts: [Paltan Bazaar, Dispur, Zoo Road, Beltola]}
+  - {name: Bhubaneswar, state: Odisha, lat: 20.2961, lon: 85.8245, population: 840000, area_code: '674', postcodes: ['751001', '751007', '751013', '751024'], districts: [Saheed Nagar, Patia, Nayapalli, Old Town]}
+streets: [
+  MG Road, Station Road, Gandhi Road, Nehru Road, Main Road, 1st Main Road, 2nd Cross Road,
+  3rd Cross, 100 Feet Road, 80 Feet Road, Ring Road, Link Road, Church Street, Temple Road,
+  Market Road, Hospital Road, College Road, School Road, Park Street, Mall Road, Civil Lines,
+  Subhash Marg, Tilak Road, Rajaji Street, Anna Salai, Netaji Subhas Road, Sardar Patel Road,
+  Ambedkar Road, Shivaji Road, Vivekananda Road, Tagore Road, Lal Bahadur Shastri Marg,
+  Rajendra Prasad Road, Gandhi Nagar Main Road, Indira Nagar 2nd Stage, Sector 15 Road,
+  Old Airport Road, Bypass Road, Lake Road, Bazaar Road, Kutchery Road, Cantonment Road,
+  Linking Road, Hill Road, Residency Road, Brigade Road, Infantry Road, Sarojini Naidu Marg,
+  Mahatma Gandhi Marg, Jawaharlal Nehru Marg, Swami Vivekanand Road, Ashoka Road, Rajpath Road,
+  Gokhale Road, Laxmi Road, Ganesh Peth Road, Kamaraj Salai, Periyar Road, Lake View Road
+]
+address_format: '{number}, {street}, {district}, {city} {postcode}'
+places:
+  - {category: park, name: Lodhi Garden, city: Delhi, lat: 28.5931, lon: 77.2197}
+  - {category: park, name: Cubbon Park, city: Bengaluru, lat: 12.9763, lon: 77.5929}
+  - {category: park, name: Lalbagh Botanical Garden, city: Bengaluru, lat: 12.9507, lon: 77.5848}
+  - {category: park, name: Sanjay Gandhi National Park, city: Mumbai, lat: 19.2147, lon: 72.9106}
+  - {category: park, name: Maidan, city: Kolkata, lat: 22.555, lon: 88.344}
+  - {category: park, name: Rock Garden, city: Chandigarh, lat: 30.7525, lon: 76.8101}
+  - {category: landmark, name: India Gate, city: Delhi, lat: 28.6129, lon: 77.2295}
+  - {category: landmark, name: Qutub Minar, city: Delhi, lat: 28.5245, lon: 77.1855}
+  - {category: landmark, name: Gateway of India, city: Mumbai, lat: 18.922, lon: 72.8347}
+  - {category: landmark, name: Charminar, city: Hyderabad, lat: 17.3616, lon: 78.4747}
+  - {category: landmark, name: Howrah Bridge, city: Kolkata, lat: 22.5851, lon: 88.3468}
+  - {category: landmark, name: Victoria Memorial, city: Kolkata, lat: 22.5448, lon: 88.3426}
+  - {category: landmark, name: Hawa Mahal, city: Jaipur, lat: 26.9239, lon: 75.8267}
+  - {category: landmark, name: Taj Mahal, city: Agra, lat: 27.1751, lon: 78.0421}
+  - {category: landmark, name: Marine Drive, city: Mumbai, lat: 18.944, lon: 72.823}
+  - {category: landmark, name: Sabarmati Riverfront, city: Ahmedabad, lat: 23.035, lon: 72.577}
+  - {category: station, name: Chhatrapati Shivaji Maharaj Terminus, city: Mumbai, lat: 18.9402, lon: 72.8356}
+  - {category: station, name: New Delhi Railway Station, city: Delhi, lat: 28.643, lon: 77.2194}
+  - {category: station, name: Howrah Junction, city: Kolkata, lat: 22.5839, lon: 88.3425}
+  - {category: station, name: Chennai Central, city: Chennai, lat: 13.0827, lon: 80.2754}
+  - {category: station, name: KSR Bengaluru City Junction, city: Bengaluru, lat: 12.9784, lon: 77.5697}
+  - {category: station, name: Rajiv Chowk Metro Station, city: Delhi, lat: 28.6328, lon: 77.2197}
+  - {category: airport, name: Indira Gandhi International Airport, city: Delhi, lat: 28.5562, lon: 77.1}
+  - {category: airport, name: Chhatrapati Shivaji Maharaj International Airport, city: Mumbai, lat: 19.0896, lon: 72.8656}
+  - {category: airport, name: Kempegowda International Airport, city: Bengaluru, lat: 13.1986, lon: 77.7066}
+  - {category: airport, name: Rajiv Gandhi International Airport, city: Hyderabad, lat: 17.2403, lon: 78.4294}
+  - {category: airport, name: Chennai International Airport, city: Chennai, lat: 12.9941, lon: 80.1709}
+  - {category: beach, name: Juhu Beach, city: Mumbai, lat: 19.0988, lon: 72.8267}
+  - {category: beach, name: Marina Beach, city: Chennai, lat: 13.05, lon: 80.2824}
+  - {category: beach, name: Calangute Beach, city: Goa, lat: 15.5439, lon: 73.7553}
+  - {category: beach, name: Kovalam Beach, city: Thiruvananthapuram, lat: 8.4004, lon: 76.9787}
+  - {category: beach, name: Puri Beach, city: Puri, lat: 19.7983, lon: 85.8249}
+  - {category: mountain, name: Mall Road, city: Shimla, lat: 31.1048, lon: 77.1734}
+  - {category: mountain, name: Tiger Hill, city: Darjeeling, lat: 26.993, lon: 88.291}
+  - {category: mountain, name: Nandi Hills, city: Chikkaballapur, lat: 13.3702, lon: 77.6835}
+  - {category: mountain, name: Solang Valley, city: Manali, lat: 32.3166, lon: 77.1569}
+  - {category: museum, name: Chhatrapati Shivaji Maharaj Vastu Sangrahalaya, city: Mumbai, lat: 18.9269, lon: 72.8326}
+  - {category: museum, name: National Museum, city: Delhi, lat: 28.6118, lon: 77.2194}
+  - {category: museum, name: Indian Museum, city: Kolkata, lat: 22.5579, lon: 88.3511}
+  - {category: museum, name: Salar Jung Museum, city: Hyderabad, lat: 17.3713, lon: 78.4804}
+  - {category: stadium, name: Wankhede Stadium, city: Mumbai, lat: 18.9389, lon: 72.8258}
+  - {category: stadium, name: Eden Gardens, city: Kolkata, lat: 22.5646, lon: 88.3433}
+  - {category: stadium, name: M. Chinnaswamy Stadium, city: Bengaluru, lat: 12.9788, lon: 77.5996}
+  - {category: stadium, name: Narendra Modi Stadium, city: Ahmedabad, lat: 23.0916, lon: 72.5974}
+  - {category: stadium, name: Arun Jaitley Stadium, city: Delhi, lat: 28.6379, lon: 77.2432}
+  - {category: stadium, name: M. A. Chidambaram Stadium, city: Chennai, lat: 13.0628, lon: 80.2793}
+  - {category: market, name: Chandni Chowk, city: Delhi, lat: 28.6506, lon: 77.2303}
+  - {category: market, name: Sarojini Nagar Market, city: Delhi, lat: 28.577, lon: 77.1966}
+  - {category: market, name: Crawford Market, city: Mumbai, lat: 18.9474, lon: 72.8343}
+  - {category: market, name: Commercial Street, city: Bengaluru, lat: 12.9822, lon: 77.6083}
+  - {category: market, name: New Market, city: Kolkata, lat: 22.56, lon: 88.3525}
+  - {category: market, name: Laad Bazaar, city: Hyderabad, lat: 17.3612, lon: 78.472}
+  - {category: lake, name: Hussain Sagar, city: Hyderabad, lat: 17.4239, lon: 78.4738}
+  - {category: lake, name: Ulsoor Lake, city: Bengaluru, lat: 12.9817, lon: 77.62}
+  - {category: lake, name: Powai Lake, city: Mumbai, lat: 19.127, lon: 72.905}
+  - {category: lake, name: Sukhna Lake, city: Chandigarh, lat: 30.7421, lon: 76.8188}
+  - {category: lake, name: Dal Lake, city: Srinagar, lat: 34.11, lon: 74.87}
+names:
+  culture: in
+  female:
+    - {name: Priya, w: 1.0, g: [hindi, tamil]}
+    - {name: Pooja, w: 0.5056, g: [hindi, kannada]}
+    - {name: Lakshmi, w: 0.4081, g: [telugu, tamil, malayalam]}
+    - {name: Fatima, w: 0.379, g: [muslim]}
+    - {name: Anjali, w: 0.3533, g: [hindi, malayalam]}
+    - {name: Neha, w: 0.3368, g: [hindi]}
+    - {name: Moumita, w: 0.2357, g: [bengali]}
+    - {name: Sneha, w: 0.2206, g: [marathi, malayalam]}
+    - {name: Sunita, w: 0.2127, g: [hindi]}
+    - {name: Ayesha, w: 0.2031, g: [muslim]}
+    - {name: Rekha, w: 0.1805, g: [hindi]}
+    - {name: Kavita, w: 0.1571, g: [hindi]}
+    - {name: Zainab, w: 0.141, g: [muslim]}
+    - {name: Hetal, w: 0.14, g: [gujarati]}
+    - {name: Anita, w: 0.1393, g: [hindi]}
+    - {name: Subhashree, w: 0.1385, g: [odia_assamese]}
+    - {name: Deepika, w: 0.133, g: [kannada]}
+    - {name: Sudeshna, w: 0.1263, g: [bengali]}
+    - {name: Sonia, w: 0.1253, g: [hindi]}
+    - {name: Divya, w: 0.1157, g: [hindi, tamil]}
+    - {name: Ritu, w: 0.114, g: [hindi]}
+    - {name: Pallavi, w: 0.1105, g: [marathi]}
+    - {name: Sana, w: 0.1088, g: [muslim]}
+    - {name: Sravani, w: 0.1053, g: [telugu]}
+    - {name: Shalini, w: 0.1046, g: [hindi]}
+    - {name: Preeti, w: 0.0967, g: [hindi]}
+    - {name: Nisha, w: 0.09, g: [hindi]}
+    - {name: Nazia, w: 0.089, g: [muslim]}
+    - {name: Riya, w: 0.0881, g: [hindi, bengali]}
+    - {name: Rumpa, w: 0.0877, g: [bengali]}
+    - {name: Sapna, w: 0.0842, g: [hindi]}
+    - {name: Harpreet, w: 0.0832, g: [punjabi]}
+    - {name: Kiran, w: 0.0791, g: [hindi]}
+    - {name: Shraddha, w: 0.0767, g: [marathi]}
+    - {name: Shabana, w: 0.0756, g: [muslim]}
+    - {name: Krupa, w: 0.075, g: [gujarati]}
+    - {name: Rani, w: 0.0747, g: [hindi]}
+    - {name: Smita, w: 0.0742, g: [odia_assamese]}
+    - {name: Kavya, w: 0.0739, g: [tamil, kannada]}
+    - {name: Swathi, w: 0.0731, g: [telugu]}
+    - {name: Shruthi, w: 0.0713, g: [kannada]}
+    - {name: Geeta, w: 0.0707, g: [hindi]}
+    - {name: Payel, w: 0.0677, g: [bengali]}
+    - {name: Manju, w: 0.0671, g: [hindi]}
+    - {name: Farah, w: 0.0658, g: [muslim]}
+    - {name: Aarti, w: 0.064, g: [hindi]}
+    - {name: Shweta, w: 0.0611, g: [hindi]}
+    - {name: Rutuja, w: 0.0592, g: [marathi]}
+    - {name: Rukhsar, w: 0.0583, g: [muslim]}
+    - {name: Bhavani, w: 0.0564, g: [telugu]}
+    - {name: Ananya, w: 0.0561, g: [hindi]}
+    - {name: Tanushree, w: 0.0554, g: [bengali]}
+    - {name: Khushi, w: 0.0539, g: [hindi]}
+    - {name: Sabina, w: 0.0525, g: [muslim]}
+    - {name: Dhara, w: 0.0521, g: [gujarati]}
+    - {name: Saloni, w: 0.0518, g: [hindi]}
+    - {name: Lipsa, w: 0.0515, g: [odia_assamese]}
+    - {name: Aparna, w: 0.05, g: [malayalam]}
+    - {name: Rashmi, w: 0.0495, g: [kannada]}
+    - {name: Prajakta, w: 0.0485, g: [marathi]}
+    - {name: Komal, w: 0.0482, g: [hindi]}
+    - {name: Nasreen, w: 0.0477, g: [muslim]}
+    - {name: Debjani, w: 0.047, g: [bengali]}
+    - {name: Payal, w: 0.0466, g: [hindi]}
+    - {name: Haritha, w: 0.0462, g: [telugu]}
+    - {name: Mamta, w: 0.0451, g: [hindi]}
+    - {name: Gurpreet, w: 0.0446, g: [punjabi]}
+    - {name: Heena, w: 0.0438, g: [muslim]}
+    - {name: Kajal, w: 0.0437, g: [hindi]}
+    - {name: Sakshi, w: 0.0424, g: [hindi]}
+    - {name: Meena, w: 0.0415, g: [tamil]}
+    - {name: Ishita, w: 0.0412, g: [hindi]}
+    - {name: Mrunal, w: 0.0411, g: [marathi]}
+    - {name: Sanchita, w: 0.0409, g: [bengali]}
+    - {name: Shaista, w: 0.0405, g: [muslim]}
+    - {name: Nidhi, w: 0.0402, g: [gujarati]}
+    - {name: Aditi, w: 0.04, g: [hindi]}
+    - {name: Swagatika, w: 0.0398, g: [odia_assamese]}
+    - {name: Sirisha, w: 0.0392, g: [telugu]}
+    - {name: Spoorthi, w: 0.0382, g: [kannada]}
+    - {name: Mehnaz, w: 0.0377, g: [muslim]}
+    - {name: Arpita, w: 0.0363, g: [bengali]}
+    - {name: Ashwini, w: 0.0358, g: [marathi]}
+    - {name: Revathi, w: 0.0352, g: [tamil]}
+    - {name: Afreen, w: 0.0352, g: [muslim]}
+    - {name: Keerthi, w: 0.0341, g: [telugu]}
+    - {name: Tabassum, w: 0.0331, g: [muslim]}
+    - {name: Bhavna, w: 0.0329, g: [gujarati]}
+    - {name: Shreya, w: 0.0326, g: [bengali]}
+    - {name: Priyanka, w: 0.0325, g: [odia_assamese]}
+    - {name: Snehal, w: 0.0317, g: [marathi]}
+    - {name: Bhavya, w: 0.0313, g: [kannada]}
+    - {name: Saba, w: 0.0313, g: [muslim]}
+    - {name: Manpreet, w: 0.0309, g: [punjabi]}
+    - {name: Saranya, w: 0.0307, g: [tamil]}
+    - {name: Madhavi, w: 0.0302, g: [telugu]}
+    - {name: Aliya, w: 0.0296, g: [muslim]}
+    - {name: Madhuri, w: 0.0285, g: [marathi]}
+    - {name: Mariyam, w: 0.0281, g: [muslim]}
+    - {name: Jinal, w: 0.0279, g: [gujarati]}
+    - {name: Bornali, w: 0.0276, g: [odia_assamese]}
+    - {name: Ankita, w: 0.0272, g: [bengali]}
+    - {name: Gayathri, w: 0.0272, g: [tamil]}
+    - {name: Sowmya, w: 0.0272, g: [telugu]}
+    - {name: Reshma, w: 0.0268, g: [malayalam]}
+    - {name: Sahana, w: 0.0265, g: [kannada]}
+    - {name: Vaishali, w: 0.026, g: [marathi]}
+    - {name: Puja, w: 0.0252, g: [bengali]}
+    - {name: Pavani, w: 0.0247, g: [telugu]}
+    - {name: Deepa, w: 0.0245, g: [tamil]}
+    - {name: Foram, w: 0.0243, g: [gujarati]}
+    - {name: Pallabi, w: 0.024, g: [odia_assamese]}
+    - {name: Simran, w: 0.0239, g: [punjabi]}
+    - {name: Supriya, w: 0.0238, g: [marathi]}
+    - {name: Sohini, w: 0.0234, g: [bengali]}
+    - {name: Anusha, w: 0.0227, g: [telugu]}
+    - {name: Vidhya, w: 0.0223, g: [tamil]}
+    - {name: Gauri, w: 0.022, g: [marathi]}
+    - {name: Sreeja, w: 0.0219, g: [malayalam]}
+    - {name: Mousumi, w: 0.0219, g: [bengali]}
+    - {name: Khyati, w: 0.0215, g: [gujarati]}
+    - {name: Monalisa, w: 0.0213, g: [odia_assamese]}
+    - {name: Navya, w: 0.021, g: [telugu]}
+    - {name: Aishwarya, w: 0.0205, g: [marathi]}
+    - {name: Nandhini, w: 0.0204, g: [tamil]}
+    - {name: Harika, w: 0.0195, g: [telugu]}
+    - {name: Jaspreet, w: 0.0195, g: [punjabi]}
+    - {name: Riddhi, w: 0.0194, g: [gujarati]}
+    - {name: Tejaswini, w: 0.0192, g: [marathi]}
+    - {name: Rupali, w: 0.0192, g: [odia_assamese]}
+    - {name: Janani, w: 0.0189, g: [tamil]}
+    - {name: Athira, w: 0.0186, g: [malayalam]}
+    - {name: Shilpa, w: 0.0184, g: [kannada]}
+    - {name: Mansi, w: 0.0176, g: [gujarati]}
+    - {name: Pavithra, w: 0.0176, g: [tamil]}
+    - {name: Lavanya, w: 0.0167, g: [kannada]}
+    - {name: Navneet, w: 0.0166, g: [punjabi]}
+    - {name: Keerthana, w: 0.0164, g: [tamil]}
+    - {name: Neethu, w: 0.0162, g: [malayalam]}
+    - {name: Hiral, w: 0.0162, g: [gujarati]}
+    - {name: Urvi, w: 0.015, g: [gujarati]}
+    - {name: Amandeep, w: 0.0144, g: [punjabi]}
+    - {name: Aswathy, w: 0.0129, g: [malayalam]}
+    - {name: Rajveer, w: 0.0128, g: [punjabi]}
+    - {name: Mariya, w: 0.0118, g: [malayalam]}
+    - {name: Kirandeep, w: 0.0115, g: [punjabi]}
+    - {name: Jincy, w: 0.0108, g: [malayalam]}
+    - {name: Parminder, w: 0.0105, g: [punjabi]}
+    - {name: Ancy, w: 0.01, g: [malayalam]}
+  male:
+    - {name: Rahul, w: 1.0, g: [hindi, malayalam]}
+    - {name: Amit, w: 0.5251, g: [hindi]}
+    - {name: Mohammed, w: 0.403, g: [muslim]}
+    - {name: Rajesh, w: 0.3819, g: [hindi, tamil]}
+    - {name: Sunil, w: 0.2814, g: [hindi]}
+    - {name: Arijit, w: 0.2552, g: [bengali]}
+    - {name: Suresh, w: 0.2535, g: [hindi, telugu]}
+    - {name: Ramesh, w: 0.2454, g: [hindi, telugu]}
+    - {name: Anil, w: 0.2302, g: [hindi]}
+    - {name: Sachin, w: 0.2233, g: [marathi]}
+    - {name: Mohd, w: 0.216, g: [muslim]}
+    - {name: Srinivas, w: 0.2024, g: [telugu]}
+    - {name: Karthik, w: 0.1869, g: [tamil]}
+    - {name: Arun, w: 0.1523, g: [hindi, tamil]}
+    - {name: Hardik, w: 0.1515, g: [gujarati]}
+    - {name: Vikas, w: 0.1508, g: [hindi]}
+    - {name: Abdul, w: 0.1499, g: [muslim]}
+    - {name: Debasish, w: 0.1499, g: [odia_assamese]}
+    - {name: Manjunath, w: 0.144, g: [kannada]}
+    - {name: Subhajit, w: 0.1367, g: [bengali]}
+    - {name: Sanjay, w: 0.1356, g: [hindi]}
+    - {name: Ravi, w: 0.1309, g: [hindi, telugu]}
+    - {name: Manoj, w: 0.1234, g: [hindi]}
+    - {name: Prashant, w: 0.1196, g: [marathi]}
+    - {name: Imran, w: 0.1157, g: [muslim]}
+    - {name: Venkatesh, w: 0.1085, g: [telugu]}
+    - {name: Vijay, w: 0.1075, g: [hindi, tamil]}
+    - {name: Deepak, w: 0.1047, g: [hindi]}
+    - {name: Arjun, w: 0.101, g: [malayalam]}
+    - {name: Ajay, w: 0.0974, g: [hindi]}
+    - {name: Sourav, w: 0.0949, g: [bengali]}
+    - {name: Salman, w: 0.0947, g: [muslim]}
+    - {name: Pankaj, w: 0.0856, g: [hindi]}
+    - {name: Mahesh, w: 0.0842, g: [marathi, telugu]}
+    - {name: Gurpreet, w: 0.0842, g: [punjabi]}
+    - {name: Sandeep, w: 0.0831, g: [marathi]}
+    - {name: Jignesh, w: 0.0812, g: [gujarati]}
+    - {name: Rakesh, w: 0.0808, g: [hindi]}
+    - {name: Faisal, w: 0.0803, g: [muslim]}
+    - {name: Sambit, w: 0.0803, g: [odia_assamese]}
+    - {name: Prashanth, w: 0.0772, g: [kannada]}
+    - {name: Ashok, w: 0.0765, g: [hindi]}
+    - {name: Ganesh, w: 0.076, g: [marathi, tamil]}
+    - {name: Debashis, w: 0.0733, g: [bengali]}
+    - {name: Mukesh, w: 0.0727, g: [hindi]}
+    - {name: Arif, w: 0.0699, g: [muslim]}
+    - {name: Prakash, w: 0.0695, g: [tamil]}
+    - {name: Rohit, w: 0.0692, g: [hindi]}
+    - {name: Abhishek, w: 0.0661, g: [hindi]}
+    - {name: Naveen, w: 0.0657, g: [telugu, kannada]}
+    - {name: Harsh, w: 0.0636, g: [hindi, gujarati]}
+    - {name: Gaurav, w: 0.0633, g: [hindi]}
+    - {name: Irfan, w: 0.062, g: [muslim]}
+    - {name: Saurabh, w: 0.0607, g: [hindi]}
+    - {name: Abhijit, w: 0.0599, g: [bengali]}
+    - {name: Vivek, w: 0.0583, g: [hindi]}
+    - {name: Chirag, w: 0.0564, g: [gujarati]}
+    - {name: Ankit, w: 0.0561, g: [hindi]}
+    - {name: Shahid, w: 0.0558, g: [muslim]}
+    - {name: Biswajit, w: 0.0558, g: [odia_assamese]}
+    - {name: Kiran, w: 0.0551, g: [telugu, kannada]}
+    - {name: Vishnu, w: 0.0541, g: [malayalam]}
+    - {name: Nitin, w: 0.0541, g: [hindi]}
+    - {name: Senthil, w: 0.0537, g: [tamil]}
+    - {name: Raghavendra, w: 0.0536, g: [kannada]}
+    - {name: Partha, w: 0.0509, g: [bengali]}
+    - {name: Aamir, w: 0.0507, g: [muslim]}
+    - {name: Aman, w: 0.0505, g: [hindi]}
+    - {name: Shubham, w: 0.0488, g: [hindi]}
+    - {name: Aditya, w: 0.0473, g: [hindi]}
+    - {name: Zaid, w: 0.0466, g: [muslim]}
+    - {name: Akash, w: 0.0459, g: [hindi]}
+    - {name: Harpreet, w: 0.0451, g: [punjabi]}
+    - {name: Nilesh, w: 0.0445, g: [marathi]}
+    - {name: Soumya, w: 0.0443, g: [bengali]}
+    - {name: Murugan, w: 0.0439, g: [tamil]}
+    - {name: Nirav, w: 0.0435, g: [gujarati]}
+    - {name: Aryan, w: 0.0433, g: [hindi]}
+    - {name: Darshan, w: 0.0431, g: [gujarati, kannada]}
+    - {name: Ayaan, w: 0.0431, g: [muslim]}
+    - {name: Pranab, w: 0.043, g: [odia_assamese]}
+    - {name: Santosh, w: 0.0414, g: [kannada]}
+    - {name: Praveen, w: 0.0404, g: [telugu]}
+    - {name: Asif, w: 0.0401, g: [muslim]}
+    - {name: Anirban, w: 0.0393, g: [bengali]}
+    - {name: Swapnil, w: 0.0387, g: [marathi]}
+    - {name: Anoop, w: 0.0376, g: [malayalam]}
+    - {name: Javed, w: 0.0375, g: [muslim]}
+    - {name: Balaji, w: 0.0373, g: [tamil]}
+    - {name: Bhavesh, w: 0.0356, g: [gujarati]}
+    - {name: Sayan, w: 0.0353, g: [bengali]}
+    - {name: Rizwan, w: 0.0352, g: [muslim]}
+    - {name: Jyotirmoy, w: 0.0352, g: [odia_assamese]}
+    - {name: Tushar, w: 0.0344, g: [marathi]}
+    - {name: Shivakumar, w: 0.0338, g: [kannada]}
+    - {name: Sameer, w: 0.0332, g: [muslim]}
+    - {name: Vignesh, w: 0.0324, g: [tamil]}
+    - {name: Tanmay, w: 0.0321, g: [bengali]}
+    - {name: Wasim, w: 0.0315, g: [muslim]}
+    - {name: Manpreet, w: 0.0313, g: [punjabi]}
+    - {name: Sai, w: 0.0312, g: [telugu]}
+    - {name: Rohan, w: 0.0309, g: [marathi]}
+    - {name: Ketan, w: 0.0302, g: [gujarati]}
+    - {name: Tariq, w: 0.0299, g: [muslim]}
+    - {name: Bikash, w: 0.0299, g: [odia_assamese]}
+    - {name: Indranil, w: 0.0295, g: [bengali]}
+    - {name: Sreejith, w: 0.029, g: [malayalam]}
+    - {name: Saravanan, w: 0.0288, g: [tamil]}
+    - {name: Vinay, w: 0.0287, g: [kannada]}
+    - {name: Arshad, w: 0.0285, g: [muslim]}
+    - {name: Omkar, w: 0.0281, g: [marathi]}
+    - {name: Chaitanya, w: 0.028, g: [telugu]}
+    - {name: Rajib, w: 0.0273, g: [bengali]}
+    - {name: Mitesh, w: 0.0263, g: [gujarati]}
+    - {name: Prasanta, w: 0.026, g: [odia_assamese]}
+    - {name: Dinesh, w: 0.0259, g: [tamil]}
+    - {name: Aniket, w: 0.0258, g: [marathi]}
+    - {name: Harish, w: 0.0255, g: [telugu]}
+    - {name: Arnab, w: 0.0254, g: [bengali]}
+    - {name: Chethan, w: 0.025, g: [kannada]}
+    - {name: Jaspreet, w: 0.0242, g: [punjabi]}
+    - {name: Sagar, w: 0.0239, g: [marathi]}
+    - {name: Jithin, w: 0.0237, g: [malayalam]}
+    - {name: Sandip, w: 0.0237, g: [bengali]}
+    - {name: Vamsi, w: 0.0234, g: [telugu]}
+    - {name: Parth, w: 0.0233, g: [gujarati]}
+    - {name: Himanshu, w: 0.0231, g: [odia_assamese]}
+    - {name: Yogesh, w: 0.0222, g: [marathi]}
+    - {name: Teja, w: 0.0216, g: [telugu]}
+    - {name: Ashwin, w: 0.0216, g: [tamil]}
+    - {name: Vishal, w: 0.0208, g: [marathi]}
+    - {name: Dipankar, w: 0.0207, g: [odia_assamese]}
+    - {name: Gowtham, w: 0.02, g: [tamil]}
+    - {name: Harjeet, w: 0.0198, g: [punjabi]}
+    - {name: Krishna, w: 0.0188, g: [telugu]}
+    - {name: Manikandan, w: 0.0186, g: [tamil]}
+    - {name: Akhil, w: 0.0175, g: [malayalam]}
+    - {name: Dhruv, w: 0.0175, g: [gujarati]}
+    - {name: Gurdeep, w: 0.0168, g: [punjabi]}
+    - {name: Kunal, w: 0.0162, g: [gujarati]}
+    - {name: Abhilash, w: 0.0155, g: [malayalam]}
+    - {name: Amandeep, w: 0.0146, g: [punjabi]}
+    - {name: Jose, w: 0.014, g: [malayalam]}
+    - {name: Sukhwinder, w: 0.013, g: [punjabi]}
+    - {name: Tom, w: 0.0127, g: [malayalam]}
+    - {name: Shibu, w: 0.0117, g: [malayalam]}
+    - {name: Baljit, w: 0.0117, g: [punjabi]}
+    - {name: Biju, w: 0.0108, g: [malayalam]}
+    - {name: Jaswinder, w: 0.0106, g: [punjabi]}
+    - {name: Navjot, w: 0.0097, g: [punjabi]}
+    - {name: Ranjit, w: 0.009, g: [punjabi]}
+  surnames:
+    - {name: Sharma, w: 1.0, g: [hindi, telugu]}
+    - {name: Singh, w: 0.5955, g: [hindi, punjabi]}
+    - {name: Kumar, w: 0.5595, g: [hindi, telugu, tamil]}
+    - {name: Khan, w: 0.408, g: [muslim]}
+    - {name: Verma, w: 0.2793, g: [hindi]}
+    - {name: Das, w: 0.2447, g: [bengali, odia_assamese]}
+    - {name: Gupta, w: 0.2285, g: [hindi]}
+    - {name: Yadav, w: 0.2243, g: [hindi, telugu]}
+    - {name: Patil, w: 0.2199, g: [marathi, kannada]}
+    - {name: Shaikh, w: 0.2186, g: [muslim]}
+    - {name: Reddy, w: 0.1972, g: [telugu]}
+    - {name: Mishra, w: 0.1967, g: [hindi, odia_assamese]}
+    - {name: Ansari, w: 0.1518, g: [muslim]}
+    - {name: Pandey, w: 0.1497, g: [hindi]}
+    - {name: Rao, w: 0.1433, g: [telugu, kannada]}
+    - {name: Patel, w: 0.1365, g: [gujarati]}
+    - {name: Tiwari, w: 0.1346, g: [hindi]}
+    - {name: Gowda, w: 0.1312, g: [kannada]}
+    - {name: Kulkarni, w: 0.1298, g: [marathi, kannada]}
+    - {name: Srivastava, w: 0.1225, g: [hindi]}
+    - {name: Ghosh, w: 0.1223, g: [bengali]}
+    - {name: Mohanty, w: 0.1187, g: [odia_assamese]}
+    - {name: Chauhan, w: 0.1185, g: [hindi, gujarati]}
+    - {name: Qureshi, w: 0.1172, g: [muslim]}
+    - {name: Shukla, w: 0.1124, g: [hindi]}
+    - {name: Nair, w: 0.1104, g: [telugu, malayalam]}
+    - {name: Jha, w: 0.0967, g: [hindi]}
+    - {name: Siddiqui, w: 0.0958, g: [muslim]}
+    - {name: Raman, w: 0.0954, g: [tamil]}
+    - {name: Dubey, w: 0.0905, g: [hindi]}
+    - {name: Prasad, w: 0.0884, g: [hindi, telugu]}
+    - {name: Saxena, w: 0.085, g: [hindi]}
+    - {name: Banerjee, w: 0.0849, g: [bengali]}
+    - {name: Ahmed, w: 0.0813, g: [muslim]}
+    - {name: Agarwal, w: 0.0802, g: [hindi]}
+    - {name: Rajput, w: 0.076, g: [hindi]}
+    - {name: Deshmukh, w: 0.0743, g: [marathi]}
+    - {name: Naidu, w: 0.0734, g: [telugu]}
+    - {name: Shah, w: 0.0731, g: [gujarati]}
+    - {name: Thakur, w: 0.0722, g: [hindi]}
+    - {name: Ali, w: 0.0708, g: [muslim]}
+    - {name: Shetty, w: 0.0703, g: [kannada]}
+    - {name: Chaudhary, w: 0.0687, g: [hindi]}
+    - {name: Subramanian, w: 0.0662, g: [tamil]}
+    - {name: Pillai, w: 0.0656, g: [tamil, malayalam]}
+    - {name: Chatterjee, w: 0.0656, g: [bengali]}
+    - {name: Patnaik, w: 0.0636, g: [odia_assamese]}
+    - {name: Joshi, w: 0.0628, g: [marathi, gujarati]}
+    - {name: Maurya, w: 0.0628, g: [hindi]}
+    - {name: Hussain, w: 0.0628, g: [muslim]}
+    - {name: Tripathi, w: 0.0602, g: [hindi]}
+    - {name: Nayak, w: 0.0593, g: [odia_assamese, kannada]}
+    - {name: Dwivedi, w: 0.0579, g: [hindi]}
+    - {name: Jadhav, w: 0.0574, g: [marathi]}
+    - {name: Chowdary, w: 0.0566, g: [telugu]}
+    - {name: Syed, w: 0.0565, g: [muslim]}
+    - {name: Bansal, w: 0.0557, g: [hindi]}
+    - {name: Jain, w: 0.0537, g: [hindi]}
+    - {name: Mukherjee, w: 0.0536, g: [bengali]}
+    - {name: Mehra, w: 0.0518, g: [hindi]}
+    - {name: Mirza, w: 0.0514, g: [muslim]}
+    - {name: Krishnan, w: 0.0511, g: [tamil]}
+    - {name: Mehta, w: 0.0508, g: [gujarati]}
+    - {name: Rawat, w: 0.0501, g: [hindi]}
+    - {name: Menon, w: 0.0499, g: [malayalam]}
+    - {name: Hegde, w: 0.0488, g: [kannada]}
+    - {name: Bisht, w: 0.0485, g: [hindi]}
+    - {name: Pathan, w: 0.0471, g: [muslim]}
+    - {name: Meena, w: 0.047, g: [hindi]}
+    - {name: Pawar, w: 0.0469, g: [marathi]}
+    - {name: Varma, w: 0.0463, g: [telugu]}
+    - {name: Gautam, w: 0.0456, g: [hindi]}
+    - {name: Sen, w: 0.0455, g: [bengali]}
+    - {name: Malik, w: 0.0436, g: [muslim]}
+    - {name: Iyer, w: 0.0418, g: [tamil]}
+    - {name: Rizvi, w: 0.0406, g: [muslim]}
+    - {name: Shinde, w: 0.0398, g: [marathi]}
+    - {name: Kaur, w: 0.0398, g: [punjabi]}
+    - {name: Roy, w: 0.0396, g: [bengali]}
+    - {name: Raju, w: 0.0393, g: [telugu]}
+    - {name: Desai, w: 0.0392, g: [gujarati]}
+    - {name: Naqvi, w: 0.0379, g: [muslim]}
+    - {name: Mansuri, w: 0.0357, g: [muslim]}
+    - {name: Iyengar, w: 0.0355, g: [tamil]}
+    - {name: Bose, w: 0.0351, g: [bengali]}
+    - {name: More, w: 0.0347, g: [marathi]}
+    - {name: Goud, w: 0.0342, g: [telugu]}
+    - {name: Sahoo, w: 0.0341, g: [odia_assamese]}
+    - {name: Saifi, w: 0.0319, g: [muslim]}
+    - {name: Dutta, w: 0.0316, g: [bengali]}
+    - {name: Bhat, w: 0.0308, g: [kannada]}
+    - {name: Warsi, w: 0.0303, g: [muslim]}
+    - {name: Saha, w: 0.0287, g: [bengali]}
+    - {name: Deshpande, w: 0.0276, g: [marathi]}
+    - {name: Gill, w: 0.0276, g: [punjabi]}
+    - {name: Murugan, w: 0.0274, g: [tamil]}
+    - {name: Parmar, w: 0.0272, g: [gujarati]}
+    - {name: Kurup, w: 0.0268, g: [malayalam]}
+    - {name: Chakraborty, w: 0.0264, g: [bengali]}
+    - {name: Naik, w: 0.0262, g: [kannada]}
+    - {name: Gaikwad, w: 0.0251, g: [marathi]}
+    - {name: Babu, w: 0.0248, g: [telugu]}
+    - {name: Rajendran, w: 0.0246, g: [tamil]}
+    - {name: Mondal, w: 0.0244, g: [bengali]}
+    - {name: Trivedi, w: 0.0237, g: [gujarati]}
+    - {name: Panda, w: 0.0237, g: [odia_assamese]}
+    - {name: Chavan, w: 0.0231, g: [marathi]}
+    - {name: Biswas, w: 0.0227, g: [bengali]}
+    - {name: Selvam, w: 0.0224, g: [tamil]}
+    - {name: Varghese, w: 0.0219, g: [malayalam]}
+    - {name: Kale, w: 0.0213, g: [marathi]}
+    - {name: Sandhu, w: 0.0213, g: [punjabi]}
+    - {name: Sarkar, w: 0.0212, g: [bengali]}
+    - {name: Murthy, w: 0.0211, g: [telugu]}
+    - {name: Pandya, w: 0.021, g: [gujarati]}
+    - {name: Behera, w: 0.0206, g: [odia_assamese]}
+    - {name: Natarajan, w: 0.0206, g: [tamil]}
+    - {name: Paul, w: 0.02, g: [bengali]}
+    - {name: Bhosale, w: 0.0199, g: [marathi]}
+    - {name: Venkatesan, w: 0.019, g: [tamil]}
+    - {name: Bhatt, w: 0.0189, g: [gujarati]}
+    - {name: Majumdar, w: 0.0188, g: [bengali]}
+    - {name: Thomas, w: 0.0186, g: [malayalam]}
+    - {name: Salunkhe, w: 0.0186, g: [marathi]}
+    - {name: Setty, w: 0.0183, g: [telugu]}
+    - {name: Rout, w: 0.0183, g: [odia_assamese]}
+    - {name: Kamath, w: 0.0182, g: [kannada]}
+    - {name: Bhattacharya, w: 0.0178, g: [bengali]}
+    - {name: Sundaram, w: 0.0177, g: [tamil]}
+    - {name: Kadam, w: 0.0175, g: [marathi]}
+    - {name: Sidhu, w: 0.0174, g: [punjabi]}
+    - {name: Modi, w: 0.0172, g: [gujarati]}
+    - {name: Ganguly, w: 0.0169, g: [bengali]}
+    - {name: Raj, w: 0.0166, g: [tamil]}
+    - {name: Shenoy, w: 0.0165, g: [kannada]}
+    - {name: Shirke, w: 0.0165, g: [marathi]}
+    - {name: Joseph, w: 0.0162, g: [malayalam]}
+    - {name: Thakkar, w: 0.0158, g: [gujarati]}
+    - {name: Mane, w: 0.0156, g: [marathi]}
+    - {name: Shankar, w: 0.0156, g: [tamil]}
+    - {name: Swain, w: 0.0149, g: [odia_assamese]}
+    - {name: Waghmare, w: 0.0148, g: [marathi]}
+    - {name: Dhillon, w: 0.0148, g: [punjabi]}
+    - {name: Ramasamy, w: 0.0147, g: [tamil]}
+    - {name: Kurian, w: 0.0143, g: [malayalam]}
+    - {name: Pai, w: 0.014, g: [kannada]}
+    - {name: Baruah, w: 0.0137, g: [odia_assamese]}
+    - {name: Solanki, w: 0.0136, g: [gujarati]}
+    - {name: Mathew, w: 0.0129, g: [malayalam]}
+    - {name: Grewal, w: 0.0129, g: [punjabi]}
+    - {name: Rathod, w: 0.0127, g: [gujarati]}
+    - {name: Gogoi, w: 0.0127, g: [odia_assamese]}
+    - {name: Vyas, w: 0.0119, g: [gujarati]}
+    - {name: Bora, w: 0.0118, g: [odia_assamese]}
+    - {name: George, w: 0.0117, g: [malayalam]}
+    - {name: Brar, w: 0.0114, g: [punjabi]}
+    - {name: Saikia, w: 0.011, g: [odia_assamese]}
+    - {name: Panicker, w: 0.0108, g: [malayalam]}
+    - {name: Kalita, w: 0.0104, g: [odia_assamese]}
+    - {name: Bajwa, w: 0.0103, g: [punjabi]}
+    - {name: Warrier, w: 0.01, g: [malayalam]}
+    - {name: Deka, w: 0.0098, g: [odia_assamese]}
+    - {name: Malhotra, w: 0.0093, g: [punjabi]}
+    - {name: Namboothiri, w: 0.0093, g: [malayalam]}
+    - {name: Jacob, w: 0.0087, g: [malayalam]}
+    - {name: Kapoor, w: 0.0086, g: [punjabi]}
+    - {name: Khanna, w: 0.0079, g: [punjabi]}
+    - {name: Arora, w: 0.0074, g: [punjabi]}
+    - {name: Ahuja, w: 0.0069, g: [punjabi]}
+    - {name: Sethi, w: 0.0065, g: [punjabi]}
+    - {name: Chopra, w: 0.0061, g: [punjabi]}
+  nicknames:
+    Mohammed: Md
+    Abhishek: Abhi
+    Aditya: Adi
+    Siddharth: Sid
+    Rohit: Ro
+    Priyanka: Pinky
+    Ananya: Annu
+    Rajesh: Raju
+    Venkatesh: Venky
+    Srinivas: Seenu
+    Subramanian: Mani
+    Lakshmi: Lucky
+    Gurpreet: Gopi
+    Harpreet: Happy
+    Shubham: Shubh
+    Prashant: Pash
+    Vignesh: Vicky
+    Vishal: Vicky
+    Nikhil: Nikki
+  display: '{first} {last}'
+  groups:
+    hindi: 0.4
+    marathi: 0.07
+    gujarati: 0.045
+    bengali: 0.08
+    odia_assamese: 0.04
+    telugu: 0.065
+    tamil: 0.06
+    kannada: 0.04
+    malayalam: 0.03
+    punjabi: 0.025
+    muslim: 0.14
+cultures: []
+email:
+  domains:
+    - {domain: gmail.com, share: 0.82}
+    - {domain: yahoo.com, share: 0.05}
+    - {domain: yahoo.co.in, share: 0.03}
+    - {domain: rediffmail.com, share: 0.03}
+    - {domain: outlook.com, share: 0.03}
+    - {domain: hotmail.com, share: 0.02}
+    - {domain: icloud.com, share: 0.01}
+    - {domain: ymail.com, share: 0.01}
+  patterns: [
+    '{first}{last}', '{first}.{last}', '{first}{last}{nn}', '{first}{yy}', '{first}.{last}{yyyy}',
+    '{f}{last}{nn}', '{first}{digits:3}'
+  ]
+services:
+  - {sender: AD-BLUDRT, label: Blue Dart, kind: courier, sender_type: alphanumeric}
+  - {sender: AX-DELHVY, label: Delhivery, kind: courier, sender_type: alphanumeric}
+  - {sender: VM-AMAZON, label: Amazon, kind: courier, sender_type: alphanumeric}
+  - {sender: JD-FLPKRT, label: Flipkart, kind: courier, sender_type: alphanumeric}
+  - {sender: VK-INDPST, label: India Post, kind: courier, sender_type: alphanumeric}
+  - {sender: AD-SBIINB, label: SBI, kind: bank, sender_type: alphanumeric}
+  - {sender: VM-HDFCBK, label: HDFC Bank, kind: bank, sender_type: alphanumeric}
+  - {sender: AX-ICICIB, label: ICICI Bank, kind: bank, sender_type: alphanumeric}
+  - {sender: JM-AXISBK, label: Axis Bank, kind: bank, sender_type: alphanumeric}
+  - {sender: VK-KOTAKB, label: Kotak, kind: bank, sender_type: alphanumeric}
+  - {sender: JX-PHONPE, label: PhonePe, kind: bank, sender_type: alphanumeric}
+  - {sender: JM-JIOINF, label: Jio, kind: telecom, sender_type: alphanumeric}
+  - {sender: AD-AIRTEL, label: Airtel, kind: telecom, sender_type: alphanumeric}
+  - {sender: VM-VICARE, label: Vi, kind: telecom, sender_type: alphanumeric}
+  - {sender: AD-GOOGLE, label: Google, kind: otp_service, sender_type: alphanumeric}
+  - {sender: VM-PAYTM, label: Paytm, kind: otp_service, sender_type: alphanumeric}
+  - {sender: AX-UIDAI, label: UIDAI (Aadhaar OTP), kind: otp_service, sender_type: alphanumeric}
+  - {sender: VM-PRACTO, label: Practo, kind: doctor, sender_type: alphanumeric}
+  - {sender: "+9198...", kind: doctor, sender_type: number}
+  - {sender: VK-APOLLO, label: Apollo Pharmacy, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: VM-SWIGGY, label: Swiggy, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: VK-ZOMATO, label: Zomato, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: AD-OLACAB, label: Ola, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: VM-UBERIN, label: Uber, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: AD-INDIGO, label: IndiGo, kind: airline, sender_type: alphanumeric}
+  - {sender: VM-AIRIND, label: Air India, kind: airline, sender_type: alphanumeric}
+  - {sender: AD-IRCTCI, label: IRCTC, kind: rail, sender_type: alphanumeric}
+  - {sender: VK-ITDEPT, label: Income Tax Dept, kind: government, sender_type: alphanumeric}
+  - {sender: AD-EPFOHO, label: EPFO, kind: government, sender_type: alphanumeric}
+  - {sender: VM-DMART, label: DMart, kind: retail, sender_type: alphanumeric}
+  - {sender: AX-MYNTRA, label: Myntra, kind: retail, sender_type: alphanumeric}
+  - {sender: VK-BESCOM, label: BESCOM, kind: utility, sender_type: alphanumeric}
+  - {sender: AD-TATAPW, label: Tata Power, kind: utility, sender_type: alphanumeric}
+holidays:
+  - {date: "01-26", name: Republic Day}
+  - {date: "08-15", name: Independence Day}
+  - {date: "10-02", name: Gandhi Jayanti}
+  - {date: "12-25", name: Christmas}
+  - {rule: easter-2, name: Good Friday}
+  - {rule: "lunisolar:holi", name: Holi}
+  - {rule: "lunisolar:diwali", name: Diwali}
+  - {rule: "lunisolar:dussehra", name: Dussehra}
+  - {rule: "hijri:10-01", name: Eid ul-Fitr}
+  - {rule: "hijri:12-10", name: Eid ul-Adha (Bakrid)}
+popular_apps:
+  - {package: com.whatsapp, name: WhatsApp, category: messaging}
+  - {package: com.truecaller, name: Truecaller, category: messaging}
+  - {package: in.mohalla.sharechat, name: ShareChat, category: messaging}
+  - {package: com.phonepe.app, name: PhonePe, category: banking}
+  - {package: com.google.android.apps.nbu.paisa.user, name: Google Pay, category: banking}
+  - {package: net.one97.paytm, name: Paytm, category: banking}
+  - {package: in.org.npci.upiapp, name: BHIM, category: banking}
+  - {package: com.sbi.lotusintouch, name: YONO SBI, category: banking}
+  - {package: com.csam.icici.bank.imobile, name: iMobile by ICICI, category: banking}
+  - {package: com.axis.mobile, name: Axis Mobile, category: banking}
+  - {package: com.hdfcbank.payzapp, name: PayZapp, category: banking}
+  - {package: com.dreamplug.androidapp, name: CRED, category: banking}
+  - {package: com.olacabs.customer, name: Ola, category: transport}
+  - {package: com.ubercab, name: Uber, category: transport}
+  - {package: com.rapido.passenger, name: Rapido, category: transport}
+  - {package: cris.org.in.prs.ima, name: IRCTC Rail Connect, category: transport}
+  - {package: com.makemytrip, name: MakeMyTrip, category: transport}
+  - {package: com.ixigo, name: ixigo, category: transport}
+  - {package: com.flipkart.android, name: Flipkart, category: shopping}
+  - {package: in.amazon.mShop.android.shopping, name: Amazon India, category: shopping}
+  - {package: com.myntra.android, name: Myntra, category: shopping}
+  - {package: com.meesho.supply, name: Meesho, category: shopping}
+  - {package: com.cricbuzz.android, name: Cricbuzz, category: news}
+  - {package: in.startv.hotstar, name: JioHotstar, category: news}
+  - {package: in.swiggy.android, name: Swiggy, category: food}
+  - {package: com.application.zomato, name: Zomato, category: food}
+  - {package: com.zeptoconsumerapp, name: Zepto, category: food}
+  - {package: com.grofers.customerapp, name: Blinkit, category: food}
+  - {package: com.bigbasket.mobileapp, name: bigbasket, category: food}
+  - {package: in.gov.umang.negd.g2c, name: UMANG, category: government}
+  - {package: com.digilocker.android, name: DigiLocker, category: government}
+  - {package: nic.goi.aarogyasetu, name: Aarogya Setu, category: health}
+  - {package: com.practo.fabric, name: Practo, category: health}
+  - {package: com.jio.myjio, name: MyJio, category: telecom}
+  - {package: com.myairtelapp, name: Airtel Thanks, category: telecom}
+  - {package: com.mventus.selfcare.activity, name: Vi, category: telecom}

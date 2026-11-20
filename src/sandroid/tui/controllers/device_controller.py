@@ -411,6 +411,9 @@ class DeviceController:
                 if self.switch_device(serial, cleanup=False):
                     return
             elif active.serial == serial:
+                from sandroid.core import device_prep
+
+                device_prep.request_prepare(serial, "ready", manager=dm)
                 self._ui(self._log_info, f"AVD '{avd_name}' ({serial}) is ready")
                 self._ui(self._refresh_ui)
                 return
@@ -614,8 +617,9 @@ class DeviceController:
 
         Args:
             serial: Emulator serial.
-            options: Launch options (default: those it was launched with, else
-                the remembered ones; a wipe becomes a normal boot).
+            options: Launch options (default: those it was launched with --
+                our launch record, else its command line -- else the
+                remembered ones; a wipe becomes a normal boot).
             on_done: UI-thread callback ``(ok, message)`` once the relaunched
                 process started or the restart failed.
         """

@@ -1,0 +1,675 @@
+# Sandroid world pack: country 'tr' (Türkiye), schema v1. Generated 2026-11-20 by agent countries-2.
+# Sources and licences: tr.SOURCES.md (source ids S1.. are referenced in phone entries).
+pack: country
+schema: 1.1
+country: tr
+name: Türkiye
+languages: {tr: 0.95, ku: 0.03, ar: 0.01, en: 0.01}
+timezones: [Europe/Istanbul]
+date_format: dd.MM.yyyy
+time_format: "HH:mm"
+currency: {code: TRY, symbol: ₺, format: "49,99 ₺"}
+phone:
+  country_code: '90'
+  trunk_prefix: '0'
+  national_format_examples: [0532 123 45 67, 0505 123 45 67, 0212 123 45 67, 0312 123 45 67]
+  mobile:
+    realistic:
+      - {prefix: '501', length: 10, operator: Türk Telekom}
+      - {prefix: '505', length: 10, operator: Türk Telekom}
+      - {prefix: '506', length: 10, operator: Türk Telekom}
+      - {prefix: '507', length: 10, operator: Türk Telekom}
+      - {prefix: '551', length: 10, operator: Türk Telekom}
+      - {prefix: '552', length: 10, operator: Türk Telekom}
+      - {prefix: '553', length: 10, operator: Türk Telekom}
+      - {prefix: '554', length: 10, operator: Türk Telekom}
+      - {prefix: '555', length: 10, operator: Türk Telekom}
+      - {prefix: '559', length: 10, operator: Türk Telekom}
+      - {prefix: '530', length: 10, operator: Turkcell}
+      - {prefix: '531', length: 10, operator: Turkcell}
+      - {prefix: '532', length: 10, operator: Turkcell}
+      - {prefix: '533', length: 10, operator: Turkcell}
+      - {prefix: '534', length: 10, operator: Turkcell}
+      - {prefix: '535', length: 10, operator: Turkcell}
+      - {prefix: '536', length: 10, operator: Turkcell}
+      - {prefix: '537', length: 10, operator: Turkcell}
+      - {prefix: '538', length: 10, operator: Turkcell}
+      - {prefix: '539', length: 10, operator: Turkcell}
+      - {prefix: '56161', length: 10, operator: Turkcell}
+      - {prefix: '540', length: 10, operator: Vodafone}
+      - {prefix: '541', length: 10, operator: Vodafone}
+      - {prefix: '542', length: 10, operator: Vodafone}
+      - {prefix: '543', length: 10, operator: Vodafone}
+      - {prefix: '544', length: 10, operator: Vodafone}
+      - {prefix: '545', length: 10, operator: Vodafone}
+      - {prefix: '546', length: 10, operator: Vodafone}
+      - {prefix: '547', length: 10, operator: Vodafone}
+      - {prefix: '548', length: 10, operator: Vodafone}
+      - {prefix: '549', length: 10, operator: Vodafone}
+    unallocated:
+      - {prefix: '502', length: 10, note: 'not allocated to any operator in BTK ''Numbers allocated to operators'' report (NPR, dated 2026-11-18); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '503', length: 10, note: 'not allocated to any operator in BTK ''Numbers allocated to operators'' report (NPR, dated 2026-11-18); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '504', length: 10, note: 'not allocated to any operator in BTK ''Numbers allocated to operators'' report (NPR, dated 2026-11-18); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '508', length: 10, note: 'not allocated to any operator in BTK ''Numbers allocated to operators'' report (NPR, dated 2026-11-18); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '509', length: 10, note: 'not allocated to any operator in BTK ''Numbers allocated to operators'' report (NPR, dated 2026-11-18); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '556', length: 10, note: 'not allocated to any operator in BTK ''Numbers allocated to operators'' report (NPR, dated 2026-11-18); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '557', length: 10, note: 'not allocated to any operator in BTK ''Numbers allocated to operators'' report (NPR, dated 2026-11-18); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '558', length: 10, note: 'not allocated to any operator in BTK ''Numbers allocated to operators'' report (NPR, dated 2026-11-18); libphonenumber 9.0.43: valid MOBILE', source: S2}
+    fiction: null
+  landline:
+    cities:
+      - {city: İstanbul (Avrupa), area_code: '212', subscriber_length: 7}
+      - {city: İstanbul (Anadolu), area_code: '216', subscriber_length: 7}
+      - {city: Ankara, area_code: '312', subscriber_length: 7}
+      - {city: İzmir, area_code: '232', subscriber_length: 7}
+      - {city: Bursa, area_code: '224', subscriber_length: 7}
+      - {city: Antalya, area_code: '242', subscriber_length: 7}
+      - {city: Adana, area_code: '322', subscriber_length: 7}
+      - {city: Konya, area_code: '332', subscriber_length: 7}
+      - {city: Gaziantep, area_code: '342', subscriber_length: 7}
+      - {city: Şanlıurfa, area_code: '414', subscriber_length: 7}
+      - {city: Kocaeli, area_code: '262', subscriber_length: 7}
+      - {city: Mersin, area_code: '324', subscriber_length: 7}
+      - {city: Diyarbakır, area_code: '412', subscriber_length: 7}
+      - {city: Kayseri, area_code: '352', subscriber_length: 7}
+      - {city: Eskişehir, area_code: '222', subscriber_length: 7}
+      - {city: Samsun, area_code: '362', subscriber_length: 7}
+      - {city: Trabzon, area_code: '462', subscriber_length: 7}
+    fiction: null
+  validation_note: 'Mobile = 5XX + 7 digits. BTK''s NPR report (18/11/2026) lists 4-digit MN blocks: Türk Telekom (TT Mobil) 50[1,5,6,7]x and 55[1-5,9]x, Turkcell 53xx, Vodafone 54xx; plus 510 (MVNO numbers, 6-digit blocks), 51616/56161 (Turkcell), 57x and 582xx (M2M / special mobile number types). 502-504, 508-509 and 556-558 have no allocation in the BTK report, yet libphonenumber 9.0.43 accepts them as valid MOBILE (its TR pattern is broader than BTK''s allocations), so they pass client-side validation. No official fiction/drama range is known for Türkiye. Number portability is heavy (BTK: ported numbers exceed 2x population), so prefix != current network.'
+carriers:
+  - {name: Turkcell, sim_operator: TURKCELL, mccmnc: '28601', share: 0.41}
+  - {name: Vodafone, sim_operator: vodafone TR, mccmnc: '28602', share: 0.31}
+  - {name: Türk Telekom, sim_operator: TURK TELEKOM, mccmnc: '28603', share: 0.28}
+cities:
+  - {name: İstanbul, lat: 41.0082, lon: 28.9784, population: 15700000, area_code: '212', postcodes: ['34000', '34100', '34349', '34365', '34371', '34420', '34435', '34664', '34710', '34730'], districts: [Kadıköy, Beşiktaş, Üsküdar, Şişli, Fatih, Bakırköy, Ataşehir, Esenyurt, Beyoğlu, Sarıyer, Maltepe, Pendik]}
+  - {name: Ankara, lat: 39.9334, lon: 32.8597, population: 5900000, area_code: '312', postcodes: ['06000', '06100', '06420', '06520', '06530', '06550', "06680", "06690"], districts: [Çankaya, Keçiören, Yenimahalle, Mamak, Etimesgut, Sincan, Altındağ]}
+  - {name: İzmir, lat: 38.4237, lon: 27.1428, population: 4500000, area_code: '232', postcodes: ['35000', '35210', '35220', '35330', '35530', '35540'], districts: [Konak, Karşıyaka, Bornova, Buca, Bayraklı, Alsancak, Çiğli]}
+  - {name: Bursa, lat: 40.1885, lon: 29.061, population: 3200000, area_code: '224', postcodes: ['16000', '16010', '16050', '16110', '16120', '16200'], districts: [Osmangazi, Nilüfer, Yıldırım, Mudanya, Gemlik]}
+  - {name: Antalya, lat: 36.8969, lon: 30.7133, population: 2700000, area_code: '242', postcodes: ['07000', '07040', '07050', '07070', '07100', '07160'], districts: [Muratpaşa, Konyaaltı, Kepez, Lara, Döşemealtı]}
+  - {name: Adana, lat: 37.0, lon: 35.3213, population: 2270000, area_code: '322', postcodes: ['01000', '01060', '01120', '01170', '01250'], districts: [Seyhan, Çukurova, Yüreğir, Sarıçam]}
+  - {name: Konya, lat: 37.8746, lon: 32.4932, population: 2330000, area_code: '332', postcodes: ['42000', '42020', '42050', '42060', '42090'], districts: [Selçuklu, Meram, Karatay]}
+  - {name: Gaziantep, lat: 37.0662, lon: 37.3833, population: 2160000, area_code: '342', postcodes: ['27000', '27060', '27090', '27310'], districts: [Şahinbey, Şehitkamil, Nizip]}
+  - {name: Şanlıurfa, lat: 37.1591, lon: 38.7969, population: 2200000, area_code: '414', postcodes: ['63000', '63050', '63200', '63300'], districts: [Haliliye, Eyyübiye, Karaköprü, Siverek]}
+  - {name: Kocaeli, lat: 40.7654, lon: 29.9408, population: 2100000, area_code: '262', postcodes: ['41000', '41040', '41100', '41200', '41400'], districts: [İzmit, Gebze, Darıca, Körfez, Gölcük]}
+  - {name: Mersin, lat: 36.8121, lon: 34.6415, population: 1950000, area_code: '324', postcodes: ['33000', '33010', '33070', '33100', '33110'], districts: [Yenişehir, Mezitli, Toroslar, Akdeniz, Tarsus]}
+  - {name: Diyarbakır, lat: 37.9144, lon: 40.2306, population: 1820000, area_code: '412', postcodes: ['21000', '21070', '21090', '21100'], districts: [Bağlar, Kayapınar, Yenişehir, Sur]}
+  - {name: Kayseri, lat: 38.7312, lon: 35.4787, population: 1450000, area_code: '352', postcodes: ['38000', '38030', '38040', '38070'], districts: [Melikgazi, Kocasinan, Talas]}
+  - {name: Eskişehir, lat: 39.7767, lon: 30.5206, population: 920000, area_code: '222', postcodes: ['26000', '26010', '26040', '26130'], districts: [Odunpazarı, Tepebaşı]}
+  - {name: Samsun, lat: 41.2867, lon: 36.33, population: 1380000, area_code: '362', postcodes: ['55000', '55060', '55080', '55200'], districts: [İlkadım, Atakum, Canik]}
+  - {name: Trabzon, lat: 41.0027, lon: 39.7168, population: 820000, area_code: '462', postcodes: ['61000', '61030', '61040', '61080'], districts: [Ortahisar, Akçaabat, Yomra]}
+streets: [
+  Atatürk Caddesi, Cumhuriyet Caddesi, İstiklal Caddesi, İnönü Caddesi, Gazi Caddesi,
+  Fatih Sultan Mehmet Caddesi, Mevlana Caddesi, Kazım Karabekir Caddesi, Barbaros Bulvarı,
+  Bağdat Caddesi, Halaskargazi Caddesi, Millet Caddesi, Hürriyet Caddesi, Zübeyde Hanım Caddesi,
+  Mithatpaşa Caddesi, Namık Kemal Caddesi, Mimar Sinan Caddesi, Yunus Emre Caddesi,
+  Necip Fazıl Caddesi, Adnan Menderes Bulvarı, Kıbrıs Caddesi, Plevne Caddesi, Okul Sokak,
+  Çiçek Sokak, Lale Sokak, Gül Sokak, Menekşe Sokak, Papatya Sokak, Yasemin Sokak, Karanfil Sokak,
+  Cami Sokak, Çınar Sokak, Ihlamur Sokak, Akasya Sokak, Manolya Sokak, Zambak Sokak, Nergis Sokak,
+  Erguvan Sokak, Bahar Sokak, Deniz Sokak, Pınar Sokak, Yıldız Sokak, Gündoğdu Sokak, Barış Sokak,
+  Huzur Sokak, Sevgi Sokak, Fırat Sokak, Dicle Sokak, Kardelen Sokak, Şehit Er Sokak,
+  Gazi Mustafa Kemal Bulvarı, Mareşal Fevzi Çakmak Caddesi, Talatpaşa Bulvarı, Kızılırmak Caddesi,
+  Sakarya Caddesi, Ankara Caddesi, İstanbul Caddesi, Kordon Boyu, Dumlupınar Bulvarı
+]
+address_format: '{street} No:{number}, {postcode} {district}/{city}'
+places:
+  - {category: park, name: Emirgan Korusu, city: İstanbul, lat: 41.108, lon: 29.0541}
+  - {category: park, name: Yıldız Parkı, city: İstanbul, lat: 41.0484, lon: 29.0128}
+  - {category: park, name: Gülhane Parkı, city: İstanbul, lat: 41.0134, lon: 28.9812}
+  - {category: park, name: Gençlik Parkı, city: Ankara, lat: 39.9383, lon: 32.8494}
+  - {category: park, name: Kültürpark, city: İzmir, lat: 38.4312, lon: 27.1446}
+  - {category: park, name: Moda Sahil Parkı, city: İstanbul, lat: 40.9795, lon: 29.0236}
+  - {category: landmark, name: Ayasofya, city: İstanbul, lat: 41.0086, lon: 28.9802}
+  - {category: landmark, name: Sultanahmet Camii, city: İstanbul, lat: 41.0054, lon: 28.9768}
+  - {category: landmark, name: Galata Kulesi, city: İstanbul, lat: 41.0256, lon: 28.9741}
+  - {category: landmark, name: Kız Kulesi, city: İstanbul, lat: 41.0211, lon: 29.0041}
+  - {category: landmark, name: Anıtkabir, city: Ankara, lat: 39.925, lon: 32.8369}
+  - {category: landmark, name: Saat Kulesi (Konak), city: İzmir, lat: 38.4189, lon: 27.1287}
+  - {category: landmark, name: Kaleiçi, city: Antalya, lat: 36.8841, lon: 30.7056}
+  - {category: landmark, name: Efes Antik Kenti, city: Selçuk, lat: 37.9395, lon: 27.3417}
+  - {category: station, name: Ankara Garı, city: Ankara, lat: 39.9361, lon: 32.8436}
+  - {category: station, name: Haydarpaşa Garı, city: İstanbul, lat: 40.9969, lon: 29.0193}
+  - {category: station, name: Söğütlüçeşme YHT, city: İstanbul, lat: 40.9918, lon: 29.0372}
+  - {category: station, name: Taksim Metro İstasyonu, city: İstanbul, lat: 41.0369, lon: 28.986}
+  - {category: station, name: Basmane Garı, city: İzmir, lat: 38.4227, lon: 27.1446}
+  - {category: airport, name: İstanbul Havalimanı, city: İstanbul, lat: 41.2753, lon: 28.7519}
+  - {category: airport, name: Sabiha Gökçen Havalimanı, city: İstanbul, lat: 40.8986, lon: 29.3092}
+  - {category: airport, name: Esenboğa Havalimanı, city: Ankara, lat: 40.1281, lon: 32.9951}
+  - {category: airport, name: Adnan Menderes Havalimanı, city: İzmir, lat: 38.2924, lon: 27.157}
+  - {category: airport, name: Antalya Havalimanı, city: Antalya, lat: 36.8987, lon: 30.8005}
+  - {category: beach, name: Konyaaltı Plajı, city: Antalya, lat: 36.865, lon: 30.63}
+  - {category: beach, name: Kleopatra Plajı, city: Alanya, lat: 36.549, lon: 31.984}
+  - {category: beach, name: Ölüdeniz, city: Fethiye, lat: 36.5496, lon: 29.115}
+  - {category: beach, name: Kilyos Plajı, city: İstanbul, lat: 41.248, lon: 29.027}
+  - {category: beach, name: Ilıca Plajı, city: Çeşme, lat: 38.312, lon: 26.37}
+  - {category: mountain, name: Uludağ, city: Bursa, lat: 40.07, lon: 29.221}
+  - {category: mountain, name: Erciyes Kayak Merkezi, city: Kayseri, lat: 38.533, lon: 35.472}
+  - {category: mountain, name: Uzungöl, city: Trabzon, lat: 40.619, lon: 40.295}
+  - {category: mountain, name: Göreme, city: Nevşehir, lat: 38.6431, lon: 34.8289}
+  - {category: museum, name: Topkapı Sarayı, city: İstanbul, lat: 41.0115, lon: 28.9834}
+  - {category: museum, name: İstanbul Arkeoloji Müzeleri, city: İstanbul, lat: 41.0117, lon: 28.9813}
+  - {category: museum, name: Anadolu Medeniyetleri Müzesi, city: Ankara, lat: 39.9385, lon: 32.8618}
+  - {category: museum, name: Zeugma Mozaik Müzesi, city: Gaziantep, lat: 37.0786, lon: 37.3824}
+  - {category: stadium, name: Rams Park, city: İstanbul, lat: 41.1035, lon: 28.9908}
+  - {category: stadium, name: Ülker Stadyumu (Şükrü Saracoğlu), city: İstanbul, lat: 40.9876, lon: 29.0369}
+  - {category: stadium, name: Tüpraş Stadyumu, city: İstanbul, lat: 41.0394, lon: 28.9947}
+  - {category: stadium, name: Papara Park, city: Trabzon, lat: 40.9991, lon: 39.646}
+  - {category: market, name: Kapalıçarşı, city: İstanbul, lat: 41.0108, lon: 28.968}
+  - {category: market, name: Mısır Çarşısı, city: İstanbul, lat: 41.0166, lon: 28.9706}
+  - {category: market, name: Kadıköy Çarşı, city: İstanbul, lat: 40.9905, lon: 29.0262}
+  - {category: market, name: Kemeraltı Çarşısı, city: İzmir, lat: 38.418, lon: 27.131}
+  - {category: lake, name: Mogan Gölü, city: Ankara, lat: 39.78, lon: 32.8}
+  - {category: lake, name: Abant Gölü, city: Bolu, lat: 40.61, lon: 31.28}
+  - {category: lake, name: Eğirdir Gölü, city: Isparta, lat: 37.874, lon: 30.85}
+  - {category: lake, name: Belgrad Ormanı Bentleri, city: İstanbul, lat: 41.18, lon: 28.98}
+names:
+  culture: tr
+  female:
+    - {name: Fatma, w: 1.0}
+    - {name: Ayşe, w: 0.5176}
+    - {name: Emine, w: 0.3522}
+    - {name: Hatice, w: 0.2679}
+    - {name: Zeynep, w: 0.2168}
+    - {name: Elif, w: 0.1823}
+    - {name: Meryem, w: 0.1575}
+    - {name: Şerife, w: 0.1387}
+    - {name: Zehra, w: 0.124}
+    - {name: Sultan, w: 0.1122}
+    - {name: Hanife, w: 0.1025}
+    - {name: Merve, w: 0.0944}
+    - {name: Havva, w: 0.0874}
+    - {name: Zeliha, w: 0.0815}
+    - {name: Esra, w: 0.0763}
+    - {name: Fadime, w: 0.0718}
+    - {name: Özlem, w: 0.0678}
+    - {name: Hacer, w: 0.0642}
+    - {name: Melek, w: 0.061}
+    - {name: Yasemin, w: 0.0581}
+    - {name: Rabia, w: 0.0554}
+    - {name: Hülya, w: 0.0531}
+    - {name: Cemile, w: 0.0509}
+    - {name: Sevim, w: 0.0488}
+    - {name: Gülsüm, w: 0.047}
+    - {name: Leyla, w: 0.0453}
+    - {name: Dilek, w: 0.0437}
+    - {name: Büşra, w: 0.0422}
+    - {name: Aysel, w: 0.0408}
+    - {name: Songül, w: 0.0395}
+    - {name: Kübra, w: 0.0383}
+    - {name: Hüsniye, w: 0.0372}
+    - {name: Hayriye, w: 0.0361}
+    - {name: Esma, w: 0.0351}
+    - {name: Tuğba, w: 0.0341}
+    - {name: Kadriye, w: 0.0332}
+    - {name: Sevgi, w: 0.0324}
+    - {name: Gül, w: 0.0316}
+    - {name: Asiye, w: 0.0308}
+    - {name: Derya, w: 0.0301}
+    - {name: Döndü, w: 0.0294}
+    - {name: Nurcan, w: 0.0287}
+    - {name: Ebru, w: 0.0281}
+    - {name: Pınar, w: 0.0275}
+    - {name: Sibel, w: 0.0269}
+    - {name: Gamze, w: 0.0263}
+    - {name: Arzu, w: 0.0258}
+    - {name: Ayten, w: 0.0253}
+    - {name: Hanım, w: 0.0248}
+    - {name: Filiz, w: 0.0243}
+    - {name: Elif Nur, w: 0.0239}
+    - {name: Yeter, w: 0.0234}
+    - {name: Gülay, w: 0.023}
+    - {name: Serpil, w: 0.0226}
+    - {name: Sema, w: 0.0222}
+    - {name: Aynur, w: 0.0218}
+    - {name: Kezban, w: 0.0215}
+    - {name: Nermin, w: 0.0211}
+    - {name: Medine, w: 0.0208}
+    - {name: Şükran, w: 0.0205}
+    - {name: Necla, w: 0.0201}
+    - {name: Fatmanur, w: 0.0198}
+    - {name: Sümeyye, w: 0.0195}
+    - {name: Hilal, w: 0.0192}
+    - {name: Ecrin, w: 0.019}
+    - {name: Zehra Nur, w: 0.0187}
+    - {name: Asya, w: 0.0184}
+    - {name: Eylül, w: 0.0182}
+    - {name: Defne, w: 0.0179}
+    - {name: Azra, w: 0.0177}
+    - {name: Nisa, w: 0.0174}
+    - {name: Duru, w: 0.0172}
+    - {name: Belinay, w: 0.017}
+    - {name: Ela, w: 0.0168}
+    - {name: Miray, w: 0.0165}
+    - {name: Ayşenur, w: 0.0163}
+    - {name: Damla, w: 0.0161}
+    - {name: İrem, w: 0.0159}
+    - {name: Melike, w: 0.0157}
+    - {name: Beyza, w: 0.0156}
+    - {name: Cansu, w: 0.0154}
+    - {name: Gizem, w: 0.0152}
+    - {name: Buse, w: 0.015}
+    - {name: Seda, w: 0.0149}
+    - {name: Tuba, w: 0.0147}
+    - {name: Neslihan, w: 0.0145}
+    - {name: Gülşen, w: 0.0144}
+    - {name: Nazlı, w: 0.0142}
+    - {name: Selin, w: 0.0141}
+    - {name: Ceren, w: 0.0139}
+    - {name: Burcu, w: 0.0138}
+    - {name: Aslı, w: 0.0136}
+    - {name: Ece, w: 0.0135}
+    - {name: Didem, w: 0.0134}
+    - {name: Çiğdem, w: 0.0132}
+    - {name: Nihal, w: 0.0131}
+    - {name: Şeyma, w: 0.013}
+    - {name: Emel, w: 0.0128}
+    - {name: Nurten, w: 0.0127}
+    - {name: Saadet, w: 0.0126}
+    - {name: Sevda, w: 0.0125}
+    - {name: Nuray, w: 0.0124}
+    - {name: Bahar, w: 0.0122}
+    - {name: Aleyna, w: 0.0121}
+    - {name: Yağmur, w: 0.012}
+  male:
+    - {name: Mehmet, w: 1.0}
+    - {name: Mustafa, w: 0.5176}
+    - {name: Ahmet, w: 0.3522}
+    - {name: Ali, w: 0.2679}
+    - {name: Hüseyin, w: 0.2168}
+    - {name: Hasan, w: 0.1823}
+    - {name: İbrahim, w: 0.1575}
+    - {name: İsmail, w: 0.1387}
+    - {name: Osman, w: 0.124}
+    - {name: Yusuf, w: 0.1122}
+    - {name: Murat, w: 0.1025}
+    - {name: Ömer, w: 0.0944}
+    - {name: Ramazan, w: 0.0874}
+    - {name: Halil, w: 0.0815}
+    - {name: Süleyman, w: 0.0763}
+    - {name: Abdullah, w: 0.0718}
+    - {name: Mahmut, w: 0.0678}
+    - {name: Recep, w: 0.0642}
+    - {name: Salih, w: 0.061}
+    - {name: Fatih, w: 0.0581}
+    - {name: Kadir, w: 0.0554}
+    - {name: Emre, w: 0.0531}
+    - {name: Hakan, w: 0.0509}
+    - {name: Adem, w: 0.0488}
+    - {name: Kemal, w: 0.047}
+    - {name: Yaşar, w: 0.0453}
+    - {name: Bekir, w: 0.0437}
+    - {name: Musa, w: 0.0422}
+    - {name: Metin, w: 0.0408}
+    - {name: Serkan, w: 0.0395}
+    - {name: Orhan, w: 0.0383}
+    - {name: Burak, w: 0.0372}
+    - {name: Mehmet Ali, w: 0.0361}
+    - {name: Uğur, w: 0.0351}
+    - {name: Yunus, w: 0.0341}
+    - {name: Abdurrahman, w: 0.0332}
+    - {name: Sinan, w: 0.0324}
+    - {name: Cemal, w: 0.0316}
+    - {name: Erkan, w: 0.0308}
+    - {name: Bayram, w: 0.0301}
+    - {name: Murat Can, w: 0.0294}
+    - {name: Selim, w: 0.0287}
+    - {name: Volkan, w: 0.0281}
+    - {name: Erdal, w: 0.0275}
+    - {name: Tuncay, w: 0.0269}
+    - {name: Gökhan, w: 0.0263}
+    - {name: Cengiz, w: 0.0258}
+    - {name: Ercan, w: 0.0253}
+    - {name: Necati, w: 0.0248}
+    - {name: Zafer, w: 0.0243}
+    - {name: Tolga, w: 0.0239}
+    - {name: Engin, w: 0.0234}
+    - {name: Mesut, w: 0.023}
+    - {name: Şükrü, w: 0.0226}
+    - {name: Hamza, w: 0.0222}
+    - {name: Furkan, w: 0.0218}
+    - {name: Enes, w: 0.0215}
+    - {name: Yiğit, w: 0.0211}
+    - {name: Eren, w: 0.0208}
+    - {name: Emir, w: 0.0205}
+    - {name: Kerem, w: 0.0201}
+    - {name: Berat, w: 0.0198}
+    - {name: Efe, w: 0.0195}
+    - {name: Mert, w: 0.0192}
+    - {name: Arda, w: 0.019}
+    - {name: Kaan, w: 0.0187}
+    - {name: Batuhan, w: 0.0184}
+    - {name: Onur, w: 0.0182}
+    - {name: Oğuz, w: 0.0179}
+    - {name: Serdar, w: 0.0177}
+    - {name: Taner, w: 0.0174}
+    - {name: Levent, w: 0.0172}
+    - {name: Barış, w: 0.017}
+    - {name: Cem, w: 0.0168}
+    - {name: Deniz, w: 0.0165}
+    - {name: Erhan, w: 0.0163}
+    - {name: Tamer, w: 0.0161}
+    - {name: Okan, w: 0.0159}
+    - {name: Alper, w: 0.0157}
+    - {name: Koray, w: 0.0156}
+    - {name: Doğan, w: 0.0154}
+    - {name: Sercan, w: 0.0152}
+    - {name: Umut, w: 0.015}
+    - {name: Tarık, w: 0.0149}
+    - {name: Nihat, w: 0.0147}
+    - {name: Hikmet, w: 0.0145}
+    - {name: Rıza, w: 0.0144}
+    - {name: Veli, w: 0.0142}
+    - {name: Hayati, w: 0.0141}
+    - {name: Şaban, w: 0.0139}
+    - {name: Cafer, w: 0.0138}
+    - {name: Muhammed, w: 0.0136}
+    - {name: Muhammet, w: 0.0135}
+    - {name: Ömer Faruk, w: 0.0134}
+    - {name: Mustafa Kemal, w: 0.0132}
+    - {name: Yavuz, w: 0.0131}
+    - {name: Selçuk, w: 0.013}
+    - {name: Kenan, w: 0.0128}
+    - {name: Bülent, w: 0.0127}
+    - {name: Ozan, w: 0.0126}
+    - {name: Berk, w: 0.0125}
+    - {name: Alperen, w: 0.0124}
+    - {name: Miraç, w: 0.0122}
+    - {name: Aras, w: 0.0121}
+    - {name: Çınar, w: 0.012}
+    - {name: Poyraz, w: 0.0119}
+    - {name: Göktuğ, w: 0.0118}
+    - {name: Alparslan, w: 0.0117}
+    - {name: Ahmet Can, w: 0.0116}
+  surnames:
+    - {name: Yılmaz, w: 1.0}
+    - {name: Kaya, w: 0.5359}
+    - {name: Demir, w: 0.372}
+    - {name: Çelik, w: 0.2872}
+    - {name: Şahin, w: 0.2349}
+    - {name: Yıldız, w: 0.1994}
+    - {name: Yıldırım, w: 0.1735}
+    - {name: Öztürk, w: 0.1539}
+    - {name: Aydın, w: 0.1384}
+    - {name: Özdemir, w: 0.1259}
+    - {name: Arslan, w: 0.1155}
+    - {name: Doğan, w: 0.1068}
+    - {name: Kılıç, w: 0.0994}
+    - {name: Aslan, w: 0.093}
+    - {name: Çetin, w: 0.0874}
+    - {name: Kara, w: 0.0825}
+    - {name: Koç, w: 0.0781}
+    - {name: Kurt, w: 0.0742}
+    - {name: Özkan, w: 0.0707}
+    - {name: Şimşek, w: 0.0675}
+    - {name: Polat, w: 0.0646}
+    - {name: Özcan, w: 0.0619}
+    - {name: Korkmaz, w: 0.0595}
+    - {name: Çakır, w: 0.0573}
+    - {name: Erdem, w: 0.0552}
+    - {name: Yavuz, w: 0.0533}
+    - {name: Can, w: 0.0515}
+    - {name: Acar, w: 0.0498}
+    - {name: Şen, w: 0.0483}
+    - {name: Aktaş, w: 0.0468}
+    - {name: Güler, w: 0.0455}
+    - {name: Yalçın, w: 0.0442}
+    - {name: Güneş, w: 0.043}
+    - {name: Bozkurt, w: 0.0418}
+    - {name: Bulut, w: 0.0408}
+    - {name: Keskin, w: 0.0397}
+    - {name: Ünal, w: 0.0388}
+    - {name: Turan, w: 0.0379}
+    - {name: Gül, w: 0.037}
+    - {name: Özer, w: 0.0362}
+    - {name: Işık, w: 0.0354}
+    - {name: Kaplan, w: 0.0346}
+    - {name: Avcı, w: 0.0339}
+    - {name: Sarı, w: 0.0332}
+    - {name: Tekin, w: 0.0325}
+    - {name: Taş, w: 0.0319}
+    - {name: Köse, w: 0.0313}
+    - {name: Yüksel, w: 0.0307}
+    - {name: Ateş, w: 0.0301}
+    - {name: Aksoy, w: 0.0296}
+    - {name: Yiğit, w: 0.0291}
+    - {name: Çiftçi, w: 0.0285}
+    - {name: Kaymaz, w: 0.0281}
+    - {name: Coşkun, w: 0.0276}
+    - {name: Kocabaş, w: 0.0271}
+    - {name: Bayram, w: 0.0267}
+    - {name: Uçar, w: 0.0263}
+    - {name: Ekinci, w: 0.0259}
+    - {name: Kılınç, w: 0.0255}
+    - {name: Sönmez, w: 0.0251}
+    - {name: Tunç, w: 0.0247}
+    - {name: Tuna, w: 0.0244}
+    - {name: Duman, w: 0.024}
+    - {name: Akın, w: 0.0237}
+    - {name: Özgür, w: 0.0234}
+    - {name: Kurtuluş, w: 0.023}
+    - {name: Karaca, w: 0.0227}
+    - {name: Erdoğan, w: 0.0224}
+    - {name: Altun, w: 0.0221}
+    - {name: Sezer, w: 0.0218}
+    - {name: Güven, w: 0.0216}
+    - {name: Uysal, w: 0.0213}
+    - {name: Akbulut, w: 0.021}
+    - {name: Kalkan, w: 0.0208}
+    - {name: Yücel, w: 0.0205}
+    - {name: Ay, w: 0.0203}
+    - {name: Bozkaya, w: 0.0201}
+    - {name: Altıntaş, w: 0.0198}
+    - {name: Toprak, w: 0.0196}
+    - {name: Durmaz, w: 0.0194}
+    - {name: Kahraman, w: 0.0192}
+    - {name: Çınar, w: 0.0189}
+    - {name: Bilgin, w: 0.0187}
+    - {name: Karakaya, w: 0.0185}
+    - {name: Özkaya, w: 0.0183}
+    - {name: Doğru, w: 0.0182}
+    - {name: Ercan, w: 0.018}
+    - {name: Er, w: 0.0178}
+    - {name: Gündoğdu, w: 0.0176}
+    - {name: Aydemir, w: 0.0174}
+    - {name: Akgül, w: 0.0173}
+    - {name: Akyüz, w: 0.0171}
+    - {name: Kaçar, w: 0.0169}
+    - {name: Taşkın, w: 0.0168}
+    - {name: Cengiz, w: 0.0166}
+    - {name: Sevim, w: 0.0164}
+    - {name: Aksu, w: 0.0163}
+    - {name: Karaman, w: 0.0161}
+    - {name: Gündüz, w: 0.016}
+    - {name: Önal, w: 0.0158}
+    - {name: Önder, w: 0.0157}
+    - {name: Turgut, w: 0.0156}
+    - {name: Ünlü, w: 0.0154}
+    - {name: Demirci, w: 0.0153}
+    - {name: Uzun, w: 0.0152}
+    - {name: Baysal, w: 0.015}
+    - {name: Erol, w: 0.0149}
+    - {name: Akdağ, w: 0.0148}
+    - {name: Bilgiç, w: 0.0147}
+    - {name: Bakır, w: 0.0145}
+    - {name: Başaran, w: 0.0144}
+    - {name: Dinç, w: 0.0143}
+    - {name: Esen, w: 0.0142}
+    - {name: Ergün, w: 0.0141}
+    - {name: Gök, w: 0.014}
+    - {name: Gökmen, w: 0.0139}
+    - {name: Gülmez, w: 0.0138}
+    - {name: Gürbüz, w: 0.0137}
+    - {name: İnce, w: 0.0136}
+    - {name: Karabulut, w: 0.0135}
+    - {name: Karadağ, w: 0.0134}
+    - {name: Karataş, w: 0.0133}
+    - {name: Kartal, w: 0.0132}
+    - {name: Keleş, w: 0.0131}
+    - {name: Kocaman, w: 0.013}
+    - {name: Metin, w: 0.0129}
+    - {name: Oral, w: 0.0128}
+    - {name: Oruç, w: 0.0127}
+    - {name: Özbek, w: 0.0126}
+    - {name: Özdoğan, w: 0.0125}
+    - {name: Özgün, w: 0.0124}
+    - {name: Özmen, w: 0.0123}
+    - {name: Özyurt, w: 0.0123}
+    - {name: Pehlivan, w: 0.0122}
+    - {name: Sağlam, w: 0.0121}
+    - {name: Savaş, w: 0.012}
+    - {name: Seçkin, w: 0.0119}
+    - {name: Soylu, w: 0.0119}
+    - {name: Sungur, w: 0.0118}
+    - {name: Şeker, w: 0.0117}
+    - {name: Tan, w: 0.0116}
+    - {name: Tatlı, w: 0.0116}
+    - {name: Temiz, w: 0.0115}
+    - {name: Tok, w: 0.0114}
+    - {name: Topal, w: 0.0113}
+    - {name: Tosun, w: 0.0113}
+    - {name: Türkmen, w: 0.0112}
+    - {name: Uğur, w: 0.0111}
+    - {name: Ulusoy, w: 0.0111}
+    - {name: Ural, w: 0.011}
+    - {name: Usta, w: 0.0109}
+    - {name: Vural, w: 0.0109}
+    - {name: Yazıcı, w: 0.0108}
+    - {name: Yeşil, w: 0.0107}
+    - {name: Yetkin, w: 0.0107}
+    - {name: Yurt, w: 0.0106}
+    - {name: Zengin, w: 0.0106}
+    - {name: Çolak, w: 0.0105}
+    - {name: Çoban, w: 0.0104}
+    - {name: Çam, w: 0.0104}
+    - {name: Ağca, w: 0.0103}
+    - {name: Akkaya, w: 0.0103}
+    - {name: Akkuş, w: 0.0102}
+    - {name: Arı, w: 0.0102}
+    - {name: Atalay, w: 0.0101}
+    - {name: Balcı, w: 0.01}
+    - {name: Bayrak, w: 0.01}
+    - {name: Boz, w: 0.0099}
+    - {name: Cebeci, w: 0.0099}
+    - {name: Dağ, w: 0.0098}
+    - {name: Demirel, w: 0.0098}
+    - {name: Dikmen, w: 0.0097}
+    - {name: Duran, w: 0.0097}
+    - {name: Durmuş, w: 0.0096}
+    - {name: Eren, w: 0.0096}
+    - {name: Erkan, w: 0.0095}
+    - {name: Göçer, w: 0.0095}
+    - {name: Gürsoy, w: 0.0094}
+    - {name: Ilgaz, w: 0.0094}
+    - {name: Kalaycı, w: 0.0093}
+    - {name: Kandemir, w: 0.0093}
+    - {name: Kılıçarslan, w: 0.0092}
+    - {name: Kuru, w: 0.0092}
+    - {name: Mutlu, w: 0.0092}
+    - {name: Nas, w: 0.0091}
+    - {name: Okur, w: 0.0091}
+    - {name: Ölmez, w: 0.009}
+    - {name: Sarıkaya, w: 0.009}
+    - {name: Sevinç, w: 0.0089}
+    - {name: Yaman, w: 0.0089}
+    - {name: Yüce, w: 0.0089}
+  nicknames:
+    Mehmet: Memo
+    Mustafa: Musti
+    Hüseyin: Hüso
+    Abdullah: Apo
+    Abdurrahman: Abdo
+    Ayşe: Ayşo
+    Fatma: Fatoş
+    Emine: Emo
+    Muhammed: Memo
+    Kübra: Kübi
+    Zeynep: Zeyno
+    İbrahim: İbo
+  display: '{first} {last}'
+cultures: []
+email:
+  domains:
+    - {domain: gmail.com, share: 0.62}
+    - {domain: hotmail.com, share: 0.21}
+    - {domain: outlook.com, share: 0.05}
+    - {domain: icloud.com, share: 0.05}
+    - {domain: yahoo.com, share: 0.03}
+    - {domain: yandex.com, share: 0.02}
+    - {domain: hotmail.com.tr, share: 0.02}
+  patterns: [
+    '{first}{last}', '{first}.{last}', '{first}{last}{yy}', '{first}_{last}', '{first}{nn}',
+    '{f}{last}'
+  ]
+services:
+  - {sender: PTT, kind: courier, sender_type: alphanumeric}
+  - {sender: YURTICI KR, kind: courier, sender_type: alphanumeric}
+  - {sender: ARAS KARGO, kind: courier, sender_type: alphanumeric}
+  - {sender: MNG KARGO, kind: courier, sender_type: alphanumeric}
+  - {sender: TRENDYOL, kind: courier, sender_type: alphanumeric}
+  - {sender: HEPSIJET, kind: courier, sender_type: alphanumeric}
+  - {sender: ZIRAAT, kind: bank, sender_type: alphanumeric}
+  - {sender: GARANTI BBVA, kind: bank, sender_type: alphanumeric}
+  - {sender: ISBANK, kind: bank, sender_type: alphanumeric}
+  - {sender: YAPI KREDI, kind: bank, sender_type: alphanumeric}
+  - {sender: AKBANK, kind: bank, sender_type: alphanumeric}
+  - {sender: VAKIFBANK, kind: bank, sender_type: alphanumeric}
+  - {sender: TURKCELL, kind: telecom, sender_type: alphanumeric}
+  - {sender: VODAFONE, kind: telecom, sender_type: alphanumeric}
+  - {sender: TURK TELEKOM, kind: telecom, sender_type: alphanumeric}
+  - {sender: Google, kind: otp_service, sender_type: alphanumeric}
+  - {sender: e-Devlet, kind: otp_service, sender_type: alphanumeric}
+  - {sender: MHRS, kind: doctor, sender_type: alphanumeric}
+  - {sender: "+90212...", kind: doctor, sender_type: number}
+  - {sender: ECZANE, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: YEMEKSEPETI, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: GETIR, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: BiTaksi, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: THY, kind: airline, sender_type: alphanumeric}
+  - {sender: PEGASUS, kind: airline, sender_type: alphanumeric}
+  - {sender: TCDD, kind: rail, sender_type: alphanumeric}
+  - {sender: GIB, kind: government, sender_type: alphanumeric}
+  - {sender: SGK, kind: government, sender_type: alphanumeric}
+  - {sender: MIGROS, kind: retail, sender_type: alphanumeric}
+  - {sender: A101, kind: retail, sender_type: alphanumeric}
+  - {sender: BIM, kind: retail, sender_type: alphanumeric}
+  - {sender: IGDAS, kind: utility, sender_type: alphanumeric}
+  - {sender: ISKI, kind: utility, sender_type: alphanumeric}
+  - {sender: CK BOGAZICI, kind: utility, sender_type: alphanumeric}
+holidays:
+  - {date: "01-01", name: Yılbaşı}
+  - {date: "04-23", name: Ulusal Egemenlik ve Çocuk Bayramı}
+  - {date: "05-01", name: Emek ve Dayanışma Günü}
+  - {date: "05-19", name: "Atatürk'ü Anma, Gençlik ve Spor Bayramı"}
+  - {date: "07-15", name: Demokrasi ve Milli Birlik Günü}
+  - {date: "08-30", name: Zafer Bayramı}
+  - {date: "10-29", name: Cumhuriyet Bayramı}
+  - {rule: "hijri:10-01", name: Ramazan Bayramı (3 gün)}
+  - {rule: "hijri:12-10", name: Kurban Bayramı (4 gün)}
+popular_apps:
+  - {package: com.whatsapp, name: WhatsApp, category: messaging}
+  - {package: com.turkcell.bip, name: BiP, category: messaging}
+  - {package: com.ziraat.ziraatmobil, name: Ziraat Mobil, category: banking}
+  - {package: com.garanti.cepsubesi, name: Garanti BBVA Mobil, category: banking}
+  - {package: com.pozitron.iscep, name: İşCep, category: banking}
+  - {package: com.ykb.android, name: Yapı Kredi Mobil, category: banking}
+  - {package: com.akbank.android.apps.akbank_direkt, name: Akbank Mobil, category: banking}
+  - {package: com.vakifbank.mobile, name: VakıfBank Mobil, category: banking}
+  - {package: com.kuveytturk.mobil, name: Kuveyt Türk Mobil, category: banking}
+  - {package: com.mobillium.papara, name: Papara, category: banking}
+  - {package: com.bitaksi.musteri, name: BiTaksi, category: transport}
+  - {package: com.martitech.marti, name: Martı, category: transport}
+  - {package: com.belbim.istanbulkart, name: İstanbulkart, category: transport}
+  - {package: com.turkishairlines.mobile, name: Türk Hava Yolları, category: transport}
+  - {package: com.pozitron.pegasus, name: Pegasus, category: transport}
+  - {package: trendyol.com, name: Trendyol, category: shopping}
+  - {package: com.pozitron.hepsiburada, name: Hepsiburada, category: shopping}
+  - {package: com.dmall.mfandroid, name: n11, category: shopping}
+  - {package: com.sahibinden, name: sahibinden.com, category: shopping}
+  - {package: com.dolap.android, name: Dolap, category: shopping}
+  - {package: com.inomera.sm, name: Migros, category: shopping}
+  - {package: com.inovel.app.yemeksepeti, name: Yemeksepeti, category: food}
+  - {package: com.getir, name: Getir, category: food}
+  - {package: tr.gov.turkiye.edevlet.kapisi, name: e-Devlet Kapısı, category: government}
+  - {package: tr.gov.saglik.enabiz, name: e-Nabız, category: health}
+  - {package: com.ttech.android.onlineislem, name: Turkcell, category: telecom}
+  - {package: com.vodafone.selfservis, name: Vodafone Yanımda, category: telecom}

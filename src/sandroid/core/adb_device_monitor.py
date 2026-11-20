@@ -113,6 +113,7 @@ class AdbDeviceMonitor:
         self,
         on_change: Callable[[], None],
         *,
+        on_reconnect: Callable[[], None] | None = None,
         host: str | None = None,
         port: int | None = None,
         connect_fn: Callable[[str, int], object] | None = None,
@@ -125,6 +126,11 @@ class AdbDeviceMonitor:
             on_change: Called (on the reader thread) once per streamed block.
                 Must be cheap and exception-tolerant; a raising callback is
                 caught and never kills the loop.
+            on_reconnect: Called (on the reader thread) when the stream is
+                back after it ended by EOF / an error -- an adb server
+                restart, which resets every adb transport (``adb reverse``
+                rules, transport ids). Not after the read timeout. Same
+                contract as ``on_change``.
             host: adb server host; ``None`` resolves from env / loopback.
             port: adb server port; ``None`` resolves from env / 5037.
             connect_fn: Injectable factory ``connect_fn(host, port)`` returning
@@ -135,6 +141,12 @@ class AdbDeviceMonitor:
             backoff_max: Maximum reconnect backoff (s).
         """
         self._on_change = on_change
+        self._on_reconnect = on_reconnect
+        #: The stream is up (handshake OKAY, reading blocks).
+        self._streaming = False
+        #: A stream that was up ended by EOF / an error (not the read
+        #: timeout): the next OKAY handshake is a reconnect.
+        self._stream_lost = False
         self._host = _resolve_host(host)
         self._port = _resolve_port(port)
         self._connect_fn = connect_fn or self._default_connect
@@ -192,6 +204,9 @@ class AdbDeviceMonitor:
             except (OSError, ConnectionError, ValueError) as exc:
                 # Any socket / parse error (incl. socket.timeout and the hex
                 # length parse) just reconnects -- never kills the thread.
+                if self._streaming and not isinstance(exc, TimeoutError):
+                    self._stream_lost = True  # EOF / reset: server restart
+                self._streaming = False
                 if self._stop_event.is_set():
                     break
                 logger.debug("adb track-devices stream error: %s", exc)
@@ -228,6 +243,10 @@ class AdbDeviceMonitor:
 
         # Successful handshake -- reset backoff and stream blocks.
         self._backoff = self._backoff_initial
+        self._streaming = True
+        if self._stream_lost:
+            self._stream_lost = False
+            self._fire(self._on_reconnect, "on_reconnect")
         while not self._stop_event.is_set():
             # Length prefix read with the exact-N helper (a bare recv(4) can
             # split); body may be empty ("0000").
@@ -250,10 +269,17 @@ class AdbDeviceMonitor:
 
     def _fire_on_change(self) -> None:
         """Invoke the change callback, swallowing any exception it raises."""
+        self._fire(self._on_change, "on_change")
+
+    @staticmethod
+    def _fire(callback: Callable[[], None] | None, name: str) -> None:
+        """Invoke *callback* (if any), swallowing any exception it raises."""
+        if callback is None:
+            return
         try:
-            self._on_change()
+            callback()
         except Exception:
-            logger.debug("adb track-devices on_change callback raised", exc_info=True)
+            logger.debug(f"adb track-devices {name} callback raised", exc_info=True)
 
     @staticmethod
     def _recv_exactly(sock: object, n: int) -> bytes:

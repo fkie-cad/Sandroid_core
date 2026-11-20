@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -75,13 +76,18 @@ class DeviceHandler:
         preset: str | None = None,
         settings_file: str | None = None,
     ) -> CommandResult:
-        """Configure device environment settings."""
+        """Configure device environment settings.
+
+        The adb/console round trips run in a worker thread so the event loop
+        stays responsive; the run is pinned to the device targeted now.
+        """
+        from sandroid.core.adb import Adb
         from sandroid.services.device_settings_service import (
             DeviceSettingsService,
             validate_settings_dict,
         )
 
-        svc = DeviceSettingsService()
+        svc = DeviceSettingsService(serial=Adb.get_target_device())
 
         if settings_file:
             import json as json_mod
@@ -105,9 +111,9 @@ class DeviceHandler:
                     error="; ".join(errors),
                     data={"validation_errors": errors},
                 )
-            results = svc.apply_settings_dict(settings)
+            results = await asyncio.to_thread(svc.apply_settings_dict, settings)
         elif preset:
-            results = [svc.apply_preset(preset)]
+            results = [await asyncio.to_thread(svc.apply_preset, preset)]
         else:
             return CommandResult(
                 success=False,

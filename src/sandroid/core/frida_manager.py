@@ -115,6 +115,19 @@ def frida_server_auto_start_enabled() -> bool:
     return True
 
 
+def _wait_device_prepared(what: str) -> None:
+    """Backstop: frida-server work waits for a running device-prepared step
+    (root, SELinux Permissive, proxy restore); never on the UI thread, and
+    on a timeout it goes on. Never raises.
+    """
+    try:
+        from sandroid.core import device_prep
+
+        device_prep.gate(what)
+    except Exception:
+        logger.debug("device-prepared gate failed", exc_info=True)
+
+
 def ensure_frida_server_started(fm) -> bool:
     """Install frida-server only if needed, then start it.
 
@@ -132,6 +145,7 @@ def ensure_frida_server_started(fm) -> bool:
         Whatever ``install_frida_server`` raises; format it with
         :func:`describe_frida_install_error`.
     """
+    _wait_device_prepared("frida-server start")
     if _server_running(fm):
         return bool(fm.run_frida_server())  # no-op when ready
     installed = None
@@ -222,6 +236,7 @@ def auto_start_frida_server(fm=None, force: bool = False) -> tuple[bool, str]:
             return False, f"Frida manager unavailable: {e}"
     if fm is None:
         return False, "Frida manager unavailable (no device connected?)"
+    _wait_device_prepared("frida-server auto-start")
     # Startup and device-change callbacks may race: one start at a time, the
     # second caller then finds the server running.
     with _AUTO_START_LOCK:
@@ -282,23 +297,6 @@ def frida_server_is_stale(fm) -> bool:
     )
 
 
-def _wait_for_system_server(timeout: float = 30.0, step: float = 1.0) -> bool:
-    """Poll until ActivityManager is registered again after a Zygote restart."""
-    import time
-
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            stdout, _ = Adb.send_adb_command("shell service check activity")
-            if ": found" in (stdout or ""):
-                return True
-        except Exception:
-            pass
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(step)
-
-
 def reset_frida_handles() -> None:
     """Drop the job manager's session/device and the cached frida device.
 
@@ -330,38 +328,6 @@ def _restart_locked(fm) -> bool:
         ok = ensure_frida_server_started(fm)
     reset_frida_handles()
     return ok
-
-
-def restart_frida_server_after_system_restart(fm=None) -> tuple[bool, str]:
-    """Restart a running frida-server after Zygote/system_server restarted.
-
-    Called after the mitmproxy CA injection (which kills Zygote). Waits for
-    the new system_server, restarts frida-server and drops cached frida
-    handles. Does nothing when no frida-server was running. Never raises.
-
-    Returns:
-        ``(restarted, reason)``.
-    """
-    if fm is None:
-        try:
-            from sandroid.services import get_frida_session_service
-
-            fm = get_frida_session_service().get_frida_manager()
-        except Exception as e:
-            return False, f"Frida manager unavailable: {e}"
-    if fm is None or not _server_running(fm):
-        return False, "frida-server not running"
-    if not _wait_for_system_server():
-        logger.warning("system_server not back after 30s; restarting frida anyway")
-    with _AUTO_START_LOCK:
-        try:
-            ok = _restart_locked(fm)
-        except Exception as e:
-            return False, describe_frida_install_error(e)
-    if ok:
-        logger.info("frida-server restarted after the Zygote restart")
-        return True, "frida-server restarted"
-    return False, "frida-server restart failed (see the log)"
 
 
 def _auto_start_locked(fm, force: bool) -> tuple[bool, str]:

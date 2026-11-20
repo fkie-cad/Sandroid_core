@@ -1,0 +1,918 @@
+# Sandroid world pack: country 'es' (Spain), schema v1. Generated 2026-11-20 by agent countries-2.
+# Sources and licences: es.SOURCES.md (source ids S1.. are referenced in phone entries).
+pack: country
+schema: 1.1
+country: es
+name: Spain
+languages: {es: 0.82, ca: 0.1, gl: 0.04, eu: 0.02, en: 0.02}
+timezones: [Europe/Madrid, Atlantic/Canary]
+date_format: dd/MM/yyyy
+time_format: "HH:mm"
+currency: {code: EUR, symbol: €, format: "49,99 €"}
+phone:
+  country_code: '34'
+  trunk_prefix: ''
+  national_format_examples: [612 34 56 78, 612 345 678, 91 123 45 67, 976 12 34 56]
+  mobile:
+    realistic:
+      - {prefix: '606', length: 9, operator: Movistar}
+      - {prefix: '609', length: 9, operator: Movistar}
+      - {prefix: '616', length: 9, operator: Movistar}
+      - {prefix: '619', length: 9, operator: Movistar}
+      - {prefix: '620', length: 9, operator: Movistar}
+      - {prefix: '626', length: 9, operator: Movistar}
+      - {prefix: '629', length: 9, operator: Movistar}
+      - {prefix: '630', length: 9, operator: Movistar}
+      - {prefix: '636', length: 9, operator: Movistar}
+      - {prefix: '639', length: 9, operator: Movistar}
+      - {prefix: '646', length: 9, operator: Movistar}
+      - {prefix: '649', length: 9, operator: Movistar}
+      - {prefix: '650', length: 9, operator: Movistar}
+      - {prefix: '659', length: 9, operator: Movistar}
+      - {prefix: '669', length: 9, operator: Movistar}
+      - {prefix: '676', length: 9, operator: Movistar}
+      - {prefix: '679', length: 9, operator: Movistar}
+      - {prefix: '680', length: 9, operator: Movistar}
+      - {prefix: '686', length: 9, operator: Movistar}
+      - {prefix: '689', length: 9, operator: Movistar}
+      - {prefix: '690', length: 9, operator: Movistar}
+      - {prefix: '696', length: 9, operator: Movistar}
+      - {prefix: '699', length: 9, operator: Movistar}
+      - {prefix: '600', length: 9, operator: Vodafone}
+      - {prefix: '607', length: 9, operator: Vodafone}
+      - {prefix: '610', length: 9, operator: Vodafone}
+      - {prefix: '617', length: 9, operator: Vodafone}
+      - {prefix: '627', length: 9, operator: Vodafone}
+      - {prefix: '647', length: 9, operator: Vodafone}
+      - {prefix: '661', length: 9, operator: Vodafone}
+      - {prefix: '662', length: 9, operator: Vodafone}
+      - {prefix: '663', length: 9, operator: Vodafone}
+      - {prefix: '664', length: 9, operator: Vodafone}
+      - {prefix: '666', length: 9, operator: Vodafone}
+      - {prefix: '667', length: 9, operator: Vodafone}
+      - {prefix: '671', length: 9, operator: Vodafone}
+      - {prefix: '677', length: 9, operator: Vodafone}
+      - {prefix: '678', length: 9, operator: Vodafone}
+      - {prefix: '687', length: 9, operator: Vodafone}
+      - {prefix: '697', length: 9, operator: Vodafone}
+      - {prefix: '615', length: 9, operator: Orange}
+      - {prefix: '651', length: 9, operator: Orange}
+      - {prefix: '653', length: 9, operator: Orange}
+      - {prefix: '654', length: 9, operator: Orange}
+      - {prefix: '655', length: 9, operator: Orange}
+      - {prefix: '656', length: 9, operator: Orange}
+      - {prefix: '657', length: 9, operator: Orange}
+      - {prefix: '658', length: 9, operator: Orange}
+      - {prefix: '665', length: 9, operator: Orange}
+      - {prefix: '675', length: 9, operator: Orange}
+      - {prefix: '685', length: 9, operator: Orange}
+      - {prefix: '692', length: 9, operator: Orange}
+      - {prefix: '695', length: 9, operator: Orange}
+      - {prefix: '622', length: 9, operator: Yoigo}
+      - {prefix: '633', length: 9, operator: Yoigo}
+      - {prefix: '7221', length: 9, operator: Yoigo}
+      - {prefix: '7222', length: 9, operator: Yoigo}
+      - {prefix: '7223', length: 9, operator: Yoigo}
+      - {prefix: '7224', length: 9, operator: Yoigo}
+      - {prefix: '7225', length: 9, operator: Yoigo}
+      - {prefix: '7410', length: 9, operator: Digi}
+      - {prefix: '7420', length: 9, operator: Digi}
+      - {prefix: '7430', length: 9, operator: Digi}
+      - {prefix: '7450', length: 9, operator: Digi}
+      - {prefix: '7460', length: 9, operator: Digi}
+      - {prefix: '7470', length: 9, operator: Digi}
+      - {prefix: '7480', length: 9, operator: Digi}
+      - {prefix: '7490', length: 9, operator: Digi}
+    unallocated:
+      - {prefix: '6127', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '6128', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '6129', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '6941', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '6947', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '6948', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '710', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '712', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '713', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '714', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '715', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '716', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '718', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '719', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '720', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '721', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '723', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '724', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '725', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '726', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '728', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '729', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '73', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '740', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+      - {prefix: '78', length: 9, note: 'not in CNMC Registro de Numeración (moviles.txt, data of 2026-11-19); libphonenumber 9.0.43: valid MOBILE', source: S2}
+    fiction: null
+  landline:
+    cities:
+      - {city: Madrid, area_code: '91', subscriber_length: 7}
+      - {city: Barcelona, area_code: '93', subscriber_length: 7}
+      - {city: Valencia, area_code: '96', subscriber_length: 7}
+      - {city: Sevilla, area_code: '95', subscriber_length: 7}
+      - {city: Zaragoza, area_code: '976', subscriber_length: 6}
+      - {city: Málaga, area_code: '95', subscriber_length: 7}
+      - {city: Murcia, area_code: '968', subscriber_length: 6}
+      - {city: Palma, area_code: '971', subscriber_length: 6}
+      - {city: Las Palmas de Gran Canaria, area_code: '928', subscriber_length: 6}
+      - {city: Bilbao, area_code: '94', subscriber_length: 7}
+      - {city: Alicante, area_code: '96', subscriber_length: 7}
+      - {city: Córdoba, area_code: '957', subscriber_length: 6}
+      - {city: Valladolid, area_code: '983', subscriber_length: 6}
+      - {city: Vigo, area_code: '986', subscriber_length: 6}
+      - {city: A Coruña, area_code: '981', subscriber_length: 6}
+      - {city: Granada, area_code: '958', subscriber_length: 6}
+    fiction: null
+  validation_note: 'Spain has a closed 9-digit plan and no trunk prefix. No official fiction/drama range exists (none in the CNMC plan; checked 2026-11). The unallocated 6xxx/7xxx blocks are absent from the CNMC registry dump of 2026-11-19 (not ''Libre con Portados'', so no ported-in numbers either); libphonenumber 9.0.43 accepts all of them as valid MOBILE (pattern (?:6\d|7[1-48])\d{7}), so a validator will not flag them. 75x-77x and 79x are reserved long-term and are INVALID in libphonenumber; they were deliberately not used. Blocks can be assigned at any time: refresh from https://numeracionyoperadores.cnmc.es/bd-num.zip before relying on them.'
+carriers:
+  - {name: Movistar, sim_operator: Movistar, mccmnc: '21407', share: 0.27}
+  - {name: Orange, sim_operator: Orange, mccmnc: '21403', share: 0.21}
+  - {name: Vodafone, sim_operator: vodafone ES, mccmnc: '21401', share: 0.19}
+  - {name: Yoigo, sim_operator: Yoigo, mccmnc: '21404', share: 0.13}
+  - {name: Digi, sim_operator: DIGI, mccmnc: '21422', share: 0.12}
+  - {name: MásMóvil, sim_operator: MASMOVIL, mccmnc: '21404', share: 0.05}
+  - {name: Lowi, sim_operator: Lowi, mccmnc: '21401', share: 0.03}
+cities:
+  - {name: Madrid, lat: 40.4168, lon: -3.7038, population: 3420000, area_code: '91', postcodes: ['28001', '28004', '28005', '28010', '28012', '28013', '28015', '28020', '28028', '28045'], districts: [Centro, Salamanca, Chamberí, Retiro, Arganzuela, Tetuán, Carabanchel, Latina, Moncloa-Aravaca, Vallecas]}
+  - {name: Barcelona, lat: 41.3874, lon: 2.1686, population: 1700000, area_code: '93', postcodes: ["08001", "08002", "08007", "08008", "08011", "08012", "08013", "08014", "08019", "08025"], districts: [Ciutat Vella, Eixample, Gràcia, Sants-Montjuïc, Sant Martí, Les Corts, Sarrià-Sant Gervasi, Horta-Guinardó]}
+  - {name: Valencia, lat: 39.4699, lon: -0.3763, population: 825000, area_code: '96', postcodes: ['46001', '46002', '46004', '46005', '46006', '46010', '46011', '46015', '46020', '46022'], districts: [Ciutat Vella, Russafa, Benimaclet, Campanar, El Cabanyal, Extramurs, L'Eixample]}
+  - {name: Sevilla, lat: 37.3891, lon: -5.9845, population: 685000, area_code: '95', postcodes: ['41001', '41002', '41003', '41004', '41005', '41010', '41011', '41013', '41018'], districts: [Casco Antiguo, Triana, Nervión, Macarena, Los Remedios, Bellavista]}
+  - {name: Zaragoza, lat: 41.6488, lon: -0.8891, population: 690000, area_code: '976', postcodes: ['50001', '50002', '50003', '50004', '50005', '50008', '50009', '50015', '50017'], districts: [Centro, Casco Histórico, Delicias, Actur-Rey Fernando, Universidad, Las Fuentes]}
+  - {name: Málaga, lat: 36.7213, lon: -4.4214, population: 595000, area_code: '95', postcodes: ['29001', '29002', '29004', '29007', '29010', '29012', '29016', '29017'], districts: [Centro, El Palo, Teatinos, Huelin, Cruz de Humilladero, Ciudad Jardín]}
+  - {name: Murcia, lat: 37.9922, lon: -1.1307, population: 475000, area_code: '968', postcodes: ['30001', '30002', '30003', '30004', '30005', '30007', '30008', '30009'], districts: [Centro, El Carmen, Santa María de Gracia, Vistalegre, La Flota]}
+  - {name: Palma, lat: 39.5696, lon: 2.6502, population: 430000, area_code: '971', postcodes: ['07001', '07002', '07003', '07004', '07005', '07013', '07014'], districts: [Centre, Santa Catalina, Son Espanyolet, El Molinar, Pere Garau]}
+  - {name: Las Palmas de Gran Canaria, lat: 28.1235, lon: -15.4363, population: 380000, area_code: '928', postcodes: ['35001', '35002', '35003', '35004', '35006', '35007', '35010'], districts: [Vegueta, Triana, Guanarteme, Alcaravaneras, Schamann]}
+  - {name: Bilbao, lat: 43.263, lon: -2.935, population: 347000, area_code: '94', postcodes: ['48001', '48003', '48005', '48007', '48008', '48009', '48011', '48013'], districts: [Abando, Indautxu, Deusto, Casco Viejo, Santutxu, Rekalde]}
+  - {name: Alicante, lat: 38.3452, lon: -0.481, population: 360000, area_code: '96', postcodes: ['03001', '03002', '03003', '03004', '03005', '03007', '03010', '03016'], districts: [Centro, San Blas, Benalúa, Carolinas, Playa de San Juan]}
+  - {name: Córdoba, lat: 37.8882, lon: -4.7794, population: 323000, area_code: '957', postcodes: ['14001', '14002', '14003', '14004', '14005', '14008', '14010'], districts: [Centro, Judería, Ciudad Jardín, Levante, Poniente]}
+  - {name: Valladolid, lat: 41.6523, lon: -4.7245, population: 300000, area_code: '983', postcodes: ['47001', '47002', '47003', '47004', '47005', '47008', '47010'], districts: [Centro, Delicias, Parquesol, La Rondilla, Huerta del Rey]}
+  - {name: Vigo, lat: 42.2406, lon: -8.7207, population: 293000, area_code: '986', postcodes: ['36201', '36202', '36203', '36204', '36205', '36208', '36210'], districts: [Casco Vello, Bouzas, Teis, Coia, Travesas]}
+  - {name: A Coruña, lat: 43.3623, lon: -8.4115, population: 249000, area_code: '981', postcodes: ['15001', '15002', '15003', '15004', '15005', '15006', '15008'], districts: [Ciudad Vieja, Monte Alto, Os Mallos, Riazor, Los Castros]}
+  - {name: Granada, lat: 37.1773, lon: -3.5986, population: 230000, area_code: '958', postcodes: ['18001', '18002', '18003', '18004', '18005', '18006', '18010'], districts: [Centro, Albaicín, Zaidín, Realejo, Ronda]}
+streets: [
+  Calle Mayor, Calle Real, Calle Nueva, Calle de la Iglesia, Plaza Mayor, Calle San José,
+  Calle del Sol, Calle de la Constitución, Avenida de la Constitución, Calle Cervantes,
+  Calle de la Fuente, Calle de las Escuelas, Calle del Castillo, Calle del Molino, Calle Santiago,
+  Calle San Juan, Calle Ramón y Cajal, Calle Antonio Machado, Calle Federico García Lorca,
+  Calle Miguel Hernández, Calle Pablo Picasso, Calle Juan Carlos I, Calle Colón, Calle Libertad,
+  Calle Andalucía, Calle Rosales, Calle de la Paz, Calle del Carmen, Calle de la Virgen,
+  Calle San Antonio, Calle San Pedro, Calle Santa Ana, Calle del Pilar, Calle de los Olivos,
+  Calle del Pozo, Calle de la Huerta, Calle del Horno, Calle de la Ermita, Calle Alfonso XIII,
+  Calle Blas de Otero, Calle Gran Vía, Avenida de Andalucía, Avenida de España,
+  Avenida de la Libertad, Calle Doctor Fleming, Calle Isaac Peral, Calle Velázquez, Calle Goya,
+  Calle Alcalá, Calle Princesa, Calle Serrano, Calle Bravo Murillo, Carrer de Balmes,
+  Carrer d'Aragó, Carrer de Muntaner, Carrer de Sant Pere, Carrer Major, Carrer de la Diputació,
+  Avinguda Diagonal, Rúa do Príncipe, Rúa Real, Calle Larios, Calle Sierpes, Calle Tetuán,
+  Paseo de la Castellana, Paseo de Gracia, Calle Colón de Larreátegui, Calle Jaime I,
+  Calle de las Flores, Calle de los Almendros, Calle Hernán Cortés, Calle Reyes Católicos,
+  Calle Rafael Alberti, Calle Severo Ochoa, Calle Mariana Pineda, Calle Concepción Arenal,
+  Calle Clara Campoamor, Calle Luis Buñuel, Calle Vicente Aleixandre
+]
+address_format: '{street}, {number}, {postcode} {city}'
+places:
+  - {category: park, name: Parque del Retiro, city: Madrid, lat: 40.4153, lon: -3.6845}
+  - {category: park, name: Parque del Oeste, city: Madrid, lat: 40.4295, lon: -3.7226}
+  - {category: park, name: Parc de la Ciutadella, city: Barcelona, lat: 41.3881, lon: 2.1873}
+  - {category: park, name: Park Güell, city: Barcelona, lat: 41.4145, lon: 2.1527}
+  - {category: park, name: Parque de María Luisa, city: Sevilla, lat: 37.3754, lon: -5.9883}
+  - {category: park, name: Jardí del Túria (Gulliver), city: Valencia, lat: 39.4646, lon: -0.36}
+  - {category: park, name: Parque Grande José Antonio Labordeta, city: Zaragoza, lat: 41.6359, lon: -0.9034}
+  - {category: landmark, name: Puerta del Sol, city: Madrid, lat: 40.4169, lon: -3.7035}
+  - {category: landmark, name: Plaza Mayor, city: Madrid, lat: 40.4155, lon: -3.7074}
+  - {category: landmark, name: Sagrada Família, city: Barcelona, lat: 41.4036, lon: 2.1744}
+  - {category: landmark, name: Plaza de España, city: Sevilla, lat: 37.3772, lon: -5.9869}
+  - {category: landmark, name: Alhambra, city: Granada, lat: 37.1761, lon: -3.5881}
+  - {category: landmark, name: Mezquita-Catedral, city: Córdoba, lat: 37.8789, lon: -4.7794}
+  - {category: landmark, name: Basílica del Pilar, city: Zaragoza, lat: 41.6567, lon: -0.8784}
+  - {category: landmark, name: Ciudad de las Artes y las Ciencias, city: Valencia, lat: 39.4541, lon: -0.3502}
+  - {category: landmark, name: Catedral de Palma, city: Palma, lat: 39.5675, lon: 2.6483}
+  - {category: landmark, name: Torre de Hércules, city: A Coruña, lat: 43.3859, lon: -8.4066}
+  - {category: station, name: Madrid Puerta de Atocha, city: Madrid, lat: 40.4066, lon: -3.6898}
+  - {category: station, name: Madrid Chamartín, city: Madrid, lat: 40.4722, lon: -3.6826}
+  - {category: station, name: Barcelona Sants, city: Barcelona, lat: 41.3792, lon: 2.1404}
+  - {category: station, name: Sevilla Santa Justa, city: Sevilla, lat: 37.3918, lon: -5.9758}
+  - {category: station, name: València Joaquín Sorolla, city: Valencia, lat: 39.4602, lon: -0.3832}
+  - {category: station, name: Málaga María Zambrano, city: Málaga, lat: 36.7118, lon: -4.4329}
+  - {category: station, name: Zaragoza Delicias, city: Zaragoza, lat: 41.6588, lon: -0.9118}
+  - {category: airport, name: Aeropuerto Adolfo Suárez Madrid-Barajas, city: Madrid, lat: 40.4983, lon: -3.5676}
+  - {category: airport, name: Aeropuerto de Barcelona-El Prat, city: Barcelona, lat: 41.2974, lon: 2.0833}
+  - {category: airport, name: Aeropuerto de Málaga-Costa del Sol, city: Málaga, lat: 36.6749, lon: -4.4991}
+  - {category: airport, name: Aeropuerto de Palma de Mallorca, city: Palma, lat: 39.5517, lon: 2.7388}
+  - {category: airport, name: Aeropuerto de Gran Canaria, city: Las Palmas de Gran Canaria, lat: 27.9319, lon: -15.3866}
+  - {category: beach, name: Playa de la Barceloneta, city: Barcelona, lat: 41.3784, lon: 2.1925}
+  - {category: beach, name: Playa de la Malvarrosa, city: Valencia, lat: 39.478, lon: -0.3236}
+  - {category: beach, name: Playa de la Malagueta, city: Málaga, lat: 36.7196, lon: -4.4089}
+  - {category: beach, name: Playa de Las Canteras, city: Las Palmas de Gran Canaria, lat: 28.1386, lon: -15.438}
+  - {category: beach, name: Playa de la Concha, city: Donostia-San Sebastián, lat: 43.3176, lon: -1.9886}
+  - {category: beach, name: Playa de Riazor, city: A Coruña, lat: 43.369, lon: -8.4056}
+  - {category: beach, name: Playa del Postiguet, city: Alicante, lat: 38.3459, lon: -0.4777}
+  - {category: mountain, name: Montserrat, city: Monistrol de Montserrat, lat: 41.5934, lon: 1.8375}
+  - {category: mountain, name: Puerto de Navacerrada, city: Navacerrada, lat: 40.7856, lon: -4.0042}
+  - {category: mountain, name: Teleférico del Teide, city: La Orotava, lat: 28.2557, lon: -16.62}
+  - {category: mountain, name: Fuente Dé (Picos de Europa), city: Camaleño, lat: 43.1453, lon: -4.8122}
+  - {category: museum, name: Museo del Prado, city: Madrid, lat: 40.4138, lon: -3.6921}
+  - {category: museum, name: Museo Reina Sofía, city: Madrid, lat: 40.408, lon: -3.6945}
+  - {category: museum, name: Museo Guggenheim Bilbao, city: Bilbao, lat: 43.2687, lon: -2.934}
+  - {category: museum, name: Museu Picasso, city: Barcelona, lat: 41.3852, lon: 2.1809}
+  - {category: stadium, name: Estadio Santiago Bernabéu, city: Madrid, lat: 40.4531, lon: -3.6883}
+  - {category: stadium, name: Riyadh Air Metropolitano, city: Madrid, lat: 40.4362, lon: -3.5995}
+  - {category: stadium, name: Spotify Camp Nou, city: Barcelona, lat: 41.3809, lon: 2.1228}
+  - {category: stadium, name: Estadio de Mestalla, city: Valencia, lat: 39.4746, lon: -0.3583}
+  - {category: stadium, name: Estadio Benito Villamarín, city: Sevilla, lat: 37.3565, lon: -5.9817}
+  - {category: market, name: Mercado de San Miguel, city: Madrid, lat: 40.4154, lon: -3.709}
+  - {category: market, name: Mercat de la Boqueria, city: Barcelona, lat: 41.3818, lon: 2.1716}
+  - {category: market, name: Mercado Central, city: Valencia, lat: 39.4736, lon: -0.379}
+  - {category: market, name: Mercado de Triana, city: Sevilla, lat: 37.3858, lon: -6.0028}
+  - {category: market, name: Mercado Central de Atarazanas, city: Málaga, lat: 36.7186, lon: -4.4237}
+  - {category: lake, name: Lago de la Casa de Campo, city: Madrid, lat: 40.4196, lon: -3.7322}
+  - {category: lake, name: Estany de Banyoles, city: Banyoles, lat: 42.1197, lon: 2.7543}
+  - {category: lake, name: Lago de Sanabria, city: Galende, lat: 42.1238, lon: -6.7225}
+names:
+  culture: es
+  female:
+    - {name: María Carmen, w: 1.0}
+    - {name: María, w: 0.8779}
+    - {name: Carmen, w: 0.5386}
+    - {name: Ana María, w: 0.4284}
+    - {name: Laura, w: 0.419}
+    - {name: María Pilar, w: 0.404}
+    - {name: María Dolores, w: 0.3914}
+    - {name: Isabel, w: 0.3832}
+    - {name: Ana, w: 0.3829}
+    - {name: María Teresa, w: 0.3821}
+    - {name: Marta, w: 0.3703}
+    - {name: Cristina, w: 0.3654}
+    - {name: Josefa, w: 0.3651}
+    - {name: Lucía, w: 0.3602}
+    - {name: María Ángeles, w: 0.3477}
+    - {name: María José, w: 0.3288}
+    - {name: María Isabel, w: 0.3242}
+    - {name: Francisca, w: 0.2915}
+    - {name: Sara, w: 0.2909}
+    - {name: Paula, w: 0.2901}
+    - {name: Antonia, w: 0.2834}
+    - {name: Elena, w: 0.2614}
+    - {name: Dolores, w: 0.2585}
+    - {name: Raquel, w: 0.2378}
+    - {name: María Luisa, w: 0.2347}
+    - {name: Rosa María, w: 0.2335}
+    - {name: Manuela, w: 0.2147}
+    - {name: María Jesús, w: 0.2121}
+    - {name: Julia, w: 0.2094}
+    - {name: Alba, w: 0.2038}
+    - {name: Pilar, w: 0.199}
+    - {name: Concepción, w: 0.1989}
+    - {name: Beatriz, w: 0.1977}
+    - {name: Mercedes, w: 0.1949}
+    - {name: Silvia, w: 0.1947}
+    - {name: Nuria, w: 0.1922}
+    - {name: Irene, w: 0.1911}
+    - {name: Patricia, w: 0.1818}
+    - {name: Rocío, w: 0.179}
+    - {name: Andrea, w: 0.1778}
+    - {name: Mónica, w: 0.1672}
+    - {name: Montserrat, w: 0.1669}
+    - {name: Rosario, w: 0.1663}
+    - {name: Juana, w: 0.1635}
+    - {name: Alicia, w: 0.1634}
+    - {name: Teresa, w: 0.1616}
+    - {name: Sofía, w: 0.1615}
+    - {name: Encarnación, w: 0.1609}
+    - {name: Marina, w: 0.1603}
+    - {name: María del Mar, w: 0.1597}
+    - {name: Sandra, w: 0.159}
+    - {name: Sonia, w: 0.1585}
+    - {name: Natalia, w: 0.1585}
+    - {name: Susana, w: 0.1536}
+    - {name: Ángela, w: 0.1495}
+    - {name: Yolanda, w: 0.1476}
+    - {name: Claudia, w: 0.1456}
+    - {name: Carla, w: 0.1411}
+    - {name: Rosa, w: 0.1392}
+    - {name: Eva, w: 0.1346}
+    - {name: Margarita, w: 0.1307}
+    - {name: María Josefa, w: 0.129}
+    - {name: Daniela, w: 0.1233}
+    - {name: Ana Isabel, w: 0.1232}
+    - {name: Inmaculada, w: 0.1229}
+    - {name: María Mercedes, w: 0.1225}
+    - {name: María Rosario, w: 0.1213}
+    - {name: Noelia, w: 0.1203}
+    - {name: Verónica, w: 0.1171}
+    - {name: Esther, w: 0.1162}
+    - {name: Martina, w: 0.1149}
+    - {name: Carolina, w: 0.1126}
+    - {name: Nerea, w: 0.1107}
+    - {name: Inés, w: 0.1049}
+    - {name: Miriam, w: 0.1038}
+    - {name: Eva María, w: 0.1023}
+    - {name: María Victoria, w: 0.1016}
+    - {name: Lorena, w: 0.101}
+    - {name: María Elena, w: 0.0989}
+    - {name: Ana Belén, w: 0.098}
+    - {name: Victoria, w: 0.097}
+    - {name: Alejandra, w: 0.0958}
+    - {name: María Rosa, w: 0.0929}
+    - {name: Ángeles, w: 0.0907}
+    - {name: María Concepción, w: 0.0906}
+    - {name: Fátima, w: 0.0877}
+    - {name: Celia, w: 0.0866}
+    - {name: Lidia, w: 0.0858}
+    - {name: María Antonia, w: 0.0846}
+    - {name: Ainhoa, w: 0.0838}
+    - {name: Valeria, w: 0.0822}
+    - {name: Amparo, w: 0.082}
+    - {name: Olga, w: 0.0818}
+    - {name: Clara, w: 0.081}
+    - {name: Catalina, w: 0.0805}
+    - {name: Adriana, w: 0.0801}
+    - {name: María Nieves, w: 0.0799}
+    - {name: Anna, w: 0.0777}
+    - {name: Emma, w: 0.0769}
+    - {name: María Cristina, w: 0.0764}
+    - {name: María Soledad, w: 0.0735}
+    - {name: Vanesa, w: 0.0724}
+    - {name: Blanca, w: 0.072}
+    - {name: Gloria, w: 0.0719}
+    - {name: Consuelo, w: 0.07}
+    - {name: Virginia, w: 0.0697}
+    - {name: Aurora, w: 0.0683}
+    - {name: Laia, w: 0.0669}
+    - {name: Emilia, w: 0.0667}
+    - {name: Noa, w: 0.0658}
+    - {name: María Luz, w: 0.0649}
+    - {name: Esperanza, w: 0.0646}
+    - {name: María Belén, w: 0.0646}
+    - {name: Valentina, w: 0.0641}
+    - {name: Lourdes, w: 0.0635}
+    - {name: Luisa, w: 0.0633}
+    - {name: Estefanía, w: 0.0624}
+    - {name: Milagros, w: 0.0622}
+    - {name: Isabel María, w: 0.0615}
+    - {name: Josefina, w: 0.0596}
+    - {name: Gema, w: 0.0587}
+    - {name: Begoña, w: 0.0587}
+    - {name: Aitana, w: 0.0582}
+    - {name: María Begoña, w: 0.0572}
+    - {name: Elisa, w: 0.0562}
+    - {name: Purificación, w: 0.056}
+    - {name: Ariadna, w: 0.0557}
+    - {name: María Lourdes, w: 0.055}
+    - {name: Belén, w: 0.055}
+    - {name: Tamara, w: 0.0547}
+    - {name: Carlota, w: 0.0539}
+    - {name: Lara, w: 0.0537}
+    - {name: María Esther, w: 0.0534}
+    - {name: María Asunción, w: 0.0534}
+    - {name: María Paz, w: 0.0522}
+    - {name: Rebeca, w: 0.0514}
+    - {name: Mireia, w: 0.0507}
+    - {name: Paloma, w: 0.05}
+    - {name: Gemma, w: 0.0498}
+    - {name: Araceli, w: 0.0495}
+    - {name: Almudena, w: 0.0494}
+    - {name: Vanessa, w: 0.0494}
+    - {name: María Inmaculada, w: 0.049}
+    - {name: Magdalena, w: 0.0488}
+    - {name: Noemí, w: 0.0487}
+    - {name: Diana, w: 0.0485}
+    - {name: Leire, w: 0.0482}
+    - {name: María Eugenia, w: 0.0466}
+    - {name: Tania, w: 0.0459}
+    - {name: Matilde, w: 0.0454}
+  male:
+    - {name: Antonio, w: 1.0}
+    - {name: Manuel, w: 0.8895}
+    - {name: José, w: 0.8253}
+    - {name: Francisco, w: 0.722}
+    - {name: David, w: 0.6312}
+    - {name: Daniel, w: 0.5249}
+    - {name: Javier, w: 0.5241}
+    - {name: Juan, w: 0.5059}
+    - {name: José Antonio, w: 0.4965}
+    - {name: Francisco Javier, w: 0.4773}
+    - {name: Carlos, w: 0.4629}
+    - {name: Alejandro, w: 0.4628}
+    - {name: José Luis, w: 0.4628}
+    - {name: Jesús, w: 0.4341}
+    - {name: José Manuel, w: 0.3952}
+    - {name: Miguel, w: 0.3905}
+    - {name: Miguel Ángel, w: 0.3865}
+    - {name: Pablo, w: 0.3858}
+    - {name: Rafael, w: 0.3677}
+    - {name: Sergio, w: 0.3566}
+    - {name: Ángel, w: 0.3431}
+    - {name: Pedro, w: 0.3382}
+    - {name: Jorge, w: 0.3287}
+    - {name: Fernando, w: 0.3248}
+    - {name: José María, w: 0.3186}
+    - {name: Alberto, w: 0.3003}
+    - {name: Luis, w: 0.294}
+    - {name: Álvaro, w: 0.2899}
+    - {name: Adrián, w: 0.2788}
+    - {name: Juan Carlos, w: 0.2741}
+    - {name: Diego, w: 0.2666}
+    - {name: Juan José, w: 0.2512}
+    - {name: Raúl, w: 0.2404}
+    - {name: Iván, w: 0.2352}
+    - {name: Rubén, w: 0.2219}
+    - {name: Juan Antonio, w: 0.2139}
+    - {name: Óscar, w: 0.2093}
+    - {name: Enrique, w: 0.2002}
+    - {name: Mario, w: 0.1904}
+    - {name: Juan Manuel, w: 0.1879}
+    - {name: Santiago, w: 0.187}
+    - {name: Andrés, w: 0.1845}
+    - {name: Víctor, w: 0.1802}
+    - {name: Ramón, w: 0.1799}
+    - {name: Hugo, w: 0.1731}
+    - {name: Eduardo, w: 0.1715}
+    - {name: Vicente, w: 0.1714}
+    - {name: Joaquín, w: 0.1705}
+    - {name: Marcos, w: 0.1685}
+    - {name: Roberto, w: 0.1638}
+    - {name: Jaime, w: 0.1608}
+    - {name: Francisco José, w: 0.16}
+    - {name: Ignacio, w: 0.1493}
+    - {name: Jordi, w: 0.1381}
+    - {name: Martín, w: 0.1345}
+    - {name: Alfonso, w: 0.1313}
+    - {name: Ricardo, w: 0.1298}
+    - {name: Marc, w: 0.1286}
+    - {name: Gabriel, w: 0.1261}
+    - {name: Guillermo, w: 0.1249}
+    - {name: Salvador, w: 0.123}
+    - {name: Gonzalo, w: 0.1229}
+    - {name: Lucas, w: 0.1118}
+    - {name: Nicolás, w: 0.1111}
+    - {name: José Miguel, w: 0.1088}
+    - {name: Emilio, w: 0.1081}
+    - {name: Samuel, w: 0.1041}
+    - {name: Julio, w: 0.1021}
+    - {name: Tomás, w: 0.1012}
+    - {name: Julián, w: 0.1004}
+    - {name: Ismael, w: 0.0962}
+    - {name: Cristian, w: 0.0954}
+    - {name: Agustín, w: 0.095}
+    - {name: José Ramón, w: 0.0934}
+    - {name: Mateo, w: 0.093}
+    - {name: Aitor, w: 0.0904}
+    - {name: Álex, w: 0.0898}
+    - {name: Joan, w: 0.0897}
+    - {name: Héctor, w: 0.0894}
+    - {name: Iker, w: 0.085}
+    - {name: Félix, w: 0.0825}
+    - {name: Juan Francisco, w: 0.0778}
+    - {name: José Carlos, w: 0.0757}
+    - {name: Rodrigo, w: 0.0752}
+    - {name: Sebastián, w: 0.0747}
+    - {name: César, w: 0.0723}
+    - {name: José Ángel, w: 0.0687}
+    - {name: Víctor Manuel, w: 0.0685}
+    - {name: Josep, w: 0.0683}
+    - {name: Alfredo, w: 0.0676}
+    - {name: José Ignacio, w: 0.0653}
+    - {name: Mariano, w: 0.065}
+    - {name: Felipe, w: 0.0639}
+    - {name: Luis Miguel, w: 0.0638}
+    - {name: Domingo, w: 0.0627}
+    - {name: Leo, w: 0.0614}
+    - {name: Pau, w: 0.0601}
+    - {name: Izan, w: 0.0596}
+    - {name: Xavier, w: 0.0574}
+    - {name: José Francisco, w: 0.0571}
+    - {name: Aarón, w: 0.0571}
+    - {name: Albert, w: 0.057}
+    - {name: Juan Luis, w: 0.0559}
+    - {name: Eric, w: 0.0558}
+    - {name: Bruno, w: 0.0539}
+    - {name: Antonio José, w: 0.0521}
+    - {name: Borja, w: 0.0519}
+    - {name: Marco, w: 0.051}
+    - {name: Joel, w: 0.0503}
+    - {name: Darío, w: 0.0501}
+    - {name: Lorenzo, w: 0.0499}
+    - {name: Isaac, w: 0.0492}
+    - {name: Arturo, w: 0.0489}
+    - {name: Esteban, w: 0.0481}
+    - {name: Asier, w: 0.0479}
+    - {name: Gregorio, w: 0.0476}
+    - {name: José Javier, w: 0.0463}
+    - {name: Cristóbal, w: 0.0461}
+    - {name: Unai, w: 0.0457}
+    - {name: Antonio Jesús, w: 0.0451}
+    - {name: Juan Miguel, w: 0.0448}
+    - {name: Francisco Manuel, w: 0.044}
+    - {name: Omar, w: 0.0438}
+    - {name: Abel, w: 0.0427}
+    - {name: Adam, w: 0.0423}
+    - {name: Jesús María, w: 0.042}
+    - {name: Jonathan, w: 0.0419}
+    - {name: Mikel, w: 0.0413}
+    - {name: Oliver, w: 0.0413}
+    - {name: Jaume, w: 0.041}
+    - {name: Germán, w: 0.0407}
+    - {name: Pedro José, w: 0.0402}
+    - {name: Pol, w: 0.0401}
+    - {name: Enzo, w: 0.0401}
+    - {name: Eugenio, w: 0.0397}
+    - {name: Christian, w: 0.0395}
+    - {name: Sergi, w: 0.0394}
+    - {name: José Vicente, w: 0.0387}
+    - {name: Moisés, w: 0.0386}
+    - {name: Jon, w: 0.0383}
+    - {name: Iñigo, w: 0.0374}
+    - {name: Gerard, w: 0.0373}
+    - {name: Arnau, w: 0.0369}
+    - {name: Valentín, w: 0.0368}
+    - {name: Juan Ramón, w: 0.0362}
+    - {name: Manuel Jesús, w: 0.0357}
+    - {name: Juan Pedro, w: 0.0347}
+    - {name: Israel, w: 0.0341}
+    - {name: Oriol, w: 0.0337}
+    - {name: Jonatan, w: 0.0328}
+  surnames:
+    - {name: García, w: 1.0}
+    - {name: Rodríguez, w: 0.6491}
+    - {name: González, w: 0.6428}
+    - {name: Fernández, w: 0.6197}
+    - {name: López, w: 0.6022}
+    - {name: Martínez, w: 0.5753}
+    - {name: Sánchez, w: 0.5655}
+    - {name: Pérez, w: 0.5386}
+    - {name: Gómez, w: 0.343}
+    - {name: Martín, w: 0.3284}
+    - {name: Jiménez, w: 0.276}
+    - {name: Hernández, w: 0.2633}
+    - {name: Ruiz, w: 0.2534}
+    - {name: Díaz, w: 0.2421}
+    - {name: Moreno, w: 0.2242}
+    - {name: Muñoz, w: 0.1969}
+    - {name: Álvarez, w: 0.1943}
+    - {name: Romero, w: 0.1572}
+    - {name: Gutiérrez, w: 0.1382}
+    - {name: Alonso, w: 0.1313}
+    - {name: Torres, w: 0.1249}
+    - {name: Navarro, w: 0.1222}
+    - {name: Domínguez, w: 0.1085}
+    - {name: Ramírez, w: 0.1083}
+    - {name: Ramos, w: 0.1034}
+    - {name: Vázquez, w: 0.0998}
+    - {name: Gil, w: 0.0961}
+    - {name: Serrano, w: 0.0898}
+    - {name: Morales, w: 0.0884}
+    - {name: Molina, w: 0.0866}
+    - {name: Suárez, w: 0.0859}
+    - {name: Castro, w: 0.0851}
+    - {name: Blanco, w: 0.0842}
+    - {name: Delgado, w: 0.0828}
+    - {name: Ortega, w: 0.0821}
+    - {name: Ortiz, w: 0.0791}
+    - {name: Marín, w: 0.0747}
+    - {name: Rubio, w: 0.0708}
+    - {name: Medina, w: 0.0662}
+    - {name: Núñez, w: 0.0654}
+    - {name: Castillo, w: 0.0651}
+    - {name: Cortés, w: 0.0622}
+    - {name: Sanz, w: 0.0615}
+    - {name: Iglesias, w: 0.0595}
+    - {name: Santos, w: 0.0589}
+    - {name: Garrido, w: 0.0582}
+    - {name: Guerrero, w: 0.0573}
+    - {name: Lozano, w: 0.0557}
+    - {name: Flores, w: 0.0551}
+    - {name: Cruz, w: 0.0543}
+    - {name: Herrera, w: 0.0535}
+    - {name: Cano, w: 0.0535}
+    - {name: Méndez, w: 0.0534}
+    - {name: Peña, w: 0.0512}
+    - {name: León, w: 0.0506}
+    - {name: Prieto, w: 0.0502}
+    - {name: Cabrera, w: 0.0499}
+    - {name: Márquez, w: 0.0498}
+    - {name: Reyes, w: 0.0493}
+    - {name: Gallego, w: 0.0477}
+    - {name: Campos, w: 0.047}
+    - {name: Vidal, w: 0.0467}
+    - {name: Calvo, w: 0.0465}
+    - {name: Vega, w: 0.0461}
+    - {name: Fuentes, w: 0.0451}
+    - {name: Aguilar, w: 0.0443}
+    - {name: Vargas, w: 0.0442}
+    - {name: Carrasco, w: 0.0436}
+    - {name: Caballero, w: 0.0424}
+    - {name: Nieto, w: 0.0416}
+    - {name: Díez, w: 0.0414}
+    - {name: Rojas, w: 0.041}
+    - {name: Santana, w: 0.0406}
+    - {name: Giménez, w: 0.0397}
+    - {name: Benítez, w: 0.0394}
+    - {name: Arias, w: 0.0393}
+    - {name: Hidalgo, w: 0.0393}
+    - {name: Montero, w: 0.0392}
+    - {name: Santiago, w: 0.0386}
+    - {name: Pascual, w: 0.0385}
+    - {name: Durán, w: 0.0385}
+    - {name: Mora, w: 0.0385}
+    - {name: Herrero, w: 0.0383}
+    - {name: Lorenzo, w: 0.0382}
+    - {name: Ibáñez, w: 0.0371}
+    - {name: Ferrer, w: 0.0367}
+    - {name: Carmona, w: 0.0365}
+    - {name: Soto, w: 0.0356}
+    - {name: Vicente, w: 0.0352}
+    - {name: Rivera, w: 0.0342}
+    - {name: Silva, w: 0.0338}
+    - {name: Román, w: 0.0338}
+    - {name: Parra, w: 0.0337}
+    - {name: Crespo, w: 0.0335}
+    - {name: Mendoza, w: 0.0327}
+    - {name: Velasco, w: 0.0325}
+    - {name: Pastor, w: 0.032}
+    - {name: Bravo, w: 0.032}
+    - {name: Rivas, w: 0.0316}
+    - {name: Moya, w: 0.0314}
+    - {name: Franco, w: 0.0314}
+    - {name: Sáez, w: 0.0313}
+    - {name: Gallardo, w: 0.0311}
+    - {name: Ríos, w: 0.0305}
+    - {name: Soler, w: 0.0305}
+    - {name: Pardo, w: 0.0301}
+    - {name: Esteban, w: 0.0299}
+    - {name: Vera, w: 0.0299}
+    - {name: Lara, w: 0.0299}
+    - {name: Camacho, w: 0.0294}
+    - {name: Espinosa, w: 0.0293}
+    - {name: Merino, w: 0.0288}
+    - {name: Sierra, w: 0.028}
+    - {name: Izquierdo, w: 0.0278}
+    - {name: Carrillo, w: 0.0276}
+    - {name: Arroyo, w: 0.0274}
+    - {name: Montes, w: 0.0274}
+    - {name: Contreras, w: 0.027}
+    - {name: Luque, w: 0.0268}
+    - {name: Casado, w: 0.0268}
+    - {name: Segura, w: 0.0267}
+    - {name: Rey, w: 0.0267}
+    - {name: Redondo, w: 0.0266}
+    - {name: Galán, w: 0.0266}
+    - {name: Heredia, w: 0.0266}
+    - {name: Otero, w: 0.0265}
+    - {name: Bernal, w: 0.0262}
+    - {name: Salazar, w: 0.0258}
+    - {name: Palacios, w: 0.0255}
+    - {name: Pereira, w: 0.0253}
+    - {name: Robles, w: 0.0253}
+    - {name: Soriano, w: 0.0251}
+    - {name: Marcos, w: 0.0251}
+    - {name: Guerra, w: 0.0251}
+    - {name: Miranda, w: 0.0247}
+    - {name: Acosta, w: 0.0246}
+    - {name: Valero, w: 0.0245}
+    - {name: Varela, w: 0.0244}
+    - {name: Martí, w: 0.0243}
+    - {name: Macías, w: 0.0243}
+    - {name: Guzmán, w: 0.0237}
+    - {name: Vila, w: 0.0235}
+    - {name: Expósito, w: 0.0234}
+    - {name: Roldán, w: 0.0234}
+    - {name: Calderón, w: 0.0234}
+    - {name: Guillén, w: 0.0233}
+    - {name: Bueno, w: 0.0231}
+    - {name: Mateo, w: 0.023}
+    - {name: Aguilera, w: 0.023}
+    - {name: Benito, w: 0.0228}
+    - {name: Padilla, w: 0.0227}
+    - {name: Rivero, w: 0.0226}
+    - {name: Andrés, w: 0.0224}
+    - {name: Villar, w: 0.0222}
+    - {name: Escudero, w: 0.0221}
+    - {name: Bermúdez, w: 0.0219}
+    - {name: Salas, w: 0.0218}
+    - {name: Escobar, w: 0.0218}
+    - {name: Beltrán, w: 0.0216}
+    - {name: Mateos, w: 0.0216}
+    - {name: Ávila, w: 0.0214}
+    - {name: Casas, w: 0.0213}
+    - {name: Aparicio, w: 0.0212}
+    - {name: Hurtado, w: 0.0211}
+    - {name: Gálvez, w: 0.021}
+    - {name: Estévez, w: 0.0208}
+    - {name: Quintana, w: 0.0207}
+    - {name: Trujillo, w: 0.0207}
+    - {name: Rico, w: 0.0206}
+    - {name: Pacheco, w: 0.0206}
+    - {name: Jurado, w: 0.0205}
+    - {name: Conde, w: 0.0204}
+    - {name: Aranda, w: 0.0202}
+    - {name: Menéndez, w: 0.02}
+    - {name: Plaza, w: 0.02}
+    - {name: Abad, w: 0.0198}
+    - {name: Villanueva, w: 0.0197}
+    - {name: Montoya, w: 0.0195}
+    - {name: Gracia, w: 0.0194}
+    - {name: Rueda, w: 0.0194}
+    - {name: Manzano, w: 0.0193}
+    - {name: Valencia, w: 0.0193}
+    - {name: Costa, w: 0.0192}
+    - {name: Maldonado, w: 0.0192}
+    - {name: Santamaría, w: 0.0192}
+    - {name: Paredes, w: 0.0191}
+    - {name: Blázquez, w: 0.0191}
+    - {name: Luna, w: 0.0191}
+    - {name: Mesa, w: 0.0191}
+    - {name: Roca, w: 0.019}
+    - {name: Castaño, w: 0.0189}
+    - {name: Alarcón, w: 0.0186}
+    - {name: Zamora, w: 0.0184}
+    - {name: Serra, w: 0.0184}
+    - {name: Cuesta, w: 0.0184}
+    - {name: Miguel, w: 0.0182}
+    - {name: Tomás, w: 0.0181}
+    - {name: Millán, w: 0.018}
+    - {name: Simón, w: 0.0179}
+    - {name: de la Fuente, w: 0.0179}
+    - {name: Bautista, w: 0.0179}
+    - {name: de la Cruz, w: 0.0178}
+    - {name: del Río, w: 0.0178}
+    - {name: Murillo, w: 0.0178}
+    - {name: Ponce, w: 0.0176}
+    - {name: Lázaro, w: 0.0175}
+    - {name: Pons, w: 0.0174}
+    - {name: Sancho, w: 0.0172}
+    - {name: Ordóñez, w: 0.0171}
+    - {name: Valverde, w: 0.017}
+    - {name: Amador, w: 0.017}
+    - {name: Ballesteros, w: 0.017}
+    - {name: Cordero, w: 0.0168}
+    - {name: Salvador, w: 0.0168}
+    - {name: Valle, w: 0.0168}
+    - {name: Blasco, w: 0.0167}
+    - {name: Oliva, w: 0.0167}
+    - {name: Bermejo, w: 0.0166}
+    - {name: Barrera, w: 0.0164}
+    - {name: Cuevas, w: 0.0164}
+    - {name: Antón, w: 0.0162}
+    - {name: Aguirre, w: 0.016}
+    - {name: Lorente, w: 0.0157}
+    - {name: Pozo, w: 0.0157}
+    - {name: Cárdenas, w: 0.0156}
+    - {name: Cuenca, w: 0.0156}
+    - {name: Quintero, w: 0.0155}
+    - {name: Arenas, w: 0.0155}
+    - {name: Collado, w: 0.0154}
+    - {name: Rodrigo, w: 0.0154}
+    - {name: Pulido, w: 0.0154}
+    - {name: Martos, w: 0.0153}
+    - {name: Quesada, w: 0.0153}
+    - {name: Barroso, w: 0.0152}
+    - {name: Sosa, w: 0.0152}
+    - {name: de la Torre, w: 0.0152}
+    - {name: Navas, w: 0.0152}
+    - {name: Paz, w: 0.0152}
+    - {name: Mas, w: 0.0151}
+    - {name: Zapata, w: 0.015}
+    - {name: Juan, w: 0.015}
+    - {name: Galindo, w: 0.015}
+    - {name: Mena, w: 0.015}
+    - {name: Correa, w: 0.0149}
+    - {name: Vallejo, w: 0.0148}
+    - {name: Bonilla, w: 0.0148}
+    - {name: Villalba, w: 0.0148}
+    - {name: Alba, w: 0.0147}
+    - {name: Cabello, w: 0.0147}
+    - {name: Naranjo, w: 0.0147}
+  nicknames:
+    Francisco: Paco
+    José: Pepe
+    Ignacio: Nacho
+    Manuel: Manolo
+    Jesús: Chus
+    Concepción: Concha
+    Dolores: Lola
+    Guadalupe: Lupe
+    Francisca: Paqui
+    María Carmen: Mari Carmen
+    María José: Majo
+    Josefa: Pepa
+    Alejandro: Álex
+    Enrique: Quique
+    Rosario: Charo
+    Encarnación: Encarna
+    Inmaculada: Inma
+    Purificación: Puri
+    Antonio: Toni
+    Ignacio José: Nacho
+    Montserrat: Montse
+    Francisco Javier: Javi
+    Javier: Javi
+    Guillermo: Guille
+    Cristina: Cris
+    Beatriz: Bea
+    Elisabet: Eli
+    Margarita: Marga
+  display: '{first} {last}'
+cultures:
+  - {culture: it, share: 0.007}
+  - {culture: gb, share: 0.0054}
+  - {culture: de, share: 0.0027}
+  - {culture: fr, share: 0.0026}
+  - {culture: pk, share: 0.0024}
+  - {culture: br, share: 0.0022}
+email:
+  domains:
+    - {domain: gmail.com, share: 0.52}
+    - {domain: hotmail.com, share: 0.16}
+    - {domain: hotmail.es, share: 0.07}
+    - {domain: outlook.es, share: 0.05}
+    - {domain: yahoo.es, share: 0.05}
+    - {domain: icloud.com, share: 0.06}
+    - {domain: telefonica.net, share: 0.03}
+    - {domain: live.com, share: 0.02}
+    - {domain: gmx.es, share: 0.02}
+    - {domain: outlook.com, share: 0.02}
+  patterns: [
+    '{first}.{last}', '{first}{last}', '{first}{last}{yy}', '{f}{last}', '{first}_{last}{nn}',
+    '{first}{nn}'
+  ]
+services:
+  - {sender: Correos, kind: courier, sender_type: alphanumeric}
+  - {sender: SEUR, kind: courier, sender_type: alphanumeric}
+  - {sender: MRW, kind: courier, sender_type: alphanumeric}
+  - {sender: GLS, kind: courier, sender_type: alphanumeric}
+  - {sender: Amazon, kind: courier, sender_type: alphanumeric}
+  - {sender: CTT Express, kind: courier, sender_type: alphanumeric}
+  - {sender: CaixaBank, kind: bank, sender_type: alphanumeric}
+  - {sender: BBVA, kind: bank, sender_type: alphanumeric}
+  - {sender: Santander, kind: bank, sender_type: alphanumeric}
+  - {sender: Sabadell, kind: bank, sender_type: alphanumeric}
+  - {sender: ING, kind: bank, sender_type: alphanumeric}
+  - {sender: Bankinter, kind: bank, sender_type: alphanumeric}
+  - {sender: Movistar, kind: telecom, sender_type: alphanumeric}
+  - {sender: Vodafone, kind: telecom, sender_type: alphanumeric}
+  - {sender: Orange, kind: telecom, sender_type: alphanumeric}
+  - {sender: Google, kind: otp_service, sender_type: alphanumeric}
+  - {sender: "+34...", label: WhatsApp, kind: otp_service, sender_type: number}
+  - {sender: "Cl@ve", kind: otp_service, sender_type: alphanumeric}
+  - {sender: "+3491...", kind: doctor, sender_type: number}
+  - {sender: CitaSalud, kind: doctor, sender_type: alphanumeric}
+  - {sender: Farmacia, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: Glovo, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: JustEat, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Uber, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: Cabify, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: Iberia, kind: airline, sender_type: alphanumeric}
+  - {sender: Vueling, kind: airline, sender_type: alphanumeric}
+  - {sender: Renfe, kind: rail, sender_type: alphanumeric}
+  - {sender: AEAT, kind: government, sender_type: alphanumeric}
+  - {sender: DGT, kind: government, sender_type: alphanumeric}
+  - {sender: Mercadona, kind: retail, sender_type: alphanumeric}
+  - {sender: ElCorteIngles, kind: retail, sender_type: alphanumeric}
+  - {sender: Iberdrola, kind: utility, sender_type: alphanumeric}
+  - {sender: Endesa, kind: utility, sender_type: alphanumeric}
+  - {sender: Naturgy, kind: utility, sender_type: alphanumeric}
+holidays:
+  - {date: "01-01", name: Año Nuevo}
+  - {date: "01-06", name: Epifanía del Señor (Reyes)}
+  - {rule: easter-3, name: Jueves Santo (todas las CCAA salvo Cataluña/C. Valenciana)}
+  - {rule: easter-2, name: Viernes Santo}
+  - {rule: easter+1, name: Lunes de Pascua (solo algunas CCAA)}
+  - {date: "05-01", name: Fiesta del Trabajo}
+  - {date: "08-15", name: Asunción de la Virgen}
+  - {date: "10-12", name: Fiesta Nacional de España}
+  - {date: "11-01", name: Todos los Santos}
+  - {date: "12-06", name: Día de la Constitución}
+  - {date: "12-08", name: Inmaculada Concepción}
+  - {date: "12-25", name: Navidad}
+popular_apps:
+  - {package: com.whatsapp, name: WhatsApp, category: messaging}
+  - {package: org.telegram.messenger, name: Telegram, category: messaging}
+  - {package: es.lacaixa.mobile.android.newwapicon, name: CaixaBank Now, category: banking}
+  - {package: com.bbva.bbvacontigo, name: BBVA, category: banking}
+  - {package: es.bancosantander.apps, name: Santander, category: banking}
+  - {package: net.inverline.bancosabadell.officelocator.android, name: Banco Sabadell, category: banking}
+  - {package: www.ingdirect.nativeframe, name: ING, category: banking}
+  - {package: com.imaginbank.app, name: imagin, category: banking}
+  - {package: es.openbank.mobile, name: Openbank, category: banking}
+  - {package: com.renfe.renfecercanias, name: Renfe Cercanías, category: transport}
+  - {package: com.mo2o.alsa, name: Alsa, category: transport}
+  - {package: com.cabify.rider, name: Cabify, category: transport}
+  - {package: com.ubercab, name: Uber, category: transport}
+  - {package: com.iberia.android, name: Iberia, category: transport}
+  - {package: com.wallapop, name: Wallapop, category: shopping}
+  - {package: com.inditex.zara, name: Zara, category: shopping}
+  - {package: es.mercadona.tienda, name: Mercadona, category: shopping}
+  - {package: com.lidl.eci.lidlplus, name: Lidl Plus, category: shopping}
+  - {package: com.idealista.android, name: idealista, category: shopping}
+  - {package: com.elpais.elpais, name: EL PAÍS, category: news}
+  - {package: com.glovo, name: Glovo, category: food}
+  - {package: com.justeat.app.es, name: Just Eat, category: food}
+  - {package: es.aeat.pin24h, name: "Cl@ve", category: government}
+  - {package: es.correos.app, name: Correos, category: government}
+  - {package: es.vodafone.mobile.mivodafone, name: Mi Vodafone, category: telecom}

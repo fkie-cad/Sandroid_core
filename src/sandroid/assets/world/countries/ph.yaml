@@ -1,0 +1,972 @@
+# Philippines country pack (schema v1). Sources: ph.SOURCES.md (S1..Sn).
+pack: country
+schema: 1.1
+country: ph
+name: Philippines
+# Shares of locally written text (SMS/chat). "fil" here means everyday Taglish:
+# Tagalog/Filipino matrix with heavy English code-switching ("san ka na? omw na
+# ako"). English-only texts are common for banks/work/formal use. Cebuano
+# (Bisaya) is the main SMS language in Cebu, Bohol, most of Mindanao (Davao,
+# CDO, GenSan). Hiligaynon, Ilocano, Waray, Kapampangan, Bikol exist regionally
+# but are not modelled (no language packs).
+languages: {fil: 0.55, en: 0.30, ceb: 0.15}
+timezones: [Asia/Manila]          # single zone, UTC+8, no DST
+date_format: "MM/dd/yyyy"         # US-style is the norm (11/20/2026); "Nov 20" in chat
+time_format: "h:mm a"             # 12-hour; SMS often "3pm", "3:30PM", "alas-tres"
+currency: {code: PHP, symbol: "₱", format: "₱1,499.00"}
+# SMS writes amounts as "P1,499.00", "PHP 1,499.00" or "Php1,499" (banks/GCash
+# use "PHP"); people write "1.5k", "500 pesos", "P500".
+phone:
+  country_code: "63"
+  trunk_prefix: "0"
+  national_format_examples: ["0917 123 4567", "0998 765 4321", "(02) 8123 4567", "(032) 234 5678"]
+  # People save mobiles as "09171234567" or "+639171234567" (no spaces) far more
+  # often than in the libphonenumber display format.
+  mobile:
+    # Mobile NSN = 10 digits (9XX + 7). Prefix->operator per libphonenumber
+    # carrier metadata (S3) cross-checked with community prefix lists (S4, S5).
+    # Mobile Number Portability (RA 11202, live since 2021-09) means a prefix no
+    # longer proves the current network. Prefixes where sources disagree
+    # (0904, 0913, 0924, 0934, 0940, 0941, 0944) are left out on purpose.
+    realistic:
+      - {prefix: "905", length: 10, operator: Globe/TM}
+      - {prefix: "906", length: 10, operator: Globe/TM}
+      - {prefix: "915", length: 10, operator: Globe/TM}
+      - {prefix: "916", length: 10, operator: Globe/TM}
+      - {prefix: "917", length: 10, operator: Globe}
+      - {prefix: "926", length: 10, operator: Globe/TM}
+      - {prefix: "927", length: 10, operator: Globe/TM}
+      - {prefix: "935", length: 10, operator: Globe/TM}
+      - {prefix: "936", length: 10, operator: Globe/TM}
+      - {prefix: "945", length: 10, operator: Globe/TM}
+      - {prefix: "953", length: 10, operator: Globe/TM}
+      - {prefix: "954", length: 10, operator: Globe/TM}
+      - {prefix: "955", length: 10, operator: Globe/TM}
+      - {prefix: "956", length: 10, operator: Globe/TM}
+      - {prefix: "965", length: 10, operator: Globe/TM}
+      - {prefix: "966", length: 10, operator: Globe/TM}
+      - {prefix: "967", length: 10, operator: Globe/TM}
+      - {prefix: "975", length: 10, operator: Globe/TM}
+      - {prefix: "976", length: 10, operator: Globe/GOMO}
+      - {prefix: "977", length: 10, operator: Globe/TM}
+      - {prefix: "995", length: 10, operator: Globe/TM}
+      - {prefix: "997", length: 10, operator: Globe/TM}
+      - {prefix: "907", length: 10, operator: Smart/TNT}
+      - {prefix: "908", length: 10, operator: Smart/TNT}
+      - {prefix: "909", length: 10, operator: Smart/TNT}
+      - {prefix: "910", length: 10, operator: Smart/TNT}
+      - {prefix: "912", length: 10, operator: Smart/TNT}
+      - {prefix: "918", length: 10, operator: Smart}
+      - {prefix: "919", length: 10, operator: Smart/TNT}
+      - {prefix: "920", length: 10, operator: Smart/TNT}
+      - {prefix: "921", length: 10, operator: Smart/TNT}
+      - {prefix: "928", length: 10, operator: Smart/TNT}
+      - {prefix: "929", length: 10, operator: Smart/TNT}
+      - {prefix: "930", length: 10, operator: Smart/TNT}
+      - {prefix: "938", length: 10, operator: Smart/TNT}
+      - {prefix: "939", length: 10, operator: Smart/TNT}
+      - {prefix: "946", length: 10, operator: Smart/TNT}
+      - {prefix: "947", length: 10, operator: Smart/TNT}
+      - {prefix: "948", length: 10, operator: Smart/TNT}
+      - {prefix: "949", length: 10, operator: Smart/TNT}
+      - {prefix: "950", length: 10, operator: Smart/TNT}
+      - {prefix: "951", length: 10, operator: Smart/TNT}
+      - {prefix: "961", length: 10, operator: Smart/TNT}
+      - {prefix: "998", length: 10, operator: Smart/TNT}
+      - {prefix: "999", length: 10, operator: Smart/TNT}
+      - {prefix: "922", length: 10, operator: "Sun (Smart)"}
+      - {prefix: "923", length: 10, operator: "Sun (Smart)"}
+      - {prefix: "932", length: 10, operator: "Sun (Smart)"}
+      - {prefix: "933", length: 10, operator: "Sun (Smart)"}
+      - {prefix: "942", length: 10, operator: "Sun (Smart)"}
+      - {prefix: "943", length: 10, operator: "Sun (Smart)"}
+      - {prefix: "895", length: 10, operator: DITO}
+      - {prefix: "896", length: 10, operator: DITO}
+      - {prefix: "897", length: 10, operator: DITO}
+      - {prefix: "898", length: 10, operator: DITO}
+      - {prefix: "991", length: 10, operator: DITO}
+      - {prefix: "992", length: 10, operator: DITO}
+      - {prefix: "993", length: 10, operator: DITO}
+      - {prefix: "994", length: 10, operator: DITO}
+    # NTC does not publish a machine-readable number-block allocation table
+    # (none found on ntc.gov.ph; an FOI request on the topic exists but was not
+    # retrievable). The blocks below are absent from libphonenumber's PH mobile
+    # pattern (is_valid_number = False) AND from every third-party prefix list
+    # checked (S4, S5, S6). Confidence: LOW-MEDIUM. Because libphonenumber
+    # rejects them, apps that validate numbers may refuse these contacts.
+    unallocated:
+      - {prefix: "901", length: 10, note: "not in libphonenumber PH mobile pattern 9(0[5-9]..); in no prefix list", source: S3}
+      - {prefix: "902", length: 10, note: "not in libphonenumber PH mobile pattern; in no prefix list", source: S3}
+      - {prefix: "903", length: 10, note: "not in libphonenumber PH mobile pattern; in no prefix list", source: S3}
+      - {prefix: "980", length: 10, note: "not in libphonenumber pattern 98[135-9]; in no prefix list", source: S3}
+      - {prefix: "982", length: 10, note: "not in libphonenumber pattern 98[135-9]; in no prefix list", source: S3}
+      - {prefix: "984", length: 10, note: "not in libphonenumber pattern 98[135-9]; in no prefix list", source: S3}
+      - {prefix: "990", length: 10, note: "not in libphonenumber pattern 99[1-9]; in no prefix list", source: S3}
+    # No official fiction/drama range exists in the Philippine numbering plan
+    # (searched NTC, Wikipedia, press). Local TV shows blur numbers instead.
+    fiction: null
+  landline:
+    # Since 2019-10-06 Metro Manila (+ Rizal, parts of Cavite/Bulacan) uses
+    # 8-digit subscriber numbers (first digit = operator: 8 PLDT, 7 Globe,
+    # 3 Bayan, 5 Eastern, 6 Converge...). Provinces keep 7 digits.
+    cities:
+      - {city: Metro Manila, area_code: "2", subscriber_length: 8}
+      - {city: Cebu City, area_code: "32", subscriber_length: 7}
+      - {city: Davao City, area_code: "82", subscriber_length: 7}
+      - {city: Iloilo City, area_code: "33", subscriber_length: 7}
+      - {city: Bacolod, area_code: "34", subscriber_length: 7}
+      - {city: Baguio, area_code: "74", subscriber_length: 7}
+      - {city: Cagayan de Oro, area_code: "88", subscriber_length: 7}
+      - {city: General Santos, area_code: "83", subscriber_length: 7}
+      - {city: Zamboanga City, area_code: "62", subscriber_length: 7}
+      - {city: Dasmariñas, area_code: "46", subscriber_length: 7}
+      - {city: Tacloban, area_code: "53", subscriber_length: 7}
+    fiction: null
+  validation_note: >-
+    libphonenumber 9.0.43 (S3): every `realistic` prefix is valid and typed
+    MOBILE; all `unallocated` prefixes (901-903, 980, 982, 984, 990) are
+    INVALID (also 900, 904, 913, 940, 941). The disputed 0904/0913/0940/0941
+    are listed as live by community lists but invalid in libphonenumber, so
+    they were kept out of both levels. Landlines (02 8xxx xxxx, 0XX xxx xxxx)
+    validate as FIXED_LINE. No fiction ranges exist to test.
+carriers:
+  # Brands on shared networks: TNT and Sun run on Smart (515-03); TM and GOMO on
+  # Globe (515-02). Shares are rough brand estimates of active SIMs from
+  # operator 2024-25 reports (Smart group ~48%, Globe group ~43%, DITO ~9%).
+  # sim_operator = SPN shown in the status bar.
+  - {name: Globe, sim_operator: "Globe", mccmnc: "51502", share: 0.22}
+  - {name: TM, sim_operator: "TM", mccmnc: "51502", share: 0.21}
+  - {name: Smart, sim_operator: "SMART", mccmnc: "51503", share: 0.18}
+  - {name: TNT, sim_operator: "TNT", mccmnc: "51503", share: 0.30}
+  - {name: DITO, sim_operator: "DITO", mccmnc: "51566", share: 0.09}
+cities:
+  # Populations: PSA 2020 Census of Population and Housing (S7). Coordinates =
+  # city hall/centre (Wikipedia/OSM, facts). Postcodes: PHLPost ZIP codes.
+  - {name: Quezon City, lat: 14.6760, lon: 121.0437, population: 2960048, area_code: "2",
+     postcodes: ["1100", "1101", "1109", "1118"], districts: [Diliman, Cubao, Novaliches, Commonwealth, Project 4]}
+  - {name: Manila, lat: 14.5995, lon: 120.9842, population: 1846513, area_code: "2",
+     postcodes: ["1000", "1003", "1004", "1006", "1008", "1012"], districts: [Ermita, Malate, Sampaloc, Tondo, Binondo, Santa Cruz]}
+  - {name: Davao City, lat: 7.1907, lon: 125.4553, population: 1776949, area_code: "82",
+     postcodes: ["8000"], districts: [Poblacion, Buhangin, Talomo, Toril, Matina]}
+  - {name: Caloocan, lat: 14.6507, lon: 120.9667, population: 1661584, area_code: "2",
+     postcodes: ["1400", "1428"], districts: [Grace Park, Bagong Silang, Camarin]}
+  - {name: Zamboanga City, lat: 6.9214, lon: 122.0790, population: 977234, area_code: "62",
+     postcodes: ["7000"], districts: [Tetuan, Putik, Pasonanca]}
+  - {name: Cebu City, lat: 10.3157, lon: 123.8854, population: 964169, area_code: "32",
+     postcodes: ["6000"], districts: [Lahug, Mabolo, Guadalupe, Banilad, Talamban]}
+  - {name: Antipolo, lat: 14.5862, lon: 121.1761, population: 887399, area_code: "2",
+     postcodes: ["1870"], districts: [San Roque, Dela Paz, Mayamot]}
+  - {name: Taguig, lat: 14.5176, lon: 121.0509, population: 886722, area_code: "2",
+     postcodes: ["1630", "1634"], districts: [Bonifacio Global City, Western Bicutan, Ususan]}
+  - {name: Pasig, lat: 14.5764, lon: 121.0851, population: 803159, area_code: "2",
+     postcodes: ["1600", "1605"], districts: [Kapitolyo, Ortigas Center, Rosario, Caniogan]}
+  - {name: Cagayan de Oro, lat: 8.4542, lon: 124.6319, population: 728402, area_code: "88",
+     postcodes: ["9000"], districts: [Carmen, Lapasan, Bulua, Nazareth]}
+  - {name: Valenzuela, lat: 14.7011, lon: 120.9830, population: 714978, area_code: "2",
+     postcodes: ["1440"], districts: [Marulas, Malinta, Karuhatan]}
+  - {name: Dasmariñas, lat: 14.3294, lon: 120.9367, population: 703141, area_code: "46",
+     postcodes: ["4114"], districts: [Salitran, Paliparan, Burol]}
+  - {name: General Santos, lat: 6.1164, lon: 125.1716, population: 697315, area_code: "83",
+     postcodes: ["9500"], districts: [Lagao, Calumpang, Fatima]}
+  - {name: Parañaque, lat: 14.4793, lon: 121.0198, population: 689992, area_code: "2",
+     postcodes: ["1700"], districts: [BF Homes, Baclaran, Sucat]}
+  - {name: Makati, lat: 14.5547, lon: 121.0244, population: 629616, area_code: "2",
+     postcodes: ["1200", "1209", "1210", "1229"], districts: [Poblacion, Bel-Air, Legaspi Village, Guadalupe Nuevo]}
+  - {name: Bacolod, lat: 10.6765, lon: 122.9509, population: 600783, area_code: "34",
+     postcodes: ["6100"], districts: [Mandalagan, Villamonte, Taculing]}
+  - {name: Iloilo City, lat: 10.7202, lon: 122.5621, population: 457626, area_code: "33",
+     postcodes: ["5000"], districts: [Jaro, Mandurriao, La Paz, Molo]}
+  - {name: Baguio, lat: 16.4023, lon: 120.5960, population: 366358, area_code: "74",
+     postcodes: ["2600"], districts: [Aurora Hill, Camp 7, Burnham-Legarda]}
+  - {name: Tacloban, lat: 11.2444, lon: 125.0039, population: 251881, area_code: "53",
+     postcodes: ["6500"], districts: [Downtown, Marasbaras, San Jose]}
+# Common street names nationwide: heroes (Rizal, Mabini, Bonifacio...), saints,
+# flowers and native trees (subdivision streets). Authored from general
+# knowledge; written with "St." / "Ave." as on PH addresses.
+streets: ["Rizal St.", "J.P. Rizal St.", "Mabini St.", "A. Mabini St.", "Bonifacio St.",
+  "Luna St.", "Gen. Luna St.", "Del Pilar St.", "M.H. del Pilar St.", "Burgos St.",
+  "P. Burgos St.", "Aguinaldo St.", "Quezon Ave.", "Quezon St.", "Magsaysay Ave.",
+  "Roxas St.", "Osmeña St.", "Jacinto St.", "Lapu-Lapu St.", "Silang St.",
+  "Lopez Jaena St.", "Arellano St.", "Recto Ave.", "Dagohoy St.", "Lakandula St.",
+  "Rajah Soliman St.", "Zamora St.", "Gomez St.", "Kalayaan Ave.", "National Highway",
+  "Real St.", "San Jose St.", "San Roque St.", "Santo Niño St.", "San Isidro St.",
+  "San Antonio St.", "Santa Rosa St.", "San Miguel St.", "Sampaguita St.", "Ilang-Ilang St.",
+  "Rosal St.", "Camia St.", "Dahlia St.", "Gumamela St.", "Orchid St.", "Waling-Waling St.",
+  "Everlasting St.", "Jasmine St.", "Kalachuchi St.", "Narra St.", "Molave St.",
+  "Acacia St.", "Mahogany St.", "Kamagong St.", "Yakal St.", "Apitong St.", "Ipil St.",
+  "Banaba St.", "Santol St.", "Mango St.", "Chico St.", "Guyabano St.", "Mabuhay St.",
+  "Maginhawa St.", "Malakas St.", "Matahimik St.", "Maharlika Highway", "Sampalok St.",
+  "Aurora St.", "Tandang Sora Ave."]
+# Real addresses add the barangay, and often a subdivision/phase/block/lot:
+# "Blk 5 Lot 12, Sampaguita St., Brgy. San Isidro, Antipolo, 1870 Rizal".
+# The schema has no {barangay} slot; districts double as barangay names.
+address_format: "{number} {street}, {city} {postcode}"
+places:
+  - {category: park, name: Rizal Park (Luneta), city: Manila, lat: 14.5831, lon: 120.9794}
+  - {category: park, name: Quezon Memorial Circle, city: Quezon City, lat: 14.6515, lon: 121.0493}
+  - {category: park, name: Ayala Triangle Gardens, city: Makati, lat: 14.5568, lon: 121.0233}
+  - {category: park, name: Burnham Park, city: Baguio, lat: 16.4125, lon: 120.5935}
+  - {category: park, name: People's Park, city: Davao City, lat: 7.0717, lon: 125.6097}
+  - {category: landmark, name: Intramuros (Fort Santiago), city: Manila, lat: 14.5958, lon: 120.9693}
+  - {category: landmark, name: Magellan's Cross, city: Cebu City, lat: 10.2934, lon: 123.9021}
+  - {category: landmark, name: Basilica Minore del Santo Niño, city: Cebu City, lat: 10.2943, lon: 123.9020}
+  - {category: landmark, name: Chocolate Hills, city: Carmen (Bohol), lat: 9.8297, lon: 124.1398}
+  - {category: landmark, name: SM Mall of Asia, city: Pasay, lat: 14.5352, lon: 120.9822}
+  - {category: landmark, name: Quiapo Church, city: Manila, lat: 14.5990, lon: 120.9838}
+  - {category: mountain, name: Mount Apo, city: Davao City, lat: 6.9875, lon: 125.2708}
+  - {category: mountain, name: Mayon Volcano, city: Legazpi, lat: 13.2548, lon: 123.6861}
+  - {category: mountain, name: Taal Volcano viewpoint (Tagaytay Ridge), city: Tagaytay, lat: 14.1067, lon: 120.9600}
+  - {category: beach, name: White Beach Boracay, city: Malay (Aklan), lat: 11.9619, lon: 121.9256}
+  - {category: beach, name: Alona Beach, city: Panglao (Bohol), lat: 9.5495, lon: 123.7746}
+  - {category: beach, name: White Beach Puerto Galera, city: Puerto Galera, lat: 13.4954, lon: 120.9008}
+  - {category: station, name: MRT-3 North Avenue Station, city: Quezon City, lat: 14.6522, lon: 121.0323}
+  - {category: station, name: MRT-3 Ayala Station, city: Makati, lat: 14.5490, lon: 121.0279}
+  - {category: station, name: LRT-2 Araneta Center-Cubao Station, city: Quezon City, lat: 14.6227, lon: 121.0527}
+  - {category: station, name: Parañaque Integrated Terminal Exchange (PITX), city: Parañaque, lat: 14.5098, lon: 120.9915}
+  - {category: station, name: Cebu South Bus Terminal, city: Cebu City, lat: 10.2985, lon: 123.8935}
+  - {category: airport, name: NAIA Terminal 3, city: Pasay, lat: 14.5203, lon: 121.0145}
+  - {category: airport, name: Mactan-Cebu International Airport, city: Lapu-Lapu, lat: 10.3075, lon: 123.9793}
+  - {category: airport, name: Francisco Bangoy International Airport, city: Davao City, lat: 7.1255, lon: 125.6458}
+  - {category: airport, name: Clark International Airport, city: Mabalacat, lat: 15.1859, lon: 120.5603}
+  - {category: museum, name: National Museum of Fine Arts, city: Manila, lat: 14.5871, lon: 120.9811}
+  - {category: museum, name: Ayala Museum, city: Makati, lat: 14.5514, lon: 121.0236}
+  - {category: museum, name: Museo Sugbo, city: Cebu City, lat: 10.2994, lon: 123.9080}
+  - {category: stadium, name: Smart Araneta Coliseum, city: Quezon City, lat: 14.6206, lon: 121.0527}
+  - {category: stadium, name: Philippine Arena, city: Bocaue, lat: 14.7934, lon: 120.9536}
+  - {category: stadium, name: Rizal Memorial Stadium, city: Manila, lat: 14.5631, lon: 120.9922}
+  - {category: stadium, name: Mall of Asia Arena, city: Pasay, lat: 14.5317, lon: 120.9839}
+  - {category: market, name: Divisoria, city: Manila, lat: 14.6033, lon: 120.9707}
+  - {category: market, name: Carbon Market, city: Cebu City, lat: 10.2925, lon: 123.8986}
+  - {category: market, name: Salcedo Saturday Market, city: Makati, lat: 14.5605, lon: 121.0240}
+  - {category: market, name: Bankerohan Public Market, city: Davao City, lat: 7.0681, lon: 125.6025}
+  - {category: lake, name: Laguna de Bay, city: Laguna, lat: 14.3833, lon: 121.2500}
+  - {category: lake, name: Taal Lake, city: Batangas, lat: 14.0000, lon: 121.0000}
+  - {category: lake, name: Lake Sebu, city: Lake Sebu (South Cotabato), lat: 6.2167, lon: 124.7000}
+names:
+  culture: ph
+  # Naming: given name(s) + middle name + surname, where the "middle name" is the
+  # MOTHER'S MAIDEN SURNAME (Juan Reyes dela Cruz), often written as an initial
+  # ("Juan R. dela Cruz"). Sons named after fathers carry "Jr." and are then
+  # called "Jun"/"Junjun"/"Jon-Jon". Compound given names are common (Mary
+  # Grace, John Paul, Ma. Theresa = "Ma." abbreviates Maria). Creative spellings
+  # and blends (Jhoanna, Jhon, Honeylyn, Jonalyn, Jay-ar) are normal.
+  # Surnames are mostly Spanish-derived (Clavería catalogue 1849); Chinese-
+  # Filipino surnames (Tan, Lim, Sy, Go, Uy, Chua, Ong, Yap, Co, Yu) are common
+  # and included; native surnames (Dimaculangan, Macaraeg, Panganiban,
+  # Cabahug, Agbayani) included at lower weights. Lowercase particles
+  # ("dela Cruz", "delos Santos") are kept as written in PSA documents; both
+  # "Dela Cruz" and "dela Cruz" occur.
+  female:   # 128 entries
+    - {name: "Maria", w: 1.0}
+    - {name: "Mary Grace", w: 1.0}
+    - {name: "Mary Joy", w: 1.0}
+    - {name: "Kristine", w: 1.0}
+    - {name: "Jennifer", w: 1.0}
+    - {name: "Angelica", w: 1.0}
+    - {name: "Michelle", w: 1.0}
+    - {name: "Mary Ann", w: 1.0}
+    - {name: "Rosemarie", w: 1.0}
+    - {name: "Jessa", w: 1.0}
+    - {name: "Ma. Theresa", w: 0.8}
+    - {name: "Maria Cristina", w: 0.8}
+    - {name: "Christine", w: 0.8}
+    - {name: "Rachelle", w: 0.8}
+    - {name: "Jocelyn", w: 0.8}
+    - {name: "Rowena", w: 0.8}
+    - {name: "Marites", w: 0.8}
+    - {name: "Teresita", w: 0.8}
+    - {name: "Rosario", w: 0.8}
+    - {name: "Lourdes", w: 0.8}
+    - {name: "Princess", w: 0.8}
+    - {name: "Joy", w: 0.8}
+    - {name: "Sheila", w: 0.8}
+    - {name: "Catherine", w: 0.8}
+    - {name: "April", w: 0.8}
+    - {name: "Althea", w: 0.8}
+    - {name: "Angel", w: 0.8}
+    - {name: "Jasmine", w: 0.8}
+    - {name: "Corazon", w: 0.6}
+    - {name: "Remedios", w: 0.6}
+    - {name: "Josefina", w: 0.6}
+    - {name: "Erlinda", w: 0.6}
+    - {name: "Leticia", w: 0.6}
+    - {name: "Evelyn", w: 0.6}
+    - {name: "Gloria", w: 0.6}
+    - {name: "Elizabeth", w: 0.6}
+    - {name: "Luzviminda", w: 0.6}
+    - {name: "Milagros", w: 0.6}
+    - {name: "Norma", w: 0.6}
+    - {name: "Nenita", w: 0.6}
+    - {name: "Rosalinda", w: 0.6}
+    - {name: "Marilou", w: 0.6}
+    - {name: "Marivic", w: 0.6}
+    - {name: "Maricel", w: 0.6}
+    - {name: "Marissa", w: 0.6}
+    - {name: "Cecilia", w: 0.6}
+    - {name: "Carmelita", w: 0.6}
+    - {name: "Aurora", w: 0.6}
+    - {name: "Zenaida", w: 0.6}
+    - {name: "Virginia", w: 0.6}
+    - {name: "Lorna", w: 0.6}
+    - {name: "Lilibeth", w: 0.6}
+    - {name: "Annabelle", w: 0.6}
+    - {name: "Myrna", w: 0.6}
+    - {name: "Susan", w: 0.6}
+    - {name: "Cynthia", w: 0.6}
+    - {name: "Edna", w: 0.6}
+    - {name: "Rosalie", w: 0.6}
+    - {name: "Aileen", w: 0.6}
+    - {name: "Arlene", w: 0.6}
+    - {name: "Grace", w: 0.6}
+    - {name: "Liza", w: 0.6}
+    - {name: "Joanna", w: 0.6}
+    - {name: "Rhea", w: 0.6}
+    - {name: "Kimberly", w: 0.6}
+    - {name: "Jessica", w: 0.6}
+    - {name: "Samantha", w: 0.6}
+    - {name: "Sofia", w: 0.6}
+    - {name: "Nicole", w: 0.6}
+    - {name: "Patricia", w: 0.6}
+    - {name: "Divina", w: 0.4}
+    - {name: "Estrella", w: 0.4}
+    - {name: "Felicidad", w: 0.4}
+    - {name: "Perla", w: 0.4}
+    - {name: "Gina", w: 0.4}
+    - {name: "Charito", w: 0.4}
+    - {name: "Mae", w: 0.4}
+    - {name: "Rose Ann", w: 0.4}
+    - {name: "Sarah", w: 0.4}
+    - {name: "Katherine", w: 0.4}
+    - {name: "Diane", w: 0.4}
+    - {name: "Cherry", w: 0.4}
+    - {name: "Lovely", w: 0.4}
+    - {name: "Precious", w: 0.4}
+    - {name: "Honeylyn", w: 0.4}
+    - {name: "Jonalyn", w: 0.4}
+    - {name: "Mylene", w: 0.4}
+    - {name: "Shiela Mae", w: 0.4}
+    - {name: "Ana Marie", w: 0.4}
+    - {name: "Hazel", w: 0.4}
+    - {name: "Camille", w: 0.4}
+    - {name: "Trisha", w: 0.4}
+    - {name: "Bianca", w: 0.4}
+    - {name: "Andrea", w: 0.4}
+    - {name: "Danica", w: 0.4}
+    - {name: "Ella", w: 0.4}
+    - {name: "Janine", w: 0.4}
+    - {name: "Pauline", w: 0.4}
+    - {name: "Erika", w: 0.4}
+    - {name: "Clarissa", w: 0.4}
+    - {name: "Abegail", w: 0.4}
+    - {name: "Mariel", w: 0.4}
+    - {name: "Kathleen", w: 0.4}
+    - {name: "Mika", w: 0.4}
+    - {name: "Jhoanna", w: 0.4}
+    - {name: "Lyka", w: 0.4}
+    - {name: "Kyla", w: 0.4}
+    - {name: "Alyssa", w: 0.4}
+    - {name: "Ayesha", w: 0.4}
+    - {name: "Zia", w: 0.4}
+    - {name: "Chloe", w: 0.4}
+    - {name: "Nathalie", w: 0.4}
+    - {name: "Angela", w: 0.4}
+    - {name: "Ashley", w: 0.4}
+    - {name: "Bea", w: 0.4}
+    - {name: "Kate", w: 0.4}
+    - {name: "Mikaela", w: 0.4}
+    - {name: "Hannah", w: 0.4}
+    - {name: "Mary Rose", w: 0.4}
+    - {name: "Ma. Luisa", w: 0.4}
+    - {name: "Kristel", w: 0.4}
+    - {name: "Rica", w: 0.4}
+    - {name: "Jenny", w: 0.4}
+    - {name: "Analyn", w: 0.4}
+    - {name: "Rochelle", w: 0.4}
+    - {name: "Irene", w: 0.4}
+    - {name: "Josephine", w: 0.4}
+    - {name: "Fe", w: 0.4}
+  male:   # 125 entries
+    - {name: "John Paul", w: 1.0}
+    - {name: "Mark Anthony", w: 1.0}
+    - {name: "Michael", w: 1.0}
+    - {name: "Christian", w: 1.0}
+    - {name: "John Michael", w: 1.0}
+    - {name: "Jose", w: 1.0}
+    - {name: "Joshua", w: 1.0}
+    - {name: "Jayson", w: 1.0}
+    - {name: "Ryan", w: 1.0}
+    - {name: "Mark", w: 1.0}
+    - {name: "Juan", w: 0.8}
+    - {name: "Antonio", w: 0.8}
+    - {name: "Eduardo", w: 0.8}
+    - {name: "Ricardo", w: 0.8}
+    - {name: "Roberto", w: 0.8}
+    - {name: "Rodolfo", w: 0.8}
+    - {name: "Ramon", w: 0.8}
+    - {name: "Romeo", w: 0.8}
+    - {name: "Danilo", w: 0.8}
+    - {name: "Reynaldo", w: 0.8}
+    - {name: "Rolando", w: 0.8}
+    - {name: "Jerome", w: 0.8}
+    - {name: "Jomar", w: 0.8}
+    - {name: "Kevin", w: 0.8}
+    - {name: "Jeffrey", w: 0.8}
+    - {name: "Joseph", w: 0.8}
+    - {name: "Christopher", w: 0.8}
+    - {name: "Jonathan", w: 0.8}
+    - {name: "Nathaniel", w: 0.8}
+    - {name: "Gabriel", w: 0.8}
+    - {name: "Jacob", w: 0.8}
+    - {name: "Alfredo", w: 0.6}
+    - {name: "Manuel", w: 0.6}
+    - {name: "Francisco", w: 0.6}
+    - {name: "Mario", w: 0.6}
+    - {name: "Arnel", w: 0.6}
+    - {name: "Edwin", w: 0.6}
+    - {name: "Edgardo", w: 0.6}
+    - {name: "Fernando", w: 0.6}
+    - {name: "Renato", w: 0.6}
+    - {name: "Virgilio", w: 0.6}
+    - {name: "Benjamin", w: 0.6}
+    - {name: "Ernesto", w: 0.6}
+    - {name: "Rogelio", w: 0.6}
+    - {name: "Nestor", w: 0.6}
+    - {name: "Wilfredo", w: 0.6}
+    - {name: "Rodel", w: 0.6}
+    - {name: "Ronaldo", w: 0.6}
+    - {name: "Noel", w: 0.6}
+    - {name: "Joel", w: 0.6}
+    - {name: "Allan", w: 0.6}
+    - {name: "Ariel", w: 0.6}
+    - {name: "Rommel", w: 0.6}
+    - {name: "Ronald", w: 0.6}
+    - {name: "Marvin", w: 0.6}
+    - {name: "Melvin", w: 0.6}
+    - {name: "Raymond", w: 0.6}
+    - {name: "Dennis", w: 0.6}
+    - {name: "Richard", w: 0.6}
+    - {name: "Erwin", w: 0.6}
+    - {name: "Randy", w: 0.6}
+    - {name: "Kenneth", w: 0.6}
+    - {name: "Carlo", w: 0.6}
+    - {name: "Paolo", w: 0.6}
+    - {name: "Miguel", w: 0.6}
+    - {name: "Angelo", w: 0.6}
+    - {name: "Ezekiel", w: 0.6}
+    - {name: "Ethan", w: 0.6}
+    - {name: "Matthew", w: 0.6}
+    - {name: "James", w: 0.6}
+    - {name: "Justin", w: 0.6}
+    - {name: "Daniel", w: 0.6}
+    - {name: "Teodoro", w: 0.4}
+    - {name: "Felipe", w: 0.4}
+    - {name: "Pedro", w: 0.4}
+    - {name: "Jesus", w: 0.4}
+    - {name: "Rey", w: 0.4}
+    - {name: "Arvin", w: 0.4}
+    - {name: "Aldrin", w: 0.4}
+    - {name: "Jhon", w: 0.4}
+    - {name: "Jun Mark", w: 0.4}
+    - {name: "Jan Carlo", w: 0.4}
+    - {name: "Rafael", w: 0.4}
+    - {name: "Lester", w: 0.4}
+    - {name: "Jericho", w: 0.4}
+    - {name: "Jeric", w: 0.4}
+    - {name: "Bryan", w: 0.4}
+    - {name: "Jhon Lloyd", w: 0.4}
+    - {name: "Jayden", w: 0.4}
+    - {name: "Liam", w: 0.4}
+    - {name: "Zion", w: 0.4}
+    - {name: "Nathan", w: 0.4}
+    - {name: "Adrian", w: 0.4}
+    - {name: "Lance", w: 0.4}
+    - {name: "Vince", w: 0.4}
+    - {name: "Sean", w: 0.4}
+    - {name: "Kyle", w: 0.4}
+    - {name: "Andrei", w: 0.4}
+    - {name: "Kurt", w: 0.4}
+    - {name: "Prince", w: 0.4}
+    - {name: "Clarence", w: 0.4}
+    - {name: "Elijah", w: 0.4}
+    - {name: "Gian", w: 0.4}
+    - {name: "John Rey", w: 0.4}
+    - {name: "Mark Joseph", w: 0.4}
+    - {name: "Ramil", w: 0.4}
+    - {name: "Rodrigo", w: 0.4}
+    - {name: "Gerardo", w: 0.4}
+    - {name: "Alvin", w: 0.4}
+    - {name: "Emmanuel", w: 0.4}
+    - {name: "Jessie", w: 0.4}
+    - {name: "Dexter", w: 0.4}
+    - {name: "Rico", w: 0.4}
+    - {name: "Ronnie", w: 0.4}
+    - {name: "Eric", w: 0.4}
+    - {name: "Leo", w: 0.4}
+    - {name: "Jaime", w: 0.4}
+    - {name: "Vicente", w: 0.4}
+    - {name: "Ernie", w: 0.4}
+    - {name: "Jojo", w: 0.4}
+    - {name: "Rene", w: 0.4}
+    - {name: "Glenn", w: 0.4}
+    - {name: "Jay-ar", w: 0.4}
+    - {name: "Dominic", w: 0.4}
+    - {name: "Patrick", w: 0.4}
+  surnames:   # 210 entries
+    - {name: "dela Cruz", w: 1.0}
+    - {name: "Garcia", w: 0.7}
+    - {name: "Reyes", w: 0.7}
+    - {name: "Ramos", w: 0.6}
+    - {name: "Mendoza", w: 0.6}
+    - {name: "Santos", w: 0.6}
+    - {name: "Flores", w: 0.5}
+    - {name: "Gonzales", w: 0.5}
+    - {name: "Bautista", w: 0.5}
+    - {name: "Villanueva", w: 0.5}
+    - {name: "Cruz", w: 0.5}
+    - {name: "Fernandez", w: 0.5}
+    - {name: "de Guzman", w: 0.4}
+    - {name: "Lopez", w: 0.4}
+    - {name: "Perez", w: 0.4}
+    - {name: "Castillo", w: 0.4}
+    - {name: "Francisco", w: 0.4}
+    - {name: "Rivera", w: 0.4}
+    - {name: "Aquino", w: 0.4}
+    - {name: "Castro", w: 0.4}
+    - {name: "Sanchez", w: 0.4}
+    - {name: "Torres", w: 0.4}
+    - {name: "de Leon", w: 0.4}
+    - {name: "Domingo", w: 0.4}
+    - {name: "Martinez", w: 0.4}
+    - {name: "Rodriguez", w: 0.4}
+    - {name: "Santiago", w: 0.4}
+    - {name: "Soriano", w: 0.4}
+    - {name: "delos Santos", w: 0.4}
+    - {name: "Diaz", w: 0.4}
+    - {name: "Hernandez", w: 0.4}
+    - {name: "Tolentino", w: 0.4}
+    - {name: "Valdez", w: 0.4}
+    - {name: "Ramirez", w: 0.4}
+    - {name: "Morales", w: 0.4}
+    - {name: "Mercado", w: 0.4}
+    - {name: "Tan", w: 0.25}
+    - {name: "Aguilar", w: 0.25}
+    - {name: "Navarro", w: 0.25}
+    - {name: "Manalo", w: 0.25}
+    - {name: "Gomez", w: 0.25}
+    - {name: "Dizon", w: 0.25}
+    - {name: "del Rosario", w: 0.25}
+    - {name: "Javier", w: 0.25}
+    - {name: "Corpuz", w: 0.25}
+    - {name: "Gutierrez", w: 0.25}
+    - {name: "Salazar", w: 0.25}
+    - {name: "Bernardo", w: 0.25}
+    - {name: "Pascual", w: 0.25}
+    - {name: "Valencia", w: 0.25}
+    - {name: "Miranda", w: 0.25}
+    - {name: "Sarmiento", w: 0.25}
+    - {name: "Mariano", w: 0.25}
+    - {name: "Robles", w: 0.25}
+    - {name: "Alvarez", w: 0.25}
+    - {name: "Romero", w: 0.25}
+    - {name: "Lim", w: 0.25}
+    - {name: "Velasco", w: 0.25}
+    - {name: "Cabrera", w: 0.25}
+    - {name: "Agustin", w: 0.25}
+    - {name: "Medina", w: 0.25}
+    - {name: "Ocampo", w: 0.25}
+    - {name: "Pineda", w: 0.25}
+    - {name: "Rosales", w: 0.25}
+    - {name: "Padilla", w: 0.25}
+    - {name: "Marquez", w: 0.25}
+    - {name: "Panganiban", w: 0.25}
+    - {name: "Mallari", w: 0.25}
+    - {name: "Manalastas", w: 0.25}
+    - {name: "Gonzaga", w: 0.25}
+    - {name: "Dimaculangan", w: 0.25}
+    - {name: "Macaraeg", w: 0.25}
+    - {name: "Magbanua", w: 0.25}
+    - {name: "Mangubat", w: 0.25}
+    - {name: "Cabahug", w: 0.25}
+    - {name: "Abella", w: 0.25}
+    - {name: "Alcantara", w: 0.25}
+    - {name: "Ancheta", w: 0.25}
+    - {name: "Angeles", w: 0.25}
+    - {name: "Aragon", w: 0.25}
+    - {name: "Arellano", w: 0.25}
+    - {name: "Austria", w: 0.25}
+    - {name: "Ballesteros", w: 0.25}
+    - {name: "Baltazar", w: 0.25}
+    - {name: "Buenaventura", w: 0.25}
+    - {name: "Calderon", w: 0.25}
+    - {name: "Camacho", w: 0.25}
+    - {name: "Canlas", w: 0.25}
+    - {name: "Capistrano", w: 0.25}
+    - {name: "Cariño", w: 0.25}
+    - {name: "Carpio", w: 0.25}
+    - {name: "Concepcion", w: 0.25}
+    - {name: "Cordero", w: 0.25}
+    - {name: "Cortez", w: 0.25}
+    - {name: "David", w: 0.25}
+    - {name: "dela Rosa", w: 0.25}
+    - {name: "del Mundo", w: 0.25}
+    - {name: "dela Peña", w: 0.25}
+    - {name: "Esguerra", w: 0.25}
+    - {name: "Espiritu", w: 0.25}
+    - {name: "Esteban", w: 0.25}
+    - {name: "Estrada", w: 0.25}
+    - {name: "Evangelista", w: 0.25}
+    - {name: "Fajardo", w: 0.25}
+    - {name: "Feliciano", w: 0.25}
+    - {name: "Galang", w: 0.25}
+    - {name: "Geronimo", w: 0.25}
+    - {name: "Guevarra", w: 0.25}
+    - {name: "Ignacio", w: 0.25}
+    - {name: "Ilagan", w: 0.25}
+    - {name: "Jimenez", w: 0.25}
+    - {name: "Lazaro", w: 0.25}
+    - {name: "Legaspi", w: 0.25}
+    - {name: "Magno", w: 0.25}
+    - {name: "Manalang", w: 0.25}
+    - {name: "Manuel", w: 0.25}
+    - {name: "Marasigan", w: 0.25}
+    - {name: "Mendiola", w: 0.25}
+    - {name: "Nepomuceno", w: 0.25}
+    - {name: "Nicolas", w: 0.25}
+    - {name: "Ong", w: 0.25}
+    - {name: "Pacheco", w: 0.25}
+    - {name: "Palma", w: 0.25}
+    - {name: "Paredes", w: 0.25}
+    - {name: "Pangilinan", w: 0.25}
+    - {name: "Quinto", w: 0.25}
+    - {name: "Roque", w: 0.25}
+    - {name: "Salvador", w: 0.25}
+    - {name: "Samson", w: 0.25}
+    - {name: "Serrano", w: 0.25}
+    - {name: "Sison", w: 0.25}
+    - {name: "Sy", w: 0.25}
+    - {name: "Tamayo", w: 0.25}
+    - {name: "Uy", w: 0.25}
+    - {name: "Vergara", w: 0.25}
+    - {name: "Villareal", w: 0.25}
+    - {name: "Yap", w: 0.25}
+    - {name: "Zamora", w: 0.25}
+    - {name: "Go", w: 0.25}
+    - {name: "Chua", w: 0.25}
+    - {name: "Co", w: 0.25}
+    - {name: "Yu", w: 0.25}
+    - {name: "Agbayani", w: 0.15}
+    - {name: "Dumlao", w: 0.15}
+    - {name: "Pagaduan", w: 0.15}
+    - {name: "Bulatao", w: 0.15}
+    - {name: "Abad", w: 0.15}
+    - {name: "Arcilla", w: 0.15}
+    - {name: "Bonifacio", w: 0.15}
+    - {name: "Borromeo", w: 0.15}
+    - {name: "Briones", w: 0.15}
+    - {name: "Cuizon", w: 0.15}
+    - {name: "dela Torre", w: 0.15}
+    - {name: "Gabriel", w: 0.15}
+    - {name: "Ortega", w: 0.15}
+    - {name: "Pacana", w: 0.15}
+    - {name: "Paguio", w: 0.15}
+    - {name: "Peralta", w: 0.15}
+    - {name: "Saavedra", w: 0.15}
+    - {name: "Sevilla", w: 0.15}
+    - {name: "Ybañez", w: 0.15}
+    - {name: "Alonzo", w: 0.15}
+    - {name: "Bello", w: 0.15}
+    - {name: "Gallardo", w: 0.15}
+    - {name: "Abellana", w: 0.15}
+    - {name: "Alcala", w: 0.15}
+    - {name: "Lacsamana", w: 0.15}
+    - {name: "Catacutan", w: 0.15}
+    - {name: "Quiambao", w: 0.15}
+    - {name: "Tiongson", w: 0.15}
+    - {name: "Montemayor", w: 0.15}
+    - {name: "Belmonte", w: 0.15}
+    - {name: "Barrientos", w: 0.15}
+    - {name: "Andrada", w: 0.15}
+    - {name: "Labrador", w: 0.15}
+    - {name: "Lagman", w: 0.15}
+    - {name: "Lualhati", w: 0.15}
+    - {name: "Malonzo", w: 0.15}
+    - {name: "Manansala", w: 0.15}
+    - {name: "Regalado", w: 0.15}
+    - {name: "Sabado", w: 0.15}
+    - {name: "Quizon", w: 0.15}
+    - {name: "Dumalagan", w: 0.15}
+    - {name: "Tabanao", w: 0.15}
+    - {name: "Lumapas", w: 0.15}
+    - {name: "Bacalso", w: 0.15}
+    - {name: "Amistoso", w: 0.15}
+    - {name: "Sumalinog", w: 0.15}
+    - {name: "Villamor", w: 0.15}
+    - {name: "Cabatingan", w: 0.15}
+    - {name: "Pepito", w: 0.15}
+    - {name: "Tumulak", w: 0.15}
+    - {name: "Nacario", w: 0.15}
+    - {name: "Ebdane", w: 0.15}
+    - {name: "Gacayan", w: 0.15}
+    - {name: "Bagtas", w: 0.15}
+    - {name: "Dalisay", w: 0.15}
+    - {name: "Macalintal", w: 0.15}
+    - {name: "Ilustre", w: 0.15}
+    - {name: "Tupas", w: 0.15}
+    - {name: "Maglaya", w: 0.15}
+    - {name: "Salonga", w: 0.15}
+    - {name: "Pamintuan", w: 0.15}
+    - {name: "Sicat", w: 0.15}
+    - {name: "Yabut", w: 0.15}
+    - {name: "Cunanan", w: 0.15}
+    - {name: "Lansangan", w: 0.15}
+    - {name: "Gatdula", w: 0.15}
+    - {name: "Mangahas", w: 0.15}
+    - {name: "Agapito", w: 0.15}
+  nicknames:
+    Jose: Pepe
+    Francisco: Kiko
+    Roberto: Bobby
+    Eduardo: Eddie
+    Ricardo: Carding
+    Rodolfo: Rudy
+    Antonio: Tony
+    Manuel: Manny
+    Ramon: Monching
+    Reynaldo: Rey
+    Rolando: Lando
+    Danilo: Danny
+    Alfredo: Fred
+    Gerardo: Gerry
+    Jonathan: Jojo
+    Christopher: Topher
+    John Paul: JP
+    John Michael: JM
+    Mark Anthony: Macmac
+    Jan Carlo: JC
+    Teresita: Tess
+    Ma. Theresa: Tessie
+    Rosario: Charing
+    Corazon: Cora
+    Remedios: Remy
+    Josefina: Josie
+    Maria Cristina: Tina
+    Mary Grace: Grace
+    Mary Joy: Joy
+    Kristine: Tin
+    Jennifer: Jen
+    Elizabeth: Beth
+    Luzviminda: Luz
+    Milagros: Mila
+    Marites: Tess
+    Lourdes: Lulu
+    Rosemarie: Rose
+    Angelica: Gelai
+    Patricia: Trish
+    Nicole: Nikki
+  # Contacts are saved mostly by first name or nickname plus context, e.g.
+  # "Joy Officemate", "Jun Tricycle", "Aling Nena Tindahan", "Kuya Grab".
+  # Family/elders get kinship honorifics instead of names: "Mama", "Nanay",
+  # "Mommy", "Tatay", "Papa", "Kuya Jun" (older brother/older male), "Ate Joy"
+  # (older sister/older female), "Tita Baby", "Tito Boy", "Lola", "Lolo",
+  # "Ninang Cora", "Ninong Bert" (godparents), "Mare"/"Pare" (co-parents),
+  # "Bes", "Beh", "Mahal"/"Hon"/"Babe" (partner). Older relatives' house nicknames
+  # (Baby, Boy, Bong, Inday, Neneng, Toto, Bebot, Dodong, Dading) are used as the
+  # saved name. The schema has one `display` string only (see report).
+  display: "{first} {last}"
+cultures:
+  # Muslim Filipinos (Moro: Maguindanao, Maranao, Tausug, ...): 6.4% of
+  # household population (PSA 2020 census, religion). Arabic/Malay given names,
+  # titles Datu/Bai/Hadji/Sitti. Distinct naming culture; no pack yet.
+  - {culture: ph-moro, share: 0.064}
+  # Chinese-Filipinos (Tsinoy): ~1.35 M (~1.2%) per community estimates;
+  # census self-reported Chinese ethnicity only 102,577 (0.1%). Common Tsinoy
+  # surnames are already in the main pool; this share covers Chinese given
+  # names / Hokkien naming. No zh pack yet.
+  - {culture: zh, share: 0.012}
+  # Foreign citizens: 78,396 (0.07%) in 2020; Indians 24.2%, US 8.0% of them
+  # (PSA). Indian-Filipino community (incl. informal "5-6" lenders) is larger
+  # than the citizen count; US share excludes dual citizens.
+  - {culture: in, share: 0.001}
+  - {culture: us, share: 0.001}
+email:
+  # Estimates (authored): Gmail dominates; Yahoo persists among 1990s/2000s
+  # account holders. Playful handles are common ("angel_cute23", "jp.reyes08").
+  domains:
+    - {domain: gmail.com, share: 0.76}
+    - {domain: yahoo.com, share: 0.11}
+    - {domain: ymail.com, share: 0.02}
+    - {domain: hotmail.com, share: 0.04}
+    - {domain: outlook.com, share: 0.03}
+    - {domain: icloud.com, share: 0.03}
+    - {domain: yahoo.com.ph, share: 0.01}
+  patterns: ["{first}{last}", "{first}.{last}", "{first}_{last}{yy}", "{f}{last}", "{first}{last}{yy}", "{last}.{first}"]
+services:
+  # Alphanumeric sender IDs as registered with the telcos (max 11 chars). The
+  # exact casing per brand is authored from common screenshots and may differ.
+  # E-wallets / mobile money (GLoan, GGives, GCredit come from "GCash"; Maya
+  # Credit/Easy Credit from "Maya")
+  - {sender: GCash, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: Maya, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: PalawanPay, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: Cebuana, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: MLhuillier, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: Coins.ph, kind: mobile_money, sender_type: alphanumeric}
+  # Banks
+  - {sender: BDO, kind: bank, sender_type: alphanumeric}
+  - {sender: BPI, kind: bank, sender_type: alphanumeric}
+  - {sender: Metrobank, kind: bank, sender_type: alphanumeric}
+  - {sender: UnionBank, kind: bank, sender_type: alphanumeric}
+  - {sender: LANDBANK, kind: bank, sender_type: alphanumeric}
+  - {sender: SecBank, kind: bank, sender_type: alphanumeric}
+  - {sender: PNB, kind: bank, sender_type: alphanumeric}
+  - {sender: RCBC, kind: bank, sender_type: alphanumeric}
+  - {sender: Chinabank, kind: bank, sender_type: alphanumeric}
+  - {sender: GoTyme, kind: bank, sender_type: alphanumeric}
+  - {sender: MariBank, kind: bank, sender_type: alphanumeric}
+  - {sender: Tonik, kind: bank, sender_type: alphanumeric}
+  # Lending / BNPL (no `lender` kind in schema; filed under bank). SEC-registered
+  # online lending platforms. Collection reminders - and, in documented
+  # harassment cases, debt-shaming texts to the borrower's contacts - often
+  # come from ordinary prepaid mobile numbers, not the brand ID.
+  - {sender: Tala, kind: lender, sender_type: alphanumeric}
+  - {sender: Cashalo, kind: lender, sender_type: alphanumeric}
+  - {sender: BillEase, kind: lender, sender_type: alphanumeric}
+  - {sender: HomeCredit, kind: lender, sender_type: alphanumeric}
+  - {sender: Atome, kind: lender, sender_type: alphanumeric}
+  - {sender: JuanHand, kind: lender, sender_type: alphanumeric}
+  - {sender: Digido, kind: lender, sender_type: alphanumeric}
+  - {sender: "+63995...", kind: lender, sender_type: number}   # collection agent on a prepaid SIM
+  - {sender: "+63961...", kind: lender, sender_type: number}   # collection agent on a prepaid SIM
+  # Telecom (promo registrations reply from short codes: Globe 8080, Smart 9999)
+  - {sender: Globe, kind: telecom, sender_type: alphanumeric}
+  - {sender: TM, kind: telecom, sender_type: alphanumeric}
+  - {sender: SMART, kind: telecom, sender_type: alphanumeric}
+  - {sender: TNT, kind: telecom, sender_type: alphanumeric}
+  - {sender: DITO, kind: telecom, sender_type: alphanumeric}
+  - {sender: "8080", kind: telecom, sender_type: shortcode}     # Globe/TM promo short code
+  - {sender: "9999", kind: telecom, sender_type: shortcode}     # Smart/TNT promo short code
+  # OTP (international aggregators; Google often arrives from a short code)
+  - {sender: Google, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Facebook, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Viber, kind: otp_service, sender_type: alphanumeric}
+  - {sender: TikTok, kind: otp_service, sender_type: alphanumeric}
+  # Shopping / couriers
+  - {sender: Shopee, kind: retail, sender_type: alphanumeric}
+  - {sender: Lazada, kind: retail, sender_type: alphanumeric}
+  - {sender: SMAdvantage, kind: retail, sender_type: alphanumeric}
+  - {sender: Puregold, kind: retail, sender_type: alphanumeric}
+  - {sender: "J&T", kind: courier, sender_type: alphanumeric}
+  - {sender: LBC, kind: courier, sender_type: alphanumeric}
+  - {sender: NinjaVan, kind: courier, sender_type: alphanumeric}
+  - {sender: SPX, kind: courier, sender_type: alphanumeric}
+  - {sender: Flash,  kind: courier, sender_type: alphanumeric}
+  - {sender: "+63917...", kind: courier, sender_type: number}   # rider texts "nasa labas na po ako"
+  - {sender: Lalamove, kind: courier, sender_type: alphanumeric}
+  # Rides / food
+  - {sender: Grab, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: Angkas, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: JoyRide, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: MoveIt, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: foodpanda, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Jollibee, kind: delivery_food, sender_type: alphanumeric}
+  # Airlines
+  - {sender: CebuPacific, kind: airline, sender_type: alphanumeric}
+  - {sender: PAL, kind: airline, sender_type: alphanumeric}
+  - {sender: AirAsia, kind: airline, sender_type: alphanumeric}
+  # Utilities
+  - {sender: MERALCO, kind: utility, sender_type: alphanumeric}
+  - {sender: Maynilad, kind: utility, sender_type: alphanumeric}
+  - {sender: ManilaWater, kind: utility, sender_type: alphanumeric}
+  - {sender: VECO, kind: utility, sender_type: alphanumeric}
+  - {sender: DavaoLight, kind: utility, sender_type: alphanumeric}
+  - {sender: PLDT, kind: utility, sender_type: alphanumeric}
+  - {sender: Converge, kind: utility, sender_type: alphanumeric}
+  # Government
+  - {sender: SSS, kind: government, sender_type: alphanumeric}
+  - {sender: PhilHealth, kind: government, sender_type: alphanumeric}
+  - {sender: PAGIBIG, kind: government, sender_type: alphanumeric}
+  - {sender: LTO, kind: government, sender_type: alphanumeric}
+  - {sender: DFA, kind: government, sender_type: alphanumeric}
+  - {sender: PhilSys, kind: government, sender_type: alphanumeric}
+  - {sender: NDRRMC, kind: government, sender_type: alphanumeric}
+  # Health
+  - {sender: MercuryDrug, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: Watsons, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: "+6328...", kind: doctor, sender_type: number}    # clinic landline (Metro Manila)
+  - {sender: "+63918...", kind: doctor, sender_type: number}   # clinic secretary's mobile ("Doc's secretary")
+holidays:
+  # Fixed dates (RA 9492 / annual proclamations). Regular holidays + common
+  # special non-working days.
+  - {date: "01-01", name: "New Year's Day"}
+  - {date: "02-25", name: "EDSA People Power Revolution Anniversary"}
+  - {date: "04-09", name: "Araw ng Kagitingan"}
+  - {date: "05-01", name: "Labor Day"}
+  - {date: "06-12", name: "Independence Day"}
+  - {date: "08-21", name: "Ninoy Aquino Day"}
+  - {date: "11-01", name: "All Saints' Day (Undas)"}
+  - {date: "11-02", name: "All Souls' Day"}
+  - {date: "11-30", name: "Bonifacio Day"}
+  - {date: "12-08", name: "Feast of the Immaculate Conception"}
+  - {date: "12-24", name: "Christmas Eve"}
+  - {date: "12-25", name: "Christmas Day"}
+  - {date: "12-30", name: "Rizal Day"}
+  - {date: "12-31", name: "Last Day of the Year"}
+  - {rule: easter-3, name: "Maundy Thursday"}
+  - {rule: easter-2, name: "Good Friday"}
+  - {rule: easter-1, name: "Black Saturday"}
+  # v1.1 rules for the holidays v1 could not express (were listed in this comment).
+  # Eid'l Fitr and Eid'l Adha are proclaimed each year; the tabular Hijri date is an estimate.
+  - {rule: "08-mon#-1", name: "National Heroes Day"}
+  - {rule: "lunisolar:chinese_new_year", name: "Chinese New Year"}
+  - {rule: "hijri:10-01", name: "Eid'l Fitr"}
+  - {rule: "hijri:12-10", name: "Eid'l Adha"}
+popular_apps:
+  # All packages verified on Google Play (store, hl=en, gl=PH) on 2026-11-20.
+  # e-wallets / banks
+  - {package: com.globe.gcash.android, name: GCash, category: banking}
+  - {package: com.paymaya, name: Maya, category: banking}
+  - {package: ph.com.bdo.retail, name: BDO Online, category: banking}
+  - {package: com.bpi.ng.app, name: BPI, category: banking}
+  - {package: ph.com.metrobank.mcc.mbonline, name: Metrobank App, category: banking}
+  - {package: com.unionbankph.online, name: UnionBank Online, category: banking}
+  - {package: com.landbank.mobilebanking, name: LANDBANK Mobile Banking, category: banking}
+  - {package: com.securitybank.bbx, name: Security Bank App, category: banking}
+  - {package: ph.com.gotyme, name: GoTyme Bank, category: banking}
+  - {package: ph.seabank.seabank, name: MariBank PH (SeaBank), category: banking}
+  - {package: com.tonik.mobile, name: Tonik Bank, category: banking}
+  - {package: com.cimbph.app2022, name: CIMB Bank Philippines, category: banking}
+  - {package: com.palawanpay.ewallet, name: PalawanPay, category: banking}
+  - {package: com.clrb.eCebuana2, name: eCebuana, category: banking}
+  - {package: asia.coins.mobile, name: Coins.ph, category: banking}
+  # lending / BNPL (SEC-registered online lending platforms)
+  - {package: ph.com.tala, name: Tala, category: finance}
+  - {package: com.oriente.cashalo, name: Cashalo, category: finance}
+  - {package: ph.billeasev2.mobile, name: BillEase, category: finance}
+  - {package: ph.homecredit.capp, name: Home Credit Philippines, category: finance}
+  - {package: ph.atome.paylater, name: Atome PH, category: finance}
+  - {package: com.juanhand.fast.cash.peso.loan.app, name: JuanHand, category: finance}
+  # messaging / social
+  - {package: com.facebook.orca, name: Messenger, category: messaging}
+  - {package: com.viber.voip, name: Viber, category: messaging}
+  - {package: com.facebook.katana, name: Facebook, category: messaging}
+  - {package: com.zhiliaoapp.musically, name: TikTok, category: messaging}
+  # shopping
+  - {package: com.shopee.ph, name: Shopee PH, category: shopping}
+  - {package: com.lazada.android, name: Lazada, category: shopping}
+  # transport / food
+  - {package: com.grabtaxi.passenger, name: Grab, category: transport}
+  - {package: com.angkas.customer, name: Angkas, category: transport}
+  - {package: hk.easyvan.app.client, name: Lalamove, category: transport}
+  - {package: com.global.foodpanda.android, name: foodpanda, category: food}
+  # telecom self-care
+  - {package: ph.com.globe.globeonesuperapp, name: GlobeOne, category: telecom}
+  - {package: com.smart.consumer.app, name: Smart, category: telecom}
+  - {package: com.mydito, name: DITO, category: telecom}
+  # government
+  - {package: egov.app, name: eGovPH, category: government}
+  - {package: com.sss.gov.mysssmobileapp, name: MySSS, category: government}
+  - {package: pagibigfund.virtualpagibigapp, name: Virtual Pag-IBIG, category: government}
+  # news / travel / health
+  - {package: com.gmanews.eleksyon, name: GMA News, category: news}
+  - {package: com.cebupacificair.app, name: Cebu Pacific, category: transport}
+  - {package: com.mtelnet.watson.ph, name: Watsons Philippines, category: health}

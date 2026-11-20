@@ -158,6 +158,12 @@ _OK = "sandroid-identity-ok"
 #: Framework restart: wait this long for a new system_server.
 RESTART_TIMEOUT_S = 180.0
 RESTART_POLL_S = 2.0
+#: ``ensure_applied``: start a framework window only with this much of the
+#: budget left (a restart usually takes 20 to 60 s; the wait is capped to
+#: what is left).
+ENSURE_WINDOW_MIN_S = 90.0
+#: Why a framework value stays pending when the budget ran out.
+OUT_OF_TIME = "not applied: device preparation ran out of time"
 
 _UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I
@@ -268,6 +274,9 @@ EMULATOR_SIM_OPERATOR = "the emulator takes the SIM operator name from its carri
 NETWORK_OPERATOR_CARRIES = "the network operator name carries it"
 #: How SIM values reach an emulator (:mod:`identity_sim`).
 SIM_MECHANISM = "set when the emulator starts (its SIM card profile)"
+PHONE_MECHANISM = (
+    f"{SIM_MECHANISM}, else adb emu phonenumber if a restart cannot (11 digits at most)"
+)
 
 
 def _spec(*args: Any, **kw: Any) -> tuple[str, KindSpec]:
@@ -335,13 +344,11 @@ REGISTRY: dict[str, KindSpec] = dict(
             ("native", "hook"),
             "none",
             "READ_PHONE_NUMBERS",
-            f"{SIM_MECHANISM}, else adb emu phonenumber (up to 11 digits)",
+            PHONE_MECHANISM,
             "service call iphonesubinfo (line 1 number)",
             verify="soft",
             needs_emulator=True,
-            emulator_mechanism=(
-                f"{SIM_MECHANISM}, else adb emu phonenumber (up to 11 digits)"
-            ),
+            emulator_mechanism=PHONE_MECHANISM,
         ),
         _spec(
             "gps",
@@ -2156,10 +2163,14 @@ class IdentityPlan:
         return [s.value_id for s in self.steps]
 
 
-def _pre_spawn_plan_cls() -> type:
-    from sandroid.services.app_start import PreSpawnPlan
+def _pre_start_plan_cls() -> type:
+    from sandroid.services.app_start import PreStartPlan
 
-    return PreSpawnPlan
+    return PreStartPlan
+
+
+#: Deprecated alias (app_start's pre-start step was called pre-spawn hook).
+_pre_spawn_plan_cls = _pre_start_plan_cls
 
 
 def _list_sig(name: str, row: dict[str, Any], when: int | None = None) -> tuple:
@@ -2538,6 +2549,9 @@ class IdentityService:
         self._hook_installed = False
         self._sleep: Callable[[float], None] = time.sleep
         self._clock: Callable[[], float] = time.monotonic
+        #: Per call (thread): the ``ensure_applied`` deadline (monotonic,
+        #: None outside it) and whether the device answered the preflight.
+        self._call = threading.local()
         #: Called with the serial and the old system_server PID once the
         #: framework is back after a restart window (default: Frida recovery
         #: through app_start, then the proxy check).
@@ -2894,18 +2908,54 @@ class IdentityService:
         """P0: one adb call reading every current value."""
         tokens = [profile.token, *profile.retired_tokens]
         script = preflight_script(packages, tokens, call_numbers(profile))
-        return parse_preflight(serial, _Device(serial).shell(script, timeout=120))
+        timeout = self._capped(120.0, floor=10.0)
+        return parse_preflight(serial, _Device(serial).shell(script, timeout=timeout))
 
     def plan(
-        self, serial: str, package: str | None = None, profile: Profile | None = None
+        self,
+        serial: str,
+        package: str | None = None,
+        profile: Profile | None = None,
+        *,
+        require_answer: bool = False,
     ) -> IdentityPlan:
-        """P0+P1: read the device once and plan (no writes)."""
+        """P0+P1: read the device once and plan (no writes).
+
+        The statuses are published unless an apply ran or runs meanwhile
+        (``_Applied.gen`` changed during the read, or the apply lock is
+        held): a slow read never overwrites an apply's newer statuses.
+
+        Args:
+            serial: Device serial.
+            package: The app about to start.
+            profile: Profile to plan (default: the active one).
+            require_answer: A device that does not answer (offline, still
+                booting) raises instead of publishing every value as failed.
+
+        Raises:
+            ProfileError: No profile.
+            IdentityApplyError: ``require_answer`` and no answer.
+        """
         profile = profile or self._require_profile()
         pkgs = self._packages(serial, package)
+        gen = self._gen(serial)
         state = self.preflight(serial, pkgs, profile)
+        if require_answer and not state.ok:
+            raise IdentityApplyError(f"{serial} did not answer the identity read")
+        stale = self._gen(serial) != gen
         plan = self._plan(profile, state, pkgs)
-        self._publish(plan)
+        if not stale and not self._apply_lock.locked():
+            self._publish(plan)
         return plan
+
+    def _gen(self, serial: str) -> int:
+        with self._lock:
+            mem = self._applied.get(serial)
+            return mem.gen if mem is not None else 0
+
+    def apply_running(self) -> bool:
+        """An apply (any device) holds the apply lock right now."""
+        return self._apply_lock.locked()
 
     def _require_profile(self) -> Profile:
         profile = self.active_profile()
@@ -3099,8 +3149,9 @@ class IdentityService:
         (a snapshot keeps the old SIM cached), never while airplane mode is
         on; afterwards a mismatch fails and an unreadable value stays
         applied. Not started with it: pending when a restart from Sandroid
-        sets it, else skipped with the reason; the phone number first falls
-        back to ``adb emu phonenumber`` when it fits.
+        sets it, else skipped with the reason. Only where a restart would not
+        set it, the phone number falls back to ``adb emu phonenumber`` when
+        it fits (that rewrites the AVD's host-side SIM profile file).
         """
         spec = REGISTRY[vs.kind]
         vid, desired = vs.id, info.rendered
@@ -3152,21 +3203,28 @@ class IdentityService:
                 if retry:
                     info.reason = SIM_TOGGLE_RETRY
             return
-        if vs.kind == "phone_number":
-            if mem.emu.get(vid) == desired:
-                info.status, info.reason = "applied", ""
-                info.sim_launch = False
-                return
-            if _ascii_digits(desired) and len(desired) <= 11:
-                info.sim_launch = False
-                # adb emu phonenumber takes at most 11 digits, no '+'.
-                plan.steps.append(Step(vid, "none", desired, current))
-                return
+        if vs.kind == "phone_number" and mem.emu.get(vid) == desired:
+            info.status, info.reason = "applied", ""
+            info.sim_launch = False
+            return
         try:
             blocker = identity_sim.restart_blocker(emu, profile)
         except (OSError, identity_sim.SimPatchError) as exc:
             logger.debug(f"identity: SIM restart check failed: {exc}")
             blocker = "the emulator's system image could not be read"
+        if (
+            blocker
+            and vs.kind == "phone_number"
+            and _ascii_digits(desired)
+            and len(desired) <= 11
+        ):
+            # A restart would not set it: adb emu phonenumber (at most 11
+            # digits, no '+'). Never when a restart can: the emulator writes
+            # the number into the AVD's modem_simulator/iccprofile_for_sim0.xml
+            # on the host, which the SIM launch hook would have to undo.
+            info.sim_launch = False
+            plan.steps.append(Step(vid, "none", desired, current))
+            return
         if blocker:
             info.status, info.reason = "skipped", blocker
         else:
@@ -3364,6 +3422,7 @@ class IdentityService:
         dev = _Device(serial)
         pkgs = self._packages(serial, package)
         state = self.preflight(serial, pkgs, profile)
+        self._call.device_ok = state.ok
         if state.ok and state.marker:
             self._recover(dev, state)
             state = self.preflight(serial, pkgs, profile)
@@ -3415,6 +3474,14 @@ class IdentityService:
                 self._run_gms(dev, state, step, plan.infos[step.value_id])
         # P5: one framework restart window
         fw = [s for s in plan.steps if s.restart == "framework"]
+        left = self._time_left()
+        if fw and left is not None and left < ENSURE_WINDOW_MIN_S:
+            # ensure_applied: no window that would outlast the budget.
+            for step in fw:
+                info = plan.infos[step.value_id]
+                info.status, info.reason = "pending", OUT_OF_TIME
+                steps.pop(step.value_id, None)
+            fw = []
         if fw:
             self._framework_window(dev, profile, state, fw, plan)
         # P6: verify with the same batched read
@@ -3471,6 +3538,81 @@ class IdentityService:
         )
         self._finish(profile, plan, state2, wrote=True, package=package)
         return plan
+
+    def ensure_applied(
+        self, serial: str, budget_s: float = 240.0
+    ) -> IdentityPlan | None:
+        """Device preparation: apply the active profile within ``budget_s``.
+
+        For a worker thread when a device comes up (no dialog). Like
+        :meth:`apply` without a package. Only ``identity.restart = "always"``
+        opens a framework window here; under ``ask`` (the default) and
+        ``never`` the framework values stay pending (:data:`NEEDS_RESTART`),
+        so the first app start's pre-start step asks as usual. Already
+        applied, it costs one preflight and writes nothing. The budget is a
+        monotonic deadline: the provider and SIM waits end with it, and no
+        framework window starts with less than :data:`ENSURE_WINDOW_MIN_S`
+        left (those values stay pending, :data:`OUT_OF_TIME`). A window that
+        started waits the full :data:`RESTART_TIMEOUT_S` for the framework.
+
+        Args:
+            serial: Device serial.
+            budget_s: Seconds the whole preparation may take.
+
+        Returns:
+            None at once when identity mode is off or no profile is set,
+            else the final plan (per-value results are its statuses).
+
+        Raises:
+            ProfileError: The profile cannot be loaded or is invalid.
+            IdentityApplyError: The device did not answer at all, or another
+                apply held the device past the budget.
+        """
+        cfg = self.config()
+        if cfg.mode != "profile" or not cfg.profile:
+            return None
+        profile = self._require_profile()
+        errors = [i for i in validate(profile) if i.severity == "error"]
+        if errors:
+            raise ProfileError(
+                f"profile {profile.id!r} is invalid: {errors[0].path}: "
+                f"{errors[0].message}"
+            )
+        deadline = self._clock() + max(0.0, budget_s)
+        if not self._apply_lock.acquire(timeout=max(0.0, budget_s)):
+            raise IdentityApplyError(
+                "another identity apply is running (it outlasted the budget)"
+            )
+        self._call.deadline = deadline
+        self._call.device_ok = None
+        try:
+            plan = self._apply(serial, None, cfg.restart == "always", profile)
+            device_ok = self._call.device_ok
+        finally:
+            self._call.deadline = None
+            self._call.device_ok = None
+            self._apply_lock.release()
+        if device_ok is False:
+            raise IdentityApplyError(f"{serial} did not answer the identity read")
+        return plan
+
+    def _time_left(self) -> float | None:
+        """Seconds left of this call's ``ensure_applied`` budget (None: no
+        budget).
+        """
+        deadline = getattr(self._call, "deadline", None)
+        return None if deadline is None else deadline - self._clock()
+
+    def _deadline(self, seconds: float) -> float:
+        """``seconds`` from now, capped to the ``ensure_applied`` budget."""
+        end = self._clock() + seconds
+        budget = getattr(self._call, "deadline", None)
+        return end if budget is None else min(end, budget)
+
+    def _capped(self, seconds: float, *, floor: float) -> float:
+        """An adb timeout capped to the budget left (at least ``floor``)."""
+        left = self._time_left()
+        return seconds if left is None else max(floor, min(seconds, left))
 
     def _drop_uninstalled(
         self,
@@ -3534,7 +3676,7 @@ class IdentityService:
                     return True
             return False
 
-        deadline = self._clock() + PROVIDER_WAIT_DEADLINE_S
+        deadline = self._deadline(PROVIDER_WAIT_DEADLINE_S)
         tokens = [profile.token, *profile.retired_tokens]
         script = lists_script(tokens, call_numbers(profile))
         for delay in PROVIDER_WAITS_S:
@@ -3578,7 +3720,30 @@ class IdentityService:
         return out
 
     def _recover(self, dev: _Device, state: DeviceState) -> None:
-        """A restart window was interrupted: bring the framework back."""
+        """A restart window was interrupted: bring the framework back.
+
+        The framework is down (the window broke off): ``start`` it and wait,
+        whatever holds the app-start lifecycle lock (no app start gets far
+        without it). The framework is up: the marker is stale unless it was
+        written in this boot (its ``boot=``) before a system_server that is
+        gone now (its ``pid=``), i.e. ``_end_window`` stopped waiting and
+        the framework came back late, unrecovered. The Frida/proxy recovery
+        (:attr:`_after_restart`) then holds the lifecycle lock like the
+        window itself; refused, the marker stays for the next apply. A stale
+        marker (another boot, the same system_server, or an older marker
+        without these fields) is only removed.
+        """
+        from sandroid.services.app_start import AppStartError, lifecycle_lock
+
+        boot, old_pid = _marker_fields(state.marker)
+        stale = bool(state.system_server) and (
+            not (boot and old_pid and boot == state.boot_id)
+            or state.system_server == old_pid
+        )
+        if stale:
+            logger.info(f"identity: removed a stale restart marker on {state.serial}")
+            dev.shell(f"rm -f {RESTART_MARKER}")
+            return
         self._emit(
             "restart",
             "identity: resuming an interrupted framework restart",
@@ -3589,9 +3754,22 @@ class IdentityService:
         )
         if not state.system_server:
             dev.shell("start")
-            if self._wait_framework(dev, ""):
-                self._after_restart(state.serial, None)
-        dev.shell(f"rm -f {RESTART_MARKER}")
+            if not self._wait_framework(dev, ""):
+                return  # still down: the marker stays, the next apply resumes
+        guard = contextlib.ExitStack()
+        try:
+            guard.enter_context(lifecycle_lock(0.0))
+        except AppStartError as exc:
+            logger.info(
+                f"identity: Frida recovery after the framework restart on "
+                f"{state.serial} left for the next apply: {exc}"
+            )
+            return
+        with guard:
+            self._after_restart(
+                state.serial, int(old_pid) if old_pid.isdigit() else None
+            )
+            dev.shell(f"rm -f {RESTART_MARKER}")
 
     def _run_sim(
         self,
@@ -3639,7 +3817,7 @@ class IdentityService:
                 for s in steps
                 if infos[s.value_id].kind == "sim_mccmnc" or state.sim_read
             ]
-            deadline = self._clock() + SIM_WAIT_DEADLINE_S
+            deadline = self._deadline(SIM_WAIT_DEADLINE_S)
             for delay in SIM_WAITS_S if readable and not err else ():
                 if self._clock() + delay + 1.0 > deadline:
                     break
@@ -3868,7 +4046,11 @@ class IdentityService:
             level="warn",
             data={"values": [s.value_id for s in steps]},
         )
-        stamp = f"{plan.fingerprint} {int(time.time())} {','.join(s.value_id for s in steps)}"
+        stamp = (
+            f"{plan.fingerprint} {int(time.time())} "
+            f"{','.join(s.value_id for s in steps)} "
+            f"boot={state.boot_id or '-'} pid={state.system_server or '-'}"
+        )
         dev.shell(f"echo {_q(stamp)} > {RESTART_MARKER}")
         dev.shell("stop")
         error: BaseException | None = None
@@ -3947,7 +4129,12 @@ class IdentityService:
         return True
 
     def _wait_framework(self, dev: _Device, old_pid: str) -> bool:
-        """Wait for a new system_server and a working package manager."""
+        """Wait for a new system_server and a working package manager.
+
+        Always the full :data:`RESTART_TIMEOUT_S`, also under an
+        ``ensure_applied`` budget: the framework is down, and the budget
+        only decides whether a window starts.
+        """
         deadline = self._clock() + RESTART_TIMEOUT_S
         while self._clock() < deadline:
             out = dev.shell("pidof system_server; pm path android 2>/dev/null")
@@ -3961,18 +4148,25 @@ class IdentityService:
     # -- verify -------------------------------------------------------------
 
     def verify(self, serial: str, profile: Profile | None = None) -> IdentityPlan:
-        """P6 alone: read back and refresh the statuses (no writes)."""
+        """P6 alone: read back and refresh the statuses (no writes).
+
+        Like :meth:`plan`, an apply that ran or runs during the read keeps
+        its newer statuses (nothing is published then).
+        """
         profile = profile or self._require_profile()
         pkgs = self._packages(serial, None)
+        gen = self._gen(serial)
         state = self.preflight(serial, pkgs, profile)
+        stale = self._gen(serial) != gen or self._apply_lock.locked()
         plan = self._plan(profile, state, pkgs)
         now = self._now()
-        if state.ok:
+        if state.ok and not stale:
             with self._lock:
                 mem = self._applied.setdefault(serial, _Applied())
                 if mem.fingerprint == plan.fingerprint:
                     mem.verified_at = now
-        self._publish(plan, now)
+        if not stale:
+            self._publish(plan, now)
         counts = _counts(plan.infos)
         self._emit(
             "verify",
@@ -4499,7 +4693,7 @@ class IdentityService:
             done = mem is not None and mem.fingerprint == fp and package in mem.done
         return "applied" if done else "not_applied"
 
-    def pre_spawn(self, package: str) -> Any:
+    def pre_start(self, package: str) -> Any:
         """The pre-spawn hook: a plan when ``package`` needs seeding, else None.
 
         Runs on the app-start worker (never the UI thread). The only device
@@ -4592,33 +4786,38 @@ class IdentityService:
                 # cache them); the next start announces the restart.
                 raise IdentityApplyError(NEEDS_RESTART_AT_START)
 
-        return _pre_spawn_plan_cls()(
+        return _pre_start_plan_cls()(
             description=f"apply identity profile {profile.id}",
             disruptive=needs_fw and allow,
             apply=run,
         )
 
-    def install_pre_spawn_hook(self) -> bool:
-        """Register :meth:`pre_spawn` with ``services.app_start`` (once).
+    def install_pre_start_step(self) -> bool:
+        """Register :meth:`pre_start` with ``services.app_start`` (once).
         Returns True.
         """
-        from sandroid.services.app_start import register_pre_spawn_hook
+        from sandroid.services.app_start import register_pre_start_step
 
         with self._lock:
             if self._hook_installed:
                 return True
-            register_pre_spawn_hook(self.pre_spawn)
+            register_pre_start_step(self.pre_start)
             self._hook_installed = True
         return True
 
-    def uninstall_pre_spawn_hook(self) -> None:
-        """Undo :meth:`install_pre_spawn_hook`."""
-        from sandroid.services.app_start import unregister_pre_spawn_hook
+    def uninstall_pre_start_step(self) -> None:
+        """Undo :meth:`install_pre_start_step`."""
+        from sandroid.services.app_start import unregister_pre_start_step
 
         with self._lock:
             if self._hook_installed:
-                unregister_pre_spawn_hook(self.pre_spawn)
+                unregister_pre_start_step(self.pre_start)
                 self._hook_installed = False
+
+    # Deprecated aliases (one round, until every caller uses the pre-start names).
+    pre_spawn = pre_start
+    install_pre_spawn_hook = install_pre_start_step
+    uninstall_pre_spawn_hook = uninstall_pre_start_step
 
 
 # ---------------------------------------------------------------------------
@@ -4661,6 +4860,16 @@ def _counts(infos: dict[str, ValueInfo]) -> dict[str, int]:
     for info in infos.values():
         out[info.status] = out.get(info.status, 0) + 1
     return out
+
+
+def _marker_fields(marker: str) -> tuple[str, str]:
+    """``(boot id, system_server PID)`` a restart marker was written with
+    (``""`` each when it has none: an older marker).
+    """
+    boot = re.search(r"\bboot=(\S+)", marker or "")
+    pid = re.search(r"\bpid=(\d+)", marker or "")
+    value = boot.group(1) if boot else ""
+    return ("" if value == "-" else value), (pid.group(1) if pid else "")
 
 
 def _timeline_rel(path: Path) -> str:
@@ -4840,6 +5049,19 @@ def _read_frozen(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def read_frozen_markers(path: Path | str) -> tuple[str, list[Marker]] | None:
+    """``(fingerprint, markers)`` of a frozen apply record (the ``ref`` of an
+    ``identity/applied`` line), or None when it cannot be read. File I/O.
+    """
+    data = _read_frozen(Path(path))
+    if data is None:
+        return None
+    try:
+        return str(data.get("fingerprint") or ""), _frozen_markers(data)
+    except (KeyError, TypeError):
+        return None
+
+
 def _load_latest_frozen() -> tuple[str, list[Marker]] | None:
     """The newest frozen apply of the live session (after a TUI restart)."""
     try:
@@ -4971,6 +5193,7 @@ __all__ = [
     "parse_preflight",
     "preflight_script",
     "profiles_dir",
+    "read_frozen_markers",
     "render_lists",
     "render_template",
     "render_value",

@@ -145,6 +145,11 @@ class MitmproxyPanel(Widget):
         self._reprobe_timer = None
         self._reprobe_step = 0
         self._device_cb_registered = False
+        self._state_cb_registered = False
+        # One setup-state probe at a time; a change reported while one runs
+        # re-probes once it finished (its read may predate the change).
+        self._state_probe_busy = False
+        self._state_probe_again = False
         self._unmounted = False
         self._liveness_busy = False
         # When the device proxy was last armed (for the steady-state 0-flows
@@ -186,6 +191,7 @@ class MitmproxyPanel(Widget):
         self._kick_focus_cleanup()
         self._kick_reverse_cleanup()
         self._subscribe_device_changes()
+        self._subscribe_proxy_changes()
         try:
             self.set_interval(self._BYPASS_LIVENESS_SECONDS, self._kick_bypass_liveness)
         except Exception:
@@ -234,23 +240,112 @@ class MitmproxyPanel(Widget):
     def _subscribe_device_changes(self) -> None:
         """Re-probe after a device reconnect (once per panel; best-effort).
 
-        DeviceManager has no unregister, so the callback checks
-        ``_unmounted`` and becomes a no-op once the panel is gone.
+        DeviceManager has no unregister for change callbacks, so the
+        callback checks ``_unmounted`` and becomes a no-op once the panel is
+        gone; the prepared listener is removed on unmount.
         """
         if self._device_cb_registered:
             return
         try:
             from sandroid.services import get_device_service
 
-            get_device_service().register_device_change_callback(self._on_device_change)
+            service = get_device_service()
+            service.register_device_change_callback(self._on_device_change)
             self._device_cb_registered = True
+            # A (re)connected device is re-probed once it is prepared (root,
+            # SELinux, the proxy restore hooks), not while that still runs.
+            if service.has_device_manager():
+                manager = service.get_device_manager()
+                register = getattr(manager, "on_device_prepared", None)
+                if callable(register):
+
+                    def prepared(device, _result) -> None:
+                        self._on_device_change(device, True)
+
+                    register(prepared)
+                    self._prepared_cb_registered = True
+                    self._prepared_cb = (manager, prepared)
         except Exception as exc:
             logger.debug("mitm panel device-change subscription failed: %s", exc)
 
-    def _on_device_change(self, device) -> None:
-        """Device-poll thread → UI thread (non-blocking, like _on_service_line)."""
+    #: ``STATE_CHANGED`` kinds that change what the lens caption says.
+    _PROXY_CHANGES = ("app_proxies", "proxy_ca", "proxy_infra")
+
+    def _subscribe_proxy_changes(self) -> None:
+        """Repaint the caption when the CA or the App Proxy lanes change.
+
+        Remove CA, an App Proxy added or removed, lane health and a restore
+        after a snapshot load publish ``STATE_CHANGED``; without this the
+        caption kept "CA installed" / "app proxies 1" until a lens switch.
+        """
+        if self._state_cb_registered:
+            return
+        try:
+            from sandroid.core.events import EventBus, EventType
+
+            EventBus.get().subscribe(EventType.STATE_CHANGED, self._on_state_changed)
+            self._state_cb_registered = True
+        except Exception as exc:
+            logger.debug("mitm panel state subscription failed: %s", exc)
+
+    def _unsubscribe_proxy_changes(self) -> None:
+        if not self._state_cb_registered:
+            return
+        self._state_cb_registered = False
+        try:
+            from sandroid.core.events import EventBus, EventType
+
+            EventBus.get().unsubscribe(EventType.STATE_CHANGED, self._on_state_changed)
+        except Exception:
+            pass
+
+    def _on_state_changed(self, event) -> None:
+        """Any thread → UI thread (non-blocking; the publisher may hold a lock)."""
+        data = getattr(event, "data", None) or {}
+        kind = data.get("change_type")
+        if self._unmounted or kind not in self._PROXY_CHANGES:
+            return
+        self._ui.post(
+            self._handle_proxy_change,
+            kind,
+            data.get("serial"),
+            data.get("installed"),
+        )
+
+    def _handle_proxy_change(self, kind: str, serial, installed) -> None:
+        """Repaint from the cached lane readers; re-read the CA off-thread.
+
+        The lane part of the caption reads ``app_proxies_cached`` /
+        ``lane_health_cached`` (never waits for the lane lock), so a repaint
+        is enough. A CA change on the selected device takes the known
+        outcome at once and confirms it with the threaded device probe.
+        """
         if self._unmounted:
             return
+        if kind != "app_proxies":
+            from sandroid.core.adb import Adb
+
+            current = Adb.get_target_device()
+            if serial is None or current is None or serial == current:
+                if kind == "proxy_ca" and installed is not None:
+                    self._ca_ok = bool(installed)
+                    if not installed:
+                        self._ct_ok = False
+                self._kick_state_refresh()
+        self._refresh_header()
+        self._refresh_status_bar()
+
+    def _on_device_change(self, device, prepared: bool = False) -> None:
+        """Device-poll / prepare thread → UI thread (non-blocking)."""
+        if self._unmounted:
+            return
+        if device is not None and not prepared:
+            from sandroid.core import device_prep
+
+            if getattr(self, "_prepared_cb_registered", False) and (
+                device_prep.is_enabled()
+            ):
+                return  # re-probed from on_device_prepared
         self._ui.post(self._handle_device_change, device)
 
     def _handle_device_change(self, device) -> None:
@@ -317,9 +412,22 @@ class MitmproxyPanel(Widget):
 
         threading.Thread(target=_run, name="mitm-reverse-cleanup", daemon=True).start()
 
+    def _unsubscribe_device_prepared(self) -> None:
+        """Drop the ``on_device_prepared`` listener (best-effort)."""
+        manager, callback = getattr(self, "_prepared_cb", (None, None))
+        self._prepared_cb = (None, None)
+        remove = getattr(manager, "remove_device_prepared_listener", None)
+        if callable(remove):
+            try:
+                remove(callback)
+            except Exception:
+                pass
+
     def on_unmount(self) -> None:
         self._unmounted = True
+        self._unsubscribe_device_prepared()
         self._cancel_reprobe()
+        self._unsubscribe_proxy_changes()
         try:
             self._service.remove_listener(self._on_service_line)
         except Exception:
@@ -1012,16 +1120,40 @@ class MitmproxyPanel(Widget):
             )
 
     def _kick_state_refresh(self) -> None:
-        """Probe real device setup state in a daemon thread, then apply."""
+        """Probe real device setup state in a daemon thread, then apply.
+
+        One probe at a time: a kick while one runs re-probes after it, so a
+        change reported meanwhile is never overwritten by an older read.
+        """
+        if self._state_probe_busy:
+            self._state_probe_again = True
+            return
+        self._state_probe_busy = True
+        self._state_probe_again = False
 
         def _run() -> None:
-            result = self._compute_setup_state()
+            result = None
             try:
-                self.app.call_from_thread(self._apply_setup_state, *result)
-            except Exception:
-                pass
+                result = self._compute_setup_state()
+            except Exception as exc:
+                logger.debug("setup state probe failed: %s", exc)
+            if not self._ui.post(self._finish_state_refresh, result):
+                self._state_probe_busy = False
 
         threading.Thread(target=_run, name="mitm-setup-probe", daemon=True).start()
+
+    def _finish_state_refresh(self, result) -> None:
+        """Apply a probe result (UI thread); run the queued re-probe."""
+        self._state_probe_busy = False
+        if self._unmounted:
+            return
+        if self._state_probe_again:
+            # A newer change arrived while this probe ran: its read may be
+            # older than that change, so only the next probe counts.
+            self._kick_state_refresh()
+            return
+        if result is not None:
+            self._apply_setup_state(*result)
 
     def _kick_reachability_probe(
         self, *, settle: bool = False, reason: str = "", quiet: bool = False

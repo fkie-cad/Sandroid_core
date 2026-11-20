@@ -1,0 +1,448 @@
+# Language pack: German (de). Schema v1, see ../PACK_SCHEMA.md.
+# All texts authored (AI-written), see de.SOURCES.md.
+# Conventions: friends/family/partner/neighbours use "du"; services use "Sie".
+# `emoji: true` sits on the thread and means "at least one message in this thread
+# contains emoji" (schema v1 has no per-message flag; messages are [speaker, text]).
+pack: language
+schema: 1.1
+lang: de
+name: Deutsch
+
+threads:
+  family:
+    - msgs:
+        - [p, "Kommst du Sonntag zum Essen?"]
+        - [o, "Ja, gegen 12"]
+        - [p, "Super, bring {partner_first} mit"]
+    - msgs:
+        - [p, "Hast du gut heimgefunden?"]
+        - [o, "Ja alles gut, bin grad rein"]
+        - [p, "Gut. Schlaf schön 😘"]
+      emoji: true
+    - msgs:
+        - [p, "Papa hat am {day} Geburtstag, denkst du dran??"]
+        - [o, "Ja Mama 🙄"]
+        - [o, "Hab schon was besorgt"]
+        - [p, "Was denn?"]
+        - [o, "Verrat ich nicht 😄"]
+      emoji: true
+    - msgs:
+        - [p, "Kannst du mal anrufen wenn du Zeit hast"]
+        - [o, "Ist was passiert?"]
+        - [p, "Nein nein alles gut. Geht nur um Weihnachten"]
+        - [o, "Ok ruf heut abend an"]
+    - msgs:
+        - [p, "Der Drucker geht wieder nicht. Weißt du wie man den wieder mit dem WLAN verbindet"]
+        - [o, "Hast du ihn mal aus und wieder an gemacht?"]
+        - [p, "Ja zweimal"]
+        - [o, "Ok ich schau es mir am Wochenende an"]
+        - [p, "Danke Schatz"]
+    - msgs:
+        - [p, "Oma fragt ob du am {day} zum Kaffee kommst"]
+        - [o, "Ja gerne, sag ihr so um 3. Grüß sie lieb"]
+    - msgs:
+        - [p, "Bin am {date} in {city}, hast du abends Zeit?"]
+        - [o, "Klar! Wann kommt dein Zug an"]
+        - [p, "So um {time}"]
+        - [o, "Dann hol ich dich ab 👍"]
+      emoji: true
+    - msgs:
+        - [p, "Was wünscht du dir eigentlich zum Geburtstag"]
+        - [o, "Keine Ahnung ehrlich gesagt"]
+        - [p, "Das sagst du jedes Jahr 😂"]
+        - [o, "Vllt n Gutschein? 😅"]
+      emoji: true
+    - msgs:
+        - [p, "Hab dir {amount} überwiesen für die Tickets"]
+        - [o, "Danke! Wär nicht nötig gewesen"]
+        - [p, "Doch doch"]
+    - msgs:
+        - [p, "Kuchen ist im Ofen. Wann seid ihr da?"]
+        - [o, "Stehen im Stau, ca halbe Stunde später"]
+        - [p, "Kein Problem fahrt vorsichtig"]
+    - msgs:
+        - [p, "Frohe Ostern ihr Lieben 🐣🌷"]
+        - [o, "Danke dir auch! Liebe Grüße an alle"]
+      emoji: true
+
+  partner:
+    - msgs:
+        - [p, "Soll ich noch was mitbringen?"]
+        - [o, "Milch und Brot bitte"]
+        - [p, "Ok 👍"]
+      emoji: true
+    - msgs:
+        - [p, "Bin in 10 min da"]
+        - [o, "Ok"]
+    - msgs:
+        - [o, "Wird heute später, Meeting zieht sich"]
+        - [p, "Schade 😕 wie spät ca?"]
+        - [o, "So {time}"]
+        - [p, "Ok dann ess ich schon mal. Lass dir was übrig"]
+        - [o, "Danke ❤️"]
+      emoji: true
+    - msgs:
+        - [p, "Hast du den Schlüssel?"]
+        - [o, "Ne der liegt aufm Schrank"]
+        - [p, "Na toll"]
+        - [p, "Hab ihn, war in meiner Jackentasche 🙈"]
+      emoji: true
+    - msgs:
+        - [p, "Denk an den Termin morgen um {time}"]
+        - [o, "Welchen termin"]
+        - [p, "Zahnarzt!!"]
+        - [o, "Ach shit danke"]
+    - msgs:
+        - [o, "Lust heute aufs Kino?"]
+        - [p, "Jaa welcher Film"]
+        - [o, "Egal, such du aus"]
+        - [p, "Ok schick dir gleich was"]
+    - msgs:
+        - [p, "Vermiss dich 💕"]
+        - [o, "Ich dich auch. Noch 2 Tage"]
+        - [p, "Zu lang"]
+      emoji: true
+    - msgs:
+        - [p, "Kannst du das Paket von {courier} beim Nachbarn abholen? Ich schaff das heute nicht"]
+        - [o, "Mach ich"]
+    - msgs:
+        - [o, "Gut angekommen?"]
+        - [p, "Jap, Zug hatte nur 20 min Verspätung lol"]
+        - [o, "Ist ja fast pünktlich 😄"]
+      emoji: true
+    - msgs:
+        - [p, "Was essen wir heute"]
+        - [o, "Pizza?"]
+        - [p, "Schon wieder 😂"]
+        - [o, "Ok ok dann Nudeln"]
+      emoji: true
+    - msgs:
+        - [p, "Gute Nacht Schatz"]
+        - [o, "Nacht 😘"]
+      emoji: true
+
+  friend:
+    - msgs:
+        - [p, "Hey wie gehts dir? Lange nichts gehört"]
+        - [o, "Hey! Gut und dir? Viel los grad"]
+        - [p, "Kenn ich. Lass mal wieder treffen"]
+        - [o, "Unbedingt! Nächste Woche?"]
+        - [p, "Do oder Fr würde gehen"]
+        - [o, "Fr passt"]
+    - msgs:
+        - [p, "Bist du heute abend dabei?"]
+        - [o, "Wo gehts hin"]
+        - [p, "{place}, ab {time}"]
+        - [o, "Bin dabei 🍻"]
+      emoji: true
+    - msgs:
+        - [p, "Alles Gute zum Geburtstag!! 🎉🎂 Lass dich feiern"]
+        - [o, "Dankeee 🥰"]
+      emoji: true
+    - msgs:
+        - [p, "hdl"]
+        - [o, "hdgdl ❤️"]
+      emoji: true
+    - msgs:
+        - [p, "Kannst du mir die Fotos von Samstag schicken?"]
+        - [o, "Klar mach ich heut abend"]
+        - [p, "Danke dir"]
+    - msgs:
+        - [p, "Sorry bin spät dran, 15 min"]
+        - [o, "Kein stress"]
+        - [p, "Bestell mir schon mal n Kaffee"]
+    - msgs:
+        - [o, "Hast du noch mein Ladekabel?"]
+        - [p, "Oh ja sorry 😅 bring ichs dir mit"]
+      emoji: true
+    - msgs:
+        - [p, "Wer kommt alles am {day}?"]
+        - [o, "Ich, Lena und vllt Tim"]
+        - [p, "Ok ich bring Salat mit"]
+        - [o, "Perfekt"]
+    - msgs:
+        - [p, "Hab das Spiel gestern gesehen... unfassbar"]
+        - [o, "Ja ich war so sauer"]
+        - [p, "Nächstes Mal schauen wir zusammen"]
+    - msgs:
+        - [p, "Kurze Frage: kennst du nen guten Zahnarzt in {city}?"]
+        - [o, "Ich geh zu einer in der Innenstadt, schick dir die Nummer"]
+        - [p, "Danke!!"]
+    - msgs:
+        - [o, "Laufen morgen früh?"]
+        - [p, "Wann"]
+        - [o, "7 am {place}"]
+        - [p, "Puh ok aber nur 5km"]
+    - msgs:
+        - [p, "Bin gut zuhause angekommen, danke für den schönen Abend"]
+        - [o, "Gerne war echt lustig 😄"]
+      emoji: true
+
+  colleague:
+    - msgs:
+        - [p, "Hi {owner_first}, bist du heute im Büro?"]
+        - [o, "Hi, nein heute Homeoffice"]
+        - [p, "Ok, dann schick ich dir die Unterlagen per Mail"]
+        - [o, "Danke dir"]
+    - msgs:
+        - [p, "Das Meeting um {time} ist verschoben auf morgen"]
+        - [o, "Ok danke für die Info"]
+    - msgs:
+        - [p, "Bin krank, kannst du mich bitte im Team entschuldigen?"]
+        - [o, "Klar, gute Besserung!"]
+        - [p, "Danke"]
+    - msgs:
+        - [p, "Mittagessen?"]
+        - [o, "Gerne, 12:30 unten?"]
+        - [p, "👍"]
+      emoji: true
+    - msgs:
+        - [o, "Stehe im Stau, komme ca 15 Min später"]
+        - [p, "Kein Problem, wir fangen schon mal an"]
+    - msgs:
+        - [p, "Kannst du mir kurz die Präsentation von gestern schicken?"]
+        - [o, "Ist im gemeinsamen Ordner, Projekt > Präsentationen"]
+        - [p, "Gefunden, danke!"]
+    - msgs:
+        - [p, "Denkst du an die Abgabe am {day}?"]
+        - [o, "Ja, bin fast fertig"]
+    - msgs:
+        - [p, "Wir sammeln für Sabines Abschied, bist du dabei? 10 Euro"]
+        - [o, "Klar, geb ich dir morgen"]
+    - msgs:
+        - [p, "Schönen Urlaub! Genieß es 🌴"]
+        - [o, "Danke! Bis in 2 Wochen"]
+      emoji: true
+    - msgs:
+        - [p, "Weißt du ob der Parkplatz morgen gesperrt ist?"]
+        - [o, "Ja wegen Bauarbeiten, nimm lieber die Bahn"]
+        - [p, "Ok danke"]
+
+  neighbor:
+    - msgs:
+        - [p, "Hallo, hier ist {first} von nebenan. Ich habe ein Paket für Sie angenommen"]
+        - [o, "Vielen Dank! Ich komme heute Abend vorbei"]
+    - msgs:
+        - [p, "Hi, könntest du am Wochenende unsere Blumen gießen? Wir sind weg"]
+        - [o, "Klar, kein Problem. Schlüssel wie immer?"]
+        - [p, "Ja, danke dir 🙏"]
+      emoji: true
+    - msgs:
+        - [p, "Kleine Info: am {day} kommt der Schornsteinfeger zwischen 8 und 12"]
+        - [o, "Danke für die Info!"]
+    - msgs:
+        - [p, "Euer Auto steht mit Licht an 😉"]
+        - [o, "Oh danke!! Bin gleich unten"]
+      emoji: true
+    - msgs:
+        - [p, "Wir feiern Samstag ein bisschen im Garten, kann etwas lauter werden. Ihr seid herzlich eingeladen"]
+        - [o, "Danke, vielleicht schauen wir kurz vorbei"]
+    - msgs:
+        - [o, "Hallo, hat bei euch auch das Wasser keinen Druck?"]
+        - [p, "Ja, bei uns auch. Hausverwaltung weiß Bescheid"]
+        - [o, "Ok danke"]
+    - msgs:
+        - [p, "Hast du zufällig eine Bohrmaschine zum Ausleihen?"]
+        - [o, "Ja, kannst du dir holen"]
+        - [p, "Super, komm in 5 min rüber"]
+    - msgs:
+        - [p, "Die Mülltonnen müssen heute raus, Abholung ist morgen früh"]
+        - [o, "Danke, mach ich gleich"]
+    - msgs:
+        - [p, "Guten Abend, Ihre Katze sitzt wieder bei uns auf dem Balkon 😄"]
+        - [o, "Oh nein 🙈 ich komme sie holen"]
+      emoji: true
+
+service_sms:
+  courier:
+    - "Ihre Sendung {tracking} wird heute zwischen {time} zugestellt."
+    - "{courier}: Ihr Paket {tracking} wurde bei Ihrem Nachbarn abgegeben."
+    - "Ihr Paket {tracking} liegt in der Filiale zur Abholung bereit. Abholcode: {code}"
+    - "Wir konnten Ihr Paket {tracking} heute nicht zustellen. Neuer Zustellversuch am {date}."
+    - "{courier}: Ihre Sendung {tracking} ist unterwegs. Voraussichtliche Zustellung: {day}."
+    - "Ihr Paket {tracking} wurde in die Packstation gelegt. Abholcode: {digits:6}. Abholung bis {date}."
+  bank:
+    - "Ihre mTAN für die Überweisung von {amount}: {digits:6}"
+    - "{bank}: Ihr Sicherheitscode lautet {digits:6}. Geben Sie diesen Code niemals weiter."
+    - "{bank}: Kartenzahlung über {amount} bei {shop} am {date}. Nicht von Ihnen? Bitte melden Sie sich."
+    - "{bank}: Ihr Kontostand beträgt {amount}."
+    - "Ihre neue Debitkarte wurde verschickt. Die PIN erhalten Sie separat per Post. {bank}"
+    - "{bank}: Bestätigen Sie die Anmeldung auf einem neuen Gerät mit dem Code {digits:6}."
+  otp_service:
+    - "{digits:6} ist dein Bestätigungscode. Teile ihn mit niemandem."
+    - "Ihr Verifizierungscode lautet: {digits:6}"
+    - "Ihr Code: {digits:4}. Gültig für 10 Minuten."
+    - "Ihr Anmeldecode lautet {digits:6}. Wenn Sie keinen Code angefordert haben, ignorieren Sie diese Nachricht."
+    - "Code {digits:6} zum Zurücksetzen Ihres Passworts. Nicht weitergeben."
+  telecom:
+    - "Ihr Guthaben beträgt {amount}. Aufladen jederzeit unter *100#."
+    - "Sie haben 80% Ihres Datenvolumens verbraucht. Zusatzpaket buchbar unter *106#."
+    - "Ihr Datenvolumen ist aufgebraucht. Sie surfen jetzt mit reduzierter Geschwindigkeit."
+    - "Ihre Aufladung über {amount} war erfolgreich."
+    - "Willkommen im Ausland! Telefonie, SMS und Daten zu Inlandskonditionen innerhalb der EU."
+    - "Ihre Rechnung für {date} über {amount} steht im Kundenportal bereit."
+  doctor:
+    - "Erinnerung: Ihr Termin in der Praxis am {date} um {time}. Bitte bringen Sie Ihre Versichertenkarte mit."
+    - "Terminerinnerung: {day}, {date}, {time} Uhr. Absage bitte bis 24h vorher."
+    - "Ihr Termin am {date} um {time} wurde bestätigt. Ihre Zahnarztpraxis"
+    - "Ihr Termin am {date} muss leider verschoben werden. Bitte rufen Sie uns an."
+    - "Ihre Befunde liegen vor. Bitte vereinbaren Sie einen Besprechungstermin."
+  pharmacy:
+    - "Ihre Bestellung liegt ab {time} zur Abholung bereit. Ihre Apotheke"
+    - "Ihr Rezept ist eingelöst. Abholung ab {date} möglich. Abholnummer: {code}"
+    - "Ihre vorbestellten Artikel sind eingetroffen und liegen bis {date} für Sie bereit."
+    - "Ihr E-Rezept wurde erfolgreich übermittelt. Wir melden uns, sobald alles da ist."
+    - "Ihre Apotheke: Ihre Bestellung {code} kann heute bis 18:30 abgeholt werden."
+  delivery_food:
+    - "Deine Bestellung bei {shop} wurde bestätigt. Lieferung ca. {time}."
+    - "Dein Essen ist unterwegs! Der Fahrer ist in ca. 10 Minuten bei dir."
+    - "Dein Fahrer ist da. Guten Appetit!"
+    - "Leider verspätet sich deine Bestellung bei {shop} um ca. 15 Minuten."
+    - "Bestellung {code} wurde storniert. Der Betrag von {amount} wird erstattet."
+  ride_hailing:
+    - "Ihr Fahrer ist unterwegs und in ca. 4 Minuten da."
+    - "Ihr Fahrer ist angekommen. Kennzeichen: {code}"
+    - "Ihr Bestätigungscode für die Fahrt: {digits:4}"
+    - "Danke für Ihre Fahrt! Betrag: {amount}. Beleg in der App."
+    - "Ihre Fahrt für {time} ist reserviert. Abholung: {place}"
+  airline:
+    - "Ihr Flug {code} am {date} ist zum Check-in bereit. Bordkarte in der App."
+    - "Gate-Änderung für Flug {code}: neues Gate B{digits:2}."
+    - "Ihr Flug {code} hat Verspätung. Neue Abflugzeit: {time}."
+    - "Boarding für Flug {code} beginnt um {time}. Bitte begeben Sie sich zum Gate."
+    - "Buchungsbestätigung {code}: {city}, {date}. Gute Reise!"
+  rail:
+    - "Ihre Fahrkarte für {date} nach {city}: Auftragsnummer {code}."
+    - "Ihr Zug nach {city} hat heute ca. 15 Minuten Verspätung."
+    - "Gleiswechsel: Ihr Zug nach {city} fährt heute von Gleis {digits:1}."
+    - "Ihre Sitzplatzreservierung: Wagen {digits:2}, Platz {digits:2}. Gute Fahrt!"
+    - "Zugausfall: Ihr Zug um {time} nach {city} fällt aus. Alternativen in der App."
+  government:
+    - "Ihr Personalausweis liegt zur Abholung im Bürgeramt bereit."
+    - "Terminbestätigung Bürgeramt: {date}, {time}. Vorgangsnummer {code}."
+    - "Erinnerung: Ihr Termin bei der Kfz-Zulassungsstelle am {date} um {time}."
+    - "Ihr Antrag {code} ist eingegangen und wird bearbeitet."
+    - "Ihr Reisepass ist fertig und kann abgeholt werden. Bitte alten Pass mitbringen."
+  retail:
+    - "Ihre Bestellung {code} bei {shop} wurde versandt."
+    - "{shop}: Ihre Bestellung liegt zur Abholung im Markt bereit. Abholnummer {digits:6}"
+    - "Nur heute: 20% auf alles bei {shop}. Abmelden: STOP an 12345"
+    - "Ihre Rücksendung bei {shop} ist eingegangen. Die Erstattung über {amount} erfolgt in 3-5 Tagen."
+    - "{shop}: Ihr Gutscheincode für den nächsten Einkauf: {code}"
+  utility:
+    - "Ihr Abschlag über {amount} wird am {date} abgebucht."
+    - "Bitte teilen Sie uns Ihren Zählerstand bis {date} mit."
+    - "Geplante Versorgungsunterbrechung am {date} von 9 bis 12 Uhr. Wir bitten um Verständnis."
+    - "Ihre Jahresabrechnung ist da. Guthaben: {amount}."
+    - "Termin Zählerwechsel: {date} zwischen 8 und 12 Uhr."
+
+calendar:
+  - {title: "Zahnarzt", minutes: 45, kind: appointment}
+  - {title: "Hausarzt", minutes: 30, kind: appointment}
+  - {title: "Friseur", minutes: 60, kind: appointment}
+  - {title: "Augenarzt", minutes: 30, kind: appointment}
+  - {title: "Bürgeramt", minutes: 30, kind: appointment}
+  - {title: "Werkstatt Ölwechsel", minutes: 60, kind: appointment}
+  - {title: "Elternabend", minutes: 90, kind: appointment}
+  - {title: "Steuerberater", minutes: 60, kind: appointment}
+  - {title: "Physio", minutes: 30, kind: appointment}
+  - {title: "Team Meeting", minutes: 60, kind: work}
+  - {title: "Jour fixe", minutes: 30, kind: work}
+  - {title: "1:1 mit {first}", minutes: 30, kind: work}
+  - {title: "Kundentermin {city}", minutes: 120, kind: work}
+  - {title: "Sprint Review", minutes: 60, kind: work}
+  - {title: "Mitarbeitergespräch", minutes: 60, kind: work}
+  - {title: "Deadline Angebot", all_day: true, kind: work}
+  - {title: "Weihnachtsfeier Firma", minutes: 240, kind: work}
+  - {title: "Abendessen mit {first}", minutes: 120, kind: social}
+  - {title: "Kaffee mit {first}", minutes: 60, kind: social}
+  - {title: "Grillen bei {first}", minutes: 240, kind: social}
+  - {title: "Spieleabend", minutes: 180, kind: social}
+  - {title: "Kino", minutes: 150, kind: social}
+  - {title: "Konzert {place}", minutes: 180, kind: social}
+  - {title: "Brunch {place}", minutes: 120, kind: social}
+  - {title: "Hochzeit {first}", all_day: true, kind: social}
+  - {title: "Fitnessstudio", minutes: 90, kind: sport}
+  - {title: "Laufen", minutes: 45, kind: sport}
+  - {title: "Fußballtraining", minutes: 90, kind: sport}
+  - {title: "Yoga", minutes: 60, kind: sport}
+  - {title: "Schwimmen", minutes: 60, kind: sport}
+  - {title: "Flug nach {city}", minutes: 120, kind: travel}
+  - {title: "Zug nach {city}", minutes: 180, kind: travel}
+  - {title: "Urlaub", all_day: true, kind: travel}
+  - {title: "Hotel {city} Check-in", minutes: 30, kind: travel}
+  - {title: "Geburtstag {first}", all_day: true, kind: birthday}
+  - {title: "{first} hat Geburtstag", all_day: true, kind: birthday}
+  - {title: "Geburtstag Mama", all_day: true, kind: birthday}
+  - {title: "Müll rausstellen", minutes: 15, kind: reminder}
+  - {title: "Miete überweisen", all_day: true, kind: reminder}
+  - {title: "Reifenwechsel", minutes: 60, kind: reminder}
+  - {title: "Kfz-Versicherung kündigen", all_day: true, kind: reminder}
+  - {title: "Paket zurückschicken", minutes: 15, kind: reminder}
+  - {title: "Geschenk für {first} besorgen", all_day: true, kind: reminder}
+  - {title: "Pflanzen gießen", minutes: 10, kind: reminder}
+
+files:
+  - {name: "Rechnung_{date}.pdf", kind: invoice}
+  - {name: "Rechnung_{digits:8}.pdf", kind: invoice}
+  - {name: "Rechnung Handwerker.pdf", kind: invoice}
+  - {name: "Mietvertrag_{last}.pdf", kind: contract}
+  - {name: "Arbeitsvertrag_unterschrieben.pdf", kind: contract}
+  - {name: "Handyvertrag.pdf", kind: contract}
+  - {name: "Gehaltsabrechnung_{date}.pdf", kind: payslip}
+  - {name: "Lohnabrechnung_Maerz.pdf", kind: payslip}
+  - {name: "Kontoauszug_{digits:4}.pdf", kind: statement}
+  - {name: "Kontoauszug_{date}.pdf", kind: statement}
+  - {name: "Steuerbescheid_2025.pdf", kind: tax}
+  - {name: "Lohnsteuerbescheinigung.pdf", kind: tax}
+  - {name: "Lebenslauf_{last}.pdf", kind: cv}
+  - {name: "Bewerbung_{last}.pdf", kind: cv}
+  - {name: "Anschreiben.docx", kind: cv}
+  - {name: "Bordkarte_{code}.pdf", kind: ticket}
+  - {name: "Ticket_{city}.pdf", kind: ticket}
+  - {name: "Konzertkarten.pdf", kind: ticket}
+  - {name: "Buchungsbestaetigung_{code}.pdf", kind: ticket}
+  - {name: "Versicherungsschein_KFZ.pdf", kind: insurance}
+  - {name: "Hausratversicherung.pdf", kind: insurance}
+  - {name: "Kündigung_Fitnessstudio.pdf", kind: letter}
+  - {name: "Kündigungsbestätigung.pdf", kind: letter}
+  - {name: "Anmeldebestätigung.pdf", kind: form}
+  - {name: "Antrag_Elterngeld.pdf", kind: form}
+  - {name: "Formular_ausgefuellt.pdf", kind: form}
+  - {name: "Bedienungsanleitung_Waschmaschine.pdf", kind: manual}
+  - {name: "Kassenbon_{date}.pdf", kind: receipt}
+  - {name: "Garantie_Fernseher.pdf", kind: receipt}
+  - {name: "Nebenkostenabrechnung_2025.pdf", kind: invoice}
+  - {name: "Scan_{date}.pdf", kind: scan}
+  - {name: "Rezept_Lasagne.pdf", kind: other}
+
+notes:
+  - "Einkaufen: Milch, Brot, Eier"
+  - "Butter, Käse, Tomaten, Spülmittel, Klopapier"
+  - "WLAN Gast: Gast_{digits:4}"
+  - "IBAN Vermieter: DE{digits:2} {digits:4} {digits:4} {digits:4} {digits:4} {digits:2}"
+  - "Termin Zahnarzt {date} {time}"
+  - "Geschenkideen {first}: Buch, Kerze, Gutschein"
+  - "Paket abholen, Code {code}"
+  - "Packliste: Ladekabel, Reisepass, Sonnencreme, Badehose"
+  - "Mama zurückrufen"
+  - "Kennzeichen Mietwagen {code}"
+  - "Rezept Pfannkuchen: 250g Mehl, 3 Eier, 500ml Milch, Prise Salz"
+  - "Tisch reserviert {place} {time}"
+  - "Zählerstand Strom {digits:5}"
+  - "Hausverwaltung anrufen wegen Heizung"
+  - "Filme: noch schauen"
+  - "Treffpunkt: {place}"
+  - "Kundennummer {digits:8}"
+  - "Flug {code} {date} {time}"
+  - "To do: Steuer, Auto TÜV, Kita Anmeldung"
+  - "Bücher für Urlaub"
+  - "Adresse Hotel in {city}"
+  - "{amount} an {first} zurück"
+
+call_names:
+  mom: Mama
+  dad: Papa
+  grandma: Oma
+  grandpa: Opa
+  partner: Schatz

@@ -1,0 +1,461 @@
+# Language pack: Italian (it). Schema v1, see ../PACK_SCHEMA.md.
+# All texts authored (AI-written), see it.SOURCES.md.
+# Conventions: friends/family/partner/neighbours use "tu"; services use "Lei"
+# or impersonal forms (app OTPs sometimes "tu", as in real Italian SMS).
+# `emoji: true` sits on the thread and means "at least one message in this thread
+# contains emoji" (schema v1 has no per-message flag; messages are [speaker, text]).
+pack: language
+schema: 1.1
+lang: it
+name: Italiano
+
+threads:
+  family:
+    - msgs:
+        - [p, "Domenica vieni a pranzo?"]
+        - [o, "Si verso l una"]
+        - [p, "Porta anche {partner_first} che faccio le lasagne"]
+        - [o, "Ok glielo dico"]
+    - msgs:
+        - [p, "Sei arrivato a casa?"]
+        - [o, "Si tutto ok"]
+        - [p, "Bene. Buonanotte tesoro 😘"]
+      emoji: true
+    - msgs:
+        - [p, "Ti ricordi che {day} e il compleanno di papà?"]
+        - [o, "Si mamma 🙄"]
+        - [o, "Il regalo ce l ho già"]
+        - [p, "Cosa gli hai preso?"]
+        - [o, "Sorpresa 😁"]
+      emoji: true
+    - msgs:
+        - [p, "Quando puoi chiamami"]
+        - [o, "E successo qualcosa?"]
+        - [p, "No no tutto bene, e per organizzare Natale"]
+        - [o, "Ok ti chiamo stasera"]
+    - msgs:
+        - [p, "Il modem non va più, come si fa a riavviarlo?"]
+        - [o, "Staccalo dalla corrente 30 secondi e riattaccalo"]
+        - [p, "Fatto ma niente"]
+        - [o, "Va bene passo sabato e guardo"]
+        - [p, "Grazie amore di mamma"]
+    - msgs:
+        - [p, "La nonna chiede se passi {day} per un caffè"]
+        - [o, "Si verso le 4, salutamela"]
+    - msgs:
+        - [p, "Il {date} sono a {city}, sei libero la sera?"]
+        - [o, "Certo! A che ora arriva il treno"]
+        - [p, "Verso le {time}"]
+        - [o, "Ti vengo a prendere in stazione 👍"]
+      emoji: true
+    - msgs:
+        - [p, "Ti ho fatto un bonifico di {amount} per i biglietti"]
+        - [o, "Grz ma non dovevi"]
+        - [p, "Figurati"]
+    - msgs:
+        - [p, "L arrosto e nel forno, a che ora arrivate?"]
+        - [o, "Siamo in coda in autostrada, mezz ora di ritardo"]
+        - [p, "Tranquilli andate piano"]
+    - msgs:
+        - [p, "Buona Pasqua a tutti 🐣🕊️"]
+        - [o, "Grazie anche a voi! Un bacio a tutti"]
+      emoji: true
+    - msgs:
+        - [p, "Hai chiamato il commercialista per il 730?"]
+        - [o, "Non ancora"]
+        - [p, "Fallo questa settimana che poi e tardi"]
+        - [o, "Si si lo chiamo domani"]
+
+  partner:
+    - msgs:
+        - [p, "Prendo qualcosa tornando?"]
+        - [o, "Latte e pane grz"]
+        - [p, "Ok 👍"]
+      emoji: true
+    - msgs:
+        - [p, "Arrivo tra 10 min"]
+        - [o, "Ok"]
+    - msgs:
+        - [o, "Faccio tardi, la riunione non finisce più"]
+        - [p, "Uffa 😕 tipo a che ora?"]
+        - [o, "Verso le {time}"]
+        - [p, "Va bene allora mangio, ti lascio un piatto"]
+        - [o, "Grazie amo ❤️"]
+      emoji: true
+    - msgs:
+        - [p, "Hai le chiavi?"]
+        - [o, "No sono sul mobile all ingresso"]
+        - [p, "Perfetto..."]
+        - [p, "Trovate erano nella giacca 🙈"]
+      emoji: true
+    - msgs:
+        - [p, "Ricordati domani alle {time}"]
+        - [o, "Cosa"]
+        - [p, "Il dentista!!"]
+        - [o, "Ah cavolo grazie"]
+    - msgs:
+        - [o, "Cinema stasera?"]
+        - [p, "Sii che film"]
+        - [o, "Scegli tu"]
+        - [p, "Ok guardo gli orari"]
+    - msgs:
+        - [p, "Mi manchi 💕"]
+        - [o, "Anche tu. Ancora 2 giorni"]
+        - [p, "Troppi"]
+        - [o, "Tvb"]
+        - [p, "Tvtb"]
+      emoji: true
+    - msgs:
+        - [p, "Riesci a ritirare il pacco dalla vicina? Oggi io non ce la faccio"]
+        - [o, "Si tranqui"]
+    - msgs:
+        - [o, "Arrivata?"]
+        - [p, "Si, il treno aveva solo 20 min di ritardo ahahah"]
+        - [o, "Quasi puntuale 😄"]
+      emoji: true
+    - msgs:
+        - [p, "Cosa mangiamo stasera"]
+        - [o, "Pizza?"]
+        - [p, "Di nuovo 😂"]
+        - [o, "Ok ok faccio una pasta"]
+      emoji: true
+    - msgs:
+        - [p, "Notte amore"]
+        - [o, "Notte 😘 un bacio"]
+      emoji: true
+
+  friend:
+    - msgs:
+        - [p, "Ehi come stai? Era un sacco che non ci sentivamo"]
+        - [o, "Ciaoo! Bene tu? Periodo pieno"]
+        - [p, "Anche io. Dobbiamo vederci"]
+        - [o, "Assolutamente, settimana prossima?"]
+        - [p, "Giovedì o venerdì per me va bene"]
+        - [o, "Venerdì perfetto"]
+    - msgs:
+        - [p, "Stasera ci sei?"]
+        - [o, "Dove si va"]
+        - [p, "{place}, dalle {time}"]
+        - [o, "Ci sono 🍻"]
+      emoji: true
+    - msgs:
+        - [p, "Tanti auguri!!! 🎉🎂 Goditi la giornata"]
+        - [o, "Grazieee 🥰"]
+      emoji: true
+    - msgs:
+        - [p, "Mi mandi le foto di sabato?"]
+        - [o, "Si stasera te le giro"]
+        - [p, "Grz sei un tesoro"]
+    - msgs:
+        - [p, "Scusa sono in ritardo 15 min"]
+        - [o, "Tranqui"]
+        - [p, "Ordinami un caffè intanto"]
+    - msgs:
+        - [o, "Ce l hai ancora il mio caricatore?"]
+        - [p, "Ah si scusa 😅 te lo riporto"]
+      emoji: true
+    - msgs:
+        - [p, "Raga chi viene {day} sera?"]
+        - [o, "Io, Giulia e forse Marco"]
+        - [p, "Ok porto il dolce"]
+        - [o, "Top"]
+    - msgs:
+        - [p, "Hai visto la partita ieri?? Nn ci credo ancora"]
+        - [o, "Lascia stare ero nero"]
+        - [p, "La prossima la guardiamo insieme cmq"]
+    - msgs:
+        - [p, "Domanda veloce: conosci un buon meccanico a {city}?"]
+        - [o, "Si il mio e bravissimo, ti mando il numero"]
+        - [p, "Grazie mille!"]
+    - msgs:
+        - [o, "Corsa domattina?"]
+        - [p, "A che ora"]
+        - [o, "Alle 7 al {place}"]
+        - [p, "Mamma mia ok ma max 5 km"]
+    - msgs:
+        - [p, "Arrivata a casa, grazie per la serata"]
+        - [o, "Ma figurati e stato bellissimo 😂 ahahah"]
+      emoji: true
+    - msgs:
+        - [p, "Xké nn rispondi?"]
+        - [o, "Scusa ero in palestra, dimmi"]
+        - [p, "Niente volevo sapere se domani c e la cena"]
+        - [o, "Si si alle 8 tt ok"]
+
+  colleague:
+    - msgs:
+        - [p, "Ciao {owner_first}, oggi sei in ufficio?"]
+        - [o, "Ciao, no oggi lavoro da casa"]
+        - [p, "Ok allora ti mando i documenti per mail"]
+        - [o, "Grazie"]
+    - msgs:
+        - [p, "La riunione delle {time} e spostata a domani"]
+        - [o, "Ok grazie dell avviso"]
+    - msgs:
+        - [p, "Sto male, puoi avvisare il team per favore?"]
+        - [o, "Certo, riguardati!"]
+        - [p, "Grazie"]
+    - msgs:
+        - [p, "Pranzo insieme?"]
+        - [o, "Si, 12:30 giù?"]
+        - [p, "👍"]
+      emoji: true
+    - msgs:
+        - [o, "Sono nel traffico, arrivo con 15 min di ritardo"]
+        - [p, "Nessun problema iniziamo noi"]
+    - msgs:
+        - [p, "Mi rimandi la presentazione di ieri?"]
+        - [o, "E nella cartella condivisa, Progetti"]
+        - [p, "Trovata, grazie!"]
+    - msgs:
+        - [p, "Ti ricordi la consegna di {day}?"]
+        - [o, "Si ho quasi finito"]
+    - msgs:
+        - [p, "Facciamo una colletta per il regalo di Francesca, ci sei? 10 euro"]
+        - [o, "Certo te li do domani"]
+    - msgs:
+        - [p, "Buone ferie! Goditele 🌴"]
+        - [o, "Grazie! Ci vediamo tra 2 settimane"]
+      emoji: true
+    - msgs:
+        - [p, "Sai se domani il parcheggio e chiuso?"]
+        - [o, "Si per lavori, meglio prendere i mezzi"]
+        - [p, "Ok grazie"]
+    - msgs:
+        - [p, "Il cliente ha approvato il preventivo 🎉"]
+        - [o, "Grande! Ottimo lavoro"]
+      emoji: true
+
+  neighbor:
+    - msgs:
+        - [p, "Buongiorno, sono {first} della porta accanto. Ho ritirato un pacco per Lei"]
+        - [o, "Grazie mille! Passo stasera a prenderlo"]
+    - msgs:
+        - [p, "Ciao, potresti bagnarci le piante nel weekend? Siamo via"]
+        - [o, "Certo nessun problema. Chiavi come al solito?"]
+        - [p, "Si grazie mille 🙏"]
+      emoji: true
+    - msgs:
+        - [p, "Vi ricordo che {day} c e la riunione di condominio alle {time}"]
+        - [o, "Grazie per l avviso"]
+    - msgs:
+        - [p, "Avete lasciato i fari della macchina accesi 😉"]
+        - [o, "Oddio grazie!! Scendo subito"]
+      emoji: true
+    - msgs:
+        - [p, "Sabato facciamo una piccola festa in giardino, magari un po di rumore. Siete invitati"]
+        - [o, "Grazie, magari passiamo un attimo"]
+    - msgs:
+        - [o, "Buonasera, anche da voi manca l acqua calda?"]
+        - [p, "Si anche da noi. L amministratore e già avvisato"]
+        - [o, "Ok grazie"]
+    - msgs:
+        - [p, "Per caso hai un trapano da prestarmi?"]
+        - [o, "Si vieni pure"]
+        - [p, "Grande, passo tra 5 min"]
+    - msgs:
+        - [p, "Stasera si mette fuori la plastica, passano domattina"]
+        - [o, "Grazie la porto giù"]
+    - msgs:
+        - [p, "Buonasera, il vostro gatto e di nuovo sul nostro balcone 😄"]
+        - [o, "Oh no 🙈 arrivo"]
+      emoji: true
+    - msgs:
+        - [p, "Domani mattina viene il tecnico della caldaia condominiale, potrebbe mancare il gas fino a mezzogiorno"]
+        - [o, "Ok grazie per l info"]
+
+service_sms:
+  courier:
+    - "La spedizione {tracking} sarà consegnata oggi nella fascia {time}."
+    - "{courier}: la spedizione {tracking} è stata consegnata al vicino."
+    - "Il pacco {tracking} è disponibile presso il punto di ritiro. Codice di ritiro: {code}"
+    - "Non è stato possibile consegnare la spedizione {tracking}. Nuovo tentativo il {date}."
+    - "{courier}: la spedizione {tracking} è in transito. Consegna prevista {day}."
+    - "Il pacco {tracking} è nel locker. Codice di apertura: {digits:6}. Ritiro entro il {date}."
+  bank:
+    - "{bank}: il codice per autorizzare il bonifico di {amount} è {digits:6}. Non comunicarlo a nessuno."
+    - "{bank}: codice di sicurezza {digits:6}. La banca non te lo chiederà mai."
+    - "{bank}: pagamento con carta di {amount} presso {shop} il {date}. Se non lo riconosci contatta il servizio clienti."
+    - "{bank}: il saldo disponibile del conto è {amount}."
+    - "La nuova carta di debito è stata spedita. Il PIN arriverà con comunicazione separata. {bank}"
+    - "{bank}: per confermare l'accesso da un nuovo dispositivo usa il codice {digits:6}."
+  otp_service:
+    - "Il tuo codice di verifica è {digits:6}. Non condividerlo con nessuno."
+    - "{digits:6} è il codice di conferma."
+    - "Codice: {digits:4}. Valido 10 minuti."
+    - "Codice di accesso: {digits:6}. Se non hai richiesto il codice, ignora questo messaggio."
+    - "Usa il codice {digits:6} per reimpostare la password."
+  telecom:
+    - "Il credito residuo è di {amount}. Puoi ricaricare in qualsiasi momento dall'app."
+    - "Hai consumato l'80% dei Giga inclusi nella tua offerta. Puoi aggiungere Giga dall'area clienti."
+    - "Hai esaurito i Giga inclusi. La navigazione prosegue a velocità ridotta fino al {date}."
+    - "Ricarica di {amount} effettuata con successo."
+    - "Benvenuto all'estero! In UE chiamate, SMS e internet alle stesse condizioni della tua offerta."
+    - "Il rinnovo dell'offerta di {amount} avverrà il {date}. Verifica di avere credito sufficiente."
+  doctor:
+    - "Promemoria: appuntamento presso lo studio il {date} alle {time}. Portare la tessera sanitaria."
+    - "Gentile paziente, Le ricordiamo l'appuntamento di {day} {date} alle {time}. Per disdette avvisare 24h prima."
+    - "L'appuntamento del {date} alle {time} è confermato. Studio dentistico"
+    - "L'appuntamento del {date} deve essere spostato. La preghiamo di richiamare la segreteria."
+    - "Il referto è disponibile. Per il ritiro rivolgersi in segreteria con un documento."
+  pharmacy:
+    - "Il Suo ordine è pronto per il ritiro dalle {time}. La Sua farmacia"
+    - "La ricetta è stata evasa. Ritiro possibile dal {date}. Rif. {code}"
+    - "I prodotti ordinati sono arrivati e restano a disposizione fino al {date}."
+    - "Farmacia: l'ordine {code} è ritirabile oggi entro le 19:30."
+    - "Un prodotto della ricetta non è disponibile. La ricontatteremo appena arriva."
+  delivery_food:
+    - "Il tuo ordine da {shop} è confermato. Consegna prevista alle {time}."
+    - "Il tuo ordine è in arrivo! Il rider sarà da te tra circa 10 minuti."
+    - "Il rider è arrivato. Buon appetito!"
+    - "Il tuo ordine da {shop} è in ritardo di circa 15 minuti. Ci scusiamo per l'attesa."
+    - "L'ordine {code} è stato annullato. L'importo di {amount} verrà rimborsato."
+  ride_hailing:
+    - "Il conducente sta arrivando, sarà da te tra circa 4 minuti."
+    - "Il conducente è arrivato. Targa: {code}"
+    - "Codice da comunicare al conducente: {digits:4}"
+    - "Grazie per aver viaggiato con noi! Importo: {amount}. Ricevuta nell'app."
+    - "La corsa delle {time} è prenotata. Partenza da: {place}"
+  airline:
+    - "Il check-in del volo {code} del {date} è aperto. Carta d'imbarco disponibile nell'app."
+    - "Cambio gate per il volo {code}: nuovo gate {digits:2}."
+    - "Il volo {code} è in ritardo. Nuovo orario di partenza: {time}."
+    - "L'imbarco del volo {code} inizia alle {time}. Si prega di recarsi al gate."
+    - "Conferma prenotazione {code}: {city}, {date}. Buon viaggio!"
+  rail:
+    - "Il biglietto per {city} del {date}: codice prenotazione {code}."
+    - "Il treno per {city} viaggia con circa 15 minuti di ritardo."
+    - "Cambio binario: il treno per {city} parte dal binario {digits:1}."
+    - "Posto assegnato: carrozza {digits:2}, posto {digits:2}. Buon viaggio!"
+    - "Il treno delle {time} per {city} è cancellato. Soluzioni alternative nell'app."
+  government:
+    - "La carta d'identità elettronica è pronta per il ritiro presso l'ufficio anagrafe."
+    - "Conferma appuntamento ufficio anagrafe: {date} ore {time}. Pratica n. {code}."
+    - "La domanda {code} è stata ricevuta ed è in lavorazione."
+    - "Il passaporto è pronto. Si prega di presentarsi con il documento precedente."
+    - "Promemoria: la scadenza per il pagamento è il {date}."
+  retail:
+    - "L'ordine {code} da {shop} è stato spedito."
+    - "{shop}: l'ordine è pronto per il ritiro in negozio. Codice ritiro {digits:6}"
+    - "Solo oggi: -20% su tutto da {shop}. Per non ricevere più SMS rispondi STOP"
+    - "Il reso presso {shop} è stato ricevuto. Rimborso di {amount} entro 3-5 giorni."
+    - "{shop}: il buono sconto per il prossimo acquisto è {code}"
+  utility:
+    - "La bolletta di {amount} sarà addebitata il {date}."
+    - "Comunichi l'autolettura del contatore entro il {date}."
+    - "Interruzione programmata della fornitura il {date} dalle 9 alle 12 per lavori."
+    - "È disponibile la bolletta di conguaglio. Importo a Suo credito: {amount}."
+    - "Appuntamento per la sostituzione del contatore: {date} tra le 8 e le 12."
+
+calendar:
+  - {title: "Dentista", minutes: 45, kind: appointment}
+  - {title: "Medico di base", minutes: 30, kind: appointment}
+  - {title: "Parrucchiere", minutes: 60, kind: appointment}
+  - {title: "Oculista", minutes: 30, kind: appointment}
+  - {title: "Anagrafe", minutes: 30, kind: appointment}
+  - {title: "Tagliando auto", minutes: 60, kind: appointment}
+  - {title: "Colloquio con i prof", minutes: 60, kind: appointment}
+  - {title: "Commercialista", minutes: 60, kind: appointment}
+  - {title: "Fisioterapia", minutes: 45, kind: appointment}
+  - {title: "Revisione auto", minutes: 60, kind: appointment}
+  - {title: "Riunione di team", minutes: 60, kind: work}
+  - {title: "Call settimanale", minutes: 30, kind: work}
+  - {title: "Allineamento con {first}", minutes: 30, kind: work}
+  - {title: "Incontro cliente {city}", minutes: 120, kind: work}
+  - {title: "Colloquio annuale", minutes: 60, kind: work}
+  - {title: "Scadenza offerta", all_day: true, kind: work}
+  - {title: "Trasferta {city}", all_day: true, kind: work}
+  - {title: "Cena aziendale", minutes: 180, kind: work}
+  - {title: "Cena con {first}", minutes: 120, kind: social}
+  - {title: "Caffè con {first}", minutes: 60, kind: social}
+  - {title: "Aperitivo", minutes: 120, kind: social}
+  - {title: "Grigliata da {first}", minutes: 240, kind: social}
+  - {title: "Serata giochi", minutes: 180, kind: social}
+  - {title: "Cinema", minutes: 150, kind: social}
+  - {title: "Concerto {place}", minutes: 180, kind: social}
+  - {title: "Matrimonio {first}", all_day: true, kind: social}
+  - {title: "Palestra", minutes: 90, kind: sport}
+  - {title: "Corsa", minutes: 45, kind: sport}
+  - {title: "Calcetto", minutes: 90, kind: sport}
+  - {title: "Yoga", minutes: 60, kind: sport}
+  - {title: "Piscina", minutes: 60, kind: sport}
+  - {title: "Padel", minutes: 90, kind: sport}
+  - {title: "Volo per {city}", minutes: 120, kind: travel}
+  - {title: "Treno per {city}", minutes: 180, kind: travel}
+  - {title: "Ferie", all_day: true, kind: travel}
+  - {title: "Check-in hotel {city}", minutes: 30, kind: travel}
+  - {title: "Compleanno {first}", all_day: true, kind: birthday}
+  - {title: "Compleanno di {first}", all_day: true, kind: birthday}
+  - {title: "Compleanno mamma", all_day: true, kind: birthday}
+  - {title: "Onomastico {first}", all_day: true, kind: birthday}
+  - {title: "Portare fuori la plastica", minutes: 15, kind: reminder}
+  - {title: "Pagare affitto", all_day: true, kind: reminder}
+  - {title: "Bollo auto", all_day: true, kind: reminder}
+  - {title: "Restituire il pacco", minutes: 15, kind: reminder}
+  - {title: "Regalo per {first}", all_day: true, kind: reminder}
+  - {title: "Cambio gomme", minutes: 60, kind: reminder}
+
+files:
+  - {name: "Fattura_n_{digits:4}.pdf", kind: invoice}
+  - {name: "fattura_luce_marzo.pdf", kind: invoice}
+  - {name: "Fattura idraulico.pdf", kind: invoice}
+  - {name: "Contratto_affitto_{last}.pdf", kind: contract}
+  - {name: "Contratto_lavoro_firmato.pdf", kind: contract}
+  - {name: "Contratto_fibra.pdf", kind: contract}
+  - {name: "Busta_paga_ottobre.pdf", kind: payslip}
+  - {name: "Cedolino_{digits:6}.pdf", kind: payslip}
+  - {name: "Estratto_conto_{digits:6}.pdf", kind: statement}
+  - {name: "Rendiconto_carta_settembre.pdf", kind: statement}
+  - {name: "730_precompilato_2025.pdf", kind: tax}
+  - {name: "CU_2025.pdf", kind: tax}
+  - {name: "F24_{digits:4}.pdf", kind: tax}
+  - {name: "CV_{last}.pdf", kind: cv}
+  - {name: "Lettera_presentazione.docx", kind: cv}
+  - {name: "Carta_imbarco_{code}.pdf", kind: ticket}
+  - {name: "Biglietto_{city}.pdf", kind: ticket}
+  - {name: "Biglietti_concerto.pdf", kind: ticket}
+  - {name: "Conferma_prenotazione_{code}.pdf", kind: ticket}
+  - {name: "Polizza_auto.pdf", kind: insurance}
+  - {name: "Polizza_casa.pdf", kind: insurance}
+  - {name: "Disdetta_palestra.pdf", kind: letter}
+  - {name: "Comunicazione_condominio.pdf", kind: letter}
+  - {name: "Modulo_compilato.pdf", kind: form}
+  - {name: "Autocertificazione.pdf", kind: form}
+  - {name: "Manuale_lavatrice.pdf", kind: manual}
+  - {name: "Scontrino_{digits:6}.pdf", kind: receipt}
+  - {name: "Garanzia_tv.pdf", kind: receipt}
+  - {name: "Scansione_{digits:4}.pdf", kind: scan}
+  - {name: "Doc_scansionato_{digits:3}.pdf", kind: scan}
+  - {name: "Ricetta_tiramisu.pdf", kind: other}
+  - {name: "Lista_invitati.xlsx", kind: other}
+
+notes:
+  - "Spesa: latte, pane, uova, burro"
+  - "Carta igienica, detersivo piatti, pomodori, parmigiano"
+  - "Wifi ospiti: Ospiti_{digits:4}"
+  - "IBAN proprietario: IT{digits:2} X{digits:5} {digits:5} {digits:12}"
+  - "Dentista {date} ore {time}"
+  - "Idee regalo {first}: libro, candela, buono"
+  - "Ritirare pacco, codice {code}"
+  - "Valigia: caricatore, carta d'identità, crema solare, costume"
+  - "Richiamare mamma"
+  - "Targa auto noleggio {code}"
+  - "Tiramisù: 4 uova, 500g mascarpone, savoiardi, caffè, cacao"
+  - "Tavolo prenotato {place} {time}"
+  - "Lettura contatore {digits:5}"
+  - "Chiamare amministratore per il riscaldamento"
+  - "Serie da vedere"
+  - "Ci vediamo a: {place}"
+  - "Codice cliente {digits:8}"
+  - "Volo {code} {date} {time}"
+  - "Da fare: bollo, revisione, iscrizione asilo"
+  - "Indirizzo hotel {city}"
+  - "Ridare {amount} a {first}"
+  - "Codice cancello {digits:4}"
+
+call_names:
+  mom: Mamma
+  dad: Papà
+  grandma: Nonna
+  grandpa: Nonno
+  partner: Amore

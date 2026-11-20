@@ -1,0 +1,261 @@
+# Filipino language pack. Personal texts are Taglish (Tagalog-English code-switching)
+# with common text shortcuts (san, nasan, otw, sge, d2, lng, nmn, po/opo).
+# Philippine service SMS are mostly English; telecom promos often Taglish.
+# `emoji: true` marks threads/entries containing emoji.
+# Proposed (not yet in schema v1): service kinds `mobile_money`, `loan`,
+# placeholders `{balance}`, `{fee}`, list values in `call_names`. See SOURCES.md.
+pack: language
+schema: 1.1
+lang: fil
+name: Filipino (Taglish)
+threads:
+  family:
+    - {msgs: [[p, "Anak kumain ka na ba?"], [o, "Opo ma kakatapos lang"], [p, "Ano ulam mo"], [o, "Adobo po"], [p, "Sige ingat ka lagi"]]}
+    - {msgs: [[p, "Uuwi ka ba sa Pasko?"], [o, "Opo ma, naka-book na ko"], [p, "Kailan dating mo"], [o, "{date} po ng gabi"]]}
+    - {emoji: true, msgs: [[p, "Happy birthday anak! 🎂 God bless you always"], [o, "Thank you po ma ❤️"], [p, "Video call tayo mamaya"]]}
+    - {msgs: [[o, "Nakarating na po ako"], [p, "Salamat sa Diyos. Pahinga ka na"]]}
+    - {msgs: [[p, "Nak padala ka na ba ng pambayad sa kuryente?"], [o, "Opo kanina pa, check nyo po"], [p, "Ok na natanggap ko na salamat"]]}
+    - {emoji: true, msgs: [[p, "Pakisend naman yung pics kahapon"], [o, "Sent na po"], [p, "Ang ganda 😍"]]}
+    - {msgs: [[p, "Kuya sabi ni papa pakisundo daw si bunso sa school"], [o, "Sge anong oras"], [p, "4pm daw"]]}
+    - {emoji: true, msgs: [[p, "Anak nasan ka na?"], [o, "Otw na po ma, traffic sa EDSA"], [p, "Ingat 🙏"]]}
+    - {msgs: [[p, "Sunday lunch dito sa bahay ha, dalhin mo si {partner_first}"], [o, "Opo ma, anong dadalhin namin"], [p, "Kahit dessert lng"]]}
+  partner:
+    - {msgs: [[p, "Babe san ka na"], [o, "Pauwi na, 20 mins"], [p, "Daan ka naman ng bigas"], [o, "Sge"]]}
+    - {emoji: true, msgs: [[p, "Miss na kita 🥺"], [o, "Miss you more mahal ❤️"], [p, "Uwi ka na"]]}
+    - {msgs: [[o, "Kain tayo sa labas mamaya?"], [p, "G! Tinatamad ako magluto"], [o, "7pm ready ka ha"]]}
+    - {emoji: true, msgs: [[p, "Sorry late ako, ang haba ng meeting"], [o, "Hmp 😒"], [p, "Bili kita milk tea promise"], [o, "😂 sige na nga"]]}
+    - {msgs: [[p, "Nabayaran mo na ba yung kuryente"], [o, "Oo kanina online"], [p, "Thank you"]]}
+    - {msgs: [[o, "Nakita mo susi ko?"], [p, "Nasa table malapit sa TV"], [o, "Ay oo nga thanks"]]}
+    - {msgs: [[p, "Nakauwi ka na?"], [o, "Oo kakarating lang"], [p, "Ok gnight"]]}
+    - {msgs: [[p, "Load mo naman ako, wala na ko data"], [o, "Sige pasaload kita"], [p, "Ty babe"]]}
+  friend:
+    - {msgs: [[p, "Beh nasan ka na"], [o, "Malapit na 5 mins"], [p, "5 mins mo 30 mins eh hahaha"], [o, "Totoo na to andito na ko sa labas"]]}
+    - {emoji: true, msgs: [[p, "G ka mamaya? Inuman sa {place}"], [o, "G! Anong oras"], [p, "8pm 🍻"]]}
+    - {emoji: true, msgs: [[o, "Happy birthday mars! 🎉🎂 Libre mo kami ha"], [p, "Hahaha thank you! Sige Sat"], [o, "Yieee"]]}
+    - {msgs: [[p, "Pre pasend naman notes kahapon"], [o, "Wait lng"], [p, "Salamat tol"]]}
+    - {msgs: [[p, "Tuloy ba tayo sa Baguio?"], [o, "Tuloy! Hanap na lng tayo ng transient"], [p, "Bilisan natin baka maubos"]]}
+    - {emoji: true, msgs: [[p, "Nakita mo sinend ni {first} sa gc 😂😂"], [o, "HAHAHAHA loko talaga"]]}
+    - {msgs: [[o, "Beh pautang muna 500 bayaran kita sa sweldo"], [p, "Na-send ko na sa wallet mo"], [o, "Thank youuu"]]}
+    - {msgs: [[p, "Kumusta interview mo?"], [o, "Ok naman, next week daw sila mag-update"], [p, "Pray natin yan"]]}
+    - {msgs: [[p, "Kape tayo?"], [o, "Tara 4pm sa dati"]]}
+  colleague:
+    - {msgs: [[p, "Hi Sir, na-move po yung meeting to 2pm"], [o, "Noted po, thanks"]]}
+    - {msgs: [[p, "Na-send mo na ba yung report?"], [o, "Yes, na-email ko na kanina"], [p, "Thanks"]]}
+    - {msgs: [[o, "WFH ako today, call nyo na lng ako pag may urgent"], [p, "Noted"]]}
+    - {msgs: [[p, "Lunch tayo?"], [o, "Sige 12 sa pantry"]]}
+    - {msgs: [[o, "Late ako 15 mins, traffic"], [p, "Ok lang, start na kami"]]}
+    - {msgs: [[p, "Bukas client visit, formal attire ha"], [o, "Copy"]]}
+    - {msgs: [[p, "Pakisend naman yung deck before 5pm"], [o, "Sure, 4pm ko isesend"]]}
+    - {msgs: [[p, "Approved na ba leave mo?"], [o, "Hindi pa, ni-remind ko na si boss"]]}
+  neighbor:
+    - {msgs: [[p, "Hello po, may parcel kayo kanina, nasa amin po"], [o, "Ay salamat po, kunin ko mamaya"]]}
+    - {msgs: [[p, "Announcement: walang tubig bukas 8am to 5pm"], [o, "Thanks po sa info"]]}
+    - {msgs: [[p, "Kuya yung kotse nyo po nakaharang sa gate"], [o, "Sorry po, ililipat ko na"]]}
+    - {msgs: [[p, "Brownout din ba sa inyo?"], [o, "Oo kanina pa"], [p, "Buong street pala"]]}
+    - {emoji: true, msgs: [[p, "Merry Christmas po! 🎄"], [o, "Merry Christmas din po! Padala ko po yung leche flan mamaya"]]}
+    - {msgs: [[p, "Monthly dues po sa HOA {amount}"], [o, "Sige po, i-transfer ko mamaya"]]}
+    - {msgs: [[o, "May nakakita po ba sa aso namin? Brown na aspin"], [p, "Kanina nasa may tindahan po"]]}
+    - {msgs: [[p, "May fogging po bukas 4pm, sara nyo po mga bintana"], [o, "Sige po salamat"]]}
+service_sms:
+  courier:
+    - "Your parcel {tracking} is out for delivery today. Please prepare the exact amount of {amount} for COD."
+    - "{courier}: Your parcel {tracking} has been delivered on {date} {time}. Received by: {first}."
+    - "Your order from {shop} has been shipped. Tracking no: {tracking}"
+    - "We tried to deliver your parcel {tracking} but no one was available. We will attempt again on {date}."
+    - "Hi! Si {first} ito, rider ng parcel nyo {tracking}. Papunta na po ako."
+  bank:
+    - "{bank}: Your OTP is {digits:6}. NEVER share this with anyone. {bank} will never ask for your OTP."
+    - "{bank}: You have successfully transferred {amount} to {first} {last} on {date} {time}. Ref No. {digits:12}"
+    - "{bank}: Your account ending {digits:4} was credited with {amount} on {date}. Avail bal: {balance}"
+    - "A purchase of {amount} was made using your card ending {digits:4} at {shop} on {date}."
+    - "Your credit card statement is ready. Total amount due: {amount}. Due date: {date}."
+  telecom:
+    - "You have successfully loaded {amount}. Your load balance is {balance}, valid until {date}."
+    - "You have received {amount} load from {first}. Ref: {digits:12}"
+    - "Your data promo will expire on {date}. Mag-register ulit para tuloy-tuloy ang surfing!"
+    - "Sulit deal! 30GB for 30 days for only {amount}. Dial *{digits:3}# para mag-register."
+    - "Your registration to 15GB+unli calls is successful. Valid until {date}."
+    - "You have used 90% of your data. Mag-add-on na para hindi maputol."
+  otp_service:
+    - "{digits:6} is your verification code. Do not share this code with anyone."
+    - "<#> Your OTP is {digits:6}. {code}"
+    - "Your one-time PIN is {digits:6}. It will expire in 5 minutes."
+    - "Use {digits:4} to verify your mobile number."
+    - "Huwag ibigay ang code na ito kahit kanino. Code: {digits:6}"
+  doctor:
+    - "Reminder: Your check-up is on {date} at {time}. Please bring your HMO card."
+    - "Your appointment has been confirmed for {date}, {time}. Queue no. {digits:2}."
+    - "Your lab results are now available. Ref {code}."
+    - "Please fast for 8-10 hours before your test on {date}."
+    - "Ang inyong appointment sa {date} ay na-reschedule. Tumawag po para sa bagong schedule."
+  pharmacy:
+    - "Your order #{digits:8} is confirmed. Delivery on {date}. Total: {amount}."
+    - "Your medicines are out for delivery."
+    - "Time to refill your maintenance meds! Order now and get free delivery."
+    - "Your prescription for order {code} has been verified."
+    - "Order {code} delivered. Thank you!"
+  delivery_food:
+    - "Your order from {shop} is on the way! Rider {first} will arrive in {digits:2} mins."
+    - "Order #{digits:6} confirmed. Total {amount}."
+    - "Your order has been delivered. Enjoy your meal!"
+    - "Gutom na? 50% OFF sa {shop} today only!"
+    - "Nandito na po ang rider sa labas."
+  ride_hailing:
+    - "Your driver {first} is on the way. Plate no. {code}. ETA 4 mins."
+    - "Your driver has arrived at the pick-up point."
+    - "Trip completed. Fare: {amount}. Thanks for riding!"
+    - "Your ride PIN is {digits:4}."
+    - "Sorry, your booking was cancelled by the driver. Finding you another ride."
+  airline:
+    - "Online check-in is now open for your flight to {city} on {date}. Booking ref {code}."
+    - "Your flight to {city} is now boarding at Gate {digits:1}."
+    - "Flight advisory: your flight to {city} has been delayed. New departure: {time}."
+    - "Booking confirmed! Ref {code}. Departure {date} {time}."
+    - "Reminder: please be at the airport at least 2 hours before your flight."
+  rail:
+    - "Your ticket is confirmed. Booking ref {code}. Departure {date} {time}."
+    - "Train service advisory: delays of {digits:2} minutes expected this morning."
+    - "Your bus/train ticket to {city} on {date} is confirmed. Seat {digits:2}."
+    - "Reminder: your trip to {city} departs tomorrow at {time}."
+    - "Refund of {amount} for booking {code} has been processed."
+  government:
+    - "Your National ID is ready for delivery. Tracking {tracking}."
+    - "Your application {code} has been received and is being processed."
+    - "Reminder: deadline for filing of annual income tax return is {date}."
+    - "Your appointment at the {city} office is on {date} at {time}. Bring your valid ID."
+    - "Your SIM registration is successful. Ref No. {code}."
+  retail:
+    - "Thank you for shopping at {shop}! You earned {digits:3} points."
+    - "PAYDAY SALE! Up to 70% off at {shop} until {date}."
+    - "Your order {code} has been shipped."
+    - "Your refund of {amount} for order {code} is processed."
+    - "11.11 sale na bukas! Check out {shop}."
+  utility:
+    - "Your electric bill for this month is {amount}, due on {date}. Acct no. {digits:10}."
+    - "Scheduled power interruption on {date}, {time}, due to maintenance works."
+    - "Water service interruption advisory: {date} from {time}."
+    - "Payment of {amount} received. Ref {code}. Thank you!"
+    - "Your water bill of {amount} is due on {date}."
+  mobile_money:
+    - "You have received {amount} of wallet balance from {first} {last}. Your new balance is {balance}. Ref. No. {digits:13}."
+    - "You have sent {amount} to {first} {last} on {date} {time}. Ref. No. {digits:13}. Your new balance is {balance}."
+    - "You have paid {amount} to {shop}. Ref. No. {digits:13}."
+    - "Cash-in of {amount} successful. Your new balance is {balance}."
+    - "You have successfully bought {amount} load for {first}. Ref. No. {digits:13}."
+  loan:
+    - "Reminder: your loan payment of {amount} is due on {date}. Pay on time to avoid penalties."
+    - "Congratulations! Your loan of {amount} has been approved and credited to your wallet."
+    - "Your loan is now overdue. Please settle {amount} today."
+    - "Thank you for your payment of {amount}. Remaining balance: {balance}."
+    - "Pwede ka nang mag-loan ng hanggang {amount}! Apply na sa app."
+calendar:
+  - {title: "Dentist", minutes: 45, kind: appointment}
+  - {title: "Check-up", minutes: 60, kind: appointment}
+  - {title: "Lab test (fasting)", minutes: 30, kind: appointment}
+  - {title: "Bank", minutes: 60, kind: appointment}
+  - {title: "Passport appointment", minutes: 180, kind: appointment}
+  - {title: "PTA meeting", minutes: 60, kind: appointment}
+  - {title: "Pa-service sasakyan", minutes: 120, kind: appointment}
+  - {title: "Haircut", minutes: 30, kind: appointment}
+  - {title: "Daily huddle", minutes: 15, kind: work}
+  - {title: "Client meeting", minutes: 60, kind: work}
+  - {title: "Team meeting", minutes: 60, kind: work}
+  - {title: "Night shift", minutes: 540, kind: work}
+  - {title: "Coaching w/ TL", minutes: 30, kind: work}
+  - {title: "Interview - {first} {last}", minutes: 45, kind: work}
+  - {title: "Report deadline", all_day: true, kind: work}
+  - {title: "Dinner with {first}", minutes: 120, kind: social}
+  - {title: "Kasal ni {first}", all_day: true, kind: social}
+  - {title: "Binyag", minutes: 180, kind: social}
+  - {title: "Simbang Gabi", minutes: 60, kind: social}
+  - {title: "Mass", minutes: 60, kind: social}
+  - {title: "Videoke night", minutes: 180, kind: social}
+  - {title: "Reunion", minutes: 240, kind: social}
+  - {title: "Fiesta sa probinsya", all_day: true, kind: social}
+  - {title: "Basketball", minutes: 90, kind: sport}
+  - {title: "Gym", minutes: 60, kind: sport}
+  - {title: "Badminton", minutes: 90, kind: sport}
+  - {title: "Zumba", minutes: 60, kind: sport}
+  - {title: "Morning jog", minutes: 45, kind: sport}
+  - {title: "Flight to {city}", minutes: 90, kind: travel}
+  - {title: "Uwi probinsya", all_day: true, kind: travel}
+  - {title: "{city} trip", all_day: true, kind: travel}
+  - {title: "Bus to {city}", minutes: 360, kind: travel}
+  - {title: "Sundo {first} sa airport", minutes: 90, kind: travel}
+  - {title: "Bday ni {first}", all_day: true, kind: birthday}
+  - {title: "{first}'s birthday", all_day: true, kind: birthday}
+  - {title: "Debut ni {first}", minutes: 240, kind: birthday}
+  - {title: "Anniversary", all_day: true, kind: birthday}
+  - {title: "Bayad renta", all_day: true, kind: reminder}
+  - {title: "Bayad kuryente", all_day: true, kind: reminder}
+  - {title: "Bayad tubig", all_day: true, kind: reminder}
+  - {title: "Padala kay mama", minutes: 15, kind: reminder}
+  - {title: "Hulog sa loan", all_day: true, kind: reminder}
+  - {title: "Tuition due", all_day: true, kind: reminder}
+  - {title: "Load", minutes: 15, kind: reminder}
+  - {title: "Sweldo", all_day: true, kind: reminder}
+files:
+  - {name: "Invoice_{digits:8}.pdf", kind: invoice}
+  - {name: "Receipt_{shop}_{date}.pdf", kind: invoice}
+  - {name: "Electric_Bill_{date}.pdf", kind: invoice}
+  - {name: "SOA_{date}.pdf", kind: statement}
+  - {name: "Contract_of_Lease_{last}.pdf", kind: contract}
+  - {name: "Employment_Contract_{last}.pdf", kind: contract}
+  - {name: "Job_Offer.pdf", kind: contract}
+  - {name: "Payslip_{date}.pdf", kind: payslip}
+  - {name: "BIR_2316_2025.pdf", kind: tax}
+  - {name: "Bank_Statement_{date}.pdf", kind: statement}
+  - {name: "National_ID_front.jpg", kind: id_document}
+  - {name: "UMID.jpg", kind: id_document}
+  - {name: "Passport_{first}.pdf", kind: id_document}
+  - {name: "Drivers_License.jpg", kind: id_document}
+  - {name: "PSA_Birth_Certificate.pdf", kind: id_document}
+  - {name: "NBI_Clearance.pdf", kind: government}
+  - {name: "Resume_{first}_{last}.pdf", kind: cv}
+  - {name: "{first}_CV_2026.docx", kind: cv}
+  - {name: "E-Ticket_{code}.pdf", kind: ticket}
+  - {name: "Boarding_Pass_{code}.pdf", kind: ticket}
+  - {name: "HMO_Card.jpg", kind: insurance}
+  - {name: "Insurance_Policy_{digits:8}.pdf", kind: insurance}
+  - {name: "Lab_Results_{date}.pdf", kind: medical}
+  - {name: "Reseta.jpg", kind: medical}
+  - {name: "Proof_of_Payment_{date}.jpg", kind: invoice}
+  - {name: "Diploma.pdf", kind: education}
+  - {name: "TOR.pdf", kind: education}
+  - {name: "Wedding_Invitation_{first}.pdf", kind: personal}
+  - {name: "Weekly_Report_final.xlsx", kind: work}
+  - {name: "IMG_{date}_{digits:6}.jpg", kind: image}
+  - {name: "Screenshot_{date}.png", kind: image}
+notes:
+  - "Grocery: bigas, itlog, sardinas, kape, asukal, sabon"
+  - "Wifi pw {code}"
+  - "Utang kay {first} {amount}"
+  - "{first} - may utang {amount}"
+  - "Renta {amount} every 5th"
+  - "Acct no {digits:10}"
+  - "Booking ref {code}"
+  - "Paluwagan: turn ko sa March"
+  - "Dalhin: charger, ID, payong"
+  - "Regalo kay {first} - relo?"
+  - "Parking B2 malapit sa elevator"
+  - "Gamot: 3x a day after meals"
+  - "Bukas: bank, padala, LTO"
+  - "Tracking {tracking}"
+  - "Movies to watch (from {first})"
+  - "Number ng aircon cleaner"
+  - "Locker {digits:4}"
+  - "Hulog sa phone 3 months pa"
+  - "Adobo: toyo, suka, bawang, paminta, dahon ng laurel"
+  - "Sweldo 15 at 30"
+call_names:
+  mom: [Mama, Mommy, Nanay, Ma, Inay, Mamshie]
+  dad: [Papa, Daddy, Tatay, Pa, Itay, Pops]
+  partner: [Babe, Mahal, "Love ❤️", Hon, Hubby, Wifey]
+  grandma: [Lola, Nanay Lola, Mamang]
+  grandpa: [Lolo, Tatay Lolo, Papang]
+  sister: ["Ate {first}", "Ate", Bunso, "Sis"]
+  brother: ["Kuya {first}", "Kuya", Bunso, "Bro"]
+  aunt: ["Tita {first}", "Tita"]
+  uncle: ["Tito {first}", "Tito"]
+  son: ["{first}", "Anak"]
+  daughter: ["{first}", "Anak"]

@@ -2540,6 +2540,21 @@ _CATEGORY_DISPLAY = {
 }
 
 
+def _notifies(method):
+    """Notify the state listeners when ``method`` changed armed or active."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        before = self._state_key()
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            if self._state_key() != before:
+                self._notify_state()
+
+    return wrapper
+
+
 class BypassService:
     """Owns the armed/active bypass categories and one flag-gated Frida script.
 
@@ -2596,6 +2611,44 @@ class BypassService:
         # Categories the in-flight set_active (under _mutate_lock) turns on;
         # a claim on any of them waits for it, unrelated claims do not.
         self._mutating: frozenset[str] = frozenset()
+        # Called after the armed or active set changed, see add_state_listener.
+        self._state_listeners: list[Callable[[], None]] = []
+        self._listeners_lock = threading.Lock()
+
+    # -- state listeners ---------------------------------------------------
+
+    def add_state_listener(self, cb: Callable[[], None]) -> None:
+        """Call ``cb()`` after every change of the armed or active set.
+
+        Runs on whichever thread made the change: a worker, or the UI thread
+        itself (a new app selection disarms from UI code). Keep it short and
+        non-blocking and post to the UI without assuming the thread (e.g.
+        ``call_later`` / ``post_message``, or a dispatcher that runs inline
+        on the UI thread; ``call_from_thread`` raises there). Read the new
+        state with :meth:`on_categories` / :meth:`armed_categories` /
+        :meth:`active_categories`. Errors are logged, not raised.
+        """
+        with self._listeners_lock:
+            if cb not in self._state_listeners:
+                self._state_listeners.append(cb)
+
+    def remove_state_listener(self, cb: Callable[[], None]) -> None:
+        with self._listeners_lock:
+            if cb in self._state_listeners:
+                self._state_listeners.remove(cb)
+
+    def _state_key(self) -> tuple[frozenset[str], frozenset[str]]:
+        with self._lock:
+            return frozenset(self._armed), frozenset(self._active)
+
+    def _notify_state(self) -> None:
+        with self._listeners_lock:
+            listeners = list(self._state_listeners)
+        for cb in listeners:
+            try:
+                cb()
+            except Exception:
+                logger.debug("Bypass state listener failed", exc_info=True)
 
     # -- mutual exclusion with other bypass sources (Dexray) --------------
 
@@ -3019,6 +3072,7 @@ class BypassService:
 
     # -- the single transition point --------------------------------------
 
+    @_notifies
     def set_active(
         self,
         target,
@@ -3227,6 +3281,7 @@ class BypassService:
             return False, decision.reason
         return None
 
+    @_notifies
     def start(
         self,
         category: str,
@@ -3248,6 +3303,7 @@ class BypassService:
             return armed
         return self.set_active(target, paused=False, on_message=on_message)
 
+    @_notifies
     def start_many(
         self,
         categories,
@@ -3267,6 +3323,7 @@ class BypassService:
             return armed
         return self.set_active(target, paused=False, on_message=on_message)
 
+    @_notifies
     def stop(self, category: str) -> bool:
         """Remove one category (and disarm it). Idempotent."""
         with self._lock:
@@ -3278,6 +3335,7 @@ class BypassService:
         self.set_active(target, paused=False)
         return True
 
+    @_notifies
     def toggle(
         self,
         category: str,
@@ -3333,6 +3391,7 @@ class BypassService:
         """True if ``category`` only fully works from the app's start."""
         return bool(getattr(self._manager_class(category), "APPLY_AT_SPAWN", False))
 
+    @_notifies
     def forget_process(self) -> None:
         """Drop the resident script and its process (keeps the armed set).
 
@@ -3341,6 +3400,7 @@ class BypassService:
         """
         self._reset_script_state()
 
+    @_notifies
     def keep_armed_and_forget(self, package: str | None = None) -> list[str]:
         """Drop the resident script but keep its categories as intent (⇧K).
 
@@ -3366,6 +3426,7 @@ class BypassService:
         rank = {c: i for i, c in enumerate(self.categories())}
         return sorted(armed, key=lambda c: (rank.get(c, len(rank)), c))
 
+    @_notifies
     def disarm_all(self) -> list[str]:
         """Clear the armed set; the live script is left alone.
 
@@ -3396,6 +3457,7 @@ class BypassService:
         with self._lock:
             return sorted(self._armed | self._active)
 
+    @_notifies
     def arm_active(self, package: str) -> None:
         """Add the categories active on ``package`` to the armed set.
 
@@ -3413,6 +3475,7 @@ class BypassService:
                 return self._armed | self._active
             return set(self._armed)
 
+    @_notifies
     def reconcile_liveness(self) -> list[str]:
         """Drop the active categories when their hooked process is gone.
 
@@ -3464,6 +3527,7 @@ class BypassService:
         self._reset_script_state()
         return active
 
+    @_notifies
     def stop_all(self) -> list[str]:
         """Stop the resident bypass script for real and clear the armed set.
 
@@ -3480,6 +3544,7 @@ class BypassService:
 
     # -- orchestration ----------------------------------------------------
 
+    @_notifies
     def apply_armed(
         self,
         on_message: Callable[[Any], None] | None = None,
@@ -3500,6 +3565,7 @@ class BypassService:
             self._plain_name(c) for c in self._categories_by_priority(armed)
         )
 
+    @_notifies
     def apply_to_fresh_spawn(
         self,
         package: str,
@@ -3617,6 +3683,7 @@ class BypassService:
             )
         return True, f"Spawned {package} (no bypasses armed)"
 
+    @_notifies
     def apply_to_fresh_spawn_with_retry(
         self,
         package: str,

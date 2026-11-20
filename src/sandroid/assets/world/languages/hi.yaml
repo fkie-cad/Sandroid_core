@@ -1,0 +1,268 @@
+# Hindi language pack. Personal texts are mostly romanized Hinglish (how people actually
+# type on Indian phones); entries tagged `script: Deva` are in Devanagari.
+# Indian service SMS are overwhelmingly English or English-Hindi mixed; that is mirrored here.
+# `emoji: true` marks threads/entries containing emoji.
+# Proposed (not yet in schema v1): `script` tag, service kinds `mobile_money`, `loan`,
+# placeholders `{balance}`, `{fee}`, list values in `call_names`. See SOURCES.md.
+pack: language
+schema: 1.1
+lang: hi
+name: हिन्दी (Hinglish)
+threads:
+  family:
+    - {msgs: [[p, "Beta khana kha liya?"], [o, "Haan mummy abhi khaya"], [p, "Kya khaya"], [o, "Dal chawal"], [p, "Theek hai. Papa ko call kar lena"]]}
+    - {msgs: [[p, "Kab aa rahe ho ghar"], [o, "Diwali pe aaunga, ticket book kar liya"], [p, "Accha. Kaunsi train"], [o, "Rajdhani, {date} ko"]]}
+    - {emoji: true, msgs: [[p, "Happy birthday beta 🎂🎉 bhagwan tumhe khush rakhe"], [o, "Thank you papa 🙏"], [p, "Shaam ko call karna"]]}
+    - {msgs: [[o, "Pahunch gaya"], [p, "Thik hai. Aaram karo"]]}
+    - {msgs: [[p, "Didi ki shaadi ki date fix ho gayi"], [o, "Kab?"], [p, "{date}. Chhutti le lena pehle se"], [o, "Haan bol dunga office me"]]}
+    - {script: Deva, msgs: [[p, "बेटा दवाई ले ली?"], [o, "हाँ मम्मी ले ली"], [p, "ठीक है, ठंड में बाहर मत जाना"]]}
+    - {msgs: [[p, "Bhai mummy ka phone nahi lag raha"], [o, "Network issue hoga, maine abhi baat ki thi"], [p, "Ok"]]}
+    - {emoji: true, msgs: [[p, "Photo bhej na kal wali"], [o, "Bhej di"], [p, "Mast aayi hai 😍"]]}
+    - {msgs: [[p, "Gas cylinder book kar diya kya"], [o, "Haan kal aa jayega"], [p, "Accha"]]}
+    - {script: Deva, emoji: true, msgs: [[p, "जन्मदिन की बहुत बहुत बधाई 🎉"], [o, "धन्यवाद चाचा जी 🙏"]]}
+  partner:
+    - {msgs: [[p, "Kahan ho"], [o, "Metro me, 20 min"], [p, "Ok aate hue doodh le aana"], [o, "Thik hai"]]}
+    - {emoji: true, msgs: [[p, "Miss u 🥺"], [o, "Miss u too jaan ❤️"], [p, "Jaldi aao"]]}
+    - {msgs: [[o, "Aaj dinner bahar karein?"], [p, "Haan please, khana banane ka mann nahi"], [o, "8 baje ready rehna"]]}
+    - {msgs: [[p, "Bijli ka bill bhar diya?"], [o, "Haan subah hi online kar diya"], [p, "Good"]]}
+    - {emoji: true, msgs: [[p, "Sorry yaar late ho jaunga, meeting lambi chal rahi"], [o, "Hmm ok 😒"], [p, "Ice cream lekar aaunga promise"], [o, "😂 ok"]]}
+    - {msgs: [[o, "Meri chaabi dekhi kya"], [p, "Table pe padi hai TV ke paas"], [o, "Mil gayi thnx"]]}
+    - {msgs: [[p, "Mummy ji aa rahi hai sunday ko"], [o, "Accha, station se le aaunga"]]}
+    - {msgs: [[p, "Ghar pahuch gaye?"], [o, "Haan bas abhi"], [p, "Ok gn"]]}
+  friend:
+    - {msgs: [[p, "Bhai kidhar hai"], [o, "Bas 5 min"], [p, "Tera 5 min matlab aadha ghanta"], [o, "Arre aa gaya aa gaya"]]}
+    - {emoji: true, msgs: [[p, "Aaj match dekhne aa raha?"], [o, "Haan pakka"], [p, "Chips le aana 😂"]]}
+    - {emoji: true, msgs: [[o, "Happy bday bhai 🎉🎉 party kab de raha"], [p, "Thanks bro. Saturday pakka"], [o, "Done"]]}
+    - {msgs: [[p, "Yaar notes bhej de kal wale"], [o, "Abhi bhejta hu"], [p, "Thnx yaar"]]}
+    - {msgs: [[p, "Goa plan final?"], [o, "Haan bas tickets dekh raha"], [p, "Jaldi kar warna mehenge ho jayenge"]]}
+    - {emoji: true, msgs: [[p, "Dekha group me {first} ne kya bheja 😂😂"], [o, "Hahaha pagal hai wo"]]}
+    - {msgs: [[o, "Yaar 500 bhej sakta hai UPI pe? kal lauta dunga"], [p, "Bhej diya"], [o, "Thanks bhai"]]}
+    - {msgs: [[p, "Interview kaisa gaya"], [o, "Accha gaya, next week batayenge"], [p, "All the best yaar"]]}
+    - {msgs: [[p, "Chai pe chalein?"], [o, "Haan 10 min me neeche aata hu"]]}
+    - {script: Deva, msgs: [[p, "कल मिलते हैं फिर"], [o, "हाँ पक्का, 6 बजे"]]}
+  colleague:
+    - {msgs: [[p, "Sir aaj ki meeting 3 baje shift ho gayi"], [o, "Ok noted"]]}
+    - {msgs: [[p, "Report bhej di?"], [o, "Haan mail kar di 10 min pehle"], [p, "Thanks"]]}
+    - {msgs: [[o, "Aaj WFH hu, kuch urgent ho toh call karna"], [p, "Ok sure"]]}
+    - {msgs: [[p, "Lunch chalein?"], [o, "Haan 1:30 pe"]]}
+    - {msgs: [[p, "Please PPT EOD tak share kar dena"], [o, "Sure, 5 baje tak bhej dunga"]]}
+    - {msgs: [[o, "Traffic me fasa hu, 15 min late"], [p, "No problem, start karte hai tab tak"]]}
+    - {msgs: [[p, "Kal client visit hai, formal pehen ke aana"], [o, "Haan yaad hai"]]}
+    - {msgs: [[p, "Leave approve ho gayi?"], [o, "Abhi tak nahi, manager ko reminder bheja"]]}
+  neighbor:
+    - {msgs: [[p, "Namaste, aapka parcel aaya tha, humne rakh liya"], [o, "Thank you aunty, shaam ko le jaunga"]]}
+    - {msgs: [[p, "Kal subah 10 se 2 paani nahi aayega, society ka notice"], [o, "Ok thanks bata diya"]]}
+    - {msgs: [[p, "Aapki gaadi gate ke saamne lagi hai, thoda hata denge?"], [o, "Sorry abhi hatata hu"]]}
+    - {script: Deva, msgs: [[p, "नमस्ते जी, कल सोसाइटी मीटिंग है शाम 7 बजे"], [o, "ठीक है, आ जाएंगे"]]}
+    - {emoji: true, msgs: [[p, "Diwali ki shubhkamnayein 🪔"], [o, "Aapko bhi, mithai bhej rahe hai"]]}
+    - {msgs: [[o, "Bhaiya maid aaj aayi thi kya aapke yahan?"], [p, "Nahi aaj chhutti pe hai"]]}
+    - {msgs: [[p, "Lift kharab hai, mechanic aa raha"], [o, "Ok seedhi se aate hai"]]}
+    - {msgs: [[p, "Doodhwala aaj nahi aaya, aapke paas extra packet hai?"], [o, "Haan ek hai, le jao"]]}
+service_sms:
+  courier:
+    - "Your shipment {tracking} is out for delivery today. Delivery OTP: {digits:4}. Share only with delivery agent. -{courier}"
+    - "Your order with {shop} has been shipped. AWB {tracking}. Track: {courier} app"
+    - "{courier}: Delivery attempt failed for {tracking}. We will try again on {date}."
+    - "Delivered: Your package {tracking} was delivered at {time}."
+    - {text: "आपका पार्सल {tracking} आज डिलीवर होगा। OTP {digits:4} केवल डिलीवरी एजेंट को बताएं।", script: Deva}
+  bank:
+    - "{amount} debited from A/c XX{digits:4} on {date} to VPA {first}{digits:2}@upi UPI Ref No {digits:12}. Not you? Call 1800{digits:7} -{bank}"
+    - "Dear Customer, A/c XX{digits:4} credited with {amount} on {date} by UPI/{digits:12}. Avl Bal {balance} -{bank}"
+    - "{digits:6} is OTP for txn of {amount} at {shop} on card XX{digits:4}. Valid for 5 mins. Do not share OTP with anyone. -{bank}"
+    - "{amount} spent on {bank} Credit Card XX{digits:4} at {shop} on {date}. Avl Lmt {balance}."
+    - "Your A/c XX{digits:4} is credited with {amount} on {date} - SALARY. Avl Bal {balance}."
+    - "Dear Customer, never share your OTP, PIN or CVV with anyone. {bank} never asks for these details."
+    - {text: "प्रिय ग्राहक, आपके खाते XX{digits:4} में {amount} जमा किए गए। शेष राशि {balance}। -{bank}", script: Deva}
+  telecom:
+    - "Recharge of {amount} successful. Pack: 1.5GB/day, Unlimited calls, 28 days. Validity till {date}."
+    - "Dear customer, your plan expires on {date}. Recharge now to enjoy uninterrupted services."
+    - "90% of your daily high speed data quota has been used. Speed will reduce to 64 Kbps after 100%."
+    - "Your bill of {amount} is due on {date}. Pay now via app to avoid late fee."
+    - {text: "प्रिय ग्राहक, आपका प्लान {date} को समाप्त हो रहा है। अभी रिचार्ज करें और अनलिमिटेड कॉल का आनंद लें।", script: Deva}
+    - {text: "बधाई! आपको {digits:1}GB अतिरिक्त डेटा मिला है, वैधता {date} तक।", script: Deva}
+  otp_service:
+    - "{digits:6} is your OTP for login. Do not share it with anyone."
+    - "<#> {digits:6} is your verification code. {code}"
+    - "Your OTP is {digits:4}. Valid for 10 minutes."
+    - "Use OTP {digits:6} to verify your mobile number. Never share OTP with anyone."
+    - {text: "{digits:6} आपका OTP है। इसे किसी के साथ साझा न करें।", script: Deva}
+  doctor:
+    - "Your appointment with the doctor is confirmed for {date} at {time}. Please reach 15 min early. Token no {digits:2}."
+    - "Reminder: Your consultation is scheduled tomorrow at {time}. Reply C to cancel."
+    - "Your lab report is ready. Download from the app using ID {code}."
+    - "Dear patient, please come fasting for your blood test on {date}."
+    - {text: "आपकी डॉक्टर से मुलाकात {date} को {time} बजे निर्धारित है।", script: Deva}
+  pharmacy:
+    - "Your order #{digits:8} is confirmed. Medicines will be delivered by {date}. Total: {amount}"
+    - "Your medicines order has been packed and is out for delivery."
+    - "Reminder: your monthly medicines refill is due. Reorder now and get 20% off."
+    - "Order {code} delivered. Thank you for ordering with {shop}."
+    - "Prescription verified for order {code}. Delivery expected {date}."
+  delivery_food:
+    - "Your order from {shop} is on the way! Rider {first} will reach in {digits:2} mins."
+    - "Order #{digits:6} confirmed. Total {amount}. Track live in app."
+    - "Your order has been delivered. Rate your meal and earn rewards!"
+    - "Delivery OTP for your order is {digits:4}. Share with rider at doorstep."
+    - "Paneer khane ka mann? 50% OFF on {shop} today only! Order now."
+  ride_hailing:
+    - "Your ride OTP is {digits:4}. {first} is arriving in a white hatchback {code}."
+    - "Your driver has arrived at pickup point."
+    - "Trip completed. Fare {amount}. Thank you for riding!"
+    - "Your auto is booked. Driver {first}, arriving in 4 min. OTP {digits:4}"
+    - "Your ride has been cancelled by the driver. Searching for another driver."
+  airline:
+    - "Web check-in is now open for flight {code} to {city} on {date}. PNR {code}."
+    - "Your flight to {city} departs at {time}. Boarding gate {digits:2}. Gate closes 25 min before departure."
+    - "Flight delayed: new departure time {time}. We regret the inconvenience."
+    - "Booking confirmed. PNR {code}. Dep {date} {time}."
+    - "Boarding pass for PNR {code} has been sent to your email."
+  rail:
+    - "PNR:{digits:10},TRN:{digits:5},DOJ:{date},SL,{city}-{city},Dep:{time},S{digits:1} {digits:2}"
+    - "PNR {digits:10}: Chart prepared. Coach B{digits:1} Berth {digits:2}."
+    - "PNR {digits:10} is WL {digits:2}. Status will be updated after chart preparation."
+    - "Your ticket for PNR {digits:10} is cancelled. Refund of {amount} will be credited in 3-5 days."
+    - "Train {digits:5} is running late by approx {digits:2} minutes."
+  government:
+    - "OTP for Aadhaar (XX{digits:4}) is {digits:6} (valid for 10 mins)."
+    - "Your application {code} for passport has been received. Appointment on {date} at {time}."
+    - "Dear taxpayer, your ITR for AY 2026-27 has been processed. Refund of {amount} determined."
+    - "Your vehicle challan of {amount} is pending. Pay online to avoid court proceedings."
+    - {text: "आपका आवेदन {code} स्वीकार कर लिया गया है। स्थिति जानने हेतु पोर्टल देखें।", script: Deva}
+  retail:
+    - "Thank you for shopping at {shop}! You earned {digits:3} points. Bill amt {amount}."
+    - "MEGA SALE! Flat 50% off at {shop}. Hurry, offer valid till {date}. T&C"
+    - "Your order {code} has been delivered. Rate your experience."
+    - "Your refund of {amount} for order {code} has been initiated."
+    - "Diwali dhamaka! Extra 10% off on all orders. Use code {code}"
+  utility:
+    - "Dear consumer, your electricity bill for CA no {digits:10} is {amount}. Due date {date}."
+    - "Power supply will remain suspended in your area on {date} from {time} due to maintenance."
+    - "Your LPG cylinder booking is confirmed. Booking no {digits:6}. Delivery within 2 days."
+    - "Payment of {amount} received for CA {digits:10}. Thank you."
+    - "Your water bill of {amount} is due on {date}."
+  mobile_money:
+    - "{amount} sent to {first} {last} via UPI. UPI Ref {digits:12}."
+    - "You have received {amount} from {first} {last}. UPI Ref {digits:12}."
+    - "Wallet: {amount} paid to {shop}. Wallet balance {balance}. Txn ID {digits:12}"
+    - "Money added to wallet: {amount}. Updated balance {balance}."
+    - "Payment of {amount} to {shop} failed. Amount, if debited, will be refunded within 3 working days."
+  loan:
+    - "Dear customer, EMI of {amount} for loan A/c XX{digits:4} is due on {date}. Maintain sufficient balance."
+    - "Your EMI of {amount} has been successfully debited. Thank you."
+    - "Congratulations! You are pre-approved for a personal loan of up to {amount}. Apply in 2 mins."
+    - "Your EMI payment is overdue. Pay {amount} today to avoid penal charges and impact on credit score."
+    - "Loan of {amount} disbursed to your A/c XX{digits:4}. First EMI on {date}."
+calendar:
+  - {title: "Dentist", minutes: 45, kind: appointment}
+  - {title: "Doctor appt", minutes: 30, kind: appointment}
+  - {title: "Blood test (fasting)", minutes: 30, kind: appointment}
+  - {title: "Bank ka kaam", minutes: 60, kind: appointment}
+  - {title: "Passport office", minutes: 120, kind: appointment}
+  - {title: "PTM school", minutes: 60, kind: appointment}
+  - {title: "Car service", minutes: 120, kind: appointment}
+  - {title: "Haircut", minutes: 30, kind: appointment}
+  - {title: "Daily standup", minutes: 15, kind: work}
+  - {title: "Client call", minutes: 60, kind: work}
+  - {title: "Team meeting", minutes: 60, kind: work}
+  - {title: "Sprint review", minutes: 90, kind: work}
+  - {title: "Appraisal discussion", minutes: 45, kind: work}
+  - {title: "Interview - {first} {last}", minutes: 45, kind: work}
+  - {title: "Timesheet submit", minutes: 15, kind: work}
+  - {title: "Dinner with {first}", minutes: 120, kind: social}
+  - {title: "{first} ki shaadi", all_day: true, kind: social}
+  - {title: "Sangeet", minutes: 240, kind: social}
+  - {title: "Mehendi", minutes: 240, kind: social}
+  - {title: "Kitty party", minutes: 180, kind: social}
+  - {title: "Satsang", minutes: 120, kind: social}
+  - {title: "Movie with gang", minutes: 180, kind: social}
+  - {title: "Mandir", minutes: 60, kind: social}
+  - {title: "Puja at home", minutes: 120, kind: social}
+  - {title: "Gym", minutes: 60, kind: sport}
+  - {title: "Yoga", minutes: 60, kind: sport}
+  - {title: "Morning walk", minutes: 45, kind: sport}
+  - {title: "Cricket", minutes: 180, kind: sport}
+  - {title: "Badminton", minutes: 60, kind: sport}
+  - {title: "Flight to {city}", minutes: 150, kind: travel}
+  - {title: "Train to {city}", minutes: 480, kind: travel}
+  - {title: "Ghar jana", all_day: true, kind: travel}
+  - {title: "{city} trip", all_day: true, kind: travel}
+  - {title: "Bus to {city}", minutes: 360, kind: travel}
+  - {title: "{first} ka birthday", all_day: true, kind: birthday}
+  - {title: "{first} bday", all_day: true, kind: birthday}
+  - {title: "Mummy papa anniversary", all_day: true, kind: birthday}
+  - {title: "Birthday {first}", all_day: true, kind: birthday}
+  - {title: "जन्मदिन {first}", all_day: true, kind: birthday, script: Deva}
+  - {title: "Rent bhejna", all_day: true, kind: reminder}
+  - {title: "EMI date", all_day: true, kind: reminder}
+  - {title: "Bijli bill", all_day: true, kind: reminder}
+  - {title: "Recharge karna", minutes: 15, kind: reminder}
+  - {title: "Gas cylinder book", minutes: 15, kind: reminder}
+  - {title: "Insurance premium", all_day: true, kind: reminder}
+  - {title: "School fees", all_day: true, kind: reminder}
+  - {title: "Karwa Chauth", all_day: true, kind: reminder}
+files:
+  - {name: "Invoice_{digits:8}.pdf", kind: invoice}
+  - {name: "Bill_{date}.pdf", kind: invoice}
+  - {name: "Electricity_Bill_{date}.pdf", kind: invoice}
+  - {name: "Rent_Agreement_{city}.pdf", kind: contract}
+  - {name: "Offer_Letter_{last}.pdf", kind: contract}
+  - {name: "Appointment_Letter.pdf", kind: contract}
+  - {name: "Salary_Slip_{date}.pdf", kind: payslip}
+  - {name: "Payslip_{date}.pdf", kind: payslip}
+  - {name: "Form16_2025-26.pdf", kind: tax}
+  - {name: "ITR-V_Acknowledgement.pdf", kind: tax}
+  - {name: "Bank_Statement_{date}.pdf", kind: statement}
+  - {name: "Account_Statement_XX{digits:4}.pdf", kind: statement}
+  - {name: "Aadhaar_{first}.pdf", kind: id_document}
+  - {name: "Aadhar card.jpg", kind: id_document}
+  - {name: "PAN_Card.jpg", kind: id_document}
+  - {name: "Voter_ID.jpg", kind: id_document}
+  - {name: "Driving_Licence.pdf", kind: id_document}
+  - {name: "Resume_{first}_{last}.pdf", kind: cv}
+  - {name: "{first}_CV_updated.docx", kind: cv}
+  - {name: "E-Ticket_PNR_{digits:10}.pdf", kind: ticket}
+  - {name: "Boarding_Pass_{code}.pdf", kind: ticket}
+  - {name: "Policy_Document_{digits:8}.pdf", kind: insurance}
+  - {name: "Health_Insurance_Card.pdf", kind: insurance}
+  - {name: "Lab_Report_{date}.pdf", kind: medical}
+  - {name: "Prescription.jpg", kind: medical}
+  - {name: "Fee_Receipt_{date}.pdf", kind: invoice}
+  - {name: "Marksheet_Class12.pdf", kind: education}
+  - {name: "Degree_Certificate.pdf", kind: education}
+  - {name: "Shaadi_card_{first}.pdf", kind: personal}
+  - {name: "Project_Report_final.docx", kind: work}
+  - {name: "IMG-{date}-WA{digits:4}.jpg", kind: image}
+  - {name: "Screenshot_{date}.png", kind: image}
+notes:
+  - "Sabzi: aloo, pyaaz, tamatar, dhaniya, mirchi"
+  - "Doodh 2 packet, bread, anda"
+  - "Wifi pass {code}"
+  - "{first} ko {amount} dene hai"
+  - "{first} se {amount} lene hai"
+  - "Gas booking no {digits:6}"
+  - "Rent {amount} - har mahine 5 tak"
+  - "Plumber ka number lena"
+  - "PNR {digits:10}"
+  - "Maid: 12 chhutti is mahine"
+  - "Dhobi: 8 kapde diye"
+  - "IFSC {code}"
+  - "Gift for {first} - watch?"
+  - "Locker code {digits:4}"
+  - "Packing: charger, kapde, dawai, aadhaar"
+  - "Doctor ne bola 2 baar subah shaam"
+  - "Movies to watch list"
+  - "Kal karna: bank, recharge, courier"
+  - {text: "राशन: आटा, चावल, दाल, तेल, चीनी", script: Deva}
+  - "Tracking {tracking}"
+call_names:
+  mom: [Mummy, Mumma, Maa, Mom, Ammi, Mummy Ji, मम्मी]
+  dad: [Papa, Papa Ji, Pappa, Dad, Pitaji, पापा]
+  partner: [Jaan, "Hubby ❤️", Wifey, Baby, Mrs, Ji]
+  grandma: [Dadi, Nani, Dadi Maa]
+  grandpa: [Dadu, Nanu, Dada Ji, Nana Ji]
+  sister: [Didi, Sis, "{first} Didi", Choti]
+  brother: [Bhaiya, Bhai, "{first} Bhaiya", Chhotu]
+  aunt: ["{first} Bua", "{first} Mausi", "{first} Chachi", "{first} Aunty"]
+  uncle: ["{first} Chacha", "{first} Mama", "{first} Uncle", "Tauji"]
+  son: ["{first}"]
+  daughter: ["{first}", Gudiya]

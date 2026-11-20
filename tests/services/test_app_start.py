@@ -1362,7 +1362,7 @@ def test_abort_cleans_up_a_nameless_spawn_whose_session_is_gone(env, monkeypatch
     assert killed == []
 
 
-# -- pre-spawn hooks (identity profile & co.) --------------------------------------
+# -- pre-start steps (identity profile & co.) --------------------------------------
 
 DESC = "apply identity profile 'mara' (ssaid, locale)"
 
@@ -1372,20 +1372,20 @@ _REAL_PM_READY = app_start._package_manager_ready
 
 
 @pytest.fixture(autouse=True)
-def _no_pre_spawn_hooks(monkeypatch):
+def _no_pre_start_steps(monkeypatch):
     """Each test starts with an empty registry (a booted TUI may register);
     system_server never changes unless a test says so (no adb).
     """
-    saved = list(app_start._PRE_SPAWN_HOOKS)
-    app_start._PRE_SPAWN_HOOKS.clear()
+    saved = list(app_start._PRE_START_STEPS)
+    app_start._PRE_START_STEPS.clear()
     monkeypatch.setattr(app_start, "_system_server_pid", lambda serial=None: 100)
     monkeypatch.setattr(app_start, "_package_manager_ready", lambda serial=None: True)
     yield
-    app_start._PRE_SPAWN_HOOKS[:] = saved
+    app_start._PRE_START_STEPS[:] = saved
 
 
 def _registered() -> list:
-    return list(app_start._PRE_SPAWN_HOOKS)
+    return list(app_start._PRE_START_STEPS)
 
 
 def _hook(log: list, *, disruptive=False, fail=None, desc=DESC):
@@ -1398,7 +1398,7 @@ def _hook(log: list, *, disruptive=False, fail=None, desc=DESC):
 
     def hook(package):
         log.append(("hook", package))
-        return app_start.PreSpawnPlan(desc, disruptive, apply)
+        return app_start.PreStartPlan(desc, disruptive, apply)
 
     return hook
 
@@ -1443,7 +1443,7 @@ def test_registry_dedupes_keeps_order_and_unregisters():
 
     def second(pkg):
         calls.append("second")
-        return app_start.PreSpawnPlan("x", False, lambda: None)
+        return app_start.PreStartPlan("x", False, lambda: None)
 
     class Owner:
         def hook(self, pkg):
@@ -1451,16 +1451,16 @@ def test_registry_dedupes_keeps_order_and_unregisters():
 
     owner = Owner()
     for hook in (first, second, first, owner.hook, owner.hook):
-        app_start.register_pre_spawn_hook(hook)
+        app_start.register_pre_start_step(hook)
     assert _registered() == [first, second, owner.hook]
 
-    plans = app_start._collect_pre_spawn(PKG, "Start")
+    plans = app_start._collect_pre_start(PKG, "Start")
 
     assert calls == ["first", "second", "bound"]  # registration order
     assert [p.description for p in plans] == ["x"]  # None = nothing to do
-    app_start.unregister_pre_spawn_hook(owner.hook)
-    app_start.unregister_pre_spawn_hook(first)
-    app_start.unregister_pre_spawn_hook(first)  # not registered: no-op
+    app_start.unregister_pre_start_step(owner.hook)
+    app_start.unregister_pre_start_step(first)
+    app_start.unregister_pre_start_step(first)  # not registered: no-op
     assert _registered() == [second]
 
 
@@ -1480,7 +1480,7 @@ def test_without_hooks_space_is_unchanged(env, monkeypatch):
 def test_a_non_disruptive_plan_is_applied_without_a_dialog(env, bus, monkeypatch):
     log: list = []
     _ladder(env, monkeypatch, log)
-    app_start.register_pre_spawn_hook(_hook(log))
+    app_start.register_pre_start_step(_hook(log))
 
     assert _in_worker(app_start.start_app) == (True, "ok")
     assert log == [("hook", PKG), "apply", ("spawn", set())]
@@ -1504,7 +1504,7 @@ def test_a_disruptive_plan_asks_then_applies_and_recovers(
         "announce_pid",
         lambda pid, pkg=None: log.append(("pid", pid)) or announce(pid, pkg),
     )
-    app_start.register_pre_spawn_hook(_hook(log, disruptive=True))
+    app_start.register_pre_start_step(_hook(log, disruptive=True))
 
     assert _in_worker(app_start.start_app) == (True, "ok")
 
@@ -1541,7 +1541,7 @@ def test_a_disruptive_plan_that_left_the_framework_up_needs_no_recovery(
         "recover_after_framework_restart",
         lambda pid, timeout=90.0: pytest.fail("waited for a restart"),
     )
-    app_start.register_pre_spawn_hook(_hook(log, disruptive=True))
+    app_start.register_pre_start_step(_hook(log, disruptive=True))
 
     assert _in_worker(app_start.start_app) == (True, "ok")
     assert log == [("hook", PKG), "apply", ("spawn", set())]
@@ -1552,7 +1552,7 @@ def test_a_declined_plan_never_spawns(env, bus, monkeypatch, answer):
     log: list = []
     _ladder(env, monkeypatch, log)
     bus.answer = answer  # Cancel; Esc / timeout
-    app_start.register_pre_spawn_hook(_hook(log, disruptive=True))
+    app_start.register_pre_start_step(_hook(log, disruptive=True))
 
     ok, msg = _in_worker(app_start.start_app)
 
@@ -1570,7 +1570,7 @@ def test_restart_asks_before_the_teardown_and_cancel_keeps_the_app(
         app_start, "respawn_teardown", lambda pkg: log.append("teardown")
     )
     monkeypatch.setattr(app_start, "_drop_dead_frida_state", lambda: None)
-    app_start.register_pre_spawn_hook(_hook(log, disruptive=True))
+    app_start.register_pre_start_step(_hook(log, disruptive=True))
     bus.answer = False
 
     ok, msg = _in_worker(app_start.restart_app)
@@ -1591,7 +1591,7 @@ def test_a_failing_apply_aborts_the_spawn(env, bus, framework, monkeypatch):
     _ladder(env, monkeypatch, log)
     forgot: list = []
     monkeypatch.setattr(env.bypass, "forget_process", lambda: forgot.append(1))
-    app_start.register_pre_spawn_hook(_hook(log, fail=RuntimeError("boom")))
+    app_start.register_pre_start_step(_hook(log, fail=RuntimeError("boom")))
     framework.pids = [100]  # this one left the framework alone
 
     ok, msg = _in_worker(app_start.start_app)
@@ -1601,10 +1601,10 @@ def test_a_failing_apply_aborts_the_spawn(env, bus, framework, monkeypatch):
     assert forgot == []  # not disruptive: nothing to recover
 
     # A disruptive one that fails mid-way still recovers the Frida state.
-    app_start._PRE_SPAWN_HOOKS.clear()
+    app_start._PRE_START_STEPS.clear()
     log.clear()
     framework.pids = [100, 200]
-    app_start.register_pre_spawn_hook(
+    app_start.register_pre_start_step(
         _hook(log, disruptive=True, fail=RuntimeError("window aborted"))
     )
     ok, msg = _in_worker(app_start.start_app)
@@ -1621,7 +1621,7 @@ def test_a_raising_hook_aborts_the_spawn(env, monkeypatch):
     def broken(pkg):
         raise ValueError("bad profile")
 
-    app_start.register_pre_spawn_hook(broken)
+    app_start.register_pre_start_step(broken)
 
     ok, msg = app_start.start_app()
 
@@ -1638,7 +1638,7 @@ def test_headless_needs_the_callers_consent(env, bus, framework, monkeypatch):
     log: list = []
     _ladder(env, monkeypatch, log)
     bus.active = False
-    app_start.register_pre_spawn_hook(_hook(log, disruptive=True))
+    app_start.register_pre_start_step(_hook(log, disruptive=True))
 
     ok, msg = app_start.start_app()
 
@@ -1656,7 +1656,7 @@ def test_headless_needs_the_callers_consent(env, bus, framework, monkeypatch):
 def test_the_ui_thread_never_shows_the_dialog(env, bus, monkeypatch):
     log: list = []
     _ladder(env, monkeypatch, log)
-    app_start.register_pre_spawn_hook(_hook(log, disruptive=True))
+    app_start.register_pre_start_step(_hook(log, disruptive=True))
     assert threading.current_thread() is threading.main_thread()
 
     ok, msg = app_start.start_app(consent=True)  # consent is headless only
@@ -1668,7 +1668,7 @@ def test_the_ui_thread_never_shows_the_dialog(env, bus, monkeypatch):
 
 
 def test_join_attach_and_resume_never_run_hooks(env, monkeypatch):
-    app_start.register_pre_spawn_hook(lambda pkg: pytest.fail("hook ran"))
+    app_start.register_pre_start_step(lambda pkg: pytest.fail("hook ran"))
     env.jm = FakeJM(session_pid=77, package_name=PKG)
     app_start.open_session(StartDecision(StartAction.JOIN, PKG, pid=77))
 
@@ -1696,7 +1696,7 @@ def test_a_tools_spawn_runs_hooks_and_respawn_asks_before_the_teardown(
     monkeypatch.setattr(
         app_start, "respawn_teardown", lambda pkg: log.append("teardown")
     )
-    app_start.register_pre_spawn_hook(_hook(log))
+    app_start.register_pre_start_step(_hook(log))
     spawn = StartDecision(StartAction.SPAWN, PKG, owns_spawn=True, tool="friTap")
 
     opened = app_start.open_session(spawn)
@@ -1706,9 +1706,9 @@ def test_a_tools_spawn_runs_hooks_and_respawn_asks_before_the_teardown(
     app_start.end_setup("friTap")
 
     # RESPAWN: declined before the teardown, so the app keeps running.
-    app_start._PRE_SPAWN_HOOKS.clear()
+    app_start._PRE_START_STEPS.clear()
     log.clear()
-    app_start.register_pre_spawn_hook(_hook(log, disruptive=True))
+    app_start.register_pre_start_step(_hook(log, disruptive=True))
     bus.answer = False
     respawn = StartDecision(StartAction.RESPAWN, PKG, owns_spawn=True, tool="friTap")
     with pytest.raises(AppStartError, match="not applied"):
@@ -1744,20 +1744,20 @@ def test_prepare_launch_runs_hooks_before_an_outside_spawn(env, monkeypatch):
     """
     env.live = (Liveness.NOT_RUNNING, None)
     log: list = []
-    app_start.register_pre_spawn_hook(_hook(log))
+    app_start.register_pre_start_step(_hook(log))
 
     assert _in_worker(lambda: app_start.prepare_launch(PKG, "Objection")) is True
     assert log == [("hook", PKG), "apply"]
 
-    app_start._PRE_SPAWN_HOOKS.clear()
-    app_start.register_pre_spawn_hook(_hook(log, fail=RuntimeError("boom")))
+    app_start._PRE_START_STEPS.clear()
+    app_start.register_pre_start_step(_hook(log, fail=RuntimeError("boom")))
     with pytest.raises(AppStartError):
         _in_worker(lambda: app_start.prepare_launch(PKG, "Objection"))
 
     # Attaching to a running app applies nothing.
-    app_start._PRE_SPAWN_HOOKS.clear()
+    app_start._PRE_START_STEPS.clear()
     running: list = []
-    app_start.register_pre_spawn_hook(_hook(running))
+    app_start.register_pre_start_step(_hook(running))
     env.live = (Liveness.RUNNING, 77)
     assert _in_worker(lambda: app_start.prepare_launch(PKG, "Objection")) is False
     assert "apply" not in running
@@ -1773,7 +1773,7 @@ def test_ai_launch_app_runs_hooks_on_a_first_launch_only(env, bus, monkeypatch):
         "launch_app",
         staticmethod(lambda pkg, activity=None: log.append("launch") or (True, "ok")),
     )
-    app_start.register_pre_spawn_hook(_hook(log))
+    app_start.register_pre_start_step(_hook(log))
     env.live = (Liveness.NOT_RUNNING, None)
 
     assert _in_worker(lambda: app_lifecycle.launch_app(PKG))["launched"] is True
@@ -1791,9 +1791,9 @@ def test_ai_launch_app_runs_hooks_on_a_first_launch_only(env, bus, monkeypatch):
     assert "adb error" in result["message"]
     assert log == [("hook", PKG)]
 
-    app_start._PRE_SPAWN_HOOKS.clear()
+    app_start._PRE_START_STEPS.clear()
     log.clear()
-    app_start.register_pre_spawn_hook(_hook(log, disruptive=True))
+    app_start.register_pre_start_step(_hook(log, disruptive=True))
     env.live = (Liveness.NOT_RUNNING, None)
     bus.answer = False
     result = _in_worker(lambda: app_lifecycle.launch_app(PKG))
@@ -1815,7 +1815,7 @@ def test_ai_launch_app_with_a_step_is_refused_while_a_start_runs(env, monkeypatc
         "launch_app",
         staticmethod(lambda pkg, activity=None: pytest.fail("launched")),
     )
-    app_start.register_pre_spawn_hook(_hook([]))
+    app_start.register_pre_start_step(_hook([]))
     held, release = threading.Event(), threading.Event()
 
     def _hold():
@@ -1839,7 +1839,7 @@ def test_identity_registers_with_the_real_registry():
     from sandroid.services import identity
 
     svc = identity.IdentityService()
-    assert identity._pre_spawn_plan_cls() is app_start.PreSpawnPlan
+    assert identity._pre_spawn_plan_cls() is app_start.PreStartPlan
     assert svc.install_pre_spawn_hook() is True
     assert svc.install_pre_spawn_hook() is True
     assert _registered() == [svc.pre_spawn]
@@ -2137,7 +2137,7 @@ def test_recovery_follows_the_pid_not_the_disruptive_claim(env, framework, monke
     _ladder(env, monkeypatch, log)
     forgot: list = []
     monkeypatch.setattr(env.bypass, "forget_process", lambda: forgot.append(1))
-    app_start.register_pre_spawn_hook(_hook(log))  # disruptive=False
+    app_start.register_pre_start_step(_hook(log))  # disruptive=False
     framework.pids = [100, 200]
 
     assert app_start.start_app() == (True, "ok")
@@ -2168,7 +2168,7 @@ def test_an_unreadable_pid_before_never_waits(
         lambda pid, timeout=90.0: calls.append(pid),
     )
     monkeypatch.setattr(app_start, "_drop_dead_frida_state", lambda: drops.append(1))
-    app_start.register_pre_spawn_hook(_hook(log, disruptive=disruptive))
+    app_start.register_pre_start_step(_hook(log, disruptive=disruptive))
 
     assert app_start.start_app(consent=True)[0] or not disruptive
     assert calls == ([None] if recovered else [])
@@ -2187,11 +2187,11 @@ def test_start_keeps_the_bypasses_armed_before_the_pre_start_step(
     framework.pids = [100]
 
     def hook(pkg):
-        return app_start.PreSpawnPlan(
+        return app_start.PreStartPlan(
             DESC, False, lambda: env.spotlight.set_app("org.example.other")
         )
 
-    app_start.register_pre_spawn_hook(hook)
+    app_start.register_pre_start_step(hook)
 
     assert app_start.start_app() == (True, "ok")
     assert env.bypass.armed_categories() == []  # the selection change disarmed
@@ -2204,7 +2204,7 @@ def test_prepare_launch_without_plans_needs_no_lock_or_adb(env, monkeypatch):
         "probe_liveness",
         lambda *a, **k: pytest.fail("probed the app"),
     )
-    app_start.register_pre_spawn_hook(lambda pkg: None)  # identity off
+    app_start.register_pre_start_step(lambda pkg: None)  # identity off
     held, release = threading.Event(), threading.Event()
 
     def _hold():
@@ -2234,7 +2234,7 @@ def test_the_dialog_lists_the_spotlight_apps_tools_for_another_launch(
         SimpleNamespace(name="dexray", app_name=other, display_name="Dexray"),
     ]
     log: list = []
-    app_start.register_pre_spawn_hook(_hook(log, disruptive=True))
+    app_start.register_pre_start_step(_hook(log, disruptive=True))
 
     assert _in_worker(lambda: app_start.prepare_launch(other, other)) is True
 
@@ -2251,17 +2251,17 @@ def test_the_progress_text_is_set_while_a_step_applies(
     _ladder(env, monkeypatch, log)
     seen: list = []
     events: list = []
-    app_start.add_pre_spawn_status_listener(lambda: events.append(1))
+    app_start.add_pre_start_status_listener(lambda: events.append(1))
     framework.pids = [100]
 
     def hook(pkg):
-        return app_start.PreSpawnPlan(
+        return app_start.PreStartPlan(
             "apply identity profile 'mara-de' (ssaid)",
             True,
-            lambda: seen.append(app_start.pre_spawn_status(PKG)),
+            lambda: seen.append(app_start.pre_start_status(PKG)),
         )
 
-    app_start.register_pre_spawn_hook(hook)
+    app_start.register_pre_start_step(hook)
     try:
         assert app_start.start_app(consent=True) == (True, "ok")
     finally:
@@ -2274,7 +2274,7 @@ def test_the_progress_text_is_set_while_a_step_applies(
     assert app_start._progress_text([hook(PKG)])[1] == (
         "Applying identity profile 'mara-de', framework restarts"
     )
-    assert app_start.pre_spawn_status() is None
+    assert app_start.pre_start_status() is None
     assert events == [1, 1]  # began, ended
 
 
@@ -2307,9 +2307,9 @@ def test_restart_keeps_the_bypasses_armed_before_the_dialog(
 
     def hook(pkg):
         env.spotlight.set_app("org.example.other")  # AI select_app meanwhile
-        return app_start.PreSpawnPlan(DESC, False, lambda: None)
+        return app_start.PreStartPlan(DESC, False, lambda: None)
 
-    app_start.register_pre_spawn_hook(hook)
+    app_start.register_pre_start_step(hook)
 
     assert app_start.restart_app() == (True, "ok")
     assert log == [("spawn", {"ssl"})]
@@ -2340,8 +2340,8 @@ def test_prepare_launch_restarts_a_running_app_only_with_consent(
         app_start, "respawn_teardown", lambda pkg: order.append(("teardown", pkg))
     )
     framework.pids = [100]
-    app_start.register_pre_spawn_hook(
-        lambda pkg: app_start.PreSpawnPlan(DESC, False, lambda: order.append("plan"))
+    app_start.register_pre_start_step(
+        lambda pkg: app_start.PreStartPlan(DESC, False, lambda: order.append("plan"))
     )
     env.live = (Liveness.RUNNING, 77)
 
@@ -2412,11 +2412,11 @@ def test_a_recovery_timeout_still_stops_the_launched_apps_tools(env, monkeypatch
         raise AppStartError("did not come back")
 
     monkeypatch.setattr(app_start, "recover_after_framework_restart", timeout)
-    app_start.register_pre_spawn_hook(_hook([], disruptive=True))
+    app_start.register_pre_start_step(_hook([], disruptive=True))
 
-    plans = app_start._collect_pre_spawn(other, other)
+    plans = app_start._collect_pre_start(other, other)
     with pytest.raises(AppStartError, match="did not come back"):
-        app_start._apply_pre_spawn(plans, other)
+        app_start._apply_pre_start(plans, other)
     assert env.stopped == ["dexray"]
 
 
@@ -2434,3 +2434,100 @@ def test_ai_start_tools_leave_timeouts_to_the_executor(env, monkeypatch):
     monkeypatch.setattr(app_start, "prepare_launch", boom)
     with pytest.raises(RuntimeError, match="adb gone"):
         app_lifecycle.launch_app(PKG)
+
+
+# -- machine-readable refusal reasons (the AI tools act on them) --------------------
+
+
+def test_start_refusals_carry_a_reason(env, monkeypatch, bus):
+    """needs_consent without a dialog, declined on Cancel, busy on the lock."""
+    log: list = []
+    _ladder(env, monkeypatch, log)
+    app_start.register_pre_start_step(
+        lambda pkg: app_start.PreStartPlan(DESC, True, lambda: None)
+    )
+    bus.active = False
+
+    result = app_start.start_app()  # no UI handler, no consent
+    ok, msg = result
+    assert not ok
+    assert result.reason == "needs_consent"
+    assert log == []
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def _hold():
+        with app_start.lifecycle_lock():
+            held.set()
+            release.wait(5)
+
+    t = threading.Thread(target=_hold)
+    t.start()
+    held.wait(5)
+    try:
+        assert app_start.start_app().reason == "busy"
+        assert app_start.restart_app().reason == "busy"
+        with pytest.raises(AppStartError) as exc:
+            with app_start.lifecycle_lock():
+                pass
+        assert exc.value.reason == "busy"
+    finally:
+        release.set()
+        t.join(5)
+
+
+def test_a_declined_pre_start_step_says_declined(bus):
+    bus.answer = False
+    plans = [app_start.PreStartPlan(DESC, True, lambda: None)]
+    out: list = []
+
+    def _run():
+        try:
+            app_start._confirm_pre_start(plans, PKG, "Start", False)
+        except AppStartError as exc:
+            out.append(exc)
+
+    t = threading.Thread(target=_run)  # the dialog is refused on the UI thread
+    t.start()
+    t.join(5)
+    assert len(out) == 1
+    assert out[0].reason == "declined"
+
+
+def test_the_old_pre_spawn_names_still_work():
+    for old, new in (
+        ("PreSpawnPlan", "PreStartPlan"),
+        ("PreSpawnHook", "PreStartStep"),
+        ("register_pre_spawn_hook", "register_pre_start_step"),
+        ("unregister_pre_spawn_hook", "unregister_pre_start_step"),
+        ("pre_spawn_running", "pre_start_running"),
+        ("pre_spawn_status", "pre_start_status"),
+        ("add_pre_spawn_status_listener", "add_pre_start_status_listener"),
+        ("remove_pre_spawn_status_listener", "remove_pre_start_status_listener"),
+    ):
+        assert getattr(app_start, old) is getattr(app_start, new), old
+    assert app_start.StartResult(True, "ok") == (True, "ok")
+    assert app_start.StartResult.of((False, "x")).reason is None
+
+
+def test_start_and_restart_always_return_a_start_result(env, monkeypatch, bus):
+    log: list = []
+    _ladder(env, monkeypatch, log)
+    monkeypatch.setattr(app_start, "respawn_teardown", lambda pkg: None)
+
+    ok = app_start.start_app()
+    assert isinstance(ok, app_start.StartResult)
+    assert ok == (True, "ok")
+    assert ok.reason is None
+
+    bus.answer = False  # Cancel in the pre-start dialog
+    app_start.register_pre_start_step(
+        lambda pkg: app_start.PreStartPlan(DESC, True, lambda: None)
+    )
+    out: list = []
+    t = threading.Thread(target=lambda: out.append(app_start.restart_app()))
+    t.start()
+    t.join(5)
+    assert out[0].reason == "declined"
+    assert not out[0][0]

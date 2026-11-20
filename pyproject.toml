@@ -92,6 +92,9 @@ dependencies = [
     # part of the default TUI, so this is a core dependency.
     "androguard>=4.1.0,<5",
     "psutil>=5.9.0",
+    # sandroid.core.privacy_markers matches ~70k identity-marker needles in
+    # one Aho-Corasick pass per haystack (Apache-2.0, releases the GIL).
+    "ahocorasick-rs>=1.0.3,<2",
 ]
 
 [project.optional-dependencies]
@@ -107,6 +110,9 @@ dev = [
     "pytest-mock>=3.10.0",
     "pytest-asyncio>=0.21.0",
     "pytest-xdist>=3.6",
+    # sandroid.world.generator.phone_check (a lazy diagnostic) and the world
+    # tests check generated numbers with libphonenumber (Apache-2.0).
+    "phonenumberslite>=8.13",
     "ruff==0.12.7",
     "black>=23.0.0",
     "isort>=5.12.0",
@@ -155,6 +161,14 @@ sandroid = [
     "assets/*.png",
     "assets/*.jpg",
     "assets/uihelper/*.jar",
+    "assets/world/*.md",
+    "assets/world/countries/*.yaml",
+    "assets/world/countries/*.md",
+    "assets/world/languages/*.yaml",
+    "assets/world/languages/*.md",
+    "assets/world/photos/*.yaml",
+    "assets/world/photos/*.md",
+    "world/*.md",
     "tui/*.tcss",
     "tui/themes/*.tcss",
 ]

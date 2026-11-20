@@ -38,8 +38,9 @@ counts ("38 of 412").
 Identity profile values (:mod:`sandroid.services.privacy_scan`): a flow that
 carries a seeded value gets a faint warn-tinted row and, from 100 columns, an
 Identity column naming the values in words (``Ad ID, GPS``; third party in
-the warn colour, first party in the accent colour); ``!`` shows only those
-flows, ``/`` matches the value names too, and the Inspector gains an Identity
+the warn colour, first party in the accent colour; shown whenever identity
+mode is on, the scan has markers or hits are loaded); ``!`` only filters the
+rows to those flows, ``/`` matches the value names too, and the Inspector gains an Identity
 tab (where, how encoded, to whom, how sure, the matched text highlighted).
 Hits the scanner finds later re-mark rows already drawn (at most once a
 second).
@@ -68,6 +69,7 @@ points to the run's pcap. ``L`` (MainScreen) returns to LIVE.
 from __future__ import annotations
 
 import base64
+import bisect
 import contextlib
 import functools
 import json
@@ -917,6 +919,16 @@ def privacy_has_hits(service: Any) -> bool:
     return bool(service.hits())
 
 
+def identity_mode_on() -> bool:
+    """The ``[identity]`` mode is ``profile`` (in-memory config, no I/O)."""
+    try:
+        from sandroid.config import get_config
+
+        return get_config().identity.mode == "profile"
+    except Exception:
+        return False
+
+
 def privacy_annotations() -> Any | None:
     """The registered privacy row-annotation provider (cached tag lookups
     shared by the row tint, the Identity column, ``!`` and ``/``), or None.
@@ -1273,6 +1285,7 @@ class NetworkPanel(Widget):
 
     def _tick(self) -> None:
         if is_shown(self):
+            self._sync_privacy_column()
             self.poll_now()
 
     def flow_hint(self) -> None:
@@ -1435,6 +1448,25 @@ class NetworkPanel(Widget):
         return False
 
     def _add_live(self, rows: list[FlowRow]) -> None:
+        """Add live rows in time order (``FlowRow.ts``, the request start).
+
+        A flow reaches the lens when it finishes, a TLS failure at once, so a
+        long request can arrive after rows that started later: such a row is
+        put in its place and the table is redrawn (the cursor stays on its
+        flow); rows that are newest go to the bottom as before.
+        """
+        rows = sorted(rows, key=lambda r: r.ts)
+        if self._live and rows[0].ts < self._live[-1].ts:
+            for row in rows:
+                bisect.insort_right(self._live, row, key=lambda r: r.ts)
+            if len(self._live) > self.MAX_ROWS:
+                self._live = self._live[-self.MAX_ROWS :]
+            if not self.in_review:
+                passing = sum(1 for row in rows if self._passes(row))
+                self._rebuild()
+                self._follow.added(passing)
+            self._do_refresh_status()
+            return
         self._live.extend(rows)
         if len(self._live) > self.MAX_ROWS + 200:
             passing = sum(1 for row in rows if self._passes(row))
@@ -2384,24 +2416,42 @@ class NetworkPanel(Widget):
     #
     # Flows carrying values of the active identity profile get a faint warn
     # tint (FlowTable, through the shared row annotations), an Identity
-    # column (from PRIVACY_COLUMN_MIN_WIDTH, only while a profile is set or
-    # hits are loaded) and an Identity Inspector tab. ``!`` shows only those
-    # flows. Hits found later (the scan worker) redraw rows already drawn
-    # through an AnnotationFeed (UI redraw at most once a second).
+    # column (from PRIVACY_COLUMN_MIN_WIDTH, while identity mode is on, the
+    # scan has markers or hits are loaded; the poll tick adds it when that
+    # changes later) and an Identity Inspector tab. ``!`` only filters rows.
+    # Hits found later (the scan worker) redraw rows already drawn through
+    # an AnnotationFeed (UI redraw at most once a second).
 
     def on_unmount(self) -> None:
         self._privacy_feed.detach()
         self._hl.detach()
 
     def _privacy_wanted(self) -> bool:
-        """A profile is set or hits are loaded (the Identity column has a use)."""
+        """Identity mode is on, the scan has markers or hits are loaded (the
+        Identity column has a use). Independent of the ``!`` row filter.
+        """
         service = privacy_service()
         if service is None:
             return False
         try:
-            return bool(service.is_active or privacy_has_hits(service))
+            if service.is_active or privacy_has_hits(service):
+                return True
         except Exception:
             return False
+        return identity_mode_on()
+
+    def _sync_privacy_column(self) -> None:
+        """Add or drop the Identity column when its use changed (markers
+        found after the first draw, identity mode switched, a session with
+        stored hits loaded); rows already drawn keep their cursor.
+        """
+        keys = [k for k, _, _ in self._net_layout]
+        if not keys:
+            return
+        wants = bool(self._privacy_columns(self.size.width or 120))
+        if wants != ("ident" in keys):
+            self._rebuild()
+            self._do_refresh_status()
 
     def _flow_tags(self, row: FlowRow) -> list:
         """The row's profile tags (the provider caches them per revision)."""

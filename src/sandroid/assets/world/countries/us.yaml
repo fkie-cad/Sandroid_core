@@ -1,0 +1,1251 @@
+# Sandroid world pack: country 'us' (United States), schema v1. Generated 2026-11-20 by agent countries-2.
+# Sources and licences: us.SOURCES.md (source ids S1.. are referenced in phone entries).
+pack: country
+schema: 1.1
+country: us
+name: United States
+languages: {en: 0.87, es: 0.12, zh: 0.01}
+timezones: [
+  America/New_York, America/Chicago, America/Denver, America/Phoenix, America/Los_Angeles,
+  America/Anchorage, Pacific/Honolulu
+]
+date_format: M/d/yyyy
+time_format: "h:mm a"
+currency: {code: USD, symbol: $, format: $49.99}
+phone:
+  country_code: '1'
+  trunk_prefix: '1'
+  national_format_examples: [(212) 555-0142, "212-555-0142", (415) 555-0123]
+  validation_note: 'NANP numbers are NPA-NXX-XXXX; mobile and fixed share the same NXX space and libphonenumber returns FIXED_LINE_OR_MOBILE for both. 555-0100..0199 is valid in libphonenumber in every NPA (it does not know the fiction reservation). ''realistic'' prefixes are NPA-NXX codes that NANPA lists as in service for Verizon (Cellco), AT&T (New Cingular) or T-Mobile (incl. Omnipoint/Sprint Spectrum) in the 2026-11-19 utilized report; porting means real subscribers may be on any network. ''unallocated'' prefixes are NXX codes NANPA lists as AVAILABLE in overlay NPAs; they become assigned over time, so refresh from https://nanpa.com/reports/co-code-reports/cocodes_assign. Avoided: N11, 555 (except 01xx), 950, 958, 959, 976; NPA 621 (Houston overlay, too new for libphonenumber).'
+  mobile:
+    realistic:
+      - {prefix: '212814', length: 10, operator: Verizon, city: New York}
+      - {prefix: '646942', length: 10, operator: Verizon, city: New York}
+      - {prefix: '646895', length: 10, operator: Verizon, city: New York}
+      - {prefix: '646705', length: 10, operator: "AT&T", city: New York}
+      - {prefix: '646549', length: 10, operator: "AT&T", city: New York}
+      - {prefix: '646934', length: 10, operator: T-Mobile, city: New York}
+      - {prefix: '646302', length: 10, operator: T-Mobile, city: New York}
+      - {prefix: '917838', length: 10, operator: Verizon, city: New York}
+      - {prefix: '917444', length: 10, operator: Verizon, city: New York}
+      - {prefix: '917834', length: 10, operator: "AT&T", city: New York}
+      - {prefix: '917374', length: 10, operator: "AT&T", city: New York}
+      - {prefix: '917674', length: 10, operator: T-Mobile, city: New York}
+      - {prefix: '917362', length: 10, operator: T-Mobile, city: New York}
+      - {prefix: '213605', length: 10, operator: Verizon, city: Los Angeles}
+      - {prefix: '213507', length: 10, operator: Verizon, city: Los Angeles}
+      - {prefix: '213937', length: 10, operator: "AT&T", city: Los Angeles}
+      - {prefix: '213458', length: 10, operator: "AT&T", city: Los Angeles}
+      - {prefix: '213414', length: 10, operator: T-Mobile, city: Los Angeles}
+      - {prefix: '213791', length: 10, operator: T-Mobile, city: Los Angeles}
+      - {prefix: '323896', length: 10, operator: Verizon, city: Los Angeles}
+      - {prefix: '323810', length: 10, operator: Verizon, city: Los Angeles}
+      - {prefix: '323610', length: 10, operator: "AT&T", city: Los Angeles}
+      - {prefix: '323365', length: 10, operator: "AT&T", city: Los Angeles}
+      - {prefix: '323747', length: 10, operator: T-Mobile, city: Los Angeles}
+      - {prefix: '323381', length: 10, operator: T-Mobile, city: Los Angeles}
+      - {prefix: '310405', length: 10, operator: Verizon, city: Los Angeles}
+      - {prefix: '310905', length: 10, operator: Verizon, city: Los Angeles}
+      - {prefix: '310795', length: 10, operator: "AT&T", city: Los Angeles}
+      - {prefix: '310880', length: 10, operator: "AT&T", city: Los Angeles}
+      - {prefix: '310621', length: 10, operator: T-Mobile, city: Los Angeles}
+      - {prefix: '310590', length: 10, operator: T-Mobile, city: Los Angeles}
+      - {prefix: '312520', length: 10, operator: Verizon, city: Chicago}
+      - {prefix: '312209', length: 10, operator: Verizon, city: Chicago}
+      - {prefix: '312860', length: 10, operator: "AT&T", city: Chicago}
+      - {prefix: '312953', length: 10, operator: "AT&T", city: Chicago}
+      - {prefix: '312617', length: 10, operator: T-Mobile, city: Chicago}
+      - {prefix: '312776', length: 10, operator: T-Mobile, city: Chicago}
+      - {prefix: '773497', length: 10, operator: Verizon, city: Chicago}
+      - {prefix: '773636', length: 10, operator: Verizon, city: Chicago}
+      - {prefix: '773750', length: 10, operator: "AT&T", city: Chicago}
+      - {prefix: '773230', length: 10, operator: "AT&T", city: Chicago}
+      - {prefix: '773738', length: 10, operator: T-Mobile, city: Chicago}
+      - {prefix: '773678', length: 10, operator: T-Mobile, city: Chicago}
+      - {prefix: '713887', length: 10, operator: Verizon, city: Houston}
+      - {prefix: '713725', length: 10, operator: Verizon, city: Houston}
+      - {prefix: '713962', length: 10, operator: "AT&T", city: Houston}
+      - {prefix: '713540', length: 10, operator: "AT&T", city: Houston}
+      - {prefix: '832683', length: 10, operator: Verizon, city: Houston}
+      - {prefix: '832707', length: 10, operator: Verizon, city: Houston}
+      - {prefix: '832671', length: 10, operator: "AT&T", city: Houston}
+      - {prefix: '832494', length: 10, operator: "AT&T", city: Houston}
+      - {prefix: '281840', length: 10, operator: Verizon, city: Houston}
+      - {prefix: '281768', length: 10, operator: Verizon, city: Houston}
+      - {prefix: '281216', length: 10, operator: "AT&T", city: Houston}
+      - {prefix: '281851', length: 10, operator: "AT&T", city: Houston}
+      - {prefix: '602739', length: 10, operator: Verizon, city: Phoenix}
+      - {prefix: '602885', length: 10, operator: Verizon, city: Phoenix}
+      - {prefix: '602538', length: 10, operator: "AT&T", city: Phoenix}
+      - {prefix: '602210', length: 10, operator: "AT&T", city: Phoenix}
+      - {prefix: '602740', length: 10, operator: T-Mobile, city: Phoenix}
+      - {prefix: '602579', length: 10, operator: T-Mobile, city: Phoenix}
+      - {prefix: '480670', length: 10, operator: Verizon, city: Phoenix}
+      - {prefix: '480973', length: 10, operator: Verizon, city: Phoenix}
+      - {prefix: '480255', length: 10, operator: "AT&T", city: Phoenix}
+      - {prefix: '480331', length: 10, operator: "AT&T", city: Phoenix}
+      - {prefix: '480628', length: 10, operator: T-Mobile, city: Phoenix}
+      - {prefix: '480277', length: 10, operator: T-Mobile, city: Phoenix}
+      - {prefix: '215514', length: 10, operator: Verizon, city: Philadelphia}
+      - {prefix: '215983', length: 10, operator: Verizon, city: Philadelphia}
+      - {prefix: '215601', length: 10, operator: "AT&T", city: Philadelphia}
+      - {prefix: '215776', length: 10, operator: "AT&T", city: Philadelphia}
+      - {prefix: '215500', length: 10, operator: T-Mobile, city: Philadelphia}
+      - {prefix: '215307', length: 10, operator: T-Mobile, city: Philadelphia}
+      - {prefix: '267279', length: 10, operator: Verizon, city: Philadelphia}
+      - {prefix: '267796', length: 10, operator: Verizon, city: Philadelphia}
+      - {prefix: '267591', length: 10, operator: "AT&T", city: Philadelphia}
+      - {prefix: '267240', length: 10, operator: "AT&T", city: Philadelphia}
+      - {prefix: '267342', length: 10, operator: T-Mobile, city: Philadelphia}
+      - {prefix: '267721', length: 10, operator: T-Mobile, city: Philadelphia}
+      - {prefix: '210319', length: 10, operator: Verizon, city: San Antonio}
+      - {prefix: '210245', length: 10, operator: Verizon, city: San Antonio}
+      - {prefix: '210620', length: 10, operator: "AT&T", city: San Antonio}
+      - {prefix: '210827', length: 10, operator: "AT&T", city: San Antonio}
+      - {prefix: '210535', length: 10, operator: T-Mobile, city: San Antonio}
+      - {prefix: '210897', length: 10, operator: T-Mobile, city: San Antonio}
+      - {prefix: '619990', length: 10, operator: Verizon, city: San Diego}
+      - {prefix: '619371', length: 10, operator: Verizon, city: San Diego}
+      - {prefix: '619316', length: 10, operator: "AT&T", city: San Diego}
+      - {prefix: '619307', length: 10, operator: "AT&T", city: San Diego}
+      - {prefix: '619248', length: 10, operator: T-Mobile, city: San Diego}
+      - {prefix: '619600', length: 10, operator: T-Mobile, city: San Diego}
+      - {prefix: '858204', length: 10, operator: Verizon, city: San Diego}
+      - {prefix: '858248', length: 10, operator: Verizon, city: San Diego}
+      - {prefix: '858295', length: 10, operator: "AT&T", city: San Diego}
+      - {prefix: '858416', length: 10, operator: "AT&T", city: San Diego}
+      - {prefix: '858205', length: 10, operator: T-Mobile, city: San Diego}
+      - {prefix: '858602', length: 10, operator: T-Mobile, city: San Diego}
+      - {prefix: '214784', length: 10, operator: Verizon, city: Dallas}
+      - {prefix: '214984', length: 10, operator: Verizon, city: Dallas}
+      - {prefix: '214612', length: 10, operator: "AT&T", city: Dallas}
+      - {prefix: '214797', length: 10, operator: "AT&T", city: Dallas}
+      - {prefix: '214690', length: 10, operator: T-Mobile, city: Dallas}
+      - {prefix: '214971', length: 10, operator: T-Mobile, city: Dallas}
+      - {prefix: '469921', length: 10, operator: Verizon, city: Dallas}
+      - {prefix: '469805', length: 10, operator: Verizon, city: Dallas}
+      - {prefix: '469866', length: 10, operator: "AT&T", city: Dallas}
+      - {prefix: '469600', length: 10, operator: "AT&T", city: Dallas}
+      - {prefix: '469463', length: 10, operator: T-Mobile, city: Dallas}
+      - {prefix: '469733', length: 10, operator: T-Mobile, city: Dallas}
+      - {prefix: '972998', length: 10, operator: Verizon, city: Dallas}
+      - {prefix: '972213', length: 10, operator: Verizon, city: Dallas}
+      - {prefix: '972345', length: 10, operator: "AT&T", city: Dallas}
+      - {prefix: '972978', length: 10, operator: "AT&T", city: Dallas}
+      - {prefix: '972821', length: 10, operator: T-Mobile, city: Dallas}
+      - {prefix: '972333', length: 10, operator: T-Mobile, city: Dallas}
+      - {prefix: '415689', length: 10, operator: Verizon, city: San Francisco}
+      - {prefix: '415423', length: 10, operator: Verizon, city: San Francisco}
+      - {prefix: '415697', length: 10, operator: "AT&T", city: San Francisco}
+      - {prefix: '415350', length: 10, operator: "AT&T", city: San Francisco}
+      - {prefix: '415286', length: 10, operator: T-Mobile, city: San Francisco}
+      - {prefix: '415867', length: 10, operator: T-Mobile, city: San Francisco}
+      - {prefix: '206507', length: 10, operator: Verizon, city: Seattle}
+      - {prefix: '206940', length: 10, operator: Verizon, city: Seattle}
+      - {prefix: '206790', length: 10, operator: "AT&T", city: Seattle}
+      - {prefix: '206669', length: 10, operator: "AT&T", city: Seattle}
+      - {prefix: '206530', length: 10, operator: T-Mobile, city: Seattle}
+      - {prefix: '206453', length: 10, operator: T-Mobile, city: Seattle}
+      - {prefix: '617861', length: 10, operator: Verizon, city: Boston}
+      - {prefix: '617699', length: 10, operator: Verizon, city: Boston}
+      - {prefix: '617849', length: 10, operator: "AT&T", city: Boston}
+      - {prefix: '617543', length: 10, operator: "AT&T", city: Boston}
+      - {prefix: '617412', length: 10, operator: T-Mobile, city: Boston}
+      - {prefix: '617671', length: 10, operator: T-Mobile, city: Boston}
+      - {prefix: '857208', length: 10, operator: Verizon, city: Boston}
+      - {prefix: '857350', length: 10, operator: Verizon, city: Boston}
+      - {prefix: '857358', length: 10, operator: "AT&T", city: Boston}
+      - {prefix: '857205', length: 10, operator: "AT&T", city: Boston}
+      - {prefix: '857222', length: 10, operator: T-Mobile, city: Boston}
+      - {prefix: '857398', length: 10, operator: T-Mobile, city: Boston}
+      - {prefix: '305563', length: 10, operator: Verizon, city: Miami}
+      - {prefix: '305397', length: 10, operator: Verizon, city: Miami}
+      - {prefix: '305407', length: 10, operator: "AT&T", city: Miami}
+      - {prefix: '305773', length: 10, operator: "AT&T", city: Miami}
+      - {prefix: '305525', length: 10, operator: T-Mobile, city: Miami}
+      - {prefix: '305490', length: 10, operator: T-Mobile, city: Miami}
+      - {prefix: '786751', length: 10, operator: Verizon, city: Miami}
+      - {prefix: '786599', length: 10, operator: Verizon, city: Miami}
+      - {prefix: '786205', length: 10, operator: "AT&T", city: Miami}
+      - {prefix: '786875', length: 10, operator: "AT&T", city: Miami}
+      - {prefix: '786797', length: 10, operator: T-Mobile, city: Miami}
+      - {prefix: '786407', length: 10, operator: T-Mobile, city: Miami}
+      - {prefix: '404989', length: 10, operator: Verizon, city: Atlanta}
+      - {prefix: '404683', length: 10, operator: Verizon, city: Atlanta}
+      - {prefix: '404281', length: 10, operator: "AT&T", city: Atlanta}
+      - {prefix: '404245', length: 10, operator: "AT&T", city: Atlanta}
+      - {prefix: '404734', length: 10, operator: T-Mobile, city: Atlanta}
+      - {prefix: '404980', length: 10, operator: T-Mobile, city: Atlanta}
+      - {prefix: '678491', length: 10, operator: Verizon, city: Atlanta}
+      - {prefix: '678628', length: 10, operator: Verizon, city: Atlanta}
+      - {prefix: '678982', length: 10, operator: "AT&T", city: Atlanta}
+      - {prefix: '678910', length: 10, operator: "AT&T", city: Atlanta}
+      - {prefix: '678360', length: 10, operator: T-Mobile, city: Atlanta}
+      - {prefix: '678790', length: 10, operator: T-Mobile, city: Atlanta}
+      - {prefix: '470371', length: 10, operator: Verizon, city: Atlanta}
+      - {prefix: '470219', length: 10, operator: Verizon, city: Atlanta}
+      - {prefix: '470448', length: 10, operator: "AT&T", city: Atlanta}
+      - {prefix: '470529', length: 10, operator: "AT&T", city: Atlanta}
+      - {prefix: '470642', length: 10, operator: T-Mobile, city: Atlanta}
+      - {prefix: '470923', length: 10, operator: T-Mobile, city: Atlanta}
+      - {prefix: '303519', length: 10, operator: Verizon, city: Denver}
+      - {prefix: '303877', length: 10, operator: Verizon, city: Denver}
+      - {prefix: '303748', length: 10, operator: "AT&T", city: Denver}
+      - {prefix: '303810', length: 10, operator: "AT&T", city: Denver}
+      - {prefix: '303525', length: 10, operator: T-Mobile, city: Denver}
+      - {prefix: '303960', length: 10, operator: T-Mobile, city: Denver}
+      - {prefix: '720910', length: 10, operator: Verizon, city: Denver}
+      - {prefix: '720471', length: 10, operator: Verizon, city: Denver}
+      - {prefix: '720630', length: 10, operator: "AT&T", city: Denver}
+      - {prefix: '720329', length: 10, operator: "AT&T", city: Denver}
+      - {prefix: '720352', length: 10, operator: T-Mobile, city: Denver}
+      - {prefix: '720255', length: 10, operator: T-Mobile, city: Denver}
+      - {prefix: '202440', length: 10, operator: Verizon, city: Washington}
+      - {prefix: '202809', length: 10, operator: Verizon, city: Washington}
+      - {prefix: '202255', length: 10, operator: "AT&T", city: Washington}
+      - {prefix: '202550', length: 10, operator: "AT&T", city: Washington}
+      - {prefix: '202270', length: 10, operator: T-Mobile, city: Washington}
+      - {prefix: '202880', length: 10, operator: T-Mobile, city: Washington}
+      - {prefix: '702419', length: 10, operator: Verizon, city: Las Vegas}
+      - {prefix: '702343', length: 10, operator: Verizon, city: Las Vegas}
+      - {prefix: '702684', length: 10, operator: "AT&T", city: Las Vegas}
+      - {prefix: '702688', length: 10, operator: "AT&T", city: Las Vegas}
+      - {prefix: '702826', length: 10, operator: T-Mobile, city: Las Vegas}
+      - {prefix: '702287', length: 10, operator: T-Mobile, city: Las Vegas}
+      - {prefix: '612463', length: 10, operator: Verizon, city: Minneapolis}
+      - {prefix: '612214', length: 10, operator: Verizon, city: Minneapolis}
+      - {prefix: '612497', length: 10, operator: "AT&T", city: Minneapolis}
+      - {prefix: '612308', length: 10, operator: "AT&T", city: Minneapolis}
+      - {prefix: '808651', length: 10, operator: Verizon, city: Honolulu}
+      - {prefix: '808766', length: 10, operator: Verizon, city: Honolulu}
+      - {prefix: '808657', length: 10, operator: "AT&T", city: Honolulu}
+      - {prefix: '808554', length: 10, operator: "AT&T", city: Honolulu}
+      - {prefix: '808557', length: 10, operator: T-Mobile, city: Honolulu}
+      - {prefix: '808991', length: 10, operator: T-Mobile, city: Honolulu}
+      - {prefix: '907673', length: 10, operator: Verizon, city: Anchorage}
+      - {prefix: '907802', length: 10, operator: Verizon, city: Anchorage}
+      - {prefix: '907942', length: 10, operator: "AT&T", city: Anchorage}
+      - {prefix: '907513', length: 10, operator: "AT&T", city: Anchorage}
+    unallocated:
+      - {prefix: '332474', length: 10, city: New York, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '332670', length: 10, city: New York, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '332572', length: 10, city: New York, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '738614', length: 10, city: Los Angeles, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '738944', length: 10, city: Los Angeles, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '738601', length: 10, city: Los Angeles, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '872426', length: 10, city: Chicago, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '872752', length: 10, city: Chicago, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '872932', length: 10, city: Chicago, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '602936', length: 10, city: Phoenix, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '602945', length: 10, city: Phoenix, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '602970', length: 10, city: Phoenix, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '445435', length: 10, city: Philadelphia, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '445553', length: 10, city: Philadelphia, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '445370', length: 10, city: Philadelphia, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '726614', length: 10, city: San Antonio, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '726331', length: 10, city: San Antonio, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '726661', length: 10, city: San Antonio, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '945491', length: 10, city: Dallas, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '945663', length: 10, city: Dallas, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '945681', length: 10, city: Dallas, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '628716', length: 10, city: San Francisco, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '628902', length: 10, city: San Francisco, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '628820', length: 10, city: San Francisco, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '564776', length: 10, city: Seattle, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '564327', length: 10, city: Seattle, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '564862', length: 10, city: Seattle, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '645968', length: 10, city: Miami, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '645504', length: 10, city: Miami, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '645699', length: 10, city: Miami, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '943861', length: 10, city: Atlanta, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '943472', length: 10, city: Atlanta, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '943768', length: 10, city: Atlanta, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '983387', length: 10, city: Denver, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '983463', length: 10, city: Denver, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '983941', length: 10, city: Denver, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '771436', length: 10, city: Washington, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '771944', length: 10, city: Washington, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '771862', length: 10, city: Washington, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '725914', length: 10, city: Las Vegas, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '725753', length: 10, city: Las Vegas, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '725436', length: 10, city: Las Vegas, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '612830', length: 10, city: Minneapolis, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '612921', length: 10, city: Minneapolis, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '612943', length: 10, city: Minneapolis, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '808916', length: 10, city: Honolulu, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '808709', length: 10, city: Honolulu, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '808406', length: 10, city: Honolulu, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '907760', length: 10, city: Anchorage, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '907641', length: 10, city: Anchorage, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+      - {prefix: '907609', length: 10, city: Anchorage, note: 'NXX listed as available (unassigned) in NANPA CO code report of 2026-11-19; libphonenumber: valid FIXED_LINE_OR_MOBILE', source: S2}
+    fiction:
+      - {range: "2125550100-2125550199", note: NANPA 555-0100..0199 reserved for fictitious use (New York)}
+      - {range: "2135550100-2135550199", note: NANPA 555-0100..0199 reserved for fictitious use (Los Angeles)}
+      - {range: "3125550100-3125550199", note: NANPA 555-0100..0199 reserved for fictitious use (Chicago)}
+      - {range: "7135550100-7135550199", note: NANPA 555-0100..0199 reserved for fictitious use (Houston)}
+      - {range: "6025550100-6025550199", note: NANPA 555-0100..0199 reserved for fictitious use (Phoenix)}
+      - {range: "2155550100-2155550199", note: NANPA 555-0100..0199 reserved for fictitious use (Philadelphia)}
+      - {range: "2105550100-2105550199", note: NANPA 555-0100..0199 reserved for fictitious use (San Antonio)}
+      - {range: "6195550100-6195550199", note: NANPA 555-0100..0199 reserved for fictitious use (San Diego)}
+      - {range: "2145550100-2145550199", note: NANPA 555-0100..0199 reserved for fictitious use (Dallas)}
+      - {range: "4155550100-4155550199", note: NANPA 555-0100..0199 reserved for fictitious use (San Francisco)}
+      - {range: "2065550100-2065550199", note: NANPA 555-0100..0199 reserved for fictitious use (Seattle)}
+      - {range: "6175550100-6175550199", note: NANPA 555-0100..0199 reserved for fictitious use (Boston)}
+      - {range: "3055550100-3055550199", note: NANPA 555-0100..0199 reserved for fictitious use (Miami)}
+      - {range: "4045550100-4045550199", note: NANPA 555-0100..0199 reserved for fictitious use (Atlanta)}
+      - {range: "3035550100-3035550199", note: NANPA 555-0100..0199 reserved for fictitious use (Denver)}
+      - {range: "2025550100-2025550199", note: NANPA 555-0100..0199 reserved for fictitious use (Washington)}
+      - {range: "7025550100-7025550199", note: NANPA 555-0100..0199 reserved for fictitious use (Las Vegas)}
+      - {range: "6125550100-6125550199", note: NANPA 555-0100..0199 reserved for fictitious use (Minneapolis)}
+      - {range: "8085550100-8085550199", note: NANPA 555-0100..0199 reserved for fictitious use (Honolulu)}
+      - {range: "9075550100-9075550199", note: NANPA 555-0100..0199 reserved for fictitious use (Anchorage)}
+  landline:
+    cities:
+      - {city: New York, area_code: '212', subscriber_length: 7}
+      - {city: Los Angeles, area_code: '213', subscriber_length: 7}
+      - {city: Chicago, area_code: '312', subscriber_length: 7}
+      - {city: Houston, area_code: '713', subscriber_length: 7}
+      - {city: Phoenix, area_code: '602', subscriber_length: 7}
+      - {city: Philadelphia, area_code: '215', subscriber_length: 7}
+      - {city: San Antonio, area_code: '210', subscriber_length: 7}
+      - {city: San Diego, area_code: '619', subscriber_length: 7}
+      - {city: Dallas, area_code: '214', subscriber_length: 7}
+      - {city: San Francisco, area_code: '415', subscriber_length: 7}
+      - {city: Seattle, area_code: '206', subscriber_length: 7}
+      - {city: Boston, area_code: '617', subscriber_length: 7}
+      - {city: Miami, area_code: '305', subscriber_length: 7}
+      - {city: Atlanta, area_code: '404', subscriber_length: 7}
+      - {city: Denver, area_code: '303', subscriber_length: 7}
+      - {city: Washington, area_code: '202', subscriber_length: 7}
+      - {city: Las Vegas, area_code: '702', subscriber_length: 7}
+      - {city: Minneapolis, area_code: '612', subscriber_length: 7}
+      - {city: Honolulu, area_code: '808', subscriber_length: 7}
+      - {city: Anchorage, area_code: '907', subscriber_length: 7}
+    fiction:
+      - {range: "2125550100-2125550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "2135550100-2135550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "3125550100-3125550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "7135550100-7135550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "6025550100-6025550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "2155550100-2155550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "2105550100-2105550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "6195550100-6195550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "2145550100-2145550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "4155550100-4155550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "2065550100-2065550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "6175550100-6175550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "3055550100-3055550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "4045550100-4045550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "3035550100-3035550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "2025550100-2025550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "7025550100-7025550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "6125550100-6125550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "8085550100-8085550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+      - {range: "9075550100-9075550199", note: same 555-01xx fiction block; NANP does not separate fixed and mobile}
+carriers:
+  - {name: Verizon, sim_operator: Verizon, mccmnc: '311480', share: 0.32}
+  - {name: "AT&T", sim_operator: "AT&T", mccmnc: '310410', share: 0.26}
+  - {name: T-Mobile, sim_operator: T-Mobile, mccmnc: '310260', share: 0.25}
+  - {name: Metro by T-Mobile, sim_operator: Metro by T-Mobile, mccmnc: '310260', share: 0.06}
+  - {name: Cricket, sim_operator: Cricket, mccmnc: '310150', share: 0.05}
+  - {name: Visible, sim_operator: Visible, mccmnc: '311480', share: 0.03}
+  - {name: Boost Mobile, sim_operator: Boost Mobile, mccmnc: '313340', share: 0.03}
+cities:
+  - {name: New York, state: NY, lat: 40.7128, lon: -74.006, population: 8260000, timezone: America/New_York, area_code: '212', postcodes: ['10001', '10003', '10011', '10025', '10027', '10128', '11201', '11215', '11375', '10463'], districts: [Manhattan, Brooklyn, Queens, The Bronx, Staten Island, Harlem, Astoria, Williamsburg]}
+  - {name: Los Angeles, state: CA, lat: 34.0522, lon: -118.2437, population: 3820000, timezone: America/Los_Angeles, area_code: '213', postcodes: ['90004', '90012', '90026', '90027', '90034', '90042', '90046', '90064', '91403'], districts: [Downtown, Hollywood, Echo Park, Silver Lake, Koreatown, Venice, Highland Park]}
+  - {name: Chicago, state: IL, lat: 41.8781, lon: -87.6298, population: 2660000, timezone: America/Chicago, area_code: '312', postcodes: ['60601', '60607', '60614', '60618', '60622', '60625', '60640', '60647'], districts: [The Loop, Lincoln Park, Wicker Park, Logan Square, Pilsen, Hyde Park, Uptown]}
+  - {name: Houston, state: TX, lat: 29.7604, lon: -95.3698, population: 2310000, timezone: America/Chicago, area_code: '713', postcodes: ['77002', '77004', '77006', '77007', '77019', '77025', '77096'], districts: [Montrose, The Heights, Midtown, Third Ward, Galleria, EaDo]}
+  - {name: Phoenix, state: AZ, lat: 33.4484, lon: -112.074, population: 1650000, timezone: America/Phoenix, area_code: '602', postcodes: ['85003', '85004', '85006', '85008', '85013', '85016', '85018'], districts: [Downtown, Arcadia, Encanto, Maryvale, Ahwatukee]}
+  - {name: Philadelphia, state: PA, lat: 39.9526, lon: -75.1652, population: 1550000, timezone: America/New_York, area_code: '215', postcodes: ['19103', '19104', '19106', '19107', '19122', '19130', '19147'], districts: [Center City, Fishtown, South Philly, University City, Manayunk, Northern Liberties]}
+  - {name: San Antonio, state: TX, lat: 29.4241, lon: -98.4936, population: 1490000, timezone: America/Chicago, area_code: '210', postcodes: ['78201', '78205', '78209', '78212', '78216', '78230'], districts: [Downtown, Alamo Heights, Southtown, Monte Vista, Stone Oak]}
+  - {name: San Diego, state: CA, lat: 32.7157, lon: -117.1611, population: 1390000, timezone: America/Los_Angeles, area_code: '619', postcodes: ['92101', '92103', '92104', '92107', '92109', '92116'], districts: [Gaslamp Quarter, North Park, Hillcrest, Pacific Beach, La Jolla, Ocean Beach]}
+  - {name: Dallas, state: TX, lat: 32.7767, lon: -96.797, population: 1300000, timezone: America/Chicago, area_code: '214', postcodes: ['75201', '75204', '75205', '75206', '75214', '75219', '75226'], districts: [Deep Ellum, Uptown, Oak Lawn, Bishop Arts, Lakewood]}
+  - {name: San Francisco, state: CA, lat: 37.7749, lon: -122.4194, population: 810000, timezone: America/Los_Angeles, area_code: '415', postcodes: ['94102', '94103', '94107', '94110', '94114', '94117', '94122'], districts: [Mission District, SoMa, Castro, Haight-Ashbury, Richmond, Sunset, Nob Hill]}
+  - {name: Seattle, state: WA, lat: 47.6062, lon: -122.3321, population: 755000, timezone: America/Los_Angeles, area_code: '206', postcodes: ['98101', '98102', '98103', '98105', '98107', '98112', '98122'], districts: [Capitol Hill, Ballard, Fremont, Queen Anne, University District, Columbia City]}
+  - {name: Boston, state: MA, lat: 42.3601, lon: -71.0589, population: 655000, timezone: America/New_York, area_code: '617', postcodes: ["02108", '02115', '02116', "02118", '02127', '02130', '02134'], districts: [Back Bay, South End, Jamaica Plain, Dorchester, Charlestown, Allston]}
+  - {name: Miami, state: FL, lat: 25.7617, lon: -80.1918, population: 455000, timezone: America/New_York, area_code: '305', postcodes: ['33125', '33127', '33130', '33131', '33133', '33137', '33145'], districts: [Little Havana, Wynwood, Brickell, Coconut Grove, Little Haiti, Edgewater]}
+  - {name: Atlanta, state: GA, lat: 33.749, lon: -84.388, population: 510000, timezone: America/New_York, area_code: '404', postcodes: ['30303', '30306', '30307', '30308', '30309', '30312', '30318'], districts: [Midtown, Buckhead, Inman Park, Old Fourth Ward, Virginia-Highland, West End]}
+  - {name: Denver, state: CO, lat: 39.7392, lon: -104.9903, population: 715000, timezone: America/Denver, area_code: '303', postcodes: ['80202', '80203', '80205', '80206', '80210', '80211', '80218'], districts: [LoDo, Capitol Hill, RiNo, Highlands, Washington Park, Baker]}
+  - {name: Washington, state: DC, lat: 38.9072, lon: -77.0369, population: 680000, timezone: America/New_York, area_code: '202', postcodes: ['20001', '20002', '20003', '20009', '20010', '20011', '20016'], districts: [Capitol Hill, Dupont Circle, Georgetown, Columbia Heights, Adams Morgan, Navy Yard]}
+  - {name: Las Vegas, state: NV, lat: 36.1699, lon: -115.1398, population: 660000, timezone: America/Los_Angeles, area_code: '702', postcodes: ['89101', '89102', '89104', '89117', '89123', '89128', '89135'], districts: [Downtown, Summerlin, Spring Valley, Arts District, Henderson]}
+  - {name: Minneapolis, state: MN, lat: 44.9778, lon: -93.265, population: 425000, timezone: America/Chicago, area_code: '612', postcodes: ['55401', '55403', '55405', '55406', '55407', '55408', '55414'], districts: [Uptown, Northeast, Downtown, Longfellow, Powderhorn]}
+  - {name: Honolulu, state: HI, lat: 21.3069, lon: -157.8583, population: 345000, timezone: Pacific/Honolulu, area_code: '808', postcodes: ['96813', '96814', '96815', '96816', '96822', '96826'], districts: [Waikiki, Kaimuki, Manoa, Kakaako, Kalihi]}
+  - {name: Anchorage, state: AK, lat: 61.2181, lon: -149.9003, population: 290000, timezone: America/Anchorage, area_code: '907', postcodes: ['99501', '99503', '99504', '99507', '99508', '99515', '99517'], districts: [Downtown, Midtown, Spenard, South Addition, Muldoon]}
+streets: [
+  Main Street, 2nd Street, 3rd Street, 1st Street, 4th Street, Park Avenue, 5th Street, Oak Street,
+  6th Street, Pine Street, Maple Avenue, Cedar Street, 7th Street, Elm Street, Washington Street,
+  8th Street, Lake Street, Hill Street, Walnut Street, Spring Street, North Street, Ridge Road,
+  Church Street, Willow Street, Mill Street, Sunset Boulevard, Jackson Street, Lincoln Avenue,
+  Jefferson Street, Franklin Street, Madison Avenue, Center Street, Highland Avenue, Union Street,
+  Market Street, Water Street, Chestnut Street, Broadway, Front Street, River Road, College Avenue,
+  Grant Avenue, Adams Street, Spruce Street, Meadow Lane, Forest Avenue, Lakeview Drive,
+  Sunset Drive, Cherry Street, Dogwood Drive, Magnolia Avenue, Hickory Lane, Birch Street,
+  Valley Road, Riverside Drive, Martin Luther King Jr Boulevard, Wilson Avenue, Johnson Street,
+  Railroad Avenue, Prospect Street, Liberty Street, Woodland Avenue, Fairview Avenue,
+  Greenwood Avenue, Kingston Road
+]
+address_format: '{number} {street}, {city}, {state} {postcode}'
+places:
+  - {category: park, name: Central Park, city: New York, lat: 40.7829, lon: -73.9654}
+  - {category: park, name: Prospect Park, city: New York, lat: 40.6602, lon: -73.969}
+  - {category: park, name: Griffith Park, city: Los Angeles, lat: 34.1366, lon: -118.2942}
+  - {category: park, name: Millennium Park, city: Chicago, lat: 41.8826, lon: -87.6226}
+  - {category: park, name: Golden Gate Park, city: San Francisco, lat: 37.7694, lon: -122.4862}
+  - {category: park, name: Balboa Park, city: San Diego, lat: 32.7341, lon: -117.1446}
+  - {category: park, name: Piedmont Park, city: Atlanta, lat: 33.7851, lon: -84.3738}
+  - {category: park, name: Boston Common, city: Boston, lat: 42.355, lon: -71.0656}
+  - {category: park, name: Discovery Park, city: Seattle, lat: 47.6573, lon: -122.4057}
+  - {category: landmark, name: Statue of Liberty, city: New York, lat: 40.6892, lon: -74.0445}
+  - {category: landmark, name: Times Square, city: New York, lat: 40.758, lon: -73.9855}
+  - {category: landmark, name: Golden Gate Bridge, city: San Francisco, lat: 37.8199, lon: -122.4783}
+  - {category: landmark, name: Space Needle, city: Seattle, lat: 47.6205, lon: -122.3493}
+  - {category: landmark, name: Cloud Gate, city: Chicago, lat: 41.8827, lon: -87.6233}
+  - {category: landmark, name: Lincoln Memorial, city: Washington, lat: 38.8893, lon: -77.0502}
+  - {category: landmark, name: Hollywood Sign, city: Los Angeles, lat: 34.1341, lon: -118.3215}
+  - {category: landmark, name: The Alamo, city: San Antonio, lat: 29.426, lon: -98.4861}
+  - {category: landmark, name: Independence Hall, city: Philadelphia, lat: 39.9489, lon: -75.15}
+  - {category: station, name: Grand Central Terminal, city: New York, lat: 40.7527, lon: -73.9772}
+  - {category: station, name: Penn Station, city: New York, lat: 40.7506, lon: -73.9935}
+  - {category: station, name: Union Station, city: Chicago, lat: 41.8787, lon: -87.6403}
+  - {category: station, name: Union Station, city: Washington, lat: 38.8973, lon: -77.0063}
+  - {category: station, name: Union Station, city: Los Angeles, lat: 34.0562, lon: -118.2365}
+  - {category: station, name: South Station, city: Boston, lat: 42.3519, lon: -71.0552}
+  - {category: station, name: 30th Street Station, city: Philadelphia, lat: 39.9557, lon: -75.182}
+  - {category: airport, name: John F. Kennedy International Airport, city: New York, lat: 40.6413, lon: -73.7781}
+  - {category: airport, name: Los Angeles International Airport, city: Los Angeles, lat: 33.9416, lon: -118.4085}
+  - {category: airport, name: O'Hare International Airport, city: Chicago, lat: 41.9742, lon: -87.9073}
+  - {category: airport, name: Hartsfield-Jackson Atlanta International Airport, city: Atlanta, lat: 33.6407, lon: -84.4277}
+  - {category: airport, name: Dallas/Fort Worth International Airport, city: Dallas, lat: 32.8998, lon: -97.0403}
+  - {category: airport, name: Denver International Airport, city: Denver, lat: 39.8561, lon: -104.6737}
+  - {category: beach, name: Santa Monica State Beach, city: Los Angeles, lat: 34.0094, lon: -118.4973}
+  - {category: beach, name: South Beach, city: Miami, lat: 25.7826, lon: -80.1341}
+  - {category: beach, name: Waikiki Beach, city: Honolulu, lat: 21.2766, lon: -157.827}
+  - {category: beach, name: Coney Island Beach, city: New York, lat: 40.5725, lon: -73.979}
+  - {category: beach, name: Mission Beach, city: San Diego, lat: 32.77, lon: -117.252}
+  - {category: beach, name: Ocean Beach, city: San Francisco, lat: 37.7594, lon: -122.5107}
+  - {category: mountain, name: Pikes Peak, city: Colorado Springs, lat: 38.8409, lon: -105.0423}
+  - {category: mountain, name: Red Rocks Park, city: Morrison, lat: 39.6654, lon: -105.2057}
+  - {category: mountain, name: Diamond Head, city: Honolulu, lat: 21.262, lon: -157.8049}
+  - {category: mountain, name: Camelback Mountain, city: Phoenix, lat: 33.5151, lon: -111.9619}
+  - {category: mountain, name: Flattop Mountain, city: Anchorage, lat: 61.0937, lon: -149.6719}
+  - {category: museum, name: The Metropolitan Museum of Art, city: New York, lat: 40.7794, lon: -73.9632}
+  - {category: museum, name: Smithsonian National Air and Space Museum, city: Washington, lat: 38.8882, lon: -77.0199}
+  - {category: museum, name: Art Institute of Chicago, city: Chicago, lat: 41.8796, lon: -87.6237}
+  - {category: museum, name: Getty Center, city: Los Angeles, lat: 34.078, lon: -118.4741}
+  - {category: museum, name: Museum of Fine Arts, city: Boston, lat: 42.3394, lon: -71.094}
+  - {category: stadium, name: Yankee Stadium, city: New York, lat: 40.8296, lon: -73.9262}
+  - {category: stadium, name: Wrigley Field, city: Chicago, lat: 41.9484, lon: -87.6553}
+  - {category: stadium, name: Dodger Stadium, city: Los Angeles, lat: 34.0739, lon: -118.24}
+  - {category: stadium, name: Fenway Park, city: Boston, lat: 42.3467, lon: -71.0972}
+  - {category: stadium, name: Lumen Field, city: Seattle, lat: 47.5952, lon: -122.3316}
+  - {category: market, name: Pike Place Market, city: Seattle, lat: 47.6097, lon: -122.3422}
+  - {category: market, name: Reading Terminal Market, city: Philadelphia, lat: 39.9533, lon: -75.159}
+  - {category: market, name: Ferry Building Marketplace, city: San Francisco, lat: 37.7955, lon: -122.3937}
+  - {category: market, name: Chelsea Market, city: New York, lat: 40.7424, lon: -74.006}
+  - {category: market, name: Grand Central Market, city: Los Angeles, lat: 34.0508, lon: -118.249}
+  - {category: lake, name: Lake Union, city: Seattle, lat: 47.639, lon: -122.3355}
+  - {category: lake, name: Bde Maka Ska, city: Minneapolis, lat: 44.942, lon: -93.311}
+  - {category: lake, name: Lake Merritt, city: Oakland, lat: 37.8044, lon: -122.2582}
+  - {category: lake, name: White Rock Lake, city: Dallas, lat: 32.8279, lon: -96.7244}
+names:
+  culture: us
+  female:
+    - {name: Jennifer, w: 1.0}
+    - {name: Mary, w: 0.9686}
+    - {name: Jessica, w: 0.7104}
+    - {name: Elizabeth, w: 0.6891}
+    - {name: Linda, w: 0.6756}
+    - {name: Lisa, w: 0.663}
+    - {name: Patricia, w: 0.6136}
+    - {name: Susan, w: 0.6033}
+    - {name: Sarah, w: 0.5735}
+    - {name: Kimberly, w: 0.5624}
+    - {name: Ashley, w: 0.5603}
+    - {name: Karen, w: 0.5538}
+    - {name: Michelle, w: 0.5451}
+    - {name: Amanda, w: 0.5231}
+    - {name: Melissa, w: 0.5097}
+    - {name: Stephanie, w: 0.49}
+    - {name: Emily, w: 0.4632}
+    - {name: Amy, w: 0.4489}
+    - {name: Rebecca, w: 0.4422}
+    - {name: Barbara, w: 0.4411}
+    - {name: Deborah, w: 0.4321}
+    - {name: Angela, w: 0.4288}
+    - {name: Cynthia, w: 0.427}
+    - {name: Laura, w: 0.4269}
+    - {name: Sandra, w: 0.4138}
+    - {name: Donna, w: 0.3937}
+    - {name: Nicole, w: 0.3931}
+    - {name: Nancy, w: 0.3827}
+    - {name: Heather, w: 0.3609}
+    - {name: Samantha, w: 0.3602}
+    - {name: Pamela, w: 0.3528}
+    - {name: Sharon, w: 0.3448}
+    - {name: Debra, w: 0.3431}
+    - {name: Brenda, w: 0.3401}
+    - {name: Rachel, w: 0.3368}
+    - {name: Kathleen, w: 0.3316}
+    - {name: Julie, w: 0.3284}
+    - {name: Kelly, w: 0.3221}
+    - {name: Christine, w: 0.3211}
+    - {name: Christina, w: 0.31}
+    - {name: Lauren, w: 0.3033}
+    - {name: Katherine, w: 0.3015}
+    - {name: Megan, w: 0.2943}
+    - {name: Maria, w: 0.2933, g: [hispanic]}
+    - {name: Carol, w: 0.2916}
+    - {name: Andrea, w: 0.2702}
+    - {name: Cheryl, w: 0.2614}
+    - {name: Diane, w: 0.2613}
+    - {name: Victoria, w: 0.2609}
+    - {name: Margaret, w: 0.258}
+    - {name: Amber, w: 0.2494}
+    - {name: Teresa, w: 0.2488}
+    - {name: Danielle, w: 0.2465}
+    - {name: Brittany, w: 0.2454}
+    - {name: Hannah, w: 0.2442}
+    - {name: Anna, w: 0.244}
+    - {name: Catherine, w: 0.2385}
+    - {name: Denise, w: 0.2371}
+    - {name: Lori, w: 0.2339}
+    - {name: Tammy, w: 0.2298}
+    - {name: Tiffany, w: 0.2292}
+    - {name: Sara, w: 0.2241}
+    - {name: Crystal, w: 0.221}
+    - {name: Janet, w: 0.2205}
+    - {name: Jacqueline, w: 0.2186}
+    - {name: Kayla, w: 0.2139}
+    - {name: Erin, w: 0.2097}
+    - {name: Alexis, w: 0.2061}
+    - {name: Kathryn, w: 0.2051}
+    - {name: Carolyn, w: 0.2036}
+    - {name: Emma, w: 0.2019}
+    - {name: Shannon, w: 0.2015}
+    - {name: Kathy, w: 0.2006}
+    - {name: Madison, w: 0.2003}
+    - {name: Diana, w: 0.198}
+    - {name: Taylor, w: 0.1968}
+    - {name: Tina, w: 0.1953}
+    - {name: Olivia, w: 0.1921}
+    - {name: Robin, w: 0.1904}
+    - {name: Dawn, w: 0.1897}
+    - {name: Natalie, w: 0.1887}
+    - {name: Alyssa, w: 0.1863}
+    - {name: Theresa, w: 0.1833}
+    - {name: Abigail, w: 0.1809}
+    - {name: Jamie, w: 0.1789}
+    - {name: Julia, w: 0.1783}
+    - {name: Allison, w: 0.177}
+    - {name: Courtney, w: 0.1748}
+    - {name: Tracy, w: 0.1724}
+    - {name: Wendy, w: 0.1704}
+    - {name: Cindy, w: 0.1697}
+    - {name: Leslie, w: 0.1653}
+    - {name: Vanessa, w: 0.1616}
+    - {name: Janice, w: 0.1615}
+    - {name: Monica, w: 0.1598}
+    - {name: April, w: 0.1589}
+    - {name: Ann, w: 0.1573}
+    - {name: Erica, w: 0.1561}
+    - {name: Paula, w: 0.1528}
+    - {name: Valerie, w: 0.1523}
+    - {name: Jasmine, w: 0.1509}
+    - {name: Brianna, w: 0.1502}
+    - {name: Judy, w: 0.1501}
+    - {name: Kristen, w: 0.1485}
+    - {name: Melanie, w: 0.1469}
+    - {name: Michele, w: 0.1451}
+    - {name: Judith, w: 0.1436}
+    - {name: Alicia, w: 0.1425}
+    - {name: Joyce, w: 0.142}
+    - {name: Alexandra, w: 0.1408}
+    - {name: Grace, w: 0.1381}
+    - {name: Rhonda, w: 0.1367}
+    - {name: Sherry, w: 0.1349}
+    - {name: Shirley, w: 0.1347}
+    - {name: Jill, w: 0.134}
+    - {name: Betty, w: 0.1332}
+    - {name: Sheila, w: 0.1313}
+    - {name: Holly, w: 0.1312}
+    - {name: Sophia, w: 0.1308}
+    - {name: Connie, w: 0.1305}
+    - {name: Morgan, w: 0.1303}
+    - {name: Isabella, w: 0.129}
+    - {name: Gloria, w: 0.1265}
+    - {name: Martha, w: 0.1262}
+    - {name: Katie, w: 0.1256}
+    - {name: Dana, w: 0.1252}
+    - {name: Debbie, w: 0.1251}
+    - {name: Kristin, w: 0.1222}
+    - {name: Kim, w: 0.1219}
+    - {name: Beverly, w: 0.1215}
+    - {name: Veronica, w: 0.1207}
+    - {name: Bonnie, w: 0.1206}
+    - {name: Anne, w: 0.1196}
+    - {name: Tara, w: 0.1187}
+    - {name: Virginia, w: 0.1167}
+    - {name: Brooke, w: 0.1158}
+    - {name: Renee, w: 0.1157}
+    - {name: Jane, w: 0.1156}
+    - {name: Carrie, w: 0.1146}
+    - {name: Suzanne, w: 0.1138}
+    - {name: Leah, w: 0.1117}
+    - {name: Stacy, w: 0.1112}
+    - {name: Cassandra, w: 0.1101}
+    - {name: Laurie, w: 0.1078}
+    - {name: Dorothy, w: 0.1056}
+    - {name: Lindsey, w: 0.1046}
+    - {name: Ruth, w: 0.1045}
+    - {name: Chelsea, w: 0.1045}
+    - {name: Evelyn, w: 0.1042}
+    - {name: Gina, w: 0.1032}
+    - {name: Cathy, w: 0.1032}
+    - {name: Lynn, w: 0.1023}
+    - {name: Joan, w: 0.1016}
+    - {name: Stacey, w: 0.1012}
+    - {name: Marilyn, w: 0.0997}
+    - {name: Kaitlyn, w: 0.0996}
+    - {name: Peggy, w: 0.0993}
+    - {name: Haley, w: 0.0985}
+    - {name: Marie, w: 0.0984}
+    - {name: Rose, w: 0.0982}
+    - {name: Wanda, w: 0.0973}
+    - {name: Sydney, w: 0.0972}
+    - {name: Beth, w: 0.0971}
+    - {name: Terri, w: 0.0963}
+    - {name: Kelsey, w: 0.0958}
+    - {name: Caroline, w: 0.0957}
+    - {name: Jean, w: 0.0954}
+    - {name: Helen, w: 0.0947}
+    - {name: Colleen, w: 0.0934}
+    - {name: Chloe, w: 0.0928}
+    - {name: Heidi, w: 0.0927}
+    - {name: Ellen, w: 0.0921}
+    - {name: Carla, w: 0.092}
+    - {name: Jenna, w: 0.0913}
+    - {name: Charlotte, w: 0.0913}
+    - {name: Regina, w: 0.0913}
+    - {name: Darlene, w: 0.0912}
+    - {name: Audrey, w: 0.0912}
+    - {name: Kristina, w: 0.0911}
+    - {name: Molly, w: 0.0901}
+  male:
+    - {name: Michael, w: 1.0}
+    - {name: James, w: 0.756}
+    - {name: David, w: 0.7436}
+    - {name: John, w: 0.7254}
+    - {name: Robert, w: 0.6923}
+    - {name: William, w: 0.5401}
+    - {name: Christopher, w: 0.5089}
+    - {name: Joseph, w: 0.4281}
+    - {name: Daniel, w: 0.415}
+    - {name: Richard, w: 0.3896}
+    - {name: Matthew, w: 0.3881}
+    - {name: Thomas, w: 0.3805}
+    - {name: Mark, w: 0.3297}
+    - {name: Steven, w: 0.3052}
+    - {name: Anthony, w: 0.3038}
+    - {name: Charles, w: 0.2975}
+    - {name: Brian, w: 0.297}
+    - {name: Joshua, w: 0.295}
+    - {name: Kevin, w: 0.2924}
+    - {name: Andrew, w: 0.2815}
+    - {name: Jason, w: 0.2625}
+    - {name: Timothy, w: 0.2623}
+    - {name: Jeffrey, w: 0.245}
+    - {name: Ryan, w: 0.2264}
+    - {name: Paul, w: 0.2246}
+    - {name: Eric, w: 0.2203}
+    - {name: Kenneth, w: 0.2137}
+    - {name: Nicholas, w: 0.2095}
+    - {name: Jonathan, w: 0.2015}
+    - {name: Jacob, w: 0.2007}
+    - {name: Scott, w: 0.1976}
+    - {name: Justin, w: 0.1947}
+    - {name: Brandon, w: 0.188}
+    - {name: Stephen, w: 0.1831}
+    - {name: Ronald, w: 0.176}
+    - {name: Donald, w: 0.171}
+    - {name: Gregory, w: 0.171}
+    - {name: Gary, w: 0.1709}
+    - {name: Edward, w: 0.1526}
+    - {name: Patrick, w: 0.1499}
+    - {name: Benjamin, w: 0.1472}
+    - {name: Tyler, w: 0.141}
+    - {name: Larry, w: 0.1346}
+    - {name: Alexander, w: 0.1343}
+    - {name: Aaron, w: 0.1325}
+    - {name: George, w: 0.1321}
+    - {name: Adam, w: 0.1317}
+    - {name: Samuel, w: 0.1313}
+    - {name: Zachary, w: 0.1297}
+    - {name: Jose, w: 0.1229, g: [hispanic]}
+    - {name: Kyle, w: 0.1207}
+    - {name: Nathan, w: 0.1181}
+    - {name: Dennis, w: 0.1134}
+    - {name: Douglas, w: 0.1125}
+    - {name: Jeremy, w: 0.1107}
+    - {name: Sean, w: 0.1055}
+    - {name: Peter, w: 0.1036}
+    - {name: Keith, w: 0.099}
+    - {name: Jerry, w: 0.0942}
+    - {name: Bryan, w: 0.0929}
+    - {name: Raymond, w: 0.0923}
+    - {name: Austin, w: 0.0921}
+    - {name: Christian, w: 0.0905}
+    - {name: Terry, w: 0.0895}
+    - {name: Frank, w: 0.0891}
+    - {name: Jordan, w: 0.084}
+    - {name: Jesse, w: 0.08}
+    - {name: Randy, w: 0.0796}
+    - {name: Ethan, w: 0.0781}
+    - {name: Shawn, w: 0.0779}
+    - {name: Dylan, w: 0.0757}
+    - {name: Juan, w: 0.0756, g: [hispanic]}
+    - {name: Travis, w: 0.0744}
+    - {name: Bradley, w: 0.0741}
+    - {name: Jack, w: 0.0739}
+    - {name: Todd, w: 0.0737}
+    - {name: Craig, w: 0.0722}
+    - {name: Cody, w: 0.0712}
+    - {name: Bruce, w: 0.0698}
+    - {name: Roger, w: 0.0691}
+    - {name: Alan, w: 0.0681}
+    - {name: Gabriel, w: 0.0661}
+    - {name: Chad, w: 0.063}
+    - {name: Carlos, w: 0.0627, g: [hispanic]}
+    - {name: Phillip, w: 0.0622}
+    - {name: Noah, w: 0.0621}
+    - {name: Henry, w: 0.0612}
+    - {name: Carl, w: 0.0602}
+    - {name: Luis, w: 0.0601, g: [hispanic]}
+    - {name: Danny, w: 0.06}
+    - {name: Vincent, w: 0.0588}
+    - {name: Logan, w: 0.0588}
+    - {name: Jeffery, w: 0.0583}
+    - {name: Cameron, w: 0.0582}
+    - {name: Lawrence, w: 0.0579}
+    - {name: Derek, w: 0.0571}
+    - {name: Victor, w: 0.0569}
+    - {name: Joel, w: 0.0567}
+    - {name: Johnny, w: 0.0564}
+    - {name: Russell, w: 0.0563}
+    - {name: Alex, w: 0.0556}
+    - {name: Philip, w: 0.0555}
+    - {name: Caleb, w: 0.0553}
+    - {name: Gerald, w: 0.055}
+    - {name: Evan, w: 0.0543}
+    - {name: Ricky, w: 0.0543}
+    - {name: Wayne, w: 0.0538}
+    - {name: Rodney, w: 0.0537}
+    - {name: Nathaniel, w: 0.0532}
+    - {name: Dustin, w: 0.0532}
+    - {name: Tony, w: 0.0531}
+    - {name: Antonio, w: 0.053}
+    - {name: Marcus, w: 0.0527}
+    - {name: Martin, w: 0.0516}
+    - {name: Walter, w: 0.0513}
+    - {name: Jared, w: 0.0504}
+    - {name: Joe, w: 0.0501}
+    - {name: Billy, w: 0.0496}
+    - {name: Jimmy, w: 0.049}
+    - {name: Luke, w: 0.0489}
+    - {name: Curtis, w: 0.0486}
+    - {name: Troy, w: 0.0483}
+    - {name: Ian, w: 0.0481}
+    - {name: Shane, w: 0.0472}
+    - {name: Jesus, w: 0.0471, g: [hispanic]}
+    - {name: Isaac, w: 0.047}
+    - {name: Steve, w: 0.047}
+    - {name: Bobby, w: 0.0465}
+    - {name: Corey, w: 0.0465}
+    - {name: Arthur, w: 0.0463}
+    - {name: Adrian, w: 0.0457}
+    - {name: Willie, w: 0.0456}
+    - {name: Elijah, w: 0.0456}
+    - {name: Angel, w: 0.0454}
+    - {name: Randall, w: 0.0449}
+    - {name: Hunter, w: 0.0447}
+    - {name: Dale, w: 0.0444}
+    - {name: Allen, w: 0.0433}
+    - {name: Roy, w: 0.0429}
+    - {name: Albert, w: 0.0427}
+    - {name: Mason, w: 0.0414}
+    - {name: Lucas, w: 0.0412}
+    - {name: Brett, w: 0.0408}
+    - {name: Connor, w: 0.0401}
+    - {name: Louis, w: 0.04}
+    - {name: Mike, w: 0.0399}
+    - {name: Harold, w: 0.0389}
+    - {name: Miguel, w: 0.0386, g: [hispanic]}
+    - {name: Glenn, w: 0.0385}
+    - {name: Wesley, w: 0.0383}
+    - {name: Trevor, w: 0.0382}
+    - {name: Seth, w: 0.0381}
+    - {name: Isaiah, w: 0.0381}
+    - {name: Erik, w: 0.0378}
+    - {name: Mitchell, w: 0.0373}
+    - {name: Jay, w: 0.0372}
+    - {name: Jon, w: 0.037}
+    - {name: Barry, w: 0.0369}
+    - {name: Blake, w: 0.0369}
+    - {name: Jeremiah, w: 0.0362}
+    - {name: Devin, w: 0.036}
+    - {name: Jackson, w: 0.0359}
+    - {name: Derrick, w: 0.0358}
+    - {name: Ronnie, w: 0.0357}
+    - {name: Micheal, w: 0.0356}
+    - {name: Ralph, w: 0.0352}
+    - {name: Brent, w: 0.0349}
+    - {name: Marc, w: 0.0342}
+    - {name: Frederick, w: 0.0339}
+    - {name: Chris, w: 0.0338}
+    - {name: Lee, w: 0.033}
+    - {name: Julian, w: 0.033}
+    - {name: Stanley, w: 0.0328}
+    - {name: Cory, w: 0.0327}
+    - {name: Eugene, w: 0.0323}
+    - {name: Darrell, w: 0.0322}
+    - {name: Ricardo, w: 0.032, g: [hispanic]}
+    - {name: Manuel, w: 0.0318, g: [hispanic]}
+    - {name: Chase, w: 0.0318}
+    - {name: Gavin, w: 0.0316}
+  surnames:
+    - {name: Smith, w: 1.0}
+    - {name: Johnson, w: 0.7912}
+    - {name: Williams, w: 0.6653, g: [black]}
+    - {name: Brown, w: 0.5882}
+    - {name: Jones, w: 0.5835}
+    - {name: Garcia, w: 0.4773, g: [hispanic]}
+    - {name: Miller, w: 0.4754}
+    - {name: Davis, w: 0.457}
+    - {name: Rodriguez, w: 0.4482, g: [hispanic]}
+    - {name: Martinez, w: 0.434, g: [hispanic]}
+    - {name: Hernandez, w: 0.4271, g: [hispanic]}
+    - {name: Lopez, w: 0.358, g: [hispanic]}
+    - {name: Gonzalez, w: 0.3443, g: [hispanic]}
+    - {name: Wilson, w: 0.3282}
+    - {name: Anderson, w: 0.3211}
+    - {name: Thomas, w: 0.3095}
+    - {name: Taylor, w: 0.3075}
+    - {name: Moore, w: 0.2965}
+    - {name: Jackson, w: 0.2899, g: [black]}
+    - {name: Martin, w: 0.2876}
+    - {name: Lee, w: 0.2837}
+    - {name: Perez, w: 0.279, g: [hispanic]}
+    - {name: Thompson, w: 0.2721}
+    - {name: White, w: 0.2704}
+    - {name: Harris, w: 0.2555, g: [black]}
+    - {name: Sanchez, w: 0.2508, g: [hispanic]}
+    - {name: Clark, w: 0.2303}
+    - {name: Ramirez, w: 0.2282, g: [hispanic]}
+    - {name: Lewis, w: 0.2177}
+    - {name: Robinson, w: 0.2169, g: [black]}
+    - {name: Walker, w: 0.2141}
+    - {name: Young, w: 0.1983}
+    - {name: Allen, w: 0.1975}
+    - {name: King, w: 0.1905}
+    - {name: Wright, w: 0.1879}
+    - {name: Scott, w: 0.1799}
+    - {name: Torres, w: 0.1792, g: [hispanic]}
+    - {name: Nguyen, w: 0.1791, g: [asian]}
+    - {name: Hill, w: 0.178}
+    - {name: Flores, w: 0.1776, g: [hispanic]}
+    - {name: Green, w: 0.1761}
+    - {name: Adams, w: 0.1751}
+    - {name: Nelson, w: 0.174}
+    - {name: Baker, w: 0.1718}
+    - {name: Hall, w: 0.1666}
+    - {name: Rivera, w: 0.1601, g: [hispanic]}
+    - {name: Campbell, w: 0.1581}
+    - {name: Mitchell, w: 0.1574}
+    - {name: Carter, w: 0.1543}
+    - {name: Roberts, w: 0.1542}
+    - {name: Gomez, w: 0.1497, g: [hispanic]}
+    - {name: Phillips, w: 0.1477}
+    - {name: Evans, w: 0.1456}
+    - {name: Turner, w: 0.1427}
+    - {name: Diaz, w: 0.1423, g: [hispanic]}
+    - {name: Parker, w: 0.1376}
+    - {name: Cruz, w: 0.1368, g: [hispanic]}
+    - {name: Edwards, w: 0.1361}
+    - {name: Collins, w: 0.135}
+    - {name: Reyes, w: 0.1342, g: [hispanic]}
+    - {name: Stewart, w: 0.133}
+    - {name: Morris, w: 0.1305}
+    - {name: Morales, w: 0.1276, g: [hispanic]}
+    - {name: Murphy, w: 0.1262}
+    - {name: Cook, w: 0.1239}
+    - {name: Rogers, w: 0.1237}
+    - {name: Gutierrez, w: 0.12, g: [hispanic]}
+    - {name: Ortiz, w: 0.1174, g: [hispanic]}
+    - {name: Morgan, w: 0.1172}
+    - {name: Cooper, w: 0.1149}
+    - {name: Peterson, w: 0.1139}
+    - {name: Bailey, w: 0.1137}
+    - {name: Reed, w: 0.1134}
+    - {name: Kelly, w: 0.1095}
+    - {name: Howard, w: 0.1084}
+    - {name: Ramos, w: 0.1078, g: [hispanic]}
+    - {name: Kim, w: 0.1074, g: [asian]}
+    - {name: Cox, w: 0.1069}
+    - {name: Ward, w: 0.1066}
+    - {name: Richardson, w: 0.1063}
+    - {name: Watson, w: 0.1034}
+    - {name: Brooks, w: 0.103}
+    - {name: Chavez, w: 0.1027, g: [hispanic]}
+    - {name: Wood, w: 0.1026}
+    - {name: James, w: 0.1021}
+    - {name: Bennett, w: 0.1014}
+    - {name: Gray, w: 0.1007}
+    - {name: Mendoza, w: 0.0994, g: [hispanic]}
+    - {name: Ruiz, w: 0.0975, g: [hispanic]}
+    - {name: Hughes, w: 0.0967}
+    - {name: Price, w: 0.0963}
+    - {name: Alvarez, w: 0.0958, g: [hispanic]}
+    - {name: Castillo, w: 0.0943, g: [hispanic]}
+    - {name: Sanders, w: 0.0943}
+    - {name: Myers, w: 0.0941}
+    - {name: Long, w: 0.0939}
+    - {name: Ross, w: 0.0939}
+    - {name: Foster, w: 0.0932}
+    - {name: Jimenez, w: 0.093, g: [hispanic]}
+    - {name: Powell, w: 0.092}
+    - {name: Jenkins, w: 0.0911}
+    - {name: Perry, w: 0.0908}
+    - {name: Russell, w: 0.0907}
+    - {name: Sullivan, w: 0.0905}
+    - {name: Bell, w: 0.0903}
+    - {name: Coleman, w: 0.0897, g: [black]}
+    - {name: Butler, w: 0.0896}
+    - {name: Henderson, w: 0.0894}
+    - {name: Barnes, w: 0.0893}
+    - {name: Gonzales, w: 0.0879, g: [hispanic]}
+    - {name: Fisher, w: 0.0879}
+    - {name: Vasquez, w: 0.0871, g: [hispanic]}
+    - {name: Simmons, w: 0.086}
+    - {name: Romero, w: 0.0854, g: [hispanic]}
+    - {name: Jordan, w: 0.0853}
+    - {name: Patterson, w: 0.0841}
+    - {name: Alexander, w: 0.0838}
+    - {name: Hamilton, w: 0.0826}
+    - {name: Graham, w: 0.0823}
+    - {name: Reynolds, w: 0.082}
+    - {name: Griffin, w: 0.0812}
+    - {name: Wallace, w: 0.0808}
+    - {name: Moreno, w: 0.0806, g: [hispanic]}
+    - {name: West, w: 0.0802}
+    - {name: Cole, w: 0.0799}
+    - {name: Hayes, w: 0.0795}
+    - {name: Bryant, w: 0.0789}
+    - {name: Herrera, w: 0.0789, g: [hispanic]}
+    - {name: Gibson, w: 0.078}
+    - {name: Ellis, w: 0.0774}
+    - {name: Tran, w: 0.0772, g: [asian]}
+    - {name: Medina, w: 0.0772, g: [hispanic]}
+    - {name: Aguilar, w: 0.0763, g: [hispanic]}
+    - {name: Stevens, w: 0.076}
+    - {name: Murray, w: 0.0757}
+    - {name: Ford, w: 0.0757}
+    - {name: Castro, w: 0.0754, g: [hispanic]}
+    - {name: Marshall, w: 0.0753}
+    - {name: Owens, w: 0.0748}
+    - {name: Harrison, w: 0.0741}
+    - {name: Fernandez, w: 0.074, g: [hispanic]}
+    - {name: McDonald, w: 0.0739}
+    - {name: Woods, w: 0.0726}
+    - {name: Washington, w: 0.0726, g: [black]}
+    - {name: Kennedy, w: 0.0724}
+    - {name: Wells, w: 0.0721}
+    - {name: Vargas, w: 0.0712, g: [hispanic]}
+    - {name: Henry, w: 0.07}
+    - {name: Chen, w: 0.0694, g: [asian]}
+    - {name: Freeman, w: 0.0692}
+    - {name: Webb, w: 0.0691}
+    - {name: Tucker, w: 0.0685}
+    - {name: Guzman, w: 0.0684, g: [hispanic]}
+    - {name: Burns, w: 0.0679}
+    - {name: Crawford, w: 0.0673}
+    - {name: Olson, w: 0.0671}
+    - {name: Simpson, w: 0.0668}
+    - {name: Porter, w: 0.0667}
+    - {name: Hunter, w: 0.0665}
+    - {name: Gordon, w: 0.0662}
+    - {name: Mendez, w: 0.0662, g: [hispanic]}
+    - {name: Silva, w: 0.0662, g: [hispanic]}
+    - {name: Shaw, w: 0.0657}
+    - {name: Snyder, w: 0.0656}
+    - {name: Mason, w: 0.0656}
+    - {name: Dixon, w: 0.0653}
+    - {name: Munoz, w: 0.0649, g: [hispanic]}
+    - {name: Hunt, w: 0.0648}
+    - {name: Hicks, w: 0.0648}
+    - {name: Holmes, w: 0.0642}
+    - {name: Palmer, w: 0.0641}
+    - {name: Wagner, w: 0.0638}
+    - {name: Black, w: 0.0633}
+    - {name: Robertson, w: 0.0629}
+    - {name: Boyd, w: 0.0628}
+    - {name: Rose, w: 0.0628}
+    - {name: Stone, w: 0.0628}
+    - {name: Salazar, w: 0.0625, g: [hispanic]}
+    - {name: Fox, w: 0.0624}
+    - {name: Warren, w: 0.0623}
+    - {name: Mills, w: 0.0622}
+    - {name: Meyer, w: 0.0618}
+    - {name: Rice, w: 0.0612}
+    - {name: Schmidt, w: 0.0602}
+    - {name: Garza, w: 0.0602, g: [hispanic]}
+    - {name: Daniels, w: 0.06}
+    - {name: Ferguson, w: 0.0599}
+    - {name: Nichols, w: 0.0596}
+    - {name: Stephens, w: 0.0592}
+    - {name: Soto, w: 0.0591, g: [hispanic]}
+    - {name: Weaver, w: 0.0589}
+    - {name: Ryan, w: 0.0587}
+    - {name: Gardner, w: 0.0585}
+    - {name: Payne, w: 0.0584}
+    - {name: Grant, w: 0.0582}
+    - {name: Dunn, w: 0.0579}
+    - {name: Kelley, w: 0.0576}
+    - {name: Spencer, w: 0.0573}
+    - {name: Hawkins, w: 0.0572}
+    - {name: Arnold, w: 0.0569}
+    - {name: Pierce, w: 0.0567}
+    - {name: Vazquez, w: 0.0566, g: [hispanic]}
+    - {name: Hansen, w: 0.0565}
+    - {name: Peters, w: 0.0563}
+    - {name: Santos, w: 0.0562, g: [hispanic]}
+    - {name: Hart, w: 0.0562}
+    - {name: Bradley, w: 0.056}
+    - {name: Knight, w: 0.056}
+    - {name: Elliott, w: 0.0556}
+    - {name: Cunningham, w: 0.0556}
+    - {name: Duncan, w: 0.0553}
+    - {name: Armstrong, w: 0.0553}
+    - {name: Hudson, w: 0.0552}
+    - {name: Carroll, w: 0.055}
+    - {name: Lane, w: 0.0549}
+    - {name: Riley, w: 0.0548}
+    - {name: Andrews, w: 0.0548}
+    - {name: Alvarado, w: 0.0546, g: [hispanic]}
+    - {name: Ray, w: 0.0545}
+    - {name: Delgado, w: 0.0544, g: [hispanic]}
+    - {name: Berry, w: 0.0544}
+    - {name: Perkins, w: 0.0538}
+    - {name: Hoffman, w: 0.0538}
+    - {name: Johnston, w: 0.0538}
+    - {name: Matthews, w: 0.0537}
+    - {name: Pena, w: 0.0535, g: [hispanic]}
+    - {name: Richards, w: 0.0534}
+    - {name: Contreras, w: 0.0533, g: [hispanic]}
+    - {name: Willis, w: 0.0533}
+    - {name: Carpenter, w: 0.0532}
+    - {name: Lawrence, w: 0.0531}
+    - {name: Sandoval, w: 0.0528, g: [hispanic]}
+    - {name: Guerrero, w: 0.0527, g: [hispanic]}
+    - {name: George, w: 0.0527}
+    - {name: Chapman, w: 0.0524}
+    - {name: Rios, w: 0.0523, g: [hispanic]}
+    - {name: Estrada, w: 0.0522, g: [hispanic]}
+    - {name: Ortega, w: 0.0521, g: [hispanic]}
+    - {name: Watkins, w: 0.052}
+    - {name: Greene, w: 0.0516}
+    - {name: Nunez, w: 0.0513, g: [hispanic]}
+    - {name: Wheeler, w: 0.0512}
+    - {name: Valdez, w: 0.0512, g: [hispanic]}
+    - {name: Harper, w: 0.0509}
+    - {name: Burke, w: 0.0503}
+    - {name: Larson, w: 0.0502}
+    - {name: Santiago, w: 0.05, g: [hispanic]}
+    - {name: Maldonado, w: 0.0497, g: [hispanic]}
+    - {name: Morrison, w: 0.0496}
+    - {name: Franklin, w: 0.0494}
+    - {name: Carlson, w: 0.0493}
+    - {name: Austin, w: 0.049}
+    - {name: Dominguez, w: 0.0488, g: [hispanic]}
+    - {name: Carr, w: 0.0487}
+    - {name: Lawson, w: 0.0487}
+    - {name: Jacobs, w: 0.0486}
+    - {name: Obrien, w: 0.0485}
+    - {name: Lynch, w: 0.0482}
+    - {name: Vega, w: 0.0478, g: [hispanic]}
+    - {name: Bishop, w: 0.0477}
+    - {name: Montgomery, w: 0.0475}
+    - {name: Oliver, w: 0.0474}
+    - {name: Jensen, w: 0.0474}
+    - {name: Harvey, w: 0.0473}
+    - {name: Williamson, w: 0.0471}
+    - {name: Gilbert, w: 0.047}
+    - {name: Dean, w: 0.0467}
+    - {name: Sims, w: 0.0464}
+    - {name: Espinoza, w: 0.0459, g: [hispanic]}
+    - {name: Howell, w: 0.0459}
+    - {name: Li, w: 0.0458, g: [asian]}
+    - {name: Wong, w: 0.0456, g: [asian]}
+    - {name: Reid, w: 0.0456}
+    - {name: Hanson, w: 0.0455}
+    - {name: Le, w: 0.0454, g: [asian]}
+    - {name: McCoy, w: 0.0453}
+    - {name: Garrett, w: 0.0453}
+    - {name: Burton, w: 0.0452}
+    - {name: Fuller, w: 0.0451}
+    - {name: Wang, w: 0.045, g: [asian]}
+    - {name: Weber, w: 0.0448}
+    - {name: Welch, w: 0.0446}
+    - {name: Rojas, w: 0.0444, g: [hispanic]}
+    - {name: Lucas, w: 0.0441}
+    - {name: Marquez, w: 0.044, g: [hispanic]}
+    - {name: Fields, w: 0.044}
+    - {name: Park, w: 0.0437, g: [asian]}
+    - {name: Yang, w: 0.0434, g: [asian]}
+    - {name: Little, w: 0.0434}
+    - {name: Banks, w: 0.0433, g: [black]}
+    - {name: Padilla, w: 0.0431, g: [hispanic]}
+    - {name: Day, w: 0.043}
+    - {name: Walsh, w: 0.043}
+    - {name: Bowman, w: 0.043}
+    - {name: Schultz, w: 0.0429}
+    - {name: Luna, w: 0.0428, g: [hispanic]}
+    - {name: Fowler, w: 0.0428}
+    - {name: Mejia, w: 0.0426, g: [hispanic]}
+    - {name: Davidson, w: 0.0425}
+    - {name: Acosta, w: 0.0423, g: [hispanic]}
+  nicknames:
+    Michael: Mike
+    William: Bill
+    Robert: Bob
+    Richard: Rick
+    Christopher: Chris
+    Matthew: Matt
+    Joseph: Joe
+    Daniel: Dan
+    Anthony: Tony
+    Elizabeth: Liz
+    Jennifer: Jen
+    Jessica: Jess
+    Katherine: Katie
+    Kimberly: Kim
+    Margaret: Peggy
+    Patricia: Pat
+    Rebecca: Becky
+    Samantha: Sam
+    Alexander: Alex
+    Benjamin: Ben
+    Jonathan: Jon
+    Nicholas: Nick
+    Thomas: Tom
+    Timothy: Tim
+    Stephanie: Steph
+    Jacqueline: Jackie
+    Victoria: Tori
+    Francisco: Paco
+  display: '{first} {last}'
+cultures:
+  - {culture: in, share: 0.0145}
+  - {culture: ph, share: 0.0132}
+  - {culture: pk, share: 0.0021}
+  - {culture: ng, share: 0.002}
+  - {culture: br, share: 0.0015}
+  - {culture: tr, share: 0.0007}
+  - {culture: ke, share: 0.0004}
+  - {culture: id, share: 0.0004}
+email:
+  domains:
+    - {domain: gmail.com, share: 0.47}
+    - {domain: yahoo.com, share: 0.14}
+    - {domain: icloud.com, share: 0.12}
+    - {domain: hotmail.com, share: 0.07}
+    - {domain: outlook.com, share: 0.07}
+    - {domain: aol.com, share: 0.05}
+    - {domain: comcast.net, share: 0.03}
+    - {domain: att.net, share: 0.02}
+    - {domain: msn.com, share: 0.01}
+    - {domain: verizon.net, share: 0.01}
+    - {domain: me.com, share: 0.01}
+  patterns: [
+    '{first}.{last}', '{first}{last}', '{f}{last}', '{first}{last}{nn}', '{first}{yy}',
+    '{first}_{last}{nn}', '{last}{f}'
+  ]
+services:
+  - {sender: '28777', label: USPS, kind: courier, sender_type: shortcode}
+  - {sender: '262966', label: Amazon, kind: courier, sender_type: shortcode}
+  - {sender: UPS, kind: courier, sender_type: shortcode}
+  - {sender: FedEx, kind: courier, sender_type: shortcode}
+  - {sender: '24273', label: Chase, kind: bank, sender_type: shortcode}
+  - {sender: '73981', label: Bank of America, kind: bank, sender_type: shortcode}
+  - {sender: '93557', label: Wells Fargo, kind: bank, sender_type: shortcode}
+  - {sender: Capital One, kind: bank, sender_type: shortcode}
+  - {sender: '86753', label: Venmo, kind: bank, sender_type: shortcode}
+  - {sender: '729725', label: PayPal, kind: bank, sender_type: shortcode}
+  - {sender: Verizon, kind: telecom, sender_type: shortcode}
+  - {sender: T-Mobile, kind: telecom, sender_type: shortcode}
+  - {sender: "AT&T", kind: telecom, sender_type: shortcode}
+  - {sender: '22000', label: Google, kind: otp_service, sender_type: shortcode}
+  - {sender: Microsoft, kind: otp_service, sender_type: shortcode}
+  - {sender: "+1212...", kind: doctor, sender_type: number}
+  - {sender: '287898', label: CVS Pharmacy, kind: pharmacy, sender_type: shortcode}
+  - {sender: Walgreens, kind: pharmacy, sender_type: shortcode}
+  - {sender: DoorDash, kind: delivery_food, sender_type: shortcode}
+  - {sender: Uber Eats, kind: delivery_food, sender_type: shortcode}
+  - {sender: Uber, kind: ride_hailing, sender_type: shortcode}
+  - {sender: Lyft, kind: ride_hailing, sender_type: shortcode}
+  - {sender: Delta, kind: airline, sender_type: shortcode}
+  - {sender: United, kind: airline, sender_type: shortcode}
+  - {sender: Amtrak, kind: rail, sender_type: shortcode}
+  - {sender: Login.gov, kind: government, sender_type: shortcode}
+  - {sender: Target, kind: retail, sender_type: shortcode}
+  - {sender: Walmart, kind: retail, sender_type: shortcode}
+  - {sender: Con Edison, kind: utility, sender_type: shortcode}
+  - {sender: "PG&E", kind: utility, sender_type: shortcode}
+holidays:
+  - {date: "01-01", name: New Year's Day}
+  - {rule: "01-mon#3", name: Martin Luther King Jr. Day}
+  - {rule: "02-mon#3", name: Presidents' Day}
+  - {rule: "05-mon#-1", name: Memorial Day}
+  - {date: "06-19", name: Juneteenth}
+  - {date: "07-04", name: Independence Day}
+  - {rule: "09-mon#1", name: Labor Day}
+  - {rule: "10-mon#2", name: Columbus Day / Indigenous Peoples' Day}
+  - {date: "11-11", name: Veterans Day}
+  - {rule: "11-thu#4", name: Thanksgiving}
+  - {date: "12-25", name: Christmas Day}
+popular_apps:
+  - {package: com.facebook.orca, name: Messenger, category: messaging}
+  - {package: com.snapchat.android, name: Snapchat, category: messaging}
+  - {package: com.chase.sig.android, name: Chase, category: banking}
+  - {package: com.infonow.bofa, name: Bank of America, category: banking}
+  - {package: com.wf.wellsfargomobile, name: Wells Fargo, category: banking}
+  - {package: com.konylabs.capitalone, name: Capital One, category: banking}
+  - {package: com.citi.citimobile, name: Citi Mobile, category: banking}
+  - {package: com.discoverfinancial.mobile, name: Discover, category: banking}
+  - {package: com.americanexpress.android.acctsvcs.us, name: Amex, category: banking}
+  - {package: com.venmo, name: Venmo, category: banking}
+  - {package: com.squareup.cash, name: Cash App, category: banking}
+  - {package: com.paypal.android.p2pmobile, name: PayPal, category: banking}
+  - {package: com.robinhood.android, name: Robinhood, category: banking}
+  - {package: com.ubercab, name: Uber, category: transport}
+  - {package: me.lyft.android, name: Lyft, category: transport}
+  - {package: com.delta.mobile.android, name: Fly Delta, category: transport}
+  - {package: com.united.mobile.android, name: United Airlines, category: transport}
+  - {package: com.aa.android, name: American Airlines, category: transport}
+  - {package: com.amazon.mShop.android.shopping, name: Amazon Shopping, category: shopping}
+  - {package: com.walmart.android, name: Walmart, category: shopping}
+  - {package: com.target.ui, name: Target, category: shopping}
+  - {package: com.zillow.android.zillowmap, name: Zillow, category: shopping}
+  - {package: com.nytimes.android, name: NYTimes, category: news}
+  - {package: com.cnn.mobile.android.phone, name: CNN, category: news}
+  - {package: com.nextdoor, name: Nextdoor, category: news}
+  - {package: com.dd.doordash, name: DoorDash, category: food}
+  - {package: com.grubhub.android, name: Grubhub, category: food}
+  - {package: com.instacart.client, name: Instacart, category: food}
+  - {package: com.starbucks.mobilecard, name: Starbucks, category: food}
+  - {package: com.mcdonalds.app, name: McDonald's, category: food}
+  - {package: gov.irs, name: IRS2Go, category: government}
+  - {package: epic.mychart.android, name: MyChart, category: health}
+  - {package: com.cvs.launchers.cvs, name: CVS Health, category: health}
+  - {package: com.ups.mobile.android, name: UPS, category: shopping}
+  - {package: com.fedex.ida.android, name: FedEx, category: shopping}
+  - {package: com.vzw.hss.myverizon, name: My Verizon, category: telecom}
+  - {package: com.att.myWireless, name: "myAT&T", category: telecom}

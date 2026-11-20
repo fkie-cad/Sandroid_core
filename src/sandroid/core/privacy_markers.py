@@ -8,9 +8,9 @@ UUID or round a coordinate. This module turns each marker into the set of
 byte patterns ("needles") those transformations produce and finds them in a
 haystack.
 
-It is deterministic, has no third-party dependencies and keeps no state
-besides the immutable needle set, so one :class:`NeedleSet` can be shared by
-any number of threads.
+It is deterministic and keeps no state besides the immutable needle set and
+its Aho-Corasick automata (``ahocorasick_rs``, built once on the first scan),
+so one :class:`NeedleSet` can be shared by any number of threads.
 
 Example::
 
@@ -23,15 +23,21 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import struct
+import threading
 import urllib.parse
 import uuid
 from dataclasses import dataclass, replace
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
+import ahocorasick_rs
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
+
+logger = logging.getLogger(__name__)
 
 #: Marker kinds that shape which plain forms are generated.
 KINDS = (
@@ -151,11 +157,16 @@ class NeedleSet:
     """Immutable set of needles; :meth:`scan` finds them in a haystack."""
 
     def __init__(self, needles: Sequence[Needle]) -> None:
+        if any(not n.pattern for n in needles):
+            raise ValueError("a needle pattern must not be empty")
         self._folded = tuple(n for n in needles if n.folded)
         self._exact = tuple(n for n in needles if not n.folded)
         self.markers: tuple[Marker, ...] = tuple(
             dict.fromkeys(n.marker for n in needles)
         )
+        self._automata: _Automata | None = None
+        self._built = False
+        self._build_lock = threading.Lock()
 
     def __len__(self) -> int:
         return len(self._folded) + len(self._exact)
@@ -173,9 +184,12 @@ class NeedleSet:
     def scan(self, data: bytes | str) -> list[MarkerHit]:
         """Find every marker occurrence in ``data``.
 
-        Weaker matches of a marker that lie inside a stronger match of the
-        same marker (e.g. the 3-decimal form of a coordinate inside its
-        6-decimal form) are dropped, so each place is reported once.
+        Every occurrence of every needle is found, overlapping ones and
+        needles inside other needles included, at most
+        :data:`MAX_HITS_PER_NEEDLE` (the first ones) per needle. Weaker
+        matches of a marker that lie inside a stronger match of the same
+        marker (e.g. the 3-decimal form of a coordinate inside its 6-decimal
+        form) are dropped, so each place is reported once.
 
         Args:
             data: The haystack. ``str`` is encoded as UTF-8.
@@ -187,15 +201,31 @@ class NeedleSet:
             data = data.encode("utf-8", "surrogatepass")
         if not data:
             return []
-        hits: list[MarkerHit] = []
-        if self._folded:
-            _find_all(data.lower(), self._folded, hits)
-        if self._exact:
-            _find_all(data, self._exact, hits)
-        hits = _drop_contained(hits)
-        hits = _boost_groups(hits, self.markers)
-        hits.sort(key=lambda h: (h.offset, -h.length))
-        return hits
+        automata = self._compiled()
+        if automata is None:
+            return _finish(_find_hits(self, data), self.markers)
+        return _finish(automata.hits(data), self.markers)
+
+    def _compiled(self) -> _Automata | None:
+        """The automata, built on first use (a worker thread, not the UI).
+
+        ``None`` when the build failed: logged once, and every scan of this
+        set uses the per-needle loop instead of retrying the build.
+        """
+        if not self._built:
+            with self._build_lock:
+                if not self._built:
+                    try:
+                        self._automata = _Automata(self.needles)
+                    except Exception:
+                        logger.warning(
+                            "privacy markers: automaton build failed for %d "
+                            "needles; scanning needle by needle (slow)",
+                            len(self),
+                            exc_info=True,
+                        )
+                    self._built = True
+        return self._automata
 
 
 def build_needles(markers: Iterable[Marker]) -> NeedleSet:
@@ -430,6 +460,167 @@ def _coordinate_needles(marker: Marker) -> list[Needle]:
 
 
 # ----------------------------------------------------------------- scanning
+
+
+class _Automata:
+    """One Aho-Corasick automaton per case mode over the unique patterns.
+
+    Read-only after construction, so concurrent scans share it safely.
+    ``ahocorasick_rs`` releases the GIL while it searches (checked against
+    ahocorasick-rs 1.0.x: another thread kept ~85% of its speed).
+
+    Periodic patterns (``000000``, ``ababab``: the pattern repeats itself
+    within its own length) and patterns shorter than :data:`MIN_NEEDLE_LEN`
+    are left out of the automata and found with ``bytes.find``, at most
+    :data:`MAX_HITS_PER_NEEDLE` each: a run of the repeated bytes (zero pages
+    in binary files) would make the automaton report a match at nearly every
+    offset, every one built as a Python tuple before the cap applies. Any
+    other pattern can match again only more than half its length (3+ bytes)
+    after a match, which bounds its matches by the haystack length
+    (callers scan in chunks of 256 KiB).
+    """
+
+    def __init__(self, needles: Sequence[Needle]) -> None:
+        self._needles = tuple(needles)
+        self._folds = any(n.folded for n in self._needles)
+        # (folded, automaton, pattern index -> needle indices), folded first.
+        self._passes: list[
+            tuple[bool, ahocorasick_rs.BytesAhoCorasick, list[tuple[int, ...]]]
+        ] = []
+        # (folded, pattern, needle indices) of the patterns found with
+        # bytes.find: periodic ones and ones shorter than MIN_NEEDLE_LEN.
+        self._by_find: list[tuple[bool, bytes, tuple[int, ...]]] = []
+        for folded in (True, False):
+            owners: dict[bytes, list[int]] = {}
+            for index, needle in enumerate(self._needles):
+                if needle.folded is folded:
+                    owners.setdefault(needle.pattern, []).append(index)
+            regular: dict[bytes, tuple[int, ...]] = {}
+            for pattern, indices in owners.items():
+                if _needs_find(pattern):
+                    self._by_find.append((folded, pattern, tuple(indices)))
+                else:
+                    regular[pattern] = tuple(indices)
+            if regular:
+                # Standard match kind: the only one reporting overlapping
+                # matches. Contiguous NFA: at 73k patterns as fast as the
+                # default, ~10x less memory than a DFA (>1 GB), ~1.7x faster
+                # than the noncontiguous NFA for ~8% more memory.
+                automaton = ahocorasick_rs.BytesAhoCorasick(
+                    list(regular),
+                    matchkind=ahocorasick_rs.MatchKind.Standard,
+                    implementation=ahocorasick_rs.Implementation.ContiguousNFA,
+                )
+                self._passes.append((folded, automaton, list(regular.values())))
+
+    def hits(self, data: bytes) -> list[MarkerHit]:
+        """Raw hits in needle order, then offset order; capped per needle."""
+        lowered = data.lower() if self._folds else data
+        # A pattern's matches arrive in offset order (same length, reported
+        # by end), so its first MAX_HITS_PER_NEEDLE are the ones the
+        # reference loop finds.
+        found: list[tuple[int, list[int]]] = []
+        for folded, automaton, owners in self._passes:
+            offsets: dict[int, list[int]] = {}
+            for pattern, start, _end in automaton.find_matches_as_indexes(
+                lowered if folded else data, overlapping=True
+            ):
+                starts = offsets.get(pattern)
+                if starts is None:
+                    offsets[pattern] = [start]
+                elif len(starts) < MAX_HITS_PER_NEEDLE:
+                    starts.append(start)
+            for pattern, starts in offsets.items():
+                found += [(index, starts) for index in owners[pattern]]
+        for folded, pattern, indices in self._by_find:
+            starts = _find_starts(lowered if folded else data, pattern)
+            if starts:
+                found += [(index, starts) for index in indices]
+        found.sort(key=lambda item: item[0])
+        hits: list[MarkerHit] = []
+        for index, starts in found:
+            hits += _hits_of(self._needles[index], starts)
+        return hits
+
+
+def _needs_find(pattern: bytes) -> bool:
+    """Short, or repeats with a period of at most half its length."""
+    n = len(pattern)
+    if n < MIN_NEEDLE_LEN:
+        return True
+    half = n // 2
+    # A period p <= half puts the first n - half bytes again at offset p.
+    head = pattern[: n - half]
+    p = pattern.find(head, 1, half + len(head))
+    while p > 0:
+        if pattern[p:] == pattern[: n - p]:
+            return True
+        p = pattern.find(head, p + 1, half + len(head))
+    return False
+
+
+def _find_starts(haystack: bytes, pattern: bytes) -> list[int]:
+    """The first :data:`MAX_HITS_PER_NEEDLE` offsets of ``pattern``."""
+    starts: list[int] = []
+    index = haystack.find(pattern)
+    while index >= 0 and len(starts) < MAX_HITS_PER_NEEDLE:
+        starts.append(index)
+        index = haystack.find(pattern, index + 1)
+    return starts
+
+
+def _hits_of(needle: Needle, starts: Iterable[int]) -> list[MarkerHit]:
+    marker = needle.marker
+    length = len(needle.pattern)
+    return [
+        MarkerHit(
+            marker_id=marker.id,
+            kind=marker.kind,
+            label=marker.label,
+            tag=marker.tag,
+            transform=needle.transform,
+            confidence=needle.confidence,
+            offset=start,
+            length=length,
+        )
+        for start in starts
+    ]
+
+
+def _finish(hits: list[MarkerHit], markers: Sequence[Marker]) -> list[MarkerHit]:
+    """Raw hits (needle order, then offset order) -> what ``scan`` returns."""
+    if not hits:
+        return []
+    hits = _drop_contained(hits)
+    hits = _boost_groups(hits, markers)
+    hits.sort(key=lambda h: (h.offset, -h.length))
+    return hits
+
+
+def _find_hits(needles: NeedleSet, data: bytes) -> list[MarkerHit]:
+    """Raw hits with one ``bytes.find`` loop per needle (no automaton)."""
+    hits: list[MarkerHit] = []
+    folded = [n for n in needles.needles if n.folded]
+    exact = [n for n in needles.needles if not n.folded]
+    if folded:
+        _find_all(data.lower(), folded, hits)
+    if exact:
+        _find_all(data, exact, hits)
+    return hits
+
+
+def _reference_scan(needles: NeedleSet, data: bytes | str) -> list[MarkerHit]:
+    """:meth:`NeedleSet.scan` with one ``bytes.find`` loop per needle.
+
+    The matcher before the automata, kept so tests can check the two agree
+    hit for hit, and the fallback when an automaton cannot be built. Slow:
+    linear in the number of needles.
+    """
+    if isinstance(data, str):
+        data = data.encode("utf-8", "surrogatepass")
+    if not data:
+        return []
+    return _finish(_find_hits(needles, data), needles.markers)
 
 
 def _find_all(

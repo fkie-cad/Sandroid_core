@@ -920,8 +920,10 @@ def test_apply_seeds_everything_and_second_apply_writes_nothing(service, device)
     assert plan.infos["imsi"].current == STOCK_SIM["imsi"]
     assert device.props["gsm.sim.operator.alpha"] == "T-Mobile"
     assert not [w for w in device.writes if "gsm.sim" in w or "airplane" in w]
-    # The phone number fits adb emu phonenumber: the fallback, read back.
-    assert st["phone_number"] == ("verified", "")
+    # A restart from Sandroid sets the phone number: no adb emu phonenumber
+    # (it would rewrite the AVD's host-side SIM profile).
+    assert st["phone_number"] == ("pending", ident.NEEDS_EMULATOR_START)
+    assert not [w for w in device.writes if "phonenumber" in w]
     assert st["gps"] == ("applied", "unverified")  # no app ran a GPS session
     assert st["imei"][0] == "hook-only"
     assert st["build_model"] == ("skipped", "disabled")
@@ -932,7 +934,6 @@ def test_apply_seeds_everything_and_second_apply_writes_nothing(service, device)
     assert device.fs[SSAID_FILE].startswith(b"ABX\0")  # re-encoded
     assert device.settings["device_name"] == "Maras Pixel 3f9a1c07"
     assert device.props["persist.sys.locale"] == "de-DE"
-    assert device.emu_state["phone"].startswith("1520")
     lon, lat, _alt = device.emu_state["geo"].split()
     assert lat.endswith("0001")
     assert lon.endswith("0001")
@@ -969,7 +970,209 @@ def test_apply_seeds_everything_and_second_apply_writes_nothing(service, device)
     assert device.writes == []
     assert len(device.calls) == 1
     assert not lines2
-    assert again.infos["phone_number"].status == "verified"
+    assert again.infos["phone_number"].status == "pending"
+
+
+def test_ensure_applied_is_nothing_with_identity_mode_off(service, device, monkeypatch):
+    from sandroid.config import get_config
+
+    monkeypatch.setattr(get_config().identity, "mode", "off")
+    assert service.ensure_applied(SERIAL) is None
+    assert device.calls == []
+    monkeypatch.setattr(get_config().identity, "mode", "profile")
+    monkeypatch.setattr(get_config().identity, "profile", "")
+    assert service.ensure_applied(SERIAL) is None
+    assert device.calls == []
+
+
+def _restart_policy(monkeypatch, policy: str) -> None:
+    from sandroid.config import get_config
+
+    monkeypatch.setattr(get_config().identity, "restart", policy)
+
+
+def test_ensure_applied_applies_then_costs_one_read_and_no_writes(
+    service, device, monkeypatch
+):
+    _restart_policy(monkeypatch, "always")
+    plan = service.ensure_applied(SERIAL)
+    assert plan is not None
+    # No app: the framework value is the locale (the Android ID waits for one).
+    assert plan.infos["locale"].status == "verified"
+    assert plan.infos["device_name"].status == "verified"
+    assert service.restarts_seen == [SERIAL]  # the framework window ran
+    device.calls.clear()
+    device.writes.clear()
+    again = service.ensure_applied(SERIAL)
+    assert again is not None
+    assert device.writes == []
+    assert len(device.calls) == 1  # one preflight
+    assert again.infos["device_name"].status == "verified"
+    assert service._time_left() is None  # the budget ends with the call
+
+
+def test_ensure_applied_starts_no_restart_the_budget_cannot_hold(
+    service, device, monkeypatch
+):
+    _restart_policy(monkeypatch, "always")
+    pid = device.pid
+    plan = service.ensure_applied(SERIAL, budget_s=ident.ENSURE_WINDOW_MIN_S - 1)
+    assert plan is not None
+    assert device.pid == pid  # the framework was never stopped
+    assert RESTART_MARKER not in device.fs
+    assert service.restarts_seen == []
+    info = plan.infos["locale"]
+    assert (info.status, info.reason) == ("pending", ident.OUT_OF_TIME)
+    assert info.reason.startswith("not applied: ")  # pending, not skipped
+    # The live values are applied all the same.
+    assert plan.infos["device_name"].status == "verified"
+    # Not done: the next preparation with time to spare restarts.
+    again = service.ensure_applied(SERIAL)
+    assert again.infos["locale"].status == "verified"
+    assert service.restarts_seen == [SERIAL]
+
+
+@pytest.mark.parametrize("policy", ["ask", "never"])
+def test_ensure_applied_leaves_the_restart_to_the_app_start(
+    service, device, monkeypatch, policy
+):
+    """Only restart = "always" opens a window during device preparation;
+    under "ask" the first app start's pre-start step asks as usual.
+    """
+    _restart_policy(monkeypatch, policy)
+    pid = device.pid
+    plan = service.ensure_applied(SERIAL)
+    assert device.pid == pid
+    assert service.restarts_seen == []
+    info = plan.infos["locale"]
+    assert (info.status, info.reason) == ("pending", ident.NEEDS_RESTART)
+    assert plan.infos["device_name"].status == "verified"
+
+
+def test_ensure_applied_names_a_running_apply(service, device):
+    with service._apply_lock:
+        with pytest.raises(
+            ident.IdentityApplyError, match="another identity apply is running"
+        ):
+            service.ensure_applied(SERIAL, budget_s=0.01)
+    assert device.calls == []
+
+
+def test_a_started_window_waits_the_full_restart_timeout(service, device, monkeypatch):
+    """The budget decides whether a window starts; after ``stop`` the wait
+    is the full RESTART_TIMEOUT_S and the recovery runs when it is back.
+    """
+    _restart_policy(monkeypatch, "always")
+    now = [0.0]
+    service._clock = lambda: now[0]
+    service._sleep = lambda s: now.__setitem__(0, now[0] + s)
+    real = device._shell
+    slow = [60]  # 60 polls of 2 s: back after 120 s, past the 100 s budget
+
+    def shell(script):
+        if script.startswith("pidof system_server") and slow[0]:
+            slow[0] -= 1
+            return ""
+        return real(script)
+
+    monkeypatch.setattr(device, "_shell", shell)
+    plan = service.ensure_applied(SERIAL, budget_s=100.0)
+    assert now[0] > 100.0  # the wait outlasted the budget
+    assert service.restarts_seen == [SERIAL]
+    assert RESTART_MARKER not in device.fs
+    assert plan.infos["locale"].status != "failed"
+
+
+def test_a_plan_never_overwrites_an_apply_s_newer_statuses(
+    service, device, monkeypatch
+):
+    service.apply(SERIAL, "com.example.app")  # statuses stamped at NOW
+
+    def stamps():
+        return {s.at for s in service.statuses()}
+
+    assert stamps() == {NOW}
+    real = service.preflight
+
+    def apply_meanwhile(*a, **kw):
+        state = real(*a, **kw)
+        with service._lock:
+            service._applied[SERIAL].gen += 1  # an apply finished meanwhile
+        return state
+
+    monkeypatch.setattr(service, "preflight", apply_meanwhile)
+    service.plan(SERIAL)
+    assert stamps() == {NOW}  # dropped: memory is newer
+    monkeypatch.setattr(service, "preflight", real)
+    with service._apply_lock:  # an apply runs
+        service.plan(SERIAL)
+    assert stamps() == {NOW}
+    assert not service.apply_running()
+    service.plan(SERIAL)
+    assert stamps() != {NOW}  # a plain read publishes
+
+
+def test_a_verify_during_an_apply_keeps_the_apply_s_statuses(
+    service, device, monkeypatch
+):
+    """The old ``v`` race: a verify that read before an apply finished must
+    not publish its older read over the apply's statuses.
+    """
+    service.apply(SERIAL, "com.example.app")
+
+    def name_status():
+        return next(s.status for s in service.statuses() if s.id == "device_name")
+
+    assert name_status() == "verified"
+    device.settings["device_name"] = "someone else"  # what the old read saw
+    real = service.preflight
+
+    def apply_meanwhile(*a, **kw):
+        state = real(*a, **kw)
+        with service._lock:
+            service._applied[SERIAL].gen += 1
+        return state
+
+    monkeypatch.setattr(service, "preflight", apply_meanwhile)
+    service.verify(SERIAL)
+    assert name_status() == "verified"
+    monkeypatch.setattr(service, "preflight", real)
+    service.verify(SERIAL)
+    assert name_status() != "verified"  # a plain verify publishes its read
+
+
+def test_a_plan_that_requires_an_answer_publishes_nothing_offline(
+    service, device, monkeypatch
+):
+    service.apply(SERIAL, "com.example.app")
+    before = {s.id: (s.status, s.at) for s in service.statuses()}
+    monkeypatch.setattr(ident, "_send", lambda *a, **kw: ("", "device offline"))
+    with pytest.raises(ident.IdentityApplyError, match="did not answer"):
+        service.plan(SERIAL, require_answer=True)
+    assert {s.id: (s.status, s.at) for s in service.statuses()} == before
+
+
+def test_ensure_applied_caps_the_waits_to_the_budget(service, device):
+    now = [0.0]
+    service._clock = lambda: now[0]
+    service._sleep = lambda s: now.__setitem__(0, now[0] + s)
+    service._call.deadline = 5.0
+    try:
+        assert service._deadline(ident.PROVIDER_WAIT_DEADLINE_S) == 5.0
+        assert service._deadline(1.0) == 1.0
+        assert service._capped(120.0, floor=10.0) == 10.0
+    finally:
+        service._call.deadline = None
+    assert service._deadline(1.0) == 1.0
+    assert service._capped(120.0, floor=10.0) == 120.0
+
+
+def test_ensure_applied_raises_when_the_device_does_not_answer(
+    service, device, monkeypatch
+):
+    monkeypatch.setattr(ident, "_send", lambda *a, **kw: ("", "no device"))
+    with pytest.raises(ident.IdentityApplyError, match="did not answer"):
+        service.ensure_applied(SERIAL)
 
 
 def service_folder(applied_line: dict) -> Path:
@@ -1017,6 +1220,108 @@ def test_crash_after_stop_resumes(service, device):
     assert device.ssaid["com.example.app"].startswith("3f9a1c07")
     recover = [x for x in lines if x["kind"] == "restart"]
     assert recover[0]["data"]["recovery"] is True
+
+
+def test_a_framework_that_came_back_late_still_gets_the_frida_recovery(
+    service, device, monkeypatch
+):
+    """``_end_window`` timed out: the marker stays, the recovery never ran.
+
+    The next apply finds system_server up with the marker still there: it
+    runs the Frida/proxy recovery once and drops the marker.
+    """
+    real_wait = service._wait_framework
+    monkeypatch.setattr(service, "_wait_framework", lambda dev, old: False)
+    service.apply(SERIAL, "com.example.app")
+    assert RESTART_MARKER in device.fs
+    assert device.running  # the framework came back after all
+    assert service.restarts_seen == []
+    monkeypatch.setattr(service, "_wait_framework", real_wait)
+    with timeline.capture() as lines:
+        service.apply(SERIAL, "com.example.app")
+    assert service.restarts_seen == [SERIAL]
+    assert RESTART_MARKER not in device.fs
+    assert any(x["data"].get("recovery") for x in lines if x["kind"] == "restart")
+
+
+def test_a_down_framework_is_started_even_while_an_app_start_runs(
+    service, device, app_start
+):
+    """No app start gets far without the framework: ``start`` regardless of
+    the lifecycle lock; only the Frida recovery waits for it (marker kept).
+    """
+    device.crash_when_stopped = 2  # the link stays down for the `start` too
+    with pytest.raises(RuntimeError, match="adb connection lost"):
+        service.apply(SERIAL, "com.example.app")
+    assert not device.running
+    assert RESTART_MARKER in device.fs
+    app_start.busy = True
+    service.apply(SERIAL, "com.example.app")
+    assert device.running  # started although the lock was refused
+    assert RESTART_MARKER in device.fs  # the recovery is still owed
+    assert service.restarts_seen == []
+    app_start.busy = False
+    service.apply(SERIAL, "com.example.app")
+    assert service.restarts_seen  # recovered (this boot, a new system_server)
+    assert RESTART_MARKER not in device.fs
+
+
+@pytest.mark.parametrize(
+    ("fields", "recovers"),
+    [
+        ("", False),  # an older marker without boot id and PID
+        ("boot=other-boot pid=999", False),  # written in another boot
+        ("boot={boot} pid={pid}", False),  # the same system_server: no restart
+        ("boot={boot} pid=999", True),  # restarted in this boot, unrecovered
+    ],
+)
+def test_a_marker_recovers_only_an_unrecovered_restart_of_this_boot(
+    service, device, fields, recovers
+):
+    boot = device.fs[ident.BOOT_ID_FILE].decode().strip()
+    stamp = f"fp 1700000000 android_id {fields}".format(boot=boot, pid=device.pid)
+    device.fs[RESTART_MARKER] = stamp.encode()
+    state = service.preflight(SERIAL, (), service.active_profile())
+    assert state.marker.strip() == stamp.strip()
+    pid = device.pid
+    with timeline.capture() as lines:
+        service._recover(ident._Device(SERIAL), state)
+    assert RESTART_MARKER not in device.fs
+    assert device.pid == pid  # never restarted
+    assert service.restarts_seen == ([SERIAL] if recovers else [])
+    # Only a real resume is announced; a stale marker is removed quietly.
+    resumed = [x for x in lines if x["kind"] == "restart"]
+    assert bool(resumed) == recovers
+
+
+def test_the_restart_marker_names_the_boot_and_the_old_system_server(
+    service, device, monkeypatch
+):
+    monkeypatch.setattr(service, "_wait_framework", lambda dev, old: False)
+    pid = device.pid
+    service.apply(SERIAL, "com.example.app")
+    boot = device.fs[ident.BOOT_ID_FILE].decode().strip()
+    assert ident._marker_fields(device.fs[RESTART_MARKER].decode()) == (
+        boot,
+        str(pid),
+    )
+
+
+def test_recovery_waits_while_an_app_start_holds_the_lifecycle_lock(
+    service, device, monkeypatch, app_start
+):
+    monkeypatch.setattr(service, "_wait_framework", lambda dev, old: False)
+    service.apply(SERIAL, "com.example.app")
+    assert RESTART_MARKER in device.fs
+    monkeypatch.setattr(service, "_wait_framework", lambda dev, old: True)
+    app_start.busy = True
+    service.apply(SERIAL, "com.example.app")
+    assert RESTART_MARKER in device.fs  # left for the next apply
+    assert service.restarts_seen == []
+    app_start.busy = False
+    service.apply(SERIAL, "com.example.app")
+    assert RESTART_MARKER not in device.fs
+    assert service.restarts_seen == [SERIAL]
 
 
 def _cmds(device) -> list[list[str]]:
@@ -1302,7 +1607,7 @@ def app_start(monkeypatch):
     hooks: list = []
 
     @dataclass(frozen=True)
-    class PreSpawnPlan:
+    class PreStartPlan:
         description: str
         disruptive: bool
         apply: object
@@ -1318,11 +1623,11 @@ def app_start(monkeypatch):
             raise AppStartError("another app start is in progress")
         yield
 
-    module.PreSpawnPlan = PreSpawnPlan
+    module.PreStartPlan = PreStartPlan
     module.AppStartError = AppStartError
     module.lifecycle_lock = lifecycle_lock
-    module.register_pre_spawn_hook = hooks.append
-    module.unregister_pre_spawn_hook = hooks.remove
+    module.register_pre_start_step = hooks.append
+    module.unregister_pre_start_step = hooks.remove
     module.hooks = hooks
     monkeypatch.setitem(sys.modules, "sandroid.services.app_start", module)
     from sandroid.core.adb import Adb
@@ -1332,19 +1637,19 @@ def app_start(monkeypatch):
 
 
 def test_pre_spawn_hook_is_idempotent(service, device, app_start):
-    assert service.install_pre_spawn_hook()
-    assert service.install_pre_spawn_hook()
+    assert service.install_pre_start_step()
+    assert service.install_pre_start_step()
     assert len(app_start.hooks) == 1
     hook = app_start.hooks[0]
     plan = hook("com.example.app")
-    assert isinstance(plan, app_start.PreSpawnPlan)
+    assert isinstance(plan, app_start.PreStartPlan)
     assert plan.disruptive
     assert "mara-de" in plan.description
     plan.apply()
     assert hook("com.example.app") is None  # no dialog on every start
     other = hook("com.other.app")
     assert other is not None
-    service.uninstall_pre_spawn_hook()
+    service.uninstall_pre_start_step()
     assert app_start.hooks == []
 
 
@@ -1352,24 +1657,24 @@ def test_pre_spawn_apply_raises_on_failure_and_is_off_without_mode(
     service, device, app_start, monkeypatch
 ):
     device.ignore.add("device_name")
-    plan = service.pre_spawn("com.example.app")
+    plan = service.pre_start("com.example.app")
     with pytest.raises(ident.IdentityApplyError, match="Device name"):
         plan.apply()
-    assert service.pre_spawn("com.example.app") is not None
+    assert service.pre_start("com.example.app") is not None
     monkeypatch.setattr(service.config(), "mode", "off")
-    assert service.pre_spawn("com.example.app") is None
+    assert service.pre_start("com.example.app") is None
 
 
 def test_restart_never_makes_the_plan_non_disruptive(service, device, app_start,
                                                      monkeypatch):  # fmt: skip
     monkeypatch.setattr(service.config(), "restart", "never")
-    plan = service.pre_spawn("com.example.app")
+    plan = service.pre_start("com.example.app")
     assert not plan.disruptive
     plan.apply()
     assert device.pid == 1000
     # The Android ID and the locale stayed pending: not done, so every start
     # tries again (never a restart while the policy says never).
-    again = service.pre_spawn("com.example.app")
+    again = service.pre_start("com.example.app")
     assert again is not None
     assert not again.disruptive
     assert service.applied_state("com.example.app") == "not_applied"
@@ -1706,22 +2011,22 @@ def test_a_failed_sim_value_never_blocks_a_start_through_app_start(
     service.save(profile)
     _launched(service, device)
     device.modem = dict(STOCK_SIM)  # the radio keeps the old SIM
-    assert service.install_pre_spawn_hook()
+    assert service.install_pre_start_step()
     try:
-        plans = real._collect_pre_spawn("com.example.app", "the app")
+        plans = real._collect_pre_start("com.example.app", "the app")
         assert len(plans) == 1
-        assert isinstance(plans[0], real.PreSpawnPlan)
+        assert isinstance(plans[0], real.PreStartPlan)
         assert not plans[0].disruptive  # the SIM toggle restarts nothing
-        real._apply_pre_spawn(plans, "com.example.app")  # no AppStartError
+        real._apply_pre_start(plans, "com.example.app")  # no AppStartError
         assert device.airplane == ["enable", "disable"]
         infos = {i.id: i for i in service.statuses()}
         assert infos["imsi"].status == "failed"
         assert infos["imsi"].sim_launch
         assert "com.example.app" in _record(device)["done"]
         # Done: the next start of the app has nothing to do.
-        assert real._collect_pre_spawn("com.example.app", "the app") == []
+        assert real._collect_pre_start("com.example.app", "the app") == []
     finally:
-        service.uninstall_pre_spawn_hook()
+        service.uninstall_pre_start_step()
 
 
 def test_a_snapshot_with_the_old_sim_gets_one_airplane_toggle(service, device):
@@ -1755,12 +2060,12 @@ def test_a_launch_checked_with_airplane_mode_on_is_not_planned_again(
     _launched(service, device)
     device.props["ro.boot.qemu.avd_name"] = "Dev1"
     device.settings["airplane_mode_on"] = "1"
-    plan = service.pre_spawn("com.example.app")
+    plan = service.pre_start("com.example.app")
     assert plan is not None
     plan.apply()
     assert not device.airplane
     for _ in range(3):
-        assert service.pre_spawn("com.example.app") is None
+        assert service.pre_start("com.example.app") is None
 
 
 def test_a_new_launch_with_a_same_country_sim_is_due(service, device, app_start):
@@ -1776,18 +2081,18 @@ def test_a_new_launch_with_a_same_country_sim_is_due(service, device, app_start)
     device.props["ro.boot.qemu.avd_name"] = "Dev1"
     device.props["gsm.sim.operator.numeric"] = sim.mccmnc
     service.apply(SERIAL, "com.example.app")
-    assert service.pre_spawn("com.example.app") is None
+    assert service.pre_start("com.example.app") is None
     device.token = "launch-2"  # noqa: S105 - a launch id, not a secret
     device.sim = {
         **dict(STOCK_SIM),
         "imsi": sim.mccmnc + "0000000000"[: 15 - len(sim.mccmnc)],
     }
     device.airplane.clear()
-    plan = service.pre_spawn("com.example.app")
+    plan = service.pre_start("com.example.app")
     assert plan is not None
     plan.apply()
     assert device.airplane == ["enable", "disable"]
-    assert service.pre_spawn("com.example.app") is None
+    assert service.pre_start("com.example.app") is None
 
 
 def test_a_launch_whose_sim_verifies_is_not_planned_again(service, device, app_start):
@@ -1802,12 +2107,12 @@ def test_a_launch_whose_sim_verifies_is_not_planned_again(service, device, app_s
     device.sim = dict(device.modem)  # already read at boot
     device.props["gsm.sim.operator.numeric"] = sim.mccmnc
     device.props["ro.boot.qemu.avd_name"] = "Dev1"
-    plan = service.pre_spawn("com.example.app")
+    plan = service.pre_start("com.example.app")
     assert plan is not None
     plan.apply()
     assert not device.airplane
     for _ in range(3):
-        assert service.pre_spawn("com.example.app") is None
+        assert service.pre_start("com.example.app") is None
 
 
 def test_started_with_compares_only_the_values_the_profile_sets():
@@ -1874,11 +2179,11 @@ def test_the_toggle_runs_once_per_launch_and_a_mismatch_fails(
     # A failed SIM value does not block app starts and the app counts as
     # done: no re-apply on the next start.
     assert "com.example.app" in service._applied[SERIAL].done
-    assert service.pre_spawn("com.example.app") is None
+    assert service.pre_start("com.example.app") is None
     # Later applies neither toggle nor wait again, and do not raise.
     device.airplane.clear()
     device.calls.clear()
-    service.pre_spawn("com.example.two").apply()
+    service.pre_start("com.example.two").apply()
     assert not device.airplane
     assert not [c for c in device.calls if "@@ssaid@@" not in c and "@@props@@" in c]
     assert service.statuses()
@@ -1905,14 +2210,14 @@ def test_a_quickboot_snapshot_with_the_old_sim_is_not_done(service, device, app_
     device.props["gsm.sim.operator.numeric"] = sim.mccmnc
     device.props["ro.boot.qemu.avd_name"] = "Dev1"
     service.apply(SERIAL, "com.example.app")
-    assert service.pre_spawn("com.example.app") is None
+    assert service.pre_start("com.example.app") is None
     # The emulator is started again from a snapshot taken before the SIM
     # refresh: same boot id, new launch token, the old SIM in the guest.
     device.token = "launch-2"  # noqa: S105 - a launch id, not a secret
     device.sim = dict(STOCK_SIM)  # cached by the snapshot
     device.props["gsm.sim.operator.numeric"] = "310260"
     device.airplane.clear()
-    plan = service.pre_spawn("com.example.app")
+    plan = service.pre_start("com.example.app")
     assert plan is not None
     assert not plan.disruptive
 
@@ -1922,11 +2227,11 @@ def test_a_quickboot_snapshot_with_the_old_sim_is_not_done(service, device, app_
     device.on_airplane = refreshed
     plan.apply()
     assert device.airplane == ["enable", "disable"]
-    assert service.pre_spawn("com.example.app") is None
+    assert service.pre_start("com.example.app") is None
     # Not started with the profile's SIM: a toggle would not help, no plan.
     device.launched = None
     device.props["gsm.sim.operator.numeric"] = "310260"
-    assert service.pre_spawn("com.example.app") is None
+    assert service.pre_start("com.example.app") is None
 
 
 def test_a_failed_toggle_switches_airplane_mode_off_again(service, device):
@@ -1998,7 +2303,27 @@ def test_a_sim_the_emulator_did_not_start_with_stays_pending(service, device):
     # Pending until the emulator restarts: no re-apply on every app start.
     assert "com.example.app" in service._applied[SERIAL].done
     assert "com.example.app" in _record(device)["done"]
-    assert service.pre_spawn("com.example.app") is None
+    assert service.pre_start("com.example.app") is None
+
+
+def test_the_phone_number_fallback_only_where_a_restart_would_not_help(service, device):
+    # A restart from Sandroid would set it: pending, the emulator never gets
+    # adb emu phonenumber (it rewrites <avd>/modem_simulator on the host).
+    plan = service.apply(SERIAL, "com.example.app")
+    info = plan.infos["phone_number"]
+    assert (info.status, info.reason) == ("pending", ident.NEEDS_EMULATOR_START)
+    assert info.sim_launch
+    assert not [w for w in device.writes if "phonenumber" in w]
+    assert "phone" not in device.emu_state
+
+    # A restart would not help and the number fits: the fallback, read back.
+    device.blocker = ident.identity_sim.OWN_SYSDIR
+    service._applied.clear()
+    plan = service.apply(SERIAL, "com.example.app")
+    info = plan.infos["phone_number"]
+    assert (info.status, info.reason) == ("verified", "")
+    assert device.emu_state["phone"].startswith("1520")
+    assert len(device.emu_state["phone"]) <= 11
 
 
 def test_no_restart_advice_when_a_restart_would_not_help(service, device):
@@ -2151,6 +2476,7 @@ def test_phone_markers_carry_the_number_the_sim_carries(number, value, forms):
 
 def test_the_emulator_phone_number_fallback_is_no_sim_launch_value(service, device):
     # adb emu phonenumber can be retried: its failure still blocks as before.
+    device.blocker = ident.identity_sim.OWN_SYSDIR
     plan = service.plan(SERIAL, "com.example.app")
     assert not plan.infos["phone_number"].sim_launch
     assert plan.infos["imsi"].sim_launch
@@ -2182,7 +2508,7 @@ def test_a_toggle_without_answer_is_tried_once_more(
     assert plan.infos["imsi"].reason == ident.SIM_TOGGLE_RETRY
     assert device.airplane == ["disable"]  # switched off again
     # Not done: the next start applies again, and tries once more.
-    assert service.pre_spawn("com.example.app") is not None
+    assert service.pre_start("com.example.app") is not None
     plan = service.apply(SERIAL, "com.example.app")
     assert len(tries) == 2
     assert plan.infos["imsi"].status == "failed"
@@ -2192,7 +2518,7 @@ def test_a_toggle_without_answer_is_tried_once_more(
     # Final: later starts do not plan for this launch again.
     device.props["ro.boot.qemu.avd_name"] = "Dev1"
     for _ in range(3):
-        assert service.pre_spawn("com.example.app") is None
+        assert service.pre_start("com.example.app") is None
 
 
 def test_a_snapshot_load_allows_a_new_toggle(service, device, monkeypatch):
@@ -2294,28 +2620,28 @@ def test_a_fresh_service_reads_the_record_before_a_start(service, device, app_st
     fresh = _fresh()
     device.calls.clear()
     device.writes.clear()
-    assert fresh.pre_spawn(PKG) is None
+    assert fresh.pre_start(PKG) is None
     assert len(device.calls) == 1  # one cheap read, nothing else
     assert device.record_reads == 1
     assert device.writes == []
     assert fresh.applied_state(PKG) == "applied"
     # A package the record does not know needs an apply (its Android ID).
-    plan = fresh.pre_spawn("com.other.app")
+    plan = fresh.pre_start("com.other.app")
     assert plan is not None
     assert plan.disruptive
 
 
 def test_the_record_is_the_truth_after_a_snapshot_load(service, device, app_start):
     service.apply(SERIAL, PKG)
-    assert service.pre_spawn(PKG) is None
+    assert service.pre_start(PKG) is None
     # A snapshot from before the apply: no record (memory still says done).
     saved = device.fs.pop(ident.APPLIED_FILE)
-    plan = service.pre_spawn(PKG)
+    plan = service.pre_start(PKG)
     assert plan is not None
     assert plan.disruptive
     assert service.applied_state(PKG) == "not_applied"
     device.fs[ident.APPLIED_FILE] = saved
-    assert service.pre_spawn(PKG) is None
+    assert service.pre_start(PKG) is None
 
 
 def test_without_an_answer_pre_spawn_applies(service, device, app_start):
@@ -2323,11 +2649,11 @@ def test_without_an_answer_pre_spawn_applies(service, device, app_start):
     device.record_down = True
     # The device did not answer: memory may be stale, so apply, but the
     # memory still says no framework restart is pending.
-    plan = service.pre_spawn(PKG)
+    plan = service.pre_start(PKG)
     assert plan is not None
     assert not plan.disruptive
     assert plan.description == "apply identity profile mara-de"
-    plan = _fresh().pre_spawn(PKG)
+    plan = _fresh().pre_start(PKG)
     assert plan is not None
     assert plan.disruptive  # nothing known: conservative
 
@@ -2339,14 +2665,14 @@ def test_a_reboot_makes_the_package_pending_but_not_disruptive(
     pid = device.pid
     device.fs[ident.BOOT_ID_FILE] = b"boot-2\n"
     for svc in (service, _fresh()):
-        plan = svc.pre_spawn(PKG)
+        plan = svc.pre_start(PKG)
         assert plan is not None
         # The Android ID (a file) and the locale (persistent) are still there.
         assert not plan.disruptive
     plan.apply()
     assert device.pid == pid  # no framework restart
     assert _record(device)["boot_id"] == "boot-2"
-    assert service.pre_spawn(PKG) is None
+    assert service.pre_start(PKG) is None
 
 
 def test_a_reboot_loses_volatile_framework_values(service, device, app_start):
@@ -2355,11 +2681,11 @@ def test_a_reboot_loses_volatile_framework_values(service, device, app_start):
     service.save(profile)
     service.apply(SERIAL, PKG)
     assert _record(device)["framework"] == {"build_model": True, "locale": False}
-    assert _fresh().pre_spawn(PKG) is None
+    assert _fresh().pre_start(PKG) is None
     device.fs[ident.BOOT_ID_FILE] = b"boot-2\n"
     device.props["ro.product.model"] = "sdk_gphone64_arm64"  # resetprop is gone
     fresh = _fresh()
-    plan = fresh.pre_spawn(PKG)
+    plan = fresh.pre_start(PKG)
     assert plan is not None
     assert plan.disruptive
     assert set(fresh._applied[SERIAL].settled) == {"locale"}
@@ -2369,7 +2695,7 @@ def test_a_new_fingerprint_means_not_applied(service, device, app_start):
     service.apply(SERIAL, PKG)
     service.regenerate(service.config().profile)
     fresh = _fresh()
-    plan = fresh.pre_spawn(PKG)
+    plan = fresh.pre_start(PKG)
     assert plan is not None
     assert plan.disruptive
     assert fresh.applied_state(PKG) == "not_applied"
@@ -2380,13 +2706,13 @@ def test_disruptive_only_while_a_framework_value_is_pending(service, device, app
     service.apply(SERIAL, PKG)
     assert _record(device)["done"] == []
     for svc in (service, _fresh()):
-        plan = svc.pre_spawn(PKG)
+        plan = svc.pre_start(PKG)
         assert plan is not None
         assert not plan.disruptive  # Android ID and locale are on the device
-        assert svc.pre_spawn("com.other.app").disruptive  # a new Android ID
+        assert svc.pre_start("com.other.app").disruptive  # a new Android ID
     # An interrupted restart window: the next apply restarts.
     device.fs[RESTART_MARKER] = b"x 1 android_id"
-    assert service.pre_spawn(PKG).disruptive
+    assert service.pre_start(PKG).disruptive
 
 
 def test_applied_state_hydrates_in_the_background(
@@ -2488,7 +2814,7 @@ def test_a_start_never_restarts_unannounced(service, device, app_start):
     pid = device.pid
     device.fs[ident.BOOT_ID_FILE] = b"boot-2\n"  # reboot: done is gone
     device.props["persist.sys.locale"] = "en-US"
-    plan = service.pre_spawn(PKG)
+    plan = service.pre_start(PKG)
     assert not plan.disruptive
     # The locale stays pending: no restart, and the app does not start.
     with pytest.raises(ident.IdentityApplyError, match="start the app again"):
@@ -2497,7 +2823,7 @@ def test_a_start_never_restarts_unannounced(service, device, app_start):
     assert device.props["persist.sys.locale"] == "en-US"
     assert PKG not in _record(device)["done"]
     assert "locale" not in _record(device)["framework"]
-    assert service.pre_spawn(PKG).disruptive
+    assert service.pre_start(PKG).disruptive
 
 
 def test_hydration_backs_off_while_an_apply_runs(service, device):
@@ -2576,7 +2902,7 @@ def test_a_failed_record_write_removes_or_marks_the_record(service, device, app_
     assert ident.APPLIED_FILE not in device.fs
     assert SERIAL not in service._record_dirty
     fresh = _fresh()
-    assert fresh.pre_spawn(PKG) is not None
+    assert fresh.pre_start(PKG) is not None
     # Even the removal fails: the stale record is ignored until a write works.
     stale = ident.json.dumps(
         dict(_stale_record(service), done=[PKG, "com.other.app"])
@@ -2587,7 +2913,7 @@ def test_a_failed_record_write_removes_or_marks_the_record(service, device, app_
     service.apply(SERIAL, PKG)
     assert device.fs[ident.APPLIED_FILE] == stale
     assert SERIAL in service._record_dirty
-    service.pre_spawn("com.other.app")
+    service.pre_start("com.other.app")
     assert "com.other.app" not in service._applied[SERIAL].done
     assert service.applied_state("com.other.app") == "not_applied"
     device.fail_cmds.clear()
@@ -2607,13 +2933,13 @@ def test_a_reinstalled_app_is_not_done_and_not_seeded(service, device, app_start
     assert _record(device)["installs"] == {PKG: device.install(PKG)}
     device.reinstall(PKG)
     for svc in (service, _fresh()):
-        plan = svc.pre_spawn(PKG)
+        plan = svc.pre_start(PKG)
         assert plan is not None
         assert plan.disruptive  # its new Android ID needs a restart
         assert PKG not in svc._applied[SERIAL].seeded
     plan.apply()
     assert device.ssaid[PKG].startswith(TOKEN)
-    assert service.pre_spawn(PKG) is None
+    assert service.pre_start(PKG) is None
 
 
 def test_done_needs_the_android_id_seeded(service, device, app_start):
@@ -2622,7 +2948,7 @@ def test_done_needs_the_android_id_seeded(service, device, app_start):
     assert record["done"] == []
     assert record["ssaids"] == {}
     assert "locale" not in record["framework"]
-    plan = _fresh().pre_spawn(PKG)
+    plan = _fresh().pre_start(PKG)
     assert plan.disruptive
 
 
@@ -2635,21 +2961,21 @@ def test_structural_failures_do_not_make_starts_disruptive(service, device, app_
     assert plan.infos["build_model"].reason == ident.NO_RESETPROP
     assert _record(device)["unappliable"] == ["build_model"]
     for svc in (service, _fresh()):
-        again = svc.pre_spawn(PKG)
+        again = svc.pre_start(PKG)
         assert again is not None  # build_model failed: not done
         assert not again.disruptive  # but no restart can apply it here
     # resetprop appears: the next apply plans it again (a start asks then).
     device.resetprop = True
     service.apply(SERIAL, PKG, allow_restart=False)
     assert service._applied[SERIAL].unappliable == set()
-    assert service.pre_spawn(PKG).disruptive
+    assert service.pre_start(PKG).disruptive
 
 
 def test_no_root_makes_no_start_disruptive(service, device, app_start):
     device.root = False
     service.apply(SERIAL, PKG)
     assert {"android_id", "locale"} <= service._applied[SERIAL].unappliable
-    assert not service.pre_spawn(PKG).disruptive
+    assert not service.pre_start(PKG).disruptive
 
 
 def test_forget_drops_the_times_and_reads_the_record_again(service, device):
@@ -2743,7 +3069,7 @@ def test_the_start_read_is_one_short_round_trip(
         return real_send(command, serial, timeout)
 
     monkeypatch.setattr(ident, "_send", send)
-    assert _fresh().pre_spawn(PKG) is None
+    assert _fresh().pre_start(PKG) is None
     assert len(timeouts) == 1
     assert timeouts[0] <= 3
 
@@ -2768,16 +3094,16 @@ def test_no_native_android_id_is_done_once(service, device, app_start):
     for _ in range(3):
         now[0] += 5
         device.writes.clear()
-        assert service.pre_spawn(PKG) is None
-        assert _fresh().pre_spawn(PKG) is None
+        assert service.pre_start(PKG) is None
+        assert _fresh().pre_start(PKG) is None
         assert device.writes == []
 
 
 def test_an_unreadable_install_does_not_undo_done(service, device, app_start):
     service.apply(SERIAL, PKG)
     device.stat_down = True  # e.g. adbd lost root: stat prints nothing
-    assert service.pre_spawn(PKG) is None
-    assert _fresh().pre_spawn(PKG) is None
+    assert service.pre_start(PKG) is None
+    assert _fresh().pre_start(PKG) is None
 
 
 def test_a_stale_unappliable_entry_never_starts_the_app_unseeded(
@@ -2790,17 +3116,17 @@ def test_a_stale_unappliable_entry_never_starts_the_app_unseeded(
     service.apply(SERIAL, PKG)
     assert service._applied[SERIAL].unappliable == {"build_model"}
     device.resetprop = True  # Magisk arrived
-    plan = service.pre_spawn(PKG)
+    plan = service.pre_start(PKG)
     assert not plan.disruptive  # memory still says it cannot be applied
     pid = device.pid
     with pytest.raises(ident.IdentityApplyError, match="framework restart"):
         plan.apply()
     assert device.pid == pid  # no unannounced restart
     assert service._applied[SERIAL].unappliable == set()
-    assert service.pre_spawn(PKG).disruptive  # the next start asks
+    assert service.pre_start(PKG).disruptive  # the next start asks
     # The restart policy "never": nothing to confirm, the app starts.
     monkeypatch.setattr(service.config(), "restart", "never")
-    service.pre_spawn(PKG).apply()
+    service.pre_start(PKG).apply()
 
 
 def test_every_preflight_relearns_unappliable(service, device, app_start):
@@ -2812,7 +3138,7 @@ def test_every_preflight_relearns_unappliable(service, device, app_start):
     device.resetprop = True
     service.plan(SERIAL, PKG)  # a plain read (the lens, a verify)
     assert service._applied[SERIAL].unappliable == set()
-    assert service.pre_spawn(PKG).disruptive
+    assert service.pre_start(PKG).disruptive
 
 
 def test_forget_moves_gen_and_clears_the_dirty_mark(service, device):
@@ -2854,13 +3180,13 @@ def test_an_uninstalled_app_leaves_the_per_app_set(service, device, app_start):
     assert set(_record(device)["ssaids"]) == {PKG, other}
     del device.packages[other]
     device.fs[ident.BOOT_ID_FILE] = b"boot-2\n"  # PKG needs an apply again
-    plan = service.pre_spawn(PKG)
+    plan = service.pre_start(PKG)
     plan.apply()
     record = _record(device)
     assert record["done"] == [PKG]
     assert set(record["ssaids"]) == {PKG}
     assert other not in service._applied[SERIAL].ssaids
-    assert service.pre_spawn(PKG) is None
+    assert service.pre_start(PKG) is None
 
 
 def test_android_id_markers_keep_their_id_whichever_app_was_applied():

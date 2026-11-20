@@ -321,9 +321,9 @@ class SpotlightPanel(Widget):
             get_identity_service().add_status_listener(self._on_identity_status)
         except Exception:
             logger.debug("Spotlight panel: no identity status", exc_info=True)
-        from sandroid.services.app_start import add_pre_spawn_status_listener
+        from sandroid.services.app_start import add_pre_start_status_listener
 
-        add_pre_spawn_status_listener(self._on_pre_spawn_status)
+        add_pre_start_status_listener(self._on_pre_start_status)
 
     def on_unmount(self) -> None:
         self._unsubscribe_events()
@@ -333,9 +333,9 @@ class SpotlightPanel(Widget):
             get_identity_service().remove_status_listener(self._on_identity_status)
         except Exception:
             pass
-        from sandroid.services.app_start import remove_pre_spawn_status_listener
+        from sandroid.services.app_start import remove_pre_start_status_listener
 
-        remove_pre_spawn_status_listener(self._on_pre_spawn_status)
+        remove_pre_start_status_listener(self._on_pre_start_status)
         if self._poll_timer is not None:
             try:
                 self._poll_timer.stop()
@@ -343,7 +343,7 @@ class SpotlightPanel(Widget):
                 pass
             self._poll_timer = None
 
-    def _on_pre_spawn_status(self) -> None:
+    def _on_pre_start_status(self) -> None:
         """A pre-start step began or ended (any thread): repaint the header."""
         self._post(self._repaint_text)
 
@@ -470,11 +470,11 @@ class SpotlightPanel(Widget):
         hooks = self._hooks_for_app(package)
         on = self._on_categories()
 
-        from sandroid.services.app_start import pre_spawn_status
+        from sandroid.services.app_start import pre_start_status
 
-        step = pre_spawn_status(package)
+        step = pre_start_status(package)
         if step and self.size.width and len(step) + len(package) + 40 > self.size.width:
-            step = pre_spawn_status(package, short=True)
+            step = pre_start_status(package, short=True)
         if step:
             # Identity's apply can take minutes: say so, not "not running".
             state = f"[{c.warn}]{escape(step)}[/]"
@@ -1470,7 +1470,7 @@ class SpotlightPanel(Widget):
         Raises:
             concurrent.futures.TimeoutError: The watchdog tripped.
         """
-        from sandroid.services.app_start import pre_spawn_running
+        from sandroid.services.app_start import pre_start_running
 
         deadline = time.monotonic() + self._ACTION_TIMEOUT
         while True:
@@ -1478,7 +1478,7 @@ class SpotlightPanel(Widget):
             try:
                 return future.result(timeout=wait)
             except concurrent.futures.TimeoutError:
-                if pre_spawn_running():
+                if pre_start_running():
                     deadline = time.monotonic() + self._ACTION_TIMEOUT
                 elif time.monotonic() >= deadline:
                     raise

@@ -1445,3 +1445,33 @@ def test_install_failures_include_late_java_perform_bodies(tmp_path) -> None:
     assert result["failed"] == ["x"]  # recorded although it threw later
     assert result["restored"] is True  # Java.perform is the real one again
     assert result["errors"][0]["merge_error"] == "x"
+
+
+# -- state listeners (the Network method control repaints on them) --------------
+
+
+def test_state_listeners_hear_armed_and_active_changes(bypass_service):
+    calls: list = []
+    bypass_service.add_state_listener(lambda: calls.append(1))
+    bypass_service.add_state_listener(lambda: 1 / 0)  # a broken listener
+
+    bypass_service.toggle("ssl")  # not running: arms only
+    assert bypass_service.armed_categories() == ["ssl"]
+    assert len(calls) == 1
+
+    bypass_service.toggle("ssl")  # disarm
+    assert len(calls) == 2
+
+    bypass_service.disarm_all()  # nothing armed: no change, no call
+    assert len(calls) == 2
+
+    bypass_service._active = {"root"}
+    bypass_service._app_package = "com.example.app"
+    bypass_service.arm_active("com.example.app")
+    assert len(calls) == 3
+
+    cb = calls.append
+    bypass_service.add_state_listener(cb)
+    bypass_service.remove_state_listener(cb)
+    bypass_service.disarm_all()
+    assert calls == [1, 1, 1, 1]

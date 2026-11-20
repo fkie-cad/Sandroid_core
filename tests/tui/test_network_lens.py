@@ -454,6 +454,46 @@ async def test_enter_opens_inspector_with_tabs(flow_dir):
         assert ms.inspector_content.key == "network:row:f2"
 
 
+async def test_a_late_flow_goes_to_its_start_time(flow_dir):
+    """A flow is read when it finishes, a TLS failure at once: a long request
+    that started before the failure still shows above it (time order).
+    """
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        panel.mitm._append_line("[TLS_FAIL]|10:00:00|pinned.example.com|cert|" + PKG)
+        await until(pilot, lambda: any(r.kind == "tls" for r in panel._live))
+        count = panel.table.row_count
+        late_host = _SPECS[1][1]
+        write_flows(flow_dir, time.time() - 30, specs=_SPECS[1:2], start_seq=100)
+        panel.poll_now()
+        await until(pilot, lambda: panel.table.row_count == count + 1)
+        stamps = [r.ts for r in panel._live]
+        assert stamps == sorted(stamps)
+        keys = [
+            panel.table.coordinate_to_cell_key((i, 0))[0].value
+            for i in range(count + 1)
+        ]
+        rows = [panel._row_by_key(k) for k in keys]
+        assert rows[-1].kind == "tls"
+        assert rows[-2].host == late_host
+        assert rows[-2].kind != "tls"
+
+
+async def test_a_late_flow_keeps_a_moved_cursor_on_its_flow(flow_dir):
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        panel.table.move_cursor(row=1)
+        await settle(pilot)
+        key = panel._cursor_key()
+        count = panel.table.row_count
+        write_flows(flow_dir, time.time() - 200, specs=_SPECS[1:2], start_seq=100)
+        panel.poll_now()
+        await until(pilot, lambda: panel.table.row_count == count + 1)
+        assert panel._cursor_key() == key
+
+
 async def test_tls_failure_row_and_badge(flow_dir):
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
@@ -1412,6 +1452,43 @@ async def test_no_identity_column_without_a_profile(flow_dir, monkeypatch):
         assert _tinted(panel.table) == set()
 
 
+async def test_identity_column_appears_when_markers_arrive_later(flow_dir, monkeypatch):
+    """Markers found after the first draw (the identity service reads them
+    on a thread) add the Identity column without ``!``; ``!`` only filters.
+    """
+    import privacy_fakes
+
+    fake = privacy_fakes.install(monkeypatch, [], active=False)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        total = panel.table.row_count
+        assert "ident" not in [str(c.value) for c in panel.table.columns]
+        fake.is_active = True  # the scan got its markers
+        await until(
+            pilot, lambda: "ident" in [str(c.value) for c in panel.table.columns]
+        )
+        assert not panel._profile_only
+        assert panel.table.row_count == total  # no row filtered
+
+
+async def test_identity_column_whenever_identity_mode_is_on(flow_dir, monkeypatch):
+    import privacy_fakes
+
+    from sandroid.config import get_config
+
+    privacy_fakes.install(monkeypatch, [], active=False)  # no markers yet
+    monkeypatch.setattr(get_config().identity, "mode", "profile")
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        widths = {str(c.key.value): c.width for c in panel.table.columns.values()}
+        assert "ident" in widths
+        assert not panel._profile_only
+        assert widths["ident"] == 18
+        assert widths["req"] >= 24  # Request keeps a readable width
+
+
 async def test_each_row_looks_up_its_profile_values_once(flow_dir, monkeypatch):
     """The "!" filter, "/" and the Identity cell share one lookup per row and
     service revision; a new hit (new revision) looks up again.
@@ -1642,3 +1719,89 @@ async def test_reveal_lands_on_a_flow_the_hidden_lens_has_not_loaded(flow_dir):
         await until(pilot, lambda: panel._pending_reveal is None)
         assert ms.inspector_content.key.startswith("network:row:")
         assert panel.table.row_count  # the table is unchanged
+
+
+async def test_caption_follows_ca_removal_and_app_proxy_changes(flow_dir, monkeypatch):
+    """E2E: after Remove CA the caption still said "CA installed", after the
+    App Proxy was removed still "app proxies 1" -- until a lens switch.
+    Both are now repainted from STATE_CHANGED (published off the UI thread).
+    """
+    import threading
+
+    from sandroid.core import proxy_manager as pm
+
+    routes: dict[str, str] = {"org.mozilla.firefox": "ours"}
+    monkeypatch.setattr(
+        pm.FocusManager, "app_proxies_cached", lambda self: dict(routes)
+    )
+    monkeypatch.setattr(pm.FocusManager, "lane_health_cached", lambda self: {})
+    device = {"ca": True}
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        await pilot.press("2")
+        await settle(pilot)
+        panel = ms.query_one("#network-panel", NetworkPanel)
+        mitm = panel.mitm
+        monkeypatch.setattr(mitm._service, "is_running", lambda: True)
+        monkeypatch.setattr(mitm._service, "ssl_unpin_is_active", lambda: False)
+        probes: list[str] = []
+
+        def probe():
+            probes.append(threading.current_thread().name)
+            return ("none", "", device["ca"], False)
+
+        monkeypatch.setattr(mitm, "_compute_setup_state", probe)
+        mitm._ca_ok = True
+        panel.refresh_header()
+
+        def title() -> str:
+            return ms._lens_captions["network"][0] or ""
+
+        assert "app proxies 1" in title()
+        assert "CA installed" in title()
+
+        def publish(fn, *args) -> None:
+            worker = threading.Thread(target=fn, args=args)
+            worker.start()
+            worker.join()
+
+        device["ca"] = False
+        publish(pm.publish_ca_change, None, False)
+        await until(pilot, lambda: "CA not installed" in title())
+        await until(pilot, lambda: not mitm._state_probe_busy)
+        assert probes
+        assert "MainThread" not in probes  # the device read is off-thread
+        assert "CA not installed" in title()
+
+        routes.clear()
+        publish(pm.FocusManager._publish_health, None)
+        await until(pilot, lambda: "app proxies" not in title())
+
+        device["ca"] = True
+        publish(pm.publish_ca_change, None, True)
+        await until(pilot, lambda: "CA installed" in title())
+        assert "CA not installed" not in title()
+
+
+async def test_ca_change_of_another_device_leaves_the_caption(flow_dir, monkeypatch):
+    from sandroid.core import proxy_manager as pm
+    from sandroid.core.adb import Adb
+
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5570")
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        await pilot.press("2")
+        await settle(pilot)
+        mitm = ms.query_one("#network-panel", NetworkPanel).mitm
+        kicks = []
+        monkeypatch.setattr(mitm, "_kick_state_refresh", lambda: kicks.append(1))
+        mitm._ca_ok = True
+        pm.publish_ca_change("emulator-5554", False)
+        await settle(pilot)
+        assert mitm._ca_ok
+        assert kicks == []
+        pm.publish_ca_change("emulator-5570", False)
+        await until(pilot, lambda: not mitm._ca_ok)
+        assert kicks == [1]

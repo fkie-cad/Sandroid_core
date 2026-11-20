@@ -1,0 +1,868 @@
+# Indonesia country pack. Sources: see id.SOURCES.md (S1..S14).
+# Things schema v1 cannot express are kept in comments marked "SCHEMA:".
+pack: country
+schema: 1.1
+country: id
+name: Indonesia
+# Locally written text: Bahasa Indonesia dominates; Javanese (and Sundanese, folded into
+# jv here) code-switching in family threads; English loanwords/phrases among urban young.
+languages: {id: 0.88, jv: 0.07, en: 0.05}
+# Four IANA zones. WIB = Asia/Jakarta (Java, Sumatra) and Asia/Pontianak (West/Central
+# Kalimantan, also UTC+7); WITA = Asia/Makassar (Bali, Sulawesi, South/East Kalimantan,
+# NTB/NTT); WIT = Asia/Jayapura (Maluku, Papua). ~57% of people live on Java (WIB).
+# SCHEMA: no per-city timezone field; mapping is in the city comments below.
+timezones: [Asia/Jakarta, Asia/Pontianak, Asia/Makassar, Asia/Jayapura]
+date_format: "dd/MM/yyyy"        # banks/couriers often "17/08/26"; people write "17-8" or "tgl 17"
+time_format: "HH.mm"             # PUEBI standard uses a dot (19.30); bank SMS often "19:30:05"; chat: "jam 7 malem"
+currency: {code: IDR, symbol: "Rp", format: "Rp49.900"}   # "." thousands sep, no decimals; also "Rp 49.900", "49rb", "1,5jt"
+phone:
+  country_code: "62"
+  trunk_prefix: "0"
+  national_format_examples: ["0812-3456-7890", "0896-1234-56789", "(021) 5312 3456", "(0274) 512345"]
+  mobile:
+    # NSN (without trunk 0) is 9-12 digits; operators set subscriber length themselves (FTP 2018, S1).
+    # New prepaid SIMs today are mostly 11 (0812-xxxx-xxxx) or 12 digits (0896-xxxx-xxxxx).
+    # Operator names reflect 2024-2025 mergers: Indosat Ooredoo Hutchison (Indosat + Tri),
+    # XLSMART (XL Axiata + Smartfren, 2025). Brands kept separate because SIM names differ.
+    realistic:
+      - {prefix: "811", length: 11, operator: Telkomsel}
+      - {prefix: "812", length: 11, operator: Telkomsel}
+      - {prefix: "813", length: 11, operator: Telkomsel}
+      - {prefix: "821", length: 11, operator: Telkomsel}
+      - {prefix: "822", length: 11, operator: Telkomsel}
+      - {prefix: "823", length: 11, operator: Telkomsel}
+      - {prefix: "851", length: 11, operator: "Telkomsel (by.U)"}
+      - {prefix: "852", length: 11, operator: Telkomsel}
+      - {prefix: "853", length: 11, operator: Telkomsel}
+      - {prefix: "814", length: 11, operator: Indosat}
+      - {prefix: "815", length: 11, operator: Indosat}
+      - {prefix: "816", length: 11, operator: Indosat}
+      - {prefix: "855", length: 11, operator: Indosat}
+      - {prefix: "856", length: 11, operator: Indosat}
+      - {prefix: "857", length: 11, operator: Indosat}
+      - {prefix: "858", length: 11, operator: Indosat}
+      - {prefix: "895", length: 12, operator: "Tri (Indosat)"}
+      - {prefix: "896", length: 12, operator: "Tri (Indosat)"}
+      - {prefix: "897", length: 12, operator: "Tri (Indosat)"}
+      - {prefix: "898", length: 12, operator: "Tri (Indosat)"}
+      - {prefix: "899", length: 11, operator: "Tri (Indosat)"}
+      - {prefix: "817", length: 11, operator: XL}
+      - {prefix: "818", length: 11, operator: XL}
+      - {prefix: "819", length: 11, operator: XL}
+      - {prefix: "859", length: 11, operator: XL}
+      - {prefix: "877", length: 11, operator: XL}
+      - {prefix: "878", length: 11, operator: XL}
+      - {prefix: "831", length: 11, operator: "AXIS (XLSMART)"}
+      - {prefix: "832", length: 11, operator: "AXIS (XLSMART)"}
+      - {prefix: "833", length: 11, operator: "AXIS (XLSMART)"}
+      - {prefix: "838", length: 11, operator: "AXIS (XLSMART)"}
+      - {prefix: "881", length: 11, operator: "Smartfren (XLSMART)"}
+      - {prefix: "882", length: 11, operator: "Smartfren (XLSMART)"}
+      - {prefix: "887", length: 11, operator: "Smartfren (XLSMART)"}
+      - {prefix: "888", length: 11, operator: "Smartfren (XLSMART)"}
+      - {prefix: "889", length: 12, operator: "Smartfren (XLSMART)"}
+    # FTP 2018 (S1, Tabel II.9) reserves 08XY (X != 0,6) and 086X (X != 1) as network NDCs but the
+    # per-operator allocation list is not published in the regulation. The prefixes below are
+    # absent from every operator in the community-maintained allocation table (S3, id.wikipedia,
+    # which also lists formerly-allocated-now-vacant 0825/0827/0828/0829: excluded here because
+    # they may be re-assigned). All are VALID MOBILE in libphonenumber 9.0.x (S4), which treats
+    # 08[1-35-9]x broadly. 084x avoided: libphonenumber rejects it as invalid. Confidence: medium.
+    unallocated:
+      - {prefix: "820", length: 11, note: "never assigned to an operator per S3; inside FTP 08XY NDC space", source: S3}
+      - {prefix: "824", length: 11, note: "never assigned per S3", source: S3}
+      - {prefix: "826", length: 11, note: "never assigned per S3", source: S3}
+      - {prefix: "834", length: 11, note: "not listed for AXIS or any operator per S3", source: S3}
+      - {prefix: "835", length: 11, note: "not listed for any operator per S3", source: S3}
+      - {prefix: "836", length: 11, note: "not listed for any operator per S3", source: S3}
+      - {prefix: "854", length: 11, note: "gap between Telkomsel 0853 and Indosat 0855; unassigned per S3", source: S3}
+      - {prefix: "871", length: 11, note: "087x only 0877-0879 assigned (XL) per S3", source: S3}
+      - {prefix: "874", length: 11, note: "unassigned per S3", source: S3}
+      - {prefix: "891", length: 11, note: "089x only 0895-0899 assigned (Tri) per S3", source: S3}
+      - {prefix: "893", length: 11, note: "unassigned per S3", source: S3}
+    fiction: null    # no official drama/fiction range exists in Indonesia (S1 has none; S5 search found none)
+  landline:
+    # 2-digit area codes (big metros): 7-8 digit subscriber numbers; 3-digit codes: mostly 6-7.
+    cities:
+      - {city: Jakarta, area_code: "21", subscriber_length: 8}
+      - {city: Surabaya, area_code: "31", subscriber_length: 7}
+      - {city: Bandung, area_code: "22", subscriber_length: 7}
+      - {city: Medan, area_code: "61", subscriber_length: 7}
+      - {city: Semarang, area_code: "24", subscriber_length: 7}
+      - {city: Palembang, area_code: "711", subscriber_length: 6}
+      - {city: Makassar, area_code: "411", subscriber_length: 6}
+      - {city: Yogyakarta, area_code: "274", subscriber_length: 6}
+      - {city: Denpasar, area_code: "361", subscriber_length: 6}
+      - {city: Malang, area_code: "341", subscriber_length: 6}
+      - {city: Batam, area_code: "778", subscriber_length: 6}
+      - {city: Balikpapan, area_code: "542", subscriber_length: 6}
+      - {city: Pontianak, area_code: "561", subscriber_length: 6}
+      - {city: Manado, area_code: "431", subscriber_length: 6}
+      - {city: Jayapura, area_code: "967", subscriber_length: 6}
+      - {city: Ambon, area_code: "911", subscriber_length: 6}
+      - {city: Bogor, area_code: "251", subscriber_length: 7}
+    fiction: null
+  validation_note: >-
+    libphonenumber 9.0.43: all realistic and unallocated mobile prefixes above parse as valid
+    MOBILE for NSN lengths 9-12 (13-digit NSN is invalid). The 084x block is INVALID (UNKNOWN),
+    so it was not used. Landlines: Jakarta/Semarang need >=7 subscriber digits to be valid,
+    Bandung >=6; 3-digit area codes accept 5-8 digits. Because libphonenumber accepts the whole
+    08[1-35-9] space, it cannot distinguish allocated from unallocated mobile prefixes.
+carriers:
+  # Shares: approximate subscriber shares 2024 annual reports (Telkomsel ~158M, IOH ~100M incl. Tri,
+  # XL+AXIS ~58M, Smartfren ~35M). sim_operator = SIM/network name shown on Android.
+  - {name: Telkomsel, sim_operator: "TELKOMSEL", mccmnc: "51010", share: 0.45}
+  - {name: Indosat (IM3), sim_operator: "INDOSAT", mccmnc: "51001", share: 0.17}
+  - {name: Tri, sim_operator: "3", mccmnc: "51089", share: 0.11}
+  - {name: XL, sim_operator: "XL", mccmnc: "51011", share: 0.12}
+  - {name: AXIS, sim_operator: "AXIS", mccmnc: "51008", share: 0.05}
+  - {name: Smartfren, sim_operator: "Smartfren", mccmnc: "51009", share: 0.10}
+cities:
+  # population: BPS Sensus Penduduk 2020 (city proper). Postcodes are central codes in each
+  # city's Pos Indonesia block (representative, see SOURCES). Timezone in comment.
+  - {name: Jakarta, lat: -6.2088, lon: 106.8456, population: 10562088, area_code: "21",
+     postcodes: ["10110", "10310", "12190", "13220", "14240"],
+     districts: [Gambir, Menteng, Kebayoran Baru, Tebet, Kelapa Gading, Cengkareng, Jatinegara, Cilandak]}   # Asia/Jakarta
+  - {name: Surabaya, lat: -7.2575, lon: 112.7521, population: 2874314, area_code: "31",
+     postcodes: ["60111", "60175", "60262", "60281"], districts: [Genteng, Gubeng, Tegalsari, Wonokromo, Rungkut]}   # Asia/Jakarta
+  - {name: Bekasi, lat: -6.2383, lon: 106.9756, population: 2543676, area_code: "21",
+     postcodes: ["17111", "17141", "17144"], districts: [Bekasi Timur, Bekasi Selatan, Bekasi Barat]}   # Asia/Jakarta
+  - {name: Bandung, lat: -6.9175, lon: 107.6191, population: 2444160, area_code: "22",
+     postcodes: ["40111", "40115", "40132", "40261"], districts: [Sumur Bandung, Coblong, Lengkong, Cicendo]}   # Asia/Jakarta
+  - {name: Medan, lat: 3.5952, lon: 98.6722, population: 2435252, area_code: "61",
+     postcodes: ["20111", "20112", "20212"], districts: [Medan Petisah, Medan Baru, Medan Kota, Medan Polonia]}   # Asia/Jakarta
+  - {name: Tangerang, lat: -6.1783, lon: 106.6319, population: 1895486, area_code: "21",
+     postcodes: ["15111", "15117", "15143"], districts: [Tangerang, Karawaci, Ciledug, Cipondoh]}   # Asia/Jakarta
+  - {name: Palembang, lat: -2.9761, lon: 104.7754, population: 1668848, area_code: "711",
+     postcodes: ["30111", "30126", "30137"], districts: [Ilir Timur I, Ilir Barat I, Seberang Ulu I]}   # Asia/Jakarta
+  - {name: Semarang, lat: -6.9667, lon: 110.4167, population: 1653524, area_code: "24",
+     postcodes: ["50132", "50134", "50241"], districts: [Semarang Tengah, Candisari, Banyumanik, Tembalang]}   # Asia/Jakarta
+  - {name: Makassar, lat: -5.1477, lon: 119.4327, population: 1423877, area_code: "411",
+     postcodes: ["90111", "90113", "90231"], districts: [Ujung Pandang, Panakkukang, Tamalate, Rappocini]}   # Asia/Makassar
+  - {name: Batam, lat: 1.0456, lon: 104.0305, population: 1196396, area_code: "778",
+     postcodes: ["29432", "29444", "29461"], districts: [Batam Kota, Lubuk Baja, Nongsa, Sekupang]}   # Asia/Jakarta
+  - {name: Bogor, lat: -6.5971, lon: 106.8060, population: 1043070, area_code: "251",
+     postcodes: ["16121", "16124", "16151"], districts: [Bogor Tengah, Bogor Utara, Bogor Barat]}   # Asia/Jakarta
+  - {name: Malang, lat: -7.9666, lon: 112.6326, population: 843810, area_code: "341",
+     postcodes: ["65111", "65119", "65145"], districts: [Klojen, Lowokwaru, Blimbing, Sukun]}   # Asia/Jakarta
+  - {name: Denpasar, lat: -8.6705, lon: 115.2126, population: 726599, area_code: "361",
+     postcodes: ["80111", "80113", "80226", "80234"], districts: [Denpasar Barat, Denpasar Timur, Denpasar Selatan]}   # Asia/Makassar
+  - {name: Balikpapan, lat: -1.2379, lon: 116.8529, population: 688318, area_code: "542",
+     postcodes: ["76111", "76114", "76125"], districts: [Balikpapan Kota, Balikpapan Selatan, Balikpapan Utara]}   # Asia/Makassar
+  - {name: Pontianak, lat: -0.0263, lon: 109.3425, population: 658685, area_code: "561",
+     postcodes: ["78111", "78116", "78121"], districts: [Pontianak Kota, Pontianak Selatan, Pontianak Barat]}   # Asia/Pontianak
+  - {name: Manado, lat: 1.4748, lon: 124.8421, population: 451916, area_code: "431",
+     postcodes: ["95111", "95115", "95124"], districts: [Wenang, Sario, Malalayang, Tikala]}   # Asia/Makassar
+  - {name: Jayapura, lat: -2.5337, lon: 140.7181, population: 398478, area_code: "967",
+     postcodes: ["99111", "99112", "99224"], districts: [Jayapura Utara, Jayapura Selatan, Abepura]}   # Asia/Jayapura
+  - {name: Yogyakarta, lat: -7.7956, lon: 110.3695, population: 373589, area_code: "274",
+     postcodes: ["55111", "55122", "55224"], districts: [Gondomanan, Danurejan, Gondokusuman, Kotagede]}   # Asia/Jakarta
+  - {name: Ambon, lat: -3.6954, lon: 128.1814, population: 347288, area_code: "911",
+     postcodes: ["97124", "97127", "97128"], districts: [Sirimau, Nusaniwe, Baguala]}   # Asia/Jayapura
+streets:
+  # "Jl." = Jalan. Mostly national heroes and flowers/fruit; housing estates use
+  # "Perumahan X Blok C2 No. 5" and kampung addresses "Gg. Y" (gang) plus RT/RW.
+  - Jl. Jenderal Sudirman
+  - Jl. Ahmad Yani
+  - Jl. Diponegoro
+  - Jl. Gatot Subroto
+  - Jl. Imam Bonjol
+  - Jl. Pahlawan
+  - Jl. Merdeka
+  - Jl. Veteran
+  - Jl. Pemuda
+  - Jl. Gajah Mada
+  - Jl. Hayam Wuruk
+  - Jl. MH Thamrin
+  - Jl. Teuku Umar
+  - Jl. Cut Nyak Dien
+  - Jl. Kartini
+  - Jl. Dewi Sartika
+  - Jl. HOS Cokroaminoto
+  - Jl. Ki Hajar Dewantara
+  - Jl. Sisingamangaraja
+  - Jl. Pattimura
+  - Jl. Sultan Hasanuddin
+  - Jl. Sam Ratulangi
+  - Jl. Pangeran Antasari
+  - Jl. Raden Saleh
+  - Jl. KH Wahid Hasyim
+  - Jl. KH Agus Salim
+  - Jl. Ir. H. Juanda
+  - Jl. Dr. Sutomo
+  - Jl. Dr. Wahidin
+  - Jl. Soekarno-Hatta
+  - Jl. Panglima Polim
+  - Jl. Sultan Agung
+  - Jl. Slamet Riyadi
+  - Jl. Basuki Rahmat
+  - Jl. Urip Sumoharjo
+  - Jl. Mayjen Sungkono
+  - Jl. Yos Sudarso
+  - Jl. RA Kartini
+  - Jl. Kapten Tendean
+  - Jl. Letjen Suprapto
+  - Jl. Pramuka
+  - Jl. Pelita
+  - Jl. Nusantara
+  - Jl. Kebon Sirih
+  - Jl. Pasar Baru
+  - Jl. Stasiun
+  - Jl. Pelabuhan
+  - Jl. Raya Pos
+  - Jl. Melati
+  - Jl. Mawar
+  - Jl. Anggrek
+  - Jl. Kenanga
+  - Jl. Flamboyan
+  - Jl. Cempaka
+  - Jl. Dahlia
+  - Jl. Kamboja
+  - Jl. Kemuning
+  - Jl. Mangga
+  - Jl. Rambutan
+  - Jl. Durian
+  - Jl. Nangka
+  - Jl. Kelapa Dua
+  - Jl. Bougenville
+  - Jl. Cendana
+  - Jl. Beringin
+address_format: "{street} No. {number}, {city} {postcode}"
+places:
+  # Public places only; coordinates from Wikipedia/OSM (S9), rounded to 4 decimals.
+  - {category: landmark, name: Monumen Nasional (Monas), city: Jakarta, lat: -6.1754, lon: 106.8272}
+  - {category: landmark, name: Masjid Istiqlal, city: Jakarta, lat: -6.1702, lon: 106.8310}
+  - {category: museum, name: Museum Fatahillah (Kota Tua), city: Jakarta, lat: -6.1352, lon: 106.8133}
+  - {category: park, name: Taman Suropati, city: Jakarta, lat: -6.1994, lon: 106.8322}
+  - {category: stadium, name: Gelora Bung Karno, city: Jakarta, lat: -6.2186, lon: 106.8019}
+  - {category: station, name: Stasiun Gambir, city: Jakarta, lat: -6.1767, lon: 106.8306}
+  - {category: beach, name: Pantai Ancol, city: Jakarta, lat: -6.1225, lon: 106.8333}
+  - {category: market, name: Pasar Tanah Abang, city: Jakarta, lat: -6.1876, lon: 106.8142}
+  - {category: airport, name: Bandara Soekarno-Hatta, city: Tangerang, lat: -6.1256, lon: 106.6559}
+  - {category: park, name: Kebun Raya Bogor, city: Bogor, lat: -6.5976, lon: 106.7996}
+  - {category: landmark, name: Gedung Sate, city: Bandung, lat: -6.9025, lon: 107.6188}
+  - {category: station, name: Stasiun Bandung, city: Bandung, lat: -6.9142, lon: 107.6025}
+  - {category: mountain, name: Tangkuban Perahu, city: Bandung, lat: -6.7596, lon: 107.6098}
+  - {category: landmark, name: Lawang Sewu, city: Semarang, lat: -6.9839, lon: 110.4106}
+  - {category: landmark, name: Candi Borobudur, city: Yogyakarta, lat: -7.6079, lon: 110.2038}
+  - {category: landmark, name: Candi Prambanan, city: Yogyakarta, lat: -7.7520, lon: 110.4915}
+  - {category: market, name: Pasar Beringharjo, city: Yogyakarta, lat: -7.7986, lon: 110.3654}
+  - {category: station, name: Stasiun Tugu, city: Yogyakarta, lat: -7.7893, lon: 110.3634}
+  - {category: beach, name: Pantai Parangtritis, city: Yogyakarta, lat: -8.0251, lon: 110.3290}
+  - {category: landmark, name: Tugu Pahlawan, city: Surabaya, lat: -7.2458, lon: 112.7378}
+  - {category: park, name: Taman Bungkul, city: Surabaya, lat: -7.2913, lon: 112.7398}
+  - {category: landmark, name: Jembatan Suramadu, city: Surabaya, lat: -7.1866, lon: 112.7795}
+  - {category: airport, name: Bandara Juanda, city: Surabaya, lat: -7.3798, lon: 112.7869}
+  - {category: mountain, name: Gunung Bromo, city: Malang, lat: -7.9425, lon: 112.9530}
+  - {category: landmark, name: Istana Maimun, city: Medan, lat: 3.5752, lon: 98.6837}
+  - {category: lake, name: Danau Toba (Parapat), city: Medan, lat: 2.6630, lon: 98.9360}
+  - {category: landmark, name: Jembatan Ampera, city: Palembang, lat: -2.9917, lon: 104.7632}
+  - {category: landmark, name: Tugu Khatulistiwa, city: Pontianak, lat: 0.0007, lon: 109.3221}
+  - {category: beach, name: Pantai Kuta, city: Denpasar, lat: -8.7184, lon: 115.1686}
+  - {category: landmark, name: Pura Tanah Lot, city: Denpasar, lat: -8.6212, lon: 115.0868}
+  - {category: airport, name: Bandara I Gusti Ngurah Rai, city: Denpasar, lat: -8.7482, lon: 115.1672}
+  - {category: beach, name: Pantai Losari, city: Makassar, lat: -5.1435, lon: 119.4073}
+  - {category: museum, name: Benteng Rotterdam, city: Makassar, lat: -5.1340, lon: 119.4053}
+  - {category: beach, name: Taman Laut Bunaken, city: Manado, lat: 1.6236, lon: 124.7607}
+  - {category: lake, name: Danau Sentani, city: Jayapura, lat: -2.6094, lon: 140.5160}
+names:
+  culture: id
+  # NAMING NOTES (for the generator):
+  # - Many Indonesians, esp. older Javanese, have ONE name only (mononym): the top Dukcapil
+  #   names (Sutrisno, Nurhayati, Slamet, Sulastri) are usually the whole legal name.
+  #   SCHEMA: no `mononym_share`; suggest ~0.35 for people born before 1980, ~0.10 after.
+  # - There is no general family name. The `surnames` pool below = (a) real clan/family names
+  #   (Batak marga, Minahasa, Maluku, Chinese-Indonesian, Arab-Indonesian) and (b) common
+  #   second-name elements that children (incl. daughters, e.g. "Rina Gunawan") often carry
+  #   from the father, patronymic-like. Gendered elements (Saputra, Putri, Pratama, -wati) were
+  #   deliberately left out so the pool works for both sexes.
+  # - Batak marga only fit Batak-sounding first names in reality; the generator has no way to
+  #   tie them, so their weights are kept proportional to the ~3.6% Batak population.
+  # - Weights: the top-10 per sex are Dukcapil e-KTP counts in thousands (S6); the rest are
+  #   authored estimates on the same scale, generations mixed (boomer/X/millennial/Z/alpha, S7).
+  # - Contacts are saved with honorific + name + context, not "first last": "Mama", "Bapak",
+  #   "Bu Dewi", "Pak Slamet RT 05", "Mas Agus Kantor", "Mbak Sari", "Kak Rina", "Bang Ucok"
+  #   (Batak/Medan), "Om Budi", "Tante Lina", "Sutrisno Bengkel", "Dewi Kos", "Ojek Pak Man".
+  #   SCHEMA: `display` takes one template; proposal: `display_variants` with weights and
+  #   tokens {honorific} {context}.
+  female:
+    - {name: Nurhayati, w: 255}
+    - {name: Sulastri, w: 193}
+    - {name: Sumiati, w: 173}
+    - {name: Sri Wahyuni, w: 163}
+    - {name: Sumarni, w: 159}
+    - {name: Sunarti, w: 136}
+    - {name: Siti Aminah, w: 122}
+    - {name: Ernawati, w: 118}
+    - {name: Aminah, w: 117}
+    - {name: Kartini, w: 115}
+    - {name: Siti Aisyah, w: 110}
+    - {name: Fitriani, w: 100}
+    - {name: Sri Rahayu, w: 95}
+    - {name: Suryani, w: 90}
+    - {name: Rohani, w: 70}
+    - {name: Siti Nurhaliza, w: 40}
+    - {name: Siti Fatimah, w: 75}
+    - {name: Fatimah, w: 85}
+    - {name: Khadijah, w: 40}
+    - {name: Halimah, w: 55}
+    - {name: Rahmawati, w: 80}
+    - {name: Yuliana, w: 60}
+    - {name: Susanti, w: 75}
+    - {name: Lestari, w: 60}
+    - {name: Rina, w: 60}
+    - {name: Dewi, w: 85}
+    - {name: Dewi Sartika, w: 35}
+    - {name: Ratna, w: 50}
+    - {name: Yanti, w: 55}
+    - {name: Rini, w: 50}
+    - {name: Tuti, w: 35}
+    - {name: Endang, w: 50}
+    - {name: Sri Mulyani, w: 70}
+    - {name: Suharti, w: 50}
+    - {name: Wartini, w: 35}
+    - {name: Sukarti, w: 35}
+    - {name: Painem, w: 20}
+    - {name: Ngatini, w: 25}
+    - {name: Juminten, w: 15}
+    - {name: Marlina, w: 50}
+    - {name: Hartati, w: 50}
+    - {name: Yuni, w: 45}
+    - {name: Wati, w: 35}
+    - {name: Ani, w: 40}
+    - {name: Ida, w: 35}
+    - {name: Neneng, w: 30}
+    - {name: Eti, w: 25}
+    - {name: Nining, w: 25}
+    - {name: Euis, w: 25}
+    - {name: Cucu, w: 15}
+    - {name: Dian, w: 55}
+    - {name: Indah, w: 55}
+    - {name: Ayu, w: 50}
+    - {name: Putri, w: 60}
+    - {name: Wulandari, w: 45}
+    - {name: Novitasari, w: 40}
+    - {name: Novi, w: 40}
+    - {name: Lia, w: 30}
+    - {name: Mega, w: 35}
+    - {name: Ratih, w: 25}
+    - {name: Maya, w: 35}
+    - {name: Rizka, w: 35}
+    - {name: Intan, w: 40}
+    - {name: Ika, w: 30}
+    - {name: Anisa, w: 45}
+    - {name: Nur Aini, w: 40}
+    - {name: Nurul, w: 45}
+    - {name: Dinda, w: 35}
+    - {name: Tika, w: 25}
+    - {name: Vina, w: 20}
+    - {name: Desi, w: 35}
+    - {name: Eka, w: 35}
+    - {name: Yulia, w: 30}
+    - {name: Anggraini, w: 30}
+    - {name: Puspita, w: 20}
+    - {name: Ratnasari, w: 20}
+    - {name: Nadia, w: 30}
+    - {name: Nabila, w: 30}
+    - {name: Salsabila, w: 30}
+    - {name: Aulia, w: 30}
+    - {name: Zahra, w: 25}
+    - {name: Fatimah Azzahra, w: 15}
+    - {name: Alya, w: 20}
+    - {name: Aisyah, w: 30}
+    - {name: Keisha, w: 12}
+    - {name: Naura, w: 12}
+    - {name: Kirana, w: 12}
+    - {name: Shanum, w: 10}
+    - {name: Almahyra, w: 8}
+    - {name: Arsyila, w: 8}
+    - {name: Adiva, w: 8}
+    - {name: Inara, w: 10}
+    - {name: Aleeya, w: 8}
+    - {name: Khalisa, w: 8}
+    - {name: Maisya, w: 6}
+    - {name: Cinta, w: 10}
+    - {name: Amelia, w: 25}
+    - {name: Cindy, w: 15}
+    - {name: Jessica, w: 10}
+    - {name: Stefani, w: 8}
+    - {name: Maria, w: 25}
+    - {name: Yohana, w: 12}
+    - {name: Theresia, w: 10}
+    - {name: Agustina, w: 25}
+    - {name: Melati, w: 10}
+    - {name: Sinta, w: 20}
+    - {name: Lina, w: 20}
+    - {name: Herlina, w: 30}
+    - {name: Rosmawati, w: 25}
+    - {name: Butet, w: 6}
+    - {name: Ni Putu Ayu, w: 10}
+    - {name: Ni Made Sri, w: 6}
+    - {name: Ni Kadek Dwi, w: 5}
+    - {name: Ni Komang, w: 4}
+    - {name: Wa Ode, w: 4}
+  male:
+    - {name: Sutrisno, w: 144}
+    - {name: Slamet, w: 115}
+    - {name: Mulyadi, w: 112}
+    - {name: Herman, w: 102}
+    - {name: Supardi, w: 93}
+    - {name: Ismail, w: 90}
+    - {name: Supriyanto, w: 88}
+    - {name: Wahyudi, w: 86}
+    - {name: Junaidi, w: 85}
+    - {name: Suparman, w: 85}
+    - {name: Sudirman, w: 80}
+    - {name: Muhammad, w: 110}
+    - {name: Ahmad, w: 90}
+    - {name: Abdul Rahman, w: 40}
+    - {name: Agus, w: 95}
+    - {name: Budi, w: 80}
+    - {name: Bambang, w: 65}
+    - {name: Joko, w: 55}
+    - {name: Eko, w: 60}
+    - {name: Dwi, w: 40}
+    - {name: Hendra, w: 55}
+    - {name: Dedi, w: 55}
+    - {name: Andi, w: 60}
+    - {name: Rudi, w: 50}
+    - {name: Yusuf, w: 45}
+    - {name: Hasan, w: 40}
+    - {name: Ali, w: 35}
+    - {name: Hamzah, w: 20}
+    - {name: Rahmat, w: 55}
+    - {name: Hidayat, w: 40}
+    - {name: Iwan, w: 45}
+    - {name: Wawan, w: 40}
+    - {name: Asep, w: 45}
+    - {name: Ujang, w: 25}
+    - {name: Dadang, w: 30}
+    - {name: Cecep, w: 20}
+    - {name: Sugiarto, w: 40}
+    - {name: Sugeng, w: 35}
+    - {name: Suyanto, w: 40}
+    - {name: Sumarno, w: 35}
+    - {name: Paijo, w: 12}
+    - {name: Tukiman, w: 12}
+    - {name: Darmo, w: 15}
+    - {name: Hartono, w: 35}
+    - {name: Heru, w: 35}
+    - {name: Teguh, w: 35}
+    - {name: Yanto, w: 35}
+    - {name: Arief, w: 35}
+    - {name: Arif, w: 40}
+    - {name: Fajar, w: 45}
+    - {name: Dimas, w: 35}
+    - {name: Bayu, w: 40}
+    - {name: Rizky, w: 55}
+    - {name: Fikri, w: 25}
+    - {name: Ilham, w: 35}
+    - {name: Reza, w: 30}
+    - {name: Aldi, w: 18}
+    - {name: Ardiansyah, w: 18}
+    - {name: Firmansyah, w: 30}
+    - {name: Hendrawan, w: 15}
+    - {name: Gilang, w: 20}
+    - {name: Yoga, w: 25}
+    - {name: Galih, w: 15}
+    - {name: Rangga, w: 15}
+    - {name: Aditya, w: 30}
+    - {name: Rafi, w: 15}
+    - {name: Farhan, w: 20}
+    - {name: Naufal, w: 15}
+    - {name: Dafa, w: 12}
+    - {name: Raka, w: 10}
+    - {name: Muhammad Al Fatih, w: 28}
+    - {name: Muhammad Rayyan, w: 10}
+    - {name: Muhammad Yusuf, w: 10}
+    - {name: Arsya, w: 8}
+    - {name: Raffasya, w: 8}
+    - {name: Kenzie, w: 6}
+    - {name: Abizar, w: 6}
+    - {name: Arkan, w: 6}
+    - {name: Zidan, w: 10}
+    - {name: Kevin, w: 15}
+    - {name: Michael, w: 12}
+    - {name: Yohanes, w: 15}
+    - {name: Yosef, w: 8}
+    - {name: Stefanus, w: 8}
+    - {name: Fransiskus, w: 8}
+    - {name: Daniel, w: 15}
+    - {name: Hendrik, w: 10}
+    - {name: Sahat, w: 6}
+    - {name: Ucok, w: 6}
+    - {name: Togar, w: 4}
+    - {name: Jefri, w: 10}
+    - {name: Rusdi, w: 20}
+    - {name: Syamsul, w: 20}
+    - {name: Zulkifli, w: 25}
+    - {name: Saiful, w: 25}
+    - {name: Nasrul, w: 15}
+    - {name: Darwis, w: 12}
+    - {name: Amir, w: 20}
+    - {name: Udin, w: 20}
+    - {name: Ketut, w: 6}
+    - {name: I Made, w: 10}
+    - {name: I Wayan, w: 10}
+    - {name: I Putu, w: 8}
+    - {name: I Gede, w: 6}
+    - {name: I Komang, w: 5}
+    - {name: La Ode, w: 4}
+    - {name: Andi Muhammad, w: 6}
+  surnames:
+    # (b) patronymic-like second names, mostly Javanese/Sundanese/Malay/Arabic
+    - {name: Hidayat, w: 60}
+    - {name: Santoso, w: 55}
+    - {name: Setiawan, w: 55}
+    - {name: Kurniawan, w: 50}
+    - {name: Nugroho, w: 50}
+    - {name: Wibowo, w: 45}
+    - {name: Susanto, w: 40}
+    - {name: Prasetyo, w: 45}
+    - {name: Gunawan, w: 40}
+    - {name: Hartono, w: 30}
+    - {name: Purnomo, w: 30}
+    - {name: Suryadi, w: 30}
+    - {name: Hermawan, w: 30}
+    - {name: Firmansyah, w: 35}
+    - {name: Ramadhan, w: 40}
+    - {name: Rahman, w: 40}
+    - {name: Hakim, w: 25}
+    - {name: Maulana, w: 35}
+    - {name: Hasibuan, w: 18}
+    - {name: Saleh, w: 20}
+    - {name: Fauzi, w: 25}
+    - {name: Iskandar, w: 25}
+    - {name: Siswanto, w: 25}
+    - {name: Widodo, w: 25}
+    - {name: Wijayanto, w: 15}
+    - {name: Sudrajat, w: 15}
+    - {name: Supriadi, w: 25}
+    - {name: Sumarno, w: 15}
+    - {name: Haryanto, w: 25}
+    - {name: Budiman, w: 15}
+    - {name: Budiyanto, w: 15}
+    - {name: Irawan, w: 25}
+    - {name: Hardiansyah, w: 15}
+    - {name: Adriansyah, w: 12}
+    - {name: Kusuma, w: 25}
+    - {name: Kusumawardhana, w: 5}
+    - {name: Wicaksono, w: 15}
+    - {name: Pranoto, w: 12}
+    - {name: Pangestu, w: 12}
+    - {name: Permana, w: 18}
+    - {name: Ruslan, w: 12}
+    - {name: Rosyid, w: 10}
+    - {name: Syahrial, w: 10}
+    - {name: Zulkarnain, w: 12}
+    - {name: Mansur, w: 12}
+    - {name: Mustofa, w: 15}
+    - {name: Nasution, w: 18}
+    - {name: Effendi, w: 18}
+    - {name: Lukman, w: 12}
+    - {name: Sofyan, w: 15}
+    - {name: Darmawan, w: 18}
+    - {name: Suherman, w: 15}
+    - {name: Sutanto, w: 12}
+    - {name: Wahyudi, w: 20}
+    - {name: Yulianto, w: 15}
+    - {name: Ardiansyah, w: 12}
+    - {name: Hamid, w: 12}
+    - {name: Abdullah, w: 20}
+    - {name: Ibrahim, w: 15}
+    - {name: Ismail, w: 12}
+    - {name: Yusuf, w: 12}
+    - {name: Harahap, w: 15}
+    - {name: Rahmat, w: 15}
+    - {name: Hasan, w: 15}
+    - {name: Husein, w: 8}
+    - {name: Sembiring, w: 10}
+    - {name: Tanjung, w: 10}
+    - {name: Hutagalung, w: 7}
+    - {name: Sasongko, w: 8}
+    - {name: Cahyono, w: 12}
+    - {name: Nurdin, w: 12}
+    - {name: Sanusi, w: 10}
+    - {name: Rasyid, w: 8}
+    - {name: Hendrawan, w: 10}
+    - {name: Sulistyo, w: 10}
+    - {name: Saputro, w: 15}
+    - {name: Utomo, w: 20}
+    - {name: Mahendra, w: 15}
+    - {name: Wirawan, w: 12}
+    - {name: Prabowo, w: 10}
+    - {name: Halim, w: 12}
+    - {name: Tanoto, w: 4}
+    - {name: Wijaya, w: 30}
+    - {name: Salim, w: 10}
+    - {name: Tan, w: 6}
+    - {name: Lim, w: 5}
+    - {name: Tjahjadi, w: 4}
+    - {name: Hartanto, w: 8}
+    - {name: Lie, w: 3}
+    - {name: Kurniadi, w: 6}
+    - {name: Sutedja, w: 4}
+    - {name: Tanuwidjaja, w: 4}
+    - {name: Gozali, w: 4}
+    # Arab-Indonesian family names
+    - {name: Assegaf, w: 4}
+    - {name: Alatas, w: 4}
+    - {name: Alaydrus, w: 3}
+    - {name: Shahab, w: 3}
+    - {name: Bachmid, w: 2}
+    - {name: Basalamah, w: 3}
+    # Batak marga (Toba, Mandailing, Karo, Simalungun)
+    - {name: Siregar, w: 14}
+    - {name: Lubis, w: 12}
+    - {name: Simanjuntak, w: 10}
+    - {name: Sinaga, w: 9}
+    - {name: Situmorang, w: 8}
+    - {name: Simatupang, w: 6}
+    - {name: Sitompul, w: 6}
+    - {name: Hutapea, w: 5}
+    - {name: Pardede, w: 5}
+    - {name: Manurung, w: 6}
+    - {name: Panjaitan, w: 6}
+    - {name: Silalahi, w: 5}
+    - {name: Tambunan, w: 5}
+    - {name: Pane, w: 4}
+    - {name: Tarigan, w: 6}
+    - {name: Ginting, w: 7}
+    - {name: Sitepu, w: 4}
+    - {name: Purba, w: 6}
+    - {name: Saragih, w: 6}
+    - {name: Damanik, w: 5}
+    - {name: Sihombing, w: 6}
+    - {name: Gultom, w: 5}
+    - {name: Marpaung, w: 6}
+    - {name: Napitupulu, w: 6}
+    - {name: Pasaribu, w: 6}
+    - {name: Sianturi, w: 4}
+    - {name: Simbolon, w: 5}
+    - {name: Sitorus, w: 5}
+    - {name: Nainggolan, w: 5}
+    - {name: Nababan, w: 4}
+    - {name: Samosir, w: 4}
+    - {name: Sihotang, w: 3}
+    - {name: Hutabarat, w: 4}
+    - {name: Matondang, w: 2}
+    - {name: Daulay, w: 3}
+    - {name: Rangkuti, w: 3}
+    # Minahasa (North Sulawesi)
+    - {name: Wenas, w: 3}
+    - {name: Rumengan, w: 2}
+    - {name: Pangemanan, w: 3}
+    - {name: Sumampouw, w: 2}
+    - {name: Mandagi, w: 2}
+    - {name: Tumbelaka, w: 2}
+    - {name: Lumenta, w: 2}
+    - {name: Rondonuwu, w: 2}
+    - {name: Supit, w: 2}
+    - {name: Kalalo, w: 2}
+    - {name: Lasut, w: 2}
+    - {name: Mamahit, w: 2}
+    # Maluku / Ambon
+    - {name: Pattiasina, w: 2}
+    - {name: Latuconsina, w: 2}
+    - {name: Pattinasarany, w: 1}
+    - {name: Tuhumury, w: 1}
+    - {name: Sahetapy, w: 1}
+    - {name: Matulessy, w: 1}
+    - {name: Latumahina, w: 1}
+    - {name: Pattipeilohy, w: 1}
+    # NTT / Flores, Papua
+    - {name: Fernandez, w: 2}
+    - {name: da Costa, w: 2}
+    - {name: Ndun, w: 1}
+    - {name: Lake, w: 1}
+    - {name: Wenda, w: 1}
+    - {name: Kogoya, w: 1}
+    - {name: Rumbiak, w: 1}
+    - {name: Mandacan, w: 1}
+    # Bugis-Makassar / Sulawesi
+    - {name: Mappanyukki, w: 1}
+    - {name: Lamba, w: 2}
+    # Balinese (caste/clan titles used as last element)
+    - {name: Suarjana, w: 3}
+    - {name: Sudarsana, w: 3}
+    - {name: Mahardika, w: 3}
+    - {name: Wiguna, w: 3}
+  nicknames:
+    Muhammad: Amad
+    Ahmad: Mamat
+    Rahmat: Mamat
+    Sutrisno: Tris
+    Slamet: Met
+    Agus: Gus
+    Wahyudi: Yudi
+    Supriyanto: Pri
+    Sudirman: Dirman
+    Abdul Rahman: Dul
+    Rizky: Kiki
+    Nurhayati: Yati
+    Sulastri: Las
+    Sri Wahyuni: Yuni
+    Fitriani: Fitri
+    Ernawati: Erna
+    Siti Aminah: Ami
+    Rahmawati: Rahma
+    Novitasari: Novi
+    Wulandari: Wulan
+    Kurniawan: Wawan
+  display: "{first} {last}"
+cultures:
+  # Foreign-origin minorities only. Chinese-Indonesians (1.2% self-identified, 2010 census, S8),
+  # Arab-Indonesians, Batak, Minahasa etc. are domestic and already in the main pools above:
+  # most Chinese-Indonesians carry Indonesian given names and Indonesianised surnames
+  # (Wijaya, Halim, Gunawan, Salim, Tanoto), so a mainland-Chinese culture pack would be WRONG here.
+  # Indian-Indonesians (Tamil/Punjabi/Sindhi, mainly Medan and Jakarta): ~0.04-0.05% (S8).
+  # Foreign residents (Chinese, Japanese, Korean, Indian, US, Malaysian, Australian expats) are
+  # each well below 0.05% of 288M people.
+  - {culture: in, share: 0.0005}
+email:
+  domains:
+    - {domain: gmail.com, share: 0.80}
+    - {domain: yahoo.com, share: 0.06}
+    - {domain: yahoo.co.id, share: 0.04}
+    - {domain: ymail.com, share: 0.01}
+    - {domain: hotmail.com, share: 0.02}
+    - {domain: outlook.com, share: 0.02}
+    - {domain: icloud.com, share: 0.02}
+  # Mononym owners use "{first}{yy}" / "{first}{last}" with the father's name or a digit run;
+  # SCHEMA: no {nn} random-digits token, common in ID ("dewi123", "agus.s88").
+  patterns: ["{first}{last}", "{first}.{last}", "{first}{yy}", "{first}_{last}", "{f}{last}", "{first}{last}{yy}"]
+services:
+  # Indonesia requires masking (alphanumeric) sender registration with operators, so most
+  # brands appear as text IDs. SCHEMA: no kinds for e-wallet / mobile money and for lenders
+  # (pinjol); they use kind "bank" here and are marked in the comment.
+  # telecom
+  - {sender: Telkomsel, kind: telecom, sender_type: alphanumeric}
+  - {sender: byU, kind: telecom, sender_type: alphanumeric}
+  - {sender: INDOSAT, kind: telecom, sender_type: alphanumeric}
+  - {sender: IM3, kind: telecom, sender_type: alphanumeric}
+  - {sender: Tri, kind: telecom, sender_type: alphanumeric}
+  - {sender: XL, kind: telecom, sender_type: alphanumeric}
+  - {sender: AXIS, kind: telecom, sender_type: alphanumeric}
+  - {sender: Smartfren, kind: telecom, sender_type: alphanumeric}
+  - {sender: IndiHome, kind: telecom, sender_type: alphanumeric}
+  # banks
+  - {sender: BCA, kind: bank, sender_type: alphanumeric}
+  - {sender: BRI, kind: bank, sender_type: alphanumeric}
+  - {sender: mandiri, kind: bank, sender_type: alphanumeric}
+  - {sender: BNI, kind: bank, sender_type: alphanumeric}
+  - {sender: BSI, kind: bank, sender_type: alphanumeric}
+  - {sender: CIMB NIAGA, kind: bank, sender_type: alphanumeric}
+  - {sender: Jenius, kind: bank, sender_type: alphanumeric}
+  - {sender: SeaBank, kind: bank, sender_type: alphanumeric}
+  # e-wallets (mobile money)  [kind bank: SCHEMA gap]
+  - {sender: DANA, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: OVO, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: GoPay, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: ShopeePay, kind: mobile_money, sender_type: alphanumeric}
+  # OJK-registered lenders / paylater (pinjol)  [kind bank: SCHEMA gap]
+  - {sender: Kredivo, kind: lender, sender_type: alphanumeric}
+  - {sender: Akulaku, kind: lender, sender_type: alphanumeric}
+  - {sender: AdaKami, kind: lender, sender_type: alphanumeric}
+  - {sender: Easycash, kind: lender, sender_type: alphanumeric}
+  - {sender: KreditPintar, kind: lender, sender_type: alphanumeric}
+  - {sender: JULO, kind: lender, sender_type: alphanumeric}
+  # collection reminders often come from ordinary mobile numbers (desk collectors), or via WA
+  - {sender: "+62857...", kind: lender, sender_type: number}
+  - {sender: "+62831...", kind: lender, sender_type: number}
+  # OTP / marketplaces / platforms
+  - {sender: Shopee, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Tokopedia, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Lazada, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Bukalapak, kind: otp_service, sender_type: alphanumeric}
+  - {sender: WhatsApp, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Google, kind: otp_service, sender_type: alphanumeric}
+  - {sender: TikTok, kind: otp_service, sender_type: alphanumeric}
+  # ride-hailing / food
+  - {sender: GOJEK, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: Grab, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: Maxim, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: ShopeeFood, kind: delivery_food, sender_type: alphanumeric}
+  # couriers
+  - {sender: JNE, kind: courier, sender_type: alphanumeric}
+  - {sender: J&T, kind: courier, sender_type: alphanumeric}
+  - {sender: SiCepat, kind: courier, sender_type: alphanumeric}
+  - {sender: AnterAja, kind: courier, sender_type: alphanumeric}
+  - {sender: POS IND, kind: courier, sender_type: alphanumeric}
+  # travel
+  - {sender: Traveloka, kind: airline, sender_type: alphanumeric}
+  - {sender: GarudaInd, kind: airline, sender_type: alphanumeric}
+  - {sender: Lion Air, kind: airline, sender_type: alphanumeric}
+  - {sender: Citilink, kind: airline, sender_type: alphanumeric}
+  - {sender: KAI121, kind: rail, sender_type: alphanumeric}
+  # utilities / government / health / retail
+  - {sender: PLN, kind: utility, sender_type: alphanumeric}
+  - {sender: PDAM, kind: utility, sender_type: alphanumeric}
+  - {sender: BPJS KES, kind: government, sender_type: alphanumeric}
+  - {sender: DJP, kind: government, sender_type: alphanumeric}
+  - {sender: Dukcapil, kind: government, sender_type: alphanumeric}
+  - {sender: Kimia Farma, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: Apotek K24, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: Halodoc, kind: doctor, sender_type: alphanumeric}
+  - {sender: "+6221...", kind: doctor, sender_type: number}
+  - {sender: Indomaret, kind: retail, sender_type: alphanumeric}
+  - {sender: Alfamart, kind: retail, sender_type: alphanumeric}
+holidays:
+  - {date: "01-01", name: Tahun Baru Masehi}
+  - {date: "05-01", name: Hari Buruh Internasional}
+  - {date: "06-01", name: Hari Lahir Pancasila}
+  - {date: "08-17", name: Hari Kemerdekaan RI}
+  - {date: "12-25", name: Hari Raya Natal}
+  - {rule: easter-2, name: Wafat Isa Almasih}
+  - {rule: easter, name: Kebangkitan Isa Almasih (Paskah)}
+  - {rule: easter+39, name: Kenaikan Isa Almasih}
+  # Lunar/other-calendar holidays (schema v1.1 rules; were proposals in comments in v1):
+  - {rule: "hijri:10-01", name: Idul Fitri}            # (+ cuti bersama, the biggest travel event: mudik)
+  - {rule: "hijri:12-10", name: Idul Adha}
+  - {rule: "hijri:01-01", name: Tahun Baru Islam}
+  - {rule: "hijri:03-12", name: Maulid Nabi Muhammad}
+  - {rule: "hijri:07-27", name: Isra Mikraj}
+  - {rule: "lunisolar:chinese_new_year", name: Tahun Baru Imlek}   # was chinese:01-01
+  - {rule: "lunisolar:nyepi", name: Hari Suci Nyepi}               # was saka:nyepi
+  - {rule: "lunisolar:vesak", name: Hari Raya Waisak}              # was buddhist:vesak
+  # plus Ramadan (hijri month 9) as a period: sahur/buka bersama calendar entries.
+popular_apps:
+  # All package ids verified on Google Play (gl=ID) on 2026-11-20 by HTTP 200 + listing title (S10).
+  - {package: com.bca, name: BCA mobile, category: banking}
+  - {package: com.bca.mybca.omni.android, name: myBCA, category: banking}
+  - {package: id.co.bri.brimo, name: BRImo, category: banking}
+  - {package: id.bmri.livin, name: "Livin' by Mandiri", category: banking}
+  - {package: id.bni.wondr, name: wondr by BNI, category: banking}
+  - {package: com.bsm.activity2, name: BSI Mobile, category: banking}
+  - {package: com.btpn.dc, name: Jenius, category: banking}
+  - {package: com.jago.digitalBanking, name: Bank Jago, category: banking}
+  - {package: id.co.bankbkemobile.digitalbank, name: SeaBank, category: banking}
+  - {package: id.dana, name: DANA, category: finance}
+  - {package: ovo.id, name: OVO, category: finance}
+  - {package: com.gojek.gopay, name: GoPay, category: finance}
+  - {package: com.finaccel.android, name: Kredivo, category: finance}
+  - {package: io.silvrr.installment, name: Akulaku, category: finance}
+  - {package: com.adakami.dana.kredit.pinjaman, name: AdaKami, category: finance}
+  - {package: com.fintopia.idnEasycash.google, name: Easycash, category: finance}
+  - {package: com.kreditpintar, name: Kredit Pintar, category: finance}
+  - {package: com.julofinance.juloapp, name: JULO, category: finance}
+  - {package: com.indodana.app, name: Indodana, category: finance}
+  - {package: com.cmcm.uangme, name: UangMe, category: finance}
+  - {package: com.bibit.bibitid, name: Bibit, category: finance}
+  - {package: com.whatsapp, name: WhatsApp, category: messaging}
+  - {package: org.telegram.messenger, name: Telegram, category: messaging}
+  - {package: com.gojek.app, name: Gojek, category: transport}
+  - {package: com.grabtaxi.passenger, name: Grab, category: transport}
+  - {package: com.kai.kaiticketing, name: Access by KAI, category: transport}
+  - {package: com.traveloka.android, name: Traveloka, category: transport}
+  - {package: com.shopee.id, name: Shopee, category: shopping}
+  - {package: com.tokopedia.tkpd, name: Tokopedia, category: shopping}
+  - {package: com.lazada.android, name: Lazada, category: shopping}
+  - {package: com.alfamart.alfagift, name: Alfagift, category: shopping}
+  - {package: org.detikcom.rss, name: detikcom, category: news}
+  - {package: com.ss.android.ugc.trill, name: TikTok, category: social}
+  - {package: com.icon.pln123, name: PLN Mobile, category: government}
+  - {package: com.bpjstku, name: JMO (Jamsostek Mobile), category: government}
+  - {package: app.bpjs.mobile, name: Mobile JKN, category: health}
+  - {package: com.telkom.tracencare, name: SATUSEHAT Mobile, category: health}
+  - {package: com.linkdokter.halodoc.android, name: Halodoc, category: health}
+  - {package: com.telkomsel.telkomselcm, name: MyTelkomsel, category: telecom}
+  - {package: com.apps.MyXL, name: myXL, category: telecom}

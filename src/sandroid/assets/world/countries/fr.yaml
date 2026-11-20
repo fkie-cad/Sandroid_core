@@ -1,0 +1,885 @@
+# Sandroid world pack: country fr. Sources: fr.SOURCES.md
+pack: country
+schema: 1.1
+country: fr
+name: France
+languages: {fr: 1.0}
+timezones: [Europe/Paris]
+date_format: dd/MM/yyyy
+time_format: HH:mm
+currency: {code: EUR, symbol: €, format: '49,99 €'}
+phone:
+  country_code: '33'
+  trunk_prefix: '0'
+  national_format_examples: [06 12 34 56 78, 07 81 23 45 67, 01 42 12 34 56, 04 91 12 34 56]
+  mobile:
+    realistic:
+      - {prefix: '607', length: 9, operator: Orange}
+      - {prefix: '608', length: 9, operator: Orange}
+      - {prefix: '630', length: 9, operator: Orange}
+      - {prefix: '631', length: 9, operator: Orange}
+      - {prefix: '632', length: 9, operator: Orange}
+      - {prefix: '633', length: 9, operator: Orange}
+      - {prefix: '637', length: 9, operator: Orange}
+      - {prefix: '638', length: 9, operator: Orange}
+      - {prefix: '640', length: 9, operator: Orange}
+      - {prefix: '642', length: 9, operator: Orange}
+      - {prefix: '643', length: 9, operator: Orange}
+      - {prefix: '645', length: 9, operator: Orange}
+      - {prefix: '647', length: 9, operator: Orange}
+      - {prefix: '648', length: 9, operator: Orange}
+      - {prefix: '649', length: 9, operator: Orange}
+      - {prefix: '670', length: 9, operator: Orange}
+      - {prefix: '671', length: 9, operator: Orange}
+      - {prefix: '672', length: 9, operator: Orange}
+      - {prefix: '673', length: 9, operator: Orange}
+      - {prefix: '674', length: 9, operator: Orange}
+      - {prefix: '675', length: 9, operator: Orange}
+      - {prefix: '676', length: 9, operator: Orange}
+      - {prefix: '677', length: 9, operator: Orange}
+      - {prefix: '678', length: 9, operator: Orange}
+      - {prefix: '679', length: 9, operator: Orange}
+      - {prefix: '680', length: 9, operator: Orange}
+      - {prefix: '681', length: 9, operator: Orange}
+      - {prefix: '682', length: 9, operator: Orange}
+      - {prefix: '683', length: 9, operator: Orange}
+      - {prefix: '684', length: 9, operator: Orange}
+      - {prefix: '685', length: 9, operator: Orange}
+      - {prefix: '686', length: 9, operator: Orange}
+      - {prefix: '687', length: 9, operator: Orange}
+      - {prefix: '688', length: 9, operator: Orange}
+      - {prefix: '689', length: 9, operator: Orange}
+      - {prefix: '772', length: 9, operator: Orange}
+      - {prefix: '785', length: 9, operator: Orange}
+      - {prefix: '786', length: 9, operator: Orange}
+      - {prefix: '787', length: 9, operator: Orange}
+      - {prefix: '788', length: 9, operator: Orange}
+      - {prefix: '789', length: 9, operator: Orange}
+      - {prefix: '603', length: 9, operator: SFR}
+      - {prefix: '609', length: 9, operator: SFR}
+      - {prefix: '610', length: 9, operator: SFR}
+      - {prefix: '611', length: 9, operator: SFR}
+      - {prefix: '612', length: 9, operator: SFR}
+      - {prefix: '613', length: 9, operator: SFR}
+      - {prefix: '614', length: 9, operator: SFR}
+      - {prefix: '615', length: 9, operator: SFR}
+      - {prefix: '616', length: 9, operator: SFR}
+      - {prefix: '617', length: 9, operator: SFR}
+      - {prefix: '618', length: 9, operator: SFR}
+      - {prefix: '619', length: 9, operator: SFR}
+      - {prefix: '620', length: 9, operator: SFR}
+      - {prefix: '621', length: 9, operator: SFR}
+      - {prefix: '622', length: 9, operator: SFR}
+      - {prefix: '623', length: 9, operator: SFR}
+      - {prefix: '624', length: 9, operator: SFR}
+      - {prefix: '625', length: 9, operator: SFR}
+      - {prefix: '626', length: 9, operator: SFR}
+      - {prefix: '627', length: 9, operator: SFR}
+      - {prefix: '629', length: 9, operator: SFR}
+      - {prefix: '634', length: 9, operator: SFR}
+      - {prefix: '635', length: 9, operator: SFR}
+      - {prefix: '646', length: 9, operator: SFR}
+      - {prefix: '776', length: 9, operator: SFR}
+      - {prefix: '777', length: 9, operator: SFR}
+      - {prefix: '778', length: 9, operator: SFR}
+      - {prefix: '779', length: 9, operator: SFR}
+      - {prefix: '636', length: 9, operator: Bouygues Telecom}
+      - {prefix: '650', length: 9, operator: Bouygues Telecom}
+      - {prefix: '658', length: 9, operator: Bouygues Telecom}
+      - {prefix: '659', length: 9, operator: Bouygues Telecom}
+      - {prefix: '660', length: 9, operator: Bouygues Telecom}
+      - {prefix: '661', length: 9, operator: Bouygues Telecom}
+      - {prefix: '662', length: 9, operator: Bouygues Telecom}
+      - {prefix: '663', length: 9, operator: Bouygues Telecom}
+      - {prefix: '664', length: 9, operator: Bouygues Telecom}
+      - {prefix: '665', length: 9, operator: Bouygues Telecom}
+      - {prefix: '666', length: 9, operator: Bouygues Telecom}
+      - {prefix: '667', length: 9, operator: Bouygues Telecom}
+      - {prefix: '668', length: 9, operator: Bouygues Telecom}
+      - {prefix: '669', length: 9, operator: Bouygues Telecom}
+      - {prefix: '698', length: 9, operator: Bouygues Telecom}
+      - {prefix: '699', length: 9, operator: Bouygues Telecom}
+      - {prefix: '760', length: 9, operator: Bouygues Telecom}
+      - {prefix: '761', length: 9, operator: Bouygues Telecom}
+      - {prefix: '762', length: 9, operator: Bouygues Telecom}
+      - {prefix: '763', length: 9, operator: Bouygues Telecom}
+      - {prefix: '764', length: 9, operator: Bouygues Telecom}
+      - {prefix: '765', length: 9, operator: Bouygues Telecom}
+      - {prefix: '651', length: 9, operator: Free Mobile}
+      - {prefix: '652', length: 9, operator: Free Mobile}
+      - {prefix: '695', length: 9, operator: Free Mobile}
+      - {prefix: '749', length: 9, operator: Free Mobile}
+      - {prefix: '766', length: 9, operator: Free Mobile}
+      - {prefix: '767', length: 9, operator: Free Mobile}
+      - {prefix: '768', length: 9, operator: Free Mobile}
+      - {prefix: '769', length: 9, operator: Free Mobile}
+      - {prefix: '781', length: 9, operator: Free Mobile}
+      - {prefix: '782', length: 9, operator: Free Mobile}
+      - {prefix: '783', length: 9, operator: Free Mobile}
+    unallocated:
+      - {prefix: '730', length: 9, note: no attributaire in ARCEP MAJNUM (Last-Modified 2026-11-13); whole 073 and 0740-0742 unassigned, source: S3}
+      - {prefix: '731', length: 9, note: no attributaire in ARCEP MAJNUM (Last-Modified 2026-11-13); whole 073 and 0740-0742 unassigned, source: S3}
+      - {prefix: '732', length: 9, note: no attributaire in ARCEP MAJNUM (Last-Modified 2026-11-13); whole 073 and 0740-0742 unassigned, source: S3}
+      - {prefix: '733', length: 9, note: no attributaire in ARCEP MAJNUM (Last-Modified 2026-11-13); whole 073 and 0740-0742 unassigned, source: S3}
+      - {prefix: '734', length: 9, note: no attributaire in ARCEP MAJNUM (Last-Modified 2026-11-13); whole 073 and 0740-0742 unassigned, source: S3}
+      - {prefix: '735', length: 9, note: no attributaire in ARCEP MAJNUM (Last-Modified 2026-11-13); whole 073 and 0740-0742 unassigned, source: S3}
+      - {prefix: '736', length: 9, note: no attributaire in ARCEP MAJNUM (Last-Modified 2026-11-13); whole 073 and 0740-0742 unassigned, source: S3}
+      - {prefix: '737', length: 9, note: no attributaire in ARCEP MAJNUM (Last-Modified 2026-11-13); whole 073 and 0740-0742 unassigned, source: S3}
+      - {prefix: '738', length: 9, note: no attributaire in ARCEP MAJNUM (Last-Modified 2026-11-13); whole 073 and 0740-0742 unassigned, source: S3}
+      - {prefix: '739', length: 9, note: no attributaire in ARCEP MAJNUM (Last-Modified 2026-11-13); whole 073 and 0740-0742 unassigned, source: S3}
+      - {prefix: '740', length: 9, note: no attributaire in ARCEP MAJNUM (Last-Modified 2026-11-13); whole 073 and 0740-0742 unassigned, source: S3}
+      - {prefix: '741', length: 9, note: no attributaire in ARCEP MAJNUM (Last-Modified 2026-11-13); whole 073 and 0740-0742 unassigned, source: S3}
+      - {prefix: '742', length: 9, note: no attributaire in ARCEP MAJNUM (Last-Modified 2026-11-13); whole 073 and 0740-0742 unassigned, source: S3}
+      - {prefix: '7469', length: 9, note: inside unassigned block 0746800000-0748099999 (ARCEP MAJNUM 2026-11-13), source: S3}
+      - {prefix: '7470', length: 9, note: inside unassigned block 0746800000-0748099999 (ARCEP MAJNUM 2026-11-13), source: S3}
+      - {prefix: '7471', length: 9, note: inside unassigned block 0746800000-0748099999 (ARCEP MAJNUM 2026-11-13), source: S3}
+      - {prefix: '7472', length: 9, note: inside unassigned block 0746800000-0748099999 (ARCEP MAJNUM 2026-11-13), source: S3}
+      - {prefix: '7473', length: 9, note: inside unassigned block 0746800000-0748099999 (ARCEP MAJNUM 2026-11-13), source: S3}
+      - {prefix: '7474', length: 9, note: inside unassigned block 0746800000-0748099999 (ARCEP MAJNUM 2026-11-13), source: S3}
+      - {prefix: '7475', length: 9, note: inside unassigned block 0746800000-0748099999 (ARCEP MAJNUM 2026-11-13), source: S3}
+      - {prefix: '7476', length: 9, note: inside unassigned block 0746800000-0748099999 (ARCEP MAJNUM 2026-11-13), source: S3}
+      - {prefix: '7477', length: 9, note: inside unassigned block 0746800000-0748099999 (ARCEP MAJNUM 2026-11-13), source: S3}
+      - {prefix: '7478', length: 9, note: inside unassigned block 0746800000-0748099999 (ARCEP MAJNUM 2026-11-13), source: S3}
+      - {prefix: '7479', length: 9, note: inside unassigned block 0746800000-0748099999 (ARCEP MAJNUM 2026-11-13), source: S3}
+    fiction:
+      - {range: 639980000-639989999, note: ARCEP 'numéros pour œuvres audiovisuelles' 06 39 98 xx xx; libphonenumber 9.0.43 rejects it (INVALID)}
+  landline:
+    cities:
+      - {city: Paris, area_code: '1', subscriber_length: 8}
+      - {city: Marseille, area_code: '4', subscriber_length: 8}
+      - {city: Lyon, area_code: '4', subscriber_length: 8}
+      - {city: Toulouse, area_code: '5', subscriber_length: 8}
+      - {city: Nice, area_code: '4', subscriber_length: 8}
+      - {city: Nantes, area_code: '2', subscriber_length: 8}
+      - {city: Montpellier, area_code: '4', subscriber_length: 8}
+      - {city: Strasbourg, area_code: '3', subscriber_length: 8}
+      - {city: Bordeaux, area_code: '5', subscriber_length: 8}
+      - {city: Lille, area_code: '3', subscriber_length: 8}
+      - {city: Rennes, area_code: '2', subscriber_length: 8}
+      - {city: Reims, area_code: '3', subscriber_length: 8}
+      - {city: Toulon, area_code: '4', subscriber_length: 8}
+      - {city: Grenoble, area_code: '4', subscriber_length: 8}
+      - {city: Dijon, area_code: '3', subscriber_length: 8}
+      - {city: Le Havre, area_code: '2', subscriber_length: 8}
+    fiction:
+      - {range: 199000000-199009999, note: ARCEP œuvres audiovisuelles 01 99 00 xx xx (Île-de-France)}
+      - {range: 261910000-261919999, note: ARCEP œuvres audiovisuelles 02 61 91 xx xx (Nord-Ouest)}
+      - {range: 353010000-353019999, note: ARCEP œuvres audiovisuelles 03 53 01 xx xx (Nord-Est)}
+      - {range: 465710000-465719999, note: ARCEP œuvres audiovisuelles 04 65 71 xx xx (Sud-Est)}
+      - {range: 536490000-536499999, note: ARCEP œuvres audiovisuelles 05 36 49 xx xx (Sud-Ouest)}
+  validation_note: 'phonenumbers 9.0.43: unallocated 073x/0740-0742/0747x samples are valid MOBILE; the landline fiction ranges are valid FIXED_LINE; the mobile fiction range 06 39 98 is INVALID (so apps that validate with libphonenumber may reject it). libphonenumber also accepts 079 and 0600 as MOBILE although ARCEP keeps 079 in reserve and 0600 for routing. There is no 07 fiction range. In France the first digit 1-5 is the regional zone, so area_code is that single digit. MAJNUM operator mapping = 3-digit prefixes held 90%+ by one operator; portability applies.'
+carriers:
+  - {name: Orange, sim_operator: Orange F, mccmnc: '20801', share: 0.27}
+  - {name: SFR, sim_operator: SFR, mccmnc: '20810', share: 0.23}
+  - {name: Bouygues Telecom, sim_operator: Bouygues Telecom, mccmnc: '20820', share: 0.22}
+  - {name: Free Mobile, sim_operator: Free, mccmnc: '20815', share: 0.19}
+cities:
+  - {name: Paris, lat: 48.8566, lon: 2.3522, population: 2130000, area_code: '1', postcodes: ['75001', '75004', '75005', '75010', '75011', '75012', '75013', '75015', '75017', '75018', '75019', '75020'], districts: [Le Marais, Montmartre, Belleville, Batignolles, Bastille, Quartier Latin, Montparnasse, Oberkampf]}
+  - {name: Marseille, lat: 43.2965, lon: 5.3698, population: 875000, area_code: '4', postcodes: ['13001', '13002', '13004', '13005', '13006', '13007', '13008', '13013'], districts: [Le Panier, Noailles, La Joliette, Castellane, Endoume, La Plaine, Mazargues]}
+  - {name: Lyon, lat: 45.764, lon: 4.8357, population: 520000, area_code: '4', postcodes: ['69001', '69002', '69003', '69004', '69005', '69006', '69007', '69008', '69009'], districts: [Presqu'île, Croix-Rousse, Vieux Lyon, Part-Dieu, Guillotière, Confluence, Brotteaux]}
+  - {name: Toulouse, lat: 43.6047, lon: 1.4442, population: 505000, area_code: '5', postcodes: ['31000', '31200', '31300', '31400', '31500'], districts: [Capitole, Saint-Cyprien, Carmes, Minimes, Rangueil, Compans-Caffarelli]}
+  - {name: Nice, lat: 43.7102, lon: 7.262, population: 348000, area_code: '4', postcodes: ['06000', '06100', '06200', '06300'], districts: [Vieux-Nice, Cimiez, Libération, Port, Fabron]}
+  - {name: Nantes, lat: 47.2184, lon: -1.5536, population: 325000, area_code: '2', postcodes: ['44000', '44100', '44200', '44300'], districts: [Centre-ville, Île de Nantes, Chantenay, Doulon, Erdre]}
+  - {name: Montpellier, lat: 43.6108, lon: 3.8767, population: 302000, area_code: '4', postcodes: ['34000', '34070', '34080', '34090'], districts: [Écusson, Antigone, Port Marianne, Beaux-Arts, Les Arceaux]}
+  - {name: Strasbourg, lat: 48.5734, lon: 7.7521, population: 291000, area_code: '3', postcodes: ['67000', '67100', '67200'], districts: [Grande Île, Neudorf, Krutenau, Robertsau, Esplanade]}
+  - {name: Bordeaux, lat: 44.8378, lon: -0.5792, population: 263000, area_code: '5', postcodes: ['33000', '33100', '33200', '33300', '33800'], districts: [Chartrons, Saint-Michel, Bastide, Saint-Pierre, Caudéran]}
+  - {name: Lille, lat: 50.6292, lon: 3.0573, population: 236000, area_code: '3', postcodes: ['59000', '59160', '59260', '59777', '59800'], districts: [Vieux-Lille, Wazemmes, Fives, Moulins, Euralille]}
+  - {name: Rennes, lat: 48.1173, lon: -1.6778, population: 225000, area_code: '2', postcodes: ['35000', '35200', '35700'], districts: [Centre, Thabor, Sainte-Thérèse, Villejean, Bréquigny]}
+  - {name: Reims, lat: 49.2583, lon: 4.0317, population: 180000, area_code: '3', postcodes: ['51100'], districts: [Centre, Clairmarais, Courlancy, Croix-Rouge]}
+  - {name: Toulon, lat: 43.1242, lon: 5.928, population: 180000, area_code: '4', postcodes: ['83000', '83100', '83200'], districts: [Centre, Mourillon, Saint-Jean-du-Var]}
+  - {name: Le Havre, lat: 49.4944, lon: 0.1079, population: 166000, area_code: '2', postcodes: ['76600', '76610', '76620'], districts: [Centre, Sainte-Adresse, Graville]}
+  - {name: Grenoble, lat: 45.1885, lon: 5.7245, population: 157000, area_code: '4', postcodes: ['38000', '38100'], districts: [Hyper-centre, Île Verte, Berriat, Championnet]}
+  - {name: Dijon, lat: 47.322, lon: 5.0415, population: 159000, area_code: '3', postcodes: ['21000'], districts: [Centre, Montchapet, Toison d'Or]}
+streets: [Rue de l'Église, Place de l'Église, Grande Rue, Rue du Moulin, Place de la Mairie, Rue du Château, Rue des Écoles, Rue de la Gare, Rue de la Mairie, Rue Principale, Rue du Stade, Rue Victor Hugo, Rue Jean Jaurès, Rue Pasteur, Rue des Jardins, Rue de la Fontaine, Rue du Puits, Rue de la République, Avenue de la République, Rue Gambetta, Rue Jean Moulin, Rue Charles de Gaulle, Avenue du Général de Gaulle, Rue du Général Leclerc, Rue de Verdun, Rue de la Paix, Rue des Lilas, Rue des Prés, Rue des Vignes, Rue du Lavoir, Chemin du Moulin, Impasse des Lilas, Rue de la Libération, Rue du 8 Mai 1945, Rue du 11 Novembre, Boulevard Voltaire, Rue Voltaire, Rue Émile Zola, Rue Anatole France, Rue Jules Ferry, Rue Saint-Martin, Rue Nationale, Avenue Jean Jaurès, Boulevard Gambetta, Rue de la Poste, Rue du Commerce, Rue des Tilleuls, Allée des Acacias, Rue des Peupliers, Rue Lamartine, Rue Pierre Curie, Rue Molière, Rue de Paris, Rue du Port, Rue du Four, Rue des Fleurs, Rue de la Croix, Rue des Rosiers, Avenue Foch, Boulevard de la Liberté]
+address_format: '{number} {street}, {postcode} {city}'
+places:
+  - {category: park, name: Jardin du Luxembourg, city: Paris, lat: 48.8469, lon: 2.3372}
+  - {category: park, name: Jardin des Tuileries, city: Paris, lat: 48.8639, lon: 2.3261}
+  - {category: park, name: Parc de la Tête d'Or, city: Lyon, lat: 45.78, lon: 4.854}
+  - {category: park, name: Parc Borély, city: Marseille, lat: 43.2597, lon: 5.3805}
+  - {category: park, name: Bois de Boulogne, city: Paris, lat: 48.86, lon: 2.25}
+  - {category: park, name: Parc des Buttes-Chaumont, city: Paris, lat: 48.8803, lon: 2.3828}
+  - {category: park, name: Jardin des Plantes, city: Nantes, lat: 47.2194, lon: -1.5428}
+  - {category: landmark, name: Tour Eiffel, city: Paris, lat: 48.8582, lon: 2.2945}
+  - {category: landmark, name: Arc de Triomphe, city: Paris, lat: 48.8738, lon: 2.295}
+  - {category: landmark, name: Notre-Dame de Paris, city: Paris, lat: 48.8531, lon: 2.35}
+  - {category: landmark, name: Sacré-Cœur, city: Paris, lat: 48.8869, lon: 2.3431}
+  - {category: landmark, name: Mont-Saint-Michel, city: Le Mont-Saint-Michel, lat: 48.636, lon: -1.511}
+  - {category: landmark, name: Pont du Gard, city: Vers-Pont-du-Gard, lat: 43.9472, lon: 4.5356}
+  - {category: landmark, name: Notre-Dame de la Garde, city: Marseille, lat: 43.2841, lon: 5.371}
+  - {category: landmark, name: Place de la Bourse, city: Bordeaux, lat: 44.8415, lon: -0.57}
+  - {category: landmark, name: Vieux-Port, city: Marseille, lat: 43.2947, lon: 5.3708}
+  - {category: station, name: Gare du Nord, city: Paris, lat: 48.8811, lon: 2.3553}
+  - {category: station, name: Gare de Lyon, city: Paris, lat: 48.8448, lon: 2.3735}
+  - {category: station, name: Gare Montparnasse, city: Paris, lat: 48.84, lon: 2.3186}
+  - {category: station, name: Gare de Lyon-Part-Dieu, city: Lyon, lat: 45.7606, lon: 4.8594}
+  - {category: station, name: Gare de Marseille-Saint-Charles, city: Marseille, lat: 43.3031, lon: 5.3811}
+  - {category: station, name: Gare de Bordeaux-Saint-Jean, city: Bordeaux, lat: 44.8256, lon: -0.5556}
+  - {category: airport, name: Aéroport Paris-Charles-de-Gaulle, city: Roissy-en-France, lat: 49.0097, lon: 2.5478}
+  - {category: airport, name: Aéroport de Paris-Orly, city: Orly, lat: 48.7233, lon: 2.3794}
+  - {category: airport, name: Aéroport Nice-Côte d'Azur, city: Nice, lat: 43.6653, lon: 7.215}
+  - {category: airport, name: Aéroport Lyon-Saint-Exupéry, city: Colombier-Saugnieu, lat: 45.7256, lon: 5.0811}
+  - {category: airport, name: Aéroport Toulouse-Blagnac, city: Blagnac, lat: 43.635, lon: 1.3678}
+  - {category: beach, name: Promenade des Anglais, city: Nice, lat: 43.691, lon: 7.2476}
+  - {category: beach, name: Grande Plage, city: Biarritz, lat: 43.4847, lon: -1.5592}
+  - {category: beach, name: La Croisette, city: Cannes, lat: 43.5492, lon: 7.0267}
+  - {category: beach, name: Plage de La Baule, city: La Baule-Escoublac, lat: 47.2867, lon: -2.3908}
+  - {category: beach, name: Étretat, city: Étretat, lat: 49.71, lon: 0.21}
+  - {category: beach, name: Plage du Prophète, city: Marseille, lat: 43.2789, lon: 5.3586}
+  - {category: mountain, name: Mont Blanc, city: Chamonix-Mont-Blanc, lat: 45.8328, lon: 6.865}
+  - {category: mountain, name: Aiguille du Midi, city: Chamonix-Mont-Blanc, lat: 45.8786, lon: 6.8872}
+  - {category: mountain, name: Puy de Dôme, city: Orcines, lat: 45.7719, lon: 2.9625}
+  - {category: mountain, name: Mont Ventoux, city: Bédoin, lat: 44.1744, lon: 5.2789}
+  - {category: mountain, name: Pic du Midi de Bigorre, city: La Mongie, lat: 42.9364, lon: 0.1428}
+  - {category: museum, name: Musée du Louvre, city: Paris, lat: 48.8611, lon: 2.3358}
+  - {category: museum, name: Musée d'Orsay, city: Paris, lat: 48.86, lon: 2.3265}
+  - {category: museum, name: Centre Pompidou, city: Paris, lat: 48.8606, lon: 2.3522}
+  - {category: museum, name: MuCEM, city: Marseille, lat: 43.2953, lon: 5.3619}
+  - {category: museum, name: Musée des Confluences, city: Lyon, lat: 45.7329, lon: 4.8183}
+  - {category: stadium, name: Stade de France, city: Saint-Denis, lat: 48.9244, lon: 2.36}
+  - {category: stadium, name: Parc des Princes, city: Paris, lat: 48.8414, lon: 2.2531}
+  - {category: stadium, name: Stade Vélodrome, city: Marseille, lat: 43.2697, lon: 5.3958}
+  - {category: stadium, name: Groupama Stadium, city: Décines-Charpieu, lat: 45.7652, lon: 4.9821}
+  - {category: market, name: Marché d'Aligre, city: Paris, lat: 48.8491, lon: 2.3781}
+  - {category: market, name: Halles de Lyon Paul Bocuse, city: Lyon, lat: 45.7632, lon: 4.8505}
+  - {category: market, name: Marché des Capucins, city: Bordeaux, lat: 44.8306, lon: -0.5676}
+  - {category: market, name: Cours Saleya, city: Nice, lat: 43.6956, lon: 7.275}
+  - {category: lake, name: Lac d'Annecy, city: Annecy, lat: 45.899, lon: 6.129}
+  - {category: lake, name: Lac du Bourget, city: Aix-les-Bains, lat: 45.697, lon: 5.888}
+  - {category: lake, name: Lac de Serre-Ponçon, city: Savines-le-Lac, lat: 44.526, lon: 6.401}
+names:
+  culture: fr
+  female:
+    - {name: Marie, w: 1.0}
+    - {name: Nathalie, w: 0.683}
+    - {name: Isabelle, w: 0.645}
+    - {name: Sylvie, w: 0.64}
+    - {name: Catherine, w: 0.609}
+    - {name: Martine, w: 0.501}
+    - {name: Christine, w: 0.479}
+    - {name: Valérie, w: 0.449}
+    - {name: Sandrine, w: 0.433}
+    - {name: Stéphanie, w: 0.421}
+    - {name: Véronique, w: 0.416}
+    - {name: Sophie, w: 0.414}
+    - {name: Céline, w: 0.402}
+    - {name: Françoise, w: 0.378}
+    - {name: Patricia, w: 0.366}
+    - {name: Julie, w: 0.325}
+    - {name: Brigitte, w: 0.323}
+    - {name: Anne, w: 0.319}
+    - {name: Aurélie, w: 0.316}
+    - {name: Chantal, w: 0.313}
+    - {name: Laurence, w: 0.306}
+    - {name: Virginie, w: 0.295}
+    - {name: Corinne, w: 0.293}
+    - {name: Emilie, w: 0.283}
+    - {name: Christelle, w: 0.28}
+    - {name: Elodie, w: 0.275}
+    - {name: Dominique, w: 0.272}
+    - {name: Caroline, w: 0.263}
+    - {name: Florence, w: 0.257}
+    - {name: Audrey, w: 0.251}
+    - {name: Camille, w: 0.247}
+    - {name: Laura, w: 0.237}
+    - {name: Laetitia, w: 0.236}
+    - {name: Hélène, w: 0.23}
+    - {name: Sarah, w: 0.228}
+    - {name: Cécile, w: 0.223}
+    - {name: Annie, w: 0.223}
+    - {name: Delphine, w: 0.222}
+    - {name: Léa, w: 0.22}
+    - {name: Monique, w: 0.22}
+    - {name: Béatrice, w: 0.218}
+    - {name: Karine, w: 0.218}
+    - {name: Mélanie, w: 0.214}
+    - {name: Claire, w: 0.214}
+    - {name: Manon, w: 0.212}
+    - {name: Marion, w: 0.209}
+    - {name: Pauline, w: 0.208}
+    - {name: Nadine, w: 0.207}
+    - {name: Marine, w: 0.204}
+    - {name: Nicole, w: 0.204}
+    - {name: Carole, w: 0.19}
+    - {name: Elisabeth, w: 0.189}
+    - {name: Sandra, w: 0.186}
+    - {name: Evelyne, w: 0.185}
+    - {name: Fabienne, w: 0.185}
+    - {name: Anaïs, w: 0.184}
+    - {name: Pascale, w: 0.182}
+    - {name: Chloé, w: 0.179}
+    - {name: Lucie, w: 0.176}
+    - {name: Mathilde, w: 0.171}
+    - {name: Sabrina, w: 0.169}
+    - {name: Michèle, w: 0.165}
+    - {name: Claudine, w: 0.163}
+    - {name: Alexandra, w: 0.16}
+    - {name: Amandine, w: 0.16}
+    - {name: Charlotte, w: 0.158}
+    - {name: Myriam, w: 0.157}
+    - {name: Agnès, w: 0.15}
+    - {name: Christiane, w: 0.146}
+    - {name: Vanessa, w: 0.143}
+    - {name: Séverine, w: 0.143}
+    - {name: Sonia, w: 0.141}
+    - {name: Emmanuelle, w: 0.141}
+    - {name: Joëlle, w: 0.137}
+    - {name: Amélie, w: 0.134}
+    - {name: Annick, w: 0.133}
+    - {name: Jacqueline, w: 0.133}
+    - {name: Jocelyne, w: 0.133}
+    - {name: Magali, w: 0.132}
+    - {name: Justine, w: 0.131}
+    - {name: Angélique, w: 0.131}
+    - {name: Fanny, w: 0.129}
+    - {name: Marie-Christine, w: 0.129}
+    - {name: Muriel, w: 0.125}
+    - {name: Emma, w: 0.124}
+    - {name: Nadia, w: 0.124}
+    - {name: Jessica, w: 0.123}
+    - {name: Océane, w: 0.121}
+    - {name: Morgane, w: 0.121}
+    - {name: Laure, w: 0.12}
+    - {name: Estelle, w: 0.119}
+    - {name: Jennifer, w: 0.117}
+    - {name: Cindy, w: 0.114}
+    - {name: Anne-Marie, w: 0.112}
+    - {name: Danielle, w: 0.111}
+    - {name: Maryse, w: 0.111}
+    - {name: Josiane, w: 0.111}
+    - {name: Mireille, w: 0.11}
+    - {name: Aurore, w: 0.11}
+    - {name: Sabine, w: 0.109}
+    - {name: Clara, w: 0.108}
+    - {name: Bernadette, w: 0.107}
+    - {name: Juliette, w: 0.099}
+    - {name: Mélissa, w: 0.098}
+    - {name: Aline, w: 0.098}
+    - {name: Alice, w: 0.097}
+    - {name: Coralie, w: 0.095}
+    - {name: Inès, w: 0.094}
+    - {name: Elise, w: 0.092}
+    - {name: Odile, w: 0.09}
+    - {name: Frédérique, w: 0.087}
+    - {name: Geneviève, w: 0.087}
+    - {name: Adeline, w: 0.086}
+    - {name: Lydie, w: 0.086}
+    - {name: Clémence, w: 0.086}
+    - {name: Ghislaine, w: 0.085}
+    - {name: Gaëlle, w: 0.084}
+    - {name: Nelly, w: 0.084}
+    - {name: Lisa, w: 0.084}
+    - {name: Carine, w: 0.083}
+    - {name: Michelle, w: 0.079}
+    - {name: Colette, w: 0.079}
+    - {name: Jeanne, w: 0.079}
+    - {name: Eva, w: 0.079}
+    - {name: Maria, w: 0.077}
+    - {name: Noémie, w: 0.075}
+    - {name: Marina, w: 0.074}
+    - {name: Célia, w: 0.073}
+    - {name: Louise, w: 0.073}
+    - {name: Maeva, w: 0.073}
+    - {name: Régine, w: 0.072}
+    - {name: Margaux, w: 0.071}
+    - {name: Ludivine, w: 0.071}
+    - {name: Nadège, w: 0.071}
+    - {name: Marie-Claude, w: 0.07}
+    - {name: Sylviane, w: 0.069}
+    - {name: Marie-France, w: 0.068}
+    - {name: Murielle, w: 0.067}
+    - {name: Eliane, w: 0.067}
+    - {name: Maryline, w: 0.067}
+    - {name: Francine, w: 0.066}
+    - {name: Viviane, w: 0.064}
+    - {name: Danièle, w: 0.063}
+    - {name: Géraldine, w: 0.063}
+    - {name: Marie-Laure, w: 0.063}
+    - {name: Marie-Thérèse, w: 0.062}
+    - {name: Josette, w: 0.061}
+    - {name: Ophélie, w: 0.06}
+    - {name: Marie-Hélène, w: 0.06}
+    - {name: Liliane, w: 0.06}
+    - {name: Gisèle, w: 0.06}
+    - {name: Rachel, w: 0.06}
+    - {name: Anne-Sophie, w: 0.058}
+    - {name: Jade, w: 0.058}
+    - {name: Alexia, w: 0.057}
+    - {name: Maud, w: 0.057}
+    - {name: Alicia, w: 0.056}
+    - {name: Charlène, w: 0.056}
+    - {name: Emeline, w: 0.055}
+    - {name: Marie-Pierre, w: 0.055}
+  male:
+    - {name: Philippe, w: 1.0}
+    - {name: Jean, w: 1.0}
+    - {name: Nicolas, w: 0.789}
+    - {name: Christophe, w: 0.769}
+    - {name: Patrick, w: 0.753}
+    - {name: Michel, w: 0.722}
+    - {name: Alain, w: 0.713}
+    - {name: Eric, w: 0.645}
+    - {name: Frédéric, w: 0.642}
+    - {name: Laurent, w: 0.638}
+    - {name: Stéphane, w: 0.627}
+    - {name: David, w: 0.621}
+    - {name: Pascal, w: 0.618}
+    - {name: Sébastien, w: 0.618}
+    - {name: Thierry, w: 0.591}
+    - {name: Pierre, w: 0.587}
+    - {name: Julien, w: 0.584}
+    - {name: Christian, w: 0.561}
+    - {name: Olivier, w: 0.554}
+    - {name: Thomas, w: 0.5}
+    - {name: Alexandre, w: 0.497}
+    - {name: Didier, w: 0.462}
+    - {name: Daniel, w: 0.452}
+    - {name: Vincent, w: 0.44}
+    - {name: Dominique, w: 0.434}
+    - {name: Bruno, w: 0.431}
+    - {name: Guillaume, w: 0.423}
+    - {name: Bernard, w: 0.397}
+    - {name: François, w: 0.391}
+    - {name: Jérôme, w: 0.365}
+    - {name: Franck, w: 0.359}
+    - {name: Romain, w: 0.358}
+    - {name: Marc, w: 0.353}
+    - {name: Maxime, w: 0.348}
+    - {name: Anthony, w: 0.344}
+    - {name: Antoine, w: 0.334}
+    - {name: Gérard, w: 0.328}
+    - {name: Gilles, w: 0.313}
+    - {name: Kevin, w: 0.304}
+    - {name: Jean-Pierre, w: 0.288}
+    - {name: Mathieu, w: 0.28}
+    - {name: Jacques, w: 0.279}
+    - {name: Fabrice, w: 0.277}
+    - {name: Cédric, w: 0.274}
+    - {name: Benjamin, w: 0.272}
+    - {name: Claude, w: 0.272}
+    - {name: Arnaud, w: 0.267}
+    - {name: Serge, w: 0.262}
+    - {name: Patrice, w: 0.262}
+    - {name: Sylvain, w: 0.258}
+    - {name: Ludovic, w: 0.254}
+    - {name: Hervé, w: 0.252}
+    - {name: Damien, w: 0.249}
+    - {name: Florian, w: 0.247}
+    - {name: Denis, w: 0.246}
+    - {name: Emmanuel, w: 0.242}
+    - {name: Clément, w: 0.241}
+    - {name: Joël, w: 0.24}
+    - {name: Benoît, w: 0.238}
+    - {name: Jérémy, w: 0.236}
+    - {name: Jean-Luc, w: 0.232}
+    - {name: Alexis, w: 0.229}
+    - {name: Quentin, w: 0.226}
+    - {name: Fabien, w: 0.224}
+    - {name: Mickaël, w: 0.22}
+    - {name: Paul, w: 0.211}
+    - {name: Jonathan, w: 0.21}
+    - {name: Xavier, w: 0.207}
+    - {name: Yves, w: 0.206}
+    - {name: Lucas, w: 0.205}
+    - {name: Loïc, w: 0.204}
+    - {name: André, w: 0.202}
+    - {name: Jean-Claude, w: 0.195}
+    - {name: Jean-François, w: 0.186}
+    - {name: Adrien, w: 0.185}
+    - {name: Guy, w: 0.181}
+    - {name: Cyril, w: 0.18}
+    - {name: Louis, w: 0.179}
+    - {name: Jean-Marc, w: 0.179}
+    - {name: Hugo, w: 0.177}
+    - {name: Francis, w: 0.176}
+    - {name: Yannick, w: 0.171}
+    - {name: Lionel, w: 0.168}
+    - {name: Jean-Michel, w: 0.165}
+    - {name: Michael, w: 0.165}
+    - {name: Théo, w: 0.164}
+    - {name: Valentin, w: 0.164}
+    - {name: Raphaël, w: 0.163}
+    - {name: Yann, w: 0.163}
+    - {name: Grégory, w: 0.162}
+    - {name: Matthieu, w: 0.157}
+    - {name: Aurélien, w: 0.152}
+    - {name: Rémi, w: 0.151}
+    - {name: Baptiste, w: 0.138}
+    - {name: Samuel, w: 0.137}
+    - {name: Jean-Paul, w: 0.132}
+    - {name: Richard, w: 0.132}
+    - {name: Florent, w: 0.132}
+    - {name: Robert, w: 0.126}
+    - {name: Jean-Louis, w: 0.125}
+    - {name: Charles, w: 0.123}
+    - {name: Bertrand, w: 0.122}
+    - {name: Jean-Marie, w: 0.119}
+    - {name: Mohamed, w: 0.119}
+    - {name: William, w: 0.118}
+    - {name: Dylan, w: 0.117}
+    - {name: Enzo, w: 0.117}
+    - {name: Simon, w: 0.115}
+    - {name: René, w: 0.114}
+    - {name: Georges, w: 0.114}
+    - {name: Luc, w: 0.112}
+    - {name: Joseph, w: 0.112}
+    - {name: Rémy, w: 0.111}
+    - {name: Arthur, w: 0.108}
+    - {name: Victor, w: 0.104}
+    - {name: Axel, w: 0.103}
+    - {name: Jordan, w: 0.102}
+    - {name: Gilbert, w: 0.101}
+    - {name: Régis, w: 0.1}
+    - {name: Nathan, w: 0.1}
+    - {name: Léo, w: 0.098}
+    - {name: José, w: 0.098}
+    - {name: Jacky, w: 0.097}
+    - {name: Henri, w: 0.096}
+    - {name: Gabriel, w: 0.095}
+    - {name: Tony, w: 0.094}
+    - {name: Jean-Philippe, w: 0.093}
+    - {name: Corentin, w: 0.093}
+    - {name: Thibault, w: 0.092}
+    - {name: Gaëtan, w: 0.09}
+    - {name: Roger, w: 0.09}
+    - {name: Bastien, w: 0.089}
+    - {name: Jean-Jacques, w: 0.088}
+    - {name: Tom, w: 0.085}
+    - {name: Etienne, w: 0.084}
+    - {name: Yoann, w: 0.083}
+    - {name: Roland, w: 0.078}
+    - {name: Christopher, w: 0.077}
+    - {name: Jean-Baptiste, w: 0.076}
+    - {name: Mathis, w: 0.075}
+    - {name: Mehdi, w: 0.075}
+    - {name: Marcel, w: 0.074}
+    - {name: Karim, w: 0.074}
+    - {name: Dimitri, w: 0.072}
+    - {name: Jean-Yves, w: 0.069}
+    - {name: Cyrille, w: 0.069}
+    - {name: Jimmy, w: 0.068}
+    - {name: Maxence, w: 0.068}
+    - {name: Martin, w: 0.067}
+    - {name: Jean-Christophe, w: 0.066}
+    - {name: Thibaut, w: 0.066}
+    - {name: Jules, w: 0.065}
+    - {name: Steven, w: 0.065}
+    - {name: Manuel, w: 0.065}
+    - {name: Tristan, w: 0.064}
+    - {name: Maurice, w: 0.063}
+    - {name: Erwan, w: 0.062}
+    - {name: Robin, w: 0.061}
+    - {name: Raymond, w: 0.06}
+    - {name: Gérald, w: 0.059}
+  surnames:
+    - {name: Martin, w: 1.0}
+    - {name: Bernard, w: 0.527}
+    - {name: Thomas, w: 0.473}
+    - {name: Petit, w: 0.461}
+    - {name: Robert, w: 0.45}
+    - {name: Richard, w: 0.437}
+    - {name: Durand, w: 0.435}
+    - {name: Dubois, w: 0.432}
+    - {name: Moreau, w: 0.412}
+    - {name: Laurent, w: 0.388}
+    - {name: Simon, w: 0.384}
+    - {name: Michel, w: 0.374}
+    - {name: Lefebvre, w: 0.361}
+    - {name: Leroy, w: 0.346}
+    - {name: Roux, w: 0.304}
+    - {name: David, w: 0.302}
+    - {name: Bertrand, w: 0.292}
+    - {name: Morel, w: 0.29}
+    - {name: Fournier, w: 0.287}
+    - {name: Girard, w: 0.28}
+    - {name: Bonnet, w: 0.276}
+    - {name: Dupont, w: 0.275}
+    - {name: Lambert, w: 0.275}
+    - {name: Fontaine, w: 0.275}
+    - {name: Rousseau, w: 0.272}
+    - {name: Vincent, w: 0.265}
+    - {name: Muller, w: 0.257}
+    - {name: Lefevre, w: 0.254}
+    - {name: Faure, w: 0.254}
+    - {name: Andre, w: 0.251}
+    - {name: Mercier, w: 0.25}
+    - {name: Blanc, w: 0.25}
+    - {name: Guerin, w: 0.248}
+    - {name: Boyer, w: 0.246}
+    - {name: Garnier, w: 0.246}
+    - {name: Chevalier, w: 0.238}
+    - {name: Francois, w: 0.236}
+    - {name: Legrand, w: 0.234}
+    - {name: Gauthier, w: 0.232}
+    - {name: Garcia, w: 0.23}
+    - {name: Perrin, w: 0.226}
+    - {name: Robin, w: 0.223}
+    - {name: Clement, w: 0.22}
+    - {name: Morin, w: 0.218}
+    - {name: Nicolas, w: 0.214}
+    - {name: Henry, w: 0.214}
+    - {name: Roussel, w: 0.214}
+    - {name: Mathieu, w: 0.213}
+    - {name: Gautier, w: 0.211}
+    - {name: Masson, w: 0.21}
+    - {name: Marchand, w: 0.204}
+    - {name: Duval, w: 0.203}
+    - {name: Denis, w: 0.197}
+    - {name: Dumont, w: 0.195}
+    - {name: Marie, w: 0.194}
+    - {name: Lemaire, w: 0.194}
+    - {name: Noel, w: 0.193}
+    - {name: Meyer, w: 0.19}
+    - {name: Dufour, w: 0.189}
+    - {name: Meunier, w: 0.189}
+    - {name: Brun, w: 0.184}
+    - {name: Blanchard, w: 0.184}
+    - {name: Giraud, w: 0.181}
+    - {name: Joly, w: 0.18}
+    - {name: Riviere, w: 0.18}
+    - {name: Lucas, w: 0.18}
+    - {name: Brunet, w: 0.179}
+    - {name: Gaillard, w: 0.178}
+    - {name: Barbier, w: 0.176}
+    - {name: Arnaud, w: 0.175}
+    - {name: Martinez, w: 0.175}
+    - {name: Gerard, w: 0.175}
+    - {name: Roche, w: 0.171}
+    - {name: Renard, w: 0.169}
+    - {name: Schmitt, w: 0.169}
+    - {name: Roy, w: 0.167}
+    - {name: Leroux, w: 0.166}
+    - {name: Colin, w: 0.165}
+    - {name: Vidal, w: 0.164}
+    - {name: Caron, w: 0.164}
+    - {name: Picard, w: 0.163}
+    - {name: Roger, w: 0.162}
+    - {name: Fabre, w: 0.161}
+    - {name: Aubert, w: 0.157}
+    - {name: Lemoine, w: 0.155}
+    - {name: Renaud, w: 0.153}
+    - {name: Dumas, w: 0.151}
+    - {name: Lacroix, w: 0.149}
+    - {name: Olivier, w: 0.148}
+    - {name: Philippe, w: 0.146}
+    - {name: Bourgeois, w: 0.146}
+    - {name: Pierre, w: 0.145}
+    - {name: Benoit, w: 0.144}
+    - {name: Rey, w: 0.143}
+    - {name: Leclerc, w: 0.143}
+    - {name: Payet, w: 0.142}
+    - {name: Rolland, w: 0.14}
+    - {name: Leclercq, w: 0.14}
+    - {name: Guillaume, w: 0.139}
+    - {name: Lecomte, w: 0.139}
+    - {name: Lopez, w: 0.136}
+    - {name: Jean, w: 0.136}
+    - {name: Dupuy, w: 0.135}
+    - {name: Guillot, w: 0.133}
+    - {name: Hubert, w: 0.133}
+    - {name: Berger, w: 0.133}
+    - {name: Carpentier, w: 0.132}
+    - {name: Sanchez, w: 0.131}
+    - {name: Dupuis, w: 0.13}
+    - {name: Moulin, w: 0.129}
+    - {name: Louis, w: 0.129}
+    - {name: Deschamps, w: 0.127}
+    - {name: Huet, w: 0.125}
+    - {name: Vasseur, w: 0.124}
+    - {name: Perez, w: 0.122}
+    - {name: Boucher, w: 0.122}
+    - {name: Fleury, w: 0.121}
+    - {name: Royer, w: 0.12}
+    - {name: Klein, w: 0.12}
+    - {name: Jacquet, w: 0.12}
+    - {name: Adam, w: 0.119}
+    - {name: Paris, w: 0.119}
+    - {name: Poirier, w: 0.119}
+    - {name: Marty, w: 0.118}
+    - {name: Aubry, w: 0.118}
+    - {name: Guyot, w: 0.118}
+    - {name: Carre, w: 0.118}
+    - {name: Charles, w: 0.117}
+    - {name: Renault, w: 0.117}
+    - {name: Charpentier, w: 0.116}
+    - {name: Menard, w: 0.116}
+    - {name: Maillard, w: 0.116}
+    - {name: Baron, w: 0.116}
+    - {name: Bertin, w: 0.115}
+    - {name: Bailly, w: 0.114}
+    - {name: Herve, w: 0.114}
+    - {name: Schneider, w: 0.114}
+    - {name: Fernandez, w: 0.113}
+    - {name: Le Gall, w: 0.111}
+    - {name: Collet, w: 0.111}
+    - {name: Leger, w: 0.11}
+    - {name: Bouvier, w: 0.11}
+    - {name: Julien, w: 0.109}
+    - {name: Prevost, w: 0.108}
+    - {name: Millet, w: 0.107}
+    - {name: Perrot, w: 0.106}
+    - {name: Daniel, w: 0.106}
+    - {name: Le Roux, w: 0.106}
+    - {name: Cousin, w: 0.105}
+    - {name: Germain, w: 0.105}
+    - {name: Breton, w: 0.104}
+    - {name: Besson, w: 0.103}
+    - {name: Langlois, w: 0.103}
+    - {name: Remy, w: 0.103}
+    - {name: Le Goff, w: 0.102}
+    - {name: Pelletier, w: 0.102}
+    - {name: Leveque, w: 0.102}
+    - {name: Perrier, w: 0.101}
+    - {name: Leblanc, w: 0.101}
+    - {name: Barre, w: 0.101}
+    - {name: Lebrun, w: 0.1}
+    - {name: Marchal, w: 0.1}
+    - {name: Weber, w: 0.099}
+    - {name: Mallet, w: 0.098}
+    - {name: Hamon, w: 0.098}
+    - {name: Boulanger, w: 0.097}
+    - {name: Jacob, w: 0.097}
+    - {name: Monnier, w: 0.097}
+    - {name: Michaud, w: 0.097}
+    - {name: Rodriguez, w: 0.097}
+    - {name: Guichard, w: 0.096}
+    - {name: Gillet, w: 0.096}
+    - {name: Etienne, w: 0.095}
+    - {name: Grondin, w: 0.095}
+    - {name: Poulain, w: 0.095}
+    - {name: Tessier, w: 0.094}
+    - {name: Chevallier, w: 0.094}
+    - {name: Collin, w: 0.094}
+    - {name: Chauvin, w: 0.093}
+    - {name: Da Silva, w: 0.093}
+    - {name: Bouchet, w: 0.093}
+    - {name: Gay, w: 0.093}
+    - {name: Lemaitre, w: 0.092}
+    - {name: Benard, w: 0.092}
+    - {name: Marechal, w: 0.091}
+    - {name: Humbert, w: 0.09}
+    - {name: Reynaud, w: 0.09}
+    - {name: Antoine, w: 0.09}
+    - {name: Hoarau, w: 0.089}
+    - {name: Perret, w: 0.089}
+    - {name: Barthelemy, w: 0.087}
+    - {name: Cordier, w: 0.087}
+    - {name: Pichon, w: 0.087}
+    - {name: Lejeune, w: 0.086}
+    - {name: Gilbert, w: 0.086}
+    - {name: Lamy, w: 0.086}
+    - {name: Delaunay, w: 0.086}
+    - {name: Pasquier, w: 0.086}
+    - {name: Carlier, w: 0.085}
+    - {name: Laporte, w: 0.085}
+  nicknames: {Alexandre: Alex, Nicolas: Nico, Christophe: Chris, Sébastien: Seb, Guillaume: Guigui, Maxime: Max, Mathieu: Mat, Jean-Baptiste: JB, Jean-François: JF, Stéphanie: Steph, Caroline: Caro, Virginie: Virgi, Catherine: Cathy, Isabelle: Isa, Frédéric: Fred, Valérie: Val, Benjamin: Ben, Thomas: Tom, Charlotte: Charlie, Dominique: Dom}
+  display: '{first} {last}'
+# Shares = share of contacts from that diaspora/minority (official origin statistics, see SOURCES).
+# Cultures without a pack in this project (not listed as data): dz 0.033, ma 0.027, tn 0.011, pt 0.018, sn 0.0023, zh 0.0017
+cultures:
+  - {culture: it, share: 0.013}
+  - {culture: es, share: 0.012}
+  - {culture: tr, share: 0.009}
+  - {culture: gb, share: 0.002}
+email:
+  domains:
+    - {domain: gmail.com, share: 0.4}
+    - {domain: orange.fr, share: 0.12}
+    - {domain: hotmail.fr, share: 0.1}
+    - {domain: outlook.fr, share: 0.04}
+    - {domain: free.fr, share: 0.07}
+    - {domain: laposte.net, share: 0.05}
+    - {domain: sfr.fr, share: 0.04}
+    - {domain: yahoo.fr, share: 0.05}
+    - {domain: icloud.com, share: 0.05}
+    - {domain: wanadoo.fr, share: 0.03}
+    - {domain: live.fr, share: 0.03}
+    - {domain: neuf.fr, share: 0.01}
+  patterns: ['{first}.{last}', '{first}{last}', '{f}{last}', '{first}.{last}{yy}', '{last}.{first}', '{first}{yy}', '{f}.{last}', '{first}_{last}', '{first}{last}{nn}']
+services:
+  - {sender: Colissimo, kind: courier, sender_type: alphanumeric}
+  - {sender: Chronopost, kind: courier, sender_type: alphanumeric}
+  - {sender: DPD, kind: courier, sender_type: alphanumeric}
+  - {sender: LaPoste, kind: courier, sender_type: alphanumeric}
+  - {sender: BNP Paribas, kind: bank, sender_type: alphanumeric}
+  - {sender: LCL, kind: bank, sender_type: alphanumeric}
+  - {sender: SG, kind: bank, sender_type: alphanumeric}
+  - {sender: BoursoBank, kind: bank, sender_type: alphanumeric}
+  - {sender: CA, kind: bank, sender_type: alphanumeric}
+  - {sender: Orange, kind: telecom, sender_type: alphanumeric}
+  - {sender: SFR, kind: telecom, sender_type: alphanumeric}
+  - {sender: Bouygues, kind: telecom, sender_type: alphanumeric}
+  - {sender: Free Mobile, kind: telecom, sender_type: alphanumeric}
+  - {sender: Google, kind: otp_service, sender_type: alphanumeric}
+  - {sender: PayPal, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Lydia, kind: otp_service, sender_type: alphanumeric}
+  - {sender: Doctolib, kind: doctor, sender_type: alphanumeric}
+  - {sender: +331..., kind: doctor, sender_type: number}
+  - {sender: +334..., kind: doctor, sender_type: number}
+  - {sender: Pharmacie, kind: pharmacy, sender_type: alphanumeric}
+  - {sender: Ameli, kind: government, sender_type: alphanumeric}
+  - {sender: Uber Eats, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Deliveroo, kind: delivery_food, sender_type: alphanumeric}
+  - {sender: Uber, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: Heetch, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: G7, kind: ride_hailing, sender_type: alphanumeric}
+  - {sender: Air France, kind: airline, sender_type: alphanumeric}
+  - {sender: SNCF, kind: rail, sender_type: alphanumeric}
+  - {sender: leboncoin, kind: retail, sender_type: alphanumeric}
+  - {sender: Cdiscount, kind: retail, sender_type: alphanumeric}
+  - {sender: Amazon, kind: retail, sender_type: alphanumeric}
+  - {sender: EDF, kind: utility, sender_type: alphanumeric}
+  - {sender: Engie, kind: utility, sender_type: alphanumeric}
+holidays:
+  - {date: 01-01, name: Jour de l'an}
+  - {date: 01-06, name: Épiphanie (galette des rois), observance: true}
+  - {date: 02-14, name: Saint-Valentin, observance: true}
+  - {rule: easter-2, name: Vendredi saint, regional: true}
+  - {rule: easter+0, name: Pâques, observance: true}
+  - {rule: easter+1, name: Lundi de Pâques}
+  - {date: 05-01, name: Fête du Travail}
+  - {date: 05-08, name: Victoire 1945}
+  - {rule: easter+39, name: Ascension}
+  - {rule: easter+50, name: Lundi de Pentecôte}
+  - {date: 06-21, name: Fête de la musique, observance: true}
+  - {date: 07-14, name: Fête nationale}
+  - {date: 08-15, name: Assomption}
+  - {date: 11-01, name: Toussaint}
+  - {date: 11-11, name: Armistice 1918}
+  - {date: 12-24, name: Réveillon de Noël, observance: true}
+  - {date: 12-25, name: Noël}
+  - {date: 12-26, name: Saint-Étienne, regional: true}
+  - {date: 12-31, name: Réveillon du Nouvel An, observance: true}
+popular_apps:
+  - {package: com.whatsapp, name: WhatsApp, category: messaging}
+  - {package: org.telegram.messenger, name: Telegram, category: messaging}
+  - {package: com.google.android.apps.maps, name: Google Maps, category: transport}
+  - {package: com.ubercab, name: Uber, category: transport}
+  - {package: com.amazon.mShop.android.shopping, name: Amazon Shopping, category: shopping}
+  - {package: com.paypal.android.p2pmobile, name: PayPal, category: banking}
+  - {package: fr.creditagricole.androidapp, name: Ma Banque (Crédit Agricole), category: banking}
+  - {package: net.bnpparibas.mescomptes, name: Mes Comptes BNP Paribas, category: banking}
+  - {package: mobi.societegenerale.mobile.lappli, name: SG, category: banking}
+  - {package: fr.lcl.android.customerarea, name: LCL, category: banking}
+  - {package: com.boursorama.android.clients, name: BoursoBank, category: banking}
+  - {package: com.fullsix.android.labanquepostale.accountaccess, name: La Banque Postale, category: banking}
+  - {package: com.lydia.app, name: Lydia, category: banking}
+  - {package: com.vsct.vsc.mobile.horaireetresa.android, name: SNCF Connect, category: transport}
+  - {package: com.fabernovel.ratp, name: Bonjour RATP, category: transport}
+  - {package: com.heetch, name: Heetch, category: transport}
+  - {package: com.airfrance.android.dinamoprd, name: Air France, category: transport}
+  - {package: fr.leboncoin, name: leboncoin, category: shopping}
+  - {package: cdiscount.mobile, name: Cdiscount, category: shopping}
+  - {package: fr.vinted, name: Vinted, category: shopping}
+  - {package: fr.laposte.lapostemobile, name: La Poste, category: shopping}
+  - {package: com.lemonde.androidapp, name: Le Monde, category: news}
+  - {package: fr.playsoft.lefigarov3, name: Le Figaro, category: news}
+  - {package: fr.francetv.apps.info, name: franceinfo, category: news}
+  - {package: com.ubercab.eats, name: Uber Eats, category: food}
+  - {package: com.deliveroo.orderapp, name: Deliveroo, category: food}
+  - {package: fr.gouv.finances.smartphone.android, name: impots.gouv, category: government}
+  - {package: fr.cnamts.it.activity, name: ameli, category: health}
+  - {package: fr.doctolib.www, name: Doctolib, category: health}
+  - {package: fr.meteo, name: Météo-France, category: weather}
+  - {package: com.orange.orangeetmoi, name: Orange et moi, category: telecom}
+  - {package: com.sfr.android.moncompte, name: SFR & Moi, category: telecom}
