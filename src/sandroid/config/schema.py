@@ -1180,7 +1180,7 @@ class TrackingConfig(BaseModel):
     )
     shot_label: bool = Field(default=False, description="Screenshot at every label")
     mark_screenshots: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Also store a marked copy of each screenshot of an input (the tap, "
             "swipe or typed field drawn on it); the original stays unchanged"

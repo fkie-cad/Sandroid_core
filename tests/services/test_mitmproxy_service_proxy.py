@@ -695,11 +695,13 @@ def test_snapshot_load_reapplies_our_device_proxy_while_mitm_runs(
     svc._proc = _FakeProc()  # mitmweb running
     svc.note_device_proxy("10.0.2.2:8090")
     settable_pm.current = ""  # the snapshot came back with http_proxy :0
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("INFO"):
         assert svc.reapply_device_proxy() == "restored"
     assert settable_pm.current == "10.0.2.2:8090"
     assert svc.owned_device_proxy == "10.0.2.2:8090"
-    assert "re-applied 10.0.2.2:8090" in caplog.text
+    # A restore that worked is routine: INFO, not WARNING.
+    (record,) = [r for r in caplog.records if "re-applied 10.0.2.2:8090" in r.message]
+    assert record.levelname == "INFO"
 
 
 def test_snapshot_load_keeps_a_proxy_that_survived(make_service, settable_pm):

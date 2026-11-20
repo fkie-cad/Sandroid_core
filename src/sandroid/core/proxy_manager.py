@@ -698,6 +698,31 @@ def remember_ca_intent(serial: str | None, spec: CaSpec | None) -> None:
             _CA_DESIRED[serial] = spec
 
 
+def publish_ca_change(serial: str | None, installed: bool | None) -> None:
+    """Tell the UI that the CA state of *serial* changed (``STATE_CHANGED``).
+
+    ``installed`` is the outcome when known (True after a successful install,
+    False after a successful removal), else None: the listeners re-read the
+    device. Any thread; never raises.
+    """
+    try:
+        from sandroid.core.events import Event, EventBus, EventType
+
+        EventBus.get().publish(
+            Event(
+                type=EventType.STATE_CHANGED,
+                data={
+                    "change_type": "proxy_ca",
+                    "serial": serial,
+                    "installed": installed,
+                },
+                source="ca_manager",
+            )
+        )
+    except Exception:
+        logger.debug("CA change publish failed", exc_info=True)
+
+
 class InjectionStrategy(Enum):
     """Strategy for CA injection based on Android version."""
 
@@ -1639,6 +1664,13 @@ class CAManager:
     ) -> InjectionResult:
         """:meth:`inject_ca_into_zygote` for an already-resolved :class:`CaSpec`."""
         serial = self._serial(serial)
+        result = self._inject_spec(spec, serial)
+        # Outside the CA lock: the listeners may re-read the device.
+        publish_ca_change(serial, True if result.success else None)
+        return result
+
+    def _inject_spec(self, spec: CaSpec, serial: str | None) -> InjectionResult:
+        """:meth:`inject_spec` body (resolved *serial*)."""
         with _ca_op_lock(serial), Adb.targeting(serial):
             try:
                 if not self._check_root_access():
@@ -1747,6 +1779,8 @@ class CAManager:
             out, rc = self._run_ca("uninject", [apex], serial)
             if rc == 0:
                 remember_ca_intent(serial, None)
+        # Outside the CA lock; a failed removal may still have removed mounts.
+        publish_ca_change(serial, False if rc == 0 else None)
         m = re.search(r"unmounted=(\d+) failed=(\d+)", out)
         removed, failed = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
         left = re.search(r"left=(\d+)", out)
@@ -2604,7 +2638,8 @@ class FocusManager:
         self._write_sidecar()
         self._add_to_state(package)
         dest = "our mitmproxy" if target is None else upstream
-        logger.warning(
+        # Routine (the user added an App Proxy): INFO, not WARNING.
+        logger.info(
             "App proxy lane %d → %s (uid %s) upstream %s",
             lane,
             package,
@@ -2661,14 +2696,17 @@ class FocusManager:
                 for lane in targets:
                     self._teardown_lane(lane)
                 self._write_sidecar()
-                return True, "App proxies disabled (all lanes freed)"
-
-            lane = self._lane_index_for(package)
-            if lane is None:
-                return True, f"{package} has no app proxy"
-            self._teardown_lane(lane)
-            self._write_sidecar()
-            return True, f"App proxy removed for {package}"
+                message = "App proxies disabled (all lanes freed)"
+            else:
+                lane = self._lane_index_for(package)
+                if lane is None:
+                    return True, f"{package} has no app proxy"
+                self._teardown_lane(lane)
+                self._write_sidecar()
+                message = f"App proxy removed for {package}"
+        # Outside the lock: the lens caption and glance re-read the lanes.
+        self._publish_health()
+        return True, message
 
     def release_serial(self, serial: str | None) -> int:
         """Tear down every lane that lives on *serial* (e.g. on device switch).
@@ -2690,7 +2728,9 @@ class FocusManager:
             if lanes:
                 self._write_sidecar()
             self._cleaned_serials.discard(serial)
-            return len(lanes)
+        if lanes:
+            self._publish_health()
+        return len(lanes)
 
     def focused_apps(self) -> list[str]:
         """Return the packages currently assigned to a lane."""
@@ -2886,7 +2926,11 @@ class FocusManager:
                 plans, orphans, stale, obs, now, [] if deferred is None else deferred
             )
         if any(r.repaired for r in reports) or stale or orphans:
-            logger.warning(
+            # Repairing lanes is the expected job after a world change (a
+            # snapshot load, a cold boot); after anything else it is news.
+            level = logging.INFO if reason in self._WORLD_CHANGES else logging.WARNING
+            logger.log(
+                level,
                 "App proxies reconciled after %s: %s",
                 reason or "a check",
                 "; ".join(
@@ -3561,9 +3605,13 @@ class FocusManager:
         except Exception:
             return True, ""
         # Clean up whether or not the add reported success (a failed add just
-        # makes the delete a harmless no-op).
+        # makes the delete a harmless no-op, whose "no such rule" answer is
+        # expected: DEBUG, not an adb WARNING).
+        from sandroid.core.adb_utils import quiet_adb_warnings
+
         try:
-            Adb.send_adb_command(f"shell {self._ca._root_cmd(dele)}")
+            with quiet_adb_warnings():
+                Adb.send_adb_command(f"shell {self._ca._root_cmd(dele)}")
         except Exception:
             pass
         return (not self._is_missing_match(f"{out}\n{err}")), err
@@ -4109,19 +4157,40 @@ class FocusManager:
         text = (err or "").lower()
         return "couldn't load" in text or "no chain/target/match" in text
 
+    @staticmethod
+    def _is_absent_rule(err: str) -> bool:
+        """Whether a ``-D`` failed only because no such rule is there."""
+        return "No chain/target/match" in err or "does a matching" in err
+
     def _delete_rule_loop(self, tbl: str, body: str) -> None:
-        """Delete every copy of a rule (ignore errors)."""
+        """Delete every copy of a rule (never raises).
+
+        The loop ends at the "no such rule" answer: the expected last round,
+        and the only answer for a rule that was never added (the delete
+        before every add, an ip6tables rule on a kernel without it). That
+        one is DEBUG; any other error stops the loop and is a WARNING.
+        """
+        from sandroid.core.adb_utils import quiet_adb_warnings
+
         del_cmd = f"{tbl} {body.format(op='-D')}"
         for _ in range(10):
             try:
-                _, err = Adb.send_adb_command(f"shell {self._ca._root_cmd(del_cmd)}")
-            except Exception:
+                with quiet_adb_warnings():
+                    _, err = Adb.send_adb_command(
+                        f"shell {self._ca._root_cmd(del_cmd)}"
+                    )
+            except Exception as exc:
+                logger.debug("%s rule delete failed: %s", tbl, exc)
                 return
-            if err and ("No chain/target/match" in err or "does a matching" in err):
-                return
-            if err and err.strip():
-                # Any other error (e.g. bad rule) — stop trying.
-                return
+            text = (err or "").strip()
+            if not text:
+                continue
+            if self._is_absent_rule(text):
+                logger.debug("%s rule absent (%s): %s", tbl, del_cmd, text)
+            else:
+                # Any other error (e.g. bad rule, device gone): stop trying.
+                logger.warning("Removing an App Proxy %s rule failed: %s", tbl, text)
+            return
 
     @staticmethod
     def _is_comment_error(err: str) -> bool:

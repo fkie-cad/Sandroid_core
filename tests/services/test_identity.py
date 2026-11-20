@@ -2013,18 +2013,18 @@ def test_a_failed_sim_value_never_blocks_a_start_through_app_start(
     device.modem = dict(STOCK_SIM)  # the radio keeps the old SIM
     assert service.install_pre_spawn_hook()
     try:
-        plans = real._collect_pre_spawn("com.example.app", "the app")
+        plans = real._collect_pre_start("com.example.app", "the app")
         assert len(plans) == 1
         assert isinstance(plans[0], real.PreSpawnPlan)
         assert not plans[0].disruptive  # the SIM toggle restarts nothing
-        real._apply_pre_spawn(plans, "com.example.app")  # no AppStartError
+        real._apply_pre_start(plans, "com.example.app")  # no AppStartError
         assert device.airplane == ["enable", "disable"]
         infos = {i.id: i for i in service.statuses()}
         assert infos["imsi"].status == "failed"
         assert infos["imsi"].sim_launch
         assert "com.example.app" in _record(device)["done"]
         # Done: the next start of the app has nothing to do.
-        assert real._collect_pre_spawn("com.example.app", "the app") == []
+        assert real._collect_pre_start("com.example.app", "the app") == []
     finally:
         service.uninstall_pre_spawn_hook()
 

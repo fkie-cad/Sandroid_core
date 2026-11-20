@@ -190,6 +190,7 @@ def env(monkeypatch, tmp_path, log_dir):
         "procs": [],
         "locked": set(),  # AVDs whose directory holds a live emulator lock
         "kill_exits": True,  # ``emu kill`` also ends our fake process
+        "cmdlines": {},  # serial -> command line of a running emulator
     }
 
     def fake_spawn(command, avd_name, env=None):
@@ -212,6 +213,7 @@ def env(monkeypatch, tmp_path, log_dir):
     monkeypatch.setattr(emu, "emulator_env", dict)
     monkeypatch.setattr(emu, "spawn_emulator", fake_spawn)
     monkeypatch.setattr(emu, "check_emulator_startup", fake_startup)
+    monkeypatch.setattr(emu, "_running_cmdline", lambda s: state["cmdlines"].get(s))
     monkeypatch.setattr(emu, "_ports_free", lambda p: p not in state["busy"])
     monkeypatch.setattr(emu.time, "sleep", lambda s: None)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
@@ -502,6 +504,109 @@ def test_restart_without_launch_record_uses_remembered_options(env):
     command = env["spawned"][-1]
     assert command[-3:] == ["-snapshot", "clean", "-no-snapshot-save"]
     assert "-no-window" in command
+
+
+_QEMU = "/sdk/emulator/qemu/darwin-aarch64/qemu-system-aarch64"
+
+
+def test_restart_of_a_foreign_emulator_uses_its_command_line(env):
+    env["adb"].add("emulator-5554", avd="Demo")
+    emu.remember_launch("Demo", AvdLaunchOptions(headless=True, boot="cold"))
+    env["cmdlines"]["emulator-5554"] = [
+        _QEMU,
+        "-avd",
+        "Demo",
+        "-port",
+        "5554",
+        "-feature",
+        "-Vulkan",
+        "-gpu",
+        "host",
+        "-no-boot-anim",
+        "-no-snapshot-save",
+        "-snapshot",
+        "clean_8g",
+    ]
+    launch = emu.restart_emulator("emulator-5554")
+    assert launch.options == AvdLaunchOptions(
+        boot="snapshot",
+        snapshot="clean_8g",
+        save_on_exit=False,
+        extra_args=("-no-boot-anim",),
+    )
+    command = env["spawned"][-1]
+    assert command[:5] == ["/sdk/emulator", "-avd", "Demo", "-port", "5554"]
+    assert "-no-window" not in command  # not the remembered headless/cold
+    assert "-no-snapshot-load" not in command
+    assert command.count("-gpu") == 1
+    assert command.count("-feature") == 1
+    # The remembered options of the AVD are left as they were.
+    assert emu.remembered_options("Demo") == AvdLaunchOptions(
+        headless=True, boot="cold"
+    )
+
+
+def test_restart_falls_back_to_remembered_options_without_a_command_line(env):
+    env["adb"].add("emulator-5558", avd="Other")
+    env["cmdlines"]["emulator-5558"] = [_QEMU, "-avd", "Someone-else"]
+    emu.remember_launch("Other", AvdLaunchOptions(boot="cold"))
+    launch = emu.restart_emulator("emulator-5558")
+    assert launch.options == AvdLaunchOptions(boot="cold")
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ([], AvdLaunchOptions(save_on_exit=True)),
+        (
+            ["-no-window", "-no-boot-anim", "-gpu", "swiftshader_indirect"],
+            AvdLaunchOptions(headless=True, save_on_exit=True),
+        ),
+        (["-no-snapshot"], AvdLaunchOptions(boot="cold", save_on_exit=False)),
+        (
+            ["-no-snapshot-load", "-snapshot", "x"],
+            AvdLaunchOptions(boot="cold", save_on_exit=True),
+        ),
+        (
+            ["-wipe-data", "-memory", "4096", "-feature", "-Vulkan,Foo"],
+            AvdLaunchOptions(
+                save_on_exit=True, extra_args=("-memory", "4096", "-feature", "Foo")
+            ),
+        ),
+    ],
+)
+def test_options_from_cmdline_maps_back_what_build_writes(args, expected):
+    cmdline = [_QEMU, "-avd", "Pixel", "-port", "5560", *args]
+    assert emu.options_from_cmdline(cmdline, "Pixel") == expected
+
+
+def test_options_from_cmdline_reads_at_name_and_rejects_other_avds():
+    assert emu.options_from_cmdline([_QEMU, "@Pixel"], "Pixel") is not None
+    assert emu.options_from_cmdline([_QEMU, "-avd", "Other"], "Pixel") is None
+    assert emu.options_from_cmdline([_QEMU], "Pixel") is None
+
+
+def test_options_from_cmdline_strips_our_earlier_hook_args():
+    cmdline = [_QEMU, "-avd", "Pixel", "-no-snapshot-save", "-sysdir", "/p/sim"]
+    opts = emu.options_from_cmdline(cmdline, "Pixel", ("-sysdir", "/p/sim"))
+    assert opts.extra_args == ()
+    # Someone else's own -sysdir is kept.
+    opts = emu.options_from_cmdline(cmdline, "Pixel", ("-sysdir", "/p/other"))
+    assert opts.extra_args == ("-sysdir", "/p/sim")
+
+
+def test_a_launch_remembers_its_hook_args_for_a_later_restart(env):
+    emu.register_pre_launch_hook(lambda ctx: ("-sysdir", "/p/sim"))
+    emu.launch_avd("Pixel", port=5560)
+    assert emu.load_launch_prefs()["avds"]["Pixel"]["hook_args"] == [
+        "-sysdir",
+        "/p/sim",
+    ]
+    emu.remember_launch("Pixel", AvdLaunchOptions(headless=True))
+    assert emu.load_launch_prefs()["avds"]["Pixel"]["hook_args"] == [
+        "-sysdir",
+        "/p/sim",
+    ]
 
 
 def test_restart_fails_cleanly_when_avd_is_unknown(env):
@@ -1137,7 +1242,7 @@ def test_hook_registration_is_ordered_idempotent_and_removable(env):
         emu.register_post_stop_hook("not callable")
 
 
-def test_pre_launch_args_follow_extra_args_and_are_never_remembered(env):
+def test_pre_launch_args_follow_extra_args_and_never_become_options(env):
     import json
 
     emu.register_pre_launch_hook(lambda ctx: ("-hook-one",))
@@ -1152,7 +1257,13 @@ def test_pre_launch_args_follow_extra_args_and_are_never_remembered(env):
     launch = emu.get_launch(serial)
     assert launch.options == opts
     assert launch.hook_args == ("-hook-one", "-hook-two", "value")
-    text = json.dumps(emu.load_launch_prefs())
+    # Hook args never become options; they are only kept to strip them from
+    # this emulator's command line on a later restart (running_options).
+    assert emu.remembered_options("Pixel").extra_args == ()
+    entry = emu.load_launch_prefs()["avds"]["Pixel"]
+    assert entry["hook_args"] == ["-hook-one", "-hook-two", "value"]
+    entry.pop("hook_args")
+    text = json.dumps(entry)
     assert "-hook" not in text
     assert "-extra" not in text  # extra_args are not remembered either
 

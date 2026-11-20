@@ -37,7 +37,7 @@ or the user's answer to the confirmation dialog :func:`negotiate_start` shows.
 Resume follows ownership: only the caller that spawned a process
 (``owns_spawn``) resumes it; a joined paused process waits for Space.
 
-Pre-spawn hooks (:func:`register_pre_spawn_hook`, e.g. the identity profile)
+Pre-start steps (:func:`register_pre_start_step`, e.g. the identity profile)
 run before every start of an app by Sandroid, inside the lifecycle lock:
 Space/⇧P (:func:`start_app`), ⇧R and the AI restart (:func:`restart_app`),
 a tool's SPAWN/RESPAWN (:func:`open_session`), and via
@@ -91,9 +91,40 @@ class StartAction(str, Enum):
 
 
 class AppStartError(RuntimeError):
-    """The app cannot be started/attached as asked (user-actionable)."""
+    """The app cannot be started/attached as asked (user-actionable).
+
+    Attributes:
+        reason: Machine-readable cause for callers that act on it (the AI
+            tools): ``"needs_consent"`` (a pre-start step stops every app and
+            there is no dialog to ask), ``"declined"`` (the dialog got no
+            yes: Cancel, Esc, a timeout or nobody answered; do not retry
+            unasked), ``"busy"`` (another start holds the lifecycle lock);
+            None otherwise.
+    """
 
     expected = True
+
+    def __init__(self, message: str = "", reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class StartResult(tuple):  # noqa: SLOT001 -- needs a __dict__ for .reason
+    """``(ok, message)`` as before, plus :attr:`reason` from AppStartError."""
+
+    reason: str | None
+
+    def __new__(cls, ok: bool, message: str, reason: str | None = None):
+        result = super().__new__(cls, (ok, message))
+        result.reason = reason
+        return result
+
+    @classmethod
+    def of(cls, result: tuple[bool, str]) -> StartResult:
+        if isinstance(result, StartResult):
+            return result
+        ok, message = result
+        return cls(ok, message)
 
 
 @dataclass(frozen=True)
@@ -157,7 +188,7 @@ class StartDecision:
         stops: Tools a RESPAWN stops (shown in the dialog).
         tool: The tool that asked.
         consent: The caller's own consent (headless ``fresh=True``); without
-            a dialog it also covers a pre-spawn step that stops every app.
+            a dialog it also covers a pre-start step that stops every app.
     """
 
     action: StartAction
@@ -367,11 +398,13 @@ def lifecycle_lock(timeout: float = 0.0) -> Iterator[None]:
     """
     if timeout > 0 and threading.current_thread() is threading.main_thread():
         logger.error("lifecycle_lock(timeout=%s) on the UI thread; refused", timeout)
-        raise AppStartError(f"{_BUSY_MSG} (cannot wait for it on the UI thread)")
+        raise AppStartError(
+            f"{_BUSY_MSG} (cannot wait for it on the UI thread)", reason="busy"
+        )
     deadline = time.monotonic() + max(0.0, timeout)
     while not _LIFECYCLE.try_acquire():
         if time.monotonic() >= deadline:
-            raise AppStartError(_BUSY_MSG)
+            raise AppStartError(_BUSY_MSG, reason="busy")
         time.sleep(_LOCK_POLL_S)
     try:
         yield
@@ -840,13 +873,13 @@ def negotiate_start(tool: str, **kwargs: Any) -> StartDecision:
 
 
 # ---------------------------------------------------------------------------
-# Pre-spawn hooks: steps that must run before the app's process starts
+# Pre-start steps: steps that must run before the app's process starts
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
-class PreSpawnPlan:
-    """What a pre-spawn hook needs done before the app starts.
+class PreStartPlan:
+    """What a pre-start step needs done before the app starts.
 
     Attributes:
         description: What ``apply`` does, a verb phrase for messages
@@ -866,45 +899,45 @@ class PreSpawnPlan:
 #: Gets the package about to start; returns a plan, or None (nothing to do).
 #: Decide quickly, no device writes: start paths call it inside the lifecycle
 #: lock, prepare_launch() just before taking it (no plans = no lock).
-PreSpawnHook = Callable[[str], PreSpawnPlan | None]
+PreStartStep = Callable[[str], PreStartPlan | None]
 
 _HOOKS_LOCK = threading.Lock()
-_PRE_SPAWN_HOOKS: list[PreSpawnHook] = []
-#: Pre-start steps (dialog or apply) in progress, see pre_spawn_running().
+_PRE_START_STEPS: list[PreStartStep] = []
+#: Pre-start steps (dialog or apply) in progress, see pre_start_running().
 _PHASES = 0
 #: ``(package, text, short text)`` while a pre-start step applies, see
-#: pre_spawn_status().
+#: pre_start_status().
 _STATUS: tuple[str, ...] | None = None
 _STATUS_LISTENERS: list[Callable[[], None]] = []
 #: Poll interval of recover_after_framework_restart().
 _RECOVERY_POLL_S = 1.0
 
 
-def register_pre_spawn_hook(hook: PreSpawnHook) -> None:
+def register_pre_start_step(hook: PreStartStep) -> None:
     """Run ``hook`` before every start of an app by Sandroid.
 
     Hooks run in registration order. Registering a hook again (also an
     equal bound method) is a no-op.
     """
     with _HOOKS_LOCK:
-        if hook not in _PRE_SPAWN_HOOKS:
-            _PRE_SPAWN_HOOKS.append(hook)
+        if hook not in _PRE_START_STEPS:
+            _PRE_START_STEPS.append(hook)
 
 
-def unregister_pre_spawn_hook(hook: PreSpawnHook) -> None:
+def unregister_pre_start_step(hook: PreStartStep) -> None:
     """Remove ``hook`` (a no-op when it is not registered)."""
     with _HOOKS_LOCK:
-        if hook in _PRE_SPAWN_HOOKS:
-            _PRE_SPAWN_HOOKS.remove(hook)
+        if hook in _PRE_START_STEPS:
+            _PRE_START_STEPS.remove(hook)
 
 
-def pre_spawn_running() -> bool:
+def pre_start_running() -> bool:
     """A pre-start step (its dialog or its apply) is in progress."""
     with _HOOKS_LOCK:
         return _PHASES > 0
 
 
-def pre_spawn_status(package: str | None = None, *, short: bool = False) -> str | None:
+def pre_start_status(package: str | None = None, *, short: bool = False) -> str | None:
     """What the pre-start step applying right now does (for the App lens).
 
     Args:
@@ -922,14 +955,14 @@ def pre_spawn_status(package: str | None = None, *, short: bool = False) -> str 
     return status[2] if short and len(status) > 2 else status[1]
 
 
-def add_pre_spawn_status_listener(cb: Callable[[], None]) -> None:
-    """Call ``cb()`` (any thread) when :func:`pre_spawn_status` changes."""
+def add_pre_start_status_listener(cb: Callable[[], None]) -> None:
+    """Call ``cb()`` (any thread) when :func:`pre_start_status` changes."""
     with _HOOKS_LOCK:
         if cb not in _STATUS_LISTENERS:
             _STATUS_LISTENERS.append(cb)
 
 
-def remove_pre_spawn_status_listener(cb: Callable[[], None]) -> None:
+def remove_pre_start_status_listener(cb: Callable[[], None]) -> None:
     """Stop calling ``cb``."""
     with _HOOKS_LOCK:
         if cb in _STATUS_LISTENERS:
@@ -949,7 +982,7 @@ def _set_status(status: tuple[str, ...] | None) -> None:
 
 
 @contextmanager
-def _pre_spawn_phase(status: tuple[str, ...] | None = None) -> Iterator[None]:
+def _pre_start_phase(status: tuple[str, ...] | None = None) -> Iterator[None]:
     global _PHASES
     with _HOOKS_LOCK:
         _PHASES += 1
@@ -964,7 +997,7 @@ def _pre_spawn_phase(status: tuple[str, ...] | None = None) -> Iterator[None]:
             _set_status(None)
 
 
-def _progress_text(plans: list[PreSpawnPlan]) -> tuple[str, str]:
+def _progress_text(plans: list[PreStartPlan]) -> tuple[str, str]:
     """``Applying identity profile 'x' (…) — the Android framework restarts;
     this can take a few minutes`` and a short form (``Applying identity
     profile 'x', framework restarts``) for the App lens.
@@ -993,14 +1026,14 @@ def _hook_name(hook: Any) -> str:
     )
 
 
-def _collect_pre_spawn(package: str, tool: str) -> list[PreSpawnPlan]:
+def _collect_pre_start(package: str, tool: str) -> list[PreStartPlan]:
     """Ask every hook (registration order) what it needs before the start.
 
     Raises:
         AppStartError: A hook raised.
     """
     with _HOOKS_LOCK:
-        hooks = list(_PRE_SPAWN_HOOKS)
+        hooks = list(_PRE_START_STEPS)
     plans = []
     for hook in hooks:
         try:
@@ -1014,12 +1047,12 @@ def _collect_pre_spawn(package: str, tool: str) -> list[PreSpawnPlan]:
     return plans
 
 
-def _plans_text(plans: list[PreSpawnPlan]) -> str:
+def _plans_text(plans: list[PreStartPlan]) -> str:
     return "; ".join(plan.description for plan in plans)
 
 
-def _confirm_pre_spawn(
-    plans: list[PreSpawnPlan], package: str, tool: str, consent: bool
+def _confirm_pre_start(
+    plans: list[PreStartPlan], package: str, tool: str, consent: bool
 ) -> None:
     """Get the OK for plans that stop every app (no-op without such a plan).
 
@@ -1043,7 +1076,8 @@ def _confirm_pre_spawn(
         raise AppStartError(
             f"{package} not started — {what} restarts the Android framework "
             "(every running app on the device stops) and there is no dialog "
-            "to confirm it; pass fresh=True (the caller consents) to apply it."
+            "to confirm it; pass fresh=True (the caller consents) to apply it.",
+            reason="needs_consent",
         )
     if threading.current_thread() is threading.main_thread():
         logger.error("Pre-start confirmation for %s on the UI thread; refused", tool)
@@ -1052,7 +1086,7 @@ def _confirm_pre_spawn(
         )
     from sandroid.tui.modals.confirm_modal import ConfirmModal
 
-    with _pre_spawn_phase():
+    with _pre_start_phase():
         answer = request_modal(
             ConfirmModal,
             title=f"Apply before starting {package}?",
@@ -1066,7 +1100,9 @@ def _confirm_pre_spawn(
             guard_typing=True,
         )
     if answer is not True:
-        raise AppStartError(f"{package} not started — {what} not applied")
+        raise AppStartError(
+            f"{package} not started — {what} not applied", reason="declined"
+        )
 
 
 def _spotlight_pkg() -> str | None:
@@ -1101,7 +1137,7 @@ def _system_server_pid(serial: str | None = None) -> int | None:
     return _parse_pid(out or "")
 
 
-def _apply_pre_spawn(plans: list[PreSpawnPlan], package: str) -> None:
+def _apply_pre_start(plans: list[PreStartPlan], package: str) -> None:
     """Run every plan's ``apply`` in order; fail closed (no spawn).
 
     The system_server PID is read before any plan runs (one adb call): any
@@ -1116,7 +1152,7 @@ def _apply_pre_spawn(plans: list[PreSpawnPlan], package: str) -> None:
     if not plans:
         return
     error: AppStartError | None = None
-    with _pre_spawn_phase((package, *_progress_text(plans))):
+    with _pre_start_phase((package, *_progress_text(plans))):
         previous = _system_server_pid()
         for plan in plans:
             try:
@@ -1335,7 +1371,7 @@ def recover_after_framework_restart(
 def prepare_launch(
     package: str, tool: str, *, consent: bool = False, restart: bool = False
 ) -> bool:
-    """Run the pre-spawn hooks before a start outside the Frida spawn path.
+    """Run the pre-start steps before a start outside the Frida spawn path.
 
     For launches that do not go through :func:`open_session` /
     :func:`start_app` (the AI ``launch_app``, an Objection spawn); the
@@ -1362,7 +1398,7 @@ def prepare_launch(
         AppStartError: A hook failed; with plans also busy, an adb error, a
             failed plan, declined.
     """
-    plans = _collect_pre_spawn(package, tool)
+    plans = _collect_pre_start(package, tool)
     if not plans:
         return True
     with _lifecycle():
@@ -1376,7 +1412,7 @@ def prepare_launch(
         held = session_pid(jm) is not None and _session_package(jm) == package
         if (liveness == Liveness.RUNNING or held) and not restart:
             return False
-        _confirm_pre_spawn(plans, package, tool, consent)
+        _confirm_pre_start(plans, package, tool, consent)
         if liveness == Liveness.RUNNING or held:
             from sandroid.services import get_spotlight_service
 
@@ -1385,7 +1421,7 @@ def prepare_launch(
                 respawn_teardown(package)  # after the OK: Cancel keeps it
             finally:
                 spotlight.end_restart()
-        _apply_pre_spawn(plans, package)
+        _apply_pre_start(plans, package)
         return True
 
 
@@ -1559,7 +1595,7 @@ def open_session(decision: StartDecision, handler: Any = None) -> Opened:
     re-checks liveness right before spawning (a config dialog or snapshot
     prompt may have passed since the decision) and refuses when the app came
     up meanwhile; RESPAWN runs the ⇧R teardown first. SPAWN and RESPAWN run
-    the pre-spawn hooks right before the spawn (RESPAWN asks before the
+    the pre-start steps right before the spawn (RESPAWN asks before the
     teardown, so Cancel leaves the app running).
 
     Raises:
@@ -1601,20 +1637,20 @@ def open_session(decision: StartDecision, handler: Any = None) -> Opened:
                 )
             if decision.reset_session:
                 drop_idle_session(jm, decision.tool)
-            plans = _collect_pre_spawn(pkg, decision.tool)
-            _confirm_pre_spawn(plans, pkg, decision.tool, decision.consent)
-            _apply_pre_spawn(plans, pkg)
+            plans = _collect_pre_start(pkg, decision.tool)
+            _confirm_pre_start(plans, pkg, decision.tool, decision.consent)
+            _apply_pre_start(plans, pkg)
             return _spawn_paused(pkg, decision.tool)
     if action == StartAction.RESPAWN:
         from sandroid.services import get_spotlight_service
 
         spotlight = get_spotlight_service()
         with _lifecycle():
-            plans = _collect_pre_spawn(pkg, decision.tool)
-            _confirm_pre_spawn(plans, pkg, decision.tool, decision.consent)
+            plans = _collect_pre_start(pkg, decision.tool)
+            _confirm_pre_start(plans, pkg, decision.tool, decision.consent)
             try:
                 respawn_teardown(pkg)
-                _apply_pre_spawn(plans, pkg)
+                _apply_pre_start(plans, pkg)
                 return _spawn_paused(pkg, decision.tool)
             finally:
                 spotlight.end_restart()
@@ -1751,12 +1787,12 @@ def _spotlight_package() -> str | None:
     return get_spotlight_service().get_effective_package()
 
 
-def start_app(paused: bool = False, *, consent: bool = False) -> tuple[bool, str]:
+def start_app(paused: bool = False, *, consent: bool = False) -> StartResult:
     """Start the stopped spotlight app with the armed bypasses (Space / ⇧P).
 
     Never restarts: a running app (also one opened from the launcher since
-    the last poll) or a held spawn is reported, not killed. The pre-spawn
-    hooks run right before the spawn.
+    the last poll) or a held spawn is reported, not killed. The pre-start
+    steps run right before the spawn.
 
     Args:
         paused: Keep the app paused after the hooks loaded (⇧P).
@@ -1764,23 +1800,24 @@ def start_app(paused: bool = False, *, consent: bool = False) -> tuple[bool, str
             (with a UI the dialog always asks).
 
     Returns:
-        ``(ok, message)``.
+        ``(ok, message)``; a refusal carries ``.reason`` (see AppStartError).
     """
     if not _LIFECYCLE.try_acquire():
-        return False, _BUSY_MSG
+        return StartResult(False, _BUSY_MSG, "busy")
     try:
         pkg = _spotlight_package()
         if not pkg:
-            return False, _no_app("Start").reason
+            return StartResult(False, _no_app("Start").reason)
         decision = decide_start(gather_inputs(pkg, tool="Start", frida_fallback=True))
         if decision.action == StartAction.REFUSE:
-            return False, decision.reason
+            return StartResult(False, decision.reason)
         if decision.action == StartAction.JOIN and decision.paused:
-            return False, f"{pkg} is already started paused — ␣ resumes it"
+            return StartResult(False, f"{pkg} is already started paused — ␣ resumes it")
         if decision.action != StartAction.SPAWN:
-            return False, (
+            return StartResult(
+                False,
                 f"{pkg} is already running (pid {decision.pid}) — ⇧R restarts "
-                "it, ⇧A attaches"
+                "it, ⇧A attaches",
             )
         # The armed set now: a selection change during the dialog or the
         # framework restart disarms, and this app must keep its bypasses.
@@ -1789,17 +1826,19 @@ def start_app(paused: bool = False, *, consent: bool = False) -> tuple[bool, str
         try:
             if decision.reset_session:
                 drop_idle_session(_job_manager(), "Start")
-            plans = _collect_pre_spawn(pkg, pkg)
-            _confirm_pre_spawn(plans, pkg, pkg, consent)
-            _apply_pre_spawn(plans, pkg)
+            plans = _collect_pre_start(pkg, pkg)
+            _confirm_pre_start(plans, pkg, pkg, consent)
+            _apply_pre_start(plans, pkg)
         except AppStartError as exc:
-            return False, str(exc)
-        return bypass.apply_to_fresh_spawn_with_retry(pkg, armed, resume=not paused)
+            return StartResult(False, str(exc), exc.reason)
+        return StartResult.of(
+            bypass.apply_to_fresh_spawn_with_retry(pkg, armed, resume=not paused)
+        )
     finally:
         _LIFECYCLE.release()
 
 
-def restart_app(paused: bool = False, *, consent: bool = False) -> tuple[bool, str]:
+def restart_app(paused: bool = False, *, consent: bool = False) -> StartResult:
     """Force-stop and start the spotlight app again (⇧R; the AI after consent).
 
     The caller is the consent to restart this app: ⇧R is the explicit restart
@@ -1815,32 +1854,34 @@ def restart_app(paused: bool = False, *, consent: bool = False) -> tuple[bool, s
             (with a UI the dialog always asks).
 
     Returns:
-        ``(ok, message)``.
+        ``(ok, message)``; a refusal carries ``.reason`` (see AppStartError).
     """
     if not _LIFECYCLE.try_acquire():
-        return False, _BUSY_MSG
+        return StartResult(False, _BUSY_MSG, "busy")
     from sandroid.services import get_spotlight_service
 
     spotlight = get_spotlight_service()
     try:
         pkg = spotlight.get_effective_package()
         if not pkg:
-            return False, _no_app("Restart").reason
+            return StartResult(False, _no_app("Restart").reason)
         # Armed or on live, now: a selection change during the dialog disarms.
         bypass = _bypass()
         armed = bypass.carried_categories(pkg)
         try:
-            plans = _collect_pre_spawn(pkg, pkg)
-            _confirm_pre_spawn(plans, pkg, pkg, consent)
+            plans = _collect_pre_start(pkg, pkg)
+            _confirm_pre_start(plans, pkg, pkg, consent)
         except AppStartError as exc:
-            return False, str(exc)  # nothing was torn down
+            return StartResult(False, str(exc), exc.reason)  # nothing was torn down
         try:
             respawn_teardown(pkg)
             try:
-                _apply_pre_spawn(plans, pkg)
+                _apply_pre_start(plans, pkg)
             except AppStartError as exc:
-                return False, str(exc)
-            return bypass.apply_to_fresh_spawn_with_retry(pkg, armed, resume=not paused)
+                return StartResult(False, str(exc), exc.reason)
+            return StartResult.of(
+                bypass.apply_to_fresh_spawn_with_retry(pkg, armed, resume=not paused)
+            )
         finally:
             spotlight.end_restart()
     finally:
@@ -1896,13 +1937,14 @@ __all__ = [
     "AppStartError",
     "Liveness",
     "Opened",
-    "PreSpawnHook",
-    "PreSpawnPlan",
+    "PreStartPlan",
+    "PreStartStep",
     "StartAction",
     "StartDecision",
     "StartInputs",
+    "StartResult",
     "abort_owned_spawn",
-    "add_pre_spawn_status_listener",
+    "add_pre_start_status_listener",
     "apply_armed_after_launch",
     "attach_app",
     "decide_start",
@@ -1911,18 +1953,29 @@ __all__ = [
     "lifecycle_lock",
     "negotiate_start",
     "open_session",
-    "pre_spawn_running",
-    "pre_spawn_status",
+    "pre_start_running",
+    "pre_start_status",
     "prepare_launch",
     "probe_liveness",
     "recover_after_framework_restart",
-    "register_pre_spawn_hook",
-    "remove_pre_spawn_status_listener",
+    "register_pre_start_step",
+    "remove_pre_start_status_listener",
     "resolve_start",
     "restart_app",
     "resume_app",
     "setup_owner",
     "start_app",
     "stops_sentence",
-    "unregister_pre_spawn_hook",
+    "unregister_pre_start_step",
 ]
+
+# Deprecated names (before 2026-11-20 these were "pre-spawn hooks"): kept
+# until the in-flight branches that call them have moved to the new names.
+PreSpawnPlan = PreStartPlan
+PreSpawnHook = PreStartStep
+register_pre_spawn_hook = register_pre_start_step
+unregister_pre_spawn_hook = unregister_pre_start_step
+pre_spawn_running = pre_start_running
+pre_spawn_status = pre_start_status
+add_pre_spawn_status_listener = add_pre_start_status_listener
+remove_pre_spawn_status_listener = remove_pre_start_status_listener

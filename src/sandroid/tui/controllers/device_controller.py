@@ -617,8 +617,9 @@ class DeviceController:
 
         Args:
             serial: Emulator serial.
-            options: Launch options (default: those it was launched with, else
-                the remembered ones; a wipe becomes a normal boot).
+            options: Launch options (default: those it was launched with --
+                our launch record, else its command line -- else the
+                remembered ones; a wipe becomes a normal boot).
             on_done: UI-thread callback ``(ok, message)`` once the relaunched
                 process started or the restart failed.
         """

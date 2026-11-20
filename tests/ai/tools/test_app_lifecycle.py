@@ -23,7 +23,7 @@ from sandroid.services import app_start
 
 
 @pytest.fixture(autouse=True)
-def _no_pre_spawn(monkeypatch):
+def _no_pre_start(monkeypatch):
     """launch_app's pre-start step (tests/services/test_app_start.py)."""
     monkeypatch.setattr(app_start, "prepare_launch", lambda *a, **k: False)
 

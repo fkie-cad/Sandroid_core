@@ -394,6 +394,35 @@ def test_uninject_clears_the_intent_and_warns_about_running_apps(host_ca, device
     assert device.ops == [["uninject", "1"]]
 
 
+@pytest.fixture
+def ca_events():
+    """``(serial, installed)`` of every ``proxy_ca`` STATE_CHANGED."""
+    from sandroid.core.events import EventBus, EventType
+
+    seen: list[tuple] = []
+
+    def handler(event) -> None:
+        data = event.data or {}
+        if data.get("change_type") == "proxy_ca":
+            seen.append((data.get("serial"), data.get("installed")))
+
+    EventBus.get().subscribe(EventType.STATE_CHANGED, handler)
+    yield seen
+    EventBus.get().unsubscribe(EventType.STATE_CHANGED, handler)
+
+
+def test_ca_install_and_removal_tell_the_ui(host_ca, device, ca_events):
+    """E2E: after Remove CA the Network caption still said "CA installed"."""
+    device.after_inject = _status_out(_sha(host_ca))
+    assert pm.CAManager().inject_ca_into_zygote(host_ca).success
+    assert ca_events == [(SERIAL, True)]
+    assert pm.CAManager().uninject_ca()[0]
+    assert ca_events == [(SERIAL, True), (SERIAL, False)]
+    device.uninject_out = ""  # adb timeout: the state is unknown, re-read it
+    assert not pm.CAManager().uninject_ca()[0]
+    assert ca_events[-1] == (SERIAL, None)
+
+
 def test_failed_uninject_keeps_the_intent(host_ca, device):
     pm.remember_ca_intent(SERIAL, pm.CAManager().ca_spec(host_ca))
     device.uninject_out = "uninject: unmounted=30 failed=2 left=2\nrc=1\n"

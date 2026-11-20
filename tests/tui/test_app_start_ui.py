@@ -264,14 +264,14 @@ def test_the_watchdog_does_not_count_a_pre_start_step(monkeypatch):
     clock = SimpleNamespace(now=0.0)
     monkeypatch.setattr(sp, "time", SimpleNamespace(monotonic=lambda: clock.now))
     panel = SimpleNamespace(_ACTION_TIMEOUT=90.0)
-    monkeypatch.setattr(app_start, "pre_spawn_running", lambda: clock.now < 300)
+    monkeypatch.setattr(app_start, "pre_start_running", lambda: clock.now < 300)
 
     result = SpotlightPanel._await_action(panel, _SlowFuture(clock, 360))
 
     assert result == (True, "Spawned")
 
     clock.now = 0.0  # without a pre-start step the watchdog trips at 90 s
-    monkeypatch.setattr(app_start, "pre_spawn_running", lambda: False)
+    monkeypatch.setattr(app_start, "pre_start_running", lambda: False)
     with pytest.raises(concurrent.futures.TimeoutError):
         SpotlightPanel._await_action(panel, _SlowFuture(clock, 360))
     assert clock.now == pytest.approx(90.0)

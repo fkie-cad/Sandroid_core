@@ -1284,8 +1284,8 @@ class EmulatorService:
         try:
             from sandroid.services import proxy_restore
 
-            # TODO(device-prepared-hook): drop this call once DeviceManager's
-            # register_device_prepared_hook is on main and always enabled.
+            # Still needed: device preparation can be off (scripts, tests, the
+            # TUI before its startup check) and only prepares the ACTIVE device.
             if not (
                 proxy_restore.device_prepared_hook_active() and is_active_serial(serial)
             ):

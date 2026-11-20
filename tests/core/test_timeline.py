@@ -250,6 +250,10 @@ def test_cli_tail_masks_per_export_setting_unless_revealed(
 def test_emit_never_waits_for_a_writer_stalled_in_io(timeline_sink, monkeypatch):
     """The monitor reader thread calls emit: it must not wait on file I/O
     (trace_pipe overruns otherwise). The writer holds no lock while writing.
+
+    Deterministic (no timing bound): the writer stays stuck in its write
+    until the test lets it go, and 200 emits must all finish meanwhile. An
+    emit that waited for the writer would never finish while it is stuck.
     """
     service, path = timeline_sink
     entered, release = threading.Event(), threading.Event()
@@ -257,24 +261,32 @@ def test_emit_never_waits_for_a_writer_stalled_in_io(timeline_sink, monkeypatch)
 
     def stalled(fd, data):
         entered.set()
-        release.wait(10)
+        release.wait()
         return real_write(fd, data)
 
     monkeypatch.setattr(timeline, "_write", stalled)
-    service.emit("input", "tap", summary="first")
-    service._kick.set()
-    assert entered.wait(5), "the writer never wrote"
-    durations = []
-    for i in range(200):
-        start = time.perf_counter()
-        service.file_event(op="FSE_CONTENT_MODIFIED", path=f"/data/data/com.x/f{i}",
-                           t=time.time(), backend="kprobe", pid=1)  # fmt: skip
-        service.emit("monitor", "lost", summary="x")
-        durations.append(time.perf_counter() - start)
-    assert max(durations) < 0.005
-    assert statistics.median(durations) < 0.001
-    release.set()
-    assert service.flush(5.0)
+    try:
+        service.emit("input", "tap", summary="first")
+        service._kick.set()
+        assert entered.wait(30), "the writer never wrote"
+        done = threading.Event()
+
+        def emitter() -> None:
+            for i in range(200):
+                service.file_event(op="FSE_CONTENT_MODIFIED",
+                                   path=f"/data/data/com.x/f{i}",
+                                   t=time.time(), backend="kprobe", pid=1)  # fmt: skip
+                service.emit("monitor", "lost", summary="x")
+            done.set()
+
+        thread = threading.Thread(target=emitter, daemon=True)
+        thread.start()
+        # Generous: only a real wait on the stuck writer can miss this.
+        assert done.wait(60), "emit waited for the writer stuck in I/O"
+        assert not release.is_set()  # the writer was stuck the whole time
+    finally:
+        release.set()
+    assert service.flush(30.0)
 
 
 def test_eight_threads_get_contiguous_seqs(timeline_sink):

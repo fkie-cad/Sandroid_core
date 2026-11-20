@@ -166,25 +166,6 @@ def test_device_prepared_hook_prefers_core_device_prep(monkeypatch):
     assert registered == [pr._device_prepared_hook]
 
 
-def test_device_prepared_hook_falls_back_to_device_manager(monkeypatch):
-    import sandroid.core as core_pkg
-    from sandroid.core import device_manager
-
-    registered = []
-    monkeypatch.setitem(sys.modules, "sandroid.core.device_prep", None)
-    # Already imported: ``from sandroid.core import device_prep`` would
-    # find the package attribute without consulting sys.modules.
-    monkeypatch.delattr(core_pkg, "device_prep", raising=False)
-    monkeypatch.setattr(
-        device_manager,
-        "register_device_prepared_hook",
-        registered.append,
-        raising=False,
-    )
-    assert pr.install_device_prepared_hook()
-    assert registered == [pr._device_prepared_hook]
-
-
 def test_without_the_hook_restart_restores_itself(monkeypatch):
     monkeypatch.setitem(sys.modules, "sandroid.core.device_prep", None)
     calls = []
@@ -965,3 +946,130 @@ async def test_proxy_modal_keys_work_on_open_and_remove_asks_first(monkeypatch):
         await _until(pilot, lambda: isinstance(app.screen, ConfirmModal))
         await pilot.press("y")
         await _until(pilot, lambda: jobs == ["remove"])
+
+
+def _quiet_proxy_modal(monkeypatch):
+    """A ProxyModal that touches no device (pilot tests)."""
+    from sandroid.tui.modals import proxy_modal
+
+    for name in (
+        "_refresh_device_proxy_status",
+        "_refresh_device_info",
+        "_detect_certificates",
+    ):
+        monkeypatch.setattr(proxy_modal.ProxyModal, name, lambda self: None)
+    monkeypatch.setattr(
+        proxy_modal,
+        "get_focus_manager",
+        lambda: SimpleNamespace(app_proxies_cached=dict),
+    )
+    return proxy_modal
+
+
+def _modal_app(modal):
+    from textual.app import App
+
+    class _App(App):
+        def on_mount(self) -> None:
+            self.push_screen(modal)
+
+    return _App()
+
+
+async def test_proxy_modal_letter_keys_work_in_both_cases(monkeypatch):
+    """E2E: the hints say R=Remove CA, but only a lower-case r was bound, so
+    Shift+R did nothing. Upper case works too; Remove CA still asks first.
+    """
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+    proxy_modal = _quiet_proxy_modal(monkeypatch)
+    calls = []
+    for action in ("push_ca", "inject_ca", "add_app", "add_spotlight"):
+        monkeypatch.setattr(
+            proxy_modal.ProxyModal,
+            f"action_{action}",
+            lambda self, action=action: calls.append(action),
+        )
+    jobs = []
+    monkeypatch.setattr(
+        proxy_modal.ProxyModal,
+        "_run_ca_job",
+        lambda self, kind, path: jobs.append(kind),
+    )
+    modal = proxy_modal.ProxyModal()
+    app = _modal_app(modal)
+    async with app.run_test() as pilot:
+        await _until(pilot, lambda: app.screen is modal and app.focused is not None)
+        for key in ("P", "p", "I", "i", "A", "F"):
+            await pilot.press(key)
+        await _until(pilot, lambda: len(calls) == 6)
+        assert calls == [
+            "push_ca",
+            "push_ca",
+            "inject_ca",
+            "inject_ca",
+            "add_app",
+            "add_spotlight",
+        ]
+        await pilot.press("R")
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        await pilot.press("escape")
+        await _until(pilot, lambda: app.screen is modal)
+        assert jobs == []
+        await pilot.press("R")
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        await pilot.press("y")
+        await _until(pilot, lambda: jobs == ["remove"])
+        hints = str(modal.query_one(proxy_modal.KeyHintFooter).render())
+        assert "R=Remove CA" in hints
+        assert "Shift+Left/Right=Tabs" in hints
+
+
+async def test_proxy_modal_shift_arrows_cycle_the_tabs(monkeypatch):
+    """E2E: the tabs took an exact number of Tab presses, then an arrow.
+    Shift+Left/Right cycle them (the project's Shift+Arrow level keys) and
+    focus the tab's first control, never a text field.
+    """
+    from textual.widgets import Input, TabbedContent
+
+    proxy_modal = _quiet_proxy_modal(monkeypatch)
+    modal = proxy_modal.ProxyModal()
+    app = _modal_app(modal)
+    async with app.run_test(size=(120, 50)) as pilot:
+        await _until(pilot, lambda: app.screen is modal and app.focused is not None)
+        tabs = modal.query_one("#proxy-tabs", TabbedContent)
+        assert tabs.active == "tab-device"
+        seen = []
+        for _ in range(3):
+            await pilot.press("shift+right")
+            await pilot.pause()
+            seen.append(tabs.active)
+        assert seen == ["tab-apps", "tab-ca", "tab-device"]
+        await pilot.press("shift+left")
+        await _until(pilot, lambda: tabs.active == "tab-ca")
+        await _until(
+            pilot,
+            lambda: app.focused is not None
+            and not isinstance(app.focused, Input)
+            and tabs.query_one("#tab-ca") in app.focused.ancestors,
+        )
+        # Letter keys still act after a tab switch (focus is not in a field).
+        assert not isinstance(app.focused, Input)
+
+        # An empty field hands Shift+Arrow to the tabs ...
+        field = modal.query_one("#custom-path-input", Input)
+        field.focus()
+        await pilot.pause()
+        await pilot.press("shift+left")
+        await _until(pilot, lambda: tabs.active == "tab-apps")
+        # ... a field with text keeps it for selecting text.
+        await pilot.press("shift+right")  # to the Certificate tab again
+        await _until(pilot, lambda: tabs.active == "tab-ca")
+        field.focus()
+        field.value = "/tmp/ca.pem"
+        field.cursor_position = len(field.value)
+        await pilot.pause()
+        await pilot.press("shift+left")
+        await pilot.pause()
+        assert tabs.active == "tab-ca"
+        assert field.selection.start != field.selection.end

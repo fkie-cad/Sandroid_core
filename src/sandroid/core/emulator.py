@@ -32,6 +32,9 @@ restarts an emulator goes through this module:
 * **Remembered launch options** (``devices.json`` in the user config dir):
   :func:`load_launch_prefs`, :func:`remembered_options`,
   :func:`remember_launch`.
+* **Restart keeps how it was started**: :func:`restart_emulator` relaunches
+  an emulator this process did not launch with the options read from its
+  command line (:func:`running_options`, :func:`options_from_cmdline`).
 """
 
 from __future__ import annotations
@@ -954,7 +957,8 @@ class LaunchContext:
 
 
 #: Called before an emulator process starts; returns extra emulator
-#: arguments (appended after ``options.extra_args``, never remembered) and
+#: arguments (appended after ``options.extra_args``, never remembered as
+#: options -- only kept to strip them on a later restart) and
 #: may patch files under ``context.avd_dir``.
 PreLaunchHook = Callable[[LaunchContext], tuple[str, ...]]
 #: Called once that emulator has exited; restores what pre-launch patched.
@@ -1505,7 +1509,7 @@ def launch_avd(
         with _LAUNCH_LOCK:
             _STARTING_AVDS.discard(avd)
     # Outside the "being started" window: a restart may follow at once.
-    _remember_port(avd, launch.port)
+    _remember_port(avd, launch.port, launch.hook_args)
     return launch
 
 
@@ -1810,6 +1814,143 @@ def _settle_stopped(launch: EmulatorLaunch, wait: float) -> None:
     _finish_launch(launch)
 
 
+def _running_cmdline(serial: str) -> list[str] | None:
+    """The command line of the emulator process behind *serial*, or None.
+
+    The qemu process keeps the arguments the emulator was started with.
+    ``None`` when the process cannot be identified unambiguously (see
+    :func:`~sandroid.core.emulator_guard.find_emulator_process`) or read.
+    """
+    from sandroid.core.emulator_guard import find_emulator_process
+
+    try:
+        proc = find_emulator_process(serial)
+        if proc is None:
+            return None
+        cmdline = proc.cmdline()
+    except Exception:
+        logger.debug(f"Could not read the command line of {serial}", exc_info=True)
+        return None
+    return [str(a) for a in cmdline] if cmdline else None
+
+
+def _strip_run(args: list[str], run: list[str]) -> list[str]:
+    """*args* without each occurrence of the token sequence *run*."""
+    if not run:
+        return args
+    out: list[str] = []
+    i = 0
+    while i < len(args):
+        if args[i : i + len(run)] == run:
+            i += len(run)
+            continue
+        out.append(args[i])
+        i += 1
+    return out
+
+
+def options_from_cmdline(
+    cmdline: list[str], avd: str, hook_args: tuple[str, ...] | list[str] = ()
+) -> AvdLaunchOptions | None:
+    """The launch options of an emulator command line (pure).
+
+    Maps what :func:`build_emulator_command` writes back to options:
+    ``-no-window`` (headless), ``-no-snapshot-load`` / ``-no-snapshot``
+    (cold boot), ``-snapshot NAME``, ``-no-snapshot-save`` /
+    ``-no-snapshot`` (no save on exit; without it the emulator saves, its
+    default). Everything else is kept, in order, as ``extra_args`` -- except
+    ``-avd``/``@name``, ``-port``/``-ports`` (a restart keeps its port),
+    ``-wipe-data`` (never repeated), ``-gpu`` and ``-feature -Vulkan``
+    (Sandroid's safe GPU flags replace them; other ``-feature`` values are
+    kept), ``-no-boot-anim`` when headless (added again with it), and
+    *hook_args*: the pre-launch hook arguments of an earlier Sandroid
+    launch of this AVD, so the hooks of the relaunch decide afresh.
+
+    Returns:
+        The options, or ``None`` when the command line does not name *avd*.
+    """
+    args = _strip_run([str(a) for a in cmdline[1:]], [str(a) for a in hook_args])
+    named: str | None = None
+    headless = False
+    cold = False
+    snapshot: str | None = None
+    save = True
+    boot_anim_off = False
+    extra: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        value = args[i + 1] if i + 1 < len(args) else None
+        if arg == "-avd" and value is not None:
+            named = value
+            i += 2
+        elif arg.startswith("@") and len(arg) > 1 and named is None:
+            named = arg[1:]
+            i += 1
+        elif arg in ("-port", "-ports", "-gpu") and value is not None:
+            i += 2
+        elif arg == "-feature" and value is not None:
+            rest = [f for f in value.split(",") if f and f != "-Vulkan"]
+            if rest:
+                extra += ["-feature", ",".join(rest)]
+            i += 2
+        elif arg == "-snapshot" and value is not None:
+            snapshot = value
+            i += 2
+        else:
+            if arg == "-no-window":
+                headless = True
+            elif arg == "-no-boot-anim":
+                boot_anim_off = True
+            elif arg == "-no-snapshot-load":
+                cold = True
+            elif arg == "-no-snapshot":
+                cold, save = True, False
+            elif arg == "-no-snapshot-save":
+                save = False
+            elif arg != "-wipe-data":
+                extra.append(arg)
+            i += 1
+    if named != avd:
+        return None
+    if boot_anim_off and not headless:
+        extra.insert(0, "-no-boot-anim")
+    if cold:
+        boot: BootMode = "cold"
+        snapshot = None
+    elif snapshot:
+        boot = "snapshot"
+    else:
+        boot = "normal"
+    return AvdLaunchOptions(
+        headless=headless,
+        boot=boot,
+        snapshot=snapshot,
+        save_on_exit=save,
+        extra_args=tuple(extra),
+    )
+
+
+def running_options(serial: str, avd: str) -> AvdLaunchOptions | None:
+    """The launch options emulator *serial* (AVD *avd*) was started with.
+
+    For an emulator this Sandroid process did not launch (another tool, a
+    terminal, an earlier Sandroid run): read from its process command line
+    (see :func:`options_from_cmdline`). ``None`` when it cannot be read or
+    does not belong to *avd*.
+    """
+    cmdline = _running_cmdline(serial)
+    if not cmdline:
+        return None
+    hook_args = load_launch_prefs()["avds"].get(avd, {}).get("hook_args") or []
+    options = options_from_cmdline(cmdline, avd, hook_args)
+    if options is not None:
+        logger.info(
+            f"Restarting {serial} the way it was started: {' '.join(cmdline[1:])}"
+        )
+    return options
+
+
 def restart_emulator(
     serial: str,
     options: AvdLaunchOptions | None = None,
@@ -1820,8 +1961,10 @@ def restart_emulator(
     """Stop emulator *serial* and start the same AVD on the same port.
 
     The AVD name is resolved BEFORE the kill. Options default to the launch
-    record, then the remembered options; ``wipe_once`` is dropped (a
-    restart never factory-resets). Same port -> same serial, so the session
+    record; for an emulator this process did not launch, to the options of
+    its command line (:func:`running_options`, read before the kill), then
+    the remembered options. ``wipe_once`` is dropped (a restart never
+    factory-resets). Same port -> same serial, so the session
     reconnects to it. Does not wait for the boot (see
     :func:`wait_until_ready`). Once it left adb, our old process is awaited
     (it may still be saving its snapshot); its post-stop hooks finish
@@ -1850,7 +1993,18 @@ def restart_emulator(
         raise EmulatorLaunchError(f"Could not determine the AVD of {serial}")
     old = get_launch(serial)
     if options is None:
-        options = old.options if old is not None else remembered_options(avd)
+        if old is not None:
+            options = old.options
+        else:
+            # Not launched by this Sandroid process: relaunch it the way it
+            # was started (read before the kill), else as remembered.
+            options = running_options(serial, avd)
+            if options is None:
+                logger.info(
+                    f"Restarting {serial} with the remembered options of "
+                    f"'{avd}' (its command line could not be read)"
+                )
+                options = remembered_options(avd)
     if options.wipe_once:
         options = replace(options, wipe_once=False)
     if not stop_emulator(serial, adb):
@@ -1998,8 +2152,9 @@ def load_launch_prefs() -> dict[str, Any]:
     Returns:
         ``{"schema_version": 1, "last_avd": str | None, "avds": {name:
         {"headless": bool, "boot": str, "snapshot": str | None,
-        "save_on_exit": bool, "port": int}}}`` (``port``: the console port
-        of its last launch); the empty document when the file is
+        "save_on_exit": bool, "port": int, "hook_args": list[str]}}}``
+        (``port``: the console port of its last launch; ``hook_args``: the
+        pre-launch hook arguments it got); the empty document when the file is
         missing or unreadable. Older files (``boot: "wipe"``, no
         ``save_on_exit``) are read by :func:`options_from_prefs`.
     """
@@ -2096,25 +2251,35 @@ def remember_launch(
             "snapshot": snapshot,
             "save_on_exit": bool(opts.save_on_exit),
         }
-        port = prefs["avds"].get(name, {}).get("port")
-        if port is not None:
-            entry["port"] = port
+        kept = prefs["avds"].get(name, {})
+        for key in ("port", "hook_args"):
+            if kept.get(key) is not None:
+                entry[key] = kept[key]
         prefs["avds"][name] = entry
         _save_prefs(prefs)
 
 
-def _remember_port(name: str, port: int) -> None:
+def _remember_port(name: str, port: int, hook_args: tuple[str, ...] = ()) -> None:
     """Persist the console port AVD *name* was just launched on.
 
     :func:`preferred_console_port` offers it again next time, so an AVD
-    keeps its serial across launches. Its options stay as they are.
+    keeps its serial across launches. Its options stay as they are. The
+    pre-launch hook arguments of the launch are kept too: a later Sandroid
+    process that restarts this emulator (no launch record) strips them from
+    its command line, so the hooks decide afresh (see
+    :func:`running_options`).
     """
     with _PREFS_LOCK:
         prefs = load_launch_prefs()
         entry = prefs["avds"].setdefault(name, {})
-        if entry.get("port") == port:
+        args = [str(a) for a in hook_args]
+        if entry.get("port") == port and entry.get("hook_args", []) == args:
             return
         entry["port"] = port
+        if args:
+            entry["hook_args"] = args
+        else:
+            entry.pop("hook_args", None)
         _save_prefs(prefs)
 
 
@@ -2163,6 +2328,7 @@ __all__ = [
     "list_avds",
     "load_launch_prefs",
     "looks_like_sdk",
+    "options_from_cmdline",
     "options_from_prefs",
     "pinned_serial",
     "preferred_console_port",
@@ -2174,6 +2340,7 @@ __all__ = [
     "remembered_port",
     "rename_avd",
     "restart_emulator",
+    "running_options",
     "sdk_root",
     "serial_port",
     "spawn_emulator",

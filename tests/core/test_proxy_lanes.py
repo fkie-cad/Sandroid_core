@@ -934,3 +934,72 @@ def test_unreachable_before_the_last_mitmproxy_start_is_stale(fm, monkeypatch):
     monkeypatch.setattr(pm, "_MITMPROXY_STARTED_AT", 0.0)
     pm.note_mitmproxy_started()
     assert fm.lane_health()[PKG].ok
+
+
+# -- routine lane events are not WARNINGs; removal tells the UI ----------------------
+
+
+def _logging_adb(monkeypatch, world):
+    """Route the fake device through the real adb result logging."""
+    from sandroid.core.adb_utils import log_adb_result
+
+    def send(cmd, serial=None, timeout=30):
+        out, err = world(cmd, serial, timeout)
+        log_adb_result(cmd, out, err)
+        return out, err
+
+    monkeypatch.setattr(pm.Adb, "send_adb_command", staticmethod(send))
+
+
+def test_lane_add_and_remove_log_no_warning_and_publish(monkeypatch, caplog):
+    """E2E: "App proxy lane 0 → ..." and the ip6tables "No chain/target/
+    match" of a delete-before-add / an absent rule were WARNINGs, and the
+    Network caption kept "app proxies 1" after the App Proxy was removed.
+    """
+    world = _World()
+    m = _manager(monkeypatch, world, lanes=())
+    monkeypatch.setattr(m, "_resolve_uid", lambda package: UID)
+    published = []
+    monkeypatch.setattr(m, "_publish_health", lambda: published.append(1))
+    _logging_adb(monkeypatch, world)
+    with caplog.at_level("DEBUG"):
+        ok, msg = m.enable_focus(PKG)
+        assert ok, msg
+        assert published == [1]
+        assert m.disable_focus(PKG)[0]
+    assert published == [1, 1]
+    assert world.keys() == set()
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == []
+    lane = [r for r in caplog.records if "App proxy lane 0" in r.getMessage()]
+    assert [r.levelname for r in lane] == ["INFO"]
+    assert any("rule absent" in r.getMessage() for r in caplog.records)
+
+
+def test_a_real_rule_removal_failure_stays_a_warning(monkeypatch, caplog):
+    world = _World()
+    m = _manager(monkeypatch, world, lanes=())
+
+    def offline(cmd, serial=None, timeout=30):
+        return "", "error: device offline"
+
+    monkeypatch.setattr(pm.Adb, "send_adb_command", staticmethod(offline))
+    with caplog.at_level("DEBUG"):
+        m._delete_rule_loop("ip6tables", "{op} OUTPUT -p tcp -j REJECT")
+    assert any(
+        r.levelname == "WARNING" and "device offline" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_releasing_a_serial_publishes_the_lane_change(monkeypatch):
+    world = _World()
+    world.lane()
+    world.gost()
+    m = _manager(monkeypatch, world)
+    published = []
+    monkeypatch.setattr(m, "_publish_health", lambda: published.append(1))
+    assert m.release_serial(SERIAL) == 1
+    assert published == [1]
+    assert m.release_serial(SERIAL) == 0
+    assert published == [1]

@@ -260,7 +260,7 @@ def launch_app(package_name: str, activity_name: str | None = None) -> dict[str,
     function quotes ``package_name``/``activity_name`` for the device and
     host shell.
 
-    A first launch (the app is not running) runs the pre-spawn hooks first
+    A first launch (the app is not running) runs the pre-start steps first
     (:func:`sandroid.services.app_start.prepare_launch`, e.g. the identity
     profile; one that stops every app asks the analyst, and the step may
     take minutes). With a pre-start step to run: busy, an adb error, a

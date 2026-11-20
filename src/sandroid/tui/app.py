@@ -724,13 +724,13 @@ class SandroidTUI(App):
         except Exception as exc:
             logger.debug(f"Failed to start the privacy scan: {exc}")
         # Identity profile: seed the active profile before app starts (an
-        # app_start pre-spawn hook).
+        # app_start pre-start step).
         try:
             from sandroid.services.identity import get_identity_service
 
             get_identity_service().install_pre_spawn_hook()
         except Exception as exc:
-            logger.debug(f"Failed to install the identity pre-spawn hook: {exc}")
+            logger.debug(f"Failed to install the identity pre-start step: {exc}")
         # Identity profile SIM card: emulator launch hooks (idempotent; the
         # CLI registers them first, this covers other entry points).
         try:

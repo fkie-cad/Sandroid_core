@@ -277,17 +277,10 @@ def device_prepared_hook_active() -> bool:
     """
     if not install_device_prepared_hook():
         return False
-    # TODO(device-prepared-hook): sandroid.core.device_prep (sandroid-startup)
-    # is not on main yet; without it nothing fires the hook.
+    from sandroid.core import device_prep
+
     try:
-        from sandroid.core import device_prep
-    except ImportError:
-        return False
-    is_enabled = getattr(device_prep, "is_enabled", None)
-    if not callable(is_enabled):
-        return False
-    try:
-        return bool(is_enabled())
+        return bool(device_prep.is_enabled())
     except Exception:
         return False
 
@@ -301,24 +294,9 @@ def _find_device_prepared_registry() -> Any:
     False on a re-attach after an adb transport/server reset. Snapshot loads
     do not fire it (``EmulatorService.load_snapshot`` restores directly).
     """
-    # TODO(device-prepared-hook): sandroid-startup's
-    # sandroid.core.device_prep.register_device_prepared_hook (re-exported by
-    # core.device_manager) is not on main yet. Until it lands nothing
-    # re-applies the proxy state on an adb re-attach, and
-    # EmulatorService.restart() calls restore_proxy_infra itself.
-    try:
-        from sandroid.core import device_prep
+    from sandroid.core import device_prep
 
-        register = getattr(device_prep, "register_device_prepared_hook", None)
-        if callable(register):
-            return register
-    except ImportError:
-        pass
-    try:
-        from sandroid.core import device_manager
-    except ImportError:
-        return None
-    register = getattr(device_manager, "register_device_prepared_hook", None)
+    register = getattr(device_prep, "register_device_prepared_hook", None)
     return register if callable(register) else None
 
 
