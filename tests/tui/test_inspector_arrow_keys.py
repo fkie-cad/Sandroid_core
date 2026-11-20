@@ -118,9 +118,14 @@ async def test_agents_bar_keeps_left_right_while_the_inspector_is_open(
         ms, _lens, inspector = await _timeline_with_inspector(pilot, app)
         await pilot.press("ctrl+y")
         await until(pilot, lambda: ms.chat_has_focus)
-        bar = ms.query_one("#chat-panel").query_one(AgentsBar)
-        bar.set_rows([_agent_row("a-re-111111"), _agent_row("a-re-222222")])
-        await settle(pilot)
+        panel = ms.query_one("#chat-panel")
+        bar = panel.query_one(AgentsBar)
+        rows = [_agent_row("a-re-111111"), _agent_row("a-re-222222")]
+        # The panel refreshes the bar from its agent manager now and then
+        # (no session here: no rows); keep the two rows across refreshes.
+        panel._agent_rows = lambda: list(rows)
+        panel._refresh_agents()
+        await until(pilot, lambda: bar.display and len(bar.rows) == 2)
         bar.focus()
         await until(pilot, lambda: bar.has_focus)
         assert ms.inspector_is_open
