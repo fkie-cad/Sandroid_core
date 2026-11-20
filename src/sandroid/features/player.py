@@ -1003,10 +1003,14 @@ def _all_selected(node: dict) -> bool:
     ``sel_end``): typing replaces it.
     """
     start, end = node.get("sel_start"), node.get("sel_end")
-    if not isinstance(start, int) or not isinstance(end, int):
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (start, end)):
         return False
+    text = _field_text(node)
+    if text.endswith("\u2026"):
+        return False  # the helper cut a long text: its length is unknown
     lo, hi = min(start, end), max(start, end)
-    return lo == 0 and hi > 0 and hi >= len(_field_text(node))
+    # Android's offsets count UTF-16 units.
+    return lo == 0 and hi > 0 and hi >= len(text.encode("utf-16-le")) // 2
 
 
 def text_check(
@@ -1511,13 +1515,13 @@ class StepReplayer:
             xy, way, reason, check = None, WAY_ELEMENT, "", CHECK_NONE
             if data.get("ime"):
                 reason = "keyboard key"
+                # (step_check below makes both unchecked)
                 if data.get("type_text"):
                     reason = "keyboard key, its field could not be verified"
-                elif self._after_typing:
+                elif self._after_typing and not data.get("typed_by"):
                     # Go / Enter after the typed text: its spot on a keyboard
                     # that may look different says nothing.
                     reason = AFTER_TYPING
-                    check = CHECK_UNCHECKED
             else:
                 xy, reason, check = self.locate(step)
             if xy is None:
@@ -1593,6 +1597,7 @@ class StepReplayer:
             if not isinstance(text, str) or not text:
                 raise StepStoppedError("the typed text was not recorded")
             self._type(text, data.get("dur_ms"))
+            self._after_typing = True
             res = {"way": WAY_REPLAYED, "reason": f"typed {len(text)} characters"}
             return self._checked(
                 res, text, step.target, bool(data.get("password")) or step.sensitive

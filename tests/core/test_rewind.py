@@ -1751,7 +1751,7 @@ def test_keyboard_taps_stay_when_the_field_cannot_be_verified():
     rep.run(extract_steps(_keyboard_lines("ab")))
     assert any(c.startswith("input tap") for c in log)
     # ... also with only part of it selected, or just a cursor in it
-    for sel in ((1, 3), (3, 3)):
+    for sel in ((1, 3), (3, 3), (0, 2), (-1, -1)):
         rep, log, _ = _typing_replayer(TypingField(value="old", sel=sel))
         rep.run(extract_steps(_keyboard_lines("ab")))
         assert any(c.startswith("input tap") for c in log), sel
@@ -1839,6 +1839,34 @@ def test_a_key_is_nothing_to_check_without_typing_or_after_another_step():
     assert report["steps"][0]["check"] == "verified"
     assert report["steps"][4]["reason"] == "keyboard key"
     assert report["steps"][4]["check"] == "none"
+
+
+def test_a_key_after_a_typed_text_step_is_unchecked():
+    # text typed another way (a text step), then Go on the keyboard
+    line = _text("abc", seq=10, t=100.0)
+    go = _tap(seq=20, t=101.0, ime=True, x=1000, y=2300)
+    rep, _, _ = _typing_replayer(TypingField())
+    report = rep.run(extract_steps([line, go]))
+    assert report["steps"][1]["reason"] == (
+        "keyboard key, the keyboard may look different after typing"
+    )
+    assert report["unchecked_steps"] == [2]
+
+
+def test_all_selected_needs_the_whole_text_in_utf16_units():
+    from sandroid.features.player import _all_selected
+
+    assert _all_selected({"text": "old", "sel_start": 0, "sel_end": 3})
+    assert _all_selected({"text": "old", "sel_start": 3, "sel_end": 0})
+    assert not _all_selected({"text": "old", "sel_start": 0, "sel_end": 2})
+    assert not _all_selected({"text": "old", "sel_start": True, "sel_end": 3})
+    assert not _all_selected({"text": "old"})
+    # an emoji is two UTF-16 units: (0, 2) covers it
+    assert _all_selected({"text": "\U0001f600", "sel_start": 0, "sel_end": 2})
+    assert not _all_selected({"text": "a\U0001f600", "sel_start": 0, "sel_end": 2})
+    # a text the helper cut: its length is unknown
+    assert not _all_selected({"text": "x" * 500 + "\u2026", "sel_start": 0,
+                              "sel_end": 501})  # fmt: skip
 
 
 def test_an_earlier_texts_keys_are_never_typed_again():
