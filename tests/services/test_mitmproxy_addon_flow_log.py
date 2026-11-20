@@ -431,6 +431,27 @@ def test_tls_failure_is_persisted_in_the_flow_log(addon, flow_paths, capsys):
     assert json.loads(flow_paths["meta"].read_text())["latest_seq"] == 1
 
 
+def test_tls_failure_ids_are_globally_unique(addon, flow_paths, capsys):
+    """``tls-<uuid4 hex>``, never ``tls-<seq>`` (seq restarts with a new log);
+    ``seq`` stays its own field.
+    """
+    import re
+    from types import SimpleNamespace
+
+    data = SimpleNamespace(
+        context=SimpleNamespace(client=SimpleNamespace(sni="a.io", proxy_mode=None)),
+        conn=SimpleNamespace(error="handshake failed"),
+    )
+    addon.SandroidLogger().tls_failed_client(data)
+    addon.SandroidLogger().tls_failed_client(data)
+    capsys.readouterr()
+    recs = _read_lines(flow_paths["log"])[-2:]
+    ids = [r["id"] for r in recs]
+    assert all(re.fullmatch(r"tls-[0-9a-f]{32}", i) for i in ids)
+    assert ids[0] != ids[1]
+    assert [r["seq"] for r in recs] == [1, 2]
+
+
 def test_protocol_token_is_short_for_http2(addon):
     """L13: "HTTPS/2.0" -> "HTTPS/2" as the docs promise."""
     flow = tflow.tflow(resp=True)

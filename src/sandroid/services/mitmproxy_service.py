@@ -63,6 +63,7 @@ import base64
 import json
 import os
 import time
+import uuid
 from mitmproxy import http
 from mitmproxy import tls as _tls
 
@@ -648,7 +649,9 @@ def _append_tls_failure(host: str, reason: str, app: str) -> None:
     seq = _next_seq(log_path)
     record = {
         "seq": seq,
-        "id": f"tls-{seq}",
+        # Globally unique (seq restarts with a new flow log); seq stays its
+        # own field for cursors and ordering.
+        "id": f"tls-{uuid.uuid4().hex}",
         "kind": "tls",
         "ts_start": now,
         "ts_end": now,
