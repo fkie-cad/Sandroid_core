@@ -398,17 +398,26 @@ def _q(text: str) -> str:
 
 
 def contact_items(world: RenderedWorld) -> list[dict[str, Any]]:
-    """Helper ``contacts`` items: a raw contact (no account) plus data rows."""
+    """Helper ``contacts`` items: a raw contact (no account) plus data rows.
+
+    The address book holds what the owner typed: a contact saved as "Mama"
+    or "Dirk" has only that name. Given and family name go in only when the
+    display name is exactly "given family" (the provider rebuilds the
+    display name from them, which would turn "Mama" into the full name).
+    """
     items = []
     for c in world.contacts:
-        name = {
+        display = c.get("display_name") or ""
+        given, family = c.get("given_name") or "", c.get("family_name") or ""
+        name: dict[str, Any] = {
             "mimetype": "vnd.android.cursor.item/name",
-            "data1": c.get("display_name"),
+            "data1": display,
         }
-        if c.get("given_name"):
-            name["data2"] = c["given_name"]
-        if c.get("family_name"):
-            name["data3"] = c["family_name"]
+        if display == " ".join(x for x in (given, family) if x):
+            if given:
+                name["data2"] = given
+            if family:
+                name["data3"] = family
         rows = [name]
         for ph in c.get("phones") or []:
             rows.append(

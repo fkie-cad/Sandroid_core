@@ -505,6 +505,24 @@ def test_contact_payload(world) -> None:
     phones = [d for d in first["data"] if d["mimetype"].endswith("phone_v2")]
     assert [p["data1"] for p in phones] == [p["number"] for p in c0["phones"]]
     assert all("account" not in k for k in first["raw"])
+    by_display = {}
+    for item, c in zip(items, world.contacts, strict=True):
+        by_display[c["display_name"]] = item["data"][0]
+    full = [c for c in world.contacts
+            if c["display_name"] == f"{c['given_name']} {c['family_name']}"]  # fmt: skip
+    variants = [c for c in world.contacts if c not in full]
+    assert full
+    assert variants  # "Mama", nick names, first names only
+    for c in full:
+        row = by_display[c["display_name"]]
+        assert (row.get("data2"), row.get("data3")) == (
+            c["given_name"],
+            c["family_name"],
+        )
+    for c in variants:
+        row = by_display[c["display_name"]]
+        assert "data2" not in row
+        assert "data3" not in row  # the provider keeps exactly what was typed
 
 
 def test_event_payload_all_day_and_birthdays(world) -> None:
