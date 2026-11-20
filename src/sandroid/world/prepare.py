@@ -31,6 +31,7 @@ import hashlib
 import json
 import logging
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -54,6 +55,7 @@ from sandroid.world.helper import (
 from sandroid.world.photos import (
     PhotoError,
     ensure_photos,
+    is_screenshot,
     photo_entries,
     plan_names,
     process_photo,
@@ -81,6 +83,19 @@ GMS = "com.google.android.gms"
 SYNC_AUTHORITIES = ("com.android.contacts", "com.android.calendar")
 #: Account of OUR local calendar (type LOCAL: no sync adapter, no upload).
 CALENDAR_ACCOUNT_TYPE = "LOCAL"
+#: Tables whose highest _id preflight records: a killed run's rows above it
+#: that the ledger never heard of are removed by a cleanup (guarded per table).
+MAX_ID_TABLES = ("contacts", "calendars", "events", "calls", "sms")
+#: The only device folders Prepare writes files to (and a cleanup removes from).
+DEVICE_FILE_DIRS = (
+    "/sdcard/DCIM/Camera/",
+    "/sdcard/Pictures/Screenshots/",
+    "/sdcard/Download/",
+    "/sdcard/Documents/",
+)
+#: Seconds to wait for the device to have no active network after svc ... disable.
+OFFLINE_WAIT_S = 20.0
+OFFLINE_POLL_S = 0.5
 #: Rows per helper request (a ledger write after each).
 CHUNKS = {"contacts": 25, "events": 50, "calls": 100, "sms": 50}
 #: Seconds per helper request.
@@ -203,8 +218,11 @@ class Ledger:
     """Everything Prepare put on a device, written after every step.
 
     The JSON holds ``lists`` (provider row ids per list), ``paths`` (device
-    files), ``photos`` (world id, device path, capture time), the calendar
-    ``account``, the ``anchor`` and ``state`` (``partial`` until the end).
+    files pushed) and ``pending`` (files about to be pushed), ``photos``
+    (world id, device path, capture time), the calendar ``account``,
+    ``max_ids`` (each table's highest _id before seeding), the network state
+    before going offline, the ``anchor`` and ``state`` (``partial`` until the
+    end).
     """
 
     def __init__(self, path: Path, data: dict[str, Any]) -> None:
@@ -213,7 +231,15 @@ class Ledger:
 
     @classmethod
     def new(
-        cls, path: Path, *, serial: str, avd: str | None, world_fp: str, anchor: str
+        cls,
+        path: Path,
+        *,
+        serial: str,
+        avd: str | None,
+        world_fp: str,
+        anchor: str,
+        account: dict[str, str] | None = None,
+        max_ids: dict[str, int] | None = None,
     ) -> Ledger:
         return cls(
             path,
@@ -227,9 +253,11 @@ class Ledger:
                 "state": "partial",
                 "started_at": _now_iso(),
                 "finished_at": None,
-                "account": None,
+                "account": account,
+                "max_ids": dict(max_ids or {}),
                 "lists": {name: [] for name in LEDGER_LISTS},
                 "paths": [],
+                "pending": [],
                 "photos": [],
                 "network_before": None,
             },
@@ -251,7 +279,17 @@ class Ledger:
         self.data["lists"].setdefault(name, []).extend(int(i) for i in ids)
         self.save()
 
+    def add_pending(self, paths: list[str]) -> None:
+        """Record files BEFORE they are pushed (a killed push leaves them)."""
+        self.data.setdefault("pending", []).extend(paths)
+        self.save()
+
     def add_paths(self, paths: list[str]) -> None:
+        """Files that are on the device (no longer pending)."""
+        done = set(paths)
+        self.data["pending"] = [
+            p for p in self.data.get("pending", []) if p not in done
+        ]
         self.data["paths"].extend(paths)
         self.save()
 
@@ -395,6 +433,32 @@ def _free_kib(df: str) -> int | None:
 
 def _q(text: str) -> str:
     return shlex.quote(text)
+
+
+def device_file_ok(path: str) -> bool:
+    """A file Prepare may write or remove: directly inside one of
+    :data:`DEVICE_FILE_DIRS`, no ``..``, no NUL, already normalised.
+    """
+    if not isinstance(path, str) or "\0" in path or path != posixpath.normpath(path):
+        return False
+    for base in DEVICE_FILE_DIRS:
+        if path.startswith(base):
+            name = path[len(base) :]
+            return bool(name) and "/" not in name and name not in (".", "..")
+    return False
+
+
+def safe_file_name(name: str) -> bool:
+    """A world file name usable as one path component."""
+    return (
+        isinstance(name, str)
+        and bool(name.strip())
+        and "/" not in name
+        and "\\" not in name
+        and "\0" not in name
+        and name not in (".", "..")
+        and not name.startswith("..")
+    )
 
 
 # ---------------------------------------------------------------- payloads
@@ -594,6 +658,8 @@ class _Run:
         self.pool: concurrent.futures.ThreadPoolExecutor | None = None
         self.cleanup_from: dict[str, Any] | None = None
         self.network_inherited: dict[str, bool] | None = None
+        self.max_ids: dict[str, int] = {}
+        self.online_done = False
 
     # -- infrastructure
 
@@ -767,10 +833,20 @@ class _Run:
             **totals,
             "accounts": [{"type": a["type"]} for a in self.accounts],
         }
+        reply = self.helper.request("max_ids", tables=list(MAX_ID_TABLES), timeout=120)
+        self.max_ids = {k: int(v) for k, v in reply["max"].items()}
 
     # -- cleanup of an interrupted run
 
     def cleanup(self) -> None:
+        """Remove an interrupted run's world (``force_cleanup``).
+
+        Its ledger must belong to the partial stamp (same world and start).
+        The network state recorded before that run went offline becomes the
+        state this run restores, whatever happens next. Rows by ledger id go
+        first, then rows above the recorded max ids that the ledger missed
+        (guarded per table), then the files (allow-listed folders only).
+        """
         stamp = self.cleanup_from or {}
         fp = str(stamp.get("world_fp") or "")
         path = ledger_path(self.dev.serial, self.report.avd, fp) if fp else None
@@ -780,30 +856,59 @@ class _Run:
                 "load clean_8g instead"
             )
         old = Ledger.load(path)
-        assert self.helper is not None
-        lists = {k: v for k, v in old.data["lists"].items() if v and k != "images"}
-        if lists:
-            self.helper.request(
-                "delete", lists=lists, account=old.data.get("account"), timeout=600
+        if old.data.get("world_fp") != fp or old.data.get("started_at") != stamp.get(
+            "started_at"
+        ):
+            raise PrepareError(
+                "the host ledger does not belong to the partial world on the "
+                "device (another run's); load clean_8g instead"
             )
-        paths = list(old.data.get("paths") or [])
-        for batch in chunked(paths, 100):
-            self.shell("rm -f " + " ".join(_q(p) for p in batch), zygote=False)
-        if paths:
-            self._scan()
-        self.shell(f"rm -f {STAMP_PATH}", zygote=False)
         inherited = old.data.get("network_before")
         if isinstance(inherited, dict) and {"wifi", "data"} <= set(inherited):
             self.network_inherited = {
                 "wifi": bool(inherited["wifi"]),
                 "data": bool(inherited["data"]),
             }
+            # From here on the network comes back even if this run fails
+            # before it goes offline itself.
+            self.network_before = dict(self.network_inherited)
+        assert self.helper is not None
+        account = old.data.get("account")
+        lists = {k: v for k, v in old.data["lists"].items() if v and k != "images"}
+        if lists:
+            self.helper.request("delete", lists=lists, account=account, timeout=600)
+        orphans: dict[str, int] = {}
+        max_ids = old.data.get("max_ids") or {}
+        if max_ids:
+            reply = self.helper.request(
+                "delete_above", max=max_ids, account=account, timeout=600
+            )
+            orphans = {k: int(v) for k, v in reply["deleted"].items() if int(v) > 0}
+        files = list(old.data.get("paths") or []) + list(old.data.get("pending") or [])
+        bad = [f for f in files if not device_file_ok(f)]
+        if bad:
+            self.report.warn(
+                f"cleanup: {len(bad)} ledger paths outside the world folders were "
+                f"left alone (e.g. {bad[0]!r})"
+            )
+        files = [f for f in files if device_file_ok(f)]
+        for batch in chunked(files, 100):
+            self.shell("rm -f " + " ".join(_q(p) for p in batch), zygote=False)
+        if files:
+            self._scan()
+        self.shell(f"rm -f {STAMP_PATH}", zygote=False)
         old.data["state"] = "cleaned"
         old.save()
         self.report.warn(
             f"removed an interrupted world ({fp[:12]}): "
             + ", ".join(f"{k} {len(v)}" for k, v in sorted(lists.items()))
-            + f", files {len(paths)}"
+            + f", files {len(files)}"
+            + (
+                "; rows the ledger missed: "
+                + ", ".join(f"{k} {v}" for k, v in sorted(orphans.items()))
+                if orphans
+                else ""
+            )
         )
 
     # -- 2. offline / 8. online
@@ -825,7 +930,49 @@ class _Run:
         assert self.ledger is not None
         self.ledger.data["network_before"] = dict(self.network_before)
         self.ledger.save()
-        self.shell("svc wifi disable; svc data disable", timeout=60)
+        res = self.dev.shell(
+            "svc wifi disable; svc data disable", timeout=60, zygote=True
+        )
+        state = self.wait_offline()
+        self.report.network["offline"] = state
+        if state["wifi"] or state["data"] or state["default"] != "none":
+            raise PrepareError(
+                f"the device is still online after svc wifi/data disable ({state}; "
+                f"svc rc {res.rc}{': ' + (res.err or res.out).strip()[:120] if res.rc else ''}"
+                "); an ethernet or other link Prepare cannot turn off? Nothing was seeded"
+            )
+
+    def network_state(self) -> dict[str, Any]:
+        """Wi-Fi and mobile-data settings plus the active default network
+        (``none``, a net id, or ``unknown`` when dumpsys has no such line).
+        """
+        out = _sections(
+            self.shell(
+                "echo; echo @@wifi@@; settings get global wifi_on;"
+                " echo; echo @@data@@; settings get global mobile_data;"
+                " echo; echo @@default@@; dumpsys connectivity 2>/dev/null"
+                " | grep -m 1 'Active default network'",
+                timeout=60,
+            )
+        )
+        m = re.search(r"Active default network:\s*(\S+)", out.get("default", ""))
+        return {
+            "wifi": out.get("wifi", "") not in ("0", ""),
+            "data": out.get("data") == "1",
+            "default": m.group(1) if m else "unknown",
+        }
+
+    def wait_offline(self) -> dict[str, Any]:
+        """Poll :meth:`network_state` until nothing is up (or the wait ends)."""
+        end = time.monotonic() + OFFLINE_WAIT_S
+        while True:
+            state = self.network_state()
+            offline = not state["wifi"] and not state["data"]
+            if offline and state["default"] == "none":
+                return state
+            if time.monotonic() >= end:
+                return state
+            time.sleep(OFFLINE_POLL_S)
 
     def restore_network(self) -> None:
         before = self.network_before
@@ -945,7 +1092,6 @@ class _Run:
             )
         with self.step("calendar"):
             account = {"name": world.calendar_name, "type": CALENDAR_ACCOUNT_TYPE}
-            self.ledger.data["account"] = account
             cal = req(
                 "calendar", account=account, create=calendar_create(world, self.tz)
             )
@@ -990,6 +1136,8 @@ class _Run:
         assert self.tmp is not None
         entries = photo_entries(self.manifest, self.packs)
         fetch = ensure_photos(entries, self.photos_cache)
+        if fetch.stopped:
+            self.report.warn(f"photo downloads stopped: {fetch.stopped}")
         for pid, why in sorted(fetch.failed.items()):
             self.report.warn(f"photo {pid} unavailable: {why}")
         names = plan_names(world.photos, self.tz)
@@ -1001,8 +1149,9 @@ class _Run:
             if src is None:
                 continue
             name, taken = names[rec["id"]]
-            shot = rec.get("category") == "screenshot_like"
-            out = self.tmp / ("Pictures/Screenshots" if shot else "DCIM/Camera")
+            out = self.tmp / (
+                "Pictures/Screenshots" if is_screenshot(rec) else "DCIM/Camera"
+            )
             self.photo_jobs[rec["id"]] = self.pool.submit(
                 process_photo, src, rec, self.tz, out, name=name, taken_ms=taken
             )
@@ -1024,12 +1173,13 @@ class _Run:
         self.shell(
             "mkdir -p /sdcard/DCIM/Camera /sdcard/Pictures/Screenshots", zygote=False
         )
+        paths = [f"/sdcard/{p.remote_dir}/{p.name}" for p in done]
+        self.ledger.add_pending(paths)
         res = self.dev.push(roots, "/sdcard/", timeout=900)
         if not res.ok:
             raise PrepareError(
                 f"photo push failed: {(res.err or res.out).strip()[:200]}"
             )
-        paths = [f"/sdcard/{p.remote_dir}/{p.name}" for p in done]
         self.ledger.data["photos"] = [
             {
                 "id": p.id,
@@ -1058,12 +1208,22 @@ class _Run:
         made: list[tuple[str, int]] = []
         for f in world.files:
             sub = "Download" if f.get("dir") == "Download" else "Documents"
-            local = self.tmp / sub / str(f["name"])
+            name = str(f.get("name"))
+            remote = f"/sdcard/{sub}/{name}"
+            local = self.tmp / sub / name
+            if (
+                not safe_file_name(name)
+                or not device_file_ok(remote)
+                or local.resolve().parent != (self.tmp / sub).resolve()
+            ):
+                r.warn(f"files: unsafe file name {name!r} left out")
+                continue
             when = dt.datetime.fromtimestamp(f["ts_ms"] / 1000, self.tz)
             local.parent.mkdir(parents=True, exist_ok=True)
             local.write_bytes(file_bytes(local.name, file_lines(f, self.tz), when))
-            made.append((f"/sdcard/{sub}/{local.name}", int(f["ts_ms"])))
+            made.append((remote, int(f["ts_ms"])))
         r.expected["files"] = len(world.files)
+        n_files = len(made)
         if world.notes:
             text, ts = notes_text(world, self.tz)
             name = NOTES_FILE.get(
@@ -1077,6 +1237,7 @@ class _Run:
         if not made:
             return []
         roots = sorted({self.tmp / p.split("/")[2] for p, _ in made})
+        self.ledger.add_pending([p for p, _ in made])
         res = self.dev.push(roots, "/sdcard/", timeout=300)
         if not res.ok:
             raise PrepareError(
@@ -1084,7 +1245,7 @@ class _Run:
             )
         self.ledger.add_paths([p for p, _ in made])
         self._touch(made)
-        r.seeded["files"] = len(world.files)
+        r.seeded["files"] = n_files
         r.seeded["notes"] = len(world.notes)
         return made
 
@@ -1176,6 +1337,11 @@ class _Run:
                 avd=r.avd,
                 world_fp=self.manifest.world_fp,
                 anchor=r.anchor,
+                account={
+                    "name": self.manifest.calendar_name,
+                    "type": CALENDAR_ACCOUNT_TYPE,
+                },
+                max_ids=self.max_ids,
             )
             self.ledger.save()
             self.write_stamp(
@@ -1183,55 +1349,69 @@ class _Run:
                     self.manifest, state="partial", anchor=r.anchor, ledger=self.ledger
                 )
             )
-            try:
-                with self.step("offline"):
-                    self.go_offline()
-                with self.step("backup_sync_off"):
-                    self.backup_off()
-                self.seed_lists(world)
-                with self.step("photos"):
-                    photos = self.push_photos(world)
-                with self.step("files"):
-                    self.push_files(world)
-                with self.step("media_scan"):
-                    if photos or world.files or world.notes:
-                        self._scan()
-                    self.verify_media(photos)
-                with self.step("verify"):
-                    self.verify_counts()
-                with self.step("stamp"):
-                    self.ledger.data["state"] = "complete"
-                    self.ledger.data["finished_at"] = _now_iso()
-                    self.ledger.save()
-                    self.write_stamp(
-                        stamp_record(
-                            self.manifest,
-                            state="complete",
-                            anchor=r.anchor,
-                            ledger=self.ledger,
-                            counts=self.ledger.counts(),
-                        )
+            with self.step("offline"):
+                self.go_offline()
+            with self.step("backup_sync_off"):
+                self.backup_off()
+            self.seed_lists(world)
+            with self.step("photos"):
+                photos = self.push_photos(world)
+            with self.step("files"):
+                self.push_files(world)
+            with self.step("media_scan"):
+                if photos or world.files or world.notes:
+                    self._scan()
+                self.verify_media(photos)
+            with self.step("verify"):
+                self.verify_counts()
+            with self.step("stamp"):
+                self.ledger.data["state"] = "complete"
+                self.ledger.data["finished_at"] = _now_iso()
+                self.ledger.save()
+                self.write_stamp(
+                    stamp_record(
+                        self.manifest,
+                        state="complete",
+                        anchor=r.anchor,
+                        ledger=self.ledger,
+                        counts=self.ledger.counts(),
                     )
-            finally:
-                with self.step("online"):
-                    self.restore_network()
-                    if self.helper is not None and r.backup.get("bmgr") == "off":
-                        self.verify_backup_still_off()
+                )
+            self.online()
             r.ok = True
             return r
         except PrepareError as exc:
             r.error = str(exc)
             exc.report = r
             raise
-        except (HelperError, PhotoError, OSError, ValueError) as exc:
+        except Exception as exc:
+            # Anything else (a malformed helper reply, a decompression bomb):
+            # the same error type with the report; the network still returns.
             r.error = f"{type(exc).__name__}: {exc}"
             raise PrepareError(r.error, r) from exc
         finally:
+            if not self.online_done and self.network_before is not None:
+                try:
+                    self.online()
+                except Exception as exc:  # the original error matters more
+                    r.warn(f"restoring the network failed: {exc}")
             if self.pool is not None:
                 self.pool.shutdown(wait=True, cancel_futures=True)
             if self.helper is not None:
                 self.helper.close()
             shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def online(self) -> None:
+        """Restore the network and re-check backup/sync (step ``online``)."""
+        self.online_done = True
+        with self.step("online"):
+            self.restore_network()
+            if (
+                self.helper is not None
+                and not self.helper.broken
+                and self.report.backup.get("bmgr") == "off"
+            ):
+                self.verify_backup_still_off()
 
 
 def prepare(

@@ -64,44 +64,76 @@ def _isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class FakeHelper:
+    """The helper's contract on a fake device: rows live in ``dev.tables``
+    (they outlive a helper, like the device's databases do).
+    """
+
     def __init__(self, dev: FakeDevice) -> None:
         self.dev = dev
-        self.next_id = 1000
-        self.rows: dict[str, list[int]] = {}
         self.sync_auto = True
         self.closed = False
+        self.broken: str | None = None
 
-    def _ids(self, name: str, n: int) -> list[int]:
-        ids = list(range(self.next_id, self.next_id + n))
-        self.next_id += n
-        self.rows.setdefault(name, []).extend(ids)
-        if name in self.dev.refuse:
-            ids[0] = -1
+    def _insert(self, name: str, rows: list[dict]) -> list[int]:
+        dev = self.dev
+        ids = []
+        for i, row in enumerate(rows):
+            if dev.die_after and dev.die_after[0] == name and i == dev.die_after[1]:
+                dev.die_after = None
+                self.broken = "exited"
+                raise HelperError(f"world helper exited during {name}")
+            if name in dev.refuse and i == 0:
+                ids.append(-1)
+                continue
+            rid = dev.next_id
+            dev.next_id += 1
+            dev.tables[name][rid] = {"account": None, **row}
+            dev.inserted[name].append(rid)
+            ids.append(rid)
         return ids
 
     def request(self, cmd: str, *, timeout: float = 120, **kw):
-        self.dev.log.append(f"helper:{cmd}")
-        if self.dev.helper_fails == cmd:
+        dev = self.dev
+        dev.log.append(f"helper:{cmd}")
+        if self.broken:
+            raise HelperError(f"world helper unusable ({self.broken}): {cmd}")
+        if dev.helper_fails == cmd:
             raise HelperError(f"world helper {cmd}: boom")
+        if dev.malformed == cmd:
+            return {"ok": True}  # no "ids": a malformed reply
+        t = dev.tables
         if cmd == "count" and "totals" in kw:
-            return {"totals": dict.fromkeys(kw["totals"], 3)}
+            out = {
+                k: len(t["contacts" if k == "aggregates" else k]) for k in kw["totals"]
+            }
+            return {"totals": out}
         if cmd == "count":
-            return {"counts": {k: len(v) for k, v in kw["lists"].items()}}
+            return {
+                "counts": {k: sum(i in t[k] for i in v) for k, v in kw["lists"].items()}
+            }
+        if cmd == "max_ids":
+            return {"max": {k: max(t[k], default=0) for k in kw["tables"]}}
         if cmd == "contacts":
-            assert self.dev.offline
-            return {"ids": self._ids("contacts", len(kw["items"]))}
+            assert dev.offline
+            return {"ids": self._insert("contacts", [{} for _ in kw["items"]])}
         if cmd == "calendar":
             cal = kw.get("calendar_id")
             if cal is None:
-                cal = self._ids("calendars", 1)[0]
-            return {
-                "calendar_id": cal,
-                "ids": self._ids("events", len(kw.get("items") or [])),
-            }
+                acct = kw["account"]
+                cal = self._insert(
+                    "calendars", [{"account": (acct["type"], acct["name"])}]
+                )[0]
+            ids = self._insert(
+                "events", [{"calendar": cal} for _ in kw.get("items") or []]
+            )
+            return {"calendar_id": cal, "ids": ids}
         if cmd == "calls":
-            return {"ids": self._ids("calls", len(kw["items"]))}
+            return {"ids": self._insert("calls", [{} for _ in kw["items"]])}
         if cmd == "sms":
-            return {"ids": self._ids("sms", len(kw["items"])), "mode": "batch"}
+            return {
+                "ids": self._insert("sms", [{} for _ in kw["items"]]),
+                "mode": "batch",
+            }
         if cmd in ("sync_off", "sync_state"):
             if cmd == "sync_off":
                 self.sync_auto = False
@@ -116,20 +148,50 @@ class FakeHelper:
         if cmd == "query":
             rows = []
             for name in kw["args"]:
-                path = next(p for p in self.dev.files if p.endswith("/" + name))
+                path = next(p for p in dev.files if p.endswith("/" + name))
                 rel = path[len("/sdcard/") : -len(name) - 1] + "/"
+                rid = self._insert("images", [{}])[0]
                 rows.append(
                     {
-                        "_id": self._ids("images", 1)[0],
+                        "_id": rid,
                         "_display_name": name,
                         "relative_path": rel,
-                        "datetaken": self.dev.mtimes.get(path, 0) * 1000,
+                        "datetaken": dev.mtimes.get(path, 0) * 1000,
                     }
                 )
             return {"rows": rows}
         if cmd == "delete":
-            self.dev.deleted.append(kw["lists"])
-            return {"deleted": {k: len(v) for k, v in kw["lists"].items()}}
+            dev.deleted.append(kw["lists"])
+            out = {}
+            for name, ids in kw["lists"].items():
+                gone = [i for i in ids if i in t[name]]
+                if name == "contacts":  # the helper's guard: account-less only
+                    gone = [i for i in gone if t[name][i]["account"] is None]
+                for i in gone:
+                    del t[name][i]
+                out[name] = len(gone)
+            return {"deleted": out}
+        if cmd == "delete_above":
+            dev.deleted_above.append(kw["max"])
+            acct = kw.get("account") or {}
+            local = ("LOCAL", acct.get("name")) if acct.get("type") == "LOCAL" else None
+            ours_cal = {c for c, r in t["calendars"].items() if r["account"] == local}
+            out = {}
+            for name, top in kw["max"].items():
+                rows = t[name]
+                hit = [i for i in rows if i > top]
+                if name == "contacts":
+                    hit = [i for i in hit if rows[i]["account"] is None]
+                elif name == "events":
+                    hit = [
+                        i for i in hit if local and rows[i].get("calendar") in ours_cal
+                    ]
+                elif name == "calendars":
+                    hit = [i for i in hit if local and rows[i]["account"] == local]
+                for i in hit:
+                    del rows[i]
+                out[name] = len(hit)
+            return {"deleted": out}
         raise AssertionError(f"unexpected helper cmd {cmd}")
 
     def close(self) -> None:
@@ -160,6 +222,19 @@ class FakeDevice:
         self.helpers: list[FakeHelper] = []
         self.calls_seen: list[tuple[str, str]] = []
         self.now = int(ANCHOR.timestamp())
+        self.malformed: str | None = None
+        self.die_after: tuple[str, int] | None = None
+        self.stuck_online = False  # an ethernet link svc cannot turn off
+        self.push_dies = False
+        self.deleted_above: list[dict] = []
+        # The base's own rows (the Google account's), ids 1..3 per table.
+        google = ("com.google", "test.user@gmail.com")
+        names = ("contacts", "calendars", "events", "calls", "sms", "images")
+        self.tables: dict[str, dict[int, dict]] = {
+            n: {i: {"account": google} for i in (1, 2, 3)} for n in names
+        }
+        self.inserted: dict[str, list[int]] = {n: [] for n in names}
+        self.next_id = 100
 
     # Device API
 
@@ -201,6 +276,9 @@ class FakeDevice:
                 self.data = "1"
         if "@@wifi@@" in script and "@@uid@@" not in script:
             out += ["@@wifi@@", self.wifi, "@@data@@", self.data]
+        if "@@default@@" in script:
+            up = not self.offline or self.stuck_online
+            out += ["@@default@@", f"Active default network: {'102' if up else 'none'}"]
         if "bmgr enable false" in script:
             self.log.append("bmgr_off")
             self.bmgr = "disabled"
@@ -241,6 +319,9 @@ class FakeDevice:
                 if f.is_file():
                     rel = f.relative_to(root.parent).as_posix()
                     self.files[f"/sdcard/{rel}"] = f.stat().st_size
+        if self.push_dies:  # the files landed, then adb died
+            self.push_dies = False
+            return ShellResult(1, "", "adb: connection reset")
         return ShellResult(0, "pushed", "")
 
     def helper(self, *, timeout: float = 30):
@@ -282,6 +363,7 @@ def test_prepare_orders_offline_sync_seed_and_restore(manifest, world) -> None:
     assert dev.data == "1"
     assert report.network == {
         "before": {"wifi": True, "data": True},
+        "offline": {"wifi": False, "data": False, "default": "none"},
         "after": {"wifi": True, "data": True},
     }
     assert dev.helpers[0].closed
@@ -350,9 +432,10 @@ def test_ledger_and_stamp_formats(manifest) -> None:
     assert data["serial"] == SERIAL
     assert data["anchor"] == ANCHOR.isoformat()
     assert data["account"] == {"name": "Personal", "type": "LOCAL"}
-    h = dev.helpers[0]
     for name in ("contacts", "calendars", "events", "calls", "sms", "images"):
-        assert data["lists"][name] == h.rows[name], name
+        assert data["lists"][name] == dev.inserted[name], name
+    assert data["max_ids"] == dict.fromkeys(pr.MAX_ID_TABLES, 3)
+    assert data["pending"] == []
     assert len(data["photos"]) == 6
     assert set(data["paths"]) == set(dev.files)
     partial, complete = dev.stamps
@@ -539,6 +622,189 @@ def test_cli_turns_sigterm_into_an_unwinding_exit() -> None:
     with pytest.raises(SystemExit) as err:
         cli._exit_on_signal(signal.SIGTERM, None)
     assert err.value.code == 128 + signal.SIGTERM
+
+
+# ------------------------------------------------- review: network, ledger
+
+
+def test_network_returns_when_a_cleanup_run_fails_before_going_offline(
+    manifest,
+) -> None:
+    """Killed offline, then a --force-cleanup run that fails right after
+    cleanup() (before go_offline): the device must still come back online,
+    and the next run must see it online.
+    """
+    dev = FakeDevice()
+    dev.helper_fails = "sms"
+    with pytest.raises(pr.PrepareError):
+        _run(manifest, dev)
+    dev.wifi = dev.data = "0"  # a hard kill skipped the online step
+    dev.offline = True
+    dev.helper_fails = "count"  # record_preexisting fails, after cleanup()
+    with pytest.raises(pr.PrepareError) as err:
+        _run(manifest, dev, force_cleanup=True)
+    assert "helper:delete" in dev.log
+    assert (dev.wifi, dev.data) == ("1", "1")
+    assert err.value.report.network["after"] == {"wifi": True, "data": True}
+    assert "online" in [s.name for s in err.value.report.steps]
+    dev.helper_fails = None
+    report = _run(manifest, dev)  # the stamp is gone: a fresh run
+    assert report.network["before"] == {"wifi": True, "data": True}
+    assert (dev.wifi, dev.data) == ("1", "1")
+
+
+def test_still_online_after_svc_refuses_before_seeding(manifest, monkeypatch) -> None:
+    monkeypatch.setattr(pr, "OFFLINE_WAIT_S", 0.0)
+    dev = FakeDevice()
+    dev.stuck_online = True  # e.g. an ethernet AVD
+    with pytest.raises(pr.PrepareError, match="still online") as err:
+        _run(manifest, dev)
+    assert not any(x in dev.log for x in ("helper:contacts", "bmgr_off"))
+    assert err.value.report.network["offline"]["default"] == "102"
+    assert (dev.wifi, dev.data) == ("1", "1")  # restored anyway
+
+
+def test_unknown_connectivity_counts_as_not_offline(manifest, monkeypatch) -> None:
+    monkeypatch.setattr(pr, "OFFLINE_WAIT_S", 0.0)
+    dev = FakeDevice()
+    orig = dev.shell
+
+    def no_dumpsys(script, **kw):
+        res = orig(script, **kw)
+        if "@@default@@" in script:
+            return ShellResult(
+                res.rc, res.out.replace("Active default network: none", ""), ""
+            )
+        return res
+
+    dev.shell = no_dumpsys
+    with pytest.raises(pr.PrepareError, match="unknown"):
+        _run(manifest, dev)
+    assert "helper:contacts" not in dev.log
+
+
+def test_helper_death_mid_batch_is_cleaned_without_duplicates(manifest, world) -> None:
+    dev = FakeDevice()
+    dev.die_after = ("sms", 20)  # 20 rows committed, then the helper is gone
+    with pytest.raises(pr.PrepareError):
+        _run(manifest, dev)
+    led = pr.Ledger.load(Path(pr.ledger_path(SERIAL, "Dev9_test", manifest.world_fp)))
+    assert led.data["lists"]["sms"] == []  # the ledger never heard of them
+    assert len(dev.tables["sms"]) == 3 + 20
+    # A Google sync row that showed up meanwhile must survive the cleanup.
+    dev.tables["contacts"][999] = {"account": ("com.google", "test.user@gmail.com")}
+    report = _run(manifest, dev, force_cleanup=True)
+    assert report.ok
+    assert dev.deleted_above[0] == dict.fromkeys(pr.MAX_ID_TABLES, 3)
+    assert any("rows the ledger missed: sms 20" in w for w in report.warnings)
+    assert 999 in dev.tables["contacts"]
+    for name, items in (
+        ("sms", world.sms),
+        ("calls", world.calls),
+        ("contacts", world.contacts),
+        ("events", world.events),
+    ):
+        ours = [i for i, r in dev.tables[name].items() if r["account"] != (
+            "com.google", "test.user@gmail.com")]  # fmt: skip
+        assert len(ours) == len(items), name
+    assert (
+        len([1 for r in dev.tables["calendars"].values() if r["account"][0] == "LOCAL"])
+        == 1
+    )
+
+
+def test_pushed_files_of_a_failed_push_are_in_the_ledger(manifest) -> None:
+    dev = FakeDevice()
+    dev.push_dies = True  # the photo push lands its files, then fails
+    with pytest.raises(pr.PrepareError, match="photo push failed"):
+        _run(manifest, dev)
+    led = pr.Ledger.load(Path(pr.ledger_path(SERIAL, "Dev9_test", manifest.world_fp)))
+    assert led.data["paths"] == []
+    assert set(led.data["pending"]) == set(dev.files)
+    report = _run(manifest, dev, force_cleanup=True)
+    assert report.ok
+    assert "rm_files" in dev.log
+    assert len([p for p in dev.files if "/DCIM/" in p or "/Screenshots/" in p]) == 6
+
+
+def test_cleanup_needs_the_ledger_of_that_partial_stamp(manifest) -> None:
+    dev = FakeDevice()
+    dev.helper_fails = "sms"
+    with pytest.raises(pr.PrepareError):
+        _run(manifest, dev)
+    stamp = json.loads(dev.stamp)
+    stamp["started_at"] = "2020-01-01T00:00:00+00:00"
+    dev.stamp = json.dumps(stamp)
+    dev.helper_fails = None
+    with pytest.raises(pr.PrepareError, match="does not belong"):
+        _run(manifest, dev, force_cleanup=True)
+    assert "helper:delete" not in dev.log
+
+
+def test_cleanup_removes_files_only_in_the_world_folders(manifest) -> None:
+    dev = FakeDevice()
+    dev.helper_fails = "sms"
+    with pytest.raises(pr.PrepareError):
+        _run(manifest, dev)
+    path = Path(pr.ledger_path(SERIAL, "Dev9_test", manifest.world_fp))
+    led = pr.Ledger.load(path)
+    led.data["paths"] = [
+        "/sdcard/Download/ok.pdf",
+        "/sdcard/Download/../../data/system/x",
+        "/data/local/tmp/sandroid/world.json",
+        "/sdcard/Download/sub/x.pdf",
+    ]
+    led.save()
+    dev.helper_fails = None
+    report = _run(manifest, dev, force_cleanup=True)
+    rms = [
+        s for k, s in dev.calls_seen if k == "shell" and s.startswith("rm -f /sdcard")
+    ]
+    assert rms == ["rm -f /sdcard/Download/ok.pdf"]
+    assert any("3 ledger paths outside the world folders" in w for w in report.warnings)
+
+
+def test_device_file_ok_and_safe_names() -> None:
+    ok = pr.device_file_ok
+    assert ok("/sdcard/DCIM/Camera/PXL_20250101_000000000.jpg")
+    assert ok("/sdcard/Documents/Notizen.txt")
+    for bad in (
+        "/sdcard/Download/../x",
+        "/sdcard/Download/",
+        "/sdcard/Download/a/b",
+        "/sdcard/DCIM/x.jpg",
+        "/data/local/tmp/x",
+        "/sdcard/Download/a\0b",
+        "/sdcard//Download/x",
+    ):
+        assert not ok(bad), bad
+    assert pr.safe_file_name("Rechnung 06.10.2025.pdf")
+    for bad in ("../x.pdf", "a/b.pdf", "..", ".", "", "a\\b", "x\0.pdf"):
+        assert not pr.safe_file_name(bad), bad
+
+
+def test_unsafe_world_file_names_are_left_out(manifest) -> None:
+    import copy
+
+    m = copy.deepcopy(manifest)
+    m.files[0]["name"] = "../../evil.pdf"
+    m.world_fp = m.compute_fp()
+    dev = FakeDevice()
+    report = _run(m, dev)
+    assert report.ok
+    assert not any("evil" in p for p in dev.files)
+    assert all(pr.device_file_ok(p) for p in dev.files)
+    assert any("unsafe file name" in w for w in report.warnings)
+    assert report.seeded["files"] == len(m.files) - 1
+
+
+def test_unexpected_errors_become_prepare_errors(manifest) -> None:
+    dev = FakeDevice()
+    dev.malformed = "calls"  # a reply without "ids": KeyError inside
+    with pytest.raises(pr.PrepareError, match="KeyError") as err:
+        _run(manifest, dev)
+    assert err.value.report is not None
+    assert (dev.wifi, dev.data) == ("1", "1")
 
 
 def test_partial_stamp_without_ledger_is_refused(manifest) -> None:
