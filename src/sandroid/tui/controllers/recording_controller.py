@@ -475,9 +475,11 @@ class RecordingController:
         name = rewind.start_point_name()
         self._guarded(self._suppress_disconnect_guard, True)
         try:
+            from sandroid.core.snapshot_policy import acting_as
             from sandroid.services import get_emulator_service
 
-            ok = bool(get_emulator_service().create_snapshot(name, rec.serial))
+            with acting_as("rewind"):  # start points are Rewind's own names
+                ok = bool(get_emulator_service().create_snapshot(name, rec.serial))
         except Exception as exc:
             logger.debug("create_snapshot raised", exc_info=True)
             ok, why = False, str(exc)
@@ -522,7 +524,10 @@ class RecordingController:
             except Exception:
                 names = set()
             if name in names:
-                return bool(service.delete_snapshot(name, serial))
+                from sandroid.core.snapshot_policy import acting_as
+
+                with acting_as("rewind"):
+                    return bool(service.delete_snapshot(name, serial))
             time.sleep(every_s)
         return False
 
@@ -614,9 +619,11 @@ class RecordingController:
         if not rewind.is_start_point_name(name):
             return
         try:
+            from sandroid.core.snapshot_policy import acting_as
             from sandroid.services import get_emulator_service
 
-            ok = bool(get_emulator_service().delete_snapshot(name, rec.serial))
+            with acting_as("rewind"):
+                ok = bool(get_emulator_service().delete_snapshot(name, rec.serial))
         except Exception:
             logger.debug("deleting the unused start point failed", exc_info=True)
             ok = False
@@ -642,9 +649,11 @@ class RecordingController:
         if not rewind.is_start_point_name(name) or name == rec.start_point_name:
             return
         try:
+            from sandroid.core.snapshot_policy import acting_as
             from sandroid.services import get_emulator_service
 
-            ok = get_emulator_service().delete_snapshot(name, previous.serial)
+            with acting_as("rewind"):
+                ok = get_emulator_service().delete_snapshot(name, previous.serial)
         except Exception:
             logger.debug("deleting the old start point failed", exc_info=True)
             ok = False

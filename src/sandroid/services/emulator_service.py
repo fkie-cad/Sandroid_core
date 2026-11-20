@@ -855,7 +855,83 @@ class EmulatorService:
     # Snapshot Methods
     # =========================================================================
 
-    def create_snapshot(self, name: str, serial: str | None = None) -> bool:
+    def snapshot_refusal(
+        self,
+        op: str,
+        name: str | bytes,
+        serial: str | None = None,
+        *,
+        actor: str | None = None,
+        confirmed: bool | None = None,
+    ) -> Any:
+        """Why *actor* may not *op* (``save``/``delete``) snapshot *name*.
+
+        See :mod:`sandroid.core.snapshot_policy`: pinned names are never
+        overwritten or deleted, owned names only by their owner (the user
+        may delete one with ``confirmed=True``). Loads are never refused.
+
+        Args:
+            op: ``save`` or ``delete`` (``load``: always ``None``).
+            name: Snapshot name.
+            serial: The emulator (default: the target).
+            actor: Who asks; default: the current
+                :func:`~sandroid.core.snapshot_policy.acting_as` actor (the
+                user outside any).
+            confirmed: The user confirmed deleting an owned name; default:
+                from ``acting_as``.
+
+        Returns:
+            A :class:`~sandroid.core.snapshot_policy.Refusal`, or ``None``.
+        """
+        from sandroid.core import snapshot_policy as policy
+
+        if op == policy.LOAD:
+            return None
+        ctx_actor, ctx_confirmed = policy.current_actor()
+        actor = actor or ctx_actor
+        confirmed = ctx_confirmed if confirmed is None else confirmed
+        text = _name_text(name)
+        avd = self._snapshot_avd(serial)
+        exists = policy.snapshot_exists(avd, text) if op == policy.SAVE else None
+        return policy.check(
+            op, text, actor=actor, avd=avd, exists=exists, confirmed=confirmed
+        )
+
+    def _snapshot_avd(self, serial: str | None) -> str | None:
+        """AVD name of the emulator *serial* (or the target), else ``None``."""
+        try:
+            target = serial or self._target_serial(self._get_adb())
+            if not isinstance(target, str) or not target.startswith("emulator-"):
+                return None
+            from sandroid.core import emulator
+
+            return emulator.avd_name_of(target, self._get_adb())
+        except Exception:
+            self._logger.debug("snapshot policy: AVD name unknown", exc_info=True)
+            return None
+
+    def _refused(
+        self,
+        verb: str,
+        op: str,
+        name: str | bytes,
+        serial: str | None,
+        actor: str | None,
+        confirmed: bool | None = None,
+    ) -> bool:
+        """Log + timeline a refused save/delete; True when refused."""
+        refusal = self.snapshot_refusal(
+            op, name, serial, actor=actor, confirmed=confirmed
+        )
+        if refusal is None:
+            return False
+        self._logger.warning(f"Snapshot {verb} refused: {refusal.reason}")
+        _snapshot_line(verb, name, False, serial, f"refused: {refusal.reason}")
+        return True
+
+    def create_snapshot(
+        self, name: str, serial: str | None = None, *, actor: str | None = None
+    ) -> bool:
         """Create a snapshot of the emulator state.
 
         Args:
@@ -863,11 +939,17 @@ class EmulatorService:
             serial: Device serial to target for this call only, without
                 mutating the shared ``Adb._target_device`` global. Omit to
                 use the current global target (default behavior, unchanged).
+            actor: Who saves (``user``, ``ai`` or a snapshot namespace owner
+                such as ``rewind``; default: the ``acting_as`` actor); see
+                :meth:`snapshot_refusal`.
 
         Returns:
-            True if snapshot was created successfully.
+            True if snapshot was created successfully; False when it failed
+            or was refused (pinned name, or another owner's name).
         """
         self._logger.info(f"Creating snapshot: {name}")
+        if self._refused("save", "save", name, serial, actor):
+            return False
         adb = self._get_adb()
 
         try:
@@ -1144,25 +1226,37 @@ class EmulatorService:
         )
         return False
 
-    def delete_snapshot(self, name: str, serial: str | None = None) -> bool:
+    def delete_snapshot(
+        self,
+        name: str,
+        serial: str | None = None,
+        *,
+        actor: str | None = None,
+        confirmed: bool | None = None,
+    ) -> bool:
         """Delete a previously created snapshot.
 
-        Mirrors :meth:`create_snapshot` exactly, changing only the console
-        verb. Blocking call (no worker); callers wrap it off the UI thread.
-
-        NOTE: ``avd snapshot del`` is the documented emulator-console verb but
-        has no in-repo precedent (create/load use ``save``/``load``). It must
-        be confirmed on a live emulator.
+        Mirrors :meth:`create_snapshot`, changing only the console verb
+        (``avd snapshot del``; verified on API 35: the tag and its directory
+        are removed, the RAM image's space is freed, the qcow2 files keep
+        their size). Blocking call (no worker); callers wrap it off the UI
+        thread.
 
         Args:
             name: Name of the snapshot to delete.
             serial: Device serial to target for this call only (as for
                 :meth:`create_snapshot`); omit for the current global target.
+            actor: Who deletes (see :meth:`snapshot_refusal`).
+            confirmed: The user confirmed deleting a name another part of
+                Sandroid owns (ignored for any other actor).
 
         Returns:
-            True if the snapshot was deleted successfully.
+            True if the snapshot was deleted successfully; False when it
+            failed or was refused.
         """
         self._logger.info(f"Deleting snapshot: {name}")
+        if self._refused("delete", "delete", name, serial, actor, confirmed):
+            return False
         adb = self._get_adb()
 
         try:

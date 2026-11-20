@@ -2252,7 +2252,7 @@ def remember_launch(
             "save_on_exit": bool(opts.save_on_exit),
         }
         kept = prefs["avds"].get(name, {})
-        for key in ("port", "hook_args"):
+        for key in ("port", "hook_args", "pins", "pins_seen"):
             if kept.get(key) is not None:
                 entry[key] = kept[key]
         prefs["avds"][name] = entry

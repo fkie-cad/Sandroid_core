@@ -85,7 +85,10 @@ class SnapshotManager:
             return False
         label = name.decode() if isinstance(name, bytes) else str(name)
         try:
-            ok = toolbox.delete_snapshot(name)
+            from sandroid.core.snapshot_policy import acting_as
+
+            with acting_as("analysis"):  # sandroid_malware_* is ours
+                ok = toolbox.delete_snapshot(name)
         except Exception as e:
             logger.warning(f"Could not delete temporary snapshot {label}: {e}")
             return False
@@ -191,7 +194,10 @@ class SnapshotManager:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         name = f"{prefix}_{timestamp}"
         try:
-            ok = toolbox.create_snapshot(name.encode())
+            from sandroid.core.snapshot_policy import acting_as
+
+            with acting_as("analysis"):
+                ok = toolbox.create_snapshot(name.encode())
         except Exception as e:
             logger.warning(f"Snapshot {name} could not be created: {e}")
             return False

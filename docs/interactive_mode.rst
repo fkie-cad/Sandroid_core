@@ -43,9 +43,19 @@ same state) and ``w`` wipe data once (asks on start, never remembered). The
 keys work while the list keeps the focus, and the boxes can be clicked. ``⏎``
 starts the AVD with exactly what is shown. For a running emulator the box
 shows, read-only, what Sandroid started it with -- what ``R`` reuses -- or,
-for one started outside Sandroid, the AVD's saved options. For a physical
+for one started outside Sandroid, the AVD's saved options (``R`` restarts
+such an emulator with the options of its own command line). For a physical
 device it shows its state and what to do about it (e.g. authorize USB
 debugging). ``emulator.avd_headless`` is only the first-launch default.
+
+``p`` pins or unpins a snapshot of the highlighted AVD. A pinned snapshot
+can neither be overwritten nor deleted -- not from the Snapshots panel, by
+Rewind or by the AI assistant. ``clean_8g`` and ``default_boot`` are pinned
+on every AVD by default; unpinning asks first, and the AI can never unpin.
+Rewind start points and persona snapshots belong to their feature: the
+Snapshots panel deletes one only after a confirm that says whose it is. A
+pinned snapshot deleted outside Sandroid (e.g. ``qemu-img`` while the AVD is
+stopped) is reported once in the Devices screen and on the timeline.
 
 .. note::
 
