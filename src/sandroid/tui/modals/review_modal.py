@@ -103,6 +103,9 @@ class ReviewModal(ForensicModal[None]):
         color: $success;
     }
     ReviewModal .verdict-different {
+        color: $error;
+    }
+    ReviewModal .verdict-volatile {
         color: $warning;
     }
     ReviewModal .verdict-none {
@@ -396,6 +399,7 @@ class ReviewModal(ForensicModal[None]):
 
         cls = {
             rewind.SAME: "verdict-same",
+            rewind.VOLATILE: "verdict-volatile",
             rewind.DIFFERENT: "verdict-different",
         }.get(fr.verdict, "verdict-none")
         out: list[Any] = [
@@ -421,6 +425,15 @@ class ReviewModal(ForensicModal[None]):
                 text = _clip_lines("\n".join(extra))
                 out.append(Static(escape(text), classes="review-hint"))
         out.append(Static(fr.verdict, classes=cls))
+        if getattr(fr, "compared", "") == rewind.BYTE_WORDS_KEY:
+            out.append(Static(rewind.BYTE_WORDS, classes="review-hint"))
+        volatile = getattr(fr, "volatile", None) or []
+        if volatile:
+            text = "\n".join(
+                [rewind.VOLATILE_HEADING]
+                + [f"  {rewind.volatile_line(v)}" for v in volatile]
+            )
+            out.append(Static(escape(_clip_lines(text)), classes="verdict-volatile"))
         if getattr(fr, "note", ""):
             out.append(Static(escape(fr.note), classes="review-warn"))
         return out

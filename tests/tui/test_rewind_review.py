@@ -1441,3 +1441,100 @@ def test_unknown_pinned_flags_delete_nothing(cleanup, tmp_path, monkeypatch):
     rec.serial = None
     assert controller._remove_old_start_points(rec) == 0
     assert deleted == []
+
+
+_VOLATILE = {
+    "field": "cookies, row name=sid, column expiry",
+    "your_run": "1795136440",
+    "replay": "1795140033",
+    "rule": "same distance from its run",
+}
+
+
+def _volatile_result(path: str) -> rewind.FileResult:
+    res = rewind.FileResult(path, "v1", "v2", "v3", "+ a", "+ b", rewind.VOLATILE)
+    res.compared = "field by field"
+    res.volatile = [dict(_VOLATILE)]
+    return res
+
+
+async def test_review_shows_volatile_fields_in_the_warning_colour():
+    class Results(FakeController):
+        def results(self, rec):
+            vol = _volatile_result(rec.selected[0])
+            byte = rewind.FileResult(rec.selected[1], "v1", "v2", "v3", "x", "y",
+                                     rewind.DIFFERENT, compared="byte for byte")  # fmt: skip
+            return {"files": [vol, byte], "flows": []}
+
+    rec = _rec()
+    rec.selected = [rec.changed[0]["path"], rec.changed[1]["path"]]
+    rec.runs = [{"n": 2, "kind": "rewind-replay", "result": "replayed"}]
+    modal = ReviewModal(rec, Results())
+    app = Host(modal)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await until(pilot, lambda: app.screen is modal)
+        await until(pilot, lambda: modal.query("#review-results .verdict-volatile"))
+        volatile = [str(w.render()) for w in modal.query(".verdict-volatile")]
+        assert rewind.VOLATILE in volatile
+        listed = " ".join(volatile)
+        assert "1795136440 in your run, 1795140033 in the replay" in listed
+        assert "(same distance from its run)" in listed
+        different = [str(w.render()) for w in modal.query(".verdict-different")]
+        assert rewind.DIFFERENT in different
+        body = " ".join(str(w.render()) for w in modal.query("#review-results Static"))
+        assert rewind.BYTE_WORDS in body
+
+
+def test_volatile_verdicts_reach_run_json_recording_json_and_the_ai(
+    controller, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from sandroid.core import run_history
+    from sandroid.tui.widgets import diffs_view
+    from sandroid.tui.widgets.diffs_view import DiffsView
+
+    saved: list = []
+    monkeypatch.setattr(run_history, "save_run", saved.append)
+    monkeypatch.setattr(
+        "sandroid.core.timeline.timeline_folder", lambda: rewind.recordings_root()
+    )
+    readers: list[str] = []
+    monkeypatch.setattr(
+        rewind,
+        "hidden_texts",
+        lambda rec, reader="ui": readers.append(reader) or frozenset(),
+    )
+    monkeypatch.setattr(
+        rewind, "file_result", lambda rec, path, **kw: _volatile_result(path)
+    )
+    rec = _rec()
+    rec.selected = [rec.changed[0]["path"]]
+    rec.runs = [{"n": 2, "kind": "rewind-replay", "result": "replayed"}]
+    outcome = rewind.RunOutcome(n=2, mode="rewind-replay", result="replayed")
+    controller._persist(rec, outcome)
+
+    path = rec.selected[0]
+    record = saved[0]
+    assert record.verdicts == {path: rewind.VOLATILE}
+    assert record.rewind["volatile"] == {path: [_VOLATILE]}
+    assert any(
+        "same distance from its run" in ln for ln in record.changed_files[0][path]
+    )
+    stored = json.loads(rewind.save_recording(rec).read_text())
+    assert stored["runs"][-1]["verdicts"] == {path: rewind.VOLATILE}
+    fake = SimpleNamespace(_short_path=DiffsView._short_path)
+    body = dict(DiffsView._rewind_sections(fake, record))["What your action changed"]
+    assert any(
+        span.style == diffs_view._WARN
+        and rewind.VOLATILE in body.plain[span.start : span.end]
+        for span in body.spans
+    )
+
+    ai = controller.review_dict(rec)
+    (entry,) = ai["results"]
+    assert entry["verdict"] == rewind.VOLATILE
+    assert entry["volatile_fields"] == [_VOLATILE]
+    assert entry["compared"] == "field by field"
+    assert ai["runs"][-1]["verdicts"] == {path: rewind.VOLATILE}
+    assert readers == ["ui", "ai"]

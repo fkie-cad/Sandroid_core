@@ -1324,9 +1324,11 @@ class DiffsView(FilesSubViewBase):
                 if body:
                     body.append("\n")
                 body.append(self._short_path(path, 44))
-                color = {rewind.SAME: _GOOD, rewind.DIFFERENT: _WARN}.get(
-                    verdict, _MUTED
-                )
+                color = {
+                    rewind.SAME: _GOOD,
+                    rewind.VOLATILE: _WARN,  # explained, not a failure
+                    rewind.DIFFERENT: _BAD,
+                }.get(verdict, _MUTED)
                 body.append(f"  {verdict}", style=color)
             out.append(("What your action changed", body))
         steps = info.get("steps") or []

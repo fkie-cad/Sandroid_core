@@ -1330,8 +1330,13 @@ class RecordingController:
 
     # -- results ----------------------------------------------------------------
 
-    def results(self, rec: Any = None) -> dict[str, Any]:
-        """Per-file and per-request results of the recording's latest run."""
+    def results(self, rec: Any = None, reader: str = "ui") -> dict[str, Any]:
+        """Per-file and per-request results of the recording's latest run.
+
+        ``reader`` picks the masking setting (``ui``: ``timeline.
+        mask_sensitive``, ``ai``: ``ai.mask_sensitive``): while it is on,
+        text typed into sensitive fields is hidden in every shown value.
+        """
         from sandroid.core import rewind
 
         rec = rec or self._rec
@@ -1339,8 +1344,10 @@ class RecordingController:
             return {"files": [], "flows": []}
         last_kind = rec.runs[-1].get("kind") if rec.runs else None
         with_replay = last_kind in (None, "rewind-replay")
+        secrets = rewind.hidden_texts(rec, reader)
         files = [
-            rewind.file_result(rec, p, with_replay=with_replay) for p in rec.selected
+            rewind.file_result(rec, p, with_replay=with_replay, secrets=secrets)
+            for p in rec.selected
         ]
         flows = []
         last = rec.runs[-1] if rec.runs else None
@@ -1390,10 +1397,12 @@ class RecordingController:
         try:
             res = self.results(rec)
             files: list[Any] = []
-            new, deleted, verdicts = [], [], {}
+            new, deleted, verdicts, volatile = [], [], {}, {}
             for fr in res["files"]:
                 files.append({fr.path: rewind.result_lines(fr)})
                 verdicts[fr.path] = fr.verdict
+                if fr.volatile:
+                    volatile[fr.path] = fr.volatile
                 if fr.before == rewind.ABSENT:
                     new.append(fr.path)
                 if fr.after == rewind.ABSENT:
@@ -1453,10 +1462,13 @@ class RecordingController:
                     "flows": flows,
                     "requests": requests,
                     "run": outcome.n,
+                    # Per file: the fields a rule explains (both values).
+                    "volatile": volatile,
                 },
             )
             run_history.save_run(record)
             rec.runs[-1]["run_id"] = run_id
+            rec.runs[-1]["verdicts"] = verdicts
             rewind.save_recording(rec)
             self._last_run_id = run_id
             return run_id
@@ -1554,7 +1566,7 @@ class RecordingController:
         rec = rec or self._rec
         if rec is None:
             return {"recording": None}
-        res = self.results(rec)
+        res = self.results(rec, reader="ai")
         from sandroid.core import rewind
 
         return {
@@ -1581,6 +1593,7 @@ class RecordingController:
                         "diverged",
                         "unchecked_steps",
                         "run_id",
+                        "verdicts",
                     )
                 }
                 for r in rec.runs
@@ -1589,6 +1602,10 @@ class RecordingController:
                 {
                     "path": fr.path,
                     "verdict": fr.verdict,
+                    "compared": fr.compared or None,
+                    "volatile_fields": fr.volatile or None,
+                    "only_in_your_run": fr.only_run or None,
+                    "only_in_the_replay": fr.only_replay or None,
                     "note": fr.note or None,
                     "what_your_action_changed": fr.action_text,
                     "what_the_replay_changed": fr.replay_text or None,

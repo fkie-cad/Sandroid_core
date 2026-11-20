@@ -539,8 +539,21 @@ repeated (a cookie banner is gone once accepted):
 
 Every selected file gets **What your action changed** (Before → After). After
 a replay it also gets **What the replay changed** and one of ``same change in
-the replay``, ``replay changed it differently`` (with ``only in your run`` /
-``only in the replay`` lines) or ``replay did not change it``. A selected
+the replay``, ``differs only in volatile fields``, ``replay changed it
+differently`` (with ``only in your run`` / ``only in the replay`` lines) or
+``replay did not change it``. Both runs are compared field by field with the
+Files lens's diff (SQLite cells by table, row key and column, preference keys,
+JSON paths, text line blocks). A field both runs changed to different values
+is *volatile* only when a rule explains it, never by its name: a **time of
+its own run** (each value lies in its run, give or take 10 s), the **same
+distance from its run** (e.g. a cookie that expires a year after its run) or a
+**freshly generated ID** (same length and characters, random looking, and
+neither value was in Before). Volatile fields are always listed with both
+values and their rule, in the warning colour; ``replay changed it
+differently`` is shown as a failure. Files without fields (binary, unknown)
+are ``compared byte for byte``. While ``timeline.mask_sensitive`` (or
+``ai.mask_sensitive`` for the assistant) is on, text typed into a password or
+other sensitive field is hidden in every value shown. A selected
 request shows ``found in the replay`` or ``not seen in the replay``, the two
 requests side by side (URL, headers, body) and ``same`` / ``different`` for
 the request body and the response status. All requests are listed per run
