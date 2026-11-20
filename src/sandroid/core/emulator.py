@@ -1002,6 +1002,66 @@ def _hook_snapshot(kind: str) -> list[Callable[..., Any]]:
         return list(_HOOKS[kind])
 
 
+#: ``fn(serial, avd) -> dict | None``: meta for a restart that has no live
+#: launch record to keep it from (see :func:`register_restart_meta`).
+RestartMetaProvider = Callable[[str, str], "dict[str, Any] | None"]
+_RESTART_META: list[RestartMetaProvider] = []
+
+
+def register_restart_meta(provider: RestartMetaProvider) -> None:
+    """Fill the meta of a restart that has no live launch to keep it from.
+
+    :func:`restart_emulator` keeps the meta of this process's live launch
+    of the serial. Without one (Sandroid was restarted, or another process
+    started the emulator), it asks each provider, before the old emulator
+    is stopped: ``provider(serial, avd)`` returns JSON values for the new
+    launch's meta (e.g. ``{"persona_id": ...}``) or ``None``. A provider
+    only adds keys that are still missing; one that raises is logged and
+    skipped. Registering the same callable again does nothing.
+
+    Raises:
+        TypeError: *provider* is not callable.
+    """
+    if not callable(provider):
+        raise TypeError(f"restart meta provider must be callable, got {provider!r}")
+    with _HOOK_LOCK:
+        if provider not in _RESTART_META:
+            _RESTART_META.append(provider)
+
+
+def unregister_restart_meta(provider: RestartMetaProvider) -> None:
+    """Remove a restart meta provider (no-op if it is not registered)."""
+    with _HOOK_LOCK:
+        if provider in _RESTART_META:
+            _RESTART_META.remove(provider)
+
+
+def _restart_meta(serial: str, avd: str, meta: dict[str, Any]) -> dict[str, Any]:
+    """*meta* plus what the restart meta providers add (missing keys only)."""
+    with _HOOK_LOCK:
+        providers = list(_RESTART_META)
+    for provider in providers:
+        try:
+            extra = provider(serial, avd)
+        except Exception:
+            logger.warning(
+                f"Restart meta provider {_hook_name(provider)} failed for {serial}",
+                exc_info=True,
+            )
+            continue
+        if not extra:
+            continue
+        if not isinstance(extra, dict):
+            logger.warning(
+                f"Restart meta provider {_hook_name(provider)} returned "
+                f"{type(extra).__name__}, not a dict; ignored"
+            )
+            continue
+        for key, value in _json_copy(extra).items():
+            meta.setdefault(str(key), value)
+    return meta
+
+
 def register_pre_launch_hook(hook: PreLaunchHook) -> None:
     """Run *hook* before every emulator process Sandroid starts.
 
@@ -2169,6 +2229,11 @@ def restart_emulator(
                 options = remembered_options(avd)
     if options.wipe_once:
         options = replace(options, wipe_once=False)
+    # The same persona etc. as before: a restart keeps the caller's meta;
+    # without a live launch of ours, the providers say (asked before the kill).
+    meta = _json_copy(old.meta) if old is not None else {}
+    if old is None or not old.alive:
+        meta = _restart_meta(serial, avd, meta)
     if not stop_emulator(serial, adb):
         raise EmulatorLaunchError(f"Emulator {serial} did not stop")
     # Bindable ignores TIME_WAIT (see _port_bindable): this only waits for
@@ -2195,9 +2260,7 @@ def restart_emulator(
                 f"{serial} stopped; start the AVD again once it is free"
             )
         time.sleep(0.5)
-    # The same persona etc. as before: a restart keeps the caller's meta.
-    meta = _json_copy(old.meta) if old is not None else None
-    return launch_avd(avd, options, port=port, adb=adb, meta=meta)
+    return launch_avd(avd, options, port=port, adb=adb, meta=meta or None)
 
 
 def _find_running_avd(avd: str, adb: Any) -> str | None:
@@ -2478,6 +2541,7 @@ __all__ = [
     "LaunchContext",
     "PostStopHook",
     "PreLaunchHook",
+    "RestartMetaProvider",
     "adb_binary",
     "avd_dir",
     "avd_home",
@@ -2508,6 +2572,7 @@ __all__ = [
     "reap_exited_launches",
     "register_post_stop_hook",
     "register_pre_launch_hook",
+    "register_restart_meta",
     "remember_launch",
     "remembered_options",
     "remembered_port",
@@ -2520,5 +2585,6 @@ __all__ = [
     "stop_emulator",
     "unregister_post_stop_hook",
     "unregister_pre_launch_hook",
+    "unregister_restart_meta",
     "wait_until_ready",
 ]

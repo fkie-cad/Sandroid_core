@@ -1801,6 +1801,52 @@ def test_pre_launch_hooks_see_the_meta_read_only_also_on_a_restart(env):
     assert dict(emu._launch_context("Pixel", 5562, AvdLaunchOptions()).meta) == {}
 
 
+def test_a_restart_without_our_launch_asks_the_meta_providers(env, monkeypatch):
+    calls = []
+
+    def provider(serial, avd):
+        calls.append((serial, avd, serial in env["adb"].devices))
+        return {"persona_id": "p7", "extra": {"n": 1}}
+
+    def broken(serial, avd):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(emu, "_RESTART_META", [])
+    emu.register_restart_meta(broken)
+    emu.register_restart_meta(provider)
+    emu.register_restart_meta(provider)  # once
+    env["adb"].add("emulator-5560", avd="Pixel")  # not launched by us
+    monkeypatch.setattr(emu, "running_options", lambda serial, avd: None)
+    launch = emu.restart_emulator("emulator-5560")
+    assert calls == [("emulator-5560", "Pixel", True)]  # asked before the kill
+    assert launch.meta == {"persona_id": "p7", "extra": {"n": 1}}
+    assert emu.launch_record("emulator-5560")["meta"]["persona_id"] == "p7"
+
+
+def test_a_restart_of_our_live_launch_keeps_its_meta_without_providers(
+    env, monkeypatch
+):
+    monkeypatch.setattr(emu, "_RESTART_META", [])
+    asked = []
+    emu.register_restart_meta(lambda serial, avd: asked.append(serial) or {"x": 1})
+    first = emu.launch_avd("Pixel", port=5560, meta={"persona_id": "mine"})
+    env["adb"].add(first.serial, avd="Pixel")
+    second = emu.restart_emulator(first.serial)
+    assert asked == []
+    assert second.meta == {"persona_id": "mine"}
+
+
+def test_restart_meta_providers_only_add_missing_keys(monkeypatch):
+    monkeypatch.setattr(emu, "_RESTART_META", [])
+    emu.register_restart_meta(lambda s, a: {"persona_id": "other", "new": True})
+    emu.register_restart_meta(lambda s, a: ["not", "a", "dict"])
+    emu.register_restart_meta(lambda s, a: None)
+    meta = emu._restart_meta("emulator-5560", "Pixel", {"persona_id": "kept"})
+    assert meta == {"persona_id": "kept", "new": True}
+    with pytest.raises(TypeError):
+        emu.register_restart_meta("nope")  # type: ignore[arg-type]
+
+
 def test_a_launch_is_a_timeline_line_with_its_record(env):
     from sandroid.core import timeline
 
