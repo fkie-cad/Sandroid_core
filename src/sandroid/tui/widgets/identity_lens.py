@@ -165,6 +165,21 @@ def _spotlight() -> Any | None:
         return None
 
 
+def _launch_persona() -> str:
+    """The persona the target device was launched as (``""``: none)."""
+    try:
+        from sandroid.services.identity import launch_persona_id
+
+        return launch_persona_id(_target_serial())
+    except Exception:
+        return ""
+
+
+def _is_launch_persona(profile_id: str) -> bool:
+    """``profile_id`` is the persona the target device was launched as."""
+    return bool(profile_id) and _launch_persona() == profile_id
+
+
 def _target_serial() -> str | None:
     try:
         from sandroid.core.adb import Adb
@@ -1211,6 +1226,8 @@ class IdentityLens(Vertical):
                 mode = "off"
         name = profile.name or profile.id
         title = f"{name} rev {profile.revision}, mode {mode}"
+        if _is_launch_persona(profile.id):
+            title += ", persona of this launch"
         applied_at, verified_at = self._apply_times(ident, profile)
         bits = []
         if applied_at:
@@ -2014,7 +2031,10 @@ class IdentityLens(Vertical):
             infos = ident.list_profiles()
         except Exception:
             infos = []
-        active = self.profile.id if self.profile is not None else ""
+        try:
+            active = str(ident.config().profile or "")
+        except Exception:
+            active = ""
         options: list[tuple[str, str, str]] = []
         for info in infos:
             if info.error:
@@ -2072,7 +2092,15 @@ class IdentityLens(Vertical):
             if action == "use":
                 ident.set_active(profile_id=arg)
                 self._statuses.clear()
-                self.app.notify(f"Active identity profile: {arg}.", timeout=3)
+                persona = _launch_persona()
+                if persona and persona != arg:
+                    self.app.notify(
+                        f"Active identity profile: {arg}. This emulator keeps "
+                        f"{persona}, the persona it was started as.",
+                        timeout=5,
+                    )
+                else:
+                    self.app.notify(f"Active identity profile: {arg}.", timeout=3)
             elif action == "new":
                 profile = ident.create(arg)
                 ident.set_active(profile_id=profile.id)
@@ -2206,13 +2234,17 @@ class IdentityLens(Vertical):
 
 
 def _read_library(ident: Any) -> tuple[int, Any, str]:
-    """``(profiles in the library, active profile, error)`` (worker thread)."""
+    """``(profiles in the library, the target device's profile, error)``
+    (worker thread). The device's profile is the persona Sandroid launched
+    it as, else the active profile (also with identity mode off: the lens
+    still shows and edits it).
+    """
     try:
         count = len(ident.list_profiles())
     except Exception:
         count = 0
     try:
-        profile_id = str(ident.config().profile or "")
+        profile_id = _launch_persona() or str(ident.config().profile or "")
     except Exception:
         profile_id = ""
     profile, error = None, ""

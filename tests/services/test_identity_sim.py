@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import types
 from pathlib import Path
 
 import pytest
@@ -667,3 +668,58 @@ def test_restart_blocker_names_an_unknown_mcc_mnc(avd, profile_env):
     profile.preset = ""
     running = sim.RunningEmulator("emulator-5580", "Dev1", avd)
     assert sim.restart_blocker(running, profile) == sim.MNC_UNKNOWN
+
+
+def _persona_profile() -> ident.Profile:
+    profile = _profile()
+    profile.id = "persona-anna"
+    profile.seed = "hex:" + "22" * 32
+    return ident.get_identity_service().save(profile)
+
+
+def test_a_persona_launch_starts_with_the_personas_sim(avd, profile_env):
+    active = _activate(profile_env)
+    persona = _persona_profile()
+    plain = _context(avd)
+    context = types.SimpleNamespace(
+        avd=plain.avd,
+        avd_dir=plain.avd_dir,
+        port=plain.port,
+        options=plain.options,
+        record={},
+        meta={ident.PERSONA_META_KEY: persona.id},
+    )
+    args = sim.pre_launch(context)
+    icc = Path(args[1]) / sim.MODEM_DIR / "iccprofile_for_sim0.xml"
+    built = sim.read_iccprofile(icc.read_text(encoding="utf-8"))
+    assert built.iccid == ident.render_value(persona, persona.values["iccid"])
+    assert built.iccid != ident.render_value(active, active.values["iccid"])
+    assert context.record[sim.RECORD_KEY]["profile"] == persona.id
+    assert profile_env.profile == active.id  # never switched
+    # Identity mode off is off for persona launches too.
+    profile_env.mode = "off"
+    context.record.clear()
+    sim.post_stop(context)
+    assert sim.pre_launch(context) == ()
+    assert context.record == {}
+
+
+def test_restart_blocker_follows_the_launch_persona(avd, profile_env, monkeypatch):
+    active = _activate(profile_env)
+    persona = _persona_profile()
+    from sandroid.core import emulator as emu
+
+    monkeypatch.setattr(
+        emu,
+        "launch_record",
+        lambda serial: {"launch_id": "L1", "meta": {"persona_id": persona.id}},
+    )
+    running = sim.RunningEmulator("emulator-5580", "Dev1", avd)
+    # Pre-launch hooks see the persona: a restart sets the persona's SIM.
+    monkeypatch.setattr(sim, "_context_has_meta", lambda: True)
+    assert sim.restart_blocker(running, persona) == ""
+    assert sim.restart_blocker(running, active) == sim.NOT_ACTIVE
+    # They do not (an older emulator module): a restart sets the active one's.
+    monkeypatch.setattr(sim, "_context_has_meta", lambda: False)
+    assert sim.restart_blocker(running, persona) == sim.NOT_ACTIVE
+    assert sim.restart_blocker(running, active) == ""

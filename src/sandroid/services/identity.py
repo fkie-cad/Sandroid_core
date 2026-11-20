@@ -175,6 +175,32 @@ ENSURE_WINDOW_MIN_S = 90.0
 #: Why a framework value stays pending when the budget ran out.
 OUT_OF_TIME = "not applied: device preparation ran out of time"
 
+#: Launch-record ``meta`` key of the persona (an identity profile id) a
+#: launch was started as (``sandroid.world.persona.META_KEY``; a test keeps
+#: them equal without importing the world package here).
+PERSONA_META_KEY = "persona_id"
+
+
+def launch_persona_id(serial: str | None) -> str:
+    """The persona Sandroid's live launch of ``serial`` was started as.
+
+    ``""`` when Sandroid did not launch ``serial``, the launch has no
+    persona, or the launch record cannot be read. No device access.
+    """
+    if not serial:
+        return ""
+    try:
+        from sandroid.core import emulator
+
+        record = emulator.launch_record(serial)
+    except Exception:
+        logger.debug("identity: launch record unreadable", exc_info=True)
+        return ""
+    meta = (record or {}).get("meta")
+    value = meta.get(PERSONA_META_KEY) if isinstance(meta, dict) else None
+    return value if isinstance(value, str) else ""
+
+
 _UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I
 )
@@ -3718,6 +3744,29 @@ class IdentityService:
             return None
         return self.load(cfg.profile)
 
+    def profile_id_for(self, serial: str | None) -> str:
+        """Id of the profile ``serial`` runs: the persona Sandroid launched
+        it as, else the active profile.
+
+        ``""`` when identity mode is off (off everywhere, also for persona
+        launches) or no profile applies. Never changes the active profile:
+        another device keeps its own. No device access.
+        """
+        cfg = self.config()
+        if cfg.mode != "profile":
+            return ""
+        return launch_persona_id(serial) or str(cfg.profile or "")
+
+    def profile_for(self, serial: str | None) -> Profile | None:
+        """The profile of :meth:`profile_id_for` (``None``: none applies).
+
+        Raises:
+            ProfileError: That profile cannot be loaded (a persona's profile
+                is never replaced by the active one).
+        """
+        profile_id = self.profile_id_for(serial)
+        return self.load(profile_id) if profile_id else None
+
     # -- listeners ----------------------------------------------------------
 
     def add_markers_listener(self, cb: MarkersListener) -> None:
@@ -3894,7 +3943,8 @@ class IdentityService:
         Args:
             serial: Device serial.
             package: The app about to start.
-            profile: Profile to plan (default: the active one).
+            profile: Profile to plan (default: the device's,
+                :meth:`profile_for`).
             require_answer: A device that does not answer (offline, still
                 booting) raises instead of publishing every value as failed.
 
@@ -3902,7 +3952,7 @@ class IdentityService:
             ProfileError: No profile.
             IdentityApplyError: ``require_answer`` and no answer.
         """
-        profile = profile or self._require_profile()
+        profile = profile or self._require_profile(serial)
         pkgs = self._packages(serial, package)
         gen = self._gen(serial)
         state = self.preflight(serial, pkgs, profile)
@@ -3923,8 +3973,9 @@ class IdentityService:
         """An apply (any device) holds the apply lock right now."""
         return self._apply_lock.locked()
 
-    def _require_profile(self) -> Profile:
-        profile = self.active_profile()
+    def _require_profile(self, serial: str | None = None) -> Profile:
+        """The profile of ``serial`` (:meth:`profile_for`), else raise."""
+        profile = self.profile_for(serial)
         if profile is None:
             raise ProfileError("no active identity profile (mode off or none chosen)")
         return profile
@@ -4363,7 +4414,8 @@ class IdentityService:
             allow_restart: Allow the framework restart window (every app
                 stops). ``None`` follows ``identity.restart`` (``ask`` counts
                 as allowed: the caller asked already).
-            profile: Profile to apply (default: the active one).
+            profile: Profile to apply (default: the device's,
+                :meth:`profile_for`).
 
         Returns:
             The final plan (``infos`` hold the statuses after verify).
@@ -4371,7 +4423,7 @@ class IdentityService:
         Raises:
             ProfileError: No profile, or it has validation errors.
         """
-        profile = profile or self._require_profile()
+        profile = profile or self._require_profile(serial)
         errors = [i for i in validate(profile) if i.severity == "error"]
         if errors:
             raise ProfileError(
@@ -4508,7 +4560,8 @@ class IdentityService:
     def ensure_applied(
         self, serial: str, budget_s: float = 240.0
     ) -> IdentityPlan | None:
-        """Device preparation: apply the active profile within ``budget_s``.
+        """Device preparation: apply the device's profile (:meth:`profile_for`:
+        its launch persona, else the active profile) within ``budget_s``.
 
         For a worker thread when a device comes up (no dialog). Like
         :meth:`apply` without a package. Only ``identity.restart = "always"``
@@ -4535,9 +4588,9 @@ class IdentityService:
                 apply held the device past the budget.
         """
         cfg = self.config()
-        if cfg.mode != "profile" or not cfg.profile:
+        if not self.profile_id_for(serial):
             return None
-        profile = self._require_profile()
+        profile = self._require_profile(serial)
         errors = [i for i in validate(profile) if i.severity == "error"]
         if errors:
             raise ProfileError(
@@ -5119,7 +5172,7 @@ class IdentityService:
         Like :meth:`plan`, an apply that ran or runs during the read keeps
         its newer statuses (nothing is published then).
         """
-        profile = profile or self._require_profile()
+        profile = profile or self._require_profile(serial)
         pkgs = self._packages(serial, None)
         gen = self._gen(serial)
         state = self.preflight(serial, pkgs, profile)
@@ -5627,7 +5680,7 @@ class IdentityService:
     # -- pre-spawn hook -----------------------------------------------------
 
     def applied_state(self, package: str, serial: str | None = None) -> str | None:
-        """Whether this process applied the active profile to ``package``.
+        """Whether this process applied the device's profile to ``package``.
 
         Read-only, no device access (the App lens polls it).
 
@@ -5638,17 +5691,17 @@ class IdentityService:
             fingerprint; ``"not_applied"`` otherwise (also after a profile
             switch or a regenerate).
         """
-        cfg = self.config()
-        if cfg.mode != "profile" or not cfg.profile:
-            return None
-        try:
-            fp = fingerprint(self.load(cfg.profile))
-        except ProfileError:
-            return None
         if serial is None:
             from sandroid.core.adb import Adb
 
             serial = Adb.get_target_device()
+        profile_id = self.profile_id_for(serial)
+        if not profile_id:
+            return None
+        try:
+            fp = fingerprint(self.load(profile_id))
+        except ProfileError:
+            return None
         if serial:
             # After a TUI restart the device record says what an earlier
             # process applied: read once in the background; the status
@@ -5672,17 +5725,20 @@ class IdentityService:
         restart is not known to be on the device.
         """
         cfg = self.config()
-        if cfg.mode != "profile" or not cfg.profile:
-            return None
-        try:
-            profile = self.load(cfg.profile)
-        except ProfileError as exc:
-            logger.warning(f"identity: active profile unusable: {exc}")
+        if cfg.mode != "profile":
             return None
         from sandroid.core.adb import Adb
 
         serial = Adb.get_target_device()
         if not serial:
+            return None
+        profile_id = self.profile_id_for(serial)
+        if not profile_id:
+            return None
+        try:
+            profile = self.load(profile_id)
+        except ProfileError as exc:
+            logger.warning(f"identity: profile {profile_id!r} unusable: {exc}")
             return None
         fp = fingerprint(profile)
         with self._lock:

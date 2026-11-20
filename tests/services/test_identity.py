@@ -3304,3 +3304,96 @@ def test_the_old_pre_spawn_names_are_gone():
     for name in ("pre_spawn", "install_pre_spawn_hook", "uninstall_pre_spawn_hook"):
         assert not hasattr(ident.IdentityService, name), name
     assert not hasattr(ident, "_pre_spawn_plan_cls")
+
+
+# ---------------------------------------------------------------------------
+# the profile of a device: its launch persona, else the active profile
+# ---------------------------------------------------------------------------
+
+
+def _launched_as(monkeypatch, persona: str, serial: str = SERIAL) -> None:
+    """``serial`` is Sandroid's live launch, started as ``persona``."""
+    from sandroid.core import emulator
+
+    records = {serial: {"launch_id": "L1", "meta": {ident.PERSONA_META_KEY: persona}}}
+    monkeypatch.setattr(emulator, "launch_record", lambda s: records.get(s))
+
+
+def _persona(service) -> Profile:
+    return service.save(_profile(id="persona-anna", seed="hex:" + "22" * 32))
+
+
+def test_the_persona_meta_key_is_the_world_modules():
+    from sandroid.world import persona
+
+    assert ident.PERSONA_META_KEY == persona.META_KEY
+
+
+def test_launch_persona_id_reads_the_launch_record(monkeypatch):
+    from sandroid.core import emulator
+
+    for record in (None, {}, {"meta": None}, {"meta": {"persona_id": 7}}):
+        monkeypatch.setattr(emulator, "launch_record", lambda s, r=record: r)
+        assert ident.launch_persona_id(SERIAL) == ""
+
+    def broken(serial):
+        raise RuntimeError("registry gone")
+
+    monkeypatch.setattr(emulator, "launch_record", broken)
+    assert ident.launch_persona_id(SERIAL) == ""
+    _launched_as(monkeypatch, "anna")
+    assert ident.launch_persona_id(SERIAL) == "anna"
+    assert ident.launch_persona_id(None) == ""
+    assert ident.launch_persona_id("emulator-5582") == ""
+
+
+def test_a_persona_launch_runs_its_own_profile(service, device, monkeypatch):
+    active = service.config().profile
+    persona = _persona(service)
+    assert ident.fingerprint(persona) != ident.fingerprint(service.load(active))
+    assert service.profile_id_for(SERIAL) == active
+    _launched_as(monkeypatch, persona.id)
+    assert service.profile_id_for(SERIAL) == persona.id
+    assert service.profile_for(SERIAL).id == persona.id
+    assert service.profile_id_for("emulator-5582") == active  # another device
+    plan = service.ensure_applied(SERIAL)
+    assert plan is not None
+    assert plan.fingerprint == ident.fingerprint(persona)
+    assert service.plan(SERIAL).fingerprint == ident.fingerprint(persona)
+    assert service.verify(SERIAL).fingerprint == ident.fingerprint(persona)
+    assert service.config().profile == active  # never switched
+    # Identity mode off is off everywhere, persona launches too.
+    monkeypatch.setattr(service.config(), "mode", "off")
+    assert service.profile_id_for(SERIAL) == ""
+    assert service.ensure_applied(SERIAL) is None
+
+
+def test_a_missing_persona_profile_is_never_replaced_by_the_active_one(
+    service, device, monkeypatch
+):
+    _launched_as(monkeypatch, "gone")
+    with pytest.raises(ident.ProfileError):
+        service.ensure_applied(SERIAL)
+    with pytest.raises(ident.ProfileError):
+        service.apply(SERIAL)
+    assert device.writes == []
+
+
+def test_applied_state_and_pre_start_follow_the_persona(
+    service, device, app_start, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SDROID_FILES_DIR", str(tmp_path / "own" / "session" / "files"))
+    pkg = "com.example.app"
+    service.apply(SERIAL, pkg)
+    assert service.applied_state(pkg) == "applied"
+    assert service.pre_start(pkg) is None
+    persona = _persona(service)
+    _launched_as(monkeypatch, persona.id)
+    # The active profile's apply is not the persona's.
+    assert service.applied_state(pkg) == "not_applied"
+    plan = service.pre_start(pkg)
+    assert plan is not None
+    plan.apply()
+    assert service.applied_state(pkg) == "applied"
+    assert service.pre_start(pkg) is None
+    assert service.statuses()[0].fingerprint == ident.fingerprint(persona)
