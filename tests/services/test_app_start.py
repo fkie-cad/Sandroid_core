@@ -1737,6 +1737,32 @@ def test_the_decision_carries_the_callers_consent():
     assert decide_start(_inputs(fresh=True, consent=True)).consent is True
 
 
+def test_prepare_launch_runs_hooks_before_an_outside_spawn(env, monkeypatch):
+    """The real prepare_launch (once reached via TrigDroid's spawn): hooks run
+    before a launch outside the Frida spawn path, a failing hook aborts it,
+    and a running app runs no plan.
+    """
+    env.live = (Liveness.NOT_RUNNING, None)
+    log: list = []
+    app_start.register_pre_spawn_hook(_hook(log))
+
+    assert _in_worker(lambda: app_start.prepare_launch(PKG, "Objection")) is True
+    assert log == [("hook", PKG), "apply"]
+
+    app_start._PRE_SPAWN_HOOKS.clear()
+    app_start.register_pre_spawn_hook(_hook(log, fail=RuntimeError("boom")))
+    with pytest.raises(AppStartError):
+        _in_worker(lambda: app_start.prepare_launch(PKG, "Objection"))
+
+    # Attaching to a running app applies nothing.
+    app_start._PRE_SPAWN_HOOKS.clear()
+    running: list = []
+    app_start.register_pre_spawn_hook(_hook(running))
+    env.live = (Liveness.RUNNING, 77)
+    assert _in_worker(lambda: app_start.prepare_launch(PKG, "Objection")) is False
+    assert "apply" not in running
+
+
 def test_ai_launch_app_runs_hooks_on_a_first_launch_only(env, bus, monkeypatch):
     from sandroid.ai.tools import app_lifecycle
     from sandroid.core.adb import Adb
