@@ -380,7 +380,13 @@ async def test_key_6_shows_the_table_with_status_words_and_no_glyphs(fakes) -> N
         assert ms.query_one("#lens-bar").badge("identity") == "1"
         # Caption: name, revision, mode; plain words, no separator glyphs.
         host = ms.query_one("#lens-host")
-        assert "rev 3, mode on" in host.border_title
+        from rich.text import Text
+
+        from sandroid.tui.themes import lens_palette
+
+        title = Text.from_markup(host.border_title).plain
+        assert "rev 3, mode ● on" in title
+        assert f"mode [{lens_palette().ok}]● on" in host.border_title
         assert host.border_title.startswith("Identity  ")
         assert "·" not in host.border_title
         assert "·" not in str(host.border_subtitle or "")
@@ -388,7 +394,8 @@ async def test_key_6_shows_the_table_with_status_words_and_no_glyphs(fakes) -> N
         text = _region_text(app, ms.query_one("#lens-host"))
         assert "verified" in text
         assert "hook only" in text
-        assert not set(GLYPHS) & set(text), text
+        # The status dot before "on" in the caption is allowed (● ○ ◌).
+        assert not set(GLYPHS.replace("●", "")) & set(text), text
 
 
 def _no_statuses_yet(fakes, monkeypatch, answers=None) -> list[str]:

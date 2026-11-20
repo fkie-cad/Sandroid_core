@@ -1799,7 +1799,11 @@ class FilesPanel(Widget):
             if self._segment is not None:
                 title = self._segment_title()
             else:
-                title = "monitor on" if running else "monitor off"
+                title = (
+                    f"monitor [{_c('ok')}]● on[/]"
+                    if running
+                    else f"monitor [{_c('dim')}]○ off[/]"
+                )
             wl = self._watchlist_or_none()
             n_groups = sum(1 for r in rows if r.group is not None and not r.fold)
             n_paths = sum(

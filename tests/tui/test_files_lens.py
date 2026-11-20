@@ -117,9 +117,16 @@ class _Harness(App):
 _FOLLOW = re.compile(r"^(?:live|scrolled back(?: · [\d,]+ new below)? · End = live) · ")
 
 
+def _markup_plain(markup: str) -> str:
+    """A caption title (markup) as the words it shows."""
+    from rich.text import Text
+
+    return Text.from_markup(markup).plain
+
+
 def _title(panel: FilesPanel) -> str:
-    """The caption title without the follow state in front of it."""
-    return _FOLLOW.sub("", panel.caption()[0], count=1)
+    """The caption title (plain) without the follow state in front of it."""
+    return _FOLLOW.sub("", _markup_plain(panel.caption()[0]), count=1)
 
 
 def _keys(panel: FilesPanel) -> list[str]:
@@ -288,7 +295,12 @@ async def test_empty_state_is_one_calm_line() -> None:
         empty = str(panel.query_one("#files-empty").render())
         assert empty == "Monitor off — press o to watch file activity"
         # L8 (round 2): no "LIVE" title while the monitor is off.
-        assert panel.caption() == ("monitor off", "")
+        title, info = panel.caption()
+        assert (_markup_plain(title), info) == ("monitor ○ off", "")
+        # The dot and its word in the state's lens colour.
+        from sandroid.tui.themes import lens_palette
+
+        assert title == f"monitor [{lens_palette().dim}]○ off[/]"
 
 
 @pytest.mark.asyncio
@@ -759,7 +771,7 @@ async def test_review_scope_shows_the_runs_files_and_live_comes_back(
         panel.post_message(ScopeChanged(None))
         await pilot.pause()
         assert [r.key for r in panel._rows] == [f"{ROOT}/files/live"]
-        assert _title(panel) == "monitor off"  # back to live, monitor off
+        assert _title(panel) == "monitor ○ off"  # back to live, monitor off
 
 
 @pytest.mark.asyncio
@@ -790,7 +802,8 @@ async def test_files_lens_in_the_app_enter_opens_and_live_updates_inspector() ->
         await settle(pilot)
         panel = ms.lens_widget("files")
         assert isinstance(panel, FilesPanel)
-        assert ms.query_one("#lens-host").border_title == "Files · monitor off"
+        border_title = ms.query_one("#lens-host").border_title
+        assert _markup_plain(border_title) == "Files · monitor ○ off"
         panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
         panel.ingest(_items(_fse("FSE_CREATE_FILE", PREFS)), now=T0)
         panel.refresh_rows()
@@ -1212,7 +1225,7 @@ async def test_marks_show_only_activity_since_and_step_through_segments() -> Non
         await pilot.pause()
         assert set(_keys(panel)) == {DB, new, PREFS, AAID}
         assert _row(panel, PREFS).stats.count == 2
-        assert _title(panel) == "monitor off"
+        assert _title(panel) == "monitor ○ off"
         await pilot.press("A")
         await pilot.pause()
         assert panel.segment == 1
@@ -2246,7 +2259,10 @@ async def test_caption_names_the_scope_following_and_how_to_stop() -> None:
         await pilot.pause()
         panel.refresh_rows()
         title, info = panel.caption()
-        assert title == "monitor on"
+        assert _markup_plain(title) == "monitor ● on"
+        from sandroid.tui.themes import lens_palette
+
+        assert title == f"monitor [{lens_palette().ok}]● on[/]"
         assert info.startswith(f"App {PKG} · 2 proc · following · o stops")
         watch.lost_events = 7
         assert "7 events lost" in panel.caption()[1]
@@ -2464,16 +2480,16 @@ async def test_title_is_not_live_while_the_monitor_is_off_or_stopping() -> None:
     async with app.run_test() as pilot:
         panel = app.query_one(FilesPanel)
         await pilot.pause()
-        assert _title(panel) == "monitor off"
+        assert _title(panel) == "monitor ○ off"
         device = _Device({10: AppProcess(10, 10100, PKG)})
         watch = _register_watched_monitor(device, mode="pid", follow=True)
         watch.seed({10: [10]}, watch.initial_processes())
         panel.refresh_rows()
-        assert _title(panel) == "monitor on"
+        assert _title(panel) == "monitor ● on"
         watch.stopping = True  # o pressed: at once, before the device work
         panel.refresh_rows()
         title, info = panel.caption()
-        assert title == "monitor stopping…"
+        assert _markup_plain(title) == "monitor ◌ stopping…"
         assert "o stops" not in info
 
 
@@ -2524,7 +2540,7 @@ async def test_newest_change_is_at_the_bottom_and_followed_until_moving_up() -> 
         assert _keys(panel) == [DB, AAID, PREFS]  # newest last
         assert panel.following
         assert panel._cursor_key() == PREFS
-        assert panel.caption()[0] == "live · monitor off"
+        assert _markup_plain(panel.caption()[0]) == "live · monitor ○ off"
         # A change moves its row to the bottom; following keeps up with it.
         panel.ingest(
             _items(_fse("FSE_CONTENT_MODIFIED", DB)), now=T0 + timedelta(seconds=5)
@@ -2536,7 +2552,10 @@ async def test_newest_change_is_at_the_bottom_and_followed_until_moving_up() -> 
         await settle(pilot)
         assert not panel.following
         assert panel._cursor_key() == PREFS
-        assert panel.caption()[0] == "scrolled back · End = live · monitor off"
+        assert (
+            _markup_plain(panel.caption()[0])
+            == "scrolled back · End = live · monitor ○ off"
+        )
         panel.ingest(
             _items(_fse("FSE_CONTENT_MODIFIED", AAID)), now=T0 + timedelta(seconds=9)
         )
@@ -2557,7 +2576,7 @@ async def test_newest_change_is_at_the_bottom_and_followed_until_moving_up() -> 
         # Sorted by name / count there is no "newest": no follow wording.
         await pilot.press("O")
         await settle(pilot)
-        assert panel.caption()[0] == "monitor off"
+        assert _markup_plain(panel.caption()[0]) == "monitor ○ off"
 
 
 async def _three_changes(app):

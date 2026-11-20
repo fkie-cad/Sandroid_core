@@ -1848,7 +1848,9 @@ class MonitorWatch:
         if self.stopping:
             # Shown the moment ``o`` is pressed; the device clean-up runs
             # off the UI thread (MonitorController.stop).
-            title = "monitor stopping…"
+            from sandroid.tui.themes import lens_palette
+
+            title = f"monitor [{lens_palette().warn}]◌ stopping…[/]"
             if self.track:
                 parts.append(f"App {self.package}")
             return title, parts

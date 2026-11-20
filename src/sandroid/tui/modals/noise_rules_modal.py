@@ -128,7 +128,7 @@ class NoiseRulesModal(ForensicModal[None]):
                 id="rules-help",
             )
             table = _RulesTable(id="rules-table", cursor_type="row")
-            table.add_column("on", width=3, key="on")
+            table.add_column("on", width=5, key="on")
             table.add_column("action", width=6, key="action")
             table.add_column("kind", width=8, key="kind")
             table.add_column("pattern", key="pattern")
@@ -191,7 +191,7 @@ class NoiseRulesModal(ForensicModal[None]):
             on = rule.get("enabled", True)
             style = "" if on else pal.dim
             table.add_row(
-                Text("on" if on else "off", style=pal.ok if on else pal.dim),
+                Text("● on" if on else "○ off", style=pal.ok if on else pal.dim),
                 Text(rule.get("action", ""), style=style or pal.accent),
                 Text(rule.get("kind", ""), style=style),
                 Text(rule.get("pattern", ""), style=style),

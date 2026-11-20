@@ -1210,7 +1210,9 @@ class IdentityLens(Vertical):
             except Exception:
                 mode = "off"
         name = profile.name or profile.id
-        title = f"{name} rev {profile.revision}, mode {mode}"
+        pal = lens_palette()
+        dot = f"[{pal.ok}]● on[/]" if mode == "on" else f"[{pal.dim}]○ off[/]"
+        title = f"{name} rev {profile.revision}, mode {dot}"
         applied_at, verified_at = self._apply_times(ident, profile)
         bits = []
         if applied_at:

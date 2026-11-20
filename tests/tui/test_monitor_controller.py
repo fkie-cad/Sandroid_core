@@ -2839,7 +2839,13 @@ def test_stop_says_stopping_at_once_and_cleans_up_off_the_ui_thread():
     finally:
         EventBus.get().unsubscribe(EventType.TASK_OUTPUT, _cb)
     assert stopped == []  # nothing slow ran on the calling (UI) thread
-    assert watch.caption() == ("monitor stopping…", [f"App {_PKG}"])
+    title, parts = watch.caption()
+    from rich.text import Text
+
+    assert (Text.from_markup(title).plain, parts) == (
+        "monitor ◌ stopping…",
+        [f"App {_PKG}"],
+    )
     assert any(d.get("monitor_status") for d in seen)  # the caption redraws
     assert controller.can_start() == (
         False,
