@@ -2058,9 +2058,10 @@ class MainScreen(Screen):
             header.set_pill(f"REVIEW {label}{busy}", "review")
             return
         if recording or replaying or phase:
-            # Record / Rewind status in plain words (core/rewind.py).
+            # Record / Rewind: ● + state word; the phase line as is
+            # (core/rewind.py).
             header.set_pill(
-                phase or ("Recording" if recording else "Rewind running"), "rec"
+                phase or ("● Recording" if recording else "● Rewind running"), "rec"
             )
         else:
             header.set_pill("LIVE", "")

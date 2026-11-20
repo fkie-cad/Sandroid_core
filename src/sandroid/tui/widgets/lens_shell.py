@@ -116,8 +116,8 @@ Scope (LIVE / REVIEW)
 ---------------------
 * ``MainScreen.set_scope(run_id | None, label=None)`` -- ``None`` = live.
   The header pill shows ``LIVE`` or ``REVIEW <label or "Run <id>">``
-  (the Runs lens passes ``"#<n> <label>"``), ``Recording`` while recording
-  and the Rewind phase while one runs -- plain words, each in its own
+  (the Runs lens passes ``"#<n> <label>"``), ``● Recording`` while
+  recording and the Rewind phase while one runs -- words, each in its own
   colour (``-live`` / ``-review`` / ``-rec``). The app pushes every
   recorder/player transition and phase change through
   ``MainScreen.refresh_scope_pill()`` (state on the StatusBar:
@@ -437,7 +437,7 @@ def _as_text(markup: str) -> Text:
 
 class ShellHeader(Header):
     """One-row header: ``Sandroid / device / app   snapshot name``, the open
-    label (``Section 7 'accept cookies' 0:12``), ``TRACKING``, the privacy
+    label (``Section 7 'accept cookies' 0:12``), ``● TRACKING``, the privacy
     indicator (``PRIVACY 3/12 found``; a click opens the Identity lens), a
     timeline banner (locked / failed), pill, clock.
 
@@ -512,7 +512,7 @@ class ShellHeader(Header):
         color: #facc15;
     }
     ShellHeader #tracking-dot {
-        color: #4ade80;
+        color: $lens-ok;
         text-style: bold;
     }
     ShellHeader #timeline-banner {
@@ -578,10 +578,10 @@ class ShellHeader(Header):
             self._set_piece("label-note", text)
 
     def set_tracking(self, active: bool) -> None:
-        """The Tracking indicator (``TRACKING`` while Tracking runs)."""
+        """The Tracking indicator (``● TRACKING`` while Tracking runs)."""
         if active != self._tracking:
             self._tracking = active
-            self._set_piece("tracking-dot", "TRACKING" if active else None)
+            self._set_piece("tracking-dot", "● TRACKING" if active else None)
 
     def set_timeline_banner(self, text: str | None) -> None:
         """``timeline locked (PID 4711 on host)`` / ``timeline failed`` (in

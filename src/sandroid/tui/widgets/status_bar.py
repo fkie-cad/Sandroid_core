@@ -344,45 +344,45 @@ class StatusBar(Static):
         # Frida / app actions wait for it.
         if self.device_prep_stage:
             segs.append(
-                f"[{paused}]Preparing device…[/] "
+                f"[{paused}]◌ Preparing device…[/] "
                 f"[{muted}]{escape(self.device_prep_stage)}[/]"
             )
 
-        # App state (package itself is in the header breadcrumb). Plain
-        # words in the state colours, no state glyphs.
+        # App state (package itself is in the header breadcrumb). A status
+        # dot plus the word, both in the state colour: ● on, ○ off, ◌ pending.
         if self.spotlight_app and self.spotlight_app != "None":
             pid = self.spotlight_pid
             step = self._pre_start_step()
             if step:
                 # Identity's apply can take minutes: say so, not "not running".
-                state = f"[{paused}]{escape(step[:1].lower() + step[1:])}[/]"
+                state = f"[{paused}]◌ {escape(step[:1].lower() + step[1:])}[/]"
             elif self.spotlight_paused:
                 pid_part = f" pid {pid}" if pid else ""
-                state = f"[{paused}]paused[/][{muted}]{pid_part}  Space resumes[/]"
+                state = f"[{paused}]◌ paused[/][{muted}]{pid_part}  Space resumes[/]"
             elif pid:
-                state = f"[{run}]running[/] [{muted}]pid {pid}[/]"
+                state = f"[{run}]● running[/] [{muted}]pid {pid}[/]"
             elif self.spotlight_restarting:
-                state = f"[{paused}]restarting…[/]"
+                state = f"[{paused}]◌ restarting…[/]"
             else:
-                state = f"[{stop}]not running[/] [{muted}] Space starts[/]"
+                state = f"[{stop}]○ not running[/] [{muted}] Space starts[/]"
             segs.append(f"[{muted}]App[/] {state}")
         else:
-            segs.append(f"[{muted}]App none[/]")
+            segs.append(f"[{muted}]App ○ none[/]")
 
         # Frida.
         if self.frida_starting:
-            frida = f"[{paused}]starting[/]"
+            frida = f"[{paused}]◌ starting[/]"
         elif self.frida_status != "Running" and self._frida_lost:
             frida = f"[{stop}]connection lost[/] [{muted}] Shift+R restarts[/]"
         elif self.frida_status == "Running":
             if self._frida_version_mismatch:
-                frida = f"[{fixed_color('notice')}]running, version mismatch[/]"
+                frida = f"[{fixed_color('notice')}]● running, version mismatch[/]"
             else:
-                frida = f"[{run}]running[/]"
+                frida = f"[{run}]● running[/]"
         elif self.frida_status == "Checking...":
-            frida = f"[{muted}]checking[/]"
+            frida = f"[{muted}]◌ checking[/]"
         else:
-            frida = f"[{stop}]off[/]"
+            frida = f"[{stop}]○ off[/]"
         segs.append(f"[{muted}]Frida[/] {frida}")
 
         # Hooks + bypass, only when something is active.
@@ -399,15 +399,15 @@ class StatusBar(Static):
         )
         # "Mitmproxy" is our engine; "Device proxy" says where the device
         # points, so a running Mitmproxy never reads as "the device is
-        # proxied". Plain words and theme colours, no symbols.
+        # proxied". Status dot + word in theme colours.
         if self.mitmweb_running:
             addr = f" {self.mitmweb_address}" if self.mitmweb_address else ""
-            proxy = f"[{muted}]Mitmproxy[/] [{run}]on{addr}[/]"
+            proxy = f"[{muted}]Mitmproxy[/] [{run}]● on{addr}[/]"
         else:
-            proxy = f"[{muted}]Mitmproxy[/] [{stop}]off[/]"
+            proxy = f"[{muted}]Mitmproxy[/] [{stop}]○ off[/]"
         if pointed_at_us:
             if self.mitmweb_running:
-                proxy += f" [{muted}]· Device proxy[/] [{run}]on[/]"
+                proxy += f" [{muted}]· Device proxy[/] [{run}]● on[/]"
             else:
                 # Device points at our stopped proxy: traffic goes nowhere.
                 proxy += f" [{warn}]· Device proxy to the stopped Mitmproxy[/]"
@@ -416,7 +416,7 @@ class StatusBar(Static):
                 f" [{muted}]· Device proxy to[/] [{primary}]{self.proxy_address}[/]"
             )
         elif self.mitmweb_running:
-            proxy += f" [{muted}]· Device proxy off[/]"
+            proxy += f" [{muted}]· Device proxy ○ off[/]"
         proxied = list(self.app_proxies.values())
         n_ours = sum(1 for v in proxied if v == "ours")
         m_ext = len(proxied) - n_ours
@@ -439,13 +439,13 @@ class StatusBar(Static):
                 else "capture.pcap"
             )
             segs.append(
-                f"[{muted}]Capture[/] [{run}]running[/] [{muted}]{escape(filename)}[/]"
+                f"[{muted}]Capture[/] [{run}]● running[/] [{muted}]{escape(filename)}[/]"
             )
 
-        # Record / Rewind: the controller's plain status line (no symbols).
+        # Record / Rewind: ● + state word; the controller's phase line as is.
         if self.recording_active or self.replay_active or self.replay_phase:
             text = self.replay_phase or (
-                "Recording" if self.recording_active else "Rewind running"
+                "● Recording" if self.recording_active else "● Rewind running"
             )
             color = stop if self.recording_active else fixed_color("spawn_mode")
             segs.append(f"[{color} bold]{escape(text)}[/]")

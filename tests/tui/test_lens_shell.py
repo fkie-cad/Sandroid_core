@@ -511,7 +511,7 @@ async def test_recording_shows_in_the_pill() -> None:
         app._set_status_bar_mode(recording=True)
         ms.refresh_status()
         await settle(pilot)
-        assert ms.query_one("#shell-header").pill_text == "Recording"
+        assert ms.query_one("#shell-header").pill_text == "● Recording"
         app._set_status_bar_mode(recording=False)
         ms.refresh_status()
         await settle(pilot)
@@ -1831,7 +1831,7 @@ def test_frida_pill_says_connection_lost_until_the_server_runs_again(monkeypatch
         seg = next(s.plain for s in bar._segments() if s.plain.startswith("Frida"))
         return seg
 
-    assert _pill() == "Frida running"
+    assert _pill() == "Frida ● running"
     # The app died (process-terminated): the server is fine, nothing changes.
     bar._on_state_changed(
         Event(
@@ -1839,7 +1839,7 @@ def test_frida_pill_says_connection_lost_until_the_server_runs_again(monkeypatch
             data={"change_type": "frida_detached", "reason": "process-terminated"},
         )
     )
-    assert _pill() == "Frida running"
+    assert _pill() == "Frida ● running"
     assert checks == []
     bar._on_state_changed(
         Event(
@@ -1856,7 +1856,7 @@ def test_frida_pill_says_connection_lost_until_the_server_runs_again(monkeypatch
     bar._update_frida_status("Not running")
     assert "connection lost" in _pill()
     bar._update_frida_status("Running")  # ⇧R / auto-start brought it back
-    assert _pill() == "Frida running"
+    assert _pill() == "Frida ● running"
 
 
 def test_frida_pill_says_starting_while_frida_server_starts(monkeypatch):
@@ -1876,19 +1876,19 @@ def test_frida_pill_says_starting_while_frida_server_starts(monkeypatch):
     def _pill() -> str:
         return next(s.plain for s in bar._segments() if s.plain.startswith("Frida"))
 
-    assert _pill() == "Frida off"
+    assert _pill() == "Frida ○ off"
     with frida_manager._marked_starting():
         bar._poll_capture_state()  # the 1.5 s poll
-        assert _pill() == "Frida starting"
+        assert _pill() == "Frida ◌ starting"
         bar._update_frida_status("Not running")  # a check racing the start
-        assert _pill() == "Frida starting"
+        assert _pill() == "Frida ◌ starting"
     assert checks == []
     bar._poll_capture_state()
     assert checks == [1]  # re-checked as soon as the start ended
     bar._update_frida_status("Running")
-    assert _pill() == "Frida running"
+    assert _pill() == "Frida ● running"
     bar._frida_version_mismatch = True
-    assert _pill() == "Frida running, version mismatch"
+    assert _pill() == "Frida ● running, version mismatch"
 
 
 def test_header_app_segment_shows_the_run_state_not_a_mode():
@@ -1901,13 +1901,25 @@ def test_header_app_segment_shows_the_run_state_not_a_mode():
         return next(s.plain for s in bar._segments() if s.plain.startswith("App"))
 
     bar.spotlight_pid, bar.spotlight_paused = None, False
-    assert app_seg() == "App not running  Space starts"
+    assert app_seg() == "App ○ not running  Space starts"
     bar.spotlight_pid = 77
-    assert app_seg() == "App running pid 77"
+    assert app_seg() == "App ● running pid 77"
+    # The dot sits inside the state word's colour span.
+    from sandroid.tui.themes import fixed_color
+
+    seg = next(s for s in bar._segments() if s.plain.startswith("App"))
+    start = seg.plain.index("● running")
+    end = start + len("● running")
+    assert any(
+        span.start <= start
+        and span.end >= end
+        and str(span.style) == fixed_color("running")
+        for span in seg.spans
+    ), seg.spans
     bar.spotlight_paused = True
-    assert app_seg() == "App paused pid 77  Space resumes"
+    assert app_seg() == "App ◌ paused pid 77  Space resumes"
     bar.spotlight_app = "None"
-    assert app_seg() == "App none"
+    assert app_seg() == "App ○ none"
     for word in ("spawn", "attach"):
         assert word not in app_seg()
 
@@ -1922,7 +1934,7 @@ def test_header_app_segment_says_when_the_identity_apply_runs(monkeypatch):
     def app_seg() -> str:
         return next(s.plain for s in bar._segments() if s.plain.startswith("App"))
 
-    assert app_seg() == "App not running  Space starts"
+    assert app_seg() == "App ○ not running  Space starts"
     monkeypatch.setattr(
         app_start,
         "_STATUS",
@@ -1932,9 +1944,9 @@ def test_header_app_segment_says_when_the_identity_apply_runs(monkeypatch):
             "Applying identity profile 'x', framework restarts",
         ),
     )
-    assert app_seg() == "App applying identity profile 'x', framework restarts"
+    assert app_seg() == "App ◌ applying identity profile 'x', framework restarts"
     bar.spotlight_app = "org.other"
-    assert app_seg() == "App not running  Space starts"
+    assert app_seg() == "App ○ not running  Space starts"
 
 
 def test_header_capture_segment_says_running_in_words():
@@ -1944,7 +1956,7 @@ def test_header_capture_segment_says_running_in_words():
     bar.network_capture_running = True
     bar.network_capture_file = "/tmp/out/run1.pcap"
     seg = next(s.plain for s in bar._segments() if s.plain.startswith("Capture"))
-    assert seg == "Capture running run1.pcap"
+    assert seg == "Capture ● running run1.pcap"
     for text in (s.plain for s in bar._segments()):
         assert "\u2423" not in text  # no key glyphs
         assert "\u21e7" not in text
@@ -1981,24 +1993,24 @@ def test_proxy_strip_segment_is_plain_words():
 
     ours = "10.0.2.2:8080"
     cases = {
-        "Proxy Mitmproxy off": {},
-        f"Proxy Mitmproxy on {ours} · Device proxy on": {
+        "Proxy Mitmproxy ○ off": {},
+        f"Proxy Mitmproxy ● on {ours} · Device proxy ● on": {
             "mitmweb_running": True,
             "mitmweb_address": ours,
             "proxy_address": ours,
         },
-        "Proxy Mitmproxy off · Device proxy to the stopped Mitmproxy": {
+        "Proxy Mitmproxy ○ off · Device proxy to the stopped Mitmproxy": {
             "mitmweb_address": ours,
             "proxy_address": ours,
         },
-        f"Proxy Mitmproxy on {ours} · Device proxy off": {
+        f"Proxy Mitmproxy ● on {ours} · Device proxy ○ off": {
             "mitmweb_running": True,
             "mitmweb_address": ours,
         },
-        "Proxy Mitmproxy off · Device proxy to 192.168.1.5:8081": {
+        "Proxy Mitmproxy ○ off · Device proxy to 192.168.1.5:8081": {
             "proxy_address": "192.168.1.5:8081",
         },
-        "Proxy Mitmproxy off · App Proxy for 2 apps · App Proxy for 1 app to an "
+        "Proxy Mitmproxy ○ off · App Proxy for 2 apps · App Proxy for 1 app to an "
         "external proxy": {
             "app_proxies": {"a": "ours", "b": "ours", "c": "http://1.2.3.4:8"},
         },
@@ -2006,5 +2018,6 @@ def test_proxy_strip_segment_is_plain_words():
     for expected, state in cases.items():
         text = proxy_segment(**state)
         assert text == expected
-        assert not re.search("[←-⇿─-➿⬀-⯿]", text)
+        # Status dots (● ○ ◌) are allowed; arrows and other glyphs are not.
+        assert not re.search("(?![●○◌])[←-⇿─-➿⬀-⯿]", text)
         assert not re.search(r"\b(mitm|Capture|arm(ed)?)\b", text)

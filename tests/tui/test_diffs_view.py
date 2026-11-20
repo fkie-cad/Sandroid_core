@@ -806,15 +806,15 @@ async def test_scope_pill_follows_the_recorder_and_the_player() -> None:
         app.push_screen(ConfirmModal(title="stand-in for the Record dialog"))
         await settle(pilot)
         app._set_status_bar_mode(recording=True)  # capture started
-        assert header.pill_text == "Recording"
+        assert header.pill_text == "● Recording"
         app._set_status_bar_mode(recording=False)  # stopped / cancelled
         assert header.pill_text == "LIVE"
         app.pop_screen()
         await settle(pilot)
 
-        # Rewind: the controller's plain status line, no symbols.
+        # Rewind: ● + state word; the controller's phase line as is.
         app._set_status_bar_mode(replaying=True)
-        assert header.pill_text == "Rewind running"
+        assert header.pill_text == "● Rewind running"
         app._set_replay_phase("Going back to the start point")
         assert header.pill_text == "Going back to the start point"
         app._set_replay_phase("dry run")
