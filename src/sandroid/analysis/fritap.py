@@ -1500,7 +1500,9 @@ def _start_fritap_keys(package: str | None, serial: str | None):
             f"friTap not started: {package or 'no app'} is not the selected app",
             "not_selected",
         )
-    active = Adb.get_target_device()
+    # The selected device, not a thread pin (Adb.targeting): friTap runs on
+    # the active device's Frida session whatever adb is pinned to.
+    active = Adb._target_device
     if serial and active and serial != active:
         return StartResult(
             False,

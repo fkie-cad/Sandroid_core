@@ -1942,7 +1942,7 @@ def test_recovery_reads_the_given_serial(recovery, clock, monkeypatch):
         return send(cmd, *a, **k)
 
     monkeypatch.setattr(Adb, "send_adb_command", staticmethod(_send))
-    monkeypatch.setattr(Adb, "get_target_device", classmethod(lambda c: "emu-1"))
+    monkeypatch.setattr(Adb, "_target_device", "emu-1")
     recovery.pids = [100, 222]
 
     app_start.recover_after_framework_restart(100, serial="emu-1")
@@ -1950,7 +1950,8 @@ def test_recovery_reads_the_given_serial(recovery, clock, monkeypatch):
     assert (recovery.dropped, recovery.refreshed) == (1, 1)
 
     recovery.pids = [100, 333]
-    app_start.recover_after_framework_restart(100, serial="emu-2")
+    with Adb.targeting("emu-2"):  # a pinned caller is still another device
+        app_start.recover_after_framework_restart(100, serial="emu-2")
     # Another device: only the wait, the active device's handles stay.
     assert (recovery.dropped, recovery.refreshed) == (1, 1)
 

@@ -1335,7 +1335,9 @@ def recover_after_framework_restart(
     """
     from sandroid.core.adb import Adb
 
-    active = serial is None or serial == Adb.get_target_device()
+    # The global target, not a thread pin (Adb.targeting): Frida's handles
+    # belong to the device Sandroid has selected.
+    active = serial is None or serial == Adb._target_device
 
     def drop() -> None:
         if active:
