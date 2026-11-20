@@ -23,15 +23,17 @@ Usage:
 """
 
 import argparse
+import contextlib
 import datetime
 import logging
 import os
 import re
 import shutil
 import threading
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from sandroid.services.protocols import EventBusProtocol
 
@@ -77,6 +79,41 @@ class SessionPaths:
             "error_log_file": str(self.error_log_file) if self.error_log_file else None,
             "timestamp": self.timestamp,
         }
+
+
+@dataclass(frozen=True)
+class SessionChange:
+    """One change of the active analysis session (see
+    :meth:`InitializationService.on_session_change`).
+
+    Attributes:
+        kind: ``"new"`` (a session folder this process created), ``"resume"``
+            (an existing session folder was opened again) or ``"closed"``
+            (no session any more: ``new_path`` is None). A switch from one
+            session to another is a ``new`` / ``resume`` whose ``old_path``
+            is set.
+        old_id: Folder name of the previous session (``YYYYmmdd_HHMMSS``),
+            or None.
+        old_path: Absolute folder of the previous session, or None.
+        new_id: Folder name of the now active session, or None.
+        new_path: Absolute folder of the now active session, or None.
+    """
+
+    kind: Literal["new", "resume", "closed"]
+    old_id: str | None
+    old_path: Path | None
+    new_id: str | None
+    new_path: Path | None
+
+
+#: A session-change listener (:meth:`InitializationService.on_session_change`).
+SessionChangeListener = Callable[[SessionChange], None]
+
+
+def _session_key(paths: "SessionPaths | None") -> Path | None:
+    if paths is None:
+        return None
+    return Path(paths.session_path).expanduser().absolute()
 
 
 @dataclass
@@ -164,6 +201,13 @@ class InitializationService:
         self._current_session: SessionPaths | None = None
         self._file_handler: logging.FileHandler | None = None
         self._error_handler: logging.FileHandler | None = None
+        # Session-change signal: listeners, the changes recorded under
+        # ``_lock`` and the lock's nesting depth (only touched while holding
+        # ``_lock``), so listeners run after the OUTERMOST release.
+        self._listeners: list[SessionChangeListener] = []
+        self._listeners_lock = threading.Lock()
+        self._pending_changes: list[SessionChange] = []
+        self._lock_depth = 0
 
     @staticmethod
     def _configured_results_root() -> Path:
@@ -186,6 +230,88 @@ class InitializationService:
             logger.debug(f"Configured results_path unavailable: {e}")
         return Path(configured or "results").expanduser().resolve()
 
+    # ------------------------------------------------------------------
+    # Session-change signal
+    # ------------------------------------------------------------------
+
+    def on_session_change(self, callback: SessionChangeListener) -> Callable[[], None]:
+        """Call ``callback(change)`` whenever the active analysis session
+        changes; returns a function that unsubscribes it (idempotent).
+
+        Fires once per real change -- a new session, a resumed (existing)
+        session folder, a switch from one session to another, or the
+        session closing (:meth:`reset`) -- never when the same session folder
+        is selected again. ``change`` is a :class:`SessionChange` with the
+        old and new session id (folder name) and absolute folder.
+
+        Thread: the callback runs synchronously on the thread that changed
+        the session (at startup the main thread, later possibly a worker),
+        after this service's lock is released; it may call back into the
+        service. It must not block on the UI thread (marshal UI work with
+        ``call_from_thread`` / ``call_later`` yourself) and should be quick.
+        A raising callback is logged and does not stop the others.
+        Listeners are kept per service instance.
+        """
+        with self._listeners_lock:
+            self._listeners.append(callback)
+
+        def unsubscribe() -> None:
+            with self._listeners_lock, contextlib.suppress(ValueError):
+                self._listeners.remove(callback)
+
+        return unsubscribe
+
+    @contextlib.contextmanager
+    def _changing(self) -> Iterator[None]:
+        """``self._lock``, plus: the session changes recorded inside go to the
+        listeners once the outermost holder released the lock.
+        """
+        pending: list[SessionChange] = []
+        try:
+            with self._lock:
+                self._lock_depth += 1
+                try:
+                    yield
+                finally:
+                    self._lock_depth -= 1
+                    if self._lock_depth == 0:
+                        pending, self._pending_changes = self._pending_changes, []
+        finally:
+            for change in pending:
+                self._fire(change)
+
+    def _record_change(
+        self, old: "SessionPaths | None", new: "SessionPaths | None"
+    ) -> None:
+        """Note the switch ``old`` -> ``new`` (caller holds ``_lock``); the
+        same folder again is no change.
+        """
+        old_path, new_path = _session_key(old), _session_key(new)
+        if old_path == new_path:
+            return
+        if new is None:
+            kind = "closed"
+        else:
+            kind = "new" if new.created else "resume"
+        self._pending_changes.append(
+            SessionChange(
+                kind=kind,
+                old_id=old_path.name if old_path else None,
+                old_path=old_path,
+                new_id=new_path.name if new_path else None,
+                new_path=new_path,
+            )
+        )
+
+    def _fire(self, change: SessionChange) -> None:
+        with self._listeners_lock:
+            listeners = list(self._listeners)
+        for callback in listeners:
+            try:
+                callback(change)
+            except Exception:
+                self._logger.warning("Session change listener failed", exc_info=True)
+
     def create_session(
         self,
         timestamp: str | None = None,
@@ -205,7 +331,7 @@ class InitializationService:
         Returns:
             SessionPaths instance with created paths.
         """
-        with self._lock:
+        with self._changing():
             # Generate timestamp
             if timestamp is None:
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -238,6 +364,7 @@ class InitializationService:
                 self.setup_file_logging(log_file)
                 self.setup_error_logging(error_log_file)
 
+            self._record_change(self._current_session, paths)
             self._current_session = paths
             self._logger.debug(f"Session initialized: {session_path}")
 
@@ -496,7 +623,7 @@ class InitializationService:
 
         Clears the current session. Does NOT delete folders.
         """
-        with self._lock:
+        with self._changing():
             root_logger = logging.getLogger()
 
             # Close file handler if open
@@ -513,6 +640,7 @@ class InitializationService:
                     root_logger.removeHandler(self._error_handler)
                 self._error_handler = None
 
+            self._record_change(self._current_session, None)
             self._current_session = None
             self._logger.debug("Initialization service reset")
 
@@ -528,7 +656,7 @@ class InitializationService:
         Returns:
             True if the folder was removed.
         """
-        with self._lock:
+        with self._changing():
             paths = self._current_session
             if paths is None or not paths.created:
                 return False
@@ -653,7 +781,7 @@ class InitializationService:
             Toolbox.frida_manager = result.frida_manager
             Toolbox.scan_directories = result.scan_directories
         """
-        with self._lock:
+        with self._changing():
             # Step 1: Create session (or reuse existing one)
             # A session may already exist if auto_select_device() was called
             # during device discovery, which triggers switch_device_folder()
