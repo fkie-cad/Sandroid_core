@@ -14,9 +14,10 @@ Tracking input, screenshots and network flows -- each line one row::
 ``screenshot``, ``request``, ``file``, ``clock`` ...) from the module-level
 ``_TYPE_STYLE`` table, which also colours them from the lens theme tokens
 (``LensPalette``): the user's own input is the brightest row on a ``band``
-tint with the ``user`` accent on its type word, screens and screenshots get
-the ``screen`` accent, requests a muted type word, file / clock / system rows
-are dimmed. Warnings and errors keep the ``warn`` / ``bad`` colours.
+tint with the ``user`` accent on its type word (typed text: the ``typed``
+accent and tint), screens get the ``screen`` accent and screenshots the
+``shot`` one, requests a muted type word, file / clock / system rows are
+dimmed. Warnings and errors keep the ``warn`` / ``bad`` colours.
 
 **Type bar** (top row): every type present with its count, in its colour --
 a legend and a filter (click a word, or ``t`` then ←/→ and Space, hides or
@@ -39,7 +40,7 @@ wait ``HOLD_S`` in a hold so a line that is written a little late (device
 time converted to host time) still lands in time order. A line that lands
 above the viewport while not following keeps the viewport still (the caption
 says "1 late lines above"). While hidden only a 1 s tick updates the badge
-(``⚠`` for dropped lines, a locked or failed timeline).
+(``dropped``, ``locked`` or ``failed``, in the warning colour).
 
 **Follow** (shared with the Files and Network lenses, ``follow.py``): new
 lines appear at the bottom; while ``live`` the view sticks to the newest row;
@@ -481,13 +482,18 @@ _TYPE_STYLE: dict[tuple[str, str] | str, dict[str, Any]] = {
     ("input", "long_press"): {"name": "long press", **_USER_INPUT},
     ("input", "swipe"): {"name": "swipe", **_USER_INPUT},
     ("input", "gesture"): {"name": "gesture", **_USER_INPUT},
-    ("input", "text"): {"name": "typed", **_USER_INPUT},
+    ("input", "text"): {
+        "name": "typed",
+        **_USER_INPUT,
+        "word": "typed",
+        "tint": "typed",
+    },
     ("input", "key"): {"name": "key", **_USER_INPUT},
     ("input", "confirm"): {"name": "confirmed", "word": "muted", "fg": "label"},
     "input": {"name": "input", **_USER_INPUT},
-    # What the screen showed: the second accent.
+    # What the screen showed: a second accent (screenshots their own).
     "screen": {"name": "screen", "word": "screen"},
-    "shot": {"name": "screenshot", "word": "screen"},
+    "shot": {"name": "screenshot", "word": "shot"},
     # Network: a muted type word.
     ("net", "flow"): {"name": "request", "word": "muted", "fg": "muted", "kind": False},
     ("net", "tls-fail"): {"name": "TLS failed", "word": "warn", "kind": False},
@@ -634,6 +640,11 @@ def _late_text(n: int) -> str:
     return f"{n:,} late line{'s' if n != 1 else ''} above"
 
 
+#: The Chain tab's one-line verify verdicts (coloured ok / bad).
+_CHAIN_OK = "h matches prev h + line"
+_CHAIN_BAD = "h does NOT match prev h + line"
+
+
 def _plain_summary(text: str) -> str:
     """``text`` without a leading symbol (rows read as plain words)."""
     return _LEAD_SYMBOL.sub("", text, count=1)
@@ -758,7 +769,7 @@ class _Fold:
 def _folder_of(summary: str) -> str:
     """``cache2`` from ``MODIFY cache2/entries/AB12 · main`` (a files line)."""
     text = summary
-    for cut in (" · ", " → "):
+    for cut in (" · ", " to ", " → "):  # " → ": files lines written before
         at = text.find(cut)
         if at >= 0:
             text = text[:at]
@@ -801,9 +812,14 @@ class TimelineView(ScrollView, can_focus=True, inherit_bindings=False):
     def render_line(self, y: int) -> Strip:
         lens = self._lens()
         width = self.scrollable_content_region.width or self.size.width
+        # The Line API draws no widget background: a segment without its own
+        # (an untinted row, the empty area) would show the terminal's default
+        # background -- dark behind a light theme's ink. The view's own
+        # colours fill in what a segment leaves unset.
+        base = self.rich_style
         if lens is None:
-            return Strip.blank(width)
-        return lens.strip_for(int(self.scroll_offset.y) + y, width)
+            return Strip.blank(width, base)
+        return lens.strip_for(int(self.scroll_offset.y) + y, width).apply_style(base)
 
     def action_cursor(self, delta: int) -> None:
         lens = self._lens()
@@ -2415,6 +2431,15 @@ class TimelineLens(Vertical):
     def _masked(self, row: Row) -> bool:
         return row.sensitive and should_mask_ui() and row.seq != self._revealed
 
+    def _words(self, row: Row, summary: str) -> str:
+        """A summary in plain words for the Inspector: a label line as the
+        rows say it (``Section 3 'x'``, also for a legacy ``▶ 3 'x'``), any
+        other without a leading symbol.
+        """
+        if row.src == "label":
+            return self._label_text(row, _plain_summary(summary)).strip()
+        return _plain_summary(summary)
+
     def _shown_summary(self, row: Row) -> str:
         """The summary as shown: a masked line's summary never quotes text."""
         if row.masked_summary and self._masked(row):
@@ -2815,11 +2840,12 @@ class TimelineLens(Vertical):
             status = svc.status()
         except Exception:
             return None
-        if getattr(status, "state", "") in ("locked", "failed"):
-            return "⚠"
+        state = getattr(status, "state", "")
+        if state in ("locked", "failed"):
+            return state
         dropped = getattr(status, "dropped", None) or {}
         if any(v for v in dropped.values() if isinstance(v, int)):
-            return "⚠"
+            return "dropped"
         return None
 
     def _badge_tick(self) -> None:
@@ -2842,7 +2868,7 @@ class TimelineLens(Vertical):
         self._update_chips()
         ms = self._main_screen()
         if ms is not None:
-            ms.set_lens_badge(LENS_ID, "⚠")
+            ms.set_lens_badge(LENS_ID, "locked")
 
     # -- scope -------------------------------------------------------------------------
 
@@ -3358,7 +3384,7 @@ class TimelineLens(Vertical):
         shown = source.get("summary") if line is not None else None
         sections: list = [
             ("Envelope", grid),
-            ("Summary", Text(str(shown or self._shown_summary(row)))),
+            ("Summary", Text(self._words(row, str(shown or self._shown_summary(row))))),
         ]
         data = source.get("data") if line is not None else row.data
         if isinstance(data, dict) and data:
@@ -3379,7 +3405,8 @@ class TimelineLens(Vertical):
                     "Follow-ups",
                     Text(
                         "\n".join(
-                            f"#{r.seq} {r.src}/{r.kind} {r.summary}" for r in follow
+                            f"#{r.seq} {r.src}/{r.kind} {self._words(r, r.summary)}"
+                            for r in follow
                         )
                     ),
                 )
@@ -3438,7 +3465,8 @@ class TimelineLens(Vertical):
         if isinstance(of, int):
             target = self._by_seq.get(of)
             text = (
-                f"#{of} {target.src}/{target.kind} · {self._shown_summary(target)}"
+                f"#{of} {target.src}/{target.kind} · "
+                f"{self._words(target, self._shown_summary(target))}"
                 if target is not None
                 else f"#{of} (not loaded)"
             )
@@ -3463,7 +3491,10 @@ class TimelineLens(Vertical):
         grid.add_row(
             "prev h", Text(str(prev.get("h")) if isinstance(prev, dict) else "—")
         )
-        grid.add_row("verify", Text(detail.get("verify") or "…"))
+        verify = detail.get("verify") or "…"
+        pal = lens_palette()
+        colour = {_CHAIN_OK: pal.ok, _CHAIN_BAD: pal.bad}.get(verify)
+        grid.add_row("verify", Text(verify, style=f"bold {colour}" if colour else ""))
         return [("", grid)]
 
 
@@ -3624,7 +3655,7 @@ def _verify(mod: Any, line: dict | None, prev: dict | None) -> str:
         ok = line_hash(prev["h"], canonical(body)) == line.get("h")
     except Exception as exc:
         return f"not checked ({exc})"
-    return "✓ h matches prev h + line" if ok else "✕ h does not match"
+    return _CHAIN_OK if ok else _CHAIN_BAD
 
 
 __all__ = [

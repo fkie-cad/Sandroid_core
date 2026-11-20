@@ -120,10 +120,10 @@ async def test_lens_badge_and_caption() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await boot(app, pilot)
         ms = app.screen
-        ms.set_lens_badge("network", "⚑2")
+        ms.set_lens_badge("network", "2 TLS")
         ms.set_lens_caption("network", "flows", "10 of 247")
         await settle(pilot)
-        assert "⚑2" in str(ms.query_one("#lens-tab-network").render())
+        assert "2 TLS" in str(ms.query_one("#lens-tab-network").render())
         host = ms.query_one("#lens-host")
         assert host.border_title == ""  # app lens: no caption set
         await pilot.press("2")
@@ -134,7 +134,7 @@ async def test_lens_badge_and_caption() -> None:
         assert host.border_subtitle == "10 of 247"
         ms.set_lens_badge("network", None)
         await settle(pilot)
-        assert "⚑" not in str(ms.query_one("#lens-tab-network").render())
+        assert "TLS" not in str(ms.query_one("#lens-tab-network").render())
 
 
 async def test_lens_activation_hook_is_called(monkeypatch) -> None:
@@ -490,16 +490,16 @@ async def test_scope_pill_and_scope_changed_message(monkeypatch) -> None:
         ms = app.screen
         header = ms.query_one("#shell-header")
         assert ms.scope is None
-        assert header.pill_text == "● LIVE"
+        assert header.pill_text == "LIVE"
         ms.set_scope("20261117-1", label="Run #3")
         await settle(pilot)
         assert ms.scope == "20261117-1"
-        assert header.pill_text == "◆ REVIEW Run #3"
+        assert header.pill_text == "REVIEW Run #3"
         assert ms.query_one("#scope-pill").has_class("-review")
         assert ("20261117-1", "Run #3") in received
         ms.set_scope(None)
         await settle(pilot)
-        assert header.pill_text == "● LIVE"
+        assert header.pill_text == "LIVE"
         assert received[-1] == (None, None)
 
 
@@ -515,7 +515,7 @@ async def test_recording_shows_in_the_pill() -> None:
         app._set_status_bar_mode(recording=False)
         ms.refresh_status()
         await settle(pilot)
-        assert ms.query_one("#shell-header").pill_text == "● LIVE"
+        assert ms.query_one("#shell-header").pill_text == "LIVE"
 
 
 # --------------------------------------------------------------------------
@@ -1754,7 +1754,7 @@ async def test_help_opens_on_the_current_lens_and_explains_shadowed_keys(
 
 
 async def test_live_pill_says_monitor_blind_while_it_is() -> None:
-    """L8 (E2E round 2): "● LIVE" stayed up during "monitor blind"."""
+    """L8 (E2E round 2): "LIVE" stayed up during "monitor blind"."""
     from datetime import datetime
 
     from sandroid.core.kprobe_tracer import AddResult, AppListing, AppProcess
@@ -1801,16 +1801,16 @@ async def test_live_pill_says_monitor_blind_while_it_is() -> None:
             watch.poll_once()  # the target is gone: blind
             panel._update_caption()
             await settle(pilot)
-            assert header.pill_text == "○ LIVE · monitor blind"
+            assert header.pill_text == "LIVE · monitor blind"
             assert ms.query_one("#scope-pill").has_class("-blind")
-            ms.refresh_status()  # the screen re-sets "● LIVE": still blind
+            ms.refresh_status()  # the screen re-sets "LIVE": still blind
             await settle(pilot)
-            assert header.pill_text == "○ LIVE · monitor blind"
+            assert header.pill_text == "LIVE · monitor blind"
         finally:
             svc._tasks.pop("monitor", None)
         panel._update_caption()
         await settle(pilot)
-        assert header.pill_text == "● LIVE"
+        assert header.pill_text == "LIVE"
         assert ms.query_one("#scope-pill").has_class("-live")
 
 

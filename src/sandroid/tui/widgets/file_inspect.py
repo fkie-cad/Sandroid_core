@@ -61,6 +61,8 @@ from textual.widgets import Label, Static
 from sandroid.core import device_clock
 from sandroid.core import file_inspect as fi
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
+from sandroid.tui.row_annotations import row_tint
+from sandroid.tui.themes import lens_palette
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -70,17 +72,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DIM = "#5b6479"
-_MUTED = "#8f9bb3"
-_TEXT = "#d6deeb"
-_ACCENT = "#7dd3fc"
-_ADD = "#4ade80"
-_ADD_SOFT = "#a7f3c5"
-_DEL = "#fb7185"
-_DEL_SOFT = "#fecdd3"
-_CHG = "#facc15"
-_SEL = "on #142640"
-_HEAD = "bold #e2e8f0 on #1d3150"
+
+def _c(token: str) -> str:
+    """A lens theme token (``"dim"``, ``"ok"`` ...) as a colour, read at
+    render time so a theme switch recolours the Inspector.
+    """
+    return str(getattr(lens_palette(), token))
+
+
+def _tint(token: str, amount: float = 0.13) -> str:
+    """The lens background blended ``amount`` towards a token's colour."""
+    return row_tint(token, amount)
+
+
+def _sel() -> str:
+    """The selected list line: the focused cursor background."""
+    return f"on {_c('cursor_focus')}"
+
+
+def _head() -> str:
+    """A section header chip (table / title name)."""
+    return f"bold {_c('text')} on {_c('band_focus')}"
+
 
 #: Rows of one table shown in the Inspector (the zoom view shows all kept).
 INSPECTOR_ROWS = 6
@@ -124,12 +137,12 @@ def value_text(
 ) -> Text:
     """One cell: the raw value plus a dim time hint for epoch-like ints."""
     if value is None:
-        return Text("NULL", style=f"italic {_DIM}")
+        return Text("NULL", style=f"italic {_c('dim')}")
     raw = fi.format_value(value)
     text = Text(raw if full else _clip(raw, 400), style=style)
     hint = fi.timestamp_hint(value, column)
     if hint:
-        text.append("\n" + hint, style=_DIM)
+        text.append("\n" + hint, style=_c("dim"))
     return text
 
 
@@ -154,7 +167,7 @@ def _marked(
         start = max(0, min(prefix - 8, len(value) - budget + 1))
     out = Text(style=style)
     if start:
-        out.append("…", style=_DIM)
+        out.append("…", style=_c("dim"))
     out.append(value[start:prefix])
     out.append(value[prefix:mid_end], style=f"bold underline {style}")
     out.append(value[mid_end:])
@@ -168,23 +181,23 @@ def change_text(old: Any, new: Any, column: str = "", budget: int | None = 40) -
     the changed part of long strings emphasised and time hints for epochs.
     """
     o, n = fi.format_value(old), fi.format_value(new)
-    old_style = _DEL if old is not None else f"italic {_DIM}"
-    new_style = _ADD if new is not None else f"italic {_DIM}"
+    old_style = _c("bad") if old is not None else f"italic {_c('dim')}"
+    new_style = _c("ok") if new is not None else f"italic {_c('dim')}"
     out = Text()
     if budget is None or len(o) + len(n) + 3 <= budget:
         out.append(o, style=old_style)
-        out.append(" → ", style=_DIM)
+        out.append(" → ", style=_c("dim"))
         out.append(n, style=f"bold {new_style}")
     else:
         prefix, suffix = _common_affixes(o, n)
         width = None if budget is None else max(8, budget - 2)
-        out.append("− ", style=_DEL)
+        out.append("− ", style=_c("bad"))
         out.append_text(_marked(o, prefix, suffix, width, old_style))
-        out.append("\n+ ", style=_ADD)
+        out.append("\n+ ", style=_c("ok"))
         out.append_text(_marked(n, prefix, suffix, width, new_style))
     h_old, h_new = fi.timestamp_hint(old, column), fi.timestamp_hint(new, column)
     if h_old or h_new:
-        out.append(f"\n{h_old or '—'} → {h_new or '—'}", style=_DIM)
+        out.append(f"\n{h_old or '—'} → {h_new or '—'}", style=_c("dim"))
     return out
 
 
@@ -192,9 +205,9 @@ def _counts_text(table: fi.TableDiff, width: int) -> Text:
     words = width >= 52
     out = Text()
     for n, sym, word, style in (
-        (table.inserted, "+", "inserted", _ADD),
-        (table.updated, "~", "updated", _CHG),
-        (table.deleted, "−", "deleted", _DEL),
+        (table.inserted, "+", "inserted", _c("ok")),
+        (table.updated, "~", "updated", _c("warn")),
+        (table.deleted, "−", "deleted", _c("bad")),
     ):
         if n:
             out.append(f"{sym}{n}" + (f" {word}" if words else ""), style=style)
@@ -227,10 +240,10 @@ class DiffRenderable:
 def render_diff_parts(diff: fi.StructuredDiff, width: int, full: bool) -> list:
     parts: list = []
     if diff.error:
-        parts.append(Text(diff.error, style=_DEL))
+        parts.append(Text(diff.error, style=_c("bad")))
         return parts
     if diff.empty:
-        parts.append(Text("No change.", style=_DIM))
+        parts.append(Text("No change.", style=_c("dim")))
         return parts
     if diff.kind == "sqlite":
         for i, table in enumerate(diff.tables):
@@ -240,7 +253,7 @@ def render_diff_parts(diff: fi.StructuredDiff, width: int, full: bool) -> list:
         if diff.source == "text" and not full:
             parts.append(Text(""))
             parts.append(
-                Text("Column names: the stored text diff has none.", style=_DIM)
+                Text("Column names: the stored text diff has none.", style=_c("dim"))
             )
     elif diff.keys:
         parts.extend(_key_parts(diff, width, full))
@@ -253,12 +266,12 @@ def render_diff_parts(diff: fi.StructuredDiff, width: int, full: bool) -> list:
 
 def _sqlite_table_parts(table: fi.TableDiff, width: int, full: bool) -> list:
     head = Text()
-    head.append(f" {table.name} ", style=_HEAD)
+    head.append(f" {table.name} ", style=_head())
     head.append("  ")
     head.append_text(_counts_text(table, width - len(table.name) - 4))
     parts: list = [head]
     if table.note:
-        parts.append(Text(table.note, style=f"italic {_MUTED}"))
+        parts.append(Text(table.note, style=f"italic {_c('muted')}"))
     rows = table.rows if full else table.rows[:INSPECTOR_ROWS]
     shown = 0
     for op in ("insert", "update", "delete"):
@@ -277,7 +290,7 @@ def _sqlite_table_parts(table: fi.TableDiff, width: int, full: bool) -> list:
             more += " — z shows " + (
                 "all" if not table.truncated else f"{len(table.rows)}"
             )
-        parts.append(Text(more, style=_DIM))
+        parts.append(Text(more, style=_c("dim")))
     return parts
 
 
@@ -295,7 +308,7 @@ def _record_parts(
     table: fi.TableDiff, rows: list[fi.RowChange], op: str, width: int, full: bool
 ) -> list:
     mark, style, soft = (
-        ("+", _ADD, _ADD_SOFT) if op == "insert" else ("−", _DEL, _DEL_SOFT)
+        ("+", _c("ok"), _c("ok")) if op == "insert" else ("−", _c("bad"), _c("bad"))
     )
     cols = list(table.columns) or sorted({c for r in rows for c in r.values})
     if len(cols) * 11 + 2 <= width:
@@ -309,7 +322,9 @@ def _record_parts(
     for start in range(0, len(rows), per):
         chunk = rows[start : start + per]
         grid = Table.grid(padding=(0, 1), expand=True)
-        grid.add_column(width=name_w, no_wrap=True, overflow="ellipsis", style=_MUTED)
+        grid.add_column(
+            width=name_w, no_wrap=True, overflow="ellipsis", style=_c("muted")
+        )
         for _ in chunk:
             grid.add_column(
                 ratio=1, no_wrap=not full, overflow="fold" if full else "ellipsis"
@@ -335,7 +350,7 @@ def _record_parts(
             parts.append(
                 Text(
                     _clip("NULL: " + ", ".join(nulls), None if full else width),
-                    style=_DIM,
+                    style=_c("dim"),
                 )
             )
     return parts
@@ -346,7 +361,7 @@ def _horizontal_rows(cols, rows, mark, style, soft, full) -> Table:
         box=None,
         padding=(0, 1),
         show_edge=False,
-        header_style=f"bold {_MUTED}",
+        header_style=f"bold {_c('muted')}",
         expand=False,
         pad_edge=False,
     )
@@ -391,13 +406,13 @@ def _updates_grid(rows: list[fi.RowChange], width: int, full: bool) -> Table:
     budget = None if full else max(16, width - key_w - col_w - 2)
     grid = Table.grid(padding=(0, 1), expand=True)
     grid.add_column(width=key_w, no_wrap=True, overflow="ellipsis")
-    grid.add_column(width=col_w, no_wrap=True, overflow="ellipsis", style=_TEXT)
+    grid.add_column(width=col_w, no_wrap=True, overflow="ellipsis", style=_c("text"))
     grid.add_column(ratio=1, no_wrap=not full, overflow="fold" if full else "ellipsis")
     for i, row in enumerate(rows):
-        label = Text("~ ", style=f"bold {_CHG}")
-        label.append(_row_label(row, i), style=_MUTED)
+        label = Text("~ ", style=f"bold {_c('warn')}")
+        label.append(_row_label(row, i), style=_c("muted"))
         if not row.changes:
-            grid.add_row(label, "", Text("changed (values unknown)", style=_DIM))
+            grid.add_row(label, "", Text("changed (values unknown)", style=_c("dim")))
         for j, (col, old, new) in enumerate(row.changes):
             grid.add_row(
                 label if j == 0 else "", col, change_text(old, new, col, budget)
@@ -412,12 +427,12 @@ def _key_parts(diff: fi.StructuredDiff, width: int, full: bool) -> list:
     title = {"json": "JSON keys", "abx": "ABX keys", "xml": "keys"}.get(
         diff.kind, "keys"
     )
-    head.append(f" {title} ", style=_HEAD)
+    head.append(f" {title} ", style=_head())
     head.append("  ")
     for n, label, style in (
-        (changed, "~", _CHG),
-        (added, "+", _ADD),
-        (removed, "−", _DEL),
+        (changed, "~", _c("warn")),
+        (added, "+", _c("ok")),
+        (removed, "−", _c("bad")),
     ):
         if n:
             word = {"~": "changed", "+": "added", "−": "removed"}[label]
@@ -434,13 +449,15 @@ def _key_parts(diff: fi.StructuredDiff, width: int, full: bool) -> list:
         width=key_w, no_wrap=not full, overflow="fold" if full else "ellipsis"
     )
     if show_type:
-        grid.add_column(width=type_w, no_wrap=True, overflow="ellipsis", style=_DIM)
+        grid.add_column(
+            width=type_w, no_wrap=True, overflow="ellipsis", style=_c("dim")
+        )
     grid.add_column(ratio=1, no_wrap=not full, overflow="fold" if full else "ellipsis")
     for change in keys:
         mark, style = {
-            "changed": ("~", _CHG),
-            "added": ("+", _ADD),
-            "removed": ("−", _DEL),
+            "changed": ("~", _c("warn")),
+            "added": ("+", _c("ok")),
+            "removed": ("−", _c("bad")),
         }[change.op]
         key = Text(
             change.key, style=f"bold {style}" if change.op == "changed" else style
@@ -448,9 +465,9 @@ def _key_parts(diff: fi.StructuredDiff, width: int, full: bool) -> list:
         if change.op == "changed":
             value: Text = change_text(change.old, change.new, change.key, budget)
         elif change.op == "added":
-            value = value_text(change.new, change.key, _ADD_SOFT, full)
+            value = value_text(change.new, change.key, _c("ok"), full)
         else:
-            value = value_text(change.old, change.key, _DEL_SOFT, full)
+            value = value_text(change.old, change.key, _c("bad"), full)
         cells = [Text(mark, style=f"bold {style}"), key]
         if show_type:
             cells.append(Text(change.type))
@@ -459,7 +476,7 @@ def _key_parts(diff: fi.StructuredDiff, width: int, full: bool) -> list:
     parts: list = [head, grid]
     if len(keys) < len(diff.keys):
         parts.append(
-            Text(f"… {len(diff.keys) - len(keys)} more — z shows all", style=_DIM)
+            Text(f"… {len(diff.keys) - len(keys)} more — z shows all", style=_c("dim"))
         )
     return parts
 
@@ -471,12 +488,12 @@ def _hunk_parts(diff: fi.StructuredDiff, width: int, full: bool) -> list:
     num_w = max(2, len(str(max(numbers, default=1))))
     added, _changed, removed = diff.counts()
     head = Text()
-    head.append(" lines ", style=_HEAD)
+    head.append(" lines ", style=_head())
     head.append("  ")
     if added:
-        head.append(f"+{added} added  ", style=_ADD)
+        head.append(f"+{added} added  ", style=_c("ok"))
     if removed:
-        head.append(f"−{removed} removed", style=_DEL)
+        head.append(f"−{removed} removed", style=_c("bad"))
     head.rstrip()
     parts: list = [head]
     budget = INSPECTOR_LINES
@@ -488,12 +505,12 @@ def _hunk_parts(diff: fi.StructuredDiff, width: int, full: bool) -> list:
         parts.append(
             Text(
                 f"@@ −{hunk.old_start},{old_n} +{hunk.new_start},{new_n} @@",
-                style=f"{_ACCENT}",
+                style=f"{_c('title')}",
             )
         )
         grid = Table.grid(padding=(0, 1), expand=True)
-        grid.add_column(width=num_w, justify="right", style=_DIM, no_wrap=True)
-        grid.add_column(width=num_w, justify="right", style=_DIM, no_wrap=True)
+        grid.add_column(width=num_w, justify="right", style=_c("dim"), no_wrap=True)
+        grid.add_column(width=num_w, justify="right", style=_c("dim"), no_wrap=True)
         grid.add_column(
             ratio=1, no_wrap=not full, overflow="fold" if full else "ellipsis"
         )
@@ -501,9 +518,9 @@ def _hunk_parts(diff: fi.StructuredDiff, width: int, full: bool) -> list:
         budget -= len(lines)
         for ln in lines:
             style = {
-                "+": f"{_ADD_SOFT} on #10261b",
-                "-": f"{_DEL_SOFT} on #2b1419",
-            }.get(ln.tag, "#9aa5b8")
+                "+": f"{_c('ok')} on {_tint('ok')}",
+                "-": f"{_c('bad')} on {_tint('bad')}",
+            }.get(ln.tag, _c("muted"))
             mark = {"+": "+", "-": "−"}.get(ln.tag, " ")
             grid.add_row(
                 str(ln.old_no or ""),
@@ -513,7 +530,7 @@ def _hunk_parts(diff: fi.StructuredDiff, width: int, full: bool) -> list:
         parts.append(grid)
     total = sum(len(h.lines) for h in diff.hunks)
     if not full and total > INSPECTOR_LINES:
-        parts.append(Text(f"… {total} diff lines — z shows all", style=_DIM))
+        parts.append(Text(f"… {total} diff lines — z shows all", style=_c("dim")))
     return parts
 
 
@@ -524,7 +541,9 @@ def _hex_line(
     for i in range(per):
         if i < len(data):
             differs = i >= len(other) or data[i] != other[i]
-            out.append(f"{data[i]:02x}", style=f"bold {style}" if differs else _MUTED)
+            out.append(
+                f"{data[i]:02x}", style=f"bold {style}" if differs else _c("muted")
+            )
         else:
             out.append("  ")
         out.append(" ")
@@ -533,13 +552,13 @@ def _hex_line(
         for i, b in enumerate(data[:per]):
             ch = chr(b) if 32 <= b < 127 else "·"
             differs = i >= len(other) or b != other[i]
-            out.append(ch, style=f"bold {style}" if differs else _DIM)
+            out.append(ch, style=f"bold {style}" if differs else _c("dim"))
     return out
 
 
 def _binary_parts(change: fi.BinaryChange, width: int) -> list:
     grid = Table.grid(padding=(0, 2))
-    grid.add_column(style=_DIM, no_wrap=True)
+    grid.add_column(style=_c("dim"), no_wrap=True)
     grid.add_column()
     grid.add_row(
         "size",
@@ -548,23 +567,23 @@ def _binary_parts(change: fi.BinaryChange, width: int) -> list:
     grid.add_row(
         "sha256",
         Text.assemble(
-            (change.old_sha256[:12] + "…", _DEL),
-            (" → ", _DIM),
-            (change.new_sha256[:12] + "…", _ADD),
+            (change.old_sha256[:12] + "…", _c("bad")),
+            (" → ", _c("dim")),
+            (change.new_sha256[:12] + "…", _c("ok")),
         ),
     )
     if change.offset is not None:
         grid.add_row(
             "first diff",
-            Text(f"at byte {change.offset} (0x{change.offset:x})", style=_CHG),
+            Text(f"at byte {change.offset} (0x{change.offset:x})", style=_c("warn")),
         )
-    parts: list = [Text(" binary ", style=_HEAD), grid]
+    parts: list = [Text(" binary ", style=_head()), grid]
     if change.offset is None:
         return parts
     per = 16 if width >= 58 else 8
     ascii_ = width >= 76
     hexes = Table.grid(padding=(0, 1))
-    hexes.add_column(style=_DIM, no_wrap=True)
+    hexes.add_column(style=_c("dim"), no_wrap=True)
     hexes.add_column(no_wrap=True)
     hexes.add_column(no_wrap=True)
     end = max(len(change.old_bytes), len(change.new_bytes))
@@ -574,13 +593,15 @@ def _binary_parts(change: fi.BinaryChange, width: int) -> list:
         addr = f"{change.window_start + off:06x}"
         if old:
             hexes.add_row(
-                addr, Text("−", style=_DEL), _hex_line(old, new, off, per, _DEL, ascii_)
+                addr,
+                Text("−", style=_c("bad")),
+                _hex_line(old, new, off, per, _c("bad"), ascii_),
             )
         if new:
             hexes.add_row(
                 "" if old else addr,
-                Text("+", style=_ADD),
-                _hex_line(new, old, off, per, _ADD, ascii_),
+                Text("+", style=_c("ok")),
+                _hex_line(new, old, off, per, _c("ok"), ascii_),
             )
     parts.append(hexes)
     return parts
@@ -609,7 +630,6 @@ class PreviewRenderable:
 def table_list(preview: fi.Preview, width: int = 60) -> Table:
     """One line per SQLite table / view; the shown one highlighted."""
     grid = Table.grid(padding=(0, 1), expand=True)
-    grid.add_column(width=1, no_wrap=True)
     grid.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
     grid.add_column(no_wrap=True, justify="right")
     for t in preview.tables:
@@ -623,12 +643,14 @@ def table_list(preview: fi.Preview, width: int = 60) -> Table:
         )
         if t.kind == "view":
             rows = "view · " + rows
-        name_style = f"bold {_ACCENT}" if selected else _TEXT
+        name_style = f"bold {_c('title')}" if selected else _c("text")
         grid.add_row(
-            Text("▸" if selected else " ", style=f"bold {_ACCENT}"),
             Text(t.name, style=name_style),
-            Text(f"{rows} · {len(t.columns)} cols", style=_MUTED if selected else _DIM),
-            style=_SEL if selected else "",
+            Text(
+                f"{rows} · {len(t.columns)} cols",
+                style=_c("muted") if selected else _c("dim"),
+            ),
+            style=_sel() if selected else "",
         )
     return grid
 
@@ -656,8 +678,8 @@ def _rows_table(
         box=None,
         padding=(0, 1),
         show_edge=False,
-        header_style=f"bold {_MUTED}",
-        row_styles=["", "on #0b1220"],
+        header_style=f"bold {_c('muted')}",
+        row_styles=["", f"on {_c('stripe')}"],
         pad_edge=False,
         expand=False,
     )
@@ -673,12 +695,12 @@ def _rows_table(
         for i in shown:
             value = row[i] if i < len(row) else None
             if value is None:
-                cells.append(Text("NULL", style=f"italic {_DIM}"))
+                cells.append(Text("NULL", style=f"italic {_c('dim')}"))
                 continue
             text = Text(fi.format_value(value))
             hint = fi.timestamp_hint(value, columns[i])
             if hint and full:
-                text.append(f" ({hint})", style=_DIM)
+                text.append(f" ({hint})", style=_c("dim"))
             cells.append(text)
         table.add_row(*cells)
     return table, len(columns) - len(shown)
@@ -686,13 +708,13 @@ def _rows_table(
 
 def _json_tree(data: Any, label: str = "$", budget: list[int] | None = None) -> Tree:
     budget = budget if budget is not None else [400]
-    tree = Tree(Text(label, style=_ACCENT), guide_style=_DIM)
+    tree = Tree(Text(label, style=_c("title")), guide_style=_c("dim"))
 
     def add(node: Tree, value: Any) -> None:
         items = value.items() if isinstance(value, dict) else enumerate(value)
         for key, child in items:
             if budget[0] <= 0:
-                node.add(Text("…", style=_DIM))
+                node.add(Text("…", style=_c("dim")))
                 return
             budget[0] -= 1
             name = f"{key}" if isinstance(value, dict) else f"[{key}]"
@@ -702,12 +724,17 @@ def _json_tree(data: Any, label: str = "$", budget: list[int] | None = None) -> 
                     if isinstance(child, dict)
                     else f"[{len(child)}]"
                 )
-                add(node.add(Text.assemble((name, _TEXT), (f" {kind}", _DIM))), child)
+                add(
+                    node.add(
+                        Text.assemble((name, _c("text")), (f" {kind}", _c("dim")))
+                    ),
+                    child,
+                )
             else:
-                leaf = Text.assemble((name, _TEXT), (": ", _DIM))
+                leaf = Text.assemble((name, _c("text")), (": ", _c("dim")))
                 leaf.append_text(
                     value_text(
-                        child, str(key), _ADD_SOFT if isinstance(child, str) else ""
+                        child, str(key), _c("ok") if isinstance(child, str) else ""
                     )
                 )
                 node.add(leaf)
@@ -723,10 +750,10 @@ def _hex_dump(head: bytes, width: int) -> Table:
     per = 16 if width >= 58 else 8
     ascii_ = width >= 76 or per == 8
     grid = Table.grid(padding=(0, 1))
-    grid.add_column(style=_DIM, no_wrap=True)
-    grid.add_column(no_wrap=True, style=_MUTED)
+    grid.add_column(style=_c("dim"), no_wrap=True)
+    grid.add_column(no_wrap=True, style=_c("muted"))
     if ascii_:
-        grid.add_column(no_wrap=True, style=_DIM)
+        grid.add_column(no_wrap=True, style=_c("dim"))
     for off in range(0, len(head), per):
         chunk = head[off : off + per]
         cells = [f"{off:06x}", " ".join(f"{b:02x}" for b in chunk)]
@@ -740,11 +767,11 @@ def render_preview_body(preview: fi.Preview, width: int, full: bool) -> list:
     """The content below the facts line (the SQLite table list is separate)."""
     parts: list = []
     if preview.error:
-        parts.append(Text(preview.error, style=_DEL))
+        parts.append(Text(preview.error, style=_c("bad")))
     kind = preview.kind
     if kind == "sqlite":
         if preview.table is None:
-            parts.append(Text("No tables.", style=_DIM))
+            parts.append(Text("No tables.", style=_c("dim")))
             return parts
         rows = preview.rows if full else preview.rows[:60]
         table, hidden = _rows_table(preview.columns, rows, width, full)
@@ -756,9 +783,9 @@ def render_preview_body(preview: fi.Preview, width: int, full: bool) -> list:
         if len(rows) < (total or 0):
             notes.append(f"{len(rows)} of {total:,} rows")
         if notes and not full:
-            parts.append(Text(" · ".join(notes) + " — z shows them", style=_DIM))
+            parts.append(Text(" · ".join(notes) + " — z shows them", style=_c("dim")))
         elif notes:
-            parts.append(Text(" · ".join(notes), style=_DIM))
+            parts.append(Text(" · ".join(notes), style=_c("dim")))
         return parts
     if kind in ("xml", "abx"):
         keys = preview.keys if full else preview.keys[: INSPECTOR_KEYS * 2]
@@ -770,11 +797,11 @@ def render_preview_body(preview: fi.Preview, width: int, full: bool) -> list:
             width=key_w,
             no_wrap=not full,
             overflow="fold" if full else "ellipsis",
-            style=_TEXT,
+            style=_c("text"),
         )
         grid.add_column(
             width=min(8, max((len(t) for _k, t, _v in keys), default=0)),
-            style=_DIM,
+            style=_c("dim"),
             no_wrap=True,
         )
         grid.add_column(
@@ -784,11 +811,13 @@ def render_preview_body(preview: fi.Preview, width: int, full: bool) -> list:
             grid.add_row(
                 key,
                 typ,
-                value_text(value, key, _ADD_SOFT if typ == "string" else "", full),
+                value_text(value, key, _c("ok") if typ == "string" else "", full),
             )
         parts.append(grid)
         if len(keys) < len(preview.keys):
-            parts.append(Text(f"… {len(preview.keys)} keys — z shows all", style=_DIM))
+            parts.append(
+                Text(f"… {len(preview.keys)} keys — z shows all", style=_c("dim"))
+            )
         return parts
     if kind == "json":
         parts.append(_json_tree(preview.data, "$", [10_000 if full else 150]))
@@ -797,22 +826,24 @@ def render_preview_body(preview: fi.Preview, width: int, full: bool) -> list:
         lines = preview.lines if full else preview.lines[:120]
         grid = Table.grid(padding=(0, 1), expand=True)
         num_w = len(str(max(1, len(lines))))
-        grid.add_column(width=num_w, justify="right", style=_DIM, no_wrap=True)
+        grid.add_column(width=num_w, justify="right", style=_c("dim"), no_wrap=True)
         grid.add_column(
             ratio=1, no_wrap=not full, overflow="fold" if full else "ellipsis"
         )
         for i, line in enumerate(lines, 1):
-            grid.add_row(str(i), Text(line.expandtabs(4), style=_TEXT))
+            grid.add_row(str(i), Text(line.expandtabs(4), style=_c("text")))
         parts.append(grid)
         if preview.total_lines > len(lines):
             more = f"{len(lines)} of {preview.total_lines} lines"
             parts.append(
-                Text(more + ("" if full else " — z shows the first 400"), style=_DIM)
+                Text(
+                    more + ("" if full else " — z shows the first 400"), style=_c("dim")
+                )
             )
         return parts
     if kind == "image":
         grid = Table.grid(padding=(0, 2))
-        grid.add_column(style=_DIM)
+        grid.add_column(style=_c("dim"))
         grid.add_column()
         info = preview.image
         grid.add_row("format", info.get("format", preview.type_guess))
@@ -821,10 +852,10 @@ def render_preview_body(preview: fi.Preview, width: int, full: bool) -> list:
         if "bit_depth" in info:
             grid.add_row("bit depth", str(info["bit_depth"]))
         parts.append(grid)
-        parts.append(Text("First bytes", style=f"bold {_MUTED}"))
+        parts.append(Text("First bytes", style=f"bold {_c('muted')}"))
         parts.append(_hex_dump(preview.head[:64], width))
         return parts
-    parts.append(Text(f"First {len(preview.head)} bytes", style=f"bold {_MUTED}"))
+    parts.append(Text(f"First {len(preview.head)} bytes", style=f"bold {_c('muted')}"))
     parts.append(_hex_dump(preview.head, width))
     return parts
 
@@ -1184,7 +1215,6 @@ class VersionList:
     ) -> RenderResult:
         width = options.max_width
         grid = Table.grid(padding=(0, 1), expand=True)
-        grid.add_column(width=1, no_wrap=True)
         grid.add_column(no_wrap=True)  # v3
         grid.add_column(no_wrap=True)  # time
         if width >= 50:
@@ -1196,47 +1226,48 @@ class VersionList:
             if kind == "checks":
                 group = self.checks[i]
                 cells = [
-                    Text(" "),
-                    Text("·", style=_DIM),
-                    Text(_when(group.last), style=_DIM),
+                    Text("·", style=_c("dim")),
+                    Text(_when(group.last), style=_c("dim")),
                 ]
                 if width >= 50:
                     cells.append(Text(""))
                 if width >= 58:
-                    cells.append(Text("+".join(group.triggers), style=_DIM))
+                    cells.append(Text("+".join(group.triggers), style=_c("dim")))
                 text = "checked, no change" + (
                     f" ({group.count}×)" if group.count > 1 else ""
                 )
-                cells.append(Text(text, style=_DIM))
+                cells.append(Text(text, style=_c("dim")))
                 grid.add_row(*cells)
                 continue
             v = self.versions[i]
             sel = i == self.selected
             cells: list = [
-                Text("▸" if sel else " ", style=f"bold {_ACCENT}"),
                 Text(
-                    f"v{v.number}", style=f"bold {_ACCENT}" if sel else f"bold {_TEXT}"
+                    f"v{v.number}",
+                    style=f"bold {_c('title')}" if sel else f"bold {_c('text')}",
                 ),
-                Text(_when(v.when), style=_TEXT if sel else _MUTED),
+                Text(_when(v.when), style=_c("text") if sel else _c("muted")),
             ]
             if width >= 50:
-                cells.append(Text(fi.format_size(v.size), style=_DIM))
+                cells.append(Text(fi.format_size(v.size), style=_c("dim")))
             if width >= 58:
-                cells.append(Text(v.trigger or "", style=_DIM))
+                cells.append(Text(v.trigger or "", style=_c("dim")))
             summary = Text()
             if (v.record or {}).get("sha256_match") is False:
-                summary.append("✗ sha256 ", style=f"bold {_DEL}")
+                summary.append("sha256 mismatch ", style=f"bold {_c('bad')}")
             if v.name == self.base:
-                summary.append("◆ base ", style=f"bold {_CHG}")
+                summary.append("base ", style=f"bold {_c('warn')}")
             text = version_summary(v, self.versions[i - 1] if i else None)
             summary.append(
                 text,
-                style=_TEXT
+                style=_c("text")
                 if sel
-                else (_DIM if text in ("no change", "first pull") else _MUTED),
+                else (
+                    _c("dim") if text in ("no change", "first pull") else _c("muted")
+                ),
             )
             cells.append(summary)
-            grid.add_row(*cells, style=_SEL if sel else "")
+            grid.add_row(*cells, style=_sel() if sel else "")
         yield grid
 
 
@@ -1348,13 +1379,13 @@ class RecordLines:
             self.second.append("device sha256 unknown")
         elif mismatched:
             names = ", ".join(m["role"] for m in mismatched)
-            self.second.append(f"device sha256 ≠ local ✗ ({names})")
+            self.second.append(f"device sha256 differs from local ({names})")
         elif len(known) < n:
-            self.second.append(f"device sha256 = local ✓ ({len(known)} of {n})")
+            self.second.append(f"device sha256 matches local ({len(known)} of {n})")
         else:
             both = "both" if n == 2 else f"all {n}"
             self.second.append(
-                "device sha256 = local ✓" + (f" ({both})" if n > 1 else "")
+                "device sha256 matches local" + (f" ({both})" if n > 1 else "")
             )
         stamped = [m for m in members if isinstance(m["mtime"], (int, float))]
         if stamped:
@@ -1384,11 +1415,11 @@ class RecordLines:
         self, console: Console, options: ConsoleOptions
     ) -> RenderResult:
         width = options.max_width
-        yield Text(self._fit(self.first, width), style=_DIM, no_wrap=True)
+        yield Text(self._fit(self.first, width), style=_c("dim"), no_wrap=True)
         if self.second:
             yield Text(
                 self._fit(self.second, width),
-                style=_DEL if self.mismatch else _DIM,
+                style=_c("bad") if self.mismatch else _c("dim"),
                 no_wrap=True,
             )
 
@@ -1407,12 +1438,12 @@ def versions_sections(
     versions = load_versions(path)
     sections: list[Section] = []
     if not versions:
-        msg = Text("Not pulled yet — ", style=_DIM)
+        msg = Text("Not pulled yet — ", style=_c("dim"))
         msg.append("u", style="bold")
         msg.append(
             " pulls a first version; with auto-pull on, every write the file "
             "monitor sees is kept as one.",
-            style=_DIM,
+            style=_c("dim"),
         )
         if status is not None:
             sections.append(("", status))
@@ -1422,7 +1453,7 @@ def versions_sections(
     index = _selected_index(versions, state)
     checks = load_checks(path, versions)
     sections.append(("", VersionList(versions, index, state.base, checks)))
-    sections.append(("", Text(HINT_VERSIONS, style=_DIM)))
+    sections.append(("", Text(HINT_VERSIONS, style=_c("dim"))))
     if status is not None:
         sections.append(("", status))
     heading, body = version_diff_body(path, versions, index, state, notify, full=False)
@@ -1464,7 +1495,7 @@ def version_diff_body(
             Text(
                 "Nothing to compare with — the next pull is diffed against it. "
                 "The Content tab shows what is inside.",
-                style=_DIM,
+                style=_c("dim"),
             ),
         )
         return heading, body
@@ -1481,7 +1512,7 @@ def version_diff_body(
                 "What your action changed (Before to After) is in Review "
                 "(p) and in the Sessions lens. * picks another version to "
                 "compare with.",
-                style=_DIM,
+                style=_c("dim"),
             )
         )
         return heading, Group(*parts)
@@ -1494,7 +1525,7 @@ def version_diff_body(
     if older.file.exists() and newer.file.exists():
         diff, pending = structured_for(older.file, newer.file, notify)
         if pending:
-            parts.append(Text("Computing the diff…", style=f"italic {_MUTED}"))
+            parts.append(Text("Computing the diff…", style=f"italic {_c('muted')}"))
             return heading, Group(*parts)
         if diff is not None and not diff.error:
             parts.append(DiffRenderable(diff, full))
@@ -1509,7 +1540,7 @@ def version_diff_body(
 
         parts.append(render_diff(stored))
     else:
-        parts.append(Text("No diff available for this pair.", style=_DIM))
+        parts.append(Text("No diff available for this pair.", style=_c("dim")))
     return heading, Group(*parts)
 
 
@@ -1520,11 +1551,11 @@ def version_diff_body(
 
 def _facts_line(file: Path, preview: fi.Preview, label: str) -> Text:
     out = Text()
-    out.append(file.name, style=f"bold {_TEXT}")
-    out.append(f" · {label}" if label else "", style=_MUTED)
-    out.append(f" · {fi.format_size(_size_of(file))}", style=_DIM)
+    out.append(file.name, style=f"bold {_c('text')}")
+    out.append(f" · {label}" if label else "", style=_c("muted"))
+    out.append(f" · {fi.format_size(_size_of(file))}", style=_c("dim"))
     if preview.kind != "sqlite":
-        out.append(f" · {preview.type_guess}", style=_DIM)
+        out.append(f" · {preview.type_guess}", style=_c("dim"))
     return out
 
 
@@ -1537,15 +1568,20 @@ def content_sections_for_file(
 ) -> list[Section]:
     if file is None or not file.exists():
         return [
-            ("", Text(empty_message or "No local copy of this file yet.", style=_DIM))
+            (
+                "",
+                Text(
+                    empty_message or "No local copy of this file yet.", style=_c("dim")
+                ),
+            )
         ]
     preview, pending = preview_for(file, state.table, notify)
     if pending or preview is None:
-        return [("", Text("Reading the file…", style=f"italic {_MUTED}"))]
+        return [("", Text("Reading the file…", style=f"italic {_c('muted')}"))]
     sections: list[Section] = []
     if preview.kind == "sqlite" and preview.tables:
         sections.append(("", table_list(preview)))
-        sections.append(("", Text(HINT_TABLES, style=_DIM)))
+        sections.append(("", Text(HINT_TABLES, style=_c("dim"))))
         sections.append(("", _facts_line(file, preview, label)))
         shown = len(preview.rows)
         total = next((t.rows for t in preview.tables if t.name == preview.table), None)
@@ -1570,10 +1606,11 @@ def content_sections(path: str, notify=None) -> list[Section]:
     """The Content tab of a watched file: the selected version's copy."""
     versions = load_versions(path)
     if not versions:
-        msg = Text("Pull the file (", style=_DIM)
+        msg = Text("Pull the file (", style=_c("dim"))
         msg.append("u", style="bold")
         msg.append(
-            ") to look inside a local copy. Nothing here reads the device.", style=_DIM
+            ") to look inside a local copy. Nothing here reads the device.",
+            style=_c("dim"),
         )
         return [("", msg)]
     state = state_for(path)
@@ -1586,9 +1623,9 @@ def content_sections(path: str, notify=None) -> list[Section]:
         (h, MatchHighlight(b, needles) if isinstance(b, PreviewRenderable) else b)
         for h, b in sections
     ]
-    note = Text("Highlighted: profile values found in this version (", style=_DIM)
+    note = Text("Highlighted: profile values found in this version (", style=_c("dim"))
     note.append_text(_privacy_tag_text(path, v.name))
-    note.append(")", style=_DIM)
+    note.append(")", style=_c("dim"))
     out.append(("", note))
     return out
 
@@ -1724,7 +1761,7 @@ def _privacy_tag_text(path: str, version: str) -> Text:
     text = Text()
     for i, label in enumerate(labels):
         if i:
-            text.append(", ", style=_DIM)
+            text.append(", ", style=_c("dim"))
         text.append(str(label), style=party_color("stored"))
     return text
 
@@ -1789,7 +1826,7 @@ def review_diff_body(
     if before is not None and after is not None:
         diff, pending = structured_for(before, after, notify)
         if pending:
-            return Text("Computing the diff…", style=f"italic {_MUTED}")
+            return Text("Computing the diff…", style=f"italic {_c('muted')}")
         if diff is not None and not diff.error:
             return DiffRenderable(diff, full)
     parsed = fi.parse_text_diff(lines) if lines else None
@@ -1946,8 +1983,8 @@ class InspectZoomModal(ForensicModal[None]):
     }
     InspectZoomModal #izoom-scroll {
         height: 1fr;
-        background: #050811;
-        border: solid #1f2d4d;
+        background: $lens-bg;
+        border: solid $lens-rule;
         scrollbar-size: 1 1;
     }
     InspectZoomModal #izoom-body {

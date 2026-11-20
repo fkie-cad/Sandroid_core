@@ -1115,7 +1115,7 @@ def test_a_diverged_replay_is_never_reported_as_success(controller, monkeypatch)
     summary = run_history._summary_from_record(record)
     assert summary["result"] == "diverged"
     problem = DiffsView._problem(SimpleNamespace(_facts={}), summary)
-    assert problem == ("diverged", diffs_view._BAD)
+    assert problem == ("diverged", diffs_view._c("bad"))
     fake = SimpleNamespace(_short_path=DiffsView._short_path)
     sections = dict(DiffsView._rewind_sections(fake, record))
     assert why in sections["The replay diverged"].plain
@@ -1205,7 +1205,7 @@ def test_unchecked_steps_are_never_reported_as_success(controller, monkeypatch):
     assert record.rewind["result_words"] == "done, 2 steps unchecked"
     summary = run_history._summary_from_record(record)
     problem = DiffsView._problem(SimpleNamespace(_facts={}), summary)
-    assert problem == ("done, 2 steps unchecked", diffs_view._WARN)
+    assert problem == ("done, 2 steps unchecked", diffs_view._c("warn"))
     fake = SimpleNamespace(_short_path=DiffsView._short_path)
     sections = dict(DiffsView._rewind_sections(fake, record))
     assert "done, 2 steps unchecked" in sections["Replay steps unchecked"].plain
@@ -1530,7 +1530,7 @@ def test_volatile_verdicts_reach_run_json_recording_json_and_the_ai(
     fake = SimpleNamespace(_short_path=DiffsView._short_path)
     body = dict(DiffsView._rewind_sections(fake, record))["What your action changed"]
     assert any(
-        span.style == diffs_view._WARN
+        span.style == diffs_view._c("warn")
         and rewind.VOLATILE in body.plain[span.start : span.end]
         for span in body.spans
     )

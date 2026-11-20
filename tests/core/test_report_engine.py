@@ -1566,7 +1566,7 @@ class TestCoverage:
             "File modifications were coalesced within 1000 ms windows for the whole "
             "timeline.",
             "The policy changed at 12:00:25 (settings, by user): "
-            "tracking.shot_before_tap True → False.",
+            "tracking.shot_before_tap True to False.",
             "142 bulk lines were dropped and are missing from the timeline "
             "(files: 140, monitor: 2; reasons queue-full: 130, no-device: 12).",
             "The timeline was resumed at 12:01:20 after an unclean shutdown, 42 s later.",
@@ -1820,7 +1820,7 @@ class TestRenderers:
             "### Label 1 'Onboarding' · 12:00:05–12:01:20 · 75 s",
             "#### Label 2 'Login' · 12:00:15–12:00:30 · 15 s",
             f"- **12:00:10.000** · tap · 'Accept all' (Button) at (540, 1650) · "
-            f"#{session.seqs['tap_accept']} ✓",
+            f"#{session.seqs['tap_accept']} · confirmed",
             "  - Screen: com.x/.MainActivity 'Welcome'",
             "  - Files (app): 2 event(s) (create 1, modify 1): "
             r"/data/data/com.x/databases/app.db ×3 (#",
@@ -1828,7 +1828,7 @@ class TestRenderers:
             f"  - ![before tap · #{session.seqs['shot_accept']}]"
             f"(../../../session/dev/tracking/shots/{session.seqs['shot_accept']}"
             "_before_tap.png)",
-            f"- **12:00:15.500** · activity · Screen → com.x/.LoginActivity 'Sign in' · "
+            f"- **12:00:15.500** · activity · Screen: com.x/.LoginActivity 'Sign in' · "
             f"#{session.seqs['screen2']}",
             "- **12:01:30.000** · key · 'BACK' · #",
             "### Unlabelled",

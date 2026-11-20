@@ -289,7 +289,7 @@ def _split_dir_filename(path: str) -> tuple[str, str]:
 
     Used by :func:`build_monitor_item` for MonitorView's own
     grouping/breadcrumb pass (Part B) -- the view groups consecutive items
-    by exact ``directory`` match and renders a ``▸ <directory>/`` breadcrumb
+    by exact ``directory`` match and renders a ``<directory>/`` breadcrumb
     for runs of 2+. ``directory`` has no trailing slash (the view adds its
     own when rendering the breadcrumb); a bare filename with no ``/`` at
     all yields an empty directory string (never groups into a breadcrumb
@@ -1689,9 +1689,9 @@ class MonitorWatch:
                 f"{self.package} {what} {started:%H:%M:%S} · {new} {proc.pid} · {gap}"
             )
             if restarted and self._sandroid_restarting():
-                text += " · restarted by ⇧R"
+                text += " · restarted by Shift+R"
             elif restarted and proc.via != "spawn":
-                text += " · Frida hooks are gone (⇧R re-applies)"
+                text += " · Frida hooks are gone (Shift+R re-applies)"
             when = started
             last_exit = self._last_exit_at
             if restarted and last_exit is not None and when <= last_exit:

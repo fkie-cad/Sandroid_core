@@ -69,8 +69,14 @@ PARENT_DIR = THEMES_DIR.parent
 #   screen             Timeline lens: the type word of screen changes and
 #                      screenshots (a second accent, apart from ``user``);
 #                      same contrast floors (without the tint)
-#   (``user`` / ``screen`` default to ``accent`` / ``title`` when a palette
-#   built elsewhere leaves them out.)
+#   typed              Timeline lens: the type word of typed text (``typed``),
+#                      its own colour apart from ``user`` (tap, key ...); its
+#                      rows are tinted with it. Same floors as ``user``
+#   shot               Timeline lens: the type word of screenshots, apart
+#                      from ``screen``; same floors as ``screen``
+#   (``user`` / ``screen`` default to ``accent`` / ``title``, ``typed`` /
+#   ``shot`` to ``user`` / ``screen`` when a palette built elsewhere leaves
+#   them out. The four are told apart in every theme: CIE76 delta E >= 20.)
 #   highlight_1..4     Network / Files lens: the colour slots of the AI
 #                      highlight sets (the set's words, its row tint at 18 %,
 #                      the highlight bar). Not set per palette: derived from
@@ -97,7 +103,9 @@ PARENT_DIR = THEMES_DIR.parent
 #: AI highlight colour slots (``LensPalette.highlight_1..4``): violet, teal,
 #: pink, lime -- apart from warn (amber), bad (red) and accent (sky).
 HIGHLIGHT_DARK = ("#c084fc", "#2dd4bf", "#f472b6", "#a3e635")
-HIGHLIGHT_LIGHT = ("#7c3aed", "#0f766e", "#be185d", "#4d7c0f")
+#: The light shades are >= 4.5:1 on every light surface and on their own
+#: 18 % row tint (``tests/tui/test_theme_contrast.py``).
+HIGHLIGHT_LIGHT = ("#7129EB", "#0E6B64", "#B21757", "#426B0D")
 
 
 def _is_light(hex_colour: str) -> bool:
@@ -151,6 +159,9 @@ class LensPalette:
     #: built without them (another branch, an old caller) still works.
     user: str = ""
     screen: str = ""
+    #: Default "" = ``user`` / ``screen`` (``__post_init__``).
+    typed: str = ""
+    shot: str = ""
     #: AI highlight colour slots; "" = derived from ``bg`` (``__post_init__``).
     highlight_1: str = ""
     highlight_2: str = ""
@@ -163,6 +174,10 @@ class LensPalette:
             object.__setattr__(self, "user", self.accent)
         if not self.screen:
             object.__setattr__(self, "screen", self.title)
+        if not self.typed:
+            object.__setattr__(self, "typed", self.user)
+        if not self.shot:
+            object.__setattr__(self, "shot", self.screen)
         slots = HIGHLIGHT_LIGHT if _is_light(self.bg) else HIGHLIGHT_DARK
         for n, colour in enumerate(slots, start=1):
             if not getattr(self, f"highlight_{n}"):
@@ -211,6 +226,8 @@ DEFAULT_LENS = LensPalette(
     stripe="#0a1121",
     user="#38bdf8",
     screen="#c4b5fd",
+    typed="#5eead4",
+    shot="#f9a8d4",
 )
 
 
@@ -404,6 +421,8 @@ DARK_THEME = Theme(
         stripe="#111111",
         user="#03DAC6",
         screen="#BB86FC",
+        typed="#82B1FF",
+        shot="#F8BBD0",
     ),
 )
 
@@ -411,32 +430,32 @@ LIGHT_THEME = Theme(
     name="light",
     display_name="Light",
     is_dark=False,
-    primary="#1976D2",  # Blue
+    primary="#1669BC",  # Blue (Material 700, darkened to 4.6:1)
     secondary="#0D47A1",  # Dark blue
-    accent="#00BFA5",  # Teal accent
+    accent="#007A69",  # Teal accent (darkened to 4.6:1)
     background="#FAFAFA",  # Off-white
     surface="#FFFFFF",  # White
-    error="#D32F2F",  # Red
-    warning="#F57C00",  # Orange
-    success="#388E3C",  # Green
+    error="#CF2C2C",  # Red (darkened to 4.6:1)
+    warning="#A95500",  # Orange (darkened to 4.6:1)
+    success="#307A34",  # Green (darkened to 4.6:1)
     text="#212121",  # Dark grey
     text_muted="#757575",  # Medium grey
     key_color="#0D47A1",  # Dark blue keys
     border_color="#E0E0E0",  # Light border
-    forensic_color="#388E3C",  # Green
-    malware_color="#D32F2F",  # Red
-    security_color="#F57C00",  # Orange
-    logo_color="#1976D2",  # Blue logo
+    forensic_color="#307A34",  # Green
+    malware_color="#CF2C2C",  # Red
+    security_color="#A95500",  # Orange
+    logo_color="#1669BC",  # Blue logo
     logo_text_color="#0D47A1",  # Dark blue "Sandroid" text
-    tool_color="#1976D2",  # == primary, == this theme's .tool-tab.-active
+    tool_color="#1669BC",  # == primary, == this theme's .tool-tab.-active
     # color in themes/light.tcss -- consistent with the chrome
     user_highlight_background="#E3F2FD",  # this theme's .tool-tab:hover bg --
     # a light blue tint that actually stands out against the near-white
     # #chat-log background (surface/background are both too close to white)
-    assistant_reply_color="#388E3C",  # == success -- dark enough green for
+    assistant_reply_color="#307A34",  # == success -- dark enough green for
     # readable contrast against this theme's light background
-    waiting_color="#FFA000",  # Material Amber 700 -- distinct from this
-    # theme's warning (#F57C00, more orange), still readable on white
+    waiting_color="#985F00",  # Material Amber 700 darkened to 4.6:1 --
+    # distinct from this theme's warning (#A95500, more orange)
     muted_status_color="#757575",  # == text_muted, == this theme's
     # .tool-tab inactive color -- consistent with the chrome
     lens=LensPalette(
@@ -447,13 +466,13 @@ LIGHT_THEME = Theme(
         dim="#6B6B6B",
         muted="#5F6368",
         title="#0D47A1",
-        accent="#1976D2",
+        accent="#1669BC",
         accent_text="#FFFFFF",
-        ok="#2E7D32",
-        warn="#B45309",
-        bad="#C62828",
+        ok="#296E2C",
+        warn="#9C4808",
+        bad="#B92525",
         rule="#D0D7DE",
-        rule_focus="#1976D2",
+        rule_focus="#1669BC",
         header="#6B6B6B",
         cursor="#EEF3F8",
         cursor_focus="#BBDEFB",
@@ -469,16 +488,18 @@ LIGHT_THEME = Theme(
         stripe="#F6F8FB",
         user="#1565C0",
         screen="#7B1FA2",
+        typed="#00695C",
+        shot="#AD1457",
     ),
     status_colors={
-        "running": "#2E7D32",
-        "stopped": "#C62828",
-        "error": "#C62828",
-        "warning_status": "#B45309",
-        "spawn_mode": "#00838F",
-        "attach_mode": "#2E7D32",
-        "paused": "#B45309",
-        "notice": "#B45309",
+        "running": "#296E2C",
+        "stopped": "#B92525",
+        "error": "#B92525",
+        "warning_status": "#9C4808",
+        "spawn_mode": "#007782",
+        "attach_mode": "#296E2C",
+        "paused": "#9C4808",
+        "notice": "#9C4808",
     },
 )
 
@@ -489,8 +510,8 @@ LIGHT_THEME = Theme(
 # petrol grey, not a lighter ink, so the key column reads as labels.
 PAPER_INK = "#1F1C17"
 PAPER_PETROL = "#1C5D7C"
-PAPER_OK = "#2D6A2F"
-PAPER_WARN = "#8F5600"
+PAPER_OK = "#2D692F"
+PAPER_WARN = "#875100"
 PAPER_BAD = "#A3302A"
 
 PAPER_THEME = Theme(
@@ -550,6 +571,8 @@ PAPER_THEME = Theme(
         stripe="#F7F3EA",
         user="#1C5D7C",
         screen="#6A4A86",
+        typed="#2A6F6B",
+        shot="#9B3D63",
     ),
     status_colors={
         "running": PAPER_OK,
@@ -585,9 +608,9 @@ PAPER_THEME = Theme(
 # are deep indigo bars (daylight.tcss) that hold their weight on a projector.
 DAYLIGHT_INK = "#0A1222"
 DAYLIGHT_INDIGO = "#4338E0"
-DAYLIGHT_OK = "#0B7A3B"
-DAYLIGHT_WARN = "#A05300"
-DAYLIGHT_BAD = "#C21A30"
+DAYLIGHT_OK = "#0A6F36"
+DAYLIGHT_WARN = "#954D00"
+DAYLIGHT_BAD = "#BE192F"
 
 DAYLIGHT_THEME = Theme(
     name="daylight",
@@ -645,7 +668,9 @@ DAYLIGHT_THEME = Theme(
         band_focus="#E0E4FF",
         stripe="#F7F9FC",
         user="#4338E0",
-        screen="#0F766E",
+        screen="#0E6C65",
+        typed="#0369A1",
+        shot="#A21CAF",
     ),
     status_colors={
         "running": DAYLIGHT_OK,
@@ -737,6 +762,8 @@ HIGH_CONTRAST_THEME = Theme(
         stripe="#0E0E0E",
         user="#00FFFF",
         screen="#FF66FF",  # >= 4.5:1 on the #333333 cursor too
+        typed="#80B0FF",
+        shot="#FFA94D",
     ),
 )
 
@@ -801,6 +828,8 @@ CYBERPUNK_THEME = Theme(
         stripe="#130630",
         user="#00FFFF",
         screen="#FF00FF",
+        typed="#B388FF",
+        shot="#FF9E3D",
     ),
 )
 
@@ -865,6 +894,8 @@ NORD_THEME = Theme(
         stripe="#323845",
         user="#88C0D0",
         screen="#D8B4D0",  # lighter aurora purple: >= 4.5:1 on the panel
+        typed="#A3B8EF",
+        shot="#F0A88A",
     ),
 )
 
@@ -929,6 +960,8 @@ DRACULA_THEME = Theme(
         stripe="#2C2E3B",
         user="#8BE9FD",
         screen="#FF79C6",
+        typed="#BD93F9",
+        shot="#F1FA8C",
     ),
 )
 
@@ -973,11 +1006,11 @@ SOLARIZED_THEME = Theme(
         dim="#6C8189",
         muted="#839496",
         title="#2AA198",
-        accent="#268BD2",
+        accent="#3295DA",
         accent_text="#FDF6E3",
         ok="#859900",
         warn="#B58900",
-        bad="#DC322F",
+        bad="#E56765",
         rule="#244F5A",
         rule_focus="#268BD2",
         header="#6C8189",
@@ -995,6 +1028,8 @@ SOLARIZED_THEME = Theme(
         stripe="#03303B",
         user="#55A5E4",  # lighter than Solarized blue: >= 4.5:1 on its tint
         screen="#EE7AB0",  # lighter magenta: >= 4.5:1 on bg / panel / cursor
+        typed="#C29BF0",
+        shot="#CDA37A",
     ),
 )
 
@@ -1070,6 +1105,8 @@ GRAPHITE_LENS = LensPalette(
     stripe="#1E1F22",
     user="#F0A15C",
     screen="#C8A2E8",
+    typed="#7FB8E0",
+    shot="#7CCFB8",
     cursor_keeps_colors=True,
 )
 
@@ -1134,6 +1171,8 @@ DEEP_SEA_LENS = LensPalette(
     stripe="#17242F",
     user="#5CD0DA",
     screen="#B9A4F0",
+    typed="#F0B48C",
+    shot="#F49AC2",
     cursor_keeps_colors=True,
 )
 
@@ -1198,6 +1237,8 @@ EVERGREEN_LENS = LensPalette(
     stripe="#1D231E",
     user="#CDAEE6",
     screen="#8CC4E0",
+    typed="#E6B88A",
+    shot="#7FD4C1",
     cursor_keeps_colors=True,
 )
 
@@ -1352,6 +1393,10 @@ $logo-text-color: {theme.logo_text_color};
 
 # ========== Textual themes + lens palette lookup ==========
 
+#: textual-light's orange ``$accent`` (#ffa62b, 1.7:1 on white) darkened to
+#: >= 4.5:1 on every light surface, same hue.
+LIGHT_TEXTUAL_ACCENT = "#9D5B00"
+
 #: Prefix of the Textual theme registered per Sandroid theme.
 TEXTUAL_THEME_PREFIX = "sandroid-"
 
@@ -1366,9 +1411,12 @@ def build_textual_theme(theme: Theme) -> TextualTheme:
 
     It is a copy of ``textual-dark`` (or ``textual-light`` for a light theme)
     that ADDS the ``$lens-*`` variables, so Textual's own widgets (inputs,
-    footers, scrollbars, ...) look exactly as they did when the app switched
-    between those two built-in themes -- unless the theme sets
-    ``textual_variables``, which override those base values.
+    footers, scrollbars, ...) look as they did when the app switched between
+    those two built-in themes -- unless the theme sets ``textual_variables``,
+    which override those base values. A light theme also replaces
+    textual-light's ``accent`` / ``warning`` / ``success`` / ``error``
+    (about 2:1 on white) with readable shades, app-wide: every
+    ``$accent`` / ``[$warning]`` text in modals, the chat and the App lens.
 
     Args:
         theme: The Sandroid theme.
@@ -1377,6 +1425,18 @@ def build_textual_theme(theme: Theme) -> TextualTheme:
         A Textual theme named :func:`textual_theme_name` ``(theme.name)``.
     """
     base = BUILTIN_THEMES["textual-dark" if theme.is_dark else "textual-light"]
+    if not theme.is_dark:
+        # textual-light's amber accent / warning and light green success are
+        # ~2:1 on white; ``[$warning]`` / ``color: $success`` text in the
+        # modals must stay readable, so a light theme uses its own shades
+        # (the accent keeps textual-light's orange hue, darkened to 4.6:1).
+        base = replace(
+            base,
+            accent=LIGHT_TEXTUAL_ACCENT,
+            warning=theme.lens.warn,
+            success=theme.lens.ok,
+            error=theme.lens.bad,
+        )
     return replace(
         base,
         name=textual_theme_name(theme.name),

@@ -1020,13 +1020,13 @@ async def test_renamed_and_deleted_rows_say_so(monkeypatch) -> None:
         await pilot.pause()
         _keys(panel)
         rows = {row.key: row for row in panel._rows}
-        assert panel._path_cell(rows[old]).plain.endswith("b.txt → c.txt")
+        assert panel._path_cell(rows[old]).plain.endswith("b.txt renamed to c.txt")
         panel._path_width = 10  # narrow (beside the Inspector at 80 columns)
-        assert panel._path_cell(rows[old]).plain.endswith(" →")
+        assert panel._path_cell(rows[old]).plain.endswith(" renamed")
         assert "→" not in panel._path_cell(rows[AAID]).plain
         panel._path_width = 60
         summary = _plain(_tab(panel._inspector_for(rows[old]), "Summary"))
-        assert "renamed → files/c.txt" in summary
+        assert "renamed to files/c.txt" in summary
         events = _plain(_tab(panel._inspector_for(rows[old]), "Events"))
         assert "RENAMED" in events
         assert "to files/c.txt" in events
@@ -1116,7 +1116,7 @@ async def test_history_tab_keeps_every_pull_and_restart_restores_the_diff(
         await until(pilot, lambda: rows[PREFS].state is RowState.CHANGED)
         panel.refresh_rows()
         history = _plain(_tab(panel.inspect_selected(), "Versions"))
-        assert "▸ v2" in history
+        assert "v2" in history
         assert "v1" in history
         assert "one → two" in history  # the k preference, old → new
         assert "first pull" in history
@@ -1133,7 +1133,7 @@ async def test_history_tab_keeps_every_pull_and_restart_restores_the_diff(
         assert info.state is RowState.BASELINE_ONLY
         panel.refresh_rows()
         history = _plain(_tab(panel.inspect_selected(), "Versions"))
-        assert "▸ v2" in history
+        assert "v2" in history
         assert "v1" in history
         assert "two" in history
 
@@ -1226,7 +1226,7 @@ async def test_marks_show_only_activity_since_and_step_through_segments() -> Non
         await pilot.press("less_than_sign")
         await pilot.pause()
         assert _keys(panel) == [DB, PREFS, new]
-        assert _title(panel) == ("Note 1 'tap login' → Note 2 · 10:40:10–10:40:30")
+        assert _title(panel) == ("Note 1 'tap login' to Note 2 · 10:40:10–10:40:30")
         await pilot.press("less_than_sign")
         await pilot.pause()
         assert set(_keys(panel)) == {DB, PREFS, AAID}
@@ -1241,17 +1241,17 @@ async def test_marks_show_only_activity_since_and_step_through_segments() -> Non
         events = _plain(_tab(panel._inspector_for(_row(panel, AAID)), "Events"))
         lines = [ln.strip() for ln in events.splitlines() if ln.strip()]
         assert lines[0].startswith("10:40:35")
-        assert lines[1] == "── Note 2 · 10:40:30 ──"
-        assert lines[2] == "── Note 1 'tap login' · 10:40:10 ──"
+        assert lines[1] == "Note 2 · 10:40:30"
+        assert lines[2] == "Note 1 'tap login' · 10:40:10"
         assert lines[3].startswith("10:40:00")
         # A file first touched after a mark ends with that mark.
         panel._segment = None
         panel.refresh_rows()
         events = _plain(_tab(panel._inspector_for(_row(panel, new)), "Events"))
         lines = [ln.strip() for ln in events.splitlines() if ln.strip()]
-        assert lines[0] == "── Note 2 · 10:40:30 ──"
+        assert lines[0] == "Note 2 · 10:40:30"
         assert lines[1].startswith("10:40:25")
-        assert lines[2] == "── Note 1 'tap login' · 10:40:10 ──"
+        assert lines[2] == "Note 1 'tap login' · 10:40:10"
         assert len(lines) == 3
 
 
@@ -1388,7 +1388,7 @@ async def test_cache_folders_collapse_into_one_expandable_row() -> None:
         assert _keys(panel) == [group, f"{ROOT}/code_cache/", PREFS]  # newest last
         row = _row(panel, group)
         assert panel._path_cell(row).plain == "cache/ · 3 files"
-        assert str(panel._mark_cell(row)) == "▸"
+        assert str(panel._mark_cell(row)) == ""  # no glyph: colour + words
         assert row.stats.count == 3
         assert panel.caption()[1].startswith("1 path + 2 groups")
 
@@ -1398,7 +1398,8 @@ async def test_cache_folders_collapse_into_one_expandable_row() -> None:
         await pilot.pause()
         assert _keys(panel)[0] == group
         assert set(_keys(panel)[1:4]) == set(cache_files)
-        assert str(panel._mark_cell(_row(panel, group))) == "▾"
+        assert str(panel._mark_cell(_row(panel, group))) == ""
+        assert panel._path_cell(_row(panel, group)).plain == "cache/ · 3 files · open"
         assert panel._path_cell(_row(panel, cache_files[0])).plain.startswith("  ")
         panel.table.move_cursor(row=2)
         await pilot.press("left")  # folds from a member row
@@ -2102,8 +2103,9 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
         )
         # Since the mark: ONE fold row for the 21 idle watches (incl. the
         # pattern and prefs[3], active before the mark only) on top, then
-        # the active ★ row, then the segment's activity (newest last).
-        assert _keys(panel) == [IDLE_FOLD, prefs[5], AAID]
+        # the segment's activity, the changed ★ row among it (newest last;
+        # same time: by path).
+        assert _keys(panel) == [IDLE_FOLD, AAID, prefs[5]]
         fold = _row(panel, IDLE_FOLD)
         assert len(fold.members) == 21
         assert pattern in {m.key for m in fold.members}
@@ -2112,7 +2114,7 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
             assert cell == "★ 21 watched · idle since Note 1 'tap login'"
         else:
             assert cell.startswith("★ 21 ")
-        assert str(panel._mark_cell(fold)) == "▸"
+        assert str(panel._mark_cell(fold)) == ""
         assert "1 group" not in panel.caption()[1]  # the fold is no cache group
 
         panel.table.focus()
@@ -2121,9 +2123,9 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
         await pilot.pause()
         keys = _keys(panel)
         assert keys[0] == IDLE_FOLD
-        assert keys[-2:] == [prefs[5], AAID]
+        assert keys[-2:] == [AAID, prefs[5]]
         assert len(keys) == 2 + 21 + 1
-        assert str(panel._mark_cell(_row(panel, IDLE_FOLD))) == "▾"
+        assert str(panel._mark_cell(_row(panel, IDLE_FOLD))) == ""
         assert panel._path_cell(_row(panel, prefs[0])).plain.startswith("  ")
         panel.table.move_cursor(row=4)
         await pilot.press("w")  # a member row: a real ★ row (unwatch works)
@@ -2132,7 +2134,7 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
         panel.table.move_cursor(row=4)
         await pilot.press("left")  # folds from a member row
         await pilot.pause()
-        assert _keys(panel) == [IDLE_FOLD, prefs[5], AAID]
+        assert _keys(panel) == [IDLE_FOLD, AAID, prefs[5]]
         assert panel._cursor_key() == IDLE_FOLD
         await pilot.press("u")  # on the fold row: a hint, no pull
         await pilot.pause()
@@ -2142,7 +2144,7 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
         await pilot.press("A")
         await pilot.pause()
         keys = _keys(panel)
-        assert keys[:3] == [IDLE_FOLD, prefs[3], prefs[5]]
+        assert keys[:4] == [IDLE_FOLD, prefs[3], AAID, prefs[5]]
         assert panel._path_cell(_row(panel, IDLE_FOLD)).plain.startswith(
             "★ 19 watched · idle"
         )
@@ -2318,7 +2320,7 @@ async def test_restart_separator_in_events_and_writes_counted_per_process() -> N
         panel.refresh_rows()
         inspected = panel.inspect_selected()
         events = _plain(_tab(inspected, "Events")).splitlines()
-        sep = f"── {text} ──"
+        sep = text
         assert sep in events
         # Newest first: the tab_17 write, the restart line, the main write.
         idx = events.index(sep)
@@ -2407,9 +2409,9 @@ async def test_a_restart_before_a_files_first_event_shows_in_its_events() -> Non
         lines = panel._events_text(_row(panel, DB)).plain.splitlines()
         assert lines[0].startswith("10:40:09")
         assert lines[1:] == [
-            f"── {text} ──",
-            f"── {PKG} exited · PID 4665 ──",
-            "── Note 1 'search' · 10:40:00 ──",
+            text,
+            f"{PKG} exited · PID 4665",
+            "Note 1 'search' · 10:40:00",
         ]  # the follow note (info) and the restart before the mark are not
 
 
@@ -2633,10 +2635,10 @@ async def test_moving_in_name_order_leaves_follow_for_the_recent_order() -> None
 
 
 @pytest.mark.asyncio
-async def test_pinned_changes_are_not_new_below_and_live_resumes_after_review(
+async def test_watched_changes_are_new_below_and_live_resumes_after_review(
     tmp_path,
 ) -> None:
-    get_forensic_service().add_spotlight_file(PREFS)  # ★, pinned on top
+    get_forensic_service().add_spotlight_file(PREFS)  # ★: moves when it changes
     app = _Harness()
     async with app.run_test(size=(140, 30)) as pilot:
         panel = await _three_changes(app)
@@ -2647,7 +2649,7 @@ async def test_pinned_changes_are_not_new_below_and_live_resumes_after_review(
             _items(_fse("FSE_CONTENT_MODIFIED", PREFS)), now=T0 + timedelta(seconds=9)
         )
         _keys(panel)
-        assert panel.caption()[0].startswith("scrolled back · End = live")
+        assert panel.caption()[0].startswith("scrolled back · 1 new below")
         assert not panel.following
         from sandroid.tui.widgets.lens_shell import ScopeChanged
 
@@ -2656,3 +2658,130 @@ async def test_pinned_changes_are_not_new_below_and_live_resumes_after_review(
         panel.post_message(ScopeChanged(None))
         await settle(pilot)
         assert panel.following
+
+
+def _columns_fill(panel) -> bool:
+    """The laid-out columns span the table (no empty strip on the right)."""
+    table = panel.table
+    used = sum(c.get_render_width(table) for c in table.columns.values())
+    return 0 <= table.size.width - used <= 4
+
+
+async def _files_with_a_row(pilot, app):
+    ms, panel = await _boot_files(pilot, app)
+    panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+    panel.refresh_rows()
+    panel.table.focus()
+    await until(pilot, lambda: panel.table.row_count == 1 and _columns_fill(panel))
+    return ms, panel
+
+
+async def test_closing_the_inspector_gives_the_table_its_full_width_back() -> None:
+    """Beside the Inspector the path column is narrow; after the Inspector
+    closes (and after a terminal resize) the columns fill the table again --
+    no truncated paths next to ~85 empty columns.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(200, 45)) as pilot:
+        ms, panel = await _files_with_a_row(pilot, app)
+        wide = panel._path_width
+        await pilot.press("enter")
+        await until(pilot, lambda: ms.inspector_is_open)
+        await until(pilot, lambda: panel._path_width < wide and _columns_fill(panel))
+        await pilot.press("escape")
+        await until(pilot, lambda: not ms.inspector_is_open)
+        await until(pilot, lambda: panel._path_width == wide and _columns_fill(panel))
+        await pilot.resize_terminal(150, 45)
+        await until(pilot, lambda: panel._path_width < wide and _columns_fill(panel))
+        await pilot.resize_terminal(200, 45)
+        await until(pilot, lambda: panel._path_width == wide and _columns_fill(panel))
+
+
+async def test_the_table_relays_out_even_when_the_panel_refresh_came_too_early(
+    monkeypatch,
+) -> None:
+    """The panel's resize refresh can run before the table has its new width
+    (it then lays the columns out for the old one and clears ``_dirty``):
+    the table's own resize re-lays them out.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(200, 45)) as pilot:
+        ms, panel = await _files_with_a_row(pilot, app)
+        wide = panel._path_width
+        await pilot.press("enter")
+        await until(pilot, lambda: ms.inspector_is_open and panel._path_width < wide)
+        monkeypatch.setattr(FilesPanel, "on_resize", lambda self, _event: None)
+        await pilot.press("escape")
+        await until(pilot, lambda: not ms.inspector_is_open)
+        await until(pilot, lambda: panel._path_width == wide and _columns_fill(panel))
+        cell = panel.table.get_cell_at((0, 1))
+        assert cell.plain == "files/aaid.txt"  # full width: not truncated
+
+
+async def test_a_changed_watched_file_moves_down_keeps_its_star_and_a_tint() -> None:
+    """A ★ file that changes moves to the bottom like any entry (newest
+    last, followed), keeps its ★ and a light tint of the ★ colour; an idle
+    ★ file stays on top, untinted.
+    """
+    from rich.style import Style
+
+    from sandroid.tui.row_annotations import row_tint
+    from sandroid.tui.widgets.files_panel import WATCHED_TINT
+
+    get_forensic_service().add_spotlight_file(PREFS)
+    get_forensic_service().add_spotlight_file(DB)
+
+    def tint(key: str):
+        table = panel.table
+        return table._get_row_style(table.get_row_index(key), Style()).bgcolor
+
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        await until(pilot, lambda: set(_keys(panel)) == {PREFS, DB})
+        assert tint(PREFS) is None  # idle ★ rows: on top, no tint
+        panel.ingest(_items(_fse("FSE_CONTENT_MODIFIED", PREFS)), now=T0)
+        panel.ingest(
+            _items(_fse("FSE_CREATE_FILE", AAID)), now=T0 + timedelta(seconds=1)
+        )
+        await until(pilot, lambda: _keys(panel) == [DB, PREFS, AAID])
+        assert str(panel._mark_cell(_row(panel, PREFS))) == "★"
+        expected = Style(bgcolor=row_tint(*WATCHED_TINT)).bgcolor
+        assert tint(PREFS) == expected
+        assert tint(DB) is None
+        assert tint(AAID) is None
+        # It changes again: the newest row, and the live cursor follows it.
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", PREFS)), now=T0 + timedelta(seconds=5)
+        )
+        await until(pilot, lambda: _keys(panel) == [DB, AAID, PREFS])
+        await until(pilot, lambda: panel._cursor_key() == PREFS)
+        assert panel.following
+        assert tint(PREFS) == expected
+
+
+async def test_an_idle_watched_file_with_only_hidden_opens_is_not_new_below() -> None:
+    """A ★ file that only saw OPEN events (hidden) stays idle on top: it
+    must not count as "new below" while scrolled back.
+    """
+    get_forensic_service().add_spotlight_file(PREFS)
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        for k, path in enumerate((DB, AAID)):
+            panel.ingest(
+                _items(_fse("FSE_CONTENT_MODIFIED", path)),
+                now=T0 + timedelta(seconds=k),
+            )
+        _keys(panel)
+        panel.table.focus()
+        await pilot.press("up")
+        await settle(pilot)
+        panel.ingest(_items(_fse("FSE_OPEN", PREFS)), now=T0 + timedelta(seconds=9))
+        assert _keys(panel)[0] == PREFS  # idle: still on top
+        _keys(panel)
+        assert panel.caption()[0].startswith("scrolled back · End = live")
