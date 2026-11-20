@@ -946,18 +946,28 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             try:
                 if kind == "remove":
                     result = manager.uninject_ca()
-                else:
-                    if kind == "restart":
-                        from sandroid.services.proxy_restore import (
-                            restart_framework_for_ca,
-                        )
+                elif kind == "restart":
+                    from sandroid.services.proxy_restore import (
+                        restart_framework_for_ca,
+                    )
 
-                        result = restart_framework_for_ca(ca_path)
-                    else:
-                        result = manager.inject_ca_into_zygote(ca_path)
+                    held: dict = {}
+
+                    def _while_held(_res) -> None:
+                        # Still under the fallback's WORLD lease.
+                        if ca_path is not None:
+                            held["ct"] = manager.bypass_chrome_ct(ca_path)
+                        held["status"] = manager.check_zygote_injection_status(ca_path)
+
+                    result = restart_framework_for_ca(ca_path, while_held=_while_held)
+                    ct = held.get("ct")
+                    status = held.get("status")
+                else:
+                    result = manager.inject_ca_into_zygote(ca_path)
                     if result.success and ca_path is not None:
                         ct = manager.bypass_chrome_ct(ca_path)
-                status = manager.check_zygote_injection_status(ca_path)
+                if status is None:
+                    status = manager.check_zygote_injection_status(ca_path)
             except Exception as exc:
                 result = exc
             try:

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -464,7 +464,11 @@ def _recover_after_framework_restart(
     return note
 
 
-def restart_framework_for_ca(cert_path: Path | None, serial: str | None = None) -> Any:
+def restart_framework_for_ca(
+    cert_path: Path | None,
+    serial: str | None = None,
+    while_held: Callable[[Any], None] | None = None,
+) -> Any:
     """CA fallback: install it WITH a Zygote restart (user-confirmed, TUI only).
 
     Only when the no-restart path cannot apply. Takes the app-start lifecycle
@@ -475,6 +479,14 @@ def restart_framework_for_ca(cert_path: Path | None, serial: str | None = None) 
     handles, re-checks the CA in the new Zygote's namespace and re-applies
     the device proxy and the App Proxy lanes. Never call it from an AI tool
     or a post-load path. Blocking: run it on a worker thread.
+
+    Args:
+        cert_path: The CA certificate to install.
+        serial: Target device; the active device when omitted.
+        while_held: Called with the successful result while the lifecycle
+            lock and the WORLD lease are still held, for the caller's own
+            follow-up device work (Chrome CT bypass, status read) so no AI
+            task slips in between. Its exceptions are logged, not raised.
 
     Returns:
         :class:`~sandroid.core.proxy_manager.InjectionResult`
@@ -538,7 +550,7 @@ def restart_framework_for_ca(cert_path: Path | None, serial: str | None = None) 
             remember_ca_intent(serial, spec)
             restore_proxy_infra(serial, "framework-restart")
             _framework_world_change(serial)
-            return InjectionResult(
+            result = InjectionResult(
                 success=True,
                 message=f"CA installed with a Zygote restart ({note})",
                 strategy=first.strategy,
@@ -546,6 +558,12 @@ def restart_framework_for_ca(cert_path: Path | None, serial: str | None = None) 
                 restarted=True,
                 verdict=status.verdict,
             )
+            if while_held is not None:
+                try:
+                    while_held(result)
+                except Exception as exc:
+                    logger.warning("CA fallback follow-up failed: %s", exc)
+            return result
     except RuntimeError as exc:
         return InjectionResult(success=False, message=f"{exc}; Zygote not restarted")
     finally:

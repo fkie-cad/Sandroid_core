@@ -1506,11 +1506,19 @@ class MitmproxyPanel(Widget):
                         restart_framework_for_ca,
                     )
 
-                    result = restart_framework_for_ca(cert_path)
+                    held: dict = {}
+
+                    def _while_held(_res) -> None:
+                        # Still under the fallback's WORLD lease.
+                        if cert_path is not None:
+                            held["ct"] = manager.bypass_chrome_ct(cert_path)
+
+                    result = restart_framework_for_ca(cert_path, while_held=_while_held)
+                    ct = held.get("ct")
                 else:
                     result = install_or_adopt_ca(manager, cert_path, self._ca_where)
-                if result.success and cert_path is not None:
-                    ct = manager.bypass_chrome_ct(cert_path)
+                    if result.success and cert_path is not None:
+                        ct = manager.bypass_chrome_ct(cert_path)
             except Exception as exc:  # marshal the failure to the UI thread
                 result = exc
             try:

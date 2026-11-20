@@ -470,6 +470,48 @@ def test_fallback_runs_the_full_restart_contract(monkeypatch, tmp_path):
     assert pm.ca_desired_for(SERIAL) is not None
 
 
+def test_fallback_follow_up_runs_while_the_world_lease_is_held(monkeypatch, tmp_path):
+    """The caller's CT bypass / status read run before the lease is released,
+    so no AI task gets the device between the restart and that work.
+    """
+    from sandroid.ai import arbiter
+
+    calls: list = []
+    _fallback(monkeypatch, calls)
+    arbiter.reset_for_tests()
+    world = frozenset({arbiter.ResourceId.WORLD})
+    seen: list = []
+
+    def follow_up(res) -> None:
+        seen.append(res.restarted)
+        seen.append(
+            isinstance(arbiter.get_arbiter().claim("ai-task", world), arbiter.Conflict)
+        )
+
+    try:
+        result = pr.restart_framework_for_ca(
+            tmp_path / "ca.pem", SERIAL, while_held=follow_up
+        )
+        after = arbiter.get_arbiter().claim("ai-task", world)
+    finally:
+        arbiter.reset_for_tests()
+    assert result.success
+    assert seen == [True, True]  # restarted, and the AI claim conflicted
+    assert not isinstance(after, arbiter.Conflict)  # released afterwards
+
+
+def test_fallback_follow_up_failure_does_not_fail_the_restart(monkeypatch, tmp_path):
+    calls: list = []
+    _fallback(monkeypatch, calls)
+
+    def boom(res) -> None:
+        raise RuntimeError("ct failed")
+
+    result = pr.restart_framework_for_ca(tmp_path / "ca.pem", SERIAL, while_held=boom)
+    assert result.success
+    assert result.restarted
+
+
 def test_fallback_fails_when_no_zygote_was_killed(monkeypatch, tmp_path):
     calls: list = []
     _fallback(monkeypatch, calls)
