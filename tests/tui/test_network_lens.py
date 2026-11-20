@@ -1412,6 +1412,43 @@ async def test_no_identity_column_without_a_profile(flow_dir, monkeypatch):
         assert _tinted(panel.table) == set()
 
 
+async def test_identity_column_appears_when_markers_arrive_later(flow_dir, monkeypatch):
+    """Markers found after the first draw (the identity service reads them
+    on a thread) add the Identity column without ``!``; ``!`` only filters.
+    """
+    import privacy_fakes
+
+    fake = privacy_fakes.install(monkeypatch, [], active=False)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        total = panel.table.row_count
+        assert "ident" not in [str(c.value) for c in panel.table.columns]
+        fake.is_active = True  # the scan got its markers
+        await until(
+            pilot, lambda: "ident" in [str(c.value) for c in panel.table.columns]
+        )
+        assert not panel._profile_only
+        assert panel.table.row_count == total  # no row filtered
+
+
+async def test_identity_column_whenever_identity_mode_is_on(flow_dir, monkeypatch):
+    import privacy_fakes
+
+    from sandroid.config import get_config
+
+    privacy_fakes.install(monkeypatch, [], active=False)  # no markers yet
+    monkeypatch.setattr(get_config().identity, "mode", "profile")
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        widths = {str(c.key.value): c.width for c in panel.table.columns.values()}
+        assert "ident" in widths
+        assert not panel._profile_only
+        assert widths["ident"] == 18
+        assert widths["req"] >= 24  # Request keeps a readable width
+
+
 async def test_each_row_looks_up_its_profile_values_once(flow_dir, monkeypatch):
     """The "!" filter, "/" and the Identity cell share one lookup per row and
     service revision; a new hit (new revision) looks up again.
