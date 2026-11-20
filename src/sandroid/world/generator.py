@@ -1273,6 +1273,7 @@ class _Generator:
         n_service = round(total * 0.35) if self.services else 0
         items: list[dict[str, Any]] = []
         threads: dict[str, int] = {}
+        conv = 0  # one conversation: messages that render together
         reachable = [p for p in self.people if p.mobile]
         if reachable:
             pcum = Cumulative([p.closeness for p in reachable])
@@ -1303,6 +1304,7 @@ class _Generator:
                 if not rendered:
                     continue
                 tid = threads.setdefault(p.mobile, len(threads) + 1)
+                conv += 1
                 for speaker, body, t in rendered:
                     if len(items) >= total - n_service:
                         break
@@ -1318,6 +1320,7 @@ class _Generator:
                             "emoji": has_emoji(body.text),
                             "t_rel_s": t,
                             "thread": tid,
+                            "conv": conv,
                         }
                     )
         if self.services:
@@ -1342,6 +1345,7 @@ class _Generator:
                 if not body or not body.text:
                     continue
                 tid = threads.setdefault(svc["address"], len(threads) + 1)
+                conv += 1
                 items.append(
                     {
                         "address": svc["address"],
@@ -1355,6 +1359,7 @@ class _Generator:
                         "emoji": has_emoji(body.text),
                         "t_rel_s": t_rel,
                         "thread": tid,
+                        "conv": conv,
                     }
                 )
         if len(items) < total:
@@ -1503,8 +1508,8 @@ class _Generator:
             t_rel = self.pick_time(
                 s, bias=1.3, hours=_WORK_HOURS if kind == "work" else _EVENT_HOURS
             )
-            if future:
-                t_rel = -int(s.uniform(0.5, 60) * DAY) // 900 * 900
+            if future:  # k days after the anchor's day, same time of day
+                t_rel = -(s.randint(1, 60) * DAY + (-t_rel) % DAY)
             t_rel -= t_rel % 900
             title = self.render(entry_text(e, "title") or "", s, t_rel=t_rel, lang=lang)
             if not title or not title.text:
@@ -1576,7 +1581,7 @@ class _Generator:
         # Clusters: trips (far places, several days), weekend outings, everyday.
         n_trip = round(total * 0.3)
         n_out = round(total * 0.25)
-        plan: list[tuple[str, int, dict[str, Any] | None]] = []
+        plan: list[tuple[str, int, dict[str, Any] | None, str | None]] = []
         trips = max(1, min(6, round(total / 25))) if n_trip and self.far_places else 0
         for k in range(trips):
             place = s.choice(
@@ -1591,7 +1596,9 @@ class _Generator:
                 t = start - s.below(days * DAY)
                 t -= t % DAY
                 t += DAY - (s.randint(9, 20) * 3600 + s.below(3600))
-                plan.append(("trip", max(60, min(t, self.history_s)), place))
+                plan.append(
+                    ("trip", max(60, min(t, self.history_s)), place, f"trip.{k}")
+                )
         outs = max(1, n_out // 4) if n_out and self.home_places else 0
         for k in range(outs):
             place = s.choice(
@@ -1601,11 +1608,13 @@ class _Generator:
             t0 = self.pick_time(s, weekend=True, hours=_DAYTIME_HOURS)
             share = n_out // outs + (1 if k < n_out % outs else 0)
             for _ in range(share):
-                plan.append(("outing", max(60, t0 - s.below(3 * 3600)), place))
+                plan.append(
+                    ("outing", max(60, t0 - s.below(3 * 3600)), place, f"outing.{k}")
+                )
         while len(plan) < total:
-            plan.append(("everyday", self.pick_time(s, bias=1.5), None))
+            plan.append(("everyday", self.pick_time(s, bias=1.5), None, None))
         out = []
-        for cluster, t_rel, place in plan[:total]:
+        for cluster, t_rel, place, group in plan[:total]:
             if cluster == "everyday":
                 photo = next_photo()
             else:
@@ -1664,6 +1673,7 @@ class _Generator:
                     "lon": lon,
                     "place": label,
                     "cluster": cluster,
+                    "group": group,
                     "make": self.device["make"],
                     "model": self.device["model"],
                 }

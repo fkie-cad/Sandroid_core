@@ -49,7 +49,7 @@ TEXT_FIELDS = (
 ANCHOR = dt.datetime(2026, 11, 20, 15, 30, tzinfo=dt.UTC)
 #: world_fp of the reference world below. A change here means the generator's
 #: output changed: bump GENERATOR_VERSION and update the value.
-GOLDEN_FP = "c0ee48fdf1f2f9bb834dccd50cb47603b425c414bc639008dd66bf1ff09f0fc8"
+GOLDEN_FP = "63706d28818cec5a9346ed827c131be0cb6413a6fccebb5ede7ec114b1c3c6bc"
 
 
 def _world(**spec: object) -> WorldManifest:
@@ -591,6 +591,55 @@ def _de_date(text: str) -> dt.date:
     return dt.date(year, month, day)
 
 
+@pytest.mark.parametrize(
+    "anchor",
+    [
+        dt.datetime(2026, 11, 22, 23, 0, tzinfo=dt.UTC),  # Sunday 23:00
+        dt.datetime(2026, 11, 16, 0, 0, tzinfo=dt.UTC),  # Monday 00:00
+        dt.datetime(2026, 11, 18, 9, 30, tzinfo=dt.UTC),  # Wednesday
+    ],
+)
+def test_render_is_relative_to_the_real_anchor(
+    large_de: WorldManifest, anchor: dt.datetime
+) -> None:
+    rendered = large_de.render(anchor)
+    now = _ms(anchor)
+    assert rendered.anchor == anchor.isoformat()
+    week = dt.datetime.fromisoformat(rendered.week_anchor)
+    assert week.weekday() == 0
+    assert dt.timedelta(0) <= week - anchor < dt.timedelta(days=7)
+    future = [e for e in large_de.events if (e["t_rel_s"] or 0) < 0]
+    assert future
+    by_id = {e["id"]: e for e in rendered.events}
+    for ev in future:
+        assert by_id[ev["id"]]["ts_ms"] > now
+    past = [
+        row["ts_ms"]
+        for name in ("sms", "calls", "photos", "files", "notes")
+        for row in getattr(rendered, name)
+    ]
+    assert max(past) <= now
+    assert now - max(past) <= 2 * 86400 * 1000
+    newest_sms = max(m["ts_ms"] for m in rendered.sms)
+    assert now - newest_sms <= 2 * 86400 * 1000
+    for name in ("sms", "photos"):
+        rows = getattr(rendered, name)
+        key = "conv" if name == "sms" else "group"
+        groups: dict[object, list[int]] = collections.defaultdict(list)
+        items = {i["id"]: i for i in getattr(large_de, name)}
+        for row in rows:
+            if row.get(key) is not None:
+                groups[row[key]].append(
+                    row["ts_ms"] + items[row["id"]]["t_rel_s"] * 1000
+                )
+        for stamps in groups.values():
+            assert len(set(stamps)) == 1  # a group moves as one
+
+
+def _ms(moment: dt.datetime) -> int:
+    return int(moment.timestamp() * 1000)
+
+
 def test_render_one_week_apart(large_de: WorldManifest) -> None:
     first = large_de.render(ANCHOR)
     second = large_de.render(ANCHOR + dt.timedelta(days=7))
@@ -655,12 +704,11 @@ def test_weekday_slots_follow_the_anchor(tmp_path: Path) -> None:
         ANCHOR + dt.timedelta(days=3),
     ):
         rendered = {m["id"]: m for m in world.render(anchor).sms}
-        base = week_anchor(anchor)
         for m, slot in day_items:
-            expected = names[(base - dt.timedelta(seconds=slot["t_rel_s"])).weekday()]
-            assert expected in rendered[m["id"]]["body"]
-            sent = base - dt.timedelta(seconds=m["t_rel_s"])
-            target = base - dt.timedelta(seconds=slot["t_rel_s"])
+            row = rendered[m["id"]]
+            sent = dt.datetime.fromtimestamp(row["ts_ms"] / 1000, dt.UTC)
+            target = sent + dt.timedelta(seconds=m["t_rel_s"] - slot["t_rel_s"])
+            assert names[target.weekday()] in row["body"]
             assert 1 <= (target.date() - sent.date()).days <= 7
 
 
@@ -670,7 +718,6 @@ def test_easter_holidays_land_on_the_right_day(many: WorldManifest) -> None:
         dt.datetime(2026, 11, 20, tzinfo=dt.UTC),
         dt.datetime(2028, 3, 1, tzinfo=dt.UTC),
     ):
-        base = week_anchor(anchor)
         seen = 0
         for ev in many.render(anchor).events:
             rule = str(ev.get("rule") or "")
@@ -679,8 +726,8 @@ def test_easter_holidays_land_on_the_right_day(many: WorldManifest) -> None:
             seen += 1
             day = dt.datetime.fromtimestamp(ev["ts_ms"] / 1000, dt.UTC).date()
             assert day == easter(day.year) + dt.timedelta(days=int(rule[6:] or 0))
-            assert day <= base.date() + dt.timedelta(days=60)
-            assert (base.date() - day).days <= 18 * 31
+            assert day <= anchor.date() + dt.timedelta(days=60)
+            assert (anchor.date() - day).days <= 18 * 31
         assert seen
 
 
@@ -793,6 +840,9 @@ def test_to_markers_sets_only_existing_fields(medium: WorldManifest) -> None:
         {"numbers": "random"},
         {"history": "forever"},
         {"history": 18},
+        {"history": "3000y"},
+        {"history": "1000000000y"},
+        {"history": "40000d"},
         {"counts": {"sms": -1}},
         {"counts": {"sms": True}},
         {"counts": {"sms": 1.5}},
@@ -818,7 +868,16 @@ def test_invalid_spec_is_rejected(spec: dict) -> None:
         generate({"country": "de", **spec}, OWNER, packs=PACKS)
 
 
-@pytest.mark.parametrize("owner", [None, "Mara", {"first": 3, "last": "K"}])
+@pytest.mark.parametrize(
+    "owner",
+    [
+        None,
+        "Mara",
+        {"first": 3, "last": "K"},
+        {"first": "Mara", "last": "K", "phone": []},
+        {"first": "Mara", "last": "K", "email": 0},
+    ],
+)
 def test_invalid_owner_is_rejected(owner: object) -> None:
     with pytest.raises(ValueError, match="owner"):
         generate({"country": "de", "size": "small"}, owner, packs=PACKS)

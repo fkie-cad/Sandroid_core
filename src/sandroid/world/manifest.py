@@ -74,6 +74,8 @@ TEXT_FIELDS = {"sms": "body", "events": "title", "files": "name", "notes": "text
 
 _HISTORY_RE = re.compile(r"^(\d+)\s*(d|w|mo|y)$")
 _HISTORY_DAYS = {"d": 1.0, "w": 7.0, "mo": 30.44, "y": 365.25}
+#: Longest history accepted (100 years).
+MAX_HISTORY_DAYS = 36525
 _SPEC_KEYS = (
     "seed",
     "size",
@@ -226,7 +228,10 @@ class WorldSpec:
         )
         if not m or int(m.group(1)) <= 0:
             raise ValueError("world history must look like 18mo, 2y, 6w or 90d")
-        return int(int(m.group(1)) * _HISTORY_DAYS[m.group(2)] * 86400)
+        days = int(m.group(1)) * _HISTORY_DAYS[m.group(2)]
+        if days > MAX_HISTORY_DAYS:
+            raise ValueError("world history must be at most 100 years")
+        return int(days * 86400)
 
     def resolved_counts(self) -> dict[str, int]:
         """Return the size defaults with :attr:`counts` applied."""
@@ -266,7 +271,8 @@ class Owner:
             return data
         if not isinstance(data, dict):
             raise ValueError("the owner must be a mapping")
-        values = {k: data.get(k) or "" for k in ("first", "last", "phone", "email")}
+        values = {k: data.get(k) for k in ("first", "last", "phone", "email")}
+        values = {k: "" if v is None else v for k, v in values.items()}
         for key, value in values.items():
             if not isinstance(value, str):
                 raise ValueError(f"owner {key} must be a string")
@@ -298,7 +304,9 @@ class RenderedWorld:
     ``occurrence`` are gone, and texts have their dates filled in.
 
     Attributes:
-        anchor: The effective anchor (local midnight of a Monday), ISO 8601.
+        anchor: The real anchor (the seeding moment), ISO 8601.
+        week_anchor: Local midnight of the Monday on or after the anchor that
+            past items are placed back from, ISO 8601.
         world_fp: The manifest's fingerprint.
         device: The persona phone.
         owner: ``{first, last}``.
@@ -314,6 +322,7 @@ class RenderedWorld:
     """
 
     anchor: str
+    week_anchor: str
     world_fp: str
     device: dict[str, Any]
     owner: dict[str, str]
@@ -435,10 +444,10 @@ class WorldManifest:
 
         Args:
             anchor: When the world is seeded. A naive datetime is taken as
-                UTC; pass an aware one in the device's time zone. The
-                effective anchor is local midnight of the Monday on or before
-                it, so the weekly rhythm of the world (weekend outings,
-                working hours) keeps its weekdays.
+                UTC; pass an aware one in the device's time zone. Past items
+                keep their weekdays (weekend outings, working hours) and end
+                just before the anchor; future events lie after it (see
+                :func:`render_world`).
 
         Returns:
             The rendered world.
@@ -529,46 +538,80 @@ def _ms(moment: dt.datetime) -> int:
 
 
 def render_world(manifest: WorldManifest, anchor: dt.datetime) -> RenderedWorld:
-    """Render ``manifest`` for ``anchor`` (see :meth:`WorldManifest.render`)."""
-    base = week_anchor(anchor)
-    oldest = base.date() - dt.timedelta(
+    """Render ``manifest`` for ``anchor`` (see :meth:`WorldManifest.render`).
+
+    Past items are placed back from the week anchor, local midnight of the
+    Monday on or after ``anchor``, so their weekdays stay right. A
+    conversation, photo group or item that would land after ``anchor``
+    moves back one week, so the newest items sit just before ``anchor`` and
+    nothing is in the future. Future calendar events count whole days from
+    the anchor's own day, so they always lie after ``anchor``.
+    """
+    real = anchor if anchor.tzinfo is not None else anchor.replace(tzinfo=dt.UTC)
+    week = week_anchor(real)
+    if week != real:
+        week = dt.datetime.combine(
+            week.date() + dt.timedelta(days=7), dt.time(), tzinfo=real.tzinfo
+        )
+    day0 = real.replace(hour=0, minute=0, second=0, microsecond=0)
+    oldest = real.date() - dt.timedelta(
         seconds=WorldSpec(
             history=manifest.spec.get("history", "18mo")
         ).history_seconds()
     )
+    week_back = week - dt.timedelta(days=7)
 
-    def at(t_rel: int) -> dt.datetime:
-        return base - dt.timedelta(seconds=t_rel)
+    def bases(items: list[dict[str, Any]]) -> dict[str, dt.datetime]:
+        """Map item ids to their base: the week anchor, or a week earlier."""
+        late: set[Any] = set()
+        for item in items:
+            t_rel = item.get("t_rel_s")
+            if t_rel is not None and t_rel >= 0:
+                if week - dt.timedelta(seconds=t_rel) > real:
+                    late.add(_group(item))
+        out = {}
+        for item in items:
+            t_rel = item.get("t_rel_s")
+            if t_rel is not None and t_rel < 0:
+                out[item["id"]] = day0
+            else:
+                out[item["id"]] = week_back if _group(item) in late else week
+        return out
 
     def timed(name: str) -> list[dict[str, Any]]:
         key = TEXT_FIELDS.get(name)
+        items = getattr(manifest, name)
+        base = bases(items)
         out = []
-        for item in getattr(manifest, name):
+        for item in items:
             row = {k: v for k, v in item.items() if k not in ("t_rel_s", "date_slots")}
+            b = base[item["id"]]
             if key and item.get("date_slots"):
-                row[key] = fill_slots(item[key], item["date_slots"], base)
-            row["ts_ms"] = _ms(at(item["t_rel_s"]))
+                row[key] = fill_slots(item[key], item["date_slots"], b)
+            row["ts_ms"] = _ms(b - dt.timedelta(seconds=item["t_rel_s"]))
             out.append(row)
         return out
 
     events = []
+    ev_base = bases(manifest.events)
     for ev in manifest.events:
         row = {
             k: v
             for k, v in ev.items()
             if k not in ("t_rel_s", "date_slots", "occurrence")
         }
+        b = ev_base[ev["id"]]
         if ev.get("date_slots"):
-            row["title"] = fill_slots(ev["title"], ev["date_slots"], base)
+            row["title"] = fill_slots(ev["title"], ev["date_slots"], b)
         if ev.get("rule"):
             day = nth_occurrence(
-                ev["rule"], base.date(), int(ev.get("occurrence") or 0)
+                ev["rule"], real.date(), int(ev.get("occurrence") or 0)
             )
             if day is None or (ev["kind"] == "holiday" and day < oldest):
                 continue
-            start = dt.datetime.combine(day, dt.time(), tzinfo=base.tzinfo)
+            start = dt.datetime.combine(day, dt.time(), tzinfo=real.tzinfo)
         else:
-            start = at(ev["t_rel_s"])
+            start = b - dt.timedelta(seconds=ev["t_rel_s"])
         minutes = ev.get("minutes")
         end = start + (
             dt.timedelta(days=1)
@@ -579,7 +622,8 @@ def render_world(manifest: WorldManifest, anchor: dt.datetime) -> RenderedWorld:
         events.append(row)
     events.sort(key=lambda e: (e["ts_ms"], e["id"]))
     return RenderedWorld(
-        anchor=base.isoformat(),
+        anchor=real.isoformat(),
+        week_anchor=week.isoformat(),
         world_fp=manifest.world_fp,
         device=dict(manifest.device),
         owner=dict(manifest.owner),
@@ -592,3 +636,12 @@ def render_world(manifest: WorldManifest, anchor: dt.datetime) -> RenderedWorld:
         files=timed("files"),
         notes=timed("notes"),
     )
+
+
+def _group(item: dict[str, Any]) -> Any:
+    """Items that move together: an SMS conversation, a photo trip or outing."""
+    if item.get("conv") is not None:
+        return ("conv", item["conv"])
+    if item.get("group"):
+        return ("group", item["group"])
+    return ("id", item["id"])

@@ -256,9 +256,13 @@ strips all original EXIF/MPO/XMP and writes the generator's metadata.
 
 The manifest holds no absolute date, so one world can be seeded on any day.
 
-- Generated items carry `t_rel_s`, seconds before the anchor (negative: after
-  it, for future calendar events). The anchor is local midnight of the Monday
-  on or before the seeding moment, so weekend outings stay on weekends.
+- Generated items carry `t_rel_s`. Past items count back from the week anchor,
+  local midnight of the Monday on or after the seeding moment, so weekend
+  outings stay on weekends; an SMS conversation, photo group or item that
+  would land after the seeding moment moves back one week, so the newest
+  items sit just before it. Future calendar events (`t_rel_s < 0`) count
+  whole days and a time of day from the seeding day, so they always lie
+  ahead.
 - A text that names a date keeps a slot `{@n}` in place of `{date}`,
   `{date_file}` or `{day}`; `date_slots[n]` holds the slot's own `t_rel_s`, its
   kind and the date pattern (or the weekday names). Rendering fills it in for
@@ -266,6 +270,9 @@ The manifest holds no absolute date, so one world can be seeded on any day.
 - Holidays and birthdays keep their `rule` and an `occurrence` index: 0 is the
   latest date of the rule up to 60 days after the anchor, 1 the one before.
   Holidays that fall before the world's history are left out when rendering.
+  Birthdays are yearly recurring events: their occurrence-0 date may lie
+  before the start of a short history (for example a birthday ten months ago
+  in a `90d` world); the recurrence carries it forward.
 - `WorldManifest.render(anchor)` returns the world with absolute `ts_ms` (and
   `end_ms` for events) and final texts; `markers(anchor)` works on that.
   `world_fp` does not depend on the anchor.
