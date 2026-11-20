@@ -98,6 +98,14 @@ NEEDS_EMULATOR_START = "set when the emulator starts; restart it from the Device
 #: A SIM value the emulator started with but this Android version gives no
 #: read-back for.
 SIM_NOT_READ = "set when the emulator started; not read back on this Android version"
+SIM_NOT_READ_ROOT = "set when the emulator started; not read back without root"
+#: The emulator started with it, airplane mode is on: the guest reads the
+#: SIM card when airplane mode is turned off (left on: often deliberate).
+SIM_AIRPLANE_ON = "the device reads it when airplane mode is turned off"
+SIM_TOGGLE_REFUSED = (
+    "set when the emulator started; airplane mode could not be switched "
+    "without root, so the device may still show the old SIM"
+)
 #: Seconds between SIM re-reads after the airplane-mode toggle (at most
 #: :data:`SIM_WAIT_DEADLINE_S` in all).
 SIM_WAITS_S = (2.0, 2.0, 3.0, 3.0, 5.0, 5.0, 5.0, 5.0)
@@ -200,7 +208,8 @@ class KindSpec:
         device_hook_only: Why there is no native mechanism off the emulator
             (there the value is hook-only), or empty.
         hook_reason: Why a hook-only kind (``("hook",)``) has no native
-            mechanism, or empty.
+            mechanism on an emulator, or empty (``device_hook_only`` says
+            it for a real device).
     """
 
     kind: str
@@ -390,6 +399,7 @@ REGISTRY: dict[str, KindSpec] = dict(
             ("hook",),
             permission="READ_PRIVILEGED_PHONE_STATE",
             hook_reason="the emulator's modem reports a fixed IMEI",
+            device_hook_only="Android lets no tool change a phone's IMEI",
         ),
         _spec(
             "imsi",
@@ -1068,6 +1078,13 @@ def validate(profile: Profile) -> list[Issue]:
             continue
         for sev, msg in _check_value(vs.kind, value, vs.effective_provider, mccmnc):
             add(sev, f"values.{vid}", msg)
+        if vs.kind == "imsi" and vs.effective_provider == "native" and not mccmnc:
+            add(
+                "error",
+                f"values.{vid}",
+                "the IMSI needs the SIM MCC/MNC: add a SIM operator MCC/MNC "
+                "value or a country preset",
+            )
         if (
             vs.kind == "phone_number"
             and vs.effective_provider == "native"
@@ -1206,14 +1223,22 @@ CALLING_CODES = {
 
 
 def _phone_marker_value(number: str, cc: str) -> tuple[str, tuple[str, ...]]:
-    """(marker value, extra forms) for a phone number."""
+    """(marker value, extra forms) for a phone number.
+
+    The value is the international form the emulator's SIM carries
+    (:func:`identity_sim.msisdn_digits`); the forms add the national ones.
+    """
     digits = "".join(c for c in number if c.isdigit())
-    if number.startswith("+"):
-        national = digits[len(cc) :] if cc and digits.startswith(cc) else ""
-        return number, (("0" + national,) if national else ())
-    if cc:
-        return f"+{cc}{digits}", (digits, "0" + digits)
-    return digits, ()
+    full, international = identity_sim.msisdn_digits(number, cc)
+    if not international:
+        return digits, ()
+    national = full[len(cc) :] if cc and full.startswith(cc) else ""
+    forms: list[str] = []
+    if not number.strip().startswith("+") and digits != full:
+        forms.append(digits)
+    if national and "0" + national not in forms:
+        forms.append("0" + national)
+    return f"+{full}", tuple(forms)
 
 
 def markers_for(
@@ -1671,7 +1696,7 @@ def call_numbers(profile: Profile) -> list[str]:
 
 def _sim_lines() -> list[str]:
     """Read IMSI, ICCID and MSISDN (``@@sim:<key>@@`` sections, one parcel
-    each) on the API levels whose transaction codes are known.
+    each) on emulators of the API levels whose transaction codes are known.
     """
     cases = []
     for api, codes in sorted(IPHONESUBINFO_CODES.items()):
@@ -1681,10 +1706,14 @@ def _sim_lines() -> list[str]:
             for key, code in codes
         )
         cases.append(f"{api}) {reads};;")
+    # Emulators only: a real phone's SIM identity is never read.
     return [
+        'if [ "$(getprop ro.kernel.qemu)" = 1 ] || [ "$(getprop ro.boot.qemu)" = 1 ];'
+        " then",
         'case "$(getprop ro.build.version.sdk)" in',
         *cases,
         "esac",
+        "fi",
     ]
 
 
@@ -1731,6 +1760,7 @@ def preflight_script(
         "echo @@props@@",
         f'for p in {" ".join(_PROPS)}; do echo "$p=$(getprop $p)"; done',
         "echo @@root@@; id -u",
+        "echo @@boot_id@@; cat /proc/sys/kernel/random/boot_id 2>/dev/null",
         "echo @@resetprop@@; command -v resetprop",
         "echo @@system_server@@; pidof system_server",
         f"echo @@marker@@; cat {RESTART_MARKER} 2>/dev/null",
@@ -1876,6 +1906,9 @@ class DeviceState:
     sim: dict[str, str] = field(default_factory=dict)
     #: The SIM values were read (known transaction codes, root).
     sim_read: bool = False
+    #: ``/proc/sys/kernel/random/boot_id`` (with the host's launch token it
+    #: tells one emulator launch from the next).
+    boot_id: str = ""
 
 
 def _settings_document(xml_text: str) -> tuple[ET.Element, ET.Element] | None:
@@ -1926,6 +1959,7 @@ def parse_preflight(serial: str, text: str) -> DeviceState:
         key, _, value = line.partition("=")
         state.props[key.strip()] = value.strip()
     state.root = sec.get("root", "").strip() == "0"
+    state.boot_id = sec.get("boot_id", "").strip()
     state.emulator = (
         state.props.get("ro.kernel.qemu") == "1"
         or state.props.get("ro.boot.qemu") == "1"
@@ -1958,7 +1992,7 @@ def parse_preflight(serial: str, text: str) -> DeviceState:
     for key, body in sec.items():
         if key.startswith("sim:"):
             value = identity_sim.decode_parcel_string(body)
-            if value is not None:
+            if value is not None and state.emulator:
                 state.sim[key[4:]] = value.strip()
                 state.sim_read = True
         elif key.startswith("pkg:"):
@@ -2252,6 +2286,9 @@ class IdentityService:
         self._loaded_frozen = False
         self._statuses: dict[str, ValueInfo] = {}
         self._applied: dict[str, _Applied] = {}
+        #: Airplane-mode toggles for the SIM, one per emulator launch:
+        #: ``(serial, boot id, launch token) -> error text ("" = done)``.
+        self._sim_toggles: dict[tuple[str, str, str], str] = {}
         self._hook_installed = False
         self._sleep: Callable[[float], None] = time.sleep
         self._clock: Callable[[], float] = time.monotonic
@@ -2576,8 +2613,6 @@ class IdentityService:
                 info.reason = "disabled"
             elif provider == "hook":
                 info.status = "hook-only"
-                if spec.providers == ("hook",):
-                    info.reason = spec.hook_reason
             infos[vid] = info
         for name, items in profile.lists().items():
             if not items:
@@ -2652,31 +2687,34 @@ class IdentityService:
                     info.status, info.reason = "failed", "device did not answer"
             return plan
         cc = CALLING_CODES.get(profile.preset, "")
-        launched: list[identity_sim.SimValues | None] = []
+        found: list[identity_sim.RunningEmulator | None] = []
 
-        def launched_with(kind: str, desired: str) -> bool:
-            """The running emulator started with ``desired`` (host file)."""
-            if not launched:
+        def running() -> identity_sim.RunningEmulator | None:
+            """Host facts about this emulator (read once per plan)."""
+            if not found:
                 try:
-                    launched.append(
-                        identity_sim.running_sim(
+                    found.append(
+                        identity_sim.running_emulator(
                             state.serial, state.props.get("ro.boot.qemu.avd_name", "")
                         )
                     )
                 except Exception:
                     logger.debug("identity: SIM launch check failed", exc_info=True)
-                    launched.append(None)
-            sim = launched[0]
-            if sim is None:
-                return False
-            if kind == "phone_number":
-                want = identity_sim.msisdn_digits(desired, cc)[0]
-                return bool(sim.msisdn) and sim.msisdn == want
-            return bool(sim.value_of(kind)) and sim.value_of(kind) == desired
+                    found.append(None)
+            return found[0]
 
         for vid, vs in profile.values.items():
             info = plan.infos.get(vid)
             spec = vs.spec
+            if (
+                info is not None
+                and spec is not None
+                and info.status == "hook-only"
+                and spec.providers == ("hook",)
+            ):
+                info.reason = (
+                    spec.hook_reason if state.emulator else spec.device_hook_only
+                )
             if info is None or spec is None or info.status != "pending":
                 continue
             if spec.device_hook_only and not state.emulator:
@@ -2696,6 +2734,11 @@ class IdentityService:
                 ):
                     info.reason += f", {NETWORK_OPERATOR_CARRIES}"
                 continue
+            if state.emulator and spec.emulator_mechanism:
+                # Before the root check: the SIM is set when the emulator
+                # starts, root only reads it back.
+                self._plan_sim(profile, vs, info, state, plan, mem, cc, running)
+                continue
             if spec.needs_root and not state.root:
                 info.status, info.reason = "failed", "adbd is not root"
                 continue
@@ -2711,23 +2754,10 @@ class IdentityService:
             desired = info.rendered
             current, verified = self._current(vs.kind, state, desired, mem, vid, cc)
             info.current = current
-            on_sim = state.emulator and bool(spec.emulator_mechanism)
-            if on_sim:
-                info.mechanism = spec.emulator_mechanism
             if verified:
                 info.status = "verified"
-            elif on_sim and self._plan_sim(
-                vs, info, state, plan, desired, current, launched_with
-            ):
-                continue
-            elif vs.kind in ("phone_number", "gps") and mem.emu.get(vid) == desired:
-                info.status = "applied"
-                info.reason = "unverified" if vs.kind == "gps" else ""
-            elif vs.kind == "phone_number" and not (
-                _ascii_digits(desired) and len(desired) <= 11
-            ):
-                # adb emu phonenumber takes at most 11 digits, no '+'.
-                info.status, info.reason = "pending", NEEDS_EMULATOR_START
+            elif vs.kind == "gps" and mem.emu.get(vid) == desired:
+                info.status, info.reason = "applied", "unverified"
             elif vs.kind == "app_set_id" and state.appset is None:
                 info.status, info.reason = "skipped", "no App Set ID store yet"
             elif vs.kind == "build_model" and not state.resetprop:
@@ -2756,43 +2786,85 @@ class IdentityService:
                 info.status = "verified"
         return plan
 
-    @staticmethod
+    def _sim_key(
+        self, state: DeviceState, emu: identity_sim.RunningEmulator | None
+    ) -> tuple[str, str, str]:
+        """One emulator launch: serial, guest boot id, host launch token."""
+        return (state.serial, state.boot_id, emu.token if emu is not None else "")
+
     def _plan_sim(
+        self,
+        profile: Profile,
         vs: ValueSpec,
         info: ValueInfo,
         state: DeviceState,
         plan: IdentityPlan,
-        desired: str,
-        current: str,
-        launched_with: Callable[[str, str], bool],
-    ) -> bool:
-        """Plan a SIM value the device does not report (emulator only).
+        mem: _Applied,
+        cc: str,
+        running: Callable[[], identity_sim.RunningEmulator | None],
+    ) -> None:
+        """Plan a SIM value on an emulator (set when the emulator starts).
 
-        The emulator's SIM card profile sets it at the emulator's start
-        (:mod:`identity_sim`). Started with it: one airplane-mode toggle
-        makes the guest read the card again (a snapshot keeps the old SIM
-        cached); without a read-back it stays applied. Not started with it:
-        pending until the emulator restarts. The phone number falls back to
-        ``adb emu phonenumber`` (returns False: the caller decides).
-
-        Returns:
-            True when ``info`` / ``plan`` got the outcome.
+        Reported by the guest: verified. The emulator started with it: one
+        airplane-mode toggle per launch makes the guest read the card again
+        (a snapshot keeps the old SIM cached), never while airplane mode is
+        on; afterwards a mismatch fails and an unreadable value stays
+        applied. Not started with it: pending when a restart from Sandroid
+        sets it, else skipped with the reason; the phone number first falls
+        back to ``adb emu phonenumber`` when it fits.
         """
-        readable = vs.kind == "sim_mccmnc" or state.sim_read
-        if launched_with(vs.kind, desired):
-            if not readable:
-                if vs.kind == "phone_number":
-                    return False
-                info.status, info.reason = "applied", SIM_NOT_READ
-                return True
-            if not state.root:
-                return False
-            plan.steps.append(Step(vs.id, "none", desired, current, via="sim"))
-            return True
+        spec = REGISTRY[vs.kind]
+        vid, desired = vs.id, info.rendered
+        current, verified = self._current(vs.kind, state, desired, mem, vid, cc)
+        info.current = current
+        info.mechanism = spec.emulator_mechanism
+        if verified:
+            info.status, info.reason = "verified", ""
+            return
+        emu = running()
+        sim = emu.sim if emu is not None else None
         if vs.kind == "phone_number":
-            return False
-        info.status, info.reason = "pending", NEEDS_EMULATOR_START
-        return True
+            want = identity_sim.msisdn_digits(desired, cc)[0]
+            launched = sim is not None and bool(sim.msisdn) and sim.msisdn == want
+        else:
+            have = sim.value_of(vs.kind) if sim is not None else ""
+            launched = bool(have) and have == desired
+        if launched:
+            readable = vs.kind == "sim_mccmnc" or state.sim_read
+            with self._lock:
+                toggled = self._sim_toggles.get(self._sim_key(state, emu))
+            if toggled is not None:
+                if toggled and state.root:
+                    info.status, info.reason = "failed", f"airplane mode: {toggled}"
+                elif toggled:
+                    info.status, info.reason = "applied", SIM_TOGGLE_REFUSED
+                elif readable:
+                    info.status = "failed"
+                    info.reason = (
+                        f"the device still reports {current or 'nothing'} after "
+                        "the airplane mode toggle"
+                    )
+                else:
+                    info.status = "applied"
+                    info.reason = SIM_NOT_READ if state.root else SIM_NOT_READ_ROOT
+            elif state.settings.get("airplane_mode_on") == "1":
+                info.status, info.reason = "applied", SIM_AIRPLANE_ON
+            else:
+                plan.steps.append(Step(vid, "none", desired, current, via="sim"))
+            return
+        if vs.kind == "phone_number":
+            if mem.emu.get(vid) == desired:
+                info.status, info.reason = "applied", ""
+                return
+            if _ascii_digits(desired) and len(desired) <= 11:
+                # adb emu phonenumber takes at most 11 digits, no '+'.
+                plan.steps.append(Step(vid, "none", desired, current))
+                return
+        blocker = identity_sim.restart_blocker(emu, profile)
+        if blocker:
+            info.status, info.reason = "skipped", blocker
+        else:
+            info.status, info.reason = "pending", NEEDS_EMULATOR_START
 
     def _plan_ssaid(
         self,
@@ -3059,7 +3131,10 @@ class IdentityService:
                 info.per_app = after.per_app
             if after.status == "verified":
                 info.status, info.reason = "verified", ""
-            elif after.status in ("pending", "skipped", "failed") and after.reason:
+            elif (
+                after.status in ("pending", "skipped", "failed", "applied")
+                and after.reason
+            ):
                 info.status, info.reason = after.status, after.reason
             elif mode == "strict":
                 info.status = "failed"
@@ -3139,6 +3214,8 @@ class IdentityService:
         for vid, vs in profile.values.items():
             if vs.kind == "android_id" or not vs.spec:
                 continue
+            if not state.emulator and vs.kind in ("imsi", "iccid", "phone_number"):
+                continue  # a real phone's SIM identity is never recorded
             try:
                 desired = render_value(profile, vs) or ""
                 out[vid] = self._current(vs.kind, state, desired, mem, vid)[0]
@@ -3176,33 +3253,51 @@ class IdentityService:
     ) -> None:
         """Make the guest read the SIM card the emulator started with.
 
-        Airplane mode on and off (as root); a guest that loaded a snapshot
-        keeps the SIM identity it had cached until then. The previous
-        airplane state is restored. Re-reads the SIM values until they match
-        (at most :data:`SIM_WAIT_DEADLINE_S`); P6 verifies them.
+        Airplane mode on and off, once per emulator launch (a guest that
+        loaded a snapshot keeps the SIM identity it had cached). Only planned
+        while airplane mode is off, and it is switched off again on every
+        path. Re-reads the readable SIM values until they match (at most
+        :data:`SIM_WAIT_DEADLINE_S`); P6 verifies them.
         """
         cc = CALLING_CODES.get(profile.preset, "")
-        was_on = state.settings.get("airplane_mode_on") == "1"
+        try:
+            emu = identity_sim.running_emulator(
+                state.serial, state.props.get("ro.boot.qemu.avd_name", "")
+            )
+        except Exception:
+            emu = None
+        key = self._sim_key(state, emu)
         self._emit(
             "sim",
             "identity: airplane mode on and off so the emulator reads its SIM "
             f"card again ({', '.join(s.value_id for s in steps)})",
             state.serial,
             None,
-            data={"values": [s.value_id for s in steps], "airplane_was_on": was_on},
+            data={"values": [s.value_id for s in steps]},
         )
-        toggle = "cmd connectivity airplane-mode disable"
-        if not was_on:
-            toggle = f"cmd connectivity airplane-mode enable && sleep 2 && {toggle}"
-        err = self._check(dev.shell(f"{toggle} && echo {_OK}"))
-        if not err:
+        err = "the toggle was interrupted"
+        try:
+            err = self._check(
+                dev.shell(
+                    "cmd connectivity airplane-mode enable && sleep 2"
+                    f" && cmd connectivity airplane-mode disable && echo {_OK}"
+                )
+            )
+            readable = [
+                s
+                for s in steps
+                if infos[s.value_id].kind == "sim_mccmnc" or state.sim_read
+            ]
             deadline = self._clock() + SIM_WAIT_DEADLINE_S
-            for delay in SIM_WAITS_S:
-                if self._clock() + delay > deadline:
+            for delay in SIM_WAITS_S if readable and not err else ():
+                if self._clock() + delay + 1.0 > deadline:
                     break
                 self._sleep(delay)
+                left = deadline - self._clock()
+                if left < 1.0:
+                    break
                 probe = parse_preflight(
-                    state.serial, dev.shell(sim_script(), timeout=30)
+                    state.serial, dev.shell(sim_script(), timeout=min(30.0, left))
                 )
                 if not probe.ok:
                     continue
@@ -3216,17 +3311,23 @@ class IdentityService:
                     self._current(
                         infos[s.value_id].kind, now, s.desired, mem, s.value_id, cc
                     )[1]
-                    for s in steps
+                    for s in readable
                 ):
                     break
-        if was_on:
-            dev.shell("cmd connectivity airplane-mode enable")
-        for step in steps:
-            info = infos[step.value_id]
+        finally:
+            with self._lock:
+                self._sim_toggles[key] = err
             if err:
-                info.status, info.reason = "failed", f"airplane mode: {err}"
-            else:
-                info.status, info.reason = "applied", ""
+                # Back to off (it was off) whatever failed.
+                try:
+                    dev.shell("cmd connectivity airplane-mode disable")
+                except Exception:
+                    logger.warning(
+                        "identity: could not switch airplane mode off again",
+                        exc_info=True,
+                    )
+        for step in steps:
+            infos[step.value_id].status, infos[step.value_id].reason = "applied", ""
 
     def _run_live(
         self, dev: _Device, profile: Profile, step: Step, info: ValueInfo, mem: _Applied

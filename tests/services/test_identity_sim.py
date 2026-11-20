@@ -99,6 +99,10 @@ def test_msisdn_digits_adds_the_calling_code_to_national_numbers():
     assert sim.msisdn_digits("+4915112345678", "49") == ("4915112345678", True)
     assert sim.msisdn_digits("015112345678", "49") == ("4915112345678", True)
     assert sim.msisdn_digits("15112345678", "") == ("15112345678", False)
+    # 00 is the international prefix; only one trunk 0 is dropped.
+    assert sim.msisdn_digits("004915112345678", "1") == ("4915112345678", True)
+    assert sim.msisdn_digits("004915112345678", "") == ("4915112345678", True)
+    assert sim.msisdn_digits("0301234567", "49") == ("49301234567", True)
 
 
 def _parcel_words(text: str) -> str:
@@ -116,6 +120,11 @@ def test_parcel_strings_are_decoded():
     assert sim.decode_parcel_string("Result: Parcel(ffffffb5 00000000 '....')") is None
     assert sim.decode_parcel_string("Result: Parcel(00000000 ffffffff '....')") is None
     assert sim.decode_parcel_string("service: not found") is None
+    # The first word right after "Parcel(" counts (one-line replies).
+    assert (
+        sim.decode_parcel_string("Result: Parcel(00000000 00000001 00000041 '.')")
+        == "A"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -280,8 +289,12 @@ def test_rebuild_replaces_the_old_dir_and_clears_leftovers(image, tmp_path):
     base = tmp_path / "cache" / "identity-sysdir"
     target = base / "Dev1"
     sim.build_private_sysdir(image, target, VALUES)
-    (base / ".Dev1.tmp-dead").mkdir()  # an interrupted build
+    (base / ".Dev1.tmp-dead").mkdir()  # an interrupted build, long ago
+    os.utime(base / ".Dev1.tmp-dead", (1, 1))
     (base / ".Dev1.old-dead").mkdir()
+    (base / ".Dev1.old-ro" / "data").mkdir(parents=True)  # read-only copy
+    (base / ".Dev1.old-ro" / "data").chmod(0o555)
+    (base / ".Dev1.old-ro").chmod(0o555)
     (base / ".Dev10.tmp-live").mkdir()  # another AVD's build: kept
     other = SimValues(
         iccid="8949" + "1" * 15 + ident.luhn_check_digit("8949" + "1" * 15)
@@ -290,6 +303,10 @@ def test_rebuild_replaces_the_old_dir_and_clears_leftovers(image, tmp_path):
     icc = target / sim.MODEM_DIR / "iccprofile_for_sim0.xml"
     assert sim.read_iccprofile(icc.read_text(encoding="utf-8")).iccid == other.iccid
     assert sorted(p.name for p in base.iterdir()) == [".Dev10.tmp-live", "Dev1"]
+    # A young build directory may be another process's build: kept.
+    (base / ".Dev1.tmp-busy").mkdir()
+    sim.build_private_sysdir(image, target, VALUES)
+    assert (base / ".Dev1.tmp-busy").is_dir()
 
 
 def test_a_failed_patch_writes_nothing(image, tmp_path):
@@ -406,3 +423,91 @@ def test_running_sim_reads_what_the_emulator_copied(avd, monkeypatch):
     assert sim.running_sim("emulator-5580", "Other") is None
     assert sim.running_sim("R58M123", "Dev1") is None
     assert sim.launched_sim(avd / "missing") is None
+
+
+def test_the_copy_never_writes_through_a_link_into_the_sdk(image, tmp_path):
+    modem = image / sim.MODEM_DIR
+    modem.chmod(0o755)
+    real = tmp_path / "sdk-shared.xml"
+    real.write_text(TEMPLATE, encoding="utf-8")
+    (modem / "iccprofile_for_sim0.xml").chmod(0o644)
+    (modem / "iccprofile_for_sim0.xml").unlink()
+    (modem / "iccprofile_for_sim0.xml").symlink_to(real)
+    target = tmp_path / "cache" / "identity-sysdir" / "Dev1"
+    sim.build_private_sysdir(image, target, VALUES)
+    copy = target / sim.MODEM_DIR / "iccprofile_for_sim0.xml"
+    assert not copy.is_symlink()
+    assert "<CIMI>262019876543210</CIMI>" in copy.read_text(encoding="utf-8")
+    assert real.read_text(encoding="utf-8") == TEMPLATE
+    # The copy of a read-only data/ is owner-writable and removable.
+    assert (target / "data").stat().st_mode & 0o777 == 0o700
+    sim._rmtree(target)
+    assert not target.exists()
+
+
+def test_a_host_without_symlinks_launches_without_the_sim(
+    avd, profile_env, monkeypatch
+):
+    _activate(profile_env)
+
+    def no_links(src, dst, *a, **k):
+        raise OSError(1, "A required privilege is not held by the client")
+
+    monkeypatch.setattr(sim.os, "symlink", no_links)
+    assert sim.pre_launch(_context(avd)) == ()
+    assert [p.name for p in sim.sysdir_path("Dev1").parent.iterdir()] == []
+
+
+def test_a_running_instance_keeps_its_sysdir(avd, profile_env, monkeypatch):
+    _activate(profile_env)
+    monkeypatch.setattr(emulator, "avd_lock_files", lambda name: [Path("x.lock")])
+    assert sim.pre_launch(_context(avd)) == ()  # nothing to reuse: no rebuild
+    assert not sim.sysdir_path("Dev1").exists()
+    monkeypatch.setattr(emulator, "avd_lock_files", lambda name: [])
+    args = sim.pre_launch(_context(avd))
+    stamp = (Path(args[1]) / "data").stat().st_ino
+    monkeypatch.setattr(emulator, "avd_lock_files", lambda name: [Path("x.lock")])
+    assert sim.pre_launch(_context(avd)) == args  # the matching one, reused
+    assert (Path(args[1]) / "data").stat().st_ino == stamp
+
+
+def test_the_sysdir_argument_is_absolute(avd, profile_env, monkeypatch, tmp_path):
+    _activate(profile_env)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sim, "cache_root", lambda: Path("relative-cache"))
+    args = sim.pre_launch(_context(avd))
+    assert Path(args[1]).is_absolute()
+    assert Path(args[1]) == tmp_path / "relative-cache" / "identity-sysdir" / "Dev1"
+
+
+def test_restart_blocker_names_the_real_reason(avd, profile_env, image):
+    profile = _activate(profile_env)
+    running = sim.RunningEmulator("emulator-5580", "Dev1", avd)
+    assert sim.restart_blocker(running, profile) == ""
+    assert sim.restart_blocker(None, profile) == sim.NOT_STARTABLE
+    unknown = sim.RunningEmulator("emulator-5580", "Gone")
+    assert sim.restart_blocker(unknown, profile) == sim.AVD_UNKNOWN
+    own = sim.RunningEmulator("emulator-5580", "Dev1", avd, own_sysdir=True)
+    assert sim.restart_blocker(own, profile) == sim.OWN_SYSDIR
+    icc = image / sim.MODEM_DIR / "iccprofile_for_sim0.xml"
+    icc.parent.chmod(0o755)
+    icc.chmod(0o644)
+    icc.write_text(TEMPLATE.replace("<CIMI>310260000000000</CIMI>", ""), "utf-8")
+    assert sim.restart_blocker(running, profile) == sim.UNKNOWN_TEMPLATE
+    icc.unlink()
+    assert sim.restart_blocker(running, profile) == sim.NO_TEMPLATE
+    profile_env.profile = "other"
+    assert sim.restart_blocker(running, profile) == sim.NOT_ACTIVE
+    profile_env.mode = "off"
+    assert sim.restart_blocker(running, profile) == sim.MODE_OFF
+
+
+def test_running_emulator_has_a_launch_token(avd, monkeypatch):
+    monkeypatch.setattr(emulator, "avd_dir", lambda name: avd)
+    (avd / "hardware-qemu.ini").write_text("x\n", encoding="utf-8")
+    os.utime(avd / "hardware-qemu.ini", ns=(1, 111))
+    found = sim.running_emulator("emulator-5580", "Dev1")
+    assert found.token == "111"  # noqa: S105 - a launch id, not a secret
+    assert found.sim is None
+    assert not found.own_sysdir
+    assert sim.running_emulator("R58M123", "Dev1") is None

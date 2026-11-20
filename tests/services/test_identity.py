@@ -212,6 +212,12 @@ class FakeDevice:
         self.sim = dict(STOCK_SIM)
         self.modem = dict(STOCK_SIM)
         self.airplane: list[str] = []
+        #: Airplane-mode commands that are refused once (exit status 1).
+        self.airplane_fail: set[str] = set()
+        self.uid = "0"
+        self.boot_id = "boot-1"
+        #: (command, timeout) of every adb call.
+        self.timeouts: list[tuple[str, float]] = []
         self.fs: dict[str, bytes] = {
             SSAID_FILE: b"ABX\0" + SSAID_XML.encode(),
             GAID_FILE: GAID_XML.encode(),
@@ -250,6 +256,7 @@ class FakeDevice:
     def __call__(self, command: str, serial: str | None, timeout: float = 60):
         assert serial == SERIAL, "every call names the device"
         self.calls.append(command)
+        self.timeouts.append((command, timeout))
         if self.crash_when_stopped and not self.running:
             self.crash_when_stopped -= 1  # True: the next call only
             raise RuntimeError("adb connection lost")
@@ -310,6 +317,12 @@ class FakeDevice:
             return "", _test(argv[1:-1])
         if argv[0] in self.fail_cmds:
             return "", False
+        if argv[:3] == ["cmd", "connectivity", "airplane-mode"] and (
+            argv[3] in self.airplane_fail
+        ):
+            self.airplane_fail.discard(argv[3])
+            self.airplane.append(f"refused {argv[3]}")
+            return "Security exception: not allowed", False
         return self._run(argv, zygote), True
 
     def _capture(self, inner: str, env: dict, zygote: bool) -> str:
@@ -448,7 +461,8 @@ class FakeDevice:
         assert ZYGOTE_PREFIX in script
         lines = [PREFLIGHT_TAG, "@@props@@"]
         lines += [f"{k}={v}" for k, v in self.props.items()]
-        lines += ["@@root@@", "0", "@@resetprop@@", "/debug_ramdisk/resetprop"]
+        lines += ["@@root@@", self.uid, "@@boot_id@@", self.boot_id]
+        lines += ["@@resetprop@@", "/debug_ramdisk/resetprop"]
         lines += ["@@system_server@@", str(self.pid) if self.running else ""]
         lines += ["@@marker@@", self.fs.get(RESTART_MARKER, b"").decode()]
         lines += [
@@ -517,7 +531,10 @@ class FakeDevice:
             return []  # unknown transaction codes: the script reads nothing
         out = []
         for key in ("imsi", "iccid", "msisdn"):
-            out += [f"@@sim:{key}@@", _parcel(self.sim.get(key, ""))]
+            if self.uid != "0":  # SecurityException for the shell user
+                out += [f"@@sim:{key}@@", "Result: Parcel(ffffffb5 00000000 '....')"]
+            else:
+                out += [f"@@sim:{key}@@", _parcel(self.sim.get(key, ""))]
         return out
 
     def _sim_read(self) -> str:
@@ -541,10 +558,20 @@ class FakeDevice:
 def device(monkeypatch):
     fake = FakeDevice()
     monkeypatch.setattr(ident, "_send", fake)
-    # The emulator was not launched with the profile's SIM (no host files).
+    # The emulator was not launched with the profile's SIM (no host files);
+    # a restart from the Devices hub would set it.
     fake.launched = None
+    fake.token = "launch-1"  # noqa: S105 - a launch id, not a secret
+    fake.blocker = ""
     monkeypatch.setattr(
-        ident.identity_sim, "running_sim", lambda serial, avd="": fake.launched
+        ident.identity_sim,
+        "running_emulator",
+        lambda serial, avd="": ident.identity_sim.RunningEmulator(
+            serial, "Dev1", Path("/avd/Dev1.avd"), fake.launched, fake.token
+        ),
+    )
+    monkeypatch.setattr(
+        ident.identity_sim, "restart_blocker", lambda emu, profile: fake.blocker
     )
     return fake
 
@@ -1519,40 +1546,113 @@ def test_sim_values_the_device_reports_are_verified_without_writes(service, devi
     assert not [w for w in device.writes if "phonenumber" in w]
 
 
-def test_a_snapshot_with_the_old_sim_gets_one_airplane_toggle(service, device):
+def _launched(service, device) -> ident.identity_sim.SimValues:
+    """The emulator started with the profile's SIM; the guest has the old one."""
     sim = _profile_sim(service)
-    # Launched with the profile's SIM; the guest kept the old one cached.
     device.launched = sim
     device.modem = {"imsi": sim.imsi, "iccid": sim.iccid, "msisdn": sim.phone}
+    return sim
+
+
+def test_a_snapshot_with_the_old_sim_gets_one_airplane_toggle(service, device):
+    sim = _launched(service, device)
+    device.props["gsm.sim.operator.numeric"] = sim.mccmnc
     with timeline.capture() as lines:
         plan = service.apply(SERIAL, "com.example.app")
-    infos = _sim_infos(plan)
-    assert infos["imsi"] == ("verified", ""), infos
-    assert infos["iccid"] == ("verified", "")
-    assert infos["phone_number"] == ("verified", "")
-    assert device.airplane == ["enable", "disable"]  # once, restored to off
+    assert set(_sim_infos(plan).values()) == {("verified", "")}
+    assert device.airplane == ["enable", "disable"]  # once, back to off
     assert device.settings["airplane_mode_on"] == "0"
+    # Never adb emu phonenumber for a number the SIM carries (it would
+    # replace the international MSISDN with the national form).
     assert not [w for w in device.writes if "phonenumber" in w]
     assert ("identity", "sim") in [(x["src"], x["kind"]) for x in lines]
-    # The fake radio does not update the operator property: read-back fails.
-    assert infos["sim_mccmnc"][0] == "failed"
-    # Second apply: the SIM is read back, no second toggle.
-    device.props["gsm.sim.operator.numeric"] = sim.mccmnc
     device.airplane.clear()
     again = service.apply(SERIAL, "com.example.app")
     assert set(_sim_infos(again).values()) == {("verified", "")}
     assert not device.airplane
 
 
-def test_airplane_mode_that_was_on_stays_on(service, device):
-    sim = _profile_sim(service)
-    device.launched = sim
+def test_the_toggle_runs_once_per_launch_and_a_mismatch_fails(
+    service, device, app_start
+):
+    sim = _launched(service, device)
+    device.modem = dict(STOCK_SIM)  # the radio keeps the old SIM
+    plan = service.apply(SERIAL, "com.example.app")
+    assert plan.infos["imsi"].status == "failed"
+    assert plan.infos["imsi"].reason == (
+        f"the device still reports {STOCK_SIM['imsi']} after the airplane mode toggle"
+    )
+    assert device.airplane == ["enable", "disable"]
+    # Later applies neither toggle nor wait again.
+    device.airplane.clear()
+    device.calls.clear()
+    with pytest.raises(ident.IdentityApplyError):
+        service.pre_spawn("com.example.app").apply()
+    assert not device.airplane
+    assert not [c for c in device.calls if "@@ssaid@@" not in c and "@@props@@" in c]
+    # A new launch of the emulator (new launch token): one toggle again.
+    device.token = "launch-2"  # noqa: S105 - a launch id, not a secret
     device.modem = {"imsi": sim.imsi, "iccid": sim.iccid, "msisdn": sim.phone}
-    device.settings["airplane_mode_on"] = "1"
+    device.props["gsm.sim.operator.numeric"] = sim.mccmnc
     plan = service.apply(SERIAL, "com.example.app")
     assert plan.infos["imsi"].status == "verified"
-    assert device.airplane == ["disable", "enable"]
+    assert device.airplane == ["enable", "disable"]
+
+
+def test_a_failed_toggle_switches_airplane_mode_off_again(service, device):
+    _launched(service, device)
+    device.modem = dict(STOCK_SIM)  # the guest still shows the old SIM
+    device.airplane_fail = {"disable"}  # on worked, off was refused
+    plan = service.apply(SERIAL, "com.example.app")
+    assert device.airplane == ["enable", "refused disable", "disable"]
+    assert device.settings["airplane_mode_on"] == "0"
+    assert plan.infos["iccid"].status == "failed"
+    assert plan.infos["iccid"].reason.startswith("airplane mode: ")
+
+
+def test_an_error_during_the_toggle_still_switches_airplane_mode_off(
+    service, device, monkeypatch
+):
+    _launched(service, device)
+    real = ident._Device.shell
+
+    def shell(self, script, **kw):
+        if "airplane-mode enable" in script:
+            device.settings["airplane_mode_on"] = "1"
+            raise RuntimeError("adb connection lost")
+        return real(self, script, **kw)
+
+    monkeypatch.setattr(ident._Device, "shell", shell)
+    with pytest.raises(RuntimeError):
+        service.apply(SERIAL, "com.example.app")
+    assert device.airplane == ["disable"]
+    assert device.settings["airplane_mode_on"] == "0"
+
+
+def test_airplane_mode_that_is_on_is_left_alone(service, device):
+    _launched(service, device)
+    device.settings["airplane_mode_on"] = "1"
+    plan = service.apply(SERIAL, "com.example.app")
+    assert plan.infos["imsi"].status == "applied"
+    assert plan.infos["imsi"].reason == ident.SIM_AIRPLANE_ON
+    assert plan.infos["phone_number"].reason == ident.SIM_AIRPLANE_ON
+    assert not device.airplane
     assert device.settings["airplane_mode_on"] == "1"
+
+
+def test_the_sim_probe_never_outlasts_the_deadline(service, device):
+    _launched(service, device)
+    device.modem = dict(STOCK_SIM)  # never matches: probes until the deadline
+    now = [0.0]
+    service._clock = lambda: now[0]
+    service._sleep = lambda s: now.__setitem__(0, now[0] + s + 2.0)
+    service.apply(SERIAL, "com.example.app")
+    probes = [
+        t for c, t in device.timeouts if "@@ssaid@@" not in c and "@@props@@" in c
+    ]
+    assert probes
+    assert all(t <= ident.SIM_WAIT_DEADLINE_S for t in probes)
+    assert probes[-1] < 30.0  # bounded by what was left
 
 
 def test_a_sim_the_emulator_did_not_start_with_stays_pending(service, device):
@@ -1569,32 +1669,85 @@ def test_a_sim_the_emulator_did_not_start_with_stays_pending(service, device):
     assert "com.example.app" in service._applied[SERIAL].done
 
 
-def test_without_a_sim_read_back_the_launch_values_count_as_applied(service, device):
+def test_no_restart_advice_when_a_restart_would_not_help(service, device):
+    device.blocker = ident.identity_sim.NO_TEMPLATE
+    profile = service.active_profile()
+    profile.values["phone_number"].template = "+49152{digits:8}"
+    service.save(profile)
+    plan = service.plan(SERIAL, "com.example.app")
+    infos = _sim_infos(plan)
+    assert set(infos.values()) == {("skipped", ident.identity_sim.NO_TEMPLATE)}
+
+
+def test_without_a_sim_read_back_the_launch_values_still_get_the_toggle(
+    service, device
+):
     device.props["ro.build.version.sdk"] = "36"  # transaction codes unknown
-    device.launched = _profile_sim(service)
-    # The operator property is readable everywhere and already matches.
-    device.props["gsm.sim.operator.numeric"] = device.launched.mccmnc
+    sim = _launched(service, device)
+    device.props["gsm.sim.operator.numeric"] = sim.mccmnc
+    plan = service.apply(SERIAL, "com.example.app")
+    for vid in ("imsi", "iccid", "phone_number"):
+        assert plan.infos[vid].status == "applied", vid
+        assert plan.infos[vid].reason == ident.SIM_NOT_READ
+    assert device.airplane == ["enable", "disable"]  # a snapshot caches the SIM
+    assert not [w for w in device.writes if "phonenumber" in w]
+
+
+def test_without_root_the_launch_values_are_applied_not_failed(service, device):
+    sim = _launched(service, device)
+    device.uid = "2000"
+    device.props["gsm.sim.operator.numeric"] = sim.mccmnc
+    plan = service.plan(SERIAL, "com.example.app")
+    assert plan.infos["imsi"].status == "pending"  # the toggle is planned
+    service._sim_toggles.clear()
+    device.airplane_fail = {"enable"}  # the shell user may not switch it
     plan = service.apply(SERIAL, "com.example.app")
     assert plan.infos["imsi"].status == "applied"
-    assert plan.infos["imsi"].reason == ident.SIM_NOT_READ
-    assert plan.infos["iccid"].reason == ident.SIM_NOT_READ
-    assert not device.airplane
+    assert plan.infos["imsi"].reason == ident.SIM_TOGGLE_REFUSED
+    assert device.airplane == ["refused enable", "disable"]
+    # Allowed for the shell user: not read back without root.
+    service._sim_toggles.clear()
+    plan = service.apply(SERIAL, "com.example.app")
+    assert plan.infos["iccid"].reason == ident.SIM_NOT_READ_ROOT
 
 
 def test_sim_values_are_hook_only_on_a_real_device(service, device, monkeypatch):
+    device.props["ro.kernel.qemu"] = "0"
     parse = ident.parse_preflight
 
     def real_device(serial, text):
-        state = parse(serial, text)
-        state.emulator = False
+        state = parse("R58M123", text)
+        state.serial = serial
         return state
 
     monkeypatch.setattr(ident, "parse_preflight", real_device)
-    plan = service.plan(SERIAL, "com.example.app")
+    with timeline.capture() as lines:
+        plan = service.apply(SERIAL, "com.example.app")
     for vid in ("imsi", "iccid"):
         assert plan.infos[vid].status == "hook-only"
         assert plan.infos[vid].reason == "a real SIM card cannot be changed"
         assert plan.infos[vid].provider == "hook"
+        assert not plan.infos[vid].current
+    assert plan.infos["imei"].reason == "Android lets no tool change a phone's IMEI"
+    # A real phone's SIM identity is never recorded.
+    applied = next(x for x in lines if x["kind"] == "applied")
+    record = ident.tomllib.loads(service_folder(applied).read_text(encoding="utf-8"))
+    for vid in ("imsi", "iccid", "phone_number"):
+        assert not record["values"][vid]["before"], vid
+    assert STOCK_SIM["iccid"] not in str(record)
+    assert STOCK_SIM["imsi"] not in str(record)
+
+
+def test_real_phones_parse_no_sim_and_the_script_checks_for_an_emulator():
+    script = ident.preflight_script([], [TOKEN])
+    assert 'if [ "$(getprop ro.kernel.qemu)" = 1 ]' in script
+    text = "\n".join(
+        [PREFLIGHT_TAG, "@@props@@", "ro.kernel.qemu=0", "@@sim:iccid@@",
+         _parcel("8949012345678901234"), "@@end@@"]
+    )  # fmt: skip
+    state = ident.parse_preflight("R58M123", text)
+    assert not state.sim
+    assert not state.sim_read
 
 
 def test_network_operator_name_carrying_the_sim_operator_is_noted(service, device):
@@ -1605,10 +1758,10 @@ def test_network_operator_name_carrying_the_sim_operator_is_noted(service, devic
     assert info.reason.endswith(ident.NETWORK_OPERATOR_CARRIES)
 
 
-def test_imei_says_why_it_is_hook_only(env):
-    infos = {i.id: i for i in IdentityService().describe(_profile())}
-    assert infos["imei"].reason == "the emulator's modem reports a fixed IMEI"
-    assert infos["imsi"].provider == "native"
+def test_imei_says_why_it_is_hook_only(service, device):
+    plan = service.plan(SERIAL, "com.example.app")
+    assert plan.infos["imei"].reason == "the emulator's modem reports a fixed IMEI"
+    assert plan.infos["imsi"].provider == "native"
 
 
 def test_preflight_reads_the_sim_on_known_api_levels():
@@ -1616,12 +1769,42 @@ def test_preflight_reads_the_sim_on_known_api_levels():
     assert "35) echo @@sim:imsi@@; service call iphonesubinfo 8 s16" in script
     assert "service call iphonesubinfo 12 s16" in script
     assert "service call iphonesubinfo 15 s16" in script
+    assert "@@boot_id@@" in script
     state = ident.parse_preflight(
         SERIAL,
         "\n".join(
-            [PREFLIGHT_TAG, "@@sim:iccid@@", _parcel("8949012345678901234"),
-             "@@sim:msisdn@@", "Result: Parcel(ffffffb5 '....')", "@@end@@"]
+            [PREFLIGHT_TAG, "@@boot_id@@", "abc", "@@sim:iccid@@",
+             _parcel("8949012345678901234"), "@@sim:msisdn@@",
+             "Result: Parcel(ffffffb5 00000000 '....')", "@@end@@"]
         ),
     )  # fmt: skip
     assert state.sim == {"iccid": "8949012345678901234"}
     assert state.sim_read
+    assert state.boot_id == "abc"
+
+
+def test_an_imsi_needs_a_known_mcc_mnc():
+    profile = _profile()
+    del profile.values["sim_mccmnc"]
+    profile.preset = ""
+    errors = [i for i in ident.validate(profile) if i.severity == "error"]
+    assert [i.path for i in errors] == ["values.imsi"]
+    assert "MCC/MNC" in errors[0].message
+    profile.values["imsi"].provider = "hook"
+    assert not [i for i in ident.validate(profile) if i.severity == "error"]
+
+
+@pytest.mark.parametrize(
+    ("number", "value", "forms"),
+    [
+        ("+4915112345678", "+4915112345678", ("015112345678",)),
+        ("015112345678", "+4915112345678", ("015112345678",)),
+        ("15112345678", "+4915112345678", ("15112345678", "015112345678")),
+        ("004915112345678", "+4915112345678", ("004915112345678", "015112345678")),
+    ],
+)
+def test_phone_markers_carry_the_number_the_sim_carries(number, value, forms):
+    assert ident._phone_marker_value(number, "49") == (value, forms)
+    digits, international = ident.identity_sim.msisdn_digits(number, "49")
+    assert international
+    assert "+" + digits == value

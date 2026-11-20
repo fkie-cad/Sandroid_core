@@ -34,6 +34,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from logging import getLogger
@@ -56,6 +57,9 @@ NUMERIC_OPERATOR = Path("etc/modem_simulator/files/numeric_operator.xml")
 SYSDIR_FLAG = "-sysdir"
 #: Sub-directory of the Sandroid cache directory holding one sysdir per AVD.
 SYSDIR_CACHE = "identity-sysdir"
+#: A ``.tmp-*`` build directory younger than this may be another process's
+#: build in progress and is left alone.
+TMP_MAX_AGE_S = 600.0
 
 #: ``EF_MSISDN`` record without the alpha identifier: length, TON/NPI,
 #: 10 BCD bytes, capability and extension identifiers.
@@ -67,6 +71,10 @@ _TON_UNKNOWN = "81"
 
 class SimPatchError(ValueError):
     """A modem simulator file does not have the structure this module knows."""
+
+
+class SymlinkError(SimPatchError):
+    """The host cannot create symlinks (e.g. Windows without the privilege)."""
 
 
 @dataclass(frozen=True)
@@ -194,14 +202,18 @@ def decode_msisdn_record(hex_text: str) -> tuple[str, bool]:
 def msisdn_digits(number: str, calling_code: str) -> tuple[str, bool]:
     """``(digits, international)`` of a profile phone number for the SIM.
 
-    ``+49...`` stays as it is; a national number gets ``calling_code`` (its
-    trunk ``0`` dropped); without a calling code the digits stay national.
+    ``+49...`` and ``0049...`` are international already; a national number
+    gets ``calling_code`` with one trunk ``0`` dropped; without a calling
+    code the digits stay national.
     """
-    digits = "".join(c for c in number if c.isdigit())
-    if number.strip().startswith("+"):
+    text = number.strip()
+    digits = "".join(c for c in text if c.isdigit())
+    if text.startswith("+"):
         return digits, True
+    if digits.startswith("00"):
+        return digits[2:], True
     if calling_code:
-        return calling_code + digits.lstrip("0"), True
+        return calling_code + digits.removeprefix("0"), True
     return digits, False
 
 
@@ -213,7 +225,7 @@ def decode_parcel_string(text: str) -> str | None:
     (little-endian). Returns ``None`` for an exception, a null string or
     output that is not a parcel.
     """
-    words = re.findall(r"(?:^|\s|:)([0-9a-fA-F]{8})(?=\s|')", text, re.M)
+    words = re.findall(r"(?:^|[\s:(])([0-9a-fA-F]{8})(?=\s|')", text, re.M)
     data = b"".join(int(w, 16).to_bytes(4, "little") for w in words)
     if len(data) < 8:
         return None
@@ -544,17 +556,47 @@ def image_dir(avd_directory: Path) -> Path | None:
     return path if path.is_dir() else None
 
 
+def _onexc(func: Any, path: str, exc: BaseException) -> None:
+    """``rmtree`` error handler: make a read-only directory writable, retry."""
+    if not isinstance(exc, PermissionError):
+        raise exc
+    parent = Path(path).parent
+    if not parent.is_symlink():
+        parent.chmod(0o700)
+    target = Path(path)
+    if target.is_dir() and not target.is_symlink():
+        target.chmod(0o700)
+    func(path)
+
+
 def _rmtree(path: Path) -> None:
-    """Remove ``path`` (a symlink is unlinked, never followed)."""
+    """Remove ``path`` (a symlink is unlinked, never followed).
+
+    Read-only directories (a copy made from a read-only image) are made
+    writable on the way.
+    """
     if path.is_symlink() or path.is_file():
         path.unlink()
     elif path.exists():
         # rmtree unlinks the symlinks into the system image, never follows.
-        shutil.rmtree(path)
+        shutil.rmtree(path, onexc=_onexc)
 
 
 def _remove_leftovers(base: Path, name: str) -> None:
-    leftovers = [*base.glob(f".{name}.tmp-*"), *base.glob(f".{name}.old-*")]
+    """Remove ``.<name>.old-*`` and stale ``.<name>.tmp-*`` directories.
+
+    A ``.tmp-*`` younger than :data:`TMP_MAX_AGE_S` may be another
+    process's build in progress: it stays.
+    """
+    now = time.time()
+    leftovers = list(base.glob(f".{name}.old-*"))
+    for tmp in base.glob(f".{name}.tmp-*"):
+        try:
+            if now - tmp.lstat().st_mtime < TMP_MAX_AGE_S:
+                continue
+        except OSError:
+            continue
+        leftovers.append(tmp)
     for leftover in leftovers:
         try:
             _rmtree(leftover)
@@ -563,13 +605,18 @@ def _remove_leftovers(base: Path, name: str) -> None:
 
 
 def _copy_data(src: Path, dest: Path) -> None:
-    """Copy ``data/`` of the image, owner-writable (image files may be
-    read-only).
+    """Copy ``data/`` of the image as real files, owner-writable.
+
+    Symlinks inside are copied as the files they point to, so nothing
+    written later reaches the SDK; image files may be read-only.
     """
-    shutil.copytree(src, dest, symlinks=True, copy_function=shutil.copyfile)
+    shutil.copytree(src, dest, symlinks=False, copy_function=shutil.copyfile)
+    dest.chmod(0o700)
     for root, dirs, files in os.walk(dest):
         for name in dirs:
-            (Path(root) / name).chmod(0o700)
+            path = Path(root) / name
+            if not path.is_symlink():
+                path.chmod(0o700)
         for name in files:
             path = Path(root) / name
             if not path.is_symlink():
@@ -582,8 +629,49 @@ def _read_text(path: Path) -> str:
 
 
 def _write_text(path: Path, text: str) -> None:
-    with open(path, "w", encoding="utf-8", newline="") as handle:
+    """Write a fresh file (a symlink or file at ``path`` is unlinked first)."""
+    if path.is_symlink() or path.exists():
+        path.unlink()
+    with open(path, "x", encoding="utf-8", newline="") as handle:
         handle.write(text)
+
+
+def patched_files(image: Path, values: SimValues) -> dict[Path, str]:
+    """The patched modem simulator files of ``image`` (paths relative to it).
+
+    Raises:
+        SimPatchError: The image has no SIM card profile, or one with an
+            unknown layout.
+        ValueError: A value has the wrong format.
+    """
+    modem = Path(image) / MODEM_DIR
+    icc = modem / ICC_PROFILE
+    if not icc.is_file():
+        raise SimPatchError(f"{image} has no modem simulator SIM profile")
+    out = {MODEM_DIR / ICC_PROFILE: patch_iccprofile(_read_text(icc), values)}
+    numeric = modem / NUMERIC_OPERATOR
+    if values.mccmnc:
+        if numeric.is_file():
+            out[MODEM_DIR / NUMERIC_OPERATOR] = patch_numeric_operator(
+                _read_text(numeric), values.mccmnc, values.operator
+            )
+        else:
+            logger.warning(
+                "identity SIM: %s has no numeric_operator.xml; the network "
+                "operator stays the emulator's own",
+                image,
+            )
+    return out
+
+
+def _matches(target: Path, files: dict[Path, str]) -> bool:
+    """``target`` is a built sysdir holding exactly ``files``."""
+    try:
+        return target.is_dir() and all(
+            _read_text(target / rel) == text for rel, text in files.items()
+        )
+    except (OSError, UnicodeDecodeError):
+        return False
 
 
 def build_private_sysdir(image: Path, target: Path, values: SimValues) -> Path:
@@ -592,7 +680,7 @@ def build_private_sysdir(image: Path, target: Path, values: SimValues) -> Path:
     ``target`` gets one symlink per entry of ``image`` except ``data/``,
     which is copied with the modem simulator files patched. It is built in
     a temporary directory next to ``target`` and renamed into place; an
-    older ``target`` and leftovers of interrupted builds are removed.
+    older ``target`` and stale leftovers of interrupted builds are removed.
 
     Args:
         image: The AVD's real system image directory.
@@ -605,27 +693,11 @@ def build_private_sysdir(image: Path, target: Path, values: SimValues) -> Path:
     Raises:
         SimPatchError: The image has no modem simulator SIM profile, or one
             this module cannot patch (nothing is written).
+        SymlinkError: This host cannot create symlinks (cleaned up).
         OSError: The directory could not be built.
     """
     image = Path(image).absolute()
-    modem = image / MODEM_DIR
-    icc = modem / ICC_PROFILE
-    if not icc.is_file():
-        raise SimPatchError(f"{image} has no modem simulator SIM profile")
-    icc_text = patch_iccprofile(_read_text(icc), values)
-    num_text = None
-    numeric = modem / NUMERIC_OPERATOR
-    if values.mccmnc:
-        if numeric.is_file():
-            num_text = patch_numeric_operator(
-                _read_text(numeric), values.mccmnc, values.operator
-            )
-        else:
-            logger.warning(
-                "identity SIM: %s has no numeric_operator.xml; the network "
-                "operator stays the emulator's own",
-                image,
-            )
+    files = patched_files(image, values)
     base = Path(target).parent
     base.mkdir(parents=True, exist_ok=True)
     _remove_leftovers(base, target.name)
@@ -633,13 +705,15 @@ def build_private_sysdir(image: Path, target: Path, values: SimValues) -> Path:
     old: Path | None = None
     try:
         for entry in sorted(image.iterdir(), key=lambda p: p.name):
-            if entry.name == "data" and entry.is_dir():
+            if entry.name == "data" and entry.is_dir() and not entry.is_symlink():
                 _copy_data(entry, tmp / "data")
-            else:
+                continue
+            try:
                 os.symlink(entry, tmp / entry.name)
-        _write_text(tmp / MODEM_DIR / ICC_PROFILE, icc_text)
-        if num_text is not None:
-            _write_text(tmp / MODEM_DIR / NUMERIC_OPERATOR, num_text)
+            except (OSError, NotImplementedError) as exc:
+                raise SymlinkError(f"cannot link {entry}: {exc}") from exc
+        for rel, text in files.items():
+            _write_text(tmp / rel, text)
         if target.exists() or target.is_symlink():
             old = base / f".{target.name}.old-{uuid.uuid4().hex[:8]}"
             os.rename(target, old)
@@ -677,19 +751,32 @@ def remove_private_sysdir(avd: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _has_sysdir(args: tuple[str, ...]) -> bool:
+def has_sysdir(args: tuple[str, ...] | list[str]) -> bool:
+    """``args`` name a ``-sysdir`` of their own."""
     return any(a == SYSDIR_FLAG or a.startswith(SYSDIR_FLAG + "=") for a in args)
 
 
+def _avd_running(avd: str) -> bool:
+    from sandroid.core import emulator
+
+    try:
+        return bool(emulator.avd_lock_files(avd))
+    except Exception:
+        logger.debug("identity SIM: lock check failed", exc_info=True)
+        return False
+
+
 def pre_launch(context: LaunchContext) -> tuple[str, ...]:
-    """Pre-launch hook: ``("-sysdir", <private dir>)`` or ``()``.
+    """Pre-launch hook: ``("-sysdir", <absolute private dir>)`` or ``()``.
 
     ``()`` when identity mode is off, the active profile has no native SIM
-    value, the launch already names a ``-sysdir``, or the image has no SIM
-    profile this module can patch (logged). Raises only when the private
-    directory cannot be written (the launch then fails closed).
+    value, the launch already names a ``-sysdir``, the image has no SIM
+    profile this module can patch, the host cannot create symlinks, or
+    another instance of the AVD runs and no matching sysdir exists (all
+    logged). Raises only when the private directory cannot be written (the
+    launch then fails closed).
     """
-    if _has_sysdir(tuple(context.options.extra_args)):
+    if has_sysdir(tuple(context.options.extra_args)):
         logger.warning(
             "identity SIM: AVD %r is launched with its own -sysdir; the SIM "
             "identity is not set",
@@ -716,8 +803,18 @@ def pre_launch(context: LaunchContext) -> tuple[str, ...]:
             context.avd,
         )
         return ()
+    target = sysdir_path(context.avd).absolute()
     try:
-        path = build_private_sysdir(image, sysdir_path(context.avd), values)
+        if _avd_running(context.avd):
+            # Another instance may run from this directory: never rebuild it.
+            if _matches(target, patched_files(image.absolute(), values)):
+                return (SYSDIR_FLAG, str(target))
+            logger.warning(
+                "identity SIM: AVD %r already runs; its SIM identity is not set",
+                context.avd,
+            )
+            return ()
+        path = build_private_sysdir(image, target, values)
     except (SimPatchError, ValueError) as exc:
         logger.warning(
             f"identity SIM: SIM identity not set for AVD {context.avd!r}: {exc}"
@@ -757,6 +854,39 @@ def uninstall_launch_hooks() -> None:
 # what a running emulator was launched with
 # ---------------------------------------------------------------------------
 
+#: Why a restart from the Devices hub would not set the SIM values.
+NOT_STARTABLE = "not an emulator Sandroid starts"
+AVD_UNKNOWN = "Sandroid does not know this emulator's AVD"
+OWN_SYSDIR = "the emulator is started with its own -sysdir"
+NO_TEMPLATE = "the system image has no SIM card profile"
+UNKNOWN_TEMPLATE = "the system image's SIM card profile has an unknown layout"
+PROFILE_INVALID = "the profile is invalid"
+MODE_OFF = "identity mode is off"
+NOT_ACTIVE = "this profile is not the active one"
+
+
+@dataclass(frozen=True)
+class RunningEmulator:
+    """What the host knows about a running emulator.
+
+    Attributes:
+        serial: Its ``emulator-<port>`` serial.
+        avd: AVD name (empty when unknown).
+        avd_dir: AVD directory (``None`` when unknown).
+        sim: The SIM it started with (``None`` when unknown).
+        token: Changes with every launch: ``hardware-qemu.ini``, which the
+            emulator writes at each start, its modification time (empty
+            when unknown).
+        own_sysdir: Sandroid launched it with a ``-sysdir`` of the user's.
+    """
+
+    serial: str
+    avd: str = ""
+    avd_dir: Path | None = None
+    sim: SimValues | None = None
+    token: str = ""
+    own_sysdir: bool = False
+
 
 def launched_sim(avd_directory: Path) -> SimValues | None:
     """SIM values in ``<avd dir>/modem_simulator/iccprofile_for_sim0.xml``.
@@ -773,38 +903,88 @@ def launched_sim(avd_directory: Path) -> SimValues | None:
     return read_iccprofile(text)
 
 
-def running_sim(serial: str, avd_name: str = "") -> SimValues | None:
-    """The SIM values the running emulator ``serial`` was launched with.
+def running_emulator(serial: str, avd_name: str = "") -> RunningEmulator | None:
+    """Host facts about the running emulator ``serial`` (``None``: not one).
 
     Args:
         serial: An ``emulator-<port>`` serial.
         avd_name: Its AVD name if known (``ro.boot.qemu.avd_name``); else
             the emulator console is asked.
-
-    Returns:
-        The values, or ``None`` (not an emulator, AVD or file not found).
     """
     if not serial.startswith("emulator-"):
         return None
     from sandroid.core import emulator
 
     name = avd_name or emulator.avd_name_of(serial) or ""
-    if not name:
-        return None
-    directory = emulator.avd_dir(name)
+    directory = emulator.avd_dir(name) if name else None
     if directory is None:
-        return None
-    return launched_sim(directory)
+        return RunningEmulator(serial, name)
+    token = ""
+    try:
+        token = str((directory / "hardware-qemu.ini").stat().st_mtime_ns)
+    except OSError:
+        pass
+    launch = emulator.get_launch(serial)
+    own = bool(
+        launch is not None
+        and launch.alive
+        and has_sysdir(tuple(launch.options.extra_args))
+    )
+    return RunningEmulator(
+        serial, name, directory, launched_sim(directory), token, own_sysdir=own
+    )
+
+
+def running_sim(serial: str, avd_name: str = "") -> SimValues | None:
+    """The SIM values the running emulator ``serial`` was launched with."""
+    found = running_emulator(serial, avd_name)
+    return found.sim if found is not None else None
+
+
+def restart_blocker(running: RunningEmulator | None, profile: Profile) -> str:
+    """Why restarting this emulator from Sandroid would not set ``profile``'s
+    SIM values (``""``: a restart sets them).
+    """
+    if running is None:
+        return NOT_STARTABLE
+    if running.avd_dir is None:
+        return AVD_UNKNOWN
+    if running.own_sysdir:
+        return OWN_SYSDIR
+    try:
+        from sandroid.services.identity import get_identity_service
+
+        cfg = get_identity_service().config()
+        if cfg.mode != "profile":
+            return MODE_OFF
+        if cfg.profile != profile.id:
+            return NOT_ACTIVE
+    except Exception:
+        logger.debug("identity SIM: config unavailable", exc_info=True)
+    values = sim_values(profile)
+    if values is None:
+        return PROFILE_INVALID
+    image = image_dir(running.avd_dir)
+    if image is None or not (image / MODEM_DIR / ICC_PROFILE).is_file():
+        return NO_TEMPLATE
+    try:
+        patched_files(image, values)
+    except (SimPatchError, ValueError):
+        return UNKNOWN_TEMPLATE
+    return ""
 
 
 __all__ = [
     "SIM_KINDS",
+    "RunningEmulator",
     "SimPatchError",
     "SimValues",
+    "SymlinkError",
     "active_sim_values",
     "build_private_sysdir",
     "decode_msisdn_record",
     "decode_parcel_string",
+    "has_sysdir",
     "iccid_bcd",
     "image_dir",
     "install_launch_hooks",
@@ -813,10 +993,13 @@ __all__ = [
     "msisdn_record",
     "patch_iccprofile",
     "patch_numeric_operator",
+    "patched_files",
     "post_stop",
     "pre_launch",
     "read_iccprofile",
     "remove_private_sysdir",
+    "restart_blocker",
+    "running_emulator",
     "running_sim",
     "sim_values",
     "swap_bcd",
