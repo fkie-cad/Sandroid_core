@@ -1541,8 +1541,9 @@ def _content_missing(
         return
     result["content_missing"] = missing
     result["content_hint"] = (
-        f"{missing} of these files have no local content yet (never read "
-        "from the device); call read_device_files with the same where "
+        f"{missing} of these files have no current local content (never "
+        "read, or changed or restored since the last read); call "
+        "read_device_files with the same where "
         "WITHOUT content_contains (it ignores it), then run "
         f"{tool} again"
     )

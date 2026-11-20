@@ -466,7 +466,7 @@ SQLite companion row (``x.db-wal``, ``-shm``, ``-journal``) as its database.
 It returns counts, never content: content reaches the model only through
 the Files digests above.
 
-Lens tool results then say ``content_missing: N`` (no local content yet;
+Lens tool results then say ``content_missing: N`` (no current local content: never read, or changed or restored since;
 decided from cache meta and watchlist presence, nothing rendered) and
 ``content_unreadable: {reason: N}`` (rows the tool could not read: they
 carry a negative cache entry and are never worth reading again, e.g. an
