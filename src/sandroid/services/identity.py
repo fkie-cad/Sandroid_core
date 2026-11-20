@@ -3000,6 +3000,9 @@ class IdentityPlan:
     #: The emulator launch whose SIM this plan checked (serial, boot id,
     #: launch token), None when the emulator did not start with its SIM.
     sim_key: tuple[str, str, str] | None = None
+    #: The device was restored (a snapshot load) during this apply: what
+    #: it applied may be gone; an app start must not go ahead on it.
+    restored: bool = False
 
     @property
     def restart(self) -> str:
@@ -4769,19 +4772,23 @@ class IdentityService:
             self._applying.add(serial)
         self._call.as_persona = as_persona
         self._call.restores = restores
+        moved = False
         try:
-            return self._apply_on(serial, package, allow_restart, profile)
+            plan = self._apply_on(serial, package, allow_restart, profile)
         finally:
             self._call.as_persona = None
             self._call.restores = None
             with self._lock:
                 self._applying.discard(serial)
                 mem = self._applied.get(serial)
-                if mem is not None and mem.restores != restores:
+                moved = mem is not None and mem.restores != restores
+                if moved:
                     # Also when the apply raised: it may have written into
                     # the loaded state, so the next read distrusts "done".
                     mem.distrust = True
                     mem.done.clear()
+        plan.restored = moved
+        return plan
 
     def _apply_on(
         self, serial: str, package: str | None, allow_restart: bool, profile: Profile
@@ -6262,7 +6269,9 @@ class IdentityService:
                 raise IdentityApplyError(
                     f"identity profile {profile.id!r}: {failed[0].label}: {failed[0].reason}"
                 )
-            if any(i.reason == RESTORED_DURING for i in plan.infos.values()):
+            if plan.restored or any(
+                i.reason == RESTORED_DURING for i in plan.infos.values()
+            ):
                 # Starting now would show the app the loaded snapshot's
                 # values (nothing was applied to it for this start).
                 raise IdentityApplyError(

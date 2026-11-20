@@ -3941,3 +3941,18 @@ def test_a_restore_during_the_record_write_distrusts_it(service, device, monkeyp
     service.apply(SERIAL, PKG)
     assert service._applied[SERIAL].distrust
     assert PKG not in service._applied[SERIAL].done
+
+
+def test_a_restore_during_the_read_back_refuses_the_app_start(
+    service, device, app_start, monkeypatch
+):
+    plan = service.pre_start(PKG)
+    real = service._await_providers
+
+    def wait(*args, **kwargs):
+        service.forget(SERIAL, restored=True)  # loaded after the last step
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_await_providers", wait)
+    with pytest.raises(ident.IdentityApplyError, match="restored during"):
+        plan.apply()

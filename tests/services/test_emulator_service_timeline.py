@@ -139,3 +139,23 @@ def test_a_cold_boot_is_a_world_change(service, monkeypatch):
     assert (boot["src"], boot["kind"], boot["world"]) == ("device", "boot", 1)
     assert boot["data"]["cause"] == "cold-boot"
     assert boot["data"]["ok"] is True
+
+
+def test_a_load_without_a_serial_changes_only_the_targets_world(service, monkeypatch):
+    from sandroid.services import identity
+
+    forgotten: list = []
+
+    class _Ident:
+        def sim_launch_changed(self, serial):
+            pass
+
+        def forget(self, serial=None, *, restored=False):
+            forgotten.append((serial, restored))
+
+    monkeypatch.setattr(identity, "get_identity_service", lambda: _Ident())
+    monkeypatch.setattr(service, "_record_device_clock", lambda *a: None)
+    with timeline.capture() as lines:
+        assert service.load_snapshot("clean") is True
+    assert forgotten == [("emu-1", True)]  # the target only, not every device
+    assert [x["dev"] for x in lines] == ["emu-1"]

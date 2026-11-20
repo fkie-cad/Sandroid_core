@@ -994,6 +994,9 @@ class EmulatorService:
 
     def _load_snapshot(self, adb: Any, name: str, serial: str | None) -> bool:
         """:meth:`load_snapshot` body (the in-flight marker is held)."""
+        # The device the load replaces (the target when no serial is given):
+        # only that one's world changes, never every device's.
+        loaded = serial or self._target_serial(adb)
         try:
             command = _snapshot_command("load", name)
 
@@ -1026,7 +1029,7 @@ class EmulatorService:
                     summary=f"snapshot '{_name_text(name)}' loaded",
                     t=t_ret,
                     t_err_ms=(t_ret - t_sent) * 500,
-                    dev=serial,
+                    dev=loaded,
                     data={
                         "name": name,
                         "ok": True,
