@@ -477,6 +477,14 @@ def sim_values(profile: Profile) -> SimValues | None:
     if not mccmnc and imsi:
         known = ident._mccmnc_of(profile, rendered)
         mccmnc = known if known and imsi.startswith(known) else ""
+        if not mccmnc:
+            # The MNC length (EF_AD) would be a guess: no SIM launch.
+            logger.warning(
+                "identity SIM: profile %r has an IMSI but no SIM MCC/MNC; the "
+                "emulator keeps its own SIM",
+                profile.id,
+            )
+            return None
     if mccmnc and not imsi:
         imsi = mccmnc + "0" * (15 - len(mccmnc))
     msisdn, international = "", True
@@ -610,7 +618,13 @@ def _copy_data(src: Path, dest: Path) -> None:
     Symlinks inside are copied as the files they point to, so nothing
     written later reaches the SDK; image files may be read-only.
     """
-    shutil.copytree(src, dest, symlinks=False, copy_function=shutil.copyfile)
+    shutil.copytree(
+        src,
+        dest,
+        symlinks=False,
+        ignore_dangling_symlinks=True,
+        copy_function=shutil.copyfile,
+    )
     dest.chmod(0o700)
     for root, dirs, files in os.walk(dest):
         for name in dirs:
@@ -706,7 +720,10 @@ def build_private_sysdir(image: Path, target: Path, values: SimValues) -> Path:
     try:
         for entry in sorted(image.iterdir(), key=lambda p: p.name):
             if entry.name == "data" and entry.is_dir() and not entry.is_symlink():
-                _copy_data(entry, tmp / "data")
+                try:
+                    _copy_data(entry, tmp / "data")
+                except shutil.Error as exc:
+                    raise SimPatchError(f"cannot copy {entry}: {exc}") from exc
                 continue
             try:
                 os.symlink(entry, tmp / entry.name)
@@ -825,7 +842,17 @@ def pre_launch(context: LaunchContext) -> tuple[str, ...]:
 
 
 def post_stop(context: LaunchContext) -> None:
-    """Post-stop hook: remove the AVD's private sysdir (idempotent)."""
+    """Post-stop hook: remove the AVD's private sysdir (idempotent).
+
+    Kept while another instance of the AVD runs (a refused duplicate
+    launch must not take the running instance's sysdir away).
+    """
+    if _avd_running(context.avd):
+        logger.info(
+            "identity SIM: AVD %r still runs; its private sysdir stays",
+            context.avd,
+        )
+        return
     remove_private_sysdir(context.avd)
 
 
@@ -861,6 +888,9 @@ OWN_SYSDIR = "the emulator is started with its own -sysdir"
 NO_TEMPLATE = "the system image has no SIM card profile"
 UNKNOWN_TEMPLATE = "the system image's SIM card profile has an unknown layout"
 PROFILE_INVALID = "the profile is invalid"
+MNC_UNKNOWN = (
+    "the SIM MCC/MNC is unknown: add a SIM operator MCC/MNC value or a country preset"
+)
 MODE_OFF = "identity mode is off"
 NOT_ACTIVE = "this profile is not the active one"
 
@@ -961,9 +991,13 @@ def restart_blocker(running: RunningEmulator | None, profile: Profile) -> str:
             return NOT_ACTIVE
     except Exception:
         logger.debug("identity SIM: config unavailable", exc_info=True)
+    from sandroid.services.identity import validate
+
+    if any(i.severity == "error" for i in validate(profile)):
+        return PROFILE_INVALID
     values = sim_values(profile)
     if values is None:
-        return PROFILE_INVALID
+        return MNC_UNKNOWN
     image = image_dir(running.avd_dir)
     if image is None or not (image / MODEM_DIR / ICC_PROFILE).is_file():
         return NO_TEMPLATE

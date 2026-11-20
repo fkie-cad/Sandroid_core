@@ -215,6 +215,7 @@ class FakeDevice:
         #: Airplane-mode commands that are refused once (exit status 1).
         self.airplane_fail: set[str] = set()
         self.uid = "0"
+        self.shell_reads_sim = False  # the shell user may read the SIM
         self.boot_id = "boot-1"
         #: (command, timeout) of every adb call.
         self.timeouts: list[tuple[str, float]] = []
@@ -531,7 +532,7 @@ class FakeDevice:
             return []  # unknown transaction codes: the script reads nothing
         out = []
         for key in ("imsi", "iccid", "msisdn"):
-            if self.uid != "0":  # SecurityException for the shell user
+            if self.uid != "0" and not self.shell_reads_sim:  # SecurityException
                 out += [f"@@sim:{key}@@", "Result: Parcel(ffffffb5 00000000 '....')"]
             else:
                 out += [f"@@sim:{key}@@", _parcel(self.sim.get(key, ""))]
@@ -1789,15 +1790,18 @@ def test_preflight_reads_the_sim_on_known_api_levels():
     assert state.boot_id == "abc"
 
 
-def test_an_imsi_needs_a_known_mcc_mnc():
+def test_an_imsi_without_a_known_mcc_mnc_warns_and_keeps_the_emulator_sim():
     profile = _profile()
     del profile.values["sim_mccmnc"]
     profile.preset = ""
-    errors = [i for i in ident.validate(profile) if i.severity == "error"]
-    assert [i.path for i in errors] == ["values.imsi"]
-    assert "MCC/MNC" in errors[0].message
-    profile.values["imsi"].provider = "hook"
+    issues = [i for i in ident.validate(profile) if i.path == "values.imsi"]
+    assert [i.severity for i in issues] == ["warning"]
+    assert "MCC/MNC" in issues[0].message
     assert not [i for i in ident.validate(profile) if i.severity == "error"]
+    # No guess at the MNC length: no SIM launch at all.
+    assert ident.identity_sim.sim_values(profile) is None
+    profile.values["imsi"].enabled = False
+    assert not [i for i in ident.validate(profile) if i.path == "values.imsi"]
 
 
 @pytest.mark.parametrize(
@@ -1821,3 +1825,87 @@ def test_the_emulator_phone_number_fallback_is_no_sim_launch_value(service, devi
     plan = service.plan(SERIAL, "com.example.app")
     assert not plan.infos["phone_number"].sim_launch
     assert plan.infos["imsi"].sim_launch
+
+
+def _no_answer_toggle(monkeypatch, device) -> list[str]:
+    """The toggle times out (adb returns nothing); every attempt is logged."""
+    tries: list[str] = []
+    real = ident._Device.shell
+
+    def shell(self, script, **kw):
+        if "airplane-mode enable" in script:
+            tries.append(script)
+            return ""
+        return real(self, script, **kw)
+
+    monkeypatch.setattr(ident._Device, "shell", shell)
+    return tries
+
+
+def test_a_toggle_without_answer_is_tried_once_more(
+    service, device, app_start, monkeypatch
+):
+    _launched(service, device)
+    device.modem = dict(STOCK_SIM)  # the guest keeps showing the old SIM
+    tries = _no_answer_toggle(monkeypatch, device)
+    plan = service.apply(SERIAL, "com.example.app")
+    assert plan.infos["imsi"].status == "pending"
+    assert plan.infos["imsi"].reason == ident.SIM_TOGGLE_RETRY
+    assert device.airplane == ["disable"]  # switched off again
+    # Not done: the next start applies again, and tries once more.
+    assert service.pre_spawn("com.example.app") is not None
+    plan = service.apply(SERIAL, "com.example.app")
+    assert len(tries) == 2
+    assert plan.infos["imsi"].status == "failed"
+    assert plan.infos["imsi"].reason == "airplane mode: no answer"
+    service.apply(SERIAL, "com.example.app")
+    assert len(tries) == 2  # the launch's result is final now
+
+
+def test_a_snapshot_load_allows_a_new_toggle(service, device, monkeypatch):
+    from sandroid.services import emulator_service
+
+    sim = _launched(service, device)
+    device.props["gsm.sim.operator.numeric"] = sim.mccmnc
+    service.apply(SERIAL, "com.example.app")
+    assert device.airplane == ["enable", "disable"]
+    # The console restores a snapshot: same boot id and launch token, the
+    # guest has the old SIM cached again.
+    device.sim = dict(STOCK_SIM)
+    device.airplane.clear()
+    service.apply(SERIAL, "com.example.app")
+    assert not device.airplane  # without the notice: no new toggle
+    monkeypatch.setattr(ident, "get_identity_service", lambda: service)
+    emulator_service._world_change("snapshot-load", dev=SERIAL)
+    plan = service.apply(SERIAL, "com.example.app")
+    assert device.airplane == ["enable", "disable"]
+    assert plan.infos["imsi"].status == "verified"
+    service.sim_launch_changed()  # all serials
+    assert not service._sim_toggles
+
+
+def test_a_refused_toggle_with_the_old_sim_read_back_fails(service, device):
+    _launched(service, device)
+    device.modem = dict(STOCK_SIM)  # the guest keeps showing the old SIM
+    device.uid = "2000"
+    device.shell_reads_sim = True  # API 35 read-back works for the shell user
+    device.airplane_fail = {"enable"}
+    plan = service.apply(SERIAL, "com.example.app")
+    assert plan.infos["imsi"].status == "failed"
+    assert plan.infos["imsi"].reason == (
+        "airplane mode could not be switched without root; the device still "
+        f"reports {STOCK_SIM['imsi']}"
+    )
+    assert plan.infos["imsi"].sim_launch  # does not block app starts
+
+
+def test_an_unreadable_system_image_gives_no_restart_advice(
+    service, device, monkeypatch
+):
+    def broken(emu, profile):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(ident.identity_sim, "restart_blocker", broken)
+    plan = service.plan(SERIAL, "com.example.app")
+    assert plan.infos["iccid"].status == "skipped"
+    assert plan.infos["iccid"].reason == "the emulator's system image could not be read"

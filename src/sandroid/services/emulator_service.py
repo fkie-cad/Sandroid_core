@@ -169,6 +169,16 @@ def _world_change(cause: str, **kwargs) -> None:
     """:meth:`TimelineService.on_world_change` (never raises)."""
     if not isinstance(kwargs.get("dev"), str):
         kwargs["dev"] = None
+    if cause in ("snapshot-load", "cold-boot"):
+        # The guest has its old SIM cached again: allow a new SIM re-read.
+        try:
+            from sandroid.services.identity import get_identity_service
+
+            get_identity_service().sim_launch_changed(kwargs["dev"])
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "identity: SIM launch change failed", exc_info=True
+            )
     data = kwargs.get("data")
     if isinstance(data, dict) and isinstance(data.get("name"), bytes):
         data["name"] = _name_text(data["name"])

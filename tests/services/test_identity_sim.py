@@ -6,6 +6,7 @@ No emulator, no adb: a fake system image directory under ``tmp_path``.
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -511,3 +512,44 @@ def test_running_emulator_has_a_launch_token(avd, monkeypatch):
     assert found.sim is None
     assert not found.own_sysdir
     assert sim.running_emulator("R58M123", "Dev1") is None
+
+
+def test_post_stop_keeps_the_sysdir_of_a_running_instance(
+    avd, profile_env, monkeypatch
+):
+    _activate(profile_env)
+    args = sim.pre_launch(_context(avd))
+    monkeypatch.setattr(emulator, "avd_lock_files", lambda name: [Path("x.lock")])
+    sim.post_stop(_context(avd))  # a refused duplicate launch
+    assert Path(args[1]).is_dir()
+    monkeypatch.setattr(emulator, "avd_lock_files", lambda name: [])
+    sim.post_stop(_context(avd))
+    assert not Path(args[1]).exists()
+
+
+def test_dangling_links_are_skipped_and_copy_errors_degrade(
+    avd, profile_env, image, monkeypatch
+):
+    _activate(profile_env)
+    data = image / "data"
+    data.chmod(0o755)
+    (data / "gone").symlink_to(image / "nowhere")
+    args = sim.pre_launch(_context(avd))
+    assert args[0] == "-sysdir"
+    assert not (Path(args[1]) / "data" / "gone").exists()
+
+    def broken_copy(src, dst, *a, **k):
+        raise shutil.Error([(str(src), str(dst), "unreadable")])
+
+    monkeypatch.setattr(sim.shutil, "copyfile", broken_copy)
+    sim.post_stop(_context(avd))
+    assert sim.pre_launch(_context(avd)) == ()
+    assert [p.name for p in sim.sysdir_path("Dev1").parent.iterdir()] == []
+
+
+def test_restart_blocker_names_an_unknown_mcc_mnc(avd, profile_env):
+    profile = _activate(profile_env)
+    del profile.values["sim_mccmnc"]
+    profile.preset = ""
+    running = sim.RunningEmulator("emulator-5580", "Dev1", avd)
+    assert sim.restart_blocker(running, profile) == sim.MNC_UNKNOWN

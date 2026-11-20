@@ -102,6 +102,12 @@ SIM_NOT_READ_ROOT = "set when the emulator started; not read back without root"
 #: The emulator started with it, airplane mode is on: the guest reads the
 #: SIM card when airplane mode is turned off (left on: often deliberate).
 SIM_AIRPLANE_ON = "the device reads it when airplane mode is turned off"
+#: The airplane-mode toggle got no answer (adb timeout, dropped link): the
+#: next apply tries once more.
+SIM_TOGGLE_RETRY = "airplane mode got no answer; the next apply tries again"
+#: The toggle result that counts as no answer from the device.
+_NO_ANSWER = "no answer"
+_TOGGLE_INTERRUPTED = "the toggle was interrupted"
 SIM_TOGGLE_REFUSED = (
     "set when the emulator started; airplane mode could not be switched "
     "without root, so the device may still show the old SIM"
@@ -1079,8 +1085,9 @@ def validate(profile: Profile) -> list[Issue]:
         for sev, msg in _check_value(vs.kind, value, vs.effective_provider, mccmnc):
             add(sev, f"values.{vid}", msg)
         if vs.kind == "imsi" and vs.effective_provider == "native" and not mccmnc:
+            # A warning only: the emulator then keeps its own SIM.
             add(
-                "error",
+                "warning",
                 f"values.{vid}",
                 "the IMSI needs the SIM MCC/MNC: add a SIM operator MCC/MNC "
                 "value or a country preset",
@@ -2292,6 +2299,8 @@ class IdentityService:
         #: Airplane-mode toggles for the SIM, one per emulator launch:
         #: ``(serial, boot id, launch token) -> error text ("" = done)``.
         self._sim_toggles: dict[tuple[str, str, str], str] = {}
+        #: Launches whose toggle got no answer once (one more try each).
+        self._sim_retry: set[tuple[str, str, str]] = set()
         self._hook_installed = False
         self._sleep: Callable[[float], None] = time.sleep
         self._clock: Callable[[], float] = time.monotonic
@@ -2789,6 +2798,22 @@ class IdentityService:
                 info.status = "verified"
         return plan
 
+    def sim_launch_changed(self, serial: str | None = None) -> None:
+        """Forget the airplane-mode toggles of ``serial`` (``None``: all).
+
+        Call it when the guest state was replaced without a new emulator
+        launch (a snapshot load from the console, a cold boot): the guest
+        has the old SIM cached again while boot id and launch token stay.
+        """
+        with self._lock:
+            for store in (self._sim_toggles, self._sim_retry):
+                for key in list(store):
+                    if serial is None or key[0] == serial:
+                        if isinstance(store, dict):
+                            store.pop(key, None)
+                        else:
+                            store.discard(key)
+
     def _sim_key(
         self, state: DeviceState, emu: identity_sim.RunningEmulator | None
     ) -> tuple[str, str, str]:
@@ -2835,11 +2860,19 @@ class IdentityService:
             launched = bool(have) and have == desired
         if launched:
             readable = vs.kind == "sim_mccmnc" or state.sim_read
+            key = self._sim_key(state, emu)
             with self._lock:
-                toggled = self._sim_toggles.get(self._sim_key(state, emu))
+                toggled = self._sim_toggles.get(key)
+                retry = key in self._sim_retry
             if toggled is not None:
                 if toggled and state.root:
                     info.status, info.reason = "failed", f"airplane mode: {toggled}"
+                elif toggled and readable:
+                    info.status = "failed"
+                    info.reason = (
+                        "airplane mode could not be switched without root; the "
+                        f"device still reports {current or 'nothing'}"
+                    )
                 elif toggled:
                     info.status, info.reason = "applied", SIM_TOGGLE_REFUSED
                 elif readable:
@@ -2855,6 +2888,8 @@ class IdentityService:
                 info.status, info.reason = "applied", SIM_AIRPLANE_ON
             else:
                 plan.steps.append(Step(vid, "none", desired, current, via="sim"))
+                if retry:
+                    info.reason = SIM_TOGGLE_RETRY
             return
         if vs.kind == "phone_number":
             if mem.emu.get(vid) == desired:
@@ -2866,7 +2901,11 @@ class IdentityService:
                 # adb emu phonenumber takes at most 11 digits, no '+'.
                 plan.steps.append(Step(vid, "none", desired, current))
                 return
-        blocker = identity_sim.restart_blocker(emu, profile)
+        try:
+            blocker = identity_sim.restart_blocker(emu, profile)
+        except (OSError, identity_sim.SimPatchError) as exc:
+            logger.debug(f"identity: SIM restart check failed: {exc}")
+            blocker = "the emulator's system image could not be read"
         if blocker:
             info.status, info.reason = "skipped", blocker
         else:
@@ -3282,7 +3321,7 @@ class IdentityService:
             None,
             data={"values": [s.value_id for s in steps]},
         )
-        err = "the toggle was interrupted"
+        err = _TOGGLE_INTERRUPTED
         try:
             err = self._check(
                 dev.shell(
@@ -3323,7 +3362,14 @@ class IdentityService:
                     break
         finally:
             with self._lock:
-                self._sim_toggles[key] = err
+                if err in (_NO_ANSWER, _TOGGLE_INTERRUPTED) and key not in (
+                    self._sim_retry
+                ):
+                    # No answer (adb timeout, dropped link): one more try on
+                    # the next apply, not this launch's final result.
+                    self._sim_retry.add(key)
+                else:
+                    self._sim_toggles[key] = err
             if err:
                 # Back to off (it was off) whatever failed.
                 try:
