@@ -607,6 +607,20 @@ def still_matches(target: dict, live: dict, item: dict[str, Any]) -> bool:
     return node_matches(want, {"node": cand, "texts": texts})
 
 
+def _top_inside(
+    top: dict, item: dict[str, Any], items: list[dict[str, Any]], live: dict
+) -> bool:
+    """The live ``top`` node lies inside the matched web element. A node the
+    dump does not know (an overlay that appeared after it) is not: web paths
+    are all ``View``, so bounds and path would take any overlay inside the
+    element's box for a part of it.
+    """
+    nid = top.get("nid")
+    if nid is not None and not any(it["node"].get("nid") == nid for it in items):
+        return False
+    return bool(_inner_of(top, item, items, live.get("top_path")))
+
+
 def hit_is_element(
     live: Any, item: dict[str, Any], items: list[dict[str, Any]]
 ) -> bool:
@@ -629,9 +643,7 @@ def hit_is_element(
     if isinstance(top, dict) and isinstance(node.get("web"), dict):
         # Web content takes the tap at the element painted on top, even one
         # that does not listen for it (a banner over part of a button).
-        if not (
-            _same_node(top, node) or _inner_of(top, item, items, live.get("top_path"))
-        ):
+        if not (_same_node(top, node) or _top_inside(top, item, items, live)):
             return False
     if _same_node(tgt, node) or _same_node(hit, node):
         return True

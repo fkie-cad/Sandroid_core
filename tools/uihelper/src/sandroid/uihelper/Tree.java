@@ -512,18 +512,39 @@ final class Tree {
         return fallback;
     }
 
+    /** Web text runs: one box over all their wrapped lines. */
+    private static final java.util.Set<String> TEXT_RUNS = new java.util.HashSet<>(
+            Arrays.asList("text leaf", "staticText", "inlineTextBox", "text"));
+
     /**
      * The deepest node under (x,y) following only the top-most sibling at
      * every level. Web content hit-tests this way: an element painted on top
      * takes the tap whether or not it listens for it (a cookie banner over a
      * button), unlike a native view that lets an unclickable overlay pass.
+     * A text run is skipped while another sibling is under the point (its
+     * box spans every wrapped line: a link inside a paragraph is not under
+     * the text after it). Web nodes have no drawing order, so "top-most" is
+     * last in document order: an earlier element raised by z-index (a
+     * sticky header) is not seen.
      */
     static SNode topmost(SNode n, int x, int y, int textMax) {
         for (SNode[] cand = under(n, x, y, textMax); cand.length > 0;
                 cand = under(n, x, y, textMax)) {
-            n = cand[0];
+            SNode pick = cand[0];
+            for (SNode c : cand) {
+                if (!textRun(c)) {
+                    pick = c;
+                    break;
+                }
+            }
+            n = pick;
         }
         return n;
+    }
+
+    private static boolean textRun(SNode s) {
+        return s.engine != null && s.role != null && TEXT_RUNS.contains(s.role)
+                && s.childCount == 0;
     }
 
     static SNode target(SNode deep) {

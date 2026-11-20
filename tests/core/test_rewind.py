@@ -1670,6 +1670,37 @@ def test_a_top_node_inside_the_web_element_is_the_element():
     assert (step["steps"][0]["check"], log) == ("verified", ["input tap 540 1200"])
 
 
+def test_a_web_overlay_inside_the_element_box_is_not_part_of_it():
+    # a badge over the button that the dump does not know (appeared later):
+    # never "inside" by its box alone
+    gecko = {"engine": "gecko", "role": "button"}
+    button = _node("Target", rid="target", bounds=(42, 1016, 1038, 1381), web=gecko,
+                   nid=7)  # fmt: skip
+    badge = _node("New", cls="android.view.View", bounds=(100, 1100, 700, 1300),
+                  web={"engine": "gecko", "role": "alert"}, nid=99)  # fmt: skip
+    helper = WebCoverHelper(_web_dump(button), button, badge)
+    target = {"web": {"html_id": "target"}, "bounds": [42, 1016, 1038, 1381]}
+    log: list[str] = []
+    rep, _ = _replayer(helper, log)
+    report = rep.run(
+        extract_steps([_tap(target=target, x=250, y=1200, screen=_SCREEN)])
+    )
+    step = report["steps"][0]
+    assert step["reason"] == "your spot was covered, tapped another spot of it"
+    x, y = (int(v) for v in log[0].split()[2:])
+    assert not (100 <= x < 700 and 1100 <= y < 1300)
+    # the same node known to the dump as the button's child: part of it
+    inner = {**badge, "nid": 8}
+    button2 = {**button, "kids": [inner]}
+    helper = WebCoverHelper(_web_dump(button2), button2, inner)
+    log.clear()
+    rep, _ = _replayer(helper, log)
+    report = rep.run(
+        extract_steps([_tap(target=target, x=250, y=1200, screen=_SCREEN)])
+    )
+    assert (report["steps"][0]["check"], log) == ("verified", ["input tap 250 1200"])
+
+
 def test_a_weak_recorded_target_goes_by_position_unchecked():
     target = {"label": "spi", "rid": "mozac.awesomebar.suggestion",
               "stale_possible": True}  # fmt: skip
@@ -1937,6 +1968,24 @@ def test_all_selected_needs_the_whole_text_in_utf16_units():
     # a text the helper cut: its length is unknown
     assert not _all_selected({"text": "x" * 500 + "\u2026", "sel_start": 0,
                               "sel_end": 501})  # fmt: skip
+
+
+def test_a_later_texts_keys_are_plain_keys_when_its_field_is_not_verified():
+    # "ab" is typed into p:id/url; "cd" belongs to p:id/pw, which never has
+    # the focus: its keys are tapped, and are not "after typing"
+    first = _keyboard_lines("ab")
+    second = [_tap(seq=60 + i, t=110 + i * 0.3, ime=True, x=70, y=2000)
+              for i in range(2)]  # fmt: skip
+    text2 = _text("cd", seq=70, t=110)
+    text2["data"]["target"] = {"rid": "p:id/pw", "bounds": [180, 400, 807, 520]}
+    rep, _, _ = _typing_replayer(TypingField())
+    report = rep.run(extract_steps([*first, *second, text2]))
+    assert report["steps"][0]["check"] == "verified"
+    assert report["steps"][2]["reason"] == (
+        "keyboard key, its field could not be verified"
+    )
+    assert report["steps"][3]["reason"].startswith("keyboard key")
+    assert "after typing" not in report["steps"][3]["reason"]
 
 
 def test_an_earlier_texts_keys_are_never_typed_again():
