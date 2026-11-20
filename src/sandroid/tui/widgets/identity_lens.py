@@ -859,7 +859,10 @@ class IdentityLens(Vertical):
         if ident is None:
             return
         wanted = _device_profile_id(ident)
-        if not wanted or wanted == self.profile.id or wanted == self._followed:
+        if wanted == self.profile.id:
+            self._followed = ""  # in step again: the next change reloads
+            return
+        if not wanted or wanted == self._followed:
             return
         self._followed = wanted  # one reload per change (a missing profile)
         self._statuses.clear()

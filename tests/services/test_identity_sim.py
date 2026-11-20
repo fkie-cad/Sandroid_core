@@ -724,3 +724,18 @@ def test_restart_blocker_follows_the_launch_persona(avd, profile_env, monkeypatc
     monkeypatch.setattr(sim, "_context_has_meta", lambda: False)
     assert sim.restart_blocker(running, persona) == sim.PERSONA_SIM_ACTIVE
     assert sim.restart_blocker(running, active) == ""
+
+
+def test_a_restart_follows_only_its_launchs_persona(avd, profile_env, monkeypatch):
+    active = _activate(profile_env)
+    persona = _persona_profile()
+    from sandroid.core import emulator as emu
+
+    service = ident.get_identity_service()
+    monkeypatch.setattr(emu, "launch_record", lambda serial: None)
+    monkeypatch.setattr(service, "persona_of", lambda serial: persona.id)
+    monkeypatch.setattr(sim, "_context_has_meta", lambda: True)
+    running = sim.RunningEmulator("emulator-5580", "Dev1", avd)
+    # A persona only the device record names: a restart starts the active SIM.
+    assert sim.restart_blocker(running, persona) == sim.PERSONA_SIM_ACTIVE
+    assert sim.restart_blocker(running, active) == ""

@@ -1074,8 +1074,12 @@ def _context_has_meta() -> bool:
 
 def _restart_profile_id(service: Any, serial: str) -> str:
     """The profile whose SIM a restart of ``serial`` from Sandroid sets."""
+    from sandroid.services.identity import launch_persona_id
+
     if _context_has_meta():
-        return service.profile_id_for(serial)
+        # A restart passes its launch's meta on: only that persona counts
+        # (one the device record names is not the restart's).
+        return launch_persona_id(serial) or str(service.config().profile or "")
     return str(service.config().profile or "")
 
 
