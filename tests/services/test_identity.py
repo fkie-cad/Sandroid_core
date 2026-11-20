@@ -985,7 +985,16 @@ def test_ensure_applied_is_nothing_with_identity_mode_off(service, device, monke
     assert device.calls == []
 
 
-def test_ensure_applied_applies_then_costs_one_read_and_no_writes(service, device):
+def _restart_policy(monkeypatch, policy: str) -> None:
+    from sandroid.config import get_config
+
+    monkeypatch.setattr(get_config().identity, "restart", policy)
+
+
+def test_ensure_applied_applies_then_costs_one_read_and_no_writes(
+    service, device, monkeypatch
+):
+    _restart_policy(monkeypatch, "always")
     plan = service.ensure_applied(SERIAL)
     assert plan is not None
     # No app: the framework value is the locale (the Android ID waits for one).
@@ -1002,7 +1011,10 @@ def test_ensure_applied_applies_then_costs_one_read_and_no_writes(service, devic
     assert service._time_left() is None  # the budget ends with the call
 
 
-def test_ensure_applied_starts_no_restart_the_budget_cannot_hold(service, device):
+def test_ensure_applied_starts_no_restart_the_budget_cannot_hold(
+    service, device, monkeypatch
+):
+    _restart_policy(monkeypatch, "always")
     pid = device.pid
     plan = service.ensure_applied(SERIAL, budget_s=ident.ENSURE_WINDOW_MIN_S - 1)
     assert plan is not None
@@ -1011,12 +1023,39 @@ def test_ensure_applied_starts_no_restart_the_budget_cannot_hold(service, device
     assert service.restarts_seen == []
     info = plan.infos["locale"]
     assert (info.status, info.reason) == ("pending", ident.OUT_OF_TIME)
+    assert info.reason.startswith("not applied: ")  # pending, not skipped
     # The live values are applied all the same.
     assert plan.infos["device_name"].status == "verified"
     # Not done: the next preparation with time to spare restarts.
     again = service.ensure_applied(SERIAL)
     assert again.infos["locale"].status == "verified"
     assert service.restarts_seen == [SERIAL]
+
+
+@pytest.mark.parametrize("policy", ["ask", "never"])
+def test_ensure_applied_leaves_the_restart_to_the_app_start(
+    service, device, monkeypatch, policy
+):
+    """Only restart = "always" opens a window during device preparation;
+    under "ask" the first app start's pre-start step asks as usual.
+    """
+    _restart_policy(monkeypatch, policy)
+    pid = device.pid
+    plan = service.ensure_applied(SERIAL)
+    assert device.pid == pid
+    assert service.restarts_seen == []
+    info = plan.infos["locale"]
+    assert (info.status, info.reason) == ("pending", ident.NEEDS_RESTART)
+    assert plan.infos["device_name"].status == "verified"
+
+
+def test_ensure_applied_names_a_running_apply(service, device):
+    with service._apply_lock:
+        with pytest.raises(
+            ident.IdentityApplyError, match="another identity apply is running"
+        ):
+            service.ensure_applied(SERIAL, budget_s=0.01)
+    assert device.calls == []
 
 
 def test_ensure_applied_caps_the_waits_to_the_budget(service, device):

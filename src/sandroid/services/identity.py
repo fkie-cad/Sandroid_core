@@ -163,7 +163,7 @@ RESTART_POLL_S = 2.0
 #: what is left).
 ENSURE_WINDOW_MIN_S = 90.0
 #: Why a framework value stays pending when the budget ran out.
-OUT_OF_TIME = "skipped: device preparation ran out of time"
+OUT_OF_TIME = "not applied: device preparation ran out of time"
 
 _UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I
@@ -3506,8 +3506,11 @@ class IdentityService:
         """Device preparation: apply the active profile within ``budget_s``.
 
         For a worker thread when a device comes up (no dialog). Like
-        :meth:`apply` without a package, the framework restart following
-        ``identity.restart`` (``never``: not at all). Already applied, it
+        :meth:`apply` without a package. Only ``identity.restart = "always"``
+        opens a framework window here; under ``ask`` (the default) and
+        ``never`` the framework values stay pending (:data:`NEEDS_RESTART`),
+        so the first app start's pre-start step asks as usual. Already
+        applied, it
         costs one preflight and writes nothing. The budget is a monotonic
         deadline: the waits (providers, SIM, framework) end with it, and no
         framework window starts with less than :data:`ENSURE_WINDOW_MIN_S`
@@ -3539,12 +3542,12 @@ class IdentityService:
         deadline = self._clock() + max(0.0, budget_s)
         if not self._apply_lock.acquire(timeout=max(0.0, budget_s)):
             raise IdentityApplyError(
-                f"another identity apply on {serial} outlasted the budget"
+                "another identity apply is running (it outlasted the budget)"
             )
         self._call.deadline = deadline
         self._call.device_ok = None
         try:
-            plan = self._apply(serial, None, cfg.restart != "never", profile)
+            plan = self._apply(serial, None, cfg.restart == "always", profile)
             device_ok = self._call.device_ok
         finally:
             self._call.deadline = None
