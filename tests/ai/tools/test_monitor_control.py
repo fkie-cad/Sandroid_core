@@ -416,3 +416,13 @@ def test_get_file_diff_pulls_sqlite_companions(monkeypatch, tmp_path):
         "/data/data/com.example/app.db-wal",
         "/data/data/com.example/app.db-journal",
     ]
+
+
+def test_get_file_diff_asks_for_approval():
+    """It adds the path to the watchlist and keeps a version: not read-only."""
+    from sandroid.ai.tools.registry import RiskTier, get_tool_registry
+
+    spec = get_tool_registry().get_spec("get_file_diff")
+    assert spec.risk == RiskTier.REVERSIBLE
+    assert spec.can_remember_choice is True
+    assert not spec.resources

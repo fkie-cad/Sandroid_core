@@ -20,8 +20,10 @@ import-time dependency of this package).
   claiming/releasing :attr:`~sandroid.ai.arbiter.ResourceId.MONITOR`
   respectively (a still-running monitor session naturally blocks a second AI
   owner from starting another one).
-- ``get_file_monitor_status``, ``get_recent_file_changes``, ``get_file_diff``
-  -- all ``RiskTier.READ_ONLY``, no resource claimed.
+- ``get_file_monitor_status``, ``get_recent_file_changes`` -- both
+  ``RiskTier.READ_ONLY``, no resource claimed.
+- ``get_file_diff`` -- ``RiskTier.REVERSIBLE`` (``can_remember_choice``),
+  no resource claimed: it adds the path to the watchlist and keeps a version.
 
 ``get_file_diff`` is the odd one out: it does not touch ``MonitorController``
 at all. It drives the existing Files-tab Watchlist mechanism instead (see
@@ -324,8 +326,11 @@ def get_recent_file_changes(
         },
         "required": ["path"],
     },
-    risk=RiskTier.READ_ONLY,
+    # Not read-only: it adds the path to the watchlist and keeps a new
+    # version (watchlist side effects), so the analyst approves it.
+    risk=RiskTier.REVERSIBLE,
     category="fs_monitor",
+    can_remember_choice=True,
 )
 def get_file_diff(path: str) -> dict[str, Any]:
     """Pull one on-device file and diff it against its watchlist baseline.
