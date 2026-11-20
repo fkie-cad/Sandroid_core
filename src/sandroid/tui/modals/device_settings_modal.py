@@ -5,7 +5,6 @@ Supports country presets for quick setup. Emulator-only and root-only controls
 are disabled when not available.
 """
 
-import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -32,7 +31,7 @@ from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
 
 logger = logging.getLogger(__name__)
 
-#: Longest failure reason shown in the status line.
+#: Longest result detail (or failure reason) shown in the status line.
 _REASON_MAX = 120
 
 
@@ -133,6 +132,8 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
 
     DeviceSettingsModal .status-label {
         height: auto;
+        max-height: 6;
+        overflow-y: auto;
         margin-top: 1;
         color: $text-muted;
         text-align: center;
@@ -542,8 +543,10 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
             coords = self._get_settings_service().geocode_location(country, city)
         except Exception as e:
             error = e
-        with contextlib.suppress(Exception):
+        try:
             app.call_from_thread(self._geocode_done, city, country, coords, error)
+        except Exception:
+            logger.debug("Could not show the geocode result", exc_info=True)
 
     def _geocode_done(
         self,
@@ -671,13 +674,18 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
 
         from sandroid.core.adb import Adb
 
+        # Pin the whole run to the device the user is looking at now, so a
+        # device switch mid-run can't split the work across two devices.
+        serial = Adb.get_target_device() or Adb.selected_serial()
+        if not serial:
+            self._update_status("[$error]No device selected[/]")
+            return
         self._set_applying(True)
         self._update_status("Applying...")
-        # Pin the whole run to the device the user is looking at now.
-        self._run_apply(self.app, plan, Adb.get_target_device())
+        self._run_apply(self.app, plan, serial)
 
     @work(thread=True, exclusive=True, group="device-settings-apply")
-    def _run_apply(self, app: App, plan: list[_PlanEntry], serial: str | None) -> None:
+    def _run_apply(self, app: App, plan: list[_PlanEntry], serial: str) -> None:
         """Run the adb/console round trips of *plan* off the UI thread.
 
         *app* is taken on the UI thread: once the modal is closed,
@@ -709,8 +717,10 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
             logger.debug("Device settings apply failed", exc_info=True)
             outcomes.append(_Outcome("Settings", False, str(e)))
         # The modal may be closed (or the app gone) by now.
-        with contextlib.suppress(Exception):
+        try:
             app.call_from_thread(self._apply_done, outcomes)
+        except Exception:
+            logger.debug("Could not show the device settings results", exc_info=True)
 
     def _apply_done(self, outcomes: list[_Outcome]) -> None:
         """Show the results of a run (UI thread)."""
@@ -740,11 +750,14 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         parts = []
         for outcome in outcomes:
             label = escape(outcome.label)
+            detail = escape(" ".join(outcome.detail.split())[:_REASON_MAX])
             if outcome.ok:
                 self._messages.append(outcome.detail)
-                parts.append(f"[$success]{label} applied[/]")
+                if detail:
+                    parts.append(f"[$success]{label} applied: {detail}[/]")
+                else:
+                    parts.append(f"[$success]{label} applied[/]")
             else:
-                reason = " ".join(outcome.detail.split())[:_REASON_MAX]
-                reason = escape(reason or "unknown error")
+                reason = detail or "unknown error"
                 parts.append(f"[$error]{label} failed: {reason}[/]")
         self._update_status("; ".join(parts))

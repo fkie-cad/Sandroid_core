@@ -15,8 +15,11 @@ from pilot_helpers import settle, until
 from textual.app import App
 from textual.widgets import Button, Input, Static
 
+from sandroid.core.adb import Adb
 from sandroid.services.device_settings_service import SettingsResult
 from sandroid.tui.modals.device_settings_modal import DeviceSettingsModal
+
+SERIAL = "emulator-5560"
 
 APPLY_BUTTONS = (
     "#btn-apply-location",
@@ -74,6 +77,8 @@ class _Harness(App):
 def service(monkeypatch, request) -> _FakeService:
     svc = _FakeService(gated=getattr(request, "param", False))
     monkeypatch.setattr("sandroid.services.get_device_settings_service", lambda: svc)
+    # A device is selected unless a test says otherwise.
+    monkeypatch.setattr(Adb, "get_target_device", classmethod(lambda cls: SERIAL))
     return svc
 
 
@@ -138,10 +143,10 @@ async def test_failures_use_error_style_and_successes_success_style(
         await until(pilot, lambda: "Bluetooth" in _status(modal))
         status = _status(modal)
 
-        assert "[$success]Location applied[/]" in status
+        assert "[$success]Location applied: GPS set to 52.52, 13.405[/]" in status
         assert "[$error]Timezone failed: no root shell[/]" in status
         assert "[$error]Accelerometer failed: invalid value[/]" in status
-        assert "[$success]WiFi applied[/]" in status
+        assert "[$success]WiFi applied: toggled[/]" in status
         assert "green" not in status
         for glyph in ("✓", "✗", "✔", "✘", "•", " · "):
             assert glyph not in status
@@ -165,6 +170,43 @@ async def test_empty_tab_warns_without_starting_a_run(service) -> None:
         assert _status(modal) == "[$warning]Enter latitude and longitude[/]"
         assert not service.started.is_set()
         assert not modal._applying
+
+
+@pytest.mark.asyncio
+async def test_no_device_selected_refuses_to_start(service, monkeypatch) -> None:
+    monkeypatch.setattr(Adb, "get_target_device", classmethod(lambda cls: None))
+    monkeypatch.setattr(Adb, "selected_serial", classmethod(lambda cls: None))
+    app = _Harness()
+    async with app.run_test() as pilot:
+        modal = await _open(pilot)
+        modal.query_one("#btn-apply-location", Button).press()
+        await settle(pilot)
+        assert _status(modal) == "[$error]No device selected[/]"
+        assert not service.started.is_set()
+        assert not modal._applying
+        assert _apply_disabled(modal) == [False, False, False, False]
+
+
+@pytest.mark.asyncio
+async def test_run_is_pinned_to_the_selected_serial(service, monkeypatch) -> None:
+    monkeypatch.setattr(Adb, "get_target_device", classmethod(lambda cls: None))
+    monkeypatch.setattr(Adb, "selected_serial", classmethod(lambda cls: "emu-9"))
+    seen: list[str | None] = []
+    real_gps = service.set_gps_location
+
+    def gps(lat: float, lon: float) -> SettingsResult:
+        from sandroid.core import adb as adb_mod
+
+        seen.append(getattr(adb_mod._thread_target, "serial", None))
+        return real_gps(lat, lon)
+
+    service.set_gps_location = gps
+    app = _Harness()
+    async with app.run_test() as pilot:
+        modal = await _open(pilot)
+        modal.query_one("#btn-apply-location", Button).press()
+        await until(pilot, lambda: "applied" in _status(modal))
+        assert seen == ["emu-9"]
 
 
 @pytest.mark.asyncio
