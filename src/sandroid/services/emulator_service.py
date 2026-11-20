@@ -1017,7 +1017,9 @@ class EmulatorService:
             # device_prepared hooks).
             from sandroid.core import device_prep
 
-            with device_prep.hold(serial, "snapshot-load"):
+            # The same device for the hold and the world change: the poll's
+            # re-attach of the loaded device then finds it held.
+            with device_prep.hold(loaded, "snapshot-load"):
                 # The device's state was replaced: a new world on the session
                 # timeline, BEFORE anything samples the restored clocks (the
                 # device-clock barrier keeps fresh monotonic times off the old
