@@ -53,6 +53,14 @@ LEAF_ONLY = frozenset(
 #: The keys of a value of which exactly one is set: a child setting one of
 #: them replaces the parent's source instead of merging next to it.
 VALUE_SOURCES = ("value", "template", "derive")
+#: What a value's optional keys mean when left out: a profile that drops one
+#: its parent sets writes the default, or the parent's would show through.
+VALUE_DEFAULTS: dict[str, Any] = {
+    "enabled": True,
+    "provider": "",
+    "label": "",
+    "scope": "signer",
+}
 _BUILTIN_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 
 #: Paths whose maps and lists are written in flow style (one line), ``*``
@@ -251,7 +259,11 @@ def parents_of(
     return base
 
 
-def own_diff(new: Any, base: Any) -> Any:
+def _is_value(path: tuple[str, ...]) -> bool:
+    return len(path) == 2 and path[0] == "values"
+
+
+def own_diff(new: Any, base: Any, path: tuple[str, ...] = ()) -> Any:
     """What a profile has to write itself so that it merges to ``new`` over
     ``base`` (``_MISSING`` when it inherits all of it).
     """
@@ -260,9 +272,13 @@ def own_diff(new: Any, base: Any) -> Any:
     if isinstance(new, dict) and isinstance(base, dict):
         out = {}
         for key, value in new.items():
-            diff = own_diff(value, base.get(key, _MISSING))
+            diff = own_diff(value, base.get(key, _MISSING), (*path, str(key)))
             if diff is not _MISSING:
                 out[key] = diff
+        if _is_value(path):
+            for key, default in VALUE_DEFAULTS.items():
+                if key not in new and base.get(key, default) != default:
+                    out[key] = default  # else the parent's would show through
         return out if out else _MISSING
     return _MISSING if new == base else new
 
@@ -276,7 +292,7 @@ def own_view(new: dict[str, Any], base: dict[str, Any]) -> dict[str, Any]:
         if key in LEAF_ONLY:
             out[key] = value
             continue
-        diff = own_diff(value, base.get(key, _MISSING))
+        diff = own_diff(value, base.get(key, _MISSING), (str(key),))
         if diff is not _MISSING:
             out[key] = diff
     return out
@@ -311,12 +327,16 @@ def apply_changes(
             else:
                 doc[key] = to_node(value, sub)
             continue
-        diff = own_diff(value, base.get(key, _MISSING))
+        diff = own_diff(value, base.get(key, _MISSING), sub)
         if diff is not _MISSING:
             doc[key] = to_node(diff, sub)
     for key in [k for k in old if k not in new]:
         removed = doc.pop(key, _MISSING)
-        if removed is _MISSING and isinstance(base.get(key), list):
+        inherited = base.get(key, _MISSING)
+        default = VALUE_DEFAULTS.get(key, _MISSING) if _is_value(path) else _MISSING
+        if default is not _MISSING and inherited not in (_MISSING, default):
+            doc[key] = default  # back to the default over a parent's value
+        elif removed is _MISSING and isinstance(inherited, list):
             doc[key] = to_node([], (*path, str(key)))  # lists replace
 
 

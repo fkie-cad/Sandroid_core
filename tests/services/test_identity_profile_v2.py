@@ -175,6 +175,25 @@ def test_an_inherited_value_edited_is_written_as_an_own_override(svc, lib):
     assert not again.values["clipboard"].enabled
 
 
+def test_a_default_over_a_parents_setting_is_written(svc, lib):
+    _hand_written(lib)
+    profile = svc.load("mara")
+    assert not profile.values["build_model"].enabled  # off in builtin:de
+    profile.values["build_model"].enabled = True
+    svc.save(profile)
+    assert svc.load("mara").values["build_model"].enabled
+    own = store.plain(store.load_yaml((lib / "mara.yaml").read_text("utf-8")))
+    assert own["values"]["build_model"] == {"enabled": True}
+    profile = svc.load("mara")
+    profile.values["build_model"].enabled = False
+    svc.save(profile)
+    assert not svc.load("mara").values["build_model"].enabled
+    profile = svc.load("mara")
+    profile.values["build_model"].enabled = True  # the key is in the file now
+    svc.save(profile)
+    assert svc.load("mara").values["build_model"].enabled
+
+
 def test_lens_draft_copy_has_no_document(svc, lib):
     _hand_written(lib)
     profile = svc.load("mara")
