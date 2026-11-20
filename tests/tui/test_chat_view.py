@@ -199,6 +199,15 @@ def test_tool_name_args_and_chip_goldens() -> None:
     assert denied.plain == "denied · 1:02"
     assert "$lens-warn" in {s.style for s in denied.spans}
     assert format_chip(ok=False).plain == "failed"
+    # App-start refusals read as words in the warn colour.
+    for code, word in (
+        ("needs_confirmation", "needs your confirmation"),
+        ("declined_by_analyst", "declined by you"),
+        ("busy", "busy"),
+    ):
+        chip = format_chip(ok=False, code=code, message="x")
+        assert chip.plain == f"{word}: x"
+        assert "$lens-warn" in {s.style for s in chip.spans}
 
 
 def test_card_rule_and_notice_goldens() -> None:

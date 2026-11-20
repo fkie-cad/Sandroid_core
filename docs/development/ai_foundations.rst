@@ -242,7 +242,10 @@ Hooks:
   no new dependency.
 - **Structured errors:** ``ToolError{code, message, retryable, hint}`` with codes
   ``unknown_tool``, ``not_loaded``, ``invalid_arguments``, ``denied``, ``resource_conflict``,
-  ``timeout``, ``cancelled``, ``device_unavailable`` and ``tool_failed``.
+  ``timeout``, ``cancelled``, ``device_unavailable``, ``tool_failed`` and
+  ``backend_error``; the app-start tools add ``needs_confirmation`` (a
+  pre-start step stops every app and only the TUI dialog can confirm it),
+  ``declined_by_analyst`` and ``busy`` (another start holds the lock).
 - **Execution:** tools run sequentially.
 
   - Each ``ToolSpec.timeout_s`` defaults to 120.

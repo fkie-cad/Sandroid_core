@@ -405,3 +405,15 @@ def test_prompts_say_a_diverged_or_unchecked_replay_is_no_success():
         assert "never" in flat
     # The addition sits after the approvals rule; the start is unchanged.
     assert ORCHESTRATOR_PROMPT_V2.startswith("You are Sandroid's built-in AI assistant")
+
+
+def test_orchestrator_prompt_says_never_retry_a_declined_start():
+    from sandroid.ai.prompts import ORCHESTRATOR_PROMPT_V2
+    from sandroid.ai.tools.registry import TOOL_ERROR_CODES
+
+    flat = " ".join(ORCHESTRATOR_PROMPT_V2.split())
+    for code in ("declined_by_analyst", "needs_confirmation", "busy"):
+        assert f'"{code}"' in flat
+        assert code in TOOL_ERROR_CODES
+    assert "never retry it unless asked" in flat
+    assert "ask them" in flat

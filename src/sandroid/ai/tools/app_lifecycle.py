@@ -62,7 +62,7 @@ from typing import Any
 
 from sandroid.ai.errors import ToolExecutionError
 from sandroid.ai.tools._host_paths import resolve_confined_host_path
-from sandroid.ai.tools._shared import validate_package_name
+from sandroid.ai.tools._shared import start_refusal, validate_package_name
 from sandroid.ai.tools.registry import RiskTier, sandroid_tool
 from sandroid.core.adb import Adb
 from sandroid.core.exceptions import APKInstallError
@@ -280,6 +280,8 @@ def launch_app(package_name: str, activity_name: str | None = None) -> dict[str,
     Raises:
         ToolExecutionError: *package_name* does not match Android's package
             identifier format.
+        ToolError: The pre-start step was refused: ``needs_confirmation``,
+            ``declined_by_analyst`` or ``busy``.
     """
     from sandroid.services.app_start import AppStartError, prepare_launch
 
@@ -289,6 +291,9 @@ def launch_app(package_name: str, activity_name: str | None = None) -> dict[str,
         # Adb.launch_app quotes both values for the device and host shell.
         success, message = Adb.launch_app(package_name, activity_name or None)
     except AppStartError as exc:
+        refusal = start_refusal(getattr(exc, "reason", None), package_name, str(exc))
+        if refusal is not None:
+            raise refusal from exc
         success, message = False, str(exc)
     return {
         "launched": success,

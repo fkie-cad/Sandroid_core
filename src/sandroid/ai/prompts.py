@@ -48,6 +48,10 @@ resource; wait or report it.
 - Device-changing tools may need the analyst's approval. Code "denied" \
 means the analyst said no; a "note" in the error is their instruction. \
 Acknowledge it, follow the note and do not retry the same call.
+- App starts (start_spotlight_app, launch_app): "declined_by_analyst" means \
+the analyst said no: never retry it unless asked. "needs_confirmation" means \
+only the analyst can confirm it in the Sandroid TUI: ask them. "busy": try \
+again in a moment.
 - "success": false means the call did not succeed. A Rewind + Replay run \
 whose result is "diverged" (the steps did not reach what the recorded run \
 did) or "unchecked" (some steps could not be confirmed) did not succeed \

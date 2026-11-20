@@ -261,3 +261,49 @@ def test_launch_app_failure_surfaces_message(monkeypatch):
 
     assert result["launched"] is False
     assert result["message"] == "boom"
+
+
+@pytest.mark.parametrize(
+    ("reason", "code", "retryable"),
+    [
+        ("needs_consent", "needs_confirmation", False),
+        ("declined", "declined_by_analyst", False),
+        ("busy", "busy", True),
+    ],
+)
+def test_launch_app_maps_pre_start_refusals_to_tool_codes(
+    monkeypatch, reason, code, retryable
+):
+    from sandroid.ai.tools.registry import ToolError
+
+    launched = []
+
+    def refuse(*_a, **_k):
+        raise app_start.AppStartError("com.example.app not started", reason=reason)
+
+    monkeypatch.setattr(app_start, "prepare_launch", refuse)
+    monkeypatch.setattr(
+        Adb,
+        "launch_app",
+        staticmethod(lambda *a, **k: launched.append(a) or (True, "ok")),
+    )
+
+    with pytest.raises(ToolError) as info:
+        app_lifecycle.launch_app("com.example.app")
+
+    assert info.value.code == code
+    assert info.value.retryable is retryable
+    assert info.value.message.startswith("com.example.app not started: ")
+    assert launched == []
+
+
+def test_launch_app_other_pre_start_failures_stay_a_result(monkeypatch):
+    def fail(*_a, **_k):
+        raise app_start.AppStartError("pre-start step x failed: adb")
+
+    monkeypatch.setattr(app_start, "prepare_launch", fail)
+
+    result = app_lifecycle.launch_app("com.example.app")
+
+    assert result["launched"] is False
+    assert "pre-start step x failed" in result["message"]

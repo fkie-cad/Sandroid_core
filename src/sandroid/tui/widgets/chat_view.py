@@ -119,9 +119,15 @@ AGENT_STATUS: dict[str, tuple[str, str]] = {
 }
 
 #: Error codes shown as another word on a result chip.
-CHIP_CODE_WORDS = {"tool_failed": "failed"}
+CHIP_CODE_WORDS = {
+    "tool_failed": "failed",
+    "needs_confirmation": "needs your confirmation",
+    "declined_by_analyst": "declined by you",
+}
 #: Error codes of a call the analyst or the runtime stopped (warn, not bad).
-CHIP_WARN_CODES = frozenset({"denied", "cancelled"})
+CHIP_WARN_CODES = frozenset(
+    {"denied", "cancelled", "needs_confirmation", "declined_by_analyst", "busy"}
+)
 
 
 def format_tokens(count: float | None) -> str:

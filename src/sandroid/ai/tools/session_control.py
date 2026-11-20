@@ -46,7 +46,7 @@ from typing import Any
 
 from sandroid.ai.arbiter import ResourceId
 from sandroid.ai.errors import ToolExecutionError
-from sandroid.ai.tools._shared import validate_package_name
+from sandroid.ai.tools._shared import start_refusal, validate_package_name
 from sandroid.ai.tools.registry import RiskTier, sandroid_tool
 from sandroid.core.adb_utils import is_valid_package_name
 
@@ -271,6 +271,9 @@ def start_spotlight_app(fresh: bool = False, paused: bool = False) -> dict[str, 
     Raises:
         ToolExecutionError: No spotlight app is selected, or the call runs
             inside a subagent.
+        ToolError: The start was refused: ``needs_confirmation`` (a pre-start
+            step stops every app and there is no dialog), ``declined_by_analyst``
+            or ``busy`` (another start is running).
     """
     from sandroid.services import app_start, get_spotlight_service
 
@@ -309,9 +312,14 @@ def start_spotlight_app(fresh: bool = False, paused: bool = False) -> dict[str, 
     # consent=False: a pre-start step that stops every app is the analyst's
     # call (the TUI dialog); the tool's approval covers this app only.
     if running:
-        ok, msg = app_start.restart_app(paused=paused, consent=False)
+        result = app_start.restart_app(paused=paused, consent=False)
     else:
-        ok, msg = app_start.start_app(paused=paused, consent=False)
+        result = app_start.start_app(paused=paused, consent=False)
+    ok, msg = result
+    if not ok:
+        refusal = start_refusal(getattr(result, "reason", None), package, msg)
+        if refusal is not None:
+            raise refusal
     return _start_result(ok, service, msg)
 
 

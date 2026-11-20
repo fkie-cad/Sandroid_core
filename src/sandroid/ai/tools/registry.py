@@ -66,6 +66,11 @@ TOOL_ERROR_CODES = frozenset(
         "device_unavailable",
         "tool_failed",
         "backend_error",
+        # An app start the analyst must confirm in the TUI dialog, one the
+        # analyst declined, one blocked by another start (app_start reasons).
+        "needs_confirmation",
+        "declined_by_analyst",
+        "busy",
     }
 )
 
