@@ -1,6 +1,6 @@
 # Philippines country pack (schema v1). Sources: ph.SOURCES.md (S1..Sn).
 pack: country
-schema: 1
+schema: 1.1
 country: ph
 name: Philippines
 # Shares of locally written text (SMS/chat). "fil" here means everyday Taglish:
@@ -805,12 +805,12 @@ services:
   # exact casing per brand is authored from common screenshots and may differ.
   # E-wallets / mobile money (GLoan, GGives, GCredit come from "GCash"; Maya
   # Credit/Easy Credit from "Maya")
-  - {sender: GCash, kind: bank, sender_type: alphanumeric}
-  - {sender: Maya, kind: bank, sender_type: alphanumeric}
-  - {sender: PalawanPay, kind: bank, sender_type: alphanumeric}
-  - {sender: Cebuana, kind: bank, sender_type: alphanumeric}
-  - {sender: MLhuillier, kind: bank, sender_type: alphanumeric}
-  - {sender: Coins.ph, kind: bank, sender_type: alphanumeric}
+  - {sender: GCash, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: Maya, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: PalawanPay, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: Cebuana, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: MLhuillier, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: Coins.ph, kind: mobile_money, sender_type: alphanumeric}
   # Banks
   - {sender: BDO, kind: bank, sender_type: alphanumeric}
   - {sender: BPI, kind: bank, sender_type: alphanumeric}
@@ -828,23 +828,23 @@ services:
   # online lending platforms. Collection reminders - and, in documented
   # harassment cases, debt-shaming texts to the borrower's contacts - often
   # come from ordinary prepaid mobile numbers, not the brand ID.
-  - {sender: Tala, kind: bank, sender_type: alphanumeric}
-  - {sender: Cashalo, kind: bank, sender_type: alphanumeric}
-  - {sender: BillEase, kind: bank, sender_type: alphanumeric}
-  - {sender: HomeCredit, kind: bank, sender_type: alphanumeric}
-  - {sender: Atome, kind: bank, sender_type: alphanumeric}
-  - {sender: JuanHand, kind: bank, sender_type: alphanumeric}
-  - {sender: Digido, kind: bank, sender_type: alphanumeric}
-  - {sender: "+63995...", kind: bank, sender_type: number}   # collection agent on a prepaid SIM
-  - {sender: "+63961...", kind: bank, sender_type: number}   # collection agent on a prepaid SIM
+  - {sender: Tala, kind: lender, sender_type: alphanumeric}
+  - {sender: Cashalo, kind: lender, sender_type: alphanumeric}
+  - {sender: BillEase, kind: lender, sender_type: alphanumeric}
+  - {sender: HomeCredit, kind: lender, sender_type: alphanumeric}
+  - {sender: Atome, kind: lender, sender_type: alphanumeric}
+  - {sender: JuanHand, kind: lender, sender_type: alphanumeric}
+  - {sender: Digido, kind: lender, sender_type: alphanumeric}
+  - {sender: "+63995...", kind: lender, sender_type: number}   # collection agent on a prepaid SIM
+  - {sender: "+63961...", kind: lender, sender_type: number}   # collection agent on a prepaid SIM
   # Telecom (promo registrations reply from short codes: Globe 8080, Smart 9999)
   - {sender: Globe, kind: telecom, sender_type: alphanumeric}
   - {sender: TM, kind: telecom, sender_type: alphanumeric}
   - {sender: SMART, kind: telecom, sender_type: alphanumeric}
   - {sender: TNT, kind: telecom, sender_type: alphanumeric}
   - {sender: DITO, kind: telecom, sender_type: alphanumeric}
-  - {sender: "8080", kind: telecom, sender_type: number}     # Globe/TM promo short code
-  - {sender: "9999", kind: telecom, sender_type: number}     # Smart/TNT promo short code
+  - {sender: "8080", kind: telecom, sender_type: shortcode}     # Globe/TM promo short code
+  - {sender: "9999", kind: telecom, sender_type: shortcode}     # Smart/TNT promo short code
   # OTP (international aggregators; Google often arrives from a short code)
   - {sender: Google, kind: otp_service, sender_type: alphanumeric}
   - {sender: Facebook, kind: otp_service, sender_type: alphanumeric}
@@ -914,8 +914,12 @@ holidays:
   - {rule: easter-3, name: "Maundy Thursday"}
   - {rule: easter-2, name: "Good Friday"}
   - {rule: easter-1, name: "Black Saturday"}
-  # Not expressible in schema: National Heroes Day = last Monday of August;
-  # Chinese New Year (lunar); Eid'l Fitr and Eid'l Adha (proclaimed each year).
+  # v1.1 rules for the holidays v1 could not express (were listed in this comment).
+  # Eid'l Fitr and Eid'l Adha are proclaimed each year; the tabular Hijri date is an estimate.
+  - {rule: "08-mon#-1", name: "National Heroes Day"}
+  - {rule: "lunisolar:chinese_new_year", name: "Chinese New Year"}
+  - {rule: "hijri:10-01", name: "Eid'l Fitr"}
+  - {rule: "hijri:12-10", name: "Eid'l Adha"}
 popular_apps:
   # All packages verified on Google Play (store, hl=en, gl=PH) on 2026-11-20.
   # e-wallets / banks

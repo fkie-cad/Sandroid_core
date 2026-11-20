@@ -1,7 +1,7 @@
 # Sandroid world pack: country 'us' (United States), schema v1. Generated 2026-11-20 by agent countries-2.
 # Sources and licences: us.SOURCES.md (source ids S1.. are referenced in phone entries).
 pack: country
-schema: 1
+schema: 1.1
 country: us
 name: United States
 languages: {en: 0.87, es: 0.12, zh: 0.01}

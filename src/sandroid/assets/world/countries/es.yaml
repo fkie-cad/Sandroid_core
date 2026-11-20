@@ -1,7 +1,7 @@
 # Sandroid world pack: country 'es' (Spain), schema v1. Generated 2026-11-20 by agent countries-2.
 # Sources and licences: es.SOURCES.md (source ids S1.. are referenced in phone entries).
 pack: country
-schema: 1
+schema: 1.1
 country: es
 name: Spain
 languages: {es: 0.82, ca: 0.1, gl: 0.04, eu: 0.02, en: 0.02}
@@ -858,7 +858,7 @@ services:
   - {sender: Vodafone, kind: telecom, sender_type: alphanumeric}
   - {sender: Orange, kind: telecom, sender_type: alphanumeric}
   - {sender: Google, kind: otp_service, sender_type: alphanumeric}
-  - {sender: WhatsApp, kind: otp_service, sender_type: number}
+  - {sender: "+34...", label: WhatsApp, kind: otp_service, sender_type: number}
   - {sender: "Cl@ve", kind: otp_service, sender_type: alphanumeric}
   - {sender: "+3491...", kind: doctor, sender_type: number}
   - {sender: CitaSalud, kind: doctor, sender_type: alphanumeric}

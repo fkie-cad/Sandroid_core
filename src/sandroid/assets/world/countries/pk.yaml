@@ -3,7 +3,7 @@
 # SMS / contacts / call logs; mobile-money (JazzCash, easypaisa) and bank senders are
 # therefore modelled in detail under `services`.
 pack: country
-schema: 1
+schema: 1.1
 country: pk
 name: Pakistan
 # Locally written text: SMS between people is overwhelmingly ROMAN URDU (Urdu in Latin
@@ -751,15 +751,15 @@ services:
   # codes are `number` without "+". Mobile-money wallets use kind `bank` (schema has no
   # `mobile_money` kind). Confidence per sender in pk.SOURCES.md.
   # -- mobile money / branchless banking
-  - {sender: "8558", kind: bank, sender_type: number}            # JazzCash transaction receipts (S10)
-  - {sender: "3737", kind: bank, sender_type: number}            # easypaisa (S11)
-  - {sender: "JazzCash", kind: bank, sender_type: alphanumeric}  # promos / OTP mask
-  - {sender: "easypaisa", kind: bank, sender_type: alphanumeric}
-  - {sender: "SadaPay", kind: bank, sender_type: alphanumeric}
-  - {sender: "NayaPay", kind: bank, sender_type: alphanumeric}
-  - {sender: "UPaisa", kind: bank, sender_type: alphanumeric}
+  - {sender: "8558", kind: mobile_money, sender_type: shortcode}            # JazzCash transaction receipts (S10)
+  - {sender: "3737", kind: mobile_money, sender_type: shortcode}            # easypaisa (S11)
+  - {sender: "JazzCash", kind: mobile_money, sender_type: alphanumeric}  # promos / OTP mask
+  - {sender: "easypaisa", kind: mobile_money, sender_type: alphanumeric}
+  - {sender: "SadaPay", kind: mobile_money, sender_type: alphanumeric}
+  - {sender: "NayaPay", kind: mobile_money, sender_type: alphanumeric}
+  - {sender: "UPaisa", kind: mobile_money, sender_type: alphanumeric}
   # -- banks (SBP/NTISB: genuine bank alerts carry the bank short name or a 4-digit short code, S12)
-  - {sender: "6222", kind: bank, sender_type: number}            # MCB Bank official short code (S13)
+  - {sender: "6222", kind: bank, sender_type: shortcode}            # MCB Bank official short code (S13)
   - {sender: "HBL", kind: bank, sender_type: alphanumeric}
   - {sender: "UBL", kind: bank, sender_type: alphanumeric}
   - {sender: "MeezanBank", kind: bank, sender_type: alphanumeric}
@@ -769,9 +769,9 @@ services:
   - {sender: "BankIslami", kind: bank, sender_type: alphanumeric}
   - {sender: "FaysalBank", kind: bank, sender_type: alphanumeric}
   # -- nano-lending (SECP-whitelisted apps, S9); repayment reminders/OTPs from masks
-  - {sender: "Paisayaar", kind: bank, sender_type: alphanumeric}   # lender (no `lender` kind in schema v1)
-  - {sender: "SmartQarza", kind: bank, sender_type: alphanumeric}   # lender (no `lender` kind in schema v1)
-  - {sender: "Aitemaad", kind: bank, sender_type: alphanumeric}   # lender (no `lender` kind in schema v1)
+  - {sender: "Paisayaar", kind: lender, sender_type: alphanumeric}   # lender (no `lender` kind in schema v1)
+  - {sender: "SmartQarza", kind: lender, sender_type: alphanumeric}   # lender (no `lender` kind in schema v1)
+  - {sender: "Aitemaad", kind: lender, sender_type: alphanumeric}   # lender (no `lender` kind in schema v1)
   # -- telecom
   - {sender: "Jazz", kind: telecom, sender_type: alphanumeric}
   - {sender: "ZONG", kind: telecom, sender_type: alphanumeric}
@@ -779,11 +779,11 @@ services:
   - {sender: "Telenor", kind: telecom, sender_type: alphanumeric}
   - {sender: "PTCL", kind: telecom, sender_type: alphanumeric}
   # -- government (consumer short codes)
-  - {sender: "8484", kind: government, sender_type: number}      # PTA DIRBS device/IMEI status (S14)
-  - {sender: "668", kind: government, sender_type: number}       # PTA: SIMs registered on a CNIC (S14)
-  - {sender: "8400", kind: government, sender_type: number}      # NADRA CNIC tracking (widely reported, unverified)
-  - {sender: "9966", kind: government, sender_type: number}      # FBR Active Taxpayer List check (widely reported, unverified)
-  - {sender: "8300", kind: government, sender_type: number}      # ECP voter info (widely reported, unverified)
+  - {sender: "8484", kind: government, sender_type: shortcode}      # PTA DIRBS device/IMEI status (S14)
+  - {sender: "668", kind: government, sender_type: shortcode}       # PTA: SIMs registered on a CNIC (S14)
+  - {sender: "8400", kind: government, sender_type: shortcode}      # NADRA CNIC tracking (widely reported, unverified)
+  - {sender: "9966", kind: government, sender_type: shortcode}      # FBR Active Taxpayer List check (widely reported, unverified)
+  - {sender: "8300", kind: government, sender_type: shortcode}      # ECP voter info (widely reported, unverified)
   # -- OTP
   - {sender: "Google", kind: otp_service, sender_type: alphanumeric}
   # -- courier
@@ -828,17 +828,17 @@ holidays:
   - {date: "11-09", name: Iqbal Day}
   - {date: "12-25", name: Quaid-e-Azam Day}
   # Islamic (Hijri) holidays move ~11 days earlier each year. The schema only defines
-  # Easter-relative rules; "hijri:MM-DD" below is a PROPOSED rule syntax, kept commented out until the schema adopts it (Umm al-Qura /
+  # Easter-relative rules; "hijri:MM-DD" below is the schema v1.1 rule syntax (Umm al-Qura /
   # tabular calendar, Pakistan's moon-sighting committee can shift by +-1 day).
-  #   {rule: "hijri:10-01", name: Eid ul Fitr}
-  #   {rule: "hijri:10-02", name: Eid ul Fitr (2nd day)}
-  #   {rule: "hijri:10-03", name: Eid ul Fitr (3rd day)}
-  #   {rule: "hijri:12-10", name: Eid ul Adha}
-  #   {rule: "hijri:12-11", name: Eid ul Adha (2nd day)}
-  #   {rule: "hijri:12-12", name: Eid ul Adha (3rd day)}
-  #   {rule: "hijri:01-09", name: Ashura (9 Muharram)}
-  #   {rule: "hijri:01-10", name: Ashura (10 Muharram)}
-  #   {rule: "hijri:03-12", name: Eid Milad-un-Nabi}
+  - {rule: "hijri:10-01", name: Eid ul Fitr}
+  - {rule: "hijri:10-02", name: Eid ul Fitr (2nd day)}
+  - {rule: "hijri:10-03", name: Eid ul Fitr (3rd day)}
+  - {rule: "hijri:12-10", name: Eid ul Adha}
+  - {rule: "hijri:12-11", name: Eid ul Adha (2nd day)}
+  - {rule: "hijri:12-12", name: Eid ul Adha (3rd day)}
+  - {rule: "hijri:01-09", name: Ashura (9 Muharram)}
+  - {rule: "hijri:01-10", name: Ashura (10 Muharram)}
+  - {rule: "hijri:03-12", name: Eid Milad-un-Nabi}
 popular_apps:
   # All package ids verified on play.google.com (gl=pk) on 2026-11-20 (S16).
   # finance / mobile money

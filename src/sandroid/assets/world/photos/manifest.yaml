@@ -1,6 +1,6 @@
 # Sandroid world pack: photos. See SOURCES.md for provenance and added keys.
 pack: photos
-schema: 1
+schema: 1.1
 photos:
 - id: wm-0001
   file: files/wm-0001.jpg
@@ -17,7 +17,6 @@ photos:
   has_people: false
   country_neutral: false
   country: ru
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -36,7 +35,6 @@ photos:
   has_people: false
   country_neutral: false
   country: fr
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -59,7 +57,6 @@ photos:
   has_people: false
   country_neutral: false
   country: de
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -78,7 +75,6 @@ photos:
   has_people: false
   country_neutral: false
   country: ir
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -97,7 +93,6 @@ photos:
   has_people: false
   country_neutral: false
   country: us
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -115,7 +110,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -138,7 +132,6 @@ photos:
   has_people: false
   country_neutral: false
   country: us
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -157,7 +150,6 @@ photos:
   has_people: false
   country_neutral: false
   country: cz
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -180,7 +172,6 @@ photos:
   has_people: false
   country_neutral: false
   country: tw
-  original_exif_stripped: false
   original_had_exif: false
   original_had_gps: false
   downscaled: false
@@ -199,7 +190,6 @@ photos:
   has_people: false
   country_neutral: false
   country: us
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -218,7 +208,6 @@ photos:
   has_people: false
   country_neutral: false
   country: pl
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -236,7 +225,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -254,7 +242,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -272,7 +259,6 @@ photos:
   indoor: true
   has_people: true
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -290,7 +276,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -308,7 +293,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -326,7 +310,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -345,7 +328,6 @@ photos:
   has_people: false
   country_neutral: false
   country: cn
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -363,7 +345,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -381,7 +362,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -399,7 +379,6 @@ photos:
   indoor: false
   has_people: true
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -417,7 +396,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -435,7 +413,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -457,7 +434,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -475,7 +451,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -493,7 +468,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -511,7 +485,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -529,7 +502,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -547,7 +519,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -569,7 +540,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -587,7 +557,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -605,7 +574,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -623,7 +591,6 @@ photos:
   indoor: true
   has_people: true
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -641,7 +608,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -659,7 +625,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -681,7 +646,6 @@ photos:
   indoor: true
   has_people: true
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -699,7 +663,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -717,7 +680,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -735,7 +697,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -753,7 +714,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -771,7 +731,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -789,7 +748,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -808,7 +766,6 @@ photos:
   has_people: false
   country_neutral: false
   country: de
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -827,7 +784,6 @@ photos:
   has_people: false
   country_neutral: false
   country: ru
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -849,7 +805,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -867,7 +822,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -890,7 +844,6 @@ photos:
   has_people: false
   country_neutral: false
   country: sk
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -909,7 +862,6 @@ photos:
   has_people: false
   country_neutral: false
   country: us
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -927,7 +879,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -949,7 +900,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -968,7 +918,6 @@ photos:
   has_people: false
   country_neutral: false
   country: gb
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -990,7 +939,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -1008,7 +956,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -1026,7 +973,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -1048,7 +994,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -1066,7 +1011,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1084,7 +1028,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -1106,7 +1049,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1124,7 +1066,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1142,7 +1083,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1160,7 +1100,6 @@ photos:
   indoor: false
   has_people: true
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1178,7 +1117,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -1200,7 +1138,6 @@ photos:
   indoor: false
   has_people: true
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -1222,7 +1159,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: false
   original_had_gps: false
   downscaled: true
@@ -1244,7 +1180,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -1266,7 +1201,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -1288,7 +1222,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -1310,7 +1243,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -1332,7 +1264,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1350,7 +1281,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -1368,7 +1298,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1386,7 +1315,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -1408,7 +1336,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1426,7 +1353,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -1448,7 +1374,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1466,7 +1391,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1484,7 +1408,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -1502,7 +1425,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1520,7 +1442,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1538,7 +1459,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -1556,7 +1476,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1574,7 +1493,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -1592,7 +1510,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -1610,7 +1527,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -1628,7 +1544,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -1650,7 +1565,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1668,7 +1582,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1686,7 +1599,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1704,7 +1616,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1722,7 +1633,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -1744,7 +1654,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -1766,7 +1675,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1784,7 +1692,6 @@ photos:
   indoor: true
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1802,7 +1709,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1820,7 +1726,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1838,7 +1743,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -1856,7 +1760,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1874,7 +1777,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1892,7 +1794,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1910,7 +1811,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1928,7 +1828,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1946,7 +1845,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -1968,7 +1866,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -1986,7 +1883,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -2004,7 +1900,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -2023,7 +1918,6 @@ photos:
   has_people: true
   country_neutral: false
   country: us
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -2045,7 +1939,6 @@ photos:
   indoor: true
   has_people: true
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: false
   original_had_gps: false
   downscaled: false
@@ -2063,7 +1956,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -2081,7 +1973,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -2104,7 +1995,6 @@ photos:
   has_people: true
   country_neutral: false
   country: us
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -2122,7 +2012,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -2144,7 +2033,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -2162,7 +2050,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -2185,7 +2072,6 @@ photos:
   has_people: true
   country_neutral: false
   country: hr
-  original_exif_stripped: false
   original_had_exif: false
   original_had_gps: false
   downscaled: true
@@ -2207,7 +2093,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -2230,7 +2115,6 @@ photos:
   has_people: false
   country_neutral: false
   country: am
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -2248,7 +2132,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -2270,7 +2153,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -2293,7 +2175,6 @@ photos:
   has_people: false
   country_neutral: false
   country: my
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -2315,7 +2196,6 @@ photos:
   indoor: false
   has_people: true
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -2338,7 +2218,6 @@ photos:
   has_people: false
   country_neutral: false
   country: il
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -2356,7 +2235,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -2375,7 +2253,6 @@ photos:
   has_people: false
   country_neutral: false
   country: kr
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -2394,7 +2271,6 @@ photos:
   has_people: false
   country_neutral: false
   country: az
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -2417,7 +2293,6 @@ photos:
   has_people: false
   country_neutral: false
   country: gb
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -2439,7 +2314,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -2457,7 +2331,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -2475,7 +2348,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -2493,7 +2365,6 @@ photos:
   indoor: false
   has_people: true
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -2515,7 +2386,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -2533,7 +2403,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -2552,7 +2421,6 @@ photos:
   has_people: false
   country_neutral: false
   country: ru
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -2570,7 +2438,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: true
@@ -2593,7 +2460,6 @@ photos:
   has_people: false
   country_neutral: false
   country: jp
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -2611,7 +2477,6 @@ photos:
   indoor: false
   has_people: true
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -2630,7 +2495,6 @@ photos:
   has_people: false
   country_neutral: false
   country: ru
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -2653,7 +2517,6 @@ photos:
   has_people: false
   country_neutral: false
   country: ru
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -2671,7 +2534,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: true
   downscaled: false
@@ -2689,7 +2551,6 @@ photos:
   indoor: false
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: false
@@ -2708,7 +2569,6 @@ photos:
   has_people: true
   country_neutral: false
   country: gb
-  original_exif_stripped: false
   original_had_exif: true
   original_had_gps: false
   downscaled: true
@@ -2730,7 +2590,6 @@ photos:
   indoor: null
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: false
   original_had_gps: false
   downscaled: false
@@ -2748,7 +2607,6 @@ photos:
   indoor: null
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: false
   original_had_gps: false
   downscaled: false
@@ -2766,7 +2624,6 @@ photos:
   indoor: null
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: false
   original_had_gps: false
   downscaled: false
@@ -2784,7 +2641,6 @@ photos:
   indoor: null
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: false
   original_had_gps: false
   downscaled: false
@@ -2802,7 +2658,6 @@ photos:
   indoor: null
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: false
   original_had_gps: false
   downscaled: false
@@ -2820,7 +2675,6 @@ photos:
   indoor: null
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: false
   original_had_gps: false
   downscaled: false
@@ -2838,7 +2692,6 @@ photos:
   indoor: null
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: false
   original_had_gps: false
   downscaled: false
@@ -2856,7 +2709,6 @@ photos:
   indoor: null
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: false
   original_had_gps: false
   downscaled: false
@@ -2874,7 +2726,6 @@ photos:
   indoor: null
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: false
   original_had_gps: false
   downscaled: false
@@ -2892,7 +2743,6 @@ photos:
   indoor: null
   has_people: false
   country_neutral: true
-  original_exif_stripped: false
   original_had_exif: false
   original_had_gps: false
   downscaled: false

@@ -1,6 +1,6 @@
 # Sandroid world pack: country at. Sources: at.SOURCES.md
 pack: country
-schema: 1
+schema: 1.1
 country: at
 name: Austria
 languages: {de: 1.0}

@@ -1,6 +1,6 @@
 # Sandroid world pack: country fr. Sources: fr.SOURCES.md
 pack: country
-schema: 1
+schema: 1.1
 country: fr
 name: France
 languages: {fr: 1.0}
@@ -592,186 +592,186 @@ names:
     - {name: Morel, w: 0.29}
     - {name: Fournier, w: 0.287}
     - {name: Girard, w: 0.28}
-    - {name: '{{page h|Bonnet}}', w: 0.276}
+    - {name: Bonnet, w: 0.276}
     - {name: Dupont, w: 0.275}
-    - {name: '{{page h|Lambert}}', w: 0.275}
-    - {name: '{{page h|Fontaine}}', w: 0.275}
-    - {name: '{{page h|Rousseau}}', w: 0.272}
+    - {name: Lambert, w: 0.275}
+    - {name: Fontaine, w: 0.275}
+    - {name: Rousseau, w: 0.272}
     - {name: Vincent, w: 0.265}
     - {name: Muller, w: 0.257}
     - {name: Lefevre, w: 0.254}
-    - {name: '{{page h|Faure}}', w: 0.254}
+    - {name: Faure, w: 0.254}
     - {name: Andre, w: 0.251}
-    - {name: '{{page h|Mercier}}', w: 0.25}
+    - {name: Mercier, w: 0.25}
     - {name: Blanc, w: 0.25}
     - {name: Guerin, w: 0.248}
-    - {name: '{{page h|Boyer}}', w: 0.246}
-    - {name: '{{page h|Garnier}}', w: 0.246}
-    - {name: '{{page h|Chevalier}}', w: 0.238}
+    - {name: Boyer, w: 0.246}
+    - {name: Garnier, w: 0.246}
+    - {name: Chevalier, w: 0.238}
     - {name: Francois, w: 0.236}
-    - {name: '{{page h|Legrand}}', w: 0.234}
-    - {name: '{{page h|Gauthier}}', w: 0.232}
+    - {name: Legrand, w: 0.234}
+    - {name: Gauthier, w: 0.232}
     - {name: Garcia, w: 0.23}
-    - {name: '{{page h|Perrin}}', w: 0.226}
-    - {name: '{{page h|Robin}}', w: 0.223}
+    - {name: Perrin, w: 0.226}
+    - {name: Robin, w: 0.223}
     - {name: Clement, w: 0.22}
-    - {name: '{{page h|Morin}}', w: 0.218}
+    - {name: Morin, w: 0.218}
     - {name: Nicolas, w: 0.214}
-    - {name: '{{page h|Henry}}', w: 0.214}
-    - {name: '{{page h|Roussel}}', w: 0.214}
+    - {name: Henry, w: 0.214}
+    - {name: Roussel, w: 0.214}
     - {name: Mathieu, w: 0.213}
-    - {name: '{{page h|Gautier}}', w: 0.211}
-    - {name: '{{page h|Masson}}', w: 0.21}
-    - {name: '{{page h|Marchand}}', w: 0.204}
-    - {name: '{{page h|Duval}}', w: 0.203}
+    - {name: Gautier, w: 0.211}
+    - {name: Masson, w: 0.21}
+    - {name: Marchand, w: 0.204}
+    - {name: Duval, w: 0.203}
     - {name: Denis, w: 0.197}
-    - {name: '{{page h|Dumont}}', w: 0.195}
-    - {name: '{{page h|Marie}}', w: 0.194}
-    - {name: '{{page h|Lemaire}}', w: 0.194}
+    - {name: Dumont, w: 0.195}
+    - {name: Marie, w: 0.194}
+    - {name: Lemaire, w: 0.194}
     - {name: Noel, w: 0.193}
-    - {name: '{{page h|Meyer}}', w: 0.19}
-    - {name: '{{page h|Dufour}}', w: 0.189}
-    - {name: '{{page h|Meunier}}', w: 0.189}
-    - {name: '{{page h|Brun}}', w: 0.184}
-    - {name: '{{page h|Blanchard}}', w: 0.184}
-    - {name: '{{page h|Giraud}}', w: 0.181}
-    - {name: '{{page h|Joly}}', w: 0.18}
+    - {name: Meyer, w: 0.19}
+    - {name: Dufour, w: 0.189}
+    - {name: Meunier, w: 0.189}
+    - {name: Brun, w: 0.184}
+    - {name: Blanchard, w: 0.184}
+    - {name: Giraud, w: 0.181}
+    - {name: Joly, w: 0.18}
     - {name: Riviere, w: 0.18}
-    - {name: '{{page h|Lucas}}', w: 0.18}
-    - {name: '{{page h|Brunet}}', w: 0.179}
-    - {name: '{{page h|Gaillard}}', w: 0.178}
-    - {name: '{{page h|Barbier}}', w: 0.176}
-    - {name: '{{page h|Arnaud}}', w: 0.175}
+    - {name: Lucas, w: 0.18}
+    - {name: Brunet, w: 0.179}
+    - {name: Gaillard, w: 0.178}
+    - {name: Barbier, w: 0.176}
+    - {name: Arnaud, w: 0.175}
     - {name: Martinez, w: 0.175}
     - {name: Gerard, w: 0.175}
     - {name: Roche, w: 0.171}
     - {name: Renard, w: 0.169}
-    - {name: '{{page h|Schmitt}}', w: 0.169}
-    - {name: '{{page h|Roy}}', w: 0.167}
-    - {name: '{{page h|Leroux}}', w: 0.166}
-    - {name: '{{page h|Colin}}', w: 0.165}
-    - {name: '{{page h|Vidal}}', w: 0.164}
-    - {name: '{{page h|Caron}}', w: 0.164}
-    - {name: '{{page h|Picard}}', w: 0.163}
-    - {name: '{{page h|Roger}}', w: 0.162}
-    - {name: '{{page h|Fabre}}', w: 0.161}
-    - {name: '{{page h|Aubert}}', w: 0.157}
-    - {name: '{{page h|Lemoine}}', w: 0.155}
+    - {name: Schmitt, w: 0.169}
+    - {name: Roy, w: 0.167}
+    - {name: Leroux, w: 0.166}
+    - {name: Colin, w: 0.165}
+    - {name: Vidal, w: 0.164}
+    - {name: Caron, w: 0.164}
+    - {name: Picard, w: 0.163}
+    - {name: Roger, w: 0.162}
+    - {name: Fabre, w: 0.161}
+    - {name: Aubert, w: 0.157}
+    - {name: Lemoine, w: 0.155}
     - {name: Renaud, w: 0.153}
-    - {name: '{{page h|Dumas}}', w: 0.151}
-    - {name: '{{page h|Lacroix}}', w: 0.149}
+    - {name: Dumas, w: 0.151}
+    - {name: Lacroix, w: 0.149}
     - {name: Olivier, w: 0.148}
-    - {name: '{{page h|Philippe}}', w: 0.146}
-    - {name: '{{page h|Bourgeois}}', w: 0.146}
-    - {name: '{{page h|Pierre}}', w: 0.145}
+    - {name: Philippe, w: 0.146}
+    - {name: Bourgeois, w: 0.146}
+    - {name: Pierre, w: 0.145}
     - {name: Benoit, w: 0.144}
-    - {name: '{{page h|Rey}}', w: 0.143}
-    - {name: '{{page h|Leclerc}}', w: 0.143}
-    - {name: '{{page h|Payet}}', w: 0.142}
-    - {name: '{{page h|Rolland}}', w: 0.14}
-    - {name: '{{page h|Leclercq}}', w: 0.14}
-    - {name: '{{page h|Guillaume}}', w: 0.139}
-    - {name: '{{page h|Lecomte}}', w: 0.139}
+    - {name: Rey, w: 0.143}
+    - {name: Leclerc, w: 0.143}
+    - {name: Payet, w: 0.142}
+    - {name: Rolland, w: 0.14}
+    - {name: Leclercq, w: 0.14}
+    - {name: Guillaume, w: 0.139}
+    - {name: Lecomte, w: 0.139}
     - {name: Lopez, w: 0.136}
-    - {name: '{{page h|Jean}}', w: 0.136}
-    - {name: '{{page h|Dupuy}}', w: 0.135}
-    - {name: '{{page h|Guillot}}', w: 0.133}
-    - {name: '{{page h|Hubert}}', w: 0.133}
+    - {name: Jean, w: 0.136}
+    - {name: Dupuy, w: 0.135}
+    - {name: Guillot, w: 0.133}
+    - {name: Hubert, w: 0.133}
     - {name: Berger, w: 0.133}
-    - {name: '{{page h|Carpentier}}', w: 0.132}
+    - {name: Carpentier, w: 0.132}
     - {name: Sanchez, w: 0.131}
-    - {name: '{{page h|Dupuis}}', w: 0.13}
+    - {name: Dupuis, w: 0.13}
     - {name: Moulin, w: 0.129}
-    - {name: '{{page h|Louis}}', w: 0.129}
-    - {name: '{{page h|Deschamps}}', w: 0.127}
-    - {name: '{{page h|Huet}}', w: 0.125}
-    - {name: '{{page h|Vasseur}}', w: 0.124}
+    - {name: Louis, w: 0.129}
+    - {name: Deschamps, w: 0.127}
+    - {name: Huet, w: 0.125}
+    - {name: Vasseur, w: 0.124}
     - {name: Perez, w: 0.122}
-    - {name: '{{page h|Boucher}}', w: 0.122}
-    - {name: '{{page h|Fleury}}', w: 0.121}
-    - {name: '{{page h|Royer}}', w: 0.12}
-    - {name: '{{page h|Klein}}', w: 0.12}
-    - {name: '{{page h|Jacquet}}', w: 0.12}
+    - {name: Boucher, w: 0.122}
+    - {name: Fleury, w: 0.121}
+    - {name: Royer, w: 0.12}
+    - {name: Klein, w: 0.12}
+    - {name: Jacquet, w: 0.12}
     - {name: Adam, w: 0.119}
     - {name: Paris, w: 0.119}
     - {name: Poirier, w: 0.119}
-    - {name: '{{page h|Marty}}', w: 0.118}
-    - {name: '{{page h|Aubry}}', w: 0.118}
-    - {name: '{{page h|Guyot}}', w: 0.118}
+    - {name: Marty, w: 0.118}
+    - {name: Aubry, w: 0.118}
+    - {name: Guyot, w: 0.118}
     - {name: Carre, w: 0.118}
-    - {name: '{{page h|Charles}}', w: 0.117}
+    - {name: Charles, w: 0.117}
     - {name: Renault, w: 0.117}
     - {name: Charpentier, w: 0.116}
     - {name: Menard, w: 0.116}
-    - {name: '{{page h|Maillard}}', w: 0.116}
-    - {name: '{{page h|Baron}}', w: 0.116}
-    - {name: '{{page h|Bertin}}', w: 0.115}
-    - {name: '{{page h|Bailly}}', w: 0.114}
+    - {name: Maillard, w: 0.116}
+    - {name: Baron, w: 0.116}
+    - {name: Bertin, w: 0.115}
+    - {name: Bailly, w: 0.114}
     - {name: Herve, w: 0.114}
-    - {name: '{{page h|Schneider}}', w: 0.114}
+    - {name: Schneider, w: 0.114}
     - {name: Fernandez, w: 0.113}
-    - {name: '{{page h|Le Gall}}', w: 0.111}
-    - {name: '{{page h|Collet}}', w: 0.111}
+    - {name: Le Gall, w: 0.111}
+    - {name: Collet, w: 0.111}
     - {name: Leger, w: 0.11}
-    - {name: '{{page h|Bouvier}}', w: 0.11}
+    - {name: Bouvier, w: 0.11}
     - {name: Julien, w: 0.109}
     - {name: Prevost, w: 0.108}
-    - {name: '{{page h|Millet}}', w: 0.107}
-    - {name: '{{page h|Perrot}}', w: 0.106}
-    - {name: '{{page h|Daniel}}', w: 0.106}
-    - {name: '{{page h|Le Roux}}', w: 0.106}
-    - {name: '{{page h|Cousin}}', w: 0.105}
-    - {name: '{{page h|Germain}}', w: 0.105}
+    - {name: Millet, w: 0.107}
+    - {name: Perrot, w: 0.106}
+    - {name: Daniel, w: 0.106}
+    - {name: Le Roux, w: 0.106}
+    - {name: Cousin, w: 0.105}
+    - {name: Germain, w: 0.105}
     - {name: Breton, w: 0.104}
-    - {name: '{{page h|Besson}}', w: 0.103}
-    - {name: '{{page h|Langlois}}', w: 0.103}
+    - {name: Besson, w: 0.103}
+    - {name: Langlois, w: 0.103}
     - {name: Remy, w: 0.103}
-    - {name: '{{page h|Le Goff}}', w: 0.102}
-    - {name: '{{page h|Pelletier}}', w: 0.102}
+    - {name: Le Goff, w: 0.102}
+    - {name: Pelletier, w: 0.102}
     - {name: Leveque, w: 0.102}
-    - {name: '{{page h|Perrier}}', w: 0.101}
-    - {name: '{{page h|Leblanc}}', w: 0.101}
+    - {name: Perrier, w: 0.101}
+    - {name: Leblanc, w: 0.101}
     - {name: Barre, w: 0.101}
-    - {name: '{{page h|Lebrun}}', w: 0.1}
-    - {name: '{{page h|Marchal}}', w: 0.1}
-    - {name: '{{page h|Weber}}', w: 0.099}
-    - {name: '{{page h|Mallet}}', w: 0.098}
-    - {name: '{{page h|Hamon}}', w: 0.098}
+    - {name: Lebrun, w: 0.1}
+    - {name: Marchal, w: 0.1}
+    - {name: Weber, w: 0.099}
+    - {name: Mallet, w: 0.098}
+    - {name: Hamon, w: 0.098}
     - {name: Boulanger, w: 0.097}
     - {name: Jacob, w: 0.097}
-    - {name: '{{page h|Monnier}}', w: 0.097}
-    - {name: '{{page h|Michaud}}', w: 0.097}
+    - {name: Monnier, w: 0.097}
+    - {name: Michaud, w: 0.097}
     - {name: Rodriguez, w: 0.097}
-    - {name: '{{page h|Guichard}}', w: 0.096}
-    - {name: '{{page h|Gillet}}', w: 0.096}
+    - {name: Guichard, w: 0.096}
+    - {name: Gillet, w: 0.096}
     - {name: Etienne, w: 0.095}
-    - {name: '{{page h|Grondin}}', w: 0.095}
+    - {name: Grondin, w: 0.095}
     - {name: Poulain, w: 0.095}
-    - {name: '{{page h|Tessier}}', w: 0.094}
-    - {name: '{{page h|Chevallier}}', w: 0.094}
-    - {name: '{{page h|Collin}}', w: 0.094}
-    - {name: '{{page h|Chauvin}}', w: 0.093}
+    - {name: Tessier, w: 0.094}
+    - {name: Chevallier, w: 0.094}
+    - {name: Collin, w: 0.094}
+    - {name: Chauvin, w: 0.093}
     - {name: Da Silva, w: 0.093}
-    - {name: '{{page h|Bouchet}}', w: 0.093}
+    - {name: Bouchet, w: 0.093}
     - {name: Gay, w: 0.093}
     - {name: Lemaitre, w: 0.092}
     - {name: Benard, w: 0.092}
     - {name: Marechal, w: 0.091}
-    - {name: '{{page h|Humbert}}', w: 0.09}
-    - {name: '{{page h|Reynaud}}', w: 0.09}
-    - {name: '{{page h|Antoine}}', w: 0.09}
-    - {name: '{{page h|Hoarau}}', w: 0.089}
-    - {name: '{{page h|Perret}}', w: 0.089}
+    - {name: Humbert, w: 0.09}
+    - {name: Reynaud, w: 0.09}
+    - {name: Antoine, w: 0.09}
+    - {name: Hoarau, w: 0.089}
+    - {name: Perret, w: 0.089}
     - {name: Barthelemy, w: 0.087}
-    - {name: '{{page h|Cordier}}', w: 0.087}
-    - {name: '{{page h|Pichon}}', w: 0.087}
-    - {name: '{{page h|Lejeune}}', w: 0.086}
-    - {name: '{{page h|Gilbert}}', w: 0.086}
-    - {name: '{{page h|Lamy}}', w: 0.086}
-    - {name: '{{page h|Delaunay}}', w: 0.086}
-    - {name: '{{page h|Pasquier}}', w: 0.086}
-    - {name: '{{page h|Carlier}}', w: 0.085}
-    - {name: '{{page h|Laporte}}', w: 0.085}
+    - {name: Cordier, w: 0.087}
+    - {name: Pichon, w: 0.087}
+    - {name: Lejeune, w: 0.086}
+    - {name: Gilbert, w: 0.086}
+    - {name: Lamy, w: 0.086}
+    - {name: Delaunay, w: 0.086}
+    - {name: Pasquier, w: 0.086}
+    - {name: Carlier, w: 0.085}
+    - {name: Laporte, w: 0.085}
   nicknames: {Alexandre: Alex, Nicolas: Nico, Christophe: Chris, Sébastien: Seb, Guillaume: Guigui, Maxime: Max, Mathieu: Mat, Jean-Baptiste: JB, Jean-François: JF, Stéphanie: Steph, Caroline: Caro, Virginie: Virgi, Catherine: Cathy, Isabelle: Isa, Frédéric: Fred, Valérie: Val, Benjamin: Ben, Thomas: Tom, Charlotte: Charlie, Dominique: Dom}
   display: '{first} {last}'
 # Shares = share of contacts from that diaspora/minority (official origin statistics, see SOURCES).

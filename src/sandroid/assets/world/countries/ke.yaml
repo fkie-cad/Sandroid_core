@@ -3,7 +3,7 @@
 # harvest SMS (M-PESA confirmations), contacts and call logs. Sender IDs, mobile-money
 # and lender entries below are therefore modelled with extra care.
 pack: country
-schema: 1
+schema: 1.1
 country: ke
 name: Kenya
 # Locally written SMS/chat text is heavily code-switched English/Swahili ("Swanglish")
@@ -859,10 +859,10 @@ services:
   # Safaricom, JUMIA). Kinds are restricted to schema v1; the comment gives the proposed
   # finer kind (see report: mobile_money, lender, betting).
   # --- mobile money (proposed kind: mobile_money) ---
-  - {sender: MPESA, kind: bank, sender_type: alphanumeric}          # M-PESA confirmations, Fuliza, Lipa na M-PESA; THE key harvest target
-  - {sender: M-SHWARI, kind: bank, sender_type: alphanumeric}       # Safaricom/NCBA savings & loan
-  - {sender: AIRTELMONEY, kind: bank, sender_type: alphanumeric}    # Airtel Money
-  - {sender: T-KASH, kind: bank, sender_type: alphanumeric}         # Telkom T-Kash
+  - {sender: MPESA, kind: mobile_money, sender_type: alphanumeric}          # M-PESA confirmations, Fuliza, Lipa na M-PESA; THE key harvest target
+  - {sender: M-SHWARI, kind: mobile_money, sender_type: alphanumeric}       # Safaricom/NCBA savings & loan
+  - {sender: AIRTELMONEY, kind: mobile_money, sender_type: alphanumeric}    # Airtel Money
+  - {sender: T-KASH, kind: mobile_money, sender_type: alphanumeric}         # Telkom T-Kash
   # --- banks ---
   - {sender: EquityBank, kind: bank, sender_type: alphanumeric}
   - {sender: KCB, kind: bank, sender_type: alphanumeric}
@@ -873,14 +873,14 @@ services:
   - {sender: StanbicBank, kind: bank, sender_type: alphanumeric}
   - {sender: Timiza, kind: bank, sender_type: alphanumeric}         # Absa micro-loan wallet
   # --- digital lenders (proposed kind: lender); repayment reminders, often several per day ---
-  - {sender: Tala, kind: bank, sender_type: alphanumeric}
-  - {sender: Branch, kind: bank, sender_type: alphanumeric}
-  - {sender: Zenka, kind: bank, sender_type: alphanumeric}
-  - {sender: ZashLoan, kind: bank, sender_type: alphanumeric}
-  - {sender: M-KOPA, kind: bank, sender_type: alphanumeric}
-  - {sender: Watu, kind: bank, sender_type: alphanumeric}
+  - {sender: Tala, kind: lender, sender_type: alphanumeric}
+  - {sender: Branch, kind: lender, sender_type: alphanumeric}
+  - {sender: Zenka, kind: lender, sender_type: alphanumeric}
+  - {sender: ZashLoan, kind: lender, sender_type: alphanumeric}
+  - {sender: M-KOPA, kind: lender, sender_type: alphanumeric}
+  - {sender: Watu, kind: lender, sender_type: alphanumeric}
   - {sender: HustlerFund, kind: government, sender_type: alphanumeric}   # state Financial Inclusion Fund (USSD *254#)
-  - {sender: "+254 7...", kind: bank, sender_type: number}          # unlicensed lenders / debt collectors text from plain mobile numbers
+  - {sender: "+254 7...", kind: lender, sender_type: number}          # unlicensed lenders / debt collectors text from plain mobile numbers
   # --- telecom ---
   - {sender: Safaricom, kind: telecom, sender_type: alphanumeric}
   - {sender: Airtel, kind: telecom, sender_type: alphanumeric}
@@ -920,13 +920,14 @@ services:
   - {sender: GOODLIFE, kind: pharmacy, sender_type: alphanumeric}
   - {sender: "+254 20...", kind: doctor, sender_type: number}       # clinic / hospital reception line
   # --- betting (proposed kind: betting); extremely common in Kenyan inboxes ---
-  - {sender: BETIKA, kind: retail, sender_type: alphanumeric}
-  - {sender: SPORTPESA, kind: retail, sender_type: alphanumeric}
+  - {sender: BETIKA, kind: betting, sender_type: alphanumeric}
+  - {sender: SPORTPESA, kind: betting, sender_type: alphanumeric}
 holidays:
   # Public Holidays Act (Cap. 110) as amended 2024 (S10). Eid al-Fitr is a public holiday but
   # follows the lunar calendar (no schema rule; proposed `rule: hijri+10-01`). Eid al-Adha is
   # gazetted ad hoc. Sunday holidays move to Monday (no schema rule).
   - {date: "01-01", name: "New Year's Day"}
+  - {rule: "hijri:10-01", name: Eid al-Fitr}   # v1.1: from the comment above (tabular Hijri date)
   - {rule: easter-2, name: Good Friday}
   - {rule: easter+1, name: Easter Monday}
   - {date: "05-01", name: Labour Day}

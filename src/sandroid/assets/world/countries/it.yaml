@@ -1,6 +1,6 @@
 # Sandroid world pack: country it. Sources: it.SOURCES.md
 pack: country
-schema: 1
+schema: 1.1
 country: it
 name: Italy
 languages: {it: 1.0}

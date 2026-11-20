@@ -1,6 +1,6 @@
 # Sandroid world pack: country ch. Sources: ch.SOURCES.md
 pack: country
-schema: 1
+schema: 1.1
 country: ch
 name: Switzerland
 languages: {de: 0.62, fr: 0.23, it: 0.08, en: 0.07}

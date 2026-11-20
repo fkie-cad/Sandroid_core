@@ -1,6 +1,6 @@
 # Sandroid world pack: country de. Sources: de.SOURCES.md
 pack: country
-schema: 1
+schema: 1.1
 country: de
 name: Germany
 languages: {de: 1.0}

@@ -1,7 +1,7 @@
 # Sandroid world pack: country 'tr' (Türkiye), schema v1. Generated 2026-11-20 by agent countries-2.
 # Sources and licences: tr.SOURCES.md (source ids S1.. are referenced in phone entries).
 pack: country
-schema: 1
+schema: 1.1
 country: tr
 name: Türkiye
 languages: {tr: 0.95, ku: 0.03, ar: 0.01, en: 0.01}

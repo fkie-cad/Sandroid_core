@@ -5,7 +5,7 @@
 # `emoji: true` sits on the thread and means "at least one message in this thread
 # contains emoji" (schema v1 has no per-message flag; messages are [speaker, text]).
 pack: language
-schema: 1
+schema: 1.1
 lang: es
 name: Español
 

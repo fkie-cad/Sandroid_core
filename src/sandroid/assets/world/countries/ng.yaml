@@ -1,6 +1,6 @@
 # Nigeria country pack. Sources: see ng.SOURCES.md (S1..S12).
 pack: country
-schema: 1
+schema: 1.1
 country: ng
 name: Nigeria
 # Locally written text: Nigerian English with heavy Nigerian Pidgin code-switching ("abeg",
@@ -890,26 +890,26 @@ services:
   - {sender: ALAT, kind: bank, sender_type: alphanumeric}
   - {sender: UnionBank, kind: bank, sender_type: alphanumeric}
   # Mobile money / fintech wallets (licensed MMOs/PSBs/MFBs)
-  - {sender: OPay, kind: bank, sender_type: alphanumeric}
-  - {sender: PalmPay, kind: bank, sender_type: alphanumeric}
-  - {sender: Moniepoint, kind: bank, sender_type: alphanumeric}
-  - {sender: Kuda, kind: bank, sender_type: alphanumeric}
-  - {sender: MoMoPSB, kind: bank, sender_type: alphanumeric}
+  - {sender: OPay, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: PalmPay, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: Moniepoint, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: Kuda, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: MoMoPSB, kind: mobile_money, sender_type: alphanumeric}
   # Digital lenders (kind "bank" is the closest schema kind; reminders/dunning SMS come from these)
-  - {sender: FairMoney, kind: bank, sender_type: alphanumeric}
-  - {sender: Carbon, kind: bank, sender_type: alphanumeric}
-  - {sender: Branch, kind: bank, sender_type: alphanumeric}
-  - {sender: PalmCredit, kind: bank, sender_type: alphanumeric}
-  - {sender: Renmoney, kind: bank, sender_type: alphanumeric}
-  - {sender: Aella, kind: bank, sender_type: alphanumeric}
-  - {sender: QuickCheck, kind: bank, sender_type: alphanumeric}
-  - {sender: OKash, kind: bank, sender_type: alphanumeric}
+  - {sender: FairMoney, kind: lender, sender_type: alphanumeric}
+  - {sender: Carbon, kind: lender, sender_type: alphanumeric}
+  - {sender: Branch, kind: lender, sender_type: alphanumeric}
+  - {sender: PalmCredit, kind: lender, sender_type: alphanumeric}
+  - {sender: Renmoney, kind: lender, sender_type: alphanumeric}
+  - {sender: Aella, kind: lender, sender_type: alphanumeric}
+  - {sender: QuickCheck, kind: lender, sender_type: alphanumeric}
+  - {sender: OKash, kind: lender, sender_type: alphanumeric}
   # Telecom
   - {sender: MTN, kind: telecom, sender_type: alphanumeric}
   - {sender: Airtel, kind: telecom, sender_type: alphanumeric}
   - {sender: Glo, kind: telecom, sender_type: alphanumeric}
   - {sender: 9mobile, kind: telecom, sender_type: alphanumeric}   # now T2; older SIMs still see 9mobile
-  - {sender: "131", kind: telecom, sender_type: number}           # MTN info/service short code
+  - {sender: "131", kind: telecom, sender_type: shortcode}           # MTN info/service short code
   # OTP / platforms
   - {sender: Paystack, kind: otp_service, sender_type: alphanumeric}
   - {sender: Flutterwave, kind: otp_service, sender_type: alphanumeric}
@@ -963,6 +963,13 @@ holidays:
   - {date: "12-26", name: "Boxing Day"}
   - {rule: easter-2, name: "Good Friday"}
   - {rule: easter+1, name: "Easter Monday"}
+  # v1.1 Hijri rules for the Islamic holidays named in the comment above (tabular dates;
+  # the FG declares the actual days each year):
+  - {rule: "hijri:10-01", name: "Eid al-Fitr"}
+  - {rule: "hijri:10-02", name: "Eid al-Fitr (2nd day)"}
+  - {rule: "hijri:12-10", name: "Eid al-Adha"}
+  - {rule: "hijri:12-11", name: "Eid al-Adha (2nd day)"}
+  - {rule: "hijri:03-12", name: "Eid-el-Maulud"}
 popular_apps:
   # All package ids verified on play.google.com (HTTP 200, gl=ng) on 2026-11-20 (S13).
   - {package: com.gtbank.gtworldv1, name: GTWorld, category: banking}

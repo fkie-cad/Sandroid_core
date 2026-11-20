@@ -1,7 +1,7 @@
 # Sandroid world pack: country 'br' (Brazil), schema v1. Generated 2026-11-20 by agent countries-2.
 # Sources and licences: br.SOURCES.md (source ids S1.. are referenced in phone entries).
 pack: country
-schema: 1
+schema: 1.1
 country: br
 name: Brazil
 languages: {pt-BR: 0.985, es: 0.005, en: 0.01}

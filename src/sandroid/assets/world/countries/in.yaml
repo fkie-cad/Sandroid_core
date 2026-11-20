@@ -1,7 +1,7 @@
 # Sandroid world pack: country 'in' (India), schema v1. Generated 2026-11-20 by agent countries-2.
 # Sources and licences: in.SOURCES.md (source ids S1.. are referenced in phone entries).
 pack: country
-schema: 1
+schema: 1.1
 country: in
 name: India
 languages:

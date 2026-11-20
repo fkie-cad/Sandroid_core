@@ -1,7 +1,7 @@
 # Indonesia country pack. Sources: see id.SOURCES.md (S1..S14).
 # Things schema v1 cannot express are kept in comments marked "SCHEMA:".
 pack: country
-schema: 1
+schema: 1.1
 country: id
 name: Indonesia
 # Locally written text: Bahasa Indonesia dominates; Javanese (and Sundanese, folded into
@@ -754,20 +754,20 @@ services:
   - {sender: Jenius, kind: bank, sender_type: alphanumeric}
   - {sender: SeaBank, kind: bank, sender_type: alphanumeric}
   # e-wallets (mobile money)  [kind bank: SCHEMA gap]
-  - {sender: DANA, kind: bank, sender_type: alphanumeric}
-  - {sender: OVO, kind: bank, sender_type: alphanumeric}
-  - {sender: GoPay, kind: bank, sender_type: alphanumeric}
-  - {sender: ShopeePay, kind: bank, sender_type: alphanumeric}
+  - {sender: DANA, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: OVO, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: GoPay, kind: mobile_money, sender_type: alphanumeric}
+  - {sender: ShopeePay, kind: mobile_money, sender_type: alphanumeric}
   # OJK-registered lenders / paylater (pinjol)  [kind bank: SCHEMA gap]
-  - {sender: Kredivo, kind: bank, sender_type: alphanumeric}
-  - {sender: Akulaku, kind: bank, sender_type: alphanumeric}
-  - {sender: AdaKami, kind: bank, sender_type: alphanumeric}
-  - {sender: Easycash, kind: bank, sender_type: alphanumeric}
-  - {sender: KreditPintar, kind: bank, sender_type: alphanumeric}
-  - {sender: JULO, kind: bank, sender_type: alphanumeric}
+  - {sender: Kredivo, kind: lender, sender_type: alphanumeric}
+  - {sender: Akulaku, kind: lender, sender_type: alphanumeric}
+  - {sender: AdaKami, kind: lender, sender_type: alphanumeric}
+  - {sender: Easycash, kind: lender, sender_type: alphanumeric}
+  - {sender: KreditPintar, kind: lender, sender_type: alphanumeric}
+  - {sender: JULO, kind: lender, sender_type: alphanumeric}
   # collection reminders often come from ordinary mobile numbers (desk collectors), or via WA
-  - {sender: "+62857...", kind: bank, sender_type: number}
-  - {sender: "+62831...", kind: bank, sender_type: number}
+  - {sender: "+62857...", kind: lender, sender_type: number}
+  - {sender: "+62831...", kind: lender, sender_type: number}
   # OTP / marketplaces / platforms
   - {sender: Shopee, kind: otp_service, sender_type: alphanumeric}
   - {sender: Tokopedia, kind: otp_service, sender_type: alphanumeric}
@@ -814,15 +814,15 @@ holidays:
   - {rule: easter-2, name: Wafat Isa Almasih}
   - {rule: easter, name: Kebangkitan Isa Almasih (Paskah)}
   - {rule: easter+39, name: Kenaikan Isa Almasih}
-  # SCHEMA: lunar/other-calendar holidays cannot be expressed with easter rules. Proposed syntax:
-  #   {rule: "hijri:10-01", name: Idul Fitri}            (+ cuti bersama, the biggest travel event: mudik)
-  #   {rule: "hijri:12-10", name: Idul Adha}
-  #   {rule: "hijri:01-01", name: Tahun Baru Islam}
-  #   {rule: "hijri:03-12", name: Maulid Nabi Muhammad}
-  #   {rule: "hijri:07-27", name: Isra Mikraj}
-  #   {rule: "chinese:01-01", name: Tahun Baru Imlek}
-  #   {rule: "saka:nyepi", name: Hari Suci Nyepi}
-  #   {rule: "buddhist:vesak", name: Hari Raya Waisak}
+  # Lunar/other-calendar holidays (schema v1.1 rules; were proposals in comments in v1):
+  - {rule: "hijri:10-01", name: Idul Fitri}            # (+ cuti bersama, the biggest travel event: mudik)
+  - {rule: "hijri:12-10", name: Idul Adha}
+  - {rule: "hijri:01-01", name: Tahun Baru Islam}
+  - {rule: "hijri:03-12", name: Maulid Nabi Muhammad}
+  - {rule: "hijri:07-27", name: Isra Mikraj}
+  - {rule: "lunisolar:chinese_new_year", name: Tahun Baru Imlek}   # was chinese:01-01
+  - {rule: "lunisolar:nyepi", name: Hari Suci Nyepi}               # was saka:nyepi
+  - {rule: "lunisolar:vesak", name: Hari Raya Waisak}              # was buddhist:vesak
   # plus Ramadan (hijri month 9) as a period: sahur/buka bersama calendar entries.
 popular_apps:
   # All package ids verified on Google Play (gl=ID) on 2026-11-20 by HTTP 200 + listing title (S10).

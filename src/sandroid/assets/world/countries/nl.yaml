@@ -1,6 +1,6 @@
 # Sandroid world pack: country nl. Sources: nl.SOURCES.md
 pack: country
-schema: 1
+schema: 1.1
 country: nl
 name: Netherlands
 languages: {nl: 1.0}

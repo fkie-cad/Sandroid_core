@@ -5,7 +5,7 @@
 # Proposed (not yet in schema v1): service kinds `mobile_money`, `loan`,
 # placeholders `{balance}`, `{fee}`, list values in `call_names`. See SOURCES.md.
 pack: language
-schema: 1
+schema: 1.1
 lang: id
 name: Bahasa Indonesia
 threads:

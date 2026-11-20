@@ -1,7 +1,7 @@
 # Sandroid world pack: country 'gb' (United Kingdom), schema v1. Generated 2026-11-20 by agent countries-2.
 # Sources and licences: gb.SOURCES.md (source ids S1.. are referenced in phone entries).
 pack: country
-schema: 1
+schema: 1.1
 country: gb
 name: United Kingdom
 languages: {en: 0.985, cy: 0.01, gd: 0.001, pl: 0.004}
