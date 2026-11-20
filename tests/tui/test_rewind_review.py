@@ -1322,6 +1322,9 @@ def cleanup(controller, tmp_path, monkeypatch):
     emu = Emu()
     monkeypatch.setattr(services, "get_emulator_service", lambda: emu)
     monkeypatch.setattr(timeline, "session_folder", lambda: session)
+    monkeypatch.setattr(
+        rewind, "recordings_root", lambda: session / "Dev3" / "recordings"
+    )
     controller._log_info = lambda text: logs.append(("info", text))
     controller._log_warning = lambda text: logs.append(("warn", text))
     controller._ui = lambda fn, *a: fn(*a)
@@ -1346,6 +1349,7 @@ def test_old_unpinned_start_points_are_removed_pinned_and_foreign_kept(
     rec = _rec()
     rec.avd = "Dev3"
     rec.start_point = {"name": new, "saved_ok": True}
+    rewind.save_recording(rec)
     assert controller._remove_old_start_points(rec) == 1
     assert deleted == [(old, "emulator-5560")]
     assert logs == [("info", "Removed 1 old start point (1 MB)")]
@@ -1364,6 +1368,7 @@ def test_an_unreadable_recording_keeps_the_start_points_it_names(
     rec = _rec()
     rec.avd = "Dev3"
     rec.start_point = {"name": "sandroid_rec_20261120_140000", "saved_ok": True}
+    rewind.save_recording(rec)
     assert controller._remove_old_start_points(rec) == 0
     assert deleted == []
 
@@ -1379,6 +1384,7 @@ def test_a_failed_delete_is_one_plain_line_and_never_blocks(
     rec = _rec()
     rec.avd = "Dev3"
     rec.start_point = {"name": "sandroid_rec_20261120_140000", "saved_ok": True}
+    rewind.save_recording(rec)
     assert controller._remove_old_start_points(rec) == 1
     assert [n for n, _s in deleted] == [a, b]
     assert logs[0] == ("info", "Removed 1 old start point (1 MB)")
@@ -1413,3 +1419,25 @@ def test_nothing_is_removed_when_the_new_start_point_did_not_save(
     rec = _rec()
     rec.start_point = {"name": None, "saved_ok": False}
     assert controller._remove_old_start_points(rec) == 0
+
+
+def test_unknown_pinned_flags_delete_nothing(cleanup, tmp_path, monkeypatch):
+    from sandroid.core import timeline
+
+    controller, results, emulator, _emu, deleted, _logs = cleanup
+    avd = _avd_with(tmp_path, ["sandroid_rec_20261101_090000"])
+    monkeypatch.setattr(emulator, "avd_dir", lambda n: avd)
+    rec = _rec()
+    rec.avd = "Dev3"
+    rec.start_point = {"name": "sandroid_rec_20261120_140000", "saved_ok": True}
+    # the current recording is not saved where the scan looks: unknown layout
+    assert controller._remove_old_start_points(rec) == 0
+    rewind.save_recording(rec)
+    # no session folder at all
+    monkeypatch.setattr(timeline, "session_folder", lambda: None)
+    assert controller._remove_old_start_points(rec) == 0
+    # no serial: never the console of whatever device is current
+    monkeypatch.setattr(timeline, "session_folder", lambda: results / "now")
+    rec.serial = None
+    assert controller._remove_old_start_points(rec) == 0
+    assert deleted == []

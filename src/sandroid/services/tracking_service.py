@@ -917,7 +917,12 @@ def typed_part(value: str, initial: str | None, keys: int, node: dict) -> int | 
     if not value.startswith(initial):
         return None
     typed = len(initial) + keys
-    return typed if typed < len(value) else None
+    suffix = value[typed:]
+    # A completion of a web address ('/' or a domain's rest), never a word
+    # a keyboard suggestion or glide put in with one keystroke.
+    if typed >= len(value) or not ("/" in suffix or "." in suffix):
+        return None
+    return typed
 
 
 def _web_target(node: dict, answer: dict, alt: dict | None) -> dict | None:
@@ -1454,6 +1459,8 @@ class TrackingService:
         #: them may show an outdated screen (see :meth:`_stale_why`).
         self._last_key_ms = -1.0
         self._win_changed: dict[Any, float] = {}
+        #: Device ms of the last tap lookup that dropped the a11y cache first.
+        self._cleared_ms = -1.0
         #: ``(device s, marker)`` of recent inputs (``mark_screenshots``):
         #: a pointer input at its finger-down, typing at its last change.
         self._marks: deque[tuple[float, dict]] = deque(maxlen=64)
@@ -1700,6 +1707,7 @@ class TrackingService:
             self._known = {}
             self._last_key_ms = -1.0
             self._win_changed = {}
+            self._cleared_ms = -1.0
             self._marks.clear()
             self._last_screen = None
             self._activities = []
@@ -2054,13 +2062,30 @@ class TrackingService:
         (Firefox's suggestion list while you type) leaves the snapshot and
         the cached live read both on the old tree.
         """
-        reply = helper.node_at(x, y, t_mono_ms=t_ms)
+        # You typed since the last lookup that dropped the cache: drop it
+        # right ahead of this one (no extra round trip), so the live answer
+        # is the screen at finger-down, not the tree before the typing.
+        first = self._last_key_ms > self._cleared_ms
+        t0 = time.monotonic()
+        if first:
+            self._cleared_ms = t_ms
+            reply = helper.node_at(x, y, t_mono_ms=t_ms, clear_first=True)
+        else:
+            reply = helper.node_at(x, y, t_mono_ms=t_ms)
         if not isinstance(reply, dict):
             return reply
         why = self._stale_why(reply.get("cached"))
         if not why:
             return reply
         reply["stale"] = why
+        live = reply.get("live")
+        if first and isinstance(live, dict) and live.get("hit"):
+            reply["fresh"] = live  # read after the cache was dropped
+            return reply
+        if time.monotonic() - t0 > NODE_WAIT_S / 2:
+            # Too late for a re-read before the finger is up, and the next
+            # tap's lookup would queue behind it: the target stays weak.
+            return reply
         try:
             clear = getattr(helper, "clear_cache", None)
             if callable(clear):
@@ -2269,7 +2294,7 @@ class TrackingService:
             self._inputs += 1
         raw_node = (answer.get("target") or answer.get("hit") or {}) if answer else {}
         if ime:
-            self._rb_key(g)
+            self._rb_key(g, glide=kind != "tap")
         elif kind in ("tap", "long_press") and raw_node.get("editable"):
             self._rb_arm(raw_node, answer, g)
         rec = {
@@ -2535,7 +2560,9 @@ class TrackingService:
             return
         ev = d.get("ev")
         if ev in ("WINDOW_CONTENT_CHANGED", "WINDOW_STATE_CHANGED", "WINDOWS_CHANGED"):
-            wid, t = d.get("window_id"), d.get("t_mono_ms")
+            wid = d.get("window_id")
+            # a coalesced burst: its last event counts
+            t = d.get("t_last_mono_ms") or d.get("t_mono_ms")
             if wid is not None and isinstance(t, (int, float)):
                 self._win_changed[wid] = max(self._win_changed.get(wid, -1.0), t)
         if ev in ("CLICKED", "LONG_CLICKED"):
@@ -2894,7 +2921,7 @@ class TrackingService:
         with self._lock:
             self._rb = rb
 
-    def _rb_key(self, g: Gesture) -> None:
+    def _rb_key(self, g: Gesture, *, glide: bool = False) -> None:
         """A keystroke (a keyboard tap or a character key; order lane)."""
         now = time.time()
         with self._lock:
@@ -2914,6 +2941,7 @@ class TrackingService:
                     "read_keys": 0,
                 }
             rb["keys"] += 1
+            rb["glide"] = bool(rb.get("glide")) or glide
             rb["last_key_host"] = now
             if rb["first_ms"] is None:
                 rb["first_ms"] = g.t_down * 1000.0
@@ -3028,7 +3056,9 @@ class TrackingService:
             "text": value,
             "via": "readback",
         }
-        n = typed_part(value, rb["initial"], rb["keys"], node)
+        n = None
+        if not rb.get("glide"):  # a glide is one keystroke for a word
+            n = typed_part(value, rb["initial"], rb["keys"], node)
         if n is not None:
             cur["typed_len"] = n
         self._emit_text(cur)

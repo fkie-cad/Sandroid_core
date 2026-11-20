@@ -130,27 +130,38 @@ def is_start_point_name(name: object) -> bool:
     return isinstance(name, str) and bool(_START_POINT_RE.match(name))
 
 
-def pinned_start_points(results_root: Path | None) -> set[str]:
+def pinned_start_points(
+    results_root: Path | None, must_see: Path | None = None
+) -> set[str] | None:
     """Start point names a pinned (or imported) recording of any session
     under ``results_root`` (``results/<session>/<device>/recordings``)
-    refers to. A recording file that cannot be read keeps every start
+    refers to; a recording file that is not valid JSON keeps every start
     point name it mentions.
+
+    None (nothing may be deleted) when the root is unknown, a folder or
+    file cannot be read, or the scan did not see ``must_see`` (the current
+    recording's file: the layout is not what it expects).
     """
-    keep: set[str] = set()
     if results_root is None:
-        return keep
-    with contextlib.suppress(OSError):
+        return None
+    keep: set[str] = set()
+    seen = False
+    try:
         for path in results_root.glob("*/*/recordings/rec-*/recording.json"):
-            try:
-                text = path.read_text()
-            except OSError:
-                continue
+            text = path.read_text()
+            if must_see is not None and path.resolve() == must_see.resolve():
+                seen = True
             try:
                 sp = json.loads(text).get("start_point") or {}
                 if sp.get("pinned") or sp.get("imported"):
                     keep.add(str(sp.get("name") or ""))
             except (ValueError, AttributeError):
                 keep.update(re.findall(START_POINT_PREFIX + r"[0-9_]+", text))
+    except OSError:
+        logger.debug("pinned start points: scan failed", exc_info=True)
+        return None
+    if must_see is not None and not seen:
+        return None
     keep.discard("")
     return keep
 

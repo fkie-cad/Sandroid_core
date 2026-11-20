@@ -327,6 +327,8 @@ WEAK_TARGET = "recorded element unsure"
 #: off the screen; and how long one live hit test may take (s).
 HIT_GRID = 3
 HIT_TIMEOUT_S = 1.5
+#: The display's size and rotation are asked again after this long (s).
+DISPLAY_EVERY_S = 5.0
 #: Nothing could check a step: no element was recorded (or it is a key on
 #: the keyboard), a swipe, a key, a raw gesture.
 _NOTHING_TO_CHECK = ("nothing to match", "keyboard key")
@@ -578,6 +580,28 @@ def _inner_of(
     if isinstance(path, list) and isinstance(ep, list) and ep:
         return path[: len(ep)] == ep and len(path) > len(ep)
     return True
+
+
+def still_matches(target: dict, live: dict, item: dict[str, Any]) -> bool:
+    """The node the live hit test found as the element still is what you
+    tapped (a recycled list row keeps its id while it shows another text):
+    the recorded ``target``'s fields against the live node. A node inside
+    the element (not the element itself) is not compared again.
+    """
+    tgt, hit, node = live.get("target"), live.get("hit"), item["node"]
+    if _same_node(tgt, node):
+        cand, has_label = tgt, True
+    elif _same_node(hit, node):
+        cand, has_label = hit, not isinstance(tgt, dict)
+    else:
+        return True
+    texts = [_norm(cand.get(k)) for k in ("text", "desc") if _norm(cand.get(k))]
+    want = dict(target)
+    if has_label and isinstance(live.get("label"), str):
+        texts += [p.strip() for p in live["label"].split(" / ") if p.strip()]
+    else:
+        want.pop("label", None)
+    return node_matches(want, {"node": cand, "texts": texts})
 
 
 def hit_is_element(
@@ -843,11 +867,14 @@ def extract_steps(lines: list[dict]) -> list[Step]:
                          sensitive=sensitive)
                 )  # fmt: skip
             elif last_ime is not None and isinstance(data.get("text"), str):
+                # (before check_text marks the last key as this text's); the
+                # read-back follows the last character, not an action key
+                planned = _plan_typing(steps, data, sensitive, line.get("t"))
+                last_ime = planned or last_ime
                 last_ime.data["check_text"] = data["text"]
                 last_ime.data["check_target"] = data.get("target")
                 last_ime.data["check_password"] = bool(data.get("password"))
                 last_ime.sensitive = last_ime.sensitive or sensitive
-                _plan_typing(steps, data, sensitive)
             ime_since_text = False
             last_ime = None
             continue
@@ -868,24 +895,58 @@ def extract_steps(lines: list[dict]) -> list[Step]:
     return steps
 
 
-def _plan_typing(steps: list[Step], data: dict, sensitive: bool) -> None:
+#: A keyboard tap up to this long (s) after the text's last change still
+#: belongs to it (the line's time and duration are the field's).
+TYPING_SLACK_S = 0.3
+
+
+def _plan_typing(
+    steps: list[Step], data: dict, sensitive: bool, t: Any = None
+) -> Step | None:
     """The keyboard taps at the end of ``steps`` typed ``data.text``: the
     first of them gets ``type_text`` (the text, its field, its pace) and
     each one ``typed_by`` (the first one's number), so the replay can type
     the text into the field instead of tapping keys whose positions depend
-    on the keyboard's state. Not for a partly read text or a field Tracking
-    could not name.
+    on the keyboard's state.
+
+    The taps are the keyboard taps since the text before (never one that
+    already belongs to an earlier text) up to the text's last change (``t``
+    + ``dur_ms``): a key tapped after it (Go, Next, Enter) is no character
+    and stays a tap. Only when there is one tap per character (a shift,
+    a suggestion, a glide or an action key in between: the taps are kept),
+    the text was read in full and Tracking named its field. Returns the
+    last character's tap (None: no plan).
     """
-    group: list[Step] = []
+    trailing: list[Step] = []
     for step in reversed(steps):
         if not step.data.get("ime") or step.kind != "tap":
             break
-        group.insert(0, step)
+        if step.data.get("typed_by") or step.data.get("check_text"):
+            break  # an earlier text's keys
+        trailing.insert(0, step)
+    start = _epoch(t)
+    try:
+        dur = float(data.get("dur_ms") or 0.0) / 1000.0
+    except (TypeError, ValueError):
+        dur = 0.0
+    if start is None:
+        return None
+    end = start + max(0.0, dur) + TYPING_SLACK_S
+    group = []
+    for step in trailing:
+        st = _epoch(step.t)
+        if st is None:
+            return None
+        if st <= end:
+            group.append(step)
+    text = data.get("text")
     target = data.get("target") if isinstance(data.get("target"), dict) else None
     if not group or target is None or data.get("partial"):
-        return
+        return None
+    if not isinstance(text, str) or len(group) != len(text):
+        return None
     if not (target.get("rid") or _bounds(target.get("bounds"))):
-        return
+        return None
     first = group[0]
     first.data["type_text"] = {
         "text": data["text"],
@@ -897,6 +958,7 @@ def _plan_typing(steps: list[Step], data: dict, sensitive: bool) -> None:
     first.sensitive = first.sensitive or sensitive
     for step in group:
         step.data["typed_by"] = first.i
+    return group[-1]
 
 
 def _epoch(value: Any) -> float | None:
@@ -1000,6 +1062,7 @@ class StepReplayer:
         self.tail_s = tail_s
         #: Steps whose keyboard taps were replaced by typing the text.
         self._typed: set[int] = set()
+        self._display_cache: tuple[float, Any] | None = None
 
     # -- helpers ------------------------------------------------------------
 
@@ -1091,6 +1154,7 @@ class StepReplayer:
             spots = [mine, *[p for p in spots if p != mine]]
         self._fresh()
         items = walk_dump(reply)
+        covered = False  # a spot answered with something else on top
         for n, xy in enumerate(spots):
             if self.cancelled():
                 raise StepStoppedError("you pressed Esc")
@@ -1099,15 +1163,18 @@ class StepReplayer:
                 if n == 0 and xy == mine:
                     return xy, NOT_HIT_TESTED, CHECK_UNCHECKED
                 break
-            if hit_is_element(live, item, items):
+            if not isinstance(live.get("hit"), dict):
+                continue  # no answer at this spot: no evidence either way
+            if hit_is_element(live, item, items) and still_matches(target, live, item):
                 if xy == mine:
                     return xy, "", CHECK_VERIFIED
                 where = "covered" if _inside(mine, visible) else "off the screen"
                 why = f"your spot was {where}, tapped another spot of it"
                 return xy, why, CHECK_VERIFIED
+            covered = True
         if not _inside(mine, visible):
             return None, OFF_SCREEN, CHECK_UNCHECKED
-        return None, COVERED, CHECK_UNCHECKED
+        return None, COVERED if covered else NOT_HIT_TESTED, CHECK_UNCHECKED
 
     def locate(self, step: Step) -> tuple[tuple[int, int] | None, str, str]:
         """Wait for the step's element: ``(xy, reason, check)``, xy None when
@@ -1184,7 +1251,9 @@ class StepReplayer:
             return None, False
         if rid and node.get("rid") and node.get("rid") != rid:
             return None, False  # the focus moved on (e.g. a code field)
-        if not rid and bounds is not None:
+        if rid and not node.get("rid") and bounds is None:
+            return None, False  # an id was recorded; this field has none
+        if (not rid or not node.get("rid")) and bounds is not None:
             # No id: the box must be the recorded field's, at most moved up
             # or down (a keyboard pan): same left, right and height.
             if not _near(bounds, node.get("bounds")) or not _same_size(
@@ -1267,8 +1336,18 @@ class StepReplayer:
     def _display_now(self) -> tuple[int, int, int | None] | None:
         """``(w, h, rotation)`` of the display now: the helper's (current
         rotation), else ``wm size`` (natural orientation, rotation None);
-        None when neither answers.
+        None when neither answers. Asked at most every
+        :data:`DISPLAY_EVERY_S` (keyboard taps come fast).
         """
+        now = self._mono()
+        cached = self._display_cache
+        if cached is not None and now - cached[0] < DISPLAY_EVERY_S:
+            return cached[1]
+        value = self._read_display()
+        self._display_cache = (now, value)
+        return value
+
+    def _read_display(self) -> tuple[int, int, int | None] | None:
         helper = self._live_helper()
         fn = getattr(helper, "display", None) if helper is not None else None
         if callable(fn):
@@ -1414,6 +1493,7 @@ class StepReplayer:
                     OFF_SCREEN,
                     COVERED,
                     WEAK_TARGET,
+                    NOT_HIT_TESTED,
                 )
             )
             if way == WAY_POSITION:
@@ -1548,6 +1628,7 @@ class StepReplayer:
         report: list[dict[str, Any]] = []
         n = len(steps)
         self._typed = set()
+        self._display_cache = None
         prev_t: float | None = None
         missed: int | None = None  # the step before missed its element
         div: dict[str, Any] = {

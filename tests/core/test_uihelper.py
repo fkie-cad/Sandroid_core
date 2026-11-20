@@ -168,6 +168,8 @@ class FakeHelper:
             )
         elif name == "windows":
             self.emit({"type": "windows", "id": rid, "windows": [{"id": 7}]})
+        elif name == "clear_cache":
+            self.emit({"type": "ok", "id": rid, "cleared": True})
         elif name == "focus":
             self.emit(
                 {
@@ -1310,3 +1312,19 @@ def test_stop_from_connected_callback_does_not_wait_for_start(adb):
     assert not t.is_alive()
     assert res["ok"] is True
     assert rec.states() == ["connected", "stopped"]
+
+
+def test_clear_cache_and_a_lookup_that_drops_it_first(adb):
+    h, popen, _rec, _ = make_helper(adb)
+    assert h.start()
+    fake = popen.current
+    assert h.clear_cache() is True
+    assert fake.commands[-1].startswith("clear_cache id=")
+    n = len(fake.commands)
+    r = h.node_at(5, 6, t_mono_ms=10.0, clear_first=True)
+    # written right ahead of the lookup, its reply not awaited
+    assert fake.commands[n].startswith("clear_cache id=")
+    assert fake.commands[n + 1].startswith("node_at 5 6 both t=10.0 id=")
+    assert r["live"]["target"]["rid"] == "a:id/b"
+    assert h.ping() is not None  # the unclaimed reply broke nothing
+    h.stop()

@@ -138,6 +138,7 @@ class FakeHelper:
         #: the live re-read after a dropped cache (``node_at`` live)
         self.fresh_reply: dict | None = None
         self.fresh_calls: list[tuple] = []
+        self.first_clears: list[tuple] = []
         self.cleared = 0
 
     def clear_cache(self, timeout=1.0):
@@ -166,7 +167,14 @@ class FakeHelper:
         self.stopped = True
         self.on_status("stopped", {**self._info(), "a11y_restored": True})
 
-    def node_at(self, x, y, *, t_mono_ms=None, timeout=1.0, mode="both"):
+    def node_at(
+        self, x, y, *, t_mono_ms=None, timeout=1.0, mode="both", clear_first=False
+    ):
+        if clear_first:  # the cache is dropped right ahead of the lookup
+            self.cleared += 1
+            self.first_clears.append((x, y))
+            if self.fresh_reply is not None:
+                return {**(self.node_reply or {}), "live": self.fresh_reply}
         if mode == "cached":  # the snapshot alone: answered at once
             self.cached_calls.append((x, y, t_mono_ms))
             cached = (self.node_reply or {}).get("cached")
@@ -4171,8 +4179,10 @@ def test_typing_after_the_snapshot_reads_the_tapped_row_live(env, cfg):
     assert target["source"] == "live"
     assert target["source_why"] == "you typed after the snapshot"
     assert "stale_possible" not in target
-    assert helper.fresh_calls
-    assert helper.fresh_calls[0][2] == 1  # the cache was dropped first
+    # you typed: the cache was dropped right ahead of the lookup, no
+    # second round trip (it would come after a quick tap's finger-up)
+    assert len(helper.first_clears) == 1
+    assert helper.fresh_calls == []
 
 
 def test_a_window_change_after_the_snapshot_reads_it_live(env, cfg):
@@ -4195,7 +4205,7 @@ def test_an_up_to_date_snapshot_is_not_read_again(env, cfg):
     assert tap["data"]["target"]["source"] == "cached"
     assert "source_why" not in tap["data"]["target"]
     assert helper.fresh_calls == []
-    assert helper.cleared == 0
+    assert len(helper.first_clears) == 1  # you typed: read fresh anyway
 
 
 @pytest.mark.parametrize(
@@ -4266,6 +4276,9 @@ def test_an_inline_autocomplete_is_kept_apart_from_what_you_typed(env, cfg):
         # unknown start: an address bar selects its text when tapped
         ("wdr.de/", None, 6, {"rid": "url_bar"}, 6),
         ("abc.de", "old", 1, {"rid": "url_bar"}, None),  # replaced: unknown
+        # a suggestion or glide put a word in with one keystroke: no split
+        ("spiegel ", "", 3, {"rid": "url_bar"}, None),
+        ("spieg", "", 1, {"rid": "url_bar"}, None),
         ("wdr.de/", "", 6, {"rid": "com.x:id/q"}, None),  # not an address bar
         ("wdr.de/", "", 6, {"rid": "url_bar", "password": True}, None),
         # the field's selection tells, in any field

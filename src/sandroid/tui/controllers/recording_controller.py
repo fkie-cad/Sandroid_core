@@ -678,15 +678,27 @@ class RecordingController:
 
         if not rec.start_point_name or not rec.avd or not rec.emulator:
             return 0
+        if not rec.serial:
+            return 0  # never the console of whatever device is current
         try:
             from sandroid.core.emulator import avd_dir
             from sandroid.core.timeline import session_folder
 
             folder = avd_dir(rec.avd)
             session = session_folder()
-            keep = rewind.pinned_start_points(session.parent if session else None)
+            root = session.parent if session else None
+            own = rewind.recording_dir(rec.rec_id) / "recording.json"
+
+            def pinned() -> set[str] | None:
+                return rewind.pinned_start_points(root, must_see=own)
+
+            keep = pinned()
         except Exception:
             logger.debug("old start points: lookup failed", exc_info=True)
+            return 0
+        if keep is None:
+            # Which start points are pinned is unknown: delete nothing.
+            logger.info("Old start points kept: the recordings could not be read")
             return 0
         keep.add(rec.start_point_name)
         if previous is not None and previous.start_point.get("name"):
@@ -704,6 +716,9 @@ class RecordingController:
         removed, freed, failed = 0, 0, []
         for name, size in old:
             if not rewind.is_start_point_name(name):
+                continue
+            again = pinned()  # an import may have pinned one meanwhile
+            if again is None or name in again:
                 continue
             try:
                 ok = bool(service.delete_snapshot(name, rec.serial))

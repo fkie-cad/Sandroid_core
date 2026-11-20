@@ -1747,3 +1747,109 @@ def test_typing_a_password_into_its_field_prints_no_value():
     for text in (str(report), str(lines)):
         assert "hunter2" not in text
     assert all(ln["sensitive"] for ln in lines[:1])
+
+
+# ---------------------------------------------------------------------------
+# review round: action keys, ids, recycled rows, other windows
+# ---------------------------------------------------------------------------
+
+
+def test_an_action_key_after_the_text_is_tapped_not_swallowed():
+    lines = _keyboard_lines("wdr")
+    # Go, tapped after the last character, before the text line was written
+    go = _tap(seq=40, t=104.5, ime=True, x=1000, y=2300)
+    lines.insert(3, go)
+    lines[-1]["data"]["dur_ms"] = 600.0  # the field's last change at 100.6 s
+    steps = extract_steps(lines)
+    assert steps[0].data["type_text"]["taps"] == 3
+    assert "typed_by" not in steps[3].data
+    rep, log, _ = _typing_replayer(TypingField())
+    report = rep.run(steps)
+    assert [c for c in log if c.startswith("input tap")] == ["input tap 1000 2300"]
+    assert report["steps"][3]["way"] == "by position"
+    # one tap more than characters (Go inside the text's time): keys stay
+    lines[-1]["data"]["dur_ms"] = 5000.0
+    steps = extract_steps(lines)
+    assert all("type_text" not in s.data for s in steps)
+
+
+def test_an_earlier_texts_keys_are_never_typed_again():
+    first = _keyboard_lines("ab")
+    second = [
+        {**_tap(seq=60 + i, t=110 + i * 0.3, ime=True, x=70, y=2000)} for i in range(2)
+    ]
+    text2 = _text("cd", seq=70, t=110)
+    text2["data"]["target"] = {"rid": "p:id/pw", "bounds": [180, 400, 807, 520]}
+    steps = extract_steps([*first, *second, text2])
+    assert steps[0].data["type_text"]["text"] == "ab"
+    assert steps[2].data["type_text"]["text"] == "cd"
+    assert [s.data["typed_by"] for s in steps] == [1, 1, 3, 3]
+
+
+def test_a_recorded_id_never_accepts_a_focused_field_without_one():
+    class NoId(TypingField):
+        def focus(self, x=None, y=None, timeout=1.0):
+            return {"input": {"editable": True, "text": self.value,
+                              "bounds": [0, 1800, 1080, 1900]}}  # fmt: skip
+
+    rep, log, _ = _typing_replayer(NoId())
+    report = rep.run(extract_steps(_keyboard_lines("ab")))
+    assert any(c.startswith("input tap") for c in log)  # not typed into it
+    assert report["steps"][0]["check"] == "unchecked"
+
+
+class LiveAnswers(FakeHelper):
+    """A helper whose live hit test gives the scripted ``answers``."""
+
+    def __init__(self, reply, answers):
+        super().__init__([reply])
+        self.answers = list(answers)
+
+    def node_at(self, x, y, *, mode="both", timeout=1.0, t_mono_ms=None):
+        self.hits.append((x, y))
+        live = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        return {"type": "node_at", "live": live}
+
+
+def _row_dump():
+    row = _node(rid="p:id/row", cls="android.view.View", bounds=(0, 400, 1080, 500),
+                nid=11, clickable=True,
+                kids=[_node("spiegel.de", cls="android.widget.TextView",
+                            bounds=(40, 410, 600, 490), nid=12)])  # fmt: skip
+    reply = _dump(row)
+    reply["windows"][0]["id"] = 10
+    return reply, row
+
+
+def test_the_helper_node_id_decides_and_a_recycled_row_is_not_verified():
+    reply, row = _row_dump()
+    target = {"rid": "p:id/row", "label": "spiegel.de", "bounds": [0, 400, 1080, 500]}
+    same = {"hit": {"nid": 12, "text": "spiegel.de", "bounds": [40, 410, 600, 490]},
+            "target": {"nid": 11, "rid": "p:id/row", "cls": "android.view.View",
+                       "bounds": [0, 400, 1080, 500]},
+            "label": "spiegel.de", "window": {"id": 10}}  # fmt: skip
+    rep, _ = _replayer(LiveAnswers(reply, [same]), [])
+    step = rep.run(extract_steps([_tap(target=target, x=300, y=450)]))["steps"][0]
+    assert step["check"] == "verified"
+    # the list refilled: same row id, another text
+    other = {**same, "label": "spi", "hit": {**same["hit"], "text": "spi"}}
+    rep, _ = _replayer(LiveAnswers(reply, [other]), [])
+    step = rep.run(extract_steps([_tap(target=target, x=300, y=450)]))["steps"][0]
+    assert (step["way"], step["reason"], step["check"]) == (
+        "by position", "element covered", "unchecked",
+    )  # fmt: skip
+    # the same node id in another window (a dialog) is never it
+    dialog = {**same, "window": {"id": 99}}
+    rep, _ = _replayer(LiveAnswers(reply, [dialog]), [])
+    step = rep.run(extract_steps([_tap(target=target, x=300, y=450)]))["steps"][0]
+    assert step["check"] == "unchecked"
+
+
+def test_a_hit_test_that_answers_nothing_is_not_called_covered():
+    reply, _row = _row_dump()
+    target = {"rid": "p:id/row", "bounds": [0, 400, 1080, 500]}
+    rep, _ = _replayer(LiveAnswers(reply, [{"hit": None, "reason": "no_window"}]), [])
+    step = rep.run(extract_steps([_tap(target=target, x=300, y=450)]))["steps"][0]
+    assert (step["way"], step["reason"], step["check"]) == (
+        "by position", "not hit-tested", "unchecked",
+    )  # fmt: skip
