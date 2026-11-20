@@ -83,6 +83,9 @@ class ReviewModal(ForensicModal[None]):
     ReviewModal .review-warn {
         color: $warning;
     }
+    ReviewModal #review-results {
+        height: auto;
+    }
     ReviewModal #review-name-row {
         height: auto;
     }
@@ -230,14 +233,21 @@ class ReviewModal(ForensicModal[None]):
             line.append(f"  modified {stamp}", style="dim")
         if entry.get("outside_app"):
             line.append("  outside the app's folders", style="dim")
-        state = self._file_state.get(path)
-        if path in self.rec.selected:
+        from sandroid.core.rewind import main_database
+
+        main = main_database(path)
+        state = self._file_state.get(main)
+        if main in self.rec.selected:
             line.append("  ★ watched", style="bold")
+            if main != path:
+                line.append(" (its database)", style="dim")
             if state:
                 line.append(f" · {state}", style="dim")
         return line
 
     def _fill_files(self) -> None:
+        from sandroid.core import rewind
+
         sel = self.query_one("#review-files", SelectionList)
         sel.clear_options()
         changed = self.rec.changed
@@ -257,7 +267,7 @@ class ReviewModal(ForensicModal[None]):
                 Selection(
                     self._file_prompt(e),
                     e["path"],
-                    e["path"] in self.rec.selected,
+                    rewind.main_database(e["path"]) in self.rec.selected,
                 )
                 for e in changed
             ]
@@ -486,18 +496,20 @@ class ReviewModal(ForensicModal[None]):
             self._update_buttons()
 
     def set_file_state(self, path: str, text: str) -> None:
+        from sandroid.core.rewind import main_database
+
+        path = main_database(path)
         self._file_state[path] = text
         with contextlib.suppress(Exception):
             sel = self.query_one("#review-files", SelectionList)
             for idx in range(sel.option_count):
                 option = sel.get_option_at_index(idx)
-                if option.value == path:
+                if main_database(option.value) == path:
                     entry = next(
                         (e for e in self.rec.changed if e.get("path") == path),
                         {"path": path, "state": ""},
                     )
                     sel.replace_option_prompt_at_index(idx, self._file_prompt(entry))
-                    break
 
     # -- events -----------------------------------------------------------------
 

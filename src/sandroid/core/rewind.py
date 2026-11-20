@@ -315,6 +315,16 @@ def _entry(path: str, state: str, fact: FileFact | None) -> dict[str, Any]:
     }
 
 
+def main_database(path: str) -> str:
+    """The database a SQLite companion (``-wal``/``-journal``/``-shm``)
+    belongs to; any other path unchanged.
+    """
+    for suffix in ("-wal", "-journal", "-shm"):
+        if path.endswith(suffix) and len(path) > len(suffix):
+            return path[: -len(suffix)]
+    return path
+
+
 def sort_changes(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Changed first, then new, then deleted; newest first in each."""
     return sorted(

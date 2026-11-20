@@ -874,9 +874,15 @@ class RecordingController:
         return None
 
     def select_file(self, path: str, selected: bool) -> None:
-        """Select (watch ★ + pull After) or unselect a Review file."""
+        """Select (watch ★ + pull After) or unselect a Review file.
+
+        A SQLite ``-wal`` / ``-journal`` / ``-shm`` file stands for its
+        database: the database is watched and copied (its pulls carry the
+        companions), so the result is a table diff, not a byte comparison.
+        """
         from sandroid.core import rewind
 
+        path = rewind.main_database(path)
         rec = self._rec
         if rec is None:
             return

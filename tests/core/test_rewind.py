@@ -966,3 +966,18 @@ def test_version_list_names_the_role():
     v = Version(1, Path("/x/v001"), Path("/x/v001/f"), None, 1,
                 {"trigger": "rewind-after_replay", "rewind": {"role": "after_replay"}})  # fmt: skip
     assert v.trigger == "After (replay)"
+
+
+def test_main_database_of_companions():
+    assert rewind.main_database("/d/c.sqlite-wal") == "/d/c.sqlite"
+    assert rewind.main_database("/d/c.sqlite-shm") == "/d/c.sqlite"
+    assert rewind.main_database("/d/c.sqlite") == "/d/c.sqlite"
+
+
+def test_before_version_summary_never_reads_backwards():
+    from sandroid.tui.widgets.file_inspect import BEFORE_NOTE, Version, version_summary
+
+    a = Version(1, Path("/x/v001"), Path("/x/v001/f"), None, 1, {})
+    b = Version(2, Path("/x/v002"), Path("/x/v002/f"), None, 1,
+                {"rewind": {"role": "before"}})  # fmt: skip
+    assert version_summary(b, a) == BEFORE_NOTE

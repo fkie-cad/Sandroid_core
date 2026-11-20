@@ -918,3 +918,36 @@ def test_a_rewind_run_is_timed_from_its_own_start(controller, monkeypatch):
     from datetime import datetime
 
     assert datetime.fromisoformat(saved[0].recorded_at).timestamp() == 5000.0
+
+
+def test_selecting_a_wal_file_watches_its_database(controller):
+    rec = _rec()
+    rec.changed.append(
+        {"path": "/data/data/org.x/cookies.sqlite-wal", "state": "changed", "size": 9}
+    )
+    controller._rec = rec
+    controller.select_file("/data/data/org.x/cookies.sqlite-wal", True)
+    assert rec.selected == ["/data/data/org.x/cookies.sqlite"]
+    assert controller.view.pulls == [("/data/data/org.x/cookies.sqlite", "after", 1)]
+
+
+async def test_review_body_scrolls_to_the_last_result():
+    from textual.containers import VerticalScroll
+
+    rec = _rec()
+    rec.runs = [{"n": 2, "kind": "rewind", "result": "rewound", "loaded": True}]
+
+    class Many(FakeController):
+        def results(self, rec):
+            res = rewind.FileResult("/data/data/org.x/f", "v1", "v2")
+            res.action_text = "\n".join(f"line {i}" for i in range(80))
+            return {"files": [res], "flows": []}
+
+    modal = ReviewModal(rec, Many())
+    app = Host(modal)
+    async with app.run_test(size=(200, 55)) as pilot:
+        body = modal.query_one("#review-body", VerticalScroll)
+        await until(pilot, lambda: body.max_scroll_y > 0)
+        body.scroll_end(animate=False)
+        await settle(pilot)
+        assert body.scroll_y == body.max_scroll_y > 0
