@@ -205,6 +205,24 @@ def test_reconcile_drops_dead_owners_leases():
     }
 
 
+def test_reconcile_keeps_leases_held_outside_the_ai():
+    """The chat panel's 1 s lease reconcile only knows AI owners: it must
+    not drop the TUI's WORLD lease (the CA fallback's Zygote restart), or an
+    AI task could work on the device while Zygote restarts.
+    """
+    from sandroid.services.proxy_restore import FALLBACK_LEASE_OWNER
+
+    arb = DeviceResourceArbiter()
+    arb.claim(FALLBACK_LEASE_OWNER, frozenset({ResourceId.WORLD}))
+    arb.reconcile({"orchestrator"})
+    assert arb.snapshot() == {ResourceId.WORLD: FALLBACK_LEASE_OWNER}
+    assert isinstance(
+        arb.claim("orchestrator", frozenset({ResourceId.FRIDA_SERVER})), Conflict
+    )
+    arb.release_all(FALLBACK_LEASE_OWNER)
+    assert arb.snapshot() == {}
+
+
 def test_get_arbiter_is_a_singleton():
     first = get_arbiter()
     second = get_arbiter()
