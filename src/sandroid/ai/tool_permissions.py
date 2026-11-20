@@ -169,6 +169,30 @@ def is_argument_dependent(
     return bool(permission_key) or not can_remember_choice
 
 
+#: tool -> {argument: value}: a call with that value is never remembered and
+#: no allow rule covers it (every such call is asked afresh).
+_NEVER_REMEMBER: dict[str, dict[str, Any]] = {}
+
+
+def register_never_remember(tool: str, **values: Any) -> None:
+    """Mark argument values whose calls are always asked (no rule, no
+    "don't ask again"), e.g. ``replace_external=True``.
+    """
+    _NEVER_REMEMBER.setdefault(tool, {}).update(values)
+
+
+def never_remembered(tool: str, args: Mapping[str, Any] | None) -> bool:
+    """Whether this call carries a value that must always be asked."""
+    values = _NEVER_REMEMBER.get(tool)
+    if not values:
+        return False
+    args = args or {}
+    return any(
+        key in args and _arg_text(args[key]) == _arg_text(value)
+        for key, value in values.items()
+    )
+
+
 def _keys(permission_key: str | Sequence[str] | None) -> tuple[str, ...]:
     if not permission_key:
         return ()
@@ -387,6 +411,8 @@ def suggest_rule(
     glob-escaped so it matches only itself); without a key, or when the key
     argument is missing, nothing can be remembered.
     """
+    if never_remembered(tool, args):
+        return None
     if not is_argument_dependent(permission_key, can_remember_choice):
         return tool
     keys = _keys(permission_key)
@@ -1056,11 +1082,17 @@ class ToolPermissionStore:
             return Resolution("deny", "session_decline")
         if mode == "allow_all":
             return Resolution("allow", "allow_all")
+        keys = _keys(permission_key)
+        always_ask = never_remembered(name, args)
         for rule in allow:
-            if rule.tool != name:
+            if rule.tool != name or always_ask:
                 continue
             if dependent and rule.is_bare:
                 self._warn_bare(rule)
+                continue
+            if len(keys) > 1 and not set(keys) <= {k for k, _ in rule.constraints}:
+                # A multi-key tool: a rule must constrain every key (an
+                # older rule on one key never covers the others' values).
                 continue
             if rule.matches(name, args):
                 return Resolution("allow", "allow_rule", rule=str(rule))

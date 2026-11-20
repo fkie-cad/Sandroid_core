@@ -1174,6 +1174,17 @@ def set_app_proxy_quic_blocking(enabled: bool) -> dict[str, Any]:
 _METHODS = ("off", "whole_device", "this_app", "keys_only")
 
 
+def _never_remember_replacing() -> None:
+    # Replacing the analyst's own proxy (or friTap) is asked every time:
+    # no "don't ask again", and no allow rule covers replace_external=true.
+    from sandroid.ai.tool_permissions import register_never_remember
+
+    register_never_remember("set_network_method", replace_external=True)
+
+
+_never_remember_replacing()
+
+
 @sandroid_tool(
     name="get_network_method",
     description=(
