@@ -2607,7 +2607,12 @@ class AppLensSections(Vertical):
             return False
         rid = self._start_runtime(wanted)
         if announce and rid is not None:
-            self._announce_rid = rid
+            if self._runtime_rid == rid:
+                self._announce_rid = rid
+            else:
+                # It ended before we could watch it (the worker did not
+                # start): say so instead of "refreshing" forever.
+                self._announce_end(failed=True)
         return True
 
     @property

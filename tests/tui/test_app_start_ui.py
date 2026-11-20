@@ -475,7 +475,6 @@ SHORT = "Identity profile 'mara-de' not applied to this app — ⇧R restarts it
 
 
 async def test_identity_notice_comes_and_goes_with_the_applied_state(monkeypatch):
-
     _svc, fake = _identity_env(monkeypatch, "not_applied")
     app = _Harness()
     async with app.run_test(size=(240, 30)) as pilot:

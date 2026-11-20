@@ -808,7 +808,11 @@ class SpotlightPanel(Widget):
         if sections is None or not self._current_package():
             self._notify("No app facts to refresh: pick an app first (c or ⇧C)")
             return
-        sections.refresh_runtime(static=True, explicit=True, announce=True)
+        if not sections.refresh_runtime(static=True, explicit=True, announce=True):
+            if not sections.refreshing:
+                self._notify(
+                    "App facts are still loading; u refreshes once they are in"
+                )
         self._repaint_text()
         self._update_caption()
 
