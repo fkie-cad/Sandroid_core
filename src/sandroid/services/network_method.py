@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -61,6 +62,12 @@ FRITAP_REASONS = {
     "declined": "the restart of the app was declined",
 }
 
+#: Steps that use Frida (friTap, the bypass scripts, the app start with its
+#: spawn bundle). They run on the SELECTED device's Frida session only, so
+#: they never run inside ``Adb.targeting`` and a preset needing them is
+#: refused for another device.
+FRIDA_STEPS = frozenset({"start_fritap_keys", "stop_fritap", "pinning", "start_app"})
+
 
 # ---------------------------------------------------------------------------
 # State model
@@ -79,20 +86,27 @@ class MethodSnapshot:
     #: The address our Mitmproxy is reached at from the device.
     our_addr: str = ""
     kill_switch: bool = False
+    #: The Kill switch also covers IPv6 (False: no ip6tables on the device).
+    ks_ipv6: bool = True
     refused: int = 0
-    #: "off" | "on" | "failed" | "external" | "unavailable"
+    #: "off" | "on" | "partial" | "failed" | "external" | "unavailable"
     attribution: str = "off"
     named_apps: int = 0
+    #: Apps the identity relay does not name yet (installed afterwards).
+    unnamed_apps: int = 0
     #: package -> "ours" | "http://ip:port"
     lanes: dict[str, str] = field(default_factory=dict)
     #: package -> health label, only lanes that pass no traffic.
     lane_problems: dict[str, str] = field(default_factory=dict)
     #: "installed" | "missing" | "unknown"
     ca: str = "unknown"
-    #: "on" | "armed" | "off"
+    #: "on" (live on the spotlight app) | "set" (for its next start) | "off"
     pinning: str = "off"
     fritap: bool = False
     fritap_on_spotlight: bool = False
+    #: The running friTap was started by hand (``h``: its own settings,
+    #: maybe a pcap), not by the Network method.
+    fritap_by_hand: bool = False
     quic_block: bool = True
     keys_only_available: bool = False
 
@@ -158,14 +172,37 @@ def _sentence(parts: tuple[str, ...]) -> str:
 def _pinning_note(s: MethodSnapshot) -> str:
     if s.pinning == "on":
         return "pinning bypassed"
-    if s.pinning == "armed":
-        return "pinning bypass armed (takes effect when the app starts)"
+    if s.pinning == "set":
+        return "pinning bypass set for the next app start"
     return "pinning not bypassed"
 
 
 def _ca_problem(s: MethodSnapshot) -> list[str]:
     if s.ca == "missing":
         return ["CA not installed: HTTPS cannot be read"]
+    return []
+
+
+def _naming_problems(s: MethodSnapshot) -> list[str]:
+    """App naming of OUR device proxy, when it is not complete."""
+    if s.device_proxy != "ours":
+        return []
+    if s.attribution == "partial":
+        count = s.unnamed_apps
+        return [f"{count} app{'s' if count != 1 else ''} not named yet (repairing)"]
+    if s.attribution in ("failed", "unavailable"):
+        if s.kill_switch:
+            return ["apps not named (identity relay not running)"]
+        return [
+            "apps not named (identity relay not running; apps may go direct "
+            "past Mitmproxy)"
+        ]
+    return []
+
+
+def _kill_switch_problems(s: MethodSnapshot) -> list[str]:
+    if s.kill_switch and not s.ks_ipv6:
+        return ["Kill switch covers IPv4 only (no ip6tables on the device)"]
     return []
 
 
@@ -199,7 +236,10 @@ def derive_method(s: MethodSnapshot) -> MethodView:
         return MethodView(
             CUSTOM,
             covered=tuple(_custom_pieces(s)),
-            problems=("Kill switch without a device proxy: apps have no network",),
+            problems=(
+                "Kill switch without a device proxy: apps have no network "
+                "(Off removes it)",
+            ),
         )
     if s.device_proxy == "none" and no_lanes and not s.fritap:
         notes = ["nothing is routed through Mitmproxy"]
@@ -218,14 +258,18 @@ def derive_method(s: MethodSnapshot) -> MethodView:
         problems: list[str] = []
         if s.attribution == "on":
             covered.append("apps named")
-        elif s.attribution in ("failed", "unavailable"):
-            problems.append("apps not named (identity relay not running)")
+        problems += _naming_problems(s)
         if not s.mitm_running:
             problems.insert(
                 0, "Mitmproxy stopped: app traffic is blocked until it runs again"
             )
+        problems += _kill_switch_problems(s)
         problems += _ca_problem(s)
         notes = [_pinning_note(s)] if spot else []
+        if s.attribution == "on":
+            # SDK runtime processes (UID 20000+) are refused by the Kill
+            # switch but get no relay identity of their own.
+            notes.insert(0, "SDK runtime processes not named")
         if s.ca == "installed":
             notes.insert(0, "CA installed")
         return MethodView(
@@ -264,7 +308,11 @@ def derive_method(s: MethodSnapshot) -> MethodView:
             covered=("friTap writing TLS keys",),
             notes=("no proxy, no rows in this list", _pinning_note(s)),
         )
-    return MethodView(CUSTOM, covered=tuple(_custom_pieces(s)))
+    return MethodView(
+        CUSTOM,
+        covered=tuple(_custom_pieces(s)),
+        problems=tuple(_naming_problems(s) + _kill_switch_problems(s)),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -304,9 +352,17 @@ def plan_apply(
 
     Steps: ``("start_mitm",)``, ``("inject_ca",)``,
     ``("prepare_guard", addr)`` (Kill switch + app naming for a proxy about
-    to be set), ``("set_device_proxy", addr)``, ``("clear_device_proxy",)``,
-    ``("enable_lane", pkg)``, ``("disable_lane", pkg)``, ``("stop_fritap",)``,
+    to be set), ``("set_device_proxy", addr)``, ``("own_device_proxy",
+    addr)`` (our proxy is already set: Sandroid takes it over, so quit
+    clears it), ``("clear_device_proxy",)``, ``("kill_switch_off",)`` (a Kill
+    switch left without its proxy), ``("enable_lane", pkg)``,
+    ``("disable_lane", pkg)``, ``("stop_fritap",)``, ``("start_app",)``,
     ``("start_fritap_keys", pkg)``, ``("pinning", bool)``.
+
+    Replacing something the analyst set up outside the Network method (an
+    external device proxy, an external App Proxy upstream, a friTap started
+    by hand) needs ``replace_external``; without it the plan only carries the
+    confirmation text.
     """
     if preset not in PRESETS:
         return ApplyPlan(error=f"Unknown Network method {preset!r}")
@@ -315,21 +371,15 @@ def plan_apply(
         return ApplyPlan(error="Pick a spotlight app first")
     if preset == KEYS_ONLY and not s.keys_only_available:
         return ApplyPlan(error=f"This app, keys only {KEYS_ONLY_UNAVAILABLE}")
-    external = _external_pieces(s)
-    if external and not replace_external:
-        target = LABELS[preset]
-        return ApplyPlan(
-            confirm=(
-                f"{'; '.join(external).capitalize()}. Applying {target} replaces "
-                "that. Continue?"
-            )
-        )
     steps: list[tuple] = []
     pin = (
         [("pinning", defeat_pinning)]
         if defeat_pinning is not None and spot and preset != OFF
         else []
     )
+    # A Kill switch without a device proxy takes every app offline; the
+    # presets without a device proxy remove it (after the proxy is gone).
+    ks_off = [("kill_switch_off",)] if s.kill_switch else []
     if preset == WHOLE_DEVICE:
         addr = s.device_addr if s.device_proxy == "ours" else s.our_addr
         if not s.mitm_running:
@@ -337,7 +387,9 @@ def plan_apply(
         if s.ca != "installed":
             steps.append(("inject_ca",))
         steps.append(("prepare_guard", addr))
-        if not (s.device_proxy == "ours" and s.device_addr == addr):
+        if s.device_proxy == "ours" and s.device_addr == addr:
+            steps.append(("own_device_proxy", addr))
+        else:
             steps.append(("set_device_proxy", addr))
         steps += [("disable_lane", pkg) for pkg in sorted(s.lanes)]
         if s.fritap:
@@ -354,23 +406,47 @@ def plan_apply(
         steps += [("disable_lane", pkg) for pkg in sorted(s.lanes) if pkg != spot]
         if s.device_proxy != "none":
             steps.append(("clear_device_proxy",))
+        steps += ks_off
         if s.fritap:
             steps.append(("stop_fritap",))
         steps += pin
     elif preset == KEYS_ONLY:
         if s.fritap and not s.fritap_on_spotlight:
             steps.append(("stop_fritap",))
+        if defeat_pinning and not s.fritap_on_spotlight:
+            # A stopped app must start WITH the bypass (its pinning checks
+            # run at startup): set it first, start the app with it in the
+            # spawn bundle, then friTap attaches to the running app.
+            steps += pin + [("start_app",)]
+            pin = []
         steps.append(("start_fritap_keys", spot))
         if s.device_proxy != "none":
             steps.append(("clear_device_proxy",))
+        steps += ks_off
         steps += [("disable_lane", pkg) for pkg in sorted(s.lanes)]
         steps += pin
     else:  # OFF
         if s.device_proxy != "none":
             steps.append(("clear_device_proxy",))
+        steps += ks_off
         steps += [("disable_lane", pkg) for pkg in sorted(s.lanes)]
         if s.fritap:
             steps.append(("stop_fritap",))
+    external = _external_pieces(s)
+    stops_hand_fritap = s.fritap_by_hand and ("stop_fritap",) in steps
+    if (external or stops_hand_fritap) and not replace_external:
+        target = LABELS[preset]
+        parts = []
+        if external:
+            parts.append(
+                f"{'; '.join(external).capitalize()}. Applying {target} replaces that."
+            )
+        if stops_hand_fritap:
+            parts.append(
+                f"friTap was started by hand (its own settings, maybe a pcap); "
+                f"applying {target} stops it."
+            )
+        return ApplyPlan(confirm=" ".join(parts) + " Continue?")
     return ApplyPlan(steps=steps)
 
 
@@ -398,6 +474,39 @@ def _fritap_state(spotlight: str | None) -> tuple[bool, bool]:
         return False, False
 
 
+#: ``id()`` of the friTap instance the Network method started (keys only).
+_OUR_FRITAP: int | None = None
+
+
+def _fritap_instance() -> Any:
+    try:
+        from sandroid.services import get_task_service
+
+        task = get_task_service().get_task("fritap")
+    except Exception:
+        return None
+    return getattr(task, "instance", None) if task is not None else None
+
+
+def _note_our_fritap() -> None:
+    global _OUR_FRITAP
+    instance = _fritap_instance()
+    _OUR_FRITAP = id(instance) if instance is not None else None
+
+
+def _fritap_by_hand() -> bool:
+    """A friTap runs that the Network method did not start (``h``)."""
+    instance = _fritap_instance()
+    return instance is not None and id(instance) != _OUR_FRITAP
+
+
+def _selected_device() -> str | None:
+    """The device the user selected (never a thread's ``Adb.targeting`` pin)."""
+    from sandroid.core.adb import Adb
+
+    return Adb._target_device
+
+
 # ---------------------------------------------------------------------------
 # Executor
 # ---------------------------------------------------------------------------
@@ -417,6 +526,11 @@ class ServiceActions:
         handler = getattr(self, f"_{name}", None)
         if handler is None:
             return False, f"unknown step {name}"
+        if name in FRIDA_STEPS:
+            # friTap and the bypass scripts run on the SELECTED device's
+            # Frida session: a pin here would only fool their device checks
+            # (the apply refuses them for another device beforehand).
+            return handler(serial, *step[1:])
         from sandroid.core.adb import Adb
 
         with Adb.targeting(serial):
@@ -476,6 +590,23 @@ class ServiceActions:
         return True, "Kill switch on"
 
     @staticmethod
+    def _own_device_proxy(serial, addr: str) -> tuple[bool, str]:
+        """Our proxy is already set (e.g. left by an earlier session): take
+        it over, so Mitmproxy stop keeps it behind the Kill switch and quit
+        clears it together with the Kill switch.
+        """
+        from sandroid.services.mitmproxy_service import get_mitmproxy_service
+
+        get_mitmproxy_service().note_device_proxy(addr, serial)
+        return True, ""
+
+    @staticmethod
+    def _kill_switch_off(serial) -> tuple[bool, str]:
+        from sandroid.core.device_guard import get_device_guard
+
+        return get_device_guard().set_kill_switch(False, serial)
+
+    @staticmethod
     def _set_device_proxy(serial, addr: str) -> tuple[bool, str]:
         from sandroid.core.proxy_manager import ProxyConfig, ProxyManager
         from sandroid.services.mitmproxy_service import get_mitmproxy_service
@@ -520,21 +651,50 @@ class ServiceActions:
     def _stop_fritap(_serial) -> tuple[bool, str]:
         from sandroid.analysis.fritap import fritap_running, stop_fritap
 
+        by_hand = _fritap_by_hand()
         stop_fritap()
         if fritap_running():
             return False, "friTap did not stop"
+        if by_hand:
+            return True, "friTap (started by hand) stopped"
         return True, "friTap stopped"
+
+    @staticmethod
+    def _start_app(_serial) -> tuple[bool, str]:
+        """Start the STOPPED spotlight app with the set bypasses (spawn
+        bundle). A running app is left alone (friTap attaches to it).
+        """
+        from sandroid.services import app_start
+
+        package = _spotlight()
+        if not package:
+            return False, "no spotlight app"
+        liveness, _pid = app_start.probe_liveness(package)
+        if liveness != app_start.Liveness.NOT_RUNNING:
+            return True, ""
+        result = app_start.start_app()
+        try:
+            ok, message = result[0], result[1]
+        except Exception:
+            ok, message = bool(result), ""
+        if ok:
+            return True, message or f"{package} started with the pinning bypass"
+        return False, message or f"{package} did not start"
 
     @staticmethod
     def _start_fritap_keys(serial, pkg: str) -> tuple[bool, str]:
         from sandroid.analysis.fritap import start_fritap_keys
 
+        before = _fritap_instance()
         result = start_fritap_keys(package=pkg, serial=serial)
         try:
             ok, message = result[0], result[1]
         except Exception:
             ok, message = bool(result), ""
         if ok:
+            after = _fritap_instance()
+            if after is not None and after is not before:
+                _note_our_fritap()  # a new friTap: the Network method's own
             return True, message or f"friTap writing TLS keys of {pkg}"
         reason = getattr(result, "reason", None)
         return False, FRITAP_REASONS.get(
@@ -584,9 +744,15 @@ class ApplyResult:
 
 
 def execute_plan(
-    plan: ApplyPlan, actions: Actions, serial: str | None
+    plan: ApplyPlan,
+    actions: Actions,
+    serial: str | None,
+    ran: list[tuple] | None = None,
 ) -> tuple[bool, list[str], str]:
     """Run *plan* in order; stop at the first failing step.
+
+    Args:
+        ran: Filled with the steps that succeeded, in order.
 
     Returns:
         ``(ok, messages of the steps run, the failure or "")``.
@@ -601,9 +767,25 @@ def execute_plan(
         logger.info("Network method step %s: %s", step[0], msg)
         if not ok:
             return False, done, f"{step[0].replace('_', ' ')}: {msg}"
+        if ran is not None:
+            ran.append(step)
         if msg:
             done.append(msg)
     return True, done, ""
+
+
+def needs_guard_rollback(plan: ApplyPlan, ran: list[tuple]) -> bool:
+    """A failed Whole device left a Kill switch for a proxy never set (pure).
+
+    ``prepare_guard`` (ran or failed half-way) points the Kill switch at the
+    proxy about to be set; when ``set_device_proxy`` then did not succeed,
+    the Kill switch allows a proxy the device does not use: every app would
+    be offline.
+    """
+    names = [step[0] for step in plan.steps]
+    if "prepare_guard" not in names or "set_device_proxy" not in names:
+        return False
+    return "set_device_proxy" not in [step[0] for step in ran]
 
 
 # ---------------------------------------------------------------------------
@@ -638,6 +820,7 @@ class NetworkMethodService:
         self._again_ca = False
         self._subscribed = False
         self._closed = False
+        self._unnamed_at = -1e9
 
     # -- cached reads (UI thread) -------------------------------------------
 
@@ -650,9 +833,17 @@ class NetworkMethodService:
     # -- gathering ----------------------------------------------------------
 
     def gather(
-        self, *, with_ca: bool = False, serial: str | None = None
+        self,
+        *,
+        with_ca: bool = False,
+        serial: str | None = None,
+        repair: bool = True,
     ) -> MethodSnapshot:
-        """Read everything the method needs (blocking: one or two adb calls)."""
+        """Read everything the method needs (blocking: one or two adb calls).
+
+        With *repair* a broken app naming of our device proxy is repaired on
+        the way (the guard's refresh; at most every few seconds).
+        """
         from sandroid.core.adb import Adb
         from sandroid.core.device_guard import get_device_guard
         from sandroid.core.proxy_manager import (
@@ -666,7 +857,7 @@ class NetworkMethodService:
         mitm = get_mitmproxy_service()
         port = mitm.state.proxy_port
         guard = get_device_guard()
-        view = guard.refresh(serial)
+        view = guard.refresh(serial, repair=repair)
         endpoint = view.endpoint
         if not view.checked:
             endpoint = _read_device_proxy(serial)
@@ -681,7 +872,7 @@ class NetworkMethodService:
         except Exception:
             our_addr = ""
         focus = get_focus_manager()
-        lanes = focus.app_proxies_cached()
+        lanes = focus.app_proxies_cached(serial)
         health = focus.lane_health_cached(serial)
         lane_problems = {pkg: h.label for pkg, h in health.items() if not h.ok}
         if with_ca:
@@ -701,15 +892,18 @@ class NetworkMethodService:
             device_addr=addr,
             our_addr=our_addr,
             kill_switch=view.kill_switch,
+            ks_ipv6=view.ipv6,
             refused=view.refused,
             attribution=view.attribution,
             named_apps=view.named_apps,
+            unnamed_apps=view.unnamed_apps,
             lanes=lanes,
             lane_problems=lane_problems,
             ca=self._ca,
-            pinning=_pinning_state(),
+            pinning=_pinning_state(spotlight),
             fritap=fritap,
             fritap_on_spotlight=fritap_on_spot,
+            fritap_by_hand=fritap and _fritap_by_hand(),
             quic_block=quic,
             keys_only_available=keys_only_available(),
         )
@@ -781,7 +975,7 @@ class NetworkMethodService:
         if not self._apply_lock.acquire(blocking=False):
             return ApplyResult(False, "Another Network method change is running")
         try:
-            snapshot = self.gather(with_ca=True, serial=serial)
+            snapshot = self.gather(with_ca=True, serial=serial, repair=False)
             plan = plan_apply(
                 preset,
                 snapshot,
@@ -797,7 +991,21 @@ class NetworkMethodService:
                     confirm=plan.confirm,
                     view=self._store(snapshot),
                 )
-            ok, done, failure = execute_plan(plan, self._actions, serial)
+            selected = _selected_device()
+            frida = sorted({step[0] for step in plan.steps} & FRIDA_STEPS)
+            if frida and serial and selected and serial != selected:
+                return ApplyResult(
+                    False,
+                    f"{LABELS[preset]} needs friTap or the pinning bypass, which "
+                    f"run on the selected device only: select {serial} first",
+                    view=self._store(snapshot),
+                )
+            ran: list[tuple] = []
+            ok, done, failure = execute_plan(plan, self._actions, serial, ran)
+            if not ok and needs_guard_rollback(plan, ran):
+                # Never leave apps offline behind a Kill switch for a proxy
+                # that did not get set: back to what the device really has.
+                done.append(self._rollback_guard(serial, snapshot.kill_switch))
             view = self.refresh_now(
                 with_ca=any(s[0] == "inject_ca" for s in plan.steps)
             )
@@ -812,6 +1020,19 @@ class NetworkMethodService:
             message += ". " + _sentence(view.problems)
         return ApplyResult(True, message, done=done, view=view)
 
+    @staticmethod
+    def _rollback_guard(serial: str | None, kill_switch_before: bool) -> str:
+        from sandroid.core.device_guard import get_device_guard
+
+        try:
+            view = get_device_guard().rollback_prepare(serial, kill_switch_before)
+        except Exception as exc:
+            logger.error("Kill switch rollback on %s failed: %s", serial, exc)
+            return f"Kill switch rollback failed: {exc}"
+        if view.kill_switch:
+            return "Kill switch kept on the device's proxy"
+        return "Kill switch removed again (the proxy was not set)"
+
     # -- events ---------------------------------------------------------------
 
     def subscribe(self) -> None:
@@ -819,6 +1040,14 @@ class NetworkMethodService:
         if self._subscribed:
             return
         self._subscribed = True
+        try:
+            # A leftover Kill switch (crash, a quit that timed out) is checked
+            # on the next device attach too, not only on a snapshot load.
+            from sandroid.services.proxy_restore import install_device_prepared_hook
+
+            install_device_prepared_hook()
+        except Exception:
+            logger.debug("proxy restore hook not installed", exc_info=True)
         try:
             from sandroid.core.events import EventBus, EventType
 
@@ -897,11 +1126,28 @@ class NetworkMethodService:
         # (it reads on_categories()); never marshal or block here.
         self.refresh()
 
+    #: Seconds between two refreshes triggered by unnamed device-proxy flows.
+    UNNAMED_REFRESH_S = 30.0
+
     def _on_mitm_line(self, line: str) -> None:
         if line.startswith("[INFO]") and (
             "mitmweb started" in line or "mitmweb stopped" in line or "exited" in line
         ):
             self.refresh()
+        elif line.startswith("[FLOW]|") and self._unnamed_device_flow(line):
+            # Maybe an app installed after "Whole device" (no relay identity
+            # yet): the refresh re-reads packages.list and repairs the naming.
+            now = time.monotonic()
+            if now - self._unnamed_at >= self.UNNAMED_REFRESH_S:
+                self._unnamed_at = now
+                self.refresh()
+
+    def _unnamed_device_flow(self, line: str) -> bool:
+        snap = self._snapshot
+        if snap.device_proxy != "ours" or snap.attribution not in ("on", "partial"):
+            return False
+        parts = line.split("|")
+        return len(parts) >= 9 and parts[8].strip() == "device" and not parts[7]
 
 
 def _publish(data: dict) -> None:
@@ -924,15 +1170,20 @@ def _spotlight() -> str | None:
         return None
 
 
-def _pinning_state() -> str:
+def _pinning_state(spotlight: str | None) -> str:
+    """The SSL pinning bypass for *spotlight*: live on it, set for its next
+    start, or off. Another app's live bypass does not count.
+    """
+    if not spotlight:
+        return "off"
     try:
         from sandroid.analysis.detection_bypass import get_bypass_service
 
         svc = get_bypass_service()
-        if svc.is_active("ssl"):
+        if svc.target_app("ssl") == spotlight:
             return "on"
-        if "ssl" in svc.on_categories():
-            return "armed"
+        if "ssl" in svc.carried_categories(spotlight):
+            return "set"
     except Exception:
         pass
     return "off"
