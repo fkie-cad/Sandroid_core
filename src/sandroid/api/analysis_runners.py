@@ -299,16 +299,18 @@ async def run_malware_analysis(
     current_run_setter: RunSetter = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Run TrigDroid-based malware analysis via the unified engine.
+    """Run malware analysis of *package* via the unified engine.
 
     This function:
     1. Sets the spotlight application to the target package
-    2. Optionally runs the TrigDroid CCF utility (only when explicitly
-       requested via ``trigdroid_ccf``; it exits the process)
-    3. Creates the ``tmp`` snapshot the engine reverts to on its first step
-    4. Optionally degrades the emulated network
-    5. Executes the unified :class:`~sandroid.analysis.engine.AnalysisEngine`
-       with a ``Trigdroid`` action and returns the JSON-safe result dict
+    2. Creates the ``tmp`` snapshot the engine reverts to on its first step
+    3. Optionally degrades the emulated network
+    4. Executes the unified :class:`~sandroid.analysis.engine.AnalysisEngine`
+       with no scripted action (a capture window of ``capture_window``
+       seconds) and returns the JSON-safe result dict
+
+    Malware mode performs no trigger actions: scripted device events will
+    come as playbooks.
 
     Args:
         toolbox: The Toolbox class reference.
@@ -319,7 +321,7 @@ async def run_malware_analysis(
         current_run_setter: Optional callback to update current run number.
         **kwargs: Additional mode-specific options (``track_deleted``,
             ``monitor_processes``, ``monitor_sockets``, ``skip_noise_filter``,
-            ``degrade_network``, ``pull_apk``, ``whitelist``, ``trigdroid_ccf``).
+            ``degrade_network``, ``pull_apk``, ``whitelist``).
 
     Returns:
         Dictionary with malware analysis results.
@@ -327,31 +329,20 @@ async def run_malware_analysis(
     from sandroid.analysis.engine import AnalysisEngine
     from sandroid.analysis.run_config import RunConfig
     from sandroid.core.json_utils import json_encoder
-    from sandroid.features.trigdroid import Trigdroid
     from sandroid.services import get_spotlight_service
 
     # 1. Point the spotlight at the target package.
     get_spotlight_service().set_app(package)
 
-    # 2. Optional TrigDroid CCF (guarded; never part of a normal run). run_ccf()
-    #    reads Toolbox.args.trigdroid_ccf and exits the process, so it is only
-    #    reached when explicitly requested — legacy hard-coded this to None.
-    ccf_mode = kwargs.get("trigdroid_ccf")
-    if ccf_mode:
-        from types import SimpleNamespace
-
-        toolbox.args = SimpleNamespace(trigdroid_ccf=ccf_mode)
-        Trigdroid().run_ccf()
-
-    # 3. The engine's first step reverts to the ``tmp`` snapshot.
+    # 2. The engine's first step reverts to the ``tmp`` snapshot.
     toolbox.create_snapshot(b"tmp")
 
-    # 4. Optional network degradation (replicates legacy assembleQ).
+    # 3. Optional network degradation (replicates legacy assembleQ).
     _apply_network_degradation(
         _degrade_network_setting(toolbox, kwargs.get("degrade_network"))
     )
 
-    # 5. Build the typed config (unset toggles follow [analysis]) and run the
+    # 4. Build the typed config (unset toggles follow [analysis]) and run the
     #    unified engine.
     options = {k: v for k, v in kwargs.items() if k != "track_deleted"}
     ac = resolve_analysis_config(
@@ -362,9 +353,7 @@ async def run_malware_analysis(
         track_deleted=kwargs.get("track_deleted"),
         **options,
     )
-    run_config = RunConfig.from_analysis_config(
-        ac, action=Trigdroid(), whitelist=ac.whitelist
-    )
+    run_config = RunConfig.from_analysis_config(ac, whitelist=ac.whitelist)
     _pin_result_dir(run_config, kwargs.get("result_dir"))
 
     from sandroid.core.run_report import iso_now

@@ -8,7 +8,8 @@
 - ``sandroid --config FILE`` works without an auto-discovered config.
 - ``sandroid-config init`` without ``-o`` refuses to clobber the user config.
 - ``sandroid-config set/get`` accept positional ``KEY [VALUE]``.
-- ``--trigdroid-ccf`` is rejected; ``--trigdroid -f DIR/FILE`` keeps DIR.
+- The removed ``--trigdroid`` fails with a pointer to ``--package``;
+  ``-f DIR/FILE`` keeps DIR.
 """
 
 from __future__ import annotations
@@ -382,20 +383,31 @@ def test_config_set_get_accept_positional_key_value(xdg):
     assert "Missing VALUE" in res.output
 
 
-# -- B9: --trigdroid-ccf is hidden and errors clearly --------------------------
+# -- B9: the removed --trigdroid is hidden and errors clearly -------------------
 
 
-def test_trigdroid_ccf_hidden_and_rejected(xdg):
+def test_removed_trigdroid_option_is_hidden_and_points_to_package(xdg):
     import sandroid.cli as cli_mod
 
     runner = CliRunner()
-    assert "--trigdroid-ccf" not in runner.invoke(cli_mod.main, ["--help"]).output
+    help_text = runner.invoke(cli_mod.main, ["--help"]).output
+    assert "--trigdroid" not in help_text
+    assert "--package" in help_text
+    assert "-p," in help_text
+
+    result = runner.invoke(cli_mod.main, ["--trigdroid", "com.example.app"])
+    assert result.exit_code == 2
+    assert "TrigDroid was removed (it never worked)." in result.output
+    assert "Use --package/-p PKG" in result.output
+    assert cli_mod.TRIGDROID_REMOVED_MESSAGE.endswith("will come as playbooks.")
+
+    # --trigdroid-ccf is gone without a replacement.
     result = runner.invoke(cli_mod.main, ["--trigdroid-ccf", "D"])
     assert result.exit_code == 2
-    assert "not supported" in result.output
+    assert "No such option" in result.output
 
 
-# -- B10: --trigdroid -f DIR/FILE keeps the directory --------------------------
+# -- B10: -f DIR/FILE keeps the directory ---------------------------------------
 
 
 def test_cli_results_copied_to_full_f_path(xdg, tmp_path):

@@ -83,7 +83,7 @@ class SandroidHeadlessAPI(SandroidAPI):
 
     The API supports three primary analysis modes:
     - FORENSIC: File system change detection, spotlight tracking, evidence collection
-    - MALWARE: TrigDroid automated triggers, behavioral monitoring, network capture
+    - MALWARE: Target-app capture window, behavioral monitoring, network capture
     - SECURITY: Static APK analysis, vulnerability scanning
 
     Thread Safety:

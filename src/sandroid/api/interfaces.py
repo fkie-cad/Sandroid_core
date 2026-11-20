@@ -41,7 +41,7 @@ class AnalysisMode(str, Enum):
 
     Each mode focuses on different aspects of Android app analysis:
     - FORENSIC: File system changes, spotlight tracking, evidence collection
-    - MALWARE: TrigDroid triggers, behavioral monitoring, network capture
+    - MALWARE: Target-app capture window, behavioral monitoring, network capture
     - NETWORK: Headless network capture and PCAP analysis
     - SECURITY: Static APK analysis, vulnerability scanning
     """
@@ -121,9 +121,9 @@ class AnalysisConfig:
         whitelist: Optional path to a whitelist file whose listed paths are
             excluded from analysis (``None`` disables whitelisting)
         capture_window: Seconds to wait for filesystem changes before
-            scanning, for a pure forensic run with no driving action (e.g.
-            ``AnalysisMode.FORENSIC``, which passes ``action=None``). Ignored
-            for action-driven runs (Trigdroid/Player), which measure their
+            scanning, for a run with no driving action (``FORENSIC`` and
+            ``MALWARE``, which pass ``action=None``). Ignored for
+            action-driven runs (recording playback), which measure their
             own real elapsed duration instead. 60s matches this API's
             existing headless network-capture default (``cli.py --duration``).
     """

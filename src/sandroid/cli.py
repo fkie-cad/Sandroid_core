@@ -59,6 +59,12 @@ def __getattr__(name: str):
 # Click command definition
 # ---------------------------------------------------------------------------
 
+#: Error for the removed ``--trigdroid`` option (kept hidden for this message).
+TRIGDROID_REMOVED_MESSAGE = (
+    "TrigDroid was removed (it never worked). Use --package/-p PKG; scripted "
+    "device events will come as playbooks."
+)
+
 
 @click.command()
 @click.option(
@@ -125,15 +131,21 @@ def __getattr__(name: str):
     "--sockets", is_flag=True, help="Monitor listening sockets during the action"
 )
 @click.option(
-    "--trigdroid",
-    metavar="PACKAGE_NAME",
-    help="Use the TrigDroid tool to execute malware triggers in package PACKAGE_NAME",
+    "--package",
+    "-p",
+    metavar="PACKAGE",
+    default=None,
+    help=(
+        "Target app package. Runs a command-line analysis of PACKAGE, or sets "
+        "the target of --headless malware/security modes (security also takes "
+        "an APK path)."
+    ),
 )
 @click.option(
-    "--trigdroid-ccf",
-    type=click.Choice(["I", "D"]),
-    hidden=True,  # not functional with the current TrigDroid API -- see main()
-    help="(Unsupported) TrigDroid CCF utility",
+    "--trigdroid",
+    metavar="PACKAGE_NAME",
+    hidden=True,  # removed; kept only to fail with a pointer -- see main()
+    default=None,
 )
 @click.option(
     "--hash",
@@ -183,7 +195,7 @@ def __getattr__(name: str):
     is_flag=True,
     help=(
         "Run in headless mode without interactive UI. Malware/security modes "
-        "need --trigdroid PACKAGE (or --batch); forensic mode needs no package."
+        "need --package PACKAGE (or --batch); forensic mode needs no package."
     ),
 )
 @click.option(
@@ -302,8 +314,8 @@ def main(
     show_deleted: bool,
     no_processes: bool,
     sockets: bool,
+    package: str | None,
     trigdroid: str | None,
-    trigdroid_ccf: str | None,
     hash: bool,
     apk: bool,
     degrade_network: bool,
@@ -337,23 +349,17 @@ def main(
 
     \b
     1. Default mode: Textual TUI (when running just 'sandroid')
-    2. Automated analysis: Command-line driven analysis with --trigdroid
+    2. Automated analysis: Command-line driven analysis with --package
     3. Headless mode (--headless): Programmatic API-based analysis
     """
     # Initialize console with default theme (re-initialized with config theme later)
     SandroidConsole.initialize()
     console = SandroidConsole.get()
 
-    # --trigdroid-ccf is kept (hidden) only so old scripts get a clear error
-    # instead of "no such option": the TrigDroid CCF utility has no
-    # equivalent in the current TrigDroid API, so it never did anything.
-    if trigdroid_ccf:
-        raise click.UsageError(
-            "--trigdroid-ccf is not supported in Sandroid 2.x (the TrigDroid "
-            "CCF utility is not available with the current TrigDroid API). "
-            "Configure TrigDroid via the [trigdroid] section of the config "
-            "file instead (sandroid-config show / set)."
-        )
+    # --trigdroid is kept (hidden) only so old scripts get a clear error
+    # instead of "no such option" or a silent change of meaning.
+    if trigdroid is not None:
+        raise click.UsageError(TRIGDROID_REMOVED_MESSAGE)
 
     if avd and serial:
         raise click.UsageError(
@@ -419,8 +425,7 @@ def main(
             show_deleted=show_deleted,
             processes=not no_processes,
             sockets=sockets,
-            trigdroid=trigdroid,
-            trigdroid_ccf=trigdroid_ccf,
+            package=package,
             hash=locals()["hash"],  # Avoid collision with builtin hash()
             apk=apk,
             degrade_network=degrade_network,
@@ -454,8 +459,6 @@ def main(
             hash_files=locals()["hash"],
             apk=apk,
             degrade_network=degrade_network,
-            trigdroid=trigdroid,
-            trigdroid_ccf=trigdroid_ccf,
             report=report,
             serial=serial,
         )
@@ -569,7 +572,7 @@ def main(
             run_headless_analysis(
                 sandroid_config=sandroid_config,
                 active_logger=active_logger,
-                package=trigdroid,
+                package=package,
                 batch_config=batch,
                 mode=mode,
                 runs=number or sandroid_config.analysis.number_of_runs,
@@ -578,8 +581,8 @@ def main(
                 show_deleted=show_deleted,
                 output_file=file,
             )
-        elif bool(trigdroid):
-            # Automated analysis with --trigdroid flag
+        elif package:
+            # Automated command-line analysis of --package
             if sandroid_config.log_level.value != "DEBUG":
                 os.system("cls" if os.name == "nt" else "clear")  # nosec S605
             SandroidConsole.print_logo()
@@ -589,6 +592,7 @@ def main(
                 Toolbox,
                 Adb,
                 ActionQ,
+                package=package,
             )
         else:
             # Default: Textual TUI
