@@ -10,7 +10,9 @@ source). A lens shows them with
 * :class:`HighlightBar`, one line at the top while sets exist: label and
   count per set, ``filtering`` / ``scanning`` (a ``classify_rows`` run is
   still filling it) / ``partial`` (stopped, cancelled or out of time) /
-  ``N new since`` in words, and the keys (``H filter · X clear``),
+  ``N new since`` / ``N not judged`` (rows the lens hid when the set was
+  made, so the tools left them out, now in view) in words, and the keys
+  (``H filter · X clear``),
 * an "AI highlight" section per set in the Inspector Summary,
 * the *AI filter* (``H`` cycles off -> set 1 -> ... -> off; Esc leaves it):
   applied inside the lens's own row filter through
@@ -26,6 +28,7 @@ the AI tools read. No glyphs or symbols: words, theme-token colours, tint.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import time
@@ -128,6 +131,9 @@ class SetCounts:
     new: int = 0
     #: Rows in the set that changed after the judgement (Files).
     changed: int = 0
+    #: Rows now passing the other filters that the lens hid when the set
+    #: was made (``basis["not_judged"]``): the tools never looked at them.
+    not_judged: int = 0
 
 
 class HighlightView:
@@ -311,7 +317,9 @@ class HighlightView:
         set that pass the other filters and came after the judgement
         (``seq > basis.through_seq``, else ``last > basis.judged_at``); only
         live, for sets judged on live rows. ``changes``: also count set rows
-        changed after the judgement (Files).
+        changed after the judgement (Files). Not judged = rows not in the set
+        that pass the other filters now and are listed in
+        ``basis["not_judged"]`` (hidden when the set was made).
         """
         sets = self.sets()
         counts = {s.id: SetCounts() for s in sets}
@@ -326,6 +334,7 @@ class HighlightView:
                 (s.basis or {}).get("through_seq"),
                 (s.basis or {}).get("judged_at"),
                 live and s.scope is None,
+                frozenset((s.basis or {}).get("not_judged") or ()),
             )
             for s in sets
         ]
@@ -335,23 +344,29 @@ class HighlightView:
                 total += 1
                 if self.passes(key):
                     shown += 1
-            for sid, c, through, judged, fresh in plan:
+            for sid, c, through, judged, fresh, unjudged in plan:
                 if sid in hits:
                     c.present += 1
                     if not ok:
                         c.hidden += 1
                     elif changes and judged and last and last > float(judged):
                         c.changed += 1
+                elif ok and key and key in unjudged:
+                    c.not_judged += 1
                 elif ok and fresh and key:
                     # Keyless rows (a stdout-only TLS failure the flow log has
                     # not caught up with) are never "new": they cannot join a
-                    # set. Keyed TLS failures (``tls-<seq>``) count like flows.
+                    # set. Keyed TLS failures (``tls_row_key``) count like flows.
                     if through is not None and seq is not None:
                         if seq > int(through):
                             c.new += 1
                     elif judged and last and last > float(judged):
                         c.new += 1
         self.counts, self.view_total, self.view_shown = counts, total, shown
+        store = self.store
+        if store is not None:
+            with contextlib.suppress(Exception):
+                store.note_not_judged({sid: c.not_judged for sid, c in counts.items()})
 
     def bar_text(self, width: int = 160, scope: str | None = None) -> Text | None:
         """The bar line (None: no sets), condensed to fit *width* cells.
@@ -408,6 +423,8 @@ class HighlightView:
                 words.append(state)  # "scanning" while running, else "partial"
             if c.new:
                 words.append(f"{c.new} new since")
+            if c.not_judged:
+                words.append(f"{c.not_judged} not judged")
             if c.changed:
                 words.append(f"{c.changed} changed since")
             if c.hidden and hs.id != fid:
@@ -604,9 +621,9 @@ class HighlightBar(Static):
 def flow_snapshot(row: Any, shown: bool, scope: str | None = None) -> dict:
     """One Network row (``FlowRow``) for the AI tools; key = flow id.
 
-    TLS failures: key = the flow-log record id ``tls-<seq>`` (None while a
-    stdout-only row is not in the flow log yet; the tools skip and count
-    those), ``error`` names the failed handshake. ``flow_dir`` is where
+    TLS failures: key = ``tls_row_key`` of the flow-log record id (None
+    while a stdout-only row is not paired yet; the tools pair it with the
+    flow log or count it), ``error`` names the failed handshake. ``flow_dir`` is where
     ``details/<id>.json`` lives: the session's flow log live, the run
     bundle's ``network/`` folder in REVIEW (TLS failures have no detail).
     """

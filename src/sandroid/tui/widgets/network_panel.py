@@ -92,6 +92,7 @@ from textual.containers import Vertical
 from textual.widget import Widget
 from textual.widgets import DataTable, Input, Static
 
+from sandroid.services.row_highlights import tls_row_key
 from sandroid.tui.row_annotations import (
     LENS_NETWORK,
     AnnotationFeed,
@@ -454,9 +455,12 @@ class FlowRow:
         ts_end = rec.get("ts_end") or rec.get("ts_start") or 0.0
         if rec.get("kind") == "tls":
             # A persisted TLS handshake failure (no HTTP flow behind it). Its
-            # flow-log record id ``tls-<seq>`` is the annotation key (AI
-            # highlights, the tools' row key); there is no detail file.
-            fid = rec.get("id") or (f"tls-{seq}" if seq is not None else None)
+            # flow-log record id ``tls-<seq>``, namespaced by the flow dir
+            # (``tls_row_key``), is the annotation key (AI highlights, the
+            # tools' row key); there is no detail file.
+            fid = tls_row_key(
+                flow_dir, rec.get("id") or (f"tls-{seq}" if seq is not None else None)
+            )
             return cls(
                 key=f"f{seq}" if seq is not None else f"f{rec.get('id')}",
                 ts=float(ts_end or 0.0),
@@ -958,8 +962,8 @@ class FlowTable(AnnotationTintMixin, DataTable):
 
     Rows are tinted by their row annotations (``row_annotations``: flows
     carrying identity-profile values, AI marks); the annotation key of a row
-    is its mitmproxy flow id (TLS failures: the flow-log id ``tls-<seq>``),
-    not the row key ``f<seq>``.
+    is its mitmproxy flow id (TLS failures: ``tls_row_key`` of the flow-log
+    id), not the row key ``f<seq>``.
 
     Moving up (↑, PgUp, Home, a wheel up, a click above the newest row) stops
     following the newest flow; End resumes (``follow.py``).
@@ -977,7 +981,7 @@ class FlowTable(AnnotationTintMixin, DataTable):
         self._owner_panel: NetworkPanel | None = None
 
     def annotation_key(self, row_key_value: Any) -> str | None:
-        """Row key ``f<seq>`` -> the flow id (TLS failures: ``tls-<seq>``)."""
+        """Row key ``f<seq>`` -> the flow id (TLS failures: ``tls_row_key``)."""
         panel = self._owner_panel
         if panel is None:
             panel = self._owner_panel = self._panel()
@@ -1377,7 +1381,13 @@ class NetworkPanel(Widget):
         if result is not None:
             flow_dir, records, cursor, stat, reset = result
             if reset:
-                self._live = [r for r in self._live if r.kind == "tls"]
+                # Another flow dir (a device switch): its seqs and TLS keys
+                # mean nothing here. Only stdout TLS rows not paired yet stay.
+                self._live = [
+                    r
+                    for r in self._live
+                    if r.kind == "tls" and r.seq is None and r.flow_id is None
+                ]
                 self._floor_seq = 0
             self._live_dir = flow_dir
             self._cursor = cursor
@@ -1404,8 +1414,9 @@ class NetworkPanel(Widget):
         """A ``[TLS_FAIL]`` line from mitmweb (UI thread)."""
         self._tls_n += 1
         now = time.time()
-        # The flow-log poll can beat mitmweb's stdout: then the row is there.
-        for r in reversed(self._live[-50:]):
+        # The flow-log poll can beat mitmweb's stdout: then the row is there
+        # (oldest unpaired first, as the failures happened in that order).
+        for r in self._live[-50:]:
             if (
                 r.kind == "tls"
                 and r.key.startswith("f")
@@ -1437,10 +1448,14 @@ class NetworkPanel(Widget):
         """A persisted TLS failure that is already on screen (from mitmweb's
         stdout, which is faster than the flow log): adopt its ``seq`` and
         drop the duplicate. Returns True when ``row`` was a duplicate.
+
+        Records come in ``seq`` order, so the oldest unpaired stdout row is
+        taken first (two failures to one host within 10 s keep their order).
+        The AI tools pair the same way off the UI thread (``lens_rows``).
         """
         if row.kind != "tls":
             return False
-        for live in reversed(self._live[-400:]):
+        for live in self._live[-400:]:
             if (
                 live.kind == "tls"
                 and live.seq is None
@@ -1449,7 +1464,7 @@ class NetworkPanel(Widget):
                 and abs(live.ts - row.ts) <= 10.0
             ):
                 # Adopt the record's id too: from now on the stdout row has
-                # the stable annotation key ``tls-<seq>`` (AI highlights).
+                # the stable annotation key (``tls_row_key``, AI highlights).
                 live.seq = row.seq
                 live.flow_id = row.flow_id
                 return True
@@ -2475,8 +2490,8 @@ class NetworkPanel(Widget):
     def annotation_flow_id(self, key: Any) -> str | None:
         """The annotation key (flow id) of table row ``key``.
 
-        Flows: the mitmproxy flow id. TLS failures: the flow-log record id
-        ``tls-<seq>``; a stdout-only TLS row (``t<n>``, not in the flow log
+        Flows: the mitmproxy flow id. TLS failures: ``tls_row_key`` of the
+        flow-log record id; a stdout-only TLS row (``t<n>``, not in the flow log
         yet) has none until the poll pairs it with its record.
         """
         if key is None:
@@ -2612,16 +2627,30 @@ class NetworkPanel(Widget):
             if row is not None:
                 ms.update_inspector(self.flow_content(row))
 
-    def _highlight_rows_snapshot(self) -> list[dict]:
+    def _highlight_rows_snapshot(self) -> list[dict] | None:
         """Every row of this view (live or the reviewed run) for the AI tools.
 
-        ``shown`` = passes the lens's current filters. TLS failures carry
-        their flow-log id ``tls-<seq>``. Rows without one (a stdout-only TLS
-        failure the flow log has not caught up with) cannot be highlighted
-        yet: they come with key None (the tools drop and count them) so
-        their ``seq`` still counts for the "new since" basis.
+        ``shown`` = passes the lens's own filters (noise, app only, ``/``,
+        phases), NOT the AI filter: the tools and the bar's "hidden by lens
+        filters" agree, and a new query or an extend of the filter set sees
+        every row the lens filters let through. TLS failures carry their
+        ``tls_row_key``. Rows without one (a stdout-only TLS failure the poll
+        has not paired yet) come with key None and ``flow_dir`` = the polled
+        flow dir: the tools pair them with the flow log themselves.
+
+        None while the live lens never polled (it was never shown): the
+        tools then read the flow log instead of an empty view.
         """
-        return [flow_snapshot(r, self._passes(r), self._scope) for r in self._model()]
+        if not self.in_review and self._live_dir is None:
+            return None
+        live_dir = str(self._live_dir) if self._live_dir is not None else None
+        out = []
+        for r in self._model():
+            snap = flow_snapshot(r, self._passes(r, ai=False), self._scope)
+            if r.flow_id is None and snap["flow_dir"] is None:
+                snap["flow_dir"] = live_dir
+            out.append(snap)
+        return out
 
     def _leave_highlight_filter(self) -> bool:
         if not self._hl.leave_filter():

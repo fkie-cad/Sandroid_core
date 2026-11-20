@@ -42,6 +42,8 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import functools
+import hashlib
 import json
 import logging
 import re
@@ -90,6 +92,8 @@ HIGHLIGHTS_FILE = "highlights.json"
 SCHEMA = "sandroid-row-highlights/1"
 #: Origins of a set.
 ORIGINS = ("structural", "ai", "manual")
+#: Keys kept in ``basis["not_judged"]`` (rows hidden when the set was made).
+MAX_NOT_JUDGED = 5000
 
 _UNBOUND = object()
 
@@ -313,6 +317,36 @@ def short_label(label: str) -> str:
     return out
 
 
+_TLS_SEQ_ID = re.compile(r"tls-\d+")
+
+
+@functools.lru_cache(maxsize=64)
+def _flow_dir_tag(flow_dir: str) -> str:
+    try:
+        resolved = str(Path(flow_dir).resolve())
+    except (OSError, RuntimeError):
+        resolved = str(flow_dir)
+    digest = hashlib.sha1(resolved.encode("utf-8"), usedforsecurity=False)
+    return digest.hexdigest()[:8]
+
+
+def tls_row_key(flow_dir: Any, rec_id: Any) -> str | None:
+    """The annotation key of a TLS-failure record of the flow log in *flow_dir*.
+
+    The addon's record id ``tls-<seq>`` is unique only within one flow log,
+    while highlight sets span the analysis session (devices, flow dirs), so
+    it is namespaced: ``tls-<8 hex of sha1(resolved flow_dir)>-<seq>``. An id
+    that is already unique (not ``tls-<digits>``) is used as is. Every path
+    (lens rows, adoption, snapshots, the tools' flow-log rows) uses this.
+    """
+    if not rec_id:
+        return None
+    rec_id = str(rec_id)
+    if flow_dir is None or not _TLS_SEQ_ID.fullmatch(rec_id):
+        return rec_id
+    return f"tls-{_flow_dir_tag(str(flow_dir))}-{rec_id[4:]}"
+
+
 def normalize_key(lens: str, key: Any) -> str:
     """The annotation key form of *key* for *lens* (files: canonical path)."""
     text = str(key or "").strip()
@@ -364,6 +398,9 @@ class HighlightStore:
         self._writer: threading.Thread | None = None
         self._writes_idle = threading.Event()
         self._writes_idle.set()
+        #: set id -> rows in the lens's view that were hidden (not judged)
+        #: when the set was made; written by the lens's bar (in memory only).
+        self._not_judged_in_view: dict[str, int] = {}
 
     # -- reads (lock-free where it matters) -----------------------------------
 
@@ -411,6 +448,16 @@ class HighlightStore:
     def filter_set(self, lens: str) -> str | None:
         """The id of the lens's AI filter set, or ``None``."""
         return self._filters.get(lens)
+
+    def note_not_judged(self, counts: Mapping[str, int]) -> None:
+        """The lens bar's "N not judged" per set (no revision, no notify)."""
+        merged = dict(self._not_judged_in_view)
+        merged.update({str(k): int(v) for k, v in counts.items()})
+        self._not_judged_in_view = merged
+
+    def not_judged_in_view(self, set_id: str) -> int:
+        """Rows now in the lens's view that the set's run did not judge."""
+        return self._not_judged_in_view.get(set_id, 0)
 
     def lookup(self, lens: str, key: str) -> tuple[tuple[str, int, str, str], ...]:
         """``((set_id, slot, short, reason), ...)`` for one row, by slot."""
@@ -684,12 +731,15 @@ class HighlightStore:
         label: str | None = None,
         short: str | None = None,
         query: str | None = None,
+        basis: Mapping[str, Any] | None = None,
         generation: int | None = None,
     ) -> None:
-        """Rename a set (label/short) or change its query text."""
+        """Rename a set (label/short), change its query text or merge *basis*."""
         with self._lock:
             self._check_generation(generation)
             hs = self._require(set_id)
+            if basis:
+                hs.basis.update(basis)
             if label:
                 hs.label = _clip(label, LABEL_MAX)
                 hs.short = _clip(short, SHORT_MAX) if short else short_label(label)
@@ -1118,4 +1168,5 @@ __all__ = [
     "normalize_key",
     "reset_for_tests",
     "short_label",
+    "tls_row_key",
 ]
