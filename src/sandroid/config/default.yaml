@@ -1,5 +1,6 @@
-# Sandroid Default Configuration
-# This file contains default settings for Sandroid analysis framework
+# Sandroid Default Configuration (YAML reference copy)
+# This file contains default settings for Sandroid analysis framework.
+# default.toml is the authoritative template; this copy mirrors it.
 # Copy this file to your config directory and customize as needed
 
 # Core Settings
@@ -15,6 +16,12 @@ emulator:
   # adb_path: ~/Android/Sdk/platform-tools/adb  # Optional: auto-detected if not provided
   # avd_home: ~/.android/avd  # Optional: auto-detected if not provided
   avd_headless: false  # First launch of an AVD with UI (Devices screen remembers per AVD)
+  # Host-memory cap for the active emulator's qemu (GB; physical footprint on
+  # macOS, resident memory elsewhere). The enforced cap is never below the AVD's
+  # RAM + 4 GB (2 x RAM + 4 GB for resident memory). Above it on two readings
+  # Sandroid stops the emulator ("kill") or only warns ("warn"). 0 disables it.
+  max_host_memory_gb: 10
+  memory_guard_action: kill
   # Set the device clock to host time at session start and after snapshot
   # loads when it is more than 1 s off (old name: sync_clock_after_snapshot)
   sync_device_clock: true
@@ -47,18 +54,37 @@ analysis:
   capture_sockets: false
   capture_network: false
   show_deleted_files: false
+  # Keep capturing N seconds after each replay (and the dry run) so slow
+  # network responses still land in the run. 0 = stop with the replay.
+  replay_settle_seconds: 8
+  # After every snapshot load (before each replay and the dry run) briefly cycle
+  # the device network so connections restored from the snapshot fail fast and
+  # the app reconnects. airplane | svc (svc wifi/data) | off.
+  network_reset_after_snapshot: airplane
   hash_files: false
   list_apks: false
   degrade_network: false
 
 ai:
-  # Chat/agent LLM connection — all three must be set together to use the Chat tab.
-  # Any OpenAI-compatible chat-completions endpoint works (OpenAI itself, Ollama,
-  # vLLM, LM Studio, an internal gateway, ...).
-  # base_url: https://api.openai.com/v1
-  # api_key: your-api-key-here  # Better to use SANDROID_AI__API_KEY env var
-  # model: gpt-4o
+  # EXPERIMENTAL AI Chat (Ctrl+Y) — OFF until base_url, api_key and model are
+  # all set. Your prompts plus device and app data (tool results, live session
+  # state, file contents) are sent to base_url. Use a LOCAL OpenAI-compatible
+  # server:
+  # base_url: http://localhost:11434/v1   # Ollama  (vLLM: http://localhost:8000/v1)
+  # model: qwen2.5:14b
+  # api_key: prefer the SANDROID_AI__API_KEY environment variable — a key written
+  # here is stored in PLAINTEXT. Local servers that ignore keys accept any value.
+  # api_key: ollama
+  # Only loopback endpoints are used unless you explicitly opt in to sending
+  # case data to a remote service (e.g. https://api.openai.com/v1):
+  allow_remote: false
   mask_sensitive: false  # mask sensitive timeline lines in what the AI reads
+  # row_classify:          # classify_rows (AI row highlights)
+  #   concurrency: 2
+  #   batch_rows: 40
+  #   batch_tokens: 24000
+  #   max_rows: 1000       # per call; the tool can raise it to 2000
+  #   max_tokens: 4096
 
 report:
   generate_pdf: false
@@ -70,7 +96,7 @@ report:
 
 # The session timeline (<results>/<session>/<device>/timeline.jsonl).
 timeline:
-  sources: {files: true, monitor: true, net: true, input: true, screen: true, shot: true}
+  sources: {files: true, monitor: true, net: true, input: true, screen: true, shot: true, ai: true}
   kinds_off: []
   count_only: [files.open, files.close]
   files_attrs: app_dirs  # app_dirs | lines | counts
@@ -105,11 +131,16 @@ identity:
   mode: "off"  # off | profile
   restart: ask  # framework restart (SSAID/locale): ask | always | never
 
-# MCP (Model Context Protocol) client — lets Sandroid's Chat feature call tools
-# hosted by external MCP servers. A bundled dummy server (proving the MCP
-# pipeline works end-to-end) is enabled by default with no config needed here.
+# MCP (Model Context Protocol) client — lets the (experimental) AI Chat call
+# tools hosted by external MCP servers. No server is configured by default, and
+# servers are only started when AI Chat is configured. MCP tools always ask for
+# confirmation before running. For a pipeline test, Sandroid bundles a DEMO
+# fixture that returns FAKE data only (never use its output as a finding):
 # mcp:
 #   servers:
+#     - name: sandroid-demo-fake-data
+#       command: python3
+#       args: ["-m", "sandroid.ai.mcp_demo_server"]
 #     - name: my-external-server
 #       transport: stdio
 #       command: /usr/bin/some-mcp-server

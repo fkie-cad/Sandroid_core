@@ -434,8 +434,9 @@ Sandroid on the same folder records no timeline (``.timeline.lock``). Check a
 file with ``python -m sandroid.core.timeline verify PATH`` (also ``seal``,
 ``tail``, ``labels``; exit code 0 ok, 1 broken, 2 unreadable).
 
-``label``, ``sandroid``, ``clock``, ``snapshot``, ``device`` and ``run``
-lines are always written; the policy below applies to the other sources.
+``label``, ``sandroid``, ``clock``, ``snapshot``, ``device``, ``run``,
+``identity`` and ``privacy`` lines are always written; the policy below
+applies to the other sources (``ai``: the AI Chat's prompts, tool calls and approvals).
 Every change (Settings or ``update_config``) is recorded as a
 ``sandroid/policy`` line.
 
@@ -443,7 +444,7 @@ Every change (Settings or ``update_config``) is recorded as a
 
    [timeline]
    # Per-source switch (off = not written)
-   sources = { files = true, monitor = true, net = true, input = true, screen = true, shot = true }
+   sources = { files = true, monitor = true, net = true, input = true, screen = true, shot = true, ai = true }
 
    # Kinds not written: "src.kind" or "src.*"
    kinds_off = []
@@ -519,6 +520,31 @@ Tracking (``[tracking]``)
 
    # Activity changes from logcat when accessibility events are unavailable
    logcat_screen_backup = true
+
+Identity profile (``[identity]``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An identity profile is a named set of distinctive fake values (Android ID,
+advertising ID, device name, phone number, location, contacts, SMS, call
+log, ...) seeded on the emulator, so the privacy scan can find them in
+traffic and pulled files and name the value that leaked. Profiles are TOML
+files in ``~/.config/sandroid/profiles/<id>.toml`` (or
+``$XDG_CONFIG_HOME/sandroid/profiles/``); the Identity lens (``6``) creates,
+edits, imports and exports them and writes the keys below.
+
+.. code-block:: toml
+
+   [identity]
+   # Id of the active profile in the profile library
+   profile = ""
+
+   # off, or profile: seed the active profile before an app starts
+   mode = "off"
+
+   # Values such as the Android ID (SSAID) or the locale need a framework
+   # restart, which stops every app: ask (default), always, or never (those
+   # values stay pending)
+   restart = "ask"
 
 TUI (``[tui]``)
 ~~~~~~~~~~~~~~~
@@ -745,6 +771,11 @@ AI Chat (``[ai]``) -- EXPERIMENTAL
    # Model name to request
    # model = <not set>
 
+   # Only loopback endpoints (localhost, 127.0.0.1, ::1) are used unless this
+   # is true. Set it only if you accept sending case data to that remote
+   # service.
+   allow_remote = false
+
    # Show the model's full reasoning/thinking text in the Chat transcript. Off
    # (default) collapses it into a single 'Thought for Ns' line once the
    # reasoning phase ends.
@@ -808,13 +839,14 @@ MCP servers (``[mcp]``) -- EXPERIMENTAL
 
 .. code-block:: toml
 
-   # One table per MCP server whose tools the AI Chat may use.
-   # Default: only the bundled demo server (returns fabricated data!).
+   # One table per MCP server whose tools the AI Chat may use. None is
+   # configured by default. The bundled demo server below is a test fixture
+   # that returns FAKE data only (never use its output as a finding).
    [[mcp.servers]]
-   name = "sandroid-dummy"
+   name = "sandroid-demo-fake-data"
    transport = "stdio"        # "stdio" (command/args) or "sse" (url)
-   command = "python"
-   args = ["-m", "sandroid.ai.mcp_dummy_server"]
+   command = "python3"
+   args = ["-m", "sandroid.ai.mcp_demo_server"]
    enabled = true
 
 
@@ -1056,6 +1088,7 @@ Advanced Configuration
 
    [ai]
    base_url = "https://api.example.com/v1"
+   allow_remote = true  # a remote endpoint is refused without it
    # api_key = ""  # Don't put API keys in files
 
 .. code-block:: bash

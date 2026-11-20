@@ -70,7 +70,8 @@ everything else out of the way until you ask for it:
   failed`` when this window records no timeline, and the clock.
 - **Status strip** (one or two rows): app state and pid, frida-server, active
   hooks and bypasses, mitmproxy / Device Proxy / App Proxies, capture.
-- **Lens bar**: ``1 App  2 Network  3 Files  4 Sessions  5 Timeline`` (a lens
+- **Lens bar**: ``1 App  2 Network  3 Files  4 Sessions  5 Timeline
+  6 Identity`` (a lens
   may show an alert badge such as ``⚑2``).
 - **Lens** (full width). ``Enter`` on a row opens the **Inspector** on the
   right where the lens offers details; ``[`` / ``]`` (or ``←``/``→``, except
@@ -87,7 +88,8 @@ Navigation
 ==========================  ==================================================
 Key                         Action
 ==========================  ==================================================
-``1`` - ``5``               App / Network / Files / Sessions / Timeline lens
+``1`` - ``6``               App / Network / Files / Sessions / Timeline /
+                            Identity lens
 ``Shift+Left/Right``        Previous/next lens
 ``Enter`` / ``Esc``         Open the Inspector (where offered) / close it
 ``[`` / ``]``               Previous/next Inspector tab
@@ -112,7 +114,8 @@ Backtick (grave accent)     Toggle the log drawer
 
 ``Esc`` in the AI Chat goes back to the lens; otherwise it closes the
 Inspector first, then the log drawer, then the AI Chat, then clears an
-applied lens filter; it never quits. The quit dialog always comes
+applied lens filter, then turns an AI filter off (Network and Files); it
+never quits. The quit dialog always comes
 first and lists what quitting stops (mitmweb, friTap, the file monitor, a
 recording, ...) and that it clears the device proxy Sandroid set. After the
 confirm the dialog stays up as "Quitting Sandroid…" and ignores keys until
@@ -125,7 +128,7 @@ Overrides for ids from 2.1 that no longer exist (``load_slot_1`` …
 an upper-case key means Shift+key and is shown as ``⇧R`` in the footer and
 ``Shift+R`` in the ``?`` list. The ``?`` list also shows each lens's own keys
 (they only work while that lens has focus). The footer shows at most seven
-keys: Record, Play, the active lens's own keys, ``1-5``, quit and help.
+keys: Record, Review, the active lens's own keys, ``1-6``, quit and help.
 
 Lenses
 ------
@@ -201,7 +204,7 @@ caption (``A: 29 dry run · 3 setup hidden``); ``A`` shows them, marked
 or captured nothing) and names the run's packet capture (pcap, with its size).
 Runs from before this version have no flows in their bundle: they are looked
 up in the current session's flow log by time, which only works in the session
-that ran them, and the empty state says so. Snapshot loads (Play, the
+that ran them, and the empty state says so. Snapshot loads (Rewind, the
 snapshot picker) put mitmproxy's device proxy back when they reset it
 (the snapshot restores the device's ``http_proxy``). Proxy state is in
 the frame caption (``mitm ● :<port> · device ✓ · CA ✓``, ``<port>`` being
@@ -210,7 +213,7 @@ Capture status page with mitmproxy and friTap tabs.
 
 Proxy keys (embedded ``mitmweb`` requires ``pip install mitmproxy``):
 
-- ``Enter`` (while nothing is captured) or ``M`` start/stop mitmweb (proxy on
+- ``Space`` starts mitmweb (it never stops it), ``M`` starts/stops it (proxy on
   ``mitmproxy.proxy_port``, web UI on ``mitmproxy.web_port``; defaults
   ``127.0.0.1:8080`` and ``http://127.0.0.1:8081/``). Start does not touch the device unless
   ``mitmproxy.auto_device_proxy = true``; stop (and quitting Sandroid) clears
@@ -239,6 +242,22 @@ agent), running, stopping (unloading the agent), stopped or failed. While
 friTap runs, Sandroid watches the app for an "isn't responding" dialog and
 says so ("app not responding -- h stops friTap"); it does not stop friTap on
 its own.
+
+.. _ai-highlights:
+
+**AI highlights** (Network and Files lenses). The AI Chat (see
+:ref:`ai-chat`) can highlight rows or show only some of them on request
+("highlight all POST requests to api.example.com", "show only files with
+personal data"). Each request becomes a *highlight set*: a row tint, a
+*Highlight* column with the set's short label (when the lens is wide
+enough) and a bar at the top of the lens with each set's label and row
+count, ``filtering`` while its filter is on, and the keys. ``H`` cycles the
+AI filter: off, the first set, the next set, ..., off again (the rows stay
+highlighted when it is off). ``X`` removes the lens's highlight sets after a
+confirm; the rows stay. ``Esc`` clears an applied ``/`` filter first and
+only then turns the AI filter off. While the AI filter is on, its rows are
+shown even when the OS-noise or path rules would hide them. The sets belong
+to the analysis session (``<session>/ai/highlights.json``).
 
 Snapshot picker (S)
 ~~~~~~~~~~~~~~~~~~~
@@ -414,6 +433,9 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   tables scroll sideways). ``/`` filters,
   ``.`` shows full paths, Shift+``O`` sorts by recency / name / count,
   ``Home``/``End`` jump to the first/last row.
+- **AI highlights**: as in the Network lens (see :ref:`ai-highlights`),
+  ``H`` cycles the AI filter, ``X`` clears the highlight sets (asks first)
+  and ``Esc`` clears the ``/`` filter before the AI filter.
 - While a run is under review (``◆ REVIEW``), the table lists that run's
   changed, new and deleted files and ``Enter`` shows the file's diff (drawn
   like the Versions diff; with a Content tab when the run kept the file). Their
@@ -503,37 +525,37 @@ run, noise filter); the TUI no longer has it.
 Every Rewind is saved as a run (its Inspector *Changes* tab shows the
 per-file results, the replayed steps and the requests per run); command-line
 analyses are saved as a run bundle under ``<results_path>/runs/<run_id>/``
-and listed in the Runs lens (per device, newest first): ``#``, label, when,
-how long the Play took (``×3`` for a run with three replays) and what changed
+and listed in the Sessions lens (per device, newest first): ``#``, label, when,
+how long the run took (``×3`` for a run with three replays) and what changed
 (files · hosts, ``⚠`` step errors, ``✕`` aborted, ``≠ #2`` when it disagrees
 strongly with another run of the *same* recording -- e.g. 0 vs 74 new files:
 at least one replay did not do what the recording did). ``Home`` / ``End``
 jump to the newest / oldest run. ``x`` / ``i`` export / import a recording.
 
-==================  =========================================================
-Key (Runs lens)     Action
-==================  =========================================================
-``Enter``           Inspector: *Summary* (run number and id, time, recording
-                    length, other runs of the same recording and whether
-                    they agree, device, status, evidence check, errors,
-                    settings used), *Changes* (files, hosts), *Report* (PDF,
-                    stored flows, pcaps, folder). The evidence check is
-                    re-run on every ``Enter`` (and when a file's size or
-                    time changes) and names the changed files.
-``v``               **Review** this run: the header shows ``◆ REVIEW <label>``
-                    and the Files / Network lenses show this run instead of
-                    the live session; ``v`` again or ``L`` (any lens) goes
-                    back to LIVE. Recording or replaying always goes LIVE.
-``=``               Compare with the run under review (or the previous run);
-                    hosts are compared without the "(also seen in
-                    background …)" note, and two runs of the same recording
-                    get a *Replay consistency* verdict
-``z``               The run's full file diff (search / export)
-Shift+``P``         Write a PDF report for the run
-``n`` / ``Del``     Rename (the old label is selected, typing replaces it) /
-                    delete the run (each asks first; dialogs name the run by
-                    ``#`` and id)
-==================  =========================================================
+===================  =========================================================
+Key (Sessions lens)  Action
+===================  =========================================================
+``Enter``            Inspector: *Summary* (run number and id, time, recording
+                     length, other runs of the same recording and whether
+                     they agree, device, status, evidence check, errors,
+                     settings used), *Changes* (files, hosts), *Report* (PDF,
+                     stored flows, pcaps, folder). The evidence check is
+                     re-run on every ``Enter`` (and when a file's size or
+                     time changes) and names the changed files.
+``v``                **Review** this run: the header shows ``◆ REVIEW <label>``
+                     and the Files / Network lenses show this run instead of
+                     the live session; ``v`` again or ``L`` (any lens) goes
+                     back to LIVE. Recording or replaying always goes LIVE.
+``=``                Compare with the run under review (or the previous run);
+                     hosts are compared without the "(also seen in
+                     background …)" note, and two runs of the same recording
+                     get a *Replay consistency* verdict
+``z``                The run's full file diff (search / export)
+Shift+``P``          Write a PDF report for the run
+``n`` / ``Del``      Rename (the old label is selected, typing replaces it) /
+                     delete the run (each asks first; dialogs name the run by
+                     ``#`` and id)
+===================  =========================================================
 
 .. _timeline-lens:
 
@@ -644,6 +666,41 @@ or only counted, the file-event coalescing window, the clock sampling
 interval, both mask switches and the Tracking capture settings (helper
 mode, screenshots before/after taps and on screen changes, marked copies of
 those screenshots, text capture, gesture thresholds).
+
+Identity (6)
+~~~~~~~~~~~~
+
+The identity profile: distinctive fake values (Android ID, advertising ID,
+device name, phone number, location, contacts, SMS, call log, ...) seeded
+on the emulator, so the privacy scan can find them in requests and pulled
+files and name the value that left the device. One table, grouped into
+Identifiers / Telephony / Place & language / Personal data; per value its
+status, where it was found (``3 recipients``, ``stored on device``, ``sent
+and stored``, or ``not seen``), the profile value, the value on the device
+now and how it is applied. A value that was found gets a tinted row.
+``Enter`` opens the Inspector: *Found* lists the hits by recipient or file
+(time, where, how it was encoded, confidence, the snippet; ``{`` / ``}``
+pick a hit, ``J`` jumps to it in the Network, Files or Timeline lens) and
+*Value* the profile value, the apply mechanism and the value before the
+apply. In the Network lens ``!`` shows only the flows that carry a profile
+value.
+
+=================  ==========================================================
+Key (Identity)     Action
+=================  ==========================================================
+``Space``          Apply the profile to the device
+``e`` / ``v``      Edit the selected value / verify the device's values
+``P``              Profiles (switch, create, duplicate, rename, delete)
+``R``              Regenerate values
+``I`` / ``X``      Import / export a profile
+``M``              Identity mode on/off (``identity.mode``)
+``J`` / ``/``      Jump to the selected hit's source / filter rows
+=================  ==========================================================
+
+Profiles are TOML files in ``~/.config/sandroid/profiles/`` (see
+``[identity]`` in :doc:`configuration`). Values such as the Android ID or
+the locale need a framework restart, which stops every app;
+``identity.restart`` says whether Sandroid asks first.
 
 Other Actions
 -------------
