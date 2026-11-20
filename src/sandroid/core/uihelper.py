@@ -668,6 +668,20 @@ class UiHelper:
             cmd += f" x={int(x)} y={int(y)}"
         return self._ok(self.request(cmd, timeout), "focus")
 
+    def clear_cache(self, timeout: float = 1.0) -> bool:
+        """Drop the a11y node cache (``clear_cache`` request): the next live
+        read asks the app again. Apps that change their tree without
+        telling a11y (Compose lists while you type) leave the cache stale.
+
+        Returns:
+            True when the helper cleared it; False otherwise (INVISIBLE
+            mode, error or timeout).
+        """
+        if self._mode is Mode.INVISIBLE:
+            return False
+        reply = self._ok(self.request("clear_cache", timeout), "ok")
+        return bool(reply and reply.get("cleared"))
+
     def dump(self, *, max_nodes: int = 50_000, timeout: float = 30.0) -> dict | None:
         """Full tree of every interactive window (``windows[].root``), bounded."""
         if self._mode is Mode.INVISIBLE:

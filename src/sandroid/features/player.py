@@ -312,13 +312,30 @@ _NO_EVIDENCE = ("", "nothing to match", "keyboard key", "the UI helper is not ru
 #: A "by position" reason: the element was found but is not on the screen
 #: (or reached beyond it when you tapped it); its centre is not tapped.
 OFF_SCREEN = "element off-screen"
+#: A "by position" reason: the element was found, but at none of its
+#: visible spots is it the topmost element (a dialog, the keyboard or
+#: another view lies over it); the recorded position is tapped instead.
+COVERED = "element covered"
+#: A "by element" reason: the element's spot was tapped, but nothing could
+#: test that the element is the topmost one there (no live hit test).
+NOT_HIT_TESTED = "not hit-tested"
+#: The recorded element is unsure (Tracking took it from an outdated
+#: snapshot and could not read the screen live): the recorded position is
+#: tapped, never an element found by those words.
+WEAK_TARGET = "recorded element unsure"
+#: Grid of other visible spots (n x n) tried when your spot is covered or
+#: off the screen; and how long one live hit test may take (s).
+HIT_GRID = 3
+HIT_TIMEOUT_S = 1.5
 #: Nothing could check a step: no element was recorded (or it is a key on
 #: the keyboard), a swipe, a key, a raw gesture.
 _NOTHING_TO_CHECK = ("nothing to match", "keyboard key")
 
-#: Per step: ``verified`` (found by element, or the typed field read
-#: back), ``unchecked`` (it could have been checked and was not: element
-#: not found, off-screen, no helper, field unreadable), ``diverged``, or
+#: Per step: ``verified`` (found by element and the live hit test showed it
+#: topmost at the tapped spot, or the typed field read back), ``unchecked``
+#: (it could have been checked and was not: element not found, covered,
+#: off-screen, not hit-tested, no helper, field unreadable, the screen is
+#: not the recorded one), ``diverged``, or
 #: ``none`` (nothing to check). A run is a plain success only with no
 #: unchecked and no diverged step.
 CHECK_VERIFIED = "verified"
@@ -403,34 +420,196 @@ def _near(a: tuple[int, int, int, int], b: Any) -> bool:
     return overlap_x and gap_y <= 300
 
 
+#: Pixels two boxes may differ by and still be "the same size".
+SIZE_SLOP_PX = 2
+
+
+def _same_size(a: tuple[int, int, int, int], b: Any) -> bool:
+    """Box ``b`` is box ``a`` shifted only up or down: the same left and
+    right edge and height (within :data:`SIZE_SLOP_PX`). False when ``b``
+    is unknown.
+    """
+    bb = _bounds(b)
+    if bb is None:
+        return False
+    slop = SIZE_SLOP_PX
+    return (
+        abs(a[0] - bb[0]) <= slop
+        and abs(a[2] - bb[2]) <= slop
+        and abs((a[3] - a[1]) - (bb[3] - bb[1])) <= slop
+    )
+
+
 def _inside(xy: tuple[int, int], area: tuple[int, int, int, int]) -> bool:
     return area[0] <= xy[0] < area[2] and area[1] <= xy[1] < area[3]
 
 
-def tap_point(
-    item: dict[str, Any], reply: dict | None, target: dict, screen: Any = None
-) -> tuple[int, int] | None:
-    """Where to tap a matched element, or None when it is off the screen.
-
-    The node's bounds are clipped to its window and the display (WebView
-    nodes report their page position, which can lie far outside the
-    screen; the dump has no visible-only bounds for them). The centre must
-    lie in that visible part. A recorded target that reached beyond the
-    recorded ``screen`` when you tapped it (a page-sized container) does
-    not say where you tapped: None as well.
+def visible_part(
+    item: dict[str, Any], reply: dict | None
+) -> tuple[int, int, int, int] | None:
+    """The matched node's bounds clipped to its window and the display
+    (WebView nodes report their page position, which can lie far outside
+    the screen; the dump has no visible-only bounds for them).
     """
     b = _bounds(item["node"].get("bounds"))
     if b is None:
         return None
     window = _bounds((item.get("window") or {}).get("bounds"))
     display = _screen((reply or {}).get("display"))
-    visible = clip(b, window, display)
-    if visible is None or not _inside(centre(b), visible):
+    return clip(b, window, display)
+
+
+def rel_point(
+    target: dict, xy: tuple[int, int] | None, now: tuple[int, int, int, int]
+) -> tuple[int, int]:
+    """Your tap's spot inside the recorded element, moved into its bounds
+    ``now``: the same fraction of its width and height (a list row, a
+    page, a large button is tapped where you tapped it, not at its centre).
+    The centre when the recorded bounds or your position are unknown, or
+    your position lay outside the recorded bounds.
+    """
+    rec = _bounds(target.get("bounds"))
+    if rec is None or xy is None or not _inside(xy, rec):
+        return centre(now)
+    fx = (xy[0] - rec[0]) / (rec[2] - rec[0])
+    fy = (xy[1] - rec[1]) / (rec[3] - rec[1])
+    x = now[0] + int(fx * (now[2] - now[0]))
+    y = now[1] + int(fy * (now[3] - now[1]))
+    return min(max(x, now[0]), now[2] - 1), min(max(y, now[1]), now[3] - 1)
+
+
+def tap_point(
+    item: dict[str, Any],
+    reply: dict | None,
+    target: dict,
+    screen: Any = None,
+    xy: tuple[int, int] | None = None,
+) -> tuple[int, int] | None:
+    """Where to tap a matched element, or None when that spot is not on the
+    screen.
+
+    The spot is your recorded position ``xy`` relative to the recorded
+    bounds, moved into the node's bounds now (:func:`rel_point`; the centre
+    without one). It must lie in the node's visible part
+    (:func:`visible_part`). A recorded target that reached beyond the
+    recorded ``screen`` when you tapped it (a page-sized container) does
+    not say where you tapped: None as well.
+    """
+    b = _bounds(item["node"].get("bounds"))
+    if b is None:
+        return None
+    visible = visible_part(item, reply)
+    point = rel_point(target, xy, b)
+    if visible is None or not _inside(point, visible):
         return None
     rec, rec_screen = _bounds(target.get("bounds")), _screen(screen)
     if rec is not None and rec_screen is not None and clip(rec, rec_screen) != rec:
         return None
-    return centre(b)
+    return point
+
+
+def other_spots(
+    visible: tuple[int, int, int, int], near: tuple[int, int], n: int = HIT_GRID
+) -> list[tuple[int, int]]:
+    """Spots inside ``visible`` to try when your spot is covered or off the
+    screen: your spot moved into it first, then the centres of an ``n`` x
+    ``n`` grid, nearest to your spot first.
+    """
+    left, top, right, bottom = visible
+    first = (min(max(near[0], left), right - 1), min(max(near[1], top), bottom - 1))
+    grid = [
+        (left + (2 * i + 1) * (right - left) // (2 * n),
+         top + (2 * j + 1) * (bottom - top) // (2 * n))
+        for j in range(n)
+        for i in range(n)
+    ]  # fmt: skip
+    grid.sort(key=lambda p: (p[0] - near[0]) ** 2 + (p[1] - near[1]) ** 2)
+    out: list[tuple[int, int]] = []
+    for p in [first, *grid]:
+        if p not in out:
+            out.append(p)
+    return out
+
+
+def _same_node(a: Any, b: Any) -> bool:
+    """``a`` and ``b`` are the same node: the same helper node id when both
+    have one; else the same bounds and no differing id, class or text.
+    """
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    if a.get("nid") is not None and b.get("nid") is not None:
+        return a["nid"] == b["nid"]
+    if _bounds(a.get("bounds")) is None or _bounds(a.get("bounds")) != _bounds(
+        b.get("bounds")
+    ):
+        return False
+    for key in ("rid", "cls", "text", "desc"):
+        va, vb = _norm(a.get(key)), _norm(b.get(key))
+        if key == "cls":
+            va, vb = _short_cls(va), _short_cls(vb)
+        if va and vb and va != vb:
+            return False
+    return True
+
+
+def _inner_of(
+    node: dict, item: dict[str, Any], items: list[dict[str, Any]],
+    path: Any = None,
+) -> bool | None:  # fmt: skip
+    """``node`` (of a live answer) lies inside the matched ``item``'s node:
+    True / False when the dump knows ``node`` (its id), else by its bounds
+    inside the item's and (when known) its ``path`` below the item's.
+    None when nothing tells.
+    """
+    nid = node.get("nid")
+    if nid is not None:
+        for it in items:
+            if it["node"].get("nid") == nid and (
+                (it.get("window") or {}).get("id")
+                == (item.get("window") or {}).get("id")
+            ):
+                return id(item["node"]) in it["anc"]
+    nb, eb = _bounds(node.get("bounds")), _bounds(item["node"].get("bounds"))
+    if nb is None or eb is None:
+        return None
+    if not (eb[0] <= nb[0] and eb[1] <= nb[1] and nb[2] <= eb[2] and nb[3] <= eb[3]):
+        return False
+    ep = item.get("path")
+    if isinstance(path, list) and isinstance(ep, list) and ep:
+        return path[: len(ep)] == ep and len(path) > len(ep)
+    return True
+
+
+def hit_is_element(
+    live: Any, item: dict[str, Any], items: list[dict[str, Any]]
+) -> bool:
+    """The live hit test ``live`` (a ``node_at`` ``live`` answer) shows the
+    matched element as the topmost at the tested spot: the element itself,
+    or a node inside it with no other control inside it taking the tap.
+    A node of another window (a dialog, the keyboard) is never it.
+    """
+    if not isinstance(live, dict) or not isinstance(live.get("hit"), dict):
+        return False
+    hit, tgt = live["hit"], live.get("target")
+    win = (live.get("window") or {}).get("id")
+    own = (item.get("window") or {}).get("id")
+    if win is not None and own is not None and win != own:
+        return False
+    node = item["node"]
+    if _same_node(tgt, node) or _same_node(hit, node):
+        return True
+    if not _inner_of(hit, item, items, live.get("path")):
+        return False
+    if isinstance(tgt, dict) and not _same_node(tgt, hit):
+        # The control that takes the tap: another one inside the element
+        # (a button inside a row) is not the element.
+        inside = _inner_of(tgt, item, items)
+        tb, nb = _bounds(tgt.get("bounds")), _bounds(node.get("bounds"))
+        if inside or (inside is None and tb != nb):
+            return False
+    elif isinstance(tgt, dict):
+        return False  # the hit is a control of its own inside the element
+    return True
 
 
 def _node_path(chain: list[dict]) -> list[str]:
@@ -817,21 +996,106 @@ class StepReplayer:
             logger.debug("replay: dump failed", exc_info=True)
             return None
 
-    def locate(self, step: Step) -> tuple[tuple[int, int] | None, str]:
-        """Wait for the step's element; ``(centre, "")`` or ``(None, why)``.
+    def _live_helper(self) -> Any:
+        return self.helper() if callable(self.helper) else self.helper
+
+    def _fresh(self) -> None:
+        """Drop the helper's a11y cache before reading the screen: an app
+        that changed its tree without telling a11y would else answer from
+        the old tree (a dropdown that refilled while you typed).
+        """
+        helper = self._live_helper()
+        fn = getattr(helper, "clear_cache", None) if helper is not None else None
+        if callable(fn):
+            try:
+                fn()
+            except Exception:
+                logger.debug("replay: clear_cache failed", exc_info=True)
+
+    def _hit(self, xy: tuple[int, int]) -> dict | None:
+        """The live hit test at ``xy`` (``node_at`` live): its answer, ``{}``
+        when it answered nothing, None when no hit test is possible.
+        """
+        helper = self._live_helper()
+        fn = getattr(helper, "node_at", None) if helper is not None else None
+        if not callable(fn):
+            return None
+        try:
+            reply = fn(xy[0], xy[1], mode="live", timeout=HIT_TIMEOUT_S)
+        except Exception:
+            logger.debug("replay: hit test failed", exc_info=True)
+            return None
+        if not isinstance(reply, dict):
+            return None
+        live = reply.get("live")
+        return live if isinstance(live, dict) else {}
+
+    def _aim(
+        self, step: Step, item: dict[str, Any], reply: dict
+    ) -> tuple[tuple[int, int] | None, str, str]:
+        """Where to tap the found element: ``(xy, reason, check)``.
+
+        Your spot (relative to the element) is tapped when the live hit test
+        shows the element topmost there; else the other visible spots
+        (:func:`other_spots`) are tested. ``verified`` only after a hit test
+        passed; no spot passing is ``(None, COVERED)``; no hit test possible
+        taps your spot unchecked (:data:`NOT_HIT_TESTED`).
+        """
+        target = step.target or {}
+        b = _bounds(item["node"].get("bounds"))
+        visible = visible_part(item, reply)
+        if b is None or visible is None:
+            return None, OFF_SCREEN, CHECK_UNCHECKED
+        rec = _bounds(target.get("bounds"))
+        rec_screen = _screen(step.data.get("screen"))
+        if rec is not None and rec_screen is not None and clip(rec, rec_screen) != rec:
+            # A page-sized target does not say where on it you tapped.
+            return None, OFF_SCREEN, CHECK_UNCHECKED
+        mine = rel_point(target, self._xy(step), b)
+        spots = other_spots(visible, mine)
+        if _inside(mine, visible):
+            spots = [mine, *[p for p in spots if p != mine]]
+        self._fresh()
+        items = walk_dump(reply)
+        for n, xy in enumerate(spots):
+            if self.cancelled():
+                raise StepStoppedError("you pressed Esc")
+            live = self._hit(xy)
+            if live is None:
+                if n == 0 and xy == mine:
+                    return xy, NOT_HIT_TESTED, CHECK_UNCHECKED
+                break
+            if hit_is_element(live, item, items):
+                if xy == mine:
+                    return xy, "", CHECK_VERIFIED
+                where = "covered" if _inside(mine, visible) else "off the screen"
+                why = f"your spot was {where}, tapped another spot of it"
+                return xy, why, CHECK_VERIFIED
+        if not _inside(mine, visible):
+            return None, OFF_SCREEN, CHECK_UNCHECKED
+        return None, COVERED, CHECK_UNCHECKED
+
+    def locate(self, step: Step) -> tuple[tuple[int, int] | None, str, str]:
+        """Wait for the step's element: ``(xy, reason, check)``, xy None when
+        it is not tapped by element (reason says why).
 
         The element must be the only match and have the same bounds in two
-        polls :data:`ELEMENT_POLL_S` apart (the screen stopped moving).
+        polls :data:`ELEMENT_POLL_S` apart (the screen stopped moving); then
+        :meth:`_aim` hit-tests where to tap it.
         """
         target = step.target or {}
         if not _identifying(target):
-            return None, "nothing to match"
+            return None, "nothing to match", CHECK_NONE
+        if target.get("stale_possible"):
+            return None, WEAK_TARGET, CHECK_UNCHECKED
         deadline = self._mono() + self.element_wait_s
         last_bounds = None
         why = "the UI helper is not running"
-        current = self.helper() if callable(self.helper) else self.helper
+        current = self._live_helper()
         if current is None:
-            return None, why  # no helper (the replay already waited for it)
+            # no helper (the replay already waited for it)
+            return None, why, CHECK_UNCHECKED
+        self._fresh()
         while True:
             if self.cancelled():
                 raise StepStoppedError("you pressed Esc")
@@ -841,16 +1105,15 @@ class StepReplayer:
                 if item is not None:
                     b = _bounds(item["node"].get("bounds"))
                     if b is not None and b == last_bounds:
-                        xy = tap_point(item, reply, target, step.data.get("screen"))
-                        return (xy, "") if xy else (None, OFF_SCREEN)
+                        return self._aim(step, item, reply)
                     last_bounds = b
                     why = "the element kept moving"
                 else:
                     last_bounds = None
             elif not callable(self.helper) and self.helper is None:
-                return None, why
+                return None, why, CHECK_UNCHECKED
             if self._mono() >= deadline:
-                return None, why
+                return None, why, CHECK_UNCHECKED
             self._sleep(ELEMENT_POLL_S)
 
     def _field_value(
@@ -885,8 +1148,13 @@ class StepReplayer:
             return None, False
         if rid and node.get("rid") and node.get("rid") != rid:
             return None, False  # the focus moved on (e.g. a code field)
-        if not rid and bounds is not None and not _near(bounds, node.get("bounds")):
-            return None, False  # no id: another field's box
+        if not rid and bounds is not None:
+            # No id: the box must be the recorded field's, at most moved up
+            # or down (a keyboard pan): same left, right and height.
+            if not _near(bounds, node.get("bounds")) or not _same_size(
+                bounds, node.get("bounds")
+            ):
+                return None, False
         text = "" if node.get("showing_hint") else str(node.get("text") or "")
         return text, bool(node.get("password"))
 
@@ -960,6 +1228,65 @@ class StepReplayer:
             sent = self._mono()
             self._run(f"input text {arg}")
 
+    def _display_now(self) -> tuple[int, int, int | None] | None:
+        """``(w, h, rotation)`` of the display now: the helper's (current
+        rotation), else ``wm size`` (natural orientation, rotation None);
+        None when neither answers.
+        """
+        helper = self._live_helper()
+        fn = getattr(helper, "display", None) if helper is not None else None
+        if callable(fn):
+            try:
+                disp = fn()
+            except Exception:
+                disp = None
+            if isinstance(disp, dict):
+                w, h = disp.get("w"), disp.get("h")
+                if isinstance(w, int) and isinstance(h, int) and w > 0 and h > 0:
+                    rot = disp.get("rotation")
+                    return w, h, rot if isinstance(rot, int) else None
+        try:
+            out = self.shell("wm size")
+        except Exception:
+            return None
+        found = re.findall(r"(Physical|Override) size:\s*(\d+)x(\d+)", str(out))
+        sizes = {m[0]: (int(m[1]), int(m[2])) for m in found}
+        size = sizes.get("Override") or sizes.get("Physical")
+        return (*size, None) if size else None
+
+    def _screen_differs(self, step: Step, points: list[tuple[int, int]]) -> str:
+        """A position step on a display other than the recorded one: the
+        plain reason ("" when it is the same or nothing tells). Positions
+        are never scaled; one outside the current display stops the step.
+        """
+        rec = _screen(step.data.get("screen"))
+        if rec is None:
+            return ""
+        now = self._display_now()
+        if now is None:
+            return ""
+        w, h, rot = now
+        rec_rot = step.data.get("rotation")
+        rec_rot = rec_rot if isinstance(rec_rot, int) else None
+        if rot is None:
+            # ``wm size`` is the natural orientation: turn the recorded one.
+            want = (rec[2], rec[3]) if rec_rot in (None, 0, 2) else (rec[3], rec[2])
+            same = (w, h) == want
+        else:
+            same = (w, h) == (rec[2], rec[3]) and (rec_rot is None or rec_rot == rot)
+        if same:
+            return ""
+        if rot is not None and rec_rot is not None and rot != rec_rot:
+            if any(not _inside(p, (0, 0, w, h)) for p in points):
+                raise StepStoppedError(
+                    "the recorded position is off the screen now (it is turned)"
+                )
+            return "the screen is turned another way than in your run"
+        cur = (w, h) if rot is not None or rec_rot in (None, 0, 2) else (h, w)
+        if any(not _inside(p, (0, 0, *cur)) for p in points):
+            raise StepStoppedError("the recorded position is off the screen now")
+        return f"the screen is {w}x{h}, your run had {rec[2]}x{rec[3]}"
+
     @staticmethod
     def _xy(step: Step) -> tuple[int, int] | None:
         x, y = step.data.get("x"), step.data.get("y")
@@ -980,11 +1307,11 @@ class StepReplayer:
         """
         kind, data = step.kind, step.data
         if kind in ("tap", "long_press"):
-            xy, way, reason = None, WAY_ELEMENT, ""
+            xy, way, reason, check = None, WAY_ELEMENT, "", CHECK_NONE
             if data.get("ime"):
                 reason = "keyboard key"
             else:
-                xy, reason = self.locate(step)
+                xy, reason, check = self.locate(step)
             if xy is None:
                 way = WAY_POSITION
                 xy = self._xy(step)
@@ -997,6 +1324,19 @@ class StepReplayer:
                 screen = _screen(data.get("screen"))
                 if screen is not None and not _inside(xy, screen):
                     raise StepStoppedError("the recorded position is off the screen")
+            # A recorded element that was looked for and not found.
+            missed = way == WAY_POSITION and reason not in (
+                *_NO_EVIDENCE,
+                OFF_SCREEN,
+                COVERED,
+                WEAK_TARGET,
+            )
+            if way == WAY_POSITION:
+                check = step_check(way, reason)
+                differs = self._screen_differs(step, [xy])
+                if differs:
+                    check = CHECK_UNCHECKED
+                    reason = f"{reason}, {differs}" if reason else differs
             x, y = xy
             if kind == "tap":
                 self._run(f"input tap {x} {y}")
@@ -1004,12 +1344,8 @@ class StepReplayer:
                 dur = max(600, int(data.get("dur_ms") or 600))
                 self._run(f"input swipe {x} {y} {x} {y} {dur}")
             res = {"way": way, "reason": reason, "x": x, "y": y}
-            # A recorded element that was looked for and not found.
-            res["missed"] = way == WAY_POSITION and reason not in (
-                *_NO_EVIDENCE,
-                OFF_SCREEN,
-            )
-            res["check"] = step_check(way, reason)
+            res["missed"] = missed
+            res["check"] = check
             check = data.get("check_text")
             if isinstance(check, str) and check:
                 # The last keyboard tap of a typed text: read the field back.
@@ -1027,9 +1363,11 @@ class StepReplayer:
             ):
                 raise StepStoppedError("the swipe's path is unknown")
             dur = max(100, int(data.get("dur_ms") or 300))
+            differs = self._screen_differs(step, [start, (int(x1), int(y1))])
             self._run(f"input swipe {start[0]} {start[1]} {int(x1)} {int(y1)} {dur}")
-            return {"way": WAY_POSITION, "reason": "", "x": start[0], "y": start[1],
-                    "check": CHECK_NONE}  # fmt: skip
+            return {"way": WAY_POSITION, "reason": differs, "x": start[0],
+                    "y": start[1],
+                    "check": CHECK_UNCHECKED if differs else CHECK_NONE}  # fmt: skip
         if kind == "key":
             name = str(data.get("name") or "")
             if not re.match(r"^[A-Z_]+$", name):
@@ -1083,7 +1421,7 @@ class StepReplayer:
         word = f"{way}: {reason}" if way in (WAY_FAILED, WAY_DIVERGED) else way
         summary = f"step {step.i} of {n} · {step.what} · {word}"
         if (
-            way in (WAY_POSITION, WAY_REPLAYED)
+            way in (WAY_POSITION, WAY_REPLAYED, WAY_ELEMENT)
             and reason
             and reason != "nothing to match"
         ):
