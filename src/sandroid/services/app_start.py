@@ -96,9 +96,10 @@ class AppStartError(RuntimeError):
     Attributes:
         reason: Machine-readable cause for callers that act on it (the AI
             tools): ``"needs_consent"`` (a pre-start step stops every app and
-            there is no dialog to ask), ``"declined"`` (the user said no:
-            do not retry), ``"busy"`` (another start holds the lifecycle
-            lock); None otherwise.
+            there is no dialog to ask), ``"declined"`` (the dialog got no
+            yes: Cancel, Esc, a timeout or nobody answered; do not retry
+            unasked), ``"busy"`` (another start holds the lifecycle lock);
+            None otherwise.
     """
 
     expected = True
@@ -1974,3 +1975,7 @@ PreSpawnPlan = PreStartPlan
 PreSpawnHook = PreStartStep
 register_pre_spawn_hook = register_pre_start_step
 unregister_pre_spawn_hook = unregister_pre_start_step
+pre_spawn_running = pre_start_running
+pre_spawn_status = pre_start_status
+add_pre_spawn_status_listener = add_pre_start_status_listener
+remove_pre_spawn_status_listener = remove_pre_start_status_listener

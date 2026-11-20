@@ -2496,7 +2496,38 @@ def test_a_declined_pre_start_step_says_declined(bus):
 
 
 def test_the_old_pre_spawn_names_still_work():
-    assert app_start.PreSpawnPlan is app_start.PreStartPlan
-    assert app_start.register_pre_spawn_hook is app_start.register_pre_start_step
+    for old, new in (
+        ("PreSpawnPlan", "PreStartPlan"),
+        ("PreSpawnHook", "PreStartStep"),
+        ("register_pre_spawn_hook", "register_pre_start_step"),
+        ("unregister_pre_spawn_hook", "unregister_pre_start_step"),
+        ("pre_spawn_running", "pre_start_running"),
+        ("pre_spawn_status", "pre_start_status"),
+        ("add_pre_spawn_status_listener", "add_pre_start_status_listener"),
+        ("remove_pre_spawn_status_listener", "remove_pre_start_status_listener"),
+    ):
+        assert getattr(app_start, old) is getattr(app_start, new), old
     assert app_start.StartResult(True, "ok") == (True, "ok")
     assert app_start.StartResult.of((False, "x")).reason is None
+
+
+def test_start_and_restart_always_return_a_start_result(env, monkeypatch, bus):
+    log: list = []
+    _ladder(env, monkeypatch, log)
+    monkeypatch.setattr(app_start, "respawn_teardown", lambda pkg: None)
+
+    ok = app_start.start_app()
+    assert isinstance(ok, app_start.StartResult)
+    assert ok == (True, "ok")
+    assert ok.reason is None
+
+    bus.answer = False  # Cancel in the pre-start dialog
+    app_start.register_pre_start_step(
+        lambda pkg: app_start.PreStartPlan(DESC, True, lambda: None)
+    )
+    out: list = []
+    t = threading.Thread(target=lambda: out.append(app_start.restart_app()))
+    t.start()
+    t.join(5)
+    assert out[0].reason == "declined"
+    assert not out[0][0]
