@@ -27,7 +27,7 @@ from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
 from sandroid.core.menu_controller import Action, ActionCategory, MenuController
-from sandroid.tui.key_display import format_key
+from sandroid.tui.key_display import format_key, key_words
 
 logger = logging.getLogger(__name__)
 
@@ -375,28 +375,6 @@ _KEY_W = 18
 #: Below this many rows (or 100 columns) the help drops its margins and the
 #: detail pane, so the list keeps most of an 80x24 terminal.
 _COMPACT_HEIGHT = 32
-
-
-#: Key glyphs written as words in help (the user's no-glyph rule covers key
-#: names too): ``Shift+←`` reads ``Shift+Left``.
-_KEY_WORDS = {
-    "←": "Left",
-    "→": "Right",
-    "↑": "Up",
-    "↓": "Down",
-    "⏎": "Enter",
-    "↵": "Enter",
-    "⇧": "Shift+",
-    "⌫": "Backspace",
-    "⇥": "Tab",
-}
-
-
-def key_words(text: str) -> str:
-    """*text* with key glyphs replaced by their names."""
-    for glyph, word in _KEY_WORDS.items():
-        text = text.replace(glyph, word)
-    return text.replace("Shift++", "Shift+")
 
 
 def _format_key_display(key: str) -> str:

@@ -56,7 +56,7 @@ from sandroid.tui.css_resolver import (
     load_css_content,
     resolve_css_path,
 )
-from sandroid.tui.key_display import format_key
+from sandroid.tui.key_display import format_key, key_words
 from sandroid.tui.launcher import run_tui, run_tui_guarded
 from sandroid.tui.modal_manager import ModalManager
 from sandroid.tui.screens.command_palette import CommandPalette
@@ -1503,7 +1503,8 @@ class SandroidTUI(App):
     def get_key_display(self, binding: Binding) -> str:
         """Footer key label: keep Shift visible (``R`` -> ``⇧R``, ``r`` -> ``r``)."""
         if binding.key_display:
-            return binding.key_display
+            # Hand-written labels too: words, never key glyphs.
+            return key_words(binding.key_display)
         return format_key(binding.key, "compact")
 
     def _get_main_screen(self) -> MainScreen | None:

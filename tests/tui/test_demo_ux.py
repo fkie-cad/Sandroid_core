@@ -43,14 +43,14 @@ def _messages(app) -> list[str]:
     ("key", "compact", "long"),
     [
         ("r", "r", "r"),
-        ("R", "⇧R", "Shift+R"),
+        ("R", "Shift+R", "Shift+R"),
         ("c", "c", "c"),
-        ("C", "⇧C", "Shift+C"),
+        ("C", "Shift+C", "Shift+C"),
         ("ctrl+b", "^b", "Ctrl+B"),
-        ("ctrl+shift+p", "^⇧P", "Ctrl+Shift+P"),
-        ("shift+right", "⇧→", "Shift+→"),
+        ("ctrl+shift+p", "^Shift+P", "Ctrl+Shift+P"),
+        ("shift+right", "Shift+Right", "Shift+Right"),
         ("question_mark", "?", "?"),
-        ("enter", "⏎", "Enter"),
+        ("enter", "Enter", "Enter"),
         ("1", "1", "1"),
     ],
 )
@@ -774,3 +774,27 @@ def test_snapshot_create_rejects_an_invalid_name_before_adb(monkeypatch):
 # ---------------------------------------------------------------------------
 # Phase 5 N1(b): hint when recording starts in the open app without a reset
 # ---------------------------------------------------------------------------
+
+
+def test_key_labels_are_words_in_both_styles() -> None:
+    """No key glyphs in the footer (compact) or help/palette (long) labels."""
+    from sandroid.tui.key_display import KEY_WORDS, format_key, key_words
+
+    keys = [
+        "up",
+        "down",
+        "left",
+        "right",
+        "shift+left",
+        "enter",
+        "tab",
+        "backspace",
+        "alt+x",
+        "R",
+        "ctrl+shift+up",
+    ]
+    for style in ("compact", "long"):
+        for key in keys:
+            label = format_key(key, style)
+            assert not set(KEY_WORDS) & set(label), (style, key, label)
+    assert key_words("⇧R ⏎ ←/→") == "Shift+R Enter Left/Right"
