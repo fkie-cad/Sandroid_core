@@ -635,14 +635,17 @@ def text_check(
 
     Both are stripped. The field may hold more after the recorded text (an
     autocomplete suffix: recorded ``wdr.de``, field ``wdr.de/``). A
-    ``password`` field that shows only mask characters is compared by
-    length. Returns ``(ok, reason)``; the reason names the values only
+    ``password`` field that shows mask characters is compared by length and
+    by the characters it shows in clear (Firefox shows the last one for a
+    moment). Returns ``(ok, reason)``; the reason names the values only
     when ``password`` is False.
     """
     want, have = (expected or "").strip(), (value or "").strip()
     if password:
-        if have and set(have) <= _MASK_CHARS:
-            ok = len(have) == len(want)
+        if any(c in _MASK_CHARS for c in have):
+            ok = len(have) == len(want) and all(
+                h in _MASK_CHARS or h == w for h, w in zip(have, want, strict=True)
+            )
         else:
             ok = have == want or (bool(want) and have.startswith(want))
         return ok, "" if ok else "field text differs"
@@ -760,9 +763,12 @@ class StepReplayer:
                 return None, why
             self._sleep(ELEMENT_POLL_S)
 
-    def _field_value(self, xy: tuple[int, int] | None) -> tuple[str | None, bool]:
+    def _field_value(
+        self, xy: tuple[int, int] | None, rid: str | None = None
+    ) -> tuple[str | None, bool]:
         """``(text, password)`` of the focused field now (``text`` None: no
-        field could be read; a hint shown in an empty field reads as "").
+        field could be read, or the focus is on another field than the
+        recorded ``rid``; a hint shown in an empty field reads as "").
         """
         helper = self.helper() if callable(self.helper) else self.helper
         fn = getattr(helper, "focus", None) if helper is not None else None
@@ -783,6 +789,8 @@ class StepReplayer:
                 break
         if node is None:
             return None, False
+        if rid and node.get("rid") and node.get("rid") != rid:
+            return None, False  # the focus moved on (e.g. a code field)
         text = "" if node.get("showing_hint") else str(node.get("text") or "")
         return text, bool(node.get("password"))
 
@@ -797,11 +805,12 @@ class StepReplayer:
         """
         bounds = _bounds((target or {}).get("bounds"))
         xy = centre(bounds) if bounds else None
+        rid = (target or {}).get("rid") or None
         deadline = self._mono() + TEXT_CHECK_S
         last: tuple[bool, str] | None = None
         while True:
             self._wait(TEXT_POLL_S)
-            value, pw = self._field_value(xy)
+            value, pw = self._field_value(xy, rid)
             if value is not None:
                 last = text_check(expected, value, password=password or pw)
                 if last[0]:
@@ -1037,8 +1046,8 @@ class StepReplayer:
             if miss and missed is not None:
                 res["way"] = WAY_DIVERGED
                 res["reason"] = (
-                    f"its element did not appear ({why}) after step {missed} "
-                    "also missed its element; tapped the recorded position"
+                    f"its element did not appear ({why}), and step {missed} "
+                    "before it missed its element too; tapped the recorded position"
                 )
             missed = step.i if miss else None
             if res["way"] == WAY_DIVERGED and div["diverged_at_step"] is None:

@@ -1219,7 +1219,7 @@ def test_two_missed_elements_in_a_row_diverge_one_is_a_note():
     rep, lines = _replayer(FakeHelper([_dump(_node("OK"))]), [], element_wait_s=0.6)
     report = rep.run(extract_steps(two))
     assert [s["way"] for s in report["steps"]] == ["by position", "diverged"]
-    assert "after step 1 also missed its element" in report["steps"][1]["reason"]
+    assert "and step 1 before it missed its element too" in report["steps"][1]["reason"]
     assert report["diverged_at_step"] == 2
     assert "diverged: its element did not appear (not found)" in lines[1]["summary"]
 
@@ -1241,3 +1241,18 @@ def test_a_run_with_a_failed_step_is_not_a_success(tmp_path, monkeypatch):
     assert out.result == "stopped"
     assert out.error
     assert not any("Done" in p for p in progress)
+
+
+def test_password_field_showing_its_last_character_and_a_moved_focus():
+    bullets = "•" * 6
+    assert player.text_check("hunter2", bullets + "2", password=True) == (True, "")
+    assert player.text_check("hunter2", bullets + "x", password=True)[0] is False
+
+    class Moved(FocusHelper):
+        def focus(self, x=None, y=None, timeout=1.0):
+            return {"input": {"editable": True, "text": "", "rid": "p:id/next"}}
+
+    rep, _ = _replayer(Moved(""), [])
+    report = rep.run(extract_steps([_text("1234")]))
+    assert report["steps"][0]["check"] == "unchecked"
+    assert report["diverged_at_step"] is None
