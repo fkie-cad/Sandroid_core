@@ -501,7 +501,7 @@ Tracking (``[tracking]``)
    # for typing. Stored next to the original as <sha>_<trigger>_marked.png
    # (its path and sha256 in the shot line's data.marked); the original and
    # its sha256 stay unchanged. Reports and the Inspector show the marked copy.
-   mark_screenshots = false
+   mark_screenshots = true
 
    # After a tap: re-check the screen every settle_interval_ms until it is
    # stable or settle_max_ms passed

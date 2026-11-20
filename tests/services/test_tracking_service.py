@@ -3809,9 +3809,14 @@ def test_marked_copies_keep_the_original_as_evidence(env, cfg):
     assert data != png
 
 
+def test_screenshot_markers_are_on_by_default():
+    """The user's choice (2026-11-20): marked copies by default."""
+    assert TrackingConfig().mark_screenshots is True
+
+
 def test_no_marked_copy_while_the_setting_is_off(env, cfg):
     svc, popen, _run, helpers, tmp = env
-    assert cfg.mark_screenshots is False  # the default
+    cfg.mark_screenshots = False
     with timeline.capture() as lines:
         ge = start(svc, popen, helpers, cfg)
         helpers[0].shots = [ShotResult(500.0, 108, 242, "h", 14.0, _real_png(), "/x")]
