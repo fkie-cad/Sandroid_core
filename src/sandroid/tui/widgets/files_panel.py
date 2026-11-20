@@ -2,12 +2,12 @@
 
 One question per screen -- *what is the app writing, and what changed in
 it?* -- answered by ONE full-width table, collapsed per file, newest at the
-bottom (watched ★ rows pinned on top)::
+bottom (watched ★ rows that saw no activity stay on top)::
 
-    ★ databases/app.db            CM  11x  10:42:05
-    ★ shared_prefs/consent.xml    M    3x  10:42:07
+    ★ shared_prefs/consent.xml    -    0x            (watched, idle)
       files/aaid.txt              C    1x  10:40:12
       cache/ · 340 files          CM 412x  10:41:58   (a cache group, ⏎/→ opens)
+    ★ databases/app.db            CM  11x  10:42:05   (watched, changed: tinted)
 
 **Follow** (the Timeline / Network rules, ``follow.py``; the default
 "recent" order): a file that changes moves to the bottom and, while *live*,
@@ -15,7 +15,7 @@ the cursor sticks to that newest row. ↑, PgUp, Home, a wheel up or a click
 on a row above the newest one stop following (the monitor keeps recording),
 ``End`` resumes, also with a file open in the Inspector (which then follows
 the newest row); the caption title says ``live`` or ``scrolled back · 3 new
-below · End = live`` (unpinned rows that changed since; ★ rows stay on top).
+below · End = live`` (rows that changed since, ★ rows included).
 The frame title says ``monitor on`` / ``monitor off`` for the monitor.
 
 Rows come from the file monitor (``o`` starts/stops it): each
@@ -24,8 +24,10 @@ Rows come from the file monitor (``o`` starts/stops it): each
 collapse, path rules, mark segments). Watched files -- the Spotlight-Files
 watchlist owned by the hidden
 :class:`~sandroid.tui.widgets.watchlist_view.WatchlistView` engine -- carry
-★ and are pinned on top, also before they saw any activity (wildcard
-patterns included). Details live in the Inspector only (Enter): Summary
+★ and are pinned on top until they see activity (wildcard patterns
+included); a ★ file that changes moves down among the other rows like any
+entry (newest last, followed) and keeps its ★ and a light tint of the ★
+colour (``WATCHED_TINT``). Details live in the Inspector only (Enter): Summary
 (full path, ops with times, processes, watch + last pull), Versions (every
 kept pull, newest first; the selected one's structured diff against the
 version before it or a marked base), Content (a first look inside the
@@ -43,8 +45,8 @@ the time is taken when the key is pressed) and asks for an optional name
 a top-level label, whose start and end are segment boundaries too ("label 7
 'x'", "after label 7 (no label)"). The table then
 shows only what happened since that mark: counts/ops per segment, rows
-without activity in the segment hidden, ★ rows with activity in it pinned on
-top. The idle ★ rows (and patterns) fold into ONE row below them --
+without activity in the segment hidden, ★ rows with activity in it among
+them (tinted). The idle ★ rows (and patterns) fold into ONE row on top --
 ``★ 21 watched · idle since mark 3`` -- that ⏎/→ opens and ← folds like a
 cache group (a single idle ★ row stays as it is). The everything view
 (``A``) folds idle ★ rows only when they flood the table (4 or more never
@@ -111,6 +113,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 from textual.binding import Binding
@@ -120,7 +123,12 @@ from textual.widgets import Button, DataTable, Input, Static
 
 from sandroid.core.adb_utils import canonical_device_path, watch_path_problem
 from sandroid.core.file_diff import is_legacy_markup_line
-from sandroid.tui.row_annotations import LENS_FILES, AnnotationFeed, AnnotationTintMixin
+from sandroid.tui.row_annotations import (
+    LENS_FILES,
+    AnnotationFeed,
+    AnnotationTintMixin,
+    row_tint,
+)
 from sandroid.tui.themes import lens_palette
 from sandroid.tui.utils.ui_thread import UiDispatcher
 
@@ -176,6 +184,10 @@ def _c(token: str) -> str:
     """
     return str(getattr(lens_palette(), token))
 
+
+#: The row tint of a ★ file that changed (it moved down among the other
+#: rows): (lens token, blend amount). The ★'s own colour, lightly.
+WATCHED_TINT = ("title", 0.10)
 
 #: The ★ colour of a watched file by its pull state (token, bold); others
 #: ``title``. Colour, not a symbol, says changed / failed / settling.
@@ -464,6 +476,28 @@ class _FilesTable(AnnotationTintMixin, DataTable):
         parent = self.parent
         return parent if isinstance(parent, FilesPanel) else None
 
+    def _get_row_style(self, row_index: int, base_style):
+        """A ★ row that changed (it moved down among the other rows) keeps
+        a light tint of the ★ colour -- unless an annotation tints it.
+        """
+        style = super()._get_row_style(row_index, base_style)
+        panel = self._panel()
+        if panel is None or row_index < 0 or not panel._watched_active:
+            return style
+        try:
+            from textual.coordinate import Coordinate
+
+            cell = self.coordinate_to_cell_key(Coordinate(row_index, 0))
+            key = cell.row_key.value
+        except Exception:
+            return style
+        if key not in panel._watched_active:
+            return style
+        annotated = self.annotation_key(key)
+        if annotated and self._annotation_tint(annotated):
+            return style
+        return style + Style(bgcolor=row_tint(WATCHED_TINT[0], WATCHED_TINT[1]))
+
     def on_resize(self, event) -> None:
         """The table's own width changed (the Inspector closed or opened, a
         terminal resize): re-lay out the columns once this size is final --
@@ -725,6 +759,8 @@ class FilesPanel(Widget):
         self._path_width = 0
         #: The table width the columns were last laid out for.
         self._layout_width = 0
+        #: Keys of the ★ rows with activity in the view (tinted rows).
+        self._watched_active: set[str] = set()
         self._notice_kind: str | None = None
         #: ``(when, text, level)`` monitor timeline lines (add_monitor_note).
         self._monitor_notes: list[tuple[datetime, str, str]] = []
@@ -852,13 +888,17 @@ class FilesPanel(Widget):
     def select_subtab(self, panel_id: str) -> None:
         """Legacy ``open_files_tab(sub_tab=...)`` target: just land on the table.
 
-        ``files-watchlist`` (key ``l``) puts the cursor on the first (pinned,
-        watched) row.
+        ``files-watchlist`` (key ``l``) puts the cursor on the first watched
+        row (an idle ★ row or their fold on top, else the first ★ row that
+        changed).
         """
         if panel_id == "files-watchlist":
+            index = next(
+                (i for i, r in enumerate(self._rows) if r.watched or r.fold), 0
+            )
             try:
                 if self.table.row_count:
-                    self.table.move_cursor(row=0, animate=False)
+                    self.table.move_cursor(row=index, animate=False)
             except Exception:
                 pass
         self.focus()
@@ -1093,10 +1133,11 @@ class FilesPanel(Widget):
     # -- rows ----------------------------------------------------------------------
 
     def _live_rows(self) -> list[_Row]:
-        """Pinned ★ rows, then activity (and cache groups), in sort order.
+        """Idle ★ rows (or their fold) on top, then activity -- cache
+        groups and the ★ rows that changed included -- in sort order.
 
-        In a mark segment only rows with activity in it are listed (★ rows
-        stay; idle ones fold into one ``IDLE_FOLD`` row, see the module doc).
+        In a mark segment only rows with activity in it are listed (idle ★
+        rows stay; many fold into one ``IDLE_FOLD`` row, see the module doc).
         Rows hidden by a rule are counted per rule kind in ``self._hidden``.
         """
         wl = self._watchlist_or_none()
@@ -1173,17 +1214,20 @@ class FilesPanel(Widget):
         pinned_rows = sorted(
             (r for r in pinned.values() if self._matches(r)), key=order
         )
-        # Idle ★ rows (no activity in the viewed segment / ever) fold into
-        # one expandable row below the active ★ rows: watching 20 prefs
-        # files must not push the segment's real activity off the screen.
+        # A ★ row that changed (activity in the viewed segment) moves among
+        # the other rows like any entry (newest last, followed); it keeps
+        # its ★ and a highlight tint (``_FilesTable``). Only idle ★ rows
+        # stay on top.
+        active = [r for r in pinned_rows if r.stats is not None]
+        self._watched_active = {r.key for r in active}
         idle = [r for r in pinned_rows if r.stats is None]
+        # Idle ★ rows (no activity in the viewed segment / ever) fold into
+        # one expandable row: watching 20 prefs files must not push the
+        # segment's real activity off the screen.
         limit = FOLD_IDLE_IN_ALL if segment is None else FOLD_IDLE_IN_SEGMENT
         if len(idle) >= limit:
-            active = [r for r in pinned_rows if r.stats is not None]
-            fold = _Row(key=IDLE_FOLD, group=IDLE_FOLD, members=idle, fold=True)
-            # Newest last: the idle fold above the ★ rows that changed.
-            pinned_rows = [fold, *active] if self._sort == "recent" else [*active, fold]
-        rows = pinned_rows + sorted(rest, key=order)
+            idle = [_Row(key=IDLE_FOLD, group=IDLE_FOLD, members=idle, fold=True)]
+        rows = idle + sorted(rest + active, key=order)
         out: list[_Row] = []
         for row in rows:
             out.append(row)
@@ -1642,11 +1686,11 @@ class FilesPanel(Widget):
         follow = self.follow_applies and self._follow.live
         self._followed_last = follow
         self._ensure_columns(table)
-        rows = (
-            [r for r in self._review_rows if self._matches(r)]
-            if self.review
-            else self._live_rows()
-        )
+        if self.review:
+            self._watched_active = set()
+            rows = [r for r in self._review_rows if self._matches(r)]
+        else:
+            rows = self._live_rows()
         self._rows = rows
         if self.follow_applies and not self._follow.live:
             # Rows that changed since: the unpinned ones (they move below);
@@ -1655,9 +1699,7 @@ class FilesPanel(Widget):
             self._follow.new_below = sum(
                 1
                 for r in rows
-                if r.watched is None
-                and not r.fold
-                and (r.key in new or any(m.key in new for m in r.members))
+                if not r.fold and (r.key in new or any(m.key in new for m in r.members))
             )
         with self.app.batch_update():
             table.clear()

@@ -27,11 +27,12 @@ THEME_TEXT = (
 THEME_QUIET = ("text_muted", "muted_status_color")
 #: Row tints that carry text: (token, blend amount). The Timeline's user /
 #: typed rows and privacy rows (13 %), the AI highlight sets (18 %), the
-#: row-annotation tints (13 %).
+#: row-annotation tints (13 %), a changed watched file's row in the Files
+#: lens (``files_panel.WATCHED_TINT``).
 TINTS = (
     ("user", 0.13), ("typed", 0.13), ("warn", 0.13), ("accent", 0.13),
     ("highlight_1", 0.18), ("highlight_2", 0.18), ("highlight_3", 0.18),
-    ("highlight_4", 0.18),
+    ("highlight_4", 0.18), ("title", 0.10),
 )  # fmt: skip
 
 LIGHT = sorted(name for name, theme in THEMES.items() if not theme.is_dark)
@@ -124,3 +125,9 @@ def test_dark_theme_text_tokens_are_readable_on_their_background(name: str) -> N
     for token in LENS_QUIET:
         _check(failures, f"lens.{token}", getattr(p, token), p.bg, 3)
     assert not failures, "\n".join(failures)
+
+
+def test_the_watched_row_tint_is_one_the_contrast_test_covers() -> None:
+    from sandroid.tui.widgets.files_panel import WATCHED_TINT
+
+    assert WATCHED_TINT in TINTS

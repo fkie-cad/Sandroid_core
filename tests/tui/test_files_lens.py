@@ -2103,8 +2103,9 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
         )
         # Since the mark: ONE fold row for the 21 idle watches (incl. the
         # pattern and prefs[3], active before the mark only) on top, then
-        # the active ★ row, then the segment's activity (newest last).
-        assert _keys(panel) == [IDLE_FOLD, prefs[5], AAID]
+        # the segment's activity, the changed ★ row among it (newest last;
+        # same time: by path).
+        assert _keys(panel) == [IDLE_FOLD, AAID, prefs[5]]
         fold = _row(panel, IDLE_FOLD)
         assert len(fold.members) == 21
         assert pattern in {m.key for m in fold.members}
@@ -2122,7 +2123,7 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
         await pilot.pause()
         keys = _keys(panel)
         assert keys[0] == IDLE_FOLD
-        assert keys[-2:] == [prefs[5], AAID]
+        assert keys[-2:] == [AAID, prefs[5]]
         assert len(keys) == 2 + 21 + 1
         assert str(panel._mark_cell(_row(panel, IDLE_FOLD))) == ""
         assert panel._path_cell(_row(panel, prefs[0])).plain.startswith("  ")
@@ -2133,7 +2134,7 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
         panel.table.move_cursor(row=4)
         await pilot.press("left")  # folds from a member row
         await pilot.pause()
-        assert _keys(panel) == [IDLE_FOLD, prefs[5], AAID]
+        assert _keys(panel) == [IDLE_FOLD, AAID, prefs[5]]
         assert panel._cursor_key() == IDLE_FOLD
         await pilot.press("u")  # on the fold row: a hint, no pull
         await pilot.pause()
@@ -2143,7 +2144,7 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
         await pilot.press("A")
         await pilot.pause()
         keys = _keys(panel)
-        assert keys[:3] == [IDLE_FOLD, prefs[3], prefs[5]]
+        assert keys[:4] == [IDLE_FOLD, prefs[3], AAID, prefs[5]]
         assert panel._path_cell(_row(panel, IDLE_FOLD)).plain.startswith(
             "★ 19 watched · idle"
         )
@@ -2634,10 +2635,10 @@ async def test_moving_in_name_order_leaves_follow_for_the_recent_order() -> None
 
 
 @pytest.mark.asyncio
-async def test_pinned_changes_are_not_new_below_and_live_resumes_after_review(
+async def test_watched_changes_are_new_below_and_live_resumes_after_review(
     tmp_path,
 ) -> None:
-    get_forensic_service().add_spotlight_file(PREFS)  # ★, pinned on top
+    get_forensic_service().add_spotlight_file(PREFS)  # ★: moves when it changes
     app = _Harness()
     async with app.run_test(size=(140, 30)) as pilot:
         panel = await _three_changes(app)
@@ -2648,7 +2649,7 @@ async def test_pinned_changes_are_not_new_below_and_live_resumes_after_review(
             _items(_fse("FSE_CONTENT_MODIFIED", PREFS)), now=T0 + timedelta(seconds=9)
         )
         _keys(panel)
-        assert panel.caption()[0].startswith("scrolled back · End = live")
+        assert panel.caption()[0].startswith("scrolled back · 1 new below")
         assert not panel.following
         from sandroid.tui.widgets.lens_shell import ScopeChanged
 
@@ -2719,3 +2720,45 @@ async def test_the_table_relays_out_even_when_the_panel_refresh_came_too_early(
         await until(pilot, lambda: panel._path_width == wide and _columns_fill(panel))
         cell = panel.table.get_cell_at((0, 1))
         assert cell.plain == "files/aaid.txt"  # full width: not truncated
+
+
+async def test_a_changed_watched_file_moves_down_keeps_its_star_and_a_tint() -> None:
+    """A ★ file that changes moves to the bottom like any entry (newest
+    last, followed), keeps its ★ and a light tint of the ★ colour; an idle
+    ★ file stays on top, untinted.
+    """
+    from rich.style import Style
+
+    from sandroid.tui.row_annotations import row_tint
+    from sandroid.tui.widgets.files_panel import WATCHED_TINT
+
+    get_forensic_service().add_spotlight_file(PREFS)
+    get_forensic_service().add_spotlight_file(DB)
+
+    def tint(key: str):
+        table = panel.table
+        return table._get_row_style(table.get_row_index(key), Style()).bgcolor
+
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        await until(pilot, lambda: set(_keys(panel)) == {PREFS, DB})
+        assert tint(PREFS) is None  # idle ★ rows: on top, no tint
+        panel.ingest(_items(_fse("FSE_CONTENT_MODIFIED", PREFS)), now=T0)
+        panel.ingest(
+            _items(_fse("FSE_CREATE_FILE", AAID)), now=T0 + timedelta(seconds=1)
+        )
+        await until(pilot, lambda: _keys(panel) == [DB, PREFS, AAID])
+        assert str(panel._mark_cell(_row(panel, PREFS))) == "★"
+        expected = Style(bgcolor=row_tint(*WATCHED_TINT)).bgcolor
+        assert tint(PREFS) == expected
+        assert tint(DB) is None
+        assert tint(AAID) is None
+        # It changes again: the newest row, and the live cursor follows it.
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", PREFS)), now=T0 + timedelta(seconds=5)
+        )
+        await until(pilot, lambda: _keys(panel) == [DB, AAID, PREFS])
+        await until(pilot, lambda: panel._cursor_key() == PREFS)
+        assert panel.following
+        assert tint(PREFS) == expected
