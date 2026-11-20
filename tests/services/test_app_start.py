@@ -1845,11 +1845,11 @@ def test_identity_registers_with_the_real_registry():
     from sandroid.services import identity
 
     svc = identity.IdentityService()
-    assert identity._pre_spawn_plan_cls() is app_start.PreStartPlan
-    assert svc.install_pre_spawn_hook() is True
-    assert svc.install_pre_spawn_hook() is True
-    assert _registered() == [svc.pre_spawn]
-    svc.uninstall_pre_spawn_hook()
+    assert identity._pre_start_plan_cls() is app_start.PreStartPlan
+    assert svc.install_pre_start_step() is True
+    assert svc.install_pre_start_step() is True
+    assert _registered() == [svc.pre_start]
+    svc.uninstall_pre_start_step()
     assert _registered() == []
 
 
@@ -2501,18 +2501,18 @@ def test_a_declined_pre_start_step_says_declined(bus):
     assert out[0].reason == "declined"
 
 
-def test_the_old_pre_spawn_names_still_work():
-    for old, new in (
-        ("PreSpawnPlan", "PreStartPlan"),
-        ("PreSpawnHook", "PreStartStep"),
-        ("register_pre_spawn_hook", "register_pre_start_step"),
-        ("unregister_pre_spawn_hook", "unregister_pre_start_step"),
-        ("pre_spawn_running", "pre_start_running"),
-        ("pre_spawn_status", "pre_start_status"),
-        ("add_pre_spawn_status_listener", "add_pre_start_status_listener"),
-        ("remove_pre_spawn_status_listener", "remove_pre_start_status_listener"),
+def test_the_old_pre_spawn_names_are_gone():
+    for old in (
+        "PreSpawnPlan",
+        "PreSpawnHook",
+        "register_pre_spawn_hook",
+        "unregister_pre_spawn_hook",
+        "pre_spawn_running",
+        "pre_spawn_status",
+        "add_pre_spawn_status_listener",
+        "remove_pre_spawn_status_listener",
     ):
-        assert getattr(app_start, old) is getattr(app_start, new), old
+        assert not hasattr(app_start, old), old
     assert app_start.StartResult(True, "ok") == (True, "ok")
     assert app_start.StartResult.of((False, "x")).reason is None
 

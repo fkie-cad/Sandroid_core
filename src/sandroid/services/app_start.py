@@ -1968,14 +1968,3 @@ __all__ = [
     "stops_sentence",
     "unregister_pre_start_step",
 ]
-
-# Deprecated names (before 2026-11-20 these were "pre-spawn hooks"): kept
-# until the in-flight branches that call them have moved to the new names.
-PreSpawnPlan = PreStartPlan
-PreSpawnHook = PreStartStep
-register_pre_spawn_hook = register_pre_start_step
-unregister_pre_spawn_hook = unregister_pre_start_step
-pre_spawn_running = pre_start_running
-pre_spawn_status = pre_start_status
-add_pre_spawn_status_listener = add_pre_start_status_listener
-remove_pre_spawn_status_listener = remove_pre_start_status_listener
