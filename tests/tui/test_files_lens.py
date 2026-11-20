@@ -2741,6 +2741,43 @@ async def test_the_table_relays_out_even_when_the_panel_refresh_came_too_early(
         assert cell.plain == "files/aaid.txt"  # full width: not truncated
 
 
+async def test_the_table_relays_out_when_textual_resizes_it_without_a_resize(
+    monkeypatch,
+) -> None:
+    """After a scroll-only refresh Textual's full widget map is stale; if it
+    is rebuilt between the Inspector's CSS change and the layout pass, the
+    layout sees no size change and sends neither the panel nor the table a
+    Resize -- their sizes change silently. The columns still follow the
+    table's width (the panel re-checks it after every layout).
+    """
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.widgets.files_panel import _FilesTable
+
+    app = SandroidTUI()
+    async with app.run_test(size=(200, 45)) as pilot:
+        ms, panel = await _files_with_a_row(pilot, app)
+        wide = panel._path_width
+        await pilot.press("enter")
+        await until(pilot, lambda: ms.inspector_is_open and panel._path_width < wide)
+        await settle(pilot)
+        resized = []
+        on_resize = _FilesTable.on_resize
+
+        def recording(table, event) -> None:
+            resized.append(event.size.width)
+            on_resize(table, event)
+
+        monkeypatch.setattr(_FilesTable, "on_resize", recording)
+        ms._refresh_layout(scroll=True)  # a scroll-only refresh: map stale
+        ms.close_side_slot()
+        ms._compositor.full_map  # noqa: B018 -- rebuilt from the new CSS
+        await settle(pilot)
+        await settle(pilot)
+        assert resized == []  # the silent resize this test is about
+        await until(pilot, lambda: panel._path_width == wide and _columns_fill(panel))
+        assert panel.table.get_cell_at((0, 1)).plain == "files/aaid.txt"
+
+
 async def test_a_changed_watched_file_moves_down_keeps_its_star_and_a_tint() -> None:
     """A ★ file that changes moves to the bottom like any entry (newest
     last, followed), keeps its ★ and a light tint of the ★ colour; an idle

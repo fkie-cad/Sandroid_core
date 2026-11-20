@@ -823,6 +823,15 @@ class FilesPanel(Widget):
             self.app.theme_changed_signal.subscribe(self, self._repaint_for_theme)
         except Exception:
             pass
+        try:
+            # Textual can resize the table without a Resize event (its full
+            # widget map rebuilt between a CSS change and the layout pass):
+            # re-check the laid-out width after every layout as well.
+            self.screen.screen_layout_refresh_signal.subscribe(
+                self, lambda _screen: self.relayout_if_stale()
+            )
+        except Exception:
+            pass
 
     def _repaint_for_theme(self, _theme: Any = None) -> None:
         """A live theme switch: rows, bar and caption take the new palette
