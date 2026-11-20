@@ -51,6 +51,7 @@ import re
 import sys
 import threading
 import time
+import weakref
 import zlib
 from collections import deque
 from dataclasses import dataclass, field
@@ -2519,12 +2520,21 @@ def _marker_digest(marker: Marker) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-@functools.lru_cache(maxsize=4)
+#: _vkeys per needle set; weak, so a dropped set (and its automata, ~100 MB
+#: at a full profile) is freed instead of lingering in a cache.
+_VKEYS: weakref.WeakKeyDictionary[NeedleSet, dict[str, str]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
 def _vkeys(needles: NeedleSet) -> dict[str, str]:
     """Marker id -> value key for the markers of ``needles`` (cached per
     needle set; callers do not change the dict).
     """
-    return {m.id: _marker_digest(m) for m in needles.markers}
+    vkeys = _VKEYS.get(needles)
+    if vkeys is None:
+        vkeys = _VKEYS[needles] = {m.id: _marker_digest(m) for m in needles.markers}
+    return vkeys
 
 
 _LABEL_PACKAGE_RE = re.compile(r"\(([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)\)\s*$")
