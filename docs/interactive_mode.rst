@@ -502,8 +502,17 @@ repeated (a cookie banner is gone once accepted):
      ends after the action. Each step is replayed *by element* (the tapped
      element is found again and its current centre is tapped), else *by
      position* (the recorded coordinates); the Timeline shows ``by element``,
-     ``by position`` or ``failed: <reason>`` for every step. Typed text is
-     replayed as the recorded keyboard taps.
+     ``by position``, ``failed: <reason>`` or ``diverged: <reason>`` for
+     every step. Typed text is replayed as the recorded keyboard taps, or
+     (typed another way) one character at a time at your recorded pace, and
+     the field is then read back: ``diverged: field reads '<x>', expected
+     '<y>'`` when it holds something else (an autocomplete suffix after the
+     recorded text is fine; password fields only say ``field text
+     differs``). A tap that misses its element right after the step before
+     missed its own also diverges. A replay with a diverged step ends
+     **diverged**, never "Done": the log, Review, the Sessions lens and
+     ``run.json`` say so, and every result after it carries a note naming
+     the step.
    - **Rewind**: back to the start point and copy **Before**. The device stays
      at the start point.
 
