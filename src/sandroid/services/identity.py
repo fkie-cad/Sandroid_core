@@ -2319,6 +2319,8 @@ class _RecordRead:
     boot_id: str
     marker: str  # the restart marker's content ("" when there is none)
     install: str = ""  # ``uid:inode`` of the package asked for ("" = none)
+    sim_numeric: str = ""  # gsm.sim.operator.numeric ("" = none, unknown)
+    avd_name: str = ""  # ro.boot.qemu.avd_name ("" = not an emulator, unknown)
 
 
 def applied_record(
@@ -2413,6 +2415,10 @@ def record_script(package: str | None = None) -> str:
         "echo @@marker@@",
         f"cat {RESTART_MARKER} 2>/dev/null",
         "echo",
+        "echo @@sim_numeric@@",
+        "getprop gsm.sim.operator.numeric",
+        "echo @@avd_name@@",
+        "getprop ro.boot.qemu.avd_name",
     ]
     if package and re.fullmatch(r"[A-Za-z0-9_.]+", package):
         lines += ["echo @@install@@", _install_cmd(package)]
@@ -3400,7 +3406,14 @@ class IdentityService:
         )
         for vid, info in plan.infos.items():
             after = verified.infos.get(vid)
-            if after is None or vid not in steps:
+            if after is None:
+                continue
+            if vid not in steps:
+                # No step of its own; after the SIM toggle the device may
+                # report something new for it too (the SIM operator name).
+                if sim and after.current != info.current:
+                    info.current = after.current
+                    info.status, info.reason = after.status, after.reason
                 continue
             if info.status == "failed":
                 continue
@@ -3984,6 +3997,27 @@ class IdentityService:
                     mem.observed = False  # the record is the truth again
         self._notify_status()
 
+    def _sim_due(self, serial: str, profile: Profile, read: _RecordRead) -> bool:
+        """The emulator started with the profile's SIM, the guest still shows
+        another SIM MCC/MNC, and no SIM refresh ran for this launch yet (a
+        quickboot snapshot whose record already says done: the one airplane
+        toggle is still due). Host-side file reads only.
+        """
+        if not read.sim_numeric or not read.avd_name:
+            return False
+        try:
+            sim = identity_sim.sim_values(profile)
+            if sim is None or not sim.mccmnc or sim.mccmnc == read.sim_numeric:
+                return False
+            emu = identity_sim.running_emulator(serial, read.avd_name)
+        except Exception:
+            logger.debug("identity: SIM launch check failed", exc_info=True)
+            return False
+        if emu is None or emu.sim is None or emu.sim.mccmnc != sim.mccmnc:
+            return False  # not started with it: a restart is needed, not a toggle
+        with self._lock:
+            return (serial, read.boot_id, emu.token) not in self._sim_toggles
+
     def _read_record(
         self, serial: str, package: str | None = None
     ) -> _RecordRead | None:
@@ -4006,6 +4040,8 @@ class IdentityService:
             sec.get("boot_id", ""),
             sec.get("marker", ""),
             install if re.fullmatch(r"\d+:\d+", install) else "",
+            sim_numeric=sec.get("sim_numeric", "").strip(),
+            avd_name=sec.get("avd_name", "").strip(),
         )
 
     def _write_record(self, serial: str, record: dict[str, Any]) -> bool:
@@ -4441,6 +4477,7 @@ class IdentityService:
         read = self._read_record(serial, package)
         if read is not None:
             self._hydrate(serial, read, gen)
+        sim_due = read is not None and self._sim_due(serial, profile, read)
         # An interrupted restart window: the next apply resumes it.
         recovery = read is not None and bool(read.marker)
         with self._lock:
@@ -4459,7 +4496,13 @@ class IdentityService:
                 mem.installs.pop(package, None)
             # Without an answer from the device the memory may be stale (a
             # snapshot load, a reinstall): apply rather than skip.
-            if ours and package in mem.done and not recovery and read is not None:
+            if (
+                ours
+                and package in mem.done
+                and not recovery
+                and read is not None
+                and not sim_due
+            ):
                 return None
             seeded = ours and package in mem.seeded
             settled = set(mem.settled) if ours else set()

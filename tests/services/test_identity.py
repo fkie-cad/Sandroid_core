@@ -216,6 +216,7 @@ class FakeDevice:
         self.airplane: list[str] = []
         #: Airplane-mode commands that are refused once (exit status 1).
         self.airplane_fail: set[str] = set()
+        self.on_airplane = None  # called (no arguments) after "disable"
         self.shell_reads_sim = False  # the shell user may read the SIM
         #: (command, timeout) of every adb call.
         self.timeouts: list[tuple[str, float]] = []
@@ -376,6 +377,8 @@ class FakeDevice:
 
     def _run(self, argv: list[str], zygote: bool) -> str:
         name = argv[0]
+        if name == "getprop" and len(argv) == 2:
+            return self.props.get(argv[1], "")
         if name == "echo":
             if ">" in argv:
                 self.fs[argv[-1]] = " ".join(argv[1:-2]).encode()
@@ -421,6 +424,8 @@ class FakeDevice:
             self.settings["airplane_mode_on"] = "1" if argv[3] == "enable" else "0"
             if argv[3] == "disable":
                 self.sim = dict(self.modem)  # the radio reads the SIM again
+                if self.on_airplane is not None:
+                    self.on_airplane()
             return ""
         if name == "sleep":
             return ""
@@ -1729,6 +1734,43 @@ def test_the_toggle_runs_once_per_launch_and_a_mismatch_fails(
     plan = service.apply(SERIAL, "com.example.app")
     assert plan.infos["imsi"].status == "verified"
     assert device.airplane == ["enable", "disable"]
+
+
+def test_a_quickboot_snapshot_with_the_old_sim_is_not_done(service, device, app_start):
+    """A new launch from a quickboot snapshot whose record says done: the
+    guest still has the old SIM, so the start applies (one toggle) instead
+    of skipping; once refreshed the next start has nothing to do.
+    """
+    profile = service.active_profile()
+    for vid in ("android_id", "locale"):  # no framework value left
+        profile.values[vid].enabled = False
+    service.save(profile)
+    sim = _launched(service, device)
+    device.props["gsm.sim.operator.numeric"] = sim.mccmnc
+    device.props["ro.boot.qemu.avd_name"] = "Dev1"
+    service.apply(SERIAL, "com.example.app")
+    assert service.pre_spawn("com.example.app") is None
+    # The emulator is started again from a snapshot taken before the SIM
+    # refresh: same boot id, new launch token, the old SIM in the guest.
+    device.token = "launch-2"  # noqa: S105 - a launch id, not a secret
+    device.sim = dict(STOCK_SIM)  # cached by the snapshot
+    device.props["gsm.sim.operator.numeric"] = "310260"
+    device.airplane.clear()
+    plan = service.pre_spawn("com.example.app")
+    assert plan is not None
+    assert not plan.disruptive
+
+    def refreshed() -> None:
+        device.props["gsm.sim.operator.numeric"] = sim.mccmnc
+
+    device.on_airplane = refreshed
+    plan.apply()
+    assert device.airplane == ["enable", "disable"]
+    assert service.pre_spawn("com.example.app") is None
+    # Not started with the profile's SIM: a toggle would not help, no plan.
+    device.launched = None
+    device.props["gsm.sim.operator.numeric"] = "310260"
+    assert service.pre_spawn("com.example.app") is None
 
 
 def test_a_failed_toggle_switches_airplane_mode_off_again(service, device):
