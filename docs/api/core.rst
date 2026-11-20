@@ -210,8 +210,15 @@ with the emulator backend instead of wrapping each launch path:
   restart / kill, i.e. ``restart_emulator`` / ``stop_emulator``) all funnel
   through one spot -- after the console port was chosen, in registration order (registering a callable
   twice is a no-op). Their arguments are appended after
-  ``options.extra_args`` and never stored in ``devices.json``. Reusing an
-  AVD that already runs calls no hook.
+  ``options.extra_args`` and never become remembered options. They are
+  kept in ``devices.json`` (``hook_args``) only so that a later Sandroid
+  process restarting that emulator strips them from its command line and
+  the hooks decide afresh. Reusing an AVD that already runs calls no hook.
+- ``restart_emulator`` relaunches an emulator this process did not launch
+  the way it was started: the options come from its process command line
+  (``running_options``), falling back to the remembered ones. Sandroid's
+  safe GPU flags replace ``-gpu`` / ``-feature -Vulkan``, and ``-wipe-data``
+  is never repeated.
 - A pre-launch hook that raises fails the launch closed: no process is
   started, the port is released, the post-stop hooks run (best effort) and
   ``EmulatorLaunchError`` names the hook and its error.
