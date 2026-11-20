@@ -840,7 +840,7 @@ class ForensicService:
     # Toolbox-Migrated State (09-02 Task 2)
     # =========================================================================
     # These properties provide direct-reference access for metaclass delegation.
-    # External files (device_manager.py, trigdroid.py, actionQ.py, factory.py)
+    # External files (device_manager.py, actionQ.py, factory.py)
     # access these via Toolbox.attr which delegates through _ToolboxMeta.
 
     @property

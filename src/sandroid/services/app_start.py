@@ -3,7 +3,7 @@
 The spotlight is a plain app *selection* (package, plus PID/activity when
 known). It has no spawn/attach mode. Every caller that needs a Frida session
 on the selected app (friTap ``h``, Dexray ``m``, the bypass toggles, fridump,
-TrigDroid, the AI) asks :func:`resolve_start` / :func:`negotiate_start`, and
+the AI) asks :func:`resolve_start` / :func:`negotiate_start`, and
 the lifecycle keys (Space, ⇧P, ⇧R, ⇧A) and the AI go through
 :func:`start_app` / :func:`restart_app` / :func:`resume_app` /
 :func:`attach_app`.

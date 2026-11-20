@@ -6,9 +6,8 @@ the TUI controllers (``app.action_record`` -> ``RecordingController``
 record / stop, ``app.action_play`` -> ``RecordingController.open_review``),
 the Rewind flow of :mod:`sandroid.core.rewind`.
 
-(The former ``t`` "Start TrigDroid" entry is gone: it only ever opened
-TrigDroid's bypass wrapper, which BypassService replaced. TrigDroid's trigger
-execution runs from the CLI ``--trigdroid`` / headless API.)
+(The former ``t`` entry is gone: it only opened a bypass wrapper, which
+BypassService replaced.)
 
 The TUI's live key-dispatch path (``MainScreen._execute_action_sync``) still
 runs these handlers on a worker thread, but it now threads a reference to the

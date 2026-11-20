@@ -260,9 +260,9 @@ class ActionStep(Step):
     """Perform the run's action, or set an action-less capture window.
 
     When :attr:`action` is a :class:`~sandroid.features.functionality.Functionality`
-    (a ``Player`` for playback, or ``Trigdroid``), it is performed and is
+    (e.g. a ``Player`` for playback), it is performed and is
     responsible for setting the action time/duration itself. When ``action`` is
-    ``None`` (a pure forensic run with no recording), the engine opens a capture
+    ``None`` (a run with no recording or scripted action), the engine opens a capture
     window of ``config.capture_window`` seconds instead.
     """
 

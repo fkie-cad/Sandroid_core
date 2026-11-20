@@ -1,8 +1,8 @@
 """Native detection-bypass managers for Android app analysis.
 
 Sandroid ships self-contained Frida bypasses for the bypasses needed to
-intercept and analyse hardened apps, so interception no longer depends on an
-external ``trigdroid`` package or a pre-compiled frida bundle being present.
+intercept and analyse hardened apps, so interception does not depend on an
+external package or a pre-compiled frida bundle being present.
 
 This module provides:
 
@@ -24,9 +24,9 @@ This module provides:
   category sets and one persistent flag-gated Frida script (toggled via the
   ``set_flags`` RPC — instant, gap-free, one Java bridge).
 
-BypassService is the only source of bypasses in Sandroid (TrigDroid's bypass
-wrapper is gone; Dexray Intercept's own bypass group is mutually exclusive
-with it).
+BypassService is the only source of bypasses in Sandroid (Dexray Intercept's
+own bypass group is mutually exclusive with it). Hook sets marked "ported
+from TrigDroid" come from the MIT-licensed TrigDroid project.
 
 **EXPERIMENTAL.** All bypass categories (SSL unpinning incl. the native
 cronet/BoringSSL and mbedTLS/MNS tiers, PairIP/integrity, root/Frida/debug/

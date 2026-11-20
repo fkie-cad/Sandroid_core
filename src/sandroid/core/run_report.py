@@ -110,14 +110,13 @@ TOOL_DISTRIBUTIONS: tuple[str, ...] = (
     "dexray-intercept",
     "dexray-insight",
     "AndroidFridaManager",
-    "trigdroid",
     "mvt",
 )
 
 #: Config sections recorded as "analysis settings" in the metadata. Sections
 #: that hold credentials or endpoints (ai, mcp, credentials, ...) are never
 #: included.
-SETTINGS_SECTIONS: tuple[str, ...] = ("analysis", "trigdroid", "report")
+SETTINGS_SECTIONS: tuple[str, ...] = ("analysis", "report")
 
 _SECRET_KEY_RE = re.compile(
     r"(api[_-]?key|token|secret|passw(or)?d|credential|auth|cookie|private)",

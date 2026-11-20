@@ -384,8 +384,8 @@ class SpotlightService:
     def spawn_app_paused(self, package_name: str) -> tuple[Any | None, int]:
         """Spawn an app in paused state for multi-tool loading.
 
-        Use this when you want to load multiple Frida tools (FriTap, TrigDroid
-        bypass, etc.) before the app starts executing. The app will remain
+        Use this when you want to load multiple Frida tools (FriTap, the
+        bypass hooks, etc.) before the app starts executing. The app will remain
         paused until resume_paused_app() is called.
 
         Args:
