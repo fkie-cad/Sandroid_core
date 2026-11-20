@@ -12,6 +12,7 @@ pre-launch / post-stop hooks (order, fail-closed launch, once per launch).
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -1775,6 +1776,29 @@ def test_a_restart_is_a_new_launch_with_the_same_meta(env):
     assert second.launch_id != first.launch_id
     assert second.meta == {"persona_id": "x"}
     assert emu.launch_record(second.serial)["boot_id"] is None
+
+
+def test_pre_launch_hooks_see_the_meta_read_only_also_on_a_restart(env):
+    seen = []
+
+    def hook(ctx):
+        seen.append(json.loads(json.dumps(dict(ctx.meta))))  # as the hook got it
+        with pytest.raises(TypeError):
+            ctx.meta["persona"] = "other"  # type: ignore[index]
+        ctx.meta["profile"]["sim"] = "changed"  # a copy: the record keeps its own
+        return ()
+
+    emu.register_pre_launch_hook(hook)
+    meta = {"persona": "p1", "profile": {"sim": "a"}}
+    first = emu.launch_avd("Pixel", port=5560, meta=meta)
+    assert seen[0]["persona"] == "p1"
+    assert meta == {"persona": "p1", "profile": {"sim": "a"}}
+    assert emu.launch_record(first.serial)["meta"]["profile"] == {"sim": "a"}
+    env["adb"].add(first.serial, avd="Pixel")
+    emu.restart_emulator(first.serial)
+    assert seen[1]["persona"] == "p1"
+    assert seen[1]["profile"] == {"sim": "a"}
+    assert dict(emu._launch_context("Pixel", 5562, AvdLaunchOptions()).meta) == {}
 
 
 def test_a_launch_is_a_timeline_line_with_its_record(env):

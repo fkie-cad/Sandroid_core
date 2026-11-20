@@ -297,6 +297,8 @@ a restart keeps it), ``hooks`` (what pre-launch hooks put into
 ``LaunchContext.record``, e.g. ``ctx.record["identity_sim"] = {...}``) and,
 once the device was first prepared, ``boot_id`` and ``first_uptime``. The
 launch is a timeline line (``emulator``/``launch``) carrying the record.
+Pre-launch hooks run before the record exists; they read the caller's
+``meta`` as ``ctx.meta`` (a read-only copy, also on a restart).
 
 The device-prepared step treats a new ``launch_id`` as a new world even when
 the boot id is the same (two boots from one snapshot); it then resets the

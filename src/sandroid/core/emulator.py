@@ -51,11 +51,12 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from logging import getLogger
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 
 from sandroid.core.exceptions import EmulatorLaunchError
@@ -953,6 +954,9 @@ class LaunchContext:
         record: What a pre-launch hook wants in the launch record
             (:func:`launch_record`): it adds ``record["<key>"] = <JSON
             value>`` (e.g. ``identity_sim``); shown under ``hooks``.
+        meta: What the caller passed to :func:`launch_avd` (``meta=``, e.g.
+            ``persona``), read-only; a restart keeps it. A copy: what a hook
+            does to a nested value never reaches the launch record.
     """
 
     avd: str
@@ -960,6 +964,9 @@ class LaunchContext:
     port: int | None
     options: AvdLaunchOptions
     record: dict[str, Any] = field(default_factory=dict, compare=False)
+    meta: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({}), compare=False
+    )
 
 
 #: Called before an emulator process starts; returns extra emulator
@@ -1069,12 +1076,23 @@ def _hook_name(hook: Callable[..., Any]) -> str:
     return f"{module}.{name}" if module else name
 
 
-def _launch_context(avd: str, port: int, opts: AvdLaunchOptions) -> LaunchContext:
+def _launch_context(
+    avd: str,
+    port: int,
+    opts: AvdLaunchOptions,
+    meta: Mapping[str, Any] | None = None,
+) -> LaunchContext:
     directory = avd_dir(avd)
     if directory is None:
         home = avd_home() or Path("~/.android/avd").expanduser()
         directory = home / f"{avd}.avd"
-    return LaunchContext(avd=avd, avd_dir=directory, port=port, options=opts)
+    return LaunchContext(
+        avd=avd,
+        avd_dir=directory,
+        port=port,
+        options=opts,
+        meta=MappingProxyType(_json_copy(dict(meta or {}))),
+    )
 
 
 def _hook_args(value: Any) -> tuple[str, ...]:
@@ -1616,7 +1634,7 @@ def _spawn_launch(
             _forget_launch(serial)
     if previous is not None:
         _await_post_stop(previous)
-    context = _launch_context(avd, port, opts)
+    context = _launch_context(avd, port, opts, meta)
     hook_args = _run_pre_launch_hooks(context)
     process = None
     try:
