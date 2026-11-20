@@ -19,11 +19,22 @@ fixed order::
     3. root        ``adb root`` (by ``Device.root_kind``), ``setenforce 0``,
                    then the waiting session-start clock sync; the adb
                    transport is read here (after adb root's adbd restart)
-    4. hooks       :func:`register_device_prepared_hook` callbacks,
+    4. stages      blocking stages in their order, each with its own
+                   budget (:func:`register_prepare_stage`): a persona check
+                   (registered by its owner), then the identity profile
+                   (``IdentityService.ensure_applied``; nothing when identity
+                   mode is off). They run before the hooks: a framework
+                   restart would kill what the hooks set up. A failing
+                   stage is a warning; the step goes on.
+    5. hooks       :func:`register_device_prepared_hook` callbacks,
                    ``hook(serial, fresh_boot)`` (e.g. the proxy restore)
-    5. done        record the boot + transport, release waiters, fire
+    6. done        record the boot + transport, release waiters, fire
                    ``DeviceManager.on_device_prepared`` listeners (Frida,
                    app work)
+
+A new Sandroid launch of the serial (a new ``launch_id`` in
+:func:`sandroid.core.emulator.launch_record`) is always a new world, even
+with the same boot id (two boots from one snapshot).
 
 The listeners also get ``failed`` runs (and ``held`` after a snapshot
 load that dropped a re-attach), never ``aborted`` ones; an ``unchanged``
@@ -37,7 +48,8 @@ untouched. The step is off until a path that prepares devices turns it on
 check); everything else keeps today's behaviour.
 
 Public API: :func:`register_device_prepared_hook`,
-:func:`unregister_device_prepared_hook`, :func:`request_prepare`,
+:func:`unregister_device_prepared_hook`, :func:`register_prepare_stage`,
+:func:`unregister_prepare_stage`, :func:`request_prepare`,
 :func:`ensure_prepared`, :func:`wait_prepared`, :func:`is_preparing`,
 :func:`hold`, :func:`note_adb_server_restart`, :func:`note_world_recorded`,
 :func:`set_enabled`, :func:`is_enabled`.
@@ -61,8 +73,17 @@ logger = logging.getLogger(__name__)
 #: UI thread. ``fresh_boot`` is False for a re-attach in the same boot.
 DevicePreparedHook = Callable[[str, bool], None]
 
+#: ``stage(serial, fresh_boot, budget_s)``: a blocking stage before the
+#: hooks (worker thread, adb pinned to ``serial``). Returns ``None``, a
+#: one-line info text or a :class:`StageNote`; raising is a warning.
+PrepStage = Callable[[str, bool, float], Any]
+
 #: Seconds a hook may run before the step warns and goes on without it.
 HOOK_TIMEOUT_S = 60.0
+#: Budget of the built-in identity stage (a framework window included).
+IDENTITY_BUDGET_S = 240.0
+#: Seconds a stage may overrun its budget before the step goes on.
+STAGE_GRACE_S = 10.0
 #: Seconds the settle step waits for a booting device.
 SETTLE_TIMEOUT_S = 300.0
 #: Seconds the device must stay ready before the step starts.
@@ -140,6 +161,9 @@ class PrepResult:
         hook_errors: ``"<hook>: <error>"`` per failed / timed-out hook.
         duration_s: Wall time of the run.
         error: Why a ``failed`` run failed.
+        stage_notes: ``(stage, level, text)`` per stage that said
+            something; ``level`` is ``info`` or ``warning``.
+        launch_id: Sandroid's launch of the serial (``None``: not ours).
     """
 
     serial: str
@@ -154,6 +178,8 @@ class PrepResult:
     hook_errors: list[str] = field(default_factory=list)
     duration_s: float = 0.0
     error: str = ""
+    stage_notes: list[tuple[str, str, str]] = field(default_factory=list)
+    launch_id: str | None = None
 
     @property
     def prepared(self) -> bool:
@@ -173,37 +199,57 @@ class PrepResult:
 
     @property
     def has_problems(self) -> bool:
-        """The run failed, root or SELinux failed, or a hook failed."""
+        """The run failed, root or SELinux failed, a stage warned or a hook
+        failed.
+        """
         root_bad = self.root == "failed"
         selinux_bad = self.selinux_check is not None and not self.selinux_check.passed
         failed = self.kind == "failed"
-        return bool(self.hook_errors) or root_bad or selinux_bad or failed
+        warned = any(level == "warning" for _n, level, _t in self.stage_notes)
+        return bool(self.hook_errors) or root_bad or selinux_bad or failed or warned
 
     def summary(self) -> str:
         """One activity-log line, e.g. ``Prepared emulator-5554 (reboot):
-        root ✓ SELinux Permissive ✓ hooks 1/1, 3.2 s``.
+        root ok, SELinux Permissive, identity: 9 set, hooks 1/1, 3.2 s``.
         """
         if not self.ran:
             why = f" ({self.error})" if self.error else ""
             return f"Device {self.serial}: preparation {self.kind}{why}"
         label = _KIND_LABEL.get(self.kind, self.kind)
         root = {
-            "ok": "root ✓",
-            "failed": "root ✗",
+            "ok": "root ok",
+            "failed": "root failed",
             "su": "root via su",
             "none": "no root",
-        }.get(self.root, "root ?")
+        }.get(self.root, "root unknown")
         parts = [root]
         if self.selinux_check is not None:
-            mark = "✓" if self.selinux_check.passed else "✗"
-            parts.append(f"SELinux {self.selinux_mode or '?'} {mark}")
+            failed = "" if self.selinux_check.passed else " (failed)"
+            parts.append(f"SELinux {self.selinux_mode or 'unknown'}{failed}")
+        parts += [f"{name}: {text}" for name, _level, text in self.stage_notes]
         if self.hooks_total:
             good = self.hooks_total - len(self.hook_errors)
             parts.append(f"hooks {good}/{self.hooks_total}")
         return (
-            f"Prepared {self.serial} ({label}): {' '.join(parts)}, "
+            f"Prepared {self.serial} ({label}): {', '.join(parts)}, "
             f"{self.duration_s:.1f} s"
         )
+
+
+@dataclass(frozen=True)
+class StageNote:
+    """What a stage reports: ``level`` ``info`` or ``warning``, one line."""
+
+    level: str
+    text: str
+
+
+@dataclass(frozen=True)
+class _StageSpec:
+    name: str
+    fn: PrepStage
+    order: int
+    budget_s: float
 
 
 @dataclass
@@ -221,6 +267,8 @@ class _Record:
     #: Host monotonic time the boot was read: a Sandroid launch of the
     #: serial after it is a new world.
     recorded_at: float = field(default_factory=lambda: _host_now())
+    #: Sandroid's launch of the serial then (another one: a new world).
+    launch_id: str | None = None
 
 
 @dataclass
@@ -250,6 +298,9 @@ class _Serial:
     held: int = 0
     held_dropped: bool = False
     progress: list[Callable[[str], None]] = field(default_factory=list)
+    #: Host monotonic end of the blocking stage running now (its budget
+    #: plus grace): waiters wait at least that long.
+    stage_deadline: float | None = None
 
 
 _LOCK = threading.RLock()
@@ -257,6 +308,7 @@ _IDLE = threading.Condition(_LOCK)
 _STATES: dict[str, _Serial] = {}
 _HOOKS_LOCK = threading.Lock()
 _HOOKS: list[DevicePreparedHook] = []
+_STAGES: list[_StageSpec] = []
 #: Thread idents of prepare workers and their hook threads (their
 #: ``wait_prepared`` returns at once: no self-deadlock).
 _PREP_THREADS: set[int] = set()
@@ -268,7 +320,7 @@ _ENABLED = False
 
 
 def register_device_prepared_hook(hook: DevicePreparedHook) -> None:
-    """Run ``hook(serial, fresh_boot)`` in step 4 of every prepare run.
+    """Run ``hook(serial, fresh_boot)`` in step 5 of every prepare run.
 
     Thread-safe and idempotent (an equal hook is registered once). Each
     hook runs in its own thread with the adb target pinned to ``serial``;
@@ -288,6 +340,40 @@ def unregister_device_prepared_hook(hook: DevicePreparedHook) -> bool:
         except ValueError:
             return False
         return True
+
+
+#: Order of the built-in identity stage (a persona check goes before it).
+IDENTITY_STAGE_ORDER = 20
+
+
+def register_prepare_stage(
+    name: str, stage: PrepStage, *, order: int, budget_s: float
+) -> None:
+    """Run ``stage(serial, fresh_boot, budget_s)`` before the hooks.
+
+    Blocking stages run in ``order`` (lowest first; the identity stage is
+    :data:`IDENTITY_STAGE_ORDER`), each in its own thread with the adb
+    target pinned, for at most ``budget_s`` + :data:`STAGE_GRACE_S`; the
+    app-start / Frida gates wait for them. A stage returns ``None``, an info
+    text or a :class:`StageNote`; an exception or an overrun is a warning in
+    the result, the log and the timeline, and the step goes on. Registering
+    a name again replaces it.
+    """
+    if not callable(stage):
+        raise TypeError("stage must be callable")
+    spec = _StageSpec(name, stage, int(order), float(budget_s))
+    with _HOOKS_LOCK:
+        _STAGES[:] = [s for s in _STAGES if s.name != name]
+        _STAGES.append(spec)
+        _STAGES.sort(key=lambda s: s.order)
+
+
+def unregister_prepare_stage(name: str) -> bool:
+    """Remove the stage *name*; False when there was none."""
+    with _HOOKS_LOCK:
+        before = len(_STAGES)
+        _STAGES[:] = [s for s in _STAGES if s.name != name]
+        return len(_STAGES) != before
 
 
 # ---------------------------------------------------------------- control
@@ -549,10 +635,13 @@ def wait_prepared(serial: str | None = None, timeout: float = GATE_TIMEOUT_S) ->
     deadline = time.monotonic() + max(0.0, timeout)
     with _IDLE:
         while state.running and _STATES.get(serial) is state:
-            remaining = deadline - time.monotonic()
+            # A blocking stage (identity) may take longer than the gate:
+            # wait until its own budget ran out.
+            until = max(deadline, state.stage_deadline or 0.0)
+            remaining = until - time.monotonic()
             if remaining <= 0:
                 return False
-            _IDLE.wait(remaining)
+            _IDLE.wait(min(remaining, 1.0))
     return True
 
 
@@ -822,9 +911,10 @@ def _run(
     token, uptime, boot_start, read_at = _read_boot(serial)
     transport, _ready = _read_transport(serial)
     launch_at = _launch_started_at(serial)
+    launch_id = _launch_id(serial)
     with _LOCK:
         record = state.record
-    kind = _classify(record, token, uptime, transport, boot_start, launch_at)
+    kind = _classify(record, token, uptime, transport, boot_start, launch_at, launch_id)
     if kind == "unchanged" and record is not None:
         if not alive():
             return aborted()
@@ -843,6 +933,7 @@ def _run(
             root=record.root,
             root_check=record.root_check,
             selinux_check=record.selinux_check,
+            launch_id=launch_id,
         )
         _finish(serial, state, manager, result, t0, deliver=deliver)
         return result
@@ -853,7 +944,17 @@ def _run(
             return aborted()
     if kind == "new-world":
         same_boot_id = record is not None and token == record.token
-        _world_change(serial, state, token, boot_start, reason, launch_at, same_boot_id)
+        _world_change(
+            serial,
+            state,
+            token,
+            boot_start,
+            reason,
+            launch_at,
+            same_boot_id,
+            launch_id,
+        )
+    _note_boot(serial, token, uptime)
     if not alive():
         return aborted()
 
@@ -882,6 +983,10 @@ def _run(
     # then a real one and causes exactly one more run.
     transport, _ready = _read_transport(serial)
 
+    notes = _run_stages(serial, state, fresh_boot, alive)
+    if not alive():
+        return aborted()
+
     _stage(state, "hooks")
     total, errors = _run_hooks(serial, fresh_boot)
     if not alive():
@@ -898,6 +1003,7 @@ def _run(
             selinux_check,
             boot_start=boot_start,
             recorded_at=read_at,
+            launch_id=launch_id,
         )
         if kind == "reattach":
             state.last_reattach = time.monotonic()
@@ -912,6 +1018,8 @@ def _run(
         selinux_check=selinux_check,
         hooks_total=total,
         hook_errors=errors,
+        stage_notes=notes,
+        launch_id=launch_id,
     )
     _finish(serial, state, manager, result, t0)
     return result
@@ -977,12 +1085,14 @@ def _classify(
     transport: str,
     boot_start: float | None = None,
     launch_at: float | None = None,
+    launch_id: str | None = None,
 ) -> str:
     """``first`` / ``new-world`` / ``reattach`` / ``unchanged``.
 
-    A new world when ANY of: the boot token changed (a reboot); Sandroid
-    launched this serial after the record was read (a restart from the
-    Devices screen / AI: definitive); the uptime went back; or the boot
+    A new world when ANY of: the boot token changed (a reboot); another
+    Sandroid launch of this serial than the recorded one (``launch_id``),
+    or one after the record was read (a restart from the Devices screen /
+    AI: definitive); the uptime went back; or the boot
     start moved later than :data:`BOOT_START_TOLERANCE_S` -- the uptime
     is behind ``recorded uptime + host time since``, as after a quickboot
     from a snapshot, which keeps the boot_id and the snapshot's uptime.
@@ -990,6 +1100,8 @@ def _classify(
     if record is None or token is None:
         return "first"  # new, or the boot cannot be told: fresh, no barrier
     if record.token is not None and token != record.token:
+        return "new-world"
+    if launch_id is not None and launch_id != record.launch_id:
         return "new-world"
     if launch_at is not None and launch_at > record.recorded_at:
         return "new-world"
@@ -1040,6 +1152,28 @@ def _launch_started_at(serial: str) -> float | None:
     return float(started) if isinstance(started, (int, float)) else None
 
 
+def _launch_id(serial: str) -> str | None:
+    """``launch_id`` of Sandroid's launch of ``serial`` (None: not ours)."""
+    try:
+        from sandroid.core import emulator
+
+        launch = emulator.get_launch(serial)
+    except Exception:
+        return None
+    value = getattr(launch, "launch_id", None) if launch is not None else None
+    return value if isinstance(value, str) else None
+
+
+def _note_boot(serial: str, token: str | None, uptime: float | None) -> None:
+    """Keep the boot id + uptime in Sandroid's launch record (first wins)."""
+    try:
+        from sandroid.core import emulator
+
+        emulator.note_boot(serial, token, uptime)
+    except Exception:
+        logger.debug("device prep: launch record boot failed", exc_info=True)
+
+
 def _world_change(
     serial: str,
     state: _Serial,
@@ -1048,6 +1182,7 @@ def _world_change(
     reason: str,
     launch_at: float | None = None,
     same_boot_id: bool = False,
+    launch_id: str | None = None,
 ) -> None:
     """The device rebooted: a new world on the session timeline (it starts
     a new device-clock epoch), once per world -- by the same rules as
@@ -1073,10 +1208,9 @@ def _world_change(
         state.world_token = token
         state.world_boot_start = boot_start
         state.world_launch_at = launch_at
+    _identity_new_world(serial)
     summary = (
-        f"⟲ {serial} restarted from a snapshot"
-        if same_boot_id
-        else f"⟲ {serial} rebooted"
+        f"{serial} restarted from a snapshot" if same_boot_id else f"{serial} rebooted"
     )
     try:
         from sandroid.core.timeline import get_timeline
@@ -1092,6 +1226,7 @@ def _world_change(
                 "trigger": reason,
                 "same_boot_id": same_boot_id,
                 "sandroid_launch": launch_at is not None,
+                "launch_id": launch_id,
             },
         )
     except Exception:
@@ -1294,13 +1429,150 @@ def _run_hooks(serial: str, fresh_boot: bool) -> tuple[int, list[str]]:
     return len(hooks), errors
 
 
+def _identity_new_world(serial: str) -> None:
+    """A new world (once per world): the identity service reads the device
+    again and allows a new SIM read (as after a snapshot load).
+    """
+    try:
+        from sandroid.services.identity import get_identity_service
+
+        service = get_identity_service()
+        service.forget(serial, restored=True)
+        service.sim_launch_changed(serial)
+    except Exception:
+        logger.debug("device prep: identity reset failed", exc_info=True)
+
+
+def _as_note(value: Any) -> StageNote | None:
+    if value is None:
+        return None
+    if isinstance(value, StageNote):
+        return value
+    return StageNote("info", str(value))
+
+
+def _run_stages(
+    serial: str, state: _Serial, fresh_boot: bool, alive: Callable[[], bool]
+) -> list[tuple[str, str, str]]:
+    """Step 4: the blocking stages, in order (see :func:`register_prepare_stage`)."""
+    from sandroid.core.adb import Adb
+
+    with _HOOKS_LOCK:
+        stages = list(_STAGES)
+    notes: list[tuple[str, str, str]] = []
+    for spec in stages:
+        if not alive():
+            break
+        _stage(state, spec.name)
+        box: dict[str, Any] = {}
+
+        def target(spec: _StageSpec = spec, box: dict = box) -> None:
+            ident = threading.get_ident()
+            with _LOCK:
+                _PREP_THREADS.add(ident)
+            try:
+                with Adb.targeting(serial):
+                    box["value"] = spec.fn(serial, fresh_boot, spec.budget_s)
+            except (Exception, SystemExit) as e:
+                box["error"] = str(e) or type(e).__name__
+                logger.debug(f"prepare stage {spec.name} raised", exc_info=True)
+            finally:
+                with _LOCK:
+                    _PREP_THREADS.discard(ident)
+
+        limit = spec.budget_s + STAGE_GRACE_S
+        with _LOCK:
+            state.stage_deadline = time.monotonic() + limit
+        thread = threading.Thread(
+            target=target, name=f"device-prep-{spec.name}-{serial}", daemon=True
+        )
+        thread.start()
+        thread.join(limit)
+        with _LOCK:
+            state.stage_deadline = None
+        if thread.is_alive():
+            note = StageNote("warning", f"still running after {limit:g} s")
+        elif "error" in box:
+            note = StageNote("warning", f"failed: {box['error']}")
+        else:
+            note = _as_note(box.get("value"))
+        if note is not None:
+            notes.append((spec.name, note.level, note.text))
+            _stage_line(serial, spec.name, note)
+    return notes
+
+
+def _stage_line(serial: str, name: str, note: StageNote) -> None:
+    """A timeline line for what a stage reported (never raises)."""
+    if note.level == "warning":
+        logger.warning(f"Preparing {serial}: {name}: {note.text}")
+    try:
+        from sandroid.core.timeline import get_timeline
+
+        get_timeline().emit(
+            "device",
+            "prep_stage",
+            summary=f"{name}: {note.text}",
+            data={"stage": name, "level": note.level, "text": note.text},
+            dev=serial,
+            level="warn" if note.level == "warning" else "info",
+        )
+    except Exception:
+        logger.debug("timeline: prepare stage line failed", exc_info=True)
+
+
+def _identity_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
+    """The identity profile (``IdentityService.ensure_applied``).
+
+    Nothing when identity mode is off. Under the restart policy ``ask`` /
+    ``never`` framework values wait for the first app start (info, not a
+    warning); a value that failed or did not fit the budget is a warning.
+    """
+    from sandroid.services.identity import NEEDS_RESTART, get_identity_service
+
+    plan = get_identity_service().ensure_applied(serial, budget_s=budget_s)
+    if plan is None:
+        return None
+    counts: dict[str, int] = {}
+    waiting = 0
+    for info in getattr(plan, "infos", {}).values():
+        status = getattr(info, "status", "")
+        if status == "pending" and getattr(info, "reason", "") == NEEDS_RESTART:
+            waiting += 1
+            continue
+        counts[status] = counts.get(status, 0) + 1
+    done = counts.pop("applied", 0) + counts.pop("verified", 0)
+    counts.pop("skipped", None)
+    counts.pop("hook-only", None)
+    parts = [f"{done} set"]
+    if waiting:
+        parts.append(f"{waiting} wait for a restart (asked at app start)")
+    problems = {k: v for k, v in counts.items() if v}
+    parts += [f"{v} {k}" for k, v in sorted(problems.items())]
+    level = "warning" if problems else "info"
+    return StageNote(level, ", ".join(parts))
+
+
+register_prepare_stage(
+    "identity",
+    _identity_stage,
+    order=IDENTITY_STAGE_ORDER,
+    budget_s=IDENTITY_BUDGET_S,
+)
+
+
 __all__ = [
     "ENSURE_TIMEOUT_S",
     "GATE_TIMEOUT_S",
     "HOOK_TIMEOUT_S",
+    "IDENTITY_BUDGET_S",
+    "IDENTITY_STAGE_ORDER",
     "LOSS_GRACE_S",
+    "STAGE_GRACE_S",
     "DevicePreparedHook",
     "PrepResult",
+    "PrepStage",
+    "StageNote",
     "connect_clock_only",
     "ensure_prepared",
     "gate",
@@ -1314,9 +1586,11 @@ __all__ = [
     "prepared_transport",
     "preparing_stage",
     "register_device_prepared_hook",
+    "register_prepare_stage",
     "request_prepare",
     "reset",
     "set_enabled",
     "unregister_device_prepared_hook",
+    "unregister_prepare_stage",
     "wait_prepared",
 ]

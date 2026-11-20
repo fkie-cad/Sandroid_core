@@ -40,6 +40,7 @@ restarts an emulator goes through this module:
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import platform
@@ -49,6 +50,7 @@ import socket
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -948,12 +950,16 @@ class LaunchContext:
         port: Console port of the launch (the serial is
             ``emulator-<port>``); always set for Sandroid's launches.
         options: The launch options, without arguments added by hooks.
+        record: What a pre-launch hook wants in the launch record
+            (:func:`launch_record`): it adds ``record["<key>"] = <JSON
+            value>`` (e.g. ``identity_sim``); shown under ``hooks``.
     """
 
     avd: str
     avd_dir: Path
     port: int | None
     options: AvdLaunchOptions
+    record: dict[str, Any] = field(default_factory=dict, compare=False)
 
 
 #: Called before an emulator process starts; returns extra emulator
@@ -1139,6 +1145,14 @@ class EmulatorLaunch:
             (they run at most once; only after its process exited).
         post_stop_finished: Set once its post-stop hooks have finished
             (also when one raised); wait on it before patching its AVD again.
+        launch_id: Unique per emulator process Sandroid started: a new one
+            is a new world, even when the boot id is the same (two boots
+            from one snapshot).
+        meta: What the caller passed to :func:`launch_avd` (``meta=``, e.g.
+            the persona).
+        info: Host facts read at the launch (see :func:`launch_record`).
+        boot_id: The guest boot id once the device was first prepared.
+        first_uptime: The guest uptime (s) then.
     """
 
     avd: str
@@ -1149,6 +1163,11 @@ class EmulatorLaunch:
     log_path: Path | None
     started_at: float
     ready: bool = False
+    launch_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    meta: dict[str, Any] = field(default_factory=dict, compare=False)
+    info: dict[str, Any] = field(default_factory=dict, compare=False)
+    boot_id: str | None = None
+    first_uptime: float | None = None
     cancel: threading.Event = field(
         default_factory=threading.Event, compare=False, repr=False
     )
@@ -1435,6 +1454,7 @@ def launch_avd(
     *,
     port: int | None = None,
     adb: Any = None,
+    meta: dict[str, Any] | None = None,
 ) -> EmulatorLaunch:
     """Start AVD *avd* on an explicit console port (blocks ~3 s).
 
@@ -1453,6 +1473,8 @@ def launch_avd(
             (the pinned serial's port, else the AVD's last port, else the
             first free one).
         adb: adb interface (default: the global ``Adb``).
+        meta: JSON values for the launch record (:func:`launch_record`),
+            e.g. ``{"persona_id": ..., "persona_fp": ...}``.
 
     Returns:
         The registered :class:`EmulatorLaunch` (``serial`` is
@@ -1504,24 +1526,30 @@ def launch_avd(
         # Another thread (a poll's reap) may still be restoring an earlier
         # launch: never patch the AVD again before that has finished.
         _await_avd_post_stops(avd)
-        launch = _launch_reserved(avd, opts, binary, _adb(adb), port)
+        launch = _launch_reserved(avd, opts, binary, _adb(adb), port, meta)
     finally:
         with _LAUNCH_LOCK:
             _STARTING_AVDS.discard(avd)
     # Outside the "being started" window: a restart may follow at once.
     _remember_port(avd, launch.port, launch.hook_args)
+    _launch_line(launch)
     return launch
 
 
 def _launch_reserved(
-    avd: str, opts: AvdLaunchOptions, binary: Path, adb: Any, port: int | None
+    avd: str,
+    opts: AvdLaunchOptions,
+    binary: Path,
+    adb: Any,
+    port: int | None,
+    meta: dict[str, Any] | None = None,
 ) -> EmulatorLaunch:
     """:func:`launch_avd` once *avd* is marked as starting."""
     taken = _listed_ports(adb)
     chosen, reason = _reserve_port(taken, port, avd)
     try:
         for attempt in (1, 2):
-            launch = _spawn_launch(binary, avd, chosen, opts)
+            launch = _spawn_launch(binary, avd, chosen, opts, meta)
             ok, error = check_emulator_startup(launch.process, launch.log_path)
             if ok:
                 logger.info(
@@ -1561,7 +1589,11 @@ def _launch_reserved(
 
 
 def _spawn_launch(
-    binary: Path, avd: str, port: int, opts: AvdLaunchOptions
+    binary: Path,
+    avd: str,
+    port: int,
+    opts: AvdLaunchOptions,
+    meta: dict[str, Any] | None = None,
 ) -> EmulatorLaunch:
     """Run the pre-launch hooks, start the process, register the launch.
 
@@ -1601,6 +1633,8 @@ def _spawn_launch(
             started_at=time.monotonic(),
             context=context,
             hook_args=hook_args,
+            meta=dict(meta or {}),
+            info=_launch_info(binary, context.avd_dir, command),
         )
         with _LAUNCH_LOCK:
             displaced = _LAUNCHES.get(serial)
@@ -1615,6 +1649,108 @@ def _spawn_launch(
             _terminate(process)
         _run_post_stop_hooks(context)
         raise
+
+
+def _pkg_revision(directory: Path | None) -> str:
+    """``Pkg.Revision`` of an SDK package directory ("" unknown)."""
+    if directory is None:
+        return ""
+    return _read_ini(directory / "source.properties").get("Pkg.Revision", "")
+
+
+def _launch_info(binary: Path, avd_folder: Path, command: list[str]) -> dict:
+    """Host facts of one launch for its record (never raises)."""
+    info: dict[str, Any] = {"command": [str(c) for c in command]}
+    try:
+        info["emulator_version"] = _pkg_revision(Path(binary).parent)
+        config_path = avd_folder / "config.ini"
+        data = config_path.read_bytes() if config_path.is_file() else b""
+        info["config_sha256"] = hashlib.sha256(data).hexdigest()[:16] if data else ""
+        sysdir = _read_ini(config_path).get("image.sysdir.1", "")
+        info["system_image"] = sysdir
+        root = sdk_root()
+        info["system_image_revision"] = (
+            _pkg_revision(root / sysdir) if root is not None and sysdir else ""
+        )
+    except Exception:
+        logger.debug("launch record: host facts failed", exc_info=True)
+    return info
+
+
+def launch_record(serial: str) -> dict[str, Any] | None:
+    """The record of Sandroid's live launch of *serial* (``None``: none).
+
+    A JSON-ready dict: ``launch_id`` (new per emulator process; a new one
+    is a new world), ``avd``, ``serial``, ``port``, ``started`` (epoch s),
+    ``options``, ``command``, ``emulator_version``, ``system_image`` (+
+    ``_revision``), ``config_sha256``, ``meta`` (what :func:`launch_avd`
+    got), ``hooks`` (what pre-launch hooks put into
+    ``LaunchContext.record``), and once the device was first prepared
+    ``boot_id`` and ``first_uptime``.
+    """
+    launch = get_launch(serial)
+    if launch is None:
+        return None
+    return _record_dict(launch)
+
+
+def _record_dict(launch: EmulatorLaunch) -> dict[str, Any]:
+    opts = launch.options
+    started = time.time() - (time.monotonic() - launch.started_at)
+    record: dict[str, Any] = {
+        "launch_id": launch.launch_id,
+        "avd": launch.avd,
+        "serial": launch.serial,
+        "port": launch.port,
+        "started": round(started, 3),
+        "options": {
+            "headless": opts.headless,
+            "boot": opts.boot,
+            "snapshot": opts.snapshot,
+            "save_on_exit": opts.save_on_exit,
+            "wipe_once": opts.wipe_once,
+            "extra_args": list(opts.extra_args),
+        },
+        "meta": dict(launch.meta),
+        "hooks": dict(launch.context.record) if launch.context else {},
+        "boot_id": launch.boot_id,
+        "first_uptime": launch.first_uptime,
+    }
+    record.update(launch.info)
+    return record
+
+
+def note_boot(serial: str, boot_id: str | None, uptime: float | None) -> None:
+    """The device of our launch *serial* was first prepared (device_prep):
+    keep its boot id and uptime in the launch record (first call wins).
+    """
+    with _LAUNCH_LOCK:
+        launch = _LAUNCHES.get(serial)
+        if launch is None or launch.boot_id is not None:
+            return
+        launch.boot_id = boot_id
+        launch.first_uptime = uptime
+
+
+def _launch_line(launch: EmulatorLaunch) -> None:
+    """A session-timeline line for the launch, with its record (never raises)."""
+    try:
+        from sandroid.core.timeline import get_timeline
+
+        record = _record_dict(launch)
+        persona = record["meta"].get("persona_id")
+        get_timeline().emit(
+            "emulator",
+            "launch",
+            summary=(
+                f"Emulator '{launch.avd}' started as {launch.serial}"
+                + (f" (persona {persona})" if persona else "")
+            ),
+            data=record,
+            dev=launch.serial,
+        )
+    except Exception:
+        logger.debug("timeline: launch line failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2033,7 +2169,9 @@ def restart_emulator(
                 f"{serial} stopped; start the AVD again once it is free"
             )
         time.sleep(0.5)
-    return launch_avd(avd, options, port=port, adb=adb)
+    # The same persona etc. as before: a restart keeps the caller's meta.
+    meta = dict(old.meta) if old is not None else None
+    return launch_avd(avd, options, port=port, adb=adb, meta=meta)
 
 
 def _find_running_avd(avd: str, adb: Any) -> str | None:
@@ -2329,10 +2467,12 @@ __all__ = [
     "free_console_port",
     "get_launch",
     "launch_avd",
+    "launch_record",
     "launches",
     "list_avds",
     "load_launch_prefs",
     "looks_like_sdk",
+    "note_boot",
     "options_from_cmdline",
     "options_from_prefs",
     "pinned_serial",

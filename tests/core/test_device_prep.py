@@ -190,7 +190,7 @@ def test_first_attach_runs_every_step_in_order(rig):
     assert result.boot_token == BOOT_A
     # The record is taken after adb root (its adbd restart = transport 2).
     assert device_prep.prepared_transport(SERIAL) == "2"
-    assert "Prepared emulator-5554 (attach): root ✓ SELinux Permissive ✓" in (
+    assert "Prepared emulator-5554 (attach): root ok, SELinux Permissive" in (
         result.summary()
     )
 
@@ -1570,3 +1570,167 @@ def test_prepare_device_without_an_active_device_turns_the_step_on(rig):
     rig.manager._active_device = None
     assert initializer._run_device_prep() is None
     assert device_prep.is_enabled()
+
+
+# ------------------------------------------------- blocking stages (identity)
+
+
+class _Identity:
+    """IdentityService double: records forget / SIM resets and applies."""
+
+    def __init__(self, plan=None, error=None) -> None:
+        self.plan = plan
+        self.error = error
+        self.calls: list = []
+
+    def ensure_applied(self, serial, budget_s=240.0):
+        self.calls.append(("ensure", serial, budget_s))
+        if self.error:
+            raise self.error
+        return self.plan
+
+    def forget(self, serial=None, *, restored=False):
+        self.calls.append(("forget", serial, restored))
+
+    def sim_launch_changed(self, serial=None):
+        self.calls.append(("sim", serial))
+
+
+def _plan(**statuses):
+    from sandroid.services.identity import NEEDS_RESTART
+
+    infos = {}
+    for i, (status, n) in enumerate(statuses.items()):
+        for j in range(n):
+            reason = NEEDS_RESTART if status == "waiting" else ""
+            infos[f"v{i}{j}"] = SimpleNamespace(
+                status="pending" if status == "waiting" else status, reason=reason
+            )
+    return SimpleNamespace(infos=infos)
+
+
+@pytest.fixture
+def identity(monkeypatch):
+    from sandroid.services import identity as identity_mod
+
+    fake = _Identity()
+    monkeypatch.setattr(identity_mod, "get_identity_service", lambda: fake)
+    return fake
+
+
+def test_stages_run_in_order_after_selinux_and_before_the_hooks(rig, identity):
+    identity.plan = _plan(applied=2, verified=1, waiting=1)
+    device_prep.register_device_prepared_hook(_hook(rig.fake))
+
+    def persona(serial, fresh_boot, budget_s):
+        rig.fake.events.append(("persona", serial, fresh_boot, budget_s))
+        return "ready"
+
+    device_prep.register_prepare_stage("persona", persona, order=10, budget_s=5)
+    try:
+        _run()
+    finally:
+        device_prep.unregister_prepare_stage("persona")
+    events = rig.fake.events
+    sync = events.index(("clock-sync", device_prep.CLOCK_SYNC_WAIT_S))
+    assert events[sync + 1] == ("persona", SERIAL, True, 5.0)
+    assert events[sync + 2] == ("hook", SERIAL, True)
+    assert identity.calls == [("ensure", SERIAL, device_prep.IDENTITY_BUDGET_S)]
+    (result,) = rig.results
+    assert result.stage_notes == [
+        ("persona", "info", "ready"),
+        ("identity", "info", "3 set, 1 wait for a restart (asked at app start)"),
+    ]
+    assert not result.has_problems
+    assert "identity: 3 set" in result.summary()
+
+
+def test_identity_off_says_nothing(rig, identity):
+    identity.plan = None
+    _run()
+    (result,) = rig.results
+    assert result.stage_notes == []
+
+
+def test_a_failing_stage_is_a_warning_and_the_step_goes_on(rig, identity):
+    identity.error = RuntimeError("profile unusable")
+    device_prep.register_device_prepared_hook(_hook(rig.fake))
+    _run()
+    assert ("hook", SERIAL, True) in rig.fake.events
+    (result,) = rig.results
+    assert result.kind == "first"
+    assert result.stage_notes == [("identity", "warning", "failed: profile unusable")]
+    assert result.has_problems
+
+
+def test_failed_identity_values_are_a_warning(rig, identity):
+    identity.plan = _plan(applied=1, failed=2)
+    _run()
+    (result,) = rig.results
+    assert result.stage_notes == [("identity", "warning", "1 set, 2 failed")]
+
+
+def test_a_stage_over_its_budget_is_a_warning(rig, identity, monkeypatch):
+    monkeypatch.setattr(device_prep, "STAGE_GRACE_S", 0.0)
+    release = threading.Event()
+
+    def slow(serial, fresh_boot, budget_s):
+        release.wait(5)
+
+    device_prep.register_prepare_stage("slow", slow, order=1, budget_s=0.05)
+    try:
+        _run()
+    finally:
+        release.set()
+        device_prep.unregister_prepare_stage("slow")
+    (result,) = rig.results
+    assert result.stage_notes[0] == ("slow", "warning", "still running after 0.05 s")
+
+
+def test_waiters_wait_for_a_long_stage_past_their_timeout(rig, identity):
+    started = threading.Event()
+    release = threading.Event()
+
+    def long_stage(serial, fresh_boot, budget_s):
+        started.set()
+        release.wait(5)
+
+    device_prep.register_prepare_stage("long", long_stage, order=1, budget_s=30)
+    try:
+        assert device_prep.request_prepare(SERIAL, "attach")
+        assert started.wait(5)
+        timer = threading.Timer(0.3, release.set)
+        timer.start()
+        # The gate's own timeout is shorter than the stage: it waits on.
+        assert device_prep.wait_prepared(SERIAL, 0.05)
+        assert release.is_set()
+    finally:
+        release.set()
+        device_prep.unregister_prepare_stage("long")
+
+
+def test_a_new_world_resets_the_identity_service_once(rig, identity):
+    _run()
+    assert ("forget", SERIAL, True) not in identity.calls
+    rig.fake.boot_id = BOOT_B
+    _run("transport")
+    resets = [c for c in identity.calls if c[0] in ("forget", "sim")]
+    assert resets == [("forget", SERIAL, True), ("sim", SERIAL)]
+
+
+def test_a_new_launch_id_is_a_new_world_even_with_the_same_boot(
+    rig, identity, monkeypatch
+):
+    from sandroid.core import emulator
+
+    launch = SimpleNamespace(launch_id="aaa", started_at=-1e9)
+    monkeypatch.setattr(emulator, "get_launch", lambda serial: launch)
+    monkeypatch.setattr(emulator, "note_boot", lambda *a: None)
+    _run()
+    _run("transport")
+    assert device_prep.last_result(SERIAL).kind == "unchanged"
+    launch.launch_id = "bbb"  # same boot id, same uptime: another launch
+    _run("transport")
+    result = device_prep.last_result(SERIAL)
+    assert result.kind == "new-world"
+    assert result.launch_id == "bbb"

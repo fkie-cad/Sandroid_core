@@ -1735,3 +1735,54 @@ def test_exit_reap_finishes_dead_launches_and_leaves_running_ones(env):
     assert running.alive
     assert running.process.signals == []
     assert not running.post_stop_done
+
+
+# -- launch record ------------------------------------------------------------
+
+
+def test_each_launch_has_its_own_record(env):
+    def hook(ctx):
+        ctx.record["identity_sim"] = {"profile": "p1"}
+        return ()
+
+    emu.register_pre_launch_hook(hook)
+    first = emu.launch_avd(
+        "Pixel", AvdLaunchOptions(boot="cold"), port=5560, meta={"persona_id": "x"}
+    )
+    record = emu.launch_record("emulator-5560")
+    assert record["launch_id"] == first.launch_id
+    assert (record["avd"], record["serial"], record["port"]) == (
+        "Pixel",
+        "emulator-5560",
+        5560,
+    )
+    assert record["options"]["boot"] == "cold"
+    assert record["meta"] == {"persona_id": "x"}
+    assert record["hooks"] == {"identity_sim": {"profile": "p1"}}
+    assert record["command"][:3] == ["/sdk/emulator", "-avd", "Pixel"]
+    assert record["boot_id"] is None
+    emu.note_boot("emulator-5560", "boot-1", 12.5)
+    emu.note_boot("emulator-5560", "boot-2", 99.0)  # first wins
+    record = emu.launch_record("emulator-5560")
+    assert (record["boot_id"], record["first_uptime"]) == ("boot-1", 12.5)
+    assert emu.launch_record("emulator-5562") is None
+
+
+def test_a_restart_is_a_new_launch_with_the_same_meta(env):
+    first = emu.launch_avd("Pixel", port=5560, meta={"persona_id": "x"})
+    env["adb"].add(first.serial, avd="Pixel")
+    second = emu.restart_emulator(first.serial)
+    assert second.launch_id != first.launch_id
+    assert second.meta == {"persona_id": "x"}
+    assert emu.launch_record(second.serial)["boot_id"] is None
+
+
+def test_a_launch_is_a_timeline_line_with_its_record(env):
+    from sandroid.core import timeline
+
+    with timeline.capture() as lines:
+        launch = emu.launch_avd("Pixel", port=5560, meta={"persona_id": "x"})
+    (line,) = [x for x in lines if (x["src"], x["kind"]) == ("emulator", "launch")]
+    assert line["dev"] == "emulator-5560"
+    assert line["data"]["launch_id"] == launch.launch_id
+    assert "persona x" in line["summary"]

@@ -285,6 +285,40 @@ with the emulator backend instead of wrapping each launch path:
   ``unregister_pre_launch_hook`` / ``unregister_post_stop_hook``
   remove them.
 
+Launch record
+~~~~~~~~~~~~~
+
+Every emulator Sandroid starts has a record,
+``emulator.launch_record(serial)`` (``None`` for one it did not start): a new
+``launch_id`` per process, the AVD, port, options, full command, emulator
+and system-image revision, a ``config.ini`` hash, ``meta`` (what the caller
+passed: ``launch_avd(..., meta={"persona_id": ..., "persona_fp": ...})``;
+a restart keeps it), ``hooks`` (what pre-launch hooks put into
+``LaunchContext.record``, e.g. ``ctx.record["identity_sim"] = {...}``) and,
+once the device was first prepared, ``boot_id`` and ``first_uptime``. The
+launch is a timeline line (``emulator``/``launch``) carrying the record.
+
+The device-prepared step treats a new ``launch_id`` as a new world even when
+the boot id is the same (two boots from one snapshot); it then resets the
+identity service once (``forget`` + ``sim_launch_changed``).
+
+Blocking prepare stages
+~~~~~~~~~~~~~~~~~~~~~~~
+
+``device_prep.register_prepare_stage(name, stage, order=..., budget_s=...)``
+runs ``stage(serial, fresh_boot, budget_s)`` on every prepare run, after
+root / SELinux / the clock sync and before the device-prepared hooks (a
+framework restart would undo what the hooks set up). Stages run in
+``order``; the built-in ``identity`` stage
+(``IdentityService.ensure_applied``, ``IDENTITY_BUDGET_S`` = 240 s, nothing
+when identity mode is off) has ``IDENTITY_STAGE_ORDER`` = 20, so a persona
+check registers below it. A stage returns ``None``, an info text or a
+``StageNote(level, text)``; an exception or running past its budget plus
+``STAGE_GRACE_S`` is a warning (``PrepResult.stage_notes``, the activity
+log, a ``device``/``prep_stage`` timeline line) and the step goes on. App
+starts and Frida wait for a running stage up to its own budget, even past
+the usual gate timeout.
+
 File Operations
 ---------------
 
