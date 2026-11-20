@@ -1590,8 +1590,9 @@ class PrivacyScanService:
 
         Its id when that is still active; else, for an id that became
         per-app (``android_id`` -> ``android_id@<pkg>``), the active marker
-        of the package its label names (``"Android ID (<pkg>)"``), else the
-        one with the same label, else the only one of that id.
+        of the package its label names (``"Android ID (<pkg>)"``; none when
+        that package has no active marker); for a label without a package,
+        the one with the same label, else the only one of that id.
         """
         digest = self._digest_of.get(marker_id)
         if digest is not None:
@@ -1603,8 +1604,11 @@ class PrivacyScanService:
         ids = [mid for mid in self._digest_of if mid.startswith(prefix)]
         pkg = _label_package(label)
         pick = None
-        if pkg and prefix + pkg in self._digest_of:
-            pick = prefix + pkg
+        if pkg:
+            # The label names its app: that app's marker or none (never
+            # another app's Android ID).
+            if prefix + pkg in self._digest_of:
+                pick = prefix + pkg
         else:
             same = [mid for mid in ids if self._markers[mid].label == label]
             if len(same) == 1:

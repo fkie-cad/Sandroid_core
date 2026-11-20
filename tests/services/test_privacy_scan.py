@@ -967,6 +967,42 @@ def test_legacy_plain_android_id_maps_to_its_per_app_marker(
         svc.close()
 
 
+def test_legacy_android_id_never_counts_for_another_app(folder, flow_dir):
+    """An older plain ``android_id`` hit whose label names an app with no
+    active marker maps to nothing, not to the one other app's Android ID.
+    """
+    other = "B" * 16
+    old = Marker("android_id", SSAID, kind="hex_id", label="Android ID (com.a)")
+    only_b = Marker(
+        "android_id@com.b", other, kind="hex_id", label="Android ID (com.b)"
+    )
+    _write_flow(flow_dir, _rec(1, path=f"/c?ssaid={SSAID}"), _detail("f1", req=b"{}"))
+    first = ps.PrivacyScanService(
+        folder_fn=lambda: folder, flow_dir_fn=lambda: flow_dir
+    )
+    try:
+        first.set_markers(FP, [*MARKERS, old])
+        assert first.flush()
+    finally:
+        first.close()
+    _make_legacy(folder)
+    svc = ps.PrivacyScanService(folder_fn=lambda: folder, flow_dir_fn=lambda: flow_dir)
+    try:
+        svc.set_markers(FP, [*MARKERS, only_b])
+        assert svc.flush()
+        assert svc.summary().values_found == 0
+        with timeline.capture() as lines:
+            rec = _rec(2, path=f"/c?ssaid={other}")
+            _write_flow(flow_dir, rec, _detail("f2", req=b"{}"))
+            svc.submit_flow(rec, flow_dir, 2)
+            assert svc.flush()
+        assert [h.marker_id for h in svc.hits_for_flow("f2")] == [only_b.id]
+        assert svc.hits_for_flow("f2")[0].new
+        assert len(_privacy_lines(lines)) == 1
+    finally:
+        svc.close()
+
+
 def test_markers_sharing_a_value_keep_their_ids(svc, flow_dir, monkeypatch):
     """Two markers with the same value each get their hits in a delta pass."""
     _ssaid_flow(flow_dir, 1)
