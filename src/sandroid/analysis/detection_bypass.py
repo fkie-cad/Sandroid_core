@@ -2611,6 +2611,9 @@ class BypassService:
         # Categories the in-flight set_active (under _mutate_lock) turns on;
         # a claim on any of them waits for it, unrelated claims do not.
         self._mutating: frozenset[str] = frozenset()
+        # Bumped by release_app: a load in flight when the selection moved
+        # away from its app is discarded instead of stored (_ensure_loaded).
+        self._release_gen = 0
         # Called after the armed or active set changed, see add_state_listener.
         self._state_listeners: list[Callable[[], None]] = []
         self._listeners_lock = threading.Lock()
@@ -3005,6 +3008,7 @@ class BypassService:
         with self._lock:
             if self._is_job_live(jm):
                 return True, "Bypass script already loaded", False
+            generation = self._release_gen
 
         # Not live — drop any stale handles/temp, then load fresh.
         self._reset_script_state()
@@ -3064,9 +3068,20 @@ class BypassService:
             return False, "Bypass load failed: script unavailable", False
 
         with self._lock:
-            self._job = job
-            self._script = script
-            self._temp_path = path
+            stale = self._release_gen != generation
+            if not stale:
+                self._job = job
+                self._script = script
+                self._temp_path = path
+        if stale:
+            # The selection left this app while it loaded: never keep a
+            # script in an app that is no longer selected.
+            try:
+                jm.stop_job_with_id(job.get_id())
+            except Exception:
+                pass
+            self._unlink(path)
+            return False, "Bypass not loaded: the app selection changed", False
 
         return True, "Bypass script loaded", True
 
@@ -3440,17 +3455,30 @@ class BypassService:
             The categories that were live in ``package`` ([] when none).
         """
         with self._lock:
+            # Always: a load for ``package`` still in flight is discarded.
+            self._release_gen += 1
             if self._app_package != package or (self._job is None and not self._active):
                 return []
             was = sorted(self._active)
             job, path = self._take_script_locked()
+        # The task entry goes now (a late unregister could remove the new
+        # app's); the slow job stop runs on a daemon thread.
+        self._unregister_task()
         threading.Thread(
-            target=self._dispose_script,
+            target=self._stop_job_and_unlink,
             args=(job, path),
             name="bypass-release",
             daemon=True,
         ).start()
         return was
+
+    def _stop_job_and_unlink(self, job: Any, path: str | None) -> None:
+        if job is not None:
+            try:
+                Toolbox.get_frida_job_manager().stop_job_with_id(job.get_id())
+            except Exception as exc:
+                logger.warning("stop_job during release failed: %s", exc)
+        self._unlink(path)
 
     @_notifies
     def disarm_all(self) -> list[str]:

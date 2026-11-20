@@ -1250,6 +1250,13 @@ class LogTicker(Horizontal):
             renderable: Any = _as_text(first)
             renderable.no_wrap = True
             renderable.overflow = "ellipsis"
+        elif isinstance(content, Text) and "\n" not in content.plain:
+            if not _ALNUM.search(content.plain):
+                return
+            plain = content.plain.strip()
+            renderable = content.copy()  # one styled line keeps its colours
+            renderable.no_wrap = True
+            renderable.overflow = "ellipsis"
         else:
             # A table or multi-line renderable: its first text line only, so
             # it cannot push the newest lines out of the 3 rows.

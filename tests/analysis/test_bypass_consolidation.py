@@ -1496,7 +1496,8 @@ def test_release_app_unloads_only_that_apps_script(monkeypatch):
         "get_frida_job_manager",
         staticmethod(lambda: types.SimpleNamespace(stop_job_with_id=_stop)),
     )
-    monkeypatch.setattr(svc, "_unregister_task", lambda: None)
+    unregistered: list = []
+    monkeypatch.setattr(svc, "_unregister_task", lambda: unregistered.append(1))
     svc._job = types.SimpleNamespace(get_id=lambda: "job-a")
     svc._active = {"ssl", "root"}
     svc._app_package = "com.example.a"
@@ -1509,6 +1510,50 @@ def test_release_app_unloads_only_that_apps_script(monkeypatch):
     assert svc.release_app("com.example.a") == ["root", "ssl"]
     assert svc.active_categories() == []
     assert svc._job is None  # dropped at once; a new load starts fresh
+    assert unregistered == [1]  # at once, not after the slow stop
     assert done.wait(5)
     assert stopped == ["job-a"]
     assert heard == [1]
+
+
+def test_a_load_in_flight_when_the_selection_moves_is_discarded(monkeypatch):
+    """release_app during _ensure_loaded: the new script is not kept."""
+    import types
+
+    from sandroid.analysis import detection_bypass as db
+
+    svc = db.BypassService()
+    stopped: list = []
+    job = types.SimpleNamespace(
+        get_id=lambda: "job-a",
+        wait_until_ready=lambda t: True,
+        state="running",
+        get_error=lambda: None,
+        get_script_of_job=lambda: object(),
+    )
+
+    def _start_job(path, **kw):
+        svc.release_app("com.example.a")  # the user picks B meanwhile
+        return job
+
+    jm = types.SimpleNamespace(
+        start_job=_start_job,
+        stop_job_with_id=stopped.append,
+        has_active_session=lambda: True,
+        jobs={},
+    )
+    monkeypatch.setattr(db.Toolbox, "get_frida_job_manager", staticmethod(lambda: jm))
+
+    def _setup(paused):
+        svc._app_package = "com.example.a"
+
+    monkeypatch.setattr(svc, "_setup_session", _setup)
+    monkeypatch.setattr(svc, "_assemble_source", lambda flags: "// js")
+    monkeypatch.setattr(svc, "_union_hooks", lambda cats: [])
+
+    ok, msg, _fresh = svc._ensure_loaded(paused=False, initial_flags={})
+
+    assert ok is False
+    assert "selection changed" in msg
+    assert stopped == ["job-a"]
+    assert svc._job is None

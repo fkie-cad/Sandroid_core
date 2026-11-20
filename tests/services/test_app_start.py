@@ -2124,6 +2124,17 @@ def test_a_new_selection_unhooks_the_app_left_behind(env):
     assert env.bypass.active_categories() == []
 
 
+def test_the_same_app_with_a_new_pid_keeps_its_live_bypass(env):
+    """A restart or a re-pick of the same app is not a new selection."""
+    env.spotlight.set_app(PKG, pid=77)
+    env.bypass._active = {"ssl"}
+    env.bypass._app_package = PKG
+
+    env.spotlight.set_app(PKG, pid=78)
+
+    assert env.bypass.active_categories() == ["ssl"]
+
+
 def test_recovery_waits_for_the_package_manager_before_frida(recovery, clock):
     """The PID alone is too early: frida would hit the post-restart ANRs."""
     recovery.pids = [222]
