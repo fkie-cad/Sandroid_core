@@ -412,6 +412,38 @@ def test_preflight_refusals_touch_nothing(manifest, attr, value, match) -> None:
     assert not any(x.startswith("helper:") and x != "helper:count" for x in dev.log)
 
 
+def test_a_stamp_without_final_newline_keeps_the_next_section(manifest) -> None:
+    """On the device `cat` of the stamp has no final newline: the next marker
+    must still start its own line (it once swallowed the Wi-Fi state).
+    """
+    dev = FakeDevice()
+    dev.stamp = json.dumps({"state": "complete", "world_fp": "ab" * 32})
+    with pytest.raises(pr.PrepareError):
+        _run(manifest, dev)
+    script = next(s for kind, s in dev.calls_seen if "@@uid@@" in s)
+    values = {"stamp": dev.stamp, "wifi": "1", "data": "0", "uid": "0"}
+    out = ""
+    for m in re.finditer(r"(echo; )?echo @@([a-z_]+)@@", script):
+        assert m.group(1), f"marker {m.group(2)} needs a newline before it"
+        out += (
+            "\n" + f"@@{m.group(2)}@@" + "\n" + values.get(m.group(2), "x")
+        )  # no final \n
+    sections = pr._sections(out)
+    assert json.loads(sections["stamp"])["state"] == "complete"
+    assert sections["wifi"] == "1"
+    assert sections["data"] == "0"
+    restore = pr._Run.restore_network.__code__.co_consts
+    assert any("echo; echo @@wifi@@" in str(c) for c in restore)
+
+
+def test_an_unreadable_stamp_is_named(manifest) -> None:
+    dev = FakeDevice()
+    dev.stamp = "{garbage"
+    with pytest.raises(pr.PrepareError, match="unreadable world stamp"):
+        _run(manifest, dev, force_cleanup=True)
+    assert "offline" not in dev.log
+
+
 def test_api_level_must_match_target_sdk() -> None:
     m = generate(SPEC, OWNER, packs=PACKS, target_sdk=34)
     dev = FakeDevice()

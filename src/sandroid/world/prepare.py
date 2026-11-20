@@ -365,7 +365,9 @@ def owner_language(manifest: WorldManifest, packs: PackSet) -> str:
 
 
 def _sections(text: str) -> dict[str, str]:
-    """Split ``@@name@@`` delimited shell output."""
+    """Split ``@@name@@`` delimited shell output (each marker on its own
+    line: the scripts echo a newline before every marker).
+    """
     out: dict[str, str] = {}
     name = None
     for line in text.splitlines():
@@ -614,7 +616,9 @@ class _Run:
     def write_stamp(self, record: dict[str, Any]) -> None:
         assert self.tmp is not None
         local = self.tmp / "world.json"
-        local.write_text(json.dumps(record, sort_keys=True, indent=1), encoding="utf-8")
+        local.write_text(
+            json.dumps(record, sort_keys=True, indent=1) + "\n", encoding="utf-8"
+        )
         tmp = f"{STAMP_PATH}.tmp"
         self.shell(f"mkdir -p {DEVICE_DIR} && rm -f {tmp}", zygote=False)
         res = self.dev.push([local], tmp, timeout=60)
@@ -633,20 +637,20 @@ class _Run:
     def preflight(self) -> None:
         script = "\n".join(
             [
-                "echo @@uid@@; id -u",
-                "echo @@sdk@@; getprop ro.build.version.sdk",
-                "echo @@avd@@; getprop ro.boot.qemu.avd_name;"
+                "echo; echo @@uid@@; id -u",
+                "echo; echo @@sdk@@; getprop ro.build.version.sdk",
+                "echo; echo @@avd@@; getprop ro.boot.qemu.avd_name;"
                 " getprop ro.kernel.qemu.avd_name",
-                "echo @@now@@; date +%s",
-                "echo @@df_sdcard@@; df -k /sdcard/ 2>/dev/null",
-                "echo @@df_data@@; df -k /data 2>/dev/null",
-                f"echo @@stamp@@; cat {STAMP_PATH} 2>/dev/null",
-                "echo @@wifi@@; settings get global wifi_on",
-                "echo @@data@@; settings get global mobile_data",
-                "echo @@accounts@@; dumpsys account 2>/dev/null"
+                "echo; echo @@now@@; date +%s",
+                "echo; echo @@df_sdcard@@; df -k /sdcard/ 2>/dev/null",
+                "echo; echo @@df_data@@; df -k /data 2>/dev/null",
+                f"echo; echo @@stamp@@; cat {STAMP_PATH} 2>/dev/null",
+                "echo; echo @@wifi@@; settings get global wifi_on",
+                "echo; echo @@data@@; settings get global mobile_data",
+                "echo; echo @@accounts@@; dumpsys account 2>/dev/null"
                 " | grep -E 'Account [{]name='",
-                f"echo @@gms@@; pm path {GMS} 2>/dev/null | head -n 1",
-                "echo @@end@@",
+                f"echo; echo @@gms@@; pm path {GMS} 2>/dev/null | head -n 1",
+                "echo; echo @@end@@",
             ]
         )
         res = self.dev.shell(script, timeout=60, zygote=True)
@@ -707,6 +711,11 @@ class _Run:
             raise PrepareError(
                 f"the device already holds world {str(stamp.get('world_fp'))[:12]}; "
                 "Prepare needs a clean base (load clean_8g first)"
+            )
+        if state != "partial":
+            raise PrepareError(
+                f"unreadable world stamp {STAMP_PATH} on the device; "
+                "load clean_8g instead"
             )
         if not self.force_cleanup:
             raise PrepareError(
@@ -811,8 +820,8 @@ class _Run:
             self.shell("; ".join(cmds), timeout=60)
         out = _sections(
             self.shell(
-                "echo @@wifi@@; settings get global wifi_on;"
-                " echo @@data@@; settings get global mobile_data",
+                "echo; echo @@wifi@@; settings get global wifi_on;"
+                " echo; echo @@data@@; settings get global mobile_data",
                 timeout=30,
             )
         )
