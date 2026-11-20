@@ -625,15 +625,15 @@ class MitmproxyPanel(Widget):
             )
         elif self._proxy_state == "ours" and self._reach_state == "checking":
             device = (
-                f"[{pal.warn}]◌ re-checking: Device proxy to our Mitmproxy "
+                f"Device proxy [{pal.warn}]◌ re-checking: our Mitmproxy "
                 f"{self._proxy_addr}[/]"
             )
         elif self._proxy_state == "ours":
-            device = f"[{pal.ok}]● Device proxy on: our Mitmproxy {self._proxy_addr}[/]"
+            device = f"Device proxy [{pal.ok}]● on: our Mitmproxy {self._proxy_addr}[/]"
         elif self._proxy_state == "other":
-            device = f"[{pal.accent}]● Device proxy on: external {self._proxy_addr}[/]"
+            device = f"Device proxy [{pal.accent}]● on: external {self._proxy_addr}[/]"
         else:
-            device = f"[{pal.dim}]○ Device proxy off[/]"
+            device = f"Device proxy [{pal.dim}]○ off[/]"
 
         # Apps part — only when there are app proxies.
         apps = ""
@@ -802,7 +802,7 @@ class MitmproxyPanel(Widget):
         parts.append(
             f"CA [{pal.ok}]● installed[/]"
             if self._ca_ok
-            else f"[{pal.dim}]CA ○ not installed[/]"
+            else f"CA [{pal.warn}]○ not installed[/]"
         )
         if self._service.ssl_unpin_is_active():
             parts.append(f"unpin [{pal.ok}]● on[/]")
@@ -870,7 +870,7 @@ class MitmproxyPanel(Widget):
                 (
                     f"[{pal.ok}]● installed[/] in the system trust store"
                     if self._ca_ok
-                    else f"[{pal.dim}]○ not installed[/]  Ctrl+N"
+                    else f"[{pal.warn}]○ not installed[/]  Ctrl+N"
                 ),
             )
         )

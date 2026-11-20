@@ -1916,6 +1916,26 @@ def test_header_app_segment_shows_the_run_state_not_a_mode():
         and str(span.style) == fixed_color("running")
         for span in seg.spans
     ), seg.spans
+    # "○ not running" / "○ off" are muted, never the red "stopped" colour.
+    muted = bar._get_theme_colors()["text_muted"]
+    bar.spotlight_pid = None
+    bar.frida_status = "Not running"
+    bar.mitmweb_running = False
+    for name, word in (
+        ("App", "○ not running"),
+        ("Frida", "○ off"),
+        ("Proxy", "○ off"),
+    ):
+        seg = next(s for s in bar._segments() if s.plain.startswith(name))
+        start = seg.plain.index(word)
+        styles = {
+            str(span.style)
+            for span in seg.spans
+            if span.start <= start and span.end >= start + len(word)
+        }
+        assert styles == {muted}, (name, seg.spans)
+        assert fixed_color("stopped") not in styles
+    bar.spotlight_pid = 77
     bar.spotlight_paused = True
     assert app_seg() == "App ◌ paused pid 77  Space resumes"
     bar.spotlight_app = "None"

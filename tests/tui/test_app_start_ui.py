@@ -141,6 +141,10 @@ def test_header_shows_the_run_state_and_no_mode(monkeypatch):
     assert "spawn" not in plain()
     svc.set_pid(None)
     assert plain().startswith(f"○ not running  Space starts  {PKG}")
+    from sandroid.tui.themes import lens_palette
+
+    # Not running is muted (lens dim), not red.
+    assert panel._render_header().startswith(f"[{lens_palette().dim}]○ not running[/]")
     svc.reset()
     header = panel._render_header()
     assert "use the foreground app" in header

@@ -464,3 +464,20 @@ def test_snapshots_panel_header_names_the_refused_console(monkeypatch):
     header = panel._render_header()
     assert CONSOLE_NOT_AUTHENTICATED[1:] in header
     assert "snapshot(s)" not in header
+
+
+def test_snapshots_panel_header_without_emulator_reads_name_dot_state(monkeypatch):
+    from rich.text import Text
+
+    from sandroid.tui.themes import lens_palette
+    from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
+
+    panel = SnapshotsPanel()
+    monkeypatch.setattr(panel, "_emulator_available", lambda: False)
+    header = panel._render_header()
+    dim = lens_palette().dim
+    assert header == f"Emulator [{dim}]○ not running · snapshots need one[/]"
+    assert Text.from_markup(header).plain == (
+        "Emulator ○ not running · snapshots need one"
+    )
+    assert lens_palette().bad not in header

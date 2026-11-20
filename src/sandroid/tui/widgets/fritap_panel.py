@@ -298,7 +298,7 @@ class FriTapPanel(Widget):
             if pid:
                 head += f"  [#5b6479]pid {pid}[/]"
         else:
-            head = f"[{pal.bad}]○ stopped[/]"
+            head = f"[{pal.dim}]○ stopped[/]"
         phase, detail = self._phase()
         if phase == "starting" and not running:
             head = f"[{pal.warn}]◌ starting[/] (attaching, loading the agent)"
@@ -312,7 +312,7 @@ class FriTapPanel(Widget):
         elif phase == "failed" and not running:
             head = f"[{pal.bad}]failed[/] {escape(detail[:80])}"
         elif phase == "stopped" and not running and detail:
-            head = f"[{pal.bad}]○ stopped[/] [{pal.dim}]({escape(detail)})[/]"
+            head = f"[{pal.dim}]○ stopped ({escape(detail)})[/]"
 
         checks = []
         if running:

@@ -364,7 +364,7 @@ class StatusBar(Static):
             elif self.spotlight_restarting:
                 state = f"[{paused}]◌ restarting…[/]"
             else:
-                state = f"[{stop}]○ not running[/] [{muted}] Space starts[/]"
+                state = f"[{muted}]○ not running[/] [{muted}] Space starts[/]"
             segs.append(f"[{muted}]App[/] {state}")
         else:
             segs.append(f"[{muted}]App ○ none[/]")
@@ -382,7 +382,7 @@ class StatusBar(Static):
         elif self.frida_status == "Checking...":
             frida = f"[{muted}]◌ checking[/]"
         else:
-            frida = f"[{stop}]○ off[/]"
+            frida = f"[{muted}]○ off[/]"
         segs.append(f"[{muted}]Frida[/] {frida}")
 
         # Hooks + bypass, only when something is active.
@@ -404,7 +404,7 @@ class StatusBar(Static):
             addr = f" {self.mitmweb_address}" if self.mitmweb_address else ""
             proxy = f"[{muted}]Mitmproxy[/] [{run}]● on{addr}[/]"
         else:
-            proxy = f"[{muted}]Mitmproxy[/] [{stop}]○ off[/]"
+            proxy = f"[{muted}]Mitmproxy[/] [{muted}]○ off[/]"
         if pointed_at_us:
             if self.mitmweb_running:
                 proxy += f" [{muted}]· Device proxy[/] [{run}]● on[/]"

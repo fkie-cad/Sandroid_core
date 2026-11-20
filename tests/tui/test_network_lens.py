@@ -688,7 +688,10 @@ def test_capture_status_is_dots_and_words(monkeypatch):
     assert plain(panel.status_caption()) == "Mitmproxy ○ off"
     rows = dict(panel.status_rows())
     assert plain(rows["Mitmproxy web interface"]).startswith("○ stopped")
+    assert rows["Mitmproxy web interface"].startswith(f"[{pal.dim}]○ stopped[/]")
     assert plain(rows["CA"]) == "○ not installed  Ctrl+N"
+    # "CA not installed" is a warning (not muted), like the Proxy dialog's.
+    assert rows["CA"].startswith(f"[{pal.warn}]○ not installed[/]")
     assert plain(rows["Chrome CT"]) == "○ off"
     assert plain(rows["SSL unpin"]) == "○ off  Ctrl+P"
 
@@ -701,16 +704,107 @@ def test_capture_status_is_dots_and_words(monkeypatch):
     rows = dict(panel.status_rows())
     assert rows["CA"].startswith(f"[{pal.ok}]● installed[/]")
     assert plain(rows["Chrome CT"]) == "● bypassed"
-    assert plain(rows["routing"]) == "● Device proxy on: our Mitmproxy 10.0.2.2:8080"
+    # Status bar order: name, dot, state (then the detail).
+    assert rows["routing"] == (
+        f"Device proxy [{pal.ok}]● on: our Mitmproxy 10.0.2.2:8080[/]"
+    )
+    assert plain(rows["routing"]) == "Device proxy ● on: our Mitmproxy 10.0.2.2:8080"
     panel._reach_state = "checking"
-    assert plain(dict(panel.status_rows())["routing"]).startswith("◌ re-checking")
+    routing = dict(panel.status_rows())["routing"]
+    assert routing.startswith(f"Device proxy [{pal.warn}]◌ re-checking: ")
+    assert plain(routing) == "Device proxy ◌ re-checking: our Mitmproxy 10.0.2.2:8080"
     panel._reach_state = "unreachable"
-    routing = plain(dict(panel.status_rows())["routing"])
-    assert routing == "Device proxy to our Mitmproxy 10.0.2.2:8080, unreachable"
+    routing = dict(panel.status_rows())["routing"]
+    # A failure: the words in the bad colour, no dot.
+    assert plain(routing) == "Device proxy to our Mitmproxy 10.0.2.2:8080, unreachable"
+    assert routing.startswith(f"[{pal.bad}]")
+    panel._reach_state = "ok"
+    panel._proxy_state = "other"
+    routing = dict(panel.status_rows())["routing"]
+    assert routing == f"Device proxy [{pal.accent}]● on: external 10.0.2.2:8080[/]"
     panel._proxy_state = "none"
-    assert plain(dict(panel.status_rows())["routing"]) == "○ Device proxy off"
+    routing = dict(panel.status_rows())["routing"]
+    assert routing == f"Device proxy [{pal.dim}]○ off[/]"
+    assert plain(routing) == "Device proxy ○ off"
     text = " ".join(plain(value) for _label, value in panel.status_rows())
     assert not set("✓✗→▲^") & set(text), text
+    panel._ca_ok = False
+    caption = panel.status_caption()
+    assert f"CA [{pal.warn}]○ not installed[/]" in caption
+    assert "CA ○ not installed" in plain(caption)
+    assert not set("✓✗▸◐⚑⇧␣⏎") & set(plain(caption)), caption
+
+
+def test_fritap_stopped_is_muted_like_mitmproxy(monkeypatch):
+    """The friTap "○ stopped" uses the lens dim token Mitmproxy uses, not red;
+    "failed" stays a word in the bad colour, without a dot.
+    """
+    from rich.text import Text
+
+    from sandroid.analysis import fritap as fritap_mod
+    from sandroid.tui.themes import lens_palette
+    from sandroid.tui.widgets.fritap_panel import FriTapPanel
+
+    pal = lens_palette()
+    panel = FriTapPanel()
+    monkeypatch.setattr(panel, "is_running", lambda: False)
+    try:
+        fritap_mod.set_lifecycle("stopped", "")
+        head = dict(panel.status_rows())["friTap"]
+        assert head == f"[{pal.dim}]○ stopped[/]"
+        fritap_mod.set_lifecycle("stopped", "agent still unloading")
+        head = dict(panel.status_rows())["friTap"]
+        assert head == f"[{pal.dim}]○ stopped (agent still unloading)[/]"
+        assert Text.from_markup(head).plain == "○ stopped (agent still unloading)"
+        fritap_mod.set_lifecycle("failed", "agent stuck")
+        head = dict(panel.status_rows())["friTap"]
+        assert head.startswith(f"[{pal.bad}]failed[/]")
+        assert not set("●○◌✓✗▸◐⚑⇧␣⏎") & set(Text.from_markup(head).plain)
+    finally:
+        fritap_mod.set_lifecycle("stopped", "")
+
+
+def test_proxy_dialog_status_reads_name_dot_state(monkeypatch):
+    """Device proxy line: "Device proxy ● on: …" / "Device proxy ○ off"; the
+    CA line's "○ Not installed" is a warning.
+    """
+    from types import SimpleNamespace
+
+    from sandroid.core.proxy_manager import ZygoteStatus
+    from sandroid.tui.modals.proxy_modal import ProxyModal
+
+    shown: list[str] = []
+    sink = SimpleNamespace(update=shown.append)
+    modal = ProxyModal()
+    monkeypatch.setattr(modal, "query_one", lambda *a, **k: sink)
+    monkeypatch.setattr(modal, "_select_device_radio", lambda radio_id: None)
+
+    modal._on_device_probe_done({"device": {"state": "ours", "addr": "10.0.2.2:8080"}})
+    assert shown[-1] == (
+        "Device proxy [$lens-ok]● on[/]: our Mitmproxy at [bold]10.0.2.2:8080[/bold]"
+    )
+    modal._on_device_probe_done(
+        {"device": {"state": "external", "addr": "192.168.1.5:8081"}}
+    )
+    assert shown[-1] == (
+        "Device proxy [$lens-accent]● on[/]: external proxy at "
+        "[bold]192.168.1.5:8081[/bold]"
+    )
+    modal._on_device_probe_done({"device": {"state": "none", "addr": ""}})
+    assert shown[-1] == "Device proxy [$lens-dim]○ off[/]"
+
+    modal._show_zygote_status(
+        ZygoteStatus(
+            injected=False,
+            cert_hash=None,
+            zygote64_pid=None,
+            zygote_pid=None,
+            verdict="absent",
+        )
+    )
+    assert shown[-1].startswith("[$warning]○ Not installed[/]")
+    for markup in shown:
+        assert not set("✓✗▸◐⚑⇧␣⏎") & set(markup), markup
 
 
 def test_network_keys_are_words(monkeypatch):

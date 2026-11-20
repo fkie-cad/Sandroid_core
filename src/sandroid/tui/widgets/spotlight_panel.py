@@ -576,7 +576,7 @@ class SpotlightPanel(Widget):
         elif self._restarting():
             state = f"[{c.warn}]◌ restarting…[/]"
         else:
-            state = f"[{c.bad}]○ not running[/]  [{c.dim}]Space starts[/]"
+            state = f"[{c.dim}]○ not running[/]  [{c.dim}]Space starts[/]"
 
         bypass_tag = (
             f"[{c.ok}]bypass: {', '.join(on)}[/]" if on else f"[{c.dim}]bypass: none[/]"

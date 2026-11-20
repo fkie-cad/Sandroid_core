@@ -958,7 +958,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
 
         if state == "ours":
             status_widget.update(
-                f"[$lens-ok]● Device proxy on:[/] our Mitmproxy at [bold]{addr}[/bold]"
+                f"Device proxy [$lens-ok]● on[/]: our Mitmproxy at [bold]{addr}[/bold]"
             )
             if addr.startswith("127.0.0.1:"):
                 self._select_device_radio("device-radio-reverse")
@@ -966,7 +966,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                 self._select_device_radio("device-radio-ours")
         elif state == "external":
             status_widget.update(
-                f"[$lens-accent]● Device proxy on:[/] external proxy at [bold]{addr}[/bold]"
+                f"Device proxy [$lens-accent]● on[/]: external proxy at [bold]{addr}[/bold]"
             )
             try:
                 self.query_one("#device-ext-input", Input).value = addr
@@ -974,7 +974,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                 pass
             self._select_device_radio("device-radio-external")
         else:
-            status_widget.update("[$lens-dim]○ Device proxy off[/]")
+            status_widget.update("Device proxy [$lens-dim]○ off[/]")
             self._select_device_radio("device-radio-off")
 
     def _select_device_radio(self, radio_id: str) -> None:
