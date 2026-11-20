@@ -230,7 +230,7 @@ def format_header(
     """The one-row chat header, ``width`` cells wide.
 
     ``tool · List Flows · deepseek-v3 REMOTE EXPERIMENTAL ... 41k/262k 16%``.
-    The state is a word in its colour. When it does not fit, parts go in
+    The state is a dot and a word in its colour. When it does not fit, parts go in
     this order: the model, the meter's window (``41k 16%``), then the detail is cut with "…". ``REMOTE`` and
     ``EXPERIMENTAL`` always stay whole (§8); at :data:`HEADER_COMPACT_WIDTH`
     columns or less the model is never shown.

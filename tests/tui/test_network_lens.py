@@ -710,7 +710,7 @@ def test_capture_status_is_dots_and_words(monkeypatch):
     panel._proxy_state = "none"
     assert plain(dict(panel.status_rows())["routing"]) == "○ Device proxy off"
     text = " ".join(plain(value) for _label, value in panel.status_rows())
-    assert not set("✓✗→▲^") & set(text.replace("→ web", "")), text
+    assert not set("✓✗→▲^") & set(text), text
 
 
 def test_network_keys_are_words(monkeypatch):

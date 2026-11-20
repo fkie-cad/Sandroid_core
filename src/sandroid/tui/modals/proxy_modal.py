@@ -1259,7 +1259,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
             )
         elif status.verdict == "partial":
             status_widget.update(
-                f"[$success]● Installed[/] for new apps; [$warning]{status.lacking} "
+                f"[$warning]● Installed[/] for new apps; [$warning]{status.lacking} "
                 "running app namespace(s) lack it[/] (I installs it there)"
             )
         elif status.error_message:

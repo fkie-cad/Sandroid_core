@@ -16,7 +16,7 @@ on a row above the newest one stop following (the monitor keeps recording),
 ``End`` resumes, also with a file open in the Inspector (which then follows
 the newest row); the caption title says ``live`` or ``scrolled back · 3 new
 below · End = live`` (rows that changed since, ★ rows included).
-The frame title says ``monitor on`` / ``monitor off`` for the monitor.
+The frame title says ``monitor ● on`` / ``monitor ○ off`` for the monitor.
 
 Rows come from the file monitor (``o`` starts/stops it): each
 ``TASK_OUTPUT``/``source="monitor"`` batch is folded into

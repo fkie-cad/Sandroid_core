@@ -258,7 +258,7 @@ class FriTapPanel(Widget):
         from sandroid.tui.themes import lens_palette
 
         pal = lens_palette()
-        return f"[{pal.ok}]● written[/]" if ok else f"[{pal.dim}]○ off[/]"
+        return f"[{pal.ok}]● on[/]" if ok else f"[{pal.dim}]○ off[/]"
 
     def _render_header(self) -> str:
         from sandroid.tui.themes import lens_palette

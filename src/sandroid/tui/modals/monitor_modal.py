@@ -417,9 +417,9 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
             app_name = self._get_app_name()
             if app_name:
                 state = (
-                    f"running pid {self._spotlight_pid}"
+                    f"[$lens-ok]● running[/] pid {self._spotlight_pid}"
                     if self._spotlight_pid
-                    else "not running"
+                    else "[$lens-dim]○ not running[/]"
                 )
                 info_text = (
                     f"[bold]Spotlight App:[/bold] {app_name}\n"

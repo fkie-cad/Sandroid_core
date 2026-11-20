@@ -771,7 +771,7 @@ class RecordingController:
                     tail = "no start point on a physical device"
                 self._ui(
                     self._set_replay_phase,
-                    f"Recording '{rec.name}' · {secs // 60}:{secs % 60:02d} · {tail}",
+                    f"● Recording '{rec.name}' · {secs // 60}:{secs % 60:02d} · {tail}",
                 )
 
         threading.Thread(target=tick, name="rewind-ticker", daemon=True).start()

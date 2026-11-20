@@ -854,8 +854,8 @@ class MitmproxyPanel(Widget):
             (
                 "Mitmproxy web interface",
                 (
-                    f"[{pal.ok}]● running[/]  {st.listen_host}:{st.proxy_port} → "
-                    f"web :{st.web_port}"
+                    f"[{pal.ok}]● running[/]  {st.listen_host}:{st.proxy_port}, "
+                    f"web interface :{st.web_port}"
                     if running
                     else f"[{pal.dim}]○ stopped[/]  (port {st.proxy_port})"
                 ),
