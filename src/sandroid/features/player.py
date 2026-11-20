@@ -327,6 +327,9 @@ WEAK_TARGET = "recorded element unsure"
 #: off the screen; and how long one live hit test may take (s).
 HIT_GRID = 3
 HIT_TIMEOUT_S = 1.5
+#: A keyboard key tapped by position after the player typed the text in
+#: place of your keys (unchecked: the keyboard may look different now).
+AFTER_TYPING = "keyboard key, the keyboard may look different after typing"
 #: The display's size and rotation are asked again after this long (s).
 DISPLAY_EVERY_S = 5.0
 #: Nothing could check a step: no element was recorded (or it is a key on
@@ -990,6 +993,22 @@ def _clip(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "\u2026"
 
 
+def _field_text(node: dict) -> str:
+    """A field node's value ("" while it shows its hint)."""
+    return "" if node.get("showing_hint") else str(node.get("text") or "")
+
+
+def _all_selected(node: dict) -> bool:
+    """The field's whole text is selected (the helper's ``sel_start`` /
+    ``sel_end``): typing replaces it.
+    """
+    start, end = node.get("sel_start"), node.get("sel_end")
+    if not isinstance(start, int) or not isinstance(end, int):
+        return False
+    lo, hi = min(start, end), max(start, end)
+    return lo == 0 and hi > 0 and hi >= len(_field_text(node))
+
+
 def text_check(
     expected: str, value: str, *, password: bool = False
 ) -> tuple[bool, str]:
@@ -1062,6 +1081,10 @@ class StepReplayer:
         self.tail_s = tail_s
         #: Steps whose keyboard taps were replaced by typing the text.
         self._typed: set[int] = set()
+        #: Text was typed in place of keys and no other step came since:
+        #: the keyboard may not look as in your run (key events can switch
+        #: it to its compact bar; its suggestions differ).
+        self._after_typing = False
         self._display_cache: tuple[float, Any] | None = None
 
     # -- helpers ------------------------------------------------------------
@@ -1217,6 +1240,50 @@ class StepReplayer:
                 return None, why, CHECK_UNCHECKED
             self._sleep(ELEMENT_POLL_S)
 
+    def _field_node(
+        self,
+        xy: tuple[int, int] | None,
+        rid: str | None = None,
+        bounds: tuple[int, int, int, int] | None = None,
+        *,
+        focused_only: bool = False,
+    ) -> dict | None:
+        """The focused field's node now; None when no field could be read,
+        or the focus is on another field: its id is not the recorded
+        ``rid``, or with no id its box is not near the recorded ``bounds``.
+        """
+        helper = self.helper() if callable(self.helper) else self.helper
+        fn = getattr(helper, "focus", None) if helper is not None else None
+        if not callable(fn):
+            return None
+        try:
+            reply = fn(*(xy or (None, None)), timeout=1.0)
+        except Exception:
+            logger.debug("replay: focus read failed", exc_info=True)
+            return None
+        if not isinstance(reply, dict):
+            return None
+        node = None
+        for key in ("input",) if focused_only else ("input", "node"):
+            cand = reply.get(key)
+            if isinstance(cand, dict) and cand.get("editable"):
+                node = cand
+                break
+        if node is None:
+            return None
+        if rid and node.get("rid") and node.get("rid") != rid:
+            return None  # the focus moved on (e.g. a code field)
+        if rid and not node.get("rid") and bounds is None:
+            return None  # an id was recorded; this field has none
+        if (not rid or not node.get("rid")) and bounds is not None:
+            # No id: the box must be the recorded field's, at most moved up
+            # or down (a keyboard pan): same left, right and height.
+            if not _near(bounds, node.get("bounds")) or not _same_size(
+                bounds, node.get("bounds")
+            ):
+                return None
+        return node
+
     def _field_value(
         self,
         xy: tuple[int, int] | None,
@@ -1225,43 +1292,13 @@ class StepReplayer:
         *,
         focused_only: bool = False,
     ) -> tuple[str | None, bool]:
-        """``(text, password)`` of the focused field now (``text`` None: no
-        field could be read, or the focus is on another field: its id is
-        not the recorded ``rid``, or with no id its box is not near the
-        recorded ``bounds``; a hint shown in an empty field reads as "").
+        """``(text, password)`` of the focused field now (``text`` None: see
+        :meth:`_field_node`; a hint shown in an empty field reads as "").
         """
-        helper = self.helper() if callable(self.helper) else self.helper
-        fn = getattr(helper, "focus", None) if helper is not None else None
-        if not callable(fn):
-            return None, False
-        try:
-            reply = fn(*(xy or (None, None)), timeout=1.0)
-        except Exception:
-            logger.debug("replay: focus read failed", exc_info=True)
-            return None, False
-        if not isinstance(reply, dict):
-            return None, False
-        node = None
-        for key in ("input",) if focused_only else ("input", "node"):
-            cand = reply.get(key)
-            if isinstance(cand, dict) and cand.get("editable"):
-                node = cand
-                break
+        node = self._field_node(xy, rid, bounds, focused_only=focused_only)
         if node is None:
             return None, False
-        if rid and node.get("rid") and node.get("rid") != rid:
-            return None, False  # the focus moved on (e.g. a code field)
-        if rid and not node.get("rid") and bounds is None:
-            return None, False  # an id was recorded; this field has none
-        if (not rid or not node.get("rid")) and bounds is not None:
-            # No id: the box must be the recorded field's, at most moved up
-            # or down (a keyboard pan): same left, right and height.
-            if not _near(bounds, node.get("bounds")) or not _same_size(
-                bounds, node.get("bounds")
-            ):
-                return None, False
-        text = "" if node.get("showing_hint") else str(node.get("text") or "")
-        return text, bool(node.get("password"))
+        return _field_text(node), bool(node.get("password"))
 
     def check_text(
         self, expected: str, target: dict | None, *, password: bool = False
@@ -1405,8 +1442,10 @@ class StepReplayer:
     def _type_into_field(self, step: Step) -> dict[str, Any] | None:
         """Keyboard taps that typed a known text: type that text into its
         field instead (per character, at the recorded pace) when the field
-        has the input focus and is empty, then read it back. None when the
-        field cannot be verified: the keys are tapped as recorded.
+        has the input focus and is empty or has all its text selected (the
+        first character replaces it, as your first key did), then read it
+        back. None when the field cannot be verified: the keys are tapped
+        as recorded.
         """
         plan = step.data.get("type_text")
         if not isinstance(plan, dict):
@@ -1419,12 +1458,16 @@ class StepReplayer:
         target = plan.get("target") if isinstance(plan.get("target"), dict) else {}
         bounds = _bounds(target.get("bounds"))
         rid = target.get("rid") or None
-        value, _pw = self._field_value(None, rid, bounds, focused_only=True)
-        if value is None or value.strip():
-            # Not the recorded field, or it holds text (where would typing go?)
+        node = self._field_node(None, rid, bounds, focused_only=True)
+        if node is None:
+            return None  # not the recorded field
+        if _field_text(node).strip() and not _all_selected(node):
+            # It holds text that typing would not replace: where would the
+            # characters go? (An address bar selects its text on focus.)
             return None
         self._type(text, plan.get("dur_ms"))
         self._typed.add(step.i)
+        self._after_typing = True
         taps = int(plan.get("taps") or 0)
         res = {
             "way": WAY_REPLAYED,
@@ -1454,6 +1497,8 @@ class StepReplayer:
                 as ``failed: <reason>`` and the replay stops there).
         """
         kind, data = step.kind, step.data
+        if not data.get("ime"):
+            self._after_typing = False
         if kind == "tap" and data.get("typed_by") in self._typed:
             if data["typed_by"] != step.i:
                 return {"way": WAY_REPLAYED, "check": CHECK_NONE,
@@ -1468,6 +1513,10 @@ class StepReplayer:
                 reason = "keyboard key"
                 if data.get("type_text"):
                     reason = "keyboard key, its field could not be verified"
+                elif self._after_typing:
+                    # Go / Enter after the typed text: its spot on a keyboard
+                    # that may look different says nothing.
+                    reason = AFTER_TYPING
                     check = CHECK_UNCHECKED
             else:
                 xy, reason, check = self.locate(step)
@@ -1628,6 +1677,7 @@ class StepReplayer:
         report: list[dict[str, Any]] = []
         n = len(steps)
         self._typed = set()
+        self._after_typing = False
         self._display_cache = None
         prev_t: float | None = None
         missed: int | None = None  # the step before missed its element

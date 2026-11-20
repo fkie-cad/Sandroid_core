@@ -53,13 +53,13 @@ logger = logging.getLogger(__name__)
 
 REMOTE_JAR = "/data/local/tmp/sandroid-uihelper.jar"
 MAIN_CLASS = "sandroid.uihelper.Main"
-HELPER_VERSION = "1.1.0"
+HELPER_VERSION = "1.2.0"
 PROTOCOL = 2
 
 #: sha256 of ``src/sandroid/assets/uihelper/uihelper.jar`` (printed by build.sh).
-JAR_SHA256 = "4f0f7842fa922c003ad691687ba7be2ac8abce6ebbc4b5c6bd50775701b2e5bc"
+JAR_SHA256 = "e04ea03159b826ffa48442d232324d4babd16d81a09fbaf1e747527436138c01"
 #: :func:`source_sha256` of ``tools/uihelper/src`` the jar was built from.
-SOURCE_SHA256 = "09de116aeb6d4d2798cfab80df54857c08fa4910038d170e244a830f3f1242c9"
+SOURCE_SHA256 = "70c36c1b8eb4e017967a7144cb9e7bbd1673ff9f515656e9e8aef0ae2d3dc45c"
 
 #: Device folder for screenshots in flight (each is fetched, then removed).
 REMOTE_SHOT_DIR = "/data/local/tmp/sandroid-shots"

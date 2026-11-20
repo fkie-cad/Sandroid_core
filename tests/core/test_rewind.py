@@ -1661,20 +1661,32 @@ def test_without_an_id_a_field_of_another_size_is_unchecked():
 
 
 class TypingField(FakeHelper):
-    """A focused field ``rid`` that holds what ``input text`` typed."""
+    """A focused field ``rid`` that holds what ``input text`` typed (a
+    character replaces the selection ``sel``, then the cursor is at the end).
+    """
 
-    def __init__(self, rid="p:id/url", value="", password=False):
+    def __init__(self, rid="p:id/url", value="", password=False, sel=None):
         super().__init__([_dump()])
         self.rid, self.value, self.password = rid, value, password
+        self.sel = sel  # (start, end) or None: the helper sent none
 
     def shell(self, cmd):
         if cmd.startswith("input text "):
-            self.value += cmd.split(" ", 2)[2].replace("%s", " ").strip("'")
+            typed = cmd.split(" ", 2)[2].replace("%s", " ").strip("'")
+            if self.sel is not None:
+                lo, hi = sorted(self.sel)
+                self.value = self.value[:lo] + typed + self.value[hi:]
+                self.sel = (lo + len(typed), lo + len(typed))
+            else:
+                self.value += typed
         return ""
 
     def focus(self, x=None, y=None, timeout=1.0):
-        return {"input": {"editable": True, "text": self.value, "rid": self.rid,
-                          "password": self.password}}  # fmt: skip
+        node = {"editable": True, "text": self.value, "rid": self.rid,
+                "password": self.password}  # fmt: skip
+        if self.sel is not None:
+            node["sel_start"], node["sel_end"] = self.sel
+        return {"input": node}
 
 
 def _keyboard_lines(text, password=False):
@@ -1738,6 +1750,33 @@ def test_keyboard_taps_stay_when_the_field_cannot_be_verified():
     rep, log, _ = _typing_replayer(TypingField(value="old"))
     rep.run(extract_steps(_keyboard_lines("ab")))
     assert any(c.startswith("input tap") for c in log)
+    # ... also with only part of it selected, or just a cursor in it
+    for sel in ((1, 3), (3, 3)):
+        rep, log, _ = _typing_replayer(TypingField(value="old", sel=sel))
+        rep.run(extract_steps(_keyboard_lines("ab")))
+        assert any(c.startswith("input tap") for c in log), sel
+
+
+def test_typing_replaces_a_fields_text_that_is_all_selected():
+    # An address bar selects its URL on focus: your first key replaced it,
+    # and so does the first typed character (device check, Firefox).
+    url = "http://10.0.2.2:8765/b.html"
+    helper = TypingField(value=url, sel=(0, len(url)))
+    rep, log, _ = _typing_replayer(helper)
+    report = rep.run(extract_steps(_keyboard_lines("sandro")))
+    assert not any(c.startswith("input tap") for c in log)
+    first = report["steps"][0]
+    assert (first["way"], first["check"]) == ("replayed", "verified")
+    assert first["reason"] == (
+        "typed 6 characters into the field instead of 6 keyboard taps, field checked"
+    )
+    assert helper.value == "sandro"
+    # selected the other way round (end before start): the same
+    helper = TypingField(value=url, sel=(len(url), 0))
+    rep, log, _ = _typing_replayer(helper)
+    assert rep.run(extract_steps(_keyboard_lines("ab")))["steps"][0]["check"] == (
+        "verified"
+    )
 
 
 def test_typing_a_password_into_its_field_prints_no_value():
@@ -1767,10 +1806,39 @@ def test_an_action_key_after_the_text_is_tapped_not_swallowed():
     report = rep.run(steps)
     assert [c for c in log if c.startswith("input tap")] == ["input tap 1000 2300"]
     assert report["steps"][3]["way"] == "by position"
+    # The text went in by typing: Go's spot on the keyboard proves nothing
+    # (device check: Gboard showed its compact bar, Go hit a suggestion).
+    assert report["steps"][3]["check"] == "unchecked"
+    assert report["steps"][3]["reason"] == (
+        "keyboard key, the keyboard may look different after typing"
+    )
+    assert report["unchecked_steps"] == [4]
     # one tap more than characters (Go inside the text's time): keys stay
     lines[-1]["data"]["dur_ms"] = 5000.0
     steps = extract_steps(lines)
     assert all("type_text" not in s.data for s in steps)
+
+
+def test_a_key_is_nothing_to_check_without_typing_or_after_another_step():
+    # no text was typed in place of keys: a key after it is "nothing to check"
+    lines = _keyboard_lines("wdr")
+    go = _tap(seq=40, t=104.5, ime=True, x=1000, y=2300)
+    lines.insert(3, go)
+    lines[-1]["data"]["dur_ms"] = 600.0
+    rep, _, _ = _typing_replayer(TypingField(rid="p:id/other"))
+    report = rep.run(extract_steps(lines))
+    assert report["steps"][3]["reason"] == "keyboard key"
+    assert report["steps"][3]["check"] == "none"
+    # typed, then a tap on the app, then a key: the key is plain again
+    lines = _keyboard_lines("wdr")
+    lines[-1]["data"]["dur_ms"] = 600.0
+    lines += [_tap(seq=55, t=105.0, x=500, y=500),
+              _tap(seq=60, t=106.0, ime=True, x=1000, y=2300)]  # fmt: skip
+    rep, _, _ = _typing_replayer(TypingField())
+    report = rep.run(extract_steps(lines))
+    assert report["steps"][0]["check"] == "verified"
+    assert report["steps"][4]["reason"] == "keyboard key"
+    assert report["steps"][4]["check"] == "none"
 
 
 def test_an_earlier_texts_keys_are_never_typed_again():

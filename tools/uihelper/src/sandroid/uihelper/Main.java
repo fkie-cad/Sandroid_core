@@ -58,7 +58,7 @@ import java.util.zip.CRC32;
  * reply {@code {"type":"error","error":"mode"}}.
  */
 public final class Main {
-    static final String VERSION = "1.1.0";
+    static final String VERSION = "1.2.0";
     static final int PROTOCOL = 2;
 
     static double monoMs() {
@@ -1409,6 +1409,8 @@ public final class Main {
      * send no TEXT_CHANGED: Compose, browser address bars). When nothing
      * editable has the input focus and a point is given, the editable node
      * under it (the field that was tapped), refreshed ({@code node}).
+     * {@code input} also carries its selection ({@code sel_start},
+     * {@code sel_end}; -1 when none is known).
      */
     private void focus(Cmd c) throws JSONException {
         double reqMs = monoMs();
@@ -1426,7 +1428,12 @@ public final class Main {
             f.refresh();
             Tree.SNode s = Tree.copy(f, f.getWindowId(), 0, 0, tm);
             editable = s.editable;
-            o.put("input", Tree.nodeJson(s).put("window_id", s.windowId).putOpt("pkg", s.pkg));
+            JSONObject in = Tree.nodeJson(s).put("window_id", s.windowId).putOpt("pkg", s.pkg);
+            // The selection (-1 both: none known). Typing replaces a field
+            // whose whole text is selected (an address bar on focus).
+            in.put("sel_start", f.getTextSelectionStart());
+            in.put("sel_end", f.getTextSelectionEnd());
+            o.put("input", in);
         }
         if (!editable && c.kv.containsKey("x") && c.kv.containsKey("y")) {
             int x = Integer.parseInt(c.kv.get("x"));

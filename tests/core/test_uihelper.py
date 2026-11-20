@@ -420,7 +420,7 @@ def test_jar_resolves_through_importlib_resources():
 
 def test_build_info():
     assert uihelper.build_info() == {
-        "version": "1.1.0",
+        "version": "1.2.0",
         "protocol": 2,
         "jar_sha256": uihelper.JAR_SHA256,
         "source_sha256": uihelper.SOURCE_SHA256,
