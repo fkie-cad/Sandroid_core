@@ -1262,8 +1262,9 @@ class RecordingController:
                 schema_version=run_history.SCHEMA_VERSION,
                 run_id=run_id,
                 label=f"{rec.name} · {mode_word}",
+                # The run's own start: the Sessions lens's "Took" is this run.
                 recorded_at=datetime.fromtimestamp(
-                    rec.started or time.time()
+                    (rec.runs[-1].get("started") if rec.runs else None) or time.time()
                 ).isoformat(),
                 completed_at=now,
                 device_name=rec.avd or self._active_device_name() or "unknown",

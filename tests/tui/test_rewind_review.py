@@ -901,3 +901,20 @@ async def test_results_are_visible_at_200x55():
         )
         row = modal.query_one("#review-name-row")
         assert row.size.height <= 3  # was ~17 empty rows (height 1fr)
+
+
+def test_a_rewind_run_is_timed_from_its_own_start(controller, monkeypatch):
+    from sandroid.core import run_history
+
+    saved = []
+    monkeypatch.setattr(run_history, "save_run", saved.append)
+    monkeypatch.setattr(
+        "sandroid.core.timeline.timeline_folder", lambda: rewind.recordings_root()
+    )
+    rec = _rec()
+    rec.runs = [{"n": 2, "kind": "rewind", "started": 5000.0, "loaded": True}]
+    outcome = rewind.RunOutcome(n=2, mode="rewind", result="rewound")
+    assert controller._persist(rec, outcome)
+    from datetime import datetime
+
+    assert datetime.fromisoformat(saved[0].recorded_at).timestamp() == 5000.0
