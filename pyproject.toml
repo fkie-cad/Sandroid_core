@@ -71,7 +71,6 @@ dependencies = [
     "colorlog>=6.7.0",
     "objection>=1.12.5,<2",
     "AndroidFridaManager>=2.0.7,<3",
-    "trigdroid[full]>=2.0.6",
     "dexray-intercept>=1.0.1.9,<2",
     "tomli-w>=1.0.0",
     "pyyaml>=6.0",

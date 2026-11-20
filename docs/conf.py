@@ -68,7 +68,6 @@ autodoc_mock_imports = [
     "objection",
     "scapy",
     "AndroidFridaManager",
-    "trigdroid",
     "friTap",
     "dexray_intercept",
     "dexray_insight",
