@@ -533,35 +533,46 @@ files in ``~/.config/sandroid/profiles/<id>.yaml`` (or
 edits, imports and exports them and writes the keys below. Sandroid keeps
 your comments and key order when it saves a profile.
 
-A profile may build on another one with ``extends: builtin:<id>`` (the
-profiles shipped with Sandroid, one per country preset) or
-``extends: <profile id>``: it then holds only the keys it changes. Its
-``owner`` (``first``, ``last``, ``phone``, ``email``) can be used in value
+A new profile (``P`` in the lens) is a full copy of one of the profiles
+shipped with Sandroid (one per country preset), so a Sandroid upgrade never
+changes its values. You can also write a profile that builds on another one
+with ``extends: builtin:<id>`` or ``extends: <profile id>``: it then holds
+only the keys it changes, and ``null`` removes an inherited key (``[]``
+empties an inherited list). The lens tells you when the profile it extends
+has changed since your last save. A profile that others extend cannot be
+renamed or deleted; export writes one standalone file that imports anywhere.
+
+Its ``owner`` (``first``, ``last``, ``phone``, ``email``) can be used in value
 templates as ``{owner.first}`` and so on; the owner's names must not contain
 the profile's token. The ``world:`` section describes generated phone
-contents; ``seed: auto`` there gets a fresh seed on the first save.
+contents (checked by the world module; a problem there never stops the
+identity values from being applied); ``seed: auto`` there gets a fresh seed
+on the first save.
 
 Profiles from older versions (schema 1, ``<id>.toml``) are converted to YAML
 once, the first time the library is read; the old file stays as
 ``<id>.toml.bak``. Their values, and with them the markers of earlier
-applies, stay the same. Import also accepts such a TOML file.
+applies, stay the same. Import also accepts such a TOML file. In a library
+folder Sandroid cannot write to, they are read as they are.
 
 .. code-block:: yaml
 
+   # Created from builtin:de (Sandroid 2.1.0).
    format: sandroid-identity
    schema: 2
    id: mara-de
    name: Mara Kessler (DE)
-   extends: builtin:de
+   preset: de
    token: 3f9a1c07
    seed: hex:...            # 64 hex digits
    revision: 3
    created: 2026-11-19T10:00:00+01:00
    retired_tokens: []
-   owner: {first: Mara, last: Kessler, phone: "+4915204902863"}
+   owner: {first: Mara, last: Kessler, phone: "+491520{digits:7}"}
    values:
-     gps: {value: "52.516375, 13.397874"}   # only what differs from builtin:de
-   world: {seed: auto, size: medium, country: de}
+     gps: {value: "52.516375, 13.397874"}
+     # ... every other value, contacts, SMS and calls
+   world: {seed: hex:..., size: medium, country: de}
 
 .. code-block:: toml
 
