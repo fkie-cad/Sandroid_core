@@ -1058,13 +1058,38 @@ def test_ensure_applied_names_a_running_apply(service, device):
     assert device.calls == []
 
 
+def test_a_started_window_waits_the_full_restart_timeout(service, device, monkeypatch):
+    """The budget decides whether a window starts; after ``stop`` the wait
+    is the full RESTART_TIMEOUT_S and the recovery runs when it is back.
+    """
+    _restart_policy(monkeypatch, "always")
+    now = [0.0]
+    service._clock = lambda: now[0]
+    service._sleep = lambda s: now.__setitem__(0, now[0] + s)
+    real = device._shell
+    slow = [60]  # 60 polls of 2 s: back after 120 s, past the 100 s budget
+
+    def shell(script):
+        if script.startswith("pidof system_server") and slow[0]:
+            slow[0] -= 1
+            return ""
+        return real(script)
+
+    monkeypatch.setattr(device, "_shell", shell)
+    plan = service.ensure_applied(SERIAL, budget_s=100.0)
+    assert now[0] > 100.0  # the wait outlasted the budget
+    assert service.restarts_seen == [SERIAL]
+    assert RESTART_MARKER not in device.fs
+    assert plan.infos["locale"].status != "failed"
+
+
 def test_ensure_applied_caps_the_waits_to_the_budget(service, device):
     now = [0.0]
     service._clock = lambda: now[0]
     service._sleep = lambda s: now.__setitem__(0, now[0] + s)
     service._call.deadline = 5.0
     try:
-        assert service._deadline(ident.RESTART_TIMEOUT_S) == 5.0
+        assert service._deadline(ident.PROVIDER_WAIT_DEADLINE_S) == 5.0
         assert service._deadline(1.0) == 1.0
         assert service._capped(120.0, floor=10.0) == 10.0
     finally:

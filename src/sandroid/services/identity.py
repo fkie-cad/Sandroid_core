@@ -3510,11 +3510,11 @@ class IdentityService:
         opens a framework window here; under ``ask`` (the default) and
         ``never`` the framework values stay pending (:data:`NEEDS_RESTART`),
         so the first app start's pre-start step asks as usual. Already
-        applied, it
-        costs one preflight and writes nothing. The budget is a monotonic
-        deadline: the waits (providers, SIM, framework) end with it, and no
+        applied, it costs one preflight and writes nothing. The budget is a
+        monotonic deadline: the provider and SIM waits end with it, and no
         framework window starts with less than :data:`ENSURE_WINDOW_MIN_S`
-        left (those values stay pending, :data:`OUT_OF_TIME`).
+        left (those values stay pending, :data:`OUT_OF_TIME`). A window that
+        started waits the full :data:`RESTART_TIMEOUT_S` for the framework.
 
         Args:
             serial: Device serial.
@@ -4087,8 +4087,13 @@ class IdentityService:
         return True
 
     def _wait_framework(self, dev: _Device, old_pid: str) -> bool:
-        """Wait for a new system_server and a working package manager."""
-        deadline = self._deadline(RESTART_TIMEOUT_S)
+        """Wait for a new system_server and a working package manager.
+
+        Always the full :data:`RESTART_TIMEOUT_S`, also under an
+        ``ensure_applied`` budget: the framework is down, and the budget
+        only decides whether a window starts.
+        """
+        deadline = self._clock() + RESTART_TIMEOUT_S
         while self._clock() < deadline:
             out = dev.shell("pidof system_server; pm path android 2>/dev/null")
             lines = out.split()
