@@ -85,6 +85,26 @@ def test_phone_digits_and_00_forms():
     assert _transforms(needles.scan(PHONE.encode()), "phone") == {"value"}
 
 
+def test_hash_labels_keep_the_plainest_case_for_values_without_letters():
+    """A digits-only value equals its lower and upper case: its hashes are
+    labelled with the plain form, never ``upper(...)`` or ``lower(...)``.
+    """
+    digits = "4930555012345"
+    needles = build_needles([Marker("phone", digits, kind="phone")])
+    labels = {n.transform for n in needles.needles}
+    digest = hashlib.sha256(digits.encode()).hexdigest()
+
+    assert "sha256(value)" in labels
+    assert not [t for t in labels if "upper(" in t or "lower(" in t]
+    assert _transforms(needles.scan(digest.encode()), "phone") == {"sha256(value)"}
+
+    mixed = build_needles([Marker("email", EMAIL, kind="email")])
+    mixed_labels = {n.transform for n in mixed.needles}
+    assert {"sha256(value)", "sha256(lower(value))", "sha256(upper(value))"} <= (
+        mixed_labels
+    )
+
+
 def test_extra_forms_from_the_caller():
     needles = build_needles(
         [Marker("phone", PHONE, kind="phone", forms=("030 555012345",))]

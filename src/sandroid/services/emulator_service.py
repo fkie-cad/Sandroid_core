@@ -190,6 +190,16 @@ def _world_change(cause: str, **kwargs) -> None:
         logging.getLogger(__name__).debug(
             "timeline: world change failed", exc_info=True
         )
+    try:
+        # The identity service's memory of the device may be stale now (a
+        # snapshot load or a cold boot): it reads the device record again.
+        from sandroid.services.identity import get_identity_service
+
+        get_identity_service().forget(kwargs.get("dev"), restored=True)
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "identity: forget after a world change failed", exc_info=True
+        )
 
 
 # ---------------------------------------------------------------------------

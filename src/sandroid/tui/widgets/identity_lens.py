@@ -677,8 +677,6 @@ class IdentityLens(Vertical):
         self._incoming_statuses: list[Any] | None = None
         self._listening: tuple[Any, Any] = (None, None)
         self._busy = False
-        self.applied_at: float | None = None
-        self.verified_at: float | None = None
         #: A profile read is running in a worker; only the newest one counts.
         self._loading = False
         self._reload_seq = 0
@@ -839,9 +837,6 @@ class IdentityLens(Vertical):
             count, profile, error = 0, None, str(result)
         else:
             count, profile, error = result
-        old = self.profile.id if self.profile is not None else None
-        if profile is None or profile.id != old:
-            self.applied_at = self.verified_at = None
         self.library_count, self.profile, self.profile_error = count, profile, error
         self.refresh_data()
 
@@ -1109,15 +1104,37 @@ class IdentityLens(Vertical):
                 mode = "off"
         name = profile.name or profile.id
         title = f"{name} rev {profile.revision}, mode {mode}"
+        applied_at, verified_at = self._apply_times(ident, profile)
         bits = []
-        if self.applied_at:
-            bits.append(f"applied {datetime.fromtimestamp(self.applied_at):%H:%M:%S}")
-        if self.verified_at:
-            bits.append(f"verified {datetime.fromtimestamp(self.verified_at):%H:%M:%S}")
+        if applied_at:
+            bits.append(f"applied {datetime.fromtimestamp(applied_at):%H:%M:%S}")
+        if verified_at:
+            bits.append(f"verified {datetime.fromtimestamp(verified_at):%H:%M:%S}")
         if not bits:
-            bits.append("not applied in this session")
+            bits.append("not applied yet")
         bits.append("enter inspect")
         ms.set_lens_caption(LENS_ID, title=title, info=", ".join(bits))
+
+    @staticmethod
+    def _apply_times(ident: Any, profile: Any) -> tuple[float, float]:
+        """``(applied_at, verified_at)`` of this profile on the target device,
+        from the service: every apply and verify, whoever ran it (this lens,
+        an app start, an earlier TUI process through the device record).
+        ``0.0`` when not known.
+        """
+        serial = _target_serial()
+        last = getattr(ident, "last_apply", None)
+        if not serial or last is None:
+            return 0.0, 0.0
+        try:
+            from sandroid.services.identity import fingerprint
+
+            times = last(serial, fingerprint(profile))
+        except Exception:
+            times = None
+        if not times:
+            return 0.0, 0.0
+        return times[0] or 0.0, times[1] or 0.0
 
     def failed_count(self) -> int:
         return sum(1 for r in self.rows if r.info.status == "failed")
@@ -1658,8 +1675,6 @@ class IdentityLens(Vertical):
                 self._failed("Applying the identity profile failed", result)
                 self.refresh_data()
                 return
-            self.applied_at = _read_at(result.infos.values())
-            self.verified_at = self.applied_at
             self._statuses = {i.id: i for i in result.infos.values()}
             self._note_running_app(package)
             counts: dict[str, int] = {}
@@ -1706,7 +1721,6 @@ class IdentityLens(Vertical):
             if isinstance(result, Exception):
                 self._failed("Verify failed", result)
                 return
-            self.verified_at = _read_at(result.infos.values())
             self._statuses = {i.id: i for i in result.infos.values()}
             self.app.notify("Identity values read back from the device.", timeout=3)
             self.refresh_data()
@@ -2093,13 +2107,6 @@ def _read_library(ident: Any) -> tuple[int, Any, str]:
     except Exception:
         logger.debug("identity lens: active markers failed", exc_info=True)
     return count, profile, error
-
-
-def _read_at(infos: Iterable[Any]) -> float:
-    """When the service read these statuses from the device (now if unset)."""
-    return max((getattr(i, "at", 0.0) or 0.0 for i in infos), default=0.0) or (
-        time.time()
-    )
 
 
 def _text_sig(text: Text) -> tuple:
