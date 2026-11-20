@@ -2917,6 +2917,37 @@ def test_older_frozen_records_get_the_per_app_android_id():
     assert [m.id for m in ident._frozen_markers(shared)] == ["android_id@com.z"]
 
 
+def test_the_real_lifecycle_lock_refuses_another_thread(service, device):
+    """With the real app_start lock: held by another thread, the window is
+    refused; held by this thread (the pre-start step), it re-enters.
+    """
+    import threading
+
+    from sandroid.services import app_start as real
+
+    held, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with real.lifecycle_lock(0.0):
+            held.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=holder, daemon=True)
+    thread.start()
+    assert held.wait(10)
+    try:
+        pid = device.pid
+        plan = service.apply(SERIAL, "com.example.app")
+        assert device.pid == pid
+        assert plan.infos["android_id"].reason.startswith(ident.NOT_RESTARTED)
+    finally:
+        release.set()
+        thread.join(10)
+    with real.lifecycle_lock(0.0):  # this thread holds it: re-entrant
+        service.apply(SERIAL, "com.example.app")
+        assert device.pid != pid
+
+
 def test_default_configs_carry_the_same_identity_section():
     import tomllib
 

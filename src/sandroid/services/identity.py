@@ -2538,9 +2538,9 @@ class IdentityService:
         self._hook_installed = False
         self._sleep: Callable[[float], None] = time.sleep
         self._clock: Callable[[], float] = time.monotonic
-        self._clock: Callable[[], float] = time.monotonic
-        #: Called with the serial once the framework is back after a restart
-        #: window (default: restart a running frida-server).
+        #: Called with the serial and the old system_server PID once the
+        #: framework is back after a restart window (default: Frida recovery
+        #: through app_start, then the proxy check).
         self._after_restart: Callable[[str, int | None], None] = (
             _after_framework_restart
         )
@@ -4584,7 +4584,8 @@ class IdentityService:
                     f"identity profile {profile.id!r}: {failed[0].label}: {failed[0].reason}"
                 )
             if allow and any(
-                i.status == "pending" and i.reason == NEEDS_RESTART
+                i.status == "pending"
+                and (i.reason == NEEDS_RESTART or i.reason.startswith(NOT_RESTARTED))
                 for i in plan.infos.values()
             ):
                 # Starting now would show the app its real values (it may
