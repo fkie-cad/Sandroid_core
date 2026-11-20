@@ -2426,6 +2426,20 @@ def record_script(package: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def _started_with(
+    launched: identity_sim.SimValues | None, sim: identity_sim.SimValues | None
+) -> bool:
+    """The emulator started with ``sim``: every SIM value the profile sets
+    (the launch leaves the others at the image's defaults) matches.
+    """
+    if launched is None or sim is None:
+        return False
+    kinds = [
+        k for k in ("imsi", "iccid", "phone_number", "sim_mccmnc") if sim.value_of(k)
+    ]
+    return bool(kinds) and all(launched.value_of(k) == sim.value_of(k) for k in kinds)
+
+
 def _learn_unappliable(mem: _Applied, plan: IdentityPlan) -> None:
     """Framework-restart values ``plan`` found structurally unappliable
     (:data:`STRUCTURAL`, skipped, hook-only); every other one is dropped.
@@ -2938,21 +2952,21 @@ class IdentityService:
                     info.status, info.reason = "failed", "device did not answer"
             return plan
         cc = CALLING_CODES.get(profile.preset, "")
-        found: list[identity_sim.RunningEmulator | None] = []
+        host_emu: list[identity_sim.RunningEmulator | None] = []
 
         def running() -> identity_sim.RunningEmulator | None:
             """Host facts about this emulator (read once per plan)."""
-            if not found:
+            if not host_emu:
                 try:
-                    found.append(
+                    host_emu.append(
                         identity_sim.running_emulator(
                             state.serial, state.props.get("ro.boot.qemu.avd_name", "")
                         )
                     )
                 except Exception:
                     logger.debug("identity: SIM launch check failed", exc_info=True)
-                    found.append(None)
-            return found[0]
+                    host_emu.append(None)
+            return host_emu[0]
 
         for vid, vs in profile.values.items():
             info = plan.infos.get(vid)
@@ -3035,6 +3049,16 @@ class IdentityService:
                 )
             else:
                 info.status = "verified"
+        if state.emulator and state.ok:
+            # The launch this plan checked (verified or toggled): an apply
+            # marks it, so later app starts do not plan for it again.
+            try:
+                sim = identity_sim.sim_values(profile)
+            except Exception:
+                sim = None
+            emu = running() if sim is not None else None
+            if emu is not None and _started_with(emu.sim, sim):
+                plan.sim_key = self._sim_key(state, emu)
         with self._lock:
             if mem.fingerprint == fp:
                 # Root or resetprop may have come (or gone) since: a start
@@ -3105,7 +3129,6 @@ class IdentityService:
         if launched:
             readable = vs.kind == "sim_mccmnc" or state.sim_read
             key = self._sim_key(state, emu)
-            plan.sim_key = key
             with self._lock:
                 toggled = self._sim_toggles.get(key)
                 retry = key in self._sim_retry
@@ -3659,6 +3682,7 @@ class IdentityService:
                     self._sim_retry.add(key)
                 else:
                     self._sim_toggles[key] = err
+                    self._sim_retry.discard(key)  # the result is final now
             if err:
                 # Back to off (it was off) whatever failed.
                 try:
@@ -4020,16 +4044,13 @@ class IdentityService:
         except Exception:
             logger.debug("identity: SIM launch check failed", exc_info=True)
             return False
-        if emu is None or emu.sim is None:
-            return False
-        if any(
-            emu.sim.value_of(kind) != sim.value_of(kind)
-            for kind in ("imsi", "iccid", "phone_number", "sim_mccmnc")
-        ):
+        if emu is None or not _started_with(emu.sim, sim):
             return False  # started with another SIM: a restart sets it, no toggle
         key = (serial, read.boot_id, emu.token)
         with self._lock:
-            return key not in self._sim_checked or key in self._sim_retry
+            if key not in self._sim_checked:
+                return True
+            return key in self._sim_retry and key not in self._sim_toggles
 
     def _read_record(
         self, serial: str, package: str | None = None

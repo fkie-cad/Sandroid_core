@@ -1751,6 +1751,57 @@ def test_a_new_launch_with_a_same_country_sim_is_due(service, device, app_start)
     assert service.pre_spawn("com.example.app") is None
 
 
+def test_a_launch_whose_sim_verifies_is_not_planned_again(service, device, app_start):
+    """A cold boot with the profile's SIM: the guest reports it, the apply
+    marks the launch checked, and later starts plan nothing.
+    """
+    profile = service.active_profile()
+    for vid in ("android_id", "locale"):
+        profile.values[vid].enabled = False
+    service.save(profile)
+    sim = _launched(service, device)
+    device.sim = dict(device.modem)  # already read at boot
+    device.props["gsm.sim.operator.numeric"] = sim.mccmnc
+    device.props["ro.boot.qemu.avd_name"] = "Dev1"
+    plan = service.pre_spawn("com.example.app")
+    assert plan is not None
+    plan.apply()
+    assert not device.airplane
+    for _ in range(3):
+        assert service.pre_spawn("com.example.app") is None
+
+
+def test_started_with_compares_only_the_values_the_profile_sets():
+    sim_cls = ident.identity_sim.SimValues
+    launched = sim_cls(
+        iccid="89860318640220133897",  # the image's default (not patched)
+        imsi="262011234567890",
+        msisdn="15551234567",
+        msisdn_international=False,
+        mccmnc="26201",
+        operator="",
+    )
+    profile_sim = sim_cls(
+        iccid="",
+        imsi="262011234567890",
+        msisdn="",
+        msisdn_international=False,
+        mccmnc="26201",
+        operator="",
+    )
+    assert ident._started_with(launched, profile_sim)
+    other = sim_cls(
+        iccid="",
+        imsi="262019999999999",
+        msisdn="",
+        msisdn_international=False,
+        mccmnc="26201",
+        operator="",
+    )
+    assert not ident._started_with(launched, other)
+    assert not ident._started_with(None, profile_sim)
+
+
 def test_rows_without_a_step_show_the_device_after_the_toggle(service, device):
     """The SIM operator name (hook-only, no step) changes with the toggle:
     the apply reports what the device shows afterwards.
@@ -2099,6 +2150,10 @@ def test_a_toggle_without_answer_is_tried_once_more(
     assert plan.infos["imsi"].reason == "airplane mode: no answer"
     service.apply(SERIAL, "com.example.app")
     assert len(tries) == 2  # the launch's result is final now
+    # Final: later starts do not plan for this launch again.
+    device.props["ro.boot.qemu.avd_name"] = "Dev1"
+    for _ in range(3):
+        assert service.pre_spawn("com.example.app") is None
 
 
 def test_a_snapshot_load_allows_a_new_toggle(service, device, monkeypatch):
