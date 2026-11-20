@@ -119,7 +119,7 @@ Screenshots are not taken on a timer: turn on Tracking in the TUI
 
 For fully non-interactive runs use ``--headless`` (see :doc:`command_line_usage`)::
 
-   sandroid --headless --trigdroid com.suspicious.app
+   sandroid --headless --package com.suspicious.app
    sandroid --headless --batch batch.json
 
 Configuration Examples
@@ -164,7 +164,7 @@ Common Workflows
 
 2. **Start Analysis**::
 
-      sandroid --trigdroid com.suspicious.app --network
+      sandroid --package com.suspicious.app --network
 
 3. **Inspect the app** in the TUI: set it as Spotlight app, enable the Frida
    bypasses it needs, route it through mitmproxy (**Network -> Mitmproxy**,

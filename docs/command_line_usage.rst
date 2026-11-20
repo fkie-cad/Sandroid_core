@@ -157,33 +157,32 @@ List all APKs from the emulator with their hashes:
 - Track APK modifications
 - Generate application manifest
 
-**TrigDroid Integration**::
+**Target Package**::
 
-   sandroid --trigdroid com.malware.package
+   sandroid --package com.malware.package
+   sandroid -p com.malware.package
 
-Execute malware triggers for the specified package:
+Run the command-line analysis with the spotlight set to the given package
+(the package is protected from noise filtering). No scripted actions are
+performed on the device: each run is a forensic diff around the analysis
+window. Scripted device events (sensors, network toggles, battery, ...) will
+come as playbooks.
 
-- Automated malware activation
-- Comprehensive trigger pattern execution
-- Behavioral analysis automation
-
-**TrigDroid Configuration**
-
-TrigDroid is configured in the ``[trigdroid]`` section of the configuration
-file (``sandroid-config show`` / ``sandroid-config set trigdroid.<key> VALUE``).
-The former ``--trigdroid-ccf I|D`` option is not supported in Sandroid 2.x
-(it never had an effect with the current TrigDroid API) and now exits with an
-error.
+``--package``/``-p`` replaces ``--trigdroid``, which was removed together with
+the TrigDroid integration (it never worked inside Sandroid); ``--trigdroid``
+now exits with a usage error that points to ``--package``.
 
 Headless Mode
 -------------
 
 **Basic Headless Operation**::
 
-   sandroid --headless --trigdroid com.example.app
-   sandroid --headless --mode forensic --trigdroid com.example.app
+   sandroid --headless --package com.example.app
+   sandroid --headless --mode forensic
 
-Run analysis without the interactive UI. Requires ``--trigdroid`` or ``--batch``.
+Run analysis without the interactive UI. Malware and security modes need
+``--package`` (security mode also accepts an APK path there) or ``--batch``;
+forensic mode needs no package.
 
 **Batch Processing**::
 
@@ -350,7 +349,7 @@ Common Usage Patterns
 **Malware Analysis**::
 
    # Automated malware analysis
-   sandroid --trigdroid com.malware.sample \
+   sandroid --package com.malware.sample \
             --network \
             --show-deleted --hash \
             --report
