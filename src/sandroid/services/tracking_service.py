@@ -891,6 +891,35 @@ def _address_bar(node: dict) -> bool:
     return bool(rid) and rid.rsplit("/", 1)[-1] in _ADDRESS_BARS
 
 
+def typed_part(value: str, initial: str | None, keys: int, node: dict) -> int | None:
+    """How many leading characters of a read-back ``value`` were typed when
+    the field added an inline autocomplete after them (``wdr.de`` typed,
+    the address bar reads ``wdr.de/``); None when nothing was added.
+
+    The field's selection says it when the node has one (``sel_start`` ..
+    ``sel_end`` reaching the end: the selected suffix is the completion).
+    Else, in a browser's address bar that was empty or kept its text
+    (``initial``; unknown counts as empty: address bars select their text
+    when you tap them, so typing replaces it), more new characters than
+    keystrokes (``keys``) cannot all have been typed: the rest is the
+    completion.
+    """
+    if not value or node.get("password"):
+        return None
+    start, end = node.get("sel_start"), node.get("sel_end")
+    if isinstance(start, int) and isinstance(end, int):
+        if 0 < start < end == len(value):
+            return start
+        return None
+    if not _address_bar(node) or keys <= 0:
+        return None
+    initial = initial or ""
+    if not value.startswith(initial):
+        return None
+    typed = len(initial) + keys
+    return typed if typed < len(value) else None
+
+
 def _web_target(node: dict, answer: dict, alt: dict | None) -> dict | None:
     """``data.target.web`` of a web node (None for native views)."""
     w = node.get("web")
@@ -2711,7 +2740,14 @@ class TrackingService:
         cfg = _config()
         node = cur["node"] or {}
         text, partial = self._typed(cur)
+        value = text
         password = bool(cur["password"])
+        # What you typed and what the field completed after it (inline
+        # autocomplete): the line's text is what you typed.
+        auto = ""
+        n = cur.get("typed_len")
+        if isinstance(n, int) and not password and 0 < n < len(text):
+            text, auto = text[:n], text[n:]
         sensitive = password or bool(cur["data_sensitive"])
         name = _field_name({**node, "cls": cur["cls"]})
         cls = _short_cls(cur["cls"])
@@ -2753,6 +2789,8 @@ class TrackingService:
             data["partial"] = True
         if cfg.capture_text:
             data["text"] = text
+            if auto and not sensitive:
+                data["autocomplete"] = auto
             if sensitive and summary != count:
                 # what readers show while sensitive lines are masked
                 data["masked_summary"] = count
@@ -2774,8 +2812,8 @@ class TrackingService:
             self._inputs += 1
             fk = _field_key(node)
             if fk is not None:
-                self._known[fk] = text
-        self._note_text_mark(seq, cur, node, text, sensitive)
+                self._known[fk] = value
+        self._note_text_mark(seq, cur, node, value, sensitive)
 
     def _note_text_mark(
         self,
@@ -2990,6 +3028,9 @@ class TrackingService:
             "text": value,
             "via": "readback",
         }
+        n = typed_part(value, rb["initial"], rb["keys"], node)
+        if n is not None:
+            cur["typed_len"] = n
         self._emit_text(cur)
 
     @staticmethod

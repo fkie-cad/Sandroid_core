@@ -4231,3 +4231,48 @@ def test_stale_reasons(env, snap, window, why):
     cached = _row("x", **snap)
     cached["window"] = {**cached["window"], **window}
     assert svc._stale_why(cached) == why
+
+
+def test_an_inline_autocomplete_is_kept_apart_from_what_you_typed(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    cfg.text_idle_ms = 400
+    empty = {**URL_BAR, "text": "", "showing_hint": True}
+    reply = {**URL_REPLY, "cached": {**URL_REPLY["cached"], "hit": empty,
+                                     "target": empty}}  # fmt: skip
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.node_reply = reply
+        ge.feed(*tap_lines(1.0))
+        assert wait_for(lambda: of(lines, "input", "tap"))
+        h.node_reply = IME_REPLY
+        h.focus_reply = _focus("wdr.de/")
+        for i in range(6):
+            ge.feed(*tap_lines(2.0 + i * 0.2))
+        assert wait_for(lambda: of(lines, "input", "text"))
+    line = of(lines, "input", "text")[0]
+    assert line["data"]["text"] == "wdr.de"
+    assert line["data"]["autocomplete"] == "/"
+    assert line["summary"] == 'typed "wdr.de" into the address bar'
+
+
+@pytest.mark.parametrize(
+    ("value", "initial", "keys", "node", "n"),
+    [
+        ("wdr.de/", "", 6, {"rid": "url_bar"}, 6),
+        ("wdr.de", "", 6, {"rid": "url_bar"}, None),  # nothing added
+        ("wdr.de/", "", 9, {"rid": "url_bar"}, None),  # more keys than chars
+        # unknown start: an address bar selects its text when tapped
+        ("wdr.de/", None, 6, {"rid": "url_bar"}, 6),
+        ("abc.de", "old", 1, {"rid": "url_bar"}, None),  # replaced: unknown
+        ("wdr.de/", "", 6, {"rid": "com.x:id/q"}, None),  # not an address bar
+        ("wdr.de/", "", 6, {"rid": "url_bar", "password": True}, None),
+        # the field's selection tells, in any field
+        ("spiegel.de/", "", 20, {"rid": "q", "sel_start": 7, "sel_end": 11}, 7),
+        ("spiegel.de", "", 3, {"rid": "url_bar", "sel_start": 10, "sel_end": 10},
+         None),
+    ],
+)  # fmt: skip
+def test_typed_part(value, initial, keys, node, n):
+    assert ts.typed_part(value, initial, keys, node) == n
