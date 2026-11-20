@@ -504,6 +504,26 @@ def exif_bytes(
     return exif.tobytes()
 
 
+def screenshot_exif(taken_ms: int, tz: dt.tzinfo, size: tuple[int, int]) -> bytes:
+    """EXIF of a screenshot, as Android's SystemUI writes it into the PNG
+    (eXIf chunk): pixel size and the capture time with sub-seconds and
+    offset; no camera, no GPS. MediaStore takes ``datetaken`` from it.
+    """
+    from PIL import Image
+
+    local = dt.datetime.fromtimestamp(taken_ms / 1000, tz)
+    off = local.strftime("%z")
+    exif = Image.Exif()
+    exif[0x0100] = size[0]  # ImageWidth
+    exif[0x0101] = size[1]  # ImageLength
+    exif[_EXIF_IFD] = {
+        0x9003: local.strftime("%Y:%m:%d %H:%M:%S"),  # DateTimeOriginal
+        0x9011: f"{off[:3]}:{off[3:]}" if off else "+00:00",  # OffsetTimeOriginal
+        0x9291: f"{taken_ms % 1000:03d}",  # SubSecTimeOriginal
+    }
+    return exif.tobytes()
+
+
 def _srgb_pixels(im: Any) -> Any:
     """Return the first frame as a fresh RGB image (orientation applied,
     converted to sRGB when it carried another ICC profile, no metadata).
@@ -550,7 +570,7 @@ def process_photo(
 
     Camera photos become a JPEG (quality :data:`JPEG_QUALITY`) with the EXIF
     of :func:`exif_bytes` (Make/Model from the record, its time and GPS).
-    Screenshots become a PNG with no metadata at all.
+    Screenshots become a PNG with only :func:`screenshot_exif`.
 
     Args:
         src: The original file (verified photo-pack file).
@@ -579,7 +599,7 @@ def process_photo(
         raise PhotoError(f"{src.name}: {exc}") from exc
     lat = lon = None
     if shot:
-        clean.save(dest, format="PNG", optimize=False)
+        clean.save(dest, format="PNG", exif=screenshot_exif(taken_ms, tz, clean.size))
     else:
         lat, lon = record.get("lat"), record.get("lon")
         if lat is None or lon is None:

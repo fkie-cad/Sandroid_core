@@ -192,15 +192,25 @@ def test_no_gps_without_a_position(leaky_jpeg: Path, tmp_path: Path) -> None:
     assert out.lat is None
 
 
-def test_screenshots_become_bare_pngs(tmp_path: Path) -> None:
+def test_screenshots_carry_only_a_systemui_style_exif(tmp_path: Path) -> None:
     src = sorted(ph.SCREENSHOT_DIR.glob("ss-*.png"))[0]
     rec = {**REC, "source": "ss-0001", "file": "files/ss-0001.png",
            "category": "screenshot_like", "lat": None, "lon": None}  # fmt: skip
     out = ph.process_photo(src, rec, BERLIN, tmp_path / "out")
     im = Image.open(out.path)
     assert im.format == "PNG"
-    assert not im.getexif()
-    assert not {k for k in im.info if k not in ("dpi",)}
+    exif = im.getexif()
+    assert set(exif) == {0x0100, 0x0101, 0x8769}  # size + Exif IFD; no camera
+    assert (exif[0x0100], exif[0x0101]) == im.size
+    ifd = exif.get_ifd(0x8769)
+    local = dt.datetime.fromtimestamp(out.taken_ms / 1000, BERLIN)
+    assert ifd == {
+        0x9003: local.strftime("%Y:%m:%d %H:%M:%S"),
+        0x9011: local.strftime("%z")[:3] + ":" + local.strftime("%z")[3:],
+        0x9291: f"{out.taken_ms % 1000:03d}",
+    }
+    assert not exif.get_ifd(0x8825)
+    assert not {k for k in im.info if k not in ("dpi", "exif")}
     assert out.remote_dir == "Pictures/Screenshots"
     local = dt.datetime.fromtimestamp(out.taken_ms / 1000, BERLIN)
     assert out.name == f"Screenshot_{local:%Y%m%d-%H%M%S}.png"
