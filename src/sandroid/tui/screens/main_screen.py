@@ -936,7 +936,7 @@ class MainScreen(Screen):
         """Switch to the Network lens and show friTap's state (key ``h``).
 
         The Network lens has no sub-tabs any more: its ``select_subtab`` hook
-        opens the "Capture status" Inspector page on its friTap tab.
+        opens the "Network status" Inspector page on its friTap tab.
         """
         self.switch_lens("network")
         try:

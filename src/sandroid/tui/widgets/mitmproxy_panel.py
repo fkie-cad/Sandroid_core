@@ -809,7 +809,8 @@ class MitmproxyPanel(Widget):
         if not self._service.is_running():
             return (
                 f"No flows yet — space starts mitmproxy on :{st.proxy_port}",
-                "then ^D routes the device · ^N installs the CA · y proxy settings",
+                "then Ctrl+D routes the device · Ctrl+N installs the CA · "
+                "y proxy settings",
             )
         if self._proxy_state == "ours" and self._reach_state == "unreachable":
             addr = escape(self._proxy_addr or f":{st.proxy_port}")
@@ -832,9 +833,9 @@ class MitmproxyPanel(Widget):
         if self._proxy_state != "ours" and not routed_apps:
             return (
                 f"mitmproxy is listening on :{st.proxy_port} — waiting for traffic",
-                "^D routes the device through it · y sets per-app proxies",
+                "Ctrl+D routes the device through it · y sets per-app proxies",
             )
-        hint = "" if self._ca_ok else "^N installs the CA so HTTPS can be read"
+        hint = "" if self._ca_ok else "Ctrl+N installs the CA so HTTPS can be read"
         return ("Waiting for the first flow…", hint)
 
     def status_rows(self) -> list[tuple[str, str]]:
@@ -1791,7 +1792,7 @@ class MitmproxyPanel(Widget):
                 if not spotlight.get_app_tuple():
                     self._append_line(
                         "[ERROR] No spotlight app. "
-                        "Press c (use the foreground app) or ⇧C (pick an app…) first."
+                        "Press c (use the foreground app) or Shift+C (pick an app) first."
                     )
                     self._refresh_header()
                     return
@@ -1924,16 +1925,19 @@ class MitmproxyPanel(Widget):
             logger.warning("Failed to open browser: %s", exc)
             opened = False
         if not opened:
-            self._append_line(f"[ERROR] Could not open a browser — mitmweb UI: {url}")
+            self._append_line(
+                f"[ERROR] Could not open a browser — Mitmproxy web interface: {url}"
+            )
             self._notify(f"No browser opened — the URL is in the log (` ): {shown}")
             return
         token_note = (
             " (logged in with its token)"
             if self._service.has_web_token
-            else " (mitmweb may ask for the token it printed on start)"
+            else " (the web interface may ask for the token Mitmproxy printed on start)"
         )
-        self._append_line(f"[INFO] Opened mitmweb UI {shown}{token_note}")
-        self._notify(f"Opened mitmweb UI {shown}{token_note}")
+        opened = f"Opened the Mitmproxy web interface {shown}{token_note}"
+        self._append_line(f"[INFO] {opened}")
+        self._notify(opened)
 
     def _notify(self, message: str, severity: str = "information") -> None:
         try:

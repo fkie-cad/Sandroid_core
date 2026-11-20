@@ -569,7 +569,7 @@ async def test_proxy_controls_stay_bound(flow_dir, monkeypatch):
         await pilot.press("I")
         await settle(pilot)
         assert ms.inspector_content.key == STATUS_KEY
-        assert [n for n, _ in ms.inspector_content.tabs] == ["mitmproxy", "friTap"]
+        assert [n for n, _ in ms.inspector_content.tabs] == ["Mitmproxy", "friTap"]
 
 
 async def test_review_scope_filters_by_run_window(flow_dir, tmp_path):
@@ -663,6 +663,31 @@ def test_mitm_port_shown_is_the_configured_one(monkeypatch):
         ProxyManager, "get_host_ip", classmethod(lambda cls: "10.0.2.2")
     )
     assert ProxyManager.get_default_config().port == 8090
+
+
+def test_network_keys_are_words(monkeypatch):
+    """Hints and key lists name keys in words (Ctrl+D, Shift+C, Space)."""
+    import re
+
+    import sandroid.config as config_mod
+    from sandroid.config import SandroidConfig
+    from sandroid.services.mitmproxy_service import MitmproxyService
+    from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
+    from sandroid.tui.widgets.network_panel import NetworkPanel
+
+    key_glyphs = re.compile(r"[⇧␣⏎←→]|\^[A-Z]\b")
+    monkeypatch.setattr(config_mod, "_config_instance", SandroidConfig())
+    service = MitmproxyService()
+    panel = MitmproxyPanel()
+    panel._service = service
+    texts = list(panel.empty_hint())
+    monkeypatch.setattr(service, "is_running", lambda: True)
+    texts += list(panel.empty_hint())
+    for text in texts:
+        assert not key_glyphs.search(text), text
+    space = [b for b in NetworkPanel.BINDINGS if b.key == "space"]
+    assert space
+    assert not space[0].key_display
 
 
 # --------------------------------------------------------------------------
@@ -1062,7 +1087,9 @@ async def test_ctrl_o_opens_mitmweb_with_its_token(flow_dir, monkeypatch):
         await settle(pilot)
         assert opened == [f"{svc.web_url(with_token=False)}?token=s3cret-token"]
         toast = [n.message for n in app._notifications]
-        assert any("Opened mitmweb UI" in m and "token" in m for m in toast)
+        assert any(
+            "Opened the Mitmproxy web interface" in m and "token" in m for m in toast
+        )
         assert not any("s3cret-token" in m for m in toast)
 
 

@@ -108,7 +108,7 @@ async def test_legacy_navigation_helpers_redirect() -> None:
         ms.open_fritap_tab()
         await settle(pilot)
         assert ms.active_lens == "network"
-        assert ms.inspector_is_open  # friTap tab of the Capture status page
+        assert ms.inspector_is_open  # friTap tab of the Network status page
         assert ms.query_one("#inspector").tab_index == 1
         ms.cycle_bottom_tab(1)
         await settle(pilot)

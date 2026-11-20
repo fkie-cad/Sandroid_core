@@ -53,7 +53,7 @@ mounted hidden inside this lens as controllers; this lens binds their keys
 their state in the caption (``Mitmproxy on :<port> · device routed · CA
 installed · friTap on``,
 ``<port>`` = the configured ``mitmproxy.proxy_port``)
-and on the "Capture status" Inspector page (``I``; ``h`` opens its friTap
+and on the "Network status" Inspector page (``I``; ``h`` opens its friTap
 tab). Their log lines go to the ActivityLog drawer (`` ` ``).
 
 REVIEW scope: ``on_scope_changed`` loads the run's flows from its bundle
@@ -1117,12 +1117,12 @@ class NetworkPanel(Widget):
     POLL_SECONDS = 1.0
 
     BINDINGS = [
-        # Shown in the footer, which keeps two lens keys: "␣ start mitm" and
-        # "^D device proxy" while nothing is captured, then "/" and "T".
+        # Shown in the footer, which keeps two lens keys: "Space Start Mitmproxy"
+        # and "Ctrl+D device proxy" while nothing is captured, then "/" and "T".
         # Space, not Enter: Enter means "inspect" in every lens (MainScreen).
         # Space only STARTS mitmproxy; stopping it (which also clears our
         # device proxy) stays on the deliberate M.
-        Binding("space", "start_mitm", "Start mitm", key_display="␣"),
+        Binding("space", "start_mitm", "Start Mitmproxy"),
         Binding("slash", "filter", "Filter"),
         Binding("T", "toggle_app_only", "App only"),
         Binding("W", "network_method", "Network method", show=False),
@@ -1130,13 +1130,13 @@ class NetworkPanel(Widget):
         Binding("N", "toggle_noise", "Show OS noise", show=False),
         Binding("H", "cycle_highlight_filter", "AI filter: next set / off", show=False),
         Binding("X", "clear_highlights", "Clear the AI highlights", show=False),
-        Binding("I", "status", "Capture status", show=False),
+        Binding("I", "status", "Network status", show=False),
         Binding("M", "mitm('toggle_running')", "Start/stop mitm", show=False),
         Binding("ctrl+n", "mitm('inject_ca')", "Install CA", show=False),
         Binding("ctrl+p", "mitm('toggle_ssl_unpin')", "SSL unpin", show=False),
         Binding("ctrl+r", "mitm('restart')", "Restart mitm", show=False),
         Binding("ctrl+a", "mitm('manage_addons')", "Addons", show=False),
-        Binding("ctrl+o", "mitm('open_browser')", "Open mitmweb", show=False),
+        Binding("ctrl+o", "mitm('open_browser')", "Open web interface", show=False),
         Binding("ctrl+v", "mitm('toggle_verbose')", "Verbose plumbing", show=False),
         Binding("ctrl+l", "clear_view", "Clear view", show=False),
         Binding("ctrl+f", "fritap_output", "friTap output", show=False),
@@ -2025,7 +2025,7 @@ class NetworkPanel(Widget):
             more = f" (+{len(pcaps) - 1} more)" if len(pcaps) > 1 else ""
             hints.append(
                 f"its packet capture: {escape(rel)} · {human_size(size)}{more} "
-                "(Sessions ⏎ → Report shows the folder; open it in Wireshark)"
+                "(Sessions, Enter, then Report shows the folder; open it in Wireshark)"
             )
         hints.append("L back to LIVE")
         if self._phase_hidden and not self._show_all_phases:
@@ -2439,8 +2439,8 @@ class NetworkPanel(Widget):
                     ("Why", why),
                     (
                         "Next",
-                        "[b]^P[/b] unpins the spotlight app (exp.) · "
-                        "[b]^N[/b] installs the CA",
+                        "[b]Ctrl+P[/b] unpins the spotlight app (exp.) · "
+                        "[b]Ctrl+N[/b] installs the CA",
                     ),
                 ],
                 key=key,
@@ -2518,21 +2518,22 @@ class NetworkPanel(Widget):
             title=f"{row.method} {label}",
             subtitle=escape(_ellipsize(row.host + row.path, 300)),
             tabs=tabs,
-            footer="←/→ tab",
+            footer="Left/Right: tab",
             key=key,
             lens=LENS_ID,
         )
 
     def status_content(self) -> InspectorContent:
-        """The "Capture status" page: mitmproxy and friTap tabs."""
+        """The "Network status" page: Mitmproxy and friTap tabs."""
         mitm, fritap = self.mitm, self.fritap
         m_grid = _grid()
         for label, value in mitm.status_rows() if mitm is not None else []:
             m_grid.add_row(label, Text.from_markup(value))
         m_keys = (
-            "[b]M[/b] start/stop  [b]^D[/b] device proxy  [b]^N[/b] install CA\n"
-            "[b]^P[/b] SSL unpin  [b]^R[/b] restart  [b]^A[/b] addons\n"
-            "[b]^O[/b] mitmweb UI  [b]^V[/b] verbose  [b]y[/b] proxy settings"
+            "[b]M[/b] start/stop  [b]Ctrl+D[/b] device proxy  [b]Ctrl+N[/b] install CA\n"
+            "[b]Ctrl+P[/b] SSL unpin  [b]Ctrl+R[/b] restart  [b]Ctrl+A[/b] addons\n"
+            "[b]Ctrl+O[/b] web interface  [b]Ctrl+V[/b] verbose  "
+            "[b]y[/b] proxy settings"
         )
         m_recent = list(mitm.recent_lines)[-8:] if mitm is not None else []
         m_sections: list[tuple[str, Any]] = [("", m_grid), ("Keys", m_keys)]
@@ -2546,16 +2547,16 @@ class NetworkPanel(Widget):
         f_recent = list(fritap.recent_lines)[-12:] if fritap is not None else []
         f_sections: list[tuple[str, Any]] = [
             ("", f_grid),
-            ("Keys", "[b]h[/b] start/stop friTap  [b]^F[/b] output folder"),
+            ("Keys", "[b]h[/b] start/stop friTap  [b]Ctrl+F[/b] output folder"),
         ]
         if f_recent:
             f_sections.append(
                 ("Recent", Text("\n".join(f_recent), style=lens_palette().muted))
             )
         return InspectorContent(
-            title="Capture status",
-            tabs=[("mitmproxy", m_sections), ("friTap", f_sections)],
-            footer="←/→ tab",
+            title="Network status",
+            tabs=[("Mitmproxy", m_sections), ("friTap", f_sections)],
+            footer="Left/Right: tab",
             key=STATUS_KEY,
             lens=LENS_ID,
         )
@@ -2905,7 +2906,7 @@ class NetworkPanel(Widget):
         if action in ("cycle_highlight_filter", "clear_highlights"):
             return self._hl.active
         if action in ("filter", "toggle_app_only"):
-            # Nothing to filter yet: hidden, so the footer shows ^D instead.
+            # Nothing to filter yet: hidden, so the footer shows Ctrl+D instead.
             return bool(self._model())
         return True
 
@@ -2956,7 +2957,7 @@ class NetworkPanel(Widget):
         self._focus_app = self._spotlight_package()
         if not self._app_only and not self._focus_app:
             self.app.notify(
-                "No spotlight app — c uses the foreground app, ⇧C picks one.",
+                "No spotlight app — c uses the foreground app, Shift+C picks one.",
                 timeout=3,
             )
             return

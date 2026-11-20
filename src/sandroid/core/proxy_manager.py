@@ -1373,12 +1373,12 @@ class CAManager:
 
             # Force-stop Chrome so it picks up the new flags on next launch --
             # unless Chrome is the running spotlight app: that is never
-            # killed without the user's OK (they restart it with ⇧R).
+            # killed without the user's OK (they restart it with Shift+R).
             if self._chrome_is_running_spotlight():
                 logger.info("Chrome CT bypass flags installed (8 locations)")
                 return True, (
                     f"Chrome CT bypass installed (SPKI: {spki_hash[:12]}...) "
-                    "— Chrome keeps running; restart it (⇧R) to apply"
+                    "— Chrome keeps running; restart it (Shift+R) to apply"
                 )
             Adb.send_adb_command("shell am force-stop com.android.chrome")
 

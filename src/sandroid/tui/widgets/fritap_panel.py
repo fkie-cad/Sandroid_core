@@ -11,7 +11,7 @@ config modal, task registration, the paused-spawn guard, and dual-path cleanup
 
 Mounted *hidden* inside the Network lens (like ``MitmproxyPanel``): the lens
 shows friTap's state in its caption (``friTap on``) and on the friTap tab of its
-"Capture status" Inspector page (``h`` or ``I``), built from
+"Network status" Inspector page (``h`` or ``I``), built from
 :meth:`FriTapPanel.status_rows` and the bounded ``recent_lines`` tail. friTap's
 output itself reaches the ActivityLog drawer through ``MainScreen``'s generic
 TASK_OUTPUT handler, so this widget does not write it there a second time.
