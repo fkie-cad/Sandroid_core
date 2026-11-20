@@ -73,7 +73,6 @@ class FridaSessionService:
     - JobManager lifecycle and access
     - Session state tracking
     - Hook registration and conflict detection
-    - Spawn/attach mode management
     - Multi-tool spawn coordination
     - Frida device caching for TUI thread safety
 

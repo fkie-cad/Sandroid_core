@@ -119,8 +119,7 @@ class ServiceProperty:
             setattr(service, self.attr_name, value)
             return
         if self.setter_name is not None:
-            # If setter_name starts with "_", treat as direct attribute write
-            # (e.g., ``_spawn_mode`` on SpotlightService).
+            # Not callable (a private attribute name): write it directly.
             target = getattr(service, self.setter_name, None)
             if callable(target):
                 target(value)

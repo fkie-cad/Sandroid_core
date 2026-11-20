@@ -145,8 +145,9 @@ lens focused:
 - ``Space`` start (or resume a paused start; never restarts a running app),
   Shift+``A`` attach, Shift+``P`` start paused (asks first when the app runs;
   the app stays paused until ``Space``, which Android limits to about 10 s),
-  Shift+``R`` restart with the armed hooks, Shift+``K`` kill and tear down
-  hooks, Shift+``X`` clear the selection
+  Shift+``R`` restart with the armed hooks, Shift+``K`` kill the app and stop
+  its tools (the bypasses that were on stay armed, so ``Space`` starts with
+  them), Shift+``X`` clear the selection
 - ``b`` then ``1``-``6`` toggles/arms the Frida bypass categories **SSL**,
   **Root**, **Frida**, **Debug**, **Integrity**
   (PairIP/licensing/attestation) and **Emulator** (Build profile, qemu

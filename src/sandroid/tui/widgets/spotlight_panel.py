@@ -135,7 +135,8 @@ class SpotlightPanel(Widget):
         A:       attach to the live process + apply armed hooks
         P:       start paused (advanced; Space then resumes; asks before
                  restarting a running app; Android ends a hold after ~10 s)
-        K:       kill the app + tear down all hooks
+        K:       kill the app and stop its tools; the bypasses that were on
+                 stay armed, so Space starts with them
         X:       clear the spotlight selection
 
     Lowercase s/r/a/p/x are deliberately NOT bound — they shadow the
@@ -1172,8 +1173,8 @@ class SpotlightPanel(Widget):
         self.app.push_screen(
             ConfirmModal(
                 title="Kill app",
-                message=f"Force-stop {self._current_package()} and tear down "
-                "its hooks?",
+                message=f"Force-stop {self._current_package()} and stop its "
+                "tools? The bypasses that are on stay armed for the next start.",
                 guard_typing=True,
             ),
             on_result,
