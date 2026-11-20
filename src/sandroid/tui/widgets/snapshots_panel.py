@@ -324,7 +324,10 @@ class SnapshotsPanel(Widget):
 
     def _render_header(self) -> str:
         if not self._emulator_available():
-            return "[#fb7185]Snapshots require a running emulator[/]"
+            from sandroid.tui.themes import lens_palette
+
+            bad = lens_palette().bad
+            return f"[{bad}]○ Snapshots require a running emulator[/]"
         if self._console_refused:
             from sandroid.core.adb_emulator import CONSOLE_NOT_AUTHENTICATED
 

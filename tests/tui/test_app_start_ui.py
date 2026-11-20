@@ -137,10 +137,10 @@ def test_header_shows_the_run_state_and_no_mode(monkeypatch):
     def plain() -> str:
         return Text.from_markup(panel._render_header()).plain
 
-    assert plain().startswith(f"running pid 77  {PKG}")
+    assert plain().startswith(f"● running pid 77  {PKG}")
     assert "spawn" not in plain()
     svc.set_pid(None)
-    assert plain().startswith(f"not running  Space starts  {PKG}")
+    assert plain().startswith(f"○ not running  Space starts  {PKG}")
     svc.reset()
     header = panel._render_header()
     assert "use the foreground app" in header

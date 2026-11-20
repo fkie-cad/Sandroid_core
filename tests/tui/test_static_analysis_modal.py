@@ -89,8 +89,10 @@ async def test_dialog_text_has_no_symbols() -> None:
     assert "selected" in text
     assert " on" in text
     assert " off" in text
-    # Plain words only: letters, digits, spaces and ordinary punctuation.
-    assert not re.search(r"[^\w\s,.;:()/-]", text), text
+    # Words, ordinary punctuation and the ● / ○ status dots; no other glyph.
+    assert "● on" in text
+    assert "○ off" in text
+    assert not re.search(r"[^\w\s,.;:()/●○-]", text), text
 
 
 def test_normalize_choice_drops_stale_values() -> None:

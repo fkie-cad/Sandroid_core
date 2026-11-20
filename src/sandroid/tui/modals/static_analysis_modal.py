@@ -170,7 +170,7 @@ class StaticAnalysisModal(ForensicModal[dict]):
         return f"[$text-muted]{profile:<9} {description}[/]"
 
     def _toggle_text(self, key: str, setting: str, label: str) -> str:
-        state = "[$success]on[/]" if self.choice[setting] else "[$text-muted]off[/]"
+        state = "[$success]● on[/]" if self.choice[setting] else "[$text-muted]○ off[/]"
         return f"[$accent]{key}[/]  {label:<20} {state}"
 
     def _refresh_rows(self) -> None:

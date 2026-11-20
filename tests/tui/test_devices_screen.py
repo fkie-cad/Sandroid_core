@@ -639,6 +639,28 @@ async def test_enter_on_a_booting_device_does_not_dismiss() -> None:
     assert app.result == "unset"
 
 
+async def test_state_cell_has_a_status_dot_in_the_state_colour() -> None:
+    """● up, ○ stopped, ◌ pending, in the State cell (not the mark column);
+    failure states keep plain words.
+    """
+    from sandroid.tui.themes import lens_palette
+
+    app, screen = _hub(devices=[READY, ACTIVE, UNAUTH, BOOTING], avds=[IDLE])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        c = lens_palette()
+        cell = screen._state_cell(READY)
+        assert (cell.plain, str(cell.style)) == ("● ready", c.ok)
+        assert screen._state_cell(ACTIVE).plain == "● ready, active"
+        assert screen._state_cell(BOOTING).plain.startswith("◌ booting")
+        assert screen._state_cell(IDLE).plain == "○ stopped"
+        assert screen._state_cell(BUSY_AVD).plain == "● running elsewhere"
+        assert screen._state_cell(UNAUTH).plain == "unauthorized"
+        screen._busy[IDLE.key] = "starting…"
+        assert screen._state_cell(IDLE).plain == "◌ starting…"
+        screen._busy.pop(IDLE.key)
+
+
 async def test_one_list_running_then_stopped_then_elsewhere() -> None:
     app, screen = _hub(devices=[READY, UNAUTH], avds=[IDLE, BUSY_AVD, OTHER])
     async with app.run_test(size=SIZE) as pilot:
@@ -943,7 +965,7 @@ async def test_an_unprobed_device_attaches_only_after_a_confirm(
     app, screen = _hub(devices=[FOREIGN])
     async with app.run_test(size=SIZE) as pilot:
         await _shown(pilot, screen)
-        assert str(screen._state_cell(FOREIGN)) == "in use · not probed"
+        assert str(screen._state_cell(FOREIGN)) == "in use · ◌ not probed"
         assert "not probed" in _box(screen)["note"]
         await pilot.press("enter")
         await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")

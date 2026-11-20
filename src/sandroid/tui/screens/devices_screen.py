@@ -1281,23 +1281,29 @@ class DevicesScreen(ModalScreen[str | None]):
         return row.boot_elapsed + max(0.0, time.monotonic() - self._applied_at)
 
     def _state_cell(self, row: DeviceRow | AvdRow) -> Text:
+        """The State cell: a status dot plus the word, in the state colour
+        (● up, ○ stopped, ◌ pending). Failure states (offline,
+        unauthorized, no permissions, adb's raw words) get no dot.
+        """
         busy = self._busy.get(row.key)
         if busy:
-            return Text(busy, style=_c("title"))
+            return Text(f"◌ {busy}", style=_c("title"))
         if isinstance(row, AvdRow):
             if row.running_elsewhere:
-                return Text("running elsewhere", style=_c("warn"))
-            return Text("stopped", style=_c("dim"))
+                return Text("● running elsewhere", style=_c("warn"))
+            return Text("○ stopped", style=_c("dim"))
         if row.active:
-            return Text("ready, active", style=f"bold {_c('ok')}")
+            return Text("● ready, active", style=f"bold {_c('ok')}")
         label = row.state.value
-        if row.state is RowState.BOOTING:
+        if row.state is RowState.READY:
+            label = f"● {label}"
+        elif row.state is RowState.BOOTING:
             elapsed = format_elapsed(self._elapsed(row))
-            label = f"booting {elapsed}".strip()
+            label = f"◌ booting {elapsed}".strip()
         elif row.state is RowState.OTHER:
             label = row.raw_state
-        elif row.state is RowState.UNPROBED and not row.is_emulator:
-            label = "not probed"
+        elif row.state is RowState.UNPROBED:
+            label = "in use · ◌ not probed" if row.is_emulator else "◌ not probed"
         return Text(label, style=_c(_STATE_STYLE[row.state]))
 
     def _cells(self, row: DeviceRow | AvdRow) -> tuple[Any, ...]:

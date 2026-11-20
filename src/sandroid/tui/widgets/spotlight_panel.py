@@ -551,7 +551,7 @@ class SpotlightPanel(Widget):
         package = self._current_package()
         if not package:
             return (
-                f"[{c.bad}]no app[/]  [b]c[/] use the foreground app  "
+                f"[{c.bad}]○ no app[/]  [b]c[/] use the foreground app  "
                 "[b]Shift+C[/] pick an app…"
             )
 
@@ -563,20 +563,20 @@ class SpotlightPanel(Widget):
         from sandroid.services.app_start import pre_start_status
 
         step = pre_start_status(package)
-        if step and self.size.width and len(step) + len(package) + 40 > self.size.width:
+        if step and self.size.width and len(step) + len(package) + 42 > self.size.width:
             step = pre_start_status(package, short=True)
         if step:
             # Identity's apply can take minutes: say so, not "not running".
-            state = f"[{c.warn}]{escape(step)}[/]"
+            state = f"[{c.warn}]◌ {escape(step)}[/]"
         elif paused:
             pid_part = f" pid [b]{pid}[/]" if pid else ""
-            state = f"[{c.warn}]paused[/]{pid_part}  [{c.dim}]Space resumes[/]"
+            state = f"[{c.warn}]◌ paused[/]{pid_part}  [{c.dim}]Space resumes[/]"
         elif pid:
-            state = f"[{c.ok}]running[/] pid [b]{pid}[/]"
+            state = f"[{c.ok}]● running[/] pid [b]{pid}[/]"
         elif self._restarting():
-            state = f"[{c.warn}]restarting…[/]"
+            state = f"[{c.warn}]◌ restarting…[/]"
         else:
-            state = f"[{c.bad}]not running[/]  [{c.dim}]Space starts[/]"
+            state = f"[{c.bad}]○ not running[/]  [{c.dim}]Space starts[/]"
 
         bypass_tag = (
             f"[{c.ok}]bypass: {', '.join(on)}[/]" if on else f"[{c.dim}]bypass: none[/]"
@@ -735,7 +735,7 @@ class SpotlightPanel(Widget):
         if self._is_paused():
             return "Space resume"
         if self._safe_pid():
-            return f"[{lens_palette().dim}]running[/]"
+            return f"[{lens_palette().dim}]● running[/]"
         return "Space start"
 
     def _repaint_text(self, _theme: object = None) -> None:
@@ -1879,7 +1879,7 @@ class BypassChordModal(_FridaModalBase):
         rows = []
         for key, category, label in _BYPASS_TOGGLES:
             is_on = category in self._on
-            mark = f"[{c.ok}]on [/]" if is_on else f"[{c.dim}]off[/]"
+            mark = f"[{c.ok}]● on [/]" if is_on else f"[{c.dim}]○ off[/]"
             rows.append(f"  [b]{key}[/]  {mark}  {label}")
         rows.append("")
         rows.append("  [b]o[/]  Objection shell [dim](b b works too)[/dim]")
