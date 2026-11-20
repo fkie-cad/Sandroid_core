@@ -327,7 +327,7 @@ one event per second and call (``force=True`` for the first and last). It
 is the one event emitted from a tool helper thread; the chat sink is a
 thread-safe queue, ``session._observe`` ignores it, and the chat panel's
 ``_on_tool_progress`` sets the running ``ToolBlock``'s progress line
-(``└ classifying 120/412 · 9 matched``) until the result chip replaces it.
+(``classifying 120/412 · 9 matched``) until the result chip replaces it.
 
 Digests and privacy
 -------------------

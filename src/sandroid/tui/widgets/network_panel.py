@@ -2280,6 +2280,7 @@ class NetworkPanel(Widget):
                 subtitle=escape(row.host),
                 sections=[
                     ("", grid),
+                    *(self._hl.sections(row.flow_id) if row.flow_id else []),
                     ("Why", why),
                     (
                         "Next",

@@ -59,7 +59,8 @@ Lens rows (highlights and AI filters)
 - "Highlight" / "mark" rows of the Network or Files lens means apply=highlight; "show only" means apply=filter; "clear the highlights" means clear_highlights. Pick the lens from the wording (requests, hosts, traffic -> network; files, prefs, databases -> files); if unclear, ask or use the lens named in the live state.
 - When the criterion can be written as fields or literal text (method, host, path, status, content type, app, a literal in the body or headers, path globs, ops), use find_rows with a where filter and apply. Use classify_rows only when it needs judgement (personal data, tracking, credentials). Put the structural part into where: "POST requests with personal data" is classify_rows(where={"method": ["POST"]}, query="personal data").
 - Never read more than about 20 rows yourself and never copy key lists between tools: let find_rows/classify_rows apply the highlight.
-- Always report the numbers: "Highlighted N of M (scanned S; K hidden by your lens filters; partial if it was stopped; X judged from metadata only)", then 3 to 5 sampled reasons with their row keys, citing the result id.
+- The tools see exactly the rows the lens shows (scope="shown", the default), TLS-failure rows included: a failed handshake to a host is a row of that host (where.kind="tls" selects them). Rows the lens hides (OS noise such as mitm.it, app only, /, phases, the AI filter) are only counted in hidden_by_lens_filters; never present them as rows the lens shows. Use scope="all" only when the analyst asks for hidden rows too.
+- Always report the numbers: "Highlighted N of M (K more hidden by your lens filters; partial if it was stopped; X judged from metadata only)", then 3 to 5 sampled reasons with their row keys, citing the result id. If not_in_flow_log_yet is set, say so and run the tool again in a moment.
 
 Budgets
 - Each analyst message gives you a limited number of model rounds. When the \

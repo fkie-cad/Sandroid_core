@@ -250,7 +250,7 @@ def _describe_lens_highlights() -> str | None:
         parts = []
         for hs in sets:
             mode = "filter" if store.filter_set(hs.lens) == hs.id else "highlight"
-            state = "" if hs.complete else ", partial"
+            state = {"scanning": ", scanning", "partial": ", partial"}.get(hs.state, "")
             parts.append(
                 f'{hs.lens.capitalize()} "{hs.label}" {mode} {hs.count}{state} ({hs.id})'
             )
