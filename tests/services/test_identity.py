@@ -1112,6 +1112,35 @@ def test_a_plan_never_overwrites_an_apply_s_newer_statuses(
     assert stamps() != {NOW}  # a plain read publishes
 
 
+def test_a_verify_during_an_apply_keeps_the_apply_s_statuses(
+    service, device, monkeypatch
+):
+    """The old ``v`` race: a verify that read before an apply finished must
+    not publish its older read over the apply's statuses.
+    """
+    service.apply(SERIAL, "com.example.app")
+
+    def name_status():
+        return next(s.status for s in service.statuses() if s.id == "device_name")
+
+    assert name_status() == "verified"
+    device.settings["device_name"] = "someone else"  # what the old read saw
+    real = service.preflight
+
+    def apply_meanwhile(*a, **kw):
+        state = real(*a, **kw)
+        with service._lock:
+            service._applied[SERIAL].gen += 1
+        return state
+
+    monkeypatch.setattr(service, "preflight", apply_meanwhile)
+    service.verify(SERIAL)
+    assert name_status() == "verified"
+    monkeypatch.setattr(service, "preflight", real)
+    service.verify(SERIAL)
+    assert name_status() != "verified"  # a plain verify publishes its read
+
+
 def test_a_plan_that_requires_an_answer_publishes_nothing_offline(
     service, device, monkeypatch
 ):

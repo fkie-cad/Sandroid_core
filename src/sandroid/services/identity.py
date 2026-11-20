@@ -4141,18 +4141,25 @@ class IdentityService:
     # -- verify -------------------------------------------------------------
 
     def verify(self, serial: str, profile: Profile | None = None) -> IdentityPlan:
-        """P6 alone: read back and refresh the statuses (no writes)."""
+        """P6 alone: read back and refresh the statuses (no writes).
+
+        Like :meth:`plan`, an apply that ran or runs during the read keeps
+        its newer statuses (nothing is published then).
+        """
         profile = profile or self._require_profile()
         pkgs = self._packages(serial, None)
+        gen = self._gen(serial)
         state = self.preflight(serial, pkgs, profile)
+        stale = self._gen(serial) != gen or self._apply_lock.locked()
         plan = self._plan(profile, state, pkgs)
         now = self._now()
-        if state.ok:
+        if state.ok and not stale:
             with self._lock:
                 mem = self._applied.setdefault(serial, _Applied())
                 if mem.fingerprint == plan.fingerprint:
                     mem.verified_at = now
-        self._publish(plan, now)
+        if not stale:
+            self._publish(plan, now)
         counts = _counts(plan.infos)
         self._emit(
             "verify",
