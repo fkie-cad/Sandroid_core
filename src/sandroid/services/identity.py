@@ -2163,10 +2163,14 @@ class IdentityPlan:
         return [s.value_id for s in self.steps]
 
 
-def _pre_spawn_plan_cls() -> type:
-    from sandroid.services.app_start import PreSpawnPlan
+def _pre_start_plan_cls() -> type:
+    from sandroid.services.app_start import PreStartPlan
 
-    return PreSpawnPlan
+    return PreStartPlan
+
+
+#: Deprecated alias (app_start's pre-start step was called pre-spawn hook).
+_pre_spawn_plan_cls = _pre_start_plan_cls
 
 
 def _list_sig(name: str, row: dict[str, Any], when: int | None = None) -> tuple:
@@ -4689,7 +4693,7 @@ class IdentityService:
             done = mem is not None and mem.fingerprint == fp and package in mem.done
         return "applied" if done else "not_applied"
 
-    def pre_spawn(self, package: str) -> Any:
+    def pre_start(self, package: str) -> Any:
         """The pre-spawn hook: a plan when ``package`` needs seeding, else None.
 
         Runs on the app-start worker (never the UI thread). The only device
@@ -4782,33 +4786,38 @@ class IdentityService:
                 # cache them); the next start announces the restart.
                 raise IdentityApplyError(NEEDS_RESTART_AT_START)
 
-        return _pre_spawn_plan_cls()(
+        return _pre_start_plan_cls()(
             description=f"apply identity profile {profile.id}",
             disruptive=needs_fw and allow,
             apply=run,
         )
 
-    def install_pre_spawn_hook(self) -> bool:
-        """Register :meth:`pre_spawn` with ``services.app_start`` (once).
+    def install_pre_start_step(self) -> bool:
+        """Register :meth:`pre_start` with ``services.app_start`` (once).
         Returns True.
         """
-        from sandroid.services.app_start import register_pre_spawn_hook
+        from sandroid.services.app_start import register_pre_start_step
 
         with self._lock:
             if self._hook_installed:
                 return True
-            register_pre_spawn_hook(self.pre_spawn)
+            register_pre_start_step(self.pre_start)
             self._hook_installed = True
         return True
 
-    def uninstall_pre_spawn_hook(self) -> None:
-        """Undo :meth:`install_pre_spawn_hook`."""
-        from sandroid.services.app_start import unregister_pre_spawn_hook
+    def uninstall_pre_start_step(self) -> None:
+        """Undo :meth:`install_pre_start_step`."""
+        from sandroid.services.app_start import unregister_pre_start_step
 
         with self._lock:
             if self._hook_installed:
-                unregister_pre_spawn_hook(self.pre_spawn)
+                unregister_pre_start_step(self.pre_start)
                 self._hook_installed = False
+
+    # Deprecated aliases (one round, until every caller uses the pre-start names).
+    pre_spawn = pre_start
+    install_pre_spawn_hook = install_pre_start_step
+    uninstall_pre_spawn_hook = uninstall_pre_start_step
 
 
 # ---------------------------------------------------------------------------
