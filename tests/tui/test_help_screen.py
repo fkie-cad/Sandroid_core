@@ -119,7 +119,7 @@ def test_slash_commands_come_from_the_chat() -> None:
 #: heading -> keys (as shown in the key column) that must be listed there.
 EXPECTED: dict[str, tuple[str, ...]] = {
     "Timeline lens": ("[/]", "[t]", "[Esc]"),
-    "Timeline lens › t type bar": ("[←]", "[→]", "[Space / Enter]", "[Esc]"),
+    "Timeline lens › t type bar": ("[Left]", "[Right]", "[Space / Enter]", "[Esc]"),
     "Files lens": ("[Shift+H]", "[Shift+X]"),
     "Network lens": ("[Shift+H]", "[Shift+X]", "[!]"),
     "AI chat": (
@@ -127,13 +127,13 @@ EXPECTED: dict[str, tuple[str, ...]] = {
         "[Ctrl+L]",
         "[Enter]",
         "[Esc]",
-        "[Shift+↑]",
-        "[Shift+↓]",
+        "[Shift+Up]",
+        "[Shift+Down]",
         "[PgUp]",
         "[PgDn]",
     ),
     "AI chat › approval prompt": ("[1]", "[2]", "[3]", "[Esc]"),
-    "AI chat › agents bar": ("[←]", "[→]", "[Enter]"),
+    "AI chat › agents bar": ("[Left]", "[Right]", "[Enter]"),
     "AI chat › slash commands": ("[/new]", "[/threads]", "[/compact]"),
     "Log drawer": ("[`]", "[Shift+Y]", "[Home / End]"),
     "Devices screen (D)": (
@@ -292,3 +292,17 @@ def test_proxy_settings_rows_come_from_the_dialog() -> None:
     keys = _section_raw_keys("Proxy settings (y)")
     for key in ("a", "f", "p", "i", "r", "shift+left", "shift+right"):
         assert any(key in k.split(",") for k in keys), key
+
+
+def test_help_key_names_are_words_not_glyphs() -> None:
+    """The no-glyph rule covers key names: help writes Shift+Left, Enter, Up."""
+    assert hs._format_key_display("shift+left") == "Shift+Left"
+    assert hs._format_key_display("enter") == "Enter"
+    assert hs.key_words("⇧Tab / ⏎ / ↑↓") == "Shift+Tab / Enter / UpDown"
+    rows = []
+    for _t, module, cls_name in hs._PANEL_SECTIONS:
+        rows += [shown for shown, _d, _r in hs._panel_binding_rows(module, cls_name)]
+    for section in hs._HAND_SECTIONS.values():
+        rows += [shown for shown, _d, _r in section]
+    glyphs = set("←→↑↓⏎↵⇧⌫⇥")
+    assert not [r for r in rows if glyphs & set(r)]

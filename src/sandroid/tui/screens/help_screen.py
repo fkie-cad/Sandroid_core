@@ -136,28 +136,28 @@ _LENS_SECTIONS: dict[str, tuple[str, ...]] = {
 #: its own BINDINGS cannot show. ``(key display, description, raw keys)``.
 _LENS_EXTRA_ROWS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
     "App lens": [
-        ("⏎", "Inspect the selected row (Evidence / Raw tabs)", ("enter",)),
-        ("Tab / ⇧Tab", "Next / previous section", ("tab", "shift+tab")),
+        ("Enter", "Inspect the selected row (Evidence / Raw tabs)", ("enter",)),
+        ("Tab / Shift+Tab", "Next / previous section", ("tab", "shift+tab")),
     ],
     "Network lens": [
-        ("⏎", "Inspect the selected flow", ("enter",)),
+        ("Enter", "Inspect the selected flow", ("enter",)),
         ("Esc", "Clear the / filter, then leave the AI filter (H)", ()),
     ],
     "Files lens": [
         ("Esc", "Clear the / filter, then leave the AI filter (H)", ()),
     ],
     "Identity lens": [
-        ("⏎", "Inspect the selected value (Found / Value tabs)", ("enter",)),
+        ("Enter", "Inspect the selected value (Found / Value tabs)", ("enter",)),
         ("{ / }", "Inspector: previous / next hit", ()),
     ],
     "Timeline lens": [
         (
-            "⏎",
+            "Enter",
             "Inspect the line (Line/JSON/Ref/Chain); a folded row: open / close",
             ("enter",),
         ),
         (
-            "↑/↓/PgUp/PgDn",
+            "Up/Dn PgUp/Dn",
             "Move (up stops following the newest line; End = live)",
             ("up", "down"),
         ),
@@ -220,14 +220,14 @@ _HAND_SECTIONS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
             ("2",),
         ),
         ("3", "No, and tell it what to do instead (type, then Enter)", ("3",)),
-        ("↑ / ↓", "Move between the options", ("up", "down")),
+        ("Up / Down", "Move between the options", ("up", "down")),
         ("Enter", "Pick the highlighted option", ("enter",)),
         ("Esc", "No (with the note typed so far)", ("escape",)),
     ],
     "Log drawer": [
         ("`", "Open / close the drawer (Esc closes it too)", ("grave_accent",)),
         (
-            "↑/↓/PgUp/PgDn",
+            "Up/Dn PgUp/Dn",
             "Scroll the log (click into it first)",
             ("up", "down", "pageup", "pagedown"),
         ),
@@ -259,7 +259,7 @@ _INSPECTOR_PREFIX = "Inspector: "
 #: bindings without a rebindable id). Listed first, under "General".
 _GENERAL_KEYS: list[tuple[str, str]] = [
     ("question_mark", "This help"),
-    ("escape", "Chat → lens, then close Inspector / log drawer / chat, dialogs"),
+    ("escape", "Chat to lens, then close Inspector / log drawer / chat, dialogs"),
     ("ctrl+b", "Focus the lens (back from the chat or Inspector)"),
     ("comma", "Settings"),
     ("0", "Snapshot picker (same as S)"),
@@ -377,14 +377,37 @@ _KEY_W = 18
 _COMPACT_HEIGHT = 32
 
 
+#: Key glyphs written as words in help (the user's no-glyph rule covers key
+#: names too): ``Shift+←`` reads ``Shift+Left``.
+_KEY_WORDS = {
+    "←": "Left",
+    "→": "Right",
+    "↑": "Up",
+    "↓": "Down",
+    "⏎": "Enter",
+    "↵": "Enter",
+    "⇧": "Shift+",
+    "⌫": "Backspace",
+    "⇥": "Tab",
+}
+
+
+def key_words(text: str) -> str:
+    """*text* with key glyphs replaced by their names."""
+    for glyph, word in _KEY_WORDS.items():
+        text = text.replace(glyph, word)
+    return text.replace("Shift++", "Shift+")
+
+
 def _format_key_display(key: str) -> str:
     """Format a key string for human display, keeping Shift visible.
 
     ``c`` stays ``c`` while ``C`` (Shift+C) becomes ``Shift+C`` -- the old
     upper-casing made every lower/upper pair (c/C, e/E, f/F, g/G) look
-    identical. See :func:`sandroid.tui.key_display.format_key`.
+    identical. See :func:`sandroid.tui.key_display.format_key`. Glyphs are
+    written as words (:func:`key_words`).
     """
-    return format_key(key, "long")
+    return key_words(format_key(key, "long"))
 
 
 class HelpScreen(ModalScreen):
@@ -622,7 +645,7 @@ class HelpScreen(ModalScreen):
     def _footer_text() -> str:
         """Return the default footer hint text."""
         return (
-            "[dim]↑/↓ navigate · Enter rebind · ⌫ reset row · "
+            "[dim]Up/Down navigate · Enter rebind · Backspace reset row · "
             "Ctrl+R reset all · Esc close[/dim]"
         )
 
@@ -805,7 +828,7 @@ class HelpScreen(ModalScreen):
         if current and lead is not None:
             add(
                 Option(
-                    "[dim]   ↑ this lens's keys win over global ones[/]",
+                    "[dim]   this lens's keys (above) win over global ones[/]",
                     disabled=True,
                 )
             )
@@ -922,7 +945,7 @@ class HelpScreen(ModalScreen):
             else:
                 where = (
                     "Works only while this lens / view has focus "
-                    "(1-6 or Shift+←/→ switch lenses)."
+                    "(1-6 or Shift+Left/Right switch lenses)."
                 )
             override = self._overrides.get((heading, key))
             if override:
