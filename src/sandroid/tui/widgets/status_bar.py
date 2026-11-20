@@ -279,7 +279,7 @@ class StatusBar(Static):
         return colors
 
     def breadcrumb_markup(self) -> str:
-        """Device ▸ app breadcrumb for the shell header (markup, no I/O)."""
+        """Device / app breadcrumb for the shell header (markup, no I/O)."""
         colors = self._get_theme_colors()
         muted = colors["header_muted"]
         parts = []
@@ -296,7 +296,7 @@ class StatusBar(Static):
             parts.append(f"[{muted}]no device — D to select[/]")
         if self.spotlight_app and self.spotlight_app != "None":
             parts.append(f"[b]{self.spotlight_app}[/b]")
-        return "  [dim]▸[/dim]  ".join(parts)
+        return "  [dim]/[/dim]  ".join(parts)
 
     def _segments(self) -> list[Text]:
         """Status segments in priority order (most important first).

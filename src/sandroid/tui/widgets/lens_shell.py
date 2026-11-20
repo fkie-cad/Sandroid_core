@@ -435,7 +435,7 @@ def _as_text(markup: str) -> Text:
 
 
 class ShellHeader(Header):
-    """One-row header: ``○ Sandroid ▸ device ▸ app ◇ snapshot``, the open
+    """One-row header: ``Sandroid / device / app   snapshot name``, the open
     label (``▶ 7 'accept cookies' 0:12``), the Tracking dot, the privacy
     indicator (``PRIVACY 3/12 found``; a click opens the Identity lens), a
     timeline banner (locked / failed), pill, clock.
@@ -758,9 +758,10 @@ class ShellHeader(Header):
         parts = [f"[b]{self.app.title or 'Sandroid'}[/b]"]
         if self._crumb:
             parts.append(self._crumb)
-        markup = "○ " + "  [dim]▸[/dim]  ".join(parts)
+        # Plain separators and words, no glyphs (the user's no-glyph rule).
+        markup = " " + "  [dim]/[/dim]  ".join(parts)
         if self._snapshot:
-            markup += f"   [dim]◇ {self._snapshot}[/dim]"
+            markup += f"   [dim]snapshot {self._snapshot}[/dim]"
         try:
             return Content.from_markup(markup)
         except Exception:

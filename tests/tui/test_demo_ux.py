@@ -798,3 +798,21 @@ def test_key_labels_are_words_in_both_styles() -> None:
             label = format_key(key, style)
             assert not set(KEY_WORDS) & set(label), (style, key, label)
     assert key_words("⇧R ⏎ ←/→") == "Shift+R Enter Left/Right"
+
+
+async def test_header_breadcrumb_uses_plain_separators() -> None:
+    """``Sandroid / device / app   snapshot name``: no ○ ▸ ◇ glyphs."""
+
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.widgets.lens_shell import ShellHeader
+
+    app = SandroidTUI()
+    async with app.run_test(size=(140, 40)) as pilot:
+        await boot(app, pilot)
+        header = app.screen.query_one(ShellHeader)
+        header._crumb = "emulator-5554  [dim]/[/dim]  [b]com.example[/b]"
+        header._snapshot = "clean"
+        title = str(header.format_title())
+        assert not set("○▸◇") & set(title), title
+        assert "Sandroid" in title
+        assert "snapshot clean" in title
