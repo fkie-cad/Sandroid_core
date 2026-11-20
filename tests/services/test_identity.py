@@ -1703,6 +1703,24 @@ def test_a_snapshot_with_the_old_sim_gets_one_airplane_toggle(service, device):
     assert not device.airplane
 
 
+def test_rows_without_a_step_show_the_device_after_the_toggle(service, device):
+    """The SIM operator name (hook-only, no step) changes with the toggle:
+    the apply reports what the device shows afterwards.
+    """
+    sim = _launched(service, device)
+    device.props["gsm.sim.operator.numeric"] = "310260"
+    device.props["gsm.sim.operator.alpha"] = "T-Mobile"
+
+    def refreshed() -> None:
+        device.props["gsm.sim.operator.numeric"] = sim.mccmnc
+        device.props["gsm.sim.operator.alpha"] = "Telekom"
+
+    device.on_airplane = refreshed
+    plan = service.apply(SERIAL, "com.example.app")
+    assert device.airplane == ["enable", "disable"]
+    assert plan.infos["sim_operator"].current == "Telekom"
+
+
 def test_the_toggle_runs_once_per_launch_and_a_mismatch_fails(
     service, device, app_start
 ):
