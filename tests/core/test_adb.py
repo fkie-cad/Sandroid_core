@@ -12,6 +12,7 @@ that default being a no-op.
 from __future__ import annotations
 
 import subprocess
+import time
 
 import pytest
 
@@ -382,3 +383,84 @@ def test_returned_start_errors_carry_no_typed_text(monkeypatch):
         assert err.startswith("OSError: ")
         assert "redacted" in err
         assert not set(TYPED) & set(err)
+
+
+# ---------------------------------------------------------------------------
+# console without authentication (texts measured on emulator 35.4.9)
+# ---------------------------------------------------------------------------
+
+_AVD_HELP_NO_AUTH = (
+    "allows you to control (e.g. start/stop) the execution of the virtual device\n"
+    "\n"
+    "available sub-commands:\n"
+    "    name             query virtual device name\n"
+    "    grpc             query the grpc port\n"
+    "\n"
+    "KO:  bad sub-command\n"
+)
+_AVD_HELP_AUTH = (
+    "allows you to control (e.g. start/stop) the execution of the virtual device\n"
+    "\n"
+    "available sub-commands:\n"
+    "    stop             stop the virtual device\n"
+    "    start            start/restart the virtual device\n"
+    "    status           query virtual device status\n"
+    "    name             query virtual device name\n"
+    "    snapshot         state snapshot commands\n"
+    "\n"
+    "KO:  bad sub-command\n"
+)
+
+
+def test_console_refusals_are_told_apart_from_real_errors():
+    from sandroid.core.adb_emulator import console_not_authenticated as refused
+
+    assert refused("avd snapshot list", _AVD_HELP_NO_AUTH)
+    assert refused("avd snapshot save x", _AVD_HELP_NO_AUTH)
+    assert refused(
+        "avd name",
+        "KO: authentication token does not match ~/.emulator_console_auth_token\n",
+    )
+    assert refused("geo fix 1 1", "KO: unknown command, try 'help'\n")
+    # an authenticated console with a real error is not a refusal
+    assert not refused("avd bogus", _AVD_HELP_AUTH)
+    assert not refused("frobnicate", "KO: unknown command, try 'help'\n")
+    assert not refused("avd snapshot save x", "KO: snapshot save failed\n")
+    assert not refused("avd snapshot list", "List of snapshots present:\nOK\n")
+
+
+def test_a_refused_console_command_says_so_and_fails(monkeypatch, caplog):
+    from sandroid.core import adb_emulator
+
+    monkeypatch.setattr(adb_emulator, "_auth_warned_at", None)
+    monkeypatch.setattr(
+        Adb, "send_adb_command", lambda c, serial=None: (_AVD_HELP_NO_AUTH, "")
+    )
+    started = time.monotonic()
+    with caplog.at_level("WARNING", logger="sandroid.core.adb_emulator"):
+        out = Adb.send_telnet_command("avd snapshot list", serial="emulator-5556")
+        Adb.send_telnet_command("avd snapshot list", serial="emulator-5556")
+    assert out == ("", adb_emulator.CONSOLE_NOT_AUTHENTICATED)
+    warnings = [r for r in caplog.records if "not authenticated" in r.getMessage()]
+    assert len(warnings) == 1  # not once per poll
+    assert adb_emulator.console_auth_failed_since(started)
+    assert Adb.get_avd_snapshots() == []
+
+    from sandroid.services.emulator_service import EmulatorService
+
+    monkeypatch.setattr(EmulatorService, "snapshot_refusal", lambda self, *a, **k: None)
+    assert EmulatorService().create_snapshot("fc_tmp", "emulator-5556") is False
+
+
+def test_snapshots_panel_header_names_the_refused_console(monkeypatch):
+    from sandroid.core.adb_emulator import CONSOLE_NOT_AUTHENTICATED
+    from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
+
+    panel = SnapshotsPanel()
+    monkeypatch.setattr(panel, "_emulator_available", lambda: True)
+    monkeypatch.setattr(panel, "_avd_name", lambda: "Dev6")
+    assert "0 snapshot(s)" in panel._render_header()
+    panel._console_refused = True
+    header = panel._render_header()
+    assert CONSOLE_NOT_AUTHENTICATED[1:] in header
+    assert "snapshot(s)" not in header

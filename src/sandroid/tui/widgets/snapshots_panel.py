@@ -164,6 +164,8 @@ class SnapshotsPanel(Widget):
         self._refresh_inflight = False
         # Newest-first list of snapshot dicts ({id,tag,size,date,clock}).
         self._snapshots: list[dict] = []
+        #: The last list fetch was refused: the console is not authenticated.
+        self._console_refused = False
         # The (label, tag) rows the OptionList shows: a rebuild with the same
         # rows is skipped so the highlight and scroll position stay put.
         self._shown_rows: list[tuple[str, str | None]] | None = None
@@ -323,6 +325,11 @@ class SnapshotsPanel(Widget):
     def _render_header(self) -> str:
         if not self._emulator_available():
             return "[#fb7185]Snapshots require a running emulator[/]"
+        if self._console_refused:
+            from sandroid.core.adb_emulator import CONSOLE_NOT_AUTHENTICATED
+
+            text = CONSOLE_NOT_AUTHENTICATED[0].upper() + CONSOLE_NOT_AUTHENTICATED[1:]
+            return f"[b]{self._avd_name()}[/] — [#fb7185]{text}[/]"
         count = len(self._snapshots)
         return f"[b]{self._avd_name()}[/] — {count} snapshot(s)"
 
@@ -542,6 +549,7 @@ class SnapshotsPanel(Widget):
         if not self._emulator_available():
             # Still reflect the unavailable state in the UI.
             self._snapshots = []
+            self._console_refused = False
             self._post(self._rebuild_list)
             return
         self._refresh_inflight = True
@@ -554,13 +562,17 @@ class SnapshotsPanel(Widget):
 
     def _refresh_worker(self) -> None:
         """Worker-thread body of the list fetch."""
+        from sandroid.core.adb_emulator import console_auth_failed_since
+
         snapshots: list[dict] = []
+        started = time.monotonic()
         try:
             snapshots = list(self._adb().get_avd_snapshots() or [])
         except Exception as exc:
             logger.debug(f"Snapshot list fetch failed: {exc}")
         finally:
             self._refresh_inflight = False
+        self._console_refused = not snapshots and console_auth_failed_since(started)
         # Telnet usually lists oldest->newest and the ``date`` strings do not
         # sort reliably, so reverse for newest-first rather than sort by date.
         snapshots.reverse()

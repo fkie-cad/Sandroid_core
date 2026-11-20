@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from logging import getLogger
 from typing import TYPE_CHECKING
 
@@ -31,6 +32,71 @@ logger = getLogger(__name__)
 #: only calls ``send_command`` (an ADB, not telnet, round-trip), so the lock
 #: is never re-entered on the same thread.
 _TELNET_LOCK = threading.Lock()
+
+#: What a console command returns (as stderr) when ``adb emu`` could not
+#: authenticate: the token file is missing, empty or does not match.
+CONSOLE_NOT_AUTHENTICATED = (
+    "emulator console not authenticated (~/.emulator_console_auth_token)"
+)
+#: Console commands an authenticated console always knows: "unknown command"
+#: for one of them means the console did not let us in.
+_KNOWN_CONSOLE_COMMANDS = frozenset(
+    {
+        "avd", "cdma", "crash", "event", "finger", "geo", "gsm", "kill",
+        "network", "physics", "power", "redir", "rotate", "screenrecord",
+        "sensor", "sms",
+    }
+)  # fmt: skip
+_SUB_COMMAND = re.compile(r"^\s{2,}([a-z][\w-]*)\s", re.MULTILINE)
+_AUTH_WARN_EVERY_S = 60.0
+_auth_failed_at: float | None = None
+_auth_warned_at: float | None = None
+
+
+def console_not_authenticated(command: str, stdout: str) -> bool:
+    """Whether *stdout* is the console refusing an unauthenticated client.
+
+    Measured on emulator 35.4: a wrong token answers "authentication token
+    does not match"; without a token the console only knows ``help``,
+    ``auth``, ``ping``, ``quit`` and ``avd name`` / ``avd grpc``, so other
+    commands get "unknown command" and other ``avd`` sub-commands get a
+    cut-down ``avd`` help plus "bad sub-command".
+    """
+    text = stdout or ""
+    if "authentication token does not match" in text:
+        return True
+    words = command.split()
+    first = words[0] if words else ""
+    if "unknown command" in text and first in _KNOWN_CONSOLE_COMMANDS:
+        return True
+    if first == "avd" and "bad sub-command" in text:
+        listed = set(_SUB_COMMAND.findall(text))
+        return bool(listed) and "snapshot" not in listed
+    return False
+
+
+def console_auth_failed_since(since: float) -> bool:
+    """A console command was refused as unauthenticated since *since*.
+
+    Args:
+        since: A :func:`time.monotonic` value.
+    """
+    at = _auth_failed_at
+    return at is not None and at >= since
+
+
+def _note_auth_failure(command: str) -> None:
+    global _auth_failed_at, _auth_warned_at
+    now = time.monotonic()
+    _auth_failed_at = now
+    if _auth_warned_at is not None and now - _auth_warned_at < _AUTH_WARN_EVERY_S:
+        return
+    _auth_warned_at = now
+    logger.warning(
+        f'Telnet command "{redact_typed_text(command)}" refused: '
+        f"{CONSOLE_NOT_AUTHENTICATED}. adb emu reads the token from that file in "
+        "the home directory of the user running Sandroid."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +134,9 @@ def send_telnet_command(
         # console would read as a second command) into plain separators.
         quoted = " ".join(quote_host_arg(word) for word in command.split())
         stdout, stderr = send_command("emu " + quoted)
+        if console_not_authenticated(command, stdout):
+            _note_auth_failure(command)
+            return "", CONSOLE_NOT_AUTHENTICATED
         if stderr and is_adb_error_actionable(stderr):
             logger.error(
                 f'Telnet command "{redact_typed_text(command)}" failed: '
