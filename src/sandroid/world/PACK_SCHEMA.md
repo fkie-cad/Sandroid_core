@@ -35,7 +35,7 @@ unusable) or **warnings** (a content gap or a soft limit; the pack works).
 | Emoji | the generator detects emoji per message; the `emoji` flag is informational. |
 | Placeholders | adds `{date_file}`, `{balance}`, `{fee}`, `{last}`, `{state}`, `{district}`. |
 | Optional fields | cities: `state`, `timezone`; phone entries: `city`, `note`, `source`; `trunk_prefix: ""`; `postcode_pattern`; `currency.sms_format`; language `weekdays`. App categories are an open set. |
-| Devices | optional country key `devices: [{make, model, codename, min_sdk, max_sdk, w}]`: the persona phone (photo EXIF; the codename later feeds Build.DEVICE/BOARD and the fingerprint). `max_sdk: null` = still supported. Without it the generator draws from a built-in list of Google Pixels (7, 7a, 8, 8 Pro, 8a, 9). A non-Google make warns: apps will see a Pixel, because the emulator bypass only spoofs Pixel fingerprints. |
+| Devices | optional country key `devices: [{make, model, codename, min_sdk, max_sdk, w}]`: the persona phone (photo EXIF; the codename later feeds Build.DEVICE/BOARD and the fingerprint). `max_sdk: null` = still supported. Without it the generator draws from a built-in list of Google Pixels (4a, 5, 6, 6 Pro, 6a, 7, 7a, 8, 8 Pro, 8a, 9, newer ones weighted higher). With `target_sdk`, only phones with `min_sdk <= target_sdk <= max_sdk` are drawn; when none fits, generation fails (a device set in the world spec is used anyway, with a warning). A non-Google make warns: apps will see a Pixel, because the emulator bypass only spoofs Pixel fingerprints. |
 | Photos manifest | adds `file`, `original_had_exif`, `original_had_gps`, `downscaled`, `sha256_original`, `bytes_original`, `width_original`, `height_original`; licence `authored` for generated images; `original_exif_stripped` is dropped (a warning if present). |
 
 ## Country pack: `countries/<cc>.yaml`
@@ -118,12 +118,17 @@ devices:                       # optional; no built-in pack sets it yet
   `utility`, `mobile_money`, `lender` (alias `loan`), `betting`. Other kinds warn
   and get no SMS unless a language pack has templates for them.
 - `sender_type: alphanumeric`: the SMS address is the sender id, unchanged.
-- `sender_type: shortcode`: the address is the numeric short code; a non-numeric
-  sender (the code is unknown) warns and is used as written.
+- `sender_type: shortcode`: the address is the numeric short code. When the
+  sender is not numeric (the code is unknown; the validator warns), the
+  generator makes a stable 5-6 digit code for it from the seed and keeps the
+  sender as `label`.
 - `sender_type: number`: `sender` is `+<digits>` or a pattern `+<digits>...`.
   The generator makes a number at the world's number level that starts with
   those digits when the level has such a range, and otherwise any mobile number
-  of that level. A prefix never moves the number to a less safe level.
+  of that level. A prefix never moves the number to a less safe level. A
+  `doctor` sender gets a landline only when landlines exist at that level;
+  there is no unallocated landline level, so at `unallocated` doctors and
+  other number senders get mobile numbers.
 - `label`: the brand behind a number or short code (shown as the contact name).
 
 ### Holiday rules
@@ -249,11 +254,18 @@ strips all original EXIF/MPO/XMP and writes the generator's metadata.
 
 ## Time
 
-Generated items carry `t_rel_s`, seconds before the anchor (negative: after
-it, for future calendar events). The anchor is local midnight at the start of
-a Monday. Text that names a date or weekday (`{date}`, `{day}`) was rendered
-against the nominal anchor 2026-01-05 00:00 (a Monday); a seeder that puts
-the real anchor a whole number of weeks later keeps weekdays consistent (the
-dates in text stay as rendered). Holiday and birthday events carry their
-`rule` (birthdays also `recurrence: yearly`), so a seeder can move them to the
-right calendar date.
+The manifest holds no absolute date, so one world can be seeded on any day.
+
+- Generated items carry `t_rel_s`, seconds before the anchor (negative: after
+  it, for future calendar events). The anchor is local midnight of the Monday
+  on or before the seeding moment, so weekend outings stay on weekends.
+- A text that names a date keeps a slot `{@n}` in place of `{date}`,
+  `{date_file}` or `{day}`; `date_slots[n]` holds the slot's own `t_rel_s`, its
+  kind and the date pattern (or the weekday names). Rendering fills it in for
+  the real anchor.
+- Holidays and birthdays keep their `rule` and an `occurrence` index: 0 is the
+  latest date of the rule up to 60 days after the anchor, 1 the one before.
+  Holidays that fall before the world's history are left out when rendering.
+- `WorldManifest.render(anchor)` returns the world with absolute `ts_ms` (and
+  `end_ms` for events) and final texts; `markers(anchor)` works on that.
+  `world_fp` does not depend on the anchor.

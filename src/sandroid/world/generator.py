@@ -11,9 +11,11 @@ the owner's first and last name, the pack contents and
 :data:`GENERATOR_VERSION`, and adding photos never changes the contacts.
 
 Time: items carry ``t_rel_s``, seconds before the anchor (negative: after
-it). The anchor is local midnight at the start of a Monday. Text that names a
-date or weekday was rendered against :data:`NOMINAL_ANCHOR`; a seeder that
-places the anchor a whole number of weeks after it keeps weekdays right.
+it); the anchor is local midnight at the start of a Monday. Dates inside texts
+stay ``{@n}`` slots with their own offset, and holidays and birthdays keep
+their rule, so :meth:`WorldManifest.render` can place everything for any
+anchor. :data:`NOMINAL_ANCHOR` only fixes the weekday arithmetic and the
+holiday years while generating.
 """
 
 from __future__ import annotations
@@ -23,22 +25,26 @@ import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from sandroid.world.manifest import (
     Owner,
     WorldManifest,
     WorldSpec,
-    device_problem,
-    normalize_device,
+    format_date,
 )
 from sandroid.world.packs import (
     KIND_ALIASES,
+    LOOKAHEAD_DAYS,
     PackSet,
+    WorldError,
+    device_fits,
+    device_problem,
     entry_text,
-    holiday_dates,
     load_packs,
+    normalize_device,
     parse_range,
+    recent_occurrences,
 )
 from sandroid.world.stream import Cumulative, SeedStream, new_seed, parse_seed
 
@@ -49,7 +55,7 @@ if TYPE_CHECKING:
 
 #: Bump when the output for the same inputs changes.
 GENERATOR_VERSION = "1"
-#: Local midnight (a Monday) that rendered text dates are relative to.
+#: Local midnight (a Monday) used while generating (weekdays, holiday years).
 NOMINAL_ANCHOR = dt.datetime(2026, 1, 5, 0, 0, 0)
 DAY = 86400
 
@@ -110,6 +116,16 @@ _SERVICE_KIND_W = {
 #: Google Pixels only: the emulator bypass builds Google-format fingerprints.
 #: min_sdk is the launch API level; max_sdk None means still supported.
 FALLBACK_DEVICES: tuple[dict[str, Any], ...] = (
+    {"make": "Google", "model": "Pixel 4a", "codename": "sunfish", "min_sdk": 29,
+     "max_sdk": None, "w": 0.4},
+    {"make": "Google", "model": "Pixel 5", "codename": "redfin", "min_sdk": 30,
+     "max_sdk": None, "w": 0.5},
+    {"make": "Google", "model": "Pixel 6", "codename": "oriole", "min_sdk": 31,
+     "max_sdk": None, "w": 0.7},
+    {"make": "Google", "model": "Pixel 6 Pro", "codename": "raven", "min_sdk": 31,
+     "max_sdk": None, "w": 0.6},
+    {"make": "Google", "model": "Pixel 6a", "codename": "bluejay", "min_sdk": 32,
+     "max_sdk": None, "w": 0.7},
     {"make": "Google", "model": "Pixel 7", "codename": "panther", "min_sdk": 33,
      "max_sdk": None, "w": 1.0},
     {"make": "Google", "model": "Pixel 7a", "codename": "lynx", "min_sdk": 33,
@@ -127,15 +143,43 @@ _SERVICE_PICKS = {"bank": 2, "courier": 3, "otp_service": 3, "retail": 3}
 _DOWNLOAD_KINDS = {"invoice", "receipt", "ticket", "statement", "payslip", "scan"}
 _TRIP_CATEGORIES = ("beach", "mountain", "lake", "landmark", "museum")
 _OUTING_CATEGORIES = ("park", "market", "lake", "museum", "stadium", "landmark")
-_EMOJI_RE = re.compile("[\U0001f000-\U0001faff☀-➿⭐⭕❤️‍]")
+# Emoji: pictographs (U+1F000..1FAFF), BMP symbols that default to emoji
+# presentation, or any BMP symbol followed by the emoji selector U+FE0F.
+# Plain dingbats (a check mark) and a lone joiner or selector are no emoji.
+_EMOJI_RE = re.compile(
+    "[\U0001f000-\U0001faff]"
+    "|[\u231a\u231b\u23e9-\u23ec\u23f0\u23f3\u25fd\u25fe\u2614\u2615"
+    "\u2648-\u2653\u267f\u2693\u26a1\u26aa\u26ab\u26bd\u26be\u26c4\u26c5"
+    "\u26ce\u26d4\u26ea\u26f2\u26f3\u26f5\u26fa\u26fd\u2705\u270a\u270b"
+    "\u2728\u274c\u274e\u2753-\u2755\u2757\u2795-\u2797\u27b0\u27bf\u2b1b"
+    "\u2b1c\u2b50\u2b55]"
+    "|[\u00a9\u00ae\u203c\u2049\u2122-\u2bff\u3030\u303d\u3297\u3299]\ufe0f"
+)
+#: Placeholders whose value makes a text distinctive enough for a marker.
+_DISTINCTIVE = frozenset(
+    {"first", "last", "partner_first", "owner_first", "code", "tracking",
+     "amount", "balance", "fee"}
+)  # fmt: skip
+_DATE_SLOTS = frozenset({"date", "date_file", "day"})
 _TRANSLIT = str.maketrans(
     {"ß": "ss", "ı": "i", "ø": "o", "Ø": "o", "æ": "ae", "Æ": "ae", "đ": "d",
      "ł": "l", "Ł": "l", "œ": "oe", "þ": "th", "ð": "d"}
 )  # fmt: skip
 
 
-class WorldError(ValueError):
-    """The spec cannot be generated (unknown country, no usable packs)."""
+class _Text(NamedTuple):
+    """A rendered template: text with ``{@n}`` date slots."""
+
+    text: str
+    slots: list[dict[str, Any]]
+    distinctive: bool
+
+    def fields(self, key: str) -> dict[str, Any]:
+        """Return the item fields for text field ``key``."""
+        out: dict[str, Any] = {key: self.text, "distinctive": self.distinctive}
+        if self.slots:
+            out["date_slots"] = self.slots
+        return out
 
 
 @dataclass
@@ -196,14 +240,19 @@ def generate(
         ``auto``) and ``world_fp`` set.
 
     Raises:
-        WorldError: The spec names an unknown country or no usable packs.
-        ValueError: The spec is invalid.
+        WorldError: Unknown country, an invalid user pack, no usable packs,
+            or no phone model for ``target_sdk``.
+        ValueError: The spec or owner is invalid (WorldError is one too).
     """
     if not isinstance(spec, WorldSpec):
         spec = WorldSpec.from_dict(spec)
     spec.validate()
     owner = Owner.from_dict(owner)
-    if target_sdk is not None and (not isinstance(target_sdk, int) or target_sdk <= 0):
+    if target_sdk is not None and (
+        isinstance(target_sdk, bool)
+        or not isinstance(target_sdk, int)
+        or target_sdk <= 0
+    ):
         raise ValueError("target_sdk must be a positive API level")
     gen = _Generator(spec, owner, packs or load_packs())
     gen.target_sdk = target_sdk
@@ -288,35 +337,6 @@ def format_amount(value: float, example: str) -> str:
     return f"{prefix}{text}{suffix}"
 
 
-_JAVA_DATE = re.compile(r"yyyy|yy|MM|M|dd|d|EEEE|HH|H|hh|h|mm|a")
-
-
-def format_date(day: dt.date | dt.datetime, pattern: str) -> str:
-    """Render a Java-style date/time pattern (``dd.MM.yyyy``, ``HH:mm``, ``h:mm a``)."""
-    hour = getattr(day, "hour", 0)
-    minute = getattr(day, "minute", 0)
-
-    def sub(m: re.Match[str]) -> str:
-        tok = m.group(0)
-        return {
-            "yyyy": f"{day.year:04d}",
-            "yy": f"{day.year % 100:02d}",
-            "MM": f"{day.month:02d}",
-            "M": str(day.month),
-            "dd": f"{day.day:02d}",
-            "d": str(day.day),
-            "HH": f"{hour:02d}",
-            "H": str(hour),
-            "hh": f"{(hour % 12) or 12:02d}",
-            "h": str((hour % 12) or 12),
-            "mm": f"{minute:02d}",
-            "a": "AM" if hour < 12 else "PM",
-            "EEEE": tok,
-        }[tok]
-
-    return _JAVA_DATE.sub(sub, pattern)
-
-
 # --------------------------------------------------------------- numbers
 
 
@@ -325,11 +345,15 @@ def phone_check(e164: str) -> dict[str, Any]:
 
     The generator itself never consults libphonenumber (its metadata changes
     between releases, which would break determinism); this is for tests,
-    reports and the seeder.
+    reports and the seeder. ``phonenumberslite`` is a development
+    dependency; install it to use this function.
 
     Returns:
         ``{possible, valid, type}`` where type is the libphonenumber number
         type name (``MOBILE``, ``FIXED_LINE`` ...).
+
+    Raises:
+        ImportError: ``phonenumberslite`` is not installed.
     """
     import phonenumbers
 
@@ -413,15 +437,41 @@ class NumberFactory:
             self._warned.add(key)
             self.warn(f"{kind} numbers: {why} at level {wanted!r}; used {used!r}")
 
+    @staticmethod
+    def _window(entry: dict[str, Any], want: str) -> tuple[int, int, int] | None:
+        """Return the part ``(low, high, width)`` of a range starting ``want``."""
+        low, high, width = parse_range(entry["range"]) or (0, -1, 0)
+        if want:
+            if len(want) >= width:
+                value = int(want[:width])
+                return (value, value, width) if low <= value <= high else None
+            pad = width - len(want)
+            low = max(low, int(want + "0" * pad))
+            high = min(high, int(want + "9" * pad))
+        return (low, high, width) if low <= high else None
+
+    @classmethod
+    def fits(cls, entry: dict[str, Any], want: str) -> bool:
+        """Return whether an entry can produce a number starting with ``want``."""
+        if "range" in entry:
+            return cls._window(entry, want) is not None
+        prefix = str(entry["prefix"])
+        length = (
+            len(prefix) + int(entry["sub"]) if "sub" in entry else int(entry["length"])
+        )
+        if not (want.startswith(prefix) or prefix.startswith(want)):
+            return False
+        return max(len(want), len(prefix)) < length
+
     def _draw(
         self, entry: dict[str, Any], stream: SeedStream, want: str = ""
     ) -> str | None:
         if "range" in entry:
-            low, high, width = parse_range(entry["range"]) or (0, -1, 0)
-            if high < low:
+            window = self._window(entry, want)
+            if window is None:
                 return None
-            nsn = str(low + stream.below(high - low + 1)).zfill(width)
-            return nsn if nsn.startswith(want) else None
+            low, high, width = window
+            return str(low + stream.below(high - low + 1)).zfill(width)
         prefix = str(entry["prefix"])
         if "sub" in entry:
             length = len(prefix) + int(entry["sub"])
@@ -465,7 +515,7 @@ class NumberFactory:
         for lv in levels:
             entries = self.pools[(kind, lv)]
             if want:
-                entries = [e for e in entries if self._draw(e, _Probe(), want)]
+                entries = [e for e in entries if self.fits(e, want)]
             elif city and kind == "landline" and lv == "realistic":
                 local = [e for e in entries if e.get("city") == city]
                 entries = local or entries
@@ -497,16 +547,6 @@ class NumberFactory:
         return None
 
 
-class _Probe(SeedStream):
-    """A stream that always yields zeros (to test whether an entry fits)."""
-
-    def __init__(self) -> None:
-        super().__init__(b"probe", "probe")
-
-    def u64(self) -> int:
-        return 0
-
-
 # --------------------------------------------------------------- generator
 
 
@@ -532,13 +572,14 @@ class _Generator:
             self.cd,
             spec.numbers,
             self.warn,
-            exclude={owner.phone} if owner.phone else None,
+            exclude={owner.phone_e164} if owner.phone_e164 else None,
         )
         self.people: list[_Person] = []
         self.partner: _Person | None = None
         self.used_emails: set[str] = set()
         self.target_sdk: int | None = None
         self.services: list[dict[str, Any]] = []
+        self._codes: set[str] = set()
         self.services_by_kind: dict[str, list[dict[str, Any]]] = {}
 
     # -- infrastructure
@@ -565,7 +606,7 @@ class _Generator:
     def _country_pack(self) -> Pack:
         cid = self.spec.country
         if not cid:
-            digits = re.sub(r"\D", "", self.owner.phone or "")
+            digits = self.owner.phone_e164[1:]
             best, best_cc = "", ""
             for pid in self.packs.ids("countries"):
                 cc = str(self.packs.country(pid).data["phone"]["country_code"])
@@ -583,6 +624,9 @@ class _Generator:
     def _mix(self) -> dict[str, float]:
         if self.spec.mix:
             raw = dict(self.spec.mix)
+            total = sum(raw.values())
+            if not 0.99 <= total <= 1.01:
+                self.warn(f"mix: shares add up to {total:g}, not 1; normalised")
         else:
             cults = [c for c in self.cd.get("cultures") or [] if c.get("share")]
             raw = {c["culture"]: float(c["share"]) for c in cults}
@@ -630,27 +674,28 @@ class _Generator:
         self,
         s: SeedStream,
         *,
-        max_age_s: int | None = None,
         bias: float = 1.7,
-        weekend: float = 1.0,
+        weekend: bool = False,
         hours: Cumulative = _HOUR_CUM,
     ) -> int:
-        """Return a recency-biased ``t_rel_s`` with a daily rhythm."""
-        days = max(1, (max_age_s or self.history_s) // DAY)
-        for _ in range(8):
-            back = 1 + int((s.random() ** bias) * days)
-            if weekend <= 1.0:
-                break
-            day = NOMINAL_ANCHOR - dt.timedelta(days=back)
-            if day.weekday() >= 5 or s.random() < 1.0 / weekend:
-                break
+        """Return a recency-biased ``t_rel_s`` with a daily rhythm.
+
+        With ``weekend`` the day moves back to the Saturday or Sunday before
+        it (the anchor is a Monday, so weekdays survive rendering).
+        """
+        days = max(1, self.history_s // DAY)
+        back = 1 + int((s.random() ** bias) * days)
+        if weekend:
+            weekday = (NOMINAL_ANCHOR - dt.timedelta(days=back)).weekday()
+            back += (weekday - 5) % 7  # the Saturday on or before
+            if s.chance(0.5):
+                back -= 1  # Sunday
+            if back > days:
+                back -= 7
+            back = max(1, back)
         hour = s.weighted_index(hours)
         sec = hour * 3600 + s.below(3600)
         return back * DAY - sec
-
-    @staticmethod
-    def when(t_rel: int) -> dt.datetime:
-        return NOMINAL_ANCHOR - dt.timedelta(seconds=t_rel)
 
     # -- names
 
@@ -934,9 +979,15 @@ class _Generator:
         person: _Person | None = None,
         service: dict[str, Any] | None = None,
         context: str = "thread",
-    ) -> str | None:
-        """Fill a template; None when a placeholder cannot be resolved."""
+    ) -> _Text | None:
+        """Fill a template; None when a placeholder cannot be resolved.
+
+        Date placeholders become ``{@n}`` slots that keep their offset from
+        the anchor (``t_rel`` plus a few days), so the date is rendered for
+        the real anchor later. The same placeholder twice gets the same value.
+        """
         memo: dict[str, str] = {}
+        slots: list[dict[str, Any]] = []
         cur = self.cd["currency"]
         money_fmt = (
             cur.get("sms_format")
@@ -944,8 +995,8 @@ class _Generator:
             else cur["format"]
         )
         base_amount = parse_amount_format(cur["format"])[5]
-        when = self.when(t_rel)
         failed = False
+        distinctive = False
 
         def other_person() -> _Person | None:
             pool = [
@@ -955,9 +1006,6 @@ class _Generator:
             ]
             return s.choice(pool) if pool else None
 
-        def stranger_name() -> tuple[str, str]:
-            return self._draw_name(s, self.country.id, s.choice("fm"), None)
-
         def value(name: str) -> str | None:
             nonlocal person
             if name.startswith("digits:"):
@@ -966,7 +1014,9 @@ class _Generator:
                 return self.owner.first or None
             if name in ("first", "last"):
                 if context == "file":
-                    return self.owner.first if name == "first" else self.owner.last
+                    return (
+                        self.owner.first if name == "first" else self.owner.last
+                    ) or None
                 if person is None:
                     if (
                         context == "service"
@@ -974,7 +1024,9 @@ class _Generator:
                         and service["kind"]
                         in ("courier", "delivery_food", "ride_hailing")
                     ):
-                        f, l_ = stranger_name()
+                        f, l_ = self._draw_name(
+                            s, self.country.id, s.choice("fm"), None
+                        )
                         memo.setdefault("first", f)
                         memo.setdefault("last", l_)
                         return memo[name]
@@ -1005,17 +1057,24 @@ class _Generator:
             if name == "time":
                 t = dt.datetime(2000, 1, 1, s.randint(8, 20), s.choice([0, 15, 30, 45]))
                 return format_date(t, self.cd["time_format"])
-            if name in ("date", "date_file"):
-                day = (when + dt.timedelta(days=s.randint(0, 10))).date()
-                if name == "date_file":
-                    return day.isoformat()
-                text = format_date(day, self.cd["date_format"])
-                return text.replace("/", "-") if context == "file" else text
-            if name == "day":
-                days = lang.get("weekdays")
-                if not isinstance(days, list) or len(days) != 7:
-                    return None
-                return days[(when + dt.timedelta(days=s.randint(1, 6))).weekday()]
+            if name in _DATE_SLOTS:
+                if name == "day":
+                    names = lang.get("weekdays")
+                    if not isinstance(names, list) or len(names) != 7:
+                        return None
+                    slot = {"kind": "day", "names": list(names)}
+                    ahead = s.randint(1, 6)
+                elif name == "date_file":
+                    slot = {"kind": "date_file"}
+                    ahead = s.randint(0, 10)
+                else:
+                    slot = {"kind": "date", "pattern": self.cd["date_format"]}
+                    if context == "file":
+                        slot["fs"] = True
+                    ahead = s.randint(0, 10)
+                slot["t_rel_s"] = t_rel - ahead * DAY
+                slots.append(slot)
+                return f"{{@{len(slots) - 1}}}"
             if name in ("amount", "balance", "fee"):
                 scale = {
                     "amount": (0.2, 6.0),
@@ -1053,7 +1112,7 @@ class _Generator:
             return None
 
         def sub(m: re.Match[str]) -> str:
-            nonlocal failed
+            nonlocal failed, distinctive
             name = m.group(1)
             if name not in memo:
                 v = value(name)
@@ -1061,12 +1120,15 @@ class _Generator:
                     failed = True
                     return ""
                 memo[name] = v
+            if name in _DISTINCTIVE or name.startswith("digits:"):
+                distinctive = distinctive or bool(memo[name].strip())
             return memo[name]
 
-        out = re.sub(r"\{([^{}]*)\}", sub, template)
+        out = re.sub(r"\{([^{}@]*)\}", sub, template)
         if failed:
             return None
-        return re.sub(r"[ \t]{2,}", " ", out).strip()
+        out = re.sub(r"[ \t]{2,}", " ", out).strip()
+        return _Text(out, slots, distinctive)
 
     def region_ok(self, entry: Any, culture: str | None = None) -> bool:
         if not isinstance(entry, dict) or not entry.get("regions"):
@@ -1167,6 +1229,9 @@ class _Generator:
                     if num is None:
                         continue
                     address = num["number"]
+                elif svc["sender_type"] == "shortcode" and not svc["sender"].isdigit():
+                    address = self._shortcode(svc["sender"])
+                    svc = {**svc, "label": svc.get("label") or svc["sender"]}
                 else:
                     address = svc["sender"]
                 chosen.append(
@@ -1177,6 +1242,20 @@ class _Generator:
                 "no service SMS: no service kind has templates in the language packs"
             )
         self.services = chosen
+
+    def _shortcode(self, sender: str) -> str:
+        """Return a stable 5-6 digit short code for a sender without one."""
+        s = self.stream(f"shortcode/{sender}")
+        taken = {
+            str(svc.get("sender"))
+            for svc in self.cd.get("services") or []
+            if str(svc.get("sender", "")).isdigit()
+        }
+        while True:
+            code = s.digits(s.randint(5, 6), first_nonzero=True)
+            if code not in taken and code not in self._codes:
+                self._codes.add(code)
+                return code
 
     def _service_templates(self, lang: str, kind: str) -> list[Any]:
         sms = self.lang(lang).get("service_sms") or {}
@@ -1213,34 +1292,34 @@ class _Generator:
                 thread = s.choice(options)
                 t_rel = self.pick_time(s)
                 rendered = []
+                t = t_rel
                 for speaker, text in thread["msgs"]:
-                    body = self.render(text, s, t_rel=t_rel, lang=lang, person=p)
+                    body = self.render(text, s, t_rel=t, lang=lang, person=p)
                     if body is None:
                         rendered = []
                         break
-                    rendered.append((speaker, body))
+                    rendered.append((speaker, body, t))
+                    t = max(1, t - int(min(6 * 3600, s.lognormal(150, 1.2))))
                 if not rendered:
                     continue
                 tid = threads.setdefault(p.mobile, len(threads) + 1)
-                t = t_rel
-                for speaker, body in rendered:
+                for speaker, body, t in rendered:
                     if len(items) >= total - n_service:
                         break
                     items.append(
                         {
                             "address": p.mobile,
-                            "body": body,
+                            **body.fields("body"),
                             "direction": "sent" if speaker == "o" else "inbox",
                             "person": p.id,
                             "service": None,
                             "sender_type": "number",
                             "lang": p.language,
-                            "emoji": has_emoji(body),
+                            "emoji": has_emoji(body.text),
                             "t_rel_s": t,
                             "thread": tid,
                         }
                     )
-                    t = max(1, t - int(min(6 * 3600, s.lognormal(150, 1.2))))
         if self.services:
             scum = Cumulative(
                 [_SERVICE_KIND_W.get(v["kind"], 0.7) for v in self.services]
@@ -1260,20 +1339,20 @@ class _Generator:
                     service=svc,
                     context="service",
                 )
-                if not body:
+                if not body or not body.text:
                     continue
                 tid = threads.setdefault(svc["address"], len(threads) + 1)
                 items.append(
                     {
                         "address": svc["address"],
                         "label": svc.get("label"),
-                        "body": body,
+                        **body.fields("body"),
                         "direction": "inbox",
                         "person": None,
                         "service": svc["kind"],
                         "sender_type": svc["sender_type"],
                         "lang": svc["lang"],
-                        "emoji": has_emoji(body),
+                        "emoji": has_emoji(body.text),
                         "t_rel_s": t_rel,
                         "thread": tid,
                     }
@@ -1360,61 +1439,54 @@ class _Generator:
             )
             if not title:
                 continue
-            nxt = (
-                p.birth.replace(year=NOMINAL_ANCHOR.year)
-                if not (p.birth.month == 2 and p.birth.day == 29)
-                else dt.date(NOMINAL_ANCHOR.year, 3, 1)
-            )
-            t_rel = int(
-                (NOMINAL_ANCHOR - dt.datetime.combine(nxt, dt.time())).total_seconds()
-            )
             out.append(
                 {
-                    "title": title,
+                    **title.fields("title"),
                     "kind": "birthday",
                     "all_day": True,
                     "minutes": None,
-                    "t_rel_s": t_rel,
+                    "t_rel_s": None,
                     "location": None,
                     "recurrence": "yearly",
                     "rule": f"{p.birth.month:02d}-{p.birth.day:02d}",
+                    "occurrence": 0,
                     "person": p.id,
                 }
             )
+        # Holidays: a rule plus an occurrence index counted back from 60
+        # days after the anchor; the renderer places them for any anchor.
         hol_slots = round(total * 0.2)
-        hols = []
+        ref = (NOMINAL_ANCHOR + dt.timedelta(days=LOOKAHEAD_DAYS)).date()
         start = (NOMINAL_ANCHOR - dt.timedelta(seconds=self.history_s)).date()
-        end = (NOMINAL_ANCHOR + dt.timedelta(days=60)).date()
+        years = self.history_s // (365 * DAY) + 2
+        hols: list[tuple[int, dict[str, Any]]] = []
         skipped = set()
         for h in self.cd.get("holidays") or []:
             if h.get("regional"):
                 continue
-            days = [
-                d for y in range(start.year, end.year + 1) for d in holiday_dates(h, y)
-            ]
+            days = recent_occurrences(h, ref, years)
             if not days and str(h.get("rule", "")).startswith("lunisolar:"):
                 skipped.add(h["rule"])
-            hols += [(d, h) for d in days if start <= d <= end]
+            hols += [(n, h) for n, d in enumerate(days) if d >= start]
         if skipped:
             self.warn(
-                f"holidays skipped (calendar not computable): {', '.join(sorted(skipped))}"
+                "holidays skipped (calendar not computable): "
+                + ", ".join(sorted(skipped))
             )
         hols.sort(key=lambda x: (x[0], x[1]["name"]))
-        for d, h in s.shuffled(hols)[:hol_slots]:
+        for n, h in s.shuffled(hols)[:hol_slots]:
             out.append(
                 {
                     "title": h["name"],
+                    "distinctive": False,
                     "kind": "holiday",
                     "all_day": True,
                     "minutes": None,
-                    "t_rel_s": int(
-                        (
-                            NOMINAL_ANCHOR - dt.datetime.combine(d, dt.time())
-                        ).total_seconds()
-                    ),
+                    "t_rel_s": None,
                     "location": None,
                     "recurrence": None,
                     "rule": h.get("rule") or h.get("date"),
+                    "occurrence": n,
                     "person": None,
                 }
             )
@@ -1435,7 +1507,7 @@ class _Generator:
                 t_rel = -int(s.uniform(0.5, 60) * DAY) // 900 * 900
             t_rel -= t_rel % 900
             title = self.render(entry_text(e, "title") or "", s, t_rel=t_rel, lang=lang)
-            if not title:
+            if not title or not title.text:
                 continue
             all_day = bool(e.get("all_day"))
             loc = None
@@ -1450,7 +1522,7 @@ class _Generator:
                 t_rel = int(math.ceil(t_rel / DAY) * DAY)
             out.append(
                 {
-                    "title": title,
+                    **title.fields("title"),
                     "kind": kind,
                     "all_day": all_day,
                     "minutes": None if all_day else int(e.get("minutes") or 60),
@@ -1458,11 +1530,12 @@ class _Generator:
                     "location": loc,
                     "recurrence": None,
                     "rule": None,
+                    "occurrence": None,
                     "person": None,
                 }
             )
         out = out[:total]
-        out.sort(key=lambda e: (-e["t_rel_s"], e["title"]))
+        out.sort(key=lambda e: (e["t_rel_s"] is None, -(e["t_rel_s"] or 0), e["title"]))
         return [{"id": f"world.events.{i}", **e} for i, e in enumerate(out, start=1)]
 
     # -- photos
@@ -1510,22 +1583,22 @@ class _Generator:
                 [p for p in self.far_places if p["category"] in _TRIP_CATEGORIES]
                 or self.far_places
             )
+            days = min(s.randint(2, 5), max(1, self.history_s // DAY - 1))
             start = self.pick_time(s, bias=1.2)
-            start = max(start, 6 * DAY)
-            days = s.randint(2, 5)
+            start = min(max(start, (days + 1) * DAY), self.history_s)
             share = n_trip // trips + (1 if k < n_trip % trips else 0)
             for _ in range(share):
                 t = start - s.below(days * DAY)
                 t -= t % DAY
                 t += DAY - (s.randint(9, 20) * 3600 + s.below(3600))
-                plan.append(("trip", t, place))
+                plan.append(("trip", max(60, min(t, self.history_s)), place))
         outs = max(1, n_out // 4) if n_out and self.home_places else 0
         for k in range(outs):
             place = s.choice(
                 [p for p in self.home_places if p["category"] in _OUTING_CATEGORIES]
                 or self.home_places
             )
-            t0 = self.pick_time(s, weekend=6.0, hours=_DAYTIME_HOURS)
+            t0 = self.pick_time(s, weekend=True, hours=_DAYTIME_HOURS)
             share = n_out // outs + (1 if k < n_out % outs else 0)
             for _ in range(share):
                 plan.append(("outing", max(60, t0 - s.below(3 * 3600)), place))
@@ -1616,12 +1689,12 @@ class _Generator:
             e = s.choice(entries)
             e = e if isinstance(e, dict) else {"name": e}
             t_rel = self.pick_time(s, bias=1.4)
-            name = self.render(
+            rendered = self.render(
                 entry_text(e, "name") or "", s, t_rel=t_rel, lang=lang, context="file"
             )
-            if not name:
+            if not rendered or not rendered.text:
                 continue
-            name = re.sub(r'[\\/:*?"<>|]', "-", name)
+            name = re.sub(r'[\\/:*?"<>|]', "-", rendered.text)
             if name in seen:
                 continue
             seen.add(name)
@@ -1636,7 +1709,7 @@ class _Generator:
             }.get(ext, 80_000)
             out.append(
                 {
-                    "name": name,
+                    **rendered._replace(text=name).fields("name"),
                     "kind": kind,
                     "dir": "Download" if kind in _DOWNLOAD_KINDS else "Documents",
                     "size_bytes": max(2_000, int(s.lognormal(median, 0.7))),
@@ -1663,46 +1736,53 @@ class _Generator:
                 lang=lang,
                 context="note",
             )
-            if not text or text in seen:
+            if not text or not text.text or text.text in seen:
                 continue
-            seen.add(text)
-            out.append({"text": text, "t_rel_s": t_rel})
+            seen.add(text.text)
+            out.append({**text.fields("text"), "t_rel_s": t_rel})
         out.sort(key=lambda n: (-n["t_rel_s"], n["text"]))
         return [{"id": f"world.notes.{i}", **n} for i, n in enumerate(out, start=1)]
 
     # -- run
 
     def pick_device(self) -> dict[str, Any]:
-        """Return the spec's device, else one drawn from the seed.
+        """Return the persona phone.
 
-        The draw uses the country pack's ``devices`` when present, else
-        :data:`FALLBACK_DEVICES`, filtered to ``target_sdk`` when given.
+        The spec's device wins. Otherwise one is drawn (sub-stream
+        ``device``) from the country pack's ``devices``, else from
+        :data:`FALLBACK_DEVICES`, keeping only phones that support
+        ``target_sdk`` when it is given.
+
+        Raises:
+            WorldError: No phone supports ``target_sdk``.
         """
+        sdk = self.target_sdk
         if self.spec.device:
             dev = normalize_device(self.spec.device)
-            if dev["make"] != "Google":
+            if sdk is not None and not device_fits(dev, sdk):
                 self.warn(
-                    f"device {dev['make']} {dev['model']} is used for photos only; "
-                    "apps will see a Google Pixel (the emulator bypass only "
-                    "spoofs Pixel fingerprints)."
+                    f"device {dev['make']} {dev['model']} does not support "
+                    f"target_sdk {sdk}; used as set"
                 )
-            return dev
-        s = self.stream("device")
-        pool = [
-            d for d in self.cd.get("devices") or [] if device_problem(d) is None
-        ] or list(FALLBACK_DEVICES)
-        sdk = self.target_sdk
-        if sdk is not None:
-            fits = [
-                d
-                for d in pool
-                if (d.get("min_sdk") or 0) <= sdk <= (d.get("max_sdk") or sdk)
-            ]
-            if not fits:
-                self.warn(f"device: no phone supports target_sdk {sdk}; any picked")
-            pool = fits or pool
-        dev = pool[s.weighted_index(Cumulative([d.get("w", 1.0) for d in pool]))]
-        return normalize_device(dev)
+        else:
+            s = self.stream("device")
+            pool = [
+                d for d in self.cd.get("devices") or [] if device_problem(d) is None
+            ] or list(FALLBACK_DEVICES)
+            if sdk is not None:
+                pool = [d for d in pool if device_fits(d, sdk)]
+                if not pool:
+                    raise WorldError(f"no phone model supports target_sdk {sdk}")
+            dev = normalize_device(
+                pool[s.weighted_index(Cumulative([d.get("w", 1.0) for d in pool]))]
+            )
+        if dev["make"] != "Google":
+            self.warn(
+                f"device {dev['make']} {dev['model']} is used for photos only; "
+                "apps will see a Google Pixel (the emulator bypass only "
+                "spoofs Pixel fingerprints)."
+            )
+        return dev
 
     def run(self) -> WorldManifest:
         self.device = self.pick_device()
@@ -1728,7 +1808,8 @@ class _Generator:
             time_base={
                 "t_rel_s": "seconds before the anchor (negative: after it)",
                 "anchor": "local midnight starting a Monday",
-                "nominal_anchor": NOMINAL_ANCHOR.isoformat(),
+                "date_slots": "{@n} in a text: a date rendered for the anchor",
+                "rule": "holidays and birthdays: date rule plus occurrence index",
             },
             packs=dict(sorted(self.used_packs.items())),
             owner=self.owner.to_dict(),
@@ -1760,7 +1841,8 @@ class _Generator:
             "gender": p.gender,
             "first": p.first,
             "last": p.last,
-            "birthday": p.birth.isoformat(),
+            "birthday": f"{p.birth.month:02d}-{p.birth.day:02d}",
+            "age": NOMINAL_ANCHOR.year - p.birth.year,
             "city": p.city,
             "numbers": p.numbers,
             "email": p.email,

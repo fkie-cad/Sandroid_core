@@ -13,8 +13,9 @@ Example::
         {"seed": "auto", "size": "medium", "country": "de"},
         {"first": "Mara", "last": "Keller", "phone": "+49...", "email": "..."},
     )
-    manifest.seed        # write back to the profile when the spec said auto
-    manifest.markers()   # values for the privacy scanner
+    manifest.seed                  # write back to the profile when the spec said auto
+    world = manifest.render(anchor)  # absolute times and final text at seed time
+    world.markers()                # values for the privacy scanner
 """
 
 from sandroid.world.generator import (
@@ -23,9 +24,21 @@ from sandroid.world.generator import (
     generate,
     phone_check,
 )
-from sandroid.world.manifest import SIZES, Owner, WorldManifest, WorldSpec
+from sandroid.world.manifest import (
+    SIZES,
+    Owner,
+    RenderedWorld,
+    WorldManifest,
+    WorldSpec,
+)
 from sandroid.world.markers import build_markers, to_markers
-from sandroid.world.packs import PackSet, ValidationReport, load_packs, validate_pack
+from sandroid.world.packs import (
+    PackSet,
+    ValidationReport,
+    WorldError,
+    load_packs,
+    validate_pack,
+)
 from sandroid.world.stream import SeedStream
 
 __all__ = [
@@ -34,8 +47,10 @@ __all__ = [
     "NumberFactory",
     "Owner",
     "PackSet",
+    "RenderedWorld",
     "SeedStream",
     "ValidationReport",
+    "WorldError",
     "WorldManifest",
     "WorldSpec",
     "build_markers",

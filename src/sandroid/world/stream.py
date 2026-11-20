@@ -79,10 +79,6 @@ class SeedStream:
         self._counter = 0
         self._buf: list[int] = []
 
-    def child(self, label: str) -> SeedStream:
-        """Return an independent sub-stream ``<label>/<sub-label>``."""
-        return SeedStream(self.seed, f"{self.label}/{label}")
-
     def u64(self) -> int:
         """Return the next 64-bit unsigned integer."""
         if not self._buf:

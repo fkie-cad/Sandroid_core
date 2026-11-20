@@ -25,12 +25,8 @@ from typing import Any
 
 import yaml
 
-from sandroid.world.manifest import device_problem
-
 #: Schema versions this module reads. v1 packs are v1.1-compatible.
 SCHEMA_VERSIONS = (1, 1.1, "1", "1.1")
-#: Schema version written by this module.
-SCHEMA_VERSION = "1.1"
 
 BUILTIN_DIR = Path(__file__).resolve().parent.parent / "assets" / "world"
 PACK_KINDS = ("countries", "languages", "photos")
@@ -139,6 +135,63 @@ _HIJRI_RE = re.compile(r"^hijri:(\d{2})-(\d{2})$")
 _LUNISOLAR_RE = re.compile(r"^lunisolar:[a-z0-9_]+$")
 _MARKUP_RE = re.compile(r"[{}\[\]|<>]")
 _DOWS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+class WorldError(ValueError):
+    """A world cannot be built: unknown country, invalid user pack, no device.
+
+    Attributes:
+        report: The validation report when a pack is invalid, else None.
+    """
+
+    def __init__(self, message: str, report: ValidationReport | None = None) -> None:
+        super().__init__(message)
+        self.report = report
+
+
+#: Fields of a persona device.
+DEVICE_KEYS = ("make", "model", "codename", "min_sdk", "max_sdk")
+
+
+def device_problem(device: Any) -> str | None:
+    """Return what is wrong with a device mapping, or None.
+
+    A device needs non-empty ``make``, ``model`` and ``codename`` strings;
+    ``min_sdk`` and ``max_sdk`` are optional API levels (null: open-ended);
+    a pack entry may add a weight ``w``.
+    """
+    if not isinstance(device, dict):
+        return "must be a mapping {make, model, codename, min_sdk, max_sdk}"
+    unknown = sorted(str(k) for k in set(device) - set(DEVICE_KEYS) - {"w"})
+    if unknown:
+        return f"unknown keys {', '.join(unknown)}"
+    for key in ("make", "model", "codename"):
+        if not isinstance(device.get(key), str) or not device[key].strip():
+            return f"{key} must be a non-empty string"
+    for key in ("min_sdk", "max_sdk"):
+        value = device.get(key)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        ):
+            return f"{key} must be a positive API level or null"
+    lo, hi = device.get("min_sdk"), device.get("max_sdk")
+    if lo is not None and hi is not None and lo > hi:
+        return "min_sdk is above max_sdk"
+    w = device.get("w", 1)
+    if isinstance(w, bool) or not isinstance(w, (int, float)) or w < 0:
+        return "w must be a non-negative number"
+    return None
+
+
+def normalize_device(device: dict[str, Any]) -> dict[str, Any]:
+    """Return a device with exactly :data:`DEVICE_KEYS` (no weight)."""
+    return {key: device.get(key) for key in DEVICE_KEYS}
+
+
+def device_fits(device: dict[str, Any], sdk: int) -> bool:
+    """Return whether ``min_sdk <= sdk <= max_sdk`` (missing bounds are open)."""
+    lo, hi = device.get("min_sdk"), device.get("max_sdk")
+    return (lo is None or lo <= sdk) and (hi is None or sdk <= hi)
 
 
 def _yaml_load(text: str) -> Any:
@@ -263,20 +316,43 @@ class PackSet:
         """Return whether a pack exists."""
         return pack_id in self._files[kind]
 
-    def get(self, kind: str, pack_id: str) -> Pack:
+    def get(self, kind: str, pack_id: str, *, validate: bool = True) -> Pack:
         """Return one pack, parsing it on first use.
+
+        User packs are validated on first use (built-in packs are validated by
+        the test suite).
+
+        Args:
+            kind: One of :data:`PACK_KINDS`.
+            pack_id: The pack id.
+            validate: Validate a user pack; False only reads it.
 
         Raises:
             KeyError: No such pack.
+            WorldError: A user pack cannot be parsed or has validation errors.
         """
         key = f"{kind}/{pack_id}"
         pack = self._cache.get(key)
-        if pack is None:
-            if pack_id not in self._files[kind]:
-                raise KeyError(f"no {kind} pack {pack_id!r}")
-            path, builtin = self._files[kind][pack_id]
+        if pack is not None:
+            return pack
+        if pack_id not in self._files[kind]:
+            raise KeyError(f"no {kind} pack {pack_id!r}")
+        path, builtin = self._files[kind][pack_id]
+        try:
             pack = read_pack(path, kind, builtin=builtin)
-            self._cache[key] = pack
+        except (OSError, UnicodeDecodeError, ValueError, yaml.YAMLError) as exc:
+            raise WorldError(f"cannot read {kind} pack {path}: {exc}") from exc
+        if not builtin and validate:
+            report = validate_pack(pack, packs=self)
+            if report.errors:
+                shown = "; ".join(report.errors[:5])
+                more = len(report.errors) - 5
+                raise WorldError(
+                    f"user pack {path} is invalid: {shown}"
+                    + (f" (+{more} more)" if more > 0 else ""),
+                    report,
+                )
+        self._cache[key] = pack
         return pack
 
     def country(self, pack_id: str) -> Pack:
@@ -298,7 +374,13 @@ class PackSet:
         out: dict[str, ValidationReport] = {}
         for kind in PACK_KINDS:
             for pack_id in self.ids(kind):
-                pack = self.get(kind, pack_id)
+                try:
+                    pack = self.get(kind, pack_id, validate=False)
+                except WorldError as exc:
+                    out[f"{kind}/{pack_id}"] = ValidationReport(
+                        f"{kind}/{pack_id}", errors=[str(exc)]
+                    )
+                    continue
                 out[pack.key] = validate_pack(pack, packs=self)
         return out
 
@@ -422,6 +504,40 @@ def holiday_dates(entry: dict[str, Any], year: int) -> list[dt.date]:
                 out.append(d)
         return sorted(out)
     return []
+
+
+#: Calendar events may lie this far after the anchor.
+LOOKAHEAD_DAYS = 60
+
+
+def recent_occurrences(
+    entry: dict[str, Any], ref: dt.date, years: int
+) -> list[dt.date]:
+    """Return a rule's dates on or before ``ref``, newest first.
+
+    Looks back ``years`` years. A ``02-29`` rule falls on 1 March in common
+    years.
+    """
+    out: list[dt.date] = []
+    for year in range(ref.year - years, ref.year + 1):
+        days = holiday_dates(entry, year)
+        if not days and str(entry.get("date", entry.get("rule"))) == "02-29":
+            days = [dt.date(year, 3, 1)]
+        out += [d for d in days if d <= ref]
+    return sorted(set(out), reverse=True)
+
+
+def nth_occurrence(rule: str, anchor: dt.date, n: int) -> dt.date | None:
+    """Return the n-th newest date of ``rule`` up to ``LOOKAHEAD_DAYS`` after ``anchor``.
+
+    ``n = 0`` is the latest occurrence not more than :data:`LOOKAHEAD_DAYS`
+    after the anchor, ``n = 1`` the one before it, and so on. This keeps a
+    holiday or birthday at the same place in the world's history whatever
+    the anchor's date.
+    """
+    ref = anchor + dt.timedelta(days=LOOKAHEAD_DAYS)
+    days = recent_occurrences({"rule": rule}, ref, n + 2)
+    return days[n] if n < len(days) else None
 
 
 # ------------------------------------------------------------------ validator

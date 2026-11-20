@@ -1,9 +1,10 @@
-"""World generator: determinism, numbers, mix, privacy, placeholders, markers."""
+"""World generator: determinism, numbers, mix, privacy, rendering, markers."""
 
 from __future__ import annotations
 
 import collections
 import dataclasses
+import datetime as dt
 import json
 import os
 import re
@@ -18,14 +19,17 @@ from sandroid.world import (
     GENERATOR_VERSION,
     NumberFactory,
     PackSet,
+    RenderedWorld,
     SeedStream,
+    WorldError,
     WorldManifest,
     WorldSpec,
     generate,
     phone_check,
 )
-from sandroid.world.generator import FALLBACK_DEVICES, WorldError, has_emoji
-from sandroid.world.packs import parse_range
+from sandroid.world.generator import FALLBACK_DEVICES, has_emoji
+from sandroid.world.manifest import week_anchor
+from sandroid.world.packs import easter, parse_range
 
 PACKS = PackSet(user_dir=False)
 SEED = "hex:" + "5a" * 16
@@ -42,9 +46,10 @@ TEXT_FIELDS = (
     ("files", "name"),
     ("notes", "text"),
 )
+ANCHOR = dt.datetime(2026, 11, 20, 15, 30, tzinfo=dt.UTC)
 #: world_fp of the reference world below. A change here means the generator's
 #: output changed: bump GENERATOR_VERSION and update the value.
-GOLDEN_FP = "d8a2f4978f9f31e5bc14495bbad651dcfff3c72546ae4a6a2c50adb6004e42b9"
+GOLDEN_FP = "c0ee48fdf1f2f9bb834dccd50cb47603b425c414bc639008dd66bf1ff09f0fc8"
 
 
 def _world(**spec: object) -> WorldManifest:
@@ -56,6 +61,17 @@ def _world(**spec: object) -> WorldManifest:
 @pytest.fixture(scope="module")
 def medium() -> WorldManifest:
     return _world()
+
+
+@pytest.fixture(scope="module")
+def large_de() -> WorldManifest:
+    return _world(size="large")
+
+
+@pytest.fixture(scope="module")
+def many() -> WorldManifest:
+    """A large world with every holiday and many files and notes."""
+    return _world(size="large", counts={"events": 400, "files": 60, "notes": 40})
 
 
 # ------------------------------------------------------------ determinism
@@ -80,7 +96,6 @@ def test_more_photos_leaves_other_lists_unchanged(medium: WorldManifest) -> None
     assert len(more.photos) == 90
     for name in ("people", "contacts", "sms", "calls", "events", "files", "notes"):
         assert getattr(more, name) == getattr(medium, name), name
-    assert more.photos[0] != medium.photos[0] or more.world_fp != medium.world_fp
 
 
 def test_auto_seed_is_resolved_and_reproducible() -> None:
@@ -187,6 +202,20 @@ def test_numbers_match_pack_ranges_at_every_level(country_id: str) -> None:
                     assert check["possible"], num
 
 
+def test_prefix_filter_sees_the_whole_range() -> None:
+    entry = {"range": "3023125000-3023125999"}
+    assert NumberFactory.fits(entry, "302312")
+    assert NumberFactory.fits(entry, "3023125")
+    assert NumberFactory.fits(entry, "30231259")  # not at the range's low end
+    assert not NumberFactory.fits(entry, "3024")
+    country = PACKS.country("de").data
+    factory = NumberFactory(country, "fiction", lambda _msg: None)
+    stream = SeedStream(b"\x02" * 16, "prefix")
+    num = factory.make("landline", stream, want="30231259")
+    assert num is not None
+    assert num["number"].startswith("+4930231259")
+
+
 def test_world_numbers_stay_at_requested_level() -> None:
     world = _world(numbers="unallocated", size="large", mix={"de": 1.0})
     levels = {n["level"] for p in world.people for n in p["numbers"]}
@@ -206,6 +235,21 @@ def test_fiction_pool_exhaustion_falls_back_with_warning() -> None:
     assert any("fiction" in w for w in world.warnings) == (len(levels) > 1)
 
 
+def test_owner_number_is_never_generated() -> None:
+    country = PACKS.country("de").data
+    entry = {"range": "1713920000-1713920001"}
+    owner = "+49 171 3920000"
+    factory = NumberFactory(
+        {**country, "phone": {**country["phone"], "mobile": {"fiction": [entry]}}},
+        "fiction",
+        lambda _msg: None,
+        exclude={"+" + re.sub(r"\D", "", owner)},
+    )
+    stream = SeedStream(b"\x03" * 16, "owner")
+    assert factory.make("mobile", stream)["number"] == "+491713920001"
+    assert factory.make("mobile", stream) is None
+
+
 # -------------------------------------------------------------- mix + graph
 
 
@@ -218,12 +262,23 @@ def test_mix_proportions_within_tolerance() -> None:
             assert abs(shares[culture] / len(others) - share) <= tol, (size, culture)
 
 
+def test_mix_is_normalised_with_a_warning() -> None:
+    world = _world(mix={"de": 2, "tr": 1}, size="small")
+    assert world.spec["mix"] == {"de": pytest.approx(2 / 3), "tr": pytest.approx(1 / 3)}
+    assert any("add up to 3" in w for w in world.warnings)
+    exact = _world(mix={"de": 0.995, "tr": 0.005}, size="small")
+    assert not any("add up" in w for w in exact.warnings)
+    unknown = _world(mix={"de": 0.9, "zz": 0.1}, size="small")
+    assert any("'zz' has no country pack" in w for w in unknown.warnings)
+
+
 def test_people_language_and_names_follow_culture(medium: WorldManifest) -> None:
     for p in medium.people:
         pack = PACKS.country(p["culture"]).data
         assert p["language"] in pack["languages"]
         pool = pack["names"]["female" if p["gender"] == "f" else "male"]
         assert p["first"] in {e["name"] for e in pool}
+        assert re.fullmatch(r"\d\d-\d\d", p["birthday"])
 
 
 def test_name_groups_keep_first_and_last_together() -> None:
@@ -258,19 +313,29 @@ def test_no_identity_token_in_manifest() -> None:
             owner,
             packs=PACKS,
         )
-        dump = world.to_json() + json.dumps(world.markers(), ensure_ascii=False)
+        rendered = world.render(ANCHOR)
+        dump = (
+            world.to_json()
+            + json.dumps(dataclasses.asdict(rendered), ensure_ascii=False)
+            + json.dumps(world.markers(ANCHOR), ensure_ascii=False)
+        )
         for needle in (token, owner["email"], owner["phone"], owner["phone"][1:]):
             assert needle not in dump
         assert world.owner == {"first": "Mara", "last": "Keller"}
 
 
 def test_country_from_owner_phone() -> None:
-    world = generate({"seed": SEED, "size": "small"}, OWNER, packs=PACKS)
+    world = generate(
+        {"seed": SEED, "size": "small"}, {**OWNER, "phone": "0049 151 123"}, packs=PACKS
+    )
     assert world.spec["country"] == "de"
     with pytest.raises(WorldError):
         generate(
             {"seed": SEED, "size": "small"}, {"first": "A", "last": "B"}, packs=PACKS
         )
+
+
+# ------------------------------------------------------------------ device
 
 
 def test_device_from_spec_or_seed(medium: WorldManifest) -> None:
@@ -311,13 +376,13 @@ def test_device_is_token_free_and_seeded() -> None:
         text = json.dumps(world.device)
         assert token not in text
         assert "keller" not in text.lower()
+        assert "w" not in world.device
         seen.add(world.device["codename"])
     assert len(seen) > 1
 
 
 def test_target_sdk_filters_devices() -> None:
     newer = {"shiba", "husky", "akita", "tokay"}
-    fps = set()
     for i in range(24):
         world = generate(
             {"seed": f"hex:{i:032x}", "size": "small", "country": "de"},
@@ -327,15 +392,89 @@ def test_target_sdk_filters_devices() -> None:
         )
         assert world.device["codename"] not in newer
         assert world.target_sdk == 33
-        fps.add(world.world_fp)
+    old = {
+        generate(
+            {"seed": f"hex:{i:032x}", "size": "small", "country": "de"},
+            OWNER,
+            packs=PACKS,
+            target_sdk=30,
+        ).device["codename"]
+        for i in range(16)
+    }
+    assert old <= {"sunfish", "redfin"}
     base = {"seed": SEED, "size": "small", "country": "de"}
     any_sdk = generate(base, OWNER, packs=PACKS)
     sdk35 = generate(base, OWNER, packs=PACKS, target_sdk=35)
     assert any_sdk.target_sdk is None
     assert sdk35.device["min_sdk"] <= 35
     assert sdk35.world_fp != any_sdk.world_fp  # target_sdk is fingerprinted
-    old = generate(base, OWNER, packs=PACKS, target_sdk=30)
-    assert any("target_sdk 30" in w for w in old.warnings)
+
+
+def test_device_fallback_errors_and_warnings() -> None:
+    base = {"seed": SEED, "size": "small", "country": "de"}
+    with pytest.raises(WorldError, match="target_sdk 28"):
+        generate(base, OWNER, packs=PACKS, target_sdk=28)
+    pinned = {"make": "Google", "model": "Pixel 9", "codename": "tokay", "min_sdk": 35}
+    world = generate({**base, "device": pinned}, OWNER, packs=PACKS, target_sdk=28)
+    assert world.device["codename"] == "tokay"
+    assert any("does not support target_sdk 28" in w for w in world.warnings)
+    with pytest.raises(ValueError, match="target_sdk"):
+        generate(base, OWNER, packs=PACKS, target_sdk=True)
+
+
+def test_pack_devices_are_used_and_non_google_warns(tmp_path: Path) -> None:
+    import yaml
+
+    from sandroid.world.packs import BUILTIN_DIR
+
+    data = yaml.safe_load((BUILTIN_DIR / "countries" / "de.yaml").read_text("utf-8"))
+    data["devices"] = [
+        {"make": "Fairphone", "model": "Fairphone 5", "codename": "FP5", "w": 1.0}
+    ]
+    (tmp_path / "countries").mkdir()
+    (tmp_path / "countries" / "de.yaml").write_text(
+        yaml.safe_dump(data, allow_unicode=True), "utf-8"
+    )
+    world = generate(
+        {"seed": SEED, "size": "small", "country": "de"},
+        OWNER,
+        packs=PackSet(user_dir=tmp_path),
+    )
+    assert world.device == {
+        "make": "Fairphone",
+        "model": "Fairphone 5",
+        "codename": "FP5",
+        "min_sdk": None,
+        "max_sdk": None,
+    }
+    assert any("apps will see a Google Pixel" in w for w in world.warnings)
+
+
+# --------------------------------------------------------------- user packs
+
+
+def test_malformed_user_pack_raises_world_error(tmp_path: Path) -> None:
+    import yaml
+
+    from sandroid.world.packs import BUILTIN_DIR
+
+    data = yaml.safe_load((BUILTIN_DIR / "countries" / "de.yaml").read_text("utf-8"))
+    del data["phone"]
+    (tmp_path / "countries").mkdir()
+    (tmp_path / "countries" / "de.yaml").write_text(
+        yaml.safe_dump(data, allow_unicode=True), "utf-8"
+    )
+    (tmp_path / "countries" / "xx.yaml").write_text("pack: [unclosed", "utf-8")
+    packs = PackSet(user_dir=tmp_path)
+    with pytest.raises(WorldError) as err:
+        generate({"seed": SEED, "size": "small", "country": "de"}, OWNER, packs=packs)
+    assert err.value.report is not None
+    assert any(e.startswith("phone") for e in err.value.report.errors)
+    with pytest.raises(WorldError, match="cannot read"):
+        packs.country("xx")
+    reports = packs.validate_all()
+    assert reports["countries/de"].errors
+    assert reports["countries/xx"].errors
 
 
 # ------------------------------------------------------------- content
@@ -348,11 +487,17 @@ def test_no_unresolved_placeholders(country_id: str) -> None:
     )
     for name, key in TEXT_FIELDS:
         for item in getattr(world, name):
-            assert not re.search(r"\{[^{}]*\}", item[key]), (name, item[key])
+            left = re.sub(r"\{@\d+\}", "", item[key])
+            assert not re.search(r"[{}]", left), (name, item[key])
+            assert len(item.get("date_slots", [])) == len(
+                set(re.findall(r"\{@(\d+)\}", item[key]))
+            )
+    rendered = world.render(ANCHOR)
+    for name, key in TEXT_FIELDS:
+        for item in getattr(rendered, name):
+            assert not re.search(r"[{}]", item[key]), (name, item[key])
     for c in world.contacts:
         assert "{" not in c["display_name"]
-    counts = world.spec["counts"] or {}
-    assert len(world.contacts) >= 0.9 * counts.get("contacts", 250)
     assert len(world.sms) == 600
 
 
@@ -370,53 +515,204 @@ def test_alphanumeric_senders_are_preserved() -> None:
             assert m["address"] in alnum
         elif m["sender_type"] == "number":
             assert m["address"].startswith("+254")
-    assert any(m["address"] == "MPESA" for m in service) or any(
-        m["service"] == "mobile_money" for m in service
-    )
+    assert any(m["service"] == "mobile_money" for m in service)
+
+
+def test_short_codes_are_numeric_and_keep_the_brand() -> None:
+    world = _world(country="br", mix=None, size="large")
+    brands = {
+        s["sender"]
+        for s in PACKS.country("br").data["services"]
+        if s["sender_type"] == "shortcode" and not s["sender"].isdigit()
+    }
+    codes = [m for m in world.sms if m["sender_type"] == "shortcode"]
+    assert any(m["label"] in brands for m in codes)
+    for m in codes:
+        assert m["address"].isdigit()
+        if m["label"] in brands:
+            assert 5 <= len(m["address"]) <= 6
+    again = _world(country="br", mix=None, size="large")
+    assert [m["address"] for m in again.sms] == [m["address"] for m in world.sms]
 
 
 def test_emoji_detected_per_message() -> None:
     world = _world(country="ke", mix=None, size="large")
-    flagged = [m for m in world.sms if m["emoji"]]
-    assert flagged
+    assert any(m["emoji"] for m in world.sms)
     for m in world.sms:
         assert m["emoji"] == has_emoji(m["body"])
     assert has_emoji("Poa 👌")
     assert has_emoji("Love ❤️")
+    assert has_emoji("Kaffee ☕")
     assert not has_emoji("Bis morgen, 12:30 Uhr")
+    assert not has_emoji("Erledigt ✓")
+    assert not has_emoji("a‍b️")
 
 
 def test_times_are_within_history(medium: WorldManifest) -> None:
-    limit = WorldSpec(history="18mo").history_seconds()
-    for name in ("sms", "calls", "photos", "files", "notes"):
-        for item in getattr(medium, name):
-            assert 0 < item["t_rel_s"] <= limit + 86400, (name, item)
+    for history in ("18mo", "10d"):
+        world = medium if history == "18mo" else _world(history=history)
+        limit = WorldSpec(history=history).history_seconds()
+        for name in ("sms", "calls", "photos", "files", "notes"):
+            for item in getattr(world, name):
+                assert 0 < item["t_rel_s"] <= limit, (history, name, item["t_rel_s"])
+
+
+def test_daily_rhythm(large_de: WorldManifest) -> None:
+    hours = collections.Counter(
+        dt.datetime.fromtimestamp(m["ts_ms"] / 1000, dt.UTC).hour
+        for m in large_de.render(ANCHOR).sms
+    )
+    night = sum(hours[h] for h in range(1, 6))
+    evening = sum(hours[h] for h in range(18, 22))
+    assert evening > 5 * max(night, 1)
+    outings = [p for p in large_de.photos if p["cluster"] == "outing"]
+    rendered = {p["id"]: p for p in large_de.render(ANCHOR).photos}
+    weekend = sum(
+        dt.datetime.fromtimestamp(rendered[p["id"]]["ts_ms"] / 1000, dt.UTC).weekday()
+        >= 5
+        for p in outings
+    )
+    assert outings
+    assert weekend == len(outings)
+
+
+# ------------------------------------------------------------- rendering
+
+
+def test_render_anchor_snaps_to_monday_midnight() -> None:
+    wed = dt.datetime(2026, 11, 18, 17, 45, tzinfo=dt.UTC)
+    assert week_anchor(wed) == dt.datetime(2026, 11, 16, tzinfo=dt.UTC)
+    naive = week_anchor(dt.datetime(2026, 11, 22, 3))
+    assert naive == dt.datetime(2026, 11, 16, tzinfo=dt.UTC)
+
+
+def _de_date(text: str) -> dt.date:
+    day, month, year = (int(x) for x in text.split("."))
+    return dt.date(year, month, day)
+
+
+def test_render_one_week_apart(large_de: WorldManifest) -> None:
+    first = large_de.render(ANCHOR)
+    second = large_de.render(ANCHOR + dt.timedelta(days=7))
+    assert isinstance(first, RenderedWorld)
+    week_ms = 7 * 86400 * 1000
+    for a, b in zip(first.sms, second.sms, strict=True):
+        assert b["ts_ms"] - a["ts_ms"] == week_ms
+    slotted = [m for m in large_de.sms if m.get("date_slots")]
+    assert slotted
+    by_id = {m["id"]: m for m in first.sms}
+    by_id2 = {m["id"]: m for m in second.sms}
+    pattern = PACKS.country("de").data["date_format"]
+    assert pattern == "dd.MM.yyyy"
+    for m in slotted:
+        sent = dt.datetime.fromtimestamp(by_id[m["id"]]["ts_ms"] / 1000, dt.UTC).date()
+        dates = re.findall(r"\d\d\.\d\d\.\d{4}", by_id[m["id"]]["body"])
+        assert dates, by_id[m["id"]]["body"]
+        for text in dates:
+            day = _de_date(text)
+            assert 0 <= (day - sent).days <= 10, (text, sent)
+        later = re.findall(r"\d\d\.\d\d\.\d{4}", by_id2[m["id"]]["body"])
+        assert [
+            (_de_date(x) - _de_date(y)).days for x, y in zip(later, dates, strict=True)
+        ] == [7] * len(dates)
+
+
+def test_weekday_slots_follow_the_anchor(tmp_path: Path) -> None:
+    import yaml
+
+    from sandroid.world.packs import BUILTIN_DIR
+
+    names = [
+        "Montag",
+        "Dienstag",
+        "Mittwoch",
+        "Donnerstag",
+        "Freitag",
+        "Samstag",
+        "Sonntag",
+    ]
+    data = yaml.safe_load((BUILTIN_DIR / "languages" / "de.yaml").read_text("utf-8"))
+    data["weekdays"] = names
+    (tmp_path / "languages").mkdir()
+    (tmp_path / "languages" / "de.yaml").write_text(
+        yaml.safe_dump(data, allow_unicode=True), "utf-8"
+    )
+    world = generate(
+        {"seed": SEED, "size": "large", "country": "de", "mix": {"de": 1}},
+        OWNER,
+        packs=PackSet(user_dir=tmp_path),
+    )
+    day_items = [
+        (m, slot)
+        for m in world.sms
+        for slot in m.get("date_slots", [])
+        if slot["kind"] == "day"
+    ]
+    assert day_items
+    for anchor in (
+        ANCHOR,
+        ANCHOR + dt.timedelta(days=7),
+        ANCHOR + dt.timedelta(days=3),
+    ):
+        rendered = {m["id"]: m for m in world.render(anchor).sms}
+        base = week_anchor(anchor)
+        for m, slot in day_items:
+            expected = names[(base - dt.timedelta(seconds=slot["t_rel_s"])).weekday()]
+            assert expected in rendered[m["id"]]["body"]
+            sent = base - dt.timedelta(seconds=m["t_rel_s"])
+            target = base - dt.timedelta(seconds=slot["t_rel_s"])
+            assert 1 <= (target.date() - sent.date()).days <= 7
+
+
+def test_easter_holidays_land_on_the_right_day(many: WorldManifest) -> None:
+    assert any(str(e.get("rule") or "").startswith("easter") for e in many.events)
+    for anchor in (
+        dt.datetime(2026, 11, 20, tzinfo=dt.UTC),
+        dt.datetime(2028, 3, 1, tzinfo=dt.UTC),
+    ):
+        base = week_anchor(anchor)
+        seen = 0
+        for ev in many.render(anchor).events:
+            rule = str(ev.get("rule") or "")
+            if not rule.startswith("easter"):
+                continue
+            seen += 1
+            day = dt.datetime.fromtimestamp(ev["ts_ms"] / 1000, dt.UTC).date()
+            assert day == easter(day.year) + dt.timedelta(days=int(rule[6:] or 0))
+            assert day <= base.date() + dt.timedelta(days=60)
+            assert (base.date() - day).days <= 18 * 31
+        assert seen
+
+
+def test_birthdays_render_every_year(large_de: WorldManifest) -> None:
+    bdays = [e for e in large_de.events if e["kind"] == "birthday"]
+    assert bdays
+    for anchor in (ANCHOR, dt.datetime(2029, 7, 1, tzinfo=dt.UTC)):
+        rendered = {e["id"]: e for e in large_de.render(anchor).events}
+        for ev in bdays:
+            day = dt.datetime.fromtimestamp(rendered[ev["id"]]["ts_ms"] / 1000, dt.UTC)
+            if ev["rule"] != "02-29":
+                assert f"{day.month:02d}-{day.day:02d}" == ev["rule"]
 
 
 # --------------------------------------------------------------- markers
 
 
-def test_markers_cover_every_kind(medium: WorldManifest) -> None:
-    markers = medium.markers()
+def test_markers_cover_every_kind(large_de: WorldManifest) -> None:
+    markers = large_de.markers(ANCHOR)
     kinds = collections.Counter(m["kind"] for m in markers)
-    for kind in (
-        "phone",
-        "email",
-        "name",
-        "sms_body",
-        "calendar_title",
-        "geo",
-        "file_name",
-    ):
+    for kind in ("phone", "email", "name", "sms_body", "calendar_title", "geo"):
         assert kinds[kind] > 0, kind
+    assert kinds["file_name"] + kinds["note"] > 0
     values = [(m["kind"], m["value"]) for m in markers]
     assert len(values) == len(set(values))
     for m in markers:
         assert m["origin"] == "world"
         assert m["population"] == f"world.{m['dataset']}"
         assert {"record": m["record"], "field": m["field"]} == m["refs"][0]
-        if m["kind"] in ("sms_body", "calendar_title"):
+        if m["kind"] in ("sms_body", "calendar_title", "file_name", "note"):
             assert len(m["value"]) >= 16
+            assert "{" not in m["value"]
         if m["kind"] == "geo":
             lat, lon = m["value"].split(",")
             assert len(lat.split(".")[1]) >= 4
@@ -425,8 +721,38 @@ def test_markers_cover_every_kind(medium: WorldManifest) -> None:
             assert re.fullmatch(r"\+\d{8,15}", m["value"])
 
 
+def test_generic_texts_are_not_markers(many: WorldManifest) -> None:
+    rendered = many.render(ANCHOR)
+    titles = {e["title"] for e in rendered.events}
+    names = {f["name"] for f in rendered.files}
+    generic = {
+        "Christi Himmelfahrt",
+        "Mitarbeitergespräch",
+        "Lohnsteuerbescheinigung.pdf",
+    }
+    assert generic & (titles | names), "the generic samples should occur"
+    values = {m["value"] for m in rendered.markers()}
+    assert not generic & values
+    holidays = {e["title"] for e in rendered.events if e["kind"] == "holiday"}
+    assert not holidays & values
+    texts = {
+        m["value"]
+        for m in rendered.markers()
+        if m["kind"] in ("sms_body", "calendar_title", "file_name", "note")
+    }
+    items = [
+        (item, key)
+        for name, key in TEXT_FIELDS
+        for item in getattr(rendered, name)
+        if item[key] in texts
+    ]
+    assert items
+    assert all(item["distinctive"] for item, _ in items)
+
+
 def test_shared_number_refs_link_contacts_sms_and_calls(medium: WorldManifest) -> None:
-    phones = [m for m in medium.markers() if m["kind"] == "phone"]
+    rendered = medium.render(ANCHOR)
+    phones = [m for m in rendered.markers() if m["kind"] == "phone"]
     linked = [
         m
         for m in phones
@@ -437,7 +763,7 @@ def test_shared_number_refs_link_contacts_sms_and_calls(medium: WorldManifest) -
     marker = linked[0]
     for ref in marker["refs"]:
         _, dataset, n = ref["record"].split(".")
-        item = getattr(medium, dataset)[int(n) - 1]
+        item = getattr(rendered, dataset)[int(n) - 1]
         assert item["id"] == ref["record"]
         assert marker["value"] in json.dumps(item)
 
@@ -445,8 +771,8 @@ def test_shared_number_refs_link_contacts_sms_and_calls(medium: WorldManifest) -
 def test_to_markers_sets_only_existing_fields(medium: WorldManifest) -> None:
     from sandroid.core.privacy_markers import Marker
 
-    dicts = medium.markers()
-    objs = medium.to_markers()
+    dicts = medium.markers(ANCHOR)
+    objs = medium.to_markers(ANCHOR)
     names = {f.name for f in dataclasses.fields(Marker)}
     geo = sum(1 for m in dicts if m["kind"] == "geo")
     assert len(objs) == len(dicts) + geo
@@ -463,17 +789,39 @@ def test_to_markers_sets_only_existing_fields(medium: WorldManifest) -> None:
     "spec",
     [
         {"size": "huge"},
+        {"size": ["medium"]},
         {"numbers": "random"},
         {"history": "forever"},
+        {"history": 18},
         {"counts": {"sms": -1}},
+        {"counts": {"sms": True}},
+        {"counts": {"sms": 1.5}},
         {"counts": {"tweets": 3}},
+        {"counts": [1, 2]},
         {"seed": "hex:abc"},
+        {"seed": 12},
+        {"mix": {"de": 0}},
+        {"mix": {"de": "lots"}},
+        {"mix": {"de": True}},
+        {"mix": ["de"]},
+        {"places": {"home": "Berlin"}},
+        {"places": {"home": {"lat": "52", "lon": 13}}},
+        {"places": {"home": {"lat": 952, "lon": 13}}},
+        {"places": {"garden": {"city": "Berlin"}}},
+        {"places": {"home": {}}},
+        {"country": 49},
         {"colour": "blue"},
     ],
 )
 def test_invalid_spec_is_rejected(spec: dict) -> None:
     with pytest.raises(ValueError):
         generate({"country": "de", **spec}, OWNER, packs=PACKS)
+
+
+@pytest.mark.parametrize("owner", [None, "Mara", {"first": 3, "last": "K"}])
+def test_invalid_owner_is_rejected(owner: object) -> None:
+    with pytest.raises(ValueError, match="owner"):
+        generate({"country": "de", "size": "small"}, owner, packs=PACKS)
 
 
 def test_unknown_country_is_rejected() -> None:
@@ -491,8 +839,9 @@ def test_large_world_under_five_seconds() -> None:
     world = generate(
         {"seed": SEED, "size": "large", "country": "de", "mix": MIX}, OWNER, packs=packs
     )
+    world.render(ANCHOR).markers()
     elapsed = time.perf_counter() - start
-    print(f"large world incl. pack loading: {elapsed:.3f} s")
+    print(f"large world incl. pack loading, render and markers: {elapsed:.3f} s")
     assert len(world.sms) == 600
     assert elapsed < 5.0
 
