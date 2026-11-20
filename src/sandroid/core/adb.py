@@ -6,7 +6,7 @@ for all ADB operations.  The actual logic is split across focused modules:
 - :mod:`adb_queries`   -- device property queries (``getprop``, date, etc.)
 - :mod:`adb_packages`  -- APK install / uninstall / package listing
 - :mod:`adb_process`   -- PID lookup with multiple fallback strategies
-- :mod:`adb_emulator`  -- emulator telnet commands (geo, sensors, snapshots, network)
+- :mod:`adb_emulator`  -- emulator telnet commands (geo, snapshots, network)
 - :mod:`adb_dumpsys`   -- ``dumpsys activity`` parsing (services, activity stack)
 - :mod:`adb_network`   -- ``/proc/net/tcp[6]`` connection listing
 - :mod:`adb_utils`     -- error handling & stderr filtering
@@ -993,39 +993,6 @@ class Adb:
                 - 'clock': The VM clock value at snapshot time
         """
         return _emu.get_avd_snapshots(cls.send_telnet_command)
-
-    @classmethod
-    def set_geo_fix(cls, lon: float, lat: float) -> tuple[str, str]:
-        """Set GPS coordinates on the emulator via telnet.
-
-        Sends a ``geo fix`` command to the emulator console.  The emulator
-        expects **longitude first**, then latitude.
-
-        Args:
-            lon: Longitude value (e.g., 11.5820).
-            lat: Latitude value (e.g., 48.1351).
-
-        Returns:
-            A tuple of (stdout, stderr) from the telnet command.
-        """
-        return _emu.set_geo_fix(cls.send_telnet_command, lon, lat)
-
-    @classmethod
-    def set_sensor_value(cls, sensor: str, values: str) -> tuple[str, str]:
-        """Set a sensor value on the emulator via telnet.
-
-        Sends a ``sensor set`` command to the emulator console to update
-        the specified sensor with the given values.
-
-        Args:
-            sensor: The sensor name (e.g., 'acceleration', 'gyroscope').
-            values: The sensor values as a colon-separated string
-                (e.g., '0:9.8:0').
-
-        Returns:
-            A tuple of (stdout, stderr) from the telnet command.
-        """
-        return _emu.set_sensor_value(cls.send_telnet_command, sensor, values)
 
     @classmethod
     def get_geo_location(cls) -> dict | None:
