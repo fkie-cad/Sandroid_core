@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -133,7 +134,8 @@ def test_ensure_jar_refuses_a_bad_push() -> None:
 FAKE_HELPER = r"""
 import json, sys
 print("WARNING: linker noise", flush=True)
-print(json.dumps({"type": "hello", "protocol": int(sys.argv[1]), "version": "1.0.0"}), flush=True)
+print(json.dumps({"type": "hello", "protocol": int(sys.argv[1]), "version": "1.0.0",
+                  "pid": 4242}), flush=True)
 for line in sys.stdin:
     req = json.loads(line)
     cmd = req["cmd"]
@@ -147,6 +149,9 @@ for line in sys.stdin:
         print("fatal: dying", file=sys.stderr, flush=True)
         sys.exit(3)
     if cmd == "hang":
+        continue
+    if cmd == "garble":
+        print(json.dumps({"id": None, "ok": False, "error": "bad json: x"}), flush=True)
         continue
     print(json.dumps({"id": 999, "ok": True}), flush=True)
     print(json.dumps({"id": req["id"], "ok": True, "echo": req, "uni": "Grüße"},
@@ -173,11 +178,50 @@ def test_client_round_trip_and_errors() -> None:
     assert reply["uni"] == "Grüße"
     with pytest.raises(HelperError, match="java.lang.X"):
         client.request("boom", timeout=20)
-    with pytest.raises(HelperError, match="timed out"):
-        client.request("hang", timeout=0.3)
+    with pytest.raises(HelperError, match="bad json"):
+        client.request("garble", timeout=20)  # an error without our id
     with pytest.raises(HelperError, match="exited during die"):
         client.request("die", timeout=20)
+    t0 = time.monotonic()
+    with pytest.raises(HelperError, match="unusable"):
+        client.request("ping", timeout=20)  # after EOF: at once, no wait
+    assert time.monotonic() - t0 < 1
     client.close()
+
+
+def test_a_timeout_kills_the_device_side_helper_and_breaks_the_client() -> None:
+    killed = []
+    client = HelperClient(_fake(), kill_remote=killed.append)
+    client.start(timeout=20)
+    with pytest.raises(HelperError, match="timed out"):
+        client.request("hang", timeout=0.3)
+    assert killed == [4242]
+    t0 = time.monotonic()
+    with pytest.raises(HelperError, match="unusable"):
+        client.request("ping", timeout=20)
+    assert time.monotonic() - t0 < 1
+    client.close()
+
+
+def test_stop_helpers_kills_only_world_helper_processes() -> None:
+    class Dev:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def shell(self, script: str, **kw) -> ShellResult:
+            self.calls.append(script)
+            ps = (
+                "PID ARGS\n"
+                "4242 app_process / sandroid.worldhelper.Main\n"
+                "4243 sh -c CLASSPATH=x exec app_process / sandroid.worldhelper.Main\n"
+                "4300 app_process / sandroid.uihelper.Main mode=full\n"
+                "4301 /system/bin/app_process64 / sandroid.worldhelper.Main\n"
+            )
+            return ShellResult(0, ps if script.startswith("ps") else "", "")
+
+    dev = Dev()
+    assert helper.stop_helpers(dev) == [4242, 4301]
+    assert dev.calls[-1] == "kill -9 4242 4301"
 
 
 def test_client_rejects_another_protocol() -> None:

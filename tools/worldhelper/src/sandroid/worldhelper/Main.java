@@ -30,6 +30,8 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Sandroid world helper: seeds a device's content providers from ONE JVM.
@@ -53,12 +55,11 @@ public final class Main {
     static final String CALENDAR = "com.android.calendar";
     static final String CALL_LOG = "call_log";
     static final String SMS = "sms";
-    static final String MMS_SMS = "mms-sms";
-    static final String MEDIA = "media";
 
     static final String SEL = "android:query-arg-sql-selection";
     static final String SEL_ARGS = "android:query-arg-sql-selection-args";
     static final String SORT = "android:query-arg-sql-sort-order";
+    static final Pattern ID_IN_LINE = Pattern.compile("\"id\"\\s*:\\s*(\\d+)");
 
     private final PrintStream out;
     private final Map<String, Object> providers = new HashMap<>();
@@ -104,7 +105,13 @@ public final class Main {
                 try {
                     req = new JSONObject(line);
                 } catch (JSONException e) {
-                    emit(new JSONObject().put("ok", false).put("error", "bad json: " + e.getMessage()));
+                    // Echo the request id when it can be found, so the host fails
+                    // that request at once instead of waiting for its timeout.
+                    Matcher m = ID_IN_LINE.matcher(line);
+                    emit(new JSONObject()
+                            .put("id", m.find() ? (Object) Long.parseLong(m.group(1)) : JSONObject.NULL)
+                            .put("ok", false)
+                            .put("error", "bad json: " + e.getMessage()));
                     continue;
                 }
                 Object id = req.opt("id");
@@ -157,6 +164,10 @@ public final class Main {
                 return count(req);
             case "delete":
                 return delete(req);
+            case "max_ids":
+                return maxIds(req);
+            case "delete_above":
+                return deleteAbove(req);
             case "query":
                 return query(req);
             default:
@@ -401,16 +412,38 @@ public final class Main {
             rows.add(cv);
             ops.add(ContentProviderOperation.newInsert(uri).withValues(cv).build());
         }
+        long before = maxId("sms");
         JSONArray ids = new JSONArray();
         String mode = "batch";
         try {
             for (ContentProviderResult r : applyBatch(SMS, ops)) ids.put(idOf(r.uri));
         } catch (Throwable batchFailed) {
-            mode = "rows";
+            // Part of the batch may be committed: take those rows' ids and
+            // insert only the rows that are missing, never a second copy.
+            mode = "recovered";
+            Map<String, List<Long>> committed = new HashMap<>();
+            try (Cursor c = queryCursor(uri, new String[] {"_id", "address", "date", "type", "body"},
+                    "_id > ?", new String[] {String.valueOf(before)}, "_id")) {
+                while (c != null && c.moveToNext()) {
+                    String key = smsKey(c.getString(1), c.getLong(2), c.getLong(3), c.getString(4));
+                    List<Long> l = committed.get(key);
+                    if (l == null) committed.put(key, l = new ArrayList<>());
+                    l.add(c.getLong(0));
+                }
+            }
             ids = new JSONArray();
-            for (ContentValues cv : rows) ids.put(idOf(insert(uri, cv)));
+            for (ContentValues cv : rows) {
+                String key = smsKey(cv.getAsString("address"), cv.getAsLong("date"),
+                        cv.getAsLong("type"), cv.getAsString("body"));
+                List<Long> l = committed.get(key);
+                ids.put(l != null && !l.isEmpty() ? l.remove(0) : idOf(insert(uri, cv)));
+            }
         }
         return new JSONObject().put("ids", ids).put("mode", mode);
+    }
+
+    private static String smsKey(String address, Long date, Long type, String body) {
+        return address + "\u0000" + date + "\u0000" + type + "\u0000" + body;
     }
 
     // ------------------------------------------------------------ sync state
@@ -476,7 +509,6 @@ public final class Main {
             case "calls": return new String[] {"content://call_log/calls", null};
             case "sms": return new String[] {"content://sms", null};
             case "images": return new String[] {"content://media/external/images/media", null};
-            case "files": return new String[] {"content://media/external/file", null};
             case "aggregates": return new String[] {"content://com.android.contacts/contacts", null};
             default: throw new IllegalArgumentException("unknown list " + list);
         }
@@ -557,15 +589,89 @@ public final class Main {
             }
             String base = table(name)[0];
             Uri uri;
+            String guard = null;
             if ("contacts".equals(name)) {
                 uri = Uri.parse(base).buildUpon()
                         .appendQueryParameter("caller_is_syncadapter", "true").build();
+                guard = NO_ACCOUNT;  // never a row of an account (Google)
             } else if (("events".equals(name) || "calendars".equals(name)) && acct != null) {
                 uri = syncAdapter(base, acct.getString("name"), acct.getString("type"));
             } else {
                 uri = Uri.parse(base);
             }
-            deleted.put(name, deleteRows(uri, inClause(ids), null));
+            deleted.put(name, deleteRows(uri, and(inClause(ids), guard), null));
+        }
+        return new JSONObject().put("deleted", deleted);
+    }
+
+    static final String NO_ACCOUNT = "account_type IS NULL AND account_name IS NULL";
+
+    /** Highest _id of a table, deleted rows included (0 when empty). */
+    private long maxId(String list) throws Exception {
+        String uri;
+        switch (list) {
+            case "contacts": uri = "content://com.android.contacts/raw_contacts"; break;
+            case "events": uri = "content://com.android.calendar/events"; break;
+            default: uri = table(list)[0];
+        }
+        try (Cursor c = queryCursor(Uri.parse(uri), new String[] {"_id"}, null, null, "_id DESC")) {
+            return c != null && c.moveToFirst() ? c.getLong(0) : 0;
+        }
+    }
+
+    /** {"tables": [contacts, calendars, events, calls, sms]} -> {"max": {name: id}}. */
+    private JSONObject maxIds(JSONObject req) throws Exception {
+        JSONArray tables = req.getJSONArray("tables");
+        JSONObject max = new JSONObject();
+        for (int i = 0; i < tables.length(); i++) {
+            max.put(tables.getString(i), maxId(tables.getString(i)));
+        }
+        return new JSONObject().put("max", max);
+    }
+
+    /**
+     * {"max": {name: id}, "account": {name, type}}: deletes the rows a killed
+     * run made after preflight that the ledger never heard of (the device was
+     * offline with sync off, so new rows there are ours). Fixed guards: only
+     * account-less raw contacts; calls; SMS; events and calendars of OUR
+     * LOCAL calendar account only. Rows of the Google account are never hit.
+     */
+    private JSONObject deleteAbove(JSONObject req) throws Exception {
+        JSONObject max = req.getJSONObject("max");
+        JSONObject acct = req.optJSONObject("account");
+        JSONObject deleted = new JSONObject();
+        Iterator<String> it = max.keys();
+        while (it.hasNext()) {
+            String name = it.next();
+            String above = String.valueOf(max.getLong(name));
+            switch (name) {
+                case "contacts":
+                    deleted.put(name, deleteRows(Uri.parse("content://com.android.contacts/raw_contacts")
+                            .buildUpon().appendQueryParameter("caller_is_syncadapter", "true").build(),
+                            "_id > ? AND " + NO_ACCOUNT, new String[] {above}));
+                    break;
+                case "calls":
+                case "sms":
+                    deleted.put(name, deleteRows(Uri.parse(table(name)[0]), "_id > ?", new String[] {above}));
+                    break;
+                case "events":
+                case "calendars": {
+                    if (acct == null || !"LOCAL".equals(acct.optString("type"))) {
+                        deleted.put(name, 0);  // only our LOCAL calendar account
+                        break;
+                    }
+                    String an = acct.getString("name");
+                    String sel = "events".equals(name)
+                            ? "_id > ? AND calendar_id IN (SELECT _id FROM Calendars"
+                                    + " WHERE account_type='LOCAL' AND account_name=?)"
+                            : "_id > ? AND account_type='LOCAL' AND account_name=?";
+                    deleted.put(name, deleteRows(syncAdapter(table(name)[0], an, "LOCAL"),
+                            sel, new String[] {above, an}));
+                    break;
+                }
+                default:
+                    throw new IllegalArgumentException("no delete_above for " + name);
+            }
         }
         return new JSONObject().put("deleted", deleted);
     }

@@ -6,7 +6,8 @@
 # Needs a JDK (javac, 11+) and an Android SDK with platforms/android-35 and any
 # build-tools (for d8). Environment:
 #   ANDROID_HOME  SDK root (default: ~/Library/Android/sdk)
-#   BUILD_TOOLS   build-tools dir to use (default: the newest under the SDK)
+#   BUILD_TOOLS   build-tools dir to use (default: <sdk>/build-tools/36.0.0, the
+#                 version JAR_SHA256 was built with)
 #
 # Writes src/sandroid/assets/worldhelper/worldhelper.jar and prints
 #   JAR_SHA256=<hex>     paste into src/sandroid/world/helper.py
@@ -22,9 +23,10 @@ SRC="$HERE/src"
 OUT="$ROOT/src/sandroid/assets/worldhelper/worldhelper.jar"
 
 SDK="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
-if [ -z "${BUILD_TOOLS:-}" ]; then
-    BUILD_TOOLS="$(ls -d "$SDK"/build-tools/* 2>/dev/null | sort -V | tail -1 || true)"
-fi
+# d8's output differs between build-tools versions: this version is what
+# JAR_SHA256 in src/sandroid/world/helper.py was built with.
+BUILD_TOOLS_VERSION=36.0.0
+BUILD_TOOLS="${BUILD_TOOLS:-$SDK/build-tools/$BUILD_TOOLS_VERSION}"
 ANDROID_JAR="$SDK/platforms/android-35/android.jar"
 
 die() {
@@ -33,8 +35,8 @@ die() {
 }
 command -v javac >/dev/null 2>&1 || die "javac not found (install a JDK 11+)"
 [ -f "$ANDROID_JAR" ] || die "missing $ANDROID_JAR (sdkmanager \"platforms;android-35\")"
-[ -n "$BUILD_TOOLS" ] && [ -x "$BUILD_TOOLS/d8" ] ||
-    die "no d8 under $SDK/build-tools (sdkmanager \"build-tools;35.0.0\")"
+[ -x "$BUILD_TOOLS/d8" ] ||
+    die "no d8 in $BUILD_TOOLS: install it with sdkmanager \"build-tools;$BUILD_TOOLS_VERSION\" (another version builds a jar with a different sha256)"
 
 sha256() {
     if command -v sha256sum >/dev/null 2>&1; then
