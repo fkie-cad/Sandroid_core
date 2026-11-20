@@ -1159,6 +1159,80 @@ async def test_hidden_network_lens_tls_row_is_paired_by_the_tools(
         assert sum(1 for r in panel._live if r.kind == "tls") == 1
 
 
+async def test_flows_logged_while_the_lens_is_hidden_are_rows_of_the_tools(
+    flow_dir, store, monkeypatch
+):
+    """The original report: the analyst works (and chats) in another lens;
+    the hidden Network lens does not poll, yet the tools see the flows that
+    reached the flow log meanwhile, keyed as the lens will key them.
+    """
+    from sandroid.ai.tools import lens_rows
+
+    monkeypatch.setattr("sandroid.core.timeline.emit", lambda *a, **k: None)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _network(app, pilot, flow_dir)
+        ms.switch_lens("timeline")
+        await settle(pilot)
+        # Meanwhile: a TLS failure on mitmweb's stdout and in the flow log
+        # (one row, not two), another one only in the flow log, two new
+        # flows, and Sandroid's mitm.it probe (OS noise).
+        panel.add_tls_failure("12:00:00", "sdk.pa-cd.com", "cert", PKG)
+        _append_tls(flow_dir, 100, "sdk.pa-cd.com")
+        _append_tls(flow_dir, 101, "cdn.pa-cd.com")
+        write_flows(
+            flow_dir,
+            time.time(),
+            specs=[
+                ("POST", "api.pa-cd.com", "/collect", 200, PKG, "a=1", "{}", None),
+                ("GET", "img.pa-cd.com", "/p.gif", 200, PKG, None, None, None),
+                ("GET", "mitm.it", "/", 200, "", None, "ok", None),
+            ],
+            start_seq=102,
+        )
+        await settle(pilot)
+        assert not any(r.seq and r.seq >= 100 for r in panel._live)  # no poll
+        k100 = tls_row_key(flow_dir, "tls-100")
+        k101 = tls_row_key(flow_dir, "tls-101")
+        found = await asyncio.to_thread(
+            lens_rows.find_rows,
+            "network",
+            {"host_glob": ["*pa-cd.com"]},
+            apply="highlight",
+            label="pa-cd",
+            short="pa-cd",
+        )
+        assert found["source"] == "lens"
+        assert sorted(found["keys"]) == sorted([k100, k101, "flow-102", "flow-103"])
+        assert "not_in_flow_log_yet" not in found
+        assert "4 newer row(s)" in found["shown_basis"]
+        every = await asyncio.to_thread(lens_rows.find_rows, "network", scope="all")
+        assert every["keys"].count(k100) == 1
+        assert "flow-104" in every["keys"]  # mitm.it: hidden by the noise rule
+        shown = await asyncio.to_thread(lens_rows.find_rows, "network")
+        assert "flow-104" not in shown["keys"]
+        assert {"flow-2", "flow-3"} <= set(shown["keys"])  # the polled rows
+
+        ms.switch_lens("network")
+        panel.poll_now()
+        await until(pilot, lambda: any(r.seq == 103 for r in panel._live))
+        await until(pilot, lambda: "hl" in _cols(panel.table))
+        stdout_row = next(r for r in panel._live if r.host == "sdk.pa-cd.com")
+        assert stdout_row.flow_id == k100
+        for key in (stdout_row.key, "f101", "f102", "f103"):
+            await until(
+                pilot,
+                lambda key=key: _tint_of(panel.table, key) == _expected_tint(1),
+            )
+            assert _cell(panel.table, key, "hl") == "pa-cd", key
+        assert _tint_of(panel.table, "f3") is None
+        snap = await asyncio.to_thread(store.snapshot_rows, "network")
+        assert snap.polled_through == 104
+        assert "shown_basis" not in await asyncio.to_thread(
+            lens_rows.find_rows, "network"
+        )
+
+
 async def test_never_shown_network_lens_reads_the_flow_log_with_the_noise_rule(
     flow_dir, store, monkeypatch
 ):

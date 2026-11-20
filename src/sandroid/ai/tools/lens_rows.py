@@ -35,7 +35,9 @@ they did not judge (``basis["not_judged"]``) for the bar's "N not judged".
 
 A stdout-only TLS failure (the lens's ``t<n>`` row, no key yet) is paired
 here with its flow-log record (same host, within 10 s, nearest first), so
-it is a row even while the Network lens is hidden and does not poll.
+it is a row even while the Network lens is hidden and does not poll. The
+records the hidden lens has not loaded (``seq`` above its snapshot's
+``polled_through``) are added from the flow log, as fallback rows.
 """
 
 from __future__ import annotations
@@ -88,6 +90,9 @@ TLS_PAIR_WINDOW_S = 10.0
 TLS_YOUNG_S = 15.0
 #: ``shown_basis`` of rows that do not come from the lens itself.
 SHOWN_BASIS_FALLBACK = "noise rule only (lens not open)"
+#: Flow-log rows newer than a hidden lens's last poll, at most (the lens's
+#: own ``MAX_ROWS``).
+MAX_ROWS_AFTER = 2000
 #: ``scope`` values; the first is the default.
 SCOPES = ("shown", "all")
 #: Notes when the highlight set went away during a call.
@@ -318,6 +323,7 @@ def _files_noise() -> Callable[[str], bool]:
 
 
 def _flow_log_rows() -> list[dict]:
+    """The newest flow-log records as rows (the lens never polled)."""
     from sandroid.services import mitmproxy_flow_log as flow_log
 
     try:
@@ -326,6 +332,35 @@ def _flow_log_rows() -> list[dict]:
     except Exception:
         logger.debug("flow log rows unavailable", exc_info=True)
         return []
+    return _records_as_rows(records, flow_dir)
+
+
+def _flow_log_rows_after(flow_dir: Path, seq: int) -> list[dict]:
+    """Flow-log records with a ``seq`` above *seq* as rows: what a hidden
+    Network lens (it does not poll) has not loaded yet. Read like the
+    lens's poll: at most :data:`MAX_ROWS_AFTER` records, the newest kept.
+    """
+    from sandroid.services import mitmproxy_flow_log as flow_log
+
+    records: list[dict] = []
+    cursor = seq
+    try:
+        for _ in range(5):
+            res = flow_log.query_flows(
+                flow_dir, since_cursor=cursor, limit=flow_log.HARD_LIMIT_CAP
+            )
+            records.extend(res["flows"])
+            cursor = res["next_cursor"]
+            if not res["truncated"] or len(records) >= MAX_ROWS_AFTER:
+                break
+    except Exception:
+        logger.debug("newer flow log rows unavailable", exc_info=True)
+        return []
+    return _records_as_rows(records[-MAX_ROWS_AFTER:], flow_dir)
+
+
+def _records_as_rows(records: list[dict], flow_dir: Path) -> list[dict]:
+    """Flow-log records as rows; ``shown`` follows the lens's noise rule."""
     rows = []
     for rec in records:
         if rec.get("kind") == "tls":
@@ -362,9 +397,10 @@ def _flow_log_rows() -> list[dict]:
                 "flow_dir": str(flow_dir),
             }
         )
-    noisy = _network_noise()
-    for row in rows:
-        row["shown"] = not noisy(row)
+    if rows:
+        noisy = _network_noise()
+        for row in rows:
+            row["shown"] = not noisy(row)
     return rows
 
 
@@ -481,7 +517,7 @@ def _max_seq(raw: list[dict]) -> int | None:
 class _Collected:
     """The rows of one call (see :func:`_collect`)."""
 
-    __slots__ = ("max_seq", "rows", "source", "unkeyed", "unkeyed_old")
+    __slots__ = ("max_seq", "newer", "rows", "source", "unkeyed", "unkeyed_old")
 
     def __init__(
         self,
@@ -490,6 +526,7 @@ class _Collected:
         max_seq: int | None,
         unkeyed: int,
         unkeyed_old: int = 0,
+        newer: int = 0,
     ) -> None:
         self.rows = rows
         self.source = source
@@ -498,6 +535,8 @@ class _Collected:
         self.unkeyed = unkeyed
         #: ... older ones (or in review): they cannot be highlighted.
         self.unkeyed_old = unkeyed_old
+        #: Rows added from the flow log after the lens's last poll.
+        self.newer = newer
 
 
 def _tls_records(flow_dir: Path, rows: list[dict]) -> list[dict]:
@@ -586,14 +625,19 @@ def _collect(lens: str) -> _Collected:
     ones the tools cannot take (a TLS failure not in the flow log yet).
     """
     snap = _store().snapshot_rows(lens)
+    newer = 0
     if snap is not None:
-        raw, source = snap, "lens"
+        raw, source = list(snap), "lens"
     elif lens == "network":
         raw, source = _flow_log_rows(), "flow_log"
     else:
+        # The Files lens ingests every monitor batch, shown or not: its
+        # snapshot is never behind.
         raw, source = _monitor_rows(), "monitor"
     if lens == "network":
         _pair_unkeyed_tls(raw)
+        if snap is not None:
+            newer = _add_unpolled(raw, snap)
     rows = []
     young = old = 0
     now = time.time()
@@ -611,8 +655,36 @@ def _collect(lens: str) -> _Collected:
             else:
                 old += 1
     return _Collected(
-        rows, source, _max_seq(raw) if lens == "network" else None, young, old
+        rows, source, _max_seq(raw) if lens == "network" else None, young, old, newer
     )
+
+
+def _add_unpolled(raw: list[dict], snap: Any) -> int:
+    """Add the flow-log rows a hidden live Network lens has not loaded yet.
+
+    The lens polls only while it is shown, so its snapshot ends at its
+    last poll (``polled_through``). The newer records come in here (tool
+    thread, never a UI poll) as the fallback's rows: same keys, ``shown``
+    by the noise rule only. Run after :func:`_pair_unkeyed_tls`, so a TLS
+    record a stdout row of the lens has paired with is not added twice.
+    Returns how many rows were added.
+    """
+    through = getattr(snap, "polled_through", None)
+    flow_dir = getattr(snap, "flow_dir", None)
+    if through is None or not flow_dir:
+        return 0  # REVIEW, or a source that does not say
+    try:
+        through = int(through)
+    except (TypeError, ValueError):
+        return 0
+    taken = {str(r["flow_id"]) for r in raw if r.get("flow_id")}
+    added = [
+        r
+        for r in _flow_log_rows_after(Path(str(flow_dir)), through)
+        if r["key"] not in taken
+    ]
+    raw.extend(added)
+    return len(added)
 
 
 def collect_rows(lens: str) -> tuple[list[dict], str]:
@@ -1161,6 +1233,11 @@ def _add_unkeyed(result: dict, got: _Collected) -> None:
     """
     if got.source != "lens":
         result["shown_basis"] = SHOWN_BASIS_FALLBACK
+    elif got.newer:
+        result["shown_basis"] = (
+            f"the lens; {got.newer} newer row(s) it has not loaded yet (it "
+            "is not shown): noise rule only"
+        )
     if got.unkeyed:
         n = got.unkeyed
         result["not_in_flow_log_yet"] = n

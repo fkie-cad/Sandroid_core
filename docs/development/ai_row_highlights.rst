@@ -264,9 +264,18 @@ first/last time). There ``shown`` follows the lens's noise rule only:
 filter set exempt as in the lens. Such results carry
 ``shown_basis: "noise rule only (lens not open)"``.
 
-A lens that was shown and then hidden does not poll either: its snapshot
-is the view as it was, plus the TLS pairing above. Flows that reached the
-flow log since are not in it until the lens is shown again.
+A lens that was shown and then hidden does not poll either. Its snapshot
+is a ``RowSnapshot`` (a list of rows) that also says how far the lens has
+read the flow log: ``polled_through`` (its cursor, the last applied
+``seq``; None in REVIEW) and ``flow_dir``. After the TLS pairing above,
+``_collect`` adds the flow-log records with a higher ``seq`` (tool thread,
+never a UI poll; at most 2000, the newest) as the fallback's rows: same
+keys (``tls_row_key`` for TLS failures), ``shown`` by the noise rule only,
+records a stdout TLS row already paired with left out. The result then
+says so in ``shown_basis`` ("N newer row(s) it has not loaded yet"). The
+lens adopts the same keys on its next poll, so a highlight made meanwhile
+tints its rows then. The Files lens needs none of this: it folds in every
+monitor batch whether it is shown or not.
 
 Scanning pipeline
 -----------------
@@ -530,7 +539,9 @@ Tests
   TLS-failed row (stdout first, then paired) highlighted with tint and
   column through ``find_rows``, the "scanning"/"partial" bar words and a
   reloaded mid-scan set shown as partial, the AI filter not narrowing a
-  find or an extend, a TLS row paired while the lens is hidden, a never
+  find or an extend, a TLS row paired while the lens is hidden, flows
+  logged while the lens is hidden found and keyed (tinted after the next
+  poll), a never
   shown lens falling back to the flow log, a device switch dropping old
   TLS rows, two failures to one host keeping their order, "N not judged".
 - ``tests/ai/test_executor.py`` (``tool_progress`` call id and throttle),

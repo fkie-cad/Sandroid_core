@@ -92,7 +92,7 @@ from textual.containers import Vertical
 from textual.widget import Widget
 from textual.widgets import DataTable, Input, Static
 
-from sandroid.services.row_highlights import tls_row_key
+from sandroid.services.row_highlights import RowSnapshot, tls_row_key
 from sandroid.tui.row_annotations import (
     LENS_NETWORK,
     AnnotationFeed,
@@ -1397,11 +1397,16 @@ class NetworkPanel(Widget):
                 for r in records
                 if (r.get("seq") or 0) > self._floor_seq
             ]
+            n = len(rows)
             rows = [r for r in rows if not self._claim_live_tls(r)]
             if reset:
                 self._rebuild_if_live()
             if rows:
                 self._add_live(rows)
+            if len(rows) < n and self._hl.active and not self.in_review:
+                # A stdout TLS row adopted its key: an AI highlight made
+                # meanwhile (the tools pair it) shows in its cell now.
+                self._rebuild()
         if self._poll_again:
             self._poll_again = False
             self.poll_now()
@@ -2639,12 +2644,18 @@ class NetworkPanel(Widget):
         flow dir: the tools pair them with the flow log themselves.
 
         None while the live lens never polled (it was never shown): the
-        tools then read the flow log instead of an empty view.
+        tools then read the flow log instead of an empty view. Live, the
+        result says how far the lens has read the flow log
+        (``polled_through``, its cursor): a hidden lens does not poll, so
+        the tools add the newer records themselves.
         """
         if not self.in_review and self._live_dir is None:
             return None
         live_dir = str(self._live_dir) if self._live_dir is not None else None
-        out = []
+        out = RowSnapshot(
+            polled_through=None if self.in_review else int(self._cursor or 0),
+            flow_dir=None if self.in_review else live_dir,
+        )
         for r in self._model():
             snap = flow_snapshot(r, self._passes(r, ai=False), self._scope)
             if r.flow_id is None and snap["flow_dir"] is None:

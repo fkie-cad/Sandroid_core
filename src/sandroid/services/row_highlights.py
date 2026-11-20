@@ -35,7 +35,10 @@ Row sources: a lens registers a snapshot callable
 (:meth:`HighlightStore.register_row_source`); tools call
 :meth:`HighlightStore.snapshot_rows` from their helper thread, which runs the
 callable on the UI loop through the lens's ``UiDispatcher`` and waits a
-bounded time (never ``App.call_from_thread``).
+bounded time (never ``App.call_from_thread``). A source may return a
+:class:`RowSnapshot` to say how far it has read its feed (``polled_through``,
+the Network lens's last applied flow-log seq): the tools read the rest
+themselves, as a hidden lens does not poll.
 """
 
 from __future__ import annotations
@@ -358,6 +361,27 @@ def normalize_key(lens: str, key: Any) -> str:
         except Exception:
             return text
     return text
+
+
+class RowSnapshot(list):
+    """A lens's rows plus how far the lens has read its feed.
+
+    ``polled_through``: the last flow-log ``seq`` the Network lens applied
+    (None: not a live view, nothing to add). ``flow_dir``: the flow log it
+    read. Rows newer than that are not in the view yet (a hidden lens does
+    not poll); the AI tools add them from the flow log.
+    """
+
+    def __init__(
+        self,
+        rows: Any = (),
+        *,
+        polled_through: int | None = None,
+        flow_dir: str | None = None,
+    ) -> None:
+        super().__init__(rows)
+        self.polled_through = polled_through
+        self.flow_dir = flow_dir
 
 
 class _RowSource:
@@ -991,7 +1015,7 @@ class HighlightStore:
         with self._sources_lock:
             return bool(self._sources.get(lens))
 
-    def snapshot_rows(self, lens: str, timeout: float = 3.0) -> list[dict] | None:
+    def snapshot_rows(self, lens: str, timeout: float = 3.0) -> RowSnapshot | None:
         """The rows of the lens's current view, taken on the UI thread.
 
         Returns ``None`` when no lens registered, its UI loop is gone or it
@@ -1106,10 +1130,13 @@ def _id_number(set_id: str) -> int:
         return 0
 
 
-def _copy_rows(rows: Any) -> list[dict] | None:
+def _copy_rows(rows: Any) -> RowSnapshot | None:
     if rows is None:
         return None
-    out: list[dict] = []
+    out = RowSnapshot(
+        polled_through=getattr(rows, "polled_through", None),
+        flow_dir=getattr(rows, "flow_dir", None),
+    )
     with contextlib.suppress(TypeError):
         for row in rows:
             if isinstance(row, dict):
@@ -1163,6 +1190,7 @@ __all__ = [
     "HighlightError",
     "HighlightSet",
     "HighlightStore",
+    "RowSnapshot",
     "StaleGenerationError",
     "get_row_highlights",
     "normalize_key",
