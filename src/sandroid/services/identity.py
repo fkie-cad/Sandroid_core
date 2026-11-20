@@ -3484,20 +3484,27 @@ class IdentityService:
                 return None
             return mem.applied_at, mem.verified_at
 
-    def forget(self, serial: str | None = None) -> None:
+    def forget(self, serial: str | None = None, *, restored: bool = False) -> None:
         """Memory of ``serial`` (default: every device) may be stale.
 
-        Called after a snapshot load and when the active device changes:
-        the apply times are dropped and the device record is read again
-        (in the background, or by the next app start). Never blocks.
+        Called after a snapshot load or cold boot (``restored``) and when the
+        active device changes: the apply times are dropped and the device
+        record is read again (in the background, or by the next app start).
+        Never blocks.
+
+        Args:
+            serial: The device; None means every device.
+            restored: The device state (and its record) was restored or
+                rebooted, so a record that could not be rewritten is
+                consistent again. A device switch keeps that mark.
         """
         with self._lock:
             serials = [serial] if serial else [*self._applied, *self._record_dirty]
             for s in serials:
                 self._hydrated.discard(s)
                 self._hydrate_tried.pop(s, None)
-                # A snapshot load restores the record with the device.
-                self._record_dirty.discard(s)
+                if restored:
+                    self._record_dirty.discard(s)
                 mem = self._applied.get(s)
                 if mem is not None:
                     mem.applied_at = mem.verified_at = 0.0

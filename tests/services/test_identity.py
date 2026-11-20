@@ -1896,7 +1896,9 @@ def test_snapshot_loads_and_device_switches_forget(monkeypatch):
     from sandroid.services import emulator_service
 
     calls: list = []
-    fake = types.SimpleNamespace(forget=lambda serial=None: calls.append(serial))
+    fake = types.SimpleNamespace(
+        forget=lambda serial=None, restored=False: calls.append((serial, restored))
+    )
     monkeypatch.setattr(ident, "get_identity_service", lambda: fake)
     monkeypatch.setattr(
         "sandroid.core.timeline.get_timeline",
@@ -1904,7 +1906,7 @@ def test_snapshot_loads_and_device_switches_forget(monkeypatch):
     )
     emulator_service._world_change("snapshot-load", src="snapshot", dev=SERIAL)
     emulator_service._world_change("cold-boot", src="device", dev=None)
-    assert calls == [SERIAL, None]
+    assert calls == [(SERIAL, True), (None, True)]
 
     from sandroid import services
     from sandroid.core.device_manager import DeviceManager
@@ -1914,7 +1916,7 @@ def test_snapshot_loads_and_device_switches_forget(monkeypatch):
     monkeypatch.setattr(services, "get_spotlight_service", lambda: stub)
     manager = DeviceManager.__new__(DeviceManager)
     manager._reset_device_state()
-    assert calls == [SERIAL, None, None]
+    assert calls == [(SERIAL, True), (None, True), (None, False)]
 
 
 def test_a_thread_that_does_not_start_is_not_registered(service, monkeypatch):
@@ -2034,12 +2036,14 @@ def test_forget_moves_gen_and_clears_the_dirty_mark(service, device):
     service.apply(SERIAL, PKG)
     gen = service._applied[SERIAL].gen
     service._record_dirty.update({SERIAL, "emulator-5582"})
-    service.forget(SERIAL)
+    service.forget(SERIAL, restored=True)
     assert service._applied[SERIAL].gen > gen
     assert service._record_dirty == {"emulator-5582"}
     read = service._read_record(SERIAL)
     assert service._hydrate(SERIAL, read, gen=gen) is False  # started before
-    service.forget()
+    service.forget()  # a device switch: the device record is still stale
+    assert service._record_dirty == {"emulator-5582"}
+    service.forget(restored=True)  # a snapshot load or cold boot
     assert service._record_dirty == set()
 
 
