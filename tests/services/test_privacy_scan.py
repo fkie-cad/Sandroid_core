@@ -1509,3 +1509,17 @@ def test_close_never_joins_a_worker_that_has_not_started():
         service.close(timeout=1.0)
         thread = service._thread
         assert thread is None or thread.ident is not None
+
+
+def test_value_key_cache_does_not_keep_needle_sets_alive():
+    import gc
+    import weakref
+
+    needles = build_needles([Marker("ad", "cafe0001-7f3a-4000-8000-c0ffee00a1d0")])
+    assert ps._vkeys(needles) is ps._vkeys(needles)  # cached
+    gone = weakref.ref(needles)
+
+    del needles
+    gc.collect()
+
+    assert gone() is None  # nor its automata (~100 MB at a full profile)
