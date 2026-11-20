@@ -1074,9 +1074,7 @@ def _world_change(
         state.world_boot_start = boot_start
         state.world_launch_at = launch_at
     summary = (
-        f"⟲ {serial} restarted from a snapshot"
-        if same_boot_id
-        else f"⟲ {serial} rebooted"
+        f"{serial} restarted from a snapshot" if same_boot_id else f"{serial} rebooted"
     )
     try:
         from sandroid.core.timeline import get_timeline

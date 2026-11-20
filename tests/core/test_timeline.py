@@ -678,12 +678,12 @@ def test_label_keys_semantics():
     assert [(x["data"]["number"], x["data"]["ended_by"]) for x in ends] == [
         (2, "sibling"), (5, "stop"), (3, "new_label"), (1, "new_label"), (6, "stop")]  # fmt: skip
     assert ends[0]["ref"]["of"] == sub.seq
-    assert lines[0]["summary"] == "▶ 1 'Accept cookies'"
-    assert lines[1]["summary"] == "▶ 2 'Click OK' (in 1)"
+    assert lines[0]["summary"] == "Section 1 'Accept cookies'"
+    assert lines[1]["summary"] == "Section 2 'Click OK' (in 1)"
     assert lines[0]["actor"] == "user"
     assert lines[0]["data"] == {"number": 1, "name": "Accept cookies", "parent": None,
                                 "depth": 0, "source": "key"}  # fmt: skip
-    assert re.fullmatch(r"■ 2 'Click OK' · \d+\.\d s", ends[0]["summary"])
+    assert re.fullmatch(r"End section 2 'Click OK' · \d+\.\d s", ends[0]["summary"])
     # '+' with nothing open is a top-level start.
     with timeline.capture():
         labels = timeline.get_timeline().labels

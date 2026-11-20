@@ -1102,13 +1102,13 @@ async def test_header_label_note_banner_and_no_clock_sampling(
         fakes.service.state = "locked"
         fakes.service.locked_by = "PID 4711 on host"
         header.refresh_timeline_state(now)
-        assert header.timeline_banner == "⚠ timeline locked (PID 4711 on host)"
+        assert header.timeline_banner == "timeline locked (PID 4711 on host)"
         lens = ms.lens_widget("timeline")
-        assert lens.badge() == "⚠"
+        assert lens.badge() == "locked"
         assert "Timeline locked by PID 4711" in lens._banner()
         ms._handle_timeline_event(SimpleNamespace(data={"op": "locked"}))
         await settle(pilot)
-        assert ms.query_one("#lens-bar").badge("timeline") == "⚠"
+        assert ms.query_one("#lens-bar").badge("timeline") == "locked"
 
 
 async def test_doorbell_rebuilds_marks_for_labels_added_elsewhere(
@@ -1682,7 +1682,7 @@ def _typed_lines() -> list[dict]:
     ]
 
 
-def _user_tint(pal, token: str = "user") -> str:
+def _user_tint(pal, role: str = "user") -> str:
     """The user-input row background: ``user`` (typed text: ``typed``)
     blended into ``bg``.
     """
@@ -1690,7 +1690,7 @@ def _user_tint(pal, token: str = "user") -> str:
 
     from sandroid.tui.widgets.timeline_lens import _TINT_AMOUNT
 
-    colour = getattr(pal, token)
+    colour = getattr(pal, role)
     blend = Color.parse(pal.bg).blend(Color.parse(colour), _TINT_AMOUNT)
     return blend.hex.lower()
 

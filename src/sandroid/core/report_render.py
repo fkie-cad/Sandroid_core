@@ -309,7 +309,7 @@ def step_title(step: Mapping[str, Any]) -> str:
         screen = step.get("screen") or {}
         where = "/".join(x for x in (screen.get("pkg"), screen.get("cls")) if x)
         title = f" '{screen['title']}'" if screen.get("title") else ""
-        return f"Screen → {where or step.get('summary') or '?'}{title}"
+        return f"Screen: {where or step.get('summary') or '?'}{title}"
     if src == "shot":
         return "Manual screenshot"
     if src == "label":
@@ -325,7 +325,7 @@ def step_title(step: Mapping[str, Any]) -> str:
     if xy:
         text += f" at ({xy[0]}, {xy[1]})"
     if step.get("to_xy"):
-        text += f" → ({step['to_xy'][0]}, {step['to_xy'][1]})"
+        text += f" to ({step['to_xy'][0]}, {step['to_xy'][1]})"
     if kind == "text":
         text = f"into {text}"
     return text
@@ -1008,7 +1008,7 @@ class PdfRenderer:
         )
         title = _txt(step_title(step))
         if step.get("confirmed"):
-            title += ' <font color="#0C9A7C">✓ confirmed</font>'
+            title += ' <font color="#0C9A7C">confirmed</font>'
         style = self.warn_style if step.get("level") == "warn" else self.body_wrap
         right: list[Any] = [Paragraph(f"<b>{title}</b>", style)]
         if step.get("kind") == "text":
@@ -1229,9 +1229,9 @@ class MarkdownRenderer:
         title = _md(step_title(step))
         line = f"- **{when}** · {kind} · {title} · #{step.get('seq')}"
         if step.get("confirmed"):
-            line += " ✓"
+            line += " · confirmed"
         if step.get("level") == "warn":
-            line += " ⚠"
+            line += " · warning"
         self.out.append(line)
         if step.get("kind") == "text":
             if step.get("text_masked"):

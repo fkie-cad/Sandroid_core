@@ -40,7 +40,7 @@ wait ``HOLD_S`` in a hold so a line that is written a little late (device
 time converted to host time) still lands in time order. A line that lands
 above the viewport while not following keeps the viewport still (the caption
 says "1 late lines above"). While hidden only a 1 s tick updates the badge
-(``⚠`` for dropped lines, a locked or failed timeline).
+(``lines dropped``, ``locked`` or ``failed``, in the warning colour).
 
 **Follow** (shared with the Files and Network lenses, ``follow.py``): new
 lines appear at the bottom; while ``live`` the view sticks to the newest row;
@@ -638,6 +638,11 @@ _LEAD_SYMBOL = re.compile(r"^[^\w'\"(\[#]+\s+")
 def _late_text(n: int) -> str:
     """``1 late line above`` / ``3 late lines above``."""
     return f"{n:,} late line{'s' if n != 1 else ''} above"
+
+
+#: The Chain tab's one-line verify verdicts (coloured ok / bad).
+_CHAIN_OK = "h matches prev h + line"
+_CHAIN_BAD = "h does NOT match prev h + line"
 
 
 def _plain_summary(text: str) -> str:
@@ -2821,11 +2826,12 @@ class TimelineLens(Vertical):
             status = svc.status()
         except Exception:
             return None
-        if getattr(status, "state", "") in ("locked", "failed"):
-            return "⚠"
+        state = getattr(status, "state", "")
+        if state in ("locked", "failed"):
+            return state
         dropped = getattr(status, "dropped", None) or {}
         if any(v for v in dropped.values() if isinstance(v, int)):
-            return "⚠"
+            return "lines dropped"
         return None
 
     def _badge_tick(self) -> None:
@@ -2848,7 +2854,7 @@ class TimelineLens(Vertical):
         self._update_chips()
         ms = self._main_screen()
         if ms is not None:
-            ms.set_lens_badge(LENS_ID, "⚠")
+            ms.set_lens_badge(LENS_ID, "locked")
 
     # -- scope -------------------------------------------------------------------------
 
@@ -3364,7 +3370,7 @@ class TimelineLens(Vertical):
         shown = source.get("summary") if line is not None else None
         sections: list = [
             ("Envelope", grid),
-            ("Summary", Text(str(shown or self._shown_summary(row)))),
+            ("Summary", Text(_plain_summary(str(shown or self._shown_summary(row))))),
         ]
         data = source.get("data") if line is not None else row.data
         if isinstance(data, dict) and data:
@@ -3385,7 +3391,8 @@ class TimelineLens(Vertical):
                     "Follow-ups",
                     Text(
                         "\n".join(
-                            f"#{r.seq} {r.src}/{r.kind} {r.summary}" for r in follow
+                            f"#{r.seq} {r.src}/{r.kind} {_plain_summary(r.summary)}"
+                            for r in follow
                         )
                     ),
                 )
@@ -3444,7 +3451,8 @@ class TimelineLens(Vertical):
         if isinstance(of, int):
             target = self._by_seq.get(of)
             text = (
-                f"#{of} {target.src}/{target.kind} · {self._shown_summary(target)}"
+                f"#{of} {target.src}/{target.kind} · "
+                f"{_plain_summary(self._shown_summary(target))}"
                 if target is not None
                 else f"#{of} (not loaded)"
             )
@@ -3469,7 +3477,10 @@ class TimelineLens(Vertical):
         grid.add_row(
             "prev h", Text(str(prev.get("h")) if isinstance(prev, dict) else "—")
         )
-        grid.add_row("verify", Text(detail.get("verify") or "…"))
+        verify = detail.get("verify") or "…"
+        pal = lens_palette()
+        colour = {_CHAIN_OK: pal.ok, _CHAIN_BAD: pal.bad}.get(verify)
+        grid.add_row("verify", Text(verify, style=f"bold {colour}" if colour else ""))
         return [("", grid)]
 
 
@@ -3630,7 +3641,7 @@ def _verify(mod: Any, line: dict | None, prev: dict | None) -> str:
         ok = line_hash(prev["h"], canonical(body)) == line.get("h")
     except Exception as exc:
         return f"not checked ({exc})"
-    return "✓ h matches prev h + line" if ok else "✕ h does not match"
+    return _CHAIN_OK if ok else _CHAIN_BAD
 
 
 __all__ = [
