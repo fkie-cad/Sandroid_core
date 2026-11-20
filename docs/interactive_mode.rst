@@ -60,10 +60,11 @@ Sandroid shows one **lens** (a full-width analysis view) at a time and keeps
 everything else out of the way until you ask for it:
 
 - **Header** (one row): ``Sandroid ▸ device ▸ app``, the last loaded snapshot,
-  the scope pill (``● LIVE``; ``● REC`` while recording; ``● REPLAY ·
-  <phase>`` while a Play runs -- ``loading snapshot``, ``replay 1/2``,
-  ``settle 8s``, ``dry run``, ``analysing``; ``◆ REVIEW #<n> <label>`` while
-  reviewing a run), the innermost open section (``Section 7 'accept cookies'
+  the scope pill (``● LIVE``; while recording ``Recording 'Recording 13:36'
+  · 0:12 · press r to stop``; during a rewind its step in plain words --
+  ``Going back to the start point``, ``Saving Before of 3 files``,
+  ``Replaying step 2 of 5: tap 'Accept all'``; ``◆ REVIEW #<n> <label>``
+  while reviewing a run), the innermost open section (``Section 7 'accept cookies'
   0:12``; a new note shows ``Note 8 'text'`` there for 5 s),
   ``◉ TRK`` while Tracking runs, ``⚠ timeline locked (…)`` / ``⚠ timeline
   failed`` when this window records no timeline, and the clock.
@@ -92,7 +93,7 @@ Key                         Action
 ``[`` / ``]``               Previous/next Inspector tab
 Backtick (grave accent)     Toggle the log drawer
 ``S`` (or ``0``)            Snapshot picker
-``r`` / ``p``               Record / Play (replay + diff) -- from any lens
+``r`` / ``p``               Record (``r`` again stops) / Review -- from any lens
 ``#``                       Section: start one (ends open sections; name)
 ``+``                       Sub-section: start one (name prompt)
 ``-``                       End section: ends the innermost one
@@ -452,31 +453,55 @@ What the kprobe monitor can and cannot see:
 Sessions (4)
 ~~~~~~~~~~~~
 
-Record/Play results and the run history (``r``/``p`` work from every lens;
-``p`` lands here; Shift+``P`` generates the PDF report of the selected run):
+Rewind results and the run history (``r``/``p`` work from every lens;
+Shift+``P`` generates the PDF report of the selected run). **Rewind** answers
+"which file did my action change, and how?" for actions that cannot simply be
+repeated (a cookie banner is gone once accepted):
 
-1. ``r`` **Record**: name the run and the number of replays, then Sandroid
-   snapshots the device and records your input (Esc in the settings form
-   cancels without recording).
-2. Interact with the device, then stop: ``Esc``/``Enter`` (or *Stop*) stop
-   and save, and the replay starts automatically; *Discard* throws the
-   recording away.
-3. ``p`` **Play** (again): asks first -- it names the recording, the number
-   of replays and roughly how long it takes -- because the emulator is
-   reverted to the snapshot taken when recording started. Then the recording
-   is replayed, background noise is measured with a dry run, and changed /
-   new / deleted files (with inline diffs), processes, sockets and network
-   activity are shown. The header pill and the status strip show the phase
-   (``● REPLAY · replay 1/2``, ``dry run``, ``analysing``). A Play takes
-   roughly (replays + 1) x (recording length + settle time + ~2.5 min) + ~3
-   min -- each replay window adds a snapshot load, a network reset and a
-   result pull, and the baseline scan runs once. An 80 s recording with 2
-   replays took 13-16 minutes on the emulator; the dialog shows a range.
+1. ``r`` saves a **start point** (an emulator snapshot named
+   ``sandroid_rec_<date>_<time>``, about 5 s) and starts recording your input
+   (Tracking), the file monitor on the app's folders and a list of the app's
+   files. An app must be selected. The recording is named
+   ``Recording HH:MM``; rename it in Review.
+2. Do the action on the device (accept the cookies, log in, ...).
+3. ``r`` again stops and opens **Review**: the files that changed (``new`` /
+   ``changed`` / ``deleted``, with size; the list keeps filling for a few
+   seconds while the app finishes writing) and, when Network data exists, the
+   requests seen. ``p`` opens Review again later.
+4. **Select** files: a selected file is watched (★ in the Files lens) and its
+   current version is copied at once -- that copy is **After**. Select
+   requests to compare them after a replay (requests are compared after
+   Rewind + Replay; Rewind alone does not compare them).
+5. Press one of two buttons (nothing runs before):
 
-   The Play that starts right after a recording keeps the name chosen in the
-   Record dialog; a later ``p`` gets a fresh name (``Run <n> · <time>``).
+   - **Rewind + Replay**: back to the start point, copy **Before** of the
+     selected files, repeat your steps, copy **After (replay)**. The device
+     ends after the action. Each step is replayed *by element* (the tapped
+     element is found again and its current centre is tapped), else *by
+     position* (the recorded coordinates); the Timeline shows ``by element``,
+     ``by position`` or ``failed: <reason>`` for every step. Typed text is
+     replayed as the recorded keyboard taps.
+   - **Rewind**: back to the start point and copy **Before**. The device stays
+     at the start point.
 
-Every Play is saved as a run bundle under ``<results_path>/runs/<run_id>/``
+Every selected file gets **What your action changed** (Before → After). After
+a replay it also gets **What the replay changed** and one of ``same change in
+the replay``, ``replay changed it differently`` (with ``only in your run`` /
+``only in the replay`` lines) or ``replay did not change it``. A selected
+request shows ``found in the replay`` or ``not seen in the replay``, the two
+requests side by side (URL, headers, body) and ``same`` / ``different`` for
+the request body and the response status. All requests are listed per run
+(``Your run``, ``Replay``), never diffed. One start point is kept at a time:
+the next ``r`` replaces it unless *Keep this start point* is ticked. Physical
+devices have no snapshots: Record and Review work, Rewind does not. Esc during
+a rewind asks before stopping it.
+
+The command line and headless runs keep the batch replay (replay count, dry
+run, noise filter); the TUI no longer has it.
+
+Every Rewind is saved as a run (its Inspector *Changes* tab shows the
+per-file results, the replayed steps and the requests per run); command-line
+analyses are saved as a run bundle under ``<results_path>/runs/<run_id>/``
 and listed in the Runs lens (per device, newest first): ``#``, label, when,
 how long the Play took (``×3`` for a run with three replays) and what changed
 (files · hosts, ``⚠`` step errors, ``✕`` aborted, ``≠ #2`` when it disagrees

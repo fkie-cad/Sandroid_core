@@ -23,45 +23,39 @@ from sandroid.tui import controller_registry
 
 class _FakeRecordingController:
     def __init__(self) -> None:
-        self.start_recording_calls: list[tuple] = []
+        self.start_recording_calls: list = []
         self.start_recording_result: dict[str, Any] = {
             "success": True,
-            "label": "Run 1",
+            "rec_id": "rec-1",
+            "name": "Recording 10:00",
+            "start_point": "sandroid_rec_20261120_100000",
         }
         self.stop_recording_result: dict[str, Any] = {
             "success": True,
-            "event_count": 5,
-            "duration": 3.0,
-            "label": "Run 1",
+            "changed_files": [{"path": "/data/data/a/x", "state": "changed"}],
         }
-        self.start_playback_calls: list[dict[str, Any]] = []
-        self.start_playback_result: dict[str, Any] = {
-            "success": True,
-            "number_of_runs": 2,
-            "noise_filter": True,
-        }
+        self.start_rewind_calls: list[dict[str, Any]] = []
+        self.start_rewind_result: dict[str, Any] = {"success": True}
+        self.review = {"rec_id": "rec-1", "changed_files": []}
         self._is_recording = False
         self._is_replaying = False
         self.current_recording_label: str | None = None
 
-    def start_recording_chat(self, label, number_of_runs=2, noise_filter=True):
-        self.start_recording_calls.append((label, number_of_runs, noise_filter))
+    def start_recording_chat(self, label=None):
+        self.start_recording_calls.append(label)
         return self.start_recording_result
 
     def stop_recording_chat(self):
         return self.stop_recording_result
 
-    def start_playback_chat(
-        self, number_of_runs=None, noise_filter=None, owner_id=None
-    ):
-        self.start_playback_calls.append(
-            {
-                "number_of_runs": number_of_runs,
-                "noise_filter": noise_filter,
-                "owner_id": owner_id,
-            }
+    def start_rewind_chat(self, paths=None, replay=True, owner_id=None):
+        self.start_rewind_calls.append(
+            {"paths": paths, "replay": replay, "owner_id": owner_id}
         )
-        return self.start_playback_result
+        return self.start_rewind_result
+
+    def review_dict(self):
+        return self.review
 
     def is_recording(self):
         return self._is_recording
@@ -123,19 +117,31 @@ def test_tools_raise_when_controller_not_registered():
 # =============================================================================
 
 
-def test_start_device_recording_passes_arguments_through(monkeypatch):
+def test_start_device_recording_passes_the_label(monkeypatch):
+    fake = _FakeRecordingController()
+    monkeypatch.setattr(controller_registry, "get_recording_controller", lambda: fake)
+
+    result = recording_control.start_device_recording(label="my run")
+
+    assert result == fake.start_recording_result
+    assert fake.start_recording_calls == ["my run"]
+    assert "ignored" not in result
+
+
+def test_start_device_recording_ignores_old_batch_parameters(monkeypatch):
     fake = _FakeRecordingController()
     monkeypatch.setattr(controller_registry, "get_recording_controller", lambda: fake)
 
     result = recording_control.start_device_recording(
-        label="my run", number_of_runs=3, noise_filter=False
+        label="x", number_of_runs=3, noise_filter=False
     )
 
-    assert result == fake.start_recording_result
-    assert fake.start_recording_calls == [("my run", 3, False)]
+    assert result["success"] is True
+    assert result["ignored"] == ["number_of_runs", "noise_filter"]
+    assert "ignored" in result["note"]
 
 
-def test_stop_device_recording_passthrough(monkeypatch):
+def test_stop_device_recording_returns_the_review_list(monkeypatch):
     fake = _FakeRecordingController()
     monkeypatch.setattr(controller_registry, "get_recording_controller", lambda: fake)
 
@@ -143,20 +149,20 @@ def test_stop_device_recording_passthrough(monkeypatch):
 
 
 # =============================================================================
-# start_replay
+# start_replay (Rewind + Replay) / get_recording_changes
 # =============================================================================
 
 
-def test_start_replay_captures_owner_id_and_renames_dry_run_arg(monkeypatch):
+def test_start_replay_captures_owner_id_paths_and_mode(monkeypatch):
     fake = _FakeRecordingController()
     monkeypatch.setattr(controller_registry, "get_recording_controller", lambda: fake)
 
     with _as_owner("owner-A"):
-        result = recording_control.start_replay(number_of_runs=5, include_dry_run=False)
+        result = recording_control.start_replay(paths=["/data/data/a/x"], replay=False)
 
-    assert result == fake.start_playback_result
-    assert fake.start_playback_calls == [
-        {"number_of_runs": 5, "noise_filter": False, "owner_id": "owner-A"}
+    assert result == fake.start_rewind_result
+    assert fake.start_rewind_calls == [
+        {"paths": ["/data/data/a/x"], "replay": False, "owner_id": "owner-A"}
     ]
 
 
@@ -164,12 +170,49 @@ def test_start_replay_no_owner_context_passes_none(monkeypatch):
     fake = _FakeRecordingController()
     monkeypatch.setattr(controller_registry, "get_recording_controller", lambda: fake)
 
-    # No _as_owner context -- _current_owner_id.get() is None here.
     recording_control.start_replay()
 
-    assert fake.start_playback_calls == [
-        {"number_of_runs": None, "noise_filter": None, "owner_id": None}
+    assert fake.start_rewind_calls == [
+        {"paths": None, "replay": True, "owner_id": None}
     ]
+
+
+@pytest.mark.parametrize("kwargs", [{"number_of_runs": 2}, {"include_dry_run": True}])
+def test_start_replay_rejects_the_old_batch_parameters(monkeypatch, kwargs):
+    fake = _FakeRecordingController()
+    monkeypatch.setattr(controller_registry, "get_recording_controller", lambda: fake)
+
+    with pytest.raises(ToolExecutionError, match="batch replay was removed"):
+        recording_control.start_replay(**kwargs)
+    assert fake.start_rewind_calls == []
+
+
+def test_start_replay_accepts_a_count_of_one(monkeypatch):
+    fake = _FakeRecordingController()
+    monkeypatch.setattr(controller_registry, "get_recording_controller", lambda: fake)
+
+    recording_control.start_replay(number_of_runs=1, include_dry_run=False)
+
+    assert len(fake.start_rewind_calls) == 1
+
+
+def test_start_replay_rejects_bad_paths(monkeypatch):
+    fake = _FakeRecordingController()
+    monkeypatch.setattr(controller_registry, "get_recording_controller", lambda: fake)
+
+    with pytest.raises(ToolExecutionError, match="list of device paths"):
+        recording_control.start_replay(paths="/data/data/a/x")
+
+
+def test_get_recording_changes_is_read_only_passthrough(monkeypatch):
+    from sandroid.ai.tools.registry import RiskTier, get_tool_registry
+
+    fake = _FakeRecordingController()
+    monkeypatch.setattr(controller_registry, "get_recording_controller", lambda: fake)
+
+    assert recording_control.get_recording_changes() == fake.review
+    spec = get_tool_registry().get_spec("get_recording_changes")
+    assert spec.risk == RiskTier.READ_ONLY
 
 
 # =============================================================================

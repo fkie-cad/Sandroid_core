@@ -103,20 +103,6 @@ async def test_r_on_main_screen_without_device_explains_why() -> None:
         assert any("No device connected" in m for m in _messages(app))
 
 
-async def test_r_on_main_screen_opens_record_settings(monkeypatch) -> None:
-    from sandroid.tui.app import SandroidTUI
-
-    monkeypatch.setattr(SandroidTUI, "_active_device", lambda self: object())
-    app = _app()
-    async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await boot(app, pilot)
-        await pilot.press("r")
-        await settle(pilot)
-        assert type(app.screen).__name__ == "RecordSettingsModal"
-        # No spotlight app: warned, but recording is still allowed.
-        assert any("No app selected" in m for m in _messages(app))
-
-
 async def test_p_without_recording_explains_and_stays_put(monkeypatch) -> None:
     from sandroid.tui.app import SandroidTUI
 
@@ -127,109 +113,13 @@ async def test_p_without_recording_explains_and_stays_put(monkeypatch) -> None:
         monkeypatch.setattr(app._recording_controller, "has_recording", lambda: False)
         started = []
         monkeypatch.setattr(
-            app._recording_controller, "start_playback", lambda: started.append(1)
+            app._recording_controller, "open_review", lambda: started.append(1)
         )
         await pilot.press("p")
         await settle(pilot)
         assert started == []
         assert any("Nothing recorded yet" in m for m in _messages(app))
         assert app.screen.query_one("#lens-body").current == "spotlight-panel"
-
-
-async def test_p_with_recording_jumps_to_diffs_and_plays(monkeypatch) -> None:
-    from sandroid.tui.app import SandroidTUI
-    from sandroid.tui.modals.confirm_modal import ConfirmModal
-
-    monkeypatch.setattr(SandroidTUI, "_active_device", lambda self: object())
-    from sandroid.tui.screens.main_screen import MainScreen
-
-    # The arm and typing-guard windows are wide, however slow the host; their
-    # ends are simulated below (backdated) instead of waited for.
-    monkeypatch.setattr(ConfirmModal, "ARM_SECONDS", 60.0)
-    monkeypatch.setattr(MainScreen, "TYPING_GUARD_SECONDS", 60.0)
-    app = _app()
-    async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await boot(app, pilot)
-        rc = app._recording_controller
-        monkeypatch.setattr(rc, "has_recording", lambda: True)
-        started = []
-        monkeypatch.setattr(rc, "start_playback", lambda: started.append(1) or True)
-        monkeypatch.setattr(
-            rc,
-            "play_plan",
-            lambda: {
-                "recording": "Run 1 · 18:22",
-                "number_of_runs": 2,
-                "noise_filter": True,
-                "seconds": 85.0,
-                "estimate": 399.0,
-            },
-        )
-        await pilot.press("p")
-        await settle(pilot)
-        # p reverts the device: it asks first, naming the recording and time.
-        assert started == []
-        assert type(app.screen).__name__ == "ConfirmModal"
-        message = str(app.screen.message_text)
-        assert "Run 1 · 18:22" in message
-        assert "2 replays + a dry run" in message
-        assert "roughly 6-8 min" in message
-        await pilot.press("n")
-        await settle(pilot)
-        assert started == []
-        # Stray typing never confirms (E2E: "places" typed while no text
-        # field had focus): No has the focus, so Enter declines ...
-        await pilot.press("p")
-        await settle(pilot)
-        assert app.screen.focused.id == "no"
-        await pilot.press("enter")
-        await settle(pilot)
-        assert started == []
-        assert type(app.screen).__name__ == "MainScreen"
-        # ... the rest of a word closes the dialog as No ...
-        await pilot.press("p", "l", "a")
-        await settle(pilot)
-        assert started == []
-        assert type(app.screen).__name__ == "MainScreen"
-        assert any("looked like typing" in m for m in _messages(app))
-        # ... (the rest of the word ran no app command: typing guard) ...
-        app.screen._typing_until = 0.0  # the guard window is over
-        # ... and a y typed right behind the p is ignored ("py...").
-        await pilot.press("p", "y")
-        await pilot.pause()
-        assert started == []
-        assert type(app.screen).__name__ == "ConfirmModal"
-        app.screen._opened_at -= 61.0  # the arm window is over
-        await pilot.press("y")  # read, then confirmed
-        await settle(pilot)
-        assert started == [1]
-        assert app.screen.query_one("#lens-body").current == "runs-panel"
-
-
-def test_play_estimate_matches_measured_plays(monkeypatch) -> None:
-    """R4-N1: an 80 s recording, 2 replays + dry run, settle 8 s took 13 min
-    12 s and 16 min 10 s on the emulator; the dialog promised "about 6 min"
-    (snapshot loads, network resets, the baseline scan and the result pulls
-    were left out).
-    """
-    from types import SimpleNamespace
-
-    from sandroid.analysis import engine
-    from sandroid.tui.controllers.recording_controller import RecordingController
-
-    monkeypatch.setattr(engine, "_replay_settle_seconds", lambda config: 8)
-    fake = SimpleNamespace(
-        recording_seconds=lambda path: 80.0,
-        get_recording_path=lambda: "rec.txt",
-        _current_number_of_runs=2,
-        _current_noise_filter=True,
-        _current_recording_label="Run 1",
-        _recording_run_id=None,
-    )
-    estimate = RecordingController.play_plan(fake)["estimate"]
-    low, high = estimate * 0.85, estimate * 1.15  # the range the dialog shows
-    for measured in (13 * 60 + 12, 16 * 60 + 10):
-        assert low <= measured <= high
 
 
 # --------------------------------------------------------------------------
@@ -328,60 +218,6 @@ async def test_files_lens_has_no_subtabs_to_get_stuck_in() -> None:
 # --------------------------------------------------------------------------
 
 
-async def _open_record_settings(app, pilot, monkeypatch) -> None:
-    from sandroid.tui.app import SandroidTUI
-
-    monkeypatch.setattr(SandroidTUI, "_active_device", lambda self: object())
-    await boot(app, pilot)
-    await pilot.press("r")
-    await settle(pilot)
-    assert type(app.screen).__name__ == "RecordSettingsModal"
-
-
-async def test_record_settings_buttons_have_visible_labels(monkeypatch) -> None:
-    from textual.widgets import Button
-
-    app = _app()
-    async with app.run_test(size=SIZE) as pilot:
-        await _open_record_settings(app, pilot, monkeypatch)
-        for button in app.screen.query(Button):
-            # Textual's tall default borders used to eat the only row of the
-            # 1-line -secondary button, leaving a blank bar.
-            assert button.content_region.height >= 1, button.id
-
-
-async def test_record_settings_esc_aborts_recording(monkeypatch) -> None:
-    app = _app()
-    async with app.run_test(size=SIZE) as pilot:
-        await _open_record_settings(app, pilot, monkeypatch)
-        footer_text = str(app.screen.query_one("KeyHintFooter").render())
-        assert "Esc=Cancel (nothing recorded)" in footer_text
-        await pilot.press("escape")
-        await settle(pilot)
-        assert type(app.screen).__name__ == "MainScreen"
-        assert not app._recording_controller.is_recording()
-
-
-async def test_recording_modal_footer_says_esc_stops_and_saves() -> None:
-    from textual.app import App
-
-    from sandroid.tui.modals.recording_modal import RecordingModal
-
-    app = App()
-    async with app.run_test() as pilot:
-        modal = RecordingModal()
-        await app.push_screen(modal)
-        await pilot.pause()
-        footer = modal.query_one("KeyHintFooter")
-        assert "Esc=Cancel" in str(footer.render())
-        modal.is_recording = True
-        await pilot.pause()
-        assert "Esc/Enter=Stop & save" in str(footer.render())
-        assert str(modal.query_one("#btn-cancel").label) == "Discard"
-        modal.is_recording = False  # don't trigger a real stop on teardown
-        await pilot.pause()
-
-
 # --------------------------------------------------------------------------
 # ? catalog
 # --------------------------------------------------------------------------
@@ -407,7 +243,7 @@ async def test_help_catalog_is_case_aware_and_lists_panel_keys() -> None:
         # Record/Play lead the Recording section.
         first = next(i for i, r in enumerate(rows) if "Recording" in r)
         assert "Record an action" in rows[first + 1]
-        assert "Play loaded action" in rows[first + 2]
+        assert "Review the recording" in rows[first + 2]
         # Panel-scoped keys are listed (read from the panels' BINDINGS).
         assert "── App lens ──" in text
         assert "── Snapshot picker (S) ──" in text
@@ -938,37 +774,3 @@ def test_snapshot_create_rejects_an_invalid_name_before_adb(monkeypatch):
 # ---------------------------------------------------------------------------
 # Phase 5 N1(b): hint when recording starts in the open app without a reset
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("mode", "focused", "hinted"),
-    [
-        ("off", "org.wikipedia", True),
-        ("airplane", "org.wikipedia", False),
-        ("off", "com.android.launcher3", False),
-    ],
-)
-def test_foreground_app_hint(monkeypatch, mode, focused, hinted):
-    from types import SimpleNamespace
-
-    from sandroid.tui.modals import recording_modal
-
-    monkeypatch.setattr(
-        "sandroid.config.get_config",
-        lambda: SimpleNamespace(
-            analysis=SimpleNamespace(network_reset_after_snapshot=mode)
-        ),
-    )
-    monkeypatch.setattr(
-        "sandroid.services.get_spotlight_service",
-        lambda: SimpleNamespace(get_effective_package=lambda: "org.wikipedia"),
-    )
-    monkeypatch.setattr(
-        recording_modal.Adb,
-        "get_focused_app",
-        classmethod(lambda cls, max_retries=3: (focused, ".Main")),
-    )
-    hint = recording_modal.foreground_app_hint()
-    assert bool(hint) is hinted
-    if hinted:
-        assert "network_reset_after_snapshot" in hint

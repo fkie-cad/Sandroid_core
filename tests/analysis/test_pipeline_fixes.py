@@ -503,47 +503,6 @@ def test_txt_diff_uses_pull_folders_for_absolute_device_paths(
     assert "Error" not in diff
 
 
-def test_playback_persists_full_results_json(tmp_path, monkeypatch) -> None:
-    """Record->Play writes the full legacy JSON (network/processes/other data)."""
-    import json
-
-    from sandroid.analysis.run_config import RunResult
-    from sandroid.core import run_bundle
-    from sandroid.tui.controllers.recording_controller import RecordingController
-
-    monkeypatch.setattr(run_bundle, "write_manifest", lambda record: None)
-    session = tmp_path / "session"
-    bundle = tmp_path / "bundle"
-    session.mkdir()
-    bundle.mkdir()
-    monkeypatch.setenv("RESULTS_PATH", str(session) + "/")
-    result = RunResult(
-        device_name="emu",
-        network_targets=["192.102.162.236:443 (42B sent to / 0B received from)"],
-        processes=["yes"],
-        other_data={"Timeline Data": [[]]},
-    )
-    RecordingController(toolbox=MagicMock())._persist_run(
-        run_id="r1",
-        result=result,
-        recording_path="/rec.txt",
-        bundle_dir=str(bundle),
-        device_name="emu",
-        recorded_at="t0",
-        error=None,
-    )
-    # Full results (+ run metadata) live in the run bundle ...
-    data = json.loads((bundle / "sandroid.json").read_text())
-    assert data["Processes"] == ["yes"]
-    assert data["Network IP:Port (send/recv)"][0].startswith("192.102.162.236")
-    assert "Other Data" in data
-    assert "Run Metadata" in data
-    # ... and the session-level sandroid.json points at them.
-    pointer = json.loads((session / "sandroid.json").read_text())
-    assert pointer["Run ID"] == "r1"
-    assert pointer["Results"] == str(bundle / "sandroid.json")
-
-
 def test_dry_run_deletions_are_subtracted(monkeypatch) -> None:
     from sandroid.analysis.deletedfiles import DeletedFiles
 

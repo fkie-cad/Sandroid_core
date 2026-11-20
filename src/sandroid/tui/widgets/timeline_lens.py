@@ -659,6 +659,11 @@ def _run_text(row: Row, summary: str) -> str:
     """``recording started · login`` / ``replay finished · 3 changed`` /
     ``replay failed · <error>``.
     """
+    data = row.data or {}
+    if data.get("rec_id") or row.kind == "step":
+        # Rewind's own lines (core/rewind.py) are plain words already:
+        # "rewind started · ...", "step 2 of 5 · ... · by element".
+        return summary
     rest = _RUN_LEAD.sub("", summary, count=1).strip()
     word = _RUN_WORD.get(row.kind, "run")
     if _run_failed(row):

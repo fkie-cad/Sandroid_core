@@ -479,7 +479,7 @@ class QuitController:
 
             svc = ms._INSTANCE
             if svc is not None and svc.is_running():
-                notes.append("stops mitmweb")
+                notes.append("stops Mitmproxy")
             if svc is not None and svc.owned_device_proxy:
                 notes.append("clears the device proxy")
         except Exception:

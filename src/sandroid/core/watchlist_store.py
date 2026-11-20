@@ -548,7 +548,10 @@ def keep_version(
     basename = ((record or {}).get("local") or {}).get("file") or _main_name(path)
     when = when or datetime.now()
     dirs = version_dirs(path)
-    if not dirs:
+    role = ((record or {}).get("rewind") or {}).get("role")
+    if not dirs or role == "before":
+        # A Rewind's Before is pulled after its After: a diff against the
+        # version before it would read backwards. Rewind compares by role.
         return KeptVersion(promote(path, None, record, when=when))
     previous = dirs[-1]
     previous_main = version_file(previous, path)

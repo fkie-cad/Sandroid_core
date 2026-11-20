@@ -213,6 +213,14 @@ def _pull_serial() -> str | None:
         return None
 
 
+def _says_missing(error: str) -> bool:
+    """An adb pull error that means the file is not there."""
+    text = (error or "").lower()
+    # "File not found on device" is detect_adb_pull_error's word for adb's
+    # "failed to stat remote object"; "device 'x' not found" is not a file.
+    return any(w in text for w in ("no such file", "does not exist", "file not found"))
+
+
 def timeline_pull(
     path: str,
     trigger: str,
@@ -259,7 +267,7 @@ def timeline_pull(
                 state = "first version"
             else:
                 state = "changed" if changed else "no content change"
-            summary = f"◆ {short} {rel} ({state})"
+            summary = f"pulled {short} {rel} ({state})"
         else:
             data["error"] = (error or "pull failed")[:500]
             summary = f"pull failed · {rel}"
@@ -289,7 +297,7 @@ def timeline_check(path: str, trigger: str, same_as: str, note: str) -> int | No
         return get_timeline().emit(
             "files",
             "check",
-            summary=f"◇ {rel} unchanged (same as {same_as})",
+            summary=f"{rel} unchanged (same as {same_as})",
             actor="user" if trigger == "manual" else "sandroid",
             data={"path": path, "same_as": same_as, "trigger": trigger, "note": note},
             ref={"path": _timeline_rel(checks), "lens": "files"},
@@ -548,8 +556,12 @@ class WatchlistView(Widget):
             return True  # "dir/*" expands recursively (find -type f)
         return fnmatch.fnmatchcase(path, pattern)
 
-    def add_path(self, path: str) -> bool:
-        """Watch a path or wildcard pattern; False (with a toast) if rejected."""
+    def add_path(self, path: str, *, pull_first: bool = True) -> bool:
+        """Watch a path or wildcard pattern; False (with a toast) if rejected.
+
+        ``pull_first=False``: no first-version pull (Rewind pulls the file
+        itself, tagged as its After).
+        """
         forensic = get_forensic_service()
         problem = watch_path_problem(path)
         if problem is not None:
@@ -572,7 +584,9 @@ class WatchlistView(Widget):
             return False
         self._persist_index()
         self._reload_rows()
-        baseline = self._pull_baselines(sorted(set(self._rows) - before))
+        baseline = (
+            self._pull_baselines(sorted(set(self._rows) - before)) if pull_first else 0
+        )
         tail = ""
         if baseline == 1:
             tail = " — pulling a first version"
@@ -842,12 +856,32 @@ class WatchlistView(Widget):
             logger.debug("Watchlist: device clock sample failed", exc_info=True)
             return None
 
+    def pull_role(self, path: str, role: str, rec_id: str, run: int) -> tuple:
+        """Pull ``path`` for a recording's ``role`` (Before / After / After
+        (replay)); blocking, for a worker thread. Returns ``(version, error)``:
+        the version folder name that holds the content (a new one, or the
+        newest one when nothing changed), ``"absent"`` when the file is not
+        on the device, ``None`` with the error otherwise.
+        """
+        self._post(self._pulling.add, path)
+        tag = {"role": role, "rec_id": rec_id, "run": run}
+        try:
+            with watchlist_store.pull_lock(path):
+                outcome = self._pull_and_diff_one(path, f"rewind-{role}", None, tag)
+        except Exception as exc:
+            logger.warning(f"Watchlist pull failed for {path}: {exc}")
+            timeline_pull(path, f"rewind-{role}", ok=False, error=str(exc))
+            self._post(self._apply_pull_result, path, RowState.ERROR, str(exc), None)
+            return None, str(exc)
+        return outcome
+
     def _pull_and_diff_one(
         self,
         path: str,
         trigger: str = "manual",
         event_time: datetime | None = None,
-    ) -> None:
+        rewind: dict | None = None,
+    ) -> tuple[str | None, str | None]:
         """Runs on a background thread (see ``_run_bg``).
 
         Device facts (stat + sha256sum of the file and its ``-wal`` /
@@ -857,7 +891,9 @@ class WatchlistView(Widget):
         staging folder, and -- unless the copy is byte-identical to the newest
         version -- the new version folder with ``acquisition.json``,
         ``diff.json`` and ``diff.txt`` (:func:`watchlist_store.keep_version`).
-        Never touches widgets; reports via ``_post``.
+        Never touches widgets; reports via ``_post``. ``rewind`` (role,
+        rec_id, run) tags the version / check for a recording. Returns
+        ``(version name, error)`` as :meth:`pull_role`.
         """
         fx = get_file_extraction_service()
         basename = os.path.basename(path.rstrip("/")) or "pulled_file"
@@ -875,23 +911,35 @@ class WatchlistView(Widget):
             if known == device_set:
                 self._record_check(
                     path, latest, trigger, event_time, device_set, mark,
-                    "no change", clock,
+                    "no change", clock, rewind,
                 )  # fmt: skip
-                return
+                return latest.name, None
 
         current = watchlist_store.reset_current(path)
         current_main = current / basename
         result = fx.pull_file(path, str(current_main))
         if not result.success:
+            error = result.error or "Pull failed"
+            if rewind is not None and (
+                _says_missing(error) or (device and path not in device)
+            ):
+                # Not on the device (a new file at the start point, a
+                # deleted one after): a fact of the role, not an error.
+                # Empty facts alone prove nothing: they are also what a
+                # failed stat (device gone, adb hiccup) returns.
+                watchlist_store.discard_current(path)
+                timeline_pull(path, trigger, ok=True, error="not on the device")
+                self._post(self._pulling.discard, path)
+                return "absent", None
             timeline_pull(path, trigger, ok=False, error=result.error)
             self._post(
                 self._apply_pull_result,
                 path,
                 RowState.ERROR,
-                result.error or "Pull failed",
+                error,
                 None,
             )
-            return
+            return None, error
 
         pulled_companions: list[str] = []
         if is_sqlite_file(str(current_main)) or any(c in device for c in companions):
@@ -909,6 +957,8 @@ class WatchlistView(Widget):
             path, current, basename, device, pulled_companions, pulled_at,
             trigger, event_time, mark, clock,
         )  # fmt: skip
+        if rewind is not None:
+            record["rewind"] = rewind
         file_set = record["set"]
         facts = (file_set["size"], file_set["local_sha256"])
         if latest is not None:
@@ -920,9 +970,9 @@ class WatchlistView(Widget):
                 watchlist_store.discard_current(path)
                 self._record_check(
                     path, latest, trigger, event_time, device_set or {}, mark,
-                    "no change (the pulled copy is identical)", clock,
+                    "no change (the pulled copy is identical)", clock, rewind,
                 )  # fmt: skip
-                return
+                return latest.name, None
 
         kept = watchlist_store.keep_version(path, record, pulled_at)
         pull_seq = timeline_pull(
@@ -947,7 +997,7 @@ class WatchlistView(Widget):
                 kept.dir.name,
                 clock,
             )
-            return
+            return kept.dir.name, None
         changed = kept.changed
         self._post(
             self._apply_pull_result,
@@ -961,6 +1011,7 @@ class WatchlistView(Widget):
             kept.dir.name,
             clock,
         )
+        return kept.dir.name, None
 
     def _record_check(
         self,
@@ -972,22 +1023,23 @@ class WatchlistView(Widget):
         mark: dict | None,
         note: str,
         clock: dict | None = None,
+        rewind: dict | None = None,
     ) -> None:
         """A pull found no change: one ``checks.jsonl`` line, no version."""
         same_as = latest.name.split("_", 1)[0]
-        entry = watchlist_store.append_check(
-            path,
-            {
-                "at": watchlist_store.iso_tz(),
-                "trigger": trigger,
-                "event_at": watchlist_store.iso_tz(event_time) if event_time else None,
-                "device_sha256": device_set,
-                "same_as": same_as,
-                "note": note,
-                "mark": mark,
-                "device_clock": clock,
-            },
-        )
+        check = {
+            "at": watchlist_store.iso_tz(),
+            "trigger": trigger,
+            "event_at": watchlist_store.iso_tz(event_time) if event_time else None,
+            "device_sha256": device_set,
+            "same_as": same_as,
+            "note": note,
+            "mark": mark,
+            "device_clock": clock,
+        }
+        if rewind is not None:
+            check["rewind"] = {**rewind, "version": latest.name}
+        entry = watchlist_store.append_check(path, check)
         timeline_check(path, trigger, same_as, note)
         self._post(self._apply_check_result, path, latest.name, entry)
 

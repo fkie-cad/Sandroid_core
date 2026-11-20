@@ -2,9 +2,9 @@
 
 These palette entries used to append work to ``ActionQ`` and rely on the legacy
 ``do_next`` pump. That engine is gone: recording and playback now run through
-the TUI controllers (``app.action_record`` -> ``RecordingController``,
-``app.action_play`` -> ``RecordingController``) which drive
-:class:`~sandroid.analysis.engine.AnalysisEngine`.
+the TUI controllers (``app.action_record`` -> ``RecordingController``
+record / stop, ``app.action_play`` -> ``RecordingController.open_review``),
+the Rewind flow of :mod:`sandroid.core.rewind`.
 
 (The former ``t`` "Start TrigDroid" entry is gone: it only ever opened
 TrigDroid's bypass wrapper, which BypassService replaced. TrigDroid's trigger
@@ -23,7 +23,7 @@ fall back to an informative result pointing the user at the live triggers
 instead of silently no-op'ing.
 
 The two ``action_*`` methods return their controller's own success bool
-(``RecordingController.start_recording``/``start_playback``), which these
+(``RecordingController.start_recording``/``open_review``), which these
 commands propagate honestly rather than reporting "success" whenever the call
 merely didn't raise -- the controller declines (log + return ``False``) rather
 than raise for real preconditions (already recording, no recording to play),
@@ -45,7 +45,7 @@ def _drive_live_action(ctx: CommandContext, action_name: str) -> bool | None:
     """Invoke ``ctx.app.<action_name>()`` on the app's main thread, if reachable.
 
     ``action_record``/``action_play`` each return their controller's own
-    success bool (``RecordingController.start_recording``/``start_playback``)
+    success bool (``RecordingController.start_recording``/``open_review``)
     -- the controller already handles every real precondition (already
     recording, no recording to play) by logging a warning and returning
     ``False`` rather than raising, so that ``False`` must be propagated
@@ -99,8 +99,8 @@ class RecorderCommand(CommandHandler):
     """
 
     key = "r"
-    name = "Start Recorder"
-    description = "Record user interactions for later playback"
+    name = "Record (Rewind)"
+    description = "Save a start point and record an action (r again stops)"
     category = CommandCategory.FUNCTIONALITY
     views = ["forensic", "malware"]
 
@@ -143,8 +143,8 @@ class PlayerCommand(CommandHandler):
     """
 
     key = "p"
-    name = "Start Player"
-    description = "Play back recorded interactions"
+    name = "Review recording"
+    description = "Review what the recorded action changed; Rewind or Replay"
     category = CommandCategory.FUNCTIONALITY
     views = ["forensic", "malware"]
 
@@ -152,7 +152,7 @@ class PlayerCommand(CommandHandler):
         """Block if a live app shows there is no recording to play back."""
         controller = _app_controller(ctx, "_recording_controller")
         if controller is not None and not controller.has_recording():
-            return (False, "No recording to play back yet. Record something first.")
+            return (False, "Nothing recorded yet. Press r to record.")
         return (True, "")
 
     async def execute(self, ctx: CommandContext) -> CommandResult:
@@ -161,18 +161,18 @@ class PlayerCommand(CommandHandler):
         if driven is True:
             return CommandResult(
                 success=True,
-                message="Playback started.",
+                message="Review opened.",
                 should_return_to_menu=True,
             )
         if driven is False:
             return CommandResult(
                 success=False,
-                message="Could not start playback (no recording?).",
+                message="Could not open Review (nothing recorded?).",
                 should_return_to_menu=True,
             )
         return CommandResult(
             success=True,
-            message="Replay from the TUI (press 'p'; results open in the Sessions lens).",
+            message="Review from the TUI (press 'p'; results open in the Sessions lens).",
             should_return_to_menu=True,
         )
 

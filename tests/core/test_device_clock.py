@@ -289,7 +289,7 @@ def test_a_move_over_two_seconds_in_either_offset_is_a_jump(device):
     assert pull["reason"] == "pull"
     assert pull["jump"] is True
     assert pull["kind"] == "jump"
-    assert _clock_lines()[-1]["summary"] == "⏱ clock jump · wall −3.5 s"
+    assert _clock_lines()[-1]["summary"] == "clock jump · wall −3.5 s"
     assert pull["jump_wall_s"] == pytest.approx(3.5, abs=1e-3)  # further behind
     assert pull["jump_mono_s"] == pytest.approx(0.0, abs=1e-3)
     device.host += 30
@@ -377,7 +377,7 @@ def test_snapshot_load_with_sync_on_sets_the_clock(device, caplog):
     assert sync["trigger"] == "snapshot-load"
     assert sync["sets"] == 1
     assert "sync_policy" not in sync
-    assert _clock_lines()[-1]["summary"] == "⏱ clock synced · −75 min → +0.0 s"
+    assert _clock_lines()[-1]["summary"] == "clock synced · −75 min to +0.0 s"
     # The wall clock moved, CLOCK_MONOTONIC did not.
     assert sync["off_mono"] == pytest.approx(load["off_mono"], abs=1e-3)
     public = {k: v for k, v in final.items() if k not in ("serial", "host_at")}
@@ -423,7 +423,11 @@ def test_a_failed_sync_is_warned_once_and_recording_goes_on(device, caplog):
         device_clock.after_snapshot_load("clean", SERIAL)
         device_clock.after_snapshot_load("clean", SERIAL)
     reasons = [x["reason"] for x in _lines()]
-    assert reasons == ["snapshot-load", "sync", "snapshot-load", "sync"]
+    # A clock still off after the sync gets one network-time force refresh.
+    assert reasons == ["snapshot-load", "sync", "sync"] * 2
+    assert _lines()[2]["trigger"] == "force-refresh"
+    assert _lines()[2]["command"] == device_clock.FORCE_REFRESH_COMMAND
+    assert _lines()[2]["ok"] is False
     assert _lines()[1]["ok"] is False
     assert _lines()[1]["command"] is None
     assert _lines()[1]["sets"] == 6  # 3 forms x (plain, su 0), none applied

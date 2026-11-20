@@ -13,7 +13,7 @@ Controllers:
     - ObjectionResumeController: Objection session resumption
     - ProxyController: Proxy configuration
     - QuitController: Quit/exit orchestration
-    - RecordingController: Input recording and playback
+    - RecordingController: Record, Review, Rewind (+ Replay)
     - ScreenshotController: Screenshot operations
     - SpotlightController: Spotlight files management
     - WidgetRefreshController: Widget refresh operations
@@ -58,7 +58,7 @@ from .network_capture_controller import NetworkCaptureController
 from .objection_resume_controller import ObjectionResumeController
 from .proxy_controller import ProxyController
 from .quit_controller import QuitController
-from .recording_controller import PlaybackResult, RecordingController, RecordingResult
+from .recording_controller import RecordingController
 from .screenshot_controller import ScreenshotController
 from .settings_controller import SettingsController
 from .spotlight_controller import SpotlightController, SpotlightFilesAction
@@ -82,14 +82,12 @@ __all__ = [
     "NetworkCaptureController",
     # Objection Resume
     "ObjectionResumeController",
-    "PlaybackResult",
     # Proxy
     "ProxyController",
     # Quit
     "QuitController",
     # Recording
     "RecordingController",
-    "RecordingResult",
     "ScanProgress",
     "ScanResult",
     # Screenshot

@@ -149,7 +149,7 @@ def test_player_can_execute_blocks_with_no_recording():
     can_execute, reason = PlayerCommand().can_execute(ctx)
 
     assert can_execute is False
-    assert "recording" in reason.lower()
+    assert "nothing recorded" in reason.lower()
 
 
 def test_player_can_execute_allows_with_a_recording():

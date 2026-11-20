@@ -586,15 +586,13 @@ def _summary(kind: str, entry: dict) -> str:
         before = entry.get("before_off_wall")
         after = entry.get("after_off_wall")
         if isinstance(before, (int, float)) and isinstance(after, (int, float)):
-            return (
-                f"⏱ clock synced · {format_offset(-before)} → {format_offset(-after)}"
-            )
-        return f"⏱ clock synced · device {shown}"
+            return f"clock synced · {format_offset(-before)} to {format_offset(-after)}"
+        return f"clock synced · device {shown}"
     if kind == "jump":
         moved = entry.get("jump_wall_s")
         if isinstance(moved, (int, float)):
-            return f"⏱ clock jump · wall {format_offset(-moved)}"
-        return f"⏱ clock jump · device {shown} ({entry.get('reason')})"
+            return f"clock jump · wall {format_offset(-moved)}"
+        return f"clock jump · device {shown} ({entry.get('reason')})"
     err = entry.get("err_ms")
     err_text = f" ±{round(err)} ms" if isinstance(err, (int, float)) else ""
     return f"clock · device {shown}{err_text} ({entry.get('reason')})"
@@ -1119,6 +1117,8 @@ def after_snapshot_load(
             )
             or final
         )
+    if policy and notable(final):
+        final = force_refresh(serial, send, snapshot=name) or final
     if notable(final):
         warn_once(
             "offset",
@@ -1129,6 +1129,49 @@ def after_snapshot_load(
             f"recorded in the session timeline.",
         )
     return final
+
+
+#: Asks Android's network time service to fetch the time now; after a
+#: snapshot load it corrects the restored clock at once (measured on API 35,
+#: where ``auto_time`` alone did not within 30 s).
+FORCE_REFRESH_COMMAND = "cmd network_time_update_service force_refresh"
+#: Samples (1 s apart) after a force refresh until the clock is within 1 s.
+FORCE_REFRESH_TRIES = 3
+
+
+def force_refresh(
+    serial: str | None = None, send: Send | None = None, **extra
+) -> dict | None:
+    """``cmd network_time_update_service force_refresh``, then a ``sync``
+    sample (``trigger: "force-refresh"``). For a clock that is still off
+    after the usual sync. Returns the new line (``None``: no answer).
+    """
+    from sandroid.core.adb_utils import device_shell_command
+
+    serial = _target(serial)
+    try:
+        (send or _default_send(serial))(device_shell_command(FORCE_REFRESH_COMMAND))
+    except (Exception, SystemExit):
+        logger.debug("force_refresh failed", exc_info=True)
+        return None
+    sample = None
+    for attempt in range(FORCE_REFRESH_TRIES):
+        if attempt:
+            _sleep(1.0)  # the service applies the fetched time asynchronously
+        sample = _measure(serial, send, SAMPLES_QUICK)
+        if sample is None or not notable(sample):
+            break
+    if sample is None:
+        return None
+    return _note(
+        sample,
+        "sync",
+        always=True,
+        trigger="force-refresh",
+        command=FORCE_REFRESH_COMMAND,
+        ok=not notable(sample),
+        **extra,
+    )
 
 
 def _selinux_enforcing(serial: str | None) -> bool:

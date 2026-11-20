@@ -1,40 +1,36 @@
-"""Recording Controller for TUI.
+"""Recording Controller for the TUI: Record, Review, Rewind (+ Replay).
 
-This controller manages recording and playback operations, extracted from the
-monolithic app.py to follow Single Responsibility Principle.
+The user-approved Rewind flow (``docs/REWIND_PLAN.md``, data model and
+device steps in :mod:`sandroid.core.rewind`):
 
-Responsibilities:
-- Start/stop input event recording
-- Playback recorded events
-- Analysis of file system changes during playback
-- Export recording to various formats
+* ``r`` saves a **start point** (an emulator snapshot) and starts recording
+  (Tracking's input lines through the shared getevent lease, the file
+  monitor, a file list of the app's folders);
+* ``r`` again stops and opens **Review** (``tui/modals/review_modal.py``):
+  the files that changed and the requests seen;
+* selecting a file watches it (★) and pulls it at once: its **After**;
+* **Rewind** loads the start point and pulls **Before**; **Rewind +
+  Replay** then repeats the steps and pulls **After (replay)**.
 
-Usage:
-    from sandroid.tui.controllers import RecordingController
+Each Rewind saves a run (``core/run_history``) shown in the Sessions lens.
+The old batch Play (replay count, dry run, noise filter) is gone from the
+TUI; the command line and headless runs keep it (``analysis/engine.py``).
 
-    controller = RecordingController(
-        log_info=activity_log.log_info,
-        log_warning=activity_log.log_warning,
-        push_modal=app.push_screen,
-        run_worker=app.run_worker,
-        call_from_thread=app.call_from_thread,
-    )
-
-    # Start recording
-    controller.start_recording()
-
-    # Start playback
-    controller.start_playback()
+Every device call runs on a worker thread; UI callbacks are marshalled with
+``call_from_thread`` (:meth:`RecordingController._ui`).
 """
 
+from __future__ import annotations
+
+import contextlib
 import logging
-import os
+import threading
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -67,55 +63,55 @@ def drop_stale_frida_device() -> bool:
     return False
 
 
-@dataclass
-class PlaybackResult:
-    """Result of playback analysis."""
+def recording_seconds(path: str) -> float | None:
+    """Length of a raw recording (first to last input event), or None.
 
-    changed_files: list[str]
-    new_files: list[str]
-    deleted_files: list[str]
-    duration: int
-    error: str | None = None
+    Both formats: raw ``getevent -t`` lines (``recording.getevent.txt``) and
+    legacy ``<epoch ms> <device> <type> <code> <value>`` lines.
+    """
+    from sandroid.features.player import parse_store_line
 
-
-@dataclass
-class RecordingResult:
-    """Result of a recording session."""
-
-    completed: bool
-    cancelled: bool
-    event_count: int
-    duration: float
-    file_path: str | None = None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            stamps = [
+                parsed[0]
+                for parsed in (parse_store_line(line) for line in f)
+                if parsed is not None
+            ]
+    except OSError:
+        return None
+    if len(stamps) < 2:
+        return None
+    return max(0.0, (stamps[-1] - stamps[0]) / 1000.0)
 
 
 class RecordingController:
-    """Controller for recording and playback operations.
+    """Record / Review / Rewind (+ Replay), decoupled from widgets.
 
-    This controller handles all recording-related operations, decoupled from
-    the TUI layer through callback injection. This enables:
-    - Independent unit testing without TUI dependencies
-    - Clear separation of recording logic from UI rendering
-    - Reusable recording management across different UI modes
-
-    Thread Safety:
-        Playback operations run in worker threads.
-        Progress callbacks are invoked via call_from_thread.
-
-    Example:
-        controller = RecordingController(
-            log_info=print,
-            log_warning=lambda msg: print(f"WARN: {msg}"),
-            push_modal=lambda modal, cb: cb(None),
-            run_worker=lambda fn, **kw: fn(),
-            call_from_thread=lambda fn, *args: fn(*args),
-        )
-
-        # Start recording
-        controller.start_recording()
-
-        # Start playback and analysis
-        controller.start_playback()
+    Args:
+        log_info: Activity-log callbacks (UI thread).
+        log_warning: As above.
+        log_error: As above.
+        log_success: As above.
+        push_modal: ``push_screen(modal, callback)``.
+        run_worker: ``run_worker(fn, name=..., thread=True)``.
+        call_from_thread: Marshal a call onto the UI thread.
+        force_ui_refresh: Repaint after a state change.
+        toolbox: Optional Toolbox reference (tests).
+        on_run_saved: Called (UI thread) with a saved run id.
+        on_monitor_stopped_for_playback: Called (UI thread) when Rewind
+            stopped the file monitor before the snapshot load.
+        on_monitor_resume_available: Called (UI thread) with the monitor's
+            config when it could not be restarted after a Rewind.
+        set_recording_indicator: ``(bool)``: recording on/off.
+        set_replay_indicator: ``(bool)``: a Rewind runs.
+        suppress_disconnect_guard: ``(bool)`` around snapshot save/load.
+        set_replay_phase: ``(text | None)``: the plain status line.
+        notify: ``(message, severity)`` toast (UI thread).
+        watchlist: Returns the Files lens's ``WatchlistView`` (UI thread).
+        resume_monitor: ``(config) -> bool`` restarts the monitor (UI thread).
+        ensure_monitor: ``(pkg)`` starts the file monitor for the app if it
+            is not running (UI thread).
     """
 
     def __init__(
@@ -136,69 +132,11 @@ class RecordingController:
         set_replay_indicator: Callable[[bool], None] | None = None,
         suppress_disconnect_guard: Callable[[bool], None] | None = None,
         set_replay_phase: Callable[[str | None], None] | None = None,
-    ):
-        """Initialize RecordingController with UI callbacks.
-
-        Args:
-            log_info: Callback for info-level logging to UI
-            log_warning: Callback for warning-level logging to UI
-            log_error: Callback for error-level logging to UI
-            log_success: Callback for success-level logging to UI
-            push_modal: Callback to push a modal screen with result callback
-            run_worker: Callback to run function in worker thread
-            call_from_thread: Callback to execute function on main thread
-            force_ui_refresh: Callback to force UI refresh after state changes
-            toolbox: Optional Toolbox reference (defaults to imported Toolbox)
-            on_run_saved: Callback invoked (via call_from_thread, so always on
-                the main thread) with the new run's ``run_id`` once
-                ``_run_playback_analysis`` has persisted a RunRecord. Wired by
-                app.py to DiffsView.on_new_run for the gated auto-select/
-                unread-marker behaviour; safe to leave unset (e.g. in tests).
-            on_monitor_stopped_for_playback: Callback invoked (via
-                call_from_thread) the moment the Play safety-net force-stops
-                a running monitor session, right before ``load_snapshot``.
-                Takes no arguments — it only needs to tell the UI "show the
-                inline notice", nothing more. See
-                ``_stop_monitor_before_revert``. Safe to leave unset.
-            on_monitor_resume_available: Callback invoked (via
-                call_from_thread) once ``_run_playback_analysis`` finishes
-                (success or failure — the offer is orthogonal to whether the
-                diff analysis itself errored), but *only* if monitor was
-                actually auto-stopped by this run. Receives the
-                ``MonitorConfig`` monitor was running with beforehand (may carry
-                a now-stale ``target_pid`` in PID-mode — re-resolving it is
-                ``MonitorController.resume_after_playback``'s job, not this
-                controller's). Wired by app.py to MonitorView's one-click
-                "Resume monitoring" offer; safe to leave unset.
-            set_recording_indicator: Callback invoked with the modal's own
-                ``is_recording`` transitions (forwarded straight through to
-                ``RecordingModal``'s ``on_recording_active_changed``) so a UI
-                mode indicator (e.g. the status bar's "● RECORDING" row) can
-                track real capture start/stop rather than the modal merely
-                being open. Safe to leave unset.
-            set_replay_indicator: Callback invoked with ``True``/``False``
-                (via call_from_thread) around ``_run_playback_analysis``'s
-                ``AnalysisEngine(...).run()`` call, so a UI mode indicator
-                (e.g. "● REPLAYING") can track the auto-chained/manual replay
-                that otherwise has no visible indication beyond Activity Log
-                lines. Safe to leave unset.
-            suppress_disconnect_guard: Callback invoked with ``True``/
-                ``False`` around every disruptive snapshot revert this
-                controller performs (forwarded to ``RecordingModal`` for its
-                own pre-recording snapshot, and wrapped directly here around
-                ``_run_playback_analysis``'s engine run, which covers every
-                ``LoadSnapshotStep`` across all replay iterations) — stops
-                the transient ADB-transport blip a snapshot save/load causes
-                from tripping a false "Device disconnected" toast. Safe to
-                leave unset.
-            set_replay_phase: Callback invoked (via call_from_thread) with
-                the running Play's phase (``"loading snapshot"``,
-                ``"replay 1/2"``, ``"settle 8s"``, ``"collecting results"``,
-                ``"dry run"``, ``"analysing"``, ``"saving"``) and with
-                ``None`` once the Play is over (success, error or cancel), so
-                the header pill / status strip can show where a 5-10 minute
-                Play is. Safe to leave unset.
-        """
+        notify: Callable[[str, str], None] | None = None,
+        watchlist: Callable[[], Any] | None = None,
+        resume_monitor: Callable[[Any], bool] | None = None,
+        ensure_monitor: Callable[[str], None] | None = None,
+    ) -> None:
         self._log_info = log_info or self._default_log
         self._log_warning = log_warning or self._default_log
         self._log_error = log_error or self._default_log
@@ -211,95 +149,78 @@ class RecordingController:
         self._on_run_saved = on_run_saved
         self._on_monitor_stopped_for_playback = on_monitor_stopped_for_playback
         self._on_monitor_resume_available = on_monitor_resume_available
-        # Wrapped: every indicator change is also a run/record-start or
-        # run/record-stop line on the session timeline (modal and chat).
-        self._set_recording_indicator = self._timeline_indicator(
-            set_recording_indicator
-        )
-        #: How the current recording was started ("modal" | "chat").
-        self._record_via = "modal"
-        #: Session-timeline seqs of the open recording's start, and of the
-        #: last recording's (start, stop) -- a Play replays that range.
-        self._tl_record_start: int | None = None
-        self._tl_recording = False
-        self._tl_record_stop: int | None = None
-        self._tl_record_range: list[int] | None = None
-        #: Host epoch of the open recording's start, and the last
-        #: recording's ``[start, stop]`` -- part of every run that replays it
-        #: (the run's privacy scope, ``RunRecord.record_window``).
-        self._tl_record_t0: float | None = None
-        self._tl_record_window: list[float] | None = None
-        #: A record-start was written that has no record-result yet (Esc on
-        #: the Record-settings form never started one: no result line).
-        self._tl_result_due = False
+        self._set_recording_indicator = set_recording_indicator
         self._set_replay_indicator = set_replay_indicator
         self._suppress_disconnect_guard = suppress_disconnect_guard
         self._set_replay_phase = set_replay_phase
-        # Label of the run the current Play will save: the recording's label
-        # for the Play that auto-chains after a Record, None (= a fresh
-        # "Run N · HH:MM") for a manual ``p`` / AI replay -- a manual Play
-        # used to copy the previous run's label (M-31).
-        self._play_label: str | None = None
-        #: Run id of the Play that ran right after the recording (named in
-        #: the Record dialog); ``p``'s confirm names the recording by that
-        #: run's *current* label, so a rename shows up there.
-        self._recording_run_id: str | None = None
-        # Whether mitmproxy ran when the current Play started (recorded with
-        # the run's flows).
-        self._mitm_at_start: bool | None = None
-        # Recording-session bookkeeping for the settings-seed flow (see
-        # start_recording()): a monotonic counter for the "Run N" default
-        # name, the label seed, and the replay-count/dry-run settings that
-        # every subsequent Play of the current recording defaults to (until a
-        # fresh Record replaces them). Chosen in the combined Record-settings
-        # form (idea B) and forwarded live via ``on_settings_chosen``.
-        self._recording_seq = 0
-        self._current_recording_label: str | None = None
-        self._current_number_of_runs = 2
-        self._current_noise_filter = True
-        # AI-chat replay state (see start_playback_chat/_run_playback_analysis):
-        # `_is_replaying` fixes get_replay_status() -- `TaskService.is_running(
-        # "playback_analysis")` would always read False, since that name is only
-        # ever a Textual `run_worker` name, never registered with TaskService.
-        # `_replay_owner_id` is the resource-arbiter owner id (see
-        # sandroid.ai.loop._current_owner_id) that claimed ResourceId.WORLD for
-        # the in-flight replay, stashed here at kickoff time so
-        # `_run_playback_analysis`'s completion path (which runs on a DETACHED
-        # worker thread that outlives the tool call's own synchronous dispatch)
-        # can release that lease itself once the replay actually finishes. Both
-        # are None/False for a manual/keybinding-triggered replay (no AI owner,
-        # nothing was ever claimed) -- see `_release_replay_world_lease`.
-        self._is_replaying = False
+        self._notify = notify
+        self._watchlist = watchlist
+        self._resume_monitor = resume_monitor
+        self._ensure_monitor = ensure_monitor
+        #: idle | saving | recording | stopping | running
+        self._state = "idle"
+        self._state_lock = threading.Lock()
+        self._rec: Any = None  # core.rewind.Recording
+        self._wrapper: Any = None
+        self._cancel = threading.Event()
+        self._review: Any = None  # the open ReviewModal
+        self._tick_stop = threading.Event()
+        self._last_run_id: str | None = None
+        #: AI resource-arbiter owner whose WORLD lease a Rewind holds.
         self._replay_owner_id: str | None = None
+        #: rec_id -> the first file list (None: it failed).
+        self._start_facts: dict[str, dict | None] = {}
+        #: After pulls still running (a Rewind waits for them).
+        self._pending_after: set[str] = set()
+        #: Serialises the late file list with a Rewind's snapshot load.
+        self._list_lock = threading.Lock()
+
+    # -- plumbing -------------------------------------------------------------
 
     def _default_log(self, message: str) -> None:
-        """Default logging when no callback provided."""
         logger.info(message)
 
-    def _ui(self, fn: Callable[..., Any], *args: Any) -> None:
-        """Run a UI callback on the main thread; never raise.
-
-        ``App.call_from_thread`` re-raises whatever the callback raised and
-        raises itself once the app has stopped (crash or quit). On the
-        playback worker that used to abort the thread before the run was
-        persisted, so a UI problem lost the analysis results (P2-H1). UI
-        updates are best-effort; persistence must never depend on them.
-        """
+    def _ui(self, fn: Callable[..., Any] | None, *args: Any) -> None:
+        """Run a UI callback on the main thread; never raise."""
+        if fn is None:
+            return
+        if threading.current_thread() is threading.main_thread():
+            self._guarded(fn, *args)
+            return
         try:
             self._call_from_thread(fn, *args)
         except Exception:
             logger.debug("UI update %r failed (ignored)", fn, exc_info=True)
 
     @staticmethod
-    def _guarded(fn: Callable[..., Any], *args: Any) -> None:
-        """Call ``fn(*args)`` directly, logging instead of raising."""
+    def _guarded(fn: Callable[..., Any] | None, *args: Any) -> None:
+        if fn is None:
+            return
         try:
             fn(*args)
         except Exception:
             logger.debug("Callback %r failed (ignored)", fn, exc_info=True)
 
+    def _spawn(self, fn: Callable[[], None], name: str) -> None:
+        """``fn`` on a worker thread (a Textual thread worker when wired)."""
+        if self._run_worker is not None:
+            try:
+                self._run_worker(fn, name=name, exclusive=False, thread=True)
+                return
+            except Exception:
+                logger.debug("run_worker failed; plain thread", exc_info=True)
+        threading.Thread(target=fn, name=name, daemon=True).start()
+
+    def _status(self, text: str | None) -> None:
+        self._ui(self._set_replay_phase, text)
+        review = self._review
+        if review is not None and hasattr(review, "set_progress"):
+            self._ui(review.set_progress, text or "")
+
+    def _toast(self, message: str, severity: str = "information") -> None:
+        self._ui(self._notify, message, severity)
+
     def _get_toolbox(self) -> Any:
-        """Get Toolbox reference."""
         if self._toolbox:
             return self._toolbox
         from sandroid.core.toolbox import Toolbox
@@ -307,544 +228,22 @@ class RecordingController:
         return Toolbox
 
     def _get_task_service(self) -> Any:
-        """Get task service instance."""
         from sandroid.services import get_task_service
 
         return get_task_service()
 
-    def _get_forensic_service(self) -> Any:
-        """Get forensic service instance."""
-        from sandroid.services import get_forensic_service
-
-        return get_forensic_service()
-
-    def _get_action_window_service(self) -> Any:
-        """Get action-window service instance."""
-        from sandroid.services import get_action_window_service
-
-        return get_action_window_service()
-
-    # =========================================================================
-    # Recording Operations
-    # =========================================================================
-
-    def is_recording(self) -> bool:
-        """Check if recording is currently in progress.
-
-        Returns:
-            True if recording is active
-        """
-        return self._get_task_service().is_running("recording")
-
-    @property
-    def is_replaying(self) -> bool:
-        """Whether a replay (Play) is currently in progress.
-
-        Backed by ``self._is_replaying`` -- set/cleared around
-        ``_run_playback_analysis``'s engine run (see that method), NOT
-        ``TaskService.is_running("playback_analysis")``: that name is only
-        ever a Textual ``run_worker`` name, never registered with
-        ``TaskService``, so that check would always read False.
-        """
-        return self._is_replaying
-
-    @property
-    def current_recording_label(self) -> str | None:
-        """The active (or most recently completed) recording's label.
-
-        ``None`` before any recording has ever been started this session.
-        """
-        return self._current_recording_label
-
-    def start_recording(self) -> bool:
-        """Start input event recording.
-
-        Shows recording modal that captures input events from the device.
-        Creates a snapshot before recording starts.
-
-        The modal is pushed with ``auto_start=True`` — see ``RecordingModal``
-        — which shows the combined Record-settings form (idea B: name +
-        replays + dry-run) *immediately*, before anything else happens.
-        Recording itself (the pre-snapshot and ``RecordingWrapper`` start)
-        only begins once that form is confirmed (Cancel/Esc there aborts the
-        recording -- reported as "Recording cancelled"). The chosen
-        name (or the auto-generated default if left blank) seeds the
-        default label for *every subsequent Play of this same recording* — it
-        is not a one-time identity — and the replay-count/dry-run choices seed
-        both the auto-chained playback and every later manual Play. A per-run
-        rename (DiffsView's ``n`` key) only edits that one run's saved label
-        and never touches this seed.
-
-        On a completed Stop the recording **auto-chains straight into
-        playback** with those settings (idea B), so Record → interact → Stop
-        lands the user on the Diff panel with results; pressing ``p`` still
-        re-plays the current recording manually with the same settings.
-
-        Returns:
-            True if recording was started successfully
-        """
-        from sandroid.tui.modals import RecordingModal, RecordingResult
-
-        # Check if already recording
-        if self.is_recording():
-            self._log_warning("Recording already in progress. Stop it first.")
-            return False
-
-        if not self._push_modal:
-            self._log_error("Cannot show recording modal - push_modal not configured")
-            return False
-
-        previous = (
-            self._recording_seq,
-            self._current_recording_label,
-            self._current_number_of_runs,
-            self._current_noise_filter,
-        )
-        self._recording_seq += 1
-        # Numbered like a manual Play (this device's next run), not per
-        # session: the session counter restarted at "Run 1" every launch.
-        # (Toolbox.device_name: no adb call on the UI thread.)
-        default_label = self._fresh_run_label(
-            getattr(self._get_toolbox(), "device_name", None)
-        )
-        # Seed sane fallbacks immediately, in case the live callback below
-        # never fires for some reason (e.g. the modal is torn down early).
-        self._current_recording_label = default_label
-
-        def on_settings_chosen(
-            label: str, number_of_runs: int, noise_filter: bool
-        ) -> None:
-            # Fires the moment the non-blocking Record-settings form is
-            # dismissed — well before the recording session itself ends
-            # (Stop/dismiss). Seeds every subsequent Play of this recording.
-            self._current_recording_label = label
-            self._current_number_of_runs = number_of_runs
-            self._current_noise_filter = noise_filter
-
-        def on_recording_result(result: RecordingResult) -> None:
-            self._timeline_record_result(
-                events=getattr(result, "event_count", 0) if result else 0,
-                duration_s=getattr(result, "duration", 0) if result else 0,
-                completed=bool(getattr(result, "completed", False)),
-                cancelled=result is None or bool(result.cancelled),
-            )
-            if result is None or result.cancelled:
-                # The earlier recording (if any) is still the one ``p``
-                # replays: keep its seeds instead of the cancelled dialog's.
-                (
-                    self._recording_seq,
-                    self._current_recording_label,
-                    self._current_number_of_runs,
-                    self._current_noise_filter,
-                ) = previous
-                self._log_info("Recording cancelled")
-                return
-
-            if result.completed:
-                self._recording_run_id = None  # a new recording
-                # Belt-and-suspenders: keep the seeds in sync even if
-                # on_settings_chosen was somehow never wired/fired.
-                if getattr(result, "label", ""):
-                    self._current_recording_label = result.label
-                self._current_number_of_runs = getattr(
-                    result, "number_of_runs", self._current_number_of_runs
-                )
-                self._current_noise_filter = getattr(
-                    result, "noise_filter", self._current_noise_filter
-                )
-                self._log_success(
-                    f"Recording saved: {result.event_count} events, {result.duration}s"
-                )
-                # Auto-chain (idea B): Record → interact → Stop flows straight
-                # into playback with the chosen settings, landing the user on
-                # the Diff panel with results. This Play's run carries the
-                # label chosen in the Record dialog.
-                self.start_playback(label=self._current_recording_label)
-
-        self._record_via = "modal"
-        self._log_info("Opening recording modal...")
-        self._push_modal(
-            RecordingModal(
-                auto_start=True,
-                default_label=default_label,
-                default_number_of_runs=self._current_number_of_runs,
-                default_noise_filter=self._current_noise_filter,
-                on_settings_chosen=on_settings_chosen,
-                on_recording_active_changed=self._set_recording_indicator,
-                suppress_disconnect_guard=self._suppress_disconnect_guard,
-            ),
-            on_recording_result,
-        )
-        return True
-
-    def start_recording_chat(
-        self, label: str, number_of_runs: int = 2, noise_filter: bool = True
-    ) -> dict[str, Any]:
-        """Start a recording from the AI chat -- no modal, no auto-chained replay.
-
-        Headless counterpart to :meth:`start_recording` for the AI
-        tool-dispatch thread (confirmed to be a background worker thread,
-        never Textual's main thread -- see ``chat_panel.py``'s
-        ``run_worker(..., thread=True)``). There is deliberately no
-        ``RecordingModal`` here: the AI is expected to have already asked
-        the analyst for *label* in chat before calling this, and tells them
-        in chat when to perform the action and when to stop -- the modal's
-        job is replaced by the chat turn itself. Record and replay are
-        separate tool calls, never auto-chained in code (unlike
-        :meth:`start_recording`'s modal-driven "Stop -> auto-play"): the LLM
-        decides when to call :meth:`start_playback_chat`, typically right
-        after stopping but it may wait if asked to.
-
-        Threading discipline: every call here that touches a UI callback
-        (``_log_info``/``_log_success``/``_set_recording_indicator``/
-        ``_suppress_disconnect_guard``) is wrapped in
-        ``self._call_from_thread(...)``. The ADB-blocking calls
-        (``Toolbox.create_snapshot``, ``RecordingWrapper.start()``) are
-        deliberately NOT wrapped -- that dance in ``RecordingModal`` exists
-        only to avoid freezing the Textual UI thread, which is not a
-        concern here since the tool-dispatch thread is already off the main
-        thread (wrapping them would instead freeze the UI thread for the
-        duration of the ADB call, the opposite of what's needed).
-
-        Args:
-            label: Human-readable name for this run. Seeds the default
-                label for every subsequent Play of this recording, same as
-                the modal's chosen name.
-            number_of_runs: Replay-repeat count seeded for a later Play.
-            noise_filter: Dry-run noise-filter toggle seeded for a later
-                Play.
-
-        Returns:
-            ``{"success": False, "message": str}`` if a recording is already
-            in progress, the snapshot failed, or the recorder failed to
-            start; ``{"success": True, "label": str}`` once recording has
-            actually started.
-        """
-        if self.is_recording():
-            return {"success": False, "message": "Recording already in progress"}
-
-        self._recording_seq += 1
-        self._recording_run_id = None
-        self._current_recording_label = label or f"Run {self._recording_seq}"
-        self._current_number_of_runs = number_of_runs
-        self._current_noise_filter = noise_filter
-
-        if self._suppress_disconnect_guard:
-            self._ui(self._suppress_disconnect_guard, True)
-        try:
-            self._get_toolbox().create_snapshot(b"tmp")
-        except Exception as e:
-            if self._suppress_disconnect_guard:
-                self._ui(self._suppress_disconnect_guard, False)
-            return {"success": False, "message": f"Failed to create snapshot: {e}"}
-        if self._suppress_disconnect_guard:
-            self._ui(self._suppress_disconnect_guard, False)
-
-        from sandroid.tui.utils.recording_wrapper import RecordingWrapper
-
-        wrapper = RecordingWrapper(output_file=self.get_recording_path())
-        if not wrapper.start():
-            return {"success": False, "message": "Failed to start recording"}
-
-        self._get_task_service().register(
-            name="recording",
-            display_name="Recording",
-            instance=wrapper,
-            stop_callback=wrapper.stop,
-        )
-        if self._set_recording_indicator:
-            self._record_via = "chat"
-            self._ui(self._set_recording_indicator, True)
-        self._ui(
-            self._log_info,
-            f"[AI] Recording '{self._current_recording_label}' started",
-        )
-        return {"success": True, "label": self._current_recording_label}
-
-    def stop_recording_chat(self) -> dict[str, Any]:
-        """Stop the current chat-triggered (or modal-driven) recording.
-
-        Headless counterpart to Stop for the AI tool-dispatch thread. Does
-        NOT auto-chain into playback -- call :meth:`start_playback_chat`
-        separately once the analyst says they're done (or immediately, if
-        that's the default the LLM has been told to use).
-
-        Returns:
-            ``{"success": False, "message": str}`` if nothing was
-            recording, else ``{"success": True, "event_count": int,
-            "duration": float, "label": str | None}``.
-        """
-        if not self.is_recording():
-            return {"success": False, "message": "No recording in progress"}
-
-        task = self._get_task_service().get_task("recording")
-        wrapper = task.instance if task else None
-        event_count = wrapper.event_count if wrapper else 0
-        self._get_task_service().stop("recording")
-        duration = wrapper.elapsed_seconds if wrapper else 0
-
-        if self._set_recording_indicator:
-            self._ui(self._set_recording_indicator, False)
-        self._timeline_record_result(
-            events=event_count, duration_s=duration, completed=True, cancelled=False
-        )
-        self._ui(
-            self._log_success,
-            f"[AI] Recording stopped: {event_count} events, {duration}s",
-        )
-        return {
-            "success": True,
-            "event_count": event_count,
-            "duration": duration,
-            "label": self._current_recording_label,
-        }
-
-    # =========================================================================
-    # Playback Operations
-    # =========================================================================
-
-    def has_recording(self) -> bool:
-        """Check if a recording file exists.
-
-        Returns:
-            True if recording file exists
-        """
-        return os.path.exists(self.get_recording_path())
-
-    def get_recording_path(self) -> str:
-        """Get the path to the recording file.
-
-        Record writes ``recording.getevent.txt`` (a raw ``getevent -t``
-        slice); the legacy ``recording.txt`` is never written any more.
-
-        Returns:
-            Path to recording file
-        """
-        from sandroid.core.run_bundle import RECORDING_FILENAME
-
-        raw_results_path = os.getenv("RAW_RESULTS_PATH", "./")
-        return os.path.join(raw_results_path, RECORDING_FILENAME)
-
-    def start_playback(self, label: str | None = None) -> bool:
-        """Start playback and analysis.
-
-        Replays recorded input events and analyzes file system changes.
-        Shows progress in activity log and summary modal at end.
-
-        Args:
-            label: Label of the run this Play saves. ``None`` (manual ``p``,
-                AI replay) gives the run a fresh default label
-                (``"Run N · HH:MM"``); the auto-chained Play after a Record
-                passes the label chosen in the Record dialog.
-
-        Returns:
-            True if playback was started successfully
-        """
-        import functools
-
-        # Check if recording exists
-        recording_file = self.get_recording_path()
-        logger.debug(f"Looking for recording at: {recording_file}")
-
-        if not os.path.exists(recording_file):
-            self._log_warning(
-                f"No recording found at {recording_file}. Press [r] to record first."
-            )
-            return False
-
-        # Check if snapshot exists - but don't block if we can't verify
-        snapshot_verified = self._verify_snapshot()
-        if not snapshot_verified:
-            # Expected whenever the host-side AVD dir isn't where we guess
-            # (custom ANDROID_AVD_HOME, AVD name != device name, ...); the
-            # engine loads the snapshot via the emulator console anyway.
-            logger.debug(
-                "Could not verify snapshot path - proceeding anyway "
-                "(recording created it)"
-            )
-
-        self._log_info("Starting playback analysis...")
-        self._play_label = label or None
-
-        # A previous Stop/quit left the process-wide cancel flag set.
-        from sandroid.features.player import Player
-
-        Player.clear_cancel()
-
-        # Run playback in worker thread (non-blocking)
-        if self._run_worker:
-            self._run_worker(
-                functools.partial(self._run_playback_analysis),
-                name="playback_analysis",
-                exclusive=True,
-                thread=True,
-            )
-        else:
-            # Fallback to synchronous execution
-            self._run_playback_analysis()
-
-        return True
-
     @staticmethod
-    def recording_seconds(path: str) -> float | None:
-        """Length of a recording (first to last input event), or None.
-
-        Both formats: raw ``getevent -t`` lines (``recording.getevent.txt``)
-        and legacy ``<epoch ms> <device> <type> <code> <value>`` lines.
-        """
-        from sandroid.features.player import parse_store_line
-
+    def _active_device() -> Any:
         try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                stamps = [
-                    parsed[0]
-                    for parsed in (parse_store_line(line) for line in f)
-                    if parsed is not None
-                ]
-        except OSError:
+            from sandroid.core.device_manager import DeviceManager
+
+            return DeviceManager.get().active_device
+        except Exception:
             return None
-        if len(stamps) < 2:
-            return None
-        return max(0.0, (stamps[-1] - stamps[0]) / 1000.0)
-
-    def play_plan(self) -> dict[str, Any]:
-        """What ``p`` is about to do, for its confirm dialog.
-
-        ``{"recording": label, "number_of_runs", "noise_filter", "seconds":
-        recording length or None, "estimate": rough total seconds or None}``.
-        The estimate is (replays + dry run) x (recording + settle + ~150 s)
-        + ~180 s. Per replay window: snapshot load + network reset (45-120 s)
-        and the result collection pull (85-110 s); once: the baseline scan
-        (90-160 s) and the analysis -- as measured on the emulator (a Play of
-        an 80 s recording with 2 replays took 13-16 min, not the 6 min the
-        old ~35 s per window promised).
-        """
-        seconds = self.recording_seconds(self.get_recording_path())
-        windows = self._current_number_of_runs + (
-            1 if self._current_noise_filter else 0
-        )
-        estimate = None
-        if seconds is not None:
-            from sandroid.analysis.engine import _replay_settle_seconds
-
-            settle = _replay_settle_seconds(None)
-            estimate = windows * (seconds + settle + 150) + 180
-        label = self._current_recording_label
-        if self._recording_run_id:
-            try:
-                from sandroid.core import run_history
-
-                label = run_history.load_run(self._recording_run_id).label or label
-            except Exception:
-                pass
-        return {
-            "recording": label,
-            "number_of_runs": self._current_number_of_runs,
-            "noise_filter": self._current_noise_filter,
-            "seconds": seconds,
-            "estimate": estimate,
-        }
-
-    def stop_playback(self) -> bool:
-        """Stop the running replay (Play) as soon as possible.
-
-        Sets the process-wide :class:`~sandroid.features.player.Player`
-        cancel flag: the replay stops before its next input event, the
-        engine skips the remaining runs, and the partial run is still saved
-        (with a "Replay cancelled" error) by :meth:`_run_playback_analysis`.
-        Call from the UI thread; a no-op when nothing is replaying.
-
-        Returns:
-            True if a replay was running and has been asked to stop.
-        """
-        from sandroid.features.player import Player
-
-        if not self._is_replaying:
-            return False
-        Player.cancel_all()
-        self._guarded(self._log_warning, "Stopping replay...")
-        return True
-
-    def start_playback_chat(
-        self,
-        number_of_runs: int | None = None,
-        noise_filter: bool | None = None,
-        owner_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Start a replay from the AI chat.
-
-        Headless counterpart to Play for the AI tool-dispatch thread.
-        :meth:`start_playback` itself only pushes one ``run_worker(...,
-        thread=True)`` call -- cheap, but ``run_worker`` is a Textual API
-        that must be invoked from the main thread same as any other, so
-        that one call is wrapped in ``self._call_from_thread(...)`` here.
-        The actual replay work (:meth:`_run_playback_analysis`) then runs on
-        ITS OWN worker thread exactly as it does for a manual/keybinding
-        Play -- unaffected by which thread kicked it off.
-
-        *owner_id* is the resource-arbiter owner id that claimed
-        ``ResourceId.WORLD`` for this call (see
-        ``ai/tools/recording_control.py``'s ``start_replay``, which reads it
-        from ``sandroid.ai.loop._current_owner_id`` before calling this --
-        the same pattern ``enable_app_proxy`` already uses to capture an
-        owner id for later-attributed release). It is stashed on
-        ``self._replay_owner_id`` ONLY once every early-return check has
-        passed and the worker is actually about to be kicked off -- never
-        earlier -- so a rejected call (no recording / already recording)
-        never leaves a stale owner id lying around for a future unrelated
-        replay to pick up. :meth:`_run_playback_analysis` releases the
-        matching ``WORLD`` lease itself once the replay actually finishes
-        (see :meth:`_release_replay_world_lease`) -- this is a deliberately
-        held-across-the-async-worker lease, unlike every other AI tool's
-        claim/release, which happens within one synchronous dispatch.
-
-        Args:
-            number_of_runs: Override the seeded replay-repeat count for
-                this Play (and future ones, until the next Record). ``None``
-                keeps the current seed.
-            noise_filter: Override the seeded dry-run/noise-filter toggle.
-                ``None`` keeps the current seed.
-            owner_id: The AI resource-arbiter owner id that claimed
-                ``ResourceId.WORLD`` for this replay, or ``None`` for a
-                manual/keybinding-triggered call (nothing was claimed, so
-                nothing needs releasing later).
-
-        Returns:
-            ``{"success": False, "message": str}`` if there is no recording
-            to replay, or one is still in progress; otherwise
-            ``{"success": True, "number_of_runs": int, "noise_filter":
-            bool}`` once the replay worker has been kicked off -- the
-            worker itself runs in the background, poll
-            ``get_replay_status()`` for completion.
-        """
-        if not self.has_recording():
-            return {"success": False, "message": "No recording found — record first"}
-        if self.is_recording():
-            return {
-                "success": False,
-                "message": "Stop the current recording before replaying",
-            }
-
-        if number_of_runs is not None:
-            self._current_number_of_runs = number_of_runs
-        if noise_filter is not None:
-            self._current_noise_filter = noise_filter
-
-        self._replay_owner_id = owner_id
-        self._call_from_thread(self.start_playback)
-        return {
-            "success": True,
-            "number_of_runs": self._current_number_of_runs,
-            "noise_filter": self._current_noise_filter,
-        }
 
     @staticmethod
     def _active_device_name() -> str | None:
-        """Name of the active device (AVD name for emulators), or None.
-
-        Also records it in the session state (``Toolbox.device_name``) when
-        that still holds another value, e.g. the hard-coded default.
-        """
+        """Name of the active device (AVD name for emulators), or None."""
         try:
             from sandroid.core.device_manager import (
                 DeviceManager,
@@ -856,143 +255,941 @@ class RecordingController:
             if device is None:
                 return None
             if device.is_emulator:
-                dm.get_avd_name_for_device(device)  # cached after the first call
-            name = resolve_device_name(device)
-            if name:
-                DeviceManager._sync_session_device_name(device)
-            return name or None
+                dm.get_avd_name_for_device(device)
+            return resolve_device_name(device) or None
         except Exception:
             logger.debug("Could not resolve the active device name", exc_info=True)
             return None
 
-    def _current_device_name(self) -> str:
-        """Device name a run is recorded under.
+    @staticmethod
+    def _shell(serial: str | None) -> Callable[[str], str]:
+        """A device shell runner for ``serial`` (raises when it is gone)."""
+        from sandroid.core.adb import Adb
+        from sandroid.core.adb_utils import device_shell_command
 
-        Resolved from the active device at run time rather than trusting
-        ``Toolbox.device_name`` alone: that value starts as the hard-coded
-        session default (``Pixel_6_Pro_API_31``) and was not updated on
-        every activation path, so runs, sandroid.json and the PDF named the
-        wrong device (P2-H5). Falls back to ``Toolbox.device_name`` without
-        a device, and whenever the session does not agree with the resolved
-        name: the engine aborts a run whose ``Toolbox.device_name`` differs
-        from the configured one ("device changed mid-run").
+        def run(command: str) -> str:
+            stdout, stderr = Adb.send_adb_command(
+                device_shell_command(command), serial=serial, timeout=60
+            )
+            err = str(stderr or "").strip()
+            low = err.lower()
+            # adb's own failures (not the device command's stderr): the
+            # device is gone, or the call hung.
+            if (
+                low.startswith("error:")
+                and any(
+                    w in low
+                    for w in ("not found", "offline", "no devices", "unauthorized")
+                )
+            ) or low.startswith(("command timed out", "oserror")):
+                raise RuntimeError(err or "the device did not answer")
+            return stdout if isinstance(stdout, str) else str(stdout or "")
+
+        return run
+
+    def _set_state(self, state: str) -> None:
+        with self._state_lock:
+            self._state = state
+
+    # -- state ----------------------------------------------------------------
+
+    def is_recording(self) -> bool:
+        """A recording is running (or its start point is being saved)."""
+        return self._state in ("saving", "recording", "stopping")
+
+    @property
+    def is_replaying(self) -> bool:
+        """A Rewind (or Rewind + Replay) is running."""
+        return self._state == "running"
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @property
+    def recording(self) -> Any:
+        """The current recording (:class:`sandroid.core.rewind.Recording`)."""
+        return self._rec
+
+    @property
+    def current_recording_label(self) -> str | None:
+        return self._rec.name if self._rec is not None else None
+
+    def has_recording(self) -> bool:
+        """A stopped recording exists that Review can show."""
+        return self._rec is not None and self._rec.stopped is not None
+
+    def get_recording_path(self) -> str:
+        """The current recording's raw getevent slice (may not exist)."""
+        from sandroid.core import rewind
+
+        if self._rec is None:
+            return ""
+        try:
+            return str(
+                rewind.recording_dir(self._rec.rec_id) / "recording.getevent.txt"
+            )
+        except Exception:
+            return ""
+
+    recording_seconds = staticmethod(recording_seconds)
+
+    # -- record -----------------------------------------------------------------
+
+    def toggle_recording(self) -> bool:
+        """``r``: start a recording, or stop the running one."""
+        if self._state == "recording":
+            return self.stop_recording()
+        return self.start_recording()
+
+    def _start_problem(self) -> tuple[str | None, Any, str | None]:
+        """``(problem, device, package)`` for a new recording."""
+        if self._state != "idle":
+            if self._state == "running":
+                return "A rewind is still running. Wait for it to finish.", None, None
+            return "Already recording. Press r to stop.", None, None
+        device = self._active_device()
+        if device is None:
+            return "No device connected.", None, None
+        try:
+            from sandroid.services import get_spotlight_service
+
+            pkg = get_spotlight_service().get_effective_package()
+        except Exception:
+            pkg = None
+        if not pkg:
+            return (
+                "Select an app first: Rewind needs to know whose files to list.",
+                device,
+                None,
+            )
+        return None, device, pkg
+
+    def start_recording(self, name: str | None = None) -> bool:
+        """``r``: save a start point, then start recording (UI thread).
+
+        Returns:
+            True when the recording is being started.
         """
-        toolbox = self._get_toolbox()
-        fallback = getattr(toolbox, "device_name", None) or "unknown"
-        name = self._active_device_name()
-        if name and getattr(toolbox, "device_name", None) == name:
-            return name
-        return fallback
+        from sandroid.core import rewind
+
+        problem, device, pkg = self._start_problem()
+        if problem:
+            self._log_warning(problem)
+            self._toast(problem, "warning")
+            return False
+        now = datetime.now()
+        rec = rewind.Recording(
+            rec_id=rewind.new_rec_id(now),
+            name=name or rewind.default_name(now),
+            pkg=pkg,
+            serial=getattr(device, "serial", None),
+            emulator=bool(getattr(device, "is_emulator", False)),
+        )
+        self._set_state("saving")
+        self._status(
+            "Saving start point (about 5 s)"
+            if rec.emulator
+            else "Starting the recording (no start point on a physical device)"
+        )
+        self._spawn(lambda: self._start_worker(rec), "rewind_record_start")
+        return True
+
+    def _start_worker(self, rec: Any) -> dict[str, Any]:
+        """Worker: start point, first file list, getevent lease, timeline."""
+        from sandroid.core import rewind
+
+        error = None
+        try:
+            error = self._save_start_point(rec)
+            if error is None and self._ensure_monitor is not None:
+                # After the save: the snapshot blinks the adb transport.
+                self._ui(self._ensure_monitor, rec.pkg)
+            if error is None:
+                error = self._begin_capture(rec)
+        except Exception as exc:  # never leave the state stuck
+            logger.exception("Starting the recording failed")
+            error = f"Could not start the recording: {exc}"
+        if error is not None:
+            # A start point saved for a recording that never started is
+            # used by nothing: delete it (never the previous one).
+            self._delete_start_point(rec)
+            wrapper, self._wrapper = self._wrapper, None
+            if wrapper is not None:  # capture failed after the lease
+                with contextlib.suppress(Exception):
+                    wrapper.stop()
+                with contextlib.suppress(Exception):
+                    self._get_task_service().unregister("recording")
+            self._set_state("idle")
+            self._status(None)
+            self._ui(self._log_error, error)
+            self._toast(error, "error")
+            return {"success": False, "message": error}
+        previous, self._rec = self._rec, rec
+        self._set_state("recording")
+        # A Review still open shows the previous recording; its buttons
+        # and selections would act on this one.
+        self._ui(self._close_review)
+        self._ui(self._set_recording_indicator, True)
+        self._replace_start_point(previous, rec)
+        with contextlib.suppress(Exception):
+            rewind.save_recording(rec)
+        self._ui(self._log_info, f"Recording '{rec.name}' started")
+        self._start_ticker(rec)
+        return {
+            "success": True,
+            "rec_id": rec.rec_id,
+            "name": rec.name,
+            "start_point": rec.start_point_name,
+        }
+
+    def _save_start_point(self, rec: Any) -> str | None:
+        """Save the snapshot (emulators); a plain error sentence or None."""
+        from sandroid.core import rewind
+
+        if not rec.emulator:
+            rec.start_point = {"name": None, "saved_ok": False, "pinned": False}
+            return None
+        avd = self._active_device_name()
+        rec.avd = avd
+        folder = None
+        if avd:
+            with contextlib.suppress(Exception):
+                from sandroid.core.emulator import avd_dir
+
+                folder = avd_dir(avd)
+        problem = rewind.disk_problem(folder)
+        if problem:
+            return problem
+        name = rewind.start_point_name()
+        self._guarded(self._suppress_disconnect_guard, True)
+        try:
+            from sandroid.services import get_emulator_service
+
+            ok = bool(get_emulator_service().create_snapshot(name, rec.serial))
+        except Exception as exc:
+            logger.debug("create_snapshot raised", exc_info=True)
+            ok, why = False, str(exc)
+        else:
+            why = "the emulator did not confirm the save (it may be slow)"
+        finally:
+            self._guarded(self._suppress_disconnect_guard, False)
+        if not ok:
+            # A save the console gave up on can still finish in the
+            # emulator: delete it once it shows up (only this name).
+            threading.Thread(
+                target=self._reap_start_point,
+                args=(name, rec.serial),
+                name="rewind-reap",
+                daemon=True,
+            ).start()
+            return f"Could not save the start point: {why}. Nothing was recorded."
+        rec.start_point = {"name": name, "saved_ok": True, "pinned": False}
+        return None
 
     @staticmethod
-    def _avd_dir(avd_name: str) -> str | None:
-        """Host directory of ``avd_name`` (see
-        :func:`sandroid.core.emulator.avd_dir`), or None if not found.
+    def _reap_start_point(
+        name: str, serial: str | None, wait_s: float = 180.0, every_s: float = 10.0
+    ) -> bool:
+        """Delete ``name`` (a ``sandroid_rec_*`` start point whose save timed
+        out) once the emulator lists it; give up after ``wait_s``.
         """
-        from sandroid.core.emulator import avd_dir
+        from sandroid.core import rewind
 
-        directory = avd_dir(avd_name)
-        return str(directory) if directory is not None else None
-
-    def _verify_snapshot(self) -> bool:
-        """Verify that a snapshot exists for playback.
-
-        Returns:
-            True if snapshot was verified
-        """
+        if not rewind.is_start_point_name(name):
+            return False
         try:
-            toolbox = self._get_toolbox()
-            name = self._active_device_name() or getattr(toolbox, "device_name", "")
-            avd_dir = self._avd_dir(name) if name else None
-            if avd_dir is None:
-                return False
-            snapshot_path = os.path.join(avd_dir, "snapshots", "tmp")
-            logger.debug(f"Looking for snapshot at: {snapshot_path}")
-            if os.path.exists(snapshot_path):
-                return True
-            if os.path.exists(os.path.join(avd_dir, "snapshots", "default_boot")):
-                self._log_info("Using default_boot snapshot")
-                return True
-        except Exception as e:
-            logger.debug(f"Error checking snapshot path: {e}")
+            from sandroid.services import get_emulator_service
 
+            service = get_emulator_service()
+        except Exception:
+            return False
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline:
+            try:
+                names = {s.name for s in service.list_snapshots()}
+            except Exception:
+                names = set()
+            if name in names:
+                return bool(service.delete_snapshot(name, serial))
+            time.sleep(every_s)
         return False
 
+    def _begin_capture(self, rec: Any) -> str | None:
+        """First file list, the getevent lease, the record-start line."""
+        from sandroid.core import rewind
+        from sandroid.tui.utils.recording_wrapper import RecordingWrapper
+
+        folder = rewind.recording_dir(rec.rec_id)
+        folder.mkdir(parents=True, exist_ok=True)
+        start = self._file_list(rec, "files_start.tsv")
+        rec.file_lists["start"] = "files_start.tsv" if start is not None else ""
+        # Per recording: the late-writes refresh of an older recording may
+        # still run when a newer one starts. None: the list failed.
+        self._start_facts[rec.rec_id] = start
+        wrapper = RecordingWrapper(
+            output_file=str(folder / "recording.getevent.txt"), serial=rec.serial
+        )
+        if not wrapper.start():
+            return "Could not start the recording: the input stream did not start."
+        self._wrapper = wrapper
+        self._wait_tracking(rec.serial)
+        self._get_task_service().register(
+            name="recording",
+            display_name="Recording",
+            instance=wrapper,
+            stop_callback=wrapper.stop,
+        )
+        rec.timeline_offset = rewind.timeline_size()
+        rec.started = time.time()
+        rec.seq["start"] = self._emit_phase(
+            "record",
+            None,
+            kind="record-start",
+            summary=f"recording started · {rec.name}",
+            data={
+                "label": rec.name,
+                "rec_id": rec.rec_id,
+                "start_point": rec.start_point_name,
+                "pkg": rec.pkg,
+                "via": "rewind",
+            },
+        )
+        return None
+
+    @staticmethod
+    def _wait_tracking(serial: str | None, timeout: float = 5.0) -> bool:
+        """Wait until Tracking's getevent stream is live (after a save the
+        adb transport blinks; a tap before the stream is back is lost).
+        """
+        try:
+            from sandroid.services.tracking_service import get_tracking
+
+            stream = get_tracking().getevent(serial) if serial else None
+        except Exception:
+            return False
+        if stream is None:
+            return False
+        try:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if stream.alive:
+                    return True
+                time.sleep(0.1)
+            return bool(stream.alive)
+        finally:
+            with contextlib.suppress(Exception):
+                stream.release()
+
+    def _file_list(self, rec: Any, name: str) -> dict | None:
+        """List the app's folders on the device and keep it as TSV."""
+        from sandroid.core import rewind
+
+        try:
+            text = self._shell(rec.serial)(rewind.file_list_command(rec.pkg))
+        except Exception:
+            logger.debug("file list failed", exc_info=True)
+            return None
+        facts = rewind.parse_file_list(text)
+        with contextlib.suppress(Exception):
+            rewind.write_file_list(rewind.recording_dir(rec.rec_id) / name, facts)
+        return facts
+
+    def _delete_start_point(self, rec: Any) -> None:
+        """Delete ``rec``'s own start point (``sandroid_rec_*`` only)."""
+        from sandroid.core import rewind
+
+        name = rec.start_point_name
+        if not rewind.is_start_point_name(name):
+            return
+        try:
+            from sandroid.services import get_emulator_service
+
+            ok = bool(get_emulator_service().delete_snapshot(name, rec.serial))
+        except Exception:
+            logger.debug("deleting the unused start point failed", exc_info=True)
+            ok = False
+        rec.start_point["deleted"] = ok
+        if ok:
+            rec.start_point["saved_ok"] = False
+
+    def _close_review(self) -> None:
+        """Close the open Review (UI thread); a new recording started."""
+        review, self._review = self._review, None
+        if review is not None and hasattr(review, "close_for_new_recording"):
+            self._guarded(review.close_for_new_recording)
+
+    def _replace_start_point(self, previous: Any, rec: Any) -> None:
+        """Delete the previous start point unless it is pinned (only
+        ``sandroid_rec_*`` names, only after the new one saved).
+        """
+        from sandroid.core import rewind
+
+        if previous is None or previous.pinned or not rec.start_point_name:
+            return
+        name = previous.start_point_name
+        if not rewind.is_start_point_name(name) or name == rec.start_point_name:
+            return
+        try:
+            from sandroid.services import get_emulator_service
+
+            ok = get_emulator_service().delete_snapshot(name, previous.serial)
+        except Exception:
+            logger.debug("deleting the old start point failed", exc_info=True)
+            ok = False
+        previous.start_point["deleted"] = bool(ok)
+        if ok:
+            previous.start_point["saved_ok"] = False
+        with contextlib.suppress(Exception):
+            rewind.save_recording(previous)
+
+    def _start_ticker(self, rec: Any) -> None:
+        self._tick_stop.clear()
+
+        def tick() -> None:
+            while not self._tick_stop.wait(1.0):
+                if self._state != "recording" or self._rec is not rec:
+                    return
+                secs = int(time.time() - (rec.started or time.time()))
+                tail = "press r to stop"
+                if not rec.emulator:
+                    tail = "no start point on a physical device"
+                self._ui(
+                    self._set_replay_phase,
+                    f"Recording '{rec.name}' · {secs // 60}:{secs % 60:02d} · {tail}",
+                )
+
+        threading.Thread(target=tick, name="rewind-ticker", daemon=True).start()
+
+    @staticmethod
+    def _emit_phase(*args: Any, **kw: Any) -> int | None:
+        try:
+            from sandroid.core.timeline import get_timeline
+
+            return get_timeline().set_phase(*args, **kw)
+        except Exception:
+            logger.debug("timeline line failed", exc_info=True)
+            return None
+
+    def stop_recording(self, *, open_review: bool = True) -> bool:
+        """``r`` while recording: stop, list the changes, open Review."""
+        if self._state != "recording":
+            self._log_warning("Nothing is recording.")
+            return False
+        self._set_state("stopping")
+        self._tick_stop.set()
+        self._status("Stopping recording")
+        rec = self._rec
+        self._spawn(lambda: self._stop_worker(rec, open_review), "rewind_record_stop")
+        return True
+
+    def _stop_worker(self, rec: Any, open_review: bool = True) -> dict[str, Any]:
+        """Worker: release the lease, second file list, the Review list."""
+        from sandroid.core import rewind
+
+        try:
+            wrapper, self._wrapper = self._wrapper, None
+            if wrapper is not None:
+                wrapper.stop()
+            with contextlib.suppress(Exception):
+                self._get_task_service().unregister("recording")
+            rec.stopped = time.time()
+            rec.seq["stop"] = self._emit_phase(
+                "live",
+                None,
+                kind="record-stop",
+                summary="recording stopped",
+                data={"rec_id": rec.rec_id},
+                ref={"of": rec.seq.get("start")} if rec.seq.get("start") else None,
+            )
+            self._collect_changes(rec, "files_stop.tsv")
+            self._emit_result(rec)
+            rewind.save_recording(rec)
+        except Exception as exc:
+            logger.exception("Stopping the recording failed")
+            self._ui(self._log_error, f"Stopping the recording failed: {exc}")
+        finally:
+            self._set_state("idle")
+            self._ui(self._set_recording_indicator, False)
+            self._status(None)
+        self._ui(
+            self._log_success,
+            f"Recording '{rec.name}' stopped: {len(rec.changed)} files changed, "
+            f"{len(rec.requests)} requests",
+        )
+        if open_review:
+            self._ui(self.open_review)
+        threading.Thread(
+            target=self._late_writes, args=(rec,), name="rewind-late", daemon=True
+        ).start()
+        return self.review_dict(rec)
+
+    def _collect_changes(self, rec: Any, list_name: str) -> None:
+        """File-list diff + monitor paths + requests of the record window."""
+        from sandroid.core import rewind
+
+        stop = self._file_list(rec, list_name)
+        if stop is not None:
+            rec.file_lists["stop"] = list_name
+        start = self._start_facts.get(rec.rec_id)
+        if start is None and rec.file_lists.get("start"):
+            start = _read_tsv(rewind.recording_dir(rec.rec_id) / "files_start.tsv")
+        listed = (
+            rewind.diff_file_lists(start or {}, stop)
+            if stop is not None and start is not None
+            else []
+        )
+        lines = rewind.lines_between(
+            rec.seq.get("start"), None, offset=rec.timeline_offset
+        )
+        # Requests by their own time: the mitmproxy log is read a moment
+        # after the request, so its line can come after record-stop.
+        in_window = rewind.in_time(
+            lines, rec.started, (rec.stopped or 0) + rewind.REQUEST_SLACK_S
+        )
+        rec.changed = rewind.merge_changes(
+            listed, rewind.monitor_changes(lines, rec.pkg)
+        )
+        rec.requests = rewind.requests_in(in_window)
+        if rec.emulator and not rec.start_point_name:
+            rec.note = "The start point is gone. Record again to rewind."
+
+    def _emit_result(self, rec: Any) -> None:
+        try:
+            from sandroid.core.timeline import get_timeline
+
+            get_timeline().emit(
+                "run",
+                "record-result",
+                summary=f"recording · {len(rec.changed)} files changed",
+                data={
+                    "rec_id": rec.rec_id,
+                    "changed": len(rec.changed),
+                    "selected": len(rec.selected),
+                    "requests": len(rec.requests),
+                    "completed": True,
+                    "cancelled": False,
+                },
+                ref={"of": rec.seq.get("stop")} if rec.seq.get("stop") else None,
+            )
+        except Exception:
+            logger.debug("record-result line failed", exc_info=True)
+
+    def _late_writes(self, rec: Any, wait: float | None = None) -> None:
+        """The Review list keeps filling for a few seconds after Stop."""
+        from sandroid.core import rewind
+
+        self._ui(self._review_refresh, rec, True)
+        time.sleep(rewind.LATE_WRITES_S if wait is None else wait)
+        # Not while a Rewind runs (the list would read the start point and
+        # empty the Review) or a new recording is starting. The lock keeps a
+        # Rewind's snapshot load from starting in the middle of the list.
+        with self._list_lock:
+            if self._rec is rec and not _rewound(rec) and self._state == "idle":
+                with contextlib.suppress(Exception):
+                    self._collect_changes(rec, "files_late.tsv")
+                    rewind.save_recording(rec)
+        self._ui(self._review_refresh, rec, False)
+
+    def _review_refresh(self, rec: Any, filling: bool) -> None:
+        review = self._review
+        if review is not None and getattr(review, "rec", None) is rec:
+            with contextlib.suppress(Exception):
+                review.refresh_lists(filling=filling)
+
+    # -- review and selection -------------------------------------------------
+
+    def open_review(self) -> bool:
+        """``p`` (or Stop): open Review for the current recording."""
+        if self._rec is None or self._rec.stopped is None:
+            self._toast("Nothing recorded yet. Press r to record.", "warning")
+            return False
+        if self._review is not None and getattr(self._review, "rec", None) is not (
+            self._rec
+        ):
+            self._close_review()  # it shows an older recording
+        if self._review is not None or self._push_modal is None:
+            return self._review is not None
+        from sandroid.tui.modals.review_modal import ReviewModal
+
+        modal = ReviewModal(self._rec, self)
+        self._review = modal
+
+        def closed(_result: Any = None) -> None:
+            if self._review is modal:
+                self._review = None
+
+        self._push_modal(modal, closed)
+        return True
+
+    def review_closed(self, modal: Any) -> None:
+        if self._review is modal:
+            self._review = None
+
+    def rename(self, name: str) -> None:
+        from sandroid.core import rewind
+
+        rec = self._rec
+        if rec is None or not name.strip():
+            return
+        rec.name = name.strip()[:80]
+        with contextlib.suppress(Exception):
+            rewind.save_recording(rec)
+
+    def set_pinned(self, pinned: bool) -> None:
+        from sandroid.core import rewind
+
+        rec = self._rec
+        if rec is None or not rec.start_point_name:
+            return
+        rec.start_point["pinned"] = bool(pinned)
+        with contextlib.suppress(Exception):
+            rewind.save_recording(rec)
+
+    def rewind_problem(self, rec: Any = None) -> str | None:
+        """Why Rewind cannot run now (plain words), or None."""
+        rec = rec or self._rec
+        # The state first: while recording, the current recording has not
+        # stopped yet, which is not "nothing recorded".
+        if self._state == "running":
+            return "A rewind is already running."
+        if self._state != "idle":
+            return "Stop the recording first (press r)."
+        if rec is None or rec.stopped is None:
+            return "Nothing recorded yet."
+        if self._pending_after:
+            n = len(self._pending_after)
+            return f"Saving After of {n} file{'s' if n != 1 else ''}. Wait a moment."
+        if not rec.emulator:
+            return "Rewind needs an emulator: physical devices have no snapshots."
+        if not rec.start_point_name:
+            return "The start point is gone. Record again to rewind."
+        device = self._active_device()
+        if device is None:
+            return "No device connected."
+        if getattr(device, "serial", None) != rec.serial:
+            return (
+                f"The recording was made on {rec.serial}; the device now is "
+                f"{getattr(device, 'serial', '?')}."
+            )
+        return None
+
+    def select_file(self, path: str, selected: bool) -> None:
+        """Select (watch ★ + pull After) or unselect a Review file.
+
+        A SQLite ``-wal`` / ``-journal`` / ``-shm`` file stands for its
+        database: the database is watched and copied (its pulls carry the
+        companions), so the result is a table diff, not a byte comparison.
+        """
+        from sandroid.core import rewind
+
+        path = rewind.main_database(path)
+        rec = self._rec
+        if rec is None:
+            return
+        if self._state != "idle":
+            # A Rewind (or a recording) runs: the device is not after the
+            # action, so no After now, and the selection stays as it is.
+            self._toast("Wait until the rewind has finished.", "warning")
+            return
+        if not selected:
+            if path in rec.selected:
+                rec.selected.remove(path)
+            with contextlib.suppress(Exception):
+                rewind.save_recording(rec)
+            return
+        if path in rec.selected:
+            return
+        rec.selected.append(path)
+        with contextlib.suppress(Exception):
+            rewind.save_recording(rec)
+        view = self._watchlist() if self._watchlist else None
+        if view is not None:
+            with contextlib.suppress(Exception):
+                view.add_path(path, pull_first=False)
+        if _rewound(rec):
+            # The device is no longer after the action: no After any more.
+            self._review_file_state(
+                path, "selected (After exists only before a rewind)"
+            )
+            return
+        if view is None:
+            self._review_file_state(path, "could not watch: the Files lens is missing")
+            return
+        self._review_file_state(path, "saving After")
+        self._pending_after.add(path)
+        self._review_buttons()
+        self._spawn(lambda: self._pull_after(rec, view, path), "rewind_after")
+
+    def _pull_after(self, rec: Any, view: Any, path: str) -> None:
+        from sandroid.core import rewind
+
+        try:
+            version, error = view.pull_role(path, "after", rec.rec_id, 1)
+        finally:
+            self._pending_after.discard(path)
+            self._review_buttons()
+        if version is not None or error is None:
+            rec.set_role(path, "after", version)
+            rec.after_at[path] = time.time()
+            with contextlib.suppress(Exception):
+                rewind.save_recording(rec)
+        if error:
+            text = f"Could not copy {path}: {error}."
+            self._ui(self._log_warning, text)
+            self._review_file_state(path, "After failed")
+        elif version == rewind.ABSENT:
+            self._review_file_state(path, "After saved (not on the device)")
+        else:
+            self._review_file_state(path, "After saved")
+
+    def _review_buttons(self) -> None:
+        review = self._review
+        if review is not None and hasattr(review, "refresh_buttons"):
+            self._ui(review.refresh_buttons)
+
+    def _review_file_state(self, path: str, text: str) -> None:
+        review = self._review
+        if review is not None and hasattr(review, "set_file_state"):
+            self._ui(review.set_file_state, path, text)
+
+    def select_flow(self, row: dict[str, Any], selected: bool) -> None:
+        """Select a request for the comparison after Rewind + Replay."""
+        from sandroid.core import rewind
+
+        rec = self._rec
+        if rec is None or self._state != "idle":
+            return
+        key = (row.get("seq"), row.get("flow_id"))
+        rec.selected_flows = [
+            r for r in rec.selected_flows if (r.get("seq"), r.get("flow_id")) != key
+        ]
+        if selected:
+            rec.selected_flows.append(dict(row))
+        with contextlib.suppress(Exception):
+            rewind.save_recording(rec)
+
+    # -- rewind -----------------------------------------------------------------
+
+    def start_rewind(self, replay: bool, *, owner_id: str | None = None) -> bool:
+        """Rewind (``replay=False``) or Rewind + Replay, on a worker."""
+        problem = self.rewind_problem()
+        if problem:
+            self._log_warning(problem)
+            self._toast(problem, "warning")
+            return False
+        rec = self._rec
+        view = self._watchlist() if self._watchlist else None
+        self._set_state("running")
+        self._replay_owner_id = owner_id
+        self._cancel.clear()
+        self._ui(self._set_replay_indicator, True)
+        self._spawn(lambda: self._rewind_worker(rec, replay, view), "rewind_run")
+        return True
+
+    def stop_rewind(self) -> bool:
+        """Ask the running Rewind / Replay to stop (Esc)."""
+        if self._state != "running":
+            return False
+        self._cancel.set()
+        self._status("Stopping the replay")
+        return True
+
+    stop_playback = stop_rewind
+
+    def _deps(self, rec: Any, view: Any, replay: bool) -> Any:
+        from sandroid.core import rewind
+
+        shell = self._shell(rec.serial)
+
+        def load(name: str, serial: str | None) -> bool:
+            self._guarded(self._suppress_disconnect_guard, True)
+            try:
+                from sandroid.services import get_emulator_service
+
+                ok = bool(get_emulator_service().load_snapshot(name, serial))
+            finally:
+                self._guarded(self._suppress_disconnect_guard, False)
+            if not ok and not _device_ready(serial):
+                # The console gave up (timeout) while the emulator went on:
+                # whether the start point was loaded is unknown.
+                raise rewind.RewindStoppedError(
+                    "Could not go back to the start point: the emulator did not "
+                    "answer in time. The device state is unknown (it may still "
+                    "be loading the start point); check the emulator before "
+                    "going on."
+                )
+            return ok
+
+        def pull(path: str, role: str, rec_id: str, run: int) -> Any:
+            if view is None:
+                return rewind.PullOutcome(None, "the Files lens is missing")
+            version, error = view.pull_role(path, role, rec_id, run)
+            return rewind.PullOutcome(version, error)
+
+        return rewind.RewindDeps(
+            load_snapshot=load,
+            shell=shell,
+            pull=pull,
+            # EmulatorService.load_snapshot already drops the frida handles
+            # and the Spotlight PID and runs the post-load steps.
+            stop_monitor=self._stop_monitor_before_revert,
+            progress=self._status,
+            cancelled=self._cancel.is_set,
+            replay=self._replay if replay else None,
+        )
+
+    def _rewind_worker(self, rec: Any, replay: bool, view: Any) -> dict[str, Any]:
+        from sandroid.core import rewind
+
+        outcome = None
+        run_id = None
+        try:
+            with self._list_lock:
+                pass  # a late file list in progress finishes first
+            runner = rewind.RewindRunner(rec, self._deps(rec, view, replay))
+            outcome = runner.run(replay=replay)
+            if outcome.monitor_config is not None:
+                self._ui(self._resume_after, outcome.monitor_config)
+            run_id = self._persist(rec, outcome)
+        except Exception as exc:
+            logger.exception("Rewind failed")
+            self._ui(self._log_error, f"Rewind failed: {exc}")
+        finally:
+            self._set_state("idle")
+            self._release_replay_world_lease()
+            self._ui(self._set_replay_indicator, False)
+            self._status(None)
+        if outcome is not None:
+            if outcome.error:
+                self._ui(self._log_warning, outcome.error)
+                self._toast(outcome.error, "warning")
+            else:
+                done = (
+                    "Done. The device shows the replayed result."
+                    if replay
+                    else "Done. The device is at the start point."
+                )
+                self._ui(self._log_success, done)
+                self._toast(done)
+        if run_id and self._on_run_saved:
+            self._ui(self._on_run_saved, run_id)
+        review = self._review
+        if review is not None and hasattr(review, "refresh_lists"):
+            self._ui(review.refresh_lists)
+        return {
+            "success": outcome is not None and not outcome.error,
+            "run_id": run_id,
+            "error": None if outcome is None else outcome.error,
+            "result": None if outcome is None else outcome.result,
+        }
+
+    def _resume_after(self, config: Any) -> None:
+        """Restart the monitor after a Rewind (offer it if that fails)."""
+        ok = False
+        if self._resume_monitor is not None:
+            try:
+                ok = bool(self._resume_monitor(config))
+            except Exception:
+                logger.debug("monitor resume failed", exc_info=True)
+        if not ok:
+            self._guarded(self._on_monitor_resume_available, config)
+
+    def _replay(self, rec: Any, runner: Any) -> dict[str, Any]:
+        """Rewind + Replay's steps (the device is at the start point)."""
+        from sandroid.core import rewind
+        from sandroid.features.player import StepReplayer, extract_steps
+
+        # Tracking writes an input line up to a moment after the finger is
+        # up, so the last tap can come after record-stop: lines are taken
+        # by time (the steps' own actor filter drops replayed lines).
+        lines = rewind.in_time(
+            rewind.lines_between(
+                rec.seq.get("start"),
+                getattr(runner, "start_seq", None),
+                offset=rec.timeline_offset,
+            ),
+            None,
+            rec.stopped,
+        )
+        steps = extract_steps(lines)
+        if not steps:
+            return {
+                "steps": [],
+                "stopped_at_step": None,
+                "error": "No steps were recorded (Tracking saw no input); nothing "
+                "was replayed. The device is at the start point.",
+            }
+        tracking = None
+        own_gen = None
+        try:
+            from sandroid.services.tracking_service import get_tracking
+
+            tracking = get_tracking()
+            if not tracking.is_active(rec.serial):
+                own_gen = tracking.start_session(rec.serial, reason="replay")
+        except Exception:
+            logger.debug("Tracking for the replay failed", exc_info=True)
+
+        def helper() -> Any:
+            return tracking.live_helper() if tracking is not None else None
+
+        # The helper restarts after the load: give it a moment before step 1.
+        deadline = time.monotonic() + 15.0
+        while helper() is None and time.monotonic() < deadline:
+            if self._cancel.wait(0.25):
+                break
+
+        def emit(*args: Any, **kw: Any) -> int | None:
+            from sandroid.core.timeline import get_timeline
+
+            return get_timeline().emit(*args, **kw)
+
+        last_t = max((t for t in (_step_time(st) for st in steps) if t), default=None)
+        # Wait as long after the last step as your run did before its copies:
+        # until Stop, or until the latest After was copied (selected later).
+        until = max(
+            [rec.stopped or 0.0] + [rec.after_at.get(p, 0.0) for p in rec.selected]
+        )
+        tail = (until - last_t) if (until and last_t) else None
+        try:
+            return StepReplayer(
+                tail_s=tail,
+                shell=runner.deps.shell,
+                helper=helper,
+                cancelled=self._cancel.is_set,
+                progress=self._status,
+                emit=emit,
+                raw_lines=_raw_reader(),
+            ).run(steps)
+        finally:
+            if own_gen is not None and tracking is not None:
+                with contextlib.suppress(Exception):
+                    tracking.stop(reason="replay", only_gen=own_gen)
+
     def _stop_monitor_before_revert(self) -> Any | None:
-        """Safety net: monitor's live ``adb shell`` session cannot survive
-        Play's snapshot revert (``EmulatorService.load_snapshot()`` is a bare
-        telnet command + ``sleep(2)``, zero adb-reconnect logic anywhere) and
-        would otherwise silently die with no indication. Stop it cleanly
-        *before* the revert instead, so its disappearance is explained rather
-        than mysterious.
-
-        True no-op when monitor isn't running: the ``is_running`` guard below
-        means nothing else in this method executes (no stop call, no
-        callback, no log line) — verified by a dedicated test.
-
-        Calls ``TaskService.stop("monitor")`` directly rather than
-        ``MonitorController.stop()``: the latter also calls
-        ``_force_ui_refresh`` — a real Textual UI touch that is not safe to
-        invoke un-marshaled from this worker thread. ``TaskService.stop()``
-        itself is plain locking + ``MonitorProcessWrapper.stop()``
-        (``process.terminate()``/``wait()``, no widget access) and is safe to
-        call from any thread. Task-service state still gets cleaned up
-        correctly and on the main thread shortly after: killing the process
-        makes monitor's own output-reader thread notice ``process.poll()`` go
-        non-None on its next iteration, which triggers
-        ``MonitorController._monitor_ended`` via its own ``call_from_thread`` —
-        the existing teardown path, unmodified by this change.
-
-        Returns:
-            The ``MonitorConfig`` monitor was running with (so a later "Resume
-            monitoring" action can re-fork it), or ``None`` if monitor wasn't
-            running, or if it was but the config couldn't be recovered.
+        """Stop the file monitor before a snapshot load (its adb shell does
+        not survive it); returns its config so it can be restarted.
         """
         try:
             task_service = self._get_task_service()
             if not task_service.is_running("monitor"):
                 return None
-
             task = task_service.get_task("monitor")
             config = getattr(getattr(task, "instance", None), "config", None)
-
             task_service.stop("monitor")
-
             self._ui(
-                self._log_warning,
-                "monitor stopped — won't survive Play's snapshot revert.",
+                self._log_info,
+                "File monitor paused for the rewind; it restarts afterwards.",
             )
-            if self._on_monitor_stopped_for_playback:
-                self._ui(self._on_monitor_stopped_for_playback)
-
+            self._ui(self._on_monitor_stopped_for_playback)
             return config
         except Exception as e:
-            logger.debug(f"monitor auto-stop safety check failed: {e}", exc_info=True)
+            logger.debug(f"monitor auto-stop failed: {e}", exc_info=True)
             return None
 
     def _release_replay_world_lease(self) -> None:
-        """Release the AI-triggered replay's held ``ResourceId.WORLD`` lease, if any.
-
-        ``start_replay`` (``ai/tools/recording_control.py``) claims
-        ``ResourceId.WORLD`` at tool-dispatch time but declares
-        ``releases=frozenset()`` -- deliberately NOT auto-released when the
-        tool call itself returns, since ``start_playback_chat`` only kicks
-        off a detached background worker (:meth:`_run_playback_analysis`)
-        and returns immediately, long before the replay (and its
-        snapshot-reverting ``LoadSnapshotStep``, repeated across every
-        replay iteration) is actually done. This is the other half of that
-        deferred-release pattern: called from :meth:`_run_playback_analysis`'s
-        outermost ``finally`` (success, an engine-reported error, or an
-        earlier pre-engine setup failure all release the SAME lease exactly
-        once).
-
-        Guarded by ``self._replay_owner_id`` so a manual/keybinding-triggered
-        replay (no AI owner -- ``start_playback()`` called directly, never
-        through ``start_playback_chat``) never touches the arbiter at all.
-        Clears ``self._replay_owner_id`` unconditionally afterward so a
-        second, unrelated replay (AI- or manually-triggered) never re-releases
-        a stale id.
-        """
+        """Release an AI-held ``ResourceId.WORLD`` lease, if any."""
         owner = self._replay_owner_id
         self._replay_owner_id = None
         if not owner:
@@ -1004,642 +1201,262 @@ class RecordingController:
         except Exception:
             logger.debug("Failed to release replay WORLD lease", exc_info=True)
 
-    def _run_playback_analysis(self) -> None:
-        """Execute the playback analysis via the unified ``AnalysisEngine``.
+    # -- results ----------------------------------------------------------------
 
-        Runs in a worker thread. Builds a self-contained *run bundle*
-        (``core/run_bundle.py``) for this Play, copies the live recording into
-        it up-front (so it is addressed by absolute path and immune to a
-        mid-flow device switch re-pointing ``RAW_RESULTS_PATH``), then hands a
-        :class:`~sandroid.analysis.run_config.RunConfig` to
-        :class:`~sandroid.analysis.engine.AnalysisEngine`. The engine performs
-        the whole load-snapshot / baseline / play / gather / first-second-noise
-        pull / dry-run pipeline (replacing the old hand-rolled ``[n/6]`` body)
-        and returns a :class:`~sandroid.analysis.run_config.RunResult` whose
-        *native* diff shapes (``{file: [diff_lines]} | str``) are persisted
-        verbatim into the :class:`~sandroid.core.run_history.RunRecord`.
+    def results(self, rec: Any = None) -> dict[str, Any]:
+        """Per-file and per-request results of the recording's latest run."""
+        from sandroid.core import rewind
 
-        A fatal step (e.g. a mid-run device switch) makes the engine return a
-        partial ``RunResult(error=...)`` rather than raising; that partial
-        result is persisted too, so a failed run stays visible in Diffs with
-        its error message. The monitor Play-safety-net (stop-before-revert +
-        resume offer) is preserved around the engine run, as are the Replay
-        UI indicator and the disconnect-guard suppression (both bracket the
-        actual ``AnalysisEngine(...).run()`` call — see the ``try/finally``
-        below).
+        rec = rec or self._rec
+        if rec is None:
+            return {"files": [], "flows": []}
+        last_kind = rec.runs[-1].get("kind") if rec.runs else None
+        with_replay = last_kind in (None, "rewind-replay")
+        files = [
+            rewind.file_result(rec, p, with_replay=with_replay) for p in rec.selected
+        ]
+        flows = []
+        last = rec.runs[-1] if rec.runs else None
+        if last and last.get("kind") == "rewind-replay" and rec.selected_flows:
+            replay_lines = self._replay_lines(rec, last)
+            replay_reqs = rewind.requests_in(replay_lines)
+            read = rewind.flow_detail_reader()
+            flows = [
+                rewind.compare_flow(f, replay_reqs, read) for f in rec.selected_flows
+            ]
+        return {"files": files, "flows": flows}
 
-        AI-chat replay tracking (Part D): ``self._is_replaying`` is set here
-        and cleared in the OUTERMOST ``finally`` below -- deliberately
-        wrapping the WHOLE pre-engine setup (monitor safety-net + run-bundle
-        creation) as well as the engine run itself, not just the inner
-        try/finally that brackets ``AnalysisEngine(...).run()``. A failure
-        in that pre-engine setup (e.g. ``run_bundle.create_bundle``/
-        ``import_recording`` raising) would otherwise skip the inner
-        try/finally entirely and leak the replay's held ``ResourceId.WORLD``
-        lease (see :meth:`_release_replay_world_lease`) forever, since no
-        other code path ever releases it for an AI-triggered replay.
-        """
-        from sandroid.analysis.engine import AnalysisEngine
-        from sandroid.analysis.run_config import RunConfig
-        from sandroid.core import run_bundle, run_history
+    def run_requests(self, rec: Any = None) -> dict[str, list[dict[str, Any]]]:
+        """Requests per run: ``{"Your run": [...], "Replay": [...]}``."""
+        from sandroid.core import rewind
 
-        toolbox = self._get_toolbox()
-        device_name = self._current_device_name()
-        recorded_at = datetime.now().isoformat()
-        run_id = run_history.new_run_id()
-        play_start = self._timeline_play_start(run_id)
-        result: Any = None
-        error: str | None = None
-        abs_rec = self.get_recording_path()
-        monitor_config_for_resume: Any = None
-
-        self._is_replaying = True
-        self._mitm_at_start = self._mitm_running()
-        try:
-            try:
-                # Safety net (see _stop_monitor_before_revert's docstring): monitor
-                # cannot survive the snapshot revert the engine's first step does,
-                # so stop it cleanly *before* handing off to the engine rather than
-                # let it silently die. True no-op if monitor isn't running.
-                monitor_config_for_resume = self._stop_monitor_before_revert()
-
-                # Build the run bundle and copy the live recording into it up-front
-                # so every later step reads it by absolute path.
-                run_bundle.create_bundle(run_id)
-                abs_rec = run_bundle.import_recording(run_id, self.get_recording_path())
-
-                config = RunConfig.for_playback(
-                    recording_path=abs_rec,
-                    number_of_runs=self._current_number_of_runs,
-                    noise_filter=self._current_noise_filter,
-                )
-                config.raw_results_path = run_bundle.raw_dir(run_id)
-                config.results_path = str(run_bundle.bundle_dir(run_id))
-                config.device_name = device_name
-                config.run_id = run_id
-                # Recorded in the run metadata as the settings actually used.
-                self._last_run_config = config
-
-                # Bracket the actual engine run with the Replay indicator and the
-                # disconnect-guard suppression: the engine's LoadSnapshotStep
-                # reverts the emulator (once per bracketed step, across every
-                # replay iteration), which transiently disrupts the ADB
-                # transport and would otherwise trip a false "Device
-                # disconnected" toast. Both the "arm" and the "disarm" calls live
-                # inside this try/finally (not just the disarm) so a raise from
-                # either arm call still reaches the finally instead of leaving
-                # the indicator/guard stuck on — the finally's own calls are
-                # idempotent when the matching arm never ran.
-                try:
-                    if self._set_replay_indicator:
-                        self._ui(self._set_replay_indicator, True)
-                    self._report_phase("starting")
-                    if self._suppress_disconnect_guard:
-                        self._guarded(self._suppress_disconnect_guard, True)
-                    result = AnalysisEngine(
-                        config,
-                        progress=self._emit_progress,
-                        toolbox=toolbox,
-                        forensic_service=self._get_forensic_service(),
-                        action_window_service=self._get_action_window_service(),
-                    ).run()
-                    # The engine returns a partial RunResult(error=...) for a
-                    # fatal step instead of raising, so surface that as this
-                    # run's error.
-                    error = result.error
-                finally:
-                    # (Every engine snapshot load already dropped the frida
-                    # handles and the Spotlight PID in EmulatorService.)
-                    if self._suppress_disconnect_guard:
-                        self._guarded(self._suppress_disconnect_guard, False)
-                    if self._set_replay_indicator:
-                        self._ui(self._set_replay_indicator, False)
-            except (Exception, SystemExit) as e:
-                # SystemExit too: raised on this worker thread it would end
-                # the whole TUI (E2E: "device still authorizing" after a
-                # snapshot load); the Play ends with an error instead.
-                why = repr(e) if isinstance(e, SystemExit) else str(e)
-                error = f"Playback failed: {why}"
-                self._ui(self._log_error, error)
-        finally:
-            self._is_replaying = False
-            self._release_replay_world_lease()
-
-        # Persist regardless of a mid-pipeline error, so a failed/partial run
-        # is still visible in Diffs (with its error message) instead of
-        # silently vanishing — this is exactly why RunRecord.error exists.
-        # Every UI touch goes through _ui(), which never raises, so a dead or
-        # broken UI can no longer skip this step (P2-H1).
-        # Identity profile active: sweep the app's data folders for markers
-        # BEFORE the run is saved, so its sealed report lists what is stored
-        # (bounded wait; never raises). The records carry the run id.
-        from sandroid.services.privacy_scan import SWEEP_WAIT_S, sweep_after_run
-
-        sweep_after_run(run_id=run_id, wait=SWEEP_WAIT_S)
-
-        self._ui(self._log_info, "Saving results...")
-        if self._set_replay_phase:
-            self._ui(self._set_replay_phase, "saving")
-        try:
-            saved_run_id = self._persist_run(
-                run_id=run_id,
-                result=result,
-                recording_path=abs_rec,
-                bundle_dir=str(run_bundle.bundle_dir(run_id)),
-                device_name=device_name,
-                recorded_at=recorded_at,
-                error=error,
-            )
-        except Exception as e:
-            logger.exception("Persisting run %s failed", run_id)
-            self._ui(self._log_error, f"Could not save run {run_id}: {e}")
-            saved_run_id = None
-        finally:
-            self._play_label = None
-            if self._set_replay_phase:
-                self._ui(self._set_replay_phase, None)
-        self._timeline_play_end(run_id, play_start, result, error, saved_run_id)
-
-        if error == "Replay cancelled":
-            self._ui(self._log_warning, "Replay stopped; the partial run was saved.")
-        elif error is None and result is not None:
-            self._ui(
-                self._log_success,
-                f"Analysis complete: {len(result.changed_files)} changed, "
-                f"{len(result.new_files)} new, "
-                f"{len(result.deleted_files)} deleted files",
-            )
-
-        if saved_run_id and self._on_run_saved:
-            self._ui(self._on_run_saved, saved_run_id)
-
-        # Offer to resume monitoring once Play is fully done — regardless of
-        # success/error above, since resuming monitor is orthogonal to whether
-        # the diff analysis itself errored. Only fires if monitor was actually
-        # auto-stopped for *this* run (monitor_config_for_resume is None both
-        # when monitor wasn't running to begin with, and in the true-no-op
-        # case covered by _stop_monitor_before_revert).
-        if monitor_config_for_resume is not None and self._on_monitor_resume_available:
-            self._ui(self._on_monitor_resume_available, monitor_config_for_resume)
-
-    # -- session timeline (run/* lines) ---------------------------------------
-
-    def _timeline_indicator(
-        self, original: Callable[[bool], None] | None
-    ) -> Callable[[bool], None]:
-        """``set_recording_indicator`` that also writes record-start/stop."""
-
-        def indicator(active: bool) -> None:
-            try:
-                self._timeline_record(bool(active))
-            except Exception:
-                logger.debug("timeline: record line failed", exc_info=True)
-            if original is not None:
-                original(active)
-
-        return indicator
-
-    def _timeline_actor(self) -> str:
-        return "ai" if self._record_via == "chat" else "user"
-
-    def _timeline_record(self, active: bool) -> None:
-        from sandroid.core.timeline import get_timeline
-
-        service = get_timeline()
-        if active and not self._tl_recording:
-            label = self._current_recording_label or ""
-            self._tl_recording = True
-            self._tl_record_t0 = time.time()
-            self._tl_result_due = True
-            self._tl_record_start = service.set_phase(
-                "record",
-                None,
-                kind="record-start",
-                summary=f"● REC · {label}" if label else "● REC",
-                actor=self._timeline_actor(),
-                data={
-                    "label": label,
-                    "number_of_runs": self._current_number_of_runs,
-                    "via": self._record_via,
-                },
-            )
-        elif not active and self._tl_recording:
-            start = self._tl_record_start
-            self._tl_recording = False
-            self._tl_record_stop = service.set_phase(
-                "live",
-                None,
-                kind="record-stop",
-                summary="■ REC stopped",
-                actor=self._timeline_actor(),
-                ref={"of": start} if start is not None else None,
-            )
-            if start is not None and self._tl_record_stop is not None:
-                self._tl_record_range = [start, self._tl_record_stop]
-            if self._tl_record_t0 is not None:
-                self._tl_record_window = [self._tl_record_t0, time.time()]
-
-    def _timeline_record_result(
-        self, *, events: Any, duration_s: Any, completed: bool, cancelled: bool
-    ) -> None:
-        """``run/record-result`` (after the recording stopped); nothing when
-        no ``record-start`` was written (cancelled before Record started).
-        """
-        try:
-            if not self._tl_result_due:
-                return
-            self._tl_result_due = False
-            from sandroid.core.timeline import get_timeline
-
-            state = "cancelled" if cancelled else f"{events} events, {duration_s} s"
-            stop = self._tl_record_stop
-            get_timeline().emit(
-                "run",
-                "record-result",
-                summary=f"recording · {state}",
-                actor=self._timeline_actor(),
-                data={
-                    "events": events,
-                    "duration_s": duration_s,
-                    "completed": completed,
-                    "cancelled": cancelled,
-                },
-                ref={"of": stop} if stop is not None else None,
-            )
-        except Exception:
-            logger.debug("timeline: record-result line failed", exc_info=True)
-        finally:
-            self._record_via = "modal"
-            self._tl_record_stop = None
-
-    def _timeline_play_start(self, run_id: str) -> int | None:
-        """``run/play-start``: the Play's run id becomes the timeline's run."""
-        try:
-            from sandroid.core.timeline import get_timeline
-
-            label = self._play_label or ""
-            seq_range = self._tl_record_range
-            return get_timeline().set_phase(
-                "live",
-                run_id,
-                kind="play-start",
-                summary=f"▷ Play · {label}" if label else f"▷ Play · {run_id}",
-                data={
-                    "label": label or None,
-                    "number_of_runs": self._current_number_of_runs,
-                    "noise_filter": self._current_noise_filter,
-                    "bundle": f"runs/{run_id}",
-                },
-                replays=(
-                    {"run": None, "seq_range": list(seq_range)} if seq_range else None
-                ),
-            )
-        except Exception:
-            logger.debug("timeline: play-start line failed", exc_info=True)
-            return None
-
-    def _timeline_play_end(
-        self,
-        run_id: str,
-        play_start: int | None,
-        result: Any,
-        error: str | None,
-        saved_run_id: str | None,
-    ) -> None:
-        """``run/play-end``: back to live, no run."""
-        try:
-            from sandroid.core.timeline import get_timeline
-
-            def _count(name: str) -> int | None:
-                value = getattr(result, name, None)
-                try:
-                    return len(value) if value is not None else None
-                except TypeError:
-                    return None
-
-            changed = _count("changed_files")
-            ref = {"run": run_id, "lens": "runs"}
-            if play_start is not None:
-                ref["of"] = play_start
-            summary = "■ Play done" if error is None else f"■ Play ended · {error}"
-            if error is None and changed is not None:
-                summary += f" · {changed} changed"
-            get_timeline().set_phase(
-                "live",
-                None,
-                kind="play-end",
-                summary=summary,
-                data={
-                    "error": error,
-                    "failed": error is not None and error != "Replay cancelled",
-                    "saved": saved_run_id is not None,
-                    "changed": changed,
-                    "new": _count("new_files"),
-                    "deleted": _count("deleted_files"),
-                },
-                ref=ref,
-            )
-        except Exception:
-            logger.debug("timeline: play-end line failed", exc_info=True)
-
-    def _emit_progress(self, update: Any) -> None:
-        """Marshal an engine ``ProgressUpdate`` to a UI-thread log line.
-
-        Replaces the old hand-rolled ``[n/6]`` step strings — the engine now
-        drives progress at run boundaries via ``AnalysisEngine(progress=...)``.
-        Invoked on the playback worker thread, so the log write is marshaled to
-        the UI thread via ``call_from_thread``.
-        """
-        phase = getattr(update, "phase", "") or ""
-        if phase:
-            self._report_phase(phase)
-            return
-        label = getattr(update, "label", "") or ""
-        message = getattr(update, "message", "") or ""
-        line = f"{label}: {message}" if message else label
-        if not line:
-            return
-        self._ui(self._log_info, line)
-
-    def _report_phase(self, phase: str | None) -> None:
-        """Tell the UI which phase the Play is in (None: the Play is over)."""
-        if phase:
-            self._ui(self._log_info, f"Play · {phase}")
-        if self._set_replay_phase:
-            self._ui(self._set_replay_phase, phase)
+        rec = rec or self._rec
+        out = {"Your run": list(rec.requests) if rec else []}
+        last = rec.runs[-1] if rec and rec.runs else None
+        if last and last.get("kind") == "rewind-replay":
+            out["Replay"] = rewind.requests_in(self._replay_lines(rec, last))
+        return out
 
     @staticmethod
-    def _mitm_running() -> bool | None:
-        """Whether the embedded mitmproxy runs (None: unknown)."""
-        try:
-            from sandroid.services.mitmproxy_service import peek_mitmproxy_service
-
-            service = peek_mitmproxy_service()
-            return bool(service is not None and service.is_running())
-        except Exception:
-            return None
-
-    def _fresh_run_label(
-        self, device_name: str | None, started_at: str | None = None
-    ) -> str:
-        """``"Run N · HH:MM"`` (N = this device's next run).
-
-        ``HH:MM`` is ``started_at`` (the Play's start, ISO) when given, so the
-        label agrees with the run's "When" -- not the end of its analysis.
+    def _replay_lines(rec: Any, run: dict[str, Any]) -> list[dict]:
+        """The replay's lines by time: from its replay phase to its end (plus
+        the request log's delay), so a late request still counts.
         """
-        from sandroid.core import run_history
+        from sandroid.core import rewind
 
-        try:
-            n = len(run_history.load_index(device_name)) + 1
-        except Exception:
-            n = 1
-        hhmm = time.strftime("%H:%M")
-        if started_at:
-            try:
-                hhmm = datetime.fromisoformat(started_at).strftime("%H:%M")
-            except ValueError:
-                pass
-        return f"Run {n} · {hhmm}"
-
-    def _export_run_flows(
-        self,
-        *,
-        bundle_dir: str,
-        recorded_at: str,
-        completed_at: str,
-        phases: Any,
-    ) -> None:
-        """Copy the run's mitmproxy flows into ``<bundle>/network/``.
-
-        Runs before the bundle's hash manifest is written, so the flows are
-        covered by ``SHA256SUMS`` and a later session can review them (the
-        session's flow log is per session). Never raises.
-        """
-        try:
-            from sandroid.core import run_history
-            from sandroid.services import mitmproxy_flow_log
-
-            start = datetime.fromisoformat(recorded_at).timestamp()
-            end = datetime.fromisoformat(completed_at).timestamp()
-            try:
-                flow_dir = mitmproxy_flow_log.resolve_flow_dir()
-            except Exception:
-                flow_dir = None
-            running = self._mitm_running()
-            if self._mitm_at_start or running:
-                mitm = True
-            elif self._mitm_at_start is None and running is None:
-                mitm = None
-            else:
-                mitm = False
-            meta = mitmproxy_flow_log.export_run_flows(
-                flow_dir,
-                Path(bundle_dir) / run_history.NETWORK_DIR_NAME,
-                start,
-                end,
-                phases,
-                mitm_running=mitm,
-            )
-            if meta.get("count"):
-                logger.info(
-                    "Stored %d mitmproxy flow(s) in the run bundle", meta["count"]
-                )
-        except Exception:
-            logger.warning(
-                "Could not store the run's flows in its bundle", exc_info=True
-            )
-
-    def _persist_run(
-        self,
-        *,
-        run_id: str,
-        result: Any,
-        recording_path: str,
-        bundle_dir: str,
-        device_name: str,
-        recorded_at: str,
-        error: str | None,
-    ) -> str | None:
-        """Persist this Play's run-bundle manifest (a :class:`RunRecord`).
-
-        Returns the new ``run_id`` on success, or ``None`` if saving failed
-        (logged, never raised — a persistence failure must not crash the
-        playback worker thread). When ``result`` is a
-        :class:`~sandroid.analysis.run_config.RunResult` its native diff shapes
-        are preserved via ``to_run_record``; when it is ``None`` (an exception
-        aborted the run before the engine returned) a minimal error-only record
-        is written so the failed run still appears in Diffs.
-
-        Also (still) writes the legacy ``RESULTS_PATH/sandroid.json`` summary
-        for anything outside the TUI that reads it.
-        """
-        from sandroid.core import run_bundle, run_history
-
-        completed_at = datetime.now().isoformat()
-        label = _unique_run_label(
-            self._play_label or self._fresh_run_label(device_name, recorded_at),
-            device_name,
+        seq = run.get("seq") or {}
+        lines = rewind.lines_between(
+            seq.get("replay") or seq.get("start"), None, offset=rec.timeline_offset
         )
-        if self._play_label:
-            self._recording_run_id = run_id
+        t0 = run.get("replay_started") or run.get("started")
+        if not isinstance(t0, (int, float)):
+            return lines
+        end = run.get("ended")
+        t1 = end + rewind.REQUEST_SLACK_S if isinstance(end, (int, float)) else None
+        return rewind.in_time(lines, t0, t1)
 
-        if result is not None:
-            duration = int(getattr(result, "action_duration", 0) or 0)
-            record = result.to_run_record(
-                run_id=run_id,
-                label=label,
-                recording_path=recording_path,
-                bundle_dir=bundle_dir,
-                recorded_at=recorded_at,
-                completed_at=completed_at,
-                duration=duration,
+    def _persist(self, rec: Any, outcome: Any) -> str | None:
+        """Save the Rewind as a run (Sessions lens); returns its id."""
+        from sandroid.core import rewind, run_history
+        from sandroid.core.timeline import timeline_folder
+
+        try:
+            res = self.results(rec)
+            files: list[Any] = []
+            new, deleted, verdicts = [], [], {}
+            for fr in res["files"]:
+                files.append({fr.path: rewind.result_lines(fr)})
+                verdicts[fr.path] = fr.verdict
+                if fr.before == rewind.ABSENT:
+                    new.append(fr.path)
+                if fr.after == rewind.ABSENT:
+                    deleted.append(fr.path)
+            flows = [rewind.flow_result_lines(f) for f in res["flows"]]
+            requests = {
+                k: [rewind.request_text(r) for r in v]
+                for k, v in self.run_requests(rec).items()
+            }
+            mode_word = (
+                "Rewind + Replay" if outcome.mode == "rewind-replay" else "Rewind"
             )
-            # to_run_record already copies result.error; keep any wrapping
-            # error (e.g. a bundle/import failure) if one was recorded.
-            if error is not None:
-                record.error = error
-        else:
-            duration = 0
+            run_id = run_history.new_run_id()
+            now = datetime.now().isoformat()
             record = run_history.RunRecord(
                 schema_version=run_history.SCHEMA_VERSION,
                 run_id=run_id,
-                label=label,
-                recorded_at=recorded_at,
-                completed_at=completed_at,
-                device_name=device_name,
-                recording_path=recording_path,
-                bundle_dir=bundle_dir,
-                duration=duration,
-                error=error,
-                changed_files=[],
-                new_files=[],
-                deleted_files=[],
-                counts={"changed": 0, "new": 0, "deleted": 0},
+                label=f"{rec.name} · {mode_word}",
+                # The run's own start: the Sessions lens's "Took" is this run.
+                recorded_at=datetime.fromtimestamp(
+                    (rec.runs[-1].get("started") if rec.runs else None) or time.time()
+                ).isoformat(),
+                completed_at=now,
+                device_name=rec.avd or self._active_device_name() or "unknown",
+                recording_path=self.get_recording_path(),
+                duration=int((rec.stopped or 0) - (rec.started or 0)),
+                error=outcome.error,
+                changed_files=files,
+                new_files=new,
+                deleted_files=deleted,
+                counts={
+                    "changed": len(files) - len(new) - len(deleted),
+                    "new": len(new),
+                    "deleted": len(deleted),
+                },
+                timeline_folder=str(timeline_folder()),
+                record_window=[rec.started or 0.0, rec.stopped or 0.0],
+                mode=outcome.mode,
+                rec_id=rec.rec_id,
+                verdicts=verdicts,
+                rewind={
+                    "steps": outcome.steps,
+                    "stopped_at_step": outcome.stopped_at_step,
+                    "flows": flows,
+                    "requests": requests,
+                    "run": outcome.n,
+                },
             )
+            run_history.save_run(record)
+            rec.runs[-1]["run_id"] = run_id
+            rewind.save_recording(rec)
+            self._last_run_id = run_id
+            return run_id
+        except Exception as exc:
+            logger.exception("Saving the rewind run failed")
+            self._ui(self._log_error, f"Could not save the rewind results: {exc}")
+            return None
 
-        # The session timeline the run belongs to: its privacy findings live
-        # there (the run index spans sessions).
-        try:
-            from sandroid.services.privacy_scan import current_timeline_folder
+    # -- AI chat (tool-dispatch thread, never the UI thread) --------------------
 
-            folder = current_timeline_folder()
-            record.timeline_folder = str(folder) if folder is not None else ""
-        except Exception:
-            logger.debug("Could not note the run's timeline folder", exc_info=True)
-        if self._tl_record_window:
-            # The recording this Play replays: part of the run's scope.
-            record.record_window = list(self._tl_record_window)
+    def start_recording_chat(self, label: str | None = None) -> dict[str, Any]:
+        """Start a recording from the AI chat (blocking; worker thread)."""
+        from sandroid.core import rewind
 
-        saved_run_id: str | None = run_id
-        try:
-            run_bundle.write_manifest(record)
-        except Exception as e:
-            self._ui(
-                self._log_warning,
-                f"Could not save run history: {e}",
-            )
-            saved_run_id = None
+        problem, device, pkg = self._start_problem()
+        if problem:
+            return {"success": False, "message": problem}
+        now = datetime.now()
+        rec = rewind.Recording(
+            rec_id=rewind.new_rec_id(now),
+            name=(label or "").strip() or rewind.default_name(now),
+            pkg=pkg,
+            serial=getattr(device, "serial", None),
+            emulator=bool(getattr(device, "is_emulator", False)),
+        )
+        self._set_state("saving")
+        self._status(
+            "Saving start point (about 5 s)"
+            if rec.emulator
+            else "Starting the recording (no start point on a physical device)"
+        )
+        return self._start_worker(rec)
 
-        # Full results JSON (+ run metadata), optional PDF and the evidence
-        # hash manifest, written into the run bundle -- the same finalisation
-        # the CLI and headless API use. The run's mitmproxy flows go into the
-        # bundle first, so the manifest covers them.
-        if result is not None:
-            self._export_run_flows(
-                bundle_dir=bundle_dir,
-                recorded_at=recorded_at,
-                completed_at=completed_at,
-                phases=record.phases,
-            )
-            self._finalize_run_bundle(
-                run_id=run_id,
-                result=result,
-                bundle_dir=bundle_dir,
-                recorded_at=recorded_at,
-            )
+    def stop_recording_chat(self) -> dict[str, Any]:
+        """Stop the recording from the AI chat; returns the Review list."""
+        if self._state != "recording":
+            return {"success": False, "message": "No recording in progress"}
+        self._set_state("stopping")
+        self._tick_stop.set()
+        return {"success": True, **self._stop_worker(self._rec, open_review=False)}
 
-        try:
-            from sandroid.core import run_bundle as _rb
-
-            _rb.record_session_bundle(bundle_dir)
-        except Exception:
-            logger.debug("Could not register run bundle for exit summary")
-
-        # Legacy session-level summary: a pointer to where the data really is.
-        try:
-            import json
-
-            results_path = os.getenv("SESSION_PATH") or os.getenv("RESULTS_PATH", "./")
-            output_file = os.path.join(results_path, "sandroid.json")
-            data = {
-                "Device Name": device_name,
-                "Action Duration": duration,
-                "Run ID": run_id,
-                "Run Bundle": bundle_dir,
-                "Results": os.path.join(bundle_dir, "sandroid.json"),
+    def start_rewind_chat(
+        self,
+        paths: list[str] | None = None,
+        replay: bool = True,
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Select ``paths`` (watch + After) and start Rewind (+ Replay)."""
+        rec = self._rec
+        problem = self.rewind_problem()
+        if problem:
+            return {"success": False, "message": problem}
+        known = {e.get("path") for e in rec.changed}
+        unknown = [p for p in paths or [] if p not in known and p not in rec.selected]
+        if unknown:
+            return {
+                "success": False,
+                "message": "Not in the Review list: " + ", ".join(unknown[:5]),
             }
-            with open(output_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4)
-        except Exception as e:
-            self._ui(
-                self._log_info,
-                f"[warning]Could not save legacy results summary: {e}[/warning]",
-            )
+        view = None
+        if self._watchlist is not None:
+            box: list[Any] = []
+            done = threading.Event()
 
-        return saved_run_id
+            def get() -> None:
+                try:
+                    box.append(self._watchlist())
+                finally:
+                    done.set()
 
-    def _finalize_run_bundle(
-        self, *, run_id: str, result: Any, bundle_dir: str, recorded_at: str
-    ) -> None:
-        """Write results JSON, optional PDF and manifest into the run bundle.
+            self._ui(get)
+            done.wait(5.0)
+            view = box[0] if box else None
+        for path in paths or []:
+            if path in rec.selected:
+                continue
+            rec.selected.append(path)
+            if view is not None:
+                self._ui(lambda p=path: view.add_path(p, pull_first=False))
+                if not _rewound(rec):
+                    self._pull_after(rec, view, path)
+        started = self._call_from_thread(
+            lambda: self.start_rewind(replay, owner_id=owner_id)
+        )
+        if started is False:
+            return {"success": False, "message": self.rewind_problem() or "not started"}
+        return {
+            "success": True,
+            "selected": list(rec.selected),
+            "mode": "rewind-replay" if replay else "rewind",
+        }
 
-        Never raises (runs on the playback worker thread); problems are
-        logged to the activity log.
-        """
-        try:
-            from sandroid.core import run_report
-            from sandroid.core.adb import Adb
+    def review_dict(self, rec: Any = None) -> dict[str, Any]:
+        """The Review list and the latest results, for the AI tools."""
+        rec = rec or self._rec
+        if rec is None:
+            return {"recording": None}
+        res = self.results(rec)
+        from sandroid.core import rewind
 
-            cfg = getattr(self._get_toolbox(), "config", None)
-            generate_pdf = bool(
-                getattr(getattr(cfg, "report", None), "generate_pdf", False)
-            )
-            run_config = getattr(self, "_last_run_config", None)
-            outcome = run_report.finalize_run(
-                bundle_dir,
-                result.to_json_dict(),
-                adb=Adb,
-                config=cfg,
-                started_at=recorded_at,
-                run_id=run_id,
-                mode="tui-play",
-                generate_pdf=generate_pdf,
-                run_settings=(
-                    run_report.describe_run_settings(run_config)
-                    if run_config is not None
-                    else None
-                ),
-            )
-            if outcome.pdf is not None:
-                self._ui(self._log_success, f"PDF report: {outcome.pdf}")
-            for err in outcome.errors:
-                self._ui(self._log_warning, f"Report finalisation issue: {err}")
-        except Exception as e:
-            logger.exception("finalize_run failed")
-            self._ui(self._log_warning, f"Could not write run report files: {e}")
+        return {
+            "rec_id": rec.rec_id,
+            "name": rec.name,
+            "package": rec.pkg,
+            "start_point": rec.start_point_name,
+            "pinned": rec.pinned,
+            "rewind_possible": self.rewind_problem(rec) is None,
+            "rewind_problem": self.rewind_problem(rec),
+            "changed_files": rec.changed,
+            "selected": list(rec.selected),
+            "requests": rec.requests,
+            "selected_requests": rec.selected_flows,
+            "runs": [
+                {k: r.get(k) for k in ("n", "kind", "result", "error", "run_id")}
+                for r in rec.runs
+            ],
+            "results": [
+                {
+                    "path": fr.path,
+                    "verdict": fr.verdict,
+                    "what_your_action_changed": fr.action_text,
+                    "what_the_replay_changed": fr.replay_text or None,
+                }
+                for fr in res["files"]
+            ],
+            "request_results": [
+                {
+                    "request": rewind.request_text(f.original),
+                    "found": f.found,
+                    "request_body": f.body or None,
+                    "response_status": f.status or None,
+                }
+                for f in res["flows"]
+            ],
+        }
 
-    # =========================================================================
-    # Export Operations
-    # =========================================================================
+    # -- export -----------------------------------------------------------------
 
     def show_export_modal(self) -> bool:
-        """Export recorded action.
-
-        Shows export modal with component selection.
-
-        Returns:
-            True if export modal was shown
-        """
+        """Export recorded action (the export modal)."""
         from sandroid.tui.modals import ExportModal, ExportResult
 
         if not self._push_modal:
@@ -1650,39 +1467,72 @@ class RecordingController:
             if result is None or result.cancelled:
                 self._log_info("Export cancelled")
                 return
-
             if result.success:
                 self._log_success(f"Exported to: {result.export_path}")
             elif result.error:
                 self._log_error(f"Export failed: {result.error}")
 
-        self._log_info("Opening export modal...")
         self._push_modal(ExportModal(), on_export_result)
         return True
 
 
-__all__ = [
-    "PlaybackResult",
-    "RecordingController",
-    "RecordingResult",
-]
+def _device_ready(serial: str | None) -> bool:
+    """``adb get-state`` says ``device`` (a short, bounded check)."""
+    try:
+        from sandroid.core.adb import Adb
+
+        stdout, _stderr = Adb.send_adb_command("get-state", serial=serial, timeout=10)
+    except Exception:
+        return False
+    return str(stdout or "").strip() == "device"
 
 
-def _unique_run_label(label: str, device_name: str | None) -> str:
-    """``label``, or ``"<label> · play N"`` if a run of it is already saved.
+def _step_time(step: Any) -> float | None:
+    from sandroid.features.player import _epoch
 
-    The recording's label seeds every Play of it, so a ``p`` replay showed
-    up as a second, indistinguishable "Run 1 · 22:58" in the Runs rail.
+    return _epoch(getattr(step, "t", None))
+
+
+def _rewound(rec: Any) -> bool:
+    """A run of ``rec`` reached its start point (the device left the
+    after-the-action state). A failed load or an Esc before it did not.
     """
-    from sandroid.core import run_history
+    return any(run.get("loaded", True) for run in rec.runs)
+
+
+def _read_tsv(path: Any) -> dict | None:
+    from sandroid.core.rewind import FileFact
 
     try:
-        taken = {e.get("label") for e in run_history.load_index(device_name)}
-    except Exception:
-        return label
-    if label not in taken:
-        return label
-    n = 2
-    while f"{label} · play {n}" in taken:
-        n += 1
-    return f"{label} · play {n}"
+        out = {}
+        for line in path.read_text().splitlines():
+            size, mtime, stamp, p = line.split("\t", 3)
+            out[p] = FileFact(int(size), int(mtime), stamp)
+        return out
+    except (OSError, ValueError):
+        return None
+
+
+def _raw_reader() -> Callable[[str, int, int], list[str]]:
+    """``(file, first, last) -> lines`` of Tracking's raw getevent log."""
+
+    def read(rel: str, first: int, last: int) -> list[str]:
+        from sandroid.core.timeline import timeline_folder
+
+        path = timeline_folder() / rel
+        out = []
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                for no, line in enumerate(handle, 1):
+                    if no > last:
+                        break
+                    if no >= first:
+                        out.append(line)
+        except OSError:
+            return []
+        return out
+
+    return read
+
+
+__all__ = ["RecordingController", "recording_seconds"]

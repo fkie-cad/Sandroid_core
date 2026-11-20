@@ -414,11 +414,11 @@ class DiffsView(FilesSubViewBase):
         info = None
         if total:
             info = f"{total} run{'s' if total != 1 else ''} · ⏎ details"
-        title = f"● Play running · {self._play_phase}" if self._play_phase else None
+        title = self._play_phase or None
         try:
             ms.set_lens_caption("runs", title, info)
             unread = len(self._unread_run_ids)
-            ms.set_lens_badge("runs", f"●{unread}" if unread else None)
+            ms.set_lens_badge("runs", f"{unread} new" if unread else None)
         except Exception:
             logger.debug("DiffsView: caption update failed", exc_info=True)
 
@@ -820,16 +820,17 @@ class DiffsView(FilesSubViewBase):
         run_id = s.get("run_id", "")
         number = Text(f"{self._run_number(run_id)}", style=_DIM, justify="right")
         label = Text()
+        # In review / new: colour and weight, no marker symbol.
+        style = ""
         if run_id == self._scope_run_id:
-            label.append("◆ ", style=_ACCENT)
+            style = f"bold {_ACCENT}"
         elif run_id in self._unread_run_ids:
-            label.append("● ", style="#22d3ee")
-        else:
-            label.append("  ")
+            style = "bold"
+        label.append("  ")
         name = s.get("label") or run_id
         if len(name) > label_width:
             name = name[: label_width - 1] + "…"
-        label.append(name.ljust(label_width))
+        label.append(name.ljust(label_width), style=style)
         when = Text(
             self._format_when(s.get("recorded_at"), short=self._compact),
             style=_MUTED,
@@ -837,7 +838,7 @@ class DiffsView(FilesSubViewBase):
         took = Text(self._format_duration(self._run_seconds(s)), style=_MUTED)
         replays = self._replays(run_id)
         if replays > 1:
-            took.append(f"  ×{replays}", style=_DIM)
+            took.append(f"  {replays} replays", style=_DIM)
         if self._compact:
             return [number, label, when]
         return [number, label, when, took, self._changes_cell(s)]
@@ -949,7 +950,7 @@ class DiffsView(FilesSubViewBase):
         if diverged:
             others = ",".join(f"#{self._run_number(o)}" for o, _ in diverged[:3])
             cell.append("   ")
-            cell.append(f"≠ {others}", style=_WARN)
+            cell.append(f"differs from {others}", style=_WARN)
         return cell
 
     def _problem(self, s: dict[str, Any]) -> tuple[str, str] | None:
@@ -958,11 +959,11 @@ class DiffsView(FilesSubViewBase):
         errors = facts.get("run_errors") or {}
         steps = len(errors.get("steps") or [])
         if s.get("error") or errors.get("fatal"):
-            if s.get("error") == "Replay cancelled":
-                return "◼ stopped", _WARN
-            return "✕ aborted", _BAD
+            if s.get("error") == "Replay cancelled" or s.get("mode"):
+                return "stopped", _WARN  # a Rewind stops, it never aborts
+            return "aborted", _BAD
         if steps:
-            return f"⚠ {steps} error{'s' if steps != 1 else ''}", _WARN
+            return f"{steps} error{'s' if steps != 1 else ''}", _WARN
         return None
 
     @staticmethod
@@ -1069,7 +1070,7 @@ class DiffsView(FilesSubViewBase):
         label = s.get("label") or run_id
         subtitle = None
         if run_id == self._scope_run_id:
-            subtitle = f"[{_ACCENT}]◆ in review[/] [{_DIM}]· L back to live[/]"
+            subtitle = f"[{_ACCENT}]in review[/] [{_DIM}]· L back to live[/]"
         return InspectorContent(
             title=label,
             subtitle=subtitle,
@@ -1101,7 +1102,7 @@ class DiffsView(FilesSubViewBase):
         end = self._parse(s.get("completed_at"))
         when = self._format_when(s.get("recorded_at"))
         if start is not None and end is not None:
-            when = f"{start.strftime('%a %d %b %Y · %H:%M')} → {end.strftime('%H:%M')}"
+            when = f"{start.strftime('%a %d %b %Y · %H:%M')} to {end.strftime('%H:%M')}"
         grid.add_row("Run", Text(f"#{self._run_number(run_id)} · {run_id}"))
         grid.add_row("When", when)
         grid.add_row("Took", self._format_duration(self._run_seconds(s)))
@@ -1174,7 +1175,7 @@ class DiffsView(FilesSubViewBase):
     def _status_text(self, s: dict[str, Any], facts: dict[str, Any]) -> Text:
         problem = self._problem(s)
         if problem is None:
-            return Text("✓ completed", style=_GOOD)
+            return Text("completed", style=_GOOD)
         text, style = problem
         return Text(text, style=style)
 
@@ -1242,6 +1243,8 @@ class DiffsView(FilesSubViewBase):
         if record is None:
             sections.append(("", Text("loading…", style=_DIM)))
             return sections
+        if getattr(record, "mode", ""):
+            return [*sections, *self._rewind_sections(record)]
         rows = run_history.file_diff_rows(record)
         for kind, title in (
             ("changed", "Changed"),
@@ -1270,6 +1273,50 @@ class DiffsView(FilesSubViewBase):
             sections.append((f"Hosts ({len(hosts)})", body))
         sections.append(("", Text("z full diff · v review in Files", style=_DIM)))
         return sections
+
+    def _rewind_sections(self, record: Any) -> list[tuple[str, Any]]:
+        """A Rewind run: per selected file its result, the replayed steps,
+        the compared requests and the requests per run (plain words).
+        """
+        from sandroid.core import rewind
+
+        info = getattr(record, "rewind", None) or {}
+        out: list[tuple[str, Any]] = []
+        verdicts = getattr(record, "verdicts", None) or {}
+        if verdicts:
+            body = Text()
+            for path, verdict in verdicts.items():
+                if body:
+                    body.append("\n")
+                body.append(self._short_path(path, 44))
+                color = {rewind.SAME: _GOOD, rewind.DIFFERENT: _WARN}.get(
+                    verdict, _MUTED
+                )
+                body.append(f"  {verdict}", style=color)
+            out.append(("What your action changed", body))
+        steps = info.get("steps") or []
+        if steps:
+            body = Text()
+            for st in steps:
+                if body:
+                    body.append("\n")
+                way = st.get("way") or ""
+                if way == "failed":
+                    way = f"failed: {st.get('reason')}"
+                body.append(f"{st.get('i')}. {st.get('what')}  ")
+                body.append(way, style=_BAD if way.startswith("failed") else _MUTED)
+            out.append(("Replayed steps", body))
+        flows = info.get("flows") or []
+        if flows:
+            lines = [ln for f in flows for ln in f]
+            out.append(("Compared requests", Text("\n".join(lines))))
+        for title, reqs in (info.get("requests") or {}).items():
+            body = Text("\n".join(reqs[:_LIST_LIMIT]) or "none")
+            if len(reqs) > _LIST_LIMIT:
+                body.append(f"\n… {len(reqs) - _LIST_LIMIT} more", style=_DIM)
+            out.append((f"Requests · {title} ({len(reqs)})", body))
+        out.append(("", Text("z full results · v review in Files", style=_DIM)))
+        return out
 
     @staticmethod
     def _short_path(path: str, limit: int = 52) -> str:
@@ -2019,7 +2066,9 @@ class DiffsView(FilesSubViewBase):
 
     def _toast_new_run(self, run_id: str) -> None:
         label = self._current_label(run_id)
-        self._notify(f"New run ready: {label} (marked ● in Runs)", "information")
+        self._notify(
+            f"New run ready: {label} (shown in bold in Sessions)", "information"
+        )
 
 
 __all__ = ["DiffsView"]

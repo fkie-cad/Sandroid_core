@@ -43,7 +43,7 @@ from .network_capture_modal import NetworkCaptureModal, NetworkCaptureResult
 from .objection_modal import ObjectionConfig, ObjectionModal, build_objection_command
 from .proxy_modal import ProxyModal, ProxyModalResult
 from .quit_modal import QuitConfirmModal
-from .recording_modal import RecordingModal, RecordingResult
+from .review_modal import ReviewModal
 from .scan_progress_modal import ScanProgressModal, ScanProgressResult
 from .screen_recording_modal import ScreenRecordingModal, ScreenRecordingResult
 from .screenshot_modal import ScreenshotModal, ScreenshotResult
@@ -103,8 +103,7 @@ __all__ = [
     "ProxyModal",
     "ProxyModalResult",
     "QuitConfirmModal",
-    "RecordingModal",
-    "RecordingResult",
+    "ReviewModal",
     "ScanProgressModal",
     "ScanProgressResult",
     "ScreenRecordingModal",

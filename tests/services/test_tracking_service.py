@@ -647,7 +647,7 @@ def test_screen_window_dedupe_and_screen_change_shot(env, cfg):
         assert wait_for(lambda: of(lines, "shot", "screen_change"))
     windows = of(lines, "screen", "window")
     assert len(windows) == 1
-    assert windows[0]["summary"] == "→ com.x/.LoginActivity · Sign in"
+    assert windows[0]["summary"] == "screen com.x/.LoginActivity · Sign in"
     assert windows[0]["data"]["via"] == "a11y"
     assert windows[0]["actor"] == "app"
     shot = of(lines, "shot", "screen_change")[0]

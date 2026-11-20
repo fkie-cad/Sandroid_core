@@ -977,8 +977,18 @@ class Version:
         return self.dir.name
 
     @property
+    def role(self) -> str | None:
+        """The Rewind role (``before`` / ``after`` / ``after_replay``)."""
+        return ((self.record or {}).get("rewind") or {}).get("role")
+
+    @property
     def trigger(self) -> str:
         record = self.record or {}
+        role = self.role
+        if role:
+            from sandroid.core.rewind import ROLE_WORDS
+
+            return ROLE_WORDS.get(role, role)
         return str(record.get("trigger") or "")
 
 
@@ -1035,6 +1045,10 @@ def stored_structured(version: Version) -> fi.StructuredDiff | None:
 SUMMARY_DIFF_BYTES = 1024 * 1024
 
 
+#: Version-list summary of a Rewind Before (no backwards chain diff).
+BEFORE_NOTE = "compare with After in Review"
+
+
 def version_summary(version: Version, previous: Version | None = None) -> str:
     """Short change summary of a version against the one before it.
 
@@ -1042,6 +1056,10 @@ def version_summary(version: Version, previous: Version | None = None) -> str:
     it existed) from a structured diff of the two copies when it is cached
     or both are small, else from the legacy text diff stored with it.
     """
+    if version.role == "before" and previous is not None:
+        # Pulled after its After: against the version before it, the change
+        # would read backwards. Rewind compares Before with After itself.
+        return BEFORE_NOTE
     key = ("summary", str(version.dir), str(previous.dir) if previous else "")
     cached = _SUMMARIES.get(key)
     if cached is not None:
@@ -1456,6 +1474,17 @@ def version_diff_body(
         f"v{older.number} {_when(older.when)}{based}"
     )
     parts: list = [record_text(selected), Text("")]
+    if older.number == newer.number - 1 and newer.role == "before" and not state.base:
+        parts.append(
+            Text(
+                "This is the Before of a rewind, copied after its After. "
+                "What your action changed (Before to After) is in Review "
+                "(p) and in the Sessions lens. * picks another version to "
+                "compare with.",
+                style=_DIM,
+            )
+        )
+        return heading, Group(*parts)
     if older.number == newer.number - 1:
         # The diff kept with the version (diff.json) -- no copy is opened.
         stored = stored_structured(newer)

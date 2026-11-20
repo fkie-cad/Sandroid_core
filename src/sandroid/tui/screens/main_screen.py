@@ -1989,13 +1989,14 @@ class MainScreen(Screen):
         if self.scope_run is not None:
             label = self._scope_label or f"Run {self.scope_run}"
             # ``v`` during a Play: say that the Play goes on (L10).
-            busy = " · ● REC" if recording else (" · ● REPLAY" if replaying else "")
+            busy = " · recording" if recording else (" · rewind" if replaying else "")
             header.set_pill(f"◆ REVIEW {label}{busy}", "review")
             return
-        if recording:
-            header.set_pill("● REC", "rec")
-        elif replaying:
-            header.set_pill(f"● REPLAY · {phase}" if phase else "● REPLAY", "rec")
+        if recording or replaying or phase:
+            # Record / Rewind status in plain words (core/rewind.py).
+            header.set_pill(
+                phase or ("Recording" if recording else "Rewind running"), "rec"
+            )
         else:
             header.set_pill("● LIVE", "")
 
