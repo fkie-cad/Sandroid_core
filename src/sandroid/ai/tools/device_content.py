@@ -12,8 +12,8 @@ each file from the ONE device it pinned at the start
 negative cache entry, so the lens tools report them as
 ``content_unreadable`` instead of missing. Rows recorded on another device
 than the one it would read are refused. It returns counts, never content:
-the content reaches the model only through the Files digests (reduced,
-capped).
+the content reaches the model only through the Files digests (capped;
+masked with ``ai.mask_sensitive`` on).
 
 ``REVERSIBLE`` with ``can_remember_choice``: it pulls app-private data to show
 it to a remote model, so the analyst approves it (once, or "allow always"),

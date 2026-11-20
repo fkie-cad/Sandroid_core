@@ -663,39 +663,54 @@ def flow_snapshot(row: Any, shown: bool, scope: str | None = None) -> dict:
     }
 
 
+def _only_noise(act: Any) -> bool:
+    """The row has open/close noise and no create / modify / delete /
+    rename / attrs op at all.
+    """
+    ops = getattr(act, "ops", None) or {}
+    return bool(ops.get("noise")) and not any(
+        n for cat, n in ops.items() if cat != "noise"
+    )
+
+
+def _ours(act: Any, path: str) -> bool:
+    """Our own reads may be taken off: a noise-only row read by
+    ``read_device_files`` around its last event.
+    """
+    from sandroid.ai.device_files import tool_read_at
+
+    if not _only_noise(act):
+        return False
+    last = getattr(act, "last", None)
+    return tool_read_at(path, last.timestamp() if last is not None else None)
+
+
 def _own_reads(act: Any, path: str) -> int:
     """Open/read events of ``read_device_files``'s own head / cat / su on
-    *path*: only for a path it read, and never more than the row's noise
-    (open/close) events, so a write by such a process always stays.
+    *path*: only on a noise-only row the tool read (a row with any write
+    keeps every event and every process).
     """
-    from sandroid.ai.device_files import is_own_read_process, was_read_by_tool
+    from sandroid.ai.device_files import is_own_read_process
 
-    if not was_read_by_tool(path):
+    if not _ours(act, path):
         return 0
-    own = sum(
+    return sum(
         int(n or 0)
         for name, n in (getattr(act, "processes", None) or {}).items()
         if is_own_read_process(name)
     )
-    noise = int((getattr(act, "ops", None) or {}).get("noise", 0) or 0)
-    return min(own, noise)
 
 
 def _processes(act: Any, path: str = "") -> list[str]:
-    from sandroid.ai.device_files import is_own_read_process, was_read_by_tool
+    from sandroid.ai.device_files import is_own_read_process
 
+    drop_ours = bool(path) and _ours(act, path)
     procs: dict[str, int] = {}
-    own: dict[str, int] = {}
     for name, n in (getattr(act, "processes", None) or {}).items():
         head = str(name).split(" · ", 1)[0]
-        target = own if is_own_read_process(head) else procs
-        target[head] = target.get(head, 0) + n
-    noise = int((getattr(act, "ops", None) or {}).get("noise", 0) or 0)
-    # Our own reads are left out only when they can all be open/close noise
-    # on a path the tool read; otherwise (a write by cat / su) they stay.
-    if not (path and was_read_by_tool(path) and sum(own.values()) <= noise):
-        for name, n in own.items():
-            procs[name] = procs.get(name, 0) + n
+        if drop_ours and is_own_read_process(head):
+            continue
+        procs[head] = procs.get(head, 0) + n
     return [name for name, _n in sorted(procs.items(), key=lambda kv: -kv[1])[:3]]
 
 

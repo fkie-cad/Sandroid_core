@@ -134,8 +134,8 @@ _WHERE_PROP = {
         "path_glob[], ops (letters CMDRA), process, app, watched, min_count, "
         "review_kind (changed/new/deleted), text, content_contains (local "
         "copies only: kept watchlist versions and files read with "
-        "read_device_files; searches the full text, secret-named values "
-        "too, except with ai.mask_sensitive on: masked text, no regex). "
+        "read_device_files; searches the full text, with "
+        "ai.mask_sensitive on the masked text and no regex). "
         "regex=true makes text/*_contains regular expressions."
     ),
 }
@@ -497,8 +497,13 @@ def _monitor_rows() -> list[dict]:
         def package_of(_p: str) -> str | None:
             return None
 
-    from sandroid.ai.device_files import is_own_read_process, was_read_by_tool
+    from sandroid.ai.device_files import (
+        is_own_read_process,
+        monitor_serial,
+        tool_read_at,
+    )
 
+    serial = monitor_serial()
     rows: dict[str, dict] = {}
     for ev in events:
         raw = ev.get("path")
@@ -507,9 +512,13 @@ def _monitor_rows() -> list[dict]:
         if (
             _is_noise(ev.get("event_type"))
             and is_own_read_process(ev.get("process"))
-            and was_read_by_tool(normalize_key("files", raw))
+            and tool_read_at(
+                normalize_key("files", raw), ev.get("timestamp"), serial=serial
+            )
         ):
-            continue  # read_device_files's own open/read (never a write)
+            # read_device_files's own open/read: inside its read window on
+            # the same device; never a write, never a later cat / su.
+            continue
         key = normalize_key("files", raw)
         row = rows.get(key)
         ts = ev.get("timestamp")
@@ -771,10 +780,9 @@ class _Details:
 
     Files: :func:`~sandroid.ai.row_classifier.file_content` (the newest of a
     kept watchlist version and a ``read_device_files`` cache entry).
-    :meth:`file` is the reduced digest part the model may see;
-    :meth:`haystack` the full local text ``content_contains`` searches here,
-    never sent (so a token under a secret-named key is still found; with
-    ``ai.mask_sensitive`` on, the masked reduced text instead).
+    :meth:`file` is the digest part the model sees; :meth:`haystack` the
+    full local text ``content_contains`` searches here (with
+    ``ai.mask_sensitive`` on, the masked digest text instead).
     :meth:`missing` / :meth:`unreadable` are cheap (no rendering).
     """
 
@@ -791,8 +799,9 @@ class _Details:
             masked = rc.mask_enabled()
         #: ``ai.mask_sensitive``: content_contains searches masked text only.
         self.masked = bool(masked)
-        #: Content searches (regex) that ran out of their per-row time budget.
-        self.not_searched = 0
+        #: Rows whose content search (regex) ran out of its time budget.
+        self._timed_out: set[str] = set()
+        self.current_row = ""
 
     def flow(self, row: Mapping[str, Any]) -> dict | None:
         if row.get("kind") == "tls":
@@ -821,6 +830,14 @@ class _Details:
                 break
         self._flows[fid] = detail
         return detail
+
+    @property
+    def not_searched(self) -> int:
+        """Rows (not searches) whose content search ran out of time."""
+        return len(self._timed_out)
+
+    def timed_out_row(self) -> None:
+        self._timed_out.add(self.current_row)
 
     def set_rows(self, rows: list[dict]) -> None:
         """Note the rows' SQLite companions (``x.db-wal`` ...): their content
@@ -875,21 +892,21 @@ class _Details:
         return got.digest, got.kind
 
     def haystack(self, row: Mapping[str, Any]) -> str:
-        """The local text ``content_contains`` searches (never sent): the
-        full decoded text, or with ``ai.mask_sensitive`` on only the reduced
-        and masked text (no yes/no oracle over hidden values).
+        """The local text ``content_contains`` searches: the full decoded
+        text, or with ``ai.mask_sensitive`` on only the masked digest text
+        (no yes/no oracle over masked values).
         """
         got = self._content(row)
         if self.masked:
             from sandroid.ai import row_classifier as rc
 
-            return rc._mask(getattr(got, "reduced", "") or "")
+            return rc._mask(getattr(got, "shown", "") or "")
         return got.match or ""
 
     def diff_text(self, row: Mapping[str, Any]) -> str:
         """A kept version's last diff, searched apart from the content."""
         if self.masked:
-            return ""  # the reduced diff is part of haystack()
+            return ""  # the diff is part of the masked haystack()
         return getattr(self._content(row), "diff", "") or ""
 
     def _state(self, row: Mapping[str, Any]) -> str | None:
@@ -1068,15 +1085,20 @@ def _content_matcher(
         deadline = time.monotonic() + REGEX_ROW_BUDGET_S
         for line in (s or "")[:CONTENT_SEARCH_CAP].splitlines():
             n = len(line)
-            for start in range(0, max(n, 1), step):
-                end = min(n, start + CONTENT_REGEX_WINDOW)
-                if pattern.search(line, start, end):
+            if n <= CONTENT_REGEX_WINDOW:
+                # A whole line: $, \b and lookaheads see its real end.
+                if pattern.search(line):
                     return True
-                if time.monotonic() > deadline:
-                    details.not_searched += 1
-                    return False
-                if end >= n:
-                    break
+            else:
+                for start in range(0, n, step):
+                    end = min(n, start + CONTENT_REGEX_WINDOW)
+                    if pattern.search(line, start, end):
+                        return True
+                    if end >= n or time.monotonic() > deadline:
+                        break
+            if time.monotonic() > deadline:
+                details.timed_out_row()
+                return False
         return False
 
     return search
@@ -1352,7 +1374,12 @@ def _files_pred(
         )
     elif field == "content_contains":
         m = _content_matcher(value, regex, details)
-        costly.append(lambda r: m(details.haystack(r)) or m(details.diff_text(r)))
+
+        def content_hit(r: dict) -> bool:
+            details.current_row = str(r.get("key") or "")
+            return m(details.haystack(r)) or m(details.diff_text(r))
+
+        costly.append(content_hit)
 
 
 def _filter(rows: list[dict], preds: list[Predicate]) -> list[dict]:
@@ -1949,7 +1976,7 @@ def classifier_client() -> Any:
         "calls, and highlight (or filter to) the matches live. Put the "
         "structural part into 'where' first. Judges exactly the rows the lens "
         "shows (TLS failures included); scope='all' adds the rows its filters "
-        "hide. Rows are compact digests (auth values reduced, bodies capped). "
+        "hide. Rows are compact digests (bodies capped). "
         "Returns N of M, partial, hidden_by_lens_filters (with a hint), "
         "sampled reasons and bytes_sent. Ctrl+X stops it (partial set). Pass "
         "label (the ask) and short (1-3 words, e.g. 'personal data')."

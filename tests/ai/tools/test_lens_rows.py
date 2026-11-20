@@ -532,8 +532,8 @@ def test_classify_rows_highlights_live_and_reports(
     assert store.filter_set("network") == hid
     # Secrets never reach the model.
     sent = json.dumps(client.calls)
-    assert "s3cr3t" not in sent
-    assert "[Bearer, 13 chars]" in sent
+    # Mask off: the header goes as it is (no secret reduction).
+    assert "Authorization: Bearer s3cr3t" in sent
     assert "[binary 33 kB image/png]" in sent
     assert gateway.peak_agents_in_use <= 3
     progress = [e for e in events if e.type == "tool_progress"]
@@ -694,7 +694,7 @@ def test_get_rows_pages_and_reads_keys(store, flow_dir):
     assert page["scope"] == "shown"
     assert page["hidden_by_lens_filters"] == 0
     assert page["rows"][0]["highlights"] == [hs.id]
-    assert "[Bearer, 13 chars]" in page["rows"][0]["digest"]
+    assert "Authorization: Bearer s3cr3t" in page["rows"][0]["digest"]
     assert page["rows"][1]["content"] == "binary"
     last = lens_rows.get_rows("network", cursor=2, limit=50, include_content=False)
     assert last["next_cursor"] is None
@@ -702,7 +702,7 @@ def test_get_rows_pages_and_reads_keys(store, flow_dir):
     picked = lens_rows.get_rows("network", keys=["a3", "zz"])
     assert [r["key"] for r in picked["rows"]] == ["a3"]
     assert picked["unknown_keys"] == ["zz"]
-    assert "user=bob; pass=[text, 7 chars]" in picked["rows"][0]["digest"]
+    assert "user=bob; pass=hunter2" in picked["rows"][0]["digest"]
     with pytest.raises(ToolError):
         lens_rows.get_rows("network", keys=[f"k{i}" for i in range(21)])
 

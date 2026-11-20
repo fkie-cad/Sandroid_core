@@ -457,7 +457,7 @@ ROW = {
 }
 
 
-def test_network_digest_reduces_secrets_caps_bodies_and_marks_binary():
+def test_network_digest_shows_values_raw_caps_bodies_and_marks_binary():
     d = rc.network_digest(ROW, detail=_detail())
     text = d.text
     assert d.key == "f1"
@@ -466,10 +466,10 @@ def test_network_digest_reduces_secrets_caps_bodies_and_marks_binary():
         "POST api.example.com/v1/t?imei=3567&x=1 200 · app com.example"
     )
     assert "query: imei=3567; x=1" in text
-    assert "s3cr3t" not in text
-    assert "Authorization: [Bearer, 25 chars]" in text
-    assert "Cookie: [cookie, 2 part(s), 19 chars]" in text
-    assert "Set-Cookie: [set-cookie, 1 part(s), 7 chars]" in text
+    # Mask off: headers as they are (no secret reduction).
+    assert "Authorization: Bearer s3cr3t-token-value" in text
+    assert "Cookie: sid=abc; theme=dark" in text
+    assert "Set-Cookie: sid=zzz" in text
     assert "X-Long: " + "v" * 100 in text
     assert "v" * 130 not in text
     assert 'request body: {"email":"a@b.c"' in text  # minified JSON
@@ -496,51 +496,38 @@ def test_form_body_is_split_into_fields():
         "application/x-www-form-urlencoded; charset=utf-8",
         1500,
     )
-    # "pass" is a secret-looking name (also in network bodies).
-    assert (text, kind) == ("user=bob; pass=[text, 7 chars]", "text")
+    assert (text, kind) == ("user=bob; pass=hunter2", "text")
     assert rc.body_text({"content": "", "size_bytes": 0}, "", 10) == (None, "none")
 
 
-def test_secret_named_headers_params_and_fields_are_always_reduced():
+def test_mask_off_sends_secret_named_values_as_they_are():
+    """With ai.mask_sensitive off there is no secret reduction: what may go
+    to the endpoint is the analyst's decision.
+    """
     row = dict(ROW, path="/v1/t?imei=3567&access_token=abcdef123456&sig=1")
     detail = _detail(
-        request_headers=[
-            ["X-Session-Id", "s-1234567890"],
-            ["X-Amz-Signature", "deadbeefdeadbeef"],
-            ["Api-Key", "k-777"],
-            ["X-Client-Version", "1.2"],
-        ],
+        request_headers=[["X-Session-Id", "s-1234567890"], ["Api-Key", "k-777"]],
         request_body={
             "content": json.dumps(
-                {
-                    "email": "a@b.c",
-                    "password": "hunter2",
-                    "nested": {"refresh_token": "eyJa.eyJb.sig", "n": 1},
-                    "items": [{"secretAnswer": 42}],
-                }
+                {"password": "hunter2", "nested": {"refresh_token": "eyJa.eyJb.sig"}}
             ),
             "encoding": "utf-8",
-            "size_bytes": 120,
+            "size_bytes": 80,
         },
     )
     text = rc.network_digest(row, detail=detail, mask=False).text
-    for secret in ("abcdef123456", "s-1234567890", "deadbeef", "k-777", "hunter2"):
-        assert secret not in text
-    assert "eyJa" not in text
-    assert "access_token=[hex, 12 chars]" in text.splitlines()[0]  # summary
-    assert "query: imei=3567; access_token=[hex, 12 chars]" in text
-    assert "X-Session-Id: [value, 12 chars]" in text
-    assert "X-Client-Version: 1.2" in text
-    assert '"password":"[text, 7 chars]"' in text
-    assert '"refresh_token":"[jwt, 13 chars]"' in text
-    assert '"secretAnswer":"[number, 2 chars]"' in text
-    assert '"email":"a@b.c"' in text  # judged content stays
+    assert "access_token=abcdef123456" in text.splitlines()[0]  # summary
+    assert "query: imei=3567; access_token=abcdef123456; sig=1" in text
+    assert "X-Session-Id: s-1234567890" in text
+    assert "Api-Key: k-777" in text
+    assert '"password":"hunter2"' in text
+    assert '"refresh_token":"eyJa.eyJb.sig"' in text
     form, _ = rc.body_text(
         {"content": "user=bob&password=hunter2&sessionid=99", "size_bytes": 38},
         "application/x-www-form-urlencoded",
         1500,
     )
-    assert form == "user=bob; password=[text, 7 chars]; sessionid=[number, 2 chars]"
+    assert form == "user=bob; password=hunter2; sessionid=99"
 
 
 def test_mask_fails_closed_when_redaction_raises(monkeypatch):

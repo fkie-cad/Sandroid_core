@@ -449,3 +449,38 @@ def test_ssl_unpin_ai_tool_is_marked_experimental():
 
 def test_safety_module_has_no_import_time_dependency_on_mcp():
     assert "mcp" not in safety.__dict__
+
+
+_MB = 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a." * (_MB // 2),  # was ~minutes: the URL scheme rescanned per boundary
+        "a-" * (_MB // 2),
+        "a://" + "b:" * (_MB // 2),
+        "a://" * (_MB // 4),
+        "password" + " " * _MB,
+        "password = " * (_MB // 11),
+        "bearer" + " " * _MB + "x",
+        "sk-" * (_MB // 3),
+    ],
+    ids=["dotted", "hyphen", "url-cred", "schemes", "space", "kv", "bearer", "sk"],
+)
+def test_redact_secrets_is_linear_on_adversarial_input(text):
+    import time
+
+    t0 = time.monotonic()
+    safety.redact_secrets(text, secrets=[])
+    assert time.monotonic() - t0 < 1.0  # measured <= 0.1 s
+
+
+def test_redact_secrets_still_masks_the_shapes():
+    r = safety.redact_secrets
+    assert (
+        r("https://user:pw@host/x", secrets=[]) == f"https://{safety.REDACTED}@host/x"
+    )
+    assert r("token=abc", secrets=[]) == f"token={safety.REDACTED}"
+    assert r("Bearer abcdefgh", secrets=[]) == f"Bearer {safety.REDACTED}"
+    assert r("ftp.example.com://a:b@c", secrets=[]).endswith(f"{safety.REDACTED}@c")

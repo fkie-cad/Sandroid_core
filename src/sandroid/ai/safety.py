@@ -248,16 +248,25 @@ def egress_notice_lines(settings: AISettings) -> list[str]:
 
 _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # Authorization headers / bearer tokens.
-    (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{4,}"), rf"\1 {REDACTED}"),
+    (re.compile(r"(?i)\b(bearer)\s++[A-Za-z0-9._~+/=-]{4,}+"), rf"\1 {REDACTED}"),
     # OpenAI-style keys (sk-..., sk-proj-...).
-    (re.compile(r"\bsk-[A-Za-z0-9_-]{8,}"), f"sk-{REDACTED}"),
-    # Credentials embedded in a URL: scheme://user:pass@host
-    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@"), rf"\1{REDACTED}@"),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{8,}+"), f"sk-{REDACTED}"),
+    # Credentials embedded in a URL: scheme://user:pass@host. The scheme
+    # starts only where a scheme-character run starts and is at most 32
+    # characters, and every run is possessive: linear on any input (an
+    # unbounded scheme rescanned "a.a.a..." at every word boundary).
+    (
+        re.compile(
+            r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,31}+://)"
+            r"[^/\s:@]++:[^/\s@]++@"
+        ),
+        rf"\1{REDACTED}@",
+    ),
     # key=value style secrets in query strings / log lines.
     (
         re.compile(
             r"(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)"
-            r"(\s*[=:]\s*)(['\"]?)[^\s&'\",;]+"
+            r"(\s*+[=:]\s*+)(['\"]?)[^\s&'\",;]++"
         ),
         rf"\1\2\3{REDACTED}",
     ),

@@ -31,7 +31,7 @@ Cache (``<session>/ai/content_cache/<sha1(path)>/``, folder 0700, files
 device mtime and size, ``read_at``, kind, truncated, root mode),
 ``raw.bin`` (text files; database copies are not kept), ``match.txt`` (the
 full decoded text, searched locally, never sent to the model) and
-``digest.txt`` (the reduced rendering). An entry is stale when the row's
+``digest.txt`` (the rendering shown). An entry is stale when the row's
 last content change is newer than the one it was read for, the device
 mtime or size (of the file, and of a database's ``-wal``) differ, it came
 from another serial or root mode, the device state was replaced since (the
@@ -123,25 +123,63 @@ def is_own_read_process(name: Any) -> bool:
     return head.rsplit("/", 1)[-1] in OWN_READ_PROCESSES
 
 
-#: Device paths this process read with read_device_files (path -> time).
-_TOOL_READS: dict[str, float] = {}
+#: Device paths this process read with read_device_files: path -> the read
+#: windows ``(serial, t0, t1)`` (host epoch), newest last, a few per path.
+_TOOL_READS: dict[str, list[tuple[str | None, float, float]]] = {}
+#: Windows kept per path, and the slack around one (event delivery lag).
+_TOOL_READ_WINDOWS = 8
+TOOL_READ_SLACK_S = 5.0
 _TOOL_READS_MAX = 20_000
 _TOOL_READS_LOCK = threading.Lock()
 
 
-def note_tool_read(path: str) -> None:
-    """Remember that read_device_files read *path* (its open/access events
-    by head / cat / su are ours).
+def note_tool_read(
+    path: str,
+    serial: str | None = None,
+    t0: float | None = None,
+    t1: float | None = None,
+) -> None:
+    """Remember that read_device_files read *path* on *serial* between *t0*
+    and *t1* (its open/access events by head / cat / su then are ours).
     """
+    now = time.time()
+    window = (serial, now if t0 is None else t0, now if t1 is None else t1)
     with _TOOL_READS_LOCK:
-        _TOOL_READS.pop(path, None)
-        _TOOL_READS[path] = time.time()
+        windows = _TOOL_READS.pop(path, [])
+        windows.append(window)
+        _TOOL_READS[path] = windows[-_TOOL_READ_WINDOWS:]
         while len(_TOOL_READS) > _TOOL_READS_MAX:
             _TOOL_READS.pop(next(iter(_TOOL_READS)))
 
 
+def tool_read_at(path: str, t: Any = None, serial: str | None = None) -> bool:
+    """Whether read_device_files read *path* at host time *t* (within its
+    read window, +- :data:`TOOL_READ_SLACK_S`) on *serial* (when both are
+    known). Without *t*: whether the latest read was in the last minute.
+    Later events on the path (a ``cat`` copying the prefs away an hour
+    later) are not ours.
+    """
+    with _TOOL_READS_LOCK:
+        windows = list(_TOOL_READS.get(path) or [])
+    if not windows:
+        return False
+    when = _as_float(t)
+    if when is None:
+        when = time.time()
+        windows = windows[-1:]
+        slack = 60.0
+    else:
+        slack = TOOL_READ_SLACK_S
+    for w_serial, t0, t1 in windows:
+        if serial and w_serial and serial != w_serial:
+            continue
+        if t0 - slack <= when <= t1 + slack:
+            return True
+    return False
+
+
 def was_read_by_tool(path: str) -> bool:
-    """Whether read_device_files read *path* in this process."""
+    """Whether read_device_files read *path* in this process (any time)."""
     with _TOOL_READS_LOCK:
         return path in _TOOL_READS
 
@@ -286,6 +324,8 @@ def _serial_in_timeline(path: Path) -> str | None:
             try:
                 line = json.loads(raw)
             except ValueError:
+                continue
+            if not isinstance(line, dict):
                 continue
             if line.get("src") in ("files", "monitor") and line.get("dev"):
                 serial = str(line["dev"])
@@ -489,16 +529,22 @@ class DeviceFileReader:
     def head(self, path: str, cap: int, timeout: float = HEAD_TIMEOUT_S) -> ReadResult:
         """At most *cap* + 1 bytes of *path* (``over`` when more existed)."""
         self.probe_root()
-        note_tool_read(path)
         words = ["head", "-c", str(cap + 1), shlex.quote(path), "2>/dev/null"]
-        return self._stream(self.argv(words), cap, timeout)
+        t0 = time.time()
+        try:
+            return self._stream(self.argv(words), cap, timeout)
+        finally:
+            note_tool_read(path, self.serial, t0, time.time())
 
     def cat(self, path: str, cap: int, timeout: float = DB_TIMEOUT_S) -> ReadResult:
         """The whole of *path*, killed beyond *cap* bytes (``over``)."""
         self.probe_root()
-        note_tool_read(path)
         words = ["cat", shlex.quote(path), "2>/dev/null"]
-        return self._stream(self.argv(words), cap, timeout)
+        t0 = time.time()
+        try:
+            return self._stream(self.argv(words), cap, timeout)
+        finally:
+            note_tool_read(path, self.serial, t0, time.time())
 
     def _stream(self, argv: list[str], cap: int, timeout: float) -> ReadResult:
         try:

@@ -371,13 +371,12 @@ def test_should_stop_ends_a_read():
 # --------------------------------------------------------------------------
 
 
-def test_render_prefs_reduces_secret_names_but_matches_them():
+def test_render_prefs_sends_values_as_they_are():
     r = rc.render_content("/data/data/com.x/shared_prefs/e2e.xml", PREFS)
     assert r.kind == "content"
     assert r.label == "prefs"
     assert "user_id = u-4711" in r.digest
-    assert f"auth_token = [jwt, {len(JWT)} chars]" in r.digest
-    assert JWT not in r.digest
+    assert f"auth_token = {JWT}" in r.digest  # no secret reduction
     assert JWT in r.match
     assert "launches = 3" in r.digest
 
@@ -387,7 +386,7 @@ def test_render_abx_prefs():
     r = rc.render_content("/data/system/x.xml", data)
     assert r.label == "abx/prefs"
     assert "email = a@b.c" in r.digest
-    assert "refresh_token = [hex, 16 chars]" in r.digest
+    assert "refresh_token = abcdef0123456789" in r.digest
     assert "abcdef0123456789" in r.match
 
 
@@ -395,16 +394,11 @@ def test_render_json_text_and_truncated_json():
     doc = {"user": {"name": "bob", "access_token": "tok-123456"}, "n": 1}
     r = rc.render_content("/sdcard/a.json", json.dumps(doc, indent=2).encode())
     assert r.label == "json"
-    assert '"name":"bob"' in r.digest
-    assert "tok-123456" not in r.digest
-    assert "tok-123456" in r.match
+    assert '"access_token":"tok-123456"' in r.digest  # minified, as it is
     cut = rc.render_content("/sdcard/a.json", b'{"api_key": "k-999", "x": "y", "z')
-    assert "k-999" not in cut.digest
-    assert "k-999" in cut.match
+    assert '"api_key": "k-999"' in cut.digest  # did not parse: the text
     kv = rc.render_content("/sdcard/a.conf", b"host=x.example\npassword = hunter2\n")
-    assert "host=x.example" in kv.digest
-    assert "hunter2" not in kv.digest
-    assert "hunter2" in kv.match
+    assert kv.digest == "host=x.example\npassword = hunter2\n"
 
 
 def test_render_binary_and_gzip():
@@ -414,8 +408,7 @@ def test_render_binary_and_gzip():
     assert "4 kB" in png.digest
     gz = rc.render_content("/sdcard/a.json.gz", gzip.compress(b'{"secret": "s1"}'))
     assert gz.label == "gzip+json"
-    assert "s1" not in gz.digest
-    assert "s1" in gz.match
+    assert gz.digest == '{"secret":"s1"}'
 
 
 def test_gzip_bomb_is_bounded():
@@ -439,7 +432,7 @@ def test_render_wal_sqlite(tmp_path):
     assert r.kind == "content"
     assert "accounts (1 rows)" in r.digest  # the row is only in the WAL
     assert "email=alice@example.com" in r.digest
-    assert "session_key=[hex, 16 chars]" in r.digest
+    assert "session_key=deadbeefcafebabe" in r.digest
     assert "deadbeefcafebabe" in r.match
     # The source files were not changed (a private copy was opened).
     assert (d / "x.db").read_bytes() == main
@@ -477,7 +470,7 @@ def test_read_into_cache_writes_private_atomic_entries(tmp_path):
     assert meta["row_last"] == 5.0
     assert meta["size"] == len(PREFS)
     assert meta["kind"] == "content"
-    assert JWT not in entry.digest()
+    assert JWT in entry.digest()
     assert JWT in entry.match()
 
 
@@ -562,7 +555,7 @@ def test_file_content_prefers_the_newer_source(tmp_path, monkeypatch):
     got = rc.file_content(path, row_last=10.0, serial=SERIAL)
     assert got.source == "device"
     assert got.digest.startswith("content read from device ")
-    assert f"auth_token = [jwt, {len(JWT)} chars]" in got.digest
+    assert f"auth_token = {JWT}" in got.digest
     assert JWT in got.match
     # Stale (a later write) -> nothing local.
     assert rc.file_content(path, row_last=11.0).kind == "metadata"
@@ -630,102 +623,8 @@ def test_watchlist_and_forensics_are_never_touched(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# fix round: privacy reductions
+# framing (prompt-injection defence, not masking)
 # --------------------------------------------------------------------------
-
-
-def test_json_inside_a_prefs_value_is_reduced():
-    prefs = (
-        '<map><string name="user_profile">'
-        + json.dumps({"name": "bob", "access_token": JWT, "n": {"api_key": 7}})
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        + "</string></map>"
-    ).encode()
-    r = rc.render_content("/data/data/com.x/shared_prefs/p.xml", prefs)
-    assert '"name":"bob"' in r.digest
-    assert JWT not in r.digest
-    assert '"api_key":"[number, 1 chars]"' in r.digest
-    assert JWT in r.match
-
-
-def test_sqlite_key_value_rows_reduce_by_the_row_name(tmp_path):
-    db = tmp_path / "kv.db"
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE kv (key TEXT, value TEXT)")
-    conn.executemany(
-        "INSERT INTO kv VALUES (?, ?)",
-        [
-            ("auth_token", "s3cr3t-value-1"),
-            ("theme", "dark"),
-            ("cfg", '{"api_key": 1}'),
-        ],
-    )
-    conn.commit()
-    conn.close()
-    r = rc.render_content("/x/kv.db", db=db)
-    assert "key=auth_token; value=[text, 14 chars]" in r.digest
-    assert "key=theme; value=dark" in r.digest
-    assert '"api_key":"[number, 1 chars]"' in r.digest  # JSON inside a cell
-    assert "s3cr3t-value-1" not in r.digest
-    assert "s3cr3t-value-1" in r.match
-
-
-def test_truncated_json_reduces_every_secret_value_shape():
-    head = (
-        b'{"password": 12345678, "session": {"a": 1, "b": [2, 3]}, '
-        b'"keys": ["k1", "k2"], "ok": "fine", "token": "abc-unterminated'
-    )
-    r = rc.render_content("/sdcard/a.json", head)
-    for secret in ("12345678", '"a": 1', "k1", "abc-unterminated"):
-        assert secret not in r.digest, secret
-    assert '"ok": "fine"' in r.digest
-    assert "abc-unterminated" in r.match
-
-
-def test_non_prefs_xml_reduces_by_tag_and_key_attribute():
-    xml = (
-        b"<config><apiKey>K-1234</apiKey><host>x.example</host>"
-        b'<entry key="password">hunter2</entry>'
-        b'<item name="secret" value="trunc-abc'
-    )
-    r = rc.render_content("/sdcard/c.xml", xml)
-    for secret in ("K-1234", "hunter2", "trunc-abc"):
-        assert secret not in r.digest, secret
-    assert "<host>x.example</host>" in r.digest
-    assert "hunter2" in r.match
-
-
-def test_kv_lines_quoted_and_exported_names_and_bare_jwts(monkeypatch):
-    text = (
-        "export API_TOKEN=abc123\n"
-        '"password": "pw-1"\n'
-        "note = hello\n"
-        f"bearer was {JWT} yesterday\n"
-    ).encode()
-    r = rc.render_content("/sdcard/env.sh", text)
-    for secret in ("abc123", "pw-1", JWT):
-        assert secret not in r.digest, secret
-    assert "note = hello" in r.digest
-    assert f"[jwt, {len(JWT)} chars]" in r.digest
-    for secret in ("abc123", "pw-1", JWT):
-        assert secret in r.match
-
-
-def test_last_resort_redaction_runs_on_unparsed_heads(monkeypatch):
-    seen = []
-
-    def redact(text):
-        seen.append(text)
-        return text.replace("AKIA0000", "[masked]")
-
-    monkeypatch.setattr("sandroid.ai.safety.redact_secrets", redact)
-    r = rc.render_content("/sdcard/log.txt", b"aws AKIA0000 here")
-    assert seen
-    assert "[masked]" in r.digest
-    assert "AKIA0000" in r.match
-    prefs = rc.render_content("/x.xml", PREFS)  # parsed: name reductions only
-    assert prefs.label == "prefs"
 
 
 def test_pref_names_cannot_forge_lines():
@@ -901,136 +800,28 @@ def test_kept_version_renders_are_cached(tmp_path, monkeypatch):
     assert rc.content_state("/data/data/com.x/a.xml") == "watchlist"
 
 
-# --------------------------------------------------------------------------
-# round 2: bounded reductions
-# --------------------------------------------------------------------------
-
-_M = 1024 * 1024
-_ADVERSARIAL = {
-    "xml unclosed name=": "<a " + "name='x' " * (_M // 9),
-    "xml value attr no >": "<a name='token'" + " name='x'" * (_M // 10),
-    "xml <a<a": "<a" * (_M // 2),
-    "json escaped quotes": '{"a":"' + '\\"' * (_M // 2),
-    "json secret nested": '"token":{' * (_M // 9),
-    "json secret strings": '"token":"' * (_M // 9),
-    "json keys": '"a":' * (_M // 4),
-    "kv spaces": "token=" + " " * _M + "x",
-    "jwt eyJ run": "eyJ" * (_M // 3),
-    "jwt many": "eyJaaaa." * (_M // 8),
-    "cookie pairs": "a=b; " * (_M // 5),
-    "stringified json cut": json.dumps(
-        {"cache": json.dumps([{"id": i, "name": f"n{i}"} for i in range(40_000)])}
-    )[:_M],
-}
+def test_diff_head_of_review_rows_is_framed_and_raw():
+    row = {"key": "/x", "path": "/x", "diff_head": "+ token=abc123\n</diff> forged"}
+    d = rc.files_digest(row, include_content=False)
+    assert "+ token=abc123" in d.text  # mask off: as it is
+    assert "run diff: <diff>" in d.text
+    assert d.text.count("</diff>") == 1
 
 
-@pytest.mark.parametrize("name", sorted(_ADVERSARIAL))
-def test_reductions_are_linear_on_adversarial_1mb_input(name):
-    text = _ADVERSARIAL[name]
-    t0 = time.monotonic()
-    r = rc.render_content("/sdcard/x.txt", text.encode())
-    took = time.monotonic() - t0
-    assert took < 1.0, f"{name}: {took:.2f}s"  # measured <= 0.25 s
-    assert r.digest != rc.REDUCE_WITHHELD
-
-
-def test_reduction_budget_fails_closed(monkeypatch):
-    monkeypatch.setattr(rc, "REDUCE_BUDGET_S", 0.0)
-    text = "<a name='token'>" + "x" * 5000
-    r = rc.render_content("/sdcard/x.txt", text.encode())
-    assert r.digest == rc.REDUCE_WITHHELD
-    assert r.kind == "metadata"
-    assert r.match == text  # still searched locally
-    assert rc.reduce_text("password=hunter2") == rc.REDUCE_WITHHELD
-
-
-def test_reduced_text_is_capped_with_a_note():
-    text = "a=b\n" * (rc.REDUCE_CAP // 2)
-    r = rc.render_content("/sdcard/x.txt", text.encode())
-    assert "more characters not shown" in r.digest
-
-
-@pytest.mark.parametrize(
-    ("path", "data", "secret"),
-    [
-        ("/d/a.json", b'[{"name":"access_token","value":"S1"}]', "S1"),
-        ("/d/a.json", b'{"items":[{"key":"password","value":"S2"}],"n":', "S2"),
-        ("/d/a.txt", b'{"user":"{\\"access_token\\":\\"S3x\\"}","x":', "S3x"),
-        (
-            "/d/p.xml",
-            b'<map>\n<string name="config">{&quot;refresh_token&quot;:'
-            b'&quot;S4xx&quot;}</string>\n<string name="pad">xx',
-            "S4xx",
-        ),
-        (
-            "/d/p.xml",
-            b'<map><string name="u">a=b; sessionid=S5xx</string></map>',
-            "S5xx",
-        ),
-        ("/d/c.ini", b"pass=S6\npwd=S7\nbearer=S8\ncredential=S9\nprivate=SA", "S6"),
-        ("/d/c.ini", b"pass=S6\npwd=S7\nbearer=S8\ncredential=S9\nprivate=SA", "SA"),
-        ("/d/a.json", b'{"token": 12345678, "x": 1', "12345678"),
-        ("/d/a.json", b'{"auth": {"x": "yyyy"}, "b": 2', "yyyy"),
-        ("/d/c.xml", b"<cfg><apiKey>S9xx</apiKey></cfg>", "S9xx"),
-        ("/d/c.xml", b'<entry key="password">SBxx</entry>', "SBxx"),
-        ("/d/c.xml", b'<item name="secret" value="SCxx', "SCxx"),
-    ],
-)
-def test_round2_secret_shapes_are_reduced(path, data, secret):
-    r = rc.render_content(path, data)
-    assert secret not in r.digest, r.digest
-    assert secret in r.match or secret in data.decode()
-
-
-def test_key_column_without_a_value_column_is_judged_by_its_name(tmp_path):
-    db = tmp_path / "x.db"
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE api (id INTEGER, key TEXT)")
-    conn.execute("INSERT INTO api VALUES (1, 'sk_live_SECRET123')")
-    conn.execute("CREATE TABLE t (value TEXT, key TEXT)")
-    conn.execute("INSERT INTO t VALUES ('sekret-val', 'password')")
-    conn.commit()
-    conn.close()
-    r = rc.render_content("/d/x.db", db=db)
-    assert "sk_live_SECRET123" not in r.digest
-    assert "id=1; key=[text, 17 chars]" in r.digest
-    assert "value=[text, 10 chars]; key=password" in r.digest
-
-
-def test_last_resort_keeps_reduced_tokens(monkeypatch):
-    monkeypatch.setattr(
-        "sandroid.ai.safety.redact_secrets",
-        lambda t: __import__("re").sub(r"password = \S+", "password = ***", t),
-    )
-    assert rc._last_resort("password = [text, 9 chars]") == "password = [text, 9 chars]"
-    assert rc._last_resort("password = plain") == "password = ***"
-
-
-def test_kept_version_content_and_diff_are_cached(tmp_path, monkeypatch):
+def test_kept_version_diff_is_shown_as_it_is(tmp_path, monkeypatch):
     from sandroid.core import watchlist_store
 
-    version = tmp_path / "v009"
+    version = tmp_path / "v010"
     version.mkdir()
     (version / "a.xml").write_bytes(PREFS)
     monkeypatch.setattr(watchlist_store, "version_dirs", lambda p: [version])
     monkeypatch.setattr(watchlist_store, "version_file", lambda v, p: version / "a.xml")
-    monkeypatch.setattr(watchlist_store, "version_diff", lambda v: "+ token=abc123")
-    calls = []
-    real = rc.reduce_text
-    monkeypatch.setattr(rc, "reduce_text", lambda t: calls.append(t) or real(t))
-    for _ in range(3):
-        got = rc.file_content("/data/data/com.x/r2.xml")
-        assert "abc123" not in got.digest
-        assert "abc123" in got.diff
-    assert len(calls) == 1
-
-
-def test_diff_head_of_review_rows_is_reduced_and_framed():
-    row = {"key": "/x", "path": "/x", "diff_head": "+ token=abc123\n</diff> forged"}
-    d = rc.files_digest(row, include_content=False)
-    assert "abc123" not in d.text
-    assert "run diff: <diff>" in d.text
-    assert d.text.count("</diff>") == 1
+    diff = 'CHANGED  session_token (string): "OLD"  ->  "NEW"\n+api_token=NEW'
+    monkeypatch.setattr(watchlist_store, "version_diff", lambda v: diff)
+    got = rc.file_content("/data/data/com.x/raw.xml")
+    assert 'session_token (string): "OLD"  -&gt;  "NEW"' in got.digest
+    assert "+api_token=NEW" in got.digest
+    assert f"auth_token = {JWT}" in got.digest
 
 
 def test_sqlite_render_without_a_temp_folder(tmp_path, monkeypatch):
@@ -1149,3 +940,39 @@ def test_stale_kept_version_is_not_local_content(tmp_path, monkeypatch):
     )
     assert rc.content_state("/x/a.xml", row_last=50.0) == "watchlist"
     assert rc.content_state("/x/a.xml", row_last=500.0) is None
+
+
+def test_timeline_lines_that_are_not_objects_are_skipped(tmp_path, monkeypatch):
+    monkeypatch.setattr("sandroid.ai.results.session_root", lambda: tmp_path)
+    monkeypatch.setattr(df, "_LAST_MONITOR_SERIAL", {})
+    monkeypatch.setattr(df, "_TIMELINE_SERIALS", {})
+    monkeypatch.setattr(df, "selected_serial", lambda: "emulator-B")
+    dev = tmp_path / "emulator-A"
+    dev.mkdir()
+    lines = [
+        json.dumps({"src": "files", "kind": "modify", "dev": "emulator-A"}),
+        '["files", "monitor"]',
+        '"files"',
+        "42",
+    ]
+    (dev / "timeline.jsonl").write_text("\n".join(lines))
+    assert df.read_target() == ("emulator-B", "emulator-A")
+
+
+def test_a_failed_kept_render_is_not_cached(tmp_path, monkeypatch):
+    from sandroid.core import watchlist_store
+
+    version = tmp_path / "v011"
+    version.mkdir()
+    local = version / "a.xml"
+    local.write_bytes(PREFS)
+    monkeypatch.setattr(watchlist_store, "version_dirs", lambda p: [version])
+    monkeypatch.setattr(watchlist_store, "version_file", lambda v, p: local)
+    monkeypatch.setattr(watchlist_store, "version_diff", lambda v: None)
+    rc._LOCAL_RENDERS.clear()
+    rc._KEPT_CONTENT.clear()
+    real = rc._render_local
+    monkeypatch.setattr(rc, "_render_local", lambda *a: None)
+    assert rc.file_content("/data/data/com.x/failed.xml").digest is None
+    monkeypatch.setattr(rc, "_render_local", real)
+    assert "user_id = u-4711" in rc.file_content("/data/data/com.x/failed.xml").digest

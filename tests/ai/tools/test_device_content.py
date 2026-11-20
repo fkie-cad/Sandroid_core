@@ -176,7 +176,7 @@ def test_reads_counts_and_never_returns_content(env):
     assert JWT not in json.dumps(kw, default=str)
 
 
-def test_content_reaches_the_lens_tools_reduced_but_findable(env):
+def test_content_reaches_the_lens_tools_as_it_is_with_mask_off(env):
     before = lens_rows.find_rows("files", {"content_contains": "eyJ"})
     assert before["matched"] == 0
     assert before["content_missing"] >= 4
@@ -185,7 +185,7 @@ def test_content_reaches_the_lens_tools_reduced_but_findable(env):
     device_content.read_device_files(where={"path_glob": [f"{PKG}/*"]})
 
     found = lens_rows.find_rows("files", {"content_contains": "eyJ"})
-    assert found["keys"] == [P_PREFS]  # a token under a secret-named key
+    assert found["keys"] == [P_PREFS]
     assert lens_rows.find_rows("files", {"content_contains": "u-4711"})["keys"] == [
         P_PREFS,
         P_GZ,
@@ -195,12 +195,13 @@ def test_content_reaches_the_lens_tools_reduced_but_findable(env):
     ]
     got = lens_rows.get_rows("files", keys=[P_PREFS, P_JSON, P_DB])
     digests = {r["key"]: r["digest"] for r in got["rows"]}
-    assert f"auth_token = [jwt, {len(JWT)} chars]" in digests[P_PREFS]
+    # Mask off: no secret reduction, the values reach the digest as they are.
+    assert f"auth_token = {JWT}" in digests[P_PREFS]
     assert "content read from device" in digests[P_PREFS]
-    assert JWT not in digests[P_PREFS]
     assert "user_id = u-4711" in digests[P_PREFS]
-    assert "K-777" not in digests[P_JSON]
+    assert '"api_key":"K-777"' in digests[P_JSON]
     assert '"device_id":"d-1"' in digests[P_JSON]
+    assert "session_key=deadbeefcafebabe" in digests[P_DB]
     assert "accounts (1 rows)" in digests[P_DB]
     assert got["rows"][0]["content"] == "content"
 
@@ -459,57 +460,86 @@ def test_device_text_is_framed_and_escaped_in_digests(env):
 
 
 def test_own_reads_leave_the_tool_rows_only_as_noise_on_paths_we_read(monkeypatch):
+    from datetime import datetime
     from types import SimpleNamespace
 
     from sandroid.tui.widgets.highlight_bar import file_snapshot
 
     monkeypatch.setattr(df, "_TOOL_READS", {})
     path = f"{PKG}/a.txt"
+    now = datetime.now()
     reads = SimpleNamespace(
-        ops={"modify": 1, "noise": 6},
+        ops={"noise": 6},
         count=7,
         processes={"com.x": 1, "cat": 3, "head · 8034": 2, "su": 1},
-        first=None,
-        last=None,
+        first=now,
+        last=now,
     )
     # Not read by the tool: everything stays.
     snap = file_snapshot(path, shown=True, act=reads)
     assert snap["count"] == 7
     assert "cat" in snap["processes"]
-    df.note_tool_read(path)
+    df.note_tool_read(path, SERIAL)
     snap = file_snapshot(path, shown=True, act=reads)
     assert snap["processes"] == ["com.x"]
     assert snap["count"] == 1
-    # A dropper: su / cat WRITE (more of them than the open/close noise).
-    dropper = SimpleNamespace(
-        ops={"create": 1, "modify": 2, "noise": 1},
-        count=4,
-        processes={"su": 2, "cat": 2},
-        first=None,
-        last=None,
+    # Any write on the row: every process and every event stays.
+    for ops in ({"modify": 1, "noise": 6}, {"create": 1, "modify": 2, "noise": 1}):
+        act = SimpleNamespace(
+            ops=ops,
+            count=sum(ops.values()),
+            processes={"su": 1, "com.x": sum(ops.values()) - 1},
+            first=now,
+            last=now,
+        )
+        snap = file_snapshot(path, shown=True, act=act)
+        assert "su" in snap["processes"]
+        assert snap["count"] == sum(ops.values())
+    # A read long ago is not ours now.
+    old = SimpleNamespace(
+        ops={"noise": 2},
+        count=2,
+        processes={"cat": 2},
+        first=datetime.fromtimestamp(1.0),
+        last=datetime.fromtimestamp(1.0),
     )
-    snap = file_snapshot(path, shown=True, act=dropper)
-    assert set(snap["processes"]) == {"su", "cat"}
-    assert snap["count"] == 3  # at most the noise is taken off
+    assert file_snapshot(path, shown=True, act=old)["processes"] == ["cat"]
 
 
-def test_monitor_fallback_skips_only_our_noise(monkeypatch):
+def test_monitor_fallback_skips_only_our_noise_in_our_window(monkeypatch):
+    import time as _time
+
     monkeypatch.setattr(df, "_TOOL_READS", {})
+    monkeypatch.setattr(df, "monitor_serial", lambda: SERIAL)
+    now = _time.time()
     other = f"{PKG}/files/other.bin"
     events = [
-        {"path": P_PREFS, "event_type": "MODIFY", "process": "com.x", "timestamp": 10},
-        {"path": P_PREFS, "event_type": "OPEN", "process": "com.x", "timestamp": 20},
-        {"path": P_PREFS, "event_type": "ACCESS", "process": "cat", "timestamp": 30},
+        {
+            "path": P_PREFS,
+            "event_type": "MODIFY",
+            "process": "com.x",
+            "timestamp": now - 100,
+        },
+        {"path": P_PREFS, "event_type": "OPEN", "process": "com.x", "timestamp": now},
+        {"path": P_PREFS, "event_type": "ACCESS", "process": "cat", "timestamp": now},
         {
             "path": P_PREFS,
             "event_type": "FSE_OPEN_WRITE",
             "process": "x",
-            "timestamp": 35,
+            "timestamp": now,
         },
-        {"path": other, "event_type": "MODIFY", "process": "cat", "timestamp": 40},
-        {"path": other, "event_type": "OPEN", "process": "cat", "timestamp": 41},
+        # an hour later: a cat copying the prefs away is not ours
+        {
+            "path": P_PREFS,
+            "event_type": "OPEN",
+            "process": "cat",
+            "timestamp": now + 3600,
+        },
+        {"path": other, "event_type": "MODIFY", "process": "cat", "timestamp": now},
+        {"path": other, "event_type": "OPEN", "process": "cat", "timestamp": now},
     ]
-    df.note_tool_read(P_PREFS)
+    df.note_tool_read(P_PREFS, SERIAL, now - 1, now + 1)
+    df.note_tool_read(other, "emulator-other", now - 1, now + 1)
 
     class Ctl:
         def get_recent_events(self, limit=2000):
@@ -520,15 +550,14 @@ def test_monitor_fallback_skips_only_our_noise(monkeypatch):
     )
     rows = {r["key"]: r for r in lens_rows._monitor_rows()}
     prefs = rows[P_PREFS]
-    assert prefs["count"] == 3  # our ACCESS dropped; OPEN W is noise, kept
-    assert prefs["processes"] == ["com.x", "x"]
+    assert prefs["count"] == 4  # only our ACCESS in the window dropped
+    assert prefs["processes"] == ["com.x", "x", "cat"]
     assert prefs["ops"] == "M"
-    assert prefs["last_change"] == 10
-    # A cat that WRITES, on a path the tool never read: real activity.
-    assert rows[other]["processes"] == ["cat"]
-    assert rows[other]["ops"] == "M"
+    assert prefs["last_change"] == now - 100
+    # Read on another device: its events stay; a write always stays.
     assert rows[other]["count"] == 2
-    assert lens_rows.change_time(prefs) == 10
+    assert rows[other]["ops"] == "M"
+    assert lens_rows.change_time(prefs) == now - 100
     assert lens_rows.change_time({"ops": "", "last": 50}) is None
 
 
@@ -610,3 +639,24 @@ def test_prompt_rules_read_first_and_plain_words():
     assert "WITHOUT content_contains" in text
     assert "content_unreadable" in text
     assert "Never use emoji or check-mark" in text
+
+
+def test_regex_searches_whole_lines_that_fit(env, monkeypatch):
+    from sandroid.ai import row_classifier
+
+    text = "a" * 60_000 + "end"  # one line under the window: searched whole
+    monkeypatch.setattr(
+        row_classifier,
+        "file_content",
+        lambda key, **kw: row_classifier.FileContent("d", text, "content"),
+    )
+    # \b and $ see the real line end, not a window edge.
+    assert (
+        lens_rows.find_rows("files", {"content_contains": r"a\b", "regex": True})[
+            "keys"
+        ]
+        == []
+    )
+    assert lens_rows.find_rows("files", {"content_contains": r"aend$", "regex": True})[
+        "keys"
+    ]

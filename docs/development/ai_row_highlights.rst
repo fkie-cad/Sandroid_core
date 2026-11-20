@@ -535,9 +535,9 @@ The cache: ``<session>/ai/content_cache/<sha1(path)>/`` (folders 0700, files
 serial, the row's ``last``, device mtime and size, ``read_at``, kind,
 label, truncated, root mode, the device-state token), ``raw.bin`` (text
 files; binaries keep only size and magic; database copies are not kept,
-they are rendered once), ``match.txt`` (the full decoded text,
-unreduced: searched locally by ``content_contains``, never sent) and
-``digest.txt`` (the reduced rendering). An entry is stale when the row's
+they are rendered once), ``match.txt`` (the full decoded text, searched
+locally by ``content_contains``) and ``digest.txt`` (the rendering shown
+to the model). An entry is stale when the row's
 ``last`` is newer than the one it was read for (the monitor saw a write),
 when the batched stat shows another mtime or size, when it came from another
 serial, after a WORLD lease, when a ``-wal``'s mtime or size changed, when a
@@ -545,56 +545,37 @@ bigger ``max_bytes_per_file`` (for a truncated read) or ``sqlite="sample"``
 after ``tables`` / ``skip`` is asked for, or with ``refresh=true``;
 ``only_missing`` (default) also skips files whose kept watchlist version is
 as new as the row. Rendered kept watchlist versions are cached in memory
-(32 versions), so repeated searches over watched databases do not render
-them again. A session switch is a
+(32 versions; a failed render is not cached), so repeated searches over
+watched databases do not render them again. A session switch is a
 different folder. At most 64 MB per session, oldest ``read_at`` evicted
 first. The tool never writes the watchlist, the forensic service or the
 privacy scan.
 
 Privacy rules:
 
-- Headers whose name matches ``auth|token|key|secret|session|cookie|
-  password|signature`` (case-insensitive; plus ``Authorization``,
-  ``Cookie``, ``Set-Cookie`` and the usual API/CSRF headers) are always
-  reduced to their type and length (``[Bearer, 132 chars]``,
-  ``[cookie, 3 part(s), 240 chars]``).
-- Query parameters (in the summary line and the query line) and JSON or
-  form body fields with such names are always reduced to type and length
-  (``access_token=[jwt, 180 chars]``, ``"password":"[text, 7 chars]"``),
-  whether ``ai.mask_sensitive`` is on or not.
-- File content the same way, always: prefs keys (``auth_token = [jwt, 180
-  chars]``), JSON keys, SQLite column names and ``name=value`` lines of
-  text files whose name matches (also ``export NAME=`` and quoted names);
-  a key/value table's value cell by the name in its ``key`` / ``name``
-  cell; JSON inside a prefs value or a SQLite cell by its own keys; any
-  JWT-shaped value whatever its name. XML or JSON that does not parse (a
-  truncated head) is reduced by pattern (element tags, ``name=`` /
-  ``key=`` attributes, every JSON value shape, cut-off values), then by
-  ``redact_secrets``. Device text in a digest is framed in ``<content>`` /
-  ``<diff>`` with ``<``/``>`` escaped and names/values kept on one line, so
-  it cannot forge digest lines. ``content_contains`` searches the full local
-  text (``match.txt`` / the kept copy, up to 2 MB; the last diff apart), so
-  "files containing this token" still finds a token stored under a
-  secret-named key, while the model only ever gets the reduced digest. With
-  ``ai.mask_sensitive`` on it searches only the reduced, masked text and
-  refuses ``regex`` (no character-by-character oracle). A regex runs line by
-  line, long lines in 64 KB windows overlapping by 8 KB; rows that run out
-  of the per-row time budget are counted (``content_not_searched``, and
-  "N rows not searched (time limit)" in the summary).
-- The reductions are linear: one JSON tokenizer pass, a ``find()``-driven
-  XML tag scanner with a 4 KB tag head, per-line ``k=v`` / cookie-pair
-  parsing, maximal-run JWT scanning. At most 256 KB of a file's text is
-  reduced (the rest is left out of the digest, with a note), and a 2 s
-  budget per rendering fails closed (the digest is withheld). Kept
-  versions' renders and reduced diffs are cached per version.
-- Secret-looking names also include ``pass``, ``pwd``, ``credential``,
-  ``bearer`` and ``private`` (network digests too). A ``key`` / ``name``
-  column (or JSON key) is the row's name only next to a ``value`` /
-  ``data`` column; otherwise it is judged by its own name.
+- With ``ai.mask_sensitive`` off, content is sent as it is: there is no
+  credential or secret reduction (``Authorization`` / ``Cookie`` headers,
+  secret-named query, form and JSON fields, prefs values, SQLite cells,
+  diffs). Deciding what may go to the endpoint is the responsibility of the
+  people using the tool. (Before this feature the Network digests reduced
+  secret-named values; that is gone.)
+- Device text in a Files digest is framed in ``<content>`` / ``<diff>``
+  with ``<``/``>`` escaped and prefs names / values and SQLite cells kept on
+  one line, so it cannot forge digest lines (a prompt-injection defence,
+  not masking).
+- ``content_contains`` searches the full local text (``match.txt`` / the
+  kept copy, up to 2 MB; the last diff apart). A regex runs line by line:
+  whole lines up to 64 KB (so ``$``, ``\b`` and lookaheads see the real
+  line end), longer lines in 64 KB windows overlapping by 8 KB. Rows that
+  run out of the per-row time budget are counted once each
+  (``content_not_searched``, and "N rows not searched (time limit)" in the
+  summary).
 - With ``ai.mask_sensitive`` on, every digest runs through
   :func:`~sandroid.ai.safety.redact_secrets`; if that raises, the digest is
   replaced by ``[digest withheld: secret redaction failed]`` (fails closed)
-  and the row is judged as metadata only.
+  and the row is judged as metadata only. ``content_contains`` then
+  searches only the masked digest text and refuses ``regex`` (no
+  character-by-character oracle over masked values).
 - ``bytes_sent`` and ``requests`` count only requests that went out (the
   stream got past the gateway slot), retries included; they are in the
   result and the set's stats.
@@ -680,7 +661,7 @@ Tests
   ids and forged row boundaries, parse and unknown ids, retry and halving,
   transport retry / no halving / three-in-a-row stop, bytes only for sent
   requests, cancelled second half, cancel, deadline, gateway peak, digests,
-  secret-name reduction, fail-closed masking.
+  values sent as they are with mask off, fail-closed masking.
 - ``tests/ai/tools/test_lens_rows.py``: every ``where`` field, ``apply``,
   limits, subagent refusal, lens sources and fallbacks, ``classify_rows``
   end to end with a fake client, backend errors, a set cleared or a session
