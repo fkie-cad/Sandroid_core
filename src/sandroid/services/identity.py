@@ -105,6 +105,10 @@ GAID_FILE = f"{GAID_DIR}/adid_settings.xml"
 APPSET_FILE = f"/data/data/{GMS}/files/appset/shared/pvids.pb"
 PREFLIGHT_TAG = "@@identity-preflight@@"
 NEEDS_RESTART = "needs a framework restart"
+NEEDS_RESTART_AT_START = (
+    "the identity profile needs an Android framework restart;"
+    " start the app again to confirm it"
+)
 NOT_ROOT = "adbd is not root"
 NO_RESETPROP = "resetprop (Magisk) missing"
 #: Failures no apply can fix on this device as it is (no step is planned).
@@ -1796,6 +1800,8 @@ class DeviceState:
     #: Lists whose provider did not answer (no row, no "No result found."):
     #: not up yet, e.g. right after a framework restart.
     lists_unread: set[str] = field(default_factory=set)
+    #: The installed-packages list was read (``pm list packages -U``).
+    uids_read: bool = False
     #: Package -> ``uid:inode`` of its data directory (see :func:`_install_cmd`).
     installs: dict[str, str] = field(default_factory=dict)
 
@@ -1859,6 +1865,7 @@ def parse_preflight(serial: str, text: str) -> DeviceState:
     state.system_server = sec.get("system_server", "").split(" ")[0]
     state.marker = sec.get("marker", "")
     state.boot_id = sec.get("boot_id", "")
+    state.uids_read = "package:" in sec.get("uids", "")
     state.gms = sec.get("gms", "").startswith("package:")
     for line in sec.get("settings", "").splitlines():
         key, _, value = line.partition("=")
@@ -2128,6 +2135,9 @@ class _Applied:
     #: Framework-restart value ids that fail structurally here
     #: (:data:`STRUCTURAL`, skipped, hook-only): no restart can apply them.
     unappliable: set[str] = field(default_factory=set)
+    #: ``unappliable`` comes from a preflight of this process (fresher than
+    #: the device record, which only an apply rewrites).
+    observed: bool = False
     #: Framework-restart values other than the Android ID that are on the
     #: device: value id -> volatile (the device forgets it on reboot).
     settled: dict[str, bool] = field(default_factory=dict)
@@ -2155,7 +2165,8 @@ def applied_record(
     """The device record (:data:`APPLIED_FILE`) for ``mem``.
 
     Keys: ``format``, ``version``, ``profile``, ``fingerprint``, ``boot_id``
-    (kernel boot id of the apply), ``at`` (epoch s), ``done`` (packages fully
+    (kernel boot id of the apply), ``at`` (epoch s of the apply),
+    ``verified_at`` (epoch s of its read-back), ``done`` (packages fully
     applied), ``ssaids`` (package -> Android ID verified with this
     fingerprint), ``installs`` (package -> ``uid:inode`` of its data
     directory when it was seeded), ``framework`` (framework-restart value id
@@ -2170,6 +2181,7 @@ def applied_record(
         "fingerprint": fp,
         "boot_id": boot_id,
         "at": round(at, 3),
+        "verified_at": round(mem.verified_at, 3),
         "done": sorted(mem.done),
         "ssaids": {p: mem.seeded[p] for p in seeded},
         "installs": {p: mem.installs[p] for p in seeded if p in mem.installs},
@@ -2182,7 +2194,11 @@ def _record_sig(record: dict[str, Any]) -> str:
     """Content signature of a record; the time counts to the second (a later
     apply rewrites the record, sub-second noise does not).
     """
-    body = dict(record, at=int(record.get("at") or 0))
+    body = dict(
+        record,
+        at=int(record.get("at") or 0),
+        verified_at=int(record.get("verified_at") or 0),
+    )
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
 
 
@@ -2210,6 +2226,7 @@ def parse_applied_record(text: str) -> dict[str, Any] | None:
         or not isinstance(data.get("fingerprint"), str)
         or not isinstance(data.get("boot_id"), str)
         or not isinstance(data.get("at"), int | float)
+        or not isinstance(data.get("verified_at"), int | float)
         or not _str_list(data.get("done"))
         or not _str_map(data.get("ssaids"))
         or not _str_map(data.get("installs"))
@@ -2239,6 +2256,24 @@ def record_script(package: str | None = None) -> str:
         lines += ["echo @@install@@", _install_cmd(package)]
     lines.append("echo @@end@@")
     return "\n".join(lines)
+
+
+def _learn_unappliable(mem: _Applied, plan: IdentityPlan) -> None:
+    """Framework-restart values ``plan`` found structurally unappliable
+    (:data:`STRUCTURAL`, skipped, hook-only); every other one is dropped.
+    """
+    for vid, info in plan.infos.items():
+        spec = REGISTRY.get(info.kind)
+        if spec is None or spec.restart != "framework":
+            continue
+        structural = info.status in ("skipped", "hook-only") or (
+            info.status == "failed" and info.reason in STRUCTURAL
+        )
+        if structural:
+            mem.unappliable.add(vid)
+        else:
+            mem.unappliable.discard(vid)
+    mem.observed = True
 
 
 def _knowledge(mem: _Applied) -> tuple:
@@ -2687,7 +2722,7 @@ class IdentityService:
             if mem.fingerprint != fp:
                 mem.fingerprint, mem.emu, mem.done = fp, {}, set()
                 mem.seeded, mem.installs, mem.settled = {}, {}, {}
-                mem.unappliable = set()
+                mem.unappliable, mem.observed = set(), False
                 mem.applied_at = mem.verified_at = 0.0
                 mem.gen += 1
             if state.ok and state.boot_id and mem.boot_id not in ("", state.boot_id):
@@ -2758,6 +2793,11 @@ class IdentityService:
                 )
             else:
                 info.status = "verified"
+        with self._lock:
+            if mem.fingerprint == fp:
+                # Root or resetprop may have come (or gone) since: a start
+                # announces the restart again once it can apply the value.
+                _learn_unappliable(mem, plan)
         return plan
 
     def _plan_ssaid(
@@ -2940,6 +2980,7 @@ class IdentityService:
         if state.ok and not mem.befores_done:
             mem.befores.update(self._befores(profile, state))
             mem.befores_done = True
+        pkgs = self._drop_uninstalled(mem, state, pkgs, package)
         plan = self._plan(profile, state, pkgs)
         if not plan.steps:
             self._finish(profile, plan, state, wrote=False, package=package)
@@ -3018,6 +3059,38 @@ class IdentityService:
         )
         self._finish(profile, plan, state2, wrote=True, package=package)
         return plan
+
+    def _drop_uninstalled(
+        self,
+        mem: _Applied,
+        state: DeviceState,
+        pkgs: tuple[str, ...],
+        package: str | None,
+    ) -> tuple[str, ...]:
+        """Forget apps seeded earlier that are not installed any more.
+
+        They would keep the Android ID pending ("not installed"), so no app
+        would ever be done. The app being started stays (its own status).
+        """
+        if not state.ok or not state.uids_read:
+            return pkgs
+        gone = {
+            p
+            for p in pkgs
+            if p != package
+            and (state.packages.get(p) is None or state.packages[p].uid is None)
+        }
+        if not gone:
+            return pkgs
+        logger.info(f"identity: no longer installed: {', '.join(sorted(gone))}")
+        with self._lock:
+            for p in gone:
+                mem.ssaids.pop(p, None)
+                mem.seeded.pop(p, None)
+                mem.installs.pop(p, None)
+                mem.done.discard(p)
+            mem.gen += 1
+        return tuple(p for p in pkgs if p not in gone)
 
     def _await_providers(
         self,
@@ -3419,13 +3492,17 @@ class IdentityService:
         (in the background, or by the next app start). Never blocks.
         """
         with self._lock:
-            serials = [serial] if serial else list(self._applied)
+            serials = [serial] if serial else [*self._applied, *self._record_dirty]
             for s in serials:
                 self._hydrated.discard(s)
                 self._hydrate_tried.pop(s, None)
+                # A snapshot load restores the record with the device.
+                self._record_dirty.discard(s)
                 mem = self._applied.get(s)
                 if mem is not None:
                     mem.applied_at = mem.verified_at = 0.0
+                    mem.gen += 1  # a read that started before is stale
+                    mem.observed = False  # the record is the truth again
         self._notify_status()
 
     def _read_record(
@@ -3533,6 +3610,7 @@ class IdentityService:
                 if rec["fingerprint"] != mem.fingerprint:
                     mem.fingerprint, mem.emu = rec["fingerprint"], {}
                     mem.applied_at = mem.verified_at = 0.0
+                    mem.observed = False
                 same_boot = bool(read.boot_id) and rec["boot_id"] == read.boot_id
                 mem.done = set(rec["done"]) if same_boot else set()
                 mem.seeded = dict(rec["ssaids"])
@@ -3542,9 +3620,15 @@ class IdentityService:
                     for vid, vol in rec["framework"].items()
                     if same_boot or not vol
                 }
-                mem.unappliable = set(rec["unappliable"])
+                # A value counts as unappliable only while both say so (a
+                # later preflight may have found root or resetprop).
+                unappliable = set(rec["unappliable"])
+                if mem.observed:
+                    unappliable &= mem.unappliable
+                mem.unappliable = unappliable
                 mem.record_sig = _record_sig(rec)
                 mem.applied_at = max(mem.applied_at, float(rec["at"]))
+                mem.verified_at = max(mem.verified_at, float(rec["verified_at"]))
             if read.boot_id:
                 mem.boot_id = read.boot_id
             changed = before != _knowledge(mem)
@@ -3716,17 +3800,11 @@ class IdentityService:
             else:
                 mem.seeded.pop(pkg, None)
                 mem.installs.pop(pkg, None)
+        _learn_unappliable(mem, plan)
         for vid, vinfo in plan.infos.items():
             spec = REGISTRY.get(vinfo.kind)
             if spec is None or spec.restart != "framework":
                 continue
-            structural = vinfo.status in ("skipped", "hook-only") or (
-                vinfo.status == "failed" and vinfo.reason in STRUCTURAL
-            )
-            if structural:
-                mem.unappliable.add(vid)
-            else:
-                mem.unappliable.discard(vid)
             if vinfo.kind == "android_id":  # per package: ``seeded``
                 continue
             if vinfo.status in ("verified", "applied"):
@@ -3881,13 +3959,17 @@ class IdentityService:
         with self._lock:
             mem = self._applied.get(serial)
             ours = mem is not None and mem.fingerprint == fp
-            if ours and read is not None:
-                known = mem.installs.get(package, "")
-                if not read.install or known != read.install:
-                    # Reinstalled (or gone): a new Android ID, nothing done.
-                    mem.done.discard(package)
-                    mem.seeded.pop(package, None)
-                    mem.installs.pop(package, None)
+            if (
+                ours
+                and read is not None
+                and read.install  # "" = not readable here (no root): unknown
+                and package in mem.seeded
+                and mem.installs.get(package) != read.install
+            ):
+                # Reinstalled: a new Android ID, nothing done.
+                mem.done.discard(package)
+                mem.seeded.pop(package, None)
+                mem.installs.pop(package, None)
             if ours and package in mem.done and not recovery:
                 return None
             seeded = ours and package in mem.seeded
@@ -3925,6 +4007,13 @@ class IdentityService:
                 raise IdentityApplyError(
                     f"identity profile {profile.id!r}: {failed[0].label}: {failed[0].reason}"
                 )
+            if allow and any(
+                i.status == "pending" and i.reason == NEEDS_RESTART
+                for i in plan.infos.values()
+            ):
+                # Starting now would show the app its real values (it may
+                # cache them); the next start announces the restart.
+                raise IdentityApplyError(NEEDS_RESTART_AT_START)
 
         return _pre_spawn_plan_cls()(
             description=f"apply identity profile {profile.id!r} ({', '.join(kinds)})",

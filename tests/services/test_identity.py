@@ -223,6 +223,7 @@ class FakeDevice:
         self.record_reads = 0
         self.record_down = False
         self.root = True  # adbd runs as root
+        self.stat_down = False  # ``stat`` of app data prints nothing
         self.resetprop = True  # Magisk's resetprop is installed
 
     # -- transport --------------------------------------------------------
@@ -355,6 +356,8 @@ class FakeDevice:
         if name == "cat":
             return self.fs.get(argv[1], b"").decode().strip()
         if name == "stat" and argv[3].startswith("/data/data/"):
+            if self.stat_down:
+                return ""
             return self.install(argv[3].removeprefix("/data/data/"))
         if name == "stop":
             self.running = False
@@ -1704,7 +1707,9 @@ def test_a_start_never_restarts_unannounced(service, device, app_start):
     device.props["persist.sys.locale"] = "en-US"
     plan = service.pre_spawn(PKG)
     assert not plan.disruptive
-    plan.apply()  # the locale stays pending: no failure, no restart
+    # The locale stays pending: no restart, and the app does not start.
+    with pytest.raises(ident.IdentityApplyError, match="start the app again"):
+        plan.apply()
     assert device.pid == pid  # no framework restart
     assert device.props["persist.sys.locale"] == "en-US"
     assert PKG not in _record(device)["done"]
@@ -1877,7 +1882,7 @@ def test_forget_drops_the_times_and_reads_the_record_again(service, device):
     # The next look reads the record again (in the background).
     service.last_apply(SERIAL, fp)
     service._join_hydration(5)
-    assert service.last_apply(SERIAL, fp) == (NOW, 0.0)
+    assert service.last_apply(SERIAL, fp) == (NOW, NOW)  # both from the record
     # A record that is gone (a snapshot from before): no times at all.
     del device.fs[ident.APPLIED_FILE]
     service.forget()
@@ -1956,3 +1961,116 @@ def test_the_start_read_is_one_short_round_trip(
     assert _fresh().pre_spawn(PKG) is None
     assert len(timeouts) == 1
     assert timeouts[0] <= 3
+
+
+# ---------------------------------------------------------------------------
+# device record: second review round
+# ---------------------------------------------------------------------------
+
+
+def test_no_native_android_id_is_done_once(service, device, app_start):
+    """With the Android ID hook-only no install identity is recorded; the
+    app is done after one apply and later starts touch nothing.
+    """
+    profile = service.active_profile()
+    profile.values["android_id"].provider = "hook"
+    service.save(profile)
+    now = [NOW]
+    service._now = lambda: now[0]
+    service.apply(SERIAL, PKG)
+    assert _record(device)["done"] == [PKG]
+    assert _record(device)["installs"] == {}
+    for _ in range(3):
+        now[0] += 5
+        device.writes.clear()
+        assert service.pre_spawn(PKG) is None
+        assert _fresh().pre_spawn(PKG) is None
+        assert device.writes == []
+
+
+def test_an_unreadable_install_does_not_undo_done(service, device, app_start):
+    service.apply(SERIAL, PKG)
+    device.stat_down = True  # e.g. adbd lost root: stat prints nothing
+    assert service.pre_spawn(PKG) is None
+    assert _fresh().pre_spawn(PKG) is None
+
+
+def test_a_stale_unappliable_entry_never_starts_the_app_unseeded(
+    service, device, app_start, monkeypatch
+):
+    profile = service.active_profile()
+    profile.values["build_model"].enabled = True
+    service.save(profile)
+    device.resetprop = False
+    service.apply(SERIAL, PKG)
+    assert service._applied[SERIAL].unappliable == {"build_model"}
+    device.resetprop = True  # Magisk arrived
+    plan = service.pre_spawn(PKG)
+    assert not plan.disruptive  # memory still says it cannot be applied
+    pid = device.pid
+    with pytest.raises(ident.IdentityApplyError, match="framework restart"):
+        plan.apply()
+    assert device.pid == pid  # no unannounced restart
+    assert service._applied[SERIAL].unappliable == set()
+    assert service.pre_spawn(PKG).disruptive  # the next start asks
+    # The restart policy "never": nothing to confirm, the app starts.
+    monkeypatch.setattr(service.config(), "restart", "never")
+    service.pre_spawn(PKG).apply()
+
+
+def test_every_preflight_relearns_unappliable(service, device, app_start):
+    profile = service.active_profile()
+    profile.values["build_model"].enabled = True
+    service.save(profile)
+    device.resetprop = False
+    service.apply(SERIAL, PKG)
+    device.resetprop = True
+    service.plan(SERIAL, PKG)  # a plain read (the lens, a verify)
+    assert service._applied[SERIAL].unappliable == set()
+    assert service.pre_spawn(PKG).disruptive
+
+
+def test_forget_moves_gen_and_clears_the_dirty_mark(service, device):
+    service.apply(SERIAL, PKG)
+    gen = service._applied[SERIAL].gen
+    service._record_dirty.update({SERIAL, "emulator-5582"})
+    service.forget(SERIAL)
+    assert service._applied[SERIAL].gen > gen
+    assert service._record_dirty == {"emulator-5582"}
+    read = service._read_record(SERIAL)
+    assert service._hydrate(SERIAL, read, gen=gen) is False  # started before
+    service.forget()
+    assert service._record_dirty == set()
+
+
+def test_the_record_keeps_the_verify_time(service, device):
+    now = [NOW]
+    service._now = lambda: now[0]
+    service.apply(SERIAL, PKG)
+    assert _record(device)["verified_at"] == NOW
+    now[0] = NOW + 60
+    service.verify(SERIAL)  # no write outside apply
+    assert _record(device)["verified_at"] == NOW
+    now[0] = NOW + 120
+    service.apply(SERIAL, PKG)
+    assert _record(device)["verified_at"] == NOW + 120
+    fresh = _fresh()
+    fresh.last_apply(SERIAL)
+    fresh._join_hydration(5)
+    assert fresh.last_apply(SERIAL) == (NOW + 120, NOW + 120)
+
+
+def test_an_uninstalled_app_leaves_the_per_app_set(service, device, app_start):
+    other = "com.other.app"
+    service.apply(SERIAL, other)
+    service.apply(SERIAL, PKG)
+    assert set(_record(device)["ssaids"]) == {PKG, other}
+    del device.packages[other]
+    device.fs[ident.BOOT_ID_FILE] = b"boot-2\n"  # PKG needs an apply again
+    plan = service.pre_spawn(PKG)
+    plan.apply()
+    record = _record(device)
+    assert record["done"] == [PKG]
+    assert set(record["ssaids"]) == {PKG}
+    assert other not in service._applied[SERIAL].ssaids
+    assert service.pre_spawn(PKG) is None
