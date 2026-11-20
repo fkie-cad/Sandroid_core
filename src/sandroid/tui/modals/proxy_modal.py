@@ -456,19 +456,19 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             yield KeyHintFooter(
                 hints={
                     "default": (
-                        "[dim]Shift+←/→=Tabs  Tab=Next  Ctrl+S=Apply  "
+                        "[dim]Shift+Left/Right=Tabs  Tab=Next  Ctrl+S=Apply  "
                         f"{_LETTER_HINTS}  Esc=Cancel[/dim]"
                     ),
                     "input": (
-                        "[dim]Shift+←/→=Tabs (empty field)  Tab=Next  "
+                        "[dim]Shift+Left/Right=Tabs (empty field)  Tab=Next  "
                         "Ctrl+S=Apply  Esc=Cancel[/dim]"
                     ),
                     "radioset": (
-                        "[dim]Shift+←/→=Tabs  Space=Select  Ctrl+S=Apply  "
+                        "[dim]Shift+Left/Right=Tabs  Space=Select  Ctrl+S=Apply  "
                         f"{_LETTER_HINTS}  Esc=Cancel[/dim]"
                     ),
                     "button": (
-                        "[dim]Shift+←/→=Tabs  Enter=Activate  Ctrl+S=Apply  "
+                        "[dim]Shift+Left/Right=Tabs  Enter=Activate  Ctrl+S=Apply  "
                         f"{_LETTER_HINTS}  Esc=Cancel[/dim]"
                     ),
                 }
