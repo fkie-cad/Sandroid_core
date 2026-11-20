@@ -54,7 +54,13 @@ if TYPE_CHECKING:
     from sandroid.world.packs import Pack
 
 #: Bump when the output for the same inputs changes.
-GENERATOR_VERSION = "1"
+#: 2: e-mail levels (``world.emails``, default ``reserved``).
+GENERATOR_VERSION = "2"
+#: RFC 2606 second-level domains reserved for documentation (``reserved``).
+RESERVED_EMAIL_DOMAINS = ("example.com", "example.net", "example.org")
+_DOMAIN_RE = re.compile(
+    r"^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+)
 #: Local midnight (a Monday) used while generating (weekdays, holiday years).
 NOMINAL_ANCHOR = dt.datetime(2026, 1, 5, 0, 0, 0)
 DAY = 86400
@@ -222,6 +228,7 @@ def generate(
     *,
     packs: PackSet | None = None,
     target_sdk: int | None = None,
+    email_domain: str | None = None,
 ) -> WorldManifest:
     """Generate a world.
 
@@ -234,6 +241,9 @@ def generate(
         target_sdk: API level of the emulator image. When the spec sets no
             device, only phones whose ``min_sdk <= target_sdk <= max_sdk``
             are drawn. Part of ``world_fp``.
+        email_domain: The domain for ``emails: owned``; None reads the
+            Sandroid config's ``world.email_domain`` (only for that level).
+            Without one, ``owned`` falls back to ``reserved`` with a warning.
 
     Returns:
         The manifest, with ``seed`` resolved (write it back when the spec said
@@ -254,9 +264,32 @@ def generate(
         or target_sdk <= 0
     ):
         raise ValueError("target_sdk must be a positive API level")
+    if spec.emails == "owned" and email_domain is None:
+        email_domain = configured_email_domain()
     gen = _Generator(spec, owner, packs or load_packs())
     gen.target_sdk = target_sdk
+    gen.set_email_level(spec.emails, email_domain)
     return gen.run()
+
+
+def configured_email_domain() -> str | None:
+    """Return the Sandroid config's ``world.email_domain`` (None if unset).
+
+    ``world`` is not a schema section yet; the config keeps unknown sections
+    as extras, so it is read defensively.
+    """
+    try:
+        from sandroid.config import get_config
+
+        world = getattr(get_config(), "world", None)
+    except Exception:  # a broken config means "not set"
+        return None
+    value = (
+        world.get("email_domain")
+        if isinstance(world, dict)
+        else getattr(world, "email_domain", None)
+    )
+    return value if isinstance(value, str) and value.strip() else None
 
 
 # ----------------------------------------------------------------- helpers
@@ -577,6 +610,8 @@ class _Generator:
         self.people: list[_Person] = []
         self.partner: _Person | None = None
         self.used_emails: set[str] = set()
+        self.email_level = "realistic"
+        self.email_domain: str | None = None
         self.target_sdk: int | None = None
         self.services: list[dict[str, Any]] = []
         self._codes: set[str] = set()
@@ -587,6 +622,21 @@ class _Generator:
     def warn(self, msg: str) -> None:
         if msg not in self.warnings:
             self.warnings.append(msg)
+
+    def set_email_level(self, level: str, domain: str | None) -> None:
+        """Pick the e-mail level; ``owned`` without a valid domain -> reserved."""
+        if level == "owned":
+            dom = (domain or "").strip().lower().rstrip(".")
+            if dom and _DOMAIN_RE.match(dom):
+                self.email_domain = dom
+            else:
+                self.warn(
+                    "emails: 'owned' needs the Sandroid config world.email_domain"
+                    + (f" (invalid: {domain!r})" if domain else "")
+                    + "; used reserved example domains"
+                )
+                level = "reserved"
+        self.email_level = level
 
     def stream(self, label: str) -> SeedStream:
         return SeedStream(self.seed_bytes, label)
@@ -868,9 +918,14 @@ class _Generator:
             return
         cdata = self.packs.country(p.culture).data.get("email") or self.cd["email"]
         domains = self.cd["email"]["domains"]
-        domain = domains[s.weighted_index(self.cum("domains", domains, "share"))][
-            "domain"
-        ]
+        # Always draw from the pack so every level consumes the stream alike.
+        idx = s.weighted_index(self.cum("domains", domains, "share"))
+        if self.email_level == "reserved":
+            domain = RESERVED_EMAIL_DOMAINS[idx % len(RESERVED_EMAIL_DOMAINS)]
+        elif self.email_level == "owned" and self.email_domain:
+            domain = self.email_domain
+        else:
+            domain = domains[idx]["domain"]
         first, last = _ascii_slug(p.first), _ascii_slug(p.last)
         if len(first) < 2:
             return

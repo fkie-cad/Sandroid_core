@@ -163,6 +163,16 @@ The national significant number of a `prefix` entry is `prefix` plus random
 digits up to `length`; a landline is `area_code` plus `subscriber_length`
 digits (first digit 2-9); a `range` entry draws inside the range.
 
+### E-mail levels
+
+The world spec's `emails:` picks the domains of generated addresses (the local
+parts come from the pack's `patterns` at every level):
+`reserved` (default) uses the RFC 2606 domains `example.com`, `example.net`
+and `example.org`; `owned` uses the Sandroid config's `world.email_domain`
+(without one it falls back to `reserved` with a warning); `realistic` draws
+from `email.domains` by `share`. The level is part of `world_fp`, and the
+addresses are markers at every level.
+
 ## Language pack: `languages/<lang>.yaml`
 
 `<lang>` is a BCP-47 tag (`de`, `pt-BR`) and must equal `lang`.

@@ -27,7 +27,11 @@ from sandroid.world import (
     generate,
     phone_check,
 )
-from sandroid.world.generator import FALLBACK_DEVICES, has_emoji
+from sandroid.world.generator import (
+    FALLBACK_DEVICES,
+    RESERVED_EMAIL_DOMAINS,
+    has_emoji,
+)
 from sandroid.world.manifest import week_anchor
 from sandroid.world.packs import easter, parse_range
 
@@ -49,7 +53,7 @@ TEXT_FIELDS = (
 ANCHOR = dt.datetime(2026, 11, 20, 15, 30, tzinfo=dt.UTC)
 #: world_fp of the reference world below. A change here means the generator's
 #: output changed: bump GENERATOR_VERSION and update the value.
-GOLDEN_FP = "63706d28818cec5a9346ed827c131be0cb6413a6fccebb5ede7ec114b1c3c6bc"
+GOLDEN_FP = "106601d8b971d4dd12f6ce2c5d60b84d50237609615391322129164c73a32b65"
 
 
 def _world(**spec: object) -> WorldManifest:
@@ -127,7 +131,7 @@ def test_world_fp_stable_across_processes(medium: WorldManifest) -> None:
 
 def test_world_fp_golden_value() -> None:
     world = _world(size="small")
-    assert GENERATOR_VERSION == "1"
+    assert GENERATOR_VERSION == "2"
     assert world.world_fp == GOLDEN_FP
 
 
@@ -861,6 +865,8 @@ def test_to_markers_sets_only_existing_fields(medium: WorldManifest) -> None:
         {"places": {"home": {}}},
         {"country": 49},
         {"colour": "blue"},
+        {"emails": "real"},
+        {"emails": 1},
     ],
 )
 def test_invalid_spec_is_rejected(spec: dict) -> None:
@@ -886,6 +892,97 @@ def test_invalid_owner_is_rejected(owner: object) -> None:
 def test_unknown_country_is_rejected() -> None:
     with pytest.raises(WorldError):
         _world(country="xx")
+
+
+# ------------------------------------------------------------ e-mail levels
+
+
+def _emails(world: WorldManifest) -> list[str]:
+    out = [p["email"] for p in world.people if p["email"]]
+    out += [c["email"] for c in world.contacts if c["email"]]
+    return out
+
+
+def test_default_emails_use_reserved_domains_only(medium: WorldManifest) -> None:
+    assert medium.spec["emails"] == "reserved"
+    emails = _emails(medium)
+    assert len(emails) > 10
+    real = {d["domain"] for d in PACKS.country("de").data["email"]["domains"]}
+    for addr in emails:
+        assert addr.split("@", 1)[1] in RESERVED_EMAIL_DOMAINS, addr
+        assert addr.split("@", 1)[1] not in real
+    blob = medium.to_json()
+    for domain in real:
+        assert "@" + domain not in blob
+
+
+def test_realistic_emails_use_pack_domains_with_same_local_parts(
+    medium: WorldManifest,
+) -> None:
+    world = _world(emails="realistic")
+    real = {d["domain"] for d in PACKS.country("de").data["email"]["domains"]}
+    assert {a.split("@", 1)[1] for a in _emails(world)} <= real
+    # Same stream draws: only the domains differ.
+    assert [a.split("@")[0] for a in _emails(world)] == [
+        a.split("@")[0] for a in _emails(medium)
+    ]
+    assert world.world_fp != medium.world_fp
+
+
+def test_owned_emails_use_the_given_domain() -> None:
+    world = generate(
+        {"seed": SEED, "size": "small", "country": "de", "emails": "owned"},
+        OWNER,
+        packs=PACKS,
+        email_domain="Lab.Sandroid.Test",
+    )
+    emails = _emails(world)
+    assert emails
+    assert all(a.endswith("@lab.sandroid.test") for a in emails)
+    assert not world.warnings or not any("emails" in w for w in world.warnings)
+
+
+@pytest.mark.parametrize("domain", [None, "", "not a domain", "x"])
+def test_owned_without_domain_falls_back_to_reserved(
+    domain: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "sandroid.world.generator.configured_email_domain", lambda: None
+    )
+    world = generate(
+        {"seed": SEED, "size": "small", "country": "de", "emails": "owned"},
+        OWNER,
+        packs=PACKS,
+        email_domain=domain,
+    )
+    reserved = generate(
+        {"seed": SEED, "size": "small", "country": "de"}, OWNER, packs=PACKS
+    )
+    assert _emails(world) == _emails(reserved)
+    assert any("email_domain" in w for w in world.warnings)
+    # The level is part of world_fp even when the output falls back.
+    assert world.world_fp != reserved.world_fp
+
+
+def test_owned_reads_the_sandroid_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "sandroid.world.generator.configured_email_domain", lambda: "mine.test"
+    )
+    world = generate(
+        {"seed": SEED, "size": "small", "country": "de", "emails": "owned"},
+        OWNER,
+        packs=PACKS,
+    )
+    assert all(a.endswith("@mine.test") for a in _emails(world))
+
+
+def test_emails_are_markers_at_every_level() -> None:
+    for level in ("reserved", "realistic"):
+        world = _world(size="small", emails=level)
+        kinds = {m["value"] for m in world.markers(ANCHOR) if m["kind"] == "email"}
+        assert kinds
+        assert kinds <= set(_emails(world))
+        assert {c["email"] for c in world.contacts if c["email"]} <= kinds
 
 
 # ------------------------------------------------------------ performance

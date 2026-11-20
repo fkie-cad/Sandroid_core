@@ -69,6 +69,9 @@ SIZES: dict[str, dict[str, int]] = {
 }
 #: Number levels, safest first.
 NUMBER_LEVELS = ("fiction", "unallocated", "realistic")
+#: E-mail levels, safest first: RFC 2606 example domains, the user's own
+#: domain (Sandroid config ``world.email_domain``), the pack's real providers.
+EMAIL_LEVELS = ("reserved", "owned", "realistic")
 #: Text field of each list that may carry ``{@n}`` date slots.
 TEXT_FIELDS = {"sms": "body", "events": "title", "files": "name", "notes": "text"}
 
@@ -86,6 +89,7 @@ _SPEC_KEYS = (
     "counts",
     "places",
     "device",
+    "emails",
 )
 _SLOT_RE = re.compile(r"\{@(\d+)\}")
 _JAVA_DATE = re.compile(r"yyyy|yy|MM|M|dd|d|HH|H|hh|h|mm|a")
@@ -115,6 +119,9 @@ class WorldSpec:
         device: Optional persona phone ``{make, model, codename, min_sdk,
             max_sdk}`` (photo EXIF, later the Build spoof); None picks a
             Google Pixel from the seed.
+        emails: E-mail domains: ``reserved`` (``example.com/net/org``),
+            ``owned`` (the Sandroid config's ``world.email_domain``) or
+            ``realistic`` (the country pack's providers).
     """
 
     seed: str = "auto"
@@ -126,6 +133,7 @@ class WorldSpec:
     counts: dict[str, int] = field(default_factory=dict)
     places: dict[str, Any] = field(default_factory=dict)
     device: dict[str, Any] | None = None
+    emails: str = "reserved"
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None) -> WorldSpec:
@@ -157,6 +165,7 @@ class WorldSpec:
             "counts": dict(sorted(self.counts.items())),
             "places": self.places,
             "device": normalize_device(self.device) if self.device else None,
+            "emails": self.emails,
         }
 
     def validate(self) -> None:
@@ -177,6 +186,8 @@ class WorldSpec:
             raise ValueError("world country must be a country pack id")
         if not isinstance(self.numbers, str) or self.numbers not in NUMBER_LEVELS:
             raise ValueError(f"world numbers must be one of {NUMBER_LEVELS}")
+        if not isinstance(self.emails, str) or self.emails not in EMAIL_LEVELS:
+            raise ValueError(f"world emails must be one of {EMAIL_LEVELS}")
         self.history_seconds()
         if not isinstance(self.counts, dict):
             raise ValueError("world counts must be a mapping")
