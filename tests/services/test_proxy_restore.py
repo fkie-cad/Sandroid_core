@@ -5,6 +5,7 @@ gating and the long-lived stream restarts after a load.
 
 from __future__ import annotations
 
+import itertools
 import sys
 import types
 from types import SimpleNamespace
@@ -230,8 +231,15 @@ def test_restart_relies_on_the_hook_only_while_device_prep_is_on(monkeypatch, en
     svc = es.EmulatorService()
     svc._get_adb = lambda: SimpleNamespace(get_target_device=lambda: SERIAL)
     state["on"] = enabled  # read at call time, not at registration
+    monkeypatch.setattr(es, "is_active_serial", lambda s: True)
     assert svc.restart() is True
     assert calls == ([] if enabled else [(SERIAL, "cold-boot")])
+    # The step prepares only the ACTIVE device: restarting another emulator
+    # restores at once even while the step is on.
+    calls.clear()
+    monkeypatch.setattr(es, "is_active_serial", lambda s: False)
+    assert svc.restart() is True
+    assert calls == [(SERIAL, "cold-boot")]
 
 
 # -- EmulatorService.load_snapshot ---------------------------------------------------
@@ -561,6 +569,71 @@ def test_framework_wait_with_an_unknown_old_pid_needs_a_new_one(monkeypatch):
     clock = iter(range(100))
     monkeypatch.setattr(pr.time, "monotonic", lambda: next(clock))
     assert not pr._wait_system_server_changed(None, SERIAL, 10.0, seen={"728"})
+
+
+def _real_recovery(monkeypatch, ss_pids, *, active_serial="emulator-OTHER"):
+    """Drive the REAL app_start.recover_after_framework_restart.
+
+    Only its adb reads are stubbed; ``serial`` is recorded on every read. The
+    restarted device is not the active one, so no Frida handle is touched.
+    """
+    from sandroid.core.adb import Adb
+    from sandroid.services import app_start
+
+    reads: list = []
+    polls = iter(ss_pids)
+
+    def pid(serial=None):
+        reads.append(("pid", serial))
+        return next(polls)
+
+    def pm_ready(serial=None):
+        reads.append(("pm", serial))
+        return True
+
+    monkeypatch.setattr(app_start, "_system_server_pid", pid)
+    monkeypatch.setattr(app_start, "_package_manager_ready", pm_ready)
+    monkeypatch.setattr(app_start, "_RECOVERY_POLL_S", 0.0)
+    monkeypatch.setattr(Adb, "get_target_device", staticmethod(lambda: active_serial))
+    return reads
+
+
+def test_recovery_uses_the_real_app_start_function_with_the_serial(monkeypatch):
+    reads = _real_recovery(monkeypatch, [728, 728, 12189])
+    note = pr._recover_after_framework_restart(728, SERIAL, timeout=5.0)
+    assert note == "framework back"
+    assert reads == [("pid", SERIAL)] * 3 + [("pm", SERIAL)]
+
+
+def test_recovery_timeout_from_the_real_function_is_reported(monkeypatch):
+    _real_recovery(monkeypatch, itertools.repeat(728))
+    note = pr._recover_after_framework_restart(728, SERIAL, timeout=0.05)
+    assert note.startswith("framework recovery failed")
+    assert "no new system_server" in note
+
+
+def test_recovery_with_an_unknown_pid_waits_for_a_new_one_first(monkeypatch):
+    """app_start treats None as "no PID gate"; the old system_server still
+    answers after the kill, so the local gate must see a NEW PID first.
+    """
+    reads = _real_recovery(monkeypatch, [12189])
+    local = iter([["728"], ["728"], ["12189"]])
+    monkeypatch.setattr(pr, "_system_server_pids", lambda serial: next(local))
+    monkeypatch.setattr(pr.time, "sleep", lambda s: None)
+    from sandroid.core.adb import Adb
+
+    monkeypatch.setattr(
+        Adb,
+        "send_adb_command",
+        staticmethod(
+            lambda cmd, serial=None, timeout=30: ("1\nService package: found", "")
+        ),
+    )
+    note = pr._recover_after_framework_restart(None, SERIAL, timeout=5.0, seen={"728"})
+    assert note == "framework back"
+    assert reads[0] == ("pid", SERIAL)
+    with pytest.raises(StopIteration):
+        next(local)  # the local gate polled until the new PID showed up
 
 
 def test_fallback_refuses_while_an_app_start_runs(monkeypatch, tmp_path):
