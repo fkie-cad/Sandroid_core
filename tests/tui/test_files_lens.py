@@ -1026,7 +1026,7 @@ async def test_renamed_and_deleted_rows_say_so(monkeypatch) -> None:
         assert "→" not in panel._path_cell(rows[AAID]).plain
         panel._path_width = 60
         summary = _plain(_tab(panel._inspector_for(rows[old]), "Summary"))
-        assert "renamed → files/c.txt" in summary
+        assert "renamed to files/c.txt" in summary
         events = _plain(_tab(panel._inspector_for(rows[old]), "Events"))
         assert "RENAMED" in events
         assert "to files/c.txt" in events

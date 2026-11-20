@@ -2386,7 +2386,7 @@ class FilesPanel(Widget):
                 top = sorted(procs.items(), key=lambda kv: -kv[1])[:3]
                 grid.add_row("by", ", ".join(name for name, _n in top))
             if act.moved_to:
-                grid.add_row("now", Text(f"renamed → {app_relative(act.moved_to)}"))
+                grid.add_row("now", Text(f"renamed to {app_relative(act.moved_to)}"))
             elif act.deleted:
                 grid.add_row("now", Text("deleted", style=OPS["delete"][1]))
         else:
