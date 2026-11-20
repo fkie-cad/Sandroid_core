@@ -814,7 +814,7 @@ def _keys_env(monkeypatch, *, spotlight="com.example.app", active="emu-1", tasks
         "get_spotlight_service",
         lambda: types.SimpleNamespace(get_effective_package=lambda: spotlight),
     )
-    monkeypatch.setattr(Adb, "get_target_device", classmethod(lambda c: active))
+    monkeypatch.setattr(Adb, "_target_device", active)
     return state
 
 
@@ -900,3 +900,13 @@ def test_keys_only_never_raises(monkeypatch):
     r = fritap_mod.start_fritap_keys()
     assert r[0] is False
     assert "no job manager" in r[1]
+
+
+def test_keys_only_checks_the_selected_device_not_a_thread_pin(monkeypatch):
+    """A caller inside Adb.targeting(serial) must not pass the device check."""
+    from sandroid.core.adb import Adb
+
+    _keys_env(monkeypatch, active="emu-1")
+    with Adb.targeting("emu-2"):
+        r = fritap_mod.start_fritap_keys(serial="emu-2")
+    assert (r[0], r.reason) == (False, "other_device")

@@ -222,7 +222,7 @@ class StatusBar(Static):
             try:
                 self.app.notify(
                     f"Frida: connection to frida-server lost ({reason}) — "
-                    "hooks are gone. ⇧R restarts the app and frida-server.",
+                    "hooks are gone. Shift+R restarts the app and frida-server.",
                     severity="warning",
                 )
             except Exception:
@@ -348,13 +348,13 @@ class StatusBar(Static):
             pid = self.spotlight_pid
             if self.spotlight_paused:
                 pid_part = f" pid {pid}" if pid else ""
-                state = f"[{paused}]paused[/][{muted}]{pid_part}  ␣ resume[/]"
+                state = f"[{paused}]paused[/][{muted}]{pid_part}  Space resumes[/]"
             elif pid:
                 state = f"[{run}]running[/] [{muted}]pid {pid}[/]"
             elif self.spotlight_restarting:
                 state = f"[{paused}]restarting…[/]"
             else:
-                state = f"[{stop}]not running[/] [{muted}] ␣ start[/]"
+                state = f"[{stop}]not running[/] [{muted}] Space starts[/]"
             segs.append(f"[{muted}]App[/] {state}")
         else:
             segs.append(f"[{muted}]App none[/]")
@@ -363,7 +363,7 @@ class StatusBar(Static):
         if self.frida_starting:
             frida = f"[{paused}]starting[/]"
         elif self.frida_status != "Running" and self._frida_lost:
-            frida = f"[{stop}]connection lost[/] [{muted}] ⇧R restarts[/]"
+            frida = f"[{stop}]connection lost[/] [{muted}] Shift+R restarts[/]"
         elif self.frida_status == "Running":
             if self._frida_version_mismatch:
                 frida = f"[{fixed_color('notice')}]running, version mismatch[/]"
@@ -422,7 +422,9 @@ class StatusBar(Static):
                 if self.network_capture_file
                 else "capture.pcap"
             )
-            segs.append(f"[{muted}]Capture[/] [{run}]● {filename}[/]")
+            segs.append(
+                f"[{muted}]Capture[/] [{run}]running[/] [{muted}]{escape(filename)}[/]"
+            )
 
         # Record / Rewind: the controller's plain status line (no symbols).
         if self.recording_active or self.replay_active or self.replay_phase:

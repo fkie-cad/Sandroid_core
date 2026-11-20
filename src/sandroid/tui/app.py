@@ -728,7 +728,7 @@ class SandroidTUI(App):
         try:
             from sandroid.services.identity import get_identity_service
 
-            get_identity_service().install_pre_spawn_hook()
+            get_identity_service().install_pre_start_step()
         except Exception as exc:
             logger.debug(f"Failed to install the identity pre-start step: {exc}")
         # Identity profile SIM card: emulator launch hooks (idempotent; the

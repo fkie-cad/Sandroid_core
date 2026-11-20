@@ -7,7 +7,7 @@ which Frida hooks/bypasses are active, and offers explicit lifecycle actions
 (Start / Restart / Kill / Attach, plus the advanced Start-paused / Resume)
 together with immediate bypass toggles. Tools decide per start whether they
 join, attach or start the app (:mod:`sandroid.services.app_start`); a restart
-of a running app always asks, except ⇧R, the explicit restart key.
+of a running app always asks, except Shift+R, the explicit restart key.
 
 It is intentionally **stateless**: it owns no manager instances and reads
 everything live from the process-wide services (BypassService, SpotlightService,
@@ -71,15 +71,18 @@ _ACTION_CELLS = {
     "act-clear": "action_clear_spotlight",
 }
 
-# Action-row cell id -> (label, label below _NARROW_WIDTH columns).
+# Action-row cell id -> (label, keys-only label, letter after one "Shift+").
 _ACTION_LABELS = {
-    "act-restart": ("⇧R restart", "⇧R"),
-    "act-attach": ("⇧A attach", "⇧A"),
-    "act-paused": ("⇧P pause", "⇧P"),
-    "act-kill": ("⇧K kill", "⇧K"),
-    "act-clear": ("⇧X clear", "⇧X"),
+    "act-restart": ("Shift+R restart", "Shift+R", "R"),
+    "act-attach": ("Shift+A attach", "Shift+A", "A"),
+    "act-paused": ("Shift+P pause", "Shift+P", "P"),
+    "act-kill": ("Shift+K kill", "Shift+K", "K"),
+    "act-clear": ("Shift+X clear", "Shift+X", "X"),
 }
-# Below this panel width the action row shows the keys only.
+# Below this panel width the action row shows the keys only (the worded
+# row is ~90 columns) ...
+_KEYS_ONLY_WIDTH = 92
+# ... and below this one a single "Shift+" leads the bare letters.
 _NARROW_WIDTH = 60
 # Below this width the bypass toggles collapse to one "b bypass: ..." line
 # (the full row is ~95 columns).
@@ -219,6 +222,12 @@ class SpotlightPanel(Widget):
         padding: 0 1;
         color: $lens-action-text;
     }
+    SpotlightPanel #act-shift {
+        width: auto;
+        padding: 0 0 0 1;
+        color: $lens-action-text;
+        display: none;
+    }
     SpotlightPanel .act-cell:hover {
         background: $lens-action-hover-bg;
         color: $lens-action-hover-text;
@@ -231,10 +240,10 @@ class SpotlightPanel(Widget):
     # panel itself, and listing all 11 pushed the global keys (r Record,
     # p Play, ? Help, ...) off a 200-column footer. Enter is MainScreen's
     # "inspect" (a focused section table posts RowSelected); the lens frame
-    # caption advertises ⏎ / z / u.
+    # caption advertises Enter / z / u.
     # The hidden bindings' descriptions are what the help screen lists.
     BINDINGS = [
-        Binding("space", "primary", "Start/Resume", key_display="␣"),
+        Binding("space", "primary", "Start/Resume"),
         Binding("b", "bypass_chord", "Bypass…"),
         Binding("slash", "filter", "Filter the rows", show=False),
         Binding("z", "fold", "Fold or unfold the section", show=False),
@@ -292,7 +301,7 @@ class SpotlightPanel(Widget):
         self._filter_timer = None
         # Layout mode from the panel width (on_resize).
         self._compact = False
-        self._narrow = False
+        self._narrow = 0  # 0 worded, 1 keys only, 2 one "Shift+" + letters
         # (package, profile id) while the identity profile was not applied
         # to the app; read off the UI thread (poll, identity status events).
         self._identity_gap: tuple[str, str] | None = None
@@ -333,15 +342,17 @@ class SpotlightPanel(Widget):
             yield AppLensSections(id="app-sections")
         with Horizontal(id="spotlight-actions"):
             yield Static(self._primary_label(), id="act-primary", classes="act-cell")
-            # Shift-letters, shown as ⇧X so they never read like the global
+            # Shift-letters, shown as Shift+X so they never read like the global
             # lower-case r/p/a/k/x keys.
-            for cell_id, (wide, _short) in _ACTION_LABELS.items():
+            yield Static("Shift+", id="act-shift")
+            for cell_id, (wide, _keys, _letter) in _ACTION_LABELS.items():
                 yield Static(wide, id=cell_id, classes="act-cell")
 
     def on_resize(self, event) -> None:
         """Compact bypass row / key-only action row on a narrow lens."""
         width = event.size.width
-        compact, narrow = width < _COMPACT_WIDTH, width < _NARROW_WIDTH
+        compact = width < _COMPACT_WIDTH
+        narrow = 2 if width < _NARROW_WIDTH else int(width < _KEYS_ONLY_WIDTH)
         if (compact, narrow) == (self._compact, self._narrow):
             # The bypass key hint comes and goes with the width.
             try:
@@ -350,11 +361,15 @@ class SpotlightPanel(Widget):
                 pass
             return
         self._compact, self._narrow = compact, narrow
-        for cell_id, (wide, short) in _ACTION_LABELS.items():
+        for cell_id, labels in _ACTION_LABELS.items():
             try:
-                self.query_one(f"#{cell_id}", Static).update(short if narrow else wide)
+                self.query_one(f"#{cell_id}", Static).update(labels[narrow])
             except Exception:
                 pass
+        try:
+            self.query_one("#act-shift", Static).display = narrow == 2
+        except Exception:
+            pass
         self.refresh_panel()
 
     def on_mount(self) -> None:
@@ -537,7 +552,7 @@ class SpotlightPanel(Widget):
         if not package:
             return (
                 f"[{c.bad}]no app[/]  [b]c[/] use the foreground app  "
-                "[b]⇧C[/] pick an app…"
+                "[b]Shift+C[/] pick an app…"
             )
 
         pid = self._safe_pid()
@@ -555,13 +570,13 @@ class SpotlightPanel(Widget):
             state = f"[{c.warn}]{escape(step)}[/]"
         elif paused:
             pid_part = f" pid [b]{pid}[/]" if pid else ""
-            state = f"[{c.warn}]paused[/]{pid_part}  [{c.dim}]␣ resume[/]"
+            state = f"[{c.warn}]paused[/]{pid_part}  [{c.dim}]Space resumes[/]"
         elif pid:
             state = f"[{c.ok}]running[/] pid [b]{pid}[/]"
         elif self._restarting():
             state = f"[{c.warn}]restarting…[/]"
         else:
-            state = f"[{c.bad}]not running[/]  [{c.dim}]␣ start[/]"
+            state = f"[{c.bad}]not running[/]  [{c.dim}]Space starts[/]"
 
         bypass_tag = (
             f"[{c.ok}]bypass: {', '.join(on)}[/]" if on else f"[{c.dim}]bypass: none[/]"
@@ -588,8 +603,8 @@ class SpotlightPanel(Widget):
         if not package:
             return (
                 f"[{c.dim}]No app selected.\n\n"
-                "Press [b]c[/] to use the foreground app or [b]⇧C[/] to pick "
-                "an app…; then [b]␣[/] starts it, [b]⇧A[/] attaches.[/]"
+                "Press [b]c[/] to use the foreground app or [b]Shift+C[/] to pick "
+                "an app…; then [b]Space[/] starts it, [b]Shift+A[/] attaches.[/]"
             )
 
         # Three rows on the gutter the sections below use (right-aligned
@@ -679,11 +694,11 @@ class SpotlightPanel(Widget):
         name = escape(gap[1])
         full = (
             f"Identity profile '{name}' not applied to this app — it started "
-            "before the profile. ⇧R restarts it with the profile; Space in the "
+            "before the profile. Shift+R restarts it with the profile; Space in the "
             "Identity lens applies the live values without a restart."
         )
         short = (
-            f"Identity profile '{name}' not applied to this app — ⇧R restarts "
+            f"Identity profile '{name}' not applied to this app — Shift+R restarts "
             "it with the profile"
         )
         room = self.size.width - 2 - (label_width + 3)
@@ -716,12 +731,12 @@ class SpotlightPanel(Widget):
     def _primary_label(self) -> str:
         """Context-sensitive label for the Space / primary action cell."""
         if not self._current_package():
-            return "␣ Start"
+            return "Space start"
         if self._is_paused():
-            return "␣ Resume"
+            return "Space resume"
         if self._safe_pid():
             return f"[{lens_palette().dim}]running[/]"
-        return "␣ Start"
+        return "Space start"
 
     def _repaint_text(self, _theme: object = None) -> None:
         """Re-render the header, body and primary cell (also on theme change:
@@ -768,7 +783,7 @@ class SpotlightPanel(Widget):
         info = None
         if self._has_sections():
             sections = self._sections()
-            info = "⏎ inspect · / filter · z or click title: fold · " + (
+            info = "Enter inspect · / filter · z or click title: fold · " + (
                 "u refreshing" if sections.refreshing else "u refresh"
             )
             primary = self._primary_hint()
@@ -782,12 +797,12 @@ class SpotlightPanel(Widget):
             pass
 
     def _primary_hint(self) -> str:
-        """``␣ start`` / ``␣ resume`` / ``""`` (running: Space does nothing)."""
+        """``Space starts`` / ``Space resumes`` / ``""`` (running: Space does nothing)."""
         if self._is_paused():
-            return "␣ resume"
+            return "Space resumes"
         if self._safe_pid():
             return ""
-        return "␣ start"
+        return "Space starts"
 
     def _facts_state_changed(self) -> None:
         sections = self._sections()
@@ -933,7 +948,7 @@ class SpotlightPanel(Widget):
         """
         sections = self._sections()
         if sections is None or not self._current_package():
-            self._notify("No app facts to refresh: pick an app first (c or ⇧C)")
+            self._notify("No app facts to refresh: pick an app first (c or Shift+C)")
             return
         if not sections.refresh_runtime(static=True, explicit=True, announce=True):
             if not sections.refreshing:
@@ -1337,7 +1352,7 @@ class SpotlightPanel(Widget):
         self.refresh_panel()
         if pid:
             self._notify(
-                "Already running — ⇧R restart · ⇧A re-attach · ⇧K kill",
+                "Already running: Shift+R restarts, Shift+A re-attaches, Shift+K kills",
                 "information",
             )
         else:
@@ -1399,7 +1414,7 @@ class SpotlightPanel(Widget):
             self._run_action_bg(self._work_attach, "attach")
 
     def action_start_paused(self) -> None:
-        """⇧P: start paused; a running app is only restarted after a Yes."""
+        """Shift+P: start paused; a running app is only restarted after a Yes."""
         if not self._require_package():
             return
         package = self._current_package()
@@ -1410,7 +1425,7 @@ class SpotlightPanel(Widget):
             try:
                 liveness, pid = probe_liveness(package)
             except Exception as exc:
-                logger.debug(f"⇧P liveness check failed: {exc}")
+                logger.debug(f"Shift+P liveness check failed: {exc}")
                 liveness, pid = None, None
             self._post(self._after_paused_check, package, liveness, pid)
 
@@ -1447,7 +1462,7 @@ class SpotlightPanel(Widget):
                 message=(
                     f"{package} is running (pid {pid}). Start paused "
                     "force-stops it and starts it again, held paused with the "
-                    "armed bypasses until ␣ (Android ends the hold after "
+                    "armed bypasses until Space (Android ends the hold after "
                     f"about 10 s).{self._restart_stops(package)}"
                 ),
                 yes_label="Restart paused",
@@ -1535,7 +1550,7 @@ class SpotlightPanel(Widget):
             logger.warning(f"Keeping the bypasses armed failed: {exc}")
         Adb.force_stop(package)
         time.sleep(0.5)
-        # The bypasses that were on stay armed (intent): ␣ starts with them.
+        # The bypasses that were on stay armed (intent): Space starts with them.
         kept: list[str] = []
         try:
             kept = self._bypass().keep_armed_and_forget(package)
@@ -1548,7 +1563,7 @@ class SpotlightPanel(Widget):
         if kept:
             return True, (
                 f"Killed {package} — bypass {', '.join(kept)} stay armed; "
-                "␣ starts with them"
+                "Space starts with them"
             )
         return True, f"Killed {package}"
 
@@ -1570,7 +1585,7 @@ class SpotlightPanel(Widget):
     def _stop_everything_for(self, package: str) -> int:
         """Stop bypasses (clears armed) + any background tasks for the app.
 
-        Stop all: clearing the armed set is the explicit "done" (⇧K keeps
+        Stop all: clearing the armed set is the explicit "done" (Shift+K keeps
         it). Returns the number of items stopped. Does NOT early-return when
         there are no TaskService tasks — the bypasses are stopped regardless.
         """
@@ -1604,7 +1619,7 @@ class SpotlightPanel(Widget):
     def _require_package(self) -> bool:
         if not self._current_package():
             self._notify(
-                "No spotlight app. Press c (use the foreground app) or ⇧C "
+                "No spotlight app. Press c (use the foreground app) or Shift+C "
                 "(pick an app…) first.",
                 "warning",
             )

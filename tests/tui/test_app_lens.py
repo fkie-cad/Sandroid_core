@@ -590,14 +590,14 @@ async def test_sections_render_inspect_and_space_starts(fake, monkeypatch, size)
         await settle(pilot)
         assert started == [1]
         # the caption advertises the lens keys
-        assert "⏎ inspect" in (ms._lens_captions["app"][1] or "")
+        assert "Enter inspect" in (ms._lens_captions["app"][1] or "")
         if size == (100, 30):
             # header, the frame and the action row stay on screen
             ms.close_inspector()
             await settle(pilot)
             text = _screen_text(app)
-            assert "␣ Start" in text or "running" in text
-            assert "⇧K kill" in text
+            assert "Space start" in text or "running" in text
+            assert "Shift+K kill" in text
             assert "IDENTITY" in text
 
 
@@ -1374,12 +1374,12 @@ async def test_caption_offers_space_only_when_it_does_something(fake, monkeypatc
             panel._update_caption()
             return ms._lens_captions["app"][1] or ""
 
-        assert "␣" not in caption()  # running (PID 4242): Space does nothing
+        assert "Space" not in caption()  # running (PID 4242): Space does nothing
         monkeypatch.setattr(SpotlightPanel, "_safe_pid", lambda self: None)
-        assert caption().endswith("· ␣ start")
+        assert caption().endswith("· Space starts")
         monkeypatch.setattr(SpotlightPanel, "_safe_pid", lambda self: 4242)
         monkeypatch.setattr(SpotlightPanel, "_is_paused", lambda self: True)
-        assert caption().endswith("· ␣ resume")
+        assert caption().endswith("· Space resumes")
 
 
 async def test_narrow_lens_keeps_bypass_and_actions_on_one_line_each(fake):
@@ -1391,7 +1391,7 @@ async def test_narrow_lens_keeps_bypass_and_actions_on_one_line_each(fake):
         await until(pilot, lambda: _loaded(sections))
         await settle(pilot)
         wide = _screen_text(app)
-        assert "⇧K kill" in wide
+        assert "Shift+K kill" in wide
         assert "1 SSL (exp.)" in wide  # the full toggle row fits
         app.focused.move_cursor(row=0)
         await pilot.press("enter")
@@ -1402,12 +1402,18 @@ async def test_narrow_lens_keeps_bypass_and_actions_on_one_line_each(fake):
         text = _screen_text(app)
         assert "b bypass: none" in text
         assert "1 SSL (exp.)" not in text
-        actions = next(line for line in text.splitlines() if "⇧R" in line)
-        for key in ("⇧R", "⇧A", "⇧P", "⇧K", "⇧X"):
-            assert key in actions
+        actions = next(line for line in text.splitlines() if "Shift+" in line)
+        assert "Shift+ R A P K X" in " ".join(actions.split())
         ms.close_inspector()
         await settle(pilot)
-        assert "⇧K kill" in _screen_text(app)
+        assert "Shift+K kill" in _screen_text(app)
+        # Between the two widths: the keys alone, each with its Shift+.
+        from types import SimpleNamespace
+
+        panel.on_resize(SimpleNamespace(size=SimpleNamespace(width=75)))
+        await settle(pilot)
+        assert str(panel.query_one("#act-kill").render()) == "Shift+K"
+        assert not panel.query_one("#act-shift").display
 
 
 def _bookkeeping_ops() -> list[AppOpEntry]:
@@ -1463,7 +1469,7 @@ async def test_other_ops_row_expands_with_enter_z_folds_and_filter(fake):
         perms.focus()
         perms.move_cursor(row=len(keys) - 1)
         await settle(pilot)
-        assert "⏎ shows them" in str(perms.rows_shown[-1].cells[-1])
+        assert "Enter shows them" in str(perms.rows_shown[-1].cells[-1])
         # z folds the section from any row, also from "+N other ops"
         await pilot.press("z")
         await settle(pilot)

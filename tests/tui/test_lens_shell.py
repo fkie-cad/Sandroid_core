@@ -1851,7 +1851,7 @@ def test_frida_pill_says_connection_lost_until_the_server_runs_again(monkeypatch
             },
         )
     )
-    assert _pill() == "Frida connection lost  ⇧R restarts"
+    assert _pill() == "Frida connection lost  Shift+R restarts"
     assert checks == [1]  # re-checked at once
     bar._update_frida_status("Not running")
     assert "connection lost" in _pill()
@@ -1901,15 +1901,28 @@ def test_header_app_segment_shows_the_run_state_not_a_mode():
         return next(s.plain for s in bar._segments() if s.plain.startswith("App"))
 
     bar.spotlight_pid, bar.spotlight_paused = None, False
-    assert app_seg() == "App not running  ␣ start"
+    assert app_seg() == "App not running  Space starts"
     bar.spotlight_pid = 77
     assert app_seg() == "App running pid 77"
     bar.spotlight_paused = True
-    assert app_seg() == "App paused pid 77  ␣ resume"
+    assert app_seg() == "App paused pid 77  Space resumes"
     bar.spotlight_app = "None"
     assert app_seg() == "App none"
     for word in ("spawn", "attach"):
         assert word not in app_seg()
+
+
+def test_header_capture_segment_says_running_in_words():
+    from sandroid.tui.widgets.status_bar import StatusBar
+
+    bar = StatusBar()
+    bar.network_capture_running = True
+    bar.network_capture_file = "/tmp/out/run1.pcap"
+    seg = next(s.plain for s in bar._segments() if s.plain.startswith("Capture"))
+    assert seg == "Capture running run1.pcap"
+    for text in (s.plain for s in bar._segments()):
+        assert "\u2423" not in text  # no key glyphs
+        assert "\u21e7" not in text
 
 
 def test_header_says_restarting_without_a_pid_during_shift_r():
