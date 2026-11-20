@@ -242,7 +242,10 @@ Hooks:
   no new dependency.
 - **Structured errors:** ``ToolError{code, message, retryable, hint}`` with codes
   ``unknown_tool``, ``not_loaded``, ``invalid_arguments``, ``denied``, ``resource_conflict``,
-  ``timeout``, ``cancelled``, ``device_unavailable`` and ``tool_failed``.
+  ``timeout``, ``cancelled``, ``device_unavailable``, ``tool_failed`` and
+  ``backend_error``; the app-start tools add ``needs_confirmation`` (a
+  pre-start step stops every app and only the TUI dialog can confirm it),
+  ``declined_by_analyst`` and ``busy`` (another start holds the lock).
 - **Execution:** tools run sequentially.
 
   - Each ``ToolSpec.timeout_s`` defaults to 120.
@@ -504,10 +507,11 @@ reached through a small ``session_root()`` helper so it can move later.
 - ``ChatPanel`` only renders ``AgentEvent``\ s and forwards input, approvals and slash
   commands to the session. It no longer owns ``_messages``, the loop, approval polling or
   subtask draining.
-- **Header:** state · model · ``◔ 41k/262k 16%`` (muted, then warn at 50%, error at 85%) ·
-  ``⟲n`` compactions · agents running.
-- **Tool calls:** ``● Humanized name`` plus args. The result is a collapsed one-line chip
-  (``✓ R17 · 12 rows · 0.4s``, or ``✗ code: message``).
+- **Header:** state · model · ``41k/262k 16%`` (muted, then warn at 50%, error at 85%) ·
+  ``n compacted`` · ``n agents``.
+- **Tool calls:** ``Humanized name`` plus args. The result is a collapsed one-line chip
+  (``done · R17 · 12 rows · 0.4s``, or ``code: message``), its first word in the
+  ok / bad colour.
 - **Slash commands:** ``/new``, ``/threads``, ``/compact [focus]``, ``/context`` (breakdown:
   system, tools schema, ambient, history, tool results, summaries, last request,
   session totals), ``/permissions``, ``/agents``, ``/doctor``.
@@ -649,28 +653,31 @@ renders live in the session scratchpad (``ui-dock/mockups.txt``, ``ui-look/mock_
   - ``UserBlock``: the full-width band, "Variant I".
   - ``ReplyBlock``: ``Markdown`` fed by ``get_stream()``, so only the live block
     re-renders.
-  - ``ReasoningLine``: ``✧ Thinking… 3s`` / ``✧ Thought for 4s``.
+  - ``ReasoningLine``: ``Thinking… 3s`` while the model reasons, ``Thought for 4s``
+    after.
   - ``ToolBlock``:
 
-    - The call line is ``● Name args``, with a spinner while running.
-    - The result chip ``└ ✓ R17 · 12 rows · 0.4s`` or ``└ ✗ code: message`` is filled
-      in place.
+    - The call line is ``Name args`` in the tool colour; the line under it reads
+      ``running`` (or the tool's progress) until the result chip replaces it.
+    - The result chip ``done · R17 · 12 rows · 0.4s`` or ``code: message`` is filled
+      in place. States are plain words in their theme colour, never glyphs.
 
-  - ``AgentCard``: a round border, the title ``◆ researcher r2 · ✓ done · 38s · 9.2k tok``,
+  - ``AgentCard``: a round border, the title ``researcher r2 · done · 38s · 9.2k tok``
+    (the status word in its colour: running accent, done ok, failed bad, cancelled muted),
     and claims shown as R-id chips.
-  - ``CompactionRule``: ``─ ⟲ compacted · 182k → 41k ─``.
-  - ``NoticeLine``: ``↻ Retrying in 4s · attempt 2/5``, updated in place.
+  - ``CompactionRule``: ``──── compacted · 182k → 41k · 14 results masked ────``.
+  - ``NoticeLine``: ``Retrying in 4s · attempt 2/5``, updated in place.
   - ``BudgetNotice`` with ``[Continue] [Stop]``.
 
   Every block is ``width: 1fr``; message boxes use the full width. At most about 300
-  blocks stay mounted, and older turns fold into ``▸ N earlier turns``.
-- **Header** (one row): state dot, state, model, ``REMOTE`` / ``EXPERIMENTAL``, then
-  ``◔ 41k/262k 16%``. The glyph steps through ○◔◑◕●. The colour is ``$lens-dim`` below
-  50%, ``$lens-warn`` from 50% and ``$lens-bad`` from 85%. After that come ``⟲n`` and
-  ``◆n``. At 60 columns the model is dropped. Updates are throttled to 10 Hz or less.
+  blocks stay mounted, and older turns fold into ``N earlier turns``.
+- **Header** (one row): state, model, ``REMOTE`` / ``EXPERIMENTAL``, then
+  ``41k/262k 16%``. The colour is ``$lens-dim`` below 50%, ``$lens-warn`` from 50% and
+  ``$lens-bad`` from 85%. After that come ``n compacted`` and ``n agents``. At 60
+  columns the model is dropped. Updates are throttled to 10 Hz or less.
 - **Approval card.** It is pinned above the input.
 
-  - Title: ``⚠ <agent> wants to run <Tool>``.
+  - Title: ``<agent> wants to run <Tool>`` (no glyph; the card border is the warn colour).
   - Options:
 
     - ``1 Yes``
@@ -685,7 +692,7 @@ renders live in the session scratchpad (``ui-dock/mockups.txt``, ``ui-look/mock_
   - Focus: the card takes the focus only when the focus already is in the chat (or
     nowhere); stray letters are swallowed while it has it. A closed dock opens
     unfocused; then, and whenever the focus is elsewhere, a toast and the ticker badge
-    ``⚠ approval needed · ^Y`` say so, and Ctrl+Y focuses the card.
+    ``approval needed · ^Y`` (warn colour) say so, and Ctrl+Y focuses the card.
   - All model text is ``Content`` (never markup): ``rich.markup.escape`` does not match
     Textual 8's parser.
 

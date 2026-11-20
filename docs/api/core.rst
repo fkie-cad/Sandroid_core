@@ -182,6 +182,41 @@ The Emulator class provides control over Android emulator instances.
    # Load snapshot
    emulator.load_snapshot("clean_baseline")
 
+Snapshot protection
+~~~~~~~~~~~~~~~~~~~
+
+``sandroid.core.snapshot_policy`` decides who may overwrite or delete which
+snapshot; ``EmulatorService.create_snapshot`` / ``delete_snapshot`` enforce
+it before any console call (loads are never restricted):
+
+- **Pinned** names (per AVD in ``devices.json``; ``clean_8g`` and
+  ``default_boot`` by default) are never overwritten or deleted.
+  ``pin(avd, name)`` / ``unpin(avd, name)``; only the user unpins (Devices
+  screen ``p``), never the AI.
+- **Owned** names belong to a ``Namespace`` (``rewind``: start points via
+  ``rewind.is_start_point_name``; ``persona``: ``sandroid_persona_*``;
+  ``analysis``: ``sandroid_malware*``). Only the owner saves or deletes
+  them; the user may delete one after a confirm (``confirmed=True``).
+- The caller says who it is with ``actor=`` or, through layers that don't
+  pass it on, ``with snapshot_policy.acting_as("rewind"): ...``; the
+  default is the user. ``EmulatorService.snapshot_refusal(op, name)``
+  returns the ``Refusal`` (``reason``, ``pinned``, ``owner``,
+  ``confirmable``) to explain it beforehand.
+
+.. code-block:: python
+
+   from sandroid.core.snapshot_policy import acting_as
+   from sandroid.services import get_emulator_service
+
+   with acting_as("persona"):
+       get_emulator_service().create_snapshot("sandroid_persona_ab12cd34_ef56ab78")
+
+Deleting through the console frees the snapshot's RAM image; the qcow2 disk
+files never shrink (the freed clusters are reused). ``snapshot_complete(avd,
+name)`` tells a loadable snapshot from a stub that only has ``snapshot.pb``.
+``vanished_pins(avd, present)`` reports a pinned snapshot that disappeared
+outside Sandroid, once.
+
 Launch hooks
 ~~~~~~~~~~~~
 

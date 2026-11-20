@@ -16,6 +16,7 @@ __all__ = [
     "PACKAGE_NAME_PARAM",
     "parse_pm_path_output",
     "resolve_package_name",
+    "start_refusal",
     "validate_package_name",
 ]
 
@@ -113,3 +114,52 @@ def validate_package_name(name: str) -> str:
             "identifier format (e.g. 'com.example.app')"
         )
     return name
+
+
+#: ``app_start`` refusal reasons (``StartResult.reason`` /
+#: ``AppStartError.reason``) -> ``(tool error code, words, retryable)``.
+START_REFUSALS: dict[str, tuple[str, str, bool]] = {
+    "needs_consent": (
+        "needs_confirmation",
+        "needs the analyst's confirmation in the Sandroid TUI (it restarts "
+        "the Android framework, every running app stops); ask the analyst — "
+        "it can't be applied without the dialog",
+        False,
+    ),
+    "declined": (
+        "declined_by_analyst",
+        "the analyst declined; don't retry unless asked",
+        False,
+    ),
+    "busy": (
+        "busy",
+        "another app start is running; wait until it has finished "
+        "(get_spotlight_app shows it) before trying once more",
+        True,
+    ),
+}
+
+
+def start_refusal(reason: str | None, package: str, detail: str | None = None):
+    """The ``ToolError`` for an app start refused with *reason*, or None.
+
+    *reason* is ``app_start``'s refusal reason (``needs_consent``,
+    ``declined``, ``busy``); any other value (None included) is an ordinary
+    failure the tool reports as before. *detail* is app_start's own message.
+    """
+    entry = START_REFUSALS.get(reason or "")
+    if entry is None:
+        return None
+    from sandroid.ai.tools.registry import ToolError
+
+    code, words, retryable = entry
+    if reason == "needs_consent":
+        # app_start's own text tells API callers to "pass fresh=True"; the
+        # AI tools never turn fresh into consent, so it would only mislead.
+        detail = None
+    return ToolError(
+        code,
+        f"{package} not started: {words}",
+        retryable=retryable,
+        details={"detail": detail} if detail else None,
+    )

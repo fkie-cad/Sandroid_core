@@ -2512,14 +2512,17 @@ class FilesPanel(Widget):
 
         Live: every path with activity plus the watched files; REVIEW: the
         run's changed / new / deleted files. ``shown`` = passes the lens's
-        current filters (a member of a folded group counts as shown).
+        own filters (rules, ``/``; a member of a folded group counts as
+        shown), NOT the AI filter: the same test as the bar's counts
+        (``_hl_live_items``), so a new query or an extend of the filter set
+        sees every row the lens filters let through.
         """
         wl = self._watchlist_or_none()
         if self.review:
             out = [
                 file_snapshot(
                     r.key,
-                    shown=self._matches(r),
+                    shown=self._matches(r, ai=False),
                     watched=r.watched is not None,
                     review_kind=r.review_kind,
                     scope=self._scope,
@@ -2528,16 +2531,12 @@ class FilesPanel(Widget):
                 for r in self._review_rows
             ]
         else:
-            shown: set[str] = set()
-            for r in self._live_rows():
-                if r.group is None and not r.pattern:
-                    shown.add(r.key)
-                shown.update(m.key for m in r.members)
+            shown = {key for key, ok, _seq, _last in self._hl_live_items() if ok}
             paths = dict.fromkeys([*self.activity.paths, *(wl.rows if wl else ())])
             out = [
                 file_snapshot(
                     path,
-                    shown=path in shown,
+                    shown=canonical_key(path) in shown,
                     act=self.activity.paths.get(path),
                     watched=wl is not None and wl.watched_by(path) is not None,
                 )

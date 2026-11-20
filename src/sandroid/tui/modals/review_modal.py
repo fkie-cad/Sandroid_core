@@ -103,6 +103,9 @@ class ReviewModal(ForensicModal[None]):
         color: $success;
     }
     ReviewModal .verdict-different {
+        color: $error;
+    }
+    ReviewModal .verdict-volatile {
         color: $warning;
     }
     ReviewModal .verdict-none {
@@ -139,6 +142,8 @@ class ReviewModal(ForensicModal[None]):
         self._file_state: dict[str, str] = {}
         self._filling = False
         self._building = False
+        #: Rewind with no file selected was asked about once already.
+        self._asked_empty = False
 
     # -- layout ----------------------------------------------------------------
 
@@ -394,6 +399,7 @@ class ReviewModal(ForensicModal[None]):
 
         cls = {
             rewind.SAME: "verdict-same",
+            rewind.VOLATILE: "verdict-volatile",
             rewind.DIFFERENT: "verdict-different",
         }.get(fr.verdict, "verdict-none")
         out: list[Any] = [
@@ -404,12 +410,12 @@ class ReviewModal(ForensicModal[None]):
         if fr.before is None:
             out.append(Static("Before was not copied.", classes="review-warn"))
         if fr.after is None:
-            out.append(
-                Static(
-                    "After was not copied (selected after a rewind).",
-                    classes="review-warn",
-                )
+            text = (
+                rewind.LATE_WORDS.strip()
+                if getattr(fr, "late", False)
+                else "After was not copied."
             )
+            out.append(Static(text, classes="review-warn"))
         if fr.after_replay is not None:
             out.append(Static("What the replay changed (Before to After (replay))"))
             out.append(Static(escape(_clip_lines(fr.replay_text or "no change"))))
@@ -419,6 +425,15 @@ class ReviewModal(ForensicModal[None]):
                 text = _clip_lines("\n".join(extra))
                 out.append(Static(escape(text), classes="review-hint"))
         out.append(Static(fr.verdict, classes=cls))
+        if getattr(fr, "compared", "") == rewind.BYTE_WORDS_KEY:
+            out.append(Static(rewind.BYTE_WORDS, classes="review-hint"))
+        volatile = getattr(fr, "volatile", None) or []
+        if volatile:
+            text = "\n".join(
+                [rewind.VOLATILE_HEADING]
+                + [f"  {rewind.volatile_line(v)}" for v in volatile]
+            )
+            out.append(Static(escape(_clip_lines(text)), classes="verdict-volatile"))
         if getattr(fr, "note", ""):
             out.append(Static(escape(fr.note), classes="review-warn"))
         return out
@@ -575,8 +590,43 @@ class ReviewModal(ForensicModal[None]):
         if bid == "close":
             self.action_cancel()
         elif bid in ("rewind", "rewind-replay") and self._current():
-            if self.controller.start_rewind(replay=bid == "rewind-replay"):
-                self.set_progress("Going back to the start point")
+            replay = bid == "rewind-replay"
+            if not self.rec.selected and not self._asked_empty:
+                self._ask_empty(replay)
+                return
+            self._start(replay)
+
+    def _start(self, replay: bool) -> None:
+        if self.controller.start_rewind(replay=replay):
+            self.set_progress("Going back to the start point")
+
+    def _ask_empty(self, replay: bool) -> None:
+        """No file selected: say that nothing will be compared and ask once
+        (never blocks: Yes goes on, and the next press does not ask again).
+        """
+        from .confirm_modal import ConfirmModal
+
+        self._asked_empty = True
+        if replay and self.rec.selected_flows:
+            message = (
+                "No files selected: only the selected requests will be compared. Go on?"
+            )
+        else:
+            message = "No files selected: nothing will be compared. Go on?"
+
+        def answer(go: bool | None) -> None:
+            if go and self._current():
+                self._start(replay)
+
+        self.app.push_screen(
+            ConfirmModal(
+                title="Rewind + Replay" if replay else "Rewind",
+                message=message,
+                yes_label="Go on",
+                no_label="Back",
+            ),
+            answer,
+        )
 
     def close_for_new_recording(self) -> None:
         """A new recording started: this Review shows an older one. Close it

@@ -41,7 +41,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Collection, Iterable
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -59,8 +59,13 @@ ROLES = ("before", "after", "after_replay")
 ROLE_WORDS = {"before": "Before", "after": "After", "after_replay": "After (replay)"}
 #: Verdict words (plain, shown as they are).
 SAME = "same change in the replay"
+#: Both runs changed the same fields; some to different values that a rule
+#: explains (a time of its own run, ...; ``core/replay_verdict.py``).
+VOLATILE = "differs only in volatile fields"
 DIFFERENT = "replay changed it differently"
 UNCHANGED = "replay did not change it"
+#: A copy's file is gone from the Files lens folder: nothing to compare.
+NOT_COMPARED = "could not compare"
 NO_REPLAY = "no replay yet"
 NOT_COPIED = "After (replay) was not copied"
 #: A Rewind + Replay whose steps did not reach what your run did (a typed
@@ -130,6 +135,74 @@ def is_start_point_name(name: object) -> bool:
     return isinstance(name, str) and bool(_START_POINT_RE.match(name))
 
 
+def pinned_start_points(
+    results_root: Path | None, must_see: Path | None = None
+) -> set[str] | None:
+    """Start point names a pinned (or imported) recording of any session
+    under ``results_root`` (``results/<session>/<device>/recordings``)
+    refers to; a recording file that is not valid JSON keeps every start
+    point name it mentions.
+
+    None (nothing may be deleted) when the root is unknown, a folder or
+    file cannot be read, or the scan did not see ``must_see`` (the current
+    recording's file: the layout is not what it expects).
+    """
+    if results_root is None:
+        return None
+    keep: set[str] = set()
+    seen = False
+    try:
+        for path in results_root.glob("*/*/recordings/rec-*/recording.json"):
+            text = path.read_text()
+            if must_see is not None and path.resolve() == must_see.resolve():
+                seen = True
+            try:
+                sp = json.loads(text).get("start_point") or {}
+                if sp.get("pinned") or sp.get("imported"):
+                    keep.add(str(sp.get("name") or ""))
+            except (ValueError, AttributeError):
+                keep.update(re.findall(START_POINT_PREFIX + r"[0-9_]+", text))
+    except OSError:
+        logger.debug("pinned start points: scan failed", exc_info=True)
+        return None
+    if must_see is not None and not seen:
+        return None
+    keep.discard("")
+    return keep
+
+
+def old_start_points(avd_folder: Path | None, keep: set[str]) -> list[tuple[str, int]]:
+    """``[(name, bytes)]`` of the start points in the AVD's ``snapshots``
+    folder that may go: Sandroid's names only (:func:`is_start_point_name`),
+    none of ``keep``. Oldest first.
+    """
+    out: list[tuple[str, int]] = []
+    folder = avd_folder / "snapshots" if avd_folder is not None else None
+    if folder is None or not folder.is_dir():
+        return out
+    with contextlib.suppress(OSError):
+        for entry in sorted(folder.iterdir()):
+            if not entry.is_dir() or not is_start_point_name(entry.name):
+                continue
+            if entry.name in keep:
+                continue
+            size = 0
+            with contextlib.suppress(OSError):
+                size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
+            out.append((entry.name, size))
+    return out
+
+
+def size_words(n: int) -> str:
+    """``11 GB`` / ``2.5 GB`` / ``300 MB`` (plain, for one line)."""
+    gb = n / 1e9
+    if gb >= 10:
+        return f"{gb:.0f} GB"
+    if gb >= 1:
+        return f"{gb:.1f} GB"
+    return f"{n / 1e6:.0f} MB"
+
+
 def default_name(when: datetime | None = None) -> str:
     """The recording's automatic name, ``Recording HH:MM``."""
     return f"Recording {(when or datetime.now()).strftime('%H:%M')}"
@@ -180,6 +253,9 @@ class Recording:
     #: When each file's After was copied (epoch s): the replay waits as long
     #: after its last step, so both copies see the app write for as long.
     after_at: dict[str, float] = field(default_factory=dict)
+    #: Files selected after a Rewind ran: the device had left the state after
+    #: your action, so they have no After from your run.
+    late_selected: list[str] = field(default_factory=list)
 
     @property
     def start_point_name(self) -> str | None:
@@ -1049,6 +1125,14 @@ class FileResult:
     error: str = ""
     #: Set when the replay this verdict compares diverged (plain sentence).
     note: str = ""
+    #: Selected after a Rewind ran: no After from your run.
+    late: bool = False
+    #: ``field by field`` (the Files lens's smart diff) or ``byte for byte``
+    #: (no structure to compare); empty when the copies are one version.
+    compared: str = ""
+    #: Fields both runs changed to different values that a rule explains:
+    #: ``{"field", "your_run", "replay", "rule"}`` each (never hidden).
+    volatile: list[dict[str, str]] = field(default_factory=list)
 
 
 def _version_main(path: str, version: str | None) -> Path | None:
@@ -1087,13 +1171,6 @@ def _diff_lines(path: str, old: str | None, new: str | None) -> tuple[list[str],
     return [ln for ln in body if ln.strip()], ""
 
 
-def _no_change(lines: list[str], note: str) -> bool:
-    return not lines and (
-        note in ("no change", "no change in the content")
-        or note.startswith("The bytes changed")
-    )
-
-
 def diverged_note(run: dict[str, Any] | None) -> str:
     """The note a verdict carries when ``run`` (a Rewind + Replay) diverged
     or left steps unchecked ("" otherwise).
@@ -1113,17 +1190,26 @@ def diverged_note(run: dict[str, Any] | None) -> str:
     )
 
 
-def file_result(rec: Recording, path: str, *, with_replay: bool = True) -> FileResult:
+def file_result(
+    rec: Recording,
+    path: str,
+    *,
+    with_replay: bool = True,
+    secrets: Collection[str] = (),
+) -> FileResult:
     """Before to After and Before to After (replay) of one selected file.
 
     ``with_replay=False``: the latest run was a plain Rewind, so an older
-    replay's copy is not compared (its verdict would be stale).
+    replay's copy is not compared (its verdict would be stale). The verdict
+    compares what both runs changed field by field (``core/replay_verdict``).
+    ``secrets`` (:func:`hidden_texts`) are masked in every value shown.
     """
     before = rec.role_version(path, "before")
     after = rec.role_version(path, "after")
     replays = rec.versions.get(path, {}).get("after_replay") or []
     replay = rec.role_version(path, "after_replay") if with_replay else None
     res = FileResult(path, before, after, replay)
+    res.late = after is None and path in rec.late_selected
     try:
         run_lines, run_note = _diff_lines(path, before, after)
         res.action_text = "\n".join(run_lines) if run_lines else run_note
@@ -1133,31 +1219,188 @@ def file_result(rec: Recording, path: str, *, with_replay: bool = True) -> FileR
         res.note = diverged_note(rec.runs[-1] if rec.runs else None)
         rep_lines, rep_note = _diff_lines(path, before, replay)
         res.replay_text = "\n".join(rep_lines) if rep_lines else rep_note
-        run_none, rep_none = (
-            _no_change(run_lines, run_note),
-            _no_change(rep_lines, rep_note),
-        )
-        if after == replay or (run_none and rep_none):
-            res.verdict = SAME
-        elif replay == before or rep_none:
+        if after == replay:
+            res.verdict = SAME  # one version: the same content
+        elif replay == before:
             res.verdict = UNCHANGED
-        elif run_lines == rep_lines and run_note == rep_note:
-            res.verdict = SAME
         else:
-            res.verdict = DIFFERENT
-            run_set, rep_set = set(run_lines), set(rep_lines)
-            res.only_run = [ln for ln in run_lines if ln not in rep_set]
-            res.only_replay = [ln for ln in rep_lines if ln not in run_set]
+            _compare(rec, path, res, run_lines, rep_lines, secrets)
     except Exception as exc:  # a result view must never crash
         logger.debug("rewind: file result failed", exc_info=True)
         res.error = str(exc)
+    if secrets:
+        _hide_values(res, secrets)
     return res
+
+
+def run_windows(rec: Recording, path: str) -> tuple[Any, Any]:
+    """``(your run, the latest replay)`` as :class:`~sandroid.core.
+    replay_verdict.RunWindow` (None when unknown).
+
+    Your run: record start to Stop (or to when ``path``'s After was copied,
+    if later). The replay: the latest one that copied After (replay), from
+    its first step to its end. Rule 2 measures both from their step 1.
+    """
+    from sandroid.core.replay_verdict import RunWindow
+
+    def num(v: Any) -> float | None:
+        return float(v) if isinstance(v, (int, float)) and v else None
+
+    run = None
+    start = num(rec.started)
+    if start is not None:
+        ends = [e for e in (num(rec.stopped), num(rec.after_at.get(path))) if e]
+        run = RunWindow(start, max(ends + [start]))
+    replays = [r for r in rec.runs if r.get("kind") == "rewind-replay"]
+    # Runs saved before ``replay_copied`` existed: the latest replay.
+    copied = [r for r in replays if r.get("replay_copied", True)]
+    last = (copied or replays or [None])[-1]
+    replay = None
+    if last is not None:
+        r_start = num(last.get("replay_started")) or num(last.get("started"))
+        if r_start is not None:
+            replay = RunWindow(
+                r_start,
+                max(num(last.get("ended")) or 0.0, r_start),
+                num(last.get("first_step_at")),
+            )
+        if run is not None:
+            run = RunWindow(run.start, run.end, num(last.get("recorded_first_step_at")))
+    return run, replay
+
+
+_OUTCOME_WORDS = {
+    "same": SAME,
+    "volatile": VOLATILE,
+    "different": DIFFERENT,
+    "unchanged": UNCHANGED,
+}
+
+
+def _compare(
+    rec: Recording,
+    path: str,
+    res: FileResult,
+    run_lines: list[str],
+    rep_lines: list[str],
+    secrets: Collection[str] = (),
+) -> None:
+    """The verdict from the Files lens's smart diff of the three copies."""
+    from sandroid.core import replay_verdict
+
+    if res.before is None or res.after is None:
+        # Before not copied (it is not "a new file"), or selected late: no
+        # After from your run.
+        res.verdict = NOT_COMPARED
+        return
+    copies = []
+    for version in (res.before, res.after, res.after_replay):
+        if version in (None, ABSENT):
+            copies.append(None)
+            continue
+        local = _version_main(path, version)
+        if local is None or not local.is_file():
+            res.verdict = NOT_COMPARED
+            res.error = "a copy of this file is missing"
+            return
+        copies.append(local)
+    run, replay = run_windows(rec, path)
+    cmp = replay_verdict.compare(*copies, run=run, replay_run=replay, secrets=secrets)
+    res.verdict = _OUTCOME_WORDS[cmp.outcome]
+    res.compared = cmp.compared
+    res.volatile = [v.as_dict() for v in cmp.volatile]
+    if cmp.compared == replay_verdict.FIELD_BY_FIELD:
+        res.only_run, res.only_replay = cmp.only_run, cmp.only_replay
+    elif res.verdict == DIFFERENT:
+        run_set, rep_set = set(run_lines), set(rep_lines)
+        res.only_run = [ln for ln in run_lines if ln not in rep_set]
+        res.only_replay = [ln for ln in rep_lines if ln not in run_set]
+
+
+def _hide_values(res: FileResult, secrets: Collection[str]) -> None:
+    """Mask what was typed into sensitive fields in the diff texts (the
+    compared fields were masked before they were cut to length).
+    """
+    from sandroid.core.replay_verdict import hide
+
+    res.action_text = hide(res.action_text, secrets)
+    res.replay_text = hide(res.replay_text, secrets)
+    res.only_run = [hide(ln, secrets) for ln in res.only_run]
+    res.only_replay = [hide(ln, secrets) for ln in res.only_replay]
+
+
+def sensitive_texts(rec: Recording) -> frozenset[str]:
+    """What was typed into sensitive fields (passwords ...) during the
+    recording: the values masking hides in its results.
+    """
+    out: set[str] = set()
+    for line in lines_between(
+        rec.seq.get("start"), rec.seq.get("stop"), offset=rec.timeline_offset
+    ):
+        data = line.get("data")
+        if not isinstance(data, dict):
+            continue
+        if not (
+            line.get("sensitive") or data.get("password") or data.get("data_sensitive")
+        ):
+            continue
+        text = data.get("text")
+        if isinstance(text, str) and len(text.strip()) >= SECRET_MIN_LEN:
+            out.add(text)
+    return frozenset(out)
+
+
+#: Shorter typed text is not masked inside file values (it would mask
+#: every occurrence of one or two characters).
+SECRET_MIN_LEN = 3
+
+
+def hidden_texts(rec: Recording | None, reader: str = "ui") -> frozenset[str]:
+    """:func:`sensitive_texts` while masking is on for ``reader`` (``ui``:
+    ``timeline.mask_sensitive``; ``ai``: ``ai.mask_sensitive``; ``any``:
+    either, for what both read later, like run.json), else none.
+    """
+    if rec is None:
+        return frozenset()
+    try:
+        from sandroid.core.timeline import should_mask
+
+        readers = ("ui", "ai") if reader == "any" else (reader,)
+        if not any(should_mask(r) for r in readers):  # type: ignore[arg-type]
+            return frozenset()
+        return sensitive_texts(rec)
+    except Exception:
+        logger.debug("rewind: sensitive texts not read", exc_info=True)
+        return frozenset()
+
+
+#: A file selected after a Rewind ran (Review, Sessions, results).
+LATE_WORDS = (
+    "  No After from your run: this file was selected after a Rewind, when "
+    "the device no longer showed what your action left."
+)
+
+
+#: ``FileResult.compared`` of a file without fields to compare.
+BYTE_WORDS_KEY = "byte for byte"
+BYTE_WORDS = "Compared byte for byte (this file has no fields to compare)."
+VOLATILE_HEADING = "Volatile fields (both runs changed them; a rule explains why):"
+
+
+def volatile_line(v: dict[str, str]) -> str:
+    """``field: A in your run, B in the replay (rule)``."""
+    return (
+        f"{v.get('field')}: {v.get('your_run')} in your run, "
+        f"{v.get('replay')} in the replay ({v.get('rule')})"
+    )
 
 
 def result_lines(res: FileResult) -> list[str]:
     """The result of one file as plain lines (Sessions lens, AI, report)."""
     words = ROLE_WORDS
     out = ["What your action changed (Before to After):"]
+    if res.late:
+        out.append(LATE_WORDS)
     if res.before is None:
         out.append("  Before was not copied (no rewind yet).")
     out.extend(f"  {ln}" for ln in (res.action_text or "no change").splitlines())
@@ -1169,6 +1412,11 @@ def result_lines(res: FileResult) -> list[str]:
         for ln in res.only_replay:
             out.append(f"  only in the replay: {ln}")
     out.append(f"Result: {res.verdict}")
+    if res.compared == BYTE_WORDS_KEY:
+        out.append(BYTE_WORDS)
+    if res.volatile:
+        out.append(VOLATILE_HEADING)
+        out.extend(f"  {volatile_line(v)}" for v in res.volatile)
     if res.note:
         out.append(f"Note: {res.note}")
     if res.error:
@@ -1235,6 +1483,11 @@ class RunOutcome:
     paused: list[int] = field(default_factory=list)
     #: The start point was loaded (the device left the after-the-action state).
     loaded: bool = False
+    #: When step 1 ran in the replay and in your run (wall clock, epoch s).
+    first_step_at: float | None = None
+    recorded_first_step_at: float | None = None
+    #: This run copied After (replay) (its window is the one compared).
+    replay_copied: bool = False
 
 
 def unchecked_words(out: RunOutcome) -> str:
@@ -1399,6 +1652,8 @@ class RewindRunner:
             out.diverged_at_step = report.get("diverged_at_step")
             out.diverged = report.get("diverged")
             out.unchecked_steps = list(report.get("unchecked_steps") or [])
+            out.first_step_at = report.get("first_step_at")
+            out.recorded_first_step_at = report.get("recorded_first_step_at")
             self._emit(
                 "setup",
                 f"{rec.rec_id}#{n}",
@@ -1407,6 +1662,7 @@ class RewindRunner:
                 data={"rec_id": rec.rec_id, "run": n},
             )
             errors = self.pull_role("after_replay", n)
+            out.replay_copied = True
             for path, err in errors.items():
                 self.deps.progress(f"Could not copy {path}: {err}.")
             if report.get("error"):
@@ -1446,6 +1702,9 @@ class RewindRunner:
                 "unchecked_steps": out.unchecked_steps,
                 "steps": out.steps,
                 "loaded": out.loaded,
+                "first_step_at": out.first_step_at,
+                "recorded_first_step_at": out.recorded_first_step_at,
+                "replay_copied": out.replay_copied,
             }
             rec.runs.append(run)
             summary = {

@@ -229,6 +229,33 @@ def test_auto_start_starts_server_and_cleans_helpers(monkeypatch):
     assert any("frida-helper-*.dex" in c and "rm -f" in c for c in fm.adb.cmds)
 
 
+def test_frida_server_starting_is_set_only_while_it_starts(monkeypatch):
+    """The status bar's Frida "starting" reads this while an auto-start runs."""
+    fm_mod = _auto(monkeypatch)
+    seen: list[bool] = []
+
+    class _Watched(_ServerFM):
+        def run_frida_server(self):
+            seen.append(fm_mod.frida_server_starting())
+            return super().run_frida_server()
+
+    assert not fm_mod.frida_server_starting()
+    assert fm_mod.auto_start_frida_server(_Watched())[0] is True
+    assert seen == [True]
+    assert not fm_mod.frida_server_starting()
+    # Already running: no start, so never "starting".
+    seen.clear()
+    assert fm_mod.auto_start_frida_server(_Watched(running=True))[0] is True
+    assert seen == []
+
+    class _Broken(_ServerFM):
+        def run_frida_server(self):
+            raise RuntimeError("boom")
+
+    assert fm_mod.auto_start_frida_server(_Broken())[0] is False
+    assert not fm_mod.frida_server_starting()  # cleared on failure too
+
+
 def test_auto_start_reports_reasons(monkeypatch):
     fm_mod = _auto(monkeypatch)
     ok, reason = fm_mod.auto_start_frida_server(_ServerFM(rooted=False))

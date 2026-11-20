@@ -68,6 +68,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from textual.containers import Vertical
+from textual.message import Message
 from textual.widgets import DataTable
 
 from sandroid.tui.themes import LensPalette, lens_palette
@@ -557,7 +558,9 @@ def build_identity(f: AppFacts) -> SectionData:
         insight = getattr(static, "insight", None)
         cache = "cached" if getattr(static, "from_cache", False) else "analysed now"
         cache += f" · key {str(key)[:12]}…" if key else ""
-        cache += " · Insight ✓" if insight else " · Insight — (a = static analysis)"
+        cache += (
+            " · Insight done" if insight else " · Insight not run (a = static analysis)"
+        )
         style = ""
     else:
         cache = static_note(f) or "?"
@@ -635,7 +638,7 @@ def _manifest_perm_line(name: str) -> str:
 
 
 def _op_cell(ops: list[Any]) -> Text:
-    """``allow · 5m ago ✗2h`` -- effective mode, last access, last reject."""
+    """``allow · 5m ago, rejected 2h`` -- mode, last access, last reject."""
     if not ops:
         return _t("—", _c().dim)
 
@@ -649,16 +652,18 @@ def _op_cell(ops: list[Any]) -> Text:
     )
     text = Text(mode, style=style)
     if any(o.running for o in ops):
-        text.append(" ● now", style=f"bold {_c().warn}")
+        text.append(" now", style=f"bold {_c().warn}")
     elif op.last_access_ago_s is not None:
         text.append(f" · {ago(op.last_access_ago_s)}")
     elif op.last_access:
         text.append(f" · {_cut(op.last_access, 12)}")
     rejects = [o.last_reject_ago_s for o in ops if o.last_reject_ago_s is not None]
     if rejects:
-        text.append(f" ✗{ago(min(rejects)).replace(' ago', '')}", style=_c().bad)
+        text.append(
+            f", rejected {ago(min(rejects)).replace(' ago', '')}", style=_c().bad
+        )
     elif any(o.last_reject for o in ops):
-        text.append(" ✗", style=_c().bad)
+        text.append(", rejected", style=_c().bad)
     return text
 
 
@@ -703,17 +708,15 @@ def _op_evidence(op: Any) -> Table:
 
 
 def _grant_cell(g: Any, ops: list[Any]) -> Text:
+    """``granted`` / ``denied`` / ``revoked`` / ``unknown`` (words, no glyphs)."""
     if g.granted is None:
-        return _t("req → ?", _c().dim)
+        return _t("unknown", _c().dim)
     if g.granted and getattr(g, "revoked", False):
-        text = Text("req → ", style=_c().dim)
-        text.append("✓ revoked", style=_c().bad)
-        return text
+        return _t("revoked", _c().bad)
     if not g.granted:
-        text = Text("req → ✗", style=_c().dim)
+        text = Text("denied", style=_c().dim)
     else:
-        text = Text("req → ", style=_c().dim)
-        text.append("✓", style=_c().ok)
+        text = Text("granted", style=_c().ok)
         if any(o.mode == "foreground" for o in ops):
             text.append(" while-in-use", style=_c().warn)
         elif "ONE_TIME" in (g.flags or []):
@@ -755,24 +758,25 @@ def _perm_note(g: Any, ops: list[Any]) -> tuple[str, str]:
     return ", ".join(notes), style
 
 
-def _grant_glyph(g: Any) -> Text:
+def _grant_word(g: Any) -> Text:
+    """Compact grant column: ``yes`` / ``no`` / ``revoked`` / ``?``."""
     if g.granted is None:
         return _t("?", _c().dim)
     if g.granted and getattr(g, "revoked", False):
-        return _t("✓⊘", _c().bad)
-    return _t("✓", _c().ok) if g.granted else _t("✗", _c().dim)
+        return _t("revoked", _c().bad)
+    return _t("yes", _c().ok) if g.granted else _t("no", _c().dim)
 
 
-def _use_glyph(ops: list[Any]) -> Text:
-    """``●`` used recently / now, dim ``●`` used before, ``○`` no recorded use."""
+def _use_word(ops: list[Any]) -> Text:
+    """`` recent`` used recently / now, `` used`` before, `` unused`` never."""
     if not ops:
         return _t("")
     ages = [o.last_access_ago_s for o in ops if o.last_access_ago_s is not None]
     if any(o.running for o in ops) or (ages and min(ages) <= RECENT_SECONDS):
-        return _t("●", _c().warn)
+        return _t(" recent", _c().warn)
     if any(o.last_access for o in ops):
-        return _t("●", _c().dim)
-    return _t("○", _c().dim)
+        return _t(" used", _c().dim)
+    return _t(" unused", _c().dim)
 
 
 def _last_use(ops: list[Any]) -> Text:
@@ -786,9 +790,9 @@ def _last_use(ops: list[Any]) -> Text:
 
 
 def _compact_perm(name: str, grant: Text, ops: list[Any]) -> tuple[Any, ...]:
-    glyph = grant.copy()
-    glyph.append_text(_use_glyph(ops))
-    return (_t(_cut(name, 22)), glyph, _last_use(ops))
+    cell = grant.copy()
+    cell.append_text(_use_word(ops))
+    return (_t(_cut(name, 22)), cell, _last_use(ops))
 
 
 def build_permissions(f: AppFacts) -> SectionData:
@@ -876,7 +880,7 @@ def build_permissions(f: AppFacts) -> SectionData:
                 ),
                 title=_short_perm(g.name),
                 subtitle=escape(g.name),
-                compact=_compact_perm(_short_perm(g.name), _grant_glyph(g), g_ops),
+                compact=_compact_perm(_short_perm(g.name), _grant_word(g), g_ops),
                 evidence=evidence,
                 raw={
                     "grant": _to_dict(g),
@@ -929,7 +933,10 @@ def build_permissions(f: AppFacts) -> SectionData:
         rows.insert(
             0,
             _placeholder(
-                "perm-reason", f"⚠ {state.reason or 'unavailable'}", 5, _c().bad
+                "perm-reason",
+                f"grants unreadable: {state.reason or 'unavailable'}",
+                5,
+                _c().bad,
             ),
         )
     if appops is not None and not getattr(appops, "ok", True):
@@ -958,7 +965,7 @@ def build_permissions(f: AppFacts) -> SectionData:
         hidden_rows=hidden,
         hidden_label="other ops (no recorded use)",
         hidden_short="other ops",
-        compact_columns=("permission", "✓·use", "last use"),
+        compact_columns=("permission", "grant, use", "last use"),
         zebra=True,
     )
 
@@ -1553,7 +1560,7 @@ def _size_text(kb: int | None, reason: str | None) -> str:
 
 # -- SUSPECTED DEFENCES ----------------------------------------------------
 
-_CONF = {"high": "●●●", "medium": "●●○", "low": "●○○"}
+_CONF = {"high": "high", "medium": "medium", "low": "low"}
 
 
 def _chord_digits() -> set[str]:
@@ -1686,24 +1693,27 @@ def row_content(section: str, row: Row) -> InspectorContent:
 
 
 def _band_title(
-    arrow: str,
     title: str,
     summary: str,
     *,
+    folded: bool,
     focused: bool,
     c: LensPalette,
     width: int = 0,
 ) -> Text:
-    """A section's header band: ``▾ TITLE  12 requested · 3 dangerous``.
+    """A section's header band: ``TITLE  12 requested · 3 dangerous``.
 
     The band is the ``panel`` top border; the title paints its own
-    background so the text sits on the band. Numbers in the summary are
-    emphasised, the rest muted, so the counts scan like chips.
+    background so the text sits on the band. Focus is the band colour, a
+    folded section says "folded" (no marker glyphs). Numbers in the summary
+    are emphasised, the rest muted, so the counts scan like chips.
     """
     band = c.band_focus if focused else c.band
     text = Text(style=f"on {band}")
-    text.append("▌" if focused else " ", style=f"{c.accent} on {band}")
-    text.append(f"{arrow} {title}", style=f"bold {c.title} on {band}")
+    text.append(" ", style=f"on {band}")
+    text.append(title, style=f"bold {c.title} on {band}")
+    if folded:
+        text.append(" folded", style=f"{c.dim} on {band}")
     if summary:
         text.append("   ", style=f"on {band}")
         start = len(text)
@@ -1895,12 +1905,11 @@ class LensSection(DataTable):
         self._update_title()
 
     def _update_title(self) -> None:
-        arrow = "▸" if self.folded else "▾"
         title = SECTION_TITLES.get(self.section_id, self.section_id)
         self.border_title = _band_title(
-            arrow,
             title,
             self._summary,
+            folded=self.folded,
             focused=self.has_focus,
             c=_c(),
             width=self.outer_size.width - 2,  # Textual keeps 2 cells free
@@ -2200,6 +2209,18 @@ def _stripe_indexes(rows: list[Row]) -> list[int]:
 class AppLensSections(Vertical):
     """The App lens's seven sections and the off-thread data behind them."""
 
+    class RefreshDone(Message):
+        """An announced (``u``) refresh ended.
+
+        ``problems``: the facts that could not be read (``"AppOps: <why>"``),
+        empty when all were; ``None`` when the refresh was abandoned (another
+        app or device was selected meanwhile).
+        """
+
+        def __init__(self, problems: list[str] | None) -> None:
+            super().__init__()
+            self.problems = problems
+
     DEFAULT_CSS = """
     AppLensSections {
         height: auto;
@@ -2222,6 +2243,10 @@ class AppLensSections(Vertical):
         self._runtime_rid: int | None = None
         self._pending: set[str] = set()
         self._explicit: set[str] = set()
+        #: The announced (``u``) refresh: its request id once it runs, and
+        #: whether it waits for the fetch in flight (see :attr:`refreshing`).
+        self._announce_rid: int | None = None
+        self._announce_waiting = False
         self._last_runtime = 0.0
         self._trail_timer: Any = None
         self._stale = False
@@ -2353,6 +2378,10 @@ class AppLensSections(Vertical):
         self._pending = set()
         self._explicit = set()
         self._runtime_rid = None
+        if self.refreshing:  # the announced refresh was for the old app
+            self._announce_rid = None
+            self._announce_waiting = False
+            self.post_message(self.RefreshDone(None))
         self._footprint_inflight = None
         self._stale = False
         if not package:
@@ -2538,6 +2567,7 @@ class AppLensSections(Vertical):
         throttle: bool = False,
         static: bool = False,
         explicit: bool = False,
+        announce: bool = False,
     ) -> bool:
         """Re-fetch runtime facts off-thread. Returns False if nothing ran now.
 
@@ -2546,9 +2576,15 @@ class AppLensSections(Vertical):
         ``static``: also re-read the static cache (Insight may have run).
         ``explicit``: the user asked (``u``) -- never throttled; while a
         fetch is in flight it runs right after that one, not 10 s later.
+        ``announce``: the user pressed ``u`` (implies ``explicit``):
+        :attr:`refreshing` is True until it ended, then a :class:`RefreshDone`
+        says how it went.
         """
         if self.facts is None:
             return False
+        if announce:
+            explicit = True
+            throttle = False
         wanted = set(kinds) | ({"static_cache"} if static else set())
         now = time.monotonic()
         if throttle:
@@ -2564,11 +2600,41 @@ class AppLensSections(Vertical):
         if self._runtime_inflight:
             if explicit:
                 self._explicit |= wanted
+                if announce:
+                    self._announce_waiting = True
             else:
                 self._pending |= wanted
             return False
-        self._start_runtime(wanted)
+        rid = self._start_runtime(wanted)
+        if announce and rid is not None:
+            if self._runtime_rid == rid:
+                self._announce_rid = rid
+            else:
+                # It ended before we could watch it (the worker did not
+                # start): say so instead of "refreshing" forever.
+                self._announce_end(failed=True)
         return True
+
+    @property
+    def refreshing(self) -> bool:
+        """An announced (``u``) refresh runs or waits for the running fetch."""
+        return self._announce_rid is not None or self._announce_waiting
+
+    def _announce_end(self, failed: bool) -> None:
+        """The announced refresh ended: post what could not be read."""
+        problems = ["the refresh failed (see the log)"] if failed else []
+        facts = self.facts
+        for kind, label in (
+            ("details", "package details"),
+            ("permissions", "grants"),
+            ("appops", "AppOps"),
+            ("services", "services"),
+        ):
+            value = getattr(facts, kind, None) if facts is not None else None
+            if value is not None and getattr(value, "ok", True) is False:
+                why = getattr(value, "reason", None) or "unavailable"
+                problems.append(f"{label}: {why}")
+        self.post_message(self.RefreshDone(problems))
 
     def _fire_trailing(self) -> None:
         self._trail_timer = None
@@ -2583,11 +2649,12 @@ class AppLensSections(Vertical):
             return
         self._start_runtime(kinds)
 
-    def _start_runtime(self, kinds: set[str]) -> None:
+    def _start_runtime(self, kinds: set[str]) -> int | None:
+        """Start a runtime fetch; returns its request id (None: no app)."""
         token = self._token()
         package, serial = token[0], self._serial
         if package is None:
-            return
+            return None
         if "footprint" in kinds:
             kinds = kinds - {"footprint"}
             self._start_footprint()
@@ -2624,18 +2691,32 @@ class AppLensSections(Vertical):
             post(self._runtime_done, token, rid)
 
         self._run(
-            work, "app-lens-refresh", functools.partial(self._runtime_done, token, rid)
+            work,
+            "app-lens-refresh",
+            functools.partial(self._runtime_done, token, rid, failed=True),
         )
+        return rid
 
-    def _runtime_done(self, token: tuple[str | None, int], rid: int) -> None:
+    def _runtime_done(
+        self, token: tuple[str | None, int], rid: int, failed: bool = False
+    ) -> None:
         """A runtime fetch ended (or failed): clear only its own flag."""
         if token != self._token() or self._runtime_rid != rid:
             return
         self._runtime_rid = None
+        if rid == self._announce_rid:
+            self._announce_rid = None
+            self._announce_end(failed)
         if self._explicit:
             kinds, self._explicit = self._explicit | self._pending, set()
             self._pending = set()
+            waiting, self._announce_waiting = self._announce_waiting, False
             self.refresh_runtime(kinds, throttle=False)
+            if waiting:
+                if self._runtime_rid is not None:
+                    self._announce_rid = self._runtime_rid
+                else:
+                    self.post_message(self.RefreshDone(None))
         elif self._pending:
             kinds, self._pending = self._pending, set()
             self.refresh_runtime(kinds, throttle=True)

@@ -6,24 +6,53 @@ the ``?`` catalog and the command palette) made e.g. Spotlight's ``R`` Restart
 look identical to the global ``r`` Record. Every place that shows a key to the
 user goes through :func:`format_key` so a shifted letter is always marked:
 
-* ``compact`` (footer, in-panel hint lines): ``r`` -> ``r``, ``R`` -> ``⇧R``,
-  ``ctrl+b`` -> ``^b``, ``shift+right`` -> ``⇧→``.
+* ``compact`` (footer, in-panel hint lines): ``r`` -> ``r``, ``R`` ->
+  ``Shift+R``, ``ctrl+b`` -> ``^b``, ``shift+right`` -> ``Shift+Right``.
 * ``long`` (help catalog, palette, detail panes): ``r`` -> ``r``,
   ``R`` -> ``Shift+R``, ``ctrl+b`` -> ``Ctrl+B``, ``question_mark`` -> ``?``.
+
+Keys are words, never glyphs (the user's no-glyph rule covers key names):
+arrows read ``Left`` / ``Right`` / ``Up`` / ``Down``, Enter ``Enter``, Shift
+``Shift+``. :func:`key_words` turns glyphs in hand-written labels (a
+binding's ``key_display``, help rows) into the same words.
 """
 
 from __future__ import annotations
 
-SHIFT_GLYPH = "⇧"
+#: The Shift prefix in both styles (a word, not the old ``⇧`` glyph).
+SHIFT_PREFIX = "Shift+"
+
+#: Key glyphs -> their words. The one mapping for every key label: help,
+#: the footer and the command palette all go through it.
+KEY_WORDS: dict[str, str] = {
+    "←": "Left",
+    "→": "Right",
+    "↑": "Up",
+    "↓": "Down",
+    "⏎": "Enter",
+    "↵": "Enter",
+    "⇧": "Shift+",
+    "⌥": "Alt+",
+    "⌫": "Backspace",
+    "⇥": "Tab",
+}
+
+
+def key_words(text: str) -> str:
+    """*text* with key glyphs replaced by their words (``⇧←`` -> ``Shift+Left``)."""
+    for glyph, word in KEY_WORDS.items():
+        text = text.replace(glyph, word)
+    return text.replace("Shift++", "Shift+").replace("Alt++", "Alt+")
+
 
 #: Named keys -> (compact, long) display.
 _NAMED: dict[str, tuple[str, str]] = {
     "space": ("Space", "Space"),
     " ": ("Space", "Space"),
-    "enter": ("⏎", "Enter"),
+    "enter": ("Enter", "Enter"),
     "escape": ("esc", "Esc"),
-    "tab": ("⇥", "Tab"),
-    "backspace": ("⌫", "Backspace"),
+    "tab": ("Tab", "Tab"),
+    "backspace": ("Backspace", "Backspace"),
     "delete": ("del", "Del"),
     "question_mark": ("?", "?"),
     "comma": (",", ","),
@@ -41,10 +70,10 @@ _NAMED: dict[str, tuple[str, str]] = {
     "right_square_bracket": ("]", "]"),
     "left_curly_bracket": ("{", "{"),
     "right_curly_bracket": ("}", "}"),
-    "up": ("↑", "↑"),
-    "down": ("↓", "↓"),
-    "left": ("←", "←"),
-    "right": ("→", "→"),
+    "up": ("Up", "Up"),
+    "down": ("Down", "Down"),
+    "left": ("Left", "Left"),
+    "right": ("Right", "Right"),
     "home": ("home", "Home"),
     "end": ("end", "End"),
     "pageup": ("pgup", "PgUp"),
@@ -94,9 +123,9 @@ def format_key(key: str | None, style: str = "long") -> str:
         if "ctrl" in mods:
             prefix += "^"
         if "alt" in mods:
-            prefix += "⌥"
+            prefix += "Alt+"
         if "shift" in mods:
-            prefix += SHIFT_GLYPH
+            prefix += SHIFT_PREFIX
         return prefix + label
 
     order = [m for m in ("ctrl", "alt", "shift") if m in mods]

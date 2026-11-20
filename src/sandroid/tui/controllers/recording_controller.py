@@ -443,6 +443,8 @@ class RecordingController:
         self._replace_start_point(previous, rec)
         with contextlib.suppress(Exception):
             rewind.save_recording(rec)
+        if rec.start_point_name:
+            self._start_cleanup(rec, previous)
         self._ui(self._log_info, f"Recording '{rec.name}' started")
         self._start_ticker(rec)
         return {
@@ -473,9 +475,11 @@ class RecordingController:
         name = rewind.start_point_name()
         self._guarded(self._suppress_disconnect_guard, True)
         try:
+            from sandroid.core.snapshot_policy import acting_as
             from sandroid.services import get_emulator_service
 
-            ok = bool(get_emulator_service().create_snapshot(name, rec.serial))
+            with acting_as("rewind"):  # start points are Rewind's own names
+                ok = bool(get_emulator_service().create_snapshot(name, rec.serial))
         except Exception as exc:
             logger.debug("create_snapshot raised", exc_info=True)
             ok, why = False, str(exc)
@@ -520,7 +524,10 @@ class RecordingController:
             except Exception:
                 names = set()
             if name in names:
-                return bool(service.delete_snapshot(name, serial))
+                from sandroid.core.snapshot_policy import acting_as
+
+                with acting_as("rewind"):
+                    return bool(service.delete_snapshot(name, serial))
             time.sleep(every_s)
         return False
 
@@ -612,9 +619,11 @@ class RecordingController:
         if not rewind.is_start_point_name(name):
             return
         try:
+            from sandroid.core.snapshot_policy import acting_as
             from sandroid.services import get_emulator_service
 
-            ok = bool(get_emulator_service().delete_snapshot(name, rec.serial))
+            with acting_as("rewind"):
+                ok = bool(get_emulator_service().delete_snapshot(name, rec.serial))
         except Exception:
             logger.debug("deleting the unused start point failed", exc_info=True)
             ok = False
@@ -640,9 +649,11 @@ class RecordingController:
         if not rewind.is_start_point_name(name) or name == rec.start_point_name:
             return
         try:
+            from sandroid.core.snapshot_policy import acting_as
             from sandroid.services import get_emulator_service
 
-            ok = get_emulator_service().delete_snapshot(name, previous.serial)
+            with acting_as("rewind"):
+                ok = get_emulator_service().delete_snapshot(name, previous.serial)
         except Exception:
             logger.debug("deleting the old start point failed", exc_info=True)
             ok = False
@@ -651,6 +662,98 @@ class RecordingController:
             previous.start_point["saved_ok"] = False
         with contextlib.suppress(Exception):
             rewind.save_recording(previous)
+
+    def _start_cleanup(self, rec: Any, previous: Any) -> None:
+        """Remove old start points on a thread of its own: console deletes
+        take seconds and must never hold up the recording.
+        """
+        threading.Thread(
+            target=self._remove_old_start_points,
+            args=(rec, previous),
+            name="rewind-cleanup",
+            daemon=True,
+        ).start()
+
+    def _remove_old_start_points(self, rec: Any, previous: Any = None) -> int:
+        """After a new start point saved: delete every unpinned start point
+        left on this AVD by earlier recordings (the AVD's ``snapshots``
+        folder). Kept: pinned and imported ones (a pinned recording in any
+        session keeps its start point), the new one, the previous one (see
+        :meth:`_replace_start_point`), and any name that is not Sandroid's.
+        One by one through the emulator console; a failure is one plain log
+        line. Returns how many were deleted.
+        """
+        from sandroid.core import rewind
+
+        if not rec.start_point_name or not rec.avd or not rec.emulator:
+            return 0
+        if not rec.serial:
+            return 0  # never the console of whatever device is current
+        try:
+            from sandroid.core.emulator import avd_dir
+            from sandroid.core.timeline import session_folder
+
+            folder = avd_dir(rec.avd)
+            session = session_folder()
+            root = session.parent if session else None
+            own = rewind.recording_dir(rec.rec_id) / "recording.json"
+
+            def pinned() -> set[str] | None:
+                return rewind.pinned_start_points(root, must_see=own)
+
+            keep = pinned()
+        except Exception:
+            logger.debug("old start points: lookup failed", exc_info=True)
+            return 0
+        if keep is None:
+            # Which start points are pinned is unknown: delete nothing.
+            logger.info("Old start points kept: the recordings could not be read")
+            return 0
+        keep.add(rec.start_point_name)
+        if previous is not None and previous.start_point.get("name"):
+            keep.add(str(previous.start_point["name"]))
+        old = rewind.old_start_points(folder, keep)
+        if not old:
+            return 0
+        try:
+            from sandroid.services import get_emulator_service
+
+            service = get_emulator_service()
+        except Exception:
+            logger.debug("old start points: no emulator service", exc_info=True)
+            return 0
+        removed, freed, failed = 0, 0, []
+        for name, size in old:
+            if not rewind.is_start_point_name(name):
+                continue
+            again = pinned()  # an import may have pinned one meanwhile
+            if again is None or name in again:
+                continue
+            try:
+                ok = bool(service.delete_snapshot(name, rec.serial))
+            except Exception:
+                logger.debug("deleting old start point %s failed", name, exc_info=True)
+                ok = False
+            if ok:
+                removed += 1
+                freed += size
+            else:
+                failed.append(name)
+        if removed:
+            words = "start point" if removed == 1 else "start points"
+            self._ui(
+                self._log_info,
+                f"Removed {removed} old {words} ({rewind.size_words(freed)})",
+            )
+        if failed:
+            self._ui(
+                self._log_warning,
+                f"Could not remove {len(failed)} old start point"
+                f"{'s' if len(failed) != 1 else ''} ({', '.join(failed[:3])}"
+                f"{', ...' if len(failed) > 3 else ''}): the emulator did not "
+                "confirm. They stay on the device; recording goes on.",
+            )
+        return removed
 
     def _start_ticker(self, rec: Any) -> None:
         self._tick_stop.clear()
@@ -918,8 +1021,15 @@ class RecordingController:
                 view.add_path(path, pull_first=False)
         if _rewound(rec):
             # The device is no longer after the action: no After any more.
+            if path not in rec.late_selected and not rec.role_version(path, "after"):
+                rec.late_selected.append(path)
+                with contextlib.suppress(Exception):
+                    rewind.save_recording(rec)
             self._review_file_state(
-                path, "selected (After exists only before a rewind)"
+                path,
+                "no After from your run: selected after a Rewind"
+                if not rec.role_version(path, "after")
+                else "After kept from before the Rewind",
             )
             return
         if view is None:
@@ -1178,8 +1288,9 @@ class RecordingController:
             [rec.stopped or 0.0] + [rec.after_at.get(p, 0.0) for p in rec.selected]
         )
         tail = (until - last_t) if (until and last_t) else None
+        first_t = min((t for t in (_step_time(st) for st in steps) if t), default=None)
         try:
-            return StepReplayer(
+            report = StepReplayer(
                 tail_s=tail,
                 shell=runner.deps.shell,
                 helper=helper,
@@ -1188,6 +1299,8 @@ class RecordingController:
                 emit=emit,
                 raw_lines=_raw_reader(),
             ).run(steps)
+            # When your run did step 1: the verdict's rule 2 measures from it.
+            return {**report, "recorded_first_step_at": first_t}
         finally:
             if own_gen is not None and tracking is not None:
                 with contextlib.suppress(Exception):
@@ -1229,8 +1342,13 @@ class RecordingController:
 
     # -- results ----------------------------------------------------------------
 
-    def results(self, rec: Any = None) -> dict[str, Any]:
-        """Per-file and per-request results of the recording's latest run."""
+    def results(self, rec: Any = None, reader: str = "ui") -> dict[str, Any]:
+        """Per-file and per-request results of the recording's latest run.
+
+        ``reader`` picks the masking setting (``ui``: ``timeline.
+        mask_sensitive``, ``ai``: ``ai.mask_sensitive``): while it is on,
+        text typed into sensitive fields is hidden in every shown value.
+        """
         from sandroid.core import rewind
 
         rec = rec or self._rec
@@ -1238,8 +1356,10 @@ class RecordingController:
             return {"files": [], "flows": []}
         last_kind = rec.runs[-1].get("kind") if rec.runs else None
         with_replay = last_kind in (None, "rewind-replay")
+        secrets = rewind.hidden_texts(rec, reader)
         files = [
-            rewind.file_result(rec, p, with_replay=with_replay) for p in rec.selected
+            rewind.file_result(rec, p, with_replay=with_replay, secrets=secrets)
+            for p in rec.selected
         ]
         flows = []
         last = rec.runs[-1] if rec.runs else None
@@ -1287,12 +1407,16 @@ class RecordingController:
         from sandroid.core.timeline import timeline_folder
 
         try:
-            res = self.results(rec)
+            # run.json is read by the Sessions lens and the AI: masked when
+            # either reader masks.
+            res = self.results(rec, reader="any")
             files: list[Any] = []
-            new, deleted, verdicts = [], [], {}
+            new, deleted, verdicts, volatile = [], [], {}, {}
             for fr in res["files"]:
                 files.append({fr.path: rewind.result_lines(fr)})
                 verdicts[fr.path] = fr.verdict
+                if fr.volatile:
+                    volatile[fr.path] = fr.volatile
                 if fr.before == rewind.ABSENT:
                     new.append(fr.path)
                 if fr.after == rewind.ABSENT:
@@ -1327,6 +1451,10 @@ class RecordingController:
                     "changed": len(files) - len(new) - len(deleted),
                     "new": len(new),
                     "deleted": len(deleted),
+                    # The Review list (changed in your run) and how many of
+                    # its files were selected for comparison.
+                    "recorded": len(rec.changed),
+                    "compared": len(files),
                 },
                 timeline_folder=str(timeline_folder()),
                 record_window=[rec.started or 0.0, rec.stopped or 0.0],
@@ -1348,10 +1476,13 @@ class RecordingController:
                     "flows": flows,
                     "requests": requests,
                     "run": outcome.n,
+                    # Per file: the fields a rule explains (both values).
+                    "volatile": volatile,
                 },
             )
             run_history.save_run(record)
             rec.runs[-1]["run_id"] = run_id
+            rec.runs[-1]["verdicts"] = verdicts
             rewind.save_recording(rec)
             self._last_run_id = run_id
             return run_id
@@ -1449,7 +1580,7 @@ class RecordingController:
         rec = rec or self._rec
         if rec is None:
             return {"recording": None}
-        res = self.results(rec)
+        res = self.results(rec, reader="ai")
         from sandroid.core import rewind
 
         return {
@@ -1476,6 +1607,7 @@ class RecordingController:
                         "diverged",
                         "unchecked_steps",
                         "run_id",
+                        "verdicts",
                     )
                 }
                 for r in rec.runs
@@ -1484,6 +1616,10 @@ class RecordingController:
                 {
                     "path": fr.path,
                     "verdict": fr.verdict,
+                    "compared": fr.compared or None,
+                    "volatile_fields": fr.volatile or None,
+                    "only_in_your_run": fr.only_run or None,
+                    "only_in_the_replay": fr.only_replay or None,
                     "note": fr.note or None,
                     "what_your_action_changed": fr.action_text,
                     "what_the_replay_changed": fr.replay_text or None,

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import contextlib
 import logging
 import lzma
 import os
@@ -128,6 +129,29 @@ def _wait_device_prepared(what: str) -> None:
         logger.debug("device-prepared gate failed", exc_info=True)
 
 
+#: How many frida-server starts run right now (auto-start, install modal,
+#: stale restart); read by the TUI status bar's poll.
+_STARTING = 0
+_STARTING_LOCK = threading.Lock()
+
+
+def frida_server_starting() -> bool:
+    """True while frida-server is being installed / started / restarted."""
+    return _STARTING > 0
+
+
+@contextlib.contextmanager
+def _marked_starting():
+    global _STARTING
+    with _STARTING_LOCK:
+        _STARTING += 1
+    try:
+        yield
+    finally:
+        with _STARTING_LOCK:
+            _STARTING -= 1
+
+
 def ensure_frida_server_started(fm) -> bool:
     """Install frida-server only if needed, then start it.
 
@@ -148,6 +172,11 @@ def ensure_frida_server_started(fm) -> bool:
     _wait_device_prepared("frida-server start")
     if _server_running(fm):
         return bool(fm.run_frida_server())  # no-op when ready
+    with _marked_starting():
+        return _install_and_start(fm)
+
+
+def _install_and_start(fm) -> bool:
     installed = None
     try:
         installed = fm.get_installed_server_version()
@@ -320,13 +349,14 @@ def reset_frida_handles() -> None:
 
 
 def _restart_locked(fm) -> bool:
-    restart = getattr(fm, "restart_frida_server_and_wait", None)
-    if callable(restart):
-        ok = bool(restart())
-    else:
-        fm.stop_frida_server()
-        ok = ensure_frida_server_started(fm)
-    reset_frida_handles()
+    with _marked_starting():
+        restart = getattr(fm, "restart_frida_server_and_wait", None)
+        if callable(restart):
+            ok = bool(restart())
+        else:
+            fm.stop_frida_server()
+            ok = ensure_frida_server_started(fm)
+        reset_frida_handles()
     return ok
 
 

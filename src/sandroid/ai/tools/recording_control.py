@@ -250,7 +250,13 @@ def start_replay(
     description=(
         "Read the current recording's Review list (changed files, requests, "
         "what is selected) and, after a rewind, each selected file's "
-        "'What your action changed' and the replay's same/different result."
+        "'What your action changed' and its verdict, compared field by field "
+        "(or byte for byte): 'same change in the replay', 'differs only in "
+        "volatile fields' (each in 'volatile_fields' with both values and the "
+        "rule: time of its own run, same distance from its run, freshly "
+        "generated ID), 'replay changed it differently' (see "
+        "'only_in_your_run' / 'only_in_the_replay') or 'replay did not "
+        "change it' ('could not compare' when a copy is missing)."
     ),
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.READ_ONLY,
@@ -387,7 +393,8 @@ def list_recent_runs(limit: int = 20) -> dict[str, Any]:
     description=(
         "Get one run's full detail: per-file text (for a Rewind: 'What your "
         "action changed' and the replay result), 'verdicts' per file, and "
-        "'rewind' (steps, compared requests, requests per run). Use the "
+        "'rewind' (steps, compared requests, requests per run, 'volatile' "
+        "fields per file with both values and their rule). Use the "
         "'run_id' field from list_recent_runs."
     ),
     parameters={

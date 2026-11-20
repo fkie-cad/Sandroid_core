@@ -487,6 +487,44 @@ _PROBE_SCRIPT = (
 )
 
 
+def _vanished_pin_notes(info: Any) -> list[str]:
+    """Notes for pinned snapshots of AVD *info* that vanished (once each).
+
+    A pinned snapshot can still disappear outside Sandroid (``qemu-img
+    snapshot -d`` or a removed folder while the AVD is stopped, a wipe):
+    say so loudly, once, and add a timeline warning; never recreate it.
+    """
+    from sandroid.core import snapshot_policy as policy
+
+    if getattr(info, "path", None) is None:
+        return []  # folder not readable (fallback info, unmounted disk)
+    try:
+        gone = policy.vanished_pins(info.name, getattr(info, "snapshots", ()) or ())
+    except Exception:
+        logger.debug("Devices: pinned snapshot check failed", exc_info=True)
+        return []
+    notes = []
+    for name in gone:
+        text = (
+            f"Pinned snapshot '{name}' of {info.name} is gone -- it was deleted "
+            "outside Sandroid (or by a wipe)"
+        )
+        notes.append(text)
+        try:
+            from sandroid.core.timeline import get_timeline
+
+            get_timeline().emit(
+                "snapshot",
+                "pin_lost",
+                summary=text,
+                data={"name": name, "avd": info.name},
+                level="warn",
+            )
+        except Exception:
+            logger.debug("timeline: pin_lost line failed", exc_info=True)
+    return notes
+
+
 class HubCollector:
     """Builds :class:`HubSnapshot` objects from adb (worker thread only).
 
@@ -504,6 +542,7 @@ class HubCollector:
         self._avd_names: dict[str, str] = {}
         self._avds: list[Any] | None = None
         self._avds_at = 0.0
+        self._pin_notes: list[str] = []
 
     def invalidate_avds(self) -> None:
         """Re-read the AVD catalogue on the next collect."""
@@ -569,6 +608,10 @@ class HubCollector:
                     avds.append(emulator.avd_info(name))
                 except Exception:
                     avds.append(emulator.AvdInfo(name=name))
+            for info in avds:
+                # Reported once by the policy; kept on this screen until it
+                # closes so a 2 s refresh does not hide it at once.
+                self._pin_notes.extend(_vanished_pin_notes(info))
         with self._lock:
             self._avds, self._avds_at = avds, time.monotonic()
         return avds
@@ -664,6 +707,7 @@ class HubCollector:
                 self._avd_names[serial] = name
 
         avds = self._catalogue(force_avds, notes)
+        notes.extend(self._pin_notes)
         locked: set[str] = set()
         for info in avds:
             try:
@@ -1024,6 +1068,7 @@ class DevicesScreen(ModalScreen[str | None]):
         Binding("s", "save", "Save state"),
         Binding("w", "wipe", "Wipe"),
         Binding("e", "rename", "Rename…"),
+        Binding("p", "pins", "Pins…"),
         Binding("x", "stop", "Stop…"),
         Binding("R", "restart", "Restart"),
         Binding("a", "connect", "Connect…"),
@@ -1908,6 +1953,78 @@ class DevicesScreen(ModalScreen[str | None]):
         row = self._editable()
         if row is not None:
             self._edit(wipe_once=row.name not in self._wipe)
+
+    def action_pins(self) -> None:
+        """``p``: pin or unpin a snapshot of the highlighted AVD.
+
+        Pinned snapshots (``clean_8g`` and ``default_boot`` by default) can
+        neither be overwritten nor deleted -- not by the Snapshots panel,
+        Rewind or the AI. Unpinning asks first; the AI can never unpin.
+        """
+        row = self.current_row()
+        avd = row.name if isinstance(row, AvdRow) else getattr(row, "avd_name", "")
+        if not avd:
+            return
+        from sandroid.core import emulator
+        from sandroid.core import snapshot_policy as policy
+        from sandroid.tui.modals.selection_modal import SelectionModal
+
+        try:
+            names = [s.name for s in emulator.avd_snapshots(avd)]
+        except Exception:
+            names = list(getattr(row, "snapshots", ()) or ())
+        pins = policy.pinned(avd)
+        if not names:
+            self.app.notify(f"'{avd}' has no snapshots", severity="warning")
+            return
+
+        def label(name: str) -> str:
+            parts = [name]
+            if name in pins:
+                parts.append("pinned")
+            owner = policy.owner_of(name)
+            if owner is not None:
+                parts.append(owner.label)
+            return " · ".join(parts)
+
+        def picked(name: str | None) -> None:
+            if not name:
+                return
+            if name not in pins:
+                policy.pin(avd, name)
+                self.app.notify(
+                    f"Pinned '{name}' on {avd}: it can't be overwritten or "
+                    "deleted until you unpin it",
+                    title="Devices",
+                )
+                return
+            from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+            def confirmed(yes: bool | None) -> None:
+                if yes:
+                    policy.unpin(avd, name)
+                    self.app.notify(f"Unpinned '{name}' on {avd}", title="Devices")
+
+            self.app.push_screen(
+                ConfirmModal(
+                    title=f"Unpin '{name}'?",
+                    message=(
+                        f"'{name}' on {avd} can then be overwritten or deleted "
+                        "again -- by the Snapshots panel, Rewind and the AI."
+                    ),
+                ),
+                confirmed,
+            )
+
+        self.app.push_screen(
+            SelectionModal(
+                title=f"Pin or unpin a snapshot of {avd}",
+                options=names,
+                message="Pinned snapshots can't be overwritten or deleted.",
+                display_func=label,
+            ),
+            picked,
+        )
 
     def action_rename(self) -> None:
         row = self._avd_row()

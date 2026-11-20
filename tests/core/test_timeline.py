@@ -1473,6 +1473,26 @@ def test_a_locked_folder_is_retried_and_active_so_nothing_is_misrouted(tmp_path)
     assert timeline.verify_chain(b / timeline.FILE_NAME).ok
 
 
+def test_close_returns_only_after_the_folder_lock_is_released(tmp_path, monkeypatch):
+    """A bind right after close() returned must find the folder free, even
+    when the writer is slow to unlock (it was "locked" under host load).
+    """
+    folder = tmp_path / "s" / "b"
+    other = _service(folder, "B")
+    real_unlock = timeline._unlock
+
+    def slow_unlock(fd: int) -> None:
+        time.sleep(0.5)  # a preempted writer, made certain
+        real_unlock(fd)
+
+    monkeypatch.setattr(timeline, "_unlock", slow_unlock)
+    assert other.close("test", 30.0)
+    fd, holder = timeline._try_lock(folder / timeline.LOCK_NAME, "B")
+    assert fd is not None, holder
+    real_unlock(fd)
+    os.close(fd)
+
+
 def test_a_clock_sample_from_before_a_world_change_does_not_count_it_twice():
     now = time.time()
     with timeline.capture() as lines:

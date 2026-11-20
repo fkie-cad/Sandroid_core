@@ -910,7 +910,7 @@ def test_status_bar_shows_every_category_including_emulator(
     monkeypatch.setattr(bar, "_schedule_frida_version_check", lambda: None)
     bar.update_from_toolbox()
     assert bar.bypass_categories == ["root", "emulator"]  # display order
-    assert any("bypass root emulator" in str(t) for t in bar._segments())
+    assert any("bypass root, emulator" in str(t) for t in bar._segments())
 
 
 def test_unrelated_bypass_load_does_not_block_a_dexray_claim(bypass_service) -> None:

@@ -46,7 +46,6 @@ from sandroid.tui.widgets.chat_view import (
     format_retry,
     format_tokens,
     humanize_tool_name,
-    meter_glyph,
     meter_style,
     resolve_mascot_style,
     ruled,
@@ -80,33 +79,30 @@ def test_token_and_elapsed_formats() -> None:
 
 
 @pytest.mark.parametrize(
-    ("fraction", "glyph", "style"),
+    ("fraction", "style"),
     [
-        (0.0, "○", "$lens-dim"),
-        (0.04, "◔", "$lens-dim"),
-        (0.16, "◔", "$lens-dim"),
-        (0.49, "◑", "$lens-dim"),
-        (0.50, "◑", "$lens-warn"),
-        (0.60, "◕", "$lens-warn"),
-        (0.849, "●", "$lens-warn"),
-        (0.85, "●", "$lens-bad"),
-        (1.30, "●", "$lens-bad"),
+        (0.0, "$lens-dim"),
+        (0.16, "$lens-dim"),
+        (0.49, "$lens-dim"),
+        (0.50, "$lens-warn"),
+        (0.849, "$lens-warn"),
+        (0.85, "$lens-bad"),
+        (1.30, "$lens-bad"),
     ],
 )
-def test_meter_glyph_and_thresholds(fraction, glyph, style) -> None:
-    assert meter_glyph(fraction) == glyph
+def test_meter_thresholds(fraction, style) -> None:
     assert meter_style(fraction) == style
 
 
 def test_meter_text_and_style() -> None:
     meter = format_meter(41_000, 262_144)
-    assert meter.plain == "◔ 41k/262k 16%"
+    assert meter.plain == "41k/262k 16%"  # no fill glyph: the colour says it
     assert {span.style for span in meter.spans} == {"$lens-dim"}
-    assert format_meter(41_000, 262_144, compact=True).plain == "◔ 41k 16%"
+    assert format_meter(41_000, 262_144, compact=True).plain == "41k 16%"
     hot = format_meter(230_000, 262_144)
-    assert hot.plain == "● 230k/262k 88%"
+    assert hot.plain == "230k/262k 88%"
     assert {span.style for span in hot.spans} == {"$lens-bad"}
-    assert format_meter(12_000, None).plain == "○ 12k"
+    assert format_meter(12_000, None).plain == "12k"
 
 
 def test_header_wide_and_compact_goldens() -> None:
@@ -121,20 +117,20 @@ def test_header_wide_and_compact_goldens() -> None:
     }
     wide = format_header("tool", width=100, **fields)
     assert wide.cell_length == 100
-    assert wide.plain.startswith(" ● tool · List Flows · deepseek-v3 @ fhgenie REMOTE ")
-    assert wide.plain.endswith("◔ 41k/262k 16%  ⟲1  ◆2 ")
+    assert wide.plain.startswith(" tool · List Flows · deepseek-v3 @ fhgenie REMOTE ")
+    assert wide.plain.endswith("41k/262k 16%  1 compacted  2 agents ")
     narrow = format_header("tool", width=60, **fields)
     assert narrow.cell_length == 60
     assert "deepseek" not in narrow.plain
-    assert narrow.plain.startswith(" ● tool · List Flows REMOTE ")
-    assert narrow.plain.endswith("◔ 41k 16% ⟲1 ◆2 ")
+    assert narrow.plain.startswith(" tool · List Flows REMOTE ")
+    assert narrow.plain.endswith("41k 16% 1 compacted 2 agents ")
     # Too long for the row: the left part is cut, the meter stays.
     tight = format_header("tool", detail="x" * 80, width=40, used=1, window=10)
     assert tight.cell_length == 40
     assert "…" in tight.plain
     assert tight.plain.rstrip().endswith("10%")
     idle = format_header(width=30)
-    assert idle.plain.startswith(" ● idle")
+    assert idle.plain.startswith(" idle")
     assert "$chat-muted" in {s.style for s in idle.spans}
 
 
@@ -166,7 +162,8 @@ def test_header_drops_the_model_first_and_keeps_both_markers(width) -> None:
     if width <= 90:
         assert model not in plain
     if width <= 60:
-        assert "Kill" not in plain or "…" in plain
+        # Whole, or cut with "…" (never a half word without one).
+        assert "Kill Process" in plain or "…" in plain
 
 
 def test_tool_name_args_and_chip_goldens() -> None:
@@ -189,31 +186,63 @@ def test_tool_name_args_and_chip_goldens() -> None:
     assert format_args({"flags": ["a", "b"]}).plain == 'flags=["a", "b"]'
 
     ok = format_chip(ref="R17", summary="12 rows", elapsed=0.4)
-    assert ok.plain == "└ ✓ R17 · 12 rows · 0.4s"
+    assert ok.plain == "done · R17 · 12 rows · 0.4s"
     assert "$lens-ok" in {s.style for s in ok.spans}
     err = format_chip(ok=False, code="frida_not_attached", message="no session")
-    assert err.plain == "└ ✗ frida_not_attached: no session"
+    assert err.plain == "frida_not_attached: no session"
     assert "$lens-bad" in {s.style for s in err.spans}
-    assert format_chip().plain == "└ ✓"
+    assert format_chip().plain == "done"
+    # Words, not glyphs: a plain tool failure reads "failed"; denied is warn.
+    failed = format_chip(ok=False, code="tool_failed", message="replay diverged")
+    assert failed.plain == "failed: replay diverged"
+    denied = format_chip(ok=False, code="denied", elapsed=62)
+    assert denied.plain == "denied · 1:02"
+    assert "$lens-warn" in {s.style for s in denied.spans}
+    assert format_chip(ok=False).plain == "failed"
+    # App-start refusals read as words in the warn colour.
+    for code, word in (
+        ("needs_confirmation", "needs your confirmation"),
+        ("declined_by_analyst", "declined by you"),
+        ("busy", "busy"),
+    ):
+        chip = format_chip(ok=False, code=code, message="x")
+        assert chip.plain == f"{word}: x"
+        assert "$lens-warn" in {s.style for s in chip.spans}
+
+
+def test_a_declined_call_is_one_line_with_its_time() -> None:
+    block = ToolBlock("kill_process", {"package_name": "com.x"}, running=False)
+    block.set_decision("declined by you", style="$lens-warn", approved=False)
+    block.set_error("denied", None, elapsed=50)
+    lines = block.render().plain.splitlines()
+    assert [line.strip() for line in lines[1:]] == ["declined by you · 50s"]
+    assert block.get_content_height(None, None, 100) == 2
+    # Allowed, then failed: the decision and the chip both stay.
+    other = ToolBlock("kill_process", {}, running=False)
+    other.set_decision("allowed by you", approved=True)
+    other.set_error("tool_failed", "boom", elapsed=1)
+    assert len(other.render().plain.splitlines()) == 3
 
 
 def test_card_rule_and_notice_goldens() -> None:
     title = format_card_title("researcher", "r2", "done", elapsed=38, tokens=9_200)
-    assert title.plain == "◆ researcher r2 · ✓ done · 38s · 9.2k tok"
-    running = format_card_title("explorer", "r1", "running", spinner="⠙")
-    assert running.plain == "◆ explorer r1 · ⠙ running"
+    assert title.plain == "researcher r2 · done · 38s · 9.2k tok"
+    assert "$lens-ok" in {s.style for s in title.spans}
+    running = format_card_title("explorer", "r1", "running")
+    assert running.plain == "explorer r1 · running"
+    assert "$lens-accent" in {s.style for s in running.spans}
     assert format_compaction(182_000, 41_000, 14) == (
-        "⟲ compacted · 182k → 41k · 14 results masked"
+        "compacted · 182k → 41k · 14 results masked"
     )
-    assert format_compaction(182_000, 41_000) == "⟲ compacted · 182k → 41k"
+    assert format_compaction(182_000, 41_000) == "compacted · 182k → 41k"
     assert format_retry(4, 2, 5, "429 rate limited") == (
-        "↻ Retrying in 4s · attempt 2/5 · 429 rate limited"
+        "Retrying in 4s · attempt 2/5 · 429 rate limited"
     )
-    rule = ruled("⟲ compacted", 30)
+    rule = ruled("compacted", 30)
     assert rule.cell_length == 30
     assert rule.plain.startswith("─")
     assert rule.plain.endswith("─")
-    assert " ⟲ compacted " in rule.plain
+    assert " compacted " in rule.plain
 
 
 def test_formatters_use_theme_variables_only() -> None:
@@ -392,15 +421,16 @@ async def test_blocks_render_and_update_in_place() -> None:
         await settle(pilot)
         assert t.current_turn == 1
         assert tool.running
-        assert tool.size.height == 1
-        assert "List Flows" in tool.call_line().plain
+        assert tool.size.height == 2  # the call, then "running" (a word)
+        assert str(tool.render()).splitlines()[1] == "  running"
+        assert tool.call_line().plain.startswith("List Flows")
         tool.set_result(ref="R17", summary="12 rows", elapsed=0.4)
         thought.finish(4)
         await settle(pilot)
         assert not tool.running
         assert tool.size.height == 2
-        assert str(tool.render()).splitlines()[1] == "  └ ✓ R17 · 12 rows · 0.4s"
-        assert str(thought.render()) == "✧ Thought for 4s"
+        assert str(tool.render()).splitlines()[1] == "  done · R17 · 12 rows · 0.4s"
+        assert str(thought.render()) == "Thought for 4s"
         assert t.block("c1") is tool
 
         failed = t.add_block(ToolBlock("get_tls_keys", {}), key="c2")
@@ -421,9 +451,9 @@ async def test_blocks_render_and_update_in_place() -> None:
         await reply.append_text("The app talks to **three** hosts.")
         await reply.finish()
         await settle(pilot)
-        assert "✗ frida_not_attached: no session" in str(failed.render())
-        assert str(notice.render()).startswith("↻ Retrying in 2s · attempt 3/5")
-        assert "⟲ compacted · 182k → 41k" in str(rule.render())
+        assert "  frida_not_attached: no session" in str(failed.render())
+        assert str(notice.render()).startswith("Retrying in 2s · attempt 3/5")
+        assert "compacted · 182k → 41k" in str(rule.render())
         body = str(card.render()).splitlines()
         assert body[0] == "adtrk.io is an ad-attribution SDK."
         assert body[1].startswith("• ANDROID_ID")
@@ -431,7 +461,7 @@ async def test_blocks_render_and_update_in_place() -> None:
         assert cell_len(body[1]) == card.content_size.width
         card.update_card(status="done", elapsed=38, tokens=9_200)
         title = Content.from_markup(card.border_title).plain
-        assert title == "◆ researcher r2 · ✓ done · 38s · 9.2k tok"
+        assert title == "researcher r2 · done · 38s · 9.2k tok"
         assert reply.text == "The app talks to **three** hosts."
         assert "three" in reply.source
 
@@ -492,7 +522,7 @@ async def test_transcript_folds_oldest_turns_past_the_cap() -> None:
         assert t.block("u4") is not None
         fold = t.query_one(FoldMarker)
         assert t.children[0] is fold
-        assert str(fold.render()) == "▸ 3 earlier turns"
+        assert str(fold.render()) == "3 earlier turns"
         assert {b.turn for b in t.blocks} == set(range(4, 9))
         fold.scroll_visible(animate=False)
         await settle(pilot)
@@ -551,7 +581,7 @@ async def test_header_widget_throttles_and_fits_its_width() -> None:
         await settle(pilot)
         text = str(header.render())
         assert cell_len(text) == 60
-        assert "◕ 49 1225%" not in text  # compact form at 60 columns
+        assert "49 1225%" in text  # compact form at 60 columns
         assert header.fields["used"] == 49
         assert text.rstrip().endswith("%")
 

@@ -78,6 +78,22 @@ from sandroid.ai.tools.registry import RiskTier, sandroid_tool
 from sandroid.core.adb_utils import validate_snapshot_name
 
 
+def _add_refusal(result: dict[str, Any], service: Any, op: str, name: str) -> None:
+    """Add ``"refused"`` (the policy's reason) when the policy refused *op*."""
+    from sandroid.core.snapshot_policy import acting_as
+
+    check = getattr(service, "snapshot_refusal", None)
+    if not callable(check):
+        return
+    try:
+        with acting_as("ai"):
+            refusal = check(op, name)
+    except Exception:
+        return
+    if refusal is not None:
+        result["refused"] = refusal.reason
+
+
 def _checked_snapshot_name(name: str) -> str:
     """Validate a snapshot name (``[A-Za-z0-9._-]``) or raise a tool error.
 
@@ -748,13 +764,20 @@ def create_snapshot(name: str) -> dict[str, Any]:
         name: Name to give the new snapshot.
 
     Returns:
-        ``{"created": bool, "name": str}``.
+        ``{"created": bool, "name": str}``, plus ``"refused"`` (why) when
+        the name is pinned or owned by another part of Sandroid.
     """
+    from sandroid.core.snapshot_policy import acting_as
     from sandroid.services import get_emulator_service
 
     name = _checked_snapshot_name(name)
-    created = get_emulator_service().create_snapshot(name)
-    return {"created": created, "name": name}
+    service = get_emulator_service()
+    with acting_as("ai"):
+        created = service.create_snapshot(name)
+    result: dict[str, Any] = {"created": created, "name": name}
+    if not created:
+        _add_refusal(result, service, "save", name)
+    return result
 
 
 @sandroid_tool(
@@ -872,7 +895,8 @@ def _require_emulator_device() -> None:
     description=(
         "Delete a named emulator snapshot. Emulator-only -- this uses the "
         "AVD's telnet console and does not work against a real physical "
-        "device."
+        "device. Pinned snapshots (clean_8g, default_boot, ...) and Rewind "
+        "or persona snapshots are refused; only the user can delete those."
     ),
     parameters={
         "type": "object",
@@ -898,11 +922,10 @@ def delete_snapshot(name: str) -> dict[str, Any]:
     physical device gets a clean, immediate rejection instead of a
     telnet-console failure.
 
-    NOTE (carried forward from ``EmulatorService.delete_snapshot``'s own
-    docstring): ``avd snapshot del`` is the documented emulator-console verb,
-    but unlike ``create_snapshot``/``load_snapshot`` (which use the
-    proven ``save``/``load`` verbs), it has no in-repo precedent and is
-    unverified against a live emulator.
+    Pinned snapshots (``clean_8g``, ``default_boot`` by default) and names
+    another part of Sandroid owns (Rewind start points, persona snapshots)
+    are refused (``"refused"`` says why); only the user can unpin or
+    confirm those.
 
     ``can_remember_choice=False`` -- deleting an arbitrary named snapshot is
     destructive, and which snapshot is at risk depends entirely on the
@@ -913,17 +936,24 @@ def delete_snapshot(name: str) -> dict[str, Any]:
         name: Name of the snapshot to delete.
 
     Returns:
-        ``{"deleted": bool, "name": str}``.
+        ``{"deleted": bool, "name": str}``, plus ``"refused"`` (why) when
+        the policy refused it.
 
     Raises:
         ToolExecutionError: The active device is not an emulator.
     """
     _require_emulator_device()
+    from sandroid.core.snapshot_policy import acting_as
     from sandroid.services import get_emulator_service
 
     name = _checked_snapshot_name(name)
-    deleted = get_emulator_service().delete_snapshot(name)
-    return {"deleted": deleted, "name": name}
+    service = get_emulator_service()
+    with acting_as("ai"):  # the AI never deletes pinned or owned snapshots
+        deleted = service.delete_snapshot(name)
+    result: dict[str, Any] = {"deleted": deleted, "name": name}
+    if not deleted:
+        _add_refusal(result, service, "delete", name)
+    return result
 
 
 @sandroid_tool(

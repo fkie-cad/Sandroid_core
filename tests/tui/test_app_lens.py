@@ -341,11 +341,11 @@ def _texts(section: LensSection) -> list[str]:
 
 
 def _band(section: LensSection) -> str:
-    """The plain text of a section's header band (focus marker stripped)."""
+    """The plain text of a section's header band."""
     from textual.content import Content
 
     plain = Content.from_markup(str(section.border_title or "")).plain
-    return plain.strip().lstrip("▌")
+    return plain.strip()
 
 
 def _screen_text(app) -> str:
@@ -368,7 +368,7 @@ def test_permission_rows_join_appops_and_list_op_only_rows() -> None:
     by_key = {r.key: r.text for r in data.rows}
     assert "while-in-use" in by_key["perm:android.permission.ACCESS_FINE_LOCATION"]
     assert "used recently" in by_key["perm:android.permission.CAMERA"]
-    assert "req → ✗" in by_key["perm:android.permission.READ_CONTACTS"]
+    assert "denied" in by_key["perm:android.permission.READ_CONTACTS"]
     assert data.summary == (
         "4 requested · 3 dangerous (2 granted) · 2 used recently · 1 no recorded use"
     )
@@ -500,8 +500,8 @@ async def test_sections_render_inspect_and_space_starts(fake, monkeypatch, size)
         await until(pilot, lambda: _loaded(sections))
         await settle(pilot)
         titles = [_band(s) for s in sections.sections()]
-        # " ▾ TITLE   summary" on the header band
-        assert [t.split("   ")[0][2:] for t in titles] == [
+        # " TITLE   summary" on the header band (no fold glyph)
+        assert [t.split("   ")[0] for t in titles] == [
             t for _id, t in app_lens.SECTIONS
         ]
         perms = sections.section("permissions")
@@ -549,7 +549,7 @@ async def test_sections_render_inspect_and_space_starts(fake, monkeypatch, size)
             ms.close_inspector()
             await settle(pilot)
             text = _screen_text(app)
-            assert "␣ Start" in text or "● running" in text
+            assert "␣ Start" in text or "running" in text
             assert "⇧K kill" in text
             assert "IDENTITY" in text
 
@@ -594,7 +594,7 @@ async def test_tab_moves_between_sections_and_z_folds(fake):
         perms = sections.section("permissions")
         assert perms.folded
         assert perms.size.height == 0
-        assert _band(perms).startswith("▸ PERMISSIONS")
+        assert _band(perms).startswith("PERMISSIONS folded")
         # still in the focus order while folded
         await pilot.press("tab")
         await pilot.press("shift+tab")
@@ -615,11 +615,11 @@ async def test_clicking_a_section_header_band_folds_and_unfolds_it(fake):
         perms = sections.section("permissions")
         perms.scroll_visible(animate=False)
         await settle(pilot)
-        await pilot.click(perms, offset=(4, 0))  # the ▾ PERMISSIONS band
+        await pilot.click(perms, offset=(4, 0))  # the PERMISSIONS band
         await settle(pilot)
         assert perms.folded
         assert app.focused is perms
-        assert _band(perms).startswith("▸ PERMISSIONS")
+        assert _band(perms).startswith("PERMISSIONS folded")
         assert not ms.inspector_is_open
         await pilot.click(perms, offset=(4, 0))
         await settle(pilot)
@@ -672,6 +672,68 @@ async def test_u_refreshes_runtime_facts_off_thread(fake):
             name != threading.main_thread().name
             for _m, _p, name in FakeService.calls[before:]
         )
+
+
+async def test_u_says_refreshing_then_refreshed(fake, monkeypatch):
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await boot(app, pilot)
+        toasts: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            app,
+            "notify",
+            lambda msg, severity="information", **_k: toasts.append((msg, severity)),
+        )
+        sections = _sections(ms)
+        panel = ms.query_one(SpotlightPanel)
+        await until(pilot, lambda: _loaded(sections) and not sections._runtime_inflight)
+        gate = threading.Event()
+        FakeService.gates[("appops", PKG)] = gate
+        await pilot.press("u")
+        await settle(pilot)
+        assert sections.refreshing
+        assert "refreshing app facts" in panel._render_header()
+        assert "u refreshing" in (ms._lens_captions["app"][1] or "")
+        assert toasts == []  # the header says it; no toast before the end
+        gate.set()
+        await until(pilot, lambda: toasts)
+        assert toasts == [("App facts refreshed", "information")]
+        assert not sections.refreshing
+        assert "refreshing" not in panel._render_header()
+
+
+async def test_u_says_what_could_not_be_read(fake, monkeypatch):
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await boot(app, pilot)
+        toasts: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            app,
+            "notify",
+            lambda msg, severity="information", **_k: toasts.append((msg, severity)),
+        )
+        sections = _sections(ms)
+        await until(pilot, lambda: _loaded(sections) and not sections._runtime_inflight)
+        monkeypatch.setattr(
+            FakeService,
+            "appops",
+            lambda self, package: AppOpsState(
+                package=package, ok=False, reason="appops: permission denied"
+            ),
+        )
+        await pilot.press("u")
+        await until(pilot, lambda: toasts)
+        msg, severity = toasts[0]
+        assert severity == "warning"
+        assert msg.startswith("App facts refreshed, but not all could be read")
+        assert "AppOps: appops: permission denied" in msg
+        # A worker that raised says so too.
+        toasts.clear()
+        FakeService.fail = {("services", PKG)}
+        await pilot.press("u")
+        await until(pilot, lambda: toasts)
+        assert "the refresh failed (see the log)" in toasts[0][0]
+        assert not sections.refreshing
 
 
 async def test_uncached_apk_shows_analysing_then_pulls(fake):
@@ -1135,7 +1197,7 @@ async def test_narrow_lens_keeps_bypass_and_actions_on_one_line_each(fake):
         await settle(pilot)
         wide = _screen_text(app)
         assert "⇧K kill" in wide
-        assert "1 ○ SSL" in wide  # the full toggle row fits
+        assert "1 SSL (exp.)" in wide  # the full toggle row fits
         app.focused.move_cursor(row=0)
         await pilot.press("enter")
         await settle(pilot)
@@ -1144,7 +1206,7 @@ async def test_narrow_lens_keeps_bypass_and_actions_on_one_line_each(fake):
         assert panel.size.width < 60
         text = _screen_text(app)
         assert "b bypass: none" in text
-        assert "1 ○ SSL" not in text
+        assert "1 SSL (exp.)" not in text
         actions = next(line for line in text.splitlines() if "⇧R" in line)
         for key in ("⇧R", "⇧A", "⇧P", "⇧K", "⇧X"):
             assert key in actions
@@ -1240,18 +1302,18 @@ def test_compact_permission_cells_combine_grant_and_use() -> None:
     data = build_permissions(
         AppFacts(package=PKG, permissions=_grants(), appops=_appops())
     )
-    assert data.compact_columns == ("permission", "✓·use", "last use")
+    assert data.compact_columns == ("permission", "grant, use", "last use")
     compact = {
         r.key: " | ".join(c.plain for c in r.compact) for r in data.rows if r.compact
     }
-    assert compact["perm:android.permission.CAMERA"] == "CAMERA | ✓● | 5m ago"
+    assert compact["perm:android.permission.CAMERA"] == "CAMERA | yes recent | 5m ago"
     assert (
         compact["perm:android.permission.ACCESS_FINE_LOCATION"]
-        == "ACCESS_FINE_LOCATION | ✓○ | —"
+        == "ACCESS_FINE_LOCATION | yes unused | —"
     )
-    assert compact["perm:android.permission.READ_CONTACTS"] == "READ_CONTACTS | ✗ | —"
-    assert compact["perm:android.permission.INTERNET"] == "INTERNET | ✓ | —"
-    assert compact["op:READ_CLIPBOARD"] == "READ_CLIPBOARD | op● | 10s ago"
+    assert compact["perm:android.permission.READ_CONTACTS"] == "READ_CONTACTS | no | —"
+    assert compact["perm:android.permission.INTERNET"] == "INTERNET | yes | —"
+    assert compact["op:READ_CLIPBOARD"] == "READ_CLIPBOARD | op recent | 10s ago"
 
 
 async def test_narrow_lens_shows_the_compact_permission_columns(fake):
@@ -1267,11 +1329,15 @@ async def test_narrow_lens_shows_the_compact_permission_columns(fake):
         await until(pilot, lambda: perms.compact)
         await settle(pilot)
         labels = [str(c.label) for c in perms.columns.values()]
-        assert labels == ["permission", "✓·use", "last use"]
+        assert labels == ["permission", "grant, use", "last use"]
         cam = next(
             i for i, r in enumerate(perms.rows_shown) if r.key.endswith("CAMERA")
         )
-        assert [str(c) for c in perms.get_row_at(cam)] == ["CAMERA", "✓●", "5m ago"]
+        assert [str(c) for c in perms.get_row_at(cam)] == [
+            "CAMERA",
+            "yes recent",
+            "5m ago",
+        ]
         # the whole grant / AppOps detail is still in the Inspector
         perms.focus()
         perms.move_cursor(row=cam)

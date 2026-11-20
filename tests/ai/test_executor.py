@@ -365,3 +365,55 @@ def test_internal_error_repairs_unanswered_tool_calls(perm_store, arbiter, monke
     assert [m.get("tool_call_id") for m in after] == ["c1", "c2"]
     assert json.loads(after[-1]["content"])["error"]["code"] == "cancelled"
     assert repair_tool_pairs(messages) == messages
+
+
+def test_failed_replay_result_summary_reads_as_words():
+    """A {"success": false} replay result: the failed chip said "6 fields"."""
+    from sandroid.ai.loop import summarize_result
+
+    diverged = {
+        "success": False,
+        "run_id": "r1",
+        "error": None,
+        "result": "diverged",
+        "diverged_at_step": 3,
+        "unchecked_steps": [],
+    }
+    assert summarize_result(diverged) == "replay diverged at step 3"
+    unchecked = {**diverged, "result": "unchecked", "diverged_at_step": None}
+    unchecked["unchecked_steps"] = [2, 5]
+    assert summarize_result(unchecked) == "replay not checked (steps 2, 5)"
+    refused = {"success": False, "message": "No recording in progress"}
+    assert summarize_result(refused) == "No recording in progress"
+    # Unchanged for successes and plain errors.
+    assert summarize_result({"success": True, "selected": ["a"]}) == "1 selected"
+    assert summarize_result({"error": "boom"}) == "boom"
+
+
+def test_prompts_say_a_diverged_or_unchecked_replay_is_no_success():
+    from sandroid.ai.prompts import (
+        OPERATOR_PROMPT,
+        ORCHESTRATOR_PROMPT_V2,
+        RESEARCHER_PROMPT,
+    )
+
+    for prompt in (ORCHESTRATOR_PROMPT_V2, OPERATOR_PROMPT, RESEARCHER_PROMPT):
+        flat = " ".join(prompt.split())
+        assert '"success": false means the call did not succeed' in flat
+        assert '"diverged"' in flat
+        assert '"unchecked"' in flat
+        assert "never" in flat
+    # The addition sits after the approvals rule; the start is unchanged.
+    assert ORCHESTRATOR_PROMPT_V2.startswith("You are Sandroid's built-in AI assistant")
+
+
+def test_orchestrator_prompt_says_never_retry_a_declined_start():
+    from sandroid.ai.prompts import ORCHESTRATOR_PROMPT_V2
+    from sandroid.ai.tools.registry import TOOL_ERROR_CODES
+
+    flat = " ".join(ORCHESTRATOR_PROMPT_V2.split())
+    for code in ("declined_by_analyst", "needs_confirmation", "busy"):
+        assert f'"{code}"' in flat
+        assert code in TOOL_ERROR_CODES
+    assert "never retry it unless asked" in flat
+    assert "ask them" in flat

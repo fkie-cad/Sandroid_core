@@ -27,19 +27,26 @@ the UI thread (``H`` / ``X`` / Esc) never waits for an fsync
 *generation*; mutations that pass ``generation=`` from before the switch
 raise :class:`StaleGenerationError` instead of landing in the new session.
 A malformed file is moved aside to ``highlights.json.bad`` and the session
-starts empty. Without a folder the sets live in memory only.
+starts empty. Without a folder the sets live in memory only. A set saved
+while ``classify_rows`` was still running (``scanning``: the process ended
+mid-scan) loads as *partial*: no scan survives a restart.
 
 Row sources: a lens registers a snapshot callable
 (:meth:`HighlightStore.register_row_source`); tools call
 :meth:`HighlightStore.snapshot_rows` from their helper thread, which runs the
 callable on the UI loop through the lens's ``UiDispatcher`` and waits a
-bounded time (never ``App.call_from_thread``).
+bounded time (never ``App.call_from_thread``). A source may return a
+:class:`RowSnapshot` to say how far it has read its feed (``polled_through``,
+the Network lens's last applied flow-log seq): the tools read the rest
+themselves, as a hidden lens does not poll.
 """
 
 from __future__ import annotations
 
 import atexit
 import contextlib
+import functools
+import hashlib
 import json
 import logging
 import re
@@ -88,6 +95,8 @@ HIGHLIGHTS_FILE = "highlights.json"
 SCHEMA = "sandroid-row-highlights/1"
 #: Origins of a set.
 ORIGINS = ("structural", "ai", "manual")
+#: Keys kept in ``basis["not_judged"]`` (rows hidden when the set was made).
+MAX_NOT_JUDGED = 5000
 
 _UNBOUND = object()
 
@@ -119,7 +128,11 @@ class HighlightSet:
         query: Classifier criterion or a summary of the ``where`` filter.
         scope: ``None`` = live rows; else the run id it was judged on.
         basis: ``{"judged_at": ts, "through_seq": int | None, "evaluated": n}``.
-        complete: False while classifying and after a cancel (partial).
+        complete: False while classifying and after a stop, cancel or
+            deadline (partial).
+        scanning: True while ``classify_rows`` is still running on the set
+            (set by :meth:`HighlightStore.start_scan` / ``create``, cleared
+            by :meth:`HighlightStore.finish`). See :attr:`state`.
         stats: ``scanned``, ``matched``, ``uncertain``, ``skipped``,
             ``bytes_sent``...
         created_at: Creation time (epoch seconds).
@@ -138,6 +151,7 @@ class HighlightSet:
     complete: bool = True
     stats: dict = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+    scanning: bool = False
     #: The store's bind generation when this copy was taken (not persisted).
     generation: int = field(default=0, compare=False)
 
@@ -157,8 +171,16 @@ class HighlightSet:
             complete=self.complete,
             stats=dict(self.stats),
             created_at=self.created_at,
+            scanning=self.scanning,
             generation=self.generation,
         )
+
+    @property
+    def state(self) -> str:
+        """``"scanning"`` (a scan is running), ``"partial"`` or ``"complete"``."""
+        if self.scanning:
+            return "scanning"
+        return "complete" if self.complete else "partial"
 
     @property
     def count(self) -> int:
@@ -204,6 +226,9 @@ class HighlightSet:
         if scope is not None and not isinstance(scope, str):
             raise ValueError("set field 'scope' has the wrong type")
         complete = need("complete", bool, True)
+        if need("scanning", bool, False):
+            # Saved mid-scan (the process ended): never "scanning" again.
+            complete = False
         created = need("created_at", (int, float), time.time())
         return cls(
             id=set_id,
@@ -295,6 +320,36 @@ def short_label(label: str) -> str:
     return out
 
 
+_TLS_SEQ_ID = re.compile(r"tls-\d+")
+
+
+@functools.lru_cache(maxsize=64)
+def _flow_dir_tag(flow_dir: str) -> str:
+    try:
+        resolved = str(Path(flow_dir).resolve())
+    except (OSError, RuntimeError):
+        resolved = str(flow_dir)
+    digest = hashlib.sha1(resolved.encode("utf-8"), usedforsecurity=False)
+    return digest.hexdigest()[:8]
+
+
+def tls_row_key(flow_dir: Any, rec_id: Any) -> str | None:
+    """The annotation key of a TLS-failure record of the flow log in *flow_dir*.
+
+    The addon's record id ``tls-<seq>`` is unique only within one flow log,
+    while highlight sets span the analysis session (devices, flow dirs), so
+    it is namespaced: ``tls-<8 hex of sha1(resolved flow_dir)>-<seq>``. An id
+    that is already unique (not ``tls-<digits>``) is used as is. Every path
+    (lens rows, adoption, snapshots, the tools' flow-log rows) uses this.
+    """
+    if not rec_id:
+        return None
+    rec_id = str(rec_id)
+    if flow_dir is None or not _TLS_SEQ_ID.fullmatch(rec_id):
+        return rec_id
+    return f"tls-{_flow_dir_tag(str(flow_dir))}-{rec_id[4:]}"
+
+
 def normalize_key(lens: str, key: Any) -> str:
     """The annotation key form of *key* for *lens* (files: canonical path)."""
     text = str(key or "").strip()
@@ -306,6 +361,27 @@ def normalize_key(lens: str, key: Any) -> str:
         except Exception:
             return text
     return text
+
+
+class RowSnapshot(list):
+    """A lens's rows plus how far the lens has read its feed.
+
+    ``polled_through``: the last flow-log ``seq`` the Network lens applied
+    (None: not a live view, nothing to add). ``flow_dir``: the flow log it
+    read. Rows newer than that are not in the view yet (a hidden lens does
+    not poll); the AI tools add them from the flow log.
+    """
+
+    def __init__(
+        self,
+        rows: Any = (),
+        *,
+        polled_through: int | None = None,
+        flow_dir: str | None = None,
+    ) -> None:
+        super().__init__(rows)
+        self.polled_through = polled_through
+        self.flow_dir = flow_dir
 
 
 class _RowSource:
@@ -346,6 +422,9 @@ class HighlightStore:
         self._writer: threading.Thread | None = None
         self._writes_idle = threading.Event()
         self._writes_idle.set()
+        #: set id -> rows in the lens's view that were hidden (not judged)
+        #: when the set was made; written by the lens's bar (in memory only).
+        self._not_judged_in_view: dict[str, int] = {}
 
     # -- reads (lock-free where it matters) -----------------------------------
 
@@ -393,6 +472,16 @@ class HighlightStore:
     def filter_set(self, lens: str) -> str | None:
         """The id of the lens's AI filter set, or ``None``."""
         return self._filters.get(lens)
+
+    def note_not_judged(self, counts: Mapping[str, int]) -> None:
+        """The lens bar's "N not judged" per set (no revision, no notify)."""
+        merged = dict(self._not_judged_in_view)
+        merged.update({str(k): int(v) for k, v in counts.items()})
+        self._not_judged_in_view = merged
+
+    def not_judged_in_view(self, set_id: str) -> int:
+        """Rows now in the lens's view that the set's run did not judge."""
+        return self._not_judged_in_view.get(set_id, 0)
 
     def lookup(self, lens: str, key: str) -> tuple[tuple[str, int, str, str], ...]:
         """``((set_id, slot, short, reason), ...)`` for one row, by slot."""
@@ -467,8 +556,12 @@ class HighlightStore:
         filter: bool = False,
         replace_id: str | None = None,
         generation: int | None = None,
+        scanning: bool = False,
     ) -> HighlightSet:
         """Create a set (or replace *replace_id* in place, keeping its slot).
+
+        ``scanning=True``: a classifier run fills it (the set is partial
+        until :meth:`finish`).
 
         The returned copy's ``generation`` is the store's bind generation;
         pass it to later mutations so they fail after a session switch.
@@ -526,7 +619,8 @@ class HighlightStore:
                 query=str(query or ""),
                 scope=scope,
                 basis=dict(basis or {}),
-                complete=bool(complete),
+                complete=bool(complete) and not scanning,
+                scanning=bool(scanning),
             )
             self._sets[set_id] = hs
             if filter:
@@ -621,15 +715,35 @@ class HighlightStore:
         basis: Mapping[str, Any] | None = None,
         generation: int | None = None,
     ) -> None:
-        """Mark a set complete or partial and merge its stats/basis."""
+        """Mark a set complete or partial and merge its stats/basis.
+
+        Ends a scan (:meth:`start_scan`): the set is no longer ``scanning``.
+        """
         with self._lock:
             self._check_generation(generation)
             hs = self._require(set_id)
             hs.complete = bool(complete)
+            hs.scanning = False
             if stats:
                 hs.stats.update(stats)
             if basis:
                 hs.basis.update(basis)
+            self._commit(hs.lens)
+            lens = hs.lens
+        self._notify(lens, None)
+
+    def start_scan(self, set_id: str, *, generation: int | None = None) -> None:
+        """A classifier run starts filling an existing set (``scanning``).
+
+        Raises:
+            HighlightError: Unknown set.
+            StaleGenerationError: *generation* is from before a session switch.
+        """
+        with self._lock:
+            self._check_generation(generation)
+            hs = self._require(set_id)
+            hs.complete = False
+            hs.scanning = True
             self._commit(hs.lens)
             lens = hs.lens
         self._notify(lens, None)
@@ -641,12 +755,15 @@ class HighlightStore:
         label: str | None = None,
         short: str | None = None,
         query: str | None = None,
+        basis: Mapping[str, Any] | None = None,
         generation: int | None = None,
     ) -> None:
-        """Rename a set (label/short) or change its query text."""
+        """Rename a set (label/short), change its query text or merge *basis*."""
         with self._lock:
             self._check_generation(generation)
             hs = self._require(set_id)
+            if basis:
+                hs.basis.update(basis)
             if label:
                 hs.label = _clip(label, LABEL_MAX)
                 hs.short = _clip(short, SHORT_MAX) if short else short_label(label)
@@ -898,7 +1015,7 @@ class HighlightStore:
         with self._sources_lock:
             return bool(self._sources.get(lens))
 
-    def snapshot_rows(self, lens: str, timeout: float = 3.0) -> list[dict] | None:
+    def snapshot_rows(self, lens: str, timeout: float = 3.0) -> RowSnapshot | None:
         """The rows of the lens's current view, taken on the UI thread.
 
         Returns ``None`` when no lens registered, its UI loop is gone or it
@@ -1013,10 +1130,13 @@ def _id_number(set_id: str) -> int:
         return 0
 
 
-def _copy_rows(rows: Any) -> list[dict] | None:
+def _copy_rows(rows: Any) -> RowSnapshot | None:
     if rows is None:
         return None
-    out: list[dict] = []
+    out = RowSnapshot(
+        polled_through=getattr(rows, "polled_through", None),
+        flow_dir=getattr(rows, "flow_dir", None),
+    )
     with contextlib.suppress(TypeError):
         for row in rows:
             if isinstance(row, dict):
@@ -1070,9 +1190,11 @@ __all__ = [
     "HighlightError",
     "HighlightSet",
     "HighlightStore",
+    "RowSnapshot",
     "StaleGenerationError",
     "get_row_highlights",
     "normalize_key",
     "reset_for_tests",
     "short_label",
+    "tls_row_key",
 ]

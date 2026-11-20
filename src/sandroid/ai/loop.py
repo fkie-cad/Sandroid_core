@@ -519,12 +519,37 @@ def _is_logical_failure(result: Any) -> bool:
     )
 
 
+def _outcome_words(result: dict) -> str | None:
+    """Why a logically failed result failed, in words (or None)."""
+    outcome = result.get("result")
+    if outcome == "diverged":
+        step = result.get("diverged_at_step")
+        return f"replay diverged at step {step}" if step else "replay diverged"
+    if outcome == "unchecked":
+        steps = result.get("unchecked_steps") or []
+        listed = ", ".join(str(s) for s in steps)
+        return (
+            f"replay not checked (steps {listed})" if listed else ("replay not checked")
+        )
+    for key in ("message", "reason"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
 def summarize_result(result: Any) -> str:
     """One-line summary of a tool result for chips and timeline lines."""
     if isinstance(result, dict):
         err = result.get("error")
         if err:
             return _clip(err if isinstance(err, str) else json.dumps(err, default=str))
+        if _is_logical_failure(result):
+            # {"success": false, "result": "diverged", ...}: say what happened,
+            # not "6 fields" on a failed chip.
+            outcome = _outcome_words(result)
+            if outcome:
+                return _clip(outcome)
         for key, value in result.items():
             if isinstance(value, list):
                 return f"{len(value)} {key}"

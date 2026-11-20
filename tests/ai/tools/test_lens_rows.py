@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 
 import pytest
 
@@ -209,7 +210,7 @@ def test_mutating_tools_refuse_in_a_subagent(store, flow_dir):
     [
         ({"method": ["post"]}, ["a1", "a3"]),
         ({"method": "GET"}, ["a2"]),
-        ({"host_glob": ["*.example.com"]}, ["a1"]),
+        ({"host_glob": ["*.example.com"]}, ["a1", "TLS4"]),
         ({"path_glob": ["/v1/*"]}, ["a1"]),
         ({"path_glob": ["img.png"]}, ["a2"]),
         ({"url_regex": r"track\?imei=\d+"}, ["a1"]),
@@ -218,8 +219,10 @@ def test_mutating_tools_refuse_in_a_subagent(store, flow_dir):
         ({"content_type_glob": "*json*"}, ["a1"]),
         ({"app": "com.other"}, ["a3"]),
         ({"min_bytes": 1000}, ["a2"]),
-        ({"max_bytes": 110}, ["a3"]),
+        ({"max_bytes": 110}, ["a3", "TLS4"]),
         ({"kind": "flow"}, ["a1", "a2", "a3"]),
+        ({"kind": "tls"}, ["TLS4"]),
+        ({"text": "handshake failed"}, ["TLS4"]),
         ({"text": "OTHER.NET"}, ["a3"]),
         ({"body_contains": "alice@"}, ["a1"]),
         ({"body_contains": "hunter2", "method": ["POST"]}, ["a3"]),
@@ -228,12 +231,19 @@ def test_mutating_tools_refuse_in_a_subagent(store, flow_dir):
     ],
 )
 def test_find_rows_network_predicates(store, flow_dir, where, expected):
+    # The TLS record id tls-4 is namespaced by its flow dir (tls_row_key).
+    expected = [
+        rh.tls_row_key(flow_dir, "tls-4") if k == "TLS4" else k for k in expected
+    ]
     result = lens_rows.find_rows("network", where)
     assert result["source"] == "flow_log"
+    assert result["shown_basis"] == "noise rule only (lens not open)"
     assert result["keys"] == expected
-    assert result["scanned"] == 3  # the TLS failure row (no flow id in the lens)
+    assert result["scanned"] == 4  # the TLS failure row is a row (tls-4)
     assert result["matched"] == len(expected)
-    assert f"{len(expected)} of 3 network rows" in result["summary"]
+    assert result["scope"] == "shown"
+    assert result["hidden_by_lens_filters"] == 0
+    assert f"{len(expected)} of 4 network rows" in result["summary"]
     assert "highlight_id" not in result
 
 
@@ -258,9 +268,9 @@ def test_find_rows_apply_creates_extends_and_filters(store, flow_dir):
     assert hs.origin == "structural"
     assert hs.label == "POST requests"
     assert set(hs.reasons) == {"a1", "a3"}
-    assert hs.basis["through_seq"] == 3
+    assert hs.basis["through_seq"] == 4
     assert store.filter_set("network") is None
-    assert "Highlighted 2 of 3" in result["summary"]
+    assert "Highlighted 2 of 4" in result["summary"]
     more = lens_rows.find_rows(
         "network", {"method": ["GET"]}, apply="filter", highlight_id=hid
     )
@@ -293,15 +303,31 @@ def test_lens_source_wins_and_counts_hidden_rows(store, flow_dir):
     rows = [
         {"key": "f1", "flow_id": "a1", "shown": True, "method": "POST", "host": "h"},
         {"key": "f3", "flow_id": "a3", "shown": False, "method": "POST", "host": "h"},
-        {"key": "t1", "flow_id": None, "shown": True, "method": "TLS", "host": "h"},
+        {
+            "key": "t1",
+            "flow_id": None,
+            "shown": True,
+            "method": "TLS",
+            "kind": "tls",
+            "host": "h",
+            "time": time.time(),
+        },
     ]
     store.register_row_source("network", lambda: rows, None)
     result = lens_rows.find_rows("network", {"method": ["POST"]})
     assert result["source"] == "lens"
-    assert result["keys"] == ["a1", "a3"]  # flow ids; the stdout TLS row is skipped
+    # Flow ids of the shown rows; the hidden one is counted, not listed.
+    assert result["keys"] == ["a1"]
+    assert result["scanned"] == 1
     assert result["hidden_by_lens_filters"] == 1
-    shown = lens_rows.find_rows("network", {"method": ["POST"]}, scope="shown")
-    assert shown["keys"] == ["a1"]
+    assert "scope='all'" in result["hidden_hint"]
+    # The stdout-only TLS row has no key yet: counted, never listed.
+    assert result["not_in_flow_log_yet"] == 1
+    every = lens_rows.find_rows("network", {"method": ["POST"]}, scope="all")
+    assert every["keys"] == ["a1", "a3"]
+    assert every["hidden_by_lens_filters"] == 1
+    with pytest.raises(ToolError):
+        lens_rows.find_rows("network", {}, scope="visible")
     # Bodies are still read through the flow log by flow id.
     assert lens_rows.find_rows("network", {"body_contains": "alice"})["keys"] == ["a1"]
 
@@ -353,9 +379,15 @@ FILE_ROWS = [
 )
 def test_find_rows_files_predicates(store, where, expected):
     store.register_row_source("files", lambda: FILE_ROWS, None)
-    result = lens_rows.find_rows("files", where)
+    result = lens_rows.find_rows("files", where, scope="all")
     assert result["keys"] == expected
     assert result["scanned"] == 2  # group and fold rows are not rows here
+    # By default only the shown rows (c.db is hidden by the lens).
+    shown = lens_rows.find_rows("files", where)
+    assert shown["scanned"] == 1
+    hidden = [k for k in expected if k.endswith("c.db")]
+    assert shown["keys"] == [k for k in expected if k not in hidden]
+    assert shown["hidden_by_lens_filters"] == len(hidden)
 
 
 def test_files_content_contains_reads_local_copies(store, monkeypatch):
@@ -530,7 +562,7 @@ def test_classify_rows_limits(store, flow_dir, run_ctx, monkeypatch):
         lens_rows.classify_rows("network", "pii", max_rows=2)
     assert err.value.code == "invalid_arguments"
     assert "narrow with where" in err.value.hint
-    assert err.value.details["candidates"] == 3
+    assert err.value.details["candidates"] == 4  # three flows + the TLS row
     with pytest.raises(ToolError):
         lens_rows.classify_rows("network", "pii", max_rows=5000)
     with pytest.raises(ToolError):
@@ -656,7 +688,9 @@ def test_get_rows_pages_and_reads_keys(store, flow_dir):
     page = lens_rows.get_rows("network", limit=2)
     assert [r["key"] for r in page["rows"]] == ["a1", "a2"]
     assert page["next_cursor"] == 2
-    assert page["total"] == 3
+    assert page["total"] == 4
+    assert page["scope"] == "shown"
+    assert page["hidden_by_lens_filters"] == 0
     assert page["rows"][0]["highlights"] == [hs.id]
     assert "[Bearer, 13 chars]" in page["rows"][0]["digest"]
     assert page["rows"][1]["content"] == "binary"
@@ -870,12 +904,18 @@ def test_classify_rows_new_since_basis_covers_every_row_of_the_view(
         "network", "personal data", where={"host_glob": ["api.*"]}
     )
     hs = store.get(result["highlight_id"])
-    assert hs.basis["through_seq"] == 3
+    assert hs.basis["through_seq"] == 4
     view = HighlightView("network")
-    rows = [("a1", True, 1, 1001.5), ("a2", True, 2, 1002.5), ("a3", True, 3, 1003.5)]
+    rows = [
+        ("a1", True, 1, 1001.5),
+        ("a2", True, 2, 1002.5),
+        ("a3", True, 3, 1003.5),
+        ("tls-4", True, 4, 1004.5),
+    ]
     view.measure(iter(rows), live=True)
     assert view.counts[hs.id].new == 0
-    view.measure(iter([*rows, ("a9", True, 4, 1004.5)]), live=True)
+    # A later TLS failure is a new row like any flow.
+    view.measure(iter([*rows, ("tls-5", True, 5, 1005.5)]), live=True)
     assert view.counts[hs.id].new == 1
 
 
@@ -907,22 +947,43 @@ def test_where_haystack_is_capped(store, monkeypatch):
     )
     for regex in (False, True):
         result = lens_rows.find_rows(
-            "files", {"content_contains": "needle", "regex": regex}
+            "files", {"content_contains": "needle", "regex": regex}, scope="all"
         )
         assert result["keys"] == ["/data/data/com.x/databases/c.db"]
 
 
-def test_tls_rows_are_never_rows_of_the_tools(store, flow_dir):
+def test_tls_rows_are_rows_of_the_tools_keyed_by_record_id(store, flow_dir):
     with pytest.raises(ToolError) as err:
-        lens_rows.find_rows("network", {"kind": ["tls"]})
-    assert "flow, error" in err.value.message
-    assert "tls" not in lens_rows._WHERE_PROP["description"]
+        lens_rows.find_rows("network", {"kind": ["dns"]})
+    assert "flow, error, tls" in err.value.message
+    assert "flow/error/tls" in lens_rows._WHERE_PROP["description"]
+    # Flow-log fallback: keyed like the lens (tls_row_key of tls-<seq>).
     rows, source = lens_rows.collect_rows("network")
     assert source == "flow_log"
-    assert "tls-4" not in {r["key"] for r in rows}
-    lens = [{"flow_id": "x1", "kind": "tls", "shown": True, "host": "h"}]
+    tls = {r["key"]: r for r in rows}[rh.tls_row_key(flow_dir, "tls-4")]
+    assert (tls["kind"], tls["method"], tls["host"]) == (
+        "tls",
+        "TLS",
+        "pinned.example.com",
+    )
+    assert tls["url"] == "https://pinned.example.com"
+    assert "TLS handshake failed" in tls["error"]
+    # A failed handshake has no detail: body predicates never read one.
+    assert lens_rows._Details().flow(tls) is None
+    # Lens source: a keyed TLS row is a row; a keyless one is counted.
+    lens = [
+        {"flow_id": "tls-9", "kind": "tls", "shown": True, "host": "h"},
+        {"flow_id": None, "kind": "tls", "shown": True, "host": "h2", "time": 1.0},
+    ]
     store.register_row_source("network", lambda: lens, None)
-    assert lens_rows.collect_rows("network") == ([], "lens")
+    rows, source = lens_rows.collect_rows("network")
+    assert (source, [r["key"] for r in rows]) == ("lens", ["tls-9"])
+    found = lens_rows.find_rows("network", {"kind": "tls"})
+    assert found["keys"] == ["tls-9"]
+    # An old keyless row (not in the flow log): no retry, it cannot be keyed.
+    assert "not_in_flow_log_yet" not in found
+    assert found["not_in_flow_log"] == 1
+    assert "cannot be highlighted" in found["not_in_flow_log_hint"]
 
 
 @pytest.mark.parametrize(
@@ -1100,3 +1161,528 @@ def test_new_since_basis_counts_rows_the_tools_cannot_take(store):
     result = lens_rows.find_rows("network", {"method": ["POST"]}, apply="highlight")
     assert result["scanned"] == 1
     assert store.get(result["highlight_id"]).basis["through_seq"] == 7
+
+
+# -- E2E finding: the tools see exactly the rows the lens shows -------------------------------
+#
+# "highlight Network rows to <tracker>" highlighted 0 rows: the tracker's only
+# row was a TLS failure (no key then), and the agent listed mitm.it rows the
+# lens hides as OS noise.
+
+E2E_ROWS = [
+    {
+        "key": "f1",
+        "flow_id": "a1",
+        "seq": 1,
+        "shown": True,
+        "kind": "flow",
+        "method": "GET",
+        "host": "api.example.com",
+        "path": "/v1/feed",
+        "url": "https://api.example.com/v1/feed",
+        "status": 200,
+    },
+    {
+        "key": "f2",
+        "flow_id": "m1",
+        "seq": 2,
+        "shown": False,  # Sandroid's own mitm.it probe: OS noise, hidden
+        "kind": "flow",
+        "method": "GET",
+        "host": "mitm.it",
+        "path": "/",
+        "url": "http://mitm.it/",
+        "status": 200,
+    },
+    {
+        "key": "f3",
+        "flow_id": "tls-3",
+        "seq": 3,
+        "shown": True,
+        "kind": "tls",
+        "method": "TLS",
+        "host": "sdk.pa-cd.com",
+        "path": "",
+        "url": "https://sdk.pa-cd.com",
+        "status": None,
+        "error": "TLS handshake failed (cert)",
+    },
+    {
+        "key": "f4",
+        "flow_id": "a4",
+        "seq": 4,
+        "shown": True,
+        "kind": "flow",
+        "method": "POST",
+        "host": "cdn.example.org",
+        "path": "/up",
+        "url": "https://cdn.example.org/up",
+        "status": 204,
+    },
+]
+
+
+@pytest.fixture
+def e2e_lens(store):
+    store.register_row_source("network", lambda: E2E_ROWS, None)
+    return store
+
+
+def test_e2e_find_rows_highlights_the_tls_failed_tracker_row(e2e_lens):
+    store = e2e_lens
+    result = lens_rows.find_rows(
+        "network", where={"host_glob": ["*pa-cd.com"]}, apply="highlight"
+    )
+    assert result["keys"] == ["tls-3"]
+    assert result["matched"] == 1
+    assert result["scanned"] == 3  # the rows the lens shows
+    assert result["hidden_by_lens_filters"] == 0
+    assert "Highlighted 1 of 3" in result["summary"]
+    hs = store.get(result["highlight_id"])
+    assert set(hs.reasons) == {"tls-3"}
+    assert hs.state == "complete"
+    assert [e[0] for e in store.lookup("network", "tls-3")] == [hs.id]
+
+
+def test_e2e_hidden_rows_are_counted_not_listed_unless_scope_all(e2e_lens):
+    listed = lens_rows.find_rows("network")
+    assert listed["keys"] == ["a1", "tls-3", "a4"]
+    assert listed["hidden_by_lens_filters"] == 1
+    assert "scope='all'" in listed["hidden_hint"]
+    probe = lens_rows.find_rows("network", where={"host_glob": ["mitm.it"]})
+    assert (probe["matched"], probe["hidden_by_lens_filters"]) == (0, 1)
+    every = lens_rows.find_rows("network", scope="all")
+    assert every["keys"] == ["a1", "m1", "tls-3", "a4"]
+    assert every["hidden_by_lens_filters"] == 1
+    assert "only with those filters off" in every["hidden_hint"]
+    # get_rows pages the same rows.
+    page = lens_rows.get_rows("network", include_content=False)
+    assert [r["key"] for r in page["rows"]] == ["a1", "tls-3", "a4"]
+    assert page["hidden_by_lens_filters"] == 1
+    assert page["rows"][1]["row"].startswith("TLS https://sdk.pa-cd.com")
+    by_key = lens_rows.get_rows("network", keys=["m1", "tls-3"])
+    assert [r["key"] for r in by_key["rows"]] == ["tls-3"]
+    assert by_key["hidden_keys"] == ["m1"]
+    assert "unknown_keys" not in by_key
+    every_page = lens_rows.get_rows("network", scope="all", include_content=False)
+    assert [r["key"] for r in every_page["rows"]] == ["a1", "m1", "tls-3", "a4"]
+    assert every_page["rows"][1]["shown"] is False
+    # The scope parameter defaults to "shown" in every schema.
+    for name in ("find_rows", "classify_rows", "get_rows"):
+        prop = get_tool_registry().get_spec(name).parameters["properties"]["scope"]
+        assert prop["default"] == "shown"
+        assert prop["enum"][0] == "shown"
+
+
+E2E_HOSTS = ("api.example.com", "mitm.it", "sdk.pa-cd.com", "cdn.example.org")
+
+
+class TrackerClient(PiiClient):
+    """Matches rows whose digest names a tracker host; records the set state."""
+
+    def __init__(self, store=None, cancel_after=None):
+        super().__init__(cancel_after)
+        self.store = store
+        self.states: list = []
+        self.seen: list[str] = []
+
+    def stream(self, messages, tools=None, *, cancel_event=None, **kwargs):
+        content = messages[1]["content"]
+        if self.store is not None:
+            self.states.extend(s.state for s in self.store.sets("network"))
+        matches = []
+        for block in content.split("<row id=")[1:]:
+            rid = json.loads(block.split(">", 1)[0])
+            # Row ids are aliases (r1, ...): record the host the row names.
+            self.seen.extend(h for h in E2E_HOSTS if h in block)
+            if "pa-cd.com" in block or "mitm.it" in block:
+                matches.append({"id": rid, "reason": "tracker host"})
+        if self.cancel_after is not None:
+            self.cancel_after.set()
+        yield StreamChunk("text", text=json.dumps({"matches": matches}))
+        yield StreamChunk("done", usage=Usage(prompt_tokens=50, completion_tokens=5))
+
+
+def test_e2e_classify_rows_has_the_same_scoping(
+    e2e_lens, run_ctx, monkeypatch, one_row_batches
+):
+    store = e2e_lens
+    client = TrackerClient(store)
+    _use_client(monkeypatch, client)
+    result = lens_rows.classify_rows("network", "tracker hosts", short="trackers")
+    # Never the mitm.it row the lens hides.
+    assert sorted(client.seen) == [
+        "api.example.com",
+        "cdn.example.org",
+        "sdk.pa-cd.com",
+    ]
+    assert result["candidates"] == 3
+    assert result["matched"] == 1
+    assert result["hidden_by_lens_filters"] == 1
+    assert "not judged" in result["summary"]
+    assert "scope='all'" in result["hidden_hint"]
+    hs = store.get(result["highlight_id"])
+    assert set(hs.reasons) == {"tls-3"}
+    # "scanning" while the classifier runs, "complete" after it.
+    assert client.states
+    assert set(client.states) == {"scanning"}
+    assert hs.state == "complete"
+    # scope="all" judges the hidden row too (and says it is hidden).
+    client2 = TrackerClient()
+    _use_client(monkeypatch, client2)
+    every = lens_rows.classify_rows(
+        "network", "tracker hosts", scope="all", apply="none"
+    )
+    assert sorted(client2.seen) == sorted(E2E_HOSTS)
+    assert every["matched"] == 2
+    assert every["hidden_by_lens_filters"] == 1
+    assert "1 of them hidden by your lens filters" in every["summary"]
+    # Explicit keys of hidden rows are named as hidden, not unknown.
+    _use_client(monkeypatch, TrackerClient())
+    picked = lens_rows.classify_rows(
+        "network", "tracker hosts", keys=["m1", "tls-3"], apply="none"
+    )
+    assert picked["hidden_keys"] == ["m1"]
+    assert "unknown_keys" not in picked
+    assert picked["candidates"] == 1
+
+
+def test_classify_rows_cancel_ends_partial_and_a_crash_never_stays_scanning(
+    e2e_lens, run_ctx, monkeypatch, one_row_batches
+):
+    store = e2e_lens
+    ctx, _events = run_ctx
+    _use_client(monkeypatch, TrackerClient(cancel_after=ctx.cancel_event))
+    cancelled = lens_rows.classify_rows(
+        "network", "tracker hosts", where={"host_glob": ["*pa-cd.com", "cdn.*"]}
+    )
+    assert cancelled["partial"] is True
+    assert cancelled["stop_reason"] == "cancelled"
+    stopped = store.get(cancelled["highlight_id"])
+    assert set(stopped.reasons) == {"tls-3"}
+    assert stopped.state == "partial"  # stopped: partial, no longer scanning
+    store.remove(stopped.id)
+    # A crash inside the classifier: an extended set ends partial, not scanning.
+    hid = store.create("network", "trackers", reasons={"tls-3": "tracker"}).id
+    ctx.cancel_event.clear()
+
+    def broken_run(self, digests):
+        raise RuntimeError("classifier crashed")
+
+    from sandroid.ai import row_classifier
+
+    monkeypatch.setattr(row_classifier.RowClassifier, "run", broken_run)
+    with pytest.raises(RuntimeError):
+        lens_rows.classify_rows("network", "tracker hosts", highlight_id=hid)
+    assert store.get(hid).state == "partial"
+    with pytest.raises(RuntimeError):
+        lens_rows.classify_rows("network", "tracker hosts")
+    assert [s.id for s in store.sets()] == [hid]  # the empty new set is gone
+
+
+# -- verifier findings (fix/ai-polish-verify) ----------------------------------------------
+
+
+def test_extend_with_no_new_rows_keeps_the_set(store, flow_dir):
+    """Finding 1: an extend that adds nothing names the set, never "no set"."""
+    first = lens_rows.find_rows("network", {"method": ["POST"]}, apply="filter")
+    hid = first["highlight_id"]
+    same = lens_rows.find_rows(
+        "network", {"method": ["POST"]}, apply="filter", highlight_id=hid
+    )
+    assert same["highlight_id"] == hid
+    assert same["note"] == f"no new rows: every match is already in {hid}"
+    none = lens_rows.find_rows(
+        "network", {"method": ["PUT"]}, apply="highlight", highlight_id=hid
+    )
+    assert none["highlight_id"] == hid
+    assert "no new rows" in none["note"]
+    assert "no highlight set was created" not in str(same) + str(none)
+    assert set(store.keys(hid)) == {"a1", "a3"}
+
+
+def test_hints_scope_and_prompt_never_name_the_ai_filter_as_hiding_rows():
+    """Finding 1: the AI filter is not a reason rows are hidden from the tools."""
+    from sandroid.ai.prompts import ORCHESTRATOR_PROMPT_V2
+
+    for lens in ("network", "files"):
+        for scope in ("shown", "all"):
+            assert "AI filter" not in lens_rows._hidden_hint(lens, 3, scope)
+    scope_text = lens_rows._SCOPE_PROP["description"]
+    assert "phases, AI filter" not in scope_text
+    assert "an AI filter does not narrow it" in scope_text
+    section = ORCHESTRATOR_PROMPT_V2.split("Lens rows", 1)[1].split("Budgets", 1)[0]
+    assert "phases, the AI filter" not in section
+    assert "the ai filter does not hide rows from the tools" in section.lower()
+    assert "cannot be highlighted (not in the flow log)" in section
+
+
+def test_tls_keys_are_namespaced_by_the_flow_dir(store, tmp_path):
+    """Finding 3: the same tls-<seq> in two flow logs (two devices) are two keys."""
+    from sandroid.tui.widgets.network_panel import FlowRow
+
+    rec = {
+        "seq": 1,
+        "id": "tls-1",
+        "kind": "tls",
+        "ts_end": 1.0,
+        "host": "pinned.example",
+        "tls_reason": "cert",
+        "app": "com.x",
+    }
+    dirs = [tmp_path / dev / "raw" / "mitm_flows" for dev in ("dev-a", "dev-b")]
+    keys = [FlowRow.from_record(rec, d).flow_id for d in dirs]
+    assert keys[0] != keys[1]
+    assert re.fullmatch(r"tls-[0-9a-f]{8}-1", keys[0])
+    # Every path agrees: the lens row, the tools' flow-log row, the helper.
+    assert lens_rows._flow_log_tls_row(rec, dirs[0])["key"] == keys[0]
+    assert rh.tls_row_key(str(dirs[0]), "tls-1") == keys[0]
+    # A record id that is already unique is kept as is.
+    uid = "tls-0b7e8c0e-5d1f-4c55-9a51-0e7f0f8f8d11"
+    assert rh.tls_row_key(dirs[0], uid) == uid
+    assert FlowRow.from_record({**rec, "id": uid}, dirs[0]).flow_id == uid
+    st = rh.get_row_highlights()
+    st.create("network", "pinned on A", reasons={keys[0]: "A"}, origin="ai")
+    assert st.lookup("network", keys[1]) == ()
+
+
+def test_tools_pair_stdout_tls_rows_with_the_flow_log_nearest_first(store, flow_dir):
+    """Finding 2: unkeyed TLS rows get the key the lens will adopt."""
+    t = time.time() - 100.0
+
+    def tls(seq, host, ts):
+        return _record(seq, f"tls-{seq}", "TLS", host, "", None, kind="tls", ts_end=ts)
+
+    with open(flow_dir / "flows.jsonl", "a") as f:
+        for rec in (
+            tls(50, "twice.example", t + 0.5),
+            tls(51, "twice.example", t + 3.2),
+            tls(52, "other.example", t + 0.4),
+            tls(53, "late.example", t + 40.0),
+        ):
+            f.write(json.dumps(rec) + "\n")
+    mitmproxy_flow_log._CURSOR_CACHE.clear()
+
+    def row(n, host, ts):
+        return {
+            "key": None,
+            "flow_id": None,
+            "kind": "tls",
+            "shown": True,
+            "method": "TLS",
+            "host": host,
+            "time": ts,
+            "flow_dir": str(flow_dir),
+            "scope": None,
+        }
+
+    rows = [
+        row(1, "twice.example", t),
+        row(2, "twice.example", t + 3.0),
+        row(3, "late.example", t),  # 40 s off: no record within 10 s
+    ]
+    store.register_row_source("network", lambda: rows, None)
+    found = lens_rows.find_rows("network", {"kind": "tls"})
+    key = lambda seq: rh.tls_row_key(flow_dir, f"tls-{seq}")  # noqa: E731
+    assert found["keys"] == [key(50), key(51)]
+    # The old unpaired row cannot be highlighted: no retry hint.
+    assert found["not_in_flow_log"] == 1
+    assert "not_in_flow_log_yet" not in found
+
+
+def test_unkeyed_tls_rows_retry_only_when_young_and_live(store, monkeypatch):
+    """Finding 2: retry hint only for young live rows, never in review."""
+    monkeypatch.setattr(lens_rows, "_pair_unkeyed_tls", lambda raw: None)
+    now = time.time()
+    rows = [
+        {"flow_id": None, "kind": "tls", "shown": True, "host": "a", "time": now},
+        {"flow_id": None, "kind": "tls", "shown": True, "host": "b", "time": now - 60},
+        {
+            "flow_id": None,
+            "kind": "tls",
+            "shown": True,
+            "host": "c",
+            "time": now,
+            "scope": "run-1",
+        },
+    ]
+    store.register_row_source("network", lambda: rows, None)
+    found = lens_rows.find_rows("network")
+    assert found["not_in_flow_log_yet"] == 1
+    assert "run the tool again" in found["not_in_flow_log_yet_hint"]
+    assert found["not_in_flow_log"] == 2
+    assert (
+        "cannot be highlighted (not in the flow log)" in found["not_in_flow_log_hint"]
+    )
+
+
+def test_sets_record_the_hidden_rows_they_did_not_judge(e2e_lens, run_ctx, monkeypatch):
+    """Finding 4: basis.not_judged lists the hidden matches (scope shown)."""
+    store = e2e_lens
+    found = lens_rows.find_rows("network", {"method": ["GET"]}, apply="highlight")
+    hs = store.get(found["highlight_id"])
+    assert hs.basis["scope"] == "shown"
+    assert hs.basis["not_judged"] == ["m1"]
+    every = lens_rows.find_rows(
+        "network", {"method": ["GET"]}, apply="highlight", scope="all"
+    )
+    assert store.get(every["highlight_id"]).basis["not_judged"] == []
+    # An extend with scope="all" judges m1: it leaves the list.
+    lens_rows.find_rows(
+        "network",
+        {"method": ["GET"]},
+        apply="highlight",
+        highlight_id=hs.id,
+        scope="all",
+    )
+    assert store.get(hs.id).basis["not_judged"] == []
+    store.clear()
+    _use_client(monkeypatch, TrackerClient())
+    judged = lens_rows.classify_rows("network", "tracker hosts")
+    basis = store.get(judged["highlight_id"]).basis
+    assert (basis["scope"], basis["not_judged"]) == ("shown", ["m1"])
+
+
+def test_content_predicates_never_read_hidden_rows(e2e_lens, monkeypatch):
+    """Finding 7: hidden rows see only the cheap predicates."""
+    read: list[str] = []
+    monkeypatch.setattr(
+        lens_rows._Details,
+        "flow",
+        lambda self, row: read.append(row["key"]) or None,
+    )
+    found = lens_rows.find_rows(
+        "network", {"method": ["GET"], "body_contains": "email"}
+    )
+    assert "m1" not in read
+    assert found["hidden_by_lens_filters"] is None
+    assert found["hidden_not_searched"] == 1
+    assert "not searched" in found["hidden_hint"]
+    # No content predicate: the full count as before.
+    plain = lens_rows.find_rows("network", {"method": ["GET"]})
+    assert plain["hidden_by_lens_filters"] == 1
+    assert "hidden_not_searched" not in plain
+    # scope="all" searches every row.
+    read.clear()
+    lens_rows.find_rows("network", {"body_contains": "email"}, scope="all")
+    assert "m1" in read
+
+
+def test_classify_rows_never_leaves_a_set_scanning(
+    e2e_lens, run_ctx, monkeypatch, one_row_batches
+):
+    """Finding 6: a store error mid-run, or a failure before the run."""
+    store = e2e_lens
+    _use_client(monkeypatch, TrackerClient())
+    hid = store.create("network", "trackers", reasons={"tls-3": "tracker"}).id
+
+    def broken_add(set_id, reasons, *, generation=None):
+        raise rh.HighlightError("store refused")
+
+    monkeypatch.setattr(store, "add", broken_add)
+    lens_rows.classify_rows("network", "tracker hosts", highlight_id=hid)
+    assert store.get(hid).state == "partial"
+    monkeypatch.undo()
+    _use_client(monkeypatch, TrackerClient())
+    from sandroid.ai import row_classifier
+
+    def broken_init(self, *a, **k):
+        raise RuntimeError("no classifier")
+
+    monkeypatch.setattr(row_classifier.RowClassifier, "__init__", broken_init)
+    with pytest.raises(RuntimeError):
+        lens_rows.classify_rows("network", "tracker hosts", highlight_id=hid)
+    assert store.get(hid).state == "partial"
+    with pytest.raises(RuntimeError):
+        lens_rows.classify_rows("network", "tracker hosts")
+    assert [s.id for s in store.sets()] == [hid]
+
+
+def test_fallback_rows_follow_the_lens_noise_rule(store, flow_dir, monkeypatch):
+    """Finding 5: mitm.it and OS paths are not "shown" without a lens."""
+    with open(flow_dir / "flows.jsonl", "a") as f:
+        f.write(json.dumps(_record(9, "n9", "GET", "mitm.it", "/cert/pem", 200)) + "\n")
+    mitmproxy_flow_log._CURSOR_CACHE.clear()
+    res = lens_rows.find_rows("network", {})
+    assert "n9" not in res["keys"]
+    assert res["hidden_by_lens_filters"] == 1
+    assert res["shown_basis"] == "noise rule only (lens not open)"
+    events = [
+        {"path": "/data/data/com.x/a.xml", "event_type": "MODIFY", "timestamp": 1},
+        {"path": "/proc/1/stat", "event_type": "OPEN", "timestamp": 2},
+    ]
+
+    class FakeController:
+        def get_recent_events(self, since_seq=None, limit=200):
+            return {"events": events}
+
+    monkeypatch.setattr(
+        "sandroid.tui.controller_registry.get_monitor_controller", FakeController
+    )
+    files = lens_rows.find_rows("files", {})
+    assert files["keys"] == ["/data/data/com.x/a.xml"]
+    assert files["hidden_by_lens_filters"] == 1
+    assert files["shown_basis"] == "noise rule only (lens not open)"
+
+
+def _flow_dir_with(tmp_path, name, host, count):
+    d = tmp_path / name
+    d.mkdir()
+    with open(d / "flows.jsonl", "w") as fh:
+        for s in range(1, count + 1):
+            rec = {
+                "seq": s,
+                "id": f"{name}{s}",
+                "kind": "flow",
+                "method": "GET",
+                "host": host,
+                "path": "/x",
+                "ts_end": 1_700_000_000 + s,
+            }
+            fh.write(json.dumps(rec) + "\n")
+    (d / "meta.json").write_text(
+        json.dumps({"earliest_seq": 1, "latest_seq": count, "generation": 0})
+    )
+    return d
+
+
+def test_rows_after_a_hidden_lens_cursor_are_the_newest(tmp_path, monkeypatch):
+    """More than MAX_ROWS_AFTER flows while the lens was hidden: the tools get
+    the newest ones (the first page used to be the oldest).
+    """
+    flow_dir = _flow_dir_with(tmp_path, "f", "h.example", 3000)
+    monkeypatch.setattr(lens_rows, "_network_noise", lambda: (lambda row: False))
+    rows = lens_rows._flow_log_rows_after(flow_dir, 500)
+    seqs = [r["seq"] for r in rows]
+    assert len(seqs) == lens_rows.MAX_ROWS_AFTER
+    assert max(seqs) == 3000
+    assert min(seqs) == 3000 - lens_rows.MAX_ROWS_AFTER + 1
+
+
+def test_a_hidden_lens_of_an_old_flow_dir_is_not_the_view(tmp_path, monkeypatch):
+    """Device / session switched while the Network lens was hidden: its
+    snapshot (old flow dir) is dropped and the current flow log is read.
+    """
+    old = _flow_dir_with(tmp_path, "A", "old.device", 5)
+    new = _flow_dir_with(tmp_path, "B", "new.device", 5)
+    monkeypatch.setattr(mitmproxy_flow_log, "resolve_flow_dir", lambda: new)
+    monkeypatch.setattr(lens_rows, "_network_noise", lambda: (lambda row: False))
+
+    class _Store:
+        def snapshot_rows(self, lens):
+            row = {
+                "key": "A1",
+                "flow_id": "A1",
+                "seq": 1,
+                "shown": True,
+                "kind": "flow",
+                "host": "old.device",
+                "time": 1_700_000_001,
+                "flow_dir": str(old),
+            }
+            return rh.RowSnapshot([row], polled_through=1, flow_dir=str(old))
+
+    monkeypatch.setattr(lens_rows, "_store", lambda: _Store())
+    got = lens_rows._collect("network")
+    assert got.source == "flow_log"
+    assert {r.get("host") for r in got.rows} == {"new.device"}

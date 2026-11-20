@@ -6,7 +6,7 @@ from ``AgentEvent`` objects:
 
 * :class:`ChatTranscript` -- a ``VerticalScroll`` holding one widget per
   block, keyed by turn / call / agent id (``add_block`` / ``block``). At most
-  :data:`MAX_BLOCKS` stay mounted; older turns fold into "▸ N earlier turns".
+  :data:`MAX_BLOCKS` stay mounted; older turns fold into "N earlier turns".
 * Blocks: :class:`UserBlock`, :class:`ReplyBlock` (Markdown fed through
   ``get_stream`` so only the live block re-renders), :class:`ReasoningLine`,
   :class:`ToolBlock` (result chip filled in place), :class:`AgentCard`,
@@ -17,7 +17,8 @@ from ``AgentEvent`` objects:
 * :class:`ChatMascot` -- "Blockhead", 9x3 cells, one frame set per state,
   plus an ASCII fallback; :class:`EmptyState` shows it in its sandbox tray.
 
-Colors are theme variables only (``$lens-*`` and the six ``$chat-*`` built
+States are plain words in a theme colour, never glyphs (the mascot is
+decoration). Colors are theme variables only (``$lens-*`` and the six ``$chat-*`` built
 in :func:`sandroid.tui.themes.chat_css_variables`); the formatters return
 Textual :class:`~textual.content.Content` whose styles name those variables,
 resolved when the widget renders.
@@ -26,7 +27,6 @@ resolved when the widget renders.
 from __future__ import annotations
 
 import json
-import math
 import os
 import sys
 import time
@@ -49,8 +49,6 @@ if TYPE_CHECKING:
 # Pure formatters
 # --------------------------------------------------------------------------
 
-#: Context-meter glyphs, empty to full.
-METER_GLYPHS = "○◔◑◕●"
 #: Meter colour thresholds (share of the context window).
 METER_WARN = 0.50
 METER_BAD = 0.85
@@ -110,18 +108,26 @@ _ACRONYMS = frozenset(
     ]
 )
 
-#: Agent card status -> (glyph + label, style).
+#: Agent card status -> (label, style): the word and its colour carry it.
 AGENT_STATUS: dict[str, tuple[str, str]] = {
-    "queued": ("◌ queued", "$chat-muted"),
-    "running": ("⠋ running", "$chat-tool"),
-    "waiting": ("⚠ awaiting approval", "$chat-wait"),
-    "done": ("✓ done", "$lens-ok"),
-    "failed": ("✗ failed", "$lens-bad"),
-    "cancelled": ("◼ cancelled", "$chat-muted"),
+    "queued": ("queued", "$chat-muted"),
+    "running": ("running", "$lens-accent"),
+    "waiting": ("awaiting approval", "$chat-wait"),
+    "done": ("done", "$lens-ok"),
+    "failed": ("failed", "$lens-bad"),
+    "cancelled": ("cancelled", "$chat-muted"),
 }
 
-#: Braille spinner frames (tool calls, running agents).
-SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+#: Error codes shown as another word on a result chip.
+CHIP_CODE_WORDS = {
+    "tool_failed": "failed",
+    "needs_confirmation": "needs your confirmation",
+    "declined_by_analyst": "declined by you",
+}
+#: Error codes of a call the analyst or the runtime stopped (warn, not bad).
+CHIP_WARN_CODES = frozenset(
+    {"denied", "cancelled", "needs_confirmation", "declined_by_analyst", "busy"}
+)
 
 
 def format_tokens(count: float | None) -> str:
@@ -156,13 +162,6 @@ def format_elapsed(seconds: float | None) -> str:
     return f"{minutes}:{secs:02d}"
 
 
-def meter_glyph(fraction: float) -> str:
-    """``○`` (empty) .. ``●`` (full) for a context share 0..1."""
-    if fraction <= 0:
-        return METER_GLYPHS[0]
-    return METER_GLYPHS[min(4, math.ceil(fraction * 4))]
-
-
 def meter_style(fraction: float) -> str:
     """``$lens-dim`` below 50 %, ``$lens-warn`` from 50 %, ``$lens-bad`` from 85 %."""
     if fraction >= METER_BAD:
@@ -175,23 +174,19 @@ def meter_style(fraction: float) -> str:
 def format_meter(
     used: int | None, window: int | None, *, compact: bool = False
 ) -> Content:
-    """The context meter: ``◔ 41k/262k 16%`` (compact: ``◔ 41k 16%``).
+    """The context meter: ``41k/262k 16%`` (compact: ``41k 16%``).
 
-    Without a known window only the token count shows (``○ 41k``).
+    Coloured by fill level (:func:`meter_style`). Without a known window
+    only the token count shows (``41k``).
     """
     if not window:
-        return Content.styled(
-            f"{METER_GLYPHS[0]} {format_tokens(used or 0)}", "$lens-dim"
-        )
+        return Content.styled(format_tokens(used or 0), "$lens-dim")
     fraction = max(0.0, (used or 0) / window)
     pct = round(fraction * 100)
     if compact:
-        text = f"{meter_glyph(fraction)} {format_tokens(used or 0)} {pct}%"
+        text = f"{format_tokens(used or 0)} {pct}%"
     else:
-        text = (
-            f"{meter_glyph(fraction)} {format_tokens(used or 0)}/"
-            f"{format_tokens(window)} {pct}%"
-        )
+        text = f"{format_tokens(used or 0)}/{format_tokens(window)} {pct}%"
     return Content.styled(text, meter_style(fraction))
 
 
@@ -210,13 +205,13 @@ def format_header(
 ) -> Content:
     """The one-row chat header, ``width`` cells wide.
 
-    ``● tool · List Flows · deepseek-v3 REMOTE EXPERIMENTAL ... ◔ 41k/262k 16%``.
-    When it does not fit, parts go in this order: the model, the meter's
-    window (``◔ 41k 16%``), then the detail is cut with "…". ``REMOTE`` and
+    ``tool · List Flows · deepseek-v3 REMOTE EXPERIMENTAL ... 41k/262k 16%``.
+    The state is a word in its colour. When it does not fit, parts go in
+    this order: the model, the meter's window (``41k 16%``), then the detail is cut with "…". ``REMOTE`` and
     ``EXPERIMENTAL`` always stay whole (§8); at :data:`HEADER_COMPACT_WIDTH`
     columns or less the model is never shown.
     """
-    label, dot_style = HEADER_STATES.get(state, (state, "$chat-muted"))
+    label, state_style = HEADER_STATES.get(state, (state, "$chat-muted"))
 
     markers: list[Any] = []
     if remote:
@@ -231,12 +226,13 @@ def format_header(
             parts.append(format_meter(used, window, compact=compact))
         sep = " " if compact else "  "
         if compactions:
-            parts += [sep, (f"⟲{compactions}", "$chat-muted")]
+            parts += [sep, (f"{compactions} compacted", "$chat-muted")]
         if agents:
-            parts += [sep, (f"◆{agents}", "$chat-tool")]
+            plural = "s" if agents != 1 else ""
+            parts += [sep, (f"{agents} agent{plural}", "$chat-tool")]
         return Content.assemble(*parts, " ")
 
-    head = Content.assemble(" ", ("●", dot_style), " ", (label, dot_style))
+    head = Content.assemble(" ", (label, state_style))
     detail_part = (
         Content.assemble((" · ", "$chat-muted"), detail) if detail else Content("")
     )
@@ -349,35 +345,32 @@ def format_chip(
     code: str | None = None,
     message: str | None = None,
 ) -> Content:
-    """A tool result chip: ``└ ✓ R17 · 12 rows · 0.4s`` / ``└ ✗ code: message``."""
+    """A tool result chip: ``done · R17 · 12 rows · 0.4s`` / ``code: message``.
+
+    The first word says how the call ended, in its colour: ``done`` (ok),
+    the error code (``denied`` / ``cancelled`` warn, others bad; a plain
+    tool failure reads ``failed``).
+    """
     if not ok:
-        parts: list[str | tuple[str, str]] = [
-            ("└ ", "$chat-muted"),
-            ("✗ ", "$lens-bad"),
-        ]
-        if code:
-            parts.append((f"{code}:" if message else code, "$lens-bad"))
-            if message:
-                parts.append(" ")
+        word = CHIP_CODE_WORDS.get(code or "", code) or "failed"
+        style = "$lens-warn" if code in CHIP_WARN_CODES else "$lens-bad"
+        parts: list[str | tuple[str, str]] = [(f"{word}:" if message else word, style)]
         if message:
-            parts.append((message, "$chat-muted"))
+            parts += [" ", (message, "$chat-muted")]
         if elapsed is not None:
             parts.append((f" · {format_elapsed(elapsed)}", "$chat-muted"))
         return Content.assemble(*parts)
     bits = [b for b in (ref, summary, format_elapsed(elapsed)) if b]
-    parts = [("└ ", "$chat-muted"), ("✓", "$lens-ok")]
-    if bits:
-        parts.append(" ")
-    for i, bit in enumerate(bits):
-        if i:
-            parts.append((" · ", "$chat-muted"))
+    parts = [("done", "$lens-ok")]
+    for bit in bits:
+        parts.append((" · ", "$chat-muted"))
         parts.append((bit, "bold $lens-accent" if bit == ref else "$chat-muted"))
     return Content.assemble(*parts)
 
 
 def format_progress(text: str) -> Content:
-    """A running call's progress line: ``└ classifying 120/412 · 9 matched``."""
-    return Content.assemble(("└ ", "$chat-muted"), (text, "$chat-muted"))
+    """A running call's progress line: ``classifying 120/412 · 9 matched``."""
+    return Content.styled(text, "$chat-muted")
 
 
 def progress_text(payload: Mapping[str, Any]) -> str:
@@ -405,14 +398,10 @@ def format_card_title(
     *,
     elapsed: float | None = None,
     tokens: int | None = None,
-    spinner: str | None = None,
 ) -> Content:
-    """``◆ researcher r2 · ✓ done · 38s · 9.2k tok``."""
+    """``researcher r2 · done · 38s · 9.2k tok`` (the status in its colour)."""
     label, style = AGENT_STATUS.get(status, (status, "$chat-muted"))
-    if status == "running" and spinner:
-        label = spinner + label[1:]
     parts: list[str | tuple[str, str]] = [
-        ("◆ ", "$chat-tool"),
         (f"{role} {agent_id}", "bold"),
         (" · ", "$chat-muted"),
         (label, style),
@@ -428,8 +417,8 @@ def format_card_title(
 
 
 def format_compaction(before: int, after: int, masked: int = 0) -> str:
-    """``⟲ compacted · 182k → 41k · 14 results masked``."""
-    text = f"⟲ compacted · {format_tokens(before)} → {format_tokens(after)}"
+    """``compacted · 182k → 41k · 14 results masked``."""
+    text = f"compacted · {format_tokens(before)} → {format_tokens(after)}"
     if masked:
         text += f" · {masked} result{'s' if masked != 1 else ''} masked"
     return text
@@ -438,8 +427,8 @@ def format_compaction(before: int, after: int, masked: int = 0) -> str:
 def format_retry(
     seconds: float, attempt: int, attempts: int, reason: str | None = None
 ) -> str:
-    """``↻ Retrying in 4s · attempt 2/5 · 429 rate limited``."""
-    text = f"↻ Retrying in {format_elapsed(seconds)} · attempt {attempt}/{attempts}"
+    """``Retrying in 4s · attempt 2/5 · 429 rate limited``."""
+    text = f"Retrying in {format_elapsed(seconds)} · attempt {attempt}/{attempts}"
     return f"{text} · {reason}" if reason else text
 
 
@@ -839,7 +828,7 @@ class ReplyBlock(Markdown, TranscriptBlock):
 
 
 class ReasoningLine(Static, TranscriptBlock):
-    """``✧ Thinking… 3s`` while the model reasons, ``✧ Thought for 4s`` after.
+    """``Thinking… 3s`` while the model reasons, ``Thought for 4s`` after.
 
     ``verbose`` shows the reasoning text (fed by :meth:`append`) under the
     line. A one-second timer runs only while thinking.
@@ -891,9 +880,9 @@ class ReasoningLine(Static, TranscriptBlock):
     def line(self) -> Content:
         if self.running:
             spent = format_elapsed(int(time.monotonic() - self.started))
-            head = f"✧ Thinking… {spent}"
+            head = f"Thinking… {spent}"
         else:
-            head = f"✧ Thought for {format_elapsed(round(self.seconds or 0))}"
+            head = f"Thought for {format_elapsed(round(self.seconds or 0))}"
         if self.verbose and self.text:
             return Content.assemble(head, "\n", (self.text.strip(), "$chat-muted"))
         return Content(head)
@@ -903,9 +892,11 @@ class ReasoningLine(Static, TranscriptBlock):
 
 
 class ToolBlock(Widget, TranscriptBlock):
-    """One tool call: ``● Name args`` and, once done, its result chip.
+    """One tool call: ``Name args`` and, once done, its result chip.
 
-    The bullet spins while the call runs. :meth:`set_result` /
+    The name is in the tool colour (bad once the call failed); the line
+    under it reads ``running`` until progress or the chip replaces it.
+    :meth:`set_result` /
     :meth:`set_error` / :meth:`set_chip` fill the chip line in place.
     Narrower than :data:`ARGS_COMPACT_WIDTH` cells, string args lose their
     quotes; every line is cut with "…" at the block's width.
@@ -921,9 +912,6 @@ class ToolBlock(Widget, TranscriptBlock):
     }
     """
 
-    #: Seconds per spinner frame.
-    SPIN_INTERVAL = 0.125
-
     def __init__(
         self,
         name: str,
@@ -931,7 +919,6 @@ class ToolBlock(Widget, TranscriptBlock):
         *,
         call_id: str | None = None,
         label: str | None = None,
-        glyph: str | None = None,
         running: bool = True,
         **kwargs: Any,
     ) -> None:
@@ -940,32 +927,20 @@ class ToolBlock(Widget, TranscriptBlock):
         self.call_id = call_id
         self.args: dict[str, Any] = dict(args or {})
         self.label = label or humanize_tool_name(name)
-        self.glyph = glyph or ("◆" if name == "spawn_agent" else "●")
         self.chip: Content | None = None
         self.ok: bool | None = None
         #: The analyst's answer to this call's approval (shown above the chip).
         self.decision: Content | None = None
         self.decision_approved: bool | None = None
-        #: Live progress of a long call (``└ classifying 120/412 · 9 matched``),
+        #: Seconds the failed call took (the declined line shows them).
+        self.elapsed: float | None = None
+        #: Live progress of a long call (``classifying 120/412 · 9 matched``),
         #: shown while it runs; replaced by the chip.
         self.progress: Content | None = None
         self.running = running
-        self._spin = 0
-        self._timer = None
-
-    def on_mount(self) -> None:
-        if self.running:
-            self._timer = self.set_interval(self.SPIN_INTERVAL, self._tick)
-
-    def _tick(self) -> None:
-        self._spin += 1
-        self.refresh()
 
     def _stop(self) -> None:
         self.running = False
-        if self._timer is not None:
-            self._timer.stop()
-            self._timer = None
 
     def set_args(self, args: Mapping[str, Any]) -> None:
         """Replace the shown arguments (e.g. once they finished streaming)."""
@@ -979,7 +954,7 @@ class ToolBlock(Widget, TranscriptBlock):
         summary: str | None = None,
         elapsed: float | None = None,
     ) -> None:
-        """The call succeeded: ``└ ✓ R17 · 12 rows · 0.4s``."""
+        """The call succeeded: ``done · R17 · 12 rows · 0.4s``."""
         self.set_chip(
             format_chip(ok=True, ref=ref, summary=summary, elapsed=elapsed), ok=True
         )
@@ -991,7 +966,8 @@ class ToolBlock(Widget, TranscriptBlock):
         *,
         elapsed: float | None = None,
     ) -> None:
-        """The call failed: ``└ ✗ code: message``."""
+        """The call failed: ``code: message``."""
+        self.elapsed = elapsed
         self.set_chip(
             format_chip(ok=False, code=code, message=message, elapsed=elapsed), ok=False
         )
@@ -999,13 +975,13 @@ class ToolBlock(Widget, TranscriptBlock):
     def set_decision(
         self, text: str, *, style: str = "$chat-muted", approved: bool = True
     ) -> None:
-        """Show the approval answer (``✓ allowed by you``) under the call."""
-        self.decision = Content.assemble(("⚠ ", "$chat-wait"), (text, style))
+        """Show the approval answer (``allowed by you``) under the call."""
+        self.decision = Content.styled(text, style)
         self.decision_approved = approved
         self.refresh(layout=True)
 
     def set_chip(self, chip: Content | str, *, ok: bool | None = True) -> None:
-        """Any chip line (e.g. ``└ ◆ r2 running · see agents bar``)."""
+        """Any chip line (e.g. ``r2 running · see agents bar``)."""
         self.chip = chip if isinstance(chip, Content) else Content(chip)
         self.ok = ok
         self.progress = None
@@ -1013,7 +989,7 @@ class ToolBlock(Widget, TranscriptBlock):
         self.refresh(layout=True)
 
     def set_progress(self, text: str) -> None:
-        """Progress of the running call (``└ classifying 120/412 · 9 matched``).
+        """Progress of the running call (``classifying 120/412 · 9 matched``).
 
         Ignored once the call has its chip.
         """
@@ -1026,38 +1002,53 @@ class ToolBlock(Widget, TranscriptBlock):
 
     def call_line(self, width: int | None = None) -> Content:
         width = width or self.content_size.width or 100
-        if self.running:
-            bullet = (SPINNER[self._spin % len(SPINNER)], "$chat-tool")
-        else:
-            bullet = (self.glyph, "$lens-bad" if self.ok is False else "$chat-tool")
+        style = "bold $lens-bad" if self.ok is False else "bold $chat-tool"
         args = format_args(self.args, compact=width < ARGS_COMPACT_WIDTH)
-        parts: list[Any] = [bullet, " ", (self.label, "bold")]
+        parts: list[Any] = [(self.label, style)]
         if args.cell_length:
             parts += ["  ", args]
         return Content.assemble(*parts)
 
+    def _declined(self) -> bool:
+        """Declined by the analyst and failed: the decision line says it all
+        (``declined by you · note · 50s``), no second ``denied`` chip line.
+        """
+        return (
+            self.decision is not None
+            and self.decision_approved is False
+            and self.ok is False
+        )
+
     def render(self) -> Content:
         lines = [self.call_line()]
+        declined = self._declined()
         if self.decision is not None:
-            lines.append(Content.assemble("  ", self.decision))
-        if self.chip is not None:
+            parts: list[Any] = ["  ", self.decision]
+            if declined and self.elapsed is not None:
+                parts.append((f" · {format_elapsed(self.elapsed)}", "$chat-muted"))
+            lines.append(Content.assemble(*parts))
+        if self.chip is not None and not declined:
             lines.append(Content.assemble("  ", self.chip))
         elif self.progress is not None:
             lines.append(Content.assemble("  ", self.progress))
+        elif self.running:
+            lines.append(Content.assemble("  ", ("running", "$lens-accent")))
         return Content("\n").join(lines)
 
     def get_content_height(self, container, viewport, width: int) -> int:
+        if self._declined():
+            return 2
         return (
             1
             + (self.decision is not None)
-            + (self.chip is not None or self.progress is not None)
+            + (self.chip is not None or self.progress is not None or bool(self.running))
         )
 
 
 class AgentCard(Widget, TranscriptBlock, can_focus=True):
     """A subagent's card: round border, status title, summary and claims.
 
-    Title ``◆ researcher r2 · ✓ done · 38s · 9.2k tok``; each claim is a
+    Title ``researcher r2 · done · 38s · 9.2k tok``; each claim is a
     bullet with its evidence R-ids right-aligned as chips. Enter (or a
     click) posts :class:`AgentCard.Open`.
     """
@@ -1111,15 +1102,7 @@ class AgentCard(Widget, TranscriptBlock, can_focus=True):
         self.summary = summary
         self.claims: list[tuple[str, list[str]]] = [(t, list(r)) for t, r in claims]
         self.border_subtitle = "Enter open"
-        self._spin = 0
-        self._timer = None
         self._sync_title()
-
-    #: Seconds per spinner frame while the agent runs.
-    SPIN_INTERVAL = 0.25
-
-    def on_mount(self) -> None:
-        self._sync_spinner(mounted=True)
 
     def update_card(self, **fields: Any) -> None:
         """Change any of ``status``, ``elapsed``, ``tokens``, ``summary``, ``claims``."""
@@ -1135,25 +1118,7 @@ class AgentCard(Widget, TranscriptBlock, can_focus=True):
         if not changed:
             return
         self._sync_title()
-        self._sync_spinner()
         self.refresh(layout=True)
-
-    @property
-    def spinning(self) -> bool:
-        """The status spinner animates (the agent runs)."""
-        return self._timer is not None
-
-    def _sync_spinner(self, mounted: bool = False) -> None:
-        running = self.status == "running"
-        if running and self._timer is None and (mounted or self.is_mounted):
-            self._timer = self.set_interval(self.SPIN_INTERVAL, self._tick)
-        elif not running and self._timer is not None:
-            self._timer.stop()
-            self._timer = None
-
-    def _tick(self) -> None:
-        self._spin += 1
-        self._sync_title()
 
     def _sync_title(self) -> None:
         self.border_title = format_card_title(
@@ -1162,7 +1127,6 @@ class AgentCard(Widget, TranscriptBlock, can_focus=True):
             self.status,
             elapsed=self.elapsed,
             tokens=self.tokens,
-            spinner=SPINNER[self._spin % len(SPINNER)],
         )
 
     def body(self, width: int) -> Content:
@@ -1198,7 +1162,7 @@ class AgentCard(Widget, TranscriptBlock, can_focus=True):
 
 
 class CompactionRule(Static, TranscriptBlock):
-    """``──── ⟲ compacted · 182k → 41k · 14 results masked ────``."""
+    """``──── compacted · 182k → 41k · 14 results masked ────``."""
 
     DEFAULT_CSS = """
     CompactionRule {
@@ -1217,7 +1181,7 @@ class CompactionRule(Static, TranscriptBlock):
 
 
 class NoticeLine(Static, TranscriptBlock):
-    """A one-line notice updated in place (``↻ Retrying in 4s · attempt 2/5``)."""
+    """A one-line notice updated in place (``Retrying in 4s · attempt 2/5``)."""
 
     DEFAULT_CSS = """
     NoticeLine {
@@ -1247,7 +1211,7 @@ class NoticeLine(Static, TranscriptBlock):
 
 
 class BudgetNotice(Horizontal, TranscriptBlock):
-    """``◼ Round budget used (25/25)   [Continue] [Stop]``.
+    """``Round budget used (25/25)   [Continue] [Stop]``.
 
     The buttons post :class:`BudgetNotice.Continue` / :class:`BudgetNotice.Stop`
     (``notice.grant`` = the extra rounds offered) and the notice collapses
@@ -1297,7 +1261,7 @@ class BudgetNotice(Horizontal, TranscriptBlock):
         self.choice: str | None = None
 
     def _text(self) -> str:
-        text = f"◼ Round budget used ({self.used}/{self.budget})"
+        text = f"Round budget used ({self.used}/{self.budget})"
         if self.choice == "continue":
             text += f" · continued (+{self.grant})" if self.grant else " · continued"
         elif self.choice == "stop":
@@ -1333,7 +1297,7 @@ class BudgetNotice(Horizontal, TranscriptBlock):
 
 
 class FoldMarker(Static):
-    """``▸ N earlier turns`` at the top of a capped transcript."""
+    """``N earlier turns`` at the top of a capped transcript."""
 
     DEFAULT_CSS = """
     FoldMarker {
@@ -1354,7 +1318,7 @@ class ChatTranscript(VerticalScroll):
     :meth:`add_block` mounts a block (a :class:`UserBlock` starts a new
     turn) and remembers it under ``key`` (turn / call / agent id) for
     :meth:`block`. Past :data:`MAX_BLOCKS` mounted blocks the oldest whole
-    turns are removed and counted in "▸ N earlier turns"; clicking that
+    turns are removed and counted in "N earlier turns"; clicking that
     line posts :class:`ChatTranscript.EarlierTurnsRequested`. The view
     stays anchored to the end while the user has not scrolled up.
     """
@@ -1369,7 +1333,7 @@ class ChatTranscript(VerticalScroll):
     """
 
     class EarlierTurnsRequested(Message):
-        """The user clicked "▸ N earlier turns"."""
+        """The user clicked "N earlier turns"."""
 
         def __init__(self, folded_turns: int) -> None:
             super().__init__()
@@ -1474,7 +1438,7 @@ class ChatTranscript(VerticalScroll):
         if not self.folded_turns:
             return
         plural = "s" if self.folded_turns != 1 else ""
-        text = f"▸ {self.folded_turns} earlier turn{plural}"
+        text = f"{self.folded_turns} earlier turn{plural}"
         if self._fold is None:
             self._fold = FoldMarker(text)
             first = self._blocks[0] if self._blocks else None
@@ -1545,9 +1509,7 @@ def format_empty_state(
         lines.append(center(target, "$chat-muted"))
     lines.append(Content(""))
     if egress:
-        lines.append(
-            Content.assemble(" ", ("⚠ ", "$lens-warn"), (egress, "$lens-warn"))
-        )
+        lines.append(Content.assemble(" ", (egress, "$lens-warn")))
         lines.append(Content(""))
     examples = list(examples)
     if examples:
@@ -1619,11 +1581,12 @@ __all__ = [
     "AGENT_STATUS",
     "ASCII_FRAMES",
     "BLOCK_FRAMES",
+    "CHIP_CODE_WORDS",
+    "CHIP_WARN_CODES",
     "EXAMPLE_PROMPTS",
     "HEADER_STATES",
     "MASCOT_STATES",
     "MAX_BLOCKS",
-    "METER_GLYPHS",
     "SLASH_COMMANDS",
     "AgentCard",
     "BudgetNotice",
@@ -1654,7 +1617,6 @@ __all__ = [
     "format_tokens",
     "humanize_tool_name",
     "mascot_frames",
-    "meter_glyph",
     "meter_style",
     "progress_text",
     "resolve_mascot_style",

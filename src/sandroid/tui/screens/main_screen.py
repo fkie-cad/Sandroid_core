@@ -674,7 +674,7 @@ class MainScreen(Screen):
         self.switch_lens(order[(idx + delta) % len(order)])
 
     def set_lens_badge(self, lens_id: str, text: str | None) -> None:
-        """Show ``text`` (e.g. ``"⚑2"``) after the lens name; None clears it."""
+        """Show ``text`` (e.g. ``"27 TLS failed"``) after the lens name; None clears it."""
         try:
             self.query_one("#lens-bar", LensBar).set_badge(lens_id, text)
         except Exception:

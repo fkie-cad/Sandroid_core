@@ -43,9 +43,21 @@ same state) and ``w`` wipe data once (asks on start, never remembered). The
 keys work while the list keeps the focus, and the boxes can be clicked. ``⏎``
 starts the AVD with exactly what is shown. For a running emulator the box
 shows, read-only, what Sandroid started it with -- what ``R`` reuses -- or,
-for one started outside Sandroid, the AVD's saved options. For a physical
+for one started outside Sandroid, the AVD's saved options (``R`` restarts
+such an emulator with the options of its own command line). For a physical
 device it shows its state and what to do about it (e.g. authorize USB
 debugging). ``emulator.avd_headless`` is only the first-launch default.
+
+``p`` pins or unpins a snapshot of the highlighted AVD. A pinned snapshot
+can neither be overwritten nor deleted -- not from the Snapshots panel, by
+Rewind or by the AI assistant. ``clean_8g`` and ``default_boot`` are pinned
+on every AVD by default; unpinning asks first, and the AI can never unpin.
+(The emulator's own quick-boot save on exit -- launch option ``s`` -- still
+updates ``default_boot``; pinning only stops Sandroid from touching it.)
+Rewind start points and persona snapshots belong to their feature: the
+Snapshots panel deletes one only after a confirm that says whose it is. A
+pinned snapshot deleted outside Sandroid (e.g. ``qemu-img`` while the AVD is
+stopped) is reported once in the Devices screen and on the timeline.
 
 .. note::
 
@@ -500,12 +512,26 @@ repeated (a cookie banner is gone once accepted):
    - **Rewind + Replay**: back to the start point, copy **Before** of the
      selected files, repeat your steps, copy **After (replay)**. The device
      ends after the action. Each step is replayed *by element* (the tapped
-     element is found again and its current centre is tapped), else *by
-     position* (the recorded coordinates); the Timeline shows ``by element``,
+     element is found again and tapped where you tapped it: the same spot
+     relative to its bounds, not its centre), else *by position* (the
+     recorded coordinates); the Timeline shows ``by element``,
      ``by position``, ``failed: <reason>`` or ``diverged: <reason>`` for
-     every step. Typed text is replayed as the recorded keyboard taps, or
-     (typed another way) one character at a time at your recorded pace, and
-     the field is then read back: ``diverged: field reads '<x>', expected
+     every step. Before a tap by element the UI helper tests the spot live:
+     only when the element (or something inside it) is the topmost there is
+     the step *verified*. When a dialog or the keyboard covers that spot,
+     other visible spots of the element are tried; when none is free the
+     recorded position is tapped, ``by position (element covered)``,
+     unchecked. Without a live hit test the step is ``not hit-tested``,
+     unchecked. A tap position is never scaled to another screen: on a
+     display of another size or rotation the step is unchecked, and a
+     position outside it is not tapped. A tap Tracking could not name
+     surely (it read the element from an outdated snapshot and could not
+     read it again in time) goes by position, unchecked. Text typed with
+     keyboard taps is typed into its field when the replay finds that
+     field focused and empty (the key positions depend on the keyboard's
+     state); otherwise the keys are tapped, unchecked. Text typed another
+     way is typed one character at a time at your recorded pace; either
+     way the field is then read back: ``diverged: field reads '<x>', expected
      '<y>'`` when it holds something else (an autocomplete suffix after the
      recorded text is fine; password fields only say ``field text
      differs``). A tap that misses its element right after the step before
@@ -525,8 +551,23 @@ repeated (a cookie banner is gone once accepted):
 
 Every selected file gets **What your action changed** (Before → After). After
 a replay it also gets **What the replay changed** and one of ``same change in
-the replay``, ``replay changed it differently`` (with ``only in your run`` /
-``only in the replay`` lines) or ``replay did not change it``. A selected
+the replay``, ``differs only in volatile fields``, ``replay changed it
+differently`` (with ``only in your run`` / ``only in the replay`` lines) or
+``replay did not change it``. Both runs are compared field by field with the
+Files lens's diff (SQLite cells by table, row key and column, preference keys,
+JSON paths, text line blocks). A field both runs changed to different values
+is *volatile* only when a rule explains it, never by its name: a **time of
+its own run** (each value lies in its run, give or take 10 s), the **same
+distance from its run** (measured from each run's first step, e.g. a cookie
+that expires a year after its run) or a **freshly generated ID** (a UUID, or
+16+ characters of one kind mixing letters and digits, random looking, the two
+differing almost everywhere, and neither value was in Before). Columns added
+to a table are compared byte for byte. Volatile fields are always listed with both
+values and their rule, in the warning colour; ``replay changed it
+differently`` is shown as a failure. Files without fields (binary, unknown)
+are ``compared byte for byte``. While ``timeline.mask_sensitive`` (or
+``ai.mask_sensitive`` for the assistant) is on, text typed into a password or
+other sensitive field is hidden in every value shown. A selected
 request shows ``found in the replay`` or ``not seen in the replay``, the two
 requests side by side (URL, headers, body) and ``same`` / ``different`` for
 the request body and the response status. All requests are listed per run
@@ -539,7 +580,14 @@ The command line and headless runs keep the batch replay (replay count, dry
 run, noise filter); the TUI no longer has it.
 
 Every Rewind is saved as a run (its Inspector *Changes* tab shows the
-per-file results, the replayed steps and the requests per run); command-line
+per-file results, the replayed steps and the requests per run); its Changes column says how many files your run changed
+and how many of them were compared (``159 changed, 0 compared``). Pressing
+Rewind with no file selected asks once whether to go on (nothing would be
+compared), and a file selected after a Rewind ran says that it has no After
+from your run. The next ``r`` also removes the start points earlier
+recordings left on the AVD (``Removed 3 old start points (11 GB)``), except
+pinned and imported ones and any snapshot that is not Sandroid's; when it
+cannot tell which are pinned it removes none. Command-line
 analyses are saved as a run bundle under ``<results_path>/runs/<run_id>/``
 and listed in the Sessions lens (per device, newest first): ``#``, label, when,
 how long the run took (``×3`` for a run with three replays) and what changed

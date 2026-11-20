@@ -56,7 +56,7 @@ from sandroid.tui.css_resolver import (
     load_css_content,
     resolve_css_path,
 )
-from sandroid.tui.key_display import format_key
+from sandroid.tui.key_display import format_key, key_words
 from sandroid.tui.launcher import run_tui, run_tui_guarded
 from sandroid.tui.modal_manager import ModalManager
 from sandroid.tui.screens.command_palette import CommandPalette
@@ -1503,7 +1503,8 @@ class SandroidTUI(App):
     def get_key_display(self, binding: Binding) -> str:
         """Footer key label: keep Shift visible (``R`` -> ``⇧R``, ``r`` -> ``r``)."""
         if binding.key_display:
-            return binding.key_display
+            # Hand-written labels too: words, never key glyphs.
+            return key_words(binding.key_display)
         return format_key(binding.key, "compact")
 
     def _get_main_screen(self) -> MainScreen | None:
@@ -2164,12 +2165,13 @@ class SandroidTUI(App):
     # -- Vim-style scrolling --------------------------------------------------
 
     def _scroll_log(self, method_name: str, *args, **kwargs) -> None:
+        # The log lives on the main screen: ``self.query_one`` searches the
+        # App's default screen and never found it, so these keys did nothing.
         try:
-            getattr(self.query_one("#activity-log", ActivityLog), method_name)(
-                *args, **kwargs
-            )
+            log = self.screen.query_one("#activity-log", ActivityLog)
         except Exception:
-            pass
+            return
+        getattr(log, method_name)(*args, **kwargs)
 
     def action_scroll_down(self) -> None:
         self._scroll_log("scroll_down_line")

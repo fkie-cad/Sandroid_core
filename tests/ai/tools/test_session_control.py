@@ -399,6 +399,57 @@ def test_start_spotlight_app_says_it_stops_the_running_tools():
     assert "STOPS the tools running on it" in spec.description
 
 
+_REFUSALS = [
+    ("needs_consent", "needs_confirmation", "analyst's confirmation", False),
+    ("declined", "declined_by_analyst", "don't retry unless asked", False),
+    ("busy", "busy", "another app start is running", True),
+]
+
+
+@pytest.mark.parametrize("running", [False, True])
+@pytest.mark.parametrize(("reason", "code", "words", "retryable"), _REFUSALS)
+def test_start_spotlight_app_maps_start_refusals_to_tool_codes(
+    lifecycle, monkeypatch, running, reason, code, words, retryable
+):
+    from sandroid.ai.tools.registry import ToolError
+
+    app_start = lifecycle.app_start
+    if running:
+        lifecycle.live["value"] = (app_start.Liveness.RUNNING, 77)
+        lifecycle.spot.pid = 77
+    refused = app_start.StartResult(
+        False, f"com.example not started ({reason})", reason
+    )
+    name = "restart_app" if running else "start_app"
+    monkeypatch.setattr(app_start, name, lambda paused=False, *, consent=None: refused)
+
+    with pytest.raises(ToolError) as info:
+        session_control.start_spotlight_app(fresh=running)
+
+    err = info.value.to_dict()["error"]
+    assert err["code"] == code
+    assert words in err["message"]
+    assert err["retryable"] is retryable
+    if reason == "needs_consent":
+        # app_start's "pass fresh=True" advice is for API callers only.
+        assert "detail" not in err
+    else:
+        assert err["detail"] == f"com.example not started ({reason})"
+
+
+def test_start_spotlight_app_other_failures_stay_a_result(lifecycle, monkeypatch):
+    app_start = lifecycle.app_start
+    failed = app_start.StartResult(False, "Failed to spawn: no PID")
+    monkeypatch.setattr(
+        app_start, "start_app", lambda paused=False, *, consent=None: failed
+    )
+
+    result = session_control.start_spotlight_app()
+
+    assert result["started"] is False
+    assert result["message"] == "Failed to spawn: no PID"
+
+
 # =============================================================================
 # start_mitmproxy / stop_mitmproxy / get_mitmproxy_status
 # =============================================================================

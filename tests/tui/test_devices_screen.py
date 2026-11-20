@@ -1057,6 +1057,66 @@ async def test_a_started_avd_keeps_the_cursor_as_its_running_row() -> None:
         assert "read-only" in _box(screen)["title"]
 
 
+async def test_p_pins_a_snapshot_and_unpins_only_after_a_confirm(
+    monkeypatch, tmp_path
+) -> None:
+    from types import SimpleNamespace
+
+    from sandroid.core import emulator
+    from sandroid.core import snapshot_policy as policy
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
+    from sandroid.tui.modals.selection_modal import SelectionModal
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setattr(
+        emulator,
+        "avd_snapshots",
+        lambda name: [SimpleNamespace(name=n) for n in ("default_boot", "s1")],
+    )
+    app, screen = _hub(avds=[IDLE])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        # default_boot is pinned by default: picking it asks before unpinning.
+        await pilot.press("p")
+        await until(pilot, lambda: isinstance(app.screen, SelectionModal))
+        app.screen.dismiss("default_boot")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        app.screen.dismiss(False)
+        await settle(pilot)
+        assert "default_boot" in policy.pinned("Idle_AVD")
+        await pilot.press("p")
+        await until(pilot, lambda: isinstance(app.screen, SelectionModal))
+        app.screen.dismiss("default_boot")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        app.screen.dismiss(True)
+        await settle(pilot)
+        assert "default_boot" not in policy.pinned("Idle_AVD")
+        # An unpinned one is pinned at once.
+        await pilot.press("p")
+        await until(pilot, lambda: isinstance(app.screen, SelectionModal))
+        app.screen.dismiss("s1")
+        await settle(pilot)
+        assert app.screen is screen
+        assert policy.pinned("Idle_AVD") == {"clean_8g", "s1"}
+
+
+def test_a_vanished_pinned_snapshot_is_a_hub_note_once(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from sandroid.tui.screens import devices_screen as hub_module
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    info = SimpleNamespace(name="Dev", snapshots=("clean_8g", "tmp"), path=tmp_path)
+    assert hub_module._vanished_pin_notes(info) == []
+    # An AVD whose folder can't be read lists no snapshots: no false alarm.
+    unreadable = SimpleNamespace(name="Dev", snapshots=(), path=None)
+    assert hub_module._vanished_pin_notes(unreadable) == []
+    info.snapshots = ("tmp",)
+    (note,) = hub_module._vanished_pin_notes(info)
+    assert "Pinned snapshot 'clean_8g' of Dev is gone" in note
+    assert hub_module._vanished_pin_notes(info) == []
+
+
 # --------------------------------------------------------------------------
 # controller launch API
 # --------------------------------------------------------------------------

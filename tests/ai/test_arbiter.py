@@ -223,6 +223,38 @@ def test_reconcile_keeps_leases_held_outside_the_ai():
     assert arb.snapshot() == {}
 
 
+def test_reconcile_warns_once_about_an_old_external_lease(caplog):
+    """A ``tui:`` lease is never dropped; past 15 min it is logged once."""
+    import logging
+
+    from sandroid.ai.arbiter import EXTERNAL_LEASE_WARN_S
+
+    now = [1000.0]
+    arb = DeviceResourceArbiter(clock=lambda: now[0])
+    arb.claim("tui:ca-fallback", frozenset({ResourceId.WORLD}))
+    caplog.set_level(logging.WARNING, logger="sandroid.ai.arbiter")
+    now[0] += EXTERNAL_LEASE_WARN_S - 1
+    arb.reconcile({"orchestrator"})
+    assert not caplog.records
+    now[0] += 2
+    arb.reconcile({"orchestrator"})
+    arb.reconcile({"orchestrator"})
+    (record,) = caplog.records
+    text = record.getMessage()
+    assert "tui:ca-fallback" in text
+    assert "world" in text
+    assert "15 min" in text
+    assert arb.snapshot() == {ResourceId.WORLD: "tui:ca-fallback"}  # kept
+    # A new lease (same owner, after a release) gets its own warning later.
+    arb.release_all("tui:ca-fallback")
+    arb.claim("tui:ca-fallback", frozenset({ResourceId.WORLD}))
+    arb.reconcile({"orchestrator"})
+    assert len(caplog.records) == 1
+    now[0] += EXTERNAL_LEASE_WARN_S
+    arb.reconcile({"orchestrator"})
+    assert len(caplog.records) == 2
+
+
 def test_get_arbiter_is_a_singleton():
     first = get_arbiter()
     second = get_arbiter()

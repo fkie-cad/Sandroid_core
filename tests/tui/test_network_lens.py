@@ -325,6 +325,15 @@ def _app():
     return SandroidTUI()
 
 
+def _column(panel, key: str) -> list[str]:
+    """The drawn cells of column ``key``, top to bottom (order-proof)."""
+    table = panel.table
+    return [
+        str(table.get_cell_at((i, table.get_column_index(key))))
+        for i in range(table.row_count)
+    ]
+
+
 async def _lens_with_flows(app, pilot, flow_dir, base=None):
     ms = await boot(app, pilot)
     await pilot.press("2")
@@ -376,7 +385,15 @@ async def test_flows_fill_the_table_noise_hidden(flow_dir):
         total = len(_SPECS)
         # connectivity check + gms batch are OS noise
         assert panel.table.row_count == total - 2
-        assert len(panel.table.columns) == 5
+        assert [str(c.value) for c in panel.table.columns] == [
+            "time",
+            "app",
+            "who",
+            "req",
+            "tls",
+            "status",
+            "size",
+        ]
         _title, info = ms._lens_captions["network"]
         assert f"{total - 2} of {total}" in info
         # newest row is selected (tail-follow)
@@ -385,9 +402,7 @@ async def test_flows_fill_the_table_noise_hidden(flow_dir):
         await settle(pilot)
         assert panel.table.row_count == total
         # an errored flow says so in words
-        cells = [
-            str(panel.table.get_row_at(i)[3]) for i in range(panel.table.row_count)
-        ]
+        cells = _column(panel, "status")
         assert any(c.startswith("error") for c in cells)
 
 
@@ -503,14 +518,13 @@ async def test_tls_failure_row_and_badge(flow_dir):
         panel.mitm._append_line("[TLS_FAIL]|10:00:00|api.revenuecat.com|cert|" + PKG)
         panel.mitm._append_line("[TLS_FAIL]|10:00:01|pinned.example.com|cert|" + PKG)
         await settle(pilot)
-        assert ms.query_one("#lens-bar").badge("network") == "⚑2"
+        assert ms.query_one("#lens-bar").badge("network") == "2 TLS failed"
         tls = [r for r in panel._live if r.kind == "tls"]
         assert [r.host for r in tls] == ["api.revenuecat.com", "pinned.example.com"]
         await pilot.press("2")
         await settle(pilot)
         assert ms.query_one("#lens-bar").badge("network") is None
-        last = panel.table.get_row_at(panel.table.row_count - 1)
-        assert "TLS failed" in str(last[3])
+        assert "TLS failed" in _column(panel, "status")[-1]
         content = panel.flow_content(tls[0])
         assert "pinning" in str(content.sections[1][1])
 
@@ -712,10 +726,7 @@ async def test_filter_matches_status_and_esc_clears_it(flow_dir):
         for ch in "200":
             await pilot.press(ch)
         await until(pilot, lambda: panel._filter == "200")
-        statuses = {
-            str(panel.table.get_row_at(i)[3]) for i in range(panel.table.row_count)
-        }
-        assert statuses == {"200"}
+        assert set(_column(panel, "status")) == {"200"}
         # Esc in the input: filter cleared, input closed, back on the table
         await pilot.press("escape")
         await settle(pilot)
@@ -750,19 +761,173 @@ async def test_end_and_home_jump_to_the_last_and_first_row(flow_dir):
         assert panel.table.cursor_row == panel.table.row_count - 1
 
 
+def _layout_at(monkeypatch, width: int, identity: bool) -> list[tuple[str, str, int]]:
+    from textual.geometry import Size
+
+    monkeypatch.setattr(NetworkPanel, "size", property(lambda self: Size(width, 40)))
+    monkeypatch.setattr(NetworkPanel, "_privacy_wanted", lambda self: identity)
+    return NetworkPanel()._layout()
+
+
+@pytest.mark.parametrize(
+    ("width", "identity", "keys"),
+    [
+        (160, False, ["time", "app", "who", "req", "tls", "status", "size"]),
+        (
+            160,
+            True,
+            ["time", "app", "who", "req", "tls", "ident", "status", "size"],
+        ),
+        (120, True, ["time", "app", "who", "req", "tls", "ident", "status"]),
+        (100, False, ["time", "app", "who", "req", "tls", "status"]),
+        # Inspector open (~100 columns) with Identity: TLS and Time go
+        (100, True, ["app", "who", "req", "ident", "status"]),
+        (80, False, ["app", "who", "req", "status"]),
+        (60, False, ["who", "req", "status"]),
+    ],
+)
+def test_column_order_and_narrow_drop_order(monkeypatch, width, identity, keys):
+    """Time | App | Recipient | Request | TLS | Identity | Status | Size; a
+    narrow lens drops Size, TLS, Time, App (in that order) for Request.
+    """
+    layout = _layout_at(monkeypatch, width, identity)
+    assert [k for k, _l, _w in layout] == keys
+    widths = {k: w for k, _l, w in layout}
+    if width >= 80:
+        assert widths["req"] >= np_mod.REQUEST_MIN_WIDTH
+    if "ident" in widths:  # Identity keeps its own width rule
+        assert widths["ident"] == (18 if width >= 130 else 14)
+    labels = {k: label for k, label, _w in layout}
+    assert labels.get("app", "App") == "App"
+    assert labels.get("tls", "TLS") == "TLS"
+
+
+def test_highlight_column_may_take_the_size_place(monkeypatch):
+    """AI highlights: Highlight goes last, in Size's place when needed, and
+    not at all when Request would get too narrow.
+    """
+    from sandroid.tui.widgets.highlight_bar import HighlightView
+
+    monkeypatch.setattr(HighlightView, "show_column", lambda self, width: True)
+    keys = [k for k, _l, _w in _layout_at(monkeypatch, 200, False)]
+    assert keys[-2:] == ["size", "hl"]
+    keys = [k for k, _l, _w in _layout_at(monkeypatch, 158, True)]
+    assert keys == ["time", "app", "who", "req", "tls", "ident", "status", "hl"]
+    assert "hl" not in [k for k, _l, _w in _layout_at(monkeypatch, 100, True)]
+
+
+def _cell_texts(row: FlowRow) -> dict[str, str]:
+    panel = NetworkPanel()
+    layout = [
+        ("time", "Time", 8),
+        ("app", "App", 20),
+        ("who", "Recipient", 18),
+        ("req", "Request", 40),
+        ("tls", "TLS", 10),
+        ("status", "Status", 13),
+        ("size", "Size", 16),
+    ]
+    cells = panel._cells(row, layout)
+    return {k: cells[i].plain for i, (k, _l, _w) in enumerate(layout)}
+
+
+def test_app_and_tls_cells_say_it_in_words():
+    from sandroid.tui.themes import lens_palette
+
+    # an App Proxy flow carries its app tag; over https it is TLS
+    proxied = FlowRow(
+        key="f1",
+        ts=0.0,
+        host="a.io",
+        status=200,
+        app=PKG,
+        protocol="HTTPS/2",
+        req_bytes=2048,
+    )
+    cells = _cell_texts(proxied)
+    assert cells["app"] == PKG
+    assert cells["tls"] == "TLS"
+    assert cells["size"] == "sent 2.0 KB"
+    # an untagged flow shows no app (nothing, not a placeholder)
+    untagged = FlowRow(
+        key="f2",
+        ts=0.0,
+        host="b.io",
+        status=200,
+        protocol="HTTP/1.1",
+        resp_bytes=5 * 1024,
+    )
+    cells = _cell_texts(untagged)
+    assert cells["app"] == ""
+    assert cells["tls"] == "plain"
+    assert cells["size"] == "received 5.0 KB"
+    panel = NetworkPanel()
+    layout = [("req", "Request", 40), ("who", "Recipient", 18), ("tls", "TLS", 10)]
+    assert panel._cells(untagged, layout)[2].style == lens_palette().warn
+    # a failed handshake
+    tls = FlowRow(key="t1", ts=0.0, host="c.io", kind="tls", method="TLS", app=PKG)
+    cells = _cell_texts(tls)
+    assert cells["tls"] == "TLS failed"
+    assert cells["status"] == "TLS failed"
+    assert cells["app"] == PKG
+    # no protocol recorded (older log): no guess
+    assert _cell_texts(FlowRow(key="f3", ts=0.0, host="d.io"))["tls"] == ""
+    # websockets
+    assert _cell_texts(FlowRow(key="f4", ts=0.0, protocol="WSS"))["tls"] == "TLS"
+    assert _cell_texts(FlowRow(key="f5", ts=0.0, protocol="WS"))["tls"] == "plain"
+    # a long package keeps its trailing name parts, cut without a glyph
+    long_app = FlowRow(key="f6", ts=0.0, app="com.ebay.kleinanzeigen")
+    assert _cell_texts(long_app)["app"] == "ebay.kleinanzeigen"
+    assert np_mod.app_label("com.ebay.kleinanzeigen", 14) == "kleinanzeigen"
+    assert np_mod.app_label("com.x.averyveryverylongname", 8) == "averyver"
+
+
+def test_status_and_size_cells_have_no_glyphs():
+    pending = FlowRow(key="f1", ts=0.0, host="a.io")  # no response yet
+    cells = _cell_texts(pending)
+    assert cells["status"] == ""
+    assert cells["size"] == ""
+    rows = [
+        pending,
+        FlowRow(key="f2", ts=0.0, status=200, req_bytes=10),
+        FlowRow(key="f3", ts=0.0, status=200, resp_bytes=3 * 1024 * 1024),
+        FlowRow(key="f4", ts=0.0, error="weird"),
+        FlowRow(key="t1", ts=0.0, kind="tls"),
+    ]
+    for row in rows:
+        cells = _cell_texts(row)
+        for key in ("app", "tls", "status", "size"):
+            assert not set(cells[key]) & set("\u2191\u2193\u2013\u2026\u2691"), (
+                key,
+                cells[key],
+            )
+    assert _cell_texts(rows[2])["size"] == "received 3.0 MB"
+
+
+def test_error_reads_once_in_the_status_and_the_filter_text():
+    """The unknown-reason fallback said "error error"."""
+    panel = NetworkPanel()
+    odd = FlowRow(key="f1", ts=0.0, host="a.io", error="something odd")
+    assert _cell_texts(odd)["status"] == "error"
+    assert panel._haystack(odd).count("error") == 1
+    reset = FlowRow(key="f2", ts=0.0, host="a.io", error="Connection reset by peer")
+    assert _cell_texts(reset)["status"] == "error reset"
+    assert panel._haystack(reset).count("error") == 1
+
+
 def test_size_column_fits_three_digit_kilobytes():
-    """L2: "↓ 190.9 K" lost its B."""
+    """L2: "190.9 K" lost its B; the cell says it in words now."""
     panel = NetworkPanel()
     layout = [
         ("time", "Time", 8),
         ("who", "Recipient", 18),
         ("req", "Request", 40),
-        ("status", "Status", 9),
-        ("size", "Size", 10),
+        ("status", "Status", 13),
+        ("size", "Size", 16),
     ]
     row = FlowRow(key="f1", ts=0.0, host="a.io", status=200, resp_bytes=195482)
     size = panel._cells(row, layout)[4].plain
-    assert size == "↓ 190.9 KB"
+    assert size == "received 191 KB"
     assert len(size) <= {k: w for k, _l, w in panel._layout()}["size"]
 
     # R4-N7: in REVIEW with A, a setup/dry-run TLS failure had no marker.
@@ -1119,7 +1284,7 @@ async def test_review_reads_the_bundle_and_hides_dry_run_flows(flow_dir, tmp_pat
         await settle(pilot)
         # all phases, OS noise (connectivitycheck, play.googleapis) still hidden
         assert panel.table.row_count == len(_SPECS) - 2
-        cells = [str(panel.table.get_row_at(i)[2]) for i in range(5)]
+        cells = _column(panel, "req")[:5]
         assert sum(c.startswith("dry ") for c in cells) == 2
         assert sum(c.startswith("setup ") for c in cells) == 1
         title, info = ms._lens_captions["network"]
@@ -1335,7 +1500,15 @@ async def test_flows_with_profile_values_are_tinted_named_and_filtered(
     async with app.run_test(size=SIZE) as pilot:
         ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         table = panel.table
-        assert [str(c.value) for c in table.columns][:3] == ["time", "who", "ident"]
+        assert [str(c.value) for c in table.columns][:7] == [
+            "time",
+            "app",
+            "who",
+            "req",
+            "tls",
+            "ident",
+            "status",
+        ]
         assert _tinted(table) == {"f2", "f3"}
         assert str(table.get_cell("f2", "ident")) == "Ad ID"
         assert str(table.get_cell("f3", "ident")) == "Email"
@@ -1448,7 +1621,8 @@ async def test_no_identity_column_without_a_profile(flow_dir, monkeypatch):
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
-        assert len(panel.table.columns) == 5
+        assert "ident" not in [str(c.value) for c in panel.table.columns]
+        assert len(panel.table.columns) == 7
         assert _tinted(panel.table) == set()
 
 

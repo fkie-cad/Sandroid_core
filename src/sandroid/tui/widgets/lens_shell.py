@@ -42,7 +42,7 @@ To replace a lens body, keep the widget id (or change it here *and* in
 * ``switch_lens(lens_id)`` / ``cycle_lens(delta)`` / ``active_lens`` (id) /
   ``lens_widget(lens_id)`` / ``is_lens_active(lens_id)``.
 * ``set_lens_badge(lens_id, text | None)`` -- alert badge after the lens
-  name in the lens bar, e.g. ``set_lens_badge("network", "⚑2")``.
+  name in the lens bar, e.g. ``set_lens_badge("network", "27 TLS failed")``.
 * ``set_lens_caption(lens_id, title=None, info=None)`` -- the lens frame
   shows ``"<Label> · <title>"`` top-left and ``info`` top-right (e.g.
   ``"10 of 247 events"``) while that lens is active.
@@ -435,7 +435,7 @@ def _as_text(markup: str) -> Text:
 
 
 class ShellHeader(Header):
-    """One-row header: ``○ Sandroid ▸ device ▸ app ◇ snapshot``, the open
+    """One-row header: ``Sandroid / device / app   snapshot name``, the open
     label (``▶ 7 'accept cookies' 0:12``), the Tracking dot, the privacy
     indicator (``PRIVACY 3/12 found``; a click opens the Identity lens), a
     timeline banner (locked / failed), pill, clock.
@@ -758,9 +758,10 @@ class ShellHeader(Header):
         parts = [f"[b]{self.app.title or 'Sandroid'}[/b]"]
         if self._crumb:
             parts.append(self._crumb)
-        markup = "○ " + "  [dim]▸[/dim]  ".join(parts)
+        # Plain separators and words, no glyphs (the user's no-glyph rule).
+        markup = " " + "  [dim]/[/dim]  ".join(parts)
         if self._snapshot:
-            markup += f"   [dim]◇ {self._snapshot}[/dim]"
+            markup += f"   [dim]snapshot {self._snapshot}[/dim]"
         try:
             return Content.from_markup(markup)
         except Exception:
@@ -1166,41 +1167,68 @@ def humanize_log_line(line: str) -> str:
     return f"{head}adb: {escape(detail)} [dim](` log has the command)[/dim]"
 
 
+def _first_rendered_line(renderable: Any) -> str:
+    """The first line with text of a Rich renderable, as plain text."""
+    try:
+        from rich.console import Console
+
+        console = Console(width=200, color_system=None, file=None)
+        with console.capture() as captured:
+            console.print(renderable)
+        for line in captured.get().splitlines():
+            if _ALNUM.search(line):
+                return line.strip()
+    except Exception:
+        pass
+    return ""
+
+
 class LogTicker(Horizontal):
-    """One row: the newest meaningful log line, plus a dim key hint."""
+    """The newest meaningful log lines (``ROWS``, newest at the bottom),
+    plus a dim key hint on the bottom row.
+    """
 
     #: The hint (AI chat + log drawer keys), drawer closed / open.
     HINT = "^Y AI · ` log"
     HINT_OPEN = "^Y AI · ` close log"
+    #: The same without the AI key, for while an attention badge (which
+    #: names ^Y itself) stands before it.
+    HINT_LOG = "` log"
+    HINT_LOG_OPEN = "` close log"
+    #: Log lines shown (the widget's height).
+    ROWS = 3
 
     DEFAULT_CSS = """
     LogTicker {
-        height: 1;
+        height: 3;
         background: #080c18;
         color: #93a4c3;
         padding: 0 1;
     }
     LogTicker #log-ticker-line {
         width: 1fr;
+        height: 3;
         text-wrap: nowrap;
         text-overflow: ellipsis;
     }
     LogTicker #log-ticker-hint {
         width: auto;
+        height: 3;
+        content-align-vertical: bottom;
         color: #5b6479;
         padding: 0 0 0 2;
-    }
-    LogTicker #log-ticker-hint.-attention {
-        color: #f0b429;
-        text-style: bold;
     }
     """
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.last_line = ""
+        #: The shown lines as plain text, oldest first (at most ``ROWS``).
+        self.lines: list[str] = []
+        self._renderables: list[Any] = []
         self._drawer_open = False
-        #: A badge shown before the hint (e.g. "⚠ approval needed · ^Y").
+        #: A badge shown before the hint (e.g. "approval needed · ^Y"); it
+        #: carries the ^Y key, so the hint then leaves "^Y AI" out.
         self.attention: str | None = None
 
     def compose(self) -> ComposeResult:
@@ -1222,12 +1250,30 @@ class LogTicker(Horizontal):
             renderable: Any = _as_text(first)
             renderable.no_wrap = True
             renderable.overflow = "ellipsis"
+        elif isinstance(content, Text) and "\n" not in content.plain:
+            if not _ALNUM.search(content.plain):
+                return
+            plain = content.plain.strip()
+            renderable = content.copy()  # one styled line keeps its colours
+            renderable.no_wrap = True
+            renderable.overflow = "ellipsis"
         else:
-            plain = str(content)
-            renderable = content
+            # A table or multi-line renderable: its first text line only, so
+            # it cannot push the newest lines out of the 3 rows.
+            first = _first_rendered_line(content)
+            if not first:
+                return
+            plain = first
+            renderable = Text(first, no_wrap=True, overflow="ellipsis")
         self.last_line = plain
+        self.lines = [*self.lines, plain][-self.ROWS :]
+        self._renderables = [*self._renderables, renderable][-self.ROWS :]
+        # Blank rows on top, so the newest line always sits on the bottom.
+        blanks = [Text("") for _ in range(self.ROWS - len(self._renderables))]
         try:
-            self.query_one("#log-ticker-line", Static).update(renderable)
+            self.query_one("#log-ticker-line", Static).update(
+                Group(*blanks, *self._renderables)
+            )
         except Exception:
             pass
 
@@ -1241,12 +1287,15 @@ class LogTicker(Horizontal):
         self._sync_hint()
 
     def _sync_hint(self) -> None:
-        hint = self.HINT_OPEN if self._drawer_open else self.HINT
         if self.attention:
-            hint = f"{self.attention} · {hint}"
+            # The badge in the warn colour (words, no glyph); the key dim.
+            log = self.HINT_LOG_OPEN if self._drawer_open else self.HINT_LOG
+            hint = Content.assemble((self.attention, "bold $lens-warn"), f" · {log}")
+        else:
+            hint = Content(self.HINT_OPEN if self._drawer_open else self.HINT)
         try:
             label = self.query_one("#log-ticker-hint", Static)
-            label.update(Content(hint))
+            label.update(hint)
             label.set_class(bool(self.attention), "-attention")
         except Exception:
             pass

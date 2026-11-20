@@ -623,6 +623,7 @@ class UiHelper:
         t_mono_ms: float | None = None,
         timeout: float = 1.0,
         mode: str = "both",
+        clear_first: bool = False,
     ) -> dict | None:
         """Element under (x, y), resolved both live and from the snapshot cache.
 
@@ -634,6 +635,10 @@ class UiHelper:
             timeout: Seconds to wait for the reply.
             mode: ``both``, ``cached`` (the snapshot only: answered at once,
                 no IPC) or ``live``.
+            clear_first: Drop the a11y cache just before (``clear_cache``
+                written right ahead of the request, its reply not awaited:
+                the helper handles it before it starts the lookup), so the
+                live answer reads the app's tree now, not a cached one.
 
         Returns:
             The ``node_at`` reply (keys ``cached`` and/or ``live``), or None
@@ -646,7 +651,21 @@ class UiHelper:
         cmd = f"node_at {int(x)} {int(y)} {mode}"
         if t_mono_ms is not None:
             cmd += f" t={float(t_mono_ms):.1f}"
+        if clear_first:
+            self._send_only("clear_cache")
         return self._ok(self.request(cmd, timeout), "node_at")
+
+    def _send_only(self, cmd: str) -> bool:
+        """Write ``cmd`` with a fresh id and wait for nothing (its reply
+        goes to ``on_event`` like any unclaimed line).
+        """
+        g = self._gen
+        if g is None or g.proc.poll() is not None or self._stopping:
+            return False
+        with self._lock:
+            self._seq += 1
+            rid = f"r{self._seq}"
+        return self._write(g, f"{cmd} id={rid}")
 
     def focus(
         self, x: int | None = None, y: int | None = None, *, timeout: float = 1.0
@@ -667,6 +686,20 @@ class UiHelper:
         if x is not None and y is not None:
             cmd += f" x={int(x)} y={int(y)}"
         return self._ok(self.request(cmd, timeout), "focus")
+
+    def clear_cache(self, timeout: float = 1.0) -> bool:
+        """Drop the a11y node cache (``clear_cache`` request): the next live
+        read asks the app again. Apps that change their tree without
+        telling a11y (Compose lists while you type) leave the cache stale.
+
+        Returns:
+            True when the helper cleared it; False otherwise (INVISIBLE
+            mode, error or timeout).
+        """
+        if self._mode is Mode.INVISIBLE:
+            return False
+        reply = self._ok(self.request("clear_cache", timeout), "ok")
+        return bool(reply and reply.get("cleared"))
 
     def dump(self, *, max_nodes: int = 50_000, timeout: float = 30.0) -> dict | None:
         """Full tree of every interactive window (``windows[].root``), bounded."""

@@ -1705,24 +1705,26 @@ class TimelineService:
                     sink.full_fsync = False
             finish = closing and not sink.queue and not batch
             if finish:
+                # Unlock before "closed" wakes close(): a bind right after
+                # close() returned must find the folder free.
+                self._release(sink)
                 sink.state = "closed"
             elif closing and not sink.queue:
                 self._kick.set()
             self._written.notify_all()
         self._publish_bell(sink)
         if finish:
-            self._release(sink)
             self._doorbell(sink, "closed")
 
     def _fail(self, sink: _Sink, exc: OSError) -> None:
         with self._lock:
+            self._release(sink)  # before "failed" wakes a waiting close()
             sink.state = "failed"
             sink.queue.clear()
             sink.bulk_queued = 0
             self._written.notify_all()
         logger.warning("Session timeline %s: write failed (%s); no more lines "
                        "are recorded there", sink.path, exc)  # fmt: skip
-        self._release(sink)
 
     @staticmethod
     def _release(sink: _Sink) -> None:
@@ -1785,9 +1787,9 @@ class TimelineService:
             self._open_sink_io(sink)
         except OSError as exc:
             with self._lock:
+                self._release(sink)  # before "failed" wakes a waiting close()
                 sink.state = "failed"
             logger.warning("Session timeline %s: cannot open (%s)", sink.path, exc)
-            self._release(sink)
             self._doorbell(sink, "bound")  # every active change rings "bound"
         finally:
             sink.opened.set()

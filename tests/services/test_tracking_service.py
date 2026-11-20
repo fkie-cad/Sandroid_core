@@ -135,6 +135,15 @@ class FakeHelper:
         self.stopped = False
         self.focus_reply: dict | None = None  # the read-back of a field
         self.focus_calls: list[tuple] = []
+        #: the live re-read after a dropped cache (``node_at`` live)
+        self.fresh_reply: dict | None = None
+        self.fresh_calls: list[tuple] = []
+        self.first_clears: list[tuple] = []
+        self.cleared = 0
+
+    def clear_cache(self, timeout=1.0):
+        self.cleared += 1
+        return True
 
     def _info(self) -> dict:
         info = {"serial": self.serial, "mode": self.mode, "pid": 77}
@@ -158,11 +167,21 @@ class FakeHelper:
         self.stopped = True
         self.on_status("stopped", {**self._info(), "a11y_restored": True})
 
-    def node_at(self, x, y, *, t_mono_ms=None, timeout=1.0, mode="both"):
+    def node_at(
+        self, x, y, *, t_mono_ms=None, timeout=1.0, mode="both", clear_first=False
+    ):
+        if clear_first:  # the cache is dropped right ahead of the lookup
+            self.cleared += 1
+            self.first_clears.append((x, y))
+            if self.fresh_reply is not None:
+                return {**(self.node_reply or {}), "live": self.fresh_reply}
         if mode == "cached":  # the snapshot alone: answered at once
             self.cached_calls.append((x, y, t_mono_ms))
             cached = (self.node_reply or {}).get("cached")
             return {"type": "node_at", "cached": cached} if cached else None
+        if mode == "live" and self.fresh_reply is not None:
+            self.fresh_calls.append((x, y, self.cleared))
+            return {"type": "node_at", "live": self.fresh_reply}
         self.node_calls.append((x, y, t_mono_ms))
         if self.node_gate is not None:
             self.node_gate.wait(10.0)
@@ -4098,3 +4117,175 @@ def test_a_flush_in_flight_writes_its_line_when_a_new_field_is_armed(env, cfg):
     texts = of(lines, "input", "text")
     assert [t["summary"] for t in texts] == ['typed "audi.de" into the address bar']
     assert svc._rb is not None  # the new watch is untouched
+
+
+# --------------------------------------------------------------------------
+# an outdated snapshot is re-read live (Firefox's suggestion list)
+# --------------------------------------------------------------------------
+
+
+def _row(label, t_snap=9_000.0, **snap):
+    """A ``cached`` answer on a suggestion row, from a snapshot taken at
+    ``t_snap`` (device ms).
+    """
+    return {
+        "window": {"id": 10, "type": "app"},
+        "pkg": "org.mozilla.firefox",
+        "hit": {"cls": "android.widget.TextView", "text": label},
+        "target": {"rid": "mozac.awesomebar.suggestion", "cls": "android.view.View",
+                   "bounds": [0, 415, 1080, 541], "clickable": True},
+        "path": ["View#mozac.awesomebar.suggestion", "TextView"],
+        "label": label,
+        "snapshot": {"start_ms": t_snap, "end_ms": t_snap + 3,
+                     "changes_since_start": 0, **snap},
+    }  # fmt: skip
+
+
+_KEY = {
+    "type": "node_at",
+    "cached": {"window": {"id": 1, "type": "ime"}, "pkg": "com.google.android.inputmethod.latin",
+               "hit": {"cls": "android.widget.FrameLayout"}, "path": ["FrameLayout"]},
+}  # fmt: skip
+
+
+def _typed_then_tapped(env, cfg, reply, *, fresh=None, events=(), key=True):
+    """A keyboard tap at 10 s (unless not ``key``), helper ``events``,
+    then a tap at 15 s answered by ``reply`` (and the re-read ``fresh``).
+    """
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        if key:
+            helpers[0].node_reply = _KEY
+            ge.feed(*tap_lines(10.0, y=0x7000))
+            assert wait_for(lambda: of(lines, "input", "tap"))
+        for ev in events:
+            helpers[0].on_event(ev, time.time())
+        helpers[0].node_reply = reply
+        helpers[0].fresh_reply = fresh
+        ge.feed(*tap_lines(15.0))
+        assert wait_for(lambda: len(of(lines, "input", "tap")) == (2 if key else 1))
+    return of(lines, "input", "tap")[-1], helpers[0]
+
+
+def test_typing_after_the_snapshot_reads_the_tapped_row_live(env, cfg):
+    reply = {"type": "node_at", "cached": _row("spi"), "live": _row("spi")}
+    fresh = {**_row("spiegel.de"), "t_start_ms": 15_010.0}
+    fresh.pop("snapshot")
+    tap, helper = _typed_then_tapped(env, cfg, reply, fresh=fresh)
+    assert tap["summary"] == "tap 'spiegel.de' (View)"
+    target = tap["data"]["target"]
+    assert target["source"] == "live"
+    assert target["source_why"] == "you typed after the snapshot"
+    assert "stale_possible" not in target
+    # you typed: the cache was dropped right ahead of the lookup, no
+    # second round trip (it would come after a quick tap's finger-up)
+    assert len(helper.first_clears) == 1
+    assert helper.fresh_calls == []
+
+
+def test_a_window_change_after_the_snapshot_reads_it_live(env, cfg):
+    reply = {"type": "node_at", "cached": _row("googee test"), "live": None}
+    fresh = {**_row("spiegel.de"), "t_start_ms": 15_010.0}
+    ev = {"type": "ev", "ev": "WINDOW_CONTENT_CHANGED", "window_id": 10,
+          "t_mono_ms": 12_000.0}  # fmt: skip
+    tap, _helper = _typed_then_tapped(env, cfg, reply, fresh=fresh, events=[ev],
+                                      key=False)  # fmt: skip
+    assert tap["data"]["target"]["source"] == "live"
+    assert (
+        tap["data"]["target"]["source_why"] == "its window changed after the snapshot"
+    )
+    assert tap["summary"] == "tap 'spiegel.de' (View)"
+
+
+def test_an_up_to_date_snapshot_is_not_read_again(env, cfg):
+    reply = {"type": "node_at", "cached": _row("spiegel.de", t_snap=12_000.0)}
+    tap, helper = _typed_then_tapped(env, cfg, reply, fresh=_row("other"))
+    assert tap["data"]["target"]["source"] == "cached"
+    assert "source_why" not in tap["data"]["target"]
+    assert helper.fresh_calls == []
+    assert len(helper.first_clears) == 1  # you typed: read fresh anyway
+
+
+@pytest.mark.parametrize(
+    "fresh",
+    [
+        {"hit": None},  # the live re-read found nothing
+        # a re-read that started after the finger was up is no better
+        {**_row("spiegel.de"), "t_start_ms": 15_500.0},
+    ],
+)
+def test_no_live_re_read_marks_the_target_stale_possible(env, cfg, fresh):
+    reply = {"type": "node_at", "cached": _row("spi"), "live": {"hit": None}}
+    tap, _helper = _typed_then_tapped(env, cfg, reply, fresh=fresh)
+    target = tap["data"]["target"]
+    assert target["source"] == "cached"
+    assert target["stale_possible"] is True
+    assert target["source_why"] == "you typed after the snapshot"
+    assert tap["summary"] == "tap 'spi' (View)"
+
+
+@pytest.mark.parametrize(
+    ("snap", "window", "why"),
+    [
+        ({"changes_since_start": 2}, {}, "the screen changed after the snapshot"),
+        ({"truncated": True}, {}, "the snapshot was cut short"),
+        ({}, {"dialog_like": True}, "a popup window"),
+        ({}, {"type": "ime"}, ""),
+        ({}, {}, ""),
+    ],
+)
+def test_stale_reasons(env, snap, window, why):
+    svc = env[0]
+    cached = _row("x", **snap)
+    cached["window"] = {**cached["window"], **window}
+    assert svc._stale_why(cached) == why
+
+
+def test_an_inline_autocomplete_is_kept_apart_from_what_you_typed(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    cfg.text_idle_ms = 400
+    empty = {**URL_BAR, "text": "", "showing_hint": True}
+    reply = {**URL_REPLY, "cached": {**URL_REPLY["cached"], "hit": empty,
+                                     "target": empty}}  # fmt: skip
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.node_reply = reply
+        ge.feed(*tap_lines(1.0))
+        assert wait_for(lambda: of(lines, "input", "tap"))
+        h.node_reply = IME_REPLY
+        h.focus_reply = _focus("wdr.de/")
+        for i in range(6):
+            ge.feed(*tap_lines(2.0 + i * 0.2))
+        assert wait_for(lambda: of(lines, "input", "text"))
+    line = of(lines, "input", "text")[0]
+    assert line["data"]["text"] == "wdr.de"
+    assert line["data"]["autocomplete"] == "/"
+    assert line["summary"] == 'typed "wdr.de" into the address bar'
+
+
+@pytest.mark.parametrize(
+    ("value", "initial", "keys", "node", "n"),
+    [
+        ("wdr.de/", "", 6, {"rid": "url_bar"}, 6),
+        ("wdr.de", "", 6, {"rid": "url_bar"}, None),  # nothing added
+        ("wdr.de/", "", 9, {"rid": "url_bar"}, None),  # more keys than chars
+        # unknown start: an address bar selects its text when tapped
+        ("wdr.de/", None, 6, {"rid": "url_bar"}, 6),
+        ("abc.de", "old", 1, {"rid": "url_bar"}, None),  # replaced: unknown
+        # a suggestion or glide put a word in with one keystroke: no split
+        ("spiegel ", "", 3, {"rid": "url_bar"}, None),
+        ("spieg", "", 1, {"rid": "url_bar"}, None),
+        ("wdr.de/", "", 6, {"rid": "com.x:id/q"}, None),  # not an address bar
+        ("wdr.de/", "", 6, {"rid": "url_bar", "password": True}, None),
+        # the field's selection tells, in any field
+        ("spiegel.de/", "", 20, {"rid": "q", "sel_start": 7, "sel_end": 11}, 7),
+        ("spiegel.de", "", 3, {"rid": "url_bar", "sel_start": 10, "sel_end": 10},
+         None),
+    ],
+)  # fmt: skip
+def test_typed_part(value, initial, keys, node, n):
+    assert ts.typed_part(value, initial, keys, node) == n

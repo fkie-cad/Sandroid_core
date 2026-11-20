@@ -13,12 +13,14 @@ from types import SimpleNamespace
 
 import pytest
 from pilot_helpers import settle, until
+from rich.text import Text
 from textual.app import App
 
 from sandroid import services
 from sandroid.services import app_start
 from sandroid.services.spotlight_service import SpotlightService
 from sandroid.tui.modals.confirm_modal import ConfirmModal
+from sandroid.tui.themes import lens_palette
 from sandroid.tui.widgets import app_lens
 from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
 
@@ -131,11 +133,14 @@ async def test_b_emulator_on_a_running_app_offers_a_restart(monkeypatch):
 def test_header_shows_the_run_state_and_no_mode(monkeypatch):
     svc, _ran = _panel_env(monkeypatch)
     panel = SpotlightPanel()
-    assert "● running" in panel._render_header()
-    assert "spawn" not in panel._render_header()
+
+    def plain() -> str:
+        return Text.from_markup(panel._render_header()).plain
+
+    assert plain().startswith(f"running pid 77  {PKG}")
+    assert "spawn" not in plain()
     svc.set_pid(None)
-    assert "○ not running" in panel._render_header()
-    assert "␣ start" in panel._render_header()
+    assert plain().startswith(f"not running  ␣ start  {PKG}")
     svc.reset()
     header = panel._render_header()
     assert "use the foreground app" in header
@@ -470,8 +475,6 @@ SHORT = "Identity profile 'mara-de' not applied to this app — ⇧R restarts it
 
 
 async def test_identity_notice_comes_and_goes_with_the_applied_state(monkeypatch):
-    from sandroid.tui.themes import lens_palette
-
     _svc, fake = _identity_env(monkeypatch, "not_applied")
     app = _Harness()
     async with app.run_test(size=(240, 30)) as pilot:

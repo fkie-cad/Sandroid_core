@@ -519,12 +519,68 @@ def test_find_element_by_row_label_and_web_fields():
     assert find_element(target, _dump(web))[0] is None
 
 
+def _hit_test(reply, x, y):
+    """A live ``node_at`` answer at (x, y) on a fake dump: the first window
+    holding the point, its deepest node there (later children on top), the
+    nearest clickable node at or above it as ``target``.
+    """
+    for window in (reply or {}).get("windows") or []:
+        root = window.get("root") or {}
+        wb = window.get("bounds") or root.get("bounds")
+        if not (wb[0] <= x < wb[2] and wb[1] <= y < wb[3]):
+            continue
+        chain = [root]
+        while True:
+            kids = [
+                k for k in chain[-1].get("kids") or []
+                if k.get("bounds") and k["bounds"][0] <= x < k["bounds"][2]
+                and k["bounds"][1] <= y < k["bounds"][3]
+            ]  # fmt: skip
+            if not kids:
+                break
+            chain.append(kids[-1])
+        target = next((n for n in reversed(chain) if n.get("clickable")), None)
+        return {"hit": chain[-1], "target": target,
+                "window": {"id": window.get("id")}}  # fmt: skip
+    return {"hit": None, "reason": "no_window"}
+
+
 class FakeHelper:
-    def __init__(self, replies):
+    """A helper with ``dump``, a live hit test on that dump (``hits`` keeps
+    every tested point) and the display.
+    """
+
+    def __init__(self, replies, display=None):
         self.replies = list(replies)
+        self.last = None
+        self.hits: list[tuple[int, int]] = []
+        self.cleared = 0
+        self.disp = display or {"w": 1080, "h": 2424, "rotation": 0}
 
     def dump(self, timeout=5.0):
-        return self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+        self.last = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+        return self.last
+
+    def node_at(self, x, y, *, mode="both", timeout=1.0, t_mono_ms=None):
+        self.hits.append((x, y))
+        return {"type": "node_at", "live": _hit_test(self.last, x, y)}
+
+    def clear_cache(self, timeout=1.0):
+        self.cleared += 1
+        return True
+
+    def display(self, timeout=2.0):
+        return self.disp
+
+
+class DumpOnly:
+    """A helper that can dump but has no live hit test."""
+
+    def __init__(self, reply):
+        self.reply = reply
+
+    def dump(self, timeout=5.0):
+        return self.reply
 
 
 class Clock:
@@ -1316,7 +1372,8 @@ def _overview_run_lines():
 def test_overview_run_reads_unchecked_not_success(tmp_path, monkeypatch):
     suchen = _node(desc="Suchen", rid="ADDRESSBAR_URL_BOX", bounds=(180, 163, 702, 289))
     # The consent page scrolled: its node's page position centres at y=3641.
-    dump = _web_dump(suchen, _page_node(-415, 7697))
+    # (the page lies below the toolbar: the toolbar is drawn on top)
+    dump = _web_dump(_page_node(-415, 7697), suchen)
     log: list[str] = []
     rep, lines = _replayer(FocusHelper("spiegel.de", replies=[dump]), log,
                            element_wait_s=1.0)  # fmt: skip
@@ -1438,3 +1495,361 @@ def test_steps_with_nothing_to_check_keep_a_plain_success():
     report = rep.run(extract_steps(lines))
     assert [s["check"] for s in report["steps"]] == ["none", "none", "none"]
     assert report["unchecked_steps"] == []
+
+
+# ---------------------------------------------------------------------------
+# verified means hit: the live hit test at the tapped spot
+# ---------------------------------------------------------------------------
+
+
+def _two_windows(top, app_nodes):
+    """A dump with ``top`` (a dialog or the keyboard, drawn first) above the
+    app window holding ``app_nodes``.
+    """
+    reply = _dump(*app_nodes)
+    reply["windows"][0]["bounds"] = [0, 0, 1080, 2424]
+    reply["windows"].insert(0, top)
+    reply["display"] = {"w": 1080, "h": 2424, "rotation": 0}
+    return reply
+
+
+def test_a_covered_element_is_tapped_by_position_and_unchecked():
+    dialog = {"id": 7, "type": "app", "bounds": [0, 800, 1080, 1400],
+              "root": {"cls": "android.widget.FrameLayout",
+                       "bounds": [0, 800, 1080, 1400], "kids": []}}  # fmt: skip
+    button = _node("Accept all", bounds=(100, 1000, 300, 1100))
+    helper = FakeHelper([_two_windows(dialog, [button])])
+    log: list[str] = []
+    rep, lines = _replayer(helper, log)
+    report = rep.run(extract_steps([_tap(target={"text": "Accept all"})]))
+    step = report["steps"][0]
+    assert (step["way"], step["reason"], step["check"]) == (
+        "by position", "element covered", "unchecked",
+    )  # fmt: skip
+    assert log == ["input tap 500 600"]  # the recorded position, never the button
+    assert len(helper.hits) > 1  # other spots were tried
+    assert "by position (element covered)" in lines[0]["summary"]
+    assert report["unchecked_steps"] == [1]
+    assert report["diverged_at_step"] is None  # covered is not a miss
+
+
+def test_a_container_is_tapped_where_you_tapped_it_and_verified():
+    row = _node(rid="p:id/row", cls="android.widget.LinearLayout",
+                bounds=(0, 600, 1080, 700), clickable=True,
+                kids=[_node("Battery", bounds=(40, 610, 400, 690))])  # fmt: skip
+    target = {"rid": "p:id/row", "bounds": [0, 400, 1080, 500]}
+    helper = FakeHelper([_dump(row)])
+    log: list[str] = []
+    rep, lines = _replayer(helper, log)
+    report = rep.run(extract_steps([_tap(target=target, x=900, y=450)]))
+    assert log == ["input tap 900 650"]  # not the centre (540, 650)
+    assert helper.hits[0] == (900, 650)
+    step = report["steps"][0]
+    assert (step["way"], step["check"]) == ("by element", "verified")
+    assert helper.cleared >= 1  # the hit test reads the screen fresh
+
+
+def test_a_control_inside_the_element_taking_the_tap_is_not_the_element():
+    inner = _node("Delete", bounds=(800, 600, 1080, 700), clickable=True)
+    row = _node(rid="p:id/row", cls="android.widget.LinearLayout",
+                bounds=(0, 600, 1080, 700), clickable=True, kids=[inner])  # fmt: skip
+    target = {"rid": "p:id/row", "bounds": [0, 600, 1080, 700]}
+    rep, _ = _replayer(FakeHelper([_dump(row)]), [])
+    report = rep.run(extract_steps([_tap(target=target, x=900, y=650)]))
+    step = report["steps"][0]
+    # your spot is the Delete button now: another spot of the row is tapped
+    assert step["check"] == "verified"
+    assert "tapped another spot of it" in step["reason"]
+
+
+def test_without_a_hit_test_an_element_tap_is_unchecked():
+    node = _node("Accept all", bounds=(100, 1000, 300, 1100))
+    log: list[str] = []
+    rep, lines = _replayer(DumpOnly(_dump(node)), log)
+    step = rep.run(extract_steps([_tap(target={"text": "Accept all"})]))["steps"][0]
+    assert log == ["input tap 200 1050"]
+    assert (step["way"], step["reason"], step["check"]) == (
+        "by element", "not hit-tested", "unchecked",
+    )  # fmt: skip
+    assert "by element (not hit-tested)" in lines[0]["summary"]
+    # no helper at all: by position, unchecked
+    rep, _ = _replayer(lambda: None, [], element_wait_s=0.5)
+    step = rep.run(extract_steps([_tap(target={"text": "Go"})]))["steps"][0]
+    assert (step["way"], step["check"]) == ("by position", "unchecked")
+
+
+def test_a_partly_visible_element_verifies_when_your_spot_is_visible():
+    link = _node(rid="more", cls="android.view.View", bounds=(0, 2300, 1080, 2600),
+                 web={"engine": "gecko", "role": "link"})  # fmt: skip
+    target = {"web": {"html_id": "more"}, "bounds": [0, 2000, 1080, 2300]}
+    log: list[str] = []
+    rep, _ = _replayer(FakeHelper([_web_dump(link)]), log)
+    steps = extract_steps([_tap(target=target, x=540, y=2050, screen=_SCREEN)])
+    step = rep.run(steps)["steps"][0]
+    assert log == ["input tap 540 2350"]  # its centre (2450) is off the screen
+    assert (step["way"], step["reason"], step["check"]) == (
+        "by element", "", "verified",
+    )  # fmt: skip
+    # your spot off the screen: another visible spot of it, said so
+    log.clear()
+    rep, _ = _replayer(FakeHelper([_web_dump(link)]), log)
+    steps = extract_steps([_tap(target=target, x=540, y=2250, screen=_SCREEN)])
+    step = rep.run(steps)["steps"][0]
+    assert step["check"] == "verified"
+    assert "your spot was off the screen" in step["reason"]
+    assert all(int(c.split()[3]) < 2424 for c in log)
+
+
+def test_a_weak_recorded_target_goes_by_position_unchecked():
+    target = {"label": "spi", "rid": "mozac.awesomebar.suggestion",
+              "stale_possible": True}  # fmt: skip
+    node = _node(rid="mozac.awesomebar.suggestion", label="spi")
+    log: list[str] = []
+    rep, lines = _replayer(FakeHelper([_dump(node)]), log)
+    step = rep.run(extract_steps([_tap(target=target)]))["steps"][0]
+    assert log == ["input tap 500 600"]
+    assert (step["way"], step["reason"], step["check"]) == (
+        "by position", "recorded element unsure", "unchecked",
+    )  # fmt: skip
+
+
+def test_position_taps_on_another_display_are_unchecked_never_scaled():
+    tap = _tap(target=None, x=500, y=600, screen=_SCREEN, rotation=0)
+    helper = FakeHelper([_dump()], display={"w": 1440, "h": 3120, "rotation": 0})
+    log: list[str] = []
+    rep, _ = _replayer(helper, log)
+    step = rep.run(extract_steps([tap]))["steps"][0]
+    assert log == ["input tap 500 600"]  # the same pixels, not scaled
+    assert step["check"] == "unchecked"
+    assert "the screen is 1440x3120, your run had 1080x2424" in step["reason"]
+    # turned: a position outside the screen now is never tapped
+    helper = FakeHelper([_dump()], display={"w": 2424, "h": 1080, "rotation": 1})
+    log.clear()
+    rep, _ = _replayer(helper, log)
+    far = _tap(target=None, x=500, y=2000, screen=_SCREEN, rotation=0)
+    report = rep.run(extract_steps([far]))
+    assert log == []
+    assert report["steps"][0]["way"] == "failed"
+    # the same display: nothing to check, a plain step
+    log.clear()
+    rep, _ = _replayer(FakeHelper([_dump()]), log)
+    assert rep.run(extract_steps([tap]))["steps"][0]["check"] == "none"
+    # without a helper, ``wm size`` tells (natural orientation)
+    rep = StepReplayer(shell=lambda c: "Physical size: 720x1280\n" if c == "wm size"
+                       else "", helper=None, sleep=lambda s: None)  # fmt: skip
+    step = rep.run(extract_steps([tap]))["steps"][0]
+    assert step["check"] == "unchecked"
+
+
+def test_without_an_id_a_field_of_another_size_is_unchecked():
+    class Wider(FocusHelper):
+        def focus(self, x=None, y=None, timeout=1.0):
+            return {"input": {"editable": True, "text": "xyz",
+                              "bounds": [0, 200, 1080, 420]}}  # fmt: skip
+
+    line = _text("abc")
+    line["data"]["target"] = {"rid": None, "bounds": [0, 200, 1080, 300]}
+    rep, _ = _replayer(Wider(""), [])
+    report = rep.run(extract_steps([line]))
+    assert report["steps"][0]["check"] == "unchecked"
+    assert report["diverged_at_step"] is None
+
+
+# ---------------------------------------------------------------------------
+# keyboard-typed text is typed into its verified field
+# ---------------------------------------------------------------------------
+
+
+class TypingField(FakeHelper):
+    """A focused field ``rid`` that holds what ``input text`` typed."""
+
+    def __init__(self, rid="p:id/url", value="", password=False):
+        super().__init__([_dump()])
+        self.rid, self.value, self.password = rid, value, password
+
+    def shell(self, cmd):
+        if cmd.startswith("input text "):
+            self.value += cmd.split(" ", 2)[2].replace("%s", " ").strip("'")
+        return ""
+
+    def focus(self, x=None, y=None, timeout=1.0):
+        return {"input": {"editable": True, "text": self.value, "rid": self.rid,
+                          "password": self.password}}  # fmt: skip
+
+
+def _keyboard_lines(text, password=False):
+    target = {"rid": "p:id/url", "bounds": [180, 164, 807, 290]}
+    keys = [_tap(seq=1 + i, t=100 + i * 0.3, ime=True, x=50 + 10 * i, y=2000)
+            for i in range(len(text))]  # fmt: skip
+    line = _text(text, seq=50, t=101, password=password)
+    line["data"]["target"] = target
+    return [*keys, line]
+
+
+def _typing_replayer(helper):
+    log: list[str] = []
+    lines: list[dict] = []
+    clock = Clock()
+
+    def shell(cmd):
+        log.append(cmd)
+        return helper.shell(cmd)
+
+    rep = StepReplayer(shell=shell, helper=helper, sleep=clock.sleep,
+                       monotonic=clock.mono,
+                       emit=lambda *a, **k: lines.append(k) or 1)  # fmt: skip
+    return rep, log, lines
+
+
+def test_keyboard_typed_text_goes_into_its_verified_field():
+    steps = extract_steps(_keyboard_lines("wdr"))
+    assert steps[0].data["type_text"]["taps"] == 3
+    assert [s.data["typed_by"] for s in steps] == [1, 1, 1]
+    helper = TypingField()
+    rep, log, lines = _typing_replayer(helper)
+    report = rep.run(steps)
+    assert not any(c.startswith("input tap") for c in log)  # no key taps
+    assert [c for c in log if c.startswith("input text")] == [
+        "input text w", "input text d", "input text r",
+    ]  # fmt: skip
+    got = [(s["way"], s["reason"], s["check"]) for s in report["steps"]]
+    assert got == [
+        ("replayed",
+         "typed 3 characters into the field instead of 3 keyboard taps, field checked",
+         "verified"),
+        ("replayed", "typed with step 1", "none"),
+        ("replayed", "typed with step 1", "none"),
+    ]  # fmt: skip
+    assert report["unchecked_steps"] == []
+
+
+def test_keyboard_taps_stay_when_the_field_cannot_be_verified():
+    # the focus is on another field: the keys are tapped, unchecked
+    rep, log, _ = _typing_replayer(TypingField(rid="p:id/other"))
+    report = rep.run(extract_steps(_keyboard_lines("ab")))
+    assert [c for c in log if c.startswith("input tap")] == [
+        "input tap 50 2000", "input tap 60 2000",
+    ]  # fmt: skip
+    first = report["steps"][0]
+    assert first["check"] == "unchecked"
+    assert first["reason"] == "keyboard key, its field could not be verified"
+    assert report["diverged_at_step"] is None  # keys are never "missed"
+    # the field holds text already: where typing goes is unknown, keys again
+    rep, log, _ = _typing_replayer(TypingField(value="old"))
+    rep.run(extract_steps(_keyboard_lines("ab")))
+    assert any(c.startswith("input tap") for c in log)
+
+
+def test_typing_a_password_into_its_field_prints_no_value():
+    rep, log, lines = _typing_replayer(TypingField(password=True))
+    report = rep.run(extract_steps(_keyboard_lines("hunter2", password=True)))
+    assert report["steps"][0]["check"] == "verified"
+    for text in (str(report), str(lines)):
+        assert "hunter2" not in text
+    assert all(ln["sensitive"] for ln in lines[:1])
+
+
+# ---------------------------------------------------------------------------
+# review round: action keys, ids, recycled rows, other windows
+# ---------------------------------------------------------------------------
+
+
+def test_an_action_key_after_the_text_is_tapped_not_swallowed():
+    lines = _keyboard_lines("wdr")
+    # Go, tapped after the last character, before the text line was written
+    go = _tap(seq=40, t=104.5, ime=True, x=1000, y=2300)
+    lines.insert(3, go)
+    lines[-1]["data"]["dur_ms"] = 600.0  # the field's last change at 100.6 s
+    steps = extract_steps(lines)
+    assert steps[0].data["type_text"]["taps"] == 3
+    assert "typed_by" not in steps[3].data
+    rep, log, _ = _typing_replayer(TypingField())
+    report = rep.run(steps)
+    assert [c for c in log if c.startswith("input tap")] == ["input tap 1000 2300"]
+    assert report["steps"][3]["way"] == "by position"
+    # one tap more than characters (Go inside the text's time): keys stay
+    lines[-1]["data"]["dur_ms"] = 5000.0
+    steps = extract_steps(lines)
+    assert all("type_text" not in s.data for s in steps)
+
+
+def test_an_earlier_texts_keys_are_never_typed_again():
+    first = _keyboard_lines("ab")
+    second = [
+        {**_tap(seq=60 + i, t=110 + i * 0.3, ime=True, x=70, y=2000)} for i in range(2)
+    ]
+    text2 = _text("cd", seq=70, t=110)
+    text2["data"]["target"] = {"rid": "p:id/pw", "bounds": [180, 400, 807, 520]}
+    steps = extract_steps([*first, *second, text2])
+    assert steps[0].data["type_text"]["text"] == "ab"
+    assert steps[2].data["type_text"]["text"] == "cd"
+    assert [s.data["typed_by"] for s in steps] == [1, 1, 3, 3]
+
+
+def test_a_recorded_id_never_accepts_a_focused_field_without_one():
+    class NoId(TypingField):
+        def focus(self, x=None, y=None, timeout=1.0):
+            return {"input": {"editable": True, "text": self.value,
+                              "bounds": [0, 1800, 1080, 1900]}}  # fmt: skip
+
+    rep, log, _ = _typing_replayer(NoId())
+    report = rep.run(extract_steps(_keyboard_lines("ab")))
+    assert any(c.startswith("input tap") for c in log)  # not typed into it
+    assert report["steps"][0]["check"] == "unchecked"
+
+
+class LiveAnswers(FakeHelper):
+    """A helper whose live hit test gives the scripted ``answers``."""
+
+    def __init__(self, reply, answers):
+        super().__init__([reply])
+        self.answers = list(answers)
+
+    def node_at(self, x, y, *, mode="both", timeout=1.0, t_mono_ms=None):
+        self.hits.append((x, y))
+        live = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        return {"type": "node_at", "live": live}
+
+
+def _row_dump():
+    row = _node(rid="p:id/row", cls="android.view.View", bounds=(0, 400, 1080, 500),
+                nid=11, clickable=True,
+                kids=[_node("spiegel.de", cls="android.widget.TextView",
+                            bounds=(40, 410, 600, 490), nid=12)])  # fmt: skip
+    reply = _dump(row)
+    reply["windows"][0]["id"] = 10
+    return reply, row
+
+
+def test_the_helper_node_id_decides_and_a_recycled_row_is_not_verified():
+    reply, row = _row_dump()
+    target = {"rid": "p:id/row", "label": "spiegel.de", "bounds": [0, 400, 1080, 500]}
+    same = {"hit": {"nid": 12, "text": "spiegel.de", "bounds": [40, 410, 600, 490]},
+            "target": {"nid": 11, "rid": "p:id/row", "cls": "android.view.View",
+                       "bounds": [0, 400, 1080, 500]},
+            "label": "spiegel.de", "window": {"id": 10}}  # fmt: skip
+    rep, _ = _replayer(LiveAnswers(reply, [same]), [])
+    step = rep.run(extract_steps([_tap(target=target, x=300, y=450)]))["steps"][0]
+    assert step["check"] == "verified"
+    # the list refilled: same row id, another text
+    other = {**same, "label": "spi", "hit": {**same["hit"], "text": "spi"}}
+    rep, _ = _replayer(LiveAnswers(reply, [other]), [])
+    step = rep.run(extract_steps([_tap(target=target, x=300, y=450)]))["steps"][0]
+    assert (step["way"], step["reason"], step["check"]) == (
+        "by position", "element covered", "unchecked",
+    )  # fmt: skip
+    # the same node id in another window (a dialog) is never it
+    dialog = {**same, "window": {"id": 99}}
+    rep, _ = _replayer(LiveAnswers(reply, [dialog]), [])
+    step = rep.run(extract_steps([_tap(target=target, x=300, y=450)]))["steps"][0]
+    assert step["check"] == "unchecked"
+
+
+def test_a_hit_test_that_answers_nothing_is_not_called_covered():
+    reply, _row = _row_dump()
+    target = {"rid": "p:id/row", "bounds": [0, 400, 1080, 500]}
+    rep, _ = _replayer(LiveAnswers(reply, [{"hit": None, "reason": "no_window"}]), [])
+    step = rep.run(extract_steps([_tap(target=target, x=300, y=450)]))["steps"][0]
+    assert (step["way"], step["reason"], step["check"]) == (
+        "by position", "not hit-tested", "unchecked",
+    )  # fmt: skip

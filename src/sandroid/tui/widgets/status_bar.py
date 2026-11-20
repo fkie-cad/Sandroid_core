@@ -18,6 +18,7 @@ from sandroid.services import (
     get_ui_service,
 )
 from sandroid.tui.themes import fixed_color
+from sandroid.tui.utils.ui_thread import UiDispatcher
 
 
 class StatusBar(Static):
@@ -99,9 +100,15 @@ class StatusBar(Static):
         self.frida_available_check = False
         self._frida_version_mismatch: bool | None = None  # None = not checked yet
         self._frida_last_status: str = ""  # Track status transitions
+        #: frida-server is being (auto-)started right now; read on the 1.5 s
+        #: poll from core/frida_manager.py (in-process, no ADB).
+        self.frida_starting = False
+        #: Re-check Frida once the running check is done (a start ended).
+        self._frida_recheck = False
         #: Stage of a running device-prepared step ("" when none), see
         #: core/device_prep.py; read on the 1.5 s poll.
         self.device_prep_stage = ""
+        self._ui = UiDispatcher()
         super().__init__(**kwargs)
 
     def on_mount(self) -> None:
@@ -118,6 +125,7 @@ class StatusBar(Static):
             self.current_theme = "Default"
             self.show_theme_indicator = False
 
+        self._ui = UiDispatcher.capture()
         # Defer EventBus subscription to avoid deadlocks during mount chain
         # (same pattern as MainScreen lines 81-84)
         self.call_later(self._subscribe_to_tool_events)
@@ -139,12 +147,24 @@ class StatusBar(Static):
             EventBus.get().subscribe(EventType.STATE_CHANGED, self._on_state_changed)
         except ImportError:
             pass  # Events module not available
+        try:
+            from sandroid.analysis.detection_bypass import get_bypass_service
+
+            get_bypass_service().add_state_listener(self._on_bypass_state)
+        except Exception:
+            pass
 
     def on_unmount(self) -> None:
         try:
             from sandroid.core.events import EventBus, EventType
 
             EventBus.get().unsubscribe(EventType.STATE_CHANGED, self._on_state_changed)
+        except Exception:
+            pass
+        try:
+            from sandroid.analysis.detection_bypass import get_bypass_service
+
+            get_bypass_service().remove_state_listener(self._on_bypass_state)
         except Exception:
             pass
 
@@ -279,7 +299,7 @@ class StatusBar(Static):
         return colors
 
     def breadcrumb_markup(self) -> str:
-        """Device ▸ app breadcrumb for the shell header (markup, no I/O)."""
+        """Device / app breadcrumb for the shell header (markup, no I/O)."""
         colors = self._get_theme_colors()
         muted = colors["header_muted"]
         parts = []
@@ -296,7 +316,7 @@ class StatusBar(Static):
             parts.append(f"[{muted}]no device — D to select[/]")
         if self.spotlight_app and self.spotlight_app != "None":
             parts.append(f"[b]{self.spotlight_app}[/b]")
-        return "  [dim]▸[/dim]  ".join(parts)
+        return "  [dim]/[/dim]  ".join(parts)
 
     def _segments(self) -> list[Text]:
         """Status segments in priority order (most important first).
@@ -318,44 +338,47 @@ class StatusBar(Static):
         # Frida / app actions wait for it.
         if self.device_prep_stage:
             segs.append(
-                f"[{paused}]◌ Preparing device…[/] "
+                f"[{paused}]Preparing device…[/] "
                 f"[{muted}]{escape(self.device_prep_stage)}[/]"
             )
 
-        # App state (package itself is in the header breadcrumb).
+        # App state (package itself is in the header breadcrumb). Plain
+        # words in the state colours, no state glyphs.
         if self.spotlight_app and self.spotlight_app != "None":
             pid = self.spotlight_pid
             if self.spotlight_paused:
                 pid_part = f" pid {pid}" if pid else ""
-                state = f"[{paused}]◐ paused[/][{muted}]{pid_part} · ␣ resume[/]"
+                state = f"[{paused}]paused[/][{muted}]{pid_part}  ␣ resume[/]"
             elif pid:
-                state = f"[{run}]● running[/] [{muted}]pid {pid}[/]"
+                state = f"[{run}]running[/] [{muted}]pid {pid}[/]"
             elif self.spotlight_restarting:
-                state = f"[{paused}]◌ restarting…[/]"
+                state = f"[{paused}]restarting…[/]"
             else:
-                state = f"[{stop}]○ not running[/] [{muted}]· ␣ start[/]"
+                state = f"[{stop}]not running[/] [{muted}] ␣ start[/]"
             segs.append(f"[{muted}]App[/] {state}")
         else:
-            segs.append(f"[{muted}]App ○ none[/]")
+            segs.append(f"[{muted}]App none[/]")
 
         # Frida.
-        if self.frida_status != "Running" and self._frida_lost:
-            frida = f"[{stop}]✕ connection lost[/] [{muted}]· ⇧R restarts[/]"
+        if self.frida_starting:
+            frida = f"[{paused}]starting[/]"
+        elif self.frida_status != "Running" and self._frida_lost:
+            frida = f"[{stop}]connection lost[/] [{muted}] ⇧R restarts[/]"
         elif self.frida_status == "Running":
             if self._frida_version_mismatch:
-                frida = f"[{fixed_color('notice')}]● running ⚠ version mismatch[/]"
+                frida = f"[{fixed_color('notice')}]running, version mismatch[/]"
             else:
-                frida = f"[{run}]● running[/]"
+                frida = f"[{run}]running[/]"
         elif self.frida_status == "Checking...":
-            frida = f"[{muted}]◌ checking[/]"
+            frida = f"[{muted}]checking[/]"
         else:
-            frida = f"[{stop}]○ off[/]"
+            frida = f"[{stop}]off[/]"
         segs.append(f"[{muted}]Frida[/] {frida}")
 
         # Hooks + bypass, only when something is active.
         on = list(self.bypass_categories)
         if self.hook_count or on:
-            bypass = f" [{muted}]· bypass[/] [{run}]{' '.join(on)}[/]" if on else ""
+            bypass = f"  [{muted}]bypass[/] [{run}]{', '.join(on)}[/]" if on else ""
             segs.append(f"[{muted}]Hooks[/] [b]{self.hook_count}[/]{bypass}")
 
         # Proxy: engine + device route + per-app lanes, on one segment.
@@ -513,17 +536,7 @@ class StatusBar(Static):
         except Exception:
             pass
 
-        # Bypass categories armed/active, in display order (every category
-        # BypassService knows, emulator included). In-process read — NOT the
-        # hook count above.
-        try:
-            from sandroid.analysis.detection_bypass import get_bypass_service
-
-            svc = get_bypass_service()
-            on = set(svc.on_categories())
-            self.bypass_categories = [c for c in svc.categories() if c in on]
-        except Exception:
-            self.bypass_categories = []
+        self._read_bypass_state()
 
         # Update device info (separate try to ensure it always runs)
         # Use Toolbox.get_device_manager() to ensure auto-refresh on first access
@@ -578,13 +591,14 @@ class StatusBar(Static):
                     if task:
                         if task.target_pid:
                             task_parts.append(
-                                f"[{fixed_color('running')}]●[/] {task.display_name} ([{warn_color}]{task.target_pid}[/])"
+                                f"[{fixed_color('running')}]{task.display_name}[/]"
+                                f" ([{warn_color}]{task.target_pid}[/])"
                             )
                         else:
                             task_parts.append(
-                                f"[{fixed_color('running')}]●[/] {task.display_name}"
+                                f"[{fixed_color('running')}]{task.display_name}[/]"
                             )
-                self.background_tasks_display = " ".join(task_parts)
+                self.background_tasks_display = ", ".join(task_parts)
             else:
                 self.background_tasks_display = ""
         except Exception:
@@ -673,6 +687,43 @@ class StatusBar(Static):
             self.app_proxies = {}
             self.app_proxy_problems = {}
 
+    def _read_bypass_state(self) -> None:
+        """Bypass categories armed or active, in display order.
+
+        In-process read, NOT the hook count (what toggle() acts on).
+        """
+        try:
+            from sandroid.analysis.detection_bypass import get_bypass_service
+
+            svc = get_bypass_service()
+            on = set(svc.on_categories())
+            self.bypass_categories = [c for c in svc.categories() if c in on]
+        except Exception:
+            self.bypass_categories = []
+
+    def _on_bypass_state(self) -> None:
+        """BypassService armed/active set changed (any thread, UI included).
+
+        Never blocks the changing thread (it may hold a bypass lock): runs
+        inline on the UI thread, else is posted to it.
+        """
+        self._ui.call(self._apply_bypass_state)
+
+    def _apply_bypass_state(self) -> None:
+        before = list(self.bypass_categories)
+        self._read_bypass_state()
+        if self.bypass_categories != before:
+            self.refresh()
+
+    def _read_frida_starting(self) -> None:
+        """Whether frida-server is being started (in-process, no ADB)."""
+        try:
+            from sandroid.core.frida_manager import frida_server_starting
+
+            self.frida_starting = frida_server_starting()
+        except Exception:
+            self.frida_starting = False
+
     def _read_device_prep_stage(self) -> None:
         """Stage of a running device-prepared step (in-process, no ADB)."""
         try:
@@ -697,16 +748,25 @@ class StatusBar(Static):
             tuple(sorted(self.app_proxies.items())),
             tuple(sorted(self.app_proxy_problems.items())),
             self.device_prep_stage,
+            self.frida_starting,
         )
+        was_starting = self.frida_starting
         self._read_capture_state()
         self._read_device_prep_stage()
+        self._read_frida_starting()
         after = (
             self.mitmweb_running,
             self.mitmweb_address,
             tuple(sorted(self.app_proxies.items())),
             tuple(sorted(self.app_proxy_problems.items())),
             self.device_prep_stage,
+            self.frida_starting,
         )
+        if was_starting and not self.frida_starting:
+            # The start ended: show running / off from a fresh check (again
+            # after a check that was already running, it sampled too early).
+            self._frida_recheck = True
+            self._schedule_frida_check()
         if after != before:
             self.refresh()
 
@@ -745,6 +805,7 @@ class StatusBar(Static):
         if hasattr(self, "_frida_check_pending") and self._frida_check_pending:
             return
         self._frida_check_pending = True
+        self._frida_recheck = False
 
         def _check_frida():
             """Background thread function to check Frida status."""
@@ -761,13 +822,13 @@ class StatusBar(Static):
                 # AndroidFridaManager throws RuntimeError on non-rooted devices
                 status = "N/A"
 
-            # Update UI from background thread safely
+            # Update UI from background thread safely (the check is done:
+            # _update_frida_status may schedule the next one).
+            self._frida_check_pending = False
             try:
                 self.app.call_from_thread(self._update_frida_status, status)
             except Exception:
                 pass  # App may have exited
-            finally:
-                self._frida_check_pending = False
 
         # Start background thread
         thread = threading.Thread(target=_check_frida, daemon=True)
@@ -793,6 +854,8 @@ class StatusBar(Static):
             self._frida_version_mismatch = None
 
         self.refresh()
+        if getattr(self, "_frida_recheck", False):
+            self._schedule_frida_check()
 
     def _schedule_frida_version_check(self) -> None:
         """Check frida-server version against host frida in background."""

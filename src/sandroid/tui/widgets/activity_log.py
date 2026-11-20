@@ -235,11 +235,31 @@ class ActivityLog(RichLog):
         retries after each refresh until layout gave the log a width, so a
         line written while hidden can never be lost.
         """
+        self._ensure_size_known()
         if self._content_width() > 0:
             self._reflow_if_needed()
             return
         if tries > 0:
             self.call_after_refresh(self.reflow_when_shown, tries - 1)
+
+    def _ensure_size_known(self) -> None:
+        """Mark RichLog's size as known once the log is laid out with a width.
+
+        RichLog only learns its size from a Resize event; when the drawer
+        opened without one reaching the log (seen in a fresh process), every
+        line stayed kept-but-unrendered and the drawer stayed empty.
+        """
+        if getattr(self, "_size_known", True):
+            return
+        try:
+            width = self.size.width
+        except Exception:
+            return
+        if width > 0:
+            self._size_known = True
+            deferred = getattr(self, "_deferred_renders", None)
+            while deferred:
+                RichLog.write(self, *deferred.popleft())
 
     def _reflow_if_needed(self) -> None:
         width_now = self._content_width()

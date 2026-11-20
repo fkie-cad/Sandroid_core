@@ -61,6 +61,20 @@ def _as_user(work):
         return work()
 
 
+def _refusal_reason(op: str, name: str, *, confirmed: bool = False) -> str | None:
+    """Why the snapshot policy refused *op* on *name* (worker thread), else None."""
+    try:
+        from sandroid.services import get_emulator_service
+
+        check = getattr(get_emulator_service(), "snapshot_refusal", None)
+        if not callable(check):
+            return None
+        refusal = check(op, name, confirmed=confirmed)
+    except Exception:
+        return None
+    return None if refusal is None else refusal.reason
+
+
 class SnapshotsPanel(Widget):
     """Snapshot list + create/load/delete/assign actions (hosted by the picker).
 
@@ -622,7 +636,8 @@ class SnapshotsPanel(Widget):
                 # The service returns False (and logs why) on a rejected save;
                 # ``None`` (older/fake toolboxes) counts as success.
                 if self._toolbox().create_snapshot(name) is False:
-                    return False, f"Could not create snapshot '{name}' (see the log)"
+                    why = _refusal_reason("save", name) or "see the log"
+                    return False, f"Could not create snapshot '{name}' ({why})"
                 return True, f"Created snapshot '{name}'"
 
             self._run_action_bg(_work, "create", refresh_after=True)
@@ -677,7 +692,14 @@ class SnapshotsPanel(Widget):
         if not tag:
             self._notify("No snapshot selected to delete.", "warning")
             return
+        from sandroid.core import snapshot_policy as policy
         from sandroid.tui.modals import ConfirmModal
+
+        # A name another part of Sandroid owns (a Rewind start point, a
+        # persona snapshot): the confirm says whose it is, and only that
+        # confirm lets the user delete it. Pinned names are refused by the
+        # service (unpin in the Devices screen first).
+        owner = policy.owner_of(tag)
 
         def on_result(yes: bool | None) -> None:
             if not yes:
@@ -686,25 +708,28 @@ class SnapshotsPanel(Widget):
             def _work() -> tuple[bool, str]:
                 # delete propagates the service bool (unlike create/load) so a
                 # rejected `avd snapshot del` surfaces as a real failure.
-                ok = self._toolbox().delete_snapshot(tag)
+                with policy.acting_as(policy.USER, confirmed=owner is not None):
+                    ok = self._toolbox().delete_snapshot(tag)
                 if ok:
                     # A slot must not outlive its snapshot.
                     for slot, slot_tag in self._slot_map().items():
                         if slot_tag == tag:
                             self._write_slot(slot, None)
                     return True, f"Deleted '{tag}'"
-                return False, f"Could not delete '{tag}' (emulator rejected it)"
+                why = _refusal_reason("delete", tag, confirmed=owner is not None) or (
+                    "emulator rejected it"
+                )
+                return False, f"Could not delete '{tag}' ({why})"
 
             self._run_action_bg(_work, "delete", refresh_after=True)
 
+        message = (
+            f"Delete snapshot {self.snapshot_summary(tag)}? This cannot be undone."
+        )
+        if owner is not None:
+            message += f"\n\nThis is a {owner.label}. {owner.delete_warning}".rstrip()
         self.app.push_screen(
-            ConfirmModal(
-                title="Delete snapshot",
-                message=(
-                    f"Delete snapshot {self.snapshot_summary(tag)}? "
-                    "This cannot be undone."
-                ),
-            ),
+            ConfirmModal(title="Delete snapshot", message=message),
             on_result,
         )
 
@@ -823,7 +848,8 @@ class SnapshotsPanel(Widget):
 
         def _work() -> tuple[bool, str]:
             if self._toolbox().create_snapshot(tag) is False:
-                return False, f"Could not save slot {slot} ('{tag}', see the log)"
+                why = _refusal_reason("save", tag) or "see the log"
+                return False, f"Could not save slot {slot} ('{tag}', {why})"
             # Pure config/file write + attr set — safe off the UI thread.
             self._write_slot(slot, tag)
             return True, f"Saved slot {slot} → '{tag}'"

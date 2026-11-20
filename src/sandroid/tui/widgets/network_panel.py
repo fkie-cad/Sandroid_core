@@ -1,8 +1,10 @@
 """Network lens: who is the app talking to, and what did it send?
 
-One full-width flow table (``#net-flows``, five columns: time · recipient ·
-request · status · size) fed from the structured flow log the embedded
-mitmweb addon writes (``<raw_results>/mitm_flows/flows.jsonl``, read through
+One full-width flow table (``#net-flows``; columns Time, App, Recipient,
+Request, TLS, Identity, Status, Size; narrow widths drop Size, TLS, Time and
+App in that order so Request stays readable) fed from the structured flow
+log the embedded mitmweb addon writes
+(``<raw_results>/mitm_flows/flows.jsonl``, read through
 :mod:`sandroid.services.mitmproxy_flow_log`). Details live only in the
 Inspector (Enter on a row): Summary / Request / Response.
 
@@ -23,8 +25,8 @@ Data flow
 * ``[TLS_FAIL]`` lines become "TLS failed" rows at once; the addon also writes them to
   ``flows.jsonl`` (``kind: "tls"``, no detail file), and the poll pairs that
   record with the stdout row instead of adding it twice. While the lens is
-  not in view they count into the lens-bar badge (``⚑N``) until the lens is
-  activated again.
+  not in view they count into the lens-bar badge (``27 TLS failed``) until
+  the lens is activated again.
   Errored flows come from ``flows.jsonl`` (their ``error`` field) as
   "error" rows.
 
@@ -92,6 +94,7 @@ from textual.containers import Vertical
 from textual.widget import Widget
 from textual.widgets import DataTable, Input, Static
 
+from sandroid.services.row_highlights import RowSnapshot, tls_row_key
 from sandroid.tui.row_annotations import (
     LENS_NETWORK,
     AnnotationFeed,
@@ -122,6 +125,11 @@ LENS_ID = "network"
 
 #: Inspector key of the "Capture status" page (mitmproxy + friTap tabs).
 STATUS_KEY = "network:capture-status"
+#: A narrow lens drops columns (this order, first goes first) until Request
+#: has this many cells; Time | App | Recipient | Request | TLS | Identity |
+#: Status | Size is the full order.
+REQUEST_MIN_WIDTH = 26
+LAYOUT_DROP_ORDER = ("size", "tls", "time", "app")
 
 # --------------------------------------------------------------------------
 # recipients + OS noise
@@ -401,7 +409,69 @@ def _short_error(error: str) -> str:
     ):
         if needle in e:
             return word
-    return "error"
+    return ""
+
+
+def error_status(error: str | None) -> str:
+    """The Status words of an errored flow: ``error timeout``, or ``error``
+    alone when the reason is not one of the known kinds (never twice).
+    """
+    word = _short_error(error or "")
+    return f"error {word}" if word else "error"
+
+
+def cell_size(n: int) -> str:
+    """``human_size`` for the Size cell: no decimal from 100 on (fits 16)."""
+    if n < 1024:
+        return f"{n} B"
+    value, unit = n / 1024, "KB"
+    if value >= 1024:
+        value, unit = value / 1024, "MB"
+    return f"{value:.1f} {unit}" if value < 100 else f"{value:.0f} {unit}"
+
+
+def size_words(row: FlowRow) -> str:
+    """The Size cell: ``sent 2.0 KB`` (a request body), else
+    ``received 5.0 KB``; nothing when neither is known.
+    """
+    if row.req_bytes:
+        return f"sent {cell_size(row.req_bytes)}"
+    if row.resp_bytes:
+        return f"received {cell_size(row.resp_bytes)}"
+    return ""
+
+
+def tls_word(row: FlowRow) -> str:
+    """The TLS cell, from what the flow log records (never guessed).
+
+    ``TLS failed`` for a failed handshake row, ``TLS`` when mitmproxy saw the
+    flow over https / wss, ``plain`` over http / ws, nothing when the record
+    has no protocol (older flow logs).
+    """
+    if row.kind == "tls":
+        return "TLS failed"
+    proto = (row.protocol or "").strip().upper()
+    if proto.startswith("HTTPS") or proto == "WSS":
+        return "TLS"
+    if proto.startswith("HTTP") or proto == "WS":
+        return "plain"
+    return ""
+
+
+def app_label(package: str, width: int) -> str:
+    """The App cell: the package, or its trailing name parts when it does
+    not fit (``com.ebay.kleinanzeigen`` -> ``kleinanzeigen``), cut without
+    a glyph; nothing for a flow with no app.
+    """
+    package = package or ""
+    if width <= 0 or len(package) <= width:
+        return package
+    parts = package.split(".")
+    for i in range(1, len(parts)):
+        tail = ".".join(parts[i:])
+        if len(tail) <= width:
+            return tail
+    return parts[-1][:width]
 
 
 _TLS_REASONS = {
@@ -453,7 +523,13 @@ class FlowRow:
         seq = rec.get("seq")
         ts_end = rec.get("ts_end") or rec.get("ts_start") or 0.0
         if rec.get("kind") == "tls":
-            # A persisted TLS handshake failure (no HTTP flow behind it).
+            # A persisted TLS handshake failure (no HTTP flow behind it). Its
+            # flow-log record id ``tls-<seq>``, namespaced by the flow dir
+            # (``tls_row_key``), is the annotation key (AI highlights, the
+            # tools' row key); there is no detail file.
+            fid = tls_row_key(
+                flow_dir, rec.get("id") or (f"tls-{seq}" if seq is not None else None)
+            )
             return cls(
                 key=f"f{seq}" if seq is not None else f"f{rec.get('id')}",
                 ts=float(ts_end or 0.0),
@@ -462,6 +538,7 @@ class FlowRow:
                 path="",
                 app=str(rec.get("app") or ""),
                 seq=seq,
+                flow_id=str(fid) if fid else None,
                 kind="tls",
                 reason=str(rec.get("tls_reason") or "tls"),
                 phase=str(rec.get("phase") or ""),
@@ -954,7 +1031,8 @@ class FlowTable(AnnotationTintMixin, DataTable):
 
     Rows are tinted by their row annotations (``row_annotations``: flows
     carrying identity-profile values, AI marks); the annotation key of a row
-    is its mitmproxy flow id, not the row key ``f<seq>``.
+    is its mitmproxy flow id (TLS failures: ``tls_row_key`` of the flow-log
+    id), not the row key ``f<seq>``.
 
     Moving up (↑, PgUp, Home, a wheel up, a click above the newest row) stops
     following the newest flow; End resumes (``follow.py``).
@@ -972,7 +1050,7 @@ class FlowTable(AnnotationTintMixin, DataTable):
         self._owner_panel: NetworkPanel | None = None
 
     def annotation_key(self, row_key_value: Any) -> str | None:
-        """Row key ``f<seq>`` -> the flow id (flow rows only)."""
+        """Row key ``f<seq>`` -> the flow id (TLS failures: ``tls_row_key``)."""
         panel = self._owner_panel
         if panel is None:
             panel = self._owner_panel = self._panel()
@@ -1372,7 +1450,13 @@ class NetworkPanel(Widget):
         if result is not None:
             flow_dir, records, cursor, stat, reset = result
             if reset:
-                self._live = [r for r in self._live if r.kind == "tls"]
+                # Another flow dir (a device switch): its seqs and TLS keys
+                # mean nothing here. Only stdout TLS rows not paired yet stay.
+                self._live = [
+                    r
+                    for r in self._live
+                    if r.kind == "tls" and r.seq is None and r.flow_id is None
+                ]
                 self._floor_seq = 0
             self._live_dir = flow_dir
             self._cursor = cursor
@@ -1382,11 +1466,16 @@ class NetworkPanel(Widget):
                 for r in records
                 if (r.get("seq") or 0) > self._floor_seq
             ]
+            n = len(rows)
             rows = [r for r in rows if not self._claim_live_tls(r)]
             if reset:
                 self._rebuild_if_live()
             if rows:
                 self._add_live(rows)
+            if len(rows) < n and self._hl.active and not self.in_review:
+                # A stdout TLS row adopted its key: an AI highlight made
+                # meanwhile (the tools pair it) shows in its cell now.
+                self._rebuild()
         if self._poll_again:
             self._poll_again = False
             self.poll_now()
@@ -1399,8 +1488,9 @@ class NetworkPanel(Widget):
         """A ``[TLS_FAIL]`` line from mitmweb (UI thread)."""
         self._tls_n += 1
         now = time.time()
-        # The flow-log poll can beat mitmweb's stdout: then the row is there.
-        for r in reversed(self._live[-50:]):
+        # The flow-log poll can beat mitmweb's stdout: then the row is there
+        # (oldest unpaired first, as the failures happened in that order).
+        for r in self._live[-50:]:
             if (
                 r.kind == "tls"
                 and r.key.startswith("f")
@@ -1426,16 +1516,20 @@ class NetworkPanel(Widget):
             self._unseen_tls += 1
             ms = self._main_screen()
             if ms is not None:
-                ms.set_lens_badge(LENS_ID, f"⚑{self._unseen_tls}")
+                ms.set_lens_badge(LENS_ID, f"{self._unseen_tls} TLS failed")
 
     def _claim_live_tls(self, row: FlowRow) -> bool:
         """A persisted TLS failure that is already on screen (from mitmweb's
         stdout, which is faster than the flow log): adopt its ``seq`` and
         drop the duplicate. Returns True when ``row`` was a duplicate.
+
+        Records come in ``seq`` order, so the oldest unpaired stdout row is
+        taken first (two failures to one host within 10 s keep their order).
+        The AI tools pair the same way off the UI thread (``lens_rows``).
         """
         if row.kind != "tls":
             return False
-        for live in reversed(self._live[-400:]):
+        for live in self._live[-400:]:
             if (
                 live.kind == "tls"
                 and live.seq is None
@@ -1443,7 +1537,10 @@ class NetworkPanel(Widget):
                 and live.host == row.host
                 and abs(live.ts - row.ts) <= 10.0
             ):
+                # Adopt the record's id too: from now on the stdout row has
+                # the stable annotation key (``tls_row_key``, AI highlights).
                 live.seq = row.seq
+                live.flow_id = row.flow_id
                 return True
         return False
 
@@ -1527,7 +1624,7 @@ class NetworkPanel(Widget):
         if row.kind == "tls":
             status = f"tls failed {row.reason}"
         elif row.error:
-            status = f"error {_short_error(row.error)}"
+            status = error_status(row.error)
         else:
             status = str(row.status) if row.status is not None else ""
         hay = f"{row.method} {row.host}{row.path} {row.app} {row.recipient[0]} {status}"
@@ -1561,27 +1658,43 @@ class NetworkPanel(Widget):
     def _layout(self) -> list[tuple[str, str, int]]:
         """``[(key, label, width)]`` of the visible columns for this width.
 
-        Five columns when there is room; a narrow lens (e.g. 100 columns
-        with the Inspector open) drops Size, then Time, so Request keeps a
-        readable width instead of scrolling sideways.
+        Time | App | Recipient | Request | TLS | Identity | Status | Size when
+        there is room; a narrow lens (e.g. 100 columns with the Inspector
+        open) drops Size, then TLS, then Time, then App (``LAYOUT_DROP_ORDER``)
+        until Request has ``REQUEST_MIN_WIDTH`` cells, instead of scrolling
+        sideways. Identity keeps its own rule (``_privacy_columns``).
         """
         avail = self.size.width or 120
         who = 18 if avail >= 110 else (16 if avail >= 58 else 12)
-        cols = [("time", "Time", 8), ("who", "Recipient", who)]
+        app = 20 if avail >= 140 else 14
+        cols = [
+            ("time", "Time", 8),
+            ("app", "App", app),
+            ("who", "Recipient", who),
+            ("req", "Request", 0),
+            ("tls", "TLS", 10),
+        ]
         cols += self._privacy_columns(avail)
-        cols += [("req", "Request", 0), ("status", "Status", 11), ("size", "Size", 10)]
-        if avail < 76:
-            cols = [c for c in cols if c[0] != "size"]
-        if avail < 58:
-            cols = [c for c in cols if c[0] != "time"]
-        # 2 cells padding per column + 1 scrollbar column
-        fixed = sum(w for _, _, w in cols) + 2 * len(cols) + 1
-        # The Highlight column only while Request keeps a readable width
-        # (with the Identity column too, a ~100 column lens has no room).
-        if self._hl.show_column(avail) and avail - fixed - (HL_WIDTH + 2) >= 24:
-            cols.append(("hl", "Highlight", HL_WIDTH))
-            fixed += HL_WIDTH + 2
-        req = max(12, avail - fixed)
+        cols += [("status", "Status", 13), ("size", "Size", 16)]
+
+        def fixed_of(columns: list[tuple[str, str, int]]) -> int:
+            # 2 cells padding per column + 1 scrollbar column
+            return sum(w for _, _, w in columns) + 2 * len(columns) + 1
+
+        for key in LAYOUT_DROP_ORDER:
+            if avail - fixed_of(cols) >= REQUEST_MIN_WIDTH:
+                break
+            cols = [c for c in cols if c[0] != key]
+        # The Highlight column (AI highlights exist) may take Size's place,
+        # but only while Request keeps a readable width (with the Identity
+        # column too, a ~100 column lens has no room).
+        if self._hl.show_column(avail):
+            with_hl = [*cols, ("hl", "Highlight", HL_WIDTH)]
+            if avail - fixed_of(with_hl) < REQUEST_MIN_WIDTH:
+                with_hl = [c for c in with_hl if c[0] != "size"]
+            if avail - fixed_of(with_hl) >= REQUEST_MIN_WIDTH:
+                cols = with_hl
+        req = max(12, avail - fixed_of(cols))
         return [(k, label, w or req) for k, label, w in cols]
 
     def _cells(self, row: FlowRow, layout: list[tuple[str, str, int]]) -> list[Text]:
@@ -1592,6 +1705,20 @@ class NetworkPanel(Widget):
         )
         label, known = row.recipient
         who = Text(_ellipsize(label, who_w), style=lens_palette().text)
+        app = Text(
+            app_label(row.app, widths.get("app", 0)),
+            style=lens_palette().muted,
+            no_wrap=True,
+            overflow="crop",
+        )
+        tls = tls_word(row)
+        tls_cell = Text(
+            tls,
+            style={
+                "TLS failed": f"bold {lens_palette().bad}",
+                "plain": lens_palette().warn,
+            }.get(tls, lens_palette().muted),
+        )
         tag = _phase_tag(row.phase) if self.in_review else ""
         if row.kind == "tls":
             req = Text(no_wrap=True, overflow="ellipsis")
@@ -1612,11 +1739,9 @@ class NetworkPanel(Widget):
             else:
                 req = smart_request(row.method, row.host, row.path, req_w)
             if row.error:
-                status = Text(
-                    f"error {_short_error(row.error)}", style=lens_palette().bad
-                )
+                status = Text(error_status(row.error), style=lens_palette().bad)
             elif row.status is None:
-                status = Text("…", style=lens_palette().dim)
+                status = Text("")  # no response (yet): nothing, not a glyph
             else:
                 code = int(row.status)
                 color = lens_palette().muted
@@ -1625,14 +1750,20 @@ class NetworkPanel(Widget):
                 elif code >= 500:
                     color = lens_palette().bad
                 status = Text(str(code), style=color)
-            if row.req_bytes:
-                size = Text(f"↑ {human_size(row.req_bytes)}", style=lens_palette().text)
-            elif row.resp_bytes:
-                size = Text(f"↓ {human_size(row.resp_bytes)}", style=lens_palette().dim)
-            else:
-                size = Text("–", style=lens_palette().dim)
+            size = Text(
+                size_words(row),
+                style=lens_palette().text if row.req_bytes else lens_palette().dim,
+            )
         size.justify = "right"
-        cells = {"time": t, "who": who, "req": req, "status": status, "size": size}
+        cells = {
+            "time": t,
+            "app": app,
+            "who": who,
+            "req": req,
+            "tls": tls_cell,
+            "status": status,
+            "size": size,
+        }
         cells["ident"] = self._privacy_cell(row, widths.get("ident", 0))
         if "hl" in widths:
             cells["hl"] = self._hl.cell(row.flow_id)
@@ -2272,6 +2403,7 @@ class NetworkPanel(Widget):
                 subtitle=escape(row.host),
                 sections=[
                     ("", grid),
+                    *(self._hl.sections(row.flow_id) if row.flow_id else []),
                     ("Why", why),
                     (
                         "Next",
@@ -2464,7 +2596,12 @@ class NetworkPanel(Widget):
         return _privacy_tags_for_flow(flow_id)
 
     def annotation_flow_id(self, key: Any) -> str | None:
-        """The annotation key (flow id) of table row ``key``; flow rows only."""
+        """The annotation key (flow id) of table row ``key``.
+
+        Flows: the mitmproxy flow id. TLS failures: ``tls_row_key`` of the
+        flow-log record id; a stdout-only TLS row (``t<n>``, not in the flow log
+        yet) has none until the poll pairs it with its record.
+        """
         if key is None:
             return None
         model = self._model()
@@ -2473,7 +2610,7 @@ class NetworkPanel(Widget):
             index = {r.key: r for r in model}
             self._flow_index = (model, len(model), index)
         row = index.get(str(key))
-        if row is None or row.kind != "flow":
+        if row is None:
             return None
         return row.flow_id
 
@@ -2598,15 +2735,36 @@ class NetworkPanel(Widget):
             if row is not None:
                 ms.update_inspector(self.flow_content(row))
 
-    def _highlight_rows_snapshot(self) -> list[dict]:
+    def _highlight_rows_snapshot(self) -> list[dict] | None:
         """Every row of this view (live or the reviewed run) for the AI tools.
 
-        ``shown`` = passes the lens's current filters. Rows without a flow id
-        (stdout-only TLS failures) cannot be highlighted: they come with key
-        None (the tools drop them) only so their ``seq`` counts for the
-        "new since" basis.
+        ``shown`` = passes the lens's own filters (noise, app only, ``/``,
+        phases), NOT the AI filter: the tools and the bar's "hidden by lens
+        filters" agree, and a new query or an extend of the filter set sees
+        every row the lens filters let through. TLS failures carry their
+        ``tls_row_key``. Rows without one (a stdout-only TLS failure the poll
+        has not paired yet) come with key None and ``flow_dir`` = the polled
+        flow dir: the tools pair them with the flow log themselves.
+
+        None while the live lens never polled (it was never shown): the
+        tools then read the flow log instead of an empty view. Live, the
+        result says how far the lens has read the flow log
+        (``polled_through``, its cursor): a hidden lens does not poll, so
+        the tools add the newer records themselves.
         """
-        return [flow_snapshot(r, self._passes(r), self._scope) for r in self._model()]
+        if not self.in_review and self._live_dir is None:
+            return None
+        live_dir = str(self._live_dir) if self._live_dir is not None else None
+        out = RowSnapshot(
+            polled_through=None if self.in_review else int(self._cursor or 0),
+            flow_dir=None if self.in_review else live_dir,
+        )
+        for r in self._model():
+            snap = flow_snapshot(r, self._passes(r, ai=False), self._scope)
+            if r.flow_id is None and snap["flow_dir"] is None:
+                snap["flow_dir"] = live_dir
+            out.append(snap)
+        return out
 
     def _leave_highlight_filter(self) -> bool:
         if not self._hl.leave_filter():

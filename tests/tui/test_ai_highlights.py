@@ -10,6 +10,7 @@ Hermetic: fixture flow log / fixture monitor batches, memory-only store.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import timedelta
 
@@ -39,7 +40,7 @@ from test_network_lens import (
 )
 
 from sandroid.services import row_highlights
-from sandroid.services.row_highlights import get_row_highlights
+from sandroid.services.row_highlights import get_row_highlights, tls_row_key
 from sandroid.tui.row_annotations import row_tint
 from sandroid.tui.themes import (
     HIGHLIGHT_DARK,
@@ -77,9 +78,14 @@ def store(monkeypatch, tmp_path):
 @pytest.fixture
 def flow_dir(tmp_path, monkeypatch):
     """The fixture flow log dir (as in test_network_lens)."""
+    from sandroid.services import mitmproxy_flow_log
+
     d = tmp_path / "mitm_flows"
     d.mkdir()
     monkeypatch.setattr(np_mod, "_flow_dir", lambda: d)
+    # In the app both resolve to the session's flow dir; the row tools
+    # compare a hidden lens's dir with it.
+    monkeypatch.setattr(mitmproxy_flow_log, "resolve_flow_dir", lambda: d)
     monkeypatch.setattr(NetworkPanel, "_spotlight_package", lambda self: PKG)
     return d
 
@@ -237,7 +243,7 @@ async def test_network_tint_column_bar_and_inspector(flow_dir, store):
         assert titles.count("AI highlight") == 1
         body = str(dict(sections)["AI highlight"])
         assert "AI: POST to graph.facebook.com" in body
-        assert "7 flows looked at" in body
+        assert "7 rows looked at" in body  # TLS-failure rows count too
         # a second set: two words in the cell, the row keeps the first slot
         store.create("network", "Meta", reasons={"flow-2": "Meta host"})
         await until(pilot, lambda: "," in _cell(table, "f2", "hl"))
@@ -387,10 +393,12 @@ async def test_network_row_source_snapshot(flow_dir, store):
         assert fb["flow_dir"] == str(flow_dir)
         assert by_key["flow-1"]["shown"] is False  # OS noise, hidden
         assert by_key["flow-6"]["kind"] == "error"
+        before = {r["key"] for r in rows if r["shown"]}
         store.create("network", "fb", reasons={"flow-2": "fb"}, filter=True)
         await until(pilot, lambda: panel.table.row_count == 1)
+        # The AI filter is not a lens filter for the tools: same shown rows.
         rows = await asyncio.to_thread(store.snapshot_rows, "network")
-        assert {r["key"] for r in rows if r["shown"]} == {"flow-2"}
+        assert {r["key"] for r in rows if r["shown"]} == before
     assert not store.has_row_source("network")  # unregistered on unmount
 
 
@@ -414,7 +422,7 @@ async def test_network_highlight_words_take_the_light_theme_colours(flow_dir, st
 async def test_network_identity_and_highlight_columns_together(
     flow_dir, store, monkeypatch
 ):
-    """With the privacy scan on the same registry: Identity after Recipient,
+    """With the privacy scan on the same registry: Identity in its agreed place,
     Highlight last, the AI tint wins a row that has both, and a privacy hit
     redraws through the privacy feed only (no whole-lens AI redraw).
     """
@@ -432,7 +440,10 @@ async def test_network_identity_and_highlight_columns_together(
         store.create("network", "POST trackers", reasons={"flow-2": "POST"})
         await until(pilot, lambda: "hl" in _cols(table))
         cols = _cols(table)
-        assert cols.index("who") + 1 == cols.index("ident")
+        # Time | App | Recipient | Request | TLS | Identity | Status | Size
+        order = ["time", "app", "who", "req", "tls", "ident", "status", "size"]
+        assert [c for c in cols if c != "hl"] == [c for c in order if c in cols]
+        assert "ident" in cols
         assert cols[-1] == "hl"
         assert _cell(table, "f2", "ident") == "Ad ID"
         assert _cell(table, "f2", "hl") == "POST trackers"
@@ -599,10 +610,12 @@ async def test_files_row_source_snapshot(store):
         assert prefs["last"] == pytest.approx(T0.timestamp())
         assert by_key[CACHE]["shown"] is True  # inside a folded cache group
         assert by_key[MISC]["shown"] is False  # hidden by a path rule
+        before = {r["key"] for r in rows if r["shown"]}
         store.create("files", "prefs", reasons={PREFS: "a"}, filter=True)
         await until(pilot, lambda: _keys(app.query_one(FilesPanel).table) == [PREFS])
+        # The AI filter is not a lens filter for the tools: same shown rows.
         rows = await asyncio.to_thread(store.snapshot_rows, "files")
-        assert {r["key"] for r in rows if r["shown"]} == {PREFS}
+        assert {r["key"] for r in rows if r["shown"]} == before
     assert not store.has_row_source("files")
 
 
@@ -902,3 +915,424 @@ async def test_network_lens_repaints_on_a_live_theme_switch(flow_dir, store):
         light = str(table.get_cell("f2", "hl").spans[0].style)
         assert light != dark
         assert lens_palette().highlight_1 in light
+
+
+# --------------------------------------------------------------------------
+# E2E finding: a TLS-failed tracker row is a row of the AI tools
+# --------------------------------------------------------------------------
+
+
+def _append_tls(flow_dir, seq: int, host: str) -> None:
+    now = time.time()
+    record = {
+        "seq": seq,
+        "id": f"tls-{seq}",
+        "kind": "tls",
+        "ts_start": now,
+        "ts_end": now,
+        "protocol": "TLS",
+        "method": "TLS",
+        "host": host,
+        "path": "",
+        "status_code": None,
+        "error": "TLS handshake failed (cert)",
+        "tls_reason": "cert",
+        "app": PKG,
+    }
+    with open(flow_dir / "flows.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+async def test_network_tls_failed_tracker_row_is_highlighted(
+    flow_dir, store, monkeypatch
+):
+    from sandroid.ai.tools import lens_rows
+
+    monkeypatch.setattr("sandroid.core.timeline.emit", lambda *a, **k: None)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _network(app, pilot, flow_dir)
+        table = panel.table
+        # mitmweb's stdout line comes first: a "t<n>" row without a key yet.
+        panel.add_tls_failure("12:00:00", "sdk.pa-cd.com", "cert", PKG)
+        await settle(pilot)
+        stdout_row = next(r for r in panel._live if r.kind == "tls")
+        assert stdout_row.key.startswith("t")
+        assert stdout_row.flow_id is None
+        early = await asyncio.to_thread(
+            lens_rows.find_rows, "network", {"host_glob": ["*pa-cd.com"]}
+        )
+        assert early["keys"] == []
+        assert early["not_in_flow_log_yet"] == 1
+        k100 = tls_row_key(flow_dir, "tls-100")
+        k101 = tls_row_key(flow_dir, "tls-101")
+        # The flow log catches up (the stdout row adopts tls-100), a second
+        # TLS failure is only in the flow log, and Sandroid's mitm.it probe
+        # is OS noise the lens hides.
+        _append_tls(flow_dir, 100, "sdk.pa-cd.com")
+        _append_tls(flow_dir, 101, "cdn.pa-cd.com")
+        write_flows(
+            flow_dir,
+            time.time(),
+            specs=[("GET", "mitm.it", "/", 200, "", None, "ok", None)],
+            start_seq=102,
+        )
+        panel.poll_now()
+        await until(pilot, lambda: any(r.host == "mitm.it" for r in panel._live))
+        await settle(pilot)
+        assert stdout_row.flow_id == k100
+        assert panel.table.get_row_index(stdout_row.key) >= 0
+        persisted = next(r for r in panel._live if r.host == "cdn.pa-cd.com")
+        assert (persisted.key, persisted.flow_id) == ("f101", k101)
+        rows = await asyncio.to_thread(store.snapshot_rows, "network")
+        by_key = {r["key"]: r for r in rows}
+        assert by_key[k100]["kind"] == "tls"
+        assert by_key[k100]["shown"] is True
+        assert "TLS handshake failed" in by_key[k100]["error"]
+        assert by_key["flow-102"]["shown"] is False  # mitm.it: OS noise
+
+        found = await asyncio.to_thread(
+            lens_rows.find_rows,
+            "network",
+            {"host_glob": ["*pa-cd.com"]},
+            apply="highlight",
+            label="tracker pa-cd.com",
+            short="pa-cd",
+        )
+        assert found["keys"] == [k100, k101]
+        assert found["hidden_by_lens_filters"] == 0
+        listed = await asyncio.to_thread(lens_rows.find_rows, "network")
+        assert "flow-102" not in listed["keys"]
+        assert listed["hidden_by_lens_filters"] >= 1
+        every = await asyncio.to_thread(lens_rows.find_rows, "network", scope="all")
+        assert "flow-102" in every["keys"]
+
+        await until(pilot, lambda: "hl" in _cols(table))
+        for key in (stdout_row.key, "f101"):
+            assert _cell(table, key, "hl") == "pa-cd"
+            assert _tint_of(table, key) == _expected_tint(1)
+        assert _tint_of(table, "f3") is None
+        assert "tracker pa-cd.com 2" in _bar(panel)
+        # The AI filter shows exactly the two TLS rows.
+        store.set_filter("network", found["highlight_id"])
+        await until(pilot, lambda: table.row_count == 2)
+        assert sorted(_keys(table)) == sorted([stdout_row.key, "f101"])
+
+
+def test_the_bar_says_scanning_while_running_then_partial_or_nothing(store):
+    from sandroid.tui.widgets.highlight_bar import HighlightView
+
+    hs = store.create("network", "tracker hosts", origin="ai", scanning=True)
+    store.add(hs.id, {"tls-3": "tracker"})
+    view = HighlightView("network")
+    view.measure(iter([("tls-3", True, 3, 3.0)]), live=True)
+    plain = view.bar_text(200).plain
+    assert "scanning" in plain
+    assert "partial" not in plain
+    section = str(view.sections("tls-3")[0][1])
+    assert "scanning" in section
+    store.finish(hs.id, complete=False)  # stopped, cancelled or deadline
+    plain = view.bar_text(200).plain
+    assert "partial" in plain
+    assert "scanning" not in plain
+    assert "partial" in str(view.sections("tls-3")[0][1])
+    store.start_scan(hs.id)
+    assert "scanning" in view.bar_text(200).plain
+    store.finish(hs.id, complete=True)
+    plain = view.bar_text(200).plain
+    assert "scanning" not in plain
+    assert "partial" not in plain
+
+
+def test_a_reloaded_scanning_set_shows_partial(store, tmp_path):
+    from sandroid.services.row_highlights import HighlightStore
+    from sandroid.tui.widgets.highlight_bar import set_state
+
+    saved = HighlightStore()
+    saved.bind_folder(tmp_path)
+    hs = saved.create("network", "tracker hosts", origin="ai", scanning=True)
+    saved.add(hs.id, {"tls-3": "tracker"})
+    assert saved.flush()  # the process ends mid-scan
+    store.bind_folder(tmp_path)
+    loaded = store.get(hs.id)
+    assert set_state(loaded) == "partial"
+    from sandroid.tui.widgets.highlight_bar import HighlightView
+
+    view = HighlightView("network")
+    view.measure(iter([("tls-3", True, 3, 3.0)]), live=True)
+    plain = view.bar_text(200).plain
+    assert "partial" in plain
+    assert "scanning" not in plain
+
+
+# --------------------------------------------------------------------------
+# verifier findings (fix/ai-polish-verify)
+# --------------------------------------------------------------------------
+
+
+async def test_ai_filter_does_not_narrow_the_next_find_and_extends_add_rows(
+    flow_dir, store, monkeypatch
+):
+    """Finding 1: the AI filter is not a lens filter for the tools."""
+    from sandroid.ai.tools import lens_rows
+
+    monkeypatch.setattr("sandroid.core.timeline.emit", lambda *a, **k: None)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _network(app, pilot, flow_dir)
+        posts_before = await asyncio.to_thread(
+            lens_rows.find_rows, "network", {"method": ["POST"]}
+        )
+        fb = await asyncio.to_thread(
+            lens_rows.find_rows,
+            "network",
+            {"host_glob": ["graph.facebook.com"]},
+            apply="filter",
+            label="facebook",
+            short="fb",
+        )
+        await until(pilot, lambda: panel.table.row_count == len(fb["keys"]))
+        posts = await asyncio.to_thread(
+            lens_rows.find_rows, "network", {"method": ["POST"]}
+        )
+        assert posts["keys"] == posts_before["keys"]
+        assert posts["hidden_by_lens_filters"] == posts_before["hidden_by_lens_filters"]
+        # Extending the filter set adds rows outside it.
+        more = await asyncio.to_thread(
+            lens_rows.find_rows,
+            "network",
+            {"method": ["POST"]},
+            apply="filter",
+            highlight_id=fb["highlight_id"],
+        )
+        assert more["highlight_id"] == fb["highlight_id"]
+        assert set(store.keys(fb["highlight_id"])) == set(posts_before["keys"]) | set(
+            fb["keys"]
+        )
+        await until(
+            pilot,
+            lambda: panel.table.row_count == len(store.keys(fb["highlight_id"])),
+        )
+        # Nothing new: the set stays and the result says so.
+        again = await asyncio.to_thread(
+            lens_rows.find_rows,
+            "network",
+            {"method": ["POST"]},
+            apply="filter",
+            highlight_id=fb["highlight_id"],
+        )
+        assert again["highlight_id"] == fb["highlight_id"]
+        assert "no new rows" in again["note"]
+        assert "no highlight set was created" not in str(again)
+
+
+async def test_hidden_network_lens_tls_row_is_paired_by_the_tools(
+    flow_dir, store, monkeypatch
+):
+    """Finding 2: a hidden lens does not poll; the tools pair the stdout TLS
+    row with its flow-log record, and the lens adopts the key on its poll.
+    """
+    from sandroid.ai.tools import lens_rows
+
+    monkeypatch.setattr("sandroid.core.timeline.emit", lambda *a, **k: None)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _network(app, pilot, flow_dir)
+        ms.switch_lens("timeline")
+        await settle(pilot)
+        panel.add_tls_failure("12:00:00", "sdk.pa-cd.com", "cert", PKG)
+        _append_tls(flow_dir, 100, "sdk.pa-cd.com")
+        await settle(pilot)
+        stdout_row = next(r for r in panel._live if r.kind == "tls")
+        k100 = tls_row_key(flow_dir, "tls-100")
+        res = await asyncio.to_thread(
+            lens_rows.find_rows,
+            "network",
+            {"host_glob": ["*pa-cd.com"]},
+            apply="highlight",
+            label="pa-cd",
+            short="pa-cd",
+        )
+        assert res["source"] == "lens"
+        assert res["keys"] == [k100]
+        assert "not_in_flow_log_yet" not in res
+        assert stdout_row.flow_id is None  # the hidden lens did not poll
+        ms.switch_lens("network")
+        panel.poll_now()
+        await until(pilot, lambda: stdout_row.flow_id == k100)
+        await until(
+            pilot,
+            lambda: _tint_of(panel.table, stdout_row.key) == _expected_tint(1),
+        )
+        assert sum(1 for r in panel._live if r.kind == "tls") == 1
+
+
+async def test_flows_logged_while_the_lens_is_hidden_are_rows_of_the_tools(
+    flow_dir, store, monkeypatch
+):
+    """The original report: the analyst works (and chats) in another lens;
+    the hidden Network lens does not poll, yet the tools see the flows that
+    reached the flow log meanwhile, keyed as the lens will key them.
+    """
+    from sandroid.ai.tools import lens_rows
+
+    monkeypatch.setattr("sandroid.core.timeline.emit", lambda *a, **k: None)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _network(app, pilot, flow_dir)
+        ms.switch_lens("timeline")
+        await settle(pilot)
+        # Meanwhile: a TLS failure on mitmweb's stdout and in the flow log
+        # (one row, not two), another one only in the flow log, two new
+        # flows, and Sandroid's mitm.it probe (OS noise).
+        panel.add_tls_failure("12:00:00", "sdk.pa-cd.com", "cert", PKG)
+        _append_tls(flow_dir, 100, "sdk.pa-cd.com")
+        _append_tls(flow_dir, 101, "cdn.pa-cd.com")
+        write_flows(
+            flow_dir,
+            time.time(),
+            specs=[
+                ("POST", "api.pa-cd.com", "/collect", 200, PKG, "a=1", "{}", None),
+                ("GET", "img.pa-cd.com", "/p.gif", 200, PKG, None, None, None),
+                ("GET", "mitm.it", "/", 200, "", None, "ok", None),
+            ],
+            start_seq=102,
+        )
+        await settle(pilot)
+        assert not any(r.seq and r.seq >= 100 for r in panel._live)  # no poll
+        k100 = tls_row_key(flow_dir, "tls-100")
+        k101 = tls_row_key(flow_dir, "tls-101")
+        found = await asyncio.to_thread(
+            lens_rows.find_rows,
+            "network",
+            {"host_glob": ["*pa-cd.com"]},
+            apply="highlight",
+            label="pa-cd",
+            short="pa-cd",
+        )
+        assert found["source"] == "lens"
+        assert sorted(found["keys"]) == sorted([k100, k101, "flow-102", "flow-103"])
+        assert "not_in_flow_log_yet" not in found
+        assert "4 newer row(s)" in found["shown_basis"]
+        every = await asyncio.to_thread(lens_rows.find_rows, "network", scope="all")
+        assert every["keys"].count(k100) == 1
+        assert "flow-104" in every["keys"]  # mitm.it: hidden by the noise rule
+        shown = await asyncio.to_thread(lens_rows.find_rows, "network")
+        assert "flow-104" not in shown["keys"]
+        assert {"flow-2", "flow-3"} <= set(shown["keys"])  # the polled rows
+
+        ms.switch_lens("network")
+        panel.poll_now()
+        await until(pilot, lambda: any(r.seq == 103 for r in panel._live))
+        await until(pilot, lambda: "hl" in _cols(panel.table))
+        stdout_row = next(r for r in panel._live if r.host == "sdk.pa-cd.com")
+        assert stdout_row.flow_id == k100
+        for key in (stdout_row.key, "f101", "f102", "f103"):
+            await until(
+                pilot,
+                lambda key=key: _tint_of(panel.table, key) == _expected_tint(1),
+            )
+            assert _cell(panel.table, key, "hl") == "pa-cd", key
+        assert _tint_of(panel.table, "f3") is None
+        snap = await asyncio.to_thread(store.snapshot_rows, "network")
+        assert snap.polled_through == 104
+        assert "shown_basis" not in await asyncio.to_thread(
+            lens_rows.find_rows, "network"
+        )
+
+
+async def test_never_shown_network_lens_reads_the_flow_log_with_the_noise_rule(
+    flow_dir, store, monkeypatch
+):
+    """Findings 2 and 5: a lens that never polled is no empty view; the
+    fallback rows follow the lens's noise rule and say so.
+    """
+    from pilot_helpers import boot
+
+    from sandroid.ai.tools import lens_rows
+    from sandroid.services import mitmproxy_flow_log
+
+    monkeypatch.setattr(mitmproxy_flow_log, "resolve_flow_dir", lambda: flow_dir)
+    mitmproxy_flow_log._CURSOR_CACHE.clear()
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        write_flows(flow_dir, time.time() - 100)
+        for panel in ms.query(NetworkPanel):
+            assert panel._highlight_rows_snapshot() is None
+        res = await asyncio.to_thread(lens_rows.find_rows, "network")
+        assert res["source"] == "flow_log"
+        assert res["shown_basis"] == "noise rule only (lens not open)"
+        assert "flow-1" not in res["keys"]  # connectivity check: OS noise
+        assert "flow-2" in res["keys"]
+        assert res["hidden_by_lens_filters"] >= 1
+
+
+async def test_device_switch_drops_tls_rows_of_the_old_flow_dir(
+    flow_dir, store, tmp_path, monkeypatch
+):
+    """Finding 3: TLS rows keyed in the old flow dir do not survive a reset."""
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _network(app, pilot, flow_dir)
+        _append_tls(flow_dir, 100, "pinned.example")
+        panel.poll_now()
+        await until(pilot, lambda: any(r.kind == "tls" for r in panel._live))
+        panel.add_tls_failure("12:00:00", "fresh.example", "cert", PKG)
+        await settle(pilot)
+        other = tmp_path / "other" / "mitm_flows"
+        other.mkdir(parents=True)
+        monkeypatch.setattr(np_mod, "_flow_dir", lambda: other)
+        panel.poll_now()
+        await until(pilot, lambda: panel._live_dir == other)
+        tls = [r for r in panel._live if r.kind == "tls"]
+        assert [(r.host, r.flow_id) for r in tls] == [("fresh.example", None)]
+
+
+async def test_two_tls_failures_to_one_host_keep_their_order(flow_dir, store):
+    """Finding 8: the oldest stdout row adopts the oldest record."""
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _network(app, pilot, flow_dir)
+        panel.add_tls_failure("12:00:00", "twice.example", "cert", PKG)
+        panel.add_tls_failure("12:00:01", "twice.example", "cert", PKG)
+        await settle(pilot)
+        first, second = [r for r in panel._live if r.kind == "tls"]
+        _append_tls(flow_dir, 100, "twice.example")
+        _append_tls(flow_dir, 101, "twice.example")
+        panel.poll_now()
+        await until(pilot, lambda: second.seq is not None)
+        assert (first.seq, second.seq) == (100, 101)
+        assert first.flow_id == tls_row_key(flow_dir, "tls-100")
+
+
+async def test_shown_scope_set_counts_rows_it_did_not_judge(
+    flow_dir, store, monkeypatch
+):
+    """Finding 4: rows hidden when the set was made show as "not judged"."""
+    from sandroid.ai.context import _describe_lens_highlights
+    from sandroid.ai.tools import lens_rows
+
+    monkeypatch.setattr("sandroid.core.timeline.emit", lambda *a, **k: None)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _network(app, pilot, flow_dir)
+        found = await asyncio.to_thread(
+            lens_rows.find_rows,
+            "network",
+            {"method": ["GET"]},
+            apply="highlight",
+            label="GET requests",
+            short="GET",
+        )
+        hs = store.get(found["highlight_id"])
+        assert hs.basis["scope"] == "shown"
+        assert "flow-1" in hs.basis["not_judged"]  # OS noise, hidden
+        assert "flow-1" not in hs.reasons
+        await until(pilot, lambda: "GET requests" in _bar(panel))
+        assert "not judged" not in _bar(panel)
+        panel.action_toggle_noise()  # N: the noise rows come into view
+        await until(pilot, lambda: "not judged" in _bar(panel))
+        n = found["hidden_by_lens_filters"]
+        assert f"{n} not judged" in _bar(panel)
+        assert f"{n} not judged" in (_describe_lens_highlights() or "")
