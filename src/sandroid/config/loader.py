@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import logging
 import os
 import tempfile
 import tomllib
@@ -14,6 +15,15 @@ from platformdirs import site_config_dir, user_config_dir
 from pydantic import ValidationError
 
 from .schema import SandroidConfig
+
+logger = logging.getLogger(__name__)
+
+#: Config sections of removed tools: still accepted (old user files keep
+#: loading), dropped at load with one warning per process.
+REMOVED_SECTIONS: dict[str, str] = {
+    "trigdroid": "TrigDroid was removed",
+}
+_warned_removed_sections: set[str] = set()
 
 
 def atomic_write_bytes(
@@ -353,6 +363,8 @@ class ConfigLoader:
         if cli_overrides:
             merged_config = self._merge_configs(merged_config, cli_overrides)
 
+        self._drop_removed_sections(merged_config)
+
         # Validate and create config object
         try:
             config = SandroidConfig(**merged_config)
@@ -563,6 +575,31 @@ class ConfigLoader:
         }
         saved_path = self.update_file_keys(self.resolve_save_target(), serialised)
         return updated_config, saved_path
+
+    @staticmethod
+    def _drop_removed_sections(merged_config: dict[str, Any]) -> None:
+        """Remove sections of removed tools from *merged_config* in place.
+
+        Old user config files may still hold e.g. ``[trigdroid]``. They keep
+        loading; the section is ignored (and not written back on a save) and
+        a single warning per section and process says so.
+
+        Args:
+            merged_config: The merged raw configuration dictionary.
+        """
+        for section, reason in REMOVED_SECTIONS.items():
+            if section not in merged_config:
+                continue
+            merged_config.pop(section)
+            if section in _warned_removed_sections:
+                continue
+            _warned_removed_sections.add(section)
+            logger.warning(
+                "Config section [%s] ignored: %s. You can delete it from your "
+                "config file.",
+                section,
+                reason,
+            )
 
     def create_default_config(self, config_file: str | Path | None = None) -> Path:
         """Create a default configuration file.

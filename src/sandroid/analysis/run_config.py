@@ -112,8 +112,8 @@ class RunConfig:
         pull_apk: Pull APKs from the device and hash them.
         whitelist: Path to a whitelist file (annotated ``list[str] | None`` per
             spec; see notes).
-        action: The ``Functionality`` to perform each run (``Player`` /
-            ``Trigdroid``), or ``None`` for a pure forensic run.
+        action: The ``Functionality`` to perform each run (e.g. ``Player``),
+            or ``None`` for a run without a scripted action.
         recording_path: Absolute path to a recording; when set with
             ``action is None`` the engine treats the run as playback.
         capture_window: Capture duration (seconds) for action-less forensic
@@ -156,7 +156,8 @@ class RunConfig:
         """Resolve ``(enabled, extra_patterns, protected_packages)``.
 
         Fields left at ``None`` follow the user's ``[analysis]`` config; if
-        that cannot be loaded the filter stays on with no extras.
+        that cannot be loaded the filter stays on with no extras. The target
+        (spotlight) app is protected by the engine itself.
         """
         enabled, patterns, protected = True, [], []
         try:
@@ -167,9 +168,6 @@ class RunConfig:
             enabled = bool(getattr(analysis, "system_noise_filter", True))
             patterns = list(getattr(analysis, "noise_patterns", None) or [])
             protected = list(getattr(analysis, "protected_packages", None) or [])
-            trig_pkg = getattr(getattr(cfg, "trigdroid", None), "package_name", None)
-            if isinstance(trig_pkg, str) and trig_pkg:
-                protected.append(trig_pkg)
         except Exception:  # config is optional here
             pass
         if self.system_noise_filter is not None:
@@ -192,7 +190,7 @@ class RunConfig:
 
         Args:
             cfg: The loaded Sandroid configuration.
-            action: Optional functionality to perform each run (e.g. Trigdroid).
+            action: Optional functionality to perform each run (e.g. Player).
             recording_path: Optional absolute recording path.
 
         Returns:
@@ -237,7 +235,7 @@ class RunConfig:
 
         Args:
             ac: The headless analysis configuration.
-            action: Optional functionality to perform each run (e.g. Trigdroid).
+            action: Optional functionality to perform each run (e.g. Player).
             whitelist: Optional whitelist-file path (see ``RunConfig`` notes).
             recording_path: Optional absolute recording path.
 
