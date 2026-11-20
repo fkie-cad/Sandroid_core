@@ -500,12 +500,26 @@ repeated (a cookie banner is gone once accepted):
    - **Rewind + Replay**: back to the start point, copy **Before** of the
      selected files, repeat your steps, copy **After (replay)**. The device
      ends after the action. Each step is replayed *by element* (the tapped
-     element is found again and its current centre is tapped), else *by
-     position* (the recorded coordinates); the Timeline shows ``by element``,
+     element is found again and tapped where you tapped it: the same spot
+     relative to its bounds, not its centre), else *by position* (the
+     recorded coordinates); the Timeline shows ``by element``,
      ``by position``, ``failed: <reason>`` or ``diverged: <reason>`` for
-     every step. Typed text is replayed as the recorded keyboard taps, or
-     (typed another way) one character at a time at your recorded pace, and
-     the field is then read back: ``diverged: field reads '<x>', expected
+     every step. Before a tap by element the UI helper tests the spot live:
+     only when the element (or something inside it) is the topmost there is
+     the step *verified*. When a dialog or the keyboard covers that spot,
+     other visible spots of the element are tried; when none is free the
+     recorded position is tapped, ``by position (element covered)``,
+     unchecked. Without a live hit test the step is ``not hit-tested``,
+     unchecked. A tap position is never scaled to another screen: on a
+     display of another size or rotation the step is unchecked, and a
+     position outside it is not tapped. A tap Tracking could not name
+     surely (it read the element from an outdated snapshot and could not
+     read it again in time) goes by position, unchecked. Text typed with
+     keyboard taps is typed into its field when the replay finds that
+     field focused and empty (the key positions depend on the keyboard's
+     state); otherwise the keys are tapped, unchecked. Text typed another
+     way is typed one character at a time at your recorded pace; either
+     way the field is then read back: ``diverged: field reads '<x>', expected
      '<y>'`` when it holds something else (an autocomplete suffix after the
      recorded text is fine; password fields only say ``field text
      differs``). A tap that misses its element right after the step before
@@ -539,7 +553,14 @@ The command line and headless runs keep the batch replay (replay count, dry
 run, noise filter); the TUI no longer has it.
 
 Every Rewind is saved as a run (its Inspector *Changes* tab shows the
-per-file results, the replayed steps and the requests per run); command-line
+per-file results, the replayed steps and the requests per run); its Changes column says how many files your run changed
+and how many of them were compared (``159 changed, 0 compared``). Pressing
+Rewind with no file selected asks once whether to go on (nothing would be
+compared), and a file selected after a Rewind ran says that it has no After
+from your run. The next ``r`` also removes the start points earlier
+recordings left on the AVD (``Removed 3 old start points (11 GB)``), except
+pinned and imported ones and any snapshot that is not Sandroid's; when it
+cannot tell which are pinned it removes none. Command-line
 analyses are saved as a run bundle under ``<results_path>/runs/<run_id>/``
 and listed in the Sessions lens (per device, newest first): ``#``, label, when,
 how long the run took (``×3`` for a run with three replays) and what changed
