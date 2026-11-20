@@ -121,6 +121,9 @@ class Device:
         root_kind: How root is available: ``"adbd root"`` (adbd runs as
             root), ``"adb root"`` (userdebug/eng build, ``adb root`` works),
             ``"su"`` (su binary), ``"none"``; ``""`` until probed.
+        transport_id: adb's ``transport_id`` from ``adb devices -l`` (``""``
+            when adb does not report it); a new one means a new adb
+            transport (adbd restart, reconnect).
     """
 
     serial: str
@@ -133,6 +136,7 @@ class Device:
     capabilities: set[DeviceCapability] = field(default_factory=set)
     last_probe_attempt: float = 0.0
     root_kind: str = ""
+    transport_id: str = ""
 
     def __post_init__(self):
         """Detect device type and capabilities based on serial pattern."""

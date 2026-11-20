@@ -115,6 +115,19 @@ def frida_server_auto_start_enabled() -> bool:
     return True
 
 
+def _wait_device_prepared(what: str) -> None:
+    """Backstop: frida-server work waits for a running device-prepared step
+    (root, SELinux Permissive, proxy restore); never on the UI thread, and
+    on a timeout it goes on. Never raises.
+    """
+    try:
+        from sandroid.core import device_prep
+
+        device_prep.gate(what)
+    except Exception:
+        logger.debug("device-prepared gate failed", exc_info=True)
+
+
 def ensure_frida_server_started(fm) -> bool:
     """Install frida-server only if needed, then start it.
 
@@ -132,6 +145,7 @@ def ensure_frida_server_started(fm) -> bool:
         Whatever ``install_frida_server`` raises; format it with
         :func:`describe_frida_install_error`.
     """
+    _wait_device_prepared("frida-server start")
     if _server_running(fm):
         return bool(fm.run_frida_server())  # no-op when ready
     installed = None
@@ -222,6 +236,7 @@ def auto_start_frida_server(fm=None, force: bool = False) -> tuple[bool, str]:
             return False, f"Frida manager unavailable: {e}"
     if fm is None:
         return False, "Frida manager unavailable (no device connected?)"
+    _wait_device_prepared("frida-server auto-start")
     # Startup and device-change callbacks may race: one start at a time, the
     # second caller then finds the server running.
     with _AUTO_START_LOCK:

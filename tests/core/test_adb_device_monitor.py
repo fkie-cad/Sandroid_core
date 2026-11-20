@@ -284,6 +284,61 @@ def test_read_timeout_self_heals(make_monitor):
     assert cf.wait_calls(2)
 
 
+def test_server_restart_fires_on_reconnect_once(make_monitor):
+    """EOF on a live stream (adb server restart), refused while it is down,
+    then a new handshake: on_reconnect fires once, before the new blocks.
+    """
+    order: list[str] = []
+    rec = OnChangeRecorder()
+    first = FakeSocket([b"OKAY", DEVICE_FRAME, EOF])
+    second = FakeSocket([b"OKAY", DEVICE_FRAME])
+    cf = ConnectFn([first, ConnectionRefusedError("server down"), second])
+
+    def on_change() -> None:
+        order.append("change")
+        rec()
+
+    monitor = make_monitor(
+        on_change=on_change,
+        on_reconnect=lambda: order.append("reconnect"),
+        connect_fn=cf,
+    )
+    monitor.start()
+
+    assert rec.wait_for(2)
+    assert order == ["change", "reconnect", "change"]
+
+
+def test_no_on_reconnect_on_first_connect_or_read_timeout(make_monitor):
+    rec = OnChangeRecorder()
+    reconnects: list[int] = []
+    stalled = FakeSocket([b"OKAY", DEVICE_FRAME, TimeoutError("timed out")])
+    good = FakeSocket([b"OKAY", DEVICE_FRAME])
+    cf = ConnectFn([stalled, good])
+    monitor = make_monitor(
+        on_change=rec, on_reconnect=lambda: reconnects.append(1), connect_fn=cf
+    )
+    monitor.start()
+
+    assert rec.wait_for(2)
+    assert reconnects == []
+
+
+def test_on_reconnect_raising_does_not_kill_loop(make_monitor):
+    rec = OnChangeRecorder()
+
+    def boom() -> None:
+        raise RuntimeError("boom")
+
+    first = FakeSocket([b"OKAY", EOF])
+    second = FakeSocket([b"OKAY", DEVICE_FRAME])
+    cf = ConnectFn([first, second])
+    monitor = make_monitor(on_change=rec, on_reconnect=boom, connect_fn=cf)
+    monitor.start()
+
+    assert rec.wait_for(1)
+
+
 def test_hex_parse_desync_reconnects(make_monitor):
     """Non-hex length bytes -> ValueError -> reconnect, no crash."""
     rec = OnChangeRecorder()

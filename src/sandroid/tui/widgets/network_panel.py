@@ -69,6 +69,7 @@ points to the run's pcap. ``L`` (MainScreen) returns to LIVE.
 from __future__ import annotations
 
 import base64
+import bisect
 import contextlib
 import functools
 import json
@@ -1447,6 +1448,25 @@ class NetworkPanel(Widget):
         return False
 
     def _add_live(self, rows: list[FlowRow]) -> None:
+        """Add live rows in time order (``FlowRow.ts``, the request start).
+
+        A flow reaches the lens when it finishes, a TLS failure at once, so a
+        long request can arrive after rows that started later: such a row is
+        put in its place and the table is redrawn (the cursor stays on its
+        flow); rows that are newest go to the bottom as before.
+        """
+        rows = sorted(rows, key=lambda r: r.ts)
+        if self._live and rows[0].ts < self._live[-1].ts:
+            for row in rows:
+                bisect.insort_right(self._live, row, key=lambda r: r.ts)
+            if len(self._live) > self.MAX_ROWS:
+                self._live = self._live[-self.MAX_ROWS :]
+            if not self.in_review:
+                passing = sum(1 for row in rows if self._passes(row))
+                self._rebuild()
+                self._follow.added(passing)
+            self._do_refresh_status()
+            return
         self._live.extend(rows)
         if len(self._live) > self.MAX_ROWS + 200:
             passing = sum(1 for row in rows if self._passes(row))

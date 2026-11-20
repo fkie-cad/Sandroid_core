@@ -702,8 +702,13 @@ class SandroidTUI(App):
         # failure must never break app setup, so guard the whole thing.
         self._adb_device_monitor: AdbDeviceMonitor | None = None
         try:
+            from sandroid.core.device_prep import note_adb_server_restart
+
+            # An adb server restart resets every transport: the active
+            # device is re-attached through the device-prepared step.
             self._adb_device_monitor = AdbDeviceMonitor(
-                on_change=self._on_adb_devices_changed
+                on_change=self._on_adb_devices_changed,
+                on_reconnect=note_adb_server_restart,
             )
             self._adb_device_monitor.start()
         except Exception as exc:
@@ -842,32 +847,46 @@ class SandroidTUI(App):
     def _register_frida_device_change_callback(self) -> None:
         """Register callback to invalidate Frida device cache on device change."""
         try:
+            from sandroid.core import device_prep
             from sandroid.services import get_device_service, get_frida_session_service
 
             device_service = get_device_service()
             frida_service = get_frida_session_service()
+            # Frida / kprobe work waits for the device-prepared step (root,
+            # SELinux, proxy restore) when its listener is registered.
+            prepared_listener = [False]
+
+            def device_work(device) -> None:
+                # Same serial after an emulator restart: the job manager
+                # would keep its dead frida handle ("device is gone").
+                from sandroid.tui.controllers.recording_controller import (
+                    drop_stale_frida_device,
+                )
+
+                drop_stale_frida_device()
+                # Re-warm the per-serial kprobe availability cache for the
+                # new device (off-thread) and re-sync an open SettingsScreen.
+                self._warm_kprobe_cache_on_device_change()
+                import threading
+
+                threading.Thread(
+                    target=self._auto_start_frida_server, daemon=True
+                ).start()
+
+            def on_device_prepared(device, result) -> None:
+                """Prepare worker thread: the device may be touched now."""
+                self._report_device_prepared(result)
+                if device is not None:
+                    device_work(device)
 
             def on_device_change(device) -> None:
                 """Handle device change - invalidate Frida device cache."""
                 frida_service.invalidate_frida_device_cache()
                 if device:
                     logger.info(f"Device changed to: {device.serial}")
-                    # Same serial after an emulator restart: the job manager
-                    # would keep its dead frida handle ("device is gone").
-                    from sandroid.tui.controllers.recording_controller import (
-                        drop_stale_frida_device,
-                    )
-
-                    drop_stale_frida_device()
                     frida_service.update_device_serial(device.serial)
-                    # Re-warm the per-serial kprobe availability cache for the
-                    # new device (off-thread) and re-sync an open SettingsScreen.
-                    self._warm_kprobe_cache_on_device_change()
-                    import threading
-
-                    threading.Thread(
-                        target=self._auto_start_frida_server, daemon=True
-                    ).start()
+                    if not (prepared_listener[0] and device_prep.is_enabled()):
+                        device_work(device)
                 else:
                     logger.info("Device changed to: None")
 
@@ -904,10 +923,49 @@ class SandroidTUI(App):
                     )
 
             device_service.register_device_change_callback(on_device_change)
+            if device_service.has_device_manager():
+                manager = device_service.get_device_manager()
+                register = getattr(manager, "on_device_prepared", None)
+                if callable(register):
+                    register(on_device_prepared)
+                    prepared_listener[0] = True
             logger.debug("Registered Frida device change callback")
 
         except Exception as e:
             logger.warning(f"Failed to register Frida device change callback: {e}")
+
+    def _report_device_prepared(self, result) -> None:
+        """Prepare worker: one activity-log line per run that prepared the
+        device or failed; a toast after a reboot or on a problem (once per
+        device and boot).
+        """
+        if getattr(result, "ran", False) or getattr(result, "kind", "") == "failed":
+            self._run_on_ui(self._show_device_prepared, result)
+        else:
+            self._run_on_ui(self._update_status_bar)
+
+    def _show_device_prepared(self, result) -> None:
+        """UI thread: see :meth:`_report_device_prepared`."""
+        problems = result.has_problems
+        log = (
+            self._activity_log.log_warning if problems else self._activity_log.log_info
+        )
+        log(result.summary())
+        toasted = self.__dict__.setdefault("_device_prep_toasted", set())
+        key = (result.serial, result.boot_token)
+        if (result.kind == "new-world" or problems) and key not in toasted:
+            toasted.add(key)
+            if problems:
+                message = f"{result.summary()} — see the log"
+            else:
+                message = f"{result.serial} rebooted: prepared again (root, SELinux)."
+            self.notify(
+                message,
+                title="Device prepared",
+                severity="warning" if problems else "information",
+                timeout=6,
+            )
+        self._update_status_bar()
 
     def _run_on_ui(self, fn, *args, **kwargs) -> None:
         """Run *fn* on the UI thread: directly there, marshaled from a worker.
@@ -1891,6 +1949,11 @@ class SandroidTUI(App):
             self._perform_device_switch(serial)
         elif current.serial == serial:
             self._activity_log.log_info(f"AVD '{avd_name}' ({serial}) is ready")
+            # Same serial back (restart / relaunch): prepare it again
+            # (non-blocking; a fresh boot is told by its boot id).
+            from sandroid.core import device_prep
+
+            device_prep.request_prepare(serial, "ready")
             self._force_ui_refresh()
         else:
             self.notify(

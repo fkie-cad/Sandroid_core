@@ -234,23 +234,45 @@ class MitmproxyPanel(Widget):
     def _subscribe_device_changes(self) -> None:
         """Re-probe after a device reconnect (once per panel; best-effort).
 
-        DeviceManager has no unregister, so the callback checks
-        ``_unmounted`` and becomes a no-op once the panel is gone.
+        DeviceManager has no unregister for change callbacks, so the
+        callback checks ``_unmounted`` and becomes a no-op once the panel is
+        gone; the prepared listener is removed on unmount.
         """
         if self._device_cb_registered:
             return
         try:
             from sandroid.services import get_device_service
 
-            get_device_service().register_device_change_callback(self._on_device_change)
+            service = get_device_service()
+            service.register_device_change_callback(self._on_device_change)
             self._device_cb_registered = True
+            # A (re)connected device is re-probed once it is prepared (root,
+            # SELinux, the proxy restore hooks), not while that still runs.
+            if service.has_device_manager():
+                manager = service.get_device_manager()
+                register = getattr(manager, "on_device_prepared", None)
+                if callable(register):
+
+                    def prepared(device, _result) -> None:
+                        self._on_device_change(device, True)
+
+                    register(prepared)
+                    self._prepared_cb_registered = True
+                    self._prepared_cb = (manager, prepared)
         except Exception as exc:
             logger.debug("mitm panel device-change subscription failed: %s", exc)
 
-    def _on_device_change(self, device) -> None:
-        """Device-poll thread → UI thread (non-blocking, like _on_service_line)."""
+    def _on_device_change(self, device, prepared: bool = False) -> None:
+        """Device-poll / prepare thread → UI thread (non-blocking)."""
         if self._unmounted:
             return
+        if device is not None and not prepared:
+            from sandroid.core import device_prep
+
+            if getattr(self, "_prepared_cb_registered", False) and (
+                device_prep.is_enabled()
+            ):
+                return  # re-probed from on_device_prepared
         self._ui.post(self._handle_device_change, device)
 
     def _handle_device_change(self, device) -> None:
@@ -317,8 +339,20 @@ class MitmproxyPanel(Widget):
 
         threading.Thread(target=_run, name="mitm-reverse-cleanup", daemon=True).start()
 
+    def _unsubscribe_device_prepared(self) -> None:
+        """Drop the ``on_device_prepared`` listener (best-effort)."""
+        manager, callback = getattr(self, "_prepared_cb", (None, None))
+        self._prepared_cb = (None, None)
+        remove = getattr(manager, "remove_device_prepared_listener", None)
+        if callable(remove):
+            try:
+                remove(callback)
+            except Exception:
+                pass
+
     def on_unmount(self) -> None:
         self._unmounted = True
+        self._unsubscribe_device_prepared()
         self._cancel_reprobe()
         try:
             self._service.remove_listener(self._on_service_line)
