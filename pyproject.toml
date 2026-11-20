@@ -74,6 +74,10 @@ dependencies = [
     "dexray-intercept>=1.0.1.9,<2",
     "tomli-w>=1.0.0",
     "pyyaml>=6.0",
+    # Identity profiles (schema 2) are YAML that users edit: ruamel keeps
+    # their comments and key order on save (MIT). mitmproxy 12.x pins
+    # ruamel.yaml >=0.18.10,<=0.19.1, so the range matches it.
+    "ruamel.yaml>=0.18.14,<0.20",
     "pydantic>=2.0.0",
     "platformdirs>=3.0.0",
     "rich>=13.0.0",
@@ -157,6 +161,7 @@ include = ["sandroid*"]
 sandroid = [
     "config/*.yaml",
     "config/*.toml",
+    "identity_profiles/*.yaml",
     "templates/*.html",
     "assets/*.png",
     "assets/*.jpg",

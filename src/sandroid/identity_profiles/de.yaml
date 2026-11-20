@@ -1,0 +1,44 @@
+# Built-in identity profile: Germany (Berlin).
+# Read-only, shipped with Sandroid. New profiles start from it (Identity
+# lens, P) or extend it (extends: builtin:de); each one gets its
+# own token, seed, GPS fix and world seed (world.seed: auto).
+format: sandroid-identity
+schema: 2
+id: de
+name: Germany (Berlin)
+preset: de
+owner: {first: Mara, last: Kessler, phone: '+491520{digits:7}', email: 'mara.kessler.{token}@example.org'}
+values:
+  android_id: {derive: ssaid, scope: signer}
+  gaid: {derive: uuid}
+  app_set_id: {derive: uuid}
+  device_name: {template: '{owner.first}s Pixel {token}'}
+  phone_number: {template: '{owner.phone}'}
+  gps: {value: '52.516375, 13.397874'}
+  timezone: {value: Europe/Berlin}
+  locale: {value: de-DE}
+  sim_operator: {template: 'Telekom {token}'}
+  sim_mccmnc: {value: '26201'}
+  build_model: {template: 'Pixel 8 {token}', enabled: false}
+  imei: {template: '35847631{digits:6}{luhn}'}
+  imsi: {template: '26201{digits:10}'}
+  iccid: {template: '8949{digits:14}{luhn}'}
+  serial: {template: 'RF8N{token}'}
+  account: {template: '{owner.email}'}
+  clipboard: {template: 'Notiz {token} merken'}
+lists:
+  contacts:
+    - {name: 'Jonas Weber {token}', phone: '+49151{digits:7}', email: 'jonas.{token}@example.org'}
+    - {name: 'Lena Hoffmann {token}', phone: '+49151{digits:7}', email: 'lena.{token}@example.org'}
+    - {name: 'Tobias Brandt {token}', phone: '+49151{digits:7}', email: 'tobias.{token}@example.org'}
+  sms:
+    - {address: '+49151{digits:7}', body: 'Dein Paket {token}{digits:3} kommt heute', box: inbox, date: -1d}
+    - {address: '+49151{digits:7}', body: 'Termin bestaetigt, Code {token}-{digits:4}', box: inbox, date: -2d}
+  calls:
+    - {number: '+49151{digits:7}', name: 'Praxis Dr. Albers {token}', type: incoming, duration: 42, date: -2d}
+    - {number: '+49151{digits:7}', name: 'Paketdienst {token}', type: missed, duration: 43, date: -3d}
+world:
+  seed: auto
+  size: medium
+  country: de
+notes: ''

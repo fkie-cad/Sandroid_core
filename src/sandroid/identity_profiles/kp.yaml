@@ -1,0 +1,41 @@
+# Built-in identity profile: North Korea (Pyongyang).
+# Read-only, shipped with Sandroid. New profiles start from it (Identity
+# lens, P) or extend it (extends: builtin:kp); each one gets its
+# own token, seed, GPS fix and world seed (world.seed: auto).
+format: sandroid-identity
+schema: 2
+id: kp
+name: North Korea (Pyongyang)
+preset: kp
+owner: {first: Alex, last: Morgan, phone: '+850212555{digits:4}', email: 'alex.morgan.{token}@example.org'}
+values:
+  android_id: {derive: ssaid, scope: signer}
+  gaid: {derive: uuid}
+  app_set_id: {derive: uuid}
+  device_name: {template: '{owner.first}s Pixel {token}'}
+  phone_number: {template: '{owner.phone}'}
+  gps: {value: '39.043221, 125.769242'}
+  timezone: {value: Asia/Pyongyang}
+  locale: {value: ko-KP}
+  sim_operator: {template: 'Carrier {token}'}
+  sim_mccmnc: {value: '46705'}
+  build_model: {template: 'Pixel 8 {token}', enabled: false}
+  imei: {template: '35847631{digits:6}{luhn}'}
+  imsi: {template: '46705{digits:10}'}
+  iccid: {template: '8949{digits:14}{luhn}'}
+  serial: {template: 'RF8N{token}'}
+  account: {template: '{owner.email}'}
+  clipboard: {template: 'Notiz {token} merken'}
+lists:
+  contacts:
+    - {name: 'Jordan Reed {token}', phone: '+1212555{digits:4}', email: 'jordan.{token}@example.org'}
+    - {name: 'Casey Turner {token}', phone: '+1212555{digits:4}', email: 'casey.{token}@example.org'}
+    - {name: 'Riley Brooks {token}', phone: '+1212555{digits:4}', email: 'riley.{token}@example.org'}
+  sms:
+    - {address: '+1212555{digits:4}', body: 'Your parcel {token}{digits:3} arrives today', box: inbox, date: -1d}
+    - {address: '+1212555{digits:4}', body: 'Appointment confirmed, code {token}-{digits:4}', box: inbox, date: -2d}
+  calls:
+    - {number: '+1212555{digits:4}', name: 'Dr. Albers Office {token}', type: incoming, duration: 42, date: -2d}
+    - {number: '+1212555{digits:4}', name: 'Courier {token}', type: missed, duration: 43, date: -3d}
+# No world section: there is no world country pack for this country yet.
+notes: ''
