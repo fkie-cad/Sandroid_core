@@ -295,7 +295,8 @@ class HighlightView:
                 meta.append(f"judged {_clock(judged)}")
             evaluated = basis.get("evaluated")
             if evaluated:
-                meta.append(f"{evaluated} {self.noun}s looked at")
+                # "rows": the Network count includes TLS-failure rows.
+                meta.append(f"{evaluated} rows looked at")
             if meta:
                 text.append("\n" + " · ".join(meta), style=pal.dim)
             if judged and last_change and float(last_change) > float(judged):

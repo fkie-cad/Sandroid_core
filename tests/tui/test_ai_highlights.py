@@ -238,7 +238,7 @@ async def test_network_tint_column_bar_and_inspector(flow_dir, store):
         assert titles.count("AI highlight") == 1
         body = str(dict(sections)["AI highlight"])
         assert "AI: POST to graph.facebook.com" in body
-        assert "7 flows looked at" in body
+        assert "7 rows looked at" in body  # TLS-failure rows count too
         # a second set: two words in the cell, the row keeps the first slot
         store.create("network", "Meta", reasons={"flow-2": "Meta host"})
         await until(pilot, lambda: "," in _cell(table, "f2", "hl"))
