@@ -28,16 +28,17 @@ Read path (:class:`DeviceFileReader`):
 
 Cache (``<session>/ai/content_cache/<sha1(path)>/``, folder 0700, files
 0600, each written atomically): ``meta.json`` (path, serial, row ``last``,
-device mtime and size, ``read_at``, kind, truncated), ``raw.bin`` (or
-``db`` + ``db-wal``), ``match.txt`` (the full decoded text, searched
-locally, never sent to the model) and ``digest.txt`` (the reduced
-rendering). An entry is stale when the row's last content change is newer
-than the one it was read for, the device mtime or size (of the file, and of
-a database's ``-wal``) differ, it came from another serial, a WORLD lease
-was taken since (snapshot restore, emulator restart: the arbiter's epoch,
-per process), or a bigger cap / fuller SQLite mode is asked for; at most
-64 MB per session, oldest ``read_at`` evicted first (never an entry of the
-running call). Files that cannot be read (gone, not a regular file,
+device mtime and size, ``read_at``, kind, truncated, root mode),
+``raw.bin`` (text files; database copies are not kept), ``match.txt`` (the
+full decoded text, searched locally, never sent to the model) and
+``digest.txt`` (the reduced rendering). An entry is stale when the row's
+last content change is newer than the one it was read for, the device
+mtime or size (of the file, and of a database's ``-wal``) differ, it came
+from another serial or root mode, the device state was replaced since (the
+session timeline's world count: snapshot loads from the TUI or the AI,
+device boots; plus the arbiter's WORLD-lease count), or a bigger cap /
+fuller SQLite mode is asked for; at most 64 MB per session, oldest
+``read_at`` evicted first (never an entry the running call used). Files that cannot be read (gone, not a regular file,
 permission denied, too big, SQLite skipped) get a small *negative* entry
 (status + stat), so the lens tools stop calling them missing.
 """
@@ -55,13 +56,12 @@ import subprocess
 import tempfile
 import threading
 import time
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +72,10 @@ MAX_BYTES_PER_FILE = 1024 * 1024
 DB_COPY_CAP = 16 * 1024 * 1024
 #: Cache size per session (oldest ``read_at`` evicted first).
 CACHE_CAP_BYTES = 64 * 1024 * 1024
-#: Paths per ``stat`` call.
+#: Paths per ``stat`` call, and characters of quoted paths per call (old
+#: adbd limits a service string to 4 KB).
 STAT_BATCH = 50
+STAT_ARGS_CAP = 3000
 #: Seconds per ``head`` read / database copy / stat / root probe.
 HEAD_TIMEOUT_S = 15.0
 DB_TIMEOUT_S = 60.0
@@ -113,20 +115,48 @@ OWN_READ_PROCESSES = frozenset({"head", "cat", "stat", "su", "id"})
 
 
 def is_own_read_process(name: Any) -> bool:
-    """Whether a monitor event's process is one of our own reads."""
+    """Whether a monitor event's process NAME is one of our read commands
+    (only ever used together with :func:`was_read_by_tool` and noise ops:
+    a ``cat`` / ``su`` that writes is real activity).
+    """
     head = str(name or "").split(" · ", 1)[0].strip().lower()
     return head.rsplit("/", 1)[-1] in OWN_READ_PROCESSES
+
+
+#: Device paths this process read with read_device_files (path -> time).
+_TOOL_READS: dict[str, float] = {}
+_TOOL_READS_MAX = 20_000
+_TOOL_READS_LOCK = threading.Lock()
+
+
+def note_tool_read(path: str) -> None:
+    """Remember that read_device_files read *path* (its open/access events
+    by head / cat / su are ours).
+    """
+    with _TOOL_READS_LOCK:
+        _TOOL_READS.pop(path, None)
+        _TOOL_READS[path] = time.time()
+        while len(_TOOL_READS) > _TOOL_READS_MAX:
+            _TOOL_READS.pop(next(iter(_TOOL_READS)))
+
+
+def was_read_by_tool(path: str) -> bool:
+    """Whether read_device_files read *path* in this process."""
+    with _TOOL_READS_LOCK:
+        return path in _TOOL_READS
 
 
 #: SQLite companion files whose rows stand for their database.
 COMPANION_SUFFIXES = ("-wal", "-shm", "-journal")
 #: Bytes of probe / stat output kept.
 OUTPUT_CAP = 4 * 1024 * 1024
-#: This process (WORLD epochs are per process).
-_PROCESS_TOKEN = uuid.uuid4().hex[:12]
-#: The last device a running file monitor recorded (rows stay that device's
-#: after the monitor stops).
-_LAST_MONITOR_SERIAL: list[str] = []
+#: The last device a running file monitor recorded, per session folder (the
+#: rows stay that device's after the monitor stops).
+_LAST_MONITOR_SERIAL: dict[str, str] = {}
+#: Timeline files read for the recording device: path -> (stamp, serial).
+_TIMELINE_SERIALS: dict[str, tuple[tuple, str | None]] = {}
+#: Bytes of a timeline file's end searched for the recording device.
+TIMELINE_TAIL = 256 * 1024
 
 
 # =============================================================================
@@ -148,15 +178,44 @@ def world_busy() -> bool:
         return False
 
 
-def world_token() -> str:
-    """``<process>:<WORLD epoch>``: changes whenever a WORLD lease is taken."""
+def _timeline_world(serial: str | None) -> str | None:
+    """``<session id>:<world>`` of *serial*'s session-timeline sink.
+
+    The timeline counts every world change: a snapshot load (panel, Rewind,
+    the AI tools: ``EmulatorService.load_snapshot``), a device boot (emulator
+    restart, Devices hub) and an inferred one (device clock went back); it is
+    kept per session and survives a restart. Read-only look at the running
+    service (none is created here).
+    """
+    try:
+        from sandroid.core import timeline
+
+        service = timeline._SERVICE
+        if service is None:
+            return None
+        with service._lock:
+            sink = service._by_serial.get(serial) if serial else None
+            sink = sink or service._active or service._detached
+            if sink is None:
+                return None
+            return f"{sink.session_id}:{sink.world}"
+    except Exception:
+        logger.debug("timeline world unavailable", exc_info=True)
+        return None
+
+
+def world_token(serial: str | None = None) -> str:
+    """Changes whenever the device state may have been replaced: the session
+    timeline's world count for *serial* (snapshot loads, boots, from the
+    TUI or the AI) plus the arbiter's WORLD-lease count.
+    """
     try:
         from sandroid.ai.arbiter import get_arbiter
 
         epoch = get_arbiter().world_epoch()
     except Exception:
         epoch = -1
-    return f"{_PROCESS_TOKEN}:{epoch}"
+    return f"tl:{_timeline_world(serial)};ar:{epoch}"
 
 
 def monitor_serial() -> str | None:
@@ -173,17 +232,86 @@ def monitor_serial() -> str | None:
         return None
     if not (isinstance(serial, str) and serial):
         return None
-    _LAST_MONITOR_SERIAL[:] = [serial]
+    session = _session_key()
+    if session is not None:
+        _LAST_MONITOR_SERIAL[session] = serial
+    return serial
+
+
+def _session_key() -> str | None:
+    try:
+        from sandroid.ai.results import session_root
+
+        root = session_root()
+    except Exception:
+        return None
+    return str(root) if root is not None else None
+
+
+def _timeline_files() -> list[Path]:
+    session = _session_key()
+    if session is None:
+        return []
+    root = Path(session)
+    files = [root / "timeline.jsonl", *root.glob("*/timeline.jsonl")]
+    out = []
+    for f in files:
+        try:
+            out.append((f.stat().st_mtime_ns, f))
+        except OSError:
+            continue
+    return [f for _t, f in sorted(out, reverse=True)]
+
+
+def _serial_in_timeline(path: Path) -> str | None:
+    """The device of the newest file-monitor line (``files`` / ``monitor``)
+    in the end of one timeline file (cached while the file is unchanged).
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    stamp = (st.st_mtime_ns, st.st_size)
+    hit = _TIMELINE_SERIALS.get(str(path))
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    serial = None
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, st.st_size - TIMELINE_TAIL))
+            tail = f.read(TIMELINE_TAIL)
+        for raw in reversed(tail.splitlines()):
+            if b'"files"' not in raw and b'"monitor"' not in raw:
+                continue
+            try:
+                line = json.loads(raw)
+            except ValueError:
+                continue
+            if line.get("src") in ("files", "monitor") and line.get("dev"):
+                serial = str(line["dev"])
+                break
+    except OSError:
+        serial = None
+    _TIMELINE_SERIALS[str(path)] = (stamp, serial)
     return serial
 
 
 def recorded_serial() -> str | None:
     """The device the Files rows were recorded on, when known: the running
-    monitor's, else the last one a monitor recorded in this process.
+    monitor's; else the one a monitor recorded in this session (remembered,
+    or the newest file-monitor line of the session's timeline files).
     """
-    return monitor_serial() or (
-        _LAST_MONITOR_SERIAL[0] if _LAST_MONITOR_SERIAL else None
-    )
+    serial = monitor_serial()
+    if serial:
+        return serial
+    session = _session_key()
+    if session is not None and session in _LAST_MONITOR_SERIAL:
+        return _LAST_MONITOR_SERIAL[session]
+    for path in _timeline_files():
+        serial = _serial_in_timeline(path)
+        if serial:
+            return serial
+    return None
 
 
 def selected_serial() -> str | None:
@@ -340,10 +468,9 @@ class DeviceFileReader:
         self.probe_root()
         todo = list(dict.fromkeys(paths))
         out: dict[str, Stat] = {}
-        for i in range(0, len(todo), STAT_BATCH):
+        for batch in _stat_batches(todo):
             if self._should_stop():
                 break
-            batch = todo[i : i + STAT_BATCH]
             words = [
                 "stat",
                 "-c",
@@ -362,12 +489,14 @@ class DeviceFileReader:
     def head(self, path: str, cap: int, timeout: float = HEAD_TIMEOUT_S) -> ReadResult:
         """At most *cap* + 1 bytes of *path* (``over`` when more existed)."""
         self.probe_root()
+        note_tool_read(path)
         words = ["head", "-c", str(cap + 1), shlex.quote(path), "2>/dev/null"]
         return self._stream(self.argv(words), cap, timeout)
 
     def cat(self, path: str, cap: int, timeout: float = DB_TIMEOUT_S) -> ReadResult:
         """The whole of *path*, killed beyond *cap* bytes (``over``)."""
         self.probe_root()
+        note_tool_read(path)
         words = ["cat", shlex.quote(path), "2>/dev/null"]
         return self._stream(self.argv(words), cap, timeout)
 
@@ -426,6 +555,23 @@ class DeviceFileReader:
                 close()
         data = bytes(buf[: cap + 1])
         return ReadResult(data, over=len(data) > cap, stop=stop, killed=killed)
+
+
+def _stat_batches(paths: list[str]) -> Iterator[list[str]]:
+    """At most :data:`STAT_BATCH` paths and :data:`STAT_ARGS_CAP` characters
+    of quoted paths per batch (one over-long path is a batch of its own).
+    """
+    batch: list[str] = []
+    size = 0
+    for path in paths:
+        n = len(shlex.quote(path)) + 1
+        if batch and (len(batch) >= STAT_BATCH or size + n > STAT_ARGS_CAP):
+            yield batch
+            batch, size = [], 0
+        batch.append(path)
+        size += n
+    if batch:
+        yield batch
 
 
 def parse_stat(text: str, paths: list[str]) -> dict[str, Stat]:
@@ -563,6 +709,7 @@ class CacheEntry:
         wal: Any = _UNSET,
         cap: int | None = None,
         sqlite: str | None = None,
+        root_mode: str | None = None,
     ) -> bool:
         """Whether this entry still stands for the device file.
 
@@ -574,7 +721,9 @@ class CacheEntry:
         meta = self.meta
         if serial and meta.get("serial") and meta["serial"] != serial:
             return False
-        if meta.get("world") and meta["world"] != world_token():
+        if meta.get("world") and meta["world"] != world_token(meta.get("serial")):
+            return False
+        if root_mode is not None and meta.get("root_mode") not in (None, root_mode):
             return False
         if mtime is not None and meta.get("mtime") != mtime:
             return False
@@ -589,7 +738,11 @@ class CacheEntry:
         if sqlite is not None:
             if self.status == "sqlite_skipped" and sqlite != "skip":
                 return False
-            if meta.get("sqlite") == "tables" and sqlite == "sample":
+            if (
+                meta.get("label") == "sqlite"
+                and meta.get("sqlite") == "tables"
+                and sqlite == "sample"
+            ):
                 return False
         last = _as_float(row_last)
         if last is not None:
@@ -696,7 +849,7 @@ def _entry_size(d: Path) -> int:
     return total
 
 
-def evict(root: Path, cap: int = CACHE_CAP_BYTES, keep: Iterable[Path] = ()) -> int:
+def evict(root: Path, cap: int | None = None, keep: Iterable[Path] = ()) -> int:
     """Remove the oldest entries (by ``read_at``) until *root* is within *cap*
     (bytes on disk). Entries in *keep* (the running call's) stay.
 
@@ -706,6 +859,7 @@ def evict(root: Path, cap: int = CACHE_CAP_BYTES, keep: Iterable[Path] = ()) -> 
     with _CACHE_LOCK:
         if not root.is_dir():
             return 0
+        cap = CACHE_CAP_BYTES if cap is None else cap
         kept = {Path(k) for k in keep}
         entries: list[tuple[float, int, Path]] = []
         for d in root.iterdir():
@@ -783,6 +937,7 @@ def _meta(
     row_last: Any,
     cap: int,
     sqlite: str,
+    world: str | None = None,
 ) -> dict[str, Any]:
     wal_mtime, wal_size = _wal_meta(wal)
     return {
@@ -794,7 +949,7 @@ def _meta(
         "wal_size": wal_size,
         "read_at": time.time(),
         "root_mode": getattr(reader, "mode", None),
-        "world": world_token(),
+        "world": world if world is not None else world_token(reader.serial),
         "cap": cap,
         "sqlite": sqlite,
     }
@@ -811,9 +966,10 @@ def remember_unreadable(
     row_last: Any = None,
     cap: int = DEFAULT_BYTES_PER_FILE,
     sqlite: str = "sample",
+    world: str | None = None,
 ) -> CacheEntry:
     """A negative entry: *path* could not be read (*status*), nothing to show."""
-    meta = _meta(reader, st, wal, row_last, cap, sqlite)
+    meta = _meta(reader, st, wal, row_last, cap, sqlite, world)
     meta.update(kind="metadata", label=status, status=status, truncated=False)
     return write_entry(root, path, meta, digest="", match="")
 
@@ -829,6 +985,7 @@ def read_into_cache(
     cap: int = DEFAULT_BYTES_PER_FILE,
     sqlite: str = "sample",
     budget_left: int | None = None,
+    world: str | None = None,
 ) -> FileOutcome:
     """Read one regular file (stat *st*) and write its cache entry.
 
@@ -848,16 +1005,22 @@ def read_into_cache(
             row_last=row_last,
             cap=cap,
             sqlite=sqlite,
+            world=world,
         )
         return FileOutcome(status, used, entry)
 
-    def empty_status() -> str:
+    def empty(used: int) -> FileOutcome:
+        """Nothing came back for a non-empty file. Only a clear answer is
+        remembered: gone, or permission denied (the re-stat says so, or it
+        works while there is no root). A transient failure (adb offline, a
+        root prompt timing out) is an ``error`` with no entry.
+        """
         again = reader.stat([path]).get(path)
-        return (
-            "gone"
-            if again is not None and again.error == "gone"
-            else ("permission_denied")
-        )
+        if again is not None and again.error in ("gone", "permission_denied"):
+            return negative(again.error, used)
+        if again is not None and again.regular and reader.mode == "none":
+            return negative("permission_denied", used)
+        return FileOutcome("error", used)
 
     used = 0
     data = b""
@@ -871,17 +1034,17 @@ def read_into_cache(
         if got.stop:
             return FileOutcome(_stop_status(got.stop), used)
         if not got.data and (st.size or 0) > 0:
-            return negative(empty_status(), used)
+            return empty(used)
         data = got.data[:cap]
         truncated = got.over or (st.size or 0) > cap
         is_db = data.startswith(_SQLITE_MAGIC)
         if is_db and sqlite == "skip":
             return negative("sqlite_skipped", used)
-    meta = _meta(reader, st, wal, row_last, cap, sqlite)
+    meta = _meta(reader, st, wal, row_last, cap, sqlite, world)
     if is_db:
         if wal is None:
             wal = reader.stat([path + "-wal"]).get(path + "-wal")
-            meta = _meta(reader, st, wal, row_last, cap, sqlite)
+            meta = _meta(reader, st, wal, row_last, cap, sqlite, world)
         wal_size = _wal_meta(wal)[1]
         total = (st.size or 0) + wal_size
         if total > DB_COPY_CAP:
@@ -896,7 +1059,7 @@ def read_into_cache(
             return negative("too_big", used)
         if not main.data.startswith(_SQLITE_MAGIC):
             if not main.data and total:
-                return negative(empty_status(), used)
+                return empty(used)
             rendered = render_content(path, main.data[:cap], size=st.size)
             status = "binary" if rendered.kind == "binary" else "read"
             meta.update(
@@ -932,8 +1095,10 @@ def read_into_cache(
         meta.update(
             kind=rendered.kind, label=rendered.label, truncated=False, status=status
         )
+        # The db / -wal copies are not kept: nothing reads them again (the
+        # digest and match text are written), and they would eat the cap.
         entry = write_entry(
-            root, path, meta, digest=rendered.digest, match=rendered.match, files=files
+            root, path, meta, digest=rendered.digest, match=rendered.match
         )
         return FileOutcome(status, used, entry)
     rendered = render_content(path, data, size=st.size)

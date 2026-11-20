@@ -491,8 +491,9 @@ def test_read_into_cache_sqlite_with_wal(tmp_path):
     out = df.read_into_cache(reader, root, path, stats[path], wal=stats[path + "-wal"])
     assert out.status == "read"
     assert out.bytes_read == len(main) + len(wal)
-    assert (out.entry.dir / "db").read_bytes() == main
-    assert (out.entry.dir / "db-wal").read_bytes() == wal
+    # The db / -wal copies are not kept (nothing reads them again).
+    assert not (out.entry.dir / "db").exists()
+    assert not (out.entry.dir / "db-wal").exists()
     assert "alice@example.com" in out.entry.digest()
     cats = [p.argv for p in dev.procs]
     assert all(a[4].startswith("cat ") for a in cats)  # no head for a .db name
@@ -861,8 +862,9 @@ def test_world_lease_since_the_read_invalidates(tmp_path, monkeypatch):
     arb.reset_for_tests()
 
 
-def test_recorded_serial_is_remembered(monkeypatch):
-    monkeypatch.setattr(df, "_LAST_MONITOR_SERIAL", ["emulator-A"])
+def test_recorded_serial_is_remembered(monkeypatch, tmp_path):
+    monkeypatch.setattr("sandroid.ai.results.session_root", lambda: tmp_path)
+    monkeypatch.setattr(df, "_LAST_MONITOR_SERIAL", {str(tmp_path): "emulator-A"})
     monkeypatch.setattr(df, "selected_serial", lambda: "emulator-B")
     assert df.read_target() == ("emulator-B", "emulator-A")
     assert df.current_serial() == "emulator-A"
@@ -897,3 +899,253 @@ def test_kept_version_renders_are_cached(tmp_path, monkeypatch):
     # content_state never renders.
     monkeypatch.setattr(rc, "_render_local", lambda *a: 1 / 0)
     assert rc.content_state("/data/data/com.x/a.xml") == "watchlist"
+
+
+# --------------------------------------------------------------------------
+# round 2: bounded reductions
+# --------------------------------------------------------------------------
+
+_M = 1024 * 1024
+_ADVERSARIAL = {
+    "xml unclosed name=": "<a " + "name='x' " * (_M // 9),
+    "xml value attr no >": "<a name='token'" + " name='x'" * (_M // 10),
+    "xml <a<a": "<a" * (_M // 2),
+    "json escaped quotes": '{"a":"' + '\\"' * (_M // 2),
+    "json secret nested": '"token":{' * (_M // 9),
+    "json secret strings": '"token":"' * (_M // 9),
+    "json keys": '"a":' * (_M // 4),
+    "kv spaces": "token=" + " " * _M + "x",
+    "jwt eyJ run": "eyJ" * (_M // 3),
+    "jwt many": "eyJaaaa." * (_M // 8),
+    "cookie pairs": "a=b; " * (_M // 5),
+    "stringified json cut": json.dumps(
+        {"cache": json.dumps([{"id": i, "name": f"n{i}"} for i in range(40_000)])}
+    )[:_M],
+}
+
+
+@pytest.mark.parametrize("name", sorted(_ADVERSARIAL))
+def test_reductions_are_linear_on_adversarial_1mb_input(name):
+    text = _ADVERSARIAL[name]
+    t0 = time.monotonic()
+    r = rc.render_content("/sdcard/x.txt", text.encode())
+    took = time.monotonic() - t0
+    assert took < 1.0, f"{name}: {took:.2f}s"  # measured <= 0.25 s
+    assert r.digest != rc.REDUCE_WITHHELD
+
+
+def test_reduction_budget_fails_closed(monkeypatch):
+    monkeypatch.setattr(rc, "REDUCE_BUDGET_S", 0.0)
+    text = "<a name='token'>" + "x" * 5000
+    r = rc.render_content("/sdcard/x.txt", text.encode())
+    assert r.digest == rc.REDUCE_WITHHELD
+    assert r.kind == "metadata"
+    assert r.match == text  # still searched locally
+    assert rc.reduce_text("password=hunter2") == rc.REDUCE_WITHHELD
+
+
+def test_reduced_text_is_capped_with_a_note():
+    text = "a=b\n" * (rc.REDUCE_CAP // 2)
+    r = rc.render_content("/sdcard/x.txt", text.encode())
+    assert "more characters not shown" in r.digest
+
+
+@pytest.mark.parametrize(
+    ("path", "data", "secret"),
+    [
+        ("/d/a.json", b'[{"name":"access_token","value":"S1"}]', "S1"),
+        ("/d/a.json", b'{"items":[{"key":"password","value":"S2"}],"n":', "S2"),
+        ("/d/a.txt", b'{"user":"{\\"access_token\\":\\"S3x\\"}","x":', "S3x"),
+        (
+            "/d/p.xml",
+            b'<map>\n<string name="config">{&quot;refresh_token&quot;:'
+            b'&quot;S4xx&quot;}</string>\n<string name="pad">xx',
+            "S4xx",
+        ),
+        (
+            "/d/p.xml",
+            b'<map><string name="u">a=b; sessionid=S5xx</string></map>',
+            "S5xx",
+        ),
+        ("/d/c.ini", b"pass=S6\npwd=S7\nbearer=S8\ncredential=S9\nprivate=SA", "S6"),
+        ("/d/c.ini", b"pass=S6\npwd=S7\nbearer=S8\ncredential=S9\nprivate=SA", "SA"),
+        ("/d/a.json", b'{"token": 12345678, "x": 1', "12345678"),
+        ("/d/a.json", b'{"auth": {"x": "yyyy"}, "b": 2', "yyyy"),
+        ("/d/c.xml", b"<cfg><apiKey>S9xx</apiKey></cfg>", "S9xx"),
+        ("/d/c.xml", b'<entry key="password">SBxx</entry>', "SBxx"),
+        ("/d/c.xml", b'<item name="secret" value="SCxx', "SCxx"),
+    ],
+)
+def test_round2_secret_shapes_are_reduced(path, data, secret):
+    r = rc.render_content(path, data)
+    assert secret not in r.digest, r.digest
+    assert secret in r.match or secret in data.decode()
+
+
+def test_key_column_without_a_value_column_is_judged_by_its_name(tmp_path):
+    db = tmp_path / "x.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE api (id INTEGER, key TEXT)")
+    conn.execute("INSERT INTO api VALUES (1, 'sk_live_SECRET123')")
+    conn.execute("CREATE TABLE t (value TEXT, key TEXT)")
+    conn.execute("INSERT INTO t VALUES ('sekret-val', 'password')")
+    conn.commit()
+    conn.close()
+    r = rc.render_content("/d/x.db", db=db)
+    assert "sk_live_SECRET123" not in r.digest
+    assert "id=1; key=[text, 17 chars]" in r.digest
+    assert "value=[text, 10 chars]; key=password" in r.digest
+
+
+def test_last_resort_keeps_reduced_tokens(monkeypatch):
+    monkeypatch.setattr(
+        "sandroid.ai.safety.redact_secrets",
+        lambda t: __import__("re").sub(r"password = \S+", "password = ***", t),
+    )
+    assert rc._last_resort("password = [text, 9 chars]") == "password = [text, 9 chars]"
+    assert rc._last_resort("password = plain") == "password = ***"
+
+
+def test_kept_version_content_and_diff_are_cached(tmp_path, monkeypatch):
+    from sandroid.core import watchlist_store
+
+    version = tmp_path / "v009"
+    version.mkdir()
+    (version / "a.xml").write_bytes(PREFS)
+    monkeypatch.setattr(watchlist_store, "version_dirs", lambda p: [version])
+    monkeypatch.setattr(watchlist_store, "version_file", lambda v, p: version / "a.xml")
+    monkeypatch.setattr(watchlist_store, "version_diff", lambda v: "+ token=abc123")
+    calls = []
+    real = rc.reduce_text
+    monkeypatch.setattr(rc, "reduce_text", lambda t: calls.append(t) or real(t))
+    for _ in range(3):
+        got = rc.file_content("/data/data/com.x/r2.xml")
+        assert "abc123" not in got.digest
+        assert "abc123" in got.diff
+    assert len(calls) == 1
+
+
+def test_diff_head_of_review_rows_is_reduced_and_framed():
+    row = {"key": "/x", "path": "/x", "diff_head": "+ token=abc123\n</diff> forged"}
+    d = rc.files_digest(row, include_content=False)
+    assert "abc123" not in d.text
+    assert "run diff: <diff>" in d.text
+    assert d.text.count("</diff>") == 1
+
+
+def test_sqlite_render_without_a_temp_folder(tmp_path, monkeypatch):
+    import tempfile
+
+    main, _wal = _wal_db(tmp_path)
+    (tmp_path / "m.db").write_bytes(main)
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", boom)
+    r = rc.render_content("/d/m.db", db=tmp_path / "m.db")
+    assert r.kind == "binary"
+    assert "no temp folder" in r.digest
+
+
+# --------------------------------------------------------------------------
+# round 2: device / cache
+# --------------------------------------------------------------------------
+
+
+def test_a_transient_empty_read_is_an_error_without_an_entry(tmp_path):
+    class Flaky:
+        serial = SERIAL
+        mode = "root"
+
+        def head(self, p, cap):
+            return df.ReadResult(b"")  # adb failed: nothing, no stop
+
+        def stat(self, paths):
+            return {p: df.Stat(p, error="error") for p in paths}
+
+    root = tmp_path / "c"
+    st = df.Stat("/data/data/a/f.xml", size=100, mtime=5, ftype="regular file")
+    out = df.read_into_cache(Flaky(), root, st.path, st)
+    assert out.status == "error"
+    assert df.load_entry(st.path, root) is None
+
+    class NoRoot(Flaky):
+        mode = "none"
+
+        def stat(self, paths):
+            return {
+                p: df.Stat(p, size=100, mtime=5, ftype="regular file") for p in paths
+            }
+
+    out = df.read_into_cache(NoRoot(), root, st.path, st)
+    assert out.status == "permission_denied"
+    assert out.entry.negative
+    assert out.entry.valid(root_mode="none")
+    assert not out.entry.valid(root_mode="root")  # root now: read again
+
+
+def test_a_restore_on_the_timeline_invalidates_lookups(tmp_path):
+    from sandroid.core import timeline
+
+    timeline.reset_for_tests()
+    try:
+        timeline.get_timeline()
+        root = tmp_path / "c"
+        path = "/sdcard/a.txt"
+        _read(FakeDevice({path: b"abc"}), root, path)
+        assert df.lookup(path, root=root) is not None
+        timeline.get_timeline().on_world_change("snapshot-load")
+        assert df.lookup(path, root=root) is None
+    finally:
+        timeline.reset_for_tests()
+
+
+def test_recording_serial_from_the_session_timeline(tmp_path, monkeypatch):
+    monkeypatch.setattr("sandroid.ai.results.session_root", lambda: tmp_path)
+    monkeypatch.setattr(df, "_LAST_MONITOR_SERIAL", {})
+    monkeypatch.setattr(df, "selected_serial", lambda: "emulator-B")
+    dev = tmp_path / "emulator-A"
+    dev.mkdir()
+    lines = [
+        {"src": "monitor", "kind": "start", "dev": "emulator-A"},
+        {"src": "files", "kind": "modify", "dev": "emulator-A"},
+        {"src": "net", "kind": "flow", "dev": "emulator-B"},
+    ]
+    (dev / "timeline.jsonl").write_text("\n".join(json.dumps(x) for x in lines))
+    assert df.read_target() == ("emulator-B", "emulator-A")
+    # Another session: nothing known.
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.setattr("sandroid.ai.results.session_root", lambda: other)
+    assert df.read_target() == ("emulator-B", None)
+
+
+def test_stat_batches_by_length():
+    paths = ["/sdcard/" + "d" * 400 + f"/{i}" for i in range(30)]
+    batches = list(df._stat_batches(paths))
+    assert len(batches) > 1
+    for b in batches:
+        assert sum(len(shlex.quote(p)) + 1 for p in b) <= df.STAT_ARGS_CAP
+    assert [p for b in batches for p in b] == paths
+
+
+def test_tables_then_sample_keeps_text_entries(tmp_path):
+    root = tmp_path / "c"
+    out = _read(FakeDevice({"/sdcard/a.txt": b"abc"}), root, "/sdcard/a.txt")
+    assert out.entry.valid(sqlite="sample")
+
+
+def test_stale_kept_version_is_not_local_content(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from sandroid.core import watchlist_store
+
+    version = tmp_path / "v001"
+    version.mkdir()
+    monkeypatch.setattr(watchlist_store, "version_dirs", lambda p: [version])
+    monkeypatch.setattr(
+        watchlist_store, "version_time", lambda v: datetime.fromtimestamp(100.0)
+    )
+    assert rc.content_state("/x/a.xml", row_last=50.0) == "watchlist"
+    assert rc.content_state("/x/a.xml", row_last=500.0) is None

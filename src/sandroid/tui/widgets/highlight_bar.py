@@ -663,26 +663,39 @@ def flow_snapshot(row: Any, shown: bool, scope: str | None = None) -> dict:
     }
 
 
-def _own_reads(act: Any) -> int:
-    """Events of the AI's own device reads (``read_device_files``)."""
-    from sandroid.ai.device_files import is_own_read_process
+def _own_reads(act: Any, path: str) -> int:
+    """Open/read events of ``read_device_files``'s own head / cat / su on
+    *path*: only for a path it read, and never more than the row's noise
+    (open/close) events, so a write by such a process always stays.
+    """
+    from sandroid.ai.device_files import is_own_read_process, was_read_by_tool
 
-    return sum(
+    if not was_read_by_tool(path):
+        return 0
+    own = sum(
         int(n or 0)
         for name, n in (getattr(act, "processes", None) or {}).items()
         if is_own_read_process(name)
     )
+    noise = int((getattr(act, "ops", None) or {}).get("noise", 0) or 0)
+    return min(own, noise)
 
 
-def _processes(act: Any) -> list[str]:
-    from sandroid.ai.device_files import is_own_read_process
+def _processes(act: Any, path: str = "") -> list[str]:
+    from sandroid.ai.device_files import is_own_read_process, was_read_by_tool
 
     procs: dict[str, int] = {}
+    own: dict[str, int] = {}
     for name, n in (getattr(act, "processes", None) or {}).items():
         head = str(name).split(" · ", 1)[0]
-        if is_own_read_process(head):
-            continue  # the AI's own reads (head / cat / stat / su)
-        procs[head] = procs.get(head, 0) + n
+        target = own if is_own_read_process(head) else procs
+        target[head] = target.get(head, 0) + n
+    noise = int((getattr(act, "ops", None) or {}).get("noise", 0) or 0)
+    # Our own reads are left out only when they can all be open/close noise
+    # on a path the tool read; otherwise (a write by cat / su) they stay.
+    if not (path and was_read_by_tool(path) and sum(own.values()) <= noise):
+        for name, n in own.items():
+            procs[name] = procs.get(name, 0) + n
     return [name for name, _n in sorted(procs.items(), key=lambda kv: -kv[1])[:3]]
 
 
@@ -719,8 +732,10 @@ def file_snapshot(
         "shown": bool(shown),
         "path": path,
         "ops": ops,
-        "count": max(0, int(getattr(act, "count", 0) or 0) - _own_reads(act)),
-        "processes": _processes(act) if act is not None else [],
+        "count": max(
+            0, int(getattr(act, "count", 0) or 0) - _own_reads(act, canonical_key(path))
+        ),
+        "processes": _processes(act, canonical_key(path)) if act is not None else [],
         "first": first.timestamp() if first is not None else None,
         "last": last.timestamp() if last is not None else None,
         "watched": bool(watched),

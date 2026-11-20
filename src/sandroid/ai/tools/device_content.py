@@ -279,7 +279,15 @@ def read_device_files(
             listed.append(key)
 
     # A SQLite companion row (x.db-wal, -shm, -journal) stands for its
-    # database: one read, its content change counts for the database.
+    # database: one read. Its content changes count for the database, taken
+    # over ALL collected rows (as the lens tools do), not only the matched.
+    changes: dict[str, float] = {}
+    for row in got.rows:
+        key = str(row.get("key") or "")
+        t = df._as_float(change_time(row))
+        if t is not None:
+            path = df.db_base(key) or key
+            changes[path] = max(t, changes.get(path, t))
     targets: dict[str, Any] = {}
     for row in matched:
         if row.get("scope") is not None:
@@ -287,11 +295,7 @@ def read_device_files(
             continue
         key = str(row["key"])
         path = df.db_base(key) or key
-        t = df._as_float(change_time(row))
-        if path not in targets:
-            targets[path] = t
-        elif t is not None:
-            targets[path] = max(t, targets[path] or t)
+        targets[path] = changes.get(path)
     candidates = list(targets.items())
 
     result: dict[str, Any] = {
@@ -438,6 +442,9 @@ def _read_rows(
 
     total = len(candidates)
     progress(0, total, note="reading", force=True)
+    # The device-state token BEFORE anything is stat'ed or read: a restore
+    # during the call leaves its entries stale.
+    world = df.world_token(reader.serial)
     entries = {path: df.load_entry(path, root) for path, _t in candidates}
     wals = [
         p + "-wal"
@@ -459,6 +466,7 @@ def _read_rows(
                 row_last=last,
                 cap=per_file,
                 sqlite=sqlite,
+                world=world,
             )
             written.append(entry.dir)
         except Exception:
@@ -495,8 +503,10 @@ def _read_rows(
                 wal=wal,
                 cap=per_file,
                 sqlite=sqlite,
+                root_mode=reader.mode,
             )
         ):
+            written.append(entry.dir)  # used by this call: never evicted now
             if entry.negative:
                 skip(entry.status, path)
             else:
@@ -526,6 +536,7 @@ def _read_rows(
                         cap=per_file,
                         sqlite=sqlite,
                         budget_left=left,
+                        world=world,
                     )
                 except Exception:
                     logger.warning("reading %s failed", path, exc_info=True)

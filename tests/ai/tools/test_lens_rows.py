@@ -702,7 +702,7 @@ def test_get_rows_pages_and_reads_keys(store, flow_dir):
     picked = lens_rows.get_rows("network", keys=["a3", "zz"])
     assert [r["key"] for r in picked["rows"]] == ["a3"]
     assert picked["unknown_keys"] == ["zz"]
-    assert "user=bob; pass=hunter2" in picked["rows"][0]["digest"]
+    assert "user=bob; pass=[text, 7 chars]" in picked["rows"][0]["digest"]
     with pytest.raises(ToolError):
         lens_rows.get_rows("network", keys=[f"k{i}" for i in range(21)])
 

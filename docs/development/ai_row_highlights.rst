@@ -507,24 +507,35 @@ editor's temp file that is gone).
 - **Leases.** None are claimed (reads change nothing). While someone holds
   the WORLD lease (snapshot restore, emulator restart) the tool answers
   ``busy``; a WORLD lease taken mid-run stops it (``stop_reason`` ``busy``).
-  The arbiter counts WORLD acquisitions (``world_epoch``); cache entries
-  carry the epoch (per process) and are stale once it moved, so lookups
-  never serve content from before a restore without a device call.
-  Snapshot loads that bypass the arbiter (the TUI's own Rewind) are caught
-  by the next read's stat, not by lens lookups.
-- **Own reads.** The monitor sees ``head`` / ``cat`` / ``stat`` / ``su`` on
-  the app's files as open/access events. They are not content changes
-  (staleness uses the row's last content change, ``last_change`` or
-  ``last`` with change ops), and the AI tool rows leave those processes out
-  of ``processes`` and ``count``. The Files lens's own "by" column still
-  lists them.
+  Cache entries carry a device-state token taken before the call stats or
+  reads anything: the session timeline's world count for the device (every
+  snapshot load through ``EmulatorService.load_snapshot`` -- panel, Rewind,
+  AI -- every device boot and inferred clock jump bumps it; kept per session)
+  plus the arbiter's WORLD-lease count. Lookups compare it, so no lens tool
+  serves content from before a restore.
+- **Own reads.** The monitor sees ``head`` / ``cat`` / ``su`` on the app's
+  files as open/access events. They are not content changes (staleness uses
+  the row's last content change, ``last_change`` or ``last`` with change
+  ops; OPEN, OPEN W and CLOSE are noise as in the monitor view). The AI tool
+  rows drop them from ``processes`` and ``count`` only as noise and only on
+  paths this process read: a ``cat`` / ``su`` that creates, writes, deletes
+  or renames always stays. The Files lens's own "by" column still lists
+  them.
+- **Recording device.** The device the rows were recorded on is the
+  running monitor's, else the one remembered for this session, else the
+  newest ``files`` / ``monitor`` line of the session's timeline files.
+- **Transient failures.** An empty read of a non-empty file is only
+  remembered as ``permission_denied`` / ``gone`` when the re-stat says so
+  (or works without root); otherwise it is an ``error`` with no entry.
+  Entries are stale when the root mode changed.
 - **Audit.** One ``ai/files_read`` timeline line with the counts.
 
 The cache: ``<session>/ai/content_cache/<sha1(path)>/`` (folders 0700, files
 0600, each written atomically, ``meta.json`` last): ``meta.json`` (path,
 serial, the row's ``last``, device mtime and size, ``read_at``, kind,
-label, truncated), ``raw.bin`` (text files; binaries keep only size and
-magic) or ``db`` + ``db-wal``, ``match.txt`` (the full decoded text,
+label, truncated, root mode, the device-state token), ``raw.bin`` (text
+files; binaries keep only size and magic; database copies are not kept,
+they are rendered once), ``match.txt`` (the full decoded text,
 unreduced: searched locally by ``content_contains``, never sent) and
 ``digest.txt`` (the reduced rendering). An entry is stale when the row's
 ``last`` is newer than the one it was read for (the monitor saw a write),
@@ -566,7 +577,20 @@ Privacy rules:
   "files containing this token" still finds a token stored under a
   secret-named key, while the model only ever gets the reduced digest. With
   ``ai.mask_sensitive`` on it searches only the reduced, masked text and
-  refuses ``regex`` (no character-by-character oracle).
+  refuses ``regex`` (no character-by-character oracle). A regex runs line by
+  line, long lines in 64 KB windows overlapping by 8 KB; rows that run out
+  of the per-row time budget are counted (``content_not_searched``, and
+  "N rows not searched (time limit)" in the summary).
+- The reductions are linear: one JSON tokenizer pass, a ``find()``-driven
+  XML tag scanner with a 4 KB tag head, per-line ``k=v`` / cookie-pair
+  parsing, maximal-run JWT scanning. At most 256 KB of a file's text is
+  reduced (the rest is left out of the digest, with a note), and a 2 s
+  budget per rendering fails closed (the digest is withheld). Kept
+  versions' renders and reduced diffs are cached per version.
+- Secret-looking names also include ``pass``, ``pwd``, ``credential``,
+  ``bearer`` and ``private`` (network digests too). A ``key`` / ``name``
+  column (or JSON key) is the row's name only next to a ``value`` /
+  ``data`` column; otherwise it is judged by its own name.
 - With ``ai.mask_sensitive`` on, every digest runs through
   :func:`~sandroid.ai.safety.redact_secrets`; if that raises, the digest is
   replaced by ``[digest withheld: secret redaction failed]`` (fails closed)

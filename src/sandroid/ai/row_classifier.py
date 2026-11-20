@@ -41,6 +41,7 @@ Two parts, both without Textual:
 from __future__ import annotations
 
 import contextlib
+import html
 import json
 import logging
 import re
@@ -48,6 +49,7 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -57,7 +59,7 @@ from sandroid.ai.prompts import ROW_CLASSIFIER_PROMPT, ROW_CLASSIFIER_RETRY
 from sandroid.ai.results import CHARS_PER_TOKEN
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +83,9 @@ DIFF_HEAD_CAP = 800
 #: Names (headers, query parameters, JSON / form fields) whose values are
 #: never sent: reduced to their type and length.
 _SECRET_NAME_RE = re.compile(
-    r"auth|token|key|secret|session|cookie|password|signature", re.IGNORECASE
+    r"auth|token|key|secret|session|cookie|password|signature|passwd|pwd"
+    r"|credential|bearer|private|(?<![a-z])pass(?![a-z])|(?-i:Pass)(?![a-z])",
+    re.IGNORECASE,
 )
 #: Header values never sent (besides :data:`_SECRET_NAME_RE` matches).
 _SECRET_HEADERS = frozenset(
@@ -522,42 +526,183 @@ def _pref_value(el: Any) -> Any:
     return el.get("value", el.text or "")
 
 
+# -- bounded reductions -----------------------------------------------------------
+#
+# Every reduction below is linear in its input: one tokenizer pass (JSON),
+# find()-driven tag scanning with a bounded tag head (XML), per-line parsing
+# in Python (k=v, cookie pairs) and maximal-run scanning (JWT). On top, the
+# input is capped (REDUCE_CAP) and a time budget per file fails closed
+# (REDUCE_WITHHELD) instead of running on.
+
+#: Characters of a file's text that are reduced for the digest; the rest is
+#: left out of the digest (never sent; still searched locally).
+REDUCE_CAP = 256 * 1024
+#: Seconds the reductions of one rendering may take, then it is withheld.
+REDUCE_BUDGET_S = 2.0
+#: The digest when the reductions ran out of time (fails closed).
+REDUCE_WITHHELD = "[content not shown: secret reduction did not finish in time]"
+#: Characters of one tag head (name + attributes) the XML scanner looks at.
+_TAG_HEAD_CAP = 4096
+#: Characters of a line the k=v parser looks at for the name.
+_KV_HEAD_CAP = 300
+#: Lines longer than this are not split into cookie pairs past the cap.
+_LINE_CAP = 64 * 1024
+#: Nesting of JSON-in-a-string that is still unpacked.
+_MAX_NEST = 3
+
+#: Name-like keys / columns of key-value rows ({"name": .., "value": ..}).
+_NAME_KEYS = frozenset({"name", "key", "k"})
+#: Value-like keys / columns of key-value rows.
+_VALUE_KEYS = frozenset({"value", "val", "data", "v"})
+
+
+class _ReduceTimeoutError(Exception):
+    """The reductions of one rendering ran out of time."""
+
+
+_REDUCE_DEADLINE: ContextVar[float | None] = ContextVar(
+    "sandroid_rc_reduce_deadline", default=None
+)
+
+
+def _tick() -> None:
+    deadline = _REDUCE_DEADLINE.get()
+    if deadline is not None and time.monotonic() > deadline:
+        raise _ReduceTimeoutError
+
+
+@contextlib.contextmanager
+def _reduce_budget(seconds: float | None = None) -> Iterator[None]:
+    """One time budget for the reductions inside (nested calls share it)."""
+    if _REDUCE_DEADLINE.get() is not None:
+        yield
+        return
+    limit = REDUCE_BUDGET_S if seconds is None else seconds
+    token = _REDUCE_DEADLINE.set(time.monotonic() + limit)
+    try:
+        yield
+    finally:
+        _REDUCE_DEADLINE.reset(token)
+
+
+def reduce_text(text: str) -> str:
+    """Free text reduced for the model under its own budget (fails closed)."""
+    try:
+        with _reduce_budget():
+            return _last_resort(_reduce_free_text(str(text)))
+    except _ReduceTimeoutError:
+        return REDUCE_WITHHELD
+
+
 def _one_line(text: Any) -> str:
     """*text* on one line (a name or value cannot forge digest lines)."""
     return str(text).replace("\r", "\\r").replace("\n", "\\n")
 
 
-#: A JSON Web Token anywhere in a text (reduced whatever its name).
-_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*")
+#: Maximal runs of base64url characters and dots (JWT candidates).
+_B64URL_RUN_RE = re.compile(r"[A-Za-z0-9_.\-]++")
 
 
 def _reduce_jwts(text: str) -> str:
-    return _JWT_RE.sub(lambda m: reduce_value(m.group(0)), text)
-
-
-def _reduce_json_file(value: Any, depth: int = 0) -> Any:
-    """:func:`_reduce_json` for file content: also JSON inside string values
-    and JWT-shaped strings under any name.
+    """Every JWT-shaped value (``eyJ...``, three dot-separated parts)
+    reduced, whatever its name.
     """
-    if isinstance(value, dict):
-        return {
-            k: reduce_value(v) if is_secret_name(k) else _reduce_json_file(v, depth)
-            for k, v in value.items()
-        }
-    if isinstance(value, list):
-        return [_reduce_json_file(v, depth) for v in value]
-    if isinstance(value, str):
+    if "eyJ" not in text:
+        return text
+    out: list[str] = []
+    pos = 0
+    for m in _B64URL_RUN_RE.finditer(text):
+        _tick()
+        run = m.group(0)
+        i = run.find("eyJ")
+        while i >= 0:
+            d1 = run.find(".", i)
+            d2 = run.find(".", d1 + 1) if d1 >= 0 else -1
+            if d2 < 0:
+                break  # no two more dots in this run: no JWT from here on
+            if d1 - i >= 4 and d2 - d1 - 1 >= 4:
+                d3 = run.find(".", d2 + 1)
+                end = len(run) if d3 < 0 else d3
+                start = m.start() + i
+                out.append(text[pos:start])
+                out.append(reduce_value(run[i:end]))
+                pos = m.start() + end
+                i = run.find("eyJ", end)
+            else:
+                i = run.find("eyJ", i + 3)
+    if not out:
+        return text
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _is_row_name(key: str, siblings: Any) -> bool:
+    """*key* names a key-value row (``key`` / ``name`` next to a ``value``)."""
+    return key.lower() in _NAME_KEYS and any(
+        str(s).lower() in _VALUE_KEYS for s in siblings
+    )
+
+
+def _maybe_reduce_str(value: str, depth: int) -> str:
+    """A string leaf: only strings that can hide something are reduced."""
+    if depth >= _MAX_NEST:
+        return _reduce_jwts(value)
+    if (
+        value[:1] in ("{", "[")
+        or "eyJ" in value
+        or "=" in value
+        or "<" in value
+        or '"' in value
+        or "&" in value
+    ):
         return _reduce_scalar(value, depth + 1)
     return value
 
 
-def _reduce_scalar(value: str, depth: int = 0) -> str:
-    """A value under a harmless name: embedded JSON reduced by its own keys,
-    else the free-text reductions (k=v, XML, JSON fragments, JWTs).
+def _reduce_json_file(value: Any, depth: int = 0) -> Any:
+    """:func:`_reduce_json` for file content: also JSON inside string values,
+    JWT-shaped strings under any name and key-value objects
+    (``{"name": "access_token", "value": ...}``).
     """
+    _tick()
+    if isinstance(value, dict):
+        keys = list(value)
+        row_name = next(
+            (
+                str(value[k])
+                for k in keys
+                if _is_row_name(str(k), keys) and isinstance(value[k], str)
+            ),
+            None,
+        )
+        row_secret = row_name is not None and is_secret_name(row_name)
+        out = {}
+        for k, v in value.items():
+            name = str(k)
+            if _is_row_name(name, keys):
+                out[k] = _reduce_json_file(v, depth)
+            elif is_secret_name(name) or (row_secret and name.lower() in _VALUE_KEYS):
+                out[k] = reduce_value(v)
+            else:
+                out[k] = _reduce_json_file(v, depth)
+        return out
+    if isinstance(value, list):
+        return [_reduce_json_file(v, depth) for v in value]
+    if isinstance(value, str):
+        return _maybe_reduce_str(value, depth)
+    return value
+
+
+def _reduce_scalar(value: Any, depth: int = 0) -> str:
+    """A value under a harmless name: embedded JSON reduced by its own keys,
+    HTML-escaped text unescaped first, else the free-text reductions.
+    """
+    _tick()
     text = str(value)
+    if len(text) > REDUCE_CAP:
+        text = text[:REDUCE_CAP]
     stripped = text.strip()
-    if depth < 4 and stripped[:1] in ("{", "[") and len(stripped) <= RENDER_CAP:
+    if depth < _MAX_NEST and stripped[:1] in ("{", "["):
         try:
             parsed = json.loads(stripped)
         except (ValueError, RecursionError):
@@ -571,22 +716,47 @@ def _reduce_scalar(value: str, depth: int = 0) -> str:
                 )
             except (ValueError, RecursionError):
                 pass
-    return _reduce_free_text(text)
+    if depth < _MAX_NEST and "&" in text and ";" in text:
+        unescaped = html.unescape(text)
+        if unescaped != text:
+            return _reduce_scalar(unescaped, depth + 1)
+    return _reduce_free_text(text, depth)
 
 
-def _reduce_free_text(text: str) -> str:
-    """Every pattern reduction for text that did not parse."""
-    return _reduce_jwts(_reduce_kv_text(_reduce_json_text(_reduce_xml_text(text))))
+def _reduce_free_text(text: str, depth: int = 0) -> str:
+    """Every pattern reduction for text that did not parse (all linear)."""
+    if len(text) > REDUCE_CAP:
+        text = text[:REDUCE_CAP]
+    if "<" in text:
+        text = _reduce_xml_text(text, depth)
+    if '"' in text:
+        text = _reduce_json_text(text, depth)
+    if "=" in text or ":" in text:
+        text = _reduce_lines(text)
+    return _reduce_jwts(text)
+
+
+#: A reduced value (``[jwt, 180 chars]``, ``[cookie, 3 part(s), 240 chars]``).
+_REDUCED_TOKEN_RE = re.compile(r"\[[^\[\]\n]{1,60}, \d{1,9} chars\]")
 
 
 def _last_resort(text: str) -> str:
-    """``redact_secrets`` over a head that did not parse (on top of the
-    name reductions); left as is when it fails (mask on still fails closed).
+    """``redact_secrets`` over a head that did not parse (on top of the name
+    reductions), with the already reduced ``[... chars]`` tokens kept intact;
+    left as is when it fails (mask on still fails closed).
     """
     try:
         from sandroid.ai.safety import redact_secrets
 
-        return redact_secrets(text)
+        # Only the text BETWEEN reduced tokens: a pattern like
+        # "password = <value>" must not eat "[text, 9 chars]".
+        parts = _REDUCED_TOKEN_RE.split(text)
+        tokens = _REDUCED_TOKEN_RE.findall(text)
+        out = [redact_secrets(parts[0])]
+        for token, part in zip(tokens, parts[1:], strict=False):
+            out.append(token)
+            out.append(redact_secrets(part))
+        return "".join(out)
     except Exception:
         logger.debug("last-resort redaction failed", exc_info=True)
         return text
@@ -611,121 +781,298 @@ def _prefs_lines(root: Any) -> tuple[list[str], list[str]]:
     return digest, match
 
 
-_XML_NAMED_BODY_RE = re.compile(
-    r"""(<(?P<tag>[\w:.-]+)\b[^<>]*?\b(?:name|key)\s*=\s*["'](?P<name>[^"']*)["']"""
-    r"""[^<>]*?>)(?P<body>[^<]*)"""
-)
-_XML_TAG_BODY_RE = re.compile(r"(<(?P<tag>[\w:.-]+)(?:\s[^<>]*)?>)(?P<body>[^<]*)")
-_XML_VALUE_ATTR_RE = re.compile(
-    r"""(<[\w:.-]+\b[^<>]*?\b(?:name|key)\s*=\s*["'](?P<name>[^"']*)["'][^<>]*?"""
-    r"""\bvalue\s*=\s*)(?P<q>["'])(?P<value>[^"'<>]*)(?:(?P=q)|$)"""
-)
-_JSON_KEY_RE = re.compile(r'"(?P<name>(?:[^"\\]|\\.)*)"\s*:\s*')
-_JSON_SCALAR_RE = re.compile(r"[^,}\]\s]*")
-_KV_LINE_RE = re.compile(
-    r"^(?P<lead>\s*(?:export\s+)?(?P<q>[\"']?)(?P<name>[\w.\-]+)(?P=q)\s*[=:]\s*)"
-    r"(?P<value>.+?)\s*$"
+# -- XML (linear tag scanner) -------------------------------------------------------
+
+_TAG_NAME_RE = re.compile(r"<([A-Za-z_][\w:.\-]{0,127})")
+_ATTR_RE = re.compile(
+    r"""([\w:.\-]{1,128})(\s*+=\s*+)(?:"([^"]*+)(?:"|\Z)|'([^']*+)(?:'|\Z)"""
+    r"""|([^\s"'<>]++))"""
 )
 
 
-def _reduce_xml_text(text: str) -> str:
-    """XML that does not parse (a truncated head) or is not prefs: bodies of
-    secret-named elements (by ``name=`` / ``key=`` attribute or by tag) and
-    their ``value=`` attributes (also cut off without a closing quote).
+def _reduce_attrs(head: str) -> tuple[str, bool]:
+    """``(head, secret)``: a tag head with secret ``value=`` / secret-named
+    attributes reduced; *secret*: its ``name=`` / ``key=`` looks secret.
     """
-
-    def named(m: re.Match[str]) -> str:
-        if is_secret_name(m.group("name")) and m.group("body").strip():
-            return m.group(1) + reduce_value(m.group("body"))
-        return m.group(0)
-
-    def tagged(m: re.Match[str]) -> str:
-        if is_secret_name(_local_name(m.group("tag"))) and m.group("body").strip():
-            return m.group(1) + reduce_value(m.group("body"))
-        return m.group(0)
+    names = [
+        (m.group(3) or m.group(4) or m.group(5) or "")
+        for m in _ATTR_RE.finditer(head)
+        if m.group(1).lower() in ("name", "key")
+    ]
+    secret = any(is_secret_name(n) for n in names)
 
     def attr(m: re.Match[str]) -> str:
-        if is_secret_name(m.group("name")):
-            q = m.group("q")
-            return f"{m.group(1)}{q}{reduce_value(m.group('value'))}{q}"
-        return m.group(0)
+        name = m.group(1)
+        low = name.lower()
+        if low in ("name", "key"):
+            return m.group(0)
+        if not ((low == "value" and secret) or is_secret_name(name)):
+            return m.group(0)
+        raw = m.group(3) if m.group(3) is not None else m.group(4)
+        if raw is None:
+            raw = m.group(5) or ""
+        return f'{name}{m.group(2)}"{reduce_value(raw)}"'
 
-    text = _XML_NAMED_BODY_RE.sub(named, text)
-    text = _XML_TAG_BODY_RE.sub(tagged, text)
-    return _XML_VALUE_ATTR_RE.sub(attr, text)
-
-
-def _json_value_end(text: str, i: int) -> int:
-    """End of the JSON value starting at *i* (the text's end if cut off)."""
-    n = len(text)
-    if i >= n:
-        return i
-    c = text[i]
-    if c == '"':
-        j = i + 1
-        while j < n:
-            if text[j] == "\\":
-                j += 2
-            elif text[j] == '"':
-                return j + 1
-            else:
-                j += 1
-        return n
-    if c in "{[":
-        depth, j, in_str = 0, i, False
-        while j < n:
-            ch = text[j]
-            if in_str:
-                if ch == "\\":
-                    j += 1
-                elif ch == '"':
-                    in_str = False
-            elif ch == '"':
-                in_str = True
-            elif ch in "{[":
-                depth += 1
-            elif ch in "}]":
-                depth -= 1
-                if depth == 0:
-                    return j + 1
-            j += 1
-        return n
-    m = _JSON_SCALAR_RE.match(text, i)
-    return m.end() if m else i
+    return _ATTR_RE.sub(attr, head), secret
 
 
-def _reduce_json_text(text: str) -> str:
-    """JSON that does not parse: the values (strings, numbers, objects,
-    arrays, also cut off at the end) of secret-named keys reduced.
+def _reduce_xml_text(text: str, depth: int = 0) -> str:
+    """XML that did not parse (a truncated head) or is not prefs: bodies of
+    secret-named elements (by ``name=`` / ``key=`` attribute or by tag) and
+    their ``value=`` attributes (also cut off without a closing quote); other
+    bodies through :func:`_reduce_scalar` (escaped JSON inside).
     """
     out: list[str] = []
     pos = 0
-    for m in _JSON_KEY_RE.finditer(text):
-        if m.start() < pos or not is_secret_name(m.group("name")):
+    n = len(text)
+    i = text.find("<")
+    while i != -1:
+        _tick()
+        m = _TAG_NAME_RE.match(text, i)
+        if m is None:
+            i = text.find("<", i + 1)
             continue
-        start = m.end()
-        end = _json_value_end(text, start)
-        if end <= start:
+        tag = m.group(1)
+        nxt = text.find("<", m.end())
+        limit = min(n if nxt == -1 else nxt, m.end() + _TAG_HEAD_CAP)
+        gt = text.find(">", m.end(), limit)
+        head_end = gt if gt != -1 else limit
+        head, secret = _reduce_attrs(text[m.end() : head_end])
+        secret = secret or is_secret_name(_local_name(tag))
+        out.append(text[pos : m.end()])
+        out.append(head)
+        if gt == -1:
+            pos = head_end
+            i = nxt
             continue
-        raw = text[start:end]
-        value = raw[1:-1] if raw[:1] == '"' and raw.endswith('"') else raw
-        out.append(text[pos:start])
-        out.append(f'"{reduce_value(value.lstrip(chr(34)))}"')
-        pos = end
+        out.append(">")
+        body_end = text.find("<", gt + 1)
+        if body_end == -1:
+            body_end = n
+        body = text[gt + 1 : body_end]
+        if body.strip():
+            if secret:
+                body = reduce_value(html.unescape(body))
+            elif depth < _MAX_NEST:
+                plain = html.unescape(body) if "&" in body else body
+                reduced = _reduce_scalar(plain, depth + 1)
+                if reduced != plain:
+                    body = reduced
+        out.append(body)
+        pos = body_end
+        i = text.find("<", pos)
     out.append(text[pos:])
     return "".join(out)
 
 
-def _reduce_kv_text(text: str) -> str:
-    """``name=value`` / ``name: value`` lines (also ``export NAME=`` and a
-    quoted name) with secret names reduced.
+# -- JSON (one linear tokenizer) ------------------------------------------------------
+
+_JSON_TOKEN_RE = re.compile(
+    r'"(?:[^"\\]++|\\.)*+\\?(?:"|\Z)|[{}\[\]:,]|[^"{}\[\]:,]++', re.DOTALL
+)
+
+
+def _json_str(token: str) -> str:
+    """The text of a JSON string token (also one cut off at the end)."""
+    for candidate in (token, token + '"', token[:-1] + '"'):
+        try:
+            value = json.loads(candidate)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(value, str):
+            return value
+    return token[1:-1] if token.endswith('"') and len(token) > 1 else token[1:]
+
+
+def _reduce_json_text(text: str, depth: int = 0) -> str:
+    """JSON that does not parse (a truncated head): values of secret-named
+    keys (strings, numbers, objects, arrays, also cut off at the end) and the
+    value of key-value objects with a secret name reduced; strings holding
+    escaped JSON / tokens reduced inside. One tokenizer pass.
     """
+    tokens: list[str] = []
+    pos = 0
+    n = len(text)
+    while pos < n:
+        m = _JSON_TOKEN_RE.match(text, pos)
+        if m is None:
+            tokens.append(text[pos])
+            pos += 1
+        else:
+            tokens.append(m.group(0))
+            pos = m.end()
+    out: list[str] = []
+    stack: list[dict] = []  # {"obj": bool, "name": str|None}
+    last_str: str | None = None  # the previous significant token, a string
+    pending: str | None = None  # "secret" / "plain" / "name": a key was seen
+    i = 0
+    while i < len(tokens):
+        if i % 256 == 0:
+            _tick()
+        tok = tokens[i]
+        sig = tok.strip()
+        if not sig:
+            out.append(tok)
+            i += 1
+            continue
+        if sig == ":" and last_str is not None and (not stack or stack[-1]["obj"]):
+            key = last_str
+            top = stack[-1] if stack else {}
+            if key.lower() in _NAME_KEYS:
+                # The row's name: kept to judge its "value"; reduced itself
+                # when the key name looks secret ("key").
+                pending = "name_secret" if is_secret_name(key) else "name"
+            elif is_secret_name(key) or (
+                key.lower() in _VALUE_KEYS
+                and top.get("name") is not None
+                and is_secret_name(top["name"])
+            ):
+                pending = "secret"
+            else:
+                pending = "plain"
+            out.append(tok)
+            last_str = None
+            i += 1
+            continue
+        if pending == "secret" and sig not in (",", "}", "]"):
+            i = _consume_secret(tokens, i, out)
+            pending = None
+            last_str = None
+            continue
+        if sig in ("{", "["):
+            stack.append({"obj": sig == "{", "name": None})
+        elif sig in ("}", "]"):
+            if stack:
+                stack.pop()
+        if tok[:1] == '"':
+            value = _json_str(tok)
+            in_array = bool(stack) and not stack[-1]["obj"]
+            if pending in ("name", "name_secret") and stack:
+                stack[-1]["name"] = value
+            if pending == "name_secret":
+                tok = f'"{reduce_value(value)}"'
+            elif pending in ("plain", "name") or (pending is None and in_array):
+                reduced = _maybe_reduce_str(value, depth)
+                if reduced != value:
+                    tok = json.dumps(reduced, ensure_ascii=False)
+            last_str = value if (pending is None and not in_array) else None
+        else:
+            if pending == "name_secret" and sig not in (",", "}", "]"):
+                i = _consume_secret(tokens, i, out)
+                pending = None
+                last_str = None
+                continue
+            last_str = None
+        pending = None
+        out.append(tok)
+        i += 1
+    return "".join(out)
+
+
+def _consume_secret(tokens: list[str], i: int, out: list[str]) -> int:
+    """Replace the JSON value starting at ``tokens[i]`` by its type and
+    length; returns the index after it.
+    """
+    tok = tokens[i]
+    sig = tok.strip()
+    if sig in ("{", "["):
+        depth = 0
+        j = i
+        raw: list[str] = []
+        while j < len(tokens):
+            if (j - i) % 256 == 0:
+                _tick()
+            t = tokens[j].strip()
+            raw.append(tokens[j])
+            if t in ("{", "["):
+                depth += 1
+            elif t in ("}", "]"):
+                depth -= 1
+                if depth == 0:
+                    j += 1
+                    break
+            j += 1
+        kind = "object" if sig == "{" else "array"
+        out.append(f'"[{kind}, {len("".join(raw))} chars]"')
+        return j
+    if tok[:1] == '"':
+        out.append(f'"{reduce_value(_json_str(tok))}"')
+        return i + 1
+    lead = tok[: len(tok) - len(tok.lstrip())]
+    trail = tok[len(tok.rstrip()) :]
+    out.append(f'{lead}"{reduce_value(sig)}"{trail}')
+    return i + 1
+
+
+# -- lines: k=v and cookie pairs --------------------------------------------------------
+
+_KV_NAME_RE = re.compile(r"[\w.\-]{1,128}")
+
+
+def _kv_line(line: str) -> str:
+    """``name=value`` / ``name: value`` (also ``export NAME=``, a quoted
+    name) with a secret name: the value reduced. Looks at the line's head.
+    """
+    head = line[:_KV_HEAD_CAP]
+    s = head.lstrip()
+    off = len(head) - len(s)
+    if s.startswith("export "):
+        rest = s[7:].lstrip()
+        off += len(s) - len(rest)
+        s = rest
+    quote = s[:1] if s[:1] in ("'", '"') else ""
+    if quote:
+        end = s.find(quote, 1)
+        if end <= 1:
+            return line
+        name, j = s[1:end], end + 1
+    else:
+        m = _KV_NAME_RE.match(s)
+        if m is None:
+            return line
+        name, j = m.group(0), m.end()
+    if _KV_NAME_RE.fullmatch(name) is None:
+        return line
+    while j < len(s) and s[j] in " \t":
+        j += 1
+    if j >= len(s) or s[j] not in "=:" or not is_secret_name(name):
+        return line
+    k = off + j + 1
+    while k < len(line) and line[k] in " \t":
+        k += 1
+    value = line[k:].rstrip()
+    if not value or _REDUCED_TOKEN_RE.fullmatch(value.strip("\"'")):
+        return line  # nothing, or already reduced (by the JSON pass)
+    return line[:k] + reduce_value(value)
+
+
+def _pairs(line: str) -> str:
+    """``a=b; sessionid=X`` / ``a=1&token=X``: secret-named pairs reduced."""
+    if "=" not in line or (";" not in line and "&" not in line):
+        return line
+    head, tail = line[:_LINE_CAP], line[_LINE_CAP:]
+    parts = re.split(r"([;&])", head)
+    for idx in range(0, len(parts), 2):
+        seg = parts[idx]
+        eq = seg.find("=")
+        if eq <= 0:
+            continue
+        name = seg[:eq].strip()
+        if _KV_NAME_RE.fullmatch(name) and is_secret_name(name):
+            value = seg[eq + 1 :].strip()
+            if value and not value.startswith("["):
+                lead = seg[: eq + 1] + (" " if seg[eq + 1 : eq + 2] == " " else "")
+                parts[idx] = lead + reduce_value(value)
+    return "".join(parts) + tail
+
+
+def _reduce_lines(text: str) -> str:
+    """k=v lines and cookie / query pairs, line by line."""
     out = []
-    for line in text.split("\n"):
-        m = _KV_LINE_RE.match(line)
-        if m and is_secret_name(m.group("name")):
-            line = m.group("lead") + reduce_value(m.group("value"))
-        out.append(line)
+    for idx, line in enumerate(text.split("\n")):
+        if idx % 256 == 0:
+            _tick()
+        out.append(_pairs(_kv_line(line)))
     return "\n".join(out)
 
 
@@ -781,7 +1128,7 @@ def _render_text(path: str, data: bytes) -> Rendered:
         root = _parse_xml(data)
         if root is not None:
             return _render_xml_root(root, text, "xml")
-        return Rendered(_last_resort(_reduce_free_text(text)), text, "content", "xml")
+        return Rendered(_free(text), text, "content", "xml")
     if stripped[:1] in ("{", "["):
         try:
             parsed = json.loads(stripped)
@@ -796,8 +1143,16 @@ def _render_text(path: str, data: bytes) -> Rendered:
                 return Rendered(digest, match, "content", "json")
             except (ValueError, RecursionError):
                 pass
-        return Rendered(_last_resort(_reduce_free_text(text)), text, "content", "json")
-    return Rendered(_last_resort(_reduce_free_text(text)), text, "content", "text")
+        return Rendered(_free(text), text, "content", "json")
+    return Rendered(_free(text), text, "content", "text")
+
+
+def _free(text: str) -> str:
+    """Text that did not parse, reduced (at most :data:`REDUCE_CAP`)."""
+    reduced = _last_resort(_reduce_free_text(text))
+    if len(text) > REDUCE_CAP:
+        reduced += f"\n[{len(text) - REDUCE_CAP} more characters not shown]"
+    return reduced
 
 
 _UNPARSED: Any = object()
@@ -839,7 +1194,11 @@ def _sqlite_render(db: Path, mode: str) -> Rendered:
     import tempfile
 
     wal = db.with_name(db.name + "-wal")
-    with tempfile.TemporaryDirectory(prefix="sandroid-db-") as tmp:
+    try:
+        tmp_dir = tempfile.TemporaryDirectory(prefix="sandroid-db-")
+    except OSError:
+        return Rendered("[sqlite database, no temp folder]", "", "binary", "sqlite")
+    with tmp_dir as tmp:
         copy = Path(tmp) / "db"
         try:
             shutil.copyfile(db, copy)
@@ -889,8 +1248,18 @@ _NAME_COLUMNS = frozenset(
 )
 
 
-def _sample_cell(column: str, value: Any, row_name: str | None) -> str:
-    if column.lower() in _NAME_COLUMNS:
+#: Value-like columns: a table with one of them is a key-value table.
+_VALUE_COLUMNS = frozenset({"value", "val", "data", "v", "content"})
+
+
+def _sample_cell(
+    column: str, value: Any, row_name: str | None, name_col: int | None, idx: int
+) -> str:
+    """One sample cell. In a key-value table (a name column next to a value
+    column) the name cell is shown and the other cells are judged by the
+    row's name; otherwise every cell is judged by its own column name.
+    """
+    if idx == name_col:
         return _one_line(_cap(_reduce_scalar(str(value)), SQLITE_CELL_CAP))
     if is_secret_name(column) or (row_name is not None and is_secret_name(row_name)):
         return reduce_value(value)
@@ -904,10 +1273,15 @@ def _sample_rows(
 ) -> None:
     """Sample rows (reduced) into *digest*, rows (full) into *match*.
 
-    Key/value tables: a row's value cells are reduced when its name cell
-    (a ``key`` / ``name`` ... column) looks secret.
+    Key/value tables (a ``key`` / ``name`` ... column AND a ``value`` /
+    ``data`` ... column): a row's other cells are reduced when its name cell
+    looks secret. Without a value column a ``key`` column is just a column
+    (reduced by its own secret-looking name).
     """
-    name_idx = next((i for i, c in enumerate(cols) if c.lower() in _NAME_COLUMNS), None)
+    lower = [c.lower() for c in cols]
+    name_col = None
+    if any(c in _VALUE_COLUMNS for c in lower):
+        name_col = next((i for i, c in enumerate(lower) if c in _NAME_COLUMNS), None)
     match_len = sum(len(m) for m in match)
     for i, row in enumerate(cur):
         cells = [_cell(v) for v in row]
@@ -918,14 +1292,15 @@ def _sample_rows(
             match_len += len(full)
         if i < SQLITE_SAMPLE_ROWS:
             row_name = (
-                str(cells[name_idx])
-                if name_idx is not None and name_idx < len(cells)
+                str(cells[name_col])
+                if name_col is not None and name_col < len(cells)
                 else None
             )
             digest.append(
                 "  "
                 + "; ".join(
-                    f"{_one_line(c)}={_sample_cell(c, v, row_name)}" for c, v in pairs
+                    f"{_one_line(c)}={_sample_cell(c, v, row_name, name_col, j)}"
+                    for j, (c, v) in enumerate(pairs)
                 )
             )
         elif match_len >= HAYSTACK_RENDER_CAP:
@@ -980,6 +1355,32 @@ def _sqlite_lines(conn: Any, mode: str) -> Rendered:
 
 
 def render_content(
+    path: str,
+    data: bytes | None = None,
+    *,
+    db: Path | None = None,
+    size: int | None = None,
+    sqlite: str = "sample",
+    _nested: bool = False,
+) -> Rendered:
+    """:func:`_render_content` under one reduction time budget: when the
+    reductions do not finish in :data:`REDUCE_BUDGET_S`, the digest is
+    withheld (fails closed); the local match text stays.
+    """
+    try:
+        with _reduce_budget():
+            return _render_content(
+                path, data, db=db, size=size, sqlite=sqlite, _nested=_nested
+            )
+    except _ReduceTimeoutError:
+        logger.warning("secret reduction of %s ran out of time; withheld", path)
+        match = ""
+        if data and b"\x00" not in data[:BINARY_PROBE]:
+            match = data[:RENDER_CAP].decode("utf-8", "replace")
+        return Rendered(REDUCE_WITHHELD, match, "metadata", "withheld")
+
+
+def _render_content(
     path: str,
     data: bytes | None = None,
     *,
@@ -1080,6 +1481,8 @@ def _framed(header: str, body: str) -> str:
 
 #: Rendered kept watchlist versions (immutable once kept), newest last.
 _LOCAL_RENDERS: OrderedDict[tuple, Rendered | None] = OrderedDict()
+#: Their whole local content (render + reduced diff), newest last.
+_KEPT_CONTENT: OrderedDict[tuple, FileContent] = OrderedDict()
 _LOCAL_RENDERS_MAX = 32
 _LOCAL_RENDERS_LOCK = threading.Lock()
 
@@ -1119,9 +1522,33 @@ def _watchlist_content(path: str) -> tuple[Callable[[], FileContent], float] | N
     def render() -> FileContent:
         try:
             local = watchlist_store.version_file(version, path)
-            diff = watchlist_store.version_diff(version)
         except Exception:
             return FileContent(None, "", "metadata")
+        try:
+            st = local.stat()
+            key: tuple | None = (str(version), str(local), st.st_mtime_ns, st.st_size)
+        except OSError:
+            key = None
+        if key is not None:
+            with _LOCAL_RENDERS_LOCK:
+                hit = _KEPT_CONTENT.get(key)
+                if hit is not None:
+                    _KEPT_CONTENT.move_to_end(key)
+                    return hit
+        got = build(local)
+        if key is not None:
+            with _LOCAL_RENDERS_LOCK:
+                _KEPT_CONTENT[key] = got
+                while len(_KEPT_CONTENT) > _LOCAL_RENDERS_MAX:
+                    _KEPT_CONTENT.popitem(last=False)
+        return got
+
+    def build(local: Path) -> FileContent:
+        """Render + reduced diff of one kept version (cached by version)."""
+        try:
+            diff = watchlist_store.version_diff(version)
+        except Exception:
+            diff = None
         lines: list[str] = []
         reduced: list[str] = []
         kind = "metadata"
@@ -1137,7 +1564,7 @@ def _watchlist_content(path: str) -> tuple[Callable[[], FileContent], float] | N
                 match = rendered.match
                 kind = rendered.kind
         if diff:
-            small = _last_resort(_reduce_free_text(diff))
+            small = reduce_text(diff)
             capped, _ = _cap_bytes(small, DIFF_HEAD_CAP)
             lines.append(f"last diff: <diff>{_escape(capped)}</diff>")
             reduced.append(small)
@@ -1201,11 +1628,21 @@ def _sqlite_tables(path: Path) -> list[str] | None:
         conn.close()
 
 
-def _has_kept_version(path: str) -> bool:
+def _kept_fresh(path: str, row_last: Any = None) -> bool:
+    """A kept watchlist version at least as new as the row's last content
+    change (any kept version when that is unknown), as ``read_device_files``
+    decides with ``only_missing``.
+    """
     try:
         from sandroid.core import watchlist_store
 
-        return bool(watchlist_store.version_dirs(path))
+        versions = watchlist_store.version_dirs(path)
+        if not versions:
+            return False
+        if row_last is None:
+            return True
+        when = watchlist_store.version_time(versions[-1])
+        return when is not None and when.timestamp() >= float(row_last)
     except Exception:
         return False
 
@@ -1228,7 +1665,7 @@ def content_state(
         logger.debug("content cache lookup failed", exc_info=True)
     if entry is not None and not entry.negative:
         return "device"
-    if _has_kept_version(path):
+    if _kept_fresh(path, row_last):
         return "watchlist"
     if entry is not None:
         return f"unreadable:{entry.status}"
@@ -1319,8 +1756,8 @@ def files_digest(
     if meta:
         lines.append(" · ".join(meta))
     if row.get("diff_head"):
-        capped, _ = _cap_bytes(str(row["diff_head"]), FILE_HEAD_CAP)
-        lines.append(f"run diff: {capped}")
+        capped, _ = _cap_bytes(reduce_text(str(row["diff_head"])), FILE_HEAD_CAP)
+        lines.append(f"run diff: <diff>{_escape(capped)}</diff>")
     kind = "content" if row.get("diff_head") else "metadata"
     if include_content:
         text, ckind = content if content is not None else local_file_content(key)

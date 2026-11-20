@@ -496,7 +496,8 @@ def test_form_body_is_split_into_fields():
         "application/x-www-form-urlencoded; charset=utf-8",
         1500,
     )
-    assert (text, kind) == ("user=bob; pass=hunter2", "text")
+    # "pass" is a secret-looking name (also in network bodies).
+    assert (text, kind) == ("user=bob; pass=[text, 7 chars]", "text")
     assert rc.body_text({"content": "", "size_bytes": 0}, "", 10) == (None, "none")
 
 

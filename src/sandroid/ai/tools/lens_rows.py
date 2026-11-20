@@ -448,11 +448,12 @@ def _flow_log_tls_row(rec: Mapping[str, Any], flow_dir: Path) -> dict | None:
 
 
 def _is_noise(event_type: Any) -> bool:
-    """OPEN / ACCESS / CLOSE without a write: no content change (the AI's own
-    reads show up like this, too).
+    """OPEN / OPEN W / ACCESS / CLOSE: no content change, as in the monitor
+    view (a write is its own MODIFY event; the AI's own reads look like
+    this, too).
     """
     name = str(event_type or "").upper()
-    if "WRITE" in name or "MODIFY" in name:
+    if "MODIF" in name or "CREATE" in name or "DELETE" in name or "RENAME" in name:
         return False
     return any(t in name for t in ("OPEN", "ACCESS", "CLOSE"))
 
@@ -496,13 +497,19 @@ def _monitor_rows() -> list[dict]:
         def package_of(_p: str) -> str | None:
             return None
 
-    from sandroid.ai.device_files import is_own_read_process
+    from sandroid.ai.device_files import is_own_read_process, was_read_by_tool
 
     rows: dict[str, dict] = {}
     for ev in events:
         raw = ev.get("path")
-        if not raw or is_own_read_process(ev.get("process")):
-            continue  # no path, or the AI's own read (read_device_files)
+        if not raw:
+            continue
+        if (
+            _is_noise(ev.get("event_type"))
+            and is_own_read_process(ev.get("process"))
+            and was_read_by_tool(normalize_key("files", raw))
+        ):
+            continue  # read_device_files's own open/read (never a write)
         key = normalize_key("files", raw)
         row = rows.get(key)
         ts = ev.get("timestamp")
@@ -784,6 +791,8 @@ class _Details:
             masked = rc.mask_enabled()
         #: ``ai.mask_sensitive``: content_contains searches masked text only.
         self.masked = bool(masked)
+        #: Content searches (regex) that ran out of their per-row time budget.
+        self.not_searched = 0
 
     def flow(self, row: Mapping[str, Any]) -> dict | None:
         if row.get("kind") == "tls":
@@ -1023,9 +1032,20 @@ def _matcher(value: Any, regex: bool, field: str) -> Callable[[str], bool]:
     return lambda s: low in (s or "")[:HAYSTACK_CAP].lower()
 
 
-def _content_matcher(value: Any, regex: bool, masked: bool) -> Callable[[str], bool]:
+#: Window and overlap of a regex content search on one long line: a match
+#: up to the overlap long is always found.
+CONTENT_REGEX_WINDOW = 64 * 1024
+CONTENT_REGEX_OVERLAP = 8 * 1024
+
+
+def _content_matcher(
+    value: Any, regex: bool, details: _Details
+) -> Callable[[str], bool]:
     """``content_contains``: the whole local text (up to
-    :data:`CONTENT_SEARCH_CAP`), a regex line by line in bounded windows.
+    :data:`CONTENT_SEARCH_CAP`). A regex runs line by line, long lines in
+    overlapping windows (``pos``/``endpos``, so ``^`` never matches at a
+    window start); a row that runs out of its time budget counts in
+    ``details.not_searched`` (reported, never a silent no-match).
 
     Raises:
         ToolError: A regex while ``ai.mask_sensitive`` is on (it would be a
@@ -1035,25 +1055,28 @@ def _content_matcher(value: Any, regex: bool, masked: bool) -> Callable[[str], b
     if not regex:
         low = text.lower()
         return lambda s: low in (s or "")[:CONTENT_SEARCH_CAP].lower()
-    if masked:
+    if details.masked:
         raise _invalid(
             "content_contains cannot be a regular expression while "
             "ai.mask_sensitive is on",
             hint="Search a literal (regex=false); masked values are not searched.",
         )
-    from sandroid.ai.results import _grep_line
-
     pattern = _compile_regex(text, "content_contains")
-    width = 60_000
+    step = CONTENT_REGEX_WINDOW - CONTENT_REGEX_OVERLAP
 
     def search(s: str | None) -> bool:
         deadline = time.monotonic() + REGEX_ROW_BUDGET_S
         for line in (s or "")[:CONTENT_SEARCH_CAP].splitlines():
-            for start in range(0, max(len(line), 1), width):
-                if _grep_line(pattern, line[start : start + width + 500], deadline):
+            n = len(line)
+            for start in range(0, max(n, 1), step):
+                end = min(n, start + CONTENT_REGEX_WINDOW)
+                if pattern.search(line, start, end):
                     return True
                 if time.monotonic() > deadline:
+                    details.not_searched += 1
                     return False
+                if end >= n:
+                    break
         return False
 
     return search
@@ -1328,7 +1351,7 @@ def _files_pred(
             )
         )
     elif field == "content_contains":
-        m = _content_matcher(value, regex, details.masked)
+        m = _content_matcher(value, regex, details)
         costly.append(lambda r: m(details.haystack(r)) or m(details.diff_text(r)))
 
 
@@ -1453,6 +1476,16 @@ def _add_unkeyed(result: dict, got: _Collected) -> None:
         result["not_in_flow_log_hint"] = (
             f"{n} TLS-failure row(s) the lens shows cannot be highlighted "
             "(not in the flow log); do not retry for them"
+        )
+
+
+def _not_searched(result: dict[str, Any], details: _Details) -> None:
+    """Rows whose content search ran out of time: counted, said in words."""
+    if details.not_searched:
+        result["content_not_searched"] = details.not_searched
+        result["summary"] = (
+            f"{result.get('summary', '')}; {details.not_searched} rows not "
+            "searched (time limit)"
         )
 
 
@@ -1733,6 +1766,7 @@ def find_rows(
     if lens == "files" and "content_contains" in (where or {}):
         cheap = [p for p in preds if not isinstance(p, _Costly)]
         _content_missing(result, _filter(scoped, cheap), details, "find_rows")
+        _not_searched(result, details)
     if apply != "none" and len(matches) > MAX_KEYS_PER_SET and not highlight_id:
         raise _invalid(
             f"{len(matches)} of {len(scoped)} {lens} rows match; a highlight set "
@@ -2322,6 +2356,7 @@ def classify_rows(
         )
     if lens == "files":
         _content_missing(base, candidates, details, "classify_rows")
+        _not_searched(base, details)
     if outcome.error:
         base["backend_error"] = outcome.error
     if len(verdicts) > MAX_VERDICTS:

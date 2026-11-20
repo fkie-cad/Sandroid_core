@@ -458,29 +458,58 @@ def test_device_text_is_framed_and_escaped_in_digests(env):
     assert "&lt;row id='r9'&gt;" in digest
 
 
-def test_own_read_processes_leave_the_tool_rows():
+def test_own_reads_leave_the_tool_rows_only_as_noise_on_paths_we_read(monkeypatch):
     from types import SimpleNamespace
 
     from sandroid.tui.widgets.highlight_bar import file_snapshot
 
-    act = SimpleNamespace(
+    monkeypatch.setattr(df, "_TOOL_READS", {})
+    path = f"{PKG}/a.txt"
+    reads = SimpleNamespace(
         ops={"modify": 1, "noise": 6},
         count=7,
         processes={"com.x": 1, "cat": 3, "head · 8034": 2, "su": 1},
         first=None,
         last=None,
     )
-    snap = file_snapshot(f"{PKG}/a.txt", shown=True, act=act)
+    # Not read by the tool: everything stays.
+    snap = file_snapshot(path, shown=True, act=reads)
+    assert snap["count"] == 7
+    assert "cat" in snap["processes"]
+    df.note_tool_read(path)
+    snap = file_snapshot(path, shown=True, act=reads)
     assert snap["processes"] == ["com.x"]
     assert snap["count"] == 1
+    # A dropper: su / cat WRITE (more of them than the open/close noise).
+    dropper = SimpleNamespace(
+        ops={"create": 1, "modify": 2, "noise": 1},
+        count=4,
+        processes={"su": 2, "cat": 2},
+        first=None,
+        last=None,
+    )
+    snap = file_snapshot(path, shown=True, act=dropper)
+    assert set(snap["processes"]) == {"su", "cat"}
+    assert snap["count"] == 3  # at most the noise is taken off
 
 
-def test_monitor_fallback_skips_own_reads_and_noise(monkeypatch):
+def test_monitor_fallback_skips_only_our_noise(monkeypatch):
+    monkeypatch.setattr(df, "_TOOL_READS", {})
+    other = f"{PKG}/files/other.bin"
     events = [
         {"path": P_PREFS, "event_type": "MODIFY", "process": "com.x", "timestamp": 10},
         {"path": P_PREFS, "event_type": "OPEN", "process": "com.x", "timestamp": 20},
         {"path": P_PREFS, "event_type": "ACCESS", "process": "cat", "timestamp": 30},
+        {
+            "path": P_PREFS,
+            "event_type": "FSE_OPEN_WRITE",
+            "process": "x",
+            "timestamp": 35,
+        },
+        {"path": other, "event_type": "MODIFY", "process": "cat", "timestamp": 40},
+        {"path": other, "event_type": "OPEN", "process": "cat", "timestamp": 41},
     ]
+    df.note_tool_read(P_PREFS)
 
     class Ctl:
         def get_recent_events(self, limit=2000):
@@ -489,13 +518,89 @@ def test_monitor_fallback_skips_own_reads_and_noise(monkeypatch):
     monkeypatch.setattr(
         "sandroid.tui.controller_registry.get_monitor_controller", lambda: Ctl()
     )
-    (row,) = lens_rows._monitor_rows()
-    assert row["count"] == 2
-    assert row["processes"] == ["com.x"]
-    assert row["ops"] == "M"
-    assert row["last_change"] == 10
-    assert lens_rows.change_time(row) == 10
+    rows = {r["key"]: r for r in lens_rows._monitor_rows()}
+    prefs = rows[P_PREFS]
+    assert prefs["count"] == 3  # our ACCESS dropped; OPEN W is noise, kept
+    assert prefs["processes"] == ["com.x", "x"]
+    assert prefs["ops"] == "M"
+    assert prefs["last_change"] == 10
+    # A cat that WRITES, on a path the tool never read: real activity.
+    assert rows[other]["processes"] == ["cat"]
+    assert rows[other]["ops"] == "M"
+    assert rows[other]["count"] == 2
+    assert lens_rows.change_time(prefs) == 10
     assert lens_rows.change_time({"ops": "", "last": 50}) is None
+
+
+def test_restore_during_the_read_leaves_its_entries_stale(env):
+    from sandroid.core import timeline
+
+    timeline.reset_for_tests()
+    try:
+        timeline.get_timeline()
+
+        def restore(proc):
+            if not getattr(restore, "done", False):
+                restore.done = True
+                timeline.get_timeline().on_world_change("snapshot-load")
+
+        env.dev.on_read = restore
+        result = device_content.read_device_files(keys=[P_PREFS])
+        assert result["read"] == 1
+        # Written with the token from BEFORE the restore: already stale.
+        assert df.lookup(P_PREFS, root=env.root) is None
+    finally:
+        timeline.reset_for_tests()
+
+
+def test_a_newer_wal_row_does_not_loop_the_db_as_missing(env):
+    env.rows.append(_row(P_DB + "-wal", last=900.0))
+    where = {"path_glob": ["*.db"]}
+    first = device_content.read_device_files(where=where)
+    assert first["keys_read"] == [P_DB]
+    found = lens_rows.find_rows("files", {**where, "content_contains": "alice@"})
+    assert found["keys"] == [P_DB]
+    assert "content_missing" not in found
+    again = device_content.read_device_files(where=where)
+    assert again["cached"] == 1
+    assert again["read"] == 0
+
+
+def test_eviction_keeps_entries_this_call_used(env, monkeypatch):
+    device_content.read_device_files()
+    monkeypatch.setattr(df, "CACHE_CAP_BYTES", 1)
+    again = device_content.read_device_files()
+    assert again["cached"] == 5
+    assert df.load_entry(P_PREFS, env.root) is not None
+    assert lens_rows.find_rows("files", {"content_contains": "u-4711"})["keys"]
+
+
+def test_regex_content_search_long_matches_anchors_and_time_outs(env, monkeypatch):
+    from sandroid.ai import row_classifier
+
+    jwt = "eyJhbGciOiJIUzI1NiJ9." + "A" * 900 + ".sig"
+    text = "x" * 70_000 + jwt + "\nline start"
+    monkeypatch.setattr(
+        row_classifier,
+        "file_content",
+        lambda key, **kw: row_classifier.FileContent("d", text, "content"),
+    )
+    hit = lens_rows.find_rows(
+        "files", {"content_contains": r"eyJ[\w-]+\.[\w-]+\.sig", "regex": True}
+    )
+    assert len(hit["keys"]) == 8  # every shown row (review row too)
+    # ^ anchors at a line start only, never at a window start.
+    anchored = lens_rows.find_rows(
+        "files", {"content_contains": "^x{10}eyJ", "regex": True}
+    )
+    assert anchored["keys"] == []
+    assert lens_rows.find_rows(
+        "files", {"content_contains": "^line start", "regex": True}
+    )["keys"]
+    monkeypatch.setattr(lens_rows, "REGEX_ROW_BUDGET_S", -1.0)
+    slow = lens_rows.find_rows("files", {"content_contains": "nomatch", "regex": True})
+    assert slow["content_not_searched"] == 8
+    assert "not searched (time limit)" in slow["summary"]
 
 
 def test_prompt_rules_read_first_and_plain_words():
