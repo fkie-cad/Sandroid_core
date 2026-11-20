@@ -945,6 +945,9 @@ async def test_slash_shows_a_hint_list(sessions):
         hints = panel.query_one("#chat-hints", Static)
         assert hints.display
         assert "/threads" in str(hints.render())
+        # Every command the panel runs is listed (the help screen reads it too).
+        assert {"/clear", "/help"} <= set(chat_panel_module.SLASH_HELP)
+        assert "/help" in str(hints.render())
         await pilot.press("t")
         await settle(pilot)
         assert "/compact" not in str(hints.render())

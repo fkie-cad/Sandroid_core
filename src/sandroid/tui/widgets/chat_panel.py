@@ -123,12 +123,14 @@ TICK_S = 1.0
 #: Slash commands and their one-line help (the "/" hint list).
 SLASH_HELP: dict[str, str] = {
     "/new": "close this thread and start a new one (Ctrl+L)",
+    "/clear": "same as /new",
     "/threads": "earlier threads; /threads <n> resumes one",
     "/compact": "summarise older history now; /compact <focus>",
     "/context": "what fills the context window",
     "/permissions": "approval mode and rules; /permissions allow_all | ask",
     "/agents": "subagents of this thread; /agents <n|id> opens one",
     "/doctor": "check the AI endpoint",
+    "/help": "list these commands",
 }
 
 #: Header state -> mascot state.
