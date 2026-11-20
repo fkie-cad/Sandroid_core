@@ -23,6 +23,9 @@ from sandroid.core.device import Device
 from sandroid.core.device_manager import DeviceManager
 from sandroid.services import setup_checks
 
+#: The real timeline singleton getter (the rig replaces it with a recorder).
+_REAL_GET_TIMELINE = timeline_mod.get_timeline
+
 SERIAL = "emulator-5554"
 BOOT_A = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
 BOOT_B = "11111111-2222-3333-4444-555555555555"
@@ -34,7 +37,7 @@ class FakeDevice:
     def __init__(self) -> None:
         self.boot_id = BOOT_A
         self.firstboot = "1763470000123"
-        self.uptime = 100.0
+        self.uptime = 100.0  # counts on with the host clock, like a device
         self.transport = 1
         self.state = "device"
         self.listed = True
@@ -45,6 +48,15 @@ class FakeDevice:
         self.calls: list[str] = []
         self.settle_gate = threading.Event()
         self.settle_gate.set()
+
+    @property
+    def uptime(self) -> float:
+        return self._uptime + (time.monotonic() - self._uptime_at)
+
+    @uptime.setter
+    def uptime(self, value: float) -> None:
+        self._uptime = value
+        self._uptime_at = time.monotonic()
 
     def settle(self, cancel) -> bool:
         while not self.settle_gate.wait(0.02):
@@ -1360,3 +1372,200 @@ def test_a_ready_emulator_with_the_active_serial_is_prepared_again(rig, monkeypa
     controller._refresh_ui = None
     controller._attach_if_idle(SERIAL, "Pixel")
     assert requests == [(SERIAL, "ready")]
+
+
+# ------------------------------------------- restart from the same snapshot
+
+
+def _restart_from_snapshot(rig, monkeypatch, host_ahead: float = 30.0) -> None:
+    """A quickboot from the snapshot the device was booted from: the same
+    boot_id, an uptime that continues from the snapshot's saved uptime
+    (about the recorded one), while the host clock went on (kill + boot).
+    """
+    monkeypatch.setattr(device_prep, "_host_now", lambda: time.monotonic() + host_ahead)
+    rig.fake.uptime = 100.0
+    rig.fake.transport += 1
+    rig.fake.adbd_root = False
+    rig.fake.selinux = "Enforcing"
+
+
+def test_a_restart_from_the_same_snapshot_is_a_new_world(rig, monkeypatch):
+    """On-device finding: a quickboot from the same snapshot (same boot_id,
+    uptime about the recorded one) was a ``reattach`` (fresh_boot=False,
+    no world change). Its boot start (host now - uptime) moved 30 s later.
+    """
+    device_prep.register_device_prepared_hook(_hook(rig.fake))
+    _run()  # boot A at uptime 100
+    start = len(rig.fake.events)
+    _restart_from_snapshot(rig, monkeypatch)
+    _run("transport")
+    result = device_prep.last_result(SERIAL)
+    assert result.kind == "new-world"
+    assert result.fresh_boot is True
+    events = _since(rig.fake.events, start)
+    assert events[0] == ("world", "reboot", SERIAL, "device", "boot")
+    assert ("hook", SERIAL, True) in events
+    assert len(_worlds(rig.fake.events)) == 1
+    _run("ready")  # the poll's re-attach of the same boot afterwards
+    assert device_prep.last_result(SERIAL).kind == "unchanged"
+    assert len(_worlds(rig.fake.events)) == 1
+
+
+def test_a_sandroid_launch_after_the_record_is_a_new_world(rig, monkeypatch):
+    """Devices-screen / AI restart: Sandroid's launch registry has a launch
+    of the serial started after the record was read -- a new world even
+    when boot_id and boot start cannot tell (a fast quickboot).
+    """
+    import sandroid.core.emulator as emulator_mod
+
+    device_prep.register_device_prepared_hook(_hook(rig.fake))
+    _run()
+    launch = SimpleNamespace(started_at=time.monotonic())
+    monkeypatch.setattr(
+        emulator_mod, "get_launch", lambda s: launch if s == SERIAL else None
+    )
+    rig.fake.transport += 1
+    rig.fake.adbd_root = False
+    _run("transport")
+    result = device_prep.last_result(SERIAL)
+    assert (result.kind, result.fresh_boot) == ("new-world", True)
+    assert ("hook", SERIAL, True) in rig.fake.events
+    assert len(_worlds(rig.fake.events)) == 1
+    _run("ready")  # the same launch: recorded now
+    assert device_prep.last_result(SERIAL).kind == "unchanged"
+    rig.fake.transport += 1
+    _run("transport")  # a plain re-attach of that launch
+    assert device_prep.last_result(SERIAL).kind == "reattach"
+    assert len(_worlds(rig.fake.events)) == 1
+
+
+def test_a_stable_boot_start_stays_the_same_world(rig, monkeypatch):
+    """Steady state: uptime and host clock advance together (and adb
+    jitter, and host sleep -- the boot start moving EARLIER -- never count).
+    """
+    _run()
+    monkeypatch.setattr(device_prep, "_host_now", lambda: time.monotonic() + 600)
+    rig.fake.uptime = rig.fake.uptime + 600  # 10 min later, in step
+    _run("ready")
+    assert device_prep.last_result(SERIAL).kind == "unchanged"
+    # The boot start 3 s later (a slow adb answer): jitter.
+    monkeypatch.setattr(device_prep, "_host_now", lambda: time.monotonic() + 603)
+    _run("ready")
+    assert device_prep.last_result(SERIAL).kind == "unchanged"
+    rig.fake.uptime = rig.fake.uptime + 3600  # host slept, device ran on
+    rig.fake.transport += 1
+    _run("transport")
+    assert device_prep.last_result(SERIAL).kind == "reattach"
+    assert _worlds(rig.fake.events) == []
+
+
+def test_the_world_change_dedupe_follows_the_launch(rig):
+    state = device_prep._state(SERIAL)
+    device_prep._world_change(SERIAL, state, BOOT_A, 1000.0, "restart", 50.0)
+    device_prep._world_change(SERIAL, state, BOOT_A, 1001.0, "ready", 50.0)
+    assert len(_worlds(rig.fake.events)) == 1  # the same launch and boot
+    device_prep._world_change(SERIAL, state, BOOT_A, 1001.0, "restart", 80.0)
+    assert len(_worlds(rig.fake.events)) == 2  # a new launch of the serial
+    device_prep._world_change(SERIAL, state, BOOT_A, 990.0, "ready", 80.0)
+    assert len(_worlds(rig.fake.events)) == 2  # earlier: host sleep, not new
+
+
+def test_a_restart_from_a_snapshot_writes_exactly_one_world_line(rig, monkeypatch):
+    """The step's explicit world change comes before its device-connect
+    clock sample, so the timeline infers no second one from the rewound
+    device CLOCK_MONOTONIC (dev_mono 45.8 before, 44.7 after the quickboot).
+    """
+    monkeypatch.setattr(timeline_mod, "get_timeline", _REAL_GET_TIMELINE)
+    service = _REAL_GET_TIMELINE()
+    mono = {"value": 45.8}
+
+    def connect(serial=None, send=None) -> None:
+        service.emit(
+            "clock", "sample", summary="clock", dev=serial,
+            data={"dev_mono": mono["value"], "reason": "device-connect"},
+        )  # fmt: skip
+
+    monkeypatch.setattr(device_clock, "after_device_connect", connect)
+    with timeline_mod.capture() as lines:
+        _run()  # first: no world change, clock at 45.8
+        mono["value"] = 44.7
+        _restart_from_snapshot(rig, monkeypatch)
+        _run("transport")
+    worlds = [line for line in lines if line["kind"] in ("boot", "world")]
+    assert [(w["src"], w["kind"], w["data"]["cause"]) for w in worlds] == [
+        ("device", "boot", "reboot")
+    ]
+    assert worlds[0]["data"]["same_boot_id"] is True
+
+
+def test_the_periodic_clock_sample_waits_while_the_device_is_prepared(
+    rig, monkeypatch, tmp_path
+):
+    calls: list = []
+    monkeypatch.setattr(device_clock, "record_async", lambda *a, **k: calls.append(a))
+    service = timeline_mod.TimelineService()
+    try:
+        assert service.bind(SERIAL, tmp_path / "s" / "d").state == "open"
+        service._policy.clock_every_s = 60
+        start = service._active.last_clock_tick
+        rig.fake.settle_gate.clear()
+        assert device_prep.request_prepare(SERIAL, "attach")
+        assert service._tick_clock(start + 61) is False
+        rig.fake.settle_gate.set()
+        assert device_prep.wait_prepared(SERIAL, 5)
+        assert service._tick_clock(start + 62) is True
+        assert calls == [("periodic", SERIAL)]
+    finally:
+        service.close("test", 2.0)
+
+
+# ------------------------------------------ startup without an active device
+
+
+def test_startup_without_an_active_device_prepares_the_later_selection(
+    rig, monkeypatch
+):
+    """On-device finding: the TUI started without its device, which was
+    then started from the startup Devices screen; the retried startup check
+    ran while no device was active yet, so the step stayed off for the
+    whole session. Now the check turns it on, reports the adb target's
+    real root / SELinux results, and the later selection (and a restart)
+    runs the step.
+    """
+    from sandroid.core.toolbox import Toolbox
+    from sandroid.services.setup_service import SetupService
+
+    device_prep.set_enabled(False)
+    rig.manager._active_device = None
+    device_prep.register_device_prepared_hook(_hook(rig.fake))
+    result = SetupService().check_critical_setup()
+    assert result.success
+    assert result.get_check("root").passed
+    assert result.get_check("selinux").details["mode"] == "Permissive"
+    assert device_prep.is_enabled()
+    # The startup Devices screen / re-init selects the device afterwards.
+    monkeypatch.setattr(Toolbox, "update_frida_device_serial", lambda s: None)
+    monkeypatch.setattr(Toolbox, "switch_device_folder", staticmethod(lambda n: None))
+    monkeypatch.setattr(rig.manager, "_sync_session_device_name", lambda d: None)
+    monkeypatch.setattr(
+        _REAL_GET_TIMELINE(), "bind", lambda *a, **k: None, raising=False
+    )
+    assert rig.manager.set_active_device(SERIAL)
+    assert device_prep.wait_prepared(SERIAL, 5)
+    assert device_prep.last_result(SERIAL).kind == "first"
+    assert ("hook", SERIAL, True) in rig.fake.events
+    # A later restart (new boot) is prepared as a new world.
+    rig.fake.boot_id = BOOT_B
+    rig.fake.transport += 1
+    _run("restart")
+    assert device_prep.last_result(SERIAL).kind == "new-world"
+    assert len(_worlds(rig.fake.events)) == 1
+
+
+def test_prepare_device_without_an_active_device_turns_the_step_on(rig):
+    from sandroid.core import initializer
+
+    device_prep.set_enabled(False)
+    rig.manager._active_device = None
+    assert initializer._run_device_prep() is None
+    assert device_prep.is_enabled()

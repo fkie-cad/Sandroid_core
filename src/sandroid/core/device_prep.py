@@ -9,7 +9,8 @@ fixed order::
 
     0. settle      the device is ``device`` + booted, stable for ~1 s
     1. classify    boot_id / ro.runtime.firstboot / uptime (one adb call):
-                   ``first`` (new to this process), ``new-world`` (rebooted:
+                   ``first`` (new to this process), ``new-world`` (rebooted,
+                   or restarted from a snapshot -- see :func:`_classify`:
                    a timeline world change before anything else),
                    ``reattach`` (same boot, new adb transport; also a
                    retry when root / SELinux failed last time) or
@@ -70,9 +71,18 @@ SETTLE_STABLE_S = 1.0
 REATTACH_MIN_INTERVAL_S = 5.0
 #: Uptime this far below the recorded one is a rewind (a new world).
 UPTIME_REWIND_S = 2.0
-#: Two boot starts (host monotonic - device uptime) this close are the
-#: same world (adb latency jitter).
-BOOT_START_TOLERANCE_S = 2.0
+#: Seconds the boot start (host monotonic - device uptime) may move LATER
+#: and still be the same world (adb latency jitter). A quickboot from a
+#: snapshot keeps the boot_id and restores the snapshot's uptime, so its
+#: boot start jumps later by about the time the device was down plus the
+#: time since the snapshot was saved. An EARLIER boot start is never a new
+#: world: a restore or reboot cannot put the uptime ahead of the host's
+#: clock, but host sleep can (host monotonic -- mach_absolute_time /
+#: CLOCK_MONOTONIC -- stops while the host sleeps, a physical device's
+#: uptime keeps counting, an emulator may catch up). Where host sleep moves
+#: it later instead (a guest paused while the host clock counts sleep), the
+#: result is one extra world change and an idempotent re-preparation.
+BOOT_START_TOLERANCE_S = 5.0
 #: Seconds the first run waits for a connect clock sample that started
 #: while the step was off (before its ``adb root`` restarts adbd).
 CONNECT_JOIN_S = 15.0
@@ -206,6 +216,11 @@ class _Record:
     root: str = ""
     root_check: Any = None
     selinux_check: Any = None
+    #: Host monotonic time the boot started (host now - uptime; None unknown).
+    boot_start: float | None = None
+    #: Host monotonic time the boot was read: a Sandroid launch of the
+    #: serial after it is a new world.
+    recorded_at: float = field(default_factory=lambda: _host_now())
 
 
 @dataclass
@@ -227,6 +242,8 @@ class _Serial:
     world_token: str | None = None
     #: Boot start (host monotonic - uptime) of the last world change.
     world_boot_start: float | None = None
+    #: ``started_at`` of the Sandroid launch the last world change was for.
+    world_launch_at: float | None = None
     #: The listeners have seen the current prepared state (an ``unchanged``
     #: run then does not fire them again); cleared on detach.
     delivered: bool = False
@@ -459,7 +476,7 @@ def note_world_recorded(serial: str) -> None:
         from sandroid.core.adb import Adb
 
         with Adb.targeting(serial):
-            token, uptime = _read_boot_info(serial)
+            token, _uptime, boot_start, _at = _read_boot(serial)
     except Exception:
         logger.debug("device prep: reading the boot failed", exc_info=True)
         return
@@ -467,7 +484,8 @@ def note_world_recorded(serial: str) -> None:
         return
     with _LOCK:
         state.world_token = token
-        state.world_boot_start = _boot_start(uptime)
+        state.world_boot_start = boot_start
+        state.world_launch_at = _launch_started_at(serial)
 
 
 def is_preparing(serial: str | None = None) -> bool:
@@ -662,7 +680,7 @@ def _record_after_hold(serial: str, state: _Serial, dropped: bool, cause: str) -
 
     try:
         with Adb.targeting(serial):
-            token, uptime = _read_boot_info(serial)
+            token, uptime, boot_start, read_at = _read_boot(serial)
             transport, _ready = _read_transport(serial)
     except Exception:
         logger.debug("device prep: recording after a hold failed", exc_info=True)
@@ -672,12 +690,20 @@ def _record_after_hold(serial: str, state: _Serial, dropped: bool, cause: str) -
         if old is None:
             return
         state.record = _Record(
-            token, uptime, transport, old.root, old.root_check, old.selinux_check
+            token,
+            uptime,
+            transport,
+            old.root,
+            old.root_check,
+            old.selinux_check,
+            boot_start=boot_start,
+            recorded_at=read_at,
         )
         if token:
             # The load recorded its own world change ("snapshot-load").
             state.world_token = token
-            state.world_boot_start = _boot_start(uptime)
+            state.world_boot_start = boot_start
+            state.world_launch_at = _launch_started_at(serial)
         manager = state.manager or _peek_manager()
     if dropped and _active_serial(manager) == serial:
         _deliver(state, manager, serial, PrepResult(serial, "held", reason=cause))
@@ -793,19 +819,21 @@ def _run(
         return aborted()
 
     _stage(state, "checking the boot")
-    token, uptime = _read_boot_info(serial)
-    boot_start = _boot_start(uptime)
+    token, uptime, boot_start, read_at = _read_boot(serial)
     transport, _ready = _read_transport(serial)
+    launch_at = _launch_started_at(serial)
     with _LOCK:
         record = state.record
-    kind = _classify(record, token, uptime, transport)
+    kind = _classify(record, token, uptime, transport, boot_start, launch_at)
     if kind == "unchanged" and record is not None:
         if not alive():
             return aborted()
         with _LOCK:
             if uptime is not None:
-                # Same boot: keep the rewind check against a current uptime.
+                # Same boot: keep the rewind checks against a current read.
                 record.uptime = uptime
+                record.boot_start = boot_start
+            record.recorded_at = read_at
             deliver = not state.delivered
         result = PrepResult(
             serial,
@@ -824,7 +852,8 @@ def _run(
         if wait > 0 and _sleep_unless(lambda: not alive(), wait):
             return aborted()
     if kind == "new-world":
-        _world_change(serial, state, token, boot_start, reason)
+        same_boot_id = record is not None and token == record.token
+        _world_change(serial, state, token, boot_start, reason, launch_at, same_boot_id)
     if not alive():
         return aborted()
 
@@ -861,7 +890,14 @@ def _run(
     _stage(state, "finishing")
     with _LOCK:
         state.record = _Record(
-            token, uptime, transport, root, root_check, selinux_check
+            token,
+            uptime,
+            transport,
+            root,
+            root_check,
+            selinux_check,
+            boot_start=boot_start,
+            recorded_at=read_at,
         )
         if kind == "reattach":
             state.last_reattach = time.monotonic()
@@ -935,18 +971,35 @@ def _fire_listeners(manager: Any, serial: str, result: PrepResult) -> None:
 
 
 def _classify(
-    record: _Record | None, token: str | None, uptime: float | None, transport: str
+    record: _Record | None,
+    token: str | None,
+    uptime: float | None,
+    transport: str,
+    boot_start: float | None = None,
+    launch_at: float | None = None,
 ) -> str:
-    """``first`` / ``new-world`` / ``reattach`` / ``unchanged``."""
+    """``first`` / ``new-world`` / ``reattach`` / ``unchanged``.
+
+    A new world when ANY of: the boot token changed (a reboot); Sandroid
+    launched this serial after the record was read (a restart from the
+    Devices screen / AI: definitive); the uptime went back; or the boot
+    start moved later than :data:`BOOT_START_TOLERANCE_S` -- the uptime
+    is behind ``recorded uptime + host time since``, as after a quickboot
+    from a snapshot, which keeps the boot_id and the snapshot's uptime.
+    """
     if record is None or token is None:
         return "first"  # new, or the boot cannot be told: fresh, no barrier
     if record.token is not None and token != record.token:
+        return "new-world"
+    if launch_at is not None and launch_at > record.recorded_at:
         return "new-world"
     if (
         uptime is not None
         and record.uptime is not None
         and uptime + UPTIME_REWIND_S < record.uptime
     ):
+        return "new-world"
+    if _boot_start_moved(record.boot_start, boot_start):
         return "new-world"
     if transport and transport == record.transport_id and _record_ok(record):
         return "unchanged"
@@ -961,9 +1014,30 @@ def _record_ok(record: _Record) -> bool:
     return record.root != "failed" and not selinux_bad
 
 
-def _boot_start(uptime: float | None) -> float | None:
-    """When the device's boot started, in host monotonic time (None unknown)."""
-    return None if uptime is None else time.monotonic() - uptime
+def _host_now() -> float:
+    """Host monotonic time (one place, so tests can move the host clock)."""
+    return time.monotonic()
+
+
+def _boot_start_moved(old: float | None, new: float | None) -> bool:
+    """The boot start moved later than the tolerance (see
+    :data:`BOOT_START_TOLERANCE_S`; earlier never counts).
+    """
+    if old is None or new is None:
+        return False
+    return new - old > BOOT_START_TOLERANCE_S
+
+
+def _launch_started_at(serial: str) -> float | None:
+    """``started_at`` (host monotonic) of Sandroid's launch of ``serial``."""
+    try:
+        from sandroid.core import emulator
+
+        launch = emulator.get_launch(serial)
+    except Exception:
+        return None
+    started = getattr(launch, "started_at", None) if launch is not None else None
+    return float(started) if isinstance(started, (int, float)) else None
 
 
 def _world_change(
@@ -972,20 +1046,38 @@ def _world_change(
     token: str | None,
     boot_start: float | None,
     reason: str,
+    launch_at: float | None = None,
+    same_boot_id: bool = False,
 ) -> None:
     """The device rebooted: a new world on the session timeline (it starts
-    a new device-clock epoch), once per world -- the boot (token) and its
-    start time, since an uptime rewind keeps the boot_id.
+    a new device-clock epoch), once per world -- by the same rules as
+    :func:`_classify`: the boot (token), its start time (a quickboot from a
+    snapshot keeps the boot_id) and Sandroid's launch of the serial.
+
+    Written before the step's device-connect clock sample, so the
+    timeline's inferred "device clock went back" world change is
+    suppressed for it (exactly one world change per restart).
     """
     with _LOCK:
         if token is not None and state.world_token == token:
             old = state.world_boot_start
-            if boot_start is None or old is None:
-                return
-            if abs(boot_start - old) <= BOOT_START_TOLERANCE_S:
+            new_launch = launch_at is not None and (
+                state.world_launch_at is None or launch_at > state.world_launch_at
+            )
+            if not new_launch and (
+                boot_start is None
+                or old is None
+                or not _boot_start_moved(old, boot_start)
+            ):
                 return
         state.world_token = token
         state.world_boot_start = boot_start
+        state.world_launch_at = launch_at
+    summary = (
+        f"⟲ {serial} restarted from a snapshot"
+        if same_boot_id
+        else f"⟲ {serial} rebooted"
+    )
     try:
         from sandroid.core.timeline import get_timeline
 
@@ -993,9 +1085,14 @@ def _world_change(
             "reboot",
             src="device",
             kind="boot",
-            summary=f"⟲ {serial} rebooted",
+            summary=summary,
             dev=serial,
-            data={"boot_id": token, "trigger": reason},
+            data={
+                "boot_id": token,
+                "trigger": reason,
+                "same_boot_id": same_boot_id,
+                "sandroid_launch": launch_at is not None,
+            },
         )
     except Exception:
         logger.debug("device prep: world change failed", exc_info=True)
@@ -1065,6 +1162,17 @@ def _read_boot_info(serial: str) -> tuple[str | None, float | None]:
             uptime = float(match.group(1))
     token = boot_id or (f"fb:{firstboot}" if firstboot else None)
     return token, uptime
+
+
+def _read_boot(serial: str) -> tuple[str | None, float | None, float | None, float]:
+    """(token, uptime, boot start, read time): :func:`_read_boot_info`,
+    with the boot start taken at the middle of the adb call.
+    """
+    before = _host_now()
+    token, uptime = _read_boot_info(serial)
+    after = _host_now()
+    boot_start = None if uptime is None else (before + after) / 2 - uptime
+    return token, uptime, boot_start, after
 
 
 def _read_transport(serial: str) -> tuple[str, bool]:

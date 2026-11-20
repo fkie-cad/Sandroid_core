@@ -452,6 +452,10 @@ class SetupService:
         """
         result = SetupResult()
         adb = self._get_adb()
+        # This process prepares devices: on before any device is active (or
+        # even found), so a device selected later -- the startup Devices
+        # screen, the poll's re-attach -- is prepared by set_active_device.
+        self._enable_device_prep(enable_root, set_selinux_permissive)
 
         # Stage 1: ADB availability
         if not self._check_adb_stage(result, adb):
@@ -482,15 +486,18 @@ class SetupService:
     ) -> Any:
         """Run (or join) the device-prepared step for the active device.
 
-        Turns the step on for the rest of the session (later attaches and
-        reboots are prepared the same way). Only with the global adb (an
-        injected one is a test double) and both stages wanted.
+        The step is on for the rest of the session (later attaches and
+        reboots are prepared the same way), also when no device is active
+        yet. Only with the global adb (an injected one is a test double)
+        and both stages wanted.
 
         Returns:
             The step's ``PrepResult`` when the device is prepared, else None
-            (then the stages run directly, as before).
+            (then the stages run directly, as before: without an active
+            device they report the adb target's real root / SELinux state,
+            and its later selection runs the step).
         """
-        if self._adb is not None or not (enable_root and set_selinux_permissive):
+        if not self._enable_device_prep(enable_root, set_selinux_permissive):
             return None
         try:
             from sandroid.core import device_prep
@@ -500,12 +507,32 @@ class SetupService:
             active = manager.active_device if manager is not None else None
             if active is None:
                 return None
-            device_prep.set_enabled(True)
             prep = device_prep.ensure_prepared(active.serial)
         except Exception as e:
             logger.warning(f"Device preparation failed: {e}")
             return None
         return prep if prep.prepared else None
+
+    def _enable_device_prep(
+        self, enable_root: bool, set_selinux_permissive: bool
+    ) -> bool:
+        """Turn the device-prepared step on: a per-process decision (this
+        process prepares devices), independent of an active device.
+
+        Returns:
+            False when this check does not prepare devices (an injected adb
+            or a stage not wanted).
+        """
+        if self._adb is not None or not (enable_root and set_selinux_permissive):
+            return False
+        try:
+            from sandroid.core import device_prep
+
+            device_prep.set_enabled(True)
+        except Exception as e:
+            logger.warning(f"Device preparation could not be enabled: {e}")
+            return False
+        return True
 
     def _check_adb_stage(self, result: SetupResult, adb: AdbProtocol) -> bool:
         """Run the ADB availability check stage.

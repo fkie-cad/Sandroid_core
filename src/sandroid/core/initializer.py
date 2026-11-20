@@ -220,11 +220,13 @@ def _run_device_prep() -> Any:
         from sandroid.core import device_prep
         from sandroid.core.device_manager import DeviceManager
 
+        # On for the session even without an active device: a device
+        # selected later is prepared by its set_active_device.
+        device_prep.set_enabled(True)
         manager = DeviceManager._instance
         active = manager.active_device if manager is not None else None
         if active is None:
             return None
-        device_prep.set_enabled(True)
         prep = device_prep.ensure_prepared(active.serial)
     except Exception as e:
         logger.warning(f"Device preparation failed: {e}")
