@@ -387,29 +387,35 @@ class StatusBar(Static):
             # A loopback proxy is our adb-reverse route, never foreign.
             or self.proxy_address.startswith("127.0.0.1:")
         )
-        # "mitm ●" is our engine; "device" says where the device points, so
-        # a running mitmweb never reads as "the device is proxied".
+        # "Mitmproxy" is our engine; "Device proxy" says where the device
+        # points, so a running Mitmproxy never reads as "the device is
+        # proxied". Plain words and theme colours, no symbols.
         if self.mitmweb_running:
-            proxy = f"[{muted}]mitm[/] [{run}]● {self.mitmweb_address or 'on'}[/]"
+            addr = f" {self.mitmweb_address}" if self.mitmweb_address else ""
+            proxy = f"[{muted}]Mitmproxy[/] [{run}]on{addr}[/]"
         else:
-            proxy = f"[{muted}]mitm[/] [{stop}]○ off[/]"
+            proxy = f"[{muted}]Mitmproxy[/] [{stop}]off[/]"
         if pointed_at_us:
             if self.mitmweb_running:
-                proxy += f" [{muted}]· device[/] [{run}]✓[/]"
+                proxy += f" [{muted}]· Device proxy[/] [{run}]on[/]"
             else:
                 # Device points at our stopped proxy: traffic goes nowhere.
-                proxy += f" [{warn}]· device → stopped proxy[/]"
+                proxy += f" [{warn}]· Device proxy to the stopped Mitmproxy[/]"
         elif self.proxy_address:
-            proxy += f" [{muted}]· device →[/] [{primary}]{self.proxy_address}[/]"
+            proxy += (
+                f" [{muted}]· Device proxy to[/] [{primary}]{self.proxy_address}[/]"
+            )
         elif self.mitmweb_running:
-            proxy += f" [{muted}]· device ○[/]"
+            proxy += f" [{muted}]· Device proxy off[/]"
         proxied = list(self.app_proxies.values())
         n_ours = sum(1 for v in proxied if v == "ours")
         m_ext = len(proxied) - n_ours
         if n_ours:
-            proxy += f" [{muted}]·[/] [{run}]{n_ours} app(s)[/]"
+            apps = "app" if n_ours == 1 else "apps"
+            proxy += f" [{muted}]·[/] [{run}]App Proxy for {n_ours} {apps}[/]"
         if m_ext:
-            proxy += f" [{muted}]· {m_ext} → ext[/]"
+            apps = "app" if m_ext == 1 else "apps"
+            proxy += f" [{muted}]· App Proxy for {m_ext} {apps} to an external proxy[/]"
         for label, count in sorted(self.app_proxy_problems.items()):
             what = "app" if count == 1 else "apps"
             proxy += f" [{warn}]· {count} {what} {escape(label)}[/]"

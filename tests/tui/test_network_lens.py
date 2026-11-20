@@ -2069,9 +2069,22 @@ async def test_network_method_line_and_W_opens_the_picker(flow_dir, monkeypatch)
         worker.start()
         worker.join()
         await until(pilot, lambda: modal.query_one("#nm-this_app", RadioButton).value)
-        modal.query_one("#nm-off", RadioButton).value = True
+        modal.query_one("#nm-off", RadioButton).value = True  # the user's pick
+        await settle(pilot)
+        # N6: a later event (the dialog's own refresh lands ~1 s after it
+        # opens) updates the status line, never the pending choice.
+        later = nm.MethodSnapshot(
+            spotlight=PKG, device_proxy="ours", kill_switch=True, refused=3
+        )
+        worker = threading.Thread(target=service._store, args=(later,))
+        worker.start()
+        worker.join()
+        await until(pilot, lambda: "(3)" in str(modal.query_one("#nm-status").render()))
+        assert modal.query_one("#nm-off", RadioButton).value
+        assert not modal.query_one("#nm-whole_device", RadioButton).value
         await pilot.press("ctrl+s")
-        await until(pilot, lambda: applied == [("off", False)])
+        # The untouched pinning box sends no pinning change (None).
+        await until(pilot, lambda: applied == [("off", None)])
         assert not isinstance(app.screen, proxy_modal.NetworkMethodModal)
         # Esc closes it (sync action_cancel) without applying anything.
         await pilot.press("W")
@@ -2082,7 +2095,141 @@ async def test_network_method_line_and_W_opens_the_picker(flow_dir, monkeypatch)
         await until(
             pilot, lambda: not isinstance(app.screen, proxy_modal.NetworkMethodModal)
         )
-        assert applied == [("off", False)]
+        assert applied == [("off", None)]
+
+
+def _method_modal_app(modal):
+    from textual.app import App
+
+    class _App(App):
+        def on_mount(self) -> None:
+            self.push_screen(modal)
+
+    return _App()
+
+
+async def test_method_dialog_pinning_is_sent_only_when_toggled(monkeypatch):
+    """N6: "Defeat pinning" is tri-state: an untouched box never starts or
+    stops a bypass, and a later event never resets a box the user toggled.
+    N20: the footer shows the dialog's own hint, in words, also while the
+    radio row has the focus.
+    """
+    import re
+    import threading
+    from dataclasses import replace
+
+    from textual.widgets import Checkbox
+
+    from sandroid.services import network_method as nm
+    from sandroid.tui.modals import proxy_modal
+    from sandroid.tui.modals.base import KeyHintFooter
+
+    applied = []
+    monkeypatch.setattr(
+        proxy_modal,
+        "run_method_apply",
+        lambda app, preset, pin, **kw: applied.append((preset, pin)),
+    )
+    service = nm.NetworkMethodService(actions=None)
+    monkeypatch.setattr(service, "refresh", lambda **kw: None)
+    monkeypatch.setattr(nm, "_INSTANCE", service)
+    whole = nm.MethodSnapshot(
+        spotlight=PKG, device_proxy="ours", kill_switch=True, pinning="on"
+    )
+    service._store(whole)
+
+    modal = proxy_modal.NetworkMethodModal()
+    app = _method_modal_app(modal)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await until(pilot, lambda: app.screen is modal and app.focused is not None)
+        footer = str(modal.query_one(KeyHintFooter).render())
+        assert "Ctrl+S=Apply" in footer
+        assert "Up/Down" in footer
+        assert not re.search("[←-⇿]", footer)  # no arrow glyphs
+        assert modal.query_one("#nm-pinning", Checkbox).value  # live state
+        await pilot.press("ctrl+s")
+        await until(pilot, lambda: applied == [("whole_device", None)])
+
+    applied.clear()
+    modal = proxy_modal.NetworkMethodModal()
+    app = _method_modal_app(modal)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await until(pilot, lambda: app.screen is modal and app.focused is not None)
+        box = modal.query_one("#nm-pinning", Checkbox)
+        box.value = False  # the user unticks it
+        await settle(pilot)
+        worker = threading.Thread(
+            target=service._store, args=(replace(whole, refused=9),)
+        )
+        worker.start()
+        worker.join()
+        await until(pilot, lambda: "(9)" in str(modal.query_one("#nm-status").render()))
+        assert not box.value  # not reset by the event
+        await pilot.press("ctrl+s")
+        await until(pilot, lambda: applied == [("whole_device", False)])
+
+
+async def test_kill_switch_checkbox_works_without_a_device_proxy(monkeypatch):
+    """N2: a Kill switch left without its device proxy (every app offline) is
+    shown checked, and unticking it removes it; ticking it without a proxy
+    says why nothing happens.
+    """
+    from types import SimpleNamespace
+
+    from textual.widgets import Checkbox
+
+    from sandroid.core import device_guard as dg
+    from sandroid.tui.modals import proxy_modal
+
+    for name in (
+        "_refresh_device_proxy_status",
+        "_refresh_device_info",
+        "_detect_certificates",
+    ):
+        monkeypatch.setattr(proxy_modal.ProxyModal, name, lambda self: None)
+    monkeypatch.setattr(
+        proxy_modal.ProxyModal, "_start_app_proxy_apply", lambda self, *a: None
+    )
+    monkeypatch.setattr(
+        proxy_modal,
+        "get_focus_manager",
+        lambda: SimpleNamespace(app_proxies_cached=dict),
+    )
+    guard = dg.DeviceGuard()
+    monkeypatch.setattr(dg, "_INSTANCE", guard)
+    monkeypatch.setattr(dg.Adb, "get_target_device", staticmethod(lambda: "emu-1"))
+    calls = []
+    monkeypatch.setattr(
+        proxy_modal.ProxyModal,
+        "_start_kill_switch_apply",
+        lambda self, enabled: calls.append(enabled),
+    )
+    notes = []
+    for start, wanted in ((True, False), (False, True)):
+        guard._views["emu-1"] = dg.GuardView(kill_switch=start, checked=True)
+        modal = proxy_modal.ProxyModal()
+        app = _method_modal_app(modal)
+        async with app.run_test(size=(120, 50)) as pilot:
+            await until(pilot, lambda app=app, modal=modal: app.screen is modal)
+            monkeypatch.setattr(
+                modal, "notify", lambda msg, **kw: notes.append(str(msg))
+            )
+            monkeypatch.setattr(
+                modal,
+                "_proxy_manager",
+                SimpleNamespace(unset_proxy=lambda: (True, "Proxy cleared")),
+            )
+            monkeypatch.setattr(
+                "sandroid.core.proxy_manager._reverse_registered", lambda port: False
+            )
+            box = modal.query_one("#kill-switch-checkbox", Checkbox)
+            assert box.value is start  # the device's truth, a leftover too
+            box.value = wanted
+            await settle(pilot)
+            modal._apply_commit(None)  # no device proxy
+            await settle(pilot)
+    assert calls == [False]  # removed without a device proxy
+    assert any("needs a device proxy" in n for n in notes)
 
 
 async def test_proxy_dialog_method_tab_and_kill_switch(monkeypatch):

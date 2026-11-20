@@ -118,6 +118,12 @@ class NetworkMethodControl(Vertical):
     Proxy dialog's Method tab. Custom is shown (derived from what is set by
     hand) but cannot be selected; "This app, keys only" is disabled while
     friTap has no non-interactive start on this build.
+
+    The radio row and "Defeat pinning" follow the live method only until the
+    user touches them: later ``network_method`` events (the dialog's own
+    refresh lands a second after it opens) update the status line, never
+    the pending choice. "Defeat pinning" is tri-state for the apply: a box
+    the user did not toggle leaves the bypass as it is.
     """
 
     DEFAULT_CSS = """
@@ -178,18 +184,54 @@ class NetworkMethodControl(Vertical):
             id="nm-note",
         )
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        #: The user changed the radio row / the pinning box.
+        self._radio_touched = False
+        self._pinning_touched = False
+        #: Changes made by :meth:`show` whose events are still queued (the
+        #: Changed messages arrive later; these are not the user's).
+        self._synced_radio: list[str] = []
+        self._synced_pinning: list[bool] = []
+
     def show(self, view, snapshot) -> None:
-        """Render a derived view (UI thread)."""
+        """Render a derived view (UI thread).
+
+        The status line always follows; the radio row and the pinning box
+        only until the user touched them.
+        """
         try:
             self.query_one("#nm-status", Static).update(
                 Text.from_markup(view.markup(*_palette()))
             )
-            button = self.query_one(f"#nm-{view.preset}", RadioButton)
-            if not button.value:
-                button.value = True
-            self.query_one("#nm-pinning", Checkbox).value = snapshot.pinning != "off"
+            if not self._radio_touched:
+                button = self.query_one(f"#nm-{view.preset}", RadioButton)
+                if not button.value:
+                    self._synced_radio.append(button.id or "")
+                    button.value = True
+            if not self._pinning_touched:
+                box = self.query_one("#nm-pinning", Checkbox)
+                value = snapshot.pinning != "off"
+                if box.value != value:
+                    self._synced_pinning.append(value)
+                    box.value = value
         except NoMatches:
             pass
+
+    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+        pressed = getattr(event.pressed, "id", None) or ""
+        if pressed in self._synced_radio:
+            self._synced_radio.remove(pressed)
+            return
+        self._radio_touched = True
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        if event.checkbox.id != "nm-pinning":
+            return
+        if event.value in self._synced_pinning:
+            self._synced_pinning.remove(event.value)
+            return
+        self._pinning_touched = True
 
     def selected(self) -> str | None:
         """The selected preset (None: Custom or nothing)."""
@@ -201,11 +243,16 @@ class NetworkMethodControl(Vertical):
             return None
         return pressed.id[len("nm-") :]
 
-    def defeat_pinning(self) -> bool:
+    def defeat_pinning(self) -> bool | None:
+        """The pinning choice to apply: None unless the user toggled the box
+        (an untouched box never starts or stops a bypass).
+        """
+        if not self._pinning_touched:
+            return None
         try:
             return bool(self.query_one("#nm-pinning", Checkbox).value)
         except NoMatches:
-            return False
+            return None
 
 
 def run_method_apply(
@@ -339,13 +386,9 @@ class NetworkMethodModal(_MethodRepaint, ForensicModal[None]):
             yield NetworkMethodControl(id="nm-control")
             with Horizontal(classes="button-row"):
                 yield Button("Apply", id="nm-apply", classes="-primary")
+            hint = "[dim]Up/Down=Choose  Space=Select  Ctrl+S=Apply  Esc=Close[/dim]"
             yield KeyHintFooter(
-                hints={
-                    "default": (
-                        "[dim]Up/Down=Choose  Space=Select  Ctrl+S=Apply  "
-                        "Esc=Close[/dim]"
-                    ),
-                }
+                hints={"default": hint, "radioset": hint, "button": hint}
             )
 
     def on_mount(self) -> None:
@@ -808,10 +851,12 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
 
     @staticmethod
     def _kill_switch_wanted() -> bool:
+        """Wanted in this session, or seen on the device (a leftover too)."""
         try:
             from sandroid.core.device_guard import get_device_guard
 
-            return get_device_guard().kill_switch_wanted()
+            guard = get_device_guard()
+            return guard.kill_switch_wanted() or guard.view_cached().kill_switch
         except Exception:
             return False
 
@@ -1665,8 +1710,17 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
             kill_switch = self.query_one("#kill-switch-checkbox", Checkbox).value
         except NoMatches:
             kill_switch = self._kill_switch_wanted()
-        if desired_config is not None and kill_switch != self._kill_switch_wanted():
-            self._start_kill_switch_apply(kill_switch)
+        if kill_switch != self._kill_switch_wanted():
+            if desired_config is not None or not kill_switch:
+                # Off works without a device proxy too (a Kill switch left
+                # behind takes every app offline).
+                self._start_kill_switch_apply(kill_switch)
+            else:
+                self.notify(
+                    "Kill switch not turned on: it needs a device proxy (it "
+                    "lets apps reach only that proxy)",
+                    severity="warning",
+                )
 
         # 2. App proxies. Read the QUIC-block setting and commit it to the
         #    shared config BEFORE reconciling, so lanes newly enabled by the

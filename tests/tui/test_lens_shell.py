@@ -1925,3 +1925,48 @@ def test_header_says_restarting_without_a_pid_during_shift_r():
     bar.spotlight_pid = 23326
     app_seg = next(s.plain for s in bar._segments() if s.plain.startswith("App"))
     assert "running pid 23326" in app_seg
+
+
+def test_proxy_strip_segment_is_plain_words():
+    """N22: the Proxy segment of the status strip in words + theme colours:
+    no symbols, never "mitm", "Capture" or "arm".
+    """
+    import re
+
+    from sandroid.tui.widgets.status_bar import StatusBar
+
+    def proxy_segment(**state) -> str:
+        bar = StatusBar()
+        for key, value in state.items():
+            setattr(bar, key, value)
+        return next(s.plain for s in bar._segments() if s.plain.startswith("Proxy"))
+
+    ours = "10.0.2.2:8080"
+    cases = {
+        "Proxy Mitmproxy off": {},
+        f"Proxy Mitmproxy on {ours} · Device proxy on": {
+            "mitmweb_running": True,
+            "mitmweb_address": ours,
+            "proxy_address": ours,
+        },
+        "Proxy Mitmproxy off · Device proxy to the stopped Mitmproxy": {
+            "mitmweb_address": ours,
+            "proxy_address": ours,
+        },
+        f"Proxy Mitmproxy on {ours} · Device proxy off": {
+            "mitmweb_running": True,
+            "mitmweb_address": ours,
+        },
+        "Proxy Mitmproxy off · Device proxy to 192.168.1.5:8081": {
+            "proxy_address": "192.168.1.5:8081",
+        },
+        "Proxy Mitmproxy off · App Proxy for 2 apps · App Proxy for 1 app to an "
+        "external proxy": {
+            "app_proxies": {"a": "ours", "b": "ours", "c": "http://1.2.3.4:8"},
+        },
+    }
+    for expected, state in cases.items():
+        text = proxy_segment(**state)
+        assert text == expected
+        assert not re.search("[←-⇿─-➿⬀-⯿]", text)
+        assert not re.search(r"\b(mitm|Capture|arm(ed)?)\b", text)
