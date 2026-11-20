@@ -460,21 +460,26 @@ async def test_a_device_that_does_not_answer_is_read_again_later(
     fakes, monkeypatch
 ) -> None:
     planned = _no_statuses_yet(fakes, monkeypatch, answers=[False])
-    monkeypatch.setattr(il, "AUTO_READ_RETRY_S", 1.5)
+    # The backoff runs on a clock the test moves by hand (no wall-clock race).
+    now = [1000.0]
+    monkeypatch.setattr(il, "_retry_clock", lambda: now[0])
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         lens = await _open_lens(app, pilot)
         await until(pilot, lambda: planned == [SERIAL])
+        await until(pilot, lambda: not lens._auto_read_busy)
         await settle(pilot)
         # Offline or booting: nothing turns failed, the values stay pending.
         assert _cell(lens, "gaid", "status") == "pending"
         assert _cell(lens, "android_id", "status") == "pending"
-        # Not a tight loop: no second read before the backoff.
-        await pilot.pause(0.5)
+        # Not a tight loop: several lens ticks pass, the backoff has not.
+        await pilot.pause(2.5)
         assert planned == [SERIAL]
+        now[0] += il.AUTO_READ_RETRY_S + 1  # the backoff is over
         await until(pilot, lambda: _cell(lens, "gaid", "status") == "verified")
         assert planned == [SERIAL, SERIAL]
-        await pilot.pause(2.0)
+        now[0] += 10 * il.AUTO_READ_RETRY_S
+        await pilot.pause(2.5)
         assert planned == [SERIAL, SERIAL]  # done after the good read
 
 

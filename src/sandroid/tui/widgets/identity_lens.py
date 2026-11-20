@@ -72,6 +72,13 @@ REFRESH_MIN_S = 1.0
 #: Seconds before the lens's own device read is tried again after a device
 #: that did not answer (offline, still booting) or a failed read.
 AUTO_READ_RETRY_S = 30.0
+
+
+def _retry_clock() -> float:
+    """Clock of the auto-read retry backoff (tests replace it)."""
+    return time.monotonic()
+
+
 #: Row key prefix of the section header rows.
 SECTION_PREFIX = "_sec:"
 #: Longest profile / device value shown in a cell.
@@ -886,7 +893,7 @@ class IdentityLens(Vertical):
         key = (serial, self.profile.id)
         if key in self._auto_read_done:
             return
-        if time.monotonic() < self._auto_read_retry.get(key, 0.0):
+        if _retry_clock() < self._auto_read_retry.get(key, 0.0):
             return
         self._auto_read_busy = True
 
@@ -894,7 +901,7 @@ class IdentityLens(Vertical):
             self._auto_read_busy = False
             if isinstance(result, Exception):
                 logger.info(f"identity lens: reading the device failed: {result}")
-                self._auto_read_retry[key] = time.monotonic() + AUTO_READ_RETRY_S
+                self._auto_read_retry[key] = _retry_clock() + AUTO_READ_RETRY_S
                 return
             self._auto_read_done.add(key)
             self._auto_read_retry.pop(key, None)
