@@ -97,7 +97,9 @@ PARENT_DIR = THEMES_DIR.parent
 #: AI highlight colour slots (``LensPalette.highlight_1..4``): violet, teal,
 #: pink, lime -- apart from warn (amber), bad (red) and accent (sky).
 HIGHLIGHT_DARK = ("#c084fc", "#2dd4bf", "#f472b6", "#a3e635")
-HIGHLIGHT_LIGHT = ("#7c3aed", "#0f766e", "#be185d", "#4d7c0f")
+#: The light shades are >= 4.5:1 on every light surface and on their own
+#: 18 % row tint (``tests/tui/test_theme_contrast.py``).
+HIGHLIGHT_LIGHT = ("#7129EB", "#0E6B64", "#B21757", "#426B0D")
 
 
 def _is_light(hex_colour: str) -> bool:
@@ -411,32 +413,32 @@ LIGHT_THEME = Theme(
     name="light",
     display_name="Light",
     is_dark=False,
-    primary="#1976D2",  # Blue
+    primary="#1669BC",  # Blue (Material 700, darkened to 4.6:1)
     secondary="#0D47A1",  # Dark blue
-    accent="#00BFA5",  # Teal accent
+    accent="#007A69",  # Teal accent (darkened to 4.6:1)
     background="#FAFAFA",  # Off-white
     surface="#FFFFFF",  # White
-    error="#D32F2F",  # Red
-    warning="#F57C00",  # Orange
-    success="#388E3C",  # Green
+    error="#CF2C2C",  # Red (darkened to 4.6:1)
+    warning="#A95500",  # Orange (darkened to 4.6:1)
+    success="#307A34",  # Green (darkened to 4.6:1)
     text="#212121",  # Dark grey
     text_muted="#757575",  # Medium grey
     key_color="#0D47A1",  # Dark blue keys
     border_color="#E0E0E0",  # Light border
-    forensic_color="#388E3C",  # Green
-    malware_color="#D32F2F",  # Red
-    security_color="#F57C00",  # Orange
-    logo_color="#1976D2",  # Blue logo
+    forensic_color="#307A34",  # Green
+    malware_color="#CF2C2C",  # Red
+    security_color="#A95500",  # Orange
+    logo_color="#1669BC",  # Blue logo
     logo_text_color="#0D47A1",  # Dark blue "Sandroid" text
-    tool_color="#1976D2",  # == primary, == this theme's .tool-tab.-active
+    tool_color="#1669BC",  # == primary, == this theme's .tool-tab.-active
     # color in themes/light.tcss -- consistent with the chrome
     user_highlight_background="#E3F2FD",  # this theme's .tool-tab:hover bg --
     # a light blue tint that actually stands out against the near-white
     # #chat-log background (surface/background are both too close to white)
-    assistant_reply_color="#388E3C",  # == success -- dark enough green for
+    assistant_reply_color="#307A34",  # == success -- dark enough green for
     # readable contrast against this theme's light background
-    waiting_color="#FFA000",  # Material Amber 700 -- distinct from this
-    # theme's warning (#F57C00, more orange), still readable on white
+    waiting_color="#985F00",  # Material Amber 700 darkened to 4.6:1 --
+    # distinct from this theme's warning (#A95500, more orange)
     muted_status_color="#757575",  # == text_muted, == this theme's
     # .tool-tab inactive color -- consistent with the chrome
     lens=LensPalette(
@@ -447,13 +449,13 @@ LIGHT_THEME = Theme(
         dim="#6B6B6B",
         muted="#5F6368",
         title="#0D47A1",
-        accent="#1976D2",
+        accent="#1669BC",
         accent_text="#FFFFFF",
         ok="#2E7D32",
-        warn="#B45309",
+        warn="#A94E09",
         bad="#C62828",
         rule="#D0D7DE",
-        rule_focus="#1976D2",
+        rule_focus="#1669BC",
         header="#6B6B6B",
         cursor="#EEF3F8",
         cursor_focus="#BBDEFB",
@@ -474,11 +476,11 @@ LIGHT_THEME = Theme(
         "running": "#2E7D32",
         "stopped": "#C62828",
         "error": "#C62828",
-        "warning_status": "#B45309",
-        "spawn_mode": "#00838F",
+        "warning_status": "#A94E09",
+        "spawn_mode": "#007782",
         "attach_mode": "#2E7D32",
-        "paused": "#B45309",
-        "notice": "#B45309",
+        "paused": "#A94E09",
+        "notice": "#A94E09",
     },
 )
 
@@ -973,11 +975,11 @@ SOLARIZED_THEME = Theme(
         dim="#6C8189",
         muted="#839496",
         title="#2AA198",
-        accent="#268BD2",
+        accent="#3295DA",
         accent_text="#FDF6E3",
         ok="#859900",
         warn="#B58900",
-        bad="#DC322F",
+        bad="#E56765",
         rule="#244F5A",
         rule_focus="#268BD2",
         header="#6C8189",
@@ -1377,6 +1379,17 @@ def build_textual_theme(theme: Theme) -> TextualTheme:
         A Textual theme named :func:`textual_theme_name` ``(theme.name)``.
     """
     base = BUILTIN_THEMES["textual-dark" if theme.is_dark else "textual-light"]
+    if not theme.is_dark:
+        # textual-light's amber accent / warning and light green success are
+        # ~2:1 on white; ``[$warning]`` / ``color: $success`` text in the
+        # modals must stay readable, so a light theme uses its own shades.
+        base = replace(
+            base,
+            accent=theme.lens.accent,
+            warning=theme.lens.warn,
+            success=theme.lens.ok,
+            error=theme.lens.bad,
+        )
     return replace(
         base,
         name=textual_theme_name(theme.name),
