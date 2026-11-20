@@ -36,7 +36,7 @@ import shutil
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from logging import getLogger
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -501,8 +501,10 @@ def sim_values(profile: Profile) -> SimValues | None:
     )
 
 
-def active_sim_values() -> SimValues | None:
-    """SIM values of the active profile; ``None`` when identity mode is off."""
+def _active_sim() -> tuple[str, SimValues] | None:
+    """The active profile's id and SIM values; ``None`` when identity mode
+    is off, the profile is unusable, or it has no native SIM value.
+    """
     from sandroid.services.identity import ProfileError, get_identity_service
 
     service = get_identity_service()
@@ -514,7 +516,14 @@ def active_sim_values() -> SimValues | None:
     except ProfileError as exc:
         logger.warning(f"identity SIM: active profile unusable: {exc}")
         return None
-    return sim_values(profile)
+    values = sim_values(profile)
+    return (profile.id, values) if values is not None else None
+
+
+def active_sim_values() -> SimValues | None:
+    """SIM values of the active profile; ``None`` when identity mode is off."""
+    found = _active_sim()
+    return found[1] if found is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -783,6 +792,15 @@ def _avd_running(avd: str) -> bool:
         return False
 
 
+#: Key of this module's entry in the launch record's ``hooks``.
+RECORD_KEY = "identity_sim"
+
+
+def _note(context: LaunchContext, profile: str, **entry: Any) -> None:
+    """Put what this launch got into the launch record (``hooks``)."""
+    context.record[RECORD_KEY] = {"profile": profile, **entry}
+
+
 def pre_launch(context: LaunchContext) -> tuple[str, ...]:
     """Pre-launch hook: ``("-sysdir", <absolute private dir>)`` or ``()``.
 
@@ -792,16 +810,13 @@ def pre_launch(context: LaunchContext) -> tuple[str, ...]:
     another instance of the AVD runs and no matching sysdir exists (all
     logged). Raises only when the private directory cannot be written (the
     launch then fails closed).
+
+    Whenever identity mode is on with SIM values, the launch record gets
+    ``hooks.identity_sim``: ``{"profile", "values", "sysdir"}`` when the
+    emulator starts with them, else ``{"profile", "skipped": <reason>}``.
     """
-    if has_sysdir(tuple(context.options.extra_args)):
-        logger.warning(
-            "identity SIM: AVD %r is launched with its own -sysdir; the SIM "
-            "identity is not set",
-            context.avd,
-        )
-        return ()
     try:
-        values = active_sim_values()
+        found = _active_sim()
     except Exception:
         logger.warning(
             "identity SIM: cannot read the active profile; the SIM identity of "
@@ -810,7 +825,16 @@ def pre_launch(context: LaunchContext) -> tuple[str, ...]:
             exc_info=True,
         )
         return ()
-    if values is None:
+    if found is None:
+        return ()
+    profile_id, values = found
+    if has_sysdir(tuple(context.options.extra_args)):
+        logger.warning(
+            "identity SIM: AVD %r is launched with its own -sysdir; the SIM "
+            "identity is not set",
+            context.avd,
+        )
+        _note(context, profile_id, skipped=OWN_SYSDIR)
         return ()
     image = image_dir(context.avd_dir)
     if image is None:
@@ -819,25 +843,31 @@ def pre_launch(context: LaunchContext) -> tuple[str, ...]:
             "identity is not set",
             context.avd,
         )
+        _note(context, profile_id, skipped=NO_IMAGE)
         return ()
     target = sysdir_path(context.avd).absolute()
     try:
         if _avd_running(context.avd):
             # Another instance may run from this directory: never rebuild it.
             if _matches(target, patched_files(image.absolute(), values)):
-                return (SYSDIR_FLAG, str(target))
-            logger.warning(
-                "identity SIM: AVD %r already runs; its SIM identity is not set",
-                context.avd,
-            )
-            return ()
-        path = build_private_sysdir(image, target, values)
+                path = target
+            else:
+                logger.warning(
+                    "identity SIM: AVD %r already runs; its SIM identity is not set",
+                    context.avd,
+                )
+                _note(context, profile_id, skipped=ALREADY_RUNNING)
+                return ()
+        else:
+            path = build_private_sysdir(image, target, values)
     except (SimPatchError, ValueError) as exc:
         logger.warning(
             f"identity SIM: SIM identity not set for AVD {context.avd!r}: {exc}"
         )
+        _note(context, profile_id, skipped=str(exc) or UNKNOWN_TEMPLATE)
         return ()
     logger.info(f"identity SIM: AVD {context.avd!r} starts with {path}")
+    _note(context, profile_id, values=asdict(values), sysdir=str(path))
     return (SYSDIR_FLAG, str(path))
 
 
@@ -892,6 +922,8 @@ MNC_UNKNOWN = (
     "the SIM MCC/MNC is unknown: add a SIM operator MCC/MNC value or a country preset"
 )
 MODE_OFF = "identity mode is off"
+NO_IMAGE = "the AVD has no system image directory"
+ALREADY_RUNNING = "another instance of the AVD runs with a different SIM"
 NOT_ACTIVE = "this profile is not the active one"
 
 
@@ -904,9 +936,10 @@ class RunningEmulator:
         avd: AVD name (empty when unknown).
         avd_dir: AVD directory (``None`` when unknown).
         sim: The SIM it started with (``None`` when unknown).
-        token: Changes with every launch: ``hardware-qemu.ini``, which the
-            emulator writes at each start, its modification time (empty
-            when unknown).
+        token: Changes with every launch: ``launch:<launch_id>`` of
+            Sandroid's launch record, else (an emulator Sandroid did not
+            start) ``ini:<mtime>`` of ``hardware-qemu.ini``, which the
+            emulator writes at each start (empty when unknown).
         own_sysdir: Sandroid launched it with a ``-sysdir`` of the user's.
     """
 
@@ -945,21 +978,33 @@ def running_emulator(serial: str, avd_name: str = "") -> RunningEmulator | None:
         return None
     from sandroid.core import emulator
 
-    name = avd_name or emulator.avd_name_of(serial) or ""
+    record: dict[str, Any] | None = None
+    try:
+        record = emulator.launch_record(serial)
+    except Exception:
+        logger.debug("identity SIM: launch record unavailable", exc_info=True)
+    if record is not None and not record.get("launch_id"):
+        record = None
+    name = (
+        avd_name
+        or (str(record.get("avd") or "") if record is not None else "")
+        or emulator.avd_name_of(serial)
+        or ""
+    )
     directory = emulator.avd_dir(name) if name else None
     if directory is None:
         return RunningEmulator(serial, name)
-    token = ""
-    try:
-        token = str((directory / "hardware-qemu.ini").stat().st_mtime_ns)
-    except OSError:
-        pass
-    launch = emulator.get_launch(serial)
-    own = bool(
-        launch is not None
-        and launch.alive
-        and has_sysdir(tuple(launch.options.extra_args))
-    )
+    own = False
+    if record is not None:
+        token = f"launch:{record['launch_id']}"
+        extra = (record.get("options") or {}).get("extra_args") or ()
+        own = has_sysdir(tuple(str(a) for a in extra))
+    else:
+        try:
+            ns = (directory / "hardware-qemu.ini").stat().st_mtime_ns
+            token = f"ini:{ns}"
+        except OSError:
+            token = ""
     return RunningEmulator(
         serial, name, directory, launched_sim(directory), token, own_sysdir=own
     )

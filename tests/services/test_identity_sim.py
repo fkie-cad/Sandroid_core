@@ -5,6 +5,7 @@ No emulator, no adb: a fake system image directory under ``tmp_path``.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
@@ -354,17 +355,27 @@ def _activate(profile_env) -> ident.Profile:
 
 def test_pre_launch_is_a_no_op_when_identity_mode_is_off(avd, tmp_path):
     ident.get_identity_service().save(_profile())
-    assert sim.pre_launch(_context(avd)) == ()
+    context = _context(avd)
+    assert sim.pre_launch(context) == ()
     assert not (tmp_path / "cache").exists()
+    assert context.record == {}  # nothing in the launch record
 
 
 def test_pre_launch_builds_the_sysdir_and_post_stop_removes_it(avd, profile_env):
     profile = _activate(profile_env)
-    args = sim.pre_launch(_context(avd))
+    context = _context(avd)
+    args = sim.pre_launch(context)
     assert args == ("-sysdir", str(sim.sysdir_path("Dev1")))
     icc = Path(args[1]) / sim.MODEM_DIR / "iccprofile_for_sim0.xml"
     built = sim.read_iccprofile(icc.read_text(encoding="utf-8"))
     assert built.iccid == ident.render_value(profile, profile.values["iccid"])
+    # The launch record says which profile's SIM the emulator starts with.
+    noted = context.record[sim.RECORD_KEY]
+    assert noted["profile"] == profile.id
+    assert noted["sysdir"] == args[1]
+    assert noted["values"]["iccid"] == built.iccid
+    assert sim.SimValues(**noted["values"]) == sim.active_sim_values()
+    json.dumps(context.record)  # JSON-ready
     # A second launch tolerates the leftover of the first.
     assert sim.pre_launch(_context(avd)) == args
     sim.post_stop(_context(avd))
@@ -374,9 +385,14 @@ def test_pre_launch_builds_the_sysdir_and_post_stop_removes_it(avd, profile_env)
 
 
 def test_pre_launch_leaves_a_launch_with_its_own_sysdir_alone(avd, profile_env):
-    _activate(profile_env)
-    assert sim.pre_launch(_context(avd, "-sysdir", "/elsewhere")) == ()
+    profile = _activate(profile_env)
+    context = _context(avd, "-sysdir", "/elsewhere")
+    assert sim.pre_launch(context) == ()
     assert not sim.sysdir_path("Dev1").exists()
+    assert context.record[sim.RECORD_KEY] == {
+        "profile": profile.id,
+        "skipped": sim.OWN_SYSDIR,
+    }
 
 
 def test_pre_launch_without_native_sim_values_or_image(avd, profile_env, image):
@@ -389,7 +405,9 @@ def test_pre_launch_without_native_sim_values_or_image(avd, profile_env, image):
         profile.values[kind].enabled = True
     ident.get_identity_service().save(profile)
     (avd / "config.ini").write_text("image.sysdir.1=nowhere/\n", encoding="utf-8")
-    assert sim.pre_launch(_context(avd)) == ()
+    context = _context(avd)
+    assert sim.pre_launch(context) == ()
+    assert context.record[sim.RECORD_KEY]["skipped"] == sim.NO_IMAGE
 
 
 def test_launch_runs_the_hooks_and_appends_the_sysdir(avd, profile_env, monkeypatch):
@@ -507,11 +525,39 @@ def test_running_emulator_has_a_launch_token(avd, monkeypatch):
     monkeypatch.setattr(emulator, "avd_dir", lambda name: avd)
     (avd / "hardware-qemu.ini").write_text("x\n", encoding="utf-8")
     os.utime(avd / "hardware-qemu.ini", ns=(1, 111))
+    monkeypatch.setattr(emulator, "launch_record", lambda serial: None)
     found = sim.running_emulator("emulator-5580", "Dev1")
-    assert found.token == "111"  # noqa: S105 - a launch id, not a secret
+    assert found.token == "ini:111"  # noqa: S105 - a launch id, not a secret
     assert found.sim is None
     assert not found.own_sysdir
     assert sim.running_emulator("R58M123", "Dev1") is None
+
+
+def test_running_emulator_uses_sandroids_launch_record(avd, monkeypatch):
+    monkeypatch.setattr(
+        emulator, "avd_dir", lambda name: avd if name == "Dev1" else None
+    )
+    monkeypatch.setattr(
+        emulator, "avd_name_of", lambda serial: pytest.fail("console asked")
+    )
+    (avd / "hardware-qemu.ini").write_text("x\n", encoding="utf-8")
+    record = {
+        "launch_id": "L1",
+        "avd": "Dev1",
+        "options": {"extra_args": ["-no-snapshot-save"]},
+    }
+    monkeypatch.setattr(emulator, "launch_record", lambda serial: record)
+    found = sim.running_emulator("emulator-5580")
+    assert found.avd == "Dev1"  # from the record, not the console
+    assert found.token == "launch:L1"  # noqa: S105 - a launch id, not a secret
+    assert not found.own_sysdir
+    # The token follows the launch, not the ini file's time.
+    os.utime(avd / "hardware-qemu.ini", ns=(1, 222))
+    assert sim.running_emulator("emulator-5580").token == "launch:L1"  # noqa: S105
+    record = {**record, "launch_id": "L2"}
+    assert sim.running_emulator("emulator-5580").token == "launch:L2"  # noqa: S105
+    record["options"] = {"extra_args": ["-sysdir=/mine"]}
+    assert sim.running_emulator("emulator-5580").own_sysdir
 
 
 def test_post_stop_keeps_the_sysdir_of_a_running_instance(
