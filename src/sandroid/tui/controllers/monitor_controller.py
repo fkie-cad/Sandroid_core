@@ -1689,9 +1689,9 @@ class MonitorWatch:
                 f"{self.package} {what} {started:%H:%M:%S} · {new} {proc.pid} · {gap}"
             )
             if restarted and self._sandroid_restarting():
-                text += " · restarted by ⇧R"
+                text += " · restarted by Shift+R"
             elif restarted and proc.via != "spawn":
-                text += " · Frida hooks are gone (⇧R re-applies)"
+                text += " · Frida hooks are gone (Shift+R re-applies)"
             when = started
             last_exit = self._last_exit_at
             if restarted and last_exit is not None and when <= last_exit:

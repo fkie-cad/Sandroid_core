@@ -518,7 +518,7 @@ async def test_tls_failure_row_and_badge(flow_dir):
         panel.mitm._append_line("[TLS_FAIL]|10:00:00|api.revenuecat.com|cert|" + PKG)
         panel.mitm._append_line("[TLS_FAIL]|10:00:01|pinned.example.com|cert|" + PKG)
         await settle(pilot)
-        assert ms.query_one("#lens-bar").badge("network") == "2 TLS"
+        assert ms.query_one("#lens-bar").badge("network") == "2 TLS failed"
         tls = [r for r in panel._live if r.kind == "tls"]
         assert [r.host for r in tls] == ["api.revenuecat.com", "pinned.example.com"]
         await pilot.press("2")

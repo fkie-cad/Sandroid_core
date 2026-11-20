@@ -964,11 +964,11 @@ async def test_files_lens_segments_follow_labels_in_note_and_section_wording(
         assert files._segment_title() == f"since Note 2 'tap' · {t(30)}"
         files._segment = 2
         assert files._segment_title() == (
-            f"after Section 1 (no section) → Note 2 'tap' · {t(20)}–{t(30)}"
+            f"after Section 1 (no section) to Note 2 'tap' · {t(20)}–{t(30)}"
         )
         files._segment = 1
         assert files._segment_title() == (
-            f"Section 1 'cookies' → after Section 1 · {t(10)}–{t(20)}"
+            f"Section 1 'cookies' to after Section 1 · {t(10)}–{t(20)}"
         )
         files._segment = 0
         assert files._segment_title() == f"before Section 1 'cookies' · until {t(10)}"
