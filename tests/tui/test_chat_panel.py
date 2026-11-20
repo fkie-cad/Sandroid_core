@@ -990,13 +990,20 @@ async def test_permissions_shows_rules_and_toggles_allow_all(sessions, perm_stor
         await _send(pilot, panel, "/permissions")
         assert "Approval mode: ask" in _notices(panel)
         assert "launch_app" in _notices(panel)
+        before = len(_blocks(panel, NoticeLine))
         await _send(pilot, panel, "/permissions allow_all")
         assert perm_store.mode == "allow_all"
         assert perm_store.file_mode == "ask"  # session only
         await settle(pilot)
         assert ALLOW_ALL_NOTICE in app.query_one(".chat-banner").plain_text
+        # One line, not "...for this session: allow_all" plus the whole view.
+        added = [b.text for b in _blocks(panel, NoticeLine)[before:]]
+        assert added == ["Approval mode: allow_all (this session; file: ask)"]
+        before = len(_blocks(panel, NoticeLine))
         await _send(pilot, panel, "/permissions ask")
         assert perm_store.mode == "ask"
+        added = [b.text for b in _blocks(panel, NoticeLine)[before:]]
+        assert added == ["Approval mode: ask (this session; file: ask)"]
 
 
 async def test_doctor_reports_the_health_check(sessions):

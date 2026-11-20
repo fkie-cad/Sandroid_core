@@ -367,12 +367,18 @@ def format_context(session: Any, agents_usage: dict | None = None) -> str:
     return "\n".join(lines)
 
 
+def format_mode_line(store: Any) -> str:
+    """``Approval mode: ask (this session; file: allow_all)``."""
+    line = f"Approval mode: {store.mode}"
+    if store.session_mode is not None:
+        line += f" (this session; file: {store.file_mode})"
+    return line
+
+
 def format_permissions(store: Any) -> str:
     """The ``/permissions`` view."""
     mode = store.mode
-    lines = [f"Approval mode: {mode}"]
-    if store.session_mode is not None:
-        lines[0] += f" (this session; file: {store.file_mode})"
+    lines = [format_mode_line(store)]
     if mode == "allow_all":
         lines.append(f"  {ALLOW_ALL_NOTICE}")
     allow, deny = store.allow_rules(), store.deny_rules()
@@ -2598,17 +2604,20 @@ class ChatPanel(Widget):
             mode = store.toggle_session_allow_all()
             if choice == "allow_all" and mode != "allow_all":
                 mode = store.toggle_session_allow_all()
-            self._notice(f"Approval mode for this session: {mode}", style="$lens-warn")
         elif choice == "ask":
             store.set_session_mode("ask")
-            self._notice("Approval mode for this session: ask")
         elif choice:
             self._notice(
                 "Use /permissions, /permissions allow_all or /permissions ask.",
                 style="$lens-warn",
             )
             return
-        self._info(format_permissions(store))
+        if choice:
+            # One line: the mode just set (the rules: bare /permissions).
+            style = "$lens-warn" if store.mode == "allow_all" else "$lens-text"
+            self._notice(format_mode_line(store), style=style)
+        else:
+            self._info(format_permissions(store))
         self.refresh_header()
 
     def _cmd_agents(self, arg: str) -> None:
@@ -2797,6 +2806,7 @@ __all__ = [
     "format_banner",
     "format_context",
     "format_health",
+    "format_mode_line",
     "format_permissions",
     "format_thread_row",
     "history_blocks",
