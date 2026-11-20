@@ -1496,6 +1496,45 @@ async def test_typing_on_the_agents_bar_goes_to_the_input(sessions, manager):
         assert field.value == "hi"
 
 
+async def test_agents_bar_spinner_animates_only_while_an_agent_runs(monkeypatch):
+    """The bar's running glyph was a fixed frame ("⠋ running 17s")."""
+    from sandroid.tui.widgets.chat_view import SPINNER
+
+    monkeypatch.setattr(AgentsBar, "SPIN_INTERVAL", 0.02)
+
+    class _BarApp(App):
+        def compose(self) -> ComposeResult:
+            yield AgentsBar()
+
+    def glyph(bar: AgentsBar) -> str:
+        text = bar.render().plain
+        return text[text.index(" · ") + 3]
+
+    app = _BarApp()
+    async with app.run_test(size=(100, 5)) as pilot:
+        bar = app.query_one(AgentsBar)
+        assert not bar.spinning
+        bar.set_rows([{"agent_id": "a1", "profile": "researcher", "status": "done"}])
+        assert not bar.spinning
+        bar.set_rows(
+            [
+                {
+                    "agent_id": "a1",
+                    "profile": "researcher",
+                    "status": "running",
+                    "elapsed_s": 17,
+                }
+            ]
+        )
+        assert bar.spinning
+        seen = {glyph(bar)}
+        await until(pilot, lambda: seen.add(glyph(bar)) or len(seen) >= 3)
+        assert seen <= set(SPINNER)
+        bar.set_rows([{"agent_id": "a1", "profile": "researcher", "status": "done"}])
+        assert not bar.spinning
+        assert "running" not in bar.render().plain
+
+
 async def test_closing_the_agent_modal_returns_to_the_chat_input(sessions, manager):
     """E2E: focus came back to the agents bar (Ctrl+Y then closed the chat)."""
     app = _Harness()

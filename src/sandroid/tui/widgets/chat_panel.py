@@ -614,16 +614,42 @@ class AgentsBar(Static, can_focus=True):
             super().__init__()
             self.text = text
 
+    #: Seconds per spinner frame while an agent runs (as on the agent cards).
+    SPIN_INTERVAL = AgentCard.SPIN_INTERVAL
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__("", **kwargs)
         self.rows: list[dict] = []
         self.selected = 0
+        self._spin = 0
+        self._timer: Any = None
 
     def set_rows(self, rows: list[dict]) -> None:
         """Show *rows* (``AgentManager.list`` snapshots, newest first)."""
         self.rows = list(rows)
         self.selected = max(0, min(self.selected, len(self.rows) - 1))
         self.display = bool(self.rows)
+        self._sync_spinner()
+        self.refresh()
+
+    @property
+    def spinning(self) -> bool:
+        """The running spinner animates (at least one agent runs)."""
+        return self._timer is not None
+
+    def on_mount(self) -> None:
+        self._sync_spinner(mounted=True)
+
+    def _sync_spinner(self, mounted: bool = False) -> None:
+        running = any(card_status(r.get("status")) == "running" for r in self.rows)
+        if running and self._timer is None and (mounted or self.is_mounted):
+            self._timer = self.set_interval(self.SPIN_INTERVAL, self._spin_tick)
+        elif not running and self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def _spin_tick(self) -> None:
+        self._spin += 1
         self.refresh()
 
     @property
@@ -639,6 +665,8 @@ class AgentsBar(Static, can_focus=True):
                 parts.append("   ")
             status = card_status(row.get("status"))
             label, style = AGENT_STATUS.get(status, (status, "$chat-muted"))
+            if status == "running":
+                label = SPINNER[self._spin % len(SPINNER)] + label[1:]
             text = f"{row.get('profile')} {row.get('agent_id')} · {label}"
             elapsed = format_elapsed(row.get("elapsed_s"))
             if elapsed and status in ("running", "queued"):
