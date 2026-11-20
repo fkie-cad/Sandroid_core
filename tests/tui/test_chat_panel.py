@@ -557,7 +557,17 @@ async def test_spawn_agent_shows_the_full_task(sessions):
         assert task.strip() in _notices(panel)
 
 
-async def test_errors_retries_and_compaction(sessions):
+def _no_idle_watchdog(monkeypatch) -> None:
+    """Stop the 1 s tick for tests that push events with no running session.
+
+    The tick (correctly) puts such a panel back to idle, which under load
+    can land between a push and its assert.
+    """
+    monkeypatch.setattr(ChatPanel, "_tick", lambda self: None)
+
+
+async def test_errors_retries_and_compaction(sessions, monkeypatch):
+    _no_idle_watchdog(monkeypatch)
     app = _Harness()
     async with app.run_test(size=(100, 40)) as pilot:
         panel = await _panel(pilot)
@@ -590,7 +600,8 @@ async def test_errors_retries_and_compaction(sessions):
         assert panel.state == "error"
 
 
-async def test_mascot_follows_the_panel_state(sessions):
+async def test_mascot_follows_the_panel_state(sessions, monkeypatch):
+    _no_idle_watchdog(monkeypatch)
     app = _Harness()
     async with app.run_test(size=(100, 40)) as pilot:
         panel = await _panel(pilot)

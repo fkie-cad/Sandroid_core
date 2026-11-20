@@ -697,7 +697,7 @@ renders live in the session scratchpad (``ui-dock/mockups.txt``, ``ui-look/mock_
     Textual 8's parser.
 
 - **Below the scroll area:** the agents bar (one line) and the input row
-  (``Ask Sandroid… / for commands``, subtitle ``⏎ send · ^X stop``) with the mascot
+  (``Ask Sandroid… / for commands``, subtitle ``Enter send · ^X stop``) with the mascot
   beside it. Typing ``/`` shows a slash-command hint list.
 - **Empty state.** Mascot C (the head standing in a ``╘═══════╛`` sandbox tray), plus
   the model, endpoint and egress notice, two example prompts and the slash commands.

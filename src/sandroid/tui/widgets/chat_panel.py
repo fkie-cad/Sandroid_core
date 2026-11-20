@@ -663,7 +663,7 @@ class AgentsBar(Static, can_focus=True):
             else:
                 # The words carry the state, in its colour.
                 parts += [(name, "$chat-muted"), (label, style)]
-        hint = "  ←→ select · ⏎ open" if self.has_focus else "  ↑ select"
+        hint = "  Left/Right select · Enter open" if self.has_focus else "  Up select"
         parts.append((hint, "$chat-muted"))
         return Content.assemble(*parts)
 
@@ -1408,7 +1408,7 @@ class ChatPanel(Widget):
     def on_mount(self) -> None:
         field = self._input()
         if field is not None:
-            field.border_subtitle = "⏎ send · ^X stop"
+            field.border_subtitle = "Enter send · ^X stop"
         self._render_intro(legacy_notice=True)
         self.refresh_header()
         self.set_interval(TICK_S, self._tick)

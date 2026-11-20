@@ -132,7 +132,7 @@ _TIER_LABELS = {
 _OPTION_IDS = {"once": "btn-once", "always": "btn-always", "no": "btn-never"}
 
 #: Hint line, normally and while the note input is open.
-HINT = "1-3 or ↑↓ Enter · Esc = No"
+HINT = "1-3, or Up/Down and Enter · Esc = No"
 HINT_NOTE = "Enter sends No with this note · empty = just No · Esc = No"
 
 
