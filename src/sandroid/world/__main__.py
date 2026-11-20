@@ -5,9 +5,14 @@ r"""Developer entry point of the world module (no public CLI surface yet).
         --owner-first F --owner-last L [--anchor 2026-11-20T15:00] [--force-cleanup]
     python -m sandroid.world photos fetch (--spec world.yaml ... | --all)
     python -m sandroid.world photos import FOLDER
+    python -m sandroid.world persona build --serial emulator-5560 --profile ID \
+        [--rebuild] [--keep 3] [--anchor ...] [--force-cleanup]
+    python -m sandroid.world persona list --avd AVD
 
 ``--spec`` is a YAML file holding either the ``world:`` mapping itself or a
-profile with a ``world:`` key (and optionally ``owner:``). Output is JSON on
+profile with a ``world:`` key (and optionally ``owner:``); ``--profile`` takes
+an identity profile from the library instead (its seed is resolved and written
+back once, its owner rendered with its token). Output is JSON on
 stdout; progress goes to stderr.
 """
 
@@ -55,6 +60,18 @@ def _anchor(text: str | None) -> dt.datetime | None:
 def _generate(args: argparse.Namespace, target_sdk: int | None = None) -> Any:
     from sandroid.world import generate
 
+    if getattr(args, "profile", None):
+        from sandroid.world.persona import PersonaError, manifest_for_profile
+
+        try:
+            manifest, _profile = manifest_for_profile(
+                args.profile, target_sdk=target_sdk
+            )
+        except PersonaError as exc:
+            raise SystemExit(str(exc)) from exc
+        for warning in manifest.warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+        return manifest
     spec, owner = _load_spec(args.spec)
     manifest = generate(spec, _owner(args, owner), target_sdk=target_sdk)
     if spec.get("seed", "auto") == "auto":
@@ -117,6 +134,41 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_persona(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from sandroid.world import persona
+    from sandroid.world.prepare import PrepareError
+
+    if args.persona_cmd == "list":
+        _dump(persona.persona_snapshots(args.avd))
+        return 0
+
+    def progress(step: str, done: int, total: int) -> None:
+        print(f"{step}: {done}/{total}", file=sys.stderr)
+
+    try:
+        result = persona.build_persona(
+            args.serial,
+            args.profile,
+            anchor=_anchor(args.anchor),
+            progress=progress,
+            force_cleanup=args.force_cleanup,
+            keep=args.keep,
+            rebuild=args.rebuild,
+        )
+    except PrepareError as exc:
+        print(f"prepare failed: {exc}", file=sys.stderr)
+        if exc.report is not None:
+            _dump(exc.report.to_dict())
+        return 1
+    except persona.PersonaError as exc:
+        print(f"persona failed: {exc}", file=sys.stderr)
+        return 1
+    _dump(asdict(result))
+    return 0
+
+
 def cmd_photos(args: argparse.Namespace) -> int:
     from sandroid.world.packs import load_packs
     from sandroid.world.photos import ensure_photos, import_photos, photo_entries
@@ -135,8 +187,8 @@ def cmd_photos(args: argparse.Namespace) -> int:
         pack = load_packs().photos()
         entries = (pack.data.get("photos") if pack else None) or []
     else:
-        if not args.spec:
-            raise SystemExit("photos fetch needs --spec or --all")
+        if not (args.spec or args.profile):
+            raise SystemExit("photos fetch needs --spec, --profile or --all")
         entries = photo_entries(_generate(args))
 
     def progress(pid: str, done: int, total: int) -> None:
@@ -155,6 +207,7 @@ def cmd_photos(args: argparse.Namespace) -> int:
 
 def _owner_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--spec", help="YAML: the world mapping or a profile")
+    p.add_argument("--profile", help="an identity profile id (instead of --spec)")
     p.add_argument("--owner-first")
     p.add_argument("--owner-last")
     p.add_argument("--owner-phone", help="E.164; only its country code is used")
@@ -182,6 +235,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--force-cleanup", action="store_true")
     p.set_defaults(func=cmd_prepare)
 
+    p = sub.add_parser("persona", help="persona snapshots")
+    psub = p.add_subparsers(dest="persona_cmd", required=True)
+    b = psub.add_parser("build", help="prepare, apply the identity, save")
+    b.add_argument("--serial", required=True)
+    b.add_argument("--profile", required=True)
+    b.add_argument("--anchor", help="ISO time; default now (host clock)")
+    b.add_argument("--force-cleanup", action="store_true")
+    b.add_argument("--keep", type=int, help="persona snapshots kept per AVD")
+    b.add_argument("--rebuild", action="store_true", help="even if it exists")
+    b.set_defaults(func=cmd_persona)
+    ls = psub.add_parser("list", help="persona snapshots of an AVD")
+    ls.add_argument("--avd", required=True)
+    ls.set_defaults(func=cmd_persona)
+
     p = sub.add_parser("photos", help="the photo cache")
     psub = p.add_subparsers(dest="photos_cmd", required=True)
     f = psub.add_parser("fetch", help="download the photos a world (or all) uses")
@@ -202,8 +269,10 @@ def main(argv: list[str] | None = None) -> int:
         stream=sys.stderr,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    if args.cmd in ("render", "prepare") and not args.spec:
-        parser.error("--spec is required")
+    if args.cmd in ("render", "prepare") and not (args.spec or args.profile):
+        parser.error("--spec or --profile is required")
+    if args.cmd in ("render", "prepare") and args.spec and args.profile:
+        parser.error("--spec and --profile exclude each other")
     return int(args.func(args))
 
 

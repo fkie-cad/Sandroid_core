@@ -1,0 +1,371 @@
+"""A persona: one identity profile's world on one AVD, kept as a snapshot.
+
+The identity profile is the truth: its ``owner`` and ``world`` sections (and
+the resolved ``world.seed``) decide the manifest. The persona snapshot is a
+validated cache of "clean base + the world seeded + the identity applied";
+when it is missing or stale, it is built again from the profile.
+
+Order of a build (the caller runs it, off the UI thread)::
+
+    manifest, profile = manifest_for_profile(pid)
+    prepare(serial, manifest)                 # sandroid.world.prepare
+    IdentityService().apply(serial, profile=profile)
+    save_persona_snapshot(serial, avd, persona_name(profile, manifest))
+
+Snapshots are saved and deleted as the ``persona`` actor
+(:mod:`sandroid.core.snapshot_policy`): nobody else may overwrite them, and
+a save never lands on a pinned base such as ``clean_8g``. Only the newest
+``world.persona_snapshots`` (default :data:`DEFAULT_KEEP`) persona snapshots
+of an AVD are kept; each holds about 2.8 GB.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+from sandroid.world.helper import Device
+from sandroid.world.prepare import STAMP_FORMAT, STAMP_PATH, persona_snapshot_name
+
+if TYPE_CHECKING:
+    from sandroid.services.identity import IdentityService, Profile
+    from sandroid.world.manifest import WorldManifest
+    from sandroid.world.packs import PackSet
+
+logger = logging.getLogger(__name__)
+
+#: Prefix of every persona snapshot (the ``persona`` namespace).
+PERSONA_PREFIX = "sandroid_persona_"
+#: Persona snapshots kept per AVD unless the config says otherwise.
+DEFAULT_KEEP = 3
+#: The persona actor of the snapshot policy.
+ACTOR = "persona"
+
+
+class PersonaError(RuntimeError):
+    """A persona cannot be built or saved."""
+
+
+@dataclass
+class PersonaSave:
+    """What :func:`save_persona_snapshot` did.
+
+    Attributes:
+        name: The snapshot.
+        saved: The snapshot was saved and is loadable.
+        pruned: Older persona snapshots deleted to stay within ``keep``.
+        kept: Persona snapshots of the AVD after pruning, newest first.
+        error: Why the save failed (``saved`` False).
+        warnings: Prune failures and the like.
+    """
+
+    name: str
+    saved: bool = False
+    pruned: list[str] = field(default_factory=list)
+    kept: list[str] = field(default_factory=list)
+    error: str = ""
+    warnings: list[str] = field(default_factory=list)
+
+
+def manifest_for_profile(
+    profile_id: str,
+    *,
+    service: IdentityService | None = None,
+    packs: PackSet | None = None,
+    target_sdk: int | None = None,
+) -> tuple[WorldManifest, Profile]:
+    """Generate the world of identity profile ``profile_id``.
+
+    ``world.seed: auto`` is resolved (and written back to the profile) once,
+    so the same profile always yields the same world. The owner's phone and
+    e-mail templates are rendered with the profile's token.
+
+    Args:
+        profile_id: The profile in the identity library.
+        service: The identity service (tests); default a new one.
+        packs: The packs; default the built-in and user packs.
+        target_sdk: The device's API level (for the persona phone model).
+
+    Returns:
+        ``(manifest, profile)``; the profile as loaded after the seed was
+        resolved.
+
+    Raises:
+        PersonaError: The profile has no ``world`` section, or its owner
+            cannot be rendered.
+        sandroid.world.WorldError: The world spec is invalid.
+    """
+    from sandroid.services.identity import (
+        IdentityService,
+        TemplateError,
+        render_owner,
+    )
+    from sandroid.world.generator import generate
+
+    svc = service or IdentityService()
+    seed = svc.resolve_world_seed(profile_id)
+    if not seed:
+        raise PersonaError(f"identity profile {profile_id!r} has no world section")
+    profile = svc.load(profile_id)
+    spec = dict(profile.world)
+    spec["seed"] = seed
+    try:
+        owner = render_owner(profile)
+    except TemplateError as exc:
+        raise PersonaError(f"profile {profile_id!r}: owner: {exc}") from exc
+    if not owner.get("first") or not owner.get("last"):
+        raise PersonaError(
+            f"profile {profile_id!r}: the world needs the owner's first and last name"
+        )
+    return generate(spec, owner, packs=packs, target_sdk=target_sdk), profile
+
+
+def persona_name(profile: Profile, manifest: WorldManifest) -> str:
+    """The snapshot name of ``profile`` with ``manifest`` (both fingerprints)."""
+    from sandroid.services.identity import fingerprint
+
+    return persona_snapshot_name(profile.id, manifest.world_fp, fingerprint(profile))
+
+
+def configured_keep() -> int:
+    """The config's ``world.persona_snapshots`` (at least 1; default 3).
+
+    ``world`` is not a schema section yet; read defensively like
+    ``world.email_domain``.
+    """
+    try:
+        from sandroid.config import get_config
+
+        world = getattr(get_config(), "world", None)
+    except Exception:
+        return DEFAULT_KEEP
+    value = (
+        world.get("persona_snapshots")
+        if isinstance(world, dict)
+        else getattr(world, "persona_snapshots", None)
+    )
+    if isinstance(value, bool) or not isinstance(value, int):
+        return DEFAULT_KEEP
+    return max(1, value)
+
+
+def persona_snapshots(avd: str) -> list[str]:
+    """Loadable persona snapshots of ``avd`` on the host, newest first."""
+    from sandroid.core import emulator
+    from sandroid.core.snapshot_policy import snapshot_complete
+
+    directory = emulator.avd_dir(avd)
+    root = directory / "snapshots" if directory else None
+    if root is None or not root.is_dir():
+        return []
+    found: list[tuple[float, str]] = []
+    for entry in root.iterdir():
+        name = entry.name
+        if not name.startswith(PERSONA_PREFIX) or not snapshot_complete(avd, name):
+            continue
+        marker = entry / "snapshot.pb"
+        try:
+            mtime = (marker if marker.exists() else entry).stat().st_mtime
+        except OSError:
+            continue
+        found.append((mtime, name))
+    return [name for _mtime, name in sorted(found, reverse=True)]
+
+
+def device_world(serial: str, *, device: Device | None = None) -> dict[str, Any] | None:
+    """The world stamp on the device (``None``: no stamp or unreadable)."""
+    dev = device or Device(serial)
+    res = dev.shell(f"cat {STAMP_PATH} 2>/dev/null", timeout=20)
+    try:
+        data = json.loads(res.out) if res.out.strip() else None
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("format") != STAMP_FORMAT:
+        return None
+    return data
+
+
+def save_persona_snapshot(
+    serial: str,
+    avd: str,
+    name: str,
+    *,
+    world_fp: str,
+    keep: int | None = None,
+    emulator: Any = None,
+    device: Device | None = None,
+) -> PersonaSave:
+    """Save the running emulator as persona snapshot ``name``, then prune.
+
+    The device must carry a complete world stamp of ``world_fp`` (a prepare
+    that finished); otherwise nothing is saved. Older persona snapshots of
+    the AVD beyond ``keep`` (newest first, this one included) are deleted.
+    Call from a worker thread: the save pauses the emulator for seconds.
+
+    Args:
+        serial: The emulator.
+        avd: Its AVD name (for the host snapshot folder).
+        name: A ``sandroid_persona_`` name (:func:`persona_name`).
+        world_fp: The world the device must hold.
+        keep: Persona snapshots to keep; default :func:`configured_keep`.
+        emulator: The emulator service (tests); default the singleton.
+        device: The device wrapper (tests).
+
+    Returns:
+        The result; ``saved`` False with ``error`` when it was not saved.
+    """
+    from sandroid.core.snapshot_policy import acting_as, snapshot_complete
+
+    out = PersonaSave(name=name)
+    if not name.startswith(PERSONA_PREFIX):
+        out.error = f"{name!r} is not a persona snapshot name"
+        return out
+    stamp = device_world(serial, device=device)
+    if stamp is None:
+        out.error = "the device holds no world (prepare it first)"
+        return out
+    if stamp.get("state") != "complete" or stamp.get("world_fp") != world_fp:
+        out.error = (
+            f"the device's world is {str(stamp.get('world_fp') or '')[:12]} "
+            f"({stamp.get('state')}), not {world_fp[:12]} (complete)"
+        )
+        return out
+    if emulator is None:
+        from sandroid.services import get_emulator_service
+
+        emulator = get_emulator_service()
+    with acting_as(ACTOR):
+        ok = emulator.create_snapshot(name, serial=serial)
+    if not ok:
+        out.error = "the emulator did not save the snapshot (see the log)"
+        return out
+    if not snapshot_complete(avd, name):
+        out.error = "the snapshot was saved but holds no RAM image"
+        return out
+    out.saved = True
+    limit = max(1, keep if keep is not None else configured_keep())
+    current = persona_snapshots(avd)
+    older = [n for n in current if n != name]
+    for old in older[limit - 1 :]:
+        if delete_persona_snapshot(serial, old, emulator=emulator):
+            out.pruned.append(old)
+        else:
+            out.warnings.append(f"could not delete the old persona snapshot {old}")
+    out.kept = [n for n in [name, *older] if n not in out.pruned]
+    return out
+
+
+@dataclass
+class PersonaBuild:
+    """What :func:`build_persona` did.
+
+    Attributes:
+        profile: The identity profile id.
+        snapshot: The persona snapshot name.
+        cached: The snapshot existed already; nothing was done.
+        prepare: :meth:`PrepareReport.to_dict` (empty when cached).
+        identity: The identity apply's step statuses.
+        save: The snapshot save (None when cached or not reached).
+    """
+
+    profile: str
+    snapshot: str
+    cached: bool = False
+    prepare: dict[str, Any] = field(default_factory=dict)
+    identity: dict[str, Any] = field(default_factory=dict)
+    save: PersonaSave | None = None
+
+
+def build_persona(
+    serial: str,
+    profile_id: str,
+    *,
+    anchor: Any = None,
+    progress: Any = None,
+    force_cleanup: bool = False,
+    keep: int | None = None,
+    rebuild: bool = False,
+    identity: IdentityService | None = None,
+    emulator: Any = None,
+    device: Device | None = None,
+) -> PersonaBuild:
+    """Build the persona snapshot of ``profile_id`` on the clean emulator
+    ``serial``: generate, prepare, apply the identity, save, prune.
+
+    The emulator must run a clean base (no world stamp). When the snapshot
+    exists already (same world and identity fingerprints) nothing is done
+    unless ``rebuild``. Call from a worker thread.
+
+    Raises:
+        PersonaError: No AVD, no world section, the identity apply failed,
+            or the snapshot was not saved.
+        sandroid.world.prepare.PrepareError: Prepare refused or failed.
+    """
+    from sandroid.core import emulator as emu
+    from sandroid.services.identity import IdentityService
+    from sandroid.world.prepare import prepare
+
+    dev = device or Device(serial)
+    avd = emu.avd_name_of(serial)
+    if not avd:
+        raise PersonaError(f"{serial} is not an emulator with a known AVD")
+    sdk = dev.shell("getprop ro.build.version.sdk", timeout=30).out.strip()
+    svc = identity or IdentityService()
+    manifest, profile = manifest_for_profile(
+        profile_id, service=svc, target_sdk=int(sdk) if sdk.isdigit() else None
+    )
+    name = persona_name(profile, manifest)
+    out = PersonaBuild(profile=profile_id, snapshot=name)
+    if not rebuild and name in persona_snapshots(avd):
+        out.cached = True
+        return out
+    report = prepare(
+        serial,
+        manifest,
+        anchor=anchor,
+        progress=progress,
+        force_cleanup=force_cleanup,
+        device=dev,
+    )
+    out.prepare = report.to_dict()
+    plan = svc.apply(serial, allow_restart=True, profile=profile)
+    out.identity = {
+        vid: {"status": info.status, "reason": info.reason}
+        for vid, info in plan.infos.items()
+    }
+    # A SIM value comes from the emulator's start, not the snapshot.
+    failed = sorted(
+        vid
+        for vid, info in plan.infos.items()
+        if info.status == "failed" and info.enabled and not info.sim_launch
+    )
+    if failed:
+        raise PersonaError(f"identity apply failed for {', '.join(failed)}")
+    out.save = save_persona_snapshot(
+        serial,
+        avd,
+        name,
+        world_fp=manifest.world_fp,
+        keep=keep,
+        emulator=emulator,
+        device=dev,
+    )
+    if not out.save.saved:
+        raise PersonaError(f"persona snapshot not saved: {out.save.error}")
+    return out
+
+
+def delete_persona_snapshot(serial: str, name: str, *, emulator: Any = None) -> bool:
+    """Delete persona snapshot ``name`` as the ``persona`` actor."""
+    from sandroid.core.snapshot_policy import acting_as
+
+    if not name.startswith(PERSONA_PREFIX):
+        return False
+    if emulator is None:
+        from sandroid.services import get_emulator_service
+
+        emulator = get_emulator_service()
+    with acting_as(ACTOR):
+        return bool(emulator.delete_snapshot(name, serial=serial))
