@@ -113,9 +113,14 @@ class FakeDevice:
         self.on_read = None  # hook(proc)
 
     def _words(self, argv: list[str]) -> tuple[list[str], bool]:
+        """Like adb 36: ONE string after exec-out is parsed by the device sh;
+        several arguments reach the command literally (quotes and redirects
+        included).
+        """
         assert argv[0] == "adb"
         assert argv[3] == "exec-out", argv
-        words = list(argv[4:])
+        literal = len(argv) != 5
+        words = list(argv[4:]) if literal else shlex.split(argv[4])
         rooted = self.adbd_root
         if words[:2] == ["su", "0"]:
             if not self.su:
@@ -124,9 +129,10 @@ class FakeDevice:
         elif words[:2] == ["su", "-c"]:
             if not self.su:
                 return ["__nosu__"], False
-            words, rooted = [words[2]], True
-        parsed = shlex.split(" ".join(words))
-        return [w for w in parsed if not w.startswith("2>")], rooted
+            words, rooted = ([words[2]] if literal else shlex.split(words[2])), True
+        if not literal:
+            words = [w for w in words if not w.startswith("2>")]
+        return words, rooted
 
     def run(self, argv, timeout=10.0):
         self.calls.append(list(argv))
@@ -137,16 +143,24 @@ class FakeDevice:
             return 0, b"0\n" if rooted else b"2000\n", b""
         if words[:2] == ["stat", "-c"]:
             fmt = words[2]
-            assert fmt == "%s|%Y|%F|%n"
+
+            def fmt_line(size, mtime, ftype, p):
+                return (
+                    fmt.replace("%s", str(size))
+                    .replace("%Y", str(mtime))
+                    .replace("%F", ftype)
+                    .replace("%n", p)
+                )
+
             lines = []
             for p in words[3:]:
                 if p in self.dirs:
-                    lines.append(f"4096|1700000000|directory|{p}")
+                    lines.append(fmt_line(4096, 1700000000, "directory", p))
                 elif p.startswith("/data/") and not rooted:
                     lines.append(f"stat: '{p}': Permission denied")
                 elif p in self.files:
                     size = len(self.files[p]) if p not in self.endless else 10**9
-                    lines.append(f"{size}|{self.mtimes[p]}|regular file|{p}")
+                    lines.append(fmt_line(size, self.mtimes[p], "regular file", p))
                 else:
                     lines.append(f"stat: '{p}': No such file or directory")
             return 0, ("\n".join(lines) + "\n").encode(), b""
@@ -236,20 +250,51 @@ def test_serial_is_pinned_even_after_a_target_switch():
     assert Adb.get_target_device() == "other-2"  # never changed by the reader
 
 
+def test_exec_out_sends_one_shell_string_adb36():
+    """With several arguments after exec-out, adb 36 escapes each one:
+    quotes and redirects would reach stat/head literally. Every device
+    command must be one string the device sh parses.
+    """
+    path = "/sdcard/My Files/a b.txt"
+    dev = FakeDevice({path: b"hello"})
+    # What the old argv form got on adb 36: nothing parses.
+    old = ["adb", "-s", SERIAL, "exec-out", "stat", "-c", "'%s|%Y|%F|%n'"]
+    _rc, out, _err = dev.run([*old, shlex.quote(path), "2>&1"])
+    assert all(s.error for s in df.parse_stat(out.decode(), [path]).values())
+    dev.calls.clear()
+    reader = dev.reader()
+    st = reader.stat([path])[path]
+    assert st.regular
+    assert st.size == 5
+    assert reader.head(path, 100).data == b"hello"
+    assert dev.calls
+    for argv in dev.calls:
+        assert len(argv) == 5, argv  # [adb, -s, serial, exec-out, "<cmd>"]
+    assert dev.calls[-1][4] == "head -c 101 '/sdcard/My Files/a b.txt' 2>/dev/null"
+    su = FakeDevice({path: b"x"}, adbd_root=False, su=True)
+    r = su.reader()
+    r.mode = "su_c"
+    assert r.head(path, 9).data == b"x"
+    assert su.calls[-1][4] == (
+        "su -c 'head -c 10 '\"'\"'/sdcard/My Files/a b.txt'\"'\"' 2>/dev/null' "
+        "2>/dev/null"
+    )
+
+
 def test_root_modes():
     files = {"/data/data/com.x/a.txt": b"secret"}
     root = FakeDevice(files)
     r = root.reader()
     assert r.probe_root() == "root"
     assert r.head("/data/data/com.x/a.txt", 10).data == b"secret"
-    assert "su" not in root.procs[-1].argv
+    assert root.procs[-1].argv[4] == "head -c 11 /data/data/com.x/a.txt 2>/dev/null"
 
     su = FakeDevice(files, adbd_root=False, su=True)
     r = su.reader()
     assert r.probe_root() == "su"
     assert r.stat(["/data/data/com.x/a.txt"])["/data/data/com.x/a.txt"].regular
     assert r.head("/data/data/com.x/a.txt", 10).data == b"secret"
-    assert su.procs[-1].argv[4:6] == ["su", "0"]
+    assert su.procs[-1].argv[4].startswith("su 0 head -c 11 ")
 
     none = FakeDevice(files, adbd_root=False)
     r = none.reader()
@@ -290,7 +335,7 @@ def test_stat_batches_fifty_paths_per_call():
     out = reader.stat([f"/sdcard/{i}" for i in range(120)])
     assert len(out) == 120
     assert all(s.regular for s in out.values())
-    stat_calls = [c for c in dev.calls if "stat" in c]
+    stat_calls = [c for c in dev.calls if c[4].startswith("stat ")]
     assert len(stat_calls) == 3
 
 
@@ -301,7 +346,7 @@ def test_host_cap_kills_an_oversized_stream():
     assert got.killed
     assert len(got.data) == 10_001
     assert dev.procs[-1].killed
-    assert dev.procs[-1].argv[-3:-1] == ["10001", "/sdcard/big"]
+    assert dev.procs[-1].argv[4:] == ["head -c 10001 /sdcard/big 2>/dev/null"]
 
 
 def test_should_stop_ends_a_read():
@@ -447,7 +492,7 @@ def test_read_into_cache_sqlite_with_wal(tmp_path):
     assert (out.entry.dir / "db-wal").read_bytes() == wal
     assert "alice@example.com" in out.entry.digest()
     cats = [p.argv for p in dev.procs]
-    assert all(a[4] == "cat" for a in cats)  # no head read for a .db name
+    assert all(a[4].startswith("cat ") for a in cats)  # no head for a .db name
 
 
 def test_sqlite_too_big_and_skip(tmp_path, monkeypatch):

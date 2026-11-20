@@ -220,35 +220,49 @@ class DeviceFileReader:
     # -- argv ---------------------------------------------------------------
 
     def argv(self, words: list[str]) -> list[str]:
-        """``exec-out`` argv for *words* (already quoted for the device shell)."""
+        """``exec-out`` argv for *words* (already quoted for the device shell).
+
+        The device command is ONE argv element: adb 36 escapes every
+        argument after ``exec-out`` when there are several, so quotes and
+        redirects would reach the command literally. As one string the
+        device ``sh`` parses it (quotes, ``2>/dev/null``).
+        """
+        return [*self.base, "exec-out", self.command(words)]
+
+    def command(self, words: list[str]) -> str:
+        """The device shell command line for *words* in the root mode."""
+        cmd = " ".join(words)
         if self.mode == "su":
-            return [*self.base, "exec-out", "su", "0", *words]
+            return f"su 0 {cmd}"
         if self.mode == "su_c":
-            return [*self.base, "exec-out", "su", "-c", shlex.quote(" ".join(words))]
-        return [*self.base, "exec-out", *words]
+            # su's own notices (Magisk) must not reach the bytes: redirect
+            # outside the quoted command as well.
+            return f"su -c {shlex.quote(cmd)} 2>/dev/null"
+        return cmd
 
     def probe_root(self) -> str:
         """``root`` / ``su`` / ``su_c`` / ``none``, probed once."""
         if self.mode is not None:
             return self.mode
-        _rc, out, _err = self._run(
-            [*self.base, "exec-out", "id", "-u"], PROBE_TIMEOUT_S
-        )
+        out = self._stdout([*self.base, "exec-out", "id -u"], PROBE_TIMEOUT_S)
         if out.strip() == b"0":
             self.mode = "root"
             return self.mode
-        _rc, out, _err = self._run(
-            [*self.base, "exec-out", "su", "0", "id", "-u"], SU_PROBE_TIMEOUT_S
+        out = self._stdout(
+            [*self.base, "exec-out", "su 0 id -u 2>/dev/null"], SU_PROBE_TIMEOUT_S
         )
         if out.strip() == b"0":
             self.mode = "su"
             return self.mode
-        _rc, out, _err = self._run(
-            [*self.base, "exec-out", "su", "-c", shlex.quote("id -u")],
+        out = self._stdout(
+            [*self.base, "exec-out", "su -c 'id -u 2>/dev/null' 2>/dev/null"],
             SU_PROBE_TIMEOUT_S,
         )
         self.mode = "su_c" if out.strip() == b"0" else "none"
         return self.mode
+
+    def _stdout(self, argv: list[str], timeout: float) -> bytes:
+        return self._run(argv, timeout)[1]
 
     # -- stat ---------------------------------------------------------------
 
