@@ -40,26 +40,45 @@ Row keys
 --------
 
 - **Network**: the mitmproxy flow id (``FlowRow.flow_id``, the ``id`` of
-  ``get_captured_flows``). **TLS failure rows** are rows too: their key is
-  the flow-log record id ``tls-<seq>`` (``mitmproxy_service`` writes
-  ``"id": "tls-<seq>"`` for every ``kind: "tls"`` record).
+  ``get_captured_flows``). **TLS failure rows** are rows too.
+  ``mitmproxy_service`` writes ``"id": "tls-<seq>"`` for every
+  ``kind: "tls"`` record, but ``seq`` is unique only within one flow log,
+  while highlight sets span the analysis session (devices, flow dirs). The
+  key is therefore namespaced on our side:
+  ``row_highlights.tls_row_key(flow_dir, rec_id)`` returns
+  ``tls-<8 hex of sha1(resolved flow_dir)>-<seq>`` (e.g.
+  ``tls-08c0cc31-100``); a record id that is not ``tls-<digits>`` (already
+  unique, e.g. a future ``tls-<uuid>``) is used as is.
   ``FlowRow.from_record`` sets it as ``flow_id``, so the annotation key
   (``annotation_flow_id``), the row tint, the Highlight column, the AI
-  filter, the store and the row snapshot all use the same key; the
-  flow-log fallback keys its ``kind=tls`` records the same way, and
-  ``where.kind`` takes ``flow``, ``error`` and ``tls``. A TLS row has no
+  filter, the store, the row snapshot, the adoption of a stdout row and the
+  tools' pairing all use the same key; the flow-log fallback keys its
+  ``kind=tls`` records the same way, and ``where.kind`` takes ``flow``,
+  ``error`` and ``tls``. On a flow-dir reset (a device switch,
+  ``_apply_poll``) the lens drops every TLS row with a ``seq`` or key from
+  the old dir and keeps only unpaired stdout rows. A run bundle has its own
+  flow dir, so a TLS row judged live and the same failure in a review are
+  two keys. A TLS row has no
   detail file (``body_contains``/``header_contains`` never match it; its
   digest is metadata only) and its ``error`` reads "TLS handshake failed
   (<reason>)".
 - **Stdout TLS rows** (``t<n>``): mitmweb's ``[TLS_FAIL]`` line usually
   arrives before the flow-log record. Such a row has no stable key yet
   (``t<n>`` is a per-panel counter); when the poll pairs it with its record
-  (``_claim_live_tls``) it adopts the record's ``seq`` and id ``tls-<seq>``
-  and becomes a normal row. Until then the snapshot lists it with key
-  ``None``: the tools skip it but count it (``not_in_flow_log_yet`` plus a
-  hint to run again), its ``seq`` counts for the "new since" basis, and the
-  bar never counts a keyless row as new. If the flow log never gets the
-  record (an addon without TLS persistence) the row stays unkeyed.
+  (``_claim_live_tls``: records come in ``seq`` order and each takes the
+  oldest unpaired stdout row of the same host within 10 s, so two failures
+  to one host keep their order) it adopts the record's ``seq`` and key and
+  becomes a normal row. The lens polls only while it is shown, so the tools
+  do not wait for it: ``lens_rows._pair_unkeyed_tls`` pairs every keyless
+  TLS row of the snapshot on the tool thread with the flow log's
+  ``kind: "tls"`` records (same host, ``|ts| <= 10 s``, one record per row,
+  nearest first, records no row of the view has yet) and gives it the key
+  the lens will adopt on its next poll, so the tint matches then. A row
+  still unpaired is counted, never listed: ``not_in_flow_log_yet`` (with a
+  hint to run again) only while it is young (at most about 15 s old) and
+  live, otherwise ``not_in_flow_log`` with "cannot be highlighted (not in
+  the flow log)". Its ``seq`` counts for the "new since" basis, and the bar
+  never counts a keyless row as new.
 - **Files**: ``canonical_device_path(path)``. Folder group rows, the idle
   fold and watched patterns are never highlighted themselves.
 
@@ -77,7 +96,8 @@ subagent as well. Subagents keep ``find_rows`` (report only) and ``get_rows``.
    find_rows(lens, where?, scope?="shown"|"all", apply?="none"|"highlight"|"filter",
              label?, short?, highlight_id?, regex?)          core, 60 s
      -> {lens, source, scope, scanned, matched, hidden_by_lens_filters,
-         hidden_hint?, not_in_flow_log_yet?, summary, keys[<=50],
+         hidden_not_searched?, hidden_hint?, shown_basis?,
+         not_in_flow_log_yet?, not_in_flow_log?, summary, keys[<=50],
          highlight_id?, mode?, truncated_by_cap?, note?}
 
    classify_rows(lens, query, where?, keys?[<=2000], scope?="shown",
@@ -85,8 +105,9 @@ subagent as well. Subagents keep ``find_rows`` (report only) and ``get_rows``.
                  max_rows?=1000 (<=2000))                          core, 600 s
      -> {summary, highlight_id, scope, scanned, matched, uncertain,
          candidates, rows_in_view, partial, stop_reason,
-         hidden_by_lens_filters, hidden_hint?, hidden_keys?,
-         not_in_flow_log_yet?, judged_on_metadata_only, binary_only,
+         hidden_by_lens_filters, hidden_not_searched?, hidden_hint?,
+         hidden_keys?, shown_basis?, not_in_flow_log_yet?,
+         not_in_flow_log?, judged_on_metadata_only, binary_only,
          skipped{errors, not_reached, unknown_ids}, backend_error?,
          bytes_sent, model_tokens, requests, samples[<=12], verdicts[<=200],
          verdicts_truncated?, truncated_by_cap?, note?}
@@ -104,16 +125,31 @@ subagent as well. Subagents keep ``find_rows`` (report only) and ``get_rows``.
             max_bytes?=2000, scope?="shown")                       deferred, 120 s
      -> {lens, source, scope, total, rows[{key, shown, row, digest?,
          content?, highlights?}], next_cursor, hidden_by_lens_filters,
-         hidden_hint?, hidden_keys?, unknown_keys?, not_in_flow_log_yet?}
+         hidden_hint?, hidden_keys?, unknown_keys?, shown_basis?,
+         not_in_flow_log_yet?, not_in_flow_log?}
 
 **Scope.** ``find_rows``, ``classify_rows`` and ``get_rows`` see exactly
-the rows the lens shows by default (``scope="shown"``): TLS failures
-included, rows hidden by the lens's filters (OS noise such as Sandroid's own
-``mitm.it`` probe, app only, ``/``, review phases, the AI filter; Files:
-hide rules, ``/``, the app filter, the AI filter) left out.
-``scope="all"`` is the explicit opt-in for those hidden rows. Every result
-says ``hidden_by_lens_filters`` and, when it is not 0, a ``hidden_hint`` on
-how to include them:
+the rows the lens's own filters let through by default
+(``scope="shown"``): TLS failures included, rows hidden by the lens's
+filters (OS noise such as Sandroid's own ``mitm.it`` probe, app only,
+``/``, review phases; Files: hide rules, ``/``, the app filter) left out.
+**The AI filter is not one of them**: the snapshot's ``shown`` is computed
+like the bar's counts (``_passes(r, ai=False)`` / ``_hl_live_items``), so a
+new query under an active AI filter sees every row (never an intersection
+with the filter set), ``find_rows(highlight_id=<filter set>)`` can add rows
+to it, and the tools' ``hidden_by_lens_filters`` agrees with the bar's
+"hidden by lens filters". An extend that finds no new rows returns that
+``highlight_id`` with the note "no new rows: ..." (never "no highlight set
+was created"). ``scope="all"`` is the explicit opt-in for the hidden rows.
+Every result says ``hidden_by_lens_filters`` and, when it is not 0, a
+``hidden_hint`` on how to include them.
+
+With ``scope="shown"`` the hidden rows are matched only to count them, so
+they see the cheap (structural) predicates only: when ``where`` has
+``body_contains``, ``header_contains`` or ``content_contains`` (which read a
+file per row), the result reports ``hidden_not_searched`` (hidden rows that
+fit the other conditions; ``hidden_by_lens_filters`` is ``null``) instead
+of a full count.
 
 - ``find_rows``: the matching rows the lens hides (counted, listed only
   with ``scope="all"``; then they are among the keys and the hint says the
@@ -128,6 +164,16 @@ how to include them:
 
 ``highlight_rows`` takes any key of the view (shown or not) and reports how
 many of them the lens hides.
+
+**Not judged.** A set made with ``scope="shown"`` records in its basis the
+rows that fit ``where``/``keys`` but were hidden, so the tools never looked
+at them: ``basis.scope`` (``"shown"``/``"all"``) and ``basis.not_judged``
+(their keys, at most 5000; an extend removes the rows it looked at and adds
+the ones it left out). When such a row comes into view (``N`` shows OS
+noise, the ``/`` filter is cleared), the bar says "N not judged" next to
+"new since", and the live state line says ", N not judged (hidden when it
+was made)" (the bar's count, kept in memory by
+``store.note_not_judged``).
 
 ``where`` (all fields ANDed; ``regex: true`` turns ``text`` and the
 ``*_contains`` fields into regular expressions; a top-level ``regex``
@@ -206,11 +252,21 @@ or review scope, each a dict ``{"key", "shown", ...}``:
   ``processes`` (up to 3 used), ``first``, ``last``, ``watched``, ``app``,
   ``review_kind``, ``scope``, optionally ``diff_head`` (a run's diff text).
 
-Without a registered lens (tests, headless) Network rows come from the
-session flow log (``mitmproxy_flow_log.query_flows``, the newest 2000) and
-Files rows from the monitor's event history (``get_recent_events``, one row
-per canonical path with its op letters, count, first three processes and
-first/last time).
+Without a registered lens (tests, headless), and while the live Network
+lens never polled (it was mounted but never shown: its snapshot returns
+``None`` instead of an empty view), Network rows come from the session flow
+log (``mitmproxy_flow_log.query_flows``, the newest 2000) and Files rows
+from the monitor's event history (``get_recent_events``, one row per
+canonical path with its op letters, count, first three processes and
+first/last time). There ``shown`` follows the lens's noise rule only:
+``network_panel.is_noise`` (with the spotlight app) for Network,
+``NoiseRules.from_config().hidden_by`` for Files, rows of the active AI
+filter set exempt as in the lens. Such results carry
+``shown_basis: "noise rule only (lens not open)"``.
+
+A lens that was shown and then hidden does not poll either: its snapshot
+is the view as it was, plus the TLS pairing above. Flows that reached the
+flow log since are not in it until the lens is shown again.
 
 Scanning pipeline
 -----------------
@@ -267,8 +323,11 @@ Scanning pipeline
    (``store.add``), so rows light up while the scan runs, and a
    ``tool_progress`` event is sent.
 8. At the end the set is finished (``complete``, ``stats``, ``basis``;
-   ``finish`` always clears ``scanning``; if the classifier raises, an
-   empty new set is removed and any other set is finished as partial), the
+   ``finish`` always clears ``scanning``). One ``try``/``finally`` covers
+   everything from the moment the set is created or marked scanning: if
+   anything raises (the classifier, its setup, a store call) or a store
+   call fails while the set still exists, an empty new set is removed and
+   any other set is finished as partial, so no set stays "scanning". The
    AI filter is applied for ``apply="filter"`` (only now, so the lens is not
    empty during the scan), an empty new set is removed again, and an
    ``ai/highlight`` timeline line is written (the tool runs under
@@ -381,7 +440,8 @@ its own.
   ``lens``, ``label`` (<=60), ``short`` (<=14), ``slot`` (1..4, the lowest
   free one of the lens), ``reasons`` {key: reason <=120}, ``origin``
   (``structural``/``ai``/``manual``), ``query``, ``scope`` (``None`` = live,
-  else a run id), ``basis`` {judged_at, through_seq, evaluated},
+  else a run id), ``basis`` {judged_at, through_seq, evaluated, scope,
+  not_judged},
   ``complete``, ``stats``, ``created_at``, ``scanning`` (a classifier run
   is filling it; ``state`` = ``scanning``/``partial``/``complete``).
 - Limits: 4 sets per lens, 5000 keys per set (``HighlightError``, a
@@ -390,7 +450,7 @@ its own.
   ``replace_keys``, ``start_scan``, ``finish``, ``update_meta``,
   ``remove``, ``clear``, ``set_filter``.
   Reads: ``sets``, ``get`` (copies), ``keys``, ``filter_set``, ``lookup``,
-  ``revision``.
+  ``revision``. ``update_meta`` also merges ``basis=``.
 - Provider: ``annotations_for(lens, key)`` returns one annotation per set
   (label = ``short``, colour and tint role ``highlight_<slot>``, tint 0.18,
   priority ``PRIORITY_AI`` + 1 for the filter set, group = set id);
@@ -452,8 +512,11 @@ Tests
   limits, subagent refusal, lens sources and fallbacks, ``classify_rows``
   end to end with a fake client, backend errors, a set cleared or a session
   switched mid-run, the new-since basis, the regex guard and haystack cap,
-  TLS rows keyed ``tls-<seq>`` (lens and fallback, keyless stdout rows
-  counted), the E2E case (a TLS-failed tracker row highlighted, a hidden
+  TLS rows keyed by ``tls_row_key`` (lens and fallback, namespaced per flow
+  dir, keyless stdout rows paired nearest first or counted, young versus
+  old), the fallback noise rule, an extend with no new rows, content
+  predicates never reading hidden rows, ``basis.not_judged``, no set left
+  scanning after a store error, the E2E case (a TLS-failed tracker row highlighted, a hidden
   ``mitm.it`` row counted but listed only with ``scope="all"``, the same
   scoping in ``classify_rows`` and ``get_rows``, "scanning" during a run,
   partial after a cancel or a crash), canonical path globs,
@@ -466,6 +529,9 @@ Tests
   new, idle watched rows present, the Network lens on a light theme, a
   TLS-failed row (stdout first, then paired) highlighted with tint and
   column through ``find_rows``, the "scanning"/"partial" bar words and a
-  reloaded mid-scan set shown as partial.
+  reloaded mid-scan set shown as partial, the AI filter not narrowing a
+  find or an extend, a TLS row paired while the lens is hidden, a never
+  shown lens falling back to the flow log, a device switch dropping old
+  TLS rows, two failures to one host keeping their order, "N not judged".
 - ``tests/ai/test_executor.py`` (``tool_progress`` call id and throttle),
   ``tests/tui/test_chat_panel.py`` (progress on the chip).

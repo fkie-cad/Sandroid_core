@@ -650,7 +650,8 @@ renders live in the session scratchpad (``ui-dock/mockups.txt``, ``ui-look/mock_
   - ``UserBlock``: the full-width band, "Variant I".
   - ``ReplyBlock``: ``Markdown`` fed by ``get_stream()``, so only the live block
     re-renders.
-  - ``ReasoningLine``: ``✧ Thinking… 3s`` / ``✧ Thought for 4s``.
+  - ``ReasoningLine``: ``Thinking… 3s`` while the model reasons, ``Thought for 4s``
+    after.
   - ``ToolBlock``:
 
     - The call line is ``Name args`` in the tool colour; the line under it reads
