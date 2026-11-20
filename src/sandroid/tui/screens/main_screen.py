@@ -2054,7 +2054,7 @@ class MainScreen(Screen):
             label = self._scope_label or f"Run {self.scope_run}"
             # ``v`` during a Play: say that the Play goes on (L10).
             busy = " · recording" if recording else (" · rewind" if replaying else "")
-            header.set_pill(f"◆ REVIEW {label}{busy}", "review")
+            header.set_pill(f"REVIEW {label}{busy}", "review")
             return
         if recording or replaying or phase:
             # Record / Rewind status in plain words (core/rewind.py).
@@ -2062,7 +2062,7 @@ class MainScreen(Screen):
                 phase or ("Recording" if recording else "Rewind running"), "rec"
             )
         else:
-            header.set_pill("● LIVE", "")
+            header.set_pill("LIVE", "")
 
     def _update_header(self) -> None:
         """Header breadcrumb + pill from the status bar's cached state."""
