@@ -157,6 +157,38 @@ async def test_lens_activation_hook_is_called(monkeypatch) -> None:
 # --------------------------------------------------------------------------
 
 
+async def test_ticker_attention_badge_names_ctrl_y_once() -> None:
+    """The ticker read "⚠ approval needed · ^Y · ^Y AI · ` log"."""
+    from textual.app import App, ComposeResult
+
+    from sandroid.tui.widgets.lens_shell import LogTicker
+
+    class _TickerApp(App):
+        def compose(self) -> ComposeResult:
+            yield LogTicker(id="log-ticker")
+
+    app = _TickerApp()
+    async with app.run_test(size=(80, 3)) as pilot:
+        ticker = app.query_one(LogTicker)
+        label = ticker.query_one("#log-ticker-hint")
+
+        def hint() -> str:
+            return label.render().plain
+
+        assert hint() == "^Y AI · ` log"
+        ticker.set_attention("approval needed · ^Y")
+        await settle(pilot)
+        assert hint() == "approval needed · ^Y · ` log"
+        assert label.has_class("-attention")
+        ticker.set_drawer_open(True)
+        await settle(pilot)
+        assert hint() == "approval needed · ^Y · ` close log"
+        ticker.set_attention(None)
+        await settle(pilot)
+        assert hint() == "^Y AI · ` close log"
+        assert not label.has_class("-attention")
+
+
 async def test_backtick_toggles_drawer_and_ticker_mirrors_log() -> None:
     from sandroid.tui.widgets import ActivityLog
 

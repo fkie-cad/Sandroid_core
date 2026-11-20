@@ -1291,7 +1291,7 @@ class ChatPanel(Widget):
     ]
 
     #: The StatusBar/ticker badge while an approval waits.
-    ATTENTION = "⚠ approval needed · ^Y"
+    ATTENTION = "approval needed · ^Y"
 
     #: Keyboard grace of the approval card (tests set 0).
     APPROVAL_INPUT_GRACE_S: float | None = None

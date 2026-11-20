@@ -583,6 +583,10 @@ async def test_approval_in_a_closed_dock_shows_without_stealing_focus(
         ticker = ms.query_one("#log-ticker")
         assert ticker.attention
         assert "approval" in ticker.attention
+        # ^Y once (the badge names it; the hint leaves "^Y AI" out), no glyph.
+        hint = ms.query_one("#log-ticker-hint").render().plain
+        assert hint == "approval needed · ^Y · ` log"
+        assert "⚠" not in hint
         await pilot.press("enter")
         await settle(pilot)
         assert not pending.done
@@ -594,6 +598,9 @@ async def test_approval_in_a_closed_dock_shows_without_stealing_focus(
         await until(pilot, lambda: pending.done)
         assert pending.decision.choice == "once"
         await until(pilot, lambda: not ticker.attention)
+        await settle(pilot)
+        hint = ms.query_one("#log-ticker-hint").render().plain
+        assert hint.startswith("^Y AI · ")
 
 
 async def test_approval_while_typing_in_the_chat_swallows_stray_letters(

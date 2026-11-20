@@ -1172,6 +1172,10 @@ class LogTicker(Horizontal):
     #: The hint (AI chat + log drawer keys), drawer closed / open.
     HINT = "^Y AI · ` log"
     HINT_OPEN = "^Y AI · ` close log"
+    #: The same without the AI key, for while an attention badge (which
+    #: names ^Y itself) stands before it.
+    HINT_LOG = "` log"
+    HINT_LOG_OPEN = "` close log"
 
     DEFAULT_CSS = """
     LogTicker {
@@ -1200,7 +1204,8 @@ class LogTicker(Horizontal):
         super().__init__(**kwargs)
         self.last_line = ""
         self._drawer_open = False
-        #: A badge shown before the hint (e.g. "⚠ approval needed · ^Y").
+        #: A badge shown before the hint (e.g. "approval needed · ^Y"); it
+        #: carries the ^Y key, so the hint then leaves "^Y AI" out.
         self.attention: str | None = None
 
     def compose(self) -> ComposeResult:
@@ -1241,9 +1246,11 @@ class LogTicker(Horizontal):
         self._sync_hint()
 
     def _sync_hint(self) -> None:
-        hint = self.HINT_OPEN if self._drawer_open else self.HINT
         if self.attention:
-            hint = f"{self.attention} · {hint}"
+            log = self.HINT_LOG_OPEN if self._drawer_open else self.HINT_LOG
+            hint = f"{self.attention} · {log}"
+        else:
+            hint = self.HINT_OPEN if self._drawer_open else self.HINT
         try:
             label = self.query_one("#log-ticker-hint", Static)
             label.update(Content(hint))
