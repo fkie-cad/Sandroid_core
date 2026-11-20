@@ -2242,7 +2242,8 @@ class MitmproxyService:
             logger.debug("Re-applying device proxy %s failed: %s", addr, exc)
             ok = False
         if ok:
-            logger.warning(
+            # The restore worked (routine after a snapshot load): INFO.
+            logger.info(
                 "The snapshot load reset the device proxy; re-applied %s so "
                 "mitmproxy keeps capturing",
                 addr,

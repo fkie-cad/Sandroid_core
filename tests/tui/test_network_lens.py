@@ -1682,3 +1682,89 @@ async def test_reveal_lands_on_a_flow_the_hidden_lens_has_not_loaded(flow_dir):
         await until(pilot, lambda: panel._pending_reveal is None)
         assert ms.inspector_content.key.startswith("network:row:")
         assert panel.table.row_count  # the table is unchanged
+
+
+async def test_caption_follows_ca_removal_and_app_proxy_changes(flow_dir, monkeypatch):
+    """E2E: after Remove CA the caption still said "CA installed", after the
+    App Proxy was removed still "app proxies 1" -- until a lens switch.
+    Both are now repainted from STATE_CHANGED (published off the UI thread).
+    """
+    import threading
+
+    from sandroid.core import proxy_manager as pm
+
+    routes: dict[str, str] = {"org.mozilla.firefox": "ours"}
+    monkeypatch.setattr(
+        pm.FocusManager, "app_proxies_cached", lambda self: dict(routes)
+    )
+    monkeypatch.setattr(pm.FocusManager, "lane_health_cached", lambda self: {})
+    device = {"ca": True}
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        await pilot.press("2")
+        await settle(pilot)
+        panel = ms.query_one("#network-panel", NetworkPanel)
+        mitm = panel.mitm
+        monkeypatch.setattr(mitm._service, "is_running", lambda: True)
+        monkeypatch.setattr(mitm._service, "ssl_unpin_is_active", lambda: False)
+        probes: list[str] = []
+
+        def probe():
+            probes.append(threading.current_thread().name)
+            return ("none", "", device["ca"], False)
+
+        monkeypatch.setattr(mitm, "_compute_setup_state", probe)
+        mitm._ca_ok = True
+        panel.refresh_header()
+
+        def title() -> str:
+            return ms._lens_captions["network"][0] or ""
+
+        assert "app proxies 1" in title()
+        assert "CA installed" in title()
+
+        def publish(fn, *args) -> None:
+            worker = threading.Thread(target=fn, args=args)
+            worker.start()
+            worker.join()
+
+        device["ca"] = False
+        publish(pm.publish_ca_change, None, False)
+        await until(pilot, lambda: "CA not installed" in title())
+        await until(pilot, lambda: not mitm._state_probe_busy)
+        assert probes
+        assert "MainThread" not in probes  # the device read is off-thread
+        assert "CA not installed" in title()
+
+        routes.clear()
+        publish(pm.FocusManager._publish_health, None)
+        await until(pilot, lambda: "app proxies" not in title())
+
+        device["ca"] = True
+        publish(pm.publish_ca_change, None, True)
+        await until(pilot, lambda: "CA installed" in title())
+        assert "CA not installed" not in title()
+
+
+async def test_ca_change_of_another_device_leaves_the_caption(flow_dir, monkeypatch):
+    from sandroid.core import proxy_manager as pm
+    from sandroid.core.adb import Adb
+
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5570")
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        await pilot.press("2")
+        await settle(pilot)
+        mitm = ms.query_one("#network-panel", NetworkPanel).mitm
+        kicks = []
+        monkeypatch.setattr(mitm, "_kick_state_refresh", lambda: kicks.append(1))
+        mitm._ca_ok = True
+        pm.publish_ca_change("emulator-5554", False)
+        await settle(pilot)
+        assert mitm._ca_ok
+        assert kicks == []
+        pm.publish_ca_change("emulator-5570", False)
+        await until(pilot, lambda: not mitm._ca_ok)
+        assert kicks == [1]
