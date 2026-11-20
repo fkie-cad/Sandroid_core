@@ -146,6 +146,8 @@ TRIGDROID_REMOVED_MESSAGE = (
     metavar="PACKAGE_NAME",
     hidden=True,  # removed; kept only to fail with a pointer -- see main()
     default=None,
+    is_flag=False,
+    flag_value="",  # a bare --trigdroid gets the pointer too, not "needs a value"
 )
 @click.option(
     "--hash",

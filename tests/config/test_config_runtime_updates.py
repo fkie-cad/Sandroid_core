@@ -402,6 +402,11 @@ def test_removed_trigdroid_option_is_hidden_and_points_to_package(xdg):
     assert "Use --package/-p PKG" in result.output
     assert cli_mod.TRIGDROID_REMOVED_MESSAGE.endswith("will come as playbooks.")
 
+    # A bare --trigdroid (no value) gets the same pointer.
+    result = runner.invoke(cli_mod.main, ["--trigdroid"])
+    assert result.exit_code == 2
+    assert "TrigDroid was removed (it never worked)." in result.output
+
     # --trigdroid-ccf is gone without a replacement.
     result = runner.invoke(cli_mod.main, ["--trigdroid-ccf", "D"])
     assert result.exit_code == 2
