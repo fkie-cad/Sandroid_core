@@ -370,3 +370,15 @@ def test_other_commands_are_logged_unchanged(monkeypatch, caplog):
     logged = [r.getMessage() for r in caplog.records]
     assert "Running ADB command -s emulator-5554 shell pm list packages -3" in logged
     assert "ADB command success: -s emulator-5554 shell pm list packages -3" in logged
+
+
+def test_returned_start_errors_carry_no_typed_text(monkeypatch):
+    def fail(cmd, *args, **kwargs):
+        raise OSError(f"cannot start {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fail)
+    for cmd in _typed_commands():
+        _out, err = Adb.send_adb_command(cmd, serial="emulator-5554")
+        assert err.startswith("OSError: ")
+        assert "redacted" in err
+        assert not set(TYPED) & set(err)

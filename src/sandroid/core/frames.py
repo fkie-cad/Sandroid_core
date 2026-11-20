@@ -101,19 +101,23 @@ def same_screen(png_a: bytes | None, png_b: bytes | None) -> bool:
 
 
 #: A frame is black (a FLAG_SECURE window: screenshots show it black; or a
-#: screen that is off) when at least this share of its pixels ...
-BLACK_SHARE = 0.9
-#: ... are at most this grey level (0-255). Not 100 %: the status and
-#: navigation bars around a secure window can still be drawn.
+#: screen that is off) when, without the status bar (:data:`SAME_TOP`) and
+#: the navigation bar (:data:`BLACK_BOTTOM`) -- both can still be drawn
+#: around a secure window -- at least this share of its pixels ...
+BLACK_SHARE = 0.995
+#: ... are at most this grey level (0-255). A black app screen with any
+#: field, button or text in it stays below the share.
 BLACK_LEVEL = 8
+#: The bottom strip (navigation bar) left out, as a fraction of the frame.
+BLACK_BOTTOM = 0.08
 #: Only PNGs up to this size are decoded: a black frame compresses to a few
-#: KB, a real screen is far larger (the check costs nothing for those).
+#: KB, a real screen is mostly far larger.
 BLACK_MAX_BYTES = 200_000
 
 
 def is_black_frame(png: bytes | None) -> bool:
-    """The screenshot is (nearly) all black: :data:`BLACK_SHARE` of its
-    pixels at most :data:`BLACK_LEVEL`. False when it does not decode.
+    """The screenshot is black apart from the system bars (see
+    :data:`BLACK_SHARE`). False when it does not decode.
     """
     if not png or len(png) > BLACK_MAX_BYTES:
         return False
@@ -122,8 +126,9 @@ def is_black_frame(png: bytes | None) -> bool:
 
         with Image.open(io.BytesIO(png)) as im:
             gray = im.convert("L")
-        gray = gray.reduce(max(1, round(gray.size[0] / SAME_THUMB_W)))
-        hist = gray.histogram()
+        w, h = gray.size
+        gray = gray.crop((0, round(h * SAME_TOP), w, h - round(h * BLACK_BOTTOM)))
+        hist = gray.reduce(max(1, round(w / SAME_THUMB_W))).histogram()
     except Exception as exc:
         logger.debug(f"frames: black check failed: {exc}")
         return False

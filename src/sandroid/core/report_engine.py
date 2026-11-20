@@ -899,8 +899,8 @@ def _cov_tracking(ctx: ReportContext) -> list[str]:
         data = _data(line)
         if data.get("fallback") == "screencap":
             items.append(
-                f"Screenshots were taken with adb screencap from "
-                f"{_clock(line.get('t'))} on: {data.get('reason') or 'no UI helper'}."
+                f"Screenshots fell back to adb screencap at "
+                f"{_clock(line.get('t'))}: {data.get('reason') or 'no UI helper'}."
             )
             continue
         state = data.get("helper") or "changed"

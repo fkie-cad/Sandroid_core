@@ -3856,8 +3856,15 @@ class TrackingService:
             run = self._session_gen
             if self._screencap_noted == run:
                 return
-            self._screencap_noted = run
             state, mode, serial = self._helper_state, self._mode, self._serial
+            # The helper's first seconds are not worth the run's one note:
+            # a real reason (failed, down) may follow.
+            starting = state == "starting" and mode != "off"
+            if not starting:
+                self._screencap_noted = run
+        if starting:
+            logger.debug(f"Tracking: screencap while the UI helper starts: {why}")
+            return
         logger.info(
             f"Tracking: taking screenshots with adb screencap instead of the "
             f"UI helper: {why}"
@@ -4110,14 +4117,16 @@ class TrackingService:
         helper was busy, e.g. with a screen-change sample: dropped, it could
         show the screen after the tap), ``failed`` (the capture errored:
         "device error: ..."; a ``failed`` shot line when the helper
-        answered), ``no_helper`` (no helper at finger-down) or ``off``
-        (``shot_before_tap`` off).
+        answered), ``no_helper`` (no helper at finger-down: "no UI helper")
+        or ``off`` (``shot_before_tap`` off).
         """
         if pending is None:  # never seen at finger-down
-            return None, "no_helper" if cfg.shot_before_tap else "off", None
+            if cfg.shot_before_tap:
+                return None, "no_helper", "no UI helper"
+            return None, "off", None
         if pending.shot_state is not None:
-            why = "helper busy" if pending.shot_state == "skipped" else None
-            return None, pending.shot_state, why
+            why = {"skipped": "helper busy", "no_helper": "no UI helper"}
+            return None, pending.shot_state, why.get(pending.shot_state)
         if pending.shot is None:
             return None, "failed", "no capture was started"
         try:

@@ -251,6 +251,15 @@ class InitializationService:
         ``call_from_thread`` / ``call_later`` yourself) and should be quick.
         A raising callback is logged and does not stop the others.
         Listeners are kept per service instance.
+
+        Subscribing does not replay the current session: read
+        :meth:`get_current_session` right after subscribing (the startup
+        ``new`` usually fires before UI code subscribes). ``closed`` also
+        fires from :meth:`cleanup` at shutdown. Changes from two threads at
+        once may arrive out of order; compare with
+        :meth:`get_current_session` when it matters. Every way to start or
+        resume a session (a future New / Resume UI) must go through
+        :meth:`create_session` (``timestamp=`` the folder name) so it fires.
         """
         with self._listeners_lock:
             self._listeners.append(callback)

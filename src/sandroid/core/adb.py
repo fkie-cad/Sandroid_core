@@ -260,7 +260,7 @@ class Adb:
                 cls.init()
             except OSError as e:
                 logger.error(str(e))
-                return "", f"OSError: {e}"
+                return "", f"OSError: {redact_typed_text(str(e))}"
 
         full_command = cls._build_command(command, serial=serial)
         logger.debug("Running ADB command " + redact_typed_text(full_command))
@@ -285,10 +285,10 @@ class Adb:
             return "", f"Command timed out after {timeout:g} seconds"
         except OSError as e:
             logger.error(f"Failed to start ADB process: {redact_typed_text(str(e))}")
-            return "", f"OSError: {e}"
+            return "", f"OSError: {redact_typed_text(str(e))}"
         except subprocess.SubprocessError as e:
             logger.error(f"ADB subprocess error: {redact_typed_text(str(e))}")
-            return "", f"SubprocessError: {e}"
+            return "", f"SubprocessError: {redact_typed_text(str(e))}"
 
     @classmethod
     def send_adb_command_popen(
@@ -371,10 +371,10 @@ class Adb:
             logger.error(
                 f"Failed to start ADB exec-out process: {redact_typed_text(str(e))}"
             )
-            return "", f"OSError: {e}"
+            return "", f"OSError: {redact_typed_text(str(e))}"
         except subprocess.SubprocessError as e:
             logger.error(f"ADB exec-out subprocess error: {redact_typed_text(str(e))}")
-            return "", f"SubprocessError: {e}"
+            return "", f"SubprocessError: {redact_typed_text(str(e))}"
 
     @classmethod
     def send_root_shell(cls, command: str) -> tuple[str, str]:

@@ -896,14 +896,22 @@ def test_screencap_fallback_names_a_failed_helper_capture(env, cfg):
 
 
 def test_screencap_fallback_names_a_helper_that_failed_to_start(env, cfg):
+    """A fallback while the helper is still starting does not use up the
+    run's note: the real reason that follows is the one said.
+    """
     svc, popen, _run, helpers, _tmp = env
     with timeline.capture() as lines:
         start(svc, popen, helpers, cfg, mode="invisible")
         helpers[0].alive = False
         with svc._lock:
-            svc._helper_state = "failed"
+            svc._helper_state = "starting"
         svc.manual_shot()
         assert wait_for(lambda: of(lines, "shot", "manual"))
+        assert not _fallback_lines(lines)
+        with svc._lock:
+            svc._helper_state = "failed"
+        svc.manual_shot()
+        assert wait_for(lambda: len(of(lines, "shot", "manual")) == 2)
     (note,) = _fallback_lines(lines)
     assert note["data"]["reason"] == "the UI helper failed to start (invisible mode)"
 
@@ -1722,6 +1730,7 @@ def test_every_pointer_input_says_what_became_of_its_before_shot(env, cfg, mode)
     assert shot_of == {seq for seq, st in states.items() if st == "taken"}
     if mode == "off":
         assert set(states.values()) == {"no_helper"}
+        assert {x["data"].get("reason") for x in inputs} == {"no UI helper"}
     else:
         assert "taken" in states.values()
 
@@ -1751,14 +1760,20 @@ def test_before_shot_off_and_failed(env, cfg):
     assert [(x["ref"]["of"], x["level"]) for x in failed] == [(taps[2]["seq"], "warn")]
 
 
-def _png(color: tuple[int, int, int], *, bar: bool = False) -> bytes:
+def _png(
+    color: tuple[int, int, int], *, bar: bool = False, field: bool = False
+) -> bytes:
     import io
 
     from PIL import Image, ImageDraw
 
     im = Image.new("RGB", (108, 242), color)
-    if bar:  # a status bar with icons over a black (secure) window
-        ImageDraw.Draw(im).rectangle((0, 0, 107, 10), fill=(200, 200, 200))
+    draw = ImageDraw.Draw(im)
+    if bar:  # status and navigation bars around a black (secure) window
+        draw.rectangle((0, 0, 107, 10), fill=(200, 200, 200))
+        draw.rectangle((0, 225, 107, 241), fill=(200, 200, 200))
+    if field:  # an AMOLED-black login screen: one outlined text field
+        draw.rectangle((10, 100, 97, 112), outline=(90, 90, 90))
     buf = io.BytesIO()
     im.save(buf, "PNG")
     return buf.getvalue()
@@ -1770,6 +1785,7 @@ def test_black_frame_check():
     assert is_black_frame(_png((0, 0, 0)))
     assert is_black_frame(_png((0, 0, 0), bar=True))
     assert not is_black_frame(_png((18, 18, 18)))  # a dark theme is not black
+    assert not is_black_frame(_png((0, 0, 0), field=True))  # a black app screen
     assert not is_black_frame(_png((255, 255, 255)))
     assert not is_black_frame(PNG_A)  # does not decode
     assert not is_black_frame(None)
