@@ -3587,7 +3587,30 @@ class IdentityService:
         return out
 
     def _recover(self, dev: _Device, state: DeviceState) -> None:
-        """A restart window was interrupted: bring the framework back."""
+        """A restart window was interrupted: bring the framework back.
+
+        Two cases leave the marker: the window broke off with the framework
+        down (``start`` it, wait, recover), or ``_end_window`` timed out and
+        the framework came back late (it is up now, but the Frida and proxy
+        recovery never ran: run it). Like the window itself it holds the
+        app-start lifecycle lock; when an app start holds it, the marker
+        stays for the next apply.
+        """
+        from sandroid.services.app_start import AppStartError, lifecycle_lock
+
+        guard = contextlib.ExitStack()
+        try:
+            guard.enter_context(lifecycle_lock(0.0))
+        except AppStartError as exc:
+            logger.info(
+                f"identity: interrupted framework restart on {state.serial} "
+                f"left for the next apply: {exc}"
+            )
+            return
+        with guard:
+            self._recover_locked(dev, state)
+
+    def _recover_locked(self, dev: _Device, state: DeviceState) -> None:
         self._emit(
             "restart",
             "identity: resuming an interrupted framework restart",
@@ -3600,6 +3623,9 @@ class IdentityService:
             dev.shell("start")
             if self._wait_framework(dev, ""):
                 self._after_restart(state.serial, None)
+        else:
+            # The framework came back after the window stopped waiting.
+            self._after_restart(state.serial, None)
         dev.shell(f"rm -f {RESTART_MARKER}")
 
     def _run_sim(

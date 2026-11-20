@@ -1020,6 +1020,45 @@ def test_crash_after_stop_resumes(service, device):
     assert recover[0]["data"]["recovery"] is True
 
 
+def test_a_framework_that_came_back_late_still_gets_the_frida_recovery(
+    service, device, monkeypatch
+):
+    """``_end_window`` timed out: the marker stays, the recovery never ran.
+
+    The next apply finds system_server up with the marker still there: it
+    runs the Frida/proxy recovery once and drops the marker.
+    """
+    real_wait = service._wait_framework
+    monkeypatch.setattr(service, "_wait_framework", lambda dev, old: False)
+    service.apply(SERIAL, "com.example.app")
+    assert RESTART_MARKER in device.fs
+    assert device.running  # the framework came back after all
+    assert service.restarts_seen == []
+    monkeypatch.setattr(service, "_wait_framework", real_wait)
+    with timeline.capture() as lines:
+        service.apply(SERIAL, "com.example.app")
+    assert service.restarts_seen == [SERIAL]
+    assert RESTART_MARKER not in device.fs
+    assert any(x["data"].get("recovery") for x in lines if x["kind"] == "restart")
+
+
+def test_recovery_waits_while_an_app_start_holds_the_lifecycle_lock(
+    service, device, monkeypatch, app_start
+):
+    monkeypatch.setattr(service, "_wait_framework", lambda dev, old: False)
+    service.apply(SERIAL, "com.example.app")
+    assert RESTART_MARKER in device.fs
+    monkeypatch.setattr(service, "_wait_framework", lambda dev, old: True)
+    app_start.busy = True
+    service.apply(SERIAL, "com.example.app")
+    assert RESTART_MARKER in device.fs  # left for the next apply
+    assert service.restarts_seen == []
+    app_start.busy = False
+    service.apply(SERIAL, "com.example.app")
+    assert RESTART_MARKER not in device.fs
+    assert service.restarts_seen == [SERIAL]
+
+
 def _cmds(device) -> list[list[str]]:
     """Every simple command sent, in order (``shell`` scripts split up)."""
     out = []
