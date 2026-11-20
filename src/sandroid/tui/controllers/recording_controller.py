@@ -1465,10 +1465,27 @@ class RecordingController:
             ],
         }
 
-    # -- export -----------------------------------------------------------------
+    # -- export / import --------------------------------------------------------
+
+    def adopt_recording(self, rec: Any) -> bool:
+        """Make an imported recording the current one (UI thread).
+
+        Only while nothing records or rewinds; ``p`` then reviews it.
+
+        Args:
+            rec: The imported :class:`sandroid.core.rewind.Recording`.
+
+        Returns:
+            True when it is the current recording now.
+        """
+        if self._state != "idle" or rec is None:
+            return False
+        self._close_review()
+        self._rec = rec
+        return True
 
     def show_export_modal(self) -> bool:
-        """Export recorded action (the export modal)."""
+        """``x``: export the current (else the newest) stopped recording."""
         from sandroid.tui.modals import ExportModal, ExportResult
 
         if not self._push_modal:
@@ -1484,7 +1501,7 @@ class RecordingController:
             elif result.error:
                 self._log_error(f"Export failed: {result.error}")
 
-        self._push_modal(ExportModal(), on_export_result)
+        self._push_modal(ExportModal(self._rec), on_export_result)
         return True
 
 

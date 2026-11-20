@@ -276,8 +276,11 @@ class ImportResultsCommand(CommandHandler):
             if ctx.is_tui_mode and ctx.request_input:
                 file_path = await ui_answer(
                     ctx.request_input(
-                        title="Import Results",
-                        message="Enter path to results file:",
+                        title="Import",
+                        message=(
+                            "Path to a results file (.json) or an exported "
+                            "recording (.action):"
+                        ),
                         default=default_path,
                     )
                 )
@@ -322,6 +325,11 @@ class ImportResultsCommand(CommandHandler):
                 error="File does not exist",
             )
 
+        from sandroid.core import rewind
+
+        if rewind.is_recording_export(file_path):
+            return self._import_recording(ctx, file_path)
+
         try:
             # Read and parse JSON
             with open(file_path, encoding="utf-8") as f:
@@ -351,6 +359,49 @@ class ImportResultsCommand(CommandHandler):
             return CommandResult(
                 success=False, message=f"Import failed: {e!s}", error=str(e)
             )
+
+    def _import_recording(self, ctx: CommandContext, file_path: str) -> CommandResult:
+        """Import a Rewind recording exported with ``x`` (a ``.action`` zip).
+
+        The recording joins this session folder and, when no recording or
+        Rewind runs, becomes the current one (``p`` reviews it).
+
+        Args:
+            ctx: Command context (``ctx.app`` is the live TUI, if any).
+            file_path: The exported file.
+
+        Returns:
+            CommandResult for the import.
+        """
+        from sandroid.core import rewind
+
+        try:
+            rec, note = rewind.import_recording(file_path)
+        except Exception as e:
+            logger.exception("Importing the recording failed")
+            return CommandResult(
+                success=False, message=f"Import failed: {e!s}", error=str(e)
+            )
+        current = False
+        try:
+            from sandroid.tui.controller_registry import get_recording_controller
+
+            controller = get_recording_controller()
+            if controller is not None and hasattr(controller, "adopt_recording"):
+                if ctx.app is not None:
+                    current = bool(
+                        ctx.app.call_from_thread(controller.adopt_recording, rec)
+                    )
+                else:
+                    current = bool(controller.adopt_recording(rec))
+        except Exception:
+            logger.debug("Could not make the imported recording current", exc_info=True)
+        tail = " Press p to review it." if current else ""
+        return CommandResult(
+            success=True,
+            message=f"Recording '{rec.name}' imported. {note}{tail}",
+            data={"import_path": file_path, "rec_id": rec.rec_id, "current": current},
+        )
 
     def _apply_import_data(self, ctx: CommandContext, data: dict) -> int:
         """Apply/recognize imported data.

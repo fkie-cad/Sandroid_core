@@ -210,6 +210,7 @@ def save_recording(rec: Recording) -> Path:
 
 
 def load_recording(rec_id: str) -> Recording | None:
+    """The recording ``rec_id`` of this session folder, or None."""
     try:
         data = json.loads((recording_dir(rec_id) / "recording.json").read_text())
         return Recording.from_dict(data)
@@ -227,6 +228,264 @@ def list_recordings() -> list[Recording]:
             if rec is not None:
                 out.append(rec)
     return out
+
+
+def latest_recording() -> Recording | None:
+    """The newest stopped recording of this session folder, or None."""
+    done = [rec for rec in list_recordings() if rec.stopped is not None]
+    return max(done, key=lambda rec: (rec.started or 0, rec.rec_id), default=None)
+
+
+# ---------------------------------------------------------------------------
+# export / import (the TUI's ``x`` and ``i``)
+# ---------------------------------------------------------------------------
+
+#: The manifest at the top of an exported recording (a zip, ``.action``).
+EXPORT_MANIFEST = "rewind_export.json"
+EXPORT_FORMAT = "sandroid-rewind"
+EXPORT_VERSION = 1
+
+
+def start_point_folder(rec: Recording, avd: str | None = None) -> Path | None:
+    """The AVD snapshot folder of ``rec``'s start point when it still exists.
+
+    Args:
+        rec: The recording.
+        avd: The AVD to look in (default: the one the recording was made on).
+    """
+    name = rec.start_point_name
+    avd = avd or rec.avd
+    if not is_start_point_name(name) or not avd:
+        return None
+    try:
+        from sandroid.core.emulator import avd_dir
+
+        folder = avd_dir(avd)
+    except Exception:
+        return None
+    if folder is None:
+        return None
+    snapshot = folder / "snapshots" / name
+    return snapshot if snapshot.is_dir() else None
+
+
+def _version_folders(rec: Recording) -> list[tuple[str, Path]]:
+    """``(device path, version folder)`` of every copy ``rec`` refers to."""
+    from sandroid.core import watchlist_store
+
+    out = []
+    for path, roles in rec.versions.items():
+        names: list[Any] = []
+        for value in roles.values():
+            names.extend(value if isinstance(value, list) else [value])
+        for name in dict.fromkeys(names):
+            if not isinstance(name, str) or name == ABSENT or "/" in name:
+                continue
+            with contextlib.suppress(Exception):
+                folder = watchlist_store.row_dir(path) / name
+                if folder.is_dir():
+                    out.append((path, folder))
+    return out
+
+
+def export_recording(
+    rec: Recording,
+    archive: Path,
+    *,
+    with_recording: bool = True,
+    with_start_point: bool = False,
+) -> Path:
+    """Write ``rec`` into the zip ``archive`` (the TUI's ``x`` Export).
+
+    The archive holds ``rewind_export.json``, ``recording/`` (always its
+    ``recording.json``; with ``with_recording`` also the recorded steps, the
+    file lists and ``pulls/``, the copied Before / After versions) and, with
+    ``with_start_point``, ``start_point/<name>/`` (the emulator snapshot).
+
+    Args:
+        rec: The recording to export.
+        archive: The zip file to write (it must not exist).
+        with_recording: Include the steps, file lists and copied files.
+        with_start_point: Include the start point snapshot.
+
+    Returns:
+        The archive path.
+
+    Raises:
+        FileExistsError: ``archive`` exists.
+        FileNotFoundError: The start point is asked for but is gone.
+    """
+    import zipfile
+
+    from sandroid.core import watchlist_store
+
+    if archive.exists():
+        raise FileExistsError(f"{archive} already exists")
+    snapshot = start_point_folder(rec) if with_start_point else None
+    if with_start_point and snapshot is None:
+        raise FileNotFoundError("The start point is gone.")
+    folder = recording_dir(rec.rec_id)
+    manifest = {
+        "format": EXPORT_FORMAT,
+        "version": EXPORT_VERSION,
+        "rec_id": rec.rec_id,
+        "name": rec.name,
+        "package": rec.pkg,
+        "avd": rec.avd,
+        "with_recording": with_recording,
+        "start_point": snapshot.name if snapshot is not None else None,
+    }
+    tmp = archive.with_name(f".{archive.name}.part")
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(EXPORT_MANIFEST, json.dumps(manifest, indent=2))
+            zf.writestr(
+                "recording/recording.json",
+                json.dumps(rec.to_dict(), indent=2, default=str),
+            )
+            if with_recording:
+                for file in sorted(folder.rglob("*")):
+                    rel = file.relative_to(folder).as_posix()
+                    if file.is_file() and not file.name.startswith("."):
+                        if rel != "recording.json":
+                            zf.write(file, f"recording/{rel}")
+                root = watchlist_store.files_root()
+                for _path, version in _version_folders(rec):
+                    for file in sorted(version.rglob("*")):
+                        if file.is_file():
+                            rel = file.relative_to(root).as_posix()
+                            zf.write(file, f"pulls/{rel}")
+            if snapshot is not None:
+                for file in sorted(snapshot.rglob("*")):
+                    if file.is_file():
+                        rel = file.relative_to(snapshot.parent).as_posix()
+                        # Snapshots are big binaries: store, do not deflate.
+                        zf.write(file, f"start_point/{rel}", zipfile.ZIP_STORED)
+        tmp.replace(archive)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+    return archive
+
+
+def is_recording_export(archive: str | Path) -> bool:
+    """``archive`` is a zip written by :func:`export_recording`."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            return EXPORT_MANIFEST in zf.namelist()
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
+def _safe_member(name: str, prefix: str) -> list[str] | None:
+    """The parts of zip member ``name`` below ``prefix``, or None when it is
+    outside it, a folder, or tries to leave it (``..``, absolute paths).
+    """
+    if not name.startswith(prefix) or name.endswith("/"):
+        return None
+    parts = name[len(prefix) :].split("/")
+    if not parts or any(p in ("", ".", "..") or "\\" in p for p in parts):
+        return None
+    return parts
+
+
+def _extract(zf: Any, prefix: str, target: Path, *, overwrite: bool) -> int:
+    """Extract the members below ``prefix`` into ``target``; the count."""
+    count = 0
+    for name in zf.namelist():
+        parts = _safe_member(name, prefix)
+        if parts is None:
+            continue
+        dest = target.joinpath(*parts)
+        if dest.exists() and not overwrite:
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with zf.open(name) as src, open(dest, "wb") as out:
+            shutil.copyfileobj(src, out)
+        count += 1
+    return count
+
+
+def import_recording(
+    archive: str | Path, avd: str | None = None
+) -> tuple[Recording, str]:
+    """Add an exported recording to this session folder (the TUI's ``i``).
+
+    The recording gets a new id when its id is already here. Its copied
+    files go to the Files lens folders (existing copies are kept). Its start
+    point is put back into the AVD's snapshots when the archive has it and
+    that AVD has no snapshot of that name yet; the imported start point is
+    pinned, so a new recording never deletes it.
+
+    Args:
+        archive: The ``.action`` zip written by :func:`export_recording`.
+        avd: The AVD to put the start point into (default: the recording's).
+
+    Returns:
+        ``(the imported recording, a plain sentence about its start point)``.
+
+    Raises:
+        ValueError: ``archive`` is not an exported recording.
+    """
+    import zipfile
+
+    from sandroid.core import watchlist_store
+
+    try:
+        zf = zipfile.ZipFile(archive)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ValueError(f"Not an exported recording: {exc}") from exc
+    with zf:
+        try:
+            manifest = json.loads(zf.read(EXPORT_MANIFEST))
+            data = json.loads(zf.read("recording/recording.json"))
+        except (KeyError, ValueError) as exc:
+            raise ValueError("Not an exported recording.") from exc
+        if manifest.get("format") != EXPORT_FORMAT:
+            raise ValueError("Not an exported recording.")
+        rec = Recording.from_dict(data)
+        recording_dir(rec.rec_id)  # a valid id, or ValueError
+        if recording_dir(rec.rec_id).exists():
+            rec.rec_id = new_rec_id()
+        folder = recording_dir(rec.rec_id)
+        folder.mkdir(parents=True, exist_ok=True)
+        _extract(zf, "recording/", folder, overwrite=True)
+        _extract(zf, "pulls/", watchlist_store.files_root(), overwrite=False)
+        name = manifest.get("start_point")
+        target_avd = avd or rec.avd
+        prefix = f"start_point/{name}/"
+        has_snapshot = is_start_point_name(name) and any(
+            n.startswith(prefix) for n in zf.namelist()
+        )
+        rec.start_point = dict(rec.start_point or {})
+        existing = start_point_folder(rec, target_avd)
+        if existing is not None:
+            note = f"The start point {existing.name} is on this computer."
+        elif has_snapshot and target_avd:
+            avd_folder = None
+            with contextlib.suppress(Exception):
+                from sandroid.core.emulator import avd_dir
+
+                avd_folder = avd_dir(target_avd)
+            if avd_folder is not None:
+                dest = avd_folder / "snapshots" / name
+                _extract(zf, prefix, dest, overwrite=False)
+                rec.start_point.update(name=name, saved_ok=True)
+                rec.avd = target_avd
+                note = f"The start point {name} was added to {target_avd}."
+            else:
+                rec.start_point["saved_ok"] = False
+                note = f"No AVD named {target_avd}: the start point was not added."
+        else:
+            rec.start_point["saved_ok"] = False
+            note = "No start point: Review works, Rewind does not."
+    rec.start_point["pinned"] = True
+    rec.start_point["imported"] = True
+    rec.note = f"Imported from {os.path.basename(str(archive))}"
+    save_recording(rec)
+    return rec, note
 
 
 # ---------------------------------------------------------------------------

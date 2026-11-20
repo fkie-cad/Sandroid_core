@@ -1,22 +1,32 @@
-"""Export modal for exporting recorded actions.
+"""Export modal: the TUI's ``x`` writes a Rewind recording to a file.
 
-Provides a modal interface for exporting action packages with
-selectable components (recording, snapshot, or both).
+The newest stopped Rewind recording (or the one the recording controller
+holds) is offered with its parts: the recording itself (``recording.json``,
+the recorded steps, the file lists and the copied Before / After files) and
+its start point (the ``sandroid_rec_*`` emulator snapshot) while it still
+exists. The file is a zip named ``<name>.action`` (see
+:func:`sandroid.core.rewind.export_recording`); ``i`` imports it again.
+The headless batch keeps its own export (``Toolbox.export_action``).
 """
 
-import os
-import shutil
-import tempfile
-from dataclasses import dataclass
+from __future__ import annotations
 
-from textual.app import ComposeResult
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Checkbox, Input, Label, Static
 
-from sandroid.core.toolbox import Toolbox
-
 from .base import ExtractionModal, KeyHintFooter
+
+if TYPE_CHECKING:
+    from textual.app import ComposeResult
+
+    from sandroid.core.rewind import Recording
 
 
 @dataclass
@@ -148,75 +158,108 @@ class ExportModal(ExtractionModal[ExportResult]):
 
     def __init__(
         self,
-        name: str = None,
-        id: str = None,
-        classes: str = None,
+        recording: Recording | None = None,
+        name: str | None = None,
+        id: str | None = None,
+        classes: str | None = None,
     ):
-        """Initialize the export modal."""
+        """Initialize the export modal.
+
+        Args:
+            recording: The recording to offer (a stopped one); default the
+                newest stopped recording of this session folder.
+            name: Widget name.
+            id: Widget id.
+            classes: Widget classes.
+        """
         super().__init__(name=name, id=id, classes=classes)
-        self._recording_exists = self._check_recording_exists()
+        self._rec = self._pick_recording(recording)
+        self._recording_exists = self._rec is not None
         self._snapshot_exists = self._check_snapshot_exists()
         self._exporting = False
         self._default_location = self._get_default_export_location()
+
+    @staticmethod
+    def _pick_recording(recording: Recording | None) -> Recording | None:
+        """``recording`` when it has stopped, else the newest stopped one."""
+        if recording is not None and recording.stopped is not None:
+            return recording
+        try:
+            from sandroid.core import rewind
+
+            return rewind.latest_recording()
+        except Exception:
+            return None
 
     def _get_default_export_location(self) -> str:
         """Get default export location (results folder)."""
         results_path = os.getenv("RESULTS_PATH", "")
         if results_path and os.path.isdir(results_path):
             return results_path
-        # Fall back to RAW_RESULTS_PATH parent directory
-        raw_path = os.getenv("RAW_RESULTS_PATH", "")
-        if raw_path:
-            parent = os.path.dirname(raw_path.rstrip("/"))
-            if parent and os.path.isdir(parent):
-                return parent
-        # Default to current directory
         return os.getcwd()
 
-    def _check_recording_exists(self) -> bool:
-        """Check if a recording (``recording.getevent.txt`` or legacy) exists."""
-        from sandroid.core.run_bundle import recording_path
-
-        return recording_path(os.getenv("RAW_RESULTS_PATH", "./")).is_file()
-
     def _check_snapshot_exists(self) -> bool:
-        """Check if tmp snapshot exists."""
+        """The recording's start point snapshot still exists."""
+        if self._rec is None:
+            return False
         try:
-            device_name = Toolbox.device_name
-            snapshot_path = os.path.join(
-                os.path.expanduser("~"),
-                ".android",
-                "avd",
-                f"{device_name}.avd",
-                "snapshots",
-                "tmp",
-            )
-            return os.path.exists(snapshot_path)
+            from sandroid.core import rewind
+
+            return rewind.start_point_folder(self._rec) is not None
         except Exception:
             return False
+
+    def _default_name(self) -> str:
+        """A file name from the recording's name (``Recording_10-00``)."""
+        if self._rec is None:
+            return ""
+        return re.sub(r"[^\w.-]+", "_", self._rec.name.replace(":", "-")).strip("_")
+
+    def _rows(self) -> list[tuple[str, str, bool, str]]:
+        """``(checkbox id, label, available, status words)`` per part."""
+        rec = self._rec
+        if rec is None:
+            return [
+                (
+                    "chk-recording",
+                    "Recording",
+                    False,
+                    "none yet: r records, r again stops",
+                ),
+                ("chk-snapshot", "Start point", False, "none"),
+            ]
+        sp = rec.start_point.get("name") or ""
+        if not rec.emulator:
+            sp_status = "none on a physical device"
+        elif self._snapshot_exists:
+            sp_status = "available"
+        else:
+            sp_status = "gone"
+        return [
+            (
+                "chk-recording",
+                f"Recording '{rec.name}' (steps, file lists, copied files)",
+                True,
+                "available",
+            ),
+            (
+                "chk-snapshot",
+                f"Start point {sp}".rstrip(),
+                self._snapshot_exists,
+                sp_status,
+            ),
+        ]
 
     def compose(self) -> ComposeResult:
         """Create the modal layout."""
         with Vertical(classes="modal-container"):
-            yield Label("Export Action", classes="modal-title")
+            yield Label("Export recording", classes="modal-title")
 
             with Vertical(id="components-section"):
                 yield Label("Select components to export:", id="components-label")
 
-                for chk_id, label, exists in [
-                    (
-                        "chk-recording",
-                        "Recording (recording.getevent.txt)",
-                        self._recording_exists,
-                    ),
-                    (
-                        "chk-snapshot",
-                        "Snapshot (emulator state)",
-                        self._snapshot_exists,
-                    ),
-                ]:
+                for chk_id, label, exists, status_text in self._rows():
                     status_class = "available" if exists else "unavailable"
-                    status_text = "available" if exists else "not found"
                     with Horizontal(classes="component-row"):
                         yield Checkbox(label, id=chk_id, value=exists)
                         yield Static(
@@ -226,9 +269,10 @@ class ExportModal(ExtractionModal[ExportResult]):
 
             # Name section
             with Vertical(id="name-section"):
-                yield Label("Action name:", id="name-label")
+                yield Label("File name:", id="name-label")
                 yield Input(
-                    placeholder="Enter a name for this action",
+                    value=self._default_name(),
+                    placeholder="Name of the file (saved as <name>.action)",
                     id="name-input",
                 )
 
@@ -237,7 +281,7 @@ class ExportModal(ExtractionModal[ExportResult]):
                 yield Label("Save location:", id="location-label")
                 yield Input(
                     value=self._default_location,
-                    placeholder="Directory to save the action file",
+                    placeholder="Folder to save the file in",
                     id="location-input",
                 )
 
@@ -330,73 +374,108 @@ class ExportModal(ExtractionModal[ExportResult]):
             pass
 
     def _do_export(self) -> None:
-        """Perform the export operation."""
+        """Check the inputs, then write the file on a worker thread."""
         if self._exporting:
             return
 
         try:
-            # Get values
             name_input = self.query_one("#name-input", Input)
             location_input = self.query_one("#location-input", Input)
             chk_recording = self.query_one("#chk-recording", Checkbox)
             chk_snapshot = self.query_one("#chk-snapshot", Checkbox)
 
             action_name = name_input.value.strip()
-            export_location = location_input.value.strip()
+            export_location = os.path.expanduser(location_input.value.strip())
             export_recording = chk_recording.value
             export_snapshot = chk_snapshot.value
 
-            # Validate name
+            if self._rec is None:
+                self._show_error("No recording yet: r records, r again stops")
+                return
             if not action_name:
-                self._show_error("Please enter an action name")
+                self._show_error("Please enter a file name")
                 name_input.focus()
                 return
-
-            # Validate location
+            if "/" in action_name or "\\" in action_name or action_name in (".", ".."):
+                self._show_error("The file name cannot contain a folder")
+                name_input.focus()
+                return
             if not export_location:
                 self._show_error("Please enter a save location")
                 location_input.focus()
                 return
-
-            # Check if location exists, create if not
             if not os.path.exists(export_location):
                 try:
                     os.makedirs(export_location, exist_ok=True)
                 except Exception as e:
-                    self._show_error(f"Cannot create directory: {e}")
+                    self._show_error(f"Cannot create the folder: {e}")
                     location_input.focus()
                     return
-
             if not export_recording and not export_snapshot:
-                self._show_error("Please select at least one component")
+                self._show_error("Please select at least one part")
                 return
-
             full_export_path = os.path.join(export_location, f"{action_name}.action")
             if os.path.exists(full_export_path):
-                self._show_error(
-                    f"Action '{action_name}' already exists in this location"
-                )
+                self._show_error(f"{action_name}.action already exists there")
                 name_input.focus()
                 return
-
-            if export_recording and not self._recording_exists:
-                self._show_error("Recording not found")
-                return
-
             if export_snapshot and not self._snapshot_exists:
-                self._show_error("Snapshot not found")
+                self._show_error("The start point is gone")
                 return
 
             self._exporting = True
-            self._update_status("[dim]Exporting...[/dim]")
-
-            # Perform export
-            success, export_path, error = self._perform_export(
-                action_name, export_location, export_recording, export_snapshot
+            self._update_status(
+                "[dim]Exporting (the start point takes a while)...[/dim]"
+                if export_snapshot
+                else "[dim]Exporting...[/dim]"
             )
+            self.run_worker(
+                lambda: self._export_worker(
+                    action_name, export_location, export_recording, export_snapshot
+                ),
+                name="export_recording",
+                thread=True,
+                exclusive=True,
+            )
+        except Exception as e:
+            self._exporting = False
+            self._update_status("")
+            self._show_error(f"Export failed: {e!s}")
 
-            if success:
-                result = ExportResult(
+    def _export_worker(
+        self,
+        action_name: str,
+        export_location: str,
+        export_recording: bool,
+        export_snapshot: bool,
+    ) -> None:
+        """Write the file (worker thread), then finish on the UI thread."""
+        success, path, error = self._perform_export(
+            action_name, export_location, export_recording, export_snapshot
+        )
+        self.app.call_from_thread(
+            self._finish_export,
+            success,
+            path,
+            error,
+            action_name,
+            export_recording,
+            export_snapshot,
+        )
+
+    def _finish_export(
+        self,
+        success: bool,
+        export_path: str,
+        error: str,
+        action_name: str,
+        export_recording: bool,
+        export_snapshot: bool,
+    ) -> None:
+        """Close with the result, or show the error (UI thread)."""
+        if success:
+            self._dismiss_with_refresh(
+                ExportResult(
                     cancelled=False,
                     success=True,
                     action_name=action_name,
@@ -404,16 +483,11 @@ class ExportModal(ExtractionModal[ExportResult]):
                     export_snapshot=export_snapshot,
                     export_path=export_path,
                 )
-                self._dismiss_with_refresh(result)
-            else:
-                self._exporting = False
-                self._update_status("")
-                self._show_error(error)
-
-        except Exception as e:
-            self._exporting = False
-            self._update_status("")
-            self._show_error(f"Export failed: {e!s}")
+            )
+            return
+        self._exporting = False
+        self._update_status("")
+        self._show_error(f"Export failed: {error}")
 
     def _perform_export(
         self,
@@ -422,62 +496,34 @@ class ExportModal(ExtractionModal[ExportResult]):
         export_recording: bool,
         export_snapshot: bool,
     ) -> tuple[bool, str, str]:
-        """Perform the actual export operation.
+        """Write the recording file.
 
         Args:
-            action_name: Name for the exported action
-            export_location: Directory to save the action file
-            export_recording: Whether to include recording
-            export_snapshot: Whether to include snapshot
+            action_name: The file name (without ``.action``).
+            export_location: The folder to save it in.
+            export_recording: Include the steps, file lists and copied files.
+            export_snapshot: Include the start point.
 
         Returns:
             Tuple of (success, export_path, error_message)
         """
+        from sandroid.core import rewind
+
+        if self._rec is None:
+            return False, "", "no recording"
         try:
-            from sandroid.core.run_bundle import recording_path as _recording
-
-            recording_path = str(_recording(os.getenv("RAW_RESULTS_PATH", "./")))
-            device_name = Toolbox.device_name
-            snapshot_path = os.path.join(
-                os.path.expanduser("~"),
-                ".android",
-                "avd",
-                f"{device_name}.avd",
-                "snapshots",
-                "tmp",
+            path = rewind.export_recording(
+                self._rec,
+                Path(export_location) / f"{action_name}.action",
+                with_recording=export_recording,
+                with_start_point=export_snapshot,
             )
-
-            temp_dir = tempfile.mkdtemp(prefix=f"{action_name}_")
-
-            try:
-                # Copy components to temp directory
-                if export_snapshot and os.path.exists(snapshot_path):
-                    # Copy snapshot directory contents
-                    for item in os.listdir(snapshot_path):
-                        src = os.path.join(snapshot_path, item)
-                        dst = os.path.join(temp_dir, item)
-                        if os.path.isdir(src):
-                            shutil.copytree(src, dst)
-                        else:
-                            shutil.copy2(src, dst)
-
-                if export_recording and os.path.exists(recording_path):
-                    shutil.copy2(recording_path, temp_dir)
-
-                # Create zip archive in temp location
-                zip_base = os.path.join(tempfile.gettempdir(), action_name)
-                shutil.make_archive(zip_base, "zip", temp_dir)
-
-                # Move to final location with .action extension
-                final_path = os.path.join(export_location, f"{action_name}.action")
-                shutil.move(f"{zip_base}.zip", final_path)
-
-                return True, os.path.abspath(final_path), ""
-
-            finally:
-                # Clean up temp directory
-                if os.path.exists(temp_dir) and os.path.isdir(temp_dir):
-                    shutil.rmtree(temp_dir)
-
         except Exception as e:
             return False, "", str(e)
+        return True, str(path.resolve()), ""
+
+    def action_cancel(self) -> None:
+        """Esc: close without exporting (not while the file is written)."""
+        if self._exporting:
+            return
+        super().action_cancel()

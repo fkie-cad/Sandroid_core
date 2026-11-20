@@ -137,21 +137,21 @@ class MenuController:
         )
         self._register(
             "export",
-            "Export loaded action",
+            "Export recording",
             "x",
             ActionCategory.RECORDING,
             ["forensic", "malware"],
-            description="Export current action to file",
-            inline_text="e[x]port currently loaded action",
+            description="Export the recording and its start point to a file",
+            inline_text="e[x]port the recording",
         )
         self._register(
             "import",
-            "Import action",
+            "Import",
             "i",
             ActionCategory.RECORDING,
             ["forensic", "malware"],
-            description="Import action from file",
-            inline_text="[i]mport action",
+            description="Import an exported recording or a results file",
+            inline_text="[i]mport a recording or results",
         )
 
         # ===== Spotlight Actions =====
