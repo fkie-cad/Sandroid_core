@@ -307,12 +307,56 @@ def reset_device_handles_after_snapshot_load() -> None:
         log.debug("Could not publish the snapshot-load refresh", exc_info=True)
 
 
-def _auto_start_frida_after_load() -> None:
+def is_active_serial(serial: str | None) -> bool:
+    """Whether *serial* is the device the TUI works on (None: unknown = yes).
+
+    The host Frida handles, the Spotlight PID and the FridaSessionService's
+    manager all belong to that device; a load on another serial (AI,
+    headless, a second emulator) must not touch them.
+    """
+    if not serial:
+        return True
+    try:
+        from sandroid.core.adb import Adb
+
+        active = Adb.selected_serial()
+    except Exception:
+        return True
+    return active is None or active == serial
+
+
+def _publish_frida_after_load(serial: str | None, ok: bool, reason: str) -> None:
+    """Tell the TUI (glance Frida row, failure toast) how the start went."""
+    try:
+        from sandroid.core.events import Event, EventBus, EventType
+
+        EventBus.get().publish(
+            Event(
+                type=EventType.STATE_CHANGED,
+                data={
+                    "change_type": "frida_server_after_load",
+                    "serial": serial,
+                    "ok": ok,
+                    "reason": reason,
+                },
+                source="emulator_service",
+            )
+        )
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "Could not publish the frida-server start", exc_info=True
+        )
+
+
+def _auto_start_frida_after_load(serial: str | None) -> None:
     """Honour ``frida.server_auto_start`` after a load (daemon thread).
 
     The load reverts the device's processes to the snapshot, so a
-    frida-server started this session may be gone. Runs on its own thread so
-    the load itself does not wait for frida-server. Never raises.
+    frida-server started this session may be gone. Runs on its own thread,
+    pinned to the loaded *serial*, so the load itself does not wait for
+    frida-server; the outcome is published as ``STATE_CHANGED``
+    (``frida_server_after_load``) for the TUI's toast and glance refresh.
+    Never raises.
     """
 
     def _run() -> None:
@@ -324,9 +368,12 @@ def _auto_start_frida_after_load() -> None:
                 frida_server_auto_start_enabled,
             )
 
-            if not frida_server_auto_start_enabled() or not Adb.get_target_device():
+            if not frida_server_auto_start_enabled():
                 return
-            ok, reason = auto_start_frida_server()
+            with Adb.targeting(serial):
+                if not Adb.get_target_device():
+                    return
+                ok, reason = auto_start_frida_server()
         except Exception as exc:
             ok, reason = False, str(exc)
         if ok:
@@ -335,6 +382,7 @@ def _auto_start_frida_after_load() -> None:
             log.warning(
                 f"frida-server auto-start after the snapshot load failed: {reason}"
             )
+        _publish_frida_after_load(serial, ok, reason)
 
     threading.Thread(target=_run, name="sandroid-frida-after-load", daemon=True).start()
 
@@ -916,22 +964,29 @@ class EmulatorService:
     def _after_snapshot_load(self, adb: AdbProtocol, serial: str | None) -> None:
         """Post-load steps after the device proxy (best-effort, never raises).
 
-        1. Drop the host Frida handles and the Spotlight PID (dead now).
+        1. Drop the host Frida handles and the Spotlight PID (dead now),
+           only when *serial* is the active device.
         2. :func:`~sandroid.services.proxy_restore.restore_proxy_infra`:
            App Proxy lanes, then the CA (no-restart re-inject only when the
            user injected it on this serial this session).
-        3. frida-server auto-start (own thread).
+        3. frida-server auto-start on that serial (own thread, active device
+           only; the outcome is published for the TUI).
         4. after-load hooks (tracking logcat, file monitor restarts).
         """
-        reset_device_handles_after_snapshot_load()
         target = serial or self._target_serial(adb)
+        # The Frida handles, Spotlight PID and frida-server manager belong
+        # to the active device: a load on another serial leaves them alone.
+        active = is_active_serial(target)
+        if active:
+            reset_device_handles_after_snapshot_load()
         try:
             from sandroid.services.proxy_restore import restore_proxy_infra
 
             restore_proxy_infra(target, "snapshot-load", device_proxy=False)
         except Exception as exc:
             self._logger.warning(f"Proxy restore after snapshot load failed: {exc}")
-        _auto_start_frida_after_load()
+        if active:
+            _auto_start_frida_after_load(target)
         _run_after_load_hooks(target)
 
     def _record_device_clock(
@@ -1179,13 +1234,14 @@ class EmulatorService:
         )
         # A cold boot wiped the CA mounts, gost, the lane rules and adb
         # reverse. DeviceManager's device-prepared hook (fresh_boot=True)
-        # restores them once that hook exists; until then restore here.
+        # restores them when it exists AND device preparation is enabled
+        # (checked now, not at import); otherwise restore here.
         try:
             from sandroid.services import proxy_restore
 
             # TODO(device-prepared-hook): drop this call once DeviceManager's
-            # register_device_prepared_hook is on main.
-            if not proxy_restore.install_device_prepared_hook():
+            # register_device_prepared_hook is on main and always enabled.
+            if not proxy_restore.device_prepared_hook_active():
                 proxy_restore.restore_proxy_infra(serial, "cold-boot", fresh_boot=True)
         except Exception as exc:
             self._logger.warning(f"Proxy restore after the restart failed: {exc}")

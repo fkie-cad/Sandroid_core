@@ -129,18 +129,6 @@ def restore_proxy_infra(
     return report
 
 
-def restore_proxy_infra_async(serial: str | None, cause: str) -> None:
-    """:func:`restore_proxy_infra` on a daemon thread (callers on hot paths)."""
-    if not _anything_desired(_target(serial)):
-        return
-    threading.Thread(
-        target=restore_proxy_infra,
-        args=(serial, cause),
-        name=f"sandroid-proxy-restore-{cause}",
-        daemon=True,
-    ).start()
-
-
 def _anything_desired(serial: str | None) -> bool:
     """Cheap in-process check: is anything set up for *serial*?"""
     try:
@@ -194,6 +182,10 @@ def _restore_lanes(serial: str | None, cause: str) -> list[Any]:
 
         focus = proxy_manager._FOCUS_INSTANCE
         if focus is None or not focus.has_lanes(serial):
+            if cause == "snapshot-load":
+                # A snapshot saved by an earlier session can bring back its
+                # App Proxy rules and gost: remove them (one adb read).
+                proxy_manager.get_focus_manager().sweep_orphans(serial, cause)
             return []
         return focus.reconcile(serial, cause)
     except Exception as exc:
@@ -275,6 +267,31 @@ def install_device_prepared_hook() -> bool:
         return True
 
 
+def device_prepared_hook_active() -> bool:
+    """Whether the device-prepared hook will restore after a fresh boot.
+
+    True only when the hook is registered AND sandroid-startup's device
+    preparation is enabled right now (``core.device_prep.is_enabled()``,
+    read at call time): with preparation off the hook never fires, so a
+    caller has to restore itself.
+    """
+    if not install_device_prepared_hook():
+        return False
+    # TODO(device-prepared-hook): sandroid.core.device_prep (sandroid-startup)
+    # is not on main yet; without it nothing fires the hook.
+    try:
+        from sandroid.core import device_prep
+    except ImportError:
+        return False
+    is_enabled = getattr(device_prep, "is_enabled", None)
+    if not callable(is_enabled):
+        return False
+    try:
+        return bool(is_enabled())
+    except Exception:
+        return False
+
+
 def _find_device_prepared_registry() -> Any:
     """``register_device_prepared_hook`` (``core.device_prep``) or None.
 
@@ -331,28 +348,52 @@ def _lifecycle_guard() -> Iterator[None]:
         raise RuntimeError(str(exc)) from exc
 
 
+def _system_server_pids(serial: str | None) -> list[str]:
+    from sandroid.core.adb import Adb
+
+    try:
+        out, _ = Adb.send_adb_command("shell pidof system_server", serial=serial)
+    except Exception:
+        return []
+    return [p for p in (out or "").split() if p.isdigit()]
+
+
 def _wait_system_server_changed(
-    previous: int | None, serial: str | None, timeout: float
+    previous: int | None,
+    serial: str | None,
+    timeout: float,
+    *,
+    seen: set[str] | None = None,
 ) -> bool:
     """Local framework gate: a NEW system_server PID, then services answer.
 
     ``sys.boot_completed`` stays 1 through a Zygote restart and the old
     system_server answers ``service check`` for seconds, so only the PID
-    change is a valid first gate.
+    change is a valid first gate. With the old PID unknown, a PID counts as
+    new only when it differs from every PID seen so far (``seen`` plus the
+    first poll), or when it shows up after a poll found no system_server.
     """
     from sandroid.core.adb import Adb
 
+    old = set(seen or ())
+    if previous is not None:
+        old.add(str(previous))
     deadline = time.monotonic() + timeout
     changed = False
+    first = True
+    gone = False
     while time.monotonic() < deadline:
-        try:
-            out, _ = Adb.send_adb_command("shell pidof system_server", serial=serial)
-        except Exception:
-            out = ""
-        pids = (out or "").split()
-        if pids and (previous is None or str(previous) not in pids):
+        pids = _system_server_pids(serial)
+        if previous is None and first and not old:
+            # Nothing known about the old one: whatever runs now may be it.
+            old.update(pids)
+        first = False
+        fresh = [p for p in pids if p not in old]
+        if fresh or (pids and gone):
             changed = True
             break
+        if not pids:
+            gone = True
         time.sleep(1.0)
     if not changed:
         return False
@@ -372,7 +413,11 @@ def _wait_system_server_changed(
 
 
 def _recover_after_framework_restart(
-    previous_ss_pid: int | None, serial: str | None, timeout: float = 120.0
+    previous_ss_pid: int | None,
+    serial: str | None,
+    timeout: float = 120.0,
+    *,
+    seen: set[str] | None = None,
 ) -> str:
     """Wait for the new framework, then restart frida-server and drop handles.
 
@@ -393,7 +438,7 @@ def _recover_after_framework_restart(
             return "framework back"
         except Exception as exc:
             return f"framework recovery failed: {exc}"
-    if not _wait_system_server_changed(previous_ss_pid, serial, timeout):
+    if not _wait_system_server_changed(previous_ss_pid, serial, timeout, seen=seen):
         return f"system_server did not come back within {timeout:.0f} s"
     note = "framework back"
     try:
@@ -460,10 +505,23 @@ def restart_framework_for_ca(cert_path: Path | None, serial: str | None = None) 
     try:
         with _lifecycle_guard():
             first = ca.inject_spec(spec, serial=serial)
+            # Re-checked here, not taken from the caller: only when init's
+            # namespace holds the CA does a new Zygote inherit it.
             if first.success or not first.restart_required:
                 return first
-            previous = ca.restart_zygote(serial=serial)
-            note = _recover_after_framework_restart(previous, serial)
+            seen = set(_system_server_pids(serial))
+            previous, killed = ca.kill_zygotes(serial=serial)
+            if not killed:
+                return InjectionResult(
+                    success=False,
+                    message=(
+                        "No Zygote whose parent is init was found, nothing was "
+                        "restarted; the CA is not installed"
+                    ),
+                )
+            if previous is None and len(seen) == 1:
+                previous = int(next(iter(seen)))
+            note = _recover_after_framework_restart(previous, serial, seen=seen)
             status = ca.check_zygote_injection_status(spec.cert_path, serial=serial)
             if not status.injected:
                 # The kill raced the binds: mount into the new Zygote now.

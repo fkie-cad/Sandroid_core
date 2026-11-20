@@ -39,6 +39,7 @@ from textual.widgets import (
 from sandroid.config import get_config
 from sandroid.core.adb import Adb
 from sandroid.core.proxy_manager import (
+    CA_RUNNING_APPS_NOTE,
     CAInfo,
     CAManager,
     CASource,
@@ -279,6 +280,11 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         Binding("r", "remove_ca", "Remove CA", show=False),
     ]
 
+    #: Focus the Device radio set on open: the base modal would focus the
+    #: first Input (the external-proxy field), which then swallowed the
+    #: modal's single-letter keys (I, P, R).
+    AUTO_FOCUS = "#device-radio-set"
+
     proxy_status = reactive(ProxyStatus.NOT_SET)
     current_proxy = reactive(None)
 
@@ -426,7 +432,8 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                     ),
                     "button": (
                         "[dim]Enter=Activate  Ctrl+S=Apply  A=Add app  "
-                        "F=Spotlight  Tab=Next  Esc=Cancel[/dim]"
+                        "F=Spotlight  I=Inject CA  R=Remove CA  Tab=Next  "
+                        "Esc=Cancel[/dim]"
                     ),
                 }
             )
@@ -576,7 +583,9 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         kept verbatim as the row's target.
         """
         try:
-            proxies = get_focus_manager().app_proxies()
+            # Never wait for the lock on the UI thread (a reconcile may hold
+            # it across seconds of adb work): the last value read is fine.
+            proxies = get_focus_manager().app_proxies_cached()
         except Exception:
             proxies = {}
         rows: list[tuple[str, str]] = []
@@ -752,6 +761,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         except Exception:
             selected = None
         manager = self._ca_manager
+        app = self.app
 
         def worker() -> None:
             try:
@@ -770,9 +780,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                     verdict="unknown",
                 )
             try:
-                self.app.call_from_thread(
-                    self._on_ca_probe, strategy, api_level, status
-                )
+                app.call_from_thread(self._on_ca_probe, strategy, api_level, status)
             except Exception:
                 pass
 
@@ -876,8 +884,34 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         self._run_ca_job("inject", ca_path)
 
     def action_remove_ca(self) -> None:
-        """Remove Sandroid's CA from the system trust store (worker)."""
-        self._run_ca_job("remove", self._get_selected_ca_path())
+        """Ask, then remove Sandroid's CA from the system trust store."""
+        from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+        if self._ca_busy:
+            self.notify("A CA operation is still running", severity="warning")
+            return
+        self._pending_ca_path = self._get_selected_ca_path()
+        self.app.push_screen(
+            ConfirmModal(
+                title="Remove the CA?",
+                message=(
+                    "Sandroid's CA is removed from the system trust store, so "
+                    "Mitmproxy can no longer read HTTPS of newly started apps, "
+                    "and it is not installed again after a snapshot load. "
+                    f"{CA_RUNNING_APPS_NOTE}\n\nRemove it?"
+                ),
+                yes_label="Remove CA",
+                no_label="Cancel",
+            ),
+            self._on_remove_confirm,
+        )
+
+    def _on_remove_confirm(self, confirmed: bool | None) -> None:
+        """The user decided on Remove CA (Esc counts as No)."""
+        if not confirmed:
+            self.notify("CA kept", severity="information")
+            return
+        self._run_ca_job("remove", self._pending_ca_path)
 
     def _run_ca_job(self, kind: str, ca_path: Path | None) -> None:
         """Run a CA install / fallback restart / removal off the UI thread.
@@ -902,6 +936,9 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         except NoMatches:
             pass
         manager = self._ca_manager
+        # Captured on the UI thread: once the modal is dismissed, self.app
+        # no longer resolves from the worker and the result would be lost.
+        app = self.app
 
         def worker() -> None:
             ct = None
@@ -924,8 +961,8 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             except Exception as exc:
                 result = exc
             try:
-                self.app.call_from_thread(
-                    self._on_ca_job_done, kind, ca_path, result, ct, status
+                app.call_from_thread(
+                    self._on_ca_job_done, kind, ca_path, result, ct, status, app
                 )
             except Exception:
                 pass
@@ -934,9 +971,19 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             target=worker, name=f"proxy-modal-ca-{kind}", daemon=True
         ).start()
 
-    def _on_ca_job_done(self, kind, ca_path, result, ct, status) -> None:
-        """Report a CA job (UI thread): toasts, the fallback offer, dismiss."""
+    def _on_ca_job_done(self, kind, ca_path, result, ct, status, app=None) -> None:
+        """Report a CA job (UI thread): toasts, the fallback offer, dismiss.
+
+        When the modal was closed meanwhile the result still reaches the
+        user as an app-level toast; no dialog is pushed over whatever screen
+        is up now (the restart fallback is offered again on the next
+        Inject CA).
+        """
         self._ca_busy = False
+        app = app or self.app
+        if self not in app.screen_stack:
+            self._report_ca_job_closed(app, kind, result, ct)
+            return
         if status is not None:
             self._show_zygote_status(status)
         if isinstance(result, Exception):
@@ -990,6 +1037,30 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             )
         else:
             self.notify(result.message, severity="error")
+
+    @staticmethod
+    def _report_ca_job_closed(app, kind, result, ct) -> None:
+        """A CA job finished after the modal was closed: toast via the app."""
+        if isinstance(result, Exception):
+            app.notify(f"CA operation failed: {result}", severity="error")
+            return
+        if kind == "remove":
+            ok, message = result
+            app.notify(message, severity="information" if ok else "error")
+            return
+        if result.success:
+            message = result.message
+            if ct is not None and ct[0]:
+                message += f". {ct[1]}"
+            app.notify(message, severity="information")
+            return
+        message = result.message
+        if result.restart_required:
+            message += (
+                ". Open Proxy Settings (y) and press I again to be offered the "
+                "Zygote restart"
+            )
+        app.notify(message, severity="error", timeout=10)
 
     def _on_restart_confirm(self, confirmed: bool) -> None:
         """The user decided on the Zygote-restart fallback."""

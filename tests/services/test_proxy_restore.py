@@ -111,13 +111,29 @@ def test_reconnect_during_a_load_is_left_to_the_load(monkeypatch):
 
 
 def test_nothing_set_up_means_no_device_work(monkeypatch):
-    started = []
-    monkeypatch.setattr(pr.threading.Thread, "start", lambda self: started.append(1))
-    pr.restore_proxy_infra_async(SERIAL, "reconnect")
+    monkeypatch.setattr(
+        pm, "get_focus_manager", lambda: pytest.fail("focus manager created")
+    )
     pr._device_prepared_hook(SERIAL, True)
-    assert started == []
     report = pr.restore_proxy_infra(SERIAL, "cold-boot")
     assert not report.acted
+    assert not hasattr(pr, "restore_proxy_infra_async")  # dead code removed
+
+
+def test_snapshot_load_without_lanes_sweeps_orphans(monkeypatch):
+    """A snapshot from an earlier session can bring back its App Proxy rules
+    and gost; with no lane of this session they are removed.
+    """
+    swept = []
+    monkeypatch.setattr(
+        pm,
+        "get_focus_manager",
+        lambda: SimpleNamespace(sweep_orphans=lambda s, c: swept.append((s, c))),
+    )
+    pr.restore_proxy_infra(SERIAL, "snapshot-load", device_proxy=False)
+    assert swept == [(SERIAL, "snapshot-load")]
+    pr.restore_proxy_infra(SERIAL, "reconnect", device_proxy=False)
+    assert swept == [(SERIAL, "snapshot-load")]
 
 
 def test_ca_intent_is_per_serial(monkeypatch):
@@ -185,6 +201,39 @@ def test_without_the_hook_restart_restores_itself(monkeypatch):
     assert calls == [(SERIAL, "cold-boot", {"fresh_boot": True})]
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_restart_relies_on_the_hook_only_while_device_prep_is_on(monkeypatch, enabled):
+    """The hook may be registered while sandroid-startup's preparation is
+    off: then it never fires and restart() must restore itself.
+    """
+    module = types.ModuleType("sandroid.core.device_prep")
+    module.register_device_prepared_hook = lambda hook: None
+    state = {"on": False}
+    module.is_enabled = lambda: state["on"]
+    monkeypatch.setitem(sys.modules, "sandroid.core.device_prep", module)
+    import sandroid.core as core_pkg
+
+    monkeypatch.setattr(core_pkg, "device_prep", module, raising=False)
+    calls = []
+    monkeypatch.setattr(
+        pr, "restore_proxy_infra", lambda s, c, **kw: calls.append((s, c))
+    )
+    from sandroid.core import emulator
+
+    monkeypatch.setattr(
+        emulator,
+        "restart_emulator",
+        lambda serial, adb=None: SimpleNamespace(avd="Dev7", log_path="x"),
+    )
+    monkeypatch.setattr(emulator, "wait_until_ready", lambda *a, **k: True)
+    monkeypatch.setattr(emulator, "emulator_binary", lambda: "/x/emulator")
+    svc = es.EmulatorService()
+    svc._get_adb = lambda: SimpleNamespace(get_target_device=lambda: SERIAL)
+    state["on"] = enabled  # read at call time, not at registration
+    assert svc.restart() is True
+    assert calls == ([] if enabled else [(SERIAL, "cold-boot")])
+
+
 # -- EmulatorService.load_snapshot ---------------------------------------------------
 
 
@@ -225,8 +274,11 @@ def test_load_snapshot_order_keeps_the_restore_chain(monkeypatch):
 
     monkeypatch.setattr(pr, "restore_proxy_infra", restore)
     monkeypatch.setattr(
-        es, "_auto_start_frida_after_load", lambda: steps.append("frida_start")
+        es,
+        "_auto_start_frida_after_load",
+        lambda serial: steps.append(f"frida_start:{serial}"),
     )
+    monkeypatch.setattr(es, "is_active_serial", lambda serial: True)
     hook = steps.append
     es.register_after_load_hook(hook)
     try:
@@ -241,11 +293,63 @@ def test_load_snapshot_order_keeps_the_restore_chain(monkeypatch):
         "device_proxy",
         "frida",
         "proxy_infra:snapshot-load:{'device_proxy': False}",
-        "frida_start",
+        f"frida_start:{SERIAL}",
         SERIAL,
     ]
     assert es.snapshot_load_generation() == gen + 1
     assert not es.snapshot_load_active(SERIAL)
+
+
+def test_load_on_another_serial_leaves_the_active_devices_frida_alone(
+    monkeypatch,
+):
+    steps: list[str] = []
+    svc = es.EmulatorService()
+    monkeypatch.setattr(es, "is_active_serial", lambda serial: False)
+    monkeypatch.setattr(
+        es, "reset_device_handles_after_snapshot_load", lambda: steps.append("reset")
+    )
+    monkeypatch.setattr(
+        es, "_auto_start_frida_after_load", lambda serial: steps.append("frida")
+    )
+    monkeypatch.setattr(
+        pr, "restore_proxy_infra", lambda s, c, **kw: steps.append(f"restore:{s}")
+    )
+    svc._after_snapshot_load(_Adb(), "emulator-5590")
+    assert steps == ["restore:emulator-5590"]
+
+
+def test_frida_auto_start_after_a_load_is_pinned_and_reported(monkeypatch):
+    from sandroid.core import frida_manager
+    from sandroid.core.adb import Adb
+    from sandroid.core.events import EventBus, EventType
+
+    seen_target = []
+    monkeypatch.setattr(frida_manager, "frida_server_auto_start_enabled", lambda: True)
+
+    def start():
+        seen_target.append(Adb.get_target_device())
+        return False, "push failed"
+
+    monkeypatch.setattr(frida_manager, "auto_start_frida_server", start)
+    monkeypatch.setattr(es.threading.Thread, "start", lambda self: self.run())
+    events = []
+    handler = events.append
+    EventBus.get().subscribe(EventType.STATE_CHANGED, handler)
+    try:
+        es._auto_start_frida_after_load("emulator-5590")
+    finally:
+        EventBus.get().unsubscribe(EventType.STATE_CHANGED, handler)
+    assert seen_target == ["emulator-5590"]
+    (event,) = [
+        e for e in events if e.data.get("change_type") == "frida_server_after_load"
+    ]
+    assert event.data == {
+        "change_type": "frida_server_after_load",
+        "serial": "emulator-5590",
+        "ok": False,
+        "reason": "push failed",
+    }
 
 
 def test_a_failed_load_runs_no_post_load_step(monkeypatch):
@@ -318,9 +422,11 @@ class _Ca:
             success=self.first_ok, message="x", restart_required=not self.first_ok
         )
 
-    def restart_zygote(self, serial=None):
+    killed = (712,)
+
+    def kill_zygotes(self, serial=None):
         self.calls.append("kill")
-        return 728
+        return 728, list(self.killed)
 
     def check_zygote_injection_status(self, cert_path, serial=None):
         return SimpleNamespace(injected=True, verdict="injected")
@@ -331,8 +437,10 @@ def _fallback(monkeypatch, calls, **kw):
     monkeypatch.setattr(
         pr,
         "_recover_after_framework_restart",
-        lambda prev, serial, timeout=120.0: calls.append(("recover", prev)) or "ok",
+        lambda prev, serial, timeout=120.0, seen=None: calls.append(("recover", prev))
+        or "ok",
     )
+    monkeypatch.setattr(pr, "_system_server_pids", lambda serial: ["728"])
     monkeypatch.setattr(
         pr, "restore_proxy_infra", lambda s, c, **k: calls.append(("restore", c))
     )
@@ -360,6 +468,57 @@ def test_fallback_runs_the_full_restart_contract(monkeypatch, tmp_path):
         "world",
     ]
     assert pm.ca_desired_for(SERIAL) is not None
+
+
+def test_fallback_fails_when_no_zygote_was_killed(monkeypatch, tmp_path):
+    calls: list = []
+    _fallback(monkeypatch, calls)
+    monkeypatch.setattr(_Ca, "killed", ())
+    result = pr.restart_framework_for_ca(tmp_path / "ca.pem", SERIAL)
+    assert not result.success
+    assert "nothing was restarted" in result.message
+    assert calls == ["inject", "kill"]  # never waited for a framework restart
+
+
+def test_fallback_not_run_when_a_restart_cannot_help(monkeypatch, tmp_path):
+    """The fallback re-checks the precondition: inject_spec says a restart
+    would not help (e.g. nsenter missing) -> nothing is killed.
+    """
+    calls: list = []
+    _fallback(monkeypatch, calls)
+    monkeypatch.setattr(
+        _Ca,
+        "inject_spec",
+        lambda self, spec, serial=None: self.calls.append("inject")
+        or pm.InjectionResult(success=False, message="nsenter missing"),
+    )
+    result = pr.restart_framework_for_ca(tmp_path / "ca.pem", SERIAL)
+    assert not result.success
+    assert calls == ["inject"]
+
+
+def test_framework_wait_with_an_unknown_old_pid_needs_a_new_one(monkeypatch):
+    """With the old system_server PID unknown, the old one still answering
+    must not count as "back": only a PID never seen before does.
+    """
+    polls = iter([["728"], ["728"], [], ["12189"]])
+    monkeypatch.setattr(pr, "_system_server_pids", lambda serial: next(polls))
+    monkeypatch.setattr(pr.time, "sleep", lambda s: None)
+    from sandroid.core.adb import Adb
+
+    monkeypatch.setattr(
+        Adb,
+        "send_adb_command",
+        staticmethod(
+            lambda cmd, serial=None, timeout=30: ("1\nService package: found", "")
+        ),
+    )
+    assert pr._wait_system_server_changed(None, SERIAL, 5.0, seen=set())
+    polls = iter([["728"]] * 50)
+    monkeypatch.setattr(pr, "_system_server_pids", lambda serial: next(polls))
+    clock = iter(range(100))
+    monkeypatch.setattr(pr.time, "monotonic", lambda: next(clock))
+    assert not pr._wait_system_server_changed(None, SERIAL, 10.0, seen={"728"})
 
 
 def test_fallback_refuses_while_an_app_start_runs(monkeypatch, tmp_path):
@@ -429,11 +588,62 @@ def test_monitor_ended_by_a_load_restarts_once_the_load_is_done(monkeypatch):
     controller = mc.MonitorController()
     resumed = []
     monkeypatch.setattr(controller, "resume_after_playback", resumed.append)
+    monkeypatch.setattr(controller, "is_running", lambda: False)
     controller._resume_after_load = "cfg"
     mc._after_snapshot_load(SERIAL)
     assert resumed == ["cfg"]
     mc._after_snapshot_load(SERIAL)  # once
     assert resumed == ["cfg"]
+
+
+def _ended_monitor(monkeypatch, controller):
+    tasks = SimpleNamespace(
+        get_task=lambda name: SimpleNamespace(
+            instance=SimpleNamespace(config="cfg", stop_requested=False, process=None)
+        ),
+        is_running=lambda name: False,
+        unregister=lambda name: None,
+    )
+    monkeypatch.setattr(controller, "_get_task_service", lambda: tasks)
+    monkeypatch.setattr(controller, "is_running", lambda: False)
+
+
+def test_monitor_end_handled_after_the_load_hook_still_restarts(monkeypatch):
+    """The stream end can reach the UI thread after the after-load hook ran
+    but while the load is still marked in flight: it must restart then, not
+    wait for a hook that already ran.
+    """
+    from sandroid.tui.controllers import monitor_controller as mc
+
+    controller = mc.MonitorController()
+    resumed = []
+    monkeypatch.setattr(controller, "resume_after_playback", resumed.append)
+    _ended_monitor(monkeypatch, controller)
+    controller._load_gen_at_start = es.snapshot_load_generation()
+    es._load_started(SERIAL)
+    try:
+        mc._after_snapshot_load(SERIAL)  # hook first (monitor still "up")
+        controller._monitor_ended()  # then the end, load not finished yet
+    finally:
+        es._load_finished(SERIAL)
+    assert resumed == ["cfg"]
+
+
+def test_monitor_that_survived_a_load_is_not_restarted_later(monkeypatch):
+    from sandroid.tui.controllers import monitor_controller as mc
+
+    controller = mc.MonitorController()
+    resumed = []
+    monkeypatch.setattr(controller, "resume_after_playback", resumed.append)
+    controller._load_gen_at_start = es.snapshot_load_generation()
+    es._load_started(SERIAL)
+    monkeypatch.setattr(controller, "is_running", lambda: True)
+    mc._after_snapshot_load(SERIAL)  # survived: re-armed
+    es._load_finished(SERIAL)
+    controller._load_done_at -= controller.LOAD_END_GRACE_S + 1  # much later
+    _ended_monitor(monkeypatch, controller)
+    controller._monitor_ended()  # an unrelated end
+    assert resumed == []
 
 
 # -- TUI entry points ---------------------------------------------------------------
@@ -471,6 +681,9 @@ def test_proxy_modal_ca_install_runs_off_the_ui_thread(monkeypatch, tmp_path):
     from sandroid.tui.modals import proxy_modal
 
     modal = proxy_modal.ProxyModal()
+    monkeypatch.setattr(
+        proxy_modal.ProxyModal, "app", property(lambda self: SimpleNamespace())
+    )
     cert = tmp_path / "ca.pem"
     cert.write_text("x")
     monkeypatch.setattr(modal, "_get_selected_ca_path", lambda: cert)
@@ -489,3 +702,147 @@ def test_proxy_modal_ca_install_runs_off_the_ui_thread(monkeypatch, tmp_path):
     assert threads == ["proxy-modal-ca-inject"]
     assert injected == []  # nothing ran on the calling (UI) thread
     assert modal._ca_busy
+
+
+# -- mitmproxy start: lanes are checked once mitmproxy listens ------------------------
+
+
+def test_app_proxy_check_after_start_waits_for_the_socks_ports(monkeypatch):
+    """Probing before mitmweb bound its SOCKS ports gave a false, sticky
+    "mitmproxy unreachable from the device" after most starts.
+    """
+    svc = ms.MitmproxyService.__new__(ms.MitmproxyService)
+    svc._lock = ms.threading.RLock()
+    svc._state = SimpleNamespace(
+        proxy_port=8080, socks_base=8082, focus_lanes=2, listen_host="127.0.0.1"
+    )
+    svc._proc = SimpleNamespace(pid=4242, poll=lambda: None)
+    bound: set[int] = set()
+
+    def listening(pid, port, host="127.0.0.1"):
+        bound.add(port)  # each port comes up on its first check
+        return port != 8083 or 8083 in seen_twice or seen_twice.add(8083)
+
+    seen_twice: set[int] = set()
+    monkeypatch.setattr(ms, "_pid_listening", listening)
+    monkeypatch.setattr(ms.time, "sleep", lambda s: None)
+    checks = []
+    monkeypatch.setattr(
+        pm,
+        "_FOCUS_INSTANCE",
+        SimpleNamespace(
+            has_lanes=lambda serial=None: True,
+            reconcile=lambda serial, reason: checks.append((reason, set(bound))),
+        ),
+    )
+    monkeypatch.setattr(ms.threading.Thread, "start", lambda self: self.run())
+    monkeypatch.setattr(pm, "_MITMPROXY_STARTED_AT", 0.0)
+    svc._kick_app_proxy_reconcile("mitmproxy-start")
+    assert checks == [("mitmproxy-start", {8080, 8082, 8083})]
+    assert 8083 in seen_twice  # it waited for the late SOCKS port
+    assert pm._MITMPROXY_STARTED_AT > 0
+
+
+# -- Ctrl+N, ProxyModal ---------------------------------------------------------------
+
+
+def test_ctrl_n_on_an_installed_ca_records_the_reinject_intent(monkeypatch, tmp_path):
+    from sandroid.core.adb import Adb
+    from sandroid.tui.widgets.mitmproxy_panel import install_or_adopt_ca
+
+    monkeypatch.setattr(Adb, "_target_device", SERIAL)
+    spec = SimpleNamespace(cert_path=tmp_path / "ca.pem")
+    manager = SimpleNamespace(
+        check_zygote_injection_status=lambda path: SimpleNamespace(verdict="injected"),
+        ca_spec=lambda path: spec,
+        inject_ca_into_zygote=lambda path: pytest.fail("re-installed"),
+    )
+    result = install_or_adopt_ca(manager, spec.cert_path)
+    assert result.success
+    assert "already in the trust store" in result.message
+    assert pm.ca_desired_for(SERIAL) is spec
+
+
+def test_panel_never_waits_for_the_focus_lock_on_the_ui_thread():
+    import inspect
+
+    from sandroid.tui.widgets import mitmproxy_panel
+
+    source = inspect.getsource(mitmproxy_panel.MitmproxyPanel)
+    for blocking in (".app_proxies()", ".lane_health()", ".is_focus_active()"):
+        assert blocking not in source
+
+
+def test_ca_result_after_the_modal_closed_goes_to_the_app(monkeypatch):
+    from sandroid.tui.modals import proxy_modal
+
+    modal = proxy_modal.ProxyModal()
+    toasts = []
+    app = SimpleNamespace(
+        screen_stack=[],  # the modal was dismissed meanwhile
+        notify=lambda message, **kw: toasts.append((message, kw["severity"])),
+        push_screen=lambda *a, **k: pytest.fail("dialog over another screen"),
+    )
+    modal._ca_busy = True
+    result = pm.InjectionResult(
+        success=False, message="Installing the CA failed: x", restart_required=True
+    )
+    modal._on_ca_job_done("inject", None, result, None, None, app)
+    assert not modal._ca_busy
+    ((message, severity),) = toasts
+    assert severity == "error"
+    assert "press I again" in message
+    modal._on_ca_job_done("remove", None, (True, "CA removed"), None, None, app)
+    assert toasts[-1] == ("CA removed", "information")
+
+
+async def _until(pilot, cond, rounds=200):
+    for _ in range(rounds):
+        if cond():
+            return
+        await pilot.pause(0.01)
+    raise AssertionError("condition not reached")
+
+
+async def test_proxy_modal_keys_work_on_open_and_remove_asks_first(monkeypatch):
+    from textual.app import App
+
+    from sandroid.tui.modals import proxy_modal
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+    for name in (
+        "_refresh_device_proxy_status",
+        "_refresh_device_info",
+        "_detect_certificates",
+    ):
+        monkeypatch.setattr(proxy_modal.ProxyModal, name, lambda self: None)
+    monkeypatch.setattr(
+        proxy_modal,
+        "get_focus_manager",
+        lambda: SimpleNamespace(app_proxies_cached=dict),
+    )
+    jobs = []
+    monkeypatch.setattr(
+        proxy_modal.ProxyModal,
+        "_run_ca_job",
+        lambda self, kind, path: jobs.append(kind),
+    )
+    modal = proxy_modal.ProxyModal()
+
+    class _App(App):
+        def on_mount(self) -> None:
+            self.push_screen(modal)
+
+    app = _App()
+    async with app.run_test() as pilot:
+        await _until(pilot, lambda: app.screen is modal and app.focused is not None)
+        assert app.focused.id == "device-radio-set"  # not the external Input
+        await pilot.press("r")
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        await pilot.press("escape")  # sync action_cancel closes it: No
+        await _until(pilot, lambda: app.screen is modal)
+        assert jobs == []
+        await pilot.press("r")
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        await pilot.press("y")
+        await _until(pilot, lambda: jobs == ["remove"])

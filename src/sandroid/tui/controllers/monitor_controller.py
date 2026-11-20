@@ -1918,9 +1918,10 @@ _AFTER_LOAD_REGISTERED = False
 
 def _after_snapshot_load(_serial: str | None) -> None:
     """EmulatorService after-load hook (loader worker thread)."""
+    gen = _load_generation()
     for controller in list(_LOAD_WATCHERS):
         try:
-            controller._call_from_thread(controller._resume_monitor_after_load)
+            controller._call_from_thread(controller._on_snapshot_load_done, gen)
         except Exception:
             logger.debug("monitor resume after load not scheduled", exc_info=True)
 
@@ -2052,6 +2053,11 @@ class MonitorController:
         #: config to restart with once a load that ended it has finished.
         self._load_gen_at_start: int | None = None
         self._resume_after_load: MonitorConfig | None = None
+        #: Load generation whose after-load hook already ran, and when: a
+        #: stream end handled after that hook still restarts (the order of
+        #: the two UI-thread callbacks is not fixed).
+        self._load_done_gen: int | None = None
+        self._load_done_at: float | None = None
         _LOAD_WATCHERS.add(self)
         _register_after_load()
 
@@ -2397,6 +2403,7 @@ class MonitorController:
             self._log_warning("Monitor is already starting — please wait.")
             return False
         self._load_gen_at_start = _load_generation()
+        self._load_done_at = None
         self._resume_after_load = None
         self._start_pending = True
 
@@ -3129,11 +3136,7 @@ class MonitorController:
         # cut the monitor's adb stream: restart it with the same config once
         # the load has finished.
         resume_config = None
-        if (
-            not intentional
-            and self._load_gen_at_start is not None
-            and _load_generation() != self._load_gen_at_start
-        ):
+        if not intentional and self._ended_by_load():
             resume_config = getattr(inst, "config", None)
         _timeline_monitor(
             "end",
@@ -3180,13 +3183,46 @@ class MonitorController:
 
         if resume_config is not None:
             self._resume_after_load = resume_config
-            if _load_running():
+            gen = _load_generation()
+            if self._load_done_gen == gen or not _load_running():
+                # The load's after-load hook already ran (or no load is in
+                # flight any more): nothing else will restart it.
+                self._resume_monitor_after_load()
+            else:
                 self._log_info(
                     "Monitor ended by the snapshot load: it restarts when the "
                     "load is done"
                 )
-            else:
-                self._resume_monitor_after_load()
+
+    #: Seconds after a load's after-load hook during which a stream end still
+    #: counts as caused by that load (the end can be handled after the hook).
+    LOAD_END_GRACE_S = 15.0
+
+    def _ended_by_load(self) -> bool:
+        """Whether a snapshot load cut the monitor's stream (UI thread)."""
+        if self._load_gen_at_start is None:
+            return False
+        if _load_generation() != self._load_gen_at_start:
+            return True
+        return (
+            self._load_done_at is not None
+            and time.monotonic() - self._load_done_at < self.LOAD_END_GRACE_S
+        )
+
+    def _on_snapshot_load_done(self, gen: int | None) -> None:
+        """A load's after-load hook ran (UI thread).
+
+        Restarts a monitor the load already ended. A monitor still running
+        survived the load (or its end is not handled yet): re-arm the
+        generation so a later unrelated end is not taken for the load's,
+        and keep a short grace window for a late end of this one.
+        """
+        self._load_done_gen = gen
+        self._load_done_at = time.monotonic()
+        if self._resume_after_load is not None:
+            self._resume_monitor_after_load()
+        elif self.is_running() or self._start_pending:
+            self._load_gen_at_start = gen
 
     def _resume_monitor_after_load(self) -> None:
         """Restart a monitor a snapshot load ended (UI thread; at most once)."""

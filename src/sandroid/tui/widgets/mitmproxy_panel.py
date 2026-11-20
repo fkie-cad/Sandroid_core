@@ -48,6 +48,34 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def install_or_adopt_ca(manager, cert_path, where=None):
+    """Ctrl+N's CA step (blocking adb, worker thread).
+
+    An already installed CA is only re-checked, but recorded as this
+    serial's re-inject intent like a fresh install: a later snapshot load or
+    cold boot onto a state without it then installs it again. Otherwise the
+    no-restart install runs (it records the intent itself).
+
+    Returns:
+        :class:`~sandroid.core.proxy_manager.InjectionResult`.
+    """
+    from sandroid.core.adb import Adb
+    from sandroid.core.proxy_manager import InjectionResult, remember_ca_intent
+
+    status = manager.check_zygote_injection_status(cert_path)
+    if status.verdict != "injected":
+        return manager.inject_ca_into_zygote(cert_path)
+    spec = manager.ca_spec(cert_path)
+    if spec is not None:
+        remember_ca_intent(Adb.get_target_device(), spec)
+    note = where(status) if where is not None else "Zygote"
+    return InjectionResult(
+        success=True,
+        message=f"CA already in the trust store ({note})",
+        verdict="injected",
+    )
+
+
 class MitmproxyPanel(Widget):
     """Hidden mitmweb controller for the Network lens (id ``mitm-panel``).
 
@@ -297,14 +325,10 @@ class MitmproxyPanel(Widget):
         except Exception:
             pass
         # Best-effort: free app-proxy lanes/iptables so they don't leak when the
-        # panel closes (disable_focus() with no active lanes is a no-op).
-        try:
-            from sandroid.core.proxy_manager import get_focus_manager
-
-            if get_focus_manager().is_focus_active():
-                get_focus_manager().disable_focus()
-        except Exception:
-            pass
+        # panel closes (disable_focus() with no active lanes is a no-op). Off
+        # the UI thread: it waits for FocusManager's lock and runs adb; the
+        # FocusManager's atexit cleanup is the backstop at exit.
+        self._release_app_proxies_async()
         # Best-effort: never leave the device pointed at a mitmproxy that dies
         # with Sandroid. Only the exact address we set is cleared (a proxy
         # changed since is left alone). The service's atexit hook is the
@@ -315,6 +339,22 @@ class MitmproxyPanel(Widget):
             pass
         # Best-effort: drop our adb-reverse tunnel so it doesn't leak.
         self._remove_our_reverse()
+
+    @staticmethod
+    def _release_app_proxies_async() -> None:
+        def _run() -> None:
+            try:
+                from sandroid.core.proxy_manager import get_focus_manager
+
+                manager = get_focus_manager()
+                if manager.app_proxies_cached():
+                    manager.disable_focus()
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=_run, name="mitm-app-proxy-release", daemon=True
+        ).start()
 
     def _on_service_line(self, line: str) -> None:
         # Reader/AI-tool-worker thread → non-blocking schedule onto the main
@@ -455,8 +495,9 @@ class MitmproxyPanel(Widget):
         * Device part — from the async-probed device-proxy state
           (``_proxy_state``/``_proxy_addr``): our mitmproxy, an external proxy,
           or off.
-        * Apps part — from ``get_focus_manager().app_proxies()`` (a cheap
-          in-process read): how many apps route to our mitmproxy vs. external.
+        * Apps part — from ``get_focus_manager().app_proxies_cached()`` (a
+          lock-free, last-known read): how many apps route to our mitmproxy vs.
+          external.
 
         Stopped → empty (the header's ``○ stopped`` already says it all).
         """
@@ -486,7 +527,7 @@ class MitmproxyPanel(Widget):
         try:
             from sandroid.core.proxy_manager import get_focus_manager
 
-            routes = get_focus_manager().app_proxies()
+            routes = get_focus_manager().app_proxies_cached()
         except Exception:
             routes = {}
         if routes:
@@ -513,7 +554,7 @@ class MitmproxyPanel(Widget):
         try:
             from sandroid.core.proxy_manager import get_focus_manager
 
-            health = get_focus_manager().lane_health_nonblocking()
+            health = get_focus_manager().lane_health_cached()
         except Exception:
             return ""
         if not health:
@@ -639,7 +680,7 @@ class MitmproxyPanel(Widget):
         try:
             from sandroid.core.proxy_manager import get_focus_manager
 
-            routes = get_focus_manager().app_proxies()
+            routes = get_focus_manager().app_proxies_cached()
         except Exception:
             routes = {}
         if routes:
@@ -677,7 +718,7 @@ class MitmproxyPanel(Widget):
         try:
             from sandroid.core.proxy_manager import get_focus_manager
 
-            routed_apps = bool(get_focus_manager().app_proxies())
+            routed_apps = bool(get_focus_manager().app_proxies_cached())
         except Exception:
             routed_apps = False
         if self._proxy_state != "ours" and not routed_apps:
@@ -1457,7 +1498,7 @@ class MitmproxyPanel(Widget):
         def _run() -> None:
             ct = None
             try:
-                from sandroid.core.proxy_manager import CAManager, InjectionResult
+                from sandroid.core.proxy_manager import CAManager
 
                 manager = CAManager()
                 if restart:
@@ -1467,18 +1508,7 @@ class MitmproxyPanel(Widget):
 
                     result = restart_framework_for_ca(cert_path)
                 else:
-                    status = manager.check_zygote_injection_status(cert_path)
-                    if status.verdict == "injected":
-                        result = InjectionResult(
-                            success=True,
-                            message=(
-                                f"CA already in the trust store "
-                                f"({self._ca_where(status)})"
-                            ),
-                            verdict="injected",
-                        )
-                    else:
-                        result = manager.inject_ca_into_zygote(cert_path)
+                    result = install_or_adopt_ca(manager, cert_path, self._ca_where)
                 if result.success and cert_path is not None:
                     ct = manager.bypass_chrome_ct(cert_path)
             except Exception as exc:  # marshal the failure to the UI thread

@@ -150,6 +150,16 @@ class StatusBar(Static):
         thread): say so in the Frida pill at once, not at the next refresh.
         """
         data = getattr(event, "data", None) or {}
+        if data.get("change_type") == "frida_server_after_load":
+            ok = bool(data.get("ok"))
+            reason = str(data.get("reason") or "")
+            try:
+                self.app.call_from_thread(self._on_frida_after_load, ok, reason)
+            except RuntimeError:  # already on the UI thread
+                self._on_frida_after_load(ok, reason)
+            except Exception:
+                pass  # app shutting down
+            return
         if data.get("change_type") != "frida_detached" or not data.get("server_lost"):
             return
         reason = str(data.get("reason") or "lost")
@@ -159,6 +169,23 @@ class StatusBar(Static):
             self._on_frida_detached(reason)
         except Exception:
             pass  # app shutting down
+
+    def _on_frida_after_load(self, ok: bool, reason: str) -> None:
+        """frida-server auto-start after a snapshot load finished (UI thread):
+        refresh the Frida row; say why when it failed.
+        """
+        if ok:
+            self._frida_lost = None
+        self._schedule_frida_check()
+        if not ok:
+            try:
+                self.app.notify(
+                    f"frida-server auto-start failed: {reason}",
+                    severity="warning",
+                    timeout=10,
+                )
+            except Exception:
+                pass
 
     def _on_frida_detached(self, reason: str) -> None:
         """Mark the session lost, re-check the server, tell the user once."""

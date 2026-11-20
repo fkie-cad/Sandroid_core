@@ -743,7 +743,11 @@ def test_every_snapshot_load_drops_frida_handles_and_pid(monkeypatch, tmp_path):
     monkeypatch.setattr(svc, "_restore_device_proxy", lambda serial: "none")
     monkeypatch.setattr(svc, "_restore_selinux_permissive", lambda adb, serial: True)
     monkeypatch.setattr(svc, "_record_device_clock", lambda adb, name, serial: None)
-    monkeypatch.setattr(es, "_auto_start_frida_after_load", lambda: None)
+    monkeypatch.setattr(es, "_auto_start_frida_after_load", lambda serial: None)
+    monkeypatch.setattr(es, "is_active_serial", lambda serial: serial == "emu-1")
+    from sandroid.services import proxy_restore
+
+    monkeypatch.setattr(proxy_restore, "restore_proxy_infra", lambda *a, **k: None)
 
     assert svc.load_snapshot("tmp", serial="emu-1") is True
 
