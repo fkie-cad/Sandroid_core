@@ -1265,7 +1265,9 @@ def test_mitmproxy_stops_the_net_source_after_mitmweb_is_gone(monkeypatch):
 
 
 def test_interval_screenshot_feature_is_gone():
-    src = Path(__file__).resolve().parents[2] / "src"
+    # The package only: an editable install's stale ``*.egg-info`` under src/
+    # still lists the deleted file.
+    src = Path(__file__).resolve().parents[2] / "src" / "sandroid"
     out = subprocess.run(
         [
             "grep",
