@@ -125,6 +125,7 @@ class FakeHelper:
         self.node_gate: threading.Event | None = None  # node_at blocks on it
         self.node_returned = 0
         self.node_calls: list[tuple] = []
+        self.cached_calls: list[tuple] = []
         self.shots: list[ShotResult] = []
         self.hashes: list[str] = []
         self.shot_calls = 0
@@ -157,7 +158,11 @@ class FakeHelper:
         self.stopped = True
         self.on_status("stopped", {**self._info(), "a11y_restored": True})
 
-    def node_at(self, x, y, *, t_mono_ms=None, timeout=1.0):
+    def node_at(self, x, y, *, t_mono_ms=None, timeout=1.0, mode="both"):
+        if mode == "cached":  # the snapshot alone: answered at once
+            self.cached_calls.append((x, y, t_mono_ms))
+            cached = (self.node_reply or {}).get("cached")
+            return {"type": "node_at", "cached": cached} if cached else None
         self.node_calls.append((x, y, t_mono_ms))
         if self.node_gate is not None:
             self.node_gate.wait(10.0)
@@ -466,9 +471,11 @@ def test_input_line_is_written_when_node_at_times_out(env, cfg):
         finally:
             gate.set()
     tap = of(lines, "input", "tap")[0]
-    assert tap["data"]["target"] is None
+    # the late live hit test costs nothing the snapshot saw at finger-down
     assert tap["data"]["node_timeout"] is True
-    assert tap["summary"].startswith("tap at ")
+    assert tap["data"]["target"]["source"] == "cached"
+    assert tap["summary"] == "tap 'Accept all' (Button)"
+    assert helpers[0].cached_calls[0][2] == 10000.0  # at the finger-down
 
 
 def test_confirm_line_refers_to_the_input(env, cfg):
@@ -3714,10 +3721,18 @@ def test_a_field_that_reports_its_text_is_never_read_back(env, cfg):
         assert wait_for(lambda: len(of(lines, "input", "tap")) == 3)
         h.on_event(_text_ev(2400.0, "hi", rid="com.x:id/q"), time.time())
         assert wait_for(lambda: of(lines, "input", "text"))
+        # a pause longer than READBACK_TEXT_GRACE_S, then a keyboard key
+        # that changes no text (Shift, ?123, Go): its read-back reads "hi"
+        svc._last_text_host -= 5.0
+        ge.feed(*tap_lines(5.0))
+        assert wait_for(lambda: len(of(lines, "input", "tap")) == 4)
         svc.tick(time.time() + 10)  # any read-back would be due now
         svc._rb_lane.drain(2.0)
+        svc.tick(time.time() + 20)
+        svc._rb_lane.drain(2.0)
+    assert h.focus_calls  # it was read ...
     texts = of(lines, "input", "text")
-    assert [t["data"]["via"] for t in texts] == ["a11y"]
+    assert [t["data"]["via"] for t in texts] == ["a11y"]  # ... and not written
 
 
 def test_enter_writes_the_read_back_line_before_its_key_line(env, cfg):
@@ -3927,3 +3942,152 @@ def test_the_keyboard_taking_focus_keeps_the_field_and_its_text(env, cfg):
     texts = of(lines, "input", "text")
     assert len(texts) == 1
     assert texts[0]["data"]["text"] == "hi"
+
+
+# --------------------------------------------------------------------------
+# review findings (2026-11-20)
+# --------------------------------------------------------------------------
+
+
+def test_input_type_words_follow_android():
+    assert ts._input_word(0x01) == "text"
+    assert ts._input_word(0xA1) == "text"  # WEB_EDIT_TEXT
+    assert ts._input_word(0xB1) == "filter"
+    assert ts._input_word(0xC1) == "text"  # PHONETIC
+    assert ts._input_word(0xD1) == "email"
+    assert ts._input_word(0xE1) == "password"
+    assert ts._input_word(0x12) == "password"  # NUMBER_VARIATION_PASSWORD
+    assert ts._input_word(0x03) == "phone"
+
+
+def test_a_text_mark_holds_no_text_while_capture_text_is_off(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    cfg.mark_screenshots = True
+    cfg.capture_text = False
+    cfg.shot_before_tap = False
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.node_reply = URL_REPLY
+        ge.feed(*tap_lines(1.0))
+        h.focus_reply = _focus("secret-typed")
+        ge.feed(*_key(2.0, 30), *_key(2.5, 28))
+        assert wait_for(lambda: len(svc._marks) == 2)
+    assert "text" not in of(lines, "input", "text")[0]["data"]
+    mark = svc._screen_mark({"ev_dev": 2.6, "t_evt": time.time()})
+    assert mark["kind"] == "text"
+    assert not mark["text"]
+
+
+@pytest.mark.parametrize("shape", [{"password": True}, {"sensitive": True}])
+def test_a_sensitive_field_marks_its_shot_sensitive_and_draws_no_text(env, cfg, shape):
+    """Password (or data-sensitive) typing, Go, then the focus moves on
+    (``_pw_focus`` is off again by the time the screen-change shot is
+    stored): the shot line is still sensitive and its marked copy shows the
+    field's box only.
+    """
+    svc, popen, _run, helpers, tmp = env
+    cfg.mark_screenshots = True
+    cfg.shot_before_tap = False
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        ev = _text_ev(1500.0, "hunter22", **shape)
+        ev["src"]["bounds"] = [100, 1000, 900, 1150]
+        h.on_event(ev, time.time())
+        ge.feed(*_key(2.0, 28))  # Go
+        assert wait_for(lambda: of(lines, "input", "key"))
+        h.on_event({"type": "ev", "ev": "FOCUSED", "pkg": "com.x",
+                    "src": {"rid": "com.x:id/next"}}, time.time())  # fmt: skip
+        assert svc._pw_focus is False
+        assert wait_for(lambda: len(svc._marks) == 1)
+        mark = svc._screen_mark({"ev_dev": 2.6, "t_evt": time.time()})
+        assert mark["sensitive"] is True
+        assert mark["text"] == ""
+        svc._store("screen_change", _real_png(1080, 2424), of=1, via="helper",
+                   w=1080, h=2424, cap_ms=1.0, dev_mono=None, t=None,
+                   mark=mark)  # fmt: skip
+    shot = of(lines, "shot", "screen_change")[0]
+    assert shot["sensitive"] is True
+    assert shot["data"]["marked"]["path"].endswith("_screen_change_marked.png")
+    assert "marked" not in timeline.mask(shot)["data"]  # only its key name
+
+
+def test_stop_reads_the_watched_field_before_the_helper_goes(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.node_reply = URL_REPLY
+        ge.feed(*tap_lines(1.0))
+        assert wait_for(lambda: of(lines, "input", "tap"))
+        h.focus_reply = _focus("a")
+        svc._tick_stop.set()  # no 300 ms read: only the stop reads it
+        ge.feed(*_key(2.0, 30))
+        assert wait_for(lambda: svc._rb is not None and svc._rb["keys"] == 1)
+        assert not h.focus_calls
+        svc.stop()
+    texts = of(lines, "input", "text")
+    assert [t["summary"] for t in texts] == ['typed "a" into the address bar']
+    stop = of(lines, "tracking", "stop")[0]
+    assert texts[0]["seq"] < stop["seq"]
+
+
+def test_a_moved_compose_field_without_id_is_still_read_back(env, cfg):
+    """A rid-less (Compose) field the keyboard panned 100 px up: same class,
+    overlapping columns; its hint differs (or is gone) once focused.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    cfg.text_idle_ms = 400
+    field = {**URL_BAR, "rid": None, "text": "", "pkg": "com.x"}
+    reply = {"type": "node_at", "cached": {"window": {"id": 5, "type": "app"},
+             "pkg": "com.x", "hit": field, "target": field, "path": ["x"]}}  # fmt: skip
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.node_reply = reply
+        ge.feed(*tap_lines(1.0))
+        assert wait_for(lambda: of(lines, "input", "tap"))
+        h.node_reply = IME_REPLY
+        h.focus_reply = _focus("hello", rid=None, hint=None, pkg="com.x",
+                               bounds=[211, 42, 691, 189])  # fmt: skip
+        for i in range(3):
+            ge.feed(*tap_lines(2.0 + i * 0.2))
+        assert wait_for(lambda: of(lines, "input", "text"))
+    line = of(lines, "input", "text")[0]
+    assert line["summary"].startswith('typed "hello" into ')
+    assert line["data"]["via"] == "readback"
+
+
+def test_a_weak_read_never_replaces_a_good_value_with_less():
+    pizza = {"rid": "com.x:id/q", "cls": "android.widget.EditText"}
+    other = {"rid": "com.x:id/other", "cls": "android.widget.EditText"}
+    good = ("pizza", pizza, 5)
+    pick = ts.TrackingService._rb_pick
+    assert pick(good, ("", pizza, 6)) is good  # emptied after Search
+    assert pick(good, ("x", other, 6)) is good  # another field at the point
+    assert pick(good, ("pizzas", pizza, 6))[0] == "pizzas"  # kept its text
+    assert pick(None, ("", pizza, 1))[0] == ""
+
+
+def test_a_flush_in_flight_writes_its_line_when_a_new_field_is_armed(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        g = ts.Gesture(dev="-", t_down=1.0, line_a=1, t_up=1.05)
+        svc._rb_arm(URL_BAR, URL_REPLY["cached"], g)
+        first = svc._rb
+        svc._rb_key(ts.Gesture(dev="-", t_down=2.0, line_a=2, t_up=2.05))
+        node = _focus("audi.de")["input"]
+        first["good"] = ("audi.de", node, 1)
+        first["read_keys"] = 1
+        other = {**URL_BAR, "rid": "com.x:id/q", "text": ""}
+        svc._rb_arm(other, URL_REPLY["cached"], g)  # the tap that ended it
+        assert svc._rb is not first
+        svc._rb_flush(first)
+        svc._rb_flush(first)  # once only
+    texts = of(lines, "input", "text")
+    assert [t["summary"] for t in texts] == ['typed "audi.de" into the address bar']
+    assert svc._rb is not None  # the new watch is untouched

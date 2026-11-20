@@ -622,6 +622,7 @@ class UiHelper:
         *,
         t_mono_ms: float | None = None,
         timeout: float = 1.0,
+        mode: str = "both",
     ) -> dict | None:
         """Element under (x, y), resolved both live and from the snapshot cache.
 
@@ -631,14 +632,18 @@ class UiHelper:
             t_mono_ms: Device-monotonic instant to resolve the cached answer at
                 (e.g. the finger-down time); defaults to now.
             timeout: Seconds to wait for the reply.
+            mode: ``both``, ``cached`` (the snapshot only: answered at once,
+                no IPC) or ``live``.
 
         Returns:
-            The ``node_at`` reply (keys ``cached`` and ``live``), or None
+            The ``node_at`` reply (keys ``cached`` and/or ``live``), or None
             (INVISIBLE mode, error or timeout).
         """
         if self._mode is Mode.INVISIBLE:
             return None
-        cmd = f"node_at {int(x)} {int(y)} both"
+        if mode not in ("both", "cached", "live"):
+            raise ValueError(f"node_at mode: {mode}")
+        cmd = f"node_at {int(x)} {int(y)} {mode}"
         if t_mono_ms is not None:
             cmd += f" t={float(t_mono_ms):.1f}"
         return self._ok(self.request(cmd, timeout), "node_at")

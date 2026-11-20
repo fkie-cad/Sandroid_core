@@ -852,6 +852,39 @@ def _short_url(url: str) -> str:
     return _clip(text.rstrip("/"), 60)
 
 
+def _field_key(node: dict | None) -> str | None:
+    """One field across reads: its id, else its class and bounds."""
+    if not node:
+        return None
+    if node.get("rid"):
+        return str(node["rid"])
+    return f"{node.get('cls')}|{node.get('bounds')}"
+
+
+def _moved_field(a: dict, b: dict) -> bool:
+    """``b`` is plausibly field ``a`` moved (keyboard pan, wrapping): no ids,
+    and the same class with the same hint / label, or boxes that overlap
+    horizontally and are at most 300 px apart vertically.
+    """
+    if a.get("rid") or b.get("rid"):
+        return False
+    if a.get("cls") != b.get("cls"):
+        return False
+
+    def name(n: dict) -> str | None:
+        web = n.get("web") if isinstance(n.get("web"), dict) else {}
+        return n.get("hint") or web.get("label")
+
+    if name(a) and name(a) == name(b):
+        return True
+    ab, bb = a.get("bounds"), b.get("bounds")
+    if not (isinstance(ab, list) and isinstance(bb, list) and len(ab) == len(bb) == 4):
+        return False
+    overlap_x = min(ab[2], bb[2]) > max(ab[0], bb[0])
+    gap_y = max(0, max(ab[1], bb[1]) - min(ab[3], bb[3]))
+    return overlap_x and gap_y <= 300
+
+
 def _address_bar(node: dict) -> bool:
     """``node`` is a browser's address bar (Chrome, Firefox)."""
     rid = str(node.get("rid") or "")
@@ -1381,6 +1414,9 @@ class TrackingService:
         #: when the last TEXT_CHANGED came (host epoch).
         self._rb: dict | None = None
         self._last_text_host = 0.0
+        #: The last text each field reported or a line wrote (``_field_key``):
+        #: a read-back of the same text is no new typing.
+        self._known: dict[str, str] = {}
         #: Packages of the input method (keyboard): its windows are no
         #: screen change of the field being typed into.
         self._ime_pkgs: set[str] = set()
@@ -1627,6 +1663,7 @@ class TrackingService:
             self._text = None
             self._rb = None
             self._last_text_host = 0.0
+            self._known = {}
             self._marks.clear()
             self._last_screen = None
             self._activities = []
@@ -1699,7 +1736,8 @@ class TrackingService:
             unsub()
         self._order_lane.drain(1.5)
         self._flush_text()
-        self._rb_trigger(flush=True, wait=True)
+        # the helper is detached already: the last read-back reads with it
+        self._rb_trigger(flush=True, wait=True, helper=helper)
         self._unsubscribe_bell()
         if logcat is not None:
             with contextlib.suppress(Exception):
@@ -2071,7 +2109,7 @@ class TrackingService:
                 reply = pending.node.result(timeout=NODE_WAIT_S)
                 data["node_ms"] = round((time.monotonic() - pending.t0) * 1000.0, 1)
             except FutureTimeout:
-                reply = None
+                reply = self._node_cached(g, x, y)
                 data["node_timeout"] = True
             except Exception:
                 reply = None
@@ -2160,6 +2198,23 @@ class TrackingService:
             self._shot_lane.submit(
                 self._after_tap, gen, seq, kind, before, t_up, sensitive, mark
             )
+
+    def _node_cached(self, g: Gesture, x: Any, y: Any) -> dict | None:
+        """The snapshot's answer at finger-down, asked on its own (answered
+        without IPC) when the full answer is late: a slow live hit test (a
+        web retry, a busy app) must not cost the element the snapshot saw.
+        """
+        helper = self._helper_up()
+        if helper is None or x is None or y is None:
+            return None
+        try:
+            reply = helper.node_at(
+                x, y, t_mono_ms=round(g.t_down * 1000.0, 1), mode="cached",
+                timeout=NODE_WAIT_S,
+            )  # fmt: skip
+        except Exception:
+            return None
+        return reply if isinstance(reply, dict) else None
 
     @staticmethod
     def _path(g: Gesture, geo: Geometry) -> list[list[float]]:
@@ -2477,7 +2532,12 @@ class TrackingService:
         with self._lock:
             # The field reports itself: no read-back of it.
             self._last_text_host = host_recv
+            if self._rb is not None:
+                self._rb["cancelled"] = True
             self._rb = None
+            fk = _field_key(src)
+            if fk is not None:
+                self._known[fk] = d.get("text") or ""
             cur = self._text
             if cur is not None and cur["key"] != key:
                 flush, cur = cur, None
@@ -2598,21 +2658,35 @@ class TrackingService:
         )
         with self._lock:
             self._inputs += 1
-        self._note_text_mark(seq, cur, node, text)
+            fk = _field_key(node)
+            if fk is not None:
+                self._known[fk] = text
+        self._note_text_mark(seq, cur, node, text, sensitive)
 
     def _note_text_mark(
-        self, seq: int | None, cur: dict, node: dict, text: str
+        self,
+        seq: int | None,
+        cur: dict,
+        node: dict,
+        text: str,
+        sensitive: bool = False,
     ) -> None:
         """Remember typing for the screenshot markers (``mark_screenshots``):
         a screen change it caused shows the field and the typed text.
+
+        The image cannot be masked: a sensitive field (password, data
+        sensitive) gets the box only and makes its shot line sensitive
+        (``mark["sensitive"]``); with ``capture_text`` off no text at all.
         """
-        if seq is None or not _config().mark_screenshots or not node.get("bounds"):
+        cfg = _config()
+        if seq is None or not cfg.mark_screenshots or not node.get("bounds"):
             return
         mark = {
             "kind": "text",
             "screen": list(self.geometry.screen),
             "bounds": node.get("bounds"),
-            "text": text,
+            "text": text if cfg.capture_text and not sensitive else "",
+            "sensitive": bool(sensitive),
         }
         t = float(cur.get("last_ms") or cur.get("first_ms") or 0.0) / 1000.0
         with self._lock:
@@ -2700,12 +2774,14 @@ class TrackingService:
             return None
         return rb
 
-    def _rb_read(self, rb: dict) -> None:
-        """Read lane: ask the helper for the field's value now."""
-        helper = self._helper_up()
+    def _rb_read(self, rb: dict, helper: Any = None) -> None:
+        """Read lane: ask the helper for the field's value now (``helper``:
+        the one a stop detached already).
+        """
+        helper = helper if helper is not None else self._helper_up()
         fn = getattr(helper, "focus", None) if helper is not None else None
         with self._lock:
-            if self._rb is not rb or not callable(fn):
+            if rb.get("cancelled") or rb.get("done") or not callable(fn):
                 return
             keys = rb["keys"]
         x, y = rb["xy"] or (None, None)
@@ -2717,7 +2793,7 @@ class TrackingService:
             return
         node, good = self._rb_node(reply, rb)
         with self._lock:
-            if self._rb is not rb:
+            if rb.get("cancelled") or rb.get("done"):
                 return
             rb["read_keys"] = max(rb["read_keys"], keys)
             if node is None:
@@ -2741,6 +2817,7 @@ class TrackingService:
                 (inp.get("rid") and inp.get("rid") == armed.get("rid"))
                 or (inp.get("bounds") and inp.get("bounds") == armed.get("bounds"))
                 or (_address_bar(inp) and _address_bar(armed))
+                or _moved_field(armed, inp)  # a Compose field the keyboard moved
             )
             if same:
                 return inp, True
@@ -2751,33 +2828,40 @@ class TrackingService:
             return inp, True
         return None, False
 
-    def _rb_flush(self, rb: dict | None = None, *, read: bool = True) -> None:
+    def _rb_flush(
+        self, rb: dict | None = None, *, read: bool = True, helper: Any = None
+    ) -> None:
         """Read lane: read once more when keystrokes are not covered yet,
         then write the read-back line (``data.via = "readback"``).
+
+        A flush writes its own field's line even when a tap meanwhile armed
+        a new watch; only a TEXT_CHANGED of the field (``cancelled``) or an
+        earlier flush (``done``) stops it.
         """
         with self._lock:
             rb = rb or self._rb
-            if rb is None or rb is not self._rb or not rb["keys"]:
+            if rb is None or rb.get("cancelled") or rb.get("done") or not rb["keys"]:
                 return
             need = rb["keys"] > rb["read_keys"]
         if need and read:
-            self._rb_read(rb)
+            self._rb_read(rb, helper)
         with self._lock:
-            if self._rb is not rb:
+            if rb.get("cancelled") or rb.get("done"):
                 return
-            self._rb = None
+            rb["done"] = True
+            if self._rb is rb:
+                self._rb = None
             reported = self._last_text_host >= rb["armed_host"] - 0.05
-        good, weak = rb.get("good"), rb.get("weak")
-        pick = good
-        if weak is not None and (
-            good is None or (weak[2] > good[2] and not _address_bar(weak[1]))
-        ):
-            pick = weak  # the field kept its text after losing the focus
+        pick = self._rb_pick(rb.get("good"), rb.get("weak"))
         if pick is None or reported:
             return
         value, node, _keys = pick
         if rb["initial"] is not None and value == rb["initial"]:
             return  # nothing changed
+        with self._lock:
+            known = self._known.get(_field_key(node) or "")
+        if rb["node"] is None and known is not None and value == known:
+            return  # what the field reported (or a line wrote) already
         cur = {
             "key": None,
             "first_ms": rb["first_ms"] or 0.0,
@@ -2794,7 +2878,28 @@ class TrackingService:
         }
         self._emit_text(cur)
 
-    def _rb_trigger(self, *, flush: bool, wait: bool = False) -> None:
+    @staticmethod
+    def _rb_pick(good: tuple | None, weak: tuple | None) -> tuple | None:
+        """The read to write: the latest good one (the focused field). A
+        weak one (re-read at the tapped point) only when there is no good
+        one, or when it covers more keystrokes, is not empty, is the same
+        field and not an address bar (which shows the loaded page's URL
+        once the typing is sent).
+        """
+        if weak is None:
+            return good
+        if good is None:
+            return weak
+        g_val, g_node, g_keys = good
+        w_val, w_node, w_keys = weak
+        same = _field_key(g_node) == _field_key(w_node) or _moved_field(g_node, w_node)
+        if w_keys > g_keys and w_val and same and not _address_bar(w_node):
+            return weak  # the field kept its text after losing the focus
+        return good
+
+    def _rb_trigger(
+        self, *, flush: bool, wait: bool = False, helper: Any = None
+    ) -> None:
         """Queue a read (``flush``: and the line) of the watched field;
         ``wait``: until it is done (order lane: before the next input line).
         """
@@ -2802,7 +2907,10 @@ class TrackingService:
             rb = self._rb
             if rb is None or not rb["keys"]:
                 return
-        fut = self._rb_lane.submit(self._rb_flush if flush else self._rb_read, rb)
+        if flush:
+            fut = self._rb_lane.submit(self._rb_flush, rb, helper=helper)
+        else:
+            fut = self._rb_lane.submit(self._rb_read, rb, helper)
         if wait:
             with contextlib.suppress(Exception):
                 fut.result(timeout=READBACK_TIMEOUT_S + 0.5)
@@ -3569,6 +3677,8 @@ class TrackingService:
         its sha256 in ``ref``, stay the evidence.
         """
         sensitive = sensitive or self._pw_focus
+        if mark is not None and mark.get("sensitive") and _config().mark_screenshots:
+            sensitive = True  # its marked copy shows a sensitive field
         data: dict[str, Any] = {
             "trigger": trigger,
             "w": w,
