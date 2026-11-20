@@ -501,9 +501,28 @@ def sim_values(profile: Profile) -> SimValues | None:
     )
 
 
-def _active_sim() -> tuple[str, SimValues] | None:
-    """The active profile's id and SIM values; ``None`` when identity mode
-    is off, the profile is unusable, or it has no native SIM value.
+def _no_sim_reason(profile: Profile) -> str:
+    """Why :func:`sim_values` gives ``None`` for ``profile`` (best effort)."""
+    from sandroid.services import identity as ident
+
+    if any(i.severity == "error" for i in ident.validate(profile)):
+        return PROFILE_INVALID
+    wanted = {
+        vs.kind
+        for vs in profile.values.values()
+        if vs.enabled and vs.kind in SIM_KINDS and vs.effective_provider == "native"
+    }
+    if "imsi" in wanted and "sim_mccmnc" not in wanted:
+        return MNC_UNKNOWN
+    return NO_SIM_VALUE
+
+
+def _active_sim() -> tuple[str, SimValues | None, str] | None:
+    """The active profile: ``(id, SIM values, why none)``.
+
+    ``None`` when identity mode is off. Otherwise the SIM values are
+    ``None`` when the profile is unusable or sets no SIM at launch, with
+    the reason as third item (``""`` when there are values).
     """
     from sandroid.services.identity import ProfileError, get_identity_service
 
@@ -515,9 +534,11 @@ def _active_sim() -> tuple[str, SimValues] | None:
         profile = service.load(cfg.profile)
     except ProfileError as exc:
         logger.warning(f"identity SIM: active profile unusable: {exc}")
-        return None
+        return (cfg.profile, None, f"{PROFILE_UNUSABLE}: {exc}")
     values = sim_values(profile)
-    return (profile.id, values) if values is not None else None
+    if values is None:
+        return (profile.id, None, _no_sim_reason(profile))
+    return (profile.id, values, "")
 
 
 def active_sim_values() -> SimValues | None:
@@ -811,9 +832,10 @@ def pre_launch(context: LaunchContext) -> tuple[str, ...]:
     logged). Raises only when the private directory cannot be written (the
     launch then fails closed).
 
-    Whenever identity mode is on with SIM values, the launch record gets
+    Whenever identity mode is on, the launch record gets
     ``hooks.identity_sim``: ``{"profile", "values", "sysdir"}`` when the
-    emulator starts with them, else ``{"profile", "skipped": <reason>}``.
+    emulator starts with the profile's SIM, else ``{"profile", "skipped":
+    <reason>}`` (nothing only when the identity settings cannot be read).
     """
     try:
         found = _active_sim()
@@ -827,7 +849,10 @@ def pre_launch(context: LaunchContext) -> tuple[str, ...]:
         return ()
     if found is None:
         return ()
-    profile_id, values = found
+    profile_id, values, why = found
+    if values is None:
+        _note(context, profile_id, skipped=why)
+        return ()
     if has_sysdir(tuple(context.options.extra_args)):
         logger.warning(
             "identity SIM: AVD %r is launched with its own -sysdir; the SIM "
@@ -923,7 +948,9 @@ MNC_UNKNOWN = (
 )
 MODE_OFF = "identity mode is off"
 NO_IMAGE = "the AVD has no system image directory"
-ALREADY_RUNNING = "another instance of the AVD runs with a different SIM"
+ALREADY_RUNNING = "another instance of the AVD runs without this SIM"
+NO_SIM_VALUE = "the profile sets no SIM value at launch"
+PROFILE_UNUSABLE = "the profile cannot be loaded"
 NOT_ACTIVE = "this profile is not the active one"
 
 

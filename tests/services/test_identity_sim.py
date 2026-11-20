@@ -347,6 +347,13 @@ def _context(avd_dir: Path, *extra: str) -> emulator.LaunchContext:
     )
 
 
+class _Alive:
+    """A process stand-in that keeps running."""
+
+    def poll(self) -> None:
+        return None
+
+
 def _activate(profile_env) -> ident.Profile:
     profile = ident.get_identity_service().save(_profile())
     profile_env.mode, profile_env.profile = "profile", profile.id
@@ -400,7 +407,12 @@ def test_pre_launch_without_native_sim_values_or_image(avd, profile_env, image):
     for kind in sim.SIM_KINDS:
         profile.values[kind].enabled = False
     ident.get_identity_service().save(profile)
-    assert sim.pre_launch(_context(avd)) == ()
+    context = _context(avd)
+    assert sim.pre_launch(context) == ()
+    assert context.record[sim.RECORD_KEY] == {
+        "profile": profile.id,
+        "skipped": sim.NO_SIM_VALUE,
+    }
     for kind in sim.SIM_KINDS:
         profile.values[kind].enabled = True
     ident.get_identity_service().save(profile)
@@ -420,6 +432,25 @@ def test_launch_runs_the_hooks_and_appends_the_sysdir(avd, profile_env, monkeypa
     context = emulator._launch_context("Dev1", 5580, emulator.AvdLaunchOptions())
     args = emulator._run_pre_launch_hooks(context)
     assert args[0] == "-sysdir"
+    # Registered like a live launch: the record carries the hook's note,
+    # and the running emulator's launch token is the launch id.
+    launch = emulator.EmulatorLaunch(
+        avd="Dev1",
+        serial="emulator-5580",
+        port=5580,
+        options=context.options,
+        process=_Alive(),
+        log_path=None,
+        started_at=0.0,
+        context=context,
+        hook_args=args,
+    )
+    monkeypatch.setitem(emulator._LAUNCHES, "emulator-5580", launch)
+    record = emulator.launch_record("emulator-5580")
+    assert record["hooks"][sim.RECORD_KEY]["sysdir"] == args[1]
+    found = sim.running_emulator("emulator-5580", "Dev1")
+    assert found.token == f"launch:{launch.launch_id}"
+    assert not found.own_sysdir  # the hook's -sysdir is ours, not the user's
     emulator._run_post_stop_hooks(context)
     assert not Path(args[1]).exists()
     sim.uninstall_launch_hooks()
@@ -473,21 +504,29 @@ def test_a_host_without_symlinks_launches_without_the_sim(
         raise OSError(1, "A required privilege is not held by the client")
 
     monkeypatch.setattr(sim.os, "symlink", no_links)
-    assert sim.pre_launch(_context(avd)) == ()
+    context = _context(avd)
+    assert sim.pre_launch(context) == ()
+    assert context.record[sim.RECORD_KEY]["skipped"]  # says why
+    assert "values" not in context.record[sim.RECORD_KEY]
     assert [p.name for p in sim.sysdir_path("Dev1").parent.iterdir()] == []
 
 
 def test_a_running_instance_keeps_its_sysdir(avd, profile_env, monkeypatch):
     _activate(profile_env)
     monkeypatch.setattr(emulator, "avd_lock_files", lambda name: [Path("x.lock")])
-    assert sim.pre_launch(_context(avd)) == ()  # nothing to reuse: no rebuild
+    context = _context(avd)
+    assert sim.pre_launch(context) == ()  # nothing to reuse: no rebuild
     assert not sim.sysdir_path("Dev1").exists()
+    assert context.record[sim.RECORD_KEY]["skipped"] == sim.ALREADY_RUNNING
     monkeypatch.setattr(emulator, "avd_lock_files", lambda name: [])
     args = sim.pre_launch(_context(avd))
     stamp = (Path(args[1]) / "data").stat().st_ino
     monkeypatch.setattr(emulator, "avd_lock_files", lambda name: [Path("x.lock")])
-    assert sim.pre_launch(_context(avd)) == args  # the matching one, reused
+    context = _context(avd)
+    assert sim.pre_launch(context) == args  # the matching one, reused
     assert (Path(args[1]) / "data").stat().st_ino == stamp
+    assert context.record[sim.RECORD_KEY]["sysdir"] == args[1]
+    assert context.record[sim.RECORD_KEY]["values"]
 
 
 def test_the_sysdir_argument_is_absolute(avd, profile_env, monkeypatch, tmp_path):
@@ -558,6 +597,35 @@ def test_running_emulator_uses_sandroids_launch_record(avd, monkeypatch):
     assert sim.running_emulator("emulator-5580").token == "launch:L2"  # noqa: S105
     record["options"] = {"extra_args": ["-sysdir=/mine"]}
     assert sim.running_emulator("emulator-5580").own_sysdir
+
+
+def test_running_emulator_falls_back_to_the_ini_time(avd, monkeypatch):
+    monkeypatch.setattr(emulator, "avd_dir", lambda name: avd)
+    (avd / "hardware-qemu.ini").write_text("x\n", encoding="utf-8")
+    os.utime(avd / "hardware-qemu.ini", ns=(1, 333))
+    monkeypatch.setattr(emulator, "launch_record", lambda serial: {"avd": "Dev1"})
+    assert sim.running_emulator("emulator-5580", "Dev1").token == "ini:333"  # noqa: S105
+
+    def broken(serial):
+        raise RuntimeError("registry gone")
+
+    monkeypatch.setattr(emulator, "launch_record", broken)
+    found = sim.running_emulator("emulator-5580", "Dev1")
+    assert found.token == "ini:333"  # noqa: S105
+    assert not found.own_sysdir
+
+
+def test_pre_launch_notes_why_the_profile_gives_no_sim(avd, profile_env):
+    profile = _activate(profile_env)
+    del profile.values["sim_mccmnc"]
+    profile.preset = ""
+    ident.get_identity_service().save(profile)
+    context = _context(avd)
+    assert sim.pre_launch(context) == ()
+    assert context.record[sim.RECORD_KEY] == {
+        "profile": profile.id,
+        "skipped": sim.MNC_UNKNOWN,
+    }
 
 
 def test_post_stop_keeps_the_sysdir_of_a_running_instance(
