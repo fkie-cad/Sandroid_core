@@ -152,8 +152,7 @@ _LENS_EXTRA_ROWS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
     "Timeline lens": [
         (
             "⏎",
-            "Inspect the selected line (Line / JSON / Ref / Chain); "
-            "on a folded row: open / close it",
+            "Inspect the line (Line/JSON/Ref/Chain); a folded row: open / close",
             ("enter",),
         ),
         (
@@ -161,12 +160,9 @@ _LENS_EXTRA_ROWS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
             "Move (up stops following the newest line; End = live)",
             ("up", "down"),
         ),
-        (
-            "Esc",
-            "Close the / filter, leave the type bar, clear the filter, "
-            "then show hidden types again",
-            ("escape",),
-        ),
+        # No raw key (as Network / Files): the lens handles Esc first, then
+        # the global Esc applies; no "overrides global" note to cut the row.
+        ("Esc", "Close / or the type bar; clear the filter; show hidden types", ()),
     ],
     "Timeline lens › t type bar": [
         ("Esc", "Back to the list", ("escape",)),
@@ -186,7 +182,7 @@ _LENS_EXTRA_ROWS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
 _ROW_TEXT: dict[tuple[str, str], str] = {
     ("Main screen", "L"): "Back to live (while reviewing a run)",
     ("Timeline lens", "slash"): (
-        "Filter: words, src: kind: actor: phase: run: world: pkg: level: (-src: hides)"
+        "Filter: text, src: kind: actor: phase: run: world: pkg: level: -src:"
     ),
     ("AI chat", "ctrl+x"): "Stop the turn and its agents",
     ("AI chat", "ctrl+l"): "New thread (not while a turn runs)",

@@ -244,3 +244,44 @@ async def test_log_scroll_keys_reach_the_log_on_the_main_screen() -> None:
         await until(pilot, lambda: log.scroll_y < 1)
         app.action_scroll_half_down()
         await until(pilot, lambda: log.scroll_y > 5)
+
+
+def test_hand_written_rows_fit_at_100_columns() -> None:
+    """At 100 columns a description-only row has 32 + 2 + 36 cells: the
+    Timeline rows were cut with "…" at 170 and 100 columns.
+    """
+    field = hs._NAME_W + 2 + 36
+    texts = [d for rows in hs._LENS_EXTRA_ROWS.values() for _k, d, _r in rows]
+    texts += list(hs._ROW_TEXT.values())
+    too_long = [t for t in texts if len(t) > field]
+    assert too_long == []
+    timeline = [d for _k, d, _r in hs._LENS_EXTRA_ROWS["Timeline lens"]]
+    assert any(t.startswith("Inspect the line") for t in timeline)
+    assert any(t.startswith("Close / or the type bar") for t in timeline)
+
+
+@pytest.mark.parametrize("size", [(170, 50), (100, 40)])
+async def test_timeline_help_rows_are_not_cut(size) -> None:
+    from rich.text import Text
+    from textual.widgets import OptionList
+
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.widgets.lens_shell import LENSES
+
+    spec = next(s for s in LENSES if s.id == "timeline")
+    app = SandroidTUI()
+    async with app.run_test(size=size) as pilot:
+        await boot(app, pilot)
+        await pilot.press(spec.key)
+        await settle(pilot)
+        await pilot.press("question_mark")
+        await until(pilot, lambda: type(app.screen).__name__ == "HelpScreen")
+        await settle(pilot)
+        options = app.screen.query_one("#kb-list", OptionList)
+        rows = [
+            Text.from_markup(str(options.get_option_at_index(i).prompt)).plain
+            for i in range(options.option_count)
+        ]
+        for head in ("Inspect the line", "Close / or the type bar", "Filter: text"):
+            row = next(r for r in rows if r.startswith(head))
+            assert "…" not in row, row
