@@ -164,9 +164,10 @@ List all APKs from the emulator with their hashes:
 
 Run the command-line analysis with the spotlight set to the given package
 (the package is protected from noise filtering). No scripted actions are
-performed on the device: each run is a forensic diff around the analysis
-window. Scripted device events (sensors, network toggles, battery, ...) will
-come as playbooks.
+performed on the device and there is no wait window: each run snapshots,
+diffs and moves on at once, so changes come only from what already runs on
+the device. Scripted device events (sensors, network toggles, battery, ...)
+will come as playbooks.
 
 ``--package``/``-p`` replaces ``--trigdroid``, which was removed together with
 the TrigDroid integration (it never worked inside Sandroid); ``--trigdroid``
@@ -182,7 +183,8 @@ Headless Mode
 
 Run analysis without the interactive UI. Malware and security modes need
 ``--package`` (security mode also accepts an APK path there) or ``--batch``;
-forensic mode needs no package.
+forensic mode needs no package. With ``--mode forensic``, ``-p PKG`` only
+keeps that package's changes from being filtered as noise.
 
 **Batch Processing**::
 
@@ -194,8 +196,8 @@ Process multiple packages from a JSON configuration file.
 **Analysis Mode**::
 
    sandroid --headless --mode forensic
-   sandroid --headless --mode malware
-   sandroid --headless --mode security
+   sandroid --headless --mode malware -p com.example.app
+   sandroid --headless --mode security -p com.example.app
    sandroid --headless --mode network
 
 Set the analysis mode for headless operation. Default is ``malware``.
