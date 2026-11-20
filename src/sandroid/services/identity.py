@@ -163,6 +163,14 @@ PROVIDER_WAITS_S = (1.0, 1.5, 2.0, 2.5, 3.0)
 PROVIDER_WAIT_DEADLINE_S = 20.0
 #: One light provider probe (lists only) gives up after this many seconds.
 PROVIDER_PROBE_TIMEOUT_S = 8.0
+#: The device read (P0/P6) is two adb calls: the values without the
+#: content-provider lists, then the lists. On a loaded host, just after a
+#: force-stop or a framework restart, the read can take minutes: the values
+#: get one more try before the device counts as not answering; lists that
+#: do not answer stay unread (pending, never inserted blind).
+PREFLIGHT_TIMEOUT_S = 90.0
+PREFLIGHT_RETRY_TIMEOUT_S = 90.0
+PREFLIGHT_LISTS_TIMEOUT_S = 60.0
 _OK = "sandroid-identity-ok"
 
 #: Framework restart: wait this long for a new system_server.
@@ -2589,10 +2597,17 @@ def _install_cmd(pkg: str) -> str:
 
 
 def preflight_script(
-    packages: Iterable[str], tokens: Iterable[str], numbers: Iterable[str] = ()
+    packages: Iterable[str],
+    tokens: Iterable[str],
+    numbers: Iterable[str] = (),
+    *,
+    lists: bool = True,
 ) -> str:
-    """The one batched read: every current value the pipeline compares
+    """The batched read: every current value the pipeline compares
     (``numbers``: the call-log numbers, found by number as well).
+
+    ``lists=False`` leaves the content-provider lists out (read with
+    :func:`lists_script`, which can hang while a provider starts).
     """
     tokens = [t for t in tokens if TOKEN_RE.fullmatch(t)]
     numbers = [n for n in numbers if _PHONE_RE.fullmatch(n)]
@@ -2651,7 +2666,7 @@ def preflight_script(
                 " | grep -m 1 -o 'signatures:\\[[0-9a-f, ]*\\]'; fi",
             ]
         lines.append(f"rm -f {px}")
-    if tokens:
+    if tokens and lists:
         for name, (uri, proj, col) in _LIST_QUERY.items():
             where = _where_like(col, tokens)
             if name == "calls" and numbers:
@@ -2754,6 +2769,9 @@ class DeviceState:
     #: Lists whose provider did not answer (no row, no "No result found."):
     #: not up yet, e.g. right after a framework restart.
     lists_unread: set[str] = field(default_factory=set)
+    #: The lists read got no answer at all (timed out): no provider probe
+    #: follows, the providers are not merely starting.
+    lists_no_answer: bool = False
     #: SIM values read with ``service call iphonesubinfo`` (``imsi``,
     #: ``iccid``, ``msisdn``; empty when the SIM has none).
     sim: dict[str, str] = field(default_factory=dict)
@@ -3920,11 +3938,50 @@ class IdentityService:
     def preflight(
         self, serial: str, packages: Iterable[str], profile: Profile
     ) -> DeviceState:
-        """P0: one adb call reading every current value."""
+        """P0: read every current value (two adb calls, see
+        :data:`PREFLIGHT_TIMEOUT_S`).
+
+        The values first (one more try when the device does not answer),
+        then the content-provider lists; lists without an answer are unread
+        (``lists_unread``), not a device that does not answer.
+        """
         tokens = [profile.token, *profile.retired_tokens]
-        script = preflight_script(packages, tokens, call_numbers(profile))
-        timeout = self._capped(120.0, floor=10.0)
-        return parse_preflight(serial, _Device(serial).shell(script, timeout=timeout))
+        numbers = call_numbers(profile)
+        dev = _Device(serial)
+        script = preflight_script(packages, tokens, numbers, lists=False)
+        state = parse_preflight(
+            serial,
+            dev.shell(script, timeout=self._capped(PREFLIGHT_TIMEOUT_S, floor=10.0)),
+        )
+        if not state.ok:
+            left = self._time_left()
+            if left is not None and left < 10.0:
+                return state
+            logger.info(f"identity: {serial} did not answer the read; trying again")
+            state = parse_preflight(
+                serial,
+                dev.shell(
+                    script,
+                    timeout=self._capped(PREFLIGHT_RETRY_TIMEOUT_S, floor=10.0),
+                ),
+            )
+            if not state.ok:
+                return state
+        names = [n for n in _LIST_QUERY if [t for t in tokens if TOKEN_RE.fullmatch(t)]]
+        if not names:
+            return state
+        out = dev.shell(
+            lists_script(tokens, numbers),
+            timeout=self._capped(PREFLIGHT_LISTS_TIMEOUT_S, floor=5.0),
+        )
+        part = parse_preflight(serial, out)
+        if part.ok:
+            state.lists, state.lists_unread = part.lists, part.lists_unread
+        else:
+            logger.info(f"identity: {serial}: the content providers did not answer")
+            state.lists, state.lists_unread = {}, set(names)
+            state.lists_no_answer = True
+        return state
 
     def plan(
         self,
@@ -4699,7 +4756,7 @@ class IdentityService:
         tokens = [profile.token, *profile.retired_tokens]
         script = lists_script(tokens, call_numbers(profile))
         for delay in PROVIDER_WAITS_S:
-            if not waiting(state, verified):
+            if state.lists_no_answer or not waiting(state, verified):
                 break
             if self._clock() + delay + 1.0 > deadline:
                 break

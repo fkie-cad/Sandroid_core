@@ -897,9 +897,11 @@ def test_service_is_registered_and_reset(env):
 # ---------------------------------------------------------------------------
 
 
-def test_preflight_is_one_adb_call(service, device):
+def test_preflight_is_two_adb_calls(service, device):
     plan = service.plan(SERIAL, "com.example.app")
-    assert len(device.calls) == 1
+    assert len(device.calls) == 2  # the values, then the lists
+    assert "@@list:" not in device.calls[0]
+    assert "@@props@@" not in device.calls[1]
     assert not device.writes
     assert plan.disruptive
     assert {"android_id", "gaid", "device_name", "contacts"} <= set(plan.todo)
@@ -983,7 +985,7 @@ def test_apply_seeds_everything_and_second_apply_writes_nothing(service, device)
     with timeline.capture() as lines2:
         again = service.apply(SERIAL, "com.example.app")
     assert device.writes == []
-    assert len(device.calls) == 1
+    assert len(device.calls) == 2  # one read (values, lists)
     assert not lines2
     assert again.infos["phone_number"].status == "pending"
 
@@ -1021,7 +1023,7 @@ def test_ensure_applied_applies_then_costs_one_read_and_no_writes(
     again = service.ensure_applied(SERIAL)
     assert again is not None
     assert device.writes == []
-    assert len(device.calls) == 1  # one preflight
+    assert len(device.calls) == 2  # one read (values, lists)
     assert again.infos["device_name"].status == "verified"
     assert service._time_left() is None  # the budget ends with the call
 
@@ -1879,9 +1881,10 @@ def test_provider_wait_is_bounded_on_an_overloaded_device(service, device):
         plan = service.apply(SERIAL, "com.example.app")
     finally:
         ident._send = real_send
-    assert len(probes) == 1  # stopped at the first unanswered probe
-    assert timeouts
-    assert max(timeouts) <= ident.PROVIDER_PROBE_TIMEOUT_S
+    # The verify read's lists got no answer at all: no probe follows it.
+    assert len(probes) == 1
+    # Lists reads before and after the restart, no provider probe.
+    assert timeouts == [ident.PREFLIGHT_LISTS_TIMEOUT_S] * 2
     assert now[0] - start <= ident.PROVIDER_WAIT_DEADLINE_S + 60  # + restart
     for script in probes:  # light: no packages.xml, settings or dumpsys
         assert "packages.xml" not in script
@@ -3397,3 +3400,60 @@ def test_applied_state_and_pre_start_follow_the_persona(
     assert service.applied_state(pkg) == "applied"
     assert service.pre_start(pkg) is None
     assert service.statuses()[0].fingerprint == ident.fingerprint(persona)
+
+
+# ---------------------------------------------------------------------------
+# a loaded device: the read in two parts, one more try for the values
+# ---------------------------------------------------------------------------
+
+
+def _hanging(device, *, values: int = 0, lists: bool = False) -> list[str]:
+    """The first ``values`` value reads and (``lists``) every lists read
+    get no answer (adb timed out). Returns the scripts that hung.
+    """
+    real = device._shell
+    hung: list[str] = []
+    left = [values]
+
+    def shell(script: str) -> str:
+        if "@@props@@" in script and left[0] > 0:
+            left[0] -= 1
+            hung.append(script)
+            return ""
+        if lists and "@@list:" in script and "@@props@@" not in script:
+            hung.append(script)
+            return ""
+        return real(script)
+
+    device._shell = shell
+    return hung
+
+
+def test_the_values_read_gets_one_more_try(service, device):
+    hung = _hanging(device, values=1)
+    state = service.preflight(SERIAL, ("com.example.app",), service.active_profile())
+    assert len(hung) == 1
+    assert state.ok
+    assert "com.example.app" in state.packages
+    assert not state.lists_unread
+
+
+def test_a_device_that_does_not_answer_twice_is_not_read_further(service, device):
+    _hanging(device, values=2)
+    state = service.preflight(SERIAL, ("com.example.app",), service.active_profile())
+    assert not state.ok
+    assert len(device.calls) == 2  # two values reads, no lists read
+    assert all("@@props@@" in c for c in device.calls)
+
+
+def test_hanging_providers_leave_the_lists_pending_not_the_apply_failed(
+    service, device, app_start
+):
+    _hanging(device, lists=True)
+    plan = service.pre_start("com.example.app")
+    plan.apply()  # does not raise: the Android ID and the rest verified
+    st = {i.id: (i.status, i.reason) for i in service.statuses()}
+    assert st["android_id"][0] == "verified"
+    assert st["device_name"][0] == "verified"
+    for name in ("contacts", "sms", "calls"):
+        assert st[name] == ("pending", ident.PROVIDER_DOWN)
