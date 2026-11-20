@@ -158,6 +158,12 @@ _OK = "sandroid-identity-ok"
 #: Framework restart: wait this long for a new system_server.
 RESTART_TIMEOUT_S = 180.0
 RESTART_POLL_S = 2.0
+#: ``ensure_applied``: start a framework window only with this much of the
+#: budget left (a restart usually takes 20 to 60 s; the wait is capped to
+#: what is left).
+ENSURE_WINDOW_MIN_S = 90.0
+#: Why a framework value stays pending when the budget ran out.
+OUT_OF_TIME = "skipped: device preparation ran out of time"
 
 _UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I
@@ -2539,6 +2545,9 @@ class IdentityService:
         self._hook_installed = False
         self._sleep: Callable[[float], None] = time.sleep
         self._clock: Callable[[], float] = time.monotonic
+        #: Per call (thread): the ``ensure_applied`` deadline (monotonic,
+        #: None outside it) and whether the device answered the preflight.
+        self._call = threading.local()
         #: Called with the serial and the old system_server PID once the
         #: framework is back after a restart window (default: Frida recovery
         #: through app_start, then the proxy check).
@@ -2895,7 +2904,8 @@ class IdentityService:
         """P0: one adb call reading every current value."""
         tokens = [profile.token, *profile.retired_tokens]
         script = preflight_script(packages, tokens, call_numbers(profile))
-        return parse_preflight(serial, _Device(serial).shell(script, timeout=120))
+        timeout = self._capped(120.0, floor=10.0)
+        return parse_preflight(serial, _Device(serial).shell(script, timeout=timeout))
 
     def plan(
         self, serial: str, package: str | None = None, profile: Profile | None = None
@@ -3373,6 +3383,7 @@ class IdentityService:
         dev = _Device(serial)
         pkgs = self._packages(serial, package)
         state = self.preflight(serial, pkgs, profile)
+        self._call.device_ok = state.ok
         if state.ok and state.marker:
             self._recover(dev, state)
             state = self.preflight(serial, pkgs, profile)
@@ -3424,6 +3435,14 @@ class IdentityService:
                 self._run_gms(dev, state, step, plan.infos[step.value_id])
         # P5: one framework restart window
         fw = [s for s in plan.steps if s.restart == "framework"]
+        left = self._time_left()
+        if fw and left is not None and left < ENSURE_WINDOW_MIN_S:
+            # ensure_applied: no window that would outlast the budget.
+            for step in fw:
+                info = plan.infos[step.value_id]
+                info.status, info.reason = "pending", OUT_OF_TIME
+                steps.pop(step.value_id, None)
+            fw = []
         if fw:
             self._framework_window(dev, profile, state, fw, plan)
         # P6: verify with the same batched read
@@ -3480,6 +3499,78 @@ class IdentityService:
         )
         self._finish(profile, plan, state2, wrote=True, package=package)
         return plan
+
+    def ensure_applied(
+        self, serial: str, budget_s: float = 240.0
+    ) -> IdentityPlan | None:
+        """Device preparation: apply the active profile within ``budget_s``.
+
+        For a worker thread when a device comes up (no dialog). Like
+        :meth:`apply` without a package, the framework restart following
+        ``identity.restart`` (``never``: not at all). Already applied, it
+        costs one preflight and writes nothing. The budget is a monotonic
+        deadline: the waits (providers, SIM, framework) end with it, and no
+        framework window starts with less than :data:`ENSURE_WINDOW_MIN_S`
+        left (those values stay pending, :data:`OUT_OF_TIME`).
+
+        Args:
+            serial: Device serial.
+            budget_s: Seconds the whole preparation may take.
+
+        Returns:
+            None at once when identity mode is off or no profile is set,
+            else the final plan (per-value results are its statuses).
+
+        Raises:
+            ProfileError: The profile cannot be loaded or is invalid.
+            IdentityApplyError: The device did not answer at all, or another
+                apply held the device past the budget.
+        """
+        cfg = self.config()
+        if cfg.mode != "profile" or not cfg.profile:
+            return None
+        profile = self._require_profile()
+        errors = [i for i in validate(profile) if i.severity == "error"]
+        if errors:
+            raise ProfileError(
+                f"profile {profile.id!r} is invalid: {errors[0].path}: "
+                f"{errors[0].message}"
+            )
+        deadline = self._clock() + max(0.0, budget_s)
+        if not self._apply_lock.acquire(timeout=max(0.0, budget_s)):
+            raise IdentityApplyError(
+                f"another identity apply on {serial} outlasted the budget"
+            )
+        self._call.deadline = deadline
+        self._call.device_ok = None
+        try:
+            plan = self._apply(serial, None, cfg.restart != "never", profile)
+            device_ok = self._call.device_ok
+        finally:
+            self._call.deadline = None
+            self._call.device_ok = None
+            self._apply_lock.release()
+        if device_ok is False:
+            raise IdentityApplyError(f"{serial} did not answer the identity read")
+        return plan
+
+    def _time_left(self) -> float | None:
+        """Seconds left of this call's ``ensure_applied`` budget (None: no
+        budget).
+        """
+        deadline = getattr(self._call, "deadline", None)
+        return None if deadline is None else deadline - self._clock()
+
+    def _deadline(self, seconds: float) -> float:
+        """``seconds`` from now, capped to the ``ensure_applied`` budget."""
+        end = self._clock() + seconds
+        budget = getattr(self._call, "deadline", None)
+        return end if budget is None else min(end, budget)
+
+    def _capped(self, seconds: float, *, floor: float) -> float:
+        """An adb timeout capped to the budget left (at least ``floor``)."""
+        left = self._time_left()
+        return seconds if left is None else max(floor, min(seconds, left))
 
     def _drop_uninstalled(
         self,
@@ -3543,7 +3634,7 @@ class IdentityService:
                     return True
             return False
 
-        deadline = self._clock() + PROVIDER_WAIT_DEADLINE_S
+        deadline = self._deadline(PROVIDER_WAIT_DEADLINE_S)
         tokens = [profile.token, *profile.retired_tokens]
         script = lists_script(tokens, call_numbers(profile))
         for delay in PROVIDER_WAITS_S:
@@ -3674,7 +3765,7 @@ class IdentityService:
                 for s in steps
                 if infos[s.value_id].kind == "sim_mccmnc" or state.sim_read
             ]
-            deadline = self._clock() + SIM_WAIT_DEADLINE_S
+            deadline = self._deadline(SIM_WAIT_DEADLINE_S)
             for delay in SIM_WAITS_S if readable and not err else ():
                 if self._clock() + delay + 1.0 > deadline:
                     break
@@ -3983,7 +4074,7 @@ class IdentityService:
 
     def _wait_framework(self, dev: _Device, old_pid: str) -> bool:
         """Wait for a new system_server and a working package manager."""
-        deadline = self._clock() + RESTART_TIMEOUT_S
+        deadline = self._deadline(RESTART_TIMEOUT_S)
         while self._clock() < deadline:
             out = dev.shell("pidof system_server; pm path android 2>/dev/null")
             lines = out.split()

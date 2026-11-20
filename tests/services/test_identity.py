@@ -973,6 +973,75 @@ def test_apply_seeds_everything_and_second_apply_writes_nothing(service, device)
     assert again.infos["phone_number"].status == "pending"
 
 
+def test_ensure_applied_is_nothing_with_identity_mode_off(service, device, monkeypatch):
+    from sandroid.config import get_config
+
+    monkeypatch.setattr(get_config().identity, "mode", "off")
+    assert service.ensure_applied(SERIAL) is None
+    assert device.calls == []
+    monkeypatch.setattr(get_config().identity, "mode", "profile")
+    monkeypatch.setattr(get_config().identity, "profile", "")
+    assert service.ensure_applied(SERIAL) is None
+    assert device.calls == []
+
+
+def test_ensure_applied_applies_then_costs_one_read_and_no_writes(service, device):
+    plan = service.ensure_applied(SERIAL)
+    assert plan is not None
+    # No app: the framework value is the locale (the Android ID waits for one).
+    assert plan.infos["locale"].status == "verified"
+    assert plan.infos["device_name"].status == "verified"
+    assert service.restarts_seen == [SERIAL]  # the framework window ran
+    device.calls.clear()
+    device.writes.clear()
+    again = service.ensure_applied(SERIAL)
+    assert again is not None
+    assert device.writes == []
+    assert len(device.calls) == 1  # one preflight
+    assert again.infos["device_name"].status == "verified"
+    assert service._time_left() is None  # the budget ends with the call
+
+
+def test_ensure_applied_starts_no_restart_the_budget_cannot_hold(service, device):
+    pid = device.pid
+    plan = service.ensure_applied(SERIAL, budget_s=ident.ENSURE_WINDOW_MIN_S - 1)
+    assert plan is not None
+    assert device.pid == pid  # the framework was never stopped
+    assert RESTART_MARKER not in device.fs
+    assert service.restarts_seen == []
+    info = plan.infos["locale"]
+    assert (info.status, info.reason) == ("pending", ident.OUT_OF_TIME)
+    # The live values are applied all the same.
+    assert plan.infos["device_name"].status == "verified"
+    # Not done: the next preparation with time to spare restarts.
+    again = service.ensure_applied(SERIAL)
+    assert again.infos["locale"].status == "verified"
+    assert service.restarts_seen == [SERIAL]
+
+
+def test_ensure_applied_caps_the_waits_to_the_budget(service, device):
+    now = [0.0]
+    service._clock = lambda: now[0]
+    service._sleep = lambda s: now.__setitem__(0, now[0] + s)
+    service._call.deadline = 5.0
+    try:
+        assert service._deadline(ident.RESTART_TIMEOUT_S) == 5.0
+        assert service._deadline(1.0) == 1.0
+        assert service._capped(120.0, floor=10.0) == 10.0
+    finally:
+        service._call.deadline = None
+    assert service._deadline(1.0) == 1.0
+    assert service._capped(120.0, floor=10.0) == 120.0
+
+
+def test_ensure_applied_raises_when_the_device_does_not_answer(
+    service, device, monkeypatch
+):
+    monkeypatch.setattr(ident, "_send", lambda *a, **kw: ("", "no device"))
+    with pytest.raises(ident.IdentityApplyError, match="did not answer"):
+        service.ensure_applied(SERIAL)
+
+
 def service_folder(applied_line: dict) -> Path:
     return timeline.timeline_folder() / applied_line["ref"]["path"]
 
