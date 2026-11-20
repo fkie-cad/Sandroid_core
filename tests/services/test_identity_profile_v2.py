@@ -449,7 +449,7 @@ def test_world_problems_come_from_the_world_module_as_warnings():
 
     for world in (
         {**GOOD_WORLD, "size": "huge"},
-        {**GOOD_WORLD, "emails": "reserved"},  # phase 2: not known yet
+        {**GOOD_WORLD, "emails": "bogus"},  # not a known e-mail level
         {**GOOD_WORLD, "device": {"make": "Google", "model": "Pixel 8"}},
         {**GOOD_WORLD, "places": {"home": {"town": "Berlin"}}},
     ):
