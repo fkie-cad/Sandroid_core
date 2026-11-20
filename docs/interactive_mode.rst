@@ -512,7 +512,14 @@ repeated (a cookie banner is gone once accepted):
      missed its own also diverges. A replay with a diverged step ends
      **diverged**, never "Done": the log, Review, the Sessions lens and
      ``run.json`` say so, and every result after it carries a note naming
-     the step.
+     the step. An element whose centre is not on the screen (a web page's
+     element can report a position far below it) or that reached beyond
+     the screen when you tapped it is not tapped by element: the recorded
+     position is, ``by position (element off-screen)``. A step that could
+     have been checked and was not (element not found or off-screen, field
+     not read back) is *unchecked*; the run then ends **done, N steps
+     unchecked**, a warning, not "Done". Swipes, keys and taps without a
+     recorded element have nothing to check and do not count.
    - **Rewind**: back to the start point and copy **Before**. The device stays
      at the start point.
 
