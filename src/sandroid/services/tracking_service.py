@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from sandroid.core.frames import (  # R1 metric, re-exported
     SAME_MAX_DIFF,
     frame_distance,
+    is_black_frame,
     same_screen,
 )
 
@@ -2226,7 +2227,9 @@ class TrackingService:
         if g.dropped:
             data["dropped"] = True  # events were lost: the end is a guess
         t_up = g.t_up if g.t_up is not None else g.t_down
-        before_res, data["before_shot"] = self._before_state(pending, cfg, t_up)
+        before_res, data["before_shot"], why = self._before_state(pending, cfg, t_up)
+        if why:
+            data["reason"] = why  # what became of the before-tap shot
         if kind == "gesture":
             data["pointers"] = g.pointers
         if kind == "swipe":
@@ -4096,36 +4099,44 @@ class TrackingService:
 
     def _before_state(
         self, pending: _Pending | None, cfg: Any, t_up: float | None
-    ) -> tuple[Any, str]:
-        """The input line's ``data.before_shot`` and the capture to store:
-        ``taken`` (stored, its shot line has ``ref.of`` = the input),
-        ``skipped`` (one was still in flight), ``late`` (captured after the
-        finger-up, or not back within :data:`BEFORE_TAP_WAIT_S` of it: the
-        helper was busy, e.g. with a screen-change sample; dropped, it could
-        show the screen after the tap), ``failed`` (the capture errored; a
-        ``failed`` shot line when the helper answered), ``no_helper`` (no
-        helper at finger-down) or ``off`` (``shot_before_tap`` off).
+    ) -> tuple[Any, str, str | None]:
+        """The input line's ``data.before_shot``, the capture to store and the
+        reason (``data.reason``, plain words) when it was not a clean capture:
+        ``taken`` (stored, its shot line has ``ref.of`` = the input; reason
+        "screen secure or black" for a black frame: a FLAG_SECURE window
+        comes out black), ``skipped`` (one was still in flight: "helper
+        busy"), ``late`` (not back within :data:`BEFORE_TAP_WAIT_S` of the
+        finger-up: "no frame in time"; or captured after the finger-up, the
+        helper was busy, e.g. with a screen-change sample: dropped, it could
+        show the screen after the tap), ``failed`` (the capture errored:
+        "device error: ..."; a ``failed`` shot line when the helper
+        answered), ``no_helper`` (no helper at finger-down) or ``off``
+        (``shot_before_tap`` off).
         """
         if pending is None:  # never seen at finger-down
-            return None, "no_helper" if cfg.shot_before_tap else "off"
+            return None, "no_helper" if cfg.shot_before_tap else "off", None
         if pending.shot_state is not None:
-            return None, pending.shot_state
+            why = "helper busy" if pending.shot_state == "skipped" else None
+            return None, pending.shot_state, why
         if pending.shot is None:
-            return None, "failed"
+            return None, "failed", "no capture was started"
         try:
             res = pending.shot.result(timeout=BEFORE_TAP_WAIT_S)
         except FutureTimeout:
-            return None, "late"
-        except Exception:
-            return None, "failed"
+            return None, "late", "no frame in time"
+        except Exception as exc:
+            return None, "failed", f"device error: {exc}"
         if res is None:
-            return None, "failed"
+            return None, "failed", "no frame from the helper"
         if self._late(res, t_up):
             logger.debug("Tracking: a before-tap shot was late, dropped")
-            return None, "late"
+            return None, "late", "helper busy, frame taken after the finger-up"
         if not getattr(res, "png", None):
-            return res, "failed"
-        return res, "taken"
+            err = getattr(res, "error", None)
+            return res, "failed", f"device error: {err}" if err else "no image"
+        if is_black_frame(res.png):
+            return res, "taken", "screen secure or black"
+        return res, "taken", None
 
     def _before_shot(
         self,

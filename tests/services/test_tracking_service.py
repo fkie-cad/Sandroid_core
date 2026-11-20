@@ -1751,6 +1751,101 @@ def test_before_shot_off_and_failed(env, cfg):
     assert [(x["ref"]["of"], x["level"]) for x in failed] == [(taps[2]["seq"], "warn")]
 
 
+def _png(color: tuple[int, int, int], *, bar: bool = False) -> bytes:
+    import io
+
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGB", (108, 242), color)
+    if bar:  # a status bar with icons over a black (secure) window
+        ImageDraw.Draw(im).rectangle((0, 0, 107, 10), fill=(200, 200, 200))
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_black_frame_check():
+    from sandroid.core.frames import is_black_frame
+
+    assert is_black_frame(_png((0, 0, 0)))
+    assert is_black_frame(_png((0, 0, 0), bar=True))
+    assert not is_black_frame(_png((18, 18, 18)))  # a dark theme is not black
+    assert not is_black_frame(_png((255, 255, 255)))
+    assert not is_black_frame(PNG_A)  # does not decode
+    assert not is_black_frame(None)
+
+
+def test_before_shot_reasons_in_plain_words(env, cfg, monkeypatch):
+    """``data.reason`` says why a before-tap shot is not a clean capture."""
+    svc, popen, _run, helpers, _tmp = env
+    monkeypatch.setattr(ts, "BEFORE_TAP_WAIT_S", 0.2)
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        n = 0
+
+        def tap(shot, t):
+            nonlocal n
+            h.shot = shot
+            ge.feed(*tap_lines(t))
+            n += 1
+            assert wait_for(lambda: len(of(lines, "input")) == n)
+
+        def broken(**kw):
+            raise OSError("helper socket closed")
+
+        def slow(**kw):
+            time.sleep(0.5)
+            return ShotResult(500.0, 1080, 2424, "h", 9.0, PNG_A, "/x")
+
+        def shot(png, err=None, t_ms=500.0):
+            return lambda **kw: ShotResult(t_ms, 1080, 2424, "h", 9.0, png, "/x", err)
+
+        tap(broken, 1.0)
+        tap(lambda **kw: None, 2.0)
+        tap(shot(None, "fetch timed out"), 3.0)
+        tap(shot(None), 4.0)
+        tap(slow, 5.0)
+        time.sleep(0.5)  # the slow capture is done
+        tap(shot(PNG_A, t_ms=6_500.0), 6.0)  # captured after the up at 6.08
+        tap(shot(_png((0, 0, 0), bar=True)), 7.0)
+        tap(shot(PNG_A), 8.0)
+        time.sleep(0.3)
+    got = [
+        (x["data"]["before_shot"], x["data"].get("reason"))
+        for x in of(lines, "input", "tap")
+    ]
+    assert got == [
+        ("failed", "device error: helper socket closed"),
+        ("failed", "no frame from the helper"),
+        ("failed", "device error: fetch timed out"),
+        ("failed", "no image"),
+        ("late", "no frame in time"),
+        ("late", "helper busy, frame taken after the finger-up"),
+        ("taken", "screen secure or black"),
+        ("taken", None),
+    ]
+
+
+def test_a_skipped_before_shot_says_helper_busy(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        gate = threading.Event()
+
+        def stuck(**kw):
+            gate.wait(5.0)
+            return ShotResult(500.0, 1080, 2424, "h", 9.0, PNG_A, "/x")
+
+        helpers[0].shot = stuck
+        ge.feed(*tap_lines(1.0))
+        ge.feed(*tap_lines(1.2))
+        assert wait_for(lambda: len(of(lines, "input")) == 2)
+        gate.set()
+    second = of(lines, "input", "tap")[1]["data"]
+    assert (second["before_shot"], second["reason"]) == ("skipped", "helper busy")
+
+
 #: Every shot's answer once the system server restarted under the helper.
 DEAD_SYSTEM = "DeadSystemRuntimeException: android.os.DeadSystemException"
 

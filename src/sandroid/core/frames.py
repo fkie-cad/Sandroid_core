@@ -100,6 +100,37 @@ def same_screen(png_a: bytes | None, png_b: bytes | None) -> bool:
     return d is not None and d <= SAME_MAX_DIFF
 
 
+#: A frame is black (a FLAG_SECURE window: screenshots show it black; or a
+#: screen that is off) when at least this share of its pixels ...
+BLACK_SHARE = 0.9
+#: ... are at most this grey level (0-255). Not 100 %: the status and
+#: navigation bars around a secure window can still be drawn.
+BLACK_LEVEL = 8
+#: Only PNGs up to this size are decoded: a black frame compresses to a few
+#: KB, a real screen is far larger (the check costs nothing for those).
+BLACK_MAX_BYTES = 200_000
+
+
+def is_black_frame(png: bytes | None) -> bool:
+    """The screenshot is (nearly) all black: :data:`BLACK_SHARE` of its
+    pixels at most :data:`BLACK_LEVEL`. False when it does not decode.
+    """
+    if not png or len(png) > BLACK_MAX_BYTES:
+        return False
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(png)) as im:
+            gray = im.convert("L")
+        gray = gray.reduce(max(1, round(gray.size[0] / SAME_THUMB_W)))
+        hist = gray.histogram()
+    except Exception as exc:
+        logger.debug(f"frames: black check failed: {exc}")
+        return False
+    total = sum(hist)
+    return total > 0 and sum(hist[: BLACK_LEVEL + 1]) >= BLACK_SHARE * total
+
+
 # ---------------------------------------------------------------------------
 # screenshot markers (tracking.mark_screenshots)
 # ---------------------------------------------------------------------------
