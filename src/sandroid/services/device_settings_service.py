@@ -6,11 +6,16 @@ Supports country presets for quick environment setup.
 """
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+#: Seconds a root-check answer stays valid per device serial (a device can be
+#: rebooted or swapped under the same serial).
+ROOT_CHECK_TTL_S = 60.0
 
 
 @dataclass
@@ -326,7 +331,8 @@ class DeviceSettingsService:
                 the current adb target, resolved anew for every operation.
         """
         self._serial = serial
-        self._root_available: dict[str | None, bool] = {}
+        #: serial -> (answer, monotonic time it was taken)
+        self._root_available: dict[str | None, tuple[bool, float]] = {}
         self._geopy_available: bool | None = None
 
     def _get_adb(self) -> type:
@@ -850,24 +856,31 @@ class DeviceSettingsService:
     def check_root_available(self) -> bool:
         """Check if root (su) is available on the device.
 
-        Returns the cached result after the first check of each device.
+        A clear answer is cached per device serial for
+        :data:`ROOT_CHECK_TTL_S` seconds. A failed check (adb error, timeout,
+        exception) answers False and is never cached.
 
         Returns:
             True if root is available, False otherwise
         """
         serial = self._resolve_serial()
-        if serial in self._root_available:
-            return self._root_available[serial]
+        cached = self._root_available.get(serial)
+        if cached is not None and time.monotonic() - cached[1] < ROOT_CHECK_TTL_S:
+            return cached[0]
 
         try:
             Adb = self._get_adb()
-            stdout, _stderr = Adb.send_adb_command("shell which su", serial=serial)
-            available = bool(stdout and stdout.strip() and "su" in stdout)
+            stdout, stderr = Adb.send_adb_command("shell which su", serial=serial)
         except Exception as e:
             logger.debug(f"Root check failed: {e}")
-            available = False
-
-        self._root_available[serial] = available
+            return False
+        available = bool(stdout and stdout.strip() and "su" in stdout)
+        if not available and (stderr or "").strip():
+            # "which" prints nothing when su is absent; any stderr is adb
+            # failing (offline device, timeout): not an answer to keep.
+            logger.debug(f"Root check inconclusive: {stderr.strip()}")
+            return False
+        self._root_available[serial] = (available, time.monotonic())
         return available
 
     def is_geopy_available(self) -> bool:

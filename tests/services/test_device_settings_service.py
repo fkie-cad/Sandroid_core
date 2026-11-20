@@ -131,3 +131,45 @@ def test_root_check_is_cached_per_device(adb_calls) -> None:
 
     su_calls = [serial for cmd, serial in adb_calls.calls if cmd == "shell which su"]
     assert su_calls == ["emulator-5554", "emulator-5556"]
+
+
+def test_console_warning_lines_before_ok_are_success(adb_calls) -> None:
+    adb_calls.replies["emu "] = (
+        "WARNING: console auth token is missing\nsome other notice\nOK\n",
+        "",
+    )
+    svc = DeviceSettingsService(serial="emulator-5556")
+
+    assert svc.set_sensor("light", 3).success
+    assert svc.set_battery_level(50).success
+
+
+def test_failed_root_check_is_never_cached(adb_calls) -> None:
+    svc = DeviceSettingsService()
+    adb_calls.replies["shell which su"] = ("", "error: device offline")
+    assert not svc.check_root_available()
+    adb_calls.replies["shell which su"] = ("", "Command timed out after 30s")
+    assert not svc.check_root_available()
+
+    adb_calls.replies["shell which su"] = ("/system/xbin/su\n", "")
+    assert svc.check_root_available()
+    su_calls = [cmd for cmd, _ in adb_calls.calls if cmd == "shell which su"]
+    assert len(su_calls) == 3
+
+
+def test_root_check_cache_expires(adb_calls, monkeypatch) -> None:
+    from sandroid.services import device_settings_service as dss
+
+    now = [1000.0]
+    monkeypatch.setattr(dss, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    adb_calls.replies["shell which su"] = ("", "")  # clean "no su": cached
+    svc = DeviceSettingsService()
+
+    assert not svc.check_root_available()
+    now[0] += dss.ROOT_CHECK_TTL_S - 1
+    assert not svc.check_root_available()
+    adb_calls.replies["shell which su"] = ("/system/xbin/su\n", "")
+    now[0] += 2
+    assert svc.check_root_available()
+    su_calls = [cmd for cmd, _ in adb_calls.calls if cmd == "shell which su"]
+    assert len(su_calls) == 2
