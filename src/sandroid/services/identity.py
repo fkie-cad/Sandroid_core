@@ -3977,7 +3977,9 @@ class IdentityService:
                 mem.done.discard(package)
                 mem.seeded.pop(package, None)
                 mem.installs.pop(package, None)
-            if ours and package in mem.done and not recovery:
+            # Without an answer from the device the memory may be stale (a
+            # snapshot load, a reinstall): apply rather than skip.
+            if ours and package in mem.done and not recovery and read is not None:
                 return None
             seeded = ours and package in mem.seeded
             settled = set(mem.settled) if ours else set()
@@ -3993,15 +3995,6 @@ class IdentityService:
             for vid, vs in profile.values.items()
         )
         allow = cfg.restart != "never"
-        kinds = sorted(
-            {
-                REGISTRY[vs.kind].tag
-                for vs in profile.values.values()
-                if vs.enabled
-                and vs.effective_provider == "native"
-                and vs.kind in REGISTRY
-            }
-        )
 
         def run() -> None:
             # Never an unannounced restart: a value that turns out to need
@@ -4023,7 +4016,7 @@ class IdentityService:
                 raise IdentityApplyError(NEEDS_RESTART_AT_START)
 
         return _pre_spawn_plan_cls()(
-            description=f"apply identity profile {profile.id!r} ({', '.join(kinds)})",
+            description=f"apply identity profile {profile.id}",
             disruptive=needs_fw and allow,
             apply=run,
         )

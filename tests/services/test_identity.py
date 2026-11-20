@@ -1540,10 +1540,15 @@ def test_the_record_is_the_truth_after_a_snapshot_load(service, device, app_star
     assert service.pre_spawn(PKG) is None
 
 
-def test_without_an_answer_pre_spawn_falls_back_to_memory(service, device, app_start):
+def test_without_an_answer_pre_spawn_applies(service, device, app_start):
     service.apply(SERIAL, PKG)
     device.record_down = True
-    assert service.pre_spawn(PKG) is None
+    # The device did not answer: memory may be stale, so apply, but the
+    # memory still says no framework restart is pending.
+    plan = service.pre_spawn(PKG)
+    assert plan is not None
+    assert not plan.disruptive
+    assert plan.description == "apply identity profile mara-de"
     plan = _fresh().pre_spawn(PKG)
     assert plan is not None
     assert plan.disruptive  # nothing known: conservative
