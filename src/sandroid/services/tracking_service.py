@@ -700,6 +700,16 @@ def rebuild_password(
     if n == k:
         for i, c in clear:
             known[i] = c
+    elif (
+        n == k + 1
+        and len(clear) > 1
+        and text[-1] != BULLET
+        and all(c == BULLET or known[i] in (None, c) for i, c in enumerate(text[:k]))
+    ):
+        # the new character at the end, earlier ones still shown in clear
+        for i, c in clear[:-1]:
+            known[i] = c
+        known.append(text[-1])
     elif n == k + 1 and len(clear) <= 1:
         if clear:
             i, c = clear[0]
@@ -779,9 +789,9 @@ _TEXT_VARIATIONS = {
     0x70: "address",
     0x80: "password",
     0x90: "password",
-    0xA0: "filter",
-    0xB0: "text",
-    0xC0: "text",
+    0xA0: "text",  # WEB_EDIT_TEXT
+    0xB0: "filter",
+    0xC0: "text",  # PHONETIC
     0xD0: "email",
     0xE0: "password",
 }

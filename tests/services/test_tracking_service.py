@@ -3409,7 +3409,7 @@ WEB_CASES = [  # (node, reply kw, summary, web fields)
                                        input_type=0xA1)},
         {"pkg": "org.mozilla.firefox", "bar": GECKO_BAR},
         "tap text field 'Your name' (#in-text) on 127.0.0.1:8097",
-        {"input": "filter"},
+        {"input": "text"},  # 0xA1: TYPE_TEXT_VARIATION_WEB_EDIT_TEXT
     ),
     (
         {"cls": "android.widget.CheckBox", "text": "I agree", "rid": "chk",
@@ -3528,6 +3528,9 @@ B = ts.BULLET
           (B * 3 + "x", 2), (B * 4, 3), (B * 4, 3)], ["P", "w", None, "x"], True),
         ([("a", 0), (B, 0), (B + "b", 1), (B * 2, 1), (B * 2 + "c", 2), (B * 3, 2)],
          ["a", "b", "c"], False),
+        # the previous character still in clear when the next one comes
+        ([("x", 0), (B + "y", 1), (B * 2 + "a", 2), (B * 2 + "ab", 3)],
+         ["x", "y", "a", "b"], False),
         # a backspace at the end, then one more character
         ([("a", 0), (B + "b", 1), (B * 2 + "c", 2), (B * 2, 2), (B * 2 + "d", 2)],
          ["a", "b", "d"], False),
