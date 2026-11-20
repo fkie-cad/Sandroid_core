@@ -14,8 +14,8 @@ from sandroid.tui.themes import THEMES, build_textual_theme
 
 #: Lens tokens drawn as text (>= 4.5:1).
 LENS_TEXT = (
-    "text", "label", "title", "accent", "ok", "warn", "bad", "user",
-    "screen", "highlight_1", "highlight_2", "highlight_3", "highlight_4",
+    "text", "label", "title", "accent", "ok", "warn", "bad", "user", "typed",
+    "screen", "shot", "highlight_1", "highlight_2", "highlight_3", "highlight_4",
 )  # fmt: skip
 #: Quiet lens text tiers (>= 3:1).
 LENS_QUIET = ("dim", "muted", "header")
@@ -29,7 +29,7 @@ THEME_QUIET = ("text_muted", "muted_status_color")
 #: typed rows and privacy rows (13 %), the AI highlight sets (18 %), the
 #: row-annotation tints (13 %).
 TINTS = (
-    ("user", 0.13), ("warn", 0.13), ("accent", 0.13),
+    ("user", 0.13), ("typed", 0.13), ("warn", 0.13), ("accent", 0.13),
     ("highlight_1", 0.18), ("highlight_2", 0.18), ("highlight_3", 0.18),
     ("highlight_4", 0.18),
 )  # fmt: skip

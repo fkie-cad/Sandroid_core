@@ -69,8 +69,14 @@ PARENT_DIR = THEMES_DIR.parent
 #   screen             Timeline lens: the type word of screen changes and
 #                      screenshots (a second accent, apart from ``user``);
 #                      same contrast floors (without the tint)
-#   (``user`` / ``screen`` default to ``accent`` / ``title`` when a palette
-#   built elsewhere leaves them out.)
+#   typed              Timeline lens: the type word of typed text (``typed``),
+#                      its own colour apart from ``user`` (tap, key ...); its
+#                      rows are tinted with it. Same floors as ``user``
+#   shot               Timeline lens: the type word of screenshots, apart
+#                      from ``screen``; same floors as ``screen``
+#   (``user`` / ``screen`` default to ``accent`` / ``title``, ``typed`` /
+#   ``shot`` to ``user`` / ``screen`` when a palette built elsewhere leaves
+#   them out. The four are told apart in every theme: CIE76 delta E >= 20.)
 #   highlight_1..4     Network / Files lens: the colour slots of the AI
 #                      highlight sets (the set's words, its row tint at 18 %,
 #                      the highlight bar). Not set per palette: derived from
@@ -153,6 +159,9 @@ class LensPalette:
     #: built without them (another branch, an old caller) still works.
     user: str = ""
     screen: str = ""
+    #: Default "" = ``user`` / ``screen`` (``__post_init__``).
+    typed: str = ""
+    shot: str = ""
     #: AI highlight colour slots; "" = derived from ``bg`` (``__post_init__``).
     highlight_1: str = ""
     highlight_2: str = ""
@@ -165,6 +174,10 @@ class LensPalette:
             object.__setattr__(self, "user", self.accent)
         if not self.screen:
             object.__setattr__(self, "screen", self.title)
+        if not self.typed:
+            object.__setattr__(self, "typed", self.user)
+        if not self.shot:
+            object.__setattr__(self, "shot", self.screen)
         slots = HIGHLIGHT_LIGHT if _is_light(self.bg) else HIGHLIGHT_DARK
         for n, colour in enumerate(slots, start=1):
             if not getattr(self, f"highlight_{n}"):
@@ -213,6 +226,8 @@ DEFAULT_LENS = LensPalette(
     stripe="#0a1121",
     user="#38bdf8",
     screen="#c4b5fd",
+    typed="#5eead4",
+    shot="#f9a8d4",
 )
 
 
@@ -406,6 +421,8 @@ DARK_THEME = Theme(
         stripe="#111111",
         user="#03DAC6",
         screen="#BB86FC",
+        typed="#82B1FF",
+        shot="#F8BBD0",
     ),
 )
 
@@ -471,6 +488,8 @@ LIGHT_THEME = Theme(
         stripe="#F6F8FB",
         user="#1565C0",
         screen="#7B1FA2",
+        typed="#00695C",
+        shot="#AD1457",
     ),
     status_colors={
         "running": "#2E7D32",
@@ -552,6 +571,8 @@ PAPER_THEME = Theme(
         stripe="#F7F3EA",
         user="#1C5D7C",
         screen="#6A4A86",
+        typed="#2A6F6B",
+        shot="#9B3D63",
     ),
     status_colors={
         "running": PAPER_OK,
@@ -648,6 +669,8 @@ DAYLIGHT_THEME = Theme(
         stripe="#F7F9FC",
         user="#4338E0",
         screen="#0F766E",
+        typed="#0369A1",
+        shot="#A21CAF",
     ),
     status_colors={
         "running": DAYLIGHT_OK,
@@ -739,6 +762,8 @@ HIGH_CONTRAST_THEME = Theme(
         stripe="#0E0E0E",
         user="#00FFFF",
         screen="#FF66FF",  # >= 4.5:1 on the #333333 cursor too
+        typed="#80B0FF",
+        shot="#FFA94D",
     ),
 )
 
@@ -803,6 +828,8 @@ CYBERPUNK_THEME = Theme(
         stripe="#130630",
         user="#00FFFF",
         screen="#FF00FF",
+        typed="#B388FF",
+        shot="#FF9E3D",
     ),
 )
 
@@ -867,6 +894,8 @@ NORD_THEME = Theme(
         stripe="#323845",
         user="#88C0D0",
         screen="#D8B4D0",  # lighter aurora purple: >= 4.5:1 on the panel
+        typed="#A3B8EF",
+        shot="#F0A88A",
     ),
 )
 
@@ -931,6 +960,8 @@ DRACULA_THEME = Theme(
         stripe="#2C2E3B",
         user="#8BE9FD",
         screen="#FF79C6",
+        typed="#BD93F9",
+        shot="#F1FA8C",
     ),
 )
 
@@ -997,6 +1028,8 @@ SOLARIZED_THEME = Theme(
         stripe="#03303B",
         user="#55A5E4",  # lighter than Solarized blue: >= 4.5:1 on its tint
         screen="#EE7AB0",  # lighter magenta: >= 4.5:1 on bg / panel / cursor
+        typed="#C29BF0",
+        shot="#CDA37A",
     ),
 )
 
@@ -1072,6 +1105,8 @@ GRAPHITE_LENS = LensPalette(
     stripe="#1E1F22",
     user="#F0A15C",
     screen="#C8A2E8",
+    typed="#7FB8E0",
+    shot="#7CCFB8",
     cursor_keeps_colors=True,
 )
 
@@ -1136,6 +1171,8 @@ DEEP_SEA_LENS = LensPalette(
     stripe="#17242F",
     user="#5CD0DA",
     screen="#B9A4F0",
+    typed="#F0B48C",
+    shot="#F49AC2",
     cursor_keeps_colors=True,
 )
 
@@ -1200,6 +1237,8 @@ EVERGREEN_LENS = LensPalette(
     stripe="#1D231E",
     user="#CDAEE6",
     screen="#8CC4E0",
+    typed="#E6B88A",
+    shot="#7FD4C1",
     cursor_keeps_colors=True,
 )
 

@@ -1682,13 +1682,16 @@ def _typed_lines() -> list[dict]:
     ]
 
 
-def _user_tint(pal) -> str:
-    """The user-input row background: ``user`` blended into ``bg``."""
+def _user_tint(pal, token: str = "user") -> str:
+    """The user-input row background: ``user`` (typed text: ``typed``)
+    blended into ``bg``.
+    """
     from textual.color import Color
 
     from sandroid.tui.widgets.timeline_lens import _TINT_AMOUNT
 
-    blend = Color.parse(pal.bg).blend(Color.parse(pal.user), _TINT_AMOUNT)
+    colour = getattr(pal, token)
+    blend = Color.parse(pal.bg).blend(Color.parse(colour), _TINT_AMOUNT)
     return blend.hex.lower()
 
 
@@ -1748,8 +1751,10 @@ async def test_types_are_plain_words_coloured_from_the_theme_tokens(
         vi = {seq: rows.index(seq) for seq in rows}
         assert word_color(vi[1]) == pal.user  # the user's own input: accent
         assert bg(vi[1]).triplet.hex == _user_tint(pal)  # ... on its accent's tint
+        assert word_color(vi[2]) == pal.typed  # typed text: its own accent
+        assert bg(vi[2]).triplet.hex == _user_tint(pal, "typed")
         assert word_color(vi[3]) == pal.screen.lower()  # screen: 2nd accent
-        assert word_color(vi[4]) == pal.screen.lower()  # screenshot too
+        assert word_color(vi[4]) == pal.shot.lower()  # screenshot: its own
         assert word_color(vi[5]) == pal.muted  # request: muted type word
         assert bg(vi[5]) is None  # only input rows are tinted
         # File / clock / system rows: dimmed as a whole row.
@@ -1780,17 +1785,17 @@ async def test_a_theme_switch_recolors_the_timeline(install_fakes) -> None:
         await until(pilot, lambda: len(lens.rows) == 10)
         lens.move_cursor(-100)
 
-        def tap_bg() -> str:
+        def typed_bg() -> str:  # row 1 (row 0 has the cursor): typed text
             return _segments(lens, 1)[-1].style.bgcolor.triplet.hex.upper()
 
-        assert tap_bg() == _user_tint(DEFAULT_THEME.lens).upper()
+        assert typed_bg() == _user_tint(DEFAULT_THEME.lens, "typed").upper()
         app._apply_theme(LIGHT_THEME, get_theme_css_path("light"))
         await settle(pilot)
-        assert tap_bg() == _user_tint(LIGHT_THEME.lens).upper()
+        assert typed_bg() == _user_tint(LIGHT_THEME.lens, "typed").upper()
         assert lens.view.styles.background.hex.upper() == LIGHT_THEME.lens.bg
         app._apply_theme(DEFAULT_THEME, get_theme_css_path("default"))
         await settle(pilot)
-        assert tap_bg() == _user_tint(DEFAULT_THEME.lens).upper()
+        assert typed_bg() == _user_tint(DEFAULT_THEME.lens, "typed").upper()
 
 
 def test_every_theme_has_readable_type_tokens() -> None:
@@ -2437,11 +2442,13 @@ def test_palettes_built_elsewhere_get_user_and_screen_defaults() -> None:
     from sandroid.tui.themes import DEFAULT_LENS, LensPalette
 
     fields = asdict(DEFAULT_LENS)
-    fields.pop("user")
-    fields.pop("screen")
+    for name in ("user", "screen", "typed", "shot"):
+        fields.pop(name)
     pal = LensPalette(**fields)
     assert pal.user == pal.accent
     assert pal.screen == pal.title
+    assert pal.typed == pal.user
+    assert pal.shot == pal.screen
     assert pal.css_variables()["lens-user"] == pal.accent
 
 
@@ -2466,13 +2473,62 @@ def test_type_tokens_meet_their_contrast_floors_in_every_theme() -> None:
 
     for name, theme in THEMES.items():
         p = theme.lens
-        tint = Color.parse(p.bg).blend(Color.parse(p.user), _TINT_AMOUNT).hex
-        assert ratio(p.user, tint) >= 4.5, name
-        assert ratio(p.text, tint) >= 4.5, name
-        assert ratio(p.user, p.cursor_focus) >= 3, name
-        for surface in (p.bg, p.panel, p.cursor):
-            assert ratio(p.screen, surface) >= 4.5, (name, surface)
-        assert ratio(p.screen, p.cursor_focus) >= 3, name
+        for token in ("user", "typed"):
+            colour = getattr(p, token)
+            tint = Color.parse(p.bg).blend(Color.parse(colour), _TINT_AMOUNT).hex
+            assert ratio(colour, tint) >= 4.5, (name, token)
+            assert ratio(p.text, tint) >= 4.5, (name, token)
+            assert ratio(colour, p.cursor_focus) >= 3, (name, token)
+        for token in ("screen", "shot"):
+            colour = getattr(p, token)
+            for surface in (p.bg, p.panel, p.cursor):
+                assert ratio(colour, surface) >= 4.5, (name, token, surface)
+            assert ratio(colour, p.cursor_focus) >= 3, (name, token)
+
+
+def _delta_e(a: str, b: str) -> float:
+    """CIE76 colour difference of two hex colours (Lab, D65)."""
+    import math
+
+    def lab(hexv: str) -> tuple[float, float, float]:
+        h = hexv.lstrip("#")
+        rgb = [int(h[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+        r, g, b = (
+            v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in rgb
+        )
+        x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047
+        y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883
+
+        def f(t: float) -> float:
+            return t ** (1 / 3) if t > 0.008856 else 7.787 * t + 16 / 116
+
+        return 116 * f(y) - 16, 500 * (f(x) - f(y)), 200 * (f(y) - f(z))
+
+    return math.dist(lab(a), lab(b))
+
+
+def test_tap_typed_screen_and_screenshot_have_their_own_colours() -> None:
+    """The four type words are told apart in every theme (delta E >= 20),
+    and the lens colours them from their own tokens.
+    """
+    from itertools import combinations
+
+    from sandroid.tui.themes import THEMES
+    from sandroid.tui.widgets.timeline_lens import type_style, type_word_style
+
+    for name, theme in THEMES.items():
+        p = theme.lens
+        four = {t: getattr(p, t) for t in ("user", "typed", "screen", "shot")}
+        for a, b in combinations(four, 2):
+            assert _delta_e(four[a], four[b]) >= 20, (name, a, b)
+    words = {
+        kind: type_word_style(src, kind).color.triplet.hex
+        for src, kind in (("input", "tap"), ("input", "text"), ("screen", "x"))
+    }
+    words["shot"] = type_word_style("shot", "x").color.triplet.hex
+    assert len(set(words.values())) == 4, words
+    assert type_style("input", "tap")[1] != type_style("input", "text")[1]
 
 
 async def test_an_open_inspector_follows_the_newest_line_while_live(

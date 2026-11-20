@@ -14,9 +14,10 @@ Tracking input, screenshots and network flows -- each line one row::
 ``screenshot``, ``request``, ``file``, ``clock`` ...) from the module-level
 ``_TYPE_STYLE`` table, which also colours them from the lens theme tokens
 (``LensPalette``): the user's own input is the brightest row on a ``band``
-tint with the ``user`` accent on its type word, screens and screenshots get
-the ``screen`` accent, requests a muted type word, file / clock / system rows
-are dimmed. Warnings and errors keep the ``warn`` / ``bad`` colours.
+tint with the ``user`` accent on its type word (typed text: the ``typed``
+accent and tint), screens get the ``screen`` accent and screenshots the
+``shot`` one, requests a muted type word, file / clock / system rows are
+dimmed. Warnings and errors keep the ``warn`` / ``bad`` colours.
 
 **Type bar** (top row): every type present with its count, in its colour --
 a legend and a filter (click a word, or ``t`` then ←/→ and Space, hides or
@@ -481,13 +482,18 @@ _TYPE_STYLE: dict[tuple[str, str] | str, dict[str, Any]] = {
     ("input", "long_press"): {"name": "long press", **_USER_INPUT},
     ("input", "swipe"): {"name": "swipe", **_USER_INPUT},
     ("input", "gesture"): {"name": "gesture", **_USER_INPUT},
-    ("input", "text"): {"name": "typed", **_USER_INPUT},
+    ("input", "text"): {
+        "name": "typed",
+        **_USER_INPUT,
+        "word": "typed",
+        "tint": "typed",
+    },
     ("input", "key"): {"name": "key", **_USER_INPUT},
     ("input", "confirm"): {"name": "confirmed", "word": "muted", "fg": "label"},
     "input": {"name": "input", **_USER_INPUT},
-    # What the screen showed: the second accent.
+    # What the screen showed: a second accent (screenshots their own).
     "screen": {"name": "screen", "word": "screen"},
-    "shot": {"name": "screenshot", "word": "screen"},
+    "shot": {"name": "screenshot", "word": "shot"},
     # Network: a muted type word.
     ("net", "flow"): {"name": "request", "word": "muted", "fg": "muted", "kind": False},
     ("net", "tls-fail"): {"name": "TLS failed", "word": "warn", "kind": False},
