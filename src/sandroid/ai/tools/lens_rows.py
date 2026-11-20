@@ -839,6 +839,9 @@ class _Details:
     def timed_out_row(self) -> None:
         self._timed_out.add(self.current_row)
 
+    def matched_row(self, key: str) -> None:
+        self._timed_out.discard(key)
+
     def set_rows(self, rows: list[dict]) -> None:
         """Note the rows' SQLite companions (``x.db-wal`` ...): their content
         changes count for their database's content.
@@ -900,7 +903,8 @@ class _Details:
         if self.masked:
             from sandroid.ai import row_classifier as rc
 
-            return rc._mask(getattr(got, "shown", "") or "")
+            # The same name rule + mask the digest gets (main's rule).
+            return rc._mask(rc.mask_names(getattr(got, "shown", "") or ""))
         return got.match or ""
 
     def diff_text(self, row: Mapping[str, Any]) -> str:
@@ -1376,8 +1380,12 @@ def _files_pred(
         m = _content_matcher(value, regex, details)
 
         def content_hit(r: dict) -> bool:
-            details.current_row = str(r.get("key") or "")
-            return m(details.haystack(r)) or m(details.diff_text(r))
+            key = str(r.get("key") or "")
+            details.current_row = key
+            hit = m(details.haystack(r)) or m(details.diff_text(r))
+            if hit:
+                details.matched_row(key)  # a match wins over a time-out
+            return hit
 
         costly.append(content_hit)
 
@@ -1555,10 +1563,17 @@ def _not_judged(matched: _Matched, scope: str) -> dict[str, Any]:
     return {"scope": scope, "not_judged": keys[:MAX_NOT_JUDGED]}
 
 
-def _row_line(lens: str, row: Mapping[str, Any]) -> str:
-    from sandroid.ai.row_classifier import files_summary, network_summary
+def _row_line(lens: str, row: Mapping[str, Any], mask: bool = False) -> str:
+    """One summary line; with mask on, secret-named query values reduced
+    (main's rule) and the line masked.
+    """
+    from sandroid.ai import row_classifier as rc
 
-    return network_summary(row) if lens == "network" else files_summary(row)
+    if lens == "network":
+        line = rc.network_summary(row, reduce=mask)
+    else:
+        line = rc.files_summary(row)
+    return rc._mask(line) if mask else line
 
 
 def _basis(
@@ -2345,7 +2360,7 @@ def classify_rows(
     samples = [
         {
             "key": v.key,
-            "row": _row_line(lens, by_key.get(v.key, {"key": v.key})),
+            "row": _row_line(lens, by_key.get(v.key, {"key": v.key}), mask=mask),
             "reason": v.reason,
         }
         for v in outcome.matched[:MAX_SAMPLES]
@@ -2754,7 +2769,7 @@ def get_rows(
         item: dict[str, Any] = {
             "key": row["key"],
             "shown": row.get("shown", True),
-            "row": _row_line(lens, row),
+            "row": _row_line(lens, row, mask=mask),
         }
         if include_content:
             if lens == "network":

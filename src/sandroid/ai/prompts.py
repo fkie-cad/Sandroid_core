@@ -109,8 +109,10 @@ Rules:
 - Use the row ids exactly as given (r1, r2, ...). Never invent ids.
 - A reason names the field that decided it, e.g. "body.email holds an email \
 address", "query param imei", "path is a contacts database".
-- Values in [brackets] stand for content that is not shown (binary data, \
-masked secrets): judge the type and size, do not guess the value."""
+- Content that is not shown is marked: [binary 34 kB image/png] for binary \
+data and, only when masking is on, [text, 12 chars] / [Bearer, 132 chars] \
+for a secret-named value and *** for a masked secret. Judge the type and \
+size, do not guess the value."""
 
 #: Extra user message of a retry after a reply that was not the JSON object.
 ROW_CLASSIFIER_RETRY = (

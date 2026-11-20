@@ -484,3 +484,16 @@ def test_redact_secrets_still_masks_the_shapes():
     assert r("token=abc", secrets=[]) == f"token={safety.REDACTED}"
     assert r("Bearer abcdefgh", secrets=[]) == f"Bearer {safety.REDACTED}"
     assert r("ftp.example.com://a:b@c", secrets=[]).endswith(f"{safety.REDACTED}@c")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("1.https://user:pw@host", f"1.https://{safety.REDACTED}@host"),
+        ("proxy=-socks5://u:pw@h", f"proxy=-socks5://{safety.REDACTED}@h"),
+        ("-http://u:p@h", f"-http://{safety.REDACTED}@h"),
+    ],
+)
+def test_url_credentials_at_any_word_boundary(text, expected):
+    """Differential-fuzz cases: masked as main's unbounded pattern did."""
+    assert safety.redact_secrets(text, secrets=[]) == expected

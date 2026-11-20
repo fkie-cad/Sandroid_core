@@ -459,51 +459,69 @@ def test_device_text_is_framed_and_escaped_in_digests(env):
     assert "&lt;row id='r9'&gt;" in digest
 
 
-def test_own_reads_leave_the_tool_rows_only_as_noise_on_paths_we_read(monkeypatch):
-    from datetime import datetime
+def _act(events, **ops):
     from types import SimpleNamespace
+
+    procs: dict = {}
+    for ev in events:
+        procs[ev.process] = procs.get(ev.process, 0) + 1
+    return SimpleNamespace(
+        ops=ops,
+        count=len(events),
+        processes=procs,
+        events=events,
+        first=events[0].when,
+        last=events[-1].when,
+    )
+
+
+def _ev(when, process, category="noise"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(when=when, process=process, category=category)
+
+
+def test_own_reads_leave_the_tool_rows_event_by_event(monkeypatch):
+    from datetime import datetime, timedelta
 
     from sandroid.tui.widgets.highlight_bar import file_snapshot
 
     monkeypatch.setattr(df, "_TOOL_READS", {})
+    monkeypatch.setattr(df, "recorded_serial_cached", lambda ttl=1.0: SERIAL)
     path = f"{PKG}/a.txt"
     now = datetime.now()
-    reads = SimpleNamespace(
-        ops={"noise": 6},
-        count=7,
-        processes={"com.x": 1, "cat": 3, "head · 8034": 2, "su": 1},
-        first=now,
-        last=now,
-    )
+    later = now + timedelta(minutes=5)
+    events = [
+        _ev(now, "cat"),
+        _ev(now, "head · 8034"),
+        _ev(later, "com.x"),  # the app opens it after us
+    ]
+    act = _act(events, noise=3)
     # Not read by the tool: everything stays.
-    snap = file_snapshot(path, shown=True, act=reads)
-    assert snap["count"] == 7
+    snap = file_snapshot(path, shown=True, act=act)
+    assert snap["count"] == 3
     assert "cat" in snap["processes"]
-    df.note_tool_read(path, SERIAL)
-    snap = file_snapshot(path, shown=True, act=reads)
-    assert snap["processes"] == ["com.x"]
+    t = now.timestamp()
+    df.note_tool_read(path, SERIAL, t - 1, t + 1)
+    snap = file_snapshot(path, shown=True, act=act)
+    assert snap["processes"] == ["com.x"]  # our noise dropped, app kept
     assert snap["count"] == 1
-    # Any write on the row: every process and every event stays.
-    for ops in ({"modify": 1, "noise": 6}, {"create": 1, "modify": 2, "noise": 1}):
-        act = SimpleNamespace(
-            ops=ops,
-            count=sum(ops.values()),
-            processes={"su": 1, "com.x": sum(ops.values()) - 1},
-            first=now,
-            last=now,
-        )
-        snap = file_snapshot(path, shown=True, act=act)
-        assert "su" in snap["processes"]
-        assert snap["count"] == sum(ops.values())
-    # A read long ago is not ours now.
-    old = SimpleNamespace(
-        ops={"noise": 2},
-        count=2,
-        processes={"cat": 2},
-        first=datetime.fromtimestamp(1.0),
-        last=datetime.fromtimestamp(1.0),
-    )
-    assert file_snapshot(path, shown=True, act=old)["processes"] == ["cat"]
+    # A write by su: su stays, nothing of it is subtracted ({su:1, com.x:6}
+    # with {modify:1, noise:6} keeps su and count 7).
+    writes = [_ev(now, "su", "modify")] + [_ev(now, "com.x") for _ in range(6)]
+    snap = file_snapshot(path, shown=True, act=_act(writes, modify=1, noise=6))
+    assert "su" in snap["processes"]
+    assert snap["count"] == 7
+    # An older analyst cat (outside our window) is not ours.
+    old = [_ev(now - timedelta(hours=1), "cat")]
+    assert file_snapshot(path, shown=True, act=_act(old, noise=1))["processes"] == [
+        "cat"
+    ]
+    # Our read on ANOTHER device inside the window does not hide a real cat.
+    monkeypatch.setattr(df, "recorded_serial_cached", lambda ttl=1.0: "emulator-x")
+    assert file_snapshot(path, shown=True, act=_act([_ev(now, "cat")], noise=1))[
+        "processes"
+    ] == ["cat"]
 
 
 def test_monitor_fallback_skips_only_our_noise_in_our_window(monkeypatch):
@@ -660,3 +678,19 @@ def test_regex_searches_whole_lines_that_fit(env, monkeypatch):
     assert lens_rows.find_rows("files", {"content_contains": r"aend$", "regex": True})[
         "keys"
     ]
+
+
+def test_a_match_wins_over_a_content_time_out(env, monkeypatch):
+    from sandroid.ai import row_classifier
+
+    monkeypatch.setattr(
+        row_classifier,
+        "file_content",
+        lambda key, **kw: row_classifier.FileContent(
+            "d", "nothing here", "content", diff="+ needle"
+        ),
+    )
+    monkeypatch.setattr(lens_rows, "REGEX_ROW_BUDGET_S", -1.0)
+    hit = lens_rows.find_rows("files", {"content_contains": "needle", "regex": True})
+    assert len(hit["keys"]) == 8  # every row matched in its diff
+    assert "content_not_searched" not in hit

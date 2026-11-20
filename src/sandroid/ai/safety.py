@@ -252,14 +252,12 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # OpenAI-style keys (sk-..., sk-proj-...).
     (re.compile(r"\bsk-[A-Za-z0-9_-]{8,}+"), f"sk-{REDACTED}"),
     # Credentials embedded in a URL: scheme://user:pass@host. The scheme
-    # starts only where a scheme-character run starts and is at most 32
-    # characters, and every run is possessive: linear on any input (an
-    # unbounded scheme rescanned "a.a.a..." at every word boundary).
+    # run is bounded (at most 32 characters; an unbounded one rescanned
+    # "a.a.a..." to the end at every word boundary) and possessive, so the
+    # pattern is linear; it still starts at every word boundary
+    # ("1.https://u:p@h", "proxy=-socks5://u:p@h").
     (
-        re.compile(
-            r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,31}+://)"
-            r"[^/\s:@]++:[^/\s@]++@"
-        ),
+        re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,31}+://)[^/\s:@]++:[^/\s@]++@"),
         rf"\1{REDACTED}@",
     ),
     # key=value style secrets in query strings / log lines.

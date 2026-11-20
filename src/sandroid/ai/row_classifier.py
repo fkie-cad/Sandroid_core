@@ -13,9 +13,11 @@ Two parts, both without Textual:
   ``<session>/ai/content_cache``, whichever is newer) -- a 1.5 KB head of
   :func:`render_content` (prefs as ``name = value`` lines, JSON minified,
   gzip/ABX decoded, SQLite tables with row counts and sample rows) plus a
-  diff head. Values are sent as they are: there is no secret reduction
-  (what may go to the endpoint is the analyst's decision). With
-  ``ai.mask_sensitive`` on, every digest goes through
+  diff head. With ``ai.mask_sensitive`` off values are sent as they are
+  (what may go to the endpoint is the analyst's decision). With it on,
+  secret-named headers, query parameters and JSON / form fields (Network)
+  and ``name = value`` lines / SQLite cells (Files) keep only their type and
+  length (the name rule of main), then every digest goes through
   :func:`~sandroid.ai.safety.redact_secrets`; if that fails, the digest is
   withheld (fails closed). Device text is framed (``<content>`` /
   ``<diff>``, ``<``/``>`` escaped) so it cannot forge digest lines.
@@ -76,6 +78,27 @@ ROW_CAP = 3000
 FILE_HEAD_CAP = 1500
 #: Diff head of a kept file version.
 DIFF_HEAD_CAP = 800
+
+#: Names (headers, query parameters, JSON / form fields) whose values are
+#: reduced to their type and length WITH ``ai.mask_sensitive`` ON (main's
+#: rule, restored as it was; with mask off values are sent as they are).
+_SECRET_NAME_RE = re.compile(
+    r"auth|token|key|secret|session|cookie|password|signature", re.IGNORECASE
+)
+#: Header values never sent (besides :data:`_SECRET_NAME_RE` matches).
+_SECRET_HEADERS = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "x-auth-token",
+        "x-access-token",
+        "x-csrf-token",
+        "x-xsrf-token",
+    }
+)
 
 # -- classifier defaults ----------------------------------------------------------
 
@@ -139,7 +162,87 @@ def _cap_bytes(text: str, limit: int) -> tuple[str, bool]:
     return raw[:limit].decode("utf-8", "ignore") + "…", True
 
 
-def _headers(pairs: Any) -> list[str]:
+def reduce_secret(name: str, value: str) -> str:
+    """``Authorization: Bearer xyz`` -> ``[Bearer, 132 chars]`` (cookies: count)."""
+    value = str(value or "")
+    lname = name.lower()
+    if lname in ("cookie", "set-cookie"):
+        parts = [p for p in value.split(";") if p.strip()]
+        kind = "cookie" if lname == "cookie" else "set-cookie"
+        return f"[{kind}, {len(parts)} part(s), {len(value)} chars]"
+    first, _, rest = value.partition(" ")
+    if rest and first.isalpha() and len(first) <= 16:
+        return f"[{first}, {len(value)} chars]"
+    return f"[value, {len(value)} chars]"
+
+
+def is_secret_name(name: Any) -> bool:
+    """Whether a header / parameter / field name looks like it holds a secret."""
+    name = str(name)
+    return name.lower() in _SECRET_HEADERS or bool(_SECRET_NAME_RE.search(name))
+
+
+def reduce_value(value: Any) -> str:
+    """``[number, 6 chars]`` / ``[jwt, 180 chars]``: a value's type and length."""
+    if isinstance(value, bool) or value is None:
+        kind, text = "literal", json.dumps(value)
+    elif isinstance(value, int | float):
+        kind, text = "number", str(value)
+    elif isinstance(value, dict):
+        kind, text = "object", json.dumps(value, ensure_ascii=False)
+    elif isinstance(value, list):
+        kind, text = "array", json.dumps(value, ensure_ascii=False)
+    else:
+        text = str(value)
+        if text.isdigit():
+            kind = "number"
+        elif text.startswith("eyJ") and text.count(".") == 2:
+            kind = "jwt"
+        elif len(text) >= 8 and re.fullmatch(r"[0-9a-fA-F]+", text):
+            kind = "hex"
+        else:
+            kind = "text"
+    return f"[{kind}, {len(text)} chars]"
+
+
+def _reduce_json(value: Any) -> Any:
+    """A copy of parsed JSON with secret-named fields reduced."""
+    if isinstance(value, dict):
+        return {
+            k: reduce_value(v) if is_secret_name(k) else _reduce_json(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_reduce_json(v) for v in value]
+    return value
+
+
+def _param_value(name: str, value: str) -> str:
+    return reduce_value(value) if is_secret_name(name) else _cap(value, FIELD_CAP)
+
+
+def reduce_url(target: str) -> str:
+    """*target* with the values of secret-named query parameters reduced."""
+    head, sep, query = str(target).partition("?")
+    if not sep:
+        return head
+    pairs = parse_qsl(query, keep_blank_values=True)
+    if not pairs:
+        return target
+    reduced = "&".join(
+        f"{k}={reduce_value(v) if is_secret_name(k) else v}" for k, v in pairs
+    )
+    return f"{head}?{reduced}"
+
+
+def _header_line(name: str, value: Any) -> str:
+    name = str(name)
+    if is_secret_name(name):
+        return f"{name}: {reduce_secret(name, str(value))}"
+    return f"{name}: {_cap(str(value), FIELD_CAP)}"
+
+
+def _headers(pairs: Any, reduce: bool = False) -> list[str]:
     out: list[str] = []
     if isinstance(pairs, dict):
         pairs = list(pairs.items())
@@ -148,7 +251,11 @@ def _headers(pairs: Any) -> list[str]:
             name, value = item[0], item[1]
         except (TypeError, IndexError, KeyError):
             continue
-        out.append(f"{name}: {_cap(str(value), FIELD_CAP)}")
+        out.append(
+            _header_line(name, value)
+            if reduce
+            else f"{name}: {_cap(str(value), FIELD_CAP)}"
+        )
         if len(out) >= MAX_HEADERS:
             out.append("…")
             break
@@ -167,11 +274,14 @@ def _content_type(pairs: Any) -> str:
     return ""
 
 
-def body_text(body: Any, ctype: str, cap: int) -> tuple[str | None, str]:
+def body_text(
+    body: Any, ctype: str, cap: int, reduce: bool = False
+) -> tuple[str | None, str]:
     """``(text, kind)`` of a captured body; kind is ``text``/``binary``/``none``.
 
     JSON is minified, form bodies become ``k=v; k2=v2``; a base64 or
-    undecodable body becomes ``[binary 34 kB image/png]``.
+    undecodable body becomes ``[binary 34 kB image/png]``. *reduce* (mask
+    on): secret-named JSON / form fields as their type and length.
     """
     if not isinstance(body, dict):
         return None, "none"
@@ -190,14 +300,20 @@ def body_text(body: Any, ctype: str, cap: int) -> tuple[str | None, str]:
     stripped = text.lstrip()
     if "json" in lowered or stripped[:1] in ("{", "["):
         with contextlib.suppress(ValueError, RecursionError):
+            parsed = json.loads(text)
             text = json.dumps(
-                json.loads(text), separators=(",", ":"), ensure_ascii=False
+                _reduce_json(parsed) if reduce else parsed,
+                separators=(",", ":"),
+                ensure_ascii=False,
             )
     elif "x-www-form-urlencoded" in lowered:
         with contextlib.suppress(ValueError):
             fields_ = parse_qsl(text, keep_blank_values=True)
             if fields_:
-                text = "; ".join(f"{k}={_cap(v, FIELD_CAP)}" for k, v in fields_)
+                text = "; ".join(
+                    f"{k}={_param_value(k, v) if reduce else _cap(v, FIELD_CAP)}"
+                    for k, v in fields_
+                )
     if "\x00" in text:
         return f"[binary {_human_bytes(size)} {ctype_short}]".strip(), "binary"
     capped, cut = _cap_bytes(text, cap)
@@ -206,12 +322,13 @@ def body_text(body: Any, ctype: str, cap: int) -> tuple[str | None, str]:
     return capped, "text"
 
 
-def network_summary(row: Mapping[str, Any]) -> str:
+def network_summary(row: Mapping[str, Any], reduce: bool = False) -> str:
     """``POST api.x/v1/t 200 · app com.x``: one line for a Network row."""
     method = row.get("method") or "?"
     target = row.get("url") or f"{row.get('host') or '?'}{row.get('path') or ''}"
     status = row.get("status")
-    parts = [f"{method} {_cap(str(target), 160)}"]
+    target = reduce_url(str(target)) if reduce else str(target)
+    parts = [f"{method} {_cap(target, 160)}"]
     if status not in (None, ""):
         parts[0] += f" {status}"
     if row.get("kind") and row.get("kind") != "flow":
@@ -221,7 +338,7 @@ def network_summary(row: Mapping[str, Any]) -> str:
     return " · ".join(parts)
 
 
-def _query_line(row: Mapping[str, Any]) -> str | None:
+def _query_line(row: Mapping[str, Any], reduce: bool = False) -> str | None:
     target = str(row.get("url") or row.get("path") or "")
     if "?" not in target:
         return None
@@ -229,7 +346,10 @@ def _query_line(row: Mapping[str, Any]) -> str | None:
     pairs = parse_qsl(query, keep_blank_values=True)
     if not pairs:
         return None
-    return "query: " + "; ".join(f"{k}={_cap(v, FIELD_CAP)}" for k, v in pairs[:30])
+    return "query: " + "; ".join(
+        f"{k}={_param_value(k, v) if reduce else _cap(v, FIELD_CAP)}"
+        for k, v in pairs[:30]
+    )
 
 
 @dataclass
@@ -256,9 +376,14 @@ def network_digest(
     mask: bool = False,
     row_cap: int = ROW_CAP,
 ) -> Digest:
-    """The digest of one Network row (*detail*: its ``read_flow_detail``)."""
+    """The digest of one Network row (*detail*: its ``read_flow_detail``).
+
+    *mask* (``ai.mask_sensitive``): secret-named headers, query parameters
+    and JSON / form fields reduced to their type and length (main's rule),
+    then :func:`_mask`; without it every value is sent as it is.
+    """
     key = str(row.get("key") or row.get("flow_id") or "")
-    lines = [network_summary(row)]
+    lines = [network_summary(row, reduce=mask)]
     meta = []
     if row.get("req_type"):
         meta.append(f"req {row['req_type']} {_human_bytes(row.get('req_bytes'))}")
@@ -270,17 +395,17 @@ def network_digest(
         meta.append(f"error {_cap(str(row['error']), FIELD_CAP)}")
     if meta:
         lines.append(" · ".join(meta))
-    query = _query_line(row)
+    query = _query_line(row, reduce=mask)
     if query:
         lines.append(_cap(query, 600))
     kind = "metadata"
     if include_content and detail:
         req_headers = detail.get("request_headers") or []
         resp_headers = detail.get("response_headers") or []
-        rh = _headers(req_headers)
+        rh = _headers(req_headers, reduce=mask)
         if rh:
             lines.append("request headers: " + " | ".join(rh))
-        sh = _headers(resp_headers)
+        sh = _headers(resp_headers, reduce=mask)
         if sh:
             lines.append("response headers: " + " | ".join(sh))
         kinds = []
@@ -288,7 +413,7 @@ def network_digest(
             ("request body", detail.get("request_body"), req_headers, REQ_BODY_CAP),
             ("response body", detail.get("response_body"), resp_headers, RESP_BODY_CAP),
         ):
-            text, bkind = body_text(body, _content_type(headers), cap)
+            text, bkind = body_text(body, _content_type(headers), cap, reduce=mask)
             if text is not None:
                 lines.append(f"{label}: {text}")
                 kinds.append(bkind)
@@ -304,6 +429,35 @@ def network_digest(
         kind = "metadata" if text == WITHHELD else kind
     text, _ = _cap_bytes(text, row_cap)
     return Digest(key, text, kind)
+
+
+#: ``name = value`` (prefs) / ``name=value`` / ``name: value`` at a line start.
+_NAME_VALUE_LINE_RE = re.compile(r"^(\s*)([\w.\-]{1,128}+)(\s*+[=:]\s*+)(.*)$")
+
+
+def mask_names(text: str) -> str:
+    """With ``ai.mask_sensitive`` on, before :func:`_mask`: main's name rule
+    on Files content lines -- a prefs ``name = value`` / text ``name=value``
+    / ``name: value`` line and a SQLite sample cell (``col=value``) whose
+    name looks secret keep only the value's type and length. Line by line,
+    linear.
+    """
+    out = []
+    for line in str(text).split("\n"):
+        if line.startswith("  ") and "; " in line and "=" in line:
+            cells = []
+            for cell in line.split("; "):
+                col, eq, value = cell.partition("=")
+                if eq and is_secret_name(col.strip()):
+                    cell = f"{col}={reduce_value(value)}"
+                cells.append(cell)
+            out.append("; ".join(cells))
+            continue
+        m = _NAME_VALUE_LINE_RE.match(line)
+        if m is not None and m.group(4) and is_secret_name(m.group(2)):
+            line = m.group(1) + m.group(2) + m.group(3) + reduce_value(m.group(4))
+        out.append(line)
+    return "\n".join(out)
 
 
 def _mask(text: str) -> str:
@@ -802,16 +956,19 @@ def _watchlist_content(path: str) -> tuple[Callable[[], FileContent], float] | N
                 if hit is not None:
                     _KEPT_CONTENT.move_to_end(key)
                     return hit
-        got = build(local)
-        if key is not None and got.digest is not None:
+        got, complete = build(local)
+        if key is not None and complete and got.digest is not None:
             with _LOCAL_RENDERS_LOCK:
                 _KEPT_CONTENT[key] = got
                 while len(_KEPT_CONTENT) > _LOCAL_RENDERS_MAX:
                     _KEPT_CONTENT.popitem(last=False)
         return got
 
-    def build(local: Path) -> FileContent:
-        """Render + diff of one kept version (cached by version)."""
+    def build(local: Path) -> tuple[FileContent, bool]:
+        """``(render + diff, complete)`` of one kept version; *complete* is
+        False when the content render failed (then nothing is cached, even
+        with a diff).
+        """
         try:
             diff = watchlist_store.version_diff(version)
         except Exception:
@@ -820,8 +977,10 @@ def _watchlist_content(path: str) -> tuple[Callable[[], FileContent], float] | N
         shown: list[str] = []
         kind = "metadata"
         match = ""
+        complete = True
         if local.is_file():
             rendered = _render_local_cached(path, local)
+            complete = rendered is not None
             if rendered is not None:
                 head, _ = _cap_bytes(rendered.digest, FILE_HEAD_CAP)
                 lines.append(
@@ -835,7 +994,7 @@ def _watchlist_content(path: str) -> tuple[Callable[[], FileContent], float] | N
             lines.append(f"last diff: <diff>{_escape(capped)}</diff>")
             shown.append(diff)
             kind = "content" if kind == "metadata" else kind
-        return FileContent(
+        content = FileContent(
             "\n".join(lines) or None,
             match,
             kind,
@@ -844,6 +1003,7 @@ def _watchlist_content(path: str) -> tuple[Callable[[], FileContent], float] | N
             shown="\n".join(shown),
             diff=diff or "",
         )
+        return content, complete
 
     return render, at
 
@@ -1033,7 +1193,7 @@ def files_digest(
             kind = ckind if kind == "metadata" else kind
     text = "\n".join(lines)
     if mask:
-        text = _mask(text)
+        text = _mask(mask_names(text))
         kind = "metadata" if text == WITHHELD else kind
     text, _ = _cap_bytes(text, row_cap)
     return Digest(key, text, kind)
@@ -1561,6 +1721,9 @@ __all__ = [
     "network_summary",
     "parse_reply",
     "parse_reply_counted",
+    "reduce_secret",
+    "reduce_url",
+    "reduce_value",
     "row_ids",
     "rows_block",
 ]

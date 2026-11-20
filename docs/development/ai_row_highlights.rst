@@ -558,7 +558,8 @@ Privacy rules:
   secret-named query, form and JSON fields, prefs values, SQLite cells,
   diffs). Deciding what may go to the endpoint is the responsibility of the
   people using the tool. (Before this feature the Network digests reduced
-  secret-named values; that is gone.)
+  secret-named values with mask off too; now that happens only with mask
+  on.)
 - Device text in a Files digest is framed in ``<content>`` / ``<diff>``
   with ``<``/``>`` escaped and prefs names / values and SQLite cells kept on
   one line, so it cannot forge digest lines (a prompt-injection defence,
@@ -570,7 +571,14 @@ Privacy rules:
   run out of the per-row time budget are counted once each
   (``content_not_searched``, and "N rows not searched (time limit)" in the
   summary).
-- With ``ai.mask_sensitive`` on, every digest runs through
+- With ``ai.mask_sensitive`` on, main's name rule runs first: headers
+  whose name matches ``auth|token|key|secret|session|cookie|password|
+  signature`` (plus ``Authorization``, ``Cookie``, ``Set-Cookie`` and the
+  usual API/CSRF headers), secret-named query parameters and JSON / form
+  fields keep only their type and length (``[Bearer, 132 chars]``,
+  ``"password":"[text, 7 chars]"``); in Files content the same rule applies
+  to ``name = value`` / ``name=value`` / ``name: value`` lines and SQLite
+  sample cells. Then every digest runs through
   :func:`~sandroid.ai.safety.redact_secrets`; if that raises, the digest is
   replaced by ``[digest withheld: secret redaction failed]`` (fails closed)
   and the row is judged as metadata only. ``content_contains`` then

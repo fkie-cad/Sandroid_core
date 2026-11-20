@@ -116,8 +116,9 @@ OWN_READ_PROCESSES = frozenset({"head", "cat", "stat", "su", "id"})
 
 def is_own_read_process(name: Any) -> bool:
     """Whether a monitor event's process NAME is one of our read commands
-    (only ever used together with :func:`was_read_by_tool` and noise ops:
-    a ``cat`` / ``su`` that writes is real activity).
+    (only ever used together with :func:`tool_read_at` and noise ops: a
+    ``cat`` / ``su`` that writes, or reads outside our read window, is real
+    activity).
     """
     head = str(name or "").split(" · ", 1)[0].strip().lower()
     return head.rsplit("/", 1)[-1] in OWN_READ_PROCESSES
@@ -178,10 +179,18 @@ def tool_read_at(path: str, t: Any = None, serial: str | None = None) -> bool:
     return False
 
 
-def was_read_by_tool(path: str) -> bool:
-    """Whether read_device_files read *path* in this process (any time)."""
-    with _TOOL_READS_LOCK:
-        return path in _TOOL_READS
+#: (time, serial) of the last :func:`recorded_serial_cached` look-up.
+_SERIAL_CACHE: list = [0.0, None]
+
+
+def recorded_serial_cached(ttl: float = 1.0) -> str | None:
+    """:func:`recorded_serial`, re-read at most every *ttl* seconds (for
+    per-row callers such as the Files lens row snapshots).
+    """
+    now = time.monotonic()
+    if now - _SERIAL_CACHE[0] > ttl:
+        _SERIAL_CACHE[:] = [now, recorded_serial()]
+    return _SERIAL_CACHE[1]
 
 
 #: SQLite companion files whose rows stand for their database.

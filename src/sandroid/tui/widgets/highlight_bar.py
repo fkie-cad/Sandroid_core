@@ -663,54 +663,47 @@ def flow_snapshot(row: Any, shown: bool, scope: str | None = None) -> dict:
     }
 
 
-def _only_noise(act: Any) -> bool:
-    """The row has open/close noise and no create / modify / delete /
-    rename / attrs op at all.
+def _our_reads(act: Any, path: str) -> dict[str, int]:
+    """``{process: n}``: the row's events that are ``read_device_files``'s
+    own reads -- open/close noise by head / cat / su, inside one of its read
+    windows on *path*, on the recorded device. Matched event by event, so
+    a write (or an analyst's ``cat`` outside the window) is never ours.
     """
-    ops = getattr(act, "ops", None) or {}
-    return bool(ops.get("noise")) and not any(
-        n for cat, n in ops.items() if cat != "noise"
+    from sandroid.ai.device_files import (
+        is_own_read_process,
+        recorded_serial_cached,
+        tool_read_at,
     )
 
+    events = getattr(act, "events", None) or []
+    if not events:
+        return {}
+    serial = recorded_serial_cached()
+    ours: dict[str, int] = {}
+    for ev in events:
+        process = str(getattr(ev, "process", "") or "")
+        if getattr(ev, "category", None) != "noise" or not is_own_read_process(process):
+            continue
+        when = getattr(ev, "when", None)
+        t = when.timestamp() if when is not None else None
+        if t is not None and tool_read_at(path, t, serial=serial):
+            head = process.split(" · ", 1)[0]
+            ours[head] = ours.get(head, 0) + 1
+    return ours
 
-def _ours(act: Any, path: str) -> bool:
-    """Our own reads may be taken off: a noise-only row read by
-    ``read_device_files`` around its last event.
+
+def _processes(act: Any, ours: dict[str, int]) -> list[str]:
+    """The top three processes without our own reads (a process keeps its
+    place for any event that is not ours).
     """
-    from sandroid.ai.device_files import tool_read_at
-
-    if not _only_noise(act):
-        return False
-    last = getattr(act, "last", None)
-    return tool_read_at(path, last.timestamp() if last is not None else None)
-
-
-def _own_reads(act: Any, path: str) -> int:
-    """Open/read events of ``read_device_files``'s own head / cat / su on
-    *path*: only on a noise-only row the tool read (a row with any write
-    keeps every event and every process).
-    """
-    from sandroid.ai.device_files import is_own_read_process
-
-    if not _ours(act, path):
-        return 0
-    return sum(
-        int(n or 0)
-        for name, n in (getattr(act, "processes", None) or {}).items()
-        if is_own_read_process(name)
-    )
-
-
-def _processes(act: Any, path: str = "") -> list[str]:
-    from sandroid.ai.device_files import is_own_read_process
-
-    drop_ours = bool(path) and _ours(act, path)
     procs: dict[str, int] = {}
     for name, n in (getattr(act, "processes", None) or {}).items():
         head = str(name).split(" · ", 1)[0]
-        if drop_ours and is_own_read_process(head):
-            continue
         procs[head] = procs.get(head, 0) + n
+    for head, n in ours.items():
+        if head in procs:
+            procs[head] -= n
+    procs = {k: v for k, v in procs.items() if v > 0}
     return [name for name, _n in sorted(procs.items(), key=lambda kv: -kv[1])[:3]]
 
 
@@ -742,15 +735,14 @@ def file_snapshot(
         ops = {"changed": "M", "new": "C", "deleted": "D"}.get(review_kind, "")
     first = getattr(act, "first", None)
     last = getattr(act, "last", None)
+    ours = _our_reads(act, canonical_key(path)) if act is not None else {}
     return {
         "key": canonical_key(path),
         "shown": bool(shown),
         "path": path,
         "ops": ops,
-        "count": max(
-            0, int(getattr(act, "count", 0) or 0) - _own_reads(act, canonical_key(path))
-        ),
-        "processes": _processes(act, canonical_key(path)) if act is not None else [],
+        "count": max(0, int(getattr(act, "count", 0) or 0) - sum(ours.values())),
+        "processes": _processes(act, ours) if act is not None else [],
         "first": first.timestamp() if first is not None else None,
         "last": last.timestamp() if last is not None else None,
         "watched": bool(watched),

@@ -615,3 +615,97 @@ def test_local_file_content_reads_kept_versions(tmp_path, monkeypatch):
 
     monkeypatch.setattr(watchlist_store, "version_dirs", lambda p: [])
     assert rc.local_file_content("/x") == (None, "metadata")
+
+
+# -- mask ON: main's name rule, then redact_secrets (pinned to 1e7de16) ---------
+
+_PIN_ROW = {
+    "key": "f1",
+    "method": "POST",
+    "url": "https://api.x/v1/login?session_id=SESSIONSECRET&sig=SIGSECRET"
+    "&apikey=APIKEYSECRET&page=2",
+    "status": 200,
+    "app": "com.x",
+}
+_PIN_DETAIL = {
+    "request_headers": [
+        ["Authorization", "Basic dXNlcjpwYXNzd29yZA=="],
+        ["Cookie", "sid=COOKIESECRET; csrftoken=CSRFSECRET"],
+        ["X-Api-Key", "XAPIKEYSECRET"],
+        ["X-Auth", "XAUTHSECRET"],
+        ["Content-Type", "application/json"],
+    ],
+    "response_headers": [
+        ["Set-Cookie", "session=SETCOOKIESECRET; Path=/"],
+        ["Content-Type", "application/json"],
+    ],
+    "request_body": {
+        "content": '{"username":"bob","password":"PWSECRET",'
+        '"refresh_token":"RTSECRET","session":"SESSBODY"}',
+        "size_bytes": 80,
+    },
+    "response_body": {
+        "content": '{"access_token":"ATSECRET","id_token":"IDTSECRET","n":1}',
+        "size_bytes": 50,
+    },
+}
+#: What main 1e7de16's network_digest(mask=True) produced for these rows.
+_PIN_MAIN = (
+    "POST https://api.x/v1/login?session_id=[text, 13 chars]&sig=SIGSECRET"
+    "&apikey=***, 12 chars]&page=2 200 · app com.x\n"
+    "query: session_id=[text, 13 chars]; sig=SIGSECRET; apikey=***, 12 chars]; "
+    "page=2\n"
+    "request headers: Authorization: [Basic, 26 chars] | Cookie: [cookie, 2 "
+    "part(s), 38 chars] | X-Api-Key: ***, 13 chars] | X-Auth: [value, 11 chars]"
+    " | Content-Type: application/json\n"
+    "response headers: Set-Cookie: [set-cookie, 2 part(s), 31 chars] | "
+    "Content-Type: application/json\n"
+    'request body: {"username":"bob","password":"[text, 8 chars]",'
+    '"refresh_token":"[text, 8 chars]","session":"[text, 8 chars]"}\n'
+    'response body: {"access_token":"[text, 8 chars]","id_token":"[text, 9 '
+    'chars]","n":1}'
+)
+
+
+def test_mask_on_network_digest_is_main_1e7de16():
+    text = rc.network_digest(_PIN_ROW, detail=_PIN_DETAIL, mask=True).text
+    assert text == _PIN_MAIN
+    for secret in ("dXNlcjpw", "COOKIESECRET", "SETCOOKIESECRET", "XAUTHSECRET"):
+        assert secret not in text
+    form_row = {"key": "f2", "method": "POST", "url": "https://a/x", "status": 200}
+    form = {
+        "request_headers": [["Content-Type", "application/x-www-form-urlencoded"]],
+        "request_body": {
+            "content": "user=bob&pwd=PWDSECRET&session_key=SKSECRET",
+            "size_bytes": 40,
+        },
+    }
+    assert rc.network_digest(form_row, detail=form, mask=True).text == (
+        "POST https://a/x 200\n"
+        "request headers: Content-Type: application/x-www-form-urlencoded\n"
+        "request body: user=bob; pwd=PWDSECRET; session_key=[text, 8 chars]"
+    )
+    # Mask off: everything as it is.
+    raw = rc.network_digest(_PIN_ROW, detail=_PIN_DETAIL, mask=False).text
+    assert "Authorization: Basic dXNlcjpwYXNzd29yZA==" in raw
+    assert '"refresh_token":"RTSECRET"' in raw
+
+
+def test_mask_on_files_lines_and_cells_get_the_name_rule():
+    text = (
+        "content read from device 10:00 (prefs, 1 kB):\n<content>\n"
+        "refresh_token = RTSECRET\nuser = bob\nsession=SESSKV\nauthKey: AKKV\n"
+        "sqlite tables: accounts (1 rows)\naccounts: name, auth_token, session\n"
+        "  name=bob; auth_token=DBTOK; session=DBSESS\n</content>"
+    )
+    out = rc.mask_names(text)
+    for secret in ("RTSECRET", "SESSKV", "AKKV", "DBTOK", "DBSESS"):
+        assert secret not in out
+    assert "user = bob" in out
+    assert "refresh_token = [text, 8 chars]" in out
+    assert "  name=bob; auth_token=[text, 5 chars]; session=[text, 6 chars]" in out
+    row = {"key": "/d/a.xml", "path": "/d/a.xml"}
+    masked = rc.files_digest(row, mask=True, content=(text, "content")).text
+    assert "RTSECRET" not in masked
+    plain = rc.files_digest(row, mask=False, content=(text, "content")).text
+    assert "refresh_token = RTSECRET" in plain

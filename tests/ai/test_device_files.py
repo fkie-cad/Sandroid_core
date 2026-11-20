@@ -976,3 +976,26 @@ def test_a_failed_kept_render_is_not_cached(tmp_path, monkeypatch):
     assert rc.file_content("/data/data/com.x/failed.xml").digest is None
     monkeypatch.setattr(rc, "_render_local", real)
     assert "user_id = u-4711" in rc.file_content("/data/data/com.x/failed.xml").digest
+
+
+def test_a_diff_only_result_after_a_failed_render_is_not_cached(tmp_path, monkeypatch):
+    from sandroid.core import watchlist_store
+
+    version = tmp_path / "v012"
+    version.mkdir()
+    local = version / "a.xml"
+    local.write_bytes(PREFS)
+    monkeypatch.setattr(watchlist_store, "version_dirs", lambda p: [version])
+    monkeypatch.setattr(watchlist_store, "version_file", lambda v, p: local)
+    monkeypatch.setattr(watchlist_store, "version_diff", lambda v: "+ changed")
+    rc._LOCAL_RENDERS.clear()
+    rc._KEPT_CONTENT.clear()
+    real = rc._render_local
+    monkeypatch.setattr(rc, "_render_local", lambda *a: None)
+    first = rc.file_content("/data/data/com.x/difonly.xml")
+    assert "+ changed" in first.digest
+    assert "user_id" not in first.digest
+    assert not rc._KEPT_CONTENT
+    monkeypatch.setattr(rc, "_render_local", real)
+    again = rc.file_content("/data/data/com.x/difonly.xml")
+    assert "user_id = u-4711" in again.digest
