@@ -920,8 +920,10 @@ def test_apply_seeds_everything_and_second_apply_writes_nothing(service, device)
     assert plan.infos["imsi"].current == STOCK_SIM["imsi"]
     assert device.props["gsm.sim.operator.alpha"] == "T-Mobile"
     assert not [w for w in device.writes if "gsm.sim" in w or "airplane" in w]
-    # The phone number fits adb emu phonenumber: the fallback, read back.
-    assert st["phone_number"] == ("verified", "")
+    # A restart from Sandroid sets the phone number: no adb emu phonenumber
+    # (it would rewrite the AVD's host-side SIM profile).
+    assert st["phone_number"] == ("pending", ident.NEEDS_EMULATOR_START)
+    assert not [w for w in device.writes if "phonenumber" in w]
     assert st["gps"] == ("applied", "unverified")  # no app ran a GPS session
     assert st["imei"][0] == "hook-only"
     assert st["build_model"] == ("skipped", "disabled")
@@ -932,7 +934,6 @@ def test_apply_seeds_everything_and_second_apply_writes_nothing(service, device)
     assert device.fs[SSAID_FILE].startswith(b"ABX\0")  # re-encoded
     assert device.settings["device_name"] == "Maras Pixel 3f9a1c07"
     assert device.props["persist.sys.locale"] == "de-DE"
-    assert device.emu_state["phone"].startswith("1520")
     lon, lat, _alt = device.emu_state["geo"].split()
     assert lat.endswith("0001")
     assert lon.endswith("0001")
@@ -969,7 +970,7 @@ def test_apply_seeds_everything_and_second_apply_writes_nothing(service, device)
     assert device.writes == []
     assert len(device.calls) == 1
     assert not lines2
-    assert again.infos["phone_number"].status == "verified"
+    assert again.infos["phone_number"].status == "pending"
 
 
 def service_folder(applied_line: dict) -> Path:
@@ -2001,6 +2002,26 @@ def test_a_sim_the_emulator_did_not_start_with_stays_pending(service, device):
     assert service.pre_spawn("com.example.app") is None
 
 
+def test_the_phone_number_fallback_only_where_a_restart_would_not_help(service, device):
+    # A restart from Sandroid would set it: pending, the emulator never gets
+    # adb emu phonenumber (it rewrites <avd>/modem_simulator on the host).
+    plan = service.apply(SERIAL, "com.example.app")
+    info = plan.infos["phone_number"]
+    assert (info.status, info.reason) == ("pending", ident.NEEDS_EMULATOR_START)
+    assert info.sim_launch
+    assert not [w for w in device.writes if "phonenumber" in w]
+    assert "phone" not in device.emu_state
+
+    # A restart would not help and the number fits: the fallback, read back.
+    device.blocker = ident.identity_sim.OWN_SYSDIR
+    service._applied.clear()
+    plan = service.apply(SERIAL, "com.example.app")
+    info = plan.infos["phone_number"]
+    assert (info.status, info.reason) == ("verified", "")
+    assert device.emu_state["phone"].startswith("1520")
+    assert len(device.emu_state["phone"]) <= 11
+
+
 def test_no_restart_advice_when_a_restart_would_not_help(service, device):
     device.blocker = ident.identity_sim.NO_TEMPLATE
     profile = service.active_profile()
@@ -2151,6 +2172,7 @@ def test_phone_markers_carry_the_number_the_sim_carries(number, value, forms):
 
 def test_the_emulator_phone_number_fallback_is_no_sim_launch_value(service, device):
     # adb emu phonenumber can be retried: its failure still blocks as before.
+    device.blocker = ident.identity_sim.OWN_SYSDIR
     plan = service.plan(SERIAL, "com.example.app")
     assert not plan.infos["phone_number"].sim_launch
     assert plan.infos["imsi"].sim_launch

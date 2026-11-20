@@ -268,6 +268,9 @@ EMULATOR_SIM_OPERATOR = "the emulator takes the SIM operator name from its carri
 NETWORK_OPERATOR_CARRIES = "the network operator name carries it"
 #: How SIM values reach an emulator (:mod:`identity_sim`).
 SIM_MECHANISM = "set when the emulator starts (its SIM card profile)"
+PHONE_MECHANISM = (
+    f"{SIM_MECHANISM}, else adb emu phonenumber if a restart cannot (11 digits at most)"
+)
 
 
 def _spec(*args: Any, **kw: Any) -> tuple[str, KindSpec]:
@@ -335,13 +338,11 @@ REGISTRY: dict[str, KindSpec] = dict(
             ("native", "hook"),
             "none",
             "READ_PHONE_NUMBERS",
-            f"{SIM_MECHANISM}, else adb emu phonenumber (up to 11 digits)",
+            PHONE_MECHANISM,
             "service call iphonesubinfo (line 1 number)",
             verify="soft",
             needs_emulator=True,
-            emulator_mechanism=(
-                f"{SIM_MECHANISM}, else adb emu phonenumber (up to 11 digits)"
-            ),
+            emulator_mechanism=PHONE_MECHANISM,
         ),
         _spec(
             "gps",
@@ -3099,8 +3100,9 @@ class IdentityService:
         (a snapshot keeps the old SIM cached), never while airplane mode is
         on; afterwards a mismatch fails and an unreadable value stays
         applied. Not started with it: pending when a restart from Sandroid
-        sets it, else skipped with the reason; the phone number first falls
-        back to ``adb emu phonenumber`` when it fits.
+        sets it, else skipped with the reason. Only where a restart would not
+        set it, the phone number falls back to ``adb emu phonenumber`` when
+        it fits (that rewrites the AVD's host-side SIM profile file).
         """
         spec = REGISTRY[vs.kind]
         vid, desired = vs.id, info.rendered
@@ -3152,21 +3154,28 @@ class IdentityService:
                 if retry:
                     info.reason = SIM_TOGGLE_RETRY
             return
-        if vs.kind == "phone_number":
-            if mem.emu.get(vid) == desired:
-                info.status, info.reason = "applied", ""
-                info.sim_launch = False
-                return
-            if _ascii_digits(desired) and len(desired) <= 11:
-                info.sim_launch = False
-                # adb emu phonenumber takes at most 11 digits, no '+'.
-                plan.steps.append(Step(vid, "none", desired, current))
-                return
+        if vs.kind == "phone_number" and mem.emu.get(vid) == desired:
+            info.status, info.reason = "applied", ""
+            info.sim_launch = False
+            return
         try:
             blocker = identity_sim.restart_blocker(emu, profile)
         except (OSError, identity_sim.SimPatchError) as exc:
             logger.debug(f"identity: SIM restart check failed: {exc}")
             blocker = "the emulator's system image could not be read"
+        if (
+            blocker
+            and vs.kind == "phone_number"
+            and _ascii_digits(desired)
+            and len(desired) <= 11
+        ):
+            # A restart would not set it: adb emu phonenumber (at most 11
+            # digits, no '+'). Never when a restart can: the emulator writes
+            # the number into the AVD's modem_simulator/iccprofile_for_sim0.xml
+            # on the host, which the SIM launch hook would have to undo.
+            info.sim_launch = False
+            plan.steps.append(Step(vid, "none", desired, current))
+            return
         if blocker:
             info.status, info.reason = "skipped", blocker
         else:
