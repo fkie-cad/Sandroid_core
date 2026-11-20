@@ -36,6 +36,7 @@ from sandroid.core.adb_utils import (
     is_adb_error_actionable,
     log_adb_result,
     quote_host_arg,
+    redact_typed_text,
 )
 
 PIPE = subprocess.PIPE
@@ -262,7 +263,7 @@ class Adb:
                 return "", f"OSError: {e}"
 
         full_command = cls._build_command(command, serial=serial)
-        logger.debug("Running ADB command " + full_command)
+        logger.debug("Running ADB command " + redact_typed_text(full_command))
         try:
             output = subprocess.run(
                 cls._build_shell_command(full_command),
@@ -280,13 +281,13 @@ class Adb:
             log_adb_result(full_command, output.stdout, output.stderr)
             return output.stdout, output.stderr.strip()
         except subprocess.TimeoutExpired:
-            logger.error(f"ADB command timed out: {full_command}")
+            logger.error(f"ADB command timed out: {redact_typed_text(full_command)}")
             return "", f"Command timed out after {timeout:g} seconds"
         except OSError as e:
-            logger.error(f"Failed to start ADB process: {e}")
+            logger.error(f"Failed to start ADB process: {redact_typed_text(str(e))}")
             return "", f"OSError: {e}"
         except subprocess.SubprocessError as e:
-            logger.error(f"ADB subprocess error: {e}")
+            logger.error(f"ADB subprocess error: {redact_typed_text(str(e))}")
             return "", f"SubprocessError: {e}"
 
     @classmethod
@@ -314,7 +315,7 @@ class Adb:
             subprocess.SubprocessError: If there is a subprocess error during execution.
         """
         full_command = cls._build_command(command, serial=serial)
-        logger.debug("Running ADB command " + full_command)
+        logger.debug("Running ADB command " + redact_typed_text(full_command))
         try:
             process = subprocess.Popen(
                 cls._build_shell_command(full_command),
@@ -325,10 +326,12 @@ class Adb:
             )
             return process
         except OSError as e:
-            logger.error(f"Failed to start ADB Popen process: {e}")
+            logger.error(
+                f"Failed to start ADB Popen process: {redact_typed_text(str(e))}"
+            )
             raise
         except subprocess.SubprocessError as e:
-            logger.error(f"ADB Popen subprocess error: {e}")
+            logger.error(f"ADB Popen subprocess error: {redact_typed_text(str(e))}")
             raise
 
     @classmethod
@@ -353,7 +356,7 @@ class Adb:
             subprocess.SubprocessError: If there is a subprocess error during execution.
         """
         full_command = cls._build_command(f"exec-out {command}")
-        logger.debug("Running ADB command " + full_command)
+        logger.debug("Running ADB command " + redact_typed_text(full_command))
         try:
             output = subprocess.run(
                 cls._build_shell_command(full_command),
@@ -365,10 +368,12 @@ class Adb:
             )
             return output.stdout, output.stderr.strip()
         except OSError as e:
-            logger.error(f"Failed to start ADB exec-out process: {e}")
+            logger.error(
+                f"Failed to start ADB exec-out process: {redact_typed_text(str(e))}"
+            )
             return "", f"OSError: {e}"
         except subprocess.SubprocessError as e:
-            logger.error(f"ADB exec-out subprocess error: {e}")
+            logger.error(f"ADB exec-out subprocess error: {redact_typed_text(str(e))}")
             return "", f"SubprocessError: {e}"
 
     @classmethod
@@ -384,7 +389,7 @@ class Adb:
         Returns:
             A tuple of (stdout, stderr) from the ADB command.
         """
-        logger.debug(f"Executing root shell command: {command}")
+        logger.debug(f"Executing root shell command: {redact_typed_text(command)}")
         stdout, stderr = cls.send_adb_command(f"shell su 0 {command}")
 
         if stderr:

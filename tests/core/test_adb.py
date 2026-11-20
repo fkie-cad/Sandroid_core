@@ -263,3 +263,110 @@ def test_base_argv_honors_adb_path_and_target(monkeypatch):
     Adb.set_target_device("emulator-5554")
     assert Adb.base_argv() == ["/sdk/platform-tools/adb", "-s", "emulator-5554"]
     assert Adb.base_argv(serial="emulator-5556")[-1] == "emulator-5556"
+
+
+# ---------------------------------------------------------------------------
+# typed text never reaches the log
+# ---------------------------------------------------------------------------
+
+#: Letters none of the adb log lines contain on their own.
+TYPED = "ZQXJ#WV"
+
+
+def _typed_commands() -> list[str]:
+    """``input text`` lines as Rewind's replay sends them (one character per
+    call, quoted for the device and the host) plus a whole-word form.
+    """
+    from sandroid.core.adb_utils import device_shell_command
+    from sandroid.features.player import input_text_arg
+
+    one_by_one = [
+        device_shell_command(f"input text {input_text_arg(c)}") for c in TYPED
+    ]
+    return [*one_by_one, device_shell_command(f"input text {input_text_arg(TYPED)}")]
+
+
+def test_redact_typed_text_hides_every_typed_character():
+    import string
+
+    from sandroid.core.adb_utils import device_shell_command, redact_typed_text
+    from sandroid.features.player import input_text_arg
+
+    for c in string.ascii_letters + string.digits + string.punctuation:
+        cmd = "-s emulator-5554 " + device_shell_command(
+            f"input text {input_text_arg(c)}"
+        )
+        out = redact_typed_text(cmd)
+        assert out == "-s emulator-5554 shell 'input text <1 char redacted>"
+    assert redact_typed_text("shell input -d 0 text pw") == (
+        "shell input -d 0 text <2 chars redacted>"
+    )
+    assert redact_typed_text("emu 'event' 'text' 'pw'") == (
+        "emu 'event' 'text' <2 chars redacted>"
+    )
+    # character keys are typing too; named keys are not
+    assert redact_typed_text("shell input keyevent KEYCODE_P 29") == (
+        "shell input keyevent <2 keys redacted>"
+    )
+    for cmd in (
+        "shell input keyevent KEYCODE_ENTER",
+        "shell input keyevent 66",
+        "shell input tap 10 20",
+        "shell pm list packages -3",
+        "shell cat /sdcard/text.txt",
+        "-s emulator-5554 shell 'getprop ro.build.version.sdk'",
+    ):
+        assert redact_typed_text(cmd) == cmd
+
+
+@pytest.mark.parametrize("path", ["run", "timeout", "popen", "root", "telnet"])
+def test_typed_text_is_never_logged_but_still_executed(monkeypatch, caplog, path):
+    import logging
+
+    executed: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        executed.append(cmd)
+        if path == "timeout":
+            raise subprocess.TimeoutExpired(cmd, 1)
+        # stderr: a warning line naming the command (log_adb_result)
+        return _FakeCompletedProcess(stderr="error: device offline")
+
+    def fake_popen(cmd, *args, **kwargs):
+        executed.append(cmd)
+        raise OSError(f"cannot start {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    caplog.set_level(logging.DEBUG)
+    commands = _typed_commands()
+    for cmd in commands:
+        if path in ("run", "timeout"):
+            Adb.send_adb_command(cmd, serial="emulator-5554")
+        elif path == "popen":
+            with pytest.raises(OSError):
+                Adb.send_adb_command_popen(cmd, serial="emulator-5554")
+        elif path == "root":
+            Adb.send_root_shell(f"input text {TYPED}")
+        else:
+            Adb.send_telnet_command(f"event text {TYPED}")
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "redacted" in logged
+    assert not set(TYPED) & set(logged)
+    # what runs is unchanged
+    assert executed
+    if path in ("run", "timeout", "popen"):
+        assert all(cmd in run for cmd, run in zip(commands, executed, strict=True))
+
+
+def test_other_commands_are_logged_unchanged(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: _FakeCompletedProcess(stdout="ok")
+    )
+    caplog.set_level(logging.DEBUG)
+    Adb.send_adb_command("shell pm list packages -3", serial="emulator-5554")
+    logged = [r.getMessage() for r in caplog.records]
+    assert "Running ADB command -s emulator-5554 shell pm list packages -3" in logged
+    assert "ADB command success: -s emulator-5554 shell pm list packages -3" in logged

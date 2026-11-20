@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from sandroid.core.adb_utils import is_adb_error_actionable, quote_host_arg
+from sandroid.core.adb_utils import (
+    is_adb_error_actionable,
+    quote_host_arg,
+    redact_typed_text,
+)
 
 logger = getLogger(__name__)
 
@@ -65,9 +69,14 @@ def send_telnet_command(
         quoted = " ".join(quote_host_arg(word) for word in command.split())
         stdout, stderr = send_command("emu " + quoted)
         if stderr and is_adb_error_actionable(stderr):
-            logger.error(f'Telnet command "{command}" failed: {stderr.strip()}')
+            logger.error(
+                f'Telnet command "{redact_typed_text(command)}" failed: '
+                f"{stderr.strip()}"
+            )
         elif stderr:
-            logger.debug(f'Telnet command "{command}" info: {stderr.strip()}')
+            logger.debug(
+                f'Telnet command "{redact_typed_text(command)}" info: {stderr.strip()}'
+            )
         return stdout, stderr
 
 

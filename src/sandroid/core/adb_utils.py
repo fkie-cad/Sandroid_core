@@ -90,6 +90,126 @@ def device_shell_arg(arg: str) -> str:
     return quote_host_arg(shlex.quote(arg))
 
 
+# ---------------------------------------------------------------------------
+# Typed text in log output
+#
+# ``input text <chars>`` (Rewind's replay types one character per call, so a
+# password goes through here character by character) and ``input keyevent``
+# with character keys put what the analyst typed on the command line. Every
+# place that LOGS an adb command line passes it through
+# :func:`redact_typed_text`; what is executed is never changed.
+# ---------------------------------------------------------------------------
+
+#: Quote characters a host-quoted command line may put around a word.
+_Q = "['\"]*"
+#: ``input [source] [-d display] text|keyevent`` or the emulator console's
+#: ``event text``, possibly with host-shell quotes around the words.
+_TYPING_RE = re.compile(
+    rf"\b(?:input{_Q}(?:\s+{_Q}[\w-]+{_Q}){{0,3}}?|event{_Q})"
+    rf"\s+{_Q}(text|keyevent){_Q}(?=\s|$)"
+)
+#: ``KEYCODE_*`` names (without the prefix) that type a character.
+_CHAR_KEY_NAMES = frozenset(
+    [
+        "SPACE",
+        "PERIOD",
+        "COMMA",
+        "AT",
+        "MINUS",
+        "PLUS",
+        "EQUALS",
+        "SLASH",
+        "BACKSLASH",
+        "SEMICOLON",
+        "APOSTROPHE",
+        "GRAVE",
+        "LEFT_BRACKET",
+        "RIGHT_BRACKET",
+        "STAR",
+        "POUND",
+    ]
+)
+#: Numeric key codes that type a character (digits, letters, punctuation,
+#: space, numpad).
+_CHAR_KEY_CODES = frozenset(
+    [*range(7, 19), *range(29, 57), 62, *range(68, 78), 81, *range(144, 164)]
+)
+
+
+def _is_char_key(arg: str) -> bool:
+    """Does the ``input keyevent`` argument ``arg`` type a character?"""
+    word = arg.strip("'\"").upper()
+    if word.isdigit():
+        return int(word) in _CHAR_KEY_CODES
+    name = word.removeprefix("KEYCODE_")
+    return len(name) == 1 or name in _CHAR_KEY_NAMES or name.startswith("NUMPAD_")
+
+
+def _typing_args(command: str, verb: str, depth: int = 0) -> list[str] | None:
+    """The words after ``input ... <verb>`` in ``command``, unwrapping up to
+    three layers of host/device quoting; None when it does not parse. (A
+    compound command's later words count too: the count is a hint only.)
+    """
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    for i, word in enumerate(words):
+        if word in ("input", "event"):
+            for j in range(i + 1, min(i + 5, len(words))):
+                if words[j] == verb:
+                    return words[j + 1 :]
+    if depth < 3:
+        for word in words:
+            if verb in word and any(c.isspace() for c in word):
+                found = _typing_args(word, verb, depth + 1)
+                if found is not None:
+                    return found
+    return None
+
+
+def _count(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def redact_typed_text(command: str) -> str:
+    """``command`` for a log line, without the characters it types.
+
+    The argument of ``input text`` (and of the emulator console's
+    ``event text``) becomes ``<N chars redacted>``; an ``input keyevent``
+    whose keys include a character key becomes ``<N keys redacted>``.
+    Everything after the verb is dropped from the log line (a quoted
+    argument cannot be cut out reliably). Other commands are returned
+    unchanged.
+
+    Args:
+        command: An adb (or device shell) command line.
+
+    Returns:
+        The command line safe to log.
+    """
+    if not isinstance(command, str) or (
+        "text" not in command and "keyevent" not in command
+    ):
+        return command
+    pos = 0
+    while True:
+        m = _TYPING_RE.search(command, pos)
+        if m is None:
+            return command
+        verb = m.group(1)
+        args = _typing_args(command, verb)
+        if verb == "keyevent":
+            if args is not None and not any(_is_char_key(a) for a in args):
+                pos = m.end()  # named keys only (ENTER, BACK): keep, look on
+                continue
+            what = _count(len(args), "key") if args is not None else "keys"
+        else:
+            typed = " ".join(args).replace("%s", " ") if args is not None else None
+            what = _count(len(typed), "char") if typed is not None else "text"
+        return f"{command[: m.end()]} <{what} redacted>"
+
+
 def device_glob_arg(pattern: str) -> str:
     """Quote a device path *pattern* for ``adb shell``, keeping ``*``/``?``.
 
@@ -409,6 +529,7 @@ def log_adb_result(
         stderr: Standard error from the command
         log_level: Base log level for success (default DEBUG)
     """
+    command = redact_typed_text(command)
     if stderr:
         # ``get-state`` is a reachability probe: "device not found" is its
         # expected answer while a snapshot loads or the emulator boots, and
