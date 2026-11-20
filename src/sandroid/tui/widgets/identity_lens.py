@@ -166,8 +166,8 @@ def _spotlight() -> Any | None:
 
 
 def _launch_persona() -> str:
-    """The persona the target device runs (``""``: none): its launch's, or
-    the one its identity record names. From memory, any thread.
+    """The persona the target device holds (``""``: none): the one its
+    identity record names, else its launch's. From memory, any thread.
     """
     ident = identity_service()
     if ident is None:
@@ -1257,7 +1257,7 @@ class IdentityLens(Vertical):
         name = profile.name or profile.id
         title = f"{name} rev {profile.revision}, mode {mode}"
         if _is_launch_persona(profile.id):
-            title += ", persona of this launch"
+            title += ", persona of this device"
         applied_at, verified_at = self._apply_times(ident, profile)
         bits = []
         if applied_at:
@@ -2120,8 +2120,8 @@ class IdentityLens(Vertical):
         if persona and persona != active:
             first = text.removesuffix("; space applies it.").rstrip(".")
             self.app.notify(
-                f"{first}. This emulator keeps {persona}, the persona it was "
-                "started as; other devices use the new profile.",
+                f"{first}. This emulator keeps {persona}, the persona it "
+                "holds; other devices use the new profile.",
                 timeout=5,
             )
         else:

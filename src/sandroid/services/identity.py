@@ -199,6 +199,11 @@ OUT_OF_TIME = "not applied: device preparation ran out of time"
 PERSONA_META_KEY = "persona_id"
 
 
+def _can_be_persona(serial: str | None) -> bool:
+    """Personas are emulator snapshots: only an emulator can hold one."""
+    return bool(serial) and str(serial).startswith("emulator-")
+
+
 def launch_persona(serial: str | None) -> str | None:
     """The persona of Sandroid's live launch of ``serial``: ``None`` when
     there is no live launch (attached, another process's, a TUI restart),
@@ -3820,60 +3825,88 @@ class IdentityService:
         return self.persona_of(serial) or str(cfg.profile or "")
 
     def persona_of(self, serial: str | None) -> str:
-        """The persona ``serial`` runs (``""``: none): its launch's, else
-        the one the device record names (a TUI restart, a persona
-        snapshot). From memory only (cheap, any thread).
+        """The persona ``serial`` holds (``""``: none). From memory only
+        (cheap, any thread).
+
+        The device decides: the persona its identity record names (a TUI
+        restart, a restart, a persona snapshot loaded into any launch);
+        without one, the persona of Sandroid's live launch (its first apply
+        is still to come). Only emulators hold personas.
         """
-        persona = launch_persona(serial)
-        if persona is not None or not serial:
-            return persona or ""  # Sandroid's live launch decides
+        if not _can_be_persona(serial):
+            return ""
         with self._lock:
             mem = self._applied.get(serial)
-            return mem.persona if mem is not None else ""
+            recorded = mem.persona if mem is not None else ""
+        return recorded or launch_persona_id(serial)
 
     def _profile_id_now(self, serial: str | None) -> str:
         """:meth:`profile_id_for` after reading the device record once
-        (worker thread): a persona that only the record names is known.
+        (worker thread): the persona the record names is known.
 
         Raises:
-            IdentityApplyError: Only the record can tell the profile (no
-                live launch, not read yet) and the device did not answer it.
+            IdentityApplyError: The record got no answer and no live launch
+                tells how the device started (:data:`RECORD_UNREAD`).
         """
         if self._needs_record(serial):
             assert serial is not None
-            gen = self._gen(serial)
-            self._take_record(serial, self._read_record(serial), gen)
+            self._take_record(serial)
         return self.profile_id_for(serial)
 
     def _needs_record(self, serial: str | None) -> bool:
-        """Only ``serial``'s record can tell its profile and memory has not
-        read it yet.
+        """Memory has not read the record of ``serial``, which may name a
+        persona (an emulator, identity mode on).
         """
-        if not serial or self.config().mode != "profile":
-            return False
-        if launch_persona(serial) is not None:
+        if self.config().mode != "profile" or not _can_be_persona(serial):
             return False
         with self._lock:
-            return serial not in self._hydrated
+            return serial not in self._hydrated and serial not in self._applying
 
-    def _take_record(self, serial: str, read: _RecordRead | None, gen: int) -> None:
-        """Hydrate from ``read`` (one slower read when there was none; ``gen``
-        as before the first read); the persona it names is known even when
-        memory keeps the rest (a snapshot load during the read).
+    def _mem_gen(self, serial: str) -> int:
+        """``gen`` of ``serial`` before a record read; the memory entry
+        exists from now on, so a :meth:`forget` meanwhile moves it.
+        """
+        with self._lock:
+            return self._applied.setdefault(serial, _Applied()).gen
+
+    def _take_record(
+        self,
+        serial: str,
+        read: _RecordRead | None = None,
+        gen: int = 0,
+        package: str | None = None,
+    ) -> _RecordRead | None:
+        """Hydrate from the device record until memory takes it.
+
+        ``read`` (with ``gen`` from :meth:`_mem_gen` before it) is used
+        first. A read without an answer is tried once more, slower; a read
+        that memory refused because ``gen`` moved (a snapshot load during
+        the read) is never trusted: it is read again.
+
+        Returns:
+            The read memory took (``None``: none, a live launch decides).
 
         Raises:
-            IdentityApplyError: No answer (see :data:`RECORD_READ_SLOW_S`).
+            IdentityApplyError: No usable read and no live launch.
         """
-        if read is None:
-            read = self._read_record(serial, timeout=RECORD_READ_SLOW_S)
-        if read is None:
-            raise IdentityApplyError(f"{serial} {RECORD_UNREAD}")
-        self._hydrate(serial, read, gen)
-        with self._lock:
-            if serial in self._hydrated or serial in self._applying:
-                return
-            mem = self._applied.setdefault(serial, _Applied())
-            mem.persona = str((read.record or {}).get("persona") or "")
+        for timeout in (RECORD_READ_TIMEOUT_S, RECORD_READ_SLOW_S):
+            if read is None:
+                gen = self._mem_gen(serial)
+                read = self._read_record(serial, package, timeout=timeout)
+                if read is None:
+                    continue
+            self._hydrate(serial, read, gen)
+            with self._lock:
+                if (
+                    serial in self._hydrated
+                    or serial in self._applying
+                    or serial in self._record_dirty
+                ):
+                    return read  # taken, or memory is newer
+            read = None  # stale: the device state changed during the read
+        if launch_persona(serial) is not None:
+            return None  # Sandroid's live launch tells how it started
+        raise IdentityApplyError(f"{serial} {RECORD_UNREAD}")
 
     def profile_for(self, serial: str | None) -> Profile | None:
         """The profile of :meth:`profile_id_for` (``None``: none applies).
@@ -4576,6 +4609,8 @@ class IdentityService:
         package: str | None = None,
         allow_restart: bool | None = None,
         profile: Profile | None = None,
+        *,
+        as_persona: bool = False,
     ) -> IdentityPlan:
         """P0-P7 on ``serial`` (call from a worker thread).
 
@@ -4587,6 +4622,9 @@ class IdentityService:
                 as allowed: the caller asked already).
             profile: Profile to apply (default: the device's,
                 :meth:`profile_for`).
+            as_persona: ``profile`` becomes the device's persona (the device
+                record names it), also without a live persona launch (a
+                persona build). Applying the device's persona keeps it one.
 
         Returns:
             The final plan (``infos`` hold the statuses after verify).
@@ -4606,16 +4644,29 @@ class IdentityService:
         if allow_restart is None:
             allow_restart = self.config().restart != "never"
         with self._apply_lock:
-            return self._apply(serial, package, allow_restart, profile)
+            return self._apply(
+                serial, package, allow_restart, profile, as_persona=as_persona
+            )
 
     def _apply(
-        self, serial: str, package: str | None, allow_restart: bool, profile: Profile
+        self,
+        serial: str,
+        package: str | None,
+        allow_restart: bool,
+        profile: Profile,
+        *,
+        as_persona: bool = False,
     ) -> IdentityPlan:
+        # Decided once, at the start: a snapshot load during the apply
+        # (forget) must not make _finish drop the persona from the record.
+        as_persona = as_persona or self.persona_of(serial) == profile.id
         with self._lock:
             self._applying.add(serial)
+        self._call.as_persona = as_persona
         try:
             return self._apply_on(serial, package, allow_restart, profile)
         finally:
+            self._call.as_persona = None
             with self._lock:
                 self._applying.discard(serial)
 
@@ -5449,7 +5500,11 @@ class IdentityService:
                 self._hydrate_tried.pop(s, None)
                 if restored:
                     self._record_dirty.discard(s)
-                mem = self._applied.get(s)
+                mem = (
+                    self._applied.setdefault(s, _Applied())
+                    if serial
+                    else (self._applied.get(s))
+                )
                 if mem is not None:
                     mem.applied_at = mem.verified_at = 0.0
                     mem.gen += 1  # a read that started before is stale
@@ -5652,9 +5707,7 @@ class IdentityService:
 
     def _hydrate_worker(self, serial: str) -> None:
         try:
-            with self._lock:
-                mem = self._applied.get(serial)
-                gen = mem.gen if mem is not None else 0
+            gen = self._mem_gen(serial)
             read = self._read_record(serial)
             if read is not None:
                 self._hydrate(serial, read, gen)
@@ -5714,8 +5767,10 @@ class IdentityService:
         with self._lock:
             mem.ssaids = ssaids
             if mem.fingerprint == plan.fingerprint:
-                persona = self.persona_of(plan.serial)
-                mem.persona = plan.profile_id if plan.profile_id == persona else ""
+                as_persona = getattr(self._call, "as_persona", None)
+                if as_persona is None:
+                    as_persona = self.persona_of(plan.serial) == plan.profile_id
+                mem.persona = plan.profile_id if as_persona else ""
                 self._learn(mem, plan, state)
                 seeded = not wants_ssaid or (package or "") in mem.seeded
                 if package and not bad and seeded:
@@ -5938,14 +5993,13 @@ class IdentityService:
         serial = Adb.get_target_device()
         if not serial:
             return None
-        with self._lock:
-            mem = self._applied.get(serial)
-            gen = mem.gen if mem is not None else 0
+        gen = self._mem_gen(serial)
         read = self._read_record(serial, package)
         if self._needs_record(serial):
-            # Only the record can tell the profile: never guess (raises
-            # when the device does not answer; the start is refused).
-            self._take_record(serial, read, gen)
+            # The record may name a persona: never guess (raises when the
+            # device does not answer and no live launch tells; the start
+            # is refused). A read across a snapshot load is read again.
+            read = self._take_record(serial, read, gen, package)
         elif read is not None:
             self._hydrate(serial, read, gen)
         profile_id = self.profile_id_for(serial)  # after the record: persona
@@ -5999,6 +6053,14 @@ class IdentityService:
         allow = cfg.restart != "never"
 
         def run() -> None:
+            # The device may have changed meanwhile (a snapshot load while
+            # the start was confirmed): never apply a profile it does not run.
+            now = self._profile_id_now(serial)
+            if now != profile.id:
+                raise IdentityApplyError(
+                    f"the identity profile of {serial} is {now or 'none'} now, "
+                    f"not {profile.id}; start the app again"
+                )
             # Never an unannounced restart: a value that turns out to need
             # one stays pending (the app is not done) and the next start asks.
             plan = self.apply(
