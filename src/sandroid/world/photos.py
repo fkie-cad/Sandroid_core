@@ -60,6 +60,10 @@ MAX_ATTEMPTS = 4
 MAX_RETRY_AFTER_S = 120.0
 #: JPEG quality of the re-encoded photos.
 JPEG_QUALITY = 90
+#: Longest side of a seeded camera photo. The pack stores large photos
+#: downscaled to this; a downloaded original is scaled the same way, so the
+#: device gets the same size however the cache was filled.
+MAX_LONG_SIDE = 3000
 
 # EXIF tags
 _MAKE, _MODEL, _ORIENTATION, _DATETIME = 0x010F, 0x0110, 0x0112, 0x0132
@@ -191,7 +195,11 @@ def ensure_photos(
         pid = str(entry["id"])
         want = str(entry.get("sha256") or "").lower()
         # A downscaled pack file: its URL serves the original.
-        original = str(entry.get("sha256_original") or "").lower()
+        original = (
+            str(entry.get("sha256_original") or "").lower()
+            if entry.get("downscaled")
+            else ""
+        )
         accept = {h for h in (want, original if want else "") if h}
         found = None
         if not PHOTO_ID_RE.fullmatch(pid):
@@ -366,7 +374,7 @@ def import_photos(
         entries = (pack.data.get("photos") if pack else None) or []
     by_sha = {str(e["sha256"]).lower(): e for e in entries if e.get("sha256")}
     for e in entries:  # the original of a downscaled pack file counts too
-        if e.get("sha256") and e.get("sha256_original"):
+        if e.get("sha256") and e.get("downscaled") and e.get("sha256_original"):
             by_sha.setdefault(str(e["sha256_original"]).lower(), e)
     result = PhotoImport()
     cache.mkdir(parents=True, exist_ok=True)
@@ -632,6 +640,8 @@ def process_photo(
     try:
         with Image.open(src) as im:
             clean = _srgb_pixels(im)
+        if not shot and max(clean.size) > MAX_LONG_SIDE:
+            clean.thumbnail((MAX_LONG_SIDE, MAX_LONG_SIDE), Image.Resampling.LANCZOS)
     except (OSError, UnidentifiedImageError, ValueError) as exc:
         raise PhotoError(f"{src.name}: {exc}") from exc
     lat = lon = None

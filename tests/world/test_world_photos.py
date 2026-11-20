@@ -422,6 +422,31 @@ def test_a_downscaled_pack_file_is_fetched_as_its_original(
     assert imported.imported == ["wm-d"]
 
 
+def test_sha256_original_counts_only_for_a_downscaled_entry(
+    server, tmp_path: Path
+) -> None:
+    data = _jpeg(colour=(3, 4, 5))
+    server.files["n.jpg"] = data
+    entry = {**_entry("wm-n", data, server.url + "n.jpg"), "sha256_original": "0" * 64}
+    clock = _Clock()
+    result = ph.ensure_photos(
+        [entry], tmp_path / "cache", sleep=clock.sleep, clock=clock.now
+    )
+    assert result.downloaded == ["wm-n"], result.failed
+
+
+def test_a_large_camera_photo_is_scaled_to_the_pack_size(tmp_path: Path) -> None:
+    from PIL import Image
+
+    src = tmp_path / "big.jpg"
+    Image.new("RGB", (4000, 3000), (10, 20, 30)).save(src, format="JPEG")
+    record = {"id": "wm-big", "ts_ms": 1_763_650_000_000, "category": "food"}
+    out = ph.process_photo(src, record, dt.UTC, tmp_path / "out", name="x.jpg")
+    with Image.open(out.path) as im:
+        assert max(im.size) == ph.MAX_LONG_SIDE
+        assert im.size == (3000, 2250)
+
+
 def test_download_honours_retry_after(server, tmp_path: Path) -> None:
     data = _jpeg()
     server.files["t.jpg"] = data

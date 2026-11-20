@@ -431,13 +431,45 @@ def test_no_persona_launch_is_silent(stage_env) -> None:
     assert persona.persona_stage(SERIAL, True, 120.0) is None
 
 
-def test_a_loaded_persona_is_info(stage_env, svc) -> None:
-    _meta, stamp, _record = stage_env
-    manifest, _ = persona.manifest_for_profile("mara", target_sdk=35)
+def test_a_loaded_persona_is_info(stage_env, svc, avd_root) -> None:
+    _meta, stamp, record = stage_env
+    record["avd"] = AVD
+    manifest, profile = persona.manifest_for_profile("mara", target_sdk=35)
     stamp.update(_stamp(manifest.world_fp))
+    note = persona.persona_stage(SERIAL, True, 120.0)
+    assert note.level == "warning"  # the world, but no snapshot of it
+    assert "no persona snapshot" in note.text
+    _old_persona(avd_root, persona.persona_name(profile, manifest), 1)
     note = persona.persona_stage(SERIAL, True, 120.0)
     assert note.level == "info"
     assert manifest.world_fp[:12] in note.text
+
+
+def test_an_interrupted_prepare_of_the_same_world_says_so(stage_env) -> None:
+    _meta, stamp, _record = stage_env
+    manifest, _ = persona.manifest_for_profile("mara", target_sdk=35)
+    stamp.update(_stamp(manifest.world_fp, state="seeding"))
+    note = persona.persona_stage(SERIAL, True, 120.0)
+    assert note.level == "warning"
+    assert "--force-cleanup" in note.text
+
+
+def test_a_save_also_removes_persona_stubs(avd_root) -> None:
+    stub = avd_root / "snapshots" / "sandroid_persona_stub_aaaaaaaaaaaa_bbbbbbbbbbbb"
+    stub.mkdir()
+    (stub / "snapshot.pb").write_bytes(b"pb")
+    emu = FakeEmulator(avd_root)
+    out = persona.save_persona_snapshot(
+        SERIAL,
+        AVD,
+        "sandroid_persona_mara_111111111111_222222222222",
+        world_fp="f" * 64,
+        emulator=emu,
+        device=StampDevice(_stamp("f" * 64)),
+    )
+    assert out.saved
+    assert stub.name in out.pruned
+    assert not stub.exists()
 
 
 def test_another_world_is_left_alone(stage_env, monkeypatch) -> None:

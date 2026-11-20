@@ -9,7 +9,7 @@ Order of a build (the caller runs it, off the UI thread)::
 
     manifest, profile = manifest_for_profile(pid)
     prepare(serial, manifest)                 # sandroid.world.prepare
-    IdentityService().apply(serial, profile=profile)
+    get_identity_service().apply(serial, profile=profile)
     save_persona_snapshot(serial, avd, persona_name(profile, manifest))
 
 Snapshots are saved and deleted as the ``persona`` actor
@@ -50,7 +50,7 @@ META_KEY = "persona_id"
 DEFAULT_BASE = "clean_8g"
 #: Seconds left that the identity apply (a framework restart) and the
 #: snapshot save need; with less, the step is skipped, not started late.
-APPLY_RESERVE_S = 60.0
+APPLY_RESERVE_S = 200.0  # one framework-restart window (180 s) and margin
 SAVE_RESERVE_S = 20.0
 
 _BUILT_LOCK = threading.Lock()
@@ -112,13 +112,13 @@ def manifest_for_profile(
         sandroid.world.WorldError: The world spec is invalid.
     """
     from sandroid.services.identity import (
-        IdentityService,
         TemplateError,
+        get_identity_service,
         render_owner,
     )
     from sandroid.world.generator import generate
 
-    svc = service or IdentityService()
+    svc = service or get_identity_service()
     seed = svc.resolve_world_seed(profile_id)
     if not seed:
         raise PersonaError(f"identity profile {profile_id!r} has no world section")
@@ -268,7 +268,28 @@ def save_persona_snapshot(
         else:
             out.warnings.append(f"could not delete the old persona snapshot {old}")
     out.kept = [n for n in [name, *older] if n not in out.pruned]
+    for stub in _persona_stubs(avd):  # an interrupted save: holds nothing
+        if delete_persona_snapshot(serial, stub, emulator=emulator):
+            out.pruned.append(stub)
     return out
+
+
+def _persona_stubs(avd: str) -> list[str]:
+    """Persona snapshot folders without a RAM image (not loadable)."""
+    from sandroid.core import emulator
+    from sandroid.core.snapshot_policy import snapshot_complete
+
+    directory = emulator.avd_dir(avd)
+    root = directory / "snapshots" if directory else None
+    if root is None or not root.is_dir():
+        return []
+    return sorted(
+        e.name
+        for e in root.iterdir()
+        if e.is_dir()
+        and e.name.startswith(PERSONA_PREFIX)
+        and not snapshot_complete(avd, e.name)
+    )
 
 
 @dataclass
@@ -324,7 +345,7 @@ def build_persona(
         sandroid.world.prepare.PrepareError: Prepare refused or failed.
     """
     from sandroid.core import emulator as emu
-    from sandroid.services.identity import IdentityService
+    from sandroid.services.identity import get_identity_service
     from sandroid.world.prepare import prepare
 
     dev = device or Device(serial)
@@ -332,7 +353,9 @@ def build_persona(
     if not avd:
         raise PersonaError(f"{serial} is not an emulator with a known AVD")
     sdk = dev.shell("getprop ro.build.version.sdk", timeout=30).out.strip()
-    svc = identity or IdentityService()
+    # The shared service: its apply lock serialises this apply with the
+    # identity stage and app starts, and its memory sees the persona apply.
+    svc = identity or get_identity_service()
     manifest, profile = manifest_for_profile(
         profile_id, service=svc, target_sdk=int(sdk) if sdk.isdigit() else None
     )
@@ -464,10 +487,31 @@ def persona_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
     stamp = device_world(serial, device=dev)
     fp = manifest.world_fp
     if stamp is not None:
-        if stamp.get("state") == "complete" and stamp.get("world_fp") == fp:
+        same = stamp.get("world_fp") == fp
+        if same and stamp.get("state") == "complete":
+            avd = record.get("avd") or ""
+            name = persona_name(profile, manifest)
+            if avd and name in persona_snapshots(avd):
+                text = f"{label}: world {fp[:12]} loaded from {name}"
+                return StageNote(
+                    "warning" if notes else "info", "; ".join([text, *notes])
+                )
             return StageNote(
-                "warning" if notes else "info",
-                "; ".join([f"{label}: world {fp[:12]} loaded", *notes]),
+                "warning",
+                "; ".join(
+                    [
+                        f"{label}: world {fp[:12]} is on the device but no "
+                        "persona snapshot of this identity exists; build it "
+                        "from the CLI (python -m sandroid.world persona build)",
+                        *notes,
+                    ]
+                ),
+            )
+        if same:
+            return StageNote(
+                "warning",
+                f"{label}: an interrupted prepare of world {fp[:12]} "
+                f"({stamp.get('state')}); clean it with --force-cleanup",
             )
         other = str(stamp.get("world_fp") or "")[:12]
         return StageNote(

@@ -61,14 +61,16 @@ def _generate(args: argparse.Namespace, target_sdk: int | None = None) -> Any:
     from sandroid.world import generate
 
     if getattr(args, "profile", None):
+        from sandroid.services.identity import ProfileError
+        from sandroid.world.packs import WorldError
         from sandroid.world.persona import PersonaError, manifest_for_profile
 
         try:
             manifest, _profile = manifest_for_profile(
                 args.profile, target_sdk=target_sdk
             )
-        except PersonaError as exc:
-            raise SystemExit(str(exc)) from exc
+        except (PersonaError, ProfileError, WorldError) as exc:
+            raise SystemExit(f"profile {args.profile}: {exc}") from exc
         for warning in manifest.warnings:
             print(f"warning: {warning}", file=sys.stderr)
         return manifest
@@ -137,7 +139,9 @@ def cmd_prepare(args: argparse.Namespace) -> int:
 def cmd_persona(args: argparse.Namespace) -> int:
     from dataclasses import asdict
 
+    from sandroid.services.identity import ProfileError
     from sandroid.world import persona
+    from sandroid.world.packs import WorldError
     from sandroid.world.prepare import PrepareError
 
     if args.persona_cmd == "list":
@@ -162,7 +166,7 @@ def cmd_persona(args: argparse.Namespace) -> int:
         if exc.report is not None:
             _dump(exc.report.to_dict())
         return 1
-    except persona.PersonaError as exc:
+    except (persona.PersonaError, ProfileError, WorldError, ValueError) as exc:
         print(f"persona failed: {exc}", file=sys.stderr)
         return 1
     _dump(asdict(result))
@@ -271,8 +275,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.cmd in ("render", "prepare") and not (args.spec or args.profile):
         parser.error("--spec or --profile is required")
-    if args.cmd in ("render", "prepare") and args.spec and args.profile:
-        parser.error("--spec and --profile exclude each other")
+    if getattr(args, "spec", None) and getattr(args, "profile", None):
+        if args.cmd != "persona":
+            parser.error("--spec and --profile exclude each other")
+    if getattr(args, "profile", None) and args.cmd != "persona":
+        given = [k for k in ("first", "last", "phone") if getattr(args, f"owner_{k}")]
+        if given:
+            parser.error("--owner-* come from the profile; drop them with --profile")
     return int(args.func(args))
 
 
