@@ -198,7 +198,7 @@ class ToolSpec:
     toolset: str = ""
     core: bool = False
     timeout_s: float = DEFAULT_TIMEOUT_S
-    permission_key: str | None = None
+    permission_key: str | tuple[str, ...] | None = None
 
 
 #: Predicate deciding whether an agent may use a tool (subagent restrictions).

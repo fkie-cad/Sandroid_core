@@ -668,7 +668,10 @@ def set_device_proxy() -> dict[str, Any]:
     name="clear_device_proxy",
     description=(
         "Clear the device's global HTTP proxy setting. Does NOT tear down "
-        "any adb-reverse tunnel (a separate TUI-only convenience)."
+        "any adb-reverse tunnel (a separate TUI-only convenience). Refused "
+        "while the Kill switch is on (clearing the proxy also removes the "
+        "Kill switch): turn it off first with set_kill_switch(enabled=false), "
+        "which the analyst confirms every time."
     ),
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.REVERSIBLE,
@@ -686,10 +689,31 @@ def clear_device_proxy() -> dict[str, Any]:
     convenience, out of scope for this tool.
 
     Returns:
-        ``{"success": bool}``.
+        ``{"success": bool}``; while the Kill switch is on ``{"success":
+        False, "needs_confirmation": True, "message": ...}`` and nothing
+        changes. Clearing the proxy then would also remove the Kill switch,
+        which ``set_kill_switch`` only does after a fresh, never remembered
+        confirmation: a remembered "clear the device proxy" must not be a way
+        around it.
     """
+    from sandroid.core.adb import Adb
+    from sandroid.core.device_guard import get_device_guard
     from sandroid.services import get_proxy_service
     from sandroid.services.mitmproxy_service import get_mitmproxy_service
+
+    guard = get_device_guard()
+    serial = Adb.get_target_device()
+    if guard.kill_switch_wanted(serial) or guard.refresh(serial).kill_switch:
+        return {
+            "success": False,
+            "needs_confirmation": True,
+            "message": (
+                "The Kill switch is on: clearing the device proxy would also "
+                "remove it. Turn the Kill switch off first with "
+                "set_kill_switch(enabled=false) (the analyst confirms it), "
+                "then clear the proxy."
+            ),
+        }
 
     success = get_proxy_service().clear_proxy()
     if success:
@@ -1227,8 +1251,10 @@ def get_network_method() -> dict[str, Any]:
             "replace_external": {
                 "type": "boolean",
                 "description": (
-                    "Allow replacing an external device proxy / App Proxy "
-                    "upstream (ask the analyst first)."
+                    "Allow replacing what the analyst set up outside the "
+                    "Network method: an external device proxy, an external "
+                    "App Proxy upstream, or a friTap started by hand (ask the "
+                    "analyst first)."
                 ),
             },
         },

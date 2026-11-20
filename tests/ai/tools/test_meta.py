@@ -101,11 +101,15 @@ def test_permission_keys_name_real_parameters():
     for spec in _native_specs():
         key = spec.permission_key
         if key is not None:
-            assert key in spec.parameters.get("properties", {}), spec.name
+            keys = (key,) if isinstance(key, str) else key
+            for name in keys:
+                assert name in spec.parameters.get("properties", {}), spec.name
 
 
 #: Tools whose every call is approved on purpose (no rule can remember them).
-_NEVER_REMEMBERED = frozenset({"start_spotlight_app"})
+#: set_kill_switch: turning every app's network off (or the guard against
+#: leaks off) is confirmed afresh each time.
+_NEVER_REMEMBERED = frozenset({"start_spotlight_app", "set_kill_switch"})
 
 
 def test_argument_dependent_tools_have_a_permission_key_where_possible():

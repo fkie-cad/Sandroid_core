@@ -42,7 +42,7 @@ class ToolsetEntry:
         toolset: Toolset name (see :data:`TOOLSET_DESCRIPTIONS`).
         core: Whether the tool is part of the fixed per-session tools array.
         timeout_s: Seconds the executor waits before giving up on the call.
-        permission_key: For argument-dependent tools, the argument a
+        permission_key: For argument-dependent tools, the argument(s) a
             remembered permission rule must constrain (e.g. ``package_name``).
             ``None`` for tools whose risk is their identity alone.
     """
@@ -50,7 +50,7 @@ class ToolsetEntry:
     toolset: str
     core: bool = False
     timeout_s: float = DEFAULT_TIMEOUT_S
-    permission_key: str | None = None
+    permission_key: str | tuple[str, ...] | None = None
 
 
 #: Toolset name -> one-line description for the system-prompt catalogue.
@@ -87,7 +87,7 @@ def _e(
     *,
     core: bool = False,
     timeout_s: float = DEFAULT_TIMEOUT_S,
-    permission_key: str | None = None,
+    permission_key: str | tuple[str, ...] | None = None,
 ) -> ToolsetEntry:
     return ToolsetEntry(toolset, core, timeout_s, permission_key)
 
@@ -155,9 +155,15 @@ TOOLSET_TABLE: dict[str, ToolsetEntry] = {
     "get_app_proxy_status": _e("proxy"),
     "set_app_proxy_quic_blocking": _e("proxy"),
     "get_network_method": _e("proxy"),
-    "set_network_method": _e("proxy", timeout_s=_LONG, permission_key="method"),
+    # replace_external is part of the key: a remembered "whole_device" never
+    # covers replacing an external proxy (an omitted value is not
+    # rememberable at all).
+    "set_network_method": _e(
+        "proxy", timeout_s=_LONG, permission_key=("method", "replace_external")
+    ),
     "get_kill_switch": _e("proxy"),
-    "set_kill_switch": _e("proxy", timeout_s=180, permission_key="enabled"),
+    # No key: every call is a fresh, non-rememberable confirmation.
+    "set_kill_switch": _e("proxy", timeout_s=180),
     # certs
     "list_detected_ca_certificates": _e("certs"),
     "check_ca_injection_status": _e("certs"),
