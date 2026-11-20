@@ -67,6 +67,35 @@ NOT_COPIED = "After (replay) was not copied"
 #: field reads something else, or steps missed their elements): never a
 #: success.
 DIVERGED = "diverged"
+#: A Rewind + Replay that went through but with steps nothing confirmed
+#: (element not found or off-screen, field not read back): not a success.
+#: Shown as ``done, N steps unchecked`` (:func:`result_words`).
+UNCHECKED = "unchecked"
+
+
+def _steps_list(steps: Any) -> str:
+    nums = [str(i) for i in steps or []]
+    if len(nums) <= 1:
+        return "".join(nums)
+    return ", ".join(nums[:-1]) + " and " + nums[-1]
+
+
+def result_words(run: dict[str, Any] | None) -> str:
+    """A run's result in plain words: ``replayed``, ``diverged at step 2``,
+    ``done, 2 steps unchecked`` ... (``run``: a recording.json run dict).
+    """
+    run = run or {}
+    result = run.get("result") or "stopped"
+    if result == DIVERGED and run.get("diverged_at_step"):
+        return f"diverged at step {run['diverged_at_step']}"
+    if result == UNCHECKED:
+        n = len(run.get("unchecked_steps") or []) or int(
+            run.get("unchecked_count") or 0
+        )
+        return f"done, {n} step{'s' if n != 1 else ''} unchecked"
+    return str(result)
+
+
 #: ``pull`` outcome for a file that is not on the device.
 ABSENT = "absent"
 #: Requests seen up to this many seconds after Stop still count (the
@@ -1066,8 +1095,16 @@ def _no_change(lines: list[str], note: str) -> bool:
 
 
 def diverged_note(run: dict[str, Any] | None) -> str:
-    """The note a verdict carries when ``run`` (a Rewind + Replay) diverged."""
+    """The note a verdict carries when ``run`` (a Rewind + Replay) diverged
+    or left steps unchecked ("" otherwise).
+    """
     at = (run or {}).get("diverged_at_step")
+    if (run or {}).get("result") == UNCHECKED:
+        steps = (run or {}).get("unchecked_steps") or []
+        return (
+            f"Replay step{'s' if len(steps) != 1 else ''} {_steps_list(steps)} "
+            "could not be checked: this result may not show what your run did."
+        )
     if (run or {}).get("result") != DIVERGED or not at:
         return ""
     return (
@@ -1191,11 +1228,24 @@ class RunOutcome:
     #: The first step that diverged, and why (plain sentence).
     diverged_at_step: int | None = None
     diverged: str | None = None
+    #: Steps nothing confirmed (element not found / off-screen ...).
+    unchecked_steps: list[int] = field(default_factory=list)
     seq: dict[str, int | None] = field(default_factory=dict)
     monitor_config: Any = None
     paused: list[int] = field(default_factory=list)
     #: The start point was loaded (the device left the after-the-action state).
     loaded: bool = False
+
+
+def unchecked_words(out: RunOutcome) -> str:
+    """What a replay with unchecked steps tells you (never "Done.")."""
+    steps = out.unchecked_steps
+    n = len(steps)
+    return (
+        f"Replay done, {n} step{'s' if n != 1 else ''} unchecked "
+        f"(step{'s' if n != 1 else ''} {_steps_list(steps)}): the device may not "
+        "show what your run did."
+    )
 
 
 def diverged_words(out: RunOutcome) -> str:
@@ -1348,6 +1398,7 @@ class RewindRunner:
             out.stopped_at_step = report.get("stopped_at_step")
             out.diverged_at_step = report.get("diverged_at_step")
             out.diverged = report.get("diverged")
+            out.unchecked_steps = list(report.get("unchecked_steps") or [])
             self._emit(
                 "setup",
                 f"{rec.rec_id}#{n}",
@@ -1364,6 +1415,9 @@ class RewindRunner:
             elif out.diverged_at_step:
                 out.result = DIVERGED
                 self.deps.progress(diverged_words(out))
+            elif out.unchecked_steps:
+                out.result = UNCHECKED
+                self.deps.progress(unchecked_words(out))
             else:
                 out.result = "replayed"
                 self.deps.progress("Done. The device shows the replayed result.")
@@ -1389,6 +1443,7 @@ class RewindRunner:
                 "stopped_at_step": out.stopped_at_step,
                 "diverged_at_step": out.diverged_at_step,
                 "diverged": out.diverged,
+                "unchecked_steps": out.unchecked_steps,
                 "steps": out.steps,
                 "loaded": out.loaded,
             }
@@ -1397,6 +1452,8 @@ class RewindRunner:
                 "rewound": "rewind finished · the device is at the start point",
                 "replayed": "replay finished",
             }.get(out.result)
+            if out.result == UNCHECKED:
+                summary = "replay " + result_words(run)
             if out.result == DIVERGED:
                 summary = f"replay diverged at step {out.diverged_at_step}" + (
                     f" · {out.diverged}" if out.diverged else ""
@@ -1419,7 +1476,9 @@ class RewindRunner:
                     "error": out.error,
                     "stopped_at_step": out.stopped_at_step,
                     "diverged_at_step": out.diverged_at_step,
+                    "unchecked_steps": out.unchecked_steps,
                 },
+                level={DIVERGED: "error", UNCHECKED: "warn"}.get(out.result, "info"),
                 ref={"of": out.seq["start"]} if out.seq.get("start") else None,
             )
             run["seq"] = dict(out.seq)

@@ -727,7 +727,7 @@ def test_replay_element_gone_but_position_known_goes_by_position():
     assert log == ["input tap 500 600"]
     assert report["steps"][0] == {
         "i": 1, "seq": 1, "what": "tap 'Accept all' (Button)",
-        "way": "by position", "reason": "not found",
+        "way": "by position", "reason": "not found", "check": "unchecked",
     }  # fmt: skip
     assert "by position (not found)" in lines[0]["summary"]
     assert report["error"] is None
@@ -1070,7 +1070,7 @@ def test_typed_text_is_typed_at_the_recorded_pace_and_checked():
     assert helper.reads >= 1
     step = report["steps"][0]
     assert step["way"] == "replayed"
-    assert step["check"] == "ok"
+    assert step["check"] == "verified"
     assert "field checked" in step["reason"]
     assert report["diverged_at_step"] is None
     assert "replayed (typed 10 characters, field checked)" in lines[0]["summary"]
@@ -1151,7 +1151,7 @@ def test_autocomplete_suffix_after_the_recorded_text_is_accepted():
     assert player.text_check("spiegel.de", "spiegel.d")[0] is False
     rep, _ = _replayer(FocusHelper("wdr.de/"), [])
     report = rep.run(extract_steps([_text("wdr.de")]))
-    assert report["steps"][0]["check"] == "ok"
+    assert report["steps"][0]["check"] == "verified"
     assert report["diverged_at_step"] is None
 
 
@@ -1159,13 +1159,14 @@ def test_password_divergence_prints_no_text():
     steps = extract_steps([_text("hunter2", password=True)])
     assert steps[0].sensitive
     assert "hunter2" not in steps[0].what
-    rep, lines = _replayer(FocusHelper("hunter", password=True), [])
+    rep, lines = _replayer(FocusHelper("letmein", password=True), [])
     report = rep.run(steps)
     step = report["steps"][0]
     assert step["way"] == "diverged"
     assert step["reason"] == "field text differs"
     for text in (str(step), str(report), str(lines)):
         assert "hunter" not in text
+        assert "letmein" not in text
     assert lines[0]["sensitive"] is True
     # bullets of the right length are a match; of another length not
     assert player.text_check("hunter2", "\u2022" * 7, password=True) == (True, "")
@@ -1256,3 +1257,184 @@ def test_password_field_showing_its_last_character_and_a_moved_focus():
     report = rep.run(extract_steps([_text("1234")]))
     assert report["steps"][0]["check"] == "unchecked"
     assert report["diverged_at_step"] is None
+
+
+# ---------------------------------------------------------------------------
+# taps never land off the screen; unchecked steps are not a success
+# ---------------------------------------------------------------------------
+
+_SCREEN = [1080, 2424]
+
+
+def _web_dump(*nodes):
+    reply = _dump(*nodes)
+    reply["windows"][0]["bounds"] = [0, 0, 1080, 2424]
+    reply["display"] = {"w": 1080, "h": 2424, "rotation": 0}
+    return reply
+
+
+def _page_node(top, bottom):
+    return _node(cls="android.view.View", bounds=(0, top, 1080, bottom),
+                 web={"engine": "gecko", "role": "text container"})  # fmt: skip
+
+
+def _overview_run_lines():
+    """The 20261120_052151 recording: Suchen, typed spiegel.de, the stale
+    'spi' suggestion, two swipes, a tap on the page body.
+    """
+    page = {
+        "bounds": [0, 307, 1080, 7697],
+        "cls": "android.view.View",
+        "rid": None,
+        "text": None,
+        "desc": None,
+        "web": {
+            "engine": "gecko",
+            "raw_role": "text container",
+            "page": "spiegel.de",
+            "doc": "spiegel.de - Google Suche",
+        },
+    }
+    swipe = {"x": 540, "y": 1900, "x1": 540, "y1": 700, "dur_ms": 680}
+    return [
+        _tap(seq=28, t=100, x=458, y=226, screen=_SCREEN,
+             target={"desc": "Suchen", "rid": "ADDRESSBAR_URL_BOX",
+                     "cls": "android.widget.Button", "bounds": [180, 163, 702, 289]}),
+        _text("spiegel.de", seq=32, t=101),
+        _tap(seq=33, t=105, x=245, y=479, screen=_SCREEN,
+             target={"label": "spi", "rid": "mozac.awesomebar.suggestion",
+                     "cls": "android.view.View", "bounds": [0, 415, 1080, 541]}),
+        {"src": "input", "kind": "swipe", "seq": 37, "t": 107, "actor": "user",
+         "data": swipe},
+        {"src": "input", "kind": "swipe", "seq": 39, "t": 108, "actor": "user",
+         "data": swipe},
+        {**_tap(seq=41, t=110, x=539, y=1826, screen=_SCREEN, target=page),
+         "summary": "tap at 539,1826 on spiegel.de"},
+    ]  # fmt: skip
+
+
+def test_overview_run_reads_unchecked_not_success(tmp_path, monkeypatch):
+    suchen = _node(desc="Suchen", rid="ADDRESSBAR_URL_BOX", bounds=(180, 163, 702, 289))
+    # The consent page scrolled: its node's page position centres at y=3641.
+    dump = _web_dump(suchen, _page_node(-415, 7697))
+    log: list[str] = []
+    rep, lines = _replayer(FocusHelper("spiegel.de", replies=[dump]), log,
+                           element_wait_s=1.0)  # fmt: skip
+    report = rep.run(extract_steps(_overview_run_lines()))
+    ways = [(s["way"], s["reason"], s["check"]) for s in report["steps"]]
+    assert ways == [
+        ("by element", "", "verified"),
+        ("replayed", "typed 10 characters, field checked", "verified"),
+        ("by position", "not found", "unchecked"),
+        ("by position", "", "none"),
+        ("by position", "", "none"),
+        ("by position", "element off-screen", "unchecked"),
+    ]
+    assert log[-1] == "input tap 539 1826"  # the recorded point, never y=3641
+    assert all(int(c.split()[3]) < 2424 for c in log if c.startswith("input tap"))
+    assert "by position (element off-screen)" in lines[5]["summary"]
+    assert lines[5]["data"]["check"] == "unchecked"
+    assert report["unchecked_steps"] == [3, 6]
+    assert report["diverged_at_step"] is None
+
+    dev = FakeDevice()
+    progress: list[str] = []
+    ends: list[dict] = []
+    deps = dev.deps(lambda r, runner: report)
+    deps.progress = progress.append
+    deps.emit = lambda *a, **k: ends.append(k) or 1
+    rec = _rec(tmp_path, monkeypatch)
+    out = rewind.RewindRunner(rec, deps).run(replay=True)
+    assert out.result == "unchecked"
+    assert rec.runs[-1]["result"] == "unchecked"
+    assert rec.runs[-1]["unchecked_steps"] == [3, 6]
+    assert rewind.result_words(rec.runs[-1]) == "done, 2 steps unchecked"
+    assert not any(p.startswith("Done") for p in progress)
+    assert any(
+        p.startswith("Replay done, 2 steps unchecked (steps 3 and 6)") for p in progress
+    )
+    end = next(k for k in ends if k.get("kind") == "play-end")
+    assert end["summary"] == "replay done, 2 steps unchecked"
+    assert end["data"]["result"] == "unchecked"
+    assert end["level"] == "warn"
+    assert "Replay steps 3 and 6 could not be checked" in rewind.diverged_note(
+        rec.runs[-1]
+    )
+
+
+def test_tap_point_clips_to_the_window_and_display():
+    target = {"web": {"raw_role": "text container"}}
+    reply = _web_dump()
+    item = {"node": {"bounds": [0, 2000, 1080, 3000]},
+            "window": {"bounds": [0, 0, 1080, 2424]}}  # fmt: skip
+    assert player.tap_point(item, reply, target, _SCREEN) is None  # centre off
+    item["node"]["bounds"] = [0, 2000, 1080, 2600]
+    assert player.tap_point(item, reply, target, _SCREEN) == (540, 2300)
+    item["window"]["bounds"] = [0, 0, 1080, 2200]  # a window above the keyboard
+    assert player.tap_point(item, reply, target, _SCREEN) is None
+    item["node"]["bounds"] = [100, 3000, 200, 3100]
+    assert player.tap_point(item, reply, target, _SCREEN) is None  # not visible
+    # a page-sized recorded target does not say where you tapped
+    big = {"bounds": [0, 307, 1080, 7697]}
+    item = {"node": {"bounds": [0, 307, 1080, 1500]}, "window": {}}
+    assert player.tap_point(item, reply, big, _SCREEN) is None
+    assert player.tap_point(item, reply, {"bounds": [0, 307, 1080, 1500]},
+                            _SCREEN) == (540, 903)  # fmt: skip
+
+
+def test_an_off_screen_recorded_position_is_never_tapped():
+    steps = extract_steps([_tap(x=500, y=3000, screen=_SCREEN)])
+    log: list[str] = []
+    rep, _ = _replayer(None, log)
+    report = rep.run(steps)
+    assert log == []
+    assert report["steps"][0]["way"] == "failed"
+    assert "off the screen" in report["steps"][0]["reason"]
+
+
+def test_a_stale_partial_reading_is_unchecked_not_diverged():
+    rep, _ = _replayer(FocusHelper("spieg"), [])
+    report = rep.run(extract_steps([_text("spiegel.de")]))
+    step = report["steps"][0]
+    assert step["way"] == "replayed"
+    assert step["check"] == "unchecked"
+    assert "only part of the text" in step["reason"]
+    assert report["unchecked_steps"] == [1]
+    assert report["diverged_at_step"] is None
+
+
+def test_without_an_id_a_field_elsewhere_is_unchecked_not_diverged():
+    class Elsewhere(FocusHelper):
+        def focus(self, x=None, y=None, timeout=1.0):
+            return {"input": {"editable": True, "text": "",
+                              "bounds": [0, 1800, 1080, 1900]}}  # fmt: skip
+
+    line = _text("abc")
+    line["data"]["target"] = {"rid": None, "bounds": [0, 200, 1080, 300]}
+    rep, _ = _replayer(Elsewhere(""), [])
+    report = rep.run(extract_steps([line]))
+    assert report["steps"][0]["check"] == "unchecked"
+    assert report["diverged_at_step"] is None
+
+    class Moved(FocusHelper):  # the keyboard panned the same field up
+        def focus(self, x=None, y=None, timeout=1.0):
+            return {"input": {"editable": True, "text": "xyz",
+                              "bounds": [0, 100, 1080, 200]}}  # fmt: skip
+
+    rep, _ = _replayer(Moved(""), [])
+    report = rep.run(extract_steps([line]))
+    assert report["steps"][0]["way"] == "diverged"
+
+
+def test_steps_with_nothing_to_check_keep_a_plain_success():
+    lines = [
+        {"src": "input", "kind": "swipe", "seq": 1, "t": 1, "actor": "user",
+         "data": {"x": 10, "y": 900, "x1": 10, "y1": 100}},
+        {"src": "input", "kind": "key", "seq": 2, "t": 1.1, "actor": "user",
+         "data": {"name": "BACK"}},
+        _tap(seq=3, t=2, target=None),
+    ]  # fmt: skip
+    rep, _ = _replayer(None, [])
+    report = rep.run(extract_steps(lines))
+    assert [s["check"] for s in report["steps"]] == ["none", "none", "none"]
+    assert report["unchecked_steps"] == []

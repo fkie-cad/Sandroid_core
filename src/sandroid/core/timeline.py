@@ -1316,14 +1316,14 @@ class TimelineService:
                   summary: str | None = None, t: TimeLike = None,
                   actor: str | None = None, data: Mapping | None = None,
                   ref: Mapping | None = None, replays: Mapping | None = None,
-                  dev: str | None = None) -> int | None:  # fmt: skip
+                  dev: str | None = None, level: str = "info") -> int | None:  # fmt: skip
         """Write a ``run/<kind>`` line; a transition only if phase/run changed."""
         if phase not in PHASES:
             phase = "live"
         payload = dict(data or {})
         fields = self._fields("run", kind, summary or "", actor, payload, ref, t,
                               "host", None, None, None, dev, None, None, None, None,
-                              replays, False, "info")  # fmt: skip
+                              replays, False, level)  # fmt: skip
         if fields is None:
             return None
         t_rx = time.time()
