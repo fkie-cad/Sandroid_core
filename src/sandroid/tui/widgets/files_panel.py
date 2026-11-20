@@ -464,6 +464,15 @@ class _FilesTable(AnnotationTintMixin, DataTable):
         parent = self.parent
         return parent if isinstance(parent, FilesPanel) else None
 
+    def on_resize(self, event) -> None:
+        """The table's own width changed (the Inspector closed or opened, a
+        terminal resize): re-lay out the columns once this size is final --
+        also when the panel's resize refresh ran before the table had it.
+        """
+        panel = self._panel()
+        if panel is not None:
+            panel.relayout_if_stale()
+
     # Moving up stops following the newest row; End resumes (follow.py).
 
     def _follow(self, live: bool) -> None:
@@ -714,6 +723,8 @@ class FilesPanel(Widget):
         self._rows: list[_Row] = []
         self._dirty = True
         self._path_width = 0
+        #: The table width the columns were last laid out for.
+        self._layout_width = 0
         self._notice_kind: str | None = None
         #: ``(when, text, level)`` monitor timeline lines (add_monitor_note).
         self._monitor_notes: list[tuple[datetime, str, str]] = []
@@ -1345,6 +1356,18 @@ class FilesPanel(Widget):
         self._dirty = True
         self.call_after_refresh(self.refresh_rows)
 
+    def relayout_if_stale(self) -> None:
+        """Rebuild the rows when the columns were laid out for another table
+        width (the paths are truncated to the path column's width).
+        """
+        try:
+            width = self.table.size.width
+        except Exception:
+            return
+        if width and width != self._layout_width:
+            self._dirty = True
+            self.call_after_refresh(self.refresh_rows)
+
     def _cursor_key(self) -> str | None:
         try:
             table = self.table
@@ -1397,6 +1420,7 @@ class FilesPanel(Widget):
         two -- then the time too.
         """
         width = table.size.width or self.size.width or 100
+        self._layout_width = table.size.width
         base = _W_MARK + _W_OPS + 2 * 3 + 1  # + cell padding, scrollbar
         path_width = width - base
         columns = ["mark", "path", "ops"]

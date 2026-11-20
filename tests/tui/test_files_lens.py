@@ -2658,3 +2658,64 @@ async def test_pinned_changes_are_not_new_below_and_live_resumes_after_review(
         await settle(pilot)
         assert panel.following
 
+
+def _columns_fill(panel) -> bool:
+    """The laid-out columns span the table (no empty strip on the right)."""
+    table = panel.table
+    used = sum(c.get_render_width(table) for c in table.columns.values())
+    return 0 <= table.size.width - used <= 4
+
+
+async def _files_with_a_row(pilot, app):
+    ms, panel = await _boot_files(pilot, app)
+    panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+    panel.refresh_rows()
+    panel.table.focus()
+    await until(pilot, lambda: panel.table.row_count == 1 and _columns_fill(panel))
+    return ms, panel
+
+
+async def test_closing_the_inspector_gives_the_table_its_full_width_back() -> None:
+    """Beside the Inspector the path column is narrow; after the Inspector
+    closes (and after a terminal resize) the columns fill the table again --
+    no truncated paths next to ~85 empty columns.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(200, 45)) as pilot:
+        ms, panel = await _files_with_a_row(pilot, app)
+        wide = panel._path_width
+        await pilot.press("enter")
+        await until(pilot, lambda: ms.inspector_is_open)
+        await until(pilot, lambda: panel._path_width < wide and _columns_fill(panel))
+        await pilot.press("escape")
+        await until(pilot, lambda: not ms.inspector_is_open)
+        await until(pilot, lambda: panel._path_width == wide and _columns_fill(panel))
+        await pilot.resize_terminal(150, 45)
+        await until(pilot, lambda: panel._path_width < wide and _columns_fill(panel))
+        await pilot.resize_terminal(200, 45)
+        await until(pilot, lambda: panel._path_width == wide and _columns_fill(panel))
+
+
+async def test_the_table_relays_out_even_when_the_panel_refresh_came_too_early(
+    monkeypatch,
+) -> None:
+    """The panel's resize refresh can run before the table has its new width
+    (it then lays the columns out for the old one and clears ``_dirty``):
+    the table's own resize re-lays them out.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(200, 45)) as pilot:
+        ms, panel = await _files_with_a_row(pilot, app)
+        wide = panel._path_width
+        await pilot.press("enter")
+        await until(pilot, lambda: ms.inspector_is_open and panel._path_width < wide)
+        monkeypatch.setattr(FilesPanel, "on_resize", lambda self, _event: None)
+        await pilot.press("escape")
+        await until(pilot, lambda: not ms.inspector_is_open)
+        await until(pilot, lambda: panel._path_width == wide and _columns_fill(panel))
+        cell = panel.table.get_cell_at((0, 1))
+        assert cell.plain == "files/aaid.txt"  # full width: not truncated
