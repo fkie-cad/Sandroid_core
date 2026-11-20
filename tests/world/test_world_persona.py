@@ -306,8 +306,9 @@ class _Info:
 
 
 class _Plan:
-    def __init__(self, infos: dict) -> None:
+    def __init__(self, infos: dict, restored: bool = False) -> None:
         self.infos = infos
+        self.restored = restored
 
 
 class _Report:
@@ -338,9 +339,10 @@ def build_env(svc, avd_root, monkeypatch):
     monkeypatch.setattr(pr, "prepare", fake_prepare)
     infos = {"imei": _Info("verified"), "imsi": _Info("failed", sim=True)}
 
-    def fake_apply(serial, allow_restart=None, profile=None, package=None):
+    def fake_apply(serial, allow_restart=None, profile=None, package=None, **kw):
         order.append("apply")
         assert allow_restart is True
+        assert kw == {"as_persona": True}
         return _Plan(infos)
 
     monkeypatch.setattr(svc, "apply", fake_apply)
@@ -409,7 +411,7 @@ def stage_env(svc, avd_root, monkeypatch):
         "manifest_for_profile",
         lambda pid, **kw: real(pid, **{**kw, "service": svc, "packs": PACKS}),
     )
-    monkeypatch.setattr(persona, "_active_profile_id", lambda: None)
+    monkeypatch.setattr(persona, "_device_profile_id", lambda serial: "mara")
     stamp: dict = {}
 
     class Dev(StampDevice):
@@ -510,7 +512,7 @@ def test_a_clean_base_is_built_and_saved(stage_env, monkeypatch) -> None:
     )
     calls: list = []
     monkeypatch.setattr(persona, "build_persona", _fake_build(calls))
-    monkeypatch.setattr(persona, "_active_profile_id", lambda: "other")
+    monkeypatch.setattr(persona, "_device_profile_id", lambda serial: "other")
     note = persona.persona_stage(SERIAL, True, 120.0)
     assert [c[:3] for c in calls] == [(SERIAL, "mara", True)]
     assert "saved as sandroid_persona_mara_x" in note.text
@@ -593,6 +595,9 @@ def test_out_of_time_skips_apply_and_save(build_env) -> None:
     [
         (_Info("pending", reason="needs a framework restart"), True),
         (_Info("pending", reason="not restarted"), True),
+        (_Info("verified", reason=ident.READBACK_NO_ANSWER), True),
+        (_Info("applied", reason=ident.READBACK_NO_ANSWER + " (x)"), True),
+        (_Info("pending", reason=ident.RESTORED_DURING), True),
         (_Info("pending", reason="no target app yet"), False),
         (_Info("hook-only"), False),
         (_Info("skipped"), False),
@@ -613,3 +618,34 @@ def test_the_core_wrapper_skips_non_persona_launches(monkeypatch, meta) -> None:
     )
     monkeypatch.setattr(persona, "persona_stage", pytest.fail)
     assert device_prep._persona_stage(SERIAL, True, 300.0) is None
+
+
+def test_a_refused_identity_apply_is_a_persona_error(build_env, monkeypatch) -> None:
+    svc, _order, _infos, dev, emu = build_env
+
+    def refuse(serial, **kw):
+        raise ident.IdentityApplyError("the identity record cannot be read")
+
+    monkeypatch.setattr(svc, "apply", refuse)
+    with pytest.raises(persona.PersonaError, match="identity apply refused"):
+        persona.build_persona(SERIAL, "mara", identity=svc, emulator=emu, device=dev)
+    assert emu.calls == []
+
+
+def test_the_device_profile_comes_from_the_identity_service(monkeypatch) -> None:
+    from sandroid.services import identity
+
+    class Svc:
+        def profile_id_for(self, serial):
+            return f"p-{serial}"
+
+    monkeypatch.setattr(identity, "get_identity_service", lambda: Svc())
+    assert persona._device_profile_id(SERIAL) == f"p-{SERIAL}"
+
+
+def test_a_restore_during_the_apply_saves_nothing(build_env, monkeypatch) -> None:
+    svc, _order, infos, dev, emu = build_env
+    monkeypatch.setattr(svc, "apply", lambda serial, **kw: _Plan(infos, restored=True))
+    with pytest.raises(persona.PersonaError, match="restored during the identity"):
+        persona.build_persona(SERIAL, "mara", identity=svc, emulator=emu, device=dev)
+    assert emu.calls == []

@@ -374,11 +374,22 @@ def build_persona(
     )
     out.prepare = report.to_dict()
     _in_time(deadline, APPLY_RESERVE_S, "the identity apply")
-    plan = svc.apply(serial, allow_restart=True, profile=profile)
+    from sandroid.services.identity import IdentityApplyError
+
+    try:
+        # as_persona: the device's identity record names this persona, so a
+        # later load of the snapshot (any launch, a TUI restart) keeps it.
+        plan = svc.apply(serial, allow_restart=True, profile=profile, as_persona=True)
+    except IdentityApplyError as exc:
+        raise PersonaError(f"identity apply refused: {exc}") from exc
     out.identity = {
         vid: {"status": info.status, "reason": info.reason}
         for vid, info in plan.infos.items()
     }
+    if getattr(plan, "restored", False):
+        # A snapshot load hit the device during the apply: the values may
+        # not be on the device that would be saved.
+        raise PersonaError("the device was restored during the identity apply")
     failed = _unbaked(plan.infos)
     if failed:
         raise PersonaError(f"identity apply failed for {', '.join(failed)}")
@@ -403,16 +414,28 @@ def _unbaked(infos: dict[str, Any]) -> list[str]:
     value (the emulator's start sets it from the modem files) and per-app or
     hook-only values (seeded at the app's first start) never count.
     """
-    from sandroid.services.identity import NEEDS_RESTART, NOT_RESTARTED
+    from sandroid.services.identity import (
+        NEEDS_RESTART,
+        NOT_RESTARTED,
+        READBACK_NO_ANSWER,
+        RESTORED_DURING,
+    )
 
     out = []
     for vid, info in infos.items():
         if not info.enabled or info.sim_launch:
             continue
         reason = info.reason or ""
-        if info.status == "failed" or (
-            info.status == "pending"
-            and reason.startswith((NEEDS_RESTART, NOT_RESTARTED))
+        # No read-back answer: the device record (and its persona) was not
+        # written, so the snapshot would not know its persona. A restore
+        # during the apply: the step never ran.
+        if (
+            info.status == "failed"
+            or reason.startswith((READBACK_NO_ANSWER, RESTORED_DURING))
+            or (
+                info.status == "pending"
+                and reason.startswith((NEEDS_RESTART, NOT_RESTARTED))
+            )
         ):
             out.append(vid)
     return sorted(out)
@@ -481,9 +504,9 @@ def persona_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
     except Exception as exc:
         return StageNote("warning", f"{label}: {exc}")
     notes: list[str] = []
-    active = _active_profile_id()
-    if active is not None and active != profile.id:
-        notes.append(f"the identity stage applies {active}, not {profile.id}")
+    runs = _device_profile_id(serial)
+    if runs and runs != profile.id:
+        notes.append(f"the identity stage applies {runs}, not {profile.id}")
     stamp = device_world(serial, device=dev)
     fp = manifest.world_fp
     if stamp is not None:
@@ -557,15 +580,19 @@ def persona_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
     )
 
 
-def _active_profile_id() -> str | None:
-    """The identity profile the identity stage applies (``None``: off)."""
+def _device_profile_id(serial: str) -> str:
+    """The profile the identity stage applies to ``serial`` (``""``: off).
+
+    The identity service resolves a device's profile itself (its persona,
+    else the launch's ``persona_id``, else the active profile); this only
+    tells when that is not the persona being built.
+    """
     try:
         from sandroid.services.identity import get_identity_service
 
-        profile = get_identity_service().active_profile()
+        return get_identity_service().profile_id_for(serial)
     except Exception:
-        return None
-    return profile.id if profile is not None else None
+        return ""
 
 
 def delete_persona_snapshot(serial: str, name: str, *, emulator: Any = None) -> bool:
