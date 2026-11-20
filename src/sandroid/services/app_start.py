@@ -36,6 +36,17 @@ RESPAWN needs ``consent`` (the caller's own, e.g. ⇧R or an API ``fresh=True``)
 or the user's answer to the confirmation dialog :func:`negotiate_start` shows.
 Resume follows ownership: only the caller that spawned a process
 (``owns_spawn``) resumes it; a joined paused process waits for Space.
+
+Pre-spawn hooks (:func:`register_pre_spawn_hook`, e.g. the identity profile)
+run before every start of an app by Sandroid, inside the lifecycle lock:
+Space/⇧P (:func:`start_app`), ⇧R and the AI restart (:func:`restart_app`),
+a tool's SPAWN/RESPAWN (:func:`open_session`), and via
+:func:`prepare_launch` TrigDroid's spawn and the AI ``launch_app``. A hook's
+plan that restarts the Android framework (every running app stops) needs the
+user's OK (a dialog; headless: the caller's ``consent``). A plan that fails
+aborts the start. They never run on JOIN, ATTACH or resume (the process
+already runs). Not covered: launches outside Sandroid (the launcher, an
+intent from another app).
 """
 
 from __future__ import annotations
@@ -43,6 +54,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -144,6 +156,8 @@ class StartDecision:
         code: Short machine-readable refusal kind.
         stops: Tools a RESPAWN stops (shown in the dialog).
         tool: The tool that asked.
+        consent: The caller's own consent (headless ``fresh=True``); without
+            a dialog it also covers a pre-spawn step that stops every app.
     """
 
     action: StartAction
@@ -156,6 +170,7 @@ class StartDecision:
     code: str = ""
     stops: tuple[str, ...] = ()
     tool: str = "this tool"
+    consent: bool = False
 
 
 def stops_sentence(tools: tuple[str, ...] | list[str]) -> str:
@@ -240,6 +255,7 @@ def decide_start(i: StartInputs) -> StartDecision:
             owns_spawn=True,
             reset_session=i.has_session and not i.live_jobs,
             tool=i.tool,
+            consent=i.consent,
         )
     target = i.live_pid if running else i.session_pid
     # R3/R4: the tool needs a process that has not run yet.
@@ -265,6 +281,7 @@ def decide_start(i: StartInputs) -> StartDecision:
             owns_spawn=True,
             stops=i.app_tools,
             tool=i.tool,
+            consent=i.consent,
         )
     # R5: our live session.
     if ours:
@@ -326,15 +343,44 @@ _LIFECYCLE = _LifecycleLock()
 _BUSY_MSG = "Another start/restart of the app is in progress"
 
 
+#: Poll interval of :func:`lifecycle_lock` while it waits.
+_LOCK_POLL_S = 0.05
+
+
 @contextmanager
-def _lifecycle() -> Iterator[None]:
-    """Hold the lifecycle lock or raise :class:`AppStartError` when busy."""
-    if not _LIFECYCLE.try_acquire():
-        raise AppStartError(_BUSY_MSG)
+def lifecycle_lock(timeout: float = 0.0) -> Iterator[None]:
+    """Hold the app lifecycle lock outside a spawn.
+
+    For steps that must not overlap an app start, e.g. the CA injection or
+    the identity profile's framework restart. Re-entrant on the same thread
+    (a start inside it works).
+
+    Never call it on the UI thread with ``timeout > 0``: waiting would block
+    the event loop, so it logs and refuses there.
+
+    Args:
+        timeout: Seconds to wait for a start in flight (0: do not wait).
+
+    Raises:
+        AppStartError: Another start holds the lock after ``timeout``, or a
+            wait was asked for on the UI thread.
+    """
+    if timeout > 0 and threading.current_thread() is threading.main_thread():
+        logger.error("lifecycle_lock(timeout=%s) on the UI thread; refused", timeout)
+        raise AppStartError(f"{_BUSY_MSG} (cannot wait for it on the UI thread)")
+    deadline = time.monotonic() + max(0.0, timeout)
+    while not _LIFECYCLE.try_acquire():
+        if time.monotonic() >= deadline:
+            raise AppStartError(_BUSY_MSG)
+        time.sleep(_LOCK_POLL_S)
     try:
         yield
     finally:
         _LIFECYCLE.release()
+
+
+#: Hold the lifecycle lock or raise :class:`AppStartError` when busy.
+_lifecycle = lifecycle_lock
 
 
 # ---------------------------------------------------------------------------
@@ -794,6 +840,556 @@ def negotiate_start(tool: str, **kwargs: Any) -> StartDecision:
 
 
 # ---------------------------------------------------------------------------
+# Pre-spawn hooks: steps that must run before the app's process starts
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PreSpawnPlan:
+    """What a pre-spawn hook needs done before the app starts.
+
+    Attributes:
+        description: What ``apply`` does, a verb phrase for messages
+            ("apply identity profile 'x' (ssaid, locale)").
+        disruptive: ``apply`` restarts the Android framework: every running
+            app on the device stops (needs the user's OK).
+        apply: Does it, blocking, on a worker thread. Raising aborts the
+            start. It returns once the framework is back (or never went
+            down).
+    """
+
+    description: str
+    disruptive: bool
+    apply: Callable[[], None]
+
+
+#: Gets the package about to start; returns a plan, or None (nothing to do).
+#: Decide quickly, no device writes: start paths call it inside the lifecycle
+#: lock, prepare_launch() just before taking it (no plans = no lock).
+PreSpawnHook = Callable[[str], PreSpawnPlan | None]
+
+_HOOKS_LOCK = threading.Lock()
+_PRE_SPAWN_HOOKS: list[PreSpawnHook] = []
+#: Pre-start steps (dialog or apply) in progress, see pre_spawn_running().
+_PHASES = 0
+#: ``(package, text, short text)`` while a pre-start step applies, see
+#: pre_spawn_status().
+_STATUS: tuple[str, ...] | None = None
+_STATUS_LISTENERS: list[Callable[[], None]] = []
+#: Poll interval of recover_after_framework_restart().
+_RECOVERY_POLL_S = 1.0
+
+
+def register_pre_spawn_hook(hook: PreSpawnHook) -> None:
+    """Run ``hook`` before every start of an app by Sandroid.
+
+    Hooks run in registration order. Registering a hook again (also an
+    equal bound method) is a no-op.
+    """
+    with _HOOKS_LOCK:
+        if hook not in _PRE_SPAWN_HOOKS:
+            _PRE_SPAWN_HOOKS.append(hook)
+
+
+def unregister_pre_spawn_hook(hook: PreSpawnHook) -> None:
+    """Remove ``hook`` (a no-op when it is not registered)."""
+    with _HOOKS_LOCK:
+        if hook in _PRE_SPAWN_HOOKS:
+            _PRE_SPAWN_HOOKS.remove(hook)
+
+
+def pre_spawn_running() -> bool:
+    """A pre-start step (its dialog or its apply) is in progress."""
+    with _HOOKS_LOCK:
+        return _PHASES > 0
+
+
+def pre_spawn_status(package: str | None = None, *, short: bool = False) -> str | None:
+    """What the pre-start step applying right now does (for the App lens).
+
+    Args:
+        package: Only for this app (None: any).
+        short: The few-word form for a narrow lens.
+
+    Returns:
+        One plain sentence, or None when no step applies (also while its
+        dialog waits: the dialog says it).
+    """
+    with _HOOKS_LOCK:
+        status = _STATUS
+    if status is None or (package is not None and status[0] != package):
+        return None
+    return status[2] if short and len(status) > 2 else status[1]
+
+
+def add_pre_spawn_status_listener(cb: Callable[[], None]) -> None:
+    """Call ``cb()`` (any thread) when :func:`pre_spawn_status` changes."""
+    with _HOOKS_LOCK:
+        if cb not in _STATUS_LISTENERS:
+            _STATUS_LISTENERS.append(cb)
+
+
+def remove_pre_spawn_status_listener(cb: Callable[[], None]) -> None:
+    """Stop calling ``cb``."""
+    with _HOOKS_LOCK:
+        if cb in _STATUS_LISTENERS:
+            _STATUS_LISTENERS.remove(cb)
+
+
+def _set_status(status: tuple[str, ...] | None) -> None:
+    global _STATUS
+    with _HOOKS_LOCK:
+        _STATUS = status
+        listeners = list(_STATUS_LISTENERS)
+    for cb in listeners:
+        try:
+            cb()
+        except Exception:
+            logger.debug("Pre-start status listener failed", exc_info=True)
+
+
+@contextmanager
+def _pre_spawn_phase(status: tuple[str, ...] | None = None) -> Iterator[None]:
+    global _PHASES
+    with _HOOKS_LOCK:
+        _PHASES += 1
+    if status is not None:
+        _set_status(status)
+    try:
+        yield
+    finally:
+        with _HOOKS_LOCK:
+            _PHASES -= 1
+        if status is not None:
+            _set_status(None)
+
+
+def _progress_text(plans: list[PreSpawnPlan]) -> tuple[str, str]:
+    """``Applying identity profile 'x' (…) — the Android framework restarts;
+    this can take a few minutes`` and a short form (``Applying identity
+    profile 'x', framework restarts``) for the App lens.
+    """
+    what = _plans_text(plans)
+    if what.startswith("apply "):
+        what = "Applying " + what[len("apply ") :]
+    else:
+        what = f"Before the start: {what}"
+    brief = plans[0].description.split(" (", 1)[0]
+    if brief.startswith("apply "):
+        brief = "Applying " + brief[len("apply ") :]
+    if len(plans) > 1:
+        brief += f" (+{len(plans) - 1})"
+    if any(plan.disruptive for plan in plans):
+        return (
+            f"{what} — the Android framework restarts; this can take a few minutes",
+            f"{brief}, framework restarts",
+        )
+    return f"{what} — the app starts after it", brief
+
+
+def _hook_name(hook: Any) -> str:
+    return str(
+        getattr(hook, "__qualname__", None) or getattr(hook, "__name__", None) or hook
+    )
+
+
+def _collect_pre_spawn(package: str, tool: str) -> list[PreSpawnPlan]:
+    """Ask every hook (registration order) what it needs before the start.
+
+    Raises:
+        AppStartError: A hook raised.
+    """
+    with _HOOKS_LOCK:
+        hooks = list(_PRE_SPAWN_HOOKS)
+    plans = []
+    for hook in hooks:
+        try:
+            plan = hook(package)
+        except Exception as exc:
+            raise AppStartError(
+                f"{tool} not started — pre-start step {_hook_name(hook)} failed: {exc}"
+            ) from exc
+        if plan is not None:
+            plans.append(plan)
+    return plans
+
+
+def _plans_text(plans: list[PreSpawnPlan]) -> str:
+    return "; ".join(plan.description for plan in plans)
+
+
+def _confirm_pre_spawn(
+    plans: list[PreSpawnPlan], package: str, tool: str, consent: bool
+) -> None:
+    """Get the OK for plans that stop every app (no-op without such a plan).
+
+    With a UI: "Apply before starting {pkg}?" (worker thread only; refused
+    on the UI thread, where the bus would deadlock). Without a UI only the
+    caller's ``consent`` (headless ``fresh=True``) lets it proceed.
+
+    Raises:
+        AppStartError: Declined, Esc, a timeout, the UI thread, or headless
+            without consent.
+    """
+    if not any(plan.disruptive for plan in plans):
+        return
+    what = _plans_text(plans)
+    from sandroid.core.ui_request_bus import UIRequestBus, request_modal
+
+    if not UIRequestBus.get().has_active_handler():
+        if consent:
+            logger.info("%s: applying %s with the caller's consent", tool, what)
+            return
+        raise AppStartError(
+            f"{package} not started — {what} restarts the Android framework "
+            "(every running app on the device stops) and there is no dialog "
+            "to confirm it; pass fresh=True (the caller consents) to apply it."
+        )
+    if threading.current_thread() is threading.main_thread():
+        logger.error("Pre-start confirmation for %s on the UI thread; refused", tool)
+        raise AppStartError(
+            f"{package} not started — cannot ask about {what} from the UI thread."
+        )
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+    with _pre_spawn_phase():
+        answer = request_modal(
+            ConfirmModal,
+            title=f"Apply before starting {package}?",
+            message=(
+                f"Before {package} starts, Sandroid will {what}. This restarts "
+                "the Android framework: every running app on the device stops."
+                f"{stops_sentence(_restart_victims(package))}"
+            ),
+            yes_label="Apply and start",
+            no_label="Cancel",
+            guard_typing=True,
+        )
+    if answer is not True:
+        raise AppStartError(f"{package} not started — {what} not applied")
+
+
+def _spotlight_pkg() -> str | None:
+    try:
+        from sandroid.services import get_spotlight_service
+
+        return get_spotlight_service().get_effective_package()
+    except Exception:
+        return None
+
+
+def _restart_victims(package: str) -> tuple[str, ...]:
+    """The tools a framework restart stops: on ``package`` and on the
+    spotlight app (an AI launch of another app kills those too).
+    """
+    tools = list(app_tools(package))
+    spot = _spotlight_pkg()
+    if spot and spot != package:
+        tools += [t for t in app_tools(spot) if t not in tools]
+    return tuple(tools)
+
+
+def _system_server_pid(serial: str | None = None) -> int | None:
+    """PID of system_server (None: not running or adb failed)."""
+    from sandroid.core.adb import Adb
+
+    try:
+        out, _err = Adb.send_adb_command("shell pidof system_server", serial=serial)
+    except Exception as exc:
+        logger.debug("pidof system_server failed: %s", exc)
+        return None
+    return _parse_pid(out or "")
+
+
+def _apply_pre_spawn(plans: list[PreSpawnPlan], package: str) -> None:
+    """Run every plan's ``apply`` in order; fail closed (no spawn).
+
+    The system_server PID is read before any plan runs (one adb call): any
+    ``apply`` may restart the framework, whatever its ``disruptive`` said.
+    When the PID changed afterwards the Frida state is recovered
+    (:func:`recover_after_framework_restart`), also after a failed plan.
+    An ``apply`` is synchronous, so an unchanged PID means no restart.
+
+    Raises:
+        AppStartError: A plan failed, or the framework did not come back.
+    """
+    if not plans:
+        return
+    error: AppStartError | None = None
+    with _pre_spawn_phase((package, *_progress_text(plans))):
+        previous = _system_server_pid()
+        for plan in plans:
+            try:
+                plan.apply()
+            except Exception as exc:
+                error = AppStartError(
+                    f"Could not {plan.description}: {exc} — {package} not started"
+                )
+                error.__cause__ = exc
+                break
+        try:
+            _after_framework_restart(
+                previous, package, any(p.disruptive for p in plans)
+            )
+        except AppStartError as exc:
+            if error is None:
+                raise AppStartError(f"{exc} — {package} not started") from exc
+            logger.warning("Recovery after the failed pre-start step: %s", exc)
+    if error is not None:
+        raise error
+
+
+def _after_framework_restart(
+    previous: int | None, package: str, disruptive: bool
+) -> None:
+    """Recover when system_server changed since ``previous``.
+
+    Without a ``previous`` reading (adb failed) there is nothing to wait
+    for: when a plan said it restarts the framework, recover if
+    system_server runs again, else just drop the dead Frida handles (no
+    wait); without that claim skip (logged).
+    """
+    now = _system_server_pid()
+    if previous is None:
+        if not disruptive:
+            logger.info(
+                "Pre-start step for %s: system_server unreadable before it "
+                "(now %s); not waiting for a framework restart",
+                package,
+                now,
+            )
+            return
+        if now is None:
+            logger.info(
+                "Pre-start step for %s: system_server unreadable before and "
+                "after it; dropping the Frida handles without waiting",
+                package,
+            )
+            _drop_dead_frida_state()
+            _stop_launched_tools(package)
+            return
+    elif now == previous:
+        logger.debug(
+            "Pre-start step for %s left the framework running (system_server "
+            "%s); nothing to recover",
+            package,
+            previous,
+        )
+        return
+    try:
+        recover_after_framework_restart(previous)
+    finally:
+        _stop_launched_tools(package)
+    logger.info(
+        "The Android framework restarted before %s started: Frida handles "
+        "dropped, armed bypasses kept",
+        package,
+    )
+
+
+def _stop_launched_tools(package: str) -> None:
+    """The launched app's tools died too (the spotlight app's: in the drop)."""
+    if package != _spotlight_pkg():
+        stop_app_tools(package)
+
+
+def _drop_dead_frida_state() -> None:
+    """Drop the handles a framework restart killed (the armed set stays).
+
+    The spotlight app's tools died with it: their tasks are stopped so none
+    stays "running" on a dead process.
+    """
+    spot = _spotlight_pkg()
+    if spot:
+        stop_app_tools(spot)
+    jm = _job_manager()
+    drop_session(jm)  # bypass forget_process + the dead JobManager session
+    try:
+        from sandroid.services import get_frida_session_service
+
+        # Also nulls JobManager.device: its transport died with the framework.
+        get_frida_session_service().invalidate_frida_device_cache()
+    except Exception as exc:
+        logger.debug("Could not invalidate the Frida device cache: %s", exc)
+    if jm is not None:
+        try:
+            jm.device = None
+        except Exception:
+            pass
+    try:
+        from sandroid.services import get_spotlight_service
+
+        get_spotlight_service().announce_pid(None)
+    except Exception as exc:
+        logger.debug("Could not clear the spotlight PID: %s", exc)
+
+
+#: Per-call adb timeout of the package-manager probe (seconds).
+_PM_PROBE_TIMEOUT_S = 5.0
+
+
+def _package_manager_ready(serial: str | None = None) -> bool:
+    """``pm path android`` answers (the new framework serves binder calls)."""
+    from sandroid.core.adb import Adb
+
+    try:
+        out, _err = Adb.send_adb_command(
+            "shell pm path android", serial=serial, timeout=_PM_PROBE_TIMEOUT_S
+        )
+    except Exception as exc:
+        logger.debug("pm path android failed: %s", exc)
+        return False
+    return "package:" in (out or "")
+
+
+def _refresh_frida_server() -> str:
+    """Restart frida-server when it died or predates the new system_server.
+
+    A fresh one (the identity apply may have restarted it already) is left
+    alone; a dead one is started as ``frida.server_auto_start`` says.
+    """
+    try:
+        from sandroid.core.frida_manager import auto_start_frida_server
+
+        _running, reason = auto_start_frida_server()
+    except Exception as exc:
+        return f"frida-server check failed: {exc}"
+    return reason
+
+
+def recover_after_framework_restart(
+    previous_system_server_pid: int | None,
+    timeout: float = 90.0,
+    *,
+    serial: str | None = None,
+) -> None:
+    """Bring Sandroid's Frida state back after an Android framework restart.
+
+    For any restart of system_server (``stop``/``start``, a Zygote kill by
+    the CA injection), also outside a spawn:
+
+    1. Waits until system_server runs with a PID other than
+       ``previous_system_server_pid`` (None: no PID gate, only "runs" --
+       the old system_server answers for seconds after a Zygote kill, so
+       pass the PID read before the restart), then, within
+       the same timeout, until the package manager answers (``pm path
+       android``): frida-server restarted earlier hits the post-restart ANR
+       burst. Not ``sys.boot_completed``: it stays 1 across a restart.
+    2. Drops the dead handles: the spotlight app's tools, the bypass script
+       (the armed set stays), the JobManager session and device, the cached
+       Frida device, the spotlight PID. Also when the wait timed out.
+    3. Restarts frida-server if it died or predates the new system_server
+       (it then fails every call with DeadSystemException). Idempotent: a
+       fresh one is left alone.
+
+    Blocking (polls adb): call it on a worker thread, never the UI thread.
+
+    Steps 2 and 3 concern the active device's Frida handles: for another
+    ``serial`` only the wait runs.
+
+    Args:
+        previous_system_server_pid: system_server's PID before the restart.
+        timeout: Seconds to wait for the new system_server.
+        serial: The restarted device (every adb read targets it); None: the
+            active device.
+
+    Raises:
+        AppStartError: No new system_server, or no package manager, within
+            ``timeout``.
+    """
+    from sandroid.core.adb import Adb
+
+    active = serial is None or serial == Adb.get_target_device()
+
+    def drop() -> None:
+        if active:
+            _drop_dead_frida_state()
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        pid = _system_server_pid(serial=serial)
+        if pid is not None and pid != previous_system_server_pid:
+            break
+        if time.monotonic() >= deadline:
+            drop()
+            raise AppStartError(
+                f"The Android framework did not come back within {timeout:.0f} s "
+                "(no new system_server)"
+            )
+        time.sleep(_RECOVERY_POLL_S)
+    while not _package_manager_ready(serial=serial):
+        if time.monotonic() >= deadline:
+            drop()
+            raise AppStartError(
+                f"The Android framework did not come back within {timeout:.0f} s "
+                "(the package manager does not answer)"
+            )
+        time.sleep(_RECOVERY_POLL_S)
+    if not active:
+        logger.info("Framework back on %s (not the active device)", serial)
+        return
+    _drop_dead_frida_state()
+    logger.info("After the framework restart: %s", _refresh_frida_server())
+
+
+def prepare_launch(
+    package: str, tool: str, *, consent: bool = False, restart: bool = False
+) -> bool:
+    """Run the pre-spawn hooks before a start outside the Frida spawn path.
+
+    For launches that do not go through :func:`open_session` /
+    :func:`start_app` (TrigDroid's own spawn, the AI ``launch_app``, an
+    Objection spawn); the caller's launch follows. The hooks are asked
+    first: with nothing to do it returns at once (no lifecycle lock, no
+    adb). Otherwise it runs under the lifecycle lock and only for an app
+    that is not running.
+
+    Args:
+        package: The app about to start.
+        tool: User-facing name for messages.
+        consent: Headless consent for a step that stops every app.
+        restart: The user already agreed to restart a running app (Objection
+            spawn on a running app): it is stopped after the dialog, then
+            the plans run.
+
+    Returns:
+        True when the caller may start the app now (no hook had anything to
+        do, or the app is not running and the plans ran); False when it
+        already runs (or Frida holds it) and ``restart`` is not set: nothing
+        was run.
+
+    Raises:
+        AppStartError: A hook failed; with plans also busy, an adb error, a
+            failed plan, declined.
+    """
+    plans = _collect_pre_spawn(package, tool)
+    if not plans:
+        return True
+    with _lifecycle():
+        liveness, _pid = probe_liveness(package, frida_fallback=True)
+        if liveness == Liveness.UNKNOWN:
+            raise AppStartError(
+                f"Could not tell whether {package} is running (adb error); "
+                f"{tool} not started."
+            )
+        jm = _job_manager()
+        held = session_pid(jm) is not None and _session_package(jm) == package
+        if (liveness == Liveness.RUNNING or held) and not restart:
+            return False
+        _confirm_pre_spawn(plans, package, tool, consent)
+        if liveness == Liveness.RUNNING or held:
+            from sandroid.services import get_spotlight_service
+
+            spotlight = get_spotlight_service()
+            try:
+                respawn_teardown(package)  # after the OK: Cancel keeps it
+            finally:
+                spotlight.end_restart()
+        _apply_pre_spawn(plans, package)
+        return True
+
+
+# ---------------------------------------------------------------------------
 # Acting on a decision
 # ---------------------------------------------------------------------------
 
@@ -899,10 +1495,21 @@ def respawn_teardown(package: str) -> None:
     from sandroid.services import get_spotlight_service
 
     spotlight = get_spotlight_service()
+    try:
+        # Bypasses turned on live (Ctrl+P) join the armed set, as on ⇧K,
+        # before the kill: the liveness poll drops them once the app is gone.
+        if _spotlight_pkg() == package:  # not after a selection change
+            _bypass().arm_active(package)
+    except Exception as exc:
+        logger.warning("Keeping the live bypasses armed failed: %s", exc)
     Adb.force_stop(package)
     spotlight.begin_restart(package)
     time.sleep(0.5)  # let the process die so the session connection breaks
     stop_app_tools(package)
+    try:
+        _bypass().keep_armed_and_forget(package)  # drops the dead script
+    except Exception as exc:
+        logger.warning("Dropping the bypass script failed: %s", exc)
     drop_session(_job_manager())
 
 
@@ -938,11 +1545,14 @@ def open_session(decision: StartDecision, handler: Any = None) -> Opened:
     JOIN does nothing; ATTACH attaches the JobManager to the PID; SPAWN
     re-checks liveness right before spawning (a config dialog or snapshot
     prompt may have passed since the decision) and refuses when the app came
-    up meanwhile; RESPAWN runs the ⇧R teardown first.
+    up meanwhile; RESPAWN runs the ⇧R teardown first. SPAWN and RESPAWN run
+    the pre-spawn hooks right before the spawn (RESPAWN asks before the
+    teardown, so Cancel leaves the app running).
 
     Raises:
         AppStartError: REFUSE/NEEDS_CONFIRM decisions, a busy lifecycle, an
-            app that started meanwhile, a failed spawn.
+            app that started meanwhile, a failed or declined pre-start step,
+            a failed spawn.
     """
     jm = _job_manager()
     pkg = decision.package
@@ -976,14 +1586,20 @@ def open_session(decision: StartDecision, handler: Any = None) -> Opened:
                 )
             if decision.reset_session:
                 drop_idle_session(jm, decision.tool)
+            plans = _collect_pre_spawn(pkg, decision.tool)
+            _confirm_pre_spawn(plans, pkg, decision.tool, decision.consent)
+            _apply_pre_spawn(plans, pkg)
             return _spawn_paused(pkg, decision.tool)
     if action == StartAction.RESPAWN:
         from sandroid.services import get_spotlight_service
 
         spotlight = get_spotlight_service()
         with _lifecycle():
+            plans = _collect_pre_spawn(pkg, decision.tool)
+            _confirm_pre_spawn(plans, pkg, decision.tool, decision.consent)
             try:
                 respawn_teardown(pkg)
+                _apply_pre_spawn(plans, pkg)
                 return _spawn_paused(pkg, decision.tool)
             finally:
                 spotlight.end_restart()
@@ -1120,14 +1736,17 @@ def _spotlight_package() -> str | None:
     return get_spotlight_service().get_effective_package()
 
 
-def start_app(paused: bool = False) -> tuple[bool, str]:
+def start_app(paused: bool = False, *, consent: bool = False) -> tuple[bool, str]:
     """Start the stopped spotlight app with the armed bypasses (Space / ⇧P).
 
     Never restarts: a running app (also one opened from the launcher since
-    the last poll) or a held spawn is reported, not killed.
+    the last poll) or a held spawn is reported, not killed. The pre-spawn
+    hooks run right before the spawn.
 
     Args:
         paused: Keep the app paused after the hooks loaded (⇧P).
+        consent: Headless consent for a pre-start step that stops every app
+            (with a UI the dialog always asks).
 
     Returns:
         ``(ok, message)``.
@@ -1148,28 +1767,37 @@ def start_app(paused: bool = False) -> tuple[bool, str]:
                 f"{pkg} is already running (pid {decision.pid}) — ⇧R restarts "
                 "it, ⇧A attaches"
             )
-        if decision.reset_session:
-            try:
-                drop_idle_session(_job_manager(), "Start")
-            except AppStartError as exc:
-                return False, str(exc)
+        # The armed set now: a selection change during the dialog or the
+        # framework restart disarms, and this app must keep its bypasses.
         bypass = _bypass()
-        return bypass.apply_to_fresh_spawn_with_retry(
-            pkg, bypass.armed_categories(), resume=not paused
-        )
+        armed = bypass.armed_categories()
+        try:
+            if decision.reset_session:
+                drop_idle_session(_job_manager(), "Start")
+            plans = _collect_pre_spawn(pkg, pkg)
+            _confirm_pre_spawn(plans, pkg, pkg, consent)
+            _apply_pre_spawn(plans, pkg)
+        except AppStartError as exc:
+            return False, str(exc)
+        return bypass.apply_to_fresh_spawn_with_retry(pkg, armed, resume=not paused)
     finally:
         _LIFECYCLE.release()
 
 
-def restart_app(paused: bool = False) -> tuple[bool, str]:
+def restart_app(paused: bool = False, *, consent: bool = False) -> tuple[bool, str]:
     """Force-stop and start the spotlight app again (⇧R; the AI after consent).
 
-    The caller is the consent: ⇧R is the explicit restart key, the AI tool
-    asks through its approval gate. Tools on the app are stopped cleanly; the
-    armed bypass set is kept and applied to the new process.
+    The caller is the consent to restart this app: ⇧R is the explicit restart
+    key, the AI tool asks through its approval gate. Tools on the app are
+    stopped cleanly; the armed bypass set is kept and applied to the new
+    process. A pre-start step that stops every app is asked about first
+    (before the teardown: Cancel leaves the app running) -- ⇧R's "no dialog"
+    covers this app only.
 
     Args:
         paused: Keep the new process paused after the hooks loaded.
+        consent: Headless consent for a pre-start step that stops every app
+            (with a UI the dialog always asks).
 
     Returns:
         ``(ok, message)``.
@@ -1183,10 +1811,20 @@ def restart_app(paused: bool = False) -> tuple[bool, str]:
         pkg = spotlight.get_effective_package()
         if not pkg:
             return False, _no_app("Restart").reason
+        # Armed or on live, now: a selection change during the dialog disarms.
         bypass = _bypass()
-        armed = bypass.armed_categories()
+        armed = bypass.carried_categories(pkg)
+        try:
+            plans = _collect_pre_spawn(pkg, pkg)
+            _confirm_pre_spawn(plans, pkg, pkg, consent)
+        except AppStartError as exc:
+            return False, str(exc)  # nothing was torn down
         try:
             respawn_teardown(pkg)
+            try:
+                _apply_pre_spawn(plans, pkg)
+            except AppStartError as exc:
+                return False, str(exc)
             return bypass.apply_to_fresh_spawn_with_retry(pkg, armed, resume=not paused)
         finally:
             spotlight.end_restart()
@@ -1243,22 +1881,33 @@ __all__ = [
     "AppStartError",
     "Liveness",
     "Opened",
+    "PreSpawnHook",
+    "PreSpawnPlan",
     "StartAction",
     "StartDecision",
     "StartInputs",
     "abort_owned_spawn",
+    "add_pre_spawn_status_listener",
     "apply_armed_after_launch",
     "attach_app",
     "decide_start",
     "end_setup",
     "finish_owned_spawn",
+    "lifecycle_lock",
     "negotiate_start",
     "open_session",
+    "pre_spawn_running",
+    "pre_spawn_status",
+    "prepare_launch",
     "probe_liveness",
+    "recover_after_framework_restart",
+    "register_pre_spawn_hook",
+    "remove_pre_spawn_status_listener",
     "resolve_start",
     "restart_app",
     "resume_app",
     "setup_owner",
     "start_app",
     "stops_sentence",
+    "unregister_pre_spawn_hook",
 ]

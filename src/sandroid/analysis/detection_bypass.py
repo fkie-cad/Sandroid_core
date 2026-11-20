@@ -3341,6 +3341,44 @@ class BypassService:
         """
         self._reset_script_state()
 
+    def keep_armed_and_forget(self, package: str | None = None) -> list[str]:
+        """Drop the resident script but keep its categories as intent (⇧K).
+
+        The active categories join the armed set (also those turned on live
+        without arming, e.g. Ctrl+P), then the script state is reset like
+        :meth:`forget_process`. The next start applies them all.
+
+        Args:
+            package: The app being stopped; active categories hooked into
+                another app (the selection changed since) are not kept.
+
+        Returns:
+            The armed categories, in display order.
+        """
+        # One lock hold for the union and the drop: a live toggle lands
+        # either before (kept as armed) or after (a fresh load), never lost.
+        with self._lock:
+            if package is None or self._app_package == package:
+                self._armed |= self._active
+            armed = set(self._armed)
+            job, path = self._take_script_locked()
+        self._dispose_script(job, path)
+        rank = {c: i for i, c in enumerate(self.categories())}
+        return sorted(armed, key=lambda c: (rank.get(c, len(rank)), c))
+
+    def disarm_all(self) -> list[str]:
+        """Clear the armed set; the live script is left alone.
+
+        Armed is intent for one app: a new spotlight selection starts clean.
+
+        Returns:
+            The categories that were armed.
+        """
+        with self._lock:
+            cleared = sorted(self._armed)
+            self._armed.clear()
+        return cleared
+
     def is_active(self, category: str) -> bool:
         with self._lock:
             return category in self._active
@@ -3357,6 +3395,23 @@ class BypassService:
         """Categories that are armed OR active (what the panel renders ON)."""
         with self._lock:
             return sorted(self._armed | self._active)
+
+    def arm_active(self, package: str) -> None:
+        """Add the categories active on ``package`` to the armed set.
+
+        Called before a force-stop: the liveness poll may clear the active
+        set as soon as the process dies. Unloads nothing, so it cannot hang.
+        """
+        with self._lock:
+            if self._app_package == package:
+                self._armed |= self._active
+
+    def carried_categories(self, package: str) -> set[str]:
+        """What a restart of ``package`` re-applies: armed, plus active on it."""
+        with self._lock:
+            if self._app_package == package:
+                return self._armed | self._active
+            return set(self._armed)
 
     def reconcile_liveness(self) -> list[str]:
         """Drop the active categories when their hooked process is gone.
@@ -3808,13 +3863,23 @@ class BypassService:
         on the new process.
         """
         with self._lock:
-            job = self._job
-            path = self._temp_path
-            self._job = None
-            self._script = None
-            self._temp_path = None
-            self._active = set()
-            self._merge_errors = set()
+            job, path = self._take_script_locked()
+        self._dispose_script(job, path)
+
+    def _take_script_locked(self) -> tuple[Any, str | None]:
+        """Null the script state (caller holds ``_lock``); returns the job
+        and temp path for :meth:`_dispose_script`.
+        """
+        job, path = self._job, self._temp_path
+        self._job = None
+        self._script = None
+        self._temp_path = None
+        self._active = set()
+        self._merge_errors = set()
+        return job, path
+
+    def _dispose_script(self, job: Any, path: str | None) -> None:
+        """Stop the taken job, unlink its temp, unregister the task."""
         if job is not None:
             try:
                 Toolbox.get_frida_job_manager().stop_job_with_id(job.get_id())

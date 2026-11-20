@@ -219,7 +219,9 @@ def _in_subtask() -> bool:
         "tools running on it (friTap, Dexray, ...; armed bypasses are "
         "re-applied); without it a running app is left alone. paused=true holds the new process paused "
         "until resumed (Android ends the hold after about 10 s). The analyst "
-        "approves every call."
+        "approves every call. A pre-start step (e.g. an identity profile "
+        "with an Android framework restart, after the analyst confirms) can "
+        "make a start take minutes."
     ),
     parameters={
         "type": "object",
@@ -304,10 +306,12 @@ def start_spotlight_app(fresh: bool = False, paused: bool = False) -> dict[str, 
             service,
             f"{package} is already running (pid {pid}); pass fresh=true to restart it",
         )
+    # consent=False: a pre-start step that stops every app is the analyst's
+    # call (the TUI dialog); the tool's approval covers this app only.
     if running:
-        ok, msg = app_start.restart_app(paused=paused)
+        ok, msg = app_start.restart_app(paused=paused, consent=False)
     else:
-        ok, msg = app_start.start_app(paused=paused)
+        ok, msg = app_start.start_app(paused=paused, consent=False)
     return _start_result(ok, service, msg)
 
 

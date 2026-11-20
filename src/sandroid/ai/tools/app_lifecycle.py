@@ -220,7 +220,10 @@ def uninstall_apk(package_name: str) -> dict[str, Any]:
     name="launch_app",
     description=(
         "Launch an app on the device. Uses the given activity if provided, "
-        "otherwise falls back to the app's default launcher intent."
+        "otherwise falls back to the app's default launcher intent. A first "
+        "launch may run a pre-start step first (e.g. an identity profile "
+        "with an Android framework restart, after the analyst confirms); "
+        "that can take minutes."
     ),
     parameters={
         "type": "object",
@@ -257,6 +260,13 @@ def launch_app(package_name: str, activity_name: str | None = None) -> dict[str,
     function quotes ``package_name``/``activity_name`` for the device and
     host shell.
 
+    A first launch (the app is not running) runs the pre-spawn hooks first
+    (:func:`sandroid.services.app_start.prepare_launch`, e.g. the identity
+    profile; one that stops every app asks the analyst, and the step may
+    take minutes). With a pre-start step to run: busy, an adb error, a
+    failed or declined step mean not launched. Without one the launch is as
+    it always was (no lifecycle lock, no liveness probe).
+
     Args:
         package_name: Fully qualified package name to launch.
         activity_name: Optional launchable activity (short, e.g.
@@ -271,9 +281,15 @@ def launch_app(package_name: str, activity_name: str | None = None) -> dict[str,
         ToolExecutionError: *package_name* does not match Android's package
             identifier format.
     """
+    from sandroid.services.app_start import AppStartError, prepare_launch
+
     package_name = validate_package_name(package_name)
-    # Adb.launch_app quotes both values for the device and host shell itself.
-    success, message = Adb.launch_app(package_name, activity_name or None)
+    try:
+        prepare_launch(package_name, package_name)
+        # Adb.launch_app quotes both values for the device and host shell.
+        success, message = Adb.launch_app(package_name, activity_name or None)
+    except AppStartError as exc:
+        success, message = False, str(exc)
     return {
         "launched": success,
         "package_name": package_name,

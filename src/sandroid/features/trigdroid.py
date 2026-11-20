@@ -154,11 +154,22 @@ class Trigdroid(Functionality):
         already run it refuses and asks for a restart first; a held (paused)
         spawn has not run yet and is joined.
 
+        Before a spawn the pre-spawn hooks (e.g. the identity profile) run
+        under the lifecycle lock (``prepare_launch``); TrigDroid's own spawn
+        follows right after, outside the lock (it runs for the whole test).
+        Whether the app runs (attach) or is held is the resolver's call
+        above, also when no hook has anything to do.
+
         Returns:
             TrigDroid's ``spawn_mode`` for this run, or None to abort.
         """
         from sandroid.services import get_trigdroid_config_service
-        from sandroid.services.app_start import StartAction, resolve_start
+        from sandroid.services.app_start import (
+            AppStartError,
+            StartAction,
+            prepare_launch,
+            resolve_start,
+        )
 
         fresh = bool(getattr(get_trigdroid_config_service(), "fresh", False))
         decision = resolve_start(package_name, tool="TrigDroid", java_agent=True)
@@ -169,6 +180,17 @@ class Trigdroid(Functionality):
         if action == StartAction.SPAWN:
             if not spawn_mode:
                 logger.error(f"TrigDroid not started: {package_name} is not running")
+                return None
+            try:
+                stopped = prepare_launch(package_name, "TrigDroid")
+            except AppStartError as exc:
+                logger.error(f"TrigDroid not started: {exc}")
+                return None
+            if not stopped:
+                logger.error(
+                    f"TrigDroid not started: {package_name} started meanwhile; "
+                    "run TrigDroid again to attach to it."
+                )
                 return None
             return True
         if fresh and not (action == StartAction.JOIN and decision.paused):

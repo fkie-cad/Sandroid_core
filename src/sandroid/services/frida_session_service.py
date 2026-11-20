@@ -343,15 +343,24 @@ class FridaSessionService:
     # =========================================================================
 
     def invalidate_frida_device_cache(self) -> None:
-        """Invalidate cached Frida device.
+        """Invalidate cached Frida device (and the JobManager's device).
 
-        Call this when the active device changes (e.g., via Shift+D in TUI).
+        Call this when the active device changes (e.g., via Shift+D in TUI)
+        or after a framework/Zygote restart.
         The next call to get_frida_device() will re-initialize on the main thread.
         """
         with self._frida_device_lock:
             self._cached_frida_device = None
             self._cached_device_serial = None
             self._logger.debug("Invalidated Frida device cache")
+        # The JobManager re-resolves its device only when it is None; after a
+        # Zygote/framework restart the old one is dead. No lock: one write.
+        jm = self._job_manager
+        if jm is not None:
+            try:
+                jm.device = None
+            except Exception:
+                pass
 
     def _init_frida_device_on_main_thread(self, device_serial: str) -> Any:
         """Initialize Frida device - MUST be called from main thread.

@@ -1644,6 +1644,42 @@ def _launched(service, device) -> ident.identity_sim.SimValues:
     return sim
 
 
+def test_a_failed_sim_value_never_blocks_a_start_through_app_start(
+    service, device, monkeypatch
+):
+    """The real ``app_start`` pre-start step: a failed SIM value (set at the
+    emulator's start) stays failed in the lens but the app starts, and the
+    SIM alone never makes the start disruptive.
+    """
+    from sandroid.core.adb import Adb
+    from sandroid.services import app_start as real
+
+    monkeypatch.setattr(Adb, "get_target_device", classmethod(lambda cls: SERIAL))
+    monkeypatch.setattr(real, "_system_server_pid", lambda serial=None: 4242)
+    profile = service.active_profile()
+    for vid in ("android_id", "locale"):  # no framework value left
+        profile.values[vid].enabled = False
+    service.save(profile)
+    _launched(service, device)
+    device.modem = dict(STOCK_SIM)  # the radio keeps the old SIM
+    assert service.install_pre_spawn_hook()
+    try:
+        plans = real._collect_pre_spawn("com.example.app", "the app")
+        assert len(plans) == 1
+        assert isinstance(plans[0], real.PreSpawnPlan)
+        assert not plans[0].disruptive  # the SIM toggle restarts nothing
+        real._apply_pre_spawn(plans, "com.example.app")  # no AppStartError
+        assert device.airplane == ["enable", "disable"]
+        infos = {i.id: i for i in service.statuses()}
+        assert infos["imsi"].status == "failed"
+        assert infos["imsi"].sim_launch
+        assert "com.example.app" in _record(device)["done"]
+        # Done: the next start of the app has nothing to do.
+        assert real._collect_pre_spawn("com.example.app", "the app") == []
+    finally:
+        service.uninstall_pre_spawn_hook()
+
+
 def test_a_snapshot_with_the_old_sim_gets_one_airplane_toggle(service, device):
     sim = _launched(service, device)
     device.props["gsm.sim.operator.numeric"] = sim.mccmnc
