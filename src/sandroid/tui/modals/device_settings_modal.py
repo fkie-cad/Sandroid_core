@@ -5,13 +5,17 @@ Supports country presets for quick setup. Emulator-only and root-only controls
 are disabled when not available.
 """
 
+import contextlib
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from textual import work
-from textual.app import ComposeResult
+from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.markup import escape
 from textual.widgets import (
     Button,
     Input,
@@ -28,6 +32,9 @@ from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
 
 logger = logging.getLogger(__name__)
 
+#: Longest failure reason shown in the status line.
+_REASON_MAX = 120
+
 
 @dataclass
 class DeviceSettingsResult:
@@ -40,6 +47,26 @@ class DeviceSettingsResult:
 
     applied: bool = False
     messages: list[str] | None = None
+
+
+@dataclass
+class _Outcome:
+    """Result of one apply step, in plain words.
+
+    Attributes:
+        label: What was applied (e.g. "Timezone")
+        ok: Whether it worked
+        detail: The service's message on success, the reason on failure
+    """
+
+    label: str
+    ok: bool
+    detail: str
+
+
+#: One apply step: a label and a call on the settings service, or an input
+#: error already known on the UI thread (shown in order with the results).
+_PlanEntry = tuple[str, Callable[[Any], Any]] | _Outcome
 
 
 class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
@@ -105,7 +132,7 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
     }
 
     DeviceSettingsModal .status-label {
-        height: 1;
+        height: auto;
         margin-top: 1;
         color: $text-muted;
         text-align: center;
@@ -162,6 +189,7 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         self._is_emulator = is_emulator
         self._has_root = has_root
         self._messages: list[str] = []
+        self._applying = False
 
     @property
     def _root_badge(self) -> str:
@@ -430,6 +458,14 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         except Exception:
             return ""
 
+    def _alive(self) -> bool:
+        """Whether the modal is still on screen (a worker may outlive it).
+
+        ``is_mounted`` stays true after the modal is closed, so also check
+        that it is still attached to the app.
+        """
+        return self.is_mounted and self.is_attached
+
     def _update_status(self, message: str) -> None:
         """Update the status label."""
         try:
@@ -452,23 +488,23 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         elif button_id == "btn-geocode":
             self._do_geocode()
         elif button_id == "btn-apply-location":
-            self._apply_location()
+            self._start_apply(self._location_plan(), "Enter latitude and longitude")
         elif button_id == "btn-apply-environment":
-            self._apply_environment()
+            self._start_apply(self._environment_plan(), "No environment fields filled")
         elif button_id == "btn-apply-sensors":
-            self._apply_sensors()
+            self._start_apply(self._sensors_plan(), "No sensor fields filled")
         elif button_id == "btn-apply-network":
-            self._apply_network()
+            self._start_apply(self._network_plan(), "")
 
     def action_apply_all(self) -> None:
         """Apply all settings (Ctrl+S)."""
-        self._apply_location()
+        plan = self._location_plan()
         if self._has_root:
-            self._apply_environment()
+            plan += self._environment_plan()
         if self._is_emulator:
-            self._apply_sensors()
-        self._apply_network()
-        self._update_status("All settings applied")
+            plan += self._sensors_plan()
+        plan += self._network_plan()
+        self._start_apply(plan, "")
 
     def _get_settings_service(self):
         """Get the device settings service (lazy import)."""
@@ -482,7 +518,7 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         country = self._get_input("input-geocode-country")
 
         if not city or not country:
-            self._update_status("[red]Enter both city and country[/]")
+            self._update_status("[$error]Enter both city and country[/]")
             return
 
         btn = self.query_one("#btn-geocode", Button)
@@ -491,16 +527,23 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         progress.add_class("visible")
         self._update_status("Geocoding...")
 
-        self._run_geocode(city, country)
+        self._run_geocode(self.app, city, country)
 
     @work(thread=True)
-    def _run_geocode(self, city: str, country: str) -> None:
-        """Run geocode in a worker thread to keep UI responsive."""
+    def _run_geocode(self, app: App, city: str, country: str) -> None:
+        """Run geocode in a worker thread to keep UI responsive.
+
+        *app* is taken on the UI thread: once the modal is closed,
+        ``self.app`` can no longer be resolved from this thread.
+        """
+        coords: tuple[float, float] | None = None
+        error: Exception | None = None
         try:
             coords = self._get_settings_service().geocode_location(country, city)
-            self.app.call_from_thread(self._geocode_done, city, country, coords, None)
         except Exception as e:
-            self.app.call_from_thread(self._geocode_done, city, country, None, e)
+            error = e
+        with contextlib.suppress(Exception):
+            app.call_from_thread(self._geocode_done, city, country, coords, error)
 
     def _geocode_done(
         self,
@@ -510,129 +553,198 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         error: Exception | None,
     ) -> None:
         """Handle geocode result back on the main thread."""
+        if not self._alive():
+            return
         btn = self.query_one("#btn-geocode", Button)
         btn.disabled = False
         progress = self.query_one("#geocode-progress", ProgressBar)
         progress.remove_class("visible")
 
         if error:
-            self._update_status(f"[red]Geocode error: {error}[/]")
+            self._update_status(f"[$error]Geocode failed: {escape(str(error))}[/]")
         elif coords:
             lat, lon = coords
             self._set_input("input-latitude", str(lat))
             self._set_input("input-longitude", str(lon))
             self._update_status(f"Geocoded: {lat:.4f}, {lon:.4f}")
         else:
-            self._update_status(f"[red]Could not geocode {city}, {country}[/]")
+            self._update_status(
+                f"[$error]Could not geocode {escape(city)}, {escape(country)}[/]"
+            )
 
-    def _apply_location(self) -> None:
-        """Apply location settings."""
+    # ── Apply: plans are read on the UI thread, run in a worker ─────
+
+    def _location_plan(self) -> list[_PlanEntry]:
+        """Location step, or nothing when no coordinates were entered."""
         lat_str = self._get_input("input-latitude")
         lon_str = self._get_input("input-longitude")
-
         if not lat_str or not lon_str:
-            self._update_status("[yellow]Enter latitude and longitude[/]")
-            return
-
+            return []
         try:
             lat = float(lat_str)
             lon = float(lon_str)
         except ValueError:
-            self._update_status("[red]Invalid coordinates[/]")
+            return [_Outcome("Location", False, "invalid coordinates")]
+        return [("Location", lambda svc: svc.set_gps_location(lat, lon))]
+
+    def _environment_plan(self) -> list[_PlanEntry]:
+        """Timezone, locale and telephony steps for the filled fields."""
+        plan: list[_PlanEntry] = []
+        tz = self._get_input("input-timezone")
+        if tz:
+            plan.append(("Timezone", lambda svc: svc.set_timezone(tz)))
+
+        lang = self._get_input("input-language")
+        country = self._get_input("input-country")
+        if lang and country:
+            plan.append(("Locale", lambda svc: svc.set_locale(lang, country)))
+
+        tel_iso = self._get_input("input-tel-iso")
+        tel_mnc = self._get_input("input-tel-mnc")
+        if tel_iso and tel_mnc:
+            plan.append(("Telephony", lambda svc: svc.set_telephony(tel_iso, tel_mnc)))
+        return plan
+
+    def _sensors_plan(self) -> list[_PlanEntry]:
+        """Sensor and battery steps for the filled fields."""
+        plan: list[_PlanEntry] = []
+        sensor_inputs = {
+            "accelerometer": "input-accelerometer",
+            "gyroscope": "input-gyroscope",
+            "light": "input-light",
+            "pressure": "input-pressure",
+        }
+        for sensor_type, input_id in sensor_inputs.items():
+            val = self._get_input(input_id)
+            if not val:
+                continue
+            label = sensor_type.capitalize()
+            try:
+                level = int(val)
+            except ValueError:
+                plan.append(_Outcome(label, False, "invalid value"))
+                continue
+            plan.append(
+                (
+                    label,
+                    lambda svc, t=sensor_type, v=level: svc.set_sensor(t, v),
+                )
+            )
+
+        battery_val = self._get_input("input-battery")
+        if battery_val:
+            try:
+                level = int(battery_val)
+            except ValueError:
+                plan.append(_Outcome("Battery", False, "invalid value"))
+            else:
+                plan.append(("Battery", lambda svc, v=level: svc.set_battery_level(v)))
+        return plan
+
+    def _network_plan(self) -> list[_PlanEntry]:
+        """WiFi, mobile data and Bluetooth steps from the switches."""
+        wifi = self.query_one("#switch-wifi", Switch).value
+        data = self.query_one("#switch-mobile-data", Switch).value
+        bluetooth = self.query_one("#switch-bluetooth", Switch).value
+        return [
+            ("WiFi", lambda svc: svc.toggle_wifi(wifi)),
+            ("Mobile data", lambda svc: svc.toggle_mobile_data(data)),
+            ("Bluetooth", lambda svc: svc.toggle_bluetooth(bluetooth)),
+        ]
+
+    def _start_apply(self, plan: list[_PlanEntry], empty_msg: str) -> None:
+        """Run *plan* in a worker; the UI stays responsive meanwhile.
+
+        Args:
+            plan: Steps (and already-known input errors) in display order.
+            empty_msg: Status shown when *plan* is empty.
+        """
+        if self._applying:
+            return
+        if not plan:
+            if empty_msg:
+                self._update_status(f"[$warning]{empty_msg}[/]")
+            return
+        if all(isinstance(entry, _Outcome) for entry in plan):
+            self._show_outcomes(plan)  # only input errors, nothing to send
             return
 
-        try:
-            result = self._get_settings_service().set_gps_location(lat, lon)
-            if result.success:
-                self._messages.append(result.message)
-                self._update_status(f"[green]{result.message}[/]")
-            else:
-                self._update_status(f"[red]{result.message}[/]")
-        except Exception as e:
-            self._update_status(f"[red]Location error: {e}[/]")
+        from sandroid.core.adb import Adb
 
-    def _apply_environment(self) -> None:
-        """Apply environment settings (timezone, locale, telephony)."""
-        try:
-            svc = self._get_settings_service()
-            messages = []
+        self._set_applying(True)
+        self._update_status("Applying...")
+        # Pin the whole run to the device the user is looking at now.
+        self._run_apply(self.app, plan, Adb.get_target_device())
 
-            tz = self._get_input("input-timezone")
-            if tz:
-                messages.append(svc.set_timezone(tz).message)
+    @work(thread=True, exclusive=True, group="device-settings-apply")
+    def _run_apply(self, app: App, plan: list[_PlanEntry], serial: str | None) -> None:
+        """Run the adb/console round trips of *plan* off the UI thread.
 
-            lang = self._get_input("input-language")
-            country = self._get_input("input-country")
-            if lang and country:
-                messages.append(svc.set_locale(lang, country).message)
+        *app* is taken on the UI thread: once the modal is closed,
+        ``self.app`` can no longer be resolved from this thread.
+        """
+        from sandroid.core.adb import Adb
 
-            tel_iso = self._get_input("input-tel-iso")
-            tel_mnc = self._get_input("input-tel-mnc")
-            if tel_iso and tel_mnc:
-                messages.append(svc.set_telephony(tel_iso, tel_mnc).message)
-
-            self._report_results(
-                messages, "No environment fields filled", "Environment"
-            )
-        except Exception as e:
-            self._update_status(f"[red]Environment error: {e}[/]")
-
-    def _apply_sensors(self) -> None:
-        """Apply sensor and battery settings."""
+        outcomes: list[_Outcome] = []
         try:
             svc = self._get_settings_service()
-            messages = []
-
-            sensor_inputs = {
-                "accelerometer": "input-accelerometer",
-                "gyroscope": "input-gyroscope",
-                "light": "input-light",
-                "pressure": "input-pressure",
-            }
-
-            for sensor_type, input_id in sensor_inputs.items():
-                val = self._get_input(input_id)
-                if val:
+            with Adb.targeting(serial):
+                for entry in plan:
+                    if isinstance(entry, _Outcome):
+                        outcomes.append(entry)
+                        continue
+                    label, call = entry
                     try:
-                        messages.append(svc.set_sensor(sensor_type, int(val)).message)
-                    except ValueError:
-                        messages.append(f"Invalid {sensor_type} value")
-
-            battery_val = self._get_input("input-battery")
-            if battery_val:
-                try:
-                    messages.append(svc.set_battery_level(int(battery_val)).message)
-                except ValueError:
-                    messages.append("Invalid battery value")
-
-            self._report_results(messages, "No sensor fields filled", "Sensor")
+                        result = call(svc)
+                    except Exception as e:
+                        logger.debug("%s failed", label, exc_info=True)
+                        outcomes.append(_Outcome(label, False, str(e)))
+                        continue
+                    if result.success:
+                        outcomes.append(_Outcome(label, True, result.message))
+                    else:
+                        reason = result.error or result.message
+                        outcomes.append(_Outcome(label, False, reason))
         except Exception as e:
-            self._update_status(f"[red]Sensor error: {e}[/]")
+            logger.debug("Device settings apply failed", exc_info=True)
+            outcomes.append(_Outcome("Settings", False, str(e)))
+        # The modal may be closed (or the app gone) by now.
+        with contextlib.suppress(Exception):
+            app.call_from_thread(self._apply_done, outcomes)
 
-    def _apply_network(self) -> None:
-        """Apply network toggle settings."""
-        try:
-            svc = self._get_settings_service()
-            messages = [
-                svc.toggle_wifi(self.query_one("#switch-wifi", Switch).value).message,
-                svc.toggle_mobile_data(
-                    self.query_one("#switch-mobile-data", Switch).value
-                ).message,
-                svc.toggle_bluetooth(
-                    self.query_one("#switch-bluetooth", Switch).value
-                ).message,
-            ]
-            self._messages.extend(messages)
-            self._update_status(f"[green]{'; '.join(messages)}[/]")
-        except Exception as e:
-            self._update_status(f"[red]Network error: {e}[/]")
+    def _apply_done(self, outcomes: list[_Outcome]) -> None:
+        """Show the results of a run (UI thread)."""
+        self._applying = False
+        if not self._alive():
+            return
+        self._set_applying(False)
+        self._show_outcomes(outcomes)
 
-    def _report_results(
-        self, messages: list[str], empty_msg: str, category: str
-    ) -> None:
-        """Report apply results to status and message list."""
-        if messages:
-            self._messages.extend(messages)
-            self._update_status(f"[green]{'; '.join(messages)}[/]")
-        else:
-            self._update_status(f"[yellow]{empty_msg}[/]")
+    def _set_applying(self, busy: bool) -> None:
+        """Disable the Apply buttons while a run is in progress."""
+        self._applying = busy
+        available = {
+            "btn-apply-location": True,
+            "btn-apply-environment": self._has_root,
+            "btn-apply-sensors": self._is_emulator,
+            "btn-apply-network": True,
+        }
+        for button_id, enabled in available.items():
+            try:
+                self.query_one(f"#{button_id}", Button).disabled = busy or not enabled
+            except Exception:
+                pass
+
+    def _show_outcomes(self, outcomes: list[_Outcome]) -> None:
+        """Report results in the status line: success and error colours."""
+        parts = []
+        for outcome in outcomes:
+            label = escape(outcome.label)
+            if outcome.ok:
+                self._messages.append(outcome.detail)
+                parts.append(f"[$success]{label} applied[/]")
+            else:
+                reason = " ".join(outcome.detail.split())[:_REASON_MAX]
+                reason = escape(reason or "unknown error")
+                parts.append(f"[$error]{label} failed: {reason}[/]")
+        self._update_status("; ".join(parts))
