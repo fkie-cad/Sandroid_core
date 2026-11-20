@@ -2182,6 +2182,10 @@ def _save_prefs(prefs: dict[str, Any]) -> None:
         logger.warning(f"Could not save launch options to {path}: {e}")
 
 
+#: Keys of an AVD's devices.json entry that are not launch options.
+_NOT_OPTIONS = frozenset({"port", "hook_args", "pins", "pins_seen"})
+
+
 def options_from_prefs(prefs: dict[str, Any], name: str) -> AvdLaunchOptions:
     """Launch options remembered for AVD *name* in *prefs* (never a wipe).
 
@@ -2196,8 +2200,9 @@ def options_from_prefs(prefs: dict[str, Any], name: str) -> AvdLaunchOptions:
         boot, a missing ``save_on_exit`` as False.
     """
     entry = (prefs.get("avds") or {}).get(name)
-    if not isinstance(entry, dict) or not set(entry) - {"port"}:
-        # No options remembered (at most the port of a launch is known).
+    if not isinstance(entry, dict) or not set(entry) - _NOT_OPTIONS:
+        # No options remembered (only the port of a launch, its hook
+        # arguments or the snapshot pins are known).
         return AvdLaunchOptions(
             headless=bool(getattr(_config_emulator(), "avd_headless", False))
         )

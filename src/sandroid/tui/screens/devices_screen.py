@@ -496,6 +496,8 @@ def _vanished_pin_notes(info: Any) -> list[str]:
     """
     from sandroid.core import snapshot_policy as policy
 
+    if getattr(info, "path", None) is None:
+        return []  # folder not readable (fallback info, unmounted disk)
     try:
         gone = policy.vanished_pins(info.name, getattr(info, "snapshots", ()) or ())
     except Exception:
@@ -540,6 +542,7 @@ class HubCollector:
         self._avd_names: dict[str, str] = {}
         self._avds: list[Any] | None = None
         self._avds_at = 0.0
+        self._pin_notes: list[str] = []
 
     def invalidate_avds(self) -> None:
         """Re-read the AVD catalogue on the next collect."""
@@ -606,7 +609,9 @@ class HubCollector:
                 except Exception:
                     avds.append(emulator.AvdInfo(name=name))
             for info in avds:
-                notes.extend(_vanished_pin_notes(info))
+                # Reported once by the policy; kept on this screen until it
+                # closes so a 2 s refresh does not hide it at once.
+                self._pin_notes.extend(_vanished_pin_notes(info))
         with self._lock:
             self._avds, self._avds_at = avds, time.monotonic()
         return avds
@@ -702,6 +707,7 @@ class HubCollector:
                 self._avd_names[serial] = name
 
         avds = self._catalogue(force_avds, notes)
+        notes.extend(self._pin_notes)
         locked: set[str] = set()
         for info in avds:
             try:

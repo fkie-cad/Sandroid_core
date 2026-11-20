@@ -156,9 +156,64 @@ def test_snapshot_complete_needs_the_ram_image(prefs):
     _snapshot(prefs, "Dev", "stub", ram=False)
     assert policy.snapshot_complete("Dev", "full")
     assert not policy.snapshot_complete("Dev", "stub")
-    assert policy.snapshot_exists("Dev", "stub")
+    # A stub holds nothing to protect: it does not count as existing.
+    assert policy.snapshot_exists("Dev", "full")
+    assert policy.snapshot_exists("Dev", "stub") is False
     assert policy.snapshot_exists("Dev", "missing") is False
     assert policy.snapshot_exists("Nope", "x") is None
+
+
+def test_an_unknown_avd_protects_every_avd_s_pins():
+    policy.pin("Dev", "golden")
+    assert policy.pinned(None) >= {"clean_8g", "default_boot", "golden"}
+    assert policy.check("delete", "golden", avd=None) is not None
+    assert policy.check("delete", "golden", avd="Other") is None
+
+
+def test_pins_alone_are_no_remembered_launch_options(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        emulator, "_config_emulator", lambda: SimpleNamespace(avd_headless=True)
+    )
+    policy.pin("Dev", "golden")
+    policy.vanished_pins("Other", ["default_boot"])
+    for avd in ("Dev", "Other"):
+        assert emulator.remembered_options(avd).headless is True
+
+
+def test_rewind_and_analysis_save_and_delete_as_themselves(monkeypatch):
+    from types import SimpleNamespace
+
+    from sandroid.analysis.snapshot_manager import SnapshotManager
+    from sandroid.tui.controllers.recording_controller import RecordingController
+
+    seen = []
+
+    def record(kind):
+        def call(*args, **kwargs):
+            seen.append((kind, policy.current_actor()[0]))
+            return True
+
+        return call
+
+    toolbox = SimpleNamespace(
+        create_snapshot=record("save"), delete_snapshot=record("delete")
+    )
+    manager = SnapshotManager()
+    assert manager._save_snapshot(toolbox, "sandroid_malware")
+    assert manager.discard_snapshot(toolbox)
+    service = SimpleNamespace(
+        list_snapshots=lambda: [SimpleNamespace(name=REC)],
+        delete_snapshot=record("delete"),
+    )
+    monkeypatch.setattr("sandroid.services.get_emulator_service", lambda: service)
+    assert RecordingController._reap_start_point(REC, "emulator-5554", wait_s=1.0)
+    assert seen == [
+        ("save", "analysis"),
+        ("delete", "analysis"),
+        ("delete", "rewind"),
+    ]
 
 
 # -- enforced at the service ----------------------------------------------------

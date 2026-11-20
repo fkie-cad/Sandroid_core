@@ -186,17 +186,29 @@ def owner_of(name: str) -> Namespace | None:
 # -- pins ---------------------------------------------------------------------
 
 
-def pinned(avd: str | None) -> frozenset[str]:
-    """Pinned snapshot names of AVD *avd* (:data:`DEFAULT_PINS` if unknown)."""
-    if not avd:
-        return frozenset(DEFAULT_PINS)
-    from sandroid.core import emulator
-
-    entry = emulator.load_launch_prefs()["avds"].get(avd, {})
+def _pins_of(entry: dict) -> frozenset[str]:
     pins = entry.get("pins")
     if not isinstance(pins, list):
         return frozenset(DEFAULT_PINS)
     return frozenset(p for p in pins if isinstance(p, str))
+
+
+def pinned(avd: str | None) -> frozenset[str]:
+    """Pinned snapshot names of AVD *avd*.
+
+    Unknown AVD (``None``: its name could not be read): the default pins
+    and every name pinned on any AVD -- never less protection.
+    """
+    from sandroid.core import emulator
+
+    avds = emulator.load_launch_prefs()["avds"]
+    if not avd:
+        union = set(DEFAULT_PINS)
+        for entry in avds.values():
+            if isinstance(entry, dict):
+                union |= _pins_of(entry)
+        return frozenset(union)
+    return _pins_of(avds.get(avd, {}))
 
 
 def _set_pins(avd: str, pins: Iterable[str]) -> None:
@@ -283,7 +295,12 @@ def check(
 
 
 def snapshot_exists(avd: str | None, name: str) -> bool | None:
-    """Whether AVD *avd* has a snapshot directory *name* (``None``: unknown)."""
+    """Whether AVD *avd* has a loadable snapshot *name* (``None``: unknown).
+
+    A stub (``snapshot.pb`` only, left by ``-snapshot <unknown name>``)
+    holds nothing to protect: it does not count (see
+    :func:`snapshot_complete`).
+    """
     if not avd:
         return None
     from sandroid.core import emulator
@@ -291,7 +308,7 @@ def snapshot_exists(avd: str | None, name: str) -> bool | None:
     directory = emulator.avd_dir(avd)
     if directory is None:
         return None
-    return (directory / "snapshots" / name).is_dir()
+    return snapshot_complete(avd, name)
 
 
 def snapshot_complete(avd: str, name: str) -> bool:

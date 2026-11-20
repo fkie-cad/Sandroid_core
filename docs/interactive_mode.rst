@@ -52,6 +52,8 @@ debugging). ``emulator.avd_headless`` is only the first-launch default.
 can neither be overwritten nor deleted -- not from the Snapshots panel, by
 Rewind or by the AI assistant. ``clean_8g`` and ``default_boot`` are pinned
 on every AVD by default; unpinning asks first, and the AI can never unpin.
+(The emulator's own quick-boot save on exit -- launch option ``s`` -- still
+updates ``default_boot``; pinning only stops Sandroid from touching it.)
 Rewind start points and persona snapshots belong to their feature: the
 Snapshots panel deletes one only after a confirm that says whose it is. A
 pinned snapshot deleted outside Sandroid (e.g. ``qemu-img`` while the AVD is

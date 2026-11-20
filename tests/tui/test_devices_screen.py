@@ -1106,8 +1106,11 @@ def test_a_vanished_pinned_snapshot_is_a_hub_note_once(monkeypatch, tmp_path):
     from sandroid.tui.screens import devices_screen as hub_module
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
-    info = SimpleNamespace(name="Dev", snapshots=("clean_8g", "tmp"))
+    info = SimpleNamespace(name="Dev", snapshots=("clean_8g", "tmp"), path=tmp_path)
     assert hub_module._vanished_pin_notes(info) == []
+    # An AVD whose folder can't be read lists no snapshots: no false alarm.
+    unreadable = SimpleNamespace(name="Dev", snapshots=(), path=None)
+    assert hub_module._vanished_pin_notes(unreadable) == []
     info.snapshots = ("tmp",)
     (note,) = hub_module._vanished_pin_notes(info)
     assert "Pinned snapshot 'clean_8g' of Dev is gone" in note
