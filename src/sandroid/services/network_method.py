@@ -28,10 +28,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +49,7 @@ LABELS = {
     CUSTOM: "Custom",
 }
 
-#: Shown while friTap has no non-interactive keys-only start on this build.
+#: Shown if friTap has no non-interactive keys-only start (older builds).
 KEYS_ONLY_UNAVAILABLE = "needs friTap support"
 
 #: friTap refusal reasons (``StartResult.reason``) in plain words.
@@ -378,48 +375,26 @@ def plan_apply(
 
 
 # ---------------------------------------------------------------------------
-# Optional APIs of peers (guarded lookups)
+# friTap (app-lens: sandroid.analysis.fritap)
 # ---------------------------------------------------------------------------
 
 
-def _fritap_api(name: str) -> Callable[..., Any] | None:
-    """``sandroid.analysis.fritap.<name>`` when this build has it.
-
-    TODO(fritap-keys-only): app-lens adds ``start_fritap_keys`` /
-    ``stop_fritap`` / ``fritap_running``; until then "This app, keys only"
-    stays visible but disabled ("needs friTap support").
-    """
-    try:
-        from sandroid.analysis import fritap
-    except Exception:
-        return None
-    fn = getattr(fritap, name, None)
-    return fn if callable(fn) else None
-
-
 def keys_only_available() -> bool:
-    return _fritap_api("start_fritap_keys") is not None
+    """FriTap has its non-interactive keys-only start (always on this build)."""
+    from sandroid.analysis import fritap
+
+    return callable(getattr(fritap, "start_fritap_keys", None))
 
 
 def _fritap_state(spotlight: str | None) -> tuple[bool, bool]:
     """``(friTap running, on the spotlight app)`` (in-process reads)."""
-    running_fn = _fritap_api("fritap_running")
-    if running_fn is not None:
-        try:
-            running = bool(running_fn())
-            on_spot = bool(spotlight) and bool(running_fn(spotlight))
-            return running, on_spot
-        except Exception:
-            logger.debug("fritap_running failed", exc_info=True)
     try:
-        from sandroid.services import get_task_service
+        from sandroid.analysis.fritap import fritap_running
 
-        task = get_task_service().get_task("fritap")
-        if task is None or not get_task_service().is_running("fritap"):
-            return False, False
-        app = getattr(task, "app_name", None)
-        return True, bool(spotlight) and (app in (None, "", spotlight))
+        running = fritap_running()
+        return running, running and bool(spotlight) and fritap_running(spotlight)
     except Exception:
+        logger.debug("fritap_running failed", exc_info=True)
         return False, False
 
 
@@ -543,24 +518,18 @@ class ServiceActions:
 
     @staticmethod
     def _stop_fritap(_serial) -> tuple[bool, str]:
-        stop = _fritap_api("stop_fritap")
-        try:
-            if stop is not None:
-                stop()
-            else:
-                from sandroid.services import get_task_service
+        from sandroid.analysis.fritap import fritap_running, stop_fritap
 
-                get_task_service().stop("fritap")
-        except Exception as exc:
-            return False, f"friTap did not stop: {exc}"
+        stop_fritap()
+        if fritap_running():
+            return False, "friTap did not stop"
         return True, "friTap stopped"
 
     @staticmethod
     def _start_fritap_keys(serial, pkg: str) -> tuple[bool, str]:
-        start = _fritap_api("start_fritap_keys")
-        if start is None:
-            return False, KEYS_ONLY_UNAVAILABLE
-        result = start(package=pkg, serial=serial)
+        from sandroid.analysis.fritap import start_fritap_keys
+
+        result = start_fritap_keys(package=pkg, serial=serial)
         try:
             ok, message = result[0], result[1]
         except Exception:
@@ -863,12 +832,9 @@ class NetworkMethodService:
         try:
             from sandroid.analysis.detection_bypass import get_bypass_service
 
-            # TODO(bypass-state-listener): app-lens adds add_state_listener;
-            # until then the TaskService "bypass" events cover live changes
-            # (arm-only changes show on the next refresh).
-            add = getattr(get_bypass_service(), "add_state_listener", None)
-            if callable(add):
-                add(self._on_bypass_state)
+            # Armed-only changes publish nothing else (TaskService events
+            # cover live ones).
+            get_bypass_service().add_state_listener(self._on_bypass_state)
         except Exception:
             logger.debug("bypass state listener not added", exc_info=True)
         try:
@@ -900,9 +866,7 @@ class NetworkMethodService:
         try:
             from sandroid.analysis.detection_bypass import get_bypass_service
 
-            remove = getattr(get_bypass_service(), "remove_state_listener", None)
-            if callable(remove):
-                remove(self._on_bypass_state)
+            get_bypass_service().remove_state_listener(self._on_bypass_state)
         except Exception:
             pass
         try:
@@ -928,8 +892,9 @@ class NetworkMethodService:
             self.refresh()
 
     def _on_bypass_state(self) -> None:
-        # Runs on the changing thread, maybe under the service's lock: only
-        # schedule (the worker reads on_categories()).
+        # Runs on the changing thread -- a worker or the UI thread itself,
+        # maybe under the bypass service's lock: only schedule a worker
+        # (it reads on_categories()); never marshal or block here.
         self.refresh()
 
     def _on_mitm_line(self, line: str) -> None:

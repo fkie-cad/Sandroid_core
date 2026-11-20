@@ -265,15 +265,52 @@ def test_fritap_reason_words():
     assert "another start" in nm.FRITAP_REASONS["busy"]
 
 
-def test_keys_only_is_disabled_without_the_fritap_api(monkeypatch):
+def test_keys_only_uses_the_fritap_api(monkeypatch):
     from sandroid.analysis import fritap
 
-    monkeypatch.delattr(fritap, "start_fritap_keys", raising=False)
-    assert not nm.keys_only_available()
-    monkeypatch.setattr(
-        fritap, "start_fritap_keys", lambda **kw: (True, "ok"), raising=False
-    )
     assert nm.keys_only_available()
+    calls = []
+
+    class Result(tuple):
+        __slots__ = ()
+        reason = "needs_consent"
+
+    monkeypatch.setattr(
+        fritap,
+        "start_fritap_keys",
+        lambda package=None, serial=None: (
+            calls.append((package, serial)) or Result((False, "consent"))
+        ),
+    )
+    ok, msg = nm.ServiceActions()._start_fritap_keys("emulator-5570", SPOT)
+    assert calls == [(SPOT, "emulator-5570")]
+    assert not ok
+    assert msg == "needs consent to restart the app"
+    monkeypatch.setattr(
+        fritap, "fritap_running", lambda package=None: package in (None, SPOT)
+    )
+    assert nm._fritap_state(SPOT) == (True, True)
+    assert nm._fritap_state("com.other") == (True, False)
+
+
+def test_service_follows_bypass_state_listener(monkeypatch):
+    from sandroid.analysis import detection_bypass
+
+    added, removed = [], []
+    fake = type(
+        "B",
+        (),
+        {
+            "add_state_listener": lambda self, cb: added.append(cb),
+            "remove_state_listener": lambda self, cb: removed.append(cb),
+        },
+    )()
+    monkeypatch.setattr(detection_bypass, "get_bypass_service", lambda: fake)
+    service = nm.NetworkMethodService(actions=None)
+    service.subscribe()
+    assert added == [service._on_bypass_state]
+    service.unsubscribe()
+    assert removed == [service._on_bypass_state]
 
 
 # -- Mitmproxy stop / restore / quit -------------------------------------------------
