@@ -1883,6 +1883,8 @@ _CA_NOT_INSTALLED_LOGGED = False
 
 #: Sentinel: "the serial adb currently targets" (``None`` is a real value).
 _CURRENT_SERIAL = object()
+#: Sentinel: "every device" (``None`` is a real value).
+_ALL_SERIALS = object()
 
 
 #: Device script for App Proxy lanes (one ``adb shell`` per operation; the
@@ -2813,18 +2815,30 @@ class FocusManager:
             if pkg
         }
 
-    def app_proxies_cached(self) -> dict[str, str]:
+    def app_proxies_cached(
+        self, serial: str | None | object = _ALL_SERIALS
+    ) -> dict[str, str]:
         """:meth:`app_proxies` for the UI thread: never waits for the lock.
 
         The current value when the lock is free, else the last value read
-        (a reconcile holds the lock across seconds of adb work).
+        (a reconcile holds the lock across seconds of adb work). With
+        *serial*, only the lanes that live on that device.
         """
         if self._lock.acquire(blocking=False):
             try:
                 self._routes_cache = self._routes_locked()
+                self._route_serials_cache = {
+                    pkg: self._lane_serials.get(lane)
+                    for lane, pkg in self._lanes.items()
+                    if pkg
+                }
             finally:
                 self._lock.release()
-        return dict(self._routes_cache)
+        routes = dict(self._routes_cache)
+        if serial is _ALL_SERIALS:
+            return routes
+        serials = getattr(self, "_route_serials_cache", {})
+        return {pkg: t for pkg, t in routes.items() if serials.get(pkg) == serial}
 
     def lane_health_cached(
         self, serial: str | None | object = _CURRENT_SERIAL

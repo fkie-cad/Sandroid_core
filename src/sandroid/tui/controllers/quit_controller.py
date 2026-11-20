@@ -140,7 +140,9 @@ def _teardown_device_guard() -> None:
     if guard is None:
         return
     for serial in guard.serials_with_state():
-        guard.teardown(serial)
+        # Never past the step's own bound waiting for a busy guard; the
+        # teardown itself does its adb work without the guard lock.
+        guard.teardown(serial, lock_timeout=3.0)
 
 
 def _flush_timeline(timeout: float) -> None:

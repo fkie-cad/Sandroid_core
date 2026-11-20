@@ -103,6 +103,7 @@ def restore_proxy_infra(
     *,
     device_proxy: bool = True,
     fresh_boot: bool | None = None,
+    device_proxy_result: str | None = None,
 ) -> RestoreReport:
     """Restore device proxy, App Proxy lanes and CA on *serial* (in that order).
 
@@ -121,6 +122,8 @@ def restore_proxy_infra(
             already done that one step earlier and passes False.
         fresh_boot: The device booted fresh (boot id changed): forces the
             ``cold-boot`` cause. None keeps *cause* as given.
+        device_proxy_result: What the caller's own device-proxy step did
+            (with ``device_proxy=False``), for the summary.
 
     Returns:
         A :class:`RestoreReport`. Never raises; blocking (adb), so call it
@@ -136,6 +139,8 @@ def restore_proxy_infra(
         return report
     if device_proxy:
         report.device_proxy = _restore_device_proxy(serial)
+    elif device_proxy_result:
+        report.device_proxy = device_proxy_result
     report.guard = _restore_guard(serial, cause)
     report.lanes = _restore_lanes(serial, cause)
     report.ca = _restore_ca(serial)
@@ -203,19 +208,20 @@ def _restore_device_proxy(serial: str | None) -> str:
 def _restore_guard(serial: str | None, cause: str) -> str:
     """Kill switch + app naming against the device; a leftover is removed.
 
-    With nothing set up in this session it reads the device only after a
-    snapshot load (a snapshot can bring back an older session's chains).
+    Also with nothing set up in this session it reads the device (one adb
+    call): a snapshot, a crashed session or a quit that timed out can leave
+    our chains behind. A Kill switch the user had on comes back on the
+    device's proxy (ours or a hand-set external one); one whose proxy is
+    gone is removed (it would take every app offline).
     """
     try:
-        from sandroid.core.device_guard import get_device_guard, peek_device_guard
+        from sandroid.core.adb import Adb
+        from sandroid.core.device_guard import get_device_guard
 
-        guard = peek_device_guard()
-        if (guard is None or not guard.has_state(serial)) and cause != "snapshot-load":
-            return "none"
-        if guard is None:
-            guard = get_device_guard()
+        guard = get_device_guard()
         before = guard.view_cached(serial)
-        view = guard.reconcile(serial, cause)
+        with Adb.targeting(serial):
+            view = guard.reconcile(serial, cause)
     except Exception as exc:
         logger.warning("Kill switch restore after %s failed: %s", cause, exc)
         return f"Kill switch restore failed: {exc}"
@@ -290,6 +296,13 @@ def _device_prepared_hook(serial: str, fresh_boot: bool) -> None:
     clock), on first attach, a fresh boot or a re-attach (adb reconnect).
     """
     if not _anything_desired(serial):
+        # Nothing of this session to restore, but a leftover Kill switch
+        # (crash, a quit that timed out) must not outlive its proxy.
+        cause = "cold-boot" if fresh_boot else "reconnect"
+        result = _restore_guard(serial, cause)
+        if result != "none":
+            logger.info("Proxy restore after %s on %s: %s", cause, serial, result)
+            _publish(serial, cause)
         return
     restore_proxy_infra(
         serial, "cold-boot" if fresh_boot else "reconnect", fresh_boot=fresh_boot

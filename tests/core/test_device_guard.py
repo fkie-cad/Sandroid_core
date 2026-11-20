@@ -187,8 +187,20 @@ def test_proxy_chain_goes_before_app_proxy_lanes():
     ]
     wrong = _obs(lane, ours, *chain, proxy="127.0.0.1:8080")
     cmds, _ = dg.plan_proxy_chain(LOOP, {10215: 61000}, wrong)
-    assert cmds[0].startswith("iptables -w -t nat -I OUTPUT 1 -d 127.0.0.1/32")
-    assert cmds[1].startswith("iptables -w -t nat -D OUTPUT -d 127.0.0.1/32")
+    # N7: delete the misplaced jump FIRST. ``-D <spec>`` removes the first
+    # match: after an insert at 1 that would be the new rule.
+    assert cmds[0].startswith("iptables -w -t nat -D OUTPUT -d 127.0.0.1/32")
+    assert cmds[1].startswith("iptables -w -t nat -I OUTPUT 1 -d 127.0.0.1/32")
+    assert len(cmds) == 2
+    # Played against a model of iptables: the jump ends up first, once.
+    rules = [line[len("NATOUT ") :] for line in (lane, ours)]
+    for cmd in cmds:
+        if " -D " in cmd:
+            rules.remove("-A " + cmd.split(" -D ", 1)[1])  # the first match
+        else:
+            rest = cmd.split(" -I ", 1)[1]  # "OUTPUT 1 <spec>"
+            rules.insert(0, "-A OUTPUT " + rest.split(" ", 2)[2])
+    assert rules == [line[len("NATOUT ") :] for line in (ours, lane)]
     right = _obs(ours, lane, *chain, proxy="127.0.0.1:8080")
     assert dg.plan_proxy_chain(LOOP, {10215: 61000}, right) == ([], False)
     # Without app naming the chain still ends in ACCEPT (the bug fix alone).
@@ -276,6 +288,8 @@ def test_relay_script_writes_identity_config(tmp_path):
             str(cfg),
             "127.0.0.1:8080",
             "TAG",
+            "dev5570",
+            "s3cr3t",
             "10215:61000",
             "10146:61001",
         ],
@@ -288,8 +302,12 @@ def test_relay_script_writes_identity_config(tmp_path):
     text = cfg.read_text()
     assert text.splitlines()[0] == "# TAG"
     assert "addr: 127.0.0.1:61000" in text
-    assert "username: uid10146" in text
+    # N4/N5: the identity carries the device token, the password is the
+    # session secret, and the file is readable by its owner only.
+    assert 'username: "uid10146-dev5570"' in text
+    assert text.count('password: "s3cr3t"') == 2
     assert text.count("addr: 127.0.0.1:8080") == 2
+    assert (cfg.stat().st_mode & 0o777) == 0o600
 
 
 # -- DeviceGuard against a recorded device ---------------------------------------------
@@ -404,11 +422,16 @@ def test_our_proxy_starts_the_relay_and_names_apps(guard, monkeypatch, tmp_path)
     assert kinds[-1] == "flush"
     relay = next(call for call in device.calls if call[0] == "relay")
     assert relay[3] == "127.0.0.1:8080"
+    assert relay[5] == dg.device_token(SERIAL)
+    assert relay[6] == dg.relay_secret()
     assert "10215:61000" in relay
     import json
 
     uids = json.loads((tmp_path / "uids.json").read_text())
-    assert uids["10215"]["package"] == "de.fkie.canary"
+    entry = uids["devices"][dg.device_token(SERIAL)]
+    assert entry["uids"]["10215"] == "de.fkie.canary"
+    assert entry["secret"] == dg.relay_secret()
+    assert entry["serial"] == SERIAL
 
 
 def test_relay_that_does_not_start_leaves_flows_unnamed(guard, monkeypatch):
@@ -443,7 +466,7 @@ def test_teardown_removes_everything(guard, monkeypatch):
     assert cmds.index(
         "iptables -w -D OUTPUT -m owner --uid-owner 10000-29999 -j sandroid_ks"
     ) < cmds.index("iptables -w -t nat -X sandroid_dp")
-    assert any(call[0] == "relay" and len(call) == 5 for call in device.calls)
+    assert any(call[0] == "relay" and len(call) == 7 for call in device.calls)
     assert not guard.has_state(SERIAL)
 
 
@@ -462,3 +485,331 @@ def test_hook_on_clear_without_state_costs_no_adb(monkeypatch):
         EventBus.get().unsubscribe(EventType.STATE_CHANGED, handler)
     assert seen == [{"change_type": "device_proxy", "serial": SERIAL, "address": None}]
     assert dg._INSTANCE is None  # nothing created, nothing read
+
+
+# -- review fixes (NETMETHOD-FIX-LIST) ---------------------------------------------
+
+
+def _healthy_naming(uid=10215, port=61000, endpoint="10.0.2.2:8080"):
+    """Observation lines of a working app naming for one UID."""
+    ip, _, dport = endpoint.partition(":")
+    return [
+        "RELAY pid=77 fd1=/dev/null fd2=/dev/null",
+        f"LISTEN {port}",
+        "DP -N sandroid_dp",
+        f"DP -A sandroid_dp -p tcp -m owner --uid-owner {uid} -j REDIRECT "
+        f"--to-ports {port}",
+        "DP -A sandroid_dp -j ACCEPT",
+        f"NATOUT -A OUTPUT -d {ip}/32 -p tcp -m tcp --dport {dport} -j sandroid_dp",
+        "RL -N sandroid_rl",
+        f"RL -A sandroid_rl -p tcp -m tcp --dport {port} -m owner ! --uid-owner "
+        f"{uid} -j REJECT --reject-with tcp-reset",
+        "RLJUMP -A OUTPUT -d 127.0.0.1/32 -p tcp -m tcp --dport 61000:64999 "
+        "-j sandroid_rl",
+    ]
+
+
+def test_relay_lock_reserves_each_port_for_its_uid():
+    """N4: after its own REDIRECT an app reaches its relay port; any other UID
+    connecting straight to that port is refused (filter sees the post-NAT
+    destination). The lock goes away with the naming.
+    """
+    obs = _obs()
+    cmds = dg.plan_relay_lock({10215: 61000, 10146: 61001}, obs)
+    assert cmds[0] == "iptables -w -N sandroid_rl"
+    rule = next(c for c in cmds if "--dport 61000 " in c)
+    assert rule.startswith(
+        "iptables -w -A sandroid_rl -p tcp -m tcp --dport 61000 -m owner ! "
+        "--uid-owner 10215 -j REJECT --reject-with tcp-reset"
+    )
+    assert rule.endswith("-j DROP")  # REJECT falls back to DROP
+    assert cmds[-1] == (
+        "iptables -w -I OUTPUT 1 -d 127.0.0.1/32 -p tcp -m tcp --dport 61000:64999 "
+        "-j sandroid_rl"
+    )
+    healthy = _obs(*_healthy_naming())
+    assert dg.plan_relay_lock({10215: 61000}, healthy) == []
+    assert dg.relay_lock_ok(healthy, {10215: 61000})
+    assert not dg.relay_lock_ok(healthy, {10215: 61000, 10146: 61001})
+    cmds = dg.plan_relay_lock({}, healthy)
+    assert cmds[0].startswith("iptables -w -D OUTPUT -d 127.0.0.1/32")
+    assert cmds[-2:] == ["iptables -w -F sandroid_rl", "iptables -w -X sandroid_rl"]
+
+
+def test_relay_identity_changes_with_the_session_secret():
+    """N4: a relay from an earlier session (other secret) is not "healthy":
+    it is restarted with this session's secret.
+    """
+    ports = {10215: 61000}
+    assert dg.relay_tag(ports, "10.0.2.2:8080", "dev:a") != dg.relay_tag(
+        ports, "10.0.2.2:8080", "dev:b"
+    )
+    assert len(dg.relay_secret()) == 32
+    assert dg.relay_secret() == dg.relay_secret()
+
+
+def test_uid_map_is_keyed_by_device(guard, tmp_path):
+    """N5: two devices on one Mitmproxy keep their own UID -> package map."""
+    import json
+
+    dg.write_device_uids("emulator-5570", {10215: ["de.fkie.canary"]})
+    dg.write_device_uids("emulator-5572", {10215: ["com.other"]})
+    data = json.loads((tmp_path / "uids.json").read_text())
+    a = data["devices"][dg.device_token("emulator-5570")]
+    b = data["devices"][dg.device_token("emulator-5572")]
+    assert (a["uids"]["10215"], b["uids"]["10215"]) == ("de.fkie.canary", "com.other")
+    assert a["serial"] == "emulator-5570"
+    assert dg.device_token("emulator-5570") != dg.device_token("emulator-5572")
+    assert ((tmp_path / "uids.json").stat().st_mode & 0o777) == 0o600
+    # Rewriting one device keeps the other.
+    dg.write_device_uids("emulator-5570", {10300: ["x.y"]})
+    data = json.loads((tmp_path / "uids.json").read_text())
+    assert data["devices"][dg.device_token("emulator-5572")]["uids"] == {
+        "10215": "com.other"
+    }
+
+
+def test_kill_switch_covers_every_android_user():
+    """N13: apps of a work profile / second user (UID 1010000+) are covered."""
+    obs = _obs("USER 0", "USER 10")
+    cmds = dg.plan_kill_switch(True, SLIRP, obs, "4")
+    jumps = [c for c in cmds if "-I OUTPUT 1" in c]
+    assert jumps == [
+        "iptables -w -I OUTPUT 1 -m owner --uid-owner 10000-29999 -j sandroid_ks",
+        "iptables -w -I OUTPUT 1 -m owner --uid-owner 1010000-1029999 -j sandroid_ks",
+    ]
+    # Installed for both users: nothing to do; a missing user's jump: rebuild.
+    both = _obs(
+        *_ks_lines(),
+        "JUMP4 -A OUTPUT -m owner --uid-owner 1010000-1029999 -j sandroid_ks",
+        "USER 0",
+        "USER 10",
+        ip6=False,
+    )
+    assert dg.plan_kill_switch(True, SLIRP, both, "4") == []
+    only_zero = _obs(*_ks_lines(), "USER 0", "USER 10", ip6=False)
+    assert dg.plan_kill_switch(True, SLIRP, only_zero, "4") != []
+
+
+def test_failed_kill_switch_removal_is_reported(guard, monkeypatch):
+    """N12: a removal the device refused is "still on", and stays installed
+    so a later clear retries it.
+    """
+    device = _Device(_text(*_ks_lines(), ip6=False))
+
+    def script(serial, *args, timeout=60.0):
+        out = device(serial, *args, timeout=timeout)
+        if args[0] == "run":
+            return "FAIL iptables -w -D OUTPUT :: busy\nrc=0"
+        return out
+
+    monkeypatch.setattr(guard, "_script", script)
+    guard._wanted[SERIAL] = dg._Wanted(kill_switch=True, endpoint=SLIRP)
+    ok, msg = guard.set_kill_switch(False, SERIAL)
+    assert not ok
+    assert "could not be removed" in msg
+    view = guard.view_cached(SERIAL)
+    assert view.kill_switch
+    assert view.installed
+    assert guard.has_state(SERIAL)
+
+
+def test_kill_switch_without_ip6tables_says_ipv4_only(guard, monkeypatch):
+    """N12: no ip6tables: the Kill switch is on for IPv4 and says so."""
+    monkeypatch.setattr(guard, "_script", _Device(_text(ip6=False)))
+    ok, msg = guard.set_kill_switch(True, SERIAL)
+    assert ok
+    assert "IPv4 only" in msg
+    assert not guard.view_cached(SERIAL).ipv6
+
+
+def _naming_guard(guard, monkeypatch, observe):
+    monkeypatch.setattr(guard, "_ensure_binary", staticmethod(lambda s: (True, "")))
+    device = _Device(observe)
+    monkeypatch.setattr(guard, "_script", device)
+    guard._named_for[SERIAL] = SLIRP
+    return device
+
+
+def test_refresh_repairs_a_dead_relay(guard, monkeypatch):
+    """N3: the relay died: REDIRECTs point at dead ports (proxy connections
+    fail; without the Kill switch apps go direct). The refresh says so and
+    relaunches it (detached), at most once per backoff.
+    """
+    lines = [x for x in _healthy_naming() if not x.startswith(("RELAY", "LISTEN"))]
+    device = _naming_guard(guard, monkeypatch, _text(*lines))
+    view = guard.refresh(SERIAL)  # read only
+    assert view.attribution == "failed"
+    assert "relay down" in view.detail
+    assert not any(call[0] == "relay" for call in device.calls)
+    guard.refresh(SERIAL, repair=True)
+    assert [call[0] for call in device.calls].count("relay") == 1
+    guard.refresh(SERIAL, repair=True)  # within the backoff: no second restart
+    assert [call[0] for call in device.calls].count("relay") == 1
+
+
+def test_refresh_names_apps_installed_later(guard, monkeypatch):
+    """N3: an app installed after "Whole device" is not named yet: the line
+    must not say "apps named", and the repair adds it (packages.list is
+    re-read on the refresh).
+    """
+    text = _text(*_healthy_naming()).replace("rc=0", "PKG com.new.sample 10400\nrc=0")
+    device = _naming_guard(guard, monkeypatch, text)
+    view = guard.refresh(SERIAL)  # the fake device always lists the packages
+    assert view.attribution == "partial"
+    assert view.unnamed_apps == 1
+    guard.refresh(SERIAL, repair=True)
+    assert any("--uid-owner 10400 -j REDIRECT" in c for c in device.commands())
+    assert any("! --uid-owner 10400 -j REJECT" in c for c in device.commands())
+
+
+def test_refresh_needs_the_nat_jump_for_apps_named(guard, monkeypatch):
+    """N21: with the sandroid_dp jump gone flows are unnamed: the refresh
+    must not say "apps named", and the repair puts the jump back.
+    """
+    lines = [x for x in _healthy_naming() if not x.startswith("NATOUT")]
+    device = _naming_guard(guard, monkeypatch, _text(*lines))
+    assert guard.refresh(SERIAL).attribution == "failed"
+    guard.refresh(SERIAL, repair=True)
+    assert any(
+        c.startswith("iptables -w -t nat -I OUTPUT 1 -d 10.0.2.2/32")
+        for c in device.commands()
+    )
+
+
+def test_relay_restart_waits_for_the_old_process(tmp_path):
+    """N3: a still-running OLD relay (same config path) must never count as
+    the new one listening; the old one is killed before the new one starts.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("sh") is None:
+        pytest.skip("no sh")
+    proc = tmp_path / "proc"
+    (proc / "111").mkdir(parents=True)
+    (proc / "111" / "cmdline").write_bytes(b"relaybin\0-C\0CFG\0")
+    stubs = f"""
+pidof() {{ ls {proc}; }}
+kill() {{ echo "kill $*" >> {tmp_path}/kills; }}
+ss() {{
+  echo "State Recv-Q Send-Q Local Peer"
+  echo "LISTEN 0 0 127.0.0.1:61000 0.0.0.0:* users:((\\"relaybin\\",pid=111,fd=3))"
+}}
+setsid() {{ :; }}
+"""
+    script = stubs + dg._GUARD_SCRIPT.replace("/proc/", f"{proc}/").replace(
+        "sleep 0.1", ":"
+    )
+    out = subprocess.run(
+        [
+            "sh",
+            "-s",
+            "--",
+            "relay",
+            "/x/relaybin",
+            "CFG",
+            "10.0.2.2:8080",
+            "TAG",
+            "dev",
+            "sec",
+            "10215:61000",
+        ],
+        input=script,
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+    )
+    assert "rc=" in out.stdout, out.stderr
+    out = out.stdout
+    kills = (tmp_path / "kills").read_text()
+    assert "kill 111" in kills
+    assert "kill -9 111" in kills  # it did not go on SIGTERM
+    # The old relay still holds the port and no new one came up: not ready.
+    assert "LISTENING" not in out
+
+
+def test_teardown_never_holds_the_lock_across_adb(guard, monkeypatch):
+    """N10: quit's teardown frees the guard lock before its adb work; with a
+    busy lock and a timeout it skips instead of blocking.
+    """
+    import threading
+
+    seen = []
+
+    def script(serial, *args, timeout=60.0):
+        # From another thread the lock must be free during the adb call.
+        def probe():
+            got = guard._lock.acquire(timeout=0.5)
+            seen.append(got)
+            if got:
+                guard._lock.release()
+
+        t = threading.Thread(target=probe)
+        t.start()
+        t.join()
+        return _text(*_ks_lines()) if args[0] == "observe" else "rc=0"
+
+    monkeypatch.setattr(guard, "_script", script)
+    guard._wanted[SERIAL] = dg._Wanted(kill_switch=True)
+    assert guard.teardown(SERIAL)
+    assert seen
+    assert all(seen)
+    # A guard busy elsewhere: skipped after the timeout, never blocking.
+    holder = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with guard._lock:
+            holder.set()
+            release.wait(5)
+
+    t = threading.Thread(target=hold)
+    t.start()
+    holder.wait(5)
+    try:
+        assert guard.teardown(SERIAL, lock_timeout=0.05) is False
+    finally:
+        release.set()
+        t.join()
+
+
+def test_guard_pins_every_device_call_to_its_serial(guard, monkeypatch):
+    """N14: the restore and the Proxy dialog's Kill switch path run on a
+    worker without a pin; the guard pins its serial itself (the "ours"
+    classification reads adb reverse of THAT device).
+    """
+    seen = []
+
+    def is_ours(endpoint):
+        seen.append(dg.Adb.get_target_device())
+        return False
+
+    monkeypatch.setattr(guard, "_is_ours", staticmethod(is_ours))
+    monkeypatch.setattr(guard, "_script", _Device(_text()))
+    monkeypatch.setattr(dg.Adb, "_target_device", "emulator-5554")
+    guard.set_kill_switch(True, SERIAL)
+    guard.reconcile(SERIAL, "reconnect")
+    assert seen
+    assert set(seen) == {SERIAL}
+
+
+def test_restore_keeps_ours_for_the_prepared_endpoint(guard, monkeypatch):
+    """N15: the restore prepares the guard, then sets the proxy: that write
+    must not drop "ours" (127.0.0.1 without its reverse yet reads as someone
+    else's) and stop the relay for a moment.
+    """
+    monkeypatch.setattr(guard, "_ensure_binary", staticmethod(lambda s: (True, "")))
+    device = _Device(_text(proxy="127.0.0.1:8080"))
+    monkeypatch.setattr(guard, "_script", device)
+    guard.prepare(SERIAL, LOOP, kill_switch=True, ours=True)
+    before = [call[0] for call in device.calls].count("relay")
+    view = guard.after_device_proxy_write(SERIAL, "127.0.0.1:8080")
+    assert view.attribution == "on"
+    stops = [c for c in device.calls if c[0] == "relay" and len(c) == 7]
+    assert stops == []  # the relay was never stopped
+    assert [call[0] for call in device.calls].count("relay") >= before
+    # Another endpoint written by hand: no longer assumed ours.
+    guard.after_device_proxy_write(SERIAL, "10.0.2.2:9999")
+    assert not guard._wanted[SERIAL].ours

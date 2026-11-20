@@ -54,9 +54,12 @@ Tag format on stdout:
 App Proxy flows are attributed by the lane's SOCKS5 listen port, the key
 into a sidecar map written by FocusManager (SANDROID_FOCUS_MAP). Device-proxy
 flows are attributed by the on-device identity relay: it connects with proxy
-auth ``uid<U>``, read here per CLIENT CONNECTION (plain HTTP is wrapped as
-CONNECT host:80, so the inner requests carry no header); the UID maps to the
-package through SANDROID_DEVICE_UIDS (written by core.device_guard).
+auth ``uid<U>-<device>:<secret>``, read here per CLIENT CONNECTION (plain
+HTTP is wrapped as CONNECT host:80, so the inner requests carry no header).
+SANDROID_DEVICE_UIDS (written by core.device_guard) holds, per device token,
+the session's relay secret and the UID -> package map: an identity with a
+wrong secret (an app forging the header) names nothing, and a UID is looked
+up on its own device only.
 
 Structured flow log (Track 2): every completed or errored flow is also
 appended as a JSON record to SANDROID_FLOW_LOG (empty/unset disables this at
@@ -67,6 +70,7 @@ property that makes clearing the log safe while mitmweb keeps running.
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import os
 import time
@@ -80,11 +84,12 @@ from mitmproxy import tls as _tls
 _FOCUS_MAP: dict = {}
 _FOCUS_MTIME: float = -1.0
 
-# Same for the device uid→package map: {"10215": {"package": "com.foo"}}.
+# Same for the device uid→package map:
+# {"version": 2, "devices": {"<token>": {"secret": "...", "uids": {"10215": "com.foo"}}}}.
 _UID_MAP: dict = {}
 _UID_MTIME: float = -1.0
 
-# client connection id -> app UID announced by the identity relay.
+# client connection id -> (device token, app UID) announced by the relay.
 _CONN_UID: dict = {}
 
 # Monotonic per-flow sequence counter, resumed once per addon-process-load
@@ -150,7 +155,7 @@ def _lane_entry(proxy_mode) -> dict | None:
 
 
 def _uid_map() -> dict:
-    """The device uid→package map (SANDROID_DEVICE_UIDS), re-read on mtime."""
+    """The per-device uid→package map (SANDROID_DEVICE_UIDS), re-read on mtime."""
     global _UID_MAP, _UID_MTIME
     path = os.environ.get("SANDROID_DEVICE_UIDS")
     if not path:
@@ -165,44 +170,75 @@ def _uid_map() -> dict:
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            _UID_MAP = data if isinstance(data, dict) else {}
+            devices = data.get("devices") if isinstance(data, dict) else None
+            _UID_MAP = devices if isinstance(devices, dict) else {}
         except (OSError, ValueError):
             _UID_MAP = {}
         _UID_MTIME = mtime
     return _UID_MAP
 
 
-def _auth_uid(headers) -> int | None:
-    """The UID in a relay's ``Proxy-Authorization: Basic uid<U>:x``, else None."""
+def _relay_auth(headers):
+    """``(user, password)`` of a relay's ``Proxy-Authorization``, else None."""
     try:
         value = headers.get("Proxy-Authorization", "") or ""
         scheme, _, token = value.partition(" ")
         if scheme.lower() != "basic" or not token:
             return None
-        user = base64.b64decode(token.strip()).decode("utf-8", "replace")
-        user = user.split(":", 1)[0]
-        if user.startswith("uid") and user[3:].isdigit():
-            return int(user[3:])
+        text = base64.b64decode(token.strip()).decode("utf-8", "replace")
+        user, _, password = text.partition(":")
+        if user.startswith("uid"):
+            return user, password
     except Exception:
         return None
     return None
 
 
+def _auth_identity(headers):
+    """``(device token, UID)`` of a TRUSTED relay identity, else None.
+
+    The username is ``uid<U>-<token>``; the password must be that device's
+    relay secret. Anything else (no secret, a wrong one, an unknown device)
+    is not trusted: a forged header names nothing.
+    """
+    auth = _relay_auth(headers)
+    if auth is None:
+        return None
+    user, password = auth
+    uid_text, _, device = user[3:].partition("-")
+    if not uid_text.isdigit() or not device:
+        return None
+    entry = _uid_map().get(device)
+    secret = entry.get("secret") if isinstance(entry, dict) else None
+    if not secret or not password:
+        return None
+    if not hmac.compare_digest(str(secret).encode(), password.encode()):
+        return None
+    return device, int(uid_text)
+
+
 def _note_identity(flow) -> None:
     """Remember the relay identity of this client connection; drop the header."""
     try:
-        uid = _auth_uid(flow.request.headers)
-        if uid is not None:
-            _CONN_UID[flow.client_conn.id] = uid
-            del flow.request.headers["Proxy-Authorization"]
+        if _relay_auth(flow.request.headers) is None:
+            return
+        identity = _auth_identity(flow.request.headers)
+        if identity is not None:
+            _CONN_UID[flow.client_conn.id] = identity
+        del flow.request.headers["Proxy-Authorization"]
     except Exception:
         pass
 
 
-def _device_app(uid) -> str:
-    entry = _uid_map().get(str(uid)) if uid is not None else None
-    if isinstance(entry, dict):
-        return str(entry.get("package") or "")
+def _device_app(identity) -> str:
+    """The package of a ``(device token, UID)`` identity ("" when unknown)."""
+    if not identity:
+        return ""
+    device, uid = identity
+    entry = _uid_map().get(device)
+    uids = entry.get("uids") if isinstance(entry, dict) else None
+    if isinstance(uids, dict):
+        return str(uids.get(str(uid)) or "")
     return ""
 
 
@@ -265,9 +301,10 @@ def _attribute_and_tag(flow: http.HTTPFlow) -> tuple:
         else:
             if flow.client_conn.id not in _CONN_UID:
                 _note_identity(flow)
-            uid = _CONN_UID.get(flow.client_conn.id)
-            app = _device_app(uid)
-            if uid is not None:
+            identity = _CONN_UID.get(flow.client_conn.id)
+            app = _device_app(identity)
+            if identity is not None:
+                uid = identity[1]
                 flow.metadata["sandroid_uid"] = uid
             if app:
                 flow.comment = app
@@ -730,8 +767,9 @@ class SandroidLogger:
                 app = entry.get("package") or ""
                 via = "app-proxy"
             else:
-                uid = _CONN_UID.get(getattr(client, "id", None))
-                app = _device_app(uid)
+                identity = _CONN_UID.get(getattr(client, "id", None))
+                app = _device_app(identity)
+                uid = identity[1] if identity else None
         except Exception:
             pass
         reason = "tls"
@@ -2090,8 +2128,11 @@ class MitmproxyService:
 
             guard = peek_device_guard()
             if guard is not None:
+                # A quit already tore the guard down (nothing left) or is
+                # still at it on an abandoned thread: never wait long for
+                # the guard here, mitmweb must be killed either way.
                 for serial in guard.serials_with_state():
-                    guard.teardown(serial)
+                    guard.teardown(serial, lock_timeout=1.0)
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("Kill switch teardown on shutdown failed: %s", exc)
         try:
@@ -2418,6 +2459,14 @@ class MitmproxyService:
                         addr,
                     )
                     return "stopped"
+                # The adb reverse goes in BEFORE the proxy points at it: the
+                # proxy write re-checks the guard, and a 127.0.0.1 proxy
+                # without its reverse reads as someone else's (the relay
+                # would stop for a moment, flows unnamed).
+                if addr.startswith("127.0.0.1:"):
+                    port = int(addr.rsplit(":", 1)[1])
+                    if not _reverse_registered(port):
+                        Adb.reverse(f"tcp:{port}", f"tcp:{port}")
                 if guard_on:
                     # Fail closed: the Kill switch (and the app naming) go
                     # in before the proxy points anywhere again.
@@ -2430,10 +2479,6 @@ class MitmproxyService:
                     if endpoint is not None:
                         get_device_guard().prepare(owner or serial, endpoint, ours=True)
                 ok, _msg = pm.set_proxy(ProxyConfig.from_string(addr))
-                if ok and addr.startswith("127.0.0.1:"):
-                    port = int(addr.rsplit(":", 1)[1])
-                    if not _reverse_registered(port):
-                        Adb.reverse(f"tcp:{port}", f"tcp:{port}")
         except Exception as exc:
             logger.debug("Re-applying device proxy %s failed: %s", addr, exc)
             ok = False

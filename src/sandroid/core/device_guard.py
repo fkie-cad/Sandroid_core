@@ -3,7 +3,8 @@
 Two pieces of device state follow the device proxy Sandroid set:
 
 * **Kill switch** (filter table, IPv4 and IPv6): while on, app UIDs
-  (10000-19999 and the SDK sandbox 20000-29999) may reach only loopback
+  (10000-19999 and the SDK sandbox 20000-29999, for every Android user:
+  one jump per user range) may reach only loopback
   (``-d 127.0.0.0/8``, never ``-o lo``: after a nat REDIRECT the filter
   table still sees the old out-interface) and the device proxy's endpoint.
   Everything else is refused (REJECT), so a proxy-aware app that falls back
@@ -14,9 +15,14 @@ Two pieces of device state follow the device proxy Sandroid set:
   at position 1 for traffic to the device proxy's endpoint): per-UID
   REDIRECTs to the on-device **identity relay** (one detached gost with one
   ``http`` listener per app UID, chaining to the device proxy with proxy
-  auth ``uid<U>``; the Mitmproxy addon maps the UID to the package), then
-  ``ACCEPT``. The final ACCEPT also keeps App Proxy lane REDIRECTs (appended
-  to nat OUTPUT) from catching an app's own connection to the device proxy:
+  auth ``uid<U>-<device token>`` and this session's random secret as the
+  password; the Mitmproxy addon trusts only that secret and maps the UID to
+  the package of THAT device), then ``ACCEPT``. A **relay lock** (filter
+  table, ``sandroid_rl``) reserves each relay port for its own UID: nat
+  OUTPUT runs before filter OUTPUT, so an app reaches its own port after its
+  REDIRECT, while a connection straight to another app's port is refused.
+  The final ACCEPT also keeps App Proxy lane REDIRECTs (appended to nat
+  OUTPUT) from catching an app's own connection to the device proxy:
   Mitmproxy refused to connect to itself and the flow was lost.
 
 The device state is read in ONE adb call (:func:`parse_guard_observation`),
@@ -26,7 +32,10 @@ are double-buffered (two chain names): a new chain is filled first, the jump
 moves to it, then the old one goes, so there is never an open window. A
 kill-switch chain never outlives its device proxy: every write of the device
 proxy goes through :func:`after_device_proxy_write`, and a reconcile that
-finds no device proxy removes the chain.
+finds no device proxy removes the chain. :meth:`DeviceGuard.refresh` with
+``repair`` re-checks the naming (relay alive, jump in place, app list
+unchanged) and repairs it, so a dead relay never keeps REDIRECTs pointing at
+closed ports.
 
 Everything blocking (adb) runs on worker threads; the UI reads
 :meth:`DeviceGuard.view_cached` and :meth:`DeviceGuard.kill_switch_wanted`.
@@ -40,8 +49,10 @@ import json
 import logging
 import os
 import re
+import secrets
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -53,8 +64,12 @@ logger = logging.getLogger(__name__)
 KS_CHAINS = ("sandroid_ks", "sandroid_ks2")
 #: Proxy-port chain (nat table, v4).
 DP_CHAIN = "sandroid_dp"
-#: App UIDs: user-0 apps plus the SDK sandbox (Android 13+).
+#: Relay lock (filter table, v4): each relay port only for its own UID.
+RL_CHAIN = "sandroid_rl"
+#: App UIDs of user 0: apps plus the SDK sandbox (Android 13+).
 APP_UID_RANGE = "10000-29999"
+#: UIDs per Android user (``UserHandle.PER_USER_RANGE``).
+PER_USER_RANGE = 100000
 #: App UIDs that get a relay identity (user-0 apps).
 _APP_UID_MIN, _APP_UID_MAX = 10000, 19999
 #: First device port of the identity relay listeners (127.0.0.1 only).
@@ -78,13 +93,16 @@ CURRENT = object()
 #:   observe <binary> <cfg> <lo> <hi> <uids 0|1>
 #:                       relay gost (pid, stdio), relay listeners, config tag,
 #:                       both kill-switch chains and their jumps (v4/v6),
-#:                       refused counters, the proxy-port chain and nat
-#:                       OUTPUT, the device proxy, packages.list (uids=1)
+#:                       refused counters, the relay lock chain, the
+#:                       proxy-port chain and nat OUTPUT, the device proxy,
+#:                       the users, packages.list (uids=1)
 #:   run <cmd> ...       eval each command; failures print ``FAIL``
-#:   relay <binary> <cfg> <upstream> <tag> [uid:port ...]
-#:                       kill the relay, write its config, launch it detached
-#:                       (setsid, stdio /dev/null), wait <=4 s for the last
-#:                       port; no uid:port = stop it and remove the config
+#:   relay <binary> <cfg> <upstream> <tag> <device> <secret> [uid:port ...]
+#:                       kill the relay and wait until it is gone, write its
+#:                       config (mode 600), launch it detached (setsid, stdio
+#:                       /dev/null), wait <=4 s until the NEW process listens
+#:                       on the last port; no uid:port = stop it and remove
+#:                       the config
 #:   flush <ip> <port>   drop established sockets to the proxy endpoint
 _GUARD_SCRIPT = r"""
 op=$1
@@ -95,6 +113,15 @@ relay_pids() {
   done
 }
 listeners() { (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | awk 'NR>1 {print $4}'; }
+# The listener on port $1 belongs to pid $2 (when ss can tell: -p).
+owns() {
+  line=$(ss -ltnp 2>/dev/null | grep "[:.]$1 ")
+  case "$line" in
+  *users:*) echo "$line" | grep -q "pid=$2," ;;
+  *) true ;;
+  esac
+}
+alive() { for p in "$@"; do [ -d /proc/$p ] && echo $p; done; }
 case "$op" in
 observe)
   name=${1##*/}; cfg=$2; lo=$3; hi=$4; uids=$5
@@ -120,9 +147,15 @@ observe)
       ip6tables -w -L $c -nvx 2>/dev/null | awk '$3=="REJECT" || $3=="DROP" {s+=$1} END {print "CNT6 " s+0}'
     done
   fi
+  iptables -w -S sandroid_rl 2>/dev/null | sed 's/^/RL /'
+  iptables -w -S OUTPUT 2>/dev/null | grep -- '-j sandroid_rl' | sed 's/^/RLJUMP /'
   iptables -w -t nat -S sandroid_dp 2>/dev/null | sed 's/^/DP /'
   iptables -w -t nat -S OUTPUT 2>/dev/null | grep -- '^-A ' | sed 's/^/NATOUT /'
   echo "PROXY $(settings get global http_proxy 2>/dev/null)"
+  for d in /data/system/users/*; do
+    n=${d##*/}
+    case "$n" in ''|*[!0-9]*) ;; *) [ -d "$d" ] && echo "USER $n" ;; esac
+  done
   if [ "$uids" = 1 ]; then
     if [ -r /data/system/packages.list ]; then
       awk '{print "PKG " $1 " " $2}' /data/system/packages.list
@@ -139,12 +172,20 @@ run)
   true
   ;;
 relay)
-  bin=$1; cfg=$2; up=$3; tag=$4; shift 4
+  bin=$1; cfg=$2; up=$3; tag=$4; dev=$5; secret=$6; shift 6
   name=${bin##*/}
-  for p in $(relay_pids "$name" "$cfg"); do kill $p 2>/dev/null && echo "killed=$p"; done
+  old=$(relay_pids "$name" "$cfg")
+  for p in $old; do kill $p 2>/dev/null && echo "killed=$p"; done
+  # The old relay must be gone before the new one binds the same ports.
+  i=0
+  while [ -n "$(alive $old)" ] && [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done
+  for p in $(alive $old); do kill -9 $p 2>/dev/null; done
+  i=0
+  while [ -n "$(alive $old)" ] && [ $i -lt 10 ]; do sleep 0.1; i=$((i+1)); done
   if [ $# -eq 0 ]; then
     rm -f "$cfg"
   else
+    umask 077
     {
       echo "# $tag"
       echo "services:"
@@ -170,18 +211,22 @@ relay)
         echo "      connector:"
         echo "        type: http"
         echo "        auth:"
-        echo "          username: uid$u"
-        echo "          password: x"
+        echo "          username: \"uid$u-$dev\""
+        echo "          password: \"$secret\""
         echo "      dialer:"
         echo "        type: tcp"
       done
-    } > "$cfg.tmp" && mv -f "$cfg.tmp" "$cfg"
+    } > "$cfg.tmp" && chmod 600 "$cfg.tmp" && mv -f "$cfg.tmp" "$cfg"
     setsid sh -c "exec $bin -C $cfg" </dev/null >/dev/null 2>&1 &
     for e in "$@"; do last=${e##*:}; done
     i=0
     while [ $i -lt 40 ]; do
-      if [ -n "$(relay_pids "$name" "$cfg")" ] && listeners | grep -q "[:.]$last\$"; then
-        echo LISTENING; break
+      new=""
+      for p in $(relay_pids "$name" "$cfg"); do
+        case " $old " in *" $p "*) ;; *) new=$p ;; esac
+      done
+      if [ -n "$new" ] && listeners | grep -q "[:.]$last\$" && owns "$last" "$new"; then
+        echo "LISTENING pid=$new"; break
       fi
       sleep 0.1; i=$((i+1))
     done
@@ -311,9 +356,17 @@ def ks_rule_command(tbl: str, chain: str, rule: KsRule, family: str) -> str:
     return f"{head} -j REJECT || {head} -j DROP"
 
 
-def ks_jump(chain: str) -> str:
+def user_app_range(user: int) -> str:
+    """The app UID range (apps + SDK sandbox) of Android user *user*."""
+    if user == 0:
+        return APP_UID_RANGE
+    base = user * PER_USER_RANGE
+    return f"{base + 10000}-{base + 29999}"
+
+
+def ks_jump(chain: str, user: int = 0) -> str:
     """The OUTPUT jump spec (without the ``-A``/``-I`` op) to a ks chain."""
-    return f"OUTPUT -m owner --uid-owner {APP_UID_RANGE} -j {chain}"
+    return f"OUTPUT -m owner --uid-owner {user_app_range(user)} -j {chain}"
 
 
 @dataclass
@@ -344,6 +397,16 @@ class GuardObservation:
     proxy_raw: str = ""
     #: package -> uid (packages.list); None = not asked / unreadable.
     packages: dict[str, int] | None = None
+    #: Android users (``/data/system/users``); user 0 when none was seen.
+    users: list[int] = field(default_factory=list)
+    #: The relay lock chain exists.
+    rl_exists: bool = False
+    #: uid -> relay port the lock chain reserves for it.
+    rl_uids: dict[int, int] = field(default_factory=dict)
+    #: Raw rule lines of the relay lock chain (``-A sandroid_rl ...``).
+    rl_lines: list[str] = field(default_factory=list)
+    #: Raw ``-A OUTPUT ... -j sandroid_rl`` lines.
+    rl_jumps: list[str] = field(default_factory=list)
 
     @property
     def relay_running(self) -> bool:
@@ -365,6 +428,10 @@ class GuardObservation:
         return [
             line for line in self.nat_output if re.search(r"-j sandroid_dp\b", line)
         ]
+
+    def user_ids(self) -> list[int]:
+        """The Android users whose apps the Kill switch covers (>= user 0)."""
+        return sorted(set(self.users) | {0})
 
 
 def parse_guard_observation(output: str) -> GuardObservation:
@@ -422,6 +489,22 @@ def parse_guard_observation(output: str) -> GuardObservation:
                     obs.dp_uids[int(uid.group(1))] = int(port.group(1))
         elif kind == "NATOUT":
             obs.nat_output.append(rest)
+        elif kind == "RL":
+            if rest == f"-N {RL_CHAIN}":
+                obs.rl_exists = True
+            elif rest.startswith(f"-A {RL_CHAIN} "):
+                obs.rl_exists = True
+                obs.rl_lines.append(rest)
+                uid = re.search(r"--uid-owner (\d+)\b", rest)
+                port = re.search(r"--dport (\d+)\b", rest)
+                if uid and port:
+                    obs.rl_uids[int(uid.group(1))] = int(port.group(1))
+        elif kind == "RLJUMP":
+            if rest.startswith("-A "):
+                obs.rl_jumps.append(rest)
+        elif kind == "USER":
+            if rest.isdigit() and int(rest) not in obs.users:
+                obs.users.append(int(rest))
         elif kind == "PROXY":
             obs.proxy_raw = rest
             obs.proxy = Endpoint.parse(rest)
@@ -463,12 +546,13 @@ def plan_kill_switch(
                 cmds.append(f"{tbl} -w -X {chain}")
         return cmds
     want = desired_ks_rules(endpoint, family)
+    users = obs.user_ids()
     active = obs.active_ks(family)
     if (
         active is not None
         and chains.get(active) == want
-        and len(jumps) == 1
-        and jumps[0].strip() == f"-A {ks_jump(active)}"
+        and sorted(j.strip() for j in jumps)
+        == sorted(f"-A {ks_jump(active, u)}" for u in users)
         and all(c == active for c in chains)
     ):
         return []
@@ -478,9 +562,10 @@ def plan_kill_switch(
     else:
         cmds.append(f"{tbl} -w -N {target}")
     cmds += [ks_rule_command(tbl, target, rule, family) for rule in want]
-    cmds.append(
-        f"{tbl} -w -I OUTPUT 1 -m owner --uid-owner {APP_UID_RANGE} -j {target}"
-    )
+    # One jump per Android user (apps of a work profile or a second user
+    # have UIDs of their own range).
+    for user in users:
+        cmds.append(f"{tbl} -w -I OUTPUT 1 {ks_jump(target, user)[len('OUTPUT ') :]}")
     for line in jumps:
         cmds.append(f"{tbl} -w -D {line[3:]}")
     for chain in KS_CHAINS:
@@ -564,11 +649,83 @@ def plan_proxy_chain(
     )
     jump_added = False
     if not jump_ok:
-        cmds.append(f"{tbl} -I OUTPUT 1 {dp_jump(endpoint)[len('OUTPUT ') :]}")
-        jump_added = not ours_at
+        # Delete first: ``-D <spec>`` removes the FIRST matching rule, so an
+        # insert of the same spec before it would delete the new rule and
+        # keep the misplaced one. A short gap without the jump only leaves
+        # a connection unnamed (it still reaches the proxy).
         for line in jumps:
             cmds.append(f"{tbl} -D {line[3:]}")
+        cmds.append(f"{tbl} -I OUTPUT 1 {dp_jump(endpoint)[len('OUTPUT ') :]}")
+        jump_added = not ours_at
     return cmds, jump_added
+
+
+def rl_jump() -> str:
+    """The filter OUTPUT jump spec (without op) to the relay lock chain."""
+    return (
+        f"OUTPUT -d 127.0.0.1/32 -p tcp -m tcp --dport "
+        f"{RELAY_BASE}:{RELAY_BASE + RELAY_SPAN - 1} -j {RL_CHAIN}"
+    )
+
+
+def rl_rule(uid: int, port: int) -> str:
+    """One relay-lock rule (without op): *port* refuses every UID but *uid*."""
+    return (
+        f"{RL_CHAIN} -p tcp -m tcp --dport {port} -m owner ! --uid-owner {uid} "
+        "-j REJECT --reject-with tcp-reset"
+    )
+
+
+def plan_relay_lock(uid_ports: dict[int, int], obs: GuardObservation) -> list[str]:
+    """Commands for the relay lock chain (filter table, pure).
+
+    The relay listens on loopback, which the Kill switch allows, and it
+    names whatever connects: without the lock any app could connect to
+    another app's relay port and get that app's name. nat OUTPUT runs before
+    filter OUTPUT, so after an app's own REDIRECT the filter table sees its
+    own relay port; every other UID is refused on that port. Without UIDs
+    the jump and the chain are removed.
+    """
+    tbl = "iptables -w"
+    cmds: list[str] = []
+    if not uid_ports:
+        for line in obs.rl_jumps:
+            cmds.append(f"{tbl} -D {line[3:]}")
+        if obs.rl_exists:
+            cmds += [f"{tbl} -F {RL_CHAIN}", f"{tbl} -X {RL_CHAIN}"]
+        return cmds
+    if not obs.rl_exists:
+        cmds.append(f"{tbl} -N {RL_CHAIN}")
+    for uid, port in sorted(uid_ports.items()):
+        if obs.rl_uids.get(uid) != port:
+            spec = rl_rule(uid, port)
+            drop = spec.replace("-j REJECT --reject-with tcp-reset", "-j DROP")
+            cmds.append(f"{tbl} -A {spec} || {tbl} -A {drop}")
+    for line in obs.rl_lines:
+        uid = re.search(r"--uid-owner (\d+)\b", line)
+        port = re.search(r"--dport (\d+)\b", line)
+        keep = (
+            uid is not None
+            and port is not None
+            and uid_ports.get(int(uid.group(1))) == int(port.group(1))
+        )
+        if not keep:
+            cmds.append(f"{tbl} -D {line[3:]}")
+    want = f"-A {rl_jump()}"
+    if [line.strip() for line in obs.rl_jumps] != [want]:
+        for line in obs.rl_jumps:
+            cmds.append(f"{tbl} -D {line[3:]}")
+        cmds.append(f"{tbl} -I OUTPUT 1 {rl_jump()[len('OUTPUT ') :]}")
+    return cmds
+
+
+def relay_lock_ok(obs: GuardObservation, uid_ports: dict[int, int]) -> bool:
+    """The lock chain reserves every relay port for its UID (pure)."""
+    return (
+        bool(uid_ports)
+        and [line.strip() for line in obs.rl_jumps] == [f"-A {rl_jump()}"]
+        and all(obs.rl_uids.get(u) == p for u, p in uid_ports.items())
+    )
 
 
 def app_uid_groups(packages: dict[str, int]) -> dict[int, list[str]]:
@@ -603,10 +760,45 @@ def assign_relay_ports(
     return result
 
 
-def relay_tag(uid_ports: dict[int, int], upstream: str) -> str:
-    """Config tag: changes whenever the listeners or the upstream change."""
-    text = upstream + ";" + ",".join(f"{u}:{p}" for u, p in sorted(uid_ports.items()))
+def relay_tag(uid_ports: dict[int, int], upstream: str, identity: str = "") -> str:
+    """Config tag: changes whenever the listeners, the upstream or the relay
+    identity (device token + this session's secret) change.
+    """
+    text = (
+        upstream
+        + ";"
+        + identity
+        + ";"
+        + ",".join(f"{u}:{p}" for u, p in sorted(uid_ports.items()))
+    )
     return "sandroid-relay " + hashlib.sha1(text.encode()).hexdigest()[:12]
+
+
+def device_token(serial: str | None) -> str:
+    """Short per-device token in the relay identity ``uid<U>-<token>``.
+
+    One Mitmproxy can serve several devices; the addon resolves a UID per
+    device with it (UIDs differ between devices).
+    """
+    return hashlib.sha1((serial or "").encode()).hexdigest()[:8]
+
+
+_SECRET: str | None = None
+_SECRET_LOCK = threading.Lock()
+
+
+def relay_secret() -> str:
+    """This session's random relay password (the addon trusts no other).
+
+    A UID the relay does not serve (an app without a REDIRECT, the SDK
+    sandbox) could otherwise send ``Proxy-Authorization: uid<U>`` itself and
+    be named as another app.
+    """
+    global _SECRET
+    with _SECRET_LOCK:
+        if _SECRET is None:
+            _SECRET = secrets.token_hex(16)
+        return _SECRET
 
 
 def relay_healthy(obs: GuardObservation, uid_ports: dict[int, int], tag: str) -> bool:
@@ -632,14 +824,18 @@ class GuardView:
     endpoint: Endpoint | None = None
     kill_switch: bool = False
     refused: int = 0
-    #: "off" | "on" | "failed" | "external" | "unavailable".
+    #: "off" | "on" | "partial" | "failed" | "external" | "unavailable".
     attribution: str = "off"
     named_apps: int = 0
+    #: Apps on the device the relay does not name yet (installed later).
+    unnamed_apps: int = 0
     detail: str = ""
     checked: bool = False
     #: Something of ours is on the device (Kill switch, proxy-port chain or
     #: relay): a later clear of the device proxy must remove it.
     installed: bool = False
+    #: The Kill switch also covers IPv6 (False: the device has no ip6tables).
+    ipv6: bool = True
 
 
 _SIDECAR_LOCK = threading.Lock()
@@ -658,22 +854,36 @@ def device_uids_path() -> str:
 
 
 def write_device_uids(serial: str | None, groups: dict[int, list[str]]) -> None:
-    """Merge *serial*'s uid -> package map into the addon's sidecar (atomic).
+    """Put *serial*'s uid -> package map into the addon's sidecar (atomic).
 
-    Shape: ``{"<uid>": {"package": "a.b" | "a.b,c.d", "serial": "..."}}``.
+    Shape (keyed by device, so two devices on one Mitmproxy never share
+    names)::
+
+        {"version": 2, "devices": {"<token>": {
+            "serial": "...", "secret": "<relay password>",
+            "uids": {"<uid>": "a.b" | "a.b,c.d"}}}}
+
+    Other devices' entries (also another Sandroid's) are kept. The file is
+    mode 600: it holds the relay password.
     """
     path = device_uids_path()
     with _SIDECAR_LOCK:
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or data.get("version") != 2:
                 data = {}
         except (OSError, ValueError):
             data = {}
-        data = {k: v for k, v in data.items() if (v or {}).get("serial") != serial}
-        for uid, pkgs in groups.items():
-            data[str(uid)] = {"package": ",".join(pkgs), "serial": serial or ""}
+        devices = data.get("devices")
+        if not isinstance(devices, dict):
+            devices = {}
+        devices[device_token(serial)] = {
+            "serial": serial or "",
+            "secret": relay_secret(),
+            "uids": {str(uid): ",".join(pkgs) for uid, pkgs in groups.items()},
+        }
+        data = {"version": 2, "devices": devices}
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             fd, tmp = tempfile.mkstemp(
@@ -694,9 +904,27 @@ def write_device_uids(serial: str | None, groups: dict[int, list[str]]) -> None:
 @dataclass
 class _Wanted:
     kill_switch: bool = False
-    #: The last device proxy endpoint Sandroid set (restored before the proxy).
+    #: The last device proxy endpoint Sandroid set (or is about to set).
     endpoint: Endpoint | None = None
     ours: bool = False
+
+
+def _install_restore_hook() -> None:
+    """Let the device-prepared hook restore the guard after a boot/attach."""
+    try:
+        from sandroid.services.proxy_restore import install_device_prepared_hook
+
+        install_device_prepared_hook()
+    except Exception:
+        logger.debug("proxy restore hook not installed", exc_info=True)
+
+
+def _dp_jump_present(obs: GuardObservation) -> bool:
+    proxy = obs.proxy
+    if proxy is None or not proxy.is_ipv4:
+        return False
+    want = f"-A {dp_jump(proxy)}"
+    return any(line.strip() == want for line in obs.nat_output)
 
 
 class DeviceGuard:
@@ -705,14 +933,26 @@ class DeviceGuard:
     Desired state is session-ephemeral, like App Proxy lanes: whether the
     Kill switch is wanted on a serial and the last endpoint Sandroid set. The
     device is always the truth for what is installed; every apply re-reads
-    it first.
+    it first. Every device read and write is pinned to its serial
+    (``Adb.targeting``), whatever device is selected meanwhile.
     """
+
+    #: Seconds between two automatic repairs of the app naming on a serial.
+    REPAIR_BACKOFF = 20.0
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._wanted: dict[str | None, _Wanted] = {}
         self._views: dict[str | None, GuardView] = {}
         self._use_su: dict[str | None, bool] = {}
+        #: serial -> the proxy endpoint the last apply named apps for.
+        self._named_for: dict[str | None, Endpoint] = {}
+        #: serial -> the uid groups last written to the addon's sidecar.
+        self._groups: dict[str | None, dict[int, list[str]]] = {}
+        #: serial -> monotonic time of the last automatic repair.
+        self._repair_at: dict[str | None, float] = {}
+        #: serial -> the relay lock rules failed (the kernel refused them).
+        self._lock_failed: dict[str | None, bool] = {}
 
     # -- cached reads (UI thread) -------------------------------------------
 
@@ -814,6 +1054,9 @@ class DeviceGuard:
             logger.warning("Device guard: %s", line[5:])
         return fails
 
+    def _stop_relay(self, serial: str | None) -> None:
+        self._script(serial, "relay", self._binary(), RELAY_CONFIG, "-", "-", "-", "-")
+
     @staticmethod
     def _is_ours(endpoint: Endpoint) -> bool:
         try:
@@ -851,10 +1094,12 @@ class DeviceGuard:
         """Turn the Kill switch on/off on *serial* (default: current target).
 
         Needs a device proxy: the Kill switch allows apps only that proxy, so
-        without one it would just take every app offline. Blocking (adb).
+        without one it would just take every app offline. Turning it off
+        works without a device proxy too (a leftover is removed). Blocking
+        (adb).
         """
         serial = serial or Adb.get_target_device()
-        with self._lock:
+        with self._lock, Adb.targeting(serial):
             if not enabled:
                 self._wanted.setdefault(serial, _Wanted()).kill_switch = False
                 view = self.apply(serial)
@@ -877,13 +1122,17 @@ class DeviceGuard:
                     "the Kill switch needs one"
                 )
             self._wanted.setdefault(serial, _Wanted()).kill_switch = True
+            _install_restore_hook()
             view = self.apply(serial, obs=obs)
         if not view.kill_switch:
             return False, view.detail or "Kill switch could not be applied"
-        return True, (
+        message = (
             f"Kill switch on: apps may only reach {obs.proxy.address}, "
             "everything else is refused"
         )
+        if not view.ipv6:
+            message += " (IPv4 only: the device has no ip6tables)"
+        return True, message
 
     def prepare(
         self,
@@ -906,7 +1155,23 @@ class DeviceGuard:
             wanted.endpoint = endpoint
             if ours is not None:
                 wanted.ours = ours
+            if wanted.kill_switch:
+                _install_restore_hook()
             return self.apply(serial, endpoint=endpoint, ours=ours)
+
+    def rollback_prepare(self, serial: str | None, kill_switch: bool) -> GuardView:
+        """Undo :meth:`prepare` when the device proxy was then NOT set.
+
+        The Kill switch goes back to *kill_switch* (what it was before) and
+        follows the device's REAL proxy again: a Kill switch allowing only a
+        proxy that never got set would leave every app offline. Blocking.
+        """
+        with self._lock:
+            wanted = self._wanted.setdefault(serial, _Wanted())
+            wanted.kill_switch = kill_switch
+            wanted.endpoint = None
+            wanted.ours = False
+            return self.apply(serial)
 
     def after_device_proxy_write(
         self, serial: str | None, address: str | None
@@ -921,8 +1186,12 @@ class DeviceGuard:
         endpoint = Endpoint.parse(address)
         with self._lock:
             wanted = self._wanted.setdefault(serial, _Wanted())
+            # The restore after a load sets the proxy it has just prepared:
+            # keep "ours" (a 127.0.0.1 proxy whose adb reverse is not back
+            # yet would read as someone else's and stop the relay).
+            if endpoint is None or endpoint != wanted.endpoint:
+                wanted.ours = False
             wanted.endpoint = endpoint
-            wanted.ours = False
             if endpoint is None:
                 wanted.kill_switch = False
             return self.apply(serial)
@@ -931,10 +1200,11 @@ class DeviceGuard:
         """Check the guard against the device and repair it (restore path).
 
         With nothing wanted on *serial* only a leftover is handled: a
-        kill-switch chain without a device proxy (e.g. from a snapshot) is
-        removed. Blocking (adb), never raises.
+        kill-switch chain without a device proxy (e.g. from a snapshot or a
+        crashed session) is removed; one WITH a device proxy is adopted
+        (kept on, following that proxy). Blocking (adb), never raises.
         """
-        with self._lock:
+        with self._lock, Adb.targeting(serial):
             if serial not in self._wanted:
                 obs = self._observe(serial, uids=False) if self._root(serial) else None
                 if obs is None:
@@ -943,6 +1213,7 @@ class DeviceGuard:
                     obs.kill_switch_on
                     or obs.active_ks("6") is not None
                     or obs.dp_exists
+                    or obs.rl_exists
                     or bool(obs.relays)
                 )
                 if not leftover:
@@ -953,6 +1224,8 @@ class DeviceGuard:
                     self._wanted[serial] = _Wanted(
                         kill_switch=obs.kill_switch_on, endpoint=obs.proxy
                     )
+                    if obs.kill_switch_on:
+                        _install_restore_hook()
                     logger.info(
                         "Device guard after %s: adopted the Kill switch of the "
                         "device proxy %s",
@@ -962,48 +1235,145 @@ class DeviceGuard:
                 return self.apply(serial, obs=obs)
             return self.apply(serial)
 
-    def refresh(self, serial: str | None) -> GuardView:
-        """Read the guard state (one adb call, no change, no event).
+    def refresh(self, serial: str | None, *, repair: bool = False) -> GuardView:
+        """Read the guard state (one adb call, no event unless it repairs).
 
         ``checked`` is False when the device could not be read (no root):
-        the caller then reads the device proxy itself.
+        the caller then reads the device proxy itself. With *repair* the
+        app naming of our proxy is repaired when it is broken (the relay
+        died, the nat jump is gone, apps were installed or removed since);
+        at most once per :attr:`REPAIR_BACKOFF` seconds per serial.
         """
-        with self._lock:
+        repaired = False
+        with self._lock, Adb.targeting(serial):
             if not self._root(serial):
                 return GuardView(attribution="unavailable", detail="no root")
-            obs = self._observe(serial, uids=False)
+            obs = self._observe(serial, uids=repair)
             if obs is None:
                 return replace(self.view_cached(serial), checked=False)
-            prev = self._views.get(serial, GuardView())
-            if obs.proxy is None:
-                attribution, named = "off", 0
-            elif obs.relay_running and obs.dp_uids:
-                attribution, named = "on", len(obs.dp_uids)
-            elif prev.attribution == "on":
-                attribution, named = "failed", 0  # the relay died
-            else:
-                attribution, named = prev.attribution, 0
-            view = GuardView(
-                installed=bool(obs.kill_switch_on or obs.dp_exists or obs.relays),
-                endpoint=obs.proxy,
-                kill_switch=obs.kill_switch_on,
-                refused=obs.refused.get("4", 0) + obs.refused.get("6", 0),
-                attribution=attribution,
-                named_apps=named,
-                detail=prev.detail,
-                checked=True,
-            )
+            view = self._read_view(serial, obs)
+            why = self._repair_reason(serial, obs, view) if repair else ""
+            if why:
+                self._repair_at[serial] = time.monotonic()
+                logger.info(
+                    "Device guard on %s: repairing the app naming (%s)", serial, why
+                )
+                # The naming this guard set up for this very proxy: ours (no
+                # re-classification that could stop the relay instead).
+                ours = True if self._named_for.get(serial) == obs.proxy else None
+                view = self._apply_locked(serial, None, ours, obs)
+                repaired = True
             self._views[serial] = view
-            return view
+        if repaired:
+            self._publish(serial)
+        return view
 
-    def teardown(self, serial: str | None) -> bool:
+    def _read_view(self, serial: str | None, obs: GuardObservation) -> GuardView:
+        """The guard as the device has it (pure on *obs* + in-process state)."""
+        prev = self._views.get(serial, GuardView())
+        named_for = self._named_for.get(serial)
+        unnamed = 0
+        if obs.proxy is None:
+            attribution, named = "off", 0
+        elif (
+            obs.dp_uids
+            or obs.relays
+            or (named_for is not None and named_for == obs.proxy)
+        ):
+            healthy = (
+                obs.relay_running
+                and bool(obs.dp_uids)
+                and _dp_jump_present(obs)
+                and set(obs.dp_uids.values()) <= obs.listening
+                and (
+                    self._lock_failed.get(serial, False)
+                    or relay_lock_ok(obs, obs.dp_uids)
+                )
+            )
+            if healthy:
+                named = len(obs.dp_uids)
+                if obs.packages is not None:
+                    unnamed = len(set(app_uid_groups(obs.packages)) - set(obs.dp_uids))
+                attribution = "partial" if unnamed else "on"
+            else:
+                attribution, named = "failed", 0
+        elif prev.attribution in ("external", "unavailable"):
+            attribution, named = prev.attribution, 0
+        else:
+            attribution, named = "off", 0
+        ks = obs.kill_switch_on
+        detail = prev.detail
+        if attribution == "failed" and obs.dp_uids and not obs.relay_running:
+            detail = "identity relay down: proxy connections fail until it is repaired"
+        return GuardView(
+            installed=bool(ks or obs.dp_exists or obs.rl_exists or obs.relays),
+            endpoint=obs.proxy,
+            kill_switch=ks,
+            refused=obs.refused.get("4", 0) + obs.refused.get("6", 0),
+            attribution=attribution,
+            named_apps=named,
+            unnamed_apps=unnamed,
+            detail=detail,
+            checked=True,
+            ipv6=obs.ip6_filter or not ks,
+        )
+
+    def _repair_reason(
+        self, serial: str | None, obs: GuardObservation, view: GuardView
+    ) -> str:
+        """Why the app naming of our proxy needs a repair now ("" = it does not)."""
+        proxy = obs.proxy
+        if proxy is None or not proxy.is_ipv4:
+            return ""
+        if self._named_for.get(serial) != proxy and not (obs.dp_uids or obs.relays):
+            return ""  # not naming for this proxy (external, or never set up)
+        groups = app_uid_groups(obs.packages) if obs.packages is not None else None
+        if view.attribution == "on" and groups is not None:
+            if groups != self._groups.get(serial) and set(groups) == set(obs.dp_uids):
+                # Same UIDs, other names (an app reinstalled under a reused
+                # UID): only the sidecar changes, no device work.
+                write_device_uids(serial, groups)
+                self._groups[serial] = groups
+            if set(groups) == set(obs.dp_uids):
+                return ""
+        elif view.attribution == "on":
+            return ""
+        last = self._repair_at.get(serial)
+        if last is not None and time.monotonic() - last < self.REPAIR_BACKOFF:
+            return ""
+        if view.attribution == "failed":
+            if obs.dp_uids and not obs.relay_running:
+                return "the identity relay is not running"
+            if not _dp_jump_present(obs):
+                return "the proxy-port jump is missing"
+            return "the identity relay is incomplete"
+        return "the app list changed"
+
+    def teardown(
+        self, serial: str | None, *, lock_timeout: float | None = None
+    ) -> bool:
         """Remove the Kill switch, the proxy-port chain and the relay (quit).
+
+        The guard lock is held only to forget the state, never across the
+        adb work: a quit that gives up on a slow teardown must not leave the
+        lock held for the rest of the shutdown (Mitmproxy's own shutdown
+        would block on it). With *lock_timeout* a busy lock skips it.
 
         Returns:
             True when something was removed.
         """
-        with self._lock:
+        if not self._lock.acquire(timeout=-1 if lock_timeout is None else lock_timeout):
+            logger.warning(
+                "Kill switch teardown on %s skipped: the guard is busy", serial
+            )
+            return False
+        try:
             self._wanted.pop(serial, None)
+            self._named_for.pop(serial, None)
+            self._views[serial] = GuardView(checked=True)
+        finally:
+            self._lock.release()
+        with Adb.targeting(serial):
             if not self._root(serial):
                 return False
             obs = self._observe(serial, uids=False)
@@ -1013,10 +1383,10 @@ class DeviceGuard:
             if obs.ip6_filter:
                 cmds += plan_kill_switch(False, None, obs, "6")
             cmds += plan_proxy_chain(None, {}, obs)[0]
+            cmds += plan_relay_lock({}, obs)
             self._run(serial, cmds)
             if obs.relays:
-                self._script(serial, "relay", self._binary(), RELAY_CONFIG, "-", "-")
-            self._views[serial] = GuardView(checked=True)
+                self._stop_relay(serial)
         removed = bool(cmds or obs.relays)
         if removed:
             self._publish(serial)
@@ -1033,10 +1403,11 @@ class DeviceGuard:
         """Bring *serial*'s guard in line with what is wanted (blocking).
 
         The endpoint is the device's real proxy unless *endpoint* is given
-        (the proxy is about to be set). Order: Kill switch, relay, then the
-        proxy-port chain, then a flush of connections the chain did not see.
+        (the proxy is about to be set). Order: Kill switch, relay, relay
+        lock, then the proxy-port chain, then a flush of connections the
+        chain did not see.
         """
-        with self._lock:
+        with self._lock, Adb.targeting(serial):
             view = self._apply_locked(serial, endpoint, ours, obs)
             self._views[serial] = view
         self._publish(serial)
@@ -1073,10 +1444,24 @@ class DeviceGuard:
         if obs.ip6_filter:
             cmds += plan_kill_switch(ks_on, target, obs, "6")
         fails = self._run(serial, cmds)
-        if ks_on and fails:
-            detail = "the Kill switch rules failed (see the log)"
-        else:
-            detail = ""
+        ks_state = ks_on
+        detail = ""
+        if fails:
+            # Report what the device really has, not what was asked for.
+            after = self._observe(serial, uids=False)
+            if after is not None:
+                ks_state = after.kill_switch_on
+            else:
+                ks_state = ks_on or obs.kill_switch_on
+            if ks_on:
+                detail = "the Kill switch rules failed (see the log)"
+            elif ks_state:
+                detail = "the Kill switch could not be removed (see the log)"
+        if ks_state and not obs.ip6_filter:
+            logger.warning(
+                "Kill switch on %s covers IPv4 only: the device has no ip6tables",
+                serial,
+            )
 
         if ours is None:
             ours = target is not None and (
@@ -1086,37 +1471,55 @@ class DeviceGuard:
         uid_ports: dict[int, int] = {}
         groups: dict[int, list[str]] = {}
         if target is not None and ours:
+            self._named_for[serial] = target
             attribution, uid_ports, groups, why = self._ensure_relay(
                 serial, target, obs
             )
             if why:
                 detail = detail or why
-        elif target is not None:
-            attribution = "external"
+        else:
+            self._named_for.pop(serial, None)
+            if target is not None:
+                attribution = "external"
             if obs.relays:
-                self._script(serial, "relay", self._binary(), RELAY_CONFIG, "-", "-")
-        elif obs.relays:
-            self._script(serial, "relay", self._binary(), RELAY_CONFIG, "-", "-")
+                self._stop_relay(serial)
+        lock_cmds = plan_relay_lock(uid_ports, obs)
         dp_cmds, jump_added = plan_proxy_chain(target, uid_ports, obs)
-        self._run(serial, dp_cmds)
+        if uid_ports:
+            # The lock first: no REDIRECT may point at a port others can use.
+            lock_fails = self._run(serial, lock_cmds)
+            self._lock_failed[serial] = bool(lock_fails)
+            if lock_fails:
+                logger.warning(
+                    "Relay lock on %s not applied: apps could connect to "
+                    "another app's relay port",
+                    serial,
+                )
+            self._run(serial, dp_cmds)
+        else:
+            self._run(serial, dp_cmds)
+            self._run(serial, lock_cmds)
+            self._lock_failed.pop(serial, None)
         if target is not None and jump_added:
             # Pooled keep-alive sockets opened before the chain keep their
             # old NAT mapping (unnamed) until they close.
             self._script(serial, "flush", target.ip, str(target.port))
         if groups:
             write_device_uids(serial, groups)
+            self._groups[serial] = groups
         refused = obs.refused.get("4", 0) + obs.refused.get("6", 0)
         if cmds:
             refused = 0  # a rebuilt chain starts counting again
         return GuardView(
             endpoint=target,
-            kill_switch=ks_on and not fails,
+            kill_switch=ks_state,
             refused=refused,
             attribution=attribution,
             named_apps=len(uid_ports),
             detail=detail,
             checked=True,
-            installed=target is not None and target.is_ipv4,
+            installed=bool(target is not None and target.is_ipv4) or ks_state,
+            ipv6=obs.ip6_filter or not ks_state,
         )
 
     def _ensure_relay(
@@ -1129,7 +1532,9 @@ class DeviceGuard:
         if not groups:
             return "failed", {}, {}, "no apps found, apps not named"
         uid_ports = assign_relay_ports(list(groups), obs.dp_uids)
-        tag = relay_tag(uid_ports, target.address)
+        token = device_token(serial)
+        secret = relay_secret()
+        tag = relay_tag(uid_ports, target.address, f"{token}:{secret}")
         if relay_healthy(obs, uid_ports, tag):
             return "on", uid_ports, groups, ""
         ok, msg = self._ensure_binary(serial)
@@ -1144,6 +1549,8 @@ class DeviceGuard:
             RELAY_CONFIG,
             target.address,
             tag,
+            token,
+            secret,
             *entries,
             timeout=90.0,
         )

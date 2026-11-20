@@ -1056,11 +1056,11 @@ class EmulatorService:
                 # ...and the device settings, including ``http_proxy``: a
                 # snapshot saved without the proxy drops mitmproxy's device
                 # proxy, so the replays were never intercepted. Re-apply it.
-                self._restore_device_proxy(serial)
+                proxy_result = self._restore_device_proxy(serial)
                 # Then everything else the load invalidated, for every caller
                 # (TUI, Play, AI, headless): Frida handles, App Proxy lanes and
                 # the CA, frida-server, long-lived streams.
-                self._after_snapshot_load(adb, serial)
+                self._after_snapshot_load(adb, serial, proxy_result)
 
             self._logger.info(f"Snapshot '{name}' loaded successfully")
             return True
@@ -1070,7 +1070,9 @@ class EmulatorService:
             _snapshot_line("load", name, False, serial, str(e))
             return False
 
-    def _after_snapshot_load(self, adb: AdbProtocol, serial: str | None) -> None:
+    def _after_snapshot_load(
+        self, adb: AdbProtocol, serial: str | None, device_proxy: str | None = None
+    ) -> None:
         """Post-load steps after the device proxy (best-effort, never raises).
 
         1. Drop the host Frida handles and the Spotlight PID (dead now),
@@ -1091,7 +1093,12 @@ class EmulatorService:
         try:
             from sandroid.services.proxy_restore import restore_proxy_infra
 
-            restore_proxy_infra(target, "snapshot-load", device_proxy=False)
+            restore_proxy_infra(
+                target,
+                "snapshot-load",
+                device_proxy=False,
+                device_proxy_result=device_proxy,
+            )
         except Exception as exc:
             self._logger.warning(f"Proxy restore after snapshot load failed: {exc}")
         if active:

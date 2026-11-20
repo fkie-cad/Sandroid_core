@@ -479,10 +479,13 @@ def test_parent_watch_needs_the_env_var(monkeypatch):
 # -- device-proxy flows named by the identity relay --------------------------------
 
 
-def _relay_auth(uid) -> str:
+_SECRET = "5ec7e75ec7e75ec7e75ec7e75ec7e75e"  # noqa: S105 -- test value
+
+
+def _relay_auth(uid, device="dev5570", secret=_SECRET) -> str:
     import base64
 
-    return "Basic " + base64.b64encode(f"uid{uid}:x".encode()).decode()
+    return "Basic " + base64.b64encode(f"uid{uid}-{device}:{secret}".encode()).decode()
 
 
 @pytest.fixture
@@ -491,8 +494,19 @@ def uid_map(tmp_path, monkeypatch):
     path.write_text(
         json.dumps(
             {
-                "10215": {"package": "de.fkie.canary", "serial": "emulator-5570"},
-                "10300": {"package": "a.one,a.two", "serial": "emulator-5570"},
+                "version": 2,
+                "devices": {
+                    "dev5570": {
+                        "serial": "emulator-5570",
+                        "secret": _SECRET,
+                        "uids": {"10215": "de.fkie.canary", "10300": "a.one,a.two"},
+                    },
+                    "dev5572": {
+                        "serial": "emulator-5572",
+                        "secret": "0ther5ecret0ther5ecret0ther5ecre",
+                        "uids": {"10215": "com.other.app"},
+                    },
+                },
             }
         )
     )
@@ -500,12 +514,61 @@ def uid_map(tmp_path, monkeypatch):
     return path
 
 
-def _connect(addon, uid):
+def _connect(addon, uid, **auth):
     connect = tflow.tflow()
     connect.request.method = "CONNECT"
-    connect.request.headers["Proxy-Authorization"] = _relay_auth(uid)
+    connect.request.headers["Proxy-Authorization"] = _relay_auth(uid, **auth)
     addon.SandroidLogger().http_connect(connect)
     return connect
+
+
+def _named(addon, flow_paths, connect) -> dict:
+    flow = tflow.tflow(resp=True)
+    flow.client_conn = connect.client_conn
+    addon.SandroidLogger().response(flow)
+    return _read_lines(flow_paths["log"])[-1]
+
+
+def test_forged_identity_without_the_secret_names_nothing(addon, flow_paths, uid_map):
+    """N4: an app without a REDIRECT (SDK sandbox, a new install, a relay
+    that is down) sending ``uid<U>`` itself is not named as app U.
+    """
+    for auth in ({"secret": "x"}, {"secret": ""}, {"device": "nodevice"}):
+        connect = _connect(addon, 10215, **auth)
+        # The forged header is still not forwarded upstream.
+        assert "Proxy-Authorization" not in connect.request.headers
+        rec = _named(addon, flow_paths, connect)
+        assert (rec["app"], rec["uid"]) == ("", None), auth
+    # The old, secret-less identity format is not trusted either.
+    import base64
+
+    flow = tflow.tflow(resp=True)
+    flow.request.headers["Proxy-Authorization"] = (
+        "Basic " + base64.b64encode(b"uid10215:x").decode()
+    )
+    addon.SandroidLogger().requestheaders(flow)
+    addon.SandroidLogger().response(flow)
+    assert _read_lines(flow_paths["log"])[-1]["app"] == ""
+
+
+def test_uid_resolves_on_its_own_device(addon, flow_paths, uid_map):
+    """N5: two devices on one Mitmproxy: UID 10215 is another app on each."""
+    a = _named(addon, flow_paths, _connect(addon, 10215))
+    assert a["app"] == "de.fkie.canary"
+    b = _named(
+        addon,
+        flow_paths,
+        _connect(
+            addon,
+            10215,
+            device="dev5572",
+            secret="0ther5ecret0ther5ecret0ther5ecre",  # noqa: S106 -- test value
+        ),
+    )
+    assert b["app"] == "com.other.app"
+    # Device A's secret does not open device B's names.
+    c = _named(addon, flow_paths, _connect(addon, 10215, device="dev5572"))
+    assert c["app"] == ""
 
 
 def test_relay_identity_tags_every_flow_of_its_connection(

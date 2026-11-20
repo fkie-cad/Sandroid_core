@@ -20,12 +20,36 @@ from sandroid.services import proxy_restore as pr
 SERIAL = "emulator-5570"
 
 
+class _Guard:
+    """The device guard's leftover check, recorded (no device)."""
+
+    def __init__(self):
+        self.reconciled: list[tuple] = []
+
+    def has_state(self, serial):
+        return False
+
+    def view_cached(self, serial=None):
+        from sandroid.core.device_guard import GuardView
+
+        return GuardView()
+
+    def reconcile(self, serial, cause=""):
+        from sandroid.core.device_guard import GuardView
+
+        self.reconciled.append((serial, cause))
+        return GuardView()
+
+
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
+    from sandroid.core import device_guard as dg
+
     pm._CA_DESIRED.clear()
     monkeypatch.setattr(pm, "_FOCUS_INSTANCE", None)
     monkeypatch.setattr(ms, "_INSTANCE", None)
     monkeypatch.setattr(pr, "_HOOK_INSTALLED", False)
+    monkeypatch.setattr(dg, "_INSTANCE", _Guard())
     yield
     pm._CA_DESIRED.clear()
 
@@ -115,9 +139,13 @@ def test_nothing_set_up_means_no_device_work(monkeypatch):
     monkeypatch.setattr(
         pm, "get_focus_manager", lambda: pytest.fail("focus manager created")
     )
+    from sandroid.core import device_guard as dg
+
     pr._device_prepared_hook(SERIAL, True)
     report = pr.restore_proxy_infra(SERIAL, "cold-boot")
     assert not report.acted
+    # The only device work: the leftover Kill switch check (one read).
+    assert dg._INSTANCE.reconciled == [(SERIAL, "cold-boot"), (SERIAL, "cold-boot")]
     assert not hasattr(pr, "restore_proxy_infra_async")  # dead code removed
 
 
@@ -255,7 +283,9 @@ def test_load_snapshot_order_keeps_the_restore_chain(monkeypatch):
         svc, "_record_device_clock", lambda adb, name, serial: steps.append("clock")
     )
     monkeypatch.setattr(
-        svc, "_restore_device_proxy", lambda serial: steps.append("device_proxy")
+        svc,
+        "_restore_device_proxy",
+        lambda serial: steps.append("device_proxy") or "restored",
     )
     monkeypatch.setattr(
         es, "reset_device_handles_after_snapshot_load", lambda: steps.append("frida")
@@ -285,7 +315,9 @@ def test_load_snapshot_order_keeps_the_restore_chain(monkeypatch):
         "clock",
         "device_proxy",
         "frida",
-        "proxy_infra:snapshot-load:{'device_proxy': False}",
+        # The device proxy step's outcome goes into the restore summary.
+        "proxy_infra:snapshot-load:{'device_proxy': False, "
+        "'device_proxy_result': 'restored'}",
         f"frida_start:{SERIAL}",
         SERIAL,
     ]
