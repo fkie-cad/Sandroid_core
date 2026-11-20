@@ -120,6 +120,11 @@ _PANEL_SECTIONS: list[tuple[str, str, str]] = [
     ("AI chat › agents bar", "sandroid.tui.widgets.chat_panel", "AgentsBar"),
     ("Devices screen (D)", "sandroid.tui.screens.devices_screen", "DevicesScreen"),
     ("Proxy settings (y)", "sandroid.tui.modals.proxy_modal", "ProxyModal"),
+    (
+        "Static analysis (a)",
+        "sandroid.tui.modals.static_analysis_modal",
+        "StaticAnalysisModal",
+    ),
 ]
 
 #: Lens id -> the ``_PANEL_SECTIONS`` headings that belong to that lens.
@@ -205,6 +210,11 @@ _ROW_TEXT: dict[tuple[str, str], str] = {
     ("Devices screen (D)", "escape"): "Close (an open snapshot list first)",
     ("Devices screen (D)", "ctrl+c"): "Quit (at startup: stop the start)",
     ("Proxy settings (y)", "r"): "Remove CA (asks first)",
+    ("Static analysis (a)", "enter"): "Start the analysis (Esc cancels)",
+    ("Static analysis (a)", "p"): "Switch the analysis profile (privacy, generic)",
+    ("Static analysis (a)", "t"): "Trackers on / off",
+    ("Static analysis (a)", "s"): "Security analysis on / off",
+    ("Static analysis (a)", "v"): "Verbose output on / off",
     ("Proxy settings (y)", "shift+left"): "Previous tab (in an empty text field)",
     ("Proxy settings (y)", "shift+right"): "Next tab (in an empty text field)",
 }

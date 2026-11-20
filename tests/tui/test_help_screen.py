@@ -306,3 +306,9 @@ def test_help_key_names_are_words_not_glyphs() -> None:
         rows += [shown for shown, _d, _r in section]
     glyphs = set("←→↑↓⏎↵⇧⌫⇥")
     assert not [r for r in rows if glyphs & set(r)]
+
+
+def test_static_analysis_rows_come_from_the_dialog() -> None:
+    """insight-privacy's `a` dialog keys are listed from its BINDINGS."""
+    keys = _section_raw_keys("Static analysis (a)")
+    assert {"enter", "p", "t", "s", "v"} <= keys
