@@ -1316,6 +1316,10 @@ def cleanup(controller, tmp_path, monkeypatch):
         fail: set[str] = set()
 
         def delete_snapshot(self, name, serial=None):
+            from sandroid.core.snapshot_policy import current_actor
+
+            # The snapshot policy refuses start-point deletes by anyone else.
+            assert current_actor()[0] == "rewind"
             deleted.append((name, serial))
             return name not in self.fail
 

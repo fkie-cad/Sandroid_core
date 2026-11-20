@@ -730,7 +730,10 @@ class RecordingController:
             if again is None or name in again:
                 continue
             try:
-                ok = bool(service.delete_snapshot(name, rec.serial))
+                from sandroid.core.snapshot_policy import acting_as
+
+                with acting_as("rewind"):  # start points are Rewind's own names
+                    ok = bool(service.delete_snapshot(name, rec.serial))
             except Exception:
                 logger.debug("deleting old start point %s failed", name, exc_info=True)
                 ok = False
