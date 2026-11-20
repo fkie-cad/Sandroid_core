@@ -1501,7 +1501,7 @@ class SandroidTUI(App):
                 pass
 
     def get_key_display(self, binding: Binding) -> str:
-        """Footer key label: keep Shift visible (``R`` -> ``⇧R``, ``r`` -> ``r``)."""
+        """Footer key label: keep Shift visible (``R`` -> ``Shift+R``, ``r`` -> ``r``)."""
         if binding.key_display:
             # Hand-written labels too: words, never key glyphs.
             return key_words(binding.key_display)
@@ -1793,7 +1793,7 @@ class SandroidTUI(App):
                 if not spotlight.get_app_tuple():
                     self.notify(
                         "No spotlight app. Press c (use the foreground app) or "
-                        "⇧C (pick an app…) first.",
+                        "Shift+C (pick an app…) first.",
                         severity="warning",
                     )
                     return
@@ -2385,7 +2385,7 @@ class SandroidTUI(App):
             return True
         if self._active_device() is None:
             self.notify(
-                "No device connected. Press [b]⇧D[/b] to open Devices and "
+                "No device connected. Press [b]Shift+D[/b] to open Devices and "
                 "attach or start one.",
                 title=f"Cannot {what}",
                 severity="error",

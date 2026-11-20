@@ -28,7 +28,7 @@ one, without ``--serial``/``--avd``) is connected, after a disconnect that does
 not reconnect, and with ``D`` any time. The *Devices* box lists everything
 once: the devices adb sees (emulators, USB and network devices: AVD or model,
 API, booting/ready/offline/unauthorized, root, serial), then the AVDs that are
-stopped, then AVDs running elsewhere (another session holds them). ``⏎``
+stopped, then AVDs running elsewhere (another session holds them). ``Enter``
 attaches a ready device or starts a stopped AVD (the last-used AVD is
 preselected); ``x`` stops an emulator (``emu kill`` for that serial only),
 ``R`` restarts it, ``e`` renames a stopped AVD, ``a`` runs ``adb connect
@@ -40,7 +40,7 @@ stopped AVD they are editable and saved for that AVD at once (in
 from a snapshot), ``h`` headless, ``s`` save state on exit (off by default:
 the emulator starts with ``-no-snapshot-save``, so every boot starts from the
 same state) and ``w`` wipe data once (asks on start, never remembered). The
-keys work while the list keeps the focus, and the boxes can be clicked. ``⏎``
+keys work while the list keeps the focus, and the boxes can be clicked. ``Enter``
 starts the AVD with exactly what is shown. For a running emulator the box
 shows, read-only, what Sandroid started it with -- what ``R`` reuses -- or,
 for one started outside Sandroid, the AVD's saved options (``R`` restarts
@@ -137,8 +137,8 @@ cannot hang the quit. Every binding can be changed in the ``?`` editor (with liv
 detection); overrides are stored in ``tui.keybindings`` in your config.
 Overrides for ids from 2.1 that no longer exist (``load_slot_1`` …
 ``load_slot_8``, ``pick_save_slot``) are ignored. Keys are case-sensitive:
-an upper-case key means Shift+key and is shown as ``⇧R`` in the footer and
-``Shift+R`` in the ``?`` list. The ``?`` list also shows each lens's own keys
+an upper-case key means Shift+key and is shown as ``Shift+R`` in the footer and
+in the ``?`` list. The ``?`` list also shows each lens's own keys
 (they only work while that lens has focus). The footer shows at most seven
 keys: Record, Review, the active lens's own keys, ``1-6``, quit and help.
 
@@ -150,8 +150,9 @@ App (1)
 
 The app under investigation (the spotlight) is a selection: ``c`` uses the
 foreground app, ``C`` (Shift+C) picks an installed app. Selecting starts
-nothing; the header shows the app's state (``● running pid N``,
-``◐ paused · ␣ resume``, ``○ not running · ␣ start``). Frida tools (friTap,
+nothing; the header shows the app's state (``running pid N``,
+``paused · Space resumes``, ``not running · Space starts``, each state
+in its colour). Frida tools (friTap,
 Dexray, the bypasses, fridump, …) attach to a running app and start a stopped
 one; they ask before restarting a running app (friTap's and Dexray's "Restart
 the app first" option), and only Shift+``R`` restarts without asking. With the
@@ -399,7 +400,7 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   (segments ``Section 7 'x'`` and ``after Section 7 (no section)``). The
   table then shows only the activity since that note or section (★ rows
   with activity in it stay on top; the idle ★ rows fold into one row,
-  ``▸ ★ 21 watched · idle since Note 3 'x'``, that ⏎ or → opens and ←
+  ``▸ ★ 21 watched · idle since Note 3 'x'``, that Enter or Right opens and Left
   folds); ``A`` toggles everything / since the last note or section (4 or
   more never-touched ★ rows fold there too) and ``<``/``>`` step through
   the segments. The caption names the segment, the log and the Inspector's
@@ -408,7 +409,7 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   ``/system/``, ``/data/dalvik-cache/``, ``/data/app/`` ...) and rows with
   only OPEN/CLOSE are hidden -- never the app's own data, nor
   ``/data/local/tmp``. ``cache/`` and ``code_cache/`` collapse into one row
-  per folder (⏎ or → opens it, ← folds it). ``N`` shows every path raw.
+  per folder (Enter or Right opens it, Left folds it). ``N`` shows every path raw.
   ``R`` opens the rule editor (hide / group by prefix, segment, suffix or
   glob; add, remove, toggle, reset); changes apply at once and are saved as
   ``tui.files_noise_rules``. The caption counts hidden rows per rule kind.
