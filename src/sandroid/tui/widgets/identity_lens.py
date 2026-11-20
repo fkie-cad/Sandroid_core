@@ -1125,6 +1125,38 @@ class IdentityLens(Vertical):
             pass
 
     def notice_text(self) -> str | None:
+        """The notices for this profile, one per line, or None: the "restart
+        the app" notice, a changed ``extends`` parent and a problem in the
+        world section (which never blocks an apply).
+        """
+        lines = [t for t in (self._stale_notice(), *self._profile_notes()) if t]
+        return "\n".join(lines) or None
+
+    def _profile_notes(self) -> list[str]:
+        profile = self.profile
+        if profile is None:
+            return []
+        out = []
+        if getattr(profile, "parent_changed", False):
+            out.append(
+                f"The profile it extends ({profile.extends}) changed since the "
+                "last save; values may differ."
+            )
+        ident = identity_service()
+        check = getattr(ident, "world_warnings", None)
+        if check is not None:
+            try:
+                issues = check(profile)
+            except Exception:
+                issues = []
+            if issues:
+                out.append(
+                    f"World section: {_oneline(issues[0].message)} "
+                    "(the identity values are not affected)."
+                )
+        return out
+
+    def _stale_notice(self) -> str | None:
         """The "restart the app" notice, or None."""
         stale = self._stale_app
         if stale is None:

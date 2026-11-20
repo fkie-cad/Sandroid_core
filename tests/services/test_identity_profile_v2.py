@@ -109,6 +109,7 @@ def test_an_edit_keeps_comments_order_and_other_nodes(svc, lib):
         "id",
         "name",
         "extends",
+        "extends_digest",
         "token",
         "seed",
         "revision",
@@ -129,7 +130,11 @@ def test_an_edit_keeps_comments_order_and_other_nodes(svc, lib):
 
 def test_a_save_without_changes_only_bumps_the_revision(svc, lib):
     pinned = "hex:" + "ab" * 32  # nothing to resolve
-    text = HAND_WRITTEN.format(seed="11" * 32).replace("seed: auto", f"seed: {pinned}")
+    text = (
+        HAND_WRITTEN.format(seed="11" * 32)
+        .replace("seed: auto", f"seed: {pinned}")
+        .replace("extends: builtin:de\n", "")  # standalone: no digest to add
+    )
     _write(lib, "mara", text)
     svc.save(svc.load("mara"))
     after = (lib / "mara.yaml").read_text(encoding="utf-8")
@@ -254,10 +259,11 @@ def test_extends_cycles_and_depth_are_errors(svc, lib):
     head = "format: sandroid-identity\nschema: 2\n"
     _write(lib, "a", head + "id: a\nextends: b\n")
     _write(lib, "b", head + "id: b\nextends: a\n")
-    with pytest.raises(ProfileError, match="cycle"):
+    with pytest.raises(ProfileError, match="loop: a extends b extends a") as err:
         svc.load("a")
+    assert "->" not in str(err.value)
     _write(lib, "self", head + "id: self\nextends: self\n")
-    with pytest.raises(ProfileError, match="cycle"):
+    with pytest.raises(ProfileError, match="loop"):
         svc.load("self")
     for n in range(store.EXTENDS_DEPTH_MAX + 1):
         _write(lib, f"p{n}", head + f"id: p{n}\nextends: p{n + 1}\n")
@@ -269,7 +275,7 @@ def test_extends_cycles_and_depth_are_errors(svc, lib):
     with pytest.raises(ProfileError, match="atlantis"):
         svc.load("lost")
     listed = {i.id: i.error for i in svc.list_profiles()}
-    assert "cycle" in listed["a"]
+    assert "loop" in listed["a"]
     assert listed["p1"] == ""
 
 
@@ -298,37 +304,43 @@ def test_every_builtin_validates_and_matches_its_preset():
             assert raw["world"]["seed"] == "auto"
 
 
-def test_create_from_a_builtin_writes_only_its_own_keys(svc, lib):
+def test_create_writes_a_standalone_copy_of_the_builtin(svc, lib, monkeypatch):
     first = svc.create("de")
     second = svc.create("de")
     assert (first.id, second.id) == ("mara-de", "mara-de-2")
-    own = store.plain(store.load_yaml((lib / "mara-de.yaml").read_text("utf-8")))
-    assert own["extends"] == "builtin:de"
-    assert set(own) == {
-        "format",
-        "schema",
-        "id",
-        "name",
-        "extends",
-        "token",
-        "seed",
-        "revision",
-        "created",
-        "retired_tokens",
-        "values",
-        "world",
-    }
-    assert set(own["values"]) == {"gps"}  # its own GPS fix
-    assert own["world"] == {"seed": first.world["seed"]}
+    text = (lib / "mara-de.yaml").read_text("utf-8")
+    from sandroid._version import __version__
+
+    assert text.startswith(f"# Created from builtin:de (Sandroid {__version__}).\n")
+    own = store.plain(store.load_yaml(text))
+    assert "extends" not in own
+    assert set(own["values"]) == set(store.load_builtin("de")["values"])
+    assert own["lists"] == store.load_builtin("de")["lists"]
+    assert own["owner"] == store.load_builtin("de")["owner"]
     assert store.WORLD_SEED_RE.fullmatch(own["world"]["seed"])
+    assert own["world"]["country"] == "de"
     loaded = svc.load(first.id)
     assert not _errors(loaded)
-    assert loaded.world["country"] == "de"
     assert first.token != second.token
     assert first.world["seed"] != second.world["seed"]
     assert first.values["gps"].value != second.values["gps"].value
     assert ident.fingerprint(first) != ident.fingerprint(second)
     assert [b for b, _ in svc.builtins()] == store.builtin_ids()
+    # a later Sandroid with another built-in never changes the copy
+    before = ident.fingerprint(loaded)
+    changed = store.load_builtin("de")
+    changed["values"]["imei"] = {"template": "99999999{digits:6}{luhn}"}
+    changed["values"]["clipboard"] = {"template": "Anders {token}"}
+    monkeypatch.setattr(store, "load_builtin", lambda bid: changed)
+    assert ident.fingerprint(svc.load(first.id)) == before
+
+
+def test_no_pack_builtins_promise_no_world_seed():
+    for bid in store.builtin_ids():
+        raw = store.load_builtin(bid)
+        text = (store._builtin_dir() / f"{bid}.yaml").read_text("utf-8")
+        header = text.split("format:")[0]
+        assert ("world seed" in header) == ("world" in raw), bid
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +425,6 @@ GOOD_WORLD = {
     "counts": {"contacts": 40, "photos": 0},
     "places": {"home": {"city": "Berlin"}},
     "device": {"make": "Google", "model": "Pixel 8", "codename": "shiba"},
-    "emails": "reserved",
 }
 
 
@@ -421,6 +432,67 @@ def test_a_good_world_has_no_issues():
     assert store.world_issues(GOOD_WORLD) == []
     assert store.world_issues({"seed": "hex:" + "a" * 32}) == []
     assert store.world_issues({}) == []
+    assert store.world_shape_issues({**GOOD_WORLD, "emails": "reserved"}) == []
+
+
+def test_world_problems_come_from_the_world_module_as_warnings():
+    from sandroid.world import WorldSpec
+
+    def says(world: dict) -> str:
+        try:
+            WorldSpec.from_dict(world)
+        except ValueError as exc:
+            return str(exc)
+        return ""
+
+    for world in (
+        {**GOOD_WORLD, "size": "huge"},
+        {**GOOD_WORLD, "emails": "reserved"},  # phase 2: not known yet
+        {**GOOD_WORLD, "device": {"make": "Google", "model": "Pixel 8"}},
+        {**GOOD_WORLD, "places": {"home": {"town": "Berlin"}}},
+    ):
+        message = says(world)
+        assert message
+        assert store.world_issues(world) == [("error", "world", message)]
+        profile = _owned()
+        profile.world = world
+        assert ("warning", "world", message) in {
+            (i.severity, i.path, i.message) for i in ident.validate(profile)
+        }
+        assert not _errors(profile)  # never blocks the identity apply
+    # null country and open SDK bounds are what the world module allows
+    text = (
+        "format: sandroid-identity\nschema: 2\nid: w\nworld:\n  seed: auto\n"
+        "  country: null\n  device: {make: Google, model: Pixel 8, codename: "
+        "shiba, min_sdk: null, max_sdk: null}\n"
+    )
+    world = Profile.loads(text).world
+    assert world == {
+        "seed": "auto",
+        "device": {"make": "Google", "model": "Pixel 8", "codename": "shiba"},
+    }
+    assert says(world) == ""
+    assert store.world_issues(world) == []
+    raw = {
+        "seed": "auto",
+        "country": None,
+        "device": {**world["device"], "min_sdk": None},
+    }
+    assert says(raw) == ""
+    assert store.world_issues(raw) == []
+
+
+def test_without_the_world_module_the_shape_check_is_used(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "sandroid.world", None)
+    assert ("error", "world.size") in {
+        (s, p) for s, p, _m in store.world_issues({**GOOD_WORLD, "size": "huge"})
+    }
+    profile = _owned()
+    profile.world = {**GOOD_WORLD, "size": "huge"}
+    assert "world.size" in _paths(profile, "warning")
+    assert not _errors(profile)
 
 
 @pytest.mark.parametrize(
@@ -465,7 +537,7 @@ def test_a_good_world_has_no_issues():
     ],
 )
 def test_world_shape_issues(patch, path, severity):
-    issues = store.world_issues({**GOOD_WORLD, **patch})
+    issues = store.world_shape_issues({**GOOD_WORLD, **patch})
     assert (severity, path) in {(s, p) for s, p, _m in issues}
     if severity == "warning":
         assert not [i for i in issues if i[0] == "error"]
@@ -478,10 +550,11 @@ def test_world_is_passed_through_and_not_fingerprinted():
     profile.world["size"] = "large"
     profile.world["weather"] = "sunny"
     assert ident.fingerprint(profile) == before
-    assert "world.weather" in _paths(profile, "warning")
+    assert "world" in _paths(profile, "warning")
     assert not _errors(profile)
     profile.world["size"] = "huge"
-    assert "world.size" in _paths(profile, "error")
+    assert "world" in _paths(profile, "warning")
+    assert not _errors(profile)
     back = Profile.loads(profile.dumps())
     assert back.world == profile.world
 
@@ -635,3 +708,388 @@ def test_import_accepts_v1_toml_and_v2_yaml_and_export_writes_yaml(svc, lib, tmp
     )
     with pytest.raises(ProfileError, match="nowhere"):
         svc.import_profile(broken)
+
+
+# ---------------------------------------------------------------------------
+# removals over a parent (null tombstones)
+# ---------------------------------------------------------------------------
+
+
+def test_removals_over_a_parent_survive_save_and_reload(svc, lib):
+    _hand_written(lib)
+    profile = svc.load("mara")
+    assert profile.contacts  # inherited from builtin:de
+    assert "clipboard" in profile.values
+    profile.contacts = []
+    del profile.values["clipboard"]
+    profile.owner = {}
+    profile.world = {}
+    svc.save(profile)
+    own = store.plain(store.load_yaml((lib / "mara.yaml").read_text("utf-8")))
+    assert own["lists"] == {"contacts": []}
+    assert own["values"]["clipboard"] is None
+    assert own["owner"] is None
+    assert own["world"] is None  # no new seed drawn for a removed world
+    again = svc.load("mara")
+    assert again.contacts == []
+    assert again.sms  # still inherited
+    assert "clipboard" not in again.values
+    assert again.owner == {}
+    assert again.world == {}
+    assert ident.fingerprint(again) == ident.fingerprint(profile)
+    assert "owner" in _paths(again, "warning")
+    # undoing a removal writes the value again
+    again.values["clipboard"] = ident.ValueSpec("clipboard", template="Hi {token}")
+    again.owner = {"first": "Mara", "last": "Schneider"}
+    svc.save(again)
+    back = svc.load("mara")
+    assert back.values["clipboard"].template == "Hi {token}"
+    assert back.owner == {"first": "Mara", "last": "Schneider"}
+
+
+def test_an_emptied_list_is_always_written(svc, lib):
+    profile = ident.generate_profile("de", profile_id="solo")
+    svc.save(profile)
+    profile = svc.load("solo")
+    profile.sms = []
+    profile.calls = []
+    svc.save(profile)
+    own = store.plain(store.load_yaml((lib / "solo.yaml").read_text("utf-8")))
+    assert own["lists"]["sms"] == []
+    assert own["lists"]["calls"] == []
+    assert svc.load("solo").sms == []
+
+
+def test_merge_null_removes_a_key():
+    base = {"owner": {"first": "A", "phone": "+491"}, "values": {"x": {"value": "1"}}}
+    child = {"owner": {"phone": None}, "values": {"x": None}, "world": None}
+    assert store.merge(base, child) == {"owner": {"first": "A"}, "values": {}}
+    assert store.merge({}, {"owner": {"phone": None, "first": "B"}}) == {
+        "owner": {"first": "B"}
+    }
+
+
+# ---------------------------------------------------------------------------
+# lists edited in place
+# ---------------------------------------------------------------------------
+
+LISTED = """\
+format: sandroid-identity
+schema: 2
+id: listed
+token: "3f9a1c07"
+seed: hex:{seed}
+revision: 1
+retired_tokens: []
+lists:
+  contacts:
+    - name: "Jonas Weber {{token}}"   # the neighbour
+      phone: "+4915100000001"
+    - name: "Lena Hoffmann {{token}}"   # a colleague
+      phone: "+4915100000002"
+  # the inbox below
+  sms:
+    - address: "+4915100000001"
+      body: "Hallo {{token}} bis morgen"
+notes: ""
+"""
+
+
+def test_editing_one_list_item_keeps_comments_and_block_style(svc, lib):
+    _write(lib, "listed", LISTED.format(seed="11" * 32))
+    profile = svc.load("listed")
+    profile.contacts[1]["name"] = "Lena Brandt {token}"
+    svc.save(profile)
+    text = (lib / "listed.yaml").read_text("utf-8")
+    assert '- name: "Jonas Weber {token}"   # the neighbour\n' in text
+    assert "Lena Brandt {token}" in text
+    assert "# a colleague" in text
+    assert "  # the inbox below\n  sms:\n" in text
+    assert '      phone: "+4915100000002"\n' in text  # still block style
+    assert "{name:" not in text
+    # append and remove items, in place
+    profile = svc.load("listed")
+    profile.contacts.append({"name": "Tobias {token}", "phone": "+4915100000003"})
+    svc.save(profile)
+    text = (lib / "listed.yaml").read_text("utf-8")
+    assert "# the neighbour" in text
+    assert "{name:" not in text  # the new item follows its siblings' style
+    profile = svc.load("listed")
+    del profile.contacts[0]
+    svc.save(profile)
+    back = svc.load("listed")
+    assert [c["phone"] for c in back.contacts] == ["+4915100000002", "+4915100000003"]
+    assert "# the inbox below" in (lib / "listed.yaml").read_text("utf-8")
+
+
+def test_regenerate_patches_retired_tokens_in_place(svc, lib):
+    text = LISTED.format(seed="11" * 32).replace(
+        "retired_tokens: []", "retired_tokens:   # old ones\n  - ab12cd34"
+    )
+    _write(lib, "listed", text)
+    svc.regenerate("listed")
+    out = (lib / "listed.yaml").read_text("utf-8")
+    assert "retired_tokens:   # old ones\n  - ab12cd34\n  - 3f9a1c07\n" in out
+
+
+# ---------------------------------------------------------------------------
+# migration robustness
+# ---------------------------------------------------------------------------
+
+
+def test_one_bad_toml_never_stops_the_listing(svc, lib, monkeypatch):
+    _v1(lib, "good")
+    _v1(lib, "boom")
+    real = ident.migrate_v1_text
+
+    def flaky(text: str) -> str:
+        if "boom" in text:
+            raise RuntimeError("disk on fire")
+        return real(text)
+
+    monkeypatch.setattr(ident, "migrate_v1_text", flaky)
+    infos = {i.id: i for i in svc.list_profiles()}
+    assert infos["good"].error == ""
+    assert infos["good"].path.suffix == ".yaml"
+    assert "disk on fire" in infos["boom"].error
+    assert (lib / "boom.toml").exists()
+    assert svc.load("boom").token == TOKEN  # read as it is
+
+
+def test_two_processes_converting_at_once(lib):
+    _v1(lib, "old")
+    toml, target = lib / "old.toml", lib / "old.yaml"
+    a = ident._convert_step(toml)
+    b = ident._convert_step(toml)
+    assert ident._publish_yaml(target, a)
+    assert not ident._publish_yaml(target, "# other\n" + b)  # never overwritten
+    assert target.read_text("utf-8") == a
+    assert ident._retire_toml(toml) == lib / "old.toml.bak"
+    assert ident._retire_toml(toml) is None  # the TOML is gone: done already
+    assert ident._convert_step(toml) is None
+    assert not ident._migrate_one(toml)
+    assert sorted(p.name for p in lib.iterdir()) == ["old.toml.bak", "old.yaml"]
+
+
+def test_an_existing_backup_is_never_overwritten(svc, lib):
+    (lib / "old.toml.bak").write_text("first backup", "utf-8")
+    (lib / "old.toml.bak.1").write_text("second backup", "utf-8")
+    text, _p = _v1(lib, "old")
+    svc.list_profiles()
+    assert (lib / "old.toml.bak").read_text("utf-8") == "first backup"
+    assert (lib / "old.toml.bak.1").read_text("utf-8") == "second backup"
+    assert (lib / "old.toml.bak.2").read_text("utf-8") == text
+
+
+@pytest.mark.skipif(
+    not hasattr(ident.os, "geteuid") or ident.os.geteuid() == 0,
+    reason="root ignores folder permissions",
+)
+def test_a_read_only_library_is_read_without_converting(svc, lib):
+    _text, v1 = _v1(lib, "old")
+    lib.chmod(0o555)
+    try:
+        infos = svc.list_profiles()
+        assert [(i.id, i.error, i.path.name) for i in infos] == [
+            ("old", "", "old.toml")
+        ]
+        loaded = svc.load("old")
+        assert ident.fingerprint(loaded) == ident.fingerprint(v1)
+        assert sorted(p.name for p in lib.iterdir()) == ["old.toml"]
+    finally:
+        lib.chmod(0o755)
+
+
+def test_rename_removes_a_leftover_toml(svc, lib):
+    _hand_written(lib)
+    _v1(lib, "mara")
+    svc.rename("mara", "Mara", new_id="mara2")
+    assert not (lib / "mara.toml").exists()
+    assert [p.id for p in svc.list_profiles()] == ["mara2"]
+
+
+def test_save_and_parent_lookup_do_not_scan_the_library(svc, lib, monkeypatch):
+    _hand_written(lib)
+    head = "format: sandroid-identity\nschema: 2\n"
+    _write(lib, "child", head + "id: child\nextends: mara\n")
+    _v1(lib, "v1parent")
+    _write(lib, "kid", head + "id: kid\nextends: v1parent\n")
+
+    def no(*_a, **_k):
+        raise AssertionError("the library was scanned")
+
+    monkeypatch.setattr(ident, "_migrate_library", no)
+    profile = svc.load("child")
+    profile.notes = "x"
+    svc.save(profile)
+    kid = svc.load("kid")  # a parent still in TOML is read as it is
+    assert kid.token == ""
+    assert kid.values["gps"].value
+    assert (lib / "v1parent.toml").exists()
+
+
+# ---------------------------------------------------------------------------
+# world seed race
+# ---------------------------------------------------------------------------
+
+
+def test_a_seed_resolved_elsewhere_is_kept(svc, lib):
+    _hand_written(lib)
+    stale = svc.load("mara")  # still says auto
+    assert stale.world["seed"] == "auto"
+    seed = IdentityService().resolve_world_seed("mara")  # another instance
+    stale.notes = "edited"
+    svc.save(stale)
+    assert stale.world["seed"] == seed
+    assert svc.load("mara").world["seed"] == seed
+    assert IdentityService().resolve_world_seed("mara") == seed
+
+
+# ---------------------------------------------------------------------------
+# extends: parent digest, children, export
+# ---------------------------------------------------------------------------
+
+CHILD = (
+    "format: sandroid-identity\nschema: 2\nid: child\nextends: mara\n"
+    'token: "ab12cd34"\nseed: hex:' + "22" * 32 + "\n"
+)
+
+
+def test_a_changed_parent_is_noticed(svc, lib):
+    from sandroid.tui.widgets.identity_lens import IdentityLens
+
+    _hand_written(lib)
+    _write(lib, "child", CHILD)
+    child = svc.load("child")
+    assert not child.parent_changed  # no digest yet
+    svc.save(child)
+    own = store.plain(store.load_yaml((lib / "child.yaml").read_text("utf-8")))
+    assert own["extends_digest"] == store.base_digest(child._base)
+    assert not svc.load("child").parent_changed
+    parent = svc.load("mara")
+    parent.values["gps"].value = "52.500001, 13.400001"
+    svc.save(parent)
+    child = svc.load("child")
+    assert child.parent_changed
+    lens = IdentityLens()
+    lens.profile = child
+    notice = lens.notice_text() or ""
+    assert "The profile it extends (mara) changed since the last save" in notice
+    assert " · " not in notice
+    svc.save(child)
+    assert not svc.load("child").parent_changed
+
+
+def test_lens_notice_names_a_world_problem(svc, lib):
+    from sandroid.tui.widgets.identity_lens import IdentityLens
+
+    profile = _owned()
+    profile.world = {"seed": "auto", "size": "huge"}
+    lens = IdentityLens()
+    lens.profile = profile
+    notice = lens.notice_text() or ""
+    assert notice.startswith("World section: world size must be one of")
+    assert "not affected" in notice
+
+
+def test_rename_and_delete_refuse_while_children_extend(svc, lib):
+    _hand_written(lib)
+    _write(lib, "child", CHILD)
+    _write(lib, "other", CHILD.replace("id: child", "id: other"))
+    with pytest.raises(ProfileError, match="child, other extend it"):
+        svc.delete("mara")
+    with pytest.raises(ProfileError, match="cannot rename 'mara'"):
+        svc.rename("mara", "Mara", new_id="mara2")
+    assert (lib / "mara.yaml").exists()
+    svc.rename("mara", "Only the name")  # the id stays: fine
+    svc.delete("other")
+    with pytest.raises(ProfileError, match="child extends it"):
+        svc.delete("mara")
+    svc.delete("child")
+    svc.delete("mara")
+    assert svc.list_profiles() == []
+
+
+def test_export_writes_a_standalone_resolved_profile(svc, lib, tmp_path, monkeypatch):
+    _hand_written(lib)
+    _write(lib, "child", CHILD)
+    child = svc.load("child")
+    out = tmp_path / "out"
+    out.mkdir()
+    exported = svc.export_profile("child", out)
+    text = exported.read_text("utf-8")
+    assert "from the profile child extends mara extends builtin:de" in text
+    own = store.plain(store.load_yaml(text))
+    assert "extends" not in own
+    assert "extends_digest" not in own
+    monkeypatch.setenv(ident.PROFILES_DIR_ENV, str(tmp_path / "elsewhere"))
+    fresh = IdentityService()
+    assert fresh.import_profile(exported) == ("child", "imported")
+    assert ident.fingerprint(fresh.load("child")) == ident.fingerprint(child)
+
+
+# ---------------------------------------------------------------------------
+# nits: aliases, alias bombs, key placement, parent schema
+# ---------------------------------------------------------------------------
+
+
+def test_saving_into_an_aliased_node_leaves_the_alias_alone(svc, lib):
+    text = (
+        HAND_WRITTEN.format(seed="11" * 32)
+        .replace("owner:\n", "owner: &me\n")
+        .replace('notes: ""\n', 'notes: ""\nx-owner-at-start: *me\n')
+    )
+    _write(lib, "mara", text)
+    profile = svc.load("mara")
+    assert profile.extra["x-owner-at-start"]["first"] == "Mara"
+    profile.owner["first"] = "Lena"
+    svc.save(profile)
+    back = svc.load("mara")
+    assert back.owner["first"] == "Lena"
+    assert back.extra["x-owner-at-start"]["first"] == "Mara"
+
+
+def test_an_alias_bomb_is_refused(svc, lib):
+    rows = ['a: &a ["x","x","x","x","x","x","x","x","x","x"]']
+    for n in range(1, 9):
+        prev, cur = chr(ord("a") + n - 1), chr(ord("a") + n)
+        rows.append(f"{cur}: &{cur} [{', '.join(['*' + prev] * 10)}]")
+    head = "format: sandroid-identity\nschema: 2\nid: bomb\n"
+    _write(lib, "bomb", head + "\n".join(rows) + "\n")
+    with pytest.raises(ProfileError, match="nodes"):
+        svc.load("bomb")
+    assert [(i.id, "nodes" in i.error) for i in svc.list_profiles()] == [("bomb", True)]
+    # an alias inside its own anchor: ruamel reads it as null, no endless loop
+    looped = Profile.loads(
+        "format: sandroid-identity\nschema: 2\nid: l\nx: &x [1, *x]\n"
+    )
+    assert looped.extra["x"] == [1, None]
+    with pytest.raises(ProfileError, match="larger"):
+        store.load_yaml("x: " + "y" * (store.MAX_FILE_CHARS + 1))
+
+
+def test_a_new_created_goes_right_after_revision(svc, lib):
+    text = HAND_WRITTEN.format(seed="11" * 32)
+    _write(lib, "mara", text.replace("created: 2026-11-19T10:00:00+01:00\n", ""))
+    svc.save(svc.load("mara"))
+    keys = [
+        line.split(":")[0]
+        for line in (lib / "mara.yaml").read_text("utf-8").splitlines()
+        if line[:1].isalpha()
+    ]
+    assert keys[keys.index("revision") + 1] == "created"
+
+
+@pytest.mark.parametrize(
+    ("parent", "error"),
+    [
+        ("format: other\nschema: 2\nid: p\n", "not a sandroid-identity file"),
+        ("format: sandroid-identity\nschema: 3\nid: p\n", "newer"),
+        ("format: sandroid-identity\nschema: one\nid: p\n", "invalid schema"),
+    ],
+)
+def test_a_library_parent_is_checked(svc, lib, parent, error):
+    _write(lib, "p", parent)
+    _write(lib, "kid", "format: sandroid-identity\nschema: 2\nid: kid\nextends: p\n")
+    with pytest.raises(ProfileError, match=error):
+        svc.load("kid")

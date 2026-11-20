@@ -47,7 +47,7 @@ import time
 import tomllib
 import uuid as uuidlib
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from glob import escape as glob_escape
@@ -658,6 +658,8 @@ class Profile:
     schema: int = SCHEMA
     extra: dict[str, Any] = field(default_factory=dict)
     extends: str = ""
+    #: Digest of the merged parents at the last save (``extends`` only).
+    extends_digest: str = ""
     owner: dict[str, Any] = field(default_factory=dict)
     world: dict[str, Any] = field(default_factory=dict)
     #: The loaded YAML document (the file's own keys, with comments), the
@@ -666,6 +668,20 @@ class Profile:
     _doc: Any = field(default=None, repr=False, compare=False)
     _base: dict[str, Any] | None = field(default=None, repr=False, compare=False)
     _loaded: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+    #: Digest of the parents as they are now (set at load).
+    _parent_digest: str = field(default="", repr=False, compare=False)
+    #: Comment at the top of a new file (a profile not saved before).
+    _header: str = field(default="", repr=False, compare=False)
+
+    @property
+    def parent_changed(self) -> bool:
+        """True when the profile it extends changed since its last save."""
+        return bool(
+            self.extends
+            and self.extends_digest
+            and self._parent_digest
+            and self.extends_digest != self._parent_digest
+        )
 
     @property
     def seed_bytes(self) -> bytes:
@@ -682,7 +698,7 @@ class Profile:
 
     def copy(self) -> Profile:
         """A deep copy without the YAML document (a draft to try edits on)."""
-        clone = replace(self, _doc=None, _base=None, _loaded=None)
+        clone = replace(self, _doc=None, _base=None, _loaded=None, _header="")
         for name in ("values", "contacts", "sms", "calls", "retired_tokens"):
             setattr(clone, name, copy.deepcopy(getattr(self, name)))
         for name in ("extra", "owner", "world"):
@@ -725,6 +741,8 @@ class Profile:
         }
         if self.extends:
             out["extends"] = self.extends
+            if self.extends_digest:
+                out["extends_digest"] = self.extends_digest
         if self.preset:
             out["preset"] = self.preset
         out["token"] = self.token
@@ -753,6 +771,7 @@ class Profile:
         """The profile as standalone schema 2 YAML (parents merged in)."""
         data = self.to_v2()
         data.pop("extends", None)
+        data.pop("extends_digest", None)
         return store.dump_yaml(store.to_node(data))
 
     @classmethod
@@ -808,6 +827,7 @@ class Profile:
             "calls",
             "retired_tokens",
             "extends",
+            "extends_digest",
             "owner",
             "world",
             "lists",
@@ -845,6 +865,7 @@ class Profile:
             schema=schema,
             extra={k: v for k, v in data.items() if k not in known},
             extends=str(data.get("extends") or ""),
+            extends_digest=str(data.get("extends_digest") or ""),
             owner=dict(owner),
             world=dict(world),
         )
@@ -879,6 +900,8 @@ class Profile:
         )
         profile = cls.from_dict(store.merge(base, own))
         profile._doc, profile._base = doc, base
+        if profile.extends:
+            profile._parent_digest = store.base_digest(base)
         profile._loaded = profile.to_v2()
         return profile
 
@@ -899,17 +922,46 @@ def _lookup_parent(ref: str) -> dict[str, Any]:
         ProfileError: Unknown or unreadable.
     """
     if ref.startswith(store.BUILTIN_PREFIX):
-        return store.load_builtin(ref[len(store.BUILTIN_PREFIX) :])
-    if not ID_RE.fullmatch(ref):
-        raise ProfileError(f"extends {ref!r}: not 'builtin:<id>' or a profile id")
-    _migrate_library()
-    try:
-        text = _profile_path(ref).read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ProfileError(f"extends {ref!r}: no such profile") from exc
-    own = store.plain(store.load_yaml(text))
+        own = store.load_builtin(ref[len(store.BUILTIN_PREFIX) :])
+    else:
+        if not ID_RE.fullmatch(ref):
+            raise ProfileError(f"extends {ref!r}: not 'builtin:<id>' or a profile id")
+        path = _profile_path(ref)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            text = None
+        if text is None:  # not converted yet (or a read-only library)
+            try:
+                data = _toml_profile(_v1_path(ref).read_text(encoding="utf-8"))
+            except OSError as exc:
+                raise ProfileError(f"extends {ref!r}: no such profile") from exc
+            if data is None or data.get("schema") != SCHEMA_V1:
+                raise ProfileError(f"extends {ref!r}: not a {FORMAT} file")
+            return _v1_own(data)
+        own = store.plain(store.load_yaml(text))
     if own.get("format") != FORMAT:
         raise ProfileError(f"extends {ref!r}: not a {FORMAT} file")
+    schema = own.get("schema")
+    if isinstance(schema, int) and not isinstance(schema, bool) and schema > SCHEMA:
+        raise ProfileError(
+            f"extends {ref!r}: profile schema {schema} is newer than this "
+            f"Sandroid ({SCHEMA})"
+        )
+    if schema != SCHEMA:
+        raise ProfileError(f"extends {ref!r}: invalid schema {schema!r}")
+    return own
+
+
+def _v1_own(data: dict[str, Any]) -> dict[str, Any]:
+    """A parsed schema 1 TOML profile in the schema 2 shape (lists under
+    ``lists``), every key as it is (no owner).
+    """
+    own = {k: v for k, v in data.items() if k not in LISTS}
+    own["schema"] = SCHEMA
+    lists = {name: data[name] for name in LISTS if data.get(name)}
+    if lists:
+        own["lists"] = lists
     return own
 
 
@@ -1285,13 +1337,24 @@ def _norm_marker(m: Marker) -> list[str]:
 def validate(profile: Profile) -> list[Issue]:
     """Every problem of ``profile``; errors block apply, drafts may be saved.
 
-    Covers the values and lists, the ``owner`` and the shape of ``world``
-    (types, enums and known keys only: the world module owns its meaning).
+    Covers the values and lists, the ``owner`` and the ``world`` section.
+    World findings come from the world module's own validator and are
+    always warnings: a world problem never blocks the identity apply.
     """
     issues = _validate_values(profile)
     issues += _owner_issues(profile)
-    issues += [Issue(*i) for i in store.world_issues(profile.world)]
+    issues += world_warnings(profile)
     return issues
+
+
+def world_warnings(profile: Profile) -> list[Issue]:
+    """The ``world`` section's problems (:func:`identity_store.world_issues`),
+    as warnings.
+    """
+    return [
+        Issue("warning", path, msg)
+        for _sev, path, msg in store.world_issues(profile.world)
+    ]
 
 
 def _owner_issues(profile: Profile) -> list[Issue]:
@@ -1825,10 +1888,13 @@ def builtin_profiles() -> list[tuple[str, str]]:
 def profile_from_builtin(
     builtin_id: str, *, name: str = "", profile_id: str = ""
 ) -> Profile:
-    """A new profile that extends ``builtin:<builtin_id>`` (not saved).
+    """A new, standalone profile copied from ``builtin:<builtin_id>`` (not
+    saved).
 
-    It gets its own token, seed and GPS fix (around the built-in's); every
-    other key is inherited, so its file holds only those and the leaf keys.
+    The copy holds every key itself (no ``extends``), so a later Sandroid
+    with other built-ins never changes its values. It gets its own token,
+    seed and GPS fix (around the built-in's); a ``world.seed: auto`` is
+    resolved at its first save.
 
     Raises:
         ProfileError: No such built-in profile.
@@ -1845,7 +1911,6 @@ def profile_from_builtin(
         "schema": SCHEMA,
         "id": pid,
         "name": name or (f"{first} {last} ({builtin_id.upper()})".strip()),
-        "extends": ref,
         "token": secrets.token_hex(4),
         "seed": "hex:" + secrets.token_hex(32),
         "revision": 0,
@@ -1853,7 +1918,9 @@ def profile_from_builtin(
         "retired_tokens": [],
     }
     profile = Profile.from_dict(store.merge(base, own))
-    profile._base = base
+    from sandroid._version import __version__
+
+    profile._header = f"Created from {ref} (Sandroid {__version__})."
     gps = profile.values.get("gps")
     if gps is not None and gps.value:
         with contextlib.suppress(ValueError):
@@ -1888,6 +1955,8 @@ _V1_KEYS = frozenset(
     }
 )
 _MIGRATE_LOCK = threading.Lock()
+#: Why a TOML profile was not converted (by file stem), for the listing.
+_MIGRATE_ERRORS: dict[str, str] = {}
 
 
 def _raw_toml_scalar(text: str, key: str) -> str:
@@ -2010,33 +2079,106 @@ def migrate_v1_text(text: str) -> str:
 def _migrate_library() -> list[str]:
     """Convert the library's schema 1 TOML profiles to YAML, once.
 
-    ``<id>.toml`` becomes ``<id>.yaml`` and is renamed ``<id>.toml.bak``.
-    Idempotent; when both files exist the YAML wins and the TOML is left
-    alone. A TOML that cannot be converted stays (it is listed with its
-    error).
+    ``<id>.toml`` becomes ``<id>.yaml`` and is renamed ``<id>.toml.bak``
+    (``.toml.bak.1``, ... when that exists). Idempotent and safe against a
+    second process doing the same (:func:`_migrate_one`). When both files
+    exist the YAML wins and the TOML is left alone. A TOML that cannot be
+    converted stays and is listed with the reason; in a library folder that
+    is not writable nothing is converted (the TOML is read as it is).
 
     Returns:
         The converted ids.
     """
     directory = profiles_dir()
+    if not os.access(directory, os.W_OK):
+        return []
     done: list[str] = []
     with _MIGRATE_LOCK:
         for path in sorted(directory.glob("*.toml")):
             if path.name.startswith(".") or not ID_RE.fullmatch(path.stem):
                 continue
-            target = directory / f"{path.stem}.yaml"
-            if target.exists():
-                continue
-            try:
-                text = migrate_v1_text(path.read_text(encoding="utf-8"))
-            except (OSError, ProfileError) as exc:
-                logger.warning("identity: cannot convert %s: %s", path.name, exc)
-                continue
-            _atomic_write_text(target, text)
-            path.replace(path.with_name(path.name + ".bak"))
-            logger.info("identity: converted %s to %s", path.name, target.name)
-            done.append(path.stem)
+            if _migrate_one(path):
+                done.append(path.stem)
     return done
+
+
+def _migrate_one(path: Path) -> bool:
+    """Convert one schema 1 TOML profile (see :func:`_migrate_library`).
+
+    Never raises: a failure is remembered in :data:`_MIGRATE_ERRORS` and
+    logged.
+
+    Returns:
+        True when this call wrote the YAML file.
+    """
+    try:
+        target = path.with_suffix(".yaml")
+        if target.exists() or not path.exists():
+            return False
+        text = _convert_step(path)
+        if text is None:
+            return False
+        written = _publish_yaml(target, text)
+        _retire_toml(path)
+    except Exception as exc:  # one bad file must not stop the listing
+        _MIGRATE_ERRORS[path.stem] = f"not converted: {exc}"
+        logger.warning("identity: cannot convert %s: %s", path.name, exc)
+        return False
+    _MIGRATE_ERRORS.pop(path.stem, None)
+    if written:
+        logger.info("identity: converted %s to %s", path.name, target.name)
+    return written
+
+
+def _convert_step(path: Path) -> str | None:
+    """The YAML text for a TOML profile (None: the TOML is gone already)."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    return migrate_v1_text(raw)
+
+
+def _publish_yaml(target: Path, text: str) -> bool:
+    """Create ``target`` with ``text`` exclusively: an existing file (another
+    process converted it first) is never overwritten.
+
+    Returns:
+        True when this call created it.
+    """
+    tmp = target.with_name(f".{target.name}.tmp-{uuidlib.uuid4().hex[:8]}")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        os.link(tmp, target)
+    except FileExistsError:
+        return False
+    finally:
+        tmp.unlink(missing_ok=True)
+    return True
+
+
+def _retire_toml(path: Path) -> Path | None:
+    """Rename a converted TOML to ``<name>.bak`` (``.bak.1``, ``.bak.2``, ...
+    when taken; an existing backup is never overwritten).
+
+    Returns:
+        The backup, or None when the TOML is gone already (another process
+        retired it).
+    """
+    for n in range(1000):
+        bak = path.with_name(f"{path.name}.bak" + (f".{n}" if n else ""))
+        try:
+            os.link(path, bak)
+        except FileExistsError:
+            continue
+        except FileNotFoundError:
+            return None
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass  # retired at the same time elsewhere: the backup stays
+        return bak
+    raise ProfileError(f"no free backup name for {path.name}")
 
 
 # ---------------------------------------------------------------------------
@@ -2076,6 +2218,53 @@ def _v1_path(pid: str) -> Path:
 def new_world_seed() -> str:
     """A fresh ``world.seed`` (``hex:`` and 64 hex digits)."""
     return "hex:" + secrets.token_hex(32)
+
+
+#: Serialises library writes in this process (see :func:`_library_lock`).
+_LIBRARY_LOCK = threading.RLock()
+_LOCK_STATE = threading.local()
+
+
+@contextlib.contextmanager
+def _library_lock() -> Iterator[None]:
+    """Hold the library lock: this process's lock plus, where the platform
+    has ``fcntl``, an advisory lock on ``<library>/.identity.lock`` that
+    other Sandroid processes take too. Without ``fcntl`` (or in a read-only
+    library) only this process is serialised.
+    """
+    with _LIBRARY_LOCK:
+        depth = getattr(_LOCK_STATE, "depth", 0)
+        handle = None
+        if depth == 0:  # the file lock once per thread (flock is per handle)
+            try:
+                import fcntl
+
+                handle = (profiles_dir() / ".identity.lock").open("a")
+                fcntl.flock(handle, fcntl.LOCK_EX)
+            except (ImportError, OSError):
+                if handle is not None:
+                    handle.close()
+                handle = None
+        _LOCK_STATE.depth = depth + 1
+        try:
+            yield
+        finally:
+            _LOCK_STATE.depth = depth
+            if handle is not None:
+                handle.close()  # releases the flock
+
+
+def _seed_on_disk(profile_id: str) -> str:
+    """The resolved ``world.seed`` the profile's file holds now (``""``
+    when there is none, or it is ``auto``).
+    """
+    path = _profile_path(profile_id)
+    try:
+        world = Profile.loads(path.read_text(encoding="utf-8"), self_ref=profile_id)
+    except (OSError, ProfileError):
+        return ""
+    seed = world.world.get("seed")
+    return seed if isinstance(seed, str) and store.WORLD_SEED_RE.fullmatch(seed) else ""
 
 
 @dataclass(frozen=True)
@@ -3095,12 +3284,13 @@ class IdentityService:
 
     def list_profiles(self) -> list[ProfileInfo]:
         """Every profile in the library, by id (schema 1 TOML profiles are
-        converted to YAML first).
+        converted to YAML first; one that cannot be is read as it is and
+        listed with the reason).
         """
         _migrate_library()
         directory = profiles_dir()
         paths = {p.stem: p for p in directory.glob("*.yaml")}
-        for path in directory.glob("*.toml"):  # left: could not convert
+        for path in directory.glob("*.toml"):  # not converted
             paths.setdefault(path.stem, path)
         out = []
         for stem, path in sorted(paths.items()):
@@ -3108,22 +3298,30 @@ class IdentityService:
                 continue
             try:
                 p = Profile.loads(path.read_text(encoding="utf-8"), self_ref=stem)
-                out.append(
-                    ProfileInfo(
-                        p.id, p.name, p.revision, p.token, p.preset, path, "", p.extends
-                    )
-                )
-            except (OSError, ProfileError) as exc:
+            except Exception as exc:  # one bad file must not stop the listing
                 out.append(ProfileInfo(stem, stem, 0, "", "", path, str(exc)))
+                continue
+            error = _MIGRATE_ERRORS.get(stem, "") if path.suffix == ".toml" else ""
+            out.append(
+                ProfileInfo(
+                    p.id, p.name, p.revision, p.token, p.preset, path, error, p.extends
+                )
+            )
         return out
 
     def load(self, profile_id: str) -> Profile:
         """Load one profile, its ``extends`` chain resolved (raises
-        :class:`ProfileError`). A schema 1 TOML profile is converted first.
+        :class:`ProfileError`). A schema 1 TOML profile is converted first;
+        in a read-only library it is read as it is.
         """
         path = _profile_path(profile_id)
         if not path.exists():
-            _migrate_library()
+            v1 = _v1_path(profile_id)
+            if v1.exists() and os.access(v1.parent, os.W_OK):
+                with _MIGRATE_LOCK:
+                    _migrate_one(v1)
+            if not path.exists() and v1.exists():
+                path = v1
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as exc:
@@ -3136,28 +3334,34 @@ class IdentityService:
         The file keeps its comments and key order: only what changed since
         the profile was loaded is written, and inherited keys only when they
         now differ from the parents. A ``world.seed`` of ``auto`` is
-        resolved to a fresh seed here, once.
+        resolved here, once: when the file on disk already holds a seed
+        (another process resolved it), that one is kept.
         """
         if not ID_RE.fullmatch(profile.id):
             raise ProfileError(f"invalid profile id {profile.id!r}")
-        if bump:
-            profile.revision += 1
-        if profile.created is None:
-            profile.created = datetime.now().astimezone().replace(microsecond=0)
-        if store.world_seed_pending(profile.world):
-            profile.world["seed"] = new_world_seed()
-        base = (
-            store.parents_of({"extends": profile.extends}, _lookup_parent, profile.id)
-            if profile.extends
-            else {}
-        )
-        new = profile.to_v2()
-        if profile._doc is None:
-            doc = store.to_node(store.own_view(new, base))
-        else:
-            doc = profile._doc
-            store.apply_changes(doc, profile._loaded or {}, new, base)
-        _atomic_write_text(_profile_path(profile.id), store.dump_yaml(doc))
+        with _library_lock():
+            if bump:
+                profile.revision += 1
+            if profile.created is None:
+                profile.created = datetime.now().astimezone().replace(microsecond=0)
+            if store.world_seed_pending(profile.world):
+                profile.world["seed"] = _seed_on_disk(profile.id) or new_world_seed()
+            base: dict[str, Any] = {}
+            if profile.extends:
+                base = store.parents_of(
+                    {"extends": profile.extends}, _lookup_parent, profile.id
+                )
+                profile.extends_digest = store.base_digest(base)
+                profile._parent_digest = profile.extends_digest
+            new = profile.to_v2()
+            if profile._doc is None:
+                doc = store.to_node(store.own_view(new, base))
+                if profile._header:
+                    doc.yaml_set_start_comment(profile._header)
+            else:
+                doc = profile._doc
+                store.apply_changes(doc, profile._loaded or {}, new, base)
+            _atomic_write_text(_profile_path(profile.id), store.dump_yaml(doc))
         profile.schema = SCHEMA
         profile._doc, profile._base, profile._loaded = doc, base, new
         return profile
@@ -3165,9 +3369,8 @@ class IdentityService:
     def create(
         self, preset: str = "de", *, name: str = "", profile_id: str = ""
     ) -> Profile:
-        """Create and save a new profile from a built-in profile (one per
-        country preset), or generate a standalone one from a preset that has
-        no built-in.
+        """Create and save a new profile: a standalone copy of the built-in
+        profile of ``preset``, or one generated from a preset without one.
         """
         if preset in store.builtin_ids():
             profile = profile_from_builtin(preset, name=name, profile_id=profile_id)
@@ -3196,26 +3399,57 @@ class IdentityService:
 
     def resolve_world_seed(self, profile_id: str) -> str:
         """The profile's ``world.seed``; ``auto`` is replaced by a fresh seed
-        and written back once (comments kept, revision unchanged).
+        and written back once (comments kept, revision unchanged). Runs
+        under the library lock and reads the file inside it, so two callers
+        get the same seed.
 
         Returns:
             ``hex:...``, or ``""`` when the profile has no ``world``.
         """
-        profile = self.load(profile_id)
-        if store.world_seed_pending(profile.world):
-            self.save(profile, bump=False)
+        with _library_lock():
+            profile = self.load(profile_id)
+            if store.world_seed_pending(profile.world):
+                self.save(profile, bump=False)
         return str(profile.world.get("seed") or "")
 
+    def children(self, profile_id: str) -> list[str]:
+        """Ids of the library profiles that extend ``profile_id`` directly."""
+        out = []
+        for path in sorted(profiles_dir().glob("*.yaml")):
+            if path.name.startswith(".") or path.stem == profile_id:
+                continue
+            try:
+                own = store.plain(store.load_yaml(path.read_text(encoding="utf-8")))
+            except (OSError, ProfileError):
+                continue
+            if own.get("extends") == profile_id:
+                out.append(path.stem)
+        return out
+
+    def _refuse_with_children(self, profile_id: str, what: str) -> None:
+        kids = self.children(profile_id)
+        if kids:
+            names = ", ".join(kids)
+            raise ProfileError(
+                f"cannot {what} '{profile_id}': {names} "
+                f"{'extends' if len(kids) == 1 else 'extend'} it; change or "
+                "delete those first"
+            )
+
     def rename(self, profile_id: str, name: str, new_id: str = "") -> Profile:
-        """Change the display name (and, with ``new_id``, the file/id)."""
+        """Change the display name (and, with ``new_id``, the file/id; refused
+        while other profiles extend it).
+        """
         profile = self.load(profile_id)
         profile.name = name
         if new_id and new_id != profile_id:
             if _profile_path(new_id).exists() or _v1_path(new_id).exists():
                 raise ProfileError(f"profile {new_id!r} exists")
+            self._refuse_with_children(profile_id, "rename")
             profile.id = new_id
             self.save(profile)
             _profile_path(profile_id).unlink(missing_ok=True)
+            _v1_path(profile_id).unlink(missing_ok=True)
             if self.config().profile == profile_id:
                 self.set_active(new_id)
             return profile
@@ -3223,8 +3457,9 @@ class IdentityService:
 
     def delete(self, profile_id: str) -> None:
         """Delete a profile file (frozen session copies and a ``.toml.bak``
-        stay).
+        stay); refused while other profiles extend it.
         """
+        self._refuse_with_children(profile_id, "delete")
         _profile_path(profile_id).unlink(missing_ok=True)
         _v1_path(profile_id).unlink(missing_ok=True)
 
@@ -3296,18 +3531,35 @@ class IdentityService:
             logger.warning("identity: world seed of %s not resolved", profile_id)
 
     def export_profile(self, profile_id: str, dest: str | Path) -> Path:
-        """Copy the profile's YAML file verbatim to ``dest`` (a file or a
-        folder).
+        """Write the profile to ``dest`` (a file or a folder) as a standalone
+        YAML file that imports anywhere: its own file verbatim, or, when it
+        extends other profiles, the resolved profile (no ``extends``) with a
+        comment naming the chain it came from.
         """
+        profile = self.load(profile_id)
         src = _profile_path(profile_id)
-        if not src.exists():
-            _migrate_library()
-        if not src.exists():
-            raise ProfileError(f"no profile {profile_id!r}")
         target = Path(dest)
         if target.is_dir():
-            target = target / src.name
-        target.write_bytes(src.read_bytes())
+            target = target / f"{profile_id}.yaml"
+        if not profile.extends and src.exists():
+            target.write_bytes(src.read_bytes())
+            return target
+        chain: list[str] = []
+        if profile.extends:
+            own = {"extends": profile.extends}
+            store.parents_of(own, _lookup_parent, profile_id, chain)
+        data = profile.to_v2()
+        data.pop("extends", None)
+        data.pop("extends_digest", None)
+        doc = store.to_node(data)
+        from sandroid._version import __version__
+
+        source = " extends ".join([profile_id, *chain])
+        doc.yaml_set_start_comment(
+            f"Exported by Sandroid {__version__} from the profile {source},\n"
+            "resolved into one standalone file."
+        )
+        target.write_text(store.dump_yaml(doc), encoding="utf-8")
         return target
 
     def builtins(self) -> list[tuple[str, str]]:
@@ -3317,6 +3569,10 @@ class IdentityService:
     def validate(self, profile: Profile) -> list[Issue]:
         """:func:`validate`."""
         return validate(profile)
+
+    def world_warnings(self, profile: Profile) -> list[Issue]:
+        """:func:`world_warnings`."""
+        return world_warnings(profile)
 
     def describe(self, profile: Profile) -> list[ValueInfo]:
         """Per-value metadata of ``profile`` (no device access)."""
@@ -5476,6 +5732,7 @@ def _canonical(profile: Profile, ignore_world_seed: bool = False) -> str:
     """
     data = profile.to_v2()
     data.pop("revision", None)
+    data.pop("extends_digest", None)
     if ignore_world_seed and isinstance(data.get("world"), dict):
         data["world"].pop("seed", None)
     return json.dumps(data, sort_keys=True, default=str)
@@ -5840,4 +6097,5 @@ __all__ = [
     "ssaid_for",
     "token_uuid",
     "validate",
+    "world_warnings",
 ]

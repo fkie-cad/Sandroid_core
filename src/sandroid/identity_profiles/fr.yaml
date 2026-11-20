@@ -1,7 +1,7 @@
 # Built-in identity profile: France (Paris).
-# Read-only, shipped with Sandroid. New profiles start from it (Identity
-# lens, P) or extend it (extends: builtin:fr); each one gets its
-# own token, seed, GPS fix and world seed (world.seed: auto).
+# Read-only, shipped with Sandroid. A new profile (Identity lens, P) is a
+# standalone copy of it with its own token, seed, GPS fix and world seed
+# (world.seed: auto). A profile can also extend it: extends: builtin:fr
 format: sandroid-identity
 schema: 2
 id: fr

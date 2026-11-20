@@ -1,7 +1,7 @@
 # Built-in identity profile: Brazil (Sao Paulo).
-# Read-only, shipped with Sandroid. New profiles start from it (Identity
-# lens, P) or extend it (extends: builtin:br); each one gets its
-# own token, seed, GPS fix and world seed (world.seed: auto).
+# Read-only, shipped with Sandroid. A new profile (Identity lens, P) is a
+# standalone copy of it with its own token, seed, GPS fix and world seed
+# (world.seed: auto). A profile can also extend it: extends: builtin:br
 format: sandroid-identity
 schema: 2
 id: br
