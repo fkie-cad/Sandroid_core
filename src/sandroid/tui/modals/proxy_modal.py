@@ -34,6 +34,7 @@ from textual.widgets import (
     Static,
     TabbedContent,
     TabPane,
+    Tabs,
 )
 
 from sandroid.config import get_config
@@ -71,6 +72,33 @@ class ProxyModalResult:
     proxy_config: ProxyConfig | None = None
     ca_path: Path | None = None
     ca_source: CASource | None = None
+
+
+class _ProxyInput(Input):
+    """Text field of the Proxy dialog: Shift+Left/Right switch the dialog's
+    tabs while the field is empty, else they select text (Textual's Input
+    default), like the lens inputs (``files_panel._LensInput``).
+    """
+
+    BINDINGS = [
+        Binding("shift+left", "nav_or_select(-1)", show=False),
+        Binding("shift+right", "nav_or_select(1)", show=False),
+    ]
+
+    def action_nav_or_select(self, delta: int) -> None:
+        if self.value:
+            if delta < 0:
+                self.action_cursor_left(select=True)
+            else:
+                self.action_cursor_right(select=True)
+            return
+        cycle = getattr(self.screen, "action_cycle_tab", None)
+        if cycle is not None:
+            cycle(delta)
+
+
+#: The dialog's single-letter keys, shown in every hint line (either case).
+_LETTER_HINTS = "A=Add app  F=Spotlight  P=Push CA  I=Inject CA  R=Remove CA"
 
 
 class ProxyModal(ForensicModal[ProxyModalResult]):
@@ -271,13 +299,19 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
     }
     """
 
+    #: Letter keys work in both cases: the hints show them upper-case (R
+    #: = Remove CA), and Shift+R used to do nothing. Shift+Left/Right cycle
+    #: the tabs (the project's Shift+Arrow level navigation); a focused
+    #: non-empty text field keeps them for selecting text (``_ProxyInput``).
     BINDINGS = [
         Binding("ctrl+s", "apply", "Apply", show=False),
-        Binding("a", "add_app", "Add app", show=False),
-        Binding("f", "add_spotlight", "Proxy spotlight app", show=False),
-        Binding("p", "push_ca", "Push CA", show=False),
-        Binding("i", "inject_ca", "Inject CA", show=False),
-        Binding("r", "remove_ca", "Remove CA", show=False),
+        Binding("a,A", "add_app", "Add app", show=False),
+        Binding("f,F", "add_spotlight", "Proxy spotlight app", show=False),
+        Binding("p,P", "push_ca", "Push CA", show=False),
+        Binding("i,I", "inject_ca", "Inject CA", show=False),
+        Binding("r,R", "remove_ca", "Remove CA", show=False),
+        Binding("shift+left", "cycle_tab(-1)", "Previous tab", show=False),
+        Binding("shift+right", "cycle_tab(1)", "Next tab", show=False),
     ]
 
     #: Focus the Device radio set on open: the base modal would focus the
@@ -355,7 +389,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                         )
                     with Horizontal(id="device-ext-row"):
                         yield Label("External:")
-                        yield Input(
+                        yield _ProxyInput(
                             placeholder="host:port",
                             value=self._default_external_addr(),
                             id="device-ext-input",
@@ -396,7 +430,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                             pass
                     with Horizontal(id="custom-path-row"):
                         yield Label("Custom:")
-                        yield Input(
+                        yield _ProxyInput(
                             placeholder="Path to custom certificate...",
                             id="custom-path-input",
                         )
@@ -422,21 +456,54 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             yield KeyHintFooter(
                 hints={
                     "default": (
-                        "[dim]Ctrl+S=Apply  A=Add app  F=Spotlight  "
-                        "P=Push CA  I=Inject CA  R=Remove CA  Esc=Cancel[/dim]"
+                        "[dim]Shift+←/→=Tabs  Tab=Next  Ctrl+S=Apply  "
+                        f"{_LETTER_HINTS}  Esc=Cancel[/dim]"
                     ),
-                    "input": ("[dim]Ctrl+S=Apply  Tab=Next  Esc=Cancel[/dim]"),
+                    "input": (
+                        "[dim]Shift+←/→=Tabs (empty field)  Tab=Next  "
+                        "Ctrl+S=Apply  Esc=Cancel[/dim]"
+                    ),
                     "radioset": (
-                        "[dim]Ctrl+S=Apply  Space=Select  P=Push CA  "
-                        "I=Inject CA  R=Remove CA  Esc=Cancel[/dim]"
+                        "[dim]Shift+←/→=Tabs  Space=Select  Ctrl+S=Apply  "
+                        f"{_LETTER_HINTS}  Esc=Cancel[/dim]"
                     ),
                     "button": (
-                        "[dim]Enter=Activate  Ctrl+S=Apply  A=Add app  "
-                        "F=Spotlight  I=Inject CA  R=Remove CA  Tab=Next  "
-                        "Esc=Cancel[/dim]"
+                        "[dim]Shift+←/→=Tabs  Enter=Activate  Ctrl+S=Apply  "
+                        f"{_LETTER_HINTS}  Esc=Cancel[/dim]"
                     ),
                 }
             )
+
+    def action_cycle_tab(self, delta: int) -> None:
+        """Shift+Left/Right: the previous / next tab (wraps), focus its first
+        control (never a text field, so letter keys stay commands).
+        """
+        try:
+            tabs = self.query_one("#proxy-tabs", TabbedContent)
+        except NoMatches:
+            return
+        panes = [pane.id for pane in tabs.query(TabPane) if pane.id]
+        if not panes:
+            return
+        current = panes.index(tabs.active) if tabs.active in panes else 0
+        tabs.active = panes[(current + delta) % len(panes)]
+        self.call_after_refresh(self._focus_active_tab)
+
+    def _focus_active_tab(self) -> None:
+        """Focus the first control of the active tab (else the tab strip)."""
+        try:
+            tabs = self.query_one("#proxy-tabs", TabbedContent)
+            pane = tabs.query_one(f"#{tabs.active}", TabPane)
+        except NoMatches:
+            return
+        for widget in pane.query("*"):
+            if isinstance(widget, (RadioSet, Checkbox, Button)) and widget.focusable:
+                widget.focus()
+                return
+        try:
+            tabs.query_one(Tabs).focus()
+        except NoMatches:
+            pass
 
     def on_mount(self) -> None:
         """Initialize the modal with current status."""
@@ -611,7 +678,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                 controls = Horizontal(classes="app-proxy-controls")
                 row.mount(controls)
                 controls.mount(
-                    Input(
+                    _ProxyInput(
                         value=target,
                         placeholder="mitmproxy (default) — or http://host:port",
                         id=f"app-target-{idx}",
