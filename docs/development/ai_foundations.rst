@@ -645,7 +645,7 @@ renders live in the session scratchpad (``ui-dock/mockups.txt``, ``ui-look/mock_
 
   - Border ``round $lens-rule``; under ``:focus-within`` it becomes ``$lens-rule-focus``.
   - Title ``▚▄▄▞ Sandroid AI`` in ``$lens-accent``.
-  - Subtitle ``50% · ⇧↑↓ size · ^Y close``.
+  - Subtitle ``50% · Shift+Up/Down size · ^Y close``.
 
 - **Transcript.** Replace the RichLog with ``ChatTranscript(VerticalScroll)``, holding one
   widget per block keyed by turn, call or agent id:

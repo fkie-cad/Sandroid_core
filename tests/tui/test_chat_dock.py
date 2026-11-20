@@ -130,7 +130,7 @@ async def test_ctrl_y_opens_focuses_and_closes(saved) -> None:
         assert ms.chat_has_focus
         assert ms.has_class("-chat-open")
         assert dock.border_title == "▚▄▄▞ Sandroid AI"
-        assert dock.border_subtitle == "50% · ⇧↑↓ size · ^Y close"
+        assert dock.border_subtitle == "50% · Shift+Up/Down size · ^Y close"
         assert _rows(ms) == chat_rows(_left_h(ms), 0.5)
 
         # Focus elsewhere: Ctrl+Y focuses the chat, it does not close it.
@@ -259,7 +259,7 @@ async def test_shift_arrows_step_presets_and_max(saved) -> None:
         assert not _dock(ms).styles.inline.has_rule("height")
         assert _rows(ms) == h
         assert not is_shown(ms.query_one("#lens-host"))
-        assert _dock(ms).border_subtitle == "max · ⇧↓ restore · ^Y close"
+        assert _dock(ms).border_subtitle == "max · Shift+Down restore · ^Y close"
         await pilot.press("shift+up")  # already max
         await settle(pilot)
         assert ms.chat_mode == "max"

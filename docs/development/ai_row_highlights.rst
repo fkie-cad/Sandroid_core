@@ -493,15 +493,13 @@ its own.
   the start of every lens tool. The same folder again is a no-op; no folder
   keeps the sets in memory only. Sets belong to the analysis session, not to
   a chat thread, so they survive Ctrl+L.
-- **Known gap: no session-switch hook.** The app has no analysis-session
-  switch event (``InitializationService.create_session`` sets the session
-  once per process; there is no listener API, and ``timeline_folder()`` /
-  ``session_root()`` are read on demand). The lenses read the store through
-  the annotation registry and never rebind it themselves, so after a switch
-  inside one process they keep showing the previous session's sets until
-  the next chat session opens or a lens tool runs (both call
-  ``bind_folder``). A future session service with a "session changed"
-  signal should call ``get_row_highlights().bind_folder(new_root)``.
+- **Follows the analysis session.** On first use the store subscribes to
+  ``InitializationService.on_session_change`` (before its first bind, so no
+  change is missed) and rebinds on every change: a new or resumed session
+  loads its ``ai/highlights.json``; a closed session binds ``None`` (memory
+  only, sets dropped). The listener re-reads ``session_root()`` instead of
+  trusting the event, since two changes may arrive out of order. A pending
+  write of the old session lands before the switch.
 
 Tests
 -----
