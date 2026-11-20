@@ -130,6 +130,63 @@ def is_start_point_name(name: object) -> bool:
     return isinstance(name, str) and bool(_START_POINT_RE.match(name))
 
 
+def pinned_start_points(results_root: Path | None) -> set[str]:
+    """Start point names a pinned (or imported) recording of any session
+    under ``results_root`` (``results/<session>/<device>/recordings``)
+    refers to. A recording file that cannot be read keeps every start
+    point name it mentions.
+    """
+    keep: set[str] = set()
+    if results_root is None:
+        return keep
+    with contextlib.suppress(OSError):
+        for path in results_root.glob("*/*/recordings/rec-*/recording.json"):
+            try:
+                text = path.read_text()
+            except OSError:
+                continue
+            try:
+                sp = json.loads(text).get("start_point") or {}
+                if sp.get("pinned") or sp.get("imported"):
+                    keep.add(str(sp.get("name") or ""))
+            except (ValueError, AttributeError):
+                keep.update(re.findall(START_POINT_PREFIX + r"[0-9_]+", text))
+    keep.discard("")
+    return keep
+
+
+def old_start_points(avd_folder: Path | None, keep: set[str]) -> list[tuple[str, int]]:
+    """``[(name, bytes)]`` of the start points in the AVD's ``snapshots``
+    folder that may go: Sandroid's names only (:func:`is_start_point_name`),
+    none of ``keep``. Oldest first.
+    """
+    out: list[tuple[str, int]] = []
+    folder = avd_folder / "snapshots" if avd_folder is not None else None
+    if folder is None or not folder.is_dir():
+        return out
+    with contextlib.suppress(OSError):
+        for entry in sorted(folder.iterdir()):
+            if not entry.is_dir() or not is_start_point_name(entry.name):
+                continue
+            if entry.name in keep:
+                continue
+            size = 0
+            with contextlib.suppress(OSError):
+                size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
+            out.append((entry.name, size))
+    return out
+
+
+def size_words(n: int) -> str:
+    """``11 GB`` / ``2.5 GB`` / ``300 MB`` (plain, for one line)."""
+    gb = n / 1e9
+    if gb >= 10:
+        return f"{gb:.0f} GB"
+    if gb >= 1:
+        return f"{gb:.1f} GB"
+    return f"{n / 1e6:.0f} MB"
+
+
 def default_name(when: datetime | None = None) -> str:
     """The recording's automatic name, ``Recording HH:MM``."""
     return f"Recording {(when or datetime.now()).strftime('%H:%M')}"

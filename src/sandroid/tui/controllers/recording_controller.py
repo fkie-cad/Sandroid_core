@@ -443,6 +443,8 @@ class RecordingController:
         self._replace_start_point(previous, rec)
         with contextlib.suppress(Exception):
             rewind.save_recording(rec)
+        if rec.start_point_name:
+            self._start_cleanup(rec, previous)
         self._ui(self._log_info, f"Recording '{rec.name}' started")
         self._start_ticker(rec)
         return {
@@ -651,6 +653,83 @@ class RecordingController:
             previous.start_point["saved_ok"] = False
         with contextlib.suppress(Exception):
             rewind.save_recording(previous)
+
+    def _start_cleanup(self, rec: Any, previous: Any) -> None:
+        """Remove old start points on a thread of its own: console deletes
+        take seconds and must never hold up the recording.
+        """
+        threading.Thread(
+            target=self._remove_old_start_points,
+            args=(rec, previous),
+            name="rewind-cleanup",
+            daemon=True,
+        ).start()
+
+    def _remove_old_start_points(self, rec: Any, previous: Any = None) -> int:
+        """After a new start point saved: delete every unpinned start point
+        left on this AVD by earlier recordings (the AVD's ``snapshots``
+        folder). Kept: pinned and imported ones (a pinned recording in any
+        session keeps its start point), the new one, the previous one (see
+        :meth:`_replace_start_point`), and any name that is not Sandroid's.
+        One by one through the emulator console; a failure is one plain log
+        line. Returns how many were deleted.
+        """
+        from sandroid.core import rewind
+
+        if not rec.start_point_name or not rec.avd or not rec.emulator:
+            return 0
+        try:
+            from sandroid.core.emulator import avd_dir
+            from sandroid.core.timeline import session_folder
+
+            folder = avd_dir(rec.avd)
+            session = session_folder()
+            keep = rewind.pinned_start_points(session.parent if session else None)
+        except Exception:
+            logger.debug("old start points: lookup failed", exc_info=True)
+            return 0
+        keep.add(rec.start_point_name)
+        if previous is not None and previous.start_point.get("name"):
+            keep.add(str(previous.start_point["name"]))
+        old = rewind.old_start_points(folder, keep)
+        if not old:
+            return 0
+        try:
+            from sandroid.services import get_emulator_service
+
+            service = get_emulator_service()
+        except Exception:
+            logger.debug("old start points: no emulator service", exc_info=True)
+            return 0
+        removed, freed, failed = 0, 0, []
+        for name, size in old:
+            if not rewind.is_start_point_name(name):
+                continue
+            try:
+                ok = bool(service.delete_snapshot(name, rec.serial))
+            except Exception:
+                logger.debug("deleting old start point %s failed", name, exc_info=True)
+                ok = False
+            if ok:
+                removed += 1
+                freed += size
+            else:
+                failed.append(name)
+        if removed:
+            words = "start point" if removed == 1 else "start points"
+            self._ui(
+                self._log_info,
+                f"Removed {removed} old {words} ({rewind.size_words(freed)})",
+            )
+        if failed:
+            self._ui(
+                self._log_warning,
+                f"Could not remove {len(failed)} old start point"
+                f"{'s' if len(failed) != 1 else ''} ({', '.join(failed[:3])}"
+                f"{', ...' if len(failed) > 3 else ''}): the emulator did not "
+                "confirm. They stay on the device; recording goes on.",
+            )
+        return removed
 
     def _start_ticker(self, rec: Any) -> None:
         self._tick_stop.clear()

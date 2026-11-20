@@ -6,6 +6,7 @@ tests drive ``RecordingController`` with fakes for the device side.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -1274,3 +1275,141 @@ def test_sessions_say_how_many_changed_and_how_many_were_compared():
     # older runs (no recorded count) keep their words
     old = {"run_id": "r2", "counts": {"changed": 0}}
     assert DiffsView._changes_cell(fake, old).plain == "no changes"
+
+
+# ---------------------------------------------------------------------------
+# the next r removes old unpinned start points of the AVD
+# ---------------------------------------------------------------------------
+
+
+def _avd_with(tmp_path, names, size=1_000_000):
+    avd = tmp_path / "avd" / "Dev3.avd"
+    for name in names:
+        folder = avd / "snapshots" / name
+        folder.mkdir(parents=True)
+        (folder / "ram.bin").write_bytes(b"\0" * size)
+    return avd
+
+
+def _old_recording(results, session, name, **sp):
+    rec_id = "rec-" + name.removeprefix("sandroid_rec_").replace("_", "-")
+    folder = results / session / "Dev3" / "recordings" / rec_id
+    folder.mkdir(parents=True)
+    rec = _rec()
+    rec.rec_id = rec_id
+    rec.start_point = {"name": name, "saved_ok": True, **sp}
+    (folder / "recording.json").write_text(json.dumps(rec.to_dict(), default=str))
+
+
+@pytest.fixture
+def cleanup(controller, tmp_path, monkeypatch):
+    from sandroid import services
+    from sandroid.core import emulator, timeline
+
+    results = tmp_path / "results"
+    session = results / "now"
+    session.mkdir(parents=True)
+    deleted: list[tuple] = []
+    logs: list[tuple[str, str]] = []
+
+    class Emu:
+        fail: set[str] = set()
+
+        def delete_snapshot(self, name, serial=None):
+            deleted.append((name, serial))
+            return name not in self.fail
+
+    emu = Emu()
+    monkeypatch.setattr(services, "get_emulator_service", lambda: emu)
+    monkeypatch.setattr(timeline, "session_folder", lambda: session)
+    controller._log_info = lambda text: logs.append(("info", text))
+    controller._log_warning = lambda text: logs.append(("warn", text))
+    controller._ui = lambda fn, *a: fn(*a)
+    return controller, results, emulator, emu, deleted, logs
+
+
+def test_old_unpinned_start_points_are_removed_pinned_and_foreign_kept(
+    cleanup, tmp_path, monkeypatch
+):
+    controller, results, emulator, _emu, deleted, logs = cleanup
+    old, pinned, imported, new = (
+        "sandroid_rec_20261101_090000",
+        "sandroid_rec_20261102_090000",
+        "sandroid_rec_20261103_090000",
+        "sandroid_rec_20261120_140000",
+    )
+    avd = _avd_with(tmp_path, [old, pinned, imported, new, "clean_8g", "default_boot"])
+    monkeypatch.setattr(emulator, "avd_dir", lambda name: avd)
+    _old_recording(results, "s1", old)
+    _old_recording(results, "s1", pinned, pinned=True)
+    _old_recording(results, "s2", imported, pinned=True, imported=True)
+    rec = _rec()
+    rec.avd = "Dev3"
+    rec.start_point = {"name": new, "saved_ok": True}
+    assert controller._remove_old_start_points(rec) == 1
+    assert deleted == [(old, "emulator-5560")]
+    assert logs == [("info", "Removed 1 old start point (1 MB)")]
+
+
+def test_an_unreadable_recording_keeps_the_start_points_it_names(
+    cleanup, tmp_path, monkeypatch
+):
+    controller, results, emulator, _emu, deleted, _logs = cleanup
+    name = "sandroid_rec_20261101_090000"
+    avd = _avd_with(tmp_path, [name])
+    monkeypatch.setattr(emulator, "avd_dir", lambda n: avd)
+    folder = results / "s1" / "Dev3" / "recordings" / "rec-1"
+    folder.mkdir(parents=True)
+    (folder / "recording.json").write_text('{"start_point": {"name": "' + name)
+    rec = _rec()
+    rec.avd = "Dev3"
+    rec.start_point = {"name": "sandroid_rec_20261120_140000", "saved_ok": True}
+    assert controller._remove_old_start_points(rec) == 0
+    assert deleted == []
+
+
+def test_a_failed_delete_is_one_plain_line_and_never_blocks(
+    cleanup, tmp_path, monkeypatch
+):
+    controller, _results, emulator, emu, deleted, logs = cleanup
+    a, b = "sandroid_rec_20261101_090000", "sandroid_rec_20261102_090000"
+    avd = _avd_with(tmp_path, [a, b])
+    monkeypatch.setattr(emulator, "avd_dir", lambda n: avd)
+    emu.fail = {a}
+    rec = _rec()
+    rec.avd = "Dev3"
+    rec.start_point = {"name": "sandroid_rec_20261120_140000", "saved_ok": True}
+    assert controller._remove_old_start_points(rec) == 1
+    assert [n for n, _s in deleted] == [a, b]
+    assert logs[0] == ("info", "Removed 1 old start point (1 MB)")
+    assert logs[1][0] == "warn"
+    assert a in logs[1][1]
+    assert "recording goes on" in logs[1][1]
+
+
+def test_nothing_is_removed_when_the_new_start_point_did_not_save(
+    controller, monkeypatch
+):
+    from sandroid import services
+
+    class Emu:
+        def create_snapshot(self, name, serial=None):
+            return False
+
+        def delete_snapshot(self, name, serial=None):
+            raise AssertionError("nothing may be deleted")
+
+    started: list = []
+    monkeypatch.setattr(services, "get_emulator_service", lambda: Emu())
+    monkeypatch.setattr(rewind, "disk_problem", lambda _f: None)
+    monkeypatch.setattr(controller, "_active_device_name", lambda: "Dev3")
+    monkeypatch.setattr(
+        controller, "_start_cleanup", lambda rec, prev: started.append(rec)
+    )
+    controller._state = "saving"
+    assert controller._start_worker(_rec())["success"] is False
+    assert started == []
+    # and the cleanup itself does nothing without a saved start point
+    rec = _rec()
+    rec.start_point = {"name": None, "saved_ok": False}
+    assert controller._remove_old_start_points(rec) == 0
