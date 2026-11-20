@@ -336,13 +336,8 @@ def _lifecycle_guard() -> Iterator[None]:
     """
     from sandroid.services import app_start
 
-    # TODO(pre-spawn-hooks): app-lens' feature/pre-spawn-hooks adds the
-    # public app_start.lifecycle_lock(timeout); fall back to the private
-    # _lifecycle() context manager until it is on main.
-    lock = getattr(app_start, "lifecycle_lock", None)
-    guard = lock(0.0) if lock is not None else app_start._lifecycle()
     try:
-        with guard:
+        with app_start.lifecycle_lock(0.0):
             yield
     except app_start.AppStartError as exc:
         raise RuntimeError(str(exc)) from exc
@@ -421,47 +416,29 @@ def _recover_after_framework_restart(
 ) -> str:
     """Wait for the new framework, then restart frida-server and drop handles.
 
+    Delegates to :func:`app_start.recover_after_framework_restart` (PID gate,
+    ``pm path android``, frida-server refresh, every host Frida handle). That
+    function treats an unknown previous PID as "no PID gate", but right after
+    a Zygote kill the OLD system_server still answers for seconds, so with the
+    PID unknown a new one is awaited here first (``seen`` = PIDs before the
+    kill).
+
     Returns:
         A short status for the log / toast.
     """
-    # TODO(pre-spawn-hooks): app-lens' frozen API
-    # app_start.recover_after_framework_restart(prev_ss_pid, timeout) does the
-    # PID gate, the frida-server restart and every host handle reset
-    # (JobManager.device included). Until it is on main, wait locally and use
-    # the existing frida restart plus the snapshot-load handle reset.
     from sandroid.services import app_start
 
-    recover = getattr(app_start, "recover_after_framework_restart", None)
-    if recover is not None:
-        try:
-            recover(previous_ss_pid, timeout=timeout)
-            return "framework back"
-        except Exception as exc:
-            return f"framework recovery failed: {exc}"
-    if not _wait_system_server_changed(previous_ss_pid, serial, timeout, seen=seen):
+    if previous_ss_pid is None and not _wait_system_server_changed(
+        None, serial, timeout, seen=seen
+    ):
         return f"system_server did not come back within {timeout:.0f} s"
-    note = "framework back"
     try:
-        from sandroid.core.frida_manager import (
-            restart_frida_server_after_system_restart,
+        app_start.recover_after_framework_restart(
+            previous_ss_pid, timeout=timeout, serial=serial
         )
-
-        restarted, reason = restart_frida_server_after_system_restart()
-        if restarted:
-            note += ", frida-server restarted"
-        elif reason != "frida-server not running":
-            note += f", {reason}"
     except Exception as exc:
-        note += f", frida-server restart failed: {exc}"
-    try:
-        from sandroid.services.emulator_service import (
-            reset_device_handles_after_snapshot_load,
-        )
-
-        reset_device_handles_after_snapshot_load()
-    except Exception:
-        logger.debug("handle reset after framework restart failed", exc_info=True)
-    return note
+        return f"framework recovery failed: {exc}"
+    return "framework back"
 
 
 def restart_framework_for_ca(
