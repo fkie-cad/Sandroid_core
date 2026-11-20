@@ -546,3 +546,34 @@ def test_a_dropped_set_frees_its_automata():
     gc.collect()
 
     assert automata() is None
+
+
+def test_world_fields_default_empty_and_change_no_needle_or_digest():
+    from sandroid.services import privacy_scan as ps
+
+    plain = Marker("email", EMAIL, kind="email", label="E-mail", tag="Email")
+    assert (plain.origin, plain.population, plain.dataset) == ("canary", "", "")
+    assert (plain.record, plain.field, plain.refs) == ("", "", ())
+    world = Marker(
+        "world.contacts.3.email",
+        EMAIL,
+        "email",
+        "E-mail",
+        tag="Email",
+        origin="world",
+        population="world.contacts",
+        dataset="contacts",
+        record="world.contacts.3",
+        field="email",
+        refs=("world.contacts.3", "world.sms.7"),
+    )
+    assert ps._marker_digest(world) == ps._marker_digest(plain)
+    assert [(n.pattern, n.transform) for n in _needles(plain)] == [
+        (n.pattern, n.transform) for n in _needles(world)
+    ]
+    with pytest.raises(TypeError):
+        Marker("x", "value", "text", "x", (), "", "", "world")  # keyword only
+
+
+def _needles(marker: Marker) -> list[Needle]:
+    return list(build_needles([marker]).needles)

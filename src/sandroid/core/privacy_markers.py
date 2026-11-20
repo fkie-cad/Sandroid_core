@@ -28,7 +28,7 @@ import struct
 import threading
 import urllib.parse
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import KW_ONLY, dataclass, replace
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
@@ -84,6 +84,18 @@ class Marker:
             found close together (:data:`GROUP_PROXIMITY` bytes).
         tag: Short display tag for row markers, e.g. ``"AdID"`` (defaults to
             ``label``).
+        origin: Where the value comes from: ``"canary"`` (an identity
+            profile's seeded value, the default) or ``"world"`` (generated
+            phone contents, :mod:`sandroid.world`). Keyword only, like the
+            fields after it.
+        population: The set the marker belongs to, e.g. ``"world.contacts"``.
+        dataset: The world dataset (list) of the record, e.g. ``"contacts"``.
+        record: The record id, e.g. ``"world.contacts.12"``.
+        field: The record field the value is in, e.g. ``"phone"``.
+        refs: Every record that uses the same value (a shared number).
+
+    The fields after ``tag`` describe a marker; matching and the privacy
+    scan's digests use only ``value``, ``kind``, ``forms`` and ``group``.
     """
 
     id: str
@@ -93,6 +105,13 @@ class Marker:
     forms: tuple[str, ...] = ()
     group: str = ""
     tag: str = ""
+    _: KW_ONLY
+    origin: str = "canary"
+    population: str = ""
+    dataset: str = ""
+    record: str = ""
+    field: str = ""
+    refs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
