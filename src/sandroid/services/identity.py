@@ -2152,8 +2152,21 @@ def _publish_yaml(target: Path, text: str) -> bool:
         os.link(tmp, target)
     except FileExistsError:
         return False
+    except OSError:  # no hard links here: an exclusive create instead
+        return _create_exclusive(target, text)
     finally:
         tmp.unlink(missing_ok=True)
+    return True
+
+
+def _create_exclusive(target: Path, text: str) -> bool:
+    """Create ``target`` with ``O_EXCL`` (False when it exists already)."""
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
     return True
 
 
@@ -2173,6 +2186,14 @@ def _retire_toml(path: Path) -> Path | None:
             continue
         except FileNotFoundError:
             return None
+        except OSError:  # no hard links here
+            if not path.exists():
+                return None
+            if bak.exists():
+                continue
+            with contextlib.suppress(FileNotFoundError):
+                path.rename(bak)
+            return bak
         try:
             path.unlink()
         except FileNotFoundError:
@@ -2231,20 +2252,14 @@ def _library_lock() -> Iterator[None]:
     has ``fcntl``, an advisory lock on ``<library>/.identity.lock`` that
     other Sandroid processes take too. Without ``fcntl`` (or in a read-only
     library) only this process is serialised.
+
+    Raises:
+        ProfileError: Another process held the file lock for
+            :data:`LIBRARY_LOCK_TIMEOUT_S` (:data:`LIBRARY_LOCKED`).
     """
     with _LIBRARY_LOCK:
         depth = getattr(_LOCK_STATE, "depth", 0)
-        handle = None
-        if depth == 0:  # the file lock once per thread (flock is per handle)
-            try:
-                import fcntl
-
-                handle = (profiles_dir() / ".identity.lock").open("a")
-                fcntl.flock(handle, fcntl.LOCK_EX)
-            except (ImportError, OSError):
-                if handle is not None:
-                    handle.close()
-                handle = None
+        handle = _flock_library() if depth == 0 else None  # flock is per handle
         _LOCK_STATE.depth = depth + 1
         try:
             yield
@@ -2252,6 +2267,40 @@ def _library_lock() -> Iterator[None]:
             _LOCK_STATE.depth = depth
             if handle is not None:
                 handle.close()  # releases the flock
+
+
+#: How long a library write waits for another Sandroid process's lock.
+LIBRARY_LOCK_TIMEOUT_S = 5.0
+LIBRARY_LOCKED = "the profile library is locked by another Sandroid process; try again"
+
+
+def _flock_library() -> Any:
+    """The open, ``flock``-ed ``.identity.lock`` (None without ``fcntl`` or
+    when it cannot be opened). Never waits longer than
+    :data:`LIBRARY_LOCK_TIMEOUT_S`.
+
+    Raises:
+        ProfileError: Another process holds the lock that long.
+    """
+    try:
+        import fcntl
+
+        handle = (profiles_dir() / ".identity.lock").open("a")
+    except (ImportError, OSError):
+        return None
+    deadline = time.monotonic() + LIBRARY_LOCK_TIMEOUT_S
+    while True:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                handle.close()
+                raise ProfileError(LIBRARY_LOCKED) from None
+            time.sleep(0.05)
+        except OSError:
+            handle.close()
+            return None
 
 
 def _seed_on_disk(profile_id: str) -> str:
@@ -2279,6 +2328,9 @@ class ProfileInfo:
     path: Path
     error: str = ""  # unreadable / newer schema
     extends: str = ""
+    #: Something to know that does not stop its use (a TOML profile that
+    #: could not be converted and is read as it is).
+    notice: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -3285,7 +3337,7 @@ class IdentityService:
     def list_profiles(self) -> list[ProfileInfo]:
         """Every profile in the library, by id (schema 1 TOML profiles are
         converted to YAML first; one that cannot be is read as it is and
-        listed with the reason).
+        stays usable, with the reason in ``notice``).
         """
         _migrate_library()
         directory = profiles_dir()
@@ -3301,10 +3353,22 @@ class IdentityService:
             except Exception as exc:  # one bad file must not stop the listing
                 out.append(ProfileInfo(stem, stem, 0, "", "", path, str(exc)))
                 continue
-            error = _MIGRATE_ERRORS.get(stem, "") if path.suffix == ".toml" else ""
+            notice = ""
+            if path.suffix == ".toml":
+                notice = _MIGRATE_ERRORS.get(stem) or (
+                    "not converted: the library folder is read-only"
+                )
             out.append(
                 ProfileInfo(
-                    p.id, p.name, p.revision, p.token, p.preset, path, error, p.extends
+                    p.id,
+                    p.name,
+                    p.revision,
+                    p.token,
+                    p.preset,
+                    path,
+                    "",
+                    p.extends,
+                    notice,
                 )
             )
         return out
@@ -3335,7 +3399,14 @@ class IdentityService:
         the profile was loaded is written, and inherited keys only when they
         now differ from the parents. A ``world.seed`` of ``auto`` is
         resolved here, once: when the file on disk already holds a seed
-        (another process resolved it), that one is kept.
+        (another process resolved it), that one is kept. So setting
+        ``auto`` on a profile that has a seed on disk keeps that seed; use
+        :meth:`new_world_seed` to really replace it.
+
+        Raises:
+            ProfileError: Invalid id, a broken ``extends`` chain, or the
+                library is locked by another process
+                (:data:`LIBRARY_LOCKED`).
         """
         if not ID_RE.fullmatch(profile.id):
             raise ProfileError(f"invalid profile id {profile.id!r}")
@@ -3412,6 +3483,24 @@ class IdentityService:
                 self.save(profile, bump=False)
         return str(profile.world.get("seed") or "")
 
+    def new_world_seed(self, profile_id: str) -> str:
+        """Replace the profile's ``world.seed`` with a fresh one (a "new
+        world"), under the library lock; the revision stays.
+
+        Returns:
+            The new ``hex:...`` seed.
+
+        Raises:
+            ProfileError: No such profile, or it has no ``world`` section.
+        """
+        with _library_lock():
+            profile = self.load(profile_id)
+            if not profile.world:
+                raise ProfileError(f"profile {profile_id!r} has no world section")
+            profile.world["seed"] = new_world_seed()
+            self.save(profile, bump=False)
+        return str(profile.world["seed"])
+
     def children(self, profile_id: str) -> list[str]:
         """Ids of the library profiles that extend ``profile_id`` directly."""
         out = []
@@ -3438,7 +3527,8 @@ class IdentityService:
 
     def rename(self, profile_id: str, name: str, new_id: str = "") -> Profile:
         """Change the display name (and, with ``new_id``, the file/id; refused
-        while other profiles extend it).
+        while other profiles extend it). A leftover ``<id>.toml`` becomes a
+        numbered ``.toml.bak``.
         """
         profile = self.load(profile_id)
         profile.name = name
@@ -3449,7 +3539,8 @@ class IdentityService:
             profile.id = new_id
             self.save(profile)
             _profile_path(profile_id).unlink(missing_ok=True)
-            _v1_path(profile_id).unlink(missing_ok=True)
+            if _v1_path(profile_id).exists():
+                _retire_toml(_v1_path(profile_id))  # kept as .toml.bak
             if self.config().profile == profile_id:
                 self.set_active(new_id)
             return profile
@@ -6058,6 +6149,7 @@ def get_identity_service() -> IdentityService:
 __all__ = [
     "CALLING_CODES",
     "FORMAT",
+    "LIBRARY_LOCKED",
     "LISTS",
     "OWNER_FIELDS",
     "REGISTRY",

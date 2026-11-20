@@ -539,7 +539,8 @@ changes its values. You can also write a profile that builds on another one
 with ``extends: builtin:<id>`` or ``extends: <profile id>``: it then holds
 only the keys it changes, and ``null`` removes an inherited key (``[]``
 empties an inherited list). The lens tells you when the profile it extends
-has changed since your last save. A profile that others extend cannot be
+has changed since your last save; a hand-written profile records the state
+of its parents at its first save, so that notice can only appear after it. A profile that others extend cannot be
 renamed or deleted; export writes one standalone file that imports anywhere.
 
 Its ``owner`` (``first``, ``last``, ``phone``, ``email``) can be used in value

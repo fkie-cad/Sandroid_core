@@ -5,6 +5,8 @@ one-time conversion of schema 1 TOML profiles. No device.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from sandroid.services import identity as ident
@@ -851,7 +853,8 @@ def test_one_bad_toml_never_stops_the_listing(svc, lib, monkeypatch):
     infos = {i.id: i for i in svc.list_profiles()}
     assert infos["good"].error == ""
     assert infos["good"].path.suffix == ".yaml"
-    assert "disk on fire" in infos["boom"].error
+    assert infos["boom"].error == ""  # still usable (the "Use" picker)
+    assert "disk on fire" in infos["boom"].notice
     assert (lib / "boom.toml").exists()
     assert svc.load("boom").token == TOKEN  # read as it is
 
@@ -893,6 +896,7 @@ def test_a_read_only_library_is_read_without_converting(svc, lib):
         assert [(i.id, i.error, i.path.name) for i in infos] == [
             ("old", "", "old.toml")
         ]
+        assert "read-only" in infos[0].notice
         loaded = svc.load("old")
         assert ident.fingerprint(loaded) == ident.fingerprint(v1)
         assert sorted(p.name for p in lib.iterdir()) == ["old.toml"]
@@ -903,8 +907,12 @@ def test_a_read_only_library_is_read_without_converting(svc, lib):
 def test_rename_removes_a_leftover_toml(svc, lib):
     _hand_written(lib)
     _v1(lib, "mara")
+    toml = (lib / "mara.toml").read_text("utf-8")
+    (lib / "mara.toml.bak").write_text("an older backup", "utf-8")
     svc.rename("mara", "Mara", new_id="mara2")
     assert not (lib / "mara.toml").exists()
+    assert (lib / "mara.toml.bak").read_text("utf-8") == "an older backup"
+    assert (lib / "mara.toml.bak.1").read_text("utf-8") == toml  # not lost
     assert [p.id for p in svc.list_profiles()] == ["mara2"]
 
 
@@ -988,7 +996,9 @@ def test_lens_notice_names_a_world_problem(svc, lib):
     lens = IdentityLens()
     lens.profile = profile
     notice = lens.notice_text() or ""
-    assert notice.startswith("World section: world size must be one of")
+    assert notice.startswith(
+        "World section: world size must be one of small, medium or large"
+    )
     assert "not affected" in notice
 
 
@@ -1093,3 +1103,144 @@ def test_a_library_parent_is_checked(svc, lib, parent, error):
     _write(lib, "kid", "format: sandroid-identity\nschema: 2\nid: kid\nextends: p\n")
     with pytest.raises(ProfileError, match=error):
         svc.load("kid")
+
+
+# ---------------------------------------------------------------------------
+# round 3: list matching, lock timeout, unconverted TOML, plain words, seeds
+# ---------------------------------------------------------------------------
+
+THREE = LISTED.replace(
+    """  # the inbox below""",
+    """    - name: "Tobias Brandt {{token}}"   # the cousin
+      phone: "+4915100000003"
+  # the inbox below""",
+)
+
+
+def test_a_deleted_item_takes_its_comment_with_it(svc, lib):
+    _write(lib, "listed", THREE.format(seed="11" * 32))
+    profile = svc.load("listed")
+    del profile.contacts[0]
+    profile.contacts[0]["phone"] = "+4915100000009"  # Lena, edited too
+    svc.save(profile)
+    text = (lib / "listed.yaml").read_text("utf-8")
+    assert "# the neighbour" not in text
+    assert '- name: "Lena Hoffmann {token}"   # a colleague\n' in text
+    assert '- name: "Tobias Brandt {token}"   # the cousin\n' in text
+    assert '      phone: "+4915100000009"\n' in text
+    assert "  # the inbox below\n  sms:\n" in text
+    # a renamed item in the middle keeps its own comment (position fallback)
+    profile = svc.load("listed")
+    profile.contacts[1]["name"] = "Tobi Brandt {token}"
+    profile.contacts.insert(0, {"name": "Neu {token}", "phone": "+4915100000004"})
+    svc.save(profile)
+    text = (lib / "listed.yaml").read_text("utf-8")
+    assert "Tobi Brandt {token}" in text
+    assert "# the cousin" in text.split("Tobi Brandt")[1].split("\n")[0]
+    assert "# a colleague" in text.split("Lena Hoffmann")[1].split("\n")[0]
+    assert [c["phone"] for c in svc.load("listed").contacts] == [
+        "+4915100000004",
+        "+4915100000009",
+        "+4915100000003",
+    ]
+
+
+def test_items_are_matched_by_content_then_key_then_position():
+    a, b, c = {"name": "A", "x": 1}, {"name": "B", "x": 2}, {"name": "C", "x": 3}
+    assert store._match_items([a, b, c], [b, c]) == [1, 2]
+    assert store._match_items([a, b, c], [{"name": "B", "x": 9}, c]) == [1, 2]
+    assert store._match_items([a, b], [{"name": "Z", "x": 1}, b]) == [0, 1]
+    assert store._match_items([a], [a, b]) == [0, None]
+    assert store._match_items(["t1", "t2"], ["t2", "t3"]) == [1, 0]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs fcntl")
+def test_a_library_locked_elsewhere_times_out_plainly(svc, lib, monkeypatch):
+    import fcntl
+
+    profile = svc.save(ident.generate_profile("de", profile_id="solo"))
+    monkeypatch.setattr(ident, "LIBRARY_LOCK_TIMEOUT_S", 0.2)
+    other = (lib / ".identity.lock").open("a")  # another process's handle
+    fcntl.flock(other, fcntl.LOCK_EX)
+    try:
+        with pytest.raises(ProfileError, match="locked by another Sandroid process"):
+            svc.save(profile)
+    finally:
+        other.close()
+    assert svc.save(profile).revision == 2  # works again once it is free
+
+
+def test_without_hard_links_conversion_still_works(svc, lib, monkeypatch):
+    import errno
+
+    _text, v1 = _v1(lib, "old")
+
+    def no_links(*_a, **_k):
+        raise OSError(errno.EPERM, "hard links not supported")
+
+    monkeypatch.setattr(ident.os, "link", no_links)
+    infos = svc.list_profiles()
+    assert [(i.id, i.path.name, i.notice) for i in infos] == [("old", "old.yaml", "")]
+    assert (lib / "old.toml.bak").exists()
+    assert not (lib / "old.toml").exists()
+    assert ident.fingerprint(svc.load("old")) == ident.fingerprint(v1)
+    assert not ident._create_exclusive(lib / "old.yaml", "x")  # never overwrites
+
+
+@pytest.mark.parametrize(
+    ("message", "plain"),
+    [
+        (
+            "world count 'sms' must be an integer >= 0",
+            "world count sms must be an integer 0 or more",
+        ),
+        (
+            "world mix share for 'de' must be > 0",
+            "world mix share for de must be above 0",
+        ),
+        (
+            "world numbers must be one of ('fiction', 'unallocated', 'realistic')",
+            "world numbers must be one of fiction, unallocated or realistic",
+        ),
+        (
+            "world seed must be 'auto' or 'hex:<hex>'",
+            "the world module reports a problem with seed",
+        ),
+    ],
+)
+def test_world_messages_are_shown_in_plain_words(message, plain):
+    from sandroid.tui.widgets.identity_lens import plain_world_message
+
+    assert plain_world_message(message) == plain
+    for symbol in "<>=|{}[]*":
+        assert symbol not in plain_world_message(message)
+
+
+def test_a_child_without_a_digest_records_it_on_the_next_save(svc, lib):
+    _hand_written(lib)
+    _write(lib, "child", CHILD)
+    assert "extends_digest" not in (lib / "child.yaml").read_text("utf-8")
+    child = svc.load("child")
+    assert not child.parent_changed
+    child.notes = "first save"
+    svc.save(child)
+    own = store.plain(store.load_yaml((lib / "child.yaml").read_text("utf-8")))
+    assert own["extends_digest"] == store.base_digest(svc.load("child")._base)
+
+
+def test_new_world_seed_really_replaces_it(svc, lib):
+    _hand_written(lib)
+    first = svc.resolve_world_seed("mara")
+    profile = svc.load("mara")
+    profile.world["seed"] = "auto"  # auto over a seed on disk keeps it
+    svc.save(profile)
+    assert svc.load("mara").world["seed"] == first
+    second = svc.new_world_seed("mara")
+    assert store.WORLD_SEED_RE.fullmatch(second)
+    assert second != first
+    text = (lib / "mara.yaml").read_text("utf-8")
+    assert f"seed: {second}" in text
+    assert "# resolved on the first save" in text
+    svc.save(ident.generate_profile("de", profile_id="nw"))
+    with pytest.raises(ProfileError, match="no world section"):
+        svc.new_world_seed("nw")

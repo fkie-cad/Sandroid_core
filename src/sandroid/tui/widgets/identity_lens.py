@@ -36,6 +36,7 @@ changes.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -1151,7 +1152,7 @@ class IdentityLens(Vertical):
                 issues = []
             if issues:
                 out.append(
-                    f"World section: {_oneline(issues[0].message)} "
+                    f"World section: {plain_world_message(issues[0].message)} "
                     "(the identity values are not affected)."
                 )
         return out
@@ -2012,6 +2013,8 @@ class IdentityLens(Vertical):
             if info.error:
                 continue
             tag = "   (active)" if info.id == active else ""
+            if getattr(info, "notice", ""):
+                tag += "   (older format, read as it is)"
             options.append(
                 ("use", info.id, f"Use {info.name or info.id}  [{info.id}]{tag}")
             )
@@ -2222,6 +2225,42 @@ def _text_sig(text: Text) -> tuple:
     return (text.plain, str(text.style), tuple(text.spans))
 
 
+#: Symbols the TUI must not show (plain words only).
+_SYMBOLS_RE = re.compile(r"[<>=|{}\[\]*]")
+_WORDS = (
+    (re.compile(r"\s*>=\s*0\b"), " 0 or more"),
+    (re.compile(r"\s*>\s*0\b"), " above 0"),
+    (re.compile(r"\s*<=\s*"), " at most "),
+    (re.compile(r"\s*>=\s*"), " at least "),
+)
+
+
+def plain_world_message(message: str) -> str:
+    """A world module message in plain words for the lens: comparison
+    symbols become words, a tuple of choices becomes "a, b or c". When a
+    symbol is left, it says which key has a problem instead.
+    """
+    text = _oneline(message).strip()
+    for pattern, words in _WORDS:
+        text = pattern.sub(words, text)
+
+    def choices(match: re.Match[str]) -> str:
+        items = re.findall(r"'([^']*)'", match.group(0))
+        return (
+            ", ".join(items[:-1]) + " or " + items[-1]
+            if len(items) > 1
+            else (items[0] if items else "")
+        )
+
+    text = re.sub(r"\(\s*'[^()]*'\s*,?\s*\)", choices, text)
+    text = re.sub(r"'([^'<>]*)'", r"\1", text)
+    if _SYMBOLS_RE.search(text):
+        key = re.search(r"\bworld (?:spec )?(\w+)", text)
+        what = key.group(1) if key else "its settings"
+        return f"the world module reports a problem with {what}"
+    return text
+
+
 def _oneline(text: str) -> str:
     return str(text).replace("\r", " ").replace("\n", " ").replace("\t", " ")
 
@@ -2238,6 +2277,7 @@ __all__ = [
     "group_hits",
     "ordered_hits",
     "part_words",
+    "plain_world_message",
     "privacy_indicator",
     "row_id_for_marker",
 ]
