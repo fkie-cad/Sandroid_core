@@ -1796,13 +1796,15 @@ def test_ai_launch_app_runs_hooks_on_a_first_launch_only(env, bus, monkeypatch):
     app_start.register_pre_start_step(_hook(log, disruptive=True))
     env.live = (Liveness.NOT_RUNNING, None)
     bus.answer = False
-    result = _in_worker(lambda: app_lifecycle.launch_app(PKG))
-    assert result == {
-        "launched": False,
-        "package_name": PKG,
-        "activity_name": None,
-        "message": f"{PKG} not started — {DESC} not applied",
-    }
+    # Declined in the dialog: a tool error the model must not retry.
+    from sandroid.ai.tools.registry import ToolError
+
+    with pytest.raises(ToolError) as info:
+        _in_worker(lambda: app_lifecycle.launch_app(PKG))
+    err = info.value.to_dict()["error"]
+    assert err["code"] == "declined_by_analyst"
+    assert err["retryable"] is False
+    assert err["detail"] == f"{PKG} not started — {DESC} not applied"
     assert log == [("hook", PKG)]
 
 
@@ -1826,13 +1828,17 @@ def test_ai_launch_app_with_a_step_is_refused_while_a_start_runs(env, monkeypatc
     t = threading.Thread(target=_hold)
     t.start()
     held.wait(5)
+    from sandroid.ai.tools.registry import ToolError
+
     try:
-        result = app_lifecycle.launch_app(PKG)
+        with pytest.raises(ToolError) as info:
+            app_lifecycle.launch_app(PKG)
     finally:
         release.set()
         t.join(5)
-    assert result["launched"] is False
-    assert result["message"] == app_start._BUSY_MSG
+    assert info.value.code == "busy"
+    assert info.value.retryable is True
+    assert info.value.details["detail"] == app_start._BUSY_MSG
 
 
 def test_identity_registers_with_the_real_registry():
