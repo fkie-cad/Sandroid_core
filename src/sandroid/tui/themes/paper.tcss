@@ -12,8 +12,8 @@
    label: #3F6475
    dim: #6B6459
    rule: #D6CCB6
-   ok: #2D6A2F
-   warn: #8F5600
+   ok: #2D692F
+   warn: #875100
    bad: #A3302A
 */
 
@@ -86,7 +86,7 @@ ActivityLog {
 
 /* Header scope pill (LIVE) */
 #scope-pill.-live {
-    color: #2D6A2F;
+    color: #2D692F;
 }
 
 /* Help screen overlay */
@@ -214,7 +214,7 @@ ScrollableContainer > .scrollbar--bar {
 
 /* View indicator colors */
 .view-forensic {
-    color: #2D6A2F;
+    color: #2D692F;
 }
 
 .view-malware {
@@ -222,12 +222,12 @@ ScrollableContainer > .scrollbar--bar {
 }
 
 .view-security {
-    color: #8F5600;
+    color: #875100;
 }
 
 /* Status indicators */
 .status-running {
-    color: #2D6A2F;
+    color: #2D692F;
     text-style: bold;
 }
 
@@ -236,7 +236,7 @@ ScrollableContainer > .scrollbar--bar {
 }
 
 .status-warning {
-    color: #8F5600;
+    color: #875100;
 }
 
 /* ========== Modal Styles ========== */
@@ -384,7 +384,7 @@ OptionList > .option-list--option-hover {
 }
 
 .message-warning #message-title {
-    color: #8F5600;
+    color: #875100;
 }
 
 .message-error #message-title {
@@ -396,7 +396,7 @@ OptionList > .option-list--option-hover {
 }
 
 .message-warning {
-    border: thick #8F5600;
+    border: thick #875100;
 }
 
 .message-error {
@@ -411,7 +411,7 @@ OptionList > .option-list--option-hover {
 }
 
 Button.-success {
-    background: #2D6A2F;
+    background: #2D692F;
     color: #FFFFFF;
 }
 
@@ -516,7 +516,7 @@ Button.-primary {
     background: #F3EEE2;
 }
 #files-panel #files-notice-text {
-    color: #8F5600;
+    color: #875100;
 }
 /* end files lens */
 
@@ -533,12 +533,12 @@ ShellHeader {
 
 ShellHeader #scope-pill,
 #scope-pill.-live {
-    color: #2D6A2F;
+    color: #2D692F;
 }
 
 ShellHeader #scope-pill.-review {
     color: #FFFFFF;
-    background: #8F5600;
+    background: #875100;
 }
 
 ShellHeader #scope-pill.-rec {
@@ -551,11 +551,11 @@ ShellHeader #timeline-banner {
 }
 
 ShellHeader #label-note {
-    color: #8F5600;
+    color: #875100;
 }
 
 ShellHeader #tracking-dot {
-    color: #2D6A2F;
+    color: #2D692F;
 }
 
 ShellHeader HeaderClock {

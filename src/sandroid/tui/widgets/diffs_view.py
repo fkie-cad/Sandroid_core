@@ -54,6 +54,7 @@ from textual.widgets import DataTable, Static
 
 from sandroid.core import run_history
 from sandroid.tui.row_annotations import AnnotationFeed
+from sandroid.tui.themes import lens_palette
 
 from .files_panel import FilesSubViewBase
 
@@ -64,14 +65,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Muted palette for the Inspector renderables (Rich, not CSS). Red/yellow only
-# for real problems.
-_MUTED = "#8f9bb3"
-_DIM = "#5b6479"
-_ACCENT = "#38bdf8"
-_WARN = "#f59e0b"
-_BAD = "#ef4444"
-_GOOD = "#22c55e"
+# Colours of the Inspector renderables (Rich, not CSS): lens theme tokens,
+# read at render time so a theme switch recolours them. Warn / bad only for
+# real problems.
+
+
+def _c(token: str) -> str:
+    """The lens theme token ``token`` (``"muted"``, ``"ok"`` ...) as a colour."""
+    return str(getattr(lens_palette(), token))
+
 
 #: Rows listed per category in the Inspector before "… N more".
 _LIST_LIMIT = 12
@@ -235,12 +237,12 @@ class DiffsView(FilesSubViewBase):
     }
     DiffsView #runs-table > .datatable--header {
         background: transparent;
-        color: #5b6479;
+        color: $lens-dim;
         text-style: none;
     }
     DiffsView #runs-table > .datatable--cursor {
-        background: #12304d;
-        color: #e5edf7;
+        background: $lens-cursor-focus;
+        color: $lens-text;
         text-style: none;
     }
     DiffsView #runs-table > .datatable--hover {
@@ -251,7 +253,7 @@ class DiffsView(FilesSubViewBase):
         width: 1fr;
         content-align: center middle;
         text-align: center;
-        color: #5b6479;
+        color: $lens-dim;
     }
     DiffsView.-has-runs #runs-empty {
         display: none;
@@ -381,21 +383,21 @@ class DiffsView(FilesSubViewBase):
     def phase_text(phase: str, kind: str | None = None) -> Text:
         """The empty state while ``phase`` runs (``"Rewind running · ..."``)."""
         if not kind:
-            return Text(phase, style="bold #8f9bb3")
+            return Text(phase, style=f"bold {_c('muted')}")
         return Text.assemble(
-            (f"{kind} running · ", "bold #fb7185"),
-            (f"{phase}\n\n", "bold #8f9bb3"),
-            ("the run appears here when the rewind is done", _DIM),
+            (f"{kind} running · ", f"bold {_c('bad')}"),
+            (f"{phase}\n\n", f"bold {_c('muted')}"),
+            ("the run appears here when the rewind is done", _c("dim")),
         )
 
     @staticmethod
     def _empty_text() -> Text:
         return Text.assemble(
-            ("No runs yet\n\n", "bold #8f9bb3"),
+            ("No runs yet\n\n", f"bold {_c('muted')}"),
             ("r", "bold"),
-            (" record a flow  ·  ", _DIM),
+            (" record a flow  ·  ", _c("dim")),
             ("p", "bold"),
-            (" review it", _DIM),
+            (" review it", _c("dim")),
         )
 
     def glance_fragment(self) -> str:
@@ -482,7 +484,7 @@ class DiffsView(FilesSubViewBase):
         Gated auto-select (separate from the always-on "switch to the Runs
         lens on Play-press" handled in app.py): the cursor only moves to the
         new run if the user was on the latest run, or there were none.
-        Otherwise the row arrives with an unread ``●`` marker and a toast,
+        Otherwise the row arrives unread (``N new`` on the lens tab) and a toast,
         and the cursor stays on the older run the user is looking at.
         """
         was_on_latest_or_empty = (
@@ -680,7 +682,7 @@ class DiffsView(FilesSubViewBase):
         """(Re-)verify a run's bundle against its ``SHA256SUMS`` off-thread.
 
         The result used to be cached for the whole session, so a file
-        changed after the first check still showed "✓ verified" (M-34).
+        changed after the first check still showed "verified" (M-34).
         Now ``force`` (Enter on a run, ``v``) always re-hashes; other calls
         (cursor moves, refreshes) re-hash only when the bundle's
         fingerprint (sizes + mtimes) changed, at most every few seconds.
@@ -828,12 +830,12 @@ class DiffsView(FilesSubViewBase):
 
     def _row_cells(self, s: dict[str, Any], label_width: int) -> list[Text]:
         run_id = s.get("run_id", "")
-        number = Text(f"{self._run_number(run_id)}", style=_DIM, justify="right")
+        number = Text(f"{self._run_number(run_id)}", style=_c("dim"), justify="right")
         label = Text()
         # In review / new: colour and weight, no marker symbol.
         style = ""
         if run_id == self._scope_run_id:
-            style = f"bold {_ACCENT}"
+            style = f"bold {_c('accent')}"
         elif run_id in self._unread_run_ids:
             style = "bold"
         label.append("  ")
@@ -843,12 +845,12 @@ class DiffsView(FilesSubViewBase):
         label.append(name.ljust(label_width), style=style)
         when = Text(
             self._format_when(s.get("recorded_at"), short=self._compact),
-            style=_MUTED,
+            style=_c("muted"),
         )
-        took = Text(self._format_duration(self._run_seconds(s)), style=_MUTED)
+        took = Text(self._format_duration(self._run_seconds(s)), style=_c("muted"))
         replays = self._replays(run_id)
         if replays > 1:
-            took.append(f"  {replays} replays", style=_DIM)
+            took.append(f"  {replays} replays", style=_c("dim"))
         if self._compact:
             return [number, label, when]
         return [number, label, when, took, self._changes_cell(s)]
@@ -945,7 +947,10 @@ class DiffsView(FilesSubViewBase):
             recorded = int(counts.get("recorded") or 0)
             compared = int(counts.get("compared") or 0)
             parts.append(
-                (f"{recorded} changed, {compared} compared", "" if compared else _DIM)
+                (
+                    f"{recorded} changed, {compared} compared",
+                    "" if compared else _c("dim"),
+                )
             )
         elif files:
             parts.append((f"{files} file{'s' if files != 1 else ''}", ""))
@@ -955,10 +960,10 @@ class DiffsView(FilesSubViewBase):
         cell = Text()
         for i, (text, style) in enumerate(parts):
             if i:
-                cell.append(" · ", style=_DIM)
+                cell.append(" · ", style=_c("dim"))
             cell.append(text, style=style)
         if not parts:
-            cell.append("no changes", style=_DIM)
+            cell.append("no changes", style=_c("dim"))
         problem = self._problem(s)
         if problem:
             text, style = problem
@@ -968,7 +973,7 @@ class DiffsView(FilesSubViewBase):
         if diverged:
             others = ",".join(f"#{self._run_number(o)}" for o, _ in diverged[:3])
             cell.append("   ")
-            cell.append(f"differs from {others}", style=_WARN)
+            cell.append(f"differs from {others}", style=_c("warn"))
         return cell
 
     def _problem(self, s: dict[str, Any]) -> tuple[str, str] | None:
@@ -977,17 +982,17 @@ class DiffsView(FilesSubViewBase):
         errors = facts.get("run_errors") or {}
         steps = len(errors.get("steps") or [])
         if s.get("result") == "diverged":
-            return "diverged", _BAD  # the replay did not reach your run
+            return "diverged", _c("bad")  # the replay did not reach your run
         if s.get("result") == "unchecked":
             from sandroid.core import rewind
 
-            return rewind.result_words(s), _WARN  # done, N steps unchecked
+            return rewind.result_words(s), _c("warn")  # done, N steps unchecked
         if s.get("error") or errors.get("fatal"):
             if s.get("error") == "Replay cancelled" or s.get("mode"):
-                return "stopped", _WARN  # a Rewind stops, it never aborts
-            return "aborted", _BAD
+                return "stopped", _c("warn")  # a Rewind stops, it never aborts
+            return "aborted", _c("bad")
         if steps:
-            return f"{steps} error{'s' if steps != 1 else ''}", _WARN
+            return f"{steps} error{'s' if steps != 1 else ''}", _c("warn")
         return None
 
     @staticmethod
@@ -1094,7 +1099,7 @@ class DiffsView(FilesSubViewBase):
         label = s.get("label") or run_id
         subtitle = None
         if run_id == self._scope_run_id:
-            subtitle = f"[{_ACCENT}]in review[/] [{_DIM}]· L back to live[/]"
+            subtitle = f"[{_c('accent')}]in review[/] [{_c('dim')}]· L back to live[/]"
         return InspectorContent(
             title=label,
             subtitle=subtitle,
@@ -1113,7 +1118,7 @@ class DiffsView(FilesSubViewBase):
     @staticmethod
     def _grid() -> Table:
         grid = Table.grid(padding=(0, 2))
-        grid.add_column(style=_DIM, no_wrap=True, min_width=12)
+        grid.add_column(style=_c("dim"), no_wrap=True, min_width=12)
         grid.add_column()
         return grid
 
@@ -1145,13 +1150,13 @@ class DiffsView(FilesSubViewBase):
             if diverged:
                 for other, reasons in diverged.items():
                     text.append(
-                        f"\n⚠ diverges from #{self._run_number(other)}: "
+                        f"\ndiverges from #{self._run_number(other)}: "
                         f"{', '.join(reasons)} -- a replay may not have done "
                         "what the recording did",
-                        style=_WARN,
+                        style=_c("warn"),
                     )
             else:
-                text.append("  ✓ consistent", style=_GOOD)
+                text.append("  consistent", style=_c("ok"))
             grid.add_row("Replays", text)
         grid.add_row("Device", Text(str(s.get("device_name") or "unknown")))
         if facts.get("app"):
@@ -1178,7 +1183,7 @@ class DiffsView(FilesSubViewBase):
         if cfg.row_count:
             sections.append(("Settings", cfg))
         sections.append(
-            ("", Text("n rename · del delete", style=_DIM)),
+            ("", Text("n rename · del delete", style=_c("dim"))),
         )
         return sections
 
@@ -1199,7 +1204,7 @@ class DiffsView(FilesSubViewBase):
     def _status_text(self, s: dict[str, Any], facts: dict[str, Any]) -> Text:
         problem = self._problem(s)
         if problem is None:
-            return Text("completed", style=_GOOD)
+            return Text("completed", style=_c("ok"))
         text, style = problem
         return Text(text, style=style)
 
@@ -1211,38 +1216,38 @@ class DiffsView(FilesSubViewBase):
             return None
         out = Text()
         if fatal:
-            out.append(str(fatal), style=_BAD)
+            out.append(str(fatal), style=_c("bad"))
         for step in steps[:_LIST_LIMIT]:
             if out:
                 out.append("\n")
             name = str(step.get("step") or "step") if isinstance(step, dict) else ""
             msg = str(step.get("error") or "") if isinstance(step, dict) else str(step)
             run = step.get("run") if isinstance(step, dict) else None
-            out.append(f"{name}", style=_WARN)
+            out.append(f"{name}", style=_c("warn"))
             if run:
-                out.append(f" (replay {run})", style=_DIM)
+                out.append(f" (replay {run})", style=_c("dim"))
             out.append(f"  {msg}")
         if len(steps) > _LIST_LIMIT:
-            out.append(f"\n… {len(steps) - _LIST_LIMIT} more", style=_DIM)
+            out.append(f"\n… {len(steps) - _LIST_LIMIT} more", style=_c("dim"))
         return out
 
     def _evidence_text(self, run_id: str) -> Text:
         state = self._evidence.get(run_id, "checking")
         if state == "verified":
-            return Text("✓ verified (SHA256SUMS)", style=_GOOD)
+            return Text("verified (SHA256SUMS)", style=_c("ok"))
         if state.startswith("modified:"):
             _, n, names = (state.split(":", 2) + ["", ""])[:3]
-            text = Text(f"✕ {n} file(s) changed since sealing", style=_BAD)
+            text = Text(f"{n} file(s) changed since sealing", style=_c("bad"))
             if names:
-                text.append(f": {names.replace(',', ', ')}", style=_BAD)
+                text.append(f": {names.replace(',', ', ')}", style=_c("bad"))
             return text
         if state == "unsealed":
-            return Text("not sealed (no SHA256SUMS)", style=_DIM)
+            return Text("not sealed (no SHA256SUMS)", style=_c("dim"))
         if state == "missing":
-            return Text("run folder missing", style=_BAD)
+            return Text("run folder missing", style=_c("bad"))
         if state == "error":
-            return Text("could not verify", style=_WARN)
-        return Text("checking…", style=_DIM)
+            return Text("could not verify", style=_c("warn"))
+        return Text("checking…", style=_c("dim"))
 
     def _changes_sections(
         self,
@@ -1254,18 +1259,18 @@ class DiffsView(FilesSubViewBase):
         head = Text()
         for i, (key, name, color) in enumerate(
             (
-                ("changed", "changed", "#facc15"),
-                ("new", "new", _GOOD),
-                ("deleted", "deleted", _BAD),
+                ("changed", "changed", _c("warn")),
+                ("new", "new", _c("ok")),
+                ("deleted", "deleted", _c("bad")),
             )
         ):
             if i:
                 head.append("   ")
             head.append(f"{int(counts.get(key, 0) or 0)}", style=f"bold {color}")
-            head.append(f" {name}", style=_MUTED)
+            head.append(f" {name}", style=_c("muted"))
         sections: list[tuple[str, Any]] = [("", head)]
         if record is None:
-            sections.append(("", Text("loading…", style=_DIM)))
+            sections.append(("", Text("loading…", style=_c("dim"))))
             return sections
         if getattr(record, "mode", ""):
             return [*sections, *self._rewind_sections(record)]
@@ -1285,17 +1290,17 @@ class DiffsView(FilesSubViewBase):
                 body.append(self._short_path(row.path, 38))
                 if row.diff:
                     n = len(row.diff)
-                    body.append(f"  {n} line{'s' if n != 1 else ''}", style=_DIM)
+                    body.append(f"  {n} line{'s' if n != 1 else ''}", style=_c("dim"))
             if len(subset) > _LIST_LIMIT:
-                body.append(f"\n… {len(subset) - _LIST_LIMIT} more", style=_DIM)
+                body.append(f"\n… {len(subset) - _LIST_LIMIT} more", style=_c("dim"))
             sections.append((title, body))
         hosts = facts.get("hosts")
         if hosts:
             body = Text("\n".join(hosts[:_LIST_LIMIT]))
             if len(hosts) > _LIST_LIMIT:
-                body.append(f"\n… {len(hosts) - _LIST_LIMIT} more", style=_DIM)
+                body.append(f"\n… {len(hosts) - _LIST_LIMIT} more", style=_c("dim"))
             sections.append((f"Hosts ({len(hosts)})", body))
-        sections.append(("", Text("z full diff · v review in Files", style=_DIM)))
+        sections.append(("", Text("z full diff · v review in Files", style=_c("dim"))))
         return sections
 
     def _rewind_sections(self, record: Any) -> list[tuple[str, Any]]:
@@ -1309,12 +1314,12 @@ class DiffsView(FilesSubViewBase):
         verdicts = getattr(record, "verdicts", None) or {}
         if info.get("diverged_at_step"):
             at = info.get("diverged_at_step")
-            body = Text(str(info.get("diverged") or f"step {at}"), style=_BAD)
+            body = Text(str(info.get("diverged") or f"step {at}"), style=_c("bad"))
             if info.get("note"):
                 body.append(f"\n{info['note']}")
             out.append(("The replay diverged", body))
         elif info.get("unchecked_steps"):
-            body = Text(str(info.get("result_words") or "unchecked"), style=_WARN)
+            body = Text(str(info.get("result_words") or "unchecked"), style=_c("warn"))
             if info.get("note"):
                 body.append(f"\n{info['note']}")
             out.append(("Replay steps unchecked", body))
@@ -1325,10 +1330,10 @@ class DiffsView(FilesSubViewBase):
                     body.append("\n")
                 body.append(self._short_path(path, 44))
                 color = {
-                    rewind.SAME: _GOOD,
-                    rewind.VOLATILE: _WARN,  # explained, not a failure
-                    rewind.DIFFERENT: _BAD,
-                }.get(verdict, _MUTED)
+                    rewind.SAME: _c("ok"),
+                    rewind.VOLATILE: _c("warn"),  # explained, not a failure
+                    rewind.DIFFERENT: _c("bad"),
+                }.get(verdict, _c("muted"))
                 body.append(f"  {verdict}", style=color)
             out.append(("What your action changed", body))
         steps = info.get("steps") or []
@@ -1345,7 +1350,9 @@ class DiffsView(FilesSubViewBase):
                 body.append(f"{st.get('i')}. {st.get('what')}  ")
                 bad = way.startswith(("failed", "diverged"))
                 warn = st.get("check") == "unchecked"
-                body.append(way, style=_BAD if bad else _WARN if warn else _MUTED)
+                body.append(
+                    way, style=_c("bad") if bad else _c("warn") if warn else _c("muted")
+                )
             out.append(("Replayed steps", body))
         flows = info.get("flows") or []
         if flows:
@@ -1354,9 +1361,9 @@ class DiffsView(FilesSubViewBase):
         for title, reqs in (info.get("requests") or {}).items():
             body = Text("\n".join(reqs[:_LIST_LIMIT]) or "none")
             if len(reqs) > _LIST_LIMIT:
-                body.append(f"\n… {len(reqs) - _LIST_LIMIT} more", style=_DIM)
+                body.append(f"\n… {len(reqs) - _LIST_LIMIT} more", style=_c("dim"))
             out.append((f"Requests · {title} ({len(reqs)})", body))
-        out.append(("", Text("z full results · v review in Files", style=_DIM)))
+        out.append(("", Text("z full results · v review in Files", style=_c("dim"))))
         return out
 
     @staticmethod
@@ -1374,7 +1381,7 @@ class DiffsView(FilesSubViewBase):
         if pdfs:
             grid.add_row("PDF", Text("\n".join(pdfs)))
         else:
-            grid.add_row("PDF", Text("none yet", style=_DIM))
+            grid.add_row("PDF", Text("none yet", style=_c("dim")))
         if facts.get("has_results"):
             grid.add_row("Results", run_history.RESULTS_JSON_NAME)
         flows = facts.get("flows")
@@ -1385,7 +1392,7 @@ class DiffsView(FilesSubViewBase):
                 f"{n} mitmproxy flow{'s' if n != 1 else ''} in "
                 f"{run_history.NETWORK_DIR_NAME}/flows.jsonl"
                 if n
-                else Text("no mitmproxy flows in this run", style=_DIM),
+                else Text("no mitmproxy flows in this run", style=_c("dim")),
             )
         pcaps = facts.get("pcaps") or []
         if pcaps:
@@ -1394,13 +1401,13 @@ class DiffsView(FilesSubViewBase):
                 if body:
                     body.append("\n")
                 body.append(rel)
-                body.append(f"  {size / 1024 / 1024:.1f} MB", style=_DIM)
+                body.append(f"  {size / 1024 / 1024:.1f} MB", style=_c("dim"))
             grid.add_row("Pcap", body)
         grid.add_row("Evidence", self._evidence_text(run_id))
         return [
             ("", grid),
-            ("Folder", Text(run_dir, style=_MUTED)),
-            ("", Text("⇧P write a new PDF report", style=_DIM)),
+            ("Folder", Text(run_dir, style=_c("muted"))),
+            ("", Text("⇧P write a new PDF report", style=_c("dim"))),
         ]
 
     # -- Privacy tab (identity profile values found during the run) ---------
@@ -1578,7 +1585,7 @@ class DiffsView(FilesSubViewBase):
     def _privacy_sections(self, run_id: str, s: dict[str, Any]) -> list:
         findings, why = self._privacy_findings(s)
         if not findings:
-            return [("", Text(why, style=_DIM))]
+            return [("", Text(why, style=_c("dim")))]
         values = len({hit.marker_id for _w, hit in findings})
         recipients = len({w for w, _h in findings if w[0] != "stored"})
         summary = Text()
@@ -1590,7 +1597,7 @@ class DiffsView(FilesSubViewBase):
         if any(w[0] == "stored" for w, _h in findings):
             summary.append(" or stored" if recipients else " stored on the device")
         body, _lines = self._privacy_render(run_id, findings)
-        hint = Text("{ } pick a finding, J jumps to its source", style=_DIM)
+        hint = Text("{ } pick a finding, J jumps to its source", style=_c("dim"))
         return [("", summary), ("", body), ("", hint)]
 
     def _privacy_keys(self, run_id: str) -> dict:
@@ -1686,7 +1693,7 @@ class DiffsView(FilesSubViewBase):
         return f"#{self._run_number(run_id)} {self._current_label(run_id)}"
 
     def on_scope_changed(self, message) -> None:
-        """MainScreen's ``ScopeChanged``: mark the reviewed row with ◆."""
+        """MainScreen's ``ScopeChanged``: mark the reviewed row (accent colour)."""
         run_dir = run_history.run_dir_for_scope(getattr(message, "run_id", None))
         scope_run_id = run_dir.name if run_dir is not None else None
         if scope_run_id == self._scope_run_id:
@@ -1946,7 +1953,7 @@ class DiffsView(FilesSubViewBase):
             return
         numbers = (self._run_number(rec_a.run_id), self._run_number(rec_b.run_id))
         content = InspectorContent(
-            title=f"#{numbers[0]} ⇄ #{numbers[1]}",
+            title=f"#{numbers[0]} vs #{numbers[1]}",
             sections=self.compare_sections(rec_a, rec_b, facts, numbers),
             footer="= compare · ⏎ run",
             key=("compare", rec_a.run_id, rec_b.run_id),
@@ -1975,11 +1982,11 @@ class DiffsView(FilesSubViewBase):
         num_b = f"#{numbers[1]}" if numbers[1] else "B"
         head = Text.assemble(
             (f"{len(only_b)}", "bold"),
-            (f" files only in {num_b}   ", _MUTED),
+            (f" files only in {num_b}   ", _c("muted")),
             (f"{len(only_a)}", "bold"),
-            (f" only in {num_a}   ", _MUTED),
+            (f" only in {num_a}   ", _c("muted")),
             (f"{both}", "bold"),
-            (" in both", _MUTED),
+            (" in both", _c("muted")),
         )
         sections.append(("", head))
         for title, items, kinds in (
@@ -1992,10 +1999,10 @@ class DiffsView(FilesSubViewBase):
             for p in items[:_LIST_LIMIT]:
                 if body:
                     body.append("\n")
-                body.append(f"{kinds[p]:<8}", style=_DIM)
+                body.append(f"{kinds[p]:<8}", style=_c("dim"))
                 body.append(cls._short_path(p, 38))
             if len(items) > _LIST_LIMIT:
-                body.append(f"\n… {len(items) - _LIST_LIMIT} more", style=_DIM)
+                body.append(f"\n… {len(items) - _LIST_LIMIT} more", style=_c("dim"))
             sections.append((title, body))
         facts = facts or {}
         fa = facts.get(rec_a.run_id) or {}
@@ -2009,29 +2016,29 @@ class DiffsView(FilesSubViewBase):
             )
             if reasons:
                 note = Text(
-                    f"⚠ Same recording, but the replays diverged: "
+                    f"Same recording, but the replays diverged: "
                     f"{', '.join(reasons)}. At least one replay did not do what "
                     "the recording did (a tap that did not take, a slow app); "
                     "check its screenshots before trusting either run.",
-                    style=_WARN,
+                    style=_c("warn"),
                 )
             else:
-                note = Text("✓ Same recording; the runs agree in size.", style=_GOOD)
+                note = Text("Same recording; the runs agree in size.", style=_c("ok"))
             sections.insert(1, ("Replay consistency", note))
         hosts_a = {host_key(h) for h in fa.get("hosts") or [] if host_key(h)}
         hosts_b = {host_key(h) for h in fb.get("hosts") or [] if host_key(h)}
         if hosts_a or hosts_b:
             body = Text()
             for sign, items, style in (
-                ("+", sorted(hosts_b - hosts_a), _WARN),
-                ("−", sorted(hosts_a - hosts_b), _MUTED),
+                ("+", sorted(hosts_b - hosts_a), _c("warn")),
+                ("−", sorted(hosts_a - hosts_b), _c("muted")),
             ):
                 for h in items[:_LIST_LIMIT]:
                     if body:
                         body.append("\n")
                     body.append(f"{sign} {h}", style=style)
             if not body:
-                body = Text("same hosts in both runs", style=_DIM)
+                body = Text("same hosts in both runs", style=_c("dim"))
             sections.append(("Hosts", body))
         return sections
 

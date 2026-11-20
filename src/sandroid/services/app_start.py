@@ -1335,7 +1335,9 @@ def recover_after_framework_restart(
     """
     from sandroid.core.adb import Adb
 
-    active = serial is None or serial == Adb.get_target_device()
+    # The global target, not a thread pin (Adb.targeting): Frida's handles
+    # belong to the device Sandroid has selected.
+    active = serial is None or serial == Adb._target_device
 
     def drop() -> None:
         if active:
@@ -1968,14 +1970,3 @@ __all__ = [
     "stops_sentence",
     "unregister_pre_start_step",
 ]
-
-# Deprecated names (before 2026-11-20 these were "pre-spawn hooks"): kept
-# until the in-flight branches that call them have moved to the new names.
-PreSpawnPlan = PreStartPlan
-PreSpawnHook = PreStartStep
-register_pre_spawn_hook = register_pre_start_step
-unregister_pre_spawn_hook = unregister_pre_start_step
-pre_spawn_running = pre_start_running
-pre_spawn_status = pre_start_status
-add_pre_spawn_status_listener = add_pre_start_status_listener
-remove_pre_spawn_status_listener = remove_pre_start_status_listener

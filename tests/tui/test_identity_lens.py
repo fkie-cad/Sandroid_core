@@ -113,7 +113,7 @@ class FakeIdentity:
     def active_markers(self, *, load=True):
         return None
 
-    def install_pre_spawn_hook(self):
+    def install_pre_start_step(self):
         return False
 
     # statuses

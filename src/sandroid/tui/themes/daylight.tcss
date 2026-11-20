@@ -12,9 +12,9 @@
    label: #3D4F86
    dim: #5B6576
    rule: #D3DAE6
-   ok: #0B7A3B
-   warn: #A05300
-   bad: #C21A30
+   ok: #0A6F36
+   warn: #954D00
+   bad: #BE192F
 */
 
 /* Main screen layout */
@@ -86,7 +86,7 @@ ActivityLog {
 
 /* Header scope pill (LIVE) */
 #scope-pill.-live {
-    color: #0B7A3B;
+    color: #0A6F36;
 }
 
 /* Help screen overlay */
@@ -214,29 +214,29 @@ ScrollableContainer > .scrollbar--bar {
 
 /* View indicator colors */
 .view-forensic {
-    color: #0B7A3B;
+    color: #0A6F36;
 }
 
 .view-malware {
-    color: #C21A30;
+    color: #BE192F;
 }
 
 .view-security {
-    color: #A05300;
+    color: #954D00;
 }
 
 /* Status indicators */
 .status-running {
-    color: #0B7A3B;
+    color: #0A6F36;
     text-style: bold;
 }
 
 .status-stopped {
-    color: #C21A30;
+    color: #BE192F;
 }
 
 .status-warning {
-    color: #A05300;
+    color: #954D00;
 }
 
 /* ========== Modal Styles ========== */
@@ -384,11 +384,11 @@ OptionList > .option-list--option-hover {
 }
 
 .message-warning #message-title {
-    color: #A05300;
+    color: #954D00;
 }
 
 .message-error #message-title {
-    color: #C21A30;
+    color: #BE192F;
 }
 
 .message-info {
@@ -396,11 +396,11 @@ OptionList > .option-list--option-hover {
 }
 
 .message-warning {
-    border: thick #A05300;
+    border: thick #954D00;
 }
 
 .message-error {
-    border: thick #C21A30;
+    border: thick #BE192F;
 }
 
 #input-buttons Button,
@@ -411,12 +411,12 @@ OptionList > .option-list--option-hover {
 }
 
 Button.-success {
-    background: #0B7A3B;
+    background: #0A6F36;
     color: #FFFFFF;
 }
 
 Button.-error {
-    background: #C21A30;
+    background: #BE192F;
     color: #FFFFFF;
 }
 
@@ -516,7 +516,7 @@ Button.-primary {
     background: #F2F5FA;
 }
 #files-panel #files-notice-text {
-    color: #A05300;
+    color: #954D00;
 }
 /* end files lens */
 

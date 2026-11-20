@@ -28,6 +28,7 @@ from sandroid.config.schema import (
     FILES_RULE_KINDS,
     default_files_noise_rules,
 )
+from sandroid.tui.themes import lens_palette
 
 from .base import ForensicModal, KeyHintFooter
 
@@ -185,12 +186,13 @@ class NoiseRulesModal(ForensicModal[None]):
         table = self.query_one("#rules-table", DataTable)
         keep = table.cursor_row if cursor is None else cursor
         table.clear()
+        pal = lens_palette()
         for i, rule in enumerate(self._rules):
             on = rule.get("enabled", True)
-            style = "" if on else "#5b6479"
+            style = "" if on else pal.dim
             table.add_row(
-                Text("✓" if on else "·", style="#4ade80" if on else "#5b6479"),
-                Text(rule.get("action", ""), style=style or "#c4b5fd"),
+                Text("on" if on else "off", style=pal.ok if on else pal.dim),
+                Text(rule.get("action", ""), style=style or pal.accent),
                 Text(rule.get("kind", ""), style=style),
                 Text(rule.get("pattern", ""), style=style),
                 key=str(i),

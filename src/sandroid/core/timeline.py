@@ -822,7 +822,7 @@ class TimelineService:
         self._label_end_all_locked(old, "device_switch", t, "sandroid")
         self._enqueue(old, {
             "src": "device", "kind": "switch", "actor": "sandroid",
-            "summary": f"device switch → {new_serial}", "data": {"to": new_serial},
+            "summary": f"device switch to {new_serial}", "data": {"to": new_serial},
         }, t_rx=t)  # fmt: skip
 
     def _emit_connect(self, sink: _Sink, *, serial_changed: bool = False) -> None:
@@ -1056,7 +1056,7 @@ class TimelineService:
                 world = _Item({
                     "src": "sandroid", "kind": "world", "actor": "sandroid",
                     "level": "warn", "clk": "host", "t": t,
-                    "summary": "⟲ world change inferred · device clock went back",
+                    "summary": "world change inferred · device clock went back",
                     "data": {"cause": "mono-rewind", "world_before": before},
                     **({"dev": fields["dev"]} if "dev" in fields else {}),
                 }, item.t_rx, item.mono, state=state,
@@ -1184,7 +1184,7 @@ class TimelineService:
         rel = _app_relative(path)
         summary = f"{label} {rel}"
         if new_path:
-            summary += f" → {_app_relative(new_path)}"
+            summary += f" to {_app_relative(new_path)}"
         if process:
             summary += f" · {process}"
         fields = self._fields("files", kind, summary, actor, data, None, t, "host",
@@ -1286,7 +1286,7 @@ class TimelineService:
             device_clock.begin_epoch(serial)
         except Exception:
             logger.debug("timeline: begin_epoch failed", exc_info=True)
-        fields = self._fields(src, kind, summary or f"⟲ {cause}", actor,
+        fields = self._fields(src, kind, summary or str(cause), actor,
                               dict(data or {}), None, t, "host", None, None,
                               t_err_ms, dev, None, None, None, None, None, False,
                               "info")  # fmt: skip
@@ -1338,7 +1338,7 @@ class TimelineService:
                 fields["data"].setdefault("from", before)
                 fields["data"].setdefault("to", phase)
             if not fields["summary"]:
-                fields["summary"] = f"phase · {before} → {phase}"
+                fields["summary"] = f"phase · {before} to {phase}"
             if sink.state in ("open", "capture"):
                 self._flush_counts(sink, t_rx)
             state = trans = None
@@ -1402,7 +1402,7 @@ class TimelineService:
         event = LabelEvent(None, number, "start", name, t, parent, depth, None,
                            None, actor)  # fmt: skip
         state.stack.append(event)
-        summary = f"▶ {number}{self._name_part(name)}"
+        summary = f"Section {number}{self._name_part(name)}"
         if parent is not None:
             summary += f" (in {parent})"
         self._label_line(sink, event, {
@@ -1424,7 +1424,7 @@ class TimelineService:
                                 "duration_s": duration}  # fmt: skip
         if late:
             data["late"] = True
-        summary = f"■ {start.number}{self._name_part(start.name)} · {duration:.1f} s"
+        summary = f"End section {start.number}{self._name_part(start.name)} · {duration:.1f} s"
         self._label_line(sink, event, data, summary)
         return state.history[-1]
 
@@ -1489,7 +1489,7 @@ class TimelineService:
                                len(state.stack), None, None, who)  # fmt: skip
             self._label_line(sink, event, {
                 "number": number, "name": name, "parent": parent,
-                "source": source}, f"◆ {number}{self._name_part(name)}")  # fmt: skip
+                "source": source}, f"Note {number}{self._name_part(name)}")  # fmt: skip
             return state.history[-1]
 
     def _label_end_all(self, ended_by, t, actor) -> list[LabelEvent]:
@@ -2376,15 +2376,16 @@ def _finalize_safe(sink: _Sink, item: _Item, transitions: list[tuple],
 
 
 def _renumber(summary: str, event: LabelEvent, number: int, parent: int | None) -> str:
-    out = summary.replace(f"{_label_glyph(event.kind)} {event.number}",
-                          f"{_label_glyph(event.kind)} {number}", 1)  # fmt: skip
+    out = summary.replace(f"{_label_word(event.kind)} {event.number}",
+                          f"{_label_word(event.kind)} {number}", 1)  # fmt: skip
     if event.parent is not None and parent is not None:
         out = out.replace(f"(in {event.parent})", f"(in {parent})")
     return out
 
 
-def _label_glyph(kind: str) -> str:
-    return {"start": "▶", "end": "■", "point": "◆"}.get(kind, "")
+def _label_word(kind: str) -> str:
+    """The plain word a label line's summary starts with (no symbols)."""
+    return {"start": "Section", "end": "End section", "point": "Note"}.get(kind, "")
 
 
 # ---------------------------------------------------------------------------

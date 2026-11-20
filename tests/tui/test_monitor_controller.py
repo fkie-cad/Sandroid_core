@@ -2273,7 +2273,7 @@ def test_restart_noticed_by_task_rename_is_followed_with_its_gap():
     assert texts[1].startswith(
         f"{_PKG} restarted 12:47:02 · new PID 25983 · gap ≈0.3 s"
     )
-    assert "⇧R re-applies" in texts[1]
+    assert "Shift+R re-applies" in texts[1]
     assert watch.label_for_tid(25984) == "main"
 
 
@@ -3023,7 +3023,7 @@ def test_an_exited_main_still_listed_as_a_zombie_is_dropped_not_readopted():
 
 
 def test_a_restart_during_sandroids_own_restart_says_so():
-    """N8: "Frida hooks are gone (⇧R re-applies)" right after ⇧R."""
+    """N8: "Frida hooks are gone (Shift+R re-applies)" right after Shift+R."""
     from sandroid.services import get_spotlight_service
 
     device = _FakeDevice(_procs(main=24310))
@@ -3038,13 +3038,13 @@ def test_a_restart_during_sandroids_own_restart_says_so():
     finally:
         spotlight.end_restart()
     restart = next(t for _l, t in notes if "restarted" in t)
-    assert restart.endswith("· restarted by ⇧R")
+    assert restart.endswith("· restarted by Shift+R")
     assert "hooks are gone" not in restart
     # Outside a ⇧R the hint stays.
     device.table = _procs(main=26000)
     watch.poll_once()
     assert next(t for _l, t in reversed(notes) if "restarted" in t).endswith(
-        "Frida hooks are gone (⇧R re-applies)"
+        "Frida hooks are gone (Shift+R re-applies)"
     )
 
 

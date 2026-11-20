@@ -2,20 +2,20 @@
 /* Clean light theme with blue accents */
 
 /* Color Palette:
-   primary: #1976D2 (Blue)
+   primary: #1669BC (Blue)
    secondary: #0D47A1 (Dark blue)
-   accent: #00BFA5 (Teal)
+   accent: #007A69 (Teal)
    background: #FAFAFA (Off-white)
    surface: #FFFFFF (White)
-   error: #D32F2F (Red)
-   warning: #F57C00 (Orange)
-   success: #388E3C (Green)
+   error: #CF2C2C (Red)
+   warning: #A95500 (Orange)
+   success: #307A34 (Green)
    text: #212121 (Dark grey)
    text_muted: #757575 (Medium grey)
-   forensic_color: #388E3C (Green)
-   malware_color: #D32F2F (Red)
-   security_color: #F57C00 (Orange)
-   logo_color: #1976D2 (Blue)
+   forensic_color: #307A34 (Green)
+   malware_color: #CF2C2C (Red)
+   security_color: #A95500 (Orange)
+   logo_color: #1669BC (Blue)
    logo_text_color: #0D47A1 (Dark blue)
 */
 
@@ -34,7 +34,7 @@ MainScreen {
     height: auto;
     max-height: 2;
     background: #E3F2FD;
-    color: #1976D2;
+    color: #1669BC;
     padding: 0 1;
 }
 
@@ -42,7 +42,7 @@ MainScreen {
 #lens-host {
     background: #FFFFFF;
     border: round #E0E0E0;
-    border-title-color: #1976D2;
+    border-title-color: #1669BC;
     border-subtitle-color: #757575;
 }
 
@@ -55,12 +55,12 @@ MainScreen {
 Inspector {
     background: #FFFFFF;
     border: round #E0E0E0;
-    border-title-color: #388E3C;
+    border-title-color: #307A34;
     border-subtitle-color: #757575;
 }
 
 Inspector:focus-within {
-    border: round #1976D2;
+    border: round #1669BC;
 }
 
 /* Log ticker (newest line) + bottom drawer (` toggles) */
@@ -89,16 +89,16 @@ ActivityLog {
 /* Header scope pill (LIVE) and the other header pieces: their
    DEFAULT_CSS (lens_shell.py ShellHeader) colors are for a dark band. */
 #scope-pill.-live {
-    color: #388E3C;
+    color: #307A34;
 }
 
 ShellHeader #scope-pill.-review {
     color: #FFFFFF;
-    background: #B45309;
+    background: #9C4808;
 }
 
 ShellHeader #scope-pill.-rec {
-    color: #C62828;
+    color: #B92525;
 }
 
 ShellHeader #scope-pill.-blind,
@@ -107,11 +107,11 @@ ShellHeader #timeline-banner {
 }
 
 ShellHeader #label-note {
-    color: #B45309;
+    color: #9C4808;
 }
 
 ShellHeader #tracking-dot {
-    color: #2E7D32;
+    color: #296E2C;
 }
 
 /* Help screen overlay */
@@ -125,14 +125,14 @@ HelpScreen {
     height: 80%;
     background: #FFFFFF;
     border: solid #E0E0E0;
-    border-title-color: #1976D2;
+    border-title-color: #1669BC;
     padding: 1 2;
 }
 
 #help-title {
     text-align: center;
     text-style: bold;
-    color: #1976D2;
+    color: #1669BC;
     padding: 1 0;
 }
 
@@ -144,7 +144,7 @@ HelpScreen {
 
 .help-category {
     margin-top: 1;
-    color: #1976D2;
+    color: #1669BC;
     text-style: bold;
 }
 
@@ -178,7 +178,7 @@ CommandPalette {
     dock: top;
     width: 100%;
     background: #FAFAFA;
-    border: solid #1976D2;
+    border: solid #1669BC;
     color: #212121;
     padding: 0 1;
 }
@@ -219,13 +219,13 @@ CommandPalette {
 /* Footer bindings */
 SandroidFooter {
     background: #E3F2FD;
-    color: #1976D2;
+    color: #1669BC;
 }
 
 /* Header */
 Header {
     background: #E3F2FD;
-    color: #1976D2;
+    color: #1669BC;
 }
 
 /* Scrollbar styling */
@@ -234,34 +234,34 @@ ScrollableContainer > .scrollbar {
 }
 
 ScrollableContainer > .scrollbar--bar {
-    background: #1976D2;
+    background: #1669BC;
 }
 
 /* View indicator colors */
 .view-forensic {
-    color: #388E3C;
+    color: #307A34;
 }
 
 .view-malware {
-    color: #D32F2F;
+    color: #CF2C2C;
 }
 
 .view-security {
-    color: #F57C00;
+    color: #A95500;
 }
 
 /* Status indicators */
 .status-running {
-    color: #00BFA5;
+    color: #007A69;
     text-style: bold;
 }
 
 .status-stopped {
-    color: #D32F2F;
+    color: #CF2C2C;
 }
 
 .status-warning {
-    color: #F57C00;
+    color: #A95500;
 }
 
 /* ========== Modal Styles ========== */
@@ -290,7 +290,7 @@ ModalScreen {
 #confirm-title,
 #message-title {
     text-style: bold;
-    color: #1976D2;
+    color: #1669BC;
     margin-bottom: 1;
     text-align: center;
 }
@@ -306,7 +306,7 @@ ModalScreen {
 #input-field {
     margin: 1 0;
     background: #FAFAFA;
-    border: solid #1976D2;
+    border: solid #1669BC;
     color: #212121;
 }
 
@@ -322,7 +322,7 @@ ModalScreen {
 #filter-input {
     margin-bottom: 1;
     background: #FAFAFA;
-    border: solid #1976D2;
+    border: solid #1669BC;
     color: #212121;
 }
 
@@ -405,27 +405,27 @@ OptionList > .option-list--option-hover {
 }
 
 .message-info #message-title {
-    color: #1976D2;
+    color: #1669BC;
 }
 
 .message-warning #message-title {
-    color: #F57C00;
+    color: #A95500;
 }
 
 .message-error #message-title {
-    color: #D32F2F;
+    color: #CF2C2C;
 }
 
 .message-info {
-    border: thick #1976D2;
+    border: thick #1669BC;
 }
 
 .message-warning {
-    border: thick #F57C00;
+    border: thick #A95500;
 }
 
 .message-error {
-    border: thick #D32F2F;
+    border: thick #CF2C2C;
 }
 
 #input-buttons Button,
@@ -436,17 +436,17 @@ OptionList > .option-list--option-hover {
 }
 
 Button.-success {
-    background: #388E3C;
+    background: #307A34;
     color: #FFFFFF;
 }
 
 Button.-error {
-    background: #D32F2F;
+    background: #CF2C2C;
     color: #FFFFFF;
 }
 
 Button {
-    background: #1976D2;
+    background: #1669BC;
     color: #FFFFFF;
 }
 
@@ -455,13 +455,13 @@ Button:hover {
 }
 
 Button.-primary {
-    background: #1976D2;
+    background: #1669BC;
     color: #FFFFFF;
 }
 
 /* Logo styling */
 .logo-container {
-    color: #1976D2;
+    color: #1669BC;
     text-style: bold;
 }
 
@@ -471,7 +471,7 @@ Button.-primary {
 }
 
 .logo-version {
-    color: #1976D2;
+    color: #1669BC;
     text-style: bold;
 }
 
@@ -490,7 +490,7 @@ Button.-primary {
 }
 
 #lens-bar.-level-active {
-    border-left: heavy #1976D2;
+    border-left: heavy #1669BC;
 }
 
 .lens-tab {
@@ -505,7 +505,7 @@ Button.-primary {
 
 .lens-tab.-active {
     color: #FFFFFF;
-    background: #1976D2;
+    background: #1669BC;
 }
 
 /* runs lens */
@@ -541,6 +541,6 @@ Button.-primary {
     background: #F5F5F5;
 }
 #files-panel #files-notice-text {
-    color: #E65100;
+    color: #BE4300;
 }
 /* end files lens */

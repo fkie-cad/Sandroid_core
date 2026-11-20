@@ -162,7 +162,7 @@ class FakeLabels:
     def _end(self, span: LabelEvent, ended_by: str, t: float, actor: str) -> None:
         seq = self._seq(
             "end",
-            f"■ {span.number} '{span.name}'",
+            f"End section {span.number} '{span.name}'",
             {"number": span.number, "ended_by": ended_by},
             t,
         )
@@ -205,7 +205,7 @@ class FakeLabels:
         self._number += 1
         seq = self._seq(
             "start",
-            f"▶ {self._number} '{name}'",
+            f"Section {self._number} '{name}'",
             {"number": self._number, "name": name, "parent": parent, "depth": depth},
             when,
         )
@@ -241,7 +241,7 @@ class FakeLabels:
         inner = self._stack[-1] if self._stack else None
         seq = self._seq(
             "point",
-            f"◆ {self._number} '{name}'",
+            f"Note {self._number} '{name}'",
             {"number": self._number, "name": name},
             when,
         )

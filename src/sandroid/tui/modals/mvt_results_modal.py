@@ -9,6 +9,7 @@ from textual.widgets import Label, Static
 
 from sandroid.core.forensic_evidence import IOCMatch, MatchSeverity, ScanResult
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
+from sandroid.tui.themes import lens_palette
 
 
 @dataclass
@@ -155,6 +156,7 @@ class MVTResultsModal(ForensicModal[MVTResultsAction]):
         total_duration = sum(r.scan_duration for r in self.results)
         total_errors = sum(len(r.errors) for r in self.results)
 
+        c = lens_palette()
         lines = []
         lines.append("[bold]Scan Summary[/bold]")
         lines.append(f"  Scans completed: {total_scans}")
@@ -163,21 +165,21 @@ class MVTResultsModal(ForensicModal[MVTResultsAction]):
         lines.append("")
 
         if total_matches == 0:
-            lines.append("[bold green]✓ No indicators of compromise found[/bold green]")
+            lines.append(f"[bold {c.ok}]No indicators of compromise found[/]")
         else:
             lines.append(
-                f"[bold red]⚠ {total_matches} potential IOC matches found:[/bold red]"
+                f"[bold {c.bad}]{total_matches} potential IOC matches found:[/]"
             )
             if critical > 0:
-                lines.append(f"  [bold #ff0000]Critical: {critical}[/bold #ff0000]")
+                lines.append(f"  [bold {c.bad}]Critical: {critical}[/]")
             if high > 0:
-                lines.append(f"  [bold #ff6600]High: {high}[/bold #ff6600]")
+                lines.append(f"  [{c.bad}]High: {high}[/]")
             medium = total_matches - critical - high
             if medium > 0:
-                lines.append(f"  [#ffcc00]Medium/Low: {medium}[/#ffcc00]")
+                lines.append(f"  [{c.warn}]Medium/Low: {medium}[/]")
 
         if total_errors > 0:
-            lines.append(f"\n[yellow]Warnings: {total_errors} scan errors[/yellow]")
+            lines.append(f"\n[{c.warn}]Warnings: {total_errors} scan errors[/]")
 
         return "\n".join(lines)
 
@@ -187,6 +189,7 @@ class MVTResultsModal(ForensicModal[MVTResultsAction]):
         Returns:
             Formatted results string
         """
+        c = lens_palette()
         lines = []
 
         # Collect all matches and sort by severity
@@ -205,7 +208,7 @@ class MVTResultsModal(ForensicModal[MVTResultsAction]):
         all_matches.sort(key=lambda x: severity_order.get(x[0].severity, 99))
 
         if all_matches:
-            lines.append("[bold cyan]=== Detailed Matches ===[/bold cyan]")
+            lines.append(f"[bold {c.title}]Detailed matches[/]")
             lines.append("")
 
             for match, scan_type in all_matches:
@@ -215,32 +218,35 @@ class MVTResultsModal(ForensicModal[MVTResultsAction]):
                     f"[bold]{match.indicator_type}[/bold]"
                 )
                 lines.append(f"  Source: {match.source} ({scan_type})")
-                lines.append(f"  Indicator: [cyan]{match.indicator_value}[/cyan]")
+                lines.append(f"  Indicator: [{c.accent}]{match.indicator_value}[/]")
                 lines.append(f"  Matched: {match.matched_data}")
                 if match.description:
                     lines.append(f"  Description: [dim]{match.description}[/dim]")
                 lines.append("")
 
         # Show scan details
-        lines.append("[bold cyan]=== Scan Details ===[/bold cyan]")
+        lines.append(f"[bold {c.title}]Scan details[/]")
         lines.append("")
 
         for result in self.results:
-            status = "[green]✓[/green]" if not result.errors else "[yellow]![/yellow]"
+            status = (
+                f"[{c.ok}]done[/]" if not result.errors else f"[{c.warn}]with errors[/]"
+            )
             match_info = (
-                f"[red]{len(result.matches)} matches[/red]"
+                f"[{c.bad}]{len(result.matches)} matches[/]"
                 if result.matches
-                else "[green]clean[/green]"
+                else f"[{c.ok}]clean[/]"
             )
 
             lines.append(
-                f"{status} [bold]{result.scan_type.name}[/bold]: "
-                f"{result.scanned_items} items, {match_info}, {result.scan_duration:.2f}s"
+                f"[bold]{result.scan_type.name}[/bold]: "
+                f"{result.scanned_items} items, {match_info}, "
+                f"{result.scan_duration:.2f}s, {status}"
             )
 
             if result.errors:
                 for error in result.errors:
-                    lines.append(f"  [yellow]⚠ {error}[/yellow]")
+                    lines.append(f"  [{c.warn}]error: {error}[/]")
 
         return "\n".join(lines)
 
@@ -253,10 +259,11 @@ class MVTResultsModal(ForensicModal[MVTResultsAction]):
         Returns:
             Rich markup style string
         """
+        c = lens_palette()
         styles = {
-            MatchSeverity.CRITICAL: "bold #ff0000",
-            MatchSeverity.HIGH: "bold #ff6600",
-            MatchSeverity.MEDIUM: "#ffcc00",
+            MatchSeverity.CRITICAL: f"bold {c.bad}",
+            MatchSeverity.HIGH: c.bad,
+            MatchSeverity.MEDIUM: c.warn,
             MatchSeverity.LOW: "dim",
         }
         return styles.get(severity, "")

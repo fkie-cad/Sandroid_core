@@ -1036,7 +1036,7 @@ def _cov_policy(ctx: ReportContext) -> list[str]:
         parts = []
         for key, pair in changed.items():
             if isinstance(pair, (list, tuple)) and len(pair) == 2:
-                parts.append(f"{key} {pair[0]!r} → {pair[1]!r}")
+                parts.append(f"{key} {pair[0]!r} to {pair[1]!r}")
             else:
                 parts.append(str(key))
         who = d.get("by") or line.get("actor")

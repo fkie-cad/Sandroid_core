@@ -71,6 +71,27 @@ OPS: dict[str, tuple[str, str]] = {
     "attrs": ("A", "#7dd3fc"),
     "noise": ("o", "#5b6479"),
 }
+#: category -> the lens theme token its letter / label is drawn in (the
+#: colours above are the default theme's; ``op_color`` follows the theme).
+OP_TOKENS: dict[str, str] = {
+    "create": "ok",
+    "modify": "screen",
+    "rename": "warn",
+    "delete": "bad",
+    "attrs": "title",
+    "noise": "dim",
+}
+
+
+def op_color(category: str | None) -> str | None:
+    """The running theme's colour of an op category (None: unknown)."""
+    token = OP_TOKENS.get(category or "")
+    if token is None:
+        return None
+    from sandroid.tui.themes import lens_palette
+
+    return str(getattr(lens_palette(), token))
+
 
 #: Events kept per path for the Inspector's Events tab.
 EVENTS_PER_PATH = 30
@@ -358,7 +379,7 @@ class SegmentStats:
     last: datetime | None = None
 
     def op_letters(self) -> list[tuple[str, str]]:
-        return [OPS[c] for c in OPS if self.ops.get(c)]
+        return [(OPS[c][0], op_color(c) or OPS[c][1]) for c in OPS if self.ops.get(c)]
 
     def add(self, event: FileEvent) -> None:
         self.count += 1
@@ -417,8 +438,10 @@ class PathActivity:
         return False
 
     def op_letters(self) -> list[tuple[str, str]]:
-        """``[(letter, colour)]`` in display order (``C M R D A o``)."""
-        return [OPS[c] for c in OPS if self.ops.get(c)]
+        """``[(letter, colour)]`` in display order (``C M R D A o``), in the
+        running theme's colours.
+        """
+        return [(OPS[c][0], op_color(c) or OPS[c][1]) for c in OPS if self.ops.get(c)]
 
     def stats(self, segment: int | None) -> SegmentStats | None:
         """The stats of one segment (``None``: the whole session)."""

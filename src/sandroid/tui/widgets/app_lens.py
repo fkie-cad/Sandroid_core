@@ -309,7 +309,7 @@ class SectionData:
     rows: list[Row]
     summary: str = ""
     show_header: bool = True
-    #: Rows shown only on request (z / ⏎ on the "+N" row) or while filtering.
+    #: Rows shown only on request (z / Enter on the "+N" row) or while filtering.
     hidden_rows: list[Row] = field(default_factory=list)
     hidden_label: str = "more"
     hidden_short: str = "more"
@@ -915,7 +915,7 @@ def build_permissions(f: AppFacts) -> SectionData:
     # Ops without a (requested) permission: READ_CLIPBOARD, *_AUDIO_FOCUS...
     # Most are the platform's own uid-level bookkeeping ("ignore" for every
     # runtime-permission op the app did not get): only notable ones get a
-    # row, the rest collapse into one "+N other ops" row (z / ⏎ / filter).
+    # row, the rest collapse into one "+N other ops" row (z / Enter / filter).
     extra = [o for o in ops if not o.permission or o.permission not in names]
     hidden: list[Row] = []
     for op in sorted(
@@ -2027,16 +2027,16 @@ class LensSection(DataTable):
         key = LESS_KEY if self.expanded else MORE_KEY
         if self.compact:
             text = (
-                f"− hide {hidden} (⏎)"
+                f"hide {hidden} (Enter)"
                 if self.expanded
-                else (f"+{hidden} {data.hidden_short} · ⏎")
+                else (f"+{hidden} {data.hidden_short} (Enter)")
             )
             return _placeholder(key[1:], text, width)
         if self.expanded:
-            text, hint = f"− hide the {hidden} {data.hidden_short}", "⏎ hides them"
+            text, hint = f"hide the {hidden} {data.hidden_short}", "Enter hides them"
         else:
             text = f"+{hidden} {data.hidden_label}"
-            hint = "⏎ shows them · / filters"
+            hint = "Enter shows them, / filters"
         row = _placeholder(key[1:], text, width)
         if width > 1:
             row.cells = (*row.cells[:-1], _t(hint, _c().dim))
@@ -2961,7 +2961,7 @@ class AppLensSections(Vertical):
             return None
         row = widget.cursor_item()
         if row is not None and row.key in (MORE_KEY, LESS_KEY):
-            widget.toggle_expanded()  # ⏎ on "+N other ops" shows them
+            widget.toggle_expanded()  # Enter on "+N other ops" shows them
             return None
         if row is None or not row.inspectable:
             return None

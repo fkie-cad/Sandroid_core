@@ -472,7 +472,7 @@ async def test_enter_inspects_run_and_v_reviews_it_until_l() -> None:
         await pilot.press("v")
         await settle(pilot)
         assert ms.scope == run_history.scope_for_run(ids[0])
-        assert ms.query_one("#shell-header").pill_text == "◆ REVIEW #1 Consent · accept"
+        assert ms.query_one("#shell-header").pill_text == "REVIEW #1 Consent · accept"
         assert view._scope_run_id == ids[0]
         cell = view.query_one("#runs-table").get_row_at(1)[1]
         assert "◆" not in str(cell)  # in review: accent colour, no symbol
@@ -484,7 +484,7 @@ async def test_enter_inspects_run_and_v_reviews_it_until_l() -> None:
         await pilot.press("L")
         await settle(pilot)
         assert ms.scope is None
-        assert ms.query_one("#shell-header").pill_text == "● LIVE"
+        assert ms.query_one("#shell-header").pill_text == "LIVE"
 
         await pilot.press("4")
         await settle(pilot)
@@ -632,7 +632,7 @@ async def test_input_modal_without_select_all_appends() -> None:
 @pytest.mark.asyncio
 async def test_evidence_is_rechecked_when_a_sealed_file_changes() -> None:
     """M-34: the evidence check was cached per session; a tampered file kept
-    showing "✓ verified".
+    showing "verified".
     """
     from sandroid.core import run_report
 
@@ -801,14 +801,14 @@ async def test_scope_pill_follows_the_recorder_and_the_player() -> None:
     async with app.run_test(size=(160, 45)) as pilot:
         ms = await boot(app, pilot)
         header = ms.query_one("#shell-header")
-        assert header.pill_text == "● LIVE"
+        assert header.pill_text == "LIVE"
 
         app.push_screen(ConfirmModal(title="stand-in for the Record dialog"))
         await settle(pilot)
         app._set_status_bar_mode(recording=True)  # capture started
         assert header.pill_text == "Recording"
         app._set_status_bar_mode(recording=False)  # stopped / cancelled
-        assert header.pill_text == "● LIVE"
+        assert header.pill_text == "LIVE"
         app.pop_screen()
         await settle(pilot)
 
@@ -824,7 +824,7 @@ async def test_scope_pill_follows_the_recorder_and_the_player() -> None:
         )
         app._set_status_bar_mode(replaying=False)  # done, failed or stopped
         app._set_replay_phase(None)
-        assert header.pill_text == "● LIVE"
+        assert header.pill_text == "LIVE"
 
 
 @pytest.mark.asyncio

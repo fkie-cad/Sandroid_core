@@ -140,7 +140,7 @@ def test_header_shows_the_run_state_and_no_mode(monkeypatch):
     assert plain().startswith(f"running pid 77  {PKG}")
     assert "spawn" not in plain()
     svc.set_pid(None)
-    assert plain().startswith(f"not running  ␣ start  {PKG}")
+    assert plain().startswith(f"not running  Space starts  {PKG}")
     svc.reset()
     header = panel._render_header()
     assert "use the foreground app" in header
@@ -346,7 +346,7 @@ async def test_shift_k_keeps_every_bypass_that_was_on_armed(monkeypatch):
         await until(pilot, lambda: env.notes)
 
     assert env.notes == [
-        f"Killed {PKG} — bypass ssl, root stay armed; ␣ starts with them"
+        f"Killed {PKG} — bypass ssl, root stay armed; Space starts with them"
     ]
     assert env.killed == [PKG]
     assert env.stopped == ["fritap"]  # the bypass task is not stopped
@@ -468,10 +468,10 @@ def _body(app) -> str:
 
 FULL = (
     "Identity profile 'mara-de' not applied to this app — it started before the "
-    "profile. ⇧R restarts it with the profile; Space in the Identity lens applies "
+    "profile. Shift+R restarts it with the profile; Space in the Identity lens applies "
     "the live values without a restart."
 )
-SHORT = "Identity profile 'mara-de' not applied to this app — ⇧R restarts it with "
+SHORT = "Identity profile 'mara-de' not applied to this app — Shift+R restarts it with "
 
 
 async def test_identity_notice_comes_and_goes_with_the_applied_state(monkeypatch):
@@ -649,7 +649,7 @@ async def test_the_header_says_what_the_pre_start_step_does(monkeypatch):
         t.start()
         await until(pilot, lambda: text in header())
         assert "not running" not in header()
-        assert "␣ start" not in header()
+        assert "Space starts" not in header()
         t = threading.Thread(target=app_start._set_status, args=(None,))
         t.start()
         await until(pilot, lambda: "not running" in header())

@@ -18,6 +18,7 @@ from textual.widgets import ContentSwitcher, DataTable, OptionList, Static
 
 from sandroid.core.menu_controller import MenuController
 from sandroid.services import get_frida_session_service, get_ui_service
+from sandroid.tui.key_display import key_words
 from sandroid.tui.widgets import (
     ActivityLog,
     FilesPanel,
@@ -1271,10 +1272,10 @@ class MainScreen(Screen):
             height = max(1, col.size.height if col is not None else 1)
             return f"{round(100 * self._chat_drag_rows / height)}% · release to snap"
         if self._chat_mode == "max":
-            return "max · ⇧↓ restore · ^Y close"
+            return key_words("max · ⇧↓ restore · ^Y close")
         if self._chat_too_short():
             return "small window · ^Y close"
-        return f"{round(self._chat_ratio * 100)}% · ⇧↑↓ size · ^Y close"
+        return key_words(f"{round(self._chat_ratio * 100)}% · ⇧↑/↓ size · ^Y close")
 
     def open_chat(self, focus: bool = True, *, split: bool = False) -> None:
         """Open the chat dock (max if that was the last choice).
@@ -2054,7 +2055,7 @@ class MainScreen(Screen):
             label = self._scope_label or f"Run {self.scope_run}"
             # ``v`` during a Play: say that the Play goes on (L10).
             busy = " · recording" if recording else (" · rewind" if replaying else "")
-            header.set_pill(f"◆ REVIEW {label}{busy}", "review")
+            header.set_pill(f"REVIEW {label}{busy}", "review")
             return
         if recording or replaying or phase:
             # Record / Rewind status in plain words (core/rewind.py).
@@ -2062,7 +2063,7 @@ class MainScreen(Screen):
                 phase or ("Recording" if recording else "Rewind running"), "rec"
             )
         else:
-            header.set_pill("● LIVE", "")
+            header.set_pill("LIVE", "")
 
     def _update_header(self) -> None:
         """Header breadcrumb + pill from the status bar's cached state."""
