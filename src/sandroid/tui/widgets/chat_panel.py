@@ -76,7 +76,7 @@ from sandroid.ai.tool_permissions import (
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
 from sandroid.tui.widgets.chat_view import (
     AGENT_STATUS,
-    SPINNER,
+    CHIP_CODE_WORDS,
     AgentCard,
     BudgetNotice,
     ChatHeader,
@@ -248,22 +248,21 @@ def banner_lines(settings: Any, mode: str) -> list[tuple[str, str]]:
 def format_banner(settings: Any, mode: str, width: int | None = None) -> Content:
     """The banner at the top of the transcript.
 
-    ``⚠`` hangs in the first two columns: every line, and every wrapped
-    continuation of a line, starts in column 3. With ``width`` the lines are
-    wrapped here (the hanging indent); without, they are left long.
+    Plain words in the warn colour (no glyph). With ``width`` the lines are
+    wrapped here, each wrapped continuation indented by two columns (a
+    hanging indent); without, they are left long.
     """
     out: list[Content] = []
-    for index, (text, style) in enumerate(banner_lines(settings, mode)):
-        lead = Content.styled("⚠ ", "bold $lens-warn") if index == 0 else Content("  ")
+    for text, style in banner_lines(settings, mode):
         body = Content.styled(text, style)
         chunks = body.wrap(max(8, width - 2)) if width else [body]
         for n, chunk in enumerate(chunks):
-            out.append(Content.assemble(lead if n == 0 else Content("  "), chunk))
+            out.append(Content.assemble(Content("  ") if n else Content(""), chunk))
     return Content("\n").join(out)
 
 
 class ChatBanner(Static):
-    """The egress banner, wrapped with a hanging indent under the ``⚠``.
+    """The egress banner, wrapped with a hanging indent.
 
     ``plain_text`` is the unwrapped text (tests, copy).
     """
@@ -397,7 +396,7 @@ def format_permissions(store: Any) -> str:
 
 
 def format_agent_row(index: int, row: dict) -> str:
-    """``1. researcher a-re-3f9c2k · ✓ done · 38s · 9.2k tok · <title>``."""
+    """``1. researcher a-re-3f9c2k · done · 38s · 9.2k tok · <title>``."""
     status = card_status(row.get("status"))
     label = AGENT_STATUS.get(status, (status, ""))[0]
     parts = [f"{index}. {row.get('profile')} {row.get('agent_id')}", label]
@@ -433,7 +432,7 @@ def render_agent_transcript(
             if ev.type == "reasoning_delta":
                 if not thinking:
                     flush()
-                    lines.append("✧ thinking…")
+                    lines.append("thinking…")
                     thinking = True
                 continue
             thinking = thinking and ev.type not in ("text_delta", "tool_call")
@@ -443,17 +442,21 @@ def render_agent_transcript(
                 flush()
                 name, args = unwrap_call(str(p.get("name", "")), p.get("args"))
                 shown = format_args(args).plain
-                lines.append(f"● {humanize_tool_name(name)}  {shown}".rstrip())
+                lines.append(f"{humanize_tool_name(name)}  {shown}".rstrip())
             elif ev.type == "tool_result":
                 ok = p.get("status") == "ok"
-                bits = [p.get("result_id"), p.get("summary")]
+                bits = ["done", p.get("result_id"), p.get("summary")]
                 if not ok:
-                    bits = [p.get("error_code") or p.get("status"), p.get("summary")]
+                    code = p.get("error_code") or p.get("status")
+                    bits = [
+                        CHIP_CODE_WORDS.get(code, code) or "failed",
+                        p.get("summary"),
+                    ]
                 shown = " · ".join(str(b) for b in bits if b)
-                lines.append(f"  └ {'✓' if ok else '✗'} {shown}".rstrip())
+                lines.append(f"  {shown}".rstrip())
             elif ev.type == "error":
                 flush()
-                lines.append(f"✗ {p.get('message') or p.get('kind')}")
+                lines.append(f"Error: {p.get('message') or p.get('kind')}")
             elif ev.type == "turn_end":
                 flush()
                 lines.append(f"── turn {p.get('reason')} · {p.get('rounds', 0)} rounds")
@@ -474,11 +477,15 @@ def render_agent_transcript(
                     str(fn.get("name", "")), _parse_args(fn.get("arguments"))
                 )
                 shown = format_args(args).plain
-                lines.append(f"● {humanize_tool_name(name)}  {shown}".rstrip())
+                lines.append(f"{humanize_tool_name(name)}  {shown}".rstrip())
         elif role == "tool":
             ok = rec.get("status", "ok") == "ok"
-            shown = rec.get("result_id") or rec.get("status") or ""
-            lines.append(f"  └ {'✓' if ok else '✗'} {shown}".rstrip())
+            if ok:
+                shown = " · ".join(b for b in ("done", rec.get("result_id")) if b)
+            else:
+                code = rec.get("error_code") or rec.get("status")
+                shown = CHIP_CODE_WORDS.get(code, code) or "failed"
+            lines.append(f"  {shown}".rstrip())
     return "\n".join(lines)
 
 
@@ -516,7 +523,7 @@ def approval_decision_text(p: dict) -> tuple[str, str, bool]:
     """The one-line answer to an approval: ``(text, style, approved)``."""
     decision, by = p.get("decision"), p.get("by")
     if decision in ("once", "always"):
-        text = "✓ allowed"
+        text = "allowed"
         if p.get("remembered_rule"):
             text += f" · remembered {p['remembered_rule']}"
         elif by == "rule":
@@ -525,9 +532,9 @@ def approval_decision_text(p: dict) -> tuple[str, str, bool]:
             text += " by you"
         return text, "$chat-muted", True
     reason = {"timeout": " (no answer)", "cancelled": " (cancelled)"}.get(by or "", "")
-    text = f"✗ declined{reason}"
+    text = f"declined{reason}"
     if by == "user" and not reason:
-        text = "✗ declined by you"
+        text = "declined by you"
     if p.get("note"):
         text += f" · {p['note']}"
     return text, "$lens-warn", False
@@ -620,42 +627,16 @@ class AgentsBar(Static, can_focus=True):
             super().__init__()
             self.text = text
 
-    #: Seconds per spinner frame while an agent runs (as on the agent cards).
-    SPIN_INTERVAL = AgentCard.SPIN_INTERVAL
-
     def __init__(self, **kwargs: Any) -> None:
         super().__init__("", **kwargs)
         self.rows: list[dict] = []
         self.selected = 0
-        self._spin = 0
-        self._timer: Any = None
 
     def set_rows(self, rows: list[dict]) -> None:
         """Show *rows* (``AgentManager.list`` snapshots, newest first)."""
         self.rows = list(rows)
         self.selected = max(0, min(self.selected, len(self.rows) - 1))
         self.display = bool(self.rows)
-        self._sync_spinner()
-        self.refresh()
-
-    @property
-    def spinning(self) -> bool:
-        """The running spinner animates (at least one agent runs)."""
-        return self._timer is not None
-
-    def on_mount(self) -> None:
-        self._sync_spinner(mounted=True)
-
-    def _sync_spinner(self, mounted: bool = False) -> None:
-        running = any(card_status(r.get("status")) == "running" for r in self.rows)
-        if running and self._timer is None and (mounted or self.is_mounted):
-            self._timer = self.set_interval(self.SPIN_INTERVAL, self._spin_tick)
-        elif not running and self._timer is not None:
-            self._timer.stop()
-            self._timer = None
-
-    def _spin_tick(self) -> None:
-        self._spin += 1
         self.refresh()
 
     @property
@@ -665,22 +646,21 @@ class AgentsBar(Static, can_focus=True):
         return str(self.rows[self.selected].get("agent_id"))
 
     def render(self) -> Content:
-        parts: list[Any] = [("◆ ", "$chat-tool")]
+        parts: list[Any] = [("agents ", "$chat-muted")]
         for index, row in enumerate(self.rows):
             if index:
                 parts.append("   ")
             status = card_status(row.get("status"))
             label, style = AGENT_STATUS.get(status, (status, "$chat-muted"))
-            if status == "running":
-                label = SPINNER[self._spin % len(SPINNER)] + label[1:]
-            text = f"{row.get('profile')} {row.get('agent_id')} · {label}"
             elapsed = format_elapsed(row.get("elapsed_s"))
             if elapsed and status in ("running", "queued"):
-                text += f" {elapsed}"
+                label += f" {elapsed}"
+            name = f"{row.get('profile')} {row.get('agent_id')} · "
             if self.has_focus and index == self.selected:
-                parts.append((text, "reverse bold"))
+                parts.append((name + label, "reverse bold"))
             else:
-                parts.append((text, style))
+                # The words carry the state, in its colour.
+                parts += [(name, "$chat-muted"), (label, style)]
         hint = "  ←→ select · ⏎ open" if self.has_focus else "  ↑ select"
         parts.append((hint, "$chat-muted"))
         return Content.assemble(*parts)
@@ -734,7 +714,7 @@ def _strip_label(text: str, label: str) -> str:
 def format_agent_meta(info: dict, *, tokens: int | None = None) -> Content:
     """The compact header of the agent modal (at most four rows).
 
-    ``researcher · ⠋ running · 1:02 · 9.2k tok · 4 rounds``, then the first
+    ``researcher · running · 1:02 · 9.2k tok · 4 rounds``, then the first
     line of the task, of the result and of an error.
     """
     status = card_status(info.get("status"))
@@ -873,7 +853,7 @@ class AgentTranscriptView(ChatTranscript):
         elif kind == "approval_request":
             tool = humanize_tool_name(str(p.get("tool", "")))
             self.add_block(
-                NoticeLine(f"⚠ waiting for your approval: {tool}", style="$chat-wait")
+                NoticeLine(f"waiting for your approval: {tool}", style="$chat-wait")
             )
         elif kind == "approval_resolved":
             text, style, _ok = approval_decision_text(p)
@@ -890,7 +870,7 @@ class AgentTranscriptView(ChatTranscript):
         elif kind == "error":
             self._finish_stream()
             message = redact_secrets(p.get("message") or p.get("kind") or "error")
-            self.add_block(NoticeLine(f"✗ {message}", style="$lens-bad"))
+            self.add_block(NoticeLine(f"Error: {message}", style="$lens-bad"))
         elif kind == "turn_end":
             self._finish_stream()
             rounds = int(p.get("rounds") or 0)
@@ -1003,7 +983,7 @@ class AgentTranscriptModal(ForensicModal[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="modal-container"):
-            yield Label(Content(f"◆ Agent {self.agent_id}"), classes="modal-title")
+            yield Label(Content(f"Agent {self.agent_id}"), classes="modal-title")
             yield Static("", id="agent-meta")
             with VerticalScroll(id="agent-details"):
                 yield Static("", id="agent-details-text")
@@ -1817,12 +1797,12 @@ class ChatPanel(Widget):
 
     def _on_warning(self, ev: AgentEvent, p: dict) -> None:
         text = p.get("message") or str(p.get("kind", "warning")).replace("_", " ")
-        self._notice(f"⚠ {text}", style="$lens-warn")
+        self._notice(text, style="$lens-warn")
 
     def _on_error(self, ev: AgentEvent, p: dict) -> None:
         self._finish_stream()
         message = redact_secrets(p.get("message") or p.get("kind") or "error")
-        self._notice(f"✗ {message}", style="$lens-bad")
+        self._notice(f"Error: {message}", style="$lens-bad")
         self._set_state("error")
 
     def _on_usage(self, ev: AgentEvent, p: dict) -> None:
@@ -1845,7 +1825,7 @@ class ChatPanel(Widget):
                 key=f"budget:{ev.turn_id}",
             )
         elif reason == "cancelled":
-            self._notice("◼ Stopped", style="$chat-muted")
+            self._notice("Stopped", style="$chat-muted")
         if reason in ("error", "content_filter"):
             self._set_state("error")
         elif self._prompt is None:
@@ -2138,7 +2118,7 @@ class ChatPanel(Widget):
         try:
             session.submit_user_message(text)
         except Exception as exc:
-            self._notice(f"✗ {redact_secrets(exc)}", style="$lens-bad")
+            self._notice(f"Error: {redact_secrets(exc)}", style="$lens-bad")
             self._set_state("error")
             return
         with contextlib.suppress(Exception):
@@ -2150,10 +2130,10 @@ class ChatPanel(Widget):
         self._opening = False
         if error is not None or session is None:
             if isinstance(error, AIClientError):
-                message = f"✗ {redact_secrets(error)}"
+                message = f"Error: {redact_secrets(error)}"
             else:
                 logger.error("Opening the AI thread failed: %s", error)
-                message = f"✗ Could not open the AI thread: {redact_secrets(error)}"
+                message = f"Could not open the AI thread: {redact_secrets(error)}"
             self._notice(message, style="$lens-bad")
             self._set_state("error")
             field = self._input()
@@ -2187,7 +2167,7 @@ class ChatPanel(Widget):
             cancelled = get_agent_manager().cancel_all(session)
         if cancelled:
             plural = "s" if cancelled != 1 else ""
-            self._notice(f"◼ Cancelled {cancelled} agent{plural}")
+            self._notice(f"Cancelled {cancelled} agent{plural}")
         elif not was_running:
             self._refresh_agents()
 
@@ -2320,12 +2300,12 @@ class ChatPanel(Widget):
             self._notice("Can't continue while a reply is running.", style="$lens-warn")
             return
         grant = message.notice.grant
-        self._notice(f"↻ Continue (+{grant} rounds)" if grant else "↻ Continue")
+        self._notice(f"Continue (+{grant} rounds)" if grant else "Continue")
         self._set_state("thinking")
         try:
             session.continue_turn(grant)
         except Exception as exc:
-            self._notice(f"✗ {redact_secrets(exc)}", style="$lens-bad")
+            self._notice(f"Error: {redact_secrets(exc)}", style="$lens-bad")
             return
         with contextlib.suppress(Exception):
             get_agent_manager().note_analyst_message(session)
@@ -2445,7 +2425,7 @@ class ChatPanel(Widget):
     ) -> None:
         current = self._session.thread_id if self._session is not None else None
         if error is not None:
-            self._notice(f"✗ {redact_secrets(error)}", style="$lens-bad")
+            self._notice(f"Error: {redact_secrets(error)}", style="$lens-bad")
             return
         threads = threads or []
         if not threads:
@@ -2525,7 +2505,7 @@ class ChatPanel(Widget):
         self._reset_view()
         if error is not None or result is None:
             self._notice(
-                f"✗ Could not resume {thread_id}: {redact_secrets(error)}",
+                f"Could not resume {thread_id}: {redact_secrets(error)}",
                 style="$lens-bad",
             )
             return
@@ -2537,7 +2517,7 @@ class ChatPanel(Widget):
         with contextlib.suppress(Exception):
             self._window = int(session.meter.window) or None
         title = session.title or thread_id
-        self._notice(f"↺ Resumed “{title}”")
+        self._notice(f"Resumed “{title}”")
         self.refresh_header()
 
     def _render_history(self, records: list[dict]) -> None:
@@ -2578,7 +2558,7 @@ class ChatPanel(Widget):
     def _compact_done(self, result: Any, error: str | None) -> None:
         self._busy = None
         if error:
-            self._notice(f"✗ Compaction failed: {error}", style="$lens-bad")
+            self._notice(f"Compaction failed: {error}", style="$lens-bad")
         elif result is None:
             self._notice("Compaction is not available.", style="$lens-warn")
         self._set_state("idle")
@@ -2597,7 +2577,7 @@ class ChatPanel(Widget):
         try:
             store = get_tool_permission_store()
         except Exception as exc:
-            self._notice(f"✗ {redact_secrets(exc)}", style="$lens-bad")
+            self._notice(f"Error: {redact_secrets(exc)}", style="$lens-bad")
             return
         choice = arg.lower().replace("-", "_")
         if choice in ("allow_all", "toggle"):
@@ -2652,7 +2632,7 @@ class ChatPanel(Widget):
                 report = client.health()
                 text, style = format_health(report)
             except Exception as exc:
-                text, style = f"✗ {redact_secrets(exc)}", "$lens-bad"
+                text, style = f"Error: {redact_secrets(exc)}", "$lens-bad"
             self._post_ui(lambda: self._notice(text, style=style, key="doctor"))
 
         self.run_worker(work, thread=True, exclusive=False, group="chat-doctor")
@@ -2661,7 +2641,7 @@ class ChatPanel(Widget):
 def format_health(report: Any) -> tuple[str, str]:
     """``/doctor`` result line and its style."""
     if getattr(report, "ok", False):
-        bits = ["✓ Endpoint OK"]
+        bits = ["Endpoint OK"]
         if report.ping_ms is not None:
             bits.append(f"ping {report.ping_ms:.0f} ms")
         if report.max_input_tokens:
@@ -2670,7 +2650,7 @@ def format_health(report: Any) -> tuple[str, str]:
             bits.append("model not in /models")
         return " · ".join(bits), "$lens-ok"
     error = redact_secrets(getattr(report, "error", None) or "unknown error")
-    return f"✗ Endpoint check failed: {error}", "$lens-bad"
+    return f"Endpoint check failed: {error}", "$lens-bad"
 
 
 def close_thread(session: Any) -> None:

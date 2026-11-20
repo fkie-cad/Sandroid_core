@@ -137,10 +137,9 @@ HINT_NOTE = "Enter sends No with this note · empty = just No · Esc = No"
 
 
 def approval_title(agent_label: str, tool: str) -> Content:
-    """``⚠ <agent> wants to run <Tool>`` (§6)."""
+    """``<agent> wants to run <Tool>`` (§6); the agent in the warn colour."""
     return Content.assemble(
-        ("⚠ ", "bold $lens-warn"),
-        (agent_label, "bold"),
+        (agent_label, "bold $lens-warn"),
         " wants to run ",
         (humanize_tool_name(tool), "bold"),
     )

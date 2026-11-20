@@ -1194,10 +1194,6 @@ class LogTicker(Horizontal):
         color: #5b6479;
         padding: 0 0 0 2;
     }
-    LogTicker #log-ticker-hint.-attention {
-        color: #f0b429;
-        text-style: bold;
-    }
     """
 
     def __init__(self, **kwargs) -> None:
@@ -1247,13 +1243,14 @@ class LogTicker(Horizontal):
 
     def _sync_hint(self) -> None:
         if self.attention:
+            # The badge in the warn colour (words, no glyph); the key dim.
             log = self.HINT_LOG_OPEN if self._drawer_open else self.HINT_LOG
-            hint = f"{self.attention} · {log}"
+            hint = Content.assemble((self.attention, "bold $lens-warn"), f" · {log}")
         else:
-            hint = self.HINT_OPEN if self._drawer_open else self.HINT
+            hint = Content(self.HINT_OPEN if self._drawer_open else self.HINT)
         try:
             label = self.query_one("#log-ticker-hint", Static)
-            label.update(Content(hint))
+            label.update(hint)
             label.set_class(bool(self.attention), "-attention")
         except Exception:
             pass

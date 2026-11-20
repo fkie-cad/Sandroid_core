@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 from pilot_helpers import settle, until
 from textual.app import App, ComposeResult
+from textual.content import Content
 from textual.widgets import Input, Static
 
 import sandroid.ai.tool_permissions as perms
@@ -523,7 +524,7 @@ async def test_tool_progress_updates_the_running_chip(sessions):
         (tool,) = _blocks(panel, ToolBlock)
         assert tool.running
         assert tool.chip is None
-        assert tool.progress.plain == "└ classifying 120/412 · 9 matched"
+        assert tool.progress.plain == "classifying 120/412 · 9 matched"
         assert "classifying 120/412 · 9 matched" in tool.render().plain
         # A subagent's progress and a later result: the result chip wins.
         await _push(
@@ -584,7 +585,7 @@ async def test_errors_retries_and_compaction(sessions):
         )
         (rule,) = _blocks(panel, CompactionRule)
         assert "2 results masked" in rule.label
-        assert "⟲1" in app.query_one("#chat-header").render().plain
+        assert "1 compacted" in app.query_one("#chat-header").render().plain
         assert "stream dropped" in _notices(panel)
         assert panel.state == "error"
 
@@ -1083,7 +1084,7 @@ async def test_agent_card_bar_and_transcript_modal(sessions, manager):
         bar = panel.query_one("#chat-agents-bar", AgentsBar)
         assert bar.display
         assert "a-re-abcdef" in bar.render().plain
-        assert "◆1" in app.query_one("#chat-header").render().plain
+        assert "1 agent" in app.query_one("#chat-header").render().plain
 
         panel.query_one("#chat-input", Input).focus()
         await pilot.press("up")
@@ -1181,8 +1182,8 @@ def test_agent_transcript_renders_file_records():
     text = render_agent_transcript(records=records)
     assert text.splitlines() == [
         "› Check the hosts",
-        "● List Flows  limit=5",
-        "  └ ✓ R2",
+        "List Flows  limit=5",
+        "  done · R2",
         "Done.",
     ]
 
@@ -1311,7 +1312,7 @@ async def test_bracket_text_is_shown_verbatim_and_never_crashes(
 async def test_approval_answer_sits_on_the_call_above_a_clean_chip(
     sessions, perm_store
 ):
-    """E2E: ``✗ denied: denied: …`` and the decline line after the chip."""
+    """E2E: ``denied: denied: …`` and the decline line after the chip."""
     app = _Harness()
     async with app.run_test(size=(120, 40)) as pilot:
         panel = await _panel(pilot)
@@ -1351,14 +1352,14 @@ async def test_approval_answer_sits_on_the_call_above_a_clean_chip(
         lines = tool.render().plain.splitlines()
         assert len(lines) == 3
         assert "declined by you · use chrome" in lines[1]
-        assert lines[2].strip() == "└ ✗ denied · 22s"
+        assert lines[2].strip() == "denied · 22s"
         assert "declined" not in _notices(panel)  # no extra line after the chip
     assert chat_panel_module.strip_code_prefix("cancelled", "cancelled: x") == "x"
     assert chat_panel_module.strip_code_prefix("denied", "other") == "other"
 
 
 async def test_resume_shows_the_threads_context_use_at_once(sessions, monkeypatch):
-    """E2E: the meter read ``○ 0/262k`` after /threads until the next request."""
+    """E2E: the meter read ``0/262k`` after /threads until the next request."""
     monkeypatch.setattr(FakeMeter, "used", 0)
     monkeypatch.setattr(
         FakeMeter, "estimate", lambda self, messages, tools: 55_000, raising=False
@@ -1503,43 +1504,42 @@ async def test_typing_on_the_agents_bar_goes_to_the_input(sessions, manager):
         assert field.value == "hi"
 
 
-async def test_agents_bar_spinner_animates_only_while_an_agent_runs(monkeypatch):
-    """The bar's running glyph was a fixed frame ("⠋ running 17s")."""
-    from sandroid.tui.widgets.chat_view import SPINNER
-
-    monkeypatch.setattr(AgentsBar, "SPIN_INTERVAL", 0.02)
+async def test_agents_bar_states_are_words_in_their_colour():
+    """No spinner glyph ("⠋ running 17s"): the word and its colour say it."""
 
     class _BarApp(App):
         def compose(self) -> ComposeResult:
             yield AgentsBar()
 
-    def glyph(bar: AgentsBar) -> str:
-        text = bar.render().plain
-        return text[text.index(" · ") + 3]
+    def row(status: str, **extra) -> dict:
+        return {"agent_id": "a1", "profile": "researcher", "status": status, **extra}
+
+    def styled(bar: AgentsBar, word: str) -> set[str]:
+        content = bar.render()
+        return {
+            str(span.style)
+            for span in content.spans
+            if content.plain[span.start : span.end].startswith(word)
+        }
 
     app = _BarApp()
     async with app.run_test(size=(100, 5)) as pilot:
         bar = app.query_one(AgentsBar)
-        assert not bar.spinning
-        bar.set_rows([{"agent_id": "a1", "profile": "researcher", "status": "done"}])
-        assert not bar.spinning
-        bar.set_rows(
-            [
-                {
-                    "agent_id": "a1",
-                    "profile": "researcher",
-                    "status": "running",
-                    "elapsed_s": 17,
-                }
-            ]
-        )
-        assert bar.spinning
-        seen = {glyph(bar)}
-        await until(pilot, lambda: seen.add(glyph(bar)) or len(seen) >= 3)
-        assert seen <= set(SPINNER)
-        bar.set_rows([{"agent_id": "a1", "profile": "researcher", "status": "done"}])
-        assert not bar.spinning
-        assert "running" not in bar.render().plain
+        app.set_focus(None)  # focused, the selected row is reverse video
+        await settle(pilot)
+        bar.set_rows([row("running", elapsed_s=17)])
+        text = bar.render().plain
+        assert "researcher a1 · running 17s" in text
+        assert not any(ch in text for ch in "⠋⠙◆✓✗◼")
+        assert styled(bar, "running") == {"$lens-accent"}
+        for status, word, style in (
+            ("complete", "done", "$lens-ok"),
+            ("failed", "failed", "$lens-bad"),
+            ("cancelled", "cancelled", "$chat-muted"),
+        ):
+            bar.set_rows([row(status)])
+            assert f"researcher a1 · {word}" in bar.render().plain
+            assert styled(bar, word) == {style}
 
 
 async def test_closing_the_agent_modal_returns_to_the_chat_input(sessions, manager):
@@ -1643,7 +1643,7 @@ async def test_agent_cards_update_live_while_running(sessions, manager):
         manager.rows = [row]
         await _push(pilot, panel, ev("agent_spawned", **row))
         (card,) = _blocks(panel, AgentCard)
-        assert card.spinning
+        assert "running" in Content.from_markup(card.border_title).plain
         manager.rows = [{**row, "elapsed_s": 75.0}]
         manager.events["a-re-abcdef"] = [
             ev("usage", agent_id="a-re-abcdef", prompt=1200, completion=34),
@@ -1655,11 +1655,10 @@ async def test_agent_cards_update_live_while_running(sessions, manager):
         title = card.border_title
         assert "1:15" in title
         assert "2.5k tok" in title
-        await until(pilot, lambda: card.border_title != title)  # spins
         manager.rows = [{**row, "status": "complete", "usage": {"prompt_tokens": 2600}}]
         panel._tick()
         assert card.status == "done"
-        assert not card.spinning
+        assert "done" in Content.from_markup(card.border_title).plain
         assert card.tokens == 2600
 
 
@@ -1727,13 +1726,13 @@ def test_history_chips_show_summary_time_and_the_approval():
     ]
     killed, listed = tools
     assert "declined by you · use chrome" in killed.decision.plain
-    assert killed.chip.plain == "└ ✗ denied · 2.2s"
-    assert listed.chip.plain == "└ ✓ R4 · 12 rows · 0.4s"
+    assert killed.chip.plain == "denied · 2.2s"
+    assert listed.chip.plain == "done · R4 · 12 rows · 0.4s"
     # Without timing in the record there is no made-up "0s".
     bare = chat_panel_module.history_blocks(
         [records[4], {**records[5], "summary": None, "duration_ms": None}]
     )
-    assert [w for w, _ in bare if isinstance(w, ToolBlock)][0].chip.plain == "└ ✓ R4"
+    assert [w for w, _ in bare if isinstance(w, ToolBlock)][0].chip.plain == "done · R4"
 
 
 def test_banner_wraps_with_a_hanging_indent():
@@ -1741,7 +1740,9 @@ def test_banner_wraps_with_a_hanging_indent():
 
     settings = get_ai_settings(_ai())
     lines = chat_panel_module.format_banner(settings, "ask", width=40).plain.split("\n")
-    assert lines[0].startswith("⚠ ")
-    assert all(line.startswith("  ") for line in lines[1:])
+    # Words in the warn colour, no "⚠"; wrapped continuations hang by two.
+    assert not lines[0].startswith(" ")
+    assert "⚠" not in "".join(lines)
+    assert any(line.startswith("  ") for line in lines[1:])
     assert all(len(line) <= 40 for line in lines)
     assert len(lines) > len(egress_banner_lines(settings, "ask"))  # it wrapped

@@ -77,7 +77,7 @@ async def test_three_options_with_rule_description_and_agent_label():
         assert _label(app, "btn-always") == "2  Yes, don't ask again for Install APK"
         assert _label(app, "btn-never") == "3  No, and tell it what to do instead…"
         title = str(app.query_one(".tool-permission-title", Label).render())
-        assert title == "⚠ operator a-op-3f9c wants to run Install APK"
+        assert title == "operator a-op-3f9c wants to run Install APK"
         tier = str(app.query_one(".tool-permission-tier", Label).render())
         assert tier == "reversible"
         assert app.query_one(ToolPermissionPrompt).has_focus
@@ -127,7 +127,7 @@ async def test_built_from_a_broker_request():
     async with app.run_test() as pilot:
         await pilot.pause()
         title = str(app.query_one(".tool-permission-title", Label).render())
-        assert title == "⚠ operator a-op-1 wants to run Clear App Data"
+        assert title == "operator a-op-1 wants to run Clear App Data"
         assert app.query_one(".tool-permission-tier").has_class("-consequential")
         message = str(app.query_one(".tool-permission-message", Label).render())
         assert "Wipe the app's data." in message
