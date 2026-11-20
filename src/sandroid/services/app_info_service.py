@@ -68,6 +68,11 @@ APK_PULL_TIMEOUT_SECONDS = 180
 #: Bumped whenever the overview.json layout changes; older entries rebuild.
 OVERVIEW_SCHEMA = 2
 
+#: Keys added to overview.json without a schema bump: an entry without one
+#: is rebuilt here, while older Sandroid versions keep reading the new entry
+#: (a bump would make two versions sharing a cache rebuild each other's).
+OVERVIEW_ADDED_KEYS = ("requested_permissions",)
+
 #: Status every :class:`SuspectedDefence` carries until verified dynamically.
 STATIC_STATUS = "suspected (static)"
 
@@ -457,6 +462,147 @@ class PermissionState(_DictMixin):
     shared_user: str | None = None
     ok: bool = True
     reason: str | None = None
+    #: The device's API level, read only when no requested permission could
+    #: be parsed (the manifest's effective requests stand in then).
+    api_level: int | None = None
+
+
+#: Manifest tags that request a permission.
+USES_PERMISSION_TAGS = ("uses-permission", "uses-permission-sdk-23")
+
+
+def _max_sdk_of(apk: Any, tag: Any) -> int | None:
+    """``android:maxSdkVersion`` of a request tag; ``None`` = no limit."""
+    try:
+        number = int(str(apk.get_value_from_tag(tag, "maxSdkVersion")).strip())
+    except Exception:
+        return None
+    return number if number > 0 else None  # 0 (or less) means no limit
+
+
+def requested_permission_entries(apk: Any) -> list[dict[str, Any]]:
+    """Every permission request of an androguard APK, in manifest order.
+
+    androguard's ``get_permissions()`` reads ``<uses-permission>`` only; a
+    ``<uses-permission-sdk-23>`` request (API 23+) is missing there. This
+    reads both tags and keeps each request's tag and ``maxSdkVersion``, like
+    Dexray Insight 2.1.1's ``requested_permission_entries``.
+
+    Returns:
+        ``[{"name", "tag", "max_sdk_version"}, ...]``; names the parser knows
+        but the tag scan missed are appended as plain ``uses-permission``.
+    """
+    entries: list[dict[str, Any]] = []
+    for tag_name in USES_PERMISSION_TAGS:
+        try:
+            tags = list(apk.find_tags(tag_name))
+        except Exception:
+            continue
+        for tag in tags:
+            try:
+                name = apk.get_value_from_tag(tag, "name")
+            except Exception:
+                name = None
+            if isinstance(name, str) and name:
+                entries.append(
+                    {
+                        "name": name,
+                        "tag": tag_name,
+                        "max_sdk_version": _max_sdk_of(apk, tag),
+                    }
+                )
+    seen = {entry["name"] for entry in entries}
+    try:
+        parsed = [str(n) for n in apk.get_permissions() or [] if n]
+    except Exception:
+        parsed = []
+    for name in parsed:
+        if name not in seen:
+            seen.add(name)
+            entries.append(
+                {"name": name, "tag": "uses-permission", "max_sdk_version": None}
+            )
+    return entries
+
+
+def _request_entries(overview: Any) -> list[dict[str, Any]]:
+    entries = _as_dict(overview).get("requested_permissions")
+    return [e for e in _as_list(entries) if isinstance(e, dict) and e.get("name")]
+
+
+def manifest_permission_names(overview: Any) -> list[str] | None:
+    """Unique permission names the manifest requests (both tags).
+
+    ``None`` when *overview* has no ``requested_permissions`` (an entry
+    from before they were recorded).
+    """
+    entries = _request_entries(overview)
+    if not entries and "requested_permissions" not in _as_dict(overview):
+        return None
+    return list(dict.fromkeys(str(e["name"]) for e in entries))
+
+
+def effective_permission_names(overview: Any, api_level: int) -> list[str]:
+    """The manifest requests a device on *api_level* keeps.
+
+    The package manager drops a request whose ``maxSdkVersion`` is below
+    the device's API level, and ``<uses-permission-sdk-23>`` applies from
+    API 23 on: what is left is what ``dumpsys package`` lists as requested
+    permissions (before any the platform adds on its own). Same rule as
+    Dexray Insight's ``effective_permission_names``.
+    """
+    kept = []
+    for entry in _request_entries(overview):
+        if entry.get("tag") == "uses-permission-sdk-23" and api_level < 23:
+            continue
+        max_sdk = entry.get("max_sdk_version")
+        if isinstance(max_sdk, int) and 0 < max_sdk < api_level:
+            continue
+        kept.append(str(entry["name"]))
+    return list(dict.fromkeys(kept))
+
+
+def permission_counts(
+    state: Any, overview: Any = None
+) -> tuple[int | None, int | None]:
+    """``(requested, in_manifest)`` for the PERMISSIONS header.
+
+    ``requested`` is what the device keeps: the ``dumpsys package``
+    requested permissions, or (when none could be read) the manifest's
+    effective requests on the device's API level; ``None`` when unknown.
+    ``in_manifest`` counts the manifest's unique requests (both tags), or
+    ``None`` without a decoded manifest.
+    """
+    grants = list(getattr(state, "permissions", None) or [])
+    requested: int | None = sum(1 for g in grants if g.requested) or None
+    api_level = getattr(state, "api_level", None)
+    if requested is None and isinstance(api_level, int) and api_level > 0:
+        if manifest_permission_names(overview) is not None:
+            requested = len(effective_permission_names(overview, api_level))
+    names = manifest_permission_names(overview)
+    return requested, (len(names) if names is not None else None)
+
+
+def device_api_level(serial: str | None) -> int | None:
+    """API level of *serial* (DeviceManager's device, else getprop); never raises."""
+    try:
+        from sandroid.core.device_manager import DeviceManager
+
+        dm = DeviceManager._instance  # the existing singleton only
+        active = dm.active_device if dm is not None else None
+        if (
+            active is not None
+            and getattr(active, "api_level", None)
+            and (serial is None or getattr(active, "serial", None) == serial)
+        ):
+            return int(active.api_level)
+    except Exception:
+        pass
+    try:
+        out = _adb_stdout("shell getprop ro.build.version.sdk", serial).strip()
+        return int(out) if out.isdigit() else None
+    except Exception:
+        return None
 
 
 _PERM_LINE_RE = re.compile(r"^([^\s:]+)(?::\s*(.*))?$")
@@ -694,12 +840,15 @@ def get_permission_state(
         dangerous = parse_dangerous_permissions(
             _adb_stdout("shell pm list permissions -g -d", serial)
         )
-        return parse_permission_state(
+        state = parse_permission_state(
             dumpsys_output,
             package,
             dangerous=dangerous,
             manifest_protection=manifest_protection,
         )
+        if not any(g.requested for g in state.permissions):
+            state.api_level = device_api_level(serial)
+        return state
     except Exception as exc:
         logger.debug("permission state failed for %s: %s", package, exc)
         return PermissionState(package=package, ok=False, reason=str(exc))
@@ -1753,6 +1902,8 @@ class ApkCache:
         data = self._read_json(key, "overview.json")
         if data is None or data.get("schema") != OVERVIEW_SCHEMA:
             return None
+        if any(name not in data for name in OVERVIEW_ADDED_KEYS):
+            return None
         current = _androguard_version()
         if current and data.get("androguard_version") != current:
             return None
@@ -2183,7 +2334,9 @@ def build_apk_overview(apk_paths: list[str]) -> dict[str, Any]:
         The overview dict (``schema``, ``package``, ``version_name``,
         ``version_code``, ``min_sdk``, ``target_sdk``, ``debuggable``,
         ``allow_backup``, ``components``, ``exported_without_permission_count``,
-        ``deep_links``, ``permissions``, ``permission_protection``,
+        ``deep_links``, ``permissions`` (both request tags),
+        ``requested_permissions`` (see :func:`requested_permission_entries`),
+        ``permission_protection``,
         ``declared_permissions``, ``nsc``, ``native_libs``,
         ``native_lib_paths``, ``abis``, ``signer``, ``splits``, ``errors``).
 
@@ -2259,7 +2412,9 @@ def build_apk_overview(apk_paths: list[str]) -> dict[str, Any]:
     ]
     overview["deep_links"] = _deep_links(summary["components"])
     requested_prot, declared_prot = _permission_protection(base)
-    overview["permissions"] = sorted(safe("get_permissions") or [])
+    entries = requested_permission_entries(base)
+    overview["requested_permissions"] = entries
+    overview["permissions"] = sorted({e["name"] for e in entries})
     overview["permission_protection"] = requested_prot
     overview["declared_permissions"] = declared_prot
     try:

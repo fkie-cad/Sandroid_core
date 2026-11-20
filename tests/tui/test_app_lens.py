@@ -370,8 +370,55 @@ def test_permission_rows_join_appops_and_list_op_only_rows() -> None:
     assert "used recently" in by_key["perm:android.permission.CAMERA"]
     assert "denied" in by_key["perm:android.permission.READ_CONTACTS"]
     assert data.summary == (
-        "4 requested · 3 dangerous (2 granted) · 2 used recently · 1 no recorded use"
+        "4 requested, 3 dangerous (2 granted), 2 used recently, 1 no recorded use"
     )
+    assert " · " not in data.summary  # plain words and commas, no glyphs
+
+
+def test_permissions_header_counts_what_the_device_keeps() -> None:
+    """Requested = dumpsys (what the device keeps); the manifest count beside
+    it when it differs; "no recorded use" never counts op-only rows.
+    """
+    overview = dict(
+        OVERVIEW,
+        requested_permissions=[
+            {"name": g.name, "tag": "uses-permission", "max_sdk_version": None}
+            for g in _grants().permissions
+        ]
+        + [
+            {
+                "name": "android.permission.WRITE_EXTERNAL_STORAGE",
+                "tag": "uses-permission",
+                "max_sdk_version": 28,
+            },
+            {
+                "name": "android.permission.BLUETOOTH_SCAN",
+                "tag": "uses-permission-sdk-23",
+                "max_sdk_version": None,
+            },
+        ],
+    )
+    static = StaticOverview(package=PKG, overview=overview, from_cache=True)
+    ops = _appops()
+    ops.ops.extend(_bookkeeping_ops())
+    f = AppFacts(package=PKG, permissions=_grants(), appops=ops, static=static)
+    data = build_permissions(f)
+    assert data.summary == (
+        "4 requested, 6 in the manifest, 3 dangerous (2 granted), "
+        "2 used recently, 1 no recorded use"
+    )
+    # the manifest evidence names the real request tag
+    camera = next(r for r in data.rows if r.key == "perm:android.permission.CAMERA")
+    assert '<uses-permission android:name="android.permission.CAMERA" />' in str(
+        camera.evidence[0][1]
+    )
+    # grants unreadable (device API unknown): the manifest count alone
+    f.permissions = PermissionState(package=PKG, ok=False, reason="offline")
+    assert build_permissions(f).summary.startswith("6 in the manifest, 0 dangerous")
+    # equal counts: no manifest note
+    f.permissions = _grants()
+    overview["requested_permissions"] = overview["requested_permissions"][:4]
+    assert build_permissions(f).summary.startswith("4 requested, 3 dangerous")
 
 
 def test_trackers_hint_without_insight_and_defences_are_static() -> None:
@@ -505,7 +552,7 @@ async def test_sections_render_inspect_and_space_starts(fake, monkeypatch, size)
             t for _id, t in app_lens.SECTIONS
         ]
         perms = sections.section("permissions")
-        assert "4 requested · 3 dangerous (2 granted)" in _band(perms)
+        assert "4 requested, 3 dangerous (2 granted)" in _band(perms)
         assert any("READ_CLIPBOARD" in t for t in _texts(perms))
         exposure = _texts(sections.section("exposure"))
         assert any(".Files" in t and "no permission" in t for t in exposure)
@@ -1072,10 +1119,24 @@ async def test_light_themes_recolor_the_shell_chrome_and_status_glyphs(fake):
         assert header.styles.background.hex.lower() == "#0b1628"
 
 
+def _static_event(state: str, **data) -> None:
+    """Publish a static analysis (``a``) state TaskOutput off the UI thread."""
+    from sandroid.core.events.events import TaskOutput
+
+    payload = {"state": state, "package": PKG, "profile": "privacy", **data}
+    event = TaskOutput(
+        task_name="static_analysis",
+        message="free text the panel never parses",
+        data=payload,
+        source="static_analysis",
+    )
+    worker = threading.Thread(target=event.publish)
+    worker.start()
+    worker.join()
+
+
 async def test_trackers_re_read_the_cache_when_static_analysis_ends(fake):
     """'press a' must go away once ``a`` recorded an Insight result."""
-    from sandroid.core.events.events import AnalysisCompleted
-
     FakeService.no_insight = {PKG}
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
@@ -1085,13 +1146,147 @@ async def test_trackers_re_read_the_cache_when_static_analysis_ends(fake):
         await settle(pilot)
         assert _texts(sections.section("trackers"))[0] == ANALYSIS_HINT
         FakeService.no_insight = set()  # the analysis wrote meta.json
-        AnalysisCompleted(source="static_analysis").publish()
+        _static_event("finished", duration_s=12.0, results_dir="/x")
         await until(
             pilot,
             lambda: any(
                 "Firebase Analytics" in t for t in _texts(sections.section("trackers"))
             ),
         )
+
+
+async def test_static_analysis_progress_in_the_header_and_toasts(fake, monkeypatch):
+    app = _app()
+    async with app.run_test(size=(200, 45)) as pilot:
+        ms = await boot(app, pilot)
+        toasts: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            app,
+            "notify",
+            lambda msg, severity="information", **_k: toasts.append((msg, severity)),
+        )
+        sections = _sections(ms)
+        panel = ms.query_one(SpotlightPanel)
+        await until(pilot, lambda: _loaded(sections) and not sections._runtime_inflight)
+        assert "static analysis" not in panel._render_header()
+
+        _static_event("started", trackers=True, security=False, verbose=False)
+        await until(pilot, lambda: panel._static_timer is not None)
+        assert "static analysis running (privacy profile), 0 s" in str(
+            panel.query_one("#spotlight-header").render()
+        )
+        # the 1 s timer keeps the elapsed time current
+        next(iter(panel._static_runs.values()))["since"] -= 80
+        await until(
+            pilot,
+            lambda: "privacy profile), 1 min 2"
+            in str(panel.query_one("#spotlight-header").render()),
+        )
+        # another app's run and a local APK (package unknown) stay out of it
+        _static_event("started", package=OTHER)
+        _static_event("started", package=None, apk="sample.apk")
+        await until(pilot, lambda: len(panel._static_runs) == 3)
+        assert panel._render_header().count("static analysis") == 1
+
+        before = len(FakeService.calls)
+        _static_event("finished", duration_s=95.4, results_dir="/x")
+        await until(pilot, lambda: toasts)
+        assert toasts == [("Static analysis done in 1 min 35 s", "information")]
+        assert "static analysis" not in panel._render_header()
+        await until(
+            pilot,
+            lambda: any(
+                m == "static_cache" for m, _p, _t in FakeService.calls[before:]
+            ),
+        )
+        assert panel._static_timer is not None  # two runs still going
+
+        toasts.clear()
+        _static_event("failed", package=OTHER, error="dexray-insight crashed")
+        _static_event("cancelled", package=None, apk="sample.apk")
+        await until(pilot, lambda: len(toasts) == 2)
+        assert toasts == [
+            (
+                "Static analysis failed for org.other.app: dexray-insight crashed",
+                "warning",
+            ),
+            ("Static analysis cancelled for sample.apk", "information"),
+        ]
+        assert panel._static_runs == {}
+        assert panel._static_timer is None  # no timer while nothing runs
+
+
+def test_static_analysis_state_keys_only_on_data_state() -> None:
+    from sandroid.core.events import Event, EventType
+    from sandroid.tui.widgets.spotlight_panel import (
+        duration_words,
+        static_analysis_state,
+    )
+
+    def event(data, source="static_analysis"):
+        return Event(type=EventType.TASK_OUTPUT, data=data, source=source)
+
+    payload = {"state": "finished", "package": PKG}
+    assert static_analysis_state(event({"data": payload})) == payload
+    # "Found 12 permissions" outputs carry no state; other tools are ignored
+    assert static_analysis_state(event({"message": "finished", "data": None})) is None
+    assert static_analysis_state(event({"data": {"state": "odd"}})) is None
+    assert static_analysis_state(event({"data": payload}, source="network")) is None
+    assert [duration_words(s) for s in (0.4, 45, 60, 80, 3600)] == [
+        "0 s",
+        "45 s",
+        "1 min",
+        "1 min 20 s",
+        "60 min",
+    ]
+
+
+def _static_with(insight: dict, **insight_meta) -> StaticOverview:
+    static = StaticOverview(
+        package=PKG,
+        overview=OVERVIEW,
+        meta={"insight": {"summary": insight, **insight_meta}},
+        from_cache=True,
+    )
+    static.set_insight(insight)
+    return static
+
+
+def test_trackers_say_not_analysed_when_the_run_had_trackers_off() -> None:
+    static = _static_with(
+        {**INSIGHT, "tracker_analysis": None},
+        options={"profile": "privacy", "trackers": False},
+        trackers_from_previous_run=False,
+    )
+    section = build_trackers(AppFacts(package=PKG, static=static))
+    assert section.summary.startswith("trackers not analysed · 3 SDKs")
+    assert section.rows[0].text.startswith("trackers not analysed")
+    assert not section.rows[0].inspectable
+    assert "no trackers" not in section.summary
+    assert "0 tracker" not in section.summary
+    # trackers on and none found: say so in words
+    analysed = _static_with(
+        {**INSIGHT, "tracker_analysis": {"detected_trackers": []}},
+        options={"profile": "privacy", "trackers": True},
+    )
+    summary = build_trackers(AppFacts(package=PKG, static=analysed)).summary
+    assert summary.startswith("no trackers · 3 SDKs")
+
+
+def test_trackers_carried_over_say_from_the_previous_run() -> None:
+    static = _static_with(
+        {
+            **INSIGHT,
+            "tracker_analysis": {
+                "detected_trackers": [{"name": "Google AdMob", "category": "ads"}]
+            },
+        },
+        options={"profile": "privacy", "trackers": False},
+        trackers_from_previous_run=True,
+    )
+    section = build_trackers(AppFacts(package=PKG, static=static))
+    assert section.summary.startswith("1 tracker (from the previous run) · 3 SDKs")
+    assert "Google AdMob" in section.rows[0].text
 
 
 async def test_lens_activation_re_reads_a_cache_without_insight(fake):
@@ -1245,8 +1440,9 @@ def test_bookkeeping_ops_collapse_and_are_counted() -> None:
         "op:ACCEPT_HANDOVER",
         "op:ACCESS_RESTRICTED_SETTINGS",
     }
-    # FINE_LOCATION (granted, no access) + 5 never-used op-only rows
-    assert data.summary.endswith("2 used recently · 6 no recorded use")
+    # Only FINE_LOCATION (requested, granted, no access) counts: the 5
+    # never-used op-only rows stay on the "+N other ops" line
+    assert data.summary.endswith("2 used recently, 1 no recorded use")
     noted = [r for r in [*data.rows, *data.hidden_rows] if "no recorded use" in r.text]
     assert len(noted) == 6
 

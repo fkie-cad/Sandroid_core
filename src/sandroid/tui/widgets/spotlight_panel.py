@@ -35,6 +35,7 @@ import time
 from typing import TYPE_CHECKING
 
 from rich.markup import escape
+from rich.text import Text
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.widget import Widget
@@ -97,26 +98,40 @@ _HIDDEN_POLL_EVERY = 2
 _AM_RECORD = re.compile(r"ProcessRecord\{[0-9a-fA-F]+ (\d+):")
 
 
-def _is_static_analysis_end(event) -> bool:
-    """True for the event that ends a static analysis (``a``).
+#: ``data.state`` values of the ``static_analysis`` TaskOutputs (``a``).
+_STATIC_STATES = ("started", "finished", "failed", "cancelled")
 
-    ``StaticAnalysis`` publishes ``AnalysisCompleted`` (a STATE_CHANGED with
-    source ``static_analysis``) after recording the Insight result in the
-    APK cache; a task-runner TASK_STOPPED of a static-analysis task counts
-    too.
+
+def static_analysis_state(event) -> dict | None:
+    """``data`` of a static analysis (``a``) state TaskOutput, else ``None``.
+
+    Keys only on ``data.state`` (``started``/``finished``/``failed``/
+    ``cancelled``), never on the message text; the "Found N ..." outputs of
+    the same task carry no state and are ignored.
     """
-    try:
-        from sandroid.core.events import EventType
+    data = getattr(event, "data", None)
+    if not isinstance(data, dict):
+        return None
+    if (
+        getattr(event, "source", None) != "static_analysis"
+        and data.get("task_name") != "static_analysis"
+    ):
+        return None
+    # The bus event's ``data`` holds the TaskOutput fields; its own ``data``
+    # (the state payload) is nested.
+    inner = data.get("data")
+    if not isinstance(inner, dict) or inner.get("state") not in _STATIC_STATES:
+        return None
+    return inner
 
-        if getattr(event, "type", None) == EventType.TASK_STARTED:
-            return False
-        if getattr(event, "source", None) == "static_analysis":
-            return True
-        data = getattr(event, "data", None) or {}
-        name = str(data.get("task_name") or "") if isinstance(data, dict) else ""
-        return "static" in name.lower() and "analysis" in name.lower()
-    except Exception:
-        return False
+
+def duration_words(seconds: float) -> str:
+    """``45 s`` / ``1 min 20 s`` / ``2 min``."""
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return f"{seconds} s"
+    minutes, rest = divmod(seconds, 60)
+    return f"{minutes} min {rest} s" if rest else f"{minutes} min"
 
 
 class SpotlightPanel(Widget):
@@ -277,6 +292,10 @@ class SpotlightPanel(Widget):
         # (package, profile id) while the identity profile was not applied
         # to the app; read off the UI thread (poll, identity status events).
         self._identity_gap: tuple[str, str] | None = None
+        # Running static analyses (``a``), UI thread only: run key (APK file
+        # name, else package) -> {"package", "apk", "profile", "since"}.
+        self._static_runs: dict[str, dict] = {}
+        self._static_timer = None
 
     # -- services (lazy) --------------------------------------------------
 
@@ -381,6 +400,7 @@ class SpotlightPanel(Widget):
             except Exception:
                 pass
             self._poll_timer = None
+        self._stop_static_timer()
 
     def _on_pre_start_status(self) -> None:
         """A pre-start step began or ended (any thread): repaint the header."""
@@ -407,8 +427,6 @@ class SpotlightPanel(Widget):
                     self._ui.post(self.refresh_panel)
                     if state_changed:
                         self._ui.post(self._facts_state_changed)
-                    if _is_static_analysis_end(event):
-                        self._ui.post(self._static_analysis_finished)
 
                 return _cb
 
@@ -420,6 +438,14 @@ class SpotlightPanel(Widget):
                 cb = _make_cb(event_type == EventType.STATE_CHANGED)
                 bus.subscribe(event_type, cb)
                 self._event_handlers.append((event_type, cb))
+
+            def _on_task_output(event) -> None:
+                state = static_analysis_state(event)
+                if state is not None:
+                    self._post(self._static_state, dict(state))
+
+            bus.subscribe(EventType.TASK_OUTPUT, _on_task_output)
+            self._event_handlers.append((EventType.TASK_OUTPUT, _on_task_output))
         except Exception as exc:
             logger.debug(f"SpotlightPanel event subscribe failed: {exc}")
 
@@ -540,6 +566,14 @@ class SpotlightPanel(Widget):
         sections = self._sections()
         if sections is not None and sections.refreshing:
             header += f"  [{c.dim}]refreshing app facts[/]"
+        static = self._static_run_for(package)
+        if static is not None:
+            elapsed = duration_words(time.monotonic() - static["since"])
+            note = f"static analysis running ({static['profile']} profile), {elapsed}"
+            width = self.size.width
+            if width and Text.from_markup(header).cell_len + len(note) + 4 > width:
+                note = f"static analysis, {elapsed}"
+            header += f"  [{c.dim}]{escape(note)}[/]"
         return header
 
     def _render_body(self) -> str:
@@ -756,10 +790,80 @@ class SpotlightPanel(Widget):
         if sections is not None:
             sections.note_state_changed()
 
-    def _static_analysis_finished(self) -> None:
-        sections = self._sections()
-        if sections is not None:
-            sections.static_analysis_finished()
+    # -- static analysis (``a``) progress ----------------------------------
+
+    def _static_run_for(self, package: str | None) -> dict | None:
+        """The running static analysis of *package* (``None``: none)."""
+        if not package:
+            return None
+        for run in self._static_runs.values():
+            if run["package"] == package:
+                return run
+        return None
+
+    def _static_state(self, data: dict) -> None:
+        """A static analysis started or ended (UI thread).
+
+        The header shows a run of the selected app while it runs (a 1 s
+        timer counts the time); its end is a toast, and a finished run makes
+        the App lens re-read the static cache (TRACKERS, defences).
+        """
+        state = data.get("state")
+        package = data.get("package") or None
+        apk = data.get("apk") or None
+        key = str(apk or package or "")
+        if state == "started":
+            self._static_runs[key] = {
+                "package": package,
+                "apk": apk,
+                "profile": str(data.get("profile") or "generic"),
+                "since": time.monotonic(),
+            }
+            if self._static_timer is None:
+                try:
+                    self._static_timer = self.set_interval(1.0, self._repaint_header)
+                except Exception:
+                    self._static_timer = None
+            self._repaint_header()
+            return
+        run = self._static_runs.pop(key, None)
+        if not self._static_runs:
+            self._stop_static_timer()
+        self._repaint_header()
+        selected = self._current_package()
+        package = package or (run or {}).get("package")
+        target = "" if package and package == selected else (package or apk or "")
+        suffix = f" for {target}" if target else ""
+        if state == "finished":
+            try:
+                took = duration_words(float(data.get("duration_s")))
+            except (TypeError, ValueError):
+                took = None
+            done = f"Static analysis done in {took}" if took else "Static analysis done"
+            self._notify(done + suffix, "information")
+            if package is None or package == selected:
+                sections = self._sections()
+                if sections is not None:
+                    sections.static_analysis_finished()
+        elif state == "failed":
+            error = str(data.get("error") or "unknown error")
+            self._notify(f"Static analysis failed{suffix}: {error}", "warning")
+        elif state == "cancelled":
+            self._notify(f"Static analysis cancelled{suffix}", "information")
+
+    def _repaint_header(self) -> None:
+        try:
+            self.query_one("#spotlight-header", Static).update(self._render_header())
+        except Exception:
+            pass
+
+    def _stop_static_timer(self) -> None:
+        if self._static_timer is not None:
+            try:
+                self._static_timer.stop()
+            except Exception:
+                pass
+            self._static_timer = None
 
     def focus(self, scroll_visible: bool = True):
         """Focus the last-used section table when an app is shown.

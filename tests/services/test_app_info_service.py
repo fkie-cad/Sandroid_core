@@ -358,6 +358,129 @@ def test_get_permission_state_uses_serial_and_never_raises(fake_adb, monkeypatch
     assert not ais.get_permission_state("bad;pkg").ok
 
 
+class _ManifestApk:
+    """androguard-like APK: ``(tag, name, maxSdkVersion)`` requests."""
+
+    REQUESTS = [
+        ("uses-permission", "android.permission.INTERNET", None),
+        ("uses-permission", "android.permission.WRITE_EXTERNAL_STORAGE", "28"),
+        ("uses-permission", "android.permission.BLUETOOTH", "30"),
+        ("uses-permission", "android.permission.CAMERA", "0"),
+        ("uses-permission-sdk-23", "android.permission.ACCESS_FINE_LOCATION", None),
+        ("uses-permission-sdk-23", "android.permission.INTERNET", None),
+    ]
+
+    def __init__(self, path=None):
+        self.path = path
+
+    def find_tags(self, tag_name):
+        return [r for r in self.REQUESTS if r[0] == tag_name]
+
+    def get_value_from_tag(self, tag, attribute):
+        return {"name": tag[1], "maxSdkVersion": tag[2]}[attribute]
+
+    def get_permissions(self):
+        # androguard reads <uses-permission> only (plus a name the tag scan
+        # cannot see here, to show nothing the parser reports is lost)
+        return [r[1] for r in self.REQUESTS if r[0] == "uses-permission"] + [
+            "android.permission.VIBRATE"
+        ]
+
+    def get_attribute_value(self, tag, name):
+        return None
+
+    def get_files(self):
+        return []
+
+
+def test_requested_permission_entries_read_both_tags():
+    entries = ais.requested_permission_entries(_ManifestApk())
+    assert [(e["tag"], e["name"], e["max_sdk_version"]) for e in entries] == [
+        ("uses-permission", "android.permission.INTERNET", None),
+        ("uses-permission", "android.permission.WRITE_EXTERNAL_STORAGE", 28),
+        ("uses-permission", "android.permission.BLUETOOTH", 30),
+        ("uses-permission", "android.permission.CAMERA", None),  # 0 = no limit
+        ("uses-permission-sdk-23", "android.permission.ACCESS_FINE_LOCATION", None),
+        ("uses-permission-sdk-23", "android.permission.INTERNET", None),
+        ("uses-permission", "android.permission.VIBRATE", None),
+    ]
+
+
+def test_build_apk_overview_records_sdk23_requests(monkeypatch, tmp_path):
+    monkeypatch.setattr(ais, "androguard_apk_class", lambda: _ManifestApk)
+    overview = ais.build_apk_overview([str(tmp_path / "base.apk")])
+    assert "android.permission.ACCESS_FINE_LOCATION" in overview["permissions"]
+    assert len(overview["permissions"]) == 6  # unique names, both tags
+    assert len(overview["requested_permissions"]) == 7
+    assert ais.manifest_permission_names(overview) == [
+        "android.permission.INTERNET",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.BLUETOOTH",
+        "android.permission.CAMERA",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.VIBRATE",
+    ]
+
+
+_WRITE = "android.permission.WRITE_EXTERNAL_STORAGE"
+_BT = "android.permission.BLUETOOTH"
+
+
+@pytest.mark.parametrize(
+    ("api_level", "dropped"),
+    [
+        # <uses-permission-sdk-23> applies from API 23 on (INTERNET stays:
+        # it is also requested with the plain tag)
+        (22, {"android.permission.ACCESS_FINE_LOCATION"}),
+        (28, set()),  # maxSdkVersion 28 still applies on API 28
+        (29, {_WRITE}),
+        (35, {_WRITE, _BT}),
+    ],
+)
+def test_effective_permission_names_drop_max_sdk_below_the_device(api_level, dropped):
+    overview = {
+        "requested_permissions": ais.requested_permission_entries(_ManifestApk())
+    }
+    names = set(ais.manifest_permission_names(overview))
+    kept = ais.effective_permission_names(overview, api_level)
+    assert set(kept) == names - dropped
+    assert len(kept) == len(set(kept))
+
+
+def test_permission_counts_prefer_dumpsys_and_fall_back_to_the_manifest():
+    overview = {
+        "requested_permissions": ais.requested_permission_entries(_ManifestApk())
+    }
+    state = ais.parse_permission_state(DUMPSYS_PACKAGE_API30, PKG)
+    requested = sum(1 for g in state.permissions if g.requested)
+    assert ais.permission_counts(state, overview) == (requested, 6)
+    assert ais.permission_counts(state, None) == (requested, None)
+    # No requested permission readable: the manifest's effective requests
+    # on the device's API level stand in.
+    empty = ais.PermissionState(package=PKG, ok=False, reason="x", api_level=35)
+    assert ais.permission_counts(empty, overview) == (4, 6)
+    empty.api_level = None
+    assert ais.permission_counts(empty, overview) == (None, 6)
+
+
+def test_get_permission_state_reads_the_api_level_only_when_needed(fake_adb):
+    fake = fake_adb(
+        {
+            "dumpsys package": DUMPSYS_PACKAGE_API30,
+            "list permissions": PM_DANGEROUS,
+            "getprop ro.build.version.sdk": "35\n",
+        }
+    )
+    state = ais.get_permission_state(PKG, serial="emulator-5556")
+    assert state.api_level is None
+    assert not any("getprop" in c for c, _s in fake.calls)
+    fake = fake_adb({"dumpsys package": "", "getprop ro.build.version.sdk": "35\n"})
+    state = ais.get_permission_state(PKG, serial="emulator-5556")
+    assert not state.ok
+    assert state.api_level == 35
+    assert all(serial == "emulator-5556" for _c, serial in fake.calls)
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -751,6 +874,7 @@ def test_cache_layout_and_meta_merge(cache_root):
         "schema": ais.OVERVIEW_SCHEMA,
         "package": PKG,
         "androguard_version": ais._androguard_version(),
+        "requested_permissions": [],
     }
     assert cache.write_entry(H1, overview=overview, meta_updates={"package": PKG})
     first = cache.read_meta(H1)
@@ -774,9 +898,26 @@ def test_cache_overview_schema_mismatch_is_a_miss(cache_root):
     assert cache.read_overview(H1) is None
 
 
+def test_cache_overview_without_an_added_key_is_a_miss(cache_root):
+    """An entry from before ``requested_permissions`` is rebuilt here."""
+    cache = ais.ApkCache()
+    overview = {
+        "schema": ais.OVERVIEW_SCHEMA,
+        "androguard_version": ais._androguard_version(),
+    }
+    cache.write_entry(H1, overview=overview)
+    assert cache.read_overview(H1) is None
+    cache.write_entry(H1, overview={**overview, "requested_permissions": []})
+    assert cache.read_overview(H1) is not None
+
+
 def test_cache_other_androguard_version_is_stale(cache_root, monkeypatch):
     cache = ais.ApkCache()
-    overview = {"schema": ais.OVERVIEW_SCHEMA, "androguard_version": "3.0.0"}
+    overview = {
+        "schema": ais.OVERVIEW_SCHEMA,
+        "androguard_version": "3.0.0",
+        "requested_permissions": [],
+    }
     cache.write_entry(H1, overview=overview)
     monkeypatch.setattr(ais, "_androguard_version", lambda: "4.1.3")
     assert cache.read_overview(H1) is None
@@ -930,6 +1071,7 @@ def test_static_overview_cache_hit_needs_no_pull(fake_adb, cache_root, monkeypat
             "schema": ais.OVERVIEW_SCHEMA,
             "native_libs": [],
             "androguard_version": ais._androguard_version(),
+            "requested_permissions": [],
         },
     )
     monkeypatch.setattr(
@@ -2215,6 +2357,7 @@ def test_static_overview_exposes_trackers_and_protections(fake_adb, cache_root):
         overview={
             "schema": ais.OVERVIEW_SCHEMA,
             "androguard_version": ais._androguard_version(),
+            "requested_permissions": [],
         },
     )
     ais.record_insight_result([H1], INSIGHT_WITH_PATHS)

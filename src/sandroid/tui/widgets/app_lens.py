@@ -633,8 +633,24 @@ def _short_perm(name: str) -> str:
     return name[len(_PERM_PREFIX) :] if name.startswith(_PERM_PREFIX) else name
 
 
-def _manifest_perm_line(name: str) -> str:
-    return f'<uses-permission android:name="{name}" />'
+def _manifest_perm_line(name: str, requests: dict[str, list[Any]] | None = None) -> str:
+    """The manifest request(s) of *name*, with their tag and maxSdkVersion.
+
+    *requests* maps names to overview ``requested_permissions`` entries
+    (``None``: not known, the plain ``<uses-permission>`` is shown).
+    """
+    if requests is None:
+        return f'<uses-permission android:name="{name}" />'
+    entries = requests.get(name)
+    if not entries:
+        return "not in this app's manifest"
+    lines = []
+    for entry in entries:
+        tag = str(entry.get("tag") or "uses-permission")
+        max_sdk = entry.get("max_sdk_version")
+        limit = f' android:maxSdkVersion="{max_sdk}"' if max_sdk else ""
+        lines.append(f'<{tag} android:name="{name}"{limit} />')
+    return "\n".join(lines)
 
 
 def _op_cell(ops: list[Any]) -> Text:
@@ -812,6 +828,12 @@ def build_permissions(f: AppFacts) -> SectionData:
         apply_appops_revocations(state, appops)
     grants = list(getattr(state, "permissions", None) or [])
     names = {g.name for g in grants}
+    requests: dict[str, list[Any]] | None = None
+    if "requested_permissions" in _overview(f):
+        requests = {}
+        for entry in _overview(f).get("requested_permissions") or []:
+            if isinstance(entry, dict) and entry.get("name"):
+                requests.setdefault(str(entry["name"]), []).append(entry)
     order = {"dangerous": 0, "signature": 2, "normal": 3}
     groups = {0: "dangerous", 1: "custom & unknown", 2: "signature", 3: "normal"}
 
@@ -830,13 +852,15 @@ def build_permissions(f: AppFacts) -> SectionData:
                 granted_dangerous += 1
         if "used recently" in note or "in use now" in note:
             recent += 1
-        if "no recorded use" in note:
+        if "no recorded use" in note and g.requested:
+            # Counted over the requested set only (op-only rows are on the
+            # "+N other ops" line), so it never exceeds "N requested".
             unused += 1
         prot_style = (
             _c().warn if prot == "dangerous" else (_c().dim if prot == "normal" else "")
         )
         evidence: list[tuple[str, Any]] = [
-            ("Manifest", _t(_manifest_perm_line(g.name))),
+            ("Manifest", _t(_manifest_perm_line(g.name, requests))),
             (
                 "Grant",
                 _grid(
@@ -904,8 +928,6 @@ def build_permissions(f: AppFacts) -> SectionData:
         if used:
             recent += 1
         never = not op.running and not op.last_access
-        if never:
-            unused += 1
         # The protection column already says "op".
         parts = ["used recently"] if used else []
         parts += ["no recorded use"] if never else []
@@ -953,11 +975,23 @@ def build_permissions(f: AppFacts) -> SectionData:
         cols = cols[:4]
         for row in [*rows, *hidden]:
             row.cells = row.cells[:4]
-    requested = sum(1 for g in grants if g.requested)
-    summary = (
-        f"{requested} requested · {dangerous} dangerous ({granted_dangerous} "
-        f"granted) · {recent} used recently · {unused} no recorded use"
-    )
+    from sandroid.services.app_info_service import permission_counts
+
+    requested, in_manifest = permission_counts(state, _overview(f))
+    # "N requested" is what the device keeps; the manifest count beside it
+    # when it differs (maxSdkVersion below the device's API level), or alone
+    # when the device's requests could not be read.
+    parts = []
+    if requested is not None or in_manifest is None:
+        parts.append(f"{requested or 0} requested")
+    if in_manifest is not None and in_manifest != requested:
+        parts.append(f"{in_manifest} in the manifest")
+    parts += [
+        f"{dangerous} dangerous ({granted_dangerous} granted)",
+        f"{recent} used recently",
+        f"{unused} no recorded use",
+    ]
+    summary = ", ".join(parts)
     return SectionData(
         cols,
         rows,
@@ -1355,6 +1389,31 @@ def build_manifest(f: AppFacts) -> SectionData:
 ANALYSIS_HINT = "press a to run static analysis (cached per APK)"
 
 
+def tracker_status(static: Any) -> tuple[bool, bool]:
+    """``(analysed, from_previous_run)`` of the recorded Insight trackers.
+
+    A run with trackers off records ``summary.tracker_analysis`` as ``None``
+    and ``insight.options.trackers`` false: its trackers were not analysed
+    (never "no trackers"). It may carry the previous run's tracker summary
+    instead (``insight.trackers_from_previous_run``).
+    """
+    meta = getattr(static, "meta", None)
+    info = meta.get("insight") if isinstance(meta, dict) else None
+    info = info if isinstance(info, dict) else {}
+    previous = info.get("trackers_from_previous_run") is True
+    summary = getattr(static, "insight", None)  # meta's insight.summary
+    summary = summary if isinstance(summary, dict) else {}
+    options = info.get("options")
+    trackers_off = isinstance(options, dict) and options.get("trackers") is False
+    if summary.get("tracker_analysis") is None and (
+        trackers_off or "tracker_analysis" in summary
+    ):
+        return False, False
+    if trackers_off and not previous:
+        return False, False
+    return True, previous
+
+
 def build_trackers(f: AppFacts) -> SectionData:
     cols = ("SDK", "category", "version", "vendor")
     insight = getattr(f.static, "insight", None) if f.static is not None else None
@@ -1372,11 +1431,14 @@ def build_trackers(f: AppFacts) -> SectionData:
     libs = [lib for lib in libs or [] if isinstance(lib, dict)]
     rows: list[Row] = []
     cats: dict[str, int] = {}
+    analysed, previous = tracker_status(f.static)
     trackers = getattr(f.static, "trackers", None)
     if not trackers:
         from sandroid.services.app_info_service import insight_trackers
 
         trackers = insight_trackers(insight)
+    if not analysed:
+        trackers = []
     for i, trk in enumerate(
         sorted(trackers, key=lambda x: (str(x.get("category")), str(x.get("name"))))
     ):
@@ -1438,10 +1500,25 @@ def build_trackers(f: AppFacts) -> SectionData:
         )
     if not rows:
         rows.append(_placeholder("none", "no SDKs detected by Insight", 4))
-    summary = f"{len(libs)} SDK" + ("s" if len(libs) != 1 else "")
-    if trackers:
+    if not analysed:
+        rows.insert(
+            0,
+            _placeholder(
+                "no-trackers",
+                "trackers not analysed (the last static analysis ran with "
+                "trackers off)",
+                4,
+            ),
+        )
+    if not analysed:
+        summary = "trackers not analysed"
+    elif trackers:
         summary = f"{len(trackers)} tracker" + "s" * (len(trackers) != 1)
-        summary += f" · {len(libs)} SDK" + "s" * (len(libs) != 1)
+    else:
+        summary = "no trackers"
+    if analysed and previous:
+        summary += " (from the previous run)"
+    summary += f" · {len(libs)} SDK" + "s" * (len(libs) != 1)
     if cats:
         top = sorted(cats.items(), key=lambda kv: -kv[1])[:3]
         summary += " · " + ", ".join(f"{n} {c}" for c, n in top)
@@ -1701,7 +1778,7 @@ def _band_title(
     c: LensPalette,
     width: int = 0,
 ) -> Text:
-    """A section's header band: ``TITLE  12 requested · 3 dangerous``.
+    """A section's header band: ``TITLE  12 requested, 3 dangerous``.
 
     The band is the ``panel`` top border; the title paints its own
     background so the text sits on the band. Focus is the band colour, a
