@@ -1044,7 +1044,9 @@ async def test_proxy_modal_shift_arrows_cycle_the_tabs(monkeypatch):
             await pilot.press("shift+right")
             await pilot.pause()
             seen.append(tabs.active)
-        assert seen == ["tab-apps", "tab-ca", "tab-device"]
+        # The Method tab (Network method) comes first; the dialog opens on
+        # Device.
+        assert seen == ["tab-apps", "tab-ca", "tab-method"]
         await pilot.press("shift+left")
         await _until(pilot, lambda: tabs.active == "tab-ca")
         await _until(

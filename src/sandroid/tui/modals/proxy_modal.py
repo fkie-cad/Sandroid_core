@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -97,11 +98,294 @@ class _ProxyInput(Input):
             cycle(delta)
 
 
+def _method_service():
+    from sandroid.services.network_method import get_network_method_service
+
+    return get_network_method_service()
+
+
+def _palette() -> tuple[str, str, str, str]:
+    from sandroid.tui.themes import lens_palette
+
+    pal = lens_palette()
+    return pal.ok, pal.warn, pal.bad, pal.dim
+
+
+class NetworkMethodControl(Vertical):
+    """The "Network method" radio row + "Defeat pinning" + the status line.
+
+    Shared by the Network method dialog (``W`` in the Network tab) and the
+    Proxy dialog's Method tab. Custom is shown (derived from what is set by
+    hand) but cannot be selected; "This app, keys only" is disabled while
+    friTap has no non-interactive start on this build.
+    """
+
+    DEFAULT_CSS = """
+    NetworkMethodControl {
+        height: auto;
+        width: 100%;
+    }
+    NetworkMethodControl #nm-status {
+        padding: 0 2;
+        background: $panel;
+        height: auto;
+    }
+    NetworkMethodControl #nm-radio {
+        width: 100%;
+        height: auto;
+        padding: 0 2;
+    }
+    NetworkMethodControl #nm-pinning {
+        margin: 0 2;
+    }
+    NetworkMethodControl #nm-note {
+        color: $text-muted;
+        padding: 0 2;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        from sandroid.services.network_method import (
+            KEYS_ONLY,
+            KEYS_ONLY_UNAVAILABLE,
+            LABELS,
+            PRESETS,
+            keys_only_available,
+        )
+
+        yield Static("Checking the device", id="nm-status")
+        with RadioSet(id="nm-radio"):
+            for preset in PRESETS:
+                label = LABELS[preset]
+                disabled = False
+                if preset == KEYS_ONLY and not keys_only_available():
+                    label = f"{label} ({KEYS_ONLY_UNAVAILABLE})"
+                    disabled = True
+                yield RadioButton(label, id=f"nm-{preset}", disabled=disabled)
+            yield RadioButton(
+                "Custom (set piece by piece, shown only)",
+                id="nm-custom",
+                disabled=True,
+            )
+        yield Checkbox(
+            "Defeat pinning (bypass scripts for the spotlight app)",
+            id="nm-pinning",
+        )
+        yield Static(
+            "Whole device: all apps through Mitmproxy, Kill switch on.  "
+            "This app: an App Proxy for the spotlight app.  "
+            "Selecting the active method again repairs it.",
+            id="nm-note",
+        )
+
+    def show(self, view, snapshot) -> None:
+        """Render a derived view (UI thread)."""
+        try:
+            self.query_one("#nm-status", Static).update(
+                Text.from_markup(view.markup(*_palette()))
+            )
+            button = self.query_one(f"#nm-{view.preset}", RadioButton)
+            if not button.value:
+                button.value = True
+            self.query_one("#nm-pinning", Checkbox).value = snapshot.pinning != "off"
+        except NoMatches:
+            pass
+
+    def selected(self) -> str | None:
+        """The selected preset (None: Custom or nothing)."""
+        try:
+            pressed = self.query_one("#nm-radio", RadioSet).pressed_button
+        except NoMatches:
+            return None
+        if pressed is None or not pressed.id or pressed.id == "nm-custom":
+            return None
+        return pressed.id[len("nm-") :]
+
+    def defeat_pinning(self) -> bool:
+        try:
+            return bool(self.query_one("#nm-pinning", Checkbox).value)
+        except NoMatches:
+            return False
+
+
+def run_method_apply(
+    app, preset: str, defeat_pinning: bool | None, *, replace_external: bool = False
+) -> None:
+    """Apply a Network method on a worker; toasts and the confirm on the UI.
+
+    An external proxy (device proxy or App Proxy upstream) is replaced only
+    after the confirmation; declined, nothing changes and the method shows
+    Custom.
+    """
+    from sandroid.services.network_method import LABELS
+
+    def _done(result) -> None:
+        if result.confirm:
+            from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+            def _answer(yes: bool | None) -> None:
+                if yes:
+                    run_method_apply(app, preset, defeat_pinning, replace_external=True)
+                else:
+                    app.notify(
+                        "External proxy kept; the Network method shows Custom",
+                        severity="warning",
+                    )
+
+            app.push_screen(
+                ConfirmModal(
+                    title="Replace the external proxy?",
+                    message=result.confirm,
+                    yes_label="Replace",
+                    no_label="Keep",
+                ),
+                _answer,
+            )
+            return
+        app.notify(
+            result.message,
+            severity="information" if result.ok else "error",
+            timeout=6,
+            markup=False,
+        )
+
+    def _worker() -> None:
+        try:
+            result = _method_service().apply(
+                preset,
+                defeat_pinning=defeat_pinning,
+                replace_external=replace_external,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            from sandroid.services.network_method import ApplyResult
+
+            result = ApplyResult(False, f"{LABELS.get(preset, preset)} failed: {exc}")
+        try:
+            app.call_from_thread(_done, result)
+        except Exception:
+            pass
+
+    app.notify(f"Applying Network method: {LABELS.get(preset, preset)}", timeout=3)
+    threading.Thread(target=_worker, name="network-method-apply", daemon=True).start()
+
+
+class _MethodRepaint:
+    """Repaint a :class:`NetworkMethodControl` on ``network_method`` events."""
+
+    def _method_attach(self) -> None:
+        from sandroid.core.events import EventBus, EventType
+        from sandroid.tui.utils.ui_thread import UiDispatcher
+
+        # Posts inline when already on the UI thread (call_from_thread
+        # would raise there and the repaint would be lost).
+        self._method_ui = UiDispatcher.capture()
+        self._method_bus = EventBus.get()
+        self._method_bus.subscribe(EventType.STATE_CHANGED, self._on_method_event)
+
+    def _method_detach(self) -> None:
+        from sandroid.core.events import EventType
+
+        bus = getattr(self, "_method_bus", None)
+        if bus is not None:
+            try:
+                bus.unsubscribe(EventType.STATE_CHANGED, self._on_method_event)
+            except Exception:
+                pass
+        self._method_bus = None
+
+    def _on_method_event(self, event) -> None:
+        data = getattr(event, "data", None) or {}
+        if data.get("change_type") != "network_method":
+            return
+        ui = getattr(self, "_method_ui", None)
+        if ui is not None:
+            ui.post(self._method_show)
+
+    def _method_show(self) -> None:
+        try:
+            control = self.query_one(NetworkMethodControl)
+        except NoMatches:
+            return
+        service = _method_service()
+        control.show(service.view_cached(), service.snapshot_cached())
+
+
+class NetworkMethodModal(_MethodRepaint, ForensicModal[None]):
+    """``W`` in the Network tab: pick the Network method.
+
+    Space selects, Ctrl+S (or Apply) applies on a worker, Esc closes.
+    """
+
+    DEFAULT_CSS = """
+    NetworkMethodModal .modal-container {
+        width: 84;
+        height: auto;
+        max-height: 90%;
+        max-width: 95%;
+    }
+    NetworkMethodModal .button-row {
+        height: auto;
+        padding: 0 2;
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS = [Binding("ctrl+s", "apply", "Apply", show=False)]
+    AUTO_FOCUS = "#nm-radio"
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal-container"):
+            yield Label("Network method", classes="modal-title")
+            yield NetworkMethodControl(id="nm-control")
+            with Horizontal(classes="button-row"):
+                yield Button("Apply", id="nm-apply", classes="-primary")
+            yield KeyHintFooter(
+                hints={
+                    "default": (
+                        "[dim]Up/Down=Choose  Space=Select  Ctrl+S=Apply  "
+                        "Esc=Close[/dim]"
+                    ),
+                }
+            )
+
+    def on_mount(self) -> None:
+        self._method_attach()
+        self._method_show()
+        try:
+            _method_service().refresh(with_ca=True)
+        except Exception:
+            pass
+
+    def on_unmount(self) -> None:
+        self._method_detach()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "nm-apply":
+            self.action_apply()
+
+    def action_apply(self) -> None:
+        control = self.query_one(NetworkMethodControl)
+        preset = control.selected()
+        if preset is None:
+            self.notify(
+                "Custom is what is set by hand; pick Off, Whole device or This app",
+                severity="warning",
+            )
+            return
+        app = self.app
+        self.dismiss(None)
+        run_method_apply(app, preset, control.defeat_pinning())
+
+    def action_cancel(self) -> None:
+        """Close (sync -- required for ESC)."""
+        self.dismiss(None)
+
+
 #: The dialog's single-letter keys, shown in every hint line (either case).
 _LETTER_HINTS = "A=Add app  F=Spotlight  P=Push CA  I=Inject CA  R=Remove CA"
 
 
-class ProxyModal(ForensicModal[ProxyModalResult]):
+class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
     """Unified modal for Device Proxy, App Proxies, and the CA certificate.
 
     Features:
@@ -359,7 +643,18 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         with Vertical(classes="modal-container"):
             yield Label("Proxy Settings", classes="modal-title")
 
-            with TabbedContent(id="proxy-tabs"):
+            with TabbedContent(id="proxy-tabs", initial="tab-device"):
+                # ----- Tab 0: Network method (convenience on top) ----- #
+                with (
+                    TabPane("Method", id="tab-method"),
+                    VerticalScroll(classes="tab-scroll"),
+                ):
+                    yield NetworkMethodControl(id="nm-control")
+                    yield Static(
+                        "[dim]Ctrl+S on this tab applies the method; the other "
+                        "tabs keep every piece settable by hand.[/dim]",
+                        id="nm-proxy-hint",
+                    )
                 # ----- Tab 1: Device Proxy ----- #
                 with (
                     TabPane("Device", id="tab-device"),
@@ -394,6 +689,12 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                             value=self._default_external_addr(),
                             id="device-ext-input",
                         )
+                    yield Checkbox(
+                        "Kill switch: apps may only reach the device proxy, "
+                        "everything else is refused",
+                        value=self._kill_switch_wanted(),
+                        id="kill-switch-checkbox",
+                    )
 
                 # ----- Tab 2: App Proxies ----- #
                 with (
@@ -505,8 +806,25 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         except NoMatches:
             pass
 
+    @staticmethod
+    def _kill_switch_wanted() -> bool:
+        try:
+            from sandroid.core.device_guard import get_device_guard
+
+            return get_device_guard().kill_switch_wanted()
+        except Exception:
+            return False
+
+    def on_unmount(self) -> None:
+        self._method_detach()
+
     def on_mount(self) -> None:
         """Initialize the modal with current status."""
+        try:
+            self._method_attach()
+            self._method_show()
+        except Exception:
+            pass
         self._refresh_device_proxy_status()
         self._init_app_rows()
         self._rebuild_app_list()
@@ -1168,6 +1486,15 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         it would overwrite a foreign device proxy, then runs the device + app
         reconciliation in :meth:`_apply_commit`.
         """
+        try:
+            on_method_tab = (
+                self.query_one("#proxy-tabs", TabbedContent).active == "tab-method"
+            )
+        except NoMatches:
+            on_method_tab = False
+        if on_method_tab:
+            self._apply_method()
+            return
         self._sync_app_targets_from_inputs()
         choice = self._selected_device_choice()
 
@@ -1223,6 +1550,44 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             return
 
         self._apply_commit(desired_config, via_reverse=via_reverse)
+
+    def _apply_method(self) -> None:
+        """Ctrl+S on the Method tab: apply the selected Network method."""
+        control = self.query_one("#nm-control", NetworkMethodControl)
+        preset = control.selected()
+        if preset is None:
+            self.notify(
+                "Custom is what is set by hand; pick Off, Whole device or This app",
+                severity="warning",
+            )
+            return
+        app = self.app
+        self._dismiss_with_refresh(ProxyModalResult(cancelled=False, action="method"))
+        run_method_apply(app, preset, control.defeat_pinning())
+
+    def _start_kill_switch_apply(self, enabled: bool) -> None:
+        """Turn the Kill switch on/off on a worker (after the device proxy)."""
+        app = self.app
+        serial = Adb.get_target_device()
+
+        def worker() -> None:
+            from sandroid.core.device_guard import get_device_guard
+
+            try:
+                ok, message = get_device_guard().set_kill_switch(enabled, serial)
+            except Exception as exc:  # pragma: no cover - defensive
+                ok, message = False, f"Kill switch failed: {exc}"
+            try:
+                app.call_from_thread(
+                    app.notify,
+                    message,
+                    severity="information" if ok else "error",
+                    markup=False,
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="kill-switch", daemon=True).start()
 
     def _on_device_overwrite_confirm(self, confirmed: bool) -> None:
         """Continue Apply after the foreign-device-proxy confirmation."""
@@ -1293,6 +1658,15 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                 self._set_glance_device_proxy(desired_config.address)
             else:
                 self.notify(message, severity="error")
+
+        # 1b. Kill switch (after the device proxy it allows; a cleared proxy
+        #     removes it on its own). Off the UI thread.
+        try:
+            kill_switch = self.query_one("#kill-switch-checkbox", Checkbox).value
+        except NoMatches:
+            kill_switch = self._kill_switch_wanted()
+        if desired_config is not None and kill_switch != self._kill_switch_wanted():
+            self._start_kill_switch_apply(kill_switch)
 
         # 2. App proxies. Read the QUIC-block setting and commit it to the
         #    shared config BEFORE reconciling, so lanes newly enabled by the

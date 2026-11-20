@@ -1979,3 +1979,177 @@ async def test_ca_change_of_another_device_leaves_the_caption(flow_dir, monkeypa
         pm.publish_ca_change("emulator-5570", False)
         await until(pilot, lambda: not mitm._ca_ok)
         assert kicks == [1]
+
+
+# --------------------------------------------------------------------------
+# Network method (W), its status line, and Shift+T with relay-named flows
+# --------------------------------------------------------------------------
+
+
+def test_app_only_matches_shared_uid_lists():
+    from sandroid.tui.widgets.network_panel import app_matches
+
+    assert app_matches(PKG, PKG)
+    assert app_matches(f"com.other,{PKG}", PKG)
+    assert not app_matches("", PKG)
+    assert not app_matches("de.fittrack", PKG)
+
+
+async def test_app_only_keeps_relay_named_device_flows(flow_dir):
+    """Shift+T: device-proxy flows the identity relay named (``via``
+    device, shared UID lists included) count as the app's own.
+    """
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        await pilot.press("2")
+        await settle(pilot)
+        panel = ms.query_one("#network-panel", NetworkPanel)
+        specs = [
+            ("GET", "api.fittrack.de", "/a", 200, PKG, None, None, None),
+            ("GET", "api.fittrack.de", "/b", 200, f"com.x,{PKG}", None, None, None),
+            ("GET", "cdn.other.com", "/c", 200, "com.other.app", None, None, None),
+            ("GET", "api.unnamed.com", "/d", 200, "", None, None, None),
+        ]
+        write_flows(flow_dir, time.time() - 100, specs)
+        panel.poll_now()
+        await until(pilot, lambda: panel.table.row_count > 0)
+        await pilot.press("N")
+        await pilot.press("T")
+        await settle(pilot)
+        paths = {
+            panel._row_by_key(
+                panel.table.coordinate_to_cell_key((i, 0)).row_key.value
+            ).path
+            for i in range(panel.table.row_count)
+        }
+        assert paths == {"/a", "/b"}
+
+
+async def test_network_method_line_and_W_opens_the_picker(flow_dir, monkeypatch):
+    from textual.widgets import RadioButton
+
+    from sandroid.services import network_method as nm
+    from sandroid.tui.modals import proxy_modal
+
+    applied = []
+    monkeypatch.setattr(
+        proxy_modal,
+        "run_method_apply",
+        lambda app, preset, pin, **kw: applied.append((preset, pin)),
+    )
+    service = nm.NetworkMethodService(actions=None)
+    monkeypatch.setattr(service, "refresh", lambda **kw: None)
+    monkeypatch.setattr(nm, "_INSTANCE", service)
+    service._store(
+        nm.MethodSnapshot(spotlight=PKG, device_proxy="ours", kill_switch=True)
+    )
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        await pilot.press("2")
+        await settle(pilot)
+        panel = ms.query_one("#network-panel", NetworkPanel)
+        line = str(panel.query_one("#net-method").render())
+        assert line.startswith("Network method: Whole device.")
+        assert "Mitmproxy stopped" in line
+        assert "W changes it" in line
+        await pilot.press("W")
+        await until(
+            pilot, lambda: isinstance(app.screen, proxy_modal.NetworkMethodModal)
+        )
+        modal = app.screen
+        assert modal.query_one("#nm-whole_device", RadioButton).value
+        assert modal.query_one("#nm-custom", RadioButton).disabled
+        # A change elsewhere repaints the open dialog (from a worker thread).
+        import threading
+
+        snap = nm.MethodSnapshot(spotlight=PKG, lanes={PKG: "ours"})
+        worker = threading.Thread(target=service._store, args=(snap,))
+        worker.start()
+        worker.join()
+        await until(pilot, lambda: modal.query_one("#nm-this_app", RadioButton).value)
+        modal.query_one("#nm-off", RadioButton).value = True
+        await pilot.press("ctrl+s")
+        await until(pilot, lambda: applied == [("off", False)])
+        assert not isinstance(app.screen, proxy_modal.NetworkMethodModal)
+        # Esc closes it (sync action_cancel) without applying anything.
+        await pilot.press("W")
+        await until(
+            pilot, lambda: isinstance(app.screen, proxy_modal.NetworkMethodModal)
+        )
+        await pilot.press("escape")
+        await until(
+            pilot, lambda: not isinstance(app.screen, proxy_modal.NetworkMethodModal)
+        )
+        assert applied == [("off", False)]
+
+
+async def test_proxy_dialog_method_tab_and_kill_switch(monkeypatch):
+    from types import SimpleNamespace
+
+    from textual.app import App
+    from textual.widgets import Checkbox, RadioButton, TabbedContent
+
+    from sandroid.services import network_method as nm
+    from sandroid.tui.modals import proxy_modal
+
+    for name in (
+        "_refresh_device_proxy_status",
+        "_refresh_device_info",
+        "_detect_certificates",
+    ):
+        monkeypatch.setattr(proxy_modal.ProxyModal, name, lambda self: None)
+    monkeypatch.setattr(
+        proxy_modal,
+        "get_focus_manager",
+        lambda: SimpleNamespace(app_proxies_cached=dict),
+    )
+    applied = []
+    monkeypatch.setattr(
+        proxy_modal,
+        "run_method_apply",
+        lambda app, preset, pin, **kw: applied.append(preset),
+    )
+    service = nm.NetworkMethodService(actions=None)
+    monkeypatch.setattr(service, "refresh", lambda **kw: None)
+    monkeypatch.setattr(nm, "_INSTANCE", service)
+    modal = proxy_modal.ProxyModal()
+
+    class _App(App):
+        def on_mount(self) -> None:
+            self.push_screen(modal)
+
+    app = _App()
+    async with app.run_test(size=(120, 50)) as pilot:
+        await until(pilot, lambda: app.screen is modal and app.focused is not None)
+        tabs = modal.query_one("#proxy-tabs", TabbedContent)
+        assert tabs.active == "tab-device"  # opens where it always did
+        assert "Kill switch" in str(
+            modal.query_one("#kill-switch-checkbox", Checkbox).label
+        )
+        await pilot.press("shift+left")
+        await until(pilot, lambda: tabs.active == "tab-method")
+        modal.query_one("#nm-this_app", RadioButton).value = True
+        await pilot.press("ctrl+s")
+        await until(pilot, lambda: applied == ["this_app"])
+
+
+def test_bypass_listener_on_the_ui_thread_only_schedules(monkeypatch):
+    """The bypass state callback can run on the UI thread (a new selection
+    disarms from UI code): it must only schedule, never marshal or block.
+    """
+    import threading
+
+    from sandroid.services import network_method as nm
+
+    service = nm.NetworkMethodService(actions=None)
+    started = []
+    monkeypatch.setattr(service, "refresh_now", lambda **kw: started.append(1))
+    assert threading.current_thread() is threading.main_thread()
+    service._on_bypass_state()
+    for _ in range(100):
+        if started:
+            break
+        time.sleep(0.01)
+    assert started == [1]

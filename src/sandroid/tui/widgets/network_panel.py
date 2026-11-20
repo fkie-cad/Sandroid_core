@@ -474,6 +474,18 @@ def app_label(package: str, width: int) -> str:
     return parts[-1][:width]
 
 
+def app_matches(app: str, package: str) -> bool:
+    """Whether a flow's ``app`` is *package* (Shift+T "App only").
+
+    App Proxy flows and device-proxy flows named by the identity relay carry
+    the package; apps sharing one UID carry ``"a.b,c.d"`` (any of them
+    matches).
+    """
+    if not app or not package:
+        return False
+    return app == package or package in app.split(",")
+
+
 _TLS_REASONS = {
     "cert": (
         "The app rejected mitmproxy's certificate — likely certificate "
@@ -1113,6 +1125,7 @@ class NetworkPanel(Widget):
         Binding("space", "start_mitm", "Start mitm", key_display="␣"),
         Binding("slash", "filter", "Filter"),
         Binding("T", "toggle_app_only", "App only"),
+        Binding("W", "network_method", "Network method", show=False),
         Binding("ctrl+d", "mitm('toggle_device')", "Device proxy"),
         Binding("N", "toggle_noise", "Show OS noise", show=False),
         Binding("H", "cycle_highlight_filter", "AI filter: next set / off", show=False),
@@ -1142,6 +1155,15 @@ class NetworkPanel(Widget):
         layout: vertical;
         height: 1fr;
         background: $lens-bg;
+    }
+    NetworkPanel > #net-method {
+        height: auto;
+        padding: 0 1;
+        background: $lens-bg;
+        color: $lens-text;
+    }
+    NetworkPanel > #net-method.-hidden {
+        display: none;
     }
     NetworkPanel > #net-filter {
         display: none;
@@ -1263,6 +1285,7 @@ class NetworkPanel(Widget):
     # -- compose / mount -------------------------------------------------
 
     def compose(self) -> ComposeResult:
+        yield Static("", id="net-method")
         yield HighlightBar("", id="net-highlights")
         yield Input(
             placeholder="filter: host · path · app · status (Esc clears)",
@@ -1298,6 +1321,7 @@ class NetworkPanel(Widget):
             self.app.theme_changed_signal.subscribe(self, self._repaint_for_theme)
         except Exception:
             pass
+        self._method_attach()
 
     def _repaint_for_theme(self, _theme: Any = None) -> None:
         """A live theme switch: cells and the highlight bar take the new
@@ -1598,7 +1622,11 @@ class NetworkPanel(Widget):
             return False
         if self._profile_only and not self._flow_tags(row):
             return False
-        if self._app_only and self._focus_app and row.app != self._focus_app:
+        if (
+            self._app_only
+            and self._focus_app
+            and not app_matches(row.app, self._focus_app)
+        ):
             return False
         if (
             noise
@@ -1966,7 +1994,9 @@ class NetworkPanel(Widget):
             head = "Nothing matches"
             if self._app_only and self._focus_app:
                 head = f"No flows attributed to {escape(self._focus_app)}"
-                widen.append("per-app attribution needs an App Proxy (y)")
+                widen.append(
+                    "apps are named through an App Proxy or the device proxy (y)"
+                )
             ai = self._hl.empty_text(escape(self._filter))
             if ai is not None:
                 head = ai[0]
@@ -2111,6 +2141,7 @@ class NetworkPanel(Widget):
 
     def _do_refresh_status(self) -> None:
         self._status_pending = False
+        self._update_method_line()
         ms = self._main_screen()
         if ms is not None:
             try:
@@ -2133,6 +2164,7 @@ class NetworkPanel(Widget):
     # -- lens hooks ------------------------------------------------------
 
     def on_lens_activated(self) -> None:
+        self._kick_method_refresh(with_ca=True)
         self._unseen_tls = 0
         ms = self._main_screen()
         if ms is not None:
@@ -2557,6 +2589,78 @@ class NetworkPanel(Widget):
     def on_unmount(self) -> None:
         self._privacy_feed.detach()
         self._hl.detach()
+        self._method_detach()
+
+    # -- Network method line (services.network_method) -----------------------
+
+    def _method_attach(self) -> None:
+        """Follow ``network_method`` events; show the last derived method."""
+        from sandroid.core.events import EventBus, EventType
+
+        self._method_ui = UiDispatcher.capture()
+        self._method_bus = EventBus.get()
+        self._method_bus.subscribe(EventType.STATE_CHANGED, self._on_method_event)
+        self._update_method_line()
+        self._kick_method_refresh(with_ca=False)
+
+    def _method_detach(self) -> None:
+        from sandroid.core.events import EventType
+
+        bus = getattr(self, "_method_bus", None)
+        self._method_bus = None
+        if bus is not None:
+            try:
+                bus.unsubscribe(EventType.STATE_CHANGED, self._on_method_event)
+            except Exception:
+                pass
+
+    def _on_method_event(self, event) -> None:
+        """Any thread: repaint the line on the UI thread (never blocks)."""
+        data = getattr(event, "data", None) or {}
+        if data.get("change_type") != "network_method":
+            return
+        ui = getattr(self, "_method_ui", None)
+        if ui is not None:
+            ui.post(self._update_method_line)
+
+    @staticmethod
+    def _kick_method_refresh(*, with_ca: bool) -> None:
+        try:
+            from sandroid.services.network_method import get_network_method_service
+
+            get_network_method_service().refresh(with_ca=with_ca)
+        except Exception:
+            logger.debug("network method refresh not started", exc_info=True)
+
+    def method_line(self) -> str:
+        """The status line markup (cached view; UI thread)."""
+        from sandroid.services.network_method import get_network_method_service
+
+        pal = lens_palette()
+        view = get_network_method_service().view_cached()
+        return (
+            view.markup(pal.ok, pal.warn, pal.bad, pal.dim)
+            + f" [{pal.dim}]W changes it[/]"
+        )
+
+    def _update_method_line(self) -> None:
+        if not self.is_attached:
+            return
+        try:
+            line = self.query_one("#net-method", Static)
+        except Exception:
+            return
+        line.set_class(self.in_review, "-hidden")
+        try:
+            line.update(Text.from_markup(self.method_line()))
+        except Exception:
+            logger.debug("network method line failed", exc_info=True)
+
+    def action_network_method(self) -> None:
+        """``W``: pick the Network method (Off / Whole device / This app ...)."""
+        from sandroid.tui.modals.proxy_modal import NetworkMethodModal
+
+        self.app.push_screen(NetworkMethodModal())
 
     def _privacy_wanted(self) -> bool:
         """Identity mode is on, the scan has markers or hits are loaded (the
