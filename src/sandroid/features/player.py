@@ -374,6 +374,15 @@ def walk_dump(reply: dict | None) -> list[dict[str, Any]]:
     return out
 
 
+def _input_word(input_type: Any) -> str | None:
+    try:
+        from sandroid.services.tracking_service import _input_word as word
+
+        return word(input_type)
+    except Exception:
+        return None
+
+
 def _identifying(target: dict) -> bool:
     """The recorded target names an element (not just a class)."""
     web = target.get("web") if isinstance(target.get("web"), dict) else {}
@@ -395,8 +404,11 @@ def node_matches(target: dict, item: dict[str, Any]) -> bool:
     Native fields: ``rid``, ``text`` (never recorded for editable or
     password fields), ``desc``, ``hint``, ``label`` (the text inside a row)
     and ``cls``. Web fields (feature/tracking-web's ``target.web``):
-    ``html_id`` (the node's ``rid``), ``field`` (``web.label``), ``href`` and
-    ``raw_role`` (``web.role``). A field the target lacks is not compared.
+    ``html_id`` (the node's ``rid``), ``engine``, ``field`` (``web.label``),
+    ``href``, ``raw_role`` (``web.role``) and ``input`` (the plain word of
+    ``web.input_type``). ``role``, ``doc`` and ``page`` describe the page or
+    a derived word and are not compared. A field the target lacks is not
+    compared.
     """
     node = item["node"]
     if node.get("visible") is False:
@@ -418,9 +430,19 @@ def node_matches(target: dict, item: dict[str, Any]) -> bool:
             web.get("html_id")
         ):
             return False
-        for tkey, nkey in (("field", "label"), ("href", "href"), ("raw_role", "role")):
+        pairs = (
+            ("engine", "engine"),
+            ("field", "label"),
+            ("href", "href"),
+            ("raw_role", "role"),
+        )
+        for tkey, nkey in pairs:
             want = _norm(web.get(tkey))
             if want and nweb and _norm(nweb.get(nkey)) != want:
+                return False
+        want = _norm(web.get("input"))
+        if want and nweb.get("input_type"):
+            if _norm(_input_word(nweb.get("input_type"))) != want:
                 return False
     return _bounds(node.get("bounds")) is not None
 

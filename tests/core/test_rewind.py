@@ -981,3 +981,25 @@ def test_before_version_summary_never_reads_backwards():
     b = Version(2, Path("/x/v002"), Path("/x/v002/f"), None, 1,
                 {"rewind": {"role": "before"}})  # fmt: skip
     assert version_summary(b, a) == BEFORE_NOTE
+
+
+def test_find_element_reads_the_merged_web_target_shape():
+    """tracking-web's data.target.web: engine, role, raw_role, html_id,
+    href, field, input, doc, page.
+    """
+    node = _node(
+        rid="email",
+        cls="android.widget.EditText",
+        web={"engine": "chromium", "role": "textbox", "label": "E-Mail",
+             "input_type": 0x21},
+    )  # fmt: skip
+    target = {
+        "rid": "email",
+        "cls": "android.widget.EditText",
+        "web": {"engine": "chromium", "role": "text field", "raw_role": "textbox",
+                "html_id": "email", "href": None, "field": "E-Mail",
+                "input": "email", "doc": "Login", "page": "example.com"},
+    }  # fmt: skip
+    assert find_element(target, _dump(node))[0] is not None
+    other = {**target, "web": {**target["web"], "engine": "gecko"}}
+    assert find_element(other, _dump(node))[0] is None
