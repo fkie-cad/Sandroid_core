@@ -451,7 +451,13 @@ def test_ensure_prepared_joins_a_run_in_flight(rig):
         )
     )
     thread.start()
-    time.sleep(0.05)
+    # Release the run only once ensure_prepared has registered on it (the
+    # run is held in settle, so it is still in flight): a fixed sleep raced
+    # under load and let the run finish first ("unchanged", not joined).
+    deadline = time.monotonic() + 5
+    while stages.append not in device_prep._state(SERIAL).progress:
+        assert time.monotonic() < deadline, "ensure_prepared never joined"
+        time.sleep(0.005)
     rig.fake.settle_gate.set()
     thread.join(5)
     (result,) = box
