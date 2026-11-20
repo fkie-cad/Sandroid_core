@@ -474,15 +474,9 @@ class SpotlightPanel(Widget):
             return False
 
     def _on_categories(self) -> list[str]:
-        """Categories rendered ON for the selected app: armed, plus active
-        only while the live bypass script is on this app (a bypass still
-        running in the previously selected app is not this app's).
-        """
-        package = self._current_package()
-        if not package:
-            return []
+        """Categories rendered ON: armed or active (what toggle() acts on)."""
         try:
-            return sorted(self._bypass().carried_categories(package))
+            return self._bypass().on_categories()
         except Exception:
             return []
 

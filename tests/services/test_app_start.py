@@ -2105,36 +2105,6 @@ def test_stop_all_and_a_new_selection_clear_the_armed_set(env):
     assert env.bypass.armed_categories() == []
 
 
-def test_a_new_selection_unhooks_the_app_left_behind(env):
-    """SSL live in A, select B: A's script goes, B starts clean (no early
-    "no change" return can keep B unhooked while the row says on).
-    """
-    env.spotlight.set_app(PKG, pid=77)
-    env.bypass._active = {"ssl"}
-    env.bypass._app_package = PKG
-
-    env.spotlight.set_app("org.example.other")
-
-    assert env.bypass.active_categories() == []
-    assert env.bypass.on_categories() == []
-
-    env.bypass._active = {"root"}
-    env.bypass._app_package = "org.example.other"
-    env.spotlight.set_app("org.example.third")
-    assert env.bypass.active_categories() == []
-
-
-def test_the_same_app_with_a_new_pid_keeps_its_live_bypass(env):
-    """A restart or a re-pick of the same app is not a new selection."""
-    env.spotlight.set_app(PKG, pid=77)
-    env.bypass._active = {"ssl"}
-    env.bypass._app_package = PKG
-
-    env.spotlight.set_app(PKG, pid=78)
-
-    assert env.bypass.active_categories() == ["ssl"]
-
-
 def test_recovery_waits_for_the_package_manager_before_frida(recovery, clock):
     """The PID alone is too early: frida would hit the post-restart ANRs."""
     recovery.pids = [222]

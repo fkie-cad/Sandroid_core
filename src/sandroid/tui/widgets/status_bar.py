@@ -688,23 +688,15 @@ class StatusBar(Static):
             self.app_proxy_problems = {}
 
     def _read_bypass_state(self) -> None:
-        """Bypass categories carried for the selected app, in display order.
+        """Bypass categories armed or active, in display order.
 
-        ``carried_categories``: the armed ones plus the active ones only while
-        the live script is on this app -- a bypass still running in the
-        previously selected app is not this app's. In-process read, NOT the
-        hook count.
+        In-process read, NOT the hook count (what toggle() acts on).
         """
         try:
             from sandroid.analysis.detection_bypass import get_bypass_service
 
             svc = get_bypass_service()
-            package = get_spotlight_service().get_effective_package()
-            on = (
-                svc.carried_categories(package)
-                if package
-                else set(svc.armed_categories())
-            )
+            on = set(svc.on_categories())
             self.bypass_categories = [c for c in svc.categories() if c in on]
         except Exception:
             self.bypass_categories = []
