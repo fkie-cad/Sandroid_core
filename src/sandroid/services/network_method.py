@@ -802,7 +802,7 @@ def execute_plan(
     done: list[str] = []
     for step in plan.steps:
         if stop is not None and stop():
-            return False, done, "stopped: Sandroid is quitting"
+            return False, done, "quit: Sandroid is quitting"
         try:
             ok, msg = actions.run(step, serial)
         except Exception as exc:
@@ -1107,9 +1107,11 @@ class NetworkMethodService:
         finally:
             self._apply_lock.release()
         if not ok:
-            return ApplyResult(
-                False, f"{LABELS[preset]} stopped at {failure}", done=done, view=view
-            )
+            if failure.startswith("quit: "):
+                text = f"{LABELS[preset]} stopped: {failure[len('quit: ') :]}"
+            else:
+                text = f"{LABELS[preset]} stopped at {failure}"
+            return ApplyResult(False, text, done=done, view=view)
         message = f"Network method: {view.name}"
         if view.problems:
             message += ". " + _sentence(view.problems)

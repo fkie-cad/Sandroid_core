@@ -937,7 +937,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
         """Render a fallback when the device proxy probe could not run."""
         try:
             self.query_one("#device-status", Static).update(
-                "[yellow]●[/yellow] Device proxy status unavailable"
+                "[yellow]Device proxy status unavailable[/yellow]"
             )
         except NoMatches:
             pass
@@ -956,7 +956,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
 
         if state == "ours":
             status_widget.update(
-                f"[green]●[/green] Device points at our mitmproxy — [bold]{addr}[/bold]"
+                f"[green]Device proxy on:[/green] our Mitmproxy at [bold]{addr}[/bold]"
             )
             if addr.startswith("127.0.0.1:"):
                 self._select_device_radio("device-radio-reverse")
@@ -964,7 +964,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                 self._select_device_radio("device-radio-ours")
         elif state == "external":
             status_widget.update(
-                f"[#6ba3ff]●[/] Device points at external proxy — [bold]{addr}[/bold]"
+                f"[#6ba3ff]Device proxy on:[/] external proxy at [bold]{addr}[/bold]"
             )
             try:
                 self.query_one("#device-ext-input", Input).value = addr
@@ -972,7 +972,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                 pass
             self._select_device_radio("device-radio-external")
         else:
-            status_widget.update("[#5b6479]○[/] No device proxy configured")
+            status_widget.update("[#5b6479]Device proxy off[/]")
             self._select_device_radio("device-radio-off")
 
     def _select_device_radio(self, radio_id: str) -> None:
