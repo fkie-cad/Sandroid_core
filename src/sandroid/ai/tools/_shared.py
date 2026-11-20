@@ -131,7 +131,12 @@ START_REFUSALS: dict[str, tuple[str, str, bool]] = {
         "the analyst declined; don't retry unless asked",
         False,
     ),
-    "busy": ("busy", "another app start is running; try again in a moment", True),
+    "busy": (
+        "busy",
+        "another app start is running; wait until it has finished "
+        "(get_spotlight_app shows it) before trying once more",
+        True,
+    ),
 }
 
 
@@ -148,6 +153,10 @@ def start_refusal(reason: str | None, package: str, detail: str | None = None):
     from sandroid.ai.tools.registry import ToolError
 
     code, words, retryable = entry
+    if reason == "needs_consent":
+        # app_start's own text tells API callers to "pass fresh=True"; the
+        # AI tools never turn fresh into consent, so it would only mislead.
+        detail = None
     return ToolError(
         code,
         f"{package} not started: {words}",

@@ -351,7 +351,9 @@ def _flow_log_rows_after(flow_dir: Path, seq: int) -> list[dict]:
             )
             records.extend(res["flows"])
             cursor = res["next_cursor"]
-            if not res["truncated"] or len(records) >= MAX_ROWS_AFTER:
+            # Page to the end (the log keeps at most a few pages): the
+            # newest rows are the ones the analyst asks about.
+            if not res["truncated"]:
                 break
     except Exception:
         logger.debug("newer flow log rows unavailable", exc_info=True)
@@ -626,6 +628,10 @@ def _collect(lens: str) -> _Collected:
     """
     snap = _store().snapshot_rows(lens)
     newer = 0
+    if lens == "network" and snap is not None and _snapshot_dir_is_stale(snap):
+        # A hidden live lens kept the old device's / session's flow dir:
+        # its rows are not this view any more.
+        snap = None
     if snap is not None:
         raw, source = list(snap), "lens"
     elif lens == "network":
@@ -657,6 +663,24 @@ def _collect(lens: str) -> _Collected:
     return _Collected(
         rows, source, _max_seq(raw) if lens == "network" else None, young, old, newer
     )
+
+
+def _snapshot_dir_is_stale(snap: Any) -> bool:
+    """A live lens snapshot whose flow dir is not the current one (it was
+    hidden across a device or session switch and never polled since).
+    """
+    if getattr(snap, "polled_through", None) is None:
+        return False  # REVIEW (its own bundle) or a source that does not say
+    flow_dir = getattr(snap, "flow_dir", None)
+    if not flow_dir:
+        return False
+    try:
+        from sandroid.services import mitmproxy_flow_log as flow_log
+
+        current = flow_log.resolve_flow_dir()
+        return Path(str(flow_dir)).resolve() != Path(str(current)).resolve()
+    except Exception:
+        return False
 
 
 def _add_unpolled(raw: list[dict], snap: Any) -> int:

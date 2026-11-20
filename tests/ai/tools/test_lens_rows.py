@@ -1623,3 +1623,66 @@ def test_fallback_rows_follow_the_lens_noise_rule(store, flow_dir, monkeypatch):
     assert files["keys"] == ["/data/data/com.x/a.xml"]
     assert files["hidden_by_lens_filters"] == 1
     assert files["shown_basis"] == "noise rule only (lens not open)"
+
+
+def _flow_dir_with(tmp_path, name, host, count):
+    d = tmp_path / name
+    d.mkdir()
+    with open(d / "flows.jsonl", "w") as fh:
+        for s in range(1, count + 1):
+            rec = {
+                "seq": s,
+                "id": f"{name}{s}",
+                "kind": "flow",
+                "method": "GET",
+                "host": host,
+                "path": "/x",
+                "ts_end": 1_700_000_000 + s,
+            }
+            fh.write(json.dumps(rec) + "\n")
+    (d / "meta.json").write_text(
+        json.dumps({"earliest_seq": 1, "latest_seq": count, "generation": 0})
+    )
+    return d
+
+
+def test_rows_after_a_hidden_lens_cursor_are_the_newest(tmp_path, monkeypatch):
+    """More than MAX_ROWS_AFTER flows while the lens was hidden: the tools get
+    the newest ones (the first page used to be the oldest).
+    """
+    flow_dir = _flow_dir_with(tmp_path, "f", "h.example", 3000)
+    monkeypatch.setattr(lens_rows, "_network_noise", lambda: (lambda row: False))
+    rows = lens_rows._flow_log_rows_after(flow_dir, 500)
+    seqs = [r["seq"] for r in rows]
+    assert len(seqs) == lens_rows.MAX_ROWS_AFTER
+    assert max(seqs) == 3000
+    assert min(seqs) == 3000 - lens_rows.MAX_ROWS_AFTER + 1
+
+
+def test_a_hidden_lens_of_an_old_flow_dir_is_not_the_view(tmp_path, monkeypatch):
+    """Device / session switched while the Network lens was hidden: its
+    snapshot (old flow dir) is dropped and the current flow log is read.
+    """
+    old = _flow_dir_with(tmp_path, "A", "old.device", 5)
+    new = _flow_dir_with(tmp_path, "B", "new.device", 5)
+    monkeypatch.setattr(mitmproxy_flow_log, "resolve_flow_dir", lambda: new)
+    monkeypatch.setattr(lens_rows, "_network_noise", lambda: (lambda row: False))
+
+    class _Store:
+        def snapshot_rows(self, lens):
+            row = {
+                "key": "A1",
+                "flow_id": "A1",
+                "seq": 1,
+                "shown": True,
+                "kind": "flow",
+                "host": "old.device",
+                "time": 1_700_000_001,
+                "flow_dir": str(old),
+            }
+            return rh.RowSnapshot([row], polled_through=1, flow_dir=str(old))
+
+    monkeypatch.setattr(lens_rows, "_store", lambda: _Store())
+    got = lens_rows._collect("network")
+    assert got.source == "flow_log"
+    assert {r.get("host") for r in got.rows} == {"new.device"}

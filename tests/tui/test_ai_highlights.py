@@ -78,9 +78,14 @@ def store(monkeypatch, tmp_path):
 @pytest.fixture
 def flow_dir(tmp_path, monkeypatch):
     """The fixture flow log dir (as in test_network_lens)."""
+    from sandroid.services import mitmproxy_flow_log
+
     d = tmp_path / "mitm_flows"
     d.mkdir()
     monkeypatch.setattr(np_mod, "_flow_dir", lambda: d)
+    # In the app both resolve to the session's flow dir; the row tools
+    # compare a hidden lens's dir with it.
+    monkeypatch.setattr(mitmproxy_flow_log, "resolve_flow_dir", lambda: d)
     monkeypatch.setattr(NetworkPanel, "_spotlight_package", lambda self: PKG)
     return d
 

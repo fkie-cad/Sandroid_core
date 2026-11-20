@@ -430,7 +430,11 @@ def test_start_spotlight_app_maps_start_refusals_to_tool_codes(
     assert err["code"] == code
     assert words in err["message"]
     assert err["retryable"] is retryable
-    assert err["detail"] == f"com.example not started ({reason})"
+    if reason == "needs_consent":
+        # app_start's "pass fresh=True" advice is for API callers only.
+        assert "detail" not in err
+    else:
+        assert err["detail"] == f"com.example not started ({reason})"
 
 
 def test_start_spotlight_app_other_failures_stay_a_result(lifecycle, monkeypatch):
