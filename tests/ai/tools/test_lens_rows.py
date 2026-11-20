@@ -396,8 +396,10 @@ def test_files_content_contains_reads_local_copies(store, monkeypatch):
     store.register_row_source("files", lambda: FILE_ROWS, None)
     monkeypatch.setattr(
         row_classifier,
-        "local_file_content",
-        lambda key: ("content: email" if key.endswith(".xml") else None, "content"),
+        "file_content",
+        lambda key, **kw: row_classifier.FileContent(
+            "content: [reduced]", "email" if key.endswith(".xml") else "", "content"
+        ),
     )
     result = lens_rows.find_rows("files", {"content_contains": "EMAIL"})
     assert result["keys"] == ["/data/data/com.x/shared_prefs/p.xml"]
@@ -942,8 +944,10 @@ def test_where_haystack_is_capped(store, monkeypatch):
     big = "x" * (lens_rows.HAYSTACK_CAP + 10) + "needle"
     monkeypatch.setattr(
         row_classifier,
-        "local_file_content",
-        lambda key: (big if key.endswith(".xml") else "needle", "content"),
+        "file_content",
+        lambda key, **kw: row_classifier.FileContent(
+            "", big if key.endswith(".xml") else "needle", "content"
+        ),
     )
     for regex in (False, True):
         result = lens_rows.find_rows(

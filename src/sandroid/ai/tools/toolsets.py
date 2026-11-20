@@ -76,7 +76,8 @@ TOOLSET_DESCRIPTIONS: dict[str, str] = {
     "monitor": "file-system monitor: live changes and per-file diffs",
     "recording": "record an action, review what changed, rewind and replay it",
     "lenses": (
-        "find, AI-classify, highlight and filter rows in the Network and Files lenses"
+        "find, AI-classify, highlight and filter rows in the Network and Files "
+        "lenses; read Files rows' content from the device"
     ),
     "agents": "subagents (orchestrator only)",
 }
@@ -213,6 +214,9 @@ TOOLSET_TABLE: dict[str, ToolsetEntry] = {
     "highlight_rows": _e("lenses", core=True, timeout_s=30),
     "clear_highlights": _e("lenses", core=True, timeout_s=30),
     "get_rows": _e("lenses"),
+    # Reads Files rows' content off the device into the session's content
+    # cache (REVERSIBLE: it asks); bounded by tool_time_remaining().
+    "read_device_files": _e("lenses", core=True, timeout_s=300),
     # agents (ai/agents.py; registered lazily by orchestrator_extra_tools, so
     # they may be absent). spawn_agent's risk depends on its profile (operator spawns ask,
     # researcher spawns do not), so remembered rules are keyed by profile; with

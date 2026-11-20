@@ -622,7 +622,8 @@ def test_local_file_content_reads_kept_versions(tmp_path, monkeypatch):
     monkeypatch.setattr(watchlist_store, "version_file", lambda v, p: db)
     monkeypatch.setattr(watchlist_store, "version_diff", lambda v: None)
     text, kind = rc.local_file_content("/data/data/com.x/c.db")
-    assert (text, kind) == ("sqlite tables: contacts", "content")
+    assert kind == "content"
+    assert "sqlite tables: contacts (0 rows)" in text
 
     monkeypatch.setattr(watchlist_store, "version_dirs", lambda p: [])
     assert rc.local_file_content("/x") == (None, "metadata")

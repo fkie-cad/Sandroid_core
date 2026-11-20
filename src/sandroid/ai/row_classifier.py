@@ -10,8 +10,13 @@ Two parts, both without Textual:
   about 3 KB per row. Headers, query parameters and JSON / form fields whose
   *name* looks secret (auth, token, key, secret, session, cookie, password,
   signature) are always reduced to their type and length. Files: path, app,
-  ops, count, processes, times, and -- only when a local kept version
-  exists -- a text head or the SQLite table list plus a diff head. With
+  ops, count, processes, times, and -- only when local content exists (a
+  kept watchlist version or a file ``read_device_files`` read into
+  ``<session>/ai/content_cache``, whichever is newer) -- a 1.5 KB head of
+  :func:`render_content` (prefs as ``name = value`` lines, JSON minified,
+  gzip/ABX decoded, SQLite tables with row counts and sample rows) plus a
+  diff head. Prefs keys, JSON keys, SQLite columns and ``k=v`` lines with
+  such names are reduced the same way. With
   ``ai.mask_sensitive`` on, every digest also goes through
   :func:`~sandroid.ai.safety.redact_secrets`; if that fails, the digest is
   withheld (fails closed).
@@ -43,6 +48,7 @@ import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlsplit
 
@@ -51,7 +57,6 @@ from sandroid.ai.results import CHARS_PER_TOKEN
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
-    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -434,9 +439,515 @@ def files_summary(row: Mapping[str, Any]) -> str:
 
 
 _SQLITE_MAGIC = b"SQLite format 3\x00"
+_GZIP_MAGIC = b"\x1f\x8b"
+_ABX_MAGIC = b"ABX\x00"
+#: Leading bytes searched for a NUL (binary content).
+BINARY_PROBE = 8192
+#: Decoded text a renderer keeps (``match`` text; the digest is capped later).
+RENDER_CAP = 1024 * 1024
+#: Characters of one prefs value / SQLite cell in a digest.
+VALUE_CAP = 200
+SQLITE_CELL_CAP = 80
+SQLITE_SAMPLE_TABLES = 10
+SQLITE_SAMPLE_ROWS = 3
+SQLITE_LIST_TABLES = 60
+#: Seconds one SQLite rendering may spend in SQL (progress-handler abort).
+SQLITE_RENDER_S = 3.0
+#: Kept SQLite copies (main + ``-wal``) larger than this are listed only.
+SQLITE_COPY_CAP = 16 * 1024 * 1024
+#: Bytes of a kept watchlist copy that are rendered.
+LOCAL_READ_CAP = 1024 * 1024
+#: Characters of SQLite rows kept in the ``match`` text.
+HAYSTACK_RENDER_CAP = 256 * 1024
+
+_MAGIC_NAMES = (
+    (b"\x89PNG", "png"),
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"GIF8", "gif"),
+    (b"RIFF", "riff/webp"),
+    (b"PK\x03\x04", "zip"),
+    (b"\x7fELF", "elf"),
+    (b"dex\n", "dex"),
+    (b"%PDF", "pdf"),
+    (b"\x1f\x8b", "gzip"),
+)
+
+
+@dataclass
+class Rendered:
+    """One file's content as text (see :func:`render_content`).
+
+    Attributes:
+        digest: Reduced text for the model: values under secret-looking
+            names (prefs keys, JSON keys, SQLite columns, ``k=v`` lines)
+            replaced by their type and length.
+        match: The full decoded text, unreduced; searched locally by
+            ``content_contains``, never sent to the model.
+        kind: ``content``, ``binary`` or ``metadata``.
+        label: ``text``, ``prefs``, ``xml``, ``json``, ``sqlite``,
+            ``binary``, ``gzip+...`` or ``abx+...``.
+    """
+
+    digest: str
+    match: str
+    kind: str
+    label: str
+
+
+def _magic_name(data: bytes) -> str:
+    for magic, name in _MAGIC_NAMES:
+        if data.startswith(magic):
+            return name
+    return data[:4].hex() or "empty"
+
+
+def _binary(data: bytes, size: int | None) -> Rendered:
+    n = len(data) if size is None else size
+    text = f"[binary {_human_bytes(n)}, magic {_magic_name(data)}]"
+    return Rendered(text, "", "binary", "binary")
+
+
+def _local_name(tag: Any) -> str:
+    tag = str(tag)
+    return tag.rsplit("}", 1)[-1]
+
+
+def _pref_value(el: Any) -> Any:
+    tag = _local_name(el.tag)
+    if tag == "string":
+        return el.text or ""
+    if tag == "set":
+        return [c.text or "" for c in el]
+    return el.get("value", el.text or "")
+
+
+def _prefs_lines(root: Any) -> tuple[list[str], list[str]]:
+    """``(digest_lines, match_lines)`` of a SharedPreferences ``<map>``."""
+    digest: list[str] = []
+    match: list[str] = []
+    for el in root:
+        if not isinstance(getattr(el, "tag", None), str):
+            continue  # comments, processing instructions
+        name = str(el.get("name") or _local_name(el.tag))
+        value = _pref_value(el)
+        shown = ", ".join(value) if isinstance(value, list) else str(value)
+        match.append(f"{name} = {shown}")
+        if is_secret_name(name):
+            digest.append(f"{name} = {reduce_value(value)}")
+        else:
+            digest.append(f"{name} = {_cap(shown, VALUE_CAP)}")
+    return digest, match
+
+
+_XML_ATTR_SECRET_RE = re.compile(
+    r"""(<(?P<tag>[\w:.-]+)\b[^>]*?\bname\s*=\s*["'](?P<name>[^"']*)["'][^>]*?"""
+    r""">)(?P<body>[^<]*)"""
+)
+_XML_VALUE_ATTR_RE = re.compile(
+    r"""(<[\w:.-]+\b[^>]*?\bname\s*=\s*["'](?P<name>[^"']*)["'][^>]*?\bvalue\s*=\s*)"""
+    r"""(?P<q>["'])(?P<value>[^"']*)(?P=q)"""
+)
+_JSON_PAIR_RE = re.compile(
+    r'"(?P<name>(?:[^"\\]|\\.)*)"\s*:\s*"(?P<value>(?:[^"\\]|\\.)*)"'
+)
+_KV_LINE_RE = re.compile(
+    r"^(?P<lead>\s*(?P<name>[\w.\-]+)\s*[=:]\s*)(?P<value>.+?)\s*$"
+)
+
+
+def _reduce_xml_text(text: str) -> str:
+    """Secret-named element bodies / ``value`` attributes reduced (regex; for
+    XML that does not parse, e.g. a truncated head).
+    """
+
+    def body(m: re.Match[str]) -> str:
+        if is_secret_name(m.group("name")) and m.group("body").strip():
+            return m.group(1) + reduce_value(m.group("body"))
+        return m.group(0)
+
+    def attr(m: re.Match[str]) -> str:
+        if is_secret_name(m.group("name")):
+            q = m.group("q")
+            return f"{m.group(1)}{q}{reduce_value(m.group('value'))}{q}"
+        return m.group(0)
+
+    return _XML_VALUE_ATTR_RE.sub(attr, _XML_ATTR_SECRET_RE.sub(body, text))
+
+
+def _reduce_json_text(text: str) -> str:
+    """Secret-named ``"key": "value"`` pairs reduced (JSON that does not parse)."""
+
+    def pair(m: re.Match[str]) -> str:
+        if is_secret_name(m.group("name")):
+            return f'"{m.group("name")}":"{reduce_value(m.group("value"))}"'
+        return m.group(0)
+
+    return _JSON_PAIR_RE.sub(pair, text)
+
+
+def _reduce_kv_text(text: str) -> str:
+    """``name=value`` / ``name: value`` lines with secret names reduced."""
+    out = []
+    for line in text.split("\n"):
+        m = _KV_LINE_RE.match(line)
+        if m and is_secret_name(m.group("name")):
+            line = m.group("lead") + reduce_value(m.group("value"))
+        out.append(line)
+    return "\n".join(out)
+
+
+def _parse_xml(data: bytes) -> Any:
+    """Parse with lxml, entities and network off (as file_diff), or None."""
+    try:
+        from lxml import etree
+    except ImportError:  # pragma: no cover - lxml is a dependency
+        return None
+    parser = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False)
+    try:
+        return etree.fromstring(data, parser=parser)
+    except (etree.XMLSyntaxError, ValueError):
+        return None
+
+
+def _render_xml_root(root: Any, raw_text: str, label: str) -> Rendered:
+    if _local_name(root.tag) == "map":
+        digest, match = _prefs_lines(root)
+        return Rendered(
+            "\n".join(digest) or "(empty prefs)",
+            "\n".join(match),
+            "content",
+            "prefs" if label == "xml" else f"{label}/prefs",
+        )
+    return Rendered(_reduce_xml_text(raw_text), raw_text, "content", label)
+
+
+def _render_abx(data: bytes) -> Rendered | None:
+    import io
+    import xml.etree.ElementTree as ET  # nosec B405 - serialising a decoded tree
+
+    try:
+        from sandroid.core.ccl_abx import AbxReader
+
+        document = AbxReader(io.BytesIO(data)).read(is_multi_root=True)
+        root = document.getroot()
+        if _local_name(root.tag) == "root" and len(root) == 1:
+            root = root[0]  # the multi-root wrapper around one document
+        raw_text = ET.tostring(root, encoding="unicode")
+    except Exception:
+        return None
+    return _render_xml_root(root, raw_text, "abx")
+
+
+def _render_text(path: str, data: bytes) -> Rendered:
+    text = data.decode("utf-8", "replace")
+    stripped = text.lstrip("﻿ \t\r\n")
+    lower = path.lower()
+    if stripped.startswith("<") and (
+        lower.endswith(".xml") or stripped.startswith("<?xml") or "<map" in stripped
+    ):
+        root = _parse_xml(data)
+        if root is not None:
+            return _render_xml_root(root, text, "xml")
+        return Rendered(_reduce_xml_text(text), text, "content", "xml")
+    if stripped[:1] in ("{", "["):
+        try:
+            parsed = json.loads(stripped)
+        except (ValueError, RecursionError):
+            return Rendered(_reduce_json_text(text), text, "content", "json")
+        try:
+            digest = json.dumps(
+                _reduce_json(parsed), separators=(",", ":"), ensure_ascii=False
+            )
+            match = json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+        except (ValueError, RecursionError):
+            return Rendered(_reduce_json_text(text), text, "content", "json")
+        return Rendered(digest, match, "content", "json")
+    return Rendered(_reduce_kv_text(text), text, "content", "text")
+
+
+def _gunzip(data: bytes, cap: int) -> tuple[bytes, bool] | None:
+    """At most *cap* bytes of a gzip stream (a bomb stops at the cap)."""
+    import zlib
+
+    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        out = d.decompress(data, cap + 1)
+    except zlib.error:
+        return None
+    if len(out) > cap:
+        return out[:cap], True
+    return out, bool(d.unconsumed_tail)
+
+
+def _cell(value: Any) -> Any:
+    if isinstance(value, bytes | bytearray | memoryview):
+        return f"[blob {len(bytes(value))} bytes]"
+    return value
+
+
+def _quote_ident(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _sqlite_render(db: Path, mode: str) -> Rendered:
+    """Tables with row counts (+ sample rows) of a private copy of *db*.
+
+    The copy (main file and ``-wal``, when there) is opened normally with
+    ``PRAGMA query_only``: unlike ``immutable=1`` this reads the WAL, where
+    fresh writes are. The original is never opened.
+    """
+    import shutil
+    import sqlite3
+    import tempfile
+
+    wal = db.with_name(db.name + "-wal")
+    with tempfile.TemporaryDirectory(prefix="sandroid-db-") as tmp:
+        copy = Path(tmp) / "db"
+        try:
+            shutil.copyfile(db, copy)
+            if wal.is_file():
+                shutil.copyfile(wal, Path(tmp) / "db-wal")
+        except OSError:
+            return Rendered("[sqlite database, copy failed]", "", "binary", "sqlite")
+        stop = time.monotonic() + SQLITE_RENDER_S
+        try:
+            conn = sqlite3.connect(str(copy), timeout=1.0)
+        except sqlite3.Error:
+            return Rendered("[sqlite database, unreadable]", "", "binary", "sqlite")
+        try:
+            conn.set_progress_handler(lambda: int(time.monotonic() > stop), 1000)
+            conn.execute("PRAGMA query_only=1")
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("PRAGMA trusted_schema=0")
+            return _sqlite_lines(conn, mode)
+        except sqlite3.Error as exc:
+            return Rendered(
+                f"[sqlite database, unreadable: {_cap(str(exc), 80)}]",
+                "",
+                "binary",
+                "sqlite",
+            )
+        finally:
+            conn.close()
+
+
+def _sample_rows(
+    cur: Any, name: str, cols: list[str], digest: list[str], match: list[str]
+) -> None:
+    """Sample rows (reduced) into *digest*, rows (full) into *match*."""
+    match_len = sum(len(m) for m in match)
+    for i, row in enumerate(cur):
+        cells = [_cell(v) for v in row]
+        pairs = list(zip(cols, cells, strict=False))
+        if match_len < HAYSTACK_RENDER_CAP:
+            full = "; ".join(f"{c}={v}" for c, v in pairs)
+            match.append(f"{name}: {full}")
+            match_len += len(full)
+        if i < SQLITE_SAMPLE_ROWS:
+            digest.append(
+                "  "
+                + "; ".join(
+                    f"{c}="
+                    + (
+                        reduce_value(v)
+                        if is_secret_name(c)
+                        else _cap(str(v), SQLITE_CELL_CAP)
+                    )
+                    for c, v in pairs
+                )
+            )
+        elif match_len >= HAYSTACK_RENDER_CAP:
+            break
+
+
+def _sqlite_lines(conn: Any, mode: str) -> Rendered:
+    import sqlite3
+
+    names = [
+        str(r[0])
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+    ]
+    counts: dict[str, int | None] = {}
+    columns: dict[str, list[str]] = {}
+    for name in names[:SQLITE_LIST_TABLES]:
+        try:
+            counts[name] = int(
+                conn.execute(f"SELECT count(*) FROM {_quote_ident(name)}").fetchone()[0]
+            )
+            info = conn.execute(f"PRAGMA table_info({_quote_ident(name)})").fetchall()
+            columns[name] = [str(c[1]) for c in info]
+        except sqlite3.Error:
+            counts[name] = None
+            columns[name] = []
+    listed = ", ".join(
+        f"{n} ({counts[n]} rows)" if counts.get(n) is not None else n
+        for n in names[:SQLITE_LIST_TABLES]
+    )
+    more = (
+        f" (+{len(names) - SQLITE_LIST_TABLES} more)"
+        if len(names) > SQLITE_LIST_TABLES
+        else ""
+    )
+    digest = [f"sqlite tables: {listed or '(none)'}{more}"]
+    match = list(digest)
+    if mode == "sample":
+        sampled = [n for n in names if counts.get(n)][:SQLITE_SAMPLE_TABLES]
+        for name in sampled:
+            cols = columns.get(name) or []
+            digest.append(f"{name}: " + ", ".join(cols))
+            try:
+                cur = conn.execute(f"SELECT * FROM {_quote_ident(name)}")
+            except sqlite3.Error:
+                continue
+            # A time-out (progress handler) keeps what was read so far.
+            with contextlib.suppress(sqlite3.Error):
+                _sample_rows(cur, name, cols, digest, match)
+    return Rendered("\n".join(digest), "\n".join(match), "content", "sqlite")
+
+
+def render_content(
+    path: str,
+    data: bytes | None = None,
+    *,
+    db: Path | None = None,
+    size: int | None = None,
+    sqlite: str = "sample",
+    _nested: bool = False,
+) -> Rendered:
+    """The one renderer of file content, for kept watchlist copies and for
+    files ``read_device_files`` read (``ai/content_cache``).
+
+    *data*: the file's bytes (a head, possibly truncated); *db*: a local
+    SQLite file (its ``-wal`` next to it is read too). gzip is decompressed
+    with the output bounded to :data:`RENDER_CAP`; ABX is decoded with
+    ``ccl_abx``; XML is parsed with entities and network off and a
+    ``<map>`` (SharedPreferences) becomes ``name = value`` lines; JSON is
+    minified. Names that look secret keep only their value's type and
+    length in the digest (always, whatever ``ai.mask_sensitive`` says).
+    """
+    if db is not None:
+        if sqlite == "skip":
+            return Rendered("[sqlite database]", "", "binary", "sqlite")
+        return _sqlite_render(db, sqlite)
+    data = data or b""
+    if not data:
+        return Rendered("(empty file)", "", "content", "text")
+    if data.startswith(_SQLITE_MAGIC):
+        return Rendered(
+            f"[sqlite database {_human_bytes(size or len(data))}, not copied]",
+            "",
+            "binary",
+            "sqlite",
+        )
+    if data.startswith(_GZIP_MAGIC) and not _nested:
+        got = _gunzip(data, RENDER_CAP)
+        if got is not None:
+            inner, cut = got
+            r = render_content(
+                path[:-3] if path.endswith(".gz") else path, inner, _nested=True
+            )
+            note = " [decompressed output capped]" if cut else ""
+            return Rendered(r.digest + note, r.match, r.kind, f"gzip+{r.label}")
+    if data.startswith(_ABX_MAGIC):
+        r = _render_abx(data)
+        if r is not None:
+            return r
+        return _binary(data, size)
+    if b"\x00" in data[:BINARY_PROBE]:
+        return _binary(data, size)
+    return _render_text(path, data[:RENDER_CAP])
+
+
+@dataclass
+class FileContent:
+    """Local content of one Files row (see :func:`file_content`).
+
+    Attributes:
+        digest: The content part of the row digest (reduced, capped), or None.
+        match: The full local text ``content_contains`` searches.
+        kind: ``content``, ``binary`` or ``metadata`` (nothing local).
+        source: ``device`` (``read_device_files`` cache), ``watchlist`` or None.
+        at: Epoch seconds of the read / pull.
+    """
+
+    digest: str | None
+    match: str
+    kind: str
+    source: str | None = None
+    at: float | None = None
+
+
+def _clock(ts: float | None) -> str:
+    try:
+        return time.strftime("%H:%M", time.localtime(float(ts or 0)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "?"
+
+
+def _watchlist_content(path: str) -> tuple[Callable[[], FileContent], float] | None:
+    """``(render, pulled_at)`` of the newest kept version of *path*."""
+    try:
+        from sandroid.core import watchlist_store
+
+        versions = watchlist_store.version_dirs(path)
+        if not versions:
+            return None
+        version = versions[-1]
+        when = watchlist_store.version_time(version)
+        at = when.timestamp() if when is not None else 0.0
+    except Exception:
+        return None
+
+    def render() -> FileContent:
+        try:
+            local = watchlist_store.version_file(version, path)
+            diff = watchlist_store.version_diff(version)
+        except Exception:
+            return FileContent(None, "", "metadata")
+        lines: list[str] = []
+        kind = "metadata"
+        match = ""
+        if local.is_file():
+            rendered = _render_local(path, local)
+            if rendered is not None:
+                head, _ = _cap_bytes(rendered.digest, FILE_HEAD_CAP)
+                lines.append(
+                    f"content (kept copy {_clock(at)}, {rendered.label}): {head}"
+                )
+                match = rendered.match
+                kind = rendered.kind
+        if diff:
+            capped, _ = _cap_bytes(diff, DIFF_HEAD_CAP)
+            lines.append(f"last diff: {capped}")
+            match = f"{match}\n{diff}" if match else diff
+            kind = "content" if kind == "metadata" else kind
+        return FileContent("\n".join(lines) or None, match, kind, "watchlist", at)
+
+    return render, at
+
+
+def _render_local(path: str, local: Path) -> Rendered | None:
+    try:
+        size = local.stat().st_size
+        with open(local, "rb") as f:
+            head = f.read(min(size, LOCAL_READ_CAP) if size else 16)
+    except OSError:
+        return None
+    if head.startswith(_SQLITE_MAGIC):
+        wal = local.with_name(local.name + "-wal")
+        total = size + (wal.stat().st_size if wal.is_file() else 0)
+        if total <= SQLITE_COPY_CAP:
+            return render_content(path, db=local)
+        tables = _sqlite_tables(local) or []
+        text = "sqlite tables: " + (", ".join(tables[:60]) or "(none)")
+        return Rendered(text, text, "content", "sqlite")
+    return render_content(path, head, size=size)
 
 
 def _sqlite_tables(path: Path) -> list[str] | None:
+    """Table names of a large kept SQLite copy (``immutable``: no WAL)."""
     try:
         with open(path, "rb") as f:
             if f.read(16) != _SQLITE_MAGIC:
@@ -460,49 +971,48 @@ def _sqlite_tables(path: Path) -> list[str] | None:
         conn.close()
 
 
-def local_file_content(path: str) -> tuple[str | None, str]:
-    """``(text, kind)`` from the newest kept watchlist version of *path*.
+def file_content(
+    path: str, *, row_last: Any = None, serial: str | None = None
+) -> FileContent:
+    """Local content of *path*: the newest kept watchlist version or a valid
+    ``read_device_files`` cache entry, whichever is newer.
 
-    Never touches the device. ``kind``: ``content``, ``binary`` or
-    ``metadata`` (no local copy).
+    Never touches the device. A cache entry is valid while the row's
+    ``last`` is not newer than when it was read and it was read from
+    *serial* (when given).
     """
+    cached = None
     try:
-        from sandroid.core import watchlist_store
+        from sandroid.ai import device_files
 
-        versions = watchlist_store.version_dirs(path)
-        if not versions:
-            return None, "metadata"
-        version = versions[-1]
-        local = watchlist_store.version_file(version, path)
-        diff = watchlist_store.version_diff(version)
+        cached = device_files.lookup(path, row_last=row_last, serial=serial)
     except Exception:
-        return None, "metadata"
-    lines: list[str] = []
-    kind = "metadata"
-    tables = _sqlite_tables(local) if local.is_file() else None
-    if tables is not None:
-        lines.append("sqlite tables: " + (", ".join(tables[:60]) or "(none)"))
-        kind = "content"
-    elif local.is_file():
-        try:
-            with open(local, "rb") as f:
-                head = f.read(FILE_HEAD_CAP + 1)
-            size = local.stat().st_size
-        except OSError:
-            head, size = b"", 0
-        if b"\x00" in head[:FILE_HEAD_CAP]:
-            lines.append(f"content: [binary {_human_bytes(size)}]")
-            kind = "binary"
-        elif head:
-            text = head[:FILE_HEAD_CAP].decode("utf-8", "replace")
-            more = f" [of {_human_bytes(size)}]" if size > FILE_HEAD_CAP else ""
-            lines.append(f"content: {text}{more}")
-            kind = "content"
-    if diff:
-        capped, _ = _cap_bytes(diff, DIFF_HEAD_CAP)
-        lines.append(f"last diff: {capped}")
-        kind = "content" if kind == "metadata" else kind
-    return ("\n".join(lines) or None), kind
+        logger.debug("content cache lookup failed", exc_info=True)
+    kept = _watchlist_content(path)
+    if cached is not None and (kept is None or cached.read_at >= kept[1]):
+        digest, _ = _cap_bytes(cached.digest(), FILE_HEAD_CAP)
+        trunc = " (head)" if cached.meta.get("truncated") else ""
+        header = (
+            f"content read from device {_clock(cached.read_at)} "
+            f"({cached.meta.get('label') or cached.kind}, "
+            f"{_human_bytes(cached.meta.get('size'))}{trunc})"
+        )
+        return FileContent(
+            f"{header}:\n{digest}",
+            cached.match(),
+            cached.kind,
+            "device",
+            cached.read_at,
+        )
+    if kept is not None:
+        return kept[0]()
+    return FileContent(None, "", "metadata")
+
+
+def local_file_content(path: str, *, row_last: Any = None) -> tuple[str | None, str]:
+    """``(text, kind)`` of :func:`file_content` (digest part only)."""
+    got = file_content(path, row_last=row_last)
+    return got.digest, got.kind
 
 
 def files_digest(
@@ -513,7 +1023,9 @@ def files_digest(
     row_cap: int = ROW_CAP,
     content: tuple[str | None, str] | None = None,
 ) -> Digest:
-    """The digest of one Files row (content only from local kept copies)."""
+    """The digest of one Files row (content only from local copies:
+    :func:`file_content`, or *content* when the caller has it).
+    """
     key = str(row.get("key") or row.get("path") or "")
     lines = [files_summary(row)]
     meta = []

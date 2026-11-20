@@ -26,7 +26,11 @@ Pieces
 | ``ai/tools/lens_rows.py``           | the five tools (toolset ``lenses``), ``where``      |
 |                                     | predicates, row collection and fallbacks            |
 +-------------------------------------+-----------------------------------------------------+
-| ``ai/row_classifier.py``            | row digests and the batched model classifier        |
+| ``ai/row_classifier.py``            | row digests, ``render_content`` and the batched     |
+|                                     | model classifier                                    |
++-------------------------------------+-----------------------------------------------------+
+| ``ai/tools/device_content.py``,     | ``read_device_files``: device reads for the Files   |
+| ``ai/device_files.py``              | lens and the session's content cache                |
 +-------------------------------------+-----------------------------------------------------+
 | ``tui/row_annotations.py``          | the shared registry the lenses read (tint, filter)  |
 +-------------------------------------+-----------------------------------------------------+
@@ -90,6 +94,8 @@ no device resource and run without an approval prompt. ``classify_rows``,
 ``highlight_rows`` and ``clear_highlights`` are in
 ``ORCHESTRATOR_ONLY_TOOL_NAMES``; ``find_rows`` with ``apply`` refuses in a
 subagent as well. Subagents keep ``find_rows`` (report only) and ``get_rows``.
+The toolset's sixth tool, ``read_device_files`` (see *Reading file content
+from the device*), reads the device and asks for approval.
 
 .. code-block:: text
 
@@ -409,10 +415,97 @@ One digest per row, shared by ``get_rows`` and the classifier:
   form bodies are split into ``k=v`` fields, base64 or undecodable bodies
   become ``[binary 34 kB image/png]``. About 3 KB per row.
 - **Files**: path, ops, count, app, up to three processes, first/last time,
-  the watched flag, and only from a local kept watchlist version: a 1.5 KB
-  text head (or the SQLite table list, opened read-only) and an 800-byte
-  diff head. Rows without local content are judged from metadata and counted
-  in ``judged_on_metadata_only``. There is no device pull.
+  the watched flag, and only from local content: a 1.5 KB head of the
+  rendered content and, for a kept watchlist version, an 800-byte diff head.
+  Local content is the newer of the newest kept watchlist version and a
+  ``read_device_files`` cache entry (see *Reading file content from the
+  device* below); the digest's first content line says which
+  (``content read from device 14:02 (prefs, 2 kB):`` or ``content (kept
+  copy 13:40, sqlite):``). Rows without local content are judged from
+  metadata and counted in ``judged_on_metadata_only``; ``find_rows`` (with
+  ``content_contains``) and ``classify_rows`` (Files) then add
+  ``content_missing: N`` and a ``content_hint`` to call
+  ``read_device_files(where=...)`` and run again.
+
+Both sources go through one renderer,
+``row_classifier.render_content(path, data | db)``: a NUL in the first 8 KB
+is binary (``[binary 34 kB, magic png]``); gzip is decompressed with the
+output bounded to 1 MB (a gzip bomb stops there); ABX is decoded with
+``ccl_abx``; XML is parsed with lxml (entities and network off) and a
+SharedPreferences ``<map>`` becomes one ``name = value`` line per entry;
+JSON is minified; SQLite is opened on a private copy (main file plus
+``-wal``) with ``PRAGMA query_only`` -- not ``immutable``, which ignores the
+WAL where fresh writes are -- and rendered as the tables with row counts
+plus 3 sample rows of up to 10 tables (cells at most 80 characters).
+
+Reading file content from the device
+------------------------------------
+
+.. code-block:: text
+
+   read_device_files(keys?[<=500], where?, scope?="shown", only_missing?=true,
+                     max_files?=100 (<=300), max_bytes_per_file?=65536 (<=1 MB),
+                     max_total_bytes?=8 MB (<=32 MB),
+                     sqlite?="sample"|"tables"|"skip", refresh?=false)
+                                                                   core, 300 s
+     -> {summary, serial, candidates, read, cached, bytes_read, partial,
+         stop_reason, where?, unknown_keys?,
+         skipped{binary, too_big, permission_denied, gone, not_regular,
+                 review_row, budget, sqlite_skipped, cancelled, error},
+         keys_read[<=50], skipped_keys{reason: [<=10]}}
+     !! busy while a WORLD lease is held
+
+``ai/tools/device_content.py`` + ``ai/device_files.py``. The lens tools
+never touch the device; this one reads the selected Files rows' content into
+the session's content cache so they can use it. It selects rows exactly like
+``find_rows`` (``_collect``, ``compile_where``, ``_scoped``; ``keys``
+narrows further) and skips review rows (``scope`` set: the device now is not
+the run). It returns counts, never content: content reaches the model only
+through the Files digests above.
+
+- **Approval.** ``RiskTier.REVERSIBLE`` with ``can_remember_choice``: it
+  pulls app-private data in order to show it to a remote model, so the
+  analyst approves it (once, or "allow always"); the prompt shows the
+  arguments (``where``, ``keys``, caps). Risk is per tool, so the read-only
+  lens tools have no ``pull`` option.
+- **One device.** The serial is fixed once per call (the running monitor's
+  ``timeline_serial``, else ``Adb.selected_serial()``) and every argv is
+  ``Adb.base_argv(serial)``; the shared target is never read again or
+  changed, so a device switch mid-run cannot redirect a read.
+- **Root.** Probed once per call: ``exec-out id -u`` = 0 reads directly;
+  else ``su 0`` (5 s probe), else ``su -c``; else no root, and ``/data``
+  paths come back ``permission_denied``.
+- **Reads.** One batched ``stat -c '%s|%Y|%F|%n'`` (50 paths per call;
+  error lines become ``gone`` / ``permission_denied``, directories
+  ``not_regular``), then per file ``exec-out head -c N+1`` (argv, binary
+  safe) with the host killing the stream at N+1 bytes. SQLite files
+  (``.db``/``.sqlite``/... or the magic) are copied whole with ``cat``,
+  main file plus ``-wal``, at most 16 MB together (else ``too_big``).
+  Timeouts: 15 s per head, 60 s per database; the whole call stops 5 s
+  before ``tool_time_remaining()`` and on ``Ctrl+X`` (the turn's cancel
+  event, checked between files and while a read waits). A stopped call is
+  ``partial``; what it already read stays cached. ``max_files`` counts
+  device reads (``stop_reason`` ``max_files``), ``max_total_bytes`` the
+  bytes (``budget`` skips). Progress: ``reading 12/40``.
+- **Leases.** None are claimed (reads change nothing). While someone holds
+  the WORLD lease (snapshot restore, emulator restart) the tool answers
+  ``busy``.
+- **Audit.** One ``ai/files_read`` timeline line with the counts.
+
+The cache: ``<session>/ai/content_cache/<sha1(path)>/`` (folders 0700, files
+0600, each written atomically, ``meta.json`` last): ``meta.json`` (path,
+serial, the row's ``last``, device mtime and size, ``read_at``, kind,
+label, truncated), ``raw.bin`` (text files; binaries keep only size and
+magic) or ``db`` + ``db-wal``, ``match.txt`` (the full decoded text,
+unreduced: searched locally by ``content_contains``, never sent) and
+``digest.txt`` (the reduced rendering). An entry is stale when the row's
+``last`` is newer than the one it was read for (the monitor saw a write),
+when the batched stat shows another mtime or size, when it came from another
+serial, or with ``refresh=true``; ``only_missing`` (default) also skips files
+whose kept watchlist version is as new as the row. A session switch is a
+different folder. At most 64 MB per session, oldest ``read_at`` evicted
+first. The tool never writes the watchlist, the forensic service or the
+privacy scan.
 
 Privacy rules:
 
@@ -425,6 +518,13 @@ Privacy rules:
   form body fields with such names are always reduced to type and length
   (``access_token=[jwt, 180 chars]``, ``"password":"[text, 7 chars]"``),
   whether ``ai.mask_sensitive`` is on or not.
+- File content the same way, always: prefs keys (``auth_token = [jwt, 180
+  chars]``), JSON keys, SQLite column names and ``name=value`` lines of
+  text files whose name matches; XML or JSON that does not parse (a
+  truncated head) is reduced by pattern. ``content_contains`` searches the
+  full local text (``match.txt`` / the kept copy), so "files containing
+  this token" still finds a token stored under a secret-named key, while
+  the model only ever gets the reduced digest.
 - With ``ai.mask_sensitive`` on, every digest runs through
   :func:`~sandroid.ai.safety.redact_secrets`; if that raises, the digest is
   replaced by ``[digest withheld: secret redaction failed]`` (fails closed)

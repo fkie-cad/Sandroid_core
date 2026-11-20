@@ -128,7 +128,9 @@ _WHERE_PROP = {
         "header_contains. Files: "
         "path_glob[], ops (letters CMDRA), process, app, watched, min_count, "
         "review_kind (changed/new/deleted), text, content_contains (local "
-        "copies only). regex=true makes text/*_contains regular expressions."
+        "copies only: kept watchlist versions and files read with "
+        "read_device_files; searches the full text, secret-named values "
+        "too). regex=true makes text/*_contains regular expressions."
     ),
 }
 
@@ -723,12 +725,20 @@ def collect_rows(lens: str) -> tuple[list[dict], str]:
 
 
 class _Details:
-    """Per-call cache of flow details (Network) and local file content."""
+    """Per-call cache of flow details (Network) and local file content.
+
+    Files: :func:`~sandroid.ai.row_classifier.file_content` (the newest of a
+    kept watchlist version and a ``read_device_files`` cache entry).
+    :meth:`file` is the reduced digest part the model may see;
+    :meth:`haystack` the full local text ``content_contains`` searches here,
+    never sent (so a token under a secret-named key is still found).
+    """
 
     def __init__(self) -> None:
         self._flows: dict[str, Any] = {}
-        self._files: dict[str, tuple[str | None, str]] = {}
+        self._files: dict[str, Any] = {}
         self._default_dir: Path | None = None
+        self._serial: list[str | None] = []
 
     def flow(self, row: Mapping[str, Any]) -> dict | None:
         if row.get("kind") == "tls":
@@ -758,12 +768,36 @@ class _Details:
         self._flows[fid] = detail
         return detail
 
-    def file(self, key: str) -> tuple[str | None, str]:
+    def _content(self, key: str, last: Any = None) -> Any:
         if key not in self._files:
-            from sandroid.ai.row_classifier import local_file_content
+            from sandroid.ai import row_classifier as rc
 
-            self._files[key] = local_file_content(key)
+            if not self._serial:
+                try:
+                    from sandroid.ai.device_files import current_serial
+
+                    self._serial.append(current_serial())
+                except Exception:
+                    self._serial.append(None)
+            self._files[key] = rc.file_content(
+                key, row_last=last, serial=self._serial[0]
+            )
         return self._files[key]
+
+    def file(self, key: str, last: Any = None) -> tuple[str | None, str]:
+        """``(digest text, kind)`` of a Files row's local content."""
+        got = self._content(key, last)
+        return got.digest, got.kind
+
+    def haystack(self, key: str, last: Any = None) -> str:
+        """The full local text of a Files row (searched, never sent)."""
+        return self._content(key, last).match or ""
+
+    def missing(self, row: Mapping[str, Any]) -> bool:
+        """A live Files row without local content (a device read would help)."""
+        if row.get("scope") is not None:
+            return False  # review rows: the device now is not the run
+        return self.file(str(row.get("key")), row.get("last"))[1] == "metadata"
 
 
 def _flow_text(detail: Mapping[str, Any] | None, *, bodies: bool) -> str:
@@ -1149,9 +1183,7 @@ def _files_pred(
         )
     elif field == "content_contains":
         m = _matcher(value, regex, field)
-        costly.append(
-            lambda r: m((details.file(str(r.get("key")))[0] or "")[:HAYSTACK_CAP])
-        )
+        costly.append(lambda r: m(details.haystack(str(r.get("key")), r.get("last"))))
 
 
 def _filter(rows: list[dict], preds: list[Predicate]) -> list[dict]:
@@ -1276,6 +1308,26 @@ def _add_unkeyed(result: dict, got: _Collected) -> None:
             f"{n} TLS-failure row(s) the lens shows cannot be highlighted "
             "(not in the flow log); do not retry for them"
         )
+
+
+def _content_missing(
+    result: dict[str, Any], rows: list[dict], details: _Details, tool: str
+) -> None:
+    """``content_missing`` + hint: live Files rows judged / searched without
+    content because nothing of them was read from the device yet.
+    """
+    missing = 0
+    for row in rows:
+        with contextlib.suppress(Exception):
+            missing += bool(details.missing(row))
+    if not missing:
+        return
+    result["content_missing"] = missing
+    result["content_hint"] = (
+        f"{missing} of these files have no local content yet (never read "
+        "from the device); call read_device_files(where=...) with the same "
+        f"where, then run {tool} again"
+    )
 
 
 def _not_judged(matched: _Matched, scope: str) -> dict[str, Any]:
@@ -1519,6 +1571,9 @@ def find_rows(
             lens, hidden, scope, searched=not matched.not_searched
         )
     _add_unkeyed(result, got)
+    if lens == "files" and "content_contains" in (where or {}):
+        cheap = [p for p in preds if not isinstance(p, _Costly)]
+        _content_missing(result, _filter(scoped, cheap), details, "find_rows")
     if apply != "none" and len(matches) > MAX_KEYS_PER_SET and not highlight_id:
         raise _invalid(
             f"{len(matches)} of {len(scoped)} {lens} rows match; a highlight set "
@@ -1865,7 +1920,11 @@ def classify_rows(
             digests.append(rc.network_digest(row, detail=details.flow(row), mask=mask))
         else:
             digests.append(
-                rc.files_digest(row, mask=mask, content=details.file(row["key"]))
+                rc.files_digest(
+                    row,
+                    mask=mask,
+                    content=details.file(row["key"], row.get("last")),
+                )
             )
     metadata_only = sum(1 for d in digests if d.kind == "metadata")
     binary_only = sum(1 for d in digests if d.kind == "binary")
@@ -2101,6 +2160,8 @@ def classify_rows(
         base["hidden_hint"] = _hidden_hint(
             lens, hidden, scope, judged=scope == "all", searched=not not_searched
         )
+    if lens == "files":
+        _content_missing(base, candidates, details, "classify_rows")
     if outcome.error:
         base["backend_error"] = outcome.error
     if len(verdicts) > MAX_VERDICTS:
@@ -2478,7 +2539,10 @@ def get_rows(
                 )
             else:
                 digest = rc.files_digest(
-                    row, mask=mask, row_cap=max_bytes, content=details.file(row["key"])
+                    row,
+                    mask=mask,
+                    row_cap=max_bytes,
+                    content=details.file(row["key"], row.get("last")),
                 )
             item["digest"] = digest.text
             item["content"] = digest.kind

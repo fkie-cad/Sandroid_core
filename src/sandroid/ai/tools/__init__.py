@@ -3,7 +3,7 @@
 Importing this package eagerly registers all native tools (side effect of
 importing :mod:`sandroid.ai.tools.app_lifecycle`,
 :mod:`sandroid.ai.tools.app_query`, :mod:`sandroid.ai.tools.certificate_control`,
-:mod:`sandroid.ai.tools.device_query`,
+:mod:`sandroid.ai.tools.device_content`, :mod:`sandroid.ai.tools.device_query`,
 :mod:`sandroid.ai.tools.environment_control`,
 :mod:`sandroid.ai.tools.file_transfer`, :mod:`sandroid.ai.tools.flow_query`,
 :mod:`sandroid.ai.tools.host_files`, :mod:`sandroid.ai.tools.lens_rows`,
@@ -24,6 +24,7 @@ from sandroid.ai.tools import (
     app_lifecycle,
     app_query,
     certificate_control,
+    device_content,
     device_query,
     environment_control,
     file_transfer,
