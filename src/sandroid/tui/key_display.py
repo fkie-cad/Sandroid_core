@@ -44,6 +44,7 @@ def key_words(text: str) -> str:
         text = text.replace(glyph, word)
     return text.replace("Shift++", "Shift+").replace("Alt++", "Alt+")
 
+
 #: Named keys -> (compact, long) display.
 _NAMED: dict[str, tuple[str, str]] = {
     "space": ("Space", "Space"),
