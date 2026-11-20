@@ -551,7 +551,7 @@ class SpotlightPanel(Widget):
         package = self._current_package()
         if not package:
             return (
-                f"[{c.bad}]○ no app[/]  [b]c[/] use the foreground app  "
+                f"[{c.dim}]○ no app[/]  [b]c[/] use the foreground app  "
                 "[b]Shift+C[/] pick an app…"
             )
 
