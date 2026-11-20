@@ -94,6 +94,10 @@ PHOTO_CATEGORIES = (
     "vehicle",
     "sport",
     "plant",
+    "travel",
+    "event",
+    "shopping",
+    "selfie_like_no_face",
 )
 PHOTO_LICENCES = ("CC0-1.0", "PDM-1.0", "authored")
 

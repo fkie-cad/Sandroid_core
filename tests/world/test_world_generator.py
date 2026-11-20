@@ -53,7 +53,7 @@ TEXT_FIELDS = (
 ANCHOR = dt.datetime(2026, 11, 20, 15, 30, tzinfo=dt.UTC)
 #: world_fp of the reference world below. A change here means the generator's
 #: output changed: bump GENERATOR_VERSION and update the value.
-GOLDEN_FP = "106601d8b971d4dd12f6ce2c5d60b84d50237609615391322129164c73a32b65"
+GOLDEN_FP = "ed3c8e1d305ad211034feae3b9473caecb358c3b83eb37fe94daed5a6a75ce87"
 
 
 def _world(**spec: object) -> WorldManifest:
@@ -131,7 +131,7 @@ def test_world_fp_stable_across_processes(medium: WorldManifest) -> None:
 
 def test_world_fp_golden_value() -> None:
     world = _world(size="small")
-    assert GENERATOR_VERSION == "2"
+    assert GENERATOR_VERSION == "3"
     assert world.world_fp == GOLDEN_FP
 
 

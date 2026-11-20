@@ -244,7 +244,7 @@ photos:
     width: 4000
     height: 3000
     bytes: 2345678
-    category: food   # food street nature pet interior landmark_generic sky document_like screenshot_like vehicle sport plant
+    category: food   # food street nature pet interior landmark_generic sky document_like screenshot_like vehicle sport plant travel event shopping selfie_like_no_face
     indoor: false    # may be null (screenshots)
     has_people: false
     country_neutral: true

@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 
 #: Bump when the output for the same inputs changes.
 #: 2: e-mail levels (``world.emails``, default ``reserved``).
-GENERATOR_VERSION = "2"
+GENERATOR_VERSION = "3"
 #: RFC 2606 second-level domains reserved for documentation (``reserved``).
 RESERVED_EMAIL_DOMAINS = ("example.com", "example.net", "example.org")
 _DOMAIN_RE = re.compile(
@@ -105,6 +105,10 @@ _PHOTO_CATEGORY_W = {
     "vehicle": 0.04,
     "sport": 0.04,
     "plant": 0.08,
+    "travel": 0.05,
+    "event": 0.04,
+    "shopping": 0.04,
+    "selfie_like_no_face": 0.03,
 }
 _SERVICE_KIND_W = {
     "bank": 3.0,
@@ -1685,6 +1689,8 @@ class _Generator:
                         "street",
                         "sport",
                         "plant",
+                        "travel",
+                        "event",
                     )
                 ]
                 photo = next_photo(s.choice(outdoor) if outdoor else None)

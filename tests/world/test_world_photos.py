@@ -396,6 +396,32 @@ def test_download_verifies_paces_and_uses_a_generic_agent(
     assert "@" not in ph.USER_AGENT
 
 
+def test_a_downscaled_pack_file_is_fetched_as_its_original(
+    server, tmp_path: Path
+) -> None:
+    original, small = _jpeg(colour=(7, 7, 7)), _jpeg(colour=(8, 8, 8))
+    server.files["o.jpg"] = original
+    entry = {
+        **_entry("wm-d", small, server.url + "o.jpg"),
+        "downscaled": True,
+        "sha256_original": _sha(original),
+    }
+    clock = _Clock()
+    cache = tmp_path / "cache"
+    result = ph.ensure_photos([entry], cache, sleep=clock.sleep, clock=clock.now)
+    assert result.downloaded == ["wm-d"], result.failed
+    assert (cache / "wm-d.jpg").read_bytes() == original
+    again = ph.ensure_photos([entry], cache, sleep=clock.sleep, clock=clock.now)
+    assert again.downloaded == []
+    assert "wm-d" in again.paths
+    # either file imports
+    folder = tmp_path / "in"
+    folder.mkdir()
+    (folder / "x.jpg").write_bytes(small)
+    imported = ph.import_photos(folder, tmp_path / "c2", [entry])
+    assert imported.imported == ["wm-d"]
+
+
 def test_download_honours_retry_after(server, tmp_path: Path) -> None:
     data = _jpeg()
     server.files["t.jpg"] = data

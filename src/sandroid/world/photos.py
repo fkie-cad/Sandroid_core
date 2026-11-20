@@ -163,7 +163,9 @@ def ensure_photos(
     Lookup per photo: the packaged screenshots (entries without a URL), the
     cache (``<cache_dir>/<id><ext>``), the ``SDROID_WORLD_PHOTOS_DIR`` folder,
     then the photo's URL. Every file is verified against the entry's
-    ``sha256``; a mismatching cache file is deleted and fetched again.
+    ``sha256`` (or, for a ``downscaled`` pack file, the original's
+    ``sha256_original``: that is what its URL serves); a mismatching cache
+    file is deleted and fetched again.
     Downloads run one at a time with at most one request per
     ``min_interval`` seconds, a generic User-Agent, 429/5xx retries that
     honour ``Retry-After``, and resume a ``.part`` file with a Range request.
@@ -188,13 +190,16 @@ def ensure_photos(
     for n, entry in enumerate(items, start=1):
         pid = str(entry["id"])
         want = str(entry.get("sha256") or "").lower()
+        # A downscaled pack file: its URL serves the original.
+        original = str(entry.get("sha256_original") or "").lower()
+        accept = {h for h in (want, original if want else "") if h}
         found = None
         if not PHOTO_ID_RE.fullmatch(pid):
             result.failed[pid] = "invalid photo id"
             continue
         for cand in _local_candidates(entry, cache):
             if cand.is_file():
-                if want and file_sha256(cand) == want:
+                if accept and file_sha256(cand) in accept:
                     found = cand
                     break
                 if cand.parent == cache:
@@ -213,7 +218,9 @@ def ensure_photos(
                 result.failed[pid] = f"downloads stopped: {fetcher.stopped}"
             else:
                 try:
-                    found = fetcher.fetch(str(url), cache / cache_name(entry), want)
+                    found = fetcher.fetch(
+                        str(url), cache / cache_name(entry), original or want
+                    )
                     result.downloaded.append(pid)
                 except PhotoError as exc:
                     result.failed[pid] = str(exc)
@@ -358,6 +365,9 @@ def import_photos(
         pack = load_packs().photos()
         entries = (pack.data.get("photos") if pack else None) or []
     by_sha = {str(e["sha256"]).lower(): e for e in entries if e.get("sha256")}
+    for e in entries:  # the original of a downscaled pack file counts too
+        if e.get("sha256") and e.get("sha256_original"):
+            by_sha.setdefault(str(e["sha256_original"]).lower(), e)
     result = PhotoImport()
     cache.mkdir(parents=True, exist_ok=True)
     for path in sorted(folder.iterdir()):
@@ -368,7 +378,10 @@ def import_photos(
             result.unknown.append(path.name)
             continue
         dest = cache / cache_name(entry)
-        if dest.is_file() and file_sha256(dest) == entry["sha256"]:
+        if dest.is_file() and file_sha256(dest) in {
+            str(entry["sha256"]).lower(),
+            str(entry.get("sha256_original") or "").lower(),
+        }:
             result.present.append(entry["id"])
             continue
         tmp = dest.with_name(dest.name + ".part")
