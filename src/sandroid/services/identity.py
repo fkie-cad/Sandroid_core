@@ -4704,7 +4704,7 @@ class IdentityService:
             return False
         for vid in list(steps):
             info = plan.infos[vid]
-            if info.status == "pending" and not info.reason:
+            if info.status == "pending":
                 info.status, info.reason = "pending", RESTORED_DURING
         return True
 
@@ -4776,6 +4776,12 @@ class IdentityService:
             self._call.restores = None
             with self._lock:
                 self._applying.discard(serial)
+                mem = self._applied.get(serial)
+                if mem is not None and mem.restores != restores:
+                    # Also when the apply raised: it may have written into
+                    # the loaded state, so the next read distrusts "done".
+                    mem.distrust = True
+                    mem.done.clear()
 
     def _apply_on(
         self, serial: str, package: str | None, allow_restart: bool, profile: Profile
@@ -5624,6 +5630,7 @@ class IdentityService:
                     mem.observed = False  # the record is the truth again
                     if restored:
                         mem.persona = ""  # the restored record says again
+                        mem.done = set()  # it described the state before
                         mem.restores += 1
         self._notify_status()
 
@@ -5762,6 +5769,7 @@ class IdentityService:
                 mem.done, mem.seeded, mem.installs = set(), {}, {}
                 mem.settled, mem.unappliable = {}, set()
                 mem.persona = ""
+                mem.distrust = False  # nothing to distrust
                 mem.applied_at = mem.verified_at = 0.0
                 mem.record_sig = ""
             else:
@@ -5958,6 +5966,17 @@ class IdentityService:
             self._write_record(plan.serial, record)
             with self._lock:
                 mem.gen += 1  # a read that started before the write is stale
+                if started is not None and mem.restores != started:
+                    # The write may have landed in a snapshot loaded during
+                    # it (its record replaced): distrust what it says.
+                    mem.distrust = True
+                    mem.done.clear()
+                    logger.warning(
+                        f"identity: {plan.serial} was restored while its record "
+                        "was written; the next app start applies again"
+                    )
+                else:
+                    mem.distrust = False
         self._publish(plan, now)
         digest = hashlib.sha256(
             json.dumps(
@@ -6242,6 +6261,12 @@ class IdentityService:
             if failed:
                 raise IdentityApplyError(
                     f"identity profile {profile.id!r}: {failed[0].label}: {failed[0].reason}"
+                )
+            if any(i.reason == RESTORED_DURING for i in plan.infos.values()):
+                # Starting now would show the app the loaded snapshot's
+                # values (nothing was applied to it for this start).
+                raise IdentityApplyError(
+                    f"{serial} was restored during the identity apply; start again"
                 )
             if allow and any(
                 i.status == "pending"

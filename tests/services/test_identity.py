@@ -3884,3 +3884,60 @@ def test_ensure_applied_without_any_profile_returns_at_once(
     monkeypatch.setattr(service.config(), "profile", "")
     with service._apply_lock:  # another device's apply
         assert service.ensure_applied(SERIAL, budget_s=0.01) is None
+
+
+def test_an_app_start_whose_apply_was_restored_refuses(
+    service, device, app_start, monkeypatch
+):
+    plan = service.pre_start(PKG)
+    real = service._run_live
+    ran: list[str] = []
+
+    def live(dev, profile, step, info, mem):
+        ran.append(step.value_id)
+        if len(ran) == 1:
+            service.forget(SERIAL, restored=True)
+        return real(dev, profile, step, info, mem)
+
+    monkeypatch.setattr(service, "_run_live", live)
+    with pytest.raises(ident.IdentityApplyError, match="restored during"):
+        plan.apply()
+
+
+def test_a_restore_while_another_apply_runs_never_skips_an_app_start(
+    service, device, app_start
+):
+    service.apply(SERIAL, PKG)
+    assert service.pre_start(PKG) is None  # done
+    service._applying.add(SERIAL)  # device prep applies right now
+    try:
+        service.forget(SERIAL, restored=True)  # a snapshot load meanwhile
+        assert service.pre_start(PKG) is not None  # "done" was the old state's
+    finally:
+        service._applying.discard(SERIAL)
+
+
+def test_distrust_ends_with_a_restored_state_without_a_record(service, device):
+    service.apply(SERIAL, PKG)
+    with service._lock:
+        service._applied[SERIAL].distrust = True
+    del device.fs[ident.APPLIED_FILE]  # the loaded snapshot has no record
+    service.forget(SERIAL, restored=True)
+    service._take_record(SERIAL)
+    assert not service._applied[SERIAL].distrust
+
+
+def test_a_restore_during_the_record_write_distrusts_it(service, device, monkeypatch):
+    service.apply(SERIAL, PKG)
+    device.fs[ident.BOOT_ID_FILE] = b"boot-2\n"  # the record will be rewritten
+    real = service._write_record
+
+    def write_then_load(serial, record):
+        out = real(serial, record)
+        service.forget(serial, restored=True)  # loaded while it was written
+        return out
+
+    monkeypatch.setattr(service, "_write_record", write_then_load)
+    service.apply(SERIAL, PKG)
+    assert service._applied[SERIAL].distrust
+    assert PKG not in service._applied[SERIAL].done
