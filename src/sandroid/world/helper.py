@@ -119,6 +119,7 @@ class Device:
         try:
             proc = subprocess.run(
                 [*self.argv(), *args],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=timeout,
                 check=False,
