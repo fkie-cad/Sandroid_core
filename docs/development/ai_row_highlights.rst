@@ -40,11 +40,26 @@ Row keys
 --------
 
 - **Network**: the mitmproxy flow id (``FlowRow.flow_id``, the ``id`` of
-  ``get_captured_flows``). TLS failure rows have no flow id in the lens and
-  are never rows of the tools (the flow-log fallback drops its ``kind=tls``
-  records too; ``where.kind`` takes only ``flow`` and ``error``). The lens's
-  row source still lists them with key ``None`` so their ``seq`` counts for
-  the "new since" basis, and the bar never counts a keyless row as new.
+  ``get_captured_flows``). **TLS failure rows** are rows too: their key is
+  the flow-log record id ``tls-<seq>`` (``mitmproxy_service`` writes
+  ``"id": "tls-<seq>"`` for every ``kind: "tls"`` record).
+  ``FlowRow.from_record`` sets it as ``flow_id``, so the annotation key
+  (``annotation_flow_id``), the row tint, the Highlight column, the AI
+  filter, the store and the row snapshot all use the same key; the
+  flow-log fallback keys its ``kind=tls`` records the same way, and
+  ``where.kind`` takes ``flow``, ``error`` and ``tls``. A TLS row has no
+  detail file (``body_contains``/``header_contains`` never match it; its
+  digest is metadata only) and its ``error`` reads "TLS handshake failed
+  (<reason>)".
+- **Stdout TLS rows** (``t<n>``): mitmweb's ``[TLS_FAIL]`` line usually
+  arrives before the flow-log record. Such a row has no stable key yet
+  (``t<n>`` is a per-panel counter); when the poll pairs it with its record
+  (``_claim_live_tls``) it adopts the record's ``seq`` and id ``tls-<seq>``
+  and becomes a normal row. Until then the snapshot lists it with key
+  ``None``: the tools skip it but count it (``not_in_flow_log_yet`` plus a
+  hint to run again), its ``seq`` counts for the "new since" basis, and the
+  bar never counts a keyless row as new. If the flow log never gets the
+  record (an addon without TLS persistence) the row stays unkeyed.
 - **Files**: ``canonical_device_path(path)``. Folder group rows, the idle
   fold and watched patterns are never highlighted themselves.
 
@@ -59,17 +74,19 @@ subagent as well. Subagents keep ``find_rows`` (report only) and ``get_rows``.
 
 .. code-block:: text
 
-   find_rows(lens, where?, scope?="all"|"shown", apply?="none"|"highlight"|"filter",
+   find_rows(lens, where?, scope?="shown"|"all", apply?="none"|"highlight"|"filter",
              label?, short?, highlight_id?, regex?)          core, 60 s
-     -> {lens, source, scanned, matched, hidden_by_lens_filters, summary,
-         keys[<=50], highlight_id?, mode?, truncated_by_cap?, note?}
+     -> {lens, source, scope, scanned, matched, hidden_by_lens_filters,
+         hidden_hint?, not_in_flow_log_yet?, summary, keys[<=50],
+         highlight_id?, mode?, truncated_by_cap?, note?}
 
-   classify_rows(lens, query, where?, keys?[<=2000], scope?, apply?="highlight",
-                 label?, short?, highlight_id?, regex?,
+   classify_rows(lens, query, where?, keys?[<=2000], scope?="shown",
+                 apply?="highlight", label?, short?, highlight_id?, regex?,
                  max_rows?=1000 (<=2000))                          core, 600 s
-     -> {summary, highlight_id, scanned, matched, uncertain, candidates,
-         rows_in_view, partial, stop_reason, hidden_by_lens_filters,
-         judged_on_metadata_only, binary_only,
+     -> {summary, highlight_id, scope, scanned, matched, uncertain,
+         candidates, rows_in_view, partial, stop_reason,
+         hidden_by_lens_filters, hidden_hint?, hidden_keys?,
+         not_in_flow_log_yet?, judged_on_metadata_only, binary_only,
          skipped{errors, not_reached, unknown_ids}, backend_error?,
          bytes_sent, model_tokens, requests, samples[<=12], verdicts[<=200],
          verdicts_truncated?, truncated_by_cap?, note?}
@@ -84,9 +101,33 @@ subagent as well. Subagents keep ``find_rows`` (report only) and ``get_rows``.
    clear_highlights(lens?, highlight_id?) -> {cleared, remaining}  core, 30 s
 
    get_rows(lens, keys?[<=20], cursor?, limit?<=50, include_content?=true,
-            max_bytes?=2000)                                       deferred, 120 s
-     -> {lens, source, total, rows[{key, shown, row, digest?, content?,
-         highlights?}], next_cursor, unknown_keys?}
+            max_bytes?=2000, scope?="shown")                       deferred, 120 s
+     -> {lens, source, scope, total, rows[{key, shown, row, digest?,
+         content?, highlights?}], next_cursor, hidden_by_lens_filters,
+         hidden_hint?, hidden_keys?, unknown_keys?, not_in_flow_log_yet?}
+
+**Scope.** ``find_rows``, ``classify_rows`` and ``get_rows`` see exactly
+the rows the lens shows by default (``scope="shown"``): TLS failures
+included, rows hidden by the lens's filters (OS noise such as Sandroid's own
+``mitm.it`` probe, app only, ``/``, review phases, the AI filter; Files:
+hide rules, ``/``, the app filter, the AI filter) left out.
+``scope="all"`` is the explicit opt-in for those hidden rows. Every result
+says ``hidden_by_lens_filters`` and, when it is not 0, a ``hidden_hint`` on
+how to include them:
+
+- ``find_rows``: the matching rows the lens hides (counted, listed only
+  with ``scope="all"``; then they are among the keys and the hint says the
+  analyst sees them only with those filters off).
+- ``classify_rows``: with ``scope="shown"`` the hidden rows that fit
+  ``where``/``keys`` and were *not judged*; with ``scope="all"`` the
+  matches the lens hides. Explicit ``keys`` of hidden rows come back as
+  ``hidden_keys`` (not ``unknown_keys``).
+- ``get_rows``: pages through the shown rows; ``hidden_by_lens_filters`` is
+  the number of hidden rows of the view, ``hidden_keys`` names requested
+  keys the lens hides.
+
+``highlight_rows`` takes any key of the view (shown or not) and reports how
+many of them the lens hides.
 
 ``where`` (all fields ANDed; ``regex: true`` turns ``text`` and the
 ``*_contains`` fields into regular expressions; a top-level ``regex``
@@ -95,7 +136,7 @@ argument is accepted as an alias, a slip models make):
 - Network: ``method[]``, ``host_glob[]``, ``path_glob[]``, ``url_regex``,
   ``status`` (``[200, "4xx"]``), ``content_type_glob``, ``app``,
   ``min_bytes``/``max_bytes`` (request + response), ``kind``
-  (``flow``/``error``), ``text``, ``body_contains``,
+  (``flow``/``error``/``tls``), ``text``, ``body_contains``,
   ``header_contains`` (the last two read the captured detail files).
 - Files: ``path_glob[]`` (a pattern without a leading ``/`` also matches any
   suffix, e.g. ``databases/*``; the literal prefix of an absolute pattern is
@@ -187,8 +228,9 @@ Scanning pipeline
    ``max_rows`` candidates is an ``invalid_arguments`` error with the counts
    and the hint "narrow with where, or raise max_rows to at most 2000".
 2. Build one digest per row (below) on the tool thread.
-3. Create the set (``origin="ai"``, ``complete=False``) unless
-   ``highlight_id`` names one to extend.
+3. Create the set (``origin="ai"``, ``scanning=True``) unless
+   ``highlight_id`` names one to extend (``store.start_scan``: it is
+   ``scanning`` again). The lens says "scanning" while the run lasts.
 4. :class:`RowClassifier` sends batches of at most ``batch_rows`` (40) rows
    or about ``batch_tokens`` (24k) tokens, ``concurrency`` (2) at a time.
    Each request is ``[system: ROW_CLASSIFIER_PROMPT, user: "Lens: ...
@@ -224,7 +266,9 @@ Scanning pipeline
 7. After every finished batch its matches are added to the set
    (``store.add``), so rows light up while the scan runs, and a
    ``tool_progress`` event is sent.
-8. At the end the set is finished (``complete``, ``stats``, ``basis``), the
+8. At the end the set is finished (``complete``, ``stats``, ``basis``;
+   ``finish`` always clears ``scanning``; if the classifier raises, an
+   empty new set is removed and any other set is finished as partial), the
    AI filter is applied for ``apply="filter"`` (only now, so the lens is not
    empty during the scan), an empty new set is removed again, and an
    ``ai/highlight`` timeline line is written (the tool runs under
@@ -261,9 +305,13 @@ Client and budgets
   executor abandons a cancelled tool, so the tool stops by itself.
 - **Deadline**: from ``tool_time_remaining()``; no new batch is started with
   less than 30 s left, running requests are aborted below 8 s.
-- **Partial**: on cancel, deadline, backend error, session switch or any
+- **Scanning / partial / complete**: ``HighlightSet.state`` (and
+  ``highlight_bar.set_state``) is ``scanning`` while ``classify_rows`` runs
+  on the set (the bar and the Inspector say "scanning"), then ``complete``
+  or ``partial``. On cancel, deadline, backend error, session switch or any
   errored row the set keeps what was found, marked ``complete=False`` (the
-  lens shows "partial"); the result says ``partial: true`` and
+  lens shows "partial", only after the run ended); the result says
+  ``partial: true`` and
   ``stop_reason`` (``cancelled``, ``deadline``, ``backend_error``,
   ``session_switched``, or ``null`` when only some rows errored).
 
@@ -334,11 +382,13 @@ its own.
   free one of the lens), ``reasons`` {key: reason <=120}, ``origin``
   (``structural``/``ai``/``manual``), ``query``, ``scope`` (``None`` = live,
   else a run id), ``basis`` {judged_at, through_seq, evaluated},
-  ``complete``, ``stats``, ``created_at``.
+  ``complete``, ``stats``, ``created_at``, ``scanning`` (a classifier run
+  is filling it; ``state`` = ``scanning``/``partial``/``complete``).
 - Limits: 4 sets per lens, 5000 keys per set (``HighlightError``, a
   ``ValueError``). At most one AI filter set per lens.
-- Mutations: ``create``, ``add``, ``remove_keys``, ``replace_keys``,
-  ``finish``, ``update_meta``, ``remove``, ``clear``, ``set_filter``.
+- Mutations: ``create`` (``scanning=``), ``add``, ``remove_keys``,
+  ``replace_keys``, ``start_scan``, ``finish``, ``update_meta``,
+  ``remove``, ``clear``, ``set_filter``.
   Reads: ``sets``, ``get`` (copies), ``keys``, ``filter_set``, ``lookup``,
   ``revision``.
 - Provider: ``annotations_for(lens, key)`` returns one annotation per set
@@ -366,7 +416,9 @@ its own.
   ``next_id``). A malformed file is logged, kept as
   ``highlights.json.bad`` and the session starts empty; the new state is
   built completely before it replaces the old one, so a bad file never
-  half-applies.
+  half-applies. A set saved with ``scanning: true`` (the process ended
+  during a scan) loads as partial (``scanning`` false, ``complete``
+  false): no scan survives a restart.
 - ``bind_folder(folder)`` loads another session's file (or starts empty); it
   runs when the orchestrator chat session opens (``AgentSession``) and at
   the start of every lens tool. The same folder again is a no-op; no folder
@@ -389,7 +441,8 @@ Tests
   index, provider, filter, notify outside the lock, persistence round trip,
   session switch and generation guard, malformed files (never half-applied,
   kept as ``.bad``), writes off the caller and outside the lock,
-  ``short_label``, row-source snapshots (dispatcher, timeout).
+  ``short_label``, row-source snapshots (dispatcher, timeout), the
+  scanning/partial/complete states and a mid-scan file loading as partial.
 - ``tests/ai/test_row_classifier.py``: batching, byte-stable prefix, row
   ids and forged row boundaries, parse and unknown ids, retry and halving,
   transport retry / no halving / three-in-a-row stop, bytes only for sent
@@ -399,12 +452,20 @@ Tests
   limits, subagent refusal, lens sources and fallbacks, ``classify_rows``
   end to end with a fake client, backend errors, a set cleared or a session
   switched mid-run, the new-since basis, the regex guard and haystack cap,
-  TLS rows, canonical path globs, ``highlight_rows`` edge cases, the row
-  cap, bounded verdicts, plain-word where summaries, ``short``, the regex
-  alias, ``clear_highlights``, ``get_rows``, the live-state line.
+  TLS rows keyed ``tls-<seq>`` (lens and fallback, keyless stdout rows
+  counted), the E2E case (a TLS-failed tracker row highlighted, a hidden
+  ``mitm.it`` row counted but listed only with ``scope="all"``, the same
+  scoping in ``classify_rows`` and ``get_rows``, "scanning" during a run,
+  partial after a cancel or a crash), canonical path globs,
+  ``highlight_rows`` edge cases, the row cap, bounded verdicts, plain-word
+  where summaries, ``short``, the regex alias, ``clear_highlights``,
+  ``get_rows``, the live-state line.
 - ``tests/tui/test_ai_highlights.py``: tint, column, bar, AI filter, ``H``,
   ``X``, Esc, labels with markup characters (notices, confirm, captions),
   the condensed bar, the filter set first in the column, keyless rows never
-  new, idle watched rows present, the Network lens on a light theme.
+  new, idle watched rows present, the Network lens on a light theme, a
+  TLS-failed row (stdout first, then paired) highlighted with tint and
+  column through ``find_rows``, the "scanning"/"partial" bar words and a
+  reloaded mid-scan set shown as partial.
 - ``tests/ai/test_executor.py`` (``tool_progress`` call id and throttle),
   ``tests/tui/test_chat_panel.py`` (progress on the chip).

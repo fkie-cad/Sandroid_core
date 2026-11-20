@@ -10,6 +10,7 @@ Hermetic: fixture flow log / fixture monitor batches, memory-only store.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import timedelta
 
@@ -902,3 +903,149 @@ async def test_network_lens_repaints_on_a_live_theme_switch(flow_dir, store):
         light = str(table.get_cell("f2", "hl").spans[0].style)
         assert light != dark
         assert lens_palette().highlight_1 in light
+
+
+# --------------------------------------------------------------------------
+# E2E finding: a TLS-failed tracker row is a row of the AI tools
+# --------------------------------------------------------------------------
+
+
+def _append_tls(flow_dir, seq: int, host: str) -> None:
+    now = time.time()
+    record = {
+        "seq": seq,
+        "id": f"tls-{seq}",
+        "kind": "tls",
+        "ts_start": now,
+        "ts_end": now,
+        "protocol": "TLS",
+        "method": "TLS",
+        "host": host,
+        "path": "",
+        "status_code": None,
+        "error": "TLS handshake failed (cert)",
+        "tls_reason": "cert",
+        "app": PKG,
+    }
+    with open(flow_dir / "flows.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+async def test_network_tls_failed_tracker_row_is_highlighted(
+    flow_dir, store, monkeypatch
+):
+    from sandroid.ai.tools import lens_rows
+
+    monkeypatch.setattr("sandroid.core.timeline.emit", lambda *a, **k: None)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _network(app, pilot, flow_dir)
+        table = panel.table
+        # mitmweb's stdout line comes first: a "t<n>" row without a key yet.
+        panel.add_tls_failure("12:00:00", "sdk.pa-cd.com", "cert", PKG)
+        await settle(pilot)
+        stdout_row = next(r for r in panel._live if r.kind == "tls")
+        assert stdout_row.key.startswith("t")
+        assert stdout_row.flow_id is None
+        early = await asyncio.to_thread(
+            lens_rows.find_rows, "network", {"host_glob": ["*pa-cd.com"]}
+        )
+        assert early["keys"] == []
+        assert early["not_in_flow_log_yet"] == 1
+        # The flow log catches up (the stdout row adopts tls-100), a second
+        # TLS failure is only in the flow log, and Sandroid's mitm.it probe
+        # is OS noise the lens hides.
+        _append_tls(flow_dir, 100, "sdk.pa-cd.com")
+        _append_tls(flow_dir, 101, "cdn.pa-cd.com")
+        write_flows(
+            flow_dir,
+            time.time(),
+            specs=[("GET", "mitm.it", "/", 200, "", None, "ok", None)],
+            start_seq=102,
+        )
+        panel.poll_now()
+        await until(pilot, lambda: any(r.host == "mitm.it" for r in panel._live))
+        await settle(pilot)
+        assert stdout_row.flow_id == "tls-100"
+        assert panel.table.get_row_index(stdout_row.key) >= 0
+        persisted = next(r for r in panel._live if r.host == "cdn.pa-cd.com")
+        assert (persisted.key, persisted.flow_id) == ("f101", "tls-101")
+        rows = await asyncio.to_thread(store.snapshot_rows, "network")
+        by_key = {r["key"]: r for r in rows}
+        assert by_key["tls-100"]["kind"] == "tls"
+        assert by_key["tls-100"]["shown"] is True
+        assert "TLS handshake failed" in by_key["tls-100"]["error"]
+        assert by_key["flow-102"]["shown"] is False  # mitm.it: OS noise
+
+        found = await asyncio.to_thread(
+            lens_rows.find_rows,
+            "network",
+            {"host_glob": ["*pa-cd.com"]},
+            apply="highlight",
+            label="tracker pa-cd.com",
+            short="pa-cd",
+        )
+        assert found["keys"] == ["tls-100", "tls-101"]
+        assert found["hidden_by_lens_filters"] == 0
+        listed = await asyncio.to_thread(lens_rows.find_rows, "network")
+        assert "flow-102" not in listed["keys"]
+        assert listed["hidden_by_lens_filters"] >= 1
+        every = await asyncio.to_thread(lens_rows.find_rows, "network", scope="all")
+        assert "flow-102" in every["keys"]
+
+        await until(pilot, lambda: "hl" in _cols(table))
+        for key in (stdout_row.key, "f101"):
+            assert _cell(table, key, "hl") == "pa-cd"
+            assert _tint_of(table, key) == _expected_tint(1)
+        assert _tint_of(table, "f3") is None
+        assert "tracker pa-cd.com 2" in _bar(panel)
+        # The AI filter shows exactly the two TLS rows.
+        store.set_filter("network", found["highlight_id"])
+        await until(pilot, lambda: table.row_count == 2)
+        assert sorted(_keys(table)) == sorted([stdout_row.key, "f101"])
+
+
+def test_the_bar_says_scanning_while_running_then_partial_or_nothing(store):
+    from sandroid.tui.widgets.highlight_bar import HighlightView
+
+    hs = store.create("network", "tracker hosts", origin="ai", scanning=True)
+    store.add(hs.id, {"tls-3": "tracker"})
+    view = HighlightView("network")
+    view.measure(iter([("tls-3", True, 3, 3.0)]), live=True)
+    plain = view.bar_text(200).plain
+    assert "scanning" in plain
+    assert "partial" not in plain
+    section = str(view.sections("tls-3")[0][1])
+    assert "scanning" in section
+    store.finish(hs.id, complete=False)  # stopped, cancelled or deadline
+    plain = view.bar_text(200).plain
+    assert "partial" in plain
+    assert "scanning" not in plain
+    assert "partial" in str(view.sections("tls-3")[0][1])
+    store.start_scan(hs.id)
+    assert "scanning" in view.bar_text(200).plain
+    store.finish(hs.id, complete=True)
+    plain = view.bar_text(200).plain
+    assert "scanning" not in plain
+    assert "partial" not in plain
+
+
+def test_a_reloaded_scanning_set_shows_partial(store, tmp_path):
+    from sandroid.services.row_highlights import HighlightStore
+    from sandroid.tui.widgets.highlight_bar import set_state
+
+    saved = HighlightStore()
+    saved.bind_folder(tmp_path)
+    hs = saved.create("network", "tracker hosts", origin="ai", scanning=True)
+    saved.add(hs.id, {"tls-3": "tracker"})
+    assert saved.flush()  # the process ends mid-scan
+    store.bind_folder(tmp_path)
+    loaded = store.get(hs.id)
+    assert set_state(loaded) == "partial"
+    from sandroid.tui.widgets.highlight_bar import HighlightView
+
+    view = HighlightView("network")
+    view.measure(iter([("tls-3", True, 3, 3.0)]), live=True)
+    plain = view.bar_text(200).plain
+    assert "partial" in plain
+    assert "scanning" not in plain

@@ -18,6 +18,13 @@ Network and Files lenses show) and without a device resource:
 Rows come from the lens itself (its registered row source, so keys and the
 ``shown`` flag are exactly what the lens has) and, without a lens, from the
 session flow log (Network) or the monitor's event history (Files).
+
+Scope: by default (``scope="shown"``) the tools see exactly the rows the lens
+shows: TLS-failure rows included (key ``tls-<seq>``, the flow-log record
+id), rows hidden by the lens filters (OS noise, app only, ``/``, review
+phases, the AI filter) left out. Every result counts the matching rows the
+lens hides (``hidden_by_lens_filters``) and says how to include them:
+``scope="all"`` is the explicit opt-in.
 """
 
 from __future__ import annotations
@@ -60,8 +67,10 @@ MAX_VERDICTS = 200
 HAYSTACK_CAP = 64 * 1024
 #: Seconds one regex may spend on one row (windowed search).
 REGEX_ROW_BUDGET_S = 0.25
-#: ``kind`` values of Network rows (stdout TLS rows have no flow id).
-NETWORK_KINDS = ("flow", "error")
+#: ``kind`` values of Network rows (TLS failures: key ``tls-<seq>``).
+NETWORK_KINDS = ("flow", "error", "tls")
+#: ``scope`` values; the first is the default.
+SCOPES = ("shown", "all")
 #: Notes when the highlight set went away during a call.
 NOTE_CLEARED = "set was cleared by the analyst during the scan"
 NOTE_SWITCHED = (
@@ -91,7 +100,8 @@ _WHERE_PROP = {
         "Row filter, all fields ANDed. Network: method[], host_glob[], "
         "path_glob[], url_regex, status (e.g. [200, '4xx']), "
         "content_type_glob, app, min_bytes, max_bytes, kind "
-        "(flow/error), text, body_contains, header_contains. Files: "
+        "(flow/error/tls: tls = TLS handshake failed), text, body_contains, "
+        "header_contains. Files: "
         "path_glob[], ops (letters CMDRA), process, app, watched, min_count, "
         "review_kind (changed/new/deleted), text, content_contains (local "
         "copies only). regex=true makes text/*_contains regular expressions."
@@ -100,9 +110,13 @@ _WHERE_PROP = {
 
 _SCOPE_PROP = {
     "type": "string",
-    "enum": ["all", "shown"],
-    "description": "all rows of the lens view (default) or only the rows shown now.",
-    "default": "all",
+    "enum": list(SCOPES),
+    "description": (
+        "shown (default): exactly the rows the lens shows now, TLS failures "
+        "included. all: also the rows the lens filters hide (OS noise, app "
+        "only, /, phases, AI filter); only when the analyst asks for them."
+    ),
+    "default": "shown",
 }
 
 _LABEL_PROP = {
@@ -214,8 +228,10 @@ def _normalize_row(lens: str, row: Mapping[str, Any]) -> dict | None:
     out = dict(row)
     if lens == "network":
         fid = row.get("flow_id")
-        if not fid or row.get("kind") == "tls":
-            return None  # TLS failure rows have no flow id in the lens
+        if not fid:
+            # A stdout-only TLS failure the flow log has not caught up with
+            # (the lens's ``t<n>`` row): no stable key yet.
+            return None
         out["key"] = str(fid)
     else:
         path = str(row.get("path") or row.get("key") or "")
@@ -238,9 +254,14 @@ def _flow_log_rows() -> list[dict]:
         return []
     rows = []
     for rec in records:
+        if rec.get("kind") == "tls":
+            row = _flow_log_tls_row(rec, flow_dir)
+            if row is not None:
+                rows.append(row)
+            continue
         fid = rec.get("id")
-        if not fid or rec.get("kind") == "tls":
-            continue  # the lens shows TLS failures without a flow id
+        if not fid:
+            continue
         kind = rec.get("kind") or ("error" if rec.get("error") else "flow")
         host = rec.get("host") or "?"
         path = rec.get("path") or ""
@@ -268,6 +289,37 @@ def _flow_log_rows() -> list[dict]:
             }
         )
     return rows
+
+
+def _flow_log_tls_row(rec: Mapping[str, Any], flow_dir: Path) -> dict | None:
+    """A TLS-failure record as a row, keyed like the lens (``tls-<seq>``)."""
+    seq = rec.get("seq")
+    fid = rec.get("id") or (f"tls-{seq}" if seq is not None else None)
+    if not fid:
+        return None
+    host = rec.get("host") or "?"
+    reason = rec.get("tls_reason") or "tls"
+    return {
+        "key": str(fid),
+        "shown": True,
+        "flow_id": str(fid),
+        "seq": seq,
+        "method": "TLS",
+        "url": f"https://{host}",
+        "host": host,
+        "path": "",
+        "status": None,
+        "app": rec.get("app"),
+        "req_type": None,
+        "resp_type": None,
+        "req_bytes": 0,
+        "resp_bytes": None,
+        "kind": "tls",
+        "phase": rec.get("phase"),
+        "time": rec.get("ts_end"),
+        "error": rec.get("error") or f"TLS handshake failed ({reason})",
+        "flow_dir": str(flow_dir),
+    }
 
 
 def _op_letter(event_type: Any) -> str:
@@ -344,9 +396,24 @@ def _max_seq(raw: list[dict]) -> int | None:
     return max(seqs) if seqs else None
 
 
-def _collect(lens: str) -> tuple[list[dict], str, int | None]:
-    """``(rows, source, max seq)``; the seq counts every row of the view,
-    also the ones the tools cannot take (TLS failures without a flow id).
+class _Collected:
+    """The rows of one call (see :func:`_collect`)."""
+
+    __slots__ = ("max_seq", "rows", "source", "unkeyed")
+
+    def __init__(
+        self, rows: list[dict], source: str, max_seq: int | None, unkeyed: int
+    ) -> None:
+        self.rows = rows
+        self.source = source
+        self.max_seq = max_seq
+        #: Shown Network rows without a key yet (stdout-only TLS failures).
+        self.unkeyed = unkeyed
+
+
+def _collect(lens: str) -> _Collected:
+    """The rows of the view; ``max_seq`` counts every row of it, also the
+    ones the tools cannot take yet (a TLS failure not in the flow log yet).
     """
     snap = _store().snapshot_rows(lens)
     if snap is not None:
@@ -355,14 +422,23 @@ def _collect(lens: str) -> tuple[list[dict], str, int | None]:
         raw, source = _flow_log_rows(), "flow_log"
     else:
         raw, source = _monitor_rows(), "monitor"
-    rows = [r for r in (_normalize_row(lens, x) for x in raw) if r is not None]
-    return rows, source, _max_seq(raw) if lens == "network" else None
+    rows = []
+    unkeyed = 0
+    for x in raw:
+        row = _normalize_row(lens, x)
+        if row is not None:
+            rows.append(row)
+        elif lens == "network" and x.get("shown", True):
+            unkeyed += 1
+    return _Collected(
+        rows, source, _max_seq(raw) if lens == "network" else None, unkeyed
+    )
 
 
 def collect_rows(lens: str) -> tuple[list[dict], str]:
-    """``(rows, source)``: the lens's rows (``lens``) or a fallback."""
-    rows, source, _seq = _collect(lens)
-    return rows, source
+    """``(rows, source)``: every row of the lens view (shown or not)."""
+    got = _collect(lens)
+    return got.rows, got.source
 
 
 # =============================================================================
@@ -379,6 +455,8 @@ class _Details:
         self._default_dir: Path | None = None
 
     def flow(self, row: Mapping[str, Any]) -> dict | None:
+        if row.get("kind") == "tls":
+            return None  # a failed handshake has no headers or bodies
         fid = str(row.get("flow_id") or row.get("key") or "")
         if fid in self._flows:
             return self._flows[fid]
@@ -726,7 +804,7 @@ def _network_pred(
             raise _invalid(
                 f"where.kind must be one of {', '.join(NETWORK_KINDS)} "
                 f"(got {', '.join(bad)})",
-                hint="TLS failure rows have no flow id and cannot be highlighted.",
+                hint="tls = the TLS handshake with mitmproxy failed (pinning).",
             )
         cheap.append(lambda r: str(r.get("kind") or "flow").lower() in kinds)
     elif field == "text":
@@ -797,10 +875,45 @@ def _filter(rows: list[dict], preds: list[Predicate]) -> list[dict]:
     return out
 
 
+def _check_scope(scope: Any) -> str:
+    if scope is None:
+        return SCOPES[0]
+    if scope not in SCOPES:
+        raise _invalid(
+            "scope must be 'shown' (the rows the lens shows, default) or 'all'"
+        )
+    return str(scope)
+
+
 def _scoped(rows: list[dict], scope: str) -> list[dict]:
-    if scope not in ("all", "shown"):
-        raise _invalid("scope must be 'all' or 'shown'")
     return rows if scope == "all" else [r for r in rows if r.get("shown")]
+
+
+def _hidden_hint(lens: str, hidden: int, scope: str, *, judged: bool = True) -> str:
+    """How to include the *hidden* rows the lens filters hide (words)."""
+    what = "OS noise, app only, the / filter, review phases or an AI filter"
+    if lens == "files":
+        what = "hide rules, the / filter, the app filter or an AI filter"
+    if scope == "all":
+        return (
+            f"{hidden} of them are hidden in the lens ({what}); the analyst "
+            "sees them only with those filters off"
+        )
+    verb = "match" if judged else "fit the filters and were not judged"
+    return (
+        f"{hidden} more {lens} rows {verb} but are hidden by the lens "
+        f"filters ({what}); pass scope='all' to include them"
+    )
+
+
+def _add_unkeyed(result: dict, n: int) -> None:
+    """Say so when shown TLS failures could not be listed (no key yet)."""
+    if n:
+        result["not_in_flow_log_yet"] = n
+        result["not_in_flow_log_yet_hint"] = (
+            f"{n} TLS-failure row(s) the lens shows are not in the flow log "
+            "yet and could not be listed; run the tool again in a moment"
+        )
 
 
 def _row_line(lens: str, row: Mapping[str, Any]) -> str:
@@ -851,6 +964,7 @@ def _create_set(
     complete: bool,
     filter: bool,
     generation: int | None = None,
+    scanning: bool = False,
 ) -> str:
     try:
         hs = store.create(
@@ -865,6 +979,7 @@ def _create_set(
             complete=complete,
             filter=filter,
             generation=generation,
+            scanning=scanning,
         )
     except StaleGenerationError as exc:
         raise ToolError(
@@ -909,6 +1024,24 @@ def _set_lost(store: Any, set_id: str | None, generation: int) -> str:
     return NOTE_CLEARED
 
 
+def _end_scan(store: Any, set_id: str | None, created: bool, generation: int) -> None:
+    """After a failed classifier run: drop an empty new set, else mark the
+    set partial (never left ``scanning``). Best effort.
+    """
+    if set_id is None:
+        return
+    try:
+        hs = store.get(set_id)
+        if hs is None:
+            return
+        if created and not hs.reasons:
+            store.remove(set_id, generation=generation)
+        else:
+            store.finish(set_id, complete=False, generation=generation)
+    except HighlightError:
+        logger.debug("ending the scan of %s failed", set_id, exc_info=True)
+
+
 def _existing_set(store: Any, lens: str, set_id: str) -> Any:
     hs = store.get(set_id)
     if hs is None:
@@ -927,12 +1060,15 @@ def _existing_set(store: Any, lens: str, set_id: str) -> Any:
     name="find_rows",
     description=(
         "Find rows of the Network or Files lens with deterministic 'where' "
-        "filters (fields, globs, literal text; no model). With apply="
-        "highlight or filter it highlights the matches in the lens itself "
-        "(or shows only them); never copy keys around. Returns N of M, "
-        "hidden_by_lens_filters and at most 50 keys. Use classify_rows when "
-        "matching needs judgement. With apply, pass label (the ask) and short "
-        "(1-3 words for the lens column, e.g. 'POST api.x')."
+        "filters (fields, globs, literal text; no model). Sees exactly the "
+        "rows the lens shows (TLS-failure rows included); scope='all' adds "
+        "the rows its filters hide. With apply=highlight or filter it "
+        "highlights the matches in the lens itself (or shows only them); "
+        "never copy keys around. Returns N of M, hidden_by_lens_filters "
+        "(matching rows the lens hides, with a hint) and at most 50 keys. "
+        "Use classify_rows when matching needs judgement. With apply, pass "
+        "label (the ask) and short (1-3 words for the lens column, e.g. "
+        "'POST api.x')."
     ),
     parameters={
         "type": "object",
@@ -962,7 +1098,7 @@ def _existing_set(store: Any, lens: str, set_id: str) -> Any:
 def find_rows(
     lens: str,
     where: dict | None = None,
-    scope: str = "all",
+    scope: str = "shown",
     apply: str = "none",
     label: str | None = None,
     highlight_id: str | None = None,
@@ -971,6 +1107,7 @@ def find_rows(
 ) -> dict[str, Any]:
     """Structural row search; see the tool description."""
     lens = _check_lens(lens)
+    scope = _check_scope(scope)
     if apply not in ("none", "highlight", "filter"):
         raise _invalid("apply must be none, highlight or filter")
     if apply != "none":
@@ -978,21 +1115,29 @@ def find_rows(
     where = _with_regex_alias(where, regex)
     details = _Details()
     preds, summary = compile_where(lens, where, details)
-    rows, source, max_seq = _collect(lens)
+    got = _collect(lens)
+    rows, source, max_seq = got.rows, got.source, got.max_seq
     collected_at = time.time()
     scoped = _scoped(rows, scope)
-    matches = _filter(scoped, preds)
-    by_key = {r["key"]: r for r in scoped}
+    # Match every row once: the hidden matches are counted, never listed
+    # (scope="shown"), so the model learns they exist and how to get them.
+    every_match = _filter(rows, preds)
+    hidden = sum(1 for r in every_match if not r.get("shown"))
+    matches = _scoped(every_match, scope)
     keys = [r["key"] for r in matches]
     result: dict[str, Any] = {
         "lens": lens,
         "source": source,
+        "scope": scope,
         "scanned": len(scoped),
         "matched": len(matches),
-        "hidden_by_lens_filters": _hidden(by_key, keys),
+        "hidden_by_lens_filters": hidden,
         "summary": f"{len(matches)} of {len(scoped)} {lens} rows match"
         + (f" ({summary})" if summary else ""),
     }
+    if hidden:
+        result["hidden_hint"] = _hidden_hint(lens, hidden, scope)
+    _add_unkeyed(result, got.unkeyed)
     if apply != "none" and len(matches) > MAX_KEYS_PER_SET and not highlight_id:
         raise _invalid(
             f"{len(matches)} of {len(scoped)} {lens} rows match; a highlight set "
@@ -1109,11 +1254,12 @@ def classifier_client() -> Any:
         "Judge Network/Files lens rows against a criterion that needs "
         "judgement (personal data, tracking, credentials) with batched model "
         "calls, and highlight (or filter to) the matches live. Put the "
-        "structural part into 'where' first. Rows are compact digests (auth "
-        "values reduced, bodies capped). Returns N of M, partial, "
-        "hidden_by_lens_filters, sampled reasons and bytes_sent. Ctrl+X stops "
-        "it and keeps a partial set. Pass label (the ask) and short (1-3 "
-        "words for the lens column, e.g. 'personal data')."
+        "structural part into 'where' first. Judges exactly the rows the lens "
+        "shows (TLS failures included); scope='all' adds the rows its filters "
+        "hide. Rows are compact digests (auth values reduced, bodies capped). "
+        "Returns N of M, partial, hidden_by_lens_filters (with a hint), "
+        "sampled reasons and bytes_sent. Ctrl+X stops it (partial set). Pass "
+        "label (the ask) and short (1-3 words, e.g. 'personal data')."
     ),
     parameters={
         "type": "object",
@@ -1155,7 +1301,7 @@ def classify_rows(
     query: str,
     where: dict | None = None,
     keys: list[str] | None = None,
-    scope: str = "all",
+    scope: str = "shown",
     apply: str = "highlight",
     label: str | None = None,
     highlight_id: str | None = None,
@@ -1173,6 +1319,7 @@ def classify_rows(
 
     _require_orchestrator("classify_rows")
     lens = _check_lens(lens)
+    scope = _check_scope(scope)
     query = " ".join(str(query or "").split())
     if not query:
         raise _invalid("query must describe what a matching row is")
@@ -1192,18 +1339,25 @@ def classify_rows(
 
     details = _Details()
     preds, where_summary = compile_where(lens, where, details)
-    rows, source, max_seq = _collect(lens)
+    got = _collect(lens)
+    rows, source, max_seq = got.rows, got.source, got.max_seq
     collected_at = time.time()
     scoped = _scoped(rows, scope)
+    all_by_key = {r["key"]: r for r in rows}
     by_key = {r["key"]: r for r in scoped}
     unknown: list[str] = []
+    hidden_keys: list[str] = []
+    selected = rows
     if key_list:
-        unknown = [k for k in key_list if k not in by_key]
+        unknown = [k for k in key_list if k not in all_by_key]
+        hidden_keys = [k for k in key_list if k in all_by_key and k not in by_key]
         wanted = set(key_list)
-        scoped_sel = [r for r in scoped if r["key"] in wanted]
-    else:
-        scoped_sel = scoped
-    candidates = _filter(scoped_sel, preds)
+        selected = [r for r in rows if r["key"] in wanted]
+    # Rows the lens hides that fit where/keys: never judged with
+    # scope="shown", but counted (hidden_by_lens_filters) with a hint.
+    fitting = _filter(selected, preds)
+    candidates = _scoped(fitting, scope)
+    hidden_unjudged = len(fitting) - len(candidates)
     if len(candidates) > limit:
         raise _invalid(
             f"{len(candidates)} rows remain after the filters (of {len(scoped)}); "
@@ -1223,20 +1377,28 @@ def classify_rows(
         "rows_in_view": len(scoped),
         "candidates": len(candidates),
     }
+    base["scope"] = scope
     if where_summary:
         base["where"] = where_summary
     if unknown:
         base["unknown_keys"] = unknown[:MAX_RETURNED_KEYS]
+    if hidden_keys:
+        base["hidden_keys"] = hidden_keys[:MAX_RETURNED_KEYS]
+    _add_unkeyed(base, got.unkeyed)
     if not candidates:
         base.update(
             scanned=0,
             matched=0,
             uncertain=0,
             partial=False,
-            hidden_by_lens_filters=0,
+            hidden_by_lens_filters=hidden_unjudged,
             highlight_id=None,
             summary=f"0 of 0 {lens} rows to classify (nothing left after the filters)",
         )
+        if hidden_unjudged:
+            base["hidden_hint"] = _hidden_hint(
+                lens, hidden_unjudged, scope, judged=False
+            )
         return base
 
     client = classifier_client()
@@ -1265,7 +1427,7 @@ def classify_rows(
         if existing is not None:
             set_id = existing.id
             try:
-                store.finish(set_id, complete=False, generation=gen)
+                store.start_scan(set_id, generation=gen)
             except HighlightError as exc:
                 raise _invalid(str(exc)) from exc
         else:
@@ -1282,6 +1444,7 @@ def classify_rows(
                 complete=False,
                 filter=False,
                 generation=gen,
+                scanning=True,
             )
             created = True
 
@@ -1329,7 +1492,12 @@ def classify_rows(
         deadline=deadline,
         on_batch=on_batch,
     )
-    outcome = classifier.run(digests)
+    try:
+        outcome = classifier.run(digests)
+    except BaseException:
+        # Never leave a set "scanning" behind: it is partial now.
+        _end_scan(store, state["set_id"], created, gen)
+        raise
     report_tool_progress(
         outcome.scanned,
         total,
@@ -1400,14 +1568,21 @@ def classify_rows(
             },
         )
 
-    hidden = _hidden(by_key, matched_keys)
+    # scope="all": matches the lens hides; "shown": rows it hides that fit
+    # where/keys and were left out (the same field, see the hint).
+    hidden = _hidden(all_by_key, matched_keys) if scope == "all" else hidden_unjudged
     stopped = f", stopped early ({outcome.stop_reason})" if outcome.stop_reason else ""
     verb = "Filtered to" if apply == "filter" else "Highlighted"
     if apply == "none" or set_id is None:
         verb = "Found"
+    hidden_words = (
+        f"{hidden} of them hidden by your lens filters"
+        if scope == "all"
+        else f"{hidden} more hidden by your lens filters, not judged"
+    )
     summary = (
         f"{verb} {len(matched_keys)} of {outcome.scanned} {lens} rows "
-        f"(candidates {total}; {hidden} hidden by your lens filters; "
+        f"(candidates {total}; {hidden_words}; "
         f"{metadata_only} judged from metadata only{stopped})"
     )
     if outcome.errors:
@@ -1455,6 +1630,8 @@ def classify_rows(
         samples=samples,
         verdicts=verdicts[:MAX_VERDICTS],
     )
+    if hidden:
+        base["hidden_hint"] = _hidden_hint(lens, hidden, scope, judged=scope == "all")
     if outcome.error:
         base["backend_error"] = outcome.error
     if len(verdicts) > MAX_VERDICTS:
@@ -1740,7 +1917,8 @@ def clear_highlights(
     description=(
         "Read compact digests of Network/Files lens rows (summary, capped "
         "headers/bodies or local file content) to check matches or handle a "
-        "few rows yourself: by keys (<=20) or a page (cursor, limit<=50)."
+        "few rows yourself: by keys (<=20) or a page (cursor, limit<=50). "
+        "Pages hold the rows the lens shows (scope='all' adds hidden ones)."
     ),
     parameters={
         "type": "object",
@@ -1751,6 +1929,7 @@ def clear_highlights(
                 "items": {"type": "string"},
                 "description": "Row keys to read (<=20).",
             },
+            "scope": _SCOPE_PROP,
             "cursor": {
                 "type": "integer",
                 "description": "Row offset of the page (from next_cursor).",
@@ -1784,11 +1963,13 @@ def get_rows(
     limit: int = 20,
     include_content: bool = True,
     max_bytes: int = 2000,
+    scope: str = "shown",
 ) -> dict[str, Any]:
     """Row digests; see the tool description."""
     from sandroid.ai import row_classifier as rc
 
     lens = _check_lens(lens)
+    scope = _check_scope(scope)
     key_list = [normalize_key(lens, k) for k in _as_list(keys)]
     if len(key_list) > MAX_GET_KEYS:
         raise _invalid(f"at most {MAX_GET_KEYS} keys per call")
@@ -1798,12 +1979,16 @@ def get_rows(
         max_bytes = max(200, min(int(max_bytes or 2000), 4000))
     except (TypeError, ValueError) as exc:
         raise _invalid("cursor, limit and max_bytes must be integers") from exc
-    rows, source = collect_rows(lens)
+    got = _collect(lens)
+    rows, source = _scoped(got.rows, scope), got.source
+    all_by_key = {r["key"]: r for r in got.rows}
     by_key = {r["key"]: r for r in rows}
     unknown: list[str] = []
+    hidden_keys: list[str] = []
     if key_list:
         page = [by_key[k] for k in key_list if k in by_key]
-        unknown = [k for k in key_list if k not in by_key]
+        unknown = [k for k in key_list if k not in all_by_key]
+        hidden_keys = [k for k in key_list if k in all_by_key and k not in by_key]
         next_cursor = None
     else:
         page = rows[cursor : cursor + limit]
@@ -1832,15 +2017,28 @@ def get_rows(
         if hl:
             item["highlights"] = [e[0] for e in hl]
         out.append(item)
+    hidden = sum(1 for r in got.rows if not r.get("shown"))
     result: dict[str, Any] = {
         "lens": lens,
         "source": source,
+        "scope": scope,
         "total": len(rows),
         "rows": out,
         "next_cursor": next_cursor,
+        "hidden_by_lens_filters": hidden,
     }
+    if hidden:
+        result["hidden_hint"] = (
+            f"{hidden} more {lens} rows are hidden by the lens filters; "
+            "pass scope='all' to page through them too"
+            if scope == "shown"
+            else f"{hidden} of these rows are hidden in the lens (shown: false)"
+        )
+    if hidden_keys:
+        result["hidden_keys"] = hidden_keys
     if unknown:
         result["unknown_keys"] = unknown
+    _add_unkeyed(result, got.unkeyed)
     return result
 
 

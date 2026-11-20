@@ -8,8 +8,9 @@ source). A lens shows them with
 * a "Highlight" column (key ``hl``) with the sets' short words in their slot
   colours, only while a set has rows and the lens is wide enough,
 * :class:`HighlightBar`, one line at the top while sets exist: label and
-  count per set, ``filtering`` / ``partial`` / ``N new since`` in words, and
-  the keys (``H filter · X clear``),
+  count per set, ``filtering`` / ``scanning`` (a ``classify_rows`` run is
+  still filling it) / ``partial`` (stopped, cancelled or out of time) /
+  ``N new since`` in words, and the keys (``H filter · X clear``),
 * an "AI highlight" section per set in the Inspector Summary,
 * the *AI filter* (``H`` cycles off -> set 1 -> ... -> off; Esc leaves it):
   applied inside the lens's own row filter through
@@ -99,6 +100,13 @@ def _clip(text: str, width: int) -> str:
     if width <= 0 or len(text) <= width:
         return text
     return text[: max(0, width - 1)] + "…"
+
+
+def set_state(hs: Any) -> str:
+    """``"scanning"``, ``"partial"`` or ``"complete"`` of a highlight set."""
+    if getattr(hs, "scanning", False):
+        return "scanning"
+    return "complete" if getattr(hs, "complete", True) else "partial"
 
 
 def _clock(ts: Any) -> str:
@@ -266,7 +274,10 @@ class HighlightView:
             text.append(label, style=f"bold {role_color(slot_role(slot))}")
             if hs is not None and sid == self.filter_id():
                 text.append("  filtering", style=pal.muted)
-            if hs is not None and not hs.complete:
+            state = set_state(hs) if hs is not None else "complete"
+            if state == "scanning":
+                text.append("  scanning", style=pal.muted)
+            elif state == "partial":
                 text.append("  partial", style=pal.warn)
             if reason:
                 who = "AI: " if getattr(hs, "origin", "ai") == "ai" else ""
@@ -332,7 +343,9 @@ class HighlightView:
                     elif changes and judged and last and last > float(judged):
                         c.changed += 1
                 elif ok and fresh and key:
-                    # Rows without a key (TLS failures) can never be in a set.
+                    # Keyless rows (a stdout-only TLS failure the flow log has
+                    # not caught up with) are never "new": they cannot join a
+                    # set. Keyed TLS failures (``tls-<seq>``) count like flows.
                     if through is not None and seq is not None:
                         if seq > int(through):
                             c.new += 1
@@ -390,8 +403,9 @@ class HighlightView:
             words = []
             if hs.id == fid:
                 words.append("filtering")
-            if not hs.complete:
-                words.append("partial")
+            state = set_state(hs)
+            if state != "complete":
+                words.append(state)  # "scanning" while running, else "partial"
             if c.new:
                 words.append(f"{c.new} new since")
             if c.changed:
@@ -590,8 +604,11 @@ class HighlightBar(Static):
 def flow_snapshot(row: Any, shown: bool, scope: str | None = None) -> dict:
     """One Network row (``FlowRow``) for the AI tools; key = flow id.
 
-    ``flow_dir`` is where ``details/<id>.json`` lives: the session's flow
-    log live, the run bundle's ``network/`` folder in REVIEW.
+    TLS failures: key = the flow-log record id ``tls-<seq>`` (None while a
+    stdout-only row is not in the flow log yet; the tools skip and count
+    those), ``error`` names the failed handshake. ``flow_dir`` is where
+    ``details/<id>.json`` lives: the session's flow log live, the run
+    bundle's ``network/`` folder in REVIEW (TLS failures have no detail).
     """
     if row.kind == "tls":
         kind = "tls"
@@ -616,7 +633,11 @@ def flow_snapshot(row: Any, shown: bool, scope: str | None = None) -> dict:
         "req_bytes": row.req_bytes,
         "resp_bytes": row.resp_bytes,
         "kind": kind,
-        "error": row.error,
+        "error": (
+            row.error or f"TLS handshake failed ({row.reason or 'tls'})"
+            if kind == "tls"
+            else row.error
+        ),
         "scope": scope,
         "phase": row.phase,
         "time": row.ts,

@@ -474,3 +474,40 @@ def test_singleton_registers_into_registry(monkeypatch, notes):
     finally:
         rh.reset_for_tests()
     assert notes.reg.provider("ai") is None
+
+
+# -- scan state: scanning / partial / complete --------------------------------------------
+
+
+def test_scan_state_scanning_partial_complete(store):
+    hs = store.create("network", "trackers", origin="ai", scanning=True)
+    assert (hs.scanning, hs.complete, hs.state) == (True, False, "scanning")
+    store.add(hs.id, {"tls-12": "tracker host"})
+    assert store.get(hs.id).state == "scanning"  # rows arrive while it runs
+    store.finish(hs.id, complete=False)  # stopped / cancelled / deadline
+    assert store.get(hs.id).state == "partial"
+    store.start_scan(hs.id)  # classify_rows extends the set
+    assert store.get(hs.id).state == "scanning"
+    store.finish(hs.id, complete=True)
+    done = store.get(hs.id)
+    assert (done.scanning, done.complete, done.state) == (False, True, "complete")
+    plain = store.create("network", "found")
+    assert plain.state == "complete"
+    with pytest.raises(HighlightError):
+        store.start_scan("h99")
+
+
+def test_a_set_saved_mid_scan_loads_as_partial(tmp_path, notes):
+    store = HighlightStore()
+    store.bind_folder(tmp_path)
+    hs = store.create("network", "trackers", origin="ai", scanning=True)
+    store.add(hs.id, {"tls-12": "tracker host"})
+    assert store.flush()
+    data = json.loads((tmp_path / "ai" / "highlights.json").read_text())
+    assert data["sets"][0]["scanning"] is True  # the process "crashed" here
+
+    reloaded = HighlightStore()
+    reloaded.bind_folder(tmp_path)
+    got = reloaded.get(hs.id)
+    assert (got.scanning, got.complete, got.state) == (False, False, "partial")
+    assert got.reasons == {"tls-12": "tracker host"}

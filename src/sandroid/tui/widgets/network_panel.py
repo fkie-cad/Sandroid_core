@@ -453,7 +453,10 @@ class FlowRow:
         seq = rec.get("seq")
         ts_end = rec.get("ts_end") or rec.get("ts_start") or 0.0
         if rec.get("kind") == "tls":
-            # A persisted TLS handshake failure (no HTTP flow behind it).
+            # A persisted TLS handshake failure (no HTTP flow behind it). Its
+            # flow-log record id ``tls-<seq>`` is the annotation key (AI
+            # highlights, the tools' row key); there is no detail file.
+            fid = rec.get("id") or (f"tls-{seq}" if seq is not None else None)
             return cls(
                 key=f"f{seq}" if seq is not None else f"f{rec.get('id')}",
                 ts=float(ts_end or 0.0),
@@ -462,6 +465,7 @@ class FlowRow:
                 path="",
                 app=str(rec.get("app") or ""),
                 seq=seq,
+                flow_id=str(fid) if fid else None,
                 kind="tls",
                 reason=str(rec.get("tls_reason") or "tls"),
                 phase=str(rec.get("phase") or ""),
@@ -954,7 +958,8 @@ class FlowTable(AnnotationTintMixin, DataTable):
 
     Rows are tinted by their row annotations (``row_annotations``: flows
     carrying identity-profile values, AI marks); the annotation key of a row
-    is its mitmproxy flow id, not the row key ``f<seq>``.
+    is its mitmproxy flow id (TLS failures: the flow-log id ``tls-<seq>``),
+    not the row key ``f<seq>``.
 
     Moving up (↑, PgUp, Home, a wheel up, a click above the newest row) stops
     following the newest flow; End resumes (``follow.py``).
@@ -972,7 +977,7 @@ class FlowTable(AnnotationTintMixin, DataTable):
         self._owner_panel: NetworkPanel | None = None
 
     def annotation_key(self, row_key_value: Any) -> str | None:
-        """Row key ``f<seq>`` -> the flow id (flow rows only)."""
+        """Row key ``f<seq>`` -> the flow id (TLS failures: ``tls-<seq>``)."""
         panel = self._owner_panel
         if panel is None:
             panel = self._owner_panel = self._panel()
@@ -1443,7 +1448,10 @@ class NetworkPanel(Widget):
                 and live.host == row.host
                 and abs(live.ts - row.ts) <= 10.0
             ):
+                # Adopt the record's id too: from now on the stdout row has
+                # the stable annotation key ``tls-<seq>`` (AI highlights).
                 live.seq = row.seq
+                live.flow_id = row.flow_id
                 return True
         return False
 
@@ -2464,7 +2472,12 @@ class NetworkPanel(Widget):
         return _privacy_tags_for_flow(flow_id)
 
     def annotation_flow_id(self, key: Any) -> str | None:
-        """The annotation key (flow id) of table row ``key``; flow rows only."""
+        """The annotation key (flow id) of table row ``key``.
+
+        Flows: the mitmproxy flow id. TLS failures: the flow-log record id
+        ``tls-<seq>``; a stdout-only TLS row (``t<n>``, not in the flow log
+        yet) has none until the poll pairs it with its record.
+        """
         if key is None:
             return None
         model = self._model()
@@ -2473,7 +2486,7 @@ class NetworkPanel(Widget):
             index = {r.key: r for r in model}
             self._flow_index = (model, len(model), index)
         row = index.get(str(key))
-        if row is None or row.kind != "flow":
+        if row is None:
             return None
         return row.flow_id
 
@@ -2601,10 +2614,11 @@ class NetworkPanel(Widget):
     def _highlight_rows_snapshot(self) -> list[dict]:
         """Every row of this view (live or the reviewed run) for the AI tools.
 
-        ``shown`` = passes the lens's current filters. Rows without a flow id
-        (stdout-only TLS failures) cannot be highlighted: they come with key
-        None (the tools drop them) only so their ``seq`` counts for the
-        "new since" basis.
+        ``shown`` = passes the lens's current filters. TLS failures carry
+        their flow-log id ``tls-<seq>``. Rows without one (a stdout-only TLS
+        failure the flow log has not caught up with) cannot be highlighted
+        yet: they come with key None (the tools drop and count them) so
+        their ``seq`` still counts for the "new since" basis.
         """
         return [flow_snapshot(r, self._passes(r), self._scope) for r in self._model()]
 

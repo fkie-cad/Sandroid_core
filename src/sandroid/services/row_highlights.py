@@ -27,7 +27,9 @@ the UI thread (``H`` / ``X`` / Esc) never waits for an fsync
 *generation*; mutations that pass ``generation=`` from before the switch
 raise :class:`StaleGenerationError` instead of landing in the new session.
 A malformed file is moved aside to ``highlights.json.bad`` and the session
-starts empty. Without a folder the sets live in memory only.
+starts empty. Without a folder the sets live in memory only. A set saved
+while ``classify_rows`` was still running (``scanning``: the process ended
+mid-scan) loads as *partial*: no scan survives a restart.
 
 Row sources: a lens registers a snapshot callable
 (:meth:`HighlightStore.register_row_source`); tools call
@@ -119,7 +121,11 @@ class HighlightSet:
         query: Classifier criterion or a summary of the ``where`` filter.
         scope: ``None`` = live rows; else the run id it was judged on.
         basis: ``{"judged_at": ts, "through_seq": int | None, "evaluated": n}``.
-        complete: False while classifying and after a cancel (partial).
+        complete: False while classifying and after a stop, cancel or
+            deadline (partial).
+        scanning: True while ``classify_rows`` is still running on the set
+            (set by :meth:`HighlightStore.start_scan` / ``create``, cleared
+            by :meth:`HighlightStore.finish`). See :attr:`state`.
         stats: ``scanned``, ``matched``, ``uncertain``, ``skipped``,
             ``bytes_sent``...
         created_at: Creation time (epoch seconds).
@@ -138,6 +144,7 @@ class HighlightSet:
     complete: bool = True
     stats: dict = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+    scanning: bool = False
     #: The store's bind generation when this copy was taken (not persisted).
     generation: int = field(default=0, compare=False)
 
@@ -157,8 +164,16 @@ class HighlightSet:
             complete=self.complete,
             stats=dict(self.stats),
             created_at=self.created_at,
+            scanning=self.scanning,
             generation=self.generation,
         )
+
+    @property
+    def state(self) -> str:
+        """``"scanning"`` (a scan is running), ``"partial"`` or ``"complete"``."""
+        if self.scanning:
+            return "scanning"
+        return "complete" if self.complete else "partial"
 
     @property
     def count(self) -> int:
@@ -204,6 +219,9 @@ class HighlightSet:
         if scope is not None and not isinstance(scope, str):
             raise ValueError("set field 'scope' has the wrong type")
         complete = need("complete", bool, True)
+        if need("scanning", bool, False):
+            # Saved mid-scan (the process ended): never "scanning" again.
+            complete = False
         created = need("created_at", (int, float), time.time())
         return cls(
             id=set_id,
@@ -467,8 +485,12 @@ class HighlightStore:
         filter: bool = False,
         replace_id: str | None = None,
         generation: int | None = None,
+        scanning: bool = False,
     ) -> HighlightSet:
         """Create a set (or replace *replace_id* in place, keeping its slot).
+
+        ``scanning=True``: a classifier run fills it (the set is partial
+        until :meth:`finish`).
 
         The returned copy's ``generation`` is the store's bind generation;
         pass it to later mutations so they fail after a session switch.
@@ -526,7 +548,8 @@ class HighlightStore:
                 query=str(query or ""),
                 scope=scope,
                 basis=dict(basis or {}),
-                complete=bool(complete),
+                complete=bool(complete) and not scanning,
+                scanning=bool(scanning),
             )
             self._sets[set_id] = hs
             if filter:
@@ -621,15 +644,35 @@ class HighlightStore:
         basis: Mapping[str, Any] | None = None,
         generation: int | None = None,
     ) -> None:
-        """Mark a set complete or partial and merge its stats/basis."""
+        """Mark a set complete or partial and merge its stats/basis.
+
+        Ends a scan (:meth:`start_scan`): the set is no longer ``scanning``.
+        """
         with self._lock:
             self._check_generation(generation)
             hs = self._require(set_id)
             hs.complete = bool(complete)
+            hs.scanning = False
             if stats:
                 hs.stats.update(stats)
             if basis:
                 hs.basis.update(basis)
+            self._commit(hs.lens)
+            lens = hs.lens
+        self._notify(lens, None)
+
+    def start_scan(self, set_id: str, *, generation: int | None = None) -> None:
+        """A classifier run starts filling an existing set (``scanning``).
+
+        Raises:
+            HighlightError: Unknown set.
+            StaleGenerationError: *generation* is from before a session switch.
+        """
+        with self._lock:
+            self._check_generation(generation)
+            hs = self._require(set_id)
+            hs.complete = False
+            hs.scanning = True
             self._commit(hs.lens)
             lens = hs.lens
         self._notify(lens, None)
