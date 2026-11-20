@@ -99,7 +99,7 @@ dependencies = [
 # default TUI imports the AI chat panel), so `.[ai]` no longer adds anything.
 ai = []
 static-analysis = [
-    "dexray-insight>=2.1.0,<3",
+    "dexray-insight>=2.1.1,<3",
 ]
 dev = [
     "pytest>=7.0.0",
