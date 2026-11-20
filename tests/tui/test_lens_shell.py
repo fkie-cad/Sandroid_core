@@ -813,24 +813,23 @@ def test_snapshot_load_restores_selinux_permissive() -> None:
     assert "root" in adb.calls
 
 
-def test_picker_load_restarts_frida_server(monkeypatch) -> None:
-    """M1: after a picker load frida-server is re-started (auto-start)."""
-    import threading
+def test_picker_load_leaves_post_load_work_to_the_service(monkeypatch) -> None:
+    """M1: the picker only loads; frida auto-start and the handle reset run
+    in EmulatorService.load_snapshot for every caller (TUI, Play, AI).
+    """
     from types import SimpleNamespace
 
     from sandroid.tui.widgets import snapshots_panel as sp
 
-    started = threading.Event()
     panel = sp.SnapshotsPanel()
-    panel._app_ref = SimpleNamespace(_auto_start_frida_server=started.set)
-    toolbox = SimpleNamespace(load_snapshot=lambda tag: True)
+    loaded: list[str] = []
+    toolbox = SimpleNamespace(load_snapshot=lambda tag: loaded.append(tag) or True)
     fake_app = SimpleNamespace(push_screen=lambda screen, cb: cb(True))
     monkeypatch.setattr(sp.SnapshotsPanel, "app", property(lambda self: fake_app))
     monkeypatch.setattr(panel, "_require_emulator", lambda: True)
     monkeypatch.setattr(panel, "_toolbox", lambda: toolbox)
     monkeypatch.setattr(panel, "_highlighted_tag", lambda: "clean_64g")
     monkeypatch.setattr(panel, "_post", lambda fn, *a: None)
-    monkeypatch.setattr(sp, "_forget_device_handles", lambda: None)
     results: list = []
     monkeypatch.setattr(
         panel,
@@ -839,7 +838,8 @@ def test_picker_load_restarts_frida_server(monkeypatch) -> None:
     )
     panel.action_load()
     assert results == [(True, "Loaded 'clean_64g'")]
-    assert started.wait(2)
+    assert loaded == ["clean_64g"]
+    assert not hasattr(panel, "_restart_frida_after_load")
 
 
 async def test_inspector_tabs_switch_while_focus_stays_in_the_lens() -> None:

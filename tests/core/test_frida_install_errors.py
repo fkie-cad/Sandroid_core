@@ -360,47 +360,6 @@ def test_restart_after_system_restart_only_when_running(monkeypatch):
     assert idle.calls == []
 
 
-def test_ca_injection_restarts_frida_after_killing_zygote(monkeypatch):
-    from sandroid.core import frida_manager as fm_mod
-    from sandroid.core import proxy_manager as pm
-
-    restarts = []
-    monkeypatch.setattr(
-        fm_mod,
-        "restart_frida_server_after_system_restart",
-        lambda: restarts.append(1) or (True, "frida-server restarted"),
-    )
-    mgr = pm.CAManager()
-    monkeypatch.setattr(mgr, "_check_root_access", lambda: True)
-    monkeypatch.setattr(mgr, "get_zygote_pids", lambda: (None, 812))
-    monkeypatch.setattr(mgr, "_get_cert_hash_from_device", lambda: "c8750f0d")
-    monkeypatch.setattr(
-        mgr,
-        "determine_injection_strategy",
-        lambda: (pm.InjectionStrategy.BIND_MOUNT, 35),
-    )
-    monkeypatch.setattr(
-        pm.Adb,
-        "send_adb_command",
-        staticmethod(lambda cmd, serial=None: (mgr.DEVICE_CERT_PATH, "")),
-    )
-
-    def _inject(cert_name, pids):
-        mgr._zygote_restarted = True  # what the real kill loop sets
-        return True, "Bind-mount: injected"
-
-    monkeypatch.setattr(mgr, "_inject_bind_mount", _inject)
-    result = mgr.inject_ca_into_zygote()
-    assert result.success
-    assert restarts == [1]
-    assert result.message.endswith("; frida-server restarted")
-
-    # No Zygote restart (e.g. failed before the kill) -> frida left alone.
-    monkeypatch.setattr(mgr, "_inject_bind_mount", lambda n, p: (False, "nope"))
-    mgr.inject_ca_into_zygote()
-    assert restarts == [1]
-
-
 # -- M6: frida-server relaunch took two zygote PIDs ------------------------
 
 

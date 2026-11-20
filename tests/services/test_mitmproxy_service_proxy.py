@@ -459,9 +459,24 @@ def test_panel_drops_stale_probe_result(panel, monkeypatch):
     assert lines == []
 
 
+def test_panel_no_settle_probe_after_a_no_restart_install(panel, monkeypatch):
+    """The normal Ctrl+N install restarts nothing: no settle wait or probe."""
+    p, _, _, _ = panel
+    kicks = []
+    monkeypatch.setattr(p, "_kick_reachability_probe", lambda **kw: kicks.append(kw))
+    monkeypatch.setattr(p, "_kick_settle_watch", lambda reason: kicks.append(reason))
+    monkeypatch.setattr(p, "_nudge_unpin", lambda: None)
+    p._proxy_state = "ours"
+    result = proxy_manager.InjectionResult(success=True, message="ok", api_level=35)
+    p._apply_inject_result(result, None, (True, "Chrome CT bypass installed"))
+    assert kicks == []
+    assert p._ca_ok
+    assert p._ct_ok
+
+
 def test_panel_settle_probe_after_zygote_restart(panel, monkeypatch):
-    """Ctrl+N success → wait for the device to settle, then probe (no
-    immediate probe against a device without network).
+    """Fallback (Zygote restarted) → wait for the device to settle, then
+    probe (no immediate probe against a device without network).
     """
     p, _, _, _ = panel
     kicks = []
@@ -478,6 +493,7 @@ def test_panel_settle_probe_after_zygote_restart(panel, monkeypatch):
         message="ok",
         strategy=proxy_manager.InjectionStrategy.BIND_MOUNT,
         api_level=35,
+        restarted=True,
     )
     p._apply_inject_result(result, None)
     assert kicks == [{"settle": True, "reason": "the Zygote restart"}]

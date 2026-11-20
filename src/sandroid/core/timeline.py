@@ -2668,13 +2668,18 @@ def should_mask(reader: Reader = "ui") -> bool:
 
 
 def mask(line: dict) -> dict:
-    """A sensitive line with its content hidden (the envelope and summary stay)."""
+    """A sensitive line with its content hidden (the envelope and summary
+    stay; a summary that quotes typed text is replaced by the line's
+    ``data.masked_summary``, e.g. ``typed 8 chars into password field 'pw'``).
+    """
     if not line.get("sensitive"):
         return line
     out = dict(line)
     data = line.get("data")
     if isinstance(data, Mapping):
         out["data"] = {"_masked": True, "keys": sorted(data)}
+        if isinstance(data.get("masked_summary"), str):
+            out["summary"] = data["masked_summary"]
     ref = line.get("ref")
     if isinstance(ref, Mapping) and "raw" in ref:
         out["ref"] = {**ref, "raw": "•••"}

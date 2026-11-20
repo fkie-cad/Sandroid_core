@@ -48,6 +48,34 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def install_or_adopt_ca(manager, cert_path, where=None):
+    """Ctrl+N's CA step (blocking adb, worker thread).
+
+    An already installed CA is only re-checked, but recorded as this
+    serial's re-inject intent like a fresh install: a later snapshot load or
+    cold boot onto a state without it then installs it again. Otherwise the
+    no-restart install runs (it records the intent itself).
+
+    Returns:
+        :class:`~sandroid.core.proxy_manager.InjectionResult`.
+    """
+    from sandroid.core.adb import Adb
+    from sandroid.core.proxy_manager import InjectionResult, remember_ca_intent
+
+    status = manager.check_zygote_injection_status(cert_path)
+    if status.verdict != "injected":
+        return manager.inject_ca_into_zygote(cert_path)
+    spec = manager.ca_spec(cert_path)
+    if spec is not None:
+        remember_ca_intent(Adb.get_target_device(), spec)
+    note = where(status) if where is not None else "Zygote"
+    return InjectionResult(
+        success=True,
+        message=f"CA already in the trust store ({note})",
+        verdict="injected",
+    )
+
+
 class MitmproxyPanel(Widget):
     """Hidden mitmweb controller for the Network lens (id ``mitm-panel``).
 
@@ -129,7 +157,7 @@ class MitmproxyPanel(Widget):
         # once (already injected vs. press Ctrl+N); cleared after it fires.
         self._announce_ca_on_start = False
         # Re-entrancy guard: an injection runs in a worker thread, so a second
-        # Ctrl+N confirm must not spawn a parallel Zygote-kill.
+        # Ctrl+N must not start a parallel install.
         self._injecting = False
         # Captured in on_mount(); lets background threads marshal log lines
         # onto the main loop with a non-blocking call_soon_threadsafe instead
@@ -297,14 +325,10 @@ class MitmproxyPanel(Widget):
         except Exception:
             pass
         # Best-effort: free app-proxy lanes/iptables so they don't leak when the
-        # panel closes (disable_focus() with no active lanes is a no-op).
-        try:
-            from sandroid.core.proxy_manager import get_focus_manager
-
-            if get_focus_manager().is_focus_active():
-                get_focus_manager().disable_focus()
-        except Exception:
-            pass
+        # panel closes (disable_focus() with no active lanes is a no-op). Off
+        # the UI thread: it waits for FocusManager's lock and runs adb; the
+        # FocusManager's atexit cleanup is the backstop at exit.
+        self._release_app_proxies_async()
         # Best-effort: never leave the device pointed at a mitmproxy that dies
         # with Sandroid. Only the exact address we set is cleared (a proxy
         # changed since is left alone). The service's atexit hook is the
@@ -315,6 +339,22 @@ class MitmproxyPanel(Widget):
             pass
         # Best-effort: drop our adb-reverse tunnel so it doesn't leak.
         self._remove_our_reverse()
+
+    @staticmethod
+    def _release_app_proxies_async() -> None:
+        def _run() -> None:
+            try:
+                from sandroid.core.proxy_manager import get_focus_manager
+
+                manager = get_focus_manager()
+                if manager.app_proxies_cached():
+                    manager.disable_focus()
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=_run, name="mitm-app-proxy-release", daemon=True
+        ).start()
 
     def _on_service_line(self, line: str) -> None:
         # Reader/AI-tool-worker thread → non-blocking schedule onto the main
@@ -455,8 +495,9 @@ class MitmproxyPanel(Widget):
         * Device part — from the async-probed device-proxy state
           (``_proxy_state``/``_proxy_addr``): our mitmproxy, an external proxy,
           or off.
-        * Apps part — from ``get_focus_manager().app_proxies()`` (a cheap
-          in-process read): how many apps route to our mitmproxy vs. external.
+        * Apps part — from ``get_focus_manager().app_proxies_cached()`` (a
+          lock-free, last-known read): how many apps route to our mitmproxy vs.
+          external.
 
         Stopped → empty (the header's ``○ stopped`` already says it all).
         """
@@ -486,7 +527,7 @@ class MitmproxyPanel(Widget):
         try:
             from sandroid.core.proxy_manager import get_focus_manager
 
-            routes = get_focus_manager().app_proxies()
+            routes = get_focus_manager().app_proxies_cached()
         except Exception:
             routes = {}
         if routes:
@@ -496,8 +537,34 @@ class MitmproxyPanel(Widget):
                 apps += f"  [#22d3ee]· Apps {ours} → mitmproxy[/]"
             if ext:
                 apps += f"  [#7dd3fc]· {ext} → ext[/]"
+        problems = self._lane_problems()
+        if problems:
+            from sandroid.tui.themes import lens_palette
+
+            apps += f"  [{lens_palette().warn}]{escape(problems)}[/]"
 
         return f"{device}{apps}"
+
+    @staticmethod
+    def _lane_problems() -> str:
+        """App Proxy lanes that pass no traffic, in words ("" when all fine).
+
+        Non-blocking read of the last reconcile verdicts (no adb).
+        """
+        try:
+            from sandroid.core.proxy_manager import get_focus_manager
+
+            health = get_focus_manager().lane_health_cached()
+        except Exception:
+            return ""
+        if not health:
+            return ""
+        bad = [
+            f"{pkg.rsplit('.', 1)[-1]} {h.label}"
+            for pkg, h in sorted(health.items())
+            if not h.ok
+        ]
+        return "App Proxy " + ", ".join(bad) if bad else ""
 
     def _unpin_tag(self) -> str:
         if self._service.ssl_unpin_is_active():
@@ -613,11 +680,14 @@ class MitmproxyPanel(Widget):
         try:
             from sandroid.core.proxy_manager import get_focus_manager
 
-            routes = get_focus_manager().app_proxies()
+            routes = get_focus_manager().app_proxies_cached()
         except Exception:
             routes = {}
         if routes:
             parts.append(f"app proxies {len(routes)}")
+        problems = self._lane_problems()
+        if problems:
+            parts.append(f"[{pal.warn}]{escape(problems)}[/]")
         parts.append(
             "CA installed" if self._ca_ok else f"[{pal.dim}]CA not installed[/]"
         )
@@ -648,7 +718,7 @@ class MitmproxyPanel(Widget):
         try:
             from sandroid.core.proxy_manager import get_focus_manager
 
-            routed_apps = bool(get_focus_manager().app_proxies())
+            routed_apps = bool(get_focus_manager().app_proxies_cached())
         except Exception:
             routed_apps = False
         if self._proxy_state != "ours" and not routed_apps:
@@ -786,9 +856,11 @@ class MitmproxyPanel(Widget):
     def action_inject_ca(self) -> None:
         """Ctrl+N — install the mitmproxy CA into the system trust store.
 
-        Self-contained and independent of the Device Proxy: it injects the CA
-        (prompting to restart Zygote) and ensures the Chrome CT bypass, then
-        is a no-op on subsequent presses once the CA is in. It does not start
+        Self-contained and independent of the Device Proxy: it installs the
+        CA without restarting Zygote (running apps and Frida sessions keep
+        going) and ensures the Chrome CT bypass, then is a no-op on
+        subsequent presses once the CA is in. Only when that cannot work on
+        the device does it offer a Zygote restart, after confirmation. It does not start
         mitmweb or touch the device proxy; if the CA cert hasn't been generated
         yet, ``_auto_inject_ca`` says to start mitmproxy once first.
         """
@@ -1369,116 +1441,100 @@ class MitmproxyPanel(Widget):
             logger.debug("Failed to remove our reverse tunnel: %s", exc)
 
     def _auto_inject_ca(self) -> None:
-        """Auto-inject mitmproxy CA cert into Android system trust store."""
+        """Install the mitmproxy CA system-wide (no Zygote restart).
+
+        Only host-side work here (finding the CA file); the status check, the
+        install and the Chrome CT bypass run on a worker (:meth:`_do_inject_ca`).
+        """
+        if self._injecting:
+            return
         try:
             from sandroid.core.proxy_manager import CAManager, CASource
 
-            ca_mgr = CAManager()
-
-            # Check if already injected
-            status = ca_mgr.check_zygote_injection_status()
-            if status.injected:
-                self._ca_ok = True
-                self._append_line(
-                    f"[INFO] [~] CA already in trust store ({self._ca_where(status)})"
-                )
-                # Still ensure Chrome CT bypass is in place
-                certs = ca_mgr.detect_ca_certificates()
-                mitm_cert = next(
-                    (c for c in certs if c.source == CASource.MITMPROXY), None
-                )
-                if mitm_cert:
-                    ct_ok, ct_msg = ca_mgr.bypass_chrome_ct(mitm_cert.path)
-                    if ct_ok:
-                        self._ct_ok = True
-                        self._append_line(f"[INFO] {ct_msg}")
-                self._nudge_unpin()
-                return
-
-            # Find mitmproxy cert
-            certs = ca_mgr.detect_ca_certificates()
-            mitm_cert = next((c for c in certs if c.source == CASource.MITMPROXY), None)
-            if not mitm_cert:
-                self._append_line(
-                    "[INFO] No mitmproxy CA cert found. Start mitmproxy once "
-                    "to generate it (~/.mitmproxy/), then restart."
-                )
-                self._nudge_unpin()
-                return
-
-            self._append_line(f"[INFO] Injecting CA cert: {mitm_cert.path.name}")
-            # Injection restarts Zygote — confirm before proceeding.
-            from sandroid.tui.modals.confirm_modal import ConfirmModal
-
-            self._pending_mitm_cert = mitm_cert.path
-            self.app.push_screen(
-                ConfirmModal(
-                    title="Restart Zygote to install CA?",
-                    message=(
-                        "Installing the CA certificate requires restarting Zygote, "
-                        "the process every Android app is forked from.\n\n"
-                        "All running apps close and System UI restarts. The "
-                        "device does NOT reboot, but on a busy emulator it can "
-                        "take a minute or more to settle: expect 'System UI "
-                        "isn't responding' dialogs meanwhile (choose Wait). "
-                        "Sandroid waits for the device before it re-checks the "
-                        "proxy, then closes leftover dialogs.\n\n"
-                        "Continue?"
-                    ),
-                    yes_label="Restart Zygote",
-                    no_label="Cancel",
-                ),
-                self._on_restart_confirm,
-            )
-            return
+            certs = CAManager().detect_ca_certificates()
         except Exception as exc:
             logger.warning("Auto CA injection failed: %s", exc)
             self._append_line(f"[ERROR] CA injection: {exc}")
             self._nudge_unpin()
+            return
+        mitm_cert = next((c for c in certs if c.source == CASource.MITMPROXY), None)
+        if not mitm_cert:
+            self._append_line(
+                "[INFO] No mitmproxy CA cert found. Start mitmproxy once "
+                "to generate it (~/.mitmproxy/), then restart."
+            )
+            self._nudge_unpin()
+            return
+        self._pending_mitm_cert = mitm_cert.path
+        self._do_inject_ca(mitm_cert.path)
 
     def _on_restart_confirm(self, confirmed: bool) -> None:
-        """Handle Zygote restart confirmation from the ConfirmModal."""
+        """The user decided on the Zygote-restart fallback."""
         if not confirmed:
-            self._append_line("[INFO] CA injection cancelled — Zygote not restarted")
+            self._append_line("[INFO] CA not installed: Zygote not restarted")
             self._refresh_header()
             self._nudge_unpin()
             return
-        self._do_inject_ca(self._pending_mitm_cert)
+        self._do_inject_ca(self._pending_mitm_cert, restart=True)
 
-    def _do_inject_ca(self, cert_path) -> None:
-        """Inject the CA off the UI thread; results land in _apply_inject_result.
+    def _do_inject_ca(self, cert_path, *, restart: bool = False) -> None:
+        """Check, install and CT-bypass the CA off the UI thread.
 
-        The injection kills + waits on Zygote (up to ~20s of polling), so it
-        must not block the event loop. Mirror _kick_state_refresh's
-        daemon-thread + call_from_thread pattern; all UI work (messages, modals)
-        stays on the main thread in _apply_inject_result.
+        Without ``restart`` nothing is restarted: an already installed CA is
+        only re-checked; otherwise the no-restart install runs. ``restart``
+        is the user-confirmed fallback (Zygote restart). Results land in
+        :meth:`_apply_inject_result` on the UI thread.
         """
         if self._injecting:
             return  # an injection is already in flight — ignore re-entry
         self._injecting = True
-        self._append_line(
-            "[INFO] [~] installing CA — waiting for Zygote to restart (up to ~20s)…"
-        )
+        if restart:
+            self._append_line(
+                "[INFO] [~] restarting Zygote to install the CA (up to ~2 min)…"
+            )
+        else:
+            self._append_line("[INFO] [~] installing the CA (no Zygote restart)…")
 
         def _run() -> None:
+            ct = None
             try:
                 from sandroid.core.proxy_manager import CAManager
 
-                result = CAManager().inject_ca_into_zygote(cert_path)
+                manager = CAManager()
+                if restart:
+                    from sandroid.services.proxy_restore import (
+                        restart_framework_for_ca,
+                    )
+
+                    held: dict = {}
+
+                    def _while_held(_res) -> None:
+                        # Still under the fallback's WORLD lease.
+                        if cert_path is not None:
+                            held["ct"] = manager.bypass_chrome_ct(cert_path)
+
+                    result = restart_framework_for_ca(cert_path, while_held=_while_held)
+                    ct = held.get("ct")
+                else:
+                    result = install_or_adopt_ca(manager, cert_path, self._ca_where)
+                    if result.success and cert_path is not None:
+                        ct = manager.bypass_chrome_ct(cert_path)
             except Exception as exc:  # marshal the failure to the UI thread
                 result = exc
             try:
-                self.app.call_from_thread(self._apply_inject_result, result, cert_path)
+                self.app.call_from_thread(
+                    self._apply_inject_result, result, cert_path, ct
+                )
             except Exception:
                 pass
 
         threading.Thread(target=_run, name="mitm-ca-inject", daemon=True).start()
 
-    def _apply_inject_result(self, result, cert_path) -> None:
+    def _apply_inject_result(self, result, cert_path, ct=None) -> None:
         """Handle the injection outcome on the UI thread (messages + modals)."""
         # The worker has finished by the time this runs, so the in-flight guard
-        # is cleared here — including before the needs_root modal so its
-        # _on_root_confirm -> _do_inject_ca re-entry can proceed.
+        # is cleared here — including before the modals so their re-entry
+        # into _do_inject_ca can proceed.
         self._injecting = False
         if isinstance(result, Exception):
             logger.warning("Auto CA injection failed: %s", result)
@@ -1488,36 +1544,27 @@ class MitmproxyPanel(Widget):
             self._nudge_unpin()
             return
         try:
-            from sandroid.core.proxy_manager import CAManager
-
             if result.success:
                 self._ca_ok = True
-                strategy_label = result.strategy.value if result.strategy else "unknown"
-                self._append_line(
-                    f"[INFO] [OK] CA injected ({strategy_label}, "
-                    f"API {result.api_level}): {result.message}"
-                )
-
-                # Bypass Chrome Certificate Transparency enforcement
-                ct_ok, ct_msg = CAManager().bypass_chrome_ct(cert_path)
-                if ct_ok:
-                    self._ct_ok = True
-                    self._append_line(f"[INFO] {ct_msg}")
-                else:
-                    self._append_line(f"[INFO] Chrome CT bypass skipped: {ct_msg}")
-
-                # CA injection restarts Zygote (and with it system_server and
-                # netd) — if the device proxy is ours, re-prove reachability
-                # once the device has settled; an immediate probe hits a device
-                # without network and reports a false "CANNOT reach". Gated on
-                # success AND an armed device proxy so we never pollute
-                # flows_seen when no device proxy is even set.
-                if self._proxy_state == "ours" or self._service.owned_device_proxy:
-                    self._kick_reachability_probe(
-                        settle=True, reason="the Zygote restart"
-                    )
-                else:
-                    self._kick_settle_watch("the Zygote restart")
+                self._append_line(f"[INFO] [OK] {result.message}")
+                if ct is not None:
+                    ct_ok, ct_msg = ct
+                    if ct_ok:
+                        self._ct_ok = True
+                        self._append_line(f"[INFO] {ct_msg}")
+                    else:
+                        self._append_line(f"[INFO] Chrome CT bypass skipped: {ct_msg}")
+                # Only the fallback restarts Zygote (and with it system_server
+                # and netd): then re-prove reachability once the device has
+                # settled; an immediate probe would report a false "CANNOT
+                # reach". The normal install restarts nothing.
+                if getattr(result, "restarted", False):
+                    if self._proxy_state == "ours" or self._service.owned_device_proxy:
+                        self._kick_reachability_probe(
+                            settle=True, reason="the Zygote restart"
+                        )
+                    else:
+                        self._kick_settle_watch("the Zygote restart")
             elif result.needs_root:
                 from sandroid.tui.modals.confirm_modal import ConfirmModal
 
@@ -1529,6 +1576,28 @@ class MitmproxyPanel(Widget):
                         ),
                     ),
                     self._on_root_confirm,
+                )
+                return
+            elif getattr(result, "restart_required", False):
+                from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+                self._append_line(f"[ERROR] {result.message}")
+                self.app.push_screen(
+                    ConfirmModal(
+                        title="Restart Zygote to install the CA?",
+                        message=(
+                            "The CA could not be installed without a restart on "
+                            "this device. Restarting Zygote, the process every "
+                            "Android app is forked from, installs it: all "
+                            "running apps close, Frida sessions end and System "
+                            "UI restarts. The device does NOT reboot, but on a "
+                            "busy emulator it can take a minute or more to "
+                            "settle.\n\nContinue?"
+                        ),
+                        yes_label="Restart Zygote",
+                        no_label="Cancel",
+                    ),
+                    self._on_restart_confirm,
                 )
                 return
             else:
@@ -1686,17 +1755,10 @@ class MitmproxyPanel(Widget):
         self._ui.post(self._append_line, line)
 
     def action_restart(self) -> None:
-        # Ctrl+R: restart mitmweb, then re-apply BOTH the device proxy and the
-        # app proxies against the fresh process. service.restart() tears down
-        # the lanes + proxy, so snapshot ground truth BEFORE restarting and
-        # re-create from the snapshot.
+        # Ctrl+R: restart mitmweb, then re-apply the device proxy against the
+        # fresh process. App Proxy lanes survive a restart (they fail closed
+        # meanwhile); the service's start reconciles them off-thread.
         device_state, _ = self._probe_proxy_state()
-        try:
-            from sandroid.core.proxy_manager import get_focus_manager
-
-            app_routes = dict(get_focus_manager().app_proxies())
-        except Exception:
-            app_routes = {}
 
         self._service.restart()
 
@@ -1704,17 +1766,6 @@ class MitmproxyPanel(Widget):
             # No external-proxy confirm — the proxy was already ours. Re-runs
             # the idempotent CA/CT re-verify (only prompts if the CA was lost).
             self._arm_device_commit()
-
-        if app_routes:
-            try:
-                from sandroid.core.proxy_manager import get_focus_manager
-
-                fm = get_focus_manager()
-                for pkg, target in app_routes.items():
-                    ok, msg = fm.enable_focus(pkg, None if target == "ours" else target)
-                    self._append_line(f"[{'INFO' if ok else 'ERROR'}] {msg}")
-            except Exception as exc:
-                self._append_line(f"[ERROR] App proxy re-apply: {exc}")
 
         self._append_line("[INFO] Restarted mitmproxy — proxies re-applied")
         self._kick_state_refresh()

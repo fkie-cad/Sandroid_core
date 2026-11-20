@@ -1192,8 +1192,9 @@ def markers_for(
     Args:
         profile: A profile whose templates render.
         ssaids: ``{package: android id}`` recorded at apply.
-        primary: The package whose Android ID gets the plain id
-            ``android_id`` (others: ``android_id@<package>``).
+        primary: The package whose Android ID is listed first. Every
+            per-app Android ID is ``android_id@<package>``, whichever app
+            was applied last: a marker id stays the same for its value.
         dedupe: List a value once (validation turns it off to see clashes).
 
     Returns:
@@ -1217,9 +1218,14 @@ def markers_for(
         if vs.derive == "ssaid" or (vs.kind == "android_id" and ssaids):
             ordered = sorted(ssaids, key=lambda p: (p != primary, p))
             for pkg in ordered:
-                mid = vid if pkg == primary else f"{vid}@{pkg}"
                 add(
-                    Marker(mid, ssaids[pkg], "hex_id", f"{label} ({pkg})", tag=spec.tag)
+                    Marker(
+                        f"{vid}@{pkg}",
+                        ssaids[pkg],
+                        "hex_id",
+                        f"{label} ({pkg})",
+                        tag=spec.tag,
+                    )
                 )
             if vs.derive == "ssaid":
                 continue
@@ -4219,9 +4225,39 @@ STARTUP_RECORDS_MAX = 200
 
 
 def _frozen_markers(data: dict[str, Any]) -> list[Marker]:
+    """The markers of a frozen apply record.
+
+    Older records gave the applied app's Android ID the plain id
+    (``android_id``): it gets its per-app id (``android_id@<package>``), so
+    a marker id stays the same for its value across applies.
+    """
+    entries = data.get("ssaid") or {}
+    value_of = (
+        {
+            str(pkg): str(entry.get("value"))
+            for pkg, entry in entries.items()
+            if isinstance(entry, dict) and entry.get("value")
+        }
+        if isinstance(entries, dict)
+        else {}
+    )
+
+    def stable(m: dict[str, Any]) -> str:
+        mid = str(m["id"])
+        value = str(m["value"])
+        if "@" in mid or m.get("kind") != "hex_id":
+            return mid
+        # The applied app (its label names it, "Android ID (<pkg>)"), which
+        # wins when apps share a value; else the first app with the value.
+        label = re.search(r"\(([^()\s]+)\)\s*$", str(m.get("label") or ""))
+        if label and value_of.get(label.group(1)) == value:
+            return f"{mid}@{label.group(1)}"
+        pkg = next((p for p in sorted(value_of) if value_of[p] == value), None)
+        return f"{mid}@{pkg}" if pkg else mid
+
     return [
         Marker(
-            m["id"],
+            stable(m),
             m["value"],
             m.get("kind", "text"),
             m.get("label", ""),
@@ -4311,11 +4347,14 @@ def startup_markers(profile: Profile) -> tuple[str, list[Marker]]:
     vs = profile.values.get("android_id")
     entries = (record or {}).get("ssaid") or {}
     if vs is not None and vs.enabled and isinstance(entries, dict):
+        # The applied app's Android ID: listed first (older records: the
+        # plain id).
         applied_primary = next(
             (
                 m.get("value")
                 for m in (record or {}).get("markers") or []
-                if isinstance(m, dict) and m.get("id") == vs.id
+                if isinstance(m, dict)
+                and str(m.get("id") or "").partition("@")[0] == vs.id
             ),
             None,
         )

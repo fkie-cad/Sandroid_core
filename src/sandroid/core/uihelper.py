@@ -53,13 +53,13 @@ logger = logging.getLogger(__name__)
 
 REMOTE_JAR = "/data/local/tmp/sandroid-uihelper.jar"
 MAIN_CLASS = "sandroid.uihelper.Main"
-HELPER_VERSION = "1.0.0"
+HELPER_VERSION = "1.1.0"
 PROTOCOL = 2
 
 #: sha256 of ``src/sandroid/assets/uihelper/uihelper.jar`` (printed by build.sh).
-JAR_SHA256 = "c2ea72f40874e01011597efc27db184a3f8b972988d81dafc6d011ebfb65130e"
+JAR_SHA256 = "4f0f7842fa922c003ad691687ba7be2ac8abce6ebbc4b5c6bd50775701b2e5bc"
 #: :func:`source_sha256` of ``tools/uihelper/src`` the jar was built from.
-SOURCE_SHA256 = "4875e9f854a3be5c969a3809016dfdf83f422f2422102f9454d708d3f86a2387"
+SOURCE_SHA256 = "09de116aeb6d4d2798cfab80df54857c08fa4910038d170e244a830f3f1242c9"
 
 #: Device folder for screenshots in flight (each is fetched, then removed).
 REMOTE_SHOT_DIR = "/data/local/tmp/sandroid-shots"
@@ -185,18 +185,83 @@ def build_info() -> dict[str, Any]:
     }
 
 
-def _remote_sha256(serial: str) -> str:
-    out, _ = Adb.send_adb_command(f"shell sha256sum {REMOTE_JAR}", serial=serial)
+def _remote_sha256(serial: str, path: str = REMOTE_JAR) -> str:
+    out, _ = Adb.send_adb_command(f"shell sha256sum {path}", serial=serial)
     first = (out or "").strip().split()
     return first[0].lower() if first else ""
+
+
+def _tmp_jar() -> str:
+    """Device name a new jar is pushed to before it replaces :data:`REMOTE_JAR`
+    (per host process: two Sandroids never write the same file).
+    """
+    return f"{REMOTE_JAR}.{os.getpid()}.tmp"
+
+
+def helper_pids(serial: str) -> list[int]:
+    """Pids of every helper process running on the device (any version).
+
+    An ``app_process`` keeps its command line (``app_process /
+    sandroid.uihelper.Main mode=...``); the ``sh -c`` that execs it is not
+    one of them.
+    """
+    out, _ = Adb.send_adb_command("shell ps -A -o PID,ARGS", serial=serial)
+    pids = []
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if (
+            len(parts) >= 3
+            and parts[0].isdigit()
+            and parts[1].rsplit("/", 1)[-1].startswith("app_process")
+            and MAIN_CLASS in parts[2:]
+        ):
+            pids.append(int(parts[0]))
+    return pids
+
+
+def stop_stale_helpers(serial: str, timeout: float = 3.0) -> list[int]:
+    """Stop every helper process still running on the device: a helper of
+    an older jar (a crashed or older Sandroid) keeps the device's one
+    UiAutomation connection, so the new helper could never connect.
+
+    ``kill`` first (the system server drops its UiAutomation when the
+    process dies), ``kill -9`` for one still there after ``timeout``.
+
+    Returns:
+        The pids that were running.
+    """
+    pids = helper_pids(serial)
+    if not pids:
+        return []
+    logger.info(f"UI helper: stopping old helper process(es) {pids} on {serial}")
+    Adb.send_adb_command(f"shell kill {' '.join(map(str, pids))}", serial=serial)
+    end = time.monotonic() + timeout
+    while True:
+        left = [p for p in helper_pids(serial) if p in pids]
+        if not left or time.monotonic() >= end:
+            break
+        time.sleep(0.1)
+    if left:
+        Adb.send_adb_command(f"shell kill -9 {' '.join(map(str, left))}", serial=serial)
+        time.sleep(0.2)
+        left = [p for p in helper_pids(serial) if p in pids]
+        if left:
+            logger.warning(f"UI helper: cannot stop old helper {left} on {serial}")
+    return pids
 
 
 def ensure_jar(serial: str) -> bool:
     """Make sure the device has exactly the packaged jar at :data:`REMOTE_JAR`.
 
-    Skips the push when the device copy already hashes to :data:`JAR_SHA256`;
-    otherwise removes it, pushes the packaged jar, verifies the hash and
-    ``chmod 644``s it.
+    Skips the push when the device copy already hashes to :data:`JAR_SHA256`.
+    Otherwise (an upgrade, or no jar yet) the packaged jar is pushed to a
+    temporary name (:func:`_tmp_jar`), its hash verified and ``chmod 644``;
+    every helper process still running (an old jar's) is stopped
+    (:func:`stop_stale_helpers`); then the temporary file is renamed over
+    :data:`REMOTE_JAR` (``mv``, one rename on the same file system: the device
+    holds the old jar or the new one, never a half-written one) and the
+    result verified again. A failed push removes the temporary file and
+    leaves the old jar in place.
 
     Args:
         serial: Device serial (every adb call is ``-s serial``).
@@ -214,18 +279,28 @@ def ensure_jar(serial: str) -> bool:
     except OSError as exc:
         logger.warning(f"UI helper: packaged jar unreadable: {exc}")
         return False
-    Adb.send_adb_command(f"shell rm -f {REMOTE_JAR}", serial=serial)
-    Adb.send_adb_command(
-        f"push {quote_host_arg(str(local))} {REMOTE_JAR}", serial=serial
-    )
-    got = _remote_sha256(serial)
+    tmp = _tmp_jar()
+    Adb.send_adb_command(f"shell rm -f {tmp}", serial=serial)
+    Adb.send_adb_command(f"push {quote_host_arg(str(local))} {tmp}", serial=serial)
+    got = _remote_sha256(serial, tmp)
     if got != JAR_SHA256:
+        Adb.send_adb_command(f"shell rm -f {tmp}", serial=serial)
         logger.warning(
             f"UI helper: jar push to {serial} failed verification "
             f"(device sha256 {got or 'missing'})"
         )
         return False
-    Adb.send_adb_command(f"shell chmod 644 {REMOTE_JAR}", serial=serial)
+    Adb.send_adb_command(f"shell chmod 644 {tmp}", serial=serial)
+    stop_stale_helpers(serial)
+    Adb.send_adb_command(f"shell mv -f {tmp} {REMOTE_JAR}", serial=serial)
+    got = _remote_sha256(serial)
+    if got != JAR_SHA256:
+        Adb.send_adb_command(f"shell rm -f {tmp}", serial=serial)
+        logger.warning(
+            f"UI helper: jar rename on {serial} failed "
+            f"(device sha256 {got or 'missing'})"
+        )
+        return False
     return True
 
 
@@ -547,6 +622,7 @@ class UiHelper:
         *,
         t_mono_ms: float | None = None,
         timeout: float = 1.0,
+        mode: str = "both",
     ) -> dict | None:
         """Element under (x, y), resolved both live and from the snapshot cache.
 
@@ -556,17 +632,41 @@ class UiHelper:
             t_mono_ms: Device-monotonic instant to resolve the cached answer at
                 (e.g. the finger-down time); defaults to now.
             timeout: Seconds to wait for the reply.
+            mode: ``both``, ``cached`` (the snapshot only: answered at once,
+                no IPC) or ``live``.
 
         Returns:
-            The ``node_at`` reply (keys ``cached`` and ``live``), or None
+            The ``node_at`` reply (keys ``cached`` and/or ``live``), or None
             (INVISIBLE mode, error or timeout).
         """
         if self._mode is Mode.INVISIBLE:
             return None
-        cmd = f"node_at {int(x)} {int(y)} both"
+        if mode not in ("both", "cached", "live"):
+            raise ValueError(f"node_at mode: {mode}")
+        cmd = f"node_at {int(x)} {int(y)} {mode}"
         if t_mono_ms is not None:
             cmd += f" t={float(t_mono_ms):.1f}"
         return self._ok(self.request(cmd, timeout), "node_at")
+
+    def focus(
+        self, x: int | None = None, y: int | None = None, *, timeout: float = 1.0
+    ) -> dict | None:
+        """Read back the field being typed into (``focus`` request).
+
+        ``input``: the input-focused node, refreshed (its ``text`` is the
+        value now, also for fields that send no TEXT_CHANGED). With ``x``,
+        ``y`` and nothing editable focused: ``node``, the editable node
+        under that point (the tapped field), refreshed.
+
+        Returns:
+            The reply, or None (INVISIBLE mode, error or timeout).
+        """
+        if self._mode is Mode.INVISIBLE:
+            return None
+        cmd = "focus"
+        if x is not None and y is not None:
+            cmd += f" x={int(x)} y={int(y)}"
+        return self._ok(self.request(cmd, timeout), "focus")
 
     def dump(self, *, max_nodes: int = 50_000, timeout: float = 30.0) -> dict | None:
         """Full tree of every interactive window (``windows[].root``), bounded."""

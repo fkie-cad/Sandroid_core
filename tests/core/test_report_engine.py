@@ -2252,3 +2252,107 @@ def test_label_path_index_matches_the_scan_and_is_fast():
     for i in range(20_000):
         report_engine._label_path(ctx, i * 0.05, i)
     assert _time.perf_counter() - start < 2.0
+
+
+def test_a_marked_copy_is_shown_and_the_original_stays_the_evidence(tmp_path):
+    """tracking.mark_screenshots: the report shows the marked copy
+    (verified against its own sha256); R1 comparisons read the original.
+    """
+    shots = tmp_path / "tracking" / "shots"
+    shots.mkdir(parents=True)
+    original, marked = b"\x89PNG original", b"\x89PNG marked"
+    (shots / "7_before_tap.png").write_bytes(original)
+    (shots / "abc_before_tap_marked.png").write_bytes(marked)
+    sha = hashlib.sha256
+    line = {
+        "seq": 8, "src": "shot", "kind": "before_tap", "t": "2026-11-19T12:00:00Z",
+        "ref": {"of": 7, "path": "tracking/shots/7_before_tap.png",
+                "sha256": sha(original).hexdigest()},
+        "data": {"trigger": "before_tap", "w": 1080, "h": 2424,
+                 "marked": {"path": "tracking/shots/abc_before_tap_marked.png",
+                            "sha256": sha(marked).hexdigest()}},
+    }  # fmt: skip
+    ctx = report_engine.ReportContext(
+        scope=report_engine.ReportScope(),
+        options=report_engine.ReportOptions(),
+        masked=False,
+        generated_at="2026-11-19T12:00:00+00:00",
+        timeline_dir=tmp_path,
+    )
+    block = report_engine._image_block(ctx, line)
+    assert block["marked"] is True
+    assert block["sha256"] == sha(marked).hexdigest()
+    assert block["path"].endswith("abc_before_tap_marked.png")
+    assert block["original"]["sha256"] == sha(original).hexdigest()
+    assert report_engine._png_of(block) == original
+    path, warning = report_render.ImageCheck(tmp_path).resolve(block)
+    assert warning is None
+    assert path.read_bytes() == marked
+    rel = report_engine._relativize({"blocks": [block]}, tmp_path)["blocks"][0]
+    assert rel["path"] == "tracking/shots/abc_before_tap_marked.png"
+    assert rel["original"]["path"] == "tracking/shots/7_before_tap.png"
+    # masked (a sensitive line): no data, the original image only
+    plain = report_engine._image_block(ctx, {**line, "data": {"_masked": True}})
+    assert "marked" not in plain
+    assert plain["sha256"] == sha(original).hexdigest()
+
+
+def test_a_web_form_control_is_named_by_its_label():
+    target = {"rid": "chk", "cls": "android.widget.CheckBox",
+              "web": {"field": "I agree", "role": "check box"}}  # fmt: skip
+    assert report_engine.element_name(target) == "I agree"
+
+
+def test_a_masked_copy_hides_quoted_text_and_marked_images():
+    """annotate_rerender with masking on: the summary that quotes typed text
+    becomes the count, a marked copy gives way to the original.
+    """
+    marked = {"type": "image", "path": "m.png", "sha256": "m" * 64, "marked": True,
+              "original": {"path": "o.png", "sha256": "o" * 64}}  # fmt: skip
+    doc = {"sections": [{"blocks": [
+        {"type": "transcript_step", "sensitive": True, "kind": "text",
+         "src": "input", "text": "hunter2",
+         "summary": "typed \"hunter2\" into password field 'pw'",
+         "masked_summary": "typed 7 chars into password field 'pw'",
+         "shots": [dict(marked)]},
+        {"type": "transcript_step", "sensitive": True, "kind": "text",
+         "src": "input", "text": "hunter2",
+         "summary": "typed \"hunter2\" into password field 'pw'"},
+        {"type": "transcript_step", "kind": "window", "src": "screen",
+         "summary": "screen", "shots": [{**marked, "sensitive": True}]},
+    ]}]}  # fmt: skip
+    out = report_engine.annotate_rerender(doc, "gone", mask_sensitive=True)
+    blocks = [
+        b
+        for sec in out["sections"]
+        for b in sec["blocks"]
+        if b.get("type") == "transcript_step"
+    ]
+    assert "hunter2" not in json.dumps(blocks)
+    assert blocks[0]["summary"] == "typed 7 chars into password field 'pw'"
+    assert blocks[1]["summary"] == "typed text (masked)"  # an older report
+    for shot in (blocks[0]["shots"][0], blocks[2]["shots"][0]):
+        assert shot["path"] == "o.png"
+        assert shot["sha256"] == "o" * 64
+        assert "marked" not in shot
+
+
+def test_a_sensitive_step_keeps_its_masked_summary_for_later_copies():
+    ctx = report_engine.ReportContext(
+        scope=report_engine.ReportScope(),
+        options=report_engine.ReportOptions(),
+        masked=False,
+        generated_at="2026-11-20T12:00:00+00:00",
+    )
+    line = {"seq": 3, "src": "input", "kind": "text", "sensitive": True,
+            "summary": "typed \"hunter2\" into password field 'pw'",
+            "data": {"text": "hunter2", "password": True,
+                     "masked_summary": "typed 7 chars into password field 'pw'"}}  # fmt: skip
+    step = report_engine._step(
+        ctx, line, screen=None, shots=report_engine._Shots(ctx, []),
+        confirmed=set(), label=[],
+    )  # fmt: skip
+    assert step["masked_summary"] == "typed 7 chars into password field 'pw'"
+    copy_doc = {"sections": [{"blocks": [step]}]}
+    out = report_engine.annotate_rerender(copy_doc, "gone", mask_sensitive=True)
+    assert "hunter2" not in json.dumps(out["sections"])

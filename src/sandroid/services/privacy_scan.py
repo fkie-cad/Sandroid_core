@@ -13,13 +13,19 @@ service looks for them wherever captured data lands:
   While a profile is active the app's ``shared_prefs``, ``databases`` and
   ``no_backup`` folders are auto-watched for this session only.
 * **Retro**: when the markers change, the session's existing flows and kept
-  versions not yet scanned for that profile are scanned once.
+  versions not yet scanned for that profile are scanned once. Under the same
+  profile fingerprint a grown marker set (e.g. the per-app Android IDs an
+  apply records) rescans the items already scanned, with the new or changed
+  markers only (a delta pass); removed markers just stop being scanned.
 
 One daemon worker (``privacy-scan``) does every scan; callers only enqueue
 (``put_nowait``) and never wait. Results go to ``<timeline folder>/privacy/``:
 ``hits.jsonl`` (one record per item x marker x transform x part) and
 ``coverage.jsonl`` (one line per scanned item, which keeps retro scans
-idempotent). A finding that is new for its recipient (network) or file
+idempotent). A coverage line names the marker set it scanned for (``set``,
+a digest defined once per folder by a ``skip: "markers"`` line listing the
+digests of its markers); a line without ``set`` (older records) covers the
+item for every marker. A finding that is new for its recipient (network) or file
 (storage) also writes one ``privacy/sent`` or ``privacy/stored`` line to the
 session timeline; it names the marker, never the value.
 
@@ -33,6 +39,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import functools
 import hashlib
 import io
 import itertools
@@ -41,6 +48,7 @@ import logging
 import os
 import queue
 import re
+import sys
 import threading
 import time
 import zlib
@@ -59,7 +67,7 @@ from sandroid.core.privacy_markers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +198,8 @@ class HitRecord:
         encoded: Hashed or encoded (not a plain spelling of the value).
         approx: A coordinate rounded/truncated below its seeded precision.
         decoded: App-level compression unpacked first (``gzip``...), or None.
+        value_key: Digest of the marker's value (not its id, see
+            ``_marker_digest``); None in older records.
     """
 
     v: int
@@ -218,6 +228,7 @@ class HitRecord:
     encoded: bool = False
     approx: bool = False
     decoded: str | None = None
+    value_key: str | None = None
 
     @property
     def flow_id(self) -> str | None:
@@ -260,7 +271,7 @@ class HitRecord:
             "encoded": self.encoded,
             "approx": self.approx,
             "decoded": self.decoded,
-        }
+        } | ({"value_key": self.value_key} if self.value_key else {})
 
     @classmethod
     def from_json(cls, data: dict) -> HitRecord | None:
@@ -295,6 +306,7 @@ class HitRecord:
                 encoded=bool(data.get("encoded")),
                 approx=bool(data.get("approx")),
                 decoded=data.get("decoded"),
+                value_key=data.get("value_key") or None,
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -361,9 +373,24 @@ class _Item:
     retro: bool = False
     #: The folder generation a retro item was listed for (-1: live item).
     gen: int = -1
+    #: Digest of the marker set ``needles`` were built from (see _set_digest).
+    mset: str = ""
+    #: A delta pass: an item already scanned for ``fp``, rescanned for the
+    #: markers it was not scanned for.
+    delta: bool = False
 
     def key(self) -> str:  # pragma: no cover - overridden
         raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class _RetroRequest:
+    """A retro scan of the session for the active markers."""
+
+    needles: NeedleSet
+    fp: str
+    markers: tuple[Marker, ...]
+    mset: str
 
 
 @dataclass
@@ -758,8 +785,21 @@ class PrivacyScanService:
         self._fp: str | None = None
         self._markers: dict[str, Marker] = {}
         self._needles: NeedleSet | None = None
+        #: Value key (see _marker_digest) -> the seeded value it counts as
+        #: (its group, else itself), for the active markers.
         self._value_key: dict[str, str] = {}
-        self._retro_request: tuple[NeedleSet, str] | None = None
+        #: Marker id -> value key, for the active markers.
+        self._digest_of: dict[str, str] = {}
+        #: (legacy marker id, label) -> the active value key it became, or
+        #: None (see _legacy_vkey); cleared with the markers.
+        self._aliases: dict[tuple[str, str], str | None] = {}
+        #: The active markers as given and the digest of their set.
+        self._marker_list: tuple[Marker, ...] = ()
+        self._mset: str | None = None
+        #: Marker set digest -> its marker digests (content-addressed: never
+        #: cleared; filled by set_markers, delta passes and loaded ledgers).
+        self._marker_sets: dict[str, frozenset[str]] = {}
+        self._retro_request: _RetroRequest | None = None
         self._retro_iter: Iterator[_Item] | None = None
         # records
         self._folder: Path | None = None
@@ -776,12 +816,19 @@ class PrivacyScanService:
         self._by_flow: dict[str, list[HitRecord]] = {}
         self._by_file: dict[str, list[HitRecord]] = {}
         self._covered: set[tuple[str, str, int]] = set()
+        #: The marker set digests (shared strings, resolved through
+        #: _marker_sets) a covered item was scanned for. Absent for a covered
+        #: item: an older ledger line covers it for every marker. Sweep items
+        #: are never looked up: not tracked.
+        self._covered_markers: dict[tuple[str, str, int], tuple[str, ...]] = {}
+        #: Marker set digests defined in the loaded folder's ledger.
+        self._sets_written: set[str] = set()
         #: Canonical device paths with kept versions in this session (pulls
         #: submitted here, and the coverage ledger of a loaded session).
         self._version_paths: set[str] = set()
         self._seen: set[tuple] = set()
         self._emitted: set[tuple] = set()
-        self._version_sets: dict[tuple[str, str, str], frozenset] = {}
+        self._version_sets: dict[tuple[str, str, str, str], frozenset] = {}
         self._file_last: dict[str, tuple[str, frozenset, frozenset]] = {}
         self._dropped: deque[str] = deque(maxlen=1_000)
         self.dropped = 0
@@ -800,23 +847,44 @@ class PrivacyScanService:
     def set_markers(self, fp: str | None, markers: list[Marker]) -> None:
         """Scan for ``markers`` from now on (``fp`` None / no markers: off).
 
-        A new fingerprint queues a retro scan of the session's flows and kept
-        versions not yet scanned for it.
+        A new fingerprint, or a changed marker set under the same one, queues
+        a retro scan of the session's flows and kept versions: items not yet
+        scanned for ``fp`` get every marker, items scanned for it get only
+        the markers they were not scanned for (a delta pass). The same
+        markers again queue nothing.
         """
         markers = list(markers or ())
         needles = build_needles(markers) if fp and markers else None
         if needles is not None and not len(needles):
             needles = None
+        digests = frozenset(_marker_digest(m) for m in markers) if needles else None
+        mset = _set_digest(digests) if digests is not None else None
         with self._lock:
-            changed = fp != self._fp
+            changed = fp != self._fp or mset != self._mset
             self._fp = fp if needles is not None else None
             self._markers = {m.id: m for m in markers} if needles else {}
+            self._marker_list = tuple(markers) if needles else ()
+            self._mset = mset
+            if mset is not None and digests is not None:
+                self._marker_sets[mset] = digests
             self._needles = needles
-            self._value_key = {m.id: (m.group or m.id) for m in self._markers.values()}
+            digest_of = {m.id: _marker_digest(m) for m in self._markers.values()}
+            remap = digest_of != self._digest_of
+            self._digest_of = digest_of
+            self._aliases = {}
+            self._value_key = {
+                d: (self._markers[mid].group or d) for mid, d in self._digest_of.items()
+            }
             self._values_total = len(set(self._value_key.values()))
+            if remap:
+                # Older records (no value key) resolve through the active
+                # markers: their novelty keys may resolve differently now.
+                self._rebuild_novelty()
             self._recount()
-            if needles is not None and changed:
-                self._retro_request = (needles, fp)
+            if needles is not None and fp and mset and changed:
+                self._retro_request = _RetroRequest(
+                    needles, fp, self._marker_list, mset
+                )
                 self._retro_iter = None
             elif needles is None:
                 self._retro_request = None
@@ -828,12 +896,16 @@ class PrivacyScanService:
     def _recount(self) -> None:
         """Lock held: summary counters for the active profile."""
         fp = self._fp
-        mine = [h for h in self._hits if fp and h.fp == fp]
-        self._found_values = {
-            self._value_key.get(h.marker_id, h.marker_id) for h in mine
-        }
+        # Hits of the active markers only (older records mapped through
+        # _legacy_vkey): every counter counts the same hits.
+        mine = [
+            (h, key)
+            for h in self._hits
+            if fp and h.fp == fp and (key := self._hit_vkey(h)) in self._value_key
+        ]
+        self._found_values = {self._value_key[key] for _h, key in mine}
         self._hits_total = len(mine)
-        self._last_hit_at = max((h.at for h in mine), default=None)
+        self._last_hit_at = max((h.at for h, _key in mine), default=None)
 
     def attach_identity(self) -> bool:
         """Follow the identity service's active markers (if it exists)."""
@@ -924,12 +996,12 @@ class PrivacyScanService:
         self._ensure_worker()
         return True
 
-    def _snapshot(self) -> tuple[NeedleSet, str] | None:
-        with self._lock:  # one consistent pair (set_markers writes both)
-            needles, fp = self._needles, self._fp
-        if needles is None or fp is None or self._closed:
+    def _snapshot(self) -> tuple[NeedleSet, str, str] | None:
+        with self._lock:  # one consistent triple (set_markers writes all)
+            needles, fp, mset = self._needles, self._fp, self._mset
+        if needles is None or fp is None or mset is None or self._closed:
             return None
-        return needles, fp
+        return needles, fp, mset
 
     def submit_flow(self, rec: dict, flow_dir: Path, seq: int | None) -> None:
         """Queue a logged flow (the ``NetFlowSource`` sink)."""
@@ -946,6 +1018,7 @@ class PrivacyScanService:
                 snap[0],
                 snap[1],
                 time.monotonic(),
+                mset=snap[2],
                 rec=dict(rec),
                 flow_dir=Path(flow_dir),
                 seq=seq,
@@ -975,6 +1048,7 @@ class PrivacyScanService:
                 snap[0],
                 snap[1],
                 time.monotonic(),
+                mset=snap[2],
                 device_path=device_path,
                 version_dir=Path(version_dir),
                 pull_seq=pull_seq,
@@ -1052,6 +1126,7 @@ class PrivacyScanService:
                     snap[0],
                     snap[1],
                     now,
+                    mset=snap[2],
                     device_path=main,
                     member=os.path.basename(remote),
                     local=Path(result.local_path),
@@ -1204,6 +1279,8 @@ class PrivacyScanService:
         self._by_flow = {}
         self._by_file = {}
         self._covered = set()
+        self._covered_markers = {}
+        self._sets_written = set()
         self._version_paths = set()
         self._seen = set()
         self._emitted = set()
@@ -1317,7 +1394,7 @@ class PrivacyScanService:
             with self._lock:
                 if self._retro_request is request:
                     self._retro_request = None
-                    self._retro_iter = self._retro_items(*request)
+                    self._retro_iter = self._retro_items(request)
         retro = self._retro_iter
         try:
             entry = (
@@ -1401,16 +1478,19 @@ class PrivacyScanService:
         previous = self._folder
         self._load(folder)
         with self._lock:
-            needles, fp = self._needles, self._fp
+            needles, fp, mset = self._needles, self._fp, self._mset
             if (
                 needles is not None
                 and fp is not None
+                and mset is not None
                 and previous is not None
                 and previous != folder
             ):
                 # The new session's flows and versions not yet scanned for
-                # the active profile (idempotent per item: coverage).
-                self._retro_request = (needles, fp)
+                # the active markers (idempotent per item: coverage).
+                self._retro_request = _RetroRequest(
+                    needles, fp, self._marker_list, mset
+                )
         self._notify_reset()
 
     def _load(self, folder: Path) -> None:
@@ -1420,14 +1500,27 @@ class PrivacyScanService:
             for line in _read_jsonl(privacy / HITS_FILE)
             if (rec := HitRecord.from_json(line)) is not None
         ]
-        covered = set()
+        lines = _read_jsonl(privacy / COVERAGE_FILE)
+        # Marker set definitions first: a coverage line refers to one.
+        sets = {
+            str(line["set"]): frozenset(str(d) for d in line.get("markers") or ())
+            for line in lines
+            if line.get("skip") == "markers" and line.get("set")
+        }
+        covered: set[tuple[str, str, int]] = set()
+        covered_markers: dict[tuple[str, str, int], tuple[str, ...]] = {}
         version_paths = set()
-        for line in _read_jsonl(privacy / COVERAGE_FILE):
+        for line in lines:
             key = str(line.get("key") or "")
             if key.startswith("file:") and "@" in key:
                 version_paths.add(_canonical(key[5:].rpartition("@")[0]))
             if line.get("skip") in (None, "unscannable") and key:
-                covered.add((key, str(line.get("fp")), line.get("engine")))
+                entry = (key, str(line.get("fp")), line.get("engine"))
+                # An undefined set (a lost line) resolves to no marker: the
+                # item is scanned again rather than missed.
+                # Sweep items are never looked up: no marker sets for them.
+                mset = None if key.startswith("sweep:") else line.get("set")
+                _note_cover(covered, covered_markers, entry, mset)
         with self._lock:
             if self._folder is not None and folder != self._folder:
                 self._flow_dir = None  # the old session's mitmproxy folder
@@ -1445,13 +1538,13 @@ class PrivacyScanService:
             self._version_sets = {}
             self._file_last = {}
             self._covered = covered
+            self._covered_markers = covered_markers
+            self._sets_written = set(sets)
+            self._marker_sets.update(sets)
             self._version_paths |= version_paths
             for rec in hits:
                 self._index(rec)
-                key = _novelty_key(rec)
-                self._seen.add(key)
-                if rec.new:
-                    self._emitted.add(key)
+            self._rebuild_novelty()
             self._recount()
 
     def _index(self, rec: HitRecord) -> None:
@@ -1462,9 +1555,100 @@ class PrivacyScanService:
         if rec.device_path:
             self._by_file.setdefault(rec.device_path, []).append(rec)
 
-    def _is_covered(self, key: str, fp: str) -> bool:
+    def _missing(
+        self, key: str, fp: str, want: frozenset[str]
+    ) -> frozenset[str] | None:
+        """The marker digests of ``want`` that item ``key`` was not scanned
+        for under ``fp`` (None: the item was not scanned for ``fp`` at all).
+        """
+        entry = (key, fp, ENGINE_VERSION)
         with self._lock:
-            return (key, fp, ENGINE_VERSION) in self._covered
+            if entry not in self._covered:
+                return None
+            names = self._covered_markers.get(entry)
+            if names is None:  # an older ledger line: every marker
+                return frozenset()
+            missing = want
+            for name in names:
+                missing = missing - self._marker_sets.get(name, frozenset())
+                if not missing:
+                    break
+        return missing
+
+    def _hit_vkey(self, rec: HitRecord) -> str:
+        """The value key of a record (older records: by the active marker
+        they map to, see _legacy_vkey, else ``id:<marker id>``).
+        """
+        return (
+            rec.value_key
+            or self._legacy_vkey(rec.marker_id, rec.label)
+            or f"id:{rec.marker_id}"
+        )
+
+    def _legacy_vkey(self, marker_id: str, label: str) -> str | None:
+        """The active marker an older record (no value key) belongs to.
+
+        Its id when that is still active; else, for an id that became
+        per-app (``android_id`` -> ``android_id@<pkg>``), the active marker
+        of the package its label names (``"Android ID (<pkg>)"``; none when
+        that package has no active marker); for a label without a package,
+        the one with the same label, else the only one of that id.
+        """
+        digest = self._digest_of.get(marker_id)
+        if digest is not None:
+            return digest
+        key = (marker_id, label)
+        if key in self._aliases:
+            return self._aliases[key]
+        prefix = f"{marker_id}@"
+        ids = [mid for mid in self._digest_of if mid.startswith(prefix)]
+        pkg = _label_package(label)
+        pick = None
+        if pkg:
+            # The label names its app: that app's marker or none (never
+            # another app's Android ID).
+            if prefix + pkg in self._digest_of:
+                pick = prefix + pkg
+        else:
+            same = [mid for mid in ids if self._markers[mid].label == label]
+            if len(same) == 1:
+                pick = same[0]
+            elif len(ids) == 1:
+                pick = ids[0]
+        found = self._digest_of[pick] if pick is not None else None
+        self._aliases[key] = found
+        return found
+
+    def _known_keys(self, rec: HitRecord) -> tuple[str, ...]:
+        """The value keys a recorded hit stands for in the "already
+        recorded" checks (older records: their id and the marker they map to).
+        """
+        if rec.value_key:
+            return (rec.value_key,)
+        legacy = self._legacy_vkey(rec.marker_id, rec.label)
+        own = f"id:{rec.marker_id}"
+        return (own, legacy) if legacy else (own,)
+
+    def _rebuild_novelty(self) -> None:
+        """Lock held: the novelty keys of the loaded records (``_seen``,
+        and ``_emitted`` for those that made a timeline line). An older
+        record counts under its id as well as under the marker it maps to.
+        """
+        self._seen = set()
+        self._emitted = set()
+        for rec in self._hits:
+            for vkey in self._known_keys(rec):
+                key = _novelty_key(rec, vkey)
+                self._seen.add(key)
+                if rec.new:
+                    self._emitted.add(key)
+
+    def _is_done(self, item: _Item) -> bool:
+        """``item`` was already scanned for every marker it carries."""
+        with self._lock:
+            want = self._marker_sets.get(item.mset, frozenset())
+        missing = self._missing(item.key(), item.fp, want)
+        return missing is not None and not missing
 
     def _ledger(
         self,
@@ -1495,10 +1679,36 @@ class PrivacyScanService:
         }
         if extra:
             line.update(extra)
-        self._append(COVERAGE_FILE, [line])
-        if skip in (None, "unscannable"):
+        lines = [line]
+        if item.mset:
+            line["set"] = item.mset
+            if item.delta:
+                line["delta"] = True
             with self._lock:
-                self._covered.add((key, item.fp, ENGINE_VERSION))
+                markers = self._marker_sets.get(item.mset, frozenset())
+                define = item.mset not in self._sets_written
+                if define:
+                    self._sets_written.add(item.mset)
+            if define:
+                lines.insert(
+                    0,
+                    {
+                        "v": RECORD_VERSION,
+                        "at": time.time(),
+                        "key": f"markers:{item.mset}",
+                        "fp": item.fp,
+                        "engine": ENGINE_VERSION,
+                        "skip": "markers",
+                        "set": item.mset,
+                        "markers": sorted(markers),
+                    },
+                )
+        self._append(COVERAGE_FILE, lines)
+        if skip in (None, "unscannable"):
+            entry = (key, item.fp, ENGINE_VERSION)
+            mset = item.mset if not isinstance(item, _SweepItem) else None
+            with self._lock:
+                _note_cover(self._covered, self._covered_markers, entry, mset)
 
     def _flush_dropped(self, item: _Item) -> None:
         if not self._dropped:
@@ -1587,7 +1797,7 @@ class PrivacyScanService:
         return parts
 
     def _scan_flow(self, item: _FlowItem) -> None:
-        if self._is_covered(item.key(), item.fp):
+        if self._is_done(item):
             return
         started = time.monotonic()
         rec = item.rec
@@ -1624,17 +1834,24 @@ class PrivacyScanService:
             agg.hit.marker_id for _p, d, _t, _c, agg in found if d == "sent"
         }
         # Parts already recorded for this flow and profile (an earlier
-        # partial scan) are not recorded again.
+        # partial scan, a delta pass) are not recorded again.
+        # Keyed by value, not marker id: a renamed marker is not recorded
+        # again, a changed value under the same id is not suppressed (older
+        # records, without a value key, by their marker id).
+        vkeys = _vkeys(item.needles)
         with self._lock:
             known = {
-                (h.part, h.marker_id, h.transform)
+                (h.part, vkey, h.transform)
                 for h in self._by_flow.get(str(rec.get("id")), ())
                 if h.fp == item.fp
+                for vkey in self._known_keys(h)
             }
         records = []
         t = rec.get("ts_start")
         for part, direction, truncated, decoded, agg in found:
-            if (part, agg.hit.marker_id, agg.hit.transform) in known:
+            mid, transform = agg.hit.marker_id, agg.hit.transform
+            mine = {(part, vkeys.get(mid), transform), (part, f"id:{mid}", transform)}
+            if mine & known:
                 continue
             records.append(
                 self._record(
@@ -1691,10 +1908,17 @@ class PrivacyScanService:
         return out, size, any_truncated, main_sha
 
     def _version_set(
-        self, needles: NeedleSet, fp: str, device_path: str, version_dir: Path
+        self,
+        needles: NeedleSet,
+        fp: str,
+        mset: str,
+        device_path: str,
+        version_dir: Path,
     ) -> frozenset:
-        """(marker, transform) pairs in a kept version (cached, scanned once)."""
-        key = (device_path, version_dir.name, fp)
+        """(marker, transform) pairs in a kept version for the markers of
+        ``mset`` (cached, scanned once).
+        """
+        key = (device_path, version_dir.name, fp, mset)
         with self._lock:
             cached = self._version_sets.get(key)
         if cached is not None:
@@ -1708,7 +1932,7 @@ class PrivacyScanService:
         return found
 
     def _scan_version(self, item: _VersionItem) -> None:
-        if self._is_covered(item.key(), item.fp):
+        if self._is_done(item):
             return
         started = time.monotonic()
         files = _version_members(item.device_path, item.version_dir)
@@ -1719,15 +1943,26 @@ class PrivacyScanService:
         current = frozenset(k for _m, aggs, _s, _t in scanned for k in aggs)
         previous = self._previous_version(item)
         before = (
-            self._version_set(item.needles, item.fp, item.device_path, previous)
+            self._version_set(
+                item.needles, item.fp, item.mset, item.device_path, previous
+            )
             if previous is not None
             else self._last_file_set(item.device_path, item.version_dir.name)
         )
+        name = item.version_dir.name
         with self._lock:
-            self._version_sets[(item.device_path, item.version_dir.name, item.fp)] = (
-                current
-            )
-        self._note_file_set(item.device_path, item.version_dir.name, current)
+            self._version_sets[(item.device_path, name, item.fp, item.mset)] = current
+            # Hits already recorded for this version and profile (a delta
+            # pass, a rescan) are not recorded again.
+            known = {
+                (h.source.get("version"), h.part, vkey, h.transform)
+                for h in self._by_file.get(item.device_path, ())
+                if h.fp == item.fp
+                for vkey in self._known_keys(h)
+            }
+        vkeys = _vkeys(item.needles)
+        if not item.delta:  # a delta pass sees only some markers
+            self._note_file_set(item.device_path, name, current)
         t = _version_time(item.version_dir)
         records = []
         for member, aggs, sha, truncated in scanned:
@@ -1741,6 +1976,14 @@ class PrivacyScanService:
                 "package": item.package,
             }
             for key, agg in aggs.items():
+                part = f"file:{member}"
+                mid, transform = key
+                mine = {
+                    (name, part, vkeys.get(mid), transform),
+                    (name, part, f"id:{mid}", transform),
+                }
+                if mine & known:
+                    continue
                 records.append(
                     self._record(
                         item,
@@ -1877,10 +2120,13 @@ class PrivacyScanService:
         decoded: str | None = None,
     ) -> HitRecord:
         hit = agg.hit
-        key = (hit.marker_id, hit.transform, *novelty)
+        vkey = _vkeys(item.needles).get(hit.marker_id)
+        key = (vkey or f"id:{hit.marker_id}", hit.transform, *novelty)
+        # Older records also count under their marker id.
+        by_id = (f"id:{hit.marker_id}", hit.transform, *novelty)
         with self._lock:
             if new is None:
-                new = key not in self._seen
+                new = key not in self._seen and by_id not in self._seen
             self._seen.add(key)
             marker = self._markers.get(hit.marker_id)
         when = float(t) if isinstance(t, (int, float)) else None
@@ -1910,6 +2156,7 @@ class PrivacyScanService:
             encoded=is_encoded(hit.transform),
             approx=is_approx(marker, hit.transform),
             decoded=decoded,
+            value_key=vkey,
         )
 
     def _emit_lines(
@@ -1928,9 +2175,10 @@ class PrivacyScanService:
             if not rec.new or rec.direction == "received":
                 out.append(rec)
                 continue
-            key = _novelty_key(rec)
             with self._lock:
-                if key in self._emitted:
+                key = _novelty_key(rec, self._hit_vkey(rec))
+                by_id = _novelty_key(rec, f"id:{rec.marker_id}")
+                if key in self._emitted or by_id in self._emitted:
                     out.append(rec)
                     continue
                 self._emitted.add(key)
@@ -2019,10 +2267,9 @@ class PrivacyScanService:
             self.revision += 1
             for rec in records:
                 self._index(rec)
-                if rec.fp == self._fp:
-                    self._found_values.add(
-                        self._value_key.get(rec.marker_id, rec.marker_id)
-                    )
+                key = self._hit_vkey(rec)
+                if rec.fp == self._fp and key in self._value_key:
+                    self._found_values.add(self._value_key[key])
                     self._hits_total += 1
                     self._last_hit_at = rec.at
             listeners = list(self._listeners)
@@ -2035,14 +2282,62 @@ class PrivacyScanService:
 
     # -- retro -------------------------------------------------------------------
 
-    def _retro_items(self, needles: NeedleSet, fp: str) -> Iterator[_Item]:
-        """Items of the session not yet scanned for ``fp`` (lazily, oldest first).
+    def _retro_items(self, request: _RetroRequest) -> Iterator[_Item]:
+        """Items of the session to scan for ``request`` (lazily, oldest first).
+
+        An item not yet scanned for the fingerprint gets every marker; one
+        scanned for it, but not for some of the markers (they were added or
+        changed since), gets only those (a delta pass, needles built from
+        just them); one scanned for all of them is skipped.
 
         Each item carries the folder generation it was listed for; after a
         session switch the rest is dropped (``_process``).
         """
         gen = self._gen
         now = time.monotonic()
+        fp = request.fp
+        # Markers with the same value (and kind, forms, group) share a
+        # digest; each keeps its id, so each gets its own hits.
+        by_digest: dict[str, list[Marker]] = {}
+        groups: dict[str, set[str]] = {}
+        for marker in request.markers:
+            digest = _marker_digest(marker)
+            by_digest.setdefault(digest, []).append(marker)
+            if marker.group:
+                groups.setdefault(marker.group, set()).add(digest)
+        with self._lock:
+            want = self._marker_sets.get(request.mset, frozenset(by_digest))
+        deltas: dict[frozenset[str], tuple[NeedleSet, str] | None] = {}
+
+        def aim(item: _Item) -> bool:
+            """Point ``item`` at the markers it still needs (False: none)."""
+            missing = self._missing(item.key(), fp, want)
+            if missing is None:
+                return True
+            if not missing:
+                return False
+            if missing not in deltas:
+                # Whole groups: a group's proximity boost needs every member
+                # (their hits already recorded are not recorded again).
+                wide = set(missing)
+                for digest in missing:
+                    for marker in by_digest.get(digest, ()):
+                        if marker.group:
+                            wide |= groups[marker.group]
+                scan = frozenset(wide)
+                needles = build_needles(
+                    m for d, ms in by_digest.items() if d in scan for m in ms
+                )
+                mset = _set_digest(scan)
+                with self._lock:
+                    self._marker_sets[mset] = scan
+                deltas[missing] = (needles, mset) if len(needles) else None
+            delta = deltas[missing]
+            if delta is None:
+                return False
+            item.needles, item.mset, item.delta = delta[0], delta[1], True
+            return True
+
         if self._flow_dir_fn is not None:
             flow_dir = self._flow_dir_fn()
         else:
@@ -2055,30 +2350,32 @@ class PrivacyScanService:
                 if rec.get("kind") == "tls" or not rec.get("id"):
                     continue
                 item = _FlowItem(
-                    needles,
+                    request.needles,
                     fp,
                     now,
                     retro=True,
                     gen=gen,
+                    mset=request.mset,
                     rec=rec,
                     flow_dir=flow_dir,
                     seq=None,
                 )
-                if not self._is_covered(item.key(), fp):
+                if aim(item):
                     yield item
         for version_dir, device_path in _kept_versions():
             item = _VersionItem(
-                needles,
+                request.needles,
                 fp,
                 now,
                 retro=True,
                 gen=gen,
+                mset=request.mset,
                 device_path=device_path,
                 version_dir=version_dir,
                 pull_seq=None,
                 package=_package_of(device_path),
             )
-            if not self._is_covered(item.key(), fp):
+            if aim(item):
                 yield item
 
 
@@ -2232,6 +2529,68 @@ def current_timeline_folder() -> Path | None:
         return None
 
 
+@functools.lru_cache(maxsize=4096)
+def _marker_digest(marker: Marker) -> str:
+    """Short digest of what a marker's needles look for: its value, kind,
+    forms and group, not its id, label or tag. A changed value is a new
+    marker for coverage; a renamed one with the same value is not. It is
+    also a record's ``value_key``.
+    """
+    raw = json.dumps(
+        [marker.value, marker.kind, sorted(marker.forms), marker.group],
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+@functools.lru_cache(maxsize=4)
+def _vkeys(needles: NeedleSet) -> dict[str, str]:
+    """Marker id -> value key for the markers of ``needles`` (cached per
+    needle set; callers do not change the dict).
+    """
+    return {m.id: _marker_digest(m) for m in needles.markers}
+
+
+_LABEL_PACKAGE_RE = re.compile(r"\(([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)\)\s*$")
+
+
+def _label_package(label: str) -> str | None:
+    """``"Android ID (com.example.app)"`` -> ``com.example.app``."""
+    match = _LABEL_PACKAGE_RE.search(label or "")
+    return match.group(1) if match else None
+
+
+def _note_cover(
+    covered: set[tuple[str, str, int]],
+    covered_markers: dict[tuple[str, str, int], tuple[str, ...]],
+    entry: tuple[str, str, int],
+    mset: str | None,
+) -> None:
+    """Record that ``entry`` was scanned for marker set ``mset`` (None: an
+    older line, every marker). Once covered for every marker, it stays so.
+    The set digests are interned: items share one string per set.
+    """
+    known = entry in covered
+    covered.add(entry)
+    names = covered_markers.get(entry)
+    if not mset:
+        covered_markers.pop(entry, None)
+        return
+    if known and names is None:
+        return  # covered for every marker (an older line, a sweep)
+    name = sys.intern(str(mset))
+    if names is None:
+        covered_markers[entry] = (name,)
+    elif name not in names:
+        covered_markers[entry] = (*names, name)
+
+
+def _set_digest(digests: Iterable[str]) -> str:
+    """Short digest of a set of marker digests (a coverage line's ``set``)."""
+    joined = "\n".join(sorted(set(digests)))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
 def _canonical(device_path: str) -> str:
     try:
         from sandroid.core.adb_utils import canonical_device_path
@@ -2241,14 +2600,15 @@ def _canonical(device_path: str) -> str:
         return device_path
 
 
-def _novelty_key(rec: HitRecord) -> tuple:
+def _novelty_key(rec: HitRecord, vkey: str) -> tuple:
+    """(value, transform, direction, where): one timeline line each."""
     if rec.direction == "stored":
         where = rec.source.get("device_path")
     else:
         where = (rec.recipient or {}).get("domain") or registrable_domain(
             str(rec.source.get("host") or "")
         )
-    return (rec.marker_id, rec.transform, rec.direction, where)
+    return (vkey, rec.transform, rec.direction, where)
 
 
 def _replace_seq(rec: HitRecord, seq: int) -> HitRecord:

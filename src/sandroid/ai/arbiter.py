@@ -55,6 +55,11 @@ from enum import Enum
 logger = logging.getLogger(__name__)
 
 
+#: Owner-id prefix of leases held outside the AI (TUI operations). The AI's
+#: lease reconcile only knows AI owners, so it never drops these.
+EXTERNAL_OWNER_PREFIX = "tui:"
+
+
 class ResourceId(Enum):
     """A shared device resource that can be leased to a single owner at a time.
 
@@ -525,14 +530,20 @@ class DeviceResourceArbiter:
 
         Args:
             live_owner_ids: The set of owner ids currently known to be alive
-                (e.g. the orchestrator plus every live subagent).
+                (e.g. the orchestrator plus every live subagent). Owners
+                outside the AI (``tui:...``, e.g. the TUI's Zygote-restart
+                fallback) are never dropped here: the AI does not know them,
+                and they release their own leases in a ``finally``.
         """
         with self._lock:
             live = set(live_owner_ids) | {
                 o for o, n in self._abandoned.items() if n > 0
             }
             for resource in [
-                r for r, lease in self._leases.items() if lease.owner not in live
+                r
+                for r, lease in self._leases.items()
+                if lease.owner not in live
+                and not lease.owner.startswith(EXTERNAL_OWNER_PREFIX)
             ]:
                 self._drop_locked(resource)
 

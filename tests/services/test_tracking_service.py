@@ -125,6 +125,7 @@ class FakeHelper:
         self.node_gate: threading.Event | None = None  # node_at blocks on it
         self.node_returned = 0
         self.node_calls: list[tuple] = []
+        self.cached_calls: list[tuple] = []
         self.shots: list[ShotResult] = []
         self.hashes: list[str] = []
         self.shot_calls = 0
@@ -132,6 +133,8 @@ class FakeHelper:
         self.last_error = None
         self.start_ok = True
         self.stopped = False
+        self.focus_reply: dict | None = None  # the read-back of a field
+        self.focus_calls: list[tuple] = []
 
     def _info(self) -> dict:
         info = {"serial": self.serial, "mode": self.mode, "pid": 77}
@@ -155,12 +158,20 @@ class FakeHelper:
         self.stopped = True
         self.on_status("stopped", {**self._info(), "a11y_restored": True})
 
-    def node_at(self, x, y, *, t_mono_ms=None, timeout=1.0):
+    def node_at(self, x, y, *, t_mono_ms=None, timeout=1.0, mode="both"):
+        if mode == "cached":  # the snapshot alone: answered at once
+            self.cached_calls.append((x, y, t_mono_ms))
+            cached = (self.node_reply or {}).get("cached")
+            return {"type": "node_at", "cached": cached} if cached else None
         self.node_calls.append((x, y, t_mono_ms))
         if self.node_gate is not None:
             self.node_gate.wait(10.0)
         self.node_returned += 1
         return self.node_reply
+
+    def focus(self, x=None, y=None, *, timeout=1.0):
+        self.focus_calls.append((x, y))
+        return self.focus_reply
 
     def shot(self, *, hash_only=False, timeout=5.0):
         self.shot_calls += 1
@@ -460,9 +471,11 @@ def test_input_line_is_written_when_node_at_times_out(env, cfg):
         finally:
             gate.set()
     tap = of(lines, "input", "tap")[0]
-    assert tap["data"]["target"] is None
+    # the late live hit test costs nothing the snapshot saw at finger-down
     assert tap["data"]["node_timeout"] is True
-    assert tap["summary"].startswith("tap at ")
+    assert tap["data"]["target"]["source"] == "cached"
+    assert tap["summary"] == "tap 'Accept all' (Button)"
+    assert helpers[0].cached_calls[0][2] == 10000.0  # at the finger-down
 
 
 def test_confirm_line_refers_to_the_input(env, cfg):
@@ -539,7 +552,12 @@ def _text_ev(t, text, *, rid="com.x:id/pw", password=False, sensitive=False, win
         "cls": "android.widget.EditText",
         "text": text,
         "window_id": win,
-        "src": {"rid": rid, "cls": "android.widget.EditText", "hint": "Password"},
+        "src": {
+            "rid": rid,
+            "cls": "android.widget.EditText",
+            "hint": "Password",
+            "editable": True,
+        },
     }
     if password:
         d["password"] = True
@@ -562,7 +580,8 @@ def test_text_is_coalesced_per_field_and_flushed_on_field_change(env, cfg):
     assert texts[0]["data"]["text"] == "alice"
     assert texts[0]["dev_mono"] == 1.0
     assert "sensitive" not in texts[0]
-    assert texts[0]["summary"] == "typed 5 chars into 'Password' (EditText)"
+    assert texts[0]["summary"] == "typed \"alice\" into 'Password'"
+    assert texts[0]["data"]["via"] == "a11y"
 
 
 @pytest.mark.parametrize(
@@ -573,7 +592,10 @@ def test_text_is_coalesced_per_field_and_flushed_on_field_change(env, cfg):
         {"password": True, "sensitive": True},
     ],
 )
-def test_sensitive_text_never_reaches_the_summary(env, cfg, shape):
+def test_sensitive_text_is_in_the_summary_and_masked_by_readers(env, cfg, shape):
+    """The user's decision: typed text, passwords included, is in the
+    summary; a reader that masks sensitive lines shows only the count.
+    """
     svc, popen, _run, helpers, _tmp = env
     secret = "hunter22-Secret"  # noqa: S105 - a typed test value
     with timeline.capture() as lines:
@@ -582,13 +604,12 @@ def test_sensitive_text_never_reaches_the_summary(env, cfg, shape):
         svc.tick(time.time() + 10)  # idle flush
     line = of(lines, "input", "text")[0]
     assert line["sensitive"] is True
-    assert secret not in line["summary"]
-    assert "hunter" not in line["summary"]
-    assert line["data"]["text"] == secret  # raw, masked by readers
+    field = "password field 'Password'" if shape.get("password") else "'Password'"
+    assert line["summary"] == f'typed "{secret}" into {field}'
+    assert line["data"]["text"] == secret
     masked = timeline.mask(line)
     assert secret not in json.dumps(masked)
-    if shape.get("password"):
-        assert line["summary"].endswith("(EditText, password)")
+    assert masked["summary"] == f"typed 15 chars into {field}"
 
 
 def test_text_capture_off_keeps_the_line_without_content(env, cfg):
@@ -601,6 +622,8 @@ def test_text_capture_off_keeps_the_line_without_content(env, cfg):
     line = of(lines, "input", "text")[0]
     assert "text" not in line["data"]
     assert line["data"]["captured"] is False
+    assert line["summary"] == "typed 6 chars into 'Password' (EditText)"
+    assert "masked_summary" not in line["data"]
 
 
 def test_screen_window_dedupe_and_screen_change_shot(env, cfg):
@@ -3285,3 +3308,786 @@ def test_r2_a_fallback_followed_by_the_old_screen_before_the_tap_is_void(env, cf
         _tap_with_before_shot(ge, lines, stats["now"]())
         assert wait_for(lambda: svc._shot_drops.get("late") == 1, timeout=10.0)
     assert not of(lines, "shot", "screen_change")
+
+
+# --------------------------------------------------------------------------
+# web elements (accessibility only), typed text, read-back, markers
+# --------------------------------------------------------------------------
+
+CHROME_BAR = "127.0.0.1:8097/index.html?c=1. Connection is not secure"
+GECKO_BAR = " 127.0.0.1:8097/index.html?f=3. Search or enter address"
+
+
+def _web_reply(node, *, pkg="com.android.chrome", bar=CHROME_BAR, hit=None,
+               title="A11y Probe Page", frame=None, label=None):  # fmt: skip
+    doc = {"title": title}
+    if bar is not None:
+        doc["bar"] = bar
+    if frame:
+        doc["frame"] = frame
+    answer = {
+        "window": {"id": 5, "type": "app"},
+        "pkg": pkg,
+        "hit": hit or dict(node),
+        "target": node,
+        "path": ["FrameLayout", "WebView", "Button"],
+        "web_doc": doc,
+    }
+    if label:
+        answer["label"] = label
+    return {"type": "node_at", "cached": answer, "live": {"hit": None}}
+
+
+def _web(role, **kw):
+    return {"engine": kw.pop("engine", "chromium"), "role": role, **kw}
+
+
+WEB_CASES = [  # (node, reply kw, summary, web fields)
+    (
+        {"cls": "android.widget.Button", "text": "Accept all", "rid": "accept-all",
+         "clickable": True, "bounds": [404, 2181, 700, 2310], "web": _web("button")},
+        {},
+        "tap button 'Accept all' (#accept-all) on 127.0.0.1:8097",
+        {"role": "button", "raw_role": "button", "html_id": "accept-all",
+         "doc": "A11y Probe Page", "page": "127.0.0.1:8097"},
+    ),
+    (
+        {"cls": "android.widget.Button", "text": "Class only", "clickable": True,
+         "web": _web("button")},
+        {},
+        "tap button 'Class only' on 127.0.0.1:8097",
+        {"html_id": None},
+    ),
+    (
+        {"cls": "android.widget.Button", "desc": "Close dialog", "rid": "btn-icon",
+         "clickable": True, "web": _web("button")},
+        {},
+        "tap button 'Close dialog' (#btn-icon) on 127.0.0.1:8097",
+        {},
+    ),
+    (
+        {"cls": "android.view.View", "desc": "External link", "rid": "lnk-ext",
+         "clickable": True,
+         "web": _web("link", role_desc="link", href="https://example.com/path?q=1")},
+        {},
+        "tap link 'External link' to example.com/path?q=1 (#lnk-ext) on 127.0.0.1:8097",
+        {"role": "link", "href": "https://example.com/path?q=1"},
+    ),
+    (
+        {"cls": "android.widget.EditText", "rid": "in-email", "editable": True,
+         "clickable": True, "text": "me@x.org",
+         "web": _web("textField", label="E-mail address", input_type=0xD1)},
+        {},
+        "tap text field 'E-mail address' (#in-email) on 127.0.0.1:8097",
+        {"role": "text field", "field": "E-mail address", "input": "email"},
+    ),
+    (
+        {"cls": "android.widget.EditText", "rid": "in-pass", "editable": True,
+         "password": True, "web": _web("textField", label="Password", input_type=0xE1)},
+        {},
+        "tap password field 'Password' (#in-pass) on 127.0.0.1:8097",
+        {"role": "password field", "input": "password"},
+    ),
+    (
+        {"cls": "android.widget.CheckBox", "rid": "chk", "clickable": True,
+         "web": _web("checkBox", label="I agree")},
+        {},
+        "tap check box 'I agree' (#chk) on 127.0.0.1:8097",
+        {"role": "check box", "field": "I agree"},
+    ),
+    (
+        {"cls": "android.view.View", "text": "Germany", "rid": "sel", "clickable": True,
+         "web": _web("comboBoxSelect", role_desc="menu pop up button", label="Country")},
+        {},
+        "tap drop-down 'Country' (#sel) on 127.0.0.1:8097",
+        {"role": "drop-down", "raw_role": "comboBoxSelect"},
+    ),
+    (
+        {"cls": "android.widget.Button", "text": "Alle akzeptieren", "rid": "ensCancel",
+         "clickable": True, "web": _web("pushbutton", engine="gecko")},
+        {"pkg": "org.mozilla.firefox", "bar": " www.audi.de/de/. Search or enter address",
+         "title": "Modelle, Aktionen, Angebote | Audi Deutschland"},
+        "tap button 'Alle akzeptieren' (#ensCancel) on www.audi.de",
+        {"engine": "gecko", "raw_role": "pushbutton", "page": "www.audi.de"},
+    ),
+    (
+        {"cls": "android.widget.EditText", "rid": "in-text", "hint": "Your name",
+         "editable": True, "web": _web("entry", engine="gecko", label="Your name",
+                                       input_type=0xA1)},
+        {"pkg": "org.mozilla.firefox", "bar": GECKO_BAR},
+        "tap text field 'Your name' (#in-text) on 127.0.0.1:8097",
+        {"input": "text"},  # 0xA1: TYPE_TEXT_VARIATION_WEB_EDIT_TEXT
+    ),
+    (
+        {"cls": "android.widget.CheckBox", "text": "I agree", "rid": "chk",
+         "checkable": True, "web": _web("checkbutton", engine="gecko")},
+        {"pkg": "org.mozilla.firefox", "bar": GECKO_BAR},
+        "tap check box 'I agree' (#chk) on 127.0.0.1:8097",
+        {},
+    ),
+    (
+        {"cls": "android.widget.TextView", "text": "Clickable div", "rid": "div-click",
+         "web": _web("genericContainer")},
+        {},
+        "tap 'Clickable div' (#div-click) on 127.0.0.1:8097",
+        {"role": None, "raw_role": "genericContainer"},
+    ),
+    (
+        {"cls": "android.widget.Button", "text": "Frame button", "rid": "if-btn",
+         "clickable": True, "web": _web("button")},
+        {"frame": "Inner"},
+        "tap button 'Frame button' (#if-btn) on 127.0.0.1:8097",
+        {"doc": "A11y Probe Page"},
+    ),
+    (
+        {"cls": "android.widget.Button", "text": "Plain button", "rid": "btn-plain",
+         "clickable": True, "web": _web("button")},
+        {"pkg": "sandroid.a11yprobe", "bar": None},
+        "tap button 'Plain button' (#btn-plain) in page 'A11y Probe Page'",
+        {"page": None, "doc": "A11y Probe Page"},
+    ),
+]  # fmt: skip
+
+
+@pytest.mark.parametrize(("node", "kw", "summary", "fields"), WEB_CASES)
+def test_a_tapped_web_element_is_named_in_plain_words(
+    env, cfg, node, kw, summary, fields
+):
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        helpers[0].node_reply = _web_reply(node, **kw)
+        ge.feed(*tap_lines(5.0))
+        assert wait_for(lambda: of(lines, "input", "tap"))
+    tap = of(lines, "input", "tap")[0]
+    assert tap["summary"] == summary
+    web = tap["data"]["target"]["web"]
+    assert set(web) == {"engine", "role", "raw_role", "html_id", "href", "field",
+                        "input", "doc", "page"}  # fmt: skip
+    for key, value in fields.items():
+        assert web[key] == value, key
+    if node.get("editable"):
+        assert node.get("text", "") not in tap["summary"] or not node.get("text")
+        assert tap["data"]["target"]["text"] is None  # a field's value never
+
+
+def test_the_live_answer_names_a_web_element_the_snapshot_did_not_see(env, cfg):
+    """Gecko builds the page lazily: the snapshot saw only the WebView."""
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    button = WEB_CASES[0][0]
+    reply = _web_reply(button)
+    live = reply["cached"]
+    reply["cached"] = {"window": {"id": 5, "type": "app"}, "pkg": "com.android.chrome",
+                       "hit": {"cls": "android.webkit.WebView", "web": _web("rootWebArea")},
+                       "bare_web": True, "path": ["WebView"]}  # fmt: skip
+    reply["live"] = live
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        helpers[0].node_reply = reply
+        ge.feed(*tap_lines(5.0))
+        assert wait_for(lambda: of(lines, "input", "tap"))
+    tap = of(lines, "input", "tap")[0]
+    assert tap["summary"] == WEB_CASES[0][2]
+    assert tap["data"]["target"]["source"] == "live"
+
+
+def test_native_taps_keep_their_wording(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        ge.feed(*tap_lines(5.0))
+        assert wait_for(lambda: of(lines, "input", "tap"))
+    tap = of(lines, "input", "tap")[0]
+    assert tap["summary"] == "tap 'Accept all' (Button)"
+    assert "web" not in tap["data"]["target"]
+
+
+@pytest.mark.parametrize(
+    ("bar", "host"),
+    [
+        (CHROME_BAR, "127.0.0.1:8097"),
+        (GECKO_BAR, "127.0.0.1:8097"),
+        ("example.com. Connection is secure", "example.com"),
+        ("https://www.audi.de/de/", "www.audi.de"),
+        ("localhost:8080/x", "localhost:8080"),
+        ("[::1]:8080/", "[::1]:8080"),
+        ("Search or type URL", None),
+        ("Search Google or type URL", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_page_host_keeps_only_the_leading_host(bar, host):
+    assert ts.page_host(bar) == host
+
+
+B = ts.BULLET
+
+
+@pytest.mark.parametrize(
+    ("events", "value", "partial"),
+    [
+        # Firefox, `input text Pw9x`: "9" was masked before it was seen
+        ([("P", 0), (B, 0), (B, 0), (B + "w", 1), (B * 2, 1), (B * 2, 1),
+          (B * 3 + "x", 2), (B * 4, 3), (B * 4, 3)], ["P", "w", None, "x"], True),
+        ([("a", 0), (B, 0), (B + "b", 1), (B * 2, 1), (B * 2 + "c", 2), (B * 3, 2)],
+         ["a", "b", "c"], False),
+        # the previous character still in clear when the next one comes
+        ([("x", 0), (B + "y", 1), (B * 2 + "a", 2), (B * 2 + "ab", 3)],
+         ["x", "y", "a", "b"], False),
+        # a backspace at the end, then one more character
+        ([("a", 0), (B + "b", 1), (B * 2 + "c", 2), (B * 2, 2), (B * 2 + "d", 2)],
+         ["a", "b", "d"], False),
+        # Chrome and native fields send the clear text
+        ([("P", 0), ("Pw9", 1), ("Pw9x", 3)], ["P", "w", "9", "x"], False),
+        # a field that already held a password
+        ([(B * 5 + "a", 5)], [None] * 5 + ["a"], True),
+    ],
+)  # fmt: skip
+def test_a_bullet_password_is_rebuilt_keystroke_by_keystroke(events, value, partial):
+    known: list = []
+    part = False
+    for text, frm in events:
+        known, part = ts.rebuild_password(known, part, text, frm)
+    assert known == value
+    assert part is partial
+
+
+def _pw_ev(t, text, frm):
+    d = _text_ev(t, text, rid="in-pass")
+    d["src"]["password"] = True
+    d["src"]["text"] = B * len(text)
+    d["from"] = frm
+    d["pkg"] = "org.mozilla.firefox"
+    return d
+
+
+def test_firefox_password_bullets_give_the_typed_value(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        for i, (text, frm) in enumerate(
+            [("h", 0), (B + "u", 1), (B * 2 + "n", 2), (B * 3 + "t", 3), (B * 4, 3)]
+        ):
+            helpers[0].on_event(_pw_ev(1000 + i, text, frm), time.time())
+        svc.tick(time.time() + 10)
+    line = of(lines, "input", "text")[0]
+    assert line["summary"] == "typed \"hunt\" into password field 'Password'"
+    assert line["data"]["text"] == "hunt"
+    assert "partial" not in line["data"]
+    assert timeline.mask(line)["summary"] == (
+        "typed 4 chars into password field 'Password'"
+    )
+
+
+def test_a_password_read_only_partly_says_so(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    seq = [("P", 0), (B, 0), (B + "w", 1), (B * 2, 1), (B * 3 + "x", 2), (B * 4, 3)]
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        for i, (text, frm) in enumerate(seq):
+            helpers[0].on_event(_pw_ev(1000 + i, text, frm), time.time())
+        svc.tick(time.time() + 10)
+    line = of(lines, "input", "text")[0]
+    assert line["summary"] == (
+        "typed 4 chars into password field 'Password' (partly read)"
+    )
+    assert line["data"]["partial"] is True
+    assert line["data"]["text"] == f"Pw{B}x"
+
+
+def test_text_events_of_non_editable_sources_are_dropped(env, cfg):
+    """audi.de in Firefox: a document change came as TEXT_CHANGED of the
+    WebView with U+FFFC ("typed 1 chars into 'WebView'").
+    """
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        doc = {"type": "ev", "ev": "TEXT_CHANGED", "t_mono_ms": 10.0,
+               "pkg": "org.mozilla.firefox", "cls": "android.webkit.WebView",
+               "text": ts.OBJ_CHAR, "window_id": 3,
+               "src": {"cls": "android.webkit.WebView", "text": "Audi"}}  # fmt: skip
+        h.on_event(doc, time.time())
+        # Dev3, Firefox navigating away: no source, only U+FFFC removed
+        h.on_event({"type": "ev", "ev": "TEXT_CHANGED", "t_mono_ms": 15.0,
+                    "pkg": "org.mozilla.firefox", "cls": "android.webkit.WebView",
+                    "before": ts.OBJ_CHAR, "from": 0, "added": 0, "removed": 1,
+                    "window_id": 52}, time.time())  # fmt: skip
+        h.on_event({**_text_ev(16.0, ts.OBJ_CHAR, rid="com.x:id/q"),
+                    "before": ""}, time.time())  # fmt: skip
+        field = _text_ev(20.0, "ab" + ts.OBJ_CHAR, rid="com.x:id/q")
+        h.on_event(field, time.time())
+        svc.tick(time.time() + 10)
+    texts = of(lines, "input", "text")
+    assert len(texts) == 1
+    assert texts[0]["data"]["text"] == "ab"
+    assert texts[0]["summary"] == "typed \"ab\" into 'Password'"
+
+
+def test_counts_are_singular_and_long_text_is_clipped(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    long = "x" * 100
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        helpers[0].on_event(_text_ev(1.0, long, rid="com.x:id/a"), time.time())
+        helpers[0].on_event(_text_ev(2.0, "q", rid="com.x:id/b"), time.time())
+        cfg.capture_text = False
+        svc.tick(time.time() + 10)
+    first, second = of(lines, "input", "text")
+    assert first["summary"] == 'typed "' + "x" * 59 + "…\" into 'Password'"
+    assert first["data"]["text"] == long
+    assert second["summary"] == "typed 1 char into 'Password' (EditText)"
+
+
+URL_BAR = {
+    "cls": "android.widget.EditText", "rid": "com.android.chrome:id/url_bar",
+    "text": "127.0.0.1:8097/index.html?c=1", "editable": True, "clickable": True,
+    "focused": True, "bounds": [211, 142, 691, 289], "hint": "Search Google or type URL",
+}  # fmt: skip
+URL_REPLY = {
+    "type": "node_at",
+    "cached": {"window": {"id": 5, "type": "app"}, "pkg": "com.android.chrome",
+               "hit": URL_BAR, "target": URL_BAR, "path": ["EditText#url_bar"]},
+}  # fmt: skip
+
+
+def _focus(text, *, rid="com.android.chrome:id/url_bar", **kw):
+    node = {**URL_BAR, "rid": rid, "text": text, "window_id": 5,
+            "pkg": "com.android.chrome", **kw}  # fmt: skip
+    return {"type": "focus", "input": node}
+
+
+def _key(t: float, code: int) -> list[str]:
+    return [
+        f"[{t:15.6f}] /dev/input/event0: 0001 {code:04x} 00000001",
+        f"[{t:15.6f}] /dev/input/event0: 0000 0000 00000000",
+        f"[{t + 0.03:15.6f}] /dev/input/event0: 0001 {code:04x} 00000000",
+        f"[{t + 0.03:15.6f}] /dev/input/event0: 0000 0000 00000000",
+    ]
+
+
+def test_the_address_bar_is_read_back_once_typing_pauses(env, cfg):
+    """Chrome's url_bar sends no TEXT_CHANGED: keyboard taps after a tap on
+    it are read back (``focus``) and written as one line.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    cfg.text_idle_ms = 400
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.node_reply = URL_REPLY
+        ge.feed(*tap_lines(1.0))
+        assert wait_for(lambda: of(lines, "input", "tap"))
+        h.node_reply = IME_REPLY
+        h.focus_reply = _focus("audi.de")
+        for i in range(3):
+            ge.feed(*tap_lines(2.0 + i * 0.2))
+        assert wait_for(lambda: of(lines, "input", "text"))
+        # read 300 ms after the last keystroke, not at once
+        assert h.focus_calls
+    line = of(lines, "input", "text")[0]
+    assert line["summary"] == 'typed "audi.de" into the address bar'
+    assert line["data"]["via"] == "readback"
+    assert line["data"]["edits"] == 3
+    assert line["data"]["text"] == "audi.de"
+    assert line["dev_mono"] == 2.0  # the first keystroke
+    assert h.focus_calls[0] == (451, 215)  # the tapped field's centre
+    assert len(of(lines, "input", "text")) == 1
+
+
+def test_a_field_that_reports_its_text_is_never_read_back(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    cfg.text_idle_ms = 300
+    field = {**URL_BAR, "rid": "com.x:id/q", "text": ""}
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.node_reply = {**URL_REPLY, "cached": {**URL_REPLY["cached"], "target": field,
+                                                "hit": field}}  # fmt: skip
+        ge.feed(*tap_lines(1.0))
+        assert wait_for(lambda: of(lines, "input", "tap"))
+        h.node_reply = IME_REPLY
+        h.focus_reply = _focus("hi", rid="com.x:id/q")
+        ge.feed(*tap_lines(2.0))
+        assert wait_for(lambda: len(of(lines, "input", "tap")) == 2)
+        h.on_event(_text_ev(2100.0, "h", rid="com.x:id/q"), time.time())
+        ge.feed(*tap_lines(2.3))
+        assert wait_for(lambda: len(of(lines, "input", "tap")) == 3)
+        h.on_event(_text_ev(2400.0, "hi", rid="com.x:id/q"), time.time())
+        assert wait_for(lambda: of(lines, "input", "text"))
+        # a pause longer than READBACK_TEXT_GRACE_S, then a keyboard key
+        # that changes no text (Shift, ?123, Go): its read-back reads "hi"
+        svc._last_text_host -= 5.0
+        ge.feed(*tap_lines(5.0))
+        assert wait_for(lambda: len(of(lines, "input", "tap")) == 4)
+        svc.tick(time.time() + 10)  # any read-back would be due now
+        svc._rb_lane.drain(2.0)
+        svc.tick(time.time() + 20)
+        svc._rb_lane.drain(2.0)
+    assert h.focus_calls  # it was read ...
+    texts = of(lines, "input", "text")
+    assert [t["data"]["via"] for t in texts] == ["a11y"]  # ... and not written
+
+
+def test_enter_writes_the_read_back_line_before_its_key_line(env, cfg):
+    """Keys typed on a keyboard device, ENTER right behind the last one:
+    the read happens at ENTER, the text line comes before ``key ENTER``.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.node_reply = URL_REPLY
+        ge.feed(*tap_lines(1.0))
+        assert wait_for(lambda: of(lines, "input", "tap"))
+        h.focus_reply = _focus("ab")
+        ge.feed(*_key(2.0, 30), *_key(2.05, 48), *_key(2.1, 28))  # a, b, ENTER
+        assert wait_for(lambda: of(lines, "input", "key"))
+    text = of(lines, "input", "text")
+    key = of(lines, "input", "key")[0]
+    assert key["data"]["name"] == "ENTER"
+    assert len(text) == 1
+    assert text[0]["seq"] < key["seq"]
+    assert text[0]["summary"] == 'typed "ab" into the address bar'
+    assert text[0]["data"]["edits"] == 2
+
+
+def test_an_unchanged_field_writes_no_read_back_line(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.node_reply = URL_REPLY
+        ge.feed(*tap_lines(1.0))
+        assert wait_for(lambda: of(lines, "input", "tap"))
+        h.focus_reply = _focus(URL_BAR["text"])
+        ge.feed(*_key(2.0, 30), *_key(2.1, 28))
+        assert wait_for(lambda: of(lines, "input", "key"))
+    assert not of(lines, "input", "text")
+
+
+def _real_png(w: int = 108, h: int = 242, colour: str = "#ffffff") -> bytes:
+    import io
+
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.new("RGB", (w, h), colour).save(out, "PNG")
+    return out.getvalue()
+
+
+def test_marked_copies_keep_the_original_as_evidence(env, cfg):
+    svc, popen, _run, helpers, tmp = env
+    cfg.mark_screenshots = True
+    png = _real_png()
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.shots = [ShotResult(500.0, 108, 242, "h-before", 14.0, png, "/x")]
+        ge.feed(*tap_lines(5.0))
+        assert wait_for(lambda: of(lines, "shot", "before_tap"))
+    shot = of(lines, "shot", "before_tap")[0]
+    assert shot["ref"]["sha256"] == hashlib.sha256(png).hexdigest()
+    assert (
+        tmp / shot["ref"]["path"].replace("{seq}", str(shot["seq"]))
+    ).read_bytes() == png
+    marked = shot["data"]["marked"]
+    assert marked["path"].startswith("tracking/shots/")
+    assert marked["path"].endswith("_before_tap_marked.png")
+    data = (tmp / marked["path"]).read_bytes()
+    assert hashlib.sha256(data).hexdigest() == marked["sha256"]
+    assert data != png
+
+
+def test_no_marked_copy_while_the_setting_is_off(env, cfg):
+    svc, popen, _run, helpers, tmp = env
+    assert cfg.mark_screenshots is False  # the default
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        helpers[0].shots = [ShotResult(500.0, 108, 242, "h", 14.0, _real_png(), "/x")]
+        ge.feed(*tap_lines(5.0))
+        assert wait_for(lambda: of(lines, "shot", "before_tap"))
+    assert "marked" not in of(lines, "shot", "before_tap")[0]["data"]
+    assert not list((tmp / "tracking/shots").glob("*_marked.png"))
+
+
+def test_a_screen_change_after_typing_is_marked_with_the_field(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    cfg.mark_screenshots = True
+    cfg.shot_before_tap = False
+    with timeline.capture():
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.node_reply = URL_REPLY
+        ge.feed(*tap_lines(1.0))
+        h.focus_reply = _focus("audi.de")
+        ge.feed(*_key(2.0, 30), *_key(2.5, 28))
+        assert wait_for(lambda: len(svc._marks) == 2)
+    req = {"ev_dev": 2.6, "t_evt": time.time()}
+    mark = svc._screen_mark(req)
+    assert mark["kind"] == "text"
+    assert mark["text"] == "audi.de"
+    assert mark["bounds"] == URL_BAR["bounds"]
+
+
+def test_marker_colours_are_the_lens_independent_highlight_slots():
+    from sandroid.core import frames
+    from sandroid.tui.themes import HIGHLIGHT_DARK
+
+    assert {frames.MARK_TAP, frames.MARK_LONG_PRESS, frames.MARK_SWIPE,
+            frames.MARK_TEXT} == set(HIGHLIGHT_DARK)  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("mark", "probe"),
+    [
+        ({"kind": "tap", "xy": [540, 1200], "bounds": [400, 1100, 700, 1300]},
+         (540 + 34, 1200)),  # on the ring (radius 9 units of 4 px)
+        ({"kind": "long_press", "xy": [540, 1200]}, (540 + 55, 1200)),
+        ({"kind": "swipe", "xy": [540, 2000],
+          "path": [[540, 2000, 0], [540, 1500, 50], [540, 900, 120]]},
+         (540, 1500)),
+        ({"kind": "text", "bounds": [100, 1000, 900, 1150], "text": "hunter22"},
+         (100, 1075)),
+    ],
+)  # fmt: skip
+def test_mark_shot_draws_the_input_on_a_copy(mark, probe):
+    import io
+
+    from PIL import Image
+
+    from sandroid.core import frames
+
+    png = _real_png(1080, 2424)
+    out = frames.mark_shot(png, {**mark, "screen": [1080, 2424]})
+    assert out is not None
+    assert out != png
+    with Image.open(io.BytesIO(out)) as im:
+        assert im.size == (1080, 2424)
+        px = im.convert("RGB").getpixel(probe)
+    assert px != (255, 255, 255)
+    with Image.open(io.BytesIO(png)) as im:  # the original is untouched
+        assert im.convert("RGB").getpixel(probe) == (255, 255, 255)
+
+
+def test_mark_shot_scales_to_the_image_and_refuses_nothing_to_draw():
+    import io
+
+    from PIL import Image
+
+    from sandroid.core import frames
+
+    png = _real_png(540, 1212)  # a half-size capture of a 1080 x 2424 screen
+    out = frames.mark_shot(
+        png, {"kind": "tap", "xy": [540, 1200], "bounds": [400, 1100, 700, 1300],
+              "screen": [1080, 2424]}
+    )  # fmt: skip
+    with Image.open(io.BytesIO(out)) as im:
+        assert im.convert("RGB").getpixel((200, 575)) != (255, 255, 255)  # box edge
+    assert frames.mark_shot(png, {"kind": "tap", "screen": [1080, 2424]}) is None
+    assert frames.mark_shot(b"not a png", {"kind": "tap", "xy": [1, 1]}) is None
+
+
+@pytest.mark.parametrize(
+    ("cached", "live", "better"),
+    [
+        # Gecko had not built the page: the snapshot saw the WebView only
+        ({"hit": {"cls": "android.webkit.WebView"}, "bare_web": True},
+         {"hit": {"cls": "android.widget.Button", "web": _web("button")}}, True),
+        # an outdated snapshot without the page tree (keyboard moving)
+        ({"hit": {"cls": "android.widget.FrameLayout"},
+          "snapshot": {"changes_since_start": 6}},
+         {"hit": {"web": _web("textField")}, "target": {"web": _web("textField")}},
+         True),
+        # ... but an accurate one (no change since) wins
+        ({"hit": {"cls": "android.widget.FrameLayout"},
+          "snapshot": {"changes_since_start": 0}},
+         {"hit": {"web": _web("textField")}}, False),
+        # an outdated toolbar without its url_bar
+        ({"hit": {"rid": "toolbar"}, "target": {"rid": "toolbar", "clickable": True,
+                                                  "bounds": [0, 142, 1080, 289]},
+          "snapshot": {"changes_since_start": 3, "truncated": True}},
+         {"hit": URL_BAR, "target": URL_BAR}, True),
+        # a native button the snapshot saw: the screen behind it is not it
+        ({"hit": {"text": "OK"}, "target": {"text": "OK", "clickable": True},
+          "snapshot": {"changes_since_start": 2}},
+         {"hit": {"web": _web("button")}, "target": {"web": _web("button")}}, False),
+        ({"hit": {"cls": "x"}, "snapshot": {"changes_since_start": 2}},
+         {"hit": {"cls": "android.webkit.WebView"}, "bare_web": True}, False),
+    ],
+)  # fmt: skip
+def test_the_live_answer_wins_only_where_the_snapshot_was_blind(cached, live, better):
+    assert ts.TrackingService._live_is_better(cached, live) is better
+
+
+def test_the_keyboard_taking_focus_keeps_the_field_and_its_text(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.on_event(_text_ev(1.0, "h", rid="com.x:id/q", password=True), time.time())
+        h.on_event({"type": "ev", "ev": "FOCUSED", "pkg":
+                    "com.google.android.inputmethod.latin"}, time.time())  # fmt: skip
+        assert svc._pw_focus is True
+        h.on_event(_text_ev(2.0, "hi", rid="com.x:id/q", password=True), time.time())
+        svc.tick(time.time() + 10)
+    texts = of(lines, "input", "text")
+    assert len(texts) == 1
+    assert texts[0]["data"]["text"] == "hi"
+
+
+# --------------------------------------------------------------------------
+# review findings (2026-11-20)
+# --------------------------------------------------------------------------
+
+
+def test_input_type_words_follow_android():
+    assert ts._input_word(0x01) == "text"
+    assert ts._input_word(0xA1) == "text"  # WEB_EDIT_TEXT
+    assert ts._input_word(0xB1) == "filter"
+    assert ts._input_word(0xC1) == "text"  # PHONETIC
+    assert ts._input_word(0xD1) == "email"
+    assert ts._input_word(0xE1) == "password"
+    assert ts._input_word(0x12) == "password"  # NUMBER_VARIATION_PASSWORD
+    assert ts._input_word(0x03) == "phone"
+
+
+def test_a_text_mark_holds_no_text_while_capture_text_is_off(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    cfg.mark_screenshots = True
+    cfg.capture_text = False
+    cfg.shot_before_tap = False
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.node_reply = URL_REPLY
+        ge.feed(*tap_lines(1.0))
+        h.focus_reply = _focus("secret-typed")
+        ge.feed(*_key(2.0, 30), *_key(2.5, 28))
+        assert wait_for(lambda: len(svc._marks) == 2)
+    assert "text" not in of(lines, "input", "text")[0]["data"]
+    mark = svc._screen_mark({"ev_dev": 2.6, "t_evt": time.time()})
+    assert mark["kind"] == "text"
+    assert not mark["text"]
+
+
+@pytest.mark.parametrize("shape", [{"password": True}, {"sensitive": True}])
+def test_a_sensitive_field_marks_its_shot_sensitive_and_draws_no_text(env, cfg, shape):
+    """Password (or data-sensitive) typing, Go, then the focus moves on
+    (``_pw_focus`` is off again by the time the screen-change shot is
+    stored): the shot line is still sensitive and its marked copy shows the
+    field's box only.
+    """
+    svc, popen, _run, helpers, tmp = env
+    cfg.mark_screenshots = True
+    cfg.shot_before_tap = False
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        ev = _text_ev(1500.0, "hunter22", **shape)
+        ev["src"]["bounds"] = [100, 1000, 900, 1150]
+        h.on_event(ev, time.time())
+        ge.feed(*_key(2.0, 28))  # Go
+        assert wait_for(lambda: of(lines, "input", "key"))
+        h.on_event({"type": "ev", "ev": "FOCUSED", "pkg": "com.x",
+                    "src": {"rid": "com.x:id/next"}}, time.time())  # fmt: skip
+        assert svc._pw_focus is False
+        assert wait_for(lambda: len(svc._marks) == 1)
+        mark = svc._screen_mark({"ev_dev": 2.6, "t_evt": time.time()})
+        assert mark["sensitive"] is True
+        assert mark["text"] == ""
+        svc._store("screen_change", _real_png(1080, 2424), of=1, via="helper",
+                   w=1080, h=2424, cap_ms=1.0, dev_mono=None, t=None,
+                   mark=mark)  # fmt: skip
+    shot = of(lines, "shot", "screen_change")[0]
+    assert shot["sensitive"] is True
+    assert shot["data"]["marked"]["path"].endswith("_screen_change_marked.png")
+    assert "marked" not in timeline.mask(shot)["data"]  # only its key name
+
+
+def test_stop_reads_the_watched_field_before_the_helper_goes(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.node_reply = URL_REPLY
+        ge.feed(*tap_lines(1.0))
+        assert wait_for(lambda: of(lines, "input", "tap"))
+        h.focus_reply = _focus("a")
+        svc._tick_stop.set()  # no 300 ms read: only the stop reads it
+        ge.feed(*_key(2.0, 30))
+        assert wait_for(lambda: svc._rb is not None and svc._rb["keys"] == 1)
+        assert not h.focus_calls
+        svc.stop()
+    texts = of(lines, "input", "text")
+    assert [t["summary"] for t in texts] == ['typed "a" into the address bar']
+    stop = of(lines, "tracking", "stop")[0]
+    assert texts[0]["seq"] < stop["seq"]
+
+
+def test_a_moved_compose_field_without_id_is_still_read_back(env, cfg):
+    """A rid-less (Compose) field the keyboard panned 100 px up: same class,
+    overlapping columns; its hint differs (or is gone) once focused.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    cfg.text_idle_ms = 400
+    field = {**URL_BAR, "rid": None, "text": "", "pkg": "com.x"}
+    reply = {"type": "node_at", "cached": {"window": {"id": 5, "type": "app"},
+             "pkg": "com.x", "hit": field, "target": field, "path": ["x"]}}  # fmt: skip
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.node_reply = reply
+        ge.feed(*tap_lines(1.0))
+        assert wait_for(lambda: of(lines, "input", "tap"))
+        h.node_reply = IME_REPLY
+        h.focus_reply = _focus("hello", rid=None, hint=None, pkg="com.x",
+                               bounds=[211, 42, 691, 189])  # fmt: skip
+        for i in range(3):
+            ge.feed(*tap_lines(2.0 + i * 0.2))
+        assert wait_for(lambda: of(lines, "input", "text"))
+    line = of(lines, "input", "text")[0]
+    assert line["summary"].startswith('typed "hello" into ')
+    assert line["data"]["via"] == "readback"
+
+
+def test_a_weak_read_never_replaces_a_good_value_with_less():
+    pizza = {"rid": "com.x:id/q", "cls": "android.widget.EditText"}
+    other = {"rid": "com.x:id/other", "cls": "android.widget.EditText"}
+    good = ("pizza", pizza, 5)
+    pick = ts.TrackingService._rb_pick
+    assert pick(good, ("", pizza, 6)) is good  # emptied after Search
+    assert pick(good, ("x", other, 6)) is good  # another field at the point
+    assert pick(good, ("pizzas", pizza, 6))[0] == "pizzas"  # kept its text
+    assert pick(None, ("", pizza, 1))[0] == ""
+
+
+def test_a_flush_in_flight_writes_its_line_when_a_new_field_is_armed(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        g = ts.Gesture(dev="-", t_down=1.0, line_a=1, t_up=1.05)
+        svc._rb_arm(URL_BAR, URL_REPLY["cached"], g)
+        first = svc._rb
+        svc._rb_key(ts.Gesture(dev="-", t_down=2.0, line_a=2, t_up=2.05))
+        node = _focus("audi.de")["input"]
+        first["good"] = ("audi.de", node, 1)
+        first["read_keys"] = 1
+        other = {**URL_BAR, "rid": "com.x:id/q", "text": ""}
+        svc._rb_arm(other, URL_REPLY["cached"], g)  # the tap that ended it
+        assert svc._rb is not first
+        svc._rb_flush(first)
+        svc._rb_flush(first)  # once only
+    texts = of(lines, "input", "text")
+    assert [t["summary"] for t in texts] == ['typed "audi.de" into the address bar']
+    assert svc._rb is not None  # the new watch is untouched

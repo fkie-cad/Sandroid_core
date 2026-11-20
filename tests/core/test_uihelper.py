@@ -168,6 +168,18 @@ class FakeHelper:
             )
         elif name == "windows":
             self.emit({"type": "windows", "id": rid, "windows": [{"id": 7}]})
+        elif name == "focus":
+            self.emit(
+                {
+                    "type": "focus",
+                    "id": rid,
+                    "input": {
+                        "rid": "com.android.chrome:id/url_bar",
+                        "text": "audi.de",
+                        "editable": True,
+                    },
+                }
+            )
         elif name == "shot" and self.shot_error:
             self.emit(
                 {"type": "error", "id": rid, "cmd": "shot", "error": self.shot_error}
@@ -252,30 +264,65 @@ class FakePopen:
 
 
 class FakeAdb:
-    """``Adb.send_adb_command`` stand-in: records (command, serial)."""
+    """``Adb.send_adb_command`` stand-in: records (command, serial).
+
+    Device files are ``files`` (path -> sha256); ``procs`` (pid -> ARGS) is
+    what ``ps -A -o PID,ARGS`` lists, ``kill`` removes all but ``unkillable``.
+    """
 
     def __init__(self, popen: FakePopen | None = None) -> None:
         self.calls: list[tuple[str, str | None]] = []
-        self.device_jar_sha = uihelper.JAR_SHA256
+        self.files: dict[str, str] = {uihelper.REMOTE_JAR: uihelper.JAR_SHA256}
         self.push_result_sha = uihelper.JAR_SHA256
+        self.procs: dict[int, str] = {}
+        self.unkillable: set[int] = set()
         self.settings = {
             "accessibility_enabled": "0",
             "enabled_accessibility_services": "null",
         }
         self.popen = popen
 
+    @property
+    def device_jar_sha(self) -> str:
+        return self.files.get(uihelper.REMOTE_JAR, "")
+
+    @device_jar_sha.setter
+    def device_jar_sha(self, sha: str) -> None:
+        if sha:
+            self.files[uihelper.REMOTE_JAR] = sha
+        else:
+            self.files.pop(uihelper.REMOTE_JAR, None)
+
     def __call__(self, command: str, serial: str | None = None, timeout: float = 30):
         self.calls.append((command, serial))
         if self.popen is not None:
             self.popen.order.append(command)
         if command.startswith("shell sha256sum "):
-            sha = self.device_jar_sha
+            path = command.split()[-1]
+            sha = self.files.get(path)
             if not sha:
-                return "", f"sha256sum: {uihelper.REMOTE_JAR}: No such file"
-            return f"{sha}  {uihelper.REMOTE_JAR}\n", ""
+                return "", f"sha256sum: {path}: No such file"
+            return f"{sha}  {path}\n", ""
         if command.startswith("push "):
-            self.device_jar_sha = self.push_result_sha
+            self.files[command.split()[-1]] = self.push_result_sha
             return "1 file pushed.\n", ""
+        if command.startswith("shell rm -f "):
+            self.files.pop(command.split()[-1], None)
+            return "", ""
+        if command.startswith("shell mv -f "):
+            _, _, _, src, dst = command.split()
+            if src in self.files:
+                self.files[dst] = self.files.pop(src)
+            return "", ""
+        if command == "shell ps -A -o PID,ARGS":
+            rows = ["  PID ARGS", "    1 init second_stage"]
+            rows += [f"{pid:5d} {args}" for pid, args in sorted(self.procs.items())]
+            return "\n".join(rows) + "\n", ""
+        if command.startswith("shell kill "):
+            for tok in command.split()[2:]:
+                if tok.isdigit() and int(tok) not in self.unkillable:
+                    self.procs.pop(int(tok), None)
+            return "", ""
         if command.startswith("shell settings get secure "):
             return self.settings.get(command.rsplit(maxsplit=1)[-1], "null") + "\n", ""
         if command.startswith("shell settings put secure "):
@@ -371,7 +418,7 @@ def test_jar_resolves_through_importlib_resources():
 
 def test_build_info():
     assert uihelper.build_info() == {
-        "version": "1.0.0",
+        "version": "1.1.0",
         "protocol": 2,
         "jar_sha256": uihelper.JAR_SHA256,
         "source_sha256": uihelper.SOURCE_SHA256,
@@ -397,13 +444,20 @@ def test_ensure_jar_pushes_and_verifies_on_mismatch(adb):
     adb.device_jar_sha = ""  # absent on the device
     assert uihelper.ensure_jar(SERIAL) is True
     jar = uihelper.REMOTE_JAR
+    tmp = uihelper._tmp_jar()
+    assert tmp.startswith(jar + ".")
+    assert tmp.endswith(".tmp")
     assert adb.commands() == [
         f"shell sha256sum {jar}",
-        f"shell rm -f {jar}",
-        f"push {uihelper.quote_host_arg(str(uihelper.jar_path()))} {jar}",
+        f"shell rm -f {tmp}",
+        f"push {uihelper.quote_host_arg(str(uihelper.jar_path()))} {tmp}",
+        f"shell sha256sum {tmp}",
+        f"shell chmod 644 {tmp}",
+        "shell ps -A -o PID,ARGS",
+        f"shell mv -f {tmp} {jar}",
         f"shell sha256sum {jar}",
-        f"shell chmod 644 {jar}",
     ]
+    assert adb.files == {jar: uihelper.JAR_SHA256}
     assert all(s == SERIAL for _, s in adb.calls)
 
 
@@ -416,7 +470,106 @@ def test_ensure_jar_fails_when_verify_mismatches(adb, caplog):
     assert len(warnings) == 1
     assert SERIAL in warnings[0].getMessage()
     assert not adb.commands("shell chmod")
+    assert not adb.commands("shell mv")
+    # the old jar is untouched, the half-written one removed
+    assert adb.files == {uihelper.REMOTE_JAR: "0" * 64}
     assert all(s == SERIAL for _, s in adb.calls)
+
+
+OLD_HELPER = "app_process / sandroid.uihelper.Main mode=full"
+
+
+def test_upgrade_replaces_an_old_jar_atomically_and_stops_its_helper(adb, monkeypatch):
+    """An old jar (main before this change) with its helper still running:
+    the new jar goes to a temporary name, is verified, the old helper is
+    stopped, then one rename swaps the jar -- never half-written.
+    """
+    jar = uihelper.REMOTE_JAR
+    adb.device_jar_sha = "c" * 64
+    adb.procs = {
+        4242: OLD_HELPER,
+        4300: f"sh -c CLASSPATH={jar} exec {OLD_HELPER}",  # not a helper
+        4400: "com.android.chrome",
+    }
+    seen: list[str] = []
+    real = adb.__call__
+
+    def spy(command, serial=None, timeout=30):
+        # at every step the jar is the old one or the new one, whole
+        seen.append(adb.files.get(jar, "missing"))
+        return real(command, serial, timeout)
+
+    monkeypatch.setattr(Adb, "send_adb_command", spy)
+    assert uihelper.helper_pids(SERIAL) == [4242]
+    assert uihelper.ensure_jar(SERIAL) is True
+    assert set(seen) <= {"c" * 64, uihelper.JAR_SHA256}
+    cmds = [c for c, _ in adb.calls]
+    assert cmds.index("shell kill 4242") < cmds.index(
+        f"shell mv -f {uihelper._tmp_jar()} {jar}"
+    )
+    assert 4242 not in adb.procs
+    assert 4400 in adb.procs
+    assert 4300 in adb.procs
+    assert adb.files == {jar: uihelper.JAR_SHA256}
+
+
+def test_a_helper_that_ignores_kill_gets_kill_9(adb):
+    adb.procs = {
+        77: OLD_HELPER,
+        78: "/system/bin/app_process64 / sandroid.uihelper.Main",
+    }
+    adb.unkillable = {77}
+    assert uihelper.stop_stale_helpers(SERIAL, timeout=0.0) == [77, 78]
+    assert "shell kill 77 78" in adb.commands()
+    assert "shell kill -9 77" in adb.commands()
+
+
+def test_no_helper_running_no_kill(adb):
+    assert uihelper.stop_stale_helpers(SERIAL) == []
+    assert not adb.commands("shell kill")
+
+
+def test_a_current_jar_never_stops_a_running_helper(adb):
+    adb.procs = {4242: OLD_HELPER}
+    assert uihelper.ensure_jar(SERIAL) is True
+    assert not adb.commands("shell kill")
+    assert 4242 in adb.procs
+
+
+def test_start_upgrades_an_old_jar_before_spawning(adb):
+    adb.device_jar_sha = "c" * 64
+    adb.procs = {4242: OLD_HELPER}
+    popen = FakePopen()
+    jar_at_spawn: list[str] = []
+
+    def spawn(argv, **kw):
+        jar_at_spawn.append(adb.device_jar_sha)
+        jar_at_spawn.append("helper running" if 4242 in adb.procs else "stopped")
+        return popen(argv, **kw)
+
+    h, _popen, rec, _ = make_helper(adb, popen=popen)
+    h._popen = spawn
+    assert h.start() is True
+    assert popen.order.index("shell kill 4242") < popen.order.index(
+        f"shell mv -f {uihelper._tmp_jar()} {uihelper.REMOTE_JAR}"
+    )
+    # spawned once, with the new jar in place and the old helper gone
+    assert jar_at_spawn == [uihelper.JAR_SHA256, "stopped"]
+    h.stop()
+
+
+def test_focus_reads_back_the_focused_field(adb):
+    h, popen, rec, _ = make_helper(adb)
+    assert h.start() is True
+    r = h.focus(120, 340)
+    assert r is not None
+    assert r["input"]["text"] == "audi.de"
+    assert popen.current.commands[-1].startswith("focus x=120 y=340 id=")
+    assert h.focus() is not None
+    assert popen.current.commands[-1].startswith("focus id=")
+    h.stop()
+    inv, _p, _r, _ = make_helper(adb, Mode.INVISIBLE)
+    assert inv.focus(1, 2) is None  # no a11y: no round trip
 
 
 # ------------------------------------------------------------ helper_command

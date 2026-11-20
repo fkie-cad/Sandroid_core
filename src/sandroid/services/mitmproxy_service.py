@@ -1527,22 +1527,29 @@ class MitmproxyService:
             result = self.probe_device_reachability(host, port)
         return result
 
-    def wait_listening(self, timeout: float = 8.0) -> bool:
+    def wait_listening(self, timeout: float = 8.0, *, socks: bool = False) -> bool:
         """Block until our mitmweb accepts connections on its proxy port.
 
         ``start()`` returns as soon as the process is spawned; mitmweb needs
         a moment (Python start-up, addons, one listener per lane) before it
-        binds. Returns False if the process is gone or the deadline passes.
+        binds. With ``socks`` every App Proxy lane's SOCKS port must listen
+        too. Returns False if the process is gone or the deadline passes.
         Blocking: call it off the UI thread.
         """
         deadline = time.monotonic() + timeout
+        ports = [self._state.proxy_port]
+        if socks:
+            ports += [
+                self._state.socks_base + i for i in range(self._state.focus_lanes)
+            ]
         while True:
             with self._lock:
                 proc = self._proc
             if proc is None or proc.poll() is not None:
                 return False
-            if _pid_listening(
-                proc.pid, self._state.proxy_port, self._state.listen_host
+            if all(
+                _pid_listening(proc.pid, port, self._state.listen_host)
+                for port in ports
             ):
                 return True
             if time.monotonic() >= deadline:
@@ -1740,10 +1747,61 @@ class MitmproxyService:
                 f"(proxy {listen_host}:{proxy_port}, "
                 f"web http://{web_host}:{web_port}/)"
             )
+            self._kick_app_proxy_reconcile("mitmproxy-start")
             return True
 
-    def stop(self, timeout: float = 3.0, *, release_device_proxy: bool = True) -> None:
+    def _kick_app_proxy_reconcile(self, reason: str) -> None:
+        """Re-check the App Proxy lanes off-thread (lanes waiting for us).
+
+        A lane kept while mitmproxy was off fails closed and forwards again
+        on its own once mitmproxy listens; the reconcile proves that (and
+        repairs a lane that died meanwhile) so its health reads "active".
+        It waits until mitmweb listens on its proxy port AND every lane's
+        SOCKS port first: probing earlier reported a false, sticky
+        "mitmproxy unreachable from the device".
+        """
+        try:
+            from sandroid.core.proxy_manager import note_mitmproxy_started
+
+            note_mitmproxy_started()
+        except Exception:
+            logger.debug("mitmproxy start not noted", exc_info=True)
+
+        def _run() -> None:
+            # Off-thread: never take FocusManager's lock under ours.
+            try:
+                from sandroid.core import proxy_manager
+
+                focus = proxy_manager._FOCUS_INSTANCE
+                if focus is None or not focus.has_lanes():
+                    return
+                if not self.wait_listening(15.0, socks=True):
+                    logger.debug(
+                        "mitmproxy not listening yet; App Proxy check after %s "
+                        "runs anyway",
+                        reason,
+                    )
+                focus.reconcile(None, reason)
+            except Exception as exc:
+                logger.debug("App Proxy reconcile after %s failed: %s", reason, exc)
+
+        threading.Thread(
+            target=_run, name="mitm-app-proxy-reconcile", daemon=True
+        ).start()
+
+    def stop(
+        self,
+        timeout: float = 3.0,
+        *,
+        release_device_proxy: bool = True,
+        release_app_proxies: bool = False,
+    ) -> None:
         """Stop mitmweb (idempotent).
+
+        App Proxy lanes stay applied by default: their apps fail closed (no
+        network, never a bypass past mitmproxy) and the lanes report
+        "waiting for mitmproxy" until it runs again, when they forward on
+        their own.
 
         Args:
             timeout: Seconds to wait for a graceful exit before killing it.
@@ -1751,10 +1809,21 @@ class MitmproxyService:
                 at this mitmproxy (see :meth:`release_device_proxy`), so the
                 device is never left routed to a dead proxy. ``restart()``
                 passes False because the caller re-applies it.
+            release_app_proxies: Also tear the App Proxy lanes down (quit).
         """
         if release_device_proxy and self._proc is not None:
             # Outside the lock: this is ADB I/O.
             self.release_device_proxy()
+        if release_app_proxies:
+            # Outside the lock too: FocusManager reads is_running() under its
+            # own lock, so taking it under ours could deadlock. Lazy import
+            # avoids a proxy_manager<->service cycle; no lanes = no-op.
+            try:
+                from sandroid.core.proxy_manager import get_focus_manager
+
+                get_focus_manager().disable_focus()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("Focus teardown on stop failed: %s", exc)
         with self._lock:
             proc = self._proc
             if proc is None:
@@ -1765,17 +1834,6 @@ class MitmproxyService:
             # but only the bypass *we* started, not one toggled elsewhere.
             if self._ssl_via_mitm:
                 self.stop_ssl_unpin()
-
-            # Tear down any active Focus lanes so stopping the proxy never
-            # leaves an app's network redirected at a dead SOCKS port. Lazy
-            # import avoids a proxy_manager↔service import cycle. disable_focus()
-            # with no active lanes is a harmless no-op.
-            try:
-                from sandroid.core.proxy_manager import get_focus_manager
-
-                get_focus_manager().disable_focus()
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.debug("Focus teardown on stop failed: %s", exc)
 
             self._state.running = False
             self._emit("[INFO] Stopping mitmweb...")
@@ -1858,7 +1916,11 @@ class MitmproxyService:
             logger.debug("release_device_proxy on shutdown failed: %s", exc)
         try:
             if self._proc is not None:
-                self.stop(timeout=timeout, release_device_proxy=False)
+                self.stop(
+                    timeout=timeout,
+                    release_device_proxy=False,
+                    release_app_proxies=True,
+                )
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("mitmweb stop on shutdown failed: %s", exc)
 
@@ -2047,6 +2109,12 @@ class MitmproxyService:
         if not self._owned_device_proxy:
             self._owned_device_proxy_serial = None
             return
+        try:
+            from sandroid.services.proxy_restore import install_device_prepared_hook
+
+            install_device_prepared_hook()
+        except Exception:
+            logger.debug("proxy restore hook not installed", exc_info=True)
         if serial is None:
             try:
                 from sandroid.core.adb import Adb
@@ -2112,8 +2180,10 @@ class MitmproxyService:
         A snapshot restores the device's settings, so loading one taken
         without the proxy (e.g. Play's ``tmp``) silently set ``http_proxy``
         back to ``:0`` and mitmproxy saw none of the replays (M-29). Called
-        by ``EmulatorService.load_snapshot`` after every load. Blocking
-        (ADB), never raises.
+        by ``EmulatorService.load_snapshot`` after every load and by the
+        proxy restore after a cold boot or reconnect. A loopback route's
+        ``adb reverse`` is re-registered in every branch (loads and
+        reconnects drop it). Blocking (ADB), never raises.
 
         Args:
             serial: The device the snapshot was loaded on (None: current).
@@ -2147,6 +2217,13 @@ class MitmproxyService:
                     and cfg is not None
                     and cfg.address == addr
                 ):
+                    # Every load and adb reconnect drops `adb reverse`: a
+                    # loopback route that "survived" points at nothing.
+                    if addr.startswith("127.0.0.1:"):
+                        port = int(addr.rsplit(":", 1)[1])
+                        if not _reverse_registered(port):
+                            Adb.reverse(f"tcp:{port}", f"tcp:{port}")
+                            logger.info("Re-registered adb reverse tcp:%s", port)
                     return "kept"
                 if not self.is_running():
                     self.note_device_proxy(None)

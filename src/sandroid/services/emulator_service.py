@@ -32,6 +32,7 @@ import os
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -189,6 +190,211 @@ def _world_change(cause: str, **kwargs) -> None:
         logging.getLogger(__name__).debug(
             "identity: forget after a world change failed", exc_info=True
         )
+
+
+# ---------------------------------------------------------------------------
+# Snapshot loads: state, after-load hooks, device handle reset
+# ---------------------------------------------------------------------------
+
+#: Hook run at the end of every successful snapshot load (worker thread).
+AfterLoadHook = Callable[[str | None], None]
+
+_LOAD_LOCK = threading.Lock()
+_LOAD_GENERATION = 0
+#: serial (or "" for "the current target") -> loads in flight.
+_LOADS_ACTIVE: dict[str, int] = {}
+_AFTER_LOAD_HOOKS: list[AfterLoadHook] = []
+
+
+def snapshot_load_generation() -> int:
+    """Counter bumped when a snapshot load starts (any serial)."""
+    with _LOAD_LOCK:
+        return _LOAD_GENERATION
+
+
+def snapshot_load_active(serial: str | None = None) -> bool:
+    """Whether a snapshot load is in flight (on *serial*, or on any device)."""
+    with _LOAD_LOCK:
+        if serial is None:
+            return any(_LOADS_ACTIVE.values())
+        return bool(_LOADS_ACTIVE.get(serial) or _LOADS_ACTIVE.get(""))
+
+
+def _load_started(serial: str | None) -> None:
+    global _LOAD_GENERATION
+    with _LOAD_LOCK:
+        _LOAD_GENERATION += 1
+        key = serial or ""
+        _LOADS_ACTIVE[key] = _LOADS_ACTIVE.get(key, 0) + 1
+
+
+def _load_finished(serial: str | None) -> None:
+    with _LOAD_LOCK:
+        key = serial or ""
+        left = _LOADS_ACTIVE.get(key, 0) - 1
+        if left > 0:
+            _LOADS_ACTIVE[key] = left
+        else:
+            _LOADS_ACTIVE.pop(key, None)
+
+
+def register_after_load_hook(hook: AfterLoadHook) -> None:
+    """Run ``hook(serial)`` at the end of every successful snapshot load.
+
+    For long-lived device streams a load kills (the tracking logcat follower,
+    the file monitor): they restart themselves here. Hooks run on the
+    loader's worker thread after the proxy restore, in registration order;
+    an exception is logged and swallowed. Registering twice is a no-op.
+    """
+    with _LOAD_LOCK:
+        if hook not in _AFTER_LOAD_HOOKS:
+            _AFTER_LOAD_HOOKS.append(hook)
+
+
+def unregister_after_load_hook(hook: AfterLoadHook) -> None:
+    """Remove an after-load hook (no-op if it is not registered)."""
+    with _LOAD_LOCK:
+        if hook in _AFTER_LOAD_HOOKS:
+            _AFTER_LOAD_HOOKS.remove(hook)
+
+
+def _run_after_load_hooks(serial: str | None) -> None:
+    with _LOAD_LOCK:
+        hooks = list(_AFTER_LOAD_HOOKS)
+    for hook in hooks:
+        try:
+            hook(serial)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "after-load hook %r failed", hook, exc_info=True
+            )
+
+
+def reset_device_handles_after_snapshot_load() -> None:
+    """Forget device state that an emulator snapshot load has invalidated.
+
+    Loading a snapshot kills every app process and the emulator's frida
+    device object. Afterwards the cached ``JobManager.device`` raised
+    "device is gone" on every spawn until the TUI was restarted, and
+    Spotlight kept showing the dead PID. Drops the job manager's session
+    and device handle (it re-creates the handle lazily on the next spawn),
+    the frida device cache and the Spotlight PID, then publishes
+    ``STATE_CHANGED`` so the panels refresh. Runs on every load (TUI, Play,
+    AI, headless) from :meth:`EmulatorService.load_snapshot`. Never raises;
+    call it from a worker thread (the session reset may wait on frida for a
+    few seconds).
+    """
+    from sandroid import services
+
+    log = logging.getLogger(__name__)
+    try:
+        frida_svc = services.get_frida_session_service()
+        jm = getattr(frida_svc, "_job_manager", None)
+        if jm is not None:
+            try:
+                jm.reset_session(timeout_per_job=1.0, detach_timeout=1.0)
+            except Exception:
+                log.debug("JobManager reset after snapshot load failed", exc_info=True)
+            jm.device = None
+        frida_svc.invalidate_frida_device_cache()
+    except Exception:
+        log.debug("Could not reset frida state after snapshot load", exc_info=True)
+    try:
+        services.get_spotlight_service().set_pid(None)
+    except Exception:
+        log.debug("Could not clear the Spotlight PID", exc_info=True)
+    try:
+        from sandroid.core.events import Event, EventBus, EventType
+
+        EventBus.get().publish(
+            Event(
+                type=EventType.STATE_CHANGED,
+                data={"change_type": "snapshot_loaded"},
+                source="emulator_service",
+            )
+        )
+    except Exception:
+        log.debug("Could not publish the snapshot-load refresh", exc_info=True)
+
+
+def is_active_serial(serial: str | None) -> bool:
+    """Whether *serial* is the device the TUI works on (None: unknown = yes).
+
+    The host Frida handles, the Spotlight PID and the FridaSessionService's
+    manager all belong to that device; a load on another serial (AI,
+    headless, a second emulator) must not touch them.
+    """
+    if not serial:
+        return True
+    try:
+        from sandroid.core.adb import Adb
+
+        active = Adb.selected_serial()
+    except Exception:
+        return True
+    return active is None or active == serial
+
+
+def _publish_frida_after_load(serial: str | None, ok: bool, reason: str) -> None:
+    """Tell the TUI (glance Frida row, failure toast) how the start went."""
+    try:
+        from sandroid.core.events import Event, EventBus, EventType
+
+        EventBus.get().publish(
+            Event(
+                type=EventType.STATE_CHANGED,
+                data={
+                    "change_type": "frida_server_after_load",
+                    "serial": serial,
+                    "ok": ok,
+                    "reason": reason,
+                },
+                source="emulator_service",
+            )
+        )
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "Could not publish the frida-server start", exc_info=True
+        )
+
+
+def _auto_start_frida_after_load(serial: str | None) -> None:
+    """Honour ``frida.server_auto_start`` after a load (daemon thread).
+
+    The load reverts the device's processes to the snapshot, so a
+    frida-server started this session may be gone. Runs on its own thread,
+    pinned to the loaded *serial*, so the load itself does not wait for
+    frida-server; the outcome is published as ``STATE_CHANGED``
+    (``frida_server_after_load``) for the TUI's toast and glance refresh.
+    Never raises.
+    """
+
+    def _run() -> None:
+        log = logging.getLogger(__name__)
+        try:
+            from sandroid.core.adb import Adb
+            from sandroid.core.frida_manager import (
+                auto_start_frida_server,
+                frida_server_auto_start_enabled,
+            )
+
+            if not frida_server_auto_start_enabled():
+                return
+            with Adb.targeting(serial):
+                if not Adb.get_target_device():
+                    return
+                ok, reason = auto_start_frida_server()
+        except Exception as exc:
+            ok, reason = False, str(exc)
+        if ok:
+            log.info(f"Frida after the snapshot load: {reason}")
+        else:
+            log.warning(
+                f"frida-server auto-start after the snapshot load failed: {reason}"
+            )
+        _publish_frida_after_load(serial, ok, reason)
+
+    threading.Thread(target=_run, name="sandroid-frida-after-load", daemon=True).start()
 
 
 class EmulatorService:
@@ -688,7 +894,14 @@ class EmulatorService:
         """
         self._logger.info(f"Loading snapshot: {name}")
         adb = self._get_adb()
+        _load_started(serial)
+        try:
+            return self._load_snapshot(adb, name, serial)
+        finally:
+            _load_finished(serial)
 
+    def _load_snapshot(self, adb: Any, name: str, serial: str | None) -> bool:
+        """:meth:`load_snapshot` body (the in-flight marker is held)."""
         try:
             command = _snapshot_command("load", name)
 
@@ -745,6 +958,10 @@ class EmulatorService:
             # snapshot saved without the proxy drops mitmproxy's device
             # proxy, so the replays were never intercepted. Re-apply it.
             self._restore_device_proxy(serial)
+            # Then everything else the load invalidated, for every caller
+            # (TUI, Play, AI, headless): Frida handles, App Proxy lanes and
+            # the CA, frida-server, long-lived streams.
+            self._after_snapshot_load(adb, serial)
 
             self._logger.info(f"Snapshot '{name}' loaded successfully")
             return True
@@ -753,6 +970,34 @@ class EmulatorService:
             self._logger.error(f"Failed to load snapshot: {e}")
             _snapshot_line("load", name, False, serial, str(e))
             return False
+
+    def _after_snapshot_load(self, adb: AdbProtocol, serial: str | None) -> None:
+        """Post-load steps after the device proxy (best-effort, never raises).
+
+        1. Drop the host Frida handles and the Spotlight PID (dead now),
+           only when *serial* is the active device.
+        2. :func:`~sandroid.services.proxy_restore.restore_proxy_infra`:
+           App Proxy lanes, then the CA (no-restart re-inject only when the
+           user injected it on this serial this session).
+        3. frida-server auto-start on that serial (own thread, active device
+           only; the outcome is published for the TUI).
+        4. after-load hooks (tracking logcat, file monitor restarts).
+        """
+        target = serial or self._target_serial(adb)
+        # The Frida handles, Spotlight PID and frida-server manager belong
+        # to the active device: a load on another serial leaves them alone.
+        active = is_active_serial(target)
+        if active:
+            reset_device_handles_after_snapshot_load()
+        try:
+            from sandroid.services.proxy_restore import restore_proxy_infra
+
+            restore_proxy_infra(target, "snapshot-load", device_proxy=False)
+        except Exception as exc:
+            self._logger.warning(f"Proxy restore after snapshot load failed: {exc}")
+        if active:
+            _auto_start_frida_after_load(target)
+        _run_after_load_hooks(target)
 
     def _record_device_clock(
         self, adb: AdbProtocol, name: str, serial: str | None
@@ -997,6 +1242,19 @@ class EmulatorService:
             dev=serial,
             data={"avd": launch.avd, "ok": True},
         )
+        # A cold boot wiped the CA mounts, gost, the lane rules and adb
+        # reverse. DeviceManager's device-prepared hook (fresh_boot=True)
+        # restores them when it exists AND device preparation is enabled
+        # (checked now, not at import); otherwise restore here.
+        try:
+            from sandroid.services import proxy_restore
+
+            # TODO(device-prepared-hook): drop this call once DeviceManager's
+            # register_device_prepared_hook is on main and always enabled.
+            if not proxy_restore.device_prepared_hook_active():
+                proxy_restore.restore_proxy_infra(serial, "cold-boot", fresh_boot=True)
+        except Exception as exc:
+            self._logger.warning(f"Proxy restore after the restart failed: {exc}")
         return True
 
     @staticmethod

@@ -717,18 +717,39 @@ def _fake_frida_and_spotlight(monkeypatch):
     return jm, frida_svc, spot
 
 
-def test_playback_drops_frida_handles_and_pid_invalidated_by_the_revert(
-    monkeypatch, tmp_path
-):
-    """Play's snapshot loads kill every app process and the frida device.
-
-    The cached JobManager.device made every later spawn fail with "device is
-    gone" until the TUI was restarted, and Spotlight kept the dead PID.
+def test_every_snapshot_load_drops_frida_handles_and_pid(monkeypatch, tmp_path):
+    """Play's (and every other) snapshot load kills every app process and the
+    frida device. The cached JobManager.device made every later spawn fail
+    with "device is gone" until the TUI was restarted, and Spotlight kept the
+    dead PID. EmulatorService.load_snapshot now drops both for every caller
+    (TUI, Play's engine, AI, headless), not only the TUI paths.
     """
-    jm, frida_svc, spot = _fake_frida_and_spotlight(monkeypatch)
-    controller, _toolbox, _forensic = _playback_controller(monkeypatch, tmp_path)
+    from sandroid.services import emulator_service as es
 
-    controller._run_playback_analysis()
+    jm, frida_svc, spot = _fake_frida_and_spotlight(monkeypatch)
+
+    class _Adb:
+        def send_telnet_command(self, command, serial=None):
+            return "OK\n", ""
+
+        def send_adb_command(self, command, serial=None):
+            return ("device\n", "") if command == "get-state" else ("", "")
+
+        def get_target_device(self):
+            return "emu-1"
+
+    svc = es.EmulatorService()
+    svc._get_adb = lambda: _Adb()
+    monkeypatch.setattr(svc, "_restore_device_proxy", lambda serial: "none")
+    monkeypatch.setattr(svc, "_restore_selinux_permissive", lambda adb, serial: True)
+    monkeypatch.setattr(svc, "_record_device_clock", lambda adb, name, serial: None)
+    monkeypatch.setattr(es, "_auto_start_frida_after_load", lambda serial: None)
+    monkeypatch.setattr(es, "is_active_serial", lambda serial: serial == "emu-1")
+    from sandroid.services import proxy_restore
+
+    monkeypatch.setattr(proxy_restore, "restore_proxy_infra", lambda *a, **k: None)
+
+    assert svc.load_snapshot("tmp", serial="emu-1") is True
 
     assert jm.device is None
     assert jm.reset_calls == 1
@@ -738,7 +759,7 @@ def test_playback_drops_frida_handles_and_pid_invalidated_by_the_revert(
 
 def test_snapshot_reset_helper_never_raises(monkeypatch):
     from sandroid import services
-    from sandroid.tui.controllers.recording_controller import (
+    from sandroid.services.emulator_service import (
         reset_device_handles_after_snapshot_load,
     )
 

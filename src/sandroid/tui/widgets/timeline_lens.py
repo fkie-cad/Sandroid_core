@@ -293,6 +293,8 @@ class Row(NamedTuple):
     ref: dict | None = None
     data: dict | None = None
     dev: str | None = None
+    #: A sensitive line's summary while masked (it quotes typed text).
+    masked_summary: str | None = None
 
     @property
     def t(self) -> float:
@@ -361,6 +363,13 @@ def row_from_line(line: dict, offset: int | None = None) -> Row:
         ref=ref,
         data=keep,
         dev=line.get("dev"),
+        masked_summary=(
+            data.get("masked_summary")
+            if sensitive
+            and data is not None
+            and isinstance(data.get("masked_summary"), str)
+            else None
+        ),
     )
 
 
@@ -1702,7 +1711,7 @@ class TimelineLens(Vertical):
     def _matches(self, row: Row, sep: bool, ignore_pkg: bool = False) -> bool:
         q = self._query
         if q.words:
-            summary = row.summary.lower()
+            summary = self._shown_summary(row).lower()
             if not all(w in summary for w in q.words):
                 return False
         for key, values in q.neg.items():
@@ -2399,6 +2408,12 @@ class TimelineLens(Vertical):
     def _masked(self, row: Row) -> bool:
         return row.sensitive and should_mask_ui() and row.seq != self._revealed
 
+    def _shown_summary(self, row: Row) -> str:
+        """The summary as shown: a masked line's summary never quotes text."""
+        if row.masked_summary and self._masked(row):
+            return row.masked_summary
+        return row.summary
+
     def _render_row(self, vi: int, width: int, selected: bool) -> Strip:
         index = self._view[vi]
         row = self._rows[index]
@@ -2457,7 +2472,7 @@ class TimelineLens(Vertical):
         if width >= 100:
             segments.append(Segment(_fit(row.actor, 6) + " ", st("actor")))
             used += 7
-        summary = _plain_summary(row.summary)
+        summary = _plain_summary(self._shown_summary(row))
         if row.seq in self._open_members:
             summary = "  " + summary
         if row.n:
@@ -3332,7 +3347,11 @@ class TimelineLens(Vertical):
             if value is None or value == "":
                 continue
             grid.add_row(name, Text(str(value)))
-        sections: list = [("Envelope", grid), ("Summary", Text(row.summary))]
+        shown = source.get("summary") if line is not None else None
+        sections: list = [
+            ("Envelope", grid),
+            ("Summary", Text(str(shown or self._shown_summary(row)))),
+        ]
         data = source.get("data") if line is not None else row.data
         if isinstance(data, dict) and data:
             kv = Table.grid(padding=(0, 2))
@@ -3411,7 +3430,7 @@ class TimelineLens(Vertical):
         if isinstance(of, int):
             target = self._by_seq.get(of)
             text = (
-                f"#{of} {target.src}/{target.kind} · {target.summary}"
+                f"#{of} {target.src}/{target.kind} · {self._shown_summary(target)}"
                 if target is not None
                 else f"#{of} (not loaded)"
             )
@@ -3419,6 +3438,8 @@ class TimelineLens(Vertical):
         facts = detail.get("ref")
         if facts:
             for heading, body in facts:
+                if masked and heading == "Marked":
+                    continue  # its label can show typed text
                 sections.append((heading, Text(body)))
         elif not detail:
             sections.append(("", Text("checking…", style=lens_palette().dim)))
@@ -3547,6 +3568,22 @@ def _ref_facts(line: dict, folder: str | None) -> list[tuple[str, str]]:
                     facts.append(
                         ("Diff", json.dumps(summary, ensure_ascii=False)[:600])
                     )
+    data = line.get("data") if isinstance(line.get("data"), dict) else {}
+    marked = data.get("marked")
+    if isinstance(marked, dict) and marked.get("path") and folder:
+        # tracking.mark_screenshots: the copy with the input drawn on it
+        target = (Path(folder) / str(marked["path"])).resolve()
+        if not target.exists():
+            facts.append(("Marked", f"{marked['path']} · missing"))
+        else:
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            ok = "sha256 ok" if digest == marked.get("sha256") else "sha256 MISMATCH"
+            facts.append(
+                (
+                    "Marked",
+                    f"{marked['path']} · {target.stat().st_size:,} bytes · {ok}",
+                )
+            )
     run = ref.get("run")
     if run:
         try:

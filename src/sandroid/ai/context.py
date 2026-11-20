@@ -216,12 +216,19 @@ def _describe_app_proxies() -> str | None:
     try:
         from sandroid.core.proxy_manager import get_focus_manager
 
-        apps = get_focus_manager().app_proxies_nonblocking()
+        manager = get_focus_manager()
+        apps = manager.app_proxies_nonblocking()
         if apps is None:
             return None
         if not apps:
             return "App proxies: none currently active."
-        parts = [f"{pkg} -> {target}" for pkg, target in apps.items()]
+        reader = getattr(manager, "lane_health_nonblocking", None)
+        health = (reader() if reader is not None else None) or {}
+        parts = []
+        for pkg, target in apps.items():
+            lane = health.get(pkg)
+            state = f" ({lane.label})" if lane is not None and not lane.ok else ""
+            parts.append(f"{pkg} -> {target}{state}")
         return "App proxies active: " + ", ".join(parts)
     except Exception:
         return None

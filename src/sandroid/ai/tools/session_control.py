@@ -888,13 +888,31 @@ def enable_app_proxy(
             if owner is not None:
                 _app_proxy_owner_by_package[effective_package] = owner
 
-    return {
+    result = {
         "success": ok,
         "message": message,
         "package": effective_package,
         "target": target,
         "lane_socks_port": lane_socks_port,
     }
+    health = _lane_health_words(manager).get(effective_package or "")
+    if health is not None:
+        # "active", "waiting for mitmproxy" (the app has no network until
+        # mitmproxy runs), "mitmproxy unreachable ..." or "failed: <why>".
+        result["health"] = health
+    return result
+
+
+def _lane_health_words(manager: Any) -> dict[str, str]:
+    """``{package: health label}`` of the lanes, if the manager reports it."""
+    reader = getattr(manager, "lane_health_nonblocking", None)
+    if reader is None:
+        return {}
+    try:
+        health = reader(timeout=1.0)
+    except Exception:
+        return {}
+    return {pkg: h.label for pkg, h in (health or {}).items()}
 
 
 @sandroid_tool(
@@ -1045,7 +1063,9 @@ def get_app_proxy_status() -> dict[str, Any]:
     from sandroid.config import get_config
     from sandroid.core.proxy_manager import get_focus_manager
 
-    apps = get_focus_manager().app_proxies()
+    manager = get_focus_manager()
+    apps = manager.app_proxies()
+    health = _lane_health_words(manager)
     owner = _current_owner_id.get()
     lanes_total = int(get_config().mitmproxy.focus_lanes)
     lanes_used = len(apps)
@@ -1053,7 +1073,11 @@ def get_app_proxy_status() -> dict[str, Any]:
     return {
         "active": lanes_used > 0,
         "apps": {
-            pkg: {"target": target, "owned_by_caller": _owns_lane(pkg, owner)}
+            pkg: {
+                "target": target,
+                "owned_by_caller": _owns_lane(pkg, owner),
+                **({"health": health[pkg]} if pkg in health else {}),
+            }
             for pkg, target in apps.items()
         },
         "lanes_used": lanes_used,

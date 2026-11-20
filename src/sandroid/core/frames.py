@@ -1,8 +1,10 @@
-"""R1 perceptual "same screen" check between two screenshots (PNG bytes).
+"""Screenshot image helpers (PNG bytes): R1 "same screen" and markers.
 
-One implementation shared by Tracking (R1: a screen-change shot equal to the
+R1, one implementation shared by Tracking (a screen-change shot equal to the
 previous screen is dropped) and the report engine (R4: a gap-fill image that
-still shows the previous screen is refused). Pure Pillow, no service state.
+still shows the previous screen is refused); :func:`mark_shot` draws an input
+onto a copy of a Tracking screenshot (``tracking.mark_screenshots``). Pure
+Pillow, no service state.
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ from __future__ import annotations
 import functools
 import io
 import logging
+import math
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -95,3 +98,145 @@ def same_screen(png_a: bytes | None, png_b: bytes | None) -> bool:
         logger.debug(f"frames: frame distance failed: {exc}")
         return False
     return d is not None and d <= SAME_MAX_DIFF
+
+
+# ---------------------------------------------------------------------------
+# screenshot markers (tracking.mark_screenshots)
+# ---------------------------------------------------------------------------
+
+#: Marker colours: the AI highlight slot colours of :mod:`sandroid.tui.themes`
+#: (``HIGHLIGHT_DARK``), which no lens theme changes. Tap pink, long press
+#: violet, swipe teal, typing lime; every stroke on a dark halo so it reads
+#: on light and dark screens alike.
+MARK_TAP = "#f472b6"
+MARK_LONG_PRESS = "#c084fc"
+MARK_SWIPE = "#2dd4bf"
+MARK_TEXT = "#a3e635"
+MARK_HALO = "#06121f"
+#: Typed text in a typing marker's label is clipped to this many characters.
+MARK_TEXT_MAX = 40
+
+
+def _mark_font(size: int) -> Any:
+    from PIL import ImageFont
+
+    try:
+        return ImageFont.load_default(size=size)
+    except (TypeError, OSError):  # Pillow < 10.1 or no FreeType
+        return ImageFont.load_default()
+
+
+def mark_shot(png: bytes, mark: dict[str, Any]) -> bytes | None:
+    """A copy of the screenshot ``png`` with the input drawn on it (the
+    original is never changed: its sha256 is the evidence).
+
+    ``mark``: ``kind`` (``tap``, ``long_press``, ``swipe``, ``text``),
+    ``screen`` (``[w, h]`` the coordinates are in), ``xy`` (the touch
+    point), ``bounds`` (``[l, t, r, b]`` of the element or field), ``path``
+    (swipe points ``[x, y, ...]``), ``text`` (typed text).
+
+    tap: a ring at the point and a box around the element; long press: a
+    double ring and the box; swipe: a line along the path with an arrow
+    head; typing: a box around the field with the typed text as a label.
+
+    Returns:
+        The marked PNG, or None (nothing to draw, or ``png`` does not decode).
+    """
+    try:
+        from PIL import Image, ImageDraw
+
+        with Image.open(io.BytesIO(png)) as im:
+            img = im.convert("RGB")
+    except Exception as exc:
+        logger.debug(f"frames: cannot mark a shot: {exc}")
+        return None
+    w, h = img.size
+    screen = mark.get("screen") or [w, h]
+    try:
+        fx, fy = w / float(screen[0]), h / float(screen[1])
+    except (TypeError, ValueError, ZeroDivisionError, IndexError):
+        fx = fy = 1.0
+    unit = max(2, round(min(w, h) / 270))  # 4 px on a 1080 px wide frame
+    draw = ImageDraw.Draw(img)
+    drawn = False
+
+    def pt(x: Any, y: Any) -> tuple[float, float]:
+        return float(x) * fx, float(y) * fy
+
+    def box(b: Any, colour: str) -> tuple[float, float, float, float] | None:
+        if not (isinstance(b, (list, tuple)) and len(b) == 4):
+            return None
+        x0, y0 = pt(b[0], b[1])
+        x1, y1 = pt(b[2], b[3])
+        if x1 <= x0 or y1 <= y0:
+            return None
+        rect = (x0, y0, x1, y1)
+        draw.rectangle(rect, outline=MARK_HALO, width=unit * 2)
+        draw.rectangle(rect, outline=colour, width=unit)
+        return rect
+
+    def ring(xy: Any, r: float, colour: str) -> bool:
+        if not (isinstance(xy, (list, tuple)) and len(xy) >= 2):
+            return False
+        if xy[0] is None or xy[1] is None:
+            return False
+        cx, cy = pt(xy[0], xy[1])
+        draw.ellipse(
+            (cx - r, cy - r, cx + r, cy + r), outline=MARK_HALO, width=unit * 2
+        )
+        draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=colour, width=unit)
+        return True
+
+    kind = mark.get("kind")
+    radius = 9 * unit
+    if kind in ("tap", "long_press"):
+        colour = MARK_TAP if kind == "tap" else MARK_LONG_PRESS
+        drawn = box(mark.get("bounds"), colour) is not None
+        drawn = ring(mark.get("xy"), radius, colour) or drawn
+        if kind == "long_press":
+            drawn = ring(mark.get("xy"), radius * 1.6, colour) or drawn
+    elif kind == "swipe":
+        pts = [
+            pt(p[0], p[1])
+            for p in mark.get("path") or []
+            if isinstance(p, (list, tuple)) and len(p) >= 2
+        ]
+        if len(pts) >= 2:
+            draw.line(pts, fill=MARK_HALO, width=unit * 3, joint="curve")
+            draw.line(pts, fill=MARK_SWIPE, width=unit, joint="curve")
+            (ax, ay), (bx, by) = pts[-2], pts[-1]
+            for p in reversed(pts[:-1]):  # the last distinct direction
+                if abs(p[0] - bx) + abs(p[1] - by) > unit:
+                    ax, ay = p
+                    break
+            ang = math.atan2(by - ay, bx - ax)
+            head = 6 * unit
+            wing = [
+                (bx - head * math.cos(ang - s), by - head * math.sin(ang - s))
+                for s in (0.45, -0.45)
+            ]
+            draw.polygon([(bx, by), *wing], fill=MARK_SWIPE, outline=MARK_HALO)
+            ring(mark.get("xy"), radius * 0.6, MARK_SWIPE)
+            drawn = True
+    elif kind == "text":
+        rect = box(mark.get("bounds"), MARK_TEXT)
+        text = " ".join(str(mark.get("text") or "").split())
+        if len(text) > MARK_TEXT_MAX:
+            text = text[: MARK_TEXT_MAX - 1] + "…"
+        if rect is not None and text:
+            font = _mark_font(max(12, 7 * unit))
+            left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+            tw, th = right - left, bottom - top
+            pad = unit * 2
+            x = max(0.0, min(rect[0], w - tw - 2 * pad))
+            y = rect[1] - th - 2 * pad - unit
+            if y < 0:
+                y = rect[3] + unit  # no room above: below the field
+            draw.rectangle((x, y, x + tw + 2 * pad, y + th + 2 * pad), fill=MARK_HALO)
+            draw.text((x + pad - left, y + pad - top), text, fill=MARK_TEXT, font=font)
+        drawn = rect is not None
+    if not drawn:
+        return None
+    out = io.BytesIO()
+    img.save(out, "PNG", compress_level=1)
+    return out.getvalue()

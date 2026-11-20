@@ -907,7 +907,6 @@ def _snapshot_panel(monkeypatch, ok):
         "_run_action_bg",
         lambda work, label, refresh_after=False: results.append(work()),
     )
-    monkeypatch.setattr(sp, "_forget_device_handles", lambda: None)
     return panel, answers, calls, results, notes
 
 

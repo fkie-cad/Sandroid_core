@@ -307,6 +307,10 @@ def element_name(target: Mapping[str, Any] | None) -> str | None:
         value = target.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+    web = target.get("web")
+    if isinstance(web, Mapping) and isinstance(web.get("field"), str):
+        if web["field"].strip():
+            return web["field"].strip()  # a web form control's label
     return _short_id(target.get("rid")) or _short_cls(target.get("cls"))
 
 
@@ -1656,14 +1660,33 @@ def _image_block(ctx: ReportContext, line: Mapping[str, Any]) -> dict[str, Any]:
         "dup_of": d.get("dup_of"),
         "caption": f"{trigger.replace('_', ' ')} · #{line.get('seq')}",
     }
+    if line.get("sensitive"):
+        block["sensitive"] = True
     rel = ref.get("path")
-    if rel and ctx.timeline_dir is not None:
-        block["path"] = os.path.normpath(str(ctx.timeline_dir / str(rel)))
-    elif rel:
-        block["path"] = str(rel)
+    block["path"] = _shot_path(ctx, rel)
     if not rel or d.get("error"):
         block["error"] = str(d.get("error") or "no screenshot file")
+    marked = d.get("marked")
+    if (
+        rel
+        and "error" not in block
+        and isinstance(marked, dict)
+        and marked.get("path")
+        and marked.get("sha256")
+    ):
+        # tracking.mark_screenshots: show the copy with the input drawn on
+        # it; the original (and its sha256) stays the evidence.
+        block["original"] = {"path": block["path"], "sha256": block["sha256"]}
+        block["path"] = _shot_path(ctx, marked["path"])
+        block["sha256"] = marked["sha256"]
+        block["marked"] = True
     return block
+
+
+def _shot_path(ctx: ReportContext, rel: Any) -> str | None:
+    if rel and ctx.timeline_dir is not None:
+        return os.path.normpath(str(ctx.timeline_dir / str(rel)))
+    return str(rel) if rel else None
 
 
 class _Shots:
@@ -1702,7 +1725,9 @@ GAP_FILL_REFUSED = "no screenshot: the new screen had not drawn before the next 
 
 
 def _png_of(block: Mapping[str, Any]) -> bytes | None:
-    path = block.get("path")
+    """The PNG of an image block: the original, never a marked copy."""
+    original = block.get("original")
+    path = original.get("path") if isinstance(original, dict) else block.get("path")
     if not path or block.get("error"):
         return None
     try:
@@ -1896,6 +1921,9 @@ def _step(
     }
     if line.get("sensitive"):
         step["sensitive"] = True
+        if isinstance(d.get("masked_summary"), str):
+            # the summary quotes typed text: a copy masked later shows this
+            step["masked_summary"] = d["masked_summary"]
     masked = bool(d.get("_masked"))
     if masked:
         step["masked"] = True
@@ -2698,11 +2726,27 @@ def _mask_copied(node: Any) -> int:
             if "text" in node or node.get("kind") == "text":
                 node["text"] = None
                 node["text_masked"] = True
+            if isinstance(node.get("masked_summary"), str):
+                node["summary"] = node["masked_summary"]
+            elif node.get("src") == "input" and node.get("kind") == "text":
+                node["summary"] = "typed text (masked)"  # an older report
+            for shot in node.get("shots") or []:
+                if isinstance(shot, dict):
+                    shot["sensitive"] = True  # a marked copy gives way to the original
             if node.get("src") == "screen":
                 node["screen"] = {"summary": node.get("summary")}
             node["masked"] = True
             count += 1
-        for value in node.values():
+        if (
+            node.get("type") == "image"
+            and node.get("sensitive")
+            and isinstance(node.get("original"), dict)
+        ):
+            # the marked copy can show what was typed: back to the original
+            original = node.pop("original")
+            node.pop("marked", None)
+            node.update(original)
+        for value in list(node.values()):
             count += _mask_copied(value)
     elif isinstance(node, list):
         for value in node:
@@ -2812,15 +2856,21 @@ def _relativize(doc: dict, out_dir: Path) -> dict:
     out = copy.deepcopy(doc)
     base = Path(out_dir).resolve()
 
+    def rel(holder: dict) -> None:
+        path = Path(str(holder["path"]))
+        if path.is_absolute():
+            try:
+                holder["path"] = Path(os.path.relpath(path, base)).as_posix()
+            except ValueError:  # other drive (Windows)
+                holder["path"] = path.as_posix()
+
     def walk(node: Any) -> None:
         if isinstance(node, dict):
             if node.get("type") == "image" and node.get("path"):
-                path = Path(str(node["path"]))
-                if path.is_absolute():
-                    try:
-                        node["path"] = Path(os.path.relpath(path, base)).as_posix()
-                    except ValueError:  # other drive (Windows)
-                        node["path"] = path.as_posix()
+                rel(node)
+                original = node.get("original")
+                if isinstance(original, dict) and original.get("path"):
+                    rel(original)
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):

@@ -1,25 +1,25 @@
-"""CA certificate detection, push, and Zygote-injection tools for the AI chat.
+"""CA certificate detection, push, install and removal tools for the AI chat.
 
 Backed entirely by :class:`~sandroid.core.proxy_manager.CAManager` -- plain
-ADB shell commands, OpenSSL subprocess calls, and Zygote mount-namespace
-manipulation (root-gated). **None** of the five tools in this module touch
-``AndroidFridaManager.FridaManager``, frida-server, or any Frida script --
-unlike the real Frida-lifecycle tools in
-:mod:`sandroid.ai.tools.environment_control`, every tool here is tagged
-``category="frida"`` purely as a chat-facing grouping choice (CA certificates
-and SSL interception are, from an analyst's point of view, part of the same
-"get HTTPS traffic decrypted" workflow as SSL-unpin). This costs nothing
-mechanically: :class:`~sandroid.ai.tools.registry.ToolSpec.category` is a
-free-form display/filter label with zero effect on dispatch, permissions, or
-the :class:`~sandroid.ai.arbiter.DeviceResourceArbiter` (see ``ToolSpec``'s
-docstring in :mod:`sandroid.ai.tools.registry`).
+ADB shell commands and one root device script that mounts the CA into the
+trust store of every mount namespace. The install restarts nothing: running
+apps, Zygote, system_server and frida-server keep their PIDs, and no Frida
+session or script is touched. A Zygote restart (the fallback for devices the
+no-restart path cannot handle) is never reachable from these tools: it kills
+every app and needs the user's confirmation in the TUI. Every tool here is
+tagged ``category="frida"`` purely as a chat-facing grouping choice (CA
+certificates and SSL interception are, from an analyst's point of view, part
+of the same "get HTTPS traffic decrypted" workflow as SSL-unpin); the
+category has no effect on dispatch, permissions, or the
+:class:`~sandroid.ai.arbiter.DeviceResourceArbiter`.
 
-Importing this module registers all five tools into the
+Importing this module registers all six tools into the
 :class:`~sandroid.ai.tools.registry.ToolRegistry` singleton as a side effect
 (see the ``@sandroid_tool`` decorator): ``list_detected_ca_certificates``
 (``RiskTier.READ_ONLY``), ``push_ca_certificate`` (``REVERSIBLE``),
 ``check_ca_injection_status`` (``READ_ONLY``), ``enable_adb_root``
-(``CONSEQUENTIAL``), ``inject_ca_certificate`` (``CONSEQUENTIAL``).
+(``CONSEQUENTIAL``), ``inject_ca_certificate`` (``CONSEQUENTIAL``),
+``remove_ca_certificate`` (``CONSEQUENTIAL``).
 """
 
 from pathlib import Path
@@ -215,38 +215,45 @@ def push_ca_certificate(
 @sandroid_tool(
     name="check_ca_injection_status",
     description=(
-        "Check whether a CA certificate is currently injected into "
-        "Zygote's mount namespace (system-wide trust), and the injection "
-        "strategy recommended for this device's Android version."
+        "Check whether Sandroid's mitmproxy CA is trusted system-wide: read "
+        "inside Zygote's, system_server's and the running apps' mount "
+        "namespaces (verdict injected / partial / other_ca / absent)."
     ),
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.READ_ONLY,
     category="frida",
 )
 def check_ca_injection_status() -> dict[str, Any]:
-    """Report Zygote CA injection status plus the recommended strategy.
+    """Report the CA status in Zygote's namespace plus the trust store used.
 
     Real integration points:
     :meth:`sandroid.core.proxy_manager.CAManager.check_zygote_injection_status`
-    (verifies by actually looking inside Zygote's mount namespace via
-    ``nsenter``, not just checking the staging path) and
+    (one root device script reading the CA file inside the namespaces of the
+    Zygotes, system_server and every app namespace -- never the adb shell's
+    own namespace) and
     :meth:`~sandroid.core.proxy_manager.CAManager.determine_injection_strategy`.
-    Neither raises on its own -- every ADB/nsenter call inside them is
-    individually try/except-guarded.
 
     Returns:
-        ``{"injected": bool, "cert_hash": str | None,
+        ``{"injected": bool, "verdict": str, "cert_hash": str | None,
         "zygote_pid": int | None, "zygote64_pid": int | None,
+        "namespaces_lacking": int, "message": str | None,
         "recommended_strategy": str, "api_level": int | None}``.
+        ``verdict`` is ``injected`` (everywhere), ``partial`` (new apps trust
+        it, some running ones not: inject again), ``other_ca`` (another CA
+        under the same name: inject again to replace it), ``absent`` or
+        ``unknown``.
     """
     manager = _get_ca_manager()
     zygote_status = manager.check_zygote_injection_status()
     strategy, api_level = manager.determine_injection_strategy()
     return {
         "injected": zygote_status.injected,
+        "verdict": getattr(zygote_status, "verdict", ""),
         "cert_hash": zygote_status.cert_hash,
         "zygote_pid": zygote_status.zygote_pid,
         "zygote64_pid": zygote_status.zygote64_pid,
+        "namespaces_lacking": getattr(zygote_status, "lacking", 0),
+        "message": zygote_status.error_message,
         "recommended_strategy": strategy.value,
         "api_level": api_level,
     }
@@ -289,12 +296,15 @@ def enable_adb_root() -> dict[str, Any]:
 @sandroid_tool(
     name="inject_ca_certificate",
     description=(
-        "Inject a CA certificate into Zygote's mount namespace for "
-        "system-wide trust, then bypass Chrome's Certificate Transparency "
-        "enforcement for it. Restarts Zygote -- every running app briefly "
-        "closes. Requires root; if the device is not yet root-enabled, this "
-        "reports needs_root=true instead of injecting -- call enable_adb_root "
-        "first, then retry this tool."
+        "Make a CA certificate trusted system-wide WITHOUT restarting "
+        "anything (running apps, Zygote and frida-server keep running; "
+        "running apps trust it at once), then bypass Chrome's Certificate "
+        "Transparency enforcement for it. Idempotent; replaces another CA "
+        "with the same name (rotation). Requires root; if the device is not "
+        "yet root-enabled, this reports needs_root=true -- call "
+        "enable_adb_root first, then retry. If the device needs a Zygote "
+        "restart instead, this reports restart_required=true and does "
+        "nothing: only the user can approve that, in the TUI (Ctrl+N)."
     ),
     parameters={
         "type": "object",
@@ -311,68 +321,45 @@ def enable_adb_root() -> dict[str, Any]:
 def inject_ca_certificate(
     source: str = "mitmproxy", custom_path: str | None = None
 ) -> dict[str, Any]:
-    """Inject a CA certificate into Zygote's mount namespace, then bypass CT.
+    """Install a CA in the system trust store (no restart), then bypass CT.
 
     Real integration points:
-    :meth:`sandroid.core.proxy_manager.CAManager.inject_ca_into_zygote` and,
-    on success, :meth:`~sandroid.core.proxy_manager.CAManager.bypass_chrome_ct`
-    -- mirrors ``tui/widgets/mitmproxy_panel.py``'s ``_apply_inject_result``,
-    which chains the same two calls in the same order after a successful
-    TUI-driven injection.
+    :meth:`sandroid.core.proxy_manager.CAManager.inject_ca_into_zygote` (the
+    no-restart install: a shared tmpfs in init's namespace, bound into every
+    Zygote first and then every running app's namespace) and, on success,
+    :meth:`~sandroid.core.proxy_manager.CAManager.bypass_chrome_ct` -- the
+    same two calls, in the same order, as the TUI's Ctrl+N.
 
-    ``source`` defaults to ``"mitmproxy"`` (never optional/``None``) and is
-    always resolved to a real local :class:`~pathlib.Path` via
-    :func:`_resolve_ca_source_path` before being passed through as
-    ``inject_ca_into_zygote(cert_path=path)`` -- this tool never calls it
-    with ``cert_path=None``. That no-argument mode is real in the underlying
-    manager (it means "use whatever is already staged on the device"), but
-    it is a trap for an AI tool specifically: the default staging push
-    (``push_cert_to_device``, used by :func:`push_ca_certificate`) converts
-    the certificate to **DER** before pushing it, while
-    ``inject_ca_into_zygote(cert_path=None)`` never re-pushes -- it goes
-    straight to ``_get_cert_hash_from_device()``, which pulls the on-device
-    file to a hardcoded local ``sandroid-device-cert.pem`` and infers
-    ``-inform PEM`` purely from that hardcoded ``.pem`` suffix, not the
-    actual bytes on disk. Against a DER-format on-device file, OpenSSL's PEM
-    parse fails, ``cert_hash`` comes back ``None``, and the call fails with a
-    misleading "could not determine certificate hash" instead of the real
-    cause. Passing a real ``cert_path`` sidesteps this entirely:
-    ``inject_ca_into_zygote`` re-pushes it in PEM form internally via
-    ``push_cert_for_injection`` (step 2 of its own implementation, run
-    *before* it ever computes a hash) whenever ``cert_path`` is truthy and
-    exists -- exactly what the TUI's own ``_do_inject_ca`` relies on, and
-    exactly why this tool never needs to call ``push_cert_for_injection``
-    itself.
+    No WORLD lease: the install kills nothing and touches no Frida state, so
+    it cannot invalidate another task's device work. It never restarts
+    Zygote; when the device needs that (``restart_required``), the tool
+    returns and the user decides in the TUI.
 
-    ``needs_root`` is reported, never auto-chained: if
-    ``InjectionResult.needs_root`` is ``True``, this returns immediately
-    without calling :func:`enable_adb_root` itself. Auto-chaining would mean
-    one approved ``CONSEQUENTIAL`` call silently also grants a second,
-    broader capability (root over every subsequent ADB command) that the
-    human never separately reviewed -- the model is expected to see
-    ``needs_root: true``, call ``enable_adb_root`` itself (its own
-    ``CONSEQUENTIAL`` approval), then re-invoke this tool.
+    ``source`` is always resolved to a real local certificate path via
+    :func:`_resolve_ca_source_path`; the manager re-encodes it as PEM, pushes
+    it and checks the result by SHA-256 inside Zygote's namespace.
+
+    ``needs_root`` is reported, never auto-chained: auto-chaining would mean
+    one approved ``CONSEQUENTIAL`` call silently also grants root over every
+    later ADB command -- the model calls ``enable_adb_root`` itself (its own
+    approval), then retries.
 
     ``can_remember_choice=False`` -- which certificate gets trusted
-    system-wide varies with ``source``/``custom_path``, so an "allow
-    always" choice made for one call must not silently cover a different
-    certificate on a later call.
+    system-wide varies with ``source``/``custom_path``.
 
     Args:
-        source: Which CA certificate to inject -- ``"mitmproxy"``,
-            ``"http_toolkit"``, ``"burp_suite"`` auto-detect that tool's
-            default certificate location on this host; ``"custom"`` requires
-            ``custom_path``. Defaults to ``"mitmproxy"``.
+        source: ``"mitmproxy"``, ``"http_toolkit"``, ``"burp_suite"`` (that
+            tool's default certificate on this host) or ``"custom"``
+            (requires ``custom_path``). Defaults to ``"mitmproxy"``.
         custom_path: Host path to a certificate file, required when
             ``source == "custom"``. Resolved through
             :func:`~sandroid.ai.tools._host_paths.resolve_confined_host_path`.
 
     Returns:
         ``{"success": bool, "message": str, "needs_root": bool,
+        "restart_required": bool, "verdict": str | None,
         "strategy": str | None, "api_level": int | None,
-        "chrome_ct_bypass": {"success": bool, "message": str} | None}`` --
-        ``chrome_ct_bypass`` is ``None`` whenever injection itself did not
-        succeed (it is never attempted in that case).
+        "chrome_ct_bypass": {"success": bool, "message": str} | None}``.
 
     Raises:
         ToolExecutionError: ``source``/``custom_path`` could not be resolved
@@ -387,11 +374,49 @@ def inject_ca_certificate(
         ct_success, ct_message = manager.bypass_chrome_ct(path)
         chrome_ct_bypass = {"success": ct_success, "message": ct_message}
 
+    restart_required = bool(getattr(result, "restart_required", False))
+    message = result.message
+    if restart_required:
+        message += (
+            " -- a Zygote restart would install it, but that kills every app; "
+            "ask the user to install it from the TUI (Ctrl+N in the Network "
+            "lens), which asks before restarting"
+        )
     return {
         "success": result.success,
-        "message": result.message,
+        "message": message,
         "needs_root": result.needs_root,
+        "restart_required": restart_required,
+        "verdict": getattr(result, "verdict", None),
         "strategy": result.strategy.value if result.strategy else None,
         "api_level": result.api_level,
         "chrome_ct_bypass": chrome_ct_bypass,
     }
+
+
+@sandroid_tool(
+    name="remove_ca_certificate",
+    description=(
+        "Remove Sandroid's CA from the system trust store in every namespace "
+        "(no restart). New apps stop trusting it at once; apps that are "
+        "already running keep the old trust until they restart. HTTPS "
+        "interception stops working after this."
+    ),
+    parameters={"type": "object", "properties": {}, "required": []},
+    risk=RiskTier.CONSEQUENTIAL,
+    category="frida",
+)
+def remove_ca_certificate() -> dict[str, Any]:
+    """Uninstall the CA (every swept namespace, init's mounts) and forget it.
+
+    Real integration point:
+    :meth:`sandroid.core.proxy_manager.CAManager.uninject_ca`. Also clears
+    the re-inject intent, so a later snapshot load does not put it back.
+
+    Returns:
+        ``{"success": bool, "message": str}``; the message says that running
+        apps keep the old trust until they restart.
+    """
+    manager = _get_ca_manager()
+    success, message = manager.uninject_ca()
+    return {"success": success, "message": message}

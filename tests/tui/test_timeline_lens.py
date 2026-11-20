@@ -2405,6 +2405,32 @@ def test_masked_and_uncertain_lines_use_words_and_colour_not_symbols(
     assert time_seg.style.color.triplet.hex == DEFAULT_LENS.warn
 
 
+def test_a_masked_row_never_shows_the_typed_text(monkeypatch) -> None:
+    """A typed-text summary quotes the text (passwords too): masked, the row,
+    the search and the Inspector show only the count.
+    """
+    import sandroid.tui.widgets.timeline_lens as tl
+
+    line = make_line(
+        1, NOW - 50, "input", "text", sensitive=True,
+        summary="typed \"hunter22\" into password field 'pw'",
+        data={"text": "hunter22",
+              "masked_summary": "typed 8 chars into password field 'pw'"},
+    )  # fmt: skip
+    row = row_from_line(line)
+    assert row.masked_summary == "typed 8 chars into password field 'pw'"
+    assert row.data is None  # a sensitive line keeps no data in the row
+    lens = TimelineLens()
+    lens._apply_rows([row], 0)
+    monkeypatch.setattr(tl, "should_mask_ui", lambda: True)
+    assert "hunter22" not in _row_text(lens, 0)
+    assert "typed 8 chars" in _row_text(lens, 0)
+    monkeypatch.setattr(tl, "should_mask_ui", lambda: False)
+    plain = TimelineLens()
+    plain._apply_rows([row], 0)
+    assert "hunter22" in _row_text(plain, 0)
+
+
 def test_palettes_built_elsewhere_get_user_and_screen_defaults() -> None:
     from dataclasses import asdict
 

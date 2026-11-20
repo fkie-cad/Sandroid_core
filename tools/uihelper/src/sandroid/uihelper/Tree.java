@@ -93,6 +93,14 @@ final class Tree {
         int index;
         int depth;
         int childCount;
+        boolean showingHint;
+        // Web content (from the node's extras, parcelled with it: no extra IPC).
+        String engine; // chromium | gecko (null: not web content)
+        String role; // chromeRole / geckoRole
+        String roleDesc;
+        String href; // Chromium targetUrl of a link
+        String fieldLabel; // Chromium SUPPLEMENTAL_DESCRIPTION_KEY, else the hint
+        int inputType;
         SNode parent;
         SNode[] kids; // null = not loaded yet (live mode only)
         AccessibilityNodeInfo info; // only while live
@@ -192,7 +200,148 @@ final class Tree {
         s.index = index;
         s.depth = depth;
         s.childCount = n.getChildCount();
+        if (Build.VERSION.SDK_INT >= 26) {
+            s.showingHint = n.isShowingHintText();
+        }
+        web(n, s, textMax);
         return s;
+    }
+
+    // ------------------------------------------------------------------ web
+
+    static final String K_CHROME_ROLE = "AccessibilityNodeInfo.chromeRole";
+    static final String K_GECKO_ROLE = "AccessibilityNodeInfo.geckoRole";
+    static final String K_ROLE_DESC = "AccessibilityNodeInfo.roleDescription";
+    static final String K_TARGET_URL = "AccessibilityNodeInfo.targetUrl";
+    static final String K_SUPPL =
+            "androidx.view.accessibility.AccessibilityNodeInfoCompat.SUPPLEMENTAL_DESCRIPTION_KEY";
+
+    /** Roles that name nothing (a tap on them means their interactive ancestor). */
+    private static final java.util.Set<String> GENERIC = new java.util.HashSet<>(Arrays.asList(
+            "section", "genericContainer", "text leaf", "staticText", "paragraph", "generic",
+            "none", "inlineTextBox", "text", "group", "presentational"));
+
+    /** Chromium and Gecko roles of controls a user operates. */
+    private static final java.util.Set<String> INTERACTIVE = new java.util.HashSet<>(Arrays.asList(
+            // Chromium (ax::mojom::Role)
+            "button", "link", "textField", "textFieldWithComboBox", "searchBox", "checkBox",
+            "radioButton", "switch", "comboBoxSelect", "comboBoxMenuButton", "comboBoxGrouping",
+            "popUpButton", "menuItem", "menuItemCheckBox", "menuItemRadio", "menuListOption",
+            "listBoxOption", "tab", "toggleButton", "slider", "spinButton", "treeItem",
+            "disclosureTriangle", "date", "dateTime", "inputTime", "colorWell",
+            // Gecko (nsIAccessibleRole names)
+            "pushbutton", "entry", "password text", "combobox", "combobox option", "checkbutton",
+            "radiobutton", "toggle button", "menuitem", "check menu item", "radio menu item",
+            "option", "page tab", "spinbutton", "buttonmenu", "buttondropdown", "parent menuitem",
+            "outlineitem", "summary"));
+
+    private static String extra(android.os.Bundle b, String key, int max) {
+        Object v = b.get(key);
+        return v == null ? null : str(String.valueOf(v), max);
+    }
+
+    /** Web fields from the node's extras (Chrome / WebView: chromeRole; Firefox: geckoRole). */
+    static void web(AccessibilityNodeInfo n, SNode s, int textMax) {
+        try {
+            s.inputType = n.getInputType();
+            android.os.Bundle b = n.getExtras();
+            if (b == null || b.isEmpty()) {
+                return;
+            }
+            if (b.containsKey(K_CHROME_ROLE)) {
+                s.engine = "chromium";
+                s.role = extra(b, K_CHROME_ROLE, 60);
+            } else if (b.containsKey(K_GECKO_ROLE)) {
+                s.engine = "gecko";
+                s.role = extra(b, K_GECKO_ROLE, 60);
+            } else {
+                return;
+            }
+            s.roleDesc = extra(b, K_ROLE_DESC, 60);
+            s.href = extra(b, K_TARGET_URL, 1000);
+            s.fieldLabel = extra(b, K_SUPPL, textMax);
+            if (s.fieldLabel == null) {
+                s.fieldLabel = s.hint; // Gecko puts a field's label into the hint
+            }
+        } catch (Throwable ignored) {
+            // a malformed bundle: no web fields
+        }
+    }
+
+    static boolean genericWeb(SNode s) {
+        return s.engine != null && (s.role == null || GENERIC.contains(s.role));
+    }
+
+    static boolean interactiveWeb(SNode s) {
+        return s.engine != null && s.role != null && INTERACTIVE.contains(s.role);
+    }
+
+    /**
+     * A web hit with a generic role (a span inside a button, the text of a
+     * link): its nearest ancestor with an interactive role, at most 3 levels
+     * up; null when there is none (or the hit is not generic web content).
+     */
+    static SNode webControl(SNode hit) {
+        if (hit == null || !genericWeb(hit)) {
+            return null;
+        }
+        SNode s = hit.parent;
+        for (int i = 0; i < 3 && s != null; i++, s = s.parent) {
+            if (interactiveWeb(s)) {
+                return s;
+            }
+            if (s.engine == null) {
+                break; // left the web content
+            }
+        }
+        return null;
+    }
+
+    /** A web document root: Chromium rootWebArea, Gecko document (or its WebView). */
+    static boolean webDocument(SNode s) {
+        if (s.engine == null) {
+            return false;
+        }
+        if ("rootWebArea".equals(s.role) || "document".equals(s.role)) {
+            return true;
+        }
+        return "gecko".equals(s.engine) && "android.webkit.WebView".equals(s.cls);
+    }
+
+    /** The title of a web document node. */
+    static String webTitle(SNode s) {
+        if ("chromium".equals(s.engine) && s.fieldLabel != null) {
+            return s.fieldLabel;
+        }
+        return s.text != null ? s.text : s.desc;
+    }
+
+    /**
+     * Nothing under the finger but the web container itself: a WebView,
+     * a document root, Firefox's engineView (Gecko builds the tree lazily),
+     * or Chrome's compositor view without its web content (Chrome drops the
+     * page's tree while no accessibility client asked for a while).
+     */
+    static boolean bareWeb(SNode h) {
+        if (h == null) {
+            return false;
+        }
+        if ("android.webkit.WebView".equals(h.cls) || webDocument(h)) {
+            return true;
+        }
+        if (h.rid != null && h.rid.endsWith(":id/engineView")) {
+            return true;
+        }
+        if (h.engine != null) {
+            return false;
+        }
+        SNode s = h;
+        for (int i = 0; i < 3 && s != null; i++, s = s.parent) {
+            if (s.rid != null && s.rid.endsWith(":id/compositor_view_holder")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static SWindow copyWindow(AccessibilityWindowInfo w) {
@@ -479,6 +628,21 @@ final class Tree {
         }
         if (n.drawingOrder != 0) {
             o.put("z", n.drawingOrder);
+        }
+        flag(o, "showing_hint", n.showingHint);
+        if (n.engine != null) {
+            JSONObject w = new JSONObject();
+            w.put("engine", n.engine);
+            w.putOpt("role", n.role);
+            w.putOpt("role_desc", n.roleDesc);
+            w.putOpt("href", n.href);
+            w.putOpt("label", n.fieldLabel);
+            if (n.inputType != 0) {
+                w.put("input_type", n.inputType);
+            }
+            o.put("web", w);
+        } else if (n.inputType != 0) {
+            o.put("input_type", n.inputType);
         }
         return o;
     }

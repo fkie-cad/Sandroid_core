@@ -93,6 +93,7 @@ tracking:
   shot_screen_change: true
   shot_after_tap: false
   shot_label: false
+  mark_screenshots: false  # also store a marked copy of input shots
   settle_interval_ms: 300
   settle_max_ms: 2000
   capture_text: true
