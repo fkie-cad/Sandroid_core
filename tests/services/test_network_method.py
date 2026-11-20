@@ -860,7 +860,11 @@ def test_status_line_never_claims_apps_named_when_some_are_not():
     assert "2 apps not named yet (repairing)" in partial.problems
     failed = nm.derive_method(replace(WHOLE, attribution="failed"))
     assert "apps not named (identity relay not running)" in failed.problems
-    direct = nm.derive_method(replace(WHOLE, kill_switch=False, attribution="failed"))
+    direct = nm.derive_method(
+        replace(
+            WHOLE, kill_switch=False, attribution="failed", naming_problem="relay_down"
+        )
+    )
     assert direct.preset == nm.CUSTOM
     assert any("go direct past Mitmproxy" in p for p in direct.problems)
     v4 = nm.derive_method(replace(WHOLE, ks_ipv6=False))
@@ -921,6 +925,9 @@ def test_mitmproxy_shutdown_never_waits_long_for_the_guard(monkeypatch):
     calls = []
 
     class Guard:
+        def begin_shutdown(self):
+            calls.append("closing")
+
         def serials_with_state(self):
             return ["emulator-5570"]
 
@@ -934,7 +941,7 @@ def test_mitmproxy_shutdown_never_waits_long_for_the_guard(monkeypatch):
     svc._lock = threading.RLock()
     monkeypatch.setattr(svc, "release_device_proxy", lambda *a, **k: False)
     svc.shutdown(timeout=0.1)
-    assert calls == [("emulator-5570", {"lock_timeout": 1.0})]
+    assert calls == ["closing", ("emulator-5570", {"lock_timeout": 1.0})]
 
 
 def test_app_proxy_lanes_are_read_per_device():
@@ -974,3 +981,249 @@ def test_unnamed_device_flow_triggers_a_throttled_refresh(monkeypatch):
     service._on_mitm_line(named)
     service._on_mitm_line(lane)
     assert kicked == [1]
+
+
+# -- re-E2E fixes (e2e-netmethod-2.md) ---------------------------------------------
+
+
+def test_quit_during_an_apply_leaves_nothing_behind(monkeypatch):
+    """B1: quit while Whole device is half way: the apply stops between two
+    steps, the guard refuses every install once its teardown started, and
+    a refresh worker never relaunches the relay afterwards.
+    """
+    import threading
+
+    from sandroid.core import device_guard as dg
+    from sandroid.tui.controllers import quit_controller as qc
+
+    guard = dg.DeviceGuard()
+    installs = []
+    monkeypatch.setattr(dg, "_INSTANCE", guard)
+    monkeypatch.setattr(
+        guard,
+        "_apply_locked",
+        lambda serial, endpoint, ours, obs: installs.append(serial) or dg.GuardView(),
+    )
+    monkeypatch.setattr(guard, "_root", lambda serial: True)
+    monkeypatch.setattr(guard, "_publish", staticmethod(lambda serial: None))
+    removed = []
+    monkeypatch.setattr(
+        guard, "_observe", lambda serial, uids: dg.parse_guard_observation("rc=0")
+    )
+    monkeypatch.setattr(guard, "_run", lambda serial, cmds: removed.extend(cmds) or [])
+
+    in_step = threading.Event()
+    release = threading.Event()
+    ran = []
+
+    class Actions:
+        def run(self, step, serial):
+            ran.append(step[0])
+            if step[0] == "prepare_guard":
+                guard.prepare(
+                    serial,
+                    dg.Endpoint("10.0.2.2", 8080),
+                    kill_switch=True,
+                )
+                in_step.set()
+                release.wait(5)
+            if step[0] == "set_device_proxy":
+                # The proxy write's follow-up: refused once quitting.
+                guard.after_device_proxy_write(serial, "10.0.2.2:8080")
+            return True, step[0]
+
+    service = nm.NetworkMethodService(actions=Actions())
+    monkeypatch.setattr(service, "gather", lambda **kw: BASE)
+    monkeypatch.setattr(nm, "_INSTANCE", service)
+    monkeypatch.setattr(
+        "sandroid.core.adb.Adb.get_target_device",
+        staticmethod(lambda: "emulator-5570"),
+    )
+    results = []
+    worker = threading.Thread(
+        target=lambda: results.append(service.apply(nm.WHOLE_DEVICE))
+    )
+    worker.start()
+    assert in_step.wait(5)
+    installs.clear()  # prepare_guard ran before the quit
+    quitter = threading.Thread(target=lambda: qc.shutdown_network(timeout=2.0))
+    quitter.start()
+    for _ in range(100):
+        if guard.closing or service._abort.is_set():
+            break
+        threading.Event().wait(0.01)
+    release.set()
+    worker.join(5)
+    quitter.join(10)
+    assert results
+    assert not results[0].ok
+    assert "set_device_proxy" not in ran  # stopped between steps
+    assert installs == []  # nothing installed after the quit started
+    assert guard.closing
+    # A refresh worker after the quit: no repair, no relay launch.
+    assert service.apply(nm.WHOLE_DEVICE).message == "Sandroid is quitting"
+    guard._named_for["emulator-5570"] = dg.Endpoint("10.0.2.2", 8080)
+    monkeypatch.setattr(
+        guard,
+        "_observe",
+        lambda serial, uids: dg.parse_guard_observation(
+            "DP -A sandroid_dp -p tcp -m owner --uid-owner 10215 -j REDIRECT "
+            "--to-ports 61000\nPROXY 10.0.2.2:8080\nrc=0"
+        ),
+    )
+    guard.refresh("emulator-5570", repair=True)
+    assert installs == []
+
+
+def test_guard_refuses_installs_once_closing(monkeypatch):
+    from sandroid.core import device_guard as dg
+
+    guard = dg.DeviceGuard()
+    monkeypatch.setattr(
+        guard, "_apply_locked", lambda *a: pytest.fail("installed while quitting")
+    )
+    guard.begin_shutdown()
+    guard.prepare("emu-1", dg.Endpoint("10.0.2.2", 8080), kill_switch=True)
+    guard.after_device_proxy_write("emu-1", "10.0.2.2:8080")
+    ok, _msg = guard.set_kill_switch(False, "emu-1")
+    assert guard.view_cached("emu-1") == dg.GuardView()
+
+
+def test_new_android_user_is_reported_and_covered():
+    """B2: a user created after Whole device: the line says it is not
+    covered (no plain "direct traffic refused"), and the repair adds it.
+    """
+    snap = replace(WHOLE, uncovered_users=(11,))
+    view = nm.derive_method(snap)
+    assert "not covered: Android user 11 (repairing)" in view.problems
+    assert "direct traffic refused" not in view.covered
+    assert "direct traffic refused for the covered users" in view.covered
+
+
+def test_remembering_replace_external_is_impossible(tmp_path):
+    """B3 with the real permission store: (a) no "don't ask again" for
+    replace_external=true and no allow rule covers it; (b) a rule on
+    ``method`` only (the old suggestion, or written by hand) never matches a
+    multi-key tool.
+    """
+    from sandroid.ai.tool_permissions import ToolPermissionStore
+    from sandroid.ai.tools.registry import RiskTier
+
+    spec = _spec("set_network_method")
+    true_args = {"method": "whole_device", "replace_external": True}
+    false_args = {"method": "whole_device", "replace_external": False}
+    assert _remembered(spec.name, true_args) is None
+    store = ToolPermissionStore(tmp_path / "perm.toml")
+
+    def resolve(args):
+        return store.resolve(
+            spec.name,
+            RiskTier.CONSEQUENTIAL,
+            args,
+            permission_key=spec.permission_key,
+            can_remember_choice=spec.can_remember_choice,
+        )
+
+    assert resolve(true_args).suggested_rule is None
+    store.add_allow_rule(
+        "set_network_method(method=whole_device, replace_external=true)"
+    )
+    store.add_allow_rule("set_network_method(method=whole_device)")
+    assert resolve(true_args).outcome == "ask"
+    assert resolve(false_args).outcome == "ask"  # the method-only rule is void
+    store.add_allow_rule(
+        "set_network_method(method=whole_device, replace_external=false)"
+    )
+    assert resolve(false_args).outcome == "allow"
+    assert resolve(true_args).outcome == "ask"
+
+
+def test_dead_relay_shows_its_real_effect():
+    """B4: a dead relay refuses every proxy connection; a missing jump only
+    leaves apps unnamed: the line says which.
+    """
+    down = nm.derive_method(
+        replace(WHOLE, attribution="failed", naming_problem="relay_down")
+    )
+    assert (
+        "device proxy connections refused: identity relay down, repairing "
+        "(apps have no network meanwhile)" in down.problems
+    )
+    jump = nm.derive_method(
+        replace(WHOLE, attribution="failed", naming_problem="jump_missing")
+    )
+    assert "apps not named (the proxy-port rule is missing, repairing)" in (
+        jump.problems
+    )
+
+
+def test_health_check_runs_only_while_our_proxy_is_on(monkeypatch):
+    """B4: the subscribed service re-checks every HEALTH_S on a worker while
+    Whole device is on, so a dead relay is repaired on any tab.
+    """
+    import threading
+
+    service = nm.NetworkMethodService(actions=None)
+    service._subscribed = True
+    monkeypatch.setattr(service, "HEALTH_S", 0.01)
+    kicked = threading.Event()
+    monkeypatch.setattr(service, "refresh", lambda **kw: kicked.set())
+    service._store(BASE)
+    assert service._health is None  # Off: no checks
+    service._store(WHOLE)
+    assert kicked.wait(2)
+    service._abort.set()
+    service._health.join(2)
+    assert not service._health.is_alive()
+
+
+def test_apply_on_another_device_reports_that_device(monkeypatch):
+    """B5: apply(serial=X) returns X's method and never replaces the selected
+    device's line; the CA state is kept per device.
+    """
+    from sandroid.core.adb import Adb
+
+    rec = _Recorder()
+    service = nm.NetworkMethodService(actions=rec)
+    service._store(WHOLE)
+    other = replace(BASE)
+    monkeypatch.setattr(service, "gather", lambda **kw: other)
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5570")
+    result = service.apply(nm.OFF, serial="emulator-5572")
+    assert result.view.preset == nm.OFF
+    assert result.message == "Network method: Off"
+    assert service.view_cached().preset == nm.WHOLE_DEVICE  # 5570 untouched
+    service.note_ca(False, "emulator-5572")
+    service.note_ca(True, "emulator-5570")
+    assert service._ca == {"emulator-5572": "missing", "emulator-5570": "installed"}
+
+
+def test_step_messages_reach_the_ai_in_plain_words():
+    """O1: messages from other services lose their symbols and "armed"."""
+    text = nm.plain_words(
+        "SSL Pinning Bypass (experimental) armed \u2014 \u2423 starts de.fkie.x with it"
+    )
+    assert "armed" not in text
+    assert text == (
+        "SSL Pinning Bypass (experimental) set for the next app start - Space "
+        "starts de.fkie.x with it"
+    )
+    assert nm.plain_words("App proxy \u2192 com.x (lane 0)") == (
+        "App proxy to com.x (lane 0)"
+    )
+
+    class Actions:
+        def run(self, step, serial):
+            return True, "App proxy \u2192 com.x"
+
+    _ok, done, _ = nm.execute_plan(nm.ApplyPlan(steps=[("x",)]), Actions(), None)
+    assert done == ["App proxy to com.x"]
+
+
+def test_keys_only_takes_the_proxy_away_before_the_app_starts():
+    """O2: the app's first requests must not go through Mitmproxy."""
+    plan = nm.plan_apply(nm.KEYS_ONLY, WHOLE, defeat_pinning=True)
+    names = _names(plan)
+    assert names.index("clear_device_proxy") < names.index("start_app")
+    assert names.index("kill_switch_off") < names.index("start_app")
+    assert names[-1] == "start_fritap_keys"
