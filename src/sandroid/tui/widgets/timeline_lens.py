@@ -1007,7 +1007,7 @@ class TimelineLens(Vertical):
     can_focus = True
 
     BINDINGS = [
-        Binding("space", "toggle_follow", "Live", key_display="␣"),
+        Binding("space", "toggle_follow", "Live"),
         Binding("end", "newest", "Newest row, live", show=False),
         Binding("home", "oldest", "Oldest / load more", show=False),
         Binding("slash", "filter", "Filter", show=False),

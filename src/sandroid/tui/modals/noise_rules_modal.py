@@ -4,7 +4,7 @@ Opened with ``R`` on the Files lens. Shows every hide / group rule in order
 and applies each change at once: the lens re-draws and the rules are saved to
 the config (``sandroid.config.update_config``, the same mechanism as the
 Settings screen). Keys: Space toggles the highlighted rule, Delete (or
-``d``) removes it, the row below adds one (action, kind, pattern, ⏎),
+``d``) removes it, the row below adds one (action, kind, pattern, Enter),
 "Reset to defaults" restores the shipped rules. Esc closes.
 
 Rule kinds: ``prefix`` (absolute path starts with), ``segment`` (a
@@ -155,7 +155,7 @@ class NoiseRulesModal(ForensicModal[None]):
             yield KeyHintFooter(
                 hints={
                     "default": "[dim]Space on/off  Del remove  Tab to the add "
-                    "row  ⏎ add  Esc close[/dim]"
+                    "row  Enter add  Esc close[/dim]"
                 }
             )
 
