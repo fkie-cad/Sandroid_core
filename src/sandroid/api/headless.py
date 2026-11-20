@@ -401,6 +401,8 @@ class SandroidHeadlessAPI(SandroidAPI):
                     **kwargs,
                 )
             elif mode == AnalysisMode.FORENSIC:
+                if package:
+                    kwargs.setdefault("package", package)
                 results = await run_forensic_analysis(
                     toolbox=self._toolbox,
                     runs=runs,

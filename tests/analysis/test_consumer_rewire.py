@@ -196,14 +196,69 @@ def test_headless_malware_returns_engine_dict(monkeypatch):
 
     spotlight.set_app.assert_called_once_with("com.evil.app")
     assert b"tmp" in toolbox.snapshots
-    # No scripted action (TrigDroid is gone): a plain capture window.
+    # No scripted action (TrigDroid is gone) and, like the old runner that
+    # returned at once, no wait by default.
     assert configs[0].action is None
-    assert configs[0].capture_window == 60
+    assert configs[0].capture_window == 0
 
     expected = json.loads(json.dumps(canned.to_json_dict(), default=json_encoder))
     assert result == expected
     assert result["Device Name"] == "emu-test"
     assert result["New Files"] == ["/data/new.txt"]
+
+
+def test_headless_malware_respects_an_explicit_capture_window(monkeypatch):
+    configs = []
+    monkeypatch.setattr(
+        AnalysisEngine,
+        "run",
+        lambda self: configs.append(self.config) or _canned_result(),
+    )
+    monkeypatch.setattr(analysis_runners, "_apply_network_degradation", lambda d: None)
+    from sandroid import services
+
+    monkeypatch.setattr(services, "get_spotlight_service", lambda: MagicMock())
+
+    asyncio.run(
+        analysis_runners.run_malware_analysis(
+            toolbox=_FakeToolbox(),
+            package="com.evil.app",
+            runs=2,
+            capture_network=False,
+            compute_hashes=False,
+            capture_window=15,
+        )
+    )
+    assert configs[0].capture_window == 15
+
+
+def test_headless_forensic_protects_the_given_package(monkeypatch):
+    """``--headless --mode forensic -p PKG`` keeps PKG out of the noise
+    filter (``--trigdroid PKG`` did so via ``trigdroid.package_name``).
+    """
+    configs = []
+    monkeypatch.setattr(
+        AnalysisEngine,
+        "run",
+        lambda self: configs.append(self.config) or _canned_result(),
+    )
+    for package, expected in (("com.x.app", ["com.x.app"]), (None, [])):
+        configs.clear()
+        asyncio.run(
+            analysis_runners.run_forensic_analysis(
+                toolbox=_FakeToolbox(),
+                runs=2,
+                track_deleted=False,
+                compute_hashes=False,
+                capture_window=0,
+                package=package,
+            )
+        )
+        assert configs[0].target_packages == expected
+        _enabled, _patterns, protected = configs[0].noise_settings()
+        assert all(p in protected for p in expected)
+    mixed = RunConfig(target_packages=["a"], protected_packages=["b"])
+    assert mixed.noise_settings()[2] == ["b", "a"]
 
 
 def test_headless_forensic_returns_engine_dict_with_metadata(monkeypatch):

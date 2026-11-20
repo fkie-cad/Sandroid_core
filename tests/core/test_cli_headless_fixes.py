@@ -1004,6 +1004,25 @@ def test_headless_api_keeps_run_documentation(monkeypatch):
     assert api.last_run_documentation == "DOC"
 
 
+def test_headless_api_forwards_the_forensic_package(monkeypatch):
+    from sandroid.api import headless
+    from sandroid.api.interfaces import AnalysisMode
+
+    seen = []
+
+    async def fake_forensic(**kwargs):
+        seen.append(kwargs.get("package"))
+        return {}
+
+    monkeypatch.setattr(headless, "run_forensic_analysis", fake_forensic)
+    _device_ok(monkeypatch)
+    api = headless.SandroidHeadlessAPI(config=SimpleNamespace())
+    api._initialized = True
+    asyncio.run(api.run_analysis(AnalysisMode.FORENSIC, package="com.x.app"))
+    asyncio.run(api.run_analysis(AnalysisMode.FORENSIC))
+    assert seen == ["com.x.app", None]
+
+
 def test_batch_reports_documentation_errors_and_exits_nonzero(monkeypatch, tmp_path):
     import json as _json
 

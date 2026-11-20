@@ -121,11 +121,12 @@ class AnalysisConfig:
         whitelist: Optional path to a whitelist file whose listed paths are
             excluded from analysis (``None`` disables whitelisting)
         capture_window: Seconds to wait for filesystem changes before
-            scanning, for a run with no driving action (``FORENSIC`` and
-            ``MALWARE``, which pass ``action=None``). Ignored for
-            action-driven runs (recording playback), which measure their
-            own real elapsed duration instead. 60s matches this API's
-            existing headless network-capture default (``cli.py --duration``).
+            scanning, for a run with no driving action (``FORENSIC``'s
+            prompted window). Ignored for action-driven runs (recording
+            playback), which measure their own real elapsed duration
+            instead. 60s matches this API's existing headless network-capture
+            default (``cli.py --duration``). ``MALWARE`` runs default to 0
+            unless ``capture_window`` is passed explicitly.
     """
 
     number_of_runs: int = 2

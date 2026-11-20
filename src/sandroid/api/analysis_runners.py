@@ -307,10 +307,11 @@ async def run_malware_analysis(
     3. Optionally degrades the emulated network
     4. Executes the unified :class:`~sandroid.analysis.engine.AnalysisEngine`
        with no scripted action (a capture window of ``capture_window``
-       seconds) and returns the JSON-safe result dict
+       seconds, default 0) and returns the JSON-safe result dict
 
-    Malware mode performs no trigger actions: scripted device events will
-    come as playbooks.
+    Malware mode performs no scripted actions until device playbooks land.
+    Its capture window defaults to 0 s (the old trigger runner returned at
+    once, so runs kept their timing); pass ``capture_window`` to wait.
 
     Args:
         toolbox: The Toolbox class reference.
@@ -321,7 +322,8 @@ async def run_malware_analysis(
         current_run_setter: Optional callback to update current run number.
         **kwargs: Additional mode-specific options (``track_deleted``,
             ``monitor_processes``, ``monitor_sockets``, ``skip_noise_filter``,
-            ``degrade_network``, ``pull_apk``, ``whitelist``).
+            ``degrade_network``, ``pull_apk``, ``whitelist``,
+            ``capture_window``).
 
     Returns:
         Dictionary with malware analysis results.
@@ -345,6 +347,8 @@ async def run_malware_analysis(
     # 4. Build the typed config (unset toggles follow [analysis]) and run the
     #    unified engine.
     options = {k: v for k, v in kwargs.items() if k != "track_deleted"}
+    # No scripted action and no prompt: no wait unless the caller asks for it.
+    options.setdefault("capture_window", 0)
     ac = resolve_analysis_config(
         toolbox,
         runs=runs,
@@ -406,7 +410,8 @@ async def run_forensic_analysis(
         compute_hashes: Compute file hashes.
         current_run_setter: Optional callback to update current run number.
         **kwargs: Additional mode-specific options (``capture_window``,
-            ``window_notify``, ``recording_path``, ``on_finalized``, ...).
+            ``window_notify``, ``recording_path``, ``on_finalized``,
+            ``package`` -- a target protected from noise filtering, ...).
 
     Returns:
         Dictionary with forensic analysis results in the unified
@@ -445,6 +450,11 @@ async def run_forensic_analysis(
     run_config = RunConfig.from_analysis_config(
         ac, action=action, whitelist=ac.whitelist
     )
+    package = kwargs.get("package")
+    if isinstance(package, str) and package:
+        # ``--headless --mode forensic -p PKG``: the run observes the whole
+        # device, but PKG's own changes are never filtered as noise.
+        run_config.target_packages = [package]
     _pin_result_dir(run_config, kwargs.get("result_dir"))
 
     from sandroid.core.run_report import iso_now
