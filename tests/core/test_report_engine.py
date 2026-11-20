@@ -2301,3 +2301,58 @@ def test_a_web_form_control_is_named_by_its_label():
     target = {"rid": "chk", "cls": "android.widget.CheckBox",
               "web": {"field": "I agree", "role": "check box"}}  # fmt: skip
     assert report_engine.element_name(target) == "I agree"
+
+
+def test_a_masked_copy_hides_quoted_text_and_marked_images():
+    """annotate_rerender with masking on: the summary that quotes typed text
+    becomes the count, a marked copy gives way to the original.
+    """
+    marked = {"type": "image", "path": "m.png", "sha256": "m" * 64, "marked": True,
+              "original": {"path": "o.png", "sha256": "o" * 64}}  # fmt: skip
+    doc = {"sections": [{"blocks": [
+        {"type": "transcript_step", "sensitive": True, "kind": "text",
+         "src": "input", "text": "hunter2",
+         "summary": "typed \"hunter2\" into password field 'pw'",
+         "masked_summary": "typed 7 chars into password field 'pw'",
+         "shots": [dict(marked)]},
+        {"type": "transcript_step", "sensitive": True, "kind": "text",
+         "src": "input", "text": "hunter2",
+         "summary": "typed \"hunter2\" into password field 'pw'"},
+        {"type": "transcript_step", "kind": "window", "src": "screen",
+         "summary": "screen", "shots": [{**marked, "sensitive": True}]},
+    ]}]}  # fmt: skip
+    out = report_engine.annotate_rerender(doc, "gone", mask_sensitive=True)
+    blocks = [
+        b
+        for sec in out["sections"]
+        for b in sec["blocks"]
+        if b.get("type") == "transcript_step"
+    ]
+    assert "hunter2" not in json.dumps(blocks)
+    assert blocks[0]["summary"] == "typed 7 chars into password field 'pw'"
+    assert blocks[1]["summary"] == "typed text (masked)"  # an older report
+    for shot in (blocks[0]["shots"][0], blocks[2]["shots"][0]):
+        assert shot["path"] == "o.png"
+        assert shot["sha256"] == "o" * 64
+        assert "marked" not in shot
+
+
+def test_a_sensitive_step_keeps_its_masked_summary_for_later_copies():
+    ctx = report_engine.ReportContext(
+        scope=report_engine.ReportScope(),
+        options=report_engine.ReportOptions(),
+        masked=False,
+        generated_at="2026-11-20T12:00:00+00:00",
+    )
+    line = {"seq": 3, "src": "input", "kind": "text", "sensitive": True,
+            "summary": "typed \"hunter2\" into password field 'pw'",
+            "data": {"text": "hunter2", "password": True,
+                     "masked_summary": "typed 7 chars into password field 'pw'"}}  # fmt: skip
+    step = report_engine._step(
+        ctx, line, screen=None, shots=report_engine._Shots(ctx, []),
+        confirmed=set(), label=[],
+    )  # fmt: skip
+    assert step["masked_summary"] == "typed 7 chars into password field 'pw'"
+    copy_doc = {"sections": [{"blocks": [step]}]}
+    out = report_engine.annotate_rerender(copy_doc, "gone", mask_sensitive=True)
+    assert "hunter2" not in json.dumps(out["sections"])

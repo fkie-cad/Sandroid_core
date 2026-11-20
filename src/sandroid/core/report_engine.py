@@ -1660,6 +1660,8 @@ def _image_block(ctx: ReportContext, line: Mapping[str, Any]) -> dict[str, Any]:
         "dup_of": d.get("dup_of"),
         "caption": f"{trigger.replace('_', ' ')} · #{line.get('seq')}",
     }
+    if line.get("sensitive"):
+        block["sensitive"] = True
     rel = ref.get("path")
     block["path"] = _shot_path(ctx, rel)
     if not rel or d.get("error"):
@@ -1919,6 +1921,9 @@ def _step(
     }
     if line.get("sensitive"):
         step["sensitive"] = True
+        if isinstance(d.get("masked_summary"), str):
+            # the summary quotes typed text: a copy masked later shows this
+            step["masked_summary"] = d["masked_summary"]
     masked = bool(d.get("_masked"))
     if masked:
         step["masked"] = True
@@ -2721,11 +2726,27 @@ def _mask_copied(node: Any) -> int:
             if "text" in node or node.get("kind") == "text":
                 node["text"] = None
                 node["text_masked"] = True
+            if isinstance(node.get("masked_summary"), str):
+                node["summary"] = node["masked_summary"]
+            elif node.get("src") == "input" and node.get("kind") == "text":
+                node["summary"] = "typed text (masked)"  # an older report
+            for shot in node.get("shots") or []:
+                if isinstance(shot, dict):
+                    shot["sensitive"] = True  # a marked copy gives way to the original
             if node.get("src") == "screen":
                 node["screen"] = {"summary": node.get("summary")}
             node["masked"] = True
             count += 1
-        for value in node.values():
+        if (
+            node.get("type") == "image"
+            and node.get("sensitive")
+            and isinstance(node.get("original"), dict)
+        ):
+            # the marked copy can show what was typed: back to the original
+            original = node.pop("original")
+            node.pop("marked", None)
+            node.update(original)
+        for value in list(node.values()):
             count += _mask_copied(value)
     elif isinstance(node, list):
         for value in node:
