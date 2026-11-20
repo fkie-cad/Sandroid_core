@@ -54,7 +54,7 @@ from sandroid.tui.modals.base import KeyHintFooter
 from sandroid.tui.modals.input_modal import InputModal
 from sandroid.tui.themes import lens_palette
 from sandroid.tui.utils.ui_thread import UiDispatcher
-from sandroid.tui.widgets.lens_shell import InspectorContent
+from sandroid.tui.widgets.lens_shell import InspectorContent, is_shown
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -683,6 +683,9 @@ class IdentityLens(Vertical):
         #: (package, pid) of the spotlight app that ran during the last apply.
         self._stale_app: tuple[str, int] | None = None
         self._inspector_sig: tuple | None = None
+        #: (serial, profile id) the lens read the device for on its own (a
+        #: TUI restart starts without statuses; see _auto_read).
+        self._auto_read_done: set[tuple[str, str]] = set()
 
     # -- compose / mount ---------------------------------------------------
 
@@ -839,6 +842,44 @@ class IdentityLens(Vertical):
             count, profile, error = result
         self.library_count, self.profile, self.profile_error = count, profile, error
         self.refresh_data()
+        self._auto_read()
+
+    def _auto_read(self) -> None:
+        """Read the device once in the background when there are no statuses.
+
+        After a TUI restart the service has no statuses yet and every value
+        would show "pending" until ``v``. The first time the lens is shown
+        with identity mode on and a device targeted, it plans (one read, no
+        writes) in a thread worker; the statuses arrive through the status
+        listener. Once per device and profile, never on the UI thread.
+        """
+        if self._statuses or self.profile is None or not is_shown(self):
+            return
+        ident = identity_service()
+        if ident is None:
+            return
+        try:
+            if ident.config().mode != "profile":
+                return
+        except Exception:
+            return
+        serial = _target_serial()
+        if not serial:
+            return
+        key = (serial, self.profile.id)
+        if key in self._auto_read_done:
+            return
+        self._auto_read_done.add(key)
+
+        def done(result: Any) -> None:
+            if isinstance(result, Exception):
+                logger.info(f"identity lens: reading the device failed: {result}")
+                return
+            if not self._statuses:
+                self._statuses = {i.id: i for i in result.infos.values()}
+                self.refresh_data()
+
+        self._run_bg(lambda: ident.plan(serial), done, group="identity-auto-read")
 
     def refresh_data(self) -> None:
         """Rebuild rows from the profile, statuses and hits (UI thread)."""

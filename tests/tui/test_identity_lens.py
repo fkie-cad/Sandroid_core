@@ -391,6 +391,63 @@ async def test_key_6_shows_the_table_with_status_words_and_no_glyphs(fakes) -> N
         assert not set(GLYPHS) & set(text), text
 
 
+def _no_statuses_yet(fakes, monkeypatch) -> list[str]:
+    """A TUI restart: the service has no statuses; ``plan`` calls recorded."""
+    planned: list[str] = []
+    real_plan = fakes.ident.plan
+
+    def plan(serial, package=None):
+        planned.append(serial)
+        return real_plan(serial, package)
+
+    monkeypatch.setattr(fakes.ident, "statuses", list)
+    monkeypatch.setattr(fakes.ident, "plan", plan)
+    return planned
+
+
+async def test_statuses_are_read_once_without_v_after_a_restart(
+    fakes, monkeypatch
+) -> None:
+    planned = _no_statuses_yet(fakes, monkeypatch)
+    fakes.ident.block = threading.Event()  # the device read takes a while
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        lens = await _open_lens(app, pilot)
+        await until(pilot, lambda: planned == [SERIAL])
+        # The read runs off the UI thread: the lens keeps answering.
+        assert _cell(lens, "gaid", "status") == "pending"
+        lens.select_value("timezone")
+        await settle(pilot)
+        fakes.ident.block.set()
+        await until(pilot, lambda: _cell(lens, "gaid", "status") == "verified")
+        assert _cell(lens, "android_id", "status") == "failed"
+        assert fakes.ident.verified == []  # a plan: no verify, no writes
+        assert fakes.ident.applied == []
+        # Once: showing the lens again reads nothing more.
+        await pilot.press("1")
+        await settle(pilot)
+        await pilot.press("6")
+        await settle(pilot)
+        assert planned == [SERIAL]
+
+
+async def test_no_background_read_with_identity_mode_off_or_no_device(
+    fakes, monkeypatch
+) -> None:
+    planned = _no_statuses_yet(fakes, monkeypatch)
+    fakes.ident.cfg.mode = "off"
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        lens = await _open_lens(app, pilot)
+        await settle(pilot)
+        assert planned == []
+        fakes.ident.cfg.mode = "profile"
+        monkeypatch.setattr(il, "_target_serial", lambda: None)
+        lens.reload()
+        await settle(pilot)
+        assert planned == []
+
+
 async def test_found_column_reflects_hits_and_tints_rows(fakes) -> None:
     fakes.privacy.records = _hits()
     app = _app()
