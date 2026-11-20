@@ -557,6 +557,23 @@ def _reset_timeline():
     _real_tl.reset_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _reset_network_method():
+    """Drop the Network method service and the device guard after every test.
+
+    The service follows process-wide events: a singleton left by one test
+    would read the (stub) device whenever a later test changes a proxy.
+    """
+    yield
+    method = sys.modules.get("sandroid.services.network_method")
+    if method is not None and method._INSTANCE is not None:
+        method._INSTANCE.unsubscribe()
+        method._INSTANCE = None
+    guard = sys.modules.get("sandroid.core.device_guard")
+    if guard is not None:
+        guard._INSTANCE = None
+
+
 @pytest.fixture
 def timeline_sink(tmp_path):
     """A bound session timeline: ``(service, path of timeline.jsonl)``.

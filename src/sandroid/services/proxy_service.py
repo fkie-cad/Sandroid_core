@@ -203,6 +203,7 @@ class ProxyService:
 
         self._logger.info(f"Proxy set to {ip}:{port}")
         self._publish_proxy_changed(ip, port)
+        self._after_write(f"{ip}:{port}")
         return True
 
     def clear_proxy(self) -> bool:
@@ -224,6 +225,7 @@ class ProxyService:
 
         self._logger.info("Proxy unset successfully")
         self._publish_proxy_changed(None, None)
+        self._after_write(None)
         return True
 
     def toggle_proxy(
@@ -292,6 +294,20 @@ class ProxyService:
     # =========================================================================
     # Event Publishing
     # =========================================================================
+
+    def _after_write(self, address: str | None) -> None:
+        """The one device-proxy hook shared with ``ProxyManager`` (Kill switch,
+        app naming, ``device_proxy`` event). Skipped for an injected test
+        adb. Never raises.
+        """
+        if self._adb is not None:
+            return
+        try:
+            from sandroid.core.device_guard import after_device_proxy_write
+
+            after_device_proxy_write(address)
+        except Exception:
+            self._logger.debug("device proxy hook failed", exc_info=True)
 
     def _publish_proxy_changed(self, ip: str | None, port: str | None) -> None:
         """Publish event when proxy settings change."""

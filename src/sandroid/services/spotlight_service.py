@@ -578,13 +578,18 @@ class SpotlightService:
         previous_package: str | None,
         pid: int | None,
     ) -> None:
-        """Publish a spotlight app changed event."""
-        if self._event_bus is None:
-            return
+        """Publish a spotlight app changed event.
 
-        from sandroid.core.events import Event, EventType
+        Falls back to the process-wide EventBus like :meth:`_publish_pid`:
+        the shared instance is built without one, so a spotlight change was
+        never published (the Network method line follows it).
+        """
+        bus = self._event_bus
+        from sandroid.core.events import Event, EventBus, EventType
 
-        self._event_bus.publish(
+        if bus is None:
+            bus = EventBus.get()
+        bus.publish(
             Event(
                 type=EventType.STATE_CHANGED,
                 data={

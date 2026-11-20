@@ -127,6 +127,16 @@ def classify_device_proxy(cfg_ip: str, cfg_port: int, proxy_port: int) -> str:
     return "other"
 
 
+def _after_device_proxy_write(address: str | None) -> None:
+    """Route a device-proxy write through the one guard hook (never raises)."""
+    try:
+        from sandroid.core.device_guard import after_device_proxy_write
+
+        after_device_proxy_write(address)
+    except Exception:
+        logger.debug("device proxy hook failed", exc_info=True)
+
+
 class ProxyStatus(Enum):
     """Status of the HTTP proxy configuration."""
 
@@ -804,6 +814,11 @@ class ProxyManager:
     def set_proxy(self, config: ProxyConfig) -> tuple[bool, str]:
         """Set the HTTP proxy on the device.
 
+        Every device-proxy write ends in
+        :func:`sandroid.core.device_guard.after_device_proxy_write` (the
+        Kill switch follows the endpoint, apps are named, an event repaints
+        the UI).
+
         Args:
             config: ProxyConfig with IP and port.
 
@@ -824,6 +839,7 @@ class ProxyManager:
                 and current.address == config.address
             ):
                 logger.info(f"Proxy set to {config.address}")
+                _after_device_proxy_write(config.address)
                 return True, f"Proxy set to {config.address}"
             return False, "Proxy was not set correctly"
 
@@ -845,6 +861,7 @@ class ProxyManager:
             status, _ = self.get_proxy_settings()
             if status == ProxyStatus.NOT_SET:
                 logger.info("Proxy cleared")
+                _after_device_proxy_write(None)
                 return True, "Proxy cleared"
             return False, "Failed to clear proxy"
 
@@ -2732,6 +2749,17 @@ class FocusManager:
             self._publish_health()
         return len(lanes)
 
+    def ensure_gost(self, serial: str | None) -> tuple[bool, str]:
+        """Make sure *serial* has the gost binary (root needed; blocking).
+
+        Public for the identity relay (``core.device_guard``), which runs the
+        same binary.
+        """
+        with self._lock, Adb.targeting(serial):
+            if not self._ca._check_root_access():
+                return False, "root is needed for gost"
+            return self._ensure_binary()
+
     def focused_apps(self) -> list[str]:
         """Return the packages currently assigned to a lane."""
         with self._lock:
@@ -3459,6 +3487,8 @@ class FocusManager:
                         for tbl, body in self._lane_quic_specs.get(lane, []):
                             self._delete_rule_loop(tbl, body)
                         self._lane_quic_specs.pop(lane, None)
+        # Outside the lock: the Network method line re-reads the QUIC block.
+        self._publish_health()
 
     def cleanup_stale(self) -> None:
         """Remove every tagged rule + stray gost/ipt2socks and clear lane state.

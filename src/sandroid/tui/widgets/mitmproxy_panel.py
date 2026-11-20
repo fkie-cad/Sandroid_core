@@ -550,10 +550,10 @@ class MitmproxyPanel(Widget):
 
     @staticmethod
     def _parse_tls_fail(line: str) -> tuple[str, str, str, str] | None:
-        """``[TLS_FAIL]|HH:MM:SS|host|reason[|app]`` -> (ts, host, reason, app)."""
-        parts = line.split("|", 4)
-        if len(parts) == 5:
-            _, ts, host, reason, app = parts
+        """``[TLS_FAIL]|HH:MM:SS|host|reason[|app[|via]]`` -> (ts, host, reason, app)."""
+        parts = line.split("|")
+        if len(parts) >= 5:
+            _, ts, host, reason, app = parts[:5]
         elif len(parts) == 4:
             _, ts, host, reason = parts
             app = ""
@@ -906,7 +906,15 @@ class MitmproxyPanel(Widget):
         start also arms the Device Proxy, exactly as Ctrl+D would).
         """
         if self._service.is_running():
-            self._disarm()
+            if self._service.kill_switch_holds_proxy():
+                # Whole device / Kill switch: the device proxy and the Kill
+                # switch stay so nothing leaks while Mitmproxy is down.
+                self._append_line(
+                    "[INFO] Kill switch on: the device proxy stays, app traffic "
+                    "is blocked until Mitmproxy runs again"
+                )
+            else:
+                self._disarm()
             self._service.stop()
         else:
             self._service.start()

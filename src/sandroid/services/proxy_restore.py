@@ -7,9 +7,15 @@ lanes (gost + per-UID rules) and the system CA. :func:`restore_proxy_infra`
 puts them back in a fixed order:
 
 1. device proxy (+ ``adb reverse``), when Sandroid owns it on that serial;
-2. App Proxy lanes (reconciled against device truth): a missing lane is a
+   when it has to be set again, the Kill switch and the app naming
+   (``core.device_guard``) go in first (``MitmproxyService.
+   reapply_device_proxy``), so a restored proxy never runs open;
+2. the device guard, checked against the device: the Kill switch follows the
+   real device proxy, and a Kill switch whose proxy is gone is removed (it
+   would take every app offline); a leftover from a snapshot too;
+3. App Proxy lanes (reconciled against device truth): a missing lane is a
    silent bypass past mitmproxy, so it comes before the CA;
-3. the CA, only when the user injected it on that serial in this session,
+4. the CA, only when the user injected it on that serial in this session,
    and only through the no-restart path (never a Zygote restart here).
 
 It never raises and costs no adb call when nothing is set up for the serial.
@@ -44,6 +50,8 @@ class RestoreReport:
     serial: str | None
     cause: str
     device_proxy: str = "none"
+    #: "none" | "kill switch on" | "apps named" ... (see _restore_guard).
+    guard: str = "none"
     lanes: list[Any] = field(default_factory=list)
     ca: str = "none"
     skipped: str = ""
@@ -55,6 +63,8 @@ class RestoreReport:
         parts = []
         if self.device_proxy not in ("none", ""):
             parts.append(f"device proxy {self.device_proxy}")
+        if self.guard not in ("none", ""):
+            parts.append(self.guard)
         for report in self.lanes:
             text = f"App Proxy {report.package} {report.health.label}"
             if report.repaired:
@@ -68,7 +78,12 @@ class RestoreReport:
     @property
     def acted(self) -> bool:
         """Whether anything was set up for this serial at all."""
-        return bool(self.lanes) or self.device_proxy != "none" or self.ca != "none"
+        return (
+            bool(self.lanes)
+            or self.device_proxy != "none"
+            or self.guard != "none"
+            or self.ca != "none"
+        )
 
 
 def _target(serial: str | None) -> str | None:
@@ -121,6 +136,7 @@ def restore_proxy_infra(
         return report
     if device_proxy:
         report.device_proxy = _restore_device_proxy(serial)
+    report.guard = _restore_guard(serial, cause)
     report.lanes = _restore_lanes(serial, cause)
     report.ca = _restore_ca(serial)
     if report.acted:
@@ -131,6 +147,14 @@ def restore_proxy_infra(
 
 def _anything_desired(serial: str | None) -> bool:
     """Cheap in-process check: is anything set up for *serial*?"""
+    try:
+        from sandroid.core.device_guard import peek_device_guard
+
+        guard = peek_device_guard()
+        if guard is not None and guard.has_state(serial):
+            return True
+    except Exception:
+        pass
     try:
         from sandroid.core import proxy_manager
 
@@ -174,6 +198,37 @@ def _restore_device_proxy(serial: str | None) -> str:
     except Exception as exc:
         logger.debug("device proxy restore failed: %s", exc)
         return "failed"
+
+
+def _restore_guard(serial: str | None, cause: str) -> str:
+    """Kill switch + app naming against the device; a leftover is removed.
+
+    With nothing set up in this session it reads the device only after a
+    snapshot load (a snapshot can bring back an older session's chains).
+    """
+    try:
+        from sandroid.core.device_guard import get_device_guard, peek_device_guard
+
+        guard = peek_device_guard()
+        if (guard is None or not guard.has_state(serial)) and cause != "snapshot-load":
+            return "none"
+        if guard is None:
+            guard = get_device_guard()
+        before = guard.view_cached(serial)
+        view = guard.reconcile(serial, cause)
+    except Exception as exc:
+        logger.warning("Kill switch restore after %s failed: %s", cause, exc)
+        return f"Kill switch restore failed: {exc}"
+    parts = []
+    if view.kill_switch:
+        parts.append("Kill switch on")
+    elif before.kill_switch:
+        parts.append("Kill switch removed (no device proxy)")
+    if view.attribution == "on":
+        parts.append(f"apps named ({view.named_apps})")
+    elif view.attribution == "failed":
+        parts.append("apps not named")
+    return ", ".join(parts) or "none"
 
 
 def _restore_lanes(serial: str | None, cause: str) -> list[Any]:
@@ -294,8 +349,10 @@ def _find_device_prepared_registry() -> Any:
     False on a re-attach after an adb transport/server reset. Snapshot loads
     do not fire it (``EmulatorService.load_snapshot`` restores directly).
     """
-    from sandroid.core import device_prep
-
+    try:
+        from sandroid.core import device_prep
+    except ImportError:
+        return None
     register = getattr(device_prep, "register_device_prepared_hook", None)
     return register if callable(register) else None
 

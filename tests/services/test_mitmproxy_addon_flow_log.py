@@ -180,9 +180,11 @@ def test_error_hook_skips_flow_that_already_has_a_response(addon, flow_paths):
 def test_app_field_empty_without_active_focus_lane(addon, flow_paths):
     flow = tflow.tflow(resp=True)
 
-    app = addon._attribute_and_tag(flow)
+    app, uid, via = addon._attribute_and_tag(flow)
 
     assert app == ""
+    assert uid is None
+    assert via == "device"
     assert flow.comment == ""
 
 
@@ -194,7 +196,7 @@ def test_app_field_empty_when_lane_lookup_raises(addon, flow_paths, monkeypatch)
         lambda _mode: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
-    app = addon._attribute_and_tag(flow)
+    app, _uid, _via = addon._attribute_and_tag(flow)
 
     assert app == ""
 
@@ -472,3 +474,123 @@ def test_parent_watch_needs_the_env_var(monkeypatch):
     exec(compile(mitmproxy_service._ADDON_SOURCE, "<addon>", "exec"), ns)  # noqa: S102
     after = {t.name for t in threading.enumerate()}
     assert "sandroid-parent-watch" not in after - before
+
+
+# -- device-proxy flows named by the identity relay --------------------------------
+
+
+def _relay_auth(uid) -> str:
+    import base64
+
+    return "Basic " + base64.b64encode(f"uid{uid}:x".encode()).decode()
+
+
+@pytest.fixture
+def uid_map(tmp_path, monkeypatch):
+    path = tmp_path / "device_uids.json"
+    path.write_text(
+        json.dumps(
+            {
+                "10215": {"package": "de.fkie.canary", "serial": "emulator-5570"},
+                "10300": {"package": "a.one,a.two", "serial": "emulator-5570"},
+            }
+        )
+    )
+    monkeypatch.setenv("SANDROID_DEVICE_UIDS", str(path))
+    return path
+
+
+def _connect(addon, uid):
+    connect = tflow.tflow()
+    connect.request.method = "CONNECT"
+    connect.request.headers["Proxy-Authorization"] = _relay_auth(uid)
+    addon.SandroidLogger().http_connect(connect)
+    return connect
+
+
+def test_relay_identity_tags_every_flow_of_its_connection(
+    addon, flow_paths, uid_map, capsys
+):
+    connect = _connect(addon, 10215)
+    assert "Proxy-Authorization" not in connect.request.headers  # not forwarded
+    flow = tflow.tflow(resp=True)
+    flow.client_conn = connect.client_conn  # inner request: no header of its own
+    addon.SandroidLogger().response(flow)
+
+    rec = _read_lines(flow_paths["log"])[-1]
+    assert rec["app"] == "de.fkie.canary"
+    assert rec["uid"] == 10215
+    assert rec["via"] == "device"
+    assert flow.metadata["sandroid_app"] == "de.fkie.canary"
+    assert flow.comment == "de.fkie.canary"
+    line = [x for x in capsys.readouterr().out.splitlines() if x.startswith("[FLOW]")]
+    assert line[-1].endswith("|de.fkie.canary|device")
+
+
+def test_plain_http_wrapped_as_connect_80_is_named(addon, flow_paths, uid_map):
+    connect = _connect(addon, 10300)
+    connect.request.port = 80
+    flow = tflow.tflow(resp=True)
+    flow.request.scheme = "http"
+    flow.client_conn = connect.client_conn
+    addon.SandroidLogger().response(flow)
+    assert _read_lines(flow_paths["log"])[-1]["app"] == "a.one,a.two"
+
+
+def test_identity_on_an_absolute_form_request(addon, flow_paths, uid_map):
+    flow = tflow.tflow(resp=True)
+    flow.request.headers["Proxy-Authorization"] = _relay_auth(10215)
+    addon.SandroidLogger().requestheaders(flow)
+    assert "Proxy-Authorization" not in flow.request.headers
+    addon.SandroidLogger().response(flow)
+    assert _read_lines(flow_paths["log"])[-1]["app"] == "de.fkie.canary"
+
+
+def test_foreign_proxy_auth_is_left_alone(addon, flow_paths, uid_map):
+    flow = tflow.tflow(resp=True)
+    flow.request.headers["Proxy-Authorization"] = "Basic dXNlcjpwYXNz"  # user:pass
+    addon.SandroidLogger().requestheaders(flow)
+    assert flow.request.headers["Proxy-Authorization"] == "Basic dXNlcjpwYXNz"
+    addon.SandroidLogger().response(flow)
+    rec = _read_lines(flow_paths["log"])[-1]
+    assert rec["app"] == ""
+    assert rec["uid"] is None
+    assert rec["via"] == "device"
+
+
+def test_tls_failure_is_named_by_its_connection(addon, flow_paths, uid_map, capsys):
+    from types import SimpleNamespace
+
+    connect = _connect(addon, 10215)
+    client = connect.client_conn
+    data = SimpleNamespace(
+        context=SimpleNamespace(client=client),
+        conn=SimpleNamespace(error="certificate unknown"),
+    )
+    client.sni = "pinned.example.com"
+    client.proxy_mode = None
+    addon.SandroidLogger().tls_failed_client(data)
+    assert "|cert|de.fkie.canary|device" in capsys.readouterr().out
+    rec = _read_lines(flow_paths["log"])[-1]
+    assert (rec["app"], rec["uid"], rec["via"]) == ("de.fkie.canary", 10215, "device")
+    addon.SandroidLogger().client_disconnected(client)
+    assert client.id not in addon._CONN_UID
+
+
+def test_app_proxy_flows_say_via_app_proxy(addon, flow_paths, tmp_path, monkeypatch):
+    lanes = tmp_path / "lanes.json"
+    lanes.write_text(json.dumps({"8082": {"package": "com.lane", "marker": ""}}))
+    monkeypatch.setenv("SANDROID_FOCUS_MAP", str(lanes))
+    flow = tflow.tflow(resp=True)
+    monkeypatch.setattr(addon, "_lane_entry", lambda mode: {"package": "com.lane"})
+    assert addon._attribute_and_tag(flow) == ("com.lane", None, "app-proxy")
+
+
+def test_direct_flow_line_uses_the_via_column():
+    from sandroid.services.mitmproxy_service import _is_direct_flow_line
+
+    head = "[FLOW]|10:00:00|HTTPS/2|200|GET|example.org/|1 B"
+    assert _is_direct_flow_line(f"{head}|de.fkie.canary|device")  # named, device
+    assert not _is_direct_flow_line(f"{head}|com.lane|app-proxy")
+    assert _is_direct_flow_line(f"{head}|")  # an older addon: no app = device
+    assert not _is_direct_flow_line(f"{head}|com.lane")

@@ -119,6 +119,7 @@ def shutdown_network(timeout: float = 4.0) -> None:
     Touches only an mitmproxy service that exists already (no new one is
     created on the way out).
     """
+    run_bounded("kill switch", _teardown_device_guard, timeout)
     try:
         from sandroid.services import mitmproxy_service as ms
     except Exception:
@@ -127,6 +128,19 @@ def shutdown_network(timeout: float = 4.0) -> None:
     if svc is None:
         return
     run_bounded("mitmproxy", lambda: svc.shutdown(timeout=min(2.0, timeout)), timeout)
+
+
+def _teardown_device_guard() -> None:
+    """Remove the Kill switch and the app naming before the device proxy goes
+    (the other order leaves apps with no network). Only an existing guard.
+    """
+    from sandroid.core.device_guard import peek_device_guard
+
+    guard = peek_device_guard()
+    if guard is None:
+        return
+    for serial in guard.serials_with_state():
+        guard.teardown(serial)
 
 
 def _flush_timeline(timeout: float) -> None:
@@ -481,6 +495,19 @@ class QuitController:
                 notes.append("stops Mitmproxy")
             if svc is not None and svc.owned_device_proxy:
                 notes.append("clears the device proxy")
+        except Exception:
+            pass
+        try:
+            from sandroid.core.device_guard import peek_device_guard
+
+            guard = peek_device_guard()
+            if guard is not None and any(
+                guard.kill_switch_wanted(serial)
+                for serial in guard.serials_with_state()
+            ):
+                notes.append(
+                    "removes the Kill switch (apps reach the network directly)"
+                )
         except Exception:
             pass
         try:

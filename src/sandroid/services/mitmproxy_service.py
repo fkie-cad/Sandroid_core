@@ -42,14 +42,21 @@ _ADDON_SOURCE = r'''
 """Sandroid TUI logging addon for mitmweb.
 
 Tag format on stdout:
-    [FLOW]|HH:MM:SS|protocol|status|method|host_and_path|size_str|app
-    [TLS_FAIL]|HH:MM:SS|host_or_sni|short_reason|app
-    [FLOW_ERR]|HH:MM:SS|host_and_path|reason|app
+    [FLOW]|HH:MM:SS|protocol|status|method|host_and_path|size_str|app|via
+    [TLS_FAIL]|HH:MM:SS|host_or_sni|short_reason|app|via
+    [FLOW_ERR]|HH:MM:SS|host_and_path|reason|app|via
 
 `protocol` is a compact token like "HTTPS/2", "HTTP/1.1", "WS", "WSS".
-`app` is the focused package the flow was attributed to (empty when not in a
-Focus lane). Attribution uses the lane's SOCKS5 listen port as the key into a
-sidecar map written by FocusManager and pointed to by SANDROID_FOCUS_MAP.
+`app` is the package the flow was attributed to ("" when unknown).
+`via` is how the flow arrived: "app-proxy" (an App Proxy SOCKS lane) or
+"device" (the regular listener, i.e. the device proxy).
+
+App Proxy flows are attributed by the lane's SOCKS5 listen port, the key
+into a sidecar map written by FocusManager (SANDROID_FOCUS_MAP). Device-proxy
+flows are attributed by the on-device identity relay: it connects with proxy
+auth ``uid<U>``, read here per CLIENT CONNECTION (plain HTTP is wrapped as
+CONNECT host:80, so the inner requests carry no header); the UID maps to the
+package through SANDROID_DEVICE_UIDS (written by core.device_guard).
 
 Structured flow log (Track 2): every completed or errored flow is also
 appended as a JSON record to SANDROID_FLOW_LOG (empty/unset disables this at
@@ -72,6 +79,13 @@ from mitmproxy import tls as _tls
 # changes. Shape: {"8082": {"package": "com.foo", "marker": ":green_circle:"}}.
 _FOCUS_MAP: dict = {}
 _FOCUS_MTIME: float = -1.0
+
+# Same for the device uid→package map: {"10215": {"package": "com.foo"}}.
+_UID_MAP: dict = {}
+_UID_MTIME: float = -1.0
+
+# client connection id -> app UID announced by the identity relay.
+_CONN_UID: dict = {}
 
 # Monotonic per-flow sequence counter, resumed once per addon-process-load
 # (see _resume_seq). Never reset by clear_captured_flows -- that is exactly
@@ -135,6 +149,63 @@ def _lane_entry(proxy_mode) -> dict | None:
     return entry if isinstance(entry, dict) else None
 
 
+def _uid_map() -> dict:
+    """The device uid→package map (SANDROID_DEVICE_UIDS), re-read on mtime."""
+    global _UID_MAP, _UID_MTIME
+    path = os.environ.get("SANDROID_DEVICE_UIDS")
+    if not path:
+        return {}
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        _UID_MAP = {}
+        _UID_MTIME = -1.0
+        return _UID_MAP
+    if mtime != _UID_MTIME:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            _UID_MAP = data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            _UID_MAP = {}
+        _UID_MTIME = mtime
+    return _UID_MAP
+
+
+def _auth_uid(headers) -> int | None:
+    """The UID in a relay's ``Proxy-Authorization: Basic uid<U>:x``, else None."""
+    try:
+        value = headers.get("Proxy-Authorization", "") or ""
+        scheme, _, token = value.partition(" ")
+        if scheme.lower() != "basic" or not token:
+            return None
+        user = base64.b64decode(token.strip()).decode("utf-8", "replace")
+        user = user.split(":", 1)[0]
+        if user.startswith("uid") and user[3:].isdigit():
+            return int(user[3:])
+    except Exception:
+        return None
+    return None
+
+
+def _note_identity(flow) -> None:
+    """Remember the relay identity of this client connection; drop the header."""
+    try:
+        uid = _auth_uid(flow.request.headers)
+        if uid is not None:
+            _CONN_UID[flow.client_conn.id] = uid
+            del flow.request.headers["Proxy-Authorization"]
+    except Exception:
+        pass
+
+
+def _device_app(uid) -> str:
+    entry = _uid_map().get(str(uid)) if uid is not None else None
+    if isinstance(entry, dict):
+        return str(entry.get("package") or "")
+    return ""
+
+
 def _ts() -> str:
     return time.strftime("%H:%M:%S")
 
@@ -172,25 +243,39 @@ def _protocol(flow: http.HTTPFlow) -> str:
     return f"{base}/{ver}" if ver else base
 
 
-def _attribute_and_tag(flow: http.HTTPFlow) -> str:
-    """Attribute a flow to its Focus app and tag it, degrading to app="".
+def _attribute_and_tag(flow: http.HTTPFlow) -> tuple:
+    """Attribute a flow to its app and tag it: ``(app, uid, via)``.
 
-    Shared by response() and error() so this per-flow app-attribution logic
-    (arrival SOCKS lane port -> sidecar map -> flow.comment/metadata/marked)
-    lives in exactly one place. Any failure degrades to app="" and never
-    raises -- never breaks emission of the flow itself.
+    Shared by response() and error() so the per-flow attribution lives in
+    exactly one place: an App Proxy lane by its arrival SOCKS port (sidecar
+    map), else a device-proxy flow by the identity relay's UID of its client
+    connection. The flow gets ``comment``/``metadata``/``marked`` the same
+    way for both, so filters by app work alike. Any failure degrades to
+    app="" and never raises -- never breaks emission of the flow itself.
     """
-    app = ""
+    app, uid, via = "", None, "device"
     try:
         entry = _lane_entry(flow.client_conn.proxy_mode)
         if entry is not None:
+            via = "app-proxy"
             app = entry.get("package") or ""
             flow.comment = app
             flow.metadata["sandroid_app"] = app
             flow.marked = entry.get("marker") or ""
+        else:
+            if flow.client_conn.id not in _CONN_UID:
+                _note_identity(flow)
+            uid = _CONN_UID.get(flow.client_conn.id)
+            app = _device_app(uid)
+            if uid is not None:
+                flow.metadata["sandroid_uid"] = uid
+            if app:
+                flow.comment = app
+                flow.metadata["sandroid_app"] = app
+        flow.metadata["sandroid_via"] = via
     except Exception:
         app = ""
-    return app
+    return app, uid, via
 
 
 def _flow_log_path() -> str:
@@ -504,7 +589,9 @@ def _maybe_trim(log_path: str, line_count: int) -> None:
     _write_meta(log_path, meta)
 
 
-def _append_flow_record(flow: http.HTTPFlow, error, app: str) -> None:
+def _append_flow_record(
+    flow: http.HTTPFlow, error, app: str, uid=None, via: str = ""
+) -> None:
     """Append one JSON record to flows.jsonl and write its detail file.
 
     WRITE-SAFETY: opens flows.jsonl in append mode and closes it on every
@@ -548,6 +635,8 @@ def _append_flow_record(flow: http.HTTPFlow, error, app: str) -> None:
         "request_bytes": request_bytes,
         "response_bytes": response_bytes,
         "app": app,
+        "uid": uid,
+        "via": via,
         "request_content_type": req.headers.get("content-type") if req else None,
         "response_content_type": response_content_type,
     }
@@ -565,13 +654,34 @@ def _append_flow_record(flow: http.HTTPFlow, error, app: str) -> None:
 
 
 class SandroidLogger:
+    def http_connect(self, flow: http.HTTPFlow) -> None:
+        """A CONNECT (incl. plain HTTP the relay wraps as CONNECT host:80):
+        the relay's identity holds for the whole client connection.
+        """
+        _note_identity(flow)
+
+    def requestheaders(self, flow: http.HTTPFlow) -> None:
+        if flow.client_conn.id not in _CONN_UID:
+            _note_identity(flow)
+        else:
+            try:
+                flow.request.headers.pop("Proxy-Authorization", None)
+            except Exception:
+                pass
+
+    def client_disconnected(self, client) -> None:
+        try:
+            _CONN_UID.pop(client.id, None)
+        except Exception:
+            pass
+
     def response(self, flow: http.HTTPFlow) -> None:
         if flow.response is None:
             return
         body_len = len(flow.response.raw_content) if flow.response.raw_content else 0
 
-        app = _attribute_and_tag(flow)
-        _append_flow_record(flow, error=None, app=app)
+        app, uid, via = _attribute_and_tag(flow)
+        _append_flow_record(flow, error=None, app=app, uid=uid, via=via)
 
         line = "|".join((
             "[FLOW]",
@@ -582,6 +692,7 @@ class SandroidLogger:
             _host_path(flow.request),
             _size(body_len),
             app,
+            via,
         ))
         print(line, flush=True)
 
@@ -593,17 +704,19 @@ class SandroidLogger:
         """
         if flow.response is not None:
             return  # defensive: never double-count if both hooks ever fire
-        app = _attribute_and_tag(flow)
+        app, uid, via = _attribute_and_tag(flow)
         reason = str(flow.error.msg) if flow.error else "unknown error"
-        _append_flow_record(flow, error=reason, app=app)
+        _append_flow_record(flow, error=reason, app=app, uid=uid, via=via)
         print(
-            f"[FLOW_ERR]|{_ts()}|{_host_path(flow.request)}|{reason[:40]}|{app}",
+            f"[FLOW_ERR]|{_ts()}|{_host_path(flow.request)}|{reason[:40]}|{app}|{via}",
             flush=True,
         )
 
     def tls_failed_client(self, data: _tls.TlsData) -> None:
         host = "?"
         app = ""
+        uid = None
+        via = "device"
         try:
             client = data.context.client
             host = getattr(client, "sni", None) or "?"
@@ -615,6 +728,10 @@ class SandroidLogger:
             entry = _lane_entry(getattr(client, "proxy_mode", None))
             if entry is not None:
                 app = entry.get("package") or ""
+                via = "app-proxy"
+            else:
+                uid = _CONN_UID.get(getattr(client, "id", None))
+                app = _device_app(uid)
         except Exception:
             pass
         reason = "tls"
@@ -627,11 +744,13 @@ class SandroidLogger:
                 reason = "ver"
         except Exception:
             pass
-        print(f"[TLS_FAIL]|{_ts()}|{host}|{reason}|{app}", flush=True)
-        _append_tls_failure(host, reason, app)
+        print(f"[TLS_FAIL]|{_ts()}|{host}|{reason}|{app}|{via}", flush=True)
+        _append_tls_failure(host, reason, app, uid, via)
 
 
-def _append_tls_failure(host: str, reason: str, app: str) -> None:
+def _append_tls_failure(
+    host: str, reason: str, app: str, uid=None, via: str = ""
+) -> None:
     """Persist a TLS handshake failure in flows.jsonl (``kind: "tls"``).
 
     There is no HTTP flow for it, so it used to exist only as a stdout line:
@@ -665,6 +784,8 @@ def _append_tls_failure(host: str, reason: str, app: str) -> None:
         "request_bytes": 0,
         "response_bytes": None,
         "app": app,
+        "uid": uid,
+        "via": via,
         "request_content_type": None,
         "response_content_type": None,
     }
@@ -854,11 +975,21 @@ def _not_settled_result() -> ReachabilityResult:
 def _is_direct_flow_line(line: str) -> bool:
     """Whether a ``[FLOW]|`` line came in on the regular proxy listener.
 
-    App-proxy (SOCKS lane) flows carry the app package in the last column;
-    regular-listener flows (the Device Proxy) leave it empty.
+    The addon's explicit ``via`` column (index 8) says it: ``device`` is the
+    device proxy, ``app-proxy`` an App Proxy lane. Device-proxy flows carry
+    an app too now (identity relay), so "no app" no longer means "device".
+    A line without the column (an older addon) falls back to that rule.
     """
     parts = line.split("|")
+    if len(parts) >= 9 and parts[8].strip():
+        return parts[8].strip() == "device"
     return len(parts) < 8 or not parts[7].strip()
+
+
+def _device_uids_path() -> str:
+    from sandroid.core.device_guard import device_uids_path
+
+    return device_uids_path()
 
 
 def _pid_listening(pid: int, port: int, host: str = "127.0.0.1") -> bool:
@@ -1267,11 +1398,25 @@ class MitmproxyService:
             logger.debug("capture_view app probe failed: %s", exc)
             apps = {}
 
+        guard = {"kill_switch": False, "attribution": "off", "refused": 0}
+        try:
+            from sandroid.core.device_guard import get_device_guard
+
+            view = get_device_guard().view_cached()
+            guard = {
+                "kill_switch": view.kill_switch,
+                "attribution": view.attribution,
+                "refused": view.refused,
+            }
+        except Exception:  # pragma: no cover - defensive
+            pass
+
         return {
             "mitmweb_running": self.is_running(),
             "mitmweb_addr": mitmweb_addr,
             "device": device,
             "apps": apps,
+            "guard": guard,
         }
 
     #: A Device-Proxy flow seen this recently counts as proof of reachability.
@@ -1712,6 +1857,7 @@ class MitmproxyService:
                     env={
                         **os.environ,
                         "SANDROID_FOCUS_MAP": sidecar_path,
+                        "SANDROID_DEVICE_UIDS": _device_uids_path(),
                         "SANDROID_PARENT_PID": str(os.getpid()),
                         **flow_log_env,
                     },
@@ -1811,12 +1957,22 @@ class MitmproxyService:
             release_device_proxy: Also clear the device proxy Sandroid pointed
                 at this mitmproxy (see :meth:`release_device_proxy`), so the
                 device is never left routed to a dead proxy. ``restart()``
-                passes False because the caller re-applies it.
+                passes False because the caller re-applies it. Ignored while
+                the Kill switch is on for that device: clearing the proxy
+                would open the direct path the Kill switch closes, so the
+                proxy and the Kill switch stay (app traffic fails until
+                Mitmproxy runs again, nothing leaks).
             release_app_proxies: Also tear the App Proxy lanes down (quit).
         """
         if release_device_proxy and self._proc is not None:
-            # Outside the lock: this is ADB I/O.
-            self.release_device_proxy()
+            if self.kill_switch_holds_proxy():
+                self._emit(
+                    "[INFO] Mitmproxy stops; the device proxy and the Kill switch "
+                    "stay: app traffic is blocked until Mitmproxy runs again"
+                )
+            else:
+                # Outside the lock: this is ADB I/O.
+                self.release_device_proxy()
         if release_app_proxies:
             # Outside the lock too: FocusManager reads is_running() under its
             # own lock, so taking it under ours could deadlock. Lazy import
@@ -1907,12 +2063,37 @@ class MitmproxyService:
                 proc.kill()
             proc.wait(timeout=1.0)
 
+    def kill_switch_holds_proxy(self) -> bool:
+        """The Kill switch is on where our device proxy is (in-process read)."""
+        if not self._owned_device_proxy:
+            return False
+        try:
+            from sandroid.core.device_guard import peek_device_guard
+
+            guard = peek_device_guard()
+            return bool(
+                guard and guard.kill_switch_wanted(self._owned_device_proxy_serial)
+            )
+        except Exception:
+            return False
+
     def shutdown(self, timeout: float = 2.0) -> None:
-        """Quit-time teardown: device proxy, SSL unpin, mitmweb. Never raises.
+        """Quit-time teardown: Kill switch, app naming, device proxy, SSL
+        unpin, mitmweb. Never raises.
 
         Every quit path (dialog, Ctrl+C/Ctrl+Q, SIGTERM, the exit watchdog)
-        runs this; it is idempotent.
+        runs this; it is idempotent. The Kill switch goes before the device
+        proxy: the other order would leave apps with no network at all.
         """
+        try:
+            from sandroid.core.device_guard import peek_device_guard
+
+            guard = peek_device_guard()
+            if guard is not None:
+                for serial in guard.serials_with_state():
+                    guard.teardown(serial)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Kill switch teardown on shutdown failed: %s", exc)
         try:
             self.release_device_proxy()
         except Exception as exc:  # pragma: no cover - defensive
@@ -2228,7 +2409,8 @@ class MitmproxyService:
                             Adb.reverse(f"tcp:{port}", f"tcp:{port}")
                             logger.info("Re-registered adb reverse tcp:%s", port)
                     return "kept"
-                if not self.is_running():
+                guard_on = self.kill_switch_holds_proxy()
+                if not self.is_running() and not guard_on:
                     self.note_device_proxy(None)
                     logger.warning(
                         "The snapshot load reset the device proxy (was %s); "
@@ -2236,6 +2418,17 @@ class MitmproxyService:
                         addr,
                     )
                     return "stopped"
+                if guard_on:
+                    # Fail closed: the Kill switch (and the app naming) go
+                    # in before the proxy points anywhere again.
+                    from sandroid.core.device_guard import (
+                        Endpoint,
+                        get_device_guard,
+                    )
+
+                    endpoint = Endpoint.parse(addr)
+                    if endpoint is not None:
+                        get_device_guard().prepare(owner or serial, endpoint, ours=True)
                 ok, _msg = pm.set_proxy(ProxyConfig.from_string(addr))
                 if ok and addr.startswith("127.0.0.1:"):
                     port = int(addr.rsplit(":", 1)[1])
