@@ -322,7 +322,7 @@ class SnapshotsPanel(Widget):
 
     def _render_header(self) -> str:
         if not self._emulator_available():
-            return "[#fb7185]○ Snapshots require a running emulator[/]"
+            return "[#fb7185]Snapshots require a running emulator[/]"
         count = len(self._snapshots)
         return f"[b]{self._avd_name()}[/] — {count} snapshot(s)"
 
@@ -852,7 +852,7 @@ class SnapshotsPanel(Widget):
                 return False, f"Could not save slot {slot} ('{tag}', {why})"
             # Pure config/file write + attr set — safe off the UI thread.
             self._write_slot(slot, tag)
-            return True, f"Saved slot {slot} → '{tag}'"
+            return True, f"Saved '{tag}' to slot {slot}"
 
         self._run_action_bg(_work, f"save slot {slot}", refresh_after=True)
 
