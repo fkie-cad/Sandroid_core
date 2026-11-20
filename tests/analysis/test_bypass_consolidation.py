@@ -120,9 +120,7 @@ def test_live_emulator_toggle_says_restart(monkeypatch) -> None:
 
     svc = BypassService()
     monkeypatch.setattr(svc, "_spotlight_running", lambda: True)
-    monkeypatch.setattr(
-        svc, "set_active", lambda target, paused, on_message=None: (True, "ok")
-    )
+    monkeypatch.setattr(svc, "set_active", lambda target, paused, **kw: (True, "ok"))
     now_on, msg = svc.toggle("emulator")
     assert now_on is True
     assert "restart" in msg.lower()
@@ -1487,7 +1485,10 @@ def test_release_app_unloads_only_that_apps_script(monkeypatch):
     stopped: list = []
     done = threading.Event()
 
+    gate = threading.Event()
+
     def _stop(job_id):
+        gate.wait(5)  # the daemon stop runs only after the asserts below
         stopped.append(job_id)
         done.set()
 
@@ -1511,8 +1512,10 @@ def test_release_app_unloads_only_that_apps_script(monkeypatch):
     assert svc.active_categories() == []
     assert svc._job is None  # dropped at once; a new load starts fresh
     assert unregistered == [1]  # at once, not after the slow stop
+    gate.set()
     assert done.wait(5)
     assert stopped == ["job-a"]
+    assert unregistered == [1]  # the daemon never unregisters (a newer task)
     assert heard == [1]
 
 
@@ -1557,3 +1560,69 @@ def test_a_load_in_flight_when_the_selection_moves_is_discarded(monkeypatch):
     assert "selection changed" in msg
     assert stopped == ["job-a"]
     assert svc._job is None
+
+
+def test_a_release_during_set_flags_commits_nothing(monkeypatch):
+    """Reuse path: the selection leaves the app while its flags flip."""
+    import types
+
+    from sandroid.analysis import detection_bypass as db
+
+    svc = db.BypassService()
+    svc._app_package = "com.example.a"
+    registered: list = []
+
+    def _set_flags(flags):
+        svc.release_app("com.example.a")  # the user picks B meanwhile
+
+    script = types.SimpleNamespace(
+        exports_sync=types.SimpleNamespace(set_flags=_set_flags)
+    )
+    svc._script = script
+    svc._job = types.SimpleNamespace(get_id=lambda: "job-a", state="running")
+    monkeypatch.setattr(svc, "_is_job_live", lambda jm: svc._job is not None)
+    monkeypatch.setattr(
+        db.Toolbox,
+        "get_frida_job_manager",
+        staticmethod(
+            lambda: types.SimpleNamespace(
+                is_paused=lambda: False, stop_job_with_id=lambda i: None
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        svc, "_register_task", lambda display: registered.append(display)
+    )
+    monkeypatch.setattr(svc, "_unregister_task", lambda: None)
+    monkeypatch.setattr(svc, "_note_install_failures", lambda script: None)
+
+    ok, msg = svc.set_active({"ssl"}, paused=False)
+
+    assert ok is False
+    assert "selection changed" in msg
+    assert svc.active_categories() == []
+    assert registered == []
+
+
+def test_the_spawn_ladder_stops_when_the_selection_changed(monkeypatch):
+    from sandroid.analysis import detection_bypass as db
+
+    svc = db.BypassService()
+    spawns: list = []
+    torn: list = []
+
+    def _spawn(package, categories, on_message, resume):
+        spawns.append(package)
+        return False, db._SELECTION_CHANGED
+
+    monkeypatch.setattr(svc, "_teardown_failed_spawn", lambda sp, pkg: torn.append(pkg))
+    monkeypatch.setattr(db.time, "sleep", lambda s: None)
+
+    ok, msg = svc.apply_to_fresh_spawn_with_retry(
+        "com.example.a", set(), spawn_fn=_spawn
+    )
+
+    assert ok is False
+    assert msg == db._SELECTION_CHANGED
+    assert spawns == ["com.example.a"]  # never relaunched
+    assert torn == ["com.example.a"]

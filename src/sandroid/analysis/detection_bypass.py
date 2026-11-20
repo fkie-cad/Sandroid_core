@@ -60,6 +60,9 @@ from sandroid.services import (
 
 logger = logging.getLogger(__name__)
 
+#: A bypass operation outlived its app selection (see BypassService.release_app).
+_SELECTION_CHANGED = "Bypass not applied: the app selection changed"
+
 # Max seconds to wait for a Frida script to finish loading (script.load runs
 # on the Job's own thread; start_job returns before it completes). Generous to
 # tolerate slow emulators loading large hook sets.
@@ -2984,7 +2987,11 @@ class BypassService:
         return True
 
     def _ensure_loaded(
-        self, *, paused: bool, initial_flags: dict[str, bool]
+        self,
+        *,
+        paused: bool,
+        initial_flags: dict[str, bool],
+        generation: int | None = None,
     ) -> tuple[bool, str, bool]:
         """Idempotently ensure the combined bypass script is loaded.
 
@@ -3008,7 +3015,10 @@ class BypassService:
         with self._lock:
             if self._is_job_live(jm):
                 return True, "Bypass script already loaded", False
-            generation = self._release_gen
+            if generation is None:
+                generation = self._release_gen
+            elif generation != self._release_gen:
+                return False, _SELECTION_CHANGED, False
 
         # Not live — drop any stale handles/temp, then load fresh.
         self._reset_script_state()
@@ -3081,7 +3091,7 @@ class BypassService:
             except Exception:
                 pass
             self._unlink(path)
-            return False, "Bypass not loaded: the app selection changed", False
+            return False, _SELECTION_CHANGED, False
 
         return True, "Bypass script loaded", True
 
@@ -3094,6 +3104,7 @@ class BypassService:
         *,
         paused: bool,
         on_message: Callable[[Any], None] | None = None,
+        generation: int | None = None,
     ) -> tuple[bool, str]:
         """Reconcile the *armed* flag set to ``target`` (the one entry point).
 
@@ -3130,6 +3141,13 @@ class BypassService:
                     return False, conflict
             jm = Toolbox.get_frida_job_manager()
             with self._lock:
+                # The selection generation this operation belongs to: read by
+                # the caller before it built ``target`` (else now). A release
+                # since then makes the whole operation stale.
+                if generation is None:
+                    generation = self._release_gen
+                if self._release_gen != generation:
+                    return False, _SELECTION_CHANGED
                 if on_message is not None:
                     self._on_message = on_message
                 # Early-return if nothing changes AND the script is still live.
@@ -3165,7 +3183,9 @@ class BypassService:
             # Ensure the combined script is loaded (bakes flags = target on a
             # fresh load; reuses an existing live job otherwise).
             flags = self._flag_dict(target)
-            ok, msg, fresh = self._ensure_loaded(paused=paused, initial_flags=flags)
+            ok, msg, fresh = self._ensure_loaded(
+                paused=paused, initial_flags=flags, generation=generation
+            )
             if not ok:
                 return False, msg
 
@@ -3183,15 +3203,19 @@ class BypassService:
                     script.exports_sync.set_flags(flags)
                     self._note_install_failures(script)
                 except Exception as exc:
+                    with self._lock:
+                        stale = self._release_gen != generation
+                    if stale:  # released meanwhile: never reload elsewhere
+                        return False, _SELECTION_CHANGED
                     logger.warning("[Bypass] set_flags failed: %s — reloading", exc)
                     self._reset_script_state()
                     ok2, msg2, _ = self._ensure_loaded(
-                        paused=paused, initial_flags=flags
+                        paused=paused, initial_flags=flags, generation=generation
                     )
                     if not ok2:
                         return False, f"Bypass reload failed: {msg2}"
 
-            return self._reconcile_and_register(target)
+            return self._reconcile_and_register(target, generation)
         finally:
             with self._lock:
                 self._mutating = frozenset()
@@ -3211,12 +3235,33 @@ class BypassService:
         with self._lock:
             self._merge_errors.update(str(c) for c in failed)
 
-    def _reconcile_and_register(self, target) -> tuple[bool, str]:
-        """Reconcile ``_active`` against merge errors and update TaskService."""
+    def _reconcile_and_register(
+        self, target, generation: int | None = None
+    ) -> tuple[bool, str]:
+        """Reconcile ``_active`` against merge errors and update TaskService.
+
+        A release since ``generation`` (the selection left the app while the
+        flags were set) commits nothing: a script still held is dropped.
+        """
         with self._lock:
-            failed = set(self._merge_errors)
-            self._active = target - failed
-            active_now = set(self._active)
+            if generation is not None and self._release_gen != generation:
+                job, path = self._take_script_locked()
+                stale = True
+            else:
+                stale = False
+                failed = set(self._merge_errors)
+                self._active = target - failed
+                active_now = set(self._active)
+        if stale:
+            if job is not None or path is not None:
+                self._unregister_task()
+                threading.Thread(
+                    target=self._stop_job_and_unlink,
+                    args=(job, path),
+                    name="bypass-release",
+                    daemon=True,
+                ).start()
+            return False, _SELECTION_CHANGED
 
         if active_now:
             display = "Bypass (experimental): " + ", ".join(
@@ -3257,6 +3302,13 @@ class BypassService:
         """Categories the user has armed (intends to apply on Start)."""
         with self._lock:
             return list(self._armed)
+
+    @staticmethod
+    def _selected_package() -> str | None:
+        try:
+            return get_spotlight_service().get_effective_package()
+        except Exception:
+            return None
 
     def _spotlight_running(self) -> bool:
         """True if the spotlight app has a live (non-paused) process."""
@@ -3313,10 +3365,13 @@ class BypassService:
             if category in self._active:
                 return True, f"{self.display_name(category)} already active"
             target = set(self._active) | {category}
+            generation = self._release_gen
         armed = self._arm_unless_live([category])
         if armed is not None:
             return armed
-        return self.set_active(target, paused=False, on_message=on_message)
+        return self.set_active(
+            target, paused=False, on_message=on_message, generation=generation
+        )
 
     @_notifies
     def start_many(
@@ -3333,10 +3388,13 @@ class BypassService:
             return False, conflict
         with self._lock:
             target = set(self._active) | set(categories)
+            generation = self._release_gen
         armed = self._arm_unless_live(sorted(set(categories)))
         if armed is not None:
             return armed
-        return self.set_active(target, paused=False, on_message=on_message)
+        return self.set_active(
+            target, paused=False, on_message=on_message, generation=generation
+        )
 
     @_notifies
     def stop(self, category: str) -> bool:
@@ -3347,7 +3405,8 @@ class BypassService:
             if not active:
                 return False
             target = set(self._active) - {category}
-        self.set_active(target, paused=False)
+            generation = self._release_gen
+        self.set_active(target, paused=False, generation=generation)
         return True
 
     @_notifies
@@ -3368,6 +3427,7 @@ class BypassService:
         name = self.display_name(category)
         with self._lock:
             currently_on = category in self._armed or category in self._active
+            generation = self._release_gen
 
         if not currently_on:
             # Turning ON (arming counts: refused while Dexray holds bypasses).
@@ -3377,7 +3437,12 @@ class BypassService:
             if self._spotlight_running():
                 with self._lock:
                     target = set(self._active) | {category}
-                ok, msg = self.set_active(target, paused=False, on_message=on_message)
+                ok, msg = self.set_active(
+                    target,
+                    paused=False,
+                    on_message=on_message,
+                    generation=generation,
+                )
                 if not ok:
                     self._disarm(category)
                     return False, msg
@@ -3397,7 +3462,7 @@ class BypassService:
             active = category in self._active
             target = set(self._active) - {category}
         if active:
-            self.set_active(target, paused=False)
+            self.set_active(target, paused=False, generation=generation)
         return False, f"{name} off"
 
     # -- queries ----------------------------------------------------------
@@ -3610,9 +3675,12 @@ class BypassService:
         """
         with self._lock:
             armed = set(self._armed)
+            generation = self._release_gen
         if not armed:
             return True, "Attached (no bypasses armed)"
-        ok, msg = self.set_active(armed, paused=False, on_message=on_message)
+        ok, msg = self.set_active(
+            armed, paused=False, on_message=on_message, generation=generation
+        )
         if not ok:
             return False, msg
         return True, "Applied (experimental): " + ", ".join(
@@ -3666,6 +3734,10 @@ class BypassService:
         # never skip installing hooks — e.g. after the app self-died without a
         # Kill, leaving _active stale and equal to the armed set.
         self._reset_script_state()
+        with self._lock:
+            # Read before the spawn: a selection change while it runs makes
+            # the paused-spawn load stale (set_active refuses it).
+            generation = self._release_gen
 
         # 1. Spawn paused.
         jm, pid = spotlight.spawn_app_paused(package)
@@ -3690,7 +3762,9 @@ class BypassService:
             spotlight.set_pid(pid)
 
         # 3. Load every bypass as ONE merged script while paused (#218-safe).
-        ok, msg = self.set_active(cats, paused=True, on_message=on_message)
+        ok, msg = self.set_active(
+            cats, paused=True, on_message=on_message, generation=generation
+        )
         if not ok:
             self._teardown_failed_spawn(spotlight, package)
             return False, msg
@@ -3814,6 +3888,14 @@ class BypassService:
                 if klass == "benign":
                     # "already running" — process is up with hooks; success.
                     return True, msg
+                if msg == _SELECTION_CHANGED or self._selected_package() not in (
+                    None,
+                    package,
+                ):
+                    # The user moved on to another app: never relaunch (and
+                    # silently re-select) the one they left.
+                    self._teardown_failed_spawn(spotlight, package)
+                    return False, _SELECTION_CHANGED
                 logger.warning(
                     "[Bypass] spawn attempt %d/%d for %s failed (%s): %s",
                     attempt,
