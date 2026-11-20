@@ -847,6 +847,7 @@ def extract_steps(lines: list[dict]) -> list[Step]:
                 last_ime.data["check_target"] = data.get("target")
                 last_ime.data["check_password"] = bool(data.get("password"))
                 last_ime.sensitive = last_ime.sensitive or sensitive
+                _plan_typing(steps, data, sensitive)
             ime_since_text = False
             last_ime = None
             continue
@@ -865,6 +866,37 @@ def extract_steps(lines: list[dict]) -> list[Step]:
         if data.get("ime"):
             last_ime = steps[-1]
     return steps
+
+
+def _plan_typing(steps: list[Step], data: dict, sensitive: bool) -> None:
+    """The keyboard taps at the end of ``steps`` typed ``data.text``: the
+    first of them gets ``type_text`` (the text, its field, its pace) and
+    each one ``typed_by`` (the first one's number), so the replay can type
+    the text into the field instead of tapping keys whose positions depend
+    on the keyboard's state. Not for a partly read text or a field Tracking
+    could not name.
+    """
+    group: list[Step] = []
+    for step in reversed(steps):
+        if not step.data.get("ime") or step.kind != "tap":
+            break
+        group.insert(0, step)
+    target = data.get("target") if isinstance(data.get("target"), dict) else None
+    if not group or target is None or data.get("partial"):
+        return
+    if not (target.get("rid") or _bounds(target.get("bounds"))):
+        return
+    first = group[0]
+    first.data["type_text"] = {
+        "text": data["text"],
+        "target": target,
+        "password": bool(data.get("password")),
+        "dur_ms": data.get("dur_ms"),
+        "taps": len(group),
+    }
+    first.sensitive = first.sensitive or sensitive
+    for step in group:
+        step.data["typed_by"] = first.i
 
 
 def _epoch(value: Any) -> float | None:
@@ -966,6 +998,8 @@ class StepReplayer:
         self._mono = monotonic or time.monotonic
         self.element_wait_s = element_wait_s
         self.tail_s = tail_s
+        #: Steps whose keyboard taps were replaced by typing the text.
+        self._typed: set[int] = set()
 
     # -- helpers ------------------------------------------------------------
 
@@ -1121,6 +1155,8 @@ class StepReplayer:
         xy: tuple[int, int] | None,
         rid: str | None = None,
         bounds: tuple[int, int, int, int] | None = None,
+        *,
+        focused_only: bool = False,
     ) -> tuple[str | None, bool]:
         """``(text, password)`` of the focused field now (``text`` None: no
         field could be read, or the focus is on another field: its id is
@@ -1139,7 +1175,7 @@ class StepReplayer:
         if not isinstance(reply, dict):
             return None, False
         node = None
-        for key in ("input", "node"):
+        for key in ("input",) if focused_only else ("input", "node"):
             cand = reply.get(key)
             if isinstance(cand, dict) and cand.get("editable"):
                 node = cand
@@ -1287,6 +1323,39 @@ class StepReplayer:
             raise StepStoppedError("the recorded position is off the screen now")
         return f"the screen is {w}x{h}, your run had {rec[2]}x{rec[3]}"
 
+    def _type_into_field(self, step: Step) -> dict[str, Any] | None:
+        """Keyboard taps that typed a known text: type that text into its
+        field instead (per character, at the recorded pace) when the field
+        has the input focus and is empty, then read it back. None when the
+        field cannot be verified: the keys are tapped as recorded.
+        """
+        plan = step.data.get("type_text")
+        if not isinstance(plan, dict):
+            return None
+        text = plan.get("text")
+        if not isinstance(text, str) or not text or input_text_arg(text) is None:
+            return None
+        if any(input_text_arg(c) is None for c in text):
+            return None
+        target = plan.get("target") if isinstance(plan.get("target"), dict) else {}
+        bounds = _bounds(target.get("bounds"))
+        rid = target.get("rid") or None
+        value, _pw = self._field_value(None, rid, bounds, focused_only=True)
+        if value is None or value.strip():
+            # Not the recorded field, or it holds text (where would typing go?)
+            return None
+        self._type(text, plan.get("dur_ms"))
+        self._typed.add(step.i)
+        taps = int(plan.get("taps") or 0)
+        res = {
+            "way": WAY_REPLAYED,
+            "reason": f"typed {len(text)} characters into the field "
+            f"instead of {taps} keyboard tap{'s' if taps != 1 else ''}",
+        }
+        return self._checked(
+            res, text, target, bool(plan.get("password")) or step.sensitive
+        )
+
     @staticmethod
     def _xy(step: Step) -> tuple[int, int] | None:
         x, y = step.data.get("x"), step.data.get("y")
@@ -1306,10 +1375,21 @@ class StepReplayer:
                 as ``failed: <reason>`` and the replay stops there).
         """
         kind, data = step.kind, step.data
+        if kind == "tap" and data.get("typed_by") in self._typed:
+            if data["typed_by"] != step.i:
+                return {"way": WAY_REPLAYED, "check": CHECK_NONE,
+                        "reason": f"typed with step {data['typed_by']}"}  # fmt: skip
+        if kind == "tap" and data.get("type_text") and data.get("typed_by") == step.i:
+            res = self._type_into_field(step)
+            if res is not None:
+                return res
         if kind in ("tap", "long_press"):
             xy, way, reason, check = None, WAY_ELEMENT, "", CHECK_NONE
             if data.get("ime"):
                 reason = "keyboard key"
+                if data.get("type_text"):
+                    reason = "keyboard key, its field could not be verified"
+                    check = CHECK_UNCHECKED
             else:
                 xy, reason, check = self.locate(step)
             if xy is None:
@@ -1325,11 +1405,16 @@ class StepReplayer:
                 if screen is not None and not _inside(xy, screen):
                     raise StepStoppedError("the recorded position is off the screen")
             # A recorded element that was looked for and not found.
-            missed = way == WAY_POSITION and reason not in (
-                *_NO_EVIDENCE,
-                OFF_SCREEN,
-                COVERED,
-                WEAK_TARGET,
+            missed = (
+                way == WAY_POSITION
+                and not data.get("ime")
+                and reason
+                not in (
+                    *_NO_EVIDENCE,
+                    OFF_SCREEN,
+                    COVERED,
+                    WEAK_TARGET,
+                )
             )
             if way == WAY_POSITION:
                 check = step_check(way, reason)
@@ -1462,6 +1547,7 @@ class StepReplayer:
         """
         report: list[dict[str, Any]] = []
         n = len(steps)
+        self._typed = set()
         prev_t: float | None = None
         missed: int | None = None  # the step before missed its element
         div: dict[str, Any] = {
@@ -1476,6 +1562,8 @@ class StepReplayer:
                 gap = min(MAX_GAP_S, max(0.0, t - prev_t))
             if t is not None:
                 prev_t = t
+            if step.data.get("typed_by") in self._typed:
+                gap = 0.0  # typed already, at the recorded pace
             self.progress(f"Replaying step {step.i} of {n}: {step.what}")
             entry = {"i": step.i, "seq": step.seq, "what": step.what}
             try:

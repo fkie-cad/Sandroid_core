@@ -1653,3 +1653,97 @@ def test_without_an_id_a_field_of_another_size_is_unchecked():
     report = rep.run(extract_steps([line]))
     assert report["steps"][0]["check"] == "unchecked"
     assert report["diverged_at_step"] is None
+
+
+# ---------------------------------------------------------------------------
+# keyboard-typed text is typed into its verified field
+# ---------------------------------------------------------------------------
+
+
+class TypingField(FakeHelper):
+    """A focused field ``rid`` that holds what ``input text`` typed."""
+
+    def __init__(self, rid="p:id/url", value="", password=False):
+        super().__init__([_dump()])
+        self.rid, self.value, self.password = rid, value, password
+
+    def shell(self, cmd):
+        if cmd.startswith("input text "):
+            self.value += cmd.split(" ", 2)[2].replace("%s", " ").strip("'")
+        return ""
+
+    def focus(self, x=None, y=None, timeout=1.0):
+        return {"input": {"editable": True, "text": self.value, "rid": self.rid,
+                          "password": self.password}}  # fmt: skip
+
+
+def _keyboard_lines(text, password=False):
+    target = {"rid": "p:id/url", "bounds": [180, 164, 807, 290]}
+    keys = [_tap(seq=1 + i, t=100 + i * 0.3, ime=True, x=50 + 10 * i, y=2000)
+            for i in range(len(text))]  # fmt: skip
+    line = _text(text, seq=50, t=101, password=password)
+    line["data"]["target"] = target
+    return [*keys, line]
+
+
+def _typing_replayer(helper):
+    log: list[str] = []
+    lines: list[dict] = []
+    clock = Clock()
+
+    def shell(cmd):
+        log.append(cmd)
+        return helper.shell(cmd)
+
+    rep = StepReplayer(shell=shell, helper=helper, sleep=clock.sleep,
+                       monotonic=clock.mono,
+                       emit=lambda *a, **k: lines.append(k) or 1)  # fmt: skip
+    return rep, log, lines
+
+
+def test_keyboard_typed_text_goes_into_its_verified_field():
+    steps = extract_steps(_keyboard_lines("wdr"))
+    assert steps[0].data["type_text"]["taps"] == 3
+    assert [s.data["typed_by"] for s in steps] == [1, 1, 1]
+    helper = TypingField()
+    rep, log, lines = _typing_replayer(helper)
+    report = rep.run(steps)
+    assert not any(c.startswith("input tap") for c in log)  # no key taps
+    assert [c for c in log if c.startswith("input text")] == [
+        "input text w", "input text d", "input text r",
+    ]  # fmt: skip
+    got = [(s["way"], s["reason"], s["check"]) for s in report["steps"]]
+    assert got == [
+        ("replayed",
+         "typed 3 characters into the field instead of 3 keyboard taps, field checked",
+         "verified"),
+        ("replayed", "typed with step 1", "none"),
+        ("replayed", "typed with step 1", "none"),
+    ]  # fmt: skip
+    assert report["unchecked_steps"] == []
+
+
+def test_keyboard_taps_stay_when_the_field_cannot_be_verified():
+    # the focus is on another field: the keys are tapped, unchecked
+    rep, log, _ = _typing_replayer(TypingField(rid="p:id/other"))
+    report = rep.run(extract_steps(_keyboard_lines("ab")))
+    assert [c for c in log if c.startswith("input tap")] == [
+        "input tap 50 2000", "input tap 60 2000",
+    ]  # fmt: skip
+    first = report["steps"][0]
+    assert first["check"] == "unchecked"
+    assert first["reason"] == "keyboard key, its field could not be verified"
+    assert report["diverged_at_step"] is None  # keys are never "missed"
+    # the field holds text already: where typing goes is unknown, keys again
+    rep, log, _ = _typing_replayer(TypingField(value="old"))
+    rep.run(extract_steps(_keyboard_lines("ab")))
+    assert any(c.startswith("input tap") for c in log)
+
+
+def test_typing_a_password_into_its_field_prints_no_value():
+    rep, log, lines = _typing_replayer(TypingField(password=True))
+    report = rep.run(extract_steps(_keyboard_lines("hunter2", password=True)))
+    assert report["steps"][0]["check"] == "verified"
+    for text in (str(report), str(lines)):
+        assert "hunter2" not in text
+    assert all(ln["sensitive"] for ln in lines[:1])
