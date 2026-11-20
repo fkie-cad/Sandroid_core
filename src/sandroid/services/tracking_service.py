@@ -1420,6 +1420,11 @@ class TrackingService:
         #: Packages of the input method (keyboard): its windows are no
         #: screen change of the field being typed into.
         self._ime_pkgs: set[str] = set()
+        #: Device ms of the last keystroke (keyboard tap or character key)
+        #: and of each window's last change event: a snapshot taken before
+        #: them may show an outdated screen (see :meth:`_stale_why`).
+        self._last_key_ms = -1.0
+        self._win_changed: dict[Any, float] = {}
         #: ``(device s, marker)`` of recent inputs (``mark_screenshots``):
         #: a pointer input at its finger-down, typing at its last change.
         self._marks: deque[tuple[float, dict]] = deque(maxlen=64)
@@ -1664,6 +1669,8 @@ class TrackingService:
             self._rb = None
             self._last_text_host = 0.0
             self._known = {}
+            self._last_key_ms = -1.0
+            self._win_changed = {}
             self._marks.clear()
             self._last_screen = None
             self._activities = []
@@ -1976,7 +1983,7 @@ class TrackingService:
         if full and g.xy_known and self._geometry_ready.is_set():
             x, y = self.geometry.to_px(g.dev, g.x0, g.y0)
             p.node = self._node_lane.submit(
-                helper.node_at, x, y, t_mono_ms=round(g.t_down * 1000.0, 1)
+                self._node_lookup, helper, x, y, round(g.t_down * 1000.0, 1)
             )
         elif full and g.xy_known:
             p.node = self._node_lane.submit(self._node_late, helper, g)
@@ -2008,7 +2015,65 @@ class TrackingService:
     def _node_late(self, helper: Any, g: Gesture) -> dict | None:
         self._geometry_ready.wait(1.0)
         x, y = self.geometry.to_px(g.dev, g.x0, g.y0)
-        return helper.node_at(x, y, t_mono_ms=round(g.t_down * 1000.0, 1))
+        return self._node_lookup(helper, x, y, round(g.t_down * 1000.0, 1))
+
+    def _node_lookup(self, helper: Any, x: int, y: int, t_ms: float) -> dict | None:
+        """Node lane, at finger-down: the helper's ``node_at`` (snapshot and
+        live). When the snapshot may be outdated (:meth:`_stale_why`) the
+        helper's a11y cache is dropped and the node read live once more
+        (``fresh``): an app that changed its tree without telling a11y
+        (Firefox's suggestion list while you type) leaves the snapshot and
+        the cached live read both on the old tree.
+        """
+        reply = helper.node_at(x, y, t_mono_ms=t_ms)
+        if not isinstance(reply, dict):
+            return reply
+        why = self._stale_why(reply.get("cached"))
+        if not why:
+            return reply
+        reply["stale"] = why
+        try:
+            clear = getattr(helper, "clear_cache", None)
+            if callable(clear):
+                clear(timeout=NODE_WAIT_S)
+            again = helper.node_at(x, y, mode="live", timeout=NODE_WAIT_S)
+        except Exception:
+            again = None
+        live = again.get("live") if isinstance(again, dict) else None
+        if isinstance(live, dict):
+            reply["fresh"] = live
+        return reply
+
+    def _stale_why(self, cached: Any) -> str:
+        """Why the snapshot behind a ``cached`` answer may show an outdated
+        screen (plain words), or "": the screen changed while or after it
+        was taken, its window changed after it, you typed after it (apps
+        refill a dropdown next to the keyboard without telling a11y), or the
+        tap is in a popup window. Keyboard taps are never re-read.
+        """
+        if not isinstance(cached, dict) or not cached.get("hit"):
+            return ""
+        win = cached.get("window") if isinstance(cached.get("window"), dict) else {}
+        if win.get("type") == "ime":
+            return ""
+        snap = (
+            cached.get("snapshot") if isinstance(cached.get("snapshot"), dict) else {}
+        )
+        start = snap.get("start_ms")
+        start = float(start) if isinstance(start, (int, float)) else None
+        if snap.get("changes_since_start") or snap.get("changed_during"):
+            return "the screen changed after the snapshot"
+        if snap.get("truncated"):
+            return "the snapshot was cut short"
+        if start is not None:
+            changed = self._win_changed.get(win.get("id"))
+            if changed is not None and changed > start:
+                return "its window changed after the snapshot"
+            if self._last_key_ms > start:
+                return "you typed after the snapshot"
+        if win.get("dialog_like"):
+            return "a popup window"
+        return ""
 
     @staticmethod
     def _actor(default: str) -> str:
@@ -2039,6 +2104,10 @@ class TrackingService:
         dur_ms = round(((g.t_up or g.t_down) - g.t_down) * 1000.0, 1)
         if g.key_code is not None:
             name = KEY_NAMES.get(g.key_code)
+            if name is None or name == "DEL":
+                self._last_key_ms = max(
+                    self._last_key_ms, (g.t_up or g.t_down) * 1000.0
+                )
             if name is None:
                 self._keys_other += 1
                 self._rb_key(g)  # a character typed on a keyboard
@@ -2117,11 +2186,15 @@ class TrackingService:
             except FutureTimeout:
                 reply = self._node_cached(g, x, y)
                 data["node_timeout"] = True
+                if isinstance(reply, dict):
+                    why = self._stale_why(reply.get("cached"))
+                    if why:
+                        reply["stale"] = why
             except Exception:
                 reply = None
             if isinstance(reply, dict):
                 self._apply_display(reply)
-            target, answer = self._target(reply)
+            target, answer = self._target(reply, up_ms=t_up * 1000.0)
             pkg = answer.get("pkg") if answer else None
             ime = self._ime_hit(reply)
         # Privacy: a tap while a password field has the focus, on a password
@@ -2130,6 +2203,7 @@ class TrackingService:
         if ime:
             if pkg:
                 self._ime_pkgs.add(str(pkg))
+            self._last_key_ms = max(self._last_key_ms, t_up * 1000.0)
         else:
             # the next tap ends typing into a field that sends no text events
             self._rb_trigger(flush=True, wait=True)
@@ -2242,7 +2316,20 @@ class TrackingService:
         return self._mode
 
     @staticmethod
-    def _target(reply: dict | None) -> tuple[dict | None, dict]:
+    def _target(
+        reply: dict | None, up_ms: float | None = None
+    ) -> tuple[dict | None, dict]:
+        """The recorded target of a tap from its ``node_at`` reply, and the
+        answer it was taken from.
+
+        The snapshot's answer wins (the screen at finger-down) unless
+        :meth:`_live_is_better`. A reply marked ``stale`` (the snapshot may
+        be outdated, see ``_node_lookup``) takes its ``fresh`` live re-read
+        when that started before the finger was up (``up_ms``: the app had
+        not acted on the tap yet); without one the target is marked
+        ``stale_possible`` (Rewind's replay treats it as weak). ``source``
+        says which answer was used, ``source_why`` why it was re-read.
+        """
         if not reply:
             return None, {}
         found = [
@@ -2254,6 +2341,16 @@ class TrackingService:
             found[0][1], found[1][1]
         ):
             found.reverse()
+        stale = reply.get("stale") if isinstance(reply.get("stale"), str) else ""
+        fresh = reply.get("fresh")
+        weak = False
+        if stale:
+            t0 = fresh.get("t_start_ms") if isinstance(fresh, dict) else None
+            in_time = up_ms is None or not isinstance(t0, (int, float)) or (t0 <= up_ms)
+            if isinstance(fresh, dict) and fresh.get("hit") and in_time:
+                found = [("live", fresh), *[f for f in found if f[0] == "cached"]]
+            elif found:
+                weak = True
         if not found:
             return None, {}
         source, answer = found[0]
@@ -2268,6 +2365,10 @@ class TrackingService:
             "bounds": node.get("bounds"),
             "source": source,
         }
+        if stale:
+            target["source_why"] = stale
+        if weak:
+            target["stale_possible"] = True
         for key in ("hint", "password", "editable"):
             if node.get(key):
                 target[key] = node[key]
@@ -2323,7 +2424,7 @@ class TrackingService:
     @staticmethod
     def _ime_hit(reply: dict | None) -> bool:
         """The touched window is the input method (the keyboard)."""
-        for source in ("cached", "live"):
+        for source in ("cached", "live", "fresh"):
             answer = (reply or {}).get(source)
             if isinstance(answer, dict):
                 win = answer.get("window")
@@ -2404,6 +2505,10 @@ class TrackingService:
         if typ != "ev" or not self._active:
             return
         ev = d.get("ev")
+        if ev in ("WINDOW_CONTENT_CHANGED", "WINDOW_STATE_CHANGED", "WINDOWS_CHANGED"):
+            wid, t = d.get("window_id"), d.get("t_mono_ms")
+            if wid is not None and isinstance(t, (int, float)):
+                self._win_changed[wid] = max(self._win_changed.get(wid, -1.0), t)
         if ev in ("CLICKED", "LONG_CLICKED"):
             self._on_click(d, host_recv)
         elif ev == "TEXT_CHANGED":
