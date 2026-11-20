@@ -1854,8 +1854,9 @@ async def test_lens_key_after_a_stray_typing_cancel_never_runs(
         exits: list[int] = []
         monkeypatch.setattr(panel, f"action_{action}", lambda: ran.append(action))
         monkeypatch.setattr(app, "exit", lambda *a, **k: exits.append(1))
-        # p: the Play confirm (a recording present), not a device revert.
-        monkeypatch.setattr(app, "action_play", app._confirm_play)
+        # p: a guarded confirm (the stop-the-rewind question), not a device
+        # action.
+        monkeypatch.setattr(app, "action_play", app._confirm_stop_replay)
         await settle(pilot)
         _burst(app, opener, "x", lens_key)
         await settle(pilot)

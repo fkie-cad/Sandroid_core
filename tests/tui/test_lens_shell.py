@@ -422,7 +422,7 @@ async def test_recording_shows_in_the_pill() -> None:
         app._set_status_bar_mode(recording=True)
         ms.refresh_status()
         await settle(pilot)
-        assert ms.query_one("#shell-header").pill_text == "● REC"
+        assert ms.query_one("#shell-header").pill_text == "Recording"
         app._set_status_bar_mode(recording=False)
         ms.refresh_status()
         await settle(pilot)
@@ -509,7 +509,7 @@ async def test_footer_shows_at_most_seven_keys() -> None:
             keys = list(footer.query("FooterKey"))
             assert 0 < len(keys) <= SandroidFooter.MAX_KEYS
             labels = [k.description for k in keys]
-            assert labels[:2] == ["Record", "Play/Replay"]
+            assert labels[:2] == ["Record", "Review"]
             assert "Help" in labels
 
 

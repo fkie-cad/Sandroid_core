@@ -175,7 +175,7 @@ async def test_footer_on_the_timeline_lens_has_at_most_seven_keys(
         keys = list(app.screen.query_one(SandroidFooter).query("FooterKey"))
         assert 0 < len(keys) <= SandroidFooter.MAX_KEYS
         labels = [k.description for k in keys]
-        assert labels[:2] == ["Record", "Play/Replay"]
+        assert labels[:2] == ["Record", "Review"]
         assert "Live" in labels
 
 
