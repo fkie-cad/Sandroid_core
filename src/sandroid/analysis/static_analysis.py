@@ -259,7 +259,7 @@ def _work_dir_config(work_root: str) -> dict:
 
     The temporal directory (unzipped APK, apktool/JADX output, tool logs) goes
     below the stable *work_root* (Insight creates one subfolder per run and
-    removes it; Sandroid removes it as well); the library definitions go to
+    removes it; leftovers are swept after a day); the library definitions go to
     the per-user Insight directory. Every value is constant across runs, so
     the config, and with it Insight's cache key, is the same for every run.
     """
@@ -280,30 +280,51 @@ def _work_dir_config(work_root: str) -> dict:
     }
 
 
-@contextlib.contextmanager
-def _preserved_root_logging():
-    """Restore the root logger's handlers and level after an Insight run.
+def _insight_keeps_host_logging() -> bool:
+    """True for an Insight (>= 2.2) that only ever moves its own debug handler."""
+    try:
+        from dexray_insight.Utils import log as insight_log
 
-    Insight < 2.2 replaces every FileHandler of the root logger with its own
-    per-APK debug log at DEBUG level, which would cut Sandroid's session and
-    error logs. File handlers added during the run are closed and removed;
-    removed ones are put back.
+        return hasattr(insight_log, "INSIGHT_HANDLER_MARK")
+    except Exception:
+        return False
+
+
+@contextlib.contextmanager
+def _preserved_root_logging(work_root: str | Path):
+    """Undo Insight 2.1.0's debug-log swap on the root logger.
+
+    At DEBUG, Insight < 2.2 removes every root FileHandler (Sandroid's session
+    and error logs) and adds its own log file inside its temporal folder below
+    *work_root*. When that happened, the handlers it added there are closed
+    and removed and the file handlers that were present before are put back.
+    Nothing else is touched (Insight never changes the root level outside
+    its own CLI), and a newer Insight is left alone entirely.
     """
+    if _insight_keeps_host_logging():
+        yield
+        return
     root = logging.getLogger()
-    handlers = list(root.handlers)
-    level = root.level
+    before = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
+    work = Path(work_root).resolve()
     try:
         yield
     finally:
-        for handler in list(root.handlers):
-            if handler not in handlers and isinstance(handler, logging.FileHandler):
+        added = []
+        for handler in root.handlers:
+            if not isinstance(handler, logging.FileHandler) or handler in before:
+                continue
+            with contextlib.suppress(Exception):
+                if Path(handler.baseFilename).resolve().is_relative_to(work):
+                    added.append(handler)
+        if added:
+            for handler in added:
                 root.removeHandler(handler)
                 with contextlib.suppress(Exception):
                     handler.close()
-        for handler in handlers:
-            if handler not in root.handlers:
-                root.addHandler(handler)
-        root.setLevel(level)
+            for handler in before:
+                if handler not in root.handlers:
+                    root.addHandler(handler)
 
 
 def _short_error(error: object, limit: int = 160) -> str:
@@ -789,7 +810,8 @@ class StaticAnalysis(DataGatherBase):
         modes. The APK is analysed from this run's own folder below
         :func:`insight_work_root` (hard-linked or copied there unless it
         already is), so files Insight writes next to the APK (``apktool_out/``)
-        and its temporal folder are removed with that folder after the run.
+        are removed with that folder after the run. Insight removes its own
+        temporal folder; leftovers are swept after a day.
 
         Args:
             apk_file_path: Full path to the APK file to analyze
@@ -812,10 +834,6 @@ class StaticAnalysis(DataGatherBase):
         )
         run_path = Path(run_dir) if run_dir else self._new_run_dir()
         work_root = run_path.parent
-        try:
-            before = {entry.name for entry in work_root.iterdir()}
-        except OSError:
-            before = set()
         try:
             analysed_apk = self._stage_apk(apk_file_path, run_path)
             results, result_file_name, security_result_file_name = self._start_insight(
@@ -912,16 +930,9 @@ class StaticAnalysis(DataGatherBase):
             raise
 
         finally:
+            # Insight removes its own temporal folder (cleanup_after_analysis);
+            # one left by a crash is removed by _clean_stale_work after a day.
             shutil.rmtree(run_path, ignore_errors=True)
-            # Insight's own temporal folder for this APK (dexray_<apk>_<time>),
-            # if Insight left it behind.
-            prefix = f"dexray_{Path(apk_file_path).stem}_"
-            try:
-                for entry in work_root.iterdir():
-                    if entry.name not in before and entry.name.startswith(prefix):
-                        shutil.rmtree(entry, ignore_errors=True)
-            except OSError:
-                pass
             if cleanup_apk and os.path.exists(apk_file_path):
                 try:
                     os.remove(apk_file_path)
@@ -1064,7 +1075,7 @@ class StaticAnalysis(DataGatherBase):
             and _accepts_kwarg(asam.start_apk_static_analysis_new, "output_dir")
             else {}
         )
-        with _preserved_root_logging():
+        with _preserved_root_logging(work_dir or insight_work_root()):
             return asam.start_apk_static_analysis_new(
                 apk_file_path,
                 configuration(config_dict=config_dict, **profile_kwargs),

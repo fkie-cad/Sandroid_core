@@ -1675,7 +1675,9 @@ def test_profile_trackers_and_dirs_reach_a_profile_aware_insight(
     work_root = tmp_path / "insight-work"
     assert seen["work"] == str(work_root)  # stable root: same cache key every run
     assert Path(seen["apk"]).parent.parent == work_root  # analysed from a run folder
-    assert list(work_root.iterdir()) == []  # run folder + Insight folder removed
+    # Our run folder is gone; Insight's own folder is Insight's to remove
+    # (a concurrent run of the same APK may still be using one).
+    assert [p.name for p in work_root.iterdir()] == ["dexray_app_2026"]
     assert list(tmp_path.glob("*.jsonl")) == []
     assert not (tmp_path / "temp_analysis").exists()
     assert analyzer.last_results["options"]["profile"] == "privacy"
@@ -1876,40 +1878,95 @@ def test_stale_run_folders_are_removed_at_the_next_start(tmp_path, monkeypatch):
     assert run_dir.parent == root
 
 
-def test_root_logging_is_restored_after_insight(monkeypatch, tmp_path, cache_root):
+def _guard_case(monkeypatch, tmp_path, inside, *, new_insight=False):
+    """Run _preserved_root_logging around a 2.1.0-style swap; return (root, host).
+
+    Inside the guard: Insight's swap (drop root FileHandlers, add a debug log
+    below the work root) and whatever ``inside(root, host)`` does.
+    """
     import logging
 
+    monkeypatch.setattr(
+        static_analysis, "_insight_keeps_host_logging", lambda: new_insight
+    )
+    work = tmp_path / "insight-work"
+    (work / "dexray_app_T" / "logs").mkdir(parents=True)
     root = logging.getLogger()
     host = logging.FileHandler(tmp_path / "session.log")
     root.addHandler(host)
-    level = root.level
+    with static_analysis._preserved_root_logging(work):
+        inside(root, host)
+    return root, host, work
 
-    def start_new(apk, config, print_results_to_terminal=False, verbose=False):
-        # What Insight 2.1.0 does at DEBUG: drop every root FileHandler and
-        # point logging into its (soon deleted) work folder.
-        for handler in [h for h in root.handlers if isinstance(h, logging.FileHandler)]:
-            root.removeHandler(handler)
-        root.addHandler(logging.FileHandler(tmp_path / "insight-debug.log"))
-        root.setLevel(logging.DEBUG)
-        return {"main": INSIGHT_MAIN, "security": None}, "", ""
 
-    fake_asam = SimpleNamespace(
-        Configuration=_FakeConfiguration, start_apk_static_analysis_new=start_new
+def _insight_swap(root, work):
+    import logging
+
+    for handler in [h for h in root.handlers if isinstance(h, logging.FileHandler)]:
+        root.removeHandler(handler)
+    root.addHandler(logging.FileHandler(work / "dexray_app_T" / "logs" / "debug.log"))
+
+
+def _file_handlers(root):
+    import logging
+
+    return [h for h in root.handlers if isinstance(h, logging.FileHandler)]
+
+
+def _cleanup(root, *handlers):
+    for handler in handlers:
+        root.removeHandler(handler)
+        handler.close()
+
+
+def test_insight_2_1_log_swap_is_undone(monkeypatch, tmp_path):
+    work = tmp_path / "insight-work"
+    root, host, work = _guard_case(
+        monkeypatch, tmp_path, lambda root, host: _insight_swap(root, work)
     )
-    analyzer = _analyzer(monkeypatch, tmp_path, fake_asam)
-    apk = tmp_path / "app.apk"
-    apk.write_bytes(b"apk-bytes")
     try:
-        assert analyzer._run_dexray_analysis(
-            str(apk), "app", str(tmp_path) + "/", time.time(), other_split_sha256s=[]
-        )
-        file_handlers = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
-        assert host in file_handlers
-        assert not any("insight-debug" in h.baseFilename for h in file_handlers)
-        assert root.level == level
+        handlers = _file_handlers(root)
+        assert host in handlers
+        assert not any(str(work) in h.baseFilename for h in handlers)
     finally:
-        root.removeHandler(host)
-        host.close()
+        _cleanup(root, host)
+
+
+def test_a_session_log_swap_during_the_run_is_kept(monkeypatch, tmp_path):
+    import logging
+
+    new_session = logging.FileHandler(tmp_path / "next-session.log")
+
+    def swap(root, host):
+        root.removeHandler(host)  # Sandroid's own session switch, not Insight
+        root.addHandler(new_session)
+        root.setLevel(logging.WARNING)
+
+    level = logging.getLogger().level
+    root, host, _work = _guard_case(monkeypatch, tmp_path, swap)
+    try:
+        assert new_session in root.handlers
+        assert host not in root.handlers
+        assert root.level == logging.WARNING  # the level is never reset
+    finally:
+        _cleanup(root, new_session, host)
+        root.setLevel(level)
+
+
+def test_a_newer_insight_is_left_alone(monkeypatch, tmp_path):
+    work = tmp_path / "insight-work"
+    root, host, work = _guard_case(
+        monkeypatch,
+        tmp_path,
+        lambda root, host: _insight_swap(root, work),
+        new_insight=True,
+    )
+    added = [h for h in _file_handlers(root) if str(work) in h.baseFilename]
+    try:
+        assert added  # untouched: Insight >= 2.2 never swaps host handlers
+        assert host not in root.handlers
+    finally:
+        _cleanup(root, host, *added)
 
 
 def _state_events(monkeypatch):
