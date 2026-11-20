@@ -539,11 +539,13 @@ class APKInstallModal(ExtractionModal[APKInstallResult]):
             elif status == "done":
                 label.add_class("done")
                 label.update(f"{display_name} ● found")
-            elif status in ("not_found", "error"):
+            elif status == "error":
+                # A failure: red, no status dot.
                 label.add_class("error")
-                # A failure gets no status dot; "not found" is an answer.
-                word = "failed" if status == "error" else "○ not found"
-                label.update(f"{display_name} {word}")
+                label.update(f"{display_name} failed")
+            elif status == "not_found":
+                # An answer, not a failure: the muted base colour.
+                label.update(f"{display_name} ○ not found")
         except Exception:
             pass
 

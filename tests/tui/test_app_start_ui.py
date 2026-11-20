@@ -147,8 +147,40 @@ def test_header_shows_the_run_state_and_no_mode(monkeypatch):
     assert panel._render_header().startswith(f"[{lens_palette().dim}]○ not running[/]")
     svc.reset()
     header = panel._render_header()
+    assert header.startswith(f"[{lens_palette().dim}]○ no app[/]")  # muted
     assert "use the foreground app" in header
     assert "pick an app…" in header
+
+
+async def test_apk_sources_not_found_is_muted_and_failed_is_red() -> None:
+    from textual.widgets import Label
+
+    from sandroid.tui.modals.apk_install_modal import APKInstallModal
+
+    class Harness(App):
+        def on_mount(self) -> None:
+            self.push_screen(APKInstallModal())
+
+    app = Harness()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await until(pilot, lambda: isinstance(app.screen, APKInstallModal))
+        modal = app.screen
+        modal._update_source_status("fdroid", "not_found")
+        modal._update_source_status("apkpure", "error")
+        modal._update_source_status("aptoide", "done")
+        await settle(pilot)
+
+        def label(widget_id: str) -> Label:
+            return modal.query_one(f"#{widget_id}", Label)
+
+        fdroid, apkpure = label("source-fdroid"), label("source-apkpure")
+        assert str(fdroid.render()) == "F-Droid ○ not found"
+        assert not fdroid.has_class("error")
+        assert str(apkpure.render()) == "APKPure failed"
+        assert apkpure.has_class("error")
+        assert str(label("source-aptoide").render()) == "Aptoide ● found"
+        modal._update_source_status("apkpure", "not_found")  # a retry answers
+        assert not apkpure.has_class("error")
 
 
 async def test_objection_warns_while_spawn_would_restart_the_app() -> None:
