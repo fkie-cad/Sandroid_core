@@ -27,7 +27,7 @@ Sandroid service):
   caller itself enabled, tracked in the module-level
   ``_app_proxy_owner_by_package`` map -- see that function's docstring.
 
-Importing this module registers all thirteen tools into the
+Importing this module registers all seventeen tools into the
 :class:`~sandroid.ai.tools.registry.ToolRegistry` singleton as a side effect
 (see the ``@sandroid_tool`` decorator). Every tool here defaults
 ``can_remember_choice=True`` except ``enable_app_proxy``
@@ -1141,3 +1141,198 @@ def set_app_proxy_quic_blocking(enabled: bool) -> dict[str, Any]:
     get_focus_manager().set_quic_blocking(enabled)
 
     return {"success": True, "enabled": enabled}
+
+
+# =============================================================================
+# Network method + Kill switch
+# =============================================================================
+
+_METHODS = ("off", "whole_device", "this_app", "keys_only")
+
+
+@sandroid_tool(
+    name="get_network_method",
+    description=(
+        "Get the current Network method, derived from what is really set on "
+        "the device: off, whole_device (all apps through Mitmproxy with the "
+        "Kill switch), this_app (an App Proxy for the spotlight app), "
+        "keys_only (friTap TLS keys, no proxy) or custom (pieces set by "
+        "hand), plus what is covered, notes and problems."
+    ),
+    parameters={"type": "object", "properties": {}, "required": []},
+    risk=RiskTier.READ_ONLY,
+    category="network_control",
+)
+def get_network_method() -> dict[str, Any]:
+    """Return the derived Network method (one fresh device read).
+
+    Real integration point:
+    :meth:`sandroid.services.network_method.NetworkMethodService.refresh_now`.
+
+    Returns:
+        ``{"method", "label", "app", "covered", "notes", "problems", "line",
+        "pieces": {...}}``.
+    """
+    from sandroid.services.network_method import get_network_method_service
+
+    service = get_network_method_service()
+    view = service.refresh_now(with_ca=True)
+    snap = service.snapshot_cached()
+    result = view.as_dict()
+    result["pieces"] = {
+        "mitmproxy_running": snap.mitm_running,
+        "device_proxy": snap.device_proxy,
+        "device_proxy_addr": snap.device_addr,
+        "kill_switch": snap.kill_switch,
+        "refused": snap.refused,
+        "apps_named": snap.attribution,
+        "app_proxies": dict(snap.lanes),
+        "ca": snap.ca,
+        "pinning": snap.pinning,
+        "fritap": snap.fritap,
+        "quic_block": snap.quic_block,
+        "spotlight": snap.spotlight,
+        "keys_only_available": snap.keys_only_available,
+    }
+    return result
+
+
+@sandroid_tool(
+    name="set_network_method",
+    description=(
+        "Apply a Network method: 'off' (no proxy routing; Mitmproxy and CA "
+        "stay), 'whole_device' (Mitmproxy + CA + device proxy + Kill switch; "
+        "proxy-unaware apps go offline), 'this_app' (Mitmproxy + CA + App "
+        "Proxy for the spotlight app) or 'keys_only' (friTap TLS keys, no "
+        "proxy). Turns off only routing Sandroid set. An EXTERNAL proxy is "
+        "replaced only with replace_external=true (else needs_confirmation, "
+        "nothing changes). Applying the active method again repairs it. "
+        "Never restarts Zygote."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "method": {
+                "type": "string",
+                "enum": list(_METHODS),
+                "description": "The preset to apply ('custom' is not settable).",
+            },
+            "defeat_pinning": {
+                "type": "boolean",
+                "description": (
+                    "Start (true) or stop (false) the SSL pinning bypass for the "
+                    "spotlight app; omit to leave it as it is."
+                ),
+            },
+            "replace_external": {
+                "type": "boolean",
+                "description": (
+                    "Allow replacing an external device proxy / App Proxy "
+                    "upstream (ask the analyst first)."
+                ),
+            },
+        },
+        "required": ["method"],
+    },
+    risk=RiskTier.CONSEQUENTIAL,
+    category="network_control",
+    can_remember_choice=False,
+    resources=frozenset(
+        {
+            ResourceId.MITMPROXY,
+            ResourceId.DEVICE_PROXY,
+            ResourceId.FOCUS,
+            ResourceId.FRIDA_SERVER,
+        }
+    ),
+)
+def set_network_method(
+    method: str,
+    defeat_pinning: bool | None = None,
+    replace_external: bool = False,
+) -> dict[str, Any]:
+    """Apply a preset through the same plan the TUI uses.
+
+    Real integration point:
+    :meth:`sandroid.services.network_method.NetworkMethodService.apply`.
+
+    Returns:
+        ``{"success", "message", "needs_confirmation", "steps", "method"}``.
+    """
+    from sandroid.services.network_method import get_network_method_service
+
+    if method not in _METHODS:
+        raise ToolExecutionError(
+            f"Unknown method {method!r}; use one of {', '.join(_METHODS)}"
+        )
+    result = get_network_method_service().apply(
+        method,
+        defeat_pinning=defeat_pinning,
+        replace_external=bool(replace_external),
+    )
+    return {
+        "success": result.ok,
+        "message": result.message,
+        "needs_confirmation": bool(result.confirm),
+        "steps": list(result.done),
+        "method": result.view.as_dict() if result.view is not None else None,
+    }
+
+
+@sandroid_tool(
+    name="get_kill_switch",
+    description=(
+        "Get the Kill switch state: whether app UIDs may reach only the "
+        "device proxy (everything else refused), the allowed endpoint and "
+        "how many direct connections were refused."
+    ),
+    parameters={"type": "object", "properties": {}, "required": []},
+    risk=RiskTier.READ_ONLY,
+    category="network_control",
+)
+def get_kill_switch() -> dict[str, Any]:
+    """Return the Kill switch as the device has it (one adb read)."""
+    from sandroid.core.adb import Adb
+    from sandroid.core.device_guard import get_device_guard
+
+    view = get_device_guard().refresh(Adb.get_target_device())
+    return {
+        "on": view.kill_switch,
+        "device_proxy": view.endpoint.address if view.endpoint else None,
+        "refused": view.refused,
+        "apps_named": view.attribution,
+        "readable": view.checked,
+    }
+
+
+@sandroid_tool(
+    name="set_kill_switch",
+    description=(
+        "Turn the Kill switch on or off. On: app UIDs may reach only "
+        "loopback and the current device proxy; everything else (direct "
+        "fallbacks, proxy-unaware apps, Google push) is refused, so those "
+        "apps lose their network. Needs a device proxy. Off: apps reach the "
+        "network directly again."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "enabled": {"type": "boolean", "description": "True turns it on."},
+        },
+        "required": ["enabled"],
+    },
+    risk=RiskTier.CONSEQUENTIAL,
+    category="network_control",
+    can_remember_choice=False,
+    resources=frozenset({ResourceId.DEVICE_PROXY}),
+)
+def set_kill_switch(enabled: bool) -> dict[str, Any]:
+    """Turn the Kill switch on/off on the current device.
+
+    Real integration point:
+    :meth:`sandroid.core.device_guard.DeviceGuard.set_kill_switch`.
+    """
+    from sandroid.core.device_guard import get_device_guard
+
+    ok, message = get_device_guard().set_kill_switch(bool(enabled))
+    return {"success": ok, "message": message, "enabled": bool(enabled)}

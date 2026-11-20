@@ -65,7 +65,10 @@ TOOLSET_DESCRIPTIONS: dict[str, str] = {
     "processes": "processes, services, activity stack, kill a process",
     "files": "pull/push device files, pull APKs and app data, read host files",
     "network": "connections, network info, captured HTTP(S) flows",
-    "proxy": "mitmproxy, device-wide proxy, per-app proxy lanes, QUIC blocking",
+    "proxy": (
+        "Network method, Kill switch, mitmproxy, device-wide proxy, per-app "
+        "proxy lanes, QUIC blocking"
+    ),
     "certs": "CA certificate detection, push and system-store injection",
     "frida": "frida-server lifecycle, running Frida jobs, SSL unpinning",
     "capture": "screenshots and screen recordings",
@@ -151,6 +154,10 @@ TOOLSET_TABLE: dict[str, ToolsetEntry] = {
     "disable_app_proxy": _e("proxy"),
     "get_app_proxy_status": _e("proxy"),
     "set_app_proxy_quic_blocking": _e("proxy"),
+    "get_network_method": _e("proxy"),
+    "set_network_method": _e("proxy", timeout_s=_LONG, permission_key="method"),
+    "get_kill_switch": _e("proxy"),
+    "set_kill_switch": _e("proxy", timeout_s=180, permission_key="enabled"),
     # certs
     "list_detected_ca_certificates": _e("certs"),
     "check_ca_injection_status": _e("certs"),
