@@ -1089,12 +1089,12 @@ def _restart_victims(package: str) -> tuple[str, ...]:
     return tuple(tools)
 
 
-def _system_server_pid() -> int | None:
+def _system_server_pid(serial: str | None = None) -> int | None:
     """PID of system_server (None: not running or adb failed)."""
     from sandroid.core.adb import Adb
 
     try:
-        out, _err = Adb.send_adb_command("shell pidof system_server")
+        out, _err = Adb.send_adb_command("shell pidof system_server", serial=serial)
     except Exception as exc:
         logger.debug("pidof system_server failed: %s", exc)
         return None
@@ -1228,13 +1228,13 @@ def _drop_dead_frida_state() -> None:
 _PM_PROBE_TIMEOUT_S = 5.0
 
 
-def _package_manager_ready() -> bool:
+def _package_manager_ready(serial: str | None = None) -> bool:
     """``pm path android`` answers (the new framework serves binder calls)."""
     from sandroid.core.adb import Adb
 
     try:
         out, _err = Adb.send_adb_command(
-            "shell pm path android", timeout=_PM_PROBE_TIMEOUT_S
+            "shell pm path android", serial=serial, timeout=_PM_PROBE_TIMEOUT_S
         )
     except Exception as exc:
         logger.debug("pm path android failed: %s", exc)
@@ -1258,7 +1258,10 @@ def _refresh_frida_server() -> str:
 
 
 def recover_after_framework_restart(
-    previous_system_server_pid: int | None, timeout: float = 90.0
+    previous_system_server_pid: int | None,
+    timeout: float = 90.0,
+    *,
+    serial: str | None = None,
 ) -> None:
     """Bring Sandroid's Frida state back after an Android framework restart.
 
@@ -1266,7 +1269,9 @@ def recover_after_framework_restart(
     the CA injection), also outside a spawn:
 
     1. Waits until system_server runs with a PID other than
-       ``previous_system_server_pid`` (None: until it runs), then, within
+       ``previous_system_server_pid`` (None: no PID gate, only "runs" --
+       the old system_server answers for seconds after a Zygote kill, so
+       pass the PID read before the restart), then, within
        the same timeout, until the package manager answers (``pm path
        android``): frida-server restarted earlier hits the post-restart ANR
        burst. Not ``sys.boot_completed``: it stays 1 across a restart.
@@ -1279,34 +1284,50 @@ def recover_after_framework_restart(
 
     Blocking (polls adb): call it on a worker thread, never the UI thread.
 
+    Steps 2 and 3 concern the active device's Frida handles: for another
+    ``serial`` only the wait runs.
+
     Args:
         previous_system_server_pid: system_server's PID before the restart.
         timeout: Seconds to wait for the new system_server.
+        serial: The restarted device (every adb read targets it); None: the
+            active device.
 
     Raises:
         AppStartError: No new system_server, or no package manager, within
             ``timeout``.
     """
+    from sandroid.core.adb import Adb
+
+    active = serial is None or serial == Adb.get_target_device()
+
+    def drop() -> None:
+        if active:
+            _drop_dead_frida_state()
+
     deadline = time.monotonic() + max(0.0, timeout)
     while True:
-        pid = _system_server_pid()
+        pid = _system_server_pid(serial=serial)
         if pid is not None and pid != previous_system_server_pid:
             break
         if time.monotonic() >= deadline:
-            _drop_dead_frida_state()
+            drop()
             raise AppStartError(
                 f"The Android framework did not come back within {timeout:.0f} s "
                 "(no new system_server)"
             )
         time.sleep(_RECOVERY_POLL_S)
-    while not _package_manager_ready():
+    while not _package_manager_ready(serial=serial):
         if time.monotonic() >= deadline:
-            _drop_dead_frida_state()
+            drop()
             raise AppStartError(
                 f"The Android framework did not come back within {timeout:.0f} s "
                 "(the package manager does not answer)"
             )
         time.sleep(_RECOVERY_POLL_S)
+    if not active:
+        logger.info("Framework back on %s (not the active device)", serial)
+        return
     _drop_dead_frida_state()
     logger.info("After the framework restart: %s", _refresh_frida_server())
 
@@ -1477,7 +1498,8 @@ def respawn_teardown(package: str) -> None:
     try:
         # Bypasses turned on live (Ctrl+P) join the armed set, as on ⇧K,
         # before the kill: the liveness poll drops them once the app is gone.
-        _bypass().arm_active(package)
+        if _spotlight_pkg() == package:  # not after a selection change
+            _bypass().arm_active(package)
     except Exception as exc:
         logger.warning("Keeping the live bypasses armed failed: %s", exc)
     Adb.force_stop(package)

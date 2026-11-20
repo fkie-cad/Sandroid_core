@@ -168,11 +168,11 @@ class ObjectionModal(FridaModal[ObjectionConfig | None]):
         warn = lens_palette().warn
         if self.running_pid:
             return (
-                f"[{warn}]⚠ restarts the running app (pid {self.running_pid}) "
+                f"[{warn}]Restarts the running app (pid {self.running_pid}) "
                 "— Enter confirms[/]"
             )
         if self.running_unknown:
-            return f"[{warn}]⚠ restarts the app if it is running — Enter confirms[/]"
+            return f"[{warn}]Restarts the app if it is running — Enter confirms[/]"
         return ""
 
     def _update_display(self) -> None:

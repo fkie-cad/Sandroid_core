@@ -161,7 +161,7 @@ async def test_objection_warns_while_spawn_would_restart_the_app() -> None:
         assert modal._warning_text() == ""
         await pilot.press("s")
         assert modal.config.spawn_mode is True
-        assert "restarts the running app (pid 77)" in modal._warning_text()
+        assert "Restarts the running app (pid 77)" in modal._warning_text()
         assert "Enter confirms" in modal._warning_text()
 
 
@@ -349,6 +349,32 @@ async def test_shift_k_keeps_every_bypass_that_was_on_armed(monkeypatch):
     assert env.bypass.active_categories() == []
     assert env.resets == [1]
     assert svc.get_pid() is None
+
+
+async def test_shift_k_arms_live_bypasses_before_the_kill(monkeypatch):
+    """The liveness poll may drop the active set as soon as the app dies."""
+    from sandroid.core.adb import Adb
+
+    _panel_env(monkeypatch)
+    env = _bypass_env(monkeypatch, active={"ssl"})
+
+    def _kill(pkg):
+        env.killed.append(pkg)
+        env.bypass._active.clear()  # the poll saw the dead process
+
+    monkeypatch.setattr(Adb, "force_stop", staticmethod(_kill))
+    app = _Harness()
+    async with app.run_test(size=(120, 30)) as pilot:
+        panel = app.query_one(SpotlightPanel)
+        panel.action_kill_app()
+        modal = await until(
+            pilot, lambda: isinstance(app.screen, ConfirmModal) and app.screen
+        )
+        modal._opened_at -= modal.ARM_SECONDS
+        await pilot.press("y")
+        await until(pilot, lambda: env.notes)
+
+    assert env.bypass.armed_categories() == ["ssl"]
 
 
 async def test_shift_k_without_bypasses_says_killed(monkeypatch):

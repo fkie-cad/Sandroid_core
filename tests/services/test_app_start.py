@@ -1412,8 +1412,8 @@ def _no_pre_spawn_hooks(monkeypatch):
     """
     saved = list(app_start._PRE_SPAWN_HOOKS)
     app_start._PRE_SPAWN_HOOKS.clear()
-    monkeypatch.setattr(app_start, "_system_server_pid", lambda: 100)
-    monkeypatch.setattr(app_start, "_package_manager_ready", lambda: True)
+    monkeypatch.setattr(app_start, "_system_server_pid", lambda serial=None: 100)
+    monkeypatch.setattr(app_start, "_package_manager_ready", lambda serial=None: True)
     yield
     app_start._PRE_SPAWN_HOOKS[:] = saved
 
@@ -1442,7 +1442,7 @@ def framework(env, monkeypatch):
     """system_server PIDs, the Frida service and the frida-server check."""
     state = SimpleNamespace(pids=[100, 200], invalidated=[], refreshed=[])
 
-    def _pid():
+    def _pid(serial=None):
         return state.pids.pop(0) if len(state.pids) > 1 else state.pids[0]
 
     monkeypatch.setattr(app_start, "_system_server_pid", _pid)
@@ -1502,7 +1502,9 @@ def test_without_hooks_space_is_unchanged(env, monkeypatch):
     log: list = []
     _ladder(env, monkeypatch, log)
     monkeypatch.setattr(
-        app_start, "_system_server_pid", lambda: pytest.fail("probed the framework")
+        app_start,
+        "_system_server_pid",
+        lambda serial=None: pytest.fail("probed the framework"),
     )
 
     assert app_start.start_app() == (True, "ok")
@@ -1951,6 +1953,31 @@ def test_recovery_without_a_previous_pid_only_needs_system_server(recovery, cloc
 
     assert clock.sleeps == 1
     assert recovery.refreshed == 1
+
+
+def test_recovery_reads_the_given_serial(recovery, clock, monkeypatch):
+    """Per-call serial (sandroid-proxy's CA restart on a named device)."""
+    from sandroid.core.adb import Adb
+
+    serials: list = []
+    send = Adb.send_adb_command
+
+    def _send(cmd, *a, **k):
+        serials.append(k.get("serial"))
+        return send(cmd, *a, **k)
+
+    monkeypatch.setattr(Adb, "send_adb_command", staticmethod(_send))
+    monkeypatch.setattr(Adb, "get_target_device", classmethod(lambda c: "emu-1"))
+    recovery.pids = [100, 222]
+
+    app_start.recover_after_framework_restart(100, serial="emu-1")
+    assert set(serials) == {"emu-1"}
+    assert (recovery.dropped, recovery.refreshed) == (1, 1)
+
+    recovery.pids = [100, 333]
+    app_start.recover_after_framework_restart(100, serial="emu-2")
+    # Another device: only the wait, the active device's handles stay.
+    assert (recovery.dropped, recovery.refreshed) == (1, 1)
 
 
 def test_recovery_times_out_but_still_drops_the_dead_handles(recovery, clock):
@@ -2410,7 +2437,7 @@ def test_a_recovery_timeout_still_stops_the_launched_apps_tools(env, monkeypatch
     other = "org.example.other"
     env.tasks = [SimpleNamespace(name="dexray", app_name=other, display_name="Dexray")]
     pids = iter([100, 200])
-    monkeypatch.setattr(app_start, "_system_server_pid", lambda: next(pids))
+    monkeypatch.setattr(app_start, "_system_server_pid", lambda serial=None: next(pids))
 
     def timeout(pid, timeout=90.0):
         raise AppStartError("did not come back")
