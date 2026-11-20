@@ -2908,15 +2908,50 @@ class IdentityService:
         return parse_preflight(serial, _Device(serial).shell(script, timeout=timeout))
 
     def plan(
-        self, serial: str, package: str | None = None, profile: Profile | None = None
+        self,
+        serial: str,
+        package: str | None = None,
+        profile: Profile | None = None,
+        *,
+        require_answer: bool = False,
     ) -> IdentityPlan:
-        """P0+P1: read the device once and plan (no writes)."""
+        """P0+P1: read the device once and plan (no writes).
+
+        The statuses are published unless an apply ran or runs meanwhile
+        (``_Applied.gen`` changed during the read, or the apply lock is
+        held): a slow read never overwrites an apply's newer statuses.
+
+        Args:
+            serial: Device serial.
+            package: The app about to start.
+            profile: Profile to plan (default: the active one).
+            require_answer: A device that does not answer (offline, still
+                booting) raises instead of publishing every value as failed.
+
+        Raises:
+            ProfileError: No profile.
+            IdentityApplyError: ``require_answer`` and no answer.
+        """
         profile = profile or self._require_profile()
         pkgs = self._packages(serial, package)
+        gen = self._gen(serial)
         state = self.preflight(serial, pkgs, profile)
+        if require_answer and not state.ok:
+            raise IdentityApplyError(f"{serial} did not answer the identity read")
+        stale = self._gen(serial) != gen
         plan = self._plan(profile, state, pkgs)
-        self._publish(plan)
+        if not stale and not self._apply_lock.locked():
+            self._publish(plan)
         return plan
+
+    def _gen(self, serial: str) -> int:
+        with self._lock:
+            mem = self._applied.get(serial)
+            return mem.gen if mem is not None else 0
+
+    def apply_running(self) -> bool:
+        """An apply (any device) holds the apply lock right now."""
+        return self._apply_lock.locked()
 
     def _require_profile(self) -> Profile:
         profile = self.active_profile()

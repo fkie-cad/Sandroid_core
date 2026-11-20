@@ -145,7 +145,7 @@ class FakeIdentity:
         )
 
     # device
-    def plan(self, serial, package=None):
+    def plan(self, serial, package=None, **_kw):
         if self.block is not None:
             self.block.wait(10)
         return self._plan()
@@ -391,13 +391,21 @@ async def test_key_6_shows_the_table_with_status_words_and_no_glyphs(fakes) -> N
         assert not set(GLYPHS) & set(text), text
 
 
-def _no_statuses_yet(fakes, monkeypatch) -> list[str]:
-    """A TUI restart: the service has no statuses; ``plan`` calls recorded."""
+def _no_statuses_yet(fakes, monkeypatch, answers=None) -> list[str]:
+    """A TUI restart: the service has no statuses; ``plan`` calls recorded.
+
+    ``answers``: per call, False makes the device not answer (the service
+    raises for ``require_answer``); missing entries answer.
+    """
     planned: list[str] = []
     real_plan = fakes.ident.plan
+    answers = list(answers or [])
 
-    def plan(serial, package=None):
+    def plan(serial, package=None, *, require_answer=False):
         planned.append(serial)
+        assert require_answer  # an offline device must not publish failures
+        if answers and not answers.pop(0):
+            raise identity_mod.IdentityApplyError(f"{serial} did not answer")
         return real_plan(serial, package)
 
     monkeypatch.setattr(fakes.ident, "statuses", list)
@@ -446,6 +454,42 @@ async def test_no_background_read_with_identity_mode_off_or_no_device(
         lens.reload()
         await settle(pilot)
         assert planned == []
+
+
+async def test_a_device_that_does_not_answer_is_read_again_later(
+    fakes, monkeypatch
+) -> None:
+    planned = _no_statuses_yet(fakes, monkeypatch, answers=[False])
+    monkeypatch.setattr(il, "AUTO_READ_RETRY_S", 1.5)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        lens = await _open_lens(app, pilot)
+        await until(pilot, lambda: planned == [SERIAL])
+        await settle(pilot)
+        # Offline or booting: nothing turns failed, the values stay pending.
+        assert _cell(lens, "gaid", "status") == "pending"
+        assert _cell(lens, "android_id", "status") == "pending"
+        # Not a tight loop: no second read before the backoff.
+        await pilot.pause(0.5)
+        assert planned == [SERIAL]
+        await until(pilot, lambda: _cell(lens, "gaid", "status") == "verified")
+        assert planned == [SERIAL, SERIAL]
+        await pilot.pause(2.0)
+        assert planned == [SERIAL, SERIAL]  # done after the good read
+
+
+async def test_no_background_read_while_an_apply_runs(fakes, monkeypatch) -> None:
+    planned = _no_statuses_yet(fakes, monkeypatch)
+    running = [True]
+    fakes.ident.apply_running = lambda: running[0]
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        lens = await _open_lens(app, pilot)
+        await pilot.pause(1.5)
+        assert planned == []
+        running[0] = False  # the apply ended (it publishes its own statuses)
+        await until(pilot, lambda: planned == [SERIAL])
+        await until(pilot, lambda: _cell(lens, "gaid", "status") == "verified")
 
 
 async def test_found_column_reflects_hits_and_tints_rows(fakes) -> None:

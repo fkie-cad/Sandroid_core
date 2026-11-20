@@ -1083,6 +1083,46 @@ def test_a_started_window_waits_the_full_restart_timeout(service, device, monkey
     assert plan.infos["locale"].status != "failed"
 
 
+def test_a_plan_never_overwrites_an_apply_s_newer_statuses(
+    service, device, monkeypatch
+):
+    service.apply(SERIAL, "com.example.app")  # statuses stamped at NOW
+
+    def stamps():
+        return {s.at for s in service.statuses()}
+
+    assert stamps() == {NOW}
+    real = service.preflight
+
+    def apply_meanwhile(*a, **kw):
+        state = real(*a, **kw)
+        with service._lock:
+            service._applied[SERIAL].gen += 1  # an apply finished meanwhile
+        return state
+
+    monkeypatch.setattr(service, "preflight", apply_meanwhile)
+    service.plan(SERIAL)
+    assert stamps() == {NOW}  # dropped: memory is newer
+    monkeypatch.setattr(service, "preflight", real)
+    with service._apply_lock:  # an apply runs
+        service.plan(SERIAL)
+    assert stamps() == {NOW}
+    assert not service.apply_running()
+    service.plan(SERIAL)
+    assert stamps() != {NOW}  # a plain read publishes
+
+
+def test_a_plan_that_requires_an_answer_publishes_nothing_offline(
+    service, device, monkeypatch
+):
+    service.apply(SERIAL, "com.example.app")
+    before = {s.id: (s.status, s.at) for s in service.statuses()}
+    monkeypatch.setattr(ident, "_send", lambda *a, **kw: ("", "device offline"))
+    with pytest.raises(ident.IdentityApplyError, match="did not answer"):
+        service.plan(SERIAL, require_answer=True)
+    assert {s.id: (s.status, s.at) for s in service.statuses()} == before
+
+
 def test_ensure_applied_caps_the_waits_to_the_budget(service, device):
     now = [0.0]
     service._clock = lambda: now[0]

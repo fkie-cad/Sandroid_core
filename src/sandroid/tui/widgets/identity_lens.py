@@ -68,6 +68,9 @@ LENS_ID = "identity"
 KEY_PREFIX = "identity:"
 #: Minimum seconds between two table refreshes caused by live updates.
 REFRESH_MIN_S = 1.0
+#: Seconds before the lens's own device read is tried again after a device
+#: that did not answer (offline, still booting) or a failed read.
+AUTO_READ_RETRY_S = 30.0
 #: Row key prefix of the section header rows.
 SECTION_PREFIX = "_sec:"
 #: Longest profile / device value shown in a cell.
@@ -686,6 +689,10 @@ class IdentityLens(Vertical):
         #: (serial, profile id) the lens read the device for on its own (a
         #: TUI restart starts without statuses; see _auto_read).
         self._auto_read_done: set[tuple[str, str]] = set()
+        #: (serial, profile id) -> monotonic time of the next try after a
+        #: failed read; a read in flight.
+        self._auto_read_retry: dict[tuple[str, str], float] = {}
+        self._auto_read_busy = False
 
     # -- compose / mount ---------------------------------------------------
 
@@ -806,6 +813,7 @@ class IdentityLens(Vertical):
 
     def _tick(self) -> None:
         self._update_notice()
+        self._auto_read()
 
     # -- data -----------------------------------------------------------------
 
@@ -848,12 +856,17 @@ class IdentityLens(Vertical):
         """Read the device once in the background when there are no statuses.
 
         After a TUI restart the service has no statuses yet and every value
-        would show "pending" until ``v``. The first time the lens is shown
-        with identity mode on and a device targeted, it plans (one read, no
-        writes) in a thread worker; the statuses arrive through the status
-        listener. Once per device and profile, never on the UI thread.
+        would show "pending" until ``v``. While the lens is shown with
+        identity mode on, a device targeted and no apply running, it plans
+        (one read, no writes) in a thread worker; the statuses arrive through
+        the status listener. A device that does not answer publishes nothing
+        and is tried again after :data:`AUTO_READ_RETRY_S` (from the lens
+        tick, never a tight loop). Once per device and profile after a
+        successful read, never on the UI thread.
         """
-        if self._statuses or self.profile is None or not is_shown(self):
+        if self._auto_read_busy or self._statuses or self.profile is None:
+            return
+        if not is_shown(self):
             return
         ident = identity_service()
         if ident is None:
@@ -861,6 +874,9 @@ class IdentityLens(Vertical):
         try:
             if ident.config().mode != "profile":
                 return
+            running = getattr(ident, "apply_running", None)
+            if running is not None and running():
+                return  # the apply publishes its own statuses
         except Exception:
             return
         serial = _target_serial()
@@ -869,17 +885,27 @@ class IdentityLens(Vertical):
         key = (serial, self.profile.id)
         if key in self._auto_read_done:
             return
-        self._auto_read_done.add(key)
+        if time.monotonic() < self._auto_read_retry.get(key, 0.0):
+            return
+        self._auto_read_busy = True
 
         def done(result: Any) -> None:
+            self._auto_read_busy = False
             if isinstance(result, Exception):
                 logger.info(f"identity lens: reading the device failed: {result}")
+                self._auto_read_retry[key] = time.monotonic() + AUTO_READ_RETRY_S
                 return
+            self._auto_read_done.add(key)
+            self._auto_read_retry.pop(key, None)
             if not self._statuses:
                 self._statuses = {i.id: i for i in result.infos.values()}
                 self.refresh_data()
 
-        self._run_bg(lambda: ident.plan(serial), done, group="identity-auto-read")
+        self._run_bg(
+            lambda: ident.plan(serial, require_answer=True),
+            done,
+            group="identity-auto-read",
+        )
 
     def refresh_data(self) -> None:
         """Rebuild rows from the profile, statuses and hits (UI thread)."""
