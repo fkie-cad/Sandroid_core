@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -42,6 +44,18 @@ PERSONA_PREFIX = "sandroid_persona_"
 DEFAULT_KEEP = 3
 #: The persona actor of the snapshot policy.
 ACTOR = "persona"
+#: The launch-record meta key naming the persona (an identity profile id).
+META_KEY = "persona_id"
+#: The base snapshot a persona is built on unless ``meta.persona_base`` says.
+DEFAULT_BASE = "clean_8g"
+#: Seconds left that the identity apply (a framework restart) and the
+#: snapshot save need; with less, the step is skipped, not started late.
+APPLY_RESERVE_S = 60.0
+SAVE_RESERVE_S = 20.0
+
+_BUILT_LOCK = threading.Lock()
+#: Launch ids the stage built (or tried to build) a persona on.
+_BUILT_LAUNCHES: set[str] = set()
 
 
 class PersonaError(RuntimeError):
@@ -290,6 +304,7 @@ def build_persona(
     identity: IdentityService | None = None,
     emulator: Any = None,
     device: Device | None = None,
+    deadline: float | None = None,
 ) -> PersonaBuild:
     """Build the persona snapshot of ``profile_id`` on the clean emulator
     ``serial``: generate, prepare, apply the identity, save, prune.
@@ -298,9 +313,14 @@ def build_persona(
     exists already (same world and identity fingerprints) nothing is done
     unless ``rebuild``. Call from a worker thread.
 
+    ``deadline`` (``time.monotonic()``): the identity apply and the save
+    start only with :data:`APPLY_RESERVE_S` / :data:`SAVE_RESERVE_S` left;
+    otherwise the build stops with a :class:`PersonaError` (the world stays
+    on the device, without a snapshot).
+
     Raises:
-        PersonaError: No AVD, no world section, the identity apply failed,
-            or the snapshot was not saved.
+        PersonaError: No AVD, no world section, out of time, the identity
+            apply failed, or the snapshot was not saved.
         sandroid.world.prepare.PrepareError: Prepare refused or failed.
     """
     from sandroid.core import emulator as emu
@@ -330,19 +350,16 @@ def build_persona(
         device=dev,
     )
     out.prepare = report.to_dict()
+    _in_time(deadline, APPLY_RESERVE_S, "the identity apply")
     plan = svc.apply(serial, allow_restart=True, profile=profile)
     out.identity = {
         vid: {"status": info.status, "reason": info.reason}
         for vid, info in plan.infos.items()
     }
-    # A SIM value comes from the emulator's start, not the snapshot.
-    failed = sorted(
-        vid
-        for vid, info in plan.infos.items()
-        if info.status == "failed" and info.enabled and not info.sim_launch
-    )
+    failed = _unbaked(plan.infos)
     if failed:
         raise PersonaError(f"identity apply failed for {', '.join(failed)}")
+    _in_time(deadline, SAVE_RESERVE_S, "the snapshot save")
     out.save = save_persona_snapshot(
         serial,
         avd,
@@ -357,31 +374,77 @@ def build_persona(
     return out
 
 
+def _unbaked(infos: dict[str, Any]) -> list[str]:
+    """Identity values the snapshot would lack: failed ones, and framework
+    values still waiting for a restart (the restart itself failed). A SIM
+    value (the emulator's start sets it from the modem files) and per-app or
+    hook-only values (seeded at the app's first start) never count.
+    """
+    from sandroid.services.identity import NEEDS_RESTART, NOT_RESTARTED
+
+    out = []
+    for vid, info in infos.items():
+        if not info.enabled or info.sim_launch:
+            continue
+        reason = info.reason or ""
+        if info.status == "failed" or (
+            info.status == "pending"
+            and reason.startswith((NEEDS_RESTART, NOT_RESTARTED))
+        ):
+            out.append(vid)
+    return sorted(out)
+
+
+def _in_time(deadline: float | None, need_s: float, step: str) -> None:
+    if deadline is not None and deadline - time.monotonic() < need_s:
+        raise PersonaError(
+            f"out of time before {step}; run the build from the CLI "
+            "(python -m sandroid.world persona build)"
+        )
+
+
 def launch_persona(serial: str) -> str | None:
-    """The persona id of Sandroid's live launch of ``serial`` (``meta.persona``)."""
+    """The persona id of Sandroid's live launch of ``serial`` (``meta.persona_id``)."""
     from sandroid.core import emulator as emu
 
     record = emu.launch_record(serial)
     meta = (record or {}).get("meta") or {}
-    value = meta.get("persona") if isinstance(meta, dict) else None
+    value = meta.get(META_KEY) if isinstance(meta, dict) else None
     return value if isinstance(value, str) and value else None
 
 
+def _built_from_base(record: dict[str, Any]) -> bool:
+    """The launch started from the persona's clean base snapshot."""
+    meta = record.get("meta") or {}
+    base = meta.get("persona_base") if isinstance(meta, dict) else None
+    opts = record.get("options") or {}
+    return opts.get("boot") == "snapshot" and opts.get("snapshot") == (
+        base if isinstance(base, str) and base else DEFAULT_BASE
+    )
+
+
 def persona_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
-    """The device-prep stage of a persona launch (``meta.persona``).
+    """The device-prep stage of a persona launch (``meta.persona_id``).
 
     * The device holds the persona's world (its snapshot was loaded): info.
     * It holds another world: a warning; nothing is changed.
-    * It holds none (a clean base): the persona is built and its snapshot
-      saved, so the next start loads it. A photo missing from the cache is
-      a warning instead: a download could outlast the stage.
+    * It holds none: only on the first prepare of a launch started from the
+      clean base (``meta.persona_base``, default :data:`DEFAULT_BASE`) the
+      persona is built and its snapshot saved, so the next start loads it;
+      any other missing world (a rewind from outside, a later prepare) is a
+      warning. A photo missing from the cache is a warning too: a download
+      could outlast the stage. The identity apply and the save are skipped
+      when ``budget_s`` would run out (:func:`build_persona`'s deadline).
 
     Not a persona launch: nothing (``None``).
     """
+    from sandroid.core import emulator as emu
     from sandroid.core.device_prep import StageNote
     from sandroid.world.photos import ensure_photos, photo_entries
     from sandroid.world.prepare import PrepareError
 
+    deadline = time.monotonic() + budget_s
+    record = emu.launch_record(serial) or {}
     pid = launch_persona(serial)
     if pid is None:
         return None
@@ -412,6 +475,23 @@ def persona_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
             f"{label}: the device holds another world ({other}, "
             f"{stamp.get('state')}); not prepared",
         )
+    launch_id = str(record.get("launch_id") or "")
+    with _BUILT_LOCK:
+        first = bool(launch_id) and launch_id not in _BUILT_LAUNCHES
+        build = first and _built_from_base(record)
+        if build:
+            _BUILT_LAUNCHES.add(launch_id)
+    if not build:
+        return StageNote(
+            "warning",
+            "; ".join(
+                [
+                    f"{label}: the device holds no world and this launch did "
+                    "not start from the clean base; not prepared",
+                    *notes,
+                ]
+            ),
+        )
     missing = ensure_photos(photo_entries(manifest), download=False).failed
     if missing:
         return StageNote(
@@ -420,7 +500,7 @@ def persona_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
             f"python -m sandroid.world photos fetch --profile {pid}",
         )
     try:
-        result = build_persona(serial, pid, rebuild=True, device=dev)
+        result = build_persona(serial, pid, rebuild=True, device=dev, deadline=deadline)
     except (PersonaError, PrepareError) as exc:
         return StageNote("warning", f"{label}: {exc}")
     save = result.save

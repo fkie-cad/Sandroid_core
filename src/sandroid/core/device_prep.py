@@ -1593,7 +1593,15 @@ def _identity_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
 
 
 def _persona_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
-    """A persona launch (``meta.persona``): :func:`sandroid.world.persona.persona_stage`."""
+    """A persona launch (``meta.persona_id``): :func:`sandroid.world.persona.persona_stage`.
+
+    Other launches never import :mod:`sandroid.world`.
+    """
+    from sandroid.core.emulator import launch_record
+
+    meta = (launch_record(serial) or {}).get("meta") or {}
+    if not (isinstance(meta, dict) and meta.get("persona_id")):
+        return None
     from sandroid.world import persona
 
     return persona.persona_stage(serial, fresh_boot, budget_s)
@@ -1608,8 +1616,8 @@ register_prepare_stage(
     "persona",
     _persona_stage,
     order=PERSONA_STAGE_ORDER,
-    budget_s=120.0,
-    overrun_s=60.0,
+    budget_s=300.0,
+    overrun_s=120.0,
 )
 
 register_prepare_stage(

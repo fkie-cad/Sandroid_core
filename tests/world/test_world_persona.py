@@ -296,8 +296,13 @@ def test_cli_render_from_a_profile(svc, monkeypatch, capsys) -> None:
 
 
 class _Info:
-    def __init__(self, status: str, sim: bool = False) -> None:
-        self.status, self.reason, self.enabled, self.sim_launch = status, "", True, sim
+    def __init__(self, status: str, sim: bool = False, reason: str = "") -> None:
+        self.status, self.reason, self.enabled, self.sim_launch = (
+            status,
+            reason,
+            True,
+            sim,
+        )
 
 
 class _Plan:
@@ -388,10 +393,16 @@ def test_the_persona_stage_is_registered_before_identity() -> None:
 def stage_env(svc, avd_root, monkeypatch):
     from sandroid.core import emulator
 
-    meta: dict = {"persona": "mara"}
+    meta: dict = {"persona_id": "mara"}
+    record: dict = {
+        "launch_id": "L1",
+        "options": {"boot": "snapshot", "snapshot": "clean_8g"},
+        "meta": meta,
+    }
     monkeypatch.setattr(
-        emulator, "launch_record", lambda serial: {"meta": meta} if meta else None
+        emulator, "launch_record", lambda serial: record if meta else None
     )
+    monkeypatch.setattr(persona, "_BUILT_LAUNCHES", set())
     real = persona.manifest_for_profile
     monkeypatch.setattr(
         persona,
@@ -411,17 +422,17 @@ def stage_env(svc, avd_root, monkeypatch):
             return ShellResult(0, json.dumps(stamp) if stamp else "", "")
 
     monkeypatch.setattr(persona, "Device", Dev)
-    return meta, stamp
+    return meta, stamp, record
 
 
 def test_no_persona_launch_is_silent(stage_env) -> None:
-    meta, _stamp = stage_env
+    meta, _stamp, _record = stage_env
     meta.clear()
     assert persona.persona_stage(SERIAL, True, 120.0) is None
 
 
 def test_a_loaded_persona_is_info(stage_env, svc) -> None:
-    _meta, stamp = stage_env
+    _meta, stamp, _record = stage_env
     manifest, _ = persona.manifest_for_profile("mara", target_sdk=35)
     stamp.update(_stamp(manifest.world_fp))
     note = persona.persona_stage(SERIAL, True, 120.0)
@@ -430,7 +441,7 @@ def test_a_loaded_persona_is_info(stage_env, svc) -> None:
 
 
 def test_another_world_is_left_alone(stage_env, monkeypatch) -> None:
-    _meta, stamp = stage_env
+    _meta, stamp, _record = stage_env
     stamp.update(_stamp("e" * 64))
     monkeypatch.setattr(persona, "build_persona", pytest.fail)
     note = persona.persona_stage(SERIAL, True, 120.0)
@@ -465,20 +476,108 @@ def test_a_clean_base_is_built_and_saved(stage_env, monkeypatch) -> None:
         "ensure_photos",
         lambda entries, cache_dir=None, **kw: photos.PhotoFetch(),
     )
-    calls = []
+    calls: list = []
+    monkeypatch.setattr(persona, "build_persona", _fake_build(calls))
+    monkeypatch.setattr(persona, "_active_profile_id", lambda: "other")
+    note = persona.persona_stage(SERIAL, True, 120.0)
+    assert [c[:3] for c in calls] == [(SERIAL, "mara", True)]
+    assert "saved as sandroid_persona_mara_x" in note.text
+    assert note.level == "warning"  # the identity stage applies another profile
+    assert "applies other, not mara" in note.text
 
+
+def _fake_build(calls: list):
     def fake_build(serial, pid, **kw):
-        calls.append((serial, pid, kw.get("rebuild")))
+        calls.append((serial, pid, kw.get("rebuild"), kw.get("deadline")))
         return persona.PersonaBuild(
             profile=pid,
             snapshot="sandroid_persona_mara_x",
             save=persona.PersonaSave(name="sandroid_persona_mara_x", saved=True),
         )
 
-    monkeypatch.setattr(persona, "build_persona", fake_build)
-    monkeypatch.setattr(persona, "_active_profile_id", lambda: "other")
-    note = persona.persona_stage(SERIAL, True, 120.0)
-    assert calls == [(SERIAL, "mara", True)]
-    assert "saved as sandroid_persona_mara_x" in note.text
-    assert note.level == "warning"  # the identity stage applies another profile
-    assert "applies other, not mara" in note.text
+    return fake_build
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"boot": "normal", "snapshot": None},
+        {"boot": "snapshot", "snapshot": "sandroid_persona_mara_x"},
+        {"boot": "cold", "snapshot": None},
+    ],
+)
+def test_no_world_outside_a_base_launch_is_only_a_warning(
+    stage_env, monkeypatch, options
+) -> None:
+    _meta, _stamp, record = stage_env
+    record["options"] = options
+    monkeypatch.setattr(persona, "build_persona", pytest.fail)
+    note = persona.persona_stage(SERIAL, True, 300.0)
+    assert note.level == "warning"
+    assert "did not start from the clean base" in note.text
+
+
+def test_a_launch_is_built_once_and_a_named_base_counts(stage_env, monkeypatch) -> None:
+    from sandroid.world import photos
+
+    meta, _stamp, record = stage_env
+    meta["persona_base"] = "my_base"
+    record["options"] = {"boot": "snapshot", "snapshot": "my_base"}
+    monkeypatch.setattr(
+        photos,
+        "ensure_photos",
+        lambda entries, cache_dir=None, **kw: photos.PhotoFetch(),
+    )
+    calls: list = []
+    monkeypatch.setattr(persona, "build_persona", _fake_build(calls))
+    first = persona.persona_stage(SERIAL, True, 300.0)
+    assert first.level == "info"
+    assert len(calls) == 1
+    assert calls[0][3] is not None  # a deadline goes down
+    second = persona.persona_stage(SERIAL, False, 300.0)  # a rewind, same launch
+    assert len(calls) == 1
+    assert second.level == "warning"
+
+
+def test_out_of_time_skips_apply_and_save(build_env) -> None:
+    import time
+
+    svc, order, _infos, dev, emu = build_env
+    with pytest.raises(persona.PersonaError, match="out of time before the identity"):
+        persona.build_persona(
+            SERIAL,
+            "mara",
+            identity=svc,
+            emulator=emu,
+            device=dev,
+            deadline=time.monotonic() + 5,
+        )
+    assert order == ["prepare"]
+    assert emu.calls == []
+
+
+@pytest.mark.parametrize(
+    ("info", "blocks"),
+    [
+        (_Info("pending", reason="needs a framework restart"), True),
+        (_Info("pending", reason="not restarted"), True),
+        (_Info("pending", reason="no target app yet"), False),
+        (_Info("hook-only"), False),
+        (_Info("skipped"), False),
+    ],
+)
+def test_what_blocks_a_persona_save(info, blocks) -> None:
+    assert persona._unbaked({"x": info}) == (["x"] if blocks else [])
+
+
+@pytest.mark.parametrize("meta", [None, {}, {"persona": "old-key"}, {"persona_id": ""}])
+def test_the_core_wrapper_skips_non_persona_launches(monkeypatch, meta) -> None:
+    from sandroid.core import device_prep, emulator
+
+    monkeypatch.setattr(
+        emulator,
+        "launch_record",
+        lambda serial: None if meta is None else {"meta": meta},
+    )
+    monkeypatch.setattr(persona, "persona_stage", pytest.fail)
+    assert device_prep._persona_stage(SERIAL, True, 300.0) is None
