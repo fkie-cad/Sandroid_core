@@ -135,6 +135,44 @@ def chat_rows(height: int, ratio: float) -> int:
     return max(CHAT_MIN_ROWS, min(round(height * ratio), height - LENS_MIN_ROWS))
 
 
+#: Textual's own ←/→ actions: sideways scrolling (scroll containers, a lens
+#: table) and caret / cell cursors. They do not keep ←/→ from the Inspector's
+#: tab switching -- whether they scrolled used to depend on the window size.
+_BUILTIN_LEFT_RIGHT_ACTIONS = frozenset(
+    {"scroll_left", "scroll_right", "cursor_left", "cursor_right"}
+)
+
+
+def handles_left_right(widget: Widget | None, stop: Widget | None = None) -> bool:
+    """True if ``widget`` or an ancestor below ``stop`` binds ←/→ itself.
+
+    Walks from ``widget`` up through its ancestors, stopping before ``stop``
+    (and before any screen). Only a binding with its own meaning counts, such
+    as the Timeline type bar or the chat's agents bar moving their selection;
+    Textual's built-in scroll / cursor actions
+    (:data:`_BUILTIN_LEFT_RIGHT_ACTIONS`) do not.
+
+    Args:
+        widget: The focused widget (None: nothing has focus).
+        stop: An ancestor whose own ←/→ bindings are not looked at, and above
+            which the walk ends (e.g. the Inspector, whose ←/→ switch its tabs).
+
+    Returns:
+        Whether a widget on that path claims ←/→ for itself.
+    """
+    node = widget
+    while node is not None and node is not stop and not isinstance(node, Screen):
+        bindings = getattr(node, "_bindings", None)
+        key_map = getattr(bindings, "key_to_bindings", None) or {}
+        for key in ("left", "right"):
+            for binding in key_map.get(key, ()):
+                action = str(getattr(binding, "action", "")).split("(", 1)[0]
+                if action.strip() not in _BUILTIN_LEFT_RIGHT_ACTIONS:
+                    return True
+        node = node.parent if isinstance(node.parent, Widget) else None
+    return False
+
+
 def snap_chat_ratio(ratio: float) -> float:
     """The preset nearest to ``ratio``."""
     return min(CHAT_PRESETS, key=lambda p: abs(p - ratio))
@@ -235,10 +273,12 @@ class MainScreen(Screen):
         ),
         Binding("shift+down", "chat_size(-1)", "AI chat smaller", show=False),
         # Inspector tabs while it is open, whatever has focus: [ / ] always;
-        # plain ←/→ too, except in a text input (caret). They are priority
-        # bindings: a lens table used to keep ←/→ for sideways scrolling
-        # only while it overflowed, so whether they switched tabs depended
-        # on the window size (they scrolled at 80x24, switched at 100x30).
+        # plain ←/→ too, except in a text input (caret) or a widget with its
+        # own ←/→ (the Timeline type bar, the chat's agents bar; see
+        # handles_left_right). They are priority bindings: a lens table used
+        # to keep ←/→ for sideways scrolling only while it overflowed, so
+        # whether they switched tabs depended on the window size (they
+        # scrolled at 80x24, switched at 100x30).
         Binding(
             "left_square_bracket",
             "inspector_tab(-1)",
@@ -253,14 +293,14 @@ class MainScreen(Screen):
         ),
         Binding(
             "left",
-            "inspector_tab(-1)",
+            "inspector_arrow(-1)",
             "Inspector: prev tab",
             show=False,
             priority=True,
         ),
         Binding(
             "right",
-            "inspector_tab(1)",
+            "inspector_arrow(1)",
             "Inspector: next tab",
             show=False,
             priority=True,
@@ -329,15 +369,35 @@ class MainScreen(Screen):
             from textual.widgets import Input, TextArea
 
             return not isinstance(self.focused, Input | TextArea)
-        if action == "inspector_tab":
+        if action in ("inspector_tab", "inspector_arrow"):
             content = self.inspector_content
             if not (self.inspector_is_open and content and content.tabs):
                 return False
             from textual.widgets import Input, TextArea
 
             # A text input keeps ←/→ (caret) and [ / ] (typed characters).
-            return not isinstance(self.focused, Input | TextArea)
+            if isinstance(self.focused, Input | TextArea):
+                return False
+            if action == "inspector_arrow":
+                # A widget with its own ←/→ (the Timeline type bar, the
+                # chat's agents bar) keeps them; [ / ] still switch tabs.
+                return not self._focus_handles_left_right()
+            return True
         return True
+
+    def _focus_handles_left_right(self) -> bool:
+        """Whether the focused widget (or an ancestor) binds ←/→ itself.
+
+        The walk stops at the Inspector: its own ←/→ switch its tabs too.
+
+        Returns:
+            True if plain ←/→ belong to the focus, not to the Inspector.
+        """
+        try:
+            inspector: Widget | None = self.query_one("#inspector", Inspector)
+        except Exception:
+            inspector = None
+        return handles_left_right(self.focused, stop=inspector)
 
     def action_inspector_tab(self, delta: int) -> None:
         """``[`` / ``]`` or ←/→: switch the open Inspector's tab."""
@@ -345,6 +405,10 @@ class MainScreen(Screen):
             self.query_one("#inspector", Inspector).action_tab(delta)
         except Exception:
             pass
+
+    def action_inspector_arrow(self, delta: int) -> None:
+        """←/→: switch the open Inspector's tab (unless the focus uses them)."""
+        self.action_inspector_tab(delta)
 
     def action_inspector_key(self, key: str) -> None:
         """``{`` / ``}`` / ``*``: the open Inspector content's own key."""
