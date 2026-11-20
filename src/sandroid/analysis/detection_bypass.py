@@ -3002,11 +3002,18 @@ class BypassService:
         which also avoids an RPC on a still-paused spawn).
         """
         jm = Toolbox.get_frida_job_manager()
+        selected = self._selected_package()
         with self._lock:
             if self._is_job_live(jm):
-                return True, "Bypass script already loaded", False
+                if selected is None or self._app_package in (None, selected):
+                    return True, "Bypass script already loaded", False
+                # Live, but hooked into the app selected before: the bypass
+                # follows the selection, so it is dropped and loaded fresh.
+                logger.info(
+                    "Bypass script moves from %s to %s", self._app_package, selected
+                )
 
-        # Not live — drop any stale handles/temp, then load fresh.
+        # Not live (or another app's) — drop the handles/temp, load fresh.
         self._reset_script_state()
         with self._lock:
             self._merge_errors = set()
@@ -3243,6 +3250,13 @@ class BypassService:
         with self._lock:
             return list(self._armed)
 
+    @staticmethod
+    def _selected_package() -> str | None:
+        try:
+            return get_spotlight_service().get_effective_package()
+        except Exception:
+            return None
+
     def _spotlight_running(self) -> bool:
         """True if the spotlight app has a live (non-paused) process."""
         try:
@@ -3351,8 +3365,14 @@ class BypassService:
         Returns ``(now_on, message)``.
         """
         name = self.display_name(category)
+        selected = self._selected_package()
         with self._lock:
-            currently_on = category in self._armed or category in self._active
+            # On for the selected app (what the App lens shows): armed, or
+            # live in its process -- not another app's live script.
+            live_here = category in self._active and (
+                selected is None or self._app_package in (None, selected)
+            )
+            currently_on = category in self._armed or live_here
 
         if not currently_on:
             # Turning ON (arming counts: refused while Dexray holds bypasses).
@@ -3361,7 +3381,9 @@ class BypassService:
                 return False, conflict
             if self._spotlight_running():
                 with self._lock:
-                    target = set(self._active) | {category}
+                    here = selected is None or self._app_package in (None, selected)
+                    base = set(self._active) if here else set(self._armed)
+                    target = base | {category}
                 ok, msg = self.set_active(target, paused=False, on_message=on_message)
                 if not ok:
                     self._disarm(category)
@@ -3376,12 +3398,12 @@ class BypassService:
                 return True, f"{name} armed — ␣ resume applies it"
             return True, f"{name} armed — ␣ start applies it"
 
-        # Turning OFF.
+        # Turning OFF: the live flag only when the script is on this app;
+        # another app's live script is left alone.
         self._disarm(category)
         with self._lock:
-            active = category in self._active
             target = set(self._active) - {category}
-        if active:
+        if live_here:
             self.set_active(target, paused=False)
         return False, f"{name} off"
 
