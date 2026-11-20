@@ -853,12 +853,12 @@ class HighlightStore:
             if target is None and self._folder in (_UNBOUND, None):
                 self._folder = None
                 return
+            # The old session's pending write lands first (also on close).
+            self.flush()
             sets: dict[str, HighlightSet] = {}
             filters: dict[str, str] = {}
             next_id = 1
             if target is not None:
-                # Our own pending write of that file must land first.
-                self.flush()
                 sets, filters, next_id = self._load(target / "ai" / HIGHLIGHTS_FILE)
             self._folder = target
             self._sets = sets
@@ -1159,6 +1159,7 @@ def get_row_highlights() -> HighlightStore:
             return _STORE
         store = HighlightStore()
         _STORE = store
+    _follow_sessions(store)
     try:
         from sandroid.ai.results import session_root
 
@@ -1171,9 +1172,49 @@ def get_row_highlights() -> HighlightStore:
     return store
 
 
+def _follow_sessions(store: HighlightStore) -> None:
+    """Rebind *store* whenever the analysis session changes.
+
+    Subscribes to ``InitializationService.on_session_change`` (subscribed
+    before the first bind, so no change is missed). The listener runs on the
+    thread that changed the session; ``bind_folder`` only notifies the lenses
+    through the non-blocking registry hop. It re-reads the current session
+    instead of trusting the event (two changes may arrive out of order); a
+    closed session binds ``None`` (memory only, sets dropped).
+    """
+    try:
+        from sandroid.services import get_initialization_service
+
+        service = get_initialization_service()
+    except Exception:
+        logger.debug("no initialization service; highlights do not follow sessions")
+        return
+
+    def on_change(_change: Any) -> None:
+        try:
+            from sandroid.ai.results import session_root
+
+            store.bind_folder(session_root())
+        except Exception:
+            logger.debug(
+                "rebinding highlights after a session change failed", exc_info=True
+            )
+
+    try:
+        store._session_unsub = service.on_session_change(on_change)
+    except Exception:
+        logger.debug("session-change subscription failed", exc_info=True)
+
+
 def reset_for_tests() -> None:
     """Drop the singleton and unregister it (test isolation)."""
     global _STORE
+    unsub = getattr(_STORE, "_session_unsub", None)
+    if callable(unsub):
+        try:
+            unsub()
+        except Exception:
+            pass
     with _STORE_LOCK:
         store, _STORE = _STORE, None
     if store is not None:

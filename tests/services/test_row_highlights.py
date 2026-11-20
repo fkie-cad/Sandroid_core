@@ -511,3 +511,44 @@ def test_a_set_saved_mid_scan_loads_as_partial(tmp_path, notes):
     got = reloaded.get(hs.id)
     assert (got.scanning, got.complete, got.state) == (False, False, "partial")
     assert got.reasons == {"tls-12": "tracker host"}
+
+
+def test_store_follows_analysis_session_changes(tmp_path, monkeypatch):
+    """Tracking's on_session_change: a switch rebinds, a close drops the sets."""
+    import sandroid.services as services_pkg
+    from sandroid.ai import results as ai_results
+
+    current = {"root": tmp_path / "s1"}
+    listeners = []
+
+    class _Service:
+        def on_session_change(self, cb):
+            listeners.append(cb)
+            return lambda: listeners.remove(cb)
+
+    monkeypatch.setattr(services_pkg, "get_initialization_service", lambda: _Service())
+    monkeypatch.setattr(ai_results, "session_root", lambda: current["root"])
+    rh.reset_for_tests()
+    try:
+        store = rh.get_row_highlights()
+        assert len(listeners) == 1
+        store.create("network", "first session", reasons={"f1": "x"})
+        store.flush()
+        assert (tmp_path / "s1" / "ai" / "highlights.json").exists()
+
+        current["root"] = tmp_path / "s2"
+        listeners[0](object())
+        assert store.sets() == []
+        store.create("files", "second", reasons={"/sdcard/a": "y"})
+        store.flush()
+
+        current["root"] = tmp_path / "s1"
+        listeners[0](object())
+        assert [s.label for s in store.sets()] == ["first session"]
+
+        current["root"] = None
+        listeners[0](object())
+        assert store.sets() == []
+    finally:
+        rh.reset_for_tests()
+    assert listeners == []
