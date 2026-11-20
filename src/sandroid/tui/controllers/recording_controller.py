@@ -1076,10 +1076,15 @@ class RecordingController:
             if outcome.error:
                 self._ui(self._log_warning, outcome.error)
                 self._toast(outcome.error, "warning")
-            else:
+            elif outcome.result == rewind.DIVERGED:
+                # Never a success: the steps did not reach what your run did.
+                words = rewind.diverged_words(outcome)
+                self._ui(self._log_warning, words)
+                self._toast(words, "warning")
+            elif outcome.result in ("replayed", "rewound"):
                 done = (
                     "Done. The device shows the replayed result."
-                    if replay
+                    if outcome.result == "replayed"
                     else "Done. The device is at the start point."
                 )
                 self._ui(self._log_success, done)
@@ -1090,10 +1095,13 @@ class RecordingController:
         if review is not None and hasattr(review, "refresh_lists"):
             self._ui(review.refresh_lists)
         return {
-            "success": outcome is not None and not outcome.error,
+            "success": outcome is not None
+            and not outcome.error
+            and outcome.result in ("replayed", "rewound"),
             "run_id": run_id,
             "error": None if outcome is None else outcome.error,
             "result": None if outcome is None else outcome.result,
+            "diverged_at_step": None if outcome is None else outcome.diverged_at_step,
         }
 
     def _resume_after(self, config: Any) -> None:
@@ -1318,10 +1326,14 @@ class RecordingController:
                 record_window=[rec.started or 0.0, rec.stopped or 0.0],
                 mode=outcome.mode,
                 rec_id=rec.rec_id,
+                result=outcome.result or "stopped",
                 verdicts=verdicts,
                 rewind={
                     "steps": outcome.steps,
                     "stopped_at_step": outcome.stopped_at_step,
+                    "diverged_at_step": outcome.diverged_at_step,
+                    "diverged": outcome.diverged,
+                    "note": rewind.diverged_note(rec.runs[-1] if rec.runs else None),
                     "flows": flows,
                     "requests": requests,
                     "run": outcome.n,
@@ -1442,13 +1454,25 @@ class RecordingController:
             "requests": rec.requests,
             "selected_requests": rec.selected_flows,
             "runs": [
-                {k: r.get(k) for k in ("n", "kind", "result", "error", "run_id")}
+                {
+                    k: r.get(k)
+                    for k in (
+                        "n",
+                        "kind",
+                        "result",
+                        "error",
+                        "diverged_at_step",
+                        "diverged",
+                        "run_id",
+                    )
+                }
                 for r in rec.runs
             ],
             "results": [
                 {
                     "path": fr.path,
                     "verdict": fr.verdict,
+                    "note": fr.note or None,
                     "what_your_action_changed": fr.action_text,
                     "what_the_replay_changed": fr.replay_text or None,
                 }

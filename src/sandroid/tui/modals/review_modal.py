@@ -349,6 +349,18 @@ class ReviewModal(ForensicModal[None]):
         ]
         if last.get("error"):
             widgets.append(Static(escape(str(last["error"])), classes="review-warn"))
+        if last.get("result") == "diverged":
+            from sandroid.core import rewind
+
+            words = rewind.diverged_words(
+                rewind.RunOutcome(
+                    n=0,
+                    mode="rewind-replay",
+                    diverged_at_step=last.get("diverged_at_step"),
+                    diverged=last.get("diverged"),
+                )
+            )
+            widgets.append(Static(escape(words), classes="review-warn"))
         widgets.extend(self._step_widgets(last))
         for fr in res["files"]:
             widgets.extend(self._file_widgets(fr))
@@ -364,8 +376,8 @@ class ReviewModal(ForensicModal[None]):
         lines = []
         for s in steps:
             way = s.get("way") or ""
-            if way == "failed":
-                way = f"failed: {s.get('reason')}"
+            if way in ("failed", "diverged"):
+                way = f"{way}: {s.get('reason')}"
             lines.append(f"  step {s.get('i')}: {s.get('what')} · {way}")
         return [Static("Replayed steps", classes="review-section"),
                 Static(escape("\n".join(lines)))]  # fmt: skip
@@ -400,6 +412,8 @@ class ReviewModal(ForensicModal[None]):
                 text = _clip_lines("\n".join(extra))
                 out.append(Static(escape(text), classes="review-hint"))
         out.append(Static(fr.verdict, classes=cls))
+        if getattr(fr, "note", ""):
+            out.append(Static(escape(fr.note), classes="review-warn"))
         return out
 
     def _flow_widgets(self, flows: list[Any]) -> list[Any]:

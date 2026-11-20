@@ -968,6 +968,8 @@ class DiffsView(FilesSubViewBase):
         facts = self._facts.get(s.get("run_id", "")) or {}
         errors = facts.get("run_errors") or {}
         steps = len(errors.get("steps") or [])
+        if s.get("result") == "diverged":
+            return "diverged", _BAD  # the replay did not reach your run
         if s.get("error") or errors.get("fatal"):
             if s.get("error") == "Replay cancelled" or s.get("mode"):
                 return "stopped", _WARN  # a Rewind stops, it never aborts
@@ -1293,6 +1295,12 @@ class DiffsView(FilesSubViewBase):
         info = getattr(record, "rewind", None) or {}
         out: list[tuple[str, Any]] = []
         verdicts = getattr(record, "verdicts", None) or {}
+        if info.get("diverged_at_step"):
+            at = info.get("diverged_at_step")
+            body = Text(str(info.get("diverged") or f"step {at}"), style=_BAD)
+            if info.get("note"):
+                body.append(f"\n{info['note']}")
+            out.append(("The replay diverged", body))
         if verdicts:
             body = Text()
             for path, verdict in verdicts.items():
@@ -1311,10 +1319,11 @@ class DiffsView(FilesSubViewBase):
                 if body:
                     body.append("\n")
                 way = st.get("way") or ""
-                if way == "failed":
-                    way = f"failed: {st.get('reason')}"
+                if way in ("failed", "diverged"):
+                    way = f"{way}: {st.get('reason')}"
                 body.append(f"{st.get('i')}. {st.get('what')}  ")
-                body.append(way, style=_BAD if way.startswith("failed") else _MUTED)
+                bad = way.startswith(("failed", "diverged"))
+                body.append(way, style=_BAD if bad else _MUTED)
             out.append(("Replayed steps", body))
         flows = info.get("flows") or []
         if flows:

@@ -1041,3 +1041,98 @@ def test_run_kind_and_stop_words_follow_the_phase(controller):
     assert statuses[-1] == "Stopping the replay"
     controller._set_state("idle")
     assert controller.run_kind is None
+
+
+def test_a_diverged_replay_is_never_reported_as_success(controller, monkeypatch):
+    from types import SimpleNamespace
+
+    from sandroid.core import run_history
+    from sandroid.tui.widgets import diffs_view
+    from sandroid.tui.widgets.diffs_view import DiffsView
+
+    saved: list = []
+    monkeypatch.setattr(run_history, "save_run", saved.append)
+    monkeypatch.setattr(
+        "sandroid.core.timeline.timeline_folder", lambda: rewind.recordings_root()
+    )
+    why = "field reads 'sgelde', expected 'spiegel.de'"
+    report = {
+        "steps": [
+            {"i": 1, "seq": 3, "what": 'typed "spiegel.de" into the address bar',
+             "way": "diverged", "reason": why, "check": "diverged"},
+        ],
+        "stopped_at_step": None,
+        "error": None,
+        "diverged_at_step": 1,
+        "diverged": f"step 1 of 1: {why}",
+    }  # fmt: skip
+    controller._deps = lambda rec, view, replay: rewind.RewindDeps(
+        load_snapshot=lambda name, serial: True,
+        shell=lambda cmd: "",
+        pull=lambda path, role, rec_id, run: rewind.PullOutcome(f"v-{role}"),
+        replay=lambda rec, runner: report,
+        emit=lambda *a, **k: 1,
+    )
+    success: list[str] = []
+    warnings: list[str] = []
+    toasts: list[tuple[str, str]] = []
+    controller._log_success = success.append
+    controller._log_warning = warnings.append
+    controller._notify = lambda message, severity: toasts.append((message, severity))
+    rec = _rec()
+    rec.selected = [rec.changed[0]["path"]]
+    controller._rec = rec
+    controller._state = "running"
+    out = controller._rewind_worker(rec, True, controller.view)
+
+    assert out["success"] is False
+    assert out["result"] == "diverged"
+    assert out["diverged_at_step"] == 1
+    assert success == []
+    assert any(f"The replay diverged at step 1 of 1: {why}" in w for w in warnings)
+    assert all(sev == "warning" for _m, sev in toasts)
+    assert not any("Done" in m for m, _sev in toasts)
+    # run.json, the Review results and the Sessions lens say diverged
+    record = saved[0]
+    assert record.result == "diverged"
+    assert record.rewind["diverged_at_step"] == 1
+    assert "diverged at step 1" in record.rewind["note"]
+    lines = next(iter(record.changed_files[0].values()))
+    assert any(ln.startswith("Note: The replay diverged at step 1") for ln in lines)
+    assert rec.runs[-1]["result"] == "diverged"
+    summary = run_history._summary_from_record(record)
+    assert summary["result"] == "diverged"
+    problem = DiffsView._problem(SimpleNamespace(_facts={}), summary)
+    assert problem == ("diverged", diffs_view._BAD)
+    fake = SimpleNamespace(_short_path=DiffsView._short_path)
+    sections = dict(DiffsView._rewind_sections(fake, record))
+    assert why in sections["The replay diverged"].plain
+    assert f"diverged: {why}" in sections["Replayed steps"].plain
+    assert controller.review_dict(rec)["runs"][-1]["diverged_at_step"] == 1
+
+
+async def test_review_results_say_the_replay_diverged():
+    ctl = FakeController()
+    rec = _rec()
+    rec.runs = [
+        {"n": 2, "kind": "rewind-replay", "result": "diverged",
+         "diverged_at_step": 2, "diverged": "step 2 of 3: field text differs",
+         "steps": [{"i": 2, "what": "typed 7 characters into password field",
+                    "way": "diverged", "reason": "field text differs"}]},
+    ]  # fmt: skip
+    modal = ReviewModal(rec, ctl)
+    app = Host(modal)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await until(pilot, lambda: app.screen is modal)
+
+        def text() -> str:
+            return " ".join(
+                str(w.render()) for w in modal.query("#review-results Static")
+            )
+
+        await until(pilot, lambda: "diverged" in text())
+        body = text()
+        assert "Results of the last Rewind + Replay (diverged)" in body
+        assert "The replay diverged at step 2 of 3: field text differs" in body
+        assert "diverged: field text differs" in body
+        assert "Done" not in body
