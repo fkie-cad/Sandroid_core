@@ -524,6 +524,24 @@ def test_own_reads_leave_the_tool_rows_event_by_event(monkeypatch):
     ] == ["cat"]
 
 
+def test_rows_the_tool_never_read_skip_the_own_read_matching(monkeypatch):
+    """The Files snapshot's fast path: a row the tool never read costs one
+    dict look-up -- no serial look-up, no walk over its events.
+    """
+    from datetime import datetime
+
+    from sandroid.tui.widgets.highlight_bar import file_snapshot
+
+    monkeypatch.setattr(df, "_TOOL_READS", {})
+
+    def boom(ttl=1.0):
+        raise AssertionError("serial looked up for a row the tool never read")
+
+    monkeypatch.setattr(df, "recorded_serial_cached", boom)
+    act = _act([_ev(datetime.now(), "cat")], noise=1)
+    assert file_snapshot(f"{PKG}/never.txt", shown=True, act=act)["count"] == 1
+
+
 def test_monitor_fallback_skips_only_our_noise_in_our_window(monkeypatch):
     import time as _time
 

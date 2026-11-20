@@ -153,6 +153,28 @@ def note_tool_read(
             _TOOL_READS.pop(next(iter(_TOOL_READS)))
 
 
+def has_tool_reads(path: str) -> bool:
+    """Whether read_device_files read *path* at all (cheap; no lock needed
+    for a dict membership test).
+    """
+    return path in _TOOL_READS
+
+
+def tool_read_windows(
+    path: str, serial: str | None = None
+) -> list[tuple[float, float]]:
+    """The read windows on *path* (with :data:`TOOL_READ_SLACK_S`) on
+    *serial*, for checking many events against them in one go.
+    """
+    with _TOOL_READS_LOCK:
+        windows = list(_TOOL_READS.get(path) or [])
+    return [
+        (t0 - TOOL_READ_SLACK_S, t1 + TOOL_READ_SLACK_S)
+        for w_serial, t0, t1 in windows
+        if not (serial and w_serial and serial != w_serial)
+    ]
+
+
 def tool_read_at(path: str, t: Any = None, serial: str | None = None) -> bool:
     """Whether read_device_files read *path* at host time *t* (within its
     read window, +- :data:`TOOL_READ_SLACK_S`) on *serial* (when both are

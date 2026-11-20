@@ -670,23 +670,32 @@ def _our_reads(act: Any, path: str) -> dict[str, int]:
     a write (or an analyst's ``cat`` outside the window) is never ours.
     """
     from sandroid.ai.device_files import (
+        has_tool_reads,
         is_own_read_process,
         recorded_serial_cached,
-        tool_read_at,
+        tool_read_windows,
     )
 
+    # Fast path (most rows, every row while the AI read nothing): one dict
+    # look-up, no serial look-up, no walk over the row's events.
+    if not has_tool_reads(path):
+        return {}
     events = getattr(act, "events", None) or []
     if not events:
         return {}
-    serial = recorded_serial_cached()
+    windows = tool_read_windows(path, serial=recorded_serial_cached())
+    if not windows:
+        return {}
     ours: dict[str, int] = {}
     for ev in events:
-        process = str(getattr(ev, "process", "") or "")
-        if getattr(ev, "category", None) != "noise" or not is_own_read_process(process):
+        if getattr(ev, "category", None) != "noise":
             continue
+        process = str(getattr(ev, "process", "") or "")
         when = getattr(ev, "when", None)
-        t = when.timestamp() if when is not None else None
-        if t is not None and tool_read_at(path, t, serial=serial):
+        if when is None or not is_own_read_process(process):
+            continue
+        t = when.timestamp()
+        if any(lo <= t <= hi for lo, hi in windows):
             head = process.split(" · ", 1)[0]
             ours[head] = ours.get(head, 0) + 1
     return ours
