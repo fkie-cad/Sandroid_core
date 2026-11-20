@@ -325,3 +325,12 @@ def test_static_analysis_rows_come_from_the_dialog() -> None:
     """insight-privacy's `a` dialog keys are listed from its BINDINGS."""
     keys = _section_raw_keys("Static analysis (a)")
     assert {"enter", "p", "t", "s", "v"} <= keys
+
+
+def test_section_notes_are_plain_words_without_markup() -> None:
+    """Notes go into Textual markup as is: no brackets, no glyphs."""
+    for heading, note in hs._SECTION_NOTES.items():
+        assert "[" not in note, heading
+        assert "]" not in note, heading
+        assert not set("←→↑↓⏎⇧⚑✓✗◇▸○") & set(note), heading
+    assert "TLS failed" in hs._SECTION_NOTES["Network lens"]

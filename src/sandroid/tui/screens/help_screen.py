@@ -263,6 +263,17 @@ _HAND_SECTIONS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
 #: Main-screen bindings with this description prefix size the AI chat:
 #: listed in the AI chat section.
 _CHAT_PREFIX = "AI chat "
+#: A note in the detail pane under a section's keys (what the view shows,
+#: not keys). Plain words, from the view's owner.
+_SECTION_NOTES: dict[str, str] = {
+    "Network lens": (
+        "Columns: Time, App (which app sent the flow), Recipient, Request, "
+        "TLS (TLS / plain / TLS failed), Identity, Status, Size (sent / "
+        "received). Narrow views drop Size, TLS, Time, then App. The lens "
+        "bar counts TLS failures you have not seen yet (e.g. "
+        "'27 TLS failed')."
+    ),
+}
 #: Sections for the AI chat dock and the log drawer, after the global
 #: action categories (in this order).
 _DOCK_SECTIONS = (
@@ -954,6 +965,9 @@ class HelpScreen(ModalScreen):
                 where += (
                     f" Overrides the global key {override} while this lens has focus."
                 )
+            note = _SECTION_NOTES.get(heading)
+            if note:
+                where += f"\n\n{note}"
             return (
                 f"[bold #58a6ff]{heading}[/]  [dim]·  panel key[/]\n\n"
                 f"[#c9d1d9]{where}[/]\n\n"
