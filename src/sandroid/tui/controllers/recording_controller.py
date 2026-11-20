@@ -471,13 +471,49 @@ class RecordingController:
             logger.debug("create_snapshot raised", exc_info=True)
             ok, why = False, str(exc)
         else:
-            why = "the emulator refused"
+            why = "the emulator did not confirm the save (it may be slow)"
         finally:
             self._guarded(self._suppress_disconnect_guard, False)
         if not ok:
+            # A save the console gave up on can still finish in the
+            # emulator: delete it once it shows up (only this name).
+            threading.Thread(
+                target=self._reap_start_point,
+                args=(name, rec.serial),
+                name="rewind-reap",
+                daemon=True,
+            ).start()
             return f"Could not save the start point: {why}. Nothing was recorded."
         rec.start_point = {"name": name, "saved_ok": True, "pinned": False}
         return None
+
+    @staticmethod
+    def _reap_start_point(
+        name: str, serial: str | None, wait_s: float = 180.0, every_s: float = 10.0
+    ) -> bool:
+        """Delete ``name`` (a ``sandroid_rec_*`` start point whose save timed
+        out) once the emulator lists it; give up after ``wait_s``.
+        """
+        from sandroid.core import rewind
+
+        if not rewind.is_start_point_name(name):
+            return False
+        try:
+            from sandroid.services import get_emulator_service
+
+            service = get_emulator_service()
+        except Exception:
+            return False
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline:
+            try:
+                names = {s.name for s in service.list_snapshots()}
+            except Exception:
+                names = set()
+            if name in names:
+                return bool(service.delete_snapshot(name, serial))
+            time.sleep(every_s)
+        return False
 
     def _begin_capture(self, rec: Any) -> str | None:
         """First file list, the getevent lease, the record-start line."""
@@ -1091,8 +1127,11 @@ class RecordingController:
 
             return get_timeline().emit(*args, **kw)
 
+        last_t = max((t for t in (_step_time(st) for st in steps) if t), default=None)
+        tail = (rec.stopped - last_t) if (rec.stopped and last_t) else None
         try:
             return StepReplayer(
+                tail_s=tail,
                 shell=runner.deps.shell,
                 helper=helper,
                 cancelled=self._cancel.is_set,
@@ -1156,12 +1195,7 @@ class RecordingController:
         flows = []
         last = rec.runs[-1] if rec.runs else None
         if last and last.get("kind") == "rewind-replay" and rec.selected_flows:
-            seq = last.get("seq") or {}
-            replay_lines = rewind.lines_between(
-                seq.get("replay") or seq.get("start"),
-                seq.get("end"),
-                offset=rec.timeline_offset,
-            )
+            replay_lines = self._replay_lines(rec, last)
             replay_reqs = rewind.requests_in(replay_lines)
             read = rewind.flow_detail_reader()
             flows = [
@@ -1177,15 +1211,26 @@ class RecordingController:
         out = {"Your run": list(rec.requests) if rec else []}
         last = rec.runs[-1] if rec and rec.runs else None
         if last and last.get("kind") == "rewind-replay":
-            seq = last.get("seq") or {}
-            out["Replay"] = rewind.requests_in(
-                rewind.lines_between(
-                    seq.get("replay") or seq.get("start"),
-                    seq.get("end"),
-                    offset=rec.timeline_offset,
-                )
-            )
+            out["Replay"] = rewind.requests_in(self._replay_lines(rec, last))
         return out
+
+    @staticmethod
+    def _replay_lines(rec: Any, run: dict[str, Any]) -> list[dict]:
+        """The replay's lines by time: from its replay phase to its end (plus
+        the request log's delay), so a late request still counts.
+        """
+        from sandroid.core import rewind
+
+        seq = run.get("seq") or {}
+        lines = rewind.lines_between(
+            seq.get("replay") or seq.get("start"), None, offset=rec.timeline_offset
+        )
+        t0 = run.get("replay_started") or run.get("started")
+        if not isinstance(t0, (int, float)):
+            return lines
+        end = run.get("ended")
+        t1 = end + rewind.REQUEST_SLACK_S if isinstance(end, (int, float)) else None
+        return rewind.in_time(lines, t0, t1)
 
     def _persist(self, rec: Any, outcome: Any) -> str | None:
         """Save the Rewind as a run (Sessions lens); returns its id."""
@@ -1405,6 +1450,12 @@ class RecordingController:
 
         self._push_modal(ExportModal(), on_export_result)
         return True
+
+
+def _step_time(step: Any) -> float | None:
+    from sandroid.features.player import _epoch
+
+    return _epoch(getattr(step, "t", None))
 
 
 def _rewound(rec: Any) -> bool:

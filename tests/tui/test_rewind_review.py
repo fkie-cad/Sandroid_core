@@ -840,3 +840,64 @@ def test_late_list_and_rewind_never_overlap(controller, monkeypatch):
     release.set()
     t.join(5)
     assert not controller._list_lock.locked()
+
+
+def test_replay_requests_are_taken_by_time_including_late_ones(controller, monkeypatch):
+    lines = [
+        {"src": "net", "kind": "flow", "seq": 50, "t": 1000.0, "ref": {"id": "a"},
+         "data": {"method": "GET", "host": "h", "path": "/early"}},
+        {"src": "net", "kind": "flow", "seq": 60, "t": 1011.0, "ref": {"id": "b"},
+         "data": {"method": "GET", "host": "h", "path": "/late"}},
+        {"src": "net", "kind": "flow", "seq": 70, "t": 1100.0, "ref": {"id": "c"},
+         "data": {"method": "GET", "host": "h", "path": "/after"}},
+    ]  # fmt: skip
+    monkeypatch.setattr(rewind, "lines_between", lambda *a, **k: lines)
+    run = {"seq": {"replay": 40, "end": 55}, "replay_started": 999.0, "ended": 1010.0}
+    got = [ln["data"]["path"] for ln in controller._replay_lines(_rec(), run)]
+    assert got == ["/early", "/late"]
+
+
+def test_a_timed_out_save_is_deleted_when_it_shows_up(monkeypatch):
+    from types import SimpleNamespace
+
+    from sandroid import services
+    from sandroid.tui.controllers.recording_controller import RecordingController
+
+    calls = {"list": 0, "deleted": []}
+
+    class Emu:
+        def list_snapshots(self):
+            calls["list"] += 1
+            names = ["clean_8g"] + (
+                ["sandroid_rec_20261120_011933"] if calls["list"] > 1 else []
+            )
+            return [SimpleNamespace(name=n) for n in names]
+
+        def delete_snapshot(self, name, serial=None):
+            calls["deleted"].append((name, serial))
+            return True
+
+    monkeypatch.setattr(services, "get_emulator_service", lambda: Emu())
+    ok = RecordingController._reap_start_point(
+        "sandroid_rec_20261120_011933", "emulator-5560", wait_s=5, every_s=0.01
+    )
+    assert ok
+    assert calls["deleted"] == [("sandroid_rec_20261120_011933", "emulator-5560")]
+    assert RecordingController._reap_start_point("clean_8g", "x", wait_s=1) is False
+
+
+async def test_results_are_visible_at_200x55():
+    rec = _rec()
+    rec.runs = [{"n": 2, "kind": "rewind", "result": "rewound", "loaded": True}]
+    modal = ReviewModal(rec, FakeController())
+    app = Host(modal)
+    async with app.run_test(size=(200, 55)) as pilot:
+        await until(
+            pilot,
+            lambda: any(
+                "Results of the last" in str(w.render())
+                for w in modal.query("#review-results Static")
+            ),
+        )
+        row = modal.query_one("#review-name-row")
+        assert row.size.height <= 3  # was ~17 empty rows (height 1fr)

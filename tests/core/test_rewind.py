@@ -932,3 +932,37 @@ def test_a_failed_before_pull_keeps_the_earlier_before(tmp_path, monkeypatch):
 def test_input_text_percent_is_sent_as_is():
     assert input_text_arg("100%") == "100%"
     assert input_text_arg("a%sb") is None
+
+
+def test_replay_waits_as_long_as_the_run_went_on_after_its_last_step():
+    clock = Clock()
+    rep = StepReplayer(
+        shell=lambda c: "", helper=None, sleep=clock.sleep, monotonic=clock.mono,
+        tail_s=20.0,
+    )  # fmt: skip
+    rep.run(extract_steps([_tap(seq=1)]))
+    assert clock.t == pytest.approx(20.0, abs=0.3)
+    clock.t = 0.0
+    rep.tail_s = 500.0
+    rep.run(extract_steps([_tap(seq=1)]))
+    assert clock.t == pytest.approx(player.MAX_TAIL_S, abs=0.3)
+
+
+def test_before_version_gets_no_backwards_chain_diff(files_root):
+    from sandroid.core import watchlist_store
+
+    path = "/data/data/p/files/c.txt"
+    _version(path, "v001_10-00-00", b"after\n")
+    staging = watchlist_store.reset_current(path)
+    (staging / "c.txt").write_bytes(b"before\n")
+    kept = watchlist_store.keep_version(path, {"rewind": {"role": "before"}})
+    assert watchlist_store.version_diff(kept.dir) is None
+    assert not (kept.dir / "diff.json").exists()
+
+
+def test_version_list_names_the_role():
+    from sandroid.tui.widgets.file_inspect import Version
+
+    v = Version(1, Path("/x/v001"), Path("/x/v001/f"), None, 1,
+                {"trigger": "rewind-after_replay", "rewind": {"role": "after_replay"}})  # fmt: skip
+    assert v.trigger == "After (replay)"

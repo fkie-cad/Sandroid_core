@@ -981,6 +981,8 @@ class RewindRunner:
         rec = self.rec
         mode = "rewind-replay" if replay else "rewind"
         n = len(rec.runs) + 2  # run 1 is the original
+        t0 = time.time()
+        t_replay: float | None = None
         out = RunOutcome(n=n, mode=mode)
         name = rec.start_point_name
         words = "rewind and replay started" if replay else "rewind started"
@@ -1025,6 +1027,7 @@ class RewindRunner:
                 return out
             if self.deps.replay is None:
                 raise RewindStoppedError("Replay is not available yet.")
+            t_replay = time.time()
             out.seq["replay"] = self._emit(
                 "replay",
                 f"{rec.rec_id}#{n}",
@@ -1065,7 +1068,8 @@ class RewindRunner:
             run = {
                 "n": n,
                 "kind": mode,
-                "started": out.seq.get("start"),
+                "started": t0,
+                "replay_started": t_replay,
                 "ended": time.time(),
                 "result": out.result or "stopped",
                 "error": out.error,

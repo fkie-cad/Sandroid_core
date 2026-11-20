@@ -83,6 +83,9 @@ class ReviewModal(ForensicModal[None]):
     ReviewModal .review-warn {
         color: $warning;
     }
+    ReviewModal #review-name-row {
+        height: auto;
+    }
     ReviewModal #review-name {
         width: 50;
         height: 1;

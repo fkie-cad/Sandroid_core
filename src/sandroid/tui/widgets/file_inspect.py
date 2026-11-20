@@ -979,6 +979,11 @@ class Version:
     @property
     def trigger(self) -> str:
         record = self.record or {}
+        role = (record.get("rewind") or {}).get("role")
+        if role:
+            from sandroid.core.rewind import ROLE_WORDS
+
+            return ROLE_WORDS.get(role, role)
         return str(record.get("trigger") or "")
 
 

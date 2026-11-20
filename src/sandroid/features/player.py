@@ -278,8 +278,11 @@ ELEMENT_WAIT_S = 10.0
 ELEMENT_POLL_S = 0.3
 #: Longest recorded pause that is waited before a step (s).
 MAX_GAP_S = 10.0
-#: Waits after the last step before After (replay) is pulled (s).
+#: Waits after the last step before After (replay) is pulled (s): at least
+#: this, else as long as your run went on after its last step (apps write and
+#: send later), at most :data:`MAX_TAIL_S`.
 SETTLE_AFTER_S = 3.0
+MAX_TAIL_S = 30.0
 
 WAY_ELEMENT = "by element"
 WAY_POSITION = "by position"
@@ -588,6 +591,7 @@ class StepReplayer:
         sleep: Any = None,
         monotonic: Any = None,
         element_wait_s: float = ELEMENT_WAIT_S,
+        tail_s: float | None = None,
     ) -> None:
         self.shell = shell
         self.helper = helper
@@ -598,6 +602,7 @@ class StepReplayer:
         self._sleep = sleep or time.sleep
         self._mono = monotonic or time.monotonic
         self.element_wait_s = element_wait_s
+        self.tail_s = tail_s
 
     # -- helpers ------------------------------------------------------------
 
@@ -833,5 +838,7 @@ class StepReplayer:
             report.append(entry)
             self._line(step, n, res["way"], res.get("reason") or "", res)
         if n:
-            self._wait(SETTLE_AFTER_S)
+            tail = min(MAX_TAIL_S, max(SETTLE_AFTER_S, float(self.tail_s or 0.0)))
+            self.progress(f"Waiting {tail:.0f} s for the app to finish, as in your run")
+            self._wait(tail)
         return {"steps": report, "stopped_at_step": None, "error": None}
