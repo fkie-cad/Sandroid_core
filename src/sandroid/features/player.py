@@ -289,6 +289,26 @@ WAY_POSITION = "by position"
 #: Keys and typed text have no element or position to choose between.
 WAY_REPLAYED = "replayed"
 WAY_FAILED = "failed"
+#: The step was done but the app is not where your run was: a typed field
+#: reads something else, or two steps in a row missed their element. The
+#: replay goes on; the run ends "diverged", never as a plain success.
+WAY_DIVERGED = "diverged"
+
+#: Typed text goes in one character at a time at your recorded pace (typing
+#: time / characters), at least / at most this far apart (s). One fast
+#: ``input text`` of the whole string loses characters in fields that
+#: rewrite themselves while you type (Firefox's address bar autocomplete).
+TYPE_MIN_GAP_S = 0.15
+TYPE_MAX_GAP_S = 0.6
+#: After typing, the field is read back for up to this long (s), every
+#: :data:`TEXT_POLL_S`, until it holds the recorded text.
+TEXT_CHECK_S = 3.0
+TEXT_POLL_S = 0.5
+#: What a password field shows instead of a character.
+_MASK_CHARS = frozenset("\u2022\u25cf*")
+#: A reason of a "by position" tap that says nothing about the app (no
+#: element was recorded, or nothing could look for it).
+_NO_EVIDENCE = ("", "nothing to match", "keyboard key", "the UI helper is not running")
 
 _STEP_KINDS = ("tap", "long_press", "swipe", "key", "gesture")
 #: Linux key names (Tracking's ``KEY_NAMES``) -> ``input keyevent`` names.
@@ -495,6 +515,9 @@ class Step:
     summary: str = ""
     pkg: str | None = None
     raw: str | None = None
+    #: A password field (or data marked sensitive): typed values are never
+    #: written into the step's words.
+    sensitive: bool = False
 
     @property
     def target(self) -> dict | None:
@@ -503,7 +526,11 @@ class Step:
 
     @property
     def what(self) -> str:
-        """The step in plain words (its timeline summary)."""
+        """The step in plain words (its timeline summary; the masked one for
+        a sensitive step).
+        """
+        if self.sensitive and self.data.get("masked_summary"):
+            return str(self.data["masked_summary"])
         return self.summary or self.kind.replace("_", " ")
 
 
@@ -515,7 +542,9 @@ def extract_steps(lines: list[dict]) -> list[Step]:
     ``input/text`` line becomes a ``text`` step only when no keyboard tap
     came before it (text typed another way, e.g. a host keyboard).
     ``input/confirm`` lines are not steps; one that names the target of a
-    tap whose position was unknown fills in that tap's target.
+    tap whose position was unknown fills in that tap's target. The text of
+    an ``input/text`` line typed by keyboard taps becomes the last keyboard
+    tap's ``data.check_text``: the field is read back after that tap.
     """
     confirm: dict[int, dict] = {}
     for line in lines:
@@ -526,6 +555,7 @@ def extract_steps(lines: list[dict]) -> list[Step]:
                 confirm[of] = data.get("node") or {}
     steps: list[Step] = []
     ime_since_text = False
+    last_ime: Step | None = None
     for line in sorted(lines, key=lambda ln: ln.get("seq") or 0):
         if line.get("src") != "input" or line.get("actor") not in (None, "user"):
             continue
@@ -534,13 +564,23 @@ def extract_steps(lines: list[dict]) -> list[Step]:
         seq = line.get("seq")
         if not isinstance(seq, int):
             continue
+        sensitive = bool(
+            line.get("sensitive") or data.get("password") or data.get("data_sensitive")
+        )
         if kind == "text":
             if not ime_since_text:
                 steps.append(
                     Step(len(steps) + 1, seq, "text", line.get("t"), data,
-                         line.get("summary") or "", line.get("pkg"))
+                         line.get("summary") or "", line.get("pkg"),
+                         sensitive=sensitive)
                 )  # fmt: skip
+            elif last_ime is not None and isinstance(data.get("text"), str):
+                last_ime.data["check_text"] = data["text"]
+                last_ime.data["check_target"] = data.get("target")
+                last_ime.data["check_password"] = bool(data.get("password"))
+                last_ime.sensitive = last_ime.sensitive or sensitive
             ime_since_text = False
+            last_ime = None
             continue
         if kind not in _STEP_KINDS:
             continue
@@ -551,8 +591,11 @@ def extract_steps(lines: list[dict]) -> list[Step]:
         raw = (line.get("ref") or {}).get("raw")
         steps.append(
             Step(len(steps) + 1, seq, kind, line.get("t"), data,
-                 line.get("summary") or "", line.get("pkg"), raw)
+                 line.get("summary") or "", line.get("pkg"), raw,
+                 sensitive=sensitive)
         )  # fmt: skip
+        if data.get("ime"):
+            last_ime = steps[-1]
     return steps
 
 
@@ -579,6 +622,33 @@ def input_text_arg(text: str) -> str | None:
     import shlex
 
     return shlex.quote(text.replace(" ", "%s"))
+
+
+def _clip(text: str, limit: int = 60) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
+def text_check(
+    expected: str, value: str, *, password: bool = False
+) -> tuple[bool, str]:
+    """Does a field reading ``value`` hold the recorded ``expected`` text?
+
+    Both are stripped. The field may hold more after the recorded text (an
+    autocomplete suffix: recorded ``wdr.de``, field ``wdr.de/``). A
+    ``password`` field that shows only mask characters is compared by
+    length. Returns ``(ok, reason)``; the reason names the values only
+    when ``password`` is False.
+    """
+    want, have = (expected or "").strip(), (value or "").strip()
+    if password:
+        if have and set(have) <= _MASK_CHARS:
+            ok = len(have) == len(want)
+        else:
+            ok = have == want or (bool(want) and have.startswith(want))
+        return ok, "" if ok else "field text differs"
+    if have == want or (want and have.startswith(want)):
+        return True, ""
+    return False, f"field reads '{_clip(have)}', expected '{_clip(want)}'"
 
 
 def _raw_range(raw: str | None) -> tuple[str, int, int] | None:
@@ -690,6 +760,94 @@ class StepReplayer:
                 return None, why
             self._sleep(ELEMENT_POLL_S)
 
+    def _field_value(self, xy: tuple[int, int] | None) -> tuple[str | None, bool]:
+        """``(text, password)`` of the focused field now (``text`` None: no
+        field could be read; a hint shown in an empty field reads as "").
+        """
+        helper = self.helper() if callable(self.helper) else self.helper
+        fn = getattr(helper, "focus", None) if helper is not None else None
+        if not callable(fn):
+            return None, False
+        try:
+            reply = fn(*(xy or (None, None)), timeout=1.0)
+        except Exception:
+            logger.debug("replay: focus read failed", exc_info=True)
+            return None, False
+        if not isinstance(reply, dict):
+            return None, False
+        node = None
+        for key in ("input", "node"):
+            cand = reply.get(key)
+            if isinstance(cand, dict) and cand.get("editable"):
+                node = cand
+                break
+        if node is None:
+            return None, False
+        text = "" if node.get("showing_hint") else str(node.get("text") or "")
+        return text, bool(node.get("password"))
+
+    def check_text(
+        self, expected: str, target: dict | None, *, password: bool = False
+    ) -> tuple[str, str]:
+        """Read the typed field back: ``("ok" | "diverged" | "unchecked",
+        reason)``.
+
+        Reads every :data:`TEXT_POLL_S` for up to :data:`TEXT_CHECK_S` (the
+        app may still be updating the field) and stops at the first match.
+        """
+        bounds = _bounds((target or {}).get("bounds"))
+        xy = centre(bounds) if bounds else None
+        deadline = self._mono() + TEXT_CHECK_S
+        last: tuple[bool, str] | None = None
+        while True:
+            self._wait(TEXT_POLL_S)
+            value, pw = self._field_value(xy)
+            if value is not None:
+                last = text_check(expected, value, password=password or pw)
+                if last[0]:
+                    return "ok", ""
+            if self._mono() >= deadline:
+                break
+        if last is None:
+            return "unchecked", "the typed field could not be read back"
+        return "diverged", last[1]
+
+    def _checked(self, res: dict[str, Any], text: str, target: dict | None,
+                 password: bool) -> dict[str, Any]:  # fmt: skip
+        """``res`` with the read-back's outcome (way ``diverged`` on a
+        mismatch; a note when it could not be read).
+        """
+        state, why = self.check_text(text, target, password=password)
+        res["check"] = state
+        base = res.get("reason") or ""
+        if state == "diverged":
+            res["way"] = WAY_DIVERGED
+            res["reason"] = why
+            res["was"] = base
+        elif state == "ok":
+            res["reason"] = (base + ", " if base else "") + "field checked"
+        else:
+            res["reason"] = (base + ", " if base else "") + f"not checked: {why}"
+        return res
+
+    def _type(self, text: str, dur_ms: Any) -> None:
+        """Type ``text`` one character at a time at the recorded pace."""
+        args = [input_text_arg(c) for c in text]
+        if input_text_arg(text) is None or any(a is None for a in args):
+            raise StepStoppedError("only plain ASCII text can be typed again")
+        try:
+            pace = float(dur_ms or 0.0) / 1000.0 / max(1, len(text) - 1)
+        except (TypeError, ValueError):
+            pace = 0.0
+        pace = min(TYPE_MAX_GAP_S, max(TYPE_MIN_GAP_S, pace))
+        sent: float | None = None
+        for arg in args:
+            if sent is not None:
+                # The ``input`` call itself takes time: wait only the rest.
+                self._wait(max(0.0, pace - (self._mono() - sent)))
+            sent = self._mono()
+            self._run(f"input text {arg}")
+
     @staticmethod
     def _xy(step: Step) -> tuple[int, int] | None:
         x, y = step.data.get("x"), step.data.get("y")
@@ -730,7 +888,17 @@ class StepReplayer:
             else:
                 dur = max(600, int(data.get("dur_ms") or 600))
                 self._run(f"input swipe {x} {y} {x} {y} {dur}")
-            return {"way": way, "reason": reason, "x": x, "y": y}
+            res = {"way": way, "reason": reason, "x": x, "y": y}
+            # A recorded element that was looked for and not found.
+            res["missed"] = way == WAY_POSITION and reason not in _NO_EVIDENCE
+            check = data.get("check_text")
+            if isinstance(check, str) and check:
+                # The last keyboard tap of a typed text: read the field back.
+                return self._checked(
+                    res, check, data.get("check_target"),
+                    bool(data.get("check_password")) or step.sensitive,
+                )  # fmt: skip
+            return res
         if kind == "swipe":
             start, x1, y1 = self._xy(step), data.get("x1"), data.get("y1")
             if (
@@ -752,11 +920,11 @@ class StepReplayer:
             text = data.get("text")
             if not isinstance(text, str) or not text:
                 raise StepStoppedError("the typed text was not recorded")
-            arg = input_text_arg(text)
-            if arg is None:
-                raise StepStoppedError("only plain ASCII text can be typed again")
-            self._run(f"input text {arg}")
-            return {"way": WAY_REPLAYED, "reason": f"typed {len(text)} characters"}
+            self._type(text, data.get("dur_ms"))
+            res = {"way": WAY_REPLAYED, "reason": f"typed {len(text)} characters"}
+            return self._checked(
+                res, text, step.target, bool(data.get("password")) or step.sensitive
+            )
         if kind == "gesture":
             return self._raw_gesture(step)
         raise StepStoppedError(f"{kind} steps cannot be replayed")
@@ -788,7 +956,7 @@ class StepReplayer:
     def _line(self, step: Step, n: int, way: str, reason: str, res: dict) -> None:
         if self.emit is None:
             return
-        word = way if way != WAY_FAILED else f"failed: {reason}"
+        word = f"{way}: {reason}" if way in (WAY_FAILED, WAY_DIVERGED) else way
         summary = f"step {step.i} of {n} · {step.what} · {word}"
         if (
             way in (WAY_POSITION, WAY_REPLAYED)
@@ -812,7 +980,8 @@ class StepReplayer:
                     "y": res.get("y"),
                 },
                 ref={"of": step.seq},
-                level="error" if way == WAY_FAILED else "info",
+                sensitive=step.sensitive,
+                level={WAY_FAILED: "error", WAY_DIVERGED: "warn"}.get(way, "info"),
             )
         except Exception:
             logger.debug("replay: step line failed", exc_info=True)
@@ -821,11 +990,17 @@ class StepReplayer:
         """Replay ``steps`` in order, keeping the recorded pauses.
 
         Returns ``{"steps": [...], "stopped_at_step": i | None, "error":
-        plain sentence | None}``.
+        plain sentence | None, "diverged_at_step": i | None, "diverged":
+        plain sentence | None}``. A step diverges when its typed field reads
+        something else, or when it missed its element right after the step
+        before it missed its own (each then went by position); the replay
+        goes on, and the first such step is ``diverged_at_step``.
         """
         report: list[dict[str, Any]] = []
         n = len(steps)
         prev_t: float | None = None
+        missed: int | None = None  # the step before missed its element
+        div: dict[str, Any] = {"diverged_at_step": None, "diverged": None}
         for step in steps:
             gap = 0.0
             t = _epoch(step.t)
@@ -855,12 +1030,27 @@ class StepReplayer:
                     "stopped_at_step": step.i,
                     "error": f"Replay stopped at step {step.i} of {n}: "
                     f"{step.what}: {reason}.",
+                    **div,
                 }
+            why = res.get("reason") or ""
+            miss = bool(res.get("missed")) and res["way"] == WAY_POSITION
+            if miss and missed is not None:
+                res["way"] = WAY_DIVERGED
+                res["reason"] = (
+                    f"its element did not appear ({why}) after step {missed} "
+                    "also missed its element; tapped the recorded position"
+                )
+            missed = step.i if miss else None
+            if res["way"] == WAY_DIVERGED and div["diverged_at_step"] is None:
+                div["diverged_at_step"] = step.i
+                div["diverged"] = f"step {step.i} of {n}: {res['reason']}"
             entry.update(way=res["way"], reason=res.get("reason") or "")
+            if res.get("check"):
+                entry["check"] = res["check"]
             report.append(entry)
             self._line(step, n, res["way"], res.get("reason") or "", res)
         if n:
             tail = min(MAX_TAIL_S, max(SETTLE_AFTER_S, float(self.tail_s or 0.0)))
             self.progress(f"Waiting {tail:.0f} s for the app to finish, as in your run")
             self._wait(tail)
-        return {"steps": report, "stopped_at_step": None, "error": None}
+        return {"steps": report, "stopped_at_step": None, "error": None, **div}

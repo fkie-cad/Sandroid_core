@@ -7,6 +7,7 @@ matching, the Rewind order, the element matcher and the step replay.
 
 from __future__ import annotations
 
+import itertools
 import sqlite3
 from pathlib import Path
 
@@ -620,7 +621,9 @@ def test_keyboard_taps_replay_typed_text_by_position_and_text_fallback():
     rep, _ = _replayer(FakeHelper([_dump(_node(rid="p:id/field"))]), log)
     report = rep.run(steps)
     assert log[1] == "input tap 50 2000"
-    assert log[2] == "input text hello%sworld"
+    # typed one character at a time (a space as %s)
+    chars = ["h", "e", "l", "l", "o", "%s", "w", "o", "r", "l", "d"]
+    assert log[2:] == [f"input text {c}" for c in chars]
     assert [s["way"] for s in report["steps"]] == [
         "by element",
         "by position",
@@ -1019,3 +1022,222 @@ def test_a_load_that_timed_out_says_the_state_is_unknown(tmp_path, monkeypatch):
     assert out.loaded is True
     assert rec.runs[-1]["loaded"] is True
     assert not any(c.startswith("pull") for c in dev.calls)
+
+
+# ---------------------------------------------------------------------------
+# the replay checks its outcome: typed text is read back, misses add up
+# ---------------------------------------------------------------------------
+
+
+class FocusHelper(FakeHelper):
+    """A helper whose focused field reads ``value``."""
+
+    def __init__(self, value, *, password=False, replies=None):
+        super().__init__(replies or [_dump()])
+        self.value = value
+        self.password = password
+        self.reads = 0
+
+    def focus(self, x=None, y=None, timeout=1.0):
+        self.reads += 1
+        return {"input": {"editable": True, "text": self.value,
+                          "password": self.password, "rid": "p:id/url"}}  # fmt: skip
+
+
+def _text(text, seq=1, t=100.0, password=False, dur_ms=3400.0, summary=None):
+    data = {
+        "text": text,
+        "password": password,
+        "dur_ms": dur_ms,
+        "target": {"rid": "p:id/url", "bounds": [180, 164, 807, 290]},
+    }
+    line = {"src": "input", "kind": "text", "seq": seq, "t": t, "actor": "user",
+            "summary": summary or f'typed "{text}" into the address bar',
+            "data": data}  # fmt: skip
+    if password:
+        line["sensitive"] = True
+        data["masked_summary"] = f"typed {len(text)} characters into password field"
+    return line
+
+
+def test_typed_text_is_typed_at_the_recorded_pace_and_checked():
+    steps = extract_steps([_text("spiegel.de")])
+    log: list[str] = []
+    helper = FocusHelper("spiegel.de")
+    rep, lines = _replayer(helper, log)
+    report = rep.run(steps)
+    assert log == [f"input text {c}" for c in "spiegel.de"]
+    assert helper.reads >= 1
+    step = report["steps"][0]
+    assert step["way"] == "replayed"
+    assert step["check"] == "ok"
+    assert "field checked" in step["reason"]
+    assert report["diverged_at_step"] is None
+    assert "replayed (typed 10 characters, field checked)" in lines[0]["summary"]
+
+
+def test_typing_keeps_the_recorded_pace_within_bounds():
+    clock = Clock()
+    sent: list[float] = []
+    rep = StepReplayer(shell=lambda c: sent.append(clock.t) or "",
+                       helper=FocusHelper("abcd"), sleep=clock.sleep,
+                       monotonic=clock.mono)  # fmt: skip
+    rep.run(extract_steps([_text("abcd", dur_ms=900.0)]))
+    gaps = [b - a for a, b in itertools.pairwise(sent)]
+    assert gaps == [pytest.approx(0.3, abs=0.01)] * 3
+    sent.clear()
+    rep.run(extract_steps([_text("abcd", dur_ms=0.1)]))
+    gaps = [b - a for a, b in itertools.pairwise(sent)]
+    assert gaps == [pytest.approx(player.TYPE_MIN_GAP_S, abs=0.01)] * 3
+
+
+def test_typed_text_that_reads_otherwise_diverges_the_run(tmp_path, monkeypatch):
+    lines_in = [_text("spiegel.de"), _tap(seq=2, t=101, target={"text": "Accept"})]
+    steps = extract_steps(lines_in)
+    log: list[str] = []
+    helper = FocusHelper("sgelde", replies=[_dump(_node("Accept"))])
+    rep, lines = _replayer(helper, log)
+    report = rep.run(steps)
+    step = report["steps"][0]
+    assert step["way"] == "diverged"
+    assert step["reason"] == "field reads 'sgelde', expected 'spiegel.de'"
+    assert (
+        "· diverged: field reads 'sgelde', expected 'spiegel.de'"
+        in (lines[0]["summary"])
+    )
+    assert lines[0]["level"] == "warn"
+    # the replay goes on, the run is not a success
+    assert report["steps"][1]["way"] == "by element"
+    assert report["error"] is None
+    assert report["diverged_at_step"] == 1
+
+    dev = FakeDevice()
+    progress: list[str] = []
+    ends: list[dict] = []
+    rec = _rec(tmp_path, monkeypatch)
+    deps = dev.deps(lambda r, runner: report)
+    deps.progress = progress.append
+
+    def emit(*a, **k):
+        if k.get("kind") == "play-end":
+            ends.append(k)
+        return 1
+
+    deps.emit = emit
+    out = rewind.RewindRunner(rec, deps).run(replay=True)
+    assert out.result == "diverged"
+    assert out.error is None
+    assert out.diverged_at_step == 1
+    assert rec.runs[-1]["result"] == "diverged"
+    assert rec.runs[-1]["diverged_at_step"] == 1
+    words = " ".join(progress).lower()
+    assert "done" not in words
+    assert "success" not in words
+    assert any("The replay diverged at step 1 of 2" in p for p in progress)
+    assert ends[0]["summary"].startswith("replay diverged at step 1")
+    assert ends[0]["data"]["result"] == "diverged"
+    assert "finished" not in ends[0]["summary"]
+    # verdicts computed after it carry the note
+    note = rewind.diverged_note(rec.runs[-1])
+    assert "diverged at step 1" in note
+    res = rewind.FileResult("/data/data/p/a", None, None, None, note=note)
+    assert f"Note: {note}" in rewind.result_lines(res)
+
+
+def test_autocomplete_suffix_after_the_recorded_text_is_accepted():
+    assert player.text_check("wdr.de", "wdr.de/") == (True, "")
+    assert player.text_check(" spiegel.de", "spiegel.de ") == (True, "")
+    assert player.text_check("spiegel.de", "sgelde")[0] is False
+    assert player.text_check("spiegel.de", "spiegel.d")[0] is False
+    rep, _ = _replayer(FocusHelper("wdr.de/"), [])
+    report = rep.run(extract_steps([_text("wdr.de")]))
+    assert report["steps"][0]["check"] == "ok"
+    assert report["diverged_at_step"] is None
+
+
+def test_password_divergence_prints_no_text():
+    steps = extract_steps([_text("hunter2", password=True)])
+    assert steps[0].sensitive
+    assert "hunter2" not in steps[0].what
+    rep, lines = _replayer(FocusHelper("hunter", password=True), [])
+    report = rep.run(steps)
+    step = report["steps"][0]
+    assert step["way"] == "diverged"
+    assert step["reason"] == "field text differs"
+    for text in (str(step), str(report), str(lines)):
+        assert "hunter" not in text
+    assert lines[0]["sensitive"] is True
+    # bullets of the right length are a match; of another length not
+    assert player.text_check("hunter2", "\u2022" * 7, password=True) == (True, "")
+    assert player.text_check("hunter2", "\u2022" * 5, password=True) == (
+        False,
+        "field text differs",
+    )
+
+
+def test_unreadable_field_is_a_note_not_a_divergence():
+    rep, lines = _replayer(FakeHelper([_dump()]), [])  # no focus read-back
+    report = rep.run(extract_steps([_text("abc")]))
+    step = report["steps"][0]
+    assert step["way"] == "replayed"
+    assert step["check"] == "unchecked"
+    assert "not checked: the typed field could not be read back" in step["reason"]
+    assert report["diverged_at_step"] is None
+
+
+def test_keyboard_typed_text_is_checked_after_the_last_key():
+    lines = [
+        _tap(seq=1, t=100, ime=True, x=50, y=2000),
+        _tap(seq=2, t=100.5, ime=True, x=60, y=2000),
+        {**_text("ab", seq=3, t=101), "data": {"text": "ab", "target": None}},
+    ]
+    steps = extract_steps(lines)
+    assert [s.kind for s in steps] == ["tap", "tap"]
+    assert "check_text" not in steps[0].data
+    assert steps[1].data["check_text"] == "ab"
+    rep, _ = _replayer(FocusHelper("xb"), [])
+    report = rep.run(steps)
+    assert [s["way"] for s in report["steps"]] == ["by position", "diverged"]
+    assert report["diverged_at_step"] == 2
+
+
+def test_two_missed_elements_in_a_row_diverge_one_is_a_note():
+    log: list[str] = []
+    one = [
+        _tap(seq=1, target={"text": "Gone"}),
+        _tap(seq=2, t=101, target={"text": "OK"}),
+    ]
+    rep, _ = _replayer(FakeHelper([_dump(_node("OK"))]), log, element_wait_s=0.6)
+    report = rep.run(extract_steps(one))
+    assert [s["way"] for s in report["steps"]] == ["by position", "by element"]
+    assert report["diverged_at_step"] is None
+
+    two = [
+        _tap(seq=1, target={"text": "Gone"}),
+        _tap(seq=2, t=101, target={"text": "Away"}),
+    ]
+    rep, lines = _replayer(FakeHelper([_dump(_node("OK"))]), [], element_wait_s=0.6)
+    report = rep.run(extract_steps(two))
+    assert [s["way"] for s in report["steps"]] == ["by position", "diverged"]
+    assert "after step 1 also missed its element" in report["steps"][1]["reason"]
+    assert report["diverged_at_step"] == 2
+    assert "diverged: its element did not appear (not found)" in lines[1]["summary"]
+
+    # no helper: nothing was looked for, so nothing diverged
+    rep, _ = _replayer(lambda: None, [], element_wait_s=0.6)
+    report = rep.run(extract_steps(two))
+    assert report["diverged_at_step"] is None
+
+
+def test_a_run_with_a_failed_step_is_not_a_success(tmp_path, monkeypatch):
+    steps = extract_steps([_tap(target={"text": "Gone"}, x=None, y=None)])
+    rep, _ = _replayer(FakeHelper([_dump()]), [], element_wait_s=0.6)
+    report = rep.run(steps)
+    dev = FakeDevice()
+    progress: list[str] = []
+    deps = dev.deps(lambda r, runner: report)
+    deps.progress = progress.append
+    out = rewind.RewindRunner(_rec(tmp_path, monkeypatch), deps).run(replay=True)
+    assert out.result == "stopped"
+    assert out.error
+    assert not any("Done" in p for p in progress)

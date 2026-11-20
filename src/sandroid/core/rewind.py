@@ -63,6 +63,10 @@ DIFFERENT = "replay changed it differently"
 UNCHANGED = "replay did not change it"
 NO_REPLAY = "no replay yet"
 NOT_COPIED = "After (replay) was not copied"
+#: A Rewind + Replay whose steps did not reach what your run did (a typed
+#: field reads something else, or steps missed their elements): never a
+#: success.
+DIVERGED = "diverged"
 #: ``pull`` outcome for a file that is not on the device.
 ABSENT = "absent"
 #: Requests seen up to this many seconds after Stop still count (the
@@ -1014,6 +1018,8 @@ class FileResult:
     only_run: list[str] = field(default_factory=list)
     only_replay: list[str] = field(default_factory=list)
     error: str = ""
+    #: Set when the replay this verdict compares diverged (plain sentence).
+    note: str = ""
 
 
 def _version_main(path: str, version: str | None) -> Path | None:
@@ -1059,6 +1065,17 @@ def _no_change(lines: list[str], note: str) -> bool:
     )
 
 
+def diverged_note(run: dict[str, Any] | None) -> str:
+    """The note a verdict carries when ``run`` (a Rewind + Replay) diverged."""
+    at = (run or {}).get("diverged_at_step")
+    if (run or {}).get("result") != DIVERGED or not at:
+        return ""
+    return (
+        f"The replay diverged at step {at}: this result does not show what "
+        "your run did."
+    )
+
+
 def file_result(rec: Recording, path: str, *, with_replay: bool = True) -> FileResult:
     """Before to After and Before to After (replay) of one selected file.
 
@@ -1076,6 +1093,7 @@ def file_result(rec: Recording, path: str, *, with_replay: bool = True) -> FileR
         if replay is None:
             res.verdict = NOT_COPIED if with_replay and replays else NO_REPLAY
             return res
+        res.note = diverged_note(rec.runs[-1] if rec.runs else None)
         rep_lines, rep_note = _diff_lines(path, before, replay)
         res.replay_text = "\n".join(rep_lines) if rep_lines else rep_note
         run_none, rep_none = (
@@ -1114,6 +1132,8 @@ def result_lines(res: FileResult) -> list[str]:
         for ln in res.only_replay:
             out.append(f"  only in the replay: {ln}")
     out.append(f"Result: {res.verdict}")
+    if res.note:
+        out.append(f"Note: {res.note}")
     if res.error:
         out.append(f"Could not compare: {res.error}")
     return out
@@ -1168,11 +1188,20 @@ class RunOutcome:
     error: str | None = None
     steps: list[dict[str, Any]] = field(default_factory=list)
     stopped_at_step: int | None = None
+    #: The first step that diverged, and why (plain sentence).
+    diverged_at_step: int | None = None
+    diverged: str | None = None
     seq: dict[str, int | None] = field(default_factory=dict)
     monitor_config: Any = None
     paused: list[int] = field(default_factory=list)
     #: The start point was loaded (the device left the after-the-action state).
     loaded: bool = False
+
+
+def diverged_words(out: RunOutcome) -> str:
+    """What a diverged replay tells you (plain sentence, no success)."""
+    why = out.diverged or f"step {out.diverged_at_step}"
+    return f"The replay diverged at {why}. The device does not show what your run did."
 
 
 class RewindRunner:
@@ -1317,6 +1346,8 @@ class RewindRunner:
             report = self.deps.replay(rec, self) or {}
             out.steps = list(report.get("steps") or [])
             out.stopped_at_step = report.get("stopped_at_step")
+            out.diverged_at_step = report.get("diverged_at_step")
+            out.diverged = report.get("diverged")
             self._emit(
                 "setup",
                 f"{rec.rec_id}#{n}",
@@ -1330,6 +1361,9 @@ class RewindRunner:
             if report.get("error"):
                 out.error = report["error"]
                 out.result = "stopped"
+            elif out.diverged_at_step:
+                out.result = DIVERGED
+                self.deps.progress(diverged_words(out))
             else:
                 out.result = "replayed"
                 self.deps.progress("Done. The device shows the replayed result.")
@@ -1353,6 +1387,8 @@ class RewindRunner:
                 "result": out.result or "stopped",
                 "error": out.error,
                 "stopped_at_step": out.stopped_at_step,
+                "diverged_at_step": out.diverged_at_step,
+                "diverged": out.diverged,
                 "steps": out.steps,
                 "loaded": out.loaded,
             }
@@ -1361,6 +1397,10 @@ class RewindRunner:
                 "rewound": "rewind finished · the device is at the start point",
                 "replayed": "replay finished",
             }.get(out.result)
+            if out.result == DIVERGED:
+                summary = f"replay diverged at step {out.diverged_at_step}" + (
+                    f" · {out.diverged}" if out.diverged else ""
+                )
             if summary is None:
                 at = out.stopped_at_step
                 summary = (
@@ -1378,6 +1418,7 @@ class RewindRunner:
                     "result": out.result or "stopped",
                     "error": out.error,
                     "stopped_at_step": out.stopped_at_step,
+                    "diverged_at_step": out.diverged_at_step,
                 },
                 ref={"of": out.seq["start"]} if out.seq.get("start") else None,
             )
