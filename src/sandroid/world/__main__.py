@@ -17,6 +17,7 @@ import argparse
 import datetime as dt
 import json
 import logging
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -159,6 +160,10 @@ def _owner_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--owner-phone", help="E.164; only its country code is used")
 
 
+def _exit_on_signal(signum: int, _frame: object) -> None:
+    raise SystemExit(128 + signum)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m sandroid.world")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -188,6 +193,10 @@ def main(argv: list[str] | None = None) -> int:
     i.set_defaults(func=cmd_photos)
 
     args = parser.parse_args(argv)
+    # A terminated run still unwinds: prepare() turns the network back on
+    # and leaves its ledger and partial stamp for --force-cleanup.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, _exit_on_signal)
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         stream=sys.stderr,

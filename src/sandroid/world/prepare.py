@@ -231,6 +231,7 @@ class Ledger:
                 "lists": {name: [] for name in LEDGER_LISTS},
                 "paths": [],
                 "photos": [],
+                "network_before": None,
             },
         )
 
@@ -592,6 +593,7 @@ class _Run:
         self.photo_jobs: dict[str, concurrent.futures.Future] = {}
         self.pool: concurrent.futures.ThreadPoolExecutor | None = None
         self.cleanup_from: dict[str, Any] | None = None
+        self.network_inherited: dict[str, bool] | None = None
 
     # -- infrastructure
 
@@ -790,6 +792,12 @@ class _Run:
         if paths:
             self._scan()
         self.shell(f"rm -f {STAMP_PATH}", zygote=False)
+        inherited = old.data.get("network_before")
+        if isinstance(inherited, dict) and {"wifi", "data"} <= set(inherited):
+            self.network_inherited = {
+                "wifi": bool(inherited["wifi"]),
+                "data": bool(inherited["data"]),
+            }
         old.data["state"] = "cleaned"
         old.save()
         self.report.warn(
@@ -803,8 +811,20 @@ class _Run:
     def go_offline(self) -> None:
         wifi = self.pre.get("wifi", "")
         data = self.pre.get("data", "")
-        self.network_before = {"wifi": wifi not in ("0", ""), "data": data == "1"}
+        now = {"wifi": wifi not in ("0", ""), "data": data == "1"}
+        # A killed run never reached its "online" step: restore what the
+        # device had before THAT run, not the offline state it left behind.
+        self.network_before = self.network_inherited or now
         self.report.network["before"] = dict(self.network_before)
+        if self.network_inherited and self.network_inherited != now:
+            self.report.network["found"] = now
+            self.report.warn(
+                f"an interrupted run left the network at {now}; it is restored "
+                f"to {self.network_inherited}"
+            )
+        assert self.ledger is not None
+        self.ledger.data["network_before"] = dict(self.network_before)
+        self.ledger.save()
         self.shell("svc wifi disable; svc data disable", timeout=60)
 
     def restore_network(self) -> None:

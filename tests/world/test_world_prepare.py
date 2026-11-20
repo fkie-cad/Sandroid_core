@@ -514,6 +514,33 @@ def test_interrupted_run_is_cleaned_with_force(manifest) -> None:
     assert any("removed an interrupted world" in w for w in report.warnings)
 
 
+def test_cleanup_restores_the_network_a_killed_run_turned_off(manifest) -> None:
+    dev = FakeDevice()
+    dev.helper_fails = "sms"
+    with pytest.raises(pr.PrepareError):
+        _run(manifest, dev)
+    led = pr.Ledger.load(Path(pr.ledger_path(SERIAL, "Dev9_test", manifest.world_fp)))
+    assert led.data["network_before"] == {"wifi": True, "data": True}
+    dev.wifi = dev.data = "0"  # a hard kill skipped the "online" step
+    dev.helper_fails = None
+    report = _run(manifest, dev, force_cleanup=True)
+    assert report.ok
+    assert report.network["before"] == {"wifi": True, "data": True}
+    assert report.network["found"] == {"wifi": False, "data": False}
+    assert (dev.wifi, dev.data) == ("1", "1")
+    assert any("interrupted run left the network" in w for w in report.warnings)
+
+
+def test_cli_turns_sigterm_into_an_unwinding_exit() -> None:
+    import signal
+
+    from sandroid.world import __main__ as cli
+
+    with pytest.raises(SystemExit) as err:
+        cli._exit_on_signal(signal.SIGTERM, None)
+    assert err.value.code == 128 + signal.SIGTERM
+
+
 def test_partial_stamp_without_ledger_is_refused(manifest) -> None:
     dev = FakeDevice()
     dev.stamp = json.dumps({"state": "partial", "world_fp": "cd" * 32})
