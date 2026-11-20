@@ -119,6 +119,7 @@ _PANEL_SECTIONS: list[tuple[str, str, str]] = [
     ("AI chat", "sandroid.tui.widgets.chat_panel", "ChatPanel"),
     ("AI chat › agents bar", "sandroid.tui.widgets.chat_panel", "AgentsBar"),
     ("Devices screen (D)", "sandroid.tui.screens.devices_screen", "DevicesScreen"),
+    ("Proxy settings (y)", "sandroid.tui.modals.proxy_modal", "ProxyModal"),
 ]
 
 #: Lens id -> the ``_PANEL_SECTIONS`` headings that belong to that lens.
@@ -203,6 +204,9 @@ _ROW_TEXT: dict[tuple[str, str], str] = {
     ("Devices screen (D)", "ctrl+r"): "Refresh (rescan the AVDs)",
     ("Devices screen (D)", "escape"): "Close (an open snapshot list first)",
     ("Devices screen (D)", "ctrl+c"): "Quit (at startup: stop the start)",
+    ("Proxy settings (y)", "r"): "Remove CA (asks first)",
+    ("Proxy settings (y)", "shift+left"): "Previous tab (in an empty text field)",
+    ("Proxy settings (y)", "shift+right"): "Next tab (in an empty text field)",
 }
 #: Sections listed by hand: keys handled outside BINDINGS (the log is a
 #: plain RichLog) or whose BINDINGS labels say nothing ("Option 1"). A test

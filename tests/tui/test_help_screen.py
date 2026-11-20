@@ -285,3 +285,10 @@ async def test_timeline_help_rows_are_not_cut(size) -> None:
         for head in ("Inspect the line", "Close / or the type bar", "Filter: text"):
             row = next(r for r in rows if r.startswith(head))
             assert "…" not in row, row
+
+
+def test_proxy_settings_rows_come_from_the_dialog() -> None:
+    """sandroid-proxy's dialog keys (BINDINGS with descriptions) are listed."""
+    keys = _section_raw_keys("Proxy settings (y)")
+    for key in ("a", "f", "p", "i", "r", "shift+left", "shift+right"):
+        assert any(key in k.split(",") for k in keys), key
