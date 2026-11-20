@@ -918,8 +918,15 @@ class RecordingController:
                 view.add_path(path, pull_first=False)
         if _rewound(rec):
             # The device is no longer after the action: no After any more.
+            if path not in rec.late_selected and not rec.role_version(path, "after"):
+                rec.late_selected.append(path)
+                with contextlib.suppress(Exception):
+                    rewind.save_recording(rec)
             self._review_file_state(
-                path, "selected (After exists only before a rewind)"
+                path,
+                "no After from your run: selected after a Rewind"
+                if not rec.role_version(path, "after")
+                else "After kept from before the Rewind",
             )
             return
         if view is None:
@@ -1327,6 +1334,10 @@ class RecordingController:
                     "changed": len(files) - len(new) - len(deleted),
                     "new": len(new),
                     "deleted": len(deleted),
+                    # The Review list (changed in your run) and how many of
+                    # its files were selected for comparison.
+                    "recorded": len(rec.changed),
+                    "compared": len(files),
                 },
                 timeline_folder=str(timeline_folder()),
                 record_window=[rec.started or 0.0, rec.stopped or 0.0],

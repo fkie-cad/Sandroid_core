@@ -939,7 +939,15 @@ class DiffsView(FilesSubViewBase):
         files = sum(int(counts.get(k, 0) or 0) for k in ("changed", "new", "deleted"))
         facts = self._facts.get(s.get("run_id", "")) or {}
         parts: list[tuple[str, str]] = []
-        if files:
+        if s.get("mode") and "recorded" in counts:
+            # A Rewind run: what your run changed and what was compared
+            # ("159 changed, 0 compared"), never "no changes".
+            recorded = int(counts.get("recorded") or 0)
+            compared = int(counts.get("compared") or 0)
+            parts.append(
+                (f"{recorded} changed, {compared} compared", "" if compared else _DIM)
+            )
+        elif files:
             parts.append((f"{files} file{'s' if files != 1 else ''}", ""))
         hosts = facts.get("hosts")
         if hosts:

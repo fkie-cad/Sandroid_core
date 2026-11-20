@@ -145,7 +145,9 @@ async def test_rewind_buttons_disabled_on_a_physical_device():
 
 async def test_buttons_start_rewind_and_esc_closes():
     ctl = FakeController()
-    modal = ReviewModal(_rec(), ctl)
+    rec = _rec()
+    rec.selected = [rec.changed[0]["path"]]
+    modal = ReviewModal(rec, ctl)
     app = Host(modal)
     async with app.run_test(size=(140, 50)) as pilot:
         await until(pilot, lambda: app.screen is modal)
@@ -229,9 +231,18 @@ def test_select_after_a_rewind_does_not_pull_after(controller):
     rec = _rec()
     rec.runs = [{"n": 2, "kind": "rewind"}]
     controller._rec = rec
-    controller.select_file(rec.changed[0]["path"], True)
+    states: list[tuple[str, str]] = []
+    controller._review_file_state = lambda path, text: states.append((path, text))
+    path = rec.changed[0]["path"]
+    controller.select_file(path, True)
     assert controller.view.pulls == []
-    assert rec.selected == [rec.changed[0]["path"]]
+    assert rec.selected == [path]
+    assert rec.late_selected == [path]
+    assert states == [(path, "no After from your run: selected after a Rewind")]
+    # its result says so in plain words
+    res = rewind.file_result(rec, path)
+    assert res.late
+    assert rewind.LATE_WORDS in rewind.result_lines(res)
 
 
 def test_rewind_problems_in_plain_words(controller, monkeypatch):
@@ -1206,3 +1217,60 @@ def test_unchecked_steps_are_never_reported_as_success(controller, monkeypatch):
     assert timeline_lens._run_failed(row)
     row = SimpleNamespace(data={"result": "replayed", "rec_id": "r"}, level="info")
     assert not timeline_lens._run_failed(row)
+
+
+async def test_rewind_with_no_file_selected_asks_once():
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+    ctl = FakeController()
+    rec = _rec()
+    modal = ReviewModal(rec, ctl)
+    app = Host(modal)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await until(pilot, lambda: app.screen is modal)
+        modal.query_one("#rewind-replay", Button).press()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        text = " ".join(str(w.render()) for w in app.screen.query(Static))
+        assert "No files selected: nothing will be compared. Go on?" in text
+        assert ctl.rewinds == []
+        await pilot.press("escape")  # Back: nothing starts
+        await until(pilot, lambda: app.screen is modal)
+        assert ctl.rewinds == []
+        # asked once: the next press goes on at once
+        modal.query_one("#rewind", Button).press()
+        await until(pilot, lambda: ctl.rewinds == [False])
+
+
+async def test_go_on_after_the_question_starts_the_rewind():
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+    ctl = FakeController()
+    modal = ReviewModal(_rec(), ctl)
+    app = Host(modal)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await until(pilot, lambda: app.screen is modal)
+        modal.query_one("#rewind", Button).press()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        app.screen.query_one("#yes", Button).press()
+        await until(pilot, lambda: ctl.rewinds == [False])
+
+
+def test_sessions_say_how_many_changed_and_how_many_were_compared():
+    from types import SimpleNamespace
+
+    from sandroid.tui.widgets.diffs_view import DiffsView
+
+    fake = SimpleNamespace(
+        _facts={}, _problem=lambda s: None, divergence=lambda run_id: []
+    )
+    summary = {"run_id": "r1", "mode": "rewind-replay",
+               "counts": {"changed": 0, "new": 0, "deleted": 0,
+                          "recorded": 159, "compared": 0}}  # fmt: skip
+    cell = DiffsView._changes_cell(fake, summary).plain
+    assert cell == "159 changed, 0 compared"
+    assert "no changes" not in cell
+    summary["counts"].update(changed=2, compared=2)
+    assert DiffsView._changes_cell(fake, summary).plain == "159 changed, 2 compared"
+    # older runs (no recorded count) keep their words
+    old = {"run_id": "r2", "counts": {"changed": 0}}
+    assert DiffsView._changes_cell(fake, old).plain == "no changes"

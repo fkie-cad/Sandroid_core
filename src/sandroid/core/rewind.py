@@ -180,6 +180,9 @@ class Recording:
     #: When each file's After was copied (epoch s): the replay waits as long
     #: after its last step, so both copies see the app write for as long.
     after_at: dict[str, float] = field(default_factory=dict)
+    #: Files selected after a Rewind ran: the device had left the state after
+    #: your action, so they have no After from your run.
+    late_selected: list[str] = field(default_factory=list)
 
     @property
     def start_point_name(self) -> str | None:
@@ -1049,6 +1052,8 @@ class FileResult:
     error: str = ""
     #: Set when the replay this verdict compares diverged (plain sentence).
     note: str = ""
+    #: Selected after a Rewind ran: no After from your run.
+    late: bool = False
 
 
 def _version_main(path: str, version: str | None) -> Path | None:
@@ -1124,6 +1129,7 @@ def file_result(rec: Recording, path: str, *, with_replay: bool = True) -> FileR
     replays = rec.versions.get(path, {}).get("after_replay") or []
     replay = rec.role_version(path, "after_replay") if with_replay else None
     res = FileResult(path, before, after, replay)
+    res.late = after is None and path in rec.late_selected
     try:
         run_lines, run_note = _diff_lines(path, before, after)
         res.action_text = "\n".join(run_lines) if run_lines else run_note
@@ -1154,10 +1160,19 @@ def file_result(rec: Recording, path: str, *, with_replay: bool = True) -> FileR
     return res
 
 
+#: A file selected after a Rewind ran (Review, Sessions, results).
+LATE_WORDS = (
+    "  No After from your run: this file was selected after a Rewind, when "
+    "the device no longer showed what your action left."
+)
+
+
 def result_lines(res: FileResult) -> list[str]:
     """The result of one file as plain lines (Sessions lens, AI, report)."""
     words = ROLE_WORDS
     out = ["What your action changed (Before to After):"]
+    if res.late:
+        out.append(LATE_WORDS)
     if res.before is None:
         out.append("  Before was not copied (no rewind yet).")
     out.extend(f"  {ln}" for ln in (res.action_text or "no change").splitlines())
