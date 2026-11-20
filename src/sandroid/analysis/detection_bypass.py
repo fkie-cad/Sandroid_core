@@ -3002,18 +3002,11 @@ class BypassService:
         which also avoids an RPC on a still-paused spawn).
         """
         jm = Toolbox.get_frida_job_manager()
-        selected = self._selected_package()
         with self._lock:
             if self._is_job_live(jm):
-                if selected is None or self._app_package in (None, selected):
-                    return True, "Bypass script already loaded", False
-                # Live, but hooked into the app selected before: the bypass
-                # follows the selection, so it is dropped and loaded fresh.
-                logger.info(
-                    "Bypass script moves from %s to %s", self._app_package, selected
-                )
+                return True, "Bypass script already loaded", False
 
-        # Not live (or another app's) — drop the handles/temp, load fresh.
+        # Not live — drop any stale handles/temp, then load fresh.
         self._reset_script_state()
         with self._lock:
             self._merge_errors = set()
@@ -3250,13 +3243,6 @@ class BypassService:
         with self._lock:
             return list(self._armed)
 
-    @staticmethod
-    def _selected_package() -> str | None:
-        try:
-            return get_spotlight_service().get_effective_package()
-        except Exception:
-            return None
-
     def _spotlight_running(self) -> bool:
         """True if the spotlight app has a live (non-paused) process."""
         try:
@@ -3365,14 +3351,8 @@ class BypassService:
         Returns ``(now_on, message)``.
         """
         name = self.display_name(category)
-        selected = self._selected_package()
         with self._lock:
-            # On for the selected app (what the App lens shows): armed, or
-            # live in its process -- not another app's live script.
-            live_here = category in self._active and (
-                selected is None or self._app_package in (None, selected)
-            )
-            currently_on = category in self._armed or live_here
+            currently_on = category in self._armed or category in self._active
 
         if not currently_on:
             # Turning ON (arming counts: refused while Dexray holds bypasses).
@@ -3381,9 +3361,7 @@ class BypassService:
                 return False, conflict
             if self._spotlight_running():
                 with self._lock:
-                    here = selected is None or self._app_package in (None, selected)
-                    base = set(self._active) if here else set(self._armed)
-                    target = base | {category}
+                    target = set(self._active) | {category}
                 ok, msg = self.set_active(target, paused=False, on_message=on_message)
                 if not ok:
                     self._disarm(category)
@@ -3398,12 +3376,12 @@ class BypassService:
                 return True, f"{name} armed — ␣ resume applies it"
             return True, f"{name} armed — ␣ start applies it"
 
-        # Turning OFF: the live flag only when the script is on this app;
-        # another app's live script is left alone.
+        # Turning OFF.
         self._disarm(category)
         with self._lock:
+            active = category in self._active
             target = set(self._active) - {category}
-        if live_here:
+        if active:
             self.set_active(target, paused=False)
         return False, f"{name} off"
 
@@ -3447,6 +3425,32 @@ class BypassService:
         self._dispose_script(job, path)
         rank = {c: i for i, c in enumerate(self.categories())}
         return sorted(armed, key=lambda c: (rank.get(c, len(rank)), c))
+
+    @_notifies
+    def release_app(self, package: str) -> list[str]:
+        """Unhook ``package`` when the live script is in it (selection left it).
+
+        A new selection starts clean, so the app left behind loses its live
+        bypass too, not only the armed set. The script handles are dropped
+        at once (any start, toggle or attach after this loads fresh for the
+        new app); the unload itself, which can take seconds, runs on a
+        daemon thread.
+
+        Returns:
+            The categories that were live in ``package`` ([] when none).
+        """
+        with self._lock:
+            if self._app_package != package or (self._job is None and not self._active):
+                return []
+            was = sorted(self._active)
+            job, path = self._take_script_locked()
+        threading.Thread(
+            target=self._dispose_script,
+            args=(job, path),
+            name="bypass-release",
+            daemon=True,
+        ).start()
+        return was
 
     @_notifies
     def disarm_all(self) -> list[str]:

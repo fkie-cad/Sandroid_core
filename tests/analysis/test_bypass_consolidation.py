@@ -1477,66 +1477,38 @@ def test_state_listeners_hear_armed_and_active_changes(bypass_service):
     assert calls == [1, 1, 1, 1]
 
 
-# -- the bypass follows the selected app ------------------------------------------
+def test_release_app_unloads_only_that_apps_script(monkeypatch):
+    import threading
+    import types
 
-
-def _two_apps(monkeypatch, selected):
-    from sandroid.analysis.detection_bypass import BypassService
-
-    svc = BypassService()
-    svc._active = {"ssl"}
-    svc._app_package = "com.example.a"  # live in app A
-    monkeypatch.setattr(svc, "_selected_package", staticmethod(lambda: selected))
-    calls: list = []
-
-    def _set_active(target, paused, on_message=None):
-        calls.append(set(target))
-        return True, "ok"
-
-    monkeypatch.setattr(svc, "set_active", _set_active)
-    return svc, calls
-
-
-def test_toggle_on_for_b_does_not_turn_off_a(monkeypatch):
-    """B selected, SSL live in A: b then 1 turns SSL ON for B."""
-    svc, calls = _two_apps(monkeypatch, "com.example.b")
-    monkeypatch.setattr(svc, "_spotlight_running", lambda: True)
-
-    now_on, _msg = svc.toggle("ssl")
-
-    assert now_on is True
-    assert calls == [{"ssl"}]  # B's set (armed + ssl), not A's minus ssl
-    assert "ssl" in svc.armed_categories()
-
-
-def test_toggle_off_for_b_leaves_a_alone(monkeypatch):
-    svc, calls = _two_apps(monkeypatch, "com.example.b")
-    svc._armed = {"ssl"}  # armed for B, B not running
-
-    now_on, _msg = svc.toggle("ssl")
-
-    assert now_on is False
-    assert calls == []  # A's live script untouched
-    assert svc.active_categories() == ["ssl"]
-
-
-def test_a_load_for_another_app_does_not_reuse_the_live_script(monkeypatch):
     from sandroid.analysis import detection_bypass as db
 
     svc = db.BypassService()
+    stopped: list = []
+    done = threading.Event()
+
+    def _stop(job_id):
+        stopped.append(job_id)
+        done.set()
+
+    monkeypatch.setattr(
+        db.Toolbox,
+        "get_frida_job_manager",
+        staticmethod(lambda: types.SimpleNamespace(stop_job_with_id=_stop)),
+    )
+    monkeypatch.setattr(svc, "_unregister_task", lambda: None)
+    svc._job = types.SimpleNamespace(get_id=lambda: "job-a")
+    svc._active = {"ssl", "root"}
     svc._app_package = "com.example.a"
-    monkeypatch.setattr(svc, "_selected_package", staticmethod(lambda: "com.example.b"))
-    monkeypatch.setattr(svc, "_is_job_live", lambda jm: True)
-    monkeypatch.setattr(db.Toolbox, "get_frida_job_manager", staticmethod(lambda: None))
-    reset: list = []
-    monkeypatch.setattr(svc, "_reset_script_state", lambda: reset.append(1))
+    heard: list = []
+    svc.add_state_listener(lambda: heard.append(1))
 
-    def _no_session(paused):
-        raise ValueError("no session in this test")
+    assert svc.release_app("com.example.b") == []  # not that app's script
+    assert svc.active_categories()
 
-    monkeypatch.setattr(svc, "_setup_session", _no_session)
-
-    ok, _msg, _fresh = svc._ensure_loaded(paused=False, initial_flags={})
-
-    assert reset == [1]  # dropped A's script instead of flipping its flags
-    assert ok is False
+    assert svc.release_app("com.example.a") == ["root", "ssl"]
+    assert svc.active_categories() == []
+    assert svc._job is None  # dropped at once; a new load starts fresh
+    assert done.wait(5)
+    assert stopped == ["job-a"]
+    assert heard == [1]

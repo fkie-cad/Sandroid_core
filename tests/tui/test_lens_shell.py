@@ -229,6 +229,21 @@ async def test_ticker_shows_the_newest_three_lines_newest_last() -> None:
         hint = ticker.query_one("#log-ticker-hint")
         assert hint.region.bottom == ticker.content_region.bottom
 
+        # A multi-row renderable takes one row (its first text line), so the
+        # newest line stays on the bottom row.
+        from rich.table import Table
+
+        table = Table("col")
+        for n in range(4):
+            table.add_row(f"table row {n}")
+        ticker.show_line(table)
+        ticker.show_line("ticker line five")
+        await settle(pilot)
+        shown = rows()
+        assert "four" in shown[0]
+        assert "col" in shown[1]
+        assert "five" in shown[2]
+
 
 async def test_backtick_toggles_drawer_and_ticker_mirrors_log() -> None:
     from sandroid.tui.widgets import ActivityLog

@@ -1167,6 +1167,22 @@ def humanize_log_line(line: str) -> str:
     return f"{head}adb: {escape(detail)} [dim](` log has the command)[/dim]"
 
 
+def _first_rendered_line(renderable: Any) -> str:
+    """The first line with text of a Rich renderable, as plain text."""
+    try:
+        from rich.console import Console
+
+        console = Console(width=200, color_system=None, file=None)
+        with console.capture() as captured:
+            console.print(renderable)
+        for line in captured.get().splitlines():
+            if _ALNUM.search(line):
+                return line.strip()
+    except Exception:
+        pass
+    return ""
+
+
 class LogTicker(Horizontal):
     """The newest meaningful log lines (``ROWS``, newest at the bottom),
     plus a dim key hint on the bottom row.
@@ -1235,8 +1251,13 @@ class LogTicker(Horizontal):
             renderable.no_wrap = True
             renderable.overflow = "ellipsis"
         else:
-            plain = str(content)
-            renderable = content
+            # A table or multi-line renderable: its first text line only, so
+            # it cannot push the newest lines out of the 3 rows.
+            first = _first_rendered_line(content)
+            if not first:
+                return
+            plain = first
+            renderable = Text(first, no_wrap=True, overflow="ellipsis")
         self.last_line = plain
         self.lines = [*self.lines, plain][-self.ROWS :]
         self._renderables = [*self._renderables, renderable][-self.ROWS :]

@@ -811,7 +811,8 @@ class SpotlightPanel(Widget):
         (:meth:`on_app_lens_sections_refresh_done`).
         """
         sections = self._sections()
-        if sections is None:
+        if sections is None or not self._current_package():
+            self._notify("No app facts to refresh: pick an app first (c or ⇧C)")
             return
         sections.refresh_runtime(static=True, explicit=True, announce=True)
         self._repaint_text()

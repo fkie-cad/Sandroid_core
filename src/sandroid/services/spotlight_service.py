@@ -558,18 +558,25 @@ class SpotlightService:
     # =========================================================================
 
     def _disarm_bypasses(self, previous_package: str) -> None:
-        """Armed bypasses are intent for one app: a new selection starts clean."""
+        """Bypasses are for one app: a new selection starts clean.
+
+        The armed set is cleared and a script still live in the app left
+        behind is unloaded (in the background), so the bypass state is only
+        ever the selected app's.
+        """
         try:
             from sandroid.analysis.detection_bypass import get_bypass_service
 
-            cleared = get_bypass_service().disarm_all()
+            svc = get_bypass_service()
+            cleared = svc.disarm_all()
+            released = svc.release_app(previous_package)
         except Exception as exc:
             self._logger.debug(f"Could not disarm the bypasses: {exc}")
             return
-        if cleared:
+        if cleared or released:
             self._logger.info(
                 f"Selection left {previous_package}: bypass "
-                f"{', '.join(cleared)} disarmed"
+                f"{', '.join(sorted(set(cleared) | set(released)))} turned off"
             )
 
     def _publish_app_changed(

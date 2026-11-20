@@ -591,13 +591,14 @@ class StatusBar(Static):
                     if task:
                         if task.target_pid:
                             task_parts.append(
-                                f"[{fixed_color('running')}]●[/] {task.display_name} ([{warn_color}]{task.target_pid}[/])"
+                                f"[{fixed_color('running')}]{task.display_name}[/]"
+                                f" ([{warn_color}]{task.target_pid}[/])"
                             )
                         else:
                             task_parts.append(
-                                f"[{fixed_color('running')}]●[/] {task.display_name}"
+                                f"[{fixed_color('running')}]{task.display_name}[/]"
                             )
-                self.background_tasks_display = " ".join(task_parts)
+                self.background_tasks_display = ", ".join(task_parts)
             else:
                 self.background_tasks_display = ""
         except Exception:
