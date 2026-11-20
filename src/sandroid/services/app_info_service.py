@@ -2585,9 +2585,10 @@ def record_insight_result(
         cache: Cache to use; defaults to ``ApkCache()``.
         options: The run's choice (``{"profile", "trackers", "security",
             "verbose"}``), stored as ``insight.options``. A run with trackers
-            off keeps the previous run's tracker summary for the same APK
-            (marked ``insight.trackers_from_previous_run``), since tracker
-            detection is per APK and that run did not look.
+            off records ``summary.tracker_analysis`` as ``None`` (not
+            analysed), or keeps the previous run's tracker summary for the
+            same APK when that run analysed trackers (marked
+            ``insight.trackers_from_previous_run``).
 
     Returns:
         The entry key, or ``None`` when nothing was recorded (never raises).
@@ -2605,12 +2606,22 @@ def record_insight_result(
         insight_options = dict(options) if isinstance(options, dict) else None
         trackers_from_previous = False
         if insight_options is not None and insight_options.get("trackers") is False:
+            # This run did not look for trackers: never record an empty list
+            # (that would read as "no trackers found"). Keep the last run's
+            # tracker summary (trackers and protections) if that run, or the
+            # one it carried over from, really analysed trackers.
+            summary["tracker_analysis"] = None
+            previous_insight = _as_dict(existing.get("insight"))
             previous = _as_dict(
-                _as_dict(_as_dict(existing.get("insight")).get("summary")).get(
-                    "tracker_analysis"
-                )
+                _as_dict(previous_insight.get("summary")).get("tracker_analysis")
             )
-            if previous:
+            previous_options = previous_insight.get("options")
+            analysed = (
+                not isinstance(previous_options, dict)  # older record: trackers ran
+                or previous_options.get("trackers") is not False
+                or previous_insight.get("trackers_from_previous_run") is True
+            )
+            if previous and analysed:
                 summary["tracker_analysis"] = previous
                 trackers_from_previous = True
         updates: dict[str, Any] = {

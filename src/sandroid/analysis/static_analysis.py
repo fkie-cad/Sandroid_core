@@ -1,6 +1,8 @@
+import contextlib
 import copy
 import inspect
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -148,32 +150,41 @@ def _insight_offline_config(configuration) -> dict:
     }
 
 
-#: Insight's ``privacy`` profile, for an Insight without analysis profiles
-#: (< 2.2): the same module/tool/assessment overrides, merged under
-#: Sandroid's own keys. Unknown keys are ignored by Insight's config merge.
+_OFF = {"enabled": False}
+
+#: Insight's ``privacy`` profile (``dexray_insight.core.profiles``), for an
+#: Insight without analysis profiles (< 2.2): exactly the same overrides,
+#: merged under Sandroid's own keys. Unknown keys are ignored by Insight's
+#: config merge. Keep in sync with Insight's ``_PRIVACY_OVERRIDES``.
 _PRIVACY_PROFILE_FALLBACK: dict = {
     "modules": {
+        "apk_overview": {"enabled": True},
+        "manifest_analysis": {"enabled": True},
+        "permission_analysis": {"enabled": True},
         "api_invocation": {"enabled": True},
+        "string_analysis": {"enabled": True},
+        "tracker_analysis": {"enabled": True},
         "behaviour_analysis": {"enabled": True, "deep_mode": False},
         "library_detection": {
+            "enabled": True,
             "enable_similarity": False,
             "version_analysis": {"enabled": False},
         },
-        "native_analysis": {"enabled": False},
-        "signature_detection": {"enabled": False},
-        "dotnet_analysis": {"enabled": False},
-        "apk_diffing": {"enabled": False},
+        "native_analysis": dict(_OFF),
+        "signature_detection": dict(_OFF),
+        "dotnet_analysis": dict(_OFF),
+        "apk_diffing": dict(_OFF),
     },
     "tools": {
-        "apktool": {"enabled": False},
-        "jadx": {"enabled": False},
-        "kavanoz": {"enabled": False},
+        "apktool": dict(_OFF),
+        "jadx": dict(_OFF),
+        "kavanoz": dict(_OFF),
     },
-    "temporal_analysis": {"enabled": False},
+    "temporal_analysis": dict(_OFF),
     "security": {
-        "cve_scanning": {"enabled": False},
+        "cve_scanning": dict(_OFF),
         "assessments": {
-            name: {"enabled": False}
+            name: dict(_OFF)
             for name in (
                 "injection",
                 "authentication_failures",
@@ -193,6 +204,10 @@ _PRIVACY_PROFILE_FALLBACK: dict = {
 #: to the working directory, so Sandroid always passes it explicitly.
 _LIBRARY_DEFINITIONS_DIR = Path.home() / ".dexray_insight" / "library_definitions"
 
+#: Per-run folders in the work root older than this are left over from a
+#: process that exited mid-run and are removed at the next start.
+_STALE_WORK_SECONDS = 24 * 3600
+
 
 def _accepts_kwarg(func, name: str) -> bool:
     """True when callable *func* takes a keyword argument *name*."""
@@ -202,17 +217,57 @@ def _accepts_kwarg(func, name: str) -> bool:
         return False
 
 
-def _work_dir_config(work_dir: str) -> dict:
+def insight_work_root() -> Path:
+    """Stable per-user root for Insight's scratch files.
+
+    ``<paths.cache_path>/insight-work`` (default ``~/.cache/sandroid/insight-work``).
+    The path is the same for every run, so it never changes Insight's cache
+    key (Insight < 2.2 hashes ``temporal_analysis.base_directory``); each run
+    works in its own subfolder below it.
+    """
+    root = None
+    try:
+        if get_config is not None:
+            configured = getattr(get_config().paths, "cache_path", None)
+            if configured:
+                root = Path(configured).expanduser()
+    except Exception:
+        root = None
+    return (root or Path("~/.cache/sandroid").expanduser()) / "insight-work"
+
+
+def _clean_stale_work(root: Path, max_age: float = _STALE_WORK_SECONDS) -> None:
+    """Remove entries in *root* last modified more than *max_age* seconds ago."""
+    cutoff = time.time() - max_age
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.stat().st_mtime < cutoff:
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _work_dir_config(work_root: str) -> dict:
     """Insight config keeping its scratch files out of the working directory.
 
     The temporal directory (unzipped APK, apktool/JADX output, tool logs) goes
-    to *work_dir*, which the caller removes after the run; the library
-    definitions go to the per-user Insight directory.
+    below the stable *work_root* (Insight creates one subfolder per run and
+    removes it; Sandroid removes it as well); the library definitions go to
+    the per-user Insight directory. Every value is constant across runs, so
+    the config, and with it Insight's cache key, is the same for every run.
     """
     return {
         "temporal_analysis": {
-            "base_directory": work_dir,
+            "base_directory": work_root,
             "cleanup_after_analysis": True,
+            "preserve_on_error": False,
         },
         "modules": {
             "library_detection": {
@@ -223,6 +278,39 @@ def _work_dir_config(work_dir: str) -> dict:
             }
         },
     }
+
+
+@contextlib.contextmanager
+def _preserved_root_logging():
+    """Restore the root logger's handlers and level after an Insight run.
+
+    Insight < 2.2 replaces every FileHandler of the root logger with its own
+    per-APK debug log at DEBUG level, which would cut Sandroid's session and
+    error logs. File handlers added during the run are closed and removed;
+    removed ones are put back.
+    """
+    root = logging.getLogger()
+    handlers = list(root.handlers)
+    level = root.level
+    try:
+        yield
+    finally:
+        for handler in list(root.handlers):
+            if handler not in handlers and isinstance(handler, logging.FileHandler):
+                root.removeHandler(handler)
+                with contextlib.suppress(Exception):
+                    handler.close()
+        for handler in handlers:
+            if handler not in root.handlers:
+                root.addHandler(handler)
+        root.setLevel(level)
+
+
+def _short_error(error: object, limit: int = 160) -> str:
+    """First line of an error, trimmed, for an event or a status line."""
+    text = str(error).strip().splitlines()[0] if str(error).strip() else ""
+    text = text or type(error).__name__
+    return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
 
 
 def describe_static_options(options: dict) -> str:
@@ -277,6 +365,10 @@ class StaticAnalysis(DataGatherBase):
             "use_cache": True,
         }
         self._output_files = []
+        # Package name for the state events: the spotlight package in device
+        # mode, Insight's package_name in local mode once known.
+        self._package: str | None = None
+        self._final_state_sent = False
 
     def _options(self) -> dict:
         """The current choice as ``{"profile", "trackers", "security", "verbose"}``."""
@@ -414,6 +506,30 @@ class StaticAnalysis(DataGatherBase):
                 if key == row_key.lower():
                     settings[setting] = not settings[setting]
 
+    def _publish_state(self, state: str, message: str, **data) -> None:
+        """Publish a static analysis TaskOutput with ``data.state``.
+
+        ``state`` is one of ``started``, ``finished``, ``failed``,
+        ``cancelled``; ``data`` always carries the package (``None`` while
+        unknown), the profile and, for a local APK, its file name (``apk``).
+        """
+        payload = {
+            "state": state,
+            "package": self._package,
+            "profile": self._options()["profile"],
+        }
+        if self._apk_path:
+            payload["apk"] = os.path.basename(self._apk_path)
+        payload.update(data)
+        self._final_state_sent = state in ("finished", "failed", "cancelled")
+        TaskOutput(
+            task_name="static_analysis",
+            message=message,
+            level="error" if state == "failed" else "info",
+            data=payload,
+            source="static_analysis",
+        ).publish()
+
     def gather(self, interactive: bool = True) -> bool:
         """Gathers and analyzes an APK file using dexray-insight.
 
@@ -421,14 +537,14 @@ class StaticAnalysis(DataGatherBase):
         1. Local APK: If `apk_path` was provided at init, analyzes that file directly
         2. Device APK: Otherwise, pulls the spotlight app from the connected device
 
+        Publishes ``static_analysis`` TaskOutputs with ``data.state``
+        ``started``, then ``finished``, ``failed`` or ``cancelled``.
+
         Args:
             interactive: If True, show interactive configuration menu first
 
         Returns:
             True if analysis completed, False if cancelled or failed
-
-        Raises:
-            Exception: If dexray-insight returns None or there is an error during analysis.
         """
         if asam is None:
             logger.error("dexray-insight not available. Static analysis skipped.")
@@ -437,19 +553,33 @@ class StaticAnalysis(DataGatherBase):
 
         # Track analysis start time for duration calculation
         start_time = time.time()
+        self._final_state_sent = False
 
         # Show interactive configuration if requested
         if interactive:
             config = self._interactive_configuration()
             if config is None:
                 logger.info("Dexray-insight configuration cancelled")
+                self._publish_state("cancelled", "Static analysis cancelled")
                 return False
             self._analysis_config = {**self._analysis_config, **config}
 
         # Route to appropriate analysis method
-        if self._apk_path:
-            return self._analyze_local_apk(self._apk_path, start_time)
-        return self._analyze_device_apk(start_time)
+        try:
+            if self._apk_path:
+                ok = self._analyze_local_apk(self._apk_path, start_time)
+            else:
+                ok = self._analyze_device_apk(start_time)
+        except BaseException:
+            if not self._final_state_sent:
+                self._publish_state("cancelled", "Static analysis stopped")
+            raise
+        if not ok and not self._final_state_sent:
+            error = _short_error(self.last_results.get("error") or "unknown error")
+            self._publish_state(
+                "failed", f"Static analysis failed: {error}", error=error
+            )
+        return ok
 
     def _analyze_local_apk(self, apk_path: str, start_time: float) -> bool:
         """Analyze a local APK file without device interaction.
@@ -461,8 +591,6 @@ class StaticAnalysis(DataGatherBase):
         Returns:
             True if analysis completed, False if failed
         """
-        from pathlib import Path
-
         apk_file = Path(apk_path)
 
         # Validate the APK file exists
@@ -500,7 +628,8 @@ class StaticAnalysis(DataGatherBase):
         """Pull and analyze an APK from the connected device.
 
         Uses the spotlight app (SpotlightService) to determine which app to
-        analyze.
+        analyze. The APK is pulled into this run's work folder (never next to
+        the results), so whatever Insight writes beside it is removed too.
 
         Args:
             start_time: Analysis start time for duration tracking
@@ -525,6 +654,7 @@ class StaticAnalysis(DataGatherBase):
             self.last_results = {"error": "no spotlight app selected"}
             return False
         self.last_analysed_app = apk_name
+        self._package = apk_name
 
         # Get APK path on device
         apk_path, stderr = self._send_adb_command("shell pm path " + apk_name)
@@ -556,7 +686,8 @@ class StaticAnalysis(DataGatherBase):
         other_splits = [
             p for p in device_paths if p != device_apk_path and not is_config_split(p)
         ]
-        local_apk_path = f"{insight_dir}{apk_name}.apk"
+        run_dir = self._new_run_dir()
+        local_apk_path = str(run_dir / f"{apk_name}.apk")
 
         logger.debug(
             f"Running dexray-insight for {apk_name} located at {local_apk_path}"
@@ -578,6 +709,7 @@ class StaticAnalysis(DataGatherBase):
                 "error": f"APK pull failed: {pull_stderr}",
                 "app_name": apk_name,
             }
+            shutil.rmtree(run_dir, ignore_errors=True)
             return False
 
         if not os.path.exists(local_apk_path):
@@ -586,6 +718,7 @@ class StaticAnalysis(DataGatherBase):
                 "error": "APK file not found after pull",
                 "app_name": apk_name,
             }
+            shutil.rmtree(run_dir, ignore_errors=True)
             return False
 
         return self._run_dexray_analysis(
@@ -593,13 +726,24 @@ class StaticAnalysis(DataGatherBase):
             apk_name,
             insight_dir,
             start_time,
-            cleanup_apk=True,
             other_split_sha256s=(
                 self._remote_split_hashes(other_splits)
                 if self._analysis_config.get("use_cache", True)
                 else None
             ),
+            run_dir=str(run_dir),
         )
+
+    @staticmethod
+    def _new_run_dir() -> Path:
+        """A fresh per-run folder below :func:`insight_work_root`.
+
+        Leftovers of runs that died more than a day ago are removed first.
+        """
+        root = insight_work_root()
+        root.mkdir(parents=True, exist_ok=True)
+        _clean_stale_work(root)
+        return Path(tempfile.mkdtemp(prefix="run-", dir=root))
 
     def _remote_split_hashes(self, device_paths: list[str]) -> list[str] | None:
         """sha256 of the non-base key splits, hashed on the device.
@@ -637,60 +781,58 @@ class StaticAnalysis(DataGatherBase):
         start_time: float,
         cleanup_apk: bool = False,
         other_split_sha256s: list[str] | None = None,
+        run_dir: str | None = None,
     ) -> bool:
         """Run dexray-insight analysis on an APK file.
 
-        This is the shared analysis logic used by both local and device APK modes.
+        This is the shared analysis logic used by both local and device APK
+        modes. The APK is analysed from this run's own folder below
+        :func:`insight_work_root` (hard-linked or copied there unless it
+        already is), so files Insight writes next to the APK (``apktool_out/``)
+        and its temporal folder are removed with that folder after the run.
 
         Args:
             apk_file_path: Full path to the APK file to analyze
             apk_name: Name/identifier for the APK (used in results)
             insight_dir: Directory where result files should be stored
             start_time: Analysis start time for duration tracking
-            cleanup_apk: If True, delete the APK file after analysis (for pulled APKs)
+            cleanup_apk: If True, delete the APK file after analysis
             other_split_sha256s: sha256 of the app's other splits (``[]`` for a
                 single APK); ``None`` skips recording the run in the APK cache.
+            run_dir: This run's work folder (created when ``None``).
 
         Returns:
             True if analysis completed, False if failed
         """
         options = self._options()
-        TaskOutput(
-            task_name="static_analysis",
-            message=f"Static analysis started: {describe_static_options(options)}",
-            level="info",
-            data={"package": apk_name, **options},
-            source="static_analysis",
-        ).publish()
-        # Insight's scratch files (unzipped APK, apktool output, tool logs)
-        # live here and are removed after the run, whatever happens.
-        work_dir = tempfile.mkdtemp(prefix="sandroid-insight-")
+        self._publish_state(
+            "started",
+            f"Static analysis started: {describe_static_options(options)}",
+            **{k: v for k, v in options.items() if k != "profile"},
+        )
+        run_path = Path(run_dir) if run_dir else self._new_run_dir()
+        work_root = run_path.parent
         try:
+            before = {entry.name for entry in work_root.iterdir()}
+        except OSError:
+            before = set()
+        try:
+            analysed_apk = self._stage_apk(apk_file_path, run_path)
             results, result_file_name, security_result_file_name = self._start_insight(
-                apk_file_path, insight_dir=insight_dir, work_dir=work_dir
+                str(analysed_apk), insight_dir=insight_dir, work_dir=str(work_root)
             )
 
             if results is None:
                 raise Exception("dexray-insight returned None")
 
-            # Move output files to insight_dir if they were created in cwd
-            if result_file_name and os.path.exists(result_file_name):
-                # File exists at returned path (might be in cwd)
-                if not os.path.dirname(result_file_name):
-                    # No directory in path - file is in cwd, move it
-                    dest_path = os.path.join(insight_dir, result_file_name)
-                    shutil.move(result_file_name, dest_path)
-                    result_file_name = dest_path
-                    logger.debug(f"Moved result file to {dest_path}")
-
-            if security_result_file_name and os.path.exists(security_result_file_name):
-                # File exists at returned path (might be in cwd)
-                if not os.path.dirname(security_result_file_name):
-                    # No directory in path - file is in cwd, move it
-                    dest_path = os.path.join(insight_dir, security_result_file_name)
-                    shutil.move(security_result_file_name, dest_path)
-                    security_result_file_name = dest_path
-                    logger.debug(f"Moved security result file to {dest_path}")
+            # Insight < 2.2 writes its files to the working directory: move them.
+            result_file_name = self._move_into(result_file_name, insight_dir)
+            security_result_file_name = self._move_into(
+                security_result_file_name, insight_dir
+            )
+            if security_result_file_name:
+                markdown = Path(security_result_file_name).stem + ".md"
+                self._move_into(markdown, insight_dir)
 
             # Convert results to dictionary for compatibility. Insight 2.0.0
             # returns a plain ``{"main": ..., "security": ...}`` dict on a
@@ -701,6 +843,10 @@ class StaticAnalysis(DataGatherBase):
             else:
                 analysis_results = results.to_dict()
                 json_output = results.to_json()
+            overview = analysis_results.get("apk_overview") or {}
+            package = (overview.get("general_info") or {}).get("package_name")
+            if package:
+                self._package = package
             self.last_results = {
                 "analysis_results": analysis_results,
                 "json_output": json_output,
@@ -728,7 +874,7 @@ class StaticAnalysis(DataGatherBase):
 
             if other_split_sha256s is not None:
                 self._record_in_apk_cache(
-                    apk_file_path,
+                    str(analysed_apk),
                     other_split_sha256s,
                     analysis_results,
                     result_file_name,
@@ -741,6 +887,12 @@ class StaticAnalysis(DataGatherBase):
 
             # Publish TaskOutput events for important findings
             self._publish_analysis_events(duration)
+            self._publish_state(
+                "finished",
+                f"Static analysis finished in {duration:.0f} seconds",
+                duration_s=round(duration, 1),
+                results_dir=os.path.abspath(insight_dir),
+            )
 
             return True
 
@@ -749,16 +901,57 @@ class StaticAnalysis(DataGatherBase):
             logger.error("This is not an issue with Sandroid. Empty output appended.")
             logger.error(str(e))
             self.last_results = {"error": str(e), "app_name": apk_name}
+            error = _short_error(e)
+            self._publish_state(
+                "failed", f"Static analysis failed: {error}", error=error
+            )
             return False
 
+        except BaseException:
+            self._publish_state("cancelled", "Static analysis stopped")
+            raise
+
         finally:
-            shutil.rmtree(work_dir, ignore_errors=True)
-            # Clean up APK file if requested (for pulled APKs)
-            if cleanup_apk:
+            shutil.rmtree(run_path, ignore_errors=True)
+            # Insight's own temporal folder for this APK (dexray_<apk>_<time>),
+            # if Insight left it behind.
+            prefix = f"dexray_{Path(apk_file_path).stem}_"
+            try:
+                for entry in work_root.iterdir():
+                    if entry.name not in before and entry.name.startswith(prefix):
+                        shutil.rmtree(entry, ignore_errors=True)
+            except OSError:
+                pass
+            if cleanup_apk and os.path.exists(apk_file_path):
                 try:
                     os.remove(apk_file_path)
                 except OSError as e:
                     logger.warning(f"Could not remove APK file: {e}")
+
+    @staticmethod
+    def _stage_apk(apk_file_path: str, run_path: Path) -> Path:
+        """The APK inside *run_path*: as is, hard-linked or copied there."""
+        source = Path(apk_file_path)
+        if source.resolve().parent == run_path.resolve():
+            return source
+        target = run_path / source.name
+        try:
+            os.link(source, target)
+        except OSError:
+            shutil.copy2(source, target)
+        return target
+
+    @staticmethod
+    def _move_into(file_name: str, directory: str) -> str:
+        """Move a bare file name from the working directory into *directory*."""
+        if not file_name or os.path.dirname(file_name):
+            return file_name
+        if not os.path.exists(file_name):
+            return file_name
+        dest_path = os.path.join(directory, file_name)
+        shutil.move(file_name, dest_path)
+        logger.debug(f"Moved {file_name} to {dest_path}")
+        return dest_path
 
     def _apk_cache(self):
         """The shared APK cache, honouring the per-run ``use_cache`` switch."""
@@ -801,7 +994,8 @@ class StaticAnalysis(DataGatherBase):
             insight_dir: Directory for Insight's result files (passed as
                 ``output_dir`` when Insight accepts it; otherwise the files
                 land in the working directory and the caller moves them).
-            work_dir: Scratch directory for Insight's temporal files.
+            work_dir: Stable root for Insight's temporal files
+                (:func:`insight_work_root`).
 
         Returns:
             Insight's ``(results, result_file_name, security_result_file_name)``.
@@ -870,13 +1064,14 @@ class StaticAnalysis(DataGatherBase):
             and _accepts_kwarg(asam.start_apk_static_analysis_new, "output_dir")
             else {}
         )
-        return asam.start_apk_static_analysis_new(
-            apk_file_path,
-            configuration(config_dict=config_dict, **profile_kwargs),
-            print_results_to_terminal=True,
-            verbose=verbose,
-            **output_kwargs,
-        )
+        with _preserved_root_logging():
+            return asam.start_apk_static_analysis_new(
+                apk_file_path,
+                configuration(config_dict=config_dict, **profile_kwargs),
+                print_results_to_terminal=True,
+                verbose=verbose,
+                **output_kwargs,
+            )
 
     def _record_in_apk_cache(
         self,

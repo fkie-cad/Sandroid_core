@@ -1532,6 +1532,9 @@ class _FakeConfiguration:
 
 def _analyzer(monkeypatch, tmp_path, fake_asam):
     monkeypatch.setattr(static_analysis, "asam", fake_asam)
+    monkeypatch.setattr(
+        static_analysis, "insight_work_root", lambda: tmp_path / "insight-work"
+    )
     analyzer = static_analysis.StaticAnalysis(adb=SimpleNamespace())
     analyzer._analysis_config["verbose_output"] = False
     monkeypatch.setattr(
@@ -1602,7 +1605,10 @@ def test_insight1_uses_legacy_call(monkeypatch, tmp_path, cache_root):
         str(apk), "app", str(tmp_path) + "/", time.time(), other_split_sha256s=[]
     )
     assert calls
-    assert calls[0]["apk_file_path"] == str(apk)
+    # Analysed from the run's own work folder (same file name and bytes).
+    staged = Path(calls[0]["apk_file_path"])
+    assert staged.name == apk.name
+    assert staged.parent.parent == tmp_path / "insight-work"
     assert not cache_root.exists()  # don't-cache switch honoured
 
 
@@ -1629,8 +1635,11 @@ def test_profile_trackers_and_dirs_reach_a_profile_aware_insight(
         seen["output_dir"] = output_dir
         work = config.config_dict["temporal_analysis"]["base_directory"]
         seen["work"] = work
+        seen["apk"] = apk
         assert os.path.isdir(work)
-        (Path(work) / "unzipped").mkdir()
+        # Insight's per-run temporal folder and apktool_out next to the APK.
+        (Path(work) / "dexray_app_2026").mkdir()
+        (Path(apk).parent / "apktool_out").mkdir()
         main = Path(output_dir) / "dexray_app_T.json"
         main.parent.mkdir(parents=True, exist_ok=True)
         main.write_text("{}")
@@ -1663,14 +1672,24 @@ def test_profile_trackers_and_dirs_reach_a_profile_aware_insight(
     ]
     assert ".dexray_insight" in definitions["libsmali_path"]
     assert seen["output_dir"] == str(out_dir) + "/"
-    assert not os.path.exists(seen["work"])  # scratch dir removed
+    work_root = tmp_path / "insight-work"
+    assert seen["work"] == str(work_root)  # stable root: same cache key every run
+    assert Path(seen["apk"]).parent.parent == work_root  # analysed from a run folder
+    assert list(work_root.iterdir()) == []  # run folder + Insight folder removed
     assert list(tmp_path.glob("*.jsonl")) == []
     assert not (tmp_path / "temp_analysis").exists()
     assert analyzer.last_results["options"]["profile"] == "privacy"
     started = events[0]
+    assert started.data["state"] == "started"
     assert started.data["profile"] == "privacy"
     assert started.data["trackers"] is False
     assert "privacy profile, trackers off" in started.message
+    finished = events[-1]
+    assert finished.data["state"] == "finished"
+    assert finished.data["package"] == PKG  # from Insight, local-APK mode
+    assert "apk" not in finished.data  # no local APK path given to this analyzer
+    assert finished.data["results_dir"] == os.path.abspath(str(out_dir) + "/")
+    assert isinstance(finished.data["duration_s"], float)
 
 
 def test_older_insight_gets_the_privacy_fallback(monkeypatch, tmp_path, cache_root):
@@ -1684,7 +1703,8 @@ def test_older_insight_gets_the_privacy_fallback(monkeypatch, tmp_path, cache_ro
         Configuration=_FakeConfiguration, start_apk_static_analysis_new=start_new
     )
     analyzer = _analyzer(monkeypatch, tmp_path, fake_asam)
-    analyzer._analysis_config["profile"] = "privacy"
+    analyzer._analysis_config.update(profile="privacy", run_tracker_analysis=False)
+    pristine = json.loads(json.dumps(static_analysis._PRIVACY_PROFILE_FALLBACK))
     apk = tmp_path / "app.apk"
     apk.write_bytes(b"apk-bytes")
 
@@ -1693,13 +1713,11 @@ def test_older_insight_gets_the_privacy_fallback(monkeypatch, tmp_path, cache_ro
     )
     modules = seen["config_dict"]["modules"]
     assert modules["native_analysis"] == {"enabled": False}
-    assert modules["tracker_analysis"].get("enabled", True) is True
+    assert modules["tracker_analysis"]["enabled"] is False  # the user's choice wins
     assert modules["signature_detection"] == {"enabled": False}
     assert seen["config_dict"]["tools"]["apktool"] == {"enabled": False}
     # The fallback constant itself is never mutated by the merge.
-    assert (
-        "tracker_analysis" not in static_analysis._PRIVACY_PROFILE_FALLBACK["modules"]
-    )
+    assert pristine == static_analysis._PRIVACY_PROFILE_FALLBACK
 
 
 def test_generic_profile_adds_no_overrides(monkeypatch, tmp_path, cache_root):
@@ -1739,6 +1757,233 @@ def test_run_without_trackers_keeps_the_previous_tracker_summary(cache_root):
     assert ais.insight_trackers(insight["summary"]) == [{"name": "Adjust"}]
 
 
+def test_trackers_off_without_an_analysed_run_records_null(cache_root):
+    protections = {
+        **INSIGHT_MAIN,
+        "tracker_analysis": {
+            "detected_trackers": [{"name": "Adjust"}],
+            "detected_protections": [{"name": "Play Integrity"}],
+        },
+    }
+    key = ais.record_insight_result(
+        ["b" * 64], INSIGHT_MAIN, options={"profile": "privacy", "trackers": False}
+    )
+    insight = ais.ApkCache().read_meta(key)["insight"]
+    assert insight["summary"]["tracker_analysis"] is None  # not "none found"
+    assert insight["trackers_from_previous_run"] is False
+
+    # A second trackers-off run does not adopt the first one's null.
+    ais.record_insight_result(
+        ["b" * 64], INSIGHT_MAIN, options={"profile": "privacy", "trackers": False}
+    )
+    insight = ais.ApkCache().read_meta(key)["insight"]
+    assert insight["summary"]["tracker_analysis"] is None
+    assert insight["trackers_from_previous_run"] is False
+
+    # Trackers on, then off: trackers and protections are both kept, and a
+    # further off run keeps them too (they still come from the analysed run).
+    ais.record_insight_result(
+        ["b" * 64], protections, options={"profile": "generic", "trackers": True}
+    )
+    for _ in range(2):
+        ais.record_insight_result(
+            ["b" * 64], INSIGHT_MAIN, options={"profile": "privacy", "trackers": False}
+        )
+        insight = ais.ApkCache().read_meta(key)["insight"]
+        assert insight["trackers_from_previous_run"] is True
+        assert ais.insight_trackers(insight["summary"]) == [{"name": "Adjust"}]
+        assert ais.insight_protections(insight["summary"]) == [
+            {"name": "Play Integrity"}
+        ]
+
+
+def _capturing_insight(seen, write_md=False):
+    """An Insight 2.1.0 stand-in: no profile/output_dir, writes to the cwd."""
+
+    def start_new(apk, config, print_results_to_terminal=False, verbose=False):
+        seen.setdefault("config_dicts", []).append(
+            json.loads(json.dumps(config.config_dict))
+        )
+        seen.setdefault("apks", []).append(apk)
+        Path("dexray_app_T.json").write_text("{}")
+        Path("dexray_app_security_T.json").write_text("{}")
+        if write_md:
+            Path("dexray_app_security_T.md").write_text("# report")
+        return (
+            {"main": INSIGHT_MAIN, "security": {"x": 1}},
+            "dexray_app_T.json",
+            "dexray_app_security_T.json",
+        )
+
+    return SimpleNamespace(
+        Configuration=_FakeConfiguration, start_apk_static_analysis_new=start_new
+    )
+
+
+def test_two_runs_send_the_same_config_so_insight_2_1_hits_its_cache(
+    monkeypatch, tmp_path, cache_root
+):
+    seen = {}
+    analyzer = _analyzer(monkeypatch, tmp_path, _capturing_insight(seen))
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"apk-bytes")
+    out = tmp_path / "out"
+    out.mkdir()
+    for _ in range(2):
+        assert analyzer._run_dexray_analysis(
+            str(apk), "app", str(out) + "/", time.time(), other_split_sha256s=[]
+        )
+    first, second = seen["config_dicts"]
+    # Insight 2.1.0 hashes the whole config: identical dicts give identical keys.
+    assert first == second
+    assert seen["apks"][0] != seen["apks"][1]  # yet each run has its own folder
+    assert first["temporal_analysis"]["base_directory"] == str(
+        tmp_path / "insight-work"
+    )
+
+
+def test_fallback_moves_the_markdown_report_too(monkeypatch, tmp_path, cache_root):
+    analyzer = _analyzer(monkeypatch, tmp_path, _capturing_insight({}, write_md=True))
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"apk-bytes")
+    out = tmp_path / "out"
+    out.mkdir()
+    assert analyzer._run_dexray_analysis(
+        str(apk), "app", str(out) + "/", time.time(), other_split_sha256s=[]
+    )
+    assert sorted(p.name for p in out.iterdir()) == [
+        "dexray_app_T.json",
+        "dexray_app_security_T.json",
+        "dexray_app_security_T.md",
+    ]
+    assert list(tmp_path.glob("dexray_*")) == []
+
+
+def test_stale_run_folders_are_removed_at_the_next_start(tmp_path, monkeypatch):
+    root = tmp_path / "insight-work"
+    old = root / "run-old"
+    fresh = root / "run-fresh"
+    old.mkdir(parents=True)
+    fresh.mkdir()
+    long_ago = time.time() - 2 * 24 * 3600
+    os.utime(old, (long_ago, long_ago))
+    monkeypatch.setattr(static_analysis, "insight_work_root", lambda: root)
+
+    run_dir = static_analysis.StaticAnalysis._new_run_dir()
+
+    assert not old.exists()
+    assert fresh.exists()
+    assert run_dir.parent == root
+
+
+def test_root_logging_is_restored_after_insight(monkeypatch, tmp_path, cache_root):
+    import logging
+
+    root = logging.getLogger()
+    host = logging.FileHandler(tmp_path / "session.log")
+    root.addHandler(host)
+    level = root.level
+
+    def start_new(apk, config, print_results_to_terminal=False, verbose=False):
+        # What Insight 2.1.0 does at DEBUG: drop every root FileHandler and
+        # point logging into its (soon deleted) work folder.
+        for handler in [h for h in root.handlers if isinstance(h, logging.FileHandler)]:
+            root.removeHandler(handler)
+        root.addHandler(logging.FileHandler(tmp_path / "insight-debug.log"))
+        root.setLevel(logging.DEBUG)
+        return {"main": INSIGHT_MAIN, "security": None}, "", ""
+
+    fake_asam = SimpleNamespace(
+        Configuration=_FakeConfiguration, start_apk_static_analysis_new=start_new
+    )
+    analyzer = _analyzer(monkeypatch, tmp_path, fake_asam)
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"apk-bytes")
+    try:
+        assert analyzer._run_dexray_analysis(
+            str(apk), "app", str(tmp_path) + "/", time.time(), other_split_sha256s=[]
+        )
+        file_handlers = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
+        assert host in file_handlers
+        assert not any("insight-debug" in h.baseFilename for h in file_handlers)
+        assert root.level == level
+    finally:
+        root.removeHandler(host)
+        host.close()
+
+
+def _state_events(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        static_analysis.TaskOutput, "publish", lambda self: events.append(self)
+    )
+    return events
+
+
+def test_failed_run_publishes_a_short_failed_state(monkeypatch, tmp_path, cache_root):
+    events = _state_events(monkeypatch)
+
+    def start_new(apk, config, print_results_to_terminal=False, verbose=False):
+        raise RuntimeError("apktool exploded\nlong traceback line")
+
+    fake_asam = SimpleNamespace(
+        Configuration=_FakeConfiguration, start_apk_static_analysis_new=start_new
+    )
+    monkeypatch.setattr(static_analysis, "asam", fake_asam)
+    monkeypatch.setattr(
+        static_analysis, "insight_work_root", lambda: tmp_path / "insight-work"
+    )
+    apk = tmp_path / "Some App.apk"
+    apk.write_bytes(b"apk-bytes")
+    monkeypatch.setenv("RESULTS_PATH", str(tmp_path) + "/")
+    analyzer = static_analysis.StaticAnalysis(apk_path=str(apk), adb=SimpleNamespace())
+
+    assert analyzer.gather(interactive=False) is False
+
+    states = [e.data["state"] for e in events]
+    assert states == ["started", "failed"]
+    failed = events[-1]
+    assert failed.data["error"] == "apktool exploded"
+    assert failed.data["apk"] == "Some App.apk"
+    assert failed.data["package"] is None  # unknown: Insight never answered
+    assert failed.data["profile"] == "generic"
+    assert list((tmp_path / "insight-work").iterdir()) == []
+
+
+def test_dialog_cancel_and_stop_publish_cancelled(monkeypatch, tmp_path, cache_root):
+    events = _state_events(monkeypatch)
+    fake_asam = SimpleNamespace(
+        Configuration=_FakeConfiguration,
+        start_apk_static_analysis_new=lambda *a, **k: (_ for _ in ()).throw(
+            KeyboardInterrupt()
+        ),
+    )
+    monkeypatch.setattr(static_analysis, "asam", fake_asam)
+    monkeypatch.setattr(
+        static_analysis, "insight_work_root", lambda: tmp_path / "insight-work"
+    )
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"apk-bytes")
+    monkeypatch.setenv("RESULTS_PATH", str(tmp_path) + "/")
+    analyzer = static_analysis.StaticAnalysis(apk_path=str(apk), adb=SimpleNamespace())
+
+    monkeypatch.setattr(analyzer, "_interactive_configuration", lambda: None)
+    assert analyzer.gather(interactive=True) is False
+    assert [e.data["state"] for e in events] == ["cancelled"]
+
+    events.clear()
+    with pytest.raises(KeyboardInterrupt):
+        analyzer.gather(interactive=False)
+    assert [e.data["state"] for e in events] == ["started", "cancelled"]
+    assert list((tmp_path / "insight-work").iterdir()) == []
+
+
+def test_privacy_fallback_equals_insights_privacy_profile():
+    profiles = pytest.importorskip("dexray_insight.core.profiles")
+    expected = profiles.get_profile_overrides("privacy")
+    assert expected == static_analysis._PRIVACY_PROFILE_FALLBACK
+
+
 def test_device_mode_parses_split_pm_path(monkeypatch, tmp_path, cache_root):
     fake_asam = SimpleNamespace(
         Configuration=type("Cfg", (), {"DEFAULT_CONFIG": {}}),
@@ -1753,7 +1998,10 @@ def test_device_mode_parses_split_pm_path(monkeypatch, tmp_path, cache_root):
         if "pm path" in command:
             return PM_PATH, ""
         if command.startswith("pull "):
-            (tmp_path / "dexray_insight" / f"{PKG}.apk").write_bytes(b"base")
+            # Pulled into the run's own work folder, not the results folder.
+            target = Path(shlex.split(command)[-1])
+            assert target.parent.parent == tmp_path / "insight-work"
+            target.write_bytes(b"base")
             return "1 file pulled", ""
         if "sha256sum" in command:
             return SHA_OUT, ""
