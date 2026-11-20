@@ -5,6 +5,7 @@ library and the apply pipeline against a fake device (no adb, no emulator).
 from __future__ import annotations
 
 import base64
+import contextlib
 import re
 import shlex
 import sys
@@ -73,7 +74,7 @@ def service(env, monkeypatch):
     svc._sleep = lambda s: None
     svc._now = lambda: NOW
     svc.restarts_seen = []
-    svc._after_restart = svc.restarts_seen.append
+    svc._after_restart = lambda serial, previous: svc.restarts_seen.append(serial)
     profile = svc.save(_profile())
     from sandroid.config import get_config
 
@@ -1306,7 +1307,20 @@ def app_start(monkeypatch):
         disruptive: bool
         apply: object
 
+    class AppStartError(RuntimeError):
+        pass
+
+    module.busy = False
+
+    @contextlib.contextmanager
+    def lifecycle_lock(timeout=0.0):
+        if module.busy:
+            raise AppStartError("another app start is in progress")
+        yield
+
     module.PreSpawnPlan = PreSpawnPlan
+    module.AppStartError = AppStartError
+    module.lifecycle_lock = lifecycle_lock
     module.register_pre_spawn_hook = hooks.append
     module.unregister_pre_spawn_hook = hooks.remove
     module.hooks = hooks
@@ -1359,11 +1373,6 @@ def test_restart_never_makes_the_plan_non_disruptive(service, device, app_start,
     assert again is not None
     assert not again.disruptive
     assert service.applied_state("com.example.app") == "not_applied"
-
-
-def test_install_hook_is_a_no_op_without_app_start(service, monkeypatch):
-    monkeypatch.setitem(sys.modules, "sandroid.services.app_start", None)
-    assert service.install_pre_spawn_hook() is False
 
 
 def test_applied_state_follows_the_current_profile_and_serial(
@@ -1576,35 +1585,65 @@ def test_lists_script_reads_only_the_lists():
 # ---------------------------------------------------------------------------
 
 
-def test_after_restart_runs_the_proxy_check(monkeypatch):
+def test_after_restart_recovers_frida_and_runs_the_proxy_check(monkeypatch):
+    from sandroid.core.proxy_manager import FocusManager
+    from sandroid.services import app_start, proxy_restore
+
     calls = []
-    module = types.ModuleType("sandroid.services.proxy_restore")
-
-    def restore_proxy_infra(serial, *, cause, fresh_boot):
-        calls.append((serial, cause, fresh_boot))
-
-    module.restore_proxy_infra = restore_proxy_infra
-    monkeypatch.setitem(sys.modules, "sandroid.services.proxy_restore", module)
     monkeypatch.setattr(
-        ident, "_restart_frida_after_framework", lambda s: calls.append(("frida", s))
+        app_start,
+        "recover_after_framework_restart",
+        lambda previous, timeout=90.0, *, serial=None: calls.append(
+            ("frida", previous, serial)
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_restore,
+        "restore_proxy_infra",
+        lambda serial, cause, *, device_proxy=True, fresh_boot=None: calls.append(
+            (serial, cause, fresh_boot)
+        ),
     )
     assert IdentityService()._after_restart is ident._after_framework_restart
-    ident._after_framework_restart(SERIAL)
-    assert calls == [("frida", SERIAL), (SERIAL, "framework_restart", False)]
+    ident._after_framework_restart(SERIAL, 748)
+    assert calls == [
+        ("frida", 748, SERIAL),
+        (SERIAL, ident.PROXY_RESTART_CAUSE, False),
+    ]
+    # The proxy resets its lane caches only for its own world-change causes.
+    assert ident.PROXY_RESTART_CAUSE in FocusManager._WORLD_CHANGES
 
 
-def test_after_restart_tolerates_a_missing_or_failing_proxy_check(monkeypatch):
-    monkeypatch.setitem(sys.modules, "sandroid.services.proxy_restore", None)
-    ident._restore_proxy_after_framework(SERIAL)  # no module: a no-op
+def test_after_restart_tolerates_failing_recoveries(monkeypatch):
+    from sandroid.services import app_start, proxy_restore
 
-    module = types.ModuleType("sandroid.services.proxy_restore")
-
-    def boom(serial, *, cause, fresh_boot):
+    def boom(*_a, **_k):
         raise RuntimeError("device gone")
 
-    module.restore_proxy_infra = boom
-    monkeypatch.setitem(sys.modules, "sandroid.services.proxy_restore", module)
-    ident._restore_proxy_after_framework(SERIAL)  # swallowed
+    monkeypatch.setattr(app_start, "recover_after_framework_restart", boom)
+    monkeypatch.setattr(proxy_restore, "restore_proxy_infra", boom)
+    ident._after_framework_restart(SERIAL, None)  # swallowed
+
+
+def test_the_restart_window_passes_the_old_system_server(service, device):
+    seen = []
+    service._after_restart = lambda serial, previous: seen.append((serial, previous))
+    service.apply(SERIAL, "com.example.app")
+    assert seen == [(SERIAL, 1000)]
+
+
+def test_no_framework_restart_while_an_app_start_runs(service, device, app_start):
+    app_start.busy = True  # another thread holds the lifecycle lock
+    pid = device.pid
+    plan = service.apply(SERIAL, "com.example.app")
+    assert device.pid == pid  # never stopped
+    info = plan.infos["android_id"]
+    assert info.status == "pending"
+    assert info.reason.startswith("not restarted: another app start")
+    assert "com.example.app" not in service._applied[SERIAL].done
+    app_start.busy = False
+    service.apply(SERIAL, "com.example.app")
+    assert device.pid != pid
 
 
 # ---------------------------------------------------------------------------
@@ -2221,7 +2260,7 @@ def _fresh() -> IdentityService:
     svc = IdentityService()
     svc._sleep = lambda s: None
     svc._now = lambda: NOW
-    svc._after_restart = lambda serial: None
+    svc._after_restart = lambda serial, previous: None
     return svc
 
 
@@ -2876,3 +2915,14 @@ def test_older_frozen_records_get_the_per_app_android_id():
     assert [m.id for m in ident._frozen_markers(shared)] == ["android_id@com.a"]
     shared["markers"][0]["label"] = "Android ID (com.z)"
     assert [m.id for m in ident._frozen_markers(shared)] == ["android_id@com.z"]
+
+
+def test_default_configs_carry_the_same_identity_section():
+    import tomllib
+
+    import yaml
+
+    config = Path(ident.__file__).parents[1] / "config"
+    toml_section = tomllib.loads((config / "default.toml").read_text())["identity"]
+    yaml_section = yaml.safe_load((config / "default.yaml").read_text())["identity"]
+    assert yaml_section == toml_section

@@ -106,6 +106,8 @@ GAID_FILE = f"{GAID_DIR}/adid_settings.xml"
 APPSET_FILE = f"/data/data/{GMS}/files/appset/shared/pvids.pb"
 PREFLIGHT_TAG = "@@identity-preflight@@"
 NEEDS_RESTART = "needs a framework restart"
+#: The framework restart was refused (an app start holds the lifecycle lock).
+NOT_RESTARTED = "not restarted"
 #: A SIM value the running emulator did not start with.
 NEEDS_EMULATOR_START = "set when the emulator starts; restart it from the Devices hub"
 #: A SIM value the emulator started with but this Android version gives no
@@ -2154,24 +2156,10 @@ class IdentityPlan:
         return [s.value_id for s in self.steps]
 
 
-@dataclass(frozen=True)
-class _FallbackPreSpawnPlan:
-    """Local twin of ``app_start.PreSpawnPlan`` (used when it is absent)."""
-
-    description: str
-    disruptive: bool
-    apply: Callable[[], None]
-
-
 def _pre_spawn_plan_cls() -> type:
-    try:
-        from sandroid.services.app_start import (
-            PreSpawnPlan,  # type: ignore[import-not-found]
-        )
+    from sandroid.services.app_start import PreSpawnPlan
 
-        return PreSpawnPlan
-    except Exception:
-        return _FallbackPreSpawnPlan
+    return PreSpawnPlan
 
 
 def _list_sig(name: str, row: dict[str, Any], when: int | None = None) -> tuple:
@@ -2474,43 +2462,46 @@ def _knowledge(mem: _Applied) -> tuple:
     )
 
 
-def _restart_frida_after_framework(serial: str) -> None:
-    """Restart a running frida-server after a framework restart window.
+#: The proxy's world-change cause for a framework restart (it resets the
+#: lane caches for these, see ``FocusManager._WORLD_CHANGES``).
+PROXY_RESTART_CAUSE = "framework-restart"
 
-    It still talks to the dead system_server (``DeadSystemException`` on the
-    next spawn), as after the CA injection's Zygote restart. Never raises.
+
+def _recover_frida_after_framework(serial: str, previous_pid: int | None) -> None:
+    """Drop Sandroid's stale Frida state after a framework restart window.
+
+    The JobManager session, the spotlight PID and the bypass handles still
+    point at the dead system_server; ``app_start`` drops them and restarts
+    frida-server when it predates the new system_server. Never raises.
     """
     try:
-        from sandroid.core.frida_manager import (
-            restart_frida_server_after_system_restart,
-        )
+        from sandroid.services import app_start
 
-        restarted, reason = restart_frida_server_after_system_restart()
-        logger.info("identity: after the framework restart on %s: %s", serial, reason)
+        app_start.recover_after_framework_restart(previous_pid, serial=serial)
     except Exception:
-        logger.warning("identity: frida-server restart failed", exc_info=True)
+        logger.warning(
+            "identity: Frida recovery after the restart failed", exc_info=True
+        )
 
 
 def _restore_proxy_after_framework(serial: str) -> None:
     """Let the proxy check its device state after a framework restart window.
 
     The proxy's CA and gost survive the restart; this cheap check (a no-op
-    when healthy) re-adds ``adb reverse`` and repairs a lane if needed. The
-    proxy service may not exist in this build. Never raises.
+    when healthy) re-adds ``adb reverse`` and repairs a lane if needed.
+    Never raises.
     """
     try:
         from sandroid.services.proxy_restore import restore_proxy_infra
-    except ImportError:
-        return
-    try:
-        restore_proxy_infra(serial, cause="framework_restart", fresh_boot=False)
+
+        restore_proxy_infra(serial, cause=PROXY_RESTART_CAUSE, fresh_boot=False)
     except Exception:
         logger.debug("identity: proxy check after the restart failed", exc_info=True)
 
 
-def _after_framework_restart(serial: str) -> None:
-    """Bring frida-server and the proxy back after a framework restart window."""
-    _restart_frida_after_framework(serial)
+def _after_framework_restart(serial: str, previous_pid: int | None = None) -> None:
+    """Bring Frida and the proxy back after a framework restart window."""
+    _recover_frida_after_framework(serial, previous_pid)
     _restore_proxy_after_framework(serial)
 
 
@@ -2550,7 +2541,9 @@ class IdentityService:
         self._clock: Callable[[], float] = time.monotonic
         #: Called with the serial once the framework is back after a restart
         #: window (default: restart a running frida-server).
-        self._after_restart: Callable[[str], None] = _after_framework_restart
+        self._after_restart: Callable[[str, int | None], None] = (
+            _after_framework_restart
+        )
 
     # -- library ----------------------------------------------------------
 
@@ -3445,8 +3438,8 @@ class IdentityService:
                     info.current = after.current
                     info.status, info.reason = after.status, after.reason
                 continue
-            if info.status == "failed":
-                continue
+            if info.status == "failed" or info.reason.startswith(NOT_RESTARTED):
+                continue  # never written: the read-back says nothing new
             spec = REGISTRY.get(info.kind)
             mode = spec.verify if spec else "strict"
             if steps[vid].via == "sim":
@@ -3597,7 +3590,7 @@ class IdentityService:
         if not state.system_server:
             dev.shell("start")
             if self._wait_framework(dev, ""):
-                self._after_restart(state.serial)
+                self._after_restart(state.serial, None)
         dev.shell(f"rm -f {RESTART_MARKER}")
 
     def _run_sim(
@@ -3842,6 +3835,30 @@ class IdentityService:
         steps: list[Step],
         plan: IdentityPlan,
     ) -> None:
+        from sandroid.services.app_start import AppStartError, lifecycle_lock
+
+        # No app start may run across the restart (re-entrant: the pre-start
+        # step of an app start already holds it on this thread).
+        guard = contextlib.ExitStack()
+        try:
+            guard.enter_context(lifecycle_lock(0.0))
+        except AppStartError as exc:
+            for step in steps:
+                info = plan.infos[step.value_id]
+                info.status = "pending"
+                info.reason = f"{NOT_RESTARTED}: {exc}"[:200]
+            return
+        with guard:
+            self._framework_window_locked(dev, profile, state, steps, plan)
+
+    def _framework_window_locked(
+        self,
+        dev: _Device,
+        profile: Profile,
+        state: DeviceState,
+        steps: list[Step],
+        plan: IdentityPlan,
+    ) -> None:
         names = ", ".join(plan.infos[s.value_id].label for s in steps)
         self._emit(
             "restart",
@@ -3925,7 +3942,8 @@ class IdentityService:
         if not self._wait_framework(dev, state.system_server):
             return False
         dev.shell(f"rm -f {RESTART_MARKER}")
-        self._after_restart(state.serial)
+        pid = state.system_server
+        self._after_restart(state.serial, int(pid) if pid.isdigit() else None)
         return True
 
     def _wait_framework(self, dev: _Device, old_pid: str) -> bool:
@@ -4580,15 +4598,11 @@ class IdentityService:
         )
 
     def install_pre_spawn_hook(self) -> bool:
-        """Register :meth:`pre_spawn` with ``services.app_start`` (no-op when
-        that module does not exist). Returns True when registered.
+        """Register :meth:`pre_spawn` with ``services.app_start`` (once).
+        Returns True.
         """
-        try:
-            from sandroid.services.app_start import (
-                register_pre_spawn_hook,  # type: ignore[import-not-found]
-            )
-        except ImportError:
-            return False
+        from sandroid.services.app_start import register_pre_spawn_hook
+
         with self._lock:
             if self._hook_installed:
                 return True
@@ -4598,12 +4612,8 @@ class IdentityService:
 
     def uninstall_pre_spawn_hook(self) -> None:
         """Undo :meth:`install_pre_spawn_hook`."""
-        try:
-            from sandroid.services.app_start import (
-                unregister_pre_spawn_hook,  # type: ignore[import-not-found]
-            )
-        except ImportError:
-            return
+        from sandroid.services.app_start import unregister_pre_spawn_hook
+
         with self._lock:
             if self._hook_installed:
                 unregister_pre_spawn_hook(self.pre_spawn)

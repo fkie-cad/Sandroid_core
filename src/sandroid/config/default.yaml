@@ -97,6 +97,14 @@ tracking:
   swipe_slop_px: 24
   logcat_screen_backup: true
 
+# Identity profile: distinctive fake values (Android ID, advertising ID, phone,
+# GPS, contacts, ...) seeded on the emulator so privacy scans can find them.
+# Profiles live in ~/.config/sandroid/profiles/<id>.toml.
+identity:
+  profile: ""  # id of the active profile
+  mode: "off"  # off | profile
+  restart: ask  # framework restart (SSAID/locale): ask | always | never
+
 # MCP (Model Context Protocol) client — lets Sandroid's Chat feature call tools
 # hosted by external MCP servers. A bundled dummy server (proving the MCP
 # pipeline works end-to-end) is enabled by default with no config needed here.
