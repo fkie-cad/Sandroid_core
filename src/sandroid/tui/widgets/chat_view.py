@@ -932,6 +932,8 @@ class ToolBlock(Widget, TranscriptBlock):
         #: The analyst's answer to this call's approval (shown above the chip).
         self.decision: Content | None = None
         self.decision_approved: bool | None = None
+        #: Seconds the failed call took (the declined line shows them).
+        self.elapsed: float | None = None
         #: Live progress of a long call (``classifying 120/412 · 9 matched``),
         #: shown while it runs; replaced by the chip.
         self.progress: Content | None = None
@@ -965,6 +967,7 @@ class ToolBlock(Widget, TranscriptBlock):
         elapsed: float | None = None,
     ) -> None:
         """The call failed: ``code: message``."""
+        self.elapsed = elapsed
         self.set_chip(
             format_chip(ok=False, code=code, message=message, elapsed=elapsed), ok=False
         )
@@ -1006,11 +1009,25 @@ class ToolBlock(Widget, TranscriptBlock):
             parts += ["  ", args]
         return Content.assemble(*parts)
 
+    def _declined(self) -> bool:
+        """Declined by the analyst and failed: the decision line says it all
+        (``declined by you · note · 50s``), no second ``denied`` chip line.
+        """
+        return (
+            self.decision is not None
+            and self.decision_approved is False
+            and self.ok is False
+        )
+
     def render(self) -> Content:
         lines = [self.call_line()]
+        declined = self._declined()
         if self.decision is not None:
-            lines.append(Content.assemble("  ", self.decision))
-        if self.chip is not None:
+            parts: list[Any] = ["  ", self.decision]
+            if declined and self.elapsed is not None:
+                parts.append((f" · {format_elapsed(self.elapsed)}", "$chat-muted"))
+            lines.append(Content.assemble(*parts))
+        if self.chip is not None and not declined:
             lines.append(Content.assemble("  ", self.chip))
         elif self.progress is not None:
             lines.append(Content.assemble("  ", self.progress))
@@ -1019,6 +1036,8 @@ class ToolBlock(Widget, TranscriptBlock):
         return Content("\n").join(lines)
 
     def get_content_height(self, container, viewport, width: int) -> int:
+        if self._declined():
+            return 2
         return (
             1
             + (self.decision is not None)

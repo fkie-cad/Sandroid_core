@@ -1353,9 +1353,10 @@ async def test_approval_answer_sits_on_the_call_above_a_clean_chip(
         )
         (tool,) = _blocks(panel, ToolBlock)
         lines = tool.render().plain.splitlines()
-        assert len(lines) == 3
-        assert "declined by you · use chrome" in lines[1]
-        assert lines[2].strip() == "denied · 22s"
+        # One line: the decision, the note and the time; no "denied" chip.
+        assert len(lines) == 2
+        assert lines[1].strip() == "declined by you · use chrome · 22s"
+        assert tool.get_content_height(None, None, 100) == 2
         assert "declined" not in _notices(panel)  # no extra line after the chip
     assert chat_panel_module.strip_code_prefix("cancelled", "cancelled: x") == "x"
     assert chat_panel_module.strip_code_prefix("denied", "other") == "other"
@@ -1730,6 +1731,10 @@ def test_history_chips_show_summary_time_and_the_approval():
     killed, listed = tools
     assert "declined by you · use chrome" in killed.decision.plain
     assert killed.chip.plain == "denied · 2.2s"
+    shown = killed.render().plain.splitlines()
+    assert [line.strip() for line in shown[1:]] == [
+        "declined by you · use chrome · 2.2s"
+    ]
     assert listed.chip.plain == "done · R4 · 12 rows · 0.4s"
     # Without timing in the record there is no made-up "0s".
     bare = chat_panel_module.history_blocks(

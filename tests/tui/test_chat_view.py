@@ -210,6 +210,20 @@ def test_tool_name_args_and_chip_goldens() -> None:
         assert "$lens-warn" in {s.style for s in chip.spans}
 
 
+def test_a_declined_call_is_one_line_with_its_time() -> None:
+    block = ToolBlock("kill_process", {"package_name": "com.x"}, running=False)
+    block.set_decision("declined by you", style="$lens-warn", approved=False)
+    block.set_error("denied", None, elapsed=50)
+    lines = block.render().plain.splitlines()
+    assert [line.strip() for line in lines[1:]] == ["declined by you · 50s"]
+    assert block.get_content_height(None, None, 100) == 2
+    # Allowed, then failed: the decision and the chip both stay.
+    other = ToolBlock("kill_process", {}, running=False)
+    other.set_decision("allowed by you", approved=True)
+    other.set_error("tool_failed", "boom", elapsed=1)
+    assert len(other.render().plain.splitlines()) == 3
+
+
 def test_card_rule_and_notice_goldens() -> None:
     title = format_card_title("researcher", "r2", "done", elapsed=38, tokens=9_200)
     assert title.plain == "researcher r2 · done · 38s · 9.2k tok"
