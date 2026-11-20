@@ -207,12 +207,6 @@ def _create_session_state_service() -> "SessionStateService":
     return SessionStateService()
 
 
-def _create_trigdroid_config_service() -> "TrigDroidConfigService":
-    from .trigdroid_config_service import TrigDroidConfigService
-
-    return TrigDroidConfigService()
-
-
 def _create_device_settings_service() -> "DeviceSettingsService":
     from .device_settings_service import DeviceSettingsService
 
@@ -319,11 +313,6 @@ def get_session_state_service() -> "SessionStateService":
     return _get_or_create(_create_session_state_service)
 
 
-def get_trigdroid_config_service() -> "TrigDroidConfigService":
-    """Get or create the TrigDroidConfigService singleton."""
-    return _get_or_create(_create_trigdroid_config_service)
-
-
 def get_device_settings_service() -> "DeviceSettingsService":
     """Get or create the DeviceSettingsService singleton."""
     return _get_or_create(_create_device_settings_service)
@@ -380,7 +369,6 @@ from .setup_service import SetupResult as SetupServiceResult
 from .spotlight_service import SpotlightApp, SpotlightService
 from .task_service import BackgroundTask, TaskService
 from .tool_usage_service import ToolUsage, ToolUsageService
-from .trigdroid_config_service import TrigDroidConfigService
 from .ui_service import OutputLine, UIService
 from .ui_service import (
     ToolUsage as UIToolUsage,  # Distinct from tool_usage_service.ToolUsage
@@ -441,7 +429,6 @@ __all__ = [
     "TimelineEntry",
     "ToolUsage",
     "ToolUsageService",
-    "TrigDroidConfigService",
     "UIService",
     "UIToolUsage",
     "get_action_window_service",
@@ -465,7 +452,6 @@ __all__ = [
     # Service getters
     "get_task_service",
     "get_tool_usage_service",
-    "get_trigdroid_config_service",
     "get_ui_service",
     "reset_services",
 ]

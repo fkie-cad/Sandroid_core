@@ -40,8 +40,8 @@ class ObjectionModal(FridaModal[ObjectionConfig | None]):
 
     Objection creates its own Frida session, so it cannot use JobManager or
     the BypassService script. Detection bypasses come from the App lens's
-    ``b`` chord (BypassService) only; this modal no longer loads TrigDroid's
-    bypass script.
+    ``b`` chord (BypassService) only; this modal loads no bypass script of
+    its own.
 
     Returns:
         ObjectionConfig with selected options, or None if cancelled.

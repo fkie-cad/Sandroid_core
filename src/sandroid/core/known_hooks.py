@@ -163,36 +163,6 @@ OBJECTION_HOOKS = ToolHookInfo(
 )
 
 # ============================================================================
-# TRIGDROID - Malware Trigger Framework
-# ============================================================================
-TRIGDROID_HOOKS = ToolHookInfo(
-    name="trigdroid",
-    display_name="TrigDroid",
-    session_type=SessionType.OWN_SESSION,  # Has its own TrigDroidAPI
-    categories=[
-        HookCategory.SENSORS,
-        HookCategory.BUILD_PROPERTIES,
-    ],
-    native_hooks=[],
-    java_hooks=[
-        # Sensor hooks
-        "android.hardware.Sensor.getPower",
-        "android.hardware.Sensor.getMaximumRange",
-        "android.hardware.Sensor.getResolution",
-        # Build property hooks
-        "android.os.Build.MODEL",
-        "android.os.Build.MANUFACTURER",
-        "android.os.Build.BRAND",
-        "android.os.Build.DEVICE",
-        "android.os.Build.FINGERPRINT",
-    ],
-    description="Automated malware trigger execution and analysis",
-    dynamic_hooks=True,
-    notes="TrigDroid has its own API and session management. Sandroid passes "
-    "it no bypass config: detection bypasses come only from BypassService.",
-)
-
-# ============================================================================
 # SSL PINNING BYPASS
 # ============================================================================
 SSL_UNPIN_TOOL = ToolHookInfo(
@@ -556,7 +526,6 @@ def get_malwaremonitor_hooks_for_config(
 KNOWN_TOOLS: dict[str, ToolHookInfo] = {
     "fritap": FRITAP_HOOKS,
     "objection": OBJECTION_HOOKS,
-    "trigdroid": TRIGDROID_HOOKS,
     "ssl_unpin": SSL_UNPIN_TOOL,
     "frida_detection_bypass": FRIDA_DETECTION_BYPASS_TOOL,
     "root_detection_bypass": ROOT_DETECTION_BYPASS_TOOL,

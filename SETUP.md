@@ -392,7 +392,7 @@ sandroid
 sandroid --avd YourAVD -f malware-analysis.json \
   --network \
   --screenshot 3 \
-  --trigdroid com.malware.example \
+  --package com.malware.example \
   --hash \
   --apk \
   --report

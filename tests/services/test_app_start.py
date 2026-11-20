@@ -163,8 +163,8 @@ def test_needs_confirm_names_the_tools_a_restart_stops():
     assert "(pid 77)" in d.reason
 
 
-def test_trigdroid_on_a_running_app_needs_confirmation():
-    d = decide_start(_inputs(fresh=True, tool="TrigDroid"))
+def test_fresh_tool_on_a_running_app_needs_confirmation():
+    d = decide_start(_inputs(fresh=True, tool="Objection"))
     assert d.action == StartAction.NEEDS_CONFIRM
 
 
@@ -818,29 +818,6 @@ def test_fridump_never_starts_or_restarts(env, monkeypatch):
     assert (session.pid, mode, info["owns_spawn"]) == (77, "attach", False)
 
 
-def test_trigdroid_attaches_to_a_running_app_and_never_restarts(env, bus, monkeypatch):
-    """TrigDroid spawns outside the JobManager: no RESPAWN, ever."""
-    from sandroid.features.trigdroid import Trigdroid
-    from sandroid.services import get_trigdroid_config_service
-
-    cfg = get_trigdroid_config_service()
-    monkeypatch.setattr(cfg, "fresh", False)
-    env.live = (Liveness.RUNNING, 77)
-
-    # spawn_mode=True (the default) no longer restarts a running app.
-    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is False
-
-    monkeypatch.setattr(cfg, "fresh", True)  # needs a fresh process: refuse
-    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is None
-    bus.active = False  # headless: refuses too, never kills
-    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is None
-    assert bus.asked == []
-
-    env.live = (Liveness.NOT_RUNNING, None)
-    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is True
-    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, False)) is None
-
-
 def test_chrome_ct_bypass_keeps_a_running_spotlight_chrome(env):
     from sandroid.core.proxy_manager import CAManager
 
@@ -1361,17 +1338,6 @@ def test_dexray_resume_and_abort_end_its_marker(monkeypatch):
     assert app_start._SETUP is None
 
 
-def test_trigdroid_fresh_joins_a_held_spawn(env, monkeypatch):
-    from sandroid.features.trigdroid import Trigdroid
-    from sandroid.services import get_trigdroid_config_service
-
-    monkeypatch.setattr(get_trigdroid_config_service(), "fresh", True)
-    env.jm = FakeJM(session_pid=77, package_name=PKG, paused=True)
-    env.live = (Liveness.NOT_RUNNING, None)
-
-    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is False
-
-
 def test_abort_cleans_up_a_nameless_spawn_whose_session_is_gone(env, monkeypatch):
     """A held spawn has no pidof name; with its session gone too (e.g. an
     anti-Frida self-kill) it is still the tool's, so the header is cleared.
@@ -1771,27 +1737,30 @@ def test_the_decision_carries_the_callers_consent():
     assert decide_start(_inputs(fresh=True, consent=True)).consent is True
 
 
-def test_trigdroid_runs_hooks_before_its_own_spawn(env, monkeypatch):
-    from sandroid.features.trigdroid import Trigdroid
-    from sandroid.services import get_trigdroid_config_service
-
-    monkeypatch.setattr(get_trigdroid_config_service(), "fresh", False)
+def test_prepare_launch_runs_hooks_before_an_outside_spawn(env, monkeypatch):
+    """The real prepare_launch (once reached via TrigDroid's spawn): hooks run
+    before a launch outside the Frida spawn path, a failing hook aborts it,
+    and a running app runs no plan.
+    """
     env.live = (Liveness.NOT_RUNNING, None)
     log: list = []
     app_start.register_pre_spawn_hook(_hook(log))
 
-    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is True
+    assert _in_worker(lambda: app_start.prepare_launch(PKG, "Objection")) is True
     assert log == [("hook", PKG), "apply"]
 
     app_start._PRE_SPAWN_HOOKS.clear()
     app_start.register_pre_spawn_hook(_hook(log, fail=RuntimeError("boom")))
-    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is None
+    with pytest.raises(AppStartError):
+        _in_worker(lambda: app_start.prepare_launch(PKG, "Objection"))
 
-    # Attaching to a running app runs nothing.
+    # Attaching to a running app applies nothing.
     app_start._PRE_SPAWN_HOOKS.clear()
-    app_start.register_pre_spawn_hook(lambda pkg: pytest.fail("hook ran"))
+    running: list = []
+    app_start.register_pre_spawn_hook(_hook(running))
     env.live = (Liveness.RUNNING, 77)
-    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is False
+    assert _in_worker(lambda: app_start.prepare_launch(PKG, "Objection")) is False
+    assert "apply" not in running
 
 
 def test_ai_launch_app_runs_hooks_on_a_first_launch_only(env, bus, monkeypatch):
@@ -2247,7 +2216,7 @@ def test_prepare_launch_without_plans_needs_no_lock_or_adb(env, monkeypatch):
     t.start()
     held.wait(5)
     try:
-        assert app_start.prepare_launch(PKG, "TrigDroid") is True
+        assert app_start.prepare_launch(PKG, "Objection") is True
     finally:
         release.set()
         t.join(5)
@@ -2449,18 +2418,6 @@ def test_a_recovery_timeout_still_stops_the_launched_apps_tools(env, monkeypatch
     with pytest.raises(AppStartError, match="did not come back"):
         app_start._apply_pre_spawn(plans, other)
     assert env.stopped == ["dexray"]
-
-
-def test_trigdroid_without_plans_still_attaches_to_a_running_app(env, monkeypatch):
-    from sandroid.features.trigdroid import Trigdroid
-    from sandroid.services import get_trigdroid_config_service
-
-    monkeypatch.setattr(get_trigdroid_config_service(), "fresh", False)
-    app_start.register_pre_spawn_hook(lambda pkg: None)  # identity off
-    env.live = (Liveness.RUNNING, 77)
-    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is False
-    env.live = (Liveness.NOT_RUNNING, None)
-    assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is True
 
 
 def test_ai_start_tools_leave_timeouts_to_the_executor(env, monkeypatch):

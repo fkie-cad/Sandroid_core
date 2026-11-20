@@ -1,8 +1,9 @@
 """BypassService is the only source of detection bypasses.
 
-Covers the consolidation: TrigDroid's bypass wrapper is gone (no module,
-import or key left), emulator detection is a BypassService category, and
-Dexray Intercept's own bypass group never runs alongside BypassService.
+Covers the consolidation: TrigDroid is gone entirely (bypass wrapper, trigger
+runner, config service; no module, import or key left), emulator detection is
+a BypassService category, and Dexray Intercept's own bypass group never runs
+alongside BypassService.
 """
 
 from __future__ import annotations
@@ -15,18 +16,22 @@ import pytest
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "sandroid"
 
-# -- TrigDroid bypass wrapper removed ------------------------------------------
+# -- TrigDroid removed -----------------------------------------------------------
 
 _REMOVED_MODULES = (
     "sandroid.analysis.trigdroid_bypass",
     "sandroid.tui.controllers.trigdroid_controller",
     "sandroid.tui.modals.trigdroid_modal",
+    "sandroid.features.trigdroid",
+    "sandroid.services.trigdroid_config_service",
 )
 
 _REMOVED_NAMES = re.compile(
     r"trigdroid_bypass|TrigDroidBypass|trigdroid_controller|TrigDroidController"
     r"|trigdroid_modal|TrigDroidModal|_find_bypass_script|action_trigdroid"
     r"|trigdroid_bypass_config"
+    r"|features\.trigdroid|trigdroid_config_service|TriggerExecutor"
+    r"|import trigdroid|from trigdroid"
 )
 
 
@@ -44,16 +49,6 @@ def test_no_source_file_references_the_removed_wrapper() -> None:
         if _REMOVED_NAMES.search(line)
     ]
     assert not offenders, offenders
-
-
-def test_trigger_execution_survives() -> None:
-    """TrigDroid's real purpose (trigger runs) stays importable."""
-    from sandroid.features.trigdroid import Trigdroid
-    from sandroid.services import get_trigdroid_config_service
-
-    assert callable(Trigdroid.perform)
-    state = get_trigdroid_config_service().get_state_dict()
-    assert state == {"spawn_mode": True, "auto_resume": True}
 
 
 # -- emulator category -----------------------------------------------------------

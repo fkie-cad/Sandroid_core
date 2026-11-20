@@ -6,7 +6,7 @@ Sandroid Documentation
    :align: center
    :width: 200px
 
-Sandroid is a comprehensive Android forensic analysis framework designed for extracting artifacts from Android Virtual Devices (AVD). It provides both static and dynamic analysis capabilities for Android applications, including automated malware trigger execution, file system monitoring, network traffic capture, and comprehensive forensic reporting.
+Sandroid is a comprehensive Android forensic analysis framework designed for extracting artifacts from Android Virtual Devices (AVD). It provides both static and dynamic analysis capabilities for Android applications, including file system monitoring, network traffic capture, and comprehensive forensic reporting.
 
 Features
 --------
@@ -28,7 +28,6 @@ Features
    - SSL/TLS traffic interception (friTap, mitmproxy with device/app proxies and CA injection)
    - Frida bypass suite for SSL pinning / root / Frida / debug / integrity checks (experimental)
    - Memory dumping capabilities
-   - Automated trigger execution (TrigDroid)
 
 🤖 **AI Chat (experimental)**
    - Chat assistant driving Sandroid tools via any OpenAI-compatible endpoint

@@ -75,8 +75,6 @@ def build_cli_overrides(
     hash_files: bool,
     apk: bool,
     degrade_network: bool,
-    trigdroid: str | None,
-    trigdroid_ccf: str | None,
     report: bool,
     serial: str | None = None,
 ) -> dict:
@@ -96,8 +94,6 @@ def build_cli_overrides(
         hash_files: Enable file hashing.
         apk: List APKs from emulator.
         degrade_network: Simulate degraded network.
-        trigdroid: TrigDroid package name.
-        trigdroid_ccf: TrigDroid CCF mode.
         report: Also render the PDF report (``report.json``/``.md`` are
             always written).
         serial: ADB serial of the device to use (``--serial``).
@@ -138,15 +134,6 @@ def build_cli_overrides(
         analysis_overrides["degrade_network"] = True
     if analysis_overrides:
         cli_overrides["analysis"] = analysis_overrides
-
-    # TrigDroid settings
-    if trigdroid or trigdroid_ccf:
-        trigdroid_overrides: dict = {"enabled": True}
-        if trigdroid:
-            trigdroid_overrides["package_name"] = trigdroid
-        if trigdroid_ccf:
-            trigdroid_overrides["config_mode"] = trigdroid_ccf
-        cli_overrides["trigdroid"] = trigdroid_overrides
 
     if report:
         cli_overrides["report"] = {"generate_pdf": True}

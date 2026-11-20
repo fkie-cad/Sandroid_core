@@ -377,11 +377,11 @@ def test_headless_summary_exits_nonzero_on_run_errors():
 
 
 # ---------------------------------------------------------------------------
-# A3 + A5 -- CLI --trigdroid: session folder, exit 3 on run errors
+# A3 + A5 -- CLI --package: session folder, exit 3 on run errors
 # ---------------------------------------------------------------------------
 
 
-def test_cli_trigdroid_writes_into_session_folder_and_exits_3(monkeypatch, tmp_path):
+def test_cli_package_run_writes_into_session_folder_and_exits_3(monkeypatch, tmp_path):
     from sandroid.analysis.engine import AnalysisEngine
     from sandroid.cli_modes import analysis as cli_analysis
     from sandroid.config import SandroidConfig
@@ -400,7 +400,6 @@ def test_cli_trigdroid_writes_into_session_folder_and_exits_3(monkeypatch, tmp_p
     monkeypatch.setenv("SESSION_PATH", f"{session}/")
     config = SandroidConfig(
         paths={"results_path": tmp_path / "results"},
-        trigdroid={"package_name": "com.example.app"},
         report={"generate_pdf": False},
     )
     toolbox = MagicMock()
@@ -408,7 +407,12 @@ def test_cli_trigdroid_writes_into_session_folder_and_exits_3(monkeypatch, tmp_p
 
     with pytest.raises(SystemExit) as info:
         cli_analysis.run_analysis(
-            config, MagicMock(), toolbox, MagicMock(), MagicMock()
+            config,
+            MagicMock(),
+            toolbox,
+            MagicMock(),
+            MagicMock(),
+            package="com.example.app",
         )
 
     assert info.value.code == 3

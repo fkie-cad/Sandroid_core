@@ -230,12 +230,12 @@ async def _run_single_analysis(
     from sandroid.api import AnalysisMode, SandroidHeadlessAPI
 
     # Forensic mode observes the whole device during a capture window and
-    # needs no target package; malware (TrigDroid) and security (APK/package
-    # static analysis) do.
+    # needs no target package; malware (target-app capture) and security
+    # (APK/package static analysis) do.
     if not package and analysis_mode != AnalysisMode.FORENSIC:
         console.print(
             f"[error]--headless --mode {analysis_mode.value} requires "
-            "--trigdroid <package> (or --batch <config>)[/error]"
+            "--package <package> (or --batch <config>)[/error]"
         )
         sys.exit(1)
 

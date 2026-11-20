@@ -3,7 +3,7 @@
 The spotlight is a plain app *selection* (package, plus PID/activity when
 known). It has no spawn/attach mode. Every caller that needs a Frida session
 on the selected app (friTap ``h``, Dexray ``m``, the bypass toggles, fridump,
-TrigDroid, the AI) asks :func:`resolve_start` / :func:`negotiate_start`, and
+the AI) asks :func:`resolve_start` / :func:`negotiate_start`, and
 the lifecycle keys (Space, ⇧P, ⇧R, ⇧A) and the AI go through
 :func:`start_app` / :func:`restart_app` / :func:`resume_app` /
 :func:`attach_app`.
@@ -41,7 +41,7 @@ Pre-spawn hooks (:func:`register_pre_spawn_hook`, e.g. the identity profile)
 run before every start of an app by Sandroid, inside the lifecycle lock:
 Space/⇧P (:func:`start_app`), ⇧R and the AI restart (:func:`restart_app`),
 a tool's SPAWN/RESPAWN (:func:`open_session`), and via
-:func:`prepare_launch` TrigDroid's spawn and the AI ``launch_app``. A hook's
+:func:`prepare_launch` an Objection spawn and the AI ``launch_app``. A hook's
 plan that restarts the Android framework (every running app stops) needs the
 user's OK (a dialog; headless: the caller's ``consent``). A plan that fails
 aborts the start. They never run on JOIN, ATTACH or resume (the process
@@ -1338,8 +1338,8 @@ def prepare_launch(
     """Run the pre-spawn hooks before a start outside the Frida spawn path.
 
     For launches that do not go through :func:`open_session` /
-    :func:`start_app` (TrigDroid's own spawn, the AI ``launch_app``, an
-    Objection spawn); the caller's launch follows. The hooks are asked
+    :func:`start_app` (the AI ``launch_app``, an Objection spawn); the
+    caller's launch follows. The hooks are asked
     first: with nothing to do it returns at once (no lifecycle lock, no
     adb). Otherwise it runs under the lifecycle lock and only for an app
     that is not running.

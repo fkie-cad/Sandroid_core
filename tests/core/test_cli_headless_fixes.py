@@ -683,8 +683,6 @@ def test_cli_serial_option_and_override():
             "loglevel",
             "number",
             "whitelist",
-            "trigdroid",
-            "trigdroid_ccf",
         ]
     )
     flags = dict.fromkeys(
@@ -1006,6 +1004,25 @@ def test_headless_api_keeps_run_documentation(monkeypatch):
     assert api.last_run_documentation == "DOC"
 
 
+def test_headless_api_forwards_the_forensic_package(monkeypatch):
+    from sandroid.api import headless
+    from sandroid.api.interfaces import AnalysisMode
+
+    seen = []
+
+    async def fake_forensic(**kwargs):
+        seen.append(kwargs.get("package"))
+        return {}
+
+    monkeypatch.setattr(headless, "run_forensic_analysis", fake_forensic)
+    _device_ok(monkeypatch)
+    api = headless.SandroidHeadlessAPI(config=SimpleNamespace())
+    api._initialized = True
+    asyncio.run(api.run_analysis(AnalysisMode.FORENSIC, package="com.x.app"))
+    asyncio.run(api.run_analysis(AnalysisMode.FORENSIC))
+    assert seen == ["com.x.app", None]
+
+
 def test_batch_reports_documentation_errors_and_exits_nonzero(monkeypatch, tmp_path):
     import json as _json
 
@@ -1085,3 +1102,95 @@ def test_subscribe_events_uses_real_eventbus_api():
         unsubscribe()  # idempotent
     finally:
         EventBus.reset()
+
+
+# ---------------------------------------------------------------------------
+# --package/-p replaces --trigdroid as the target-package flag
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def cli_dispatch(tmp_path, monkeypatch):
+    """Run ``sandroid`` up to its mode dispatch; record the mode calls."""
+    from click.testing import CliRunner
+
+    import sandroid.cli as cli_mod
+    from sandroid import cli_modes
+    from sandroid.config import set_config
+    from sandroid.core.toolbox import Toolbox
+
+    config_file = tmp_path / "sandroid.toml"
+    config_file.write_text(f'[paths]\nresults_path = "{tmp_path / "res"}"\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    for var in ("RESULTS_PATH", "RAW_RESULTS_PATH"):
+        monkeypatch.setenv(var, "")  # main() sets them; restored afterwards
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_mod, "setup_logging", lambda *a, **k: SimpleNamespace())
+    monkeypatch.setattr(cli_mod.os, "system", lambda *_a: 0)
+    monkeypatch.setattr(cli_mod.SandroidConsole, "print_logo", lambda *a: None)
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        cli_modes, "run_headless_analysis", lambda **kw: seen.update(headless=kw)
+    )
+    monkeypatch.setattr(
+        cli_modes,
+        "run_analysis",
+        lambda *a, **kw: seen.update(analysis=kw),
+    )
+    saved_args = Toolbox.args
+
+    def invoke(*args: str):
+        seen.clear()
+        result = CliRunner().invoke(cli_mod.main, ["--config", str(config_file), *args])
+        return result, dict(seen)
+
+    yield invoke
+    Toolbox.args = saved_args
+    set_config(None)
+
+
+@pytest.mark.parametrize("flag", ["--package", "-p"])
+@pytest.mark.parametrize("mode", ["malware", "security"])
+def test_package_flag_sets_the_headless_target(cli_dispatch, flag, mode):
+    result, seen = cli_dispatch("--headless", "--mode", mode, flag, "com.x.app")
+
+    assert result.exit_code == 0, result.output
+    assert seen["headless"]["package"] == "com.x.app"
+    assert seen["headless"]["mode"] == mode
+
+
+def test_forensic_headless_needs_no_package(cli_dispatch):
+    result, seen = cli_dispatch("--headless", "--mode", "forensic")
+
+    assert result.exit_code == 0, result.output
+    assert seen["headless"]["package"] is None
+
+
+def test_package_flag_alone_runs_the_cli_analysis(cli_dispatch):
+    result, seen = cli_dispatch("-p", "com.x.app")
+
+    assert result.exit_code == 0, result.output
+    assert "headless" not in seen
+    assert seen["analysis"] == {"package": "com.x.app"}
+
+
+def test_headless_requires_package_message(capsys):
+    from sandroid.cli_modes import headless as mode
+
+    with pytest.raises(SystemExit):
+        mode.run_headless_analysis(
+            sandroid_config=object(),
+            active_logger=None,
+            package=None,
+            batch_config=None,
+            mode="security",
+            runs=2,
+            network=False,
+            hash_files=False,
+            show_deleted=False,
+            output_file=None,
+        )
+    out = capsys.readouterr().out
+    assert "requires --package" in out
+    assert "trigdroid" not in out.lower()

@@ -333,22 +333,6 @@ class AnalysisConfig(BaseModel):
         return data
 
 
-class TrigDroidConfig(BaseModel):
-    """TrigDroid malware trigger configuration."""
-
-    enabled: bool = Field(
-        default=False, description="Enable TrigDroid malware triggers"
-    )
-    package_name: str | None = Field(
-        default=None, description="Target package name for triggers"
-    )
-    config_mode: str | None = Field(
-        default=None,
-        pattern=r"^[ID]$",
-        description="Configuration mode: I (interactive) or D (default)",
-    )
-
-
 class AIBudgetsConfig(BaseModel):
     """Per-turn budgets of the AI runtime (``ai.budgets``).
 
@@ -1829,7 +1813,6 @@ class SandroidConfig(BaseModel):
     network: NetworkConfig = Field(default_factory=NetworkConfig)
     paths: PathConfig = Field(default_factory=PathConfig)
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
-    trigdroid: TrigDroidConfig = Field(default_factory=TrigDroidConfig)
     ai: AIConfig = Field(default_factory=AIConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)

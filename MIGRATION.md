@@ -21,6 +21,9 @@ Device and AVD management moved from `sandroid-config` into the TUI.
 | `sandroid-config init` AVD selection/start prompts | `init` only detects the SDK/adb/emulator paths; pick the AVD in the Devices screen (it opens at startup when no device runs). `--skip-avd-setup` still works as an alias of `--skip-android-setup`. |
 | `emulator.selected_avd`, `emulator.avd_auto_start` | Removed; old configs still load (the keys are ignored). For a scripted start use `sandroid --avd NAME`; the last-used AVD is preselected in the Devices screen. |
 | `set_avd_location.py` (repository-root GPS script) | Device settings: `E` in the TUI, `sandroid --device-settings FILE` or `--preset CODE` |
+| `sandroid --trigdroid PKG` (also the package flag of `--headless`/`--batch` modes) | `sandroid --package PKG` / `-p PKG`. `--trigdroid` now exits with a usage error; `--trigdroid-ccf` is gone. Malware mode performs no trigger actions (it never did: TrigDroid failed before its first trigger). |
+| `[trigdroid]` config section (`enabled`, `package_name`, `config_mode`) | Removed; an old section still loads and is ignored with one warning. Pass the target with `--package`/`-p`. |
+| `trigdroid[full]` dependency, `sandroid.features.trigdroid`, `get_trigdroid_config_service()` | Removed; nothing replaces them yet (device playbooks are planned). Device events: device settings (`E`, `--device-settings FILE`, `--preset CODE`). |
 | `sandroid.services.EnvironmentService` / `get_environment_service()` | `SetupService` / `get_setup_service()` (`sandroid.services.SetupResult` now refers to `SetupService`'s result) |
 
 Launch options chosen in the Devices screen (headless, boot mode, snapshot)

@@ -164,7 +164,6 @@ class BackgroundWorkTracker:
             job_to_task = {
                 "fritap": "fritap",
                 "dexray": "dexray-intercept",
-                "trigdroid": "trigdroid",
             }
 
             for job_info in running_jobs:
@@ -320,7 +319,6 @@ class BackgroundWorkTracker:
             job_to_task = {
                 "fritap": "fritap",
                 "dexray": "dexray-intercept",
-                "trigdroid": "trigdroid",
             }
 
             for job_info in running_jobs:

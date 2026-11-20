@@ -6,11 +6,16 @@ Supports country presets for quick environment setup.
 """
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+#: Seconds a root-check answer stays valid per device serial (a device can be
+#: rebooted or swapped under the same serial).
+ROOT_CHECK_TTL_S = 60.0
 
 
 @dataclass
@@ -313,27 +318,22 @@ class DeviceSettingsService:
     sensor values, network toggles, and battery level. Supports
     country presets for quick environment configuration.
 
-    Uses TrigDroid TriggerExecutor when available, falls back to
-    direct ADB commands.
+    Every operation resolves the device serial once and passes it on each
+    adb call, so a concurrent change of the global adb target can never
+    send half of an operation to another device.
     """
 
-    def __init__(self) -> None:
-        """Initialize the DeviceSettingsService."""
-        self._trigger_executor = None
-        self._root_available: bool | None = None
+    def __init__(self, serial: str | None = None) -> None:
+        """Initialize the DeviceSettingsService.
+
+        Args:
+            serial: Device serial to configure. ``None`` (the default) means
+                the current adb target, resolved anew for every operation.
+        """
+        self._serial = serial
+        #: serial -> (answer, monotonic time it was taken)
+        self._root_available: dict[str | None, tuple[bool, float]] = {}
         self._geopy_available: bool | None = None
-        self._try_init_trigger_executor()
-
-    def _try_init_trigger_executor(self) -> None:
-        """Try to initialize TrigDroid TriggerExecutor if available."""
-        try:
-            from trigdroid.api.trigger_executor import TriggerExecutor
-
-            self._trigger_executor = TriggerExecutor()
-            logger.debug("TrigDroid TriggerExecutor available")
-        except ImportError:
-            logger.debug("TrigDroid not installed, using direct ADB fallback")
-            self._trigger_executor = None
 
     def _get_adb(self) -> type:
         """Get ADB class (lazy import)."""
@@ -341,34 +341,57 @@ class DeviceSettingsService:
 
         return Adb
 
-    def _try_trigdroid_then_adb(
-        self,
-        trigdroid_call: Callable[[], Any] | None,
-        adb_fallback: Callable[[], SettingsResult],
-        success_msg: str,
-        error_label: str,
-    ) -> SettingsResult:
-        """Try TrigDroid first, then fall back to ADB.
-
-        Args:
-            trigdroid_call: Callable that invokes TrigDroid (None to skip).
-            adb_fallback: Callable that performs the ADB fallback.
-            success_msg: Message to return on TrigDroid success.
-            error_label: Label for error logging.
+    def _resolve_serial(self) -> str | None:
+        """Return the serial this operation must target.
 
         Returns:
-            SettingsResult from TrigDroid or ADB fallback.
+            The fixed serial, else the current adb target (thread pin or
+            global), else the explicitly requested serial; ``None`` only
+            when no device was selected at all.
         """
-        if self._trigger_executor and trigdroid_call is not None:
-            try:
-                result = trigdroid_call()
-                if result.success:
-                    return SettingsResult(success=True, message=success_msg)
-            except Exception as e:
-                logger.debug(f"TrigDroid {error_label} failed, using ADB fallback: {e}")
+        if self._serial:
+            return self._serial
+        Adb = self._get_adb()
+        return Adb.get_target_device() or Adb.selected_serial()
 
+    def _console(self, command: str, serial: str | None) -> tuple[bool, str]:
+        """Send one emulator console command and check its reply.
+
+        ``adb emu`` exits 0 even when the console answers ``KO``, so only a
+        reply containing an ``OK`` line and no ``KO`` line counts as success.
+
+        Args:
+            command: Console command (e.g. ``"power capacity 50"``).
+            serial: Device serial to target.
+
+        Returns:
+            ``(ok, detail)``; *detail* is the console/adb error text on failure.
+        """
+        Adb = self._get_adb()
+        stdout, stderr = Adb.send_telnet_command(command, serial=serial)
+        lines = [line.strip() for line in (stdout or "").splitlines()]
+        failed = any(line.startswith("KO") for line in lines)
+        ok = not failed and any(line.startswith("OK") for line in lines)
+        if ok:
+            return True, ""
+        detail = (stderr or "").strip() or (stdout or "").strip()
+        return False, detail[:200] or "no OK from the emulator console"
+
+    @staticmethod
+    def _guarded(
+        operation: Callable[[], SettingsResult], error_label: str
+    ) -> SettingsResult:
+        """Run *operation*, turning an exception into a failed result.
+
+        Args:
+            operation: Callable performing the adb work.
+            error_label: Label for the error message and log.
+
+        Returns:
+            The operation's result, or a failed SettingsResult on exception.
+        """
         try:
-            return adb_fallback()
+            return operation()
         except Exception as e:
             logger.error(f"Failed {error_label}: {e}")
             return SettingsResult(
@@ -387,13 +410,19 @@ class DeviceSettingsService:
         Returns:
             SettingsResult with success/failure status
         """
-        Adb = self._get_adb()
-        return SettingsResult.from_operation(
-            operation=lambda: Adb.set_geo_fix(lon, lat),
-            success_msg=f"GPS set to {lat}, {lon}",
-            error_label="set GPS location",
-            log_msg=f"GPS location set to {lat}, {lon}",
-        )
+        serial = self._resolve_serial()
+
+        def run() -> SettingsResult:
+            # The console expects longitude first.
+            ok, detail = self._console(f"geo fix {lon} {lat}", serial)
+            if not ok:
+                return SettingsResult(
+                    success=False, message="Failed to set GPS location", error=detail
+                )
+            logger.info(f"GPS location set to {lat}, {lon}")
+            return SettingsResult(success=True, message=f"GPS set to {lat}, {lon}")
+
+        return self._guarded(run, "to set GPS location")
 
     def geocode_location(self, country: str, city: str) -> tuple[float, float] | None:
         """Geocode a city/country to coordinates.
@@ -441,10 +470,14 @@ class DeviceSettingsService:
             SettingsResult with success/failure status
         """
         Adb = self._get_adb()
+        serial = self._resolve_serial()
+
+        def run() -> tuple[str, str]:
+            with Adb.targeting(serial):
+                return Adb.send_root_shell(f'setprop persist.sys.timezone "{tz}"')
+
         return SettingsResult.from_operation(
-            operation=lambda: Adb.send_root_shell(
-                f'setprop persist.sys.timezone "{tz}"'
-            ),
+            operation=run,
             success_msg=f"Timezone set to {tz}",
             error_label="set timezone",
             log_msg=f"Timezone set to {tz}",
@@ -462,6 +495,7 @@ class DeviceSettingsService:
         """
         try:
             Adb = self._get_adb()
+            serial = self._resolve_serial()
             commands = [
                 f"setprop persist.sys.language {language}",
                 f"setprop persist.sys.country {country}",
@@ -469,7 +503,8 @@ class DeviceSettingsService:
                 "start",
             ]
             for cmd in commands:
-                _stdout, stderr = Adb.send_root_shell(cmd)
+                with Adb.targeting(serial):
+                    _stdout, stderr = Adb.send_root_shell(cmd)
                 if stderr and "error" in stderr.lower():
                     return SettingsResult(
                         success=False,
@@ -504,8 +539,14 @@ class DeviceSettingsService:
             "gsm.operator.numeric": mnc,
         }
         cmd = " && ".join(f"setprop {key} {val}" for key, val in props.items())
+        serial = self._resolve_serial()
+
+        def run() -> tuple[str, str]:
+            with Adb.targeting(serial):
+                return Adb.send_root_shell(f"sh -c '{cmd}'")
+
         return SettingsResult.from_operation(
-            operation=lambda: Adb.send_root_shell(f"sh -c '{cmd}'"),
+            operation=run,
             success_msg=f"Telephony set to {iso_country}/{mnc}",
             error_label="set telephony properties",
             log_msg=f"Telephony set to {iso_country}/{mnc}",
@@ -531,10 +572,15 @@ class DeviceSettingsService:
             )
 
         results: list[SettingsResult] = []
-        results.append(self.set_gps_location(preset.latitude, preset.longitude))
-        results.append(self.set_timezone(preset.timezone))
-        results.append(self.set_locale(preset.language, preset.country))
-        results.append(self.set_telephony(preset.country_code, preset.telephony_mnc))
+        # Pin the whole preset to one device: every step resolves the serial
+        # through the thread pin, so a target switch mid-preset can't split it.
+        with self._get_adb().targeting(self._resolve_serial()):
+            results.append(self.set_gps_location(preset.latitude, preset.longitude))
+            results.append(self.set_timezone(preset.timezone))
+            results.append(self.set_locale(preset.language, preset.country))
+            results.append(
+                self.set_telephony(preset.country_code, preset.telephony_mnc)
+            )
 
         failed = [r for r in results if not r.success]
         if failed:
@@ -558,6 +604,18 @@ class DeviceSettingsService:
         Args:
             settings: Validated settings dictionary. Call
                 ``validate_settings_dict()`` before this method.
+
+        Returns:
+            List of SettingsResult for each applied operation.
+        """
+        with self._get_adb().targeting(self._resolve_serial()):
+            return self._apply_settings_dict(settings)
+
+    def _apply_settings_dict(self, settings: dict) -> list[SettingsResult]:
+        """Apply *settings*; the caller pins the device (see above).
+
+        Args:
+            settings: Validated settings dictionary.
 
         Returns:
             List of SettingsResult for each applied operation.
@@ -651,27 +709,18 @@ class DeviceSettingsService:
         else:
             values = str(level)
 
-        def trigdroid_call() -> Any:
-            return self._trigger_executor.set_sensor(sensor_type, level)
+        serial = self._resolve_serial()
 
-        def adb_fallback() -> SettingsResult:
-            Adb = self._get_adb()
-            _stdout, stderr = Adb.set_sensor_value(sensor_name, values)
-            if stderr and "error" in stderr.lower():
+        def run() -> SettingsResult:
+            ok, detail = self._console(f"sensor set {sensor_name} {values}", serial)
+            if not ok:
                 return SettingsResult(
-                    success=False,
-                    message=f"Failed to set {sensor_type}",
-                    error=stderr,
+                    success=False, message=f"Failed to set {sensor_type}", error=detail
                 )
             logger.info(f"Sensor {sensor_type} set to {level}")
             return SettingsResult(success=True, message=f"{sensor_type} set to {level}")
 
-        return self._try_trigdroid_then_adb(
-            trigdroid_call=trigdroid_call,
-            adb_fallback=adb_fallback,
-            success_msg=f"{sensor_type} set to {level}",
-            error_label=f"to set sensor {sensor_type}",
-        )
+        return self._guarded(run, f"to set sensor {sensor_type}")
 
     def reset_sensors(self) -> SettingsResult:
         """Reset all sensors to default values.
@@ -679,23 +728,26 @@ class DeviceSettingsService:
         Returns:
             SettingsResult with success/failure status
         """
+        serial = self._resolve_serial()
 
-        def trigdroid_call() -> Any:
-            return self._trigger_executor.reset_sensors()
-
-        def adb_fallback() -> SettingsResult:
-            Adb = self._get_adb()
+        def run() -> SettingsResult:
+            failed = []
             for sensor_name, default_val in SENSOR_DEFAULTS.items():
-                Adb.set_sensor_value(sensor_name, default_val)
+                ok, detail = self._console(
+                    f"sensor set {sensor_name} {default_val}", serial
+                )
+                if not ok:
+                    failed.append(f"{sensor_name}: {detail}")
+            if failed:
+                return SettingsResult(
+                    success=False,
+                    message="Failed to reset sensors",
+                    error="; ".join(failed),
+                )
             logger.info("All sensors reset to defaults")
             return SettingsResult(success=True, message="Sensors reset to defaults")
 
-        return self._try_trigdroid_then_adb(
-            trigdroid_call=trigdroid_call,
-            adb_fallback=adb_fallback,
-            success_msg="Sensors reset to defaults",
-            error_label="to reset sensors",
-        )
+        return self._guarded(run, "to reset sensors")
 
     # ── Network ─────────────────────────────────────────────────────
 
@@ -703,17 +755,13 @@ class DeviceSettingsService:
         self,
         service_name: str,
         svc_command: str,
-        trigdroid_method: str,
         enabled: bool,
     ) -> SettingsResult:
-        """Toggle a network service on/off.
-
-        Tries TrigDroid first, then falls back to ADB svc command.
+        """Toggle a network service on/off with ``svc``.
 
         Args:
             service_name: Human-readable name (e.g., "WiFi")
             svc_command: ADB svc command name (e.g., "wifi")
-            trigdroid_method: TriggerExecutor method name (e.g., "toggle_wifi")
             enabled: True to enable, False to disable
 
         Returns:
@@ -721,14 +769,13 @@ class DeviceSettingsService:
         """
         state = "enabled" if enabled else "disabled"
         action = "enable" if enabled else "disable"
+        serial = self._resolve_serial()
 
-        def trigdroid_call() -> Any:
-            method = getattr(self._trigger_executor, trigdroid_method)
-            return method(enabled)
-
-        def adb_fallback() -> SettingsResult:
+        def run() -> SettingsResult:
             Adb = self._get_adb()
-            _stdout, stderr = Adb.send_adb_command(f"shell svc {svc_command} {action}")
+            _stdout, stderr = Adb.send_adb_command(
+                f"shell svc {svc_command} {action}", serial=serial
+            )
             if stderr and "error" in stderr.lower():
                 return SettingsResult(
                     success=False,
@@ -738,12 +785,7 @@ class DeviceSettingsService:
             logger.info(f"{service_name} {state}")
             return SettingsResult(success=True, message=f"{service_name} {state}")
 
-        return self._try_trigdroid_then_adb(
-            trigdroid_call=trigdroid_call,
-            adb_fallback=adb_fallback,
-            success_msg=f"{service_name} {state}",
-            error_label=f"to toggle {service_name}",
-        )
+        return self._guarded(run, f"to toggle {service_name}")
 
     def toggle_wifi(self, enabled: bool) -> SettingsResult:
         """Toggle WiFi on/off.
@@ -754,7 +796,7 @@ class DeviceSettingsService:
         Returns:
             SettingsResult with success/failure status
         """
-        return self._toggle_service("WiFi", "wifi", "toggle_wifi", enabled)
+        return self._toggle_service("WiFi", "wifi", enabled)
 
     def toggle_mobile_data(self, enabled: bool) -> SettingsResult:
         """Toggle mobile data on/off.
@@ -765,9 +807,7 @@ class DeviceSettingsService:
         Returns:
             SettingsResult with success/failure status
         """
-        return self._toggle_service(
-            "Mobile data", "data", "toggle_mobile_data", enabled
-        )
+        return self._toggle_service("Mobile data", "data", enabled)
 
     def toggle_bluetooth(self, enabled: bool) -> SettingsResult:
         """Toggle Bluetooth on/off.
@@ -778,9 +818,7 @@ class DeviceSettingsService:
         Returns:
             SettingsResult with success/failure status
         """
-        return self._toggle_service(
-            "Bluetooth", "bluetooth", "toggle_bluetooth", enabled
-        )
+        return self._toggle_service("Bluetooth", "bluetooth", enabled)
 
     # ── Battery ─────────────────────────────────────────────────────
 
@@ -800,50 +838,50 @@ class DeviceSettingsService:
                 error=f"Invalid level: {level}",
             )
 
-        def trigdroid_call() -> Any:
-            return self._trigger_executor.set_battery_level(level)
+        serial = self._resolve_serial()
 
-        def adb_fallback() -> SettingsResult:
-            Adb = self._get_adb()
-            _stdout, stderr = Adb.send_telnet_command(f"power capacity {level}")
-            if stderr and "error" in stderr.lower():
+        def run() -> SettingsResult:
+            ok, detail = self._console(f"power capacity {level}", serial)
+            if not ok:
                 return SettingsResult(
-                    success=False,
-                    message="Failed to set battery level",
-                    error=stderr,
+                    success=False, message="Failed to set battery level", error=detail
                 )
             logger.info(f"Battery level set to {level}%")
             return SettingsResult(success=True, message=f"Battery set to {level}%")
 
-        return self._try_trigdroid_then_adb(
-            trigdroid_call=trigdroid_call,
-            adb_fallback=adb_fallback,
-            success_msg=f"Battery set to {level}%",
-            error_label="to set battery level",
-        )
+        return self._guarded(run, "to set battery level")
 
     # ── Capability checks ───────────────────────────────────────────
 
     def check_root_available(self) -> bool:
         """Check if root (su) is available on the device.
 
-        Returns cached result after first check.
+        A clear answer is cached per device serial for
+        :data:`ROOT_CHECK_TTL_S` seconds. A failed check (adb error, timeout,
+        exception) answers False and is never cached.
 
         Returns:
             True if root is available, False otherwise
         """
-        if self._root_available is not None:
-            return self._root_available
+        serial = self._resolve_serial()
+        cached = self._root_available.get(serial)
+        if cached is not None and time.monotonic() - cached[1] < ROOT_CHECK_TTL_S:
+            return cached[0]
 
         try:
             Adb = self._get_adb()
-            stdout, _stderr = Adb.send_adb_command("shell which su")
-            self._root_available = bool(stdout and stdout.strip() and "su" in stdout)
+            stdout, stderr = Adb.send_adb_command("shell which su", serial=serial)
         except Exception as e:
             logger.debug(f"Root check failed: {e}")
-            self._root_available = False
-
-        return self._root_available
+            return False
+        available = bool(stdout and stdout.strip() and "su" in stdout)
+        if not available and (stderr or "").strip():
+            # "which" prints nothing when su is absent; any stderr is adb
+            # failing (offline device, timeout): not an answer to keep.
+            logger.debug(f"Root check inconclusive: {stderr.strip()}")
+            return False
+        self._root_available[serial] = (available, time.monotonic())
+        return available
 
     def is_geopy_available(self) -> bool:
         """Check if geopy is installed for geocoding.

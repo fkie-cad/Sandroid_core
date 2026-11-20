@@ -467,7 +467,6 @@ class QuitController:
         "bypass": "the bypass hooks",
         "network_capture": "the network capture",
         "dexray-intercept": "Dexray Intercept",
-        "trigdroid": "TrigDroid",
     }
 
     @staticmethod

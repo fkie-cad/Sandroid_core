@@ -8,7 +8,9 @@
 - ``sandroid --config FILE`` works without an auto-discovered config.
 - ``sandroid-config init`` without ``-o`` refuses to clobber the user config.
 - ``sandroid-config set/get`` accept positional ``KEY [VALUE]``.
-- ``--trigdroid-ccf`` is rejected; ``--trigdroid -f DIR/FILE`` keeps DIR.
+- The removed ``--trigdroid`` fails with a pointer to ``--package``;
+  ``-f DIR/FILE`` keeps DIR; an old ``[trigdroid]`` section loads with one
+  warning.
 """
 
 from __future__ import annotations
@@ -382,20 +384,64 @@ def test_config_set_get_accept_positional_key_value(xdg):
     assert "Missing VALUE" in res.output
 
 
-# -- B9: --trigdroid-ccf is hidden and errors clearly --------------------------
+# -- B9: the removed --trigdroid is hidden and errors clearly -------------------
 
 
-def test_trigdroid_ccf_hidden_and_rejected(xdg):
+def test_removed_trigdroid_option_is_hidden_and_points_to_package(xdg):
     import sandroid.cli as cli_mod
 
     runner = CliRunner()
-    assert "--trigdroid-ccf" not in runner.invoke(cli_mod.main, ["--help"]).output
+    help_text = runner.invoke(cli_mod.main, ["--help"]).output
+    assert "--trigdroid" not in help_text
+    assert "--package" in help_text
+    assert "-p," in help_text
+
+    result = runner.invoke(cli_mod.main, ["--trigdroid", "com.example.app"])
+    assert result.exit_code == 2
+    assert "TrigDroid was removed (it never worked)." in result.output
+    assert "Use --package/-p PKG" in result.output
+    assert cli_mod.TRIGDROID_REMOVED_MESSAGE.endswith("will come as playbooks.")
+
+    # A bare --trigdroid (no value) gets the same pointer.
+    result = runner.invoke(cli_mod.main, ["--trigdroid"])
+    assert result.exit_code == 2
+    assert "TrigDroid was removed (it never worked)." in result.output
+
+    # --trigdroid-ccf is gone without a replacement.
     result = runner.invoke(cli_mod.main, ["--trigdroid-ccf", "D"])
     assert result.exit_code == 2
-    assert "not supported" in result.output
+    assert "No such option" in result.output
 
 
-# -- B10: --trigdroid -f DIR/FILE keeps the directory --------------------------
+# -- B9b: an old [trigdroid] section still loads, with one warning --------------
+
+
+def test_old_trigdroid_section_loads_and_warns_once(xdg, monkeypatch):
+    from sandroid.config import loader as loader_mod
+
+    monkeypatch.setattr(loader_mod, "_warned_removed_sections", set())
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        loader_mod.logger, "warning", lambda msg, *a: warnings.append(msg % a)
+    )
+    user_dir, work = xdg
+    user_dir.mkdir(parents=True)
+    (user_dir / "sandroid.toml").write_text(
+        '[trigdroid]\nenabled = true\npackage_name = "com.example.app"\n'
+        'config_mode = "I"\n\n[paths]\nresults_path = "res"\n'
+    )
+
+    config = ConfigLoader().load()
+    ConfigLoader().load()
+
+    assert not hasattr(config, "trigdroid")
+    assert "trigdroid" not in config.model_dump()
+    assert config.paths.results_path.name == "res"
+    assert len(warnings) == 1
+    assert "[trigdroid] ignored: TrigDroid was removed" in warnings[0]
+
+
+# -- B10: -f DIR/FILE keeps the directory ---------------------------------------
 
 
 def test_cli_results_copied_to_full_f_path(xdg, tmp_path):

@@ -1,7 +1,7 @@
 """Automated forensic analysis mode dispatcher for Sandroid.
 
 Handles the non-interactive, command-line driven analysis workflow
-(e.g., triggered by --trigdroid flags).
+(``sandroid --package PKG``).
 """
 
 import json
@@ -30,19 +30,22 @@ def run_analysis(
     Toolbox,
     Adb,
     ActionQ,
+    package: str | None = None,
 ) -> None:
     """Execute automated forensic analysis workflow.
 
     Performs a complete forensic analysis cycle including initialization,
     unified-engine execution, result generation, and the report
-    (``report.json``/``report.md``, optional PDF). This is the primary entry point for non-interactive,
-    command-line driven analysis (the ``--trigdroid`` path).
+    (``report.json``/``report.md``, optional PDF). This is the primary entry
+    point for non-interactive, command-line driven analysis (the ``--package``
+    path). It performs no scripted action: there are no trigger actions
+    until device playbooks land.
 
     The legacy ``ActionQ.assembleQ()``/``do_next()`` pump is gone; this
     reaches the same :class:`~sandroid.analysis.engine.AnalysisEngine` the TUI
     and headless paths use. The pre-analysis setup ``assembleQ`` performed
-    (TrigDroid CCF, network degradation, spotlight app, and the initial
-    ``tmp`` snapshot) is replicated here, gated on the same options as before,
+    (network degradation, spotlight app, and the initial ``tmp`` snapshot) is
+    replicated here, gated on the same options as before,
     because the engine's first step reverts to that snapshot.
 
     Args:
@@ -55,6 +58,8 @@ def run_analysis(
             unified engine no longer uses it). The report is written by
             :func:`sandroid.core.run_report.finalize_run`; the PDF only when
             ``config.report.generate_pdf`` is set.
+        package: Target app package (``--package``); the spotlight is
+            pointed at it so the engine protects it from noise filtering.
 
     Raises:
         SystemExit: If environment validation fails.
@@ -64,7 +69,6 @@ def run_analysis(
         from sandroid.analysis.engine import AnalysisEngine
         from sandroid.analysis.run_config import RunConfig
         from sandroid.core.initializer import initialize_core
-        from sandroid.features.trigdroid import Trigdroid
 
         initialize_core(config, require=True)
 
@@ -78,18 +82,10 @@ def run_analysis(
             sys.exit(1)
 
         # --- Pre-analysis setup (replicates legacy ActionQ.assembleQ) --------
-        # TrigDroid CCF runs (and exits) before anything else. run_ccf() reads
-        # Toolbox.args.trigdroid_ccf, which cli.py still populates.
-        if config.trigdroid.config_mode:
-            Trigdroid().run_ccf()
-
         # Point the spotlight at the target package.
-        if config.trigdroid.package_name:
-            get_spotlight_service().set_app(config.trigdroid.package_name)
-            logger.info(
-                "SpotlightService initialized with package: "
-                f"{config.trigdroid.package_name}"
-            )
+        if package:
+            get_spotlight_service().set_app(package)
+            logger.info(f"SpotlightService initialized with package: {package}")
 
         # The engine's first step reverts to the ``tmp`` snapshot, so it must
         # exist before the run starts.
@@ -104,7 +100,7 @@ def run_analysis(
             Adb.send_telnet_command("network speed full")
 
         # --- Run the unified analysis engine ---------------------------------
-        run_config = RunConfig.from_sandroid_config(config, action=Trigdroid())
+        run_config = RunConfig.from_sandroid_config(config)
         # Identity pin: CLI has no run bundle, so leave the env pointing at the
         # existing session dir (empty paths => the engine leaves RESULTS_PATH /
         # RAW_RESULTS_PATH untouched, keeping the raw pulls and the session
@@ -142,7 +138,7 @@ def run_analysis(
                 config=config,
                 started_at=started_at,
                 ended_at=ended_at,
-                mode="cli-trigdroid",
+                mode="cli-malware",
                 generate_pdf=config.report.generate_pdf,
                 run_settings=describe_run_settings(run_config),
             )

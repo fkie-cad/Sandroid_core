@@ -150,12 +150,6 @@ Configuration Structure
            "avoid_noise_filter": False
        },
 
-       "trigdroid": {
-           "enabled": False,
-           "timeout": 300,
-           "trigger_sets": ["network", "filesystem", "permissions"]
-       },
-
        "ai": {  # AI Chat (experimental), OpenAI-compatible endpoint
            "base_url": None,
            "api_key": None,  # prefer SANDROID_AI__API_KEY
@@ -430,8 +424,6 @@ Dynamic Configuration
 
        # Enhanced monitoring (Tracking screenshots after taps as well)
        config.tracking.shot_after_tap = True
-       config.trigdroid.enabled = True
-       config.trigdroid.timeout = 600
 
        config.report.generate_pdf = True
 

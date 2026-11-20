@@ -110,7 +110,8 @@ Analysis Options:
   -d, --show-deleted              Reveal deleted files via full filesystem checks
   --no-processes                  Do not monitor active processes
   --sockets                       Monitor listening sockets
-  --trigdroid PACKAGE_NAME        Execute malware triggers for PACKAGE_NAME
+  -p, --package PACKAGE           Target app package (CLI analysis; target of
+                                  headless malware/security modes)
   --hash                          Create MD5 hashes of changed and new files
   --apk                           List all APKs and their hashes
   --degrade-network               Simulate UMTS/3G network conditions
@@ -204,7 +205,7 @@ These tools are developed under the same sandbox ecosystem and are designed to w
 
 | Project | Description | Status |
 |--------|------------|--------|
-| [**TrigDroid**](https://github.com/fkie-cad/Sandroid_TrigDroid) | Dynamic tracing and Frida-based interception for Android apps, enabling enhanced runtime analysis. | ✅ Integrated |
+| [**TrigDroid**](https://github.com/fkie-cad/Sandroid_TrigDroid) | Malware trigger execution (sensors, network, battery, ...) for Android apps. Some emulator-detection bypass hooks are ported from it. | ❌ Not integrated (removed; device playbooks planned) |
 | [**Dexray Insight**](https://github.com/fkie-cad/Sandroid_Dexray-Insight) | A static analysis tool focused on DEX files, helping to uncover cryptographic usage, API patterns, and potential vulnerabilities. | ✅ Integrated |
 | [**Dexray Intercept**](https://github.com/fkie-cad/Sandroid_Dexray-Intercept) | Dynamic hooking framework for intercepting sensitive data flows, network traffic, and runtime behaviors in Android apps. | ✅ Integrated |
 | [**friTap**](https://github.com/fkie-cad/friTap) | TLS key extraction and decrypted traffic interception for Android, enabling advanced network analysis in sandboxed environments. | ✅ Integrated |

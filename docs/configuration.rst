@@ -818,11 +818,15 @@ MCP servers (``[mcp]``) -- EXPERIMENTAL
    enabled = true
 
 
-Further sections -- ``[network]``, ``[trigdroid]``, ``[timeouts]``,
+Further sections -- ``[network]``, ``[timeouts]``,
 ``[device_paths]``, ``[external_urls]``, ``[display]``, ``[credentials]`` --
 contain advanced tuning knobs (timeouts, on-device paths, download URLs,
 display widths) whose defaults rarely need changing; see
 ``sandroid-config show`` or :doc:`api/config` for the full schema.
+
+A ``[trigdroid]`` section from older versions still loads but is ignored, with
+one warning: TrigDroid was removed. Pass the target package with
+``--package``/``-p`` instead.
 
 Environment Variables
 ---------------------
@@ -929,10 +933,6 @@ Configuration Templates
    # Screenshots before each tap and on every screen change
    shot_before_tap = true
    shot_screen_change = true
-
-   [trigdroid]
-   enabled = true
-   package_name = "com.suspicious.app"
 
    [report]
    generate_pdf = true
@@ -1154,7 +1154,7 @@ Integration with Tools
    #!/bin/bash
 
    # Different configs for different analysis types
-   sandroid --config malware-analysis.toml --trigdroid com.malware.app
+   sandroid --config malware-analysis.toml --package com.malware.app
    sandroid --config performance-test.toml --degrade-network
    sandroid --config development.toml -n 2
 

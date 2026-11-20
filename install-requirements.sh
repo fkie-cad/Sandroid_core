@@ -77,7 +77,6 @@ source "$FULL_VENV_PATH/bin/activate" || {
 echo "Installing modern PyPI dependencies..."
 # Install all dependencies via PyPI
 python3 -m pip install AndroidFridaManager
-python3 -m pip install trigdroid[full]
 python3 -m pip install dexray-intercept
 python3 -m pip install dexray-insight
 
