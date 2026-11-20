@@ -121,6 +121,11 @@ _PANEL_SECTIONS: list[tuple[str, str, str]] = [
     ("Devices screen (D)", "sandroid.tui.screens.devices_screen", "DevicesScreen"),
     ("Proxy settings (y)", "sandroid.tui.modals.proxy_modal", "ProxyModal"),
     (
+        "Network method (W)",
+        "sandroid.tui.modals.proxy_modal",
+        "NetworkMethodModal",
+    ),
+    (
         "Static analysis (a)",
         "sandroid.tui.modals.static_analysis_modal",
         "StaticAnalysisModal",
@@ -181,6 +186,11 @@ _LENS_EXTRA_ROWS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
     "Devices screen (D)": [
         ("Enter", "Attach a running device / start a stopped AVD", ("enter",)),
     ],
+    "Network method (W)": [
+        ("Up / Down", "Choose a method", ("up", "down")),
+        ("Space", "Select it", ("space",)),
+        ("Esc", "Close without applying", ("escape",)),
+    ],
 }
 #: Longer help text for terse footer labels: ``(heading, raw key) -> text``.
 #: Only the wording comes from here; the key itself must be in the class's
@@ -211,6 +221,12 @@ _ROW_TEXT: dict[tuple[str, str], str] = {
     ("Devices screen (D)", "ctrl+c"): "Quit (at startup: stop the start)",
     ("Devices screen (D)", "p"): "Pin / unpin snapshots (pinned: kept)",
     ("Proxy settings (y)", "r"): "Remove CA (asks first)",
+    ("Proxy settings (y)", "ctrl+s"): "Apply (on the Method tab: the network method)",
+    ("Network lens", "W"): (
+        "Network method: Off / Whole device / This app / This app, keys only"
+    ),
+    ("Network lens", "T"): "App only (App Proxy and named device-proxy flows)",
+    ("Network method (W)", "ctrl+s"): "Apply the method",
     ("Inspector (while open)", "left"): "Previous tab (unless the focus uses Left)",
     ("Inspector (while open)", "right"): "Next tab (unless the focus uses Right)",
     ("Inspector (while open)", "left_square_bracket"): "Previous tab (always)",
@@ -273,6 +289,11 @@ _SECTION_NOTES: dict[str, str] = {
         "received). Narrow views drop Size, TLS, Time, then App. The lens "
         "bar counts TLS failures you have not seen yet (e.g. "
         "'27 TLS failed')."
+    ),
+    "Proxy settings (y)": (
+        "Device tab: the Kill switch (on with Whole device) blocks every app "
+        "connection that does not go through the proxy and shows how many "
+        "were refused."
     ),
 }
 #: Sections for the AI chat dock and the log drawer, after the global

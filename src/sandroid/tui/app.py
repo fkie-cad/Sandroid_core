@@ -821,7 +821,7 @@ class SandroidTUI(App):
                     "\n"
                     "  1-6           App · Network · Files · Sessions · Timeline ·\n"
                     "                Identity\n"
-                    "  ⏎ / Esc       details on demand / close them\n"
+                    "  Enter / Esc   details on demand / close them\n"
                     "  S             snapshots     `  log\n"
                     "  ?             help & all keybindings\n"
                     "  D             devices: attach, start, stop\n"
@@ -1958,7 +1958,7 @@ class SandroidTUI(App):
             self._force_ui_refresh()
         else:
             self.notify(
-                f"{avd_name} is ready — ⏎ on it in Devices (D) to switch.",
+                f"{avd_name} is ready — press Enter on it in Devices (D) to switch.",
                 title="Emulator ready",
                 timeout=8,
             )
@@ -2285,7 +2285,7 @@ class SandroidTUI(App):
 
         if held:
             self.notify(
-                "App is paused with hooks loaded — ␣ resume first.",
+                "App is paused with hooks loaded — press Space to resume first.",
                 severity="warning",
             )
             return

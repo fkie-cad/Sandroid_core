@@ -70,16 +70,16 @@ class MessageModal(ForensicModal):
 
     def compose(self) -> ComposeResult:
         """Create the modal layout."""
-        # Get icon based on level
-        icons = {
-            "info": "[blue]i[/]",
-            "warning": "[yellow]![/]",
-            "error": "[red]X[/]",
+        # The level is a word in its colour (info needs none), not a symbol.
+        prefixes = {
+            "info": "",
+            "warning": "[$warning]Warning:[/] ",
+            "error": "[$error]Error:[/] ",
         }
-        icon = icons.get(self.level, icons["info"])
+        prefix = prefixes.get(self.level, "")
 
         with Vertical(classes=f"modal-container message-{self.level}"):
-            yield Label(f"{icon} {self.title_text}", classes="modal-title")
+            yield Label(f"{prefix}{self.title_text}", classes="modal-title")
             yield Static(self.message_text, classes="modal-content")
             with Vertical(classes="button-row"):
                 yield Button("OK", id="ok", classes="-primary")
