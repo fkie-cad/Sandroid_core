@@ -256,6 +256,9 @@ class Recording:
     #: Files selected after a Rewind ran: the device had left the state after
     #: your action, so they have no After from your run.
     late_selected: list[str] = field(default_factory=list)
+    #: The device's timezone at the start (``persist.sys.timezone``); the
+    #: verdict reads ISO times without a zone in it. None: unknown.
+    device_tz: str | None = None
 
     @property
     def start_point_name(self) -> str | None:
@@ -291,6 +294,21 @@ class Recording:
             roles.setdefault("after_replay", []).append(version)
         else:
             roles[role] = version
+
+
+def device_timezone(shell: Callable[[str], str]) -> str | None:
+    """The device's timezone (an IANA name from ``persist.sys.timezone``)
+    through ``shell`` (a device shell runner); None when it is unset, not a
+    known zone or the device did not answer. Never raises.
+    """
+    from sandroid.core.replay_verdict import device_zone
+
+    try:
+        name = str(shell("getprop persist.sys.timezone") or "").strip()
+    except Exception:
+        logger.debug("rewind: reading the device timezone failed", exc_info=True)
+        return None
+    return name if device_zone(name) is not None else None
 
 
 def recordings_root() -> Path:
@@ -1305,7 +1323,13 @@ def _compare(
             return
         copies.append(local)
     run, replay = run_windows(rec, path)
-    cmp = replay_verdict.compare(*copies, run=run, replay_run=replay, secrets=secrets)
+    cmp = replay_verdict.compare(
+        *copies,
+        run=run,
+        replay_run=replay,
+        secrets=secrets,
+        device_tz=rec.device_tz,
+    )
     res.verdict = _OUTCOME_WORDS[cmp.outcome]
     res.compared = cmp.compared
     res.volatile = [v.as_dict() for v in cmp.volatile]

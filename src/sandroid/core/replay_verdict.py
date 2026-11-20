@@ -18,6 +18,11 @@ builds no diff of its own; it only reads that diff as a change set.
      its own run's window (start..end, :data:`SLACK_S` either side);
   2. ``same distance from its run``: both read as a time and their distance
      from their own run's start agrees within :data:`SLACK_S`;
+
+     An ISO-8601 time without a zone is read in the device's timezone
+     (recorded at the start, :func:`device_zone`); only when that is unknown
+     in host local time, and the rule's text then says so
+     (:data:`HOST_LOCAL_NOTE`).
   3. ``freshly generated ID``: same length and character class, random
      looking, and neither occurs anywhere in Before (:data:`FRESH_IDS`).
 
@@ -33,8 +38,9 @@ import hashlib
 import math
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, tzinfo
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sandroid.core import file_inspect
 
@@ -59,6 +65,9 @@ VALUE_MAX = 120
 RULE_OWN_RUN = "time of its own run"
 RULE_SAME_DISTANCE = "same distance from its run"
 RULE_FRESH_ID = "freshly generated ID"
+#: Added to rule 1 or 2 when a time without a zone was read as host local
+#: time because the device's timezone is unknown.
+HOST_LOCAL_NOTE = "read as host local time: device timezone unknown"
 
 #: How the two runs were compared.
 FIELD_BY_FIELD = "field by field"
@@ -271,11 +280,40 @@ _ISO = re.compile(
 _TOKEN = re.compile(_ISO.pattern + r"|[A-Za-z0-9_.-]+")
 
 
-def as_time(value: Any) -> float | None:
+def device_zone(name: Any) -> tzinfo | None:
+    """The timezone of an IANA name (the device's ``persist.sys.timezone``),
+    None when it is empty or not a known zone.
+    """
+    if not isinstance(name, str) or not name.strip():
+        return None
+    try:
+        return ZoneInfo(name.strip())
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return None
+
+
+def _iso_time(text: str) -> datetime | None:
+    if not _ISO.fullmatch(text):
+        return None
+    with contextlib.suppress(ValueError, OverflowError, OSError):
+        return datetime.fromisoformat(text.replace(",", "."))
+    return None
+
+
+def is_zoneless_time(value: Any) -> bool:
+    """``value`` is ISO-8601 text without a zone (its offset needs a timezone)."""
+    if not isinstance(value, str):
+        return False
+    when = _iso_time(value.strip())
+    return when is not None and when.tzinfo is None
+
+
+def as_time(value: Any, tz: tzinfo | None = None) -> float | None:
     """Epoch seconds of a value that reads as a time, else None.
 
     Unix seconds, milli-, micro- or nanoseconds (int, float or digit text;
-    2001..2096 by magnitude) and ISO-8601 text (no zone: local time).
+    2001..2096 by magnitude) and ISO-8601 text. ISO text without a zone is
+    read in ``tz`` (the device's timezone), host local time when None.
     """
     if isinstance(value, bool) or value is None or value is ABSENT:
         return None
@@ -287,8 +325,12 @@ def as_time(value: Any) -> float | None:
         if _NUMBER.fullmatch(text):
             num = float(text)
         elif _ISO.fullmatch(text):
+            when = _iso_time(text)
+            if when is None:
+                return None
+            if when.tzinfo is None and tz is not None:
+                when = when.replace(tzinfo=tz)
             with contextlib.suppress(ValueError, OverflowError, OSError):
-                when = datetime.fromisoformat(text.replace(",", "."))
                 return when.timestamp()
             return None
     if num is None or not math.isfinite(num):
@@ -361,19 +403,28 @@ class _Context:
     before: Callable[[], bytes]
     fresh_ids: bool
     secrets: Collection[str] = ()
+    #: The device's timezone (naive ISO times); None: unknown, host local.
+    tz: tzinfo | None = None
 
 
 def _in_window(t: float, w: RunWindow) -> bool:
     return w.start - SLACK_S <= t <= w.end + SLACK_S
 
 
+def _time_rule(rule: str, a: Any, b: Any, ctx: _Context) -> str:
+    """``rule``, saying so when a zoneless time was read as host local."""
+    if ctx.tz is None and (is_zoneless_time(a) or is_zoneless_time(b)):
+        return f"{rule}, {HOST_LOCAL_NOTE}"
+    return rule
+
+
 def _scalar_rule(a: Any, b: Any, ctx: _Context) -> str | None:
-    ta, tb = as_time(a), as_time(b)
+    ta, tb = as_time(a, ctx.tz), as_time(b, ctx.tz)
     if ta is not None and tb is not None and ctx.run and ctx.replay:
         if _in_window(ta, ctx.run) and _in_window(tb, ctx.replay):
-            return RULE_OWN_RUN
+            return _time_rule(RULE_OWN_RUN, a, b, ctx)
         if abs((ta - ctx.run.origin) - (tb - ctx.replay.origin)) <= SLACK_S:
-            return RULE_SAME_DISTANCE
+            return _time_rule(RULE_SAME_DISTANCE, a, b, ctx)
     if (
         ctx.fresh_ids
         and isinstance(a, str)
@@ -585,13 +636,16 @@ def compare(
     replay_run: RunWindow | None = None,
     fresh_ids: bool | None = None,
     secrets: Collection[str] = (),
+    device_tz: str | None = None,
 ) -> Comparison:
     """The verdict of one file from its three local copies.
 
     ``None`` for a copy means the file was not on the device. ``run`` and
     ``replay_run`` are the two runs' windows (rules 1 and 2 need both);
     ``fresh_ids`` overrides :data:`FRESH_IDS`; ``secrets`` are masked in
-    every value shown (before it is cut to length).
+    every value shown (before it is cut to length). ``device_tz`` is the
+    device's timezone (an IANA name): ISO times without a zone are read in
+    it, in host local time when it is unknown.
     """
     ctx = _Context(
         run,
@@ -599,6 +653,7 @@ def compare(
         _bytes_of(before),
         FRESH_IDS if fresh_ids is None else fresh_ids,
         secrets,
+        device_zone(device_tz),
     )
     if before is None and after is not None and replay is not None:
         return _new_file(after, replay, ctx)

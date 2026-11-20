@@ -617,6 +617,8 @@ def _capture_fakes(controller, monkeypatch, lists):
     monkeypatch.setattr(rewind, "timeline_size", lambda: 0)
     monkeypatch.setattr(rewind, "lines_between", lambda *a, **k: [])
     monkeypatch.setattr(controller, "_file_list", lambda rec, name: lists.pop(0))
+    monkeypatch.setattr(type(controller), "_shell",
+                        staticmethod(lambda serial: lambda cmd: "Asia/Tokyo\n"))  # fmt: skip
 
 
 def test_late_list_is_diffed_against_its_own_start_list(controller, monkeypatch):
@@ -645,6 +647,8 @@ def test_a_failed_first_list_does_not_make_every_file_new(controller, monkeypatc
     assert controller._begin_capture(rec) is None
     controller._collect_changes(rec, "files_stop.tsv")
     assert rec.changed == []
+    # The device's timezone is kept for the verdict's zoneless ISO times.
+    assert rec.device_tz == "Asia/Tokyo"
 
 
 def test_stop_worker_failure_still_returns_to_idle(controller, monkeypatch):

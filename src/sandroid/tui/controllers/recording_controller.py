@@ -556,6 +556,8 @@ class RecordingController:
             instance=wrapper,
             stop_callback=wrapper.stop,
         )
+        # ISO times without a zone in the app's files are in this timezone.
+        rec.device_tz = rewind.device_timezone(self._shell(rec.serial))
         rec.timeline_offset = rewind.timeline_size()
         rec.started = time.time()
         rec.seq["start"] = self._emit_phase(

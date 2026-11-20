@@ -581,3 +581,118 @@ def test_the_player_reports_when_step_one_ran():
     )
     out = rep.run(extract_steps([tap]))
     assert isinstance(out["first_step_at"], float)
+
+
+# ---------------------------------------------------------------------------
+# ISO times without a zone: the device's timezone
+# ---------------------------------------------------------------------------
+
+
+def _other_zone() -> str:
+    """A timezone at least an hour away from the host's at T0 and T1."""
+    from zoneinfo import ZoneInfo
+
+    for name in ("Pacific/Kiritimati", "Pacific/Pago_Pago", "Asia/Kolkata"):
+        zone = ZoneInfo(name)
+        if all(
+            abs(
+                datetime.fromtimestamp(t, zone).utcoffset().total_seconds()
+                - datetime.fromtimestamp(t).astimezone().utcoffset().total_seconds()
+            )
+            >= 3600
+            for t in (T0, T1)
+        ):
+            return name
+    pytest.skip("no timezone far enough from the host's")
+
+
+def _naive(t: float, zone: str) -> str:
+    """``t`` as the device writes it: wall time in ``zone``, no offset."""
+    from zoneinfo import ZoneInfo
+
+    when = datetime.fromtimestamp(t, ZoneInfo(zone)).replace(tzinfo=None)
+    return when.isoformat(timespec="seconds")
+
+
+def test_zoneless_iso_time_is_read_in_the_device_timezone(files_root):
+    zone = _other_zone()
+
+    def doc(sync: str) -> bytes:
+        return json.dumps({"sync": sync}).encode()
+
+    before = _version(PATH_JSON, "v001", doc("never"))
+    after = _version(PATH_JSON, "v002", doc(_naive(T0 + 30, zone)))
+    replay = _version(PATH_JSON, "v003", doc(_naive(T1 + 12, zone)))
+    rec = _rec(PATH_JSON, before, after, replay)
+    rec.device_tz = zone
+    res = rewind.file_result(rec, PATH_JSON)
+    assert res.verdict == rewind.VOLATILE
+    assert res.volatile[0]["rule"] == rv.RULE_OWN_RUN
+    # Read as host local time the two times leave their runs: no rule.
+    rec.device_tz = None
+    assert rewind.file_result(rec, PATH_JSON).verdict == rewind.DIFFERENT
+    # A name that is no timezone is unknown too.
+    rec.device_tz = "Not/A_Zone"
+    assert rewind.file_result(rec, PATH_JSON).verdict == rewind.DIFFERENT
+
+
+def test_host_local_reading_says_so_in_the_rule(files_root):
+    zone = _other_zone()
+    before = _version(PATH_JSON, "v001", json.dumps({"sync": "never"}).encode())
+    # Same distance from both runs: rule 2 holds in any timezone.
+    after = _version(PATH_JSON, "v002", json.dumps({"sync": _naive(T0 + 30, zone)}).encode())  # fmt: skip
+    replay = _version(PATH_JSON, "v003", json.dumps({"sync": _naive(T1 + 30, zone)}).encode())  # fmt: skip
+    rec = _rec(PATH_JSON, before, after, replay)
+    res = rewind.file_result(rec, PATH_JSON)
+    assert res.verdict == rewind.VOLATILE
+    rule = res.volatile[0]["rule"]
+    assert rule == f"{rv.RULE_SAME_DISTANCE}, {rv.HOST_LOCAL_NOTE}"
+    assert "host local time" in rewind.volatile_line(res.volatile[0])
+    # Known timezone, or a time with its own offset: no note.
+    rec.device_tz = zone
+    assert rewind.file_result(rec, PATH_JSON).volatile[0]["rule"] == rv.RULE_OWN_RUN
+    aware = _rec(
+        PATH_JSON,
+        before,
+        _version(PATH_JSON, "v004", json.dumps({"sync": _iso(T0 + 30)}).encode()),
+        _version(PATH_JSON, "v005", json.dumps({"sync": _iso(T1 + 30)}).encode()),
+    )
+    assert rewind.file_result(aware, PATH_JSON).volatile[0]["rule"] == rv.RULE_OWN_RUN
+
+
+def test_as_time_reads_zoneless_text_in_the_given_zone():
+    from zoneinfo import ZoneInfo
+
+    assert rv.as_time("2025-11-20T10:00:00", ZoneInfo("UTC")) == 1_763_632_800.0
+    tokyo = rv.as_time("2025-11-20T19:00:00", ZoneInfo("Asia/Tokyo"))
+    assert tokyo == 1_763_632_800.0
+    # An offset in the text wins over the zone.
+    assert rv.as_time("2025-11-20T10:00:00Z", ZoneInfo("Asia/Tokyo")) == 1_763_632_800.0
+    assert rv.is_zoneless_time("2025-11-20 10:00")
+    assert not rv.is_zoneless_time("2025-11-20T10:00:00+01:00")
+    assert not rv.is_zoneless_time(1_763_632_800)
+    assert rv.device_zone("Europe/Berlin") is not None
+    assert rv.device_zone("") is None
+    assert rv.device_zone("../etc/passwd") is None
+
+
+def test_the_device_timezone_is_read_from_persist_sys_timezone():
+    calls: list[str] = []
+
+    def shell(cmd: str) -> str:
+        calls.append(cmd)
+        return "Europe/Berlin\n"
+
+    assert rewind.device_timezone(shell) == "Europe/Berlin"
+    assert calls == ["getprop persist.sys.timezone"]
+    assert rewind.device_timezone(lambda c: "\n") is None
+    assert rewind.device_timezone(lambda c: "Mars/Olympus") is None
+
+    def gone(cmd: str) -> str:
+        raise RuntimeError("device offline")
+
+    assert rewind.device_timezone(gone) is None
+    # Recordings saved before the field existed load with it unknown.
+    old = rewind.Recording(rec_id="rec-1", name="R", pkg="p", serial="s").to_dict()
+    del old["device_tz"]
+    assert rewind.Recording.from_dict(old).device_tz is None
