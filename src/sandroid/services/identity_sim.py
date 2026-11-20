@@ -855,7 +855,7 @@ def pre_launch(context: LaunchContext) -> tuple[str, ...]:
     <reason>}`` (nothing only when the identity settings cannot be read).
     """
     try:
-        found = _active_sim(_persona_of(getattr(context, "meta", None)))
+        found = _active_sim(_persona_of(context.meta))
     except Exception:
         logger.warning(
             "identity SIM: cannot read the active profile; the SIM identity of "
@@ -1063,24 +1063,16 @@ def running_sim(serial: str, avd_name: str = "") -> SimValues | None:
     return found.sim if found is not None else None
 
 
-def _context_has_meta() -> bool:
-    """Pre-launch hooks see the launch's ``meta`` (and so its persona)."""
-    from dataclasses import fields
-
-    from sandroid.core import emulator
-
-    return any(f.name == "meta" for f in fields(emulator.LaunchContext))
-
-
 def _restart_profile_id(service: Any, serial: str) -> str:
-    """The profile whose SIM a restart of ``serial`` from Sandroid sets."""
+    """The profile whose SIM a restart of ``serial`` from Sandroid sets.
+
+    A restart passes its launch's ``meta`` on (pre-launch hooks see it as
+    ``context.meta``): only that persona counts, not one the device record
+    names (a launch without a live record, e.g. after a TUI restart).
+    """
     from sandroid.services.identity import launch_persona_id
 
-    if _context_has_meta():
-        # A restart passes its launch's meta on: only that persona counts
-        # (one the device record names is not the restart's).
-        return launch_persona_id(serial) or str(service.config().profile or "")
-    return str(service.config().profile or "")
+    return launch_persona_id(serial) or str(service.config().profile or "")
 
 
 def restart_blocker(running: RunningEmulator | None, profile: Profile) -> str:

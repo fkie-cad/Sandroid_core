@@ -680,13 +680,11 @@ def _persona_profile() -> ident.Profile:
 def test_a_persona_launch_starts_with_the_personas_sim(avd, profile_env):
     active = _activate(profile_env)
     persona = _persona_profile()
-    plain = _context(avd)
-    context = types.SimpleNamespace(
-        avd=plain.avd,
-        avd_dir=plain.avd_dir,
-        port=plain.port,
-        options=plain.options,
-        record={},
+    context = emulator.LaunchContext(
+        avd="Dev1",
+        avd_dir=avd,
+        port=5580,
+        options=emulator.AvdLaunchOptions(),
         meta={ident.PERSONA_META_KEY: persona.id},
     )
     args = sim.pre_launch(context)
@@ -715,15 +713,9 @@ def test_restart_blocker_follows_the_launch_persona(avd, profile_env, monkeypatc
         lambda serial: {"launch_id": "L1", "meta": {"persona_id": persona.id}},
     )
     running = sim.RunningEmulator("emulator-5580", "Dev1", avd)
-    # Pre-launch hooks see the persona: a restart sets the persona's SIM.
-    monkeypatch.setattr(sim, "_context_has_meta", lambda: True)
+    # A restart passes the launch's persona on: it sets the persona's SIM.
     assert sim.restart_blocker(running, persona) == ""
     assert sim.restart_blocker(running, active) == sim.NOT_ACTIVE
-    # They do not (an older emulator module): a restart sets the active one's,
-    # and the persona's SIM says so.
-    monkeypatch.setattr(sim, "_context_has_meta", lambda: False)
-    assert sim.restart_blocker(running, persona) == sim.PERSONA_SIM_ACTIVE
-    assert sim.restart_blocker(running, active) == ""
 
 
 def test_a_restart_follows_only_its_launchs_persona(avd, profile_env, monkeypatch):
@@ -734,7 +726,6 @@ def test_a_restart_follows_only_its_launchs_persona(avd, profile_env, monkeypatc
     service = ident.get_identity_service()
     monkeypatch.setattr(emu, "launch_record", lambda serial: None)
     monkeypatch.setattr(service, "persona_of", lambda serial: persona.id)
-    monkeypatch.setattr(sim, "_context_has_meta", lambda: True)
     running = sim.RunningEmulator("emulator-5580", "Dev1", avd)
     # A persona only the device record names: a restart starts the active SIM.
     assert sim.restart_blocker(running, persona) == sim.PERSONA_SIM_ACTIVE
