@@ -2564,6 +2564,7 @@ def record_insight_result(
     apk_md5: str | None = None,
     package: str | None = None,
     cache: ApkCache | None = None,
+    options: dict[str, Any] | None = None,
 ) -> str | None:
     """Record a Dexray Insight run in the APK cache's meta.json.
 
@@ -2582,6 +2583,11 @@ def record_insight_result(
         apk_md5: md5 of the analysed APK (Insight's cache key).
         package: Package name if not derivable from the results.
         cache: Cache to use; defaults to ``ApkCache()``.
+        options: The run's choice (``{"profile", "trackers", "security",
+            "verbose"}``), stored as ``insight.options``. A run with trackers
+            off keeps the previous run's tracker summary for the same APK
+            (marked ``insight.trackers_from_previous_run``), since tracker
+            detection is per APK and that run did not look.
 
     Returns:
         The entry key, or ``None`` when nothing was recorded (never raises).
@@ -2594,6 +2600,19 @@ def record_insight_result(
         general = _as_dict(
             _as_dict(_as_dict(analysis_results).get("apk_overview")).get("general_info")
         )
+        existing = cache.read_meta(key) or {}
+        summary = _insight_summary(analysis_results or {})
+        insight_options = dict(options) if isinstance(options, dict) else None
+        trackers_from_previous = False
+        if insight_options is not None and insight_options.get("trackers") is False:
+            previous = _as_dict(
+                _as_dict(_as_dict(existing.get("insight")).get("summary")).get(
+                    "tracker_analysis"
+                )
+            )
+            if previous:
+                summary["tracker_analysis"] = previous
+                trackers_from_previous = True
         updates: dict[str, Any] = {
             "insight": {
                 "result_name": os.path.basename(result_file) if result_file else None,
@@ -2606,10 +2625,11 @@ def record_insight_result(
                 "cache": "insight" if insight_cache_used else None,
                 "apk_md5": apk_md5,
                 "recorded_at": _utc_now(),
-                "summary": _insight_summary(analysis_results or {}),
+                "summary": summary,
+                "options": insight_options,
+                "trackers_from_previous_run": trackers_from_previous,
             }
         }
-        existing = cache.read_meta(key) or {}
         if not existing.get("package"):
             updates["package"] = general.get("package_name") or package
         if not existing.get("version_name"):

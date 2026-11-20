@@ -1606,6 +1606,139 @@ def test_insight1_uses_legacy_call(monkeypatch, tmp_path, cache_root):
     assert not cache_root.exists()  # don't-cache switch honoured
 
 
+class _ProfileConfiguration:
+    """An Insight >= 2.2 Configuration: takes ``profile``."""
+
+    DEFAULT_CONFIG = {"caching": {"enabled": True, "cache_dir": None}}
+
+    def __init__(self, config_dict=None, profile=None):
+        self.config_dict = config_dict
+        self.profile = profile
+
+
+def test_profile_trackers_and_dirs_reach_a_profile_aware_insight(
+    monkeypatch, tmp_path, cache_root
+):
+    seen = {}
+    out_dir = tmp_path / "session" / "dexray_insight"
+
+    def start_new(
+        apk, config, print_results_to_terminal=False, verbose=False, output_dir=None
+    ):
+        seen["config"] = config
+        seen["output_dir"] = output_dir
+        work = config.config_dict["temporal_analysis"]["base_directory"]
+        seen["work"] = work
+        assert os.path.isdir(work)
+        (Path(work) / "unzipped").mkdir()
+        main = Path(output_dir) / "dexray_app_T.json"
+        main.parent.mkdir(parents=True, exist_ok=True)
+        main.write_text("{}")
+        return {"main": INSIGHT_MAIN, "security": None}, str(main), ""
+
+    events = []
+    monkeypatch.setattr(
+        static_analysis.TaskOutput, "publish", lambda self: events.append(self)
+    )
+    fake_asam = SimpleNamespace(
+        Configuration=_ProfileConfiguration, start_apk_static_analysis_new=start_new
+    )
+    analyzer = _analyzer(monkeypatch, tmp_path, fake_asam)
+    analyzer._analysis_config.update(profile="privacy", run_tracker_analysis=False)
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"apk-bytes")
+
+    assert analyzer._run_dexray_analysis(
+        str(apk), "app", str(out_dir) + "/", time.time(), other_split_sha256s=[]
+    )
+
+    config = seen["config"]
+    assert config.profile == "privacy"
+    # A profile-aware Insight gets the name, not Sandroid's fallback copy.
+    assert "native_analysis" not in config.config_dict["modules"]
+    assert config.config_dict["modules"]["tracker_analysis"]["enabled"] is False
+    assert config.config_dict["temporal_analysis"]["cleanup_after_analysis"] is True
+    definitions = config.config_dict["modules"]["library_detection"][
+        "apktool_detection"
+    ]
+    assert ".dexray_insight" in definitions["libsmali_path"]
+    assert seen["output_dir"] == str(out_dir) + "/"
+    assert not os.path.exists(seen["work"])  # scratch dir removed
+    assert list(tmp_path.glob("*.jsonl")) == []
+    assert not (tmp_path / "temp_analysis").exists()
+    assert analyzer.last_results["options"]["profile"] == "privacy"
+    started = events[0]
+    assert started.data["profile"] == "privacy"
+    assert started.data["trackers"] is False
+    assert "privacy profile, trackers off" in started.message
+
+
+def test_older_insight_gets_the_privacy_fallback(monkeypatch, tmp_path, cache_root):
+    seen = {}
+
+    def start_new(apk, config, print_results_to_terminal=False, verbose=False):
+        seen["config_dict"] = config.config_dict
+        return {"main": INSIGHT_MAIN, "security": None}, "", ""
+
+    fake_asam = SimpleNamespace(
+        Configuration=_FakeConfiguration, start_apk_static_analysis_new=start_new
+    )
+    analyzer = _analyzer(monkeypatch, tmp_path, fake_asam)
+    analyzer._analysis_config["profile"] = "privacy"
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"apk-bytes")
+
+    assert analyzer._run_dexray_analysis(
+        str(apk), "app", str(tmp_path) + "/", time.time(), other_split_sha256s=[]
+    )
+    modules = seen["config_dict"]["modules"]
+    assert modules["native_analysis"] == {"enabled": False}
+    assert modules["tracker_analysis"].get("enabled", True) is True
+    assert modules["signature_detection"] == {"enabled": False}
+    assert seen["config_dict"]["tools"]["apktool"] == {"enabled": False}
+    # The fallback constant itself is never mutated by the merge.
+    assert (
+        "tracker_analysis" not in static_analysis._PRIVACY_PROFILE_FALLBACK["modules"]
+    )
+
+
+def test_generic_profile_adds_no_overrides(monkeypatch, tmp_path, cache_root):
+    seen = {}
+
+    def start_new(apk, config, print_results_to_terminal=False, verbose=False):
+        seen["config_dict"] = config.config_dict
+        return {"main": INSIGHT_MAIN, "security": None}, "", ""
+
+    fake_asam = SimpleNamespace(
+        Configuration=_FakeConfiguration, start_apk_static_analysis_new=start_new
+    )
+    analyzer = _analyzer(monkeypatch, tmp_path, fake_asam)
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"apk-bytes")
+    assert analyzer._run_dexray_analysis(
+        str(apk), "app", str(tmp_path) + "/", time.time(), other_split_sha256s=[]
+    )
+    assert "native_analysis" not in seen["config_dict"]["modules"]
+    assert "tools" not in seen["config_dict"]
+
+
+def test_run_without_trackers_keeps_the_previous_tracker_summary(cache_root):
+    with_trackers = {
+        **INSIGHT_MAIN,
+        "tracker_analysis": {"detected_trackers": [{"name": "Adjust"}]},
+    }
+    key = ais.record_insight_result(
+        ["a" * 64], with_trackers, options={"profile": "generic", "trackers": True}
+    )
+    ais.record_insight_result(
+        ["a" * 64], INSIGHT_MAIN, options={"profile": "privacy", "trackers": False}
+    )
+    insight = ais.ApkCache().read_meta(key)["insight"]
+    assert insight["options"]["trackers"] is False
+    assert insight["trackers_from_previous_run"] is True
+    assert ais.insight_trackers(insight["summary"]) == [{"name": "Adjust"}]
+
+
 def test_device_mode_parses_split_pm_path(monkeypatch, tmp_path, cache_root):
     fake_asam = SimpleNamespace(
         Configuration=type("Cfg", (), {"DEFAULT_CONFIG": {}}),

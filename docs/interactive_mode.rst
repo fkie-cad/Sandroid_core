@@ -726,7 +726,10 @@ Key                 Action
 ==================  =========================================================
 ``f``               Frida server: download, install, start
 ``k``               Reconfigure Frida hooks
-``a``               Static analysis of the spotlight APK (Dexray-Insight)
+``a``               Static analysis of the spotlight APK (Dexray-Insight); the
+                    dialog picks the profile (``p``: privacy or generic) and
+                    switches trackers (``t``), security analysis (``s``) and
+                    verbose output (``v``); the last choice is remembered
 ``m``               Dexray-Intercept malware monitor
 ``d``               Dump memory (Fridump)
 ``b`` / ``O``       Objection shell / resume objection session

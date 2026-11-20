@@ -54,6 +54,7 @@ from .snapshot_save_choice_modal import (
     SnapshotSaveChoiceResult,
     SnapshotSlotPickerModal,
 )
+from .static_analysis_modal import StaticAnalysisModal
 from .toggle_modal import FridaToggleConfigModal, ToggleConfigModal
 from .tool_selection_modal import ToolSelectionModal
 
@@ -115,6 +116,7 @@ __all__ = [
     "SnapshotSaveChoiceModal",
     "SnapshotSaveChoiceResult",
     "SnapshotSlotPickerModal",
+    "StaticAnalysisModal",
     "ToggleConfigModal",
     "ToolSelectionModal",
     "build_objection_command",

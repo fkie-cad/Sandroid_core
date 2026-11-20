@@ -1,8 +1,12 @@
+import copy
+import inspect
 import json
 import os
 import shutil
+import tempfile
 import time
 from logging import getLogger
+from pathlib import Path
 
 import click
 
@@ -43,6 +47,9 @@ except ImportError:
     asam = None
 
 logger = getLogger(__name__)
+
+#: ``tui_state.json`` key remembering the last ``a`` dialog choice.
+_UI_STATE_KEY = "static_analysis"
 
 
 def _insight_counts(analysis_results: dict) -> dict[str, int]:
@@ -141,6 +148,94 @@ def _insight_offline_config(configuration) -> dict:
     }
 
 
+#: Insight's ``privacy`` profile, for an Insight without analysis profiles
+#: (< 2.2): the same module/tool/assessment overrides, merged under
+#: Sandroid's own keys. Unknown keys are ignored by Insight's config merge.
+_PRIVACY_PROFILE_FALLBACK: dict = {
+    "modules": {
+        "api_invocation": {"enabled": True},
+        "behaviour_analysis": {"enabled": True, "deep_mode": False},
+        "library_detection": {
+            "enable_similarity": False,
+            "version_analysis": {"enabled": False},
+        },
+        "native_analysis": {"enabled": False},
+        "signature_detection": {"enabled": False},
+        "dotnet_analysis": {"enabled": False},
+        "apk_diffing": {"enabled": False},
+    },
+    "tools": {
+        "apktool": {"enabled": False},
+        "jadx": {"enabled": False},
+        "kavanoz": {"enabled": False},
+    },
+    "temporal_analysis": {"enabled": False},
+    "security": {
+        "cve_scanning": {"enabled": False},
+        "assessments": {
+            name: {"enabled": False}
+            for name in (
+                "injection",
+                "authentication_failures",
+                "logging_monitoring_failures",
+                "vulnerable_components",
+                "cve_scanning",
+                "ssrf",
+                "integrity_failures",
+                "insecure_design",
+            )
+        },
+    },
+}
+
+#: Where Insight keeps the IzzyOnDroid library definitions (``libsmali.jsonl``,
+#: ``libinfo.jsonl``). Insight >= 2.2 defaults to it; older versions default
+#: to the working directory, so Sandroid always passes it explicitly.
+_LIBRARY_DEFINITIONS_DIR = Path.home() / ".dexray_insight" / "library_definitions"
+
+
+def _accepts_kwarg(func, name: str) -> bool:
+    """True when callable *func* takes a keyword argument *name*."""
+    try:
+        return name in inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _work_dir_config(work_dir: str) -> dict:
+    """Insight config keeping its scratch files out of the working directory.
+
+    The temporal directory (unzipped APK, apktool/JADX output, tool logs) goes
+    to *work_dir*, which the caller removes after the run; the library
+    definitions go to the per-user Insight directory.
+    """
+    return {
+        "temporal_analysis": {
+            "base_directory": work_dir,
+            "cleanup_after_analysis": True,
+        },
+        "modules": {
+            "library_detection": {
+                "apktool_detection": {
+                    "libsmali_path": str(_LIBRARY_DEFINITIONS_DIR / "libsmali.jsonl"),
+                    "libinfo_path": str(_LIBRARY_DEFINITIONS_DIR / "libinfo.jsonl"),
+                }
+            }
+        },
+    }
+
+
+def describe_static_options(options: dict) -> str:
+    """Plain-words summary of a static analysis choice.
+
+    Example: ``"privacy profile, trackers on, security analysis off"``.
+    """
+    profile = options.get("profile") or "generic"
+    trackers = "on" if options.get("trackers", True) else "off"
+    security = "on" if options.get("security", True) else "off"
+    return f"{profile} profile, trackers {trackers}, security analysis {security}"
+
+
 class StaticAnalysis(DataGatherBase):
     """Handles static analysis of APK files using dexray-insight (formerly ASAM).
 
@@ -175,47 +270,81 @@ class StaticAnalysis(DataGatherBase):
         self._analysis_config = {
             "run_security_analysis": True,
             "verbose_output": False,
+            # Insight analysis profile ("generic" = full, "privacy").
+            "profile": "generic",
+            "run_tracker_analysis": True,
             # Per-run "don't cache" switch for the shared APK/Insight cache.
             "use_cache": True,
         }
         self._output_files = []
 
+    def _options(self) -> dict:
+        """The current choice as ``{"profile", "trackers", "security", "verbose"}``."""
+        cfg = self._analysis_config
+        return {
+            "profile": cfg.get("profile") or "generic",
+            "trackers": bool(cfg.get("run_tracker_analysis", True)),
+            "security": bool(cfg.get("run_security_analysis", True)),
+            "verbose": bool(cfg.get("verbose_output", False)),
+        }
+
+    @staticmethod
+    def _config_from_choice(choice: dict) -> dict:
+        """Map a dialog choice onto ``_analysis_config`` keys."""
+        return {
+            "profile": choice["profile"],
+            "run_tracker_analysis": choice["trackers"],
+            "run_security_analysis": choice["security"],
+            "verbose_output": choice["verbose"],
+        }
+
+    def _dialog_target(self) -> str:
+        """Package (device mode) or APK file name (local mode) for the dialog."""
+        if self._apk_path:
+            return os.path.basename(self._apk_path)
+        try:
+            from sandroid.services import get_spotlight_service
+
+            return get_spotlight_service().get_effective_package() or ""
+        except Exception:
+            return ""
+
     def _interactive_configuration(self) -> dict | None:
-        """Interactive configuration menu for dexray-insight options.
+        """Ask for the Insight profile and options (the ``a`` dialog).
+
+        The last confirmed choice is remembered per user in ``tui_state.json``
+        (key ``static_analysis``) and preselected next time.
 
         Returns:
-            Configuration dict if user confirms, None if cancelled
+            ``_analysis_config`` updates if the user confirms, None if cancelled
         """
-        from sandroid.core.ui_request_bus import UIRequestBus, request_toggle_config
+        from sandroid.config.ui_state import load_ui_state, update_ui_state
+        from sandroid.core.ui_request_bus import UIRequestBus, request_modal
+        from sandroid.tui.modals.static_analysis_modal import normalize_choice
 
-        # Check if TUI mode is active
+        remembered = normalize_choice(load_ui_state().get(_UI_STATE_KEY))
+
         bus = UIRequestBus.get()
         if bus.has_active_handler():
-            # TUI mode - use toggle config modal
-            toggle_options = {
-                "Security Analysis (vulnerability scan)": True,
-                "Verbose Output (detailed logging)": False,
-            }
+            from sandroid.tui.modals.static_analysis_modal import StaticAnalysisModal
 
-            result = request_toggle_config(
-                title="Dexray-Insight Configuration",
-                options=toggle_options,
-                message="Configure static analysis options",
+            result = request_modal(
+                StaticAnalysisModal, choice=remembered, target=self._dialog_target()
             )
+        else:
+            result = self._console_configuration(remembered)
+        if result is None:
+            return None
+        choice = normalize_choice(result)
+        try:
+            update_ui_state(_UI_STATE_KEY, choice)
+        except Exception as e:
+            logger.debug(f"Could not remember the static analysis choice: {e}")
+        return self._config_from_choice(choice)
 
-            if result is None:
-                return None
-
-            return {
-                "run_security_analysis": result.get(
-                    "Security Analysis (vulnerability scan)", True
-                ),
-                "verbose_output": result.get(
-                    "Verbose Output (detailed logging)", False
-                ),
-            }
-
-        # Rich mode - use console and click.getchar()
+    def _console_configuration(self, choice: dict) -> dict | None:
+        """Rich console version of the dialog (no TUI running)."""
+        from sandroid.tui.modals.static_analysis_modal import STATIC_ANALYSIS_PROFILES
         from sandroid.tui.utils.box_renderer import make_box_line
 
         console = SandroidConsole.get()
@@ -225,67 +354,65 @@ class StaticAnalysis(DataGatherBase):
         BOX_WIDTH = _get_display_value("box_width", _DEFAULT_BOX_WIDTH)
 
         _box_line = make_box_line(BOX_WIDTH)
-
-        settings = {
-            "run_security_analysis": True,
-            "verbose_output": False,
-        }
+        settings = dict(choice)
+        profiles = [name for name, _ in STATIC_ANALYSIS_PROFILES]
+        rows = (
+            ("T", "trackers", "Trackers"),
+            ("S", "security", "Security analysis"),
+            ("V", "verbose", "Verbose output"),
+        )
 
         while True:
             console.clear()
 
             console.print(f"[primary]╔{'═' * BOX_WIDTH}╗[/primary]")
-            console.print(_box_line("[bold]Dexray-Insight Configuration[/bold]"))
+            console.print(_box_line("[bold]Static analysis (Dexray Insight)[/bold]"))
             console.print(f"[primary]╠{'═' * BOX_WIDTH}╣[/primary]")
-
-            sec_status = (
-                "[success]●[/success]"
-                if settings["run_security_analysis"]
-                else "[error]○[/error]"
-            )
-            verbose_status = (
-                "[success]●[/success]"
-                if settings["verbose_output"]
-                else "[error]○[/error]"
-            )
-
             console.print(
                 _box_line(
-                    f"[accent]\\[S][/accent] Security Analysis: {sec_status} (vulnerability scan)",
+                    f"[accent]\\[P][/accent] Profile:           "
+                    f"[bold]{settings['profile']}[/bold]",
                     align="left",
                 )
             )
-            console.print(
-                _box_line(
-                    f"[accent]\\[V][/accent] Verbose Output:    {verbose_status} (detailed logging)",
-                    align="left",
+            for key, setting, label in rows:
+                state = (
+                    "[success]on[/success]"
+                    if settings[setting]
+                    else "[error]off[/error]"
                 )
-            )
+                console.print(
+                    _box_line(
+                        f"[accent]\\[{key}][/accent] {label + ':':<18} {state}",
+                        align="left",
+                    )
+                )
 
             console.print(f"[primary]╠{'═' * BOX_WIDTH}╣[/primary]")
             console.print(
                 _box_line(
-                    "[success]\\[Enter][/success] Start Analysis    [warning]\\[Esc/Q][/warning] Cancel",
+                    "[success]\\[Enter][/success] Start Analysis    "
+                    "[warning]\\[Esc/Q][/warning] Cancel",
                     align="left",
                 )
             )
             console.print(f"[primary]╚{'═' * BOX_WIDTH}╝[/primary]")
 
             try:
-                choice = click.getchar().lower()
+                key = click.getchar().lower()
             except (KeyboardInterrupt, EOFError):
                 return None
 
-            if choice in ("\r", "\n"):
+            if key in ("\r", "\n"):
                 return settings
-            if choice in ("\x1b", "q"):
+            if key in ("\x1b", "q"):
                 return None
-            if choice == "s":
-                settings["run_security_analysis"] = not settings[
-                    "run_security_analysis"
-                ]
-            elif choice == "v":
-                settings["verbose_output"] = not settings["verbose_output"]
+            if key == "p":
+                index = profiles.index(settings["profile"])
+                settings["profile"] = profiles[(index + 1) % len(profiles)]
+            for row_key, setting, _label in rows:
+                if key == row_key.lower():
+                    settings[setting] = not settings[setting]
 
     def gather(self, interactive: bool = True) -> bool:
         """Gathers and analyzes an APK file using dexray-insight.
@@ -527,9 +654,20 @@ class StaticAnalysis(DataGatherBase):
         Returns:
             True if analysis completed, False if failed
         """
+        options = self._options()
+        TaskOutput(
+            task_name="static_analysis",
+            message=f"Static analysis started: {describe_static_options(options)}",
+            level="info",
+            data={"package": apk_name, **options},
+            source="static_analysis",
+        ).publish()
+        # Insight's scratch files (unzipped APK, apktool output, tool logs)
+        # live here and are removed after the run, whatever happens.
+        work_dir = tempfile.mkdtemp(prefix="sandroid-insight-")
         try:
             results, result_file_name, security_result_file_name = self._start_insight(
-                apk_file_path
+                apk_file_path, insight_dir=insight_dir, work_dir=work_dir
             )
 
             if results is None:
@@ -567,6 +705,7 @@ class StaticAnalysis(DataGatherBase):
                 "analysis_results": analysis_results,
                 "json_output": json_output,
                 "app_name": apk_name,
+                "options": options,
                 "result_files": {
                     "main_result": result_file_name,
                     "security_result": security_result_file_name,
@@ -594,6 +733,7 @@ class StaticAnalysis(DataGatherBase):
                     analysis_results,
                     result_file_name,
                     security_result_file_name,
+                    options,
                 )
 
             # Calculate analysis duration
@@ -612,6 +752,7 @@ class StaticAnalysis(DataGatherBase):
             return False
 
         finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
             # Clean up APK file if requested (for pulled APKs)
             if cleanup_apk:
                 try:
@@ -636,7 +777,12 @@ class StaticAnalysis(DataGatherBase):
             pass
         return True
 
-    def _start_insight(self, apk_file_path: str):
+    def _start_insight(
+        self,
+        apk_file_path: str,
+        insight_dir: str | None = None,
+        work_dir: str | None = None,
+    ):
         """Call Dexray Insight with the shared cache dir and offline settings.
 
         Uses ``start_apk_static_analysis_new`` + ``Configuration`` whenever the
@@ -645,11 +791,25 @@ class StaticAnalysis(DataGatherBase):
         feature-detected; an Insight without that entry point gets the legacy
         call unchanged.
 
+        The analysis profile goes to Insight's ``profile`` argument when it has
+        one (>= 2.2) and is otherwise merged in from
+        :data:`_PRIVACY_PROFILE_FALLBACK`; trackers map to
+        ``modules.tracker_analysis.enabled``.
+
+        Args:
+            apk_file_path: The APK to analyse.
+            insight_dir: Directory for Insight's result files (passed as
+                ``output_dir`` when Insight accepts it; otherwise the files
+                land in the working directory and the caller moves them).
+            work_dir: Scratch directory for Insight's temporal files.
+
         Returns:
             Insight's ``(results, result_file_name, security_result_file_name)``.
         """
         verbose = self._analysis_config.get("verbose_output", False)
         do_sec = self._analysis_config.get("run_security_analysis", True)
+        profile = self._analysis_config.get("profile") or "generic"
+        trackers = self._analysis_config.get("run_tracker_analysis", True)
         offline = self._insight_offline()
         configuration = getattr(asam, "Configuration", None)
         if configuration is None or not hasattr(asam, "start_apk_static_analysis_new"):
@@ -667,15 +827,29 @@ class StaticAnalysis(DataGatherBase):
                 do_sec_analysis=do_sec,
                 exclude_net_libs=None,
             )
-        # Same config the legacy wrapper builds, plus cache/offline sections.
-        config_dict: dict = {
-            "modules": {
-                "signature_detection": {"enabled": False},
-                "apk_diffing": {"enabled": False},
+        # Same config the legacy wrapper builds, plus profile, tracker,
+        # scratch-dir, cache and offline sections.
+        native_profiles = _accepts_kwarg(configuration, "profile")
+        config_dict: dict = {}
+        if profile == "privacy" and not native_profiles:
+            _merge_dict(config_dict, copy.deepcopy(_PRIVACY_PROFILE_FALLBACK))
+        _merge_dict(
+            config_dict,
+            {
+                "modules": {
+                    "signature_detection": {"enabled": False},
+                    "apk_diffing": {"enabled": False},
+                },
+                "security": {"enable_owasp_assessment": do_sec},
+                "logging": {"level": "DEBUG" if verbose else "INFO"},
             },
-            "security": {"enable_owasp_assessment": do_sec},
-            "logging": {"level": "DEBUG" if verbose else "INFO"},
-        }
+        )
+        if not trackers:
+            _merge_dict(
+                config_dict, {"modules": {"tracker_analysis": {"enabled": False}}}
+            )
+        if work_dir:
+            _merge_dict(config_dict, _work_dir_config(work_dir))
         if _insight_supports_cache_dir():
             cache = self._apk_cache()
             caching = {"enabled": cache.enabled}
@@ -689,11 +863,19 @@ class StaticAnalysis(DataGatherBase):
                 "Dexray Insight runs offline (no Exodus fetch, no library-"
                 "definition update, no version/CVE lookups)"
             )
+        profile_kwargs = {"profile": profile} if native_profiles else {}
+        output_kwargs = (
+            {"output_dir": insight_dir}
+            if insight_dir
+            and _accepts_kwarg(asam.start_apk_static_analysis_new, "output_dir")
+            else {}
+        )
         return asam.start_apk_static_analysis_new(
             apk_file_path,
-            configuration(config_dict=config_dict),
+            configuration(config_dict=config_dict, **profile_kwargs),
             print_results_to_terminal=True,
             verbose=verbose,
+            **output_kwargs,
         )
 
     def _record_in_apk_cache(
@@ -703,6 +885,7 @@ class StaticAnalysis(DataGatherBase):
         analysis_results: dict,
         result_file: str | None,
         security_result_file: str | None,
+        options: dict | None = None,
     ) -> None:
         """Record this run in the APK cache's meta.json (best effort)."""
         try:
@@ -730,6 +913,7 @@ class StaticAnalysis(DataGatherBase):
                 apk_md5=md5.hexdigest(),
                 package=self.last_analysed_app,
                 cache=cache,
+                options=options,
             )
             if key:
                 logger.debug(f"Recorded Insight result in APK cache entry {key}")
