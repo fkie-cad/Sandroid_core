@@ -1714,3 +1714,22 @@ def test_content_contains_searches_past_64_kb_and_the_diff_apart(store, monkeypa
         "files", {"content_contains": r"y{5}z2", "regex": True}, scope="all"
     )
     assert len(one_line["keys"]) == 2  # a match deep inside one long line
+
+
+def test_mask_on_row_line_is_mains_reduced_summary_unmasked():
+    """get_rows / classify sample "row" line: main's name rule, no _mask."""
+    from sandroid.ai import row_classifier as rc
+
+    row = {
+        "key": "f1",
+        "kind": "flow",
+        "method": "GET",
+        "host": "h.com",
+        "path": "/x",
+        "url": "https://u:pw@h.com/x?token=abcdef&q=Bearer abcdefgh",
+        "status": 200,
+    }
+    line = lens_rows._row_line("network", row, mask=True)
+    assert line == rc.network_summary(row, reduce=True)
+    assert "token=abcdef" not in line
+    assert lens_rows._row_line("network", row) == rc.network_summary(row)

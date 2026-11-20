@@ -492,6 +492,11 @@ def test_redact_secrets_still_masks_the_shapes():
         ("1.https://user:pw@host", f"1.https://{safety.REDACTED}@host"),
         ("proxy=-socks5://u:pw@h", f"proxy=-socks5://{safety.REDACTED}@h"),
         ("-http://u:p@h", f"-http://{safety.REDACTED}@h"),
+        ("a" * 40 + "://u:p@h", "a" * 40 + f"://{safety.REDACTED}@h"),
+        (
+            "deadbeef" * 5 + "https://user:pass@host",
+            "deadbeef" * 5 + f"https://{safety.REDACTED}@host",
+        ),
     ],
 )
 def test_url_credentials_at_any_word_boundary(text, expected):

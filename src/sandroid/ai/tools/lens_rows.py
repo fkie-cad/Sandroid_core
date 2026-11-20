@@ -1565,7 +1565,7 @@ def _not_judged(matched: _Matched, scope: str) -> dict[str, Any]:
 
 def _row_line(lens: str, row: Mapping[str, Any], mask: bool = False) -> str:
     """One summary line; with mask on, secret-named query values reduced
-    (main's rule) and the line masked.
+    (main's rule, as main did: the line itself is not masked).
     """
     from sandroid.ai import row_classifier as rc
 
@@ -1573,7 +1573,7 @@ def _row_line(lens: str, row: Mapping[str, Any], mask: bool = False) -> str:
         line = rc.network_summary(row, reduce=mask)
     else:
         line = rc.files_summary(row)
-    return rc._mask(line) if mask else line
+    return line
 
 
 def _basis(

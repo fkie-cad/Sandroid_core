@@ -709,3 +709,13 @@ def test_mask_on_files_lines_and_cells_get_the_name_rule():
     assert "RTSECRET" not in masked
     plain = rc.files_digest(row, mask=False, content=(text, "content")).text
     assert "refresh_token = RTSECRET" in plain
+
+
+def test_mask_on_prefs_names_with_any_characters():
+    """A prefs name is everything before " = " (Firebase's keys have [ ])."""
+    name = "com.google.firebase.auth.GET_TOKEN_RESPONSE.[DEFAULT]"
+    out = rc.mask_names(f"{name} = ya29SECRET\nsession id = SIDVAL\nplain = ok")
+    assert "ya29SECRET" not in out
+    assert "SIDVAL" not in out
+    assert f"{name} = [text, 10 chars]" in out
+    assert "plain = ok" in out

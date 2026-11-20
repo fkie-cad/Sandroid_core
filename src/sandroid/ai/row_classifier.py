@@ -453,6 +453,12 @@ def mask_names(text: str) -> str:
                 cells.append(cell)
             out.append("; ".join(cells))
             continue
+        name, eq, value = line.partition(" = ")
+        if eq and value and name.strip() and is_secret_name(name.strip()):
+            # A prefs line (``name = value``): the whole name, whatever its
+            # characters ("...auth.GET_TOKEN_RESPONSE.[DEFAULT]").
+            out.append(f"{name} = {reduce_value(value)}")
+            continue
         m = _NAME_VALUE_LINE_RE.match(line)
         if m is not None and m.group(4) and is_secret_name(m.group(2)):
             line = m.group(1) + m.group(2) + m.group(3) + reduce_value(m.group(4))

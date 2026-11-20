@@ -251,13 +251,14 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\b(bearer)\s++[A-Za-z0-9._~+/=-]{4,}+"), rf"\1 {REDACTED}"),
     # OpenAI-style keys (sk-..., sk-proj-...).
     (re.compile(r"\bsk-[A-Za-z0-9_-]{8,}+"), f"sk-{REDACTED}"),
-    # Credentials embedded in a URL: scheme://user:pass@host. The scheme
-    # run is bounded (at most 32 characters; an unbounded one rescanned
-    # "a.a.a..." to the end at every word boundary) and possessive, so the
-    # pattern is linear; it still starts at every word boundary
-    # ("1.https://u:p@h", "proxy=-socks5://u:p@h").
+    # Credentials embedded in a URL: scheme://user:pass@host. The match
+    # starts only at the beginning of a run of scheme characters and takes
+    # the whole run possessively, so it is linear (the old "\b[a-z]..."
+    # form rescanned "a.a.a..." to the end at every word boundary); any
+    # URL the old form masked lies at the end of such a run, so this
+    # masks at least as much ("1.https://u:p@h", "-socks5://u:p@h").
     (
-        re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,31}+://)[^/\s:@]++:[^/\s@]++@"),
+        re.compile(r"(?i)(?<![a-z0-9+.-])([a-z0-9+.-]++://)[^/\s:@]++:[^/\s@]++@"),
         rf"\1{REDACTED}@",
     ),
     # key=value style secrets in query strings / log lines.
