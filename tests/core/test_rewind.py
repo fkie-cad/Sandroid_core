@@ -1003,3 +1003,19 @@ def test_find_element_reads_the_merged_web_target_shape():
     assert find_element(target, _dump(node))[0] is not None
     other = {**target, "web": {**target["web"], "engine": "gecko"}}
     assert find_element(other, _dump(node))[0] is None
+
+
+def test_a_load_that_timed_out_says_the_state_is_unknown(tmp_path, monkeypatch):
+    dev = FakeDevice()
+
+    def hung(name, serial):
+        raise rewind.RewindStoppedError("the device state is unknown")
+
+    rec = _rec(tmp_path, monkeypatch)
+    deps = dev.deps()
+    deps.load_snapshot = hung
+    out = rewind.RewindRunner(rec, deps).run(replay=False)
+    assert out.error == "the device state is unknown"
+    assert out.loaded is True
+    assert rec.runs[-1]["loaded"] is True
+    assert not any(c.startswith("pull") for c in dev.calls)

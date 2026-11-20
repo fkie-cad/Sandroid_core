@@ -1005,9 +1005,19 @@ class RecordingController:
             try:
                 from sandroid.services import get_emulator_service
 
-                return bool(get_emulator_service().load_snapshot(name, serial))
+                ok = bool(get_emulator_service().load_snapshot(name, serial))
             finally:
                 self._guarded(self._suppress_disconnect_guard, False)
+            if not ok and not _device_ready(serial):
+                # The console gave up (timeout) while the emulator went on:
+                # whether the start point was loaded is unknown.
+                raise rewind.RewindStoppedError(
+                    "Could not go back to the start point: the emulator did not "
+                    "answer in time. The device state is unknown (it may still "
+                    "be loading the start point); check the emulator before "
+                    "going on."
+                )
+            return ok
 
         def pull(path: str, role: str, rec_id: str, run: int) -> Any:
             if view is None:
@@ -1457,6 +1467,17 @@ class RecordingController:
 
         self._push_modal(ExportModal(), on_export_result)
         return True
+
+
+def _device_ready(serial: str | None) -> bool:
+    """``adb get-state`` says ``device`` (a short, bounded check)."""
+    try:
+        from sandroid.core.adb import Adb
+
+        stdout, _stderr = Adb.send_adb_command("get-state", serial=serial, timeout=10)
+    except Exception:
+        return False
+    return str(stdout or "").strip() == "device"
 
 
 def _step_time(step: Any) -> float | None:

@@ -680,6 +680,11 @@ def test_snapshot_load_failure_resumes_the_monitor_and_pulls_nothing(
             return False
 
     monkeypatch.setattr(services, "get_emulator_service", lambda: Emu())
+    # The emulator answered (refused the load): the device is unchanged.
+    monkeypatch.setattr(
+        "sandroid.tui.controllers.recording_controller._device_ready",
+        lambda serial: True,
+    )
     monkeypatch.setattr(rewind.RewindRunner, "_emit", lambda self, *a, **k: 1)
     monkeypatch.setattr(controller, "_stop_monitor_before_revert", lambda: "cfg")
     monkeypatch.setattr(controller, "_persist", lambda rec, out: None)
@@ -951,3 +956,22 @@ async def test_review_body_scrolls_to_the_last_result():
         body.scroll_end(animate=False)
         await settle(pilot)
         assert body.scroll_y == body.max_scroll_y > 0
+
+
+def test_load_timeout_with_the_device_offline_is_not_reported_as_unchanged(
+    controller, monkeypatch
+):
+    from sandroid import services
+    from sandroid.tui.controllers import recording_controller as rc
+
+    class Emu:
+        def load_snapshot(self, name, serial=None):
+            return False
+
+    monkeypatch.setattr(services, "get_emulator_service", lambda: Emu())
+    monkeypatch.setattr(rc, "_device_ready", lambda serial: False)
+    deps = controller._deps(_rec(), None, replay=False)
+    with pytest.raises(rewind.RewindStoppedError, match="state is unknown"):
+        deps.load_snapshot("sandroid_rec_20261120_133600", "emulator-5560")
+    monkeypatch.setattr(rc, "_device_ready", lambda serial: True)
+    assert deps.load_snapshot("sandroid_rec_20261120_133600", "emulator-5560") is False

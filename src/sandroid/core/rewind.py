@@ -1014,7 +1014,14 @@ class RewindRunner:
             self._check()
             out.monitor_config = self.deps.stop_monitor()
             self.deps.progress("Going back to the start point")
-            if not self.deps.load_snapshot(name, rec.serial):
+            try:
+                loaded = self.deps.load_snapshot(name, rec.serial)
+            except RewindStoppedError:
+                # The load may have happened (it timed out): count the
+                # device as no longer after the action.
+                out.loaded = True
+                raise
+            if not loaded:
                 raise RewindStoppedError(
                     "Could not go back to the start point: the emulator refused "
                     "to load it. The device was not changed."
