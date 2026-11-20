@@ -1323,6 +1323,7 @@ def test_mitm_panel_drops_its_prepared_listener_on_unmount(rig, monkeypatch):
         _device_cb_registered=False,
         _on_device_change=lambda device, prepared=False: None,
         _cancel_reprobe=lambda: None,
+        _unsubscribe_proxy_changes=lambda: None,
         _service=SimpleNamespace(
             remove_listener=lambda cb: None, release_device_proxy=lambda: None
         ),

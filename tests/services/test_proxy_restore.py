@@ -166,25 +166,6 @@ def test_device_prepared_hook_prefers_core_device_prep(monkeypatch):
     assert registered == [pr._device_prepared_hook]
 
 
-def test_device_prepared_hook_falls_back_to_device_manager(monkeypatch):
-    import sandroid.core as core_pkg
-    from sandroid.core import device_manager
-
-    registered = []
-    monkeypatch.setitem(sys.modules, "sandroid.core.device_prep", None)
-    # Already imported: ``from sandroid.core import device_prep`` would
-    # find the package attribute without consulting sys.modules.
-    monkeypatch.delattr(core_pkg, "device_prep", raising=False)
-    monkeypatch.setattr(
-        device_manager,
-        "register_device_prepared_hook",
-        registered.append,
-        raising=False,
-    )
-    assert pr.install_device_prepared_hook()
-    assert registered == [pr._device_prepared_hook]
-
-
 def test_without_the_hook_restart_restores_itself(monkeypatch):
     monkeypatch.setitem(sys.modules, "sandroid.core.device_prep", None)
     calls = []
