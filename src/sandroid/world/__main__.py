@@ -78,8 +78,10 @@ def cmd_render(args: argparse.Namespace) -> int:
     manifest = _generate(args, args.target_sdk)
     tz = world_timezone(manifest)
     anchor = _anchor(args.anchor) or dt.datetime.now(tz)
-    if anchor.tzinfo is None:
-        anchor = anchor.replace(tzinfo=tz)
+    # As prepare() does: local wall times of the world's zone (DST included).
+    anchor = (
+        anchor.replace(tzinfo=tz) if anchor.tzinfo is None else anchor.astimezone(tz)
+    )
     _dump(asdict(manifest.render(anchor)))
     return 0
 
