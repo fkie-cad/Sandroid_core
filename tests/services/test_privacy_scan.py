@@ -879,6 +879,108 @@ def test_delta_pass_scans_whole_marker_groups(svc, flow_dir, monkeypatch):
     assert {h.confidence for h in lat} == {"high"}  # boosted by the pair
 
 
+def _make_legacy(folder: Path) -> None:
+    """Rewrite the session's records as written before value keys."""
+    path = folder / "privacy" / "hits.jsonl"
+    lines = [json.loads(x) for x in path.read_text().splitlines()]
+    for line in lines:
+        line.pop("value_key", None)
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+
+def test_legacy_findings_loaded_before_the_markers_are_not_announced_again(
+    folder, flow_dir
+):
+    """A TUI start reads the session before the identity markers arrive:
+    an older finding repeated by a live flow makes no second line.
+    """
+    first = ps.PrivacyScanService(
+        folder_fn=lambda: folder, flow_dir_fn=lambda: flow_dir
+    )
+    try:
+        _standard_flow(flow_dir)
+        first.set_markers(FP, MARKERS)
+        assert first.flush()
+        n_hits = len(first.hits())
+    finally:
+        first.close()
+    _make_legacy(folder)
+    svc = ps.PrivacyScanService(folder_fn=lambda: folder, flow_dir_fn=lambda: flow_dir)
+    try:
+        svc.load_session(folder)  # before set_markers: no active markers
+        assert len(svc.hits()) == n_hits
+        svc.set_markers(FP, MARKERS)
+        assert svc.flush()
+        with timeline.capture() as lines:
+            rec = _standard_flow(flow_dir, seq=2)
+            svc.submit_flow(rec, flow_dir, 2)
+            assert svc.flush()
+        assert svc.hits_for_flow("f2")
+        assert not [h for h in svc.hits_for_flow("f2") if h.new]
+        assert _privacy_lines(lines) == []
+    finally:
+        svc.close()
+
+
+def test_legacy_plain_android_id_maps_to_its_per_app_marker(
+    folder, flow_dir, monkeypatch
+):
+    """Older sessions named the applied app's Android ID ``android_id``;
+    the active marker is ``android_id@<pkg>``. The old finding counts for
+    it, is not re-recorded when its partial flow completes, and a repeat
+    makes no second line.
+    """
+    monkeypatch.setattr(ps, "DETAIL_RETRY_S", 0.1)
+    pkg = "com.fittrack.app"
+    old = Marker("android_id", SSAID, kind="hex_id", label=f"Android ID ({pkg})")
+    new = Marker(f"android_id@{pkg}", SSAID, kind="hex_id", label=f"Android ID ({pkg})")
+    rec = _rec(1, path=f"/c?ssaid={SSAID}")
+    _write_flow(flow_dir, rec, None)  # no details yet: a partial flow
+    first = ps.PrivacyScanService(
+        folder_fn=lambda: folder, flow_dir_fn=lambda: flow_dir
+    )
+    try:
+        first.set_markers(FP, [*MARKERS, old])
+        assert first.flush()
+        assert {h.marker_id for h in first.hits()} == {"android_id"}
+    finally:
+        first.close()
+    _make_legacy(folder)
+    (flow_dir / "details" / "f1.json").write_text(json.dumps(_detail("f1", req=b"{}")))
+    svc = ps.PrivacyScanService(folder_fn=lambda: folder, flow_dir_fn=lambda: flow_dir)
+    try:
+        with timeline.capture() as lines:
+            svc.set_markers(FP, [*MARKERS, new])  # retro: completes f1
+            assert svc.flush()
+            assert [h.marker_id for h in svc.hits_for_flow("f1")] == ["android_id"]
+            summary = svc.summary()
+            assert (summary.values_found, summary.hits_total) == (1, 1)
+            again = _rec(2, path=f"/c?ssaid={SSAID}")
+            _write_flow(flow_dir, again, _detail("f2", req=b"{}"))
+            svc.submit_flow(again, flow_dir, 2)
+            assert svc.flush()
+        assert [h.marker_id for h in svc.hits_for_flow("f2")] == [new.id]
+        assert not svc.hits_for_flow("f2")[0].new
+        assert _privacy_lines(lines) == []
+        assert svc.summary().hits_total == 2
+    finally:
+        svc.close()
+
+
+def test_markers_sharing_a_value_keep_their_ids(svc, flow_dir, monkeypatch):
+    """Two markers with the same value each get their hits in a delta pass."""
+    _ssaid_flow(flow_dir, 1)
+    svc.set_markers(FP, MARKERS)
+    assert svc.flush()
+    twin = Marker("android_id@other.app", SSAID, kind="hex_id", label="AID (o)")
+    calls = _spy_needles(monkeypatch)
+    svc.set_markers(FP, [*GROWN, twin])
+    assert svc.flush()
+    assert sorted(calls[-1]) == sorted([SSAID_MARKER.id, twin.id])
+    ids = {h.marker_id for h in svc.hits_for_flow("f1")}
+    assert {SSAID_MARKER.id, twin.id} <= ids
+
+
 def test_read_hits_and_run_hits(svc, flow_dir, folder, tmp_path):
     _standard_flow(flow_dir)
     svc.set_markers(FP, MARKERS)

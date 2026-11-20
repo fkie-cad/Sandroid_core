@@ -3600,10 +3600,10 @@ def _frozen_markers(data: dict[str, Any]) -> list[Marker]:
     a marker id stays the same for its value across applies.
     """
     entries = data.get("ssaid") or {}
-    by_value = (
+    value_of = (
         {
-            str(entry.get("value")): str(pkg)
-            for pkg, entry in sorted(entries.items())
+            str(pkg): str(entry.get("value"))
+            for pkg, entry in entries.items()
             if isinstance(entry, dict) and entry.get("value")
         }
         if isinstance(entries, dict)
@@ -3612,8 +3612,16 @@ def _frozen_markers(data: dict[str, Any]) -> list[Marker]:
 
     def stable(m: dict[str, Any]) -> str:
         mid = str(m["id"])
-        pkg = by_value.get(str(m["value"])) if m.get("kind") == "hex_id" else None
-        return f"{mid}@{pkg}" if pkg and "@" not in mid else mid
+        value = str(m["value"])
+        if "@" in mid or m.get("kind") != "hex_id":
+            return mid
+        # The applied app (its label names it, "Android ID (<pkg>)"), which
+        # wins when apps share a value; else the first app with the value.
+        label = re.search(r"\(([^()\s]+)\)\s*$", str(m.get("label") or ""))
+        if label and value_of.get(label.group(1)) == value:
+            return f"{mid}@{label.group(1)}"
+        pkg = next((p for p in sorted(value_of) if value_of[p] == value), None)
+        return f"{mid}@{pkg}" if pkg else mid
 
     return [
         Marker(

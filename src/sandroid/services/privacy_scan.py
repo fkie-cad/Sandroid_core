@@ -790,6 +790,9 @@ class PrivacyScanService:
         self._value_key: dict[str, str] = {}
         #: Marker id -> value key, for the active markers.
         self._digest_of: dict[str, str] = {}
+        #: (legacy marker id, label) -> the active value key it became, or
+        #: None (see _legacy_vkey); cleared with the markers.
+        self._aliases: dict[tuple[str, str], str | None] = {}
         #: The active markers as given and the digest of their set.
         self._marker_list: tuple[Marker, ...] = ()
         self._mset: str | None = None
@@ -865,11 +868,18 @@ class PrivacyScanService:
             if mset is not None and digests is not None:
                 self._marker_sets[mset] = digests
             self._needles = needles
-            self._digest_of = {m.id: _marker_digest(m) for m in self._markers.values()}
+            digest_of = {m.id: _marker_digest(m) for m in self._markers.values()}
+            remap = digest_of != self._digest_of
+            self._digest_of = digest_of
+            self._aliases = {}
             self._value_key = {
                 d: (self._markers[mid].group or d) for mid, d in self._digest_of.items()
             }
             self._values_total = len(set(self._value_key.values()))
+            if remap:
+                # Older records (no value key) resolve through the active
+                # markers: their novelty keys may resolve differently now.
+                self._rebuild_novelty()
             self._recount()
             if needles is not None and fp and mset and changed:
                 self._retro_request = _RetroRequest(
@@ -886,14 +896,16 @@ class PrivacyScanService:
     def _recount(self) -> None:
         """Lock held: summary counters for the active profile."""
         fp = self._fp
-        mine = [h for h in self._hits if fp and h.fp == fp]
-        self._found_values = {
-            self._value_key[key]
-            for h in mine
-            if (key := self._hit_vkey(h)) in self._value_key
-        }
+        # Hits of the active markers only (older records mapped through
+        # _legacy_vkey): every counter counts the same hits.
+        mine = [
+            (h, key)
+            for h in self._hits
+            if fp and h.fp == fp and (key := self._hit_vkey(h)) in self._value_key
+        ]
+        self._found_values = {self._value_key[key] for _h, key in mine}
         self._hits_total = len(mine)
-        self._last_hit_at = max((h.at for h in mine), default=None)
+        self._last_hit_at = max((h.at for h, _key in mine), default=None)
 
     def attach_identity(self) -> bool:
         """Follow the identity service's active markers (if it exists)."""
@@ -1532,10 +1544,7 @@ class PrivacyScanService:
             self._version_paths |= version_paths
             for rec in hits:
                 self._index(rec)
-                key = _novelty_key(rec, self._hit_vkey(rec))
-                self._seen.add(key)
-                if rec.new:
-                    self._emitted.add(key)
+            self._rebuild_novelty()
             self._recount()
 
     def _index(self, rec: HitRecord) -> None:
@@ -1568,11 +1577,67 @@ class PrivacyScanService:
 
     def _hit_vkey(self, rec: HitRecord) -> str:
         """The value key of a record (older records: by the active marker
-        of its id, else the id itself).
+        they map to, see _legacy_vkey, else ``id:<marker id>``).
         """
         return (
-            rec.value_key or self._digest_of.get(rec.marker_id) or f"id:{rec.marker_id}"
+            rec.value_key
+            or self._legacy_vkey(rec.marker_id, rec.label)
+            or f"id:{rec.marker_id}"
         )
+
+    def _legacy_vkey(self, marker_id: str, label: str) -> str | None:
+        """The active marker an older record (no value key) belongs to.
+
+        Its id when that is still active; else, for an id that became
+        per-app (``android_id`` -> ``android_id@<pkg>``), the active marker
+        of the package its label names (``"Android ID (<pkg>)"``), else the
+        one with the same label, else the only one of that id.
+        """
+        digest = self._digest_of.get(marker_id)
+        if digest is not None:
+            return digest
+        key = (marker_id, label)
+        if key in self._aliases:
+            return self._aliases[key]
+        prefix = f"{marker_id}@"
+        ids = [mid for mid in self._digest_of if mid.startswith(prefix)]
+        pkg = _label_package(label)
+        pick = None
+        if pkg and prefix + pkg in self._digest_of:
+            pick = prefix + pkg
+        else:
+            same = [mid for mid in ids if self._markers[mid].label == label]
+            if len(same) == 1:
+                pick = same[0]
+            elif len(ids) == 1:
+                pick = ids[0]
+        found = self._digest_of[pick] if pick is not None else None
+        self._aliases[key] = found
+        return found
+
+    def _known_keys(self, rec: HitRecord) -> tuple[str, ...]:
+        """The value keys a recorded hit stands for in the "already
+        recorded" checks (older records: their id and the marker they map to).
+        """
+        if rec.value_key:
+            return (rec.value_key,)
+        legacy = self._legacy_vkey(rec.marker_id, rec.label)
+        own = f"id:{rec.marker_id}"
+        return (own, legacy) if legacy else (own,)
+
+    def _rebuild_novelty(self) -> None:
+        """Lock held: the novelty keys of the loaded records (``_seen``,
+        and ``_emitted`` for those that made a timeline line). An older
+        record counts under its id as well as under the marker it maps to.
+        """
+        self._seen = set()
+        self._emitted = set()
+        for rec in self._hits:
+            for vkey in self._known_keys(rec):
+                key = _novelty_key(rec, vkey)
+                self._seen.add(key)
+                if rec.new:
+                    self._emitted.add(key)
 
     def _is_done(self, item: _Item) -> bool:
         """``item`` was already scanned for every marker it carries."""
@@ -1772,9 +1837,10 @@ class PrivacyScanService:
         vkeys = _vkeys(item.needles)
         with self._lock:
             known = {
-                (h.part, _known_key(h), h.transform)
+                (h.part, vkey, h.transform)
                 for h in self._by_flow.get(str(rec.get("id")), ())
                 if h.fp == item.fp
+                for vkey in self._known_keys(h)
             }
         records = []
         t = rec.get("ts_start")
@@ -1885,9 +1951,10 @@ class PrivacyScanService:
             # Hits already recorded for this version and profile (a delta
             # pass, a rescan) are not recorded again.
             known = {
-                (h.source.get("version"), h.part, _known_key(h), h.transform)
+                (h.source.get("version"), h.part, vkey, h.transform)
                 for h in self._by_file.get(item.device_path, ())
                 if h.fp == item.fp
+                for vkey in self._known_keys(h)
             }
         vkeys = _vkeys(item.needles)
         if not item.delta:  # a delta pass sees only some markers
@@ -2051,9 +2118,11 @@ class PrivacyScanService:
         hit = agg.hit
         vkey = _vkeys(item.needles).get(hit.marker_id)
         key = (vkey or f"id:{hit.marker_id}", hit.transform, *novelty)
+        # Older records also count under their marker id.
+        by_id = (f"id:{hit.marker_id}", hit.transform, *novelty)
         with self._lock:
             if new is None:
-                new = key not in self._seen
+                new = key not in self._seen and by_id not in self._seen
             self._seen.add(key)
             marker = self._markers.get(hit.marker_id)
         when = float(t) if isinstance(t, (int, float)) else None
@@ -2104,7 +2173,8 @@ class PrivacyScanService:
                 continue
             with self._lock:
                 key = _novelty_key(rec, self._hit_vkey(rec))
-                if key in self._emitted:
+                by_id = _novelty_key(rec, f"id:{rec.marker_id}")
+                if key in self._emitted or by_id in self._emitted:
                     out.append(rec)
                     continue
                 self._emitted.add(key)
@@ -2193,10 +2263,9 @@ class PrivacyScanService:
             self.revision += 1
             for rec in records:
                 self._index(rec)
-                if rec.fp == self._fp:
-                    key = self._hit_vkey(rec)
-                    if key in self._value_key:
-                        self._found_values.add(self._value_key[key])
+                key = self._hit_vkey(rec)
+                if rec.fp == self._fp and key in self._value_key:
+                    self._found_values.add(self._value_key[key])
                     self._hits_total += 1
                     self._last_hit_at = rec.at
             listeners = list(self._listeners)
@@ -2223,9 +2292,13 @@ class PrivacyScanService:
         gen = self._gen
         now = time.monotonic()
         fp = request.fp
-        by_digest = {_marker_digest(m): m for m in request.markers}
+        # Markers with the same value (and kind, forms, group) share a
+        # digest; each keeps its id, so each gets its own hits.
+        by_digest: dict[str, list[Marker]] = {}
         groups: dict[str, set[str]] = {}
-        for digest, marker in by_digest.items():
+        for marker in request.markers:
+            digest = _marker_digest(marker)
+            by_digest.setdefault(digest, []).append(marker)
             if marker.group:
                 groups.setdefault(marker.group, set()).add(digest)
         with self._lock:
@@ -2244,11 +2317,13 @@ class PrivacyScanService:
                 # (their hits already recorded are not recorded again).
                 wide = set(missing)
                 for digest in missing:
-                    marker = by_digest.get(digest)
-                    if marker is not None and marker.group:
-                        wide |= groups[marker.group]
+                    for marker in by_digest.get(digest, ()):
+                        if marker.group:
+                            wide |= groups[marker.group]
                 scan = frozenset(wide)
-                needles = build_needles(m for d, m in by_digest.items() if d in scan)
+                needles = build_needles(
+                    m for d, ms in by_digest.items() if d in scan for m in ms
+                )
                 mset = _set_digest(scan)
                 with self._lock:
                     self._marker_sets[mset] = scan
@@ -2464,7 +2539,7 @@ def _marker_digest(marker: Marker) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-@functools.lru_cache(maxsize=16)
+@functools.lru_cache(maxsize=4)
 def _vkeys(needles: NeedleSet) -> dict[str, str]:
     """Marker id -> value key for the markers of ``needles`` (cached per
     needle set; callers do not change the dict).
@@ -2472,11 +2547,13 @@ def _vkeys(needles: NeedleSet) -> dict[str, str]:
     return {m.id: _marker_digest(m) for m in needles.markers}
 
 
-def _known_key(rec: HitRecord) -> str:
-    """A record's value key for the "already recorded" check (older
-    records: ``id:<marker id>``).
-    """
-    return rec.value_key or f"id:{rec.marker_id}"
+_LABEL_PACKAGE_RE = re.compile(r"\(([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)\)\s*$")
+
+
+def _label_package(label: str) -> str | None:
+    """``"Android ID (com.example.app)"`` -> ``com.example.app``."""
+    match = _LABEL_PACKAGE_RE.search(label or "")
+    return match.group(1) if match else None
 
 
 def _note_cover(

@@ -1412,3 +1412,21 @@ def test_older_frozen_records_get_the_per_app_android_id():
     }
     ids = [m.id for m in ident._frozen_markers(record)]
     assert ids == ["android_id@com.a", "android_id@com.b", "label"]
+    # Two apps with one value: the applied one (its label names it) wins.
+    shared = {
+        "ssaid": {
+            "com.a": {"value": "5555eeee6666ffff"},
+            "com.z": {"value": "5555eeee6666ffff"},
+        },
+        "markers": [
+            {
+                "id": "android_id",
+                "value": "5555eeee6666ffff",
+                "kind": "hex_id",
+                "label": "Android ID (com.a)",
+            }
+        ],
+    }
+    assert [m.id for m in ident._frozen_markers(shared)] == ["android_id@com.a"]
+    shared["markers"][0]["label"] = "Android ID (com.z)"
+    assert [m.id for m in ident._frozen_markers(shared)] == ["android_id@com.z"]
