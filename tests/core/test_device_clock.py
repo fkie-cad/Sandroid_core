@@ -289,7 +289,7 @@ def test_a_move_over_two_seconds_in_either_offset_is_a_jump(device):
     assert pull["reason"] == "pull"
     assert pull["jump"] is True
     assert pull["kind"] == "jump"
-    assert _clock_lines()[-1]["summary"] == "⏱ clock jump · wall −3.5 s"
+    assert _clock_lines()[-1]["summary"] == "clock jump · wall −3.5 s"
     assert pull["jump_wall_s"] == pytest.approx(3.5, abs=1e-3)  # further behind
     assert pull["jump_mono_s"] == pytest.approx(0.0, abs=1e-3)
     device.host += 30
@@ -377,7 +377,7 @@ def test_snapshot_load_with_sync_on_sets_the_clock(device, caplog):
     assert sync["trigger"] == "snapshot-load"
     assert sync["sets"] == 1
     assert "sync_policy" not in sync
-    assert _clock_lines()[-1]["summary"] == "⏱ clock synced · −75 min → +0.0 s"
+    assert _clock_lines()[-1]["summary"] == "clock synced · −75 min to +0.0 s"
     # The wall clock moved, CLOCK_MONOTONIC did not.
     assert sync["off_mono"] == pytest.approx(load["off_mono"], abs=1e-3)
     public = {k: v for k, v in final.items() if k not in ("serial", "host_at")}

@@ -586,15 +586,13 @@ def _summary(kind: str, entry: dict) -> str:
         before = entry.get("before_off_wall")
         after = entry.get("after_off_wall")
         if isinstance(before, (int, float)) and isinstance(after, (int, float)):
-            return (
-                f"⏱ clock synced · {format_offset(-before)} → {format_offset(-after)}"
-            )
-        return f"⏱ clock synced · device {shown}"
+            return f"clock synced · {format_offset(-before)} to {format_offset(-after)}"
+        return f"clock synced · device {shown}"
     if kind == "jump":
         moved = entry.get("jump_wall_s")
         if isinstance(moved, (int, float)):
-            return f"⏱ clock jump · wall {format_offset(-moved)}"
-        return f"⏱ clock jump · device {shown} ({entry.get('reason')})"
+            return f"clock jump · wall {format_offset(-moved)}"
+        return f"clock jump · device {shown} ({entry.get('reason')})"
     err = entry.get("err_ms")
     err_text = f" ±{round(err)} ms" if isinstance(err, (int, float)) else ""
     return f"clock · device {shown}{err_text} ({entry.get('reason')})"

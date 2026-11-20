@@ -267,7 +267,7 @@ def timeline_pull(
                 state = "first version"
             else:
                 state = "changed" if changed else "no content change"
-            summary = f"◆ {short} {rel} ({state})"
+            summary = f"pulled {short} {rel} ({state})"
         else:
             data["error"] = (error or "pull failed")[:500]
             summary = f"pull failed · {rel}"
@@ -297,7 +297,7 @@ def timeline_check(path: str, trigger: str, same_as: str, note: str) -> int | No
         return get_timeline().emit(
             "files",
             "check",
-            summary=f"◇ {rel} unchanged (same as {same_as})",
+            summary=f"{rel} unchanged (same as {same_as})",
             actor="user" if trigger == "manual" else "sandroid",
             data={"path": path, "same_as": same_as, "trigger": trigger, "note": note},
             ref={"path": _timeline_rel(checks), "lens": "files"},

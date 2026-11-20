@@ -1214,7 +1214,7 @@ def test_quit_dialog_says_what_quitting_tears_down(monkeypatch):
         SimpleNamespace(is_running=lambda: True, owned_device_proxy="10.0.2.2:8090"),
     )
     notes = QuitController._quit_notes()
-    assert notes[:2] == ["stops mitmweb", "clears the device proxy"]
+    assert notes[:2] == ["stops Mitmproxy", "clears the device proxy"]
 
 
 def test_ui_dispatcher_runs_in_the_ui_context_and_reports_once(caplog):

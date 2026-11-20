@@ -61,7 +61,7 @@ def test_a_load_is_a_world_change_before_the_clock_is_sampled(service, monkeypat
     assert world["data"]["ok"] is True
     assert world["data"]["cause"] == "snapshot-load"
     assert world["data"]["console_ms"] >= 0
-    assert world["summary"] == "⟲ snapshot 'clean' loaded"
+    assert world["summary"] == "snapshot 'clean' loaded"
     assert "t_err_ms" in world
     assert world["t"] >= timeline._iso(sent)
 

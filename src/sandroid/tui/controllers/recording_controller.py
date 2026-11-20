@@ -699,6 +699,7 @@ class RecordingController:
                 None,
                 kind="record-stop",
                 summary="recording stopped",
+                data={"rec_id": rec.rec_id},
                 ref={"of": rec.seq.get("start")} if rec.seq.get("start") else None,
             )
             self._collect_changes(rec, "files_stop.tsv")

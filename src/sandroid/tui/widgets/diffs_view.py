@@ -414,11 +414,11 @@ class DiffsView(FilesSubViewBase):
         info = None
         if total:
             info = f"{total} run{'s' if total != 1 else ''} · ⏎ details"
-        title = f"● Play running · {self._play_phase}" if self._play_phase else None
+        title = self._play_phase or None
         try:
             ms.set_lens_caption("runs", title, info)
             unread = len(self._unread_run_ids)
-            ms.set_lens_badge("runs", f"●{unread}" if unread else None)
+            ms.set_lens_badge("runs", f"{unread} new" if unread else None)
         except Exception:
             logger.debug("DiffsView: caption update failed", exc_info=True)
 
@@ -820,16 +820,17 @@ class DiffsView(FilesSubViewBase):
         run_id = s.get("run_id", "")
         number = Text(f"{self._run_number(run_id)}", style=_DIM, justify="right")
         label = Text()
+        # In review / new: colour and weight, no marker symbol.
+        style = ""
         if run_id == self._scope_run_id:
-            label.append("◆ ", style=_ACCENT)
+            style = f"bold {_ACCENT}"
         elif run_id in self._unread_run_ids:
-            label.append("● ", style="#22d3ee")
-        else:
-            label.append("  ")
+            style = "bold"
+        label.append("  ")
         name = s.get("label") or run_id
         if len(name) > label_width:
             name = name[: label_width - 1] + "…"
-        label.append(name.ljust(label_width))
+        label.append(name.ljust(label_width), style=style)
         when = Text(
             self._format_when(s.get("recorded_at"), short=self._compact),
             style=_MUTED,
@@ -837,7 +838,7 @@ class DiffsView(FilesSubViewBase):
         took = Text(self._format_duration(self._run_seconds(s)), style=_MUTED)
         replays = self._replays(run_id)
         if replays > 1:
-            took.append(f"  ×{replays}", style=_DIM)
+            took.append(f"  {replays} replays", style=_DIM)
         if self._compact:
             return [number, label, when]
         return [number, label, when, took, self._changes_cell(s)]
@@ -949,7 +950,7 @@ class DiffsView(FilesSubViewBase):
         if diverged:
             others = ",".join(f"#{self._run_number(o)}" for o, _ in diverged[:3])
             cell.append("   ")
-            cell.append(f"≠ {others}", style=_WARN)
+            cell.append(f"differs from {others}", style=_WARN)
         return cell
 
     def _problem(self, s: dict[str, Any]) -> tuple[str, str] | None:
@@ -958,11 +959,11 @@ class DiffsView(FilesSubViewBase):
         errors = facts.get("run_errors") or {}
         steps = len(errors.get("steps") or [])
         if s.get("error") or errors.get("fatal"):
-            if s.get("error") == "Replay cancelled":
-                return "◼ stopped", _WARN
-            return "✕ aborted", _BAD
+            if s.get("error") == "Replay cancelled" or s.get("mode"):
+                return "stopped", _WARN  # a Rewind stops, it never aborts
+            return "aborted", _BAD
         if steps:
-            return f"⚠ {steps} error{'s' if steps != 1 else ''}", _WARN
+            return f"{steps} error{'s' if steps != 1 else ''}", _WARN
         return None
 
     @staticmethod
@@ -1069,7 +1070,7 @@ class DiffsView(FilesSubViewBase):
         label = s.get("label") or run_id
         subtitle = None
         if run_id == self._scope_run_id:
-            subtitle = f"[{_ACCENT}]◆ in review[/] [{_DIM}]· L back to live[/]"
+            subtitle = f"[{_ACCENT}]in review[/] [{_DIM}]· L back to live[/]"
         return InspectorContent(
             title=label,
             subtitle=subtitle,
@@ -1174,7 +1175,7 @@ class DiffsView(FilesSubViewBase):
     def _status_text(self, s: dict[str, Any], facts: dict[str, Any]) -> Text:
         problem = self._problem(s)
         if problem is None:
-            return Text("✓ completed", style=_GOOD)
+            return Text("completed", style=_GOOD)
         text, style = problem
         return Text(text, style=style)
 
@@ -2065,7 +2066,9 @@ class DiffsView(FilesSubViewBase):
 
     def _toast_new_run(self, run_id: str) -> None:
         label = self._current_label(run_id)
-        self._notify(f"New run ready: {label} (marked ● in Runs)", "information")
+        self._notify(
+            f"New run ready: {label} (shown in bold in Sessions)", "information"
+        )
 
 
 __all__ = ["DiffsView"]

@@ -379,7 +379,7 @@ class ReviewModal(ForensicModal[None]):
         }.get(fr.verdict, "verdict-none")
         out: list[Any] = [
             Static(escape(_short(fr.path, self.rec.pkg, 90)), classes="review-section"),
-            Static("What your action changed (Before → After)"),
+            Static("What your action changed (Before to After)"),
             Static(escape(_clip_lines(fr.action_text or "no change"))),
         ]
         if fr.before is None:
@@ -392,7 +392,7 @@ class ReviewModal(ForensicModal[None]):
                 )
             )
         if fr.after_replay is not None:
-            out.append(Static("What the replay changed (Before → After (replay))"))
+            out.append(Static("What the replay changed (Before to After (replay))"))
             out.append(Static(escape(_clip_lines(fr.replay_text or "no change"))))
             extra = [f"only in your run: {ln}" for ln in fr.only_run[:20]]
             extra += [f"only in the replay: {ln}" for ln in fr.only_replay[:20]]

@@ -1680,7 +1680,7 @@ class TrackingService:
         _emit(
             "tracking",
             "start",
-            summary=f"◉ tracking on · {self._mode} helper"
+            summary=f"tracking on · {self._mode} helper"
             if self._mode != "off"
             else "◉ tracking on · no helper",
             actor=actor or self._actor("user"),
@@ -1750,7 +1750,7 @@ class TrackingService:
         _emit(
             "tracking",
             "stop",
-            summary=f"◎ tracking off · {inputs} inputs, {shots} shots"
+            summary=f"tracking off · {inputs} inputs, {shots} shots"
             + (f" ({dropped} dropped)" if dropped else ""),
             actor=actor or self._actor("user"),
             data={
@@ -2492,7 +2492,10 @@ class TrackingService:
         _emit(
             "input",
             "confirm",
-            summary=f"✓ {str(click['ev']).lower().replace('_', ' ')} #{rec['seq']}",
+            summary=(
+                f"confirmed · {str(click['ev']).lower().replace('_', ' ')} "
+                f"#{rec['seq']}"
+            ),
             actor="app",
             clk="dev_mono",
             dev_mono=click["t_ms"] / 1000.0,
@@ -2964,7 +2967,7 @@ class TrackingService:
         seq = _emit(
             "screen",
             kind,
-            summary=f"→ {shown}" + (f" · {_clip(title, 40)}" if title else ""),
+            summary=f"screen {shown}" + (f" · {_clip(title, 40)}" if title else ""),
             actor="app",
             clk="dev_mono",
             dev_mono=dev_mono,

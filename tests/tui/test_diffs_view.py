@@ -186,7 +186,9 @@ async def test_new_run_cursor_stays_on_older_run_row() -> None:
         await until(pilot, lambda: table.row_count == 3)
         await settle(pilot)
         assert view._cursor_run_id() == "20260101_000000_aaaaaa"
-        assert "●" in str(table.get_row_at(0)[1])
+        cell = table.get_row_at(0)[1]  # new: bold, no marker symbol
+        assert "●" not in str(cell)
+        assert any("bold" in str(span.style) for span in cell.spans)
 
 
 @pytest.mark.asyncio
@@ -340,10 +342,10 @@ async def test_table_row_shows_changes_errors_and_batch() -> None:
         await pilot.pause()
         rows = [[str(c) for c in table.get_row_at(i)] for i in range(3)]
         assert [r[0] for r in rows] == ["3", "2", "1"]
-        assert "✕ aborted" in rows[0][4]
+        assert "aborted" in rows[0][4]
         assert "2 files · 3 hosts" in rows[1][4]
-        assert "⚠ 2 errors" in rows[1][4]
-        assert "×3" in rows[2][3]
+        assert "2 errors" in rows[1][4]
+        assert "3 replays" in rows[2][3]
         assert len(table.columns) == 5
 
 
@@ -472,7 +474,9 @@ async def test_enter_inspects_run_and_v_reviews_it_until_l() -> None:
         assert ms.scope == run_history.scope_for_run(ids[0])
         assert ms.query_one("#shell-header").pill_text == "◆ REVIEW #1 Consent · accept"
         assert view._scope_run_id == ids[0]
-        assert "◆" in str(view.query_one("#runs-table").get_row_at(1)[1])
+        cell = view.query_one("#runs-table").get_row_at(1)[1]
+        assert "◆" not in str(cell)  # in review: accent colour, no symbol
+        assert any("bold" in str(span.style) for span in cell.spans)
         assert ms.check_action("back_to_live", ()) is True
 
         await pilot.press("3")  # another lens: L works from there too
@@ -737,8 +741,8 @@ async def test_runs_of_the_same_recording_that_diverge_are_flagged() -> None:
         await until(pilot, lambda: len(view._facts) == 3)
         await pilot.pause()
         rows = [[str(c) for c in table.get_row_at(i)] for i in range(3)]
-        assert "≠ #1" in rows[1][4]  # B (#2) diverges from A (#1)
-        assert "≠ #2" in rows[2][4]
+        assert "differs from #1" in rows[1][4]  # B (#2) diverges from A (#1)
+        assert "differs from #2" in rows[2][4]
         assert "≠" not in rows[0][4]  # another recording: not compared
         summary = view._summary_sections(
             view._summary("20260101_000000_aaaaaa"),

@@ -243,7 +243,7 @@ def test_result_lines_use_the_plain_words():
     res = rewind.FileResult("/a", "v1", "v2", "v3", "x", "y", rewind.DIFFERENT)
     res.only_run = ["+ a"]
     lines = rewind.result_lines(res)
-    assert lines[0] == "What your action changed (Before → After):"
+    assert lines[0] == "What your action changed (Before to After):"
     assert any("only in your run" in ln for ln in lines)
     assert lines[-1] == f"Result: {rewind.DIFFERENT}"
 

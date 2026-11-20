@@ -924,7 +924,7 @@ class EmulatorService:
                 "snapshot-load",
                 src="snapshot",
                 kind="load",
-                summary=f"⟲ snapshot '{_name_text(name)}' loaded",
+                summary=f"snapshot '{_name_text(name)}' loaded",
                 t=t_ret,
                 t_err_ms=(t_ret - t_sent) * 500,
                 dev=serial,

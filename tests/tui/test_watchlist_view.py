@@ -723,7 +723,7 @@ async def test_pulls_and_checks_are_session_timeline_lines(
     assert first["data"]["trigger"] == "watch"
     assert first["data"]["changed"] is None
     assert first["ref"]["path"] == f"files/com.app/config_a/{v1.name}/acquisition.json"
-    assert first["summary"] == "◆ v001 config_a (first version)"
+    assert first["summary"] == "pulled v001 config_a (first version)"
     assert (second["kind"], second["actor"]) == ("pull", "user")
     assert second["data"]["changed"] is True
     assert second["data"]["version"] == v2.name
@@ -737,7 +737,7 @@ async def test_pulls_and_checks_are_session_timeline_lines(
         "lens": "files",
     }
     assert "diff" not in second["data"]
-    assert second["summary"] == "◆ v002 config_a (changed)"
+    assert second["summary"] == "pulled v002 config_a (changed)"
     assert second["pkg"] == "com.app"
     assert check["kind"] == "check"
     assert check["data"]["same_as"] == "v002"

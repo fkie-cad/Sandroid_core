@@ -798,7 +798,7 @@ def _no_change(lines: list[str], note: str) -> bool:
 
 
 def file_result(rec: Recording, path: str, *, with_replay: bool = True) -> FileResult:
-    """Before → After and Before → After (replay) of one selected file.
+    """Before to After and Before to After (replay) of one selected file.
 
     ``with_replay=False``: the latest run was a plain Rewind, so an older
     replay's copy is not compared (its verdict would be stale).
@@ -840,12 +840,12 @@ def file_result(rec: Recording, path: str, *, with_replay: bool = True) -> FileR
 def result_lines(res: FileResult) -> list[str]:
     """The result of one file as plain lines (Sessions lens, AI, report)."""
     words = ROLE_WORDS
-    out = ["What your action changed (Before → After):"]
+    out = ["What your action changed (Before to After):"]
     if res.before is None:
         out.append("  Before was not copied (no rewind yet).")
     out.extend(f"  {ln}" for ln in (res.action_text or "no change").splitlines())
     if res.after_replay is not None:
-        out.append(f"What the replay changed (Before → {words['after_replay']}):")
+        out.append(f"What the replay changed (Before to {words['after_replay']}):")
         out.extend(f"  {ln}" for ln in (res.replay_text or "no change").splitlines())
         for ln in res.only_run:
             out.append(f"  only in your run: {ln}")
