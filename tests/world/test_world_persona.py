@@ -371,3 +371,114 @@ def test_a_failed_identity_value_saves_nothing(build_env) -> None:
     with pytest.raises(persona.PersonaError, match="gaid"):
         persona.build_persona(SERIAL, "mara", identity=svc, emulator=emu, device=dev)
     assert emu.calls == []
+
+
+# ------------------------------------------------------------------- stage
+
+
+def test_the_persona_stage_is_registered_before_identity() -> None:
+    from sandroid.core import device_prep
+
+    names = [(s.name, s.order) for s in device_prep._STAGES]
+    assert ("persona", 10) in names
+    assert names.index(("persona", 10)) < [n for n, _o in names].index("identity")
+
+
+@pytest.fixture
+def stage_env(svc, avd_root, monkeypatch):
+    from sandroid.core import emulator
+
+    meta: dict = {"persona": "mara"}
+    monkeypatch.setattr(
+        emulator, "launch_record", lambda serial: {"meta": meta} if meta else None
+    )
+    real = persona.manifest_for_profile
+    monkeypatch.setattr(
+        persona,
+        "manifest_for_profile",
+        lambda pid, **kw: real(pid, **{**kw, "service": svc, "packs": PACKS}),
+    )
+    monkeypatch.setattr(persona, "_active_profile_id", lambda: None)
+    stamp: dict = {}
+
+    class Dev(StampDevice):
+        def __init__(self, serial: str) -> None:
+            super().__init__(None)
+
+        def shell(self, script, *, timeout=60, zygote=False):
+            if "getprop" in script:
+                return ShellResult(0, "35\n", "")
+            return ShellResult(0, json.dumps(stamp) if stamp else "", "")
+
+    monkeypatch.setattr(persona, "Device", Dev)
+    return meta, stamp
+
+
+def test_no_persona_launch_is_silent(stage_env) -> None:
+    meta, _stamp = stage_env
+    meta.clear()
+    assert persona.persona_stage(SERIAL, True, 120.0) is None
+
+
+def test_a_loaded_persona_is_info(stage_env, svc) -> None:
+    _meta, stamp = stage_env
+    manifest, _ = persona.manifest_for_profile("mara", target_sdk=35)
+    stamp.update(_stamp(manifest.world_fp))
+    note = persona.persona_stage(SERIAL, True, 120.0)
+    assert note.level == "info"
+    assert manifest.world_fp[:12] in note.text
+
+
+def test_another_world_is_left_alone(stage_env, monkeypatch) -> None:
+    _meta, stamp = stage_env
+    stamp.update(_stamp("e" * 64))
+    monkeypatch.setattr(persona, "build_persona", pytest.fail)
+    note = persona.persona_stage(SERIAL, True, 120.0)
+    assert note.level == "warning"
+    assert "another world (eeeeeeeeeeee" in note.text
+
+
+def test_missing_photos_are_named_not_downloaded(stage_env, monkeypatch) -> None:
+    from sandroid.world import photos
+
+    seen = {}
+
+    def fake_ensure(entries, cache_dir=None, **kw):
+        seen.update(kw)
+        out = photos.PhotoFetch()
+        out.failed = {e["id"]: "not in the cache" for e in entries}
+        return out
+
+    monkeypatch.setattr(photos, "ensure_photos", fake_ensure)
+    monkeypatch.setattr(persona, "build_persona", pytest.fail)
+    note = persona.persona_stage(SERIAL, True, 120.0)
+    assert seen == {"download": False}
+    assert note.level == "warning"
+    assert "photos fetch --profile mara" in note.text
+
+
+def test_a_clean_base_is_built_and_saved(stage_env, monkeypatch) -> None:
+    from sandroid.world import photos
+
+    monkeypatch.setattr(
+        photos,
+        "ensure_photos",
+        lambda entries, cache_dir=None, **kw: photos.PhotoFetch(),
+    )
+    calls = []
+
+    def fake_build(serial, pid, **kw):
+        calls.append((serial, pid, kw.get("rebuild")))
+        return persona.PersonaBuild(
+            profile=pid,
+            snapshot="sandroid_persona_mara_x",
+            save=persona.PersonaSave(name="sandroid_persona_mara_x", saved=True),
+        )
+
+    monkeypatch.setattr(persona, "build_persona", fake_build)
+    monkeypatch.setattr(persona, "_active_profile_id", lambda: "other")
+    note = persona.persona_stage(SERIAL, True, 120.0)
+    assert calls == [(SERIAL, "mara", True)]
+    assert "saved as sandroid_persona_mara_x" in note.text
+    assert note.level == "warning"  # the identity stage applies another profile
+    assert "applies other, not mara" in note.text

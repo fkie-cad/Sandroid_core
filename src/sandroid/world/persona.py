@@ -357,6 +357,93 @@ def build_persona(
     return out
 
 
+def launch_persona(serial: str) -> str | None:
+    """The persona id of Sandroid's live launch of ``serial`` (``meta.persona``)."""
+    from sandroid.core import emulator as emu
+
+    record = emu.launch_record(serial)
+    meta = (record or {}).get("meta") or {}
+    value = meta.get("persona") if isinstance(meta, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def persona_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
+    """The device-prep stage of a persona launch (``meta.persona``).
+
+    * The device holds the persona's world (its snapshot was loaded): info.
+    * It holds another world: a warning; nothing is changed.
+    * It holds none (a clean base): the persona is built and its snapshot
+      saved, so the next start loads it. A photo missing from the cache is
+      a warning instead: a download could outlast the stage.
+
+    Not a persona launch: nothing (``None``).
+    """
+    from sandroid.core.device_prep import StageNote
+    from sandroid.world.photos import ensure_photos, photo_entries
+    from sandroid.world.prepare import PrepareError
+
+    pid = launch_persona(serial)
+    if pid is None:
+        return None
+    label = f"persona {pid}"
+    try:
+        dev = Device(serial)
+        sdk = dev.shell("getprop ro.build.version.sdk", timeout=30).out.strip()
+        manifest, profile = manifest_for_profile(
+            pid, target_sdk=int(sdk) if sdk.isdigit() else None
+        )
+    except Exception as exc:
+        return StageNote("warning", f"{label}: {exc}")
+    notes: list[str] = []
+    active = _active_profile_id()
+    if active is not None and active != profile.id:
+        notes.append(f"the identity stage applies {active}, not {profile.id}")
+    stamp = device_world(serial, device=dev)
+    fp = manifest.world_fp
+    if stamp is not None:
+        if stamp.get("state") == "complete" and stamp.get("world_fp") == fp:
+            return StageNote(
+                "warning" if notes else "info",
+                "; ".join([f"{label}: world {fp[:12]} loaded", *notes]),
+            )
+        other = str(stamp.get("world_fp") or "")[:12]
+        return StageNote(
+            "warning",
+            f"{label}: the device holds another world ({other}, "
+            f"{stamp.get('state')}); not prepared",
+        )
+    missing = ensure_photos(photo_entries(manifest), download=False).failed
+    if missing:
+        return StageNote(
+            "warning",
+            f"{label}: {len(missing)} photos are not downloaded; run "
+            f"python -m sandroid.world photos fetch --profile {pid}",
+        )
+    try:
+        result = build_persona(serial, pid, rebuild=True, device=dev)
+    except (PersonaError, PrepareError) as exc:
+        return StageNote("warning", f"{label}: {exc}")
+    save = result.save
+    text = f"{label}: world {fp[:12]} prepared, saved as {result.snapshot}"
+    if save is not None and save.pruned:
+        text += f" ({len(save.pruned)} older persona snapshots deleted)"
+    return StageNote(
+        "warning" if notes or (save and save.warnings) else "info",
+        "; ".join([text, *notes, *(save.warnings if save else [])]),
+    )
+
+
+def _active_profile_id() -> str | None:
+    """The identity profile the identity stage applies (``None``: off)."""
+    try:
+        from sandroid.services.identity import get_identity_service
+
+        profile = get_identity_service().active_profile()
+    except Exception:
+        return None
+    return profile.id if profile is not None else None
+
+
 def delete_persona_snapshot(serial: str, name: str, *, emulator: Any = None) -> bool:
     """Delete persona snapshot ``name`` as the ``persona`` actor."""
     from sandroid.core.snapshot_policy import acting_as

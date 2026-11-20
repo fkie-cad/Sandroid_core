@@ -1592,6 +1592,26 @@ def _identity_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
     return StageNote("warning" if warn_parts else "info", ", ".join(parts))
 
 
+def _persona_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
+    """A persona launch (``meta.persona``): :func:`sandroid.world.persona.persona_stage`."""
+    from sandroid.world import persona
+
+    return persona.persona_stage(serial, fresh_boot, budget_s)
+
+
+#: The persona stage runs before the identity stage (it bakes the identity
+#: into the persona snapshot). Its budget covers prepare (15-20 s for a medium
+#: world), the identity apply (a framework restart) and the save (about 9 s).
+PERSONA_STAGE_ORDER = 10
+
+register_prepare_stage(
+    "persona",
+    _persona_stage,
+    order=PERSONA_STAGE_ORDER,
+    budget_s=120.0,
+    overrun_s=60.0,
+)
+
 register_prepare_stage(
     "identity",
     _identity_stage,

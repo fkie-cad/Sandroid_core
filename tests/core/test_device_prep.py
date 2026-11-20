@@ -1626,11 +1626,12 @@ def test_stages_run_in_order_after_selinux_and_before_the_hooks(rig, identity):
         rig.fake.events.append(("persona", serial, fresh_boot, budget_s))
         return "ready"
 
+    builtin = list(device_prep._STAGES)
     device_prep.register_prepare_stage("persona", persona, order=10, budget_s=5)
     try:
         _run()
-    finally:
-        device_prep.unregister_prepare_stage("persona")
+    finally:  # the built-in persona stage comes back
+        device_prep._STAGES[:] = builtin
     events = rig.fake.events
     sync = events.index(("clock-sync", device_prep.CLOCK_SYNC_WAIT_S))
     assert events[sync + 1] == ("persona", SERIAL, True, 5.0)
