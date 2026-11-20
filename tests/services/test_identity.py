@@ -1284,10 +1284,14 @@ def test_a_marker_recovers_only_an_unrecovered_restart_of_this_boot(
     state = service.preflight(SERIAL, (), service.active_profile())
     assert state.marker.strip() == stamp.strip()
     pid = device.pid
-    service._recover(ident._Device(SERIAL), state)
+    with timeline.capture() as lines:
+        service._recover(ident._Device(SERIAL), state)
     assert RESTART_MARKER not in device.fs
     assert device.pid == pid  # never restarted
     assert service.restarts_seen == ([SERIAL] if recovers else [])
+    # Only a real resume is announced; a stale marker is removed quietly.
+    resumed = [x for x in lines if x["kind"] == "restart"]
+    assert bool(resumed) == recovers
 
 
 def test_the_restart_marker_names_the_boot_and_the_old_system_server(

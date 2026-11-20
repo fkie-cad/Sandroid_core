@@ -1788,7 +1788,11 @@ class IdentityLens(Vertical):
             if isinstance(result, Exception):
                 self._failed("Verify failed", result)
                 return
-            self._statuses = {i.id: i for i in result.infos.values()}
+            # The service's statuses: a verify that read while an apply ran
+            # is not published, and must not replace the apply's result here.
+            current = ident.statuses()
+            infos = current or list(result.infos.values())
+            self._statuses = {i.id: i for i in infos}
             self.app.notify("Identity values read back from the device.", timeout=3)
             self.refresh_data()
 

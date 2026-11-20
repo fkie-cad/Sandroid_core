@@ -3731,6 +3731,15 @@ class IdentityService:
         """
         from sandroid.services.app_start import AppStartError, lifecycle_lock
 
+        boot, old_pid = _marker_fields(state.marker)
+        stale = bool(state.system_server) and (
+            not (boot and old_pid and boot == state.boot_id)
+            or state.system_server == old_pid
+        )
+        if stale:
+            logger.info(f"identity: removed a stale restart marker on {state.serial}")
+            dev.shell(f"rm -f {RESTART_MARKER}")
+            return
         self._emit(
             "restart",
             "identity: resuming an interrupted framework restart",
@@ -3739,16 +3748,10 @@ class IdentityService:
             level="warn",
             data={"marker": state.marker[:200], "recovery": True},
         )
-        boot, old_pid = _marker_fields(state.marker)
         if not state.system_server:
             dev.shell("start")
             if not self._wait_framework(dev, ""):
                 return  # still down: the marker stays, the next apply resumes
-        elif not (boot and old_pid and boot == state.boot_id) or (
-            state.system_server == old_pid
-        ):
-            dev.shell(f"rm -f {RESTART_MARKER}")
-            return
         guard = contextlib.ExitStack()
         try:
             guard.enter_context(lifecycle_lock(0.0))
