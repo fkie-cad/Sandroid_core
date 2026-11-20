@@ -1912,6 +1912,31 @@ def test_header_app_segment_shows_the_run_state_not_a_mode():
         assert word not in app_seg()
 
 
+def test_header_app_segment_says_when_the_identity_apply_runs(monkeypatch):
+    from sandroid.services import app_start
+    from sandroid.tui.widgets.status_bar import StatusBar
+
+    bar = StatusBar()
+    bar.spotlight_app, bar.spotlight_pid = "org.wikipedia", None
+
+    def app_seg() -> str:
+        return next(s.plain for s in bar._segments() if s.plain.startswith("App"))
+
+    assert app_seg() == "App not running  Space starts"
+    monkeypatch.setattr(
+        app_start,
+        "_STATUS",
+        (
+            "org.wikipedia",
+            "long text",
+            "Applying identity profile 'x', framework restarts",
+        ),
+    )
+    assert app_seg() == "App applying identity profile 'x', framework restarts"
+    bar.spotlight_app = "org.other"
+    assert app_seg() == "App not running  Space starts"
+
+
 def test_header_capture_segment_says_running_in_words():
     from sandroid.tui.widgets.status_bar import StatusBar
 

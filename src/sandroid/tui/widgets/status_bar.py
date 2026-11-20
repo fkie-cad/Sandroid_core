@@ -86,7 +86,7 @@ class StatusBar(Static):
         # Glance-band datums (cheap, in-process reads — no ADB):
         self.spotlight_pid: int | None = None
         self.spotlight_paused = False
-        #: Sandroid is restarting the app (⇧R): the old PID is gone.
+        #: Sandroid is restarting the app (Shift+R): the old PID is gone.
         self.spotlight_restarting = False
         #: Why the Frida session was lost (frida-server gone), until it runs
         #: again; see _on_frida_detached.
@@ -153,6 +153,9 @@ class StatusBar(Static):
             get_bypass_service().add_state_listener(self._on_bypass_state)
         except Exception:
             pass
+        from sandroid.services.app_start import add_pre_start_status_listener
+
+        add_pre_start_status_listener(self._on_pre_start_status)
 
     def on_unmount(self) -> None:
         try:
@@ -167,6 +170,9 @@ class StatusBar(Static):
             get_bypass_service().remove_state_listener(self._on_bypass_state)
         except Exception:
             pass
+        from sandroid.services.app_start import remove_pre_start_status_listener
+
+        remove_pre_start_status_listener(self._on_pre_start_status)
 
     def _on_state_changed(self, event) -> None:
         """A Frida session detached because frida-server went away (any
@@ -346,7 +352,11 @@ class StatusBar(Static):
         # words in the state colours, no state glyphs.
         if self.spotlight_app and self.spotlight_app != "None":
             pid = self.spotlight_pid
-            if self.spotlight_paused:
+            step = self._pre_start_step()
+            if step:
+                # Identity's apply can take minutes: say so, not "not running".
+                state = f"[{paused}]{escape(step[:1].lower() + step[1:])}[/]"
+            elif self.spotlight_paused:
                 pid_part = f" pid {pid}" if pid else ""
                 state = f"[{paused}]paused[/][{muted}]{pid_part}  Space resumes[/]"
             elif pid:
@@ -717,6 +727,19 @@ class StatusBar(Static):
         """
         self._ui.call(self._apply_bypass_state)
 
+    def _pre_start_step(self) -> str | None:
+        """The short text of a pre-start step running for the app, or None."""
+        try:
+            from sandroid.services.app_start import pre_start_status
+
+            return pre_start_status(self.spotlight_app, short=True)
+        except Exception:
+            return None
+
+    def _on_pre_start_status(self) -> None:
+        """A pre-start step (identity apply) began or ended: repaint (any thread)."""
+        self._ui.call(self.refresh)
+
     def _apply_bypass_state(self) -> None:
         before = list(self.bypass_categories)
         self._read_bypass_state()
@@ -852,7 +875,7 @@ class StatusBar(Static):
         self._frida_last_status = status
         self.frida_status = status
         if status == "Running":
-            self._frida_lost = None  # the server is back (⇧R / auto-start)
+            self._frida_lost = None  # the server is back (Shift+R / auto-start)
 
         # Check version mismatch only on transition to Running
         if status == "Running" and prev_status != "Running":

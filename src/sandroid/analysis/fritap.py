@@ -461,7 +461,7 @@ class FriTap(DataGatherBase):
         self.fresh_consent = False
         #: The process friTap got (sandroid.services.app_start.Opened).
         self._opened = None
-        #: Note for the user after start() ("app still paused — ␣ resumes").
+        #: Note for the user after start() ("app still paused — Space resumes").
         self.start_note = ""
         #: friTap resumed its own spawn (a later failure must not kill it).
         self._spawn_resumed = False
@@ -670,7 +670,7 @@ class FriTap(DataGatherBase):
             raise FriTapTargetError(
                 f"Not attaching friTap to {package} (PID {pid}): {why}. "
                 "Injecting a second agent into the same process crashes the app. "
-                "Restart the app (App lens ⇧R) or turn on friTap's 'Restart "
+                "Restart the app (App lens Shift+R) or turn on friTap's 'Restart "
                 "the app first' option for a fresh process."
             )
 
@@ -887,7 +887,7 @@ class FriTap(DataGatherBase):
                     "Resume the app before loading friTap on a paused spawn — "
                     "it attaches live, and stacking a 2nd Frida script on a "
                     "still-paused spawn can crash the agent "
-                    "(frida-java-bridge #218). Press ␣ (resume) first, then "
+                    "(frida-java-bridge #218). Press Space (resume) first, then "
                     "start friTap."
                 )
                 logger.error(msg)
@@ -955,7 +955,7 @@ class FriTap(DataGatherBase):
             remember_injected_pid(self.process_id)
 
             # Resume our own spawn now that hooks are installed (a joined
-            # ⇧P hold stays paused until Space).
+            # Shift+P hold stays paused until Space).
             self.start_note = self._resume_spawned_target(toolbox, job)
 
             # Register tool usage and files for exit summary
@@ -1044,7 +1044,7 @@ class FriTap(DataGatherBase):
         """Resume the target once friTap's agent is loaded -- if friTap owns it.
 
         Only a process friTap spawned itself is resumed (then the armed
-        bypasses are applied live); a joined paused process (⇧P) stays
+        bypasses are applied live); a joined paused process (Shift+P) stays
         paused until Space. The agent gets a moment to install its hooks,
         well inside Android's 10 s process-start timeout.
 
@@ -1320,7 +1320,7 @@ class FriTap(DataGatherBase):
         if spawned and _force_stop_if_running(package, pid):
             msg = (
                 f"{cause} Sandroid spawned it, so it was force-stopped. Start "
-                "it again (App lens ␣) or from the launcher."
+                "it again (App lens Space) or from the launcher."
             )
             forget_injected_pid(pid)
             try:

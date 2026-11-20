@@ -48,7 +48,7 @@ def _inputs(**kw) -> StartInputs:
     ("kw", "action", "extra"),
     [
         # R0: a start/restart is in flight.
-        ({"busy": "⇧R restart of org.wikipedia in progress"}, "refuse", "busy"),
+        ({"busy": "Shift+R restart of org.wikipedia in progress"}, "refuse", "busy"),
         # R0b: adb could not tell.
         ({"liveness": Liveness.UNKNOWN}, "refuse", "unknown"),
         # R1: a held spawn of ours: join it (also when fresh: it has not run).
@@ -624,7 +624,7 @@ def test_not_owned_is_never_resumed(env, monkeypatch):
     note = app_start.finish_owned_spawn(Opened(7, False, True))
 
     assert resumed == []
-    assert note == "app still paused — ␣ resumes"
+    assert note == "app still paused — Space resumes"
 
 
 def test_owned_is_resumed_then_armed_bypasses_applied(env, monkeypatch):
@@ -645,7 +645,7 @@ def test_owned_is_resumed_then_armed_bypasses_applied(env, monkeypatch):
 
     assert order == [("resume", 7), "apply_armed"]
     assert "startup" in note
-    assert "␣ start first" in note
+    assert "press Space to start first" in note
     assert "friTap" in note
 
 
@@ -754,7 +754,7 @@ def test_ctrl_p_on_a_stopped_app_only_arms(env):
 
     assert ok is True
     assert "armed" in msg
-    assert "␣ starts" in msg
+    assert "Space starts" in msg
     assert env.bypass.armed_categories() == ["ssl"]
     assert env.bypass.active_categories() == []
     assert env.jm.calls == []
@@ -767,7 +767,7 @@ def test_ctrl_p_on_a_held_app_arms_for_resume(env):
     ok, msg = env.bypass.start_many(["ssl", "root"])
 
     assert ok
-    assert "␣ resume" in msg
+    assert "Space (resume)" in msg
     assert sorted(env.bypass.armed_categories()) == ["root", "ssl"]
     assert env.jm.calls == []
 

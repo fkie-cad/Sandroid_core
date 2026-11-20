@@ -718,7 +718,7 @@ class FridaSessionService:
             if not pid:
                 raise ValueError(
                     f"Application {package_name} is not running. "
-                    "Start it first (App lens ␣)."
+                    "Start it first (App lens Space)."
                 )
             spotlight.set_pid(pid)
         else:

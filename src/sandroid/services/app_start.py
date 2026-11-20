@@ -4,7 +4,7 @@ The spotlight is a plain app *selection* (package, plus PID/activity when
 known). It has no spawn/attach mode. Every caller that needs a Frida session
 on the selected app (friTap ``h``, Dexray ``m``, the bypass toggles, fridump,
 the AI) asks :func:`resolve_start` / :func:`negotiate_start`, and
-the lifecycle keys (Space, ⇧P, ⇧R, ⇧A) and the AI go through
+the lifecycle keys (Space, Shift+P, Shift+R, Shift+A) and the AI go through
 :func:`start_app` / :func:`restart_app` / :func:`resume_app` /
 :func:`attach_app`.
 
@@ -32,14 +32,14 @@ R6    otherwise                                  ATTACH; REFUSE while Frida runs
 ====  =========================================  ==================================
 
 A running app is never killed without consent: only RESPAWN kills, and
-RESPAWN needs ``consent`` (the caller's own, e.g. ⇧R or an API ``fresh=True``)
+RESPAWN needs ``consent`` (the caller's own, e.g. Shift+R or an API ``fresh=True``)
 or the user's answer to the confirmation dialog :func:`negotiate_start` shows.
 Resume follows ownership: only the caller that spawned a process
 (``owns_spawn``) resumes it; a joined paused process waits for Space.
 
 Pre-start steps (:func:`register_pre_start_step`, e.g. the identity profile)
 run before every start of an app by Sandroid, inside the lifecycle lock:
-Space/⇧P (:func:`start_app`), ⇧R and the AI restart (:func:`restart_app`),
+Space/Shift+P (:func:`start_app`), Shift+R and the AI restart (:func:`restart_app`),
 a tool's SPAWN/RESPAWN (:func:`open_session`), and via
 :func:`prepare_launch` an Objection spawn and the AI ``launch_app``. A hook's
 plan that restarts the Android framework (every running app stops) needs the
@@ -247,7 +247,7 @@ def decide_start(i: StartInputs) -> StartDecision:
                 i,
                 "paused_hooks",
                 f"{pkg} is paused with hooks loaded; a second Frida script on "
-                f"a paused app crashes it (frida #218). Press ␣ to resume, "
+                f"a paused app crashes it (frida #218). Press Space to resume, "
                 f"then start {i.tool}.",
             )
         return StartDecision(
@@ -278,7 +278,7 @@ def decide_start(i: StartInputs) -> StartDecision:
     if not running and not ours:
         if not i.allow_spawn:
             return _refuse(
-                i, "not_running", f"{pkg} is not running — press ␣ to start it."
+                i, "not_running", f"{pkg} is not running — press Space to start it."
             )
         return StartDecision(
             StartAction.SPAWN,
@@ -447,7 +447,7 @@ def end_setup(tool: str, pid: int | None = None) -> None:
     """The owner resumed (or gave up) its spawn. Idempotent.
 
     Clears only the marker of ``tool`` (and of ``pid`` when given): a later
-    owner's marker -- a ⇧R or another tool spawned meanwhile -- stays.
+    owner's marker -- a Shift+R or another tool spawned meanwhile -- stays.
     """
     global _SETUP
     with _SETUP_LOCK:
@@ -675,7 +675,7 @@ def _busy_reason(spotlight: Any, package: str) -> str | None:
         return None  # the start/restart in flight is this thread's own
     try:
         if spotlight.is_restarting(package):
-            return f"⇧R restart of {package} in progress"
+            return f"Shift+R restart of {package} in progress"
     except Exception:
         pass
     if _LIFECYCLE.busy_for_caller():
@@ -744,7 +744,7 @@ def _no_app(tool: str) -> StartDecision:
         StartAction.REFUSE,
         "",
         reason=(
-            "No spotlight app. Press c (use the foreground app) or ⇧C "
+            "No spotlight app. Press c (use the foreground app) or Shift+C "
             "(pick an app…) first."
         ),
         code="no_app",
@@ -1522,7 +1522,7 @@ def stop_app_tools(package: str) -> list[str]:
 
 
 def respawn_teardown(package: str) -> None:
-    """Kill ``package`` and clear every Frida state on it (⇧R order).
+    """Kill ``package`` and clear every Frida state on it (Shift+R order).
 
     force-stop FIRST: unloading a script on a live process can hang, while
     every unload/detach on a dead one fails fast. The header says
@@ -1534,7 +1534,7 @@ def respawn_teardown(package: str) -> None:
 
     spotlight = get_spotlight_service()
     try:
-        # Bypasses turned on live (Ctrl+P) join the armed set, as on ⇧K,
+        # Bypasses turned on live (Ctrl+P) join the armed set, as on Shift+K,
         # before the kill: the liveness poll drops them once the app is gone.
         if _spotlight_pkg() == package:  # not after a selection change
             _bypass().arm_active(package)
@@ -1596,7 +1596,7 @@ def open_session(decision: StartDecision, handler: Any = None) -> Opened:
     JOIN does nothing; ATTACH attaches the JobManager to the PID; SPAWN
     re-checks liveness right before spawning (a config dialog or snapshot
     prompt may have passed since the decision) and refuses when the app came
-    up meanwhile; RESPAWN runs the ⇧R teardown first. SPAWN and RESPAWN run
+    up meanwhile; RESPAWN runs the Shift+R teardown first. SPAWN and RESPAWN run
     the pre-start steps right before the spawn (RESPAWN asks before the
     teardown, so Cancel leaves the app running).
 
@@ -1683,7 +1683,7 @@ def apply_armed_after_launch(tool: str = "the tool") -> str:
     if early:
         return (
             f"{', '.join(early)} applied after launch, so checks at startup "
-            f"missed them — next time ␣ start first, then {tool} joins live"
+            f"missed them — next time press Space to start first, then {tool} joins live"
         )
     return ""
 
@@ -1691,7 +1691,7 @@ def apply_armed_after_launch(tool: str = "the tool") -> str:
 def finish_owned_spawn(opened: Opened, tool: str = "the tool") -> str:
     """Resume a spawn the caller owns, then apply the armed bypasses live.
 
-    A process the caller did not spawn is never resumed (a ⇧P hold waits
+    A process the caller did not spawn is never resumed (a Shift+P hold waits
     for Space).
 
     Returns:
@@ -1701,7 +1701,7 @@ def finish_owned_spawn(opened: Opened, tool: str = "the tool") -> str:
         frida.ProcessNotFoundError: The process died during hook load.
     """
     if not opened.owns_spawn:
-        return "app still paused — ␣ resumes" if opened.paused else ""
+        return "app still paused — Space resumes" if opened.paused else ""
     from sandroid.services import get_frida_session_service
 
     jm = _job_manager()
@@ -1725,7 +1725,7 @@ def abort_owned_spawn(opened: Opened | None) -> None:
     Force-stops the spawn (first: unloads on a live process can hang), drops
     the JobManager session and the bypass handles, clears the PID so the
     header shows ○ -- but only while the spawn is still the app's process
-    (pidof or the JobManager's session PID): after a ⇧R / AI restart or a
+    (pidof or the JobManager's session PID): after a Shift+R / AI restart or a
     die-and-respawn the new process is never touched. The tool's setup
     marker is always ended. A process the tool did not spawn is left alone.
     """
@@ -1779,7 +1779,7 @@ def abort_owned_spawn(opened: Opened | None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle (Space, ⇧P, ⇧R, ⇧A, AI start_spotlight_app)
+# Lifecycle (Space, Shift+P, Shift+R, Shift+A, AI start_spotlight_app)
 # ---------------------------------------------------------------------------
 
 
@@ -1790,14 +1790,14 @@ def _spotlight_package() -> str | None:
 
 
 def start_app(paused: bool = False, *, consent: bool = False) -> StartResult:
-    """Start the stopped spotlight app with the armed bypasses (Space / ⇧P).
+    """Start the stopped spotlight app with the armed bypasses (Space / Shift+P).
 
     Never restarts: a running app (also one opened from the launcher since
     the last poll) or a held spawn is reported, not killed. The pre-start
     steps run right before the spawn.
 
     Args:
-        paused: Keep the app paused after the hooks loaded (⇧P).
+        paused: Keep the app paused after the hooks loaded (Shift+P).
         consent: Headless consent for a pre-start step that stops every app
             (with a UI the dialog always asks).
 
@@ -1814,12 +1814,14 @@ def start_app(paused: bool = False, *, consent: bool = False) -> StartResult:
         if decision.action == StartAction.REFUSE:
             return StartResult(False, decision.reason)
         if decision.action == StartAction.JOIN and decision.paused:
-            return StartResult(False, f"{pkg} is already started paused — ␣ resumes it")
+            return StartResult(
+                False, f"{pkg} is already started paused — Space resumes it"
+            )
         if decision.action != StartAction.SPAWN:
             return StartResult(
                 False,
-                f"{pkg} is already running (pid {decision.pid}) — ⇧R restarts "
-                "it, ⇧A attaches",
+                f"{pkg} is already running (pid {decision.pid}) — Shift+R restarts "
+                "it, Shift+A attaches",
             )
         # The armed set now: a selection change during the dialog or the
         # framework restart disarms, and this app must keep its bypasses.
@@ -1841,13 +1843,13 @@ def start_app(paused: bool = False, *, consent: bool = False) -> StartResult:
 
 
 def restart_app(paused: bool = False, *, consent: bool = False) -> StartResult:
-    """Force-stop and start the spotlight app again (⇧R; the AI after consent).
+    """Force-stop and start the spotlight app again (Shift+R; the AI after consent).
 
-    The caller is the consent to restart this app: ⇧R is the explicit restart
+    The caller is the consent to restart this app: Shift+R is the explicit restart
     key, the AI tool asks through its approval gate. Tools on the app are
     stopped cleanly; the armed bypass set is kept and applied to the new
     process. A pre-start step that stops every app is asked about first
-    (before the teardown: Cancel leaves the app running) -- ⇧R's "no dialog"
+    (before the teardown: Cancel leaves the app running) -- Shift+R's "no dialog"
     covers this app only.
 
     Args:
@@ -1904,7 +1906,7 @@ def resume_app() -> tuple[bool, str]:
         return False, _BUSY_MSG
     owner = setup_owner()
     if owner:
-        return False, f"{owner} is still loading its hooks — ␣ resumes after it"
+        return False, f"{owner} is still loading its hooks — Space resumes after it"
     if not spotlight.resume_paused_app():
         return False, "Resume failed"
     bypass = _bypass()
@@ -1919,7 +1921,7 @@ def resume_app() -> tuple[bool, str]:
 
 
 def attach_app() -> tuple[bool, str]:
-    """Attach to the running spotlight app and apply the armed bypasses (⇧A)."""
+    """Attach to the running spotlight app and apply the armed bypasses (Shift+A)."""
     from sandroid.services import get_spotlight_service
 
     spotlight = get_spotlight_service()
@@ -1930,7 +1932,7 @@ def attach_app() -> tuple[bool, str]:
     if liveness == Liveness.UNKNOWN:
         return False, f"Could not tell whether {pkg} is running (adb error)"
     if not pid:
-        return False, f"{pkg} is not running — ␣ starts it"
+        return False, f"{pkg} is not running — Space starts it"
     spotlight.set_app(pkg, pid=pid)
     return _bypass().apply_armed()
 

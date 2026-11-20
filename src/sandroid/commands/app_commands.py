@@ -378,7 +378,7 @@ class SetSpotlightAttachCommand(CommandHandler):
 
 
 class SetSpotlightSpawnCommand(CommandHandler):
-    """``⇧C``: pick the spotlight app from the installed apps (fuzzy search).
+    """``Shift+C``: pick the spotlight app from the installed apps (fuzzy search).
 
     A selection only: nothing is started or restarted. The PID is looked up
     quietly, so the header shows "running pid N" or "not running".
@@ -472,7 +472,7 @@ class SetSpotlightSpawnCommand(CommandHandler):
                 result_message = f"Spotlight: {package_name} — running pid {pid}"
             else:
                 result_message = (
-                    f"Spotlight: {package_name} — not running · ␣ starts it"
+                    f"Spotlight: {package_name} — not running; Space starts it"
                 )
 
             logger.debug(result_message)

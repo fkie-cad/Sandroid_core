@@ -2858,7 +2858,7 @@ class BypassService:
 
         Records :attr:`_app_package` / :attr:`_process_id` and surfaces the
         PID to the spotlight panel. Joins the JobManager's session on the app
-        (the paused spawn of Start/⇧P/⇧R, or a live session of another tool)
+        (the paused spawn of Start/Shift+P/Shift+R, or a live session of another tool)
         or attaches to the running PID. A stopped app is refused, never
         spawned (:func:`sandroid.services.app_start.resolve_start` with
         ``allow_spawn=False``), and a running one is never restarted.
@@ -3257,8 +3257,8 @@ class BypassService:
         """Arm ``categories`` instead of loading them when the app is not live.
 
         Ctrl+P / the AI ``start_ssl_unpin`` never start or restart the app:
-        a stopped app gets the categories armed (␣ starts it with them), a
-        held paused spawn gets them on ␣ resume.
+        a stopped app gets the categories armed (Space starts it with them), a
+        held paused spawn gets them on Space resume.
 
         Returns:
             ``(ok, message)`` when armed or refused, None when the app runs
@@ -3272,12 +3272,12 @@ class BypassService:
         if decision.action == StartAction.JOIN and decision.paused:
             for cat in categories:
                 self._arm(cat)
-            return True, f"{names} armed — ␣ resume applies it"
+            return True, f"{names} armed — Space (resume) applies it"
         if decision.action == StartAction.REFUSE:
             if decision.code == "not_running":
                 for cat in categories:
                     self._arm(cat)
-                return True, f"{names} armed — ␣ starts {decision.package} with it"
+                return True, f"{names} armed — Space starts {decision.package} with it"
             return False, decision.reason
         return None
 
@@ -3368,13 +3368,13 @@ class BypassService:
                     return False, msg
                 if self.applies_at_spawn(category):
                     return True, (
-                        f"{name} active — restart the app (⇧R) so checks it "
+                        f"{name} active — restart the app (Shift+R) so checks it "
                         "ran at startup see it too"
                     )
                 return True, f"{name} active"
             if self.is_paused_session():
-                return True, f"{name} armed — ␣ resume applies it"
-            return True, f"{name} armed — ␣ start applies it"
+                return True, f"{name} armed — Space (resume) applies it"
+            return True, f"{name} armed — Space (start) applies it"
 
         # Turning OFF.
         self._disarm(category)
@@ -3402,7 +3402,7 @@ class BypassService:
 
     @_notifies
     def keep_armed_and_forget(self, package: str | None = None) -> list[str]:
-        """Drop the resident script but keep its categories as intent (⇧K).
+        """Drop the resident script but keep its categories as intent (Shift+K).
 
         The active categories join the armed set (also those turned on live
         without arming, e.g. Ctrl+P), then the script state is reset like
@@ -3706,7 +3706,7 @@ class BypassService:
         stock/uninstrumented launch — for a forensic tool a clear failure beats
         a quietly-unhooked capture.
 
-        Always active: every Start/⇧P/⇧R spawn gets the ladder (attach is
+        Always active: every Start/Shift+P/Shift+R spawn gets the ladder (attach is
         the separate ``apply_armed`` path). Callers check that the app is not
         running before calling (a spawn kills a running instance).
 
