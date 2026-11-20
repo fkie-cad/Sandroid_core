@@ -298,7 +298,11 @@ a restart keeps it), ``hooks`` (what pre-launch hooks put into
 once the device was first prepared, ``boot_id`` and ``first_uptime``. The
 launch is a timeline line (``emulator``/``launch``) carrying the record.
 Pre-launch hooks run before the record exists; they read the caller's
-``meta`` as ``ctx.meta`` (a read-only copy, also on a restart).
+``meta`` as ``ctx.meta`` (a read-only copy, also on a restart). A restart
+with no live launch of this process to keep the meta from (Sandroid was
+restarted, or another process started the emulator) asks the providers of
+``emulator.register_restart_meta(fn)``: ``fn(serial, avd)`` returns meta
+such as ``{"persona_id": ...}`` or ``None``; providers only add missing keys.
 
 The device-prepared step treats a new ``launch_id`` as a new world even when
 the boot id is the same (two boots from one snapshot); it then resets the
