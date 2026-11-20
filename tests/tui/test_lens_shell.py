@@ -189,6 +189,47 @@ async def test_ticker_attention_badge_names_ctrl_y_once() -> None:
         assert not label.has_class("-attention")
 
 
+async def test_ticker_shows_the_newest_three_lines_newest_last() -> None:
+    from sandroid.tui.widgets import ActivityLog
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await boot(app, pilot)
+        ms = app.screen
+        log = ms.query_one("#activity-log", ActivityLog)
+        ticker = ms.query_one("#log-ticker")
+        assert ticker.size.height == 3
+        line = ticker.query_one("#log-ticker-line")
+
+        def rows() -> list[str]:
+            return [
+                "".join(seg.text for seg in strip).rstrip()
+                for strip in line.render_lines(line.region.reset_offset)
+            ]
+
+        log.log_info("ticker line one")
+        await until(pilot, lambda: ticker.last_line.endswith("ticker line one"))
+        await settle(pilot)
+        assert rows()[0] == "" or "ticker line one" not in rows()[0]
+        assert "ticker line one" in rows()[2]  # alone: on the bottom row
+        for word in ("two", "three", "four"):
+            log.log_info(f"ticker line {word}")
+        await until(pilot, lambda: ticker.last_line.endswith("ticker line four"))
+        await settle(pilot)
+        assert [ln.rsplit("ticker line ", 1)[-1] for ln in ticker.lines] == [
+            "two",
+            "three",
+            "four",
+        ]
+        shown = rows()
+        assert "two" in shown[0]
+        assert "three" in shown[1]
+        assert "four" in shown[2]
+        assert not any("ticker line one" in r for r in shown)
+        hint = ticker.query_one("#log-ticker-hint")
+        assert hint.region.bottom == ticker.content_region.bottom
+
+
 async def test_backtick_toggles_drawer_and_ticker_mirrors_log() -> None:
     from sandroid.tui.widgets import ActivityLog
 
@@ -212,6 +253,7 @@ async def test_backtick_toggles_drawer_and_ticker_mirrors_log() -> None:
         await settle(pilot)
         assert ms.log_drawer_is_open
         assert is_shown(log)
+        assert ticker.query_one("#log-ticker-hint").render().plain.endswith("close log")
         await pilot.press("grave_accent")
         await settle(pilot)
         assert not ms.log_drawer_is_open
@@ -592,7 +634,7 @@ async def test_layout_degrades_gracefully(width) -> None:
         ms = app.screen
         assert ms.query_one("#status-bar").size.height <= 2
         assert ms.query_one("#lens-bar").size.height == 1
-        assert ms.query_one("#log-ticker").size.height == 1
+        assert ms.query_one("#log-ticker").size.height == 3
         ms.open_inspector(_content())
         await settle(pilot)
         assert ms.query_one("#lens-host").size.width >= 40
@@ -1774,7 +1816,7 @@ def test_frida_pill_says_connection_lost_until_the_server_runs_again(monkeypatch
         seg = next(s.plain for s in bar._segments() if s.plain.startswith("Frida"))
         return seg
 
-    assert "● running" in _pill()
+    assert _pill() == "Frida running"
     # The app died (process-terminated): the server is fine, nothing changes.
     bar._on_state_changed(
         Event(
@@ -1782,7 +1824,7 @@ def test_frida_pill_says_connection_lost_until_the_server_runs_again(monkeypatch
             data={"change_type": "frida_detached", "reason": "process-terminated"},
         )
     )
-    assert "● running" in _pill()
+    assert _pill() == "Frida running"
     assert checks == []
     bar._on_state_changed(
         Event(
@@ -1794,12 +1836,44 @@ def test_frida_pill_says_connection_lost_until_the_server_runs_again(monkeypatch
             },
         )
     )
-    assert "✕ connection lost" in _pill()
+    assert _pill() == "Frida connection lost  ⇧R restarts"
     assert checks == [1]  # re-checked at once
     bar._update_frida_status("Not running")
-    assert "✕ connection lost" in _pill()
+    assert "connection lost" in _pill()
     bar._update_frida_status("Running")  # ⇧R / auto-start brought it back
-    assert "● running" in _pill()
+    assert _pill() == "Frida running"
+
+
+def test_frida_pill_says_starting_while_frida_server_starts(monkeypatch):
+    """An auto-start (any caller) shows "starting", then a fresh check."""
+    from sandroid.core import frida_manager
+    from sandroid.tui.widgets.status_bar import StatusBar
+
+    bar = StatusBar()
+    checks: list[int] = []
+    monkeypatch.setattr(
+        StatusBar, "_schedule_frida_check", lambda self: checks.append(1)
+    )
+    monkeypatch.setattr(StatusBar, "_schedule_frida_version_check", lambda self: None)
+    monkeypatch.setattr(StatusBar, "_read_capture_state", lambda self: None)
+    bar.frida_status = "Not running"
+
+    def _pill() -> str:
+        return next(s.plain for s in bar._segments() if s.plain.startswith("Frida"))
+
+    assert _pill() == "Frida off"
+    with frida_manager._marked_starting():
+        bar._poll_capture_state()  # the 1.5 s poll
+        assert _pill() == "Frida starting"
+        bar._update_frida_status("Not running")  # a check racing the start
+        assert _pill() == "Frida starting"
+    assert checks == []
+    bar._poll_capture_state()
+    assert checks == [1]  # re-checked as soon as the start ended
+    bar._update_frida_status("Running")
+    assert _pill() == "Frida running"
+    bar._frida_version_mismatch = True
+    assert _pill() == "Frida running, version mismatch"
 
 
 def test_header_app_segment_shows_the_run_state_not_a_mode():
@@ -1812,11 +1886,13 @@ def test_header_app_segment_shows_the_run_state_not_a_mode():
         return next(s.plain for s in bar._segments() if s.plain.startswith("App"))
 
     bar.spotlight_pid, bar.spotlight_paused = None, False
-    assert app_seg() == "App ○ not running · ␣ start"
+    assert app_seg() == "App not running  ␣ start"
     bar.spotlight_pid = 77
-    assert app_seg() == "App ● running pid 77"
+    assert app_seg() == "App running pid 77"
     bar.spotlight_paused = True
-    assert app_seg() == "App ◐ paused pid 77 · ␣ resume"
+    assert app_seg() == "App paused pid 77  ␣ resume"
+    bar.spotlight_app = "None"
+    assert app_seg() == "App none"
     for word in ("spawn", "attach"):
         assert word not in app_seg()
 
@@ -1833,4 +1909,4 @@ def test_header_says_restarting_without_a_pid_during_shift_r():
     assert "pid" not in app_seg
     bar.spotlight_pid = 23326
     app_seg = next(s.plain for s in bar._segments() if s.plain.startswith("App"))
-    assert "● running pid 23326" in app_seg
+    assert "running pid 23326" in app_seg

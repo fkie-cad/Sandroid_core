@@ -245,11 +245,11 @@ async def test_shift_arrows_step_presets_and_max(saved) -> None:
         await pilot.press("ctrl+y")
         await settle(pilot)
         h = _left_h(ms)
-        assert h == 40
-        assert _rows(ms) == 20
+        assert h == 38  # 40 before the log ticker grew from 1 row to 3
+        assert _rows(ms) == 19
         await pilot.press("shift+up")
         await settle(pilot)
-        assert (ms.chat_mode, ms.chat_ratio, _rows(ms)) == ("split", 0.7, 28)
+        assert (ms.chat_mode, ms.chat_ratio, _rows(ms)) == ("split", 0.7, 27)
         assert _dock(ms).styles.inline.has_rule("height")
         await pilot.press("shift+up")
         await settle(pilot)
@@ -265,12 +265,12 @@ async def test_shift_arrows_step_presets_and_max(saved) -> None:
         assert ms.chat_mode == "max"
         await pilot.press("shift+down")
         await settle(pilot)
-        assert (ms.chat_mode, ms.chat_ratio, _rows(ms)) == ("split", 0.7, 28)
+        assert (ms.chat_mode, ms.chat_ratio, _rows(ms)) == ("split", 0.7, 27)
         assert is_shown(ms.query_one("#lens-host"))
         for _ in range(4):  # 0.5, 0.3, then stays at 0.3
             await pilot.press("shift+down")
         await settle(pilot)
-        assert (ms.chat_ratio, _rows(ms)) == (0.3, 12)
+        assert (ms.chat_ratio, _rows(ms)) == (0.3, 11)
         await until(pilot, lambda: len(saved) >= 5)
         assert saved == [
             (0.7, False),
@@ -367,15 +367,15 @@ async def test_drag_border_resizes_and_snaps(saved) -> None:
         col = ms.query_one("#left-col")
         bottom = col.content_region.bottom
         top = _dock(ms).region.y
-        assert bottom - top == 20
+        assert bottom - top == 19
         await pilot.mouse_down("#chat-dock", offset=(10, 0))
-        await pilot.hover("#chat-dock", offset=(10, -6))  # 26 rows: live
+        await pilot.hover("#chat-dock", offset=(10, -6))  # 25 rows: live
         await settle(pilot)
-        assert _rows(ms) == 26
+        assert _rows(ms) == 25
         assert "release to snap" in _dock(ms).border_subtitle
         await pilot.mouse_up("#chat-dock", offset=(10, 0))
         await settle(pilot)
-        assert (ms.chat_mode, ms.chat_ratio, _rows(ms)) == ("split", 0.7, 28)
+        assert (ms.chat_mode, ms.chat_ratio, _rows(ms)) == ("split", 0.7, 27)
         await until(pilot, lambda: saved == [(0.7, False)])
 
         # Dragged nearly to the top: snaps to max.
@@ -425,7 +425,7 @@ async def test_saved_size_is_used_and_chat_starts_closed(saved) -> None:
         assert ms.chat_mode == "max"
         await pilot.press("shift+down")
         await settle(pilot)
-        assert (ms.chat_ratio, _rows(ms)) == (0.3, 12)
+        assert (ms.chat_ratio, _rows(ms)) == (0.3, 11)
         # The same ChatPanel object across every mode.
         await pilot.press("ctrl+y")  # close
         await pilot.press("ctrl+y")  # reopen: split now (max was undone)

@@ -1168,7 +1168,9 @@ def humanize_log_line(line: str) -> str:
 
 
 class LogTicker(Horizontal):
-    """One row: the newest meaningful log line, plus a dim key hint."""
+    """The newest meaningful log lines (``ROWS``, newest at the bottom),
+    plus a dim key hint on the bottom row.
+    """
 
     #: The hint (AI chat + log drawer keys), drawer closed / open.
     HINT = "^Y AI · ` log"
@@ -1177,21 +1179,26 @@ class LogTicker(Horizontal):
     #: names ^Y itself) stands before it.
     HINT_LOG = "` log"
     HINT_LOG_OPEN = "` close log"
+    #: Log lines shown (the widget's height).
+    ROWS = 3
 
     DEFAULT_CSS = """
     LogTicker {
-        height: 1;
+        height: 3;
         background: #080c18;
         color: #93a4c3;
         padding: 0 1;
     }
     LogTicker #log-ticker-line {
         width: 1fr;
+        height: 3;
         text-wrap: nowrap;
         text-overflow: ellipsis;
     }
     LogTicker #log-ticker-hint {
         width: auto;
+        height: 3;
+        content-align-vertical: bottom;
         color: #5b6479;
         padding: 0 0 0 2;
     }
@@ -1200,6 +1207,9 @@ class LogTicker(Horizontal):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.last_line = ""
+        #: The shown lines as plain text, oldest first (at most ``ROWS``).
+        self.lines: list[str] = []
+        self._renderables: list[Any] = []
         self._drawer_open = False
         #: A badge shown before the hint (e.g. "approval needed · ^Y"); it
         #: carries the ^Y key, so the hint then leaves "^Y AI" out.
@@ -1228,8 +1238,14 @@ class LogTicker(Horizontal):
             plain = str(content)
             renderable = content
         self.last_line = plain
+        self.lines = [*self.lines, plain][-self.ROWS :]
+        self._renderables = [*self._renderables, renderable][-self.ROWS :]
+        # Blank rows on top, so the newest line always sits on the bottom.
+        blanks = [Text("") for _ in range(self.ROWS - len(self._renderables))]
         try:
-            self.query_one("#log-ticker-line", Static).update(renderable)
+            self.query_one("#log-ticker-line", Static).update(
+                Group(*blanks, *self._renderables)
+            )
         except Exception:
             pass
 

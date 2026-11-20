@@ -213,17 +213,48 @@ class SpotlightPanel(Widget):
     # p Play, ? Help, ...) off a 200-column footer. Enter is MainScreen's
     # "inspect" (a focused section table posts RowSelected); the lens frame
     # caption advertises ⏎ / z / u.
+    # The hidden bindings' descriptions are what the help screen lists.
     BINDINGS = [
         Binding("space", "primary", "Start/Resume", key_display="␣"),
         Binding("b", "bypass_chord", "Bypass…"),
-        Binding("slash", "filter", "Filter rows", show=False),
-        Binding("z", "fold", "Fold/unfold section", show=False),
-        Binding("u", "refresh_facts", "Refresh app facts", show=False),
-        Binding("R", "restart_app", "Restart", show=False),
-        Binding("A", "attach_app", "Attach", show=False),
-        Binding("P", "start_paused", "Start paused", show=False),
-        Binding("K", "kill_app", "Kill", show=False),
-        Binding("X", "clear_spotlight", "Clear", show=False),
+        Binding("slash", "filter", "Filter the rows", show=False),
+        Binding("z", "fold", "Fold or unfold the section", show=False),
+        Binding(
+            "u",
+            "refresh_facts",
+            "Refresh the app facts (grants, AppOps, footprint, services)",
+            show=False,
+        ),
+        Binding(
+            "R",
+            "restart_app",
+            "Restart with the armed bypasses (no dialog)",
+            show=False,
+        ),
+        Binding(
+            "A",
+            "attach_app",
+            "Attach to the running app and apply the armed bypasses",
+            show=False,
+        ),
+        Binding(
+            "P",
+            "start_paused",
+            "Start paused; Space resumes (Android ends a hold after about 10 s)",
+            show=False,
+        ),
+        Binding(
+            "K",
+            "kill_app",
+            "Kill the app and stop its tools; armed bypasses stay",
+            show=False,
+        ),
+        Binding(
+            "X",
+            "clear_spotlight",
+            "Clear the app selection (disarms the bypasses)",
+            show=False,
+        ),
     ]
 
     def __init__(self, **kwargs) -> None:
@@ -324,6 +355,10 @@ class SpotlightPanel(Widget):
         from sandroid.services.app_start import add_pre_start_status_listener
 
         add_pre_start_status_listener(self._on_pre_start_status)
+        try:
+            self._bypass().add_state_listener(self._on_bypass_state)
+        except Exception:
+            logger.debug("Spotlight panel: no bypass state", exc_info=True)
 
     def on_unmount(self) -> None:
         self._unsubscribe_events()
@@ -336,6 +371,10 @@ class SpotlightPanel(Widget):
         from sandroid.services.app_start import remove_pre_start_status_listener
 
         remove_pre_start_status_listener(self._on_pre_start_status)
+        try:
+            self._bypass().remove_state_listener(self._on_bypass_state)
+        except Exception:
+            pass
         if self._poll_timer is not None:
             try:
                 self._poll_timer.stop()
@@ -435,11 +474,23 @@ class SpotlightPanel(Widget):
             return False
 
     def _on_categories(self) -> list[str]:
-        """Categories that are armed OR active (rendered ON)."""
+        """Categories rendered ON for the selected app: armed, plus active
+        only while the live bypass script is on this app (a bypass still
+        running in the previously selected app is not this app's).
+        """
+        package = self._current_package()
+        if not package:
+            return []
         try:
-            return self._bypass().on_categories()
+            return sorted(self._bypass().carried_categories(package))
         except Exception:
             return []
+
+    def _on_bypass_state(self) -> None:
+        """BypassService armed/active set changed (any thread, UI included):
+        repaint without blocking the changing thread.
+        """
+        self._post(self._repaint_text)
 
     def _hooks_for_app(self, package: str | None) -> list:
         if not package:
@@ -461,7 +512,7 @@ class SpotlightPanel(Widget):
         package = self._current_package()
         if not package:
             return (
-                f"[{c.bad}]○ no app[/] — [b]c[/] use the foreground app · "
+                f"[{c.bad}]no app[/]  [b]c[/] use the foreground app  "
                 "[b]⇧C[/] pick an app…"
             )
 
@@ -480,18 +531,22 @@ class SpotlightPanel(Widget):
             state = f"[{c.warn}]{escape(step)}[/]"
         elif paused:
             pid_part = f" pid [b]{pid}[/]" if pid else ""
-            state = f"[{c.warn}]◐ paused[/]{pid_part} [{c.dim}]· ␣ resume[/]"
+            state = f"[{c.warn}]paused[/]{pid_part}  [{c.dim}]␣ resume[/]"
         elif pid:
-            state = f"[{c.ok}]● running[/] pid [b]{pid}[/]"
+            state = f"[{c.ok}]running[/] pid [b]{pid}[/]"
         elif self._restarting():
-            state = f"[{c.warn}]◌ restarting…[/]"
+            state = f"[{c.warn}]restarting…[/]"
         else:
-            state = f"[{c.bad}]○ not running[/] [{c.dim}]· ␣ start[/]"
+            state = f"[{c.bad}]not running[/]  [{c.dim}]␣ start[/]"
 
         bypass_tag = (
-            f"[{c.ok}]bypass: {','.join(on)}[/]" if on else f"[{c.dim}]bypass: none[/]"
+            f"[{c.ok}]bypass: {', '.join(on)}[/]" if on else f"[{c.dim}]bypass: none[/]"
         )
-        return f"{state}  [b]{package}[/]  hooks: [b]{len(hooks)}[/]  {bypass_tag}"
+        header = f"{state}  [b]{package}[/]  hooks: [b]{len(hooks)}[/]  {bypass_tag}"
+        sections = self._sections()
+        if sections is not None and sections.refreshing:
+            header += f"  [{c.dim}]refreshing app facts[/]"
+        return header
 
     def _render_body(self) -> str:
         c = lens_palette()
@@ -528,7 +583,7 @@ class SpotlightPanel(Widget):
         lines.append(
             row(
                 "hooks",
-                "  ".join(f"[{c.ok}]●[/] {n}" for n in names) or f"[{c.dim}]none[/]",
+                ", ".join(f"[{c.ok}]{n}[/]" for n in names) or f"[{c.dim}]none[/]",
             )
         )
         identity = self._identity_line(package, width)
@@ -538,7 +593,7 @@ class SpotlightPanel(Widget):
         if self._compact:
             # Narrow lens (e.g. 100x30 with the Inspector open): one line.
             names = [c for _k, c, _l in _BYPASS_TOGGLES if c in on]
-            state = f"[{c.ok}]{','.join(names)}[/]" if names else f"[{c.dim}]none[/]"
+            state = f"[{c.ok}]{', '.join(names)}[/]" if names else f"[{c.dim}]none[/]"
             lines.append(
                 row(
                     "b bypass:",
@@ -555,12 +610,11 @@ class SpotlightPanel(Widget):
         gap = "   "
         cells = []
         for key, category, label in _BYPASS_TOGGLES:
-            is_on = category in on
-            color = c.ok if is_on else c.dim
-            mark = "●" if is_on else "○"
-            plain = f"{key} {mark} {label}"
-            cells.append((len(plain), f"[{color}][b]{key}[/] {mark} {label}[/]"))
-        hint = f"b then 1-{len(_BYPASS_TOGGLES)} · armed applies on Start"
+            # On / off is the colour alone (no state glyphs).
+            color = c.ok if category in on else c.dim
+            plain = f"{key} {label}"
+            cells.append((len(plain), f"[{color}][b]{key}[/] {label}[/]"))
+        hint = f"b then 1-{len(_BYPASS_TOGGLES)}, armed ones apply on Start"
         cells.append((len(hint), f"[{c.dim}]{hint}[/]"))
         rows: list[list[str]] = [[]]
         used = 0
@@ -634,7 +688,7 @@ class SpotlightPanel(Widget):
         if self._is_paused():
             return "␣ Resume"
         if self._safe_pid():
-            return f"[{lens_palette().dim}]● running[/]"
+            return f"[{lens_palette().dim}]running[/]"
         return "␣ Start"
 
     def _repaint_text(self, _theme: object = None) -> None:
@@ -682,7 +736,9 @@ class SpotlightPanel(Widget):
         info = None
         if self._has_sections():
             sections = self._sections()
-            info = "⏎ inspect · / filter · z or click title: fold · u refresh"
+            info = "⏎ inspect · / filter · z or click title: fold · " + (
+                "u refreshing" if sections.refreshing else "u refresh"
+            )
             primary = self._primary_hint()
             if primary:
                 info += f" · {primary}"
@@ -748,16 +804,36 @@ class SpotlightPanel(Widget):
             sections.toggle_fold()
 
     def action_refresh_facts(self) -> None:
-        """``u``: re-read grants, AppOps, footprint, services (+ static cache)."""
+        """``u``: re-read grants, AppOps, footprint, services (+ static cache).
+
+        The header says "refreshing app facts" while it runs; a toast says
+        when it is done, or what could not be read
+        (:meth:`on_app_lens_sections_refresh_done`).
+        """
         sections = self._sections()
         if sections is None:
             return
-        if sections.refresh_runtime(static=True, explicit=True):
-            self._notify("Refreshing app facts…", "information")
-        else:
+        sections.refresh_runtime(static=True, explicit=True, announce=True)
+        self._repaint_text()
+        self._update_caption()
+
+    def on_app_lens_sections_refresh_done(
+        self, event: AppLensSections.RefreshDone
+    ) -> None:
+        """A ``u`` refresh ended: clear the header note, say how it went."""
+        event.stop()
+        self._repaint_text()
+        self._update_caption()
+        if event.problems is None:
+            return  # abandoned (another app / device): nothing to report
+        if event.problems:
             self._notify(
-                "Refreshing app facts right after the running fetch…", "information"
+                "App facts refreshed, but not all could be read: "
+                + "; ".join(event.problems),
+                "warning",
             )
+        else:
+            self._notify("App facts refreshed", "information")
 
     def action_filter(self) -> None:
         try:
@@ -958,7 +1034,7 @@ class SpotlightPanel(Widget):
 
         Some AFM resume paths (e.g. ``JobManager.run_last_created_job``) resume
         the spawned process without clearing the in-memory ``_paused`` flag, so
-        the header would show "◐ paused" forever though the app runs. When the
+        the header would show "paused" forever though the app runs. When the
         flag says paused but ActivityManager shows the process attached (a
         held spawn never is), clear it at the source (``mark_resumed``) so every reader — header,
         status bar, primary label — self-corrects. Worker-thread only (does a
@@ -1662,7 +1738,7 @@ class BypassChordModal(_FridaModalBase):
         rows = []
         for key, category, label in _BYPASS_TOGGLES:
             is_on = category in self._on
-            mark = f"[{c.ok}]● on [/]" if is_on else f"[{c.dim}]○ off[/]"
+            mark = f"[{c.ok}]on [/]" if is_on else f"[{c.dim}]off[/]"
             rows.append(f"  [b]{key}[/]  {mark}  {label}")
         rows.append("")
         rows.append("  [b]o[/]  Objection shell [dim](b b works too)[/dim]")

@@ -13,12 +13,14 @@ from types import SimpleNamespace
 
 import pytest
 from pilot_helpers import settle, until
+from rich.text import Text
 from textual.app import App
 
 from sandroid import services
 from sandroid.services import app_start
 from sandroid.services.spotlight_service import SpotlightService
 from sandroid.tui.modals.confirm_modal import ConfirmModal
+from sandroid.tui.themes import lens_palette
 from sandroid.tui.widgets import app_lens
 from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
 
@@ -131,11 +133,14 @@ async def test_b_emulator_on_a_running_app_offers_a_restart(monkeypatch):
 def test_header_shows_the_run_state_and_no_mode(monkeypatch):
     svc, _ran = _panel_env(monkeypatch)
     panel = SpotlightPanel()
-    assert "● running" in panel._render_header()
-    assert "spawn" not in panel._render_header()
+
+    def plain() -> str:
+        return Text.from_markup(panel._render_header()).plain
+
+    assert plain().startswith(f"running pid 77  {PKG}")
+    assert "spawn" not in plain()
     svc.set_pid(None)
-    assert "○ not running" in panel._render_header()
-    assert "␣ start" in panel._render_header()
+    assert plain().startswith(f"not running  ␣ start  {PKG}")
     svc.reset()
     header = panel._render_header()
     assert "use the foreground app" in header
@@ -692,3 +697,72 @@ def test_an_unexpected_objection_pre_start_error_is_shown(monkeypatch):
     assert fake.pushed == []
     assert fake.notes == [("Objection not started: adb gone", "error")]
     assert fake.worker_kwargs["exit_on_error"] is False
+
+
+async def test_bypass_row_follows_the_selected_app_not_the_live_script(monkeypatch):
+    """SSL live in app A must not show as on once app B is selected."""
+    import threading
+
+    from sandroid.analysis.detection_bypass import BypassService
+
+    svc, _ran = _panel_env(monkeypatch)
+    bypass = BypassService()
+    bypass._app_package = PKG
+    bypass._armed = {"ssl"}
+    bypass._active = {"ssl"}
+    monkeypatch.setattr(SpotlightPanel, "_bypass", staticmethod(lambda: bypass))
+    app = _Harness()
+    async with app.run_test(size=(160, 30)) as pilot:
+        await settle(pilot)
+        panel = app.query_one(SpotlightPanel)
+
+        def header() -> str:
+            return str(panel.query_one("#spotlight-header").render())
+
+        def ssl_is(color: str) -> bool:
+            return f"[{color}][b]1[/] SSL (exp.)[/]" in panel._render_body()
+
+        await until(pilot, lambda: "bypass: ssl" in header())
+        assert ssl_is(lens_palette().ok)
+        assert len(bypass._state_listeners) == 1
+        # Select app B: the selection disarms (from a worker here); the live
+        # script stays on A, so B's row is off without any other repaint.
+        svc.set_app("org.other.app", pid=88)
+        worker = threading.Thread(target=bypass.disarm_all)
+        worker.start()
+        worker.join()
+        await until(pilot, lambda: "bypass: none" in header())
+        assert bypass.on_categories() == ["ssl"]  # still live in A
+        assert ssl_is(lens_palette().dim)
+        # Back on A: its live bypass is on again.
+        svc.set_app(PKG, pid=77)
+        bypass._notify_state()  # UI thread: runs inline
+        await until(pilot, lambda: "bypass: ssl" in header())
+    assert bypass._state_listeners == []  # removed on unmount
+
+
+def test_status_bar_bypass_segment_is_for_the_selected_app(monkeypatch):
+    from sandroid.analysis import detection_bypass
+    from sandroid.tui.widgets import status_bar
+    from sandroid.tui.widgets.status_bar import StatusBar
+
+    selected = {"pkg": PKG}
+    spotlight = SimpleNamespace(get_effective_package=lambda: selected["pkg"])
+    monkeypatch.setattr(status_bar, "get_spotlight_service", lambda: spotlight)
+    bypass = detection_bypass.BypassService()
+    bypass._app_package = PKG
+    bypass._active = {"ssl", "root"}
+    monkeypatch.setattr(detection_bypass, "get_bypass_service", lambda: bypass)
+    bar = StatusBar()
+    bar.spotlight_app = PKG
+
+    def hooks_seg() -> str | None:
+        return next(
+            (s.plain for s in bar._segments() if s.plain.startswith("Hooks")), None
+        )
+
+    bar._read_bypass_state()
+    assert hooks_seg() == "Hooks 0  bypass ssl, root"
+    selected["pkg"] = "org.other.app"
+    bar._read_bypass_state()
+    assert hooks_seg() is None  # nothing on for the other app
