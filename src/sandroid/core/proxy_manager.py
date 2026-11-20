@@ -200,6 +200,9 @@ class ZygoteStatus:
     target_injected: bool | None = None
     #: Swept namespaces that still lack the CA (API 34+).
     lacking: int = 0
+    #: init's namespace holds our CA (our tmpfs, plus the APEX bind on API
+    #: 34+): only then does a restarted Zygote inherit it.
+    init_has_ca: bool = False
 
 
 _PEM_CERT_RE = re.compile(
@@ -254,7 +257,9 @@ def _subject_hash_old(der: bytes) -> str | None:
 #: private APEX cacerts dir in init (a later Zygote restart inherits it), in
 #: each Zygote whose parent is init (every future fork) and in every mount
 #: namespace below a Zygote (running apps, system_server). Rotation replaces
-#: the file in the shared tmpfs; uninject unmounts everywhere.
+#: the file in the shared tmpfs; uninject deletes our file in the shared
+#: tmpfs first (every bind stops trusting it, also one the sweep misses),
+#: then unmounts everywhere (Zygotes first, two passes) and verifies.
 #:
 #: Operations (the last output line is always ``rc=<n>``):
 #:   inject <staged.pem> <name> <apex 0|1>
@@ -265,7 +270,9 @@ _CA_SCRIPT = r"""
 SYS=/system/etc/security/cacerts
 APEX=/apex/com.android.conscrypt/cacerts
 LABEL=u:object_r:system_security_cacerts_file:s0
-MANIFEST=/data/local/tmp/.sandroid-ca-manifest
+WORK=/data/local/tmp
+MANIFEST=$WORK/.sandroid-ca-manifest
+SEEDED=$WORK/.sandroid-ca-seeded
 op=$1
 [ $# -gt 0 ] && shift
 
@@ -328,16 +335,35 @@ inject() {
   command -v nsenter >/dev/null 2>&1 || { echo "inject: nsenter missing"; return 3; }
   orig=
   [ "$apex" = 1 ] && orig=$(ls -d /apex/com.android.conscrypt@*/cacerts 2>/dev/null | head -n1)
+  if [ -n "$(our_dev)" ]; then
+    # Reuse only a tmpfs this script seeded completely: an empty or partial
+    # one (a failed earlier copy, a foreign overlay) would leave every stock
+    # CA untrusted.
+    want=$(cat $SEEDED 2>/dev/null)
+    have=$(nsenter -t 1 -m -- ls $SYS 2>/dev/null | wc -l)
+    if [ -n "$want" ] && [ "$have" -ge "$want" ] 2>/dev/null; then
+      echo "inject: reusing the tmpfs on $SYS"
+    else
+      echo "inject: the tmpfs on $SYS is incomplete (have=$have want=${want:-unknown}); rebuilding it"
+      nsenter -t 1 -m -- umount $SYS || { echo "inject: tmpfs mount failed (could not remove the incomplete tmpfs)"; return 5; }
+    fi
+  fi
   if [ -z "$(our_dev)" ]; then
     seed=$SYS
     if [ "$apex" = 1 ]; then seed=${orig:-$APEX}; fi
-    tmp=/data/local/tmp/.sandroid-ca-seed.$$
+    tmp=$WORK/.sandroid-ca-seed.$$
     rm -rf $tmp && mkdir -p $tmp && cp $seed/* $tmp/ || { echo "inject: seed copy failed"; rm -rf $tmp; return 4; }
-    nsenter -t 1 -m -- sh -c "mount -t tmpfs -o mode=755 tmpfs $SYS && cp $tmp/* $SYS/" || { echo "inject: tmpfs mount failed"; rm -rf $tmp; return 5; }
+    count=$(ls $tmp | wc -l)
+    nsenter -t 1 -m -- sh -c "mount -t tmpfs -o mode=755 tmpfs $SYS || exit 5; cp $tmp/* $SYS/ || { umount $SYS; exit 6; }"
+    r=$?
     rm -rf $tmp
+    case $r in
+      0) ;;
+      6) echo "inject: seed copy into the tmpfs failed (tmpfs removed)"; return 6 ;;
+      *) echo "inject: tmpfs mount failed"; return 5 ;;
+    esac
+    echo "$count" >$SEEDED
     echo "inject: tmpfs on $SYS seeded from $seed"
-  else
-    echo "inject: reusing the tmpfs on $SYS"
   fi
   for old in $(cat $MANIFEST 2>/dev/null); do
     [ "$old" = "$name" ] && continue
@@ -386,30 +412,59 @@ status() {
     echo "namespaces have=$have lack=$lack"
   fi
 }
+unbind_all() {
+  for p in $(namespaces) 1; do
+    while :; do
+      set -- $(top_mount $p $APEX)
+      [ "$2" = tmpfs ] || break
+      if nsenter -t $p -m -- umount $APEX 2>/dev/null; then n=$((n+1)); else
+        [ -d /proc/$p ] && fail=$((fail+1)); break
+      fi
+    done
+  done
+}
 uninject() {
   apex=$1; n=0; fail=0
-  if [ "$apex" = 1 ]; then
-    for p in $(namespaces) 1; do
-      while :; do
-        set -- $(top_mount $p $APEX)
-        [ "$2" = tmpfs ] || break
-        if nsenter -t $p -m -- umount $APEX 2>/dev/null; then n=$((n+1)); else
-          [ -d /proc/$p ] && fail=$((fail+1)); break
-        fi
-      done
+  # Delete our certificate in the shared tmpfs FIRST: every bind of it, also
+  # one in a namespace the sweep below misses, then stops trusting it.
+  orig=$(ls -d /apex/com.android.conscrypt@*/cacerts 2>/dev/null | head -n1)
+  if [ -n "$(our_dev)" ]; then
+    for old in $(cat $MANIFEST 2>/dev/null); do
+      if [ -n "$orig" ] && [ -e "$orig/$old" ]; then
+        nsenter -t 1 -m -- cp "$orig/$old" $SYS/$old
+      else
+        nsenter -t 1 -m -- rm -f $SYS/$old
+      fi
+      echo "uninject: deleted=$old"
     done
+  fi
+  if [ "$apex" = 1 ]; then
+    # Zygotes first, then every app namespace; twice, so an app forked
+    # between the listing and the Zygote unmount is caught too.
+    unbind_all
+    fail=0
+    unbind_all
   fi
   while [ -n "$(our_dev)" ]; do
     nsenter -t 1 -m -- umount $SYS || { fail=$((fail+1)); break; }
     n=$((n+1))
   done
-  rm -f $MANIFEST
-  echo "uninject: unmounted=$n failed=$fail"
-  [ $fail = 0 ]
+  left=0
+  if [ "$apex" = 1 ]; then
+    for p in $(namespaces) 1; do
+      set -- $(top_mount $p $APEX)
+      [ "$2" = tmpfs ] && left=$((left+1))
+    done
+  fi
+  [ -n "$(our_dev)" ] && left=$((left+1))
+  [ $left = 0 ] && rm -f $MANIFEST $SEEDED
+  echo "uninject: unmounted=$n failed=$fail left=$left"
+  [ $fail = 0 ] && [ $left = 0 ]
 }
 restart_zygote() {
   echo "ss_before=$(pidof system_server | cut -d' ' -f1)"
   for z in $(zygotes); do kill $z && echo "killed=$z"; done
+  true
 }
 case "$op" in
   inject) inject "$@" ;;
@@ -615,6 +670,19 @@ def _install_restore_hook() -> None:
         install_device_prepared_hook()
     except Exception:
         logger.debug("proxy restore hook not installed", exc_info=True)
+
+
+def restart_can_help(rc: int, status: ZygoteStatus) -> bool:
+    """Whether the Zygote-restart fallback can install the CA (pure).
+
+    A new Zygote only inherits what init's namespace holds: our tmpfs (and
+    on API 34+ its APEX bind). That is the case after the script got that
+    far (rc 0, or rc 8 when only the Zygote/app binds failed) and init
+    shows our CA. Never for a missing ``nsenter``, a failed seed, tmpfs or
+    init bind (rc 2-7) or an adb timeout (rc -1): the retry after the
+    restart would fail the same way.
+    """
+    return rc in (0, 8) and status.init_has_ca and status.verdict != "injected"
 
 
 def remember_ca_intent(serial: str | None, spec: CaSpec | None) -> None:
@@ -1017,24 +1085,37 @@ class CAManager:
             return False, f"Error pushing certificate: {e}"
 
     def get_device_api_level(self) -> int | None:
-        """Get the API level of the connected Android device.
+        """Get the API level of the device adb currently targets.
 
-        Tries DeviceManager first, falls back to ADB shell query.
+        Uses DeviceManager's active device only when it is that device (the
+        thread may be pinned to another serial), else asks the device.
 
         Returns:
             API level as int, or None if unavailable.
         """
+        serial = Adb.get_target_device()
         try:
             from sandroid.core.device_manager import DeviceManager
 
-            dm = DeviceManager.get_instance()
-            if dm.active_device and dm.active_device.api_level:
-                return int(dm.active_device.api_level)
+            # The existing singleton only (never create it here).
+            dm = DeviceManager._instance
+            active = dm.active_device if dm is not None else None
+            # Only the device this call targets (Adb.targeting / serial=):
+            # a CA operation on another serial must not use the active
+            # device's API level (it picks the trust store).
+            if (
+                active
+                and active.api_level
+                and getattr(active, "serial", None) in (None, serial)
+            ):
+                return int(active.api_level)
         except Exception:
             pass
 
         try:
-            stdout, _ = Adb.send_adb_command("shell getprop ro.build.version.sdk")
+            stdout, _ = Adb.send_adb_command(
+                "shell getprop ro.build.version.sdk", serial=serial
+            )
             if stdout and stdout.strip().isdigit():
                 return int(stdout.strip())
         except Exception:
@@ -1469,6 +1550,10 @@ class CAManager:
                 all(ns.sha256 in ours for ns in targets) if targets else None
             ),
             lacking=report.lack or 0,
+            init_has_ca=report.our_dev is not None
+            and any(
+                ns.role == "init" and ns.sha256 in ours for ns in report.namespaces
+            ),
         )
 
     def check_zygote_injection_status(
@@ -1613,12 +1698,24 @@ class CAManager:
                         f"script rc {rc})"
                     )
                 )
+                restart_helps = restart_can_help(rc, status)
+                if rc == -1:
+                    message = (
+                        "The device did not answer the CA install (adb timed out "
+                        "or the connection dropped); try again"
+                    )
+                else:
+                    message = (
+                        f"Installing the CA without a Zygote restart failed: {why}"
+                    )
+                    if not restart_helps:
+                        message += " (a Zygote restart would not help here)"
                 return InjectionResult(
                     success=False,
-                    message=f"Installing the CA without a Zygote restart failed: {why}",
+                    message=message,
                     strategy=strategy,
                     api_level=api_level,
-                    restart_required=True,
+                    restart_required=restart_helps,
                     verdict=status.verdict,
                 )
             except Exception as e:
@@ -1630,10 +1727,14 @@ class CAManager:
     def uninject_ca(self, *, serial: str | None = None) -> tuple[bool, str]:
         """Remove our CA from the trust store in every namespace.
 
-        Unmounts the APEX binds (every swept namespace, init) and the tmpfs on
-        the system dir, also stacked mounts an older injection left. Clears
-        this serial's re-inject intent. Running apps that already validated
-        the CA keep trusting it until they restart.
+        Deletes our certificate in the shared tmpfs first (every bind of it,
+        also one in a namespace the sweep misses, stops trusting it), then
+        unmounts the APEX binds (Zygotes first, two passes, init last) and
+        the tmpfs on the system dir, also stacked mounts an older injection
+        left, and verifies nothing is left. Clears this serial's re-inject
+        intent only when the removal succeeded. Removes any tmpfs on those
+        dirs, also a third party's CA overlay. Running apps that already
+        validated the CA keep trusting it until they restart.
 
         Returns:
             ``(ok, message)``.
@@ -1644,18 +1745,28 @@ class CAManager:
                 return False, "Root access required to remove the CA"
             apex = self._apex_flag()[0]
             out, rc = self._run_ca("uninject", [apex], serial)
-            remember_ca_intent(serial, None)
+            if rc == 0:
+                remember_ca_intent(serial, None)
         m = re.search(r"unmounted=(\d+) failed=(\d+)", out)
         removed, failed = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+        left = re.search(r"left=(\d+)", out)
+        deleted = "uninject: deleted=" in out
         if rc == 0:
-            if removed == 0:
+            if removed == 0 and not deleted:
                 return True, "No CA of Sandroid's was installed"
             return True, (
                 f"CA removed from the system trust store ({removed} mounts). "
                 f"{CA_RUNNING_APPS_NOTE}"
             )
+        if rc == -1:
+            return False, (
+                "The device did not answer the CA removal (adb timed out or the "
+                "connection dropped); try again"
+            )
+        still = f", {left.group(1)} still mounted" if left else ""
         return False, (
-            f"CA removal incomplete ({removed} mounts removed, {failed} failed)"
+            f"CA removal incomplete ({removed} mounts removed, {failed} failed"
+            f"{still}); try again"
         )
 
     def reconcile_ca(self, serial: str | None) -> str:
@@ -1696,12 +1807,24 @@ class CAManager:
         Returns:
             The system_server PID before the kill (None if unknown).
         """
+        return self.kill_zygotes(serial=serial)[0]
+
+    def kill_zygotes(
+        self, *, serial: str | None = None
+    ) -> tuple[int | None, list[int]]:
+        """:meth:`restart_zygote` that also says which Zygotes were killed.
+
+        Returns:
+            ``(system_server PID before the kill or None, killed Zygote PIDs)``;
+            an empty list means nothing was restarted.
+        """
         serial = self._serial(serial)
         with _ca_op_lock(serial), Adb.targeting(serial):
             self._check_root_access()
             out, _rc = self._run_ca("restart-zygote", [], serial)
         m = re.search(r"ss_before=(\d+)", out)
-        return int(m.group(1)) if m else None
+        killed = [int(k) for k in re.findall(r"killed=(\d+)", out)]
+        return (int(m.group(1)) if m else None), killed
 
 
 #: The "CA not installed yet" probe result is logged at INFO once, then DEBUG.
@@ -1716,9 +1839,13 @@ _CURRENT_SERIAL = object()
 #: their exact ``-L red://:<port> `` argument, never ``pkill -f`` (that also
 #: hit other sessions' gost and the adb ``sh -c`` wrapper itself).
 #:
-#:   observe <binary> <tag> [pkg ...]   gost (pid, stdio, argv), listeners,
-#:                                      tagged rules (v4/v6, nat/filter),
-#:                                      ip6tables tables, app UIDs
+#:   observe <binary> <tag> <all 0|1> [pkg ...]
+#:                                      gost (pid, stdio, argv), listeners,
+#:                                      tagged rules (v4/v6, nat/filter; with
+#:                                      all=1 every per-UID rule, for devices
+#:                                      without xt_comment), ip6tables tables,
+#:                                      app UIDs (``unknown`` when the data
+#:                                      dir and packages.list are unreadable)
 #:   kill <binary> <port> ...           kill the gost of these ports
 #:   listening <binary> <port>          wait <=2 s for that gost + listener
 #:   flush <uid>                        drop the UID's established TCP sockets
@@ -1733,24 +1860,36 @@ gost_pids() {
 listeners() { (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | awk 'NR>1 {print $4}'; }
 case "$op" in
 observe)
-  name=${1##*/}; tag=$2; shift 2
+  name=${1##*/}; tag=$2; all=$3; shift 3
+  pick="$tag"; [ "$all" = 1 ] && pick="--uid-owner "
   for p in $(pidof "$name" 2>/dev/null); do
     c=$(tr '\0' ' ' </proc/$p/cmdline 2>/dev/null) || continue
     echo "GOST pid=$p fd1=$(readlink /proc/$p/fd/1) fd2=$(readlink /proc/$p/fd/2) cmd=$c"
   done
   listeners | sed 's/^/LISTEN /'
-  iptables -w -t nat -S OUTPUT 2>/dev/null | grep -- "$tag" | sed 's/^/NAT4 /'
-  iptables -w -S OUTPUT 2>/dev/null | grep -- "$tag" | sed 's/^/FILTER4 /'
+  iptables -w -t nat -S OUTPUT 2>/dev/null | grep -- "$pick" | sed 's/^/NAT4 /'
+  iptables -w -S OUTPUT 2>/dev/null | grep -- "$pick" | sed 's/^/FILTER4 /'
   if ip6tables -w -S OUTPUT >/dev/null 2>&1; then
     echo "IP6 filter"
-    ip6tables -w -S OUTPUT | grep -- "$tag" | sed 's/^/FILTER6 /'
+    ip6tables -w -S OUTPUT | grep -- "$pick" | sed 's/^/FILTER6 /'
   fi
   if ip6tables -w -t nat -S OUTPUT >/dev/null 2>&1; then
     echo "IP6 nat"
-    ip6tables -w -t nat -S OUTPUT | grep -- "$tag" | sed 's/^/NAT6 /'
+    ip6tables -w -t nat -S OUTPUT | grep -- "$pick" | sed 's/^/NAT6 /'
   fi
   for pkg in "$@"; do
-    echo "UID $pkg $(stat -c %u /data/data/$pkg 2>/dev/null || echo missing)"
+    u=$(stat -c %u /data/data/$pkg 2>/dev/null)
+    if [ -z "$u" ]; then
+      # The data dir can be unreadable for a moment (CE storage locked
+      # right after a boot): only packages.list says the app is gone.
+      if [ -r /data/system/packages.list ]; then
+        u=$(awk -v p="$pkg" '$1==p { print $2; exit }' /data/system/packages.list)
+        [ -n "$u" ] || u=missing
+      else
+        u=unknown
+      fi
+    fi
+    echo "UID $pkg $u"
   done
   ;;
 kill)
@@ -1772,8 +1911,14 @@ listening)
   ;;
 flush)
   uid=$1; n=0
-  for sp in $(ss -tnae 2>/dev/null | awk -v u="uid:$uid" '$1=="ESTAB" { for (i=1;i<=NF;i++) if ($i==u) { k=split($4,a,":"); print a[k]; break } }'); do
-    ss -K -tn "( sport = :$sp )" >/dev/null 2>&1 && n=$((n+1))
+  for pp in $(ss -tnae 2>/dev/null | awk -v u="uid:$uid" '$1=="ESTAB" { for (i=1;i<=NF;i++) if ($i==u) { k=split($4,a,":"); m=split($5,b,":"); print a[k] "/" b[m]; break } }'); do
+    sp=${pp%/*}; dp=${pp#*/}
+    sel="( sport = :$sp and dport = :$dp )"
+    # Only when every socket the filter selects is this UID's: ss -K has no
+    # UID match, and another app may share that port pair.
+    other=$(ss -tnae "$sel" 2>/dev/null | awk -v u="uid:$uid" 'NR>1 && NF { own=0; for (i=1;i<=NF;i++) if ($i==u) own=1; if (!own) print }')
+    [ -z "$other" ] || continue
+    ss -K -tn "$sel" >/dev/null 2>&1 && n=$((n+1))
   done
   echo "flushed=$n"
   ;;
@@ -1865,6 +2010,9 @@ class LaneObservation:
     ip6_filter: bool = False
     ip6_nat: bool = False
     uids: dict[str, int | None] = field(default_factory=dict)
+    #: Packages whose UID could not be read (data dir and packages.list
+    #: unreadable): NOT "uninstalled", their lane is left as it is.
+    uid_unknown: set[str] = field(default_factory=set)
 
 
 def parse_lane_observation(output: str) -> LaneObservation:
@@ -1896,6 +2044,8 @@ def parse_lane_observation(output: str) -> LaneObservation:
             pkg, _, value = rest.partition(" ")
             value = value.strip()
             obs.uids[pkg] = int(value) if value.isdigit() else None
+            if value == "unknown":
+                obs.uid_unknown.add(pkg)
     return obs
 
 
@@ -1932,6 +2082,8 @@ class LanePlan:
     port: int
     uid: int | None
     app_missing: bool = False
+    #: The UID could not be read and none is known: the lane is left alone.
+    uid_unknown: bool = False
     kill: list[int] = field(default_factory=list)
     launch: bool = False
     add: set[RuleKey] = field(default_factory=set)
@@ -1946,6 +2098,8 @@ class DesiredLane:
     package: str
     port: int
     upstream: str
+    #: The UID the lane was built for (used when the device cannot say).
+    uid_hint: int | None = None
 
 
 def plan_lanes(
@@ -1962,15 +2116,29 @@ def plan_lanes(
         ``(plans, orphan_gost_pids, stale_rules)``: one plan per desired
         lane; gost on OUR port range that no lane wants (never one outside
         it); tagged rules no desired lane needs (another snapshot's lane set,
-        a reinstalled app's old UID, a lane of an app that is gone).
+        a reinstalled app's old UID, a lane of an app that is gone). An app
+        whose UID could not be read is not taken for uninstalled: its last
+        known UID is used, and without one nothing stale is removed.
     """
     plans: list[LanePlan] = []
     wanted: set[RuleKey] = set()
     wanted_ports = {d.port for d in desired}
+    hold_stale = False
     for d in desired:
         uid = obs.uids.get(d.package)
+        unknown = uid is None and d.package in obs.uid_unknown
+        if unknown and d.uid_hint is not None:
+            uid = d.uid_hint
         plan = LanePlan(lane=d.lane, package=d.package, port=d.port, uid=uid)
         on_port = [g for g in obs.gosts if g.port() == d.port]
+        if unknown and uid is None:
+            plan.uid_unknown = True
+            plan.why.append("the app's UID could not be read")
+            hold_stale = True
+            plans.append(plan)
+            continue
+        if unknown:
+            plan.why.append("the app's UID could not be read; kept its last UID")
         if uid is None:
             plan.app_missing = True
             plan.kill = [g.pid for g in on_port]
@@ -2015,7 +2183,34 @@ def plan_lanes(
         for kind, line in obs.rules
         if (key := parse_rule_key(kind, line)) is not None and key not in wanted
     ]
+    if hold_stale:
+        stale = []
     return plans, orphans, stale
+
+
+#: ``time.time()`` of the last mitmproxy start (see
+#: :func:`note_mitmproxy_started`): an "unreachable" verdict checked before
+#: it is stale.
+_MITMPROXY_STARTED_AT = 0.0
+
+
+def note_mitmproxy_started() -> None:
+    """Record that our mitmproxy (re)started: older "unreachable" verdicts of
+    App Proxy lanes no longer count until the lanes are probed again.
+    """
+    global _MITMPROXY_STARTED_AT
+    _MITMPROXY_STARTED_AT = time.time()
+
+
+@dataclass
+class _UpstreamProbe:
+    """A device-side SOCKS probe deferred until FocusManager's lock is free."""
+
+    lane: int
+    package: str
+    serial: str | None
+    host: str
+    port: int
 
 
 #: Lane health states (``LaneHealth.state``).
@@ -2058,6 +2253,17 @@ class LaneReport:
     lane: int
     health: LaneHealth
     repaired: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _LaneEnabled:
+    """``enable_focus`` outcome whose upstream probe may still be pending.
+
+    ``label`` is None for an app that was already proxied (reconciled).
+    """
+
+    report: LaneReport
+    label: str | None
 
 
 class FocusManager:
@@ -2142,6 +2348,20 @@ class FocusManager:
         # Most Android kernels have v6 filter but no v6 nat; a world change
         # (snapshot load, cold boot) re-probes.
         self._ip6_cap_cache: dict[str | None, tuple[bool, bool]] = {}
+        # Serials with an ip6tables nat table whose v6 REDIRECT failed: v6
+        # TCP is REJECTed there instead (never a leak). A world change
+        # re-probes.
+        self._ip6_redirect_broken: set[str | None] = set()
+        # Serials where lane rules had to be added without the tag (no
+        # xt_comment): observe then lists every per-UID rule.
+        self._untagged_serials: set[str | None] = set()
+        # serial -> every lane UID used there this session (recognises our
+        # untagged rules).
+        self._uids_used: dict[str | None, set[int]] = {}
+        # Last values read for the UI thread, which must never wait on
+        # self._lock (a reconcile holds it across adb work).
+        self._routes_cache: dict[str, str] = {}
+        self._health_cache: dict[str | None, dict[str, LaneHealth]] = {}
         atexit.register(self._atexit_cleanup)
 
     # ── config helpers ────────────────────────────────────────────────
@@ -2249,122 +2469,150 @@ class FocusManager:
         Returns:
             ``(ok, message)``.
         """
+        deferred: list[_UpstreamProbe] = []
         with self._lock:
-            self._ensure_lanes()
             serial = Adb.get_target_device()
-
-            # 1. Resolve package.
-            if not package:
-                package = self._spotlight_package()
-            if not package:
-                return False, "No spotlight app set — pick one first."
-            if not is_valid_package_name(package):
-                return False, f"Invalid package name {package!r}."
-
-            # 2. Already proxied (on THIS device): verify against the device
-            #    and repair (Ctrl+S with an unchanged list used to be a no-op
-            #    even when gost had died).
-            existing = self._lane_index_for(package, serial)
-            if existing is not None:
-                reports = self._reconcile_locked(serial, "apply")
-                report = next((r for r in reports if r.lane == existing), None)
-                if report is None:
-                    return True, f"{package} already proxied"
-                return self._report_message(report)
-            free = self._first_free_lane()
-            if free is None:
-                n = self._pool_size
-                return False, (
-                    f"All {n} app-proxy lanes in use — remove an app or raise "
-                    "mitmproxy.focus_lanes."
-                )
-
-            # 3. Root probe (sets _use_su, required by every device command
-            #    below — including the stale-rule cleanup, which must wrap with
-            #    the right su/non-su form to actually clear leftovers).
-            if not self._ca._check_root_access():
-                return False, "Focus requires root (su)."
-
-            # 4. Housekeeping: clear stale rules/processes once per session.
-            if serial not in self._cleaned_serials:
-                self._cleanup_stale_locked()
-                self._cleaned_serials.add(serial)
-
-            # 5. owner-match capability probe.
-            ok, msg = self._probe_owner_match()
-            if not ok:
-                return False, msg
-
-            # 6. Resolve UID.
-            uid = self._resolve_uid(package)
-            if uid is None:
-                return False, f"Could not resolve Linux UID for {package}."
-
-            # 7. Ensure the gost binary is on this device.
-            ok, msg = self._ensure_binary()
-            if not ok:
-                return False, msg
-
-            lane = free
-            redirect_port = self._redirect_port(lane)
-
-            # 8. Resolve the lane's upstream host-side BEFORE launching, so a bad
-            #    external target fails loud without leaving a half-applied lane.
-            ok, upstream = self._build_upstream(target, lane)
-            if not ok:
-                return False, upstream  # upstream holds the error message
-            lane_target = "ours" if target is None else upstream
-
-            # 9. Fail closed first: IPv6 fence and QUIC block before anything
-            #    can redirect, so no v6 or HTTP/3 packet leaks meanwhile.
-            self._lane_uids[lane] = uid
-            self._ensure_v6_fence(lane, uid)
-            if self._quic_blocking_enabled():
-                self._add_quic_block(lane, uid)
-
-            # 10. The detached gost redirector (any leftover on the port first).
-            self._kill_lane_process(redirect_port)
-            self._launch_gost(redirect_port, upstream)
-            if not self._wait_listening(redirect_port):
-                self._remove_lane_rules(lane)
-                self._kill_lane_process(redirect_port)
-                self._lane_uids.pop(lane, None)
-                return False, f"gost failed to bind port {redirect_port}."
-
-            # 11. The IPv4 REDIRECT LAST (fatal: roll back on failure so a
-            #     redirector never runs without a working rule).
-            ok, msg = self._ensure_redirect(lane, uid, redirect_port)
-            if not ok:
-                self._remove_lane_rules(lane)
-                self._kill_lane_process(redirect_port)
-                self._lane_uids.pop(lane, None)
-                return False, msg
-
-            # 12. Commit lane state, target, sidecar, and shared MitmproxyState.
-            self._lanes[lane] = package
-            self._lane_targets[lane] = lane_target
-            self._lane_upstreams[lane] = upstream
-            self._lane_serials[lane] = serial
-            self._lane_health[lane] = self._upstream_health(lane, probe=True)
-            _install_restore_hook()
-            self._flush_app_sockets(uid)
-            self._write_sidecar()
-            self._add_to_state(package)
-            dest = "our mitmproxy" if target is None else upstream
-            logger.warning(
-                "App proxy lane %d → %s (uid %s) upstream %s",
-                lane,
-                package,
-                uid,
-                dest,
-            )
-            health = self._lane_health[lane]
+            # Every device call of this enable goes to the serial it started
+            # on, even if the selected device changes meanwhile.
+            with Adb.targeting(serial):
+                outcome = self._enable_locked(package, target, serial, deferred)
+        if not isinstance(outcome, _LaneEnabled):
+            return outcome
+        report, label = outcome.report, outcome.label
+        if deferred:
+            self._finish_probes(deferred, [report])
         self._publish_health()
-        label = package if target is None else f"{package} → {upstream}"
-        message = f"App proxy → {label} (lane {lane})"
-        if not health.ok:
-            message += f": {self._health_sentence(health)}"
+        if label is None:
+            return self._report_message(report)
+        message = f"App proxy → {label} (lane {report.lane})"
+        if not report.health.ok:
+            message += f": {self._health_sentence(report.health)}"
         return True, message
+
+    def _enable_locked(
+        self,
+        package: str | None,
+        target: str | None,
+        serial: str | None,
+        deferred: list[_UpstreamProbe],
+    ) -> tuple[bool, str] | _LaneEnabled:
+        """:meth:`enable_focus` body (lock held, adb pinned to *serial*).
+
+        Returns:
+            ``(ok, message)`` when finished, or a :class:`_LaneEnabled` for a
+            lane whose upstream probe may still be pending.
+        """
+        self._ensure_lanes()
+
+        # 1. Resolve package.
+        if not package:
+            package = self._spotlight_package()
+        if not package:
+            return False, "No spotlight app set — pick one first."
+        if not is_valid_package_name(package):
+            return False, f"Invalid package name {package!r}."
+
+        # 2. Already proxied (on THIS device): verify against the device
+        #    and repair (Ctrl+S with an unchanged list used to be a no-op
+        #    even when gost had died).
+        existing = self._lane_index_for(package, serial)
+        if existing is not None:
+            reports = self._reconcile_locked(serial, "apply", deferred)
+            report = next((r for r in reports if r.lane == existing), None)
+            if report is None:
+                return True, f"{package} already proxied"
+            return _LaneEnabled(report, None)
+        free = self._first_free_lane()
+        if free is None:
+            n = self._pool_size
+            return False, (
+                f"All {n} app-proxy lanes in use — remove an app or raise "
+                "mitmproxy.focus_lanes."
+            )
+
+        # 3. Root probe (sets _use_su, required by every device command
+        #    below — including the stale-rule cleanup, which must wrap with
+        #    the right su/non-su form to actually clear leftovers).
+        if not self._ca._check_root_access():
+            return False, "Focus requires root (su)."
+
+        # 4. Housekeeping: clear stale rules/processes once per session.
+        if serial not in self._cleaned_serials:
+            self._cleanup_stale_locked()
+            self._cleaned_serials.add(serial)
+
+        # 5. owner-match capability probe.
+        ok, msg = self._probe_owner_match()
+        if not ok:
+            return False, msg
+
+        # 6. Resolve UID.
+        uid = self._resolve_uid(package)
+        if uid is None:
+            return False, f"Could not resolve Linux UID for {package}."
+
+        # 7. Ensure the gost binary is on this device.
+        ok, msg = self._ensure_binary()
+        if not ok:
+            return False, msg
+
+        lane = free
+        redirect_port = self._redirect_port(lane)
+
+        # 8. Resolve the lane's upstream host-side BEFORE launching, so a bad
+        #    external target fails loud without leaving a half-applied lane.
+        ok, upstream = self._build_upstream(target, lane)
+        if not ok:
+            return False, upstream  # upstream holds the error message
+        lane_target = "ours" if target is None else upstream
+
+        # 9. Fail closed first: IPv6 fence and QUIC block before anything
+        #    can redirect, so no v6 or HTTP/3 packet leaks meanwhile.
+        self._lane_uids[lane] = uid
+        self._uids_used.setdefault(serial, set()).add(uid)
+        self._ensure_v6_fence(lane, uid)
+        if self._quic_blocking_enabled():
+            self._add_quic_block(lane, uid)
+
+        # 10. The detached gost redirector (any leftover on the port first).
+        self._kill_lane_process(redirect_port)
+        self._launch_gost(redirect_port, upstream)
+        if not self._wait_listening(redirect_port):
+            self._remove_lane_rules(lane)
+            self._kill_lane_process(redirect_port)
+            self._lane_uids.pop(lane, None)
+            return False, f"gost failed to bind port {redirect_port}."
+
+        # 11. The IPv4 REDIRECT LAST (fatal: roll back on failure so a
+        #     redirector never runs without a working rule).
+        ok, msg = self._ensure_redirect(lane, uid, redirect_port)
+        if not ok:
+            self._remove_lane_rules(lane)
+            self._kill_lane_process(redirect_port)
+            self._lane_uids.pop(lane, None)
+            return False, msg
+
+        # 12. Commit lane state, target, sidecar, and shared MitmproxyState.
+        self._lanes[lane] = package
+        self._lane_targets[lane] = lane_target
+        self._lane_upstreams[lane] = upstream
+        self._lane_serials[lane] = serial
+        health = self._upstream_health(lane, probe=True, deferred=deferred)
+        self._lane_health[lane] = health
+        _install_restore_hook()
+        self._flush_app_sockets(uid)
+        self._write_sidecar()
+        self._add_to_state(package)
+        dest = "our mitmproxy" if target is None else upstream
+        logger.warning(
+            "App proxy lane %d → %s (uid %s) upstream %s",
+            lane,
+            package,
+            uid,
+            dest,
+        )
+        label = package if target is None else f"{package} → {upstream}"
+        return _LaneEnabled(LaneReport(package, lane, health), label)
 
     @staticmethod
     def _health_sentence(health: LaneHealth) -> str:
@@ -2374,7 +2622,7 @@ class FocusManager:
         if health.state == LANE_UNREACHABLE:
             return (
                 "mitmproxy is not reachable from the device, the app has no "
-                "network until that is fixed (set focus.host_ip_override)"
+                "network until it is"
             )
         return health.label
 
@@ -2485,13 +2733,43 @@ class FocusManager:
         if not self._lock.acquire(timeout=timeout):
             return None
         try:
-            return {
-                pkg: self._lane_targets.get(lane, "ours")
-                for lane, pkg in self._lanes.items()
-                if pkg
-            }
+            self._routes_cache = self._routes_locked()
+            return dict(self._routes_cache)
         finally:
             self._lock.release()
+
+    def _routes_locked(self) -> dict[str, str]:
+        return {
+            pkg: self._lane_targets.get(lane, "ours")
+            for lane, pkg in self._lanes.items()
+            if pkg
+        }
+
+    def app_proxies_cached(self) -> dict[str, str]:
+        """:meth:`app_proxies` for the UI thread: never waits for the lock.
+
+        The current value when the lock is free, else the last value read
+        (a reconcile holds the lock across seconds of adb work).
+        """
+        if self._lock.acquire(blocking=False):
+            try:
+                self._routes_cache = self._routes_locked()
+            finally:
+                self._lock.release()
+        return dict(self._routes_cache)
+
+    def lane_health_cached(
+        self, serial: str | None | object = _CURRENT_SERIAL
+    ) -> dict[str, LaneHealth]:
+        """:meth:`lane_health` for the UI thread (last value on contention)."""
+        if serial is _CURRENT_SERIAL:
+            serial = Adb.get_target_device()
+        if self._lock.acquire(blocking=False):
+            try:
+                self._health_cache[serial] = self._health_snapshot(serial)
+            finally:
+                self._lock.release()
+        return dict(self._health_cache.get(serial, {}))
 
     def lane_for(self, package: str) -> int | None:
         """Return the host SOCKS port serving ``package``, or None."""
@@ -2523,13 +2801,17 @@ class FocusManager:
 
         Reads the device in ONE adb call (gost PIDs with their argv and stdio,
         listeners, tagged v4/v6 rules, app UIDs) and repairs only what
-        differs, in fail-closed order: IPv6 fence and QUIC block, then stale
-        rules and dead, doomed (stdio on an old adb session), duplicate or
-        orphan gost, then the detached relaunch, then the REDIRECT. A lane
-        whose app is gone is torn down on the device and reported as failed
-        (the lane stays requested). With our mitmproxy off a lane stays
-        applied and reports "waiting for mitmproxy". Blocking (adb): never
-        call it on the UI thread.
+        differs, in fail-closed order: first every missing protective rule
+        (IPv6 fence, QUIC block AND the IPv4 REDIRECT, which a dead or
+        missing gost turns into a refused connection), then stale rules and
+        dead, doomed (stdio on an old adb session), duplicate or orphan
+        gost, then the binary check and the detached relaunch. A failed
+        relaunch keeps the REDIRECT (fail closed). A lane whose app is gone
+        (packages.list says so) is torn down on the device and reported as
+        failed (the lane stays requested); an unreadable UID is not "gone".
+        With our mitmproxy off a lane stays applied and reports "waiting
+        for mitmproxy". The upstream probe runs after the lock is released.
+        Blocking (adb): never call it on the UI thread.
 
         Args:
             serial: Device; default the current adb target.
@@ -2540,8 +2822,12 @@ class FocusManager:
         Returns:
             One :class:`LaneReport` per lane on that serial.
         """
+        deferred: list[_UpstreamProbe] = []
         with self._lock:
-            reports = self._reconcile_locked(serial, reason)
+            reports = self._reconcile_locked(serial, reason, deferred)
+        if deferred:
+            # Outside the lock: the SOCKS probe takes seconds.
+            self._finish_probes(deferred, reports)
         if reports:
             self._publish_health()
         return reports
@@ -2549,8 +2835,13 @@ class FocusManager:
     #: Reasons after which the device's kernel/tables may differ.
     _WORLD_CHANGES = ("snapshot-load", "cold-boot", "framework-restart")
 
-    def _reconcile_locked(self, serial: str | None, reason: str) -> list[LaneReport]:
-        """:meth:`reconcile` with ``self._lock`` held."""
+    def _reconcile_locked(
+        self,
+        serial: str | None,
+        reason: str,
+        deferred: list[_UpstreamProbe] | None = None,
+    ) -> list[LaneReport]:
+        """:meth:`reconcile` with ``self._lock`` held (probes go to *deferred*)."""
         if serial is None:
             serial = Adb.get_target_device()
         self._ensure_lanes()
@@ -2564,6 +2855,7 @@ class FocusManager:
         now = time.time()
         if reason in self._WORLD_CHANGES:
             self._ip6_cap_cache.pop(serial, None)
+            self._ip6_redirect_broken.discard(serial)
             self._binary_ok.discard(serial)
         with Adb.targeting(serial):
             if not self._ca._check_root_access():
@@ -2574,26 +2866,25 @@ class FocusManager:
                     package=self._lanes[lane] or "",
                     port=self._redirect_port(lane),
                     upstream=self._lane_upstream(lane),
+                    uid_hint=self._lane_uids.get(lane),
                 )
                 for lane in lanes
             ]
             obs = self._observe([d.package for d in desired])
             if obs is None:
                 return self._mark_failed(lanes, "device state unreadable", now)
+            obs.ip6_nat = obs.ip6_nat and serial not in self._ip6_redirect_broken
             self._ip6_cap_cache[serial] = (obs.ip6_filter, obs.ip6_nat)
             plans, orphans, stale = plan_lanes(
                 desired,
                 obs,
                 binary=self._binary_dst,
-                port_range=range(
-                    self._redirect_base, self._redirect_base + self._pool_size
-                ),
+                port_range=self._port_range(),
                 quic=self._quic_blocking_enabled(),
             )
-            binary_missing = (
-                any(p.launch for p in plans) and not self._ensure_binary()[0]
+            reports = self._apply_plans(
+                plans, orphans, stale, obs, now, [] if deferred is None else deferred
             )
-            reports = self._apply_plans(plans, orphans, stale, binary_missing, now)
         if any(r.repaired for r in reports) or stale or orphans:
             logger.warning(
                 "App proxies reconciled after %s: %s",
@@ -2606,6 +2897,60 @@ class FocusManager:
             )
             self._write_sidecar()
         return reports
+
+    def _port_range(self) -> range:
+        """Our gost REDIRECT ports (the lane pool)."""
+        return range(self._redirect_base, self._redirect_base + self._pool_size)
+
+    def sweep_orphans(self, serial: str | None, reason: str = "") -> int:
+        """Remove App Proxy rules and gost this session did not ask for.
+
+        A snapshot saved by an earlier session with an App Proxy restores
+        its tagged rules and its gost. With no lane of this session on
+        *serial* nothing reconciles them, so the app is cut off (mitmproxy
+        off) or captured without attribution. One adb read; only our tag
+        and our port range are touched. Blocking (adb), never raises.
+
+        Returns:
+            The number of rules and gost processes removed.
+        """
+        try:
+            with self._lock:
+                if any(
+                    pkg and self._lane_serials.get(lane) == serial
+                    for lane, pkg in self._lanes.items()
+                ):
+                    return 0  # the reconcile of those lanes handles it
+                with Adb.targeting(serial):
+                    if not self._ca._check_root_access():
+                        return 0
+                    obs = self._observe([])
+                    if obs is None:
+                        return 0
+                    _plans, orphans, stale = plan_lanes(
+                        [],
+                        obs,
+                        binary=self._binary_dst,
+                        port_range=self._port_range(),
+                        quic=self._quic_blocking_enabled(),
+                    )
+                    for kind, line in stale:
+                        self._delete_observed_rule(kind, line)
+                    if orphans:
+                        self._kill_pids(orphans)
+        except Exception as exc:
+            logger.debug("App Proxy orphan sweep failed: %s", exc)
+            return 0
+        if stale or orphans:
+            logger.warning(
+                "Removed %d App Proxy rule(s) and %d gost process(es) on %s "
+                "that %s brought back without an App Proxy of this session",
+                len(stale),
+                len(orphans),
+                serial,
+                reason or "the device state",
+            )
+        return len(stale) + len(orphans)
 
     def _mark_failed(self, lanes: list[int], why: str, now: float) -> list[LaneReport]:
         reports = []
@@ -2620,12 +2965,23 @@ class FocusManager:
         plans: list[LanePlan],
         orphans: list[int],
         stale: list[tuple[str, str]],
-        binary_missing: bool,
+        obs: LaneObservation,
         now: float,
+        deferred: list[_UpstreamProbe],
     ) -> list[LaneReport]:
-        """Execute reconcile plans in fail-closed order (lock + targeting held)."""
+        """Execute reconcile plans in fail-closed order (lock + targeting held).
+
+        Invariant: from the first device change on, no requested app has an
+        IPv4 TCP path without our REDIRECT or an IPv6 path without our
+        REJECT (or v6 REDIRECT). So every missing protective rule goes in
+        FIRST; only then are stale rules deleted, gost killed, the binary
+        checked and gost relaunched. A REDIRECT to a port without a
+        listening gost refuses the connection: closed, never a leak.
+        """
+        serial = Adb.get_target_device()
         repaired: dict[int, list[str]] = {p.lane: [] for p in plans}
-        # 1. Fail closed: IPv6 fence and QUIC block before anything else.
+        redirect_errors: dict[int, str] = {}
+        # 1. Fail closed: v6 fence, QUIC block and the IPv4 REDIRECT.
         for plan in plans:
             if plan.app_missing or plan.uid is None:
                 continue
@@ -2634,6 +2990,7 @@ class FocusManager:
                 self._lane_uids[plan.lane] = plan.uid
                 self._lane_rule_specs.pop(plan.lane, None)
                 self._lane_quic_specs.pop(plan.lane, None)
+            self._uids_used.setdefault(serial, set()).add(plan.uid)
             blocks = {k for k in plan.add if k.target == "BLOCK"}
             if any(k.proto == "tcp" for k in blocks):
                 self._ensure_v6_fence(plan.lane, plan.uid)
@@ -2641,6 +2998,15 @@ class FocusManager:
                 self._add_quic_block(plan.lane, plan.uid)
             if blocks:
                 repaired[plan.lane].append("fail-closed rules restored")
+            families = {k.family for k in plan.add if k.target == "REDIRECT"}
+            if families:
+                ok, msg = self._ensure_redirect(
+                    plan.lane, plan.uid, plan.port, families=families
+                )
+                if ok:
+                    repaired[plan.lane].append("redirect restored")
+                else:
+                    redirect_errors[plan.lane] = msg
         # 2. Stale rules (other lane sets, old UIDs, gone apps) and bad gost.
         for kind, line in stale:
             self._delete_observed_rule(kind, line)
@@ -2650,7 +3016,11 @@ class FocusManager:
         for plan in plans:
             if plan.kill and not plan.app_missing:
                 repaired[plan.lane].append("; ".join(plan.why[:2]) or "gost replaced")
-        # 3. Detached relaunch, 4. REDIRECT last.
+        # 3. The binary (only when a gost has to start), 4. detached relaunch.
+        binary_missing = (
+            any(p.launch and not p.app_missing and p.uid is not None for p in plans)
+            and not self._ensure_binary()[0]
+        )
         reports: list[LaneReport] = []
         for plan in plans:
             lane = plan.lane
@@ -2663,36 +3033,91 @@ class FocusManager:
                     "(any more); its lane is removed from the device",
                     plan.package,
                 )
+            elif plan.uid is None:
+                health = self._lane_health.get(lane) or LaneHealth(
+                    LANE_FAILED,
+                    "the app's UID could not be read; its rules were left as they are",
+                    now,
+                )
+                logger.warning(
+                    "App proxy for %s: could not read the app's UID; its lane "
+                    "is left as it is",
+                    plan.package,
+                )
             else:
-                health = self._repair_lane(plan, binary_missing, repaired[lane], now)
+                health = self._repair_lane(
+                    plan,
+                    binary_missing,
+                    repaired[lane],
+                    redirect_errors.get(lane),
+                    obs,
+                    now,
+                    deferred,
+                )
             self._lane_health[lane] = health
             reports.append(LaneReport(plan.package, lane, health, repaired[lane]))
         return reports
 
     def _repair_lane(
-        self, plan: LanePlan, binary_missing: bool, repaired: list[str], now: float
+        self,
+        plan: LanePlan,
+        binary_missing: bool,
+        repaired: list[str],
+        redirect_error: str | None,
+        obs: LaneObservation,
+        now: float,
+        deferred: list[_UpstreamProbe],
     ) -> LaneHealth:
-        """Relaunch gost and restore the REDIRECT for one lane (lock held)."""
+        """Relaunch gost for one lane whose rules are in place (lock held)."""
         lane, port, uid = plan.lane, plan.port, plan.uid or 0
+        self._remember_observed(lane, uid, port, obs.rules)
+        health: LaneHealth | None = None
         if plan.launch:
             if binary_missing:
-                return LaneHealth(LANE_FAILED, "gost binary missing on the device", now)
-            self._launch_gost(port, self._lane_upstream(lane))
-            if not self._wait_listening(port):
-                return LaneHealth(LANE_FAILED, f"gost did not start on :{port}", now)
-            if "gost not running" in plan.why:
-                repaired.append("gost restarted")
-        if any(k.target == "REDIRECT" for k in plan.add):
-            ok, msg = self._ensure_redirect(lane, uid, port)
-            if not ok:
-                return LaneHealth(LANE_FAILED, msg, now)
-            repaired.append("redirect restored")
-        else:
-            self._remember_lane_specs(lane, uid, port)
+                health = LaneHealth(
+                    LANE_FAILED, "gost binary missing on the device (fail closed)", now
+                )
+            else:
+                self._launch_gost(port, self._lane_upstream(lane))
+                if not self._wait_listening(port):
+                    health = LaneHealth(
+                        LANE_FAILED, f"gost did not start on :{port} (fail closed)", now
+                    )
+                elif "gost not running" in plan.why:
+                    repaired.append("gost restarted")
+        if health is None and redirect_error:
+            health = LaneHealth(LANE_FAILED, redirect_error, now)
         if plan.launch or plan.add:
+            # Connections opened before the rules (or through a dead gost)
+            # are dropped, so they reconnect through the lane or are refused.
             self._flush_app_sockets(uid)
+        if health is not None:
+            return health
         changed = bool(plan.launch or plan.add)
-        return self._upstream_health(lane, probe=changed, now=now)
+        return self._upstream_health(lane, probe=changed, now=now, deferred=deferred)
+
+    def _remember_observed(
+        self, lane: int, uid: int, port: int, rules: list[tuple[str, str]]
+    ) -> None:
+        """Record the lane's rules exactly as the device lists them.
+
+        Teardown deletes these lines, so a DROP fallback or an untagged rule
+        a snapshot restored is removed too (rebuilding the REJECT spec would
+        miss them).
+        """
+        for kind, line in rules:
+            key = parse_rule_key(kind, line)
+            spec = line.strip()
+            if key is None or key.uid != uid or not spec.startswith("-A "):
+                continue
+            if key.target == "REDIRECT" and key.to_port != port:
+                continue
+            tbl = "ip6tables" if kind.endswith("6") else "iptables"
+            table = "-t nat " if kind.startswith("NAT") else ""
+            body = table + "{op} " + spec[3:].replace("{", "{{").replace("}", "}}")
+            quic = key.proto == "udp" and key.dport == 443
+            store = self._lane_quic_specs if quic else self._lane_rule_specs
+            self._remember(store, lane, (tbl, body))
 
     def _lane_upstream(self, lane: int) -> str:
         """The gost ``-F`` upstream of a lane (rebuilt if unknown)."""
@@ -2706,14 +3131,21 @@ class FocusManager:
         return upstream
 
     def _upstream_health(
-        self, lane: int, *, probe: bool, now: float | None = None
+        self,
+        lane: int,
+        *,
+        probe: bool,
+        now: float | None = None,
+        deferred: list[_UpstreamProbe] | None = None,
     ) -> LaneHealth:
         """Health of a lane whose device side is in place (lock held).
 
         External upstreams are taken as given. For our mitmproxy: not running
         means waiting (the lane stays and fails closed); running is probed
         from the device (SOCKS greeting) only when asked to or when the last
-        verdict was not active, so a steady reconcile costs no probe.
+        verdict was not active, so a steady reconcile costs no probe. With
+        *deferred* the probe is queued for :meth:`_finish_probes` (after the
+        lock is released) and the previous verdict stands meanwhile.
         """
         now = time.time() if now is None else now
         if self._lane_targets.get(lane, "ours") != "ours":
@@ -2725,9 +3157,63 @@ class FocusManager:
             return LaneHealth(LANE_ACTIVE, "", now)
         host_ip = self._resolve_host_ip()
         socks = self._socks_port(lane)
-        if self._device_tcp_reachable(host_ip, socks) == "unreachable":
-            return LaneHealth(LANE_UNREACHABLE, f"{host_ip}:{socks}", now)
-        return LaneHealth(LANE_ACTIVE, "", now)
+        if deferred is not None:
+            deferred.append(
+                _UpstreamProbe(
+                    lane,
+                    self._lanes.get(lane) or "",
+                    Adb.get_target_device(),
+                    host_ip,
+                    socks,
+                )
+            )
+            if previous is not None and previous.state == LANE_UNREACHABLE:
+                return previous
+            return LaneHealth(LANE_ACTIVE, "", now)
+        return self._probe_verdict(host_ip, socks)
+
+    #: Waits before re-probing an "unreachable" upstream (mitmproxy may still
+    #: be binding its SOCKS listeners).
+    _PROBE_RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0)
+
+    def _probe_verdict(self, host_ip: str, socks: int) -> LaneHealth:
+        """Probe our SOCKS port from the device; retry "unreachable" twice."""
+        verdict = self._device_tcp_reachable(host_ip, socks)
+        for delay in self._PROBE_RETRY_DELAYS:
+            if verdict != "unreachable":
+                break
+            time.sleep(delay)
+            verdict = self._device_tcp_reachable(host_ip, socks)
+        if verdict == "unreachable":
+            return LaneHealth(LANE_UNREACHABLE, f"{host_ip}:{socks}", time.time())
+        return LaneHealth(LANE_ACTIVE, "", time.time())
+
+    def _finish_probes(
+        self, probes: list[_UpstreamProbe], reports: list[LaneReport]
+    ) -> None:
+        """Run deferred upstream probes WITHOUT the lock, then store them."""
+        results: dict[int, LaneHealth] = {}
+        for probe in probes:
+            try:
+                with Adb.targeting(probe.serial):
+                    results[probe.lane] = self._probe_verdict(probe.host, probe.port)
+            except Exception as exc:
+                logger.debug("App Proxy upstream probe failed: %s", exc)
+        with self._lock:
+            for probe in probes:
+                health = results.get(probe.lane)
+                if health is None:
+                    continue
+                still = self._lanes.get(probe.lane) == probe.package and (
+                    self._lane_serials.get(probe.lane) == probe.serial
+                )
+                current = self._lane_health.get(probe.lane)
+                if still and (current is None or current.state != LANE_FAILED):
+                    self._lane_health[probe.lane] = health
+        for report in reports:
+            health = results.get(report.lane)
+            if health is not None and report.health.state != LANE_FAILED:
+                report.health = health
 
     @staticmethod
     def _mitmproxy_running() -> bool:
@@ -2778,8 +3264,12 @@ class FocusManager:
                     running = self._mitmproxy_running()
                 if not running:
                     health = LaneHealth(LANE_WAITING, "", health.checked_at)
-                elif health.state == LANE_WAITING:
-                    # mitmproxy came back: the same gost forwards again.
+                elif health.state == LANE_WAITING or (
+                    health.state == LANE_UNREACHABLE
+                    and health.checked_at < _MITMPROXY_STARTED_AT
+                ):
+                    # mitmproxy came back: the same gost forwards again (an
+                    # "unreachable" from before this start no longer counts).
                     health = LaneHealth(LANE_ACTIVE, "", health.checked_at)
             out[pkg] = health
         return out
@@ -2817,12 +3307,41 @@ class FocusManager:
         return out or ""
 
     def _observe(self, packages: list[str]) -> LaneObservation | None:
-        """Device truth for the lanes (one adb call); None if unreadable."""
+        """Device truth for the lanes (one adb call); None if unreadable.
+
+        On a device where our rules had to go in untagged (no xt_comment)
+        every per-UID rule is listed and those of our lane UIDs (REDIRECTs
+        into our port range) are kept, so they are neither re-added on every
+        reconcile nor left behind as stale.
+        """
+        serial = Adb.get_target_device()
+        untagged = serial in self._untagged_serials
         valid = [p for p in packages if is_valid_package_name(p)]
-        out = self._run_lane("observe", self._binary_dst, self._RULE_TAG, *valid)
+        out = self._run_lane(
+            "observe",
+            self._binary_dst,
+            self._RULE_TAG,
+            "1" if untagged else "0",
+            *valid,
+        )
         if _script_rc(out) is None:
             return None
-        return parse_lane_observation(out)
+        obs = parse_lane_observation(out)
+        if untagged:
+            ours = set(self._uids_used.get(serial, set()))
+            ours |= {u for u in obs.uids.values() if u is not None}
+            ports = self._port_range()
+            kept = []
+            for kind, line in obs.rules:
+                key = parse_rule_key(kind, line)
+                if self._RULE_TAG in line or (
+                    key is not None
+                    and key.uid in ours
+                    and (key.target != "REDIRECT" or key.to_port in ports)
+                ):
+                    kept.append((kind, line))
+            obs.rules = kept
+        return obs
 
     def _kill_pids(self, pids: list[int]) -> None:
         """Kill exact gost PIDs (observed by argv; never a pattern kill)."""
@@ -3449,6 +3968,9 @@ class FocusManager:
                 target = "DROP"
                 continue
             break
+        if not tagged and not (err or "").strip():
+            # No xt_comment: observe must list untagged rules from now on.
+            self._untagged_serials.add(Adb.get_target_device())
         return body, (err or "").strip()
 
     @staticmethod
@@ -3482,18 +4004,28 @@ class FocusManager:
             logger.warning("ip6tables fence (uid %s) add warning: %s", uid, err)
 
     def _ensure_redirect(
-        self, lane: int, uid: int, redirect_port: int
+        self,
+        lane: int,
+        uid: int,
+        redirect_port: int,
+        *,
+        families: set[str] | frozenset[str] = frozenset({"4", "6"}),
     ) -> tuple[bool, str]:
         """Add the v4 (and, with a v6 nat table, v6) REDIRECT of a lane.
 
+        Only the *families* asked for (a reconcile re-adds just the missing
+        one; re-adding a present rule would open a delete-then-add gap).
         The IPv4 rule is fatal: a genuine failure is returned so the caller
-        rolls back, because a redirector with no rule captures nothing.
+        rolls back, because a redirector with no rule captures nothing. A
+        failed v6 REDIRECT falls back to the v6 REJECT (fail closed).
 
         Returns:
             ``(ok, message)``.
         """
-        tables = [("iptables", True)]
-        if self._ip6_nat_ok():
+        tables = []
+        if "4" in families:
+            tables.append(("iptables", True))
+        if "6" in families and self._ip6_nat_ok():
             tables.append(("ip6tables", False))
         for tbl, fatal in tables:
             body, err = self._install_rule(
@@ -3502,42 +4034,26 @@ class FocusManager:
                 insert=False,
                 allow_drop=False,
             )
-            self._remember(self._lane_rule_specs, lane, (tbl, body))
             if err:
                 if fatal:
                     return False, f"iptables redirect rule failed: {err}"
-                logger.warning("ip6tables redirect add warning: %s", err)
+                self._v6_redirect_failed(lane, uid, err)
+                continue
+            self._remember(self._lane_rule_specs, lane, (tbl, body))
         return True, "rules added"
 
-    def _remember_lane_specs(self, lane: int, uid: int, redirect_port: int) -> None:
-        """Record the tagged specs of a lane whose rules already exist.
-
-        After a reconcile found every rule in place (e.g. restored by a
-        snapshot), teardown must still be able to delete them.
-        """
-        filter_ok, nat_ok = self._ip6_caps()
-        self._remember(
-            self._lane_rule_specs,
-            lane,
-            ("iptables", self._rule_body(uid, redirect_port, True)),
+    def _v6_redirect_failed(self, lane: int, uid: int, err: str) -> None:
+        """ip6tables nat exists but the v6 REDIRECT failed: REJECT v6 instead."""
+        serial = Adb.get_target_device()
+        logger.warning(
+            "ip6tables redirect failed (%s): IPv6 TCP of uid %s is rejected instead",
+            err,
+            uid,
         )
-        if nat_ok:
-            self._remember(
-                self._lane_rule_specs,
-                lane,
-                ("ip6tables", self._rule_body(uid, redirect_port, True)),
-            )
-        elif filter_ok:
-            self._remember(
-                self._lane_rule_specs,
-                lane,
-                ("ip6tables", self._v6_reject_body(uid, True)),
-            )
-        if self._quic_blocking_enabled():
-            for tbl in ("iptables", "ip6tables") if filter_ok else ("iptables",):
-                self._remember(
-                    self._lane_quic_specs, lane, (tbl, self._quic_rule_body(uid, True))
-                )
+        self._ip6_redirect_broken.add(serial)
+        filter_ok = self._ip6_caps()[0]
+        self._ip6_cap_cache[serial] = (filter_ok, False)
+        self._ensure_v6_fence(lane, uid)
 
     def _quic_rule_body(self, uid: int, tagged: bool, target: str = "REJECT") -> str:
         """A filter-table OUTPUT rule REJECTing the UID's QUIC (UDP/443).

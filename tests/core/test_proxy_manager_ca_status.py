@@ -13,6 +13,7 @@ import hashlib
 import re
 import shutil
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 from cryptography import x509
@@ -93,6 +94,7 @@ class _Device:
         self.inject_out = "inject: tmpfs on ...\nsweep: bound=36 already=0 failed=0\n"
         self.inject_out += "sweep: bound=0 already=36 failed=0\nrc=0\n"
         self.after_inject: str | None = None
+        self.uninject_out: str | None = None
         self.ns_cat = ""
 
     def __call__(self, cmd, serial=None, timeout=30):
@@ -123,8 +125,10 @@ class _Device:
                     self.status = self.after_inject
                 return self.inject_out, ""
             if op == "uninject":
+                if self.uninject_out is not None:
+                    return self.uninject_out, ""
                 self.status = _status_out(None)
-                return "uninject: unmounted=37 failed=0\nrc=0\n", ""
+                return "uninject: unmounted=37 failed=0 left=0\nrc=0\n", ""
             if op == "restart-zygote":
                 return "ss_before=728\nkilled=712\nrc=0\n", ""
         return "", ""
@@ -309,14 +313,56 @@ def _name(path) -> str:
     return pm.CAManager().ca_spec(path).name
 
 
-def test_failed_no_restart_path_reports_restart_required(host_ca, device):
-    device.inject_out = "inject: nsenter missing\nrc=3\n"
+@pytest.mark.parametrize(
+    ("out", "words"),
+    [
+        ("inject: nsenter missing\nrc=3\n", "nsenter missing"),
+        ("inject: seed copy failed\nrc=4\n", "seed copy failed"),
+        ("inject: tmpfs mount failed\nrc=5\n", "tmpfs mount failed"),
+        ("inject: init APEX bind failed\nrc=7\n", "init APEX bind failed"),
+    ],
+)
+def test_no_restart_offer_when_init_does_not_hold_the_ca(host_ca, device, out, words):
+    """A new Zygote inherits only what init's namespace holds: for these
+    failures the restart would kill every app for nothing.
+    """
+    device.inject_out = out
+    result = pm.CAManager().inject_ca_into_zygote(host_ca)
+    assert not result.success
+    assert not result.restart_required
+    assert words in result.message
+    assert "would not help" in result.message
+    assert pm.ca_desired_for(SERIAL) is None
+    assert not any("restart-zygote" in " ".join(op) for op in device.ops)
+
+
+def test_adb_timeout_says_try_again_not_restart(host_ca, device):
+    device.inject_out = ""  # no rc trailer: adb timed out / transport lost
+    result = pm.CAManager().inject_ca_into_zygote(host_ca)
+    assert not result.success
+    assert not result.restart_required
+    assert "try again" in result.message
+
+
+def test_restart_offered_when_init_holds_the_ca_but_zygote_lacks_it(host_ca, device):
+    sha = _sha(host_ca)
+    device.inject_out = (
+        "sweep: failed pid=712\nsweep: bound=0 already=0 failed=1\nrc=8\n"
+    )
+    device.after_inject = "\n".join(
+        [
+            "our_dev=0:101",
+            f"ns role=init pid=1 comm=init mount=0:101/tmpfs file={sha}",
+            "ns role=zygote pid=712 comm=zygote64 mount=none file=missing",
+            "ns role=system_server pid=728 comm=system_server mount=none file=missing",
+            "namespaces have=0 lack=36",
+            "rc=0",
+        ]
+    )
     result = pm.CAManager().inject_ca_into_zygote(host_ca)
     assert not result.success
     assert result.restart_required
-    assert "nsenter missing" in result.message
     assert pm.ca_desired_for(SERIAL) is None
-    assert not any("restart-zygote" in " ".join(op) for op in device.ops)
 
 
 def test_inject_needs_root(host_ca, device):
@@ -348,6 +394,157 @@ def test_uninject_clears_the_intent_and_warns_about_running_apps(host_ca, device
     assert device.ops == [["uninject", "1"]]
 
 
+def test_failed_uninject_keeps_the_intent(host_ca, device):
+    pm.remember_ca_intent(SERIAL, pm.CAManager().ca_spec(host_ca))
+    device.uninject_out = "uninject: unmounted=30 failed=2 left=2\nrc=1\n"
+    ok, message = pm.CAManager().uninject_ca()
+    assert not ok
+    assert "2 still mounted" in message
+    assert pm.ca_desired_for(SERIAL) is not None
+    device.uninject_out = ""  # adb timeout
+    ok, message = pm.CAManager().uninject_ca()
+    assert not ok
+    assert "try again" in message
+    assert pm.ca_desired_for(SERIAL) is not None
+
+
+def test_api_level_comes_from_the_targeted_serial(monkeypatch):
+    from sandroid.core import device_manager
+
+    active = SimpleNamespace(serial="emulator-5554", api_level=31)
+    monkeypatch.setattr(
+        device_manager.DeviceManager,
+        "_instance",
+        SimpleNamespace(active_device=active),
+    )
+    asked = []
+    monkeypatch.setattr(
+        pm.Adb,
+        "send_adb_command",
+        staticmethod(
+            lambda cmd, serial=None, timeout=30: asked.append(serial) or ("35\n", "")
+        ),
+    )
+    monkeypatch.setattr(pm.Adb, "_target_device", "emulator-5554")
+    with pm.Adb.targeting(SERIAL):
+        assert pm.CAManager().get_device_api_level() == 35
+    assert asked == [SERIAL]
+    assert pm.CAManager().get_device_api_level() == 31  # the active device
+
+
+# -- the device script itself, with mount/nsenter stubbed (POSIX sh) -------------
+
+
+def _ca_harness(tmp_path, driver: str) -> tuple[str, list[str]]:
+    """Run the CA script's functions with nsenter/mount/namespaces stubbed.
+
+    State lives in files: ``mounted`` (our tmpfs in init), ``bound_<pid>``
+    (the APEX bind in that namespace); every nsenter call is logged as
+    ``<pid> <command>``.
+    """
+    script = pm._CA_SCRIPT
+    body = script[: script.index('case "$op" in')]
+    state = tmp_path / "state"
+    for d in ("state", "sys", "apex", "work"):
+        (tmp_path / d).mkdir(exist_ok=True)
+    stubs = f"""
+SYS={tmp_path}/sys; APEX={tmp_path}/apex; WORK={tmp_path}/work
+MANIFEST=$WORK/manifest; SEEDED=$WORK/seeded
+STATE={state}; LOG={tmp_path}/log
+zygotes() {{ echo 712; }}
+namespaces() {{ echo 712; echo 900; }}
+our_dev() {{ [ -e "$STATE/mounted" ] && echo 0:99; }}
+top_mount() {{ [ "$2" = "$APEX" ] && [ -e "$STATE/bound_$1" ] && echo "0:99 tmpfs"; }}
+mount() {{ touch "$STATE/mounted"; }}
+umount() {{
+  if [ "$1" = "$APEX" ]; then rm -f "$STATE/bound_$NS"; else rm -f "$STATE/mounted"; fi
+}}
+nsenter() {{
+  NS=$2; shift 4; echo "$NS $*" >>"$LOG"
+  if [ "$1" = sh ]; then ( eval "$3" ); else "$@"; fi
+}}
+"""
+    path = tmp_path / "harness.sh"
+    path.write_text("set -- noop\n" + body + stubs + driver)
+    out = subprocess.run(
+        ["sh", str(path)], capture_output=True, text=True, check=False
+    ).stdout
+    log_path = tmp_path / "log"
+    log = log_path.read_text().splitlines() if log_path.exists() else []
+    return out, log
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="no POSIX sh")
+def test_uninject_deletes_our_cert_first_then_unmounts_twice(tmp_path):
+    (tmp_path / "sys").mkdir()
+    (tmp_path / "sys" / "c8750f0d.0").write_text("ours")
+    (tmp_path / "sys" / "stock.0").write_text("stock")
+    (tmp_path / "work").mkdir()
+    (tmp_path / "work" / "manifest").write_text("c8750f0d.0\n")
+    (tmp_path / "state").mkdir()
+    for name in ("mounted", "bound_712", "bound_900", "bound_1"):
+        (tmp_path / "state" / name).touch()
+    out, log = _ca_harness(tmp_path, 'uninject 1; echo "rc=$?"\n')
+    assert "rc=0" in out
+    assert "uninject: deleted=c8750f0d.0" in out
+    assert "left=0" in out
+    assert log[0] == f"1 rm -f {tmp_path}/sys/c8750f0d.0"
+    umounts = [line.split()[0] for line in log if " umount " in f" {line} "]
+    assert umounts[:3] == ["712", "900", "1"]  # Zygote first, init last
+    assert not any((tmp_path / "state").iterdir())
+    assert not (tmp_path / "work" / "manifest").exists()
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="no POSIX sh")
+def test_uninject_reports_a_namespace_it_could_not_clean(tmp_path):
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "bound_900").touch()
+    driver = (
+        'nsenter() { NS=$2; shift 4; [ "$NS" = 900 ] && return 1; "$@"; }\n'
+        'uninject 1; echo "rc=$?"\n'
+    )
+    out, _ = _ca_harness(tmp_path, driver)
+    assert "left=1" in out
+    assert "rc=1" in out
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="no POSIX sh")
+def test_inject_removes_a_tmpfs_it_could_not_seed(tmp_path):
+    """Mount succeeds, the copy into it fails: the empty tmpfs must not stay
+    (a later run would reuse it and every stock CA would be untrusted).
+    """
+    (tmp_path / "apex").mkdir()
+    (tmp_path / "apex" / "stock.0").write_text("stock")
+    (tmp_path / "work").mkdir()
+    (tmp_path / "work" / "stage.pem").write_text("pem")
+    driver = (
+        "SYS=/nonexistent/sys\n"
+        f'inject {tmp_path}/work/stage.pem c8750f0d.0 1; echo "rc=$?"\n'
+    )
+    out, _ = _ca_harness(tmp_path, driver)
+    assert "rc=6" in out
+    assert "tmpfs removed" in out
+    assert not (tmp_path / "state" / "mounted").exists()
+    assert not (tmp_path / "work" / "seeded").exists()
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="no POSIX sh")
+def test_inject_rebuilds_an_incomplete_tmpfs_instead_of_reusing_it(tmp_path):
+    (tmp_path / "apex").mkdir()
+    for i in range(3):
+        (tmp_path / "apex" / f"stock{i}.0").write_text("stock")
+    (tmp_path / "work").mkdir()
+    (tmp_path / "work" / "stage.pem").write_text("pem")
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "mounted").touch()  # a tmpfs, but nothing seeded
+    driver = f'inject {tmp_path}/work/stage.pem c8750f0d.0 1; echo "rc=$?"\n'
+    out, log = _ca_harness(tmp_path, driver)
+    assert "is incomplete" in out
+    assert f"1 umount {tmp_path}/sys" in log
+    assert "seeded from" in out
+    assert (tmp_path / "work" / "seeded").read_text().strip() == "3"
+
+
 def test_reconcile_without_intent_touches_nothing(device):
     assert pm.CAManager().reconcile_ca(SERIAL) == "none"
     assert device.sent == []
@@ -374,7 +571,7 @@ def test_reconcile_never_restarts_when_the_no_restart_path_fails(host_ca, device
     device.inject_out = "inject: tmpfs mount failed\nrc=5\n"
     outcome = pm.CAManager().reconcile_ca(SERIAL)
     assert outcome.startswith("failed")
-    assert "TUI" in outcome
+    assert "tmpfs mount failed" in outcome
     assert not any("restart-zygote" in " ".join(op) for op in device.ops)
 
 

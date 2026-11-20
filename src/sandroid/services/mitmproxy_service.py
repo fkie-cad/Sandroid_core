@@ -1527,22 +1527,29 @@ class MitmproxyService:
             result = self.probe_device_reachability(host, port)
         return result
 
-    def wait_listening(self, timeout: float = 8.0) -> bool:
+    def wait_listening(self, timeout: float = 8.0, *, socks: bool = False) -> bool:
         """Block until our mitmweb accepts connections on its proxy port.
 
         ``start()`` returns as soon as the process is spawned; mitmweb needs
         a moment (Python start-up, addons, one listener per lane) before it
-        binds. Returns False if the process is gone or the deadline passes.
+        binds. With ``socks`` every App Proxy lane's SOCKS port must listen
+        too. Returns False if the process is gone or the deadline passes.
         Blocking: call it off the UI thread.
         """
         deadline = time.monotonic() + timeout
+        ports = [self._state.proxy_port]
+        if socks:
+            ports += [
+                self._state.socks_base + i for i in range(self._state.focus_lanes)
+            ]
         while True:
             with self._lock:
                 proc = self._proc
             if proc is None or proc.poll() is not None:
                 return False
-            if _pid_listening(
-                proc.pid, self._state.proxy_port, self._state.listen_host
+            if all(
+                _pid_listening(proc.pid, port, self._state.listen_host)
+                for port in ports
             ):
                 return True
             if time.monotonic() >= deadline:
@@ -1743,14 +1750,22 @@ class MitmproxyService:
             self._kick_app_proxy_reconcile("mitmproxy-start")
             return True
 
-    @staticmethod
-    def _kick_app_proxy_reconcile(reason: str) -> None:
+    def _kick_app_proxy_reconcile(self, reason: str) -> None:
         """Re-check the App Proxy lanes off-thread (lanes waiting for us).
 
         A lane kept while mitmproxy was off fails closed and forwards again
         on its own once mitmproxy listens; the reconcile proves that (and
         repairs a lane that died meanwhile) so its health reads "active".
+        It waits until mitmweb listens on its proxy port AND every lane's
+        SOCKS port first: probing earlier reported a false, sticky
+        "mitmproxy unreachable from the device".
         """
+        try:
+            from sandroid.core.proxy_manager import note_mitmproxy_started
+
+            note_mitmproxy_started()
+        except Exception:
+            logger.debug("mitmproxy start not noted", exc_info=True)
 
         def _run() -> None:
             # Off-thread: never take FocusManager's lock under ours.
@@ -1758,8 +1773,15 @@ class MitmproxyService:
                 from sandroid.core import proxy_manager
 
                 focus = proxy_manager._FOCUS_INSTANCE
-                if focus is not None and focus.has_lanes():
-                    focus.reconcile(None, reason)
+                if focus is None or not focus.has_lanes():
+                    return
+                if not self.wait_listening(15.0, socks=True):
+                    logger.debug(
+                        "mitmproxy not listening yet; App Proxy check after %s "
+                        "runs anyway",
+                        reason,
+                    )
+                focus.reconcile(None, reason)
             except Exception as exc:
                 logger.debug("App Proxy reconcile after %s failed: %s", reason, exc)
 

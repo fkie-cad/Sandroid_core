@@ -9,6 +9,9 @@ from __future__ import annotations
 import atexit
 import base64
 import re
+import shlex
+import threading
+import time
 
 import pytest
 
@@ -360,11 +363,574 @@ def test_cleanup_kills_by_port_range_never_pkill_gost(monkeypatch):
 
 def test_flush_uses_the_proven_sport_filter():
     """``state established`` plus ports matched nothing on the device's
-    iproute2: the script picks the UID's ESTAB sockets and kills by sport.
+    iproute2: the script picks the UID's ESTAB sockets and kills by port
+    pair, and only when every socket that filter selects is that UID's (ss
+    has no UID match; another app may share the port pair).
     """
     script = pm._LANE_SCRIPT
     flush = script[script.index("flush)") :]
-    assert 'ss -K -tn "( sport = :$sp )"' in flush
+    assert 'sel="( sport = :$sp and dport = :$dp )"' in flush
+    assert 'ss -K -tn "$sel"' in flush
+    assert '[ -z "$other" ] || continue' in flush
     assert "state established" not in flush
     assert '$1=="ESTAB"' in flush
     assert 'u="uid:$uid"' in flush
+
+
+def test_observe_tells_unknown_from_uninstalled():
+    """A failed ``stat`` of the data dir (CE storage locked after a boot) is
+    not "uninstalled": only packages.list decides, else the UID is unknown.
+    """
+    script = pm._LANE_SCRIPT
+    observe = script[script.index("observe)") : script.index("kill)")]
+    assert "/data/system/packages.list" in observe
+    assert "u=unknown" in observe
+    obs = pm.parse_lane_observation(
+        "UID a.b unknown\nUID c.d missing\nUID e.f 10300\nrc=0"
+    )
+    assert obs.uids == {"a.b": None, "c.d": None, "e.f": 10300}
+    assert obs.uid_unknown == {"a.b"}
+
+
+def test_unknown_uid_keeps_the_lane_with_its_last_uid():
+    obs = _obs(_gost(5300), *_rules(), uid=None)
+    obs.uid_unknown.add(DESIRED[0].package)
+    hinted = [pm.DesiredLane(0, DESIRED[0].package, 60080, UP, uid_hint=UID)]
+    (plan,), _, stale = _plan(obs, desired=hinted)
+    assert not plan.app_missing
+    assert plan.uid == UID
+    assert (plan.kill, plan.launch, plan.add, stale) == ([], False, set(), [])
+    # Without a known UID nothing at all is torn down.
+    (plan,), _, stale = _plan(obs)
+    assert plan.uid_unknown
+    assert not plan.app_missing
+    assert (plan.kill, stale) == ([], [])
+
+
+# -- the device as a state machine: the fail-closed invariant -----------------------
+
+PORTS = range(60080, 60085)
+PKG = DESIRED[0].package
+
+
+def _key(kind: str, spec: str):
+    return pm.parse_rule_key(kind, "-A " + spec)
+
+
+class _World:
+    """A stateful fake device: iptables tables, gost processes, packages.
+
+    Every adb command goes through ``__call__``; each one that changes the
+    device is recorded with whether the requested app could leak before and
+    after it, so a test can assert the forensic guarantee: during a repair
+    no IPv4 TCP of the app goes past our REDIRECT and no IPv6 TCP past our
+    REJECT (or v6 REDIRECT).
+    """
+
+    def __init__(
+        self,
+        *,
+        uid=UID,
+        ip6_nat=False,
+        comment_ok=True,
+        reject_ok=True,
+        uid_state=None,
+    ):
+        self.uid = uid
+        self.tables = {
+            ("iptables", "nat"): [],
+            ("iptables", "filter"): [],
+            ("ip6tables", "filter"): [],
+        }
+        if ip6_nat:
+            self.tables[("ip6tables", "nat")] = []
+        self.comment_ok = comment_ok
+        self.reject_ok = reject_ok
+        self.fail_v6_redirect = False
+        self.listen_fails = False
+        self.uid_state = uid_state  # None = installed, "missing", "unknown"
+        self.gosts: dict[int, dict] = {}
+        self.next_pid = 9000
+        self.events: list[tuple[str, bool, bool, bool]] = []
+        self.flushes = 0
+        self.targets: list[str | None] = []
+
+    # -- state ---------------------------------------------------------------
+
+    def rule(self, binary, table, spec):
+        self.tables[(binary, table)].append(" ".join(shlex.split(spec)))
+
+    def lane(self, uid=UID, port=60080, *, v6=True, quic=True, drop=False):
+        tag = '-m comment --comment "sandroid-focus" ' if self.comment_ok else ""
+        block = "DROP" if drop else "REJECT"
+        self.rule(
+            "iptables",
+            "nat",
+            f"OUTPUT -m owner --uid-owner {uid} -p tcp {tag}-j REDIRECT "
+            f"--to-ports {port}",
+        )
+        if v6:
+            self.rule(
+                "ip6tables",
+                "filter",
+                f"OUTPUT -m owner --uid-owner {uid} -p tcp {tag}-j {block}",
+            )
+        if quic:
+            for binary in ("iptables", "ip6tables"):
+                self.rule(
+                    binary,
+                    "filter",
+                    f"OUTPUT -m owner --uid-owner {uid} -p udp --dport 443 "
+                    f"{tag}-j {block}",
+                )
+
+    def gost(self, port=60080, up=UP, fd="/dev/null", listening=True):
+        pid = self.next_pid
+        self.next_pid += 1
+        self.gosts[pid] = {"port": port, "up": up, "fd": fd, "listen": listening}
+        return pid
+
+    def keys(self):
+        out = set()
+        for (binary, table), specs in self.tables.items():
+            kind = ("NAT" if table == "nat" else "FILTER") + (
+                "6" if binary == "ip6tables" else "4"
+            )
+            out |= {k for spec in specs if (k := _key(kind, spec)) is not None}
+        return out
+
+    def safe(self, uid=None) -> bool:
+        """No IPv4 or IPv6 TCP of the app can leave unproxied."""
+        uid = self.uid if uid is None else uid
+        keys = self.keys()
+        v4 = any(
+            k.family == "4"
+            and k.target == "REDIRECT"
+            and k.uid == uid
+            and k.to_port in PORTS
+            for k in keys
+        )
+        if ("ip6tables", "nat") in self.tables:
+            v6 = any(
+                k.family == "6" and k.uid == uid and k.proto == "tcp" for k in keys
+            )
+        else:
+            v6 = any(
+                k.family == "6" and k.table == "filter" and k.proto == "tcp"
+                and k.target == "BLOCK" and k.uid == uid
+                for k in keys
+            )  # fmt: skip
+        return v4 and v6
+
+    def violations(self) -> list[str]:
+        """Device changes that opened a leak, or ran while one was open
+        without closing it (only protective rule adds may run then).
+        """
+        bad = []
+        for what, before, after, protective in self.events:
+            if before and not after:
+                bad.append(f"{what}: opened a leak")
+            elif not before and not protective:
+                bad.append(f"{what}: changed the device while the app leaked")
+        return bad
+
+    def mutations(self) -> list[str]:
+        return [what for what, *_ in self.events]
+
+    # -- adb -----------------------------------------------------------------
+
+    def __call__(self, cmd, serial=None, timeout=30):
+        self.targets.append(pm.Adb.get_target_device())
+        if cmd in ("shell id",):
+            return "uid=0(root)", ""
+        inner = shlex.split(cmd)[1] if cmd.startswith("shell ") else cmd
+        if cmd.startswith("push "):
+            self._record("push gost", False)
+            return "1 file pushed", ""
+        m = re.match(r"echo (\S+) \| base64 -d \| sh -s -- ?(.*)$", inner)
+        if m:
+            return self._lane_op(shlex.split(m.group(2)))
+        m = re.match(r"(ip6?tables)(?: -w)? (?:-t (nat) )?-S OUTPUT", inner)
+        if m:
+            table = m.group(2) or "filter"
+            exists = (m.group(1), table) in self.tables
+            return ("-P OUTPUT ACCEPT\n" if exists else ""), ""
+        m = re.match(r"(ip6?tables)(?: -w)? (?:-t (nat) )?(-[IAD]) (OUTPUT .*)$", inner)
+        if m:
+            return self._iptables(m.group(1), m.group(2) or "filter", m.group(3), m)
+        if "setsid" in inner:
+            g = re.search(r"-L red://:(\d+) -F (\S+?)'", inner)
+            before = self.safe()
+            self.gost(int(g.group(1)), g.group(2), listening=not self.listen_fails)
+            self.events.append(
+                (f"launch gost :{g.group(1)}", before, self.safe(), False)
+            )
+            return "", ""
+        m = re.match(r"kill ([\d ]+)$", inner)
+        if m:
+            before = self.safe()
+            for pid in m.group(1).split():
+                self.gosts.pop(int(pid), None)
+            self.events.append((f"kill {m.group(1)}", before, self.safe(), False))
+            return "", ""
+        return "", ""
+
+    def _record(self, what, protective):
+        before = self.safe()
+        self.events.append((what, before, before, protective))
+
+    def _iptables(self, binary, table, op, m):
+        spec = " ".join(shlex.split(m.group(4)))
+        if (binary, table) not in self.tables:
+            return "", f"{binary}: can't initialize table `{table}'"
+        if "comment" in spec and not self.comment_ok:
+            return "", "iptables: Couldn't load match `comment'"
+        if "REJECT" in spec and not self.reject_ok:
+            return "", "iptables: No chain/target/match by that name."
+        if (
+            op != "-D"
+            and binary == "ip6tables"
+            and table == "nat"
+            and self.fail_v6_redirect
+        ):
+            return "", "ip6tables: No chain/target/match by that name."
+        rules = self.tables[(binary, table)]
+        before = self.safe()
+        if op == "-D":
+            if spec not in rules:
+                return (
+                    "",
+                    "iptables: Bad rule (does a matching rule exist in that chain?).",
+                )
+            rules.remove(spec)
+            self.events.append(
+                (f"{binary} {table} -D {spec}", before, self.safe(), False)
+            )
+            return "", ""
+        rules.insert(0, spec) if op == "-I" else rules.append(spec)
+        protective = f"--uid-owner {self.uid} " in spec
+        self.events.append(
+            (f"{binary} {table} {op} {spec}", before, self.safe(), protective)
+        )
+        return "", ""
+
+    def _lane_op(self, args):
+        op = args[0]
+        if op == "observe":
+            out = []
+            for pid, g in self.gosts.items():
+                out.append(
+                    f"GOST pid={pid} fd1={g['fd']} fd2={g['fd']} cmd={BIN} "
+                    f"-L red://:{g['port']} -F {g['up']} "
+                )
+            out += [f"LISTEN *:{g['port']}" for g in self.gosts.values() if g["listen"]]
+            pick = "sandroid-focus" if args[3] == "0" else "--uid-owner "
+            for (binary, table), specs in self.tables.items():
+                kind = ("NAT" if table == "nat" else "FILTER") + (
+                    "6" if binary == "ip6tables" else "4"
+                )
+                if binary == "ip6tables":
+                    out.append(f"IP6 {table}")
+                out += [f"{kind} -A {spec}" for spec in specs if pick in spec]
+            for pkg in args[4:]:
+                state = self.uid_state or str(self.uid)
+                out.append(f"UID {pkg} {state}")
+            return "\n".join(out) + "\nrc=0\n", ""
+        if op == "listening":
+            port = int(args[2])
+            ok = any(g["port"] == port and g["listen"] for g in self.gosts.values())
+            return ("LISTENING\n" if ok else "") + "rc=0\n", ""
+        if op == "kill":
+            ports = {int(a) for a in args[2:]}
+            before = self.safe()
+            gone = [p for p, g in self.gosts.items() if g["port"] in ports]
+            for pid in gone:
+                del self.gosts[pid]
+            if gone:
+                self.events.append(
+                    (f"kill ports {sorted(ports)}", before, self.safe(), False)
+                )
+            return "rc=0\n", ""
+        if op == "flush":
+            self.flushes += 1
+            return "flushed=0\nrc=0\n", ""
+        return "rc=0\n", ""
+
+
+def _manager(monkeypatch, world, *, lanes=((0, UID),), binary_ok=True):
+    monkeypatch.setattr(pm.Adb, "send_adb_command", staticmethod(world))
+    monkeypatch.setattr(pm.Adb, "_target_device", SERIAL)
+    monkeypatch.setattr(pm.FocusManager, "_pool_size", property(lambda self: 5))
+    _mitm(monkeypatch, True)
+    m = pm.FocusManager()
+    atexit.unregister(m._atexit_cleanup)
+    m._ca._use_su = False
+
+    def ensure_binary():
+        world._record("push gost binary", False)
+        return (True, "ok") if binary_ok else (False, "push failed")
+
+    monkeypatch.setattr(m, "_ensure_binary", ensure_binary)
+    for name, value in [
+        ("_write_sidecar", lambda: None),
+        ("_add_to_state", lambda package: None),
+        ("_remove_from_state", lambda package: None),
+        ("_publish_health", lambda: None),
+        ("_probe_owner_match", lambda: (True, "ok")),
+        ("_cleanup_stale_locked", lambda: None),
+        ("_device_tcp_reachable", lambda h, p: "reachable"),
+    ]:
+        monkeypatch.setattr(m, name, value)
+    monkeypatch.setattr(pm, "_install_restore_hook", lambda: None)
+    m._ensure_lanes()
+    for lane, uid in lanes:
+        m._lanes[lane] = PKG
+        m._lane_targets[lane] = "ours"
+        m._lane_serials[lane] = SERIAL
+        m._lane_upstreams[lane] = UP
+        m._lane_uids[lane] = uid
+    return m
+
+
+def _repair(monkeypatch, world, **kw):
+    m = _manager(monkeypatch, world, **kw)
+    world.events.clear()
+    (report,) = m.reconcile(SERIAL, "snapshot-load")
+    assert world.violations() == []
+    assert world.safe(), world.tables
+    return m, report
+
+
+def test_invariant_missing_lane_after_a_load(monkeypatch):
+    """A snapshot saved before the lane: no rules, no gost. The protective
+    rules go in before anything else; the REDIRECT before gost.
+    """
+    world = _World()
+    m, report = _repair(monkeypatch, world)
+    assert report.health.state == pm.LANE_ACTIVE
+    done = world.mutations()
+    first_unprotective = next(i for i, (_, _, _, p) in enumerate(world.events) if not p)
+    redirect = next(i for i, w in enumerate(done) if "REDIRECT" in w)
+    assert redirect < first_unprotective
+    assert redirect < next(i for i, w in enumerate(done) if w.startswith("launch"))
+    assert world.flushes == 1
+
+
+def test_invariant_dead_gost(monkeypatch):
+    world = _World()
+    world.lane()
+    m, report = _repair(monkeypatch, world)
+    assert world.events[0][1]  # safe from the start
+    assert any(w.startswith("launch") for w in world.mutations())
+    assert report.repaired == ["gost restarted"]
+    assert report.health.ok
+
+
+def test_invariant_doomed_gost(monkeypatch):
+    world = _World()
+    world.lane()
+    doomed = world.gost(fd="socket:[119974]")
+    m, report = _repair(monkeypatch, world)
+    assert doomed not in world.gosts
+    assert [g["fd"] for g in world.gosts.values()] == ["/dev/null"]
+    assert report.health.ok
+
+
+def test_invariant_gost_binary_push_fails(monkeypatch):
+    world = _World()
+    m, report = _repair(monkeypatch, world, binary_ok=False)
+    assert report.health.state == pm.LANE_FAILED
+    assert "fail closed" in report.health.detail
+    assert world.gosts == {}  # nothing listens: the REDIRECT refuses
+
+
+def test_invariant_gost_does_not_listen(monkeypatch):
+    world = _World()
+    world.listen_fails = True
+    m, report = _repair(monkeypatch, world)
+    assert report.health.state == pm.LANE_FAILED
+    assert "did not start" in report.health.detail
+    assert any(k.target == "REDIRECT" for k in world.keys())
+
+
+def test_invariant_stale_rules_of_another_lane_set(monkeypatch):
+    """The snapshot's lane for this app sat on another port: the new
+    REDIRECT goes in before the stale one is deleted and its gost killed.
+    """
+    world = _World()
+    world.lane(port=60081)
+    old = world.gost(port=60081)
+    m, report = _repair(monkeypatch, world)
+    redirects = [k for k in world.keys() if k.target == "REDIRECT"]
+    assert [k.to_port for k in redirects] == [60080]
+    assert old not in world.gosts
+    assert report.health.ok
+
+
+def test_invariant_orphans_and_an_old_uid(monkeypatch):
+    """Another app's lane (orphan gost, its rules) and this app's rules for
+    an old UID (reinstalled) are removed only after the new rules are in.
+    """
+    world = _World()
+    world.lane(uid=10999, port=60082)
+    orphan = world.gost(port=60082)
+    world.lane(uid=10100)  # the app's UID before a reinstall
+    world.gost()
+    m, report = _repair(monkeypatch, world)
+    assert orphan not in world.gosts
+    assert {k.uid for k in world.keys()} == {UID}
+    assert "app UID changed" not in report.repaired  # same UID as recorded
+
+
+def test_invariant_v6_redirect_fails_falls_back_to_reject(monkeypatch):
+    world = _World(ip6_nat=True)
+    world.fail_v6_redirect = True
+    m, report = _repair(monkeypatch, world)
+    assert any(
+        k.family == "6" and k.target == "BLOCK" and k.proto == "tcp"
+        for k in world.keys()
+    )
+    world.events.clear()
+    m.reconcile(SERIAL, "apply")
+    assert world.mutations() == []  # no re-add, no delete-then-add gap
+
+
+def test_steady_state_changes_nothing(monkeypatch):
+    world = _World()
+    world.lane()
+    world.gost()
+    m, report = _repair(monkeypatch, world)
+    assert world.mutations() == []
+    assert world.flushes == 0
+
+
+def test_untagged_rules_are_seen_and_not_readded(monkeypatch):
+    """No xt_comment: rules go in untagged; later reconciles must see them
+    (no re-add, no socket flush every run).
+    """
+    world = _World(comment_ok=False)
+    m, report = _repair(monkeypatch, world)
+    assert SERIAL in m._untagged_serials
+    world.events.clear()
+    world.flushes = 0
+    m.reconcile(SERIAL, "apply")
+    assert world.mutations() == []
+    assert world.flushes == 0
+
+
+def test_teardown_removes_drop_fallback_rules_a_snapshot_restored(monkeypatch):
+    world = _World(reject_ok=False)
+    world.lane(drop=True)
+    world.gost()
+    m, report = _repair(monkeypatch, world)
+    assert world.mutations() == []
+    m.disable_focus()
+    assert world.keys() == set()
+
+
+def test_unreadable_uid_never_tears_the_lane_down(monkeypatch):
+    world = _World(uid_state="unknown")
+    world.lane()
+    world.gost()
+    m, report = _repair(monkeypatch, world)
+    assert world.mutations() == []
+    assert report.health.state != pm.LANE_FAILED
+
+
+def test_uninstalled_app_per_packages_list_is_torn_down(monkeypatch):
+    world = _World(uid_state="missing")
+    world.lane()
+    world.gost()
+    m = _manager(monkeypatch, world)
+    (report,) = m.reconcile(SERIAL, "snapshot-load")
+    assert report.health.label == "failed: app not installed"
+    assert world.keys() == set()
+    assert world.gosts == {}
+
+
+def test_orphan_lanes_from_a_snapshot_are_swept_without_session_lanes(monkeypatch):
+    world = _World()
+    world.lane(uid=10999, port=60081)
+    world.gost(port=60081)
+    foreign = world.gost(port=1080)  # not ours: never touched
+    m = _manager(monkeypatch, world, lanes=())
+    assert m.sweep_orphans(SERIAL, "snapshot-load") == 5
+    assert world.keys() == set()
+    assert list(world.gosts) == [foreign]
+
+
+def test_enable_pins_every_adb_call_to_its_serial(monkeypatch):
+    world = _World()
+    m = _manager(monkeypatch, world, lanes=())
+    original = world.__call__
+
+    class _Switching:
+        def __call__(self, cmd, serial=None, timeout=30):
+            out = original(cmd, serial, timeout)
+            pm.Adb._target_device = "emulator-5554"  # user switched devices
+            return out
+
+    monkeypatch.setattr(pm.Adb, "send_adb_command", staticmethod(_Switching()))
+    monkeypatch.setattr(m, "_resolve_uid", lambda package: UID)
+    ok, msg = m.enable_focus(PKG)
+    assert ok, msg
+    assert set(world.targets) == {SERIAL}
+    assert m._lane_serials[0] == SERIAL
+
+
+# -- the UI thread never waits for the lock; probes run without it --------------
+
+
+def test_cached_reads_never_block(fm, monkeypatch):
+    _mitm(monkeypatch, True)
+    assert fm.enable_focus(PKG)[0]
+    assert fm.app_proxies_cached() == {PKG: "ours"}
+    assert fm.lane_health_cached()[PKG].ok
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with fm._lock:
+            held.set()
+            release.wait(5)
+
+    t = threading.Thread(target=hold)
+    t.start()
+    held.wait(5)
+    try:
+        start = time.monotonic()
+        assert fm.app_proxies_cached() == {PKG: "ours"}  # last value
+        assert fm.lane_health_cached()[PKG].ok
+        assert time.monotonic() - start < 0.5
+    finally:
+        release.set()
+        t.join()
+
+
+def test_upstream_probe_runs_outside_the_lock_and_retries(fm, monkeypatch):
+    _mitm(monkeypatch, True)
+    answers = iter(["unreachable", "reachable"])
+    locked = []
+
+    def probe(host, port):
+        locked.append(fm._lock.locked())
+        return next(answers)
+
+    monkeypatch.setattr(fm, "_device_tcp_reachable", probe)
+    monkeypatch.setattr(fm, "_PROBE_RETRY_DELAYS", (0.0, 0.0))
+    ok, msg = fm.enable_focus(PKG)
+    assert ok, msg
+    assert locked == [False, False]
+    assert fm.lane_health()[PKG].ok
+
+
+def test_unreachable_before_the_last_mitmproxy_start_is_stale(fm, monkeypatch):
+    _mitm(monkeypatch, True)
+    monkeypatch.setattr(fm, "_device_tcp_reachable", lambda h, p: "unreachable")
+    monkeypatch.setattr(fm, "_PROBE_RETRY_DELAYS", ())
+    ok, msg = fm.enable_focus(PKG)
+    assert fm.lane_health()[PKG].state == pm.LANE_UNREACHABLE
+    assert "host_ip_override" not in msg
+    monkeypatch.setattr(pm, "_MITMPROXY_STARTED_AT", 0.0)
+    pm.note_mitmproxy_started()
+    assert fm.lane_health()[PKG].ok
