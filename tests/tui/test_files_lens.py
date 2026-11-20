@@ -1116,7 +1116,7 @@ async def test_history_tab_keeps_every_pull_and_restart_restores_the_diff(
         await until(pilot, lambda: rows[PREFS].state is RowState.CHANGED)
         panel.refresh_rows()
         history = _plain(_tab(panel.inspect_selected(), "Versions"))
-        assert "▸ v2" in history
+        assert "v2" in history
         assert "v1" in history
         assert "one → two" in history  # the k preference, old → new
         assert "first pull" in history
@@ -1133,7 +1133,7 @@ async def test_history_tab_keeps_every_pull_and_restart_restores_the_diff(
         assert info.state is RowState.BASELINE_ONLY
         panel.refresh_rows()
         history = _plain(_tab(panel.inspect_selected(), "Versions"))
-        assert "▸ v2" in history
+        assert "v2" in history
         assert "v1" in history
         assert "two" in history
 
@@ -1241,17 +1241,17 @@ async def test_marks_show_only_activity_since_and_step_through_segments() -> Non
         events = _plain(_tab(panel._inspector_for(_row(panel, AAID)), "Events"))
         lines = [ln.strip() for ln in events.splitlines() if ln.strip()]
         assert lines[0].startswith("10:40:35")
-        assert lines[1] == "── Note 2 · 10:40:30 ──"
-        assert lines[2] == "── Note 1 'tap login' · 10:40:10 ──"
+        assert lines[1] == "Note 2 · 10:40:30"
+        assert lines[2] == "Note 1 'tap login' · 10:40:10"
         assert lines[3].startswith("10:40:00")
         # A file first touched after a mark ends with that mark.
         panel._segment = None
         panel.refresh_rows()
         events = _plain(_tab(panel._inspector_for(_row(panel, new)), "Events"))
         lines = [ln.strip() for ln in events.splitlines() if ln.strip()]
-        assert lines[0] == "── Note 2 · 10:40:30 ──"
+        assert lines[0] == "Note 2 · 10:40:30"
         assert lines[1].startswith("10:40:25")
-        assert lines[2] == "── Note 1 'tap login' · 10:40:10 ──"
+        assert lines[2] == "Note 1 'tap login' · 10:40:10"
         assert len(lines) == 3
 
 
@@ -1388,7 +1388,7 @@ async def test_cache_folders_collapse_into_one_expandable_row() -> None:
         assert _keys(panel) == [group, f"{ROOT}/code_cache/", PREFS]  # newest last
         row = _row(panel, group)
         assert panel._path_cell(row).plain == "cache/ · 3 files"
-        assert str(panel._mark_cell(row)) == "▸"
+        assert str(panel._mark_cell(row)) == ""  # no glyph: colour + words
         assert row.stats.count == 3
         assert panel.caption()[1].startswith("1 path + 2 groups")
 
@@ -1398,7 +1398,8 @@ async def test_cache_folders_collapse_into_one_expandable_row() -> None:
         await pilot.pause()
         assert _keys(panel)[0] == group
         assert set(_keys(panel)[1:4]) == set(cache_files)
-        assert str(panel._mark_cell(_row(panel, group))) == "▾"
+        assert str(panel._mark_cell(_row(panel, group))) == ""
+        assert panel._path_cell(_row(panel, group)).plain == "cache/ · 3 files · open"
         assert panel._path_cell(_row(panel, cache_files[0])).plain.startswith("  ")
         panel.table.move_cursor(row=2)
         await pilot.press("left")  # folds from a member row
@@ -2112,7 +2113,7 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
             assert cell == "★ 21 watched · idle since Note 1 'tap login'"
         else:
             assert cell.startswith("★ 21 ")
-        assert str(panel._mark_cell(fold)) == "▸"
+        assert str(panel._mark_cell(fold)) == ""
         assert "1 group" not in panel.caption()[1]  # the fold is no cache group
 
         panel.table.focus()
@@ -2123,7 +2124,7 @@ async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
         assert keys[0] == IDLE_FOLD
         assert keys[-2:] == [prefs[5], AAID]
         assert len(keys) == 2 + 21 + 1
-        assert str(panel._mark_cell(_row(panel, IDLE_FOLD))) == "▾"
+        assert str(panel._mark_cell(_row(panel, IDLE_FOLD))) == ""
         assert panel._path_cell(_row(panel, prefs[0])).plain.startswith("  ")
         panel.table.move_cursor(row=4)
         await pilot.press("w")  # a member row: a real ★ row (unwatch works)
@@ -2318,7 +2319,7 @@ async def test_restart_separator_in_events_and_writes_counted_per_process() -> N
         panel.refresh_rows()
         inspected = panel.inspect_selected()
         events = _plain(_tab(inspected, "Events")).splitlines()
-        sep = f"── {text} ──"
+        sep = text
         assert sep in events
         # Newest first: the tab_17 write, the restart line, the main write.
         idx = events.index(sep)
@@ -2407,9 +2408,9 @@ async def test_a_restart_before_a_files_first_event_shows_in_its_events() -> Non
         lines = panel._events_text(_row(panel, DB)).plain.splitlines()
         assert lines[0].startswith("10:40:09")
         assert lines[1:] == [
-            f"── {text} ──",
-            f"── {PKG} exited · PID 4665 ──",
-            "── Note 1 'search' · 10:40:00 ──",
+            text,
+            f"{PKG} exited · PID 4665",
+            "Note 1 'search' · 10:40:00",
         ]  # the follow note (info) and the restart before the mark are not
 
 
@@ -2656,3 +2657,4 @@ async def test_pinned_changes_are_not_new_below_and_live_resumes_after_review(
         panel.post_message(ScopeChanged(None))
         await settle(pilot)
         assert panel.following
+

@@ -7,7 +7,7 @@ bottom (watched ★ rows pinned on top)::
     ★ databases/app.db            CM  11x  10:42:05
     ★ shared_prefs/consent.xml    M    3x  10:42:07
       files/aaid.txt              C    1x  10:40:12
-    ▸ cache/ · 340 files          CM 412x  10:41:58   (a cache group, ⏎/→ opens)
+      cache/ · 340 files          CM 412x  10:41:58   (a cache group, ⏎/→ opens)
 
 **Follow** (the Timeline / Network rules, ``follow.py``; the default
 "recent" order): a file that changes moves to the bottom and, while *live*,
@@ -45,10 +45,10 @@ a top-level label, whose start and end are segment boundaries too ("label 7
 shows only what happened since that mark: counts/ops per segment, rows
 without activity in the segment hidden, ★ rows with activity in it pinned on
 top. The idle ★ rows (and patterns) fold into ONE row below them --
-``▸ ★ 21 watched · idle since mark 3`` -- that ⏎/→ opens and ← folds like a
+``★ 21 watched · idle since mark 3`` -- that ⏎/→ opens and ← folds like a
 cache group (a single idle ★ row stays as it is). The everything view
 (``A``) folds idle ★ rows only when they flood the table (4 or more never
-touched this session: ``▸ ★ 20 watched · idle``). ``A`` toggles everything /
+touched this session: ``★ 20 watched · idle``). ``A`` toggles everything /
 since the last mark; ``<``/``>`` step through the segments (before mark 1,
 mark 1 → 2, ...). The caption names the segment ("since mark 3 'tap login'
 · 10:42:07").
@@ -121,6 +121,7 @@ from textual.widgets import Button, DataTable, Input, Static
 from sandroid.core.adb_utils import canonical_device_path, watch_path_problem
 from sandroid.core.file_diff import is_legacy_markup_line
 from sandroid.tui.row_annotations import LENS_FILES, AnnotationFeed, AnnotationTintMixin
+from sandroid.tui.themes import lens_palette
 from sandroid.tui.utils.ui_thread import UiDispatcher
 
 from . import file_inspect
@@ -168,15 +169,30 @@ _W_MARK, _W_OPS, _W_COUNT, _W_LAST = 1, 5, 5, 8
 #: The Identity column (values of the identity profile found in the file).
 _W_IDENT = 16
 
-_DIM = "#5b6479"
-#: A monitor note that stands out (restart, exit, lost events).
-_NOTE_WARNING = "#fb923c"
-_STAR = "#7dd3fc"
+
+def _c(token: str) -> str:
+    """A lens theme token (``"dim"``, ``"warn"`` ...) as a colour, read at
+    render time so a theme switch recolours the lens.
+    """
+    return str(getattr(lens_palette(), token))
+
+
+#: The ★ colour of a watched file by its pull state (token, bold); others
+#: ``title``. Colour, not a symbol, says changed / failed / settling.
 _STATE_STAR = {
-    RowState.CHANGED: "bold #facc15",
-    RowState.ERROR: "bold #ef4444",
-    RowState.SETTLING: "#a3873f",
+    RowState.CHANGED: ("warn", True),
+    RowState.ERROR: ("bad", True),
+    RowState.SETTLING: ("muted", False),
 }
+
+
+def _state_star(state: RowState | None) -> str | None:
+    """The ★ style of a watched file in ``state`` (None: the plain ★)."""
+    spec = _STATE_STAR.get(state) if state is not None else None
+    if spec is None:
+        return None
+    token, bold = spec
+    return f"bold {_c(token)}" if bold else _c(token)
 
 
 class _Sep(NamedTuple):
@@ -184,7 +200,17 @@ class _Sep(NamedTuple):
 
     when: datetime
     text: str
-    style: str
+    #: ``"mark"`` (a note / section), ``"warning"`` (a monitor restart, exit,
+    #: lost events) or ``"note"`` (a followed sub-process): its colour.
+    kind: str
+
+
+#: The style of an Events separator by kind (no rule line, no symbol).
+_SEP_STYLE = {
+    "mark": lambda: f"bold {_c('title')}",
+    "warning": lambda: f"bold {_c('warn')}",
+    "note": lambda: _c("muted"),
+}
 
 
 def _load_run_record(scope: str):
@@ -221,7 +247,7 @@ def render_diff(diff: str | list[str] | None) -> Text:
             out.append("\n")
         out.append_text(diff_line_text(line))
     if len(shown) < len(lines):
-        out.append(f"\n… {len(lines)} lines — z for the full diff", style=_DIM)
+        out.append(f"\n… {len(lines)} lines — z for the full diff", style=_c("dim"))
     return out
 
 
@@ -242,10 +268,10 @@ def _is_markup(line: str) -> bool:
 
 
 _LINE_STYLES = (
-    (("[ADDED]", "[LINE ADDED]", "[INSERT]", "+"), "#4ade80"),
-    (("[DELETED]", "[LINE DELETED]", "[DELETE]", "-"), "#fb7185"),
-    (("[UPDATED]", "[UPDATE]"), "#facc15"),
-    (("@@",), _DIM),
+    (("[ADDED]", "[LINE ADDED]", "[INSERT]", "+"), "ok"),
+    (("[DELETED]", "[LINE DELETED]", "[DELETE]", "-"), "bad"),
+    (("[UPDATED]", "[UPDATE]"), "warn"),
+    (("@@",), "dim"),
 )
 
 
@@ -260,9 +286,9 @@ def diff_line_text(line: str) -> Text:
             pass
     text = Text(line)
     head = line.lstrip()
-    for prefixes, style in _LINE_STYLES:
+    for prefixes, token in _LINE_STYLES:
         if head.startswith(prefixes):
-            text.stylize(style)
+            text.stylize(_c(token))
             break
     return text
 
@@ -385,11 +411,11 @@ class FilesSubViewBase(Widget):
     FilesSubViewBase {
         layout: vertical;
         height: 1fr;
-        background: #050811;
+        background: $lens-bg;
         padding: 0 1;
     }
     FilesSubViewBase .files-subview-placeholder {
-        color: #5b6479;
+        color: $lens-dim;
     }
     """
 
@@ -979,7 +1005,7 @@ class FilesPanel(Widget):
         self._notice_kind = kind if text else None
         try:
             self.query_one("#files-notice-text", Static).update(
-                Text(f"⚠ {text}") if text else ""
+                Text(text) if text else ""
             )
             self.query_one("#files-notice").set_class(
                 bool(text) or self._resume_config is not None, "-shown"
@@ -1446,9 +1472,17 @@ class FilesPanel(Widget):
             if 2 + len(str(n)) + len(tail) <= self._path_width:
                 break
         text = Text(no_wrap=True, overflow="ellipsis")
-        text.append("★ ", style=_STAR)
-        text.append(str(n), style="#c4b5fd")
-        text.append(tail, style=_DIM)
+        text.append("★ ", style=_c("title"))
+        text.append(str(n), style=_c("screen"))
+        text.append(tail, style=_c("dim"))
+        return self._open_word(row, text)
+
+    def _open_word(self, row: _Row, text: Text) -> Text:
+        """`` · open`` after an expanded group / fold row (a folded one has
+        no word; the group colour and ``· N files`` say it is a group).
+        """
+        if row.group in self._expanded and len(text) + 7 <= self._path_width:
+            text.append(" · open", style=_c("muted"))
         return text
 
     def _group_cell(self, row: _Row) -> Text:
@@ -1468,9 +1502,9 @@ class FilesPanel(Widget):
             shown = smart_truncate(shown, max(4, self._path_width - len(tail) - 1))
         shown += "/"
         text = Text(no_wrap=True, overflow="ellipsis")
-        text.append(shown, style="#c4b5fd")
-        text.append(tail, style=_DIM)
-        return text
+        text.append(shown, style=_c("screen"))
+        text.append(tail, style=_c("dim"))
+        return self._open_word(row, text)
 
     def _path_cell(self, row: _Row) -> Text:
         if row.group is not None:
@@ -1502,31 +1536,30 @@ class FilesPanel(Widget):
         head, sep, name = shown.rpartition("/")
         text = Text(no_wrap=True, overflow="ellipsis")
         if owner:
-            text.append(f"{owner}: ", style="#7dd3fc")
+            text.append(f"{owner}: ", style=_c("title"))
         if sep:
-            text.append(head + sep, style=_DIM)
+            text.append(head + sep, style=_c("dim"))
         gone = act is not None and (act.deleted or bool(moved))
         style = "italic" if row.pattern else ""
         if gone:
-            style = "strike #8f9bb3"  # deleted / renamed away: no longer there
+            style = f"strike {_c('muted')}"  # deleted / renamed away: gone
         if row.dim:
-            style = _DIM  # ★ row untouched in the viewed mark segment
+            style = _c("dim")  # ★ row untouched in the viewed mark segment
         text.append(name, style=style)
         if suffix:
-            text.append(suffix, style="#facc15")
+            text.append(suffix, style=_c("warn"))
         return text
 
     def _mark_cell(self, row: _Row) -> Text:
-        if row.group is not None:
-            opened = row.group in self._expanded
-            return Text("▾" if opened else "▸", style="#c4b5fd")
-        if row.watched is None:
+        if row.group is not None or row.watched is None:
+            # A group says it in its path cell (colour, "· N files", "open").
             return Text("")
         wl = self._watchlist_or_none()
         info = wl.rows.get(row.key) if wl is not None else None
-        style = _STATE_STAR.get(info.state, _STAR) if info is not None else _STAR
-        if row.dim and (info is None or info.state not in _STATE_STAR):
-            style = _DIM
+        state_style = _state_star(info.state) if info is not None else None
+        style = state_style or _c("title")
+        if row.dim and state_style is None:
+            style = _c("dim")
         return Text("★", style=style)
 
     def _cells(self, row: _Row) -> tuple:
@@ -1554,9 +1587,11 @@ class FilesPanel(Widget):
                 if letter != OPS["noise"][0] or self.activity.show_all:
                     ops.append(letter, style=color)
         elif row.pattern:
-            ops.append("*", style=_DIM)
-        count = Text(f"{stats.count}×" if stats else "", style=_DIM, justify="right")
-        last = Text(_fmt_time(stats.last) if stats else "", style=_DIM)
+            ops.append("*", style=_c("dim"))
+        count = Text(
+            f"{stats.count}×" if stats else "", style=_c("dim"), justify="right"
+        )
+        last = Text(_fmt_time(stats.last) if stats else "", style=_c("dim"))
         return self._mark_cell(row), self._path_cell(row), ops, count, last
 
     def refresh_rows(self) -> None:
@@ -1645,20 +1680,20 @@ class FilesPanel(Widget):
     def _empty_text(self) -> Text:
         ai = self._hl.empty_text(self._filter)
         if ai is not None:
-            return Text(f"{ai[0]} — {ai[1]}", style=_DIM)
+            return Text(f"{ai[0]} — {ai[1]}", style=_c("dim"))
         if self._filter:
-            return Text(f"Nothing matches “{self._filter}”", style=_DIM)
+            return Text(f"Nothing matches “{self._filter}”", style=_c("dim"))
         if self.review:
             if self._review_error:
                 return Text(f"Could not load this run: {self._review_error}")
             if self._review_record is None:
-                return Text("Loading the run…", style=_DIM)
+                return Text("Loading the run…", style=_c("dim"))
             return Text("This run changed no files.")
         if self._segment is not None and self.activity.paths:
             return Text.assemble(
-                (f"Nothing {self._segment_title()} — ", _DIM),
+                (f"Nothing {self._segment_title()} — ", _c("dim")),
                 ("A", "bold"),
-                (" shows everything", _DIM),
+                (" shows everything", _c("dim")),
             )
         running, task = self._monitor_task()
         if not running:
@@ -1764,7 +1799,7 @@ class FilesPanel(Widget):
             ms.set_lens_caption("files", title, info)
         except Exception:
             pass
-        # The header's "● LIVE" must not claim a recording monitor while
+        # The header's "LIVE" pill must not claim a recording monitor while
         # it is blind (the session's app is gone and nothing is followed).
         blind = None
         watch = self._monitor_watch()
@@ -2079,10 +2114,10 @@ class FilesPanel(Widget):
         if not row.pattern and self._has_versions(row.key):
             return None
         if row.pattern:
-            return Text("Pull a matching file to see its versions.", style=_DIM)
+            return Text("Pull a matching file to see its versions.", style=_c("dim"))
         return Text.assemble(
-            ("Watch (", _DIM), ("w", "bold"), (") and pull (", _DIM),
-            ("u", "bold"), (") to diff this file — every pull is kept as a version.", _DIM),
+            ("Watch (", _c("dim")), ("w", "bold"), (") and pull (", _c("dim")),
+            ("u", "bold"), (") to diff this file — every pull is kept as a version.", _c("dim")),
         )  # fmt: skip
 
     @staticmethod
@@ -2108,12 +2143,13 @@ class FilesPanel(Widget):
         status = None
         if info is not None and info.state is RowState.ERROR:
             status = Text(
-                f"✕ {info.detail or 'The last pull failed.'}", style="#ef4444"
+                f"Pull failed: {info.detail or 'the last pull failed.'}",
+                style=f"bold {_c('bad')}",
             )
         elif info is not None and info.state is RowState.SETTLING:
             status = Text(
-                "◇ A change is settling; auto-pull keeps it as a new version.",
-                style="#a3873f",
+                "Settling: a change is settling; auto-pull keeps it as a new version.",
+                style=_c("muted"),
             )
         return file_inspect.versions_sections(row.key, self._inspect_notify, status)
 
@@ -2223,7 +2259,7 @@ class FilesPanel(Widget):
         self.app.push_screen(
             file_inspect.InspectZoomModal(
                 Path(row.key).name or row.key,
-                Group(Text(heading, style="bold #8f9bb3"), body),
+                Group(Text(heading, style=f"bold {_c('muted')}"), body),
             )
         )
         return True
@@ -2231,7 +2267,7 @@ class FilesPanel(Widget):
     @staticmethod
     def _grid() -> Table:
         grid = Table.grid(padding=(0, 2))
-        grid.add_column(style=_DIM, no_wrap=True)
+        grid.add_column(style=_c("dim"), no_wrap=True)
         grid.add_column()
         return grid
 
@@ -2288,7 +2324,7 @@ class FilesPanel(Widget):
             elif act.deleted:
                 grid.add_row("now", Text("deleted", style=OPS["delete"][1]))
         else:
-            grid.add_row("activity", Text("none seen yet", style=_DIM))
+            grid.add_row("activity", Text("none seen yet", style=_c("dim")))
         sections: list = [("", grid)]
         wl = self._watchlist_or_none()
         info = wl.rows.get(row.key) if wl is not None else None
@@ -2305,7 +2341,7 @@ class FilesPanel(Widget):
             if clock is not None:
                 pull.add_row("device clock", clock)
             if info.detail and info.state is not RowState.CHANGED:
-                pull.add_row("", Text(info.detail, style=_DIM))
+                pull.add_row("", Text(info.detail, style=_c("dim")))
             sections.append(("Last pull", pull))
         return sections
 
@@ -2319,37 +2355,35 @@ class FilesPanel(Widget):
         if not device_clock.notable(sample):
             return None
         offset = device_clock.format_offset(device_clock.device_minus_host(sample))
-        return Text(f"{offset} vs host (device times are on it)", style="#fbbf24")
+        return Text(f"{offset} vs host (device times are on it)", style=_c("warn"))
 
     @staticmethod
     def _state_text(state: RowState) -> Text:
         return {
-            RowState.NEVER_PULLED: Text("never pulled — u to pull", style=_DIM),
+            RowState.NEVER_PULLED: Text("never pulled — u to pull", style=_c("dim")),
             RowState.BASELINE_ONLY: Text("baseline captured"),
             RowState.UNCHANGED: Text("unchanged since the pull before"),
-            RowState.CHANGED: Text("◆ changed since the pull before", style="#facc15"),
-            RowState.ERROR: Text("✕ last pull failed", style="#ef4444"),
-            RowState.SETTLING: Text("◇ change detected, settling", style="#a3873f"),
+            RowState.CHANGED: Text(
+                "changed since the pull before", style=f"bold {_c('warn')}"
+            ),
+            RowState.ERROR: Text("last pull failed", style=f"bold {_c('bad')}"),
+            RowState.SETTLING: Text("change detected, settling", style=_c("muted")),
         }[state]
 
     def _events_text(self, row: _Row) -> Text:
         act = row.activity
         if act is None or not act.events:
-            return Text("No events seen.", style=_DIM)
+            return Text("No events seen.", style=_c("dim"))
         out = Text()
         # Separators: the marks, and the monitor's own timeline lines
         # (restart + gap, exit, lost events) -- see add_monitor_note.
         seps = [
-            _Sep(m.when, f"── {m.label()} · {m.when:%H:%M:%S} ──", "#facc15")
+            _Sep(m.when, f"{m.label()} · {m.when:%H:%M:%S}", "mark")
             for m in self._marks
         ]
         seps += [
             # A restart / exit / loss stands out; a followed sub-process less.
-            _Sep(
-                when,
-                f"── {text} ──",
-                _NOTE_WARNING if level == "warning" else "#a3873f",
-            )
+            _Sep(when, text, "warning" if level == "warning" else "note")
             for when, text, level in collapse_follow_notes(self._notes())
         ]
         # Separators newer than an event are printed above it (newest
@@ -2359,13 +2393,13 @@ class FilesPanel(Widget):
         # restart still shows the restart).
         pending = sorted(seps, key=lambda m: m.when, reverse=True)
         oldest = act.events[0].when
-        older = [m for m in pending if m.when < oldest and m.style == "#facc15"]
+        older = [m for m in pending if m.when < oldest and m.kind == "mark"]
         start = older[0].when if older else None
         notes = [
             m
             for m in pending
             if m.when < oldest
-            and m.style == _NOTE_WARNING
+            and m.kind == "warning"
             and (start is None or m.when >= start)
         ][: self._MAX_OLDER_NOTES]
         pending = [m for m in pending if m.when >= oldest] + notes + older[:1]
@@ -2374,10 +2408,10 @@ class FilesPanel(Widget):
                 mark = pending.pop(0)
                 if out:
                     out.append("\n")
-                out.append(mark.text, style=mark.style)
+                out.append(mark.text, style=_SEP_STYLE[mark.kind]())
             if out:
                 out.append("\n")
-            out.append(_fmt_time(ev.when), style=_DIM)
+            out.append(_fmt_time(ev.when), style=_c("dim"))
             out.append("  ")
             out.append(f"{ev.label or '?':<7}", style=ev.color or "")
             extra = []
@@ -2392,10 +2426,10 @@ class FilesPanel(Widget):
             if ev.process:
                 extra.append(ev.process)
             if extra:
-                out.append("  " + " · ".join(extra), style=_DIM)
+                out.append("  " + " · ".join(extra), style=_c("dim"))
         for mark in pending:
             out.append("\n")
-            out.append(mark.text, style=mark.style)
+            out.append(mark.text, style=_SEP_STYLE[mark.kind]())
         return out
 
     #: Restart/exit/loss lines shown before a file's first event (newest).
@@ -2437,7 +2471,7 @@ class FilesPanel(Widget):
                 "new": "New in this run — no earlier version to diff.",
                 "deleted": "Deleted in this run.",
             }.get(row.review_kind or "", "Changed, but the run kept no diff for it."),
-            style=_DIM,
+            style=_c("dim"),
         )
 
     # -- AI highlights (highlight_bar) --------------------------------------------

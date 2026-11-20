@@ -185,7 +185,7 @@ def test_versions_tab_newest_first_selection_base_and_clicks(tmp_path):
     _places_versions(tmp_path)
     sections = fins.versions_sections(PLACES)
     listing = _render(sections[0][1], 60).splitlines()
-    assert listing[0].startswith("▸ v3")
+    assert listing[0].startswith("v3")
     assert listing[2].lstrip().startswith("v1")
     assert "first pull" in listing[2]
     assert "moz_meta ~3" in listing[0]  # summary from the structured diff
@@ -431,7 +431,7 @@ def test_versions_tab_shows_the_acquisition_record(tmp_path):
     text = _sections_text(fins.versions_sections(PLACES), 70)
     assert "pulled" in text
     assert "auto" in text
-    assert "device sha256 = local ✓ · changed" in text
+    assert "device sha256 matches local · changed" in text
     # A copy that does not match the on-device sha256 is flagged.
     record = store.version_record(dirs[-1])
     record["sha256_match"] = False
@@ -439,8 +439,8 @@ def test_versions_tab_shows_the_acquisition_record(tmp_path):
     (dirs[-1] / "acquisition.json").write_text(json.dumps(record), encoding="utf-8")
     fins.clear_caches()
     text = _sections_text(fins.versions_sections(PLACES), 70)
-    assert "device sha256 ≠ local ✗" in text
-    assert "✗ sha256" in _render(fins.versions_sections(PLACES)[0][1], 70)
+    assert "device sha256 differs from local" in text
+    assert "sha256 mismatch" in _render(fins.versions_sections(PLACES)[0][1], 70)
     # Without a record (older pulls) the line still shows time and size.
     (dirs[-1] / "acquisition.json").unlink()
     fins.clear_caches()
@@ -592,7 +592,7 @@ def test_the_hash_line_covers_the_wal(tmp_path):
     set_sha = record["set"]["local_sha256"]
     assert f"sha256 (db+wal) {set_sha[:10]}" in text
     assert main_sha[:10] not in text  # not the main file's hash alone
-    assert "device sha256 = local ✓ (both)" in text
+    assert "device sha256 matches local (both)" in text
     assert f"changed {t0:%H:%M:%S} (wal)" in text
     assert " wal" in text.split("pulled", 1)[1].splitlines()[0]  # "… + 2.0 KB wal"
     # A WAL that differs from the device is named.
@@ -602,7 +602,7 @@ def test_the_hash_line_covers_the_wal(tmp_path):
     (version / "acquisition.json").write_text(json.dumps(stored), encoding="utf-8")
     fins.clear_caches()
     text = _sections_text(fins.versions_sections(PLACES), 100)
-    assert "device sha256 ≠ local ✗ (wal)" in text
+    assert "device sha256 differs from local (wal)" in text
 
 
 # ---------------------------------------------------------------------------
