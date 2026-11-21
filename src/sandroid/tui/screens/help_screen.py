@@ -160,6 +160,9 @@ _LENS_EXTRA_ROWS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
         ("Esc", "Clear the / filter, then leave the AI filter (H)", ()),
     ],
     "Files lens": [
+        ("Enter / Right", "Open a group row (a file row: Enter inspects)", ()),
+        ("Left", "Fold the open group (also from one of its rows)", ()),
+        ("End", "Back to live: follow the newest row (Up stops it)", ()),
         ("Esc", "Clear the / filter, then leave the AI filter (H)", ()),
     ],
     "Identity lens": [

@@ -40,7 +40,8 @@ wait ``HOLD_S`` in a hold so a line that is written a little late (device
 time converted to host time) still lands in time order. A line that lands
 above the viewport while not following keeps the viewport still (the caption
 says "1 late lines above"). While hidden only a 1 s tick updates the badge
-(``dropped``, ``locked`` or ``failed``, in the warning colour).
+(``N dropped``, ``locked`` or ``failed``, in the warning colour; the
+caption names why lines were dropped).
 
 **Follow** (shared with the Files and Network lenses, ``follow.py``): new
 lines appear at the bottom; while ``live`` the view sticks to the newest row;
@@ -2820,7 +2821,42 @@ class TimelineLens(Vertical):
         )
         if self._late_above:
             info = f"{_late_text(self._late_above)} · " + info
+        dropped = self._dropped_text(long=True)
+        if dropped:
+            info = f"{dropped} · " + info
         return title, info
+
+    #: Why lines were not written (``SinkStatus.dropped`` keys), in words.
+    _DROP_REASONS = {
+        "no-device": "no device connected",
+        "queue-full": "writer queue full",
+        "unrouted": "no session open",
+    }
+
+    @classmethod
+    def _drop_words(cls, reason: str) -> str:
+        return cls._DROP_REASONS.get(reason, reason.replace("-", " "))
+
+    def _dropped_text(self, long: bool = False) -> str:
+        """``3 dropped`` (the badge) / ``3 lines dropped: no device
+        connected 3`` (the caption); ``""`` when nothing was dropped.
+        """
+        svc = timeline_service()
+        if svc is None:
+            return ""
+        try:
+            dropped = getattr(svc.status(), "dropped", None) or {}
+        except Exception:
+            return ""
+        counts = {k: v for k, v in dropped.items() if isinstance(v, int) and v > 0}
+        total = sum(counts.values())
+        if not total:
+            return ""
+        if not long:
+            return f"{total:,} dropped"
+        why = ", ".join(f"{self._drop_words(k)} {v:,}" for k, v in counts.items())
+        noun = "line" if total == 1 else "lines"
+        return f"{total:,} {noun} not recorded ({why})"
 
     def _update_caption(self) -> None:
         ms = self._main_screen()
@@ -2843,10 +2879,8 @@ class TimelineLens(Vertical):
         state = getattr(status, "state", "")
         if state in ("locked", "failed"):
             return state
-        dropped = getattr(status, "dropped", None) or {}
-        if any(v for v in dropped.values() if isinstance(v, int)):
-            return "dropped"
-        return None
+        # "N dropped" (the caption says why): a bare "dropped" said nothing.
+        return self._dropped_text() or None
 
     def _badge_tick(self) -> None:
         """1 s, also while hidden: the lens-bar badge only."""

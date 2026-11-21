@@ -133,7 +133,8 @@ def test_slash_commands_come_from_the_chat() -> None:
 EXPECTED: dict[str, tuple[str, ...]] = {
     "Timeline lens": ("[/]", "[t]", "[Esc]"),
     "Timeline lens › t type bar": ("[Left]", "[Right]", "[Space / Enter]", "[Esc]"),
-    "Files lens": ("[Shift+H]", "[Shift+X]"),
+    # N1-V12: group open / fold and End = live were missing.
+    "Files lens": ("[Shift+H]", "[Shift+X]", "[Enter / Right]", "[Left]", "[End]"),
     "Network lens": ("[Shift+H]", "[Shift+X]", "[!]"),
     "AI chat": (
         "[Ctrl+X]",

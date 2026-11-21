@@ -643,6 +643,38 @@ async def test_slash_filters_and_escape_clears() -> None:
 
 
 @pytest.mark.asyncio
+async def test_filter_enter_while_live_keeps_the_match_selected() -> None:
+    """N1-V9: Enter in the filter while live jumped to the newest row on the
+    next update, and Esc then lost the selection.
+    """
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        for i, path in enumerate((PREFS, AAID, DB)):
+            panel.ingest(
+                _items(_fse("FSE_CONTENT_MODIFIED", path)),
+                now=T0 + timedelta(seconds=i),
+            )
+        panel.refresh_rows()
+        panel.table.focus()
+        assert panel.following
+        await pilot.press("slash", *"prefs", "enter")
+        await pilot.pause()
+        assert not panel.following
+        assert panel._cursor_key() == PREFS
+        panel.ingest(
+            _items(_fse("FSE_CREATE_FILE", f"{ROOT}/files/new_prefs.txt")),
+            now=T0 + timedelta(seconds=9),
+        )
+        panel.refresh_rows()
+        assert panel._cursor_key() == PREFS  # a new match does not take it
+        assert panel.handle_escape()  # Esc (MainScreen hook): clears the filter
+        await pilot.pause()
+        assert panel._filter == ""
+        assert panel._cursor_key() == PREFS
+
+
+@pytest.mark.asyncio
 async def test_n_adds_an_arbitrary_path_and_keeps_failures_in_the_input() -> None:
     app = _Harness()
     async with app.run_test() as pilot:

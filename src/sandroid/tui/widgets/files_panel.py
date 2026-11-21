@@ -3271,6 +3271,10 @@ class FilesPanel(Widget):
         event.stop()
         if event.input.mode == "filter":
             self._filter = event.value.strip()
+            if self._filter and self.following:
+                # Enter keeps the match selected: stop following, so new rows
+                # (and Esc clearing the filter later) leave the cursor on it.
+                self.set_following(False)
             self.close_input()
             return
         path = event.value.strip()
