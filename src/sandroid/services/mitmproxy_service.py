@@ -8,8 +8,10 @@ controls lifecycle and tails the log.
 from __future__ import annotations
 
 import atexit
+import collections
 import logging
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -998,6 +1000,8 @@ class MitmproxyState:
     #: ``time.monotonic()`` of the last flow that arrived on the regular proxy
     #: listener (no app-proxy lane), i.e. through the Device Proxy. 0 = none.
     last_direct_flow_at: float = 0.0
+    #: mitmweb was seen listening on its proxy port (False while it starts).
+    listening: bool = False
 
 
 def _not_settled_result() -> ReachabilityResult:
@@ -1022,6 +1026,72 @@ def _is_direct_flow_line(line: str) -> bool:
     if len(parts) >= 9 and parts[8].strip():
         return parts[8].strip() == "device"
     return len(parts) < 8 or not parts[7].strip()
+
+
+#: The schema's ``mitmproxy.socks_base`` default.
+_DEFAULT_SOCKS_BASE = 8082
+#: Seconds a fresh mitmweb gets to listen before the start counts as failed.
+START_CONFIRM_S = 15.0
+
+
+def effective_socks_base(cfg: Any) -> int:
+    """First SOCKS port of the App Proxy lanes for a ``mitmproxy`` config.
+
+    The schema default (8082) means "right after our own ports": with the
+    default 8080/8081 that is still 8082, and a second Sandroid on 8390/8391
+    gets 8392 and up instead of colliding on 8082-8086. Any other configured
+    base is used as is.
+    """
+    try:
+        base = int(getattr(cfg, "socks_base", _DEFAULT_SOCKS_BASE))
+        if base != _DEFAULT_SOCKS_BASE:
+            return base
+        proxy = int(getattr(cfg, "proxy_port", 8080))
+        web = int(getattr(cfg, "web_port", 8081))
+        return max(proxy, web) + 1
+    except Exception:
+        return _DEFAULT_SOCKS_BASE
+
+
+def _port_busy(host: str, port: int) -> bool:
+    """Whether another process holds ``port`` on ``host`` (never raises).
+
+    Busy when something accepts connections there, or when binding it the way
+    mitmproxy does (``SO_REUSEADDR`` on POSIX) fails.
+    """
+    import socket
+
+    target = "127.0.0.1" if host in ("", "0.0.0.0", "::") else host  # nosec B104
+    try:
+        with socket.create_connection((target, port), timeout=0.3):
+            return True
+    except OSError:
+        pass
+    family = socket.AF_INET6 if ":" in (host or "") else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            if os.name == "posix":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host or "0.0.0.0", port))  # nosec B104
+    except OSError:
+        return True
+    return False
+
+
+def _exit_reason(lines: list[str]) -> str:
+    """The reason in mitmweb's last output lines, in plain words ("" if none)."""
+    for line in reversed(lines):
+        low = line.lower()
+        if "address already in use" in low:
+            match = re.search(r"(\d{2,5})\)?\W*address already in use", line, re.I)
+            if match is None:
+                match = re.search(r"[,:]\s*(\d{2,5})\b", line)
+            return f"port {match.group(1)} is in use" if match else "a port is in use"
+    for line in reversed(lines):
+        low = line.lower()
+        if any(w in low for w in ("error", "exception", "failed", "denied")):
+            return line.strip()[:160]
+    return ""
 
 
 def _device_uids_path() -> str:
@@ -1128,6 +1198,8 @@ class MitmproxyService:
         #: Session-timeline ``net/flow`` lines while mitmweb runs (WP4).
         self._net_source: Any = None
         self._state = MitmproxyState()
+        #: mitmweb's last own output lines (the reason when it exits).
+        self._exit_tail: collections.deque[str] = collections.deque(maxlen=20)
         self._addon_path: str | None = None
         # User-supplied addon configuration. ``_user_addons_dir`` is the
         # configured drop-in folder; ``_enabled_addons`` is the cached,
@@ -1181,6 +1253,7 @@ class MitmproxyService:
             self._state.listen_host = str(
                 getattr(cfg, "listen_host", "127.0.0.1") or "127.0.0.1"
             )
+            self._state.socks_base = effective_socks_base(cfg)
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("mitmproxy port sync failed: %s", exc)
 
@@ -1214,7 +1287,7 @@ class MitmproxyService:
         # Focus capture-scope settings (lane pool is allocated at start()).
         # ``focus_apps`` is intentionally left empty at load — FocusManager is
         # authoritative for live lane assignments.
-        self._state.socks_base = cfg.socks_base
+        self._state.socks_base = effective_socks_base(cfg)
         self._state.focus_lanes = cfg.focus_lanes
         self._state.capture_scope = cfg.capture_scope
         # Ports too: before this, state kept the dataclass default 8080 until
@@ -1815,6 +1888,19 @@ class MitmproxyService:
                     except Exception as exc:  # pragma: no cover - defensive
                         logger.warning("Failed to read listen_host: %s", exc)
 
+            if get_config is not None:
+                try:
+                    self._state.socks_base = effective_socks_base(
+                        get_config().mitmproxy
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("socks_base not read: %s", exc)
+            busy = self._busy_port(proxy_port, web_port, web_host, listen_host)
+            if busy:
+                self._state.last_error = busy
+                self._emit(f"[ERROR] Mitmproxy did not start: {busy}")
+                return False
+
             binary = _find_mitmweb()
             if binary is None:
                 self._state.last_error = (
@@ -1910,6 +1996,8 @@ class MitmproxyService:
                 return False
 
             self._state.running = True
+            self._state.listening = False
+            self._exit_tail.clear()
             self._state.proxy_port = proxy_port
             self._state.web_port = web_port
             self._state.web_host = web_host
@@ -1928,14 +2016,64 @@ class MitmproxyService:
             )
             self._reader_thread.start()
             self._start_net_source()
-
-            self._emit(
-                f"[INFO] mitmweb started "
-                f"(proxy {listen_host}:{proxy_port}, "
-                f"web http://{web_host}:{web_port}/)"
-            )
+            # "started" only once mitmweb listens (a port another process
+            # took makes it exit after a second: that is no start).
+            threading.Thread(
+                target=self._confirm_listening,
+                args=(self._proc,),
+                name="mitmweb-confirm",
+                daemon=True,
+            ).start()
             self._kick_app_proxy_reconcile("mitmproxy-start")
             return True
+
+    def _busy_port(
+        self, proxy_port: int, web_port: int, web_host: str, listen_host: str
+    ) -> str:
+        """Why mitmweb cannot bind its ports ("" when all are free)."""
+        wanted = [
+            (listen_host, proxy_port, "proxy port"),
+            (web_host, web_port, "web interface port"),
+        ]
+        base = self._state.socks_base
+        wanted += [
+            (listen_host, base + i, "App Proxy port")
+            for i in range(self._state.focus_lanes)
+        ]
+        seen: dict[int, str] = {}
+        for _host, port, what in wanted:
+            if port in seen:
+                return (
+                    f"the {what} {port} is also the {seen[port]} "
+                    "(change mitmproxy.socks_base or the ports)"
+                )
+            seen[port] = what
+        for host, port, what in wanted:
+            if _port_busy(host, port):
+                return f"port {port} is in use ({what})"
+        return ""
+
+    def _confirm_listening(self, proc, timeout: float = START_CONFIRM_S) -> None:
+        """Say "started" once mitmweb listens; a red line if it never does."""
+        ok = self.wait_listening(timeout)
+        with self._lock:
+            if self._proc is not proc:
+                return
+            st = self._state
+            if ok:
+                st.listening = True
+        if ok:
+            self._emit(
+                f"[INFO] mitmweb started "
+                f"(proxy {st.listen_host}:{st.proxy_port}, "
+                f"web http://{st.web_host}:{st.web_port}/)"
+            )
+        elif proc.poll() is None:
+            st.last_error = f"not listening on port {st.proxy_port}"
+            self._emit(
+                f"[ERROR] Mitmproxy is not listening on port {st.proxy_port} "
+                f"after {timeout:.0f} s"
+            )
 
     def _kick_app_proxy_reconcile(self, reason: str) -> None:
         """Re-check the App Proxy lanes off-thread (lanes waiting for us).
@@ -2033,6 +2171,7 @@ class MitmproxyService:
                 self.stop_ssl_unpin()
 
             self._state.running = False
+            self._state.listening = False
             self._emit("[INFO] Stopping mitmweb...")
 
             try:
@@ -2303,15 +2442,25 @@ class MitmproxyService:
                     token = line.split("?token=", 1)[1].split()[0].strip("/")
                     if token:
                         self._web_token = token
+                if not line.startswith(("[FLOW]|", "[TLS_FAIL]|", "[FLOW_ERR]|")):
+                    # mitmweb's own output: the reason if it exits.
+                    self._exit_tail.append(line)
                 self._emit(line)
         except Exception as exc:
             logger.debug("mitmweb reader exited: %s", exc)
         finally:
             with self._lock:
-                if self._proc is not None and self._proc.poll() is not None:
+                if self._proc is proc and proc.poll() is not None:
+                    # Not stopped by us (stop() clears _proc first).
                     self._state.running = False
+                    self._state.listening = False
                     self._state.pid = None
-                    self._emit("[INFO] mitmweb exited")
+                    reason = _exit_reason(list(self._exit_tail))
+                    if not reason:
+                        reason = f"exit code {proc.poll()}"
+                    self._state.last_error = reason
+                    logger.warning("mitmweb exited unexpectedly: %s", reason)
+                    self._emit(f"[ERROR] Mitmproxy exited unexpectedly: {reason}")
 
     def _emit(self, line: str) -> None:
         for cb in list(self._listeners):

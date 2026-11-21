@@ -269,7 +269,13 @@ class MitmproxyPanel(Widget):
             logger.debug("mitm panel device-change subscription failed: %s", exc)
 
     #: ``STATE_CHANGED`` kinds that change what the lens caption says.
-    _PROXY_CHANGES = ("app_proxies", "proxy_ca", "proxy_infra")
+    _PROXY_CHANGES = (
+        "app_proxies",
+        "proxy_ca",
+        "proxy_infra",
+        "device_proxy",
+        "network_method",
+    )
 
     def _subscribe_proxy_changes(self) -> None:
         """Repaint the caption when the CA or the App Proxy lanes change.
@@ -322,7 +328,12 @@ class MitmproxyPanel(Widget):
         """
         if self._unmounted:
             return
-        if kind != "app_proxies":
+        if kind == "network_method":
+            # The method service re-read the device (Off, This app, the
+            # Proxy dialog, adb reverse, Whole device...): its routing is
+            # the current truth, no adb read needed here.
+            self._apply_method_routing()
+        elif kind != "app_proxies":
             from sandroid.core.adb import Adb
 
             current = Adb.get_target_device()
@@ -334,6 +345,31 @@ class MitmproxyPanel(Widget):
                 self._kick_state_refresh()
         self._refresh_header()
         self._refresh_status_bar()
+
+    def _apply_method_routing(self) -> None:
+        """Take the device routing from the Network method's last snapshot.
+
+        ``_proxy_state`` used to change only on Mitmproxy start, Ctrl+D and
+        the M stop, so the title kept "device routed" after Off / keys only
+        and missed Whole device and adb reverse.
+        """
+        try:
+            from sandroid.services.network_method import (
+                peek_network_method_service,
+            )
+
+            service = peek_network_method_service()
+            if service is None:
+                return
+            snap = service.snapshot_cached()
+        except Exception:
+            return
+        state = {"ours": "ours", "external": "other"}.get(snap.device_proxy, "none")
+        if state != self._proxy_state:
+            self._proxy_state = state
+            if state != "ours":
+                self._reach_state = "unknown"
+        self._proxy_addr = snap.device_addr if state != "none" else ""
 
     def _on_device_change(self, device, prepared: bool = False) -> None:
         """Device-poll / prepare thread → UI thread (non-blocking)."""
@@ -473,6 +509,10 @@ class MitmproxyPanel(Widget):
         # lock via is_running() in that window, the two threads deadlock and
         # the whole TUI freezes.
         self._ui.post(self._append_line, line)
+        if line.startswith("[ERROR]"):
+            # The engine failed (port in use, exited, not listening): a red
+            # toast too, the log drawer may be closed.
+            self._ui.post(self._notify, line[len("[ERROR]") :].strip(), "error")
 
     # -- output routing (lens rows + ActivityLog drawer) ---------------------
 
@@ -780,8 +820,19 @@ class MitmproxyPanel(Widget):
         pal = lens_palette()
         st = self._service.state
         if not self._service.is_running():
+            # A failure is red words (no dot); a clean stop is muted.
+            problem = []
+            if st.last_error and st.last_error != "already running":
+                problem.append(escape(st.last_error))
+            if self._routed_to_us():
+                problem.append("app traffic blocked")
+            if problem:
+                return f"[{pal.bad}]Mitmproxy stopped: {', '.join(problem)}[/]"
             return f"[{pal.dim}]Mitmproxy ○ off[/]"
-        parts = [f"[{pal.ok}]Mitmproxy ● on[/] :{st.proxy_port}"]
+        if st.running and not st.listening:
+            parts = [f"[{pal.warn}]Mitmproxy ◌ starting[/] :{st.proxy_port}"]
+        else:
+            parts = [f"[{pal.ok}]Mitmproxy ● running[/] :{st.proxy_port}"]
         if self._proxy_state == "ours" and self._reach_state == "unreachable":
             parts.append(f"[{pal.bad}]device can't reach it[/]")
         elif self._proxy_state == "ours":
@@ -807,6 +858,18 @@ class MitmproxyPanel(Widget):
         if self._service.ssl_unpin_is_active():
             parts.append(f"unpin [{pal.ok}]● on[/]")
         return " · ".join(parts)
+
+    def _routed_to_us(self) -> bool:
+        """The device proxy or an App Proxy lane goes to our Mitmproxy."""
+        if self._proxy_state == "ours":
+            return True
+        try:
+            from sandroid.core.proxy_manager import get_focus_manager
+
+            routes = get_focus_manager().app_proxies_cached()
+        except Exception:
+            return False
+        return any(target == "ours" for target in routes.values())
 
     def empty_hint(self) -> tuple[str, str]:
         """``(headline, dim hint)`` for the lens when nothing is captured."""
@@ -928,9 +991,9 @@ class MitmproxyPanel(Widget):
             else:
                 self._disarm()
             self._service.stop()
-        else:
-            self._service.start()
-            self._append_line("[INFO] running")
+        elif self._service.start():
+            # The service says "mitmweb started" once it listens (a red
+            # line and a toast if it does not): nothing to claim here yet.
             # Let the upcoming ground-truth probe report CA status once.
             self._announce_ca_on_start = True
             if self._auto_device_proxy_enabled() and self._service.is_running():
@@ -1058,7 +1121,6 @@ class MitmproxyPanel(Widget):
         """Start mitmweb if it isn't already (arming implies a live process)."""
         if not self._service.is_running():
             self._service.start()
-            self._append_line("[INFO] running")
 
     def _our_proxy_addr(self) -> tuple[str, str]:
         """Return ``(host_ip, port)`` for our mitmweb proxy as strings.
