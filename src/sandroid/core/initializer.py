@@ -268,6 +268,54 @@ def ensure_frida_server(console: Any | None = None) -> bool:
     return False
 
 
+_exit_restore_registered = False
+
+
+def restore_selinux_at_exit() -> list[str]:
+    """Put SELinux back where a headless/CLI run changed it (atexit).
+
+    The TUI restores it in its quit flow; one-shot headless and CLI modes
+    (``--proxy-clear``, ``--install-apk``, ``--dexray``, the API, ...) end
+    without that flow, so :func:`initialize_core` registers this for them.
+    Reuses :func:`~sandroid.services.setup_checks.restore_selinux_on_quit`
+    (only devices whose mode Sandroid changed; the mode found first) and
+    removes the on-device marker (``setup_checks.SELINUX_MARKER``) that
+    ``check_and_set_selinux`` writes. A run that crashed before this hook
+    leaves the marker, so the next start -- headless or TUI -- finds
+    Permissive + marker, takes Enforcing as the mode found, and restores it
+    at its own exit. Never raises. Returns the restored serials.
+    """
+    try:
+        from sandroid.services.setup_checks import restore_selinux_on_quit
+
+        restored = restore_selinux_on_quit()
+    except Exception:
+        logger.debug("SELinux restore at exit failed", exc_info=True)
+        return []
+    if restored:
+        try:
+            from sandroid.core.console import SandroidConsole
+
+            SandroidConsole.get().print(
+                f"[dim]SELinux restored on {', '.join(r or 'device' for r in restored)}"
+                "[/dim]"
+            )
+        except Exception:
+            pass
+    return restored
+
+
+def _register_exit_restore() -> None:
+    """Register :func:`restore_selinux_at_exit` once per process."""
+    global _exit_restore_registered
+    if _exit_restore_registered:
+        return
+    import atexit
+
+    atexit.register(restore_selinux_at_exit)
+    _exit_restore_registered = True
+
+
 def initialize_core(
     config: SandroidConfig, prepare: bool = False, require: bool | None = None
 ) -> None:
@@ -316,6 +364,10 @@ def initialize_core(
     # IMPORTANT: Adb.init() must come before Toolbox.init() because
     # Toolbox.init() uses DeviceManager which depends on Adb being initialized
     Adb.init()
+    if prepare or require:
+        # Headless / CLI run (the TUI passes neither and restores on quit):
+        # whatever sets SELinux Permissive below is undone when it exits.
+        _register_exit_restore()
     if prepare:
         # The device-prepared step is on before a device is selected: the
         # selection starts it (off this thread) and prepare_device() below

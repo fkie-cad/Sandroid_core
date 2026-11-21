@@ -264,11 +264,14 @@ class MenuController:
         )
         self._register(
             "frida",
-            "Run/install Frida server",
+            "Start Frida server",
             "f",
             ActionCategory.EMULATOR,
             ["forensic", "malware", "security"],
-            description="Install and start Frida server",
+            description=(
+                "Start frida-server (installed first if missing); when it "
+                "already runs, only says so"
+            ),
             inline_text="run/install [f]rida server",
         )
         self._register(

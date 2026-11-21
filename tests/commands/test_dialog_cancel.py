@@ -178,3 +178,56 @@ def test_f_while_frida_runs_is_a_toast_not_a_dialog(monkeypatch):
     assert result.data["toast"] is True
     assert result.message == "frida-server is already running: nothing to start"
     assert shown == []
+
+
+# -- capture: Screen Recording / Screenshot filename (N6-B8) ----------------------
+
+
+def test_recording_filename_esc_cancels_and_blank_means_timestamp(monkeypatch):
+    from sandroid.commands import capture_commands as cc
+
+    started: list = []
+
+    class _Emulator:
+        def is_recording(self):
+            return False
+
+        def start_recording(self, filename):
+            started.append(filename)
+            return True
+
+        def get_recording_file(self):
+            return "/tmp/rec.webm"
+
+    monkeypatch.setattr(cc, "get_emulator_service", _Emulator)
+    command = cc.ScreenRecordingCommand()
+    toolbox = SimpleNamespace()
+
+    result = asyncio.run(
+        command._start_recording(_ctx(toolbox=toolbox, request_input=_input(None)))
+    )
+    assert result.error == "cancelled"
+    assert started == []  # Esc never starts a recording
+
+    ctx = CommandContext(
+        is_tui_mode=False,
+        toolbox=SimpleNamespace(safe_input=lambda prompt: "  "),
+    )
+    asyncio.run(command._start_recording(ctx))
+    assert started == [None]  # a blank answer: timestamped file
+
+
+def test_screenshot_filename_esc_takes_no_screenshot():
+    from sandroid.commands.capture_commands import ScreenshotCommand
+
+    shots: list = []
+    toolbox = SimpleNamespace(take_screenshot=lambda name: shots.append(name) or "x")
+    result = asyncio.run(
+        ScreenshotCommand().execute(_ctx(toolbox=toolbox, request_input=_input(None)))
+    )
+    assert result.error == "cancelled"
+    assert shots == []
+    asyncio.run(
+        ScreenshotCommand().execute(_ctx(toolbox=toolbox, request_input=_input("")))
+    )
+    assert shots == [None]

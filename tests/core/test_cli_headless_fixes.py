@@ -259,6 +259,7 @@ def test_initialize_core_prepare_runs_before_toolbox_init(monkeypatch):
     from sandroid.core.toolbox import Toolbox
 
     order = []
+    monkeypatch.setattr(initializer, "_register_exit_restore", lambda: None)
     monkeypatch.setattr(Adb, "init", classmethod(lambda cls: order.append("adb")))
     monkeypatch.setattr(Toolbox, "init", classmethod(lambda cls: order.append("tb")))
     monkeypatch.setattr(
@@ -278,6 +279,116 @@ def test_initialize_core_prepare_runs_before_toolbox_init(monkeypatch):
     order.clear()
     initializer.initialize_core(SimpleNamespace(), require=True)
     assert order == ["adb", "require", "tb"]
+
+
+def test_headless_paths_restore_selinux_at_exit(monkeypatch):
+    """N6-B7: a headless/CLI run that set Permissive restores it at exit."""
+    from sandroid.core import initializer
+    from sandroid.core.toolbox import Toolbox
+    from sandroid.services import setup_checks
+
+    registered = []
+    monkeypatch.setattr(
+        initializer, "_register_exit_restore", lambda: registered.append(1)
+    )
+    monkeypatch.setattr(Adb, "init", classmethod(lambda cls: None))
+    monkeypatch.setattr(Toolbox, "init", classmethod(lambda cls: None))
+    monkeypatch.setattr(initializer, "prepare_device", lambda console=None: None)
+    monkeypatch.setattr(initializer, "require_device", lambda: None)
+    monkeypatch.setattr(initializer, "refuse_ambiguous_device", lambda: None)
+    monkeypatch.setattr(Toolbox, "config", None, raising=False)
+
+    initializer.initialize_core(SimpleNamespace())  # the TUI: restores on quit
+    assert registered == []
+    initializer.initialize_core(SimpleNamespace(), prepare=True)  # --proxy-clear
+    initializer.initialize_core(SimpleNamespace(), require=True)  # headless API
+    assert len(registered) == 2
+
+    # The exit hook reuses the TUI's restore: back to the mode found first.
+    monkeypatch.setattr(setup_checks, "_selinux_found", {})
+    monkeypatch.setattr(setup_checks, "_selinux_changed", set())
+    mode = {"value": "Enforcing", "marker": ""}
+    boot = "boot-1"
+
+    def _send(cls, command, serial=None, **_kw):
+        # A device with SELinux and the on-device original-state marker.
+        if setup_checks.SELINUX_MARKER in command:
+            if "echo Enforcing" in command:
+                mode["marker"] = f"Enforcing {boot}"
+            elif "rm -f" in command:
+                mode["marker"] = ""
+            elif "cat" in command:
+                return f"{mode['marker']}\n{boot}\n", ""
+            return "", ""
+        if command.endswith("getenforce"):
+            return mode["value"], ""
+        if command.endswith("setenforce 0"):
+            mode["value"] = "Permissive"
+        if command.endswith("setenforce 1"):
+            mode["value"] = "Enforcing"
+        return "", ""
+
+    monkeypatch.setattr(Adb, "send_adb_command", classmethod(_send))
+    monkeypatch.setattr(Adb, "get_target_device", classmethod(lambda cls: "emu-1"))
+    assert setup_checks.check_and_set_selinux(Adb, notify_clock=False).passed
+    assert mode["value"] == "Permissive"
+    assert mode["marker"] == f"Enforcing {boot}"  # noted on the device
+    assert initializer.restore_selinux_at_exit() == ["emu-1"]
+    assert mode["value"] == "Enforcing"
+    assert mode["marker"] == ""  # removed by the restore
+    assert initializer.restore_selinux_at_exit() == []  # once
+
+    # A headless run that crashed (no exit hook) leaves Permissive + the
+    # marker; the next headless start finds both and restores at its exit.
+    assert setup_checks.check_and_set_selinux(Adb, notify_clock=False).passed
+    monkeypatch.setattr(setup_checks, "_selinux_found", {})  # new process
+    monkeypatch.setattr(setup_checks, "_selinux_changed", set())
+    assert mode["value"] == "Permissive"
+    assert mode["marker"]
+    assert setup_checks.check_and_set_selinux(Adb, notify_clock=False).passed
+    assert initializer.restore_selinux_at_exit() == ["emu-1"]
+    assert mode["value"] == "Enforcing"
+    assert mode["marker"] == ""
+
+
+def test_api_module_help_serial_and_exit_codes(monkeypatch, capsys):
+    """N6-B7: ``python -m sandroid.api`` has real help, --serial, exit codes."""
+    from sandroid.api import __main__ as api_main
+    from sandroid.api.interfaces import CommandResult
+
+    with pytest.raises(SystemExit) as exc:
+        api_main.main(["--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--serial" in out
+    assert "-s SERIAL" in out
+    assert "package" in out
+
+    with pytest.raises(SystemExit) as exc:
+        api_main.main(["com.x", "bogus"])
+    assert exc.value.code == 2
+
+    seen = {}
+
+    class _FailingAPI:
+        def __init__(self, config=None):
+            seen["serial"] = config.emulator.serial if config else None
+
+        async def initialize(self):
+            return CommandResult(success=False, message="No usable device", error="x")
+
+        async def shutdown(self):
+            return CommandResult(success=True, message="ok")
+
+    from sandroid.config import ConfigLoader, SandroidConfig
+
+    monkeypatch.setattr(api_main, "SandroidHeadlessAPI", _FailingAPI)
+    monkeypatch.setattr(ConfigLoader, "load", lambda self, **kw: SandroidConfig())
+    with pytest.raises(SystemExit) as exc:
+        api_main.main(["-s", "emulator-5562", "com.x", "forensic"])
+    assert exc.value.code == 1
+    assert seen["serial"] == "emulator-5562"
+    assert "Initialization failed" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -1194,3 +1305,37 @@ def test_headless_requires_package_message(capsys):
     out = capsys.readouterr().out
     assert "requires --package" in out
     assert "trigdroid" not in out.lower()
+
+
+def test_top_level_help_keeps_its_list_and_has_no_literal_backslash_b():
+    """N6-V13: the click marker works (no literal backslash-b; a line per mode)."""
+    from click.testing import CliRunner
+
+    import sandroid.cli as cli_mod
+
+    out = CliRunner().invoke(cli_mod.main, ["--help"]).output
+    assert "\\b" not in out
+    lines = [line.strip() for line in out.splitlines()]
+    assert any(line.startswith("1. Default mode") for line in lines)
+    assert any(line.startswith("2. Automated analysis") for line in lines)
+    assert any(line.startswith("3. Headless mode") for line in lines)
+
+
+@pytest.mark.parametrize(
+    ("argv", "says"),
+    [
+        (["photos", "--bogus"], "unrecognized arguments: --bogus"),
+        (["photos"], "a command is needed: fetch, import"),
+        (["persona", "list", "--avd", "A", "--nope"], "unrecognized arguments"),
+    ],
+)
+def test_world_cli_usage_errors_name_the_problem(argv, says, capsys):
+    """N6-V13: not "required: photos_cmd" for an unknown option."""
+    from sandroid.world import __main__ as world_cli
+
+    with pytest.raises(SystemExit) as exc:
+        world_cli.main(argv)
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert says in err
+    assert "photos_cmd" not in err

@@ -16,11 +16,12 @@ import sys
 from pathlib import Path
 
 import click
+from pydantic import ValidationError
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from sandroid.config.loader import ConfigLoader
-from sandroid.config.schema import SandroidConfig
+from sandroid.config.schema import SandroidConfig, describe_validation_error
 
 from .helpers import (
     THEME_REGISTRY,
@@ -521,6 +522,16 @@ def _resolve_key_value(
     return key, value
 
 
+def _warn_unknown_avd(name: str) -> None:
+    """Warn (yellow) when no AVD called *name* exists in the AVD home."""
+    from sandroid.core.emulator import known_avd_names
+
+    known = known_avd_names()
+    if known is not None and name not in known:
+        listed = ", ".join(sorted(known)) or "none"
+        console.print(f"[yellow]No AVD named {name!r} exists (known: {listed}).")
+
+
 @main.command("set")
 @click.argument("key_arg", metavar="KEY", required=False)
 @click.argument("value_arg", metavar="VALUE", required=False)
@@ -577,8 +588,22 @@ def set_config(
         parsed_value = _parse_value(value)
         current[keys[-1]] = parsed_value
 
-        # Validate the updated configuration
-        updated_config = SandroidConfig(**config_dict)
+        # Validate the updated configuration (one plain line on failure). A
+        # text field keeps the raw text ("0" is a name, not False).
+        try:
+            updated_config = SandroidConfig(**config_dict)
+        except ValidationError as e:
+            current[keys[-1]] = value
+            try:
+                if parsed_value == value:
+                    raise
+                updated_config = SandroidConfig(**config_dict)
+                parsed_value = value
+            except ValidationError:
+                console.print(f"[red]Not saved: {describe_validation_error(e)}")
+                sys.exit(1)
+        if key == "emulator.device_name":
+            _warn_unknown_avd(str(parsed_value))
 
         # Save the configuration
         saved_path = loader.save_config(updated_config, config, format)

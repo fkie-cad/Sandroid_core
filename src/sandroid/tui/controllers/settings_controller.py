@@ -104,6 +104,7 @@ class SettingsController:
         """
         level = getattr(logging, new_level.upper(), logging.INFO)
         root = logging.getLogger()
+        changed = root.level != level
         root.setLevel(level)
         from sandroid.core.events import TUILoggingHandler
 
@@ -112,4 +113,7 @@ class SettingsController:
             if isinstance(handler, (logging.FileHandler, TUILoggingHandler)):
                 continue
             handler.setLevel(level)
-        logger.info(f"Log level changed to {new_level.upper()}")
+        if changed:
+            # Settings re-stages the unchanged level on every save: say so
+            # only when it really changed.
+            logger.info(f"Log level changed to {new_level.upper()}")

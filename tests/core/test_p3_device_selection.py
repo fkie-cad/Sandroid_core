@@ -437,6 +437,7 @@ async def test_tui_two_devices_without_pin_asks_before_any_prep(
     monkeypatch.setattr(startup_screen, "_startup_failure", None)
     monkeypatch.setattr(DevicesScreen, "monitor_factory", None)
     monkeypatch.setattr(emulator, "emulator_binary", lambda: None)  # no AVDs
+    monkeypatch.setattr(emulator, "host_avd_names", dict)  # hermetic
     setup_calls: list[str | None] = []
 
     class _Setup:
@@ -474,6 +475,10 @@ async def test_tui_two_devices_without_pin_asks_before_any_prep(
         assert Adb.get_target_device() is None
 
         await pilot.press("enter")
+        # No configured AVD runs: every emulator may be another session's,
+        # so Enter asks first (N6-V10).
+        await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
+        await pilot.press("y")
         await until(pilot, lambda: setup_calls)
         await settle(pilot)
         picked = config.emulator.serial

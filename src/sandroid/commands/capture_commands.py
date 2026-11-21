@@ -55,6 +55,13 @@ class ScreenshotCommand(CommandHandler):
         except Exception as e:
             logger.warning(f"Error getting filename input: {e}")
             # Continue with default timestamp filename
+        else:
+            if filename is None and ctx.is_tui_mode and ctx.request_input:
+                # Esc / Cancel on the filename dialog: nothing happens. (An
+                # empty submit still means "use a timestamp".)
+                return CommandResult(
+                    success=False, message="Screenshot cancelled", error="cancelled"
+                )
 
         # Empty string means use timestamp
         if filename is not None and filename.strip() == "":
@@ -149,6 +156,15 @@ class ScreenRecordingCommand(CommandHandler):
         except Exception as e:
             logger.warning(f"Error getting filename input: {e}")
             # Continue with default timestamp filename
+        else:
+            if filename is None and ctx.is_tui_mode and ctx.request_input:
+                # Esc / Cancel on the filename dialog: nothing happens. (An
+                # empty submit still means "use a timestamp".)
+                return CommandResult(
+                    success=False,
+                    message="Screen recording cancelled",
+                    error="cancelled",
+                )
 
         # Empty string means use timestamp
         if filename is not None and filename.strip() == "":

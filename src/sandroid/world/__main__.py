@@ -240,7 +240,10 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_prepare)
 
     p = sub.add_parser("persona", help="persona snapshots")
-    psub = p.add_subparsers(dest="persona_cmd", required=True)
+    # Not required=True: argparse would then report "required: persona_cmd"
+    # before an unknown option; main() names both properly instead.
+    psub = p.add_subparsers(dest="persona_cmd", metavar="{build,list}")
+    nested = {"persona": (p, "persona_cmd", "build, list")}
     b = psub.add_parser("build", help="prepare, apply the identity, save")
     b.add_argument("--serial", required=True)
     b.add_argument("--profile", required=True)
@@ -254,7 +257,8 @@ def main(argv: list[str] | None = None) -> int:
     ls.set_defaults(func=cmd_persona)
 
     p = sub.add_parser("photos", help="the photo cache")
-    psub = p.add_subparsers(dest="photos_cmd", required=True)
+    psub = p.add_subparsers(dest="photos_cmd", metavar="{fetch,import}")
+    nested["photos"] = (p, "photos_cmd", "fetch, import")
     f = psub.add_parser("fetch", help="download the photos a world (or all) uses")
     _owner_args(f)
     f.add_argument("--all", action="store_true")
@@ -263,7 +267,14 @@ def main(argv: list[str] | None = None) -> int:
     i.add_argument("folder")
     i.set_defaults(func=cmd_photos)
 
-    args = parser.parse_args(argv)
+    args, unknown = parser.parse_known_args(argv)
+    owner = nested.get(args.cmd)
+    if unknown:
+        (owner[0] if owner else parser).error(
+            f"unrecognized arguments: {' '.join(unknown)}"
+        )
+    if owner and getattr(args, owner[1], None) is None:
+        owner[0].error(f"a command is needed: {owner[2]}")
     # A terminated run still unwinds: prepare() turns the network back on
     # and leaves its ledger and partial stamp for --force-cleanup.
     for sig in (signal.SIGTERM, signal.SIGHUP):

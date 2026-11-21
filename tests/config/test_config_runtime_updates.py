@@ -201,16 +201,17 @@ async def test_settings_screen_shows_error_for_invalid_runs(xdg, monkeypatch):
         assert isinstance(screen, SettingsScreen)
         runs = screen.query_one("#setting-analysis--number_of_runs", Input)
         runs.value = "1"
-        # Input.Changed bubbles to the screen, which stages the value.
-        await _until(
-            pilot, lambda: screen._pending.get("analysis.number_of_runs") in (1, "1")
-        )
+        # Input.Changed bubbles to the screen: the field is checked against
+        # the schema bounds, marked red and never staged (N6-B3).
+        await _until(pilot, lambda: runs.id in screen._invalid)
+        assert "analysis.number_of_runs" not in screen._pending
+        assert runs.has_class("-invalid")
         screen.action_save()
 
         def messages() -> list[str]:
             return [n.message for n in app._notifications]
 
-        await _until(pilot, lambda: any("number_of_runs" in m for m in messages()))
+        await _until(pilot, lambda: any("at least 2" in m for m in messages()))
         assert app.screen is screen  # stays open
 
     assert user_file.read_text() == 'log_level = "INFO"\n'
@@ -382,6 +383,41 @@ def test_config_set_get_accept_positional_key_value(xdg):
     res = runner.invoke(config_main, ["set", "mvt.enabled"])
     assert res.exit_code == 2
     assert "Missing VALUE" in res.output
+
+
+def test_config_set_out_of_bounds_is_one_clean_line(xdg):
+    """N6-B3/V13: a negative timeout is refused with one plain line."""
+    from sandroid.config.cli import main as config_main
+
+    user_dir, _ = xdg
+    runner = CliRunner()
+    for args in (
+        ["set", "timeouts.adb_command", "--", "-5"],
+        ["set", "-k", "timeouts.adb_command", "-v", "-5"],
+        ["set", "mitmproxy.proxy_port", "70000"],
+    ):
+        res = runner.invoke(config_main, args)
+        assert res.exit_code == 1, (args, res.output)
+        lines = [line for line in res.output.splitlines() if line.strip()]
+        assert len(lines) == 1, res.output
+        assert lines[0].startswith("Not saved: "), res.output
+        assert "errors.pydantic.dev" not in res.output
+        assert "validation error" not in res.output
+    assert "timeouts.adb_command: must be at least 1 (got -5)" in (
+        runner.invoke(config_main, ["set", "-v", "-5", "timeouts.adb_command"]).output
+    )
+    assert not (user_dir / "sandroid.toml").exists()
+
+
+def test_config_set_unknown_avd_warns(xdg, monkeypatch):
+    """Setting a device name that is no AVD warns (but saves: CLI scripts)."""
+    from sandroid.config.cli import main as config_main
+    from sandroid.core import emulator
+
+    monkeypatch.setattr(emulator, "known_avd_names", lambda: {"Dev4"})
+    res = CliRunner().invoke(config_main, ["set", "emulator.device_name", "0"])
+    assert res.exit_code == 0, res.output
+    assert "No AVD named '0' exists (known: Dev4)" in res.output
 
 
 # -- B9: the removed --trigdroid is hidden and errors clearly -------------------

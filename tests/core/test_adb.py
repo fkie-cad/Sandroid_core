@@ -453,8 +453,7 @@ def test_a_refused_console_command_says_so_and_fails(monkeypatch, caplog):
 
 
 def test_snapshots_panel_header_names_the_refused_console(monkeypatch):
-    from sandroid.core.adb_emulator import CONSOLE_NOT_AUTHENTICATED
-    from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
+    from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel, console_auth_fix
 
     panel = SnapshotsPanel()
     monkeypatch.setattr(panel, "_emulator_available", lambda: True)
@@ -462,8 +461,12 @@ def test_snapshots_panel_header_names_the_refused_console(monkeypatch):
     assert "0 snapshot(s)" in panel._render_header()
     panel._console_refused = True
     header = panel._render_header()
-    assert CONSOLE_NOT_AUTHENTICATED[1:] in header
+    assert "snapshots can't be listed" in header
+    assert "console not authenticated" in header
     assert "snapshot(s)" not in header
+    # N6-V10: the fix is named instead of "no snapshots -- press c to create".
+    fix = console_auth_fix()
+    assert "copy ~/.emulator_console_auth_token" in fix
 
 
 def test_snapshots_panel_header_without_emulator_reads_name_dot_state(monkeypatch):
