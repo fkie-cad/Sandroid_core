@@ -454,3 +454,45 @@ def test_mask_sensitive_masks_every_tool_result_centrally(
     monkeypatch.setattr("sandroid.ai.row_classifier.mask_enabled", lambda: False)
     outcome = call(ex, "reader", call_id="c2")
     assert "SuperSecret123XYZ" in outcome.content  # off: sent as it is
+
+
+def test_declined_pull_blocks_get_file_diff_for_the_rest_of_the_turn(
+    perm_store, arbiter
+):
+    """N2-B8: after a No to pull_app_data, get_file_diff (which pulls the
+    file too) is refused in the same turn, even with a remembered allow;
+    other tools and a new turn are not affected.
+    """
+    ran = []
+    reg = ToolRegistry()
+    register_meta_tools(reg)
+    for name in ("pull_app_data", "get_file_diff", "start_file_monitor"):
+        reg.register(
+            ToolSpec(
+                name=name,
+                description=f"Tool {name}.",
+                parameters=NO_ARGS,
+                func=lambda name=name: ran.append(name) or {"ok": True},
+                risk=RiskTier.REVERSIBLE,
+                core=True,
+            )
+        )
+    perm_store.add_allow_rule("get_file_diff")
+    perm_store.add_allow_rule("start_file_monitor")
+    broker = perms.ApprovalBroker(perm_store)
+    broker.add_listener(
+        lambda kind, request, decision: (
+            broker.resolve(request.request_id, "no", note="Do not pull")
+            if kind == "added"
+            else None
+        )
+    )
+    ex = executor(reg, agent_id="orchestrator", broker=broker)
+    assert call(ex, "pull_app_data").status == "denied"
+    blocked = call(ex, "get_file_diff", call_id="c2")
+    assert blocked.status == "denied"
+    assert "pull_app_data" in json.loads(blocked.content)["error"]["message"]
+    assert call(ex, "start_file_monitor", call_id="c3").status == "ok"
+    assert ran == ["start_file_monitor"]
+    # The next turn has a new executor: the remembered allow applies again.
+    assert call(executor(reg, agent_id="orchestrator"), "get_file_diff").status == "ok"
