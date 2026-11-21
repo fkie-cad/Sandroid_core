@@ -149,6 +149,16 @@ def test_status_line_words_and_colours_only():
         assert " arm" not in text.replace("armed", "")
 
 
+def test_off_is_muted_not_the_ok_colour():
+    """House rule: an "off" state reads in the muted colour, never green."""
+    view = nm.derive_method(BASE)
+    assert view.preset == nm.OFF
+    markup = view.markup("#0f0", "#ff0", "#f00", "#888")
+    assert "[#888]Off[/]" in markup
+    assert "#0f0" not in markup
+    assert "[#0f0]" in nm.derive_method(THIS).markup("#0f0", "#ff0", "#f00", "#888")
+
+
 # -- apply plans ---------------------------------------------------------------------
 
 
