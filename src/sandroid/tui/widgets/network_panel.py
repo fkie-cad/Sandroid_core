@@ -2164,14 +2164,19 @@ class NetworkPanel(Widget):
             note = self._review_note_short()
             warn = lens_palette().warn
             return f"[{warn}]review {label}[/]" + (f" · {note}" if note else "")
-        # At most one problem (N3-V2): Mitmproxy's first, else friTap's.
-        # What runs, where the device points and the method are in the
-        # status bar and the method line below; not repeated here.
+        # Mitmproxy: at most one problem (N3-V2); what runs, where the
+        # device points and the method are in the status bar and the method
+        # line below. friTap: its state (the status bar does not name it).
         mitm = self.mitm
-        title = mitm.status_caption() if mitm is not None else ""
-        if not title:
-            fritap = self.fritap
-            title = fritap.caption_token() if fritap is not None else ""
+        fritap = self.fritap
+        title = " · ".join(
+            part
+            for part in (
+                mitm.status_caption() if mitm is not None else "",
+                fritap.caption_token() if fritap is not None else "",
+            )
+            if part
+        )
         if self._live:
             # Follow state: in ONE place, the title (as in every lens).
             title = f"{self._follow.text} · {title}" if title else self._follow.text

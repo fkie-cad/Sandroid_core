@@ -253,9 +253,10 @@ class FriTapPanel(Widget):
             return "stopped", ""
 
     def caption_token(self) -> str:
-        """The lens caption's friTap fragment: a problem or a transition
-        (starting, stopping, failed, not responding) in words and theme
-        colours; ``""`` while it runs fine or is cleanly stopped.
+        """The lens caption's friTap fragment in words and theme colours:
+        a problem or a transition (starting, stopping, failed, not
+        responding), ``friTap ● running`` (the status bar does not name
+        friTap), ``""`` while cleanly stopped.
         """
         from sandroid.tui.themes import lens_palette
 
@@ -275,9 +276,9 @@ class FriTapPanel(Widget):
             return ""
         if phase == "hung":
             return f"[{pal.warn}]friTap app not responding[/]"
-        # Running fine: the status bar and the friTap tab say so (N3-V2; main's R3
-        # "friTap ● running" would be the only running state in the title).
-        return ""
+        # Kept from main (R3): the status bar names Mitmproxy but not friTap
+        # (only "Hooks N"), so the title says friTap runs.
+        return f"[{pal.ok}]friTap ● running[/]"  # like Mitmproxy's (R3)
 
     @staticmethod
     def _mark(ok: bool) -> str:
