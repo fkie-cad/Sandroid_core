@@ -1281,12 +1281,13 @@ def test_static_analysis_state_keys_only_on_data_state() -> None:
     assert static_analysis_state(event({"message": "finished", "data": None})) is None
     assert static_analysis_state(event({"data": {"state": "odd"}})) is None
     assert static_analysis_state(event({"data": payload}, source="network")) is None
-    assert [duration_words(s) for s in (0.4, 45, 60, 80, 3600)] == [
+    assert [duration_words(s) for s in (0.4, 45, 60, 80, 3600, 23002)] == [
         "0 s",
         "45 s",
         "1 min",
         "1 min 20 s",
-        "60 min",
+        "1 h",
+        "6 h 23 min",  # N6-V5: not "383 min 22 s"
     ]
 
 

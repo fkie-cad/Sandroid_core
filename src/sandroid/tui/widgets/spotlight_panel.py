@@ -129,11 +129,14 @@ def static_analysis_state(event) -> dict | None:
 
 
 def duration_words(seconds: float) -> str:
-    """``45 s`` / ``1 min 20 s`` / ``2 min``."""
+    """``45 s`` / ``1 min 20 s`` / ``2 min`` / ``6 h 23 min``."""
     seconds = max(0, int(round(seconds)))
     if seconds < 60:
         return f"{seconds} s"
     minutes, rest = divmod(seconds, 60)
+    if minutes >= 60:  # not "383 min 22 s" (N6-V5)
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours} h {minutes} min" if minutes else f"{hours} h"
     return f"{minutes} min {rest} s" if rest else f"{minutes} min"
 
 
@@ -380,7 +383,8 @@ def hooks_inspector(
         if state:
             body.append("\n")
             line += 1
-            body.append(f"  {'unload'.rjust(8)}  ", style=c.label)
+            # "state", not "unload": the value says "unload failed" (N6-V5).
+            body.append(f"  {'state'.rjust(8)}  ", style=c.label)
             body.append_text(Text.from_markup(state))
             if app.unload == "failed":
                 hint = "hooks off but loaded" if app.hooks_off else "hooks may be on"

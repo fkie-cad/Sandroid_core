@@ -886,6 +886,8 @@ def test_an_unfinished_unload_stays_listed_with_its_state():
     body = content.sections[0][1]
     assert "No other app has hooks" not in body.plain
     assert "unload failed" in body.plain
+    assert "unload  unload failed" not in body.plain  # N6-V5: no repeat
+    assert "state  unload failed" in body.plain
     assert "restart the app to clear them" in body.plain
     assert "hooks off but loaded" in body.plain
     # The failure is a red word.
