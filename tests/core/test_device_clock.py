@@ -877,6 +877,26 @@ def test_format_offset():
     assert not device_clock.notable(None)
 
 
+@pytest.mark.parametrize(
+    ("offset", "text"),
+    [
+        (2.3, "2 s"),
+        (-45, "45 s"),
+        (59.6, "1 min"),
+        (59 * 60, "59 min"),
+        (4500, "1 h"),  # minutes only under an hour
+        (7199.6, "2 h"),  # a +2 h jump, measured
+        (120 * 60, "2 h"),
+        (-22 * 3600, "22 h"),
+        (23.9 * 3600, "1 d"),
+        (33.4 * 86400, "33 d"),
+    ],
+)
+def test_header_offsets_use_one_whole_unit(offset, text):
+    """N5 V8: not "120 min" / "22.0 h" / "33.5 d" side by side."""
+    assert device_clock.format_offset_compact(offset) == text
+
+
 @pytest.fixture
 def target(monkeypatch):
     monkeypatch.setattr(Adb, "get_target_device", classmethod(lambda cls: SERIAL))
@@ -890,7 +910,7 @@ def test_header_always_shows_the_device_time(device, target):
     assert header.update_device_clock(now) == "dev time unknown"  # no sample
     device_clock.measure(SERIAL)
     when = datetime.fromtimestamp(now - 4500.0)
-    assert header.update_device_clock(now) == f"dev {when:%H:%M:%S} 75 min behind"
+    assert header.update_device_clock(now) == f"dev {when:%H:%M:%S} 1 h behind"
     device.behind = 0.4
     device_clock.measure(SERIAL)
     when = datetime.fromtimestamp(now - device_clock.last_sample(SERIAL)["off_wall"])
@@ -909,13 +929,13 @@ def test_header_hides_the_stale_offset_after_a_world_change(device, target):
 
     header = ShellHeader()
     device_clock.measure(SERIAL)
-    assert "75 min behind" in header.update_device_clock(device.host)
+    assert "1 h behind" in header.update_device_clock(device.host)
     device.host += 1
     device_clock.begin_epoch(SERIAL)  # a snapshot load: no fresh sample yet
     assert header.update_device_clock(device.host) == "dev time unknown"
     device.behind = 9000.0
     device_clock.measure(SERIAL)
-    assert "150 min behind" in header.update_device_clock(device.host)
+    assert "3 h behind" in header.update_device_clock(device.host)  # 150 min
 
 
 def test_the_timeline_writer_samples_the_clock_every_clock_every_s(
@@ -974,7 +994,7 @@ async def test_header_device_clock_is_dim_until_off_then_amber(device, target):
         assert not label.has_class("-unknown")
         assert label.styles.display == "block"
         assert label.styles.color.hex.lower() == "#fbbf24"
-        assert "75 min behind" in str(label.render())
+        assert "1 h behind" in str(label.render())
         device.behind = 0.2
         device_clock.measure(SERIAL)
         header.update_device_clock()

@@ -707,7 +707,7 @@ class ShellHeader(Header):
 
         * within 1 s of the host, dimmed: ``dev 17:16:02 in sync``
         * more than 1 s off, amber: ``dev 16:01:02 75 min behind`` (or
-          ``ahead``)
+          ``ahead``; one whole unit: ``45 s``, ``75 min``, ``2 h``, ``33 d``)
         * no sample of the current world yet (startup, or after a snapshot
           load / cold boot, when the old offset is stale), dimmed:
           ``dev time unknown``
@@ -730,7 +730,7 @@ class ShellHeader(Header):
             when = datetime.fromtimestamp(now - sample["off_wall"])
             if device_clock.notable(sample):
                 ahead = device_clock.device_minus_host(sample) or 0.0
-                offset = device_clock.format_offset(abs(ahead)).lstrip("+−-")
+                offset = device_clock.format_offset_compact(ahead)
                 side = "ahead" if ahead > 0 else "behind"
                 text, state = f"dev {when:%H:%M:%S} {offset} {side}", "-off"
             else:
