@@ -96,10 +96,14 @@ class FakeRun:
     def __init__(self, screencap: bytes | None = PNG_A) -> None:
         self.calls: list[list[str]] = []
         self.screencap = screencap
+        #: ``dumpsys input`` EventHub lines (the axis seed); none by default
+        self.abs_state = b""
 
     def __call__(self, argv, timeout=10.0):
         self.calls.append(list(argv))
         cmd = " ".join(argv)
+        if "AbsState" in cmd:
+            return 0, self.abs_state
         if "getevent -p" in cmd:
             return 0, GETEVENT_P.encode()
         if "wm size" in cmd:
@@ -4493,3 +4497,91 @@ def test_an_inline_autocomplete_is_kept_apart_from_what_you_typed(env, cfg):
 )  # fmt: skip
 def test_typed_part(value, initial, keys, node, n):
     assert ts.typed_part(value, initial, keys, node) == n
+
+
+# --------------------------------------------------------------------------
+# N4-B4: an axis the kernel did not repeat (raw evidence of the N4 run)
+# --------------------------------------------------------------------------
+
+#: The N4 device E2E's raw getevent (session 3, L1-51): the stream starts,
+#: then a swipe up whose X equals the last X before the stream (no 0035).
+N4_RAW = FIX / "ge_n4_x_unchanged.txt"
+ABS_STATE = (
+    "      Path: /dev/input/event0\n"
+    "      Path: /dev/input/event1\n"
+    "      AbsState: ABS_X=0, ABS_Y=0, ABS_MT_SLOT=0, ABS_MT_POSITION_X=16384, "
+    "ABS_MT_POSITION_Y=12165, ABS_MT_TRACKING_ID=-1\n"
+    "      Path: <virtual>\n"
+)
+
+
+def test_n4_raw_swipe_has_no_x_but_its_y_span():
+    events = decode_all(N4_RAW.read_text().splitlines())
+    end = next(e.gesture for e in events if e.kind == "end")
+    assert end.uncertain
+    assert end.x0 is None  # no 0035 line in the evidence
+    assert end.x_span is None
+    assert end.y_span == (0x2F85, 0x6453)  # the finger went up the screen
+
+
+def test_parse_abs_state_reads_the_current_slot():
+    assert ts.parse_abs_state(ABS_STATE) == {"/dev/input/event1": (0, 16384, 12165)}
+    assert ts.parse_abs_state("Path: /dev/input/event1\n") == {}
+
+
+def test_a_seed_fills_only_unseen_axes_of_its_own_stream():
+    lines = N4_RAW.read_text().splitlines()
+    d = ts.TouchDecoder()
+    decode_all(lines[:26], d)  # the listing: one reset
+    gen = d.generation
+    d.seed({"/dev/input/event1": (0, 16384, 99)}, gen)
+    d.seed({"/dev/input/event1": (0, 1, 1)}, gen - 1)  # read before a restart
+    events = decode_all(lines[26:], d)
+    end = next(e.gesture for e in events if e.kind == "end")
+    assert not end.uncertain
+    assert end.x0 == 16384  # seeded
+    assert end.y0 == 0x6453  # seen in the stream, never the seed's 99
+    assert end.x_span == (16384, 16384)
+
+
+def test_n4_swipe_with_an_unknown_x_is_a_swipe_not_a_long_press(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    with timeline.capture() as lines:
+        g = start(svc, popen, helpers, cfg, mode="off")
+        g.feed(*N4_RAW.read_text().splitlines())
+        assert wait_for(lambda: of(lines, "input"))
+    line = of(lines, "input")[0]
+    assert line["kind"] == "swipe"
+    assert line["data"]["xy_uncertain"] is True
+    assert line["summary"] == "swipe · position unknown"
+
+
+def test_n4_swipe_position_comes_from_the_seed(env, cfg):
+    svc, popen, run, helpers, _tmp = env
+    cfg.shot_before_tap = False
+    run.abs_state = ABS_STATE.encode()
+    raw = N4_RAW.read_text().splitlines()
+    with timeline.capture() as lines:
+        g = start(svc, popen, helpers, cfg, mode="off")
+        stream = svc.getevent(SERIAL)
+        try:
+            g.feed(*raw[:26])
+
+            def seeded() -> bool:  # pending, or applied already
+                dev = stream.decoder._devs.get("/dev/input/event1")
+                slot = dev.slots.get(0, {}) if dev else {}
+                return bool(stream.decoder._seeds) or slot.get("x") == 16384
+
+            assert wait_for(seeded)
+            g.feed(*raw[26:])
+            assert wait_for(lambda: of(lines, "input"))
+        finally:
+            stream.release()
+    line = of(lines, "input")[0]
+    assert any("AbsState" in " ".join(c) for c in run.calls)
+    assert line["kind"] == "swipe"
+    assert line["data"]["xy_uncertain"] is False
+    assert line["data"]["x"] == 540
+    assert line["data"]["x1"] == 540
+    assert line["data"]["y1"] < line["data"]["y"]  # up
