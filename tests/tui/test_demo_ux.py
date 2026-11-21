@@ -755,6 +755,8 @@ def test_snapshot_create_and_load_report_the_service_result(monkeypatch, ok):
     panel._do_save("slot-3", "3")
     assert [c[0] for c in calls] == ["create", "load", "load", "create"]
     assert [r[0] for r in results] == [ok] * 4
+    # N4-B11: the next list rebuild highlights the snapshot just created.
+    assert panel._select_tag == ("slot-3" if ok else None)
     if not ok:
         assert results[0][1].startswith("Could not create snapshot 'p5_snap'")
         assert results[1][1].startswith("Could not load 'p5_snap'")

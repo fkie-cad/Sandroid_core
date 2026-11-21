@@ -2059,3 +2059,28 @@ def test_proxy_strip_segment_is_plain_words():
         # Status dots (● ○ ◌) are allowed; arrows and other glyphs are not.
         assert not re.search("(?![●○◌])[←-⇿─-➿⬀-⯿]", text)
         assert not re.search(r"\b(mitm|Capture|arm(ed)?)\b", text)
+
+
+async def test_picker_highlights_a_snapshot_just_created(monkeypatch) -> None:
+    """N4-B11: after creating a snapshot the highlight must not end up on a
+    different snapshot: it goes to the new one.
+    """
+    from sandroid.tui.modals import SnapshotPickerModal
+
+    snaps = list(_SNAPS)
+    _fake_picker_panel(monkeypatch, snaps)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await boot(app, pilot)
+        await pilot.press("S")
+        await settle(pilot)
+        picker = app.screen
+        assert isinstance(picker, SnapshotPickerModal)
+        panel = picker.panel()
+        assert panel._highlighted_tag() == "tmp"
+        panel._select_tag = "e2e-new"  # what a successful create sets
+        snaps.insert(0, {"tag": "e2e-new", "date": "2026-11-21 04:30", "size": "69M"})
+        panel.refresh_snapshots()
+        await settle(pilot)
+        assert panel._highlighted_tag() == "e2e-new"
+        assert panel._select_tag is None

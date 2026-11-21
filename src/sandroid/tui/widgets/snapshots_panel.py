@@ -169,6 +169,9 @@ class SnapshotsPanel(Widget):
         # The (label, tag) rows the OptionList shows: a rebuild with the same
         # rows is skipped so the highlight and scroll position stay put.
         self._shown_rows: list[tuple[str, str | None]] | None = None
+        #: A snapshot just created here: the next rebuild that lists it
+        #: highlights it (the new row shifts the others down).
+        self._select_tag: str | None = None
 
     # -- services (lazy) --------------------------------------------------
 
@@ -426,7 +429,10 @@ class SnapshotsPanel(Widget):
             tags = [tag for _label, tag in rows if tag is not None]
             if not tags:
                 return
-            if previous_tag in tags:
+            if self._select_tag in tags:
+                index = tags.index(self._select_tag)
+                self._select_tag = None
+            elif previous_tag in tags:
                 index = tags.index(previous_tag)
             elif previous_index is not None:
                 # The highlighted snapshot is gone (deleted): stay on the same
@@ -653,6 +659,7 @@ class SnapshotsPanel(Widget):
                 if self._toolbox().create_snapshot(name) is False:
                     why = _refusal_reason("save", name) or "see the log"
                     return False, f"Could not create snapshot '{name}' ({why})"
+                self._select_tag = name  # plain attribute: safe off-thread
                 return True, f"Created snapshot '{name}'"
 
             self._run_action_bg(_work, "create", refresh_after=True)
@@ -867,6 +874,7 @@ class SnapshotsPanel(Widget):
                 return False, f"Could not save slot {slot} ('{tag}', {why})"
             # Pure config/file write + attr set — safe off the UI thread.
             self._write_slot(slot, tag)
+            self._select_tag = tag
             return True, f"Saved '{tag}' to slot {slot}"
 
         self._run_action_bg(_work, f"save slot {slot}", refresh_after=True)
