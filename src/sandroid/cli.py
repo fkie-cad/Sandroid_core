@@ -344,7 +344,7 @@ def main(
     with_fritap: str | None,
     report_from: str | None = None,
 ) -> None:
-    r"""Sandroid: Extract forensic and malware artifacts from Android Virtual Devices.
+    """Sandroid: Extract forensic and malware artifacts from Android Virtual Devices.
 
     Main entry point for the Sandroid CLI application. Handles configuration
     loading, logging setup, and dispatches to the appropriate execution mode:
@@ -353,7 +353,7 @@ def main(
     1. Default mode: Textual TUI (when running just 'sandroid')
     2. Automated analysis: Command-line driven analysis with --package
     3. Headless mode (--headless): Programmatic API-based analysis
-    """
+    """  # noqa: D301 -- "\b" must be click's real \x08 marker, not raw text
     # Initialize console with default theme (re-initialized with config theme later)
     SandroidConsole.initialize()
     console = SandroidConsole.get()

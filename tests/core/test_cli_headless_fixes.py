@@ -1281,3 +1281,37 @@ def test_headless_requires_package_message(capsys):
     out = capsys.readouterr().out
     assert "requires --package" in out
     assert "trigdroid" not in out.lower()
+
+
+def test_top_level_help_keeps_its_list_and_has_no_literal_backslash_b():
+    """N6-V13: the click marker works (no literal backslash-b; a line per mode)."""
+    from click.testing import CliRunner
+
+    import sandroid.cli as cli_mod
+
+    out = CliRunner().invoke(cli_mod.main, ["--help"]).output
+    assert "\\b" not in out
+    lines = [line.strip() for line in out.splitlines()]
+    assert any(line.startswith("1. Default mode") for line in lines)
+    assert any(line.startswith("2. Automated analysis") for line in lines)
+    assert any(line.startswith("3. Headless mode") for line in lines)
+
+
+@pytest.mark.parametrize(
+    ("argv", "says"),
+    [
+        (["photos", "--bogus"], "unrecognized arguments: --bogus"),
+        (["photos"], "a command is needed: fetch, import"),
+        (["persona", "list", "--avd", "A", "--nope"], "unrecognized arguments"),
+    ],
+)
+def test_world_cli_usage_errors_name_the_problem(argv, says, capsys):
+    """N6-V13: not "required: photos_cmd" for an unknown option."""
+    from sandroid.world import __main__ as world_cli
+
+    with pytest.raises(SystemExit) as exc:
+        world_cli.main(argv)
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert says in err
+    assert "photos_cmd" not in err
