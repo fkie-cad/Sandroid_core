@@ -336,6 +336,7 @@ def avd(tmp_path, image, monkeypatch, profile_env):
     (avd_dir / "config.ini").write_text(f"image.sysdir.1={rel}/\n", encoding="utf-8")
     monkeypatch.setattr(emulator, "sdk_root", lambda: tmp_path / "sdk")
     monkeypatch.setattr(emulator, "_HOOKS", {"pre_launch": [], "post_stop": []})
+    monkeypatch.setattr(emulator, "_RESTART_META", [])
     return avd_dir
 
 
@@ -429,6 +430,7 @@ def test_launch_runs_the_hooks_and_appends_the_sysdir(avd, profile_env, monkeypa
     sim.install_launch_hooks()  # idempotent
     hooks = emulator._HOOKS
     assert hooks == {"pre_launch": [sim.pre_launch], "post_stop": [sim.post_stop]}
+    assert [sim.restart_meta] == emulator._RESTART_META
     monkeypatch.setattr(emulator, "avd_dir", lambda name: avd)
     context = emulator._launch_context("Dev1", 5580, emulator.AvdLaunchOptions())
     args = emulator._run_pre_launch_hooks(context)
@@ -456,6 +458,7 @@ def test_launch_runs_the_hooks_and_appends_the_sysdir(avd, profile_env, monkeypa
     assert not Path(args[1]).exists()
     sim.uninstall_launch_hooks()
     assert emulator._HOOKS == {"pre_launch": [], "post_stop": []}
+    assert emulator._RESTART_META == []
 
 
 def test_running_sim_reads_what_the_emulator_copied(avd, monkeypatch):
@@ -730,3 +733,10 @@ def test_a_restart_follows_only_its_launchs_persona(avd, profile_env, monkeypatc
     # A persona only the device record names: a restart starts the active SIM.
     assert sim.restart_blocker(running, persona) == sim.PERSONA_SIM_ACTIVE
     assert sim.restart_blocker(running, active) == ""
+    # With identity's restart meta provider, the restart names the persona.
+    sim.install_launch_hooks()
+    assert sim.restart_meta("emulator-5580", "Dev1") == {"persona_id": persona.id}
+    assert sim.restart_blocker(running, persona) == ""
+    assert sim.restart_blocker(running, active) == sim.NOT_ACTIVE
+    monkeypatch.setattr(service, "persona_of", lambda serial: "")
+    assert sim.restart_meta("emulator-5580", "Dev1") is None

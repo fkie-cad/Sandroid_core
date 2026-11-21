@@ -1847,6 +1847,34 @@ def test_restart_meta_providers_only_add_missing_keys(monkeypatch):
         emu.register_restart_meta("nope")  # type: ignore[arg-type]
 
 
+def test_identity_installs_a_restart_meta_provider_for_personas(env, monkeypatch):
+    """After a TUI restart (no live launch of ours), a restart of a persona
+    emulator still starts the persona: identity's provider names it.
+    """
+    from sandroid.services import identity as ident
+    from sandroid.services import identity_sim as sim
+
+    monkeypatch.setattr(emu, "_RESTART_META", [])
+    sim.install_launch_hooks()
+    sim.install_launch_hooks()  # idempotent
+    assert [sim.restart_meta] == emu._RESTART_META
+    personas = {"emulator-5560": "persona-a"}
+    service = ident.get_identity_service()
+    monkeypatch.setattr(service, "persona_of", lambda s: personas.get(s, ""))
+    monkeypatch.setattr(sim, "pre_launch", lambda ctx: ())
+    monkeypatch.setattr(emu, "_HOOKS", {"pre_launch": [], "post_stop": []})
+    monkeypatch.setattr(emu, "running_options", lambda serial, avd: None)
+    env["adb"].add("emulator-5560", avd="Pixel")  # a persona emulator
+    env["adb"].add("emulator-5562", avd="Pixel2")  # holds no persona
+    persona = emu.restart_emulator("emulator-5560")
+    plain = emu.restart_emulator("emulator-5562")
+    assert persona.meta == {ident.PERSONA_META_KEY: "persona-a"}
+    assert emu.launch_record("emulator-5560")["meta"] == {"persona_id": "persona-a"}
+    assert plain.meta == {}
+    sim.uninstall_launch_hooks()
+    assert emu._RESTART_META == []
+
+
 def test_a_launch_is_a_timeline_line_with_its_record(env):
     from sandroid.core import timeline
 

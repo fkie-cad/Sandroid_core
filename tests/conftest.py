@@ -505,6 +505,38 @@ def _no_device_clock():
     device_clock.SHELL_FACTORY, device_clock._default_send = saved
 
 
+#: ``emulator_service._auto_start_frida_after_load`` as the module defines it.
+_real_frida_after_load: Any = None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_frida_after_load():
+    """A snapshot load starts frida-server on a daemon thread
+    (``emulator_service._auto_start_frida_after_load``) that outlives the
+    test and runs ``adb devices -l`` between tests, where no guard is
+    installed. For the whole session a load starts no thread; tests that
+    check it use the :func:`frida_after_load` fixture.
+    """
+    global _real_frida_after_load
+    from sandroid.services import emulator_service
+
+    _real_frida_after_load = emulator_service._auto_start_frida_after_load
+    emulator_service._auto_start_frida_after_load = lambda serial: None
+    yield
+    emulator_service._auto_start_frida_after_load = _real_frida_after_load
+
+
+@pytest.fixture
+def frida_after_load(monkeypatch):
+    """The real ``_auto_start_frida_after_load`` for this test (returned)."""
+    from sandroid.services import emulator_service
+
+    monkeypatch.setattr(
+        emulator_service, "_auto_start_frida_after_load", _real_frida_after_load
+    )
+    return _real_frida_after_load
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _lens_theme_variables():
     """Bare test ``App``s know the App lens's ``$lens-*`` CSS variables.

@@ -425,7 +425,7 @@ class DiffsView(FilesSubViewBase):
         total = len(self._summaries)
         info = None
         if total:
-            info = f"{total} run{'s' if total != 1 else ''} · ⏎ details"
+            info = f"{total} run{'s' if total != 1 else ''} · Enter details"
         title = self._play_phase or None
         try:
             ms.set_lens_caption("runs", title, info)
@@ -1109,7 +1109,7 @@ class DiffsView(FilesSubViewBase):
                 ("Report", self._report_sections(run_id, facts)),
                 ("Privacy", self._privacy_sections(run_id, s)),
             ],
-            footer="v review · = compare · z diff · ⇧P pdf",
+            footer="v review · = compare · z diff · Shift+P pdf",
             key=("run", run_id),
             keys=self._privacy_keys(run_id),
             click=lambda tab, line: self._privacy_click(run_id, tab, line),
@@ -1407,7 +1407,7 @@ class DiffsView(FilesSubViewBase):
         return [
             ("", grid),
             ("Folder", Text(run_dir, style=_c("muted"))),
-            ("", Text("⇧P write a new PDF report", style=_c("dim"))),
+            ("", Text("Shift+P write a new PDF report", style=_c("dim"))),
         ]
 
     # -- Privacy tab (identity profile values found during the run) ---------
@@ -1955,7 +1955,7 @@ class DiffsView(FilesSubViewBase):
         content = InspectorContent(
             title=f"#{numbers[0]} vs #{numbers[1]}",
             sections=self.compare_sections(rec_a, rec_b, facts, numbers),
-            footer="= compare · ⏎ run",
+            footer="= compare · Enter run",
             key=("compare", rec_a.run_id, rec_b.run_id),
         )
         ms.open_inspector(content)

@@ -928,8 +928,24 @@ def post_stop(context: LaunchContext) -> None:
     remove_private_sysdir(context.avd)
 
 
+def restart_meta(serial: str, avd: str) -> dict[str, str] | None:
+    """Restart meta provider: the persona ``serial`` holds.
+
+    Asked by :func:`~sandroid.core.emulator.restart_emulator` when Sandroid
+    has no live launch of ``serial`` (a TUI restart, another process's
+    launch): the relaunch's meta names the persona, so :func:`pre_launch`
+    starts it with the persona's SIM, not the active profile's. ``None``
+    when ``serial`` holds no persona. From memory only (no device access).
+    """
+    from sandroid.services.identity import PERSONA_META_KEY, get_identity_service
+
+    persona = get_identity_service().persona_of(serial)
+    return {PERSONA_META_KEY: persona} if persona else None
+
+
 def install_launch_hooks() -> None:
-    """Register :func:`pre_launch` and :func:`post_stop` (idempotent).
+    """Register :func:`pre_launch`, :func:`post_stop` and
+    :func:`restart_meta` (idempotent).
 
     Call once at startup, before Sandroid can launch an emulator. They stay
     registered until the process exits: post-stop also runs for launches
@@ -939,6 +955,7 @@ def install_launch_hooks() -> None:
 
     emulator.register_pre_launch_hook(pre_launch)
     emulator.register_post_stop_hook(post_stop)
+    emulator.register_restart_meta(restart_meta)
 
 
 def uninstall_launch_hooks() -> None:
@@ -947,6 +964,15 @@ def uninstall_launch_hooks() -> None:
 
     emulator.unregister_pre_launch_hook(pre_launch)
     emulator.unregister_post_stop_hook(post_stop)
+    emulator.unregister_restart_meta(restart_meta)
+
+
+def _restart_meta_installed() -> bool:
+    """:func:`restart_meta` is registered with the emulator module."""
+    from sandroid.core import emulator
+
+    with emulator._HOOK_LOCK:
+        return restart_meta in emulator._RESTART_META
 
 
 # ---------------------------------------------------------------------------
@@ -1066,13 +1092,17 @@ def running_sim(serial: str, avd_name: str = "") -> SimValues | None:
 def _restart_profile_id(service: Any, serial: str) -> str:
     """The profile whose SIM a restart of ``serial`` from Sandroid sets.
 
-    A restart passes its launch's ``meta`` on (pre-launch hooks see it as
-    ``context.meta``): only that persona counts, not one the device record
-    names (a launch without a live record, e.g. after a TUI restart).
+    A restart passes its live launch's ``meta`` on (pre-launch hooks see it
+    as ``context.meta``): only that persona counts. Without a live launch
+    (e.g. after a TUI restart) :func:`restart_meta`, when installed, gives
+    the persona the device holds.
     """
-    from sandroid.services.identity import launch_persona_id
+    from sandroid.services.identity import launch_persona
 
-    return launch_persona_id(serial) or str(service.config().profile or "")
+    persona = launch_persona(serial)
+    if persona is None and _restart_meta_installed():
+        persona = service.persona_of(serial)
+    return persona or str(service.config().profile or "")
 
 
 def restart_blocker(running: RunningEmulator | None, profile: Profile) -> str:
@@ -1139,6 +1169,7 @@ __all__ = [
     "read_iccprofile",
     "remove_private_sysdir",
     "restart_blocker",
+    "restart_meta",
     "running_emulator",
     "running_sim",
     "sim_values",
