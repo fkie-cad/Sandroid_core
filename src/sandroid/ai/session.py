@@ -401,6 +401,28 @@ def list_threads(root: Path | None | Any = AUTO_ROOT) -> list[dict]:
     return sorted(entries, key=lambda e: e.get("updated") or "", reverse=True)
 
 
+def _masked_prompt(text: str) -> str:
+    """An analyst prompt as it is sent and stored (N2-B3).
+
+    With ``ai.mask_sensitive`` on, secrets typed into a prompt (``sk-...``,
+    bearer / AWS keys, ``password=...``, ``token: ...``) are masked by the
+    tool-result rules before the prompt reaches the model, the thread title
+    (``ai/index.json``) or the transcript (``threads/*.jsonl``); the live
+    chat view keeps showing what the analyst typed. Off: unchanged.
+    """
+    try:
+        from sandroid.ai.row_classifier import mask_enabled, mask_text
+
+        if not mask_enabled():
+            return text
+        return mask_text(text)
+    except Exception:
+        logger.warning("masking an analyst prompt failed; redacting it instead")
+        from sandroid.ai.safety import redact_secrets
+
+        return redact_secrets(text)
+
+
 def _title(text: str, limit: int = 80) -> str:
     text = " ".join(str(text).split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -713,6 +735,13 @@ class AgentSession:
                 msg_id = str(rec.get("msg_id") or "")
                 if msg_id.startswith("m") and msg_id[1:].isdigit():
                     self._msg_counter = max(self._msg_counter, int(msg_id[1:]))
+            elif rtype == "usage":
+                # N2-B7: /context's totals survive a resume (one record per
+                # model request, as _after_turn counts them).
+                with contextlib.suppress(TypeError, ValueError):
+                    self.totals["prompt_tokens"] += int(rec.get("prompt") or 0)
+                    self.totals["completion_tokens"] += int(rec.get("completion") or 0)
+                    self.totals["requests"] += 1
             elif rtype == "header" and not rec.get("resumed"):
                 self.created = rec.get("t") or self.created
         history = [*(checkpoint or []), *tail]
@@ -782,6 +811,12 @@ class AgentSession:
                 :meth:`continue_turn`).
             extra_rounds: Round budget of this turn (default: configured).
         """
+        if self.kind == "chat" and self.depth == 0:
+            # On the UI thread (chat panel): which lens is open (N2-B1).
+            with contextlib.suppress(Exception):
+                from sandroid.ai.context import capture_lens_state
+
+                capture_lens_state()
         job = _Job(
             "continue" if continuation else "user",
             text,
@@ -994,21 +1029,22 @@ class AgentSession:
         return "\n\n".join(p for p in parts if p)
 
     def _append_user_turn(self, job: _Job, turn_id: str) -> None:
+        text = _masked_prompt(job.text) if job.kind == "user" else job.text
         if self.title is None and job.kind == "user":
-            self.title = _title(job.text)
+            self.title = _title(text)
         ambient = self._build_ambient()
         multi = getattr(self.profile, "system_mode", "multi") != "first_only"
-        content = job.text
+        content = text
         if ambient and multi:
             msg = {"role": "system", "content": ambient}
             self.messages.append(msg)
             self._persist("ambient", content=ambient, turn=turn_id)
         elif ambient:
-            content = f"{job.text}\n\n{ambient}"
+            content = f"{text}\n\n{ambient}"
             self._persist("ambient", content=ambient, turn=turn_id, merged=True)
         user = {"role": "user", "content": content}
         self.messages.append(user)
-        meta = {"kind": job.kind, "text": job.text, **job.meta}
+        meta = {"kind": job.kind, "text": text, **job.meta}
         ref = self._persist_msg(user, meta, turn_id)
         if job.kind in ("user", "continue"):
             self._timeline(
