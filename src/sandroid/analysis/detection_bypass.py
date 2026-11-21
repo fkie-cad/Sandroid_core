@@ -2562,6 +2562,13 @@ class _ParkedHooks:
     categories: frozenset[str]
     since: float
     session: Any = None
+    # Shift+U unload: None, "unloading" (in flight) or "failed" (it did
+    # not finish in time; it may still finish in the background).
+    unload: str | None = None
+    # The flags-off RPC of that unload answered: the hooks are inert.
+    flags_off: bool = False
+    # The unload's teardown thread ended (set under the service lock).
+    torn_down: bool = False
 
     @property
     def task_name(self) -> str:
@@ -2582,6 +2589,10 @@ class HookedApp:
     categories: tuple[str, ...]
     since: float | None
     parked: bool
+    # A parked script whose unload is in flight ("unloading") or did not
+    # finish in time ("failed"); ``hooks_off``: its flags are off.
+    unload: str | None = None
+    hooks_off: bool = False
 
 
 _CATEGORY_DISPLAY = {
@@ -2676,6 +2687,9 @@ class BypassService:
         self._retired: set[str] = set()
         # time.time() when the resident script loaded (None without one).
         self._resident_since: float | None = None
+        # The last set_active loaded a fresh script into a running (not
+        # held) app: Frida's Java bridge then initialises in a busy process.
+        self._attached_live = False
         # Called after the armed or active set changed, see add_state_listener.
         self._state_listeners: list[Callable[[], None]] = []
         self._listeners_lock = threading.Lock()
@@ -2704,7 +2718,9 @@ class BypassService:
 
     def _state_key(self) -> tuple[frozenset, ...]:
         with self._lock:
-            parked = frozenset((p, r.categories) for p, r in self._parked.items())
+            parked = frozenset(
+                (p, r.categories, r.unload) for p, r in self._parked.items()
+            )
             return frozenset(self._armed), frozenset(self._active), parked
 
     def _notify_state(self) -> None:
@@ -3190,6 +3206,7 @@ class BypassService:
         if not self._mutate_lock.acquire(blocking=False):
             return False, "Bypass change already in progress"
         try:
+            self._attached_live = False
             # Published under _lock before the claim check: claim_exclusive
             # refuses a claim on any category in _mutating, so a Dexray claim
             # and this load cannot interleave (unrelated claims still can).
@@ -3202,7 +3219,10 @@ class BypassService:
             # The target is the selected app's: another app's resident
             # script stays loaded there (parked), this app's parked one
             # comes back.
-            refusal = self._focus(self._selected_package())
+            selected = self._selected_package()
+            refusal = self._focus(selected)
+            if target and not refusal:
+                refusal = self.unload_pending(selected)
             if refusal:
                 return False, refusal
             jm = Toolbox.get_frida_job_manager()
@@ -3243,6 +3263,7 @@ class BypassService:
             # fresh load; reuses an existing live job otherwise).
             flags = self._flag_dict(target)
             ok, msg, fresh = self._ensure_loaded(paused=paused, initial_flags=flags)
+            self._attached_live = bool(ok and fresh and not paused)
             if not ok:
                 return False, msg
 
@@ -3470,6 +3491,15 @@ class BypassService:
                         f"{name} active — restart the app (Shift+R) so checks it "
                         "ran at startup see it too"
                     )
+                if self._attached_live:
+                    # Live: Frida's Java bridge faulted in a busy app that had
+                    # just started (an ART "SuspendAll timeout" abort seconds
+                    # later); loaded at spawn, the app is held while it starts.
+                    return True, (
+                        f"{name} active in the running app. If it crashes, "
+                        "restart it (Shift+R): the bypass then loads at spawn, "
+                        "which is more reliable"
+                    )
                 return True, f"{name} active"
             if self.is_paused_session():
                 return True, f"{name} armed — Space (resume) applies it"
@@ -3497,7 +3527,7 @@ class BypassService:
             if package is None or self._app_package in (None, package):
                 return set(self._active)
             rec = self._parked.get(package)
-            return set(rec.categories) if rec else set()
+            return set(rec.categories) if rec and not rec.unload else set()
 
     @staticmethod
     def _job_session(job: Any) -> Any:
@@ -3622,9 +3652,22 @@ class BypassService:
         if unpark:
             with self._lock:
                 rec = self._parked.get(package) if self._job is None else None
-            if rec is not None:
+            if rec is not None and not rec.unload:
                 self._unpark(rec, jm)
         return None
+
+    def unload_pending(self, package: str | None) -> str | None:
+        """Why ``package`` gets no new bypass now: its own hooks of a
+        Shift+U unload that did not finish are still loaded. Else None.
+        """
+        with self._lock:
+            rec = self._parked.get(package) if package else None
+            if rec is None or not rec.unload:
+                return None
+        return (
+            f"The bypass hooks in {package} are still unloading; restart the "
+            "app to clear them, then add bypasses again."
+        )
 
     def _park_resident(self, jm: Any) -> str | None:
         refusal = self._park_block(jm)
@@ -3752,10 +3795,12 @@ class BypassService:
     @staticmethod
     def _parked_alive(rec: _ParkedHooks) -> bool:
         """Cheap liveness (no device call): job running, script and
-        session not gone (Frida marks both when the process dies).
+        session not gone (Frida marks both when the process dies, and when
+        an unload finished). While an unload runs only the script and the
+        session count: the job is stopped before the hooks are gone.
         """
         try:
-            if getattr(rec.job, "state", "running") in _DEAD:
+            if not rec.unload and getattr(rec.job, "state", "running") in _DEAD:
                 return False
             if getattr(rec.script, "is_destroyed", False):
                 return False
@@ -3810,34 +3855,69 @@ class BypassService:
                     continue
                 out.append(
                     HookedApp(
-                        rec.package, rec.pid, order(rec.categories), rec.since, True
+                        rec.package,
+                        rec.pid,
+                        order(rec.categories),
+                        rec.since,
+                        True,
+                        rec.unload,
+                        rec.flags_off,
                     )
                 )
         return out
+
+    #: Seconds Shift+U waits for a parked script to unload.
+    UNLOAD_WAIT_S = 8.0
 
     @_notifies
     def unload_app(self, package: str) -> tuple[bool, str]:
         """Unload the bypass hooks loaded in ``package`` (worker thread).
 
-        A parked script is unloaded and its session detached (both bounded);
-        the resident one is stopped like :meth:`forget_process`. The armed
-        set is left alone (it belongs to the selected app).
+        A parked script: every flag off first (one RPC, the hooks go inert),
+        then ``script.unload()`` and ``session.detach()`` on one daemon
+        thread, waited for at most :attr:`UNLOAD_WAIT_S`. Both block while
+        an app thread sits inside a hooked call (an idle ``SSL_read``), and
+        nothing on the host can force them. So success is only claimed once
+        the script or the session is really gone; otherwise the app stays
+        listed with its unload "failed" (the teardown keeps running and
+        drops the entry when it ends, as does the app's death). The
+        resident one is stopped like :meth:`forget_process`. The armed set
+        is left alone (it belongs to the selected app).
         """
-        rec = self._drop_parked(package)
+        with self._lock:
+            rec = self._parked.get(package)
+            busy = rec is not None and rec.unload is not None
+            if rec is not None and not busy:
+                rec.unload = "unloading"
+        if busy:
+            return False, self._unload_failed_msg(rec)
         if rec is not None:
+            self._notify_state()  # "unloading" in the list
             names = ", ".join(self._plain_name(c) for c in sorted(rec.categories))
-            # Every flag off first (one RPC, bounded): the hooks go inert at
-            # once even when the unload below hangs on the live process.
-            self._bounded(
-                lambda: rec.script.exports_sync.set_flags(self._flag_dict(set()))
+            worker = threading.Thread(
+                target=self._teardown_parked,
+                args=(rec,),
+                name="bypass-unload",
+                daemon=True,
             )
-            try:
-                rec.job.close_job(timeout=3.0)
-            except Exception as exc:
-                logger.warning("[Bypass] unloading in %s failed: %s", package, exc)
-            if rec.session is not None:
-                self._bounded(rec.session.detach)
-            return True, f"Unloaded the bypass hooks in {package} ({names})"
+            worker.start()
+            worker.join(self.UNLOAD_WAIT_S)
+            with self._lock:
+                done = rec.torn_down or not self._parked_alive(rec)
+                if not done:
+                    rec.unload = "failed"  # the teardown drops it when it ends
+            if done:
+                self._drop_parked_rec(rec)
+                return True, f"Unloaded the bypass hooks in {package} ({names})"
+            logger.warning(
+                "[Bypass] Unloading the hooks in %s did not finish within %.0fs "
+                "(an app thread is inside a hooked call; hooks %s); still "
+                "trying in the background.",
+                package,
+                self.UNLOAD_WAIT_S,
+                "switched off" if rec.flags_off else "possibly still on",
+            )
+            return False, self._unload_failed_msg(rec)
         with self._lock:
             resident = self._job is not None and self._app_package == package
             names = ", ".join(self._plain_name(c) for c in sorted(self._active))
@@ -3847,18 +3927,61 @@ class BypassService:
         return False, f"No bypass hooks loaded in {package}"
 
     @staticmethod
-    def _bounded(fn: Callable[[], Any], timeout: float = 3.0) -> None:
-        """Run ``fn`` on a daemon thread, wait at most ``timeout``, ignore errors."""
+    def _unload_failed_msg(rec: _ParkedHooks) -> str:
+        state = (
+            "are switched off but still loaded"
+            if rec.flags_off
+            else "may still be active"
+        )
+        return (
+            f"Could not unload the bypass hooks in {rec.package}: they {state} "
+            "(an app thread is inside a hooked call). Restart the app to "
+            "clear them."
+        )
 
-        def run() -> None:
+    def _teardown_parked(self, rec: _ParkedHooks) -> None:
+        """Daemon thread: flags off, unload, detach; may block for long."""
+        try:
+            rec.job.stop_event.set()  # ends AFM's keep-alive loop
+        except Exception:
+            pass
+        try:
+            rec.script.exports_sync.set_flags(self._flag_dict(set()))
+            rec.flags_off = True
+        except Exception as exc:
+            logger.debug("[Bypass] set_flags(off) in %s: %s", rec.package, exc)
+        try:
+            rec.script.unload()
+        except Exception as exc:  # already gone / connection closed
+            logger.debug("[Bypass] script.unload in %s: %s", rec.package, exc)
+        if rec.session is not None:
             try:
-                fn()
+                rec.session.detach()
             except Exception as exc:
-                logger.debug("[Bypass] bounded call failed: %s", exc)
+                logger.debug("[Bypass] session.detach in %s: %s", rec.package, exc)
+        try:
+            set_state = getattr(rec.job, "_set_state", None)
+            if callable(set_state):
+                set_state("stopped")
+            else:
+                rec.job.state = "stopped"
+        except Exception:
+            pass
+        with self._lock:
+            rec.torn_down = True
+            late = rec.unload == "failed" and self._parked.get(rec.package) is rec
+        if late:
+            # Shift+U gave up waiting: drop the entry now and say so.
+            self._drop_parked_rec(rec)
+            logger.info("[Bypass] The bypass hooks in %s are unloaded", rec.package)
+            self._notify_state()
 
-        t = threading.Thread(target=run, name="bypass-bounded", daemon=True)
-        t.start()
-        t.join(timeout)
+    def _drop_parked_rec(self, rec: _ParkedHooks) -> None:
+        """Forget ``rec`` if it is still the parked script of its app."""
+        with self._lock:
+            mine = self._parked.get(rec.package) is rec
+        if mine:
+            self._drop_parked(rec.package)
 
     def _register_parked_task(self, rec: _ParkedHooks) -> None:
         try:
@@ -3986,7 +4109,7 @@ class BypassService:
         with self._lock:
             if self._app_package == package:
                 self._armed |= self._active
-            elif package in self._parked:
+            elif package in self._parked and not self._parked[package].unload:
                 self._armed |= self._parked[package].categories
 
     def carried_categories(self, package: str) -> set[str]:
@@ -3994,8 +4117,9 @@ class BypassService:
         with self._lock:
             if self._app_package == package:
                 return self._armed | self._active
-            if package in self._parked:
-                return self._armed | self._parked[package].categories
+            rec = self._parked.get(package)
+            if rec is not None and not rec.unload:
+                return self._armed | rec.categories
             return set(self._armed)
 
     @_notifies
