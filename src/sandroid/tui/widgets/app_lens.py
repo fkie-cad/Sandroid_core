@@ -1414,6 +1414,24 @@ def tracker_status(static: Any) -> tuple[bool, bool]:
     return True, previous
 
 
+def _tracker_vendor(trk: dict) -> str:
+    """The vendor column: Insight's vendor, else its website's host.
+
+    Never ``network_signature``: that is the detection regex (N6-B4); it
+    stays in the row's evidence.
+    """
+    vendor = str(trk.get("vendor") or "").strip()
+    if vendor:
+        return vendor
+    site = str(trk.get("website") or "").strip()
+    if not site:
+        return "—"
+    from urllib.parse import urlsplit
+
+    host = urlsplit(site if "//" in site else f"//{site}").hostname or site
+    return host.removeprefix("www.")
+
+
 def build_trackers(f: AppFacts) -> SectionData:
     cols = ("SDK", "category", "version", "vendor")
     insight = getattr(f.static, "insight", None) if f.static is not None else None
@@ -1443,9 +1461,6 @@ def build_trackers(f: AppFacts) -> SectionData:
         sorted(trackers, key=lambda x: (str(x.get("category")), str(x.get("name"))))
     ):
         name = str(trk.get("name") or "?")
-        domains = trk.get("network_domains") or trk.get("network_signature") or ""
-        if isinstance(domains, list):
-            domains = ", ".join(str(d) for d in domains)
         rows.append(
             Row(
                 key=f"trk:{i}:{name}",
@@ -1453,7 +1468,7 @@ def build_trackers(f: AppFacts) -> SectionData:
                     _t(_cut(name, 30), _c().warn),
                     _t(_cut(str(trk.get("category") or "tracker"), 18), _c().dim),
                     _t(_cut(str(trk.get("version") or "—"), 12), _c().dim),
-                    _t(_cut(str(domains or trk.get("website") or "—"), 20), _c().dim),
+                    _t(_cut(_tracker_vendor(trk), 20), _c().dim),
                 ),
                 title=name,
                 subtitle="tracker (Insight)",

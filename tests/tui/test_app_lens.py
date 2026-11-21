@@ -447,7 +447,8 @@ def test_trackers_render_insight_tracker_rows() -> None:
                         "name": "Google AdMob",
                         "category": "Advertisement",
                         "version": "22.1",
-                        "network_signature": "googleads.g.doubleclick.net",
+                        "network_signature": r"googleads\.g\.doubleclick\.net",
+                        "website": "https://admob.google.com/home/",
                         "locations": ["/Users/someone/tmp/x"],
                     }
                 ]
@@ -460,9 +461,22 @@ def test_trackers_render_insight_tracker_rows() -> None:
     section = build_trackers(f)
     texts = [r.text for r in section.rows]
     assert "Google AdMob" in texts[0]
-    assert "googleads.g" in texts[0]
+    # N6-B4: the vendor column is the website's host, not the detection regex.
+    assert "admob.google.com" in texts[0]
+    assert "googleads" not in texts[0]
     assert any("Firebase Analytics" in t for t in texts)
     assert section.summary.startswith("1 tracker, 3 SDKs")
+
+
+def test_tracker_vendor_prefers_the_vendor_then_the_website_host() -> None:
+    from sandroid.tui.widgets.app_lens import _tracker_vendor
+
+    assert _tracker_vendor({"vendor": "Google", "website": "x.io"}) == "Google"
+    assert _tracker_vendor({"website": "https://www.facebook.com/x"}) == (
+        "facebook.com"
+    )
+    assert _tracker_vendor({"website": "appsflyer.com"}) == "appsflyer.com"
+    assert _tracker_vendor({"network_signature": r"a\.b"}) == "—"
 
 
 def test_revoked_grant_and_de_storage_are_shown() -> None:
