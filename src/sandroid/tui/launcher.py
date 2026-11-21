@@ -163,9 +163,18 @@ def _shutdown_services(
     _cleanup_with_timeout(
         lambda: _stop_network_capture(get_network_capture_service), timeout=3.0
     )
+    # SELinux back to the mode found (a no-op after a clean quit restored
+    # it): a crash must not leave the device Permissive.
+    _cleanup_with_timeout(_restore_selinux, timeout=5.0)
     # The session timeline last (idempotent: a no-op after the quit closed it).
     _cleanup_with_timeout(lambda: _close_timeline(close_reason), timeout=2.0)
     _reset_tui_mode()
+
+
+def _restore_selinux() -> None:
+    from sandroid.services.setup_checks import restore_selinux_on_quit
+
+    restore_selinux_on_quit()
 
 
 def _close_timeline(reason: str = "exit") -> None:

@@ -1187,6 +1187,7 @@ class EmulatorService:
                     "permissive",
                     "snapshot load had restored Enforcing",
                     serial,
+                    adb=adb,
                 )
                 return True
         self._logger.warning(

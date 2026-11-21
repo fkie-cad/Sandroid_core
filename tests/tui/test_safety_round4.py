@@ -260,6 +260,70 @@ def test_selinux_restore_skips_a_device_that_is_gone(selinux, caplog) -> None:
     assert not any("setenforce 1" in c for c in adb.calls)
 
 
+class _MarkerAdb(_SelinuxAdb):
+    """Also keeps the on-device marker file and a boot id."""
+
+    def __init__(self, mode: str, boot: str = "boot-1"):
+        super().__init__(mode)
+        self.boot = boot
+        self.marker: str | None = None
+
+    def send_adb_command(self, command: str, serial=None, timeout=30):
+        from sandroid.services.setup_checks import SELINUX_MARKER
+
+        if SELINUX_MARKER in command and "mkdir" in command:
+            self.calls.append(command)
+            self.marker = f"Enforcing {self.boot}"
+            return "", ""
+        if command.startswith("shell 'cat " + SELINUX_MARKER):
+            self.calls.append(command)
+            return f"{self.marker or ''}\n{self.boot}\n", ""
+        if command == f"shell rm -f {SELINUX_MARKER}":
+            self.calls.append(command)
+            self.marker = None
+            return "", ""
+        return super().send_adb_command(command, serial, timeout)
+
+
+def test_selinux_after_a_crash_is_restored_by_the_next_session(selinux) -> None:
+    """N4: a crash left Permissive; the next session took Permissive as the
+    original state. The on-device marker (same boot) says Enforcing.
+    """
+    adb = _MarkerAdb("Enforcing")
+    assert selinux.check_and_set_selinux(adb).passed
+    assert adb.marker == "Enforcing boot-1"
+    # Crash: no restore. A new session starts with fresh state.
+    selinux._selinux_found.clear()
+    selinux._selinux_changed.clear()
+    assert selinux.check_and_set_selinux(adb).passed
+    assert adb.mode == "Permissive"
+    assert selinux.restore_selinux_on_quit(adb) == [SERIAL]
+    assert adb.mode == "Enforcing"
+    assert adb.marker is None  # removed by the restore
+
+
+def test_selinux_marker_from_another_boot_is_ignored(selinux) -> None:
+    adb = _MarkerAdb("Permissive", boot="boot-2")
+    adb.marker = "Enforcing boot-1"
+    assert selinux.check_and_set_selinux(adb).passed
+    assert selinux.restore_selinux_on_quit(adb) == []
+    assert adb.mode == "Permissive"
+
+
+def test_post_tui_cleanup_restores_selinux(monkeypatch) -> None:
+    """A crash skips the quit dialog's restore; run_tui's finally does it."""
+    from sandroid.services import setup_checks
+    from sandroid.tui import launcher
+
+    called: list[int] = []
+    monkeypatch.setattr(
+        setup_checks, "restore_selinux_on_quit", lambda: called.append(1) or []
+    )
+    services = SimpleNamespace(stop_all=lambda: None, is_capturing=lambda: False)
+    launcher._shutdown_services(lambda: services, lambda: services, "crash")
+    assert called == [1]
+
+
 def test_quit_cleanup_restores_selinux_before_timeline_close(monkeypatch) -> None:
     from sandroid.services import setup_checks
     from sandroid.tui.controllers import quit_controller as qc

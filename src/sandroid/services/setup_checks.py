@@ -286,6 +286,53 @@ SELINUX_PERMISSIVE_REASON = (
 _selinux_found: dict[str, str] = {}
 _selinux_changed: set[str] = set()
 
+#: On-device note of the mode Sandroid found before setting Permissive, with
+#: the boot id: ``Enforcing <boot id>``. A session that ends without the
+#: quit restore (a crash) leaves it behind, so the next session, finding
+#: Permissive in the same boot, still knows to restore Enforcing. Removed
+#: by the restore. On the device (not the host) so a snapshot load brings
+#: back the note that belongs to the loaded state.
+SELINUX_MARKER = "/data/local/tmp/sandroid/selinux_orig"
+_BOOT_ID = "/proc/sys/kernel/random/boot_id"
+
+
+def _write_selinux_marker(adb: Any, serial: str | None, found: str) -> None:
+    folder = SELINUX_MARKER.rsplit("/", 1)[0]
+    command = (
+        f"shell 'mkdir -p {folder} && "
+        f"echo {found} $(cat {_BOOT_ID}) > {SELINUX_MARKER}'"
+    )
+    try:
+        adb.send_adb_command(command, serial=serial, timeout=5)
+    except Exception as exc:
+        logger.debug(f"SELinux marker not written: {exc}")
+
+
+def _marker_mode(adb: Any, serial: str | None) -> str:
+    """The mode in the device's marker when it is from this boot, else ""."""
+    try:
+        stdout, _ = adb.send_adb_command(
+            f"shell 'cat {SELINUX_MARKER} 2>/dev/null; echo; cat {_BOOT_ID}'",
+            serial=serial,
+            timeout=5,
+        )
+    except Exception:
+        return ""
+    lines = [ln.strip() for ln in str(stdout or "").splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return ""
+    parts, boot = lines[0].split(), lines[-1]
+    if len(parts) == 2 and parts[0] == "Enforcing" and parts[1] == boot:
+        return "Enforcing"
+    return ""
+
+
+def _remove_selinux_marker(adb: Any, serial: str | None) -> None:
+    try:
+        adb.send_adb_command(f"shell rm -f {SELINUX_MARKER}", serial=serial, timeout=5)
+    except Exception:
+        pass
+
 
 def _selinux_key(serial: str | None) -> str:
     if serial:
@@ -304,6 +351,7 @@ def log_selinux_change(
     when: str,
     serial: str | None = None,
     reason: str | None = None,
+    adb: Any = None,
 ) -> None:
     """Log, at INFO, an SELinux mode change Sandroid made, with the reason.
 
@@ -311,15 +359,38 @@ def log_selinux_change(
     when it was not read; ``when`` names the occasion (e.g. "startup").
     ``reason`` defaults to why Sandroid sets Permissive; such a change (and
     the mode found before it) is remembered for ``restore_selinux_on_quit``.
+    With ``adb``, the mode found is also noted on the device
+    (:data:`SELINUX_MARKER`), and a Permissive found first is checked
+    against that note: Permissive left behind by a crashed session in the
+    same boot is restored to Enforcing too.
     """
     old = (before or "").strip().capitalize()
     new = (after or "").strip().capitalize()
     if reason is None:
         key = _selinux_key(serial)
+        if (
+            old == "Permissive"
+            and key not in _selinux_found
+            and adb is not None
+            and _marker_mode(adb, serial or None) == "Enforcing"
+        ):
+            logger.info(
+                "SELinux is Permissive%s, left by an earlier Sandroid session "
+                "in this boot: Enforcing is restored on quit",
+                f" on {serial}" if serial else "",
+            )
+            _selinux_found[key] = "Enforcing"
+            _selinux_changed.add(key)
         if old in ("Enforcing", "Permissive"):
             _selinux_found.setdefault(key, old)
         if new and old != new:
             _selinux_changed.add(key)
+            if (
+                adb is not None
+                and new == "Permissive"
+                and _selinux_found.get(key) == "Enforcing"
+            ):
+                _write_selinux_marker(adb, serial or None, "Enforcing")
     if not new or old == new:
         return
     device = f" on {serial}" if serial else ""
@@ -366,6 +437,7 @@ def restore_selinux_on_quit(adb: Any = None) -> list[str]:
             logger.debug(f"SELinux restore skipped: device {key or '(default)'} gone")
             continue
         if current == found:
+            _remove_selinux_marker(adb, serial)
             continue
         value = "1" if found == "Enforcing" else "0"
         for command in (f"shell setenforce {value}", f"shell su 0 setenforce {value}"):
@@ -379,6 +451,7 @@ def restore_selinux_on_quit(adb: Any = None) -> list[str]:
                 log_selinux_change(
                     current, after, "quit", serial, reason="restore on quit"
                 )
+                _remove_selinux_marker(adb, serial)
                 restored.append(key)
                 break
         else:
@@ -416,7 +489,7 @@ def check_and_set_selinux(adb: Any, *, notify_clock: bool = True) -> SetupCheckR
         stdout, _ = adb.send_adb_command("shell getenforce")
         mode = (stdout or "").strip()
         check.details["mode"] = mode
-        log_selinux_change(before, mode, "device preparation")
+        log_selinux_change(before, mode, "device preparation", adb=adb)
         if "permissive" in mode.lower():
             check.status = SetupCheckStatus.PASSED
             check.message = "SELinux set to permissive mode"
