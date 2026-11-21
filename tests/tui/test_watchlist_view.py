@@ -769,3 +769,36 @@ def test_pull_and_check_lines_name_the_pulled_device(monkeypatch) -> None:
         ("pull", "emulator-5556"),
         ("check", "emulator-5556"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_u_with_no_change_toasts_and_a_failed_pull_leaves_no_folder(
+    monkeypatch,
+) -> None:
+    """N1-B9: a manual pull of one file that found no change said nothing
+    (only the Inspector knew); a failed pull of a missing file left an
+    empty ``.current/`` behind.
+    """
+    monkeypatch.setattr(
+        FileExtractionService, "pull_file", _fake_pull_file({PATH_A: "same\n"})
+    )
+    missing = "/data/data/com.app/gone.xml"
+    get_forensic_service().add_spotlight_file(PATH_A)
+    get_forensic_service().add_spotlight_file(missing)
+
+    app = _WatchlistHarness()
+    async with app.run_test() as pilot:
+        view = app.query_one(WatchlistView)
+        await pilot.pause()
+        notes: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda msg, **kw: notes.append(msg))
+        view.pull([PATH_A])
+        await until(pilot, lambda: view._rows[PATH_A].state != RowState.NEVER_PULLED)
+        (first,) = watchlist_store.version_dirs(PATH_A)
+        view.pull([PATH_A])  # the pulled copy is identical: nothing kept
+        await until(pilot, lambda: any("no change" in n for n in notes))
+        assert f"config_a: no change since {first.name.split('_')[0]}" in notes
+        view.pull([missing])
+        await until(pilot, lambda: view._rows[missing].state == RowState.ERROR)
+        # (row_dir() itself creates the folder: nothing may be inside.)
+        assert list(watchlist_store.row_dir(missing).iterdir()) == []
