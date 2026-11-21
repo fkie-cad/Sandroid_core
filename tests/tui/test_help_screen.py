@@ -335,3 +335,48 @@ def test_section_notes_are_plain_words_without_markup() -> None:
         assert "]" not in note, heading
         assert not set("←→↑↓⏎⇧⚑✓✗◇▸○") & set(note), heading
     assert "TLS failed" in hs._SECTION_NOTES["Network lens"]
+
+
+async def test_help_has_no_duplicates_and_lists_the_dialogs() -> None:
+    """N6-V11: one help row, one Ctrl+C/Ctrl+Q quit row, one save-slot row,
+    no nested brackets, the picker / Settings / restart-now keys, words.
+    """
+    from rich.text import Text
+    from textual.widgets import OptionList
+
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(200, 50)) as pilot:
+        await boot(app, pilot)
+        await pilot.press("question_mark")
+        await settle(pilot)
+        options = app.screen.query_one("#kb-list", OptionList)
+        rows = [
+            Text.from_markup(str(options.get_option_at_index(i).prompt)).plain
+            for i in range(options.option_count)
+        ]
+    text = "\n".join(rows)
+    sections = _sections(rows)
+    assert "This help" not in text
+    assert sum(r.rstrip().endswith("[?]") for r in rows) == 1
+    quits = [r for r in sections["General"] if r.startswith("Quit")]
+    assert len(quits) == 1
+    assert quits[0].endswith("[Ctrl+C / Ctrl+Q]")
+    slots = [r for r in sections["Snapshots"] if r.startswith("Save to slot")]
+    assert len(slots) == 1
+    assert slots[0].startswith("Save to slot 1-8")
+    assert slots[0].endswith("[Ctrl+1-8]")
+    assert "[[" not in text
+    assert "[] /" not in text
+    assert "[space]" not in text
+    assert any(r.endswith("[Space]") for r in sections["Identity lens"])
+    picker = sections["App picker (Shift+C)"]
+    assert any(r.endswith("[Ctrl+S]") for r in picker)
+    assert any(r.endswith("[Ctrl+R]") for r in picker)
+    settings = sections["Settings (,)"]
+    assert any(r.endswith("[Ctrl+S]") for r in settings)
+    assert any(r.endswith("[Shift+Right]") for r in settings)
+    assert any(r.endswith("[y]") for r in sections["App lens › Restart now? dialog"])
+    frida = next(r for r in sections["Emulator"] if r.rstrip().endswith("[f]"))
+    assert "install" not in frida.split("  ")[0].lower()

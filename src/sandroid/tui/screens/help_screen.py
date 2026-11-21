@@ -140,11 +140,23 @@ _PANEL_SECTIONS: list[tuple[str, str, str]] = [
         "sandroid.tui.modals.device_settings_modal",
         "DeviceSettingsModal",
     ),
+    (
+        "App picker (Shift+C)",
+        "sandroid.tui.modals.app_selection_modal",
+        "AppSelectionModal",
+    ),
+    ("Settings (,)", "sandroid.tui.screens.settings_screen", "SettingsScreen"),
 ]
+#: Dialog sections (the detail pane says "works in this dialog").
+_DIALOG_SECTIONS = (
+    "App picker (Shift+C)",
+    "Settings (,)",
+    "App lens › Restart now? dialog",
+)
 
 #: Lens id -> the ``_PANEL_SECTIONS`` headings that belong to that lens.
 _LENS_SECTIONS: dict[str, tuple[str, ...]] = {
-    "app": ("App lens", "App lens › b bypass"),
+    "app": ("App lens", "App lens › b bypass", "App lens › Restart now? dialog"),
     "network": ("Network lens",),
     "files": ("Files lens",),
     "runs": ("Sessions lens",),
@@ -199,6 +211,12 @@ _LENS_EXTRA_ROWS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
     ],
     "Devices screen (D)": [
         ("Enter", "Attach a running device / start a stopped AVD", ("enter",)),
+    ],
+    "Settings (,)": [
+        ("Tab / Shift+Tab", "Next / previous field", ()),
+    ],
+    "App picker (Shift+C)": [
+        ("type", "Filter the list by package name", ()),
     ],
     "Network method (W)": [
         ("Up / Down", "Choose a method", ("up", "down")),
@@ -258,6 +276,13 @@ _ROW_TEXT: dict[tuple[str, str], str] = {
     ("Device settings (Shift+E)", "escape"): (
         "Close (a GPS route keeps running in the background)"
     ),
+    ("App picker (Shift+C)", "enter"): "Pick the highlighted app",
+    ("App picker (Shift+C)", "ctrl+s"): "System apps shown / hidden",
+    ("App picker (Shift+C)", "ctrl+r"): "Reload the app list",
+    ("Settings (,)", "escape"): "Close without saving (theme preview undone)",
+    ("Settings (,)", "ctrl+s"): "Save (a field shown red must be fixed first)",
+    ("Settings (,)", "shift+left"): "Previous tab (not in a text field)",
+    ("Settings (,)", "shift+right"): "Next tab (not in a text field)",
     ("Proxy settings (y)", "shift+left"): "Previous tab (in an empty text field)",
     ("Proxy settings (y)", "shift+right"): "Next tab (in an empty text field)",
 }
@@ -288,6 +313,12 @@ _HAND_SECTIONS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
         ("j / Ctrl+K", "Log a line down / up (also Ctrl+J)", ("j", "ctrl+j", "ctrl+k")),
         ("Ctrl+D / U", "Log half a page down / up", ("ctrl+d", "ctrl+u")),
         ("Shift+Y", "Copy the whole log", ("Y",)),
+    ],
+    "App lens › Restart now? dialog": [
+        ("y", "Restart (ignored for a moment after it opens)", ("y",)),
+        ("n / Enter", "Keep running (No has the focus)", ("n", "enter")),
+        ("Esc", "Keep running", ("escape",)),
+        ("other letters", "Close as No: that looked like typing", ()),
     ],
     "Review (p)": [
         ("Space", "Select a file or request to compare", ("space",)),
@@ -336,8 +367,9 @@ _INSPECTOR_PREFIX = "Inspector: "
 
 #: App-wide keys that no MenuController action describes (they are plain App
 #: bindings without a rebindable id). Listed first, under "General".
+#: ``?`` is the Navigation action "Show help overlay", ``q`` "Quit Sandroid":
+#: not repeated here. Rows with the same text are shown as one row.
 _GENERAL_KEYS: list[tuple[str, str]] = [
-    ("question_mark", "This help"),
     ("escape", "Chat to lens, then close Inspector / log drawer / chat, dialogs"),
     ("ctrl+b", "Focus the lens (back from the chat or Inspector)"),
     ("comma", "Settings"),
@@ -390,7 +422,11 @@ def _panel_binding_rows(
     for entry in cls.__dict__.get("BINDINGS", []):
         if isinstance(entry, Binding):
             key, desc = entry.key, entry.description
-            shown = entry.key_display or _format_key_display(key)
+            shown = (
+                _named_key_word(entry.key_display)
+                if entry.key_display
+                else _format_key_display(key)
+            )
         else:
             key, desc = entry[0], (entry[2] if len(entry) > 2 else "")
             shown = _format_key_display(key)
@@ -413,6 +449,16 @@ def _panel_binding_rows(
     return rows
 
 
+def _named_key_word(shown: str) -> str:
+    """A hand-written key label as words, named keys capitalised
+    (``space`` -> ``Space``, ``esc`` -> ``Esc``).
+    """
+    shown = key_words(shown)
+    if shown.lower() in ("space", "enter", "esc", "tab", "backspace"):
+        return shown.title()
+    return shown
+
+
 def _slash_rows() -> list[tuple[str, str, tuple[str, ...]]]:
     """The chat's slash commands, from its own ``SLASH_HELP`` (best effort)."""
     try:
@@ -420,6 +466,21 @@ def _slash_rows() -> list[tuple[str, str, tuple[str, ...]]]:
     except Exception:
         return []
     return [(name, _cap(text), ()) for name, text in SLASH_HELP.items()]
+
+
+def _key_markup(key: str) -> str:
+    """``[key]`` as markup; a key that is itself a bracket is shown bare."""
+    if "[" in key or "]" in key:
+        return key.replace("[", "\\[")
+    return f"\\[{key}]"
+
+
+def _slot_keys(keys: list[str | None]) -> str:
+    """``Ctrl+1-8`` for the save-slot keys (each as shown when rebound)."""
+    shown = [_format_key_display(k) for k in keys]
+    if all(s == f"Ctrl+{i}" for i, s in enumerate(shown, 1)):
+        return f"Ctrl+1-{len(shown)}"
+    return " / ".join(shown)
 
 
 def _cap(text: str) -> str:
@@ -729,14 +790,19 @@ class HelpScreen(ModalScreen):
             name = name[: name_w - 1] + "…"
         if len(desc) > desc_w:
             desc = (desc[: desc_w - 1] + "…") if desc_w else ""
-        bracket = f"[{key_display}]"  # plain, for width
+        # A key that is itself a bracket ("[ / Left") is not wrapped in
+        # brackets again ("[[ / Left]"): it is shown bare.
+        bare = "[" in key_display or "]" in key_display
+        escaped = key_display.replace("[", "\\[")
+        wrapped = escaped if bare else f"\\[{key_display}]"
+        bracket = key_display if bare else f"[{key_display}]"  # plain, for width
         pad = max(1, key_w - len(bracket))
         name_field = name.ljust(name_w)
         desc_field = f"  {desc.ljust(desc_w)}" if desc_w else ""
         if colored:
-            key_field = (" " * pad) + f"[bold #ff79c6]\\[{key_display}][/]"
+            key_field = (" " * pad) + f"[bold #ff79c6]{wrapped}[/]"
         else:
-            key_field = (" " * pad) + f"\\[{key_display}]"
+            key_field = (" " * pad) + wrapped
         return f"{name_field}{desc_field}{key_field}"
 
     def _rebuild_list(self) -> None:
@@ -888,19 +954,41 @@ class HelpScreen(ModalScreen):
         panel_section("Inspector (while open)")
 
         heading_row("General")
+        general: dict[str, list[str]] = {}
         for key, desc in _GENERAL_KEYS:
-            label = self._columns(desc, "", _format_key_display(key), colored=False)
+            general.setdefault(desc, []).append(_format_key_display(key))
+        for desc, keys in general.items():
+            shown = " / ".join(keys)  # Ctrl+C / Ctrl+Q: one Quit row
+            label = self._columns(desc, "", shown, colored=False)
             add(
                 Option(
                     f"[#8b949e]{label}[/]",
-                    id=f"{_PANEL_PREFIX}General|{_format_key_display(key)}",
+                    id=f"{_PANEL_PREFIX}General|{shown}",
                 )
             )
         for heading in _GLOBAL_PANEL_SECTIONS:
             panel_section(heading)
         for category, block in categories:
             heading_row(category.name.title())
+            slots = [(a, k) for a, k in block if a.name.startswith("save_slot_")]
             for action, key in block:
+                if action.name.startswith("save_slot_"):
+                    if action is slots[0][0]:
+                        # Eight identical rows -> one "Save to slot 1-8".
+                        shown = _slot_keys([k for _a, k in slots])
+                        label = self._columns(
+                            f"Save to slot 1-{len(slots)}",
+                            "save current state",
+                            shown,
+                            colored=False,
+                        )
+                        add(
+                            Option(
+                                f"[#8b949e]{label}[/]",
+                                id=f"{_PANEL_PREFIX}Snapshots|{shown}",
+                            )
+                        )
+                    continue
                 rebindable = action.name in self._defaults
                 key_display = _format_key_display(key)
                 desc = self._row_description(action)
@@ -995,6 +1083,14 @@ class HelpScreen(ModalScreen):
                 where = "Works on the log drawer (` opens it)."
             elif heading.startswith("Devices screen"):
                 where = "Works on the Devices screen (Shift+D opens it)."
+            elif heading in _DIALOG_SECTIONS:
+                where = "Works in this dialog while it is open."
+            elif heading == "Snapshots":
+                where = (
+                    "Saves the current state to that slot (works everywhere "
+                    "on the main screen). Rebind a single slot key in "
+                    "tui.keybindings (save_slot_N)."
+                )
             else:
                 where = (
                     "Works only while this lens / view has focus "
@@ -1011,7 +1107,7 @@ class HelpScreen(ModalScreen):
             return (
                 f"[bold #58a6ff]{heading}[/]  [dim]·  panel key[/]\n\n"
                 f"[#c9d1d9]{where}[/]\n\n"
-                f"[dim]Key[/]  [#8b949e]\\[{key}][/]"
+                f"[dim]Key[/]  [#8b949e]{_key_markup(key)}[/]"
                 "   [dim](fixed — cannot be rebound)[/]"
             )
         action = self._controller.get_action_by_name(action_id)
