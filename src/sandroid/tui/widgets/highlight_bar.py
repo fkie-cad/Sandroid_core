@@ -21,8 +21,9 @@ source). A lens shows them with
   analyst's explicit pick beats a heuristic).
 
 ``calm`` (the Files lens): the bar keeps only actionable words
-(``filtering``, ``partial``, ``N changed since``, ``N hidden by lens
-filters``; no ``N new since`` on the live lens), the key hint shows only
+(``filtering``, ``scanning`` while a run still fills the set,
+``partial``, ``N changed since``, ``N hidden by lens filters``; no ``N new
+since`` on the live lens), the key hint shows only
 while filtering or for a few seconds after a set first appears, and the
 Highlight column shows only with 2+ sets, never repeating the file name.
 
@@ -446,7 +447,7 @@ class HighlightView:
             if hs.id == fid:
                 words.append("filtering")
             state = set_state(hs)
-            if state == "partial" or (state == "scanning" and not self.calm):
+            if state != "complete":
                 words.append(state)  # "scanning" while running, else "partial"
             if c.new and not self.calm:
                 words.append(f"{c.new} new since")

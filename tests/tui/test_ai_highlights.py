@@ -1366,6 +1366,7 @@ def test_files_calm_bar_keeps_actionable_words_and_a_brief_hint(store):
     plain = view.bar_text(1000).plain
     assert "new since" not in plain
     assert "1 changed since" in plain
+    assert "scanning" not in plain
     assert "H filter · X clear" in plain  # a new set: for a few seconds
     view._first_seen = {k: v - 60 for k, v in view._first_seen.items()}
     assert view.hint_remaining() is None
@@ -1380,6 +1381,11 @@ def test_files_calm_bar_keeps_actionable_words_and_a_brief_hint(store):
     assert view.show_column(200)
     assert view.cell("/a/consent.xml", name="consent.xml").plain == ""
     assert view.cell("/a/consent.xml", name="other.xml").plain == "consent"
+    # A run still filling a set: "scanning" stays (progress), then "partial".
+    store.create("files", "running", reasons={"/a/k2": "r"}, scanning=True)
+    assert "scanning" in view.bar_text(1000).plain
+    store.create("files", "stopped", reasons={"/a/k3": "r"}, complete=False)
+    assert "partial" in view.bar_text(1000).plain
     # The Network bar keeps its words (not calm).
     net = store.create("network", "n", reasons={"k0": "r"}, basis={"judged_at": 1.0})
     nview = HighlightView("network")

@@ -13,8 +13,10 @@ live in the old Monitor sub-tab's ``MonitorView`` except the drawing:
 * **collapse per path** -- one :class:`PathActivity` per file (keyed by the
   full on-device path when the monitor provides it) with the ops seen, the
   event count, first/last time, the processes and a short event history.
-  SQLite ``-wal``/``-journal`` writes fold onto their database (that is what
-  the watchlist pulls, companions included). Keys are canonical
+  SQLite ``-wal``/``-journal``/``-shm`` events fold onto their database
+  (that is what the watchlist pulls, companions included; a ``-shm`` write
+  is no content change of the database, so it never counts as a write for
+  auto-pull: SQLite touches it on every read). Keys are canonical
   (``adb_utils.canonical_device_path``): ``/data/user/0/<pkg>`` and
   ``/data/data/<pkg>`` are one row, ``databases/`` is ``databases``. A
   rename marks its source row "→ new name"; a deleted directory marks its
@@ -550,11 +552,16 @@ class PathActivity:
         self.events.append(event)
 
 
-_COMPANIONS = ("-wal", "-journal")
+_COMPANIONS = ("-wal", "-journal", "-shm")
+#: Companions whose writes say nothing about the database's content
+#: (``-shm`` is the WAL index, rewritten on reads too): no auto-pull.
+_INDEX_COMPANIONS = ("-shm",)
 
 
 def split_companion(path: str) -> tuple[str, str]:
-    """``app.db-wal`` -> ``("app.db", "-wal")``; other paths pass through."""
+    """``app.db-wal`` -> ``("app.db", "-wal")`` (also ``-journal``,
+    ``-shm``); other paths pass through.
+    """
     for suffix in _COMPANIONS:
         if path.endswith(suffix) and len(path) > len(suffix):
             return path[: -len(suffix)], suffix
@@ -707,7 +714,11 @@ class FileActivity:
             )
             row.add(event, segment)
             touched.add(key)
-            if category in self.WRITE_CATEGORIES and event.label != "CREATE DIR":
+            if (
+                category in self.WRITE_CATEGORIES
+                and event.label != "CREATE DIR"
+                and via not in _INDEX_COMPANIONS
+            ):
                 self.writes.append((key, now, category))
             if other and category == "rename":
                 touched |= self._mark_moved(

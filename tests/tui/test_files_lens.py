@@ -200,6 +200,26 @@ def test_rename_lands_on_destination_and_wal_folds_onto_database() -> None:
     assert [e.via for e in model.paths[DB].events] == ["-wal", "-journal"]
 
 
+def test_shm_folds_onto_its_database_but_is_no_write() -> None:
+    """``-shm`` (the WAL index) is the database's row too; SQLite rewrites
+    it on reads, so it never triggers an auto-pull write.
+    """
+    model = FileActivity()
+    model.ingest(
+        _items(
+            _fse("FSE_CONTENT_MODIFIED", DB + "-shm"),
+            _fse("FSE_CREATE_FILE", DB + "-shm"),
+        ),
+        now=T0,
+    )
+    assert set(model.paths) == {DB}
+    assert [e.via for e in model.paths[DB].events] == ["-shm", "-shm"]
+    assert model.writes == []
+    assert not model.paths[DB].deleted
+    model.ingest(_items(_fse("FSE_CONTENT_MODIFIED", DB + "-wal")), now=T0)
+    assert model.writes == [(DB, T0, "modify")]  # a -wal write still counts
+
+
 def test_tally_counts_every_item_even_hidden_and_never() -> None:
     model = FileActivity({"noise": "verbose", "attrs": "never"})
     model.ingest(
