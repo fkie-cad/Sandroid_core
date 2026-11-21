@@ -891,6 +891,58 @@ def test_exit_helper_hard_exits_only_with_lingering_threads(monkeypatch):
         t.join()
 
 
+def test_exit_skips_the_scans_the_quit_already_ran(monkeypatch, caplog):
+    """N5-B4 rest: the exit after the TUI repeated the quit's untracked-work
+    check and scanned the process tree once more for capture helpers (each
+    2.7-3.7 s on a busy host). After the quit's check they are skipped;
+    without it (a quit that timed out, a failed start) they still run.
+    """
+    import logging
+
+    from sandroid.cli_modes import interactive
+    from sandroid.core import background_tracker as bt
+    from sandroid.tui.controllers import quit_controller as qc
+
+    scans = []
+    report = SimpleNamespace(has_untracked_work=False)
+    tracker = SimpleNamespace(
+        detect_untracked_work=lambda: scans.append("detect") or report
+    )
+    monkeypatch.setattr(bt, "get_background_tracker", lambda: tracker)
+    monkeypatch.setattr(
+        interactive, "_stop_capture_children", lambda: scans.append("capture")
+    )
+    monkeypatch.setattr("os._exit", lambda code: None)
+    monkeypatch.setattr(qc, "_untracked_checked", threading.Event())
+
+    interactive._check_untracked_work_after_tui()
+    interactive._exit_without_lingering_threads(grace=0.1)
+    assert scans == ["detect", "capture"]  # no quit check ran: both run
+
+    # The quit's own check marks it done (here with nothing to stop).
+    for name in ("get_network_capture_service", "get_objection_service"):
+        monkeypatch.setattr(
+            f"sandroid.services.{name}",
+            lambda: SimpleNamespace(
+                is_capturing=lambda: False, has_session=lambda: False
+            ),
+        )
+    scans.clear()
+    qc.QuitController._cleanup_rest()
+    assert scans == ["detect"]
+    assert qc.untracked_check_done()
+    interactive._check_untracked_work_after_tui()
+    interactive._exit_without_lingering_threads(grace=0.1)
+    assert scans == ["detect"]
+
+    # A slow part of the check is named in the log.
+    monkeypatch.setattr(bt, "_SLOW_PART_S", 0.0)
+    with caplog.at_level(logging.INFO, logger=bt.logger.name):
+        bt.BackgroundWorkTracker().detect_untracked_work()
+    parts = [r.message for r in caplog.records if "Untracked-work check:" in r.message]
+    assert any("processes took" in m for m in parts)
+
+
 # ---------------------------------------------------------------------------
 # Headless output, exit codes, capture-window prompts, --import-action
 # ---------------------------------------------------------------------------

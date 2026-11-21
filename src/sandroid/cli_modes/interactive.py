@@ -73,6 +73,39 @@ def _stop_capture_children() -> None:
         pass
 
 
+def _quit_checked_untracked_work() -> bool:
+    """The TUI's quit already ran the untracked-work check (and cleanup)."""
+    try:
+        from sandroid.tui.controllers.quit_controller import untracked_check_done
+
+        return untracked_check_done()
+    except Exception:
+        return False
+
+
+def _check_untracked_work_after_tui() -> None:
+    """The exit's untracked-work check, unless the quit ran the same one."""
+    if _quit_checked_untracked_work():
+        logger.debug("Untracked-work check already done by the quit; skipped")
+        return
+    try:
+        from sandroid.core.background_tracker import get_background_tracker
+
+        tracker = get_background_tracker()
+        report = tracker.detect_untracked_work()
+
+        if report.has_untracked_work:
+            logger.warning("Detected untracked background work on exit")
+            logger.warning(report.format_report())
+
+            # Force cleanup
+            cleaned = tracker.force_cleanup(report)
+            for item in cleaned:
+                logger.info(f"Cleanup: {item}")
+    except Exception as e:
+        logger.debug(f"Error in background work detection: {e}")
+
+
 def _exit_without_lingering_threads(grace: float = 3.0, exit_code: int = 0) -> None:
     """Make sure the process actually exits after the TUI is closed.
 
@@ -85,13 +118,23 @@ def _exit_without_lingering_threads(grace: float = 3.0, exit_code: int = 0) -> N
     import threading
     import time
 
-    _stop_capture_children()
+    if not _quit_checked_untracked_work():
+        # The quit's untracked-work check force-stopped capture helpers
+        # already; this scan costs as much again (N5-B4).
+        _stop_capture_children()
 
     deadline = time.monotonic() + grace
     for thread in threading.enumerate():
         if thread is threading.main_thread() or thread.daemon:
             continue
-        thread.join(max(0.0, deadline - time.monotonic()))
+        started = time.monotonic()
+        thread.join(max(0.0, deadline - started))
+        if time.monotonic() - started >= 0.5:
+            logger.info(
+                "Exit: waited %.1fs for thread %r",
+                time.monotonic() - started,
+                thread.name,
+            )
 
     lingering = [
         t
@@ -194,26 +237,16 @@ def _start_tui_mode(config: SandroidConfig, Toolbox, ActionQ) -> None:
 
         run_bounded("background tasks", lambda: get_task_service().stop_all(), 8.0)
 
-        # Check for untracked background work on exit
-        try:
-            from sandroid.core.background_tracker import get_background_tracker
-
-            tracker = get_background_tracker()
-            report = tracker.detect_untracked_work()
-
-            if report.has_untracked_work:
-                logger.warning("Detected untracked background work on exit")
-                logger.warning(report.format_report())
-
-                # Force cleanup
-                cleaned = tracker.force_cleanup(report)
-                for item in cleaned:
-                    logger.info(f"Cleanup: {item}")
-        except Exception as e:
-            logger.debug(f"Error in background work detection: {e}")
+        # Check for untracked background work on exit (once per process)
+        _check_untracked_work_after_tui()
 
         logger.info("Analysis completed successfully")
+        import time
+
+        started = time.monotonic()
         get_ui_service().print_exit_summary(Toolbox.get_tools_used())
+        if time.monotonic() - started >= 0.5:
+            logger.info("Exit: summary took %.1fs", time.monotonic() - started)
         _exit_without_lingering_threads(exit_code=exit_code or 0)
         if exit_code:
             sys.exit(exit_code)

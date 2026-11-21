@@ -21,6 +21,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,6 +57,8 @@ _PROXY_PROCESS_NAMES = ("mitmdump", "mitmweb", "mitmproxy", "gost", "ipt2socks")
 
 #: Seconds the one ``ps`` call that lists the process tree may take.
 _PS_TIMEOUT_S = 5.0
+#: A part of the untracked-work check that takes longer is logged.
+_SLOW_PART_S = 0.5
 
 
 def descendant_pids(root: int) -> list[int] | None:
@@ -254,14 +257,27 @@ class BackgroundWorkTracker:
         """
         report = BackgroundWorkReport()
 
+        def _timed(part: str, detect: Any) -> list[UntrackedWork]:
+            # A slow part is logged (the quit's check took 2.7-3.7 s, N5-B4).
+            started = time.monotonic()
+            found = detect()
+            took = time.monotonic() - started
+            if took >= _SLOW_PART_S:
+                logger.info("Untracked-work check: %s took %.1fs", part, took)
+            return found
+
         # 1. Detect untracked threads
-        report.untracked_threads = self._detect_untracked_threads()
+        report.untracked_threads = _timed("threads", self._detect_untracked_threads)
 
         # 2. Detect untracked child processes
-        report.untracked_processes = self._detect_untracked_processes()
+        report.untracked_processes = _timed(
+            "processes", self._detect_untracked_processes
+        )
 
         # 3. Detect untracked Frida jobs
-        report.untracked_frida_jobs = self._detect_untracked_frida_jobs()
+        report.untracked_frida_jobs = _timed(
+            "frida jobs", self._detect_untracked_frida_jobs
+        )
 
         return report
 
