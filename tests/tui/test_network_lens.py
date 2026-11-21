@@ -2634,7 +2634,11 @@ async def test_device_radios_start_on_the_choice_and_space_types(monkeypatch):
         assert field.value != " "
 
         box = modal.query_one("#kill-switch-checkbox", Checkbox)
-        assert str(box.label).endswith("refused")
+        # The label is short; the "refused" explanation is the note below
+        # it, which wraps instead of being cut.
+        assert str(box.label) == "Kill switch"
+        note = str(modal.query_one("#kill-switch-note").render())
+        assert note.rstrip(".").endswith("refused")
         assert len(str(box.label)) <= 70
 
         # V5: the CA actions are on screen at 120x35 without scrolling.

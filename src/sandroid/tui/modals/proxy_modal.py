@@ -778,8 +778,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                     )
                     yield Static(
                         # main's wording, as the note that wraps
-                        "Only the device proxy is reachable; the rest is "
-                        "refused.",
+                        "Only the device proxy is reachable; the rest is refused.",
                         id="kill-switch-note",
                         classes="checkbox-note",
                     )
