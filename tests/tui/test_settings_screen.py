@@ -885,3 +885,17 @@ def test_log_level_message_only_when_changed(caplog) -> None:
             assert "Log level changed to DEBUG" in caplog.text
     finally:
         root.setLevel(old)
+
+
+@pytest.mark.asyncio
+async def test_a_focused_switch_is_visibly_highlighted(monkeypatch) -> None:
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: True)
+    app = _MonitorSettingsHarness(SandroidConfig())
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.pause()
+        switch = app.screen.query_one("#setting-emulator--avd_headless", Switch)
+        before = switch.styles.background
+        switch.focus()
+        await pilot.pause()
+        assert switch.has_focus
+        assert switch.styles.background != before
