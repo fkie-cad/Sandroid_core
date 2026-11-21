@@ -232,6 +232,10 @@ def test_unprobed_foreign_devices_are_in_use_not_ready() -> None:
     assert rows["emulator-5554"].state.value == "in use · not probed"
     assert rows["emulator-5556"].state is RowState.OFFLINE  # adb's own word
     assert rows["emulator-5562"].state is RowState.READY
+    # Stop / restart guard: in use elsewhere in any adb state, never ours.
+    assert rows["emulator-5554"].in_use_elsewhere
+    assert rows["emulator-5556"].in_use_elsewhere
+    assert not rows["emulator-5562"].in_use_elsewhere
     assert [
         (a.name, a.running_elsewhere, a.port, a.port_reason) for a in snap.avds
     ] == [
@@ -893,6 +897,36 @@ async def test_x_then_y_stops_the_emulator_by_serial() -> None:
     assert actions.calls == [("stop_emulator", "emulator-5554")]
 
 
+class _StopFails(FakeActions):
+    def stop_emulator(self, serial, *, on_done=None):
+        self.calls.append(("stop_emulator", serial))
+        if on_done:
+            on_done(False, f"Emulator {serial} did not stop: still running.")
+
+
+async def test_a_failed_stop_marks_the_row_in_red_with_a_hint() -> None:
+    actions = _StopFails()
+    app, screen = _hub(devices=[READY], actions=actions)
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        await pilot.press("x")
+        await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
+        await pilot.press("y")
+        await until(pilot, lambda: app.screen is screen)
+        await until(pilot, lambda: "stop failed" in screen._state_cell(READY).plain)
+        cell = screen._state_cell(READY)
+        assert cell.plain.startswith("● ready")  # the state is kept
+        red = [
+            cell.plain[sp.start : sp.end]
+            for sp in cell.spans
+            if hub._c("bad") in str(sp.style)
+        ]
+        assert red == ["stop failed"]
+        note = _box(screen)["note"]
+        assert "Stop failed: Emulator emulator-5554 did not stop" in note
+    assert actions.calls == [("stop_emulator", "emulator-5554")]
+
+
 async def test_x_then_n_does_not_stop() -> None:
     actions = FakeActions()
     app, screen = _hub(devices=[READY], actions=actions)
@@ -978,6 +1012,59 @@ async def test_an_unprobed_device_attaches_only_after_a_confirm(
         await pilot.press("y")
         await settle(pilot)
     assert app.result == "emulator-5556"
+
+
+@pytest.mark.parametrize(
+    ("key", "verb", "method"),
+    [("x", "Stop", "stop_emulator"), ("R", "Restart", "restart_emulator")],
+)
+async def test_stop_or_restart_of_a_device_in_use_elsewhere_warns_first(
+    monkeypatch, key, verb, method
+) -> None:
+    """E2E #3 bug 1: ``x`` then ``y`` on an ``in use · not probed`` row
+    killed another session's emulator behind a plain "Stop <model>?".
+    """
+    from sandroid.core.device_manager import DeviceManager
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+    monkeypatch.setattr(DeviceManager, "_preferred_serial", "emulator-5562")
+    actions = FakeActions()
+    app, screen = _hub(devices=[FOREIGN], actions=actions)
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        await pilot.press(key)
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        modal = app.screen
+        assert modal.guard_typing  # Cancel has the focus, a fast y is ignored
+        assert modal.title_text == f"{verb} emulator-5556? It is in use elsewhere"
+        assert "in use by another Sandroid session" in modal.message_text
+        assert "emulator-5562" in modal.message_text
+        assert modal.yes_label == f"{verb} anyway"
+        await settle(pilot)
+        assert modal.focused is not None
+        assert modal.focused.id == "no"
+        await pilot.press("enter")  # the default declines
+        await until(pilot, lambda: app.screen is screen)
+        assert actions.calls == []
+        monkeypatch.setattr(ConfirmModal, "ARM_SECONDS", 0.0)
+        await pilot.press(key)
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        await pilot.press("y")
+        await until(pilot, lambda: app.screen is screen)
+    assert actions.calls == [(method, "emulator-5556")]
+
+
+async def test_the_stop_dialog_names_the_avd_and_the_serial() -> None:
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+    app, screen = _hub(devices=[dataclasses.replace(READY, model="sdk_gphone64")])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        await pilot.press("x")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        assert app.screen.title_text == "Stop Pixel_7 (emulator-5554)?"
+        assert "of AVD Pixel_7" in app.screen.message_text
+        assert not app.screen.guard_typing
 
 
 async def test_the_options_box_shows_the_console_port() -> None:
@@ -1194,6 +1281,25 @@ def test_stop_emulator_is_per_serial(monkeypatch, sync_threads) -> None:
     _controller().stop_emulator("emulator-5556", on_done=lambda ok, m: done.append(ok))
     assert stopped == ["emulator-5556"]
     assert done == [True]
+
+
+@pytest.mark.parametrize("ours", [True, False])
+def test_failed_stop_says_what_was_tried(monkeypatch, sync_threads, ours) -> None:
+    launch = SimpleNamespace(process=SimpleNamespace(pid=4242)) if ours else None
+    monkeypatch.setattr(emulator, "get_launch", lambda serial: launch)
+    monkeypatch.setattr(emulator, "stop_emulator", lambda serial: False)
+    done: list = []
+    _controller().stop_emulator(
+        "emulator-5556", on_done=lambda ok, m: done.append((ok, m))
+    )
+    ((ok, message),) = done
+    assert not ok
+    if ours:
+        assert "SIGKILL" in message
+        assert "PID 4242" in message
+    else:
+        assert "Sandroid did not start it" in message
+        assert "does not kill it by PID" in message
 
 
 def test_connect_rejects_a_bogus_address(sync_threads) -> None:
@@ -1881,6 +1987,128 @@ async def test_shift_p_starts_a_stopped_avd_as_a_persona(monkeypatch) -> None:
     assert asked == [("Idle_AVD", "mara", 34, True)]
     assert actions.calls == [
         ("start_avd", "Idle_AVD", opts, {"persona_id": "mara"}, False)
+    ]
+
+
+@pytest.mark.parametrize("fetch_fails", [False, True])
+async def test_shift_p_offers_to_fetch_missing_photos_first(
+    monkeypatch, fetch_fails
+) -> None:
+    """E2E #3 bug 3: a persona from a new profile never built in the TUI
+    (its photos were not downloaded). Shift+P now offers the fetch, shows
+    its progress on the row, and starts only once the photos are there.
+    """
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
+    from sandroid.tui.modals.selection_modal import SelectionModal
+    from sandroid.world import persona, photos
+
+    monkeypatch.setattr(
+        persona,
+        "persona_choices",
+        lambda avd: [persona.PersonaChoice("mara", "Mara (DE)", 0)],
+    )
+    opts = AvdLaunchOptions(boot="snapshot", snapshot="clean_8g")
+    monkeypatch.setattr(
+        persona,
+        "persona_start",
+        lambda avd, pid, **kw: persona.PersonaStart(
+            options=opts,
+            meta={"persona_id": pid},
+            snapshot="sandroid_persona_x",
+            cached=False,
+            missing_photos=2,
+        ),
+    )
+    fetched: list = []
+    progress_seen: list = []
+
+    def fetch(pid, *, api=None, progress=None):
+        fetched.append(pid)
+        progress("p1", 1, 2)
+        progress("p2", 2, 2)
+        out = photos.PhotoFetch()
+        if fetch_fails:
+            out.failed = {"p2": "download failed: 404"}
+        return out
+
+    monkeypatch.setattr(persona, "fetch_persona_photos", fetch)
+    actions = PersonaActions()
+    app, screen = _hub(avds=[IDLE], actions=actions)
+    real_repaint = screen._repaint_busy
+
+    def repaint() -> None:
+        progress_seen.append(dict(screen._busy))
+        real_repaint()
+
+    screen._repaint_busy = repaint
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        await pilot.press("P")
+        await until(pilot, lambda: isinstance(app.screen, SelectionModal))
+        app.screen.dismiss(app.screen.all_options[0])
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        assert app.screen.title_text == "Fetch 2 photos for persona mara?"
+        assert app.screen.yes_label == "Fetch and start"
+        assert actions.calls == []  # nothing starts before the answer
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: fetched
+            and not screen._busy.get(IDLE.key, "").startswith("fetching"),
+        )
+        await settle(pilot)
+        if fetch_fails:
+            await until(pilot, lambda: app._notifications)
+            text = " ".join(n.message for n in app._notifications)
+            assert "1 photo could not be fetched" in text
+            assert "photos fetch --profile mara" in text
+    assert fetched == ["mara"]
+    assert {IDLE.key: "fetching photos 2/2…"} in progress_seen
+    if fetch_fails:
+        assert actions.calls == []
+    else:
+        assert actions.calls == [
+            ("start_avd", "Idle_AVD", opts, {"persona_id": "mara"}, False)
+        ]
+
+
+async def test_shift_p_on_a_built_in_profile_copies_it_first(monkeypatch) -> None:
+    from sandroid.tui.modals.selection_modal import SelectionModal
+    from sandroid.world import persona
+
+    monkeypatch.setattr(
+        persona,
+        "persona_choices",
+        lambda avd: [persona.PersonaChoice("lena-de", "Lena (DE)", 0, builtin="de")],
+    )
+    copied: list = []
+    monkeypatch.setattr(
+        persona, "copy_builtin", lambda bid: copied.append(bid) or "lena-de"
+    )
+    started: list = []
+    opts = AvdLaunchOptions(boot="snapshot", snapshot="clean_8g")
+
+    def start(avd, pid, **kw):
+        started.append(pid)
+        return persona.PersonaStart(
+            options=opts, meta={"persona_id": pid}, snapshot="s", cached=False
+        )
+
+    monkeypatch.setattr(persona, "persona_start", start)
+    actions = PersonaActions()
+    app, screen = _hub(avds=[IDLE], actions=actions)
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        await pilot.press("P")
+        await until(pilot, lambda: isinstance(app.screen, SelectionModal))
+        (label,) = app.screen.all_options
+        assert label.startswith("Lena (DE) (built-in de) · copied to your library")
+        app.screen.dismiss(label)
+        await until(pilot, lambda: actions.calls)
+    assert copied == ["de"]
+    assert started == ["lena-de"]
+    assert actions.calls == [
+        ("start_avd", "Idle_AVD", opts, {"persona_id": "lena-de"}, False)
     ]
 
 

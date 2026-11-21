@@ -446,6 +446,39 @@ def test_stop_emulator_never_signals_someone_else_s_emulator(env):
     assert env["procs"] == []
 
 
+def test_stop_emulator_escalates_on_our_pid_when_emu_kill_is_ignored(env):
+    """``emu kill`` answered OK but qemu kept running: our own launch gets
+    SIGTERM (then SIGKILL) on the PID Sandroid started, and the stop works.
+    """
+    launch = emu.launch_avd("Pixel")
+    env["adb"].add(launch.serial, avd="Pixel")
+    env["adb"].kill_removes = False  # console says OK, the emulator stays
+    assert emu.stop_emulator(launch.serial, timeout=0) is True
+    assert launch.process.signals == ["TERM"]
+    assert launch.serial not in env["adb"].devices
+    assert emu.get_launch(launch.serial) is None
+
+
+def test_stop_emulator_escalates_to_kill_when_our_pid_ignores_term(env):
+    launch = emu.launch_avd("Pixel")
+    env["adb"].add(launch.serial, avd="Pixel")
+    env["adb"].kill_removes = False
+    launch.process.terminate = lambda: launch.process.signals.append("TERM")
+    assert emu.stop_emulator(launch.serial, timeout=0) is True
+    assert launch.process.signals == ["TERM", "KILL"]
+
+
+def test_stop_emulator_does_not_kill_by_pid_an_emulator_it_did_not_start(env):
+    """A ready emulator Sandroid did not launch ignores ``emu kill``: the
+    stop reports failure and nothing is signalled or spawned.
+    """
+    env["adb"].add("emulator-5556", avd="ByHand")
+    env["adb"].kill_removes = False
+    assert emu.stop_emulator("emulator-5556", timeout=0) is False
+    assert env["procs"] == []
+    assert "emulator-5556" in env["adb"].devices
+
+
 def test_stop_emulator_refuses_non_emulator_serials(env):
     assert emu.stop_emulator("R58N123ABC") is False
     assert env["adb"].calls == []

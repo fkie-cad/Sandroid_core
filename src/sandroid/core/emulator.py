@@ -1977,7 +1977,12 @@ def _terminate(process: Any, grace: float = 10.0) -> None:
         logger.warning(f"Emulator process {getattr(process, 'pid', '?')} did not exit")
 
 
-def stop_emulator(serial: str, adb: Any = None, timeout: float = 30.0) -> bool:
+def stop_emulator(
+    serial: str,
+    adb: Any = None,
+    timeout: float = 30.0,
+    escalate_grace: float = 15.0,
+) -> bool:
     """Stop emulator *serial* via its console (``adb -s <serial> emu kill``).
 
     Never kills processes by name: other sessions' emulators stay untouched.
@@ -1993,9 +1998,15 @@ def stop_emulator(serial: str, adb: Any = None, timeout: float = 30.0) -> bool:
     next noticed, see :func:`reap_exited_launches`). An emulator Sandroid
     did not launch is stopped the same way but gets no post-stop hooks.
 
+    If our own launch is still listed *timeout* seconds after an accepted
+    ``emu kill`` (qemu ignored it), its process -- by the PID Sandroid
+    started, nothing else -- gets SIGTERM, then SIGKILL, and adb gets
+    *escalate_grace* more seconds to drop it. An emulator Sandroid did not
+    launch is never signalled: the stop just reports failure.
+
     Returns:
         True once *serial* left ``adb devices`` (and our process, if it was
-        terminated, exited) within *timeout*.
+        terminated, exited) within *timeout* (plus the escalation grace).
     """
     if serial_port(serial) is None:
         logger.warning(f"{serial} is not an emulator; not stopping it")
@@ -2007,12 +2018,14 @@ def stop_emulator(serial: str, adb: Any = None, timeout: float = 30.0) -> bool:
     entries = _list_entries(adb)
     listed = entries is not None and any(e.serial == serial for e in entries)
     killed = _console_kill(adb, serial)
+    signalled = False
     if launch is not None and launch.alive and not (killed and listed):
         logger.info(
             f"Emulator {serial} is not reachable over its console yet; "
             f"terminating our process (PID {getattr(launch.process, 'pid', '?')})"
         )
         _terminate(launch.process)
+        signalled = True
     deadline = time.monotonic() + timeout
     while True:
         entries = _list_entries(adb)
@@ -2022,6 +2035,18 @@ def stop_emulator(serial: str, adb: Any = None, timeout: float = 30.0) -> bool:
                 _settle_stopped(launch, max(2.0, deadline - time.monotonic()))
             return True
         if time.monotonic() >= deadline:
+            if launch is not None and launch.alive and not signalled:
+                # emu kill was accepted but qemu kept running: escalate on
+                # the PID we started (SIGTERM, then SIGKILL) -- ours only.
+                logger.warning(
+                    f"Emulator {serial} still listed {timeout:g}s after emu "
+                    f"kill; terminating our process "
+                    f"(PID {getattr(launch.process, 'pid', '?')})"
+                )
+                _terminate(launch.process)
+                signalled = True
+                deadline = time.monotonic() + escalate_grace
+                continue
             logger.warning(f"Emulator {serial} still listed {timeout:g}s after kill")
             if launch is not None and not launch.alive:
                 _finish_launch(launch)  # adb lags, but our process ended

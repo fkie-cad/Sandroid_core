@@ -40,6 +40,8 @@ from sandroid.world.helper import Device
 from sandroid.world.prepare import STAMP_FORMAT, STAMP_PATH, persona_snapshot_name
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sandroid.services.identity import IdentityService, Profile
     from sandroid.world.manifest import WorldManifest
     from sandroid.world.packs import PackSet
@@ -495,6 +497,35 @@ def _built_from_base(record: dict[str, Any]) -> bool:
     )
 
 
+def missing_photos_hint(count: int, profile_id: str) -> str:
+    """What to do when ``count`` photos of a persona are not downloaded."""
+    return (
+        f"{count} photos are not downloaded, so the persona was not built. "
+        "Stop the emulator and start it again with Shift+P in Devices "
+        "(it offers to fetch them first), or run python -m sandroid.world "
+        f"photos fetch --profile {profile_id} and then restart it."
+    )
+
+
+def fetch_persona_photos(
+    profile_id: str,
+    *,
+    api: int | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> Any:
+    """Download the photos persona ``profile_id`` needs into the cache
+    (what ``python -m sandroid.world photos fetch --profile`` does).
+    Blocking, one request per second: call off the UI thread.
+
+    Returns:
+        The :class:`~sandroid.world.photos.PhotoFetch`.
+    """
+    from sandroid.world.photos import ensure_photos, photo_entries
+
+    manifest, _profile = manifest_for_profile(profile_id, target_sdk=api)
+    return ensure_photos(photo_entries(manifest), progress=progress)
+
+
 def persona_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
     """The device-prep stage of a persona launch (``meta.persona_id``).
 
@@ -576,8 +607,6 @@ def persona_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
     with _BUILT_LOCK:
         first = bool(launch_id) and launch_id not in _BUILT_LAUNCHES
         build = first and _built_from_base(record)
-        if build:
-            _BUILT_LAUNCHES.add(launch_id)
     if not build:
         return StageNote(
             "warning",
@@ -589,13 +618,17 @@ def persona_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
                 ]
             ),
         )
+    # Preconditions first: a launch that could not be built yet (photos
+    # missing) is not marked built, so a later prepare of it can build.
     missing = ensure_photos(photo_entries(manifest), download=False).failed
     if missing:
         return StageNote(
-            "warning",
-            f"{label}: {len(missing)} photos are not downloaded; run "
-            f"python -m sandroid.world photos fetch --profile {pid}",
+            "warning", f"{label}: {missing_photos_hint(len(missing), pid)}"
         )
+    with _BUILT_LOCK:
+        if launch_id in _BUILT_LAUNCHES:
+            return StageNote("info", f"{label}: another prepare is building it")
+        _BUILT_LAUNCHES.add(launch_id)
     try:
         result = build_persona(serial, pid, rebuild=True, device=dev, deadline=deadline)
     except (PersonaError, PrepareError) as exc:
@@ -830,28 +863,35 @@ class PersonaChoice:
     """An identity profile that can be started as a persona.
 
     Attributes:
-        id: The profile id.
+        id: The profile id (for a built-in: the id its library copy gets).
         name: Its display name.
         snapshots: Persona snapshots of it on the AVD (any version).
+        builtin: A built-in profile with a world (``builtin:<id>``) that is
+            not in the library yet: picking it creates the library copy
+            first (:func:`copy_builtin`); the built-in is never written.
     """
 
     id: str
     name: str
     snapshots: int = 0
+    builtin: str = ""
 
 
 def persona_choices(
     avd: str, *, service: IdentityService | None = None
 ) -> list[PersonaChoice]:
     """The library's profiles with a ``world`` section, and how many persona
-    snapshots of each the AVD holds. Reads files only (worker thread).
+    snapshots of each the AVD holds; then the built-in profiles with a world
+    that have no library copy yet (``builtin`` set: picking one copies it
+    first). Reads files only (worker thread).
     """
     from sandroid.services.identity import get_identity_service
 
     svc = service or get_identity_service()
     present = persona_snapshots(avd)
     out = []
-    for info in svc.list_profiles():
+    infos = svc.list_profiles()
+    for info in infos:
         if info.error:
             continue
         try:
@@ -863,7 +903,37 @@ def persona_choices(
         prefix = _snapshot_prefix(info.id)
         count = sum(1 for n in present if prefix and n.startswith(prefix))
         out.append(PersonaChoice(info.id, info.name or info.id, count))
+    out.extend(_builtin_choices({info.id for info in infos}))
     return out
+
+
+def _builtin_choices(library: set[str]) -> list[PersonaChoice]:
+    """Built-in profiles with a world whose library copy does not exist yet
+    (the id :meth:`IdentityService.create` would give it is not taken).
+    """
+    from sandroid.services.identity import builtin_profiles, profile_from_builtin
+
+    out = []
+    for bid, name in builtin_profiles():
+        try:
+            copy = profile_from_builtin(bid)  # not saved
+        except Exception:
+            logger.debug(f"persona: built-in {bid} unusable", exc_info=True)
+            continue
+        if copy.world and copy.id not in library:
+            out.append(PersonaChoice(copy.id, name, 0, builtin=bid))
+    return out
+
+
+def copy_builtin(builtin_id: str, *, service: IdentityService | None = None) -> str:
+    """Save a library copy of built-in profile ``builtin_id`` (as the
+    Identity lens' "new from preset" does) and return its id. The built-in
+    itself is never written (a persona resolves and writes back its seed).
+    """
+    from sandroid.services.identity import get_identity_service
+
+    svc = service or get_identity_service()
+    return svc.create(builtin_id).id
 
 
 def _snapshot_prefix(profile_id: str) -> str:
@@ -884,12 +954,16 @@ class PersonaStart:
         snapshot: The persona snapshot name of the current profile.
         cached: That snapshot exists and is loaded; otherwise the start loads
             the clean base and the persona stage builds it.
+        missing_photos: Photos the build needs that are not downloaded
+            (0 when cached): the stage cannot build without them
+            (:func:`fetch_persona_photos`).
     """
 
     options: Any
     meta: dict[str, Any]
     snapshot: str
     cached: bool
+    missing_photos: int = 0
 
 
 def persona_start(
@@ -934,4 +1008,15 @@ def persona_start(
         snapshot=name if cached else base,
         save_on_exit=False,
     )
-    return PersonaStart(options=options, meta=meta, snapshot=name, cached=cached)
+    missing = 0
+    if not cached:
+        from sandroid.world.photos import ensure_photos, photo_entries
+
+        missing = len(ensure_photos(photo_entries(manifest), download=False).failed)
+    return PersonaStart(
+        options=options,
+        meta=meta,
+        snapshot=name,
+        cached=cached,
+        missing_photos=missing,
+    )

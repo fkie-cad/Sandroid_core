@@ -172,6 +172,9 @@ class DeviceRow:
         persona: The persona our launch started it as (``meta.persona_id``).
         snapshot_warnings: ``(snapshot, why it may not load)`` of its AVD's
             snapshots (``snapshot.pb``, read only).
+        unprobed: Deliberately not probed: this session is pinned to another
+            serial and did not launch it -- another session's or tool's
+            device (whatever adb state it is in).
     """
 
     serial: str
@@ -190,10 +193,21 @@ class DeviceRow:
     saved_options: Any = None
     persona: str = ""
     snapshot_warnings: tuple[tuple[str, str], ...] = ()
+    unprobed: bool = False
 
     @property
     def key(self) -> str:
         return f"dev:{self.serial}"
+
+    @property
+    def in_use_elsewhere(self) -> bool:
+        """Another session's / tool's device (shown ``in use · not probed``)."""
+        return self.unprobed or self.state is RowState.UNPROBED
+
+    @property
+    def stop_name(self) -> str:
+        """AVD and serial, for a dialog that stops or restarts it."""
+        return f"{self.avd_name} ({self.serial})" if self.avd_name else self.serial
 
     @property
     def network(self) -> bool:
@@ -415,6 +429,7 @@ def build_snapshot(
             ),
             persona=_persona_of(launch),
             snapshot_warnings=warned(avd_name),
+            unprobed=serial in unprobed and launch is None,
         )
 
     for serial, launch in by_serial.items():
@@ -1175,6 +1190,9 @@ class DevicesScreen(ModalScreen[str | None]):
         self.snapshot: HubSnapshot | None = None
         #: Row key -> what is being done to it ("stopping…").
         self._busy: dict[str, str] = {}
+        #: Row key -> (red word, hint) of an action that failed on it ("stop
+        #: failed"); kept until the row goes away or a new action starts.
+        self._failed: dict[str, tuple[str, str]] = {}
         #: AVDs whose next start wipes their data (never persisted).
         self._wipe: set[str] = set()
         self._in_flight = False
@@ -1375,6 +1393,15 @@ class DevicesScreen(ModalScreen[str | None]):
         busy = self._busy.get(row.key)
         if busy:
             return Text(f"◌ {busy}", style=_c("title"))
+        cell = self._plain_state_cell(row)
+        failed = self._failed.get(row.key)
+        if failed:
+            cell.append(" · ", style=_c("dim"))
+            cell.append(failed[0], style=f"bold {_c('bad')}")
+        return cell
+
+    def _plain_state_cell(self, row: DeviceRow | AvdRow) -> Text:
+        """The State cell without the busy / failed overlays."""
         if isinstance(row, AvdRow):
             if row.running_elsewhere:
                 return Text("● running elsewhere", style=_c("warn"))
@@ -1472,6 +1499,9 @@ class DevicesScreen(ModalScreen[str | None]):
         self.snapshot = snap
         table = self.query_one("#hub-table", DataTable)
         rows = snap.rows
+        listed = {row.key for row in rows}
+        for key in [k for k in self._failed if k not in listed]:
+            del self._failed[key]  # it went away after all
         self._fill(table, rows)
         running = len(snap.devices)
         booting = sum(1 for d in snap.devices if d.state is RowState.BOOTING)
@@ -1676,6 +1706,10 @@ class DevicesScreen(ModalScreen[str | None]):
             )
             self._warning_lines(text, row.snapshot_warnings)
             return text
+        failed = self._failed.get(row.key)
+        if failed:
+            text.append(f"{failed[0].capitalize()}: ", style=f"bold {_c('bad')}")
+            text.append(f"{failed[1]}\n", style=_c("text"))
         help_text = {
             RowState.UNAUTHORIZED: UNAUTHORIZED_HELP,
             RowState.NO_PERMISSIONS: NO_PERMISSIONS_HELP,
@@ -1846,8 +1880,20 @@ class DevicesScreen(ModalScreen[str | None]):
             return self._actions
         return getattr(self.app, "_device_controller", None)
 
-    def _call(self, method: str, key: str, busy: str, *args: Any, **kw: Any) -> None:
-        """Run an action of the controller, showing *busy* on row *key*."""
+    def _call(
+        self,
+        method: str,
+        key: str,
+        busy: str,
+        *args: Any,
+        failed_word: str = "",
+        **kw: Any,
+    ) -> None:
+        """Run an action of the controller, showing *busy* on row *key*.
+
+        With *failed_word*, a failure also marks the row: the word in red in
+        its State cell and the failure message as the hint below the list.
+        """
         actions = self._get_actions()
         fn = getattr(actions, method, None)
         if fn is None:
@@ -1860,10 +1906,11 @@ class DevicesScreen(ModalScreen[str | None]):
             )
             return
         self._busy[key] = busy
+        self._failed.pop(key, None)
         self._repaint_busy()
 
         def done(ok: bool, message: str) -> None:
-            self._action_done(key, ok, message)
+            self._action_done(key, ok, message, failed_word)
 
         try:
             fn(*args, on_done=done, **kw)
@@ -1871,13 +1918,17 @@ class DevicesScreen(ModalScreen[str | None]):
             logger.exception(f"Devices screen: {method} failed")
             self._action_done(key, False, f"{type(e).__name__}: {e}")
 
-    def _action_done(self, key: str, ok: bool, message: str) -> None:
+    def _action_done(
+        self, key: str, ok: bool, message: str, failed_word: str = ""
+    ) -> None:
         """UI thread: an action finished (or its process started)."""
         if not self.is_attached:
             return
         self._busy.pop(key, None)
         if not ok:
             self.app.notify(message, title="Devices", severity="error", timeout=8)
+            if failed_word:
+                self._failed[key] = (failed_word, message)
         if self._collector is not None:
             self._collector.invalidate_avds()
         self._repaint_busy()
@@ -2086,12 +2137,19 @@ class DevicesScreen(ModalScreen[str | None]):
                 if choice.snapshots
                 else "built from clean_8g on the first start"
             )
-            labels[f"{choice.name} ({choice.id}) · {saved}"] = choice.id
+            if choice.builtin:
+                label = (
+                    f"{choice.name} (built-in {choice.builtin}) · copied to "
+                    f"your library as {choice.id}, then {saved}"
+                )
+            else:
+                label = f"{choice.name} ({choice.id}) · {saved}"
+            labels[label] = choice
 
         def picked(label: str | None) -> None:
-            pid = labels.get(label or "")
-            if pid and self.is_attached:
-                self._start_persona(row, pid)
+            choice = labels.get(label or "")
+            if choice is not None and self.is_attached:
+                self._start_persona(row, choice.id, builtin=choice.builtin)
 
         self.app.push_screen(
             SelectionModal(
@@ -2104,8 +2162,13 @@ class DevicesScreen(ModalScreen[str | None]):
             picked,
         )
 
-    def _start_persona(self, row: AvdRow, profile_id: str) -> None:
-        """Work out the persona launch (worker), then start it."""
+    def _start_persona(self, row: AvdRow, profile_id: str, builtin: str = "") -> None:
+        """Work out the persona launch (worker), then start it.
+
+        A built-in profile (*builtin*) is copied into the library first: a
+        persona writes its resolved world seed back, which a built-in must
+        never get.
+        """
         options = self._shown_options(row)
         headless = bool(getattr(options, "headless", False))
         self._busy[row.key] = "preparing persona…"
@@ -2114,13 +2177,22 @@ class DevicesScreen(ModalScreen[str | None]):
         def work() -> None:
             from sandroid.world import persona
 
+            pid = profile_id
             try:
+                if builtin:
+                    pid = persona.copy_builtin(builtin)
+                    self.app.call_from_thread(
+                        self.app.notify,
+                        f"Copied built-in profile {builtin} to your library as {pid}.",
+                        title="Devices",
+                        timeout=6,
+                    )
                 result: Any = persona.persona_start(
-                    row.name, profile_id, api=row.api, headless=headless
+                    row.name, pid, api=row.api, headless=headless
                 )
             except Exception as exc:
                 result = exc
-            self.app.call_from_thread(self._persona_ready, row, profile_id, result)
+            self.app.call_from_thread(self._persona_ready, row, pid, result)
 
         self.run_worker(work, thread=True, group="devices-persona", exit_on_error=False)
 
@@ -2137,6 +2209,93 @@ class DevicesScreen(ModalScreen[str | None]):
                 timeout=8,
             )
             return
+        if start.missing_photos:
+            self._repaint_busy()
+            self._offer_photo_fetch(row, profile_id, start)
+            return
+        self._launch_persona(row, profile_id, start)
+
+    def _offer_photo_fetch(self, row: AvdRow, profile_id: str, start: Any) -> None:
+        """The persona cannot be built without its photos: fetch, then start."""
+        from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+        count = start.missing_photos
+
+        def confirmed(yes: bool | None) -> None:
+            if yes and self.is_attached:
+                self._fetch_photos_then_start(row, profile_id, start)
+
+        self.app.push_screen(
+            ConfirmModal(
+                title=f"Fetch {count} photos for persona {profile_id}?",
+                message=f"{count} photos of this persona are not downloaded "
+                "yet, and the persona cannot be built without them. Fetch "
+                f"them now from the photo pack's URLs (one request per "
+                f"second, about {count} s), then start {row.name}?",
+                yes_label="Fetch and start",
+                no_label="Cancel",
+            ),
+            confirmed,
+        )
+
+    def _fetch_photos_then_start(
+        self, row: AvdRow, profile_id: str, start: Any
+    ) -> None:
+        """Download the persona's photos (worker, progress on the row), then
+        start it; on a failure say how many are missing and what to run.
+        """
+        total = start.missing_photos
+        self._busy[row.key] = f"fetching photos 0/{total}…"
+        self._repaint_busy()
+
+        def show(done: int, of: int) -> None:
+            if row.key in self._busy and self.is_attached:
+                self._busy[row.key] = f"fetching photos {done}/{of}…"
+                self._repaint_busy()
+
+        def work() -> None:
+            from sandroid.world import persona
+
+            def progress(_pid: str, done: int, of: int) -> None:
+                self.app.call_from_thread(show, done, of)
+
+            try:
+                result: Any = persona.fetch_persona_photos(
+                    profile_id, api=row.api, progress=progress
+                )
+            except Exception as exc:
+                result = exc
+            self.app.call_from_thread(
+                self._photos_fetched, row, profile_id, start, result
+            )
+
+        self.run_worker(work, thread=True, group="devices-persona", exit_on_error=False)
+
+    def _photos_fetched(
+        self, row: AvdRow, profile_id: str, start: Any, fetch: Any
+    ) -> None:
+        if not self.is_attached:
+            return
+        self._busy.pop(row.key, None)
+        failed = str(fetch) if isinstance(fetch, Exception) else len(fetch.failed or {})
+        if failed:
+            self._repaint_busy()
+            why = (
+                f"{failed} photo{'s' if failed != 1 else ''} could not be fetched"
+                if isinstance(failed, int)
+                else f"the photo fetch failed: {failed}"
+            )
+            self.app.notify(
+                f"Not started: {why}. Try {format_key('P')} again later, or "
+                f"run python -m sandroid.world photos fetch --profile {profile_id}.",
+                title="Devices",
+                severity="error",
+                timeout=10,
+            )
+            return
+        self._launch_persona(row, profile_id, start)
+
+    def _launch_persona(self, row: AvdRow, profile_id: str, start: Any) -> None:
         how = (
             f"loading {start.snapshot}"
             if start.cached
@@ -2294,25 +2453,69 @@ class DevicesScreen(ModalScreen[str | None]):
             renamed,
         )
 
+    def _confirm_in_use(self, row: DeviceRow, verb: str, then: Callable) -> None:
+        """*verb* ("Stop" / "Restart") a device in use elsewhere: only after a
+        warning that names it. Cancel has the focus, and a fast ``y`` typed
+        out of habit (the rows shifted under the cursor) is ignored.
+        """
+        from sandroid.core.device_manager import DeviceManager
+        from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+        pinned = DeviceManager.preferred_serial() or "another serial"
+        avd = row.avd_name or "unknown: never probed"
+        gerund = {"Stop": "Stopping", "Restart": "Restarting"}.get(verb, verb)
+
+        def confirmed(yes: bool | None) -> None:
+            if yes and self.is_attached:
+                then()
+
+        self.app.push_screen(
+            ConfirmModal(
+                title=f"{verb} {row.stop_name}? It is in use elsewhere",
+                message=f"{row.serial} (AVD {avd}) is in use by another "
+                f"Sandroid session or tool: this session is pinned to "
+                f"{pinned} and did not start it. {gerund} it ends that "
+                "session's work.",
+                yes_label=f"{verb} anyway",
+                no_label="Cancel",
+                guard_typing=True,
+            ),
+            confirmed,
+        )
+
     def action_stop(self) -> None:
         row = self.current_row()
         if not isinstance(row, DeviceRow) or not row.is_emulator:
             return
         from sandroid.tui.modals.confirm_modal import ConfirmModal
 
+        def stop() -> None:
+            self._call(
+                "stop_emulator",
+                row.key,
+                "stopping…",
+                row.serial,
+                failed_word="stop failed",
+            )
+
+        if row.in_use_elsewhere:
+            self._confirm_in_use(row, "Stop", stop)
+            return
+
         def confirmed(yes: bool | None) -> None:
             if yes:
-                self._call("stop_emulator", row.key, "stopping…", row.serial)
+                stop()
 
         warning = (
             "\nIt is the active device: running tasks lose their device."
             if row.active
             else ""
         )
+        avd = f" of AVD {row.avd_name}" if row.avd_name else ""
         self.app.push_screen(
             ConfirmModal(
-                title=f"Stop {row.title}?",
-                message=f"Shuts down emulator {row.serial} (emu kill).{warning}",
+                title=f"Stop {row.stop_name}?",
+                message=f"Shuts down emulator {row.serial}{avd} (emu kill).{warning}",
                 yes_label="Stop",
                 no_label="Cancel",
             ),
@@ -2322,6 +2525,15 @@ class DevicesScreen(ModalScreen[str | None]):
     def action_restart(self) -> None:
         row = self.current_row()
         if not isinstance(row, DeviceRow) or not row.is_emulator:
+            return
+        if row.in_use_elsewhere:
+            self._confirm_in_use(
+                row,
+                "Restart",
+                lambda: self._call(
+                    "restart_emulator", row.key, "restarting…", row.serial
+                ),
+            )
             return
         if not (row.active and self._session_busy()):
             self._call("restart_emulator", row.key, "restarting…", row.serial)
@@ -2334,7 +2546,7 @@ class DevicesScreen(ModalScreen[str | None]):
 
         self.app.push_screen(
             ConfirmModal(
-                title=f"Restart {row.title}?",
+                title=f"Restart {row.stop_name}?",
                 message=f"Restarts emulator {row.serial} (same AVD and port).\n"
                 "It is the active device: running tasks lose their device.",
                 yes_label="Restart",
