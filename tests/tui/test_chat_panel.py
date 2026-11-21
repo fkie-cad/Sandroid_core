@@ -624,11 +624,34 @@ async def test_mascot_follows_the_panel_state(sessions, monkeypatch):
         assert mascot.state == "idle"
 
 
+async def test_the_mascot_shows_once_empty_state_then_beside_the_input(ai_on):
+    """Redesign: the empty state's mascot and the live one never show
+    together (the dock title has none either).
+    """
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        mascot = app.query_one("#chat-mascot", ChatMascot)
+        assert app.query(EmptyState)
+        assert not mascot.display  # the empty state shows its own
+        panel._add(UserBlock("hi"))
+        await settle(pilot)
+        assert not app.query(EmptyState)
+        assert mascot.display
+        panel.action_new_thread()
+        await until(pilot, lambda: not panel.io_pending)
+        await settle(pilot)
+        assert app.query(EmptyState)
+        assert not mascot.display
+
+
 async def test_mascot_off_hides_it_on_refresh_header(ai_on):
     app = _Harness()
     async with app.run_test(size=(100, 40)) as pilot:
         panel = await _panel(pilot)
         mascot = app.query_one("#chat-mascot", ChatMascot)
+        panel._add(UserBlock("hi"))  # past the empty state (its own mascot)
+        await settle(pilot)
         assert mascot.display
         ai_on.show_chat_mascot = False
         panel.refresh_header()
@@ -1366,11 +1389,12 @@ async def test_approval_answer_sits_on_the_call_above_a_clean_chip(
             ),
         )
         (tool,) = _blocks(panel, ToolBlock)
-        lines = tool.render().plain.splitlines()
-        # One line: the decision, the note and the time; no "denied" chip.
-        assert len(lines) == 2
-        assert lines[1].strip() == "declined by you · use chrome · 22s"
-        assert tool.get_content_height(None, None, 100) == 2
+        (line,) = tool.render().plain.splitlines()
+        # One line: the call, then the decision, the note and the time; no
+        # "denied" chip.
+        assert line.endswith("   declined by you · use chrome · 22s")
+        assert "denied" not in line
+        assert tool.get_content_height(None, None, 100) == 1
         assert "declined" not in _notices(panel)  # no extra line after the chip
     assert chat_panel_module.strip_code_prefix("cancelled", "cancelled: x") == "x"
     assert chat_panel_module.strip_code_prefix("denied", "other") == "other"
@@ -1757,10 +1781,8 @@ def test_history_chips_show_summary_time_and_the_approval():
     killed, listed = tools
     assert "declined by you · use chrome" in killed.decision.plain
     assert killed.chip.plain == "denied · 2.2s"
-    shown = killed.render().plain.splitlines()
-    assert [line.strip() for line in shown[1:]] == [
-        "declined by you · use chrome · 2.2s"
-    ]
+    (shown,) = killed.render().plain.splitlines()
+    assert shown.endswith("   declined by you · use chrome · 2.2s")
     assert listed.chip.plain == "done · R4 · 12 rows · 0.4s"
     # Without timing in the record there is no made-up "0s".
     bare = chat_panel_module.history_blocks(
@@ -1810,3 +1832,37 @@ async def test_copy_puts_an_answer_on_the_clipboard(sessions, monkeypatch):
         await _send(pilot, panel, "/copy 3")
         assert "only 2 answers" in _notices(panel)
         assert len(copied) == 2
+
+
+def test_banner_body_is_secondary_text_and_only_warnings_stay_warn():
+    """Redesign: the headline stays bold warn; on a ready endpoint the
+    information lines are ``$lens-muted`` and only real warnings are warn.
+    """
+    from sandroid.ai.safety import get_ai_settings
+
+    settings = get_ai_settings(_ai())
+    styles = dict(chat_panel_module.banner_lines(settings, "ask"))
+    lines = list(styles)
+    assert styles[lines[0]] == "bold $lens-warn"
+    for line in lines[1:]:
+        want = "$lens-warn" if line.startswith("Warning:") else "$lens-muted"
+        assert styles[line] == want, line
+    allow = dict(chat_panel_module.banner_lines(settings, "allow_all"))
+    assert any(
+        text.startswith("Approval mode") and style == "bold $lens-bad"
+        for text, style in allow.items()
+    )
+
+
+async def test_error_notice_shows_only_the_word_in_red(sessions):
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "hi")
+        await _push(pilot, panel, ev("error", message="endpoint closed"))
+        (notice,) = _blocks(panel, NoticeLine)
+        assert notice.text == "Error: endpoint closed"
+        shown = notice.render()
+        spans = {(shown.plain[s.start : s.end], str(s.style)) for s in shown.spans}
+        assert ("Error:", "$lens-bad") in spans
+        assert (" endpoint closed", "$lens-text") in spans

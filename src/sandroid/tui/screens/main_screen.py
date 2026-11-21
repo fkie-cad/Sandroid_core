@@ -123,8 +123,8 @@ LENS_MIN_ROWS = 6
 CHAT_SPLIT_MIN_HEIGHT = CHAT_MIN_ROWS + LENS_MIN_ROWS
 #: Below this screen width the screen gets ``-narrow`` (narrower Inspector).
 NARROW_WIDTH = 120
-#: Dock frame title (the "Blockhead" antennae + name).
-CHAT_TITLE = "▚▄▄▞ Sandroid AI"
+#: Dock frame title: the name only (the mascot itself shows once, inside).
+CHAT_TITLE = "Sandroid AI"
 
 
 def chat_rows(height: int, ratio: float) -> int:

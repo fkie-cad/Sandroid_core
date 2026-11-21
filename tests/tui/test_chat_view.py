@@ -202,7 +202,11 @@ def test_tool_name_args_and_chip_goldens() -> None:
 
     ok = format_chip(ref="R17", summary="12 rows", elapsed=0.4)
     assert ok.plain == "done · R17 · 12 rows · 0.4s"
-    assert "$lens-ok" in {s.style for s in ok.spans}
+    # Success is the normal case: "done" is muted, not green.
+    assert "$lens-ok" not in {s.style for s in ok.spans}
+    assert ("done", "$chat-muted") in {
+        (ok.plain[s.start : s.end], str(s.style)) for s in ok.spans
+    }
     err = format_chip(ok=False, code="frida_not_attached", message="no session")
     assert err.plain == "frida_not_attached: no session"
     assert "$lens-bad" in {s.style for s in err.spans}
@@ -229,14 +233,65 @@ def test_a_declined_call_is_one_line_with_its_time() -> None:
     block = ToolBlock("kill_process", {"package_name": "com.x"}, running=False)
     block.set_decision("declined by you", style="$lens-warn", approved=False)
     block.set_error("denied", None, elapsed=50)
-    lines = block.render().plain.splitlines()
-    assert [line.strip() for line in lines[1:]] == ["declined by you · 50s"]
-    assert block.get_content_height(None, None, 100) == 2
-    # Allowed, then failed: the decision and the chip both stay.
+    (line,) = block.render().plain.splitlines()
+    assert line.endswith("   declined by you · 50s")
+    assert "denied" not in line
+    assert block.get_content_height(None, None, 100) == 1
+    # Allowed, then failed: the decision and the chip both stay, one line.
     other = ToolBlock("kill_process", {}, running=False)
     other.set_decision("allowed by you", approved=True)
     other.set_error("tool_failed", "boom", elapsed=1)
-    assert len(other.render().plain.splitlines()) == 3
+    (line,) = other.render().plain.splitlines()
+    assert line == "  Kill Process   allowed by you · failed: boom · 1s"
+
+
+def test_tool_call_is_one_line_with_a_dot_only_while_it_runs() -> None:
+    """Redesign: ``● Name  args   status`` on one line; finished calls lose
+    the dot, args give way first when the line is narrow.
+    """
+    block = ToolBlock("list_flows", {"package": "com.example.bank"})
+    line = block.call_line(100)
+    assert line.plain == '● List Flows  package="com.example.bank"   running'
+    styles = {(line.plain[s.start : s.end], str(s.style)) for s in line.spans}
+    assert ("● ", "$lens-accent") in styles
+    assert ("List Flows", "bold") in styles  # text colour, not the tool purple
+    block.set_awaiting()
+    line = block.call_line(100)
+    assert line.plain.startswith("◌ List Flows")
+    assert line.plain.endswith("   waiting on you")
+    block.set_decision("allowed by you")
+    assert block.call_line(100).plain.endswith("allowed by you · running")
+    block.set_progress("classifying 120/412")
+    assert block.call_line(100).plain.endswith("allowed by you · classifying 120/412")
+    block.set_result(ref="R17", summary="12 rows", elapsed=0.4)
+    line = block.call_line(100)
+    assert line.plain.startswith("  List Flows  package=")
+    assert line.plain.endswith("allowed by you · done · R17 · 12 rows · 0.4s")
+    # Narrow: the args shrink, then go; the status stays whole.
+    narrow = block.call_line(60).plain
+    assert narrow.endswith("done · R17 · 12 rows · 0.4s")
+    assert "package" not in narrow
+    assert len(narrow) <= 60
+    tiny = block.call_line(20).plain
+    assert len(tiny) <= 20
+    assert tiny.endswith("…")
+
+
+def test_tool_call_expands_to_its_full_arguments() -> None:
+    block = ToolBlock(
+        "classify_hosts", {"hosts": ["a.example", "b.example"], "q": "x" * 60}
+    )
+    block.set_error("tool_failed", "upstream timed out", elapsed=2)
+    assert block.get_content_height(None, None, 100) == 1
+    block.on_click()
+    assert block.expanded
+    lines = block.render().plain.splitlines()
+    assert lines[1] == '    hosts ["a.example", "b.example"]'
+    assert lines[2] == "    q " + "x" * 60  # in full, no "…"
+    assert lines[3] == "    failed: upstream timed out · 2s"
+    assert block.get_content_height(None, None, 100) == 4
+    block.on_click()
+    assert block.get_content_height(None, None, 100) == 1
 
 
 def test_card_rule_and_notice_goldens() -> None:
@@ -358,14 +413,14 @@ async def test_mascot_timer_runs_only_in_animated_states() -> None:
         assert str(mascot.render()).splitlines()[2] == "▐█x███x█▌"
 
 
-async def test_mascot_hides_below_fifty_columns_and_when_off() -> None:
+async def test_mascot_hides_below_72_columns_and_when_off() -> None:
     app = _MascotApp()
-    async with app.run_test(size=(45, 10)) as pilot:
+    async with app.run_test(size=(60, 10)) as pilot:
         await settle(pilot)
         mascot = app.query_one(ChatMascot)
         assert not mascot.display
         assert not mascot.animated
-        await pilot.resize_terminal(70, 10)
+        await pilot.resize_terminal(80, 10)
         await until(pilot, lambda: mascot.display)
         assert mascot.animated
         mascot.style_name = "off"
@@ -392,8 +447,13 @@ def test_empty_state_shows_the_tray_and_adapts_to_width() -> None:
     wide = format_empty_state(100, model="deepseek-v3", endpoint="fhgenie", remote=True)
     lines = wide.plain.splitlines()
     assert any(line.strip() == "╘═══════╛" for line in lines)
-    assert any("Sandroid AI · experimental" in line for line in lines)
-    assert any("deepseek-v3 @ fhgenie · REMOTE" in line for line in lines)
+    # The mascot is the one brand mark: no second "Sandroid AI" title.
+    assert "Sandroid AI" not in wide.plain
+    assert any(
+        "deepseek-v3 @ fhgenie · REMOTE · experimental" in line for line in lines
+    )
+    assert "›" not in wide.plain  # examples are indented, not glyph-marked
+    assert "Sandroid AI" in format_empty_state(100, mascot_style="off").plain
     assert "/permissions" in wide.plain
     narrow = format_empty_state(60, mascot_style="ascii")
     assert "`-------'" in narrow.plain
@@ -438,15 +498,15 @@ async def test_blocks_render_and_update_in_place() -> None:
         await settle(pilot)
         assert t.current_turn == 1
         assert tool.running
-        assert tool.size.height == 2  # the call, then "running" (a word)
-        assert str(tool.render()).splitlines()[1] == "  ● running"
-        assert tool.call_line().plain.startswith("List Flows")
+        assert tool.size.height == 1  # one line: dot, call, "running"
+        assert str(tool.render()).startswith("● List Flows")
+        assert str(tool.render()).endswith("   running")
         tool.set_result(ref="R17", summary="12 rows", elapsed=0.4)
         thought.finish(4)
         await settle(pilot)
         assert not tool.running
-        assert tool.size.height == 2
-        assert str(tool.render()).splitlines()[1] == "  done · R17 · 12 rows · 0.4s"
+        assert tool.size.height == 1
+        assert str(tool.render()).endswith("   done · R17 · 12 rows · 0.4s")
         assert str(thought.render()) == "Thought for 4s"
         assert t.block("c1") is tool
 
@@ -468,7 +528,7 @@ async def test_blocks_render_and_update_in_place() -> None:
         await reply.append_text("The app talks to **three** hosts.")
         await reply.finish()
         await settle(pilot)
-        assert "  frida_not_attached: no session" in str(failed.render())
+        assert "   frida_not_attached: no session" in str(failed.render())
         assert str(notice.render()).startswith("Retrying in 2s · attempt 3/5")
         assert "compacted · 182k → 41k" in str(rule.render())
         body = str(card.render()).splitlines()

@@ -129,7 +129,7 @@ async def test_ctrl_y_opens_focuses_and_closes(saved) -> None:
         assert app.focused.id == "chat-input"
         assert ms.chat_has_focus
         assert ms.has_class("-chat-open")
-        assert dock.border_title == "▚▄▄▞ Sandroid AI"
+        assert dock.border_title == "Sandroid AI"  # the mascot shows inside
         assert dock.border_subtitle == "50% · Shift+Up/Down size · ^Y close"
         assert _rows(ms) == chat_rows(_left_h(ms), 0.5)
 

@@ -117,6 +117,9 @@ logger = logging.getLogger(__name__)
 #: The orchestrator's system prompt (the session appends the toolset catalogue).
 SYSTEM_PROMPT = f"{ORCHESTRATOR_PROMPT_V2}\n\n{ORCHESTRATOR_AGENTS_ADDENDUM}"
 
+#: The leading word of an error notice (the only part in the bad colour).
+ERROR_HEAD = "Error:"
+
 #: Shortest gap between two drains of the event queue (about 20 Hz).
 DRAIN_INTERVAL_S = 0.05
 
@@ -234,20 +237,37 @@ def egress_banner_lines(settings: Any, mode: str) -> list[str]:
     return lines
 
 
+#: Banner lines that stay in the warn colour on a ready endpoint (the
+#: rest is plain information, in the lens's secondary text colour).
+_BANNER_WARN_PREFIXES = ("Warning:", "ai.allow_remote")
+
+
 def banner_lines(settings: Any, mode: str) -> list[tuple[str, str]]:
-    """The banner's ``(text, style)`` lines (theme variables only)."""
+    """The banner's ``(text, style)`` lines (theme variables only).
+
+    The headline is bold warn. On a ready endpoint the body is secondary
+    text (``$lens-muted``) and only real warnings (the plaintext API key,
+    ``allow_remote``) stay warn; an endpoint that is not ready keeps the
+    whole body bad, an unconfigured one muted. The allow_all line is bold
+    bad.
+    """
     lines = egress_banner_lines(settings, mode)
+    ready = settings.is_configured and settings.is_ready
     if not settings.is_configured:
         body = "$chat-muted"
-    elif settings.is_ready:
-        body = "$lens-warn"
+    elif ready:
+        body = "$lens-muted"
     else:
         body = "$lens-bad"
     out = [(lines[0], "bold $lens-warn")]
     for line in lines[1:]:
-        out.append(
-            (line, "bold $lens-bad" if line.startswith("Approval mode") else body)
-        )
+        if line.startswith("Approval mode"):
+            style = "bold $lens-bad"
+        elif ready and line.startswith(_BANNER_WARN_PREFIXES):
+            style = "$lens-warn"
+        else:
+            style = body
+        out.append((line, style))
     return out
 
 
@@ -883,7 +903,9 @@ class AgentTranscriptView(ChatTranscript):
         elif kind == "error":
             self._finish_stream()
             message = redact_secrets(p.get("message") or p.get("kind") or "error")
-            self.add_block(NoticeLine(f"Error: {message}", style="$lens-bad"))
+            self.add_block(
+                NoticeLine(f"Error: {message}", style="$lens-bad", head=ERROR_HEAD)
+            )
         elif kind == "turn_end":
             self._finish_stream()
             rounds = int(p.get("rounds") or 0)
@@ -1245,7 +1267,7 @@ class ChatPanel(Widget):
     ChatPanel .chat-banner {
         width: 1fr;
         height: auto;
-        padding: 0 1;
+        padding: 0 1 0 2;
         margin: 0 0 1 0;
         text-wrap: nowrap;
     }
@@ -1462,6 +1484,7 @@ class ChatPanel(Widget):
             widgets.append(self._empty)
         self._intro = widgets
         transcript.mount(*widgets)
+        self._sync_mascot()
 
     def _legacy_notice(self) -> NoticeLine | None:
         """The one-time "previous declines are not enforced" notice."""
@@ -1547,6 +1570,8 @@ class ChatPanel(Widget):
             return
         mascot.set_style(configured_mascot_style())
         mascot.set_state(_MASCOT_FOR_STATE.get(state or self._state, "idle"))
+        # One mascot on screen: the empty state's, else the live one.
+        mascot.set_suppressed(self._empty is not None)
 
     def _set_state(self, state: str, detail: str | None = None) -> None:
         self._state = state
@@ -1562,18 +1587,24 @@ class ChatPanel(Widget):
                 with contextlib.suppress(Exception):
                     self._empty.remove()
                 self._empty = None
+                self._sync_mascot()
         return self._transcript().add_block(block, key=key)
 
     def _notice(
         self, text: str, *, style: str = "$chat-muted", key: str | None = None
     ) -> NoticeLine:
-        """Add (or update, with an existing *key*) a one-line notice."""
+        """Add (or update, with an existing *key*) a one-line notice.
+
+        An ``Error: ...`` notice shows only ``Error:`` in its colour.
+        """
         if key is not None:
             existing = self._transcript().block(key)
             if isinstance(existing, NoticeLine):
                 existing.set_notice(text, style=style)
                 return existing
-        return self._add(NoticeLine(text, style=style), key=key)  # type: ignore[return-value]
+        head = ERROR_HEAD if text.startswith(ERROR_HEAD) else None
+        notice = NoticeLine(text, style=style, head=head)
+        return self._add(notice, key=key)  # type: ignore[return-value]
 
     def _info(self, text: str) -> NoticeLine:
         """A multi-line informational block (``/context`` and friends)."""
@@ -1763,6 +1794,7 @@ class ChatPanel(Widget):
             block = self._running_tool_block(str(p.get("tool", "")))
             if block is not None:
                 self._approval_blocks[rid] = block
+                block.set_awaiting()
         self._show_next_approval()
 
     def _running_tool_block(self, tool: str) -> ToolBlock | None:

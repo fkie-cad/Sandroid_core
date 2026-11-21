@@ -510,8 +510,8 @@ reached through a small ``session_root()`` helper so it can move later.
 - **Header:** state · model · ``41k/262k 16%`` (muted, then warn at 50%, error at 85%) ·
   ``n compacted`` · ``n agents``.
 - **Tool calls:** ``Humanized name`` plus args. The result is a collapsed one-line chip
-  (``done · R17 · 12 rows · 0.4s``, or ``code: message``), its first word in the
-  ok / bad colour.
+  (``done · R17 · 12 rows · 0.4s``, or ``code: message``), its first word muted when
+  done and in the warn / bad colour when not.
 - **Slash commands:** ``/new``, ``/threads``, ``/compact [focus]``, ``/context`` (breakdown:
   system, tools schema, ambient, history, tool results, summaries, last request,
   session totals), ``/permissions``, ``/agents``, ``/doctor``.
@@ -644,23 +644,30 @@ renders live in the session scratchpad (``ui-dock/mockups.txt``, ``ui-look/mock_
 - **Dock frame.**
 
   - Border ``round $lens-rule``; under ``:focus-within`` it becomes ``$lens-rule-focus``.
-  - Title ``▚▄▄▞ Sandroid AI`` in ``$lens-accent``.
+  - Title ``Sandroid AI`` in ``$lens-accent`` (no mascot glyph: the mascot shows once,
+    inside the dock).
   - Subtitle ``50% · Shift+Up/Down size · ^Y close``.
 
 - **Transcript.** Replace the RichLog with ``ChatTranscript(VerticalScroll)``, holding one
   widget per block keyed by turn, call or agent id:
 
-  - ``UserBlock``: the full-width band, "Variant I".
+  - ``UserBlock``: the full-width band with an accent bar on its left edge, the
+    transcript's one speaker marker (no ``›`` prefix).
   - ``ReplyBlock``: ``Markdown`` fed by ``get_stream()``, so only the live block
-    re-renders.
+    re-renders. Plain ``$lens-text`` (not a reply colour); headings ``$lens-title``,
+    inline code and fences on ``$lens-band``.
   - ``ReasoningLine``: ``Thinking… 3s`` while the model reasons, ``Thought for 4s``
     after.
   - ``ToolBlock``:
 
-    - The call line is ``Name args`` in the tool colour; the line under it reads
-      ``running`` (or the tool's progress) until the result chip replaces it.
+    - One line: ``● Name  args   status``. The gutter dot shows only while the call
+      runs (``●`` accent) or waits for an approval (``◌`` wait colour). The name is
+      bold text, the args muted; the status reads ``running``, the progress, ``waiting
+      on you``, then the approval answer and the result chip. Narrow lines drop the
+      args first. A click expands the call: every argument in full, then the status.
     - The result chip ``done · R17 · 12 rows · 0.4s`` or ``code: message`` is filled
-      in place. States are plain words in their theme colour, never glyphs.
+      in place. States are plain words (``done`` muted, failures warn / bad), never
+      glyphs.
 
   - ``AgentCard``: a round border, the title ``researcher r2 · done · 38s · 9.2k tok``
     (the status word in its colour: running accent, done ok, failed bad, cancelled muted),
@@ -671,7 +678,7 @@ renders live in the session scratchpad (``ui-dock/mockups.txt``, ``ui-look/mock_
 
   Every block is ``width: 1fr``; message boxes use the full width. At most about 300
   blocks stay mounted, and older turns fold into ``N earlier turns``.
-- **Header** (one row): state, model, ``REMOTE`` / ``EXPERIMENTAL``, then
+- **Header** (one row): state, model, ``REMOTE`` (warn) / ``EXPERIMENTAL`` (muted), then
   ``41k/262k 16%``. The colour is ``$lens-dim`` below 50%, ``$lens-warn`` from 50% and
   ``$lens-bad`` from 85%. After that come ``n compacted`` and ``n agents``. At 60
   columns the model is dropped. Updates are throttled to 10 Hz or less.
@@ -698,9 +705,12 @@ renders live in the session scratchpad (``ui-dock/mockups.txt``, ``ui-look/mock_
 
 - **Below the scroll area:** the agents bar (one line) and the input row
   (``Ask Sandroid… / for commands``, subtitle ``Enter send · ^X stop``) with the mascot
-  beside it. Typing ``/`` shows a slash-command hint list.
+  beside it (hidden while the empty state shows its own, and below 72 columns). Typing
+  ``/`` shows a slash-command hint list.
 - **Empty state.** Mascot C (the head standing in a ``╘═══════╛`` sandbox tray), plus
-  the model, endpoint and egress notice, two example prompts and the slash commands.
+  the model and endpoint (one muted line), example prompts and the slash commands.
+- **Egress banner.** The headline is bold warn; on a ready endpoint the rest is
+  ``$lens-muted`` and only real warnings (plaintext API key, ``allow_remote``) stay warn.
 - **Mascot B, "Blockhead".** It is 9×3 and drawn with half and quadrant blocks. It sits
   in a normal ``Horizontal`` beside the 3-row input, with no overlay layer.
 
@@ -722,7 +732,7 @@ renders live in the session scratchpad (``ui-dock/mockups.txt``, ``ui-look/mock_
   ``ai.chat_mascot`` is one of ``auto``, ``blocks``, ``ascii`` or ``off``, and the old
   ``show_chat_mascot`` is kept as an alias. ``auto`` chooses ASCII when the encoding is
   not UTF-8 or ``TERM`` is ``linux``, ``vt100`` or ``dumb``. The mascot is hidden below
-  50 columns, and its timer runs only in animated states. The Braille mascot, overlay
+  72 columns (the empty state's below 50), and its timer runs only in animated states. The Braille mascot, overlay
   layer and ``_log_full`` gating are deleted. The startup logo is unchanged.
 - **Files.** The block widgets, pure formatters and ``ChatMascot`` go in one new module,
   ``tui/widgets/chat_view.py``. The approval card replaces the body of
