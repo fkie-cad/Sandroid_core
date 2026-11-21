@@ -17,6 +17,13 @@ writes the world's phone contents onto it:
    arrives; the device stamp records the world and the ledger's hash.
 8. Network restored; backup and sync re-verified.
 
+The ledger also lists every item by its world id with its row id and a
+hash of the row (``items``), so :func:`refresh` can later bring the device
+to an edited world by removing and adding only what differs. :func:`topup`
+adds the world's SMS, calls and events of the time since the anchor (a
+loaded persona snapshot looks used today); the device stamp records each
+top-up before its rows go in.
+
 Run it from a worker thread (it blocks for minutes), never the UI thread.
 Every adb call names the serial. The identity layer and the persona snapshot
 are the caller's next steps (see :func:`persona_snapshot_name`).
