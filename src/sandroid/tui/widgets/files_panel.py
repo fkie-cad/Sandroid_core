@@ -442,6 +442,11 @@ def collapse_follow_notes(
     return out
 
 
+def _event_kind(ev) -> tuple:
+    """What makes two Events lines the same, apart from their time."""
+    return (ev.label, ev.category, ev.via, ev.source, ev.other, ev.process, ev.pid)
+
+
 def _fmt_span(span: timedelta) -> str:
     """``under 1 s`` / ``4 s`` / ``2 min 5 s`` / ``1 h 3 min``."""
     secs = int(span.total_seconds())
@@ -3023,36 +3028,61 @@ class FilesPanel(Widget):
             and (start is None or m.when >= start)
         ][: self._MAX_OLDER_NOTES]
         pending = [m for m in pending if m.when >= oldest] + notes + older[:1]
+        kept = len(act.events)
+        if act.count > kept:
+            # Only the newest EVENTS_PER_PATH are kept per file: say so.
+            out.append(f"last {kept} of {act.count:,} events", style=_c("dim"))
+        # Identical consecutive events (the same op, companion, process and
+        # other side; times differ) are one line with a count, newest time.
+        run: list = []
+
+        def flush() -> None:
+            if run:
+                self._event_line(out, run[0], len(run))
+                run.clear()
+
         for ev in reversed(act.events):
-            while pending and pending[0].when > ev.when:
-                mark = pending.pop(0)
-                if out:
-                    out.append("\n")
-                out.append(mark.text, style=_SEP_STYLE[mark.kind]())
-            if out:
-                out.append("\n")
-            out.append(_fmt_time(ev.when), style=_c("dim"))
-            out.append("  ")
-            out.append(
-                f"{ev.label or '?':<7}", style=op_color(ev.category) or ev.color or ""
-            )
-            extra = []
-            if ev.via:
-                extra.append(ev.via)
-            if ev.source == "renamed" and ev.other:
-                extra.append(f"to {app_relative(ev.other)}")
-            elif ev.source == "parent" and ev.other:
-                extra.append(f"directory {app_relative(ev.other)} deleted")
-            elif ev.other:
-                extra.append(f"from {app_relative(ev.other)}")
-            if ev.process:
-                extra.append(ev.process)
-            if extra:
-                out.append("  " + " · ".join(extra), style=_c("dim"))
+            if pending and pending[0].when > ev.when:
+                flush()
+                while pending and pending[0].when > ev.when:
+                    mark = pending.pop(0)
+                    if out:
+                        out.append("\n")
+                    out.append(mark.text, style=_SEP_STYLE[mark.kind]())
+            elif run and _event_kind(run[0]) != _event_kind(ev):
+                flush()
+            run.append(ev)
+        flush()
         for mark in pending:
             out.append("\n")
             out.append(mark.text, style=_SEP_STYLE[mark.kind]())
         return out
+
+    @staticmethod
+    def _event_line(out: Text, ev, n: int = 1) -> None:
+        """One Events line (``n`` > 1: a run of identical events)."""
+        if out:
+            out.append("\n")
+        out.append(_fmt_time(ev.when), style=_c("dim"))
+        out.append("  ")
+        out.append(
+            f"{ev.label or '?':<7}", style=op_color(ev.category) or ev.color or ""
+        )
+        extra = []
+        if ev.via:
+            extra.append(ev.via)
+        if ev.source == "renamed" and ev.other:
+            extra.append(f"to {app_relative(ev.other)}")
+        elif ev.source == "parent" and ev.other:
+            extra.append(f"directory {app_relative(ev.other)} deleted")
+        elif ev.other:
+            extra.append(f"from {app_relative(ev.other)}")
+        if ev.process:
+            extra.append(ev.process)
+        if extra:
+            out.append("  " + " · ".join(extra), style=_c("dim"))
+        if n > 1:
+            out.append(f"  ×{n}", style=_c("muted"))
 
     #: Restart/exit/loss lines shown before a file's first event (newest).
     _MAX_OLDER_NOTES = 5

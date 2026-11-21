@@ -347,3 +347,35 @@ def test_the_bar_uses_short_labels_before_it_drops_the_keys(width):
         assert "Shift+H filter · Shift+X clear" in plain
     finally:
         row_highlights.reset_for_tests()
+
+
+# --------------------------------------------------------------------------
+# V6: Inspector Events ("last 30 of N", runs of identical events)
+# --------------------------------------------------------------------------
+
+
+async def test_events_say_how_many_are_kept_and_fold_identical_runs() -> None:
+    from datetime import timedelta
+
+    db = f"{ROOT}/databases/places.sqlite"
+    app = _Harness()
+    async with app.run_test(size=(160, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        panel.ingest(_items(*[_fse("FSE_CONTENT_MODIFIED", db + "-wal")] * 40), now=T0)
+        later = T0 + timedelta(seconds=5)
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", db + "-journal")), now=later)
+        panel.ingest(
+            _items(*[_fse("FSE_CONTENT_MODIFIED", db + "-wal")] * 3), now=later
+        )
+        _keys(panel)
+        events = _plain(_tab(panel._inspector_for(_row(panel, db)), "Events"))
+        lines = events.splitlines()
+        assert lines[0] == "last 30 of 44 events"
+        assert lines[1].startswith("10:40:05  MODIFY")
+        assert lines[1].endswith("×3")
+        assert "-journal" in lines[2]
+        assert not lines[2].endswith("×1")
+        assert lines[3].startswith("10:40:00  MODIFY")
+        assert lines[3].endswith("×26")  # 30 kept: 3 + 1 + 26
+        assert len(lines) == 4
+        await pilot.pause()
