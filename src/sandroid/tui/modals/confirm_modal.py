@@ -25,6 +25,9 @@ class ConfirmModal(ForensicModal[bool]):
       focus (Enter declines), ``y``/Yes are ignored for ``ARM_SECONDS`` after
       the dialog opened (typed-ahead keys), and any other letter or digit
       closes it as No ("that looked like typing").
+    - ``yes_keys``: further keys that answer Yes, like ``y`` (the command
+      the dialog confirms, e.g. ``R`` for "Restart now?": pressing Shift+R
+      again restarts instead of reading as typing).
     """
 
     DEFAULT_CSS = """
@@ -80,6 +83,7 @@ class ConfirmModal(ForensicModal[bool]):
         id: str = None,
         classes: str = None,
         guard_typing: bool = False,
+        yes_keys: tuple[str, ...] = (),
     ):
         """Initialize the confirmation modal.
 
@@ -92,9 +96,11 @@ class ConfirmModal(ForensicModal[bool]):
             id: Widget ID
             classes: CSS classes
             guard_typing: Guard against stray typing (see the class doc).
+            yes_keys: Keys that answer Yes besides ``y`` (see the class doc).
         """
         super().__init__(name=name, id=id, classes=classes)
         self.guard_typing = guard_typing
+        self.yes_keys = tuple(yes_keys)
         self._opened_at = time.monotonic()
         self._stray = False
         if guard_typing:
@@ -125,7 +131,9 @@ class ConfirmModal(ForensicModal[bool]):
         from sandroid.tui.utils.markup import escape
 
         yes, no = escape(self.yes_label), escape(self.no_label)
-        return f"[dim]y {yes}  n or {format_key('escape')} {no}[/dim]"
+        # yes_keys answer Yes too (Shift+R in "Restart ... now?").
+        keys = " or ".join(["y", *(format_key(k) for k in self.yes_keys)])
+        return f"[dim]{keys} {yes}  n or {format_key('escape')} {no}[/dim]"
 
     def on_descendant_focus(self, _event) -> None:
         mark_focused_button(self)
@@ -149,6 +157,11 @@ class ConfirmModal(ForensicModal[bool]):
             # neither an answer here nor a command below.
             event.stop()
             event.prevent_default()
+            return
+        if event.key in self.yes_keys:
+            event.stop()
+            event.prevent_default()
+            self.action_yes()
             return
         char = event.character or ""
         if len(char) == 1 and char.isalnum() and event.key not in ("y", "n"):

@@ -545,6 +545,8 @@ class MainScreen(Screen):
         # Typing guard (see on_key): monotonic deadline, ignored text.
         self._typing_until = 0.0
         self._typed_ignored = ""
+        # monotonic time of the guard's start or its last swallowed key.
+        self._typing_last = 0.0
         logger.debug("[MAIN_SCREEN] __init__ complete")
 
     def compose(self) -> ComposeResult:
@@ -1520,6 +1522,9 @@ class MainScreen(Screen):
     #: Seconds after an unhandled ``/`` or a stray-typing cancel (and after
     #: each further swallowed key) during which printable keys are swallowed.
     TYPING_GUARD_SECONDS = 1.5
+    #: A swallowed key this long after the previous one was pressed on
+    #: purpose, not typed as part of a word: a notice says it did not run.
+    TYPING_PAUSE_SECONDS = 0.5
 
     @property
     def AUTO_FOCUS(self) -> str:
@@ -1596,7 +1601,8 @@ class MainScreen(Screen):
         """
         import time
 
-        self._typing_until = time.monotonic() + self.TYPING_GUARD_SECONDS
+        self._typing_last = time.monotonic()
+        self._typing_until = self._typing_last + self.TYPING_GUARD_SECONDS
         self._typed_ignored = ""
 
     def typing_guard_active(self) -> bool:
@@ -1634,11 +1640,24 @@ class MainScreen(Screen):
             return False
         if isinstance(self.focused, Input | TextArea):
             return False
+        paused = now - self._typing_last >= self.TYPING_PAUSE_SECONDS
+        self._typing_last = now
         self._typing_until = now + self.TYPING_GUARD_SECONDS
         self._typed_ignored += event.character or ""
         notice = getattr(self.lens_widget(), "stray_key_swallowed", None)
-        if notice is not None:
+        if notice is not None and event.key == "R":
             notice(event.key)  # App lens: "Restart not run"
+        elif paused:
+            # Not the rest of a fast word but a key pressed on purpose (N6:
+            # a q after a dialog closed as typing opened nothing): say why.
+            from sandroid.tui.key_display import format_key
+
+            self.app.notify(
+                f"{format_key(event.key)} not run: keys right after typing are "
+                "ignored for a moment. Press it again.",
+                severity="warning",
+                timeout=3,
+            )
         return True
 
     def _lens_binding_for(self, key: str):

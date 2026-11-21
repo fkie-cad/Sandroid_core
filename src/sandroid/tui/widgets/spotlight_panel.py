@@ -1599,6 +1599,7 @@ class SpotlightPanel(Widget):
                 yes_label="Restart",
                 no_label="Keep running",
                 guard_typing=True,
+                yes_keys=("R",),  # Shift+R restarts here too, not "typing"
             ),
             on_result,
         )
@@ -1664,8 +1665,12 @@ class SpotlightPanel(Widget):
             self._run_frida_action(self._work_start, "start", "Spawning an app")
 
     def action_restart_app(self) -> None:
-        # No dialog (used often), but never inside the stray-typing window:
-        # an R in a typed word must not restart the app.
+        """Shift+R: restart after a guarded confirm, as Shift+K kills.
+
+        An R in a typed word ("zRK", N6-B2) restarted the app: the dialog
+        has No focused, and the next letter of the word closes it as typing.
+        Shift+R (or y) in the dialog restarts, so R R stays quick.
+        """
         from sandroid.tui.modals.confirm_modal import typing_guard_active
 
         if typing_guard_active(self.app):
@@ -1673,7 +1678,27 @@ class SpotlightPanel(Widget):
             return
         if not self._require_package():
             return
-        self._run_frida_action(self._work_restart, "restart", "Restarting an app")
+        from sandroid.tui.modals import ConfirmModal
+
+        package = self._current_package()
+
+        def on_result(yes: bool | None) -> None:
+            if yes:
+                self._run_frida_action(
+                    self._work_restart, "restart", "Restarting an app"
+                )
+
+        self.app.push_screen(
+            ConfirmModal(
+                title="Restart app",
+                message=f"Restart {package}? The bypasses that are on are "
+                f"applied at its start.{self._restart_stops(package)}",
+                yes_label="Restart",
+                guard_typing=True,
+                yes_keys=("R",),
+            ),
+            on_result,
+        )
 
     def stray_key_swallowed(self, key: str) -> None:
         """The main screen swallowed ``key`` as stray typing (notice for R)."""

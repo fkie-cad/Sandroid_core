@@ -122,12 +122,83 @@ async def test_restart_is_not_run_inside_the_stray_typing_window(
         assert ms.typing_guard_active()
         ms.lens_widget().dispatch_action_cell("act-restart")
         assert app_lens == []
-        # The window is over: R restarts without a dialog.
+        # The window is over: R asks first (N6-B2), R again restarts.
         ms._typing_until = 0.0
+        await pilot.press("R")
+        await settle(pilot)
+        modal = app.screen
+        assert type(modal).__name__ == "ConfirmModal"
+        assert app.focused.id == "no"
+        modal._opened_at -= 61.0  # the arm window is over
         await pilot.press("R")
         await settle(pilot)
         assert app_lens == ["restart"]
         assert type(app.screen).__name__ == "MainScreen"
+
+
+async def test_a_typed_word_with_an_r_does_not_restart(app_lens) -> None:
+    """N6-B2: "zRK" typed fast restarted Wikipedia. R now asks first, and
+    the K after it closes the dialog as typing (no kill dialog either).
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=SIZE, notifications=True) as pilot:
+        await boot(app, pilot)
+        _burst(app, "z", "R", "K")
+        await settle(pilot)
+        assert type(app.screen).__name__ == "MainScreen"
+        assert app_lens == []
+        assert any("looked like typing" in m for m in _messages(app))
+
+
+async def test_a_key_pressed_on_purpose_in_the_guard_says_it_did_not_run(
+    app_lens,
+) -> None:
+    """N6-B2 follow-up: q right after a dialog closed as typing opened no quit
+    dialog and said nothing. A key after a pause names itself; the rest of a
+    fast word stays silent.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=SIZE, notifications=True) as pilot:
+        await boot(app, pilot)
+        ms = app.screen
+        ms.start_typing_guard()
+        await pilot.press("x")  # the rest of the word: silent
+        await settle(pilot)
+        assert not any("not run" in m for m in _messages(app))
+        ms._typing_last -= 1.0  # a pause, then q on purpose
+        await pilot.press("q")
+        await settle(pilot)
+        assert type(app.screen).__name__ == "MainScreen"
+        assert any(m.startswith("q not run") for m in _messages(app))
+
+
+async def test_restart_now_dialog_takes_shift_r_as_restart(app_lens) -> None:
+    """N6-B2: in "Restart … now?" (after arming a start-time bypass) Shift+R
+    was called typing and closed the dialog; it restarts now, and starts no
+    typing guard (the next q opens the quit dialog).
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=SIZE, notifications=True) as pilot:
+        await boot(app, pilot)
+        panel = app.screen.lens_widget()
+        panel._safe_pid = lambda: 4242
+        panel._offer_restart_for("emulator")
+        await settle(pilot)
+        modal = app.screen
+        assert type(modal).__name__ == "ConfirmModal"
+        modal._opened_at -= 61.0
+        await pilot.press("R")
+        await settle(pilot)
+        assert app_lens == ["restart"]
+        assert type(app.screen).__name__ == "MainScreen"
+        assert not app.screen.typing_guard_active()
+        assert not any("looked like typing" in m for m in _messages(app))
 
 
 # --------------------------------------------------------------------------
