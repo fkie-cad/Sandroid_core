@@ -278,8 +278,12 @@ def restore_selinux_at_exit() -> list[str]:
     (``--proxy-clear``, ``--install-apk``, ``--dexray``, the API, ...) end
     without that flow, so :func:`initialize_core` registers this for them.
     Reuses :func:`~sandroid.services.setup_checks.restore_selinux_on_quit`
-    (only devices whose mode Sandroid changed; the mode found first). Never
-    raises. Returns the restored serials.
+    (only devices whose mode Sandroid changed; the mode found first) and
+    removes the on-device marker (``setup_checks.SELINUX_MARKER``) that
+    ``check_and_set_selinux`` writes. A run that crashed before this hook
+    leaves the marker, so the next start -- headless or TUI -- finds
+    Permissive + marker, takes Enforcing as the mode found, and restores it
+    at its own exit. Never raises. Returns the restored serials.
     """
     try:
         from sandroid.services.setup_checks import restore_selinux_on_quit

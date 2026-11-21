@@ -307,9 +307,19 @@ def test_headless_paths_restore_selinux_at_exit(monkeypatch):
     # The exit hook reuses the TUI's restore: back to the mode found first.
     monkeypatch.setattr(setup_checks, "_selinux_found", {})
     monkeypatch.setattr(setup_checks, "_selinux_changed", set())
-    mode = {"value": "Enforcing"}
+    mode = {"value": "Enforcing", "marker": ""}
+    boot = "boot-1"
 
     def _send(cls, command, serial=None, **_kw):
+        # A device with SELinux and the on-device original-state marker.
+        if setup_checks.SELINUX_MARKER in command:
+            if "echo Enforcing" in command:
+                mode["marker"] = f"Enforcing {boot}"
+            elif "rm -f" in command:
+                mode["marker"] = ""
+            elif "cat" in command:
+                return f"{mode['marker']}\n{boot}\n", ""
+            return "", ""
         if command.endswith("getenforce"):
             return mode["value"], ""
         if command.endswith("setenforce 0"):
@@ -322,9 +332,23 @@ def test_headless_paths_restore_selinux_at_exit(monkeypatch):
     monkeypatch.setattr(Adb, "get_target_device", classmethod(lambda cls: "emu-1"))
     assert setup_checks.check_and_set_selinux(Adb, notify_clock=False).passed
     assert mode["value"] == "Permissive"
+    assert mode["marker"] == f"Enforcing {boot}"  # noted on the device
     assert initializer.restore_selinux_at_exit() == ["emu-1"]
     assert mode["value"] == "Enforcing"
+    assert mode["marker"] == ""  # removed by the restore
     assert initializer.restore_selinux_at_exit() == []  # once
+
+    # A headless run that crashed (no exit hook) leaves Permissive + the
+    # marker; the next headless start finds both and restores at its exit.
+    assert setup_checks.check_and_set_selinux(Adb, notify_clock=False).passed
+    monkeypatch.setattr(setup_checks, "_selinux_found", {})  # new process
+    monkeypatch.setattr(setup_checks, "_selinux_changed", set())
+    assert mode["value"] == "Permissive"
+    assert mode["marker"]
+    assert setup_checks.check_and_set_selinux(Adb, notify_clock=False).passed
+    assert initializer.restore_selinux_at_exit() == ["emu-1"]
+    assert mode["value"] == "Enforcing"
+    assert mode["marker"] == ""
 
 
 def test_api_module_help_serial_and_exit_codes(monkeypatch, capsys):
