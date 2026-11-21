@@ -2457,3 +2457,80 @@ def test_a_sensitive_step_keeps_its_masked_summary_for_later_copies():
     copy_doc = {"sections": [{"blocks": [step]}]}
     out = report_engine.annotate_rerender(copy_doc, "gone", mask_sensitive=True)
     assert "hunter2" not in json.dumps(out["sections"])
+
+
+# ---------------------------------------------------------------------------
+# N4-B3: TUI sessions and Record/Replay runs have no timeline_seal.json
+# ---------------------------------------------------------------------------
+
+_STEPS = [
+    {"i": 1, "what": "tap 'OK' (Button)", "way": "by element", "check": "verified"},
+    {"i": 2, "what": "tap 'Save'", "way": "by position", "reason": "not found",
+     "check": "unchecked"},
+]  # fmt: skip
+
+
+def _texts(section: dict) -> str:
+    return json.dumps(section["blocks"], ensure_ascii=False)
+
+
+def test_run_bundle_without_seal_reports_timeline_steps_and_files(session):
+    """Shift+P on a TUI run: the timeline named in run.json is sealed now,
+    and run.json's steps, verdicts and changes are in the report.
+    """
+    bundle = session.root / "results" / "runs" / "20261121_042602_eac980"
+    bundle.mkdir(parents=True)
+    run = {
+        "run_id": bundle.name,
+        "label": "Recording 04:18 · Rewind + Replay",
+        "mode": "rewind-replay",
+        "timeline_folder": str(session.tl.path.parent),
+        "record_window": [BASE.timestamp(), BASE.timestamp() + 60],
+        "completed_at": "2026-11-19T13:00:00+01:00",
+        "verdicts": {"/data/data/org.x/db": "replay changed it differently"},
+        "changed_files": [{"/data/data/org.x/db": ["  INSERT id=1"]}],
+        "rewind": {"steps": _STEPS, "result_words": "done, 1 step unchecked"},
+    }
+    (bundle / "run.json").write_text(json.dumps(run), encoding="utf-8")
+    out = run_report.report_from_folder(bundle)
+    assert out.timeline_note is None
+    doc = json.loads(out.report_json.read_text())
+    assert doc["timeline"]["available"]
+    assert doc["scope"]["kind"] == "run"
+    assert _steps(doc)  # the transcript
+    rec = _texts(_section(doc, "recordings"))
+    for text in ("tap 'Save'", "by position: not found", "unchecked",
+                 "replay changed it differently", "INSERT id=1",
+                 "done, 1 step unchecked"):  # fmt: skip
+        assert text in rec
+    assert "Record/Replay" in _texts(_section(doc, "results"))
+    assert "No results file" not in _texts(_section(doc, "overview"))
+    assert any("sealed when this report was made" in s for s in _sentences(doc))
+
+
+def test_session_folder_without_seal_reports_timeline_and_recordings(session):
+    """``sandroid --report-from <session folder>`` of a TUI session."""
+    folder = session.tl.path.parent / "recordings" / "rec-1"
+    folder.mkdir(parents=True)
+    rec = {
+        "rec_id": "rec-1",
+        "name": "Recording 04:18",
+        "pkg": "org.x",
+        "started": BASE.timestamp(),
+        "stopped": BASE.timestamp() + 60,
+        "changed": [{"path": "/data/data/org.x/db"}],
+        "selected": ["/data/data/org.x/db"],
+        "versions": {"/data/data/org.x/db": {"after": "v001", "before": "v002"}},
+        "runs": [{"n": 1, "kind": "rewind-replay", "result": "unchecked",
+                  "run_id": "r1", "steps": _STEPS,
+                  "verdicts": {"/data/data/org.x/db": "same as your run"}}],
+    }  # fmt: skip
+    (folder / "recording.json").write_text(json.dumps(rec), encoding="utf-8")
+    out = run_report.report_from_folder(session.root / "session")
+    doc = json.loads(out.report_json.read_text())
+    assert doc["timeline"]["available"]
+    assert _steps(doc)
+    text = _texts(_section(doc, "recordings"))
+    for part in ("Recording 04:18", "after v001, before v002", "tap 'Save'",
+                 "same as your run"):  # fmt: skip
+        assert part in text

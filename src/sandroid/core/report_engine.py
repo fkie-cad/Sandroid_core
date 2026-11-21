@@ -181,6 +181,10 @@ class ReportContext:
     bundle_sha256: str | None = None
     bundle_error: str | None = None
     notes: list[str] = field(default_factory=list)
+    #: Record/Replay data of the folder (``run.json`` of a run bundle, or
+    #: the session's ``recordings/*/recording.json``), see
+    #: :func:`_load_recordings`.
+    recordings: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -387,6 +391,160 @@ def _load_bundle(
     except Exception as exc:
         logger.warning("Report: results JSON unavailable: %s", exc)
         ctx.bundle_error = f"{type(exc).__name__}: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Record/Replay data (run.json, recording.json)
+# ---------------------------------------------------------------------------
+
+#: A Record/Replay run bundle's record (``runs/<run id>/run.json``).
+RUN_JSON_NAME = "run.json"
+
+
+def _json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _kv_rows(pairs: Iterable[tuple[str, Any]]) -> list[list[Any]]:
+    return [[k, v] for k, v in pairs if v not in (None, "", [], {})]
+
+
+def _run_entry(title: str, run: Mapping[str, Any], rows: list) -> dict[str, Any]:
+    verdicts = run.get("verdicts") if isinstance(run.get("verdicts"), dict) else {}
+    return {
+        "title": title,
+        "rows": rows,
+        "steps": [s for s in run.get("steps") or [] if isinstance(s, dict)],
+        "verdicts": verdicts,
+    }
+
+
+def _recording_from_run(run: Mapping[str, Any]) -> dict[str, Any]:
+    """A run bundle's ``run.json`` as one recording with one run."""
+    rewind = run.get("rewind") if isinstance(run.get("rewind"), dict) else {}
+    counts = run.get("counts") if isinstance(run.get("counts"), dict) else {}
+    window = run.get("record_window") or []
+    rows = _kv_rows(
+        [
+            ("Run", run.get("run_id")),
+            ("Mode", run.get("mode")),
+            ("Result", rewind.get("result_words") or run.get("result")),
+            ("Error", run.get("error")),
+            ("Note", rewind.get("note")),
+            ("Recording", run.get("rec_id")),
+            ("Recorded from", _iso(window[0]) if len(window) == 2 else None),
+            ("Recorded until", _iso(window[1]) if len(window) == 2 else None),
+            ("Run started", run.get("recorded_at")),
+            ("Run completed", run.get("completed_at")),
+            (
+                "Files",
+                ", ".join(f"{v} {k}" for k, v in counts.items() if v)
+                if counts
+                else None,
+            ),
+            ("Input events", run.get("recording_path")),
+        ]
+    )
+    entry = _run_entry(
+        "Replayed steps",
+        {"steps": rewind.get("steps"), "verdicts": run.get("verdicts")},
+        [],
+    )
+    return {
+        "title": str(run.get("label") or run.get("run_id") or "Run"),
+        "rows": rows,
+        "files": [],
+        "runs": [entry],
+        "changes": run.get("changed_files") or [],
+        "source": RUN_JSON_NAME,
+    }
+
+
+def _recording_from_rec(path: Path) -> dict[str, Any] | None:
+    """A session's ``recording.json``: the recording and each of its runs."""
+    rec = _json_object(path)
+    if rec is None:
+        return None
+    versions = rec.get("versions") if isinstance(rec.get("versions"), dict) else {}
+    files = []
+    for name in rec.get("selected") or []:
+        copies = versions.get(name) if isinstance(versions.get(name), dict) else {}
+        files.append(
+            [
+                str(name),
+                ", ".join(
+                    f"{role} {', '.join(v) if isinstance(v, list) else v}"
+                    for role, v in copies.items()
+                )
+                or "–",
+            ]
+        )
+    runs = []
+    for run in rec.get("runs") or []:
+        if not isinstance(run, dict):
+            continue
+        rows = _kv_rows(
+            [
+                ("Run", run.get("run_id")),
+                ("Result", run.get("result")),
+                ("Error", run.get("error")),
+                ("Started", _iso(_num(run.get("started")))),
+                ("Ended", _iso(_num(run.get("ended")))),
+            ]
+        )
+        kind = str(run.get("kind") or "run")
+        runs.append(_run_entry(f"Run {run.get('n', '?')}: {kind}", run, rows))
+    rows = _kv_rows(
+        [
+            ("Recording", rec.get("rec_id")),
+            ("App", rec.get("pkg")),
+            ("Device", rec.get("avd") or rec.get("serial")),
+            ("Started", _iso(_num(rec.get("started")))),
+            ("Stopped", _iso(_num(rec.get("stopped")))),
+            ("Files changed", len(rec.get("changed") or [])),
+            ("Files watched", len(files)),
+            ("Note", rec.get("note")),
+        ]
+    )
+    return {
+        "title": str(rec.get("name") or rec.get("rec_id") or path.parent.name),
+        "rows": rows,
+        "files": files,
+        "runs": runs,
+        "changes": [],
+        "source": path.parent.name + "/recording.json",
+    }
+
+
+def _num(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _load_recordings(ctx: ReportContext, bundle_dir: Path | None) -> None:
+    """Record/Replay data of ``bundle_dir``: its ``run.json`` (a run bundle)
+    or the session's ``[<device>/]recordings/*/recording.json``.
+    """
+    if bundle_dir is None:
+        return
+    root = Path(bundle_dir)
+    try:
+        run = _json_object(root / RUN_JSON_NAME)
+        if run is not None:
+            ctx.recordings = [_recording_from_run(run)]
+            return
+        paths = sorted(
+            [
+                *root.glob("recordings/*/recording.json"),
+                *root.glob("*/recordings/*/recording.json"),
+            ]
+        )
+        ctx.recordings = [r for r in map(_recording_from_rec, paths) if r]
+    except Exception as exc:
+        logger.warning("Report: recordings unreadable: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -2490,8 +2648,76 @@ def results_plan(
     return plan
 
 
+def build_recordings(ctx: ReportContext) -> dict:
+    """Recordings, their Rewind/Replay runs, steps and file verdicts."""
+    blocks: list[dict] = []
+    for rec in ctx.recordings:
+        blocks.append(_heading(rec["title"], 2))
+        if rec["rows"]:
+            blocks.append({"type": "kv", "rows": rec["rows"]})
+        if rec["files"]:
+            blocks.append(
+                {
+                    "type": "table",
+                    "columns": ["Watched file", "Saved copies"],
+                    "rows": rec["files"],
+                    "widths": [260, None],
+                    "see_also": rec["source"],
+                }
+            )
+        for run in rec["runs"]:
+            blocks.append(_heading(run["title"], 3))
+            if run["rows"]:
+                blocks.append({"type": "kv", "rows": run["rows"]})
+            steps = [
+                [
+                    s.get("i"),
+                    str(s.get("what") or ""),
+                    str(s.get("way") or "")
+                    + (f": {s['reason']}" if s.get("reason") else ""),
+                    str(s.get("check") or ""),
+                ]
+                for s in run["steps"]
+            ]
+            if steps:
+                blocks.append(
+                    {
+                        "type": "table",
+                        "columns": ["Step", "What", "How", "Check"],
+                        "rows": steps,
+                        "widths": [30, None, 150, 70],
+                        "see_also": rec["source"],
+                    }
+                )
+            if run["verdicts"]:
+                blocks.append(
+                    {
+                        "type": "table",
+                        "columns": ["File", "Verdict"],
+                        "rows": [[str(k), str(v)] for k, v in run["verdicts"].items()],
+                        "widths": [260, None],
+                        "see_also": rec["source"],
+                    }
+                )
+        if rec["changes"]:
+            blocks.append(_heading("What the action changed", 3))
+            blocks.extend(
+                _res_changed_files({"Changed Files": rec["changes"]}, rec["source"])
+            )
+    return {"blocks": blocks}
+
+
 def build_results(ctx: ReportContext) -> dict:
     """The legacy result tables, built from the bundle's results JSON."""
+    if ctx.bundle is None and ctx.recordings and not ctx.bundle_error:
+        return {
+            "blocks": [
+                _text(
+                    "No analysis results file: this folder holds Record/Replay "
+                    "data, shown under Recording and replay."
+                )
+            ]
+        }
     if ctx.bundle is None:
         reason = ctx.bundle_error or "this report has no run bundle"
         return {"blocks": [_text(f"No analysis results: {reason}.")]}
@@ -2580,6 +2806,7 @@ SECTION_PLAN: tuple[SectionSpec, ...] = (
         build_transcript,
         requires_src=frozenset({"input", "screen", "shot", "label"}),
     ),
+    SectionSpec("recordings", "Recording and replay", build_recordings),
     SectionSpec("results", "Analysis results", build_results),
     SectionSpec("seal", "Timeline seal", build_seal),
 )
@@ -2683,7 +2910,19 @@ def build_report(
     _apply_scope(ctx)
     ctx.labels = _build_labels(ctx.lines)
     _load_bundle(ctx, bundle_dir, results_json)
-    sections = [_run_section(spec, ctx) for spec in _plan(options.sections)]
+    _load_recordings(ctx, bundle_dir)
+    if (
+        ctx.bundle is None
+        and ctx.recordings
+        and results_json is None
+        and str(ctx.bundle_error or "").startswith("FileNotFoundError")
+    ):
+        ctx.bundle_error = None  # a Record/Replay folder has no results JSON
+    sections = [
+        _run_section(spec, ctx)
+        for spec in _plan(options.sections)
+        if spec.id != "recordings" or ctx.recordings
+    ]
     device = (ctx.bundle or {}).get("Device Name") or _device_info(ctx)[1]
     return {
         "schema": SCHEMA,

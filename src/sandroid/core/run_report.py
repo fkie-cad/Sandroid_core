@@ -1370,14 +1370,89 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _run_timeline(root: Path, run: dict[str, Any]) -> Path | None:
+    """The session timeline a run bundle's ``run.json`` points to.
+
+    ``timeline_folder`` is absolute; a results folder that was copied or
+    moved keeps the ``<session>/<device>`` layout next to ``runs/``.
+    """
+    folder = str(run.get("timeline_folder") or "")
+    if not folder:
+        return None
+    named = Path(folder)
+    for candidate in (
+        named / TIMELINE_FILE_NAME,
+        root.parent.parent / named.parent.name / named.name / TIMELINE_FILE_NAME,
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _epoch(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return (dt if dt.tzinfo else dt.astimezone()).timestamp()
+
+
+def _seal_unsealed_timeline(
+    root: Path, scope: Any
+) -> tuple[Path | None, Any | None, Any]:
+    """Seal (read-only, now) the timeline of a folder without
+    ``timeline_seal.json`` -- a TUI session folder or a Record/Replay run
+    bundle -- and the scope of the report.
+
+    A run bundle (``run.json``) is reported over its record window to its
+    end; without ``play-start`` lines naming the run, that window comes
+    from ``run.json``. Returns ``(timeline, seal, scope)``; ``seal`` is None
+    when no timeline was found or it could not be sealed.
+    """
+    from sandroid.core import report_engine
+
+    tl = report_engine._timeline_module()
+    run = _read_json(root / report_engine.RUN_JSON_NAME)
+    timeline = _run_timeline(root, run) if run else None
+    if timeline is None:
+        timeline = _find_session_timeline(root)
+    if tl is None or timeline is None:
+        return timeline, None, scope
+    try:
+        seal = tl.seal_file(timeline)
+    except Exception as exc:
+        logger.error("Sealing %s failed: %s", timeline, exc, exc_info=True)
+        return timeline, None, scope
+    if run:
+        run_id = str(run.get("run_id") or root.name)
+        scope = report_engine.scope_for_run(
+            timeline, run_id, end=getattr(seal, "bytes", None)
+        )
+        window = run.get("record_window") or []
+        start = _epoch(window[0]) if len(window) == 2 else None
+        end = _epoch(run.get("completed_at")) or (
+            _epoch(window[1]) if len(window) == 2 else None
+        )
+        if not (scope.window or scope.seq_range) and start is not None and end:
+            scope = report_engine.ReportScope(
+                kind="run", run_id=run_id, window=(start, max(start, end))
+            )
+    return timeline, seal, scope
+
+
 def _regenerated_report(
     root: Path, json_file: str | os.PathLike[str] | None
 ) -> tuple[dict[str, Any], str | None]:
     """The report document for :func:`report_from_folder` and a timeline note.
 
     The timeline is re-read when ``timeline_seal.json`` still matches it.
-    Otherwise the previous ``report.json`` is re-rendered with a coverage
-    warning, or (no previous report) the report is built without timeline.
+    If it no longer matches, the previous ``report.json`` is re-rendered
+    with a coverage warning, or (no previous report) the report is built
+    without timeline. A folder that never had a seal (TUI sessions and
+    Record/Replay runs) gets its timeline sealed now
+    (:func:`_seal_unsealed_timeline`).
     """
     from sandroid.core import report_engine
 
@@ -1417,6 +1492,26 @@ def _regenerated_report(
             return report_engine.annotate_rerender(previous, note), note
         notes: tuple[str, ...] = (f"{note}. The transcript is omitted.",)
     else:
+        timeline, seal, scope = _seal_unsealed_timeline(root, scope)
+        if seal is not None:
+            options = report_engine.report_options_from_config(
+                config,
+                coverage_notes=(
+                    f"This result folder had no timeline seal ({TIMELINE_SEAL_NAME}): "
+                    f"the session timeline {timeline} was sealed when this report "
+                    "was made, so the seal does not prove that the timeline was "
+                    "unchanged before then.",
+                ),
+            )
+            doc = report_engine.build_report(
+                timeline=timeline,
+                seal=seal,
+                scope=scope,
+                bundle_dir=root,
+                options=options,
+                results_json=results_json,
+            )
+            return doc, None
         notes = (
             "This result folder has no sealed session timeline "
             f"({TIMELINE_SEAL_NAME}); the transcript is omitted.",
