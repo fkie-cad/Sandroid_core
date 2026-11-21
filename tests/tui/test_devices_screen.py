@@ -306,6 +306,8 @@ def collector_env(monkeypatch):
     monkeypatch.setattr(emulator, "launches", list)
     monkeypatch.setattr(emulator, "emulator_binary", lambda: None)
     monkeypatch.setattr(emulator, "load_launch_prefs", lambda: {"avds": {}})
+    # Hermetic: never read the host's real qemu processes.
+    monkeypatch.setattr(emulator, "host_avd_names", dict)
     monkeypatch.setattr(DeviceManager, "_preferred_serial", None)
     monkeypatch.delenv("ANDROID_SERIAL", raising=False)
     dm = SimpleNamespace(active_device=None, get_device=lambda serial: None)
@@ -2167,7 +2169,8 @@ async def test_shift_p_is_not_offered_on_a_running_device() -> None:
         await _shown(pilot, screen)
         assert screen.check_action("persona", ()) is False
         await pilot.press("down")
-        assert screen.check_action("persona", ()) is None  # shown, disabled
+        # Running elsewhere: not startable here, so no Shift+P (N6-V9).
+        assert screen.check_action("persona", ()) is False
 
 
 def test_start_avd_as_persona_passes_meta_and_is_not_remembered(
@@ -2201,3 +2204,151 @@ def test_start_avd_as_persona_passes_meta_and_is_not_remembered(
     assert remembered == []
     assert messages
     assert messages[0].endswith("as persona mara")
+
+
+# --------------------------------------------------------------------------
+# N6-V10 / N6-V9: startup picker safety, merged rows, keys as words
+# --------------------------------------------------------------------------
+
+
+def test_startup_picker_probes_only_the_configured_avds_emulator(
+    collector_env, monkeypatch
+) -> None:
+    """No pin at startup: other emulators are in use, never probed; each is
+    named from the host (its qemu command line), so its AVD is listed once.
+    """
+    # The fake getprop names emulator-5562's AVD "AVD_5562".
+    names = {"emulator-5554": "Demo8G", "emulator-5562": "AVD_5562"}
+    monkeypatch.setattr(emulator, "host_avd_names", lambda: names)
+    monkeypatch.setattr(emulator, "emulator_binary", lambda: "/sdk/emulator")
+    monkeypatch.setattr(
+        emulator, "list_avds", lambda timeout=15.0: ["Demo8G", "AVD_5562"]
+    )
+    monkeypatch.setattr(emulator, "avd_info", lambda name: AvdInfo(name=name))
+    monkeypatch.setattr(emulator, "avd_lock_files", lambda name: ["x.lock"])
+    adb = _FakeAdb("emulator-5554\tdevice\nemulator-5562\tdevice\n")
+    snap = hub.HubCollector(adb, startup_avd="AVD_5562").collect()
+    assert _probed(adb) == {"emulator-5562"}
+    rows = {r.serial: r for r in snap.devices}
+    assert rows["emulator-5554"].in_use_elsewhere
+    assert rows["emulator-5554"].avd_name == "Demo8G"
+    assert not rows["emulator-5562"].in_use_elsewhere
+    # Merged: no second "running elsewhere" row for either AVD.
+    assert snap.avds == ()
+
+
+def test_pinned_foreign_emulator_is_one_row_named_from_the_host(
+    collector_env, monkeypatch
+) -> None:
+    collector_env.set_preferred_serial("emulator-5562")
+    monkeypatch.setattr(emulator, "host_avd_names", lambda: {"emulator-5554": "Demo8G"})
+    monkeypatch.setattr(emulator, "emulator_binary", lambda: "/sdk/emulator")
+    monkeypatch.setattr(emulator, "list_avds", lambda timeout=15.0: ["Demo8G"])
+    monkeypatch.setattr(emulator, "avd_info", lambda name: AvdInfo(name=name))
+    monkeypatch.setattr(emulator, "avd_lock_files", lambda name: ["x.lock"])
+    adb = _FakeAdb("emulator-5554\tdevice\n")
+    snap = hub.HubCollector(adb).collect()
+    assert _probed(adb) == set()
+    (row,) = snap.devices
+    assert row.in_use_elsewhere
+    assert row.title == "Demo8G"
+    assert snap.avds == ()  # not also "running elsewhere"
+
+
+def test_host_avd_names_reads_port_and_avd_of_qemu(monkeypatch) -> None:
+    import psutil
+
+    procs = [
+        SimpleNamespace(
+            info={
+                "name": "qemu-system-aarch64",
+                "cmdline": ["qemu-system-aarch64", "-avd", "Dev4", "-port", "5562"],
+            }
+        ),
+        SimpleNamespace(
+            info={
+                "name": "qemu-system-aarch64",
+                "cmdline": ["qemu-system-aarch64", "-avd", "NoPort"],
+            }
+        ),
+        SimpleNamespace(info={"name": "bash", "cmdline": ["bash", "-port", "1"]}),
+    ]
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs=None: iter(procs))
+    assert emulator.host_avd_names() == {"emulator-5562": "Dev4"}
+
+
+def test_avd_from_cmdline() -> None:
+    assert emulator.avd_from_cmdline(["qemu", "-avd", "Dev4", "-port", "5562"]) == (
+        "Dev4"
+    )
+    assert emulator.avd_from_cmdline(["emulator", "@Pixel"]) == "Pixel"
+    assert emulator.avd_from_cmdline(["qemu", "-port", "5554"]) == ""
+    assert emulator.avd_from_cmdline(None) == ""
+
+
+async def test_startup_highlight_is_never_another_sessions_device(
+    monkeypatch,
+) -> None:
+    """In-use devices first in the list: the cursor goes to the configured
+    AVD (to start it), not to the first row.
+    """
+    monkeypatch.setattr(hub, "_configured_avd", lambda: "Other")
+    app, screen = _hub(devices=[FOREIGN], avds=[IDLE, OTHER], mode="startup")
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        assert screen.current_row() == OTHER
+
+
+async def test_startup_highlight_prefers_the_configured_avds_device(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(hub, "_configured_avd", lambda: "Pixel_8")
+    mine = dataclasses.replace(ACTIVE, active=False, serial="emulator-5560")
+    app, screen = _hub(devices=[FOREIGN, READY, mine], avds=[IDLE], mode="startup")
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        assert screen.current_row() == mine
+
+
+async def test_without_a_configured_avd_the_last_used_avd_beats_a_foreign_row(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(hub, "_configured_avd", lambda: "")
+    app, screen = _hub(devices=[FOREIGN], avds=[OTHER, IDLE], mode="startup")
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        assert screen.current_row() == IDLE  # the last-used one
+
+
+async def test_running_elsewhere_row_hides_start_cold_wipe_rename() -> None:
+    app, screen = _hub(avds=[BUSY_AVD])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        shown = {
+            key
+            for key, b in screen.active_bindings.items()
+            if b.binding.show and screen.check_action(b.binding.action, ()) is not False
+        }
+        assert not {"c", "w", "e", "n", "h", "s", "P"} & shown
+
+
+async def test_hub_keys_are_words_and_no_gap_between_the_boxes() -> None:
+    from textual.widgets import RadioButton
+
+    app, screen = _hub(devices=[READY])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        labels = {
+            b.binding.action: app.get_key_display(b.binding)
+            for b in screen.active_bindings.values()
+        }
+        assert labels["refresh"] == "Ctrl+R"
+        assert labels["cancel"] == "Esc"
+        radio = screen.query_one("#opt-quick", RadioButton)
+        assert str(radio._button) in ("●", "○")
+        hub_box = screen.query_one("#hub")
+        options = screen.query_one("#hub-options")
+        assert hub_box.region.bottom == options.region.y  # nothing shows through
+        note = str(screen._note_text(READY))
+        assert "Shift+R restarts" in note
+        assert " R restarts" not in note

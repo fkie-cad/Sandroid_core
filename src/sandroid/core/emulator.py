@@ -2112,6 +2112,49 @@ def _running_cmdline(serial: str) -> list[str] | None:
     return [str(a) for a in cmdline] if cmdline else None
 
 
+def avd_from_cmdline(cmdline: list[str] | None) -> str:
+    """The AVD an emulator command line runs (``-avd NAME`` / ``@NAME``)."""
+    args = [str(a) for a in (cmdline or [])[1:]]
+    for i, arg in enumerate(args):
+        if arg == "-avd" and i + 1 < len(args):
+            return args[i + 1]
+        if arg.startswith("@") and len(arg) > 1:
+            return arg[1:]
+    return ""
+
+
+def host_avd_names() -> dict[str, str]:
+    """``{"emulator-<port>": AVD}`` of the emulators running on this host,
+    read from their qemu command lines (``-port N`` + ``-avd NAME``) in one
+    process scan -- never from a device or its console, so it is safe for
+    another session's emulator. Emulators started without ``-port`` (not by
+    Sandroid) are not in it. ``{}`` when psutil cannot list processes.
+    """
+    from sandroid.core.emulator_guard import console_port
+
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover - psutil is a core dependency
+        return {}
+    names: dict[str, str] = {}
+    try:
+        for proc in psutil.process_iter(["name", "cmdline"]):
+            try:
+                name = proc.info.get("name") or ""
+                cmdline = proc.info.get("cmdline") or []
+            except Exception:
+                continue
+            if not name.startswith("qemu-system") or not cmdline:
+                continue
+            port = console_port([str(a) for a in cmdline])
+            avd = avd_from_cmdline(cmdline)
+            if port and avd:
+                names[f"emulator-{port}"] = avd
+    except Exception:
+        logger.debug("Could not list the host's emulators", exc_info=True)
+    return names
+
+
 def _strip_run(args: list[str], run: list[str]) -> list[str]:
     """*args* without each occurrence of the token sequence *run*."""
     if not run:

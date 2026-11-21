@@ -75,6 +75,16 @@ def _refusal_reason(op: str, name: str, *, confirmed: bool = False) -> str | Non
     return None if refusal is None else refusal.reason
 
 
+def console_auth_fix() -> str:
+    """How to let ``adb emu`` into the console (the token adb reads)."""
+    from pathlib import Path
+
+    return (
+        "fix: copy ~/.emulator_console_auth_token of the user who started the "
+        f"emulator to {Path.home()}/ (adb reads it from this HOME)"
+    )
+
+
 class SnapshotsPanel(Widget):
     """Snapshot list + create/load/delete/assign actions (hosted by the picker).
 
@@ -332,10 +342,11 @@ class SnapshotsPanel(Widget):
             dim = lens_palette().dim
             return f"Emulator [{dim}]○ not running · snapshots need one[/]"
         if self._console_refused:
-            from sandroid.core.adb_emulator import CONSOLE_NOT_AUTHENTICATED
-
-            text = CONSOLE_NOT_AUTHENTICATED[0].upper() + CONSOLE_NOT_AUTHENTICATED[1:]
-            return f"[b]{self._avd_name()}[/] — [#fb7185]{text}[/]"
+            # Not "0 snapshots": the list could not be read at all.
+            return (
+                f"[b]{self._avd_name()}[/] — [#fb7185]snapshots can't be listed: "
+                "emulator console not authenticated[/]"
+            )
         count = len(self._snapshots)
         return f"[b]{self._avd_name()}[/] — {count} snapshot(s)"
 
@@ -410,6 +421,8 @@ class SnapshotsPanel(Widget):
             rows = [
                 ("[#5b6479]start an emulator (D) to save and load snapshots[/]", None)
             ]
+        elif not self._snapshots and self._console_refused:
+            rows = [(f"[#5b6479]{console_auth_fix()}[/]", None)]
         elif not self._snapshots:
             rows = [("[#5b6479]no snapshots — press c to create[/]", None)]
         else:

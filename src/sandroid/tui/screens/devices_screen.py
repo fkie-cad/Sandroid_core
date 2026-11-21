@@ -115,7 +115,7 @@ UNPROBED_HELP = (
 
 OFFLINE_HELP = (
     "Offline: adb sees the device but cannot talk to it. Wait a moment, "
-    "replug it / run `adb reconnect offline`, or restart the emulator (R)."
+    "replug it / run `adb reconnect offline`, or restart the emulator (Shift+R)."
 )
 
 
@@ -593,8 +593,13 @@ class HubCollector:
     ``adb devices -l`` says and are never touched.
     """
 
-    def __init__(self, adb: Any = None) -> None:
+    def __init__(self, adb: Any = None, startup_avd: str | None = None) -> None:
         self._adb = adb
+        #: Startup picker without a pin (``None``: not that): the configured
+        #: AVD. Only its emulator (and our launches) is probed; every other
+        #: emulator is treated as another session's (``in use · not
+        #: probed``) -- nothing on it is touched before the user picks.
+        self.startup_avd = startup_avd
         self._lock = threading.Lock()
         self._probes: dict[str, SerialProbe] = {}
         self._avd_names: dict[str, str] = {}
@@ -720,11 +725,51 @@ class HubCollector:
                 if serial not in listed:
                     self._probes.pop(serial, None)
                     self._avd_names.pop(serial, None)
-        unprobed = {
-            entry.serial
-            for entry in entries
-            if pinned and entry.serial != pinned and entry.serial not in ours
-        }
+        # Emulators that are not ours, named from the host (their qemu
+        # command line): never asked anything, but their row carries the
+        # AVD name, so the AVD is not listed a second time as "running
+        # elsewhere".
+        guard = not pinned and self.startup_avd is not None
+        unnamed = []
+        for entry in entries:
+            serial = entry.serial
+            if serial in ours or emulator.serial_port(serial) is None:
+                continue
+            if not guard and (not pinned or serial == pinned):
+                continue
+            with self._lock:
+                if serial not in self._avd_names:
+                    unnamed.append(serial)
+        if unnamed:
+            host_names = emulator.host_avd_names()
+            with self._lock:
+                for serial in unnamed:  # "" (unknown) is cached too
+                    self._avd_names[serial] = host_names.get(serial, "")
+        soft_pin = ""
+        if guard and self.startup_avd:
+            with self._lock:
+                soft_pin = next(
+                    (
+                        e.serial
+                        for e in entries
+                        if self._avd_names.get(e.serial) == self.startup_avd
+                    ),
+                    "",
+                )
+
+        def foreign(serial: str) -> bool:
+            """Someone else's device: shown, never probed (shared lab)."""
+            if serial in ours:
+                return False
+            if pinned:
+                return serial != pinned
+            return (
+                guard
+                and emulator.serial_port(serial) is not None
+                and serial != soft_pin
+            )
+
+        unprobed = {entry.serial for entry in entries if foreign(entry.serial)}
         for entry in entries:
             serial = entry.serial
             if entry.state != "device":
@@ -732,7 +777,7 @@ class HubCollector:
                     if self._probes.get(serial, SerialProbe()).booted:
                         self._probes.pop(serial, None)
                 continue
-            if pinned and serial != pinned and serial not in ours:
+            if foreign(serial):
                 continue  # someone else's device in a shared lab
             with self._lock:
                 cached = self._probes.get(serial)
@@ -753,7 +798,7 @@ class HubCollector:
             serial = entry.serial
             if emulator.serial_port(serial) is None or entry.state != "device":
                 continue
-            if pinned and serial != pinned and serial not in ours:
+            if foreign(serial):
                 continue
             if serial in alive:
                 continue  # our launch knows its AVD
@@ -968,12 +1013,14 @@ class _BootRadios(RadioSet, can_focus=False):
 
 
 class _Radio(RadioButton):
-    """A boot mode drawn as ``(•)`` / ``( )``: readable on any background."""
+    """A boot mode drawn as ``●`` / ``○`` (the house dots): readable on any
+    background.
+    """
 
     @property
     def _button(self) -> Content:
         style = self.get_visual_style("toggle--button")
-        return Content.assemble(("(" + ("•" if self.value else " ") + ")", style))
+        return Content.assemble(("●" if self.value else "○", style))
 
 
 class _Option(Checkbox, can_focus=False):
@@ -999,6 +1046,21 @@ def _snapshot_prompt(row: DeviceRow | AvdRow) -> str:
     if not count:
         return "no snapshots"
     return f"{count} snapshot{'s' if count != 1 else ''}"
+
+
+def _configured_avd() -> str:
+    """``emulator.device_name`` of the live config (``""`` if unknown)."""
+    try:
+        from sandroid.core.toolbox import Toolbox
+
+        config = getattr(Toolbox, "config", None)
+        if config is None:
+            from sandroid.config import get_config
+
+            config = get_config()
+        return str(getattr(config.emulator, "device_name", "") or "")
+    except Exception:
+        return ""
 
 
 class DevicesScreen(ModalScreen[str | None]):
@@ -1080,7 +1142,12 @@ class DevicesScreen(ModalScreen[str | None]):
     }
     DevicesScreen #hub-options {
         height: auto;
-        margin: 1 0 0 0;
+        /* No margin: the gap between the boxes was left unpainted and
+           showed a main-screen row through (N6-V9). */
+        margin: 0;
+    }
+    DevicesScreen #opt-snapshot .arrow {
+        display: none;  /* no glyphs: the prompt says what it is */
     }
     DevicesScreen #opt-row {
         height: auto;
@@ -1164,11 +1231,12 @@ class DevicesScreen(ModalScreen[str | None]):
         Binding("x", "stop", "Stop…"),
         Binding("R", "restart", "Restart"),
         Binding("a", "connect", "Connect…"),
-        Binding("ctrl+r", "refresh", "Refresh"),
+        # Keys as words in the footer (not "^r" / "esc").
+        Binding("ctrl+r", "refresh", "Refresh", key_display="Ctrl+R"),
         Binding("j", "cursor('down')", "Down", show=False),
         Binding("k", "cursor('up')", "Up", show=False),
-        Binding("escape", "cancel", "Close"),
-        Binding("ctrl+c", "abort", "Quit", show=False),
+        Binding("escape", "cancel", "Close", key_display="Esc"),
+        Binding("ctrl+c", "abort", "Quit", show=False, key_display="Ctrl+C"),
     ]
 
     def __init__(
@@ -1182,8 +1250,12 @@ class DevicesScreen(ModalScreen[str | None]):
         self.mode = mode
         self.reason = reason
         self._collector: HubCollector | None = None
+        #: The configured AVD (``emulator.device_name``): the default row.
+        self._configured_avd = _configured_avd()
         if collect is None:
-            self._collector = HubCollector()
+            self._collector = HubCollector(
+                startup_avd=self._configured_avd if mode == "startup" else None
+            )
             collect = self._collector.collect
         self._collect_fn = collect
         self._actions = actions
@@ -1531,17 +1603,32 @@ class DevicesScreen(ModalScreen[str | None]):
         self.refresh_bindings()
 
     def _initial_cursor(self, snap: HubSnapshot) -> None:
-        """The active device, else the first device, else the last-used AVD."""
+        """Where Enter is safe: the active device, else the configured AVD's
+        device, else a device not in use elsewhere, else the configured AVD
+        (to start it), else the last-used AVD. Never another session's
+        device by default.
+        """
         table = self.query_one("#hub-table", DataTable)
-        mine = [
-            i for i, d in enumerate(snap.devices) if d.state is not RowState.UNPROBED
+        want = self._configured_avd
+        devices = snap.devices
+        mine = [i for i, d in enumerate(devices) if not d.in_use_elsewhere]
+        # Rows are the devices, then the AVDs.
+        startable = [
+            len(devices) + j for j, a in enumerate(snap.avds) if not a.running_elsewhere
         ]
-        if mine:
-            index = next((i for i in mine if snap.devices[i].active), mine[0])
-        elif not snap.avds:
-            index = 0
-        else:
-            index = next((i for i, a in enumerate(snap.avds) if a.last_used), 0)
+
+        def avd(row: int) -> AvdRow:
+            return snap.avds[row - len(devices)]
+
+        candidates = (
+            next((i for i in mine if devices[i].active), None),
+            next((i for i in mine if want and devices[i].avd_name == want), None),
+            next((r for r in startable if want and avd(r).name == want), None),
+            mine[0] if mine else None,
+            next((r for r in startable if avd(r).last_used), None),
+            startable[0] if startable else None,
+        )
+        index = next((c for c in candidates if c is not None), 0)
         if snap.rows:
             table.move_cursor(row=index, animate=False)
 
@@ -1743,14 +1830,14 @@ class DevicesScreen(ModalScreen[str | None]):
             )
         if row.launch_options is not None:
             text.append(
-                "\nStarted by Sandroid with these options; R restarts with them "
+                "\nStarted by Sandroid with these options; Shift+R restarts with them "
                 "(never wipes).",
                 style=_c("dim"),
             )
         elif row.saved_options is not None:
             text.append(
                 f"\nStarted outside Sandroid (its options are unknown); these are "
-                f"{row.avd_name}'s saved options, which R restarts with.",
+                f"{row.avd_name}'s saved options, which Shift+R restarts with.",
                 style=_c("dim"),
             )
         else:
@@ -1869,7 +1956,8 @@ class DevicesScreen(ModalScreen[str | None]):
             if not isinstance(row, AvdRow):
                 return False
             if row.running_elsewhere:
-                return None  # shown, disabled
+                # Cannot be started, renamed or wiped here: no such keys.
+                return False
             if action == "snapshot" and not row.snapshots:
                 return None  # shown, disabled
             return True
@@ -2011,7 +2099,13 @@ class DevicesScreen(ModalScreen[str | None]):
         from sandroid.core.device_manager import DeviceManager
         from sandroid.tui.modals.confirm_modal import ConfirmModal
 
-        pinned = DeviceManager.preferred_serial() or "another serial"
+        pinned = DeviceManager.preferred_serial()
+        if pinned:
+            why = f"This session is pinned to {pinned}. {row.serial} is not pinned"
+        else:
+            # Startup picker without a pin (N6-V10).
+            avd = self._configured_avd or "none"
+            why = f"{row.serial} does not run the configured AVD ({avd})"
 
         def confirmed(yes: bool | None) -> None:
             if yes and self.is_attached:
@@ -2020,8 +2114,7 @@ class DevicesScreen(ModalScreen[str | None]):
         self.app.push_screen(
             ConfirmModal(
                 title=f"Attach {row.serial}?",
-                message=f"This session is pinned to {pinned}. {row.serial} is "
-                "not pinned and was not probed: it is probably another "
+                message=f"{why} and was not probed: it is probably another "
                 "session's device, whose work an attach can disturb.",
                 yes_label="Attach anyway",
                 no_label="Cancel",
