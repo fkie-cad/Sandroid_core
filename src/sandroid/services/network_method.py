@@ -351,6 +351,12 @@ class ApplyPlan:
     #: ``replace_external=True`` (the TUI asks, the AI passes the argument).
     confirm: str = ""
     error: str = ""
+    #: The confirmation's title, buttons and the toast when it is declined
+    #: (an external proxy, a friTap started by hand, or both).
+    confirm_title: str = ""
+    confirm_yes: str = ""
+    confirm_no: str = ""
+    confirm_kept: str = ""
 
 
 def _external_pieces(s: MethodSnapshot, keep_device: bool = False) -> list[str]:
@@ -471,7 +477,22 @@ def plan_apply(
                 f"friTap was started by hand (its own settings, maybe a pcap); "
                 f"applying {target} stops it."
             )
-        return ApplyPlan(confirm=" ".join(parts) + " Continue?")
+        if external and stops_hand_fritap:
+            title, yes = "Replace the external proxy and stop friTap?", "Continue"
+            kept = "Nothing changed; the Network method shows Custom"
+        elif external:
+            title, yes = "Replace the external proxy?", "Replace"
+            kept = "External proxy kept; the Network method shows Custom"
+        else:
+            title, yes = "Stop friTap?", "Stop friTap"
+            kept = "friTap keeps running; nothing changed"
+        return ApplyPlan(
+            confirm=" ".join(parts) + " Continue?",
+            confirm_title=title,
+            confirm_yes=yes,
+            confirm_no="Keep",
+            confirm_kept=kept,
+        )
     return ApplyPlan(steps=steps)
 
 
@@ -766,6 +787,11 @@ class ApplyResult:
     confirm: str = ""
     done: list[str] = field(default_factory=list)
     view: MethodView | None = None
+    #: The confirmation's title, buttons and declined toast (see ApplyPlan).
+    confirm_title: str = ""
+    confirm_yes: str = ""
+    confirm_no: str = ""
+    confirm_kept: str = ""
 
 
 _SYMBOLS = {
@@ -1084,6 +1110,10 @@ class NetworkMethodService:
                     plan.confirm,
                     confirm=plan.confirm,
                     view=self._view_of(snapshot, serial),
+                    confirm_title=plan.confirm_title,
+                    confirm_yes=plan.confirm_yes,
+                    confirm_no=plan.confirm_no,
+                    confirm_kept=plan.confirm_kept,
                 )
             selected = _selected_device()
             frida = sorted({step[0] for step in plan.steps} & FRIDA_STEPS)

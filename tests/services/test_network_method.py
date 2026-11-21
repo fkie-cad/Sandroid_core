@@ -860,6 +860,64 @@ def test_fritap_started_by_hand_needs_a_confirmation():
     assert not nm.plan_apply(nm.OFF, replace(snap, fritap_by_hand=False)).confirm
 
 
+def test_confirmation_words_name_what_is_replaced():
+    """N3-B4: friTap gets its own title, buttons and declined toast, not
+    "Replace the external proxy?" / "External proxy kept".
+    """
+    fritap = nm.plan_apply(nm.OFF, replace(KEYS, fritap_by_hand=True))
+    assert fritap.confirm_title == "Stop friTap?"
+    assert (fritap.confirm_yes, fritap.confirm_no) == ("Stop friTap", "Keep")
+    assert "proxy" not in fritap.confirm_kept.lower()
+    ext = replace(BASE, device_proxy="external", device_addr="192.168.1.5:8081")
+    proxy = nm.plan_apply(nm.WHOLE_DEVICE, ext)
+    assert proxy.confirm_title == "Replace the external proxy?"
+    assert proxy.confirm_yes == "Replace"
+    assert proxy.confirm_kept.startswith("External proxy kept")
+    both = nm.plan_apply(nm.OFF, replace(ext, fritap=True, fritap_by_hand=True))
+    assert both.confirm_title == "Replace the external proxy and stop friTap?"
+    assert both.confirm_yes == "Continue"
+
+
+def test_tui_confirm_uses_the_plan_words(monkeypatch):
+    from sandroid.tui.modals import proxy_modal
+
+    result = nm.ApplyResult(
+        False,
+        "x",
+        confirm="friTap was started by hand. Continue?",
+        confirm_title="Stop friTap?",
+        confirm_yes="Stop friTap",
+        confirm_no="Keep",
+        confirm_kept="friTap keeps running; nothing changed",
+    )
+    monkeypatch.setattr(
+        proxy_modal,
+        "_method_service",
+        lambda: SimpleNamespace(apply=lambda *a, **k: result),
+    )
+    pushed, toasts = [], []
+
+    class _App:
+        def notify(self, message, **_kw):
+            toasts.append(message)
+
+        def call_from_thread(self, fn, *args):
+            fn(*args)
+
+        def push_screen(self, screen, callback):
+            pushed.append(screen)
+            callback(False)
+
+    import threading
+
+    monkeypatch.setattr(threading.Thread, "start", lambda self: self.run())
+    proxy_modal.run_method_apply(_App(), nm.OFF, None)
+    modal = pushed[0]
+    assert modal.title_text == "Stop friTap?"
+    assert (modal.yes_label, modal.no_label) == ("Stop friTap", "Keep")
+    assert toasts[-1] == "friTap keeps running; nothing changed"
+
+
 def test_stop_step_names_a_by_hand_fritap(monkeypatch):
     from sandroid.analysis import fritap
 

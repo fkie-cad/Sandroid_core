@@ -270,21 +270,22 @@ def run_method_apply(
         if result.confirm:
             from sandroid.tui.modals.confirm_modal import ConfirmModal
 
+            # The plan names what would be replaced (an external proxy, a
+            # friTap started by hand): its own title, buttons and toast.
+            kept = getattr(result, "confirm_kept", "") or "Nothing changed"
+
             def _answer(yes: bool | None) -> None:
                 if yes:
                     run_method_apply(app, preset, defeat_pinning, replace_external=True)
                 else:
-                    app.notify(
-                        "External proxy kept; the Network method shows Custom",
-                        severity="warning",
-                    )
+                    app.notify(kept, severity="warning")
 
             app.push_screen(
                 ConfirmModal(
-                    title="Replace the external proxy?",
+                    title=getattr(result, "confirm_title", "") or "Continue?",
                     message=result.confirm,
-                    yes_label="Replace",
-                    no_label="Keep",
+                    yes_label=getattr(result, "confirm_yes", "") or "Continue",
+                    no_label=getattr(result, "confirm_no", "") or "Keep",
                 ),
                 _answer,
             )
