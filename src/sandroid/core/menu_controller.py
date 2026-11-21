@@ -76,6 +76,17 @@ class Action:
     mode_indicator: str = ""  # e.g., "ATTACH", "ATTACH MODE", "SPAWN MODE"
 
 
+#: Actions whose registered key does nothing in the TUI (" " pulls the
+#: spotlight DB, v / u remove and pull spotlight files: Rich-CLI keys that
+#: the Files lens' row actions replaced). The registrations stay because the
+#: legacy Rich-CLI path still dispatches those keys; the TUI lists them
+#: without a key (command palette: run by name; help: left out), so no key
+#: is advertised that would start the app (Space) or act on a row (u).
+TUI_UNBOUND_KEY_ACTIONS: frozenset[str] = frozenset(
+    {"remove_file", "pull_files", "pull_spotlight_db"}
+)
+
+
 class MenuController:
     """Shared controller for menu actions across TUI and Rich mode.
 
