@@ -404,6 +404,44 @@ async def test_refusals_and_failures_are_red_words(registry) -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_action_result_stays_on_its_tab(registry) -> None:
+    """N5 V9: the last result does not linger on every tab, nor under the
+    next action; a result that arrives on another tab waits for its tab.
+    """
+    from textual.widgets import TabbedContent
+
+    app = _ActionsHarness()
+    async with app.run_test(size=(120, 50)) as pilot:
+        modal = await _open_actions(pilot)
+        tabs = modal.query_one("#settings-tabs", TabbedContent)
+        modal.query_one("#btn-run-action", Button).press()
+        await until(pilot, lambda: "SMS received" in _status(modal))
+
+        tabs.active = "tab-location"
+        await until(pilot, lambda: _status(modal) == "")
+        tabs.active = "tab-actions"
+        await until(pilot, lambda: "SMS received" in _status(modal))
+
+        await _pick(pilot, modal, "call.incoming")
+        assert _status(modal) == ""
+
+        # A run that finishes while another tab is shown.
+        registry.gate.clear()
+        registry.started.clear()
+        modal.query_one("#btn-run-action", Button).press()
+        await until(pilot, registry.started.is_set)
+        await settle(pilot)
+        tabs.active = "tab-network"
+        await settle(pilot)
+        registry.gate.set()
+        await until(pilot, lambda: not modal._action_busy)
+        await settle(pilot)
+        assert _status(modal) == ""
+        tabs.active = "tab-actions"
+        await until(pilot, lambda: "SMS received" in _status(modal))
+
+
+@pytest.mark.asyncio
 async def test_emulator_only_actions_are_locked_on_a_physical_device(
     registry,
 ) -> None:
