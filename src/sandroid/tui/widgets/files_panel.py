@@ -15,8 +15,13 @@ the cursor sticks to that newest row. ↑, PgUp, Home, a wheel up or a click
 on a row above the newest one stop following (the monitor keeps recording),
 ``End`` resumes, also with a file open in the Inspector (which then follows
 the newest row); the caption title says ``live`` or ``scrolled back · 3 new
-below · End = live`` (rows that changed since, ★ rows included).
-The frame title says ``monitor ● on`` / ``monitor ○ off`` for the monitor.
+below · End = live`` (rows that changed since, ★ rows included; no
+``live`` while the monitor is off or blind: it records nothing).
+The frame title says ``monitor ● on`` / ``monitor ○ off`` for the monitor,
+after the modes (``watched only``, ``by name``). The info line is short
+(``191 paths + 11 groups · 3 watched · 298 hidden · 262 dropped (cap
+500)``) and fitted to the frame: key hints, then hidden / dropped counts,
+then the path count go first; filters and lost events stay.
 
 Rows come from the file monitor (``o`` starts/stops it): each
 ``TASK_OUTPUT``/``source="monitor"`` batch is folded into
@@ -94,8 +99,7 @@ many were dropped, and the first drop says so once.
 **Auto-pull** (``tui.auto_pull_on_change``, default on): a write the monitor
 reports for a ★ file pulls it once the writes are quiet (~1.5 s), see
 ``WatchlistView.note_write``. No polling: with the monitor off and files
-watched the caption says "monitor off — watched files not tracked · o
-starts it".
+watched the caption says "watched files not tracked · o starts".
 
 **Monitor status** (``MonitorWatch`` of the running session): the caption
 says what is recorded and how to stop it ("App org.x · 5 proc · following
@@ -2165,12 +2169,25 @@ class FilesPanel(Widget):
         where = f" in {target}" if target else ""
         return Text(f"Watching for file activity{where} — nothing yet{tail}")
 
+    #: Caption parts by priority (lower: kept longer when the caption is
+    #: cut to the frame width): filters and losses, scope and watches,
+    #: counts, hidden / dropped, key hints.
+    _KEEP, _SCOPE, _COUNT, _HIDDEN, _HINT = range(5)
+
     def caption(self) -> tuple[str, str]:
-        """``(title, info)`` for the lens frame."""
+        """``(title, info)`` for the lens frame.
+
+        The title carries the state and the modes (``live · watched only ·
+        by name · monitor ● on``; no ``live`` while the monitor is off or
+        blind). The info line is short and fitted to the frame: the parts
+        of least priority go first (:meth:`_fit_caption`).
+        """
         rows = self._rows
+        parts: list[tuple[int, str]] = []
         if self.review:
             title = self._review_title()
-            parts = [f"{len(rows)} files"] if self._review_record is not None else []
+            if self._review_record is not None:
+                parts.append((self._COUNT, f"{len(rows)} files"))
         else:
             running, _task = self._monitor_task()
             if self._segment is not None:
@@ -2181,6 +2198,12 @@ class FilesPanel(Widget):
                     if running
                     else f"monitor [{_c('dim')}]○ off[/]"
                 )
+            # Modes are state: in the title, before the monitor's.
+            modes = []
+            if self._watched_only:
+                modes.append("watched only")
+            if self._sort != "recent":
+                modes.append(f"by {self._sort}")
             wl = self._watchlist_or_none()
             n_groups = sum(1 for r in rows if r.group is not None and not r.fold)
             n_paths = sum(
@@ -2192,28 +2215,28 @@ class FilesPanel(Widget):
                 count += f" + {n_patterns} pattern{'s' if n_patterns != 1 else ''}"
             if n_groups:
                 count += f" + {n_groups} group{'s' if n_groups != 1 else ''}"
-            parts = [count]
+            parts.append((self._COUNT, count))
             if wl is not None and wl.summary():
-                parts.append(wl.summary())
-            hidden = self.hidden_summary()
-            if hidden:
-                parts.append(hidden)
-            if self.activity.dropped:
-                parts.append(
-                    f"{self.activity.dropped} dropped at the "
-                    f"{self.activity.max_paths}-row limit"
-                )
-            if self._watched_only:
-                parts.append("watched only · W all")
-            if self._sort != "recent":
-                parts.append(f"by {self._sort}")
-            if self._segment is not None:
-                parts.append("A all · </> notes and sections")
+                parts.append((self._SCOPE, wl.summary()))
             watching = wl is not None and wl.has_watches
             if not running and watching:
-                parts.append("monitor off — watched files not tracked · o starts it")
-            elif watching and not wl._auto_pull_enabled():
-                parts.append("auto-pull off")
+                # The title says "monitor ○ off".
+                parts.append((self._KEEP, "watched files not tracked · o starts"))
+            hidden = self.hidden_summary()
+            if hidden:
+                parts.append((self._HIDDEN, hidden))
+            if self.activity.dropped:
+                parts.append(
+                    (
+                        self._HIDDEN,
+                        f"{self.activity.dropped} dropped "
+                        f"(cap {self.activity.max_paths})",
+                    )
+                )
+            if self._segment is not None:
+                parts.append((self._HINT, "A all · </> notes and sections"))
+            if running and watching and not wl._auto_pull_enabled():
+                parts.append((self._COUNT, "auto-pull off"))
             if (
                 not rows
                 and not self._filter
@@ -2224,6 +2247,7 @@ class FilesPanel(Widget):
             # What the monitor records: scope, following, lost events, how to
             # stop -- and "blind" instead of LIVE once it records nothing.
             watch = self._monitor_watch() if running else None
+            blind = None
             if watch is not None:
                 try:
                     blind, status = watch.caption()
@@ -2231,30 +2255,66 @@ class FilesPanel(Widget):
                     blind, status = None, []
                 if blind:
                     if self._segment is not None:
-                        parts.insert(0, title)
+                        parts.insert(0, (self._SCOPE, title))
                     title = blind
-                parts = list(status) + parts
-            if self.follow_applies and rows:
+                parts = [(self._status_priority(p), p) for p in status] + parts
+            if modes:
+                title = f"{' · '.join(modes)} · {title}"
+            # A stopped or blind monitor records nothing: no "live" then
+            # (the title said "live · monitor ○ off"); scrolled back stays.
+            quiet = not running or bool(blind)
+            if self.follow_applies and rows and not (quiet and self._follow.live):
                 # Follow state: in ONE place, the title (as in every lens).
                 title = f"{self._follow.text} · {title}"
         if self._filter:
-            parts.insert(0, f"/{escape_markup(self._filter)}")
+            parts.insert(0, (self._KEEP, f"/{escape_markup(self._filter)}"))
         ai = self._hl.caption_count(self._hl.view_shown, self._hl.view_total)
         if ai is not None:
             # The frame caption is markup; the label is chat agent text.
-            parts.insert(0, escape_markup(ai))
-        return title, " · ".join(parts)
+            parts.insert(0, (self._KEEP, escape_markup(ai)))
+        return title, self._fit_caption(parts)
+
+    def _status_priority(self, part: str) -> int:
+        """A ``MonitorWatch.caption`` part's priority: losses stay, the
+        scope next, the stop hint goes first.
+        """
+        if "lost" in part or part.startswith("o stops ·"):
+            return self._KEEP  # blind: "o stops · o again re-targets" stays
+        if part == "o stops":
+            return self._HINT
+        return self._SCOPE
+
+    def _fit_caption(self, parts: list[tuple[int, str]]) -> str:
+        """The parts joined with `` · ``, the least important ones left out
+        until the line fits the frame (the frame cut it mid-word before:
+        at 120 columns, or with the Inspector open).
+        """
+        width = self.size.width
+        budget = width - 4 if width else 0
+        keep = list(parts)
+
+        def plain(items) -> str:
+            return " · ".join(text for _p, text in items)
+
+        def cells(items) -> int:
+            try:
+                return Text.from_markup(plain(items)).cell_len
+            except Exception:
+                return len(plain(items))
+
+        while budget and len(keep) > 1 and cells(keep) > budget:
+            worst = max(p for p, _t in keep)
+            if worst == self._KEEP:
+                break
+            index = max(i for i, (p, _t) in enumerate(keep) if p == worst)
+            del keep[index]
+        return plain(keep)
 
     def hidden_summary(self) -> str:
-        """``"14 hidden: prefix 12 · open-only 2"`` (empty when none)."""
+        """``"14 hidden"`` (empty when none; ``R`` lists the rules)."""
         if self.activity.show_all or not self._hidden:
             return ""
-        total = sum(self._hidden.values())
-        kinds = " · ".join(
-            f"{kind} {n}"
-            for kind, n in sorted(self._hidden.items(), key=lambda kv: -kv[1])
-        )
-        return f"{total} hidden: {kinds} (N shows)"
+        return f"{sum(self._hidden.values())} hidden"
 
     def _hidden_count(self) -> int:
         """Rows hidden by a rule in the last redraw (0 while showing all)."""

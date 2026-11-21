@@ -10,12 +10,15 @@ from __future__ import annotations
 from test_files_lens import (  # _isolated: autouse fixture
     ROOT,
     T0,
+    _Device,
     _fse,
     _Harness,
     _isolated,
     _items,
     _keys,
+    _markup_plain,
     _plain,
+    _register_watched_monitor,
     _tab,
 )
 
@@ -208,3 +211,61 @@ def test_paths_break_after_a_slash() -> None:
     toast = toast_paths(_App(), f"Watching {path}")
     assert all(len(line) <= 57 for line in toast.splitlines())
     assert toast.replace("\n", "") == f"Watching {path}"
+
+
+# --------------------------------------------------------------------------
+# V4: caption (modes in the title, short counts, fitted to the frame)
+# --------------------------------------------------------------------------
+
+
+async def test_the_caption_is_short_and_fits_the_frame() -> None:
+    from sandroid.core.kprobe_tracer import AppProcess
+
+    app = _Harness()
+    async with app.run_test(size=(200, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        watch = _register_watched_monitor(
+            _Device({10: AppProcess(10, 10100, "com.example.fit")}),
+            mode="pid",
+            follow=True,
+        )
+        watch.seed({10: [10]}, watch.initial_processes())
+        panel.activity.max_paths = 5
+        lines = [_fse("FSE_CREATE_FILE", f"{ROOT}/files/f{i}") for i in range(8)]
+        lines += [_fse("FSE_OPEN", f"{ROOT}/files/o{i}") for i in range(2)]
+        panel.ingest(_items(*lines), now=T0)
+        panel._watched_only = False
+        panel._sort = "name"
+        _keys(panel)
+        title, info = panel.caption()
+        assert _markup_plain(title) == "by name · monitor ● on"
+        assert info == (
+            "App com.example.fit · 1 proc · following · o stops · 5 paths · "
+            "5 dropped (cap 5)"
+        )
+        # Narrow (the Inspector open): the stop hint goes first, the scope
+        # and losses stay.
+        await pilot.resize_terminal(60, 30)
+        await pilot.pause()
+        info = panel.caption()[1]
+        assert len(info) <= 56
+        assert "o stops" not in info
+        assert info.startswith("App com.example.fit")
+        watch.lost_events = 3
+        await pilot.resize_terminal(40, 30)
+        await pilot.pause()
+        assert "3 events lost" in panel.caption()[1]
+
+
+async def test_no_live_in_the_title_while_the_monitor_is_off() -> None:
+    app = _Harness()
+    async with app.run_test(size=(160, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", f"{ROOT}/files/a")), now=T0)
+        _keys(panel)
+        assert panel.following
+        assert _markup_plain(panel.caption()[0]) == "monitor ○ off"
+        panel._watched_only = True
+        panel.refresh_rows()
+        assert _markup_plain(panel.caption()[0]) == "watched only · monitor ○ off"
+        await pilot.pause()
