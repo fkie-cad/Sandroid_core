@@ -268,7 +268,7 @@ def _job_state(job) -> str | None:
     return getattr(job, "state", None)
 
 
-# FriTap hooks SSL/TLS functions - used for conflict detection with other Frida tools
+# friTap hooks SSL/TLS functions - used for conflict detection with other Frida tools
 FRITAP_SSL_HOOKS = [
     "SSL_read",
     "SSL_write",
@@ -295,7 +295,7 @@ FRITAP_SSL_HOOKS = [
 class EventBusHandler(logging.Handler):
     """Logging handler that forwards messages to the EventBus for TUI display."""
 
-    def __init__(self, task_name: str = "FriTap"):
+    def __init__(self, task_name: str = "friTap"):
         super().__init__()
         self.task_name = task_name
         self._event_bus = None
@@ -388,7 +388,7 @@ def _is_console_message(message: dict) -> bool:
 
 
 def _publish_fritap_event(event_bus, message: str):
-    """Publish a FriTap TASK_OUTPUT event to the EventBus.
+    """Publish a friTap TASK_OUTPUT event to the EventBus.
 
     Consolidates the repeated EventBus.publish pattern used throughout FriTap.
 
@@ -400,7 +400,7 @@ def _publish_fritap_event(event_bus, message: str):
         Event(
             type=EventType.TASK_OUTPUT,
             data={
-                "task_name": "FriTap",
+                "task_name": "friTap",
                 "message": message,
             },
             source="fritap",
@@ -418,7 +418,7 @@ def _setup_fritap_logging():
         log_filename="fritap.log",
     )
     if log_path:
-        logger.debug(f"FriTap logs will be saved to {log_path}")
+        logger.debug(f"friTap logs will be saved to {log_path}")
 
 
 def _setup_activity_log_handler():
@@ -431,7 +431,7 @@ def _setup_activity_log_handler():
     )
 
     if not has_eventbus_handler:
-        handler = EventBusHandler(task_name="FriTap")
+        handler = EventBusHandler(task_name="friTap")
         handler.setLevel(logging.INFO)
         handler.setFormatter(logging.Formatter("%(message)s"))
         fritap_logger.addHandler(handler)
@@ -451,7 +451,7 @@ def _remove_activity_log_handler():
 
 class FriTap(DataGatherBase):
     def __init__(self, **kwargs):
-        """Initialize FriTap without process_id - will get session info when starting."""
+        """Initialize friTap without process_id - will get session info when starting."""
         super().__init__(**kwargs)
         self.last_results = {}
         self.job_manager = self._get_toolbox().get_frida_job_manager()
@@ -528,7 +528,7 @@ class FriTap(DataGatherBase):
                 except Exception as e:
                     # Log at warning level for visibility during debugging
                     logger.warning(
-                        f"Error forwarding FriTap message to activity log: {e}"
+                        f"Error forwarding friTap message to activity log: {e}"
                     )
 
             # Always call the original handler
@@ -626,9 +626,9 @@ class FriTap(DataGatherBase):
 
         # Log the configuration
         if verbose or debug_output:
-            logger.debug(f"FriTap started with verbose={verbose}, debug={debug_output}")
+            logger.debug(f"friTap started with verbose={verbose}, debug={debug_output}")
         if self.show_in_activity_log:
-            logger.debug("FriTap output will be shown in activity log")
+            logger.debug("friTap output will be shown in activity log")
 
         # Create message handler - wrap with activity log forwarder if enabled
         self.message_handler = self._create_activity_log_wrapper(
@@ -663,7 +663,7 @@ class FriTap(DataGatherBase):
         self._watch_target(self.job_manager.process_session)
 
         logger.debug(
-            f"FriTap initialized in {self.mode.upper()} mode for "
+            f"friTap initialized in {self.mode.upper()} mode for "
             f"{self.app_package} (PID: {self.process_id})"
         )
 
@@ -791,7 +791,7 @@ class FriTap(DataGatherBase):
         self.stop()
 
     def _interactive_configuration(self) -> dict | None:
-        """Interactive configuration menu for FriTap options.
+        """Interactive configuration menu for friTap options.
 
         Returns:
             Configuration dict if user confirms, None if cancelled
@@ -810,7 +810,7 @@ class FriTap(DataGatherBase):
         return config
 
     def start(self, interactive: bool = True) -> bool:
-        """Start FriTap monitoring.
+        """Start friTap monitoring.
 
         Args:
             interactive: If True, show interactive configuration menu first
@@ -827,12 +827,12 @@ class FriTap(DataGatherBase):
         if interactive:
             config = self._interactive_configuration()
             if config is None:
-                logger.info("FriTap configuration cancelled")
+                logger.info("friTap configuration cancelled")
                 self.cancelled = True
                 return False
 
             # Log the configured options for diagnostics
-            logger.debug("=== FriTap Configuration Applied ===")
+            logger.debug("=== friTap Configuration Applied ===")
             logger.debug(f"  verbose: {config.get('verbose', False)}")
             logger.debug(f"  debug_output: {config.get('debug_output', False)}")
             logger.debug(
@@ -849,10 +849,10 @@ class FriTap(DataGatherBase):
         self._start_watchdog(token)
         try:
             # Set up session FIRST (before starting network) to fail fast
-            logger.debug("=== FriTap Session Setup Starting ===")
+            logger.debug("=== friTap Session Setup Starting ===")
             if self.process_id is None:
                 self._setup_session(config)
-            logger.debug("=== FriTap Session Setup Complete ===")
+            logger.debug("=== friTap Session Setup Complete ===")
             logger.debug(f"  PID: {self.process_id}")
             logger.debug(f"  Package: {self.app_package}")
             logger.debug(f"  Mode: {self.mode}")
@@ -863,7 +863,7 @@ class FriTap(DataGatherBase):
                 and config.get("enable_network_capture")
                 and not get_network_capture_service().is_capturing()
             ):
-                # Set long action duration for FriTap sessions (1 hour)
+                # Set long action duration for friTap sessions (1 hour)
                 toolbox.action_duration = 3600
                 from sandroid.analysis.network import Network
 
@@ -881,7 +881,7 @@ class FriTap(DataGatherBase):
                 network_started = True
                 self._network_instance = network_instance
                 logger.info(
-                    f"Network capture started for FriTap: {self.network_capture_path}"
+                    f"Network capture started for friTap: {self.network_capture_path}"
                 )
 
                 # Register network as background task (started by fritap)
@@ -903,7 +903,7 @@ class FriTap(DataGatherBase):
                     for hook, job_id in conflicts.items()
                 )
                 logger.warning(
-                    f"FriTap may conflict with existing hooks: {conflict_details}"
+                    f"friTap may conflict with existing hooks: {conflict_details}"
                 )
 
             # Guard against frida-java-bridge #218: loading friTap's agent (a
@@ -935,7 +935,7 @@ class FriTap(DataGatherBase):
                 self.frida_script_path,
                 custom_hooking_handler_name=self.message_handler,
                 job_type="fritap",
-                display_name="FriTap SSL Logger",
+                display_name="friTap SSL Logger",
                 hooks_registry=FRITAP_SSL_HOOKS,
                 priority=10,  # High priority for SSL interception
                 auto_resume=False,
@@ -945,7 +945,7 @@ class FriTap(DataGatherBase):
             logger.debug(f"FriTap.start(): job_id={self.job_id}")
 
             # Diagnostic logging for job state
-            logger.debug("=== FriTap Job Created ===")
+            logger.debug("=== friTap Job Created ===")
             logger.debug(f"  job_id: {self.job_id}")
             if job:
                 job_state = (
@@ -977,7 +977,7 @@ class FriTap(DataGatherBase):
             # Blocking here with a timeout would fail on cold starts.
             # Instead, we return immediately and let friTap's messages show progress.
             logger.debug(
-                f"FriTap job started for {self.app_package} (PID: {self.process_id})"
+                f"friTap job started for {self.app_package} (PID: {self.process_id})"
             )
 
             # Register hooks for conflict detection by other tools
@@ -1004,7 +1004,7 @@ class FriTap(DataGatherBase):
             # to avoid duplicate registration and ensure proper lifecycle management
 
             logger.debug(
-                f"FriTap job started with ID: {self.job_id} in {self.mode.upper()} mode for {self.app_package}"
+                f"friTap job started with ID: {self.job_id} in {self.mode.upper()} mode for {self.app_package}"
             )
 
             # Send test message to verify EventBus → ActivityLog path works
@@ -1012,10 +1012,10 @@ class FriTap(DataGatherBase):
                 event_bus = EventBus.get()
                 _publish_fritap_event(
                     event_bus,
-                    f"FriTap started for {self.app_package} - activity log enabled",
+                    f"friTap started for {self.app_package} - activity log enabled",
                 )
                 logger.debug(
-                    "FriTap sent test message to EventBus for activity log verification"
+                    "friTap sent test message to EventBus for activity log verification"
                 )
 
             self._start_token = None
@@ -1042,7 +1042,7 @@ class FriTap(DataGatherBase):
                 pass
             # Clean up network capture if we started it
             if network_started and network_instance:
-                logger.info("Cleaning up network capture due to FriTap startup failure")
+                logger.info("Cleaning up network capture due to friTap startup failure")
                 self._stop_network_capture()
             # Our own spawn must not stay frozen with the session held.
             self._cleanup_failed_start()
@@ -1254,7 +1254,7 @@ class FriTap(DataGatherBase):
         return {hook: jid for hook, jid in conflicts.items() if jid not in dead}
 
     def stop(self):
-        """Stop FriTap monitoring and finalize outputs.
+        """Stop friTap monitoring and finalize outputs.
 
         Note: This stops Frida hooks but keeps the target app running.
         Uses timeout parameters for graceful shutdown even if Frida hangs.
@@ -1305,7 +1305,7 @@ class FriTap(DataGatherBase):
                             else "Unknown error"
                         )
                         logger.warning(
-                            f"FriTap encountered errors during execution: {error_msg}"
+                            f"friTap encountered errors during execution: {error_msg}"
                         )
             except ValueError:
                 # Job already removed from manager
@@ -1322,10 +1322,10 @@ class FriTap(DataGatherBase):
             if stop_frida_job_bounded(
                 self.job_manager, getattr(self, "job_id", None), timeout=_STOP_TIMEOUT
             ):
-                logger.info(f"FriTap detached from {self.app_package}")
+                logger.info(f"friTap detached from {self.app_package}")
             else:
                 logger.info(
-                    f"FriTap stopped for {self.app_package} (agent unload "
+                    f"friTap stopped for {self.app_package} (agent unload "
                     "continues in the background)"
                 )
                 self._stop_note = "agent still unloading"
@@ -1333,7 +1333,7 @@ class FriTap(DataGatherBase):
                     getattr(self.job_manager, "_sandroid_pending_teardown", None)
                 )
         except Exception as e:
-            logger.warning(f"Error stopping FriTap jobs: {e}")
+            logger.warning(f"Error stopping friTap jobs: {e}")
         self._outputs_closed = True
 
         # Release this job's hook registrations so the next start does not
@@ -1441,7 +1441,7 @@ class FriTap(DataGatherBase):
         path = getattr(self, "network_capture_path", None)
         if path and os.path.isfile(path):
             logger.info(
-                f"FriTap network capture closed: {path} ({os.path.getsize(path)} bytes)"
+                f"friTap network capture closed: {path} ({os.path.getsize(path)} bytes)"
             )
 
     def _finalize_outputs(self) -> None:
@@ -1464,7 +1464,7 @@ class FriTap(DataGatherBase):
                 method()
             except Exception as e:
                 logger.warning(f"Error finalizing friTap output ({name}): {e}")
-        logger.info("FriTap output finalized")
+        logger.info("friTap output finalized")
 
     def gather(self) -> None:
         """Not supported: friTap is driven by :meth:`start` and :meth:`stop`.
@@ -1608,7 +1608,7 @@ def _start_fritap_keys(package: str | None, serial: str | None):
         try:
             get_task_service().register(
                 name="fritap",
-                display_name="FriTap",
+                display_name="friTap",
                 instance=fritap,
                 stop_callback=fritap.stop,
                 app_name=fritap.app_package,

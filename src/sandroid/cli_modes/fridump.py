@@ -21,7 +21,7 @@ def run_fridump_headless(
 ) -> None:
     """Run Fridump memory dump in headless mode.
 
-    Dumps the memory of the target package and exits. Unlike FriTap/dexray,
+    Dumps the memory of the target package and exits. Unlike friTap/dexray,
     this is a one-shot operation — dump, report results, exit.
 
     Args:

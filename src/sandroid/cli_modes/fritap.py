@@ -1,6 +1,6 @@
-"""Headless FriTap mode dispatcher for Sandroid.
+"""Headless friTap mode dispatcher for Sandroid.
 
-Runs FriTap SSL/TLS key extraction in headless mode until interrupted.
+Runs friTap SSL/TLS key extraction in headless mode until interrupted.
 """
 
 import logging
@@ -20,9 +20,9 @@ def run_fritap_headless(
     package: str,
     output_file: str | None,
 ) -> None:
-    """Run FriTap in headless mode until interrupted.
+    """Run friTap in headless mode until interrupted.
 
-    Starts FriTap SSL/TLS key extraction and runs until Ctrl+C is pressed.
+    Starts friTap SSL/TLS key extraction and runs until Ctrl+C is pressed.
     This enables long-running key capture for traffic analysis.
 
     Args:
@@ -90,11 +90,11 @@ def run_fritap_headless(
     signal_handler.install()
 
     try:
-        console.print(f"[accent]Starting FriTap for: {package}[/accent]")
+        console.print(f"[accent]Starting friTap for: {package}[/accent]")
         success = fritap.start(interactive=False)
 
         if not success:
-            console.print("[error]FriTap startup cancelled or failed[/error]")
+            console.print("[error]friTap startup cancelled or failed[/error]")
             sys.exit(1)
 
         # Now that fritap is running, wire up the cleanup callback
@@ -103,7 +103,7 @@ def run_fritap_headless(
         try:
             get_task_service().register(
                 name="fritap",
-                display_name="FriTap",
+                display_name="friTap",
                 instance=fritap,
                 stop_callback=fritap.stop,
                 app_name=fritap.app_package,
@@ -113,7 +113,7 @@ def run_fritap_headless(
             logger.debug(f"Task registration note: {e}")
 
         console.print(
-            f"[success]FriTap started for {fritap.app_package} "
+            f"[success]friTap started for {fritap.app_package} "
             f"(PID: {fritap.process_id})[/success]"
         )
 
@@ -126,25 +126,25 @@ def run_fritap_headless(
             "[dim]Waiting for SSL/TLS hooks to load (friTap messages will appear)...[/dim]"
         )
 
-        # Block until signal received; the FriTap job thread keeps itself alive
+        # Block until signal received; the friTap job thread keeps itself alive
         try:
             signal.pause()
         except KeyboardInterrupt:
             pass
 
     except RuntimeError as e:
-        console.print(f"[error]FriTap error: {e}[/error]")
-        logger.exception("FriTap startup error")
+        console.print(f"[error]friTap error: {e}[/error]")
+        logger.exception("friTap startup error")
         sys.exit(1)
     except Exception as e:
         console.print(f"[error]Unexpected error: {e}[/error]")
-        logger.exception("FriTap headless error")
+        logger.exception("friTap headless error")
         sys.exit(1)
     finally:
         console.print("[dim]Stopping FriTap...[/dim]")
         try:
             fritap.stop()
-            console.print("[success]FriTap stopped successfully[/success]")
+            console.print("[success]friTap stopped successfully[/success]")
 
             output_files = _get_output_files(fritap)
             if output_files:
@@ -152,17 +152,17 @@ def run_fritap_headless(
                     f"[success]Output saved to: {', '.join(output_files)}[/success]"
                 )
         except Exception as e:
-            console.print(f"[warning]Error during FriTap stop: {e}[/warning]")
+            console.print(f"[warning]Error during friTap stop: {e}[/warning]")
 
         fritap_logger.removeHandler(console_handler)
         get_task_service().stop_all()
 
 
 def _get_output_files(fritap) -> list[str]:
-    """Collect output file paths from a FriTap instance.
+    """Collect output file paths from a friTap instance.
 
     Args:
-        fritap: FriTap instance to inspect.
+        fritap: friTap instance to inspect.
 
     Returns:
         List of output file path strings.

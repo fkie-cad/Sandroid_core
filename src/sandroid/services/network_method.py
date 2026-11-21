@@ -195,7 +195,7 @@ def _is_status_note(note: str) -> bool:
     return note in (
         "CA installed",
         "Mitmproxy running",
-        "SDK runtime processes not named",
+        "SDK sandbox traffic has no app name",
     ) or note.startswith("pinning ")
 
 
@@ -309,7 +309,7 @@ def derive_method(s: MethodSnapshot) -> MethodView:
         if s.attribution == "on":
             # SDK runtime processes (UID 20000+) are refused by the Kill
             # switch but get no relay identity of their own.
-            notes.insert(0, "SDK runtime processes not named")
+            notes.insert(0, "SDK sandbox traffic has no app name")
         if s.ca == "installed":
             notes.insert(0, "CA installed")
         return MethodView(
@@ -528,7 +528,7 @@ def plan_apply(
 
 
 def keys_only_available() -> bool:
-    """FriTap has its non-interactive keys-only start (always on this build)."""
+    """True: friTap has its non-interactive keys-only start (always here)."""
     from sandroid.analysis import fritap
 
     return callable(getattr(fritap, "start_fritap_keys", None))

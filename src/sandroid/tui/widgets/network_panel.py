@@ -1209,7 +1209,7 @@ class NetworkPanel(Widget):
         Binding("H", "cycle_highlight_filter", "AI filter: next set / off", show=False),
         Binding("X", "clear_highlights", "Clear the AI highlights", show=False),
         Binding("I", "status", "Network status", show=False),
-        Binding("M", "mitm('toggle_running')", "Start/stop mitm", show=False),
+        Binding("M", "mitm('toggle_running')", "Start/stop Mitmproxy", show=False),
         Binding("ctrl+n", "mitm('inject_ca')", "Install CA", show=False),
         Binding("ctrl+p", "mitm('toggle_ssl_unpin')", "SSL unpin", show=False),
         Binding("ctrl+r", "mitm('restart')", "Restart mitm", show=False),

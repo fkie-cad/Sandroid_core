@@ -21,7 +21,7 @@ class ToolSelectionModal(FridaModal[dict[str, bool] | None]):
     Supports both multi-select mode (for multi-tool spawn) and single-select mode.
 
     Available tools:
-    - FriTap: SSL/TLS interception and decryption
+    - friTap: SSL/TLS interception and decryption
     - Dexray-Intercept: Runtime monitoring of crypto, network, file operations
 
     Detection bypasses are not offered here: they come only from
@@ -98,7 +98,7 @@ class ToolSelectionModal(FridaModal[dict[str, bool] | None]):
     BINDINGS = [
         Binding("enter", "confirm", "Confirm", priority=True),
         Binding("space", "toggle_current", "Toggle", show=False),
-        Binding("1", "toggle_fritap", "FriTap", show=False),
+        Binding("1", "toggle_fritap", "friTap", show=False),
         Binding("2", "toggle_dexray", "Dexray", show=False),
     ]
 
@@ -149,9 +149,9 @@ class ToolSelectionModal(FridaModal[dict[str, bool] | None]):
             )
             yield Label(f"[dim]{mode_text}[/dim]", id="tool-selection-subtitle")
 
-            # FriTap option
+            # friTap option
             yield Static(
-                "[1] FriTap SSL/TLS Interception\n"
+                "[1] friTap SSL/TLS Interception\n"
                 "[dim]    Capture decrypted HTTPS traffic[/dim]",
                 classes="tool-option",
                 id="option-fritap",
@@ -216,7 +216,7 @@ class ToolSelectionModal(FridaModal[dict[str, bool] | None]):
         self._update_display()
 
     def action_toggle_fritap(self) -> None:
-        """Toggle FriTap selection."""
+        """Toggle friTap selection."""
         self._toggle_tool("fritap")
 
     def action_toggle_dexray(self) -> None:

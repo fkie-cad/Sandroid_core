@@ -3,7 +3,7 @@
 Each module handles a specific execution mode:
 - interactive: TUI and Rich-based interactive menus
 - analysis: Automated forensic analysis workflow
-- fritap: Headless FriTap SSL/TLS key extraction
+- fritap: Headless friTap SSL/TLS key extraction
 - dexray: Headless dexray-intercept malware monitoring
 - network: Headless network capture
 - headless: Headless/batch API-based analysis

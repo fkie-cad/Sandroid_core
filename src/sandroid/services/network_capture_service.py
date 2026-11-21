@@ -67,7 +67,7 @@ class NetworkCaptureService:
     This service tracks whether network capture is active and manages
     the capture output file path. It does NOT implement the actual
     capture logic - that is handled by capture implementations
-    (tcpdump, FriTap, etc.).
+    (tcpdump, friTap, etc.).
 
     Thread Safety:
         All operations are thread-safe through internal locking.

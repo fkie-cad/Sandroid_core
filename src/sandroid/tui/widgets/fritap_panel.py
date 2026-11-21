@@ -161,7 +161,7 @@ class FriTapPanel(Widget):
         """Handle a TASK_OUTPUT event (runs on the UI thread).
 
         Source-only match: another task that happens to emit the same
-        ``task_name`` ("FriTap") must not leak into this panel, so we filter on
+        ``task_name`` ("friTap") must not leak into this panel, so we filter on
         ``event.source == "fritap"`` and nothing else.
         """
         if getattr(event, "source", None) != "fritap":
@@ -193,7 +193,7 @@ class FriTapPanel(Widget):
     def _append_line(self, line: str) -> None:
         # A fresh session resets the glance counters (the engine emits this
         # sentinel only when activity-log output is enabled).
-        if "FriTap started for" in line:
+        if "friTap started for" in line:
             self._keys = self._datalog = self._errors = 0
 
         stripped, was_error, was_warning = self._strip_pseudo_tags(line)
@@ -403,7 +403,7 @@ class FriTapPanel(Widget):
     # -- actions ----------------------------------------------------------
 
     def action_toggle_running(self) -> None:
-        """Enter — delegate Start/Stop to the existing FriTap command (key h).
+        """Enter — delegate Start/Stop to the existing friTap command (key h).
 
         The command owns ALL preconditions (frida-server up, spotlight app),
         the config modal, task registration, the paused-spawn guard, and the
@@ -415,7 +415,7 @@ class FriTapPanel(Widget):
         try:
             self.app.action_action_key("h")
         except Exception as exc:
-            logger.warning("FriTap toggle failed: %s", exc)
+            logger.warning("friTap toggle failed: %s", exc)
         self.refresh_header()
 
     def action_clear_log(self) -> None:
@@ -424,7 +424,7 @@ class FriTapPanel(Widget):
         self.refresh_header()
 
     def action_open_output(self) -> None:
-        """Ctrl+O — open the friTap results folder in the OS file manager."""
+        """Ctrl+F — open the friTap results folder in the OS file manager."""
         folder = self._output_folder()
         if folder is None or not folder.exists():
             try:

@@ -527,8 +527,9 @@ class MitmproxyPanel(Widget):
             node = node.parent
         return None
 
-    def _log(self, line: str, tag: str = "mitm") -> None:
-        """Write one controller line to the ActivityLog drawer, tagged ``mitm``.
+    def _log(self, line: str, tag: str = "Mitmproxy") -> None:
+        """Write one controller line to the ActivityLog drawer, tagged
+        ``Mitmproxy`` (or ``tag``, e.g. ``bypass``).
 
         ``line`` keeps its ``[INFO]``/``[ERROR]`` prefix convention; the prefix
         picks the colour and is dropped from the text. Best-effort: without a

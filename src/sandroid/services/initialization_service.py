@@ -795,7 +795,7 @@ class InitializationService:
             # A session may already exist if auto_select_device() was called
             # during device discovery, which triggers switch_device_folder()
             # and sets up the device path. Creating a new session here would
-            # reset device_path to None and cause tools like FriTap to write
+            # reset device_path to None and cause tools like friTap to write
             # results to the session root instead of the device directory.
             if self._current_session is not None:
                 session_paths = self._current_session

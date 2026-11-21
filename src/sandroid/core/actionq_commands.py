@@ -72,7 +72,7 @@ COMMAND_KEYS: set[str] = {
     "m",  # Dexray-Intercept (toggle)
     "k",  # Reconfigure hooks
     # Network commands
-    "h",  # FriTap (toggle)
+    "h",  # friTap (toggle)
     "y",  # Proxy configuration
     "w",  # Network capture (toggle)
     # Monitoring commands

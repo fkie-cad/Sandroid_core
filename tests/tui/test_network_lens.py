@@ -567,7 +567,7 @@ async def test_mitm_lines_go_to_the_activity_log(flow_dir):
         )
         await settle(pilot)
         assert any(
-            "mitm:" in line and "CANNOT reach" in line for line in log._plain_lines
+            "Mitmproxy:" in line and "CANNOT reach" in line for line in log._plain_lines
         )
         assert "CANNOT reach" in panel.mitm.recent_lines[-1]
         # N6-V8: the SSL unpin bypass logs as bypass, not "mitm: Bypass …".
@@ -2810,3 +2810,21 @@ async def test_inspector_footer_and_ticker_keys_are_words(flow_dir):
         assert footer == "Left/Right tab · [ ] tabs · Esc close"
         hint = str(ms.query_one("#log-ticker-hint").render())
         assert hint.startswith("Ctrl+Y AI")
+
+
+def test_tool_names_are_spelled_one_way():
+    """N3-V11: friTap / FriTap / "FriTap Configuration", Mitmproxy / mitm."""
+    import inspect
+
+    from sandroid.analysis import fritap_config
+    from sandroid.commands import network_commands
+    from sandroid.tui.app import SandroidTUI
+
+    h = next(b for b in SandroidTUI.BINDINGS if getattr(b, "id", None) == "fritap")
+    assert h.description == "friTap"
+    m = next(b for b in NetworkPanel.BINDINGS if b.key == "M")
+    assert m.description == "Start/stop Mitmproxy"
+    for module in (fritap_config, network_commands):
+        source = inspect.getsource(module)
+        for literal in ('"FriTap ', "'FriTap ", 'f"FriTap ', '"FriTap"'):
+            assert literal not in source, (module.__name__, literal)

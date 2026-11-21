@@ -141,8 +141,8 @@ class ActivityLog(RichLog):
         """True if ``message`` was already shown within ``DEDUP_WINDOW``.
 
         Many tools reach the log twice or three times -- e.g. every friTap
-        line arrives as task output ("FriTap: x"), as its own Python log
-        record ("INFO: x") and with its "[*] " prefix ("FriTap: [*] x").
+        line arrives as task output ("friTap: x"), as its own Python log
+        record ("INFO: x") and with its "[*] " prefix ("friTap: [*] x").
         Level, source label and "[*]"/"[+]" prefixes are ignored when
         comparing, so only the first copy is shown.
         """

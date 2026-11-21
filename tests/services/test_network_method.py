@@ -160,12 +160,12 @@ def test_brief_line_leaves_tool_state_notes_to_the_status_page():
     assert "CA installed" in full
     assert "pinning not bypassed" in full
     brief = view.markup("#0f0", "#ff0", "#f00", "#888", brief=True)
-    for note in ("CA installed", "SDK runtime processes not named", "pinning"):
+    for note in ("CA installed", "SDK sandbox traffic has no app name", "pinning"):
         assert note not in brief
     assert "Whole device" in brief
     assert set(view.status_notes) == {
         "CA installed",
-        "SDK runtime processes not named",
+        "SDK sandbox traffic has no app name",
         "pinning not bypassed",
     }
     # Method notes stay on the brief line (they describe the method).
@@ -998,7 +998,7 @@ def test_status_line_never_claims_apps_named_when_some_are_not():
     assert "Kill switch covers IPv4 only (no ip6tables on the device)" in v4.problems
     ok = nm.derive_method(WHOLE)
     assert "apps named" in ok.covered
-    assert "SDK runtime processes not named" in ok.notes
+    assert "SDK sandbox traffic has no app name" in ok.notes
     for view in (partial, failed, direct, v4, ok):
         assert not _GLYPHS.search(view.line())
         assert " arm" not in view.line()

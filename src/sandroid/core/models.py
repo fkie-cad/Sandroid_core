@@ -22,7 +22,7 @@ class BackgroundTask:
     """Represents a running background task."""
 
     name: str  # e.g., "fritap", "dexray-intercept", "network"
-    display_name: str  # e.g., "FriTap", "Dexray-Intercept"
+    display_name: str  # e.g., "friTap", "Dexray-Intercept"
     instance: object  # The actual tool instance
     stop_callback: Callable  # Function to call when stopping
     started_at: datetime.datetime  # When the task started

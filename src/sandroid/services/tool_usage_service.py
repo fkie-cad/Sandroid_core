@@ -83,7 +83,7 @@ class ToolUsageService:
 
         # Check if tool was used
         if service.is_used("fritap"):
-            print("FriTap was used")
+            print("friTap was used")
 
         # Get summary for exit display
         for tool, info in service.get_usage().items():

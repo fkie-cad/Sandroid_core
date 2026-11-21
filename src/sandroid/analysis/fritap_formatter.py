@@ -1,7 +1,7 @@
-"""FriTap message formatting for activity log and console output.
+"""friTap message formatting for activity log and console output.
 
 Extracts the message parsing and formatting logic from the activity log wrapper,
-keeping the FriTap class focused on Frida session management.
+keeping the friTap class focused on Frida session management.
 """
 
 import ipaddress

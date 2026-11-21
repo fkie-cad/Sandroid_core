@@ -171,7 +171,7 @@ class SandroidHeadlessAPI(SandroidAPI):
 
     @property
     def _fritap(self) -> HeadlessFriTapController:
-        """Lazily create and return the FriTap controller."""
+        """Lazily create and return the friTap controller."""
         if self._fritap_controller is None:
             self._fritap_controller = HeadlessFriTapController(
                 adb=self._adb,
@@ -181,7 +181,7 @@ class SandroidHeadlessAPI(SandroidAPI):
         return self._fritap_controller
 
     def _set_spotlight_app_name(self, package: str) -> None:
-        """Internal setter for spotlight app name used by FriTap controller."""
+        """Internal setter for spotlight app name used by friTap controller."""
         self._spotlight_app = package
 
     # =========================================================================
@@ -233,7 +233,7 @@ class SandroidHeadlessAPI(SandroidAPI):
             self._toolbox = Toolbox
             self._initialized = True
 
-            # Reset FriTap controller so it picks up the new ADB
+            # Reset friTap controller so it picks up the new ADB
             self._fritap_controller = None
 
             # Validate environment
@@ -448,11 +448,11 @@ class SandroidHeadlessAPI(SandroidAPI):
         with_fritap: bool = False,
         fritap_package: str | None = None,
     ) -> dict[str, Any]:
-        """Run headless network capture with optional FriTap integration.
+        """Run headless network capture with optional friTap integration.
 
         Args:
             duration: Capture duration in seconds (minimum 5, default 60).
-            with_fritap: Whether to enable FriTap SSL keylog during capture.
+            with_fritap: Whether to enable friTap SSL keylog during capture.
             fritap_package: Target package name for FriTap.
 
         Returns:
@@ -700,7 +700,7 @@ class SandroidHeadlessAPI(SandroidAPI):
         return await self._app_handler.get_installed_apps()
 
     # =========================================================================
-    # FriTap Control (delegates to HeadlessFriTapController)
+    # friTap Control (delegates to HeadlessFriTapController)
     # =========================================================================
 
     @require_initialized
@@ -712,7 +712,7 @@ class SandroidHeadlessAPI(SandroidAPI):
         json_output: str | None = None,
         fresh: bool = False,
     ) -> CommandResult:
-        """Start FriTap SSL/TLS key extraction (non-blocking).
+        """Start friTap SSL/TLS key extraction (non-blocking).
 
         ``fresh=True`` restarts a running app first (the caller consents).
         """
@@ -725,11 +725,11 @@ class SandroidHeadlessAPI(SandroidAPI):
         )
 
     async def stop_fritap(self, timeout: float = 5.0) -> CommandResult:
-        """Stop FriTap SSL/TLS key extraction."""
+        """Stop friTap SSL/TLS key extraction."""
         return await self._fritap.stop(timeout=timeout)
 
     async def is_fritap_running(self) -> bool:
-        """Check if FriTap is currently running."""
+        """Check if friTap is currently running."""
         return await self._fritap.is_running()
 
     # =========================================================================

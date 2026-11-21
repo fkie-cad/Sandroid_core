@@ -74,7 +74,7 @@ class ToolHookInfo:
 # ============================================================================
 FRITAP_HOOKS = ToolHookInfo(
     name="fritap",
-    display_name="FriTap SSL Logger",
+    display_name="friTap SSL Logger",
     session_type=SessionType.JOB_MANAGER,
     categories=[HookCategory.SSL_TLS, HookCategory.NETWORK],
     native_hooks=[
