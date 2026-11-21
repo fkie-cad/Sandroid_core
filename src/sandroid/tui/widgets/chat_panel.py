@@ -1817,6 +1817,10 @@ class ChatPanel(Widget):
 
     def _on_error(self, ev: AgentEvent, p: dict) -> None:
         self._finish_stream()
+        # The final error replaces a pending "Retrying in 8.4s" line.
+        retry = self._transcript().block(f"retry:{ev.turn_id}")
+        if isinstance(retry, NoticeLine) and retry.notice_style != "$chat-muted":
+            self._transcript().remove_block(f"retry:{ev.turn_id}")
         message = redact_secrets(p.get("message") or p.get("kind") or "error")
         self._notice(f"Error: {message}", style="$lens-bad")
         self._set_state("error")

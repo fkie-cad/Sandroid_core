@@ -1419,6 +1419,13 @@ class ChatTranscript(VerticalScroll):
         self.call_after_refresh(self._maybe_anchor)
         return block
 
+    def remove_block(self, key: str) -> None:
+        """Remove the block added under ``key`` (no-op if unknown)."""
+        block = self._by_key.pop(key, None)
+        if block is not None:
+            self._blocks = [w for w in self._blocks if w is not block]
+            block.remove()
+
     def clear_blocks(self) -> None:
         """Remove every block (a new conversation)."""
         self.anchor(False)

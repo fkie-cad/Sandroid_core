@@ -598,6 +598,9 @@ async def test_errors_retries_and_compaction(sessions, monkeypatch):
         assert "1 compacted" in app.query_one("#chat-header").render().plain
         assert "stream dropped" in _notices(panel)
         assert panel.state == "error"
+        # The final error clears the stale "Retrying in 8s · attempt 3/4".
+        assert not [n for n in _blocks(panel, NoticeLine) if "Retr" in n.text]
+        assert panel._transcript().block("retry:u1") is None
 
 
 async def test_mascot_follows_the_panel_state(sessions, monkeypatch):
