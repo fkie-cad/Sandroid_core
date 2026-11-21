@@ -48,6 +48,12 @@ class QuitConfirmModal(DangerModal[bool]):
         max-width: 80%;
         max-height: 80%;
     }
+    /* A Label is as wide as its text: text-align alone left it at the
+       left edge while the title and the notes are centred. */
+    QuitConfirmModal #quit-question {
+        width: 100%;
+        text-align: center;
+    }
     QuitConfirmModal #quit-notes {
         width: 100%;
         height: auto;

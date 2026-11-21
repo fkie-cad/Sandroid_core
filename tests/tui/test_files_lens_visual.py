@@ -469,3 +469,29 @@ async def test_monitor_dialog_dims_follow_in_path_mode_and_remembers(
             "/data/data/org.mozilla.firefox",
             "/data/data/org.wikipedia",
         ]
+
+
+# --------------------------------------------------------------------------
+# V13: quit dialog (the question is centred like the title and the notes)
+# --------------------------------------------------------------------------
+
+
+async def test_quit_dialog_question_is_centred() -> None:
+    from textual.app import App
+
+    from sandroid.tui.modals.quit_modal import QuitConfirmModal
+
+    class _App(App):
+        def on_mount(self) -> None:
+            self.push_screen(QuitConfirmModal(notes=["stops the file monitor"]))
+
+    app = _App()
+    async with app.run_test(size=(120, 35)) as pilot:
+        await pilot.pause()
+        modal = app.screen
+        box = modal.query_one(".modal-container").content_region
+        for selector in ("#quit-title", "#quit-question", "#quit-notes"):
+            widget = modal.query_one(selector)
+            assert widget.region.x == box.x, selector
+            assert widget.region.width == box.width, selector
+            assert widget.styles.text_align == "center", selector
