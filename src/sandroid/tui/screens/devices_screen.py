@@ -172,6 +172,9 @@ class DeviceRow:
         persona: The persona our launch started it as (``meta.persona_id``).
         snapshot_warnings: ``(snapshot, why it may not load)`` of its AVD's
             snapshots (``snapshot.pb``, read only).
+        unprobed: Deliberately not probed: this session is pinned to another
+            serial and did not launch it -- another session's or tool's
+            device (whatever adb state it is in).
     """
 
     serial: str
@@ -190,10 +193,21 @@ class DeviceRow:
     saved_options: Any = None
     persona: str = ""
     snapshot_warnings: tuple[tuple[str, str], ...] = ()
+    unprobed: bool = False
 
     @property
     def key(self) -> str:
         return f"dev:{self.serial}"
+
+    @property
+    def in_use_elsewhere(self) -> bool:
+        """Another session's / tool's device (shown ``in use · not probed``)."""
+        return self.unprobed or self.state is RowState.UNPROBED
+
+    @property
+    def stop_name(self) -> str:
+        """AVD and serial, for a dialog that stops or restarts it."""
+        return f"{self.avd_name} ({self.serial})" if self.avd_name else self.serial
 
     @property
     def network(self) -> bool:
@@ -415,6 +429,7 @@ def build_snapshot(
             ),
             persona=_persona_of(launch),
             snapshot_warnings=warned(avd_name),
+            unprobed=serial in unprobed and launch is None,
         )
 
     for serial, launch in by_serial.items():
@@ -2330,31 +2345,69 @@ class DevicesScreen(ModalScreen[str | None]):
             renamed,
         )
 
+    def _confirm_in_use(self, row: DeviceRow, verb: str, then: Callable) -> None:
+        """*verb* ("Stop" / "Restart") a device in use elsewhere: only after a
+        warning that names it. Cancel has the focus, and a fast ``y`` typed
+        out of habit (the rows shifted under the cursor) is ignored.
+        """
+        from sandroid.core.device_manager import DeviceManager
+        from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+        pinned = DeviceManager.preferred_serial() or "another serial"
+        avd = row.avd_name or "unknown: never probed"
+        gerund = {"Stop": "Stopping", "Restart": "Restarting"}.get(verb, verb)
+
+        def confirmed(yes: bool | None) -> None:
+            if yes and self.is_attached:
+                then()
+
+        self.app.push_screen(
+            ConfirmModal(
+                title=f"{verb} {row.stop_name}? It is in use elsewhere",
+                message=f"{row.serial} (AVD {avd}) is in use by another "
+                f"Sandroid session or tool: this session is pinned to "
+                f"{pinned} and did not start it. {gerund} it ends that "
+                "session's work.",
+                yes_label=f"{verb} anyway",
+                no_label="Cancel",
+                guard_typing=True,
+            ),
+            confirmed,
+        )
+
     def action_stop(self) -> None:
         row = self.current_row()
         if not isinstance(row, DeviceRow) or not row.is_emulator:
             return
         from sandroid.tui.modals.confirm_modal import ConfirmModal
 
+        def stop() -> None:
+            self._call(
+                "stop_emulator",
+                row.key,
+                "stopping…",
+                row.serial,
+                failed_word="stop failed",
+            )
+
+        if row.in_use_elsewhere:
+            self._confirm_in_use(row, "Stop", stop)
+            return
+
         def confirmed(yes: bool | None) -> None:
             if yes:
-                self._call(
-                    "stop_emulator",
-                    row.key,
-                    "stopping…",
-                    row.serial,
-                    failed_word="stop failed",
-                )
+                stop()
 
         warning = (
             "\nIt is the active device: running tasks lose their device."
             if row.active
             else ""
         )
+        avd = f" of AVD {row.avd_name}" if row.avd_name else ""
         self.app.push_screen(
             ConfirmModal(
-                title=f"Stop {row.title}?",
-                message=f"Shuts down emulator {row.serial} (emu kill).{warning}",
+                title=f"Stop {row.stop_name}?",
+                message=f"Shuts down emulator {row.serial}{avd} (emu kill).{warning}",
                 yes_label="Stop",
                 no_label="Cancel",
             ),
@@ -2364,6 +2417,15 @@ class DevicesScreen(ModalScreen[str | None]):
     def action_restart(self) -> None:
         row = self.current_row()
         if not isinstance(row, DeviceRow) or not row.is_emulator:
+            return
+        if row.in_use_elsewhere:
+            self._confirm_in_use(
+                row,
+                "Restart",
+                lambda: self._call(
+                    "restart_emulator", row.key, "restarting…", row.serial
+                ),
+            )
             return
         if not (row.active and self._session_busy()):
             self._call("restart_emulator", row.key, "restarting…", row.serial)
@@ -2376,7 +2438,7 @@ class DevicesScreen(ModalScreen[str | None]):
 
         self.app.push_screen(
             ConfirmModal(
-                title=f"Restart {row.title}?",
+                title=f"Restart {row.stop_name}?",
                 message=f"Restarts emulator {row.serial} (same AVD and port).\n"
                 "It is the active device: running tasks lose their device.",
                 yes_label="Restart",

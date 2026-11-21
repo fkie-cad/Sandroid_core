@@ -232,6 +232,10 @@ def test_unprobed_foreign_devices_are_in_use_not_ready() -> None:
     assert rows["emulator-5554"].state.value == "in use · not probed"
     assert rows["emulator-5556"].state is RowState.OFFLINE  # adb's own word
     assert rows["emulator-5562"].state is RowState.READY
+    # Stop / restart guard: in use elsewhere in any adb state, never ours.
+    assert rows["emulator-5554"].in_use_elsewhere
+    assert rows["emulator-5556"].in_use_elsewhere
+    assert not rows["emulator-5562"].in_use_elsewhere
     assert [
         (a.name, a.running_elsewhere, a.port, a.port_reason) for a in snap.avds
     ] == [
@@ -1008,6 +1012,59 @@ async def test_an_unprobed_device_attaches_only_after_a_confirm(
         await pilot.press("y")
         await settle(pilot)
     assert app.result == "emulator-5556"
+
+
+@pytest.mark.parametrize(
+    ("key", "verb", "method"),
+    [("x", "Stop", "stop_emulator"), ("R", "Restart", "restart_emulator")],
+)
+async def test_stop_or_restart_of_a_device_in_use_elsewhere_warns_first(
+    monkeypatch, key, verb, method
+) -> None:
+    """E2E #3 bug 1: ``x`` then ``y`` on an ``in use · not probed`` row
+    killed another session's emulator behind a plain "Stop <model>?".
+    """
+    from sandroid.core.device_manager import DeviceManager
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+    monkeypatch.setattr(DeviceManager, "_preferred_serial", "emulator-5562")
+    actions = FakeActions()
+    app, screen = _hub(devices=[FOREIGN], actions=actions)
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        await pilot.press(key)
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        modal = app.screen
+        assert modal.guard_typing  # Cancel has the focus, a fast y is ignored
+        assert modal.title_text == f"{verb} emulator-5556? It is in use elsewhere"
+        assert "in use by another Sandroid session" in modal.message_text
+        assert "emulator-5562" in modal.message_text
+        assert modal.yes_label == f"{verb} anyway"
+        await settle(pilot)
+        assert modal.focused is not None
+        assert modal.focused.id == "no"
+        await pilot.press("enter")  # the default declines
+        await until(pilot, lambda: app.screen is screen)
+        assert actions.calls == []
+        monkeypatch.setattr(ConfirmModal, "ARM_SECONDS", 0.0)
+        await pilot.press(key)
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        await pilot.press("y")
+        await until(pilot, lambda: app.screen is screen)
+    assert actions.calls == [(method, "emulator-5556")]
+
+
+async def test_the_stop_dialog_names_the_avd_and_the_serial() -> None:
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+    app, screen = _hub(devices=[dataclasses.replace(READY, model="sdk_gphone64")])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        await pilot.press("x")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        assert app.screen.title_text == "Stop Pixel_7 (emulator-5554)?"
+        assert "of AVD Pixel_7" in app.screen.message_text
+        assert not app.screen.guard_typing
 
 
 async def test_the_options_box_shows_the_console_port() -> None:
