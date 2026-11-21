@@ -2508,6 +2508,20 @@ EXPERIMENTAL_SUFFIX = " (experimental)"
 BYPASS_CONFLICT_CHOICE = (
     "choose one: Dexray's bypass group or the Bypass (b) categories"
 )
+#: Job states that no longer hold a script in the process.
+_DEAD = ("stopped", "error")
+
+
+def _job_lock(jm: Any):
+    """The JobManager's mutation lock (see ``install_job_lock``), else a no-op."""
+    import contextlib
+
+    lock = getattr(jm, "_sandroid_job_lock", None)
+    if isinstance(lock, type(threading.RLock())):
+        return lock
+    return contextlib.nullcontext()
+
+
 #: Dexray's ``telephony_hooks`` replace the same TelephonyManager methods as
 #: the emulator category, from a second script (the same two-bridge
 #: double-replace that crashed File.exists), so that pair excludes too.
@@ -2528,6 +2542,46 @@ class _ExclusiveClaim:
     choice: str
     is_alive: Callable[[], bool] | None
     resolve: str = ""
+
+
+@dataclass
+class _ParkedHooks:
+    """A bypass script left loaded in an app the selection moved away from.
+
+    The selection (App lens) moved to another app while this script ran:
+    it stays loaded on its own Frida session, out of the JobManager (whose
+    one session then serves the selected app), until the app dies, the
+    user unloads it (Shift+H in the App lens) or selects the app again.
+    """
+
+    package: str
+    pid: int | None
+    job: Any
+    script: Any
+    temp_path: str | None
+    categories: frozenset[str]
+    since: float
+    session: Any = None
+
+    @property
+    def task_name(self) -> str:
+        return f"bypass:{self.package}"
+
+
+@dataclass(frozen=True)
+class HookedApp:
+    """One app with bypass hooks loaded (see :meth:`BypassService.hooked_apps`).
+
+    ``categories`` in display order; ``since`` is a ``time.time()`` stamp;
+    ``parked`` means the selection moved away from the app (its script
+    stays loaded on its own session).
+    """
+
+    package: str
+    pid: int | None
+    categories: tuple[str, ...]
+    since: float | None
+    parked: bool
 
 
 _CATEGORY_DISPLAY = {
@@ -2591,6 +2645,9 @@ class BypassService:
         # Category labels whose IIFE reported a merge_error at load (so they are
         # NOT counted active). Reset on every fresh load.
         self._merge_errors: set[str] = set()
+        # merge_errors of loads in flight, by job id: each load counts only
+        # its own (a late message of an old script cannot fail a new one).
+        self._load_errors: dict[str, set[str]] = {}
         self._active: set[str] = set()
         self._app_package: str | None = None
         self._process_id: int | None = None
@@ -2611,6 +2668,14 @@ class BypassService:
         # Categories the in-flight set_active (under _mutate_lock) turns on;
         # a claim on any of them waits for it, unrelated claims do not.
         self._mutating: frozenset[str] = frozenset()
+        # Bypass scripts left loaded in apps the selection moved away from,
+        # by package (see _focus): several apps can keep their bypasses.
+        self._parked: dict[str, _ParkedHooks] = {}
+        # Ids of jobs that are no longer the resident one (parked in another
+        # app, or stopped): their late messages are not this load's.
+        self._retired: set[str] = set()
+        # time.time() when the resident script loaded (None without one).
+        self._resident_since: float | None = None
         # Called after the armed or active set changed, see add_state_listener.
         self._state_listeners: list[Callable[[], None]] = []
         self._listeners_lock = threading.Lock()
@@ -2637,9 +2702,10 @@ class BypassService:
             if cb in self._state_listeners:
                 self._state_listeners.remove(cb)
 
-    def _state_key(self) -> tuple[frozenset[str], frozenset[str]]:
+    def _state_key(self) -> tuple[frozenset, ...]:
         with self._lock:
-            return frozenset(self._armed), frozenset(self._active)
+            parked = frozenset((p, r.categories) for p, r in self._parked.items())
+            return frozenset(self._armed), frozenset(self._active), parked
 
     def _notify_state(self) -> None:
         with self._listeners_lock:
@@ -2816,13 +2882,24 @@ class BypassService:
         reconciliation.
         """
         msg_type = message.get("type", "")
+        if self._retired_job(job):
+            # A late message of another app's (parked) or a stopped script:
+            # never counted against the selected app's load, never forwarded.
+            if msg_type == "error":
+                logger.debug("[Bypass] error from a retired script: %s", message)
+            return
         if msg_type == "send":
             payload = message.get("payload", {})
             if isinstance(payload, dict):
                 if "merge_error" in payload:
                     label = payload.get("merge_error")
                     with self._lock:
-                        self._merge_errors.add(label)
+                        if job is None or job is self._job:
+                            self._merge_errors.add(label)
+                        else:  # a load in flight: its own set
+                            self._load_errors.setdefault(self._job_id(job), set()).add(
+                                label
+                            )
                     logger.warning(
                         "[Bypass] hook-set '%s' failed to load: %s",
                         label,
@@ -2888,7 +2965,7 @@ class BypassService:
         # Surface the resolved PID so the spotlight panel shows it (non-
         # publishing, so this does not retrigger a panel refresh loop).
         if process_id:
-            spotlight.set_pid(process_id)
+            self._set_pid_for(spotlight, decision.package, process_id)
         return False
 
     # -- combined-script assembly -----------------------------------------
@@ -3002,9 +3079,22 @@ class BypassService:
         which also avoids an RPC on a still-paused spawn).
         """
         jm = Toolbox.get_frida_job_manager()
+        selected = self._selected_package()
         with self._lock:
-            if self._is_job_live(jm):
+            # Only the selected app's own script is reused (set_active parks
+            # another app's first; this is the guard if that was skipped).
+            mine = selected is None or self._app_package in (None, selected)
+            if mine and self._is_job_live(jm):
                 return True, "Bypass script already loaded", False
+            if not mine and self._is_job_live(jm):
+                return (
+                    False,
+                    (
+                        f"The bypass script in {self._app_package} is still the "
+                        f"active one; {selected} not changed."
+                    ),
+                    False,
+                )
 
         # Not live — drop any stale handles/temp, then load fresh.
         self._reset_script_state()
@@ -3047,26 +3137,22 @@ class BypassService:
 
         if not job.wait_until_ready(_READINESS_TIMEOUT) or job.state != "running":
             err = job.get_error() or "hooks did not load (timeout)"
-            try:
-                jm.stop_job_with_id(job.get_id())
-            except Exception:
-                pass
+            self._retire_failed_load(jm, job)
             self._unlink(path)
             return False, f"Bypass load failed: {err}", False
 
         script = job.get_script_of_job()
         if script is None:
-            try:
-                jm.stop_job_with_id(job.get_id())
-            except Exception:
-                pass
+            self._retire_failed_load(jm, job)
             self._unlink(path)
             return False, "Bypass load failed: script unavailable", False
 
         with self._lock:
+            self._merge_errors = self._load_errors.pop(self._job_id(job), set())
             self._job = job
             self._script = script
             self._temp_path = path
+            self._resident_since = time.time()
 
         return True, "Bypass script loaded", True
 
@@ -3113,6 +3199,12 @@ class BypassService:
                 conflict = self.exclusive_conflict(target)
                 if conflict:
                     return False, conflict
+            # The target is the selected app's: another app's resident
+            # script stays loaded there (parked), this app's parked one
+            # comes back.
+            refusal = self._focus(self._selected_package())
+            if refusal:
+                return False, refusal
             jm = Toolbox.get_frida_job_manager()
             with self._lock:
                 if on_message is not None:
@@ -3181,6 +3273,15 @@ class BypassService:
             with self._lock:
                 self._mutating = frozenset()
             self._mutate_lock.release()
+
+    def _retire_failed_load(self, jm: Any, job: Any) -> None:
+        with self._lock:
+            self._load_errors.pop(self._job_id(job), None)
+            self._retired.add(self._job_id(job))
+        try:
+            jm.stop_job_with_id(job.get_id())
+        except Exception:
+            pass
 
     def _note_install_failures(self, script) -> None:
         """Count categories whose lazy install (on a live flip) threw.
@@ -3294,10 +3395,10 @@ class BypassService:
         conflict = self.exclusive_conflict([category])
         if conflict:
             return False, conflict
-        with self._lock:
-            if category in self._active:
-                return True, f"{self.display_name(category)} already active"
-            target = set(self._active) | {category}
+        current = self._active_for(self._selected_package())
+        if category in current:
+            return True, f"{self.display_name(category)} already active"
+        target = current | {category}
         armed = self._arm_unless_live([category])
         if armed is not None:
             return armed
@@ -3316,8 +3417,7 @@ class BypassService:
         conflict = self.exclusive_conflict(categories)
         if conflict:
             return False, conflict
-        with self._lock:
-            target = set(self._active) | set(categories)
+        target = self._active_for(self._selected_package()) | set(categories)
         armed = self._arm_unless_live(sorted(set(categories)))
         if armed is not None:
             return armed
@@ -3326,13 +3426,12 @@ class BypassService:
     @_notifies
     def stop(self, category: str) -> bool:
         """Remove one category (and disarm it). Idempotent."""
+        current = self._active_for(self._selected_package())
         with self._lock:
-            active = category in self._active
             self._armed.discard(category)
-            if not active:
-                return False
-            target = set(self._active) - {category}
-        self.set_active(target, paused=False)
+        if category not in current:
+            return False
+        self.set_active(current - {category}, paused=False)
         return True
 
     @_notifies
@@ -3351,8 +3450,9 @@ class BypassService:
         Returns ``(now_on, message)``.
         """
         name = self.display_name(category)
+        current = self._active_for(self._selected_package())
         with self._lock:
-            currently_on = category in self._armed or category in self._active
+            currently_on = category in self._armed or category in current
 
         if not currently_on:
             # Turning ON (arming counts: refused while Dexray holds bypasses).
@@ -3360,8 +3460,7 @@ class BypassService:
             if conflict:
                 return False, conflict
             if self._spotlight_running():
-                with self._lock:
-                    target = set(self._active) | {category}
+                target = current | {category}
                 ok, msg = self.set_active(target, paused=False, on_message=on_message)
                 if not ok:
                     self._disarm(category)
@@ -3378,12 +3477,423 @@ class BypassService:
 
         # Turning OFF.
         self._disarm(category)
-        with self._lock:
-            active = category in self._active
-            target = set(self._active) - {category}
-        if active:
-            self.set_active(target, paused=False)
+        if category in current:
+            self.set_active(current - {category}, paused=False)
         return False, f"{name} off"
+
+    # -- several apps: the resident script and the parked ones ------------
+
+    @staticmethod
+    def _selected_package() -> str | None:
+        """The App lens selection (read before taking ``_lock``)."""
+        try:
+            return get_spotlight_service().get_effective_package()
+        except Exception:
+            return None
+
+    def _active_for(self, package: str | None) -> set[str]:
+        """Categories active in ``package``'s own script (resident or parked)."""
+        with self._lock:
+            if package is None or self._app_package in (None, package):
+                return set(self._active)
+            rec = self._parked.get(package)
+            return set(rec.categories) if rec else set()
+
+    @staticmethod
+    def _job_session(job: Any) -> Any:
+        return getattr(job, "process_session", None)
+
+    @staticmethod
+    def _job_id(job: Any) -> str:
+        try:
+            return str(job.get_id())
+        except Exception:
+            return str(id(job))
+
+    def _retired_job(self, job: Any) -> bool:
+        """True for a job that is no longer the resident one (see _retired)."""
+        if job is None or job is self._job:
+            return False
+        with self._lock:
+            return self._job_id(job) in self._retired
+
+    @staticmethod
+    def _live_jobs(jm: Any) -> list[Any]:
+        jobs = getattr(jm, "jobs", None)
+        if not isinstance(jobs, dict):
+            return []
+        return [
+            j for j in list(jobs.values()) if getattr(j, "state", None) not in _DEAD
+        ]
+
+    def _park_block(self, jm: Any) -> str | None:
+        """Why the resident script cannot stay loaded alone, else None.
+
+        It can when it is the only live job on the JobManager's session and
+        that process is not held paused.
+        """
+        with self._lock:
+            job, owner = self._job, self._app_package
+        session = self._job_session(job)
+        others = []
+        for other in self._live_jobs(jm):
+            if other is job:
+                continue
+            on = self._job_session(other)
+            if on is None or session is None or on is session:
+                others.append(
+                    str(getattr(other, "display_name", None) or "a Frida job")
+                )
+        if others:
+            return (
+                f"Frida also runs {', '.join(others)} in {owner}; stop it "
+                f"there first, or unload {owner}'s hooks (Shift+H in the "
+                "App lens)."
+            )
+        try:
+            paused = bool(jm.is_paused())
+        except Exception:
+            paused = False
+        if paused:
+            return (
+                f"{owner} is held paused with its bypasses; select it again "
+                "and resume it (Space) or kill it (Shift+K) first."
+            )
+        return None
+
+    def can_park_for(self, package: str, jm: Any = None) -> bool:
+        """True when the JobManager's live jobs are only another app's
+        bypass script, which may stay loaded there while ``package`` gets
+        a session (see :mod:`sandroid.services.app_start`).
+        """
+        jm = jm if jm is not None else Toolbox.get_frida_job_manager()
+        with self._lock:
+            job, owner = self._job, self._app_package
+            if job is None or not owner or owner == package:
+                return False
+            if not self._is_job_live(jm):
+                return False
+        session = self._job_session(job)
+        if session is not None and getattr(jm, "process_session", None) is not session:
+            return False
+        return self._park_block(jm) is None
+
+    @_notifies
+    def park_for(self, package: str) -> str | None:
+        """Leave another app's resident script loaded there (parked) so the
+        JobManager's session is free for ``package``.
+
+        Returns:
+            None when nothing is in the way (parked, or nothing to park),
+            else why not (other Frida jobs in that app, a held spawn).
+        """
+        return self._focus(package, unpark=False)
+
+    def _focus(self, package: str | None, *, unpark: bool = True) -> str | None:
+        """Make the resident script ``package``'s.
+
+        A live script of another app is parked: it stays loaded on its own
+        session (listed by :meth:`hooked_apps`, unloaded by
+        :meth:`unload_app`), and the JobManager's session is handed back.
+        A dead one is dropped. With ``unpark``, ``package``'s own parked
+        script becomes the resident one again (its session the
+        JobManager's) when the JobManager has no live jobs.
+
+        Returns:
+            None, or why another app's script cannot be parked (it then
+            stays resident and nothing changes).
+        """
+        if not package:
+            return None
+        self.prune_parked()
+        with self._lock:
+            job, owner = self._job, self._app_package
+            foreign = job is not None and bool(owner) and owner != package
+            if not foreign and not (unpark and package in self._parked):
+                return None  # nothing to move (and no JobManager needed)
+        jm = Toolbox.get_frida_job_manager()
+        if foreign:
+            if self._is_job_live(jm):
+                refusal = self._park_resident(jm)
+                if refusal:
+                    return refusal
+            else:
+                self._reset_script_state()
+        if unpark:
+            with self._lock:
+                rec = self._parked.get(package) if self._job is None else None
+            if rec is not None:
+                self._unpark(rec, jm)
+        return None
+
+    def _park_resident(self, jm: Any) -> str | None:
+        refusal = self._park_block(jm)
+        if refusal:
+            return refusal
+        with self._lock:
+            job, owner = self._job, self._app_package
+            if job is None or not owner:
+                return None
+            if not self._active:
+                rec = None  # every flag off: nothing to keep loaded
+            else:
+                rec = _ParkedHooks(
+                    package=owner,
+                    pid=self._process_id,
+                    job=job,
+                    script=self._script,
+                    temp_path=self._temp_path,
+                    categories=frozenset(self._active),
+                    since=self._resident_since or time.time(),
+                    session=self._job_session(job),
+                )
+                self._job = self._script = self._temp_path = None
+                self._resident_since = None
+                self._active = set()
+                self._merge_errors = set()
+                self._app_package = None
+                self._process_id = None
+                self._parked[owner] = rec
+                self._retired.add(self._job_id(job))
+        if rec is None:
+            self._reset_script_state()
+            return None
+        self._release_job_manager(jm, rec)
+        self._unregister_task()
+        self._register_parked_task(rec)
+        logger.info(
+            "[Bypass] %s keeps its bypass hooks (%s) while another app is "
+            "selected; Shift+H in the App lens lists and unloads them.",
+            owner,
+            ", ".join(self._plain_name(c) for c in sorted(rec.categories)),
+        )
+        return None
+
+    @staticmethod
+    def _release_job_manager(jm: Any, rec: _ParkedHooks) -> None:
+        """Take ``rec``'s job out of the JobManager and free its session
+        pointer without detaching: the script stays loaded, and a
+        ``reset_session`` / ``stop_jobs`` for the next app never touches it.
+        """
+        with _job_lock(jm):
+            BypassService._release_locked(jm, rec)
+
+    @staticmethod
+    def _release_locked(jm: Any, rec: _ParkedHooks) -> None:
+        job_id = rec.job.get_id()
+        jobs = getattr(jm, "jobs", None)
+        if isinstance(jobs, dict):
+            jobs.pop(job_id, None)
+        try:
+            jm.unregister_hooks(job_id)
+        except Exception:
+            pass
+        if rec.session is None or getattr(jm, "process_session", None) is not (
+            rec.session
+        ):
+            return
+        try:
+            # AFM's own handler would clear the next app's session when
+            # this one detaches (Sandroid's detach guard already ignores it).
+            rec.session.off("detached", jm._on_session_detached)
+        except Exception:
+            pass
+        jm.process_session = None
+        jm.pid = -1
+        jm.package_name = ""
+        jm._mode = None
+        jm.is_first_job = True
+        jm.last_created_job = None
+        jm.init_last_job = False
+        jm._paused = False
+
+    def _unpark(self, rec: _ParkedHooks, jm: Any) -> None:
+        """Make ``rec`` resident again (its session the JobManager's)."""
+        if not self._parked_alive(rec):
+            self._drop_parked(rec.package)
+            return
+        if self._live_jobs(jm):
+            return  # the JobManager serves other jobs: rec stays parked
+        try:
+            if jm.has_active_session():
+                jm.reset_session()  # idle: nothing runs on it
+        except Exception as exc:
+            logger.debug("[Bypass] dropping the idle session failed: %s", exc)
+            return
+        with self._lock:
+            if self._job is not None or self._parked.get(rec.package) is not rec:
+                return
+            del self._parked[rec.package]
+            self._retired.discard(self._job_id(rec.job))
+            self._job, self._script = rec.job, rec.script
+            self._temp_path = rec.temp_path
+            self._active = set(rec.categories)
+            self._app_package, self._process_id = rec.package, rec.pid
+            self._resident_since = rec.since
+        with _job_lock(jm):
+            jobs = getattr(jm, "jobs", None)
+            if isinstance(jobs, dict):
+                jobs[rec.job.get_id()] = rec.job
+            jm.process_session = rec.session
+            jm.pid = -1
+            jm.package_name = rec.pid or rec.package
+            jm._mode = "attach"
+            jm.is_first_job = False
+            jm._paused = False
+        self._unregister_task_named(rec.task_name)
+        self._register_task(self._active_display(rec.categories))
+        self._set_task_since("bypass", rec.since)
+
+    def _active_display(self, categories) -> str:
+        return "Bypass (experimental): " + ", ".join(
+            self._plain_name(c) for c in self._categories_by_priority(categories)
+        )
+
+    @staticmethod
+    def _parked_alive(rec: _ParkedHooks) -> bool:
+        """Cheap liveness (no device call): job running, script and
+        session not gone (Frida marks both when the process dies).
+        """
+        try:
+            if getattr(rec.job, "state", "running") in _DEAD:
+                return False
+            if getattr(rec.script, "is_destroyed", False):
+                return False
+            return not getattr(rec.session, "is_detached", False)
+        except Exception:
+            return False
+
+    def _drop_parked(self, package: str) -> _ParkedHooks | None:
+        with self._lock:
+            rec = self._parked.pop(package, None)
+        if rec is not None:
+            self._unlink(rec.temp_path)
+            self._unregister_task_named(rec.task_name)
+        return rec
+
+    @_notifies
+    def prune_parked(self) -> list[str]:
+        """Forget parked scripts whose app died. Returns their packages."""
+        with self._lock:
+            dead = [p for p, r in self._parked.items() if not self._parked_alive(r)]
+        for package in dead:
+            self._drop_parked(package)
+            logger.info("[Bypass] %s is gone, and its bypass hooks with it", package)
+        return dead
+
+    def hooked_apps(self) -> list[HookedApp]:
+        """Apps with bypass categories on: the resident script's app first.
+
+        Cheap (no device call) and read-only: safe on the UI thread. A
+        parked script whose app died is left out (:meth:`prune_parked`
+        forgets it).
+        """
+        rank = {c: i for i, c in enumerate(self.categories())}
+
+        def order(cats) -> tuple[str, ...]:
+            return tuple(sorted(cats, key=lambda c: rank.get(c, len(rank))))
+
+        with self._lock:
+            out = []
+            if self._job is not None and self._active and self._app_package:
+                out.append(
+                    HookedApp(
+                        self._app_package,
+                        self._process_id,
+                        order(self._active),
+                        self._resident_since,
+                        False,
+                    )
+                )
+            for rec in self._parked.values():
+                if not self._parked_alive(rec):
+                    continue
+                out.append(
+                    HookedApp(
+                        rec.package, rec.pid, order(rec.categories), rec.since, True
+                    )
+                )
+        return out
+
+    @_notifies
+    def unload_app(self, package: str) -> tuple[bool, str]:
+        """Unload the bypass hooks loaded in ``package`` (worker thread).
+
+        A parked script is unloaded and its session detached (both bounded);
+        the resident one is stopped like :meth:`forget_process`. The armed
+        set is left alone (it belongs to the selected app).
+        """
+        rec = self._drop_parked(package)
+        if rec is not None:
+            names = ", ".join(self._plain_name(c) for c in sorted(rec.categories))
+            # Every flag off first (one RPC, bounded): the hooks go inert at
+            # once even when the unload below hangs on the live process.
+            self._bounded(
+                lambda: rec.script.exports_sync.set_flags(self._flag_dict(set()))
+            )
+            try:
+                rec.job.close_job(timeout=3.0)
+            except Exception as exc:
+                logger.warning("[Bypass] unloading in %s failed: %s", package, exc)
+            if rec.session is not None:
+                self._bounded(rec.session.detach)
+            return True, f"Unloaded the bypass hooks in {package} ({names})"
+        with self._lock:
+            resident = self._job is not None and self._app_package == package
+            names = ", ".join(self._plain_name(c) for c in sorted(self._active))
+        if resident:
+            self._reset_script_state()
+            return True, f"Unloaded the bypass hooks in {package} ({names})"
+        return False, f"No bypass hooks loaded in {package}"
+
+    @staticmethod
+    def _bounded(fn: Callable[[], Any], timeout: float = 3.0) -> None:
+        """Run ``fn`` on a daemon thread, wait at most ``timeout``, ignore errors."""
+
+        def run() -> None:
+            try:
+                fn()
+            except Exception as exc:
+                logger.debug("[Bypass] bounded call failed: %s", exc)
+
+        t = threading.Thread(target=run, name="bypass-bounded", daemon=True)
+        t.start()
+        t.join(timeout)
+
+    def _register_parked_task(self, rec: _ParkedHooks) -> None:
+        try:
+            get_task_service().register(
+                name=rec.task_name,
+                display_name=self._active_display(rec.categories),
+                instance=self,
+                stop_callback=lambda pkg=rec.package: self.unload_app(pkg),
+                app_name=rec.package,
+                target_pid=rec.pid,
+            )
+        except Exception:
+            logger.debug("[Bypass] parked task not registered", exc_info=True)
+        self._set_task_since(rec.task_name, rec.since)
+
+    @staticmethod
+    def _set_task_since(name: str, since: float | None) -> None:
+        """Keep a moved task's start time (TaskService stamps "now")."""
+        if since is None:
+            return
+        try:
+            from datetime import datetime
+
+            task = get_task_service().get_task(name)
+            if task is not None:
+                task.started_at = datetime.fromtimestamp(since)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _unregister_task_named(name: str) -> None:
+        try:
+            get_task_service().unregister(name)
+        except Exception:
+            pass
 
     # -- queries ----------------------------------------------------------
 
@@ -3415,6 +3925,10 @@ class BypassService:
         Returns:
             The armed categories, in display order.
         """
+        if package is not None:
+            # Another app's script stays loaded there (parked); this app's
+            # parked one comes back, so the drop below takes it.
+            self._focus(package)
         # One lock hold for the union and the drop: a live toggle lands
         # either before (kept as armed) or after (a fresh load), never lost.
         with self._lock:
@@ -3453,9 +3967,14 @@ class BypassService:
             return list(self._active)
 
     def on_categories(self) -> list[str]:
-        """Categories that are armed OR active (what the panel renders ON)."""
+        """Categories armed OR active in the selected app (rendered ON).
+
+        Active means in the selected app's own script: another app's
+        script (still loaded after the selection moved) does not count.
+        """
+        current = self._active_for(self._selected_package())
         with self._lock:
-            return sorted(self._armed | self._active)
+            return sorted(self._armed | current)
 
     @_notifies
     def arm_active(self, package: str) -> None:
@@ -3467,12 +3986,16 @@ class BypassService:
         with self._lock:
             if self._app_package == package:
                 self._armed |= self._active
+            elif package in self._parked:
+                self._armed |= self._parked[package].categories
 
     def carried_categories(self, package: str) -> set[str]:
         """What a restart of ``package`` re-applies: armed, plus active on it."""
         with self._lock:
             if self._app_package == package:
                 return self._armed | self._active
+            if package in self._parked:
+                return self._armed | self._parked[package].categories
             return set(self._armed)
 
     @_notifies
@@ -3496,16 +4019,32 @@ class BypassService:
             job, pid, package = self._job, self._process_id, self._app_package
         if not active or job is None:
             return []
-        if self._mutate_lock.locked():
-            return []  # a load / set_flags is in flight: not our call now
+        # Held for the whole check-and-drop: a load / set_flags that starts
+        # meanwhile is refused instead of racing the drop (and one in flight
+        # makes this a no-op).
+        if not self._mutate_lock.acquire(blocking=False):
+            return []
+        try:
+            return self._reconcile_locked(active, job, pid, package)
+        finally:
+            self._mutate_lock.release()
+
+    def _reconcile_locked(self, active, job, pid, package) -> list[str]:
         alive = True
         try:
             alive = self._is_job_live(Toolbox.get_frida_job_manager())
         except Exception:
             alive = True  # cannot tell: keep showing what we have
         if alive and pid is not None:
+            # Only the selected app's PID says anything about this process:
+            # after the selection moved, the other app's PID never matches.
             try:
-                current = get_spotlight_service().get_pid()
+                spotlight = get_spotlight_service()
+                current = (
+                    spotlight.get_pid()
+                    if spotlight.get_effective_package() == package
+                    else None
+                )
             except Exception:
                 current = None
             if current is not None and current != pid:
@@ -3524,17 +4063,41 @@ class BypassService:
             pid if pid is not None else "?",
             names,
         )
+        with self._lock:
+            if self._job is not job:  # replaced meanwhile
+                return []
+        # No load can start in between: this holds the change lock.
         self._reset_script_state()
         return active
 
     @_notifies
-    def stop_all(self) -> list[str]:
+    def stop_all(self, package: str | None = None) -> list[str]:
         """Stop the resident bypass script for real and clear the armed set.
 
         This is the explicit "done" teardown: it stops the job, unlinks the temp
         file, and unregisters the task — distinct from a toggle-last-off, which
         keeps the script resident (flags all false) for instant re-enable.
+
+        Args:
+            package: The app being stopped (the panel's "stop all"): its
+                parked script is unloaded too, and another app's resident
+                script is left alone. None stops the resident script
+                whatever app it is in (the TaskService stop).
         """
+        if package is not None:
+            with self._lock:
+                rec = self._parked.get(package)
+                parked = sorted(rec.categories) if rec else []
+                foreign = self._job is not None and self._app_package not in (
+                    None,
+                    package,
+                )
+            if parked:
+                self.unload_app(package)
+            if foreign:
+                with self._lock:
+                    self._armed.clear()
+                return parked
         with self._lock:
             stopped = list(self._active)
         self._reset_script_state()
@@ -3606,6 +4169,11 @@ class BypassService:
             if conflict:
                 return False, conflict  # before spawning anything
 
+        # Another app's live script stays loaded there (parked), not torn
+        # down with the old process of this one.
+        refusal = self._focus(package)
+        if refusal:
+            return False, refusal
         # A fresh spawn invalidates any prior job (it lives on a now dead/
         # replaced process). Clear script state up front so set_active loads
         # onto the new process from scratch and its no-change early-return can
@@ -3633,7 +4201,7 @@ class BypassService:
         # 2. Surface the PID immediately -- publishing, so the header shows it
         #    now, not when the whole spawn (hooks, resume, splash check) ends.
         if not spotlight.announce_pid(pid, package):
-            spotlight.set_pid(pid)
+            self._set_pid_for(spotlight, package, pid)
 
         # 3. Load every bypass as ONE merged script while paused (#218-safe).
         ok, msg = self.set_active(cats, paused=True, on_message=on_message)
@@ -3796,10 +4364,7 @@ class BypassService:
             # Resume path: confirm the SPECIFIC spawned pid survived the splash.
             # MUST be pid-based — a relaunched uninstrumented process keeps the
             # SAME package, so a package-focused check would false-positive.
-            try:
-                pid = spotlight.get_pid()
-            except Exception:
-                pid = None
+            pid = self._spawned_pid(spotlight, package)
 
             if pid and pid > 0:
                 device = self._frida_device()
@@ -3938,9 +4503,12 @@ class BypassService:
         and temp path for :meth:`_dispose_script`.
         """
         job, path = self._job, self._temp_path
+        if job is not None:
+            self._retired.add(self._job_id(job))
         self._job = None
         self._script = None
         self._temp_path = None
+        self._resident_since = None
         self._active = set()
         self._merge_errors = set()
         return job, path
@@ -3954,6 +4522,47 @@ class BypassService:
                 logger.warning("stop_job during reset failed: %s", exc)
         self._unlink(path)
         self._unregister_task()
+
+    @staticmethod
+    def _set_pid_for(spotlight: Any, package: str | None, pid: int | None) -> None:
+        """Write ``pid`` only into ``package``'s record (compare-and-set):
+        never another app's PID into the selection after it moved.
+        """
+        try:
+            current = spotlight.get_effective_package()
+        except Exception:
+            current = None
+        if package and current and current != package:
+            return
+        try:
+            spotlight.set_pid(pid)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _spawned_pid(spotlight: Any, package: str) -> int | None:
+        """PID of the process just spawned for ``package``.
+
+        The selection's PID only while ``package`` is still selected; else
+        the JobManager's spawn (the selection moved during the spawn).
+        """
+        try:
+            selected = spotlight.get_effective_package()
+        except Exception:
+            selected = None
+        if selected in (None, package):
+            try:
+                return spotlight.get_pid()
+            except Exception:
+                return None
+        try:
+            jm = Toolbox.get_frida_job_manager()
+            if getattr(jm, "package_name", None) == package:
+                pid = getattr(jm, "pid", None)
+                return pid if isinstance(pid, int) and pid > 0 else None
+        except Exception:
+            pass
+        return None
 
     @staticmethod
     def _frida_device():
@@ -4016,10 +4625,7 @@ class BypassService:
             # not when the whole spawn ladder ends.
             spotlight.announce_pid(None, package)
         except Exception:
-            try:
-                spotlight.set_pid(None)
-            except Exception:
-                pass
+            self._set_pid_for(spotlight, package, None)
 
 
 _INSTANCE: BypassService | None = None

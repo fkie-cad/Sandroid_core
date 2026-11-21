@@ -1660,3 +1660,35 @@ def test_force_exit_runs_the_shutdown_hooks(monkeypatch) -> None:
     monkeypatch.setattr(services, "get_task_service", _Tasks)
     qc.QuitController().force_exit()
     assert calls == ["bus", "net", "hook", "tasks"]
+
+
+async def test_hooks_list_keys_run_through_the_main_screen(fake, monkeypatch):
+    """Shift+H from a section, { } * from MainScreen's Inspector keys."""
+    from sandroid.services import get_spotlight_service
+    from sandroid.tui.widgets import spotlight_panel as sp
+
+    apps = [
+        sp.AppHooks("org.mozilla.firefox", 88, ("ssl", "root"), (), 100.0),
+        sp.AppHooks("org.third.app", 99, (), ("friTap",), 200.0),
+        sp.AppHooks(PKG, 4242, ("ssl",), (), 300.0),
+    ]
+    monkeypatch.setattr(sp, "collect_app_hooks", lambda: list(apps))
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await boot(app, pilot)
+        sections = _sections(ms)
+        await until(pilot, lambda: _loaded(sections))
+        await settle(pilot)
+        assert isinstance(app.focused, LensSection)
+        await pilot.press("H")
+        await settle(pilot)
+        assert ms.inspector_is_open
+        assert ms.inspector_content.key == sp.HOOKS_KEY
+        panel = ms.query_one(SpotlightPanel)
+        assert panel._hooks_pick == "org.mozilla.firefox"
+        await pilot.press("right_curly_bracket")
+        await settle(pilot)
+        assert panel._hooks_pick == "org.third.app"
+        await pilot.press("asterisk")
+        await settle(pilot)
+        assert get_spotlight_service().get_effective_package() == "org.third.app"

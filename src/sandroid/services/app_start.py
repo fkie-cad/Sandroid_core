@@ -31,6 +31,13 @@ R6    otherwise                                  ATTACH; REFUSE while Frida runs
                                                  or dead session is reset
 ====  =========================================  ==================================
 
+Another app's bypass script does not count as "busy": when the live jobs
+on the JobManager's session are only the bypass script of an app the
+selection moved away from, SPAWN/ATTACH first *park* it
+(:meth:`BypassService.park_for`): it stays loaded in that app on its own
+session, and the JobManager's session serves the selected app. Any other
+live job (friTap, Dexray, ...) still refuses as before.
+
 A running app is never killed without consent: only RESPAWN kills, and
 RESPAWN needs ``consent`` (the caller's own, e.g. Shift+R or an API ``fresh=True``)
 or the user's answer to the confirmation dialog :func:`negotiate_start` shows.
@@ -151,6 +158,9 @@ class StartInputs:
         allow_spawn: The caller may start a stopped app.
         java_agent: The caller loads its own Java-bridge script (#218).
         tool: User-facing tool name for messages.
+        parkable: The live jobs on the session are only another app's bypass
+            script, which stays loaded there (parked) while this app gets
+            the session.
     """
 
     package: str
@@ -170,6 +180,7 @@ class StartInputs:
     allow_spawn: bool = True
     java_agent: bool = True
     tool: str = "this tool"
+    parkable: bool = False
 
 
 @dataclass(frozen=True)
@@ -189,6 +200,8 @@ class StartDecision:
         tool: The tool that asked.
         consent: The caller's own consent (headless ``fresh=True``); without
             a dialog it also covers a pre-start step that stops every app.
+        park: SPAWN/ATTACH: first leave another app's bypass script loaded
+            there (parked) to free the JobManager's session.
     """
 
     action: StartAction
@@ -202,6 +215,7 @@ class StartDecision:
     stops: tuple[str, ...] = ()
     tool: str = "this tool"
     consent: bool = False
+    park: bool = False
 
 
 def stops_sentence(tools: tuple[str, ...] | list[str]) -> str:
@@ -265,8 +279,11 @@ def decide_start(i: StartInputs) -> StartDecision:
             f"Frida runs {', '.join(i.live_jobs)} on a process it cannot "
             f"name; stop those first. {i.tool} not started.",
         )
-    busy_elsewhere = i.session_pid is not None and not ours and bool(i.live_jobs)
-    if busy_elsewhere:
+    other_app = i.session_pid is not None and not ours and bool(i.live_jobs)
+    # Only another app's bypass script runs there: it stays loaded in that
+    # app (parked) and the session serves this one.
+    park = other_app and i.parkable
+    if other_app and not park:
         jobs = ", ".join(i.live_jobs)
         return _refuse(
             i,
@@ -287,6 +304,7 @@ def decide_start(i: StartInputs) -> StartDecision:
             reset_session=i.has_session and not i.live_jobs,
             tool=i.tool,
             consent=i.consent,
+            park=park,
         )
     target = i.live_pid if running else i.session_pid
     # R3/R4: the tool needs a process that has not run yet.
@@ -324,6 +342,7 @@ def decide_start(i: StartInputs) -> StartDecision:
         pid=target,
         reset_session=i.has_session and not i.live_jobs,
         tool=i.tool,
+        park=park,
     )
 
 
@@ -718,6 +737,10 @@ def gather_inputs(
         paused = bool(jm.is_paused()) if jm is not None and spid else False
     except Exception:
         paused = False
+    try:
+        parkable = bool(alive and spid and _bypass().can_park_for(package, jm))
+    except Exception:
+        parkable = False
     return StartInputs(
         package=package,
         liveness=liveness,
@@ -736,6 +759,7 @@ def gather_inputs(
         allow_spawn=allow_spawn,
         java_agent=java_agent,
         tool=tool,
+        parkable=parkable,
     )
 
 
@@ -1450,6 +1474,20 @@ def _bypass() -> Any:
     return get_bypass_service()
 
 
+def _park_other_app(decision: StartDecision) -> None:
+    """Leave another app's bypass script loaded there (``decision.park``).
+
+    Raises:
+        AppStartError: It cannot stay alone (other Frida jobs appeared in
+            that app meanwhile, or it is held paused).
+    """
+    if not decision.park:
+        return
+    refusal = _bypass().park_for(decision.package)
+    if refusal:
+        raise AppStartError(f"{refusal} {decision.tool} not started.")
+
+
 def drop_session(jm: Any) -> None:
     """Drop the JobManager session (dead or idle) and the bypass handles.
 
@@ -1617,6 +1655,7 @@ def open_session(decision: StartDecision, handler: Any = None) -> Opened:
     if action == StartAction.ATTACH:
         if jm is None:
             raise AppStartError("Frida JobManager unavailable")
+        _park_other_app(decision)
         if decision.reset_session:
             drop_idle_session(jm, decision.tool)
         from sandroid.core.frida_manager import install_stale_detach_guard
@@ -1637,6 +1676,7 @@ def open_session(decision: StartDecision, handler: Any = None) -> Opened:
                     f"{pkg} started meanwhile (pid {pid}); start "
                     f"{decision.tool} again to attach to it."
                 )
+            _park_other_app(decision)
             if decision.reset_session:
                 drop_idle_session(jm, decision.tool)
             plans = _collect_pre_start(pkg, decision.tool)
@@ -1933,6 +1973,9 @@ def attach_app() -> tuple[bool, str]:
         return False, f"Could not tell whether {pkg} is running (adb error)"
     if not pid:
         return False, f"{pkg} is not running — Space starts it"
+    if spotlight.get_effective_package() != pkg:
+        # The selection moved during the adb probe: never re-select pkg.
+        return False, f"Selection changed; {pkg} not attached"
     spotlight.set_app(pkg, pid=pid)
     return _bypass().apply_armed()
 

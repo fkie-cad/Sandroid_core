@@ -403,14 +403,20 @@ class SpotlightService:
 
             pid = job_manager.spawn_paused(package_name)
             self.last_spawn_error = None
-            # A new process: another package replaces the record; the same
-            # package keeps its activity but not its old PID.
+            # A new process: the same package keeps its activity but not its
+            # old PID. Never re-select: when the user picked another app
+            # during the spawn, that selection stays.
             with self._lock:
                 app = self._current_app
-                if app is None or app.package_name != package_name:
+                if app is None:
                     self._current_app = SpotlightApp(package_name=package_name)
-                else:
+                elif app.package_name == package_name:
                     app.pid = None
+                else:
+                    self._logger.info(
+                        f"Spawned {package_name} while {app.package_name} is "
+                        "selected; the selection stays"
+                    )
             # Still paused: a running file monitor follows the new process
             # before its first instruction (gap-free).
             self.notify_spawned(pid, package_name)
