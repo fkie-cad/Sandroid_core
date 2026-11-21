@@ -412,6 +412,7 @@ def stage_env(svc, avd_root, monkeypatch):
         lambda pid, **kw: real(pid, **{**kw, "service": svc, "packs": PACKS}),
     )
     monkeypatch.setattr(persona, "_device_profile_id", lambda serial: "mara")
+    monkeypatch.setattr(persona, "topup_enabled", lambda: False)
     stamp: dict = {}
 
     class Dev(StampDevice):
@@ -649,3 +650,201 @@ def test_a_restore_during_the_apply_saves_nothing(build_env, monkeypatch) -> Non
     with pytest.raises(persona.PersonaError, match="restored during the identity"):
         persona.build_persona(SERIAL, "mara", identity=svc, emulator=emu, device=dev)
     assert emu.calls == []
+
+
+# ------------------------------------------------------------ top-up on load
+
+
+def test_a_loaded_persona_is_topped_up_and_says_so(
+    stage_env, avd_root, monkeypatch
+) -> None:
+    from sandroid.core import timeline
+    from sandroid.world import prepare as pr
+
+    _meta, stamp, record = stage_env
+    record["avd"] = AVD
+    manifest, profile = persona.manifest_for_profile("mara", target_sdk=35)
+    stamp.update(_stamp(manifest.world_fp))
+    _old_persona(avd_root, persona.persona_name(profile, manifest), 1)
+    calls: list = []
+
+    def fake_topup(serial, manifest, **kw):
+        calls.append((serial, manifest.world_fp))
+        return pr.TopUpReport(
+            serial=serial, ran=True, counts={"sms": 3, "calls": 2, "events": 0}
+        )
+
+    lines: list = []
+
+    class TL:
+        def emit(self, src, kind, **kw):
+            lines.append((src, kind, kw))
+
+    monkeypatch.setattr(pr, "topup", fake_topup)
+    monkeypatch.setattr(timeline, "get_timeline", lambda: TL())
+    monkeypatch.setattr(persona, "topup_enabled", lambda: True)
+    note = persona.persona_stage(SERIAL, True, 120.0)
+    assert note.level == "info"
+    assert "topped up with 3 SMS, 2 calls" in note.text
+    assert calls == [(SERIAL, manifest.world_fp)]
+    assert [(s, k) for s, k, _kw in lines] == [("device", "persona_topup")]
+    assert lines[0][2]["data"]["counts"]["sms"] == 3
+
+
+def test_a_failed_topup_is_a_warning_in_words(stage_env, avd_root, monkeypatch) -> None:
+    from sandroid.world import prepare as pr
+
+    _meta, stamp, record = stage_env
+    record["avd"] = AVD
+    manifest, profile = persona.manifest_for_profile("mara", target_sdk=35)
+    stamp.update(_stamp(manifest.world_fp))
+    _old_persona(avd_root, persona.persona_name(profile, manifest), 1)
+
+    def boom(serial, manifest, **kw):
+        raise pr.PrepareError("the top-up needs adb root (adb root)")
+
+    monkeypatch.setattr(pr, "topup", boom)
+    monkeypatch.setattr(persona, "topup_enabled", lambda: True)
+    note = persona.persona_stage(SERIAL, True, 120.0)
+    assert note.level == "warning"
+    assert "top-up failed: the top-up needs adb root" in note.text
+
+
+@pytest.mark.parametrize(
+    ("world", "on"),
+    [(None, True), ({}, True), ({"persona_topup": False}, False),
+     ({"persona_topup": "no"}, True), ({"persona_topup": True}, True)],
+)  # fmt: skip
+def test_the_topup_follows_the_config(monkeypatch, world, on) -> None:
+    from types import SimpleNamespace
+
+    from sandroid import config
+
+    monkeypatch.setattr(config, "get_config", lambda: SimpleNamespace(world=world))
+    assert persona.topup_enabled() is on
+    if not on:
+        assert persona.after_load_topup(SERIAL, object()) == ("", False)
+
+
+# ------------------------------------------------------ start as a persona
+
+
+def test_persona_choices_list_world_profiles_and_their_snapshots(svc, avd_root) -> None:
+    _old_persona(avd_root, "sandroid_persona_mara_aaaaaaaaaaaa_bbbbbbbbbbbb", 1)
+    _old_persona(avd_root, "sandroid_persona_other_aaaaaaaaaaaa_bbbbbbbbbbbb", 2)
+    choices = persona.persona_choices(AVD, service=svc)
+    assert [(c.id, c.snapshots) for c in choices] == [("mara", 1)]
+    assert choices[0].name == "Mara (DE)"
+
+
+def test_persona_start_loads_its_snapshot_else_the_base(svc, avd_root) -> None:
+    with pytest.raises(persona.PersonaError, match="no clean_8g"):
+        persona.persona_start(AVD, "mara", api=35, service=svc)
+    base = avd_root / "snapshots" / "clean_8g"
+    base.mkdir()
+    (base / "ram.bin").write_bytes(b"x")
+    first = persona.persona_start(AVD, "mara", api=35, headless=True, service=svc)
+    assert not first.cached
+    assert first.options.boot == "snapshot"
+    assert first.options.snapshot == "clean_8g"
+    assert first.options.save_on_exit is False
+    assert first.options.headless is True
+    assert first.meta == {"persona_id": "mara"}
+    _old_persona(avd_root, first.snapshot, 1)
+    again = persona.persona_start(AVD, "mara", api=35, service=svc)
+    assert again.cached
+    assert again.options.snapshot == first.snapshot == again.snapshot
+    assert again.meta == {"persona_id": "mara"}
+    other = persona.persona_start(AVD, "mara", api=35, base="mybase", service=svc)
+    assert other.meta == {"persona_id": "mara", "persona_base": "mybase"}
+
+
+# ------------------------------------------------------------------ refresh
+
+
+@pytest.fixture
+def refresh_env(build_env, monkeypatch):
+    from sandroid.world import prepare as pr
+
+    svc, order, _infos, _dev, emu = build_env
+    stamp_box: dict = {}
+
+    class _Refreshed:
+        def to_dict(self):
+            return {"ok": True, "changes": {"added": {"sms": 2}, "removed": {"sms": 1}}}
+
+    def fake_refresh(serial, manifest, **kw):
+        order.append("refresh")
+        stamp_box.update(_stamp(manifest.world_fp))
+        return _Refreshed()
+
+    class Dev(StampDevice):
+        def shell(self, script, *, timeout=60, zygote=False):
+            if "getprop" in script:
+                return ShellResult(0, "35\n", "")
+            return ShellResult(0, json.dumps(stamp_box) if stamp_box else "", "")
+
+    monkeypatch.setattr(pr, "refresh", fake_refresh)
+    tops: list = []
+
+    def fake_topup(serial, manifest, device=None):
+        tops.append(serial)
+        return "topped up with 1 SMS", False
+
+    monkeypatch.setattr(persona, "after_load_topup", fake_topup)
+    return svc, order, Dev(None), emu, stamp_box, tops
+
+
+def test_refresh_does_nothing_when_world_and_identity_are_current(refresh_env) -> None:
+    svc, order, dev, emu, stamp, _tops = refresh_env
+    manifest, profile = persona.manifest_for_profile("mara", service=svc, target_sdk=35)
+    stamp.update(_stamp(manifest.world_fp))
+    _old_persona(emu.root, persona.persona_name(profile, manifest), 1)
+    out = persona.refresh_persona(
+        SERIAL, "mara", identity=svc, emulator=emu, device=dev
+    )
+    assert out.up_to_date
+    assert order == []
+    assert emu.calls == []
+    assert "up to date" in out.words()
+
+
+def test_refresh_of_the_identity_only_applies_and_saves(refresh_env) -> None:
+    svc, order, dev, emu, stamp, tops = refresh_env
+    manifest, _profile = persona.manifest_for_profile(
+        "mara", service=svc, target_sdk=35
+    )
+    stamp.update(_stamp(manifest.world_fp))  # same world, no snapshot of it
+    out = persona.refresh_persona(
+        SERIAL, "mara", identity=svc, emulator=emu, device=dev
+    )
+    assert order == ["apply"]  # no world refresh
+    assert out.save is not None
+    assert out.save.saved
+    assert out.snapshot in persona.persona_snapshots(AVD)
+    assert not out.world_changed
+    assert tops == []
+    assert "phone contents unchanged" in out.words()
+
+
+def test_refresh_of_a_changed_world_is_incremental_then_saved(refresh_env) -> None:
+    svc, order, dev, emu, stamp, tops = refresh_env
+    stamp.update(_stamp("0" * 64))  # the device holds an older world
+    out = persona.refresh_persona(
+        SERIAL, "mara", identity=svc, emulator=emu, device=dev
+    )
+    assert order == ["refresh", "apply"]
+    assert out.world_changed
+    assert out.save is not None
+    assert out.save.saved
+    assert emu.calls[0][:3] == ("save", out.snapshot, "persona")
+    assert tops == [SERIAL]
+    words = out.words()
+    assert "2 added, 1 removed" in words
+    assert "topped up with 1 SMS" in words
+
+
+def test_refresh_needs_a_world_on_the_device(refresh_env) -> None:
+    svc, _order, dev, emu, _stamp, _tops = refresh_env
+    with pytest.raises(persona.PersonaError, match="no complete world"):
+        persona.refresh_persona(SERIAL, "mara", identity=svc, emulator=emu, device=dev)

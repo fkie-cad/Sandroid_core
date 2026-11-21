@@ -936,3 +936,128 @@ def test_the_lens_shows_the_target_devices_persona(fakes) -> None:
     # The read never fails the lens: no persona then.
     fakes.ident.persona_of = lambda serial: 1 / 0
     assert il._device_profile_id(fakes.ident) == "mara-de"
+
+
+# --------------------------------------------------------------------------
+# persona: W builds (no persona on the device) or refreshes
+# --------------------------------------------------------------------------
+
+
+def _caption(lens) -> str:
+    return lens.screen._lens_captions["identity"][1] or ""
+
+
+async def test_w_builds_the_persona_in_the_background_with_progress(
+    fakes, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
+    from sandroid.world import persona
+
+    fakes.ident.profile.world = {"seed": "auto", "size": "small", "country": "de"}
+    gate = threading.Event()
+    calls: list = []
+
+    def build(serial, pid, *, progress=None, rebuild=False):
+        calls.append((serial, pid, rebuild, threading.get_ident()))
+        progress("sms", 5, 10)
+        gate.wait(10)
+        return SimpleNamespace(
+            snapshot="sandroid_persona_mara-de_1_2",
+            save=SimpleNamespace(name="sandroid_persona_mara-de_1_2"),
+        )
+
+    monkeypatch.setattr(persona, "build_persona", build)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        lens = await _open_lens(app, pilot)
+        await until(pilot, lambda: "Shift+W build persona" in _caption(lens))
+        await pilot.press("W")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        app.screen.dismiss(True)
+        try:
+            await until(pilot, lambda: "sms 5 of 10" in _caption(lens))
+            assert "building persona mara-de: sms 5 of 10" in _caption(lens)
+            # A second W while it runs only says so.
+            await pilot.press("W")
+            await settle(pilot)
+            assert len(calls) == 1
+        finally:
+            gate.set()
+        await until(pilot, lambda: any("built and saved" in m for m in _messages(app)))
+        assert lens._persona_work == ""
+    (serial, pid, rebuild, thread) = calls[0]
+    assert (serial, pid, rebuild) == (SERIAL, "mara-de", True)
+    assert thread != threading.get_ident()
+    text = " ".join(_messages(app))
+    assert "Persona mara-de built and saved as sandroid_persona_mara-de_1_2." in text
+    assert not any(g in text for g in GLYPHS)
+
+
+async def test_w_refreshes_the_devices_persona(fakes, monkeypatch) -> None:
+    from sandroid.world import persona
+
+    fakes.ident.persona_of = lambda serial: "mara-de"
+    seen: list = []
+
+    def refresh(serial, pid, *, progress=None):
+        seen.append((serial, pid))
+        return persona.PersonaRefresh(
+            profile=pid,
+            snapshot="sandroid_persona_mara-de_3_4",
+            world_changed=True,
+            prepare={"changes": {"added": {"sms": 2}, "removed": {"sms": 1}}},
+            save=persona.PersonaSave(name="sandroid_persona_mara-de_3_4", saved=True),
+        )
+
+    monkeypatch.setattr(persona, "refresh_persona", refresh)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        lens = await _open_lens(app, pilot)
+        await until(pilot, lambda: "Shift+W refresh persona" in _caption(lens))
+        await pilot.press("W")
+        await until(pilot, lambda: any("phone contents" in m for m in _messages(app)))
+    assert seen == [(SERIAL, "mara-de")]
+    text = " ".join(_messages(app))
+    assert "persona mara-de: phone contents: 2 added, 1 removed" in text
+    assert "saved as sandroid_persona_mara-de_3_4" in text
+
+
+async def test_w_failures_are_words(fakes, monkeypatch) -> None:
+    from sandroid.world import persona
+
+    fakes.ident.persona_of = lambda serial: "mara-de"
+
+    def refresh(serial, pid, *, progress=None):
+        raise persona.PersonaError(
+            "the device holds no complete world; build the persona"
+        )
+
+    monkeypatch.setattr(persona, "refresh_persona", refresh)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        lens = await _open_lens(app, pilot)
+        await pilot.press("W")
+        await until(pilot, lambda: any("failed" in m for m in _messages(app)))
+        assert lens._persona_work == ""
+    text = " ".join(_messages(app))
+    assert (
+        "Refreshing persona mara-de failed: the device holds no complete world" in text
+    )
+
+
+async def test_w_needs_a_world_section_and_an_emulator(fakes, monkeypatch) -> None:
+    from sandroid.world import persona
+
+    monkeypatch.setattr(persona, "build_persona", pytest.fail)
+    fakes.ident.profile.world = {}
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _open_lens(app, pilot)
+        await pilot.press("W")
+        await until(pilot, lambda: any("world section" in m for m in _messages(app)))
+        fakes.ident.profile.world = {"seed": "auto", "country": "de"}
+        monkeypatch.setattr(il, "_target_serial", lambda: "R58M")
+        await pilot.press("W")
+        await until(pilot, lambda: any("emulators only" in m for m in _messages(app)))

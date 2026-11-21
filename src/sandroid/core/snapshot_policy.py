@@ -27,6 +27,11 @@ Rules:
 What happens outside Sandroid (``qemu-img snapshot -d``, removing the
 directory while the AVD is stopped) cannot be prevented; :func:`vanished_pins`
 reports a pinned snapshot that disappeared, once.
+
+:func:`snapshot_warnings` reads each snapshot's ``snapshot.pb`` (read only,
+never rewritten) and says why one may not load: a recorded
+``failed_to_load_reason_code`` or another emulator build than the installed
+one (the Devices screen shows it).
 """
 
 from __future__ import annotations
@@ -392,26 +397,249 @@ def snapshot_dir(avd: str, name: str) -> Path | None:
     return None if directory is None else directory / "snapshots" / name
 
 
+# -- snapshot.pb (read only) --------------------------------------------------
+
+#: ``failed_to_load_reason_code`` values below this make the emulator refuse
+#: the snapshot for good (``android::snapshot::FailureReason``); higher ones
+#: record a failed load (a config mismatch, an error while loading).
+UNRECOVERABLE_LIMIT = 10000
+
+#: ``FailureReason`` codes in plain words.
+FAILURE_WORDS = {
+    1: "corrupted data",
+    2: "snapshot.pb missing",
+    3: "snapshot.pb unreadable",
+    4: "saved by an incompatible emulator version",
+    5: "RAM image missing",
+    6: "textures file missing",
+    7: "snapshots not supported",
+    8: "load cancelled",
+    9: "tombstone",
+    10001: "host hypervisor changed",
+    10002: "host GPU changed",
+    10003: "renderer changed",
+    10004: "emulator features changed",
+    10005: "AVD configuration changed",
+    10006: "system image changed",
+    20001: "internal error",
+    20002: "emulation engine failed",
+    20003: "RAM load failed",
+    20004: "textures load failed",
+    20005: "adb offline",
+    20006: "out of disk space",
+}
+
+#: Bytes of a ``snapshot.pb`` read at most (they are about 1 KB).
+_PB_MAX = 1 << 20
+
+
+@dataclass(frozen=True)
+class SnapshotPb:
+    """The top-level facts of a snapshot's ``snapshot.pb`` (emulator proto).
+
+    Attributes:
+        version: Snapshot format version (field 1).
+        created: Creation time, Unix seconds (field 2; 0 unknown).
+        failed_reason: ``failed_to_load_reason_code`` (field 7; 0 none).
+        invalid_loads: Field 10.
+        successful_loads: Field 11.
+        emulator_build: Build id of the emulator that last wrote it (field 18).
+        system_image_build: The system image's build id (field 19).
+    """
+
+    version: int = 0
+    created: int = 0
+    failed_reason: int = 0
+    invalid_loads: int = 0
+    successful_loads: int = 0
+    emulator_build: str = ""
+    system_image_build: str = ""
+
+
+def _varint(data: bytes, pos: int) -> tuple[int, int]:
+    value = shift = 0
+    while True:
+        if pos >= len(data) or shift > 63:
+            raise ValueError("truncated varint")
+        byte = data[pos]
+        pos += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, pos
+        shift += 7
+
+
+def parse_snapshot_pb(data: bytes) -> SnapshotPb:
+    """Decode the top-level scalar fields of ``snapshot.pb`` bytes (pure).
+
+    Only the wire format is used (no generated code); nested messages and
+    unknown fields are skipped. Raises :class:`ValueError` on bytes that are
+    not a protobuf message.
+    """
+    ints = {1: 0, 2: 0, 7: 0, 10: 0, 11: 0}
+    texts = {18: "", 19: ""}
+    pos = 0
+    while pos < len(data):
+        key, pos = _varint(data, pos)
+        field_no, wire = key >> 3, key & 7
+        if field_no == 0:
+            raise ValueError("field number 0")
+        if wire == 0:
+            value, pos = _varint(data, pos)
+            if field_no in ints:
+                ints[field_no] = value
+        elif wire == 2:
+            size, pos = _varint(data, pos)
+            if pos + size > len(data):
+                raise ValueError("truncated field")
+            if field_no in texts:
+                texts[field_no] = data[pos : pos + size].decode("utf-8", "replace")
+            pos += size
+        elif wire == 1:
+            pos += 8
+        elif wire == 5:
+            pos += 4
+        else:
+            raise ValueError(f"unsupported wire type {wire}")
+    if pos != len(data):
+        raise ValueError("truncated field")
+    return SnapshotPb(
+        version=ints[1],
+        created=ints[2],
+        failed_reason=ints[7],
+        invalid_loads=ints[10],
+        successful_loads=ints[11],
+        emulator_build=texts[18],
+        system_image_build=texts[19],
+    )
+
+
+_PB_CACHE: dict[str, tuple[tuple[int, int], SnapshotPb | None]] = {}
+_PB_LOCK = threading.Lock()
+
+
+def read_snapshot_pb(path: Path) -> SnapshotPb | None:
+    """``snapshot.pb`` at *path*, opened read-only and never written
+    (``None``: missing or unreadable). Cached by size and mtime.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    sig = (st.st_size, st.st_mtime_ns)
+    with _PB_LOCK:
+        hit = _PB_CACHE.get(str(path))
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    try:
+        with path.open("rb") as fh:
+            data = fh.read(_PB_MAX + 1)
+        info = None if len(data) > _PB_MAX else parse_snapshot_pb(data)
+    except (OSError, ValueError):
+        info = None
+    with _PB_LOCK:
+        _PB_CACHE[str(path)] = (sig, info)
+    return info
+
+
+def failure_words(code: int) -> str:
+    """A ``failed_to_load_reason_code`` in plain words."""
+    return FAILURE_WORDS.get(code, f"reason code {code}")
+
+
+def snapshot_pb_warning(
+    info: SnapshotPb | None,
+    *,
+    installed_version: str = "",
+    installed_build: str = "",
+    launch_build: str = "",
+) -> str:
+    """Why a snapshot may not load, in words (``""``: nothing to say).
+
+    A ``failed_to_load_reason_code`` below :data:`UNRECOVERABLE_LIMIT` means
+    the emulator refuses the snapshot (a start cold boots); a higher one
+    records a failed load. A snapshot last written by another emulator build
+    than the installed one (or than the one the running emulator was
+    launched with, *launch_build*) may not load either: a 35.x snapshot
+    touched by emulator 37 becomes unloadable.
+    """
+    if info is None:
+        return ""
+    parts = []
+    code = info.failed_reason
+    if code and code < UNRECOVERABLE_LIMIT:
+        parts.append(f"will not load ({failure_words(code)}); a start cold boots")
+    elif code:
+        parts.append(f"a load failed before ({failure_words(code)})")
+    build = info.emulator_build
+    expected = [b for b in (launch_build, installed_build) if b]
+    if build and expected and build not in expected:
+        mine = f"emulator {installed_version} (build {installed_build})"
+        if launch_build and launch_build != installed_build:
+            mine = f"the running emulator (build {launch_build})"
+        elif not installed_version:
+            mine = f"build {installed_build}"
+        parts.append(
+            f"last written by emulator build {build}, not {mine}; loading it "
+            "may fail and cold boot"
+        )
+    return "; ".join(parts)
+
+
+def snapshot_warnings(
+    avd: str,
+    names: Iterable[str],
+    *,
+    installed: tuple[str, str] = ("", ""),
+    launch_build: str = "",
+) -> dict[str, str]:
+    """Warnings for the snapshots *names* of *avd* (see
+    :func:`snapshot_pb_warning`); only snapshots with something to say.
+    *installed* is ``(version, build id)`` of the installed emulator.
+    """
+    out: dict[str, str] = {}
+    for name in names:
+        folder = snapshot_dir(avd, name)
+        if folder is None:
+            continue
+        text = snapshot_pb_warning(
+            read_snapshot_pb(folder / "snapshot.pb"),
+            installed_version=installed[0],
+            installed_build=installed[1],
+            launch_build=launch_build,
+        )
+        if text:
+            out[name] = text
+    return out
+
+
 __all__ = [
     "AI",
     "DEFAULT_PINS",
     "DELETE",
     "LOAD",
     "SAVE",
+    "UNRECOVERABLE_LIMIT",
     "USER",
     "Namespace",
     "Refusal",
+    "SnapshotPb",
     "acting_as",
     "check",
     "current_actor",
+    "failure_words",
     "is_pinned",
     "owner_of",
+    "parse_snapshot_pb",
     "pin",
     "pinned",
+    "read_snapshot_pb",
     "register_namespace",
     "snapshot_complete",
     "snapshot_dir",
     "snapshot_exists",
+    "snapshot_pb_warning",
+    "snapshot_warnings",
     "unpin",
     "unregister_namespace",
     "vanished_pins",

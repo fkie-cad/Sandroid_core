@@ -8,7 +8,11 @@ One screen replaces the old device / AVD / boot-mode pickers. Two boxes:
   unauthorized / no-permissions states), then the stopped AVDs, then AVDs
   running elsewhere (another session holds their lock files). ⏎ attaches a
   ready device or starts a stopped AVD; ``x`` stops and ``R`` restarts an
-  emulator (per serial, never by process name); ``e`` renames an AVD.
+  emulator (per serial, never by process name); ``e`` renames an AVD;
+  ``P`` starts a stopped AVD as a persona (an identity profile's phone
+  contents: its persona snapshot, else clean_8g and the persona stage
+  builds it). A snapshot whose ``snapshot.pb`` (read only) records a failed
+  load or another emulator build is marked on the row and named in the box.
 * **Launch options** -- for the highlighted row. A stopped AVD's options
   are editable and saved for that AVD at once (``devices.json``): boot
   (quick / cold / a snapshot), headless, save state on exit and a one-off
@@ -59,6 +63,7 @@ from textual.widgets import (
 )
 
 from sandroid.core.adb_device_monitor import AdbDeviceMonitor
+from sandroid.tui.key_display import format_key
 from sandroid.tui.themes import lens_palette
 
 if TYPE_CHECKING:
@@ -75,6 +80,9 @@ logger = logging.getLogger(__name__)
 
 #: Our launch is shown as booting at most this long (matches core.emulator).
 _BOOTING_MAX_AGE = 600.0
+#: Prefix of persona snapshots (``sandroid.world.persona.PERSONA_PREFIX``;
+#: not imported: the world package is loaded only when a persona starts).
+PERSONA_PREFIX = "sandroid_persona_"
 
 UNAUTHORIZED_HELP = (
     "Unauthorized: unlock the device and accept the “Allow USB debugging?” "
@@ -160,6 +168,9 @@ class DeviceRow:
             did not start it in this session).
         saved_options: The remembered options of its AVD (what a restart
             of an emulator we did not launch uses); ``None`` if no AVD.
+        persona: The persona our launch started it as (``meta.persona_id``).
+        snapshot_warnings: ``(snapshot, why it may not load)`` of its AVD's
+            snapshots (``snapshot.pb``, read only).
     """
 
     serial: str
@@ -176,6 +187,8 @@ class DeviceRow:
     log_path: str = ""
     launch_options: Any = None
     saved_options: Any = None
+    persona: str = ""
+    snapshot_warnings: tuple[tuple[str, str], ...] = ()
 
     @property
     def key(self) -> str:
@@ -211,6 +224,9 @@ class AvdRow:
         snapshots: Names of its saved snapshots.
         port: Console port a start would use (``None``: unknown / none free).
         port_reason: Why: ``pinned``, ``last used`` or ``auto``.
+        snapshot_warnings: ``(snapshot, why it may not load)`` per snapshot
+            whose ``snapshot.pb`` records a failed load or another emulator
+            build (read only).
     """
 
     name: str
@@ -225,10 +241,16 @@ class AvdRow:
     snapshots: tuple[str, ...] = ()
     port: int | None = None
     port_reason: str = ""
+    snapshot_warnings: tuple[tuple[str, str], ...] = ()
 
     @property
     def key(self) -> str:
         return f"avd:{self.name}"
+
+    @property
+    def persona_snapshots(self) -> tuple[str, ...]:
+        """Its persona snapshots (``sandroid_persona_*``)."""
+        return tuple(n for n in self.snapshots if n.startswith(PERSONA_PREFIX))
 
 
 @dataclass(frozen=True)
@@ -308,6 +330,7 @@ def build_snapshot(
     locked_avds: Collection[str] = (),
     unprobed: Collection[str] = (),
     ports: dict[str, tuple[int, str]] | None = None,
+    snapshot_warnings: dict[str, dict[str, str]] | None = None,
 ) -> HubSnapshot:
     """Combine adb, probes, the AVD catalogue and our launches (pure).
 
@@ -331,6 +354,8 @@ def build_snapshot(
             never as ready.
         ports: ``(port, reason)`` a start of each stopped AVD would use
             (:func:`~sandroid.core.emulator.preferred_console_port`).
+        snapshot_warnings: Per AVD, ``{snapshot: why it may not load}``
+            (:func:`~sandroid.core.snapshot_policy.snapshot_warnings`).
 
     Returns:
         The snapshot. Our launch not yet listed (or still offline) shows as
@@ -341,6 +366,11 @@ def build_snapshot(
     from sandroid.core.emulator import options_from_prefs, serial_port
 
     known = known or {}
+    warnings = snapshot_warnings or {}
+
+    def warned(avd: str) -> tuple[tuple[str, str], ...]:
+        return tuple(sorted((warnings.get(avd) or {}).items())) if avd else ()
+
     by_serial = {launch.serial: launch for launch in launches}
     rows: dict[str, DeviceRow] = {}
     out_notes = list(notes)
@@ -382,6 +412,8 @@ def build_snapshot(
                 if is_emulator and avd_name
                 else None
             ),
+            persona=_persona_of(launch),
+            snapshot_warnings=warned(avd_name),
         )
 
     for serial, launch in by_serial.items():
@@ -400,6 +432,8 @@ def build_snapshot(
                 log_path=str(launch.log_path or ""),
                 launch_options=launch.options,
                 saved_options=options_from_prefs(prefs, launch.avd),
+                persona=_persona_of(launch),
+                snapshot_warnings=warned(launch.avd),
             )
         elif (
             not launch.ready
@@ -428,6 +462,7 @@ def build_snapshot(
                 snapshots=tuple(getattr(info, "snapshots", ()) or ()),
                 port=ports.get(info.name, (None, ""))[0],
                 port_reason=ports.get(info.name, (None, ""))[1],
+                snapshot_warnings=warned(info.name),
             )
             for info in avds
             if info.name not in running_avds
@@ -440,6 +475,13 @@ def build_snapshot(
         notes=tuple(out_notes),
         taken_at=now,
     )
+
+
+def _persona_of(launch: Any) -> str:
+    """The persona a launch of ours started as (``""``: none)."""
+    meta = getattr(launch, "meta", None) if launch is not None else None
+    value = meta.get("persona_id") if isinstance(meta, dict) else None
+    return value if isinstance(value, str) else ""
 
 
 def format_elapsed(seconds: float | None) -> str:
@@ -717,6 +759,7 @@ class HubCollector:
                 logger.debug(f"lock check of {info.name} failed", exc_info=True)
         prefs = emulator.load_launch_prefs()
         ports = self._start_ports(avds, locked, entries, launches, prefs)
+        warnings = self._snapshot_warnings(avds, launches)
         with self._lock:
             probes = dict(self._probes)
             avd_names = {k: v for k, v in self._avd_names.items() if v}
@@ -734,7 +777,49 @@ class HubCollector:
             locked_avds=locked,
             unprobed=unprobed,
             ports=ports,
+            snapshot_warnings=warnings,
         )
+
+    @staticmethod
+    def _snapshot_warnings(
+        avds: Iterable[Any], launches: Iterable[Any]
+    ) -> dict[str, dict[str, str]]:
+        """Per AVD, why its snapshots may not load (``snapshot.pb``, read
+        only): a recorded failed load, or another emulator build than the
+        installed one -- or than the one our live launch of it runs.
+        """
+        from sandroid.core import emulator
+        from sandroid.core import snapshot_policy as policy
+
+        try:
+            installed = emulator.installed_emulator()
+        except Exception:
+            installed = ("", "")
+        running = {
+            launch.avd: str(
+                (getattr(launch, "info", None) or {}).get("emulator_build_id") or ""
+            )
+            for launch in launches
+            if getattr(launch, "alive", False)
+        }
+        out: dict[str, dict[str, str]] = {}
+        for info in avds:
+            names = tuple(getattr(info, "snapshots", ()) or ())
+            if getattr(info, "path", None) is None or not names:
+                continue
+            try:
+                found = policy.snapshot_warnings(
+                    info.name,
+                    names,
+                    installed=installed,
+                    launch_build=running.get(info.name, ""),
+                )
+            except Exception:
+                logger.debug(f"snapshot.pb check of {info.name} failed", exc_info=True)
+                continue
+            if found:
+                out[info.name] = found
+        return out
 
     @staticmethod
     def _start_ports(
@@ -791,7 +876,7 @@ _DEVICE_ACTIONS = frozenset({"attach"})
 _EMULATOR_ACTIONS = frozenset({"stop", "restart"})
 #: Launch-option keys: they edit the highlighted stopped AVD's options.
 _OPTION_ACTIONS = frozenset({"cold", "snapshot", "headless", "save", "wipe"})
-_AVD_ACTIONS = frozenset({"start", "rename"}) | _OPTION_ACTIONS
+_AVD_ACTIONS = frozenset({"start", "rename", "persona"}) | _OPTION_ACTIONS
 
 #: Boot radio button ids -> ``AvdLaunchOptions.boot``.
 _BOOT_IDS = {"opt-quick": "normal", "opt-cold": "cold", "opt-snap": "snapshot"}
@@ -1059,6 +1144,7 @@ class DevicesScreen(ModalScreen[str | None]):
         Binding("w", "wipe", "Wipe"),
         Binding("e", "rename", "Rename…"),
         Binding("p", "pins", "Pins…"),
+        Binding("P", "persona", "Start as persona…"),
         Binding("x", "stop", "Stop…"),
         Binding("R", "restart", "Restart"),
         Binding("a", "connect", "Connect…"),
@@ -1317,9 +1403,12 @@ class DevicesScreen(ModalScreen[str | None]):
             else:
                 mark = Text("★" if row.last_used else "", style=_c("dim"))
                 name_style = "bold" if row.last_used else ""
+            name = Text(row.name, style=name_style)
+            if row.snapshot_warnings:
+                name.append(" · snapshot warning", style=_c("warn"))
             return (
                 mark,
-                Text(row.name, style=name_style),
+                name,
                 Text(str(row.api)) if row.api else dim,
                 self._state_cell(row),
                 dim,
@@ -1328,6 +1417,8 @@ class DevicesScreen(ModalScreen[str | None]):
         name = Text(row.title, style="bold" if row.active else "")
         if not row.is_emulator:
             name.append(" · network" if row.network else " · USB", style=_c("dim"))
+        if row.persona:
+            name.append(f" · persona {row.persona}", style=_c("dim"))
         return (
             Text(""),
             name,
@@ -1539,6 +1630,11 @@ class DevicesScreen(ModalScreen[str | None]):
                 if count
                 else "no snapshots"
             )
+            personas = len(row.persona_snapshots)
+            if personas:
+                facts.append(
+                    f"{personas} persona snapshot{'s' if personas != 1 else ''}"
+                )
             if row.port is not None and not row.running_elsewhere:
                 text.append(f"Port: {row.port} ({row.port_reason})\n")
             text.append(" · ".join(f for f in facts if f), style=_c("dim"))
@@ -1551,6 +1647,7 @@ class DevicesScreen(ModalScreen[str | None]):
         facts = [
             f"API {row.api}" if row.api else "",
             f"root: {row.root_kind}" if row.root_kind else "",
+            f"persona: {row.persona}" if row.persona else "",
             row.serial,
         ]
         if row.log_path:
@@ -1570,6 +1667,13 @@ class DevicesScreen(ModalScreen[str | None]):
                 text.append(" -- and wipes its data first (asks)", style=_c("warn"))
             text.append(". Changes are saved for this AVD at once; ", style=_c("text"))
             text.append("a wipe is never remembered.", style=_c("dim"))
+            text.append(
+                f"\n{format_key('P')} starts it as a persona (an identity "
+                "profile's phone contents, loaded from its persona snapshot "
+                "or built from clean_8g).",
+                style=_c("dim"),
+            )
+            self._warning_lines(text, row.snapshot_warnings)
             return text
         help_text = {
             RowState.UNAUTHORIZED: UNAUTHORIZED_HELP,
@@ -1597,6 +1701,11 @@ class DevicesScreen(ModalScreen[str | None]):
             kind = "Network device" if row.network else "Physical device"
             text.append(f"\n{kind}: no launch options.", style=_c("dim"))
             return text
+        if row.persona:
+            text.append(
+                f"\nStarted as persona {row.persona}; the Identity lens refreshes it.",
+                style=_c("text"),
+            )
         if row.launch_options is not None:
             text.append(
                 "\nStarted by Sandroid with these options; R restarts with them "
@@ -1614,7 +1723,14 @@ class DevicesScreen(ModalScreen[str | None]):
                 "\nStarted outside Sandroid; its AVD is not known yet.",
                 style=_c("dim"),
             )
+        self._warning_lines(text, row.snapshot_warnings)
         return text
+
+    @staticmethod
+    def _warning_lines(text: Text, warnings: Sequence[tuple[str, str]]) -> None:
+        """One warning line per snapshot that may not load."""
+        for name, why in warnings:
+            text.append(f"\nSnapshot {name}: {why}.", style=_c("warn"))
 
     def _set_options(self, row: AvdRow, options: Any) -> None:
         """Save *options* for *row*'s AVD and show them (wipe stays local)."""
@@ -1907,6 +2023,137 @@ class DevicesScreen(ModalScreen[str | None]):
                 guard_typing=True,
             ),
             confirmed,
+        )
+
+    def action_persona(self) -> None:
+        """``P``: start the highlighted stopped AVD as a persona.
+
+        Lists the identity profiles with a world section (worker thread),
+        then starts the AVD from the chosen profile's persona snapshot, or
+        from clean_8g when there is none yet (the persona stage builds and
+        saves it). Never saves on exit, never changes the AVD's remembered
+        options.
+        """
+        row = self._avd_row()
+        if row is None:
+            return
+        if row.key in self._busy:
+            self.app.notify(
+                f"Already {self._busy[row.key] or 'busy'}", title="Devices", timeout=3
+            )
+            return
+
+        def work() -> None:
+            from sandroid.world import persona
+
+            try:
+                result: Any = persona.persona_choices(row.name)
+            except Exception as exc:
+                result = exc
+            self.app.call_from_thread(self._persona_choices, row, result)
+
+        self.run_worker(work, thread=True, group="devices-persona", exit_on_error=False)
+
+    def _persona_choices(self, row: AvdRow, result: Any) -> None:
+        """UI thread: offer the personas (or say why there are none)."""
+        if not self.is_attached:
+            return
+        if isinstance(result, Exception):
+            self.app.notify(
+                f"Could not list the identity profiles: {result}",
+                title="Devices",
+                severity="error",
+                timeout=8,
+            )
+            return
+        if not result:
+            self.app.notify(
+                "No identity profile has a world section (phone contents); "
+                f"add one in the Identity lens ({format_key('P')}) first.",
+                title="Devices",
+                severity="warning",
+                timeout=8,
+            )
+            return
+        from sandroid.tui.modals.selection_modal import SelectionModal
+
+        labels = {}
+        for choice in result:
+            saved = (
+                f"{choice.snapshots} persona snapshot"
+                f"{'s' if choice.snapshots != 1 else ''} saved"
+                if choice.snapshots
+                else "built from clean_8g on the first start"
+            )
+            labels[f"{choice.name} ({choice.id}) · {saved}"] = choice.id
+
+        def picked(label: str | None) -> None:
+            pid = labels.get(label or "")
+            if pid and self.is_attached:
+                self._start_persona(row, pid)
+
+        self.app.push_screen(
+            SelectionModal(
+                title=f"Start {row.name} as a persona",
+                options=list(labels),
+                message="The persona snapshot of the profile as it is now is "
+                "loaded; without one, clean_8g boots and the persona is built "
+                "and saved (a few minutes). The state is never saved on exit.",
+            ),
+            picked,
+        )
+
+    def _start_persona(self, row: AvdRow, profile_id: str) -> None:
+        """Work out the persona launch (worker), then start it."""
+        options = self._shown_options(row)
+        headless = bool(getattr(options, "headless", False))
+        self._busy[row.key] = "preparing persona…"
+        self._repaint_busy()
+
+        def work() -> None:
+            from sandroid.world import persona
+
+            try:
+                result: Any = persona.persona_start(
+                    row.name, profile_id, api=row.api, headless=headless
+                )
+            except Exception as exc:
+                result = exc
+            self.app.call_from_thread(self._persona_ready, row, profile_id, result)
+
+        self.run_worker(work, thread=True, group="devices-persona", exit_on_error=False)
+
+    def _persona_ready(self, row: AvdRow, profile_id: str, start: Any) -> None:
+        if not self.is_attached:
+            return
+        self._busy.pop(row.key, None)
+        if isinstance(start, Exception):
+            self._repaint_busy()
+            self.app.notify(
+                f"Cannot start {row.name} as persona {profile_id}: {start}",
+                title="Devices",
+                severity="error",
+                timeout=8,
+            )
+            return
+        how = (
+            f"loading {start.snapshot}"
+            if start.cached
+            else "from clean_8g; the persona is built and saved after boot"
+        )
+        self.app.notify(
+            f"Starting {row.name} as persona {profile_id}, {how}.",
+            title="Devices",
+            timeout=6,
+        )
+        self._call(
+            "start_avd",
+            row.key,
+            "starting as persona…",
+            row.name,
+            start.options,
+            meta=start.meta,
+            remember=False,
         )
 
     def action_cold(self) -> None:

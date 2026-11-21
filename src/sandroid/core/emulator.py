@@ -1739,11 +1739,26 @@ def _pkg_revision(directory: Path | None) -> str:
     return _read_ini(directory / "source.properties").get("Pkg.Revision", "")
 
 
+def installed_emulator() -> tuple[str, str]:
+    """``(Pkg.Revision, Pkg.BuildId)`` of the emulator Sandroid launches
+    (``("", "")`` unknown). A snapshot's ``snapshot.pb`` names the build id
+    of the emulator that last wrote it.
+    """
+    binary = emulator_binary()
+    if binary is None:
+        return "", ""
+    props = _read_ini(Path(binary).parent / "source.properties")
+    return props.get("Pkg.Revision", ""), props.get("Pkg.BuildId", "")
+
+
 def _launch_info(binary: Path, avd_folder: Path, command: list[str]) -> dict:
     """Host facts of one launch for its record (never raises)."""
     info: dict[str, Any] = {"command": [str(c) for c in command]}
     try:
         info["emulator_version"] = _pkg_revision(Path(binary).parent)
+        info["emulator_build_id"] = _read_ini(
+            Path(binary).parent / "source.properties"
+        ).get("Pkg.BuildId", "")
         config_path = avd_folder / "config.ini"
         data = config_path.read_bytes() if config_path.is_file() else b""
         info["config_sha256"] = hashlib.sha256(data).hexdigest()[:16] if data else ""
@@ -1763,7 +1778,8 @@ def launch_record(serial: str) -> dict[str, Any] | None:
 
     A JSON-ready dict: ``launch_id`` (new per emulator process; a new one
     is a new world), ``avd``, ``serial``, ``port``, ``started`` (epoch s),
-    ``options``, ``command``, ``emulator_version``, ``system_image`` (+
+    ``options``, ``command``, ``emulator_version`` (+ ``_build_id``),
+    ``system_image`` (+
     ``_revision``), ``config_sha256``, ``meta`` (what :func:`launch_avd`
     got), ``hooks`` (what pre-launch hooks put into
     ``LaunchContext.record``), and once the device was first prepared
@@ -2558,6 +2574,7 @@ __all__ = [
     "ensure_avd_running",
     "free_console_port",
     "get_launch",
+    "installed_emulator",
     "launch_avd",
     "launch_record",
     "launches",

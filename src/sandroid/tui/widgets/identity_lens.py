@@ -22,7 +22,10 @@ permission an app needs, the status and the value before the apply.
 
 Keys (lens-local): ``space`` apply, ``e`` edit value, ``v`` verify,
 ``R`` regenerate, ``P`` profiles, ``I`` import, ``X`` export, ``M`` mode
-on/off, ``J`` jump, ``/`` filter.
+on/off, ``J`` jump, ``/`` filter, ``W`` build the persona (a device without
+phone contents) or refresh it (only what changed against the host ledger;
+:mod:`sandroid.world.persona`), in the background with its progress in the
+caption.
 
 Threading: every device call (plan / apply / verify) and the profile read
 on activation run in a thread worker; results come back through a
@@ -51,6 +54,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Input, Label, Static
 
+from sandroid.tui.key_display import format_key
 from sandroid.tui.modals.base import KeyHintFooter
 from sandroid.tui.modals.input_modal import InputModal
 from sandroid.tui.themes import lens_palette
@@ -646,6 +650,9 @@ class IdentityLens(Vertical):
         Binding("M", "toggle_mode", "Identity mode on/off", show=False),
         Binding("J", "jump", "Jump to the selected hit's source", show=False),
         Binding("slash", "filter", "Filter rows", show=False),
+        # Build on a device without a persona, else refresh (the caption
+        # names which one W does now).
+        Binding("W", "persona", "Build / refresh persona"),
     ]
 
     DEFAULT_CSS = """
@@ -726,6 +733,10 @@ class IdentityLens(Vertical):
         #: failed read; a read in flight.
         self._auto_read_retry: dict[tuple[str, str], float] = {}
         self._auto_read_busy = False
+        #: A persona build / refresh runs: what it does now (caption).
+        self._persona_work = ""
+        #: The target device's persona the footer was last drawn for.
+        self._shown_persona = ""
 
     # -- compose / mount ---------------------------------------------------
 
@@ -848,6 +859,11 @@ class IdentityLens(Vertical):
         self._update_notice()
         self._follow_device()
         self._auto_read()
+        persona = _launch_persona()
+        if persona != self._shown_persona:
+            # The caption says whether W builds or refreshes.
+            self._shown_persona = persona
+            self._update_caption()
 
     def _follow_device(self) -> None:
         """Reload once when the target device runs another profile than the
@@ -1262,6 +1278,12 @@ class IdentityLens(Vertical):
             title += ", persona of this device"
         applied_at, verified_at = self._apply_times(ident, profile)
         bits = []
+        if self._persona_work:
+            bits.append(self._persona_work)
+        elif _launch_persona():
+            bits.append(f"{format_key('W')} refresh persona")
+        elif getattr(profile, "world", None):
+            bits.append(f"{format_key('W')} build persona")
         if applied_at:
             bits.append(f"applied {datetime.fromtimestamp(applied_at):%H:%M:%S}")
         if verified_at:
@@ -1891,6 +1913,114 @@ class IdentityLens(Vertical):
     def _failed(self, what: str, exc: Exception) -> None:
         logger.info(f"identity lens: {what}: {exc}")
         self.app.notify(f"{what}: {exc}", severity="error", timeout=6)
+
+    # -- persona (build / refresh, workers) -----------------------------------
+
+    def action_persona(self) -> None:
+        """``W``: build the persona on a device without one, else refresh it."""
+        if _launch_persona():
+            self.action_refresh_persona()
+        else:
+            self.action_build_persona()
+
+    def _persona_target(self) -> str | None:
+        """The emulator a persona action runs on (notifies why not)."""
+        if self._persona_work:
+            self.app.notify(f"Busy: {self._persona_work}.", timeout=3)
+            return None
+        serial = _target_serial()
+        if not serial:
+            self.app.notify("No device connected (D selects one).", timeout=4)
+            return None
+        if not serial.startswith("emulator-"):
+            self.app.notify("Personas live on emulators only.", timeout=4)
+            return None
+        return serial
+
+    def action_build_persona(self) -> None:
+        """``W`` (no persona on the device): build the profile's persona here."""
+        if not self._require_profile():
+            return
+        profile = self.profile
+        if not getattr(profile, "world", None):
+            self.app.notify(
+                "This profile has no world section (phone contents): add one "
+                "to build a persona.",
+                severity="warning",
+                timeout=6,
+            )
+            return
+        serial = self._persona_target()
+        if serial is None:
+            return
+        pid = profile.id
+        from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+        def confirmed(yes: bool | None) -> None:
+            if yes:
+                self._run_persona(serial, pid, build=True)
+
+        self.app.push_screen(
+            ConfirmModal(
+                title=f"Build persona {pid} on {serial}?",
+                message="Seeds the phone contents (contacts, SMS, calls, "
+                "calendar, photos, files; offline for about a minute), applies "
+                "the identity (Android restarts) and saves a persona snapshot "
+                "(about 3 GB). The device should run a clean base such as "
+                "clean_8g.",
+                yes_label="Build persona",
+                no_label="Cancel",
+            ),
+            confirmed,
+        )
+
+    def action_refresh_persona(self) -> None:
+        """``W`` (a persona on the device): bring it up to its profile."""
+        serial = self._persona_target()
+        if serial is None:
+            return
+        pid = _launch_persona()
+        if not pid:
+            return
+        self._run_persona(serial, pid, build=False)
+
+    def _run_persona(self, serial: str, pid: str, *, build: bool) -> None:
+        verb = "Building" if build else "Refreshing"
+        self._persona_work = f"{verb.lower()} persona {pid}"
+        self._update_caption()
+
+        def progress(step: str, done: int, total: int) -> None:
+            text = f"{verb.lower()} persona {pid}: {step} {done} of {total}"
+            self._ui.post(self._persona_progress, text)
+
+        def work() -> Any:
+            from sandroid.world import persona
+
+            if build:
+                return persona.build_persona(
+                    serial, pid, progress=progress, rebuild=True
+                )
+            return persona.refresh_persona(serial, pid, progress=progress)
+
+        def done(result: Any) -> None:
+            self._persona_work = ""
+            if isinstance(result, Exception):
+                self._failed(f"{verb} persona {pid} failed", result)
+            elif build:
+                save = getattr(result, "save", None)
+                where = save.name if save is not None else result.snapshot
+                self.app.notify(f"Persona {pid} built and saved as {where}.", timeout=6)
+            else:
+                self.app.notify(result.words() + ".", timeout=6)
+            self.refresh_data()
+
+        self.app.notify(f"{verb} persona {pid} in the background…", timeout=3)
+        self._run_bg(work, done, group="identity-persona")
+
+    def _persona_progress(self, text: str) -> None:
+        if self._persona_work:
+            self._persona_work = text
+            self._update_caption()
 
     # -- library actions (local files, UI thread) ---------------------------
 

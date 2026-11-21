@@ -36,8 +36,9 @@ import re
 import shlex
 import shutil
 import tempfile
+import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -160,6 +161,7 @@ class PrepareReport:
         warnings: Everything a person should know.
         ledger_path: The host ledger.
         stamp: The device stamp written.
+        changes: What a :func:`refresh` added and removed, per list.
     """
 
     serial: str
@@ -177,6 +179,7 @@ class PrepareReport:
     warnings: list[str] = field(default_factory=list)
     ledger_path: str = ""
     stamp: dict[str, Any] = field(default_factory=dict)
+    changes: dict[str, Any] = field(default_factory=dict)
 
     @property
     def seconds(self) -> float:
@@ -362,6 +365,29 @@ def persona_snapshot_name(persona_id: str, world_fp: str, identity_fp: str) -> s
 # ============================================================================
 
 
+def write_device_stamp(dev: Device, record: dict[str, Any], tmp: Path) -> None:
+    """Write the device stamp atomically (push to a temp file, then ``mv``).
+
+    Raises:
+        PrepareError: The stamp did not land.
+    """
+    local = tmp / "world.json"
+    local.write_text(
+        json.dumps(record, sort_keys=True, indent=1) + "\n", encoding="utf-8"
+    )
+    remote_tmp = f"{STAMP_PATH}.tmp"
+    dev.shell(f"mkdir -p {DEVICE_DIR} && rm -f {remote_tmp}", zygote=False)
+    res = dev.push([local], remote_tmp, timeout=60)
+    out = dev.shell(
+        f"chmod 644 {remote_tmp} && mv -f {remote_tmp} {STAMP_PATH} && echo stamped",
+        zygote=False,
+    ).out
+    if "stamped" not in out:
+        raise PrepareError(
+            f"cannot write the world stamp: {(res.err or res.out).strip()[:200]}"
+        )
+
+
 # ------------------------------------------------------------------- utils
 
 
@@ -465,7 +491,13 @@ def safe_file_name(name: str) -> bool:
 
 
 def contact_items(world: RenderedWorld) -> list[dict[str, Any]]:
-    """Helper ``contacts`` items: a raw contact (no account) plus data rows.
+    """Helper ``contacts`` items (see :func:`contact_rows`)."""
+    return [row for _key, row in contact_rows(world)]
+
+
+def contact_rows(world: RenderedWorld) -> list[tuple[str, dict[str, Any]]]:
+    """``(world id, helper item)`` of every contact: a raw contact (no
+    account) plus data rows.
 
     The address book holds what the owner typed: a contact saved as "Mama"
     or "Dirk" has only that name. Given and family name go in only when the
@@ -502,7 +534,12 @@ def contact_items(world: RenderedWorld) -> list[dict[str, Any]]:
                     "data2": 1,
                 }
             )
-        items.append({"raw": {"starred": 1 if c.get("starred") else 0}, "data": rows})
+        items.append(
+            (
+                str(c.get("id") or len(items)),
+                {"raw": {"starred": 1 if c.get("starred") else 0}, "data": rows},
+            )
+        )
     return items
 
 
@@ -521,8 +558,14 @@ def calendar_create(world: RenderedWorld, tz: ZoneInfo) -> dict[str, Any]:
 
 
 def event_items(world: RenderedWorld, tz: ZoneInfo) -> list[dict[str, Any]]:
-    """Helper ``calendar`` items. All-day events start at UTC midnight of
-    their local date (the provider's rule); birthdays recur yearly.
+    """Helper ``calendar`` items (see :func:`event_rows`)."""
+    return [row for _key, row in event_rows(world, tz)]
+
+
+def event_rows(world: RenderedWorld, tz: ZoneInfo) -> list[tuple[str, dict[str, Any]]]:
+    """``(world id, helper calendar item)`` of every event, by start. All-day
+    events start at UTC midnight of their local date (the provider's rule);
+    birthdays recur yearly.
     """
     out = []
     for ev in world.events:
@@ -550,13 +593,20 @@ def event_items(world: RenderedWorld, tz: ZoneInfo) -> list[dict[str, Any]]:
                 dtstart=int(ev["ts_ms"]),
                 dtend=int(ev["end_ms"]),
             )
-        out.append({k: v for k, v in row.items() if v is not None})
-    out.sort(key=lambda r: r["dtstart"])
+        out.append((str(ev["id"]), {k: v for k, v in row.items() if v is not None}))
+    out.sort(key=lambda kr: kr[1]["dtstart"])
     return out
 
 
 def call_items(world: RenderedWorld) -> list[dict[str, Any]]:
-    """Helper ``calls`` items, oldest first, with the cached contact name."""
+    """Helper ``calls`` items (see :func:`call_rows`)."""
+    return [row for _key, row in call_rows(world)]
+
+
+def call_rows(world: RenderedWorld) -> list[tuple[str, dict[str, Any]]]:
+    """``(world id, helper calls item)``, oldest first, with the cached
+    contact name.
+    """
     names = {
         ph["number"]: c.get("display_name")
         for c in world.contacts
@@ -576,28 +626,42 @@ def call_items(world: RenderedWorld) -> list[dict[str, Any]]:
         }
         if names.get(call["number"]):
             row["name"] = names[call["number"]]
-        out.append(row)
+        out.append((str(call["id"]), row))
     return out
 
 
 def sms_items(world: RenderedWorld) -> list[dict[str, Any]]:
-    """Helper ``sms`` items, oldest first."""
+    """Helper ``sms`` items (see :func:`sms_rows`)."""
+    return [row for _key, row in sms_rows(world)]
+
+
+def sms_rows(world: RenderedWorld) -> list[tuple[str, dict[str, Any]]]:
+    """``(world id, helper sms item)``, oldest first."""
     out = []
     for m in sorted(world.sms, key=lambda s: (s["ts_ms"], s["id"])):
         sent = m.get("direction") == "sent"
         date = int(m["ts_ms"])
         out.append(
-            {
-                "address": m["address"],
-                "body": m["body"],
-                "date": date,
-                "date_sent": date if sent else date - 3000,
-                "type": 2 if sent else 1,
-                "read": 1 if sent or m.get("read", True) else 0,
-                "seen": 1,
-            }
+            (
+                str(m["id"]),
+                {
+                    "address": m["address"],
+                    "body": m["body"],
+                    "date": date,
+                    "date_sent": date if sent else date - 3000,
+                    "type": 2 if sent else 1,
+                    "read": 1 if sent or m.get("read", True) else 0,
+                    "seen": 1,
+                },
+            )
         )
     return out
+
+
+def row_hash(row: Any) -> str:
+    """Short hash of a helper row (or any JSON value): what a refresh compares."""
+    data = json.dumps(row, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()[:16]
 
 
 def file_lines(f: Mapping[str, Any], tz: ZoneInfo) -> list[str]:
@@ -660,6 +724,9 @@ class _Run:
         self.network_inherited: dict[str, bool] | None = None
         self.max_ids: dict[str, int] = {}
         self.online_done = False
+        #: A :func:`refresh`: the device holds a complete world (``old_stamp``).
+        self.refreshing = False
+        self.old_stamp: dict[str, Any] | None = None
 
     # -- infrastructure
 
@@ -683,21 +750,7 @@ class _Run:
 
     def write_stamp(self, record: dict[str, Any]) -> None:
         assert self.tmp is not None
-        local = self.tmp / "world.json"
-        local.write_text(
-            json.dumps(record, sort_keys=True, indent=1) + "\n", encoding="utf-8"
-        )
-        tmp = f"{STAMP_PATH}.tmp"
-        self.shell(f"mkdir -p {DEVICE_DIR} && rm -f {tmp}", zygote=False)
-        res = self.dev.push([local], tmp, timeout=60)
-        out = self.shell(
-            f"chmod 644 {tmp} && mv -f {tmp} {STAMP_PATH} && echo stamped",
-            zygote=False,
-        )
-        if "stamped" not in out:
-            raise PrepareError(
-                f"cannot write the world stamp: {(res.err or res.out).strip()[:200]}"
-            )
+        write_device_stamp(self.dev, record, self.tmp)
         self.report.stamp = record
 
     # -- 1. preflight
@@ -769,12 +822,22 @@ class _Run:
 
     def _check_stamp(self, text: str) -> None:
         if not text.strip():
+            if self.refreshing:
+                raise PrepareError("the device holds no world to refresh")
             return
         try:
             stamp = json.loads(text)
         except ValueError:
             stamp = {"state": "unreadable"}
         state = stamp.get("state") if isinstance(stamp, dict) else "unreadable"
+        if self.refreshing:
+            if state != "complete" or stamp.get("format") != STAMP_FORMAT:
+                raise PrepareError(
+                    "a refresh needs a device that holds a complete world "
+                    f"(the stamp says {state})"
+                )
+            self.old_stamp = stamp
+            return
         if state == "complete":
             raise PrepareError(
                 f"the device already holds world {str(stamp.get('world_fp'))[:12]}; "
@@ -1059,22 +1122,31 @@ class _Run:
 
     # -- 4. lists
 
-    def _seed(self, name: str, items: list[dict[str, Any]], send) -> None:
+    def _seed(self, name: str, rows: list[tuple[str, dict[str, Any]]], send) -> None:
+        """Insert keyed helper ``rows``; each new row id goes to the ledger's
+        list and, with the row's world id and hash, to its ``items`` map
+        (what a later :func:`refresh` compares against).
+        """
         r = self.report
-        r.expected[name] = len(items)
+        r.expected[name] = r.expected.get(name, 0) + len(rows)
         done = 0
         bad = 0
-        for batch in chunked(items, CHUNKS.get(name, 50)):
-            ids = send(list(batch))
-            good = [i for i in ids if isinstance(i, int) and i > 0]
-            bad += len(ids) - len(good)
-            assert self.ledger is not None
+        assert self.ledger is not None
+        keyed = self.ledger.data.setdefault("items", {}).setdefault(name, {})
+        for batch in chunked(rows, CHUNKS.get(name, 50)):
+            ids = send([row for _key, row in batch])
+            good = []
+            for (key, row), rid in zip(batch, ids, strict=False):
+                if isinstance(rid, int) and rid > 0:
+                    good.append(rid)
+                    keyed[key] = [rid, row_hash(row)]
+            bad += len(batch) - len(good)
             self.ledger.add(name, good)
             done += len(batch)
-            self.progress(name, done, len(items))
-        r.seeded[name] = len(self.ledger.data["lists"][name]) if self.ledger else 0
+            self.progress(name, done, len(rows))
+        r.seeded[name] = len(self.ledger.data["lists"][name])
         if bad:
-            r.warn(f"{name}: {bad} of {len(items)} rows were refused by the provider")
+            r.warn(f"{name}: {bad} of {len(rows)} rows were refused by the provider")
 
     def seed_lists(self, world: RenderedWorld) -> None:
         h = self.helper
@@ -1087,7 +1159,7 @@ class _Run:
         with self.step("contacts"):
             self._seed(
                 "contacts",
-                contact_items(world),
+                contact_rows(world),
                 lambda b: req("contacts", items=b)["ids"],
             )
         with self.step("calendar"):
@@ -1096,32 +1168,45 @@ class _Run:
                 "calendar", account=account, create=calendar_create(world, self.tz)
             )
             self.ledger.add("calendars", [cal["calendar_id"]])
-            cal_id = cal["calendar_id"]
-            self._seed(
-                "events",
-                event_items(world, self.tz),
-                lambda b: req("calendar", account=account, calendar_id=cal_id, items=b)[
-                    "ids"
-                ],
-            )
+            self._seed_events(event_rows(world, self.tz), cal["calendar_id"], world)
         with self.step("calls"):
             self._seed(
-                "calls", call_items(world), lambda b: req("calls", items=b)["ids"]
+                "calls", call_rows(world), lambda b: req("calls", items=b)["ids"]
             )
         with self.step("sms") as st:
+            st.detail = self._seed_sms(sms_rows(world))
+
+    def _req(self, cmd: str, **kw: Any) -> dict:
+        assert self.helper is not None
+        return self.helper.request(cmd, timeout=CHUNK_TIMEOUT_S, **kw)
+
+    def _seed_events(
+        self, rows: list[tuple[str, dict[str, Any]]], cal_id: int, world: RenderedWorld
+    ) -> None:
+        account = {"name": world.calendar_name, "type": CALENDAR_ACCOUNT_TYPE}
+        self._seed(
+            "events",
+            rows,
+            lambda b: self._req(
+                "calendar", account=account, calendar_id=cal_id, items=b
+            )["ids"],
+        )
+
+    def _seed_sms(self, rows: list[tuple[str, dict[str, Any]]]) -> str:
+        """Insert SMS rows with the messaging apps stopped; the provider mode."""
+        self._stop_messaging()
+        modes: set[str] = set()
+
+        def send(b: list[dict[str, Any]]) -> list[int]:
+            reply = self._req("sms", items=b)
+            modes.add(str(reply.get("mode")))
+            return reply["ids"]
+
+        try:
+            self._seed("sms", rows, send)
+        finally:
             self._stop_messaging()
-            modes: set[str] = set()
-
-            def send(b: list[dict[str, Any]]) -> list[int]:
-                reply = req("sms", items=b)
-                modes.add(str(reply.get("mode")))
-                return reply["ids"]
-
-            try:
-                self._seed("sms", sms_items(world), send)
-            finally:
-                self._stop_messaging()
-            st.detail = "provider " + "/".join(sorted(modes))
+        return "provider " + "/".join(sorted(modes))
 
     def _stop_messaging(self) -> None:
         self.shell(
@@ -1180,14 +1265,13 @@ class _Run:
             raise PrepareError(
                 f"photo push failed: {(res.err or res.out).strip()[:200]}"
             )
-        self.ledger.data["photos"] = [
-            {
-                "id": p.id,
-                "path": f"/sdcard/{p.remote_dir}/{p.name}",
-                "taken_ms": p.taken_ms,
-            }
-            for p in done
-        ]
+        recs = {rec["id"]: rec for rec in world.photos}
+        keyed = self.ledger.data.setdefault("items", {}).setdefault("photos", {})
+        photos = self.ledger.data.setdefault("photos", [])
+        for p in done:
+            path = f"/sdcard/{p.remote_dir}/{p.name}"
+            photos.append({"id": p.id, "path": path, "taken_ms": p.taken_ms})
+            keyed[p.id] = [path, row_hash(recs.get(p.id))]
         self.ledger.add_paths(paths)
         self._touch([(path, p.taken_ms) for path, p in zip(paths, done, strict=True)])
         return done
@@ -1206,6 +1290,8 @@ class _Run:
         assert self.ledger is not None
         r = self.report
         made: list[tuple[str, int]] = []
+        items = self.ledger.data.setdefault("items", {})
+        keyed = {"files": items.setdefault("files", {})}
         for f in world.files:
             sub = "Download" if f.get("dir") == "Download" else "Documents"
             name = str(f.get("name"))
@@ -1222,6 +1308,7 @@ class _Run:
             local.parent.mkdir(parents=True, exist_ok=True)
             local.write_bytes(file_bytes(local.name, file_lines(f, self.tz), when))
             made.append((remote, int(f["ts_ms"])))
+            keyed["files"][str(f["id"])] = [remote, row_hash(f)]
         r.expected["files"] = len(world.files)
         n_files = len(made)
         if world.notes:
@@ -1233,6 +1320,7 @@ class _Run:
             local.parent.mkdir(parents=True, exist_ok=True)
             local.write_text(text, encoding="utf-8")
             made.append((f"/sdcard/Documents/{name}", int(ts)))
+            items["notes"] = {"notes": [f"/sdcard/Documents/{name}", row_hash(text)]}
         r.expected["notes"] = len(world.notes)
         if not made:
             return []
@@ -1401,6 +1489,217 @@ class _Run:
                 self.helper.close()
             shutil.rmtree(self.tmp, ignore_errors=True)
 
+    # -- refresh: only what changed against the ledger
+
+    def refresh(self) -> PrepareReport:
+        """Bring the device's world to :attr:`manifest` (see :func:`refresh`)."""
+        r = self.report
+        self.refreshing = True
+        self.tmp = Path(tempfile.mkdtemp(prefix="sandroid-world-"))
+        try:
+            with self.step("preflight") as st:
+                self.preflight()
+                old = self._refresh_ledger()
+                world = self.manifest.render(self.anchor)
+                plan = refresh_plan(old.data, world, self.tz, self._notes_name())
+                plan.drop_topups(self.old_stamp or {})
+                r.changes = plan.summary()
+                st.detail = plan.words()
+                if plan.empty and old.data.get("world_fp") == self.manifest.world_fp:
+                    r.ok = True
+                    return r
+                self.start_helper()
+            self._refresh_apply(old, world, plan)
+            self.online()
+            r.ok = True
+            return r
+        except PrepareError as exc:
+            r.error = str(exc)
+            exc.report = r
+            raise
+        except Exception as exc:
+            r.error = f"{type(exc).__name__}: {exc}"
+            raise PrepareError(r.error, r) from exc
+        finally:
+            if not self.online_done and self.network_before is not None:
+                try:
+                    self.online()
+                except Exception as exc:
+                    r.warn(f"restoring the network failed: {exc}")
+            if self.pool is not None:
+                self.pool.shutdown(wait=True, cancel_futures=True)
+            if self.helper is not None:
+                self.helper.close()
+            shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _notes_name(self) -> str:
+        return NOTES_FILE.get(owner_language(self.manifest, self.packs), "Notes.txt")
+
+    def _refresh_ledger(self) -> Ledger:
+        """The host ledger of the world on the device; the anchor it used."""
+        stamp = self.old_stamp or {}
+        fp = str(stamp.get("world_fp") or "")
+        path = ledger_path(self.dev.serial, self.report.avd, fp) if fp else None
+        if path is None or not path.is_file():
+            raise PrepareError(
+                "the host ledger of the world on the device is missing; build "
+                "the persona again from clean_8g"
+            )
+        old = Ledger.load(path)
+        if old.data.get("world_fp") != fp or old.data.get("state") != "complete":
+            raise PrepareError(
+                "the host ledger does not belong to the world on the device; "
+                "build the persona again from clean_8g"
+            )
+        if not isinstance(old.data.get("items"), dict):
+            raise PrepareError(
+                "this persona was built before refresh existed (its ledger "
+                "lists no items); build it again from clean_8g"
+            )
+        anchor = _parse_iso(old.data.get("anchor"))
+        if anchor is None:
+            raise PrepareError("the host ledger has no anchor")
+        # The same anchor: an unchanged item renders to the same row.
+        self.anchor = anchor.astimezone(self.tz)
+        self.report.anchor = self.anchor.isoformat()
+        return old
+
+    def _refresh_apply(
+        self, old: Ledger, world: RenderedWorld, plan: RefreshPlan
+    ) -> None:
+        r = self.report
+        data = json.loads(old.to_json())
+        data.update(
+            world_fp=self.manifest.world_fp,
+            state="partial",
+            started_at=_now_iso(),
+            finished_at=None,
+            refreshed_from=old.data.get("world_fp"),
+        )
+        path = ledger_path(self.dev.serial, r.avd, self.manifest.world_fp)
+        r.ledger_path = str(path)
+        self.ledger = Ledger(path, data)
+        self.ledger.save()
+        self.write_stamp(
+            stamp_record(
+                self.manifest, state="partial", anchor=r.anchor, ledger=self.ledger
+            )
+        )
+        with self.step("offline"):
+            self.go_offline()
+        with self.step("backup_sync_off"):
+            self.backup_off()
+        with self.step("remove"):
+            self._refresh_remove(plan)
+        lists = plan.added
+        with self.step("contacts"):
+            self._seed(
+                "contacts",
+                lists["contacts"],
+                lambda b: self._req("contacts", items=b)["ids"],
+            )
+        with self.step("calendar"):
+            if lists["events"]:
+                cals = self.ledger.data["lists"].get("calendars") or []
+                if not cals:
+                    raise PrepareError("the host ledger names no calendar")
+                self._seed_events(lists["events"], int(cals[0]), world)
+        with self.step("calls"):
+            self._seed(
+                "calls", lists["calls"], lambda b: self._req("calls", items=b)["ids"]
+            )
+        with self.step("sms") as st:
+            if lists["sms"]:
+                st.detail = self._seed_sms(lists["sms"])
+        sub = replace(
+            world,
+            photos=plan.photos,
+            files=plan.files,
+            notes=world.notes if plan.notes else [],
+        )
+        with self.step("photos"):
+            self.start_photo_jobs(sub)
+            photos = self.push_photos(sub)
+        with self.step("files"):
+            self.push_files(sub)
+        with self.step("media_scan"):
+            if photos or plan.files or plan.notes or plan.removed_paths:
+                self._scan()
+            self._requery_images()
+        with self.step("verify"):
+            self.verify_counts()
+        with self.step("stamp"):
+            self.ledger.data["state"] = "complete"
+            self.ledger.data["finished_at"] = _now_iso()
+            self.ledger.save()
+            self.write_stamp(
+                stamp_record(
+                    self.manifest,
+                    state="complete",
+                    anchor=r.anchor,
+                    ledger=self.ledger,
+                    counts=self.ledger.counts(),
+                )
+            )
+
+    def _refresh_remove(self, plan: RefreshPlan) -> None:
+        """Delete the changed and removed rows and files (and old top-ups)."""
+        assert self.ledger is not None
+        data = self.ledger.data
+        lists = {k: v for k, v in plan.removed.items() if v}
+        if lists:
+            self._req("delete", lists=lists, account=data.get("account"))
+        for name, ids in lists.items():
+            gone = set(ids)
+            data["lists"][name] = [
+                i for i in data["lists"].get(name, []) if i not in gone
+            ]
+            keyed = data.get("items", {}).get(name, {})
+            for key in [k for k, v in keyed.items() if v[0] in gone]:
+                del keyed[key]
+        paths = [p for p in plan.removed_paths if device_file_ok(p)]
+        for batch in chunked(paths, 100):
+            self.shell("rm -f " + " ".join(_q(p) for p in batch), zygote=False)
+        gone_paths = set(paths)
+        data["paths"] = [p for p in data.get("paths", []) if p not in gone_paths]
+        data["photos"] = [
+            p for p in data.get("photos", []) if p.get("path") not in gone_paths
+        ]
+        items = data.setdefault("items", {})
+        for kind in ("photos", "files", "notes"):
+            keyed = items.get(kind, {})
+            for key in [k for k, v in keyed.items() if v[0] in gone_paths]:
+                del keyed[key]
+        self.ledger.save()
+
+    def _requery_images(self) -> None:
+        """The ledger's MediaStore ids: those of the photos it lists now."""
+        assert self.ledger is not None
+        assert self.helper is not None
+        want = {
+            posixpath.basename(p["path"]): posixpath.dirname(p["path"])[
+                len("/sdcard/") :
+            ]
+            for p in self.ledger.data.get("photos", [])
+        }
+        ids: list[int] = []
+        for batch in chunked(sorted(want), 200):
+            rows = self.helper.request(
+                "query",
+                uri="content://media/external/images/media",
+                projection=["_id", "_display_name", "relative_path"],
+                selection="_display_name IN (" + ",".join("?" * len(batch)) + ")",
+                args=list(batch),
+                timeout=120,
+            )["rows"]
+            for row in rows:
+                rel = str(row.get("relative_path") or "").rstrip("/")
+                if want.get(row.get("_display_name")) == rel:
+                    ids.append(int(row["_id"]))
+        self.ledger.data["lists"]["images"] = sorted(set(ids))
+        self.ledger.save()
+        self.report.seeded["photos"] = len(self.ledger.data["lists"]["images"])
+
     def online(self) -> None:
         """Restore the network and re-check backup/sync (step ``online``)."""
         self.online_done = True
@@ -1459,3 +1758,460 @@ def prepare(
         dev, manifest, anchor, progress, packs, photos_cache, force_cleanup, workers
     )
     return run.run(manifest.render)
+
+
+# ------------------------------------------------------------------ refresh
+
+#: Provider lists a refresh compares row by row.
+REFRESH_LISTS = ("contacts", "events", "calls", "sms")
+
+
+@dataclass
+class RefreshPlan:
+    """What :func:`refresh` changes: rows and files to remove (changed or
+    gone), rows and records to add (changed or new).
+    """
+
+    removed: dict[str, list[int]] = field(default_factory=dict)
+    added: dict[str, list[tuple[str, dict[str, Any]]]] = field(default_factory=dict)
+    removed_paths: list[str] = field(default_factory=list)
+    photos: list[dict[str, Any]] = field(default_factory=list)
+    files: list[dict[str, Any]] = field(default_factory=list)
+    notes: bool = False
+    unchanged: dict[str, int] = field(default_factory=dict)
+    topups: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def empty(self) -> bool:
+        return not (
+            any(self.removed.values())
+            or any(self.added.values())
+            or self.removed_paths
+            or self.photos
+            or self.files
+            or self.notes
+        )
+
+    def drop_topups(self, stamp: Mapping[str, Any]) -> None:
+        """Also remove the rows earlier top-ups added (from the device stamp)."""
+        for entry in stamp.get("topups") or []:
+            if not isinstance(entry, dict):
+                continue
+            for name, ids in (entry.get("ids") or {}).items():
+                good = [int(i) for i in ids if isinstance(i, int) and i > 0]
+                if name in REFRESH_LISTS and good:
+                    self.removed.setdefault(name, []).extend(good)
+                    self.topups[name] = self.topups.get(name, 0) + len(good)
+
+    def summary(self) -> dict[str, Any]:
+        """Counts per list: added, removed, unchanged, top-up rows removed."""
+        added = {k: len(v) for k, v in self.added.items() if v}
+        removed = {k: len(v) for k, v in self.removed.items() if v}
+        if self.photos:
+            added["photos"] = len(self.photos)
+        if self.files:
+            added["files"] = len(self.files)
+        if self.notes:
+            added["notes"] = 1
+        if self.removed_paths:
+            removed["files"] = len(self.removed_paths)
+        return {
+            "added": added,
+            "removed": removed,
+            "unchanged": {k: v for k, v in self.unchanged.items() if v},
+            "topups_removed": dict(self.topups),
+        }
+
+    def words(self) -> str:
+        """``3 added, 2 removed, 410 unchanged`` (rows and files)."""
+        s = self.summary()
+        return (
+            f"{sum(s['added'].values())} added, {sum(s['removed'].values())} "
+            f"removed, {sum(s['unchanged'].values())} unchanged"
+        )
+
+
+def _changed(old: Mapping[str, Any], key: str, new_hash: str) -> bool:
+    entry = old.get(key)
+    return not (isinstance(entry, list) and len(entry) > 1 and entry[1] == new_hash)
+
+
+def refresh_plan(
+    ledger: Mapping[str, Any], world: RenderedWorld, tz: ZoneInfo, notes_name: str
+) -> RefreshPlan:
+    """Compare ``world`` (rendered at the ledger's anchor) with the ledger's
+    ``items`` map: a row whose world id is gone or whose hash changed is
+    removed, a new or changed one added; the rest stays untouched.
+    """
+    items = ledger.get("items") or {}
+    plan = RefreshPlan()
+    builders = {
+        "contacts": contact_rows(world),
+        "events": event_rows(world, tz),
+        "calls": call_rows(world),
+        "sms": sms_rows(world),
+    }
+    for name, rows in builders.items():
+        old = items.get(name) or {}
+        new = {key: row_hash(row) for key, row in rows}
+        plan.removed[name] = [
+            int(v[0]) for k, v in old.items() if new.get(k) is None or new[k] != v[1]
+        ]
+        plan.added[name] = [(k, row) for k, row in rows if _changed(old, k, new[k])]
+        plan.unchanged[name] = len(rows) - len(plan.added[name])
+    for kind, records in (("photos", world.photos), ("files", world.files)):
+        old = items.get(kind) or {}
+        new = {str(rec["id"]): row_hash(rec) for rec in records}
+        plan.removed_paths += [
+            v[0] for k, v in old.items() if new.get(k) is None or new[k] != v[1]
+        ]
+        fresh = [
+            rec for rec in records if _changed(old, str(rec["id"]), new[str(rec["id"])])
+        ]
+        setattr(plan, kind, fresh)
+        plan.unchanged[kind] = len(records) - len(fresh)
+    old_notes = (items.get("notes") or {}).get("notes")
+    text = notes_text(world, tz)[0] if world.notes else ""
+    path = f"/sdcard/Documents/{notes_name}"
+    if old_notes and (not text or old_notes != [path, row_hash(text)]):
+        plan.removed_paths.append(old_notes[0])
+        plan.notes = bool(text)
+    elif not old_notes and text:
+        plan.notes = True
+    return plan
+
+
+def _parse_iso(value: Any) -> dt.datetime | None:
+    """An aware datetime from ISO 8601 text (naive: UTC); ``None`` if not one."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        out = dt.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return out if out.tzinfo is not None else out.replace(tzinfo=dt.UTC)
+
+
+def refresh(
+    serial: str,
+    manifest: WorldManifest,
+    *,
+    progress: Callable[[str, int, int], None] | None = None,
+    packs: PackSet | None = None,
+    photos_cache: Path | None = None,
+    device: Device | None = None,
+    workers: int = 3,
+) -> PrepareReport:
+    """Bring the world on ``serial`` to ``manifest``, changing only what differs.
+
+    The device must hold a complete world whose host ledger lists its items
+    (every :func:`prepare` since refresh exists writes that list). The new
+    world is rendered at the ledger's anchor, so an unchanged item renders
+    to the same row; rows and files whose world id is gone or whose content
+    changed are removed (by ledger id / path), new and changed ones added,
+    and so are the rows earlier top-ups added. Offline, with backup and sync
+    off, like :func:`prepare`. The ledger moves to the new world's file; the
+    stamp names the new world. When nothing differs, ``report.changes``
+    says so and nothing on the device changes.
+
+    Raises:
+        PrepareError: No complete world on the device, no usable ledger, or
+            a step failed (``exc.report`` says how far it got).
+    """
+    if not manifest.verify():
+        raise PrepareError("the manifest's world_fp does not match its content")
+    dev = device or Device(serial)
+    if dev.serial != serial:
+        raise PrepareError(f"device wrapper is for {dev.serial}, not {serial}")
+    run = _Run(dev, manifest, None, progress, packs, photos_cache, False, workers)
+    return run.refresh()
+
+
+# ------------------------------------------------------------------- top-up
+
+#: A top-up adds nothing when the newest seeded items are younger than this.
+TOPUP_MIN_GAP_S = 3600
+#: A top-up covers at most this many days (an older snapshot keeps a gap).
+TOPUP_MAX_DAYS = 30
+#: Calendar events up to this far ahead of now are part of a top-up.
+TOPUP_EVENTS_AHEAD_S = 86400
+
+_TOPUP_LOCKS: dict[str, threading.Lock] = {}
+_TOPUP_LOCKS_GUARD = threading.Lock()
+
+
+def _topup_lock(serial: str) -> threading.Lock:
+    with _TOPUP_LOCKS_GUARD:
+        return _TOPUP_LOCKS.setdefault(serial, threading.Lock())
+
+
+@dataclass
+class TopUpReport:
+    """What :func:`topup` did.
+
+    Attributes:
+        serial: The device.
+        world_fp: The world.
+        ran: The window was looked at (and the stamp records this top-up).
+        skipped: Why nothing was done (``ran`` False).
+        anchor: The top-up's anchor (now), ISO 8601.
+        since: The start of the window it covered, ISO 8601.
+        counts: Rows added per list (``sms``, ``calls``, ``events``).
+        newest: Newest added time per list, ISO 8601.
+        warnings: Everything a person should know.
+        seconds: Wall time.
+    """
+
+    serial: str
+    world_fp: str = ""
+    ran: bool = False
+    skipped: str = ""
+    anchor: str = ""
+    since: str = ""
+    counts: dict[str, int] = field(default_factory=dict)
+    newest: dict[str, str] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    seconds: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def words(self) -> str:
+        """``topped up with 4 SMS, 2 calls`` (or why not)."""
+        if not self.ran:
+            return self.skipped
+        names = {"sms": "SMS", "calls": "calls", "events": "calendar events"}
+        parts = [f"{n} {names.get(k, k)}" for k, n in self.counts.items() if n]
+        return "topped up with " + (", ".join(parts) or "nothing new")
+
+
+def last_world_anchor(stamp: Mapping[str, Any]) -> dt.datetime | None:
+    """The newest anchor on the device: the prepare's or a top-up's."""
+    found = [_parse_iso(stamp.get("anchor"))]
+    found += [
+        _parse_iso(e.get("anchor"))
+        for e in stamp.get("topups") or []
+        if isinstance(e, dict)
+    ]
+    real = [a for a in found if a is not None]
+    return max(real) if real else None
+
+
+def topup(
+    serial: str,
+    manifest: WorldManifest,
+    *,
+    now: dt.datetime | None = None,
+    packs: PackSet | None = None,
+    device: Device | None = None,
+    max_days: int = TOPUP_MAX_DAYS,
+    min_gap_s: float = TOPUP_MIN_GAP_S,
+) -> TopUpReport:
+    """Add the world's SMS, calls and calendar events of the time since the
+    device's world was seeded (or last topped up), so it looks used today.
+
+    The world is rendered at ``now`` (default the host clock) -- the same
+    deterministic render :func:`prepare` uses -- and only its items between
+    the newest anchor on the device and now (events up to a day ahead) go
+    in, at most ``max_days`` back. The device stamp records each top-up
+    (anchor, window, row ids) BEFORE the rows go in, so a second call, or
+    one after an interrupted top-up, never adds them twice; within
+    ``min_gap_s`` of the newest anchor nothing is done. Contacts, photos
+    and files stay as they are. Call from a worker thread (seconds).
+
+    Raises:
+        PrepareError: No root, no complete world of ``manifest`` on the
+            device, or the helper failed.
+    """
+    t0 = time.monotonic()
+    dev = device or Device(serial)
+    if dev.serial != serial:
+        raise PrepareError(f"device wrapper is for {dev.serial}, not {serial}")
+    if packs is None:
+        from sandroid.world.packs import load_packs
+
+        packs = load_packs()
+    tz = world_timezone(manifest, packs)
+    out = TopUpReport(serial=serial, world_fp=manifest.world_fp)
+    with _topup_lock(serial):
+        script = "\n".join(
+            [
+                "echo; echo @@uid@@; id -u",
+                "echo; echo @@now@@; date +%s",
+                f"echo; echo @@stamp@@; cat {STAMP_PATH} 2>/dev/null",
+                "echo; echo @@end@@",
+            ]
+        )
+        res = dev.shell(script, timeout=30, zygote=False)
+        pre = _sections(res.out)
+        if "end" not in pre:
+            raise PrepareError(
+                f"device {serial} did not answer: {(res.err or res.out).strip()[:200]}"
+            )
+        if pre.get("uid") != "0":
+            raise PrepareError("the top-up needs adb root (adb root)")
+        try:
+            stamp = json.loads(pre.get("stamp") or "null")
+        except ValueError:
+            stamp = None
+        if (
+            not isinstance(stamp, dict)
+            or stamp.get("format") != STAMP_FORMAT
+            or stamp.get("state") != "complete"
+            or stamp.get("world_fp") != manifest.world_fp
+        ):
+            raise PrepareError(
+                f"the device holds no complete world {manifest.world_fp[:12]}"
+            )
+        host = now.timestamp() if now is not None else _host_now()
+        device_now = pre.get("now", "")
+        if device_now.isdigit() and int(device_now) - host < -CLOCK_SKEW_WARN_S:
+            out.warnings.append(
+                f"the device clock is {(host - int(device_now)) / 60:.0f} min behind "
+                "the host; today's items may look like they lie ahead"
+            )
+        now_dt = dt.datetime.fromtimestamp(int(host), dt.UTC).astimezone(tz)
+        last = last_world_anchor(stamp)
+        if last is not None and (now_dt - last).total_seconds() < min_gap_s:
+            when = last.astimezone(tz)
+            out.skipped = f"already fresh (newest items from {when:%Y-%m-%d %H:%M})"
+            out.seconds = round(time.monotonic() - t0, 2)
+            return out
+        floor = now_dt - dt.timedelta(days=max(1, max_days))
+        since = max(last, floor) if last is not None else floor
+        if last is not None and last < floor:
+            out.warnings.append(
+                f"the world was seeded {(now_dt - last).days} days ago; only the "
+                f"last {max_days} days are topped up"
+            )
+        world = manifest.render(now_dt)
+        lo, hi = _ms_of(since), _ms_of(now_dt)
+        ahead = hi + TOPUP_EVENTS_AHEAD_S * 1000
+        sub = replace(
+            world,
+            sms=[m for m in world.sms if lo < m["ts_ms"] <= hi],
+            calls=[c for c in world.calls if lo < c["ts_ms"] <= hi],
+            events=[
+                e
+                for e in world.events
+                if not e.get("rule") and lo < e["ts_ms"] <= ahead
+            ],
+        )
+        entry: dict[str, Any] = {
+            "anchor": now_dt.isoformat(),
+            "since": since.isoformat(),
+            "state": "running",
+            "counts": {},
+            "ids": {},
+        }
+        topups = [e for e in stamp.get("topups") or [] if isinstance(e, dict)]
+        tmp = Path(tempfile.mkdtemp(prefix="sandroid-topup-"))
+        try:
+            # Recorded first: a killed top-up is never repeated (no doubles).
+            write_device_stamp(dev, {**stamp, "topups": [*topups, entry]}, tmp)
+            try:
+                if sub.sms or sub.calls or sub.events:
+                    _topup_insert(dev, sub, tz, out, entry["ids"])
+            except BaseException:
+                # What landed stays recorded (a refresh removes it).
+                entry["state"] = "failed"
+                entry["counts"] = {k: len(v) for k, v in entry["ids"].items()}
+                with contextlib.suppress(Exception):
+                    write_device_stamp(dev, {**stamp, "topups": [*topups, entry]}, tmp)
+                raise
+            entry["counts"] = {k: len(v) for k, v in entry["ids"].items()}
+            entry["state"] = "complete"
+            write_device_stamp(dev, {**stamp, "topups": [*topups, entry]}, tmp)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    out.ran = True
+    out.anchor = entry["anchor"]
+    out.since = entry["since"]
+    out.counts = dict(entry["counts"])
+    for name, rows in (("sms", sub.sms), ("calls", sub.calls), ("events", sub.events)):
+        if rows and out.counts.get(name):
+            newest = max(r["ts_ms"] for r in rows)
+            out.newest[name] = dt.datetime.fromtimestamp(newest / 1000, tz).isoformat()
+    out.seconds = round(time.monotonic() - t0, 2)
+    return out
+
+
+def _ms_of(moment: dt.datetime) -> int:
+    return int(moment.timestamp() * 1000)
+
+
+def _topup_insert(
+    dev: Device,
+    sub: RenderedWorld,
+    tz: ZoneInfo,
+    out: TopUpReport,
+    ids: dict[str, list[int]],
+) -> None:
+    """Insert the top-up rows with one helper; each list's new row ids go
+    into ``ids`` as soon as they are known (a failure keeps what landed).
+
+    Raises:
+        PrepareError: The helper failed.
+    """
+    try:
+        ensure_jar(dev)
+        helper = dev.helper(timeout=60)
+    except HelperError as exc:
+        raise PrepareError(str(exc)) from exc
+
+    def good(reply: dict) -> list[int]:
+        return [i for i in reply.get("ids") or [] if isinstance(i, int) and i > 0]
+
+    try:
+        if sub.calls:
+            reply = helper.request(
+                "calls", items=call_items(sub), timeout=CHUNK_TIMEOUT_S
+            )
+            ids["calls"] = good(reply)
+        if sub.sms:
+            stop = "; ".join(f"am force-stop {p}" for p in MESSAGING_PACKAGES)
+            dev.shell(stop, timeout=60, zygote=True)
+            try:
+                reply = helper.request(
+                    "sms", items=sms_items(sub), timeout=CHUNK_TIMEOUT_S
+                )
+                ids["sms"] = good(reply)
+            finally:
+                dev.shell(stop, timeout=60, zygote=True)
+        if sub.events:
+            rows = (
+                helper.request(
+                    "query",
+                    uri="content://com.android.calendar/calendars",
+                    projection=["_id"],
+                    selection="account_name=? AND account_type=?",
+                    args=[sub.calendar_name, CALENDAR_ACCOUNT_TYPE],
+                    timeout=60,
+                ).get("rows")
+                or []
+            )
+            if not rows:
+                out.warnings.append("the world's calendar is gone; no events added")
+            else:
+                account = {"name": sub.calendar_name, "type": CALENDAR_ACCOUNT_TYPE}
+                reply = helper.request(
+                    "calendar",
+                    account=account,
+                    calendar_id=int(rows[0]["_id"]),
+                    items=event_items(sub, tz),
+                    timeout=CHUNK_TIMEOUT_S,
+                )
+                ids["events"] = good(reply)
+    except HelperError as exc:
+        raise PrepareError(f"top-up: {exc}") from exc
+    finally:
+        helper.close()
+    for name, rows_in in (
+        ("calls", sub.calls),
+        ("sms", sub.sms),
+        ("events", sub.events),
+    ):
+        if name in ids and len(ids[name]) < len(rows_in):
+            out.warnings.append(
+                f"{name}: {len(rows_in) - len(ids[name])} rows were refused"
+            )

@@ -1713,3 +1713,255 @@ async def test_attaching_from_devices_moves_the_pin(live_app, monkeypatch) -> No
         assert device.api_level == 35
         assert device.root_kind == "adbd root"
         assert connected[-1] == "emulator-5556"
+
+
+# --------------------------------------------------------------------------
+# personas and snapshot warnings
+# --------------------------------------------------------------------------
+
+NO_GLYPHS = "✓✗▸⇧␣⏎←→"
+WARNED = dataclasses.replace(
+    IDLE,
+    snapshots=("default_boot", "clean_8g", "sandroid_persona_mara_aaaa_bbbb"),
+    snapshot_warnings=(
+        ("clean_8g", "a load failed before (AVD configuration changed)"),
+    ),
+)
+
+
+def test_build_snapshot_carries_personas_and_snapshot_warnings() -> None:
+    launch = _Launch("Pixel_7", "emulator-5560", started_at=58.0)
+    launch.meta = {"persona_id": "mara"}
+    entries = _entries("emulator-5560\tdevice\n")
+    infos = [
+        AvdInfo(name="Pixel_7", snapshots=("clean_8g",)),
+        AvdInfo(name="Idle", snapshots=("s1", "s2")),
+    ]
+    warnings = {
+        "Pixel_7": {"clean_8g": "will not load"},
+        "Idle": {"s2": "b", "s1": "a"},
+    }
+    snap = build_snapshot(
+        entries,
+        {"emulator-5560": SerialProbe(booted=True, api=35)},
+        {},
+        infos,
+        {},
+        [launch],
+        None,
+        100.0,
+        snapshot_warnings=warnings,
+    )
+    (row,) = snap.devices
+    assert row.persona == "mara"
+    assert row.snapshot_warnings == (("clean_8g", "will not load"),)
+    (avd,) = snap.avds
+    assert avd.snapshot_warnings == (("s1", "a"), ("s2", "b"))
+    assert AvdRow(
+        name="X", snapshots=("a", "sandroid_persona_p_1_2")
+    ).persona_snapshots == ("sandroid_persona_p_1_2",)
+
+
+def test_the_collector_reads_snapshot_warnings_per_avd(monkeypatch) -> None:
+    from sandroid.core import snapshot_policy as policy
+
+    seen: list = []
+
+    def fake(avd, names, *, installed, launch_build):
+        seen.append((avd, tuple(names), installed, launch_build))
+        return {names[0]: "why"} if avd == "Running" else {}
+
+    monkeypatch.setattr(policy, "snapshot_warnings", fake)
+    monkeypatch.setattr(emulator, "installed_emulator", lambda: ("35.4.9", "130"))
+    launch = _Launch("Running", "emulator-5560")
+    launch.info = {"emulator_build_id": "999"}
+    infos = [
+        SimpleNamespace(name="Running", snapshots=("clean_8g",), path="/x"),
+        SimpleNamespace(name="Stopped", snapshots=("s1",), path="/y"),
+        SimpleNamespace(name="NoFolder", snapshots=("s1",), path=None),
+        SimpleNamespace(name="Empty", snapshots=(), path="/z"),
+    ]
+    out = hub.HubCollector._snapshot_warnings(infos, [launch])
+    assert out == {"Running": {"clean_8g": "why"}}
+    assert seen == [
+        ("Running", ("clean_8g",), ("35.4.9", "130"), "999"),
+        ("Stopped", ("s1",), ("35.4.9", "130"), ""),
+    ]
+
+
+async def test_a_snapshot_warning_is_on_the_row_and_in_the_box() -> None:
+    app, screen = _hub(avds=[WARNED])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        table = screen.query_one("#hub-table")
+        name = table.get_row(WARNED.key)[1].plain
+        assert name == "Idle_AVD · snapshot warning"
+        note = _box(screen)["note"]
+        assert (
+            "Snapshot clean_8g: a load failed before (AVD configuration changed)."
+            in note
+        )
+        assert "Shift+P starts it as a persona" in note
+        facts = str(screen.query_one("#opt-facts").render())
+        assert "1 persona snapshot" in facts
+        assert not any(g in note + facts + name for g in NO_GLYPHS)
+
+
+async def test_a_persona_device_row_names_its_persona() -> None:
+    row = dataclasses.replace(
+        READY,
+        persona="mara",
+        snapshot_warnings=(("clean_8g", "will not load (x); a start cold boots"),),
+    )
+    app, screen = _hub(devices=[row])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        table = screen.query_one("#hub-table")
+        assert table.get_row(row.key)[1].plain == "Pixel_7 · persona mara"
+        note = _box(screen)["note"]
+        assert "Started as persona mara" in note
+        assert "Snapshot clean_8g: will not load" in note
+        assert "persona: mara" in str(screen.query_one("#opt-facts").render())
+
+
+class PersonaActions(FakeActions):
+    def start_avd(self, name, options=None, *, on_done=None, meta=None, remember=True):
+        self.calls.append(("start_avd", name, options, meta, remember))
+
+
+async def test_shift_p_starts_a_stopped_avd_as_a_persona(monkeypatch) -> None:
+    from sandroid.tui.modals.selection_modal import SelectionModal
+    from sandroid.world import persona
+
+    asked: list = []
+    monkeypatch.setattr(
+        persona,
+        "persona_choices",
+        lambda avd: [persona.PersonaChoice("mara", "Mara (DE)", 1)],
+    )
+    opts = AvdLaunchOptions(
+        headless=True, boot="snapshot", snapshot="sandroid_persona_x"
+    )
+
+    def start(avd, pid, *, api=None, headless=False):
+        asked.append((avd, pid, api, headless))
+        return persona.PersonaStart(
+            options=opts,
+            meta={"persona_id": pid},
+            snapshot="sandroid_persona_x",
+            cached=True,
+        )
+
+    monkeypatch.setattr(persona, "persona_start", start)
+    actions = PersonaActions()
+    app, screen = _hub(avds=[IDLE], actions=actions)
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        keys = {
+            k: b.binding.description
+            for k, b in screen.active_bindings.items()
+            if b.binding.show
+        }
+        assert keys["P"] == "Start as persona…"
+        await pilot.press("P")
+        await until(pilot, lambda: isinstance(app.screen, SelectionModal))
+        (label,) = app.screen.all_options
+        assert label == "Mara (DE) (mara) · 1 persona snapshot saved"
+        app.screen.dismiss(label)
+        await until(pilot, lambda: actions.calls)
+        await settle(pilot)
+    assert asked == [("Idle_AVD", "mara", 34, True)]
+    assert actions.calls == [
+        ("start_avd", "Idle_AVD", opts, {"persona_id": "mara"}, False)
+    ]
+
+
+async def test_shift_p_without_a_world_profile_says_so(monkeypatch) -> None:
+    from sandroid.world import persona
+
+    monkeypatch.setattr(persona, "persona_choices", lambda avd: [])
+    actions = PersonaActions()
+    app, screen = _hub(avds=[IDLE], actions=actions)
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        await pilot.press("P")
+        await until(pilot, lambda: app._notifications)
+        await settle(pilot)
+        text = " ".join(n.message for n in app._notifications)
+        assert "No identity profile has a world section" in text
+        assert app.screen is screen
+    assert actions.calls == []
+
+
+async def test_a_persona_that_cannot_start_is_an_error_in_words(monkeypatch) -> None:
+    from sandroid.tui.modals.selection_modal import SelectionModal
+    from sandroid.world import persona
+
+    monkeypatch.setattr(
+        persona,
+        "persona_choices",
+        lambda avd: [persona.PersonaChoice("mara", "Mara (DE)", 0)],
+    )
+
+    def start(avd, pid, **kw):
+        raise persona.PersonaError(
+            "Idle_AVD has no persona snapshot of mara and no clean_8g snapshot to build it from"
+        )
+
+    monkeypatch.setattr(persona, "persona_start", start)
+    actions = PersonaActions()
+    app, screen = _hub(avds=[IDLE], actions=actions)
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        await pilot.press("P")
+        await until(pilot, lambda: isinstance(app.screen, SelectionModal))
+        (label,) = app.screen.all_options
+        assert "built from clean_8g on the first start" in label
+        app.screen.dismiss(label)
+        await until(pilot, lambda: not screen._busy and app._notifications)
+        text = " ".join(n.message for n in app._notifications)
+        assert "Cannot start Idle_AVD as persona mara" in text
+        assert "no clean_8g snapshot" in text
+    assert actions.calls == []
+
+
+async def test_shift_p_is_not_offered_on_a_running_device() -> None:
+    app, screen = _hub(devices=[READY], avds=[BUSY_AVD])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        assert screen.check_action("persona", ()) is False
+        await pilot.press("down")
+        assert screen.check_action("persona", ()) is None  # shown, disabled
+
+
+def test_start_avd_as_persona_passes_meta_and_is_not_remembered(
+    monkeypatch, sync_threads
+) -> None:
+    opts = AvdLaunchOptions(boot="snapshot", snapshot="clean_8g")
+    launched: list = []
+    remembered: list = []
+    launch = _Launch("A", "emulator-5560")
+    launch.options = opts
+
+    def fake_launch(name, options, meta=None):
+        launched.append((name, options, meta))
+        return launch
+
+    monkeypatch.setattr(emulator, "launch_avd", fake_launch)
+    monkeypatch.setattr(
+        emulator, "remember_launch", lambda *a, **k: remembered.append(a)
+    )
+    monkeypatch.setattr(emulator, "wait_until_ready", lambda serial, **kw: True)
+    messages: list = []
+    ctl = _controller(on_emulator_ready=lambda s, a: None)
+    ctl.start_avd(
+        "A",
+        opts,
+        on_done=lambda ok, msg: messages.append(msg),
+        meta={"persona_id": "mara"},
+        remember=False,
+    )
+    assert launched == [("A", opts, {"persona_id": "mara"})]
+    assert remembered == []
+    assert messages
+    assert messages[0].endswith("as persona mara")
