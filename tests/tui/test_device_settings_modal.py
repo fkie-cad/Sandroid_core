@@ -319,7 +319,7 @@ async def test_actions_tab_shows_the_fields_of_the_picked_action(registry) -> No
         modal = await _open_actions(pilot)
         assert modal._built_for == "sms.receive"
         assert modal.query_one("#action-param-sender", Input).placeholder == (
-            "DHL or +4915112345678"
+            "e.g. DHL or +4915112345678"
         )
         modal.query_one("#action-param-text", Input)
 
@@ -659,3 +659,21 @@ async def test_action_dropdown_reaches_the_network_actions_by_keyboard(
         assert overlay.scroll_y == overlay.max_scroll_y
         await pilot.press("enter")
         await until(pilot, lambda: modal._built_for.startswith("net."))
+
+
+@pytest.mark.asyncio
+async def test_action_inputs_show_their_whole_box_and_an_empty_value(registry) -> None:
+    """N4-V10: the Sender/Text inputs showed only their top border, and the
+    example looked like a value (Run then said "Sender: enter a value").
+    """
+    app = _ActionsHarness()
+    async with app.run_test(size=(120, 50)) as pilot:
+        modal = await _open_actions(pilot)
+        for name in ("sender", "text"):
+            field = modal.query_one(f"#action-param-{name}", Input)
+            row = field.parent
+            assert field.value == ""
+            assert field.placeholder.startswith("e.g. ")
+            assert field.region.height == 3
+            assert field.region.y >= row.region.y
+            assert field.region.bottom <= row.region.bottom

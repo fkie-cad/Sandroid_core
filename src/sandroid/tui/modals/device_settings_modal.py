@@ -157,6 +157,18 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         width: 1fr;
     }
 
+    /* SandroidModal gives Inputs "margin: 1 0": in a 3-row field row that
+       pushed the box down and cut its bottom border (only the top showed). */
+    DeviceSettingsModal .field-row Input {
+        margin: 0;
+    }
+
+    /* An example in the box must not read as a value that is already set. */
+    DeviceSettingsModal Input > .input--placeholder {
+        color: $text-disabled;
+        text-style: italic;
+    }
+
     DeviceSettingsModal .badge {
         width: 7;
         height: 3;

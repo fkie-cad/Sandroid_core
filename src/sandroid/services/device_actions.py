@@ -873,7 +873,9 @@ def _net_profile(dev: _Device, p: dict, action: DeviceAction) -> ActionResult:
 # -- the registry ---------------------------------------------------------------
 
 _ON = Param("on", "On", "bool", default=True)
-_NUMBER = Param("number", "Number", placeholder="+4915112345678", check=phone_number)
+_NUMBER = Param(
+    "number", "Number", placeholder="e.g. +4915112345678", check=phone_number
+)
 
 ACTIONS: dict[str, DeviceAction] = {
     a.id: a
@@ -881,9 +883,9 @@ ACTIONS: dict[str, DeviceAction] = {
         DeviceAction(
             "sms.receive", "Receive an SMS", "SMS",
             (
-                Param("sender", "Sender", placeholder="DHL or +4915112345678",
+                Param("sender", "Sender", placeholder="e.g. DHL or +4915112345678",
                       check=sms_sender),
-                Param("text", "Text", placeholder="Your parcel arrives today",
+                Param("text", "Text", placeholder="e.g. Your parcel arrives today",
                       check=sms_text),
             ),
             _sms_receive,
