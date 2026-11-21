@@ -79,6 +79,10 @@ _INSTALLER_RE = re.compile(r"installerPackageName=(\S+)")
 # section to parse, so this raw capture is the extent of "signing info".
 _SIGNATURES_RE = re.compile(r"signatures=PackageSignatures\{([^}]*)\}")
 _LAST_UPDATE_RE = re.compile(r"lastUpdateTime=([^\n]+)")
+# ``flags=[ SYSTEM HAS_CODE ... ]`` / ``pkgFlags=[ ... ]`` of the package.
+_FLAGS_RE = re.compile(r"\b(?:pkgF|f)lags=\[([^\]]*)\]")
+#: Code paths of preinstalled (system) apps.
+_SYSTEM_CODE_PATHS = ("/system/", "/product/", "/system_ext/", "/vendor/", "/apex/")
 
 
 def _extract_requested_permissions(dumpsys_output: str) -> list[str]:
@@ -129,6 +133,8 @@ def parse_extended_package_info(dumpsys_output: str) -> dict[str, Any]:
     - ``signing_info``: raw ``PackageSignatures{...}`` body as a string, or
       ``None`` if the dump has no ``signatures=`` line
     - ``last_update``: ``lastUpdateTime=`` as printed, or ``None``
+    - ``system_app``: True for a preinstalled app (``SYSTEM`` flag, or a
+      code path on a system partition)
 
     Args:
         dumpsys_output: Raw stdout of ``adb shell dumpsys package <pkg>``.
@@ -152,6 +158,12 @@ def parse_extended_package_info(dumpsys_output: str) -> dict[str, Any]:
 
     last_update = _LAST_UPDATE_RE.search(dumpsys_output)
     result["last_update"] = last_update.group(1).strip() if last_update else None
+
+    flags = " ".join(m.group(1) for m in _FLAGS_RE.finditer(dumpsys_output))
+    code_path = str(result.get("apk_path") or "")
+    result["system_app"] = "SYSTEM" in flags.split() or code_path.startswith(
+        _SYSTEM_CODE_PATHS
+    )
 
     result["requested_permissions"] = _extract_requested_permissions(dumpsys_output)
 

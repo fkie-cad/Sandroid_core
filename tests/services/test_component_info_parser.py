@@ -482,6 +482,21 @@ def test_uid_extracted_from_app_id_field():
     assert result["uid"] == 10224
 
 
+def test_system_app_from_the_flags_or_the_code_path():
+    """N6-V2: com.android.settings read "none (sideloaded / adb install)"."""
+    assert parse_extended_package_info(DUMPSYS_PACKAGE_FIXTURE)["system_app"] is False
+    flagged = DUMPSYS_PACKAGE_FIXTURE.replace(
+        "    apkSigningVersion=3\n",
+        "    apkSigningVersion=3\n    flags=[ SYSTEM HAS_CODE ALLOW_CLEAR_USER_DATA ]\n",
+    )
+    assert parse_extended_package_info(flagged)["system_app"] is True
+    on_system = (
+        "Packages:\n  Package [com.android.settings] (1):\n"
+        "    codePath=/system_ext/priv-app/Settings\n"
+    )
+    assert parse_extended_package_info(on_system)["system_app"] is True
+
+
 def test_install_source_extracted_from_installer_package_name():
     result = parse_extended_package_info(DUMPSYS_PACKAGE_FIXTURE)
 

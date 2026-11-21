@@ -153,6 +153,16 @@ def test_header_shows_the_run_state_and_no_mode(monkeypatch):
     assert "pick an app…" in header
 
 
+def test_activity_row_only_when_the_activity_is_known(monkeypatch):
+    """N6-V2: "activity —" for every app not picked with c."""
+    svc, _ran = _panel_env(monkeypatch)
+    panel = SpotlightPanel()
+    monkeypatch.setattr(svc, "get_activity_name", lambda: None, raising=False)
+    assert "activity" not in Text.from_markup(panel._render_body()).plain
+    monkeypatch.setattr(svc, "get_activity_name", lambda: ".MainActivity")
+    assert "activity  .MainActivity" in Text.from_markup(panel._render_body()).plain
+
+
 async def test_apk_sources_not_found_is_muted_and_failed_is_red() -> None:
     from textual.widgets import Label
 

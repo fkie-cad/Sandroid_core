@@ -906,10 +906,11 @@ class SpotlightPanel(Widget):
 
         lines: list[str] = []
         try:
-            activity = spotlight.get_activity_name() or "—"
+            activity = spotlight.get_activity_name()
         except Exception:
-            activity = "—"
-        lines.append(row("activity", escape(str(activity))))
+            activity = None
+        if activity:  # known only for an app picked with c: else no row
+            lines.append(row("activity", escape(str(activity))))
 
         hooks = self._hooks_for_app(package)
         names = [

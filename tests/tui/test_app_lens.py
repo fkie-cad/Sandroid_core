@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from pilot_helpers import boot, settle, until
@@ -32,6 +33,7 @@ from sandroid.tui.widgets.app_lens import (
     AppLensSections,
     LensSection,
     build_defences,
+    build_identity,
     build_permissions,
     build_trackers,
     route_text,
@@ -403,9 +405,10 @@ def test_permissions_header_counts_what_the_device_keeps() -> None:
     ops.ops.extend(_bookkeeping_ops())
     f = AppFacts(package=PKG, permissions=_grants(), appops=ops, static=static)
     data = build_permissions(f)
+    # N6-V2: the gap is explained (device API unknown: not kept).
     assert data.summary == (
-        "4 requested, 6 in the manifest, 3 dangerous (2 granted), "
-        "2 used recently, 1 no recorded use"
+        "4 requested, 6 in the manifest (2 not kept on this device), "
+        "3 dangerous (2 granted), 2 used recently, 1 no recorded use"
     )
     # the manifest evidence names the real request tag
     camera = next(r for r in data.rows if r.key == "perm:android.permission.CAMERA")
@@ -419,6 +422,38 @@ def test_permissions_header_counts_what_the_device_keeps() -> None:
     f.permissions = _grants()
     overview["requested_permissions"] = overview["requested_permissions"][:4]
     assert build_permissions(f).summary.startswith("4 requested, 3 dangerous")
+
+
+def test_permissions_header_explains_the_manifest_gap() -> None:
+    """N6-V2: "33 requested, 36 in the manifest" said nothing about why."""
+    from sandroid.tui.widgets.app_lens import _manifest_gap
+
+    entries = [
+        {"name": f"p{i}", "tag": "uses-permission", "max_sdk_version": None}
+        for i in range(4)
+    ] + [{"name": "old", "tag": "uses-permission", "max_sdk_version": 28}]
+    overview = {"requested_permissions": entries}
+    on_35 = SimpleNamespace(api_level=35)
+    assert _manifest_gap(4, 5, on_35, overview) == " (1 capped by maxSdkVersion)"
+    assert _manifest_gap(3, 5, on_35, overview) == " (2 not kept on this device)"
+    assert _manifest_gap(7, 5, on_35, overview) == " (2 added by Android)"
+    assert _manifest_gap(None, 5, on_35, overview) == ""
+
+
+def test_identity_says_system_app_and_whole_split_names() -> None:
+    from sandroid.tui.widgets.app_lens import _split_names
+
+    details = SimpleNamespace(value={"install_source": None, "system_app": True})
+    rows = build_identity(AppFacts(package=PKG, details=details)).rows
+    installer = next(r for r in rows if r.key == "installer")
+    assert "system app" in installer.text
+    assert "sideloaded" not in installer.text
+    details.value["system_app"] = False
+    rows = build_identity(AppFacts(package=PKG, details=details)).rows
+    assert "sideloaded" in next(r for r in rows if r.key == "installer").text
+    names = ["split_config.arm64_v8a.apk", "split_config.xxhdpi.apk", "split_x.apk"]
+    assert _split_names(names[:2]) == "split_config.arm64_v8a, split_config.xxhdpi"
+    assert _split_names(names) == "split_config.arm64_v8a, +2 more"
 
 
 def test_trackers_hint_without_insight_and_defences_are_static() -> None:
@@ -1575,6 +1610,10 @@ def test_data_says_dash_for_an_absent_external_dir() -> None:
     )
     data = app_lens.build_data(AppFacts(package=PKG, footprint=fp))
     assert data.summary == "private 12.7 MB · external —"
+    fp.de_kb = 1024  # N6-V2: DE storage is in the summary too
+    summary = app_lens.build_data(AppFacts(package=PKG, footprint=fp)).summary
+    assert summary == "private 12.7 MB · DE 1.0 MB · external —"
+    fp.de_kb = None
     external = next(r for r in data.rows if r.key == "external")
     assert external.text.startswith("external —")
     fp.external_reason = "permission denied"

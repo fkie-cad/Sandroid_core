@@ -452,6 +452,20 @@ def static_note(f: AppFacts) -> str | None:
 # -- IDENTITY --------------------------------------------------------------
 
 
+def _split_names(names: list[str], room: int = 48) -> str:
+    """Whole split names (never cut mid-name, N6-V2), ``+N more`` past room."""
+    shown: list[str] = []
+    for i, name in enumerate(names):
+        name = name.removesuffix(".apk")
+        rest = len(names) - i - 1
+        tail = f", +{rest} more" if rest else ""
+        if shown and len(", ".join([*shown, name]) + tail) > room:
+            shown.append(f"+{len(names) - i} more")
+            break
+        shown.append(name)
+    return ", ".join(shown)
+
+
 def build_identity(f: AppFacts) -> SectionData:
     d = _details(f)
     ov = _overview(f)
@@ -478,7 +492,10 @@ def build_identity(f: AppFacts) -> SectionData:
     )
     installer = d.get("install_source")
     if d:
-        installer_text = installer or "none (sideloaded / adb install)"
+        # A preinstalled app has no installer either: not "sideloaded".
+        installer_text = installer or (
+            "system app" if d.get("system_app") else "none (sideloaded / adb install)"
+        )
     else:
         installer_text = "?"
     rows.append(_kv("installer", "installer", installer_text, raw=d))
@@ -531,7 +548,7 @@ def build_identity(f: AppFacts) -> SectionData:
             "s" if len(splits) != 1 else ""
         )
         if len(splits) > 1:
-            value += f" ({', '.join(n for n in names if n != 'base.apk')[:40]})"
+            value += f" ({_split_names([n for n in names if n != 'base.apk'])})"
         evidence = [
             (
                 "splits",
@@ -811,6 +828,29 @@ def _compact_perm(name: str, grant: Text, ops: list[Any]) -> tuple[Any, ...]:
     return (_t(_cut(name, 22)), cell, _last_use(ops))
 
 
+def _manifest_gap(
+    requested: int | None, in_manifest: int, state: Any, overview: Any
+) -> str:
+    """Why the device's request count differs from the manifest's (N6-V2).
+
+    Fewer: requests whose ``maxSdkVersion`` is below the device's API level
+    are dropped. More: Android adds permissions on its own (split
+    permissions for an older targetSdk).
+    """
+    if requested is None:
+        return ""
+    if requested > in_manifest:
+        return f" ({requested - in_manifest} added by Android)"
+    from sandroid.services.app_info_service import effective_permission_names
+
+    api_level = getattr(state, "api_level", None)
+    if isinstance(api_level, int) and api_level > 0:
+        dropped = in_manifest - len(effective_permission_names(overview, api_level))
+        if dropped == in_manifest - requested:
+            return f" ({dropped} capped by maxSdkVersion)"
+    return f" ({in_manifest - requested} not kept on this device)"
+
+
 def build_permissions(f: AppFacts) -> SectionData:
     cols = ("permission", "protection", "grant", "AppOps", "note")
     state = f.permissions
@@ -845,7 +885,7 @@ def build_permissions(f: AppFacts) -> SectionData:
     for g in sorted(grants, key=sort_key):
         g_ops = by_perm.get(g.name, [])
         note, note_style = _perm_note(g, g_ops)
-        prot = g.protection or "?"
+        prot = g.protection or "unknown"  # a word, muted (N6-V2)
         if prot == "dangerous":
             dangerous += 1
             if g.granted and not getattr(g, "revoked", False):
@@ -857,7 +897,9 @@ def build_permissions(f: AppFacts) -> SectionData:
             # "+N other ops" line), so it never exceeds "N requested".
             unused += 1
         prot_style = (
-            _c().warn if prot == "dangerous" else (_c().dim if prot == "normal" else "")
+            _c().warn
+            if prot == "dangerous"
+            else (_c().dim if prot in ("normal", "unknown") else "")
         )
         evidence: list[tuple[str, Any]] = [
             ("Manifest", _t(_manifest_perm_line(g.name, requests))),
@@ -985,7 +1027,10 @@ def build_permissions(f: AppFacts) -> SectionData:
     if requested is not None or in_manifest is None:
         parts.append(f"{requested or 0} requested")
     if in_manifest is not None and in_manifest != requested:
-        parts.append(f"{in_manifest} in the manifest")
+        parts.append(
+            f"{in_manifest} in the manifest"
+            + _manifest_gap(requested, in_manifest, state, _overview(f))
+        )
     parts += [
         f"{dangerous} dangerous ({granted_dangerous} granted)",
         f"{recent} used recently",
@@ -1633,10 +1678,11 @@ def build_data(f: AppFacts) -> SectionData:
             ],
         )
     )
-    summary = (
-        f"private {_size_text(fp.private_kb, fp.private_reason)} · "
-        f"external {_size_text(fp.external_kb, fp.external_reason)}"
-    )
+    summary = f"private {_size_text(fp.private_kb, fp.private_reason)} · "
+    de_kb = getattr(fp, "de_kb", None)
+    if de_kb is not None:  # device-encrypted storage counts too (N6-V2)
+        summary += f"DE {human_kb(de_kb)} · "
+    summary += f"external {_size_text(fp.external_kb, fp.external_reason)}"
     if fp.reason:
         summary += f" · {fp.reason}"
     return SectionData(cols, rows, summary, show_header=False, widths=_KV_WIDTHS)
