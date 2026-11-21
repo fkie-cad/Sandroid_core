@@ -1493,14 +1493,25 @@ async def test_drawer_focus_offers_no_inspect_and_has_no_hscroll() -> None:
 # --------------------------------------------------------------------------
 
 
-async def test_q_asks_first_and_stops_running_tools_off_the_ui_thread() -> None:
+async def test_q_asks_first_and_stops_running_tools_off_the_ui_thread(
+    monkeypatch,
+) -> None:
     """NEW-1 / Files M7: with friTap or the file monitor running, ``q``
     stopped them on the UI thread instead of asking (~6 s freeze); the ``y``
     meant for the dialog then opened Proxy Settings and Sandroid stayed up.
     """
     import threading
 
+    from sandroid.core import background_tracker as bt
     from sandroid.services import get_task_service
+
+    # The real quit cleanup runs here. Its untracked-process check walks the
+    # parent of every process on the host (psutil on macOS): 6-9 s on a busy
+    # shared host, which ate the wait below and made this test flaky. It is
+    # not what this test is about (test_demo_ux covers it).
+    monkeypatch.setattr(
+        bt.BackgroundWorkTracker, "_detect_untracked_processes", lambda self: []
+    )
 
     stops: list[tuple[str, bool]] = []
     release = threading.Event()  # the stops hang until the keys are checked
@@ -1546,7 +1557,9 @@ async def test_q_asks_first_and_stops_running_tools_off_the_ui_thread() -> None:
             assert app.check_action("toggle_proxy", ()) is False
             assert stops == []  # the stops are still running meanwhile
             release.set()
-            await until(pilot, lambda: app._exit)
+            # The app exits when the cleanup is done, at the latest after its
+            # budget (counted from the confirm, so this bound always holds).
+            await until(pilot, lambda: app._exit, timeout=app.QUIT_CLEANUP_BUDGET + 5.0)
             assert app._exit
             assert sorted(stops) == [("fritap", False), ("monitor", False)]
     finally:
