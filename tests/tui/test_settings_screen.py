@@ -140,7 +140,8 @@ async def test_title_and_switch_labels_are_plain_words() -> None:
         title = str(screen.query_one("#settings-title").render())
         assert title.strip() == "Settings"
         states = {str(s.render()).strip() for s in screen.query(".switch-state")}
-        assert states <= {"on", "off"} and states
+        assert states
+        assert states <= {"on", "off"}
 
 
 @pytest.mark.asyncio
