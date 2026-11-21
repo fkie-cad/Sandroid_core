@@ -137,6 +137,73 @@ class DeviceHandler:
             error="; ".join(r.message for r in results if not r.success),
         )
 
+    # -- Device actions (registry: services/device_actions.py) ---------------
+
+    @safe_command("Failed to list device actions")
+    async def list_device_actions(self) -> CommandResult:
+        """The device actions with their parameters, and the running jobs."""
+        from sandroid.services.device_actions import list_actions, running_jobs
+
+        actions = [a.describe() for a in list_actions()]
+        jobs = [
+            {
+                "id": j.id,
+                "action": j.action,
+                "serial": j.serial,
+                "title": j.title,
+                "progress": j.progress,
+            }
+            for j in running_jobs()
+        ]
+        return CommandResult(
+            success=True,
+            message=f"{len(actions)} device actions, {len(jobs)} running",
+            data={"actions": actions, "jobs": jobs},
+        )
+
+    @safe_command("Failed to run the device action")
+    async def run_device_action(
+        self,
+        action_id: str,
+        params: dict[str, Any] | None = None,
+        serial: str | None = None,
+    ) -> CommandResult:
+        """Run one device action (``sms.receive``, ``time.jump`` ...).
+
+        Validated before any adb call; the adb round trips run in a worker
+        thread, pinned to *serial* (default: the device targeted now). The
+        action writes its line on the session timeline (actor ``user``).
+        """
+        from sandroid.core.adb import Adb
+        from sandroid.services.device_actions import run_action
+
+        target = serial or Adb.get_target_device() or Adb.selected_serial()
+        result = await asyncio.to_thread(run_action, action_id, target, params)
+        return CommandResult(
+            success=result.ok,
+            message=result.message,
+            data={
+                "action": action_id,
+                "serial": target,
+                "job": result.job,
+                "refused": result.refused,
+                **result.data,
+            },
+            error=None if result.ok else result.message,
+        )
+
+    @safe_command("Failed to stop the device action")
+    async def stop_device_action(self, job_id: str) -> CommandResult:
+        """Stop a background device action (a GPS route) by its job id."""
+        from sandroid.services.device_actions import stop_job
+
+        stopped = await asyncio.to_thread(stop_job, job_id)
+        if stopped:
+            return CommandResult(success=True, message=f"Stopped {job_id}")
+        return CommandResult(
+            success=False, message=f"No running job {job_id}", error="not running"
+        )
+
     # -- Screenshots ---------------------------------------------------------
 
     @safe_command("Failed to take screenshot")

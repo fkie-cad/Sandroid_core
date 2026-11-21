@@ -75,6 +75,22 @@ to pick, among the epochs that cover a time, the one whose result lies in
 never reuses it and the header (``last_sample(current_world=True)``) does
 not show it. On a resume :func:`seed` restores the last
 recorded offsets so the first new sample detects a jump.
+
+**Deliberate moves** (the ``time.jump`` device action):
+:func:`move_wall_clock` moves the device wall clock by a delta or to a
+time on purpose (Android's automatic time detection off, then a manual
+time suggestion; ``date`` as the fallback) and writes a ``reason:
+"time-jump"`` line (always ``jump: true``: a new clock epoch on the
+timeline, not a world change). From then on the wall clock is **held**
+(:func:`held`): neither the session-start sync nor a later device connect
+snaps it back. The hold ends at the next real resync: a world change
+(:func:`begin_epoch`: snapshot load, cold boot) or :func:`reset_wall_clock`
+(automatic time detection back as it was, then a sync to the host;
+``reason: "time-reset"`` or a ``sync`` line with ``trigger:
+"time-reset"``). CLOCK_MONOTONIC is never touched, so monotonic times map
+as before. While automatic time is off for a move, a device file
+(:data:`HOLD_MARKER`) keeps its state from before the first move: after a
+Sandroid restart the session-start resync (or a reset) still restores it.
 """
 
 from __future__ import annotations
@@ -100,7 +116,7 @@ SYNC_TOLERANCE_S = 0.05
 #: A sample younger than this is reused by :func:`current` (bursts of pulls).
 REUSE_S = 10.0
 #: Reasons that are clock epoch changes by themselves.
-EPOCH_REASONS = frozenset({"snapshot-load", "sync"})
+EPOCH_REASONS = frozenset({"snapshot-load", "sync", "time-jump", "time-reset"})
 #: Queries per measurement (after :data:`WARMUP` discarded ones): events
 #: (connect, snapshot load, sync) / frequent samples (periodic, pulls).
 SAMPLES = 20
@@ -139,6 +155,9 @@ _BARRIER: dict[str, float] = {}
 #: serials whose session-start sync waits for startup's SELinux step
 #: (:func:`after_selinux_step`; SELinux was Enforcing at connect).
 _PENDING_SYNC: set[str] = set()
+#: serial -> the deliberate wall-clock move that no sync may undo until the
+#: next real resync (:func:`move_wall_clock`, :func:`held`).
+_HELD: dict[str, dict] = {}
 #: serial -> the open shell, and the lock that serialises its queries.
 _SHELLS: dict[str, Shell] = {}
 _SHELL_LOCKS: dict[str, threading.Lock] = {}
@@ -543,6 +562,9 @@ def begin_epoch(serial: str | None) -> None:
         # A session-start sync still waiting is superseded by the new world
         # (a snapshot load syncs by itself).
         _PENDING_SYNC.discard(key)
+        # The new world brings its own clock and settings: a deliberate
+        # move of the old world is no longer held.
+        _HELD.pop(key, None)
         epochs = _EPOCHS.get(key)
         if epochs and "closed_host" not in epochs[-1]:
             epochs[-1]["closed_host"] = now
@@ -1101,6 +1123,8 @@ def after_snapshot_load(
     last line written (``None``: the device did not answer).
     """
     serial = _target(serial)
+    with _LOCK:
+        _HELD.pop(_key(serial), None)  # the snapshot restored its own clock
     policy = sync_enabled()
     final = loaded = record("snapshot-load", serial, snapshot=name, sync_policy=policy)
     if loaded is None:
@@ -1206,6 +1230,8 @@ def _session_start_sync(
         if key not in _PENDING_SYNC:
             return None
         _PENDING_SYNC.discard(key)
+        if key in _HELD:
+            return None  # moved on purpose (time.jump): never snapped back
     if before is None:
         before = _measure(serial, samples=SAMPLES_QUICK)
         if before is None or before.get("_stale") or not notable(before):
@@ -1235,6 +1261,9 @@ def after_device_connect(
     connected = record("device-connect", serial, sync_policy=policy)
     if connected is None or not (policy and notable(connected)):
         return connected
+    if held(serial) is not None:
+        return connected  # moved on purpose (time.jump): record only
+    _end_leftover_hold(serial)
     with _LOCK:
         _PENDING_SYNC.add(_key(serial))
     if _selinux_enforcing(serial):
@@ -1294,6 +1323,323 @@ def after_selinux_step(
     return box[0] if box else None
 
 
+# ---------------------------------------------------------------------------
+# deliberate moves: the time.jump device action
+# ---------------------------------------------------------------------------
+
+#: Android's automatic time detection: read / switch (``true`` / ``false``).
+AUTO_TIME_GET = "cmd time_detector is_auto_detection_enabled"
+AUTO_TIME_SET = "cmd time_detector set_auto_detection_enabled {}"
+#: CLOCK_BOOTTIME (``/proc/uptime``, no root needed) and the wall clock at
+#: one instant: the pair of a manual time suggestion.
+PAIR_QUERY = "cat /proc/uptime; date +%s%N"
+#: A move landed when the wall offset moved this close to the request (s).
+MOVE_TOLERANCE_S = 2.0
+#: Seconds Android takes to apply automatic time after it is switched on.
+AUTO_TIME_SETTLE_S = 1.0
+#: Device file kept while automatic time is off for a deliberate move: it
+#: survives a Sandroid restart, so the state from before the first move is
+#: never lost (a snapshot load drops it with the rest of the device state).
+HOLD_MARKER = "/data/local/tmp/sandroid/clock_hold"
+_MARKER = re.compile(r"auto_before=(true|false|unknown)")
+_UPTIME = re.compile(r"^(\d+(?:\.\d+)?)\s")
+_DIGITS = re.compile(r"^(\d{9,})")
+
+
+def manual_time_command(elapsed_ms: int, epoch_ms: int) -> str:
+    """``cmd time_detector suggest_manual_time``: the wall clock is
+    ``epoch_ms`` at device CLOCK_BOOTTIME ``elapsed_ms`` (one instant, so
+    the adb latency does not matter).
+    """
+    return (
+        "cmd time_detector suggest_manual_time "
+        f"--elapsed_realtime {elapsed_ms} --unix_epoch_time {epoch_ms}"
+    )
+
+
+def held(serial: str | None = None) -> dict | None:
+    """The deliberate wall-clock move of ``serial`` that no sync undoes
+    (a copy: ``since``, ``by``, ``moved_s``, ``auto_before``), or ``None``.
+    """
+    with _LOCK:
+        hold = _HELD.get(_key(_target(serial)))
+        return None if hold is None else dict(hold)
+
+
+def _send_out(send: Send, command: str) -> str | None:
+    """The stdout of one device shell command, ``None`` when adb failed."""
+    from sandroid.core.adb_utils import device_shell_command
+
+    try:
+        stdout, _stderr = send(device_shell_command(command))
+    except (Exception, SystemExit):
+        logger.debug("device clock: %r failed", command, exc_info=True)
+        return None
+    return str(stdout or "")
+
+
+def _device_pair(send: Send) -> tuple[float, float] | None:
+    """``(CLOCK_BOOTTIME s, wall epoch s)`` read at one instant, or ``None``."""
+    out = _send_out(send, PAIR_QUERY)
+    lines = [line.strip() for line in (out or "").splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+    boot = _UPTIME.match(lines[0] + " ")
+    wall = _DIGITS.match(lines[1])
+    if boot is None or wall is None:
+        return None
+    digits = wall.group(1)
+    # Without ``%N`` support ``date`` prints whole seconds.
+    epoch = int(digits) / 1e9 if len(digits) > 12 else float(digits)
+    return float(boot.group(1)), epoch
+
+
+def _auto_detection(send: Send) -> bool | None:
+    """Android's automatic time detection: on / off / ``None`` (unknown)."""
+    out = (_send_out(send, f"{AUTO_TIME_GET} 2>&1") or "").strip().lower()
+    if out.startswith("true"):
+        return True
+    if out.startswith("false"):
+        return False
+    return None
+
+
+def _set_auto_detection(send: Send, enabled: bool) -> None:
+    _send_out(send, f"{AUTO_TIME_SET.format(str(enabled).lower())} 2>&1")
+
+
+def _marker_read(send: Send) -> tuple[bool, bool | None]:
+    """``(present, auto_before)`` of the device's hold marker."""
+    match = _MARKER.search(_send_out(send, f"cat {HOLD_MARKER} 2>/dev/null") or "")
+    if match is None:
+        return False, None
+    return True, {"true": True, "false": False}.get(match.group(1))
+
+
+def _marker_write(send: Send, auto_before: bool | None) -> None:
+    word = "unknown" if auto_before is None else str(auto_before).lower()
+    folder = HOLD_MARKER.rsplit("/", 1)[0]
+    _send_out(send, f"mkdir -p {folder} && echo auto_before={word} > {HOLD_MARKER}")
+
+
+def _marker_clear(send: Send) -> None:
+    _send_out(send, f"rm -f {HOLD_MARKER}")
+
+
+def _shell_run(serial: str | None, command: str) -> str:
+    """Output of one device command over the persistent shell, else one
+    one-shot ``adb shell``.
+    """
+    key = _key(serial)
+    with _shell_lock(key):
+        try:
+            lines, _t0, _t1 = _shell(serial).query(f"{command}; echo {_END}")
+            return "\n".join(lines)
+        except (ShellDeadError, OSError, ValueError, SystemExit):
+            _SHELLS.pop(key, None)
+    return _send_out(_default_send(serial), command) or ""
+
+
+def _end_leftover_hold(serial: str | None) -> None:
+    """A session-start resync ends a move an earlier Sandroid process left
+    (its marker is on the device): automatic time back as it was before
+    that move, marker removed.
+    """
+    match = _MARKER.search(_shell_run(serial, f"cat {HOLD_MARKER} 2>/dev/null"))
+    if match is None:
+        return
+    if match.group(1) != "false":
+        _shell_run(serial, f"{AUTO_TIME_SET.format('true')} 2>&1")
+    _shell_run(serial, f"rm -f {HOLD_MARKER}")
+
+
+def _date_fallback(send: Send, target: float, boot_s: float) -> tuple[str | None, bool]:
+    """``date -u @S.fff`` (as the shell user, then ``su 0``) so the wall
+    clock is ``target`` at CLOCK_BOOTTIME ``boot_s``. Returns the last
+    command sent and whether a check read the clock where it should be.
+    """
+    command = None
+    for prefix in _SET_PREFIXES:
+        fresh = _device_pair(send)
+        if fresh is None:
+            return command, False
+        command = f"{prefix}date -u @{target + fresh[0] - boot_s:.3f}"
+        _send_out(send, f"{command} >/dev/null 2>&1")
+        check = _device_pair(send)
+        if check is not None:
+            if abs(check[1] - (target + check[0] - boot_s)) < MOVE_TOLERANCE_S:
+                return command, True
+    return command, False
+
+
+def move_wall_clock(
+    serial: str | None = None,
+    *,
+    delta_s: float | None = None,
+    to_epoch: float | None = None,
+    send: Send | None = None,
+    by: str = "time.jump",
+) -> dict:
+    """Move the device wall clock on purpose: by ``delta_s`` seconds or to
+    ``to_epoch``; hold it there until the next real resync.
+
+    1. Hold first (:func:`held`): a waiting session-start sync is dropped
+       and no later sync of this session snaps the clock back.
+    2. Android's automatic time detection off (its state before the first
+       move is kept in the hold, so :func:`reset_wall_clock` restores it);
+       otherwise network or telephony time would undo the move.
+    3. ``cmd time_detector suggest_manual_time`` with a (CLOCK_BOOTTIME,
+       wall) pair read on the device; when that is not taken: ``date -u
+       @S.fff`` (root), then through ``su 0``.
+    4. Measure and write a ``reason: "time-jump"`` line (``moved_s``
+       requested, ``actual_moved_s``, ``set_by``, ``command``, ``ok``).
+
+    A first move that did not land releases the hold and restores the
+    automatic time detection. Blocks on adb: never on the UI thread.
+
+    Returns:
+        ``{"ok", "moved_s", "actual_moved_s", "set_by", "command",
+        "error", "line"}``.
+
+    Raises:
+        ValueError: Neither or both of ``delta_s`` / ``to_epoch``.
+    """
+    if (delta_s is None) == (to_epoch is None):
+        raise ValueError("give exactly one of delta_s / to_epoch")
+    serial = _target(serial)
+    key = _key(serial)
+    send = send or _default_send(serial)
+    result: dict = {"ok": False, "moved_s": None, "actual_moved_s": None,
+                    "set_by": None, "command": None, "error": None,
+                    "line": None}  # fmt: skip
+    before = _measure(serial, samples=SAMPLES_QUICK)
+    pair = _device_pair(send) if before is not None else None
+    if before is None or pair is None:
+        result["error"] = "the device did not answer"
+        return result
+    boot_s, wall_s = pair
+    target = wall_s + delta_s if delta_s is not None else float(to_epoch)
+    moved = target - wall_s
+    result["moved_s"] = round(moved, 3)
+    with _LOCK:
+        previous = _HELD.get(key)
+        _PENDING_SYNC.discard(key)
+        _BARRIER[key] = _now()  # older wall offsets describe the old time
+        _HELD[key] = {
+            "since": _now(),
+            "by": by,
+            "moved_s": round(moved + (previous or {}).get("moved_s", 0.0), 3),
+            "auto_before": (previous or {}).get("auto_before"),
+        }
+    if previous is not None:
+        auto_before = previous["auto_before"]
+    else:
+        # A marker left by an earlier Sandroid process holds the state from
+        # before ITS first move (automatic time is still off from it).
+        present, auto_before = _marker_read(send)
+        if not present:
+            auto_before = _auto_detection(send)
+            _marker_write(send, auto_before)
+    with _LOCK:
+        if key in _HELD:
+            _HELD[key]["auto_before"] = auto_before
+    if auto_before is not False:
+        _set_auto_detection(send, False)
+    command: str | None = manual_time_command(
+        round(boot_s * 1000), round(target * 1000)
+    )
+    out = _send_out(send, f"{command} 2>&1") or ""
+    set_by = "time_detector" if "injected" in out else None
+    if set_by is None:
+        command, landed = _date_fallback(send, target, boot_s)
+        set_by = "date" if landed else None
+    after = _measure(serial, samples=SAMPLES_QUICK)
+    actual = None
+    if after is not None:
+        actual = round(before["off_wall"] - after["off_wall"], 3)
+    ok = actual is not None and abs(actual - moved) <= MOVE_TOLERANCE_S
+    result.update(ok=ok, actual_moved_s=actual, set_by=set_by if ok else None,
+                  command=command)  # fmt: skip
+    if not ok:
+        result["error"] = (
+            "the device did not answer after the move"
+            if after is None
+            else "the device clock did not move (needs cmd time_detector or root)"
+        )
+        if previous is None:
+            with _LOCK:
+                _HELD.pop(key, None)
+            if auto_before is not False:
+                _set_auto_detection(send, True)
+            _marker_clear(send)
+    if after is not None:
+        result["line"] = _note(
+            after,
+            "time-jump",
+            always=True,
+            by=by,
+            moved_s=result["moved_s"],
+            actual_moved_s=actual,
+            before_off_wall=before["off_wall"],
+            after_off_wall=after["off_wall"],
+            command=command,
+            set_by=result["set_by"],
+            auto_time_before=auto_before,
+            ok=ok,
+        )
+    return result
+
+
+def reset_wall_clock(serial: str | None = None, send: Send | None = None) -> dict:
+    """Undo deliberate moves: the next real resync, on request.
+
+    Releases the hold and switches Android's automatic time detection
+    back on if it was on (or unknown) before the first move; without a
+    hold (moved by another process) it is switched on when it is off.
+    Then syncs the wall clock to the host when it is still more than
+    :data:`NOTABLE_S` off (a ``sync`` line, ``trigger: "time-reset"``),
+    else writes a ``reason: "time-reset"`` line. Blocks on adb: never on
+    the UI thread.
+
+    Returns:
+        ``{"ok", "was_held", "line", "error"}``; ``ok``: the wall clock is
+        within :data:`NOTABLE_S` of the host afterwards.
+    """
+    serial = _target(serial)
+    key = _key(serial)
+    send = send or _default_send(serial)
+    with _LOCK:
+        hold = _HELD.pop(key, None)
+    result: dict = {"ok": False, "was_held": hold is not None, "line": None,
+                    "error": None}  # fmt: skip
+    present, marked = _marker_read(send)
+    if hold is not None:
+        restore = hold.get("auto_before") is not False
+    elif present:
+        restore = marked is not False  # moved by an earlier Sandroid process
+    else:
+        # No record of a move: "real time" is automatic time.
+        restore = _auto_detection(send) is False
+    if present:
+        _marker_clear(send)
+    if restore:
+        _set_auto_detection(send, True)
+        _sleep(AUTO_TIME_SETTLE_S)  # Android applies automatic time async
+    before = _measure(serial, samples=SAMPLES_QUICK)
+    if before is None:
+        result["error"] = "the device did not answer"
+        return result
+    if notable(before):
+        line = _sync_and_note(serial, before, "time-reset", send, "after a time reset")
+    else:
+        line = _note(before, "time-reset", always=True, was_held=hold is not None)
+    result["line"] = line
+    result["ok"] = line is not None and not notable(line)
+    if not result["ok"]:
+        result["error"] = "the device clock is still off the host"
+    return result
+
+
 def reset() -> None:
     """Forget every sample and close the shells (tests; a new session)."""
     close_shells()
@@ -1306,6 +1652,7 @@ def reset() -> None:
         _SHELL_LOCKS.clear()
         _BARRIER.clear()
         _PENDING_SYNC.clear()
+        _HELD.clear()
 
 
 __all__ = [
@@ -1331,13 +1678,17 @@ __all__ = [
     "current",
     "device_minus_host",
     "format_offset",
+    "held",
     "last_sample",
+    "manual_time_command",
     "measure",
+    "move_wall_clock",
     "notable",
     "parse_clocks",
     "record",
     "record_async",
     "reset",
+    "reset_wall_clock",
     "seed",
     "suggestion_command",
     "sync",

@@ -130,6 +130,11 @@ _PANEL_SECTIONS: list[tuple[str, str, str]] = [
         "sandroid.tui.modals.static_analysis_modal",
         "StaticAnalysisModal",
     ),
+    (
+        "Device settings (Shift+E)",
+        "sandroid.tui.modals.device_settings_modal",
+        "DeviceSettingsModal",
+    ),
 ]
 
 #: Lens id -> the ``_PANEL_SECTIONS`` headings that belong to that lens.
@@ -237,6 +242,14 @@ _ROW_TEXT: dict[tuple[str, str], str] = {
     ("Static analysis (a)", "t"): "Trackers on / off",
     ("Static analysis (a)", "s"): "Security analysis on / off",
     ("Static analysis (a)", "v"): "Verbose output on / off",
+    ("Device settings (Shift+E)", "ctrl+s"): (
+        "Apply all settings (on the Actions tab: run the action)"
+    ),
+    ("Device settings (Shift+E)", "shift+left"): "Previous tab (not in a text field)",
+    ("Device settings (Shift+E)", "shift+right"): "Next tab (not in a text field)",
+    ("Device settings (Shift+E)", "escape"): (
+        "Close (a GPS route keeps running in the background)"
+    ),
     ("Proxy settings (y)", "shift+left"): "Previous tab (in an empty text field)",
     ("Proxy settings (y)", "shift+right"): "Next tab (in an empty text field)",
 }

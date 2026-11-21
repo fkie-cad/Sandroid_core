@@ -1179,3 +1179,274 @@ def test_reconnect_after_reboot_starts_a_new_clock_world(monkeypatch, device):
         assert not device_clock._PENDING_SYNC
     finally:
         device_prep.reset(hooks=True)
+
+
+# -- deliberate moves: time.jump ---------------------------------------------------
+
+
+class FakeSend:
+    """One-shot ``adb shell`` of :class:`FakeDevice` for the time-jump path.
+
+    Answers the (CLOCK_BOOTTIME, wall) pair, the automatic time detection
+    (``auto``: ``"true"`` / ``"false"`` / anything else for a missing
+    ``cmd``) and a manual time suggestion (``inject``: whether the detector
+    takes it); ``date -u`` goes to :meth:`FakeDevice.apply_date`.
+    """
+
+    def __init__(self, device: FakeDevice, auto: str = "true", inject: bool = True):
+        self.device, self.auto, self.inject = device, auto, inject
+        self.commands: list[str] = []
+        #: The device's hold marker file (``None``: absent).
+        self.marker: str | None = None
+
+    def __call__(self, command: str):
+        import shlex
+
+        inner = shlex.split(command)[1]  # "shell", "<device command>"
+        self.commands.append(inner)
+        dev = self.device
+        dev.host += 0.005
+        boot = dev.host - dev.mono_off  # BOOTTIME == MONOTONIC on the emulator
+        if inner.startswith(f"cat {device_clock.HOLD_MARKER}"):
+            return (self.marker or ""), ""
+        if inner.startswith("mkdir -p") and device_clock.HOLD_MARKER in inner:
+            self.marker = re.search(r"(auto_before=\w+)", inner)[1] + "\n"
+            return "", ""
+        if inner == f"rm -f {device_clock.HOLD_MARKER}":
+            self.marker = None
+            return "", ""
+        if inner == device_clock.PAIR_QUERY:
+            return f"{boot:.2f} 12.00\n{int((dev.host - dev.behind) * 1e9)}\n", ""
+        if inner.startswith(device_clock.AUTO_TIME_GET):
+            return f"{self.auto}\n", ""
+        if inner.startswith("cmd time_detector set_auto_detection_enabled"):
+            self.auto = inner.split()[3]
+            return "", ""
+        if inner.startswith("cmd time_detector suggest_manual_time"):
+            if not self.inject:
+                return "cmd: Can't find service: time_detector\n", ""
+            elapsed = int(re.search(r"--elapsed_realtime (\d+)", inner)[1])
+            epoch = int(re.search(r"--unix_epoch_time (\d+)", inner)[1])
+            dev.behind = dev.host - (epoch / 1000 + (boot - elapsed / 1000))
+            return "Suggestion ManualTimeSuggestion{...} injected.\n", ""
+        if "date -u" in inner:
+            dev.apply_date(inner, dev.host)
+        return "", ""
+
+
+def _jump_lines() -> list[dict]:
+    return [x for x in _lines() if x["reason"] == "time-jump"]
+
+
+def test_a_time_jump_moves_the_wall_clock_and_holds_it(device):
+    device.behind = 0.0
+    send = FakeSend(device)
+    moved = device_clock.move_wall_clock(SERIAL, delta_s=7200, send=send)
+
+    assert moved["ok"], moved
+    assert moved["set_by"] == "time_detector"
+    assert moved["moved_s"] == pytest.approx(7200, abs=0.05)
+    assert moved["actual_moved_s"] == pytest.approx(7200, abs=0.05)
+    assert device.behind == pytest.approx(-7200, abs=0.05)  # device ahead 2 h
+    # Automatic time off first, then the manual suggestion.
+    assert send.commands.index(
+        "cmd time_detector set_auto_detection_enabled false 2>&1"
+    ) < next(
+        i for i, c in enumerate(send.commands) if c.startswith("cmd time_detector sug")
+    )
+    assert send.auto == "false"
+    hold = device_clock.held(SERIAL)
+    assert hold["by"] == "time.jump"
+    assert hold["auto_before"] is True
+    assert hold["moved_s"] == pytest.approx(7200, abs=0.05)
+    # The clock line: a jump (new clock epoch) with the move recorded.
+    (envelope,) = [x for x in _clock_lines() if x["data"]["reason"] == "time-jump"]
+    assert envelope["kind"] == "jump"
+    (line,) = _jump_lines()
+    assert line["jump"] is True
+    assert line["ok"] is True
+    assert line["set_by"] == "time_detector"
+    assert line["auto_time_before"] is True
+    assert line["before_off_wall"] == pytest.approx(0.0, abs=0.05)
+    assert line["after_off_wall"] == pytest.approx(-7200, abs=0.05)
+    # The header shows the new device time at once.
+    assert device_clock.last_sample(SERIAL, current_world=True)["off_wall"] == (
+        pytest.approx(-7200, abs=0.05)
+    )
+
+
+def test_a_jump_to_a_time_lands_there(device):
+    send = FakeSend(device)
+    target = HOST0 + 30 * 86400
+    moved = device_clock.move_wall_clock(SERIAL, to_epoch=target, send=send)
+    assert moved["ok"], moved
+    assert device.host - device.behind == pytest.approx(target, abs=1.0)
+
+
+def test_neither_or_both_targets_is_an_error(device):
+    with pytest.raises(ValueError):
+        device_clock.move_wall_clock(SERIAL, send=FakeSend(device))
+    with pytest.raises(ValueError):
+        device_clock.move_wall_clock(
+            SERIAL, delta_s=1, to_epoch=HOST0, send=FakeSend(device)
+        )
+
+
+def test_the_held_clock_is_not_snapped_back_by_the_session_syncs(
+    device, inline_threads
+):
+    device.behind = 0.0
+    send = FakeSend(device)
+    assert device_clock.move_wall_clock(SERIAL, delta_s=-3600, send=send)["ok"]
+
+    # A session-start sync that was waiting for SELinux is dropped ...
+    with device_clock._LOCK:
+        device_clock._PENDING_SYNC.add(SERIAL)
+    assert device_clock.after_selinux_step(SERIAL, wait=1.0) is None
+    # ... and a device connect (a device switch back) only records.
+    connected = device_clock.after_device_connect(SERIAL)
+    assert connected["reason"] == "device-connect"
+    assert device.behind == pytest.approx(3600, abs=0.05)
+    assert [x["reason"] for x in _lines()] == ["time-jump", "device-connect"]
+    assert not any("date -u" in c for c in device.commands)
+    assert device_clock.held(SERIAL) is not None
+
+
+def test_a_world_change_ends_the_hold(device):
+    assert device_clock.move_wall_clock(SERIAL, delta_s=600, send=FakeSend(device))[
+        "ok"
+    ]
+    device_clock.begin_epoch(SERIAL)  # a snapshot load brings its own clock
+    assert device_clock.held(SERIAL) is None
+
+
+def test_a_second_jump_keeps_the_first_auto_time_state(device):
+    device.behind = 0.0
+    send = FakeSend(device)
+    assert device_clock.move_wall_clock(SERIAL, delta_s=3600, send=send)["ok"]
+    assert device_clock.move_wall_clock(SERIAL, delta_s=1800, send=send)["ok"]
+    hold = device_clock.held(SERIAL)
+    assert hold["auto_before"] is True  # not the "false" the first move set
+    assert hold["moved_s"] == pytest.approx(5400, abs=0.1)
+    assert device.behind == pytest.approx(-5400, abs=0.1)
+
+
+def test_without_cmd_the_jump_falls_back_to_date(device):
+    device.behind = 0.0
+    send = FakeSend(device, auto="cmd: Can't find service", inject=False)
+    moved = device_clock.move_wall_clock(SERIAL, delta_s=7200, send=send)
+    assert moved["ok"], moved
+    assert moved["set_by"] == "date"
+    assert moved["command"].startswith("date -u @")
+    assert device.behind == pytest.approx(-7200, abs=0.1)
+    assert device_clock.held(SERIAL)["auto_before"] is None
+
+
+def test_a_jump_that_does_not_land_releases_the_hold(device):
+    device.behind = 0.0
+    device.root = False  # no date; and the detector refuses
+    device.set_forms = set()
+    send = FakeSend(device, inject=False)
+    moved = device_clock.move_wall_clock(SERIAL, delta_s=7200, send=send)
+    assert not moved["ok"]
+    assert "did not move" in moved["error"]
+    assert device_clock.held(SERIAL) is None
+    assert send.auto == "true"  # automatic time restored
+    (line,) = _jump_lines()
+    assert line["ok"] is False
+
+
+def test_no_answer_is_a_failed_jump_without_a_hold(monkeypatch):
+    monkeypatch.setattr(
+        device_clock, "SHELL_FACTORY", lambda serial: FakeShell(None, dead=True)
+    )
+    monkeypatch.setattr(device_clock, "_default_send", lambda s: lambda c: ("", ""))
+    moved = device_clock.move_wall_clock(SERIAL, delta_s=60)
+    assert moved == {**moved, "ok": False, "error": "the device did not answer"}
+    assert device_clock.held(SERIAL) is None
+
+
+def test_reset_restores_auto_time_and_syncs_to_the_host(device):
+    device.behind = 0.0
+    send = FakeSend(device)
+    assert device_clock.move_wall_clock(SERIAL, delta_s=7200, send=send)["ok"]
+
+    reset = device_clock.reset_wall_clock(SERIAL, send=send)
+
+    assert reset["ok"], reset
+    assert reset["was_held"] is True
+    assert send.auto == "true"
+    assert abs(device.behind) <= device_clock.SYNC_TOLERANCE_S
+    assert device_clock.held(SERIAL) is None
+    sync = _lines()[-1]
+    assert (sync["reason"], sync["trigger"]) == ("sync", "time-reset")
+
+
+def test_reset_without_a_hold_switches_auto_time_on_when_off(device):
+    device.behind = 0.2  # already close: a plain time-reset line
+    send = FakeSend(device, auto="false")
+    reset = device_clock.reset_wall_clock(SERIAL, send=send)
+    assert reset["ok"]
+    assert reset["was_held"] is False
+    assert send.auto == "true"
+    assert _lines()[-1]["reason"] == "time-reset"
+    assert _lines()[-1]["jump"] is True
+
+
+def test_reset_leaves_auto_time_off_when_it_was_off_before_the_jump(device):
+    device.behind = 0.0
+    send = FakeSend(device, auto="false")
+    assert device_clock.move_wall_clock(SERIAL, delta_s=600, send=send)["ok"]
+    assert not any("enabled false" in c for c in send.commands)
+    device_clock.reset_wall_clock(SERIAL, send=send)
+    assert send.auto == "false"
+    assert not any("enabled true" in c for c in send.commands)
+
+
+def test_the_hold_marker_survives_a_restart_and_reset_uses_it(device):
+    device.behind = 0.0
+    send = FakeSend(device)
+    assert device_clock.move_wall_clock(SERIAL, delta_s=3600, send=send)["ok"]
+    assert send.marker == "auto_before=true\n"
+    assert send.auto == "false"
+
+    device_clock.reset()  # Sandroid restarted: the in-memory hold is gone
+    # A new move keeps the state from before the FIRST move ...
+    assert device_clock.move_wall_clock(SERIAL, delta_s=60, send=send)["ok"]
+    assert device_clock.held(SERIAL)["auto_before"] is True
+    device_clock.reset()
+    # ... and a reset without an in-memory hold restores it from the marker.
+    reset = device_clock.reset_wall_clock(SERIAL, send=send)
+    assert reset["ok"], reset
+    assert send.auto == "true"
+    assert send.marker is None
+
+
+def test_a_failed_first_move_removes_the_marker(device):
+    device.root = False
+    device.set_forms = set()
+    send = FakeSend(device, inject=False)
+    assert not device_clock.move_wall_clock(SERIAL, delta_s=60, send=send)["ok"]
+    assert send.marker is None
+
+
+def test_a_session_start_ends_a_leftover_hold(monkeypatch, device):
+    marker = {"text": "auto_before=true\n"}
+    ran: list[str] = []
+
+    def shell_run(serial, command):
+        ran.append(command)
+        if command.startswith("cat "):
+            return marker["text"]
+        if command.startswith("rm -f"):
+            marker["text"] = ""
+        return ""
+
+    monkeypatch.setattr(device_clock, "_shell_run", shell_run)
+    device_clock.after_device_connect(SERIAL)  # 4500 s off: resync
+    assert ran == [
+        f"cat {device_clock.HOLD_MARKER} 2>/dev/null",
+        "cmd time_detector set_auto_detection_enabled true 2>&1",
+        f"rm -f {device_clock.HOLD_MARKER}",
+    ]
+    assert [x["reason"] for x in _lines()] == ["device-connect", "sync"]
