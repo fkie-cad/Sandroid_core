@@ -1203,3 +1203,31 @@ async def test_run_phase_uses_rewind_words() -> None:
         assert "review it" in text
         assert "Play" not in text
         assert "replay it" not in text
+
+
+def test_user_visible_strings_name_keys_in_words() -> None:
+    """Footers and hints say "Enter" / "Shift+P", never key glyphs."""
+    import ast
+    import inspect
+
+    from sandroid.tui.widgets import diffs_view
+
+    tree = ast.parse(inspect.getsource(diffs_view))
+    scopes = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    docstrings = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, scopes)
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+    }
+    glyphs = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+        and any(g in node.value for g in "⏎⇧␣")
+    ]
+    assert glyphs == []
