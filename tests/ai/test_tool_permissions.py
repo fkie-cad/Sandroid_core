@@ -656,3 +656,21 @@ def test_broker_listener_errors_do_not_break_resolution(broker):
     p = _submit(broker)
     broker.resolve(p.request.request_id, "once")
     assert p.wait().approved
+
+
+def test_hand_edit_is_seen_without_restart(tmp_path):
+    """N2-B4: a hand edit of the rules file applies at the next resolution
+    and in /permissions (deny_rules), without a restart.
+    """
+    store = _store(tmp_path, 'mode = "ask"\n')
+    assert store.resolve("pull_app_data", C).outcome == "ask"
+    _write(store.path, 'mode = "ask"\ndeny = ["kill_process", "pull_app_data"]\n')
+    assert store.resolve("pull_app_data", C).denied
+    _write(store.path, 'mode = "ask"\n')
+    assert store.refresh_if_changed() is True
+    assert store.deny_rules() == []
+    assert store.refresh_if_changed() is False  # unchanged: no re-read
+    # The store's own writes are not mistaken for a hand edit.
+    store.add_deny_rule("z")
+    assert store.refresh_if_changed() is False
+    assert store.deny_rules() == ["z"]

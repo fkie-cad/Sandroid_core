@@ -2587,6 +2587,7 @@ class ChatPanel(Widget):
     def _cmd_permissions(self, arg: str) -> None:
         try:
             store = get_tool_permission_store()
+            store.refresh_if_changed()  # a hand edit of the rules file
         except Exception as exc:
             self._notice(f"Error: {redact_secrets(exc)}", style="$lens-bad")
             return

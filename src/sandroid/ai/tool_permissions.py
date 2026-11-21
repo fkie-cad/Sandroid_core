@@ -656,6 +656,8 @@ class ToolPermissionStore:
         self._session_allow: list[PermissionRule] = []
         self._session_declines: set[str] = set()
         self._warned_bare: set[str] = set()
+        #: (mtime_ns, size, inode) of the file as last read or written.
+        self._file_sig: tuple[int, int, int] | None = None
         self.reload()
 
     # -- properties --------------------------------------------------------
@@ -737,10 +739,30 @@ class ToolPermissionStore:
                 return False
         return _is_arg_dependent_name(name)
 
+    def _stat_sig(self) -> tuple[int, int, int] | None:
+        try:
+            st = self._path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+    def refresh_if_changed(self) -> bool:
+        """Re-read the file when it changed on disk (a hand edit, N2-B4).
+
+        Cheap (one ``stat``); called before every resolution and by
+        ``/permissions``. Returns whether the file was re-read.
+        """
+        with self._lock:
+            if self._stat_sig() == self._file_sig:
+                return False
+            self.reload()
+            return True
+
     def reload(self) -> None:
         """(Re)read the file. Never writes (a legacy file migrates in memory)."""
         with self._lock:
             self._load_error = None
+            self._file_sig = self._stat_sig()
             if not self._path.exists():
                 self._apply({})
                 return
@@ -909,6 +931,7 @@ class ToolPermissionStore:
                     ):
                         doc.set("legacy_declines_notified", True)
                     _atomic_write(self._path, doc.dumps())
+                    self._file_sig = self._stat_sig()
                     data = doc.plain()
             except OSError as exc:
                 logger.warning(
@@ -1070,6 +1093,8 @@ class ToolPermissionStore:
         )
         if risk == RiskTier.NOT_EXPOSED:
             return Resolution("deny", "not_exposed")
+        with contextlib.suppress(Exception):
+            self.refresh_if_changed()
         with self._lock:
             deny = list(self._deny)
             allow = self._allow + self._session_allow
