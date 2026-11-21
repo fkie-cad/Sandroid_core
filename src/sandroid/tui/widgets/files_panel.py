@@ -74,6 +74,12 @@ UUIDs) fold from 8. Watched and AI-highlighted files keep their own rows.
 With the Inspector open, the cursor on a group row shows its op counts
 and time span.
 
+**Atomic writes**: a temp file renamed onto its final file in the same
+folder (``x.0.tmp`` -> ``x.0``, ``data.safe.tmp`` -> ``data.safe.bin``)
+shows in the final file's row (summed ops and count), not as a second row;
+the Inspector names the temp file and Events keep the rename. ``N`` shows
+both rows raw. Display only: activity, pulls and results are untouched.
+
 **Row cap** (``tui.monitor_max_lines``, default 500 rows, a group row is
 one): rows hidden by a rule go first, then open-only rows, then the oldest
 shown rows; watched and AI-highlighted rows never. The caption says how
@@ -464,6 +470,52 @@ class _Row:
     fold: bool = False
     #: A group made by auto-grouping (many touched siblings), not a rule.
     auto: bool = False
+    #: Temp files renamed onto this row's file (an atomic write: "x.tmp"
+    #: renamed to "x"), shown in this row instead of their own (display
+    #: only; see ``atomic_rename_target``).
+    folded: list[_Row] = field(default_factory=list)
+
+
+def atomic_rename_target(act: PathActivity | None) -> str | None:
+    """Where the temp file of an atomic write went, else None.
+
+    An atomic write creates ``x.0.tmp`` (``.new``, ``-tmp``, ``-new.bin``
+    ...), writes it and renames it onto ``x.0``. The lens showed two rows
+    for it (about a third of Firefox's rows). The temp file folds into its
+    final file's row when it was renamed away (and nothing re-created it)
+    within its folder onto a name it starts with that is not longer than
+    its own. ``prefs.xml`` -> ``prefs.xml.bak`` (a backup) stays a row.
+    """
+    moved = act.moved_to if act is not None else None
+    if not moved:
+        return None
+    src_dir, _, src = act.key.rpartition("/")
+    dst_dir, _, dst = moved.rpartition("/")
+    if src_dir != dst_dir or not src or not dst or src == dst:
+        return None
+    stem = dst.lstrip(".").split(".", 1)[0]
+    if not stem or len(src) < len(dst) or not src.lstrip(".").startswith(stem):
+        return None
+    return moved
+
+
+def _fold_stats(dest: SegmentStats, temps: list[SegmentStats]) -> SegmentStats:
+    """``dest`` with the events of its temp files added (a new object: the
+    activity's own stats share their ``ops`` dict). The temp file's
+    "renamed away" event is the final file's own rename: counted once.
+    """
+    out = SegmentStats(dest.count, dict(dest.ops), dest.first, dest.last)
+    for stats in temps:
+        for cat, n in stats.ops.items():
+            if cat == "rename":
+                continue
+            out.ops[cat] = out.ops.get(cat, 0) + n
+            out.count += n
+        if stats.first and (out.first is None or stats.first < out.first):
+            out.first = stats.first
+        if stats.last and (out.last is None or stats.last > out.last):
+            out.last = stats.last
+    return out
 
 
 def _hl_key(row: _Row) -> str | None:
@@ -1290,6 +1342,8 @@ class FilesPanel(Widget):
         grouping = not (self.activity.show_all or self._hl.filter_id())
         auto_min = self.activity.auto_group_min if grouping else 0
         candidates: list[_Row] = []
+        #: Shown file rows (not watched), before grouping.
+        plain: list[_Row] = []
         if wl is not None:
             for path in wl.rows:
                 pinned[path] = _Row(key=path, watched=path, dim=segment is not None)
@@ -1326,6 +1380,12 @@ class FilesPanel(Widget):
             if reason is not None and not self._hl.bypass_noise(canonical_key(key)):
                 hidden[reason] = hidden.get(reason, 0) + 1
                 continue
+            plain.append(row)
+        self._hidden = hidden
+        if grouping:
+            plain = self._fold_atomic_renames(plain, pinned)
+        for row in plain:
+            key = row.key
             folder = self.activity.rules.group_of(key) if grouping else None
             if folder is not None:
                 groups.setdefault(folder, []).append(row)
@@ -1333,7 +1393,6 @@ class FilesPanel(Widget):
                 candidates.append(row)  # an AI-highlighted file stays a row
             else:
                 rest.append(row)
-        self._hidden = hidden
         auto = auto_group_folders((r.key for r in candidates), auto_min)
         for row in candidates:
             folder = row.key.rpartition("/")[0]
@@ -1393,6 +1452,40 @@ class FilesPanel(Widget):
         if stats is None or not stats.ops or self.activity.show_all:
             return False
         return all(self.activity.category_mode(c) == "verbose" for c in stats.ops)
+
+    def _fold_atomic_renames(
+        self, plain: list[_Row], pinned: dict[str, _Row]
+    ) -> list[_Row]:
+        """Fold each atomic write's temp file into its final file's row
+        (``atomic_rename_target``): one row per write instead of two.
+
+        Only shown rows fold (both sides passed the filters and rules); an
+        AI-highlighted temp file keeps its row. The final file's row shows
+        the summed ops and counts; its Inspector names the temp file and its
+        Events keep the rename. Display only: the activity is untouched.
+        """
+        by_key = {r.key: r for r in plain}
+        out: list[_Row] = []
+        for row in plain:
+            target = atomic_rename_target(row.activity)
+            dest = by_key.get(target) if target else None
+            if dest is None and target in pinned and pinned[target].stats is not None:
+                dest = pinned[target]
+            if (
+                dest is None
+                or dest is row
+                or row.stats is None
+                or self._hl.lookup(canonical_key(row.key))
+            ):
+                out.append(row)
+                continue
+            dest.folded.append(row)
+        for dest in [*by_key.values(), *pinned.values()]:
+            if dest.folded and dest.stats is not None:
+                dest.stats = _fold_stats(
+                    dest.stats, [t.stats for t in dest.folded if t.stats]
+                )
+        return out
 
     @staticmethod
     def _group_row(folder: str, members: list[_Row], auto: bool = False) -> _Row:
@@ -1888,7 +1981,11 @@ class FilesPanel(Widget):
                 for r in rows
                 if not r.fold
                 and not (r.watched and r.stats is None)
-                and (r.key in new or any(m.key in new for m in r.members))
+                and (
+                    r.key in new
+                    or any(m.key in new for m in r.members)
+                    or any(t.key in new for t in r.folded)
+                )
             )
         with self.app.batch_update():
             table.clear()
@@ -2669,6 +2766,8 @@ class FilesPanel(Widget):
                 grid.add_row("now", Text(f"renamed to {app_relative(act.moved_to)}"))
             elif act.deleted:
                 grid.add_row("now", Text("deleted", style=op_color("delete")))
+            for temp in row.folded:
+                grid.add_row("temp file", self._temp_text(temp))
         else:
             grid.add_row("activity", Text("none seen yet", style=_c("dim")))
         sections: list = [("", grid)]
@@ -2690,6 +2789,23 @@ class FilesPanel(Widget):
                 pull.add_row("", Text(info.detail, style=_c("dim")))
             sections.append(("Last pull", pull))
         return sections
+
+    @staticmethod
+    def _temp_text(temp: _Row) -> Text:
+        """An atomic write's temp file folded into this row: its name, its
+        own ops and "renamed to this file" (its row is not in the table).
+        """
+        text = Text(temp.key.rpartition("/")[2])
+        stats = temp.activity.stats(None) if temp.activity is not None else None
+        if stats is not None:
+            for cat, (letter, _color) in OPS.items():
+                n = stats.ops.get(cat, 0)
+                if n > 0 and cat not in ("rename", "noise"):
+                    text.append("  ")
+                    text.append(letter, style=op_color(cat))
+                    text.append(f" {n}×")
+        text.append("  renamed to this file", style=_c("dim"))
+        return text
 
     @staticmethod
     def _clock_text(sample: dict | None) -> Text | None:
