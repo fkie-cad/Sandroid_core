@@ -245,7 +245,7 @@ async def test_n_without_a_focused_run_reaches_the_global_binding(
 
 
 @pytest.mark.asyncio
-async def test_rename_needs_explicit_confirm(results_root) -> None:
+async def test_rename_of_a_path_like_label_needs_explicit_confirm(results_root) -> None:
     """The tester's APK path typed after `n` became the run label at once."""
     from textual.widgets import Input
 
@@ -273,9 +273,8 @@ async def test_rename_needs_explicit_confirm(results_root) -> None:
         await pilot.press("n")
         await until(pilot, lambda: type(app.screen).__name__ == "InputModal")
         app.screen.query_one(Input).value = "Bookmark article"
+        # N4-V3: a plain label is applied on Enter (no second Yes/No).
         await pilot.press("enter")
-        await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
-        await pilot.press("y")
         await until(
             pilot, lambda: run_history.load_run(run_id).label == "Bookmark article"
         )
