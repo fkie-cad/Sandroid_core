@@ -123,6 +123,13 @@ class SandroidTUI(App):
 
     TITLE = "Sandroid"
     CSS_PATH = None  # loaded dynamically via css_resolver
+    #: Kept by every theme (App.CSS survives a theme-file swap). The toast
+    #: rack is invisible, but its vertical scrollbar gutter (2 columns) kept
+    #: every toast off the right edge, so the end of the log ticker's hint
+    #: (the "g" of "` log") showed beside the toast (R3).
+    CSS = """
+    ToastRack { scrollbar-size-vertical: 0; }
+    """
     ENABLE_COMMAND_PALETTE = False  # we use our own CommandPalette
     #: Open Devices when the post-start check finds no device (the test suite,
     #: which has none, turns it off -- like ``DevicesScreen.monitor_factory``).

@@ -1094,6 +1094,26 @@ def _exit_reason(lines: list[str]) -> str:
     return ""
 
 
+def _exit_code_reason(code: int | None) -> str:
+    """Plain words for how mitmweb ended without saying why.
+
+    mitmweb ends with code 0 on SIGTERM/SIGINT (it has no quit of its own),
+    so a 0 means someone else stopped it, not "exit code 0" (R3).
+    """
+    if code is None:
+        return "it ended"
+    if code < 0:
+        try:
+            import signal
+
+            return f"killed ({signal.Signals(-code).name})"
+        except ValueError:
+            return f"killed (signal {-code})"
+    if code == 0:
+        return "terminated from outside"
+    return f"exit code {code}"
+
+
 def _device_uids_path() -> str:
     from sandroid.core.device_guard import device_uids_path
 
@@ -1107,12 +1127,29 @@ def _pid_listening(pid: int, port: int, host: str = "127.0.0.1") -> bool:
     *different* process holding that port (e.g. another mitmproxy) is never
     mistaken for ours. Falls back to a plain connect when psutil cannot
     inspect the process.
+
+    The children come from one ``ps`` call
+    (:func:`~sandroid.core.background_tracker.descendant_pids`):
+    ``Process.children`` reads every host process, which took tens of
+    seconds on a busy host, per poll of the start wait (R3-B2).
     """
     try:
         import psutil
 
+        from sandroid.core.background_tracker import descendant_pids
+
         proc = psutil.Process(pid)
-        for p in [proc, *proc.children(recursive=True)]:
+        child_pids = descendant_pids(pid)
+        if child_pids is None:
+            children = proc.children(recursive=True)
+        else:
+            children = []
+            for child in child_pids:
+                try:
+                    children.append(psutil.Process(child))
+                except psutil.NoSuchProcess:
+                    continue
+        for p in [proc, *children]:
             for conn in p.net_connections(kind="tcp"):
                 if (
                     conn.status == psutil.CONN_LISTEN
@@ -2457,7 +2494,7 @@ class MitmproxyService:
                     self._state.pid = None
                     reason = _exit_reason(list(self._exit_tail))
                     if not reason:
-                        reason = f"exit code {proc.poll()}"
+                        reason = _exit_code_reason(proc.poll())
                     self._state.last_error = reason
                     logger.warning("mitmweb exited unexpectedly: %s", reason)
                     self._emit(f"[ERROR] Mitmproxy exited unexpectedly: {reason}")

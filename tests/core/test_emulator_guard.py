@@ -203,6 +203,8 @@ def procs(monkeypatch):
 
     running = _Running()
     monkeypatch.setattr(psutil, "process_iter", lambda attrs: list(running))
+    # The psutil fallback path (no ``ps``); the ps path has its own tests.
+    monkeypatch.setattr(eg, "host_qemu_processes", lambda: None)
     monkeypatch.setattr(eg, "_unidentified_serials", set())
     lsof_calls = []
 
@@ -439,3 +441,70 @@ def test_confirm_waits_the_confirm_delay_and_stops_cleanly(monkeypatch):
     assert g.check_once() is None  # guard stopped while confirming: no kill
     assert waits == [7.5]
     assert adb == []
+
+
+# -- one ``ps`` call instead of a psutil scan of every process (R3-B2) -------
+
+_PS_OUT = """\
+  101 /sbin/launchd
+  202 /sdk/emulator/emulator -avd Dev4 -port 5562
+  303 /sdk/emulator/qemu/darwin-aarch64/qemu-system-aarch64 -avd Dev4 -port 5562 -feature -Vulkan
+  404 /sdk/emulator/qemu/darwin-aarch64/qemu-system-aarch64 -avd Mine
+  505 grep qemu-system
+  bad line
+"""
+
+
+def test_parse_qemu_ps_keeps_only_qemu_lines():
+    assert eg.parse_qemu_ps(_PS_OUT) == [
+        (
+            303,
+            [
+                "/sdk/emulator/qemu/darwin-aarch64/qemu-system-aarch64",
+                "-avd",
+                "Dev4",
+                "-port",
+                "5562",
+                "-feature",
+                "-Vulkan",
+            ],
+        ),
+        (
+            404,
+            ["/sdk/emulator/qemu/darwin-aarch64/qemu-system-aarch64", "-avd", "Mine"],
+        ),
+    ]
+
+
+def test_host_qemu_processes_is_one_ps_call_without_stdin(monkeypatch):
+    import psutil
+
+    calls = []
+
+    def _run(argv, **kw):
+        calls.append((argv, kw))
+        return types.SimpleNamespace(returncode=0, stdout=_PS_OUT, stderr="")
+
+    def _no_scan(*a, **k):
+        raise AssertionError("psutil.process_iter must not run")
+
+    monkeypatch.setattr(eg.subprocess, "run", _run)
+    monkeypatch.setattr(psutil, "process_iter", _no_scan)
+    assert [pid for pid, _argv in eg.host_qemu_processes()] == [303, 404]
+    ((argv, kw),) = calls
+    assert argv[0] == "ps"
+    assert kw["stdin"] is eg.subprocess.DEVNULL
+    assert kw["timeout"] <= 5
+
+    monkeypatch.setattr(
+        psutil, "Process", lambda pid: types.SimpleNamespace(pid=pid, info={})
+    )
+    assert eg.find_emulator_process("emulator-5562").pid == 303
+
+
+def test_host_qemu_processes_is_none_without_ps(monkeypatch):
+    def _missing(*a, **k):
+        raise FileNotFoundError("ps")
+
+    monkeypatch.setattr(eg.subprocess, "run", _missing)
+    assert eg.host_qemu_processes() is None

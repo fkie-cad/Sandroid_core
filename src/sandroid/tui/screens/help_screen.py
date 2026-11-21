@@ -315,7 +315,11 @@ _HAND_SECTIONS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
         ("Shift+Y", "Copy the whole log", ("Y",)),
     ],
     "App lens › Restart now? dialog": [
-        ("y", "Restart (ignored for a moment after it opens)", ("y",)),
+        (
+            "y / Shift+R",
+            "Restart (ignored for a moment after it opens)",
+            ("y", "R"),
+        ),
         ("n / Enter", "Keep running (No has the focus)", ("n", "enter")),
         ("Esc", "Keep running", ("escape",)),
         ("other letters", "Close as No: that looked like typing", ()),

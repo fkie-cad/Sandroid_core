@@ -253,7 +253,7 @@ class FriTapPanel(Widget):
             return ""
         if phase == "hung":
             return f"[{pal.warn}]friTap app not responding[/]"
-        return f"[{pal.ok}]friTap ● on[/]"
+        return f"[{pal.ok}]friTap ● running[/]"  # like Mitmproxy's (R3)
 
     @staticmethod
     def _mark(ok: bool) -> str:

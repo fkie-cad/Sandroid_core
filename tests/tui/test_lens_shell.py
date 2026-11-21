@@ -2240,3 +2240,18 @@ def test_quit_logs_slow_steps_and_names_threads_that_hold_the_exit(
         held.join(5)
     assert "thread 'held-exit' (daemon=False)" in report
     assert "_stuck_adb_read" in report
+
+
+async def test_a_toast_reaches_the_right_edge_over_the_log_hint() -> None:
+    """R3: the hidden toast rack's scrollbar gutter kept toasts 2 columns
+    off the right edge; the "g" of the log ticker's "` log" showed beside.
+    """
+    from textual.widgets._toast import Toast
+
+    app = _app()
+    async with app.run_test(size=(200, 50), notifications=True) as pilot:
+        await boot(app, pilot)
+        app.notify("friTap keeps running; nothing changed")
+        await until(pilot, lambda: bool(app.screen.query(Toast)))
+        toast = app.screen.query_one(Toast)
+        assert toast.region.right == app.size.width

@@ -252,6 +252,22 @@ def test_unexpected_exit_without_output_names_the_exit_code(make_service):
     assert lines == ["[ERROR] Mitmproxy exited unexpectedly: exit code 3"]
 
 
+@pytest.mark.parametrize(
+    ("code", "reason"),
+    [
+        (0, "terminated from outside"),
+        (-9, "killed (SIGKILL)"),
+        (-15, "killed (SIGTERM)"),
+    ],
+)
+def test_a_kill_from_outside_is_not_called_exit_code_0(make_service, code, reason):
+    """R3: SIGTERM ends mitmweb with code 0; the title read "exit code 0"."""
+    svc, _ = make_service()
+    svc._proc = _ExitedProc([], code=code)
+    svc._read_loop()
+    assert svc.state.last_error == reason
+
+
 def test_panel_toasts_engine_errors(panel, monkeypatch):
     p, _, _, _ = panel
     posted = []
@@ -914,3 +930,31 @@ def test_emulator_load_snapshot_restores_the_device_proxy(monkeypatch):
     monkeypatch.setattr(ms, "_INSTANCE", None)
     assert svc.load_snapshot("tmp") is True
     assert ms._INSTANCE is None
+
+
+def test_pid_listening_reads_the_children_from_one_ps_call(monkeypatch):
+    """R3-B2: ``Process.children`` scans every host process (tens of seconds
+    on a busy host) on each poll of the start wait; one ``ps`` call instead.
+    """
+    import psutil
+
+    from sandroid.core import background_tracker
+
+    listen = SimpleNamespace(
+        status=psutil.CONN_LISTEN, laddr=SimpleNamespace(port=8390)
+    )
+
+    class _Proc:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def children(self, recursive=False):
+            raise AssertionError("psutil's full scan must not run")
+
+        def net_connections(self, kind="tcp"):
+            return [listen] if self.pid == 43 else []
+
+    monkeypatch.setattr(psutil, "Process", _Proc)
+    monkeypatch.setattr(background_tracker, "descendant_pids", lambda root: [43])
+    assert ms._pid_listening(42, 8390) is True
+    assert ms._pid_listening(42, 8391) is False

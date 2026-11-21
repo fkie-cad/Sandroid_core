@@ -1354,7 +1354,9 @@ async def test_fritap_caption_follows_its_lifecycle(flow_dir, monkeypatch):
             )
             running["on"] = True
             fritap_mod.set_lifecycle("running", "org.wikipedia")
-            await until(pilot, lambda: "friTap ● on" in ms._lens_captions["network"][0])
+            await until(
+                pilot, lambda: "friTap ● running" in ms._lens_captions["network"][0]
+            )
             fritap_mod.set_lifecycle("hung", "org.wikipedia is not responding")
             await until(
                 pilot, lambda: "not responding" in ms._lens_captions["network"][0]

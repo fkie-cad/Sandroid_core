@@ -51,9 +51,10 @@ class FakeSpotlight:
     def get_pid(self):
         return self._pid
 
-    def set_pid(self, pid) -> None:
+    def set_pid(self, pid, package=None, epoch=None) -> bool:
         self.set_pid_calls.append(pid)
         self._pid = pid
+        return True
 
     def announce_pid(self, pid, package=None) -> bool:
         self.set_pid(pid)  # the real one publishes too

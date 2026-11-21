@@ -119,6 +119,10 @@ class SpotlightService:
         self.last_spawn_error: str | None = None
         #: Package Sandroid is restarting (⇧R) right now, else None.
         self._restarting: str | None = None
+        #: Bumped on every selection change (set_app/reset). A PID sampled
+        #: off-thread carries the epoch it was taken in; set_pid drops it
+        #: when the selection moved meanwhile (R3-B1).
+        self._epoch = 0
         self._event_bus = event_bus
         self._job_manager_factory = job_manager_factory
         self._logger = logger
@@ -163,6 +167,7 @@ class SpotlightService:
                 activity_name=activity_name,
                 pid=pid,
             )
+            self._epoch += 1
             previous_package = previous.package_name if previous else None
         self._logger.debug(
             f"Set spotlight app: {package_name}" + (f" (PID: {pid})" if pid else "")
@@ -222,7 +227,17 @@ class SpotlightService:
         app = self._current_app
         return app.pid if app else None
 
-    def set_pid(self, pid: int | None) -> None:
+    def selection_epoch(self) -> int:
+        """Counter bumped on every selection change (see :meth:`set_pid`)."""
+        with self._lock:
+            return self._epoch
+
+    def set_pid(
+        self,
+        pid: int | None,
+        package: str | None = None,
+        epoch: int | None = None,
+    ) -> bool:
         """Update the cached PID of the current spotlight app.
 
         Pass ``None`` to clear the PID (e.g. after the app is killed).
@@ -232,16 +247,35 @@ class SpotlightService:
         worker thread on every tick; publishing here would create a
         poll -> event -> refresh feedback loop.
 
+        A PID sampled off-thread is tagged with the ``package`` (and the
+        :meth:`selection_epoch`) it was sampled for. The write is a
+        compare-and-set under the lock: when the selection moved since, the
+        sample belongs to another app and is dropped (R3-B1: the poll wrote
+        ground_truth's PID under org.wikipedia, and the liveness check then
+        unloaded Wikipedia's running hooks).
+
         Args:
             pid: New process ID, or None to clear it.
+            package: The package the PID was sampled for, if known.
+            epoch: The selection epoch the PID was sampled in, if known.
+
+        Returns:
+            False if the sample was dropped (stale tag or no selection).
         """
         with self._lock:
-            if self._current_app:
-                self._current_app.pid = pid
+            app = self._current_app
+            if app is None:
+                return False
+            if package is not None and app.package_name != package:
+                return False
+            if epoch is not None and epoch != self._epoch:
+                return False
+            app.pid = pid
         if pid:
             self._logger.debug(f"Updated spotlight PID to {pid}")
         else:
             self._logger.debug("Cleared spotlight PID")
+        return True
 
     def announce_pid(self, pid: int | None, package: str | None = None) -> bool:
         """Set the PID after a lifecycle change (spawn, respawn, process death).
@@ -515,6 +549,7 @@ class SpotlightService:
         with self._lock:
             previous_pkg = self.get_effective_package()
             self._current_app = None
+            self._epoch += 1
 
         self._logger.info("Reset spotlight application")
 
@@ -573,9 +608,12 @@ class SpotlightService:
             self._logger.debug(f"Could not disarm the bypasses: {exc}")
             return
         if cleared:
+            # Only the armed set (applied at the next start) is cleared;
+            # hooks already running in the app stay loaded. "disarmed" read
+            # as if those stopped too (R3).
             self._logger.info(
                 f"Selection left {previous_package}: bypass "
-                f"{', '.join(cleared)} disarmed"
+                f"{', '.join(cleared)} no longer armed for its next start"
             )
 
     def _publish_app_changed(

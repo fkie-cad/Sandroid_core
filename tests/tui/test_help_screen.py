@@ -377,6 +377,11 @@ async def test_help_has_no_duplicates_and_lists_the_dialogs() -> None:
     settings = sections["Settings (,)"]
     assert any(r.endswith("[Ctrl+S]") for r in settings)
     assert any(r.endswith("[Shift+Right]") for r in settings)
-    assert any(r.endswith("[y]") for r in sections["App lens › Restart now? dialog"])
+    restart = sections["App lens › Restart now? dialog"]
+    # R3-V1: Shift+R answers Yes in that dialog too, and Shift+R itself asks.
+    assert any(r.endswith("[y / Shift+R]") for r in restart)
+    app_lens_rows = " ".join(sections["App lens"])
+    assert "no dialog" not in app_lens_rows
+    assert "asks first" in app_lens_rows
     frida = next(r for r in sections["Emulator"] if r.rstrip().endswith("[f]"))
     assert "install" not in frida.split("  ")[0].lower()

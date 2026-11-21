@@ -425,7 +425,7 @@ class SpotlightPanel(Widget):
         /:       filter the rows of all sections (Esc clears)
         z:       fold / unfold the focused section
         u:       refresh runtime facts (grants, AppOps, footprint, services)
-        R:       restart (force-stop + respawn with armed hooks; no dialog)
+        R:       restart (asks first; force-stop + respawn with armed hooks)
         A:       attach to the live process + apply armed hooks
         P:       start paused (advanced; Space then resumes; asks before
                  restarting a running app; Android ends a hold after ~10 s)
@@ -531,7 +531,7 @@ class SpotlightPanel(Widget):
         Binding(
             "R",
             "restart_app",
-            "Restart with the armed bypasses (no dialog)",
+            "Restart with the armed bypasses (asks first)",
             show=False,
         ),
         Binding(
@@ -1398,16 +1398,25 @@ class SpotlightPanel(Widget):
             self._hidden_ticks += 1
             if self._hidden_ticks % _HIDDEN_POLL_EVERY:
                 return
+        try:
+            epoch = self._spotlight().selection_epoch()
+        except Exception:
+            epoch = None
         self._poll_inflight = True
         self.run_worker(
-            functools.partial(self._poll_worker, package),
+            functools.partial(self._poll_worker, package, epoch),
             name="spotlight_pid_poll",
             exclusive=False,
             thread=True,
         )
 
-    def _poll_worker(self, package: str) -> None:
-        """Worker-thread body of the poll. Writes PID; refreshes on change."""
+    def _poll_worker(self, package: str, epoch: int | None = None) -> None:
+        """Worker-thread body of the poll. Writes PID; refreshes on change.
+
+        The sample is tagged with the package and selection epoch it was
+        taken for: when the selection moved while ADB answered, the reading
+        belongs to the old app and is dropped (R3-B1).
+        """
         pid = None
         try:
             from sandroid.core.adb import Adb
@@ -1430,7 +1439,8 @@ class SpotlightPanel(Widget):
 
         try:
             previous_pid = self._spotlight().get_pid()
-            self._spotlight().set_pid(pid)
+            if self._spotlight().set_pid(pid, package=package, epoch=epoch) is False:
+                return  # the selection moved meanwhile: a stale sample
         except Exception:
             previous_pid = pid
 
@@ -1663,6 +1673,10 @@ class SpotlightPanel(Widget):
     def _recheck_pid_then_start(self) -> None:
         """Re-read the app's PID off-thread; start it if it is really gone."""
         package = self._current_package()
+        try:
+            epoch = self._spotlight().selection_epoch()
+        except Exception:
+            epoch = None
 
         def _check() -> None:
             pid = None
@@ -1675,7 +1689,11 @@ class SpotlightPanel(Widget):
             except Exception as exc:
                 logger.debug(f"PID re-check failed for {package}: {exc}")
             try:
-                self._spotlight().set_pid(pid)
+                if (
+                    self._spotlight().set_pid(pid, package=package, epoch=epoch)
+                    is False
+                ):
+                    return  # the selection moved meanwhile (R3-B1)
             except Exception:
                 pass
             self._last_running_state = pid is not None

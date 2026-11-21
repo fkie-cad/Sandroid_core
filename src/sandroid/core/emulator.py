@@ -2126,27 +2126,18 @@ def avd_from_cmdline(cmdline: list[str] | None) -> str:
 def host_avd_names() -> dict[str, str]:
     """``{"emulator-<port>": AVD}`` of the emulators running on this host,
     read from their qemu command lines (``-port N`` + ``-avd NAME``) in one
-    process scan -- never from a device or its console, so it is safe for
-    another session's emulator. Emulators started without ``-port`` (not by
-    Sandroid) are not in it. ``{}`` when psutil cannot list processes.
+    ``ps`` call (:func:`~sandroid.core.emulator_guard.host_qemu_processes`;
+    a psutil scan of every host process took 63 s on a busy host, R3-B2) --
+    never from a device or its console, so it is safe for another session's
+    emulator. Emulators started without ``-port`` (not by Sandroid) are not
+    in it. ``{}`` when the processes cannot be listed.
     """
-    from sandroid.core.emulator_guard import console_port
+    from sandroid.core.emulator_guard import _qemu_candidates, console_port
 
-    try:
-        import psutil
-    except ImportError:  # pragma: no cover - psutil is a core dependency
-        return {}
     names: dict[str, str] = {}
     try:
-        for proc in psutil.process_iter(["name", "cmdline"]):
-            try:
-                name = proc.info.get("name") or ""
-                cmdline = proc.info.get("cmdline") or []
-            except Exception:
-                continue
-            if not name.startswith("qemu-system") or not cmdline:
-                continue
-            port = console_port([str(a) for a in cmdline])
+        for _proc, cmdline in _qemu_candidates():
+            port = console_port(cmdline)
             avd = avd_from_cmdline(cmdline)
             if port and avd:
                 names[f"emulator-{port}"] = avd
