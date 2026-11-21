@@ -559,3 +559,42 @@ def test_quit_summary_lists_the_flow_log(tmp_path, monkeypatch):
     out.truncate(0)
     ExitSummaryRenderer.print_exit_summary({})
     assert "Mitmproxy flows" not in out.getvalue()  # empty: not listed
+
+
+def test_exit_summary_lists_a_shared_file_once(tmp_path, monkeypatch):
+    """N3-V13: friTap's pcap was listed under "fritap" and again under
+    "network" (the network capture friTap started reports it too).
+    """
+    import io
+
+    from rich.console import Console
+
+    from sandroid.core.console import SandroidConsole
+    from sandroid.services.renderers import ExitSummaryRenderer
+    from sandroid.services.tool_usage_service import ToolUsageService
+
+    pcap = tmp_path / "fritap" / "fritap_capture_1.pcap"
+    keylog = tmp_path / "fritap" / "fritap_keylog.log"
+    pcap.parent.mkdir()
+    pcap.write_bytes(b"x")
+    keylog.write_text("k")
+    tools = {
+        "fritap": {"used": True, "files": [str(keylog), str(pcap)]},
+        "network": {"used": True, "files": [str(pcap)]},
+    }
+    out = io.StringIO()
+    monkeypatch.setattr(
+        SandroidConsole, "get", classmethod(lambda cls: Console(file=out, width=200))
+    )
+    monkeypatch.setattr(flow_log, "resolve_flow_dir", lambda: tmp_path / "none")
+    monkeypatch.setenv("SESSION_PATH", str(tmp_path))
+    ExitSummaryRenderer.print_exit_summary(tools)
+    text = out.getvalue()
+    assert text.count("fritap_capture_1.pcap") == 1
+    assert "network:" not in text  # nothing of its own left to list
+
+    service = ToolUsageService()
+    service.mark_used("fritap", [str(keylog), str(pcap)])
+    service.mark_used("network", [str(pcap)])
+    summary = service.get_summary_string(str(tmp_path))
+    assert summary.count("fritap_capture_1.pcap") == 1

@@ -221,11 +221,15 @@ class ToolUsageService:
                 return ""
 
             lines = ["Generated files by tool:"]
+            listed: set[str] = set()
             for tool_name, tool in self._tools.items():
-                if tool.files:
+                # A file two tools report is listed once, under the first.
+                files = [f for f in tool.files if f and f not in listed]
+                listed.update(files)
+                if files:
                     display = tool.display_name or tool_name
                     lines.append(f"  {display}:")
-                    for file_path in tool.files:
+                    for file_path in files:
                         if file_path and os.path.exists(file_path):
                             try:
                                 rel_path = os.path.relpath(file_path, results_path)

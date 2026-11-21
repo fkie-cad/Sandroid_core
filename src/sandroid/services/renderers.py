@@ -205,19 +205,28 @@ class ExitSummaryRenderer:
         if tools:
             console.print()
             console.print("[cyan]Generated files by tool:[/cyan]")
+            listed: set[str] = set()
             for tool_name, tool_info in tools.items():
                 if isinstance(tool_info, dict):
                     files = tool_info.get("files", [])
                 else:
                     # Support ToolUsage-like objects
                     files = [getattr(tool_info, "file_path", None)]
-
-                if files:
+                # A file two tools report (friTap's pcap is also the network
+                # capture's) is listed once, under the first (E2E N3-V13).
+                shown = []
+                for file_path in files:
+                    if not file_path or not os.path.exists(file_path):
+                        continue
+                    key = os.path.realpath(file_path)
+                    if key not in listed:
+                        listed.add(key)
+                        shown.append(file_path)
+                if shown:
                     console.print(f"  [magenta]{tool_name}:[/magenta]")
-                    for file_path in files:
-                        if file_path and os.path.exists(file_path):
-                            rel_path = os.path.relpath(file_path, results_path)
-                            console.print(f"    \u2022 {rel_path}")
+                    for file_path in shown:
+                        rel_path = os.path.relpath(file_path, results_path)
+                        console.print(f"    \u2022 {rel_path}")
 
         flows = ExitSummaryRenderer._mitm_flows_dir()
         if flows:
