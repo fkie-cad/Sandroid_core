@@ -109,3 +109,26 @@ class TestLoadWatchlistIndex:
 
         assert added == 0
         assert service.get_spotlight_files() == []
+
+
+class _ListingAdb:
+    """``find`` output for a watched ``databases/*`` pattern."""
+
+    @staticmethod
+    def send_adb_command(cmd):
+        base = "/data/data/com.app/databases/"
+        names = ["a.db", "a.db-wal", "a.db-shm", "b.db-journal", "b.db"]
+        return "\n".join(base + n for n in names) + "\n", ""
+
+
+def test_pattern_skips_every_sqlite_companion_including_shm():
+    """N1-B1: ``-shm`` (the WAL index) is neither watched nor pulled on
+    its own, like ``-wal``/``-journal``.
+    """
+    service = ForensicService()
+    service.add_spotlight_file("/data/data/com.app/databases/*", adb=_ListingAdb)
+    assert service.get_spotlight_files() == [
+        "/data/data/com.app/databases/a.db",
+        "/data/data/com.app/databases/b.db",
+    ]
+    assert not service.add_spotlight_file("/data/data/com.app/databases/a.db-shm")
