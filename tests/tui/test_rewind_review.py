@@ -377,6 +377,35 @@ async def test_enter_in_the_name_field_never_starts_a_rewind():
         assert app.screen is modal
 
 
+async def test_review_opens_on_the_file_list_so_q_quits_and_keeps_the_name():
+    """R1-B2: Review opened in the Name field with its text selected, so q
+    renamed the recording to "q" and never reached the quit dialog.
+    """
+    from textual.widgets import Input
+
+    quits: list[bool] = []
+
+    class QuitHost(Host):
+        def action_request_quit(self) -> None:
+            quits.append(True)
+
+    ctl = FakeController()
+    modal = ReviewModal(_rec(), ctl)
+    app = QuitHost(modal)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await until(pilot, lambda: app.screen is modal)
+        files = modal.query_one("#review-files", SelectionList)
+        await until(pilot, lambda: app.focused is files)
+        await pilot.press("q")
+        await until(pilot, lambda: quits)
+        name = modal.query_one("#review-name", Input)
+        assert name.value == "Recording 13:36"
+        assert set(ctl.names) <= {"Recording 13:36"}  # never renamed to "q"
+        await pilot.press("tab")  # the Name field is still reachable
+        await settle(pilot)
+        assert app.focused is not files
+
+
 async def test_esc_on_the_stop_question_keeps_the_rewind_running():
     from sandroid.tui.modals import ConfirmModal
 

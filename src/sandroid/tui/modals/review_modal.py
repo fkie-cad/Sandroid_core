@@ -201,6 +201,24 @@ class ReviewModal(ForensicModal[None]):
     def on_mount(self) -> None:
         super().on_mount()
         self.refresh_lists()
+        self.call_after_refresh(self._focus_list)
+
+    def _focus_list(self) -> None:
+        """Open on the file list, not the Name field (R1-B2): with the name
+        focused and selected, q (or any stray key) replaced the recording's
+        name and never reached the quit dialog. Tab or a click reaches it.
+        """
+        for selector in (
+            "#review-files",
+            "#review-requests",
+            "#rewind-replay",
+            "#close",
+        ):
+            with contextlib.suppress(Exception):
+                widget = self.query_one(selector)
+                if widget.display and widget.focusable:
+                    widget.focus()
+                    return
 
     # -- content ---------------------------------------------------------------
 
