@@ -57,6 +57,9 @@ def _make_config(backend: str = "fsmon", default_path: str = "/data/"):
 def _stub_spotlight(monkeypatch):
     """Force the modal into path-only mode with no spotlight app."""
     monkeypatch.setattr(monitor_modal, "get_spotlight_service", _StubSpotlight)
+    # What the last start remembered (mode, paths) is per process: none.
+    for name in ("_last_mode", "_last_paths", "_last_app"):
+        monkeypatch.setattr(MonitorConfigModal, name, None)
 
 
 def _patch_backend(monkeypatch, backend: str, availability, default_path="/data/"):

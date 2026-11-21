@@ -379,3 +379,93 @@ async def test_events_say_how_many_are_kept_and_fold_identical_runs() -> None:
         assert lines[3].endswith("×26")  # 30 kept: 3 + 1 + 26
         assert len(lines) == 4
         await pilot.pause()
+
+
+# --------------------------------------------------------------------------
+# V8: monitor dialog (Follow dimmed in Path mode, words, reopen, round)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def monitor_dialog(monkeypatch):
+    """The modal with a running spotlight app on a kprobe device."""
+    from types import SimpleNamespace
+
+    from sandroid.tui.modals import monitor_modal
+    from sandroid.tui.modals.monitor_modal import MonitorConfigModal
+
+    class _Spot:
+        def get_app_tuple(self):
+            return ("org.mozilla.firefox", "Firefox")
+
+        def get_pid(self):
+            return 6264
+
+    monkeypatch.setattr(monitor_modal, "get_spotlight_service", _Spot)
+    monkeypatch.setattr(
+        monitor_modal,
+        "get_config",
+        lambda: SimpleNamespace(
+            tui=SimpleNamespace(monitor_backend="kprobe", monitor_follow_app=True),
+            device_paths=SimpleNamespace(default_monitor_path="/data/"),
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_modal.KprobeTracer, "cached_availability", classmethod(lambda c: True)
+    )
+    for name in ("_last_mode", "_last_paths", "_last_app"):
+        monkeypatch.setattr(MonitorConfigModal, name, None)
+    return MonitorConfigModal
+
+
+async def test_monitor_dialog_dims_follow_in_path_mode_and_remembers(
+    monitor_dialog,
+) -> None:
+    from textual.app import App
+    from textual.widgets import Checkbox, RadioSet
+
+    from sandroid.tui.modals.base import KeyHintFooter
+
+    results: list = []
+
+    class _App(App):
+        def on_mount(self) -> None:
+            self.push_screen(monitor_dialog(), results.append)
+
+    app = _App()
+    async with app.run_test(size=(120, 50)) as pilot:
+        await pilot.pause()
+        modal = app.screen
+        follow = modal.query_one("#follow-app", Checkbox)
+        assert modal.focused is modal.query_one("#mode-select", RadioSet)
+        assert not follow.disabled
+        hint = str(modal.query_one(KeyHintFooter).render())
+        assert "Up/Down=Select Mode" in hint
+        assert "↑" not in hint
+        border = modal.query_one(".modal-container").styles.border_top[0]
+        assert border == "round"
+        await pilot.press("down", "enter")  # Path
+        await pilot.pause()
+        assert follow.disabled  # dimmed: an App-mode option
+        modal._add_path_row()
+        await pilot.pause()
+        modal.query(".path-input").last().value = "/data/data/org.wikipedia"
+        modal._start()
+        await pilot.pause()
+        assert results[-1].target_paths == [
+            "/data/data/org.mozilla.firefox",
+            "/data/data/org.wikipedia",
+        ]
+        # Reopen: the mode list has the focus and its highlight on Path,
+        # the extra path is listed again.
+        app.push_screen(monitor_dialog(), results.append)
+        await pilot.pause()
+        modal = app.screen
+        radio = modal.query_one("#mode-select", RadioSet)
+        assert modal.focused is radio
+        assert radio._selected == radio.pressed_index == 1
+        assert modal.query_one("#follow-app", Checkbox).disabled
+        assert [i.value for i in modal.query(".path-input")] == [
+            "/data/data/org.mozilla.firefox",
+            "/data/data/org.wikipedia",
+        ]
