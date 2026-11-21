@@ -119,7 +119,7 @@ async def test_ctrl_y_opens_focuses_and_closes(saved) -> None:
         panel = ms.query_one("#chat-panel")
         assert ms.chat_mode == "closed"
         assert not dock.display
-        assert ms.query_one("#log-ticker-hint").render().plain == "^Y AI · ` log"
+        assert ms.query_one("#log-ticker-hint").render().plain == "Ctrl+Y AI · ` log"
 
         await pilot.press("ctrl+y")
         await settle(pilot)
@@ -130,7 +130,7 @@ async def test_ctrl_y_opens_focuses_and_closes(saved) -> None:
         assert ms.chat_has_focus
         assert ms.has_class("-chat-open")
         assert dock.border_title == "Sandroid AI"  # the mascot shows inside
-        assert dock.border_subtitle == "50% · Shift+Up/Down size · ^Y close"
+        assert dock.border_subtitle == "50% · Shift+Up/Down size · Ctrl+Y close"
         assert _rows(ms) == chat_rows(_left_h(ms), 0.5)
 
         # Focus elsewhere: Ctrl+Y focuses the chat, it does not close it.
@@ -259,7 +259,7 @@ async def test_shift_arrows_step_presets_and_max(saved) -> None:
         assert not _dock(ms).styles.inline.has_rule("height")
         assert _rows(ms) == h
         assert not is_shown(ms.query_one("#lens-host"))
-        assert _dock(ms).border_subtitle == "max · Shift+Down restore · ^Y close"
+        assert _dock(ms).border_subtitle == "max · Shift+Down restore · Ctrl+Y close"
         await pilot.press("shift+up")  # already max
         await settle(pilot)
         assert ms.chat_mode == "max"
@@ -321,7 +321,7 @@ async def test_short_window_shows_the_chat_maximized() -> None:
         assert not _dock(ms).styles.inline.has_rule("height")
         assert not is_shown(ms.query_one("#lens-host"))
         assert _rows(ms) == _left_h(ms)
-        assert _dock(ms).border_subtitle == "small window · ^Y close"
+        assert _dock(ms).border_subtitle == "small window · Ctrl+Y close"
         assert not ms.chat_can_resize
         # Closing the drawer gives the split back.
         ms.toggle_log_drawer()
@@ -583,9 +583,9 @@ async def test_approval_in_a_closed_dock_shows_without_stealing_focus(
         ticker = ms.query_one("#log-ticker")
         assert ticker.attention
         assert "approval" in ticker.attention
-        # ^Y once (the badge names it; the hint leaves "^Y AI" out), no glyph.
+        # Ctrl+Y once (the badge names it; the hint leaves "Ctrl+Y AI" out), no glyph.
         hint = ms.query_one("#log-ticker-hint").render().plain
-        assert hint == "approval needed · ^Y · ` log"
+        assert hint == "approval needed · Ctrl+Y · ` log"
         assert "⚠" not in hint
         await pilot.press("enter")
         await settle(pilot)
@@ -600,7 +600,7 @@ async def test_approval_in_a_closed_dock_shows_without_stealing_focus(
         await until(pilot, lambda: not ticker.attention)
         await settle(pilot)
         hint = ms.query_one("#log-ticker-hint").render().plain
-        assert hint.startswith("^Y AI · ")
+        assert hint.startswith("Ctrl+Y AI · ")
 
 
 async def test_approval_while_typing_in_the_chat_swallows_stray_letters(

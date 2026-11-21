@@ -73,6 +73,7 @@ from sandroid.ai.tool_permissions import (
     get_approval_broker,
     get_tool_permission_store,
 )
+from sandroid.tui.key_display import key_words
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
 from sandroid.tui.utils import copy_to_clipboard
 from sandroid.tui.widgets.chat_view import (
@@ -1031,8 +1032,9 @@ class AgentTranscriptModal(ForensicModal[None]):
                 yield Button("Close", id="agent-close", classes="-primary")
             yield KeyHintFooter(
                 hints={
-                    "button": "[dim]Enter=Send  PgUp/PgDn=Scroll  "
-                    "^T=Full task  Esc=Close[/dim]"
+                    "button": key_words(
+                        "[dim]Enter=Send  PgUp/PgDn=Scroll  ^T=Full task  Esc=Close[/dim]"
+                    )
                 }
             )
 
@@ -1315,7 +1317,7 @@ class ChatPanel(Widget):
     ]
 
     #: The StatusBar/ticker badge while an approval waits.
-    ATTENTION = "approval needed · ^Y"
+    ATTENTION = key_words("approval needed · ^Y")
 
     #: Keyboard grace of the approval card (tests set 0).
     APPROVAL_INPUT_GRACE_S: float | None = None
@@ -1444,7 +1446,7 @@ class ChatPanel(Widget):
     def on_mount(self) -> None:
         field = self._input()
         if field is not None:
-            field.border_subtitle = "Enter send · ^X stop"
+            field.border_subtitle = key_words("Enter send · ^X stop")
         self._render_intro(legacy_notice=True)
         self.refresh_header()
         self.set_interval(TICK_S, self._tick)

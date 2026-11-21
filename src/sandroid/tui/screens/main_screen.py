@@ -1292,7 +1292,7 @@ class MainScreen(Screen):
         if self._chat_mode == "max":
             return key_words("max · ⇧↓ restore · ^Y close")
         if self._chat_too_short():
-            return "small window · ^Y close"
+            return key_words("small window · ^Y close")
         return key_words(f"{round(self._chat_ratio * 100)}% · ⇧↑/↓ size · ^Y close")
 
     def open_chat(self, focus: bool = True, *, split: bool = False) -> None:

@@ -13,11 +13,14 @@ user goes through :func:`format_key` so a shifted letter is always marked:
 
 Keys are words, never glyphs (the user's no-glyph rule covers key names):
 arrows read ``Left`` / ``Right`` / ``Up`` / ``Down``, Enter ``Enter``, Shift
-``Shift+``. :func:`key_words` turns glyphs in hand-written labels (a
-binding's ``key_display``, help rows) into the same words.
+``Shift+``. :func:`key_words` turns glyphs and the caret notation
+(``^Y`` -> ``Ctrl+Y``) in hand-written labels (a binding's
+``key_display``, help rows, the AI chat's hints) into the same words.
 """
 
 from __future__ import annotations
+
+import re
 
 #: The Shift prefix in both styles (a word, not the old ``⇧`` glyph).
 SHIFT_PREFIX = "Shift+"
@@ -38,10 +41,17 @@ KEY_WORDS: dict[str, str] = {
 }
 
 
+#: ``^X`` (caret + one letter, not followed by another letter) in a label.
+_CARET_KEY = re.compile(r"\^([A-Za-z])(?![A-Za-z])")
+
+
 def key_words(text: str) -> str:
-    """*text* with key glyphs replaced by their words (``⇧←`` -> ``Shift+Left``)."""
+    """*text* with key glyphs replaced by their words (``⇧←`` -> ``Shift+Left``,
+    ``^Y`` -> ``Ctrl+Y``).
+    """
     for glyph, word in KEY_WORDS.items():
         text = text.replace(glyph, word)
+    text = _CARET_KEY.sub(lambda m: f"Ctrl+{m.group(1).upper()}", text)
     return text.replace("Shift++", "Shift+").replace("Alt++", "Alt+")
 
 

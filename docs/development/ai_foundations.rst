@@ -646,7 +646,7 @@ renders live in the session scratchpad (``ui-dock/mockups.txt``, ``ui-look/mock_
   - Border ``round $lens-rule``; under ``:focus-within`` it becomes ``$lens-rule-focus``.
   - Title ``Sandroid AI`` in ``$lens-accent`` (no mascot glyph: the mascot shows once,
     inside the dock).
-  - Subtitle ``50% · Shift+Up/Down size · ^Y close``.
+  - Subtitle ``50% · Shift+Up/Down size · Ctrl+Y close``.
 
 - **Transcript.** Replace the RichLog with ``ChatTranscript(VerticalScroll)``, holding one
   widget per block keyed by turn, call or agent id:
@@ -694,17 +694,17 @@ renders live in the session scratchpad (``ui-dock/mockups.txt``, ``ui-look/mock_
   - Keys 1–3, ↑↓ and Enter; Esc means No. Once answered, the answer is shown on the
     tool call it belongs to, above its result chip (subagent approvals: one transcript
     line).
-  - Only the selected option has the cursor background and a ``›`` marker; while the
+  - Only the selected option has the cursor background (no glyph marker); while the
     note input is open the card and its hint switch to ``$chat-wait``.
   - Focus: the card takes the focus only when the focus already is in the chat (or
     nowhere); stray letters are swallowed while it has it. A closed dock opens
     unfocused; then, and whenever the focus is elsewhere, a toast and the ticker badge
-    ``approval needed · ^Y`` (warn colour) say so, and Ctrl+Y focuses the card.
+    ``approval needed · Ctrl+Y`` (warn colour) say so, and Ctrl+Y focuses the card.
   - All model text is ``Content`` (never markup): ``rich.markup.escape`` does not match
     Textual 8's parser.
 
 - **Below the scroll area:** the agents bar (one line) and the input row
-  (``Ask Sandroid… / for commands``, subtitle ``Enter send · ^X stop``) with the mascot
+  (``Ask Sandroid… / for commands``, subtitle ``Enter send · Ctrl+X stop``) with the mascot
   beside it (hidden while the empty state shows its own, and below 72 columns). Typing
   ``/`` shows a slash-command hint list.
 - **Empty state.** Mascot C (the head standing in a ``╘═══════╛`` sandbox tray), plus
