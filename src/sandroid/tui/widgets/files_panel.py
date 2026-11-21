@@ -193,8 +193,9 @@ logger = logging.getLogger(__name__)
 #: How often a dirty table is redrawn (monitor batches arrive every ~0.15 s).
 _REFRESH_INTERVAL = 0.4
 
-#: Fixed column widths (★, ops, count, last); the path takes the rest.
-_W_MARK, _W_OPS, _W_COUNT, _W_LAST = 1, 5, 5, 8
+#: Fixed column widths (★, ops, count, last); the path takes the rest. The
+#: count fits ``9999x`` exactly and ``94.8kx`` compact (``count_text``).
+_W_MARK, _W_OPS, _W_COUNT, _W_LAST = 1, 5, 6, 8
 #: The Identity column (values of the identity profile found in the file).
 _W_IDENT = 16
 
@@ -343,6 +344,22 @@ def diff_markup(diff: str | list[str]) -> str:
 
     lines = diff.splitlines() if isinstance(diff, str) else list(diff)
     return "\n".join(line if _is_markup(line) else escape(line) for line in lines)
+
+
+def count_text(n: int) -> str:
+    """A row's event count in at most ``_W_COUNT`` cells, the times sign
+    kept: ``812x``, ``9999x``, ``94.8kx``, ``123kx``, ``1.2Mx`` (x = the
+    times sign). Exact counts are in the Inspector.
+    """
+    if n < 10_000:
+        return f"{n}×"
+    for div, unit in ((1_000, "k"), (1_000_000, "M"), (1_000_000_000, "G")):
+        value = n / div
+        if round(value, 1) < 100:
+            return f"{value:.1f}{unit}×"
+        if round(value) < 1_000:
+            return f"{round(value)}{unit}×"
+    return f"{n // 1_000_000_000}G×"
 
 
 def _fmt_time(when: datetime | None) -> str:
@@ -1809,7 +1826,7 @@ class FilesPanel(Widget):
         elif row.pattern:
             ops.append("*", style=_c("dim"))
         count = Text(
-            f"{max(0, stats.count - ours)}×" if stats else "",
+            count_text(max(0, stats.count - ours)) if stats else "",
             style=_c("dim"),
             justify="right",
         )
