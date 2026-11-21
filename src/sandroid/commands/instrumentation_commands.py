@@ -148,6 +148,14 @@ class MalwareMonitorCommand(CommandHandler):
             # Start monitoring (will show interactive config if TTY)
             if not monitor.start_monitoring():
                 reason = getattr(monitor, "last_error", None) or "unknown error"
+                if getattr(monitor, "attach_timed_out", False) is True:
+                    # The message says what to do: a red line, no dialog.
+                    return CommandResult(
+                        success=False,
+                        message=reason,
+                        error=reason,
+                        data={"no_dialog": True},
+                    )
                 return CommandResult(
                     success=False,
                     message=f"Failed to start malware monitoring: {reason}",
@@ -358,6 +366,14 @@ class ReconfigureHooksCommand(RequiresFrida):
             # Start monitoring with new configuration
             if not monitor.start_monitoring():
                 reason = getattr(monitor, "last_error", None) or "unknown error"
+                if getattr(monitor, "attach_timed_out", False) is True:
+                    # The message says what to do: a red line, no dialog.
+                    return CommandResult(
+                        success=False,
+                        message=reason,
+                        error=reason,
+                        data={"no_dialog": True},
+                    )
                 return CommandResult(
                     success=False,
                     message=f"Failed to restart monitoring: {reason}",

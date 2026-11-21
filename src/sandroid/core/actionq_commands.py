@@ -224,6 +224,9 @@ def execute_command_from_actionq(
         elif result.error == "cancelled":
             # The user said no in a dialog: not a failure.
             logger.info(f"Command '{char}' cancelled: {result.message}")
+        elif (result.data or {}).get("no_dialog"):
+            # The command logged its own message (what to do next).
+            logger.debug(f"Command '{char}' failed: {result.message}")
         else:
             logger.warning(f"Command '{char}' failed: {result.error or result.message}")
 

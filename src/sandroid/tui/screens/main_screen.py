@@ -2522,7 +2522,16 @@ class MainScreen(Screen):
                         "cancel" in (result.error or "").lower()
                         or "cancel" in (result.message or "").lower()
                     )
-                    if not cancelled:
+                    if (result.data or {}).get("no_dialog"):
+                        # The message says what to do: a red toast, never a
+                        # dialog that eats the next keys (N6-B6).
+                        self.app.call_from_thread(
+                            self.app.notify,
+                            result.message or str(result.error),
+                            severity="error",
+                            timeout=8,
+                        )
+                    elif not cancelled:
                         error_msg = result.message or str(result.error)
                         self.app.call_from_thread(
                             self._show_error_modal, "Command Failed", error_msg
