@@ -638,18 +638,35 @@ class SpotlightPanel(Widget):
             for cell_id, (wide, _keys, _letter) in _ACTION_LABELS.items():
                 yield Static(wide, id=cell_id, classes="act-cell")
 
-    def on_resize(self, event) -> None:
+    def on_resize(self, _event) -> None:
         """Compact bypass row / key-only action row on a narrow lens."""
-        width = event.size.width
-        compact = width < _COMPACT_WIDTH
-        narrow = 2 if width < _NARROW_WIDTH else int(width < _KEYS_ONLY_WIDTH)
-        if (compact, narrow) == (self._compact, self._narrow):
+        if not self._fit_width():
             # The bypass key hint comes and goes with the width.
             try:
                 self.query_one("#spotlight-body", Static).update(self._render_body())
             except Exception:
                 pass
-            return
+
+    def _on_screen_layout(self, _screen: object = None) -> None:
+        """After every layout pass of the screen: fit the current width.
+
+        A Resize event alone was not enough: closing the Inspector widened
+        the lens back to the full width while the action row kept its
+        narrow "Shift+ R A P K X" form (seen under host load), and nothing
+        resized it again.
+        """
+        if self.is_attached:
+            self._fit_width()
+
+    def _fit_width(self) -> bool:
+        """Layout mode from the panel's current width; True if it changed."""
+        width = self.size.width
+        if not width:
+            return False
+        compact = width < _COMPACT_WIDTH
+        narrow = 2 if width < _NARROW_WIDTH else int(width < _KEYS_ONLY_WIDTH)
+        if (compact, narrow) == (self._compact, self._narrow):
+            return False
         self._compact, self._narrow = compact, narrow
         for cell_id, labels in _ACTION_LABELS.items():
             try:
@@ -661,6 +678,7 @@ class SpotlightPanel(Widget):
         except Exception:
             pass
         self.refresh_panel()
+        return True
 
     def on_mount(self) -> None:
         self._subscribe_events()
@@ -669,6 +687,12 @@ class SpotlightPanel(Widget):
             self.app.theme_changed_signal.subscribe(self, self._repaint_text)
         except Exception:
             logger.debug("Spotlight panel: no theme signal", exc_info=True)
+        try:
+            self.screen.screen_layout_refresh_signal.subscribe(
+                self, self._on_screen_layout
+            )
+        except Exception:
+            logger.debug("Spotlight panel: no layout signal", exc_info=True)
         # Event-driven transitions cover the common cases; this slow poll is
         # the safety net that catches the app dying on its own. Stopped in
         # on_unmount; each tick is a no-op when no app is selected or the
