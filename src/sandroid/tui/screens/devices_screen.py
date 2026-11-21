@@ -1175,6 +1175,9 @@ class DevicesScreen(ModalScreen[str | None]):
         self.snapshot: HubSnapshot | None = None
         #: Row key -> what is being done to it ("stopping…").
         self._busy: dict[str, str] = {}
+        #: Row key -> (red word, hint) of an action that failed on it ("stop
+        #: failed"); kept until the row goes away or a new action starts.
+        self._failed: dict[str, tuple[str, str]] = {}
         #: AVDs whose next start wipes their data (never persisted).
         self._wipe: set[str] = set()
         self._in_flight = False
@@ -1375,6 +1378,15 @@ class DevicesScreen(ModalScreen[str | None]):
         busy = self._busy.get(row.key)
         if busy:
             return Text(f"◌ {busy}", style=_c("title"))
+        cell = self._plain_state_cell(row)
+        failed = self._failed.get(row.key)
+        if failed:
+            cell.append(" · ", style=_c("dim"))
+            cell.append(failed[0], style=f"bold {_c('bad')}")
+        return cell
+
+    def _plain_state_cell(self, row: DeviceRow | AvdRow) -> Text:
+        """The State cell without the busy / failed overlays."""
         if isinstance(row, AvdRow):
             if row.running_elsewhere:
                 return Text("● running elsewhere", style=_c("warn"))
@@ -1472,6 +1484,9 @@ class DevicesScreen(ModalScreen[str | None]):
         self.snapshot = snap
         table = self.query_one("#hub-table", DataTable)
         rows = snap.rows
+        listed = {row.key for row in rows}
+        for key in [k for k in self._failed if k not in listed]:
+            del self._failed[key]  # it went away after all
         self._fill(table, rows)
         running = len(snap.devices)
         booting = sum(1 for d in snap.devices if d.state is RowState.BOOTING)
@@ -1676,6 +1691,10 @@ class DevicesScreen(ModalScreen[str | None]):
             )
             self._warning_lines(text, row.snapshot_warnings)
             return text
+        failed = self._failed.get(row.key)
+        if failed:
+            text.append(f"{failed[0].capitalize()}: ", style=f"bold {_c('bad')}")
+            text.append(f"{failed[1]}\n", style=_c("text"))
         help_text = {
             RowState.UNAUTHORIZED: UNAUTHORIZED_HELP,
             RowState.NO_PERMISSIONS: NO_PERMISSIONS_HELP,
@@ -1846,8 +1865,20 @@ class DevicesScreen(ModalScreen[str | None]):
             return self._actions
         return getattr(self.app, "_device_controller", None)
 
-    def _call(self, method: str, key: str, busy: str, *args: Any, **kw: Any) -> None:
-        """Run an action of the controller, showing *busy* on row *key*."""
+    def _call(
+        self,
+        method: str,
+        key: str,
+        busy: str,
+        *args: Any,
+        failed_word: str = "",
+        **kw: Any,
+    ) -> None:
+        """Run an action of the controller, showing *busy* on row *key*.
+
+        With *failed_word*, a failure also marks the row: the word in red in
+        its State cell and the failure message as the hint below the list.
+        """
         actions = self._get_actions()
         fn = getattr(actions, method, None)
         if fn is None:
@@ -1860,10 +1891,11 @@ class DevicesScreen(ModalScreen[str | None]):
             )
             return
         self._busy[key] = busy
+        self._failed.pop(key, None)
         self._repaint_busy()
 
         def done(ok: bool, message: str) -> None:
-            self._action_done(key, ok, message)
+            self._action_done(key, ok, message, failed_word)
 
         try:
             fn(*args, on_done=done, **kw)
@@ -1871,13 +1903,17 @@ class DevicesScreen(ModalScreen[str | None]):
             logger.exception(f"Devices screen: {method} failed")
             self._action_done(key, False, f"{type(e).__name__}: {e}")
 
-    def _action_done(self, key: str, ok: bool, message: str) -> None:
+    def _action_done(
+        self, key: str, ok: bool, message: str, failed_word: str = ""
+    ) -> None:
         """UI thread: an action finished (or its process started)."""
         if not self.is_attached:
             return
         self._busy.pop(key, None)
         if not ok:
             self.app.notify(message, title="Devices", severity="error", timeout=8)
+            if failed_word:
+                self._failed[key] = (failed_word, message)
         if self._collector is not None:
             self._collector.invalidate_avds()
         self._repaint_busy()
@@ -2302,7 +2338,13 @@ class DevicesScreen(ModalScreen[str | None]):
 
         def confirmed(yes: bool | None) -> None:
             if yes:
-                self._call("stop_emulator", row.key, "stopping…", row.serial)
+                self._call(
+                    "stop_emulator",
+                    row.key,
+                    "stopping…",
+                    row.serial,
+                    failed_word="stop failed",
+                )
 
         warning = (
             "\nIt is the active device: running tasks lose their device."

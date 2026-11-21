@@ -893,6 +893,36 @@ async def test_x_then_y_stops_the_emulator_by_serial() -> None:
     assert actions.calls == [("stop_emulator", "emulator-5554")]
 
 
+class _StopFails(FakeActions):
+    def stop_emulator(self, serial, *, on_done=None):
+        self.calls.append(("stop_emulator", serial))
+        if on_done:
+            on_done(False, f"Emulator {serial} did not stop: still running.")
+
+
+async def test_a_failed_stop_marks_the_row_in_red_with_a_hint() -> None:
+    actions = _StopFails()
+    app, screen = _hub(devices=[READY], actions=actions)
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        await pilot.press("x")
+        await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
+        await pilot.press("y")
+        await until(pilot, lambda: app.screen is screen)
+        await until(pilot, lambda: "stop failed" in screen._state_cell(READY).plain)
+        cell = screen._state_cell(READY)
+        assert cell.plain.startswith("● ready")  # the state is kept
+        red = [
+            cell.plain[sp.start : sp.end]
+            for sp in cell.spans
+            if hub._c("bad") in str(sp.style)
+        ]
+        assert red == ["stop failed"]
+        note = _box(screen)["note"]
+        assert "Stop failed: Emulator emulator-5554 did not stop" in note
+    assert actions.calls == [("stop_emulator", "emulator-5554")]
+
+
 async def test_x_then_n_does_not_stop() -> None:
     actions = FakeActions()
     app, screen = _hub(devices=[READY], actions=actions)
@@ -1194,6 +1224,25 @@ def test_stop_emulator_is_per_serial(monkeypatch, sync_threads) -> None:
     _controller().stop_emulator("emulator-5556", on_done=lambda ok, m: done.append(ok))
     assert stopped == ["emulator-5556"]
     assert done == [True]
+
+
+@pytest.mark.parametrize("ours", [True, False])
+def test_failed_stop_says_what_was_tried(monkeypatch, sync_threads, ours) -> None:
+    launch = SimpleNamespace(process=SimpleNamespace(pid=4242)) if ours else None
+    monkeypatch.setattr(emulator, "get_launch", lambda serial: launch)
+    monkeypatch.setattr(emulator, "stop_emulator", lambda serial: False)
+    done: list = []
+    _controller().stop_emulator(
+        "emulator-5556", on_done=lambda ok, m: done.append((ok, m))
+    )
+    ((ok, message),) = done
+    assert not ok
+    if ours:
+        assert "SIGKILL" in message
+        assert "PID 4242" in message
+    else:
+        assert "Sandroid did not start it" in message
+        assert "does not kill it by PID" in message
 
 
 def test_connect_rejects_a_bogus_address(sync_threads) -> None:

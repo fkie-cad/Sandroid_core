@@ -605,12 +605,15 @@ class DeviceController:
         Args:
             serial: Emulator serial.
             on_done: UI-thread callback ``(ok, message)`` once it is gone (or
-                still listed after the timeout).
+                still listed after the timeout; the message then says what
+                was tried and what is left to the user).
         """
 
         def worker() -> None:
             from sandroid.core import emulator
 
+            launch = emulator.get_launch(serial)
+            pid = getattr(getattr(launch, "process", None), "pid", None)
             try:
                 ok = emulator.stop_emulator(serial)
             except Exception as e:
@@ -619,8 +622,22 @@ class DeviceController:
                 return
             if ok:
                 self._done(on_done, True, f"Emulator {serial} stopped")
+            elif launch is not None:
+                self._done(
+                    on_done,
+                    False,
+                    f"Emulator {serial} did not stop, not even after SIGTERM "
+                    f"and SIGKILL of the process Sandroid started (PID {pid}).",
+                )
             else:
-                self._done(on_done, False, f"Emulator {serial} did not stop")
+                self._done(
+                    on_done,
+                    False,
+                    f"Emulator {serial} did not stop: emu kill was accepted, "
+                    "but it keeps running. Sandroid did not start it, so it "
+                    "does not kill it by PID: stop it where it was started, "
+                    "or end its qemu process yourself.",
+                )
 
         self._spawn(worker, f"stop-emulator-{serial}")
 
