@@ -24,19 +24,20 @@ STATIC_ANALYSIS_PROFILES: tuple[tuple[str, str], ...] = (
     (
         "privacy",
         "permissions, trackers, privacy-relevant APIs, strings and behaviour; "
-        "skips native code, decompilation and unrelated security checks",
+        "skips native code and decompilation",
     ),
     (
         "generic",
-        "full analysis: also library similarity, native code, decompilation "
-        "and every security check",
+        "full analysis: also library similarity, native code and decompilation",
     ),
 )
 
 #: Toggle options: ``(key, setting, label)``.
 _TOGGLES: tuple[tuple[str, str, str], ...] = (
     ("t", "trackers", "Trackers"),
-    ("s", "security", "Security analysis"),
+    # The OWASP checks run in either profile, only when this is on (the
+    # profile texts used to promise "every security check" with it off).
+    ("s", "security", "Security (OWASP)"),
     ("v", "verbose", "Verbose output"),
 )
 
@@ -166,8 +167,8 @@ class StaticAnalysisModal(ForensicModal[dict]):
     def _profile_text(self, profile: str) -> str:
         description = dict(STATIC_ANALYSIS_PROFILES)[profile]
         if profile == self.choice["profile"]:
-            return f"[b $accent]{profile:<9}[/] {description}  [$accent]selected[/]"
-        return f"[$text-muted]{profile:<9} {description}[/]"
+            return f"[$accent]●[/] [b $accent]{profile:<9}[/] {description}"
+        return f"[$text-muted]○ {profile:<9} {description}[/]"
 
     def _toggle_text(self, key: str, setting: str, label: str) -> str:
         state = "[$success]● on[/]" if self.choice[setting] else "[$text-muted]○ off[/]"

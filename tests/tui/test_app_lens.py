@@ -1745,3 +1745,13 @@ async def test_hooks_list_keys_run_through_the_main_screen(fake, monkeypatch):
         await pilot.press("asterisk")
         await settle(pilot)
         assert get_spotlight_service().get_effective_package() == "org.third.app"
+
+
+def test_static_cache_row_names_the_security_findings() -> None:
+    """N6-V6: finished OWASP findings appeared nowhere in the TUI."""
+    from sandroid.tui.widgets.app_lens import _security_text
+
+    meta = {"insight": {"security_findings": {"total": 3, "by_severity": {"high": 3}}}}
+    assert _security_text(meta) == "3 security findings (3 high)"
+    assert _security_text({"insight": {"security_findings": None}}) is None
+    assert _security_text({}) is None

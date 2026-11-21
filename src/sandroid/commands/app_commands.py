@@ -451,6 +451,7 @@ class SetSpotlightSpawnCommand(CommandHandler):
                 return CommandResult(
                     success=False,
                     message="App selection cancelled",
+                    error="cancelled",  # Esc: info, not "Command 'C' failed"
                 )
 
             logger.info(f"Picked spotlight app: {package_name}")

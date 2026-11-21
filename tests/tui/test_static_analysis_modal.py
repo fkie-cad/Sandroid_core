@@ -86,7 +86,13 @@ async def test_dialog_text_has_no_symbols() -> None:
     async with app.run_test() as pilot:
         await settle(pilot)
         text = _text(app)
-    assert "selected" in text
+    # N6-V6: the profile is marked with a dot, no "selected" word dangling.
+    assert "selected" not in text
+    assert "● privacy" in text
+    assert "○ generic" in text
+    # The profile texts no longer promise security checks the toggle owns.
+    assert "security check" not in text
+    assert "Security (OWASP)" in text
     assert " on" in text
     assert " off" in text
     # Words, ordinary punctuation and the ● / ○ status dots; no other glyph.
@@ -162,3 +168,96 @@ def test_cancel_remembers_nothing(ui_state_home, monkeypatch) -> None:
     analyzer = static_analysis.StaticAnalysis(apk_path="/x/app.apk")
     assert analyzer._interactive_configuration() is None
     assert "static_analysis" not in load_ui_state()
+
+
+# -- N6-V6: cancel is no error; a finished run says what it found and where --
+
+
+def _command_with(monkeypatch, *, ok, state, summary="", error=None):
+    import asyncio
+    import types
+
+    from sandroid.commands.analysis_commands import StaticAnalysisCommand
+    from sandroid.commands.base import CommandContext
+
+    class _Fake:
+        def __init__(self, *a, **k):
+            self.last_state = state
+            self.result_summary = summary
+            self.last_results = {"error": error} if error else {}
+
+        def gather(self, interactive=True):
+            return ok
+
+        def return_data(self):
+            return {}
+
+    monkeypatch.setattr(static_analysis, "StaticAnalysis", _Fake)
+    spot = types.SimpleNamespace(get_app_tuple=lambda: ("org.example.app", None))
+    ctx = CommandContext(toolbox=object(), spotlight_service=spot)
+    return asyncio.run(StaticAnalysisCommand().execute(ctx))
+
+
+def test_esc_in_the_static_dialog_is_a_cancel_not_an_error(monkeypatch) -> None:
+    result = _command_with(monkeypatch, ok=False, state="cancelled")
+    assert result.error == "cancelled"
+    assert result.message == "Static analysis cancelled"
+
+
+def test_a_failed_static_run_names_the_error_without_a_dialog(monkeypatch) -> None:
+    result = _command_with(monkeypatch, ok=False, state="failed", error="boom")
+    assert result.message == "Static analysis failed: boom"
+    assert result.data == {"no_dialog": True}
+
+
+def test_a_finished_static_run_reports_findings_and_path(monkeypatch) -> None:
+    summary = "44 security findings (5 high) · results in /r/dexray_insight"
+    result = _command_with(monkeypatch, ok=True, state="finished", summary=summary)
+    assert result.success
+    assert result.message == f"Static analysis completed for org.example.app: {summary}"
+
+
+def test_summary_line_counts_findings_from_the_security_file(tmp_path) -> None:
+    import json
+
+    sec = tmp_path / "dexray_x_security.json"
+    sec.write_text(
+        json.dumps(
+            {
+                "findings": [],
+                "total_findings": 44,
+                "findings_by_severity": {"medium": 28, "low": 11, "high": 5},
+            }
+        )
+    )
+    analyzer = static_analysis.StaticAnalysis(apk_path="/x/app.apk")
+    line = analyzer._summary_line(str(sec), "/r/dexray_insight")
+    assert line == (
+        "44 security findings (5 high, 28 medium, 11 low) · "
+        "results in /r/dexray_insight"
+    )
+    analyzer._analysis_config["run_security_analysis"] = False
+    assert analyzer._summary_line(None, "/r") == "results in /r"
+
+
+def test_app_picker_esc_is_a_cancel(monkeypatch) -> None:
+    """N6-V6: Esc in the picker logged "WARNING: Command 'C' failed"."""
+    import asyncio
+    import types
+
+    from sandroid.commands import app_commands
+    from sandroid.commands.base import CommandContext
+
+    monkeypatch.setattr(
+        app_commands,
+        "get_app_selection_service",
+        lambda: types.SimpleNamespace(select_app_with_fuzzy_search=lambda: None),
+        raising=False,
+    )
+    cmd = next(
+        c()
+        for c in vars(app_commands).values()
+        if isinstance(c, type) and getattr(c, "key", None) == "C"
+    )
+    result = asyncio.run(cmd.execute(CommandContext(toolbox=object())))
+    assert result.error == "cancelled"

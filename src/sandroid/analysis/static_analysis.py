@@ -390,6 +390,12 @@ class StaticAnalysis(DataGatherBase):
         # mode, Insight's package_name in local mode once known.
         self._package: str | None = None
         self._final_state_sent = False
+        #: The last published state (``cancelled`` tells a cancel apart
+        #: from a failure when gather() returns False).
+        self.last_state: str | None = None
+        #: ``44 security findings (5 high, ...) · results in <dir>`` after a
+        #: finished run (shown in the log, N6-V6); "" before.
+        self.result_summary = ""
 
     def _options(self) -> dict:
         """The current choice as ``{"profile", "trackers", "security", "verbose"}``."""
@@ -543,6 +549,7 @@ class StaticAnalysis(DataGatherBase):
             payload["apk"] = os.path.basename(self._apk_path)
         payload.update(data)
         self._final_state_sent = state in ("finished", "failed", "cancelled")
+        self.last_state = state
         TaskOutput(
             task_name="static_analysis",
             message=message,
@@ -905,6 +912,9 @@ class StaticAnalysis(DataGatherBase):
 
             # Publish TaskOutput events for important findings
             self._publish_analysis_events(duration)
+            self.result_summary = self._summary_line(
+                security_result_file_name, os.path.abspath(insight_dir)
+            )
             self._publish_state(
                 "finished",
                 f"Static analysis finished in {duration:.0f} seconds",
@@ -1125,6 +1135,22 @@ class StaticAnalysis(DataGatherBase):
                 logger.debug(f"Recorded Insight result in APK cache entry {key}")
         except Exception as e:
             logger.debug(f"Recording Insight result in APK cache failed: {e}")
+
+    def _summary_line(self, security_file: str | None, results_dir: str) -> str:
+        """Findings count and where the results are (N6-V6: they appeared
+        nowhere in the TUI and no path was shown).
+        """
+        from sandroid.services.app_info_service import (
+            security_findings,
+            security_findings_text,
+        )
+
+        parts = []
+        if self._options().get("security"):
+            found = security_findings(security_file)
+            parts.append(security_findings_text(found) or "security findings unread")
+        parts.append(f"results in {results_dir}")
+        return " · ".join(parts)
 
     def _publish_analysis_events(self, duration: float) -> None:
         """Publish events for analysis findings.

@@ -2649,6 +2649,55 @@ def _pick(items: Any, keep: tuple[str, ...]) -> list[dict[str, Any]]:
     ]
 
 
+def security_findings(path: str | None) -> dict[str, Any] | None:
+    """``{"total", "by_severity"}`` of an Insight security result file.
+
+    ``None`` without a readable file (security analysis off, an old run).
+    """
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    findings = data.get("findings")
+    total = data.get("total_findings")
+    if not isinstance(total, int):
+        total = len(findings) if isinstance(findings, list) else None
+    if total is None:
+        return None
+    by_severity = data.get("findings_by_severity")
+    by_severity = {
+        str(k): int(v)
+        for k, v in _as_dict(by_severity).items()
+        if isinstance(v, int) and v
+    }
+    return {"total": total, "by_severity": by_severity}
+
+
+_SEVERITY_ORDER = ("critical", "high", "medium", "low", "info")
+
+
+def security_findings_text(found: Any) -> str | None:
+    """``44 security findings (5 high, 28 medium, 11 low)``; None if unknown."""
+    found = _as_dict(found)
+    total = found.get("total")
+    if not isinstance(total, int):
+        return None
+    if total == 0:
+        return "no security findings"
+    by = _as_dict(found.get("by_severity"))
+    order = [k for k in _SEVERITY_ORDER if k in by] + [
+        k for k in by if k not in _SEVERITY_ORDER
+    ]
+    detail = ", ".join(f"{by[k]} {k}" for k in order)
+    text = f"{total} security finding" + "s" * (total != 1)
+    return f"{text} ({detail})" if detail else text
+
+
 def _insight_summary(results: dict[str, Any]) -> dict[str, Any]:
     """The small, lens-relevant subset of Insight results kept in meta.json.
 
@@ -2798,6 +2847,7 @@ def record_insight_result(
                 "summary": summary,
                 "options": insight_options,
                 "trackers_from_previous_run": trackers_from_previous,
+                "security_findings": security_findings(security_result_file),
             }
         }
         if not existing.get("package"):

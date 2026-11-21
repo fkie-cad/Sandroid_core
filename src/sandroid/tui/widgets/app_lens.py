@@ -452,6 +452,16 @@ def static_note(f: AppFacts) -> str | None:
 # -- IDENTITY --------------------------------------------------------------
 
 
+def _security_text(meta: dict) -> str | None:
+    """``44 security findings (5 high, ...)`` of the last Insight run."""
+    from sandroid.services.app_info_service import security_findings_text
+
+    info = meta.get("insight")
+    if not isinstance(info, dict):
+        return None
+    return security_findings_text(info.get("security_findings"))
+
+
 def _split_names(names: list[str], room: int = 48) -> str:
     """Whole split names (never cut mid-name, N6-V2), ``+N more`` past room."""
     shown: list[str] = []
@@ -578,6 +588,9 @@ def build_identity(f: AppFacts) -> SectionData:
         cache += (
             " · Insight done" if insight else " · Insight not run (a = static analysis)"
         )
+        found = _security_text(meta)
+        if insight and found:
+            cache += f" · {found}"
         style = ""
     else:
         cache = static_note(f) or "?"

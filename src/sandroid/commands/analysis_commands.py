@@ -101,10 +101,21 @@ class StaticAnalysisCommand(CommandHandler):
             success = static_analysis.gather(interactive=True)
 
             if not success:
+                if getattr(static_analysis, "last_state", None) == "cancelled":
+                    # Esc in the dialog: the user's choice, not an error.
+                    return CommandResult(
+                        success=False,
+                        message="Static analysis cancelled",
+                        error="cancelled",
+                    )
+                error = (static_analysis.last_results or {}).get("error")
                 return CommandResult(
                     success=False,
-                    message="Static analysis cancelled or failed",
-                    error="Analysis was cancelled by user or encountered an error",
+                    message=f"Static analysis failed: {error or 'unknown error'}",
+                    error=str(error or "Static analysis failed"),
+                    # A red line and toast; no dialog popping up at the end
+                    # of a long background run to eat the next keys.
+                    data={"no_dialog": True},
                 )
 
             # Get results
@@ -123,9 +134,11 @@ class StaticAnalysisCommand(CommandHandler):
 
             logger.info(f"Static analysis completed for {app_name}")
 
+            summary = getattr(static_analysis, "result_summary", "")
             return CommandResult(
                 success=True,
-                message=f"Static analysis completed for {app_name}",
+                message=f"Static analysis completed for {app_name}"
+                + (f": {summary}" if isinstance(summary, str) and summary else ""),
                 data=results,
             )
 
