@@ -33,8 +33,15 @@ live in the old Monitor sub-tab's ``MonitorView`` except the drawing:
   show "only what happened since mark N";
 * **writes** -- after each :meth:`FileActivity.ingest`, ``writes`` lists the
   create/modify/rename-into events of that batch (what auto-pull acts on);
+* **auto-groups** -- :func:`auto_group_folders`: many sibling files touched
+  in one folder (``tui.files_auto_group_min``, default 20; machine-made
+  names such as ``123`` / hex / UUIDs from 2/5 of it) fold into one group
+  row, like a group rule's;
 * **cap** -- ``tui.monitor_max_lines`` (default 500) bounds the number of
-  tracked paths (least-recently touched paths are dropped first).
+  rows (a group row is one slot). Over it, rule-hidden rows go first, then
+  open-only rows, then the oldest shown rows; ``protected`` rows (the lens:
+  watched and AI-highlighted files) are never dropped. ``dropped`` counts
+  the files dropped, never silently.
 
 Pure Python, no Textual imports: unit-testable without a Pilot harness.
 """
@@ -58,7 +65,7 @@ from sandroid.config.schema import (
 from sandroid.core.adb_utils import canonical_device_path
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from sandroid.tui.controllers.monitor_controller import FileSystemMonitorItem
 
@@ -127,6 +134,8 @@ class NoiseRule:
     kind: str
     pattern: str
     enabled: bool = True
+    #: A rule for this session only (``M`` in the lens): never saved.
+    session: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> NoiseRule | None:
@@ -138,15 +147,24 @@ class NoiseRule:
             return None
         if action not in RULE_ACTIONS or kind not in RULE_KINDS or not pattern:
             return None
-        return cls(action, kind, pattern, bool(data.get("enabled", True)))
+        return cls(
+            action,
+            kind,
+            pattern,
+            bool(data.get("enabled", True)),
+            bool(data.get("session", False)),
+        )
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "action": self.action,
             "kind": self.kind,
             "pattern": self.pattern,
             "enabled": self.enabled,
         }
+        if self.session:
+            out["session"] = True
+        return out
 
     def folder_for(self, path: str) -> str | None:
         """The folder this rule matches ``path`` by (``None``: no match).
@@ -210,6 +228,10 @@ class NoiseRules:
     def to_list(self) -> list[dict]:
         return [rule.to_dict() for rule in self.rules]
 
+    def saved_list(self) -> list[dict]:
+        """The rules to save in the config (session-only rules left out)."""
+        return [rule.to_dict() for rule in self.rules if not rule.session]
+
     def classify(self, path: str) -> tuple[str, NoiseRule, str] | None:
         """``("hide", rule, folder)`` / ``("group", rule, folder)`` or None.
 
@@ -272,6 +294,57 @@ def app_relative(path: str) -> str:
             rest = path[match.end() :]
             return marker + rest if rest else path
     return path
+
+
+#: A machine-made file name (after one short extension is dropped): all
+#: digits, 8+ hex digits, or a UUID.
+_MACHINE_NAME_RE = re.compile(
+    r"^(?:\d+|[0-9a-f]{8,}|"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+    re.IGNORECASE,
+)
+_SHORT_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,5}$")
+
+
+def machine_name(name: str) -> bool:
+    """``123``, ``0a1b2c3d4e``, ``<uuid>.tmp``: a name no person typed."""
+    stem = _SHORT_EXT_RE.sub("", name) or name
+    return bool(_MACHINE_NAME_RE.match(stem))
+
+
+def machine_group_min(min_count: int) -> int:
+    """The auto-group threshold for machine-made names: 2/5 of
+    ``min_count`` (8 at the default 20), at least 2; 0 when grouping is off.
+    """
+    if min_count <= 0:
+        return 0
+    return min(min_count, max(2, (min_count * 2) // 5))
+
+
+def auto_group_folders(keys: Iterable[str], min_count: int) -> dict[str, list[str]]:
+    """``{folder: member keys}`` for the folders with many touched siblings.
+
+    A folder folds when ``min_count`` (0 = never) of ``keys`` are directly
+    in it, or :func:`machine_group_min` of them when every member name is
+    machine-made (an IndexedDB attachment store's ``1``, ``2``, ... ``445``).
+    Generic on purpose: no app or path list.
+    """
+    if min_count <= 0:
+        return {}
+    by_folder: dict[str, list[str]] = {}
+    for key in keys:
+        folder, sep, name = key.rpartition("/")
+        if sep and folder and name:
+            by_folder.setdefault(folder, []).append(key)
+    low = machine_group_min(min_count)
+    out: dict[str, list[str]] = {}
+    for folder, members in by_folder.items():
+        n = len(members)
+        if n >= min_count or (
+            n >= low and all(machine_name(k.rpartition("/")[2]) for k in members)
+        ):
+            out[folder] = members
+    return out
 
 
 _DEFAULT_RULES: NoiseRules | None = None
@@ -502,14 +575,26 @@ class FileActivity:
     #: Categories whose event on a path means its content may have changed.
     WRITE_CATEGORIES = ("create", "modify", "rename")
 
+    #: Tracked files never exceed this many times ``max_paths``, groups
+    #: included (memory bound; the oldest group members go, counted).
+    HARD_CAP_FACTOR = 20
+
     def __init__(
         self,
         visibility: dict[str, str] | None = None,
         max_paths: int = 500,
         rules: NoiseRules | None = None,
+        auto_group_min: int = 20,
     ) -> None:
         self.visibility: dict[str, str] = dict(visibility or {})
         self.max_paths = max(50, int(max_paths or 500))
+        #: ``tui.files_auto_group_min`` (0 = no auto-groups).
+        self.auto_group_min = max(0, int(auto_group_min or 0))
+        #: ``protected(key)``: a row the cap never drops (the lens: watched
+        #: and AI-highlighted files).
+        self.protected: Callable[[str], bool] | None = None
+        #: Files dropped at the row cap (never silently: the caption says so).
+        self.dropped = 0
         self.show_all = False
         self.rules: NoiseRules = rules if rules is not None else NoiseRules()
         self.paths: dict[str, PathActivity] = {}
@@ -541,6 +626,16 @@ class FileActivity:
             return 500
 
     @staticmethod
+    def config_auto_group_min() -> int:
+        """``tui.files_auto_group_min``, default 20 (0 = off)."""
+        try:
+            from sandroid.config.loader import ConfigLoader
+
+            return int(ConfigLoader().load().tui.files_auto_group_min)
+        except Exception:
+            return 20
+
+    @staticmethod
     def config_visibility() -> dict[str, str]:
         """``tui.monitor_event_visibility``; ``{}`` (all "always") on error."""
         try:
@@ -556,6 +651,7 @@ class FileActivity:
         self.paths.clear()
         self.counts = dict.fromkeys(self._CATEGORIES, 0)
         self.total = 0
+        self.dropped = 0
 
     def _tally(self, category: str | None) -> None:
         """Bump the counters -- for EVERY item, visible or not."""
@@ -677,16 +773,85 @@ class FileActivity:
             row.is_dir = True
         return touched
 
+    def _is_protected(self, key: str) -> bool:
+        check = self.protected
+        if check is None:
+            return False
+        try:
+            return bool(check(key))
+        except Exception:
+            return False
+
+    def drop_tier(self, row: PathActivity) -> int:
+        """Eviction order at the cap: 0 hidden by a rule, 1 open-only,
+        2 shown (whatever ``show_all`` says: the default view decides).
+        """
+        if self.rules.hidden_by(row.key) is not None:
+            return 0
+        if row.ops and all(self.category_mode(c) == "verbose" for c in row.ops):
+            return 1
+        return 2
+
+    @staticmethod
+    def _age(row: PathActivity) -> float:
+        return row.last.timestamp() if row.last else 0.0
+
+    def slots(self) -> tuple[list[tuple[int, float, list[str]]], int]:
+        """``([(tier, last, keys)], protected)``: the rows the cap counts.
+
+        A group row (a group rule's folder or an auto-group) is ONE slot
+        with all its files; protected rows are counted, never listed.
+        """
+        out: list[tuple[int, float, list[str]]] = []
+        groups: dict[str, list[PathActivity]] = {}
+        candidates: list[PathActivity] = []
+        n_protected = 0
+        for key, row in self.paths.items():
+            if self._is_protected(key):
+                n_protected += 1
+                continue
+            tier = self.drop_tier(row)
+            if tier < 2:
+                out.append((tier, self._age(row), [key]))
+                continue
+            folder = self.rules.group_of(key)
+            if folder is not None:
+                groups.setdefault(folder, []).append(row)
+            else:
+                candidates.append(row)
+        auto = auto_group_folders((r.key for r in candidates), self.auto_group_min)
+        grouped = {k for members in auto.values() for k in members}
+        for row in candidates:
+            if row.key in grouped:
+                groups.setdefault(row.key.rpartition("/")[0], []).append(row)
+            else:
+                out.append((2, self._age(row), [row.key]))
+        for members in groups.values():
+            last = max(self._age(r) for r in members)
+            out.append((2, last, [r.key for r in members]))
+        return out, n_protected
+
     def _evict(self) -> None:
-        excess = len(self.paths) - self.max_paths
-        if excess <= 0:
-            return
-        oldest = sorted(
-            self.paths.values(),
-            key=lambda r: (r.last is not None, r.last.timestamp() if r.last else 0),
-        )
-        for row in oldest[:excess]:
-            self.paths.pop(row.key, None)
+        """Keep the rows within ``max_paths`` (see the module docstring)."""
+        if len(self.paths) <= self.max_paths:
+            return  # never more slots than files
+        slots, n_protected = self.slots()
+        excess = len(slots) + n_protected - self.max_paths
+        if excess > 0:
+            slots.sort(key=lambda s: (s[0], s[1]))
+            for _tier, _last, keys in slots[:excess]:
+                for key in keys:
+                    if self.paths.pop(key, None) is not None:
+                        self.dropped += 1
+        hard = self.max_paths * self.HARD_CAP_FACTOR
+        if len(self.paths) > hard:
+            rows = sorted(
+                (r for k, r in self.paths.items() if not self._is_protected(k)),
+                key=lambda r: (self.drop_tier(r), self._age(r)),
+            )
+            for row in rows[: len(self.paths) - hard]:
+                self.paths.pop(row.key, None)
+                self.dropped += 1
 
     # -- visibility -------------------------------------------------------------
 
@@ -745,7 +910,10 @@ __all__ = [
     "SegmentStats",
     "app_package",
     "app_relative",
+    "auto_group_folders",
     "is_noise_path",
+    "machine_group_min",
+    "machine_name",
     "smart_truncate",
     "split_companion",
 ]

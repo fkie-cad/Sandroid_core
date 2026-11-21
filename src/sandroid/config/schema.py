@@ -840,8 +840,10 @@ class TUIConfig(BaseModel):
         default=500,
         ge=50,
         le=10000,
-        description="Maximum lines kept in Monitor observer log. "
-        "Higher values use more memory but allow scrolling back further.",
+        description="Maximum rows the Files lens keeps (a group row counts "
+        "as one). Over it, rows hidden by a rule go first, then open-only "
+        "rows, then the oldest shown rows; watched and AI-highlighted rows "
+        "are never dropped. The caption counts what was dropped.",
     )
     monitor_event_visibility: dict[str, str] = Field(
         default_factory=lambda: {
@@ -882,6 +884,15 @@ class TUIConfig(BaseModel):
         "kind: prefix|segment|suffix|glob, pattern, enabled}. 'hide' drops "
         "matching rows (N shows them), 'group' collapses them into one row "
         "per folder. Edited live from the Files lens (R).",
+    )
+    files_auto_group_min: int = Field(
+        default=20,
+        ge=0,
+        le=10000,
+        description="Files lens: fold this many sibling files touched in one "
+        "folder into one expandable row (0 = off). Machine-made names (all "
+        "digits, hex, UUIDs) fold from 2/5 of it (8 at the default). "
+        "Watched and AI-highlighted files keep their own rows.",
     )
     keybindings: dict[str, str] = Field(
         default_factory=dict,

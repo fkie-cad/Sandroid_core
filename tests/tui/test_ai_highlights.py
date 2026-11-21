@@ -503,8 +503,14 @@ async def test_files_tint_column_group_cell_bar_and_inspector(store):
             origin="ai",
             basis={"judged_at": judged, "evaluated": 5},
         )
+        await until(pilot, lambda: _bar(panel))
+        # Calm Files bar: one set -> the tint says it all, no column.
+        assert "hl" not in _cols(table)
+        store.create("files", "ad ids", short="aaid", reasons={AAID: "ad id"})
         await until(pilot, lambda: "hl" in _cols(table))
         assert _cell(table, PREFS, "hl") == "personal"
+        # A label that just repeats the file name is left out.
+        assert _cell(table, AAID, "hl") == ""
         assert _tint_of(table, PREFS) == _expected_tint(1)
         group = next(r.key for r in panel._rows if r.group and not r.fold)
         assert _cell(table, group, "hl") == "1 inside"
@@ -521,7 +527,7 @@ async def test_files_tint_column_group_cell_bar_and_inspector(store):
         )
         panel.refresh_rows()
         bar = _bar(panel)
-        assert "1 new since" in bar
+        assert "new since" not in bar  # calm: only actionable words
         assert "1 changed since" in bar
         row = next(r for r in panel._rows if r.key == PREFS)
         summary = dict(panel._inspector_for(row).tabs)["Summary"]
@@ -580,7 +586,7 @@ async def test_files_X_clears_after_confirm(store, monkeypatch):
     async with app.run_test(size=WIDE) as pilot:
         panel = await _files(app, pilot)
         store.create("files", "secrets", reasons={PREFS: "a"})
-        await until(pilot, lambda: "hl" in _cols(panel.table))
+        await until(pilot, lambda: _bar(panel))
         assert panel.check_action("clear_highlights", ())
         panel.table.focus()
         await pilot.press("X")
@@ -886,6 +892,7 @@ async def test_files_lens_repaints_on_a_live_theme_switch(store):
         panel = await _files(app, pilot)
         table = panel.table
         store.create("files", "secrets", short="secrets", reasons={PREFS: "a"})
+        store.create("files", "ids", short="ids", reasons={AAID: "b"})
         await until(pilot, lambda: "hl" in _cols(table))
         dark = str(table.get_cell(PREFS, "hl").spans[0].style)
         app.theme = textual_theme_name("paper")
@@ -1336,3 +1343,73 @@ async def test_shown_scope_set_counts_rows_it_did_not_judge(
         n = found["hidden_by_lens_filters"]
         assert f"{n} not judged" in _bar(panel)
         assert f"{n} not judged" in (_describe_lens_highlights() or "")
+
+
+# --------------------------------------------------------------------------
+# Files lens: calm bar, auto-groups and the row cap vs. highlights
+# --------------------------------------------------------------------------
+
+
+def test_files_calm_bar_keeps_actionable_words_and_a_brief_hint(store):
+    from sandroid.tui.widgets.highlight_bar import HighlightView
+
+    hs = store.create(
+        "files", "secrets", reasons={"/a/k0": "r"}, basis={"judged_at": 1.0}
+    )
+    view = HighlightView("files", noun="file", calm=True)
+    view.measure(
+        iter([("/a/k0", True, None, 2.0), ("/a/new", True, None, 5.0)]),
+        live=True,
+        changes=True,
+    )
+    assert view.counts[hs.id].new == 1  # still counted, never shown
+    plain = view.bar_text(1000).plain
+    assert "new since" not in plain
+    assert "1 changed since" in plain
+    assert "H filter · X clear" in plain  # a new set: for a few seconds
+    view._first_seen = {k: v - 60 for k, v in view._first_seen.items()}
+    assert view.hint_remaining() is None
+    assert "H filter" not in view.bar_text(1000).plain
+    store.set_filter("files", hs.id)
+    plain = view.bar_text(1000).plain
+    assert "filtering" in plain
+    assert "H filter · X clear" in plain  # while filtering
+    # The Highlight column: only with 2+ sets, never repeating the name.
+    assert not view.show_column(200)
+    store.create("files", "consent", short="consent", reasons={"/a/consent.xml": "r"})
+    assert view.show_column(200)
+    assert view.cell("/a/consent.xml", name="consent.xml").plain == ""
+    assert view.cell("/a/consent.xml", name="other.xml").plain == "consent"
+    # The Network bar keeps its words (not calm).
+    net = store.create("network", "n", reasons={"k0": "r"}, basis={"judged_at": 1.0})
+    nview = HighlightView("network")
+    nview.measure(iter([("k1", True, None, 5.0)]), live=True)
+    assert nview.counts[net.id].new == 1
+    assert "1 new since" in nview.bar_text(1000).plain
+
+
+async def test_files_highlighted_member_stays_out_of_a_group_and_the_cap(store):
+    idb = f"{ROOT}/files/idb/x.files"
+    store.create("files", "attachments", reasons={f"{idb}/3": "r"})
+    app = _Harness()
+    async with app.run_test(size=WIDE) as pilot:
+        panel = app.query_one(FilesPanel)
+        panel.ingest(
+            _items(*[_fse("FSE_DELETE", f"{idb}/{n}") for n in range(12)]), now=T0
+        )
+        panel.refresh_rows()
+        await pilot.pause()
+        keys = _keys(panel.table)
+        assert set(keys) == {f"{idb}/", f"{idb}/3"}
+        group = next(r for r in panel._rows if r.group)
+        assert len(group.members) == 11
+        # the cap: the oldest files go, the highlighted one stays
+        panel.activity.max_paths = 50
+        panel.activity.auto_group_min = 0
+        for i in range(60):
+            panel.ingest(
+                _items(_fse("FSE_CONTENT_MODIFIED", f"{ROOT}/d{i}/f")),
+                now=T0 + timedelta(seconds=10 + i),
+            )
+        assert f"{idb}/3" in panel.activity.paths
+        assert f"{idb}/4" not in panel.activity.paths

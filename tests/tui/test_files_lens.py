@@ -250,7 +250,7 @@ def test_noise_rules_and_show_all() -> None:
 
 
 def test_tracked_paths_are_capped_oldest_first() -> None:
-    model = FileActivity(max_paths=50)
+    model = FileActivity(max_paths=50, auto_group_min=0)
     for i in range(60):
         model.ingest(
             _items(_fse("FSE_CREATE_FILE", f"{ROOT}/files/f{i}")),
@@ -259,6 +259,104 @@ def test_tracked_paths_are_capped_oldest_first() -> None:
     assert len(model.paths) == 50
     assert f"{ROOT}/files/f0" not in model.paths
     assert f"{ROOT}/files/f59" in model.paths
+    assert model.dropped == 10  # never silent
+
+
+def _ingest_one(model: FileActivity, line: str, second: int) -> None:
+    model.ingest(_items(line), now=T0 + timedelta(seconds=second))
+
+
+def test_the_cap_drops_rule_hidden_then_open_only_then_the_oldest_shown() -> None:
+    """Hidden rows go first even when they are the newest; within a tier
+    the oldest goes first; the counter counts every dropped file.
+    """
+    model = FileActivity({"noise": "verbose"}, max_paths=50, auto_group_min=0)
+    shown = [f"{ROOT}/d{i}/f.txt" for i in range(40)]  # oldest, no siblings
+    opened = [f"{ROOT}/o{i}/f.txt" for i in range(10)]
+    os_paths = [f"/data/misc/m{i}/x" for i in range(10)]  # newest, rule-hidden
+    for i, path in enumerate(shown):
+        _ingest_one(model, _fse("FSE_CONTENT_MODIFIED", path), i)
+    for i, path in enumerate(opened):
+        _ingest_one(model, _fse("FSE_OPEN", path), 100 + i)
+    for i, path in enumerate(os_paths):
+        _ingest_one(model, _fse("FSE_CONTENT_MODIFIED", path), 200 + i)
+    assert len(model.paths) == 50
+    assert not any(p in model.paths for p in os_paths)  # tier 0 went first
+    assert model.dropped == 10
+    for i in range(10):
+        _ingest_one(model, _fse("FSE_CONTENT_MODIFIED", f"{ROOT}/n{i}/f"), 300 + i)
+    assert not any(p in model.paths for p in opened)  # then the open-only ones
+    assert all(p in model.paths for p in shown)
+    for i in range(5):
+        _ingest_one(model, _fse("FSE_CONTENT_MODIFIED", f"{ROOT}/k{i}/f"), 400 + i)
+    assert not any(p in model.paths for p in shown[:5])  # the oldest shown
+    assert all(p in model.paths for p in shown[5:])
+    assert model.dropped == 25
+    model.reset()
+    assert model.dropped == 0
+
+
+def test_the_cap_never_drops_watched_or_highlighted_rows() -> None:
+    model = FileActivity({"noise": "verbose"}, max_paths=50, auto_group_min=0)
+    keep = {f"{ROOT}/d0/f.txt", "/data/misc/kept/x", f"{ROOT}/o0/open.txt"}
+    model.protected = lambda key: key in keep
+    _ingest_one(model, _fse("FSE_CONTENT_MODIFIED", f"{ROOT}/d0/f.txt"), 0)
+    _ingest_one(model, _fse("FSE_CONTENT_MODIFIED", "/data/misc/kept/x"), 0)
+    _ingest_one(model, _fse("FSE_OPEN", f"{ROOT}/o0/open.txt"), 0)
+    for i in range(1, 80):
+        _ingest_one(model, _fse("FSE_CONTENT_MODIFIED", f"{ROOT}/d{i}/f.txt"), i)
+    assert keep <= set(model.paths)  # the oldest, but protected
+    assert len(model.paths) == 50  # protected rows still take their slots
+    assert model.dropped == 32
+
+
+def test_a_group_row_is_one_slot_and_goes_whole() -> None:
+    model = FileActivity(max_paths=50)  # auto-groups from 20 / 8 machine names
+    cache = [f"{ROOT}/cache/c{i}" for i in range(100)]  # group rule
+    idb = f"{ROOT}/files/idb/3870112724rsegmnoittet-es.files"
+    model.ingest(_items(*[_fse("FSE_CONTENT_MODIFIED", p) for p in cache]), now=T0)
+    model.ingest(
+        _items(*[_fse("FSE_DELETE", f"{idb}/{n}") for n in range(445)]),
+        now=T0 + timedelta(seconds=1),
+    )
+    for i in range(48):
+        _ingest_one(model, _fse("FSE_CONTENT_MODIFIED", f"{ROOT}/d{i}/f"), 10 + i)
+    assert len(model.paths) == 100 + 445 + 48  # 50 slots: nothing dropped
+    assert model.dropped == 0
+    _ingest_one(model, _fse("FSE_CONTENT_MODIFIED", f"{ROOT}/late/f"), 100)
+    # the oldest slot is the cache group: all of its files go together
+    assert not any(p in model.paths for p in cache)
+    assert f"{idb}/444" in model.paths
+    assert model.dropped == 100
+
+
+def test_auto_group_thresholds_and_machine_names() -> None:
+    from sandroid.tui.widgets.monitor_view import (
+        auto_group_folders,
+        machine_group_min,
+        machine_name,
+    )
+
+    for name in (
+        "445",
+        "0a1b2c3d4e5f",
+        "6f1c2a9e-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
+        "12345.tmp",
+    ):
+        assert machine_name(name), name
+    for name in ("journal", "cafe", "aaid.txt", "f_001", "data.sqlite"):
+        assert not machine_name(name), name
+    assert machine_group_min(20) == 8
+    assert machine_group_min(0) == 0
+    named = [f"/d/a/file{i}.json" for i in range(20)]
+    assert auto_group_folders(named[:19], 20) == {}
+    assert auto_group_folders(named, 20) == {"/d/a": named}
+    numbered = [f"/d/idb/{i}" for i in range(8)]
+    assert auto_group_folders(numbered[:7], 20) == {}
+    assert auto_group_folders(numbered, 20) == {"/d/idb": numbered}
+    mixed = [*numbered[:7], "/d/idb/readme"]  # one person-made name: 20 needed
+    assert auto_group_folders(mixed, 20) == {}
+    assert auto_group_folders(named, 0) == {}  # 0 = off
 
 
 def test_path_helpers() -> None:
@@ -1327,7 +1425,7 @@ def test_the_new_lens_keys_shadow_no_app_wide_key() -> None:
         b.key for b in MainScreen.BINDINGS
     }
     lens_keys = {b.key for b in FilesPanel.BINDINGS}
-    for key in ("A", "less_than_sign", "greater_than_sign", "R"):
+    for key in ("A", "less_than_sign", "greater_than_sign", "R", "M", "W"):
         assert key in lens_keys
         assert key not in app_keys
     assert "a" not in lens_keys  # auto-pull poll mode removed; Analyze works
@@ -2841,3 +2939,221 @@ async def test_an_idle_watched_file_with_only_hidden_opens_is_not_new_below() ->
         assert _keys(panel)[0] == PREFS  # idle: still on top
         _keys(panel)
         assert panel.caption()[0].startswith("scrolled back · End = live")
+
+
+# --------------------------------------------------------------------------
+# bursts: auto-groups, the row cap, M (hide like this), W (watched only)
+# --------------------------------------------------------------------------
+
+IDB = f"{ROOT}/files/idb/3870112724rsegmnoittet-es.files"
+
+
+async def test_a_burst_of_siblings_folds_into_one_group_and_the_star_stays() -> None:
+    get_forensic_service().add_spotlight_file(f"{IDB}/7")  # a watched member
+    app = _Harness()
+    async with app.run_test(size=(140, 40)) as pilot:
+        panel = app.query_one(FilesPanel)
+        panel.ingest(
+            _items(*[_fse("FSE_DELETE", f"{IDB}/{n}") for n in range(30)]), now=T0
+        )
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", PREFS)), now=T0 + timedelta(seconds=2)
+        )
+        group = IDB + "/"
+        keys = _keys(panel)
+        assert set(keys) == {f"{IDB}/7", group, PREFS}
+        row = _row(panel, group)
+        assert row.auto
+        assert len(row.members) == 29
+        assert panel._path_cell(row).plain.endswith(" · 29 files")
+        assert panel.caption()[1].startswith("2 paths + 1 group")
+        # The Inspector of the group: op counts and the time span.
+        summary = _plain(panel._group_inspector(row).tabs[0][1])
+        assert "29 files" in summary
+        assert "D 29×" in summary
+        assert "span" in summary
+        assert "under 1 s" in summary
+        assert "auto" in summary
+        # Enter / Right open it, Left folds it (the existing group keys).
+        panel.table.focus()
+        panel.set_following(False)
+        panel.table.move_cursor(row=panel.table.get_row_index(group))
+        await pilot.press("enter")
+        await settle(pilot)
+        assert len(_keys(panel)) == 3 + 29
+        assert _row(panel, f"{IDB}/12").depth == 1
+        await pilot.press("left")
+        await settle(pilot)
+        assert len(_keys(panel)) == 3
+        # 0 = off: every file is its own row again.
+        panel.activity.auto_group_min = 0
+        assert len(_keys(panel)) == 30 + 1
+
+
+async def test_auto_groups_need_fewer_machine_made_names() -> None:
+    app = _Harness()
+    async with app.run_test(size=(140, 40)) as pilot:
+        panel = app.query_one(FilesPanel)
+        numbered = [f"{ROOT}/files/blobs/{n}" for n in range(8)]
+        named = [f"{ROOT}/files/notes/note{n}.txt" for n in range(8)]
+        panel.ingest(
+            _items(*[_fse("FSE_CREATE_FILE", p) for p in numbered + named]), now=T0
+        )
+        keys = _keys(panel)
+        assert f"{ROOT}/files/blobs/" in keys  # 8 machine-made names: a group
+        assert set(named) <= set(keys)  # 8 named files: still rows
+        await pilot.pause()
+
+
+async def test_the_row_cap_says_what_it_dropped_once_and_keeps_watched_rows() -> None:
+    kept = f"{ROOT}/d0/f"
+    get_forensic_service().add_spotlight_file(kept)
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        notes: list[str] = []
+        app.notify = lambda message, **kw: notes.append(str(message))
+        panel.activity.max_paths = 50
+        panel.activity.auto_group_min = 0
+        for i in range(60):
+            panel.ingest(
+                _items(_fse("FSE_CONTENT_MODIFIED", f"{ROOT}/d{i}/f")),
+                now=T0 + timedelta(seconds=i),
+            )
+        panel.refresh_rows()
+        assert kept in panel.activity.paths  # the oldest, but watched
+        assert f"{ROOT}/d1/f" not in panel.activity.paths
+        assert "10 dropped at the 50-row limit" in panel.caption()[1]
+        cap_notes = [n for n in notes if "tui.monitor_max_lines" in n]
+        assert len(cap_notes) == 1  # once, not per batch
+        await pilot.pause()
+
+
+async def test_M_hides_rows_like_this_one_for_the_session_or_always(
+    monkeypatch,
+) -> None:
+    import glob
+
+    import sandroid.config as config_module
+    from sandroid.tui.modals.noise_rules_modal import MuteRowModal, NoiseRulesModal
+
+    saved: list[dict] = []
+    monkeypatch.setattr(
+        config_module, "update_config", lambda updates, **kw: saved.append(updates)
+    )
+    logs = [f"{ROOT}/files/logs/a.log", f"{ROOT}/files/logs/b.log"]
+    other = f"{ROOT}/files/other.txt"
+    app = _Harness()
+    async with app.run_test(size=(140, 40)) as pilot:
+        panel = app.query_one(FilesPanel)
+        panel.ingest(
+            _items(*[_fse("FSE_CONTENT_MODIFIED", p) for p in [*logs, other, PREFS]]),
+            now=T0,
+        )
+        _keys(panel)
+        choices = panel.mute_choices(_row(panel, logs[0]))
+        assert [(c[0], c[3]) for c in choices] == [
+            ("this folder", 2),
+            ("parent folder", 3),
+            ("this file", 1),
+        ]
+        # Enter: the first scope, for this session only (nothing saved).
+        panel.table.focus()
+        panel.set_following(False)
+        panel.table.move_cursor(row=panel.table.get_row_index(logs[0]))
+        await pilot.press("M")
+        await until(pilot, lambda: isinstance(app.screen, MuteRowModal))
+        assert "hides 2 rows" in MuteRowModal.choice_text(app.screen.choices[0]).plain
+        await pilot.press("enter")
+        await until(pilot, lambda: not isinstance(app.screen, MuteRowModal))
+        assert not set(logs) & set(_keys(panel))
+        assert saved == []
+        assert panel.activity.rules.rules[-1].session
+        assert "2 hidden: prefix 2" in panel.caption()[1]
+        # R lists it as "this session"; removing it there undoes it.
+        panel.table.focus()
+        await pilot.press("R")
+        await until(pilot, lambda: isinstance(app.screen, NoiseRulesModal))
+        modal = app.screen
+        assert modal.rules[-1]["session"] is True
+        table = modal.query_one("#rules-table")
+        assert "this session" in str(table.get_row_at(len(modal.rules) - 1)[3])
+        modal.remove_rule(len(modal.rules) - 1)
+        assert set(logs) <= set(_keys(panel))
+        assert all(not r.get("session") for r in saved[-1]["tui.files_noise_rules"])
+        await pilot.press("escape")
+        await until(pilot, lambda: not isinstance(app.screen, NoiseRulesModal))
+        # a: always -- a saved hide rule for just this file.
+        panel.table.focus()
+        panel.set_following(False)
+        panel.table.move_cursor(row=panel.table.get_row_index(other))
+        await pilot.press("M")
+        await until(pilot, lambda: isinstance(app.screen, MuteRowModal))
+        labels = [c[0] for c in app.screen.choices]
+        assert labels == ["this folder", "this file"]  # the app root is no choice
+        await pilot.press("down")
+        await pilot.press("a")
+        await until(pilot, lambda: not isinstance(app.screen, MuteRowModal))
+        assert other not in _keys(panel)
+        assert saved[-1]["tui.files_noise_rules"][-1] == {
+            "action": "hide",
+            "kind": "glob",
+            "pattern": glob.escape(other),
+            "enabled": True,
+        }
+
+
+async def test_W_shows_only_watched_files() -> None:
+    get_forensic_service().add_spotlight_file(DB)
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", PREFS), _fse("FSE_CREATE_FILE", AAID)),
+            now=T0,
+        )
+        panel.table.focus()
+        await pilot.press("W")
+        await settle(pilot)
+        assert _keys(panel) == [DB]
+        assert "watched only · W all" in panel.caption()[1]
+        await pilot.press("W")
+        await settle(pilot)
+        assert set(_keys(panel)) == {DB, PREFS, AAID}
+        assert "watched only" not in panel.caption()[1]
+        get_forensic_service()._spotlight_files.clear()
+        panel.watchlist.reload()
+        panel.action_toggle_watched_only()
+        assert panel.has_class("-empty")
+        empty = str(panel.query_one("#files-empty").render())
+        assert empty == "No watched files — w watches a row, W shows all"
+
+
+async def test_the_ai_own_reads_are_no_app_activity(monkeypatch) -> None:
+    from sandroid.ai import device_files as df
+
+    monkeypatch.setattr(df, "_TOOL_READS", {})
+    monkeypatch.setattr(df, "recorded_serial_cached", lambda ttl=1.0: "emu")
+    now = datetime.now()
+    ours = f'FSE_OPEN\t456\t"cat"\t{PREFS}'
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        panel.ingest(_items(_fse("FSE_CONTENT_MODIFIED", PREFS), ours, ours), now=now)
+        _keys(panel)
+        row = _row(panel, PREFS)
+        assert str(panel._cells(row)[3]) == "3×"  # not read by the tool yet
+        t = now.timestamp()
+        df.note_tool_read(PREFS, "emu", t - 1, t + 1)
+        _keys(panel)
+        row = _row(panel, PREFS)
+        assert str(panel._cells(row)[3]) == "1×"
+        panel.activity.show_all = True  # the raw view shows o for OPENs
+        _keys(panel)
+        assert str(panel._cells(_row(panel, PREFS))[2]) == "M"
+        summary = _plain(panel._inspector_for(row).tabs[0][1])
+        by = next(line for line in summary.splitlines() if line.startswith("by"))
+        assert "cat" not in by
+        assert "456" not in by
+        assert "o 2×" not in summary
+        await pilot.pause()

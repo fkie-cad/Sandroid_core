@@ -20,6 +20,12 @@ source). A lens shows them with
   While it is on, its rows bypass the OS-noise / path-rule filter (the
   analyst's explicit pick beats a heuristic).
 
+``calm`` (the Files lens): the bar keeps only actionable words
+(``filtering``, ``partial``, ``N changed since``, ``N hidden by lens
+filters``; no ``N new since`` on the live lens), the key hint shows only
+while filtering or for a few seconds after a set first appears, and the
+Highlight column shows only with 2+ sets, never repeating the file name.
+
 Everything lens-independent lives here so the panels keep small hunks:
 :class:`HighlightView` (one per panel) wraps the store, the feed and the
 row source; :func:`flow_snapshot` / :func:`file_snapshot` build the row dicts
@@ -61,6 +67,8 @@ HL_MIN_WIDTH = {"network": 100, "files": 110}
 TINT = 0.18
 #: Below this width the bar uses the sets' short labels.
 BAR_SHORT_BELOW = 120
+#: ``calm``: seconds the key hint stays after a set first appears.
+HINT_SECONDS = 8.0
 
 
 def highlight_store() -> Any:
@@ -139,10 +147,14 @@ class SetCounts:
 class HighlightView:
     """One lens's view of the highlight store (see the module docstring)."""
 
-    def __init__(self, lens: str, noun: str = "row") -> None:
+    def __init__(self, lens: str, noun: str = "row", *, calm: bool = False) -> None:
         self.lens = lens
         #: "flow" / "file": the empty state and the Inspector name rows so.
         self.noun = noun
+        #: Fewer words (see the module docstring).
+        self.calm = calm
+        #: ``calm``: set id -> when the bar first showed it (monotonic).
+        self._first_seen: dict[str, float] = {}
         self.counts: dict[str, SetCounts] = {}
         #: Rows of the view passing the other filters / also the AI filter.
         self.view_total = 0
@@ -227,8 +239,15 @@ class HighlightView:
         return bool(fid and key and any(e[0] == fid for e in self.lookup(key)))
 
     def show_column(self, width: int) -> bool:
-        """Whether the "Highlight" column fits and has something to say."""
-        return width >= HL_MIN_WIDTH.get(self.lens, 100) and self.has_rows
+        """Whether the "Highlight" column fits and has something to say
+        (``calm``: only while 2+ sets have rows -- with one set the tint
+        says it all).
+        """
+        if width < HL_MIN_WIDTH.get(self.lens, 100):
+            return False
+        if self.calm:
+            return sum(1 for s in self.sets() if s.reasons) >= 2
+        return self.has_rows
 
     # -- rendering -------------------------------------------------------------
 
@@ -240,15 +259,22 @@ class HighlightView:
             return hits
         return tuple(sorted(hits, key=lambda e: e[0] != fid))
 
-    def cell(self, key: str | None) -> Text:
+    def cell(self, key: str | None, name: str | None = None) -> Text:
         """The Highlight cell: the sets' short words in their slot colours.
 
         The AI filter set comes first (the set whose colour tints the row).
+        ``name`` (the row's file name): a label that just repeats it is left
+        out.
         """
         text = Text(no_wrap=True, overflow="ellipsis")
-        for i, (_sid, slot, short, _reason) in enumerate(self.ordered(key)):
-            if i:
+        same = _name_forms(name) if name else set()
+        first = True
+        for _sid, slot, short, _reason in self.ordered(key):
+            if same and str(short).strip().lower() in same:
+                continue
+            if not first:
                 text.append(", ", style=lens_palette().dim)
+            first = False
             text.append(short, style=f"bold {role_color(slot_role(slot))}")
         return text
 
@@ -420,11 +446,11 @@ class HighlightView:
             if hs.id == fid:
                 words.append("filtering")
             state = set_state(hs)
-            if state != "complete":
+            if state == "partial" or (state == "scanning" and not self.calm):
                 words.append(state)  # "scanning" while running, else "partial"
-            if c.new:
+            if c.new and not self.calm:
                 words.append(f"{c.new} new since")
-            if c.not_judged:
+            if c.not_judged and not self.calm:
                 words.append(f"{c.not_judged} not judged")
             if c.changed:
                 words.append(f"{c.changed} changed since")
@@ -434,9 +460,20 @@ class HighlightView:
                 words.append("judged on live" if hs.scope is None else "from a run")
             if words:
                 text.append(" " + ", ".join(words), style=pal.text)
-        if hint:
+        if hint and (not self.calm or fid is not None or self.hint_remaining()):
             text.append("  ·  H filter · X clear", style=pal.dim)
         return text
+
+    def hint_remaining(self) -> float | None:
+        """``calm``: seconds the key hint still shows for a new set (None:
+        no set is new). The first call that sees a set starts its clock.
+        """
+        now = time.monotonic()
+        left = 0.0
+        for hs in self.sets():
+            seen = self._first_seen.setdefault(hs.id, now)
+            left = max(left, seen + HINT_SECONDS - now)
+        return left if left > 0 else None
 
     def _bar_counts(self, sets: list) -> Text:
         """The narrowest form: ``AI highlights · 4 sets: 10 8 4 3``."""
@@ -663,11 +700,18 @@ def flow_snapshot(row: Any, shown: bool, scope: str | None = None) -> dict:
     }
 
 
-def _our_reads(act: Any, path: str) -> dict[str, int]:
-    """``{process: n}``: the row's events that are ``read_device_files``'s
-    own reads -- open/close noise by head / cat / su, inside one of its read
-    windows on *path*, on the recorded device. Matched event by event, so
-    a write (or an analyst's ``cat`` outside the window) is never ours.
+def _name_forms(name: str) -> set[str]:
+    """``prefs.xml`` -> ``{"prefs.xml", "prefs"}`` (lower case)."""
+    base = name.rsplit("/", 1)[-1].strip().lower()
+    stem = base.rsplit(".", 1)[0] if "." in base.lstrip(".") else base
+    return {base, stem} - {""}
+
+
+def own_read_events(act: Any, path: str) -> list:
+    """The row's events that are ``read_device_files``'s own reads --
+    open/close noise by head / cat / su, inside one of its read windows on
+    *path* (canonical), on the recorded device. Matched event by event, so a
+    write (or an analyst's ``cat`` outside the window) is never ours.
     """
     from sandroid.ai.device_files import (
         has_tool_reads,
@@ -678,15 +722,15 @@ def _our_reads(act: Any, path: str) -> dict[str, int]:
 
     # Fast path (most rows, every row while the AI read nothing): one dict
     # look-up, no serial look-up, no walk over the row's events.
-    if not has_tool_reads(path):
-        return {}
+    if act is None or not has_tool_reads(path):
+        return []
     events = getattr(act, "events", None) or []
     if not events:
-        return {}
+        return []
     windows = tool_read_windows(path, serial=recorded_serial_cached())
     if not windows:
-        return {}
-    ours: dict[str, int] = {}
+        return []
+    ours = []
     for ev in events:
         if getattr(ev, "category", None) != "noise":
             continue
@@ -696,8 +740,16 @@ def _our_reads(act: Any, path: str) -> dict[str, int]:
             continue
         t = when.timestamp()
         if any(lo <= t <= hi for lo, hi in windows):
-            head = process.split(" · ", 1)[0]
-            ours[head] = ours.get(head, 0) + 1
+            ours.append(ev)
+    return ours
+
+
+def _our_reads(act: Any, path: str) -> dict[str, int]:
+    """``{process: n}`` of :func:`own_read_events`."""
+    ours: dict[str, int] = {}
+    for ev in own_read_events(act, path):
+        head = str(getattr(ev, "process", "") or "").split(" · ", 1)[0]
+        ours[head] = ours.get(head, 0) + 1
     return ours
 
 
@@ -784,4 +836,5 @@ __all__ = [
     "file_snapshot",
     "flow_snapshot",
     "highlight_store",
+    "own_read_events",
 ]

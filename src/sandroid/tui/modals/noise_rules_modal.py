@@ -11,6 +11,13 @@ Rule kinds: ``prefix`` (absolute path starts with), ``segment`` (a
 directory named so), ``suffix`` (file name ends with), ``glob`` (``fnmatch``
 on the absolute or app-relative path). Actions: ``hide`` (``N`` in the lens
 still shows the rows) and ``group`` (one expandable row per folder).
+
+Rules added with ``M`` for this session only are listed too, marked "this
+session"; they apply but are never saved (removing one here undoes it).
+
+:class:`MuteRowModal` is that ``M`` chooser: this folder / parent folder /
+this file with the number of rows each would hide; Enter hides for this
+session, ``a`` always (a saved rule).
 """
 
 from __future__ import annotations
@@ -21,7 +28,16 @@ from typing import TYPE_CHECKING
 from rich.text import Text
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Input, Label, Select, Static
+from textual.widgets import (
+    Button,
+    DataTable,
+    Input,
+    Label,
+    OptionList,
+    Select,
+    Static,
+)
+from textual.widgets.option_list import Option
 
 from sandroid.config.schema import (
     FILES_RULE_ACTIONS,
@@ -124,7 +140,8 @@ class NoiseRulesModal(ForensicModal[None]):
                 "(tui.files_noise_rules). [b]hide[/b] drops matching rows "
                 "(N in the lens shows everything raw), [b]group[/b] collapses "
                 "them into one row per folder. Open-only rows are hidden by "
-                "tui.monitor_event_visibility (noise = verbose, Settings).",
+                "tui.monitor_event_visibility (noise = verbose, Settings). "
+                "Rules marked [b]this session[/b] (from M) are not saved.",
                 id="rules-help",
             )
             table = _RulesTable(id="rules-table", cursor_type="row")
@@ -190,11 +207,14 @@ class NoiseRulesModal(ForensicModal[None]):
         for i, rule in enumerate(self._rules):
             on = rule.get("enabled", True)
             style = "" if on else pal.dim
+            pattern = Text(rule.get("pattern", ""), style=style)
+            if rule.get("session"):
+                pattern.append("  this session", style=pal.muted)
             table.add_row(
                 Text("● on" if on else "○ off", style=pal.ok if on else pal.dim),
                 Text(rule.get("action", ""), style=style or pal.accent),
                 Text(rule.get("kind", ""), style=style),
-                Text(rule.get("pattern", ""), style=style),
+                pattern,
                 key=str(i),
             )
         if self._rules:
@@ -273,4 +293,114 @@ class NoiseRulesModal(ForensicModal[None]):
             self._dismiss_with_refresh(None)
 
 
-__all__ = ["NoiseRulesModal"]
+#: ``(label, shown path, hide rule, rows it would hide)`` (``FilesPanel``).
+MuteChoice = tuple[str, str, dict, int]
+#: ``apply(rule, always)`` (the Files lens's ``apply_mute``).
+ApplyMute = Callable[[dict, bool], None]
+
+
+class MuteRowModal(ForensicModal[None]):
+    """``M`` in the Files lens: hide rows like the selected one."""
+
+    DEFAULT_CSS = """
+    MuteRowModal .modal-container {
+        width: 90;
+        max-width: 96%;
+        height: auto;
+        padding: 0 2;
+    }
+    MuteRowModal .modal-title {
+        height: 1;
+        margin-bottom: 0;
+    }
+    MuteRowModal #mute-help {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+    MuteRowModal #mute-choices {
+        height: auto;
+        max-height: 5;
+    }
+    """
+
+    BINDINGS = [Binding("a", "always", "Hide always (saved)", show=False)]
+
+    AUTO_FOCUS = "#mute-choices"
+
+    def __init__(self, choices: list[MuteChoice], apply: ApplyMute, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.choices = list(choices)
+        self._apply = apply
+
+    @staticmethod
+    def choice_text(choice: MuteChoice) -> Text:
+        label, shown, _rule, count = choice
+        pal = lens_palette()
+        text = Text(no_wrap=True, overflow="ellipsis")
+        text.append(f"{label:<14}", style="bold")
+        text.append(shown)
+        text.append(f"  hides {count} row{'s' if count != 1 else ''}", style=pal.muted)
+        return text
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal-container"):
+            yield Label("Hide rows like this one", classes="modal-title")
+            yield Static(
+                "For this session only, or always (saved in "
+                "tui.files_noise_rules). Watched rows stay. R lists the rules "
+                "and removes one.",
+                id="mute-help",
+            )
+            yield OptionList(
+                *(
+                    Option(self.choice_text(c), id=str(i))
+                    for i, c in enumerate(self.choices)
+                ),
+                id="mute-choices",
+            )
+            with Horizontal(classes="button-row"):
+                yield Button("This session", id="mute-session", classes="-primary")
+                yield Button("Always", id="mute-always")
+                yield Button("Cancel", id="mute-cancel")
+            yield KeyHintFooter(
+                hints={
+                    "default": "[dim]Up/Down choose  Enter this session  "
+                    "a always (saved)  Esc cancel[/dim]"
+                }
+            )
+
+    def on_mount(self) -> None:
+        super().on_mount()
+        choices = self.query_one("#mute-choices", OptionList)
+        if self.choices:
+            choices.highlighted = 0  # Enter acts on the first scope at once
+
+    def _highlighted(self) -> int:
+        index = self.query_one("#mute-choices", OptionList).highlighted
+        return index if index is not None else 0
+
+    def choose(self, index: int, always: bool = False) -> None:
+        if not 0 <= index < len(self.choices):
+            return
+        rule = dict(self.choices[index][2])
+        self._dismiss_with_refresh(None)
+        self._apply(rule, always)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        self.choose(event.option_index)
+
+    def action_always(self) -> None:
+        self.choose(self._highlighted(), always=True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "mute-session":
+            self.choose(self._highlighted())
+        elif event.button.id == "mute-always":
+            self.choose(self._highlighted(), always=True)
+        else:
+            self._dismiss_with_refresh(None)
+
+
+__all__ = ["MuteRowModal", "NoiseRulesModal"]

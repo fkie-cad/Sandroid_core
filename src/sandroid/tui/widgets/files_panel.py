@@ -6,7 +6,7 @@ bottom (watched ★ rows that saw no activity stay on top)::
 
     ★ shared_prefs/consent.xml    -    0x            (watched, idle)
       files/aaid.txt              C    1x  10:40:12
-      cache/ · 340 files          CM 412x  10:41:58   (a cache group, ⏎/→ opens)
+      cache/ · 340 files          CM 412x  10:41:58   (a cache group, Enter/Right opens)
     ★ databases/app.db            CM  11x  10:42:05   (watched, changed: tinted)
 
 **Follow** (the Timeline / Network rules, ``follow.py``; the default
@@ -62,6 +62,22 @@ hidden -- never the app's own data, nor ``/data/local/tmp``. ``cache/`` and
 ``N`` shows every path raw. ``R`` opens the rule editor (add / remove /
 toggle prefix, segment, suffix and glob rules; applies at once, persists in
 the config, reset to defaults). The caption counts hidden rows by rule kind.
+``M`` hides rows like the selected one: a small chooser (this folder /
+parent folder / this file, each with the number of rows it would hide),
+for this session only (Enter, listed in ``R`` as "this session") or always
+(``a``: a saved hide rule).
+
+**Auto-groups** (``tui.files_auto_group_min``, default 20, 0 = off): many
+sibling files touched in one folder fold into one group row like a cache
+folder (``…/x.files/ · 445 files``); machine-made names (digits, hex,
+UUIDs) fold from 8. Watched and AI-highlighted files keep their own rows.
+With the Inspector open, the cursor on a group row shows its op counts
+and time span.
+
+**Row cap** (``tui.monitor_max_lines``, default 500 rows, a group row is
+one): rows hidden by a rule go first, then open-only rows, then the oldest
+shown rows; watched and AI-highlighted rows never. The caption says how
+many were dropped, and the first drop says so once.
 
 **Auto-pull** (``tui.auto_pull_on_change``, default on): a write the monitor
 reports for a ★ file pulls it once the writes are quiet (~1.5 s), see
@@ -82,8 +98,9 @@ all watched · ``/`` filter · ``n`` watch a path or pattern that is not in
 the table · ``A`` all / since mark · ``<``/``>`` mark
 segments · ``N`` show everything raw (as in the Network lens) · ``R`` path
 rules · ``.`` full paths · ``z`` zoom the diff · ``O`` sort (recent / name /
-count) · ``Home``/``End`` first/last row · ``Ctrl+L`` clear. Only
-``w``/``u`` are shown in the footer (the rest are in ``?``).
+count) · ``M`` hide rows like this one · ``W`` watched only / all ·
+``Home``/``End`` first/last row · ``Ctrl+L`` clear. Only ``w``/``u`` are
+shown in the footer (the rest are in ``?``).
 
 Jump target: ``reveal(path, version=None)`` puts the cursor on a file's row
 and opens its Inspector on the Versions tab (the Timeline lens's ``J`` on a
@@ -141,16 +158,19 @@ from .highlight_bar import (
     canonical_key,
     escape_markup,
     file_snapshot,
+    own_read_events,
 )
 from .lens_shell import InspectorContent, Mark, SessionMarks, ShellHeader, is_shown
 from .monitor_view import (
     OPS,
     FileActivity,
+    NoiseRule,
     NoiseRules,
     PathActivity,
     SegmentStats,
     app_package,
     app_relative,
+    auto_group_folders,
     op_color,
     smart_truncate,
 )
@@ -381,6 +401,18 @@ def collapse_follow_notes(
     return out
 
 
+def _fmt_span(span: timedelta) -> str:
+    """``under 1 s`` / ``4 s`` / ``2 min 5 s`` / ``1 h 3 min``."""
+    secs = int(span.total_seconds())
+    if secs < 1:
+        return "under 1 s"
+    if secs < 60:
+        return f"{secs} s"
+    if secs < 3600:
+        return f"{secs // 60} min {secs % 60} s"
+    return f"{secs // 3600} h {secs % 3600 // 60} min"
+
+
 def _fmt_size(size: int | None) -> str:
     if size is None:
         return "?"
@@ -413,6 +445,8 @@ class _Row:
     depth: int = 0
     #: The group row folding the idle ★ rows (``group`` is ``IDLE_FOLD``).
     fold: bool = False
+    #: A group made by auto-grouping (many touched siblings), not a rule.
+    auto: bool = False
 
 
 def _hl_key(row: _Row) -> str | None:
@@ -666,6 +700,8 @@ class FilesPanel(Widget):
         Binding("H", "cycle_highlight_filter", "AI filter: next set / off", show=False),
         Binding("X", "clear_highlights", "Clear the AI highlights", show=False),
         Binding("R", "noise_rules", "Hide / group rules…", show=False),
+        Binding("M", "mute_row", "Hide rows like this one…", show=False),
+        Binding("W", "toggle_watched_only", "Watched files only / all", show=False),
         Binding("full_stop", "toggle_full_paths", "Full paths", show=False),
         Binding("z", "zoom", "Zoom diff", show=False),
         Binding("O", "cycle_sort", "Sort: recent / name / count", show=False),
@@ -741,7 +777,14 @@ class FilesPanel(Widget):
             FileActivity.config_visibility(),
             FileActivity.config_max_paths(),
             rules=NoiseRules.from_config(),
+            auto_group_min=FileActivity.config_auto_group_min(),
         )
+        #: The row cap never drops watched or AI-highlighted files.
+        self.activity.protected = self._protected_key
+        #: The one-time notice of the first rows dropped at the cap.
+        self._cap_noticed = False
+        #: ``W``: only watched files (and patterns).
+        self._watched_only = False
         self._filter = ""
         #: Marks of the session (a copy of ``MainScreen.marks``; a lens
         #: outside a MainScreen keeps its own list).
@@ -791,7 +834,9 @@ class FilesPanel(Widget):
         #: (rows, row key -> row): the annotation key of a table row.
         self._row_index: tuple[Any, dict[str, _Row]] = (None, {})
         #: AI highlight sets (``highlight_bar``), keyed by canonical path.
-        self._hl = HighlightView(LENS_FILES, noun="file")
+        self._hl = HighlightView(LENS_FILES, noun="file", calm=True)
+        #: A timer drops the key hint of a new highlight set (calm bar).
+        self._hl_hint_timer = False
 
     # -- compose / mount -----------------------------------------------------
 
@@ -1026,6 +1071,8 @@ class FilesPanel(Widget):
         now = now or datetime.now()
         batch = list(batch)
         touched = self.activity.ingest(batch, now=now)
+        if self.activity.dropped and not self._cap_noticed:
+            self._notice_cap()
         if touched and not self._follow.live:
             self._new_keys.update(touched)
         writes = self.activity.writes
@@ -1040,6 +1087,27 @@ class FilesPanel(Widget):
         if touched:
             self._dirty = True
             self._refresh_inspector(touched)
+
+    def _protected_key(self, key: str) -> bool:
+        """A row the cap never drops: watched (★) or AI-highlighted."""
+        wl = self._watchlist_or_none()
+        if wl is not None and wl.watched_by(key) is not None:
+            return True
+        return bool(self._hl.lookup(canonical_key(key)))
+
+    def _notice_cap(self) -> None:
+        """The first rows dropped at ``tui.monitor_max_lines``: say so once."""
+        self._cap_noticed = True
+        text = (
+            f"Files lens at its {self.activity.max_paths}-row limit: hidden rows "
+            "are dropped first, watched and AI-highlighted rows never. "
+            "tui.monitor_max_lines keeps more."
+        )
+        logger.info(text)
+        try:
+            self.app.notify(text, timeout=6, markup=False)
+        except Exception:
+            pass
 
     def _on_monitor_lifecycle(self, event_type) -> None:
         from sandroid.core.events import EventType
@@ -1167,6 +1235,11 @@ class FilesPanel(Widget):
         rest: list[_Row] = []
         groups: dict[str, list[_Row]] = {}
         hidden: dict[str, int] = {}
+        # Group rules and auto-groups: not in the raw view (N) nor under the
+        # AI filter (its rows are what the analyst asked to see).
+        grouping = not (self.activity.show_all or self._hl.filter_id())
+        auto_min = self.activity.auto_group_min if grouping else 0
+        candidates: list[_Row] = []
         if wl is not None:
             for path in wl.rows:
                 pinned[path] = _Row(key=path, watched=path, dim=segment is not None)
@@ -1203,18 +1276,23 @@ class FilesPanel(Widget):
             if reason is not None and not self._hl.bypass_noise(canonical_key(key)):
                 hidden[reason] = hidden.get(reason, 0) + 1
                 continue
-            folder = (
-                None
-                if self.activity.show_all or self._hl.filter_id()
-                else self.activity.rules.group_of(key)
-            )
+            folder = self.activity.rules.group_of(key) if grouping else None
             if folder is not None:
                 groups.setdefault(folder, []).append(row)
+            elif auto_min and not self._hl.lookup(canonical_key(key)):
+                candidates.append(row)  # an AI-highlighted file stays a row
             else:
                 rest.append(row)
         self._hidden = hidden
+        auto = auto_group_folders((r.key for r in candidates), auto_min)
+        for row in candidates:
+            folder = row.key.rpartition("/")[0]
+            if folder in auto:
+                groups.setdefault(folder, []).append(row)
+            else:
+                rest.append(row)
         for folder, members in groups.items():
-            rest.append(self._group_row(folder, members))
+            rest.append(self._group_row(folder, members, auto=folder in auto))
 
         def recency(row: _Row):
             last = row.stats.last if row.stats else None
@@ -1246,7 +1324,7 @@ class FilesPanel(Widget):
         # one expandable row: watching 20 prefs files must not push the
         # segment's real activity off the screen.
         limit = FOLD_IDLE_IN_ALL if segment is None else FOLD_IDLE_IN_SEGMENT
-        if len(idle) >= limit:
+        if len(idle) >= limit and not self._watched_only:
             idle = [_Row(key=IDLE_FOLD, group=IDLE_FOLD, members=idle, fold=True)]
         rows = idle + sorted(rest + active, key=order)
         out: list[_Row] = []
@@ -1267,8 +1345,10 @@ class FilesPanel(Widget):
         return all(self.activity.category_mode(c) == "verbose" for c in stats.ops)
 
     @staticmethod
-    def _group_row(folder: str, members: list[_Row]) -> _Row:
-        """One row for a cache folder: summed counts, union of ops."""
+    def _group_row(folder: str, members: list[_Row], auto: bool = False) -> _Row:
+        """One row for a cache folder or an auto-group: summed counts, union
+        of ops.
+        """
         total = SegmentStats()
         for member in members:
             stats = member.stats
@@ -1281,10 +1361,16 @@ class FilesPanel(Widget):
                 total.first = stats.first
             if stats.last and (total.last is None or stats.last > total.last):
                 total.last = stats.last
-        return _Row(key=folder + "/", stats=total, group=folder, members=members)
+        return _Row(
+            key=folder + "/", stats=total, group=folder, members=members, auto=auto
+        )
 
     def _matches(self, row: _Row, *, ai: bool = True) -> bool:
-        """The ``/`` filter and (``ai``) the AI filter (``highlight_bar``)."""
+        """The ``/`` filter, ``W`` (watched only) and (``ai``) the AI filter
+        (``highlight_bar``).
+        """
+        if self._watched_only and not self.review and row.watched is None:
+            return False
         if ai and not self._hl.passes(_hl_key(row)):
             return False
         if not self._filter:
@@ -1668,18 +1754,41 @@ class FilesPanel(Widget):
             stats = row.activity.stats(None)
         if self._hidden_only(stats):
             stats = None  # no empty ops column with a count of hidden events
+        # read_device_files's own reads are no app activity: not counted.
+        ours = self._own_reads(row) if stats is not None else 0
         ops = Text()
         if stats is not None:
+            own_noise_only = ours and stats.ops.get("noise", 0) <= ours
             for letter, color in stats.op_letters():
-                if letter != OPS["noise"][0] or self.activity.show_all:
-                    ops.append(letter, style=color)
+                if letter == OPS["noise"][0] and (
+                    own_noise_only or not self.activity.show_all
+                ):
+                    continue
+                ops.append(letter, style=color)
         elif row.pattern:
             ops.append("*", style=_c("dim"))
         count = Text(
-            f"{stats.count}×" if stats else "", style=_c("dim"), justify="right"
+            f"{max(0, stats.count - ours)}×" if stats else "",
+            style=_c("dim"),
+            justify="right",
         )
         last = Text(_fmt_time(stats.last) if stats else "", style=_c("dim"))
         return self._mark_cell(row), self._path_cell(row), ops, count, last
+
+    def _own_reads(self, row: _Row) -> int:
+        """Events of ``row`` (a group: of its files) in the viewed segment
+        that are ``read_device_files``'s own reads (not app activity).
+        """
+        n = 0
+        for r in row.members if row.group is not None else [row]:
+            if r.activity is None:
+                continue
+            events = own_read_events(r.activity, canonical_key(r.key))
+            if self._segment is not None:
+                seg = self._segment
+                events = [e for e in events if self.activity.segment_of(e.when) == seg]
+            n += len(events)
+        return n
 
     def refresh_rows(self) -> None:
         """Rebuild the table from the current model (keeps the cursor row)."""
@@ -1771,6 +1880,14 @@ class FilesPanel(Widget):
             return Text(f"{ai[0]} — {ai[1]}", style=_c("dim"))
         if self._filter:
             return Text(f"Nothing matches “{self._filter}”", style=_c("dim"))
+        if self._watched_only and not self.review:
+            return Text.assemble(
+                ("No watched files — ", _c("dim")),
+                ("w", "bold"),
+                (" watches a row, ", _c("dim")),
+                ("W", "bold"),
+                (" shows all", _c("dim")),
+            )
         if self.review:
             if self._review_error:
                 return Text(f"Could not load this run: {self._review_error}")
@@ -1830,6 +1947,13 @@ class FilesPanel(Widget):
             hidden = self.hidden_summary()
             if hidden:
                 parts.append(hidden)
+            if self.activity.dropped:
+                parts.append(
+                    f"{self.activity.dropped} dropped at the "
+                    f"{self.activity.max_paths}-row limit"
+                )
+            if self._watched_only:
+                parts.append("watched only · W all")
             if self._sort != "recent":
                 parts.append(f"by {self._sort}")
             if self._segment is not None:
@@ -1839,7 +1963,12 @@ class FilesPanel(Widget):
                 parts.append("monitor off — watched files not tracked · o starts it")
             elif watching and not wl._auto_pull_enabled():
                 parts.append("auto-pull off")
-            if not rows and not self._filter and not (watching and not running):
+            if (
+                not rows
+                and not self._filter
+                and not self._watched_only
+                and not (watching and not running)
+            ):
                 parts = []
             # What the monitor records: scope, following, lost events, how to
             # stop -- and "blind" instead of LIVE once it records nothing.
@@ -2084,6 +2213,13 @@ class FilesPanel(Widget):
         if key[1] != (self._scope or "live"):
             return
         path = key[2]
+        group = next(
+            (r for r in self._rows if r.key == path and r.group and not r.fold), None
+        )
+        if group is not None:
+            if touched is None or any(m.key in touched for m in group.members):
+                ms.update_inspector(self._group_inspector(group))
+            return
         if touched is not None and path not in touched:
             return
         row = next((r for r in self._rows if r.key == path and r.group is None), None)
@@ -2141,8 +2277,47 @@ class FilesPanel(Widget):
         if not (isinstance(key, tuple) and key and key[0] == "files"):
             return
         row = self.current_row()
-        if row is not None and row.group is None and key[2] != row.key:
+        if row is None or row.fold or key[2] == row.key:
+            return
+        if row.group is not None:
+            ms.update_inspector(self._group_inspector(row))
+        else:
             ms.update_inspector(self._inspector_for(row))
+
+    def _group_inspector(self, row: _Row) -> InspectorContent:
+        """A group row (auto-group or group rule): files, op counts, span."""
+        folder = row.group or row.key.rstrip("/")
+        grid = self._grid()
+        n = len(row.members)
+        grid.add_row("files", f"{n} file{'s' if n != 1 else ''}")
+        grid.add_row(
+            "grouped",
+            "many sibling files touched (auto)" if row.auto else "by a group rule (R)",
+        )
+        stats = row.stats or SegmentStats()
+        ours = self._own_reads(row)
+        ops = Text()
+        for cat in OPS:
+            count = stats.ops.get(cat, 0) - (ours if cat == "noise" else 0)
+            if count > 0:
+                if ops:
+                    ops.append("  ")
+                ops.append(OPS[cat][0], style=op_color(cat))
+                ops.append(f" {count}×")
+        if ops:
+            grid.add_row("ops", ops)
+        grid.add_row("first", _fmt_time(stats.first))
+        grid.add_row("last", _fmt_time(stats.last))
+        if stats.first is not None and stats.last is not None:
+            grid.add_row("span", _fmt_span(stats.last - stats.first))
+        name = app_relative(folder).rpartition("/")[2] or folder
+        return InspectorContent(
+            title=f"{name}/",
+            subtitle=f"{folder}/",
+            tabs=[("Summary", [("", grid)])],
+            footer="Enter open / fold  M hide",
+            key=self._inspector_key(row.key),
+        )
 
     def _inspector_for(self, row: _Row) -> InspectorContent:
         title = app_relative(row.key).rpartition("/")[2] or row.key
@@ -2383,10 +2558,13 @@ class FilesPanel(Widget):
         act = row.activity
         grid.add_row("watch", self._watch_text(row))
         if act is not None:
+            # read_device_files's own reads (open/close noise) are no app
+            # activity: left out of the counts and of "by".
+            ours = own_read_events(act, canonical_key(row.key))
             ops = Text()
             for cat, (letter, color) in OPS.items():
-                n = act.ops.get(cat)
-                if n:
+                n = act.ops.get(cat, 0) - (len(ours) if cat == "noise" else 0)
+                if n > 0:
                     if ops:
                         ops.append("  ")
                     ops.append(letter, style=color)
@@ -2394,21 +2572,31 @@ class FilesPanel(Widget):
             grid.add_row("ops", ops)
             grid.add_row("first", _fmt_time(act.first))
             grid.add_row("last", _fmt_time(act.last))
-            if act.pids:
+            pids = dict(act.pids)
+            for ev in ours:
+                if ev.pid in pids:
+                    pids[ev.pid] -= 1
+            pids = {pid: n for pid, n in pids.items() if n > 0}
+            procs: dict[str, int] = {}
+            for name, n in act.processes.items():
+                head = name.split(" · ", 1)[0]
+                procs[head] = procs.get(head, 0) + n
+            for ev in ours:
+                head = (ev.process or "").split(" · ", 1)[0]
+                if head in procs:
+                    procs[head] -= 1
+            procs = {name: n for name, n in procs.items() if n > 0}
+            if pids:
                 # Per process (pid), never per thread: "main (4665), tab_17
                 # (5395)"; a process without an app label is "PID n".
-                top = sorted(act.pids.items(), key=lambda kv: -kv[1])[:3]
+                top = sorted(pids.items(), key=lambda kv: -kv[1])[:3]
                 names = []
                 for pid, _n in top:
                     label = act.pid_labels.get(pid)
                     names.append(f"{label} ({pid})" if label else f"PID {pid}")
                 grid.add_row("by", ", ".join(names))
-            elif act.processes:
+            elif procs and not act.pids:
                 # No pid reported: "tab_17 · DOM Worker" counts as tab_17.
-                procs: dict[str, int] = {}
-                for name, n in act.processes.items():
-                    key = name.split(" · ", 1)[0]
-                    procs[key] = procs.get(key, 0) + n
                 top = sorted(procs.items(), key=lambda kv: -kv[1])[:3]
                 grid.add_row("by", ", ".join(name for name, _n in top))
             if act.moved_to:
@@ -2570,7 +2758,7 @@ class FilesPanel(Widget):
     def _hl_cell(self, row: _Row) -> Text:
         if row.group is not None:
             return self._hl.inside_cell(_hl_key(m) for m in row.members)
-        return self._hl.cell(_hl_key(row))
+        return self._hl.cell(_hl_key(row), name=row.key.rpartition("/")[2])
 
     def _hl_sections(self, row: _Row) -> list:
         last = row.activity.last if row.activity is not None else None
@@ -2594,6 +2782,15 @@ class FilesPanel(Widget):
                 items = self._hl_live_items()
             self._hl.measure(items, live=not self.review, changes=True)
         bar.show_text(self._hl.bar_text(self.size.width or 160, self._scope))
+        left = self._hl.hint_remaining() if self._hl.active else None
+        if left is not None and not self._hl_hint_timer:
+            # The key hint of a new set goes after a few seconds.
+            def _expire() -> None:
+                self._hl_hint_timer = False
+                self._update_highlight_bar()
+
+            self._hl_hint_timer = True
+            self.set_timer(left + 0.1, _expire)
 
     def _hl_live_items(self):
         """``(key, passes the other filters, None, last change)`` per live path.
@@ -2713,7 +2910,11 @@ class FilesPanel(Widget):
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if action in ("pull", "pull_all") and self.review:
             return False
-        if action in ("toggle_since_mark", "step_mark") and self.review:
+        if (
+            action
+            in ("toggle_since_mark", "step_mark", "mute_row", "toggle_watched_only")
+            and self.review
+        ):
             return False
         if action in ("cycle_highlight_filter", "clear_highlights"):
             return self._hl.active
@@ -2726,7 +2927,9 @@ class FilesPanel(Widget):
         if row.group is None:
             return False
         self.app.notify(
-            "A group row — ⏎ or → lists its files.", severity="warning", timeout=3
+            "A group row — Enter or Right lists its files.",
+            severity="warning",
+            timeout=3,
         )
         return True
 
@@ -2826,11 +3029,28 @@ class FilesPanel(Widget):
             NoiseRulesModal(self.activity.rules.to_list(), self.apply_noise_rules)
         )
 
-    def apply_noise_rules(self, rules: list[dict], persist: bool = True) -> str | None:
+    def apply_noise_rules(
+        self, rules: list[dict], persist: bool = True, append: bool = False
+    ) -> str | None:
         """Use ``rules`` now (and save them as ``tui.files_noise_rules``).
 
-        Returns an error text when they could not be saved (they still apply).
+        ``append``: add ``rules`` to the current ones (an equal rule is not
+        added twice; a saved rule replaces an equal session-only one).
+        Session-only rules (``"session": True``, from ``M``) apply but are
+        never saved. Returns an error text when the rules could not be saved
+        (they still apply).
         """
+        if append:
+            merged = self.activity.rules.to_list()
+            ident = [(r["action"], r["kind"], r["pattern"]) for r in merged]
+            for rule in rules:
+                key = (rule.get("action"), rule.get("kind"), rule.get("pattern"))
+                if key not in ident:
+                    merged.append(dict(rule))
+                    ident.append(key)
+                elif not rule.get("session"):
+                    merged[ident.index(key)] = dict(rule)
+            rules = merged
         self.activity.rules = NoiseRules(rules)
         self._dirty = True
         self.refresh_rows()
@@ -2839,11 +3059,87 @@ class FilesPanel(Widget):
         try:
             from sandroid.config import update_config
 
-            update_config({"tui.files_noise_rules": self.activity.rules.to_list()})
+            update_config({"tui.files_noise_rules": self.activity.rules.saved_list()})
         except Exception as exc:
             logger.warning(f"Could not save the Files rules: {exc}")
             return str(exc)
         return None
+
+    def mute_choices(self, row: _Row) -> list[tuple[str, str, dict, int]]:
+        """``M``: ``(label, shown path, hide rule, rows it would hide)`` per
+        scope -- this folder, the parent folder, this file (a group row: its
+        folder only). The parent is left out when it is the app's data root
+        or shallower.
+        """
+
+        def folder_rule(folder: str) -> dict:
+            return {"action": "hide", "kind": "prefix", "pattern": folder + "/"}
+
+        out: list[tuple[str, str, dict, int]] = []
+        if row.group is not None:
+            folder = row.group
+            out.append(("this folder", folder + "/", folder_rule(folder)))
+        else:
+            import glob
+
+            folder = row.key.rpartition("/")[0]
+            if folder:
+                out.append(("this folder", folder + "/", folder_rule(folder)))
+                parent = folder.rpartition("/")[0]
+                if parent.count("/") >= 2 and app_relative(parent + "/x") != "x":
+                    out.append(("parent folder", parent + "/", folder_rule(parent)))
+            rule = {"action": "hide", "kind": "glob", "pattern": glob.escape(row.key)}
+            out.append(("this file", row.key, rule))
+        return [
+            (label, shown, rule, self._mute_count(rule)) for label, shown, rule in out
+        ]
+
+    def _mute_count(self, rule: dict) -> int:
+        """The rows ``rule`` would hide now (watched rows are never hidden)."""
+        parsed = NoiseRule.from_dict(rule)
+        if parsed is None:
+            return 0
+        wl = self._watchlist_or_none()
+        n = 0
+        for key, act in self.activity.paths.items():
+            if parsed.folder_for(key) is None or act.stats(self._segment) is None:
+                continue
+            if wl is not None and wl.watched_by(key) is not None:
+                continue
+            if self.activity.hide_reason(act, self._segment) is None:
+                n += 1
+        return n
+
+    def action_mute_row(self) -> None:
+        """``M``: hide rows like the selected one (chooser, see the doc)."""
+        row = self.current_row()
+        if row is None or row.fold or row.pattern:
+            self.app.notify("Select a file or folder row to hide.", severity="warning")
+            return
+        from sandroid.tui.modals.noise_rules_modal import MuteRowModal
+
+        self.app.push_screen(MuteRowModal(self.mute_choices(row), self.apply_mute))
+
+    def apply_mute(self, rule: dict, always: bool = False) -> None:
+        """Add a hide rule from ``M``: session-only unless ``always``."""
+        rule = {**rule, "enabled": True}
+        if not always:
+            rule["session"] = True
+        error = self.apply_noise_rules([rule], persist=always, append=True)
+        shown = app_relative(str(rule.get("pattern", "")))
+        if error:
+            self.app.notify(
+                f"Hidden, but not saved: {error}", severity="warning", markup=False
+            )
+            return
+        how = "saved" if always else "this session"
+        self.app.notify(f"Hidden: {shown} ({how}; R undoes)", timeout=4, markup=False)
+
+    def action_toggle_watched_only(self) -> None:
+        """``W``: watched files only ↔ all rows."""
+        self._watched_only = not self._watched_only
+        self._dirty = True
+        self.refresh_rows()
 
     def action_toggle_noise(self) -> None:
         self.activity.show_all = not self.activity.show_all
@@ -2898,10 +3194,12 @@ class FilesPanel(Widget):
         field = self.query_one("#files-input", _LensInput)
         field.mode = mode
         if mode == "filter":
-            field.placeholder = "filter paths   ⏎ keep · esc clear"
+            field.placeholder = "filter paths   Enter keep · Esc clear"
             field.value = self._filter
         else:
-            field.placeholder = "/data/data/<pkg>/databases/*   ⏎ watch · esc cancel"
+            field.placeholder = (
+                "/data/data/<pkg>/databases/*   Enter watch · Esc cancel"
+            )
             field.value = self._app_root() or ""
         field.set_class(True, "-shown")
         field.focus()
