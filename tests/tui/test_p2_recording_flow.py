@@ -454,7 +454,10 @@ async def test_enter_on_spotlight_with_a_stale_pid_rechecks_and_starts(
         monkeypatch.setattr(panel, "_current_package", lambda: "org.wikipedia")
         monkeypatch.setattr(panel, "_safe_pid", lambda: spot.pid)
         monkeypatch.setattr(panel, "_is_paused", lambda: False)
-        fake_spotlight = SimpleNamespace(set_pid=lambda pid: setattr(spot, "pid", pid))
+        fake_spotlight = SimpleNamespace(
+            set_pid=lambda pid, **_kw: setattr(spot, "pid", pid),
+            selection_epoch=lambda: 0,
+        )
         monkeypatch.setattr(panel, "_spotlight", lambda: fake_spotlight)
         monkeypatch.setattr(
             panel,
