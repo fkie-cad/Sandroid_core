@@ -394,6 +394,12 @@ def test_auto_group_thresholds_and_machine_names() -> None:
     assert auto_group_folders(numbered, 20) == {"/d/idb": numbered}
     mixed = [*numbered[:7], "/d/idb/readme"]  # one person-made name: 20 needed
     assert auto_group_folders(mixed, 20) == {}
+    # A DiskLruCache folder: 9 `<hash>.0` files plus its `journal` folds.
+    lru = [f"/d/icons/{i:016x}.0" for i in range(9)] + ["/d/icons/journal"]
+    assert auto_group_folders(lru, 20) == {"/d/icons": lru}
+    # Under 80 % machine-made: the full threshold applies.
+    many = [*numbered, "/d/idb/a.txt", "/d/idb/b.txt", "/d/idb/c.txt"]
+    assert auto_group_folders(many, 20) == {}
     assert auto_group_folders(named, 0) == {}  # 0 = off
 
 

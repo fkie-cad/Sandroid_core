@@ -340,8 +340,10 @@ def auto_group_folders(keys: Iterable[str], min_count: int) -> dict[str, list[st
     """``{folder: member keys}`` for the folders with many touched siblings.
 
     A folder folds when ``min_count`` (0 = never) of ``keys`` are directly
-    in it, or :func:`machine_group_min` of them when every member name is
-    machine-made (an IndexedDB attachment store's ``1``, ``2``, ... ``445``).
+    in it, or when :func:`machine_group_min` of them have machine-made names
+    (an IndexedDB attachment store's ``1``, ``2``, ... ``445``) and those
+    are at least 80 % of the members -- a few companions such as a
+    DiskLruCache ``journal`` beside its ``<hash>.0`` files do not stop it.
     Generic on purpose: no app or path list.
     """
     if min_count <= 0:
@@ -355,9 +357,8 @@ def auto_group_folders(keys: Iterable[str], min_count: int) -> dict[str, list[st
     out: dict[str, list[str]] = {}
     for folder, members in by_folder.items():
         n = len(members)
-        if n >= min_count or (
-            n >= low and all(machine_name(k.rpartition("/")[2]) for k in members)
-        ):
+        machine = sum(1 for k in members if machine_name(k.rpartition("/")[2]))
+        if n >= min_count or (machine >= low and machine * 5 >= n * 4):
             out[folder] = members
     return out
 
