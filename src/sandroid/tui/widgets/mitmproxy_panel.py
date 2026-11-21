@@ -34,10 +34,11 @@ import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rich.markup import escape
+from rich.markup import escape as rich_escape
 from textual.widget import Widget
 
 from sandroid.services.mitmproxy_service import get_mitmproxy_service
+from sandroid.tui.utils.markup import escape
 from sandroid.tui.utils.ui_thread import UiDispatcher
 
 if TYPE_CHECKING:
@@ -542,7 +543,7 @@ class MitmproxyPanel(Widget):
         if not text:
             return
         self.recent_lines.append(("✗ " if color == "#fb7185" else "") + text)
-        body = escape(text)
+        body = rich_escape(text)
         if color:
             body = f"[{color}]{body}[/]"
         try:
@@ -944,7 +945,7 @@ class MitmproxyPanel(Widget):
             )
         )
         if self._service.ssl_unpin_is_active():
-            target = escape(self._service.ssl_unpin_target() or "")
+            target = rich_escape(self._service.ssl_unpin_target() or "")
             rows.append(("SSL unpin", f"[{pal.ok}]● on[/] {target}"))
         else:
             rows.append(("SSL unpin", f"[{pal.dim}]○ off[/]  Ctrl+P"))

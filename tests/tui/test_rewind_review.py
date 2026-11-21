@@ -1546,3 +1546,78 @@ def test_volatile_verdicts_reach_run_json_recording_json_and_the_ai(
     assert entry["compared"] == "field by field"
     assert ai["runs"][-1]["verdicts"] == {path: rewind.VOLATILE}
     assert readers == ["any", "ai"]
+
+
+_COOKIE = '{"meta.wikimedia.org":["WMF-Uniq=abc[/b]","[bold]x"]}'
+
+
+def test_markup_helpers_show_device_text_literally():
+    """N4-B1: ``rich.markup.escape`` leaves ``["`` alone; Textual reads it as
+    a tag (``MarkupError``). The helpers keep any text literal.
+    """
+    from textual.content import Content
+
+    from sandroid.tui.utils.markup import escape, plain
+
+    for text in (_COOKIE, '["', "[Foo=bar]", "a\\[b]", "C:\\x\\", "[$var]"):
+        assert Content.from_markup(escape(text)).plain.rstrip("\u200b") == text
+        assert (
+            Content.from_markup(f"[b]{escape(text)}[/b]").plain.rstrip("\u200b") == text
+        )
+        assert plain(text).plain == text
+
+
+async def test_review_with_brackets_and_quotes_in_the_diff_does_not_crash():
+    """N4-B1: a cookie_map value ``{"meta.wikimedia.org":["WMF-Uniq=...``
+    in the diff, the error, a request body and the name crashed Sandroid.
+    """
+
+    class Results(FakeController):
+        def results(self, rec):
+            res = rewind.FileResult(rec.selected[0], "v1", "v2", "v3",
+                                    f"+ {_COOKIE}", f"+ {_COOKIE}",
+                                    rewind.DIFFERENT)  # fmt: skip
+            res.only_run = [_COOKIE]
+            res.note = _COOKIE
+            return {"files": [res], "flows": []}
+
+    rec = _rec()
+    rec.name = _COOKIE
+    rec.note = _COOKIE
+    rec.selected = [rec.changed[0]["path"]]
+    rec.runs = [{"n": 2, "kind": "rewind-replay", "result": "replayed",
+                 "error": _COOKIE,
+                 "steps": [{"i": 1, "what": _COOKIE, "way": "failed",
+                            "reason": _COOKIE}]}]  # fmt: skip
+    modal = ReviewModal(rec, Results())
+    app = Host(modal)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await until(pilot, lambda: app.screen is modal)
+        await until(pilot, lambda: modal.query("#review-results .review-warn"))
+        await settle(pilot)
+        modal.set_progress(_COOKIE)
+        await settle(pilot)
+        body = " ".join(str(w.render()) for w in modal.query("#review-results Static"))
+        assert _COOKIE in body
+        assert _COOKIE in str(modal.query_one("#review-progress", Static).render())
+        assert app.is_running
+
+
+def test_a_notice_with_invalid_markup_is_shown_as_plain_text(monkeypatch):
+    """N4-B1 safety net: ``notify(f"Failed: {exc}")`` with ``["`` in the
+    exception must not raise ``MarkupError`` when the toast renders.
+    """
+    from textual.app import App
+
+    from sandroid.tui.app import SandroidTUI
+
+    seen: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        App, "notify", lambda self, message, **kw: seen.append((message, kw["markup"]))
+    )
+    app = SandroidTUI.__new__(SandroidTUI)
+    app.notify(f"Failed: {_COOKIE}")
+    app.notify("[b]bold[/b] fine")
+    app.notify("x", markup=False)
+    assert seen == [(f"Failed: {_COOKIE}", False), ("[b]bold[/b] fine", True),
+                    ("x", False)]  # fmt: skip

@@ -35,7 +35,6 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from rich.markup import escape
 from rich.text import Text
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
@@ -45,6 +44,7 @@ from textual.widgets import Input, Static
 from sandroid.tui.modals.base import FridaModal as _FridaModalBase
 from sandroid.tui.modals.objection_modal import BYPASS_KEYS
 from sandroid.tui.themes import lens_palette
+from sandroid.tui.utils.markup import escape
 from sandroid.tui.utils.ui_thread import UiDispatcher
 from sandroid.tui.widgets.app_lens import LABEL_WIDTH, LENS_ID, AppLensSections
 from sandroid.tui.widgets.lens_shell import InspectorContent

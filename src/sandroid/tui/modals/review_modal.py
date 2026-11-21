@@ -21,16 +21,17 @@ import contextlib
 import logging
 from typing import TYPE_CHECKING, Any
 
-from rich.markup import escape
 from rich.text import Text
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Checkbox, Input, Label, SelectionList, Static
 from textual.widgets.selection_list import Selection
 
+from ..utils.markup import escape, plain
 from .base import ForensicModal
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
+    from textual.content import Content
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,9 @@ class ReviewModal(ForensicModal[None]):
     def compose(self) -> ComposeResult:
         rec = self.rec
         with Vertical(classes="modal-container"):
-            yield Label(f"Review · Recording '{rec.name}'", classes="modal-title")
+            yield Label(
+                f"Review · Recording '{escape(rec.name)}'", classes="modal-title"
+            )
             yield Static(self._head_text(), id="review-head", classes="review-head")
             with Horizontal(id="review-name-row", classes="review-row"):
                 yield Label("Name  ")
@@ -189,7 +192,7 @@ class ReviewModal(ForensicModal[None]):
 
     # -- content ---------------------------------------------------------------
 
-    def _head_text(self) -> str:
+    def _head_text(self) -> Content:
         rec = self.rec
         secs = int((rec.stopped or 0) - (rec.started or 0)) if rec.started else 0
         parts = [f"{secs // 60}:{secs % 60:02d}"]
@@ -205,7 +208,7 @@ class ReviewModal(ForensicModal[None]):
             parts.append("start point saved")
         elif not rec.emulator:
             parts.append("no start point on a physical device")
-        return escape("   ".join(parts))
+        return plain("   ".join(parts))
 
     def refresh_lists(self, filling: bool | None = None) -> None:
         """Rebuild the file and request lists, results and buttons."""
@@ -355,7 +358,7 @@ class ReviewModal(ForensicModal[None]):
             Static(f"Results of the last {word} ({result})", classes="review-section")
         ]
         if last.get("error"):
-            widgets.append(Static(escape(str(last["error"])), classes="review-warn"))
+            widgets.append(Static(plain(str(last["error"])), classes="review-warn"))
         if last.get("result") == "diverged":
             from sandroid.core import rewind
 
@@ -367,10 +370,10 @@ class ReviewModal(ForensicModal[None]):
                     diverged=last.get("diverged"),
                 )
             )
-            widgets.append(Static(escape(words), classes="review-warn"))
+            widgets.append(Static(plain(words), classes="review-warn"))
         elif last.get("result") == "unchecked":
             note = _rewind.diverged_note(last)
-            widgets.append(Static(escape(note), classes="review-warn"))
+            widgets.append(Static(plain(note), classes="review-warn"))
         widgets.extend(self._step_widgets(last))
         for fr in res["files"]:
             widgets.extend(self._file_widgets(fr))
@@ -392,7 +395,7 @@ class ReviewModal(ForensicModal[None]):
                 way = f"{way} ({s.get('reason')}), unchecked"
             lines.append(f"  step {s.get('i')}: {s.get('what')} · {way}")
         return [Static("Replayed steps", classes="review-section"),
-                Static(escape("\n".join(lines)))]  # fmt: skip
+                Static(plain("\n".join(lines)))]  # fmt: skip
 
     def _file_widgets(self, fr: Any) -> list[Any]:
         from sandroid.core import rewind
@@ -403,9 +406,9 @@ class ReviewModal(ForensicModal[None]):
             rewind.DIFFERENT: "verdict-different",
         }.get(fr.verdict, "verdict-none")
         out: list[Any] = [
-            Static(escape(_short(fr.path, self.rec.pkg, 90)), classes="review-section"),
+            Static(plain(_short(fr.path, self.rec.pkg, 90)), classes="review-section"),
             Static("What your action changed (Before to After)"),
-            Static(escape(_clip_lines(fr.action_text or "no change"))),
+            Static(plain(_clip_lines(fr.action_text or "no change"))),
         ]
         if fr.before is None:
             out.append(Static("Before was not copied.", classes="review-warn"))
@@ -418,12 +421,12 @@ class ReviewModal(ForensicModal[None]):
             out.append(Static(text, classes="review-warn"))
         if fr.after_replay is not None:
             out.append(Static("What the replay changed (Before to After (replay))"))
-            out.append(Static(escape(_clip_lines(fr.replay_text or "no change"))))
+            out.append(Static(plain(_clip_lines(fr.replay_text or "no change"))))
             extra = [f"only in your run: {ln}" for ln in fr.only_run[:20]]
             extra += [f"only in the replay: {ln}" for ln in fr.only_replay[:20]]
             if extra:
                 text = _clip_lines("\n".join(extra))
-                out.append(Static(escape(text), classes="review-hint"))
+                out.append(Static(plain(text), classes="review-hint"))
         out.append(Static(fr.verdict, classes=cls))
         if getattr(fr, "compared", "") == rewind.BYTE_WORDS_KEY:
             out.append(Static(rewind.BYTE_WORDS, classes="review-hint"))
@@ -433,9 +436,9 @@ class ReviewModal(ForensicModal[None]):
                 [rewind.VOLATILE_HEADING]
                 + [f"  {rewind.volatile_line(v)}" for v in volatile]
             )
-            out.append(Static(escape(_clip_lines(text)), classes="verdict-volatile"))
+            out.append(Static(plain(_clip_lines(text)), classes="verdict-volatile"))
         if getattr(fr, "note", ""):
-            out.append(Static(escape(fr.note), classes="review-warn"))
+            out.append(Static(plain(fr.note), classes="review-warn"))
         return out
 
     def _flow_widgets(self, flows: list[Any]) -> list[Any]:
@@ -444,9 +447,7 @@ class ReviewModal(ForensicModal[None]):
         out: list[Any] = []
         for f in flows:
             out.append(
-                Static(
-                    escape(rewind.request_text(f.original)), classes="review-section"
-                )
+                Static(plain(rewind.request_text(f.original)), classes="review-section")
             )
             found_cls = "verdict-same" if f.replay is not None else "verdict-different"
             out.append(Static(f.found, classes=found_cls))
@@ -471,7 +472,7 @@ class ReviewModal(ForensicModal[None]):
                         _clip_lines(s.get("body", ""), 30),
                     ]
                 )
-                cols.append(Static(escape(text), classes="side"))
+                cols.append(Static(plain(text), classes="side"))
             row = Horizontal(*cols)
             row.styles.height = "auto"
             out.append(row)
@@ -488,9 +489,7 @@ class ReviewModal(ForensicModal[None]):
             body = "\n".join(rewind.request_text(r) for r in reqs[:40]) or "none"
             if len(reqs) > 40:
                 body += f"\n… {len(reqs) - 40} more"
-            cols.append(
-                Static(escape(f"{title} ({len(reqs)})\n{body}"), classes="side")
-            )
+            cols.append(Static(plain(f"{title} ({len(reqs)})\n{body}"), classes="side"))
         row = Horizontal(*cols)
         row.styles.height = "auto"
         return [Static("Requests per run", classes="review-section"), row]
@@ -519,7 +518,7 @@ class ReviewModal(ForensicModal[None]):
                     running or not self._current()
                 )
         text = "" if running else (problem or self.rec.note or "")
-        self.query_one("#review-problem", Static).update(escape(text))
+        self.query_one("#review-problem", Static).update(plain(text))
         keep = self.query_one("#review-keep", Checkbox)
         keep.disabled = not self.rec.start_point_name
         self.query_one("#review-head", Static).update(self._head_text())
@@ -528,7 +527,7 @@ class ReviewModal(ForensicModal[None]):
 
     def set_progress(self, text: str) -> None:
         with contextlib.suppress(Exception):
-            self.query_one("#review-progress", Static).update(escape(text or ""))
+            self.query_one("#review-progress", Static).update(plain(text or ""))
             self._update_buttons()
 
     def set_file_state(self, path: str, text: str) -> None:
@@ -574,7 +573,7 @@ class ReviewModal(ForensicModal[None]):
             self.controller.rename(event.value)
             with contextlib.suppress(Exception):
                 self.query_one(".modal-title", Label).update(
-                    f"Review · Recording '{self.rec.name}'"
+                    f"Review · Recording '{escape(self.rec.name)}'"
                 )
 
     def on_input_submitted(self, event: Input.Submitted) -> None:

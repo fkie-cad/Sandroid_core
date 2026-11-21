@@ -19,7 +19,6 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.markup import escape
 from textual.widgets import (
     Button,
     Input,
@@ -34,6 +33,7 @@ from textual.widgets import (
 )
 
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
+from sandroid.tui.utils.markup import escape
 
 logger = logging.getLogger(__name__)
 

@@ -43,7 +43,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from rich.text import Text
-from textual.markup import escape as escape_markup
 from textual.widgets import Static
 
 from sandroid.tui.row_annotations import (
@@ -54,6 +53,7 @@ from sandroid.tui.row_annotations import (
     row_tint,
 )
 from sandroid.tui.themes import lens_palette
+from sandroid.tui.utils.markup import escape as escape_markup
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable

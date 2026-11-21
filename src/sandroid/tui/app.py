@@ -74,6 +74,8 @@ from sandroid.tui.utils import copy_to_clipboard
 from sandroid.tui.widgets import ActivityLog
 
 if TYPE_CHECKING:
+    from textual.notifications import SeverityLevel
+
     from sandroid.config import SandroidConfig
     from sandroid.core.actionQ import ActionQ
 
@@ -573,6 +575,33 @@ class SandroidTUI(App):
     def get_theme_variable_defaults(self) -> dict[str, str]:
         """Default ``$lens-*`` values, for Textual themes that are not ours."""
         return {**super().get_theme_variable_defaults(), **lens_css_defaults()}
+
+    def notify(
+        self,
+        message: str,
+        *,
+        title: str = "",
+        severity: "SeverityLevel" = "information",
+        timeout: float | None = None,
+        markup: bool = True,
+    ) -> None:
+        """``App.notify``, but text that is not valid markup is shown as is.
+
+        Many notices put exception or device text into markup
+        (``f"Failed: {exc}"``); a ``["`` in it would raise ``MarkupError``
+        when the toast renders and take the app down (N4-B1).
+        """
+        if markup:
+            from textual.content import Content
+            from textual.markup import MarkupError
+
+            try:
+                Content.from_markup(str(message))
+            except MarkupError:
+                markup = False
+        super().notify(
+            message, title=title, severity=severity, timeout=timeout, markup=markup
+        )
 
     @property
     def sandroid_css_path(self) -> Path:

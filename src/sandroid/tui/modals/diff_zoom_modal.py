@@ -34,6 +34,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Input, Label, RichLog, Static
 
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
+from sandroid.tui.utils.markup import escape as escape_textual
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
@@ -145,13 +146,16 @@ class DiffZoomModal(ForensicModal[None]):
         self._query = ""
         self._match_lines: list[int] = []
         self._match_cursor = -1
+        #: First RichLog row of each logical line (the log wraps long
+        #: lines, so line i is not row i); empty until rendered with a width.
+        self._row_of: list[int] = []
         self._exported_path: Path | None = None
 
     # -- compose / mount -----------------------------------------------------
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="modal-container"):
-            yield Label(self._title, classes="modal-title")
+            yield Label(self._title, classes="modal-title", markup=False)
             yield Static("", id="zoom-status")
             yield RichLog(
                 id="zoom-log",
@@ -247,17 +251,25 @@ class DiffZoomModal(ForensicModal[None]):
         except Exception:
             return
         log.clear()
+        rows: list[int] = []
+
+        def write(markup: str) -> None:
+            rows.append(len(log.lines))
+            log.write(markup)
+
+        # Writes before the log has a width are deferred (no rows yet).
+        self._row_of = rows if getattr(log, "_size_known", True) else []
         query = self._query
         if not query:
             for line in self._lines:
-                log.write(escape(line))
+                write(escape(line))
             return
         needle = query.lower()
         qlen = len(query)
         for line in self._lines:
             lower_line = line.lower()
             if needle not in lower_line:
-                log.write(escape(line))
+                write(escape(line))
                 continue
             segments: list[str] = []
             pos = 0
@@ -269,7 +281,7 @@ class DiffZoomModal(ForensicModal[None]):
                 segments.append(escape(line[pos:idx]))
                 segments.append(f"[reverse]{escape(line[idx : idx + qlen])}[/reverse]")
                 pos = idx + qlen
-            log.write("".join(segments))
+            write("".join(segments))
 
     def _update_status(self) -> None:
         try:
@@ -281,12 +293,13 @@ class DiffZoomModal(ForensicModal[None]):
             count = len(self._match_lines)
             pos = f"{self._match_cursor + 1}/{count}" if count else "0/0"
             status.update(
-                f"[b]{self._title}[/] — {n} lines · search '{self._query}' "
-                f"· match {pos} (n/N)"
+                f"[b]{escape_textual(self._title)}[/] — {n} lines · search "
+                f"'{escape_textual(self._query)}' · match {pos} (n/N)"
             )
         else:
             status.update(
-                f"[b]{self._title}[/] — {n} lines · / search · e export · o open"
+                f"[b]{escape_textual(self._title)}[/] — {n} lines · / search "
+                "· e export · o open"
             )
 
     # -- match navigation --------------------------------------------------
@@ -312,9 +325,13 @@ class DiffZoomModal(ForensicModal[None]):
         if not self._match_lines or self._match_cursor < 0:
             return
         line_idx = self._match_lines[self._match_cursor]
+        rows = self._row_of
+        # The wrapped row of the match (RichLog wraps long lines), not the
+        # logical line index: otherwise the match is far above the view.
+        row = rows[line_idx] if line_idx < len(rows) else line_idx
         try:
             log = self.query_one("#zoom-log", RichLog)
-            log.scroll_to(y=max(0, line_idx - 3), animate=False)
+            log.scroll_to(y=max(0, row - 3), animate=False)
         except Exception:
             pass
 

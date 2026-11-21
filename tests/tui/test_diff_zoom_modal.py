@@ -205,3 +205,31 @@ async def test_export_failure_notifies_error_and_leaves_modal_open(monkeypatch) 
         assert "disk full" in message
         # Failure must not dismiss the modal.
         assert app.screen is modal
+
+
+@pytest.mark.asyncio
+async def test_search_scrolls_to_the_wrapped_row_of_the_match() -> None:
+    """N4-B9: long lines wrap in the RichLog, so the match of logical line
+    40 sits far below row 40; the view must show the match's own row.
+    """
+    from textual.widgets import RichLog
+
+    lines = [f"line {i} " + "x" * 400 for i in range(60)]
+    lines[50] = "needle here"
+    app = _ZoomHarness(diff_text="\n".join(lines), title='["odd" [title]')
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        modal = app.screen
+        modal.action_start_search()
+        await pilot.pause()
+        modal.query_one("#zoom-search-input", Input).value = 'needle["'
+        await pilot.pause()
+        modal.query_one("#zoom-search-input", Input).value = "needle"
+        await pilot.pause()
+        await pilot.pause()
+        log = modal.query_one("#zoom-log", RichLog)
+        row = modal._row_of[50]
+        assert row > 100  # the 50 lines above wrap to several rows each
+        top = int(log.scroll_y)
+        assert top <= row < top + log.scrollable_content_region.height
+        assert "needle" in log.lines[row].text

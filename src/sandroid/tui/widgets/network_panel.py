@@ -84,7 +84,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl
 
-from rich.markup import escape
+from rich.markup import escape as rich_escape
 from rich.style import Style
 from rich.syntax import Syntax
 from rich.table import Table
@@ -101,6 +101,7 @@ from sandroid.tui.row_annotations import (
     AnnotationTintMixin,
 )
 from sandroid.tui.themes import lens_palette
+from sandroid.tui.utils.markup import escape
 from sandroid.tui.utils.ui_thread import UiDispatcher, in_app_context
 from sandroid.tui.widgets.follow import Follow
 from sandroid.tui.widgets.fritap_panel import FriTapPanel
@@ -2528,7 +2529,7 @@ class NetworkPanel(Widget):
             why, next_hint = tls_failure_why(row.reason, row.app, self._ca_state())
             return InspectorContent(
                 title=f"TLS failed · {label}",
-                subtitle=escape(row.host),
+                subtitle=rich_escape(row.host),
                 sections=[
                     ("", grid),
                     *(self._hl.sections(row.flow_id) if row.flow_id else []),
@@ -2608,7 +2609,7 @@ class NetworkPanel(Widget):
         tabs += self._identity_tabs(row)
         return InspectorContent(
             title=f"{row.method} {label}",
-            subtitle=escape(_ellipsize(row.host + row.path, 300)),
+            subtitle=rich_escape(_ellipsize(row.host + row.path, 300)),
             tabs=tabs,
             footer="Left/Right: tab",
             key=key,
