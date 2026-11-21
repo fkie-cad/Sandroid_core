@@ -223,15 +223,26 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
                 error=f"Import error: {e}. Is friTap installed?",
             )
         except Exception as e:
+            from sandroid.analysis.fritap import start_failure_reason
+
+            reason = start_failure_reason(e)
+            if getattr(e, "reason", None) == "declined":
+                # "Keep running" / Esc on the restart question: the user's
+                # choice, not a failure (no "Command Failed" dialog).
+                return CommandResult(
+                    success=False,
+                    message=f"friTap not started: {reason}",
+                    error="cancelled",
+                )
             if getattr(e, "expected", False):
                 # A refusal with guidance (app not running, agent already
                 # injected): the message is the whole story, no traceback.
-                logger.error(f"FriTap not started: {e}")
+                logger.error(f"friTap did not start: {reason}")
             else:
                 logger.exception("Error starting FriTap")
             return CommandResult(
                 success=False,
-                message=f"FriTap startup failed: {e!s}",
+                message=f"friTap did not start: {reason}",
                 error=str(e),
             )
 

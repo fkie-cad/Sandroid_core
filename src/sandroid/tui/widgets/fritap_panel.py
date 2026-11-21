@@ -245,6 +245,8 @@ class FriTapPanel(Widget):
         if phase == "stopping":
             return f"[{pal.warn}]friTap ◌ stopping[/]"
         if phase == "failed" and not running:
+            if _detail.startswith("did not start"):
+                return f"[{pal.bad}]friTap did not start[/]"
             # e.g. an agent stuck in a frozen app: not a clean stop.
             return f"[{pal.bad}]friTap failed[/]"
         if not running:
@@ -309,6 +311,9 @@ class FriTapPanel(Widget):
                 f"[{pal.warn}]{escape(detail or 'app not responding')}[/] — "
                 "h stops friTap"
             )
+        elif phase == "failed" and not running and detail.startswith("did not start"):
+            # A start that failed or hung: the reason in red words.
+            head = f"[{pal.bad}]{escape(detail[:120])}[/]"
         elif phase == "failed" and not running:
             head = f"[{pal.bad}]failed[/] {escape(detail[:80])}"
         elif phase == "stopped" and not running and detail:

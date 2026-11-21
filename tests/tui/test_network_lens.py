@@ -2673,3 +2673,47 @@ def test_tls_failure_why_uses_the_known_ca_state(app, ca, why_part, next_part):
     assert next_part in nxt
     if ca == "installed":
         assert "installs the CA" not in nxt
+
+
+def test_fritap_did_not_start_is_red_words(monkeypatch):
+    """N3-B5/V7: a failed or hung friTap start reads "did not start: <reason>"
+    in the bad colour (caption and Inspector), not a muted line.
+    """
+    from sandroid.analysis import fritap as fritap_mod
+    from sandroid.tui.themes import lens_palette
+    from sandroid.tui.widgets.fritap_panel import FriTapPanel
+
+    pal = lens_palette()
+    panel = FriTapPanel()
+    monkeypatch.setattr(panel, "is_running", lambda: False)
+    try:
+        fritap_mod.set_lifecycle(
+            "failed", "did not start: no answer from org.x after 90 s"
+        )
+        assert panel.caption_token() == f"[{pal.bad}]friTap did not start[/]"
+        head = dict(panel.status_rows())["friTap"]
+        assert head == f"[{pal.bad}]did not start: no answer from org.x after 90 s[/]"
+    finally:
+        fritap_mod.set_lifecycle("stopped", "")
+
+
+def test_recent_failures_are_red_words():
+    from sandroid.tui.themes import lens_palette
+
+    pal = lens_palette()
+    text = np_mod._recent_text(["started", "✗ ERROR: unable to intercept"])
+    assert text.plain == "started\nERROR: unable to intercept"
+    styles = {str(span.style) for span in text.spans}
+    assert pal.bad in styles
+
+
+def test_activity_log_task_errors_are_red():
+    from sandroid.tui.widgets.activity_log import ActivityLog
+
+    colors = {"error": "#ff0000", "warning": "#ffff00"}
+    red = ActivityLog._level_colored("[error]friTap did not start: x[/error]", colors)
+    assert red == "[#ff0000]friTap did not start: x[/]"
+    assert ActivityLog._level_colored("ERROR: Error: boom", colors).startswith(
+        "[#ff0000]"
+    )
+    assert ActivityLog._level_colored("plain line", colors) == "plain line"

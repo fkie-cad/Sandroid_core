@@ -517,6 +517,24 @@ def _own_store_app(app: str) -> str:
     return ""
 
 
+def _recent_text(lines: list[str]) -> Text:
+    """The controllers' recent lines: muted, failures as red words.
+
+    The controllers mark failures with a leading ``✗ `` (not a house
+    symbol): it picks the colour and is dropped (E2E N3-V7).
+    """
+    pal = lens_palette()
+    out = Text()
+    for i, line in enumerate(lines):
+        if i:
+            out.append("\n")
+        if line.startswith("✗ "):
+            out.append(line[2:], style=pal.bad)
+        else:
+            out.append(line, style=pal.muted)
+    return out
+
+
 def tls_failure_why(reason: str, app: str, ca: str) -> tuple[str, str]:
     """``(why, next)`` for a TLS failure row, from what is known.
 
@@ -2612,9 +2630,7 @@ class NetworkPanel(Widget):
         m_recent = list(mitm.recent_lines)[-8:] if mitm is not None else []
         m_sections: list[tuple[str, Any]] = [("", m_grid), ("Keys", m_keys)]
         if m_recent:
-            m_sections.append(
-                ("Recent", Text("\n".join(m_recent), style=lens_palette().muted))
-            )
+            m_sections.append(("Recent", _recent_text(m_recent)))
         f_grid = _grid()
         for label, value in fritap.status_rows() if fritap is not None else []:
             f_grid.add_row(label, Text.from_markup(value))
@@ -2624,9 +2640,7 @@ class NetworkPanel(Widget):
             ("Keys", "[b]h[/b] start/stop friTap  [b]Ctrl+F[/b] output folder"),
         ]
         if f_recent:
-            f_sections.append(
-                ("Recent", Text("\n".join(f_recent), style=lens_palette().muted))
-            )
+            f_sections.append(("Recent", _recent_text(f_recent)))
         return InspectorContent(
             title="Network status",
             tabs=[("Mitmproxy", m_sections), ("friTap", f_sections)],
