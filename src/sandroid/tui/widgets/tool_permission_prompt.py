@@ -440,7 +440,8 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
     def _note_placeholder(self) -> str:
         """The note input's hint; for a device-pull tool it says that a No
         blocks the other pull tools this turn unless the note names one
-        (R2-U1)."""
+        (R2-U1).
+        """
         from sandroid.ai.loop import DEVICE_PULL_TOOLS
 
         if self._tool in DEVICE_PULL_TOOLS:

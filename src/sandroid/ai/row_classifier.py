@@ -445,7 +445,8 @@ _NAME_TAIL_WORDS = frozenset({"number", "no", "nr", "address", "id"})
 
 def _name_tail(name: str) -> str:
     """The part of a multi-word name the rule looks at: its last word, or
-    its last two words for "phone number" / "e-mail address"."""
+    its last two words for "phone number" / "e-mail address".
+    """
     words = name.split(" ")
     if len(words) > 1 and words[-1].lower() in _NAME_TAIL_WORDS:
         return "".join(words[-2:])
@@ -647,8 +648,7 @@ def mask_text(text: str) -> str:
         )
     text = _PARAM_RE.sub(
         lambda m: (
-            f"{m.group(1) or ''}{m.group(2)}="
-            f"{_sub_reduced(m.group(3), reduce_value)}"
+            f"{m.group(1) or ''}{m.group(2)}={_sub_reduced(m.group(3), reduce_value)}"
             if is_sensitive_name(m.group(2))
             else m.group(0)
         ),
@@ -665,8 +665,35 @@ _EMAIL_RE = re.compile(
 )
 #: ``icon@2x.png`` is a file name, not an address.
 _FILE_SUFFIXES = frozenset(
-    "png jpg jpeg gif webp svg bmp ico js css json xml html htm txt log so "
-    "dex apk jar db sqlite zip gz mp3 mp4 pdf".split()
+    [
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "webp",
+        "svg",
+        "bmp",
+        "ico",
+        "js",
+        "css",
+        "json",
+        "xml",
+        "html",
+        "htm",
+        "txt",
+        "log",
+        "so",
+        "dex",
+        "apk",
+        "jar",
+        "db",
+        "sqlite",
+        "zip",
+        "gz",
+        "mp3",
+        "mp4",
+        "pdf",
+    ]
 )
 #: An international phone number: ``+`` and 7-15 digits (E.164), optional
 #: spaces, dashes, dots or a bracketed area code. The ``+`` is required, so
