@@ -70,6 +70,7 @@ def descendant_pids(root: int) -> list[int] | None:
     try:
         out = subprocess.run(
             ["ps", "-axo", "pid=,ppid="],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=_PS_TIMEOUT_S,
