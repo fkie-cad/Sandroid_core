@@ -31,6 +31,7 @@ from __future__ import annotations
 import collections
 import logging
 import os
+import re
 import subprocess
 import sys
 import webbrowser
@@ -47,6 +48,12 @@ if TYPE_CHECKING:
     from textual.app import ComposeResult
 
 logger = logging.getLogger(__name__)
+
+
+#: friTap's own line markers ("[*] ", "[+] ", "[!] ", "[-] "), not words.
+_MARKER_RE = re.compile(r"^(?:\[[*+!-]\]\s*)+")
+#: How many of the newest Recent lines a repeat is checked against.
+_DEDUP_LINES = 8
 
 
 class FriTapPanel(Widget):
@@ -197,6 +204,17 @@ class FriTapPanel(Widget):
             self._keys = self._datalog = self._errors = 0
 
         stripped, was_error, was_warning = self._strip_pseudo_tags(line)
+        # friTap reports many lines twice (its "[*] " print and its log
+        # record) and repeats hook notes per loaded library: a line already
+        # among the last few is not listed (nor counted) again (N3).
+        stripped = _MARKER_RE.sub("", stripped.strip())
+        if not stripped or stripped in list(self.recent_lines)[-_DEDUP_LINES:]:
+            return
+        if any(
+            r.endswith(stripped) and r[:2] in ("✗ ", "! ")
+            for r in list(self.recent_lines)[-_DEDUP_LINES:]
+        ):
+            return
 
         # Prefix/substring dispatch. Shapes come from fritap_formatter.py:
         # keylog "TLS key …" (older engines: "🔑 …"), datalog "… (N bytes)",

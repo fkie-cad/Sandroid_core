@@ -2828,3 +2828,36 @@ def test_tool_names_are_spelled_one_way():
         source = inspect.getsource(module)
         for literal in ('"FriTap ', "'FriTap ", 'f"FriTap ', '"FriTap"'):
             assert literal not in source, (module.__name__, literal)
+
+
+def test_fritap_recent_lists_a_line_once(monkeypatch):
+    """N3: friTap's Recent listed "[*] x" and "x" (its print and its log
+    record) and four identical hook notes; errors were counted twice.
+    """
+    from sandroid.tui.widgets.fritap_panel import FriTapPanel
+
+    panel = FriTapPanel()
+    monkeypatch.setattr(panel, "refresh_header", lambda: None)
+    for line in (
+        "libnss3.so found & will be hooked on Android (tls)!",
+        "libnss3.so found & will be hooked on Android (tls)!",
+        "[*] libssl.so: keylog hooks installed via callback",
+        "libssl.so: keylog hooks installed via callback",
+        "[error]ERROR: unable to intercept function at 0x6c[/error]",
+        "ERROR: unable to intercept function at 0x6c",
+    ):
+        panel._append_line(line)
+    assert list(panel.recent_lines) == [
+        "libnss3.so found & will be hooked on Android (tls)!",
+        "libssl.so: keylog hooks installed via callback",
+        "✗ ERROR: unable to intercept function at 0x6c",
+    ]
+    assert panel._errors == 1
+
+
+def test_activity_log_shows_tool_lines_without_markers():
+    from sandroid.tui.widgets.activity_log import ActivityLog
+
+    log = ActivityLog()
+    log.log_message("[*] Android dynamic loader hooked.", "friTap")
+    assert log._plain_lines[-1].endswith("friTap: Android dynamic loader hooked.")

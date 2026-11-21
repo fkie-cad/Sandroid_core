@@ -398,6 +398,8 @@ class ActivityLog(RichLog):
         """
         if self._is_repeat(message):
             return
+        # friTap's "[*] " / "[+] " markers are not words: shown without them.
+        message = self._TOOL_PREFIX_RE.sub("", str(message).lstrip())
         colors = self._get_theme_colors()
         timestamp = datetime.now().strftime("%H:%M:%S")
         message = self._level_colored(message, colors)
