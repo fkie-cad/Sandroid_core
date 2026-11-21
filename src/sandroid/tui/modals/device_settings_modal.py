@@ -1,10 +1,15 @@
 """Device settings modal for configuring device environment.
 
-Tabbed modal with Location, Environment, Sensors & Battery, and Network tabs.
-Supports country presets for quick setup. Emulator-only and root-only controls
-are disabled when not available.
+Tabbed modal with Location, Environment, Sensors & Battery, Network and
+Actions tabs. Supports country presets for quick setup. Emulator-only and
+root-only controls are disabled when not available. The Actions tab is the
+front end of the device-actions registry
+(:mod:`sandroid.services.device_actions`): pick an action, fill its
+parameters, run it (off the UI thread); background actions (a GPS route)
+are listed and can be stopped.
 """
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -13,7 +18,7 @@ from typing import Any
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.markup import escape
 from textual.widgets import (
     Button,
@@ -76,7 +81,9 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
     - Environment tab: timezone, locale, telephony (root required)
     - Sensors & Battery tab: accelerometer, gyroscope, light, pressure, battery
     - Network tab: WiFi, mobile data, Bluetooth toggles
-    - Per-tab Apply buttons + Ctrl+S for apply all
+    - Actions tab: device actions (SMS, calls, GPS, time, power, network)
+    - Per-tab Apply buttons + Ctrl+S for apply all (on the Actions tab:
+      run the action)
     - Preset dropdown auto-fills fields across tabs
     """
 
@@ -167,6 +174,36 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
     DeviceSettingsModal #geocode-progress.visible {
         display: block;
     }
+
+    DeviceSettingsModal #actions-scroll {
+        height: auto;
+        max-height: 24;
+    }
+
+    DeviceSettingsModal #action-params {
+        height: auto;
+    }
+
+    DeviceSettingsModal #action-help {
+        height: auto;
+        color: $text-muted;
+        margin: 0 0 1 0;
+    }
+
+    DeviceSettingsModal #action-jobs {
+        height: auto;
+    }
+
+    DeviceSettingsModal .job-row {
+        height: 3;
+    }
+
+    DeviceSettingsModal .job-label {
+        width: 1fr;
+        height: 3;
+        content-align: left middle;
+        padding: 1 1 0 0;
+    }
     """
 
     def __init__(
@@ -191,6 +228,16 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         self._has_root = has_root
         self._messages: list[str] = []
         self._applying = False
+        #: An action run is in progress (the Run button is locked).
+        self._action_busy = False
+        #: The action whose parameter fields are shown.
+        self._action_id: str | None = None
+        #: Job ids shown in the background list (rebuilt when they change).
+        self._shown_jobs: tuple[str, ...] = ()
+        #: The action whose fields are built, and the lock that keeps
+        #: rebuilds (fields, background list) one at a time.
+        self._built_for: str | None = None
+        self._rebuild_lock = asyncio.Lock()
 
     @property
     def _root_badge(self) -> str:
@@ -400,6 +447,10 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
                             classes="-primary",
                         )
 
+                # Tab 5: device actions (the registry's front end)
+                with TabPane("Actions", id="tab-actions"):
+                    yield from self._compose_actions()
+
             # Status label
             yield Static("", id="status-label", classes="status-label")
 
@@ -417,9 +468,16 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
                 self.query_one("#btn-geocode", Button).disabled = True
         except Exception:
             pass
+        self.call_later(self._show_action, self._first_action_id())
+        self.set_interval(1.0, self._refresh_jobs)
+        self.call_later(self._refresh_jobs)
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        """Handle preset selection."""
+        """Handle preset and action selection."""
+        if event.select.id == "action-select":
+            if event.value != Select.BLANK and event.value != self._action_id:
+                self.call_later(self._show_action, str(event.value))
+            return
         if event.select.id != "preset-select" or event.value == Select.BLANK:
             return
 
@@ -496,9 +554,20 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
             self._start_apply(self._sensors_plan(), "No sensor fields filled")
         elif button_id == "btn-apply-network":
             self._start_apply(self._network_plan(), "")
+        elif button_id == "btn-run-action":
+            self._start_action()
+        elif button_id and button_id.startswith("btn-stop-"):
+            self._stop_job(button_id.removeprefix("btn-stop-"))
 
     def action_apply_all(self) -> None:
-        """Apply all settings (Ctrl+S)."""
+        """Apply all settings (Ctrl+S); on the Actions tab: run the action."""
+        try:
+            tab = self.query_one("#settings-tabs", TabbedContent).active
+        except Exception:
+            tab = ""
+        if tab == "tab-actions":
+            self._start_action()
+            return
         plan = self._location_plan()
         if self._has_root:
             plan += self._environment_plan()
@@ -761,3 +830,262 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
                 reason = detail or "unknown error"
                 parts.append(f"[$error]{label} failed: {reason}[/]")
         self._update_status("; ".join(parts))
+
+    # ── Actions tab: the device-actions registry ─────────────────────
+
+    def _compose_actions(self) -> ComposeResult:
+        """The Actions tab: picker, parameter fields, Run, background list."""
+        from sandroid.services.device_actions import list_actions
+
+        options = [(f"{a.group}: {a.title}", a.id) for a in list_actions()]
+        with VerticalScroll(id="actions-scroll"):
+            yield Select(
+                options,
+                id="action-select",
+                allow_blank=False,
+                value=self._first_action_id(),
+            )
+            yield Static("", id="action-help")
+            yield Vertical(id="action-params")
+            with Horizontal(classes="button-row"):
+                yield Button("Run", id="btn-run-action", classes="-primary")
+            yield Static("", id="action-jobs-title")
+            yield Vertical(id="action-jobs")
+
+    @staticmethod
+    def _first_action_id() -> str:
+        from sandroid.services.device_actions import list_actions
+
+        return list_actions()[0].id
+
+    def _action(self):
+        """The selected :class:`DeviceAction` (``None`` before the first)."""
+        from sandroid.services.device_actions import ACTIONS
+
+        return ACTIONS.get(self._action_id or "")
+
+    async def _show_action(self, action_id: str) -> None:
+        """Show the help line and parameter fields of *action_id* (one
+        rebuild at a time: the fields keep fixed ids).
+        """
+        async with self._rebuild_lock:
+            if action_id != self._built_for:
+                await self._build_action(action_id)
+
+    async def _build_action(self, action_id: str) -> None:
+        from sandroid.services.device_actions import ACTIONS
+
+        action = ACTIONS.get(action_id)
+        if action is None or not self._alive():
+            return
+        self._action_id = action_id
+        self._built_for = action_id
+        refused = action.emulator_only and not self._is_emulator
+        help_text = escape(action.help)
+        if refused:
+            help_text += " [$warning]Works on an emulator only.[/]"
+        self.query_one("#action-help", Static).update(help_text)
+        container = self.query_one("#action-params", Vertical)
+        await container.remove_children()
+        rows = []
+        for param in action.params:
+            widget = self._param_widget(param)
+            widget.disabled = refused
+            rows.append(
+                Horizontal(
+                    Static(param.label, classes="field-label"),
+                    widget,
+                    classes="switch-row" if param.kind == "bool" else "field-row",
+                )
+            )
+        if rows:
+            await container.mount(*rows)
+        self._set_action_busy(self._action_busy)
+
+    @staticmethod
+    def _param_widget(param) -> Input | Switch | Select:
+        """The form widget of one ``Param`` (id ``action-param-<name>``)."""
+        widget_id = f"action-param-{param.name}"
+        if param.kind == "bool":
+            return Switch(value=bool(param.default), id=widget_id)
+        if param.kind == "choice":
+            return Select(
+                [(label, value) for value, label in param.choices],
+                id=widget_id,
+                allow_blank=param.default is None,
+                value=param.default if param.default is not None else Select.BLANK,
+                classes="field-input",
+            )
+        default = "" if param.default is None else str(param.default)
+        return Input(
+            value=default,
+            placeholder=param.placeholder,
+            id=widget_id,
+            classes="field-input",
+        )
+
+    def _action_params(self) -> dict[str, Any]:
+        """The form values of the shown action (raw; the registry validates)."""
+        action = self._action()
+        values: dict[str, Any] = {}
+        for param in action.params if action else ():
+            try:
+                widget = self.query_one(f"#action-param-{param.name}")
+            except Exception:
+                continue
+            if isinstance(widget, Switch):
+                values[param.name] = widget.value
+            elif isinstance(widget, Select):
+                value = widget.value
+                values[param.name] = None if value == Select.BLANK else value
+            elif isinstance(widget, Input):
+                values[param.name] = widget.value
+        return values
+
+    def _start_action(self) -> None:
+        """Run the selected action in a worker (UI thread entry point)."""
+        action = self._action()
+        if self._action_busy or action is None:
+            return
+        if action.emulator_only and not self._is_emulator:
+            self._update_status(
+                f"[$error]{escape(action.title)} not run: works on an emulator only[/]"
+            )
+            return
+        from sandroid.core.adb import Adb
+
+        serial = Adb.get_target_device() or Adb.selected_serial()
+        if not serial:
+            self._update_status("[$error]No device selected[/]")
+            return
+        params = self._action_params()
+        self._set_action_busy(True)
+        self._update_status(f"Running: {escape(action.title)}...")
+        self._run_action(self.app, action.id, params, serial)
+
+    @work(thread=True, exclusive=True, group="device-actions-run")
+    def _run_action(
+        self, app: App, action_id: str, params: dict[str, Any], serial: str
+    ) -> None:
+        """Run one device action off the UI thread (pinned to *serial*).
+
+        *app* is taken on the UI thread: once the modal is closed,
+        ``self.app`` can no longer be resolved from this thread.
+        """
+        from sandroid.services.device_actions import ActionResult, run_action
+
+        try:
+            result = run_action(action_id, serial, params, actor="user")
+        except Exception as e:  # run_action never raises; belt and braces
+            logger.debug("Device action failed", exc_info=True)
+            result = ActionResult(action_id, False, str(e))
+        try:
+            app.call_from_thread(self._action_done, result)
+        except Exception:
+            logger.debug("Could not show the device action result", exc_info=True)
+
+    def _action_done(self, result) -> None:
+        """Show the result line of a run (UI thread)."""
+        self._action_busy = False
+        if not self._alive():
+            return
+        self._set_action_busy(False)
+        from sandroid.services.device_actions import ACTIONS
+
+        action = ACTIONS.get(result.action)
+        title = escape(action.title if action else result.action)
+        detail = escape(" ".join(result.message.split())[: _REASON_MAX * 2])
+        if result.ok:
+            self._messages.append(result.message)
+            self._update_status(f"[$success]{detail}[/]")
+        elif result.refused:
+            self._update_status(f"[$error]{title} not run: {detail}[/]")
+        else:
+            self._update_status(f"[$error]{title} failed: {detail}[/]")
+        self.call_later(self._refresh_jobs)
+
+    def _set_action_busy(self, busy: bool) -> None:
+        """Lock the Run button while an action runs (and when refused)."""
+        self._action_busy = busy
+        action = self._action()
+        refused = bool(action and action.emulator_only and not self._is_emulator)
+        try:
+            self.query_one("#btn-run-action", Button).disabled = busy or refused
+        except Exception:
+            pass
+
+    async def _refresh_jobs(self) -> None:
+        """List the running background actions with a Stop button each."""
+        async with self._rebuild_lock:
+            await self._render_jobs()
+
+    async def _render_jobs(self) -> None:
+        from sandroid.services.device_actions import running_jobs
+
+        if not self._alive():
+            return
+        jobs = running_jobs()
+        try:
+            title = self.query_one("#action-jobs-title", Static)
+            container = self.query_one("#action-jobs", Vertical)
+        except Exception:
+            return
+        title.update("Running in the background" if jobs else "")
+        ids = tuple(job.id for job in jobs)
+        if ids != self._shown_jobs:
+            self._shown_jobs = ids
+            await container.remove_children()
+            rows = [
+                Horizontal(
+                    Static(
+                        self._job_text(job),
+                        id=f"job-label-{job.id}",
+                        classes="job-label",
+                    ),
+                    Button("Stop", id=f"btn-stop-{job.id}", classes="-secondary"),
+                    classes="job-row",
+                )
+                for job in jobs
+            ]
+            if rows:
+                await container.mount(*rows)
+            return
+        for job in jobs:
+            try:
+                label = self.query_one(f"#job-label-{job.id}", Static)
+            except Exception:
+                continue
+            label.update(self._job_text(job))
+
+    @staticmethod
+    def _job_text(job) -> str:
+        """``<name> ● running, <progress>`` (the dot in the success colour)."""
+        progress = f", {escape(job.progress)}" if job.progress else ""
+        return f"{escape(job.title)} [$success]●[/] running{progress}"
+
+    def _stop_job(self, job_id: str) -> None:
+        """Stop a background job (the wait for its thread runs off the UI)."""
+        self._update_status("Stopping...")
+        self._run_stop(self.app, job_id)
+
+    @work(thread=True, group="device-actions-stop")
+    def _run_stop(self, app: App, job_id: str) -> None:
+        """Stop *job_id* and wait for its thread, off the UI thread."""
+        from sandroid.services.device_actions import stop_job
+
+        stopped = stop_job(job_id)
+        try:
+            app.call_from_thread(self._stop_done, stopped)
+        except Exception:
+            logger.debug("Could not show the stop result", exc_info=True)
+
+    def _stop_done(self, stopped: bool) -> None:
+        """Show the stop result (UI thread)."""
+        if not self._alive():
+            return
+        self._update_status(
+            "[$success]Background action stopped[/]"
+            if stopped
+            else "[$warning]That action had already ended[/]"
+        )
+        self.call_later(self._refresh_jobs)

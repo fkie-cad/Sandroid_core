@@ -801,6 +801,28 @@ class SandroidHeadlessAPI(SandroidAPI):
         )
 
     @require_initialized
+    async def list_device_actions(self) -> CommandResult:
+        """List the device actions (SMS, calls, GPS, time, power, network)."""
+        return await self._device_handler.list_device_actions()
+
+    @require_initialized
+    async def run_device_action(
+        self,
+        action_id: str,
+        params: dict[str, Any] | None = None,
+        serial: str | None = None,
+    ) -> CommandResult:
+        """Run one device action, e.g. ``sms.receive`` or ``time.jump``."""
+        return await self._device_handler.run_device_action(
+            action_id, params=params, serial=serial
+        )
+
+    @require_initialized
+    async def stop_device_action(self, job_id: str) -> CommandResult:
+        """Stop a background device action (a GPS route)."""
+        return await self._device_handler.stop_device_action(job_id)
+
+    @require_initialized
     async def take_screenshot(self, filename: str | None = None) -> CommandResult:
         """Take a screenshot of the device screen."""
         return await self._device_handler.take_screenshot(filename)

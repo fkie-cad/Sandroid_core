@@ -229,3 +229,237 @@ async def test_escape_closes_the_modal_during_a_run(service) -> None:
         await settle(pilot)
         assert app.is_running
         assert app._exception is None
+
+
+# -- Actions tab (device-actions registry) ----------------------------------------
+
+
+class _ActionsHarness(App):
+    def __init__(self, is_emulator: bool = True) -> None:
+        super().__init__()
+        self._is_emulator = is_emulator
+
+    def on_mount(self) -> None:
+        self.push_screen(
+            DeviceSettingsModal(is_emulator=self._is_emulator, has_root=True)
+        )
+
+
+class _FakeRegistry:
+    """Stands in for ``run_action`` / the background jobs; can gate a run."""
+
+    def __init__(self) -> None:
+        self.gate = threading.Event()
+        self.gate.set()
+        self.started = threading.Event()
+        self.runs: list[tuple] = []
+        self.threads: list[int] = []
+        self.jobs: list = []
+        self.stopped: list[str] = []
+        self.result = None
+
+    def run_action(self, action_id, serial, params=None, *, actor="user"):
+        from sandroid.services.device_actions import ActionResult
+
+        self.runs.append((action_id, serial, dict(params or {}), actor))
+        self.threads.append(threading.get_ident())
+        self.started.set()
+        assert self.gate.wait(10), "gate never opened"
+        return self.result or ActionResult(action_id, True, "SMS received from DHL")
+
+    def running_jobs(self, serial=None):
+        return list(self.jobs)
+
+    def stop_job(self, job_id, wait=5.0):
+        self.stopped.append(job_id)
+        self.jobs = [j for j in self.jobs if j.id != job_id]
+        return True
+
+
+@pytest.fixture
+def registry(monkeypatch, service) -> _FakeRegistry:
+    fake = _FakeRegistry()
+    from sandroid.services import device_actions
+
+    monkeypatch.setattr(device_actions, "run_action", fake.run_action)
+    monkeypatch.setattr(device_actions, "running_jobs", fake.running_jobs)
+    monkeypatch.setattr(device_actions, "stop_job", fake.stop_job)
+    return fake
+
+
+async def _open_actions(pilot) -> DeviceSettingsModal:
+    from textual.widgets import TabbedContent
+
+    await until(pilot, lambda: isinstance(pilot.app.screen, DeviceSettingsModal))
+    modal = pilot.app.screen
+    modal.query_one("#settings-tabs", TabbedContent).active = "tab-actions"
+    await until(pilot, lambda: modal._built_for is not None)
+    await settle(pilot)
+    return modal
+
+
+async def _pick(pilot, modal: DeviceSettingsModal, action_id: str) -> None:
+    from textual.widgets import Select
+
+    modal.query_one("#action-select", Select).value = action_id
+    await until(pilot, lambda: modal._built_for == action_id)
+    await settle(pilot)
+
+
+@pytest.mark.asyncio
+async def test_actions_tab_shows_the_fields_of_the_picked_action(registry) -> None:
+    app = _ActionsHarness()
+    async with app.run_test(size=(120, 50)) as pilot:
+        modal = await _open_actions(pilot)
+        assert modal._built_for == "sms.receive"
+        assert modal.query_one("#action-param-sender", Input).placeholder == (
+            "DHL or +4915112345678"
+        )
+        modal.query_one("#action-param-text", Input)
+
+        await _pick(pilot, modal, "gps.route")
+        from textual.widgets import Select
+
+        assert modal.query_one("#action-param-route", Select).value == "berlin-walk"
+        assert modal.query_one("#action-param-interval_s", Input).value == "2"
+        assert not modal.query("#action-param-sender")
+
+        await _pick(pilot, modal, "net.wifi")
+        from textual.widgets import Switch
+
+        assert modal.query_one("#action-param-on", Switch).value is True
+
+        await _pick(pilot, modal, "call.hangup")  # no parameters at all
+        assert not modal.query("#action-params Horizontal")
+        assert not modal.query_one("#btn-run-action", Button).disabled
+
+
+@pytest.mark.asyncio
+async def test_run_goes_off_the_ui_thread_and_shows_the_result(registry) -> None:
+    registry.gate.clear()
+    app = _ActionsHarness()
+    async with app.run_test(size=(120, 50)) as pilot:
+        modal = await _open_actions(pilot)
+        modal.query_one("#action-param-sender", Input).value = "DHL"
+        modal.query_one("#action-param-text", Input).value = "Paket kommt"
+
+        modal.query_one("#btn-run-action", Button).press()
+        await until(pilot, registry.started.is_set, msg="run never started")
+        await settle(pilot)
+        assert registry.threads[0] != threading.get_ident()
+        assert modal.query_one("#btn-run-action", Button).disabled
+        assert _status(modal) == "Running: Receive an SMS..."
+
+        registry.gate.set()
+        await until(pilot, lambda: "SMS received" in _status(modal))
+        assert _status(modal) == "[$success]SMS received from DHL[/]"
+        assert not modal.query_one("#btn-run-action", Button).disabled
+        assert registry.runs == [
+            ("sms.receive", SERIAL, {"sender": "DHL", "text": "Paket kommt"}, "user")
+        ]
+        assert modal._messages == ["SMS received from DHL"]
+
+
+@pytest.mark.asyncio
+async def test_ctrl_s_on_the_actions_tab_runs_the_action(registry, service) -> None:
+    app = _ActionsHarness()
+    async with app.run_test(size=(120, 50)) as pilot:
+        modal = await _open_actions(pilot)
+        await _pick(pilot, modal, "power.battery")
+        modal.query_one("#action-param-level", Input).value = "15"
+        await pilot.press("ctrl+s")
+        await until(pilot, lambda: registry.runs)
+        assert registry.runs[0][:3] == ("power.battery", SERIAL, {"level": "15"})
+        assert not service.gps_threads  # not "apply all settings"
+
+
+@pytest.mark.asyncio
+async def test_refusals_and_failures_are_red_words(registry) -> None:
+    from sandroid.services.device_actions import ActionResult
+
+    app = _ActionsHarness()
+    async with app.run_test(size=(120, 50)) as pilot:
+        modal = await _open_actions(pilot)
+        registry.result = ActionResult(
+            "sms.receive", False, "Sender: at most 11 letters", refused=True
+        )
+        modal.query_one("#btn-run-action", Button).press()
+        await until(pilot, lambda: "not run" in _status(modal))
+        assert _status(modal) == (
+            "[$error]Receive an SMS not run: Sender: at most 11 letters[/]"
+        )
+        registry.result = ActionResult("sms.receive", False, "device offline")
+        modal.query_one("#btn-run-action", Button).press()
+        await until(pilot, lambda: "failed" in _status(modal))
+        assert _status(modal) == "[$error]Receive an SMS failed: device offline[/]"
+        for glyph in ("✓", "✗", "▸", "•"):
+            assert glyph not in _status(modal)
+        assert modal._messages == []
+
+
+@pytest.mark.asyncio
+async def test_emulator_only_actions_are_locked_on_a_physical_device(
+    registry,
+) -> None:
+    app = _ActionsHarness(is_emulator=False)
+    async with app.run_test(size=(120, 50)) as pilot:
+        modal = await _open_actions(pilot)
+        assert modal.query_one("#btn-run-action", Button).disabled
+        assert modal.query_one("#action-param-sender", Input).disabled
+        help_text = str(modal.query_one("#action-help", Static).content)
+        assert "Works on an emulator only." in help_text
+        await pilot.press("ctrl+s")
+        await settle(pilot)
+        assert registry.runs == []
+        assert "works on an emulator only" in _status(modal)
+
+        await _pick(pilot, modal, "net.airplane")  # fine on a phone
+        assert not modal.query_one("#btn-run-action", Button).disabled
+
+
+@pytest.mark.asyncio
+async def test_background_actions_are_listed_and_can_be_stopped(registry) -> None:
+    from types import SimpleNamespace
+
+    registry.jobs = [
+        SimpleNamespace(id="job-7", title="GPS route Berlin walk",
+                        progress="fix 3 of 40", serial=SERIAL)
+    ]  # fmt: skip
+    app = _ActionsHarness()
+    async with app.run_test(size=(120, 50)) as pilot:
+        modal = await _open_actions(pilot)
+        await until(pilot, lambda: modal.query("#btn-stop-job-7"))
+        label = modal.query_one("#job-label-job-7", Static)
+        assert str(label.content) == (
+            "GPS route Berlin walk [$success]●[/] running, fix 3 of 40"
+        )
+        assert str(modal.query_one("#action-jobs-title", Static).content) == (
+            "Running in the background"
+        )
+        registry.jobs[0].progress = "fix 4 of 40"
+        await modal._refresh_jobs()
+        assert str(label.content).endswith("running, fix 4 of 40")
+
+        modal.query_one("#btn-stop-job-7", Button).press()
+        await until(pilot, lambda: registry.stopped == ["job-7"])
+        await until(pilot, lambda: "stopped" in _status(modal))
+        assert _status(modal) == "[$success]Background action stopped[/]"
+        await until(pilot, lambda: not modal.query("#btn-stop-job-7"))
+        assert str(modal.query_one("#action-jobs-title", Static).content) == ""
+
+
+@pytest.mark.asyncio
+async def test_closing_during_an_action_run_is_quiet(registry) -> None:
+    registry.gate.clear()
+    app = _ActionsHarness()
+    async with app.run_test(size=(120, 50)) as pilot:
+        modal = await _open_actions(pilot)
+        modal.query_one("#btn-run-action", Button).press()
+        await until(pilot, registry.started.is_set)
+        await pilot.press("escape")
+        await until(pilot, lambda: not isinstance(app.screen, DeviceSettingsModal))
+        registry.gate.set()
+        await until(pilot, lambda: not modal._action_busy)
+        await settle(pilot)
+        assert app.is_running
+        assert app._exception is None
