@@ -274,8 +274,35 @@ def test_outgoing_call_starts_the_call_intent(adb):
     assert result.ok
     assert result.message == "Outgoing call to +4989111222"
     assert adb.commands() == [
-        "shell 'am start -a android.intent.action.CALL -d tel:+4989111222'"
+        "shell 'am start -a android.intent.action.CALL -d tel:+4989111222'",
+        "shell 'dumpsys telephony.registry'",
     ]
+
+
+def test_outgoing_call_still_on_after_the_settle_is_a_success(adb):
+    adb.replies["shell 'am start"] = ("Starting: Intent { act=... }\n", "")
+    adb.replies["shell 'dumpsys"] = ("  mCallState=2\n", "")
+    result = da.run_action("call.outgoing", PHONE, {"number": "+4989111222"})
+    assert result.ok, result
+
+
+def test_outgoing_call_ended_by_the_network_is_a_failure(adb):
+    """N5-B1: the modem drops the call within a second; say so."""
+    adb.replies["shell 'am start"] = ("Starting: Intent { act=... }\n", "")
+    adb.replies["shell 'dumpsys"] = ("  mCallState=0\n", "")
+    result = da.run_action("call.outgoing", PHONE, {"number": "+4989111222"})
+    assert not result.ok
+    assert not result.refused
+    assert result.message == "call ended by the network"
+    assert adb.commands().count("shell 'dumpsys telephony.registry'") == 2
+    assert _action_lines()[-1]["data"]["ok"] is False
+
+
+def test_outgoing_call_that_starts_slowly_is_a_success(adb):
+    adb.replies["shell 'am start"] = ("Starting: Intent { act=... }\n", "")
+    adb.replies["shell 'dumpsys"] = [("  mCallState=0\n", ""), ("  mCallState=2\n", "")]
+    result = da.run_action("call.outgoing", PHONE, {"number": "+4989111222"})
+    assert result.ok, result
 
 
 # -- location -----------------------------------------------------------------

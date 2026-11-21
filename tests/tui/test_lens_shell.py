@@ -2143,3 +2143,33 @@ async def test_picker_highlights_a_snapshot_just_created(monkeypatch) -> None:
         await settle(pilot)
         assert panel._highlighted_tag() == "e2e-new"
         assert panel._select_tag is None
+
+
+def test_quit_logs_slow_steps_and_names_threads_that_hold_the_exit(
+    caplog, monkeypatch
+) -> None:
+    """N5-B4: a 46 s quit could not be pinned to a step from the log."""
+    import logging
+    import threading
+
+    from sandroid.tui.controllers import quit_controller as qc
+
+    monkeypatch.setattr(qc, "SLOW_STEP_S", 0.0)
+    with caplog.at_level(logging.INFO, logger=qc.logger.name):
+        assert qc.run_bounded("probe step", lambda: None, 2.0)
+    assert any("Quit: probe step took" in r.message for r in caplog.records)
+
+    release = threading.Event()
+
+    def _stuck_adb_read() -> None:
+        release.wait(10)
+
+    held = threading.Thread(target=_stuck_adb_read, name="held-exit", daemon=False)
+    held.start()
+    try:
+        report = qc.blocking_threads_report()
+    finally:
+        release.set()
+        held.join(5)
+    assert "thread 'held-exit' (daemon=False)" in report
+    assert "_stuck_adb_read" in report

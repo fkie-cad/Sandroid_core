@@ -448,6 +448,21 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 config.frida.server_auto_start, "setting-frida--server_auto_start"
             )
 
+        # Persona snapshots: fresh texts up to now when one is loaded
+        world = getattr(config, "world", None)
+        with Horizontal(classes="setting-row"):
+            yield Label("Persona top-up:", classes="setting-label")
+            yield from self._switch_with_state(
+                bool(getattr(world, "persona_topup", True)),
+                "setting-world--persona_topup",
+            )
+        yield Static(
+            "[dim]A loaded persona snapshot gets new SMS, calls and events "
+            "for the time since it was saved; off keeps the saved texts as "
+            "they are.[/dim]",
+            classes="setting-help",
+        )
+
         # Flush Package Cache
         with Horizontal(classes="setting-row"):
             yield Label("Package Cache:", classes="setting-label")

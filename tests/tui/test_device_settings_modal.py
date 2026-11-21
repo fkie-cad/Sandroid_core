@@ -404,6 +404,44 @@ async def test_refusals_and_failures_are_red_words(registry) -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_action_result_stays_on_its_tab(registry) -> None:
+    """N5 V9: the last result does not linger on every tab, nor under the
+    next action; a result that arrives on another tab waits for its tab.
+    """
+    from textual.widgets import TabbedContent
+
+    app = _ActionsHarness()
+    async with app.run_test(size=(120, 50)) as pilot:
+        modal = await _open_actions(pilot)
+        tabs = modal.query_one("#settings-tabs", TabbedContent)
+        modal.query_one("#btn-run-action", Button).press()
+        await until(pilot, lambda: "SMS received" in _status(modal))
+
+        tabs.active = "tab-location"
+        await until(pilot, lambda: _status(modal) == "")
+        tabs.active = "tab-actions"
+        await until(pilot, lambda: "SMS received" in _status(modal))
+
+        await _pick(pilot, modal, "call.incoming")
+        assert _status(modal) == ""
+
+        # A run that finishes while another tab is shown.
+        registry.gate.clear()
+        registry.started.clear()
+        modal.query_one("#btn-run-action", Button).press()
+        await until(pilot, registry.started.is_set)
+        await settle(pilot)
+        tabs.active = "tab-network"
+        await settle(pilot)
+        registry.gate.set()
+        await until(pilot, lambda: not modal._action_busy)
+        await settle(pilot)
+        assert _status(modal) == ""
+        tabs.active = "tab-actions"
+        await until(pilot, lambda: "SMS received" in _status(modal))
+
+
+@pytest.mark.asyncio
 async def test_emulator_only_actions_are_locked_on_a_physical_device(
     registry,
 ) -> None:
@@ -677,3 +715,56 @@ async def test_action_inputs_show_their_whole_box_and_an_empty_value(registry) -
             assert field.region.height == 3
             assert field.region.y >= row.region.y
             assert field.region.bottom <= row.region.bottom
+
+
+def _mouse(cls, app, widget):
+    """A terminal mouse event at the centre of *widget* (as the driver posts)."""
+    x, y = widget.region.center
+    return cls(
+        widget=None, x=x, y=y, delta_x=0, delta_y=0, button=1,
+        shift=False, meta=False, ctrl=False, screen_x=x, screen_y=y,
+    )  # fmt: skip
+
+
+@pytest.mark.asyncio
+async def test_fast_typing_into_sender_stays_there_when_a_click_follows(
+    registry,
+) -> None:
+    """N4-B12: "DHL" typed fast into Sender, then a click on Text. The
+    click must not overtake the typed-ahead keys (they ended up as "D" in
+    Sender and "HL..." in Text).
+    """
+    from pilot_helpers import boot
+    from textual import events
+    from textual.widgets import TabbedContent
+
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(200, 50)) as pilot:
+        await boot(app, pilot)
+        app.push_screen(DeviceSettingsModal(is_emulator=True, has_root=True))
+        await until(pilot, lambda: isinstance(app.screen, DeviceSettingsModal))
+        modal = app.screen
+        await until(pilot, lambda: modal.query("#settings-tabs"))
+        await settle(pilot)
+        modal.query_one("#settings-tabs", TabbedContent).active = "tab-actions"
+        await until(pilot, lambda: modal._built_for == "sms.receive")
+        await settle(pilot)
+        sender = modal.query_one("#action-param-sender", Input)
+        text = modal.query_one("#action-param-text", Input)
+        sender.focus()
+        await settle(pilot)
+
+        app.KEY_SETTLE_SECONDS = 60.0  # never released early by a slow host
+        # One burst, as the terminal delivers it: keys, a click, more keys.
+        for key in "DHL":
+            app.post_message(events.Key(key, key))
+        app.post_message(_mouse(events.MouseDown, app, text))
+        app.post_message(_mouse(events.MouseUp, app, text))
+        for key in "Par":
+            app.post_message(events.Key(key, key))
+        await until(pilot, lambda: len(sender.value + text.value) == 6)
+        await settle(pilot)
+        assert (sender.value, text.value) == ("DHL", "Par")
+        assert app.focused is text

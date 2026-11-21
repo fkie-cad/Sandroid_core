@@ -1280,6 +1280,24 @@ class SandroidTUI(App):
     async def on_event(self, event) -> None:
         from textual import events
 
+        if (
+            isinstance(event, (events.MouseDown, events.MouseUp))
+            and not event.is_forwarded
+            and (self._key_backlog or self._key_in_flight is not None)
+        ):
+            # A click moves the focus at once, so it must not overtake keys
+            # typed before it (N4-B12: "DHL" typed into Sender, then a click
+            # on Text left "D" in Sender and "HL..." in Text). It waits in
+            # line like a key; with nothing waiting it goes straight through.
+            if self._key_in_flight is not None and not self._key_stale():
+                self._key_backlog.append(event)
+                self.set_timer(self.KEY_SETTLE_SECONDS, self._key_unstick)
+                return
+            if self._key_backlog:
+                self._key_backlog.append(event)
+                self._key_in_flight = None
+                self._key_next()
+                return
         if isinstance(event, events.Key) and not event.is_forwarded:
             if self._key_in_flight is not None and not self._key_stale():
                 self._key_backlog.append(event)
@@ -1295,7 +1313,17 @@ class SandroidTUI(App):
         await super().on_event(event)
 
     async def _route_key(self, event) -> None:
-        """Route one key (priority bindings, else the focused widget)."""
+        """Route one key (priority bindings, else the focused widget), or a
+        click that waited behind keys.
+        """
+        from textual import events
+
+        if not isinstance(event, events.Key):
+            # A click: its focus move happens while it is routed.
+            self._key_in_flight = event
+            await super().on_event(event)
+            self.call_later(self._key_done, event)
+            return
         self.keys_routed += 1
         self._key_in_flight = event
         self._key_routed_at = time.monotonic()

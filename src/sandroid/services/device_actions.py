@@ -63,6 +63,9 @@ ALPHA_SENDER_MAX = 11
 TIME_JUMP_MAX_DAYS = 3650
 #: Seconds between the END CALL key and the check that the call ended.
 HANGUP_CHECK_S = 1.0
+#: Seconds between dialling and each check that the outgoing call is still
+#: on (the emulator modem can drop it within about a second).
+OUTGOING_CHECK_S = 1.5
 
 #: Waits (tests replace them).
 _sleep: Callable[[float], None] = time.sleep
@@ -651,6 +654,17 @@ def _call_outgoing(dev: _Device, p: dict, action: DeviceAction) -> ActionResult:
     )
     if "Starting" not in out:
         raise CommandError(out.strip()[:200] or "the dialer did not start")
+    # The dialer starts even when the network ends the call at once; check
+    # the call state after a short settle (twice, for a slow dialer).
+    for _attempt in range(2):
+        _sleep(OUTGOING_CHECK_S)
+        state = _call_state(dev)
+        if state != 0:
+            break
+    if state == 0:
+        return ActionResult(
+            action.id, False, "call ended by the network", {"number": number}
+        )
     return _ok(action, f"Outgoing call to {number}")
 
 

@@ -378,10 +378,49 @@ def test_quit_cleanup_keeps_emulator_and_adb_server(monkeypatch) -> None:
         def children(self, recursive: bool = False):
             return children
 
+    from sandroid.core import background_tracker as bt
+
+    # Without ps: psutil's own (slow) scan.
+    monkeypatch.setattr(bt, "descendant_pids", lambda root: None)
     monkeypatch.setattr(psutil, "Process", lambda *a, **k: _Me())
     found = BackgroundWorkTracker()._detect_untracked_processes()
     pids = {w.identifier for w in found}
     assert pids == {13, 14, 15, 16}
+
+    # With ps (the usual path): only the listed descendants are opened.
+    by_pid = {child.pid: child for child in children}
+    monkeypatch.setattr(bt, "descendant_pids", lambda root: list(by_pid))
+    monkeypatch.setattr(psutil, "Process", lambda pid: by_pid[pid])
+    found = BackgroundWorkTracker()._detect_untracked_processes()
+    assert {w.identifier for w in found} == {13, 14, 15, 16}
+
+
+def test_descendants_come_from_one_ps_call(monkeypatch) -> None:
+    """N5-B4: psutil's children() scanned every process of the host one by
+    one (8-38 s with thousands of processes) and the quit waited for it.
+    """
+    import subprocess
+    from types import SimpleNamespace
+
+    from sandroid.core import background_tracker as bt
+
+    calls = []
+    table = "  100     1\n  200   100\n  201   100\n  300   200\n  400     1\n  x y\n"
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return SimpleNamespace(stdout=table)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert sorted(bt.descendant_pids(100)) == [200, 201, 300]
+    assert bt.descendant_pids(400) == []
+    assert calls == [["ps", "-axo", "pid=,ppid="]] * 2
+
+    def broken(cmd, **kw):
+        raise OSError("no ps")
+
+    monkeypatch.setattr(subprocess, "run", broken)
+    assert bt.descendant_pids(100) is None
 
 
 # --------------------------------------------------------------------------

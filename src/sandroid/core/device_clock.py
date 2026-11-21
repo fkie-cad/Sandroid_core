@@ -789,6 +789,27 @@ def format_offset(offset_s: float) -> str:
     return sign + text
 
 
+def format_offset_compact(offset_s: float) -> str:
+    """The size of an offset in one whole unit, for the header: ``"45 s"``,
+    ``"75 min"`` (under 1 h), ``"2 h"`` (under 1 d), ``"33 d"``; no sign.
+
+    Rounded half up, so a jump of +2 h that measures 7199.6 s reads
+    ``"2 h"``; minutes only under an hour.
+    """
+    value = abs(offset_s)
+
+    def whole(x: float) -> int:
+        return int(x + 0.5)
+
+    if whole(value) < 60:
+        return f"{whole(value)} s"
+    if whole(value / 60) < 60:
+        return f"{whole(value / 60)} min"
+    if whole(value / 3600) < 24:
+        return f"{whole(value / 3600)} h"
+    return f"{whole(value / 86400)} d"
+
+
 def notable(sample: dict | None) -> bool:
     """The wall-clock offset is worth showing (``|off_wall| > NOTABLE_S``)."""
     offset = (sample or {}).get("off_wall")
@@ -1678,6 +1699,7 @@ __all__ = [
     "current",
     "device_minus_host",
     "format_offset",
+    "format_offset_compact",
     "held",
     "last_sample",
     "manual_time_command",

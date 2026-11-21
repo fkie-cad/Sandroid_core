@@ -346,6 +346,7 @@ def build_snapshot(
     unprobed: Collection[str] = (),
     ports: dict[str, tuple[int, str]] | None = None,
     snapshot_warnings: dict[str, dict[str, str]] | None = None,
+    personas: dict[str, str] | None = None,
 ) -> HubSnapshot:
     """Combine adb, probes, the AVD catalogue and our launches (pure).
 
@@ -371,6 +372,9 @@ def build_snapshot(
             (:func:`~sandroid.core.emulator.preferred_console_port`).
         snapshot_warnings: Per AVD, ``{snapshot: why it may not load}``
             (:func:`~sandroid.core.snapshot_policy.snapshot_warnings`).
+        personas: The persona each serial holds by the identity service's
+            record (a device of an earlier Sandroid run has no launch of
+            ours to name it).
 
     Returns:
         The snapshot. Our launch not yet listed (or still offline) shows as
@@ -382,6 +386,7 @@ def build_snapshot(
 
     known = known or {}
     warnings = snapshot_warnings or {}
+    personas = personas or {}
 
     def warned(avd: str) -> tuple[tuple[str, str], ...]:
         return tuple(sorted((warnings.get(avd) or {}).items())) if avd else ()
@@ -427,7 +432,7 @@ def build_snapshot(
                 if is_emulator and avd_name
                 else None
             ),
-            persona=_persona_of(launch),
+            persona=_persona_of(launch) or personas.get(serial, ""),
             snapshot_warnings=warned(avd_name),
             unprobed=serial in unprobed and launch is None,
         )
@@ -491,6 +496,22 @@ def build_snapshot(
         notes=tuple(out_notes),
         taken_at=now,
     )
+
+
+def _nearest_own_row(rows: Sequence[DeviceRow | AvdRow], index: int) -> int:
+    """The row nearest *index* that this session may act on: not another
+    session's device, not an AVD running elsewhere (*index* if none is).
+    """
+
+    def own(row: DeviceRow | AvdRow) -> bool:
+        if isinstance(row, DeviceRow):
+            return not row.in_use_elsewhere
+        return not row.running_elsewhere
+
+    candidates = [i for i, row in enumerate(rows) if own(row)]
+    if not candidates:
+        return index
+    return min(candidates, key=lambda i: (abs(i - index), i))
 
 
 def _persona_of(launch: Any) -> str:
@@ -824,6 +845,7 @@ class HubCollector:
         with self._lock:
             probes = dict(self._probes)
             avd_names = {k: v for k, v in self._avd_names.items() if v}
+        personas = self._personas(entries, unprobed)
         return build_snapshot(
             entries,
             probes,
@@ -839,7 +861,35 @@ class HubCollector:
             unprobed=unprobed,
             ports=ports,
             snapshot_warnings=warnings,
+            personas=personas,
         )
+
+    @staticmethod
+    def _personas(entries: Iterable[Any], unprobed: Collection[str]) -> dict[str, str]:
+        """The persona each emulator of ours holds by the identity record
+        (from memory, no device access): after a Sandroid restart there is
+        no launch of ours to name it (N5-B7).
+        """
+        from sandroid.core.emulator import serial_port
+
+        try:
+            from sandroid.services.identity import get_identity_service
+
+            ident = get_identity_service()
+        except Exception:
+            return {}
+        out: dict[str, str] = {}
+        for entry in entries:
+            serial = entry.serial
+            if serial in unprobed or serial_port(serial) is None:
+                continue
+            try:
+                persona = ident.persona_of(serial)
+            except Exception:
+                continue
+            if isinstance(persona, str) and persona:
+                out[serial] = persona
+        return out
 
     @staticmethod
     def _snapshot_warnings(
@@ -1088,6 +1138,8 @@ class DevicesScreen(ModalScreen[str | None]):
     #: Seconds between refreshes while something boots / the backstop.
     BOOT_POLL_SECONDS = 2.0
     BACKSTOP_SECONDS = 10.0
+    #: Longest a stopped emulator still listed by adb shows "stopping".
+    STOPPING_MAX_S = 60.0
 
     DEFAULT_CSS = """
     DevicesScreen {
@@ -1265,6 +1317,10 @@ class DevicesScreen(ModalScreen[str | None]):
         #: Row key -> (red word, hint) of an action that failed on it ("stop
         #: failed"); kept until the row goes away or a new action starts.
         self._failed: dict[str, tuple[str, str]] = {}
+        #: Row key -> ``time.monotonic()`` of a successful Stop: adb lists
+        #: the emulator for a while after qemu exited; it shows "stopping"
+        #: until it is gone (at most :attr:`STOPPING_MAX_S`).
+        self._stopping: dict[str, float] = {}
         #: AVDs whose next start wipes their data (never persisted).
         self._wipe: set[str] = set()
         self._in_flight = False
@@ -1429,7 +1485,11 @@ class DevicesScreen(ModalScreen[str | None]):
 
     def _boot_poll(self) -> None:
         snap = self.snapshot
-        busy = (snap is not None and snap.booting) or bool(self._busy)
+        busy = (
+            (snap is not None and snap.booting)
+            or bool(self._busy)
+            or bool(self._stopping)
+        )
         stale = time.monotonic() - self._last_backstop >= self.BACKSTOP_SECONDS
         if busy or stale:
             self.request_refresh()
@@ -1465,12 +1525,18 @@ class DevicesScreen(ModalScreen[str | None]):
         busy = self._busy.get(row.key)
         if busy:
             return Text(f"◌ {busy}", style=_c("title"))
+        if isinstance(row, DeviceRow) and self._is_stopping(row.key):
+            return Text("◌ stopping", style=_c("title"))
         cell = self._plain_state_cell(row)
         failed = self._failed.get(row.key)
         if failed:
             cell.append(" · ", style=_c("dim"))
             cell.append(failed[0], style=f"bold {_c('bad')}")
         return cell
+
+    def _is_stopping(self, key: str) -> bool:
+        at = self._stopping.get(key)
+        return at is not None and time.monotonic() - at < self.STOPPING_MAX_S
 
     def _plain_state_cell(self, row: DeviceRow | AvdRow) -> Text:
         """The State cell without the busy / failed overlays."""
@@ -1528,11 +1594,19 @@ class DevicesScreen(ModalScreen[str | None]):
             Text(row.serial, style=_c("dim")),
         )
 
-    def _fill(self, table: DataTable, rows: Sequence[DeviceRow | AvdRow]) -> None:
+    def _fill(
+        self,
+        table: DataTable,
+        rows: Sequence[DeviceRow | AvdRow],
+        before: Sequence[DeviceRow | AvdRow] = (),
+    ) -> None:
         """Replace *table*'s rows, keeping the cursor on the same row.
 
         A stopped AVD that was just started keeps the cursor: its row
-        becomes the running emulator of that AVD.
+        becomes the running emulator of that AVD. An emulator that went
+        away (stopped) hands the cursor to its AVD's row; the cursor never
+        falls onto another session's device (N5-B5: Stop, then ``x`` on
+        the row that slid under the cursor).
         """
         keep = None
         if table.row_count:
@@ -1560,6 +1634,17 @@ class DevicesScreen(ModalScreen[str | None]):
                 ),
                 old_index,
             )
+        elif keep is not None and str(keep.value).startswith("dev:"):
+            gone = next((r for r in before if r.key == keep.value), None)
+            avd = gone.avd_name if isinstance(gone, DeviceRow) else ""
+            index = next(
+                (
+                    i
+                    for i, row in enumerate(rows)
+                    if avd and isinstance(row, AvdRow) and row.name == avd
+                ),
+                _nearest_own_row(rows, old_index),
+            )
         table.move_cursor(row=max(0, min(index, len(rows) - 1)), animate=False)
 
     def _apply(self, snap: HubSnapshot) -> None:
@@ -1568,13 +1653,16 @@ class DevicesScreen(ModalScreen[str | None]):
             return
         if self.snapshot is None or snap.taken_at != self.snapshot.taken_at:
             self._applied_at = time.monotonic()  # boot_elapsed is as of now
+        before = self.snapshot.rows if self.snapshot is not None else ()
         self.snapshot = snap
         table = self.query_one("#hub-table", DataTable)
         rows = snap.rows
         listed = {row.key for row in rows}
         for key in [k for k in self._failed if k not in listed]:
             del self._failed[key]  # it went away after all
-        self._fill(table, rows)
+        for key in [k for k in self._stopping if k not in listed]:
+            del self._stopping[key]  # gone: stopped
+        self._fill(table, rows, before)
         running = len(snap.devices)
         booting = sum(1 for d in snap.devices if d.state is RowState.BOOTING)
         elsewhere = sum(1 for a in snap.avds if a.running_elsewhere)
@@ -1998,6 +2086,8 @@ class DevicesScreen(ModalScreen[str | None]):
         self._repaint_busy()
 
         def done(ok: bool, message: str) -> None:
+            if ok and method == "stop_emulator":
+                self._stopping[key] = time.monotonic()
             self._action_done(key, ok, message, failed_word)
 
         try:

@@ -288,6 +288,11 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         self._rebuild_lock = asyncio.Lock()
         #: The tab to open on: the one active when the modal was last used.
         self._initial_tab = self._remembered_tab()
+        #: Status line text per tab: a result belongs to the tab it came
+        #: from and does not linger on the others.
+        self._status_by_tab: dict[str, str] = {}
+        #: The tab an apply run was started from (its results go there).
+        self._apply_tab: str | None = None
 
     @staticmethod
     def _remembered_tab() -> str:
@@ -303,8 +308,12 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
     def on_tabbed_content_tab_activated(
         self, event: TabbedContent.TabActivated
     ) -> None:
-        """Remember the active tab for the next opening."""
+        """Show the tab's own status line; remember the tab for the next
+        opening.
+        """
         tab = event.pane.id
+        if tab in _TAB_IDS:
+            self._show_status(self._status_by_tab.get(tab, ""))
         if tab not in _TAB_IDS or tab == self._initial_tab:
             return
         self._initial_tab = tab
@@ -576,6 +585,9 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         """Handle preset and action selection."""
         if event.select.id == "action-select":
             if event.value != Select.BLANK and event.value != self._action_id:
+                if self._action_id is not None and not self._action_busy:
+                    # The last result belongs to the previous action.
+                    self._update_status("", tab="tab-actions")
                 self.call_later(self._show_action, str(event.value))
             return
         if event.select.id != "preset-select" or event.value == Select.BLANK:
@@ -625,7 +637,23 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         """
         return self.is_mounted and self.is_attached
 
-    def _update_status(self, message: str) -> None:
+    def _active_tab(self) -> str:
+        try:
+            return str(self.query_one("#settings-tabs", TabbedContent).active)
+        except Exception:
+            return ""
+
+    def _update_status(self, message: str, tab: str | None = None) -> None:
+        """Set the status line of *tab* (default: the active tab); it shows
+        only while that tab is active.
+        """
+        active = self._active_tab()
+        tab = tab or active
+        self._status_by_tab[tab] = message
+        if tab == active:
+            self._show_status(message)
+
+    def _show_status(self, message: str) -> None:
         """Update the status label."""
         try:
             label = self.query_one("#status-label", Static)
@@ -751,15 +779,18 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         progress.remove_class("visible")
 
         if error:
-            self._update_status(f"[$error]Geocode failed: {escape(str(error))}[/]")
+            self._update_status(
+                f"[$error]Geocode failed: {escape(str(error))}[/]", tab="tab-location"
+            )
         elif coords:
             lat, lon = coords
             self._set_input("input-latitude", str(lat))
             self._set_input("input-longitude", str(lon))
-            self._update_status(f"Geocoded: {lat:.4f}, {lon:.4f}")
+            self._update_status(f"Geocoded: {lat:.4f}, {lon:.4f}", tab="tab-location")
         else:
             self._update_status(
-                f"[$error]Could not geocode {escape(city)}, {escape(country)}[/]"
+                f"[$error]Could not geocode {escape(city)}, {escape(country)}[/]",
+                tab="tab-location",
             )
 
     # ── Apply: plans are read on the UI thread, run in a worker ─────
@@ -868,6 +899,7 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
             self._update_status("[$error]No device selected[/]")
             return
         self._set_applying(True)
+        self._apply_tab = self._active_tab()
         self._update_status("Applying...")
         self._run_apply(self.app, plan, serial)
 
@@ -915,7 +947,7 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         if not self._alive():
             return
         self._set_applying(False)
-        self._show_outcomes(outcomes)
+        self._show_outcomes(outcomes, tab=self._apply_tab)
 
     def _set_applying(self, busy: bool) -> None:
         """Disable the Apply buttons while a run is in progress."""
@@ -932,7 +964,7 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
             except Exception:
                 pass
 
-    def _show_outcomes(self, outcomes: list[_Outcome]) -> None:
+    def _show_outcomes(self, outcomes: list[_Outcome], tab: str | None = None) -> None:
         """Report results in the status line: success and error colours."""
         parts = []
         for outcome in outcomes:
@@ -947,7 +979,7 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
             else:
                 reason = detail or "unknown error"
                 parts.append(f"[$error]{label} failed: {reason}[/]")
-        self._update_status("; ".join(parts))
+        self._update_status("; ".join(parts), tab=tab)
 
     # ── Actions tab: the device-actions registry ─────────────────────
 
@@ -1079,7 +1111,7 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
             return
         params = self._action_params()
         self._set_action_busy(True)
-        self._update_status(f"Running: {escape(action.title)}...")
+        self._update_status(f"Running: {escape(action.title)}...", tab="tab-actions")
         self._run_action(self.app, action.id, params, serial)
 
     @work(thread=True, exclusive=True, group="device-actions-run")
@@ -1116,11 +1148,15 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         detail = escape(" ".join(result.message.split())[: _REASON_MAX * 2])
         if result.ok:
             self._messages.append(result.message)
-            self._update_status(f"[$success]{detail}[/]")
+            self._update_status(f"[$success]{detail}[/]", tab="tab-actions")
         elif result.refused:
-            self._update_status(f"[$error]{title} not run: {detail}[/]")
+            self._update_status(
+                f"[$error]{title} not run: {detail}[/]", tab="tab-actions"
+            )
         else:
-            self._update_status(f"[$error]{title} failed: {detail}[/]")
+            self._update_status(
+                f"[$error]{title} failed: {detail}[/]", tab="tab-actions"
+            )
         self.call_later(self._refresh_jobs)
 
     def _set_action_busy(self, busy: bool) -> None:
@@ -1184,7 +1220,7 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
 
     def _stop_job(self, job_id: str) -> None:
         """Stop a background job (the wait for its thread runs off the UI)."""
-        self._update_status("Stopping...")
+        self._update_status("Stopping...", tab="tab-actions")
         self._run_stop(self.app, job_id)
 
     @work(thread=True, group="device-actions-stop")
@@ -1205,6 +1241,7 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         self._update_status(
             "[$success]Background action stopped[/]"
             if stopped
-            else "[$warning]That action had already ended[/]"
+            else "[$warning]That action had already ended[/]",
+            tab="tab-actions",
         )
         self.call_later(self._refresh_jobs)

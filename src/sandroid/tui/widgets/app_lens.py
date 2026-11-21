@@ -204,7 +204,9 @@ def kill_app_lens_adb(package: str | None) -> int:
         markers = _LENS_ADB_MARKERS
     killed = 0
     try:
-        children = psutil.Process().children(recursive=True)
+        from sandroid.core.background_tracker import child_processes
+
+        children = child_processes()
     except Exception:
         return 0
     for child in children:
