@@ -251,6 +251,8 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\b(bearer)\s++[A-Za-z0-9._~+/=-]{4,}+"), rf"\1 {REDACTED}"),
     # OpenAI-style keys (sk-..., sk-proj-...).
     (re.compile(r"\bsk-[A-Za-z0-9_-]{8,}+"), f"sk-{REDACTED}"),
+    # AWS access key ids (AKIA... long-term, ASIA... temporary).
+    (re.compile(r"\b(AKIA|ASIA)[0-9A-Z]{12,}+\b"), rf"\1{REDACTED}"),
     # Credentials embedded in a URL: scheme://user:pass@host. The match
     # starts only at the beginning of a run of scheme characters and takes
     # the whole run possessively, so it is linear (the old "\b[a-z]..."

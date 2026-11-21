@@ -430,3 +430,27 @@ def test_policy_refused_snapshot_reads_as_refused_and_prompt_says_no_retry():
     assert summarize_result({"deleted": True, "name": "x"}) == "2 fields"
     assert '"refused" key' in ORCHESTRATOR_PROMPT_V2
     assert "do not retry" in ORCHESTRATOR_PROMPT_V2
+
+
+def test_mask_sensitive_masks_every_tool_result_centrally(
+    perm_store, arbiter, monkeypatch
+):
+    """N2-B2: with ai.mask_sensitive on, a tool that does no masking itself
+    (read_host_file, get_file_diff, get_captured_flows ...) still reaches the
+    model, the result store and the summary masked.
+    """
+    secret = {"content": "auth_token=SuperSecret123XYZ\nemail=jane.doe@example.org"}
+    reg = make_registry(reader=(lambda: secret, set(), 5))
+    monkeypatch.setattr("sandroid.ai.row_classifier.mask_enabled", lambda: True)
+    ex = executor(reg)
+    outcome = call(ex, "reader")
+    assert outcome.status == "ok"
+    stored = ex.ctx.get_store().get(outcome.result_id)
+    for text in (outcome.content, json.dumps(stored), outcome.summary):
+        assert "SuperSecret123XYZ" not in text
+        assert "jane.doe@example.org" not in text
+    assert "auth_token=[text, 17 chars]" in json.loads(outcome.content)["content"]
+
+    monkeypatch.setattr("sandroid.ai.row_classifier.mask_enabled", lambda: False)
+    outcome = call(ex, "reader", call_id="c2")
+    assert "SuperSecret123XYZ" in outcome.content  # off: sent as it is

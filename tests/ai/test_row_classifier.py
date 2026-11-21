@@ -719,3 +719,123 @@ def test_mask_on_prefs_names_with_any_characters():
     assert "SIDVAL" not in out
     assert f"{name} = [text, 10 chars]" in out
     assert "plain = ok" in out
+
+
+# -- the central tool-result pass (N2-B2) ----------------------------------------
+
+#: Repro values of the device E2E (results R29 / R36 / R37).
+_E2E_FILE = (
+    "auth_token=SuperSecret123XYZ\npassword: hunter2hunter2\n"
+    "email=jane.doe@example.org\nbearer_note=Bearer abcdefghijklmnop\n"
+)
+_E2E_DIFF = (
+    "base e2e_secret.txt  117 B  sha256 fc045fa28b8b950d\n\n@@ -1,4 +1,4 @@\n"
+    "-auth_token=SuperSecret123XYZ\n+auth_token=NewSecret999ABC\n"
+    " password: hunter2hunter2\n email=jane.doe@example.org\n"
+    "-bearer_note=Bearer abcdefghijklmnop\n+api_key=AKIA1234567890XYZ\n"
+    "+aws=AKIAIOSFODNN7EXAMPLE and sk-test1234567890abcd\n"
+)
+_E2E_SECRETS = (
+    "SuperSecret123XYZ",
+    "NewSecret999ABC",
+    "hunter2hunter2",
+    "jane.doe@example.org",
+    "abcdefghijklmnop",
+    "AKIA1234567890XYZ",
+    "AKIAIOSFODNN7EXAMPLE",
+    "sk-test1234567890abcd",
+    "abc123secret",
+)
+
+
+def test_mask_tool_result_masks_the_e2e_repro_values():
+    flows = {
+        "flows": [
+            {
+                "id": "789cafd6",
+                "host": "example.com",
+                "path": "/?email=jane.doe@example.org&token=abc123secret&page=2",
+                "prompt_tokens": 5,
+            }
+        ]
+    }
+    file_ = {"path": "/x/e2e_secret.txt", "content": _E2E_FILE}
+    diff = {"path": "/data/data/x/files/e2e_secret.txt", "diff": _E2E_DIFF}
+    masked = rc.mask_tool_result({"r29": flows, "r36": file_, "r37": diff})
+    flat = json.dumps(masked)
+    for secret in _E2E_SECRETS:
+        assert secret not in flat, secret
+    flow = masked["r29"]["flows"][0]
+    assert flow["path"] == "/?email=[text, 20 chars]&token=[text, 12 chars]&page=2"
+    assert flow["prompt_tokens"] == 5
+    assert flow["id"] == "789cafd6"
+    assert masked["r36"]["content"].startswith(
+        "auth_token=[text, 17 chars]\npassword: [text, 14 chars]\n"
+    )
+    assert "+api_key=[text, 17 chars]" in masked["r37"]["diff"]
+    assert "sha256 fc045fa28b8b950d" in masked["r37"]["diff"]
+
+
+def test_mask_tool_result_headers_json_fields_and_prefs():
+    detail = {
+        "request_headers": [
+            ["Host", "example.com"],
+            ["Authorization", "Bearer abcdef123456"],
+            ["Cookie", "a=1; b=2"],
+        ],
+        "response_body": {
+            "content": '{"user":{"email":"x@y.zz","name":"Jane"},'
+            '"access_token":"eyJabc.def.ghi","n":1}'
+        },
+        "api_key": "k-12345678",
+        "note": "request headers: Host: a | Authorization: Bearer xyz12345 | A: b",
+        "prefs": '<string name="auth_token">abc123</string>'
+        '<string name="theme">dark</string><long name="session_id" value="1234" />',
+    }
+    masked = rc.mask_tool_result(detail)
+    assert masked["request_headers"] == [
+        ["Host", "example.com"],
+        ["Authorization", "[Bearer, 19 chars]"],
+        ["Cookie", "[cookie, 2 part(s), 8 chars]"],
+    ]
+    body = masked["response_body"]["content"]
+    assert '"email":"[text, 6 chars]"' in body
+    assert '"name":"Jane"' in body
+    assert '"access_token":"[jwt, 14 chars]"' in body
+    assert masked["api_key"] == "[text, 10 chars]"
+    assert "Authorization: [Bearer, 15 chars] | A: b" in masked["note"]
+    assert '"auth_token">[text, 6 chars]<' in masked["prefs"]
+    assert '"theme">dark<' in masked["prefs"]
+    assert 'value="[number, 4 chars]"' in masked["prefs"]
+
+
+def test_mask_tool_result_is_idempotent_and_keeps_ordinary_content():
+    ordinary = {
+        "summary": "Read 3 of 4 files",
+        "key": "/data/data/a/shared_prefs/auth.xml",
+        "keys": ["/data/data/a/files/token.txt"],
+        "session_id": "20261121_034459",
+        "completion_tokens": 12,
+        "text": "The quick fox: jumps. See https://example.com/page?id=5&lang=en",
+    }
+    assert rc.mask_tool_result(ordinary) == ordinary
+    once = rc.mask_tool_result({"content": _E2E_FILE, "diff": _E2E_DIFF})
+    assert rc.mask_tool_result(once) == once
+    # An already masked digest (find_rows / classify_rows) passes unchanged.
+    digest = rc.network_digest(
+        {"key": "f1", "method": "GET", "url": "http://h/?token=abc123secret"},
+        detail=None,
+        mask=True,
+    )
+    assert "abc123secret" not in digest.text
+    assert rc.mask_tool_result(digest.text) == digest.text
+
+
+def test_mask_tool_result_fails_closed(monkeypatch):
+    def boom(text):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(rc, "mask_text", boom)
+    masked = rc.mask_tool_result({"content": "password=hunter2"})
+    assert "hunter2" not in json.dumps(masked)
+    assert "withheld" in masked["error"]

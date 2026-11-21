@@ -432,35 +432,49 @@ def network_digest(
 
 
 #: ``name = value`` (prefs) / ``name=value`` / ``name: value`` at a line start.
-_NAME_VALUE_LINE_RE = re.compile(r"^(\s*)([\w.\-]{1,128}+)(\s*+[=:]\s*+)(.*)$")
+#: A leading ``+`` (a diff's added line) belongs to the indent, not the name.
+_NAME_VALUE_LINE_RE = re.compile(r"^(\s*+\+?)([\w.\-]{1,128}+)(\s*+[=:]\s*+)(.*)$")
 
 
-def mask_names(text: str) -> str:
+def mask_names(text: str, name_rule: Callable[[str], bool] | None = None) -> str:
     """With ``ai.mask_sensitive`` on, before :func:`_mask`: main's name rule
     on Files content lines -- a prefs ``name = value`` / text ``name=value``
     / ``name: value`` line and a SQLite sample cell (``col=value``) whose
     name looks secret keep only the value's type and length. Line by line,
-    linear.
+    linear. *name_rule* replaces :func:`is_secret_name` (the tool-result
+    pass adds personal-data names such as ``email``).
     """
+    rule = name_rule or is_secret_name
     out = []
     for line in str(text).split("\n"):
         if line.startswith("  ") and "; " in line and "=" in line:
             cells = []
             for cell in line.split("; "):
                 col, eq, value = cell.partition("=")
-                if eq and is_secret_name(col.strip()):
+                if eq and rule(col.strip()) and not is_reduced(value):
                     cell = f"{col}={reduce_value(value)}"
                 cells.append(cell)
             out.append("; ".join(cells))
             continue
         name, eq, value = line.partition(" = ")
-        if eq and value and name.strip() and is_secret_name(name.strip()):
+        if (
+            eq
+            and value
+            and name.strip()
+            and rule(name.strip())
+            and not is_reduced(value)
+        ):
             # A prefs line (``name = value``): the whole name, whatever its
             # characters ("...auth.GET_TOKEN_RESPONSE.[DEFAULT]").
             out.append(f"{name} = {reduce_value(value)}")
             continue
         m = _NAME_VALUE_LINE_RE.match(line)
-        if m is not None and m.group(4) and is_secret_name(m.group(2)):
+        if (
+            m is not None
+            and m.group(4)
+            and rule(m.group(2))
+            and not is_reduced(m.group(4))
+        ):
             line = m.group(1) + m.group(2) + m.group(3) + reduce_value(m.group(4))
         out.append(line)
     return "\n".join(out)
@@ -475,6 +489,216 @@ def _mask(text: str) -> str:
     except Exception:
         logger.warning("secret redaction failed; a row digest was withheld")
         return WITHHELD
+
+
+# -- the central tool-result pass ----------------------------------------------
+#
+# With ``ai.mask_sensitive`` on, every tool result goes through
+# :func:`mask_tool_result` before it is stored, shaped for the model or
+# written to the transcript (``ai/loop.py``). It reuses the digest rules above
+# (a value is reduced to its type and length) and ends with
+# :func:`~sandroid.ai.safety.redact_secrets`. Digests that are already masked
+# pass through unchanged (reduced values are left alone).
+
+#: A value this module (or redact_secrets) already reduced.
+_REDUCED_RE = re.compile(
+    r"\[(?:[A-Za-z][\w-]{0,15}+), \d++ (?:chars|part\(s\))[^\]]{0,40}+\]|\*\*\*"
+)
+#: A reduced value inside text (protected from redact_secrets).
+_PLACEHOLDER_RE = re.compile(
+    r"\[(?:[A-Za-z][\w-]{0,15}+), \d++ (?:chars|part\(s\))[^\]]{0,40}+\]"
+)
+#: Personal data names masked like secrets in tool results (DPA).
+_PERSONAL_NAME_RE = re.compile(r"e-?mail|phone|msisdn|imei|imsi|iccid", re.IGNORECASE)
+#: Normalised (lower case, alphanumerics only) structured field names whose
+#: string or number value is reduced. Stricter than :func:`is_secret_name`
+#: so tool envelopes keep ``key``, ``session_id`` (Sandroid's own session),
+#: ``prompt_tokens`` & co.
+_SECRET_FIELD_PARTS = (
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "apikey",
+    "accesskey",
+    "privatekey",
+    "authorization",
+    "authtoken",
+    "accesstoken",
+    "refreshtoken",
+    "idtoken",
+    "sessiontoken",
+    "sessionkey",
+    "cookie",
+    "bearer",
+    "credential",
+    "csrf",
+    "xsrf",
+    "email",
+    "phonenumber",
+)
+_SECRET_FIELD_EXACT = frozenset(
+    {"auth", "pwd", "pin", "otp", "token", "phone", "msisdn", "imei", "imsi", "iccid"}
+)
+#: Header names whose value is reduced in text (``Cookie: a=1; b=2``).
+_SECRET_HEADER_TEXT_RE = re.compile(
+    r"(?im)\b(authorization|proxy-authorization|set-cookie|cookie|x-api-key|"
+    r"x-auth-token|x-access-token|x-csrf-token|x-xsrf-token)(\s*+:\s*+)"
+    r"([^\r\n|]+?)(?=\s*+(?:\||$))"
+)
+#: ``"name": "value"`` inside JSON text (a captured body as a string).
+_JSON_FIELD_RE = re.compile(r'"([\w.\-]{1,64}+)"(\s*+:\s*+)"((?:[^"\\]|\\.)*+)"')
+#: ``<string name="auth_token">value</string>`` (shared_prefs XML).
+_XML_PREF_RE = re.compile(
+    r'(<string\b[^>]{0,200}?\bname="([^"]{1,128})"[^>]*+>)([^<]*+)'
+)
+#: ``<long name="session_id" value="123" />``.
+_XML_ATTR_RE = re.compile(
+    r'(<(?:int|long|float|boolean)\b[^>]{0,200}?\bname="([^"]{1,128})"'
+    r'[^>]{0,200}?\bvalue=")([^"]*+)(")'
+)
+#: A query or form parameter after ``?``, ``&`` or ``; ``.
+_PARAM_RE = re.compile(
+    r"([?&;] ?)([A-Za-z0-9_.\-\[\]%]{1,64}+)="
+    r"(\[[A-Za-z][\w-]{0,15}+, \d++ [^\]]{0,60}+\]|[^&#\s\"'<>;,]*+)"
+)
+
+
+def is_reduced(value: Any) -> bool:
+    """Whether *value* is already a reduced placeholder (``[text, 8 chars]``)."""
+    return bool(_REDUCED_RE.fullmatch(str(value).strip()))
+
+
+def is_sensitive_name(name: Any) -> bool:
+    """:func:`is_secret_name` plus personal-data names (``email``, ``phone``)."""
+    return is_secret_name(name) or bool(_PERSONAL_NAME_RE.search(str(name)))
+
+
+def is_secret_field(name: Any) -> bool:
+    """Whether a structured field name of a tool result holds a secret.
+
+    Stricter than :func:`is_secret_name`: ``key``, ``keys``, ``session``,
+    ``prompt_tokens`` or ``author`` are ordinary envelope fields.
+    """
+    norm = re.sub(r"[^a-z0-9]", "", str(name).lower())
+    if not norm:
+        return False
+    if norm in _SECRET_FIELD_EXACT or norm.endswith("token"):
+        return True
+    return any(part in norm for part in _SECRET_FIELD_PARTS)
+
+
+def _sub_reduced(value: str, reduce: Callable[[str], str]) -> str:
+    return value if not value or is_reduced(value) else reduce(value)
+
+
+def mask_text(text: str) -> str:
+    """One string of a tool result with secret / personal values reduced.
+
+    Header lines, ``"name": "value"`` JSON fields, shared_prefs XML entries,
+    URL / form parameters and ``name=value`` / ``name: value`` lines whose
+    name looks secret (or personal) keep only the value's type and length;
+    then :func:`~sandroid.ai.safety.redact_secrets` (bearer tokens, ``sk-``
+    and AWS keys, URL credentials, the configured API key). Linear.
+    """
+    from sandroid.ai.safety import redact_secrets
+
+    text = str(text)
+    if not text:
+        return text
+    text = _SECRET_HEADER_TEXT_RE.sub(
+        lambda m: m.group(1)
+        + m.group(2)
+        + _sub_reduced(m.group(3), lambda v: reduce_secret(m.group(1), v)),
+        text,
+    )
+    text = _JSON_FIELD_RE.sub(
+        lambda m: (
+            f'"{m.group(1)}"{m.group(2)}"{_sub_reduced(m.group(3), reduce_value)}"'
+            if is_sensitive_name(m.group(1))
+            else m.group(0)
+        ),
+        text,
+    )
+    for pattern in (_XML_PREF_RE, _XML_ATTR_RE):
+        text = pattern.sub(
+            lambda m: (
+                m.group(1)
+                + _sub_reduced(m.group(3), reduce_value)
+                + (m.group(4) if m.re is _XML_ATTR_RE else "")
+                if is_sensitive_name(m.group(2))
+                else m.group(0)
+            ),
+            text,
+        )
+    text = _PARAM_RE.sub(
+        lambda m: (
+            f"{m.group(1)}{m.group(2)}={_sub_reduced(m.group(3), reduce_value)}"
+            if is_sensitive_name(m.group(2))
+            else m.group(0)
+        ),
+        text,
+    )
+    text = mask_names(text, name_rule=is_sensitive_name)
+    # redact_secrets would turn ``token=[text, 8 chars]`` into
+    # ``token=***, 8 chars]``: reduced values sit it out as placeholders.
+    kept: list[str] = []
+    mark = "\ue000"
+    while mark in text:
+        mark += "\ue001"
+
+    def _keep(m: re.Match[str]) -> str:
+        kept.append(m.group(0))
+        # ``;`` ends redact_secrets' key=value match before the placeholder.
+        return f";{mark}{len(kept) - 1}{mark};"
+
+    text = redact_secrets(_PLACEHOLDER_RE.sub(_keep, text))
+    restore = re.compile(";" + re.escape(mark) + r"(\d++)" + re.escape(mark) + ";")
+    return restore.sub(lambda m: kept[int(m.group(1))], text)
+
+
+def _mask_value(value: Any, depth: int = 0) -> Any:
+    if depth > 64:
+        return WITHHELD
+    if isinstance(value, str):
+        return mask_text(value)
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if (
+                is_secret_field(key)
+                and isinstance(item, str | int | float)
+                and not isinstance(item, bool)
+                and item != ""
+            ):
+                out[key] = item if is_reduced(item) else reduce_value(item)
+            else:
+                out[key] = _mask_value(item, depth + 1)
+        return out
+    if isinstance(value, list | tuple):
+        if (
+            len(value) == 2
+            and all(isinstance(v, str) for v in value)
+            and re.fullmatch(r"[A-Za-z0-9-]{1,64}", value[0])
+            and is_secret_field(value[0])
+        ):
+            # A ``[header, value]`` pair (get_flow_detail).
+            name, item = value
+            return [name, item if is_reduced(item) else reduce_secret(name, item)]
+        return [_mask_value(v, depth + 1) for v in value]
+    return value
+
+
+def mask_tool_result(result: Any) -> Any:
+    """A copy of a tool result with secret / personal values reduced.
+
+    Fails closed: when masking raises, the whole result is withheld.
+    """
+    try:
+        return _mask_value(result)
+    except Exception:
+        logger.warning("masking a tool result failed; the result was withheld")
+        return {"error": WITHHELD.replace("digest", "result")}
 
 
 def _ts(value: Any) -> str:

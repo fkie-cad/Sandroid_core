@@ -442,6 +442,13 @@ def _redact(text: Any) -> str:
     return redact_secrets(text)
 
 
+def _mask_on() -> bool:
+    """Whether ``ai.mask_sensitive`` is on (tool results are masked)."""
+    from sandroid.ai.row_classifier import mask_enabled
+
+    return mask_enabled()
+
+
 # =============================================================================
 # Tool executor
 # =============================================================================
@@ -912,6 +919,13 @@ class ToolExecutor:
         rid: str | None = None
         size = 0
         truncated = False
+        if _mask_on():
+            # The one masking pass (ai.mask_sensitive): every tool result is
+            # masked before it is stored (results/R*.json, read_result),
+            # shaped for the model, summarised or written to the transcript.
+            from sandroid.ai.row_classifier import mask_tool_result
+
+            result = mask_tool_result(result)
         try:
             stored = ctx.get_store().put(spec.name, args, result, agent_id=ctx.agent_id)
             rid, size = stored.id, stored.bytes
@@ -998,14 +1012,25 @@ class ToolExecutor:
         err: ToolError,
         started: float | None = None,
     ) -> ToolOutcome:
+        content = err.to_json()
+        summary = _clip(f"{err.code}: {err.message}")
+        if _mask_on():
+            from sandroid.ai.row_classifier import mask_text
+
+            try:
+                content, summary = mask_text(content), mask_text(summary)
+            except Exception:
+                logger.warning("masking a tool error failed; its text was withheld")
+                content = ToolError(err.code, "error text withheld").to_json()
+                summary = f"{err.code}: error text withheld"
         return ToolOutcome(
             call_id=call_id,
             name=name,
             args=args,
-            content=err.to_json(),
+            content=content,
             status=_ERROR_STATUS.get(err.code, "error"),
             error_code=err.code,
-            summary=_clip(f"{err.code}: {err.message}"),
+            summary=summary,
             duration_ms=int((time.monotonic() - started) * 1000) if started else 0,
         )
 
