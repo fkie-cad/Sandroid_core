@@ -531,7 +531,7 @@ class SpotlightPanel(Widget):
         Binding(
             "R",
             "restart_app",
-            "Restart with the armed bypasses (no dialog)",
+            "Restart with the armed bypasses (asks first)",
             show=False,
         ),
         Binding(
