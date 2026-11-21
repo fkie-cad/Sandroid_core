@@ -770,3 +770,48 @@ async def test_follow_the_app_switch_defaults_on_and_stages_the_key(
         switch.value = False
         await pilot.pause()
         assert screen._pending["tui.monitor_follow_app"] is False
+
+
+async def test_persona_topup_switch_stages_and_saves_the_world_key(
+    live_config,
+) -> None:
+    """``[world] persona_topup`` was reachable only by editing the TOML."""
+    from textual.widgets import Switch
+
+    from sandroid.world import persona
+
+    config = SandroidConfig()
+    assert config.world.persona_topup is True
+    assert "persona snapshot" in (
+        type(config.world).model_fields["persona_topup"].description
+    )
+    cfg_file = live_config(config)
+    app = _MonitorSettingsHarness(config)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        switch = screen.query_one("#setting-world--persona_topup", Switch)
+        assert switch.value is True
+        switch.value = False
+        await pilot.pause()
+        assert screen._pending["world.persona_topup"] is False
+        screen.action_save()
+        await pilot.pause()
+    assert config.world.persona_topup is False
+    assert persona.topup_enabled() is False
+    assert "persona_topup = false" in cfg_file.read_text()
+
+
+def test_unknown_world_keys_survive_the_schema_section() -> None:
+    from sandroid.world import generator
+
+    config = SandroidConfig(world={"email_domain": "example.org", "x": 1})
+    assert config.world.persona_topup is True
+    assert config.world.email_domain == "example.org"
+    from sandroid.config import set_config
+
+    set_config(config)
+    try:
+        assert generator.configured_email_domain() == "example.org"
+    finally:
+        set_config(None)

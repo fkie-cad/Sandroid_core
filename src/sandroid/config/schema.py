@@ -7,7 +7,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator, validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+    validator,
+)
 
 #: Default of ``ai.mask_sensitive``: whether the AI's timeline reads see the
 #: content of sensitive lines (typed text, TLS keys) masked. One constant:
@@ -1270,6 +1277,25 @@ class IdentityConfig(BaseModel):
     )
 
 
+class WorldConfig(BaseModel):
+    """Seeded worlds and personas (SMS, calls, contacts, events on the device).
+
+    Other ``[world]`` keys (``email_domain``, ``persona_snapshots``) are kept
+    as they are and read by :mod:`sandroid.world`.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    persona_topup: bool = Field(
+        default=True,
+        description=(
+            "Top up a loaded persona snapshot with fresh SMS, calls and "
+            "events up to now (off: the device keeps the saved texts as they "
+            "are)"
+        ),
+    )
+
+
 class MVTConfig(BaseModel):
     """Mobile Verification Toolkit (MVT) integration configuration.
 
@@ -1880,6 +1906,7 @@ class SandroidConfig(BaseModel):
     timeline: TimelineConfig = Field(default_factory=TimelineConfig)
     tracking: TrackingConfig = Field(default_factory=TrackingConfig)
     identity: IdentityConfig = Field(default_factory=IdentityConfig)
+    world: WorldConfig = Field(default_factory=WorldConfig)
     mvt: MVTConfig = Field(default_factory=MVTConfig)
     mitmproxy: MitmproxyConfig = Field(default_factory=MitmproxyConfig)
     focus: FocusConfig = Field(default_factory=FocusConfig)
