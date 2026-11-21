@@ -116,7 +116,16 @@ class ConfirmModal(ForensicModal[bool]):
                 yes_style = "-secondary" if self.guard_typing else "-primary"
                 yield Button(self.yes_label, id="yes", classes=yes_style)
                 yield Button(self.no_label, id="no", classes="-secondary")
-            yield KeyHintFooter(hints={"button": "[dim]y=Yes  n=No  Esc=Cancel[/dim]"})
+            yield KeyHintFooter(hints=dict.fromkeys(("default", "button"), self.hint))
+
+    @property
+    def hint(self) -> str:
+        """The key hint, named after the buttons (Esc answers like No)."""
+        from sandroid.tui.key_display import format_key
+        from sandroid.tui.utils.markup import escape
+
+        yes, no = escape(self.yes_label), escape(self.no_label)
+        return f"[dim]y {yes}  n or {format_key('escape')} {no}[/dim]"
 
     def on_descendant_focus(self, _event) -> None:
         mark_focused_button(self)

@@ -603,7 +603,17 @@ async def test_rename_input_shows_the_old_label_selected_so_typing_replaces() ->
         for ch in "B replay":
             await pilot.press("space" if ch == " " else ch)
         assert field.value == "B replay"
-        # R4-N3: the confirm named the run only by its label.
+        # N4-V3: Enter renames; no second Yes/No question.
+        await pilot.press("enter")
+        await until(pilot, lambda: view._current_label(run_id) == "B replay")
+        assert type(app.screen).__name__ != "ConfirmModal"
+        # A label that looks like a path still asks (R4-N3: naming the run by
+        # # and id, not by its label alone).
+        view.focus()
+        await pilot.press("n")
+        await until(pilot, lambda: isinstance(app.screen, InputModal))
+        for ch in "a.apk":
+            await pilot.press(ch)
         await pilot.press("enter")
         await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
         message = str(app.screen.message_text)
@@ -1199,7 +1209,7 @@ async def test_run_phase_uses_rewind_words() -> None:
         view.set_run_phase(None)
         await settle(pilot)
         text = str(empty.render())
-        assert "No runs yet" in text
+        assert "No sessions yet" in text
         assert "review it" in text
         assert "Play" not in text
         assert "replay it" not in text
@@ -1231,3 +1241,41 @@ def test_user_visible_strings_name_keys_in_words() -> None:
         and any(g in node.value for g in "⏎⇧␣")
     ]
     assert glyphs == []
+
+
+def test_sessions_footer_has_one_review_and_rewound_runs_show_it() -> None:
+    """N4-V4: "p Review" and "v Review" side by side; a finished Rewind
+    ("rewound") had a blank status.
+    """
+    from sandroid.tui.widgets.diffs_view import DiffsView
+
+    labels = {b.key: b.description for b in DiffsView.BINDINGS}
+    assert labels["v"] != "Review"
+    view = DiffsView.__new__(DiffsView)
+    view._facts = {}
+    for result in ("rewound", "replayed"):
+        run = {"run_id": "r", "mode": "rewind", "result": result}
+        text, _style = view._problem(run)
+        assert text == result
+    assert view._problem({"run_id": "r"}) is None
+
+
+@pytest.mark.asyncio
+async def test_confirm_hint_names_the_buttons() -> None:
+    """N4-V3: the hint said "y=Yes n=No Esc=Cancel" over "Stop / Continue"."""
+    from sandroid.tui.modals import ConfirmModal
+    from sandroid.tui.modals.base import KeyHintFooter
+
+    modal = ConfirmModal("Stop the rewind?", yes_label="Stop", no_label="Continue")
+
+    class _Host(App):
+        def on_mount(self) -> None:
+            self.push_screen(modal)
+
+    app = _Host()
+    async with app.run_test(size=(120, 30)) as pilot:
+        await settle(pilot)
+        text = str(modal.query_one(KeyHintFooter).render())
+        assert text == "y Stop  n or Esc Continue"
+        assert "Yes" not in text
+        assert "Cancel" not in text

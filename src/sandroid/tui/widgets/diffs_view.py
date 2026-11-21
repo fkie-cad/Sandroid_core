@@ -213,7 +213,8 @@ class DiffsView(FilesSubViewBase):
     BINDINGS = [
         # Record/Play (r/p) are global app bindings (SandroidTUI.BINDINGS).
         # Order matters: the footer shows only the first context keys.
-        Binding("v", "review_run", "Review"),
+        # Not "Review": the global p is "Review" (the recording's Review).
+        Binding("v", "review_run", "Show in lenses"),
         Binding("P", "generate_pdf", "PDF report"),
         Binding("n", "rename_run", "Rename"),
         Binding("delete", "delete_run", "Delete"),
@@ -393,7 +394,7 @@ class DiffsView(FilesSubViewBase):
     @staticmethod
     def _empty_text() -> Text:
         return Text.assemble(
-            ("No runs yet\n\n", f"bold {_c('muted')}"),
+            ("No sessions yet\n\n", f"bold {_c('muted')}"),
             ("r", "bold"),
             (" record a flow  ·  ", _c("dim")),
             ("p", "bold"),
@@ -993,6 +994,8 @@ class DiffsView(FilesSubViewBase):
             return "aborted", _c("bad")
         if steps:
             return f"{steps} error{'s' if steps != 1 else ''}", _c("warn")
+        if s.get("mode") and s.get("result") in ("rewound", "replayed"):
+            return str(s["result"]), _c("ok")  # a Rewind that finished
         return None
 
     @staticmethod
@@ -1109,7 +1112,7 @@ class DiffsView(FilesSubViewBase):
                 ("Report", self._report_sections(run_id, facts)),
                 ("Privacy", self._privacy_sections(run_id, s)),
             ],
-            footer="v review · = compare · z diff · Shift+P pdf",
+            footer="v show in lenses · = compare · z diff · Shift+P pdf",
             key=("run", run_id),
             keys=self._privacy_keys(run_id),
             click=lambda tab, line: self._privacy_click(run_id, tab, line),
@@ -1703,12 +1706,13 @@ class DiffsView(FilesSubViewBase):
         self._follow_in_inspector()
 
     def action_rename_run(self) -> None:
-        """``n`` — rename the highlighted run, after an explicit confirm.
+        """``n`` — rename the highlighted run.
 
         Only acts while the runs table has focus with a run highlighted;
         otherwise the key falls through (``SkipAction``) to the global
-        ``n`` = Install APK. The new label is applied only after a Yes in a
-        confirm dialog (a tester once typed an APK path here).
+        ``n`` = Install APK. Enter in the name dialog renames; only a label
+        that looks like a file path asks again (a tester once typed an APK
+        path here).
         """
         from textual.actions import SkipAction
 
@@ -1731,17 +1735,17 @@ class DiffsView(FilesSubViewBase):
             label = value.strip()
             if not label or label == current:
                 return
+            if not (label.lower().endswith(".apk") or "/" in label):
+                self._rename_run_bg(run_id, label)
+                return
             # Name the run like the input dialog did (# and id), not by its
             # label alone.
             message = (
                 f"Rename run #{self._run_number(run_id)} '{current}' "
                 f"({run_id}) to '{label}'?"
+                "\nThis looks like a file path. To install an APK, "
+                "choose No and press n outside the Runs lens."
             )
-            if label.lower().endswith(".apk") or "/" in label:
-                message += (
-                    "\nThis looks like a file path. To install an APK, "
-                    "choose No and press n outside the Runs lens."
-                )
             self.app.push_screen(
                 ConfirmModal(
                     title=f"Rename run #{self._run_number(run_id)}", message=message
