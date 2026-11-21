@@ -478,13 +478,9 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
                     self.package_loader, self.include_system_apps
                 )
                 self.all_packages = new_packages or []
-                self.filtered_packages = self.all_packages.copy()
-
-                # Clear filter
-                filter_input = self.query_one("#filter-input", Input)
-                filter_input.value = ""
-
-                # Update list
+                # Keep the filter (N6-B5), also text typed during the reload:
+                # read it now, after the load.
+                self._apply_filter(self.query_one("#filter-input", Input).value)
                 self._update_option_list()
         finally:
             self.query_one("#loading-indicator", LoadingSpinner).add_class("hidden")

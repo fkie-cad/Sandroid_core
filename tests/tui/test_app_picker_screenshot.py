@@ -217,6 +217,32 @@ async def test_typing_during_the_open_refresh_keeps_the_filter() -> None:
         assert _names(modal.filtered_packages) == ["org.mozilla.firefox"]
 
 
+async def test_ctrl_s_system_apps_keeps_the_filter() -> None:
+    """N6-B5: Ctrl+S (system apps) cleared the filter, also text typed while
+    the list reloaded.
+    """
+    import threading
+
+    release = threading.Event()
+    settings = {"package_name": "com.android.settings", "install_date": "x"}
+
+    def loader(include_system: bool) -> list[dict]:
+        release.wait(10)
+        return [dict(settings), *OLD] if include_system else list(OLD)
+
+    modal = AppSelectionModal(packages=[dict(p) for p in OLD], package_loader=loader)
+    async with _Host(modal).run_test(size=(120, 40)) as pilot:
+        await settle(pilot)
+        await pilot.press("s", "e", "t")
+        await pilot.press("ctrl+s")
+        await pilot.press("t")  # typed during the reload
+        release.set()
+        await until(pilot, lambda: len(modal.all_packages) == 3)
+        await settle(pilot)
+        assert modal.query_one("#filter-input", Input).value == "sett"
+        assert _names(modal.filtered_packages) == ["com.android.settings"]
+
+
 def test_adb_commands_never_read_the_terminal(monkeypatch) -> None:
     """E2E L9 root cause: ``adb shell`` forwards its stdin to the device. With
     the TUI's terminal as stdin it consumed keys typed while the picker's
