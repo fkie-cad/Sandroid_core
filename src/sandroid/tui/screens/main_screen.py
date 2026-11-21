@@ -2173,6 +2173,7 @@ class MainScreen(Screen):
                 EventType.FILE_CHANGED: self._handle_file_changed,
                 EventType.HOOK_TRIGGERED: self._handle_hook_triggered,
                 EventType.NETWORK_EVENT: self._handle_network_event,
+                EventType.STATE_CHANGED: self._handle_snapshot_state,
             }
 
             def _make_callback(h):
@@ -2195,6 +2196,26 @@ class MainScreen(Screen):
             logger.warning(
                 "Events module not available, TUI will not receive background updates"
             )
+
+    def _handle_snapshot_state(self, event) -> None:
+        """Header: the snapshot a load put on the device, from every load
+        path (Rewind, the AI, a load that completed late), not only the
+        snapshot picker's. A load the console gave up on says so.
+        """
+        data = getattr(event, "data", None) or {}
+        if data.get("change_type") != "snapshot_state" or not data.get("name"):
+            return
+        name = str(data["name"])
+        if data.get("state") == "unconfirmed":
+            self.note_snapshot(f"{name} (load not confirmed)")
+            return
+        try:
+            current = self.query_one("#shell-header", ShellHeader)._snapshot
+        except Exception:
+            current = ""
+        if current == name or current.endswith(f" · {name}"):
+            return  # the picker named it already (with its slot)
+        self.note_snapshot(name)
 
     def _handle_task_output(self, event) -> None:
         """Handle task output event."""

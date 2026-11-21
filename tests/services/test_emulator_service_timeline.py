@@ -184,3 +184,122 @@ def test_a_load_holds_the_device_its_world_change_names(service, monkeypatch):
         assert service.load_snapshot("clean") is True
     assert held == ["emu-9"]
     assert {x["dev"] for x in lines} <= {"emu-9", None}
+
+
+# ---------------------------------------------------------------------------
+# N4-B2 / N4-B7: the network step of every load, and a load that completes
+# after the console gave up
+# ---------------------------------------------------------------------------
+
+
+def _wait(cond, timeout=5.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return cond()
+
+
+def test_every_load_resets_the_network_unless_the_caller_does(service, monkeypatch):
+    from sandroid.services import emulator_service as es
+
+    resets: list = []
+    monkeypatch.setattr(
+        es, "reset_network_after_load", lambda serial, **kw: resets.append(serial)
+    )
+    monkeypatch.setattr(service, "_record_device_clock", lambda *a: None)
+    with timeline.capture():
+        assert service.load_snapshot("clean", serial="emu-1") is True
+        assert service.load_snapshot("clean", serial="emu-1", reset_network=False)
+        service.adb_fake.reply = ("KO: unknown snapshot\n", "")
+        assert service.load_snapshot("gone", serial="emu-1") is False
+    assert resets == ["emu-1"]  # once: not for False, not for a failed load
+
+
+def test_reset_network_after_load_follows_the_setting(monkeypatch):
+    from sandroid.services import emulator_service as es
+
+    sent: list[str] = []
+
+    def send(command):
+        sent.append(command)
+        if "airplane_mode_on" in command:
+            return "0\n", ""
+        if "Active default network" in command:
+            # up, down after the switch, up again
+            up = sum("airplane-mode" in c for c in sent) != 1
+            return ("Active default network: 100\n" if up else
+                    "Active default network: none\n"), ""  # fmt: skip
+        return "", ""
+
+    assert es.reset_network_after_load("emu-1", mode="off", send=send) is False
+    assert sent == []
+    monkeypatch.setattr(es, "network_reset_mode", lambda: "airplane")
+    assert es.reset_network_after_load("emu-1", send=send, sleep=lambda s: None)
+    assert "shell cmd connectivity airplane-mode enable" in sent
+    assert "shell cmd connectivity airplane-mode disable" in sent
+
+
+def test_a_timed_out_load_is_prepared_once_the_device_answers(service, monkeypatch):
+    """N4-B7: the console gave up, the emulator finished the load after a
+    pause. The device state is unknown at once (a world change: the header
+    shows the device time as unknown, not "in sync"), and when the device
+    answers the post-load routine (SELinux, clock sync, Frida) and the
+    network reset run.
+    """
+    from sandroid.core.events import EventBus, EventType
+    from sandroid.services import emulator_service as es
+
+    adb = service.adb_fake
+    adb.reply = ("", "error: timeout")
+    answers = iter(["", "", "ok"])
+
+    def send_adb(command, serial=None):
+        adb.order.append(command)
+        if command == "shell echo ok":
+            return next(answers, "ok") + "\n", ""
+        return ("device\n", "") if command == "get-state" else ("", "")
+
+    adb.send_adb_command = send_adb
+    service.UNCONFIRMED_LOAD_POLL_S = 0.01
+    steps: list = []
+    monkeypatch.setattr(
+        service, "_post_load", lambda a, name, serial: steps.append(("post", name))
+    )
+    monkeypatch.setattr(
+        es, "reset_network_after_load", lambda serial, **kw: steps.append("network")
+    )
+    monkeypatch.setattr(es, "is_active_serial", lambda serial: True)
+    states: list = []
+
+    def on_state(event):
+        if event.data.get("change_type") == "snapshot_state":
+            states.append(event.data["state"])
+
+    bus = EventBus.get()
+    bus.subscribe(EventType.STATE_CHANGED, on_state)
+    try:
+        with timeline.capture() as lines:
+            assert service.load_snapshot("start", serial="emu-1") is False
+            assert _wait(lambda: "network" in steps)
+    finally:
+        bus.unsubscribe(EventType.STATE_CHANGED, on_state)
+    assert steps == [("post", "start"), "network"]
+    assert adb.order.count("shell echo ok") == 3
+    world = [x for x in lines if x.get("data", {}).get("cause") == "snapshot-load"]
+    assert world
+    assert world[0]["data"]["unconfirmed"] is True
+    assert "device state unknown" in world[0]["summary"]
+    assert _wait(lambda: states == ["unconfirmed", "loaded"])
+
+
+def test_a_refused_load_is_not_watched(service, monkeypatch):
+    service.adb_fake.reply = ("KO: unknown snapshot\n", "")
+    watched: list = []
+    monkeypatch.setattr(
+        service, "_watch_unconfirmed_load", lambda *a: watched.append(a)
+    )
+    with timeline.capture():
+        assert service.load_snapshot("gone", serial="emu-1") is False
+    assert watched == []

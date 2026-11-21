@@ -912,7 +912,9 @@ def test_picker_load_leaves_post_load_work_to_the_service(monkeypatch) -> None:
 
     panel = sp.SnapshotsPanel()
     loaded: list[str] = []
-    toolbox = SimpleNamespace(load_snapshot=lambda tag: loaded.append(tag) or True)
+    toolbox = SimpleNamespace(
+        load_snapshot=lambda tag, **kw: loaded.append((tag, kw)) or True
+    )
     fake_app = SimpleNamespace(push_screen=lambda screen, cb: cb(True))
     monkeypatch.setattr(sp.SnapshotsPanel, "app", property(lambda self: fake_app))
     monkeypatch.setattr(panel, "_require_emulator", lambda: True)
@@ -927,7 +929,8 @@ def test_picker_load_leaves_post_load_work_to_the_service(monkeypatch) -> None:
     )
     panel.action_load()
     assert results == [(True, "Loaded 'clean_64g'")]
-    assert loaded == ["clean_64g"]
+    # N4-B2: a picker load resets the network like every interactive load
+    assert loaded == [("clean_64g", {"reset_network": True})]
     assert not hasattr(panel, "_restart_frida_after_load")
 
 

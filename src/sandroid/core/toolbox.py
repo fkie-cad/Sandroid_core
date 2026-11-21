@@ -441,18 +441,28 @@ class Toolbox(metaclass=_ToolboxMeta):
         )
 
     @classmethod
-    def load_snapshot(cls, name):
-        """Delegates to EmulatorService.load_snapshot(); returns its success bool."""
+    def load_snapshot(cls, name, reset_network=False):
+        """Delegates to EmulatorService.load_snapshot(); returns its success bool.
+
+        ``reset_network`` is off here: the engine resets the network itself
+        (only before an action run or the dry run, cancellably); interactive
+        callers (the snapshot picker, the snapshot command) pass True.
+        """
         return _service("get_emulator_service").load_snapshot(
-            name if isinstance(name, str) else name.decode("utf-8")
+            name if isinstance(name, str) else name.decode("utf-8"),
+            reset_network=reset_network,
         )
 
     @classmethod
     def reset_network(cls, mode="airplane", timeout=30.0, sleep=None) -> bool:
-        """Cycle the device network after a snapshot load (see ``adb_network``)."""
-        from .adb_network import reset_network
+        """Cycle the device network after a snapshot load (the shared step,
+        ``emulator_service.reset_network_after_load``).
+        """
+        from sandroid.services.emulator_service import reset_network_after_load
 
-        return reset_network(Adb.send_adb_command, mode, timeout=timeout, sleep=sleep)
+        return reset_network_after_load(
+            mode=mode, timeout=timeout, sleep=sleep, send=Adb.send_adb_command
+        )
 
     @classmethod
     def delete_snapshot(cls, name) -> bool:

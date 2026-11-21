@@ -189,7 +189,7 @@ class SnapshotListCommand(CommandHandler):
 
                 # Toolbox expects bytes for the name; a user command.
                 with acting_as("user"):
-                    ctx.toolbox.load_snapshot(snapshot_tag.encode())
+                    ctx.toolbox.load_snapshot(snapshot_tag.encode(), reset_network=True)
                 logger.info(f"Loaded snapshot: {snapshot_tag}")
                 return CommandResult(
                     success=True,
