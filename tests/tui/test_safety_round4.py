@@ -281,6 +281,37 @@ def test_quit_cleanup_restores_selinux_before_timeline_close(monkeypatch) -> Non
     assert steps.index("SELinux restore") < steps.index("timeline close")
 
 
+def test_quit_closes_the_device_clock_shell_before_the_untracked_check(
+    monkeypatch,
+) -> None:
+    """N1-B8: the device clock's persistent "adb shell" was reported as an
+    untracked "ADB Command" and force-killed on every quit.
+    """
+    from sandroid.core import device_clock
+    from sandroid.services import setup_checks
+    from sandroid.tui.controllers import quit_controller as qc
+
+    steps: list[str] = []
+    monkeypatch.setattr(qc, "shutdown_network", lambda timeout=0: None)
+
+    def _run(name, fn, timeout):
+        if name == "device clock shells":
+            fn()
+        steps.append(name)
+        return True
+
+    monkeypatch.setattr(qc, "run_bounded", _run)
+    monkeypatch.setattr(setup_checks, "restore_selinux_on_quit", list)
+    monkeypatch.setattr(device_clock, "close_shells", lambda: steps.append("closed"))
+    fake = SimpleNamespace(
+        _stop_frida_sessions=lambda: None,
+        _cleanup_rest=lambda: steps.append("rest"),  # the untracked check
+    )
+    qc.QuitController.force_exit(fake)
+    assert "closed" in steps
+    assert steps.index("closed") < steps.index("rest")
+
+
 # --------------------------------------------------------------------------
 # 4. Result folders are created by their writers, not with the session
 # --------------------------------------------------------------------------

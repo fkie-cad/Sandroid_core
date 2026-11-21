@@ -579,6 +579,16 @@ class QuitController:
         # before the tasks and long before the untracked-work check.
         run_shutdown_hooks(timeout=3.0)
 
+        # The device clock's persistent "adb shell" (opened by a monitor start
+        # or a watched-file pull): it was found by the untracked-work check
+        # and force-killed on every quit.
+        def _close_clock_shells() -> None:
+            from sandroid.core import device_clock
+
+            device_clock.close_shells()
+
+        run_bounded("device clock shells", _close_clock_shells, 2.0)
+
         # Stop all background tasks (FriTap, network capture, etc.). A friTap
         # agent that cannot unload must not hold the quit up.
         logger.info("Stopping all background tasks before exit")

@@ -2247,7 +2247,8 @@ def test_watch_seeds_every_app_process_with_labels():
     assert parts == [f"App {_PKG} · 5 proc · following", "o stops"]
 
 
-def test_restart_noticed_by_task_rename_is_followed_with_its_gap():
+def test_restart_noticed_by_task_rename_is_followed_with_its_gap(monkeypatch):
+    monkeypatch.setattr(MonitorWatch, "_app_hooked", lambda self: True)
     device = _FakeDevice(_procs(main=24310, gpu=24402))
     notes: list = []
     watch = _watch(device, notes=notes)
@@ -3028,10 +3029,11 @@ def test_an_exited_main_still_listed_as_a_zombie_is_dropped_not_readopted():
     assert watch._gone == set()
 
 
-def test_a_restart_during_sandroids_own_restart_says_so():
+def test_a_restart_during_sandroids_own_restart_says_so(monkeypatch):
     """N8: "Frida hooks are gone (Shift+R re-applies)" right after Shift+R."""
     from sandroid.services import get_spotlight_service
 
+    monkeypatch.setattr(MonitorWatch, "_app_hooked", lambda self: True)
     device = _FakeDevice(_procs(main=24310))
     notes: list = []
     watch = _watch(device, notes=notes)
@@ -3052,6 +3054,31 @@ def test_a_restart_during_sandroids_own_restart_says_so():
     assert next(t for _l, t in reversed(notes) if "restarted" in t).endswith(
         "Frida hooks are gone (Shift+R re-applies)"
     )
+
+
+def test_a_restart_says_hooks_are_gone_only_when_hooks_ran(monkeypatch):
+    """N1-V7: "Frida hooks are gone" was said with no hooks applied. The
+    hooks of the running app are sampled by the polls: the dead process's
+    are often cleared by the time its restart is seen.
+    """
+    hooked = {"now": False}
+    monkeypatch.setattr(MonitorWatch, "_app_hooked", lambda self: hooked["now"])
+    device = _FakeDevice(_procs(main=24310))
+    notes: list = []
+    watch = _watch(device, notes=notes)
+    watch.seed({24310: [24310]}, watch.initial_processes())
+    device.table = _procs(main=25983)
+    watch.poll_once()
+    restart = next(t for _l, t in reversed(notes) if "restarted" in t)
+    assert "hooks are gone" not in restart
+    hooked["now"] = True
+    watch.poll_once()  # the running 25983 has hooks now
+    hooked["now"] = False  # ... gone with the process
+    device.table = _procs(main=26000)
+    watch.poll_once()
+    restart = next(t for _l, t in reversed(notes) if "restarted" in t)
+    assert "26000" in restart
+    assert restart.endswith("Frida hooks are gone (Shift+R re-applies)")
 
 
 def test_a_spawn_the_poll_found_first_is_still_sandroids_spawn():
