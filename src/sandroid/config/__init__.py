@@ -150,10 +150,9 @@ def update_config(
     try:
         candidate = SandroidConfig(**candidate_dict)
     except ValidationError as e:
-        details = "; ".join(
-            f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}"
-            for err in e.errors()
-        )
+        from .schema import describe_validation_error
+
+        details = describe_validation_error(e)
         raise ConfigUpdateError(f"Invalid setting -- {details}") from e
 
     def _owner(model: Any, parts: tuple[str, ...]) -> Any:

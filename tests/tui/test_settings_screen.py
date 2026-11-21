@@ -770,3 +770,118 @@ async def test_follow_the_app_switch_defaults_on_and_stages_the_key(
         switch.value = False
         await pilot.pause()
         assert screen._pending["tui.monitor_follow_app"] is False
+
+
+# -- N6-B3 / N6-V12: bounds, red field errors, focus, tabs, fit --------------
+
+
+@pytest.mark.asyncio
+async def test_negative_timeout_is_red_not_staged_and_blocks_save(
+    monkeypatch,
+) -> None:
+    """A negative timeout shows a red field error and is never saved."""
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: True)
+    app = _MonitorSettingsHarness(SandroidConfig())
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        field = screen.query_one("#setting-timeouts--adb_command", Input)
+        field.value = "-5"
+        await pilot.pause()
+        assert "timeouts.adb_command" not in screen._pending
+        assert field.has_class("-invalid")
+        error = screen.query_one("#settings-error", Static)
+        assert error.display
+        assert "at least 1" in str(error.render())
+        screen.action_save()
+        await pilot.pause()
+        assert app.screen is screen  # stays open on the bad field
+        assert screen.focused is field
+        # Blur keeps it red (Textual re-validates on blur).
+        field.blur()
+        await pilot.pause()
+        assert field.has_class("-invalid")
+        field.value = "45"
+        await pilot.pause()
+        assert screen._pending["timeouts.adb_command"] == 45
+        assert not field.has_class("-invalid")
+        assert not screen.query_one("#settings-error", Static).display
+
+
+@pytest.mark.asyncio
+async def test_unknown_avd_name_is_red_and_not_staged(monkeypatch) -> None:
+    """A device name that is no AVD (a stray "0") is refused."""
+    from sandroid.core import emulator
+
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: True)
+    monkeypatch.setattr(emulator, "known_avd_names", lambda: {"Dev4", "Pixel"})
+    app = _MonitorSettingsHarness(SandroidConfig())
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        field = screen.query_one("#setting-emulator--device_name", Input)
+        # The configured (default) name is not an AVD here: unchanged is fine.
+        assert not field.has_class("-invalid")
+        field.value = "0"
+        await pilot.pause()
+        assert "emulator.device_name" not in screen._pending
+        assert "no AVD named '0'" in screen._invalid[field.id]
+        field.value = "Dev4"
+        await pilot.pause()
+        assert screen._pending["emulator.device_name"] == "Dev4"
+        assert field.id not in screen._invalid
+
+
+@pytest.mark.asyncio
+async def test_focus_starts_on_first_field_and_shift_arrows_switch_tabs(
+    monkeypatch,
+) -> None:
+    """Deterministic focus (first field of the tab); Shift+Left/Right tabs."""
+    from textual.widgets import TabbedContent
+
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: True)
+    for _ in range(2):  # the same on every open
+        app = _MonitorSettingsHarness(SandroidConfig())
+        async with app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            screen = app.screen
+            assert screen.focused is screen.query_one("#setting-log_level", Select)
+            tabs = screen.query_one("#settings-tabs", TabbedContent)
+            await pilot.press("shift+right")
+            assert tabs.active == "tab-monitor"
+            await pilot.press("shift+left", "shift+left")
+            assert tabs.active == "tab-timeline"  # wraps
+
+
+@pytest.mark.asyncio
+async def test_footer_stays_on_screen_at_120x35(monkeypatch) -> None:
+    """At 120x35 the body scrolls and the Save hint stays visible."""
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: True)
+    app = _MonitorSettingsHarness(SandroidConfig())
+    async with app.run_test(size=(120, 35)) as pilot:
+        await pilot.pause()
+        footer = app.screen.query_one(".settings-footer", Static)
+        assert footer.region.height >= 1
+        assert footer.region.bottom <= 35
+        assert "Ctrl+S save" in str(footer.render())
+
+
+def test_log_level_message_only_when_changed(caplog) -> None:
+    """Saving an unchanged log level does not log "Log level changed"."""
+    import logging
+
+    from sandroid.tui.controllers.settings_controller import SettingsController
+
+    root = logging.getLogger()
+    old = root.level
+    try:
+        root.setLevel(logging.INFO)
+        controller = SettingsController(SimpleNamespace())
+        with caplog.at_level(logging.INFO, logger="sandroid"):
+            controller.apply_log_level("INFO")
+            assert "Log level changed" not in caplog.text
+            controller.apply_log_level("DEBUG")
+            assert "Log level changed to DEBUG" in caplog.text
+    finally:
+        root.setLevel(old)

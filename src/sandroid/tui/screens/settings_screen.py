@@ -14,6 +14,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.screen import ModalScreen
+from textual.validation import ValidationResult, Validator
 from textual.widgets import (
     Button,
     Input,
@@ -25,13 +26,15 @@ from textual.widgets import (
     Switch,
     TabbedContent,
     TabPane,
+    Tabs,
 )
 
 from sandroid.config import SandroidConfig, get_config
-from sandroid.config.schema import LogLevel
+from sandroid.config.schema import LogLevel, validate_setting
 from sandroid.core.adb import Adb
 from sandroid.core.kprobe_tracer import KprobeTracer
 from sandroid.tui.controllers.settings_controller import SettingsController
+from sandroid.tui.key_display import key_words
 from sandroid.tui.themes import THEME_ORDER, THEMES
 from sandroid.tui.utils import apply_compact_widgets
 
@@ -82,6 +85,18 @@ _TIMELINE_LIST_IDS = {
 #: Config sections of the Timeline tab (unchanged values are never saved).
 _POLICY_PREFIXES = ("timeline.", "tracking.")
 _MISSING = object()
+
+
+class _FieldCheck(Validator):
+    """Textual validator around a ``value -> reason | None`` function."""
+
+    def __init__(self, check: Any) -> None:
+        super().__init__()
+        self._check = check
+
+    def validate(self, value: str) -> ValidationResult:
+        reason = self._check(value)
+        return self.success() if reason is None else self.failure(reason)
 
 
 def _acting_as_user() -> Any:
@@ -193,8 +208,9 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
     }
 
     .setting-switch:focus {
-        background: $panel-lighten-1;
+        background: $accent;
         border: none;
+        text-style: bold;
     }
 
     .switch-state {
@@ -237,6 +253,13 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         margin-top: 1;
     }
 
+    .settings-error {
+        color: $error;
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+    }
+
     .settings-footer {
         text-align: center;
         color: #8b949e;
@@ -248,7 +271,20 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", priority=True),
         Binding("ctrl+s", "save", "Save", priority=True),
+        # Not priority: a focused text field keeps Shift+Left/Right for
+        # selecting text (same rule as Device settings).
+        Binding("shift+left", "cycle_tab(-1)", "Previous tab", show=False),
+        Binding("shift+right", "cycle_tab(1)", "Next tab", show=False),
     ]
+
+    #: Focus is placed explicitly (first field of the active tab) once the
+    #: screen is mounted; Textual's auto focus picked whatever widget was
+    #: focusable first, which differed between opens.
+    AUTO_FOCUS = None
+
+    #: Rows of the container around the tabs (border, padding, title,
+    #: error line, footer): the tabs get the rest of the screen, at most 32.
+    _CHROME_ROWS = 12
 
     # Dotted config keys that must take effect immediately (not just on
     # Save) because a live, already-mounted widget reads them straight off
@@ -284,6 +320,9 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # the re-entrant ``on_radio_set_changed`` call (see
         # ``_revert_backend_to_fsmon``).
         self._reverting_backend = False
+        # widget id -> reason of numeric fields holding a bad value (shown
+        # red, never staged; Save is refused while any is left).
+        self._invalid: dict[str, str] = {}
 
     def _get_config(self) -> SandroidConfig:
         """Get current config, falling back to defaults."""
@@ -344,8 +383,14 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                     with ScrollableContainer():
                         yield from self._compose_timeline_tab(config)
 
+            yield Static("", id="settings-error", classes="settings-error")
             yield Static(
-                "[dim]Ctrl+S=Save  Esc=Cancel  Tab/Shift+Tab=Navigate[/dim]",
+                "[dim]"
+                + key_words(
+                    "Ctrl+S save  Esc cancel  Tab / Shift+Tab next / previous "
+                    "field  Shift+Left / Shift+Right tab"
+                )
+                + "[/dim]",
                 classes="settings-footer",
             )
 
@@ -1034,6 +1079,51 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # Grey out / re-select the Monitor Source per this device's kprobe
         # verdict (and warm the cache off-thread when it is unknown).
         self.refresh_backend_availability()
+        self.query_one("#settings-error", Static).display = False
+        self._attach_field_checks()
+        self._fit_to_screen()
+        self.call_after_refresh(self._focus_first_field)
+
+    def on_resize(self, event: Any = None) -> None:
+        """Keep the footer on screen: the tab body scrolls instead."""
+        self._fit_to_screen()
+
+    def _fit_to_screen(self) -> None:
+        """Cap the tabs' height so the container fits the screen height."""
+        try:
+            tabs = self.query_one("#settings-tabs", TabbedContent)
+        except Exception:
+            return
+        height = self.size.height or self.app.size.height
+        tabs.styles.max_height = max(8, min(32, height - self._CHROME_ROWS))
+
+    def _focus_first_field(self) -> None:
+        """Focus the first focusable field of the active tab (deterministic)."""
+        try:
+            tabs = self.query_one("#settings-tabs", TabbedContent)
+            pane = tabs.get_pane(tabs.active)
+        except Exception:
+            return
+        for widget in pane.query("Input, Select, Switch, RadioSet, Button"):
+            if widget.focusable and widget.display:
+                widget.focus()
+                return
+
+    def action_cycle_tab(self, delta: int) -> None:
+        """Shift+Left/Right: the previous / next tab (wraps); the tab bar
+        gets the focus, so Left/Right go on from there.
+        """
+        try:
+            tabs = self.query_one("#settings-tabs", TabbedContent)
+        except Exception:
+            return
+        panes = [pane.id for pane in tabs.query(TabPane) if pane.id]
+        if not panes:
+            return
+        current = panes.index(tabs.active) if tabs.active in panes else 0
+        tabs.active = panes[(current + delta) % len(panes)]
+        with contextlib.suppress(Exception):
+            tabs.query_one(Tabs).focus()
 
     def _fetch_frida_versions(self) -> None:
         """Background worker: pull available + installed frida versions."""
@@ -1469,11 +1559,102 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
 
         self._pending[key] = event.value
 
+    def _set_field_error(self, widget: Input, reason: str | None) -> None:
+        """Mark *widget* red with *reason* (or clear it) and show the reason."""
+        widget_id = widget.id or ""
+        if reason:
+            self._invalid[widget_id] = reason
+        else:
+            self._invalid.pop(widget_id, None)
+        widget.set_class(bool(reason), "-invalid")
+        self._show_field_errors()
+
+    def _field_label(self, widget_id: str) -> str:
+        """The row label of a setting widget (its key when there is none)."""
+        try:
+            widget = self.query_one(f"#{widget_id}")
+            label = widget.parent.query_one(Label) if widget.parent else None
+            text = str(label.render()).strip().rstrip(":") if label else ""
+        except Exception:
+            text = ""
+        return text or self._id_to_key(widget_id)
+
+    def _show_field_errors(self) -> None:
+        """Show the first bad field's reason in red above the footer."""
+        try:
+            line = self.query_one("#settings-error", Static)
+        except Exception:
+            return
+        if not self._invalid:
+            line.update("")
+            line.display = False
+            return
+        widget_id, reason = next(iter(self._invalid.items()))
+        more = len(self._invalid) - 1
+        text = f"{self._field_label(widget_id)}: {reason}"
+        if more:
+            text += f" (and {more} more)"
+        line.update(text)
+        line.display = True
+
+    @staticmethod
+    def _numeric_reason(input_type: str, key: str, value: str) -> str | None:
+        """Why *value* is not a good *key* (schema type + bounds), or None."""
+        cast = int if input_type == "integer" else float
+        try:
+            number = cast(value)
+        except ValueError:
+            return "needs a whole number" if cast is int else "needs a number"
+        return validate_setting(key, number)
+
+    def _device_name_reason(self, name: str) -> str | None:
+        """Why *name* is not a known AVD, or None (unchanged / cannot check)."""
+        from sandroid.core.emulator import known_avd_names
+
+        if name == self._get_config().emulator.device_name:
+            return None
+        if not name.strip():
+            return "needs an AVD name"
+        known = known_avd_names()
+        if known is None or name in known:
+            return None
+        listed = ", ".join(sorted(known)[:4]) or "none"
+        if len(known) > 4:
+            listed += ", ..."
+        return f"no AVD named {name!r} (known: {listed})"
+
+    def _field_check(self, widget: Input) -> Any:
+        """The reason function for a checked field, or None if unchecked."""
+        widget_id = widget.id or ""
+        if widget_id == "setting-emulator--device_name":
+            return self._device_name_reason
+        if widget_id.startswith("setting-") and widget.type in ("integer", "number"):
+            key = self._id_to_key(widget_id)
+            return lambda value: self._numeric_reason(widget.type, key, value)
+        return None
+
+    def _attach_field_checks(self) -> None:
+        """Give checked fields a validator, so Textual keeps them red."""
+        for widget in self.query(Input):
+            check = self._field_check(widget)
+            if check is not None:
+                widget.validators = [*widget.validators, _FieldCheck(check)]
+
     def on_input_changed(self, event: Input.Changed) -> None:
         """Track input changes."""
         widget_id = event.input.id
         if not widget_id or not widget_id.startswith("setting-"):
             return
+
+        # Numeric fields (schema type + bounds) and the AVD name: a bad
+        # value is shown red and never staged (e.g. a negative timeout).
+        check = self._field_check(event.input)
+        if check is not None:
+            reason = check(event.value)
+            self._set_field_error(event.input, reason)
+            if reason:
+                self._pending.pop(self._id_to_key(widget_id), None)
+                return
 
         # Custom Frida version Input writes into frida.server_version (not
         # its own key) so the saved config never contains "__custom__".
@@ -1669,6 +1850,24 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
 
     def action_save(self) -> None:
         """Save pending settings and dismiss."""
+        if self._invalid:
+            # A field still holds a bad value (shown red): keep the screen
+            # open on it instead of silently saving the old value.
+            widget_id = next(iter(self._invalid))
+            self._show_field_errors()
+            self.notify(
+                f"Not saved: {self._field_label(widget_id)}: "
+                f"{self._invalid[widget_id]}",
+                severity="error",
+                title="Invalid setting",
+            )
+            with contextlib.suppress(Exception):
+                widget = self.query_one(f"#{widget_id}")
+                tabs = self.query_one("#settings-tabs", TabbedContent)
+                pane = next(a for a in widget.ancestors if isinstance(a, TabPane))
+                tabs.active = pane.id or tabs.active
+                widget.focus()
+            return
         self._drop_unchanged_timeline_keys()
         if not self._pending:
             # Nothing changed

@@ -349,6 +349,21 @@ def avd_home() -> Path | None:
     return next((c for c in candidates if c.is_dir()), None)
 
 
+def known_avd_names() -> set[str] | None:
+    """AVD names in the AVD home (``<name>.ini``), read without a subprocess.
+
+    ``None`` when there is no AVD home, so callers can tell "cannot check"
+    from "no such AVD".
+    """
+    home = avd_home()
+    if home is None:
+        return None
+    try:
+        return {p.stem for p in home.glob("*.ini")}
+    except OSError:
+        return None
+
+
 def _read_ini(path: Path) -> dict[str, str]:
     """``key=value`` lines of an AVD ini file ({} when unreadable)."""
     values: dict[str, str] = {}

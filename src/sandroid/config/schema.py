@@ -153,9 +153,11 @@ class FridaConfig(BaseModel):
     server_auto_start: bool = Field(
         default=True, description="Automatically start Frida server if not running"
     )
-    server_port: int = Field(default=27042, description="Frida server port")
+    server_port: int = Field(
+        default=27042, ge=1, le=65535, description="Frida server port"
+    )
     spawn_timeout: int = Field(
-        default=30, description="Timeout for spawning processes (seconds)"
+        default=30, ge=1, description="Timeout for spawning processes (seconds)"
     )
     server_version: str = Field(
         default="host",
@@ -197,10 +199,10 @@ class NetworkConfig(BaseModel):
         description="Network interface to capture (auto-detected if not provided)",
     )
     pcap_buffer_size: int = Field(
-        default=65536, description="PCAP capture buffer size in bytes"
+        default=65536, ge=1, description="PCAP capture buffer size in bytes"
     )
     connection_timeout: int = Field(
-        default=30, description="Network connection timeout (seconds)"
+        default=30, ge=1, description="Network connection timeout (seconds)"
     )
 
 
@@ -1358,6 +1360,8 @@ class FocusConfig(BaseModel):
 
     redirect_base: int = Field(
         default=60080,
+        ge=1024,
+        le=65535 - 16,
         description="Base on-device REDIRECT port for app-proxy lanes",
     )
     gost_binary_dst: str = Field(
@@ -1438,7 +1442,10 @@ class MitmproxyConfig(BaseModel):
     """
 
     proxy_port: int = Field(
-        default=8080, description="Listen port for the mitmproxy HTTP proxy"
+        default=8080,
+        ge=1,
+        le=65535,
+        description="Listen port for the mitmproxy HTTP proxy",
     )
     listen_host: str = Field(
         default="127.0.0.1",
@@ -1459,7 +1466,9 @@ class MitmproxyConfig(BaseModel):
             "proxy it set when mitmproxy stops and when Sandroid exits."
         ),
     )
-    web_port: int = Field(default=8081, description="Port for the mitmweb web UI")
+    web_port: int = Field(
+        default=8081, ge=1, le=65535, description="Port for the mitmweb web UI"
+    )
     web_host: str = Field(
         default="127.0.0.1", description="Bind host for the mitmweb web UI"
     )
@@ -1482,6 +1491,8 @@ class MitmproxyConfig(BaseModel):
     )
     socks_base: int = Field(
         default=8082,
+        ge=1,
+        le=65535 - 16,
         description="Base host SOCKS5 port for our-mitmproxy app-proxy lanes",
     )
     focus_lanes: int = Field(
@@ -1817,24 +1828,30 @@ class TimeoutConfig(BaseModel):
     """
 
     adb_command: int = Field(
-        default=30, description="Timeout for ADB shell commands (seconds)"
+        default=30, ge=1, description="Timeout for ADB shell commands (seconds)"
     )
-    adb_pull: int = Field(default=60, description="Timeout for ADB file pull (seconds)")
+    adb_pull: int = Field(
+        default=60, ge=1, description="Timeout for ADB file pull (seconds)"
+    )
     adb_pull_large: int = Field(
-        default=180, description="Timeout for large file pulls like APKs (seconds)"
+        default=180,
+        ge=1,
+        description="Timeout for large file pulls like APKs (seconds)",
     )
     adb_push: int = Field(
-        default=120, description="Timeout for ADB file push (seconds)"
+        default=120, ge=1, description="Timeout for ADB file push (seconds)"
     )
     network_download: int = Field(
-        default=120, description="Timeout for network file downloads (seconds)"
+        default=120, ge=1, description="Timeout for network file downloads (seconds)"
     )
     frida_download: int = Field(
-        default=300, description="Timeout for Frida server download (seconds)"
+        default=300, ge=1, description="Timeout for Frida server download (seconds)"
     )
-    api_call: int = Field(default=10, description="Timeout for API calls (seconds)")
+    api_call: int = Field(
+        default=10, ge=1, description="Timeout for API calls (seconds)"
+    )
     subprocess: int = Field(
-        default=60, description="Default subprocess timeout (seconds)"
+        default=60, ge=1, description="Default subprocess timeout (seconds)"
     )
 
 
@@ -1924,3 +1941,79 @@ class SandroidConfig(BaseModel):
             self.paths.cache_path,
         ]:
             path.mkdir(parents=True, exist_ok=True)
+
+
+_BOUND_WORDS = {
+    "greater_than_equal": ("ge", "must be at least {}"),
+    "greater_than": ("gt", "must be greater than {}"),
+    "less_than_equal": ("le", "must be at most {}"),
+    "less_than": ("lt", "must be less than {}"),
+}
+
+
+def _error_text(err: dict) -> str:
+    """One pydantic error as ``must be at least 1 (got -5)``-style words."""
+    kind = _BOUND_WORDS.get(err.get("type", ""))
+    ctx = err.get("ctx") or {}
+    if kind and kind[0] in ctx:
+        text = kind[1].format(ctx[kind[0]])
+    else:
+        text = str(err.get("msg", "invalid value"))
+        text = text.removeprefix("Value error, ")
+        if text.startswith("Input should be"):
+            text = "must be" + text[len("Input should be") :]
+    if "input" in err and not isinstance(err["input"], (dict, list)):
+        text += f" (got {err['input']!r})"
+    return text
+
+
+def describe_validation_error(error: Exception) -> str:
+    """A pydantic ``ValidationError`` as one plain line (no URL, no dump).
+
+    ``timeouts.adb_command: must be at least 1 (got -5)``; several errors are
+    joined with ``; ``. Anything else falls back to the first line of
+    ``str(error)``.
+    """
+    errors = getattr(error, "errors", None)
+    if not callable(errors):
+        text = str(error)
+        return text.splitlines()[0] if text else type(error).__name__
+    parts = []
+    for err in errors():
+        loc = ".".join(str(p) for p in err.get("loc", ()))
+        text = _error_text(err)
+        parts.append(f"{loc}: {text}" if loc else text)
+    return "; ".join(parts)
+
+
+def validate_setting(key: str, value: Any) -> str | None:
+    """Check one dotted setting against its schema field (type + bounds).
+
+    Returns ``None`` when *value* is acceptable, else a short reason such as
+    ``must be at least 1 (got -5)``. Unknown keys and checks spanning several
+    fields are left to the full config validation.
+    """
+    from typing import Annotated
+
+    from pydantic import TypeAdapter, ValidationError
+
+    model: type[BaseModel] = SandroidConfig
+    parts = key.split(".")
+    for part in parts[:-1]:
+        sub = getattr(model.model_fields.get(part), "annotation", None)
+        if not (isinstance(sub, type) and issubclass(sub, BaseModel)):
+            return None
+        model = sub
+    field = model.model_fields.get(parts[-1])
+    if field is None:
+        return None
+    annotation: Any = field.annotation
+    if field.metadata:
+        annotation = Annotated[(annotation, *field.metadata)]
+    try:
+        TypeAdapter(annotation).validate_python(value)
+    except ValidationError as e:
+        return _error_text(e.errors()[0])
+    except Exception:
+        return None
+    return None
