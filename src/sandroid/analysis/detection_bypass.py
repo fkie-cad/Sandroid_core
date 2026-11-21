@@ -4140,9 +4140,11 @@ class BypassService:
         process; "SSL unpin ✓" and "Hooks 1 · bypass ssl" used to stay for as
         long as Sandroid ran. Gone means: the Frida session detached or the
         script was destroyed (``_is_job_live``), or the spotlight app now runs
-        under another PID. The armed set is kept, so the next Start/Restart
-        re-applies the categories. Blocking only when it stops the dead job:
-        call it off the UI thread.
+        under another PID and the device confirms the hooked one is missing
+        (a mismatch alone, with the session still attached, is no proof).
+        The armed set is kept, so the next Start/Restart re-applies the
+        categories. Blocking (that probe, stopping the dead job): call it
+        off the UI thread.
 
         Returns:
             The categories that were dropped (empty while all is well, while
@@ -4182,7 +4184,12 @@ class BypassService:
             except Exception:
                 current = None
             if current is not None and current != pid:
-                alive = False
+                # A PID mismatch alone is no proof of death while the Frida
+                # session is attached and the script is alive (R3-B1: a stale
+                # poll sample wrote another app's PID under this package, and
+                # the running app's hooks were unloaded). Only a process that
+                # is confirmed missing on the device counts.
+                alive = not self._hooked_process_gone(package, pid)
         if alive:
             return []
         with self._lock:
@@ -4203,6 +4210,28 @@ class BypassService:
         # No load can start in between: this holds the change lock.
         self._reset_script_state()
         return active
+
+    @staticmethod
+    def _hooked_process_gone(package: str | None, pid: int) -> bool:
+        """True only if the device confirms that ``pid`` no longer exists.
+
+        Blocking ADB (the liveness check runs off the UI thread). Any doubt
+        (adb error, an unreadable answer) keeps the hooks: unloading the
+        hooks of a live app is worse than showing them a poll longer.
+        """
+        try:
+            from sandroid.core.adb import Adb
+
+            out, err = Adb.send_adb_command(f"shell cat /proc/{int(pid)}/cmdline")
+        except Exception:
+            return False
+        text = f"{out or ''}\n{err or ''}"
+        if package and package in text:
+            return False  # still our process
+        if "No such file" in text:
+            return True
+        # Another process reuses the PID: the hooked one is gone.
+        return bool((out or "").strip()) and not (err or "").strip()
 
     @_notifies
     def stop_all(self, package: str | None = None) -> list[str]:
@@ -4669,7 +4698,12 @@ class BypassService:
         if package and current and current != package:
             return
         try:
-            spotlight.set_pid(pid)
+            # The compare-and-set itself runs under the spotlight's lock: the
+            # selection can still move between the check above and the write.
+            if package:
+                spotlight.set_pid(pid, package=package)
+            else:
+                spotlight.set_pid(pid)
         except Exception:
             pass
 

@@ -61,8 +61,13 @@ class SpotlightServiceProtocol(Protocol):
         """The cached PID of the selected app."""
         ...
 
-    def set_pid(self, pid: int | None) -> None:
-        """Update the cached PID."""
+    def set_pid(
+        self,
+        pid: int | None,
+        package: str | None = None,
+        epoch: int | None = None,
+    ) -> bool:
+        """Update the cached PID (dropped when the tag is stale)."""
         ...
 
 

@@ -2973,6 +2973,92 @@ def test_the_liveness_poll_keeps_the_other_apps_bypass_after_a_switch(two_apps):
     assert not first.closed
 
 
+def _cmdline(monkeypatch, out: str, err: str = "") -> list[str]:
+    from sandroid.core.adb import Adb
+
+    asked: list[str] = []
+
+    def _send(cmd, *a, **k):
+        asked.append(cmd)
+        return out, err
+
+    monkeypatch.setattr(Adb, "send_adb_command", staticmethod(_send))
+    return asked
+
+
+def test_a_pid_poll_for_the_old_app_never_lands_after_a_switch_back(
+    two_apps, monkeypatch
+):
+    """R3-B1: the poll sampled PKG's PID, ``*`` switched back to OTHER while
+    adb answered, and the sample was written under OTHER. The liveness check
+    then saw a PID mismatch and unloaded the hooks of the running OTHER.
+    Interleaved deterministically: the switch happens inside the sample.
+    """
+    from sandroid.core.adb import Adb
+    from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
+
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    bypass.toggle("ssl")
+    first = bypass._job
+    env.select(PKG)  # c on the other app: OTHER's hooks stay loaded
+
+    def _sample(package, **kw):
+        assert package == PKG
+        env.spotlight.set_app(OTHER)  # ``*`` lands while adb answers
+        return env.pids[PKG]
+
+    monkeypatch.setattr(Adb, "get_pid_for_package_name", staticmethod(_sample))
+    _cmdline(monkeypatch, OTHER)  # OTHER's hooked process is alive
+    panel = SpotlightPanel()
+    for name in ("_reconcile_paused_flag", "_read_identity_gap", "_post"):
+        monkeypatch.setattr(panel, name, lambda *a, **k: None)
+    monkeypatch.setattr(panel, "_bypass", lambda: bypass)
+
+    panel._poll_worker(PKG, env.spotlight.selection_epoch())
+
+    assert env.spotlight.get_package_name() == OTHER
+    assert env.spotlight.get_pid() != env.pids[PKG]  # the stale sample dropped
+    assert bypass.reconcile_liveness() == []
+    assert bypass._job is first
+    assert not first.closed
+
+
+def test_set_pid_drops_a_sample_tagged_for_another_selection(env):
+    spot = env.spotlight
+    epoch = spot.selection_epoch()
+    assert spot.set_pid(5, package=PKG, epoch=epoch) is True
+    spot.set_app(OTHER)
+    assert spot.set_pid(6, package=PKG) is False  # another package
+    assert spot.set_pid(6, epoch=epoch) is False  # the selection moved
+    spot.set_app(PKG)  # A -> B -> A: same package, newer epoch
+    assert spot.set_pid(6, package=PKG, epoch=epoch) is False
+    assert spot.get_pid() is None
+    assert spot.set_pid(7, package=PKG, epoch=spot.selection_epoch()) is True
+    assert spot.get_pid() == 7
+
+
+def test_a_pid_mismatch_with_the_session_attached_is_not_death(two_apps, monkeypatch):
+    """R3-B1: only a confirmed detach or a missing process drops the hooks."""
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    bypass.toggle("ssl")
+    first = bypass._job
+    env.spotlight.set_pid(4242)  # a wrong PID under OTHER, session attached
+
+    asked = _cmdline(monkeypatch, OTHER + "\x00")  # still OTHER's process
+    assert bypass.reconcile_liveness() == []
+    assert asked == [f"shell cat /proc/{env.pids[OTHER]}/cmdline"]
+    _cmdline(monkeypatch, "", "error: device offline")  # cannot tell
+    assert bypass.reconcile_liveness() == []
+    assert bypass._job is first
+    assert not first.closed
+
+    _cmdline(monkeypatch, "cat: /proc/88/cmdline: No such file or directory")
+    assert bypass.reconcile_liveness() == ["ssl"]
+    assert bypass._job is None
+
+
 def test_open_session_parks_the_other_apps_bypass_for_a_tool(two_apps):
     """A tool (friTap, Dexray) on the selected app: the other keeps its bypass."""
     env, bypass = two_apps, two_apps.bypass
