@@ -640,7 +640,7 @@ class IdentityLens(Vertical):
     can_focus = True
 
     BINDINGS = [
-        Binding("space", "apply", "Apply", key_display="space"),
+        Binding("space", "apply", "Apply"),
         Binding("e", "edit", "Edit value"),
         Binding("v", "verify", "Verify"),
         Binding("P", "profiles", "Profiles"),
@@ -1311,7 +1311,7 @@ class IdentityLens(Vertical):
             bits.append(f"verified {datetime.fromtimestamp(verified_at):%H:%M:%S}")
         if not bits:
             bits.append("not applied yet")
-        bits.append("enter inspect")
+        bits.append(f"{format_key('enter')} inspects")
         ms.set_lens_caption(LENS_ID, title=title, info=", ".join(bits))
 
     @staticmethod

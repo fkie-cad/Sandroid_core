@@ -976,6 +976,8 @@ async def test_caption_uses_the_service_times(fakes) -> None:
             return lens.screen._lens_captions["identity"][1] or ""
 
         await until(pilot, lambda: "not applied yet" in info())
+        # Keys as the footer writes them: "Enter", not "enter".
+        assert "Enter inspects" in info()
         await pilot.press("space")
         stamp = f"{il.datetime.fromtimestamp(applied_at):%H:%M:%S}"
         await until(pilot, lambda: f"applied {stamp}" in info())
@@ -1049,6 +1051,12 @@ def test_the_lens_shows_the_target_devices_persona(fakes) -> None:
 # --------------------------------------------------------------------------
 # persona: W builds (no persona on the device) or refreshes
 # --------------------------------------------------------------------------
+
+
+def test_space_reads_as_the_footer_writes_it() -> None:
+    """The Apply key shows as "Space" like in every other lens footer."""
+    binding = next(b for b in il.IdentityLens.BINDINGS if b.key == "space")
+    assert binding.key_display in (None, "Space")
 
 
 def _caption(lens) -> str:
