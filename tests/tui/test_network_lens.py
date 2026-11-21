@@ -378,6 +378,34 @@ async def test_empty_state_and_space_starts_mitm(flow_dir, monkeypatch):
         assert calls == ["toggle", "toggle"]
 
 
+async def test_space_starts_a_stopped_mitm_with_flows_listed(flow_dir, monkeypatch):
+    """N3-B6: once flows exist Space still starts a stopped Mitmproxy; the
+    footer offers "Start Mitmproxy" only while it is stopped.
+    """
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        running = {"v": False}
+        calls = []
+        monkeypatch.setattr(panel.mitm, "is_running", lambda: running["v"])
+        monkeypatch.setattr(
+            panel.mitm, "action_toggle_running", lambda: calls.append("toggle")
+        )
+        panel._do_refresh_status()
+        await settle(pilot)
+        assert panel.check_action("start_mitm", ()) is True
+        await pilot.press("space")
+        await settle(pilot)
+        assert calls == ["toggle"]
+        running["v"] = True
+        panel._do_refresh_status()
+        await settle(pilot)
+        assert panel.check_action("start_mitm", ()) is False
+        await pilot.press("space")
+        await settle(pilot)
+        assert calls == ["toggle"]
+
+
 async def test_flows_fill_the_table_noise_hidden(flow_dir):
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
@@ -699,7 +727,7 @@ def test_capture_status_is_dots_and_words(monkeypatch):
     panel._ca_ok = panel._ct_ok = True
     panel._proxy_state, panel._proxy_addr = "ours", "10.0.2.2:8080"
     caption = panel.status_caption()
-    assert f"[{pal.ok}]Mitmproxy ● on[/]" in caption
+    assert f"[{pal.ok}]Mitmproxy ● running[/]" in caption
     assert f"CA [{pal.ok}]● installed[/]" in caption
     rows = dict(panel.status_rows())
     assert rows["CA"].startswith(f"[{pal.ok}]● installed[/]")
@@ -733,6 +761,74 @@ def test_capture_status_is_dots_and_words(monkeypatch):
     assert f"CA [{pal.warn}]○ not installed[/]" in caption
     assert "CA ○ not installed" in plain(caption)
     assert not set("✓✗▸◐⚑⇧␣⏎") & set(plain(caption)), caption
+
+
+def _caption_panel(monkeypatch, running: bool):
+    from sandroid.services.mitmproxy_service import MitmproxyService
+    from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
+
+    service = MitmproxyService()
+    panel = MitmproxyPanel()
+    panel._service = service
+    monkeypatch.setattr(service, "is_running", lambda: running)
+    monkeypatch.setattr(service, "ssl_unpin_is_active", lambda: False)
+    return panel, service
+
+
+def test_caption_routing_follows_the_network_method(monkeypatch):
+    """N3-B2: "device routed" follows the method service's device read (Off,
+    keys only, Whole device, adb reverse), not only M / Ctrl+D.
+    """
+    from types import SimpleNamespace
+
+    from sandroid.services import network_method as nm
+
+    panel, _ = _caption_panel(monkeypatch, running=True)
+    snap = {"value": nm.MethodSnapshot(device_proxy="none")}
+    fake = SimpleNamespace(snapshot_cached=lambda: snap["value"])
+    monkeypatch.setattr(nm, "peek_network_method_service", lambda: fake)
+    panel._proxy_state = "ours"  # set by an earlier Ctrl+D
+    panel._handle_proxy_change("network_method", None, None)
+    assert "device routed" not in panel.status_caption()
+    assert panel._proxy_state == "none"
+    snap["value"] = nm.MethodSnapshot(device_proxy="ours", device_addr="127.0.0.1:8090")
+    panel._handle_proxy_change("network_method", None, None)
+    assert "device routed" in panel.status_caption()
+    snap["value"] = nm.MethodSnapshot(device_proxy="external", device_addr="1.2.3.4:8")
+    panel._handle_proxy_change("network_method", None, None)
+    assert "device on another proxy" in panel.status_caption()
+
+
+def test_caption_shows_a_stopped_mitmproxy_as_a_red_problem(monkeypatch):
+    """N3-B3: Mitmproxy down while something routes to it is red words, not
+    a muted "○ off"; the reason of a failed start or exit is named.
+    """
+    from sandroid.tui.themes import lens_palette
+
+    pal = lens_palette()
+    panel, service = _caption_panel(monkeypatch, running=False)
+    panel._proxy_state = "ours"
+    assert panel.status_caption() == (
+        f"[{pal.bad}]Mitmproxy stopped: app traffic blocked[/]"
+    )
+    service._state.last_error = "port 8390 is in use"
+    assert panel.status_caption() == (
+        f"[{pal.bad}]Mitmproxy stopped: port 8390 is in use, app traffic blocked[/]"
+    )
+    panel._proxy_state = "none"
+    service._state.last_error = None
+    assert panel.status_caption() == f"[{pal.dim}]Mitmproxy ○ off[/]"
+
+
+def test_caption_says_starting_until_mitmweb_listens(monkeypatch):
+    from sandroid.tui.themes import lens_palette
+
+    pal = lens_palette()
+    panel, service = _caption_panel(monkeypatch, running=True)
+    service._state.running, service._state.listening = True, False
+    assert f"[{pal.warn}]Mitmproxy ◌ starting[/]" in panel.status_caption()
+    service._state.listening = True
+    assert f"[{pal.ok}]Mitmproxy ● running[/]" in panel.status_caption()
 
 
 def test_fritap_stopped_is_muted_like_mitmproxy(monkeypatch):
@@ -2459,6 +2555,85 @@ async def test_proxy_dialog_method_tab_and_kill_switch(monkeypatch):
         await until(pilot, lambda: applied == ["this_app"])
 
 
+async def test_device_radios_start_on_the_choice_and_space_types(monkeypatch):
+    """N3-B7: back on the Device tab (Shift+Left), Down + Space picks the
+    option after the current one, never Off from a stray cursor; Space in
+    the External field types a space instead of replacing the address.
+    V5: the Kill switch label fits (keeps "refused").
+    """
+    from types import SimpleNamespace
+
+    from textual.app import App
+    from textual.widgets import Checkbox, Input, RadioSet, TabbedContent
+
+    from sandroid.services import network_method as nm
+    from sandroid.tui.modals import proxy_modal
+
+    for name in (
+        "_refresh_device_proxy_status",
+        "_refresh_device_info",
+        "_detect_certificates",
+    ):
+        monkeypatch.setattr(proxy_modal.ProxyModal, name, lambda self: None)
+    monkeypatch.setattr(
+        proxy_modal,
+        "get_focus_manager",
+        lambda: SimpleNamespace(app_proxies_cached=dict),
+    )
+    service = nm.NetworkMethodService(actions=None)
+    monkeypatch.setattr(service, "refresh", lambda **kw: None)
+    monkeypatch.setattr(nm, "_INSTANCE", service)
+    modal = proxy_modal.ProxyModal()
+
+    class _App(App):
+        def on_mount(self) -> None:
+            self.push_screen(modal)
+
+    app = _App()
+    async with app.run_test(size=(120, 35)) as pilot:
+        await until(pilot, lambda: app.screen is modal and app.focused is not None)
+        radios = modal.query_one("#device-radio-set", RadioSet)
+        # The device probe found our proxy via adb reverse.
+        modal._on_device_probe_done(
+            {"device": {"state": "ours", "addr": "127.0.0.1:8080"}}
+        )
+        await settle(pilot)
+        tabs = modal.query_one("#proxy-tabs", TabbedContent)
+        await pilot.press("shift+left")
+        await until(pilot, lambda: tabs.active == "tab-method")
+        await pilot.press("shift+right")
+        await until(pilot, lambda: tabs.active == "tab-device")
+        await until(pilot, lambda: app.focused is radios)
+        assert radios.pressed_button.id == "device-radio-reverse"
+        await pilot.press("up", "space")
+        await settle(pilot)
+        assert radios.pressed_button.id == "device-radio-external"
+        await pilot.press("down", "down", "space")
+        await settle(pilot)
+        # Wraps from adb reverse straight to Off (no caption in between).
+        assert radios.pressed_button.id == "device-radio-off"
+
+        field = modal.query_one("#device-ext-input", Input)
+        field.value = "1.2.3.4:8080"
+        field.focus()
+        await settle(pilot)
+        await pilot.press("space")
+        await settle(pilot)
+        assert field.value.strip() == "1.2.3.4:8080"
+        assert field.value != " "
+
+        box = modal.query_one("#kill-switch-checkbox", Checkbox)
+        assert str(box.label).endswith("refused")
+        assert len(str(box.label)) <= 70
+
+        # V5: the CA actions are on screen at 120x35 without scrolling.
+        tabs.active = "tab-ca"
+        await settle(pilot)
+        remove = modal.query_one("#btn-remove-ca")
+        assert remove.region.height > 0
+        assert remove.region.bottom <= 35
+
+
 def test_bypass_listener_on_the_ui_thread_only_schedules(monkeypatch):
     """The bypass state callback can run on the UI thread (a new selection
     disarms from UI code): it must only schedule, never marshal or block.
@@ -2477,3 +2652,68 @@ def test_bypass_listener_on_the_ui_thread_only_schedules(monkeypatch):
             break
         time.sleep(0.01)
     assert started == [1]
+
+
+@pytest.mark.parametrize(
+    ("app", "ca", "why_part", "next_part"),
+    [
+        ("org.mozilla.firefox", "installed", "Firefox uses its own certificate", "h"),
+        ("org.mozilla.firefox", "missing", "own certificate store", "friTap"),
+        ("com.example", "installed", "although the CA is installed", "Ctrl+P"),
+        ("com.example", "missing", "The CA is not installed", "Ctrl+N"),
+        ("com.example", "unknown", "or the CA is not trusted yet", "Ctrl+N"),
+    ],
+)
+def test_tls_failure_why_uses_the_known_ca_state(app, ca, why_part, next_part):
+    """N3-V6: the "Why" of a TLS failure follows the CA state and names an
+    app with its own trust store instead of always blaming pinning or the CA.
+    """
+    why, nxt = np_mod.tls_failure_why("cert", app, ca)
+    assert why_part in why
+    assert next_part in nxt
+    if ca == "installed":
+        assert "installs the CA" not in nxt
+
+
+def test_fritap_did_not_start_is_red_words(monkeypatch):
+    """N3-B5/V7: a failed or hung friTap start reads "did not start: <reason>"
+    in the bad colour (caption and Inspector), not a muted line.
+    """
+    from sandroid.analysis import fritap as fritap_mod
+    from sandroid.tui.themes import lens_palette
+    from sandroid.tui.widgets.fritap_panel import FriTapPanel
+
+    pal = lens_palette()
+    panel = FriTapPanel()
+    monkeypatch.setattr(panel, "is_running", lambda: False)
+    try:
+        fritap_mod.set_lifecycle(
+            "failed", "did not start: no answer from org.x after 90 s"
+        )
+        assert panel.caption_token() == f"[{pal.bad}]friTap did not start[/]"
+        head = dict(panel.status_rows())["friTap"]
+        assert head == f"[{pal.bad}]did not start: no answer from org.x after 90 s[/]"
+    finally:
+        fritap_mod.set_lifecycle("stopped", "")
+
+
+def test_recent_failures_are_red_words():
+    from sandroid.tui.themes import lens_palette
+
+    pal = lens_palette()
+    text = np_mod._recent_text(["started", "✗ ERROR: unable to intercept"])
+    assert text.plain == "started\nERROR: unable to intercept"
+    styles = {str(span.style) for span in text.spans}
+    assert pal.bad in styles
+
+
+def test_activity_log_task_errors_are_red():
+    from sandroid.tui.widgets.activity_log import ActivityLog
+
+    colors = {"error": "#ff0000", "warning": "#ffff00"}
+    red = ActivityLog._level_colored("[error]friTap did not start: x[/error]", colors)
+    assert red == "[#ff0000]friTap did not start: x[/]"
+    assert ActivityLog._level_colored("ERROR: Error: boom", colors).startswith(
+        "[#ff0000]"
+    )
+    assert ActivityLog._level_colored("plain line", colors) == "plain line"

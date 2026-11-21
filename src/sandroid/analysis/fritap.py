@@ -81,6 +81,34 @@ _LIFECYCLE_LOCK = threading.Lock()
 #: Seconds between "is the target app frozen?" checks while friTap runs.
 _ANR_POLL_SECONDS = 8.0
 
+#: Seconds a start may sit at "starting" (not counting a dialog waiting for
+#: the user) before it reads "did not start" (E2E N3-B5: 75 s and more).
+START_TIMEOUT_S = 90.0
+#: Poll interval of the start watchdog.
+_START_POLL_S = 1.0
+
+
+def start_failure_reason(error: object) -> str:
+    """Why a friTap start failed, in plain words (no "friTap not started"
+    prefix, no dashes): ``"org.x keeps running"``.
+    """
+    text = str(error).strip()
+    for prefix in ("friTap not started", "FriTap not started"):
+        if text.startswith(prefix):
+            text = text[len(prefix) :].lstrip(" :\u2014-")
+    text = text.replace(" \u2014 ", ": ").replace("\u2014", "-").rstrip(".")
+    return text or "unknown error"
+
+
+def _ui_request_pending() -> bool:
+    """A dialog (config, restart consent) is waiting for the user."""
+    try:
+        from sandroid.core.ui_request_bus import UIRequestBus
+
+        return UIRequestBus.get().has_pending_requests()
+    except Exception:
+        return False
+
 
 def lifecycle() -> tuple[str, str]:
     """``(phase, detail)`` of friTap, see :data:`FRITAP_PHASES`."""
@@ -459,6 +487,8 @@ class FriTap(DataGatherBase):
         #: unless ``fresh_consent`` is set (non-interactive callers).
         self.fresh = False
         self.fresh_consent = False
+        #: The start in flight (its watchdog stops once this changes).
+        self._start_token: object | None = None
         #: The process friTap got (sandroid.services.app_start.Opened).
         self._opened = None
         #: Note for the user after start() ("app still paused — Space resumes").
@@ -815,6 +845,8 @@ class FriTap(DataGatherBase):
             logger.debug(f"  output_json: {config.get('output_json', True)}")
 
         set_lifecycle("starting", self.app_package or "")
+        token = self._start_token = object()
+        self._start_watchdog(token)
         try:
             # Set up session FIRST (before starting network) to fail fast
             logger.debug("=== FriTap Session Setup Starting ===")
@@ -986,18 +1018,26 @@ class FriTap(DataGatherBase):
                     "FriTap sent test message to EventBus for activity log verification"
                 )
 
+            self._start_token = None
             set_lifecycle("running", self.app_package or "")
             self._start_anr_watch()
             return True
 
         except Exception as e:
-            set_lifecycle("failed", str(e)[:200])
-            logger.error(f"Failed to start FriTap: {e}")
+            self._start_token = None
+            reason = start_failure_reason(e)
+            if getattr(e, "reason", None) == "declined":
+                # The user kept the app running: a choice, not a failure.
+                set_lifecycle("stopped", f"restart declined: {reason}")
+                logger.info(f"friTap not started: {reason}")
+                message = f"friTap not started: {reason}"
+            else:
+                set_lifecycle("failed", f"did not start: {reason}"[:200])
+                logger.error(f"friTap did not start: {reason}")
+                message = f"[error]friTap did not start: {reason}[/error]"
             # Shown in the friTap panel, too (it only tails friTap events).
             try:
-                _publish_fritap_event(
-                    EventBus.get(), f"[error]friTap not started: {e}[/error]"
-                )
+                _publish_fritap_event(EventBus.get(), message)
             except Exception:
                 pass
             # Clean up network capture if we started it
@@ -1007,6 +1047,39 @@ class FriTap(DataGatherBase):
             # Our own spawn must not stay frozen with the session held.
             self._cleanup_failed_start()
             raise  # Re-raise so the caller knows it failed
+
+    def _start_watchdog(self, token: object) -> None:
+        """Say "did not start" when a start hangs at "starting".
+
+        The time a dialog waits for the user (the restart consent) does not
+        count. A start that still completes later reads "running" again.
+        """
+        package = self.app_package or "the app"
+
+        def _run() -> None:
+            deadline = time.monotonic() + START_TIMEOUT_S
+            while True:
+                time.sleep(_START_POLL_S)
+                if getattr(self, "_start_token", None) is not token:
+                    return
+                if lifecycle()[0] != "starting":
+                    return
+                if _ui_request_pending():
+                    deadline = time.monotonic() + START_TIMEOUT_S
+                    continue
+                if time.monotonic() >= deadline:
+                    break
+            reason = f"no answer from {package} after {START_TIMEOUT_S:.0f} s"
+            set_lifecycle("failed", f"did not start: {reason}")
+            logger.error(f"friTap did not start: {reason}")
+            try:
+                _publish_fritap_event(
+                    EventBus.get(), f"[error]friTap did not start: {reason}[/error]"
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, name="fritap-start-watchdog", daemon=True).start()
 
     def _cleanup_failed_start(self) -> None:
         """Undo a failed start: friTap's own spawn, else only its own job.

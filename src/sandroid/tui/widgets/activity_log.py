@@ -369,6 +369,26 @@ class ActivityLog(RichLog):
         self.write("[dim]─" * 40 + "[/]")
         self.write("")
 
+    @staticmethod
+    def _level_colored(message: str, colors: dict) -> str:
+        """Task output in its level's colour: errors are red words.
+
+        Tools mark levels with pseudo tags (``[error]…[/error]``, friTap's
+        log handler) or an ``ERROR:`` prefix; both rendered in the muted
+        base colour before (E2E N3-V7).
+        """
+        text = str(message)
+        level = None
+        if "[error]" in text or text.lstrip().startswith("ERROR:"):
+            level = "error"
+        elif "[warning]" in text or text.lstrip().startswith("WARNING:"):
+            level = "warning"
+        if level is None:
+            return text
+        for tag in ("[error]", "[/error]", "[warning]", "[/warning]"):
+            text = text.replace(tag, "")
+        return f"[{colors[level]}]{text}[/]"
+
     def log_message(self, message: str, task_name: str = None) -> None:
         """Log a message with optional task name prefix.
 
@@ -380,6 +400,7 @@ class ActivityLog(RichLog):
             return
         colors = self._get_theme_colors()
         timestamp = datetime.now().strftime("%H:%M:%S")
+        message = self._level_colored(message, colors)
         if task_name:
             self.write(
                 f"[{colors['text_muted']}]{timestamp}[/] [{colors['primary']}]{task_name}:[/] {message}"

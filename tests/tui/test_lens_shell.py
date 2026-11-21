@@ -2026,7 +2026,7 @@ def test_proxy_strip_segment_is_plain_words():
     ours = "10.0.2.2:8080"
     cases = {
         "Proxy Mitmproxy ○ off": {},
-        f"Proxy Mitmproxy ● on {ours} · Device proxy ● on": {
+        f"Proxy Mitmproxy ● running {ours} · Device proxy ● on": {
             "mitmweb_running": True,
             "mitmweb_address": ours,
             "proxy_address": ours,
@@ -2035,8 +2035,14 @@ def test_proxy_strip_segment_is_plain_words():
             "mitmweb_address": ours,
             "proxy_address": ours,
         },
-        f"Proxy Mitmproxy ● on {ours} · Device proxy ○ off": {
+        f"Proxy Mitmproxy ● running {ours} · Device proxy ○ off": {
             "mitmweb_running": True,
+            "mitmweb_address": ours,
+        },
+        # Spawned, not listening yet (N3-B1: a busy port is no "running").
+        "Proxy Mitmproxy ◌ starting · Device proxy ○ off": {
+            "mitmweb_running": True,
+            "mitmweb_starting": True,
             "mitmweb_address": ours,
         },
         "Proxy Mitmproxy ○ off · Device proxy to 192.168.1.5:8081": {

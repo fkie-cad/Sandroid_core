@@ -70,6 +70,8 @@ class StatusBar(Static):
         # points: ``mitmweb_address`` is our canonical host:port even when
         # stopped, so the Proxy row can tell "ours" from a foreign proxy.
         self.mitmweb_running = False
+        #: Spawned but not listening yet (a busy port makes it exit).
+        self.mitmweb_starting = False
         self.mitmweb_address = ""
         self.network_capture_running = False
         self.network_capture_file = ""
@@ -400,9 +402,11 @@ class StatusBar(Static):
         # "Mitmproxy" is our engine; "Device proxy" says where the device
         # points, so a running Mitmproxy never reads as "the device is
         # proxied". Status dot + word in theme colours.
-        if self.mitmweb_running:
+        if self.mitmweb_running and self.mitmweb_starting:
+            proxy = f"[{muted}]Mitmproxy[/] [{paused}]◌ starting[/]"
+        elif self.mitmweb_running:
             addr = f" {self.mitmweb_address}" if self.mitmweb_address else ""
-            proxy = f"[{muted}]Mitmproxy[/] [{run}]● on{addr}[/]"
+            proxy = f"[{muted}]Mitmproxy[/] [{run}]● running{addr}[/]"
         else:
             proxy = f"[{muted}]Mitmproxy[/] [{muted}]○ off[/]"
         if pointed_at_us:
@@ -683,7 +687,11 @@ class StatusBar(Static):
 
             svc = get_mitmproxy_service()
             self.mitmweb_running = svc.is_running()
-            port = getattr(svc.state, "proxy_port", "")
+            st = svc.state
+            self.mitmweb_starting = bool(
+                getattr(st, "running", False) and not getattr(st, "listening", True)
+            )
+            port = getattr(st, "proxy_port", "")
             # Emulator-aware (10.0.2.2 on an emulator), so the glance agrees with
             # the Mitmproxy panel on which device proxy is "ours" — NOT the raw
             # host LAN/VPN IP, which the device can't reach.
@@ -701,6 +709,7 @@ class StatusBar(Static):
                 self.app_proxy_problems = problems
         except Exception:
             self.mitmweb_running = False
+            self.mitmweb_starting = False
             self.mitmweb_address = ""
             self.app_proxies = {}
             self.app_proxy_problems = {}
@@ -775,6 +784,7 @@ class StatusBar(Static):
         """
         before = (
             self.mitmweb_running,
+            self.mitmweb_starting,
             self.mitmweb_address,
             tuple(sorted(self.app_proxies.items())),
             tuple(sorted(self.app_proxy_problems.items())),
@@ -787,6 +797,7 @@ class StatusBar(Static):
         self._read_frida_starting()
         after = (
             self.mitmweb_running,
+            self.mitmweb_starting,
             self.mitmweb_address,
             tuple(sorted(self.app_proxies.items())),
             tuple(sorted(self.app_proxy_problems.items())),

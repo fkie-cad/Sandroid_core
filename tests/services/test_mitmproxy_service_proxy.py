@@ -95,6 +95,7 @@ def popen_spy(monkeypatch):
     monkeypatch.setattr(ms, "_find_mitmweb", lambda: "/x/mitmweb")
     monkeypatch.setattr(ms.subprocess, "Popen", _popen)
     monkeypatch.setattr(ms.threading.Thread, "start", lambda self: None)
+    monkeypatch.setattr(ms, "_port_busy", lambda host, port: False)
     return calls
 
 
@@ -132,6 +133,140 @@ def test_restart_keeps_listen_host(make_service, popen_spy, monkeypatch):
     assert _arg(popen_spy[-1], "--listen-host") == "0.0.0.0"
     assert released == []  # restart must not drop the device proxy
     svc._cleanup_addon()
+
+
+# ── N3-B1 / V10: busy ports, a confirmed start, the exit reason ─────────
+
+
+def test_start_refuses_a_busy_port(make_service, popen_spy, monkeypatch):
+    svc, _ = make_service(proxy_port=8390, web_port=8391)
+    monkeypatch.setattr(ms, "_port_busy", lambda host, port: port == 8390)
+    lines = []
+    svc.add_listener(lines.append)
+    assert svc.start() is False
+    assert popen_spy == []  # nothing spawned
+    assert svc.state.last_error == "port 8390 is in use (proxy port)"
+    assert lines == [
+        "[ERROR] Mitmproxy did not start: port 8390 is in use (proxy port)"
+    ]
+    assert not svc.is_running()
+
+
+def test_start_refuses_a_busy_lane_port(make_service, popen_spy, monkeypatch):
+    svc, _ = make_service(proxy_port=8390, web_port=8391)
+    monkeypatch.setattr(ms, "_port_busy", lambda host, port: port == 8393)
+    assert svc.start() is False
+    assert svc.state.last_error == "port 8393 is in use (App Proxy port)"
+
+
+def test_port_busy_sees_a_listener():
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        assert ms._port_busy("127.0.0.1", port)
+
+
+def test_socks_lanes_follow_the_proxy_port(make_service, popen_spy):
+    """V10: the default lanes sit right after our ports, so two instances
+    on different proxy ports never share 8082-8086.
+    """
+    assert ms.effective_socks_base(MitmproxyConfig()) == 8082
+    assert ms.effective_socks_base(MitmproxyConfig(proxy_port=8390, web_port=8391)) == (
+        8392
+    )
+    assert ms.effective_socks_base(MitmproxyConfig(socks_base=9100)) == 9100
+    svc, _ = make_service(proxy_port=8390, web_port=8391)
+    assert svc.start()
+    modes = [a for a in popen_spy[0] if a.startswith("socks5@")]
+    assert modes[0] == "socks5@8392"
+    svc._cleanup_addon()
+
+
+def test_lane_port_clash_with_web_port_is_reported(make_service, popen_spy):
+    svc, _ = make_service(proxy_port=8390, web_port=8392, socks_base=8392)
+    assert svc.start() is False
+    assert "8392" in svc.state.last_error
+    assert popen_spy == []
+
+
+def test_start_says_started_only_once_listening(make_service, popen_spy, monkeypatch):
+    svc, _ = make_service(proxy_port=8390)
+    lines = []
+    svc.add_listener(lines.append)
+    assert svc.start()
+    assert not any("mitmweb started" in line for line in lines)
+    assert svc.state.listening is False
+    monkeypatch.setattr(svc, "wait_listening", lambda timeout=0: True)
+    svc._confirm_listening(svc._proc)
+    assert svc.state.listening is True
+    assert any(line.startswith("[INFO] mitmweb started") for line in lines)
+    svc._cleanup_addon()
+
+
+def test_start_not_listening_is_an_error(make_service, popen_spy, monkeypatch):
+    svc, _ = make_service(proxy_port=8390)
+    lines = []
+    svc.add_listener(lines.append)
+    svc.start()
+    monkeypatch.setattr(svc, "wait_listening", lambda timeout=0: False)
+    svc._confirm_listening(svc._proc, timeout=15)
+    assert lines[-1] == "[ERROR] Mitmproxy is not listening on port 8390 after 15 s"
+    svc._cleanup_addon()
+
+
+class _ExitedProc(_FakeProc):
+    def __init__(self, output, code=1):
+        super().__init__()
+        self.stdout = iter(output)
+        self.code = code
+
+    def poll(self):
+        return self.code
+
+
+def test_unexpected_exit_is_red_with_the_reason(make_service):
+    svc, _ = make_service()
+    svc._proc = _ExitedProc(
+        [
+            '[04:12:38.501] Error starting proxy server: OSError(48, "error while '
+            "attempting to bind on address ('127.0.0.1', 8390): address already "
+            'in use")\n',
+        ]
+    )
+    lines = []
+    svc.add_listener(lines.append)
+    svc._read_loop()
+    assert lines[-1] == "[ERROR] Mitmproxy exited unexpectedly: port 8390 is in use"
+    assert svc.state.last_error == "port 8390 is in use"
+
+
+def test_unexpected_exit_without_output_names_the_exit_code(make_service):
+    svc, _ = make_service()
+    svc._proc = _ExitedProc([], code=3)
+    lines = []
+    svc.add_listener(lines.append)
+    svc._read_loop()
+    assert lines == ["[ERROR] Mitmproxy exited unexpectedly: exit code 3"]
+
+
+def test_panel_toasts_engine_errors(panel, monkeypatch):
+    p, _, _, _ = panel
+    posted = []
+    monkeypatch.setattr(p._ui, "post", lambda fn, *args: posted.append((fn, args)))
+    p._on_service_line("[ERROR] Mitmproxy did not start: port 8390 is in use")
+    assert (p._notify, ("Mitmproxy did not start: port 8390 is in use", "error")) in (
+        posted
+    )
+
+
+def test_panel_start_failure_claims_nothing(panel, monkeypatch):
+    p, svc, _, lines = panel
+    monkeypatch.setattr(svc, "start", lambda: False)
+    p.action_toggle_running()
+    assert lines == []  # no "running": the service's red line says it
 
 
 def test_schema_defaults_are_safe():
@@ -557,6 +692,7 @@ def popen_kwargs(monkeypatch):
     monkeypatch.setattr(ms, "_find_mitmweb", lambda: "/x/mitmweb")
     monkeypatch.setattr(ms.subprocess, "Popen", _popen)
     monkeypatch.setattr(ms.threading.Thread, "start", lambda self: None)
+    monkeypatch.setattr(ms, "_port_busy", lambda host, port: False)
     return calls
 
 

@@ -322,10 +322,18 @@ def derive_method(s: MethodSnapshot) -> MethodView:
             covered=("friTap writing TLS keys",),
             notes=("no proxy, no rows in this list", _pinning_note(s)),
         )
+    problems = _naming_problems(s) + _kill_switch_problems(s)
+    needs_mitm = s.device_proxy == "ours" or "ours" in s.lanes.values()
+    if needs_mitm and not s.mitm_running:
+        # Every piece routed to our Mitmproxy fails while it is down (the
+        # Kill switch blocks, the device proxy and the lanes go nowhere).
+        problems.insert(
+            0, "Mitmproxy stopped: app traffic is blocked until it runs again"
+        )
     return MethodView(
         CUSTOM,
         covered=tuple(_custom_pieces(s)),
-        problems=tuple(_naming_problems(s) + _kill_switch_problems(s)),
+        problems=tuple(problems),
     )
 
 
@@ -343,6 +351,12 @@ class ApplyPlan:
     #: ``replace_external=True`` (the TUI asks, the AI passes the argument).
     confirm: str = ""
     error: str = ""
+    #: The confirmation's title, buttons and the toast when it is declined
+    #: (an external proxy, a friTap started by hand, or both).
+    confirm_title: str = ""
+    confirm_yes: str = ""
+    confirm_no: str = ""
+    confirm_kept: str = ""
 
 
 def _external_pieces(s: MethodSnapshot, keep_device: bool = False) -> list[str]:
@@ -463,7 +477,22 @@ def plan_apply(
                 f"friTap was started by hand (its own settings, maybe a pcap); "
                 f"applying {target} stops it."
             )
-        return ApplyPlan(confirm=" ".join(parts) + " Continue?")
+        if external and stops_hand_fritap:
+            title, yes = "Replace the external proxy and stop friTap?", "Continue"
+            kept = "Nothing changed; the Network method shows Custom"
+        elif external:
+            title, yes = "Replace the external proxy?", "Replace"
+            kept = "External proxy kept; the Network method shows Custom"
+        else:
+            title, yes = "Stop friTap?", "Stop friTap"
+            kept = "friTap keeps running; nothing changed"
+        return ApplyPlan(
+            confirm=" ".join(parts) + " Continue?",
+            confirm_title=title,
+            confirm_yes=yes,
+            confirm_no="Keep",
+            confirm_kept=kept,
+        )
     return ApplyPlan(steps=steps)
 
 
@@ -758,6 +787,11 @@ class ApplyResult:
     confirm: str = ""
     done: list[str] = field(default_factory=list)
     view: MethodView | None = None
+    #: The confirmation's title, buttons and declined toast (see ApplyPlan).
+    confirm_title: str = ""
+    confirm_yes: str = ""
+    confirm_no: str = ""
+    confirm_kept: str = ""
 
 
 _SYMBOLS = {
@@ -1076,6 +1110,10 @@ class NetworkMethodService:
                     plan.confirm,
                     confirm=plan.confirm,
                     view=self._view_of(snapshot, serial),
+                    confirm_title=plan.confirm_title,
+                    confirm_yes=plan.confirm_yes,
+                    confirm_no=plan.confirm_no,
+                    confirm_kept=plan.confirm_kept,
                 )
             selected = _selected_device()
             frida = sorted({step[0] for step in plan.steps} & FRIDA_STEPS)
@@ -1113,6 +1151,11 @@ class NetworkMethodService:
                 text = f"{LABELS[preset]} stopped at {failure}"
             return ApplyResult(False, text, done=done, view=view)
         message = f"Network method: {view.name}"
+        if ("inject_ca",) in ran and "CA installed" in done:
+            # Never silently: the user may just have removed it (E2E N3-V13).
+            note = f"Installed the Sandroid CA for {LABELS[preset]}"
+            logger.info(note)
+            message += f". {note}"
         if view.problems:
             message += ". " + _sentence(view.problems)
         return ApplyResult(True, message, done=done, view=view)
@@ -1257,9 +1300,11 @@ class NetworkMethodService:
     UNNAMED_REFRESH_S = 30.0
 
     def _on_mitm_line(self, line: str) -> None:
-        if line.startswith("[INFO]") and (
-            "mitmweb started" in line or "mitmweb stopped" in line or "exited" in line
-        ):
+        if (
+            line.startswith("[INFO]")
+            and ("mitmweb started" in line or "mitmweb stopped" in line)
+        ) or (line.startswith("[ERROR]") and "Mitmproxy" in line):
+            # Started (listening), stopped, exited or did not start.
             self.refresh()
         elif line.startswith("[FLOW]|") and self._unnamed_device_flow(line):
             # Maybe an app installed after "Whole device" (no relay identity

@@ -495,6 +495,77 @@ _TLS_REASONS = {
     "tls": "The TLS handshake with mitmproxy failed.",
 }
 
+#: Apps that trust only their own certificate store (NSS), never Android's
+#: system store: package prefix -> name.
+_OWN_TRUST_STORE = {
+    "org.mozilla.": "Firefox",
+    "org.torproject.": "Tor Browser",
+}
+
+_NEXT_DEFAULT = (
+    "[b]Ctrl+P[/b] unpins the spotlight app (exp.) · [b]Ctrl+N[/b] installs the CA"
+)
+
+
+def _own_store_app(app: str) -> str:
+    """The name of an app known to use its own trust store, else ""."""
+    for pkg in (app or "").split(","):
+        pkg = pkg.strip()
+        for prefix, name in _OWN_TRUST_STORE.items():
+            if pkg.startswith(prefix):
+                return name
+    return ""
+
+
+def _recent_text(lines: list[str]) -> Text:
+    """The controllers' recent lines: muted, failures as red words.
+
+    The controllers mark failures with a leading ``✗ `` (not a house
+    symbol): it picks the colour and is dropped (E2E N3-V7).
+    """
+    pal = lens_palette()
+    out = Text()
+    for i, line in enumerate(lines):
+        if i:
+            out.append("\n")
+        if line.startswith("✗ "):
+            out.append(line[2:], style=pal.bad)
+        else:
+            out.append(line, style=pal.muted)
+    return out
+
+
+def tls_failure_why(reason: str, app: str, ca: str) -> tuple[str, str]:
+    """``(why, next)`` for a TLS failure row, from what is known.
+
+    Args:
+        reason: The failure kind (``cert`` / ``ver`` / ``tls``).
+        app: The row's app (package, maybe ``"a,b"``).
+        ca: The Sandroid CA on the device: ``installed`` / ``missing`` /
+            ``unknown``.
+    """
+    if reason != "cert":
+        return _TLS_REASONS.get(reason, _TLS_REASONS["tls"]), _NEXT_DEFAULT
+    own = _own_store_app(app)
+    if own:
+        return (
+            f"{own} uses its own certificate store (NSS); the system CA "
+            "is not trusted.",
+            "[b]h[/b] starts friTap for its TLS keys",
+        )
+    if ca == "installed":
+        return (
+            "The app rejected mitmproxy's certificate although the CA is "
+            "installed: likely certificate pinning.",
+            "[b]Ctrl+P[/b] unpins the spotlight app (exp.)",
+        )
+    if ca == "missing":
+        return (
+            "The CA is not installed, so the app cannot trust mitmproxy's certificate.",
+            "[b]Ctrl+N[/b] installs the CA",
+        )
+    return _TLS_REASONS["cert"], _NEXT_DEFAULT
+
 
 # --------------------------------------------------------------------------
 # model
@@ -1270,6 +1341,8 @@ class NetworkPanel(Widget):
         self._width = -1
         self._net_layout: list[tuple[str, str, int]] = []
         self._status_pending = False
+        #: Mitmproxy running when the footer bindings were last checked.
+        self._footer_mitm_running: bool | None = None
         self._filter_timer = None
         # identity profile values (privacy scan; see the _privacy_* methods)
         self._profile_only = False
@@ -2141,6 +2214,14 @@ class NetworkPanel(Widget):
 
     def _do_refresh_status(self) -> None:
         self._status_pending = False
+        running = self._mitm_running()
+        if running != self._footer_mitm_running:
+            # Show / hide "Space Start Mitmproxy" with the engine's state.
+            self._footer_mitm_running = running
+            try:
+                self.screen.refresh_bindings()
+            except Exception:
+                pass
         self._update_method_line()
         ms = self._main_screen()
         if ms is not None:
@@ -2414,6 +2495,21 @@ class NetworkPanel(Widget):
             with contextlib.suppress(Exception):
                 self.app.notify("That flow is not in the flow log.", timeout=3)
 
+    @staticmethod
+    def _ca_state() -> str:
+        """The Sandroid CA on the selected device, as the Network method
+        last read it (``installed`` / ``missing`` / ``unknown``).
+        """
+        try:
+            from sandroid.services.network_method import (
+                peek_network_method_service,
+            )
+
+            service = peek_network_method_service()
+            return service.snapshot_cached().ca if service is not None else "unknown"
+        except Exception:
+            return "unknown"
+
     def flow_content(self, row: FlowRow) -> InspectorContent:
         key = f"network:row:{row.key}"
         label, _known = row.recipient
@@ -2429,7 +2525,7 @@ class NetworkPanel(Widget):
                 "result",
                 Text(f"TLS failed ({row.reason})", style=lens_palette().bad),
             )
-            why = _TLS_REASONS.get(row.reason, _TLS_REASONS["tls"])
+            why, next_hint = tls_failure_why(row.reason, row.app, self._ca_state())
             return InspectorContent(
                 title=f"TLS failed · {label}",
                 subtitle=escape(row.host),
@@ -2437,11 +2533,7 @@ class NetworkPanel(Widget):
                     ("", grid),
                     *(self._hl.sections(row.flow_id) if row.flow_id else []),
                     ("Why", why),
-                    (
-                        "Next",
-                        "[b]Ctrl+P[/b] unpins the spotlight app (exp.) · "
-                        "[b]Ctrl+N[/b] installs the CA",
-                    ),
+                    ("Next", next_hint),
                 ],
                 key=key,
                 lens=LENS_ID,
@@ -2538,9 +2630,7 @@ class NetworkPanel(Widget):
         m_recent = list(mitm.recent_lines)[-8:] if mitm is not None else []
         m_sections: list[tuple[str, Any]] = [("", m_grid), ("Keys", m_keys)]
         if m_recent:
-            m_sections.append(
-                ("Recent", Text("\n".join(m_recent), style=lens_palette().muted))
-            )
+            m_sections.append(("Recent", _recent_text(m_recent)))
         f_grid = _grid()
         for label, value in fritap.status_rows() if fritap is not None else []:
             f_grid.add_row(label, Text.from_markup(value))
@@ -2550,9 +2640,7 @@ class NetworkPanel(Widget):
             ("Keys", "[b]h[/b] start/stop friTap  [b]Ctrl+F[/b] output folder"),
         ]
         if f_recent:
-            f_sections.append(
-                ("Recent", Text("\n".join(f_recent), style=lens_palette().muted))
-            )
+            f_sections.append(("Recent", _recent_text(f_recent)))
         return InspectorContent(
             title="Network status",
             tabs=[("Mitmproxy", m_sections), ("friTap", f_sections)],
@@ -2899,8 +2987,9 @@ class NetworkPanel(Widget):
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if action == "start_mitm":
-            # Only while nothing is captured (footer room); M works always.
-            return not self.in_review and not self._model()
+            # Space starts a stopped Mitmproxy, also once flows exist; while
+            # it runs the key is hidden (M stops it, deliberately).
+            return not self.in_review and not self._mitm_running()
         if action == "toggle_phases":
             return self.in_review
         if action in ("cycle_highlight_filter", "clear_highlights"):
@@ -2909,6 +2998,13 @@ class NetworkPanel(Widget):
             # Nothing to filter yet: hidden, so the footer shows Ctrl+D instead.
             return bool(self._model())
         return True
+
+    def _mitm_running(self) -> bool:
+        mitm = self.mitm
+        try:
+            return bool(mitm is not None and mitm.is_running())
+        except Exception:
+            return False
 
     def action_start_mitm(self) -> None:
         """Space: start mitmproxy; never stops it (M does)."""

@@ -910,3 +910,86 @@ def test_keys_only_checks_the_selected_device_not_a_thread_pin(monkeypatch):
     with Adb.targeting("emu-2"):
         r = fritap_mod.start_fritap_keys(serial="emu-2")
     assert (r[0], r.reason) == (False, "other_device")
+
+
+# ---------------------------------------------------------------------------
+# E2E N3-B5: a declined restart is no failure; a hung start times out
+# ---------------------------------------------------------------------------
+
+
+def test_declined_restart_is_a_cancel_not_command_failed(monkeypatch):
+    """Esc / Keep running on "Restart <app>?" showed "Command Failed"."""
+    from sandroid.commands.base import CommandContext
+    from sandroid.commands.network_commands import FriTapCommand
+
+    monkeypatch.setattr(
+        fritap_mod.FriTap, "__init__", lambda self, **kw: setattr(self, "_x", 1)
+    )
+
+    def _start(self, interactive=True):
+        raise fritap_mod.FriTapTargetError(
+            "friTap not started — org.mozilla.firefox keeps running.",
+            reason="declined",
+        )
+
+    monkeypatch.setattr(fritap_mod.FriTap, "start", _start)
+    result = FriTapCommand()._start_fritap(CommandContext(toolbox=object()))
+    assert result.error == "cancelled"  # no error dialog
+    assert result.message == "friTap not started: org.mozilla.firefox keeps running"
+
+
+def test_failed_start_message_is_plain_words(monkeypatch):
+    from sandroid.commands.base import CommandContext
+    from sandroid.commands.network_commands import FriTapCommand
+
+    monkeypatch.setattr(
+        fritap_mod.FriTap, "__init__", lambda self, **kw: setattr(self, "_x", 1)
+    )
+
+    def _start(self, interactive=True):
+        raise fritap_mod.FriTapTargetError("the app is not running", reason=None)
+
+    monkeypatch.setattr(fritap_mod.FriTap, "start", _start)
+    result = FriTapCommand()._start_fritap(CommandContext(toolbox=object()))
+    assert result.message == "friTap did not start: the app is not running"
+    assert result.error != "cancelled"
+    assert "—" not in result.message
+
+
+def _wait_phase_leaves(phase: str, seconds: float = 3.0) -> None:
+    import time
+
+    deadline = time.monotonic() + seconds
+    while fritap_mod.lifecycle()[0] == phase and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def test_start_watchdog_reports_a_hung_start(monkeypatch, _lifecycle_events):
+    monkeypatch.setattr(fritap_mod, "START_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(fritap_mod, "_START_POLL_S", 0.01)
+    monkeypatch.setattr(fritap_mod, "_ui_request_pending", lambda: False)
+    inst = fritap_mod.FriTap.__new__(fritap_mod.FriTap)
+    inst.app_package = "org.mozilla.firefox"
+    token = inst._start_token = object()
+    fritap_mod.set_lifecycle("starting", "org.mozilla.firefox")
+    inst._start_watchdog(token)
+    _wait_phase_leaves("starting")
+    phase, detail = fritap_mod.lifecycle()
+    assert phase == "failed"
+    assert detail.startswith("did not start: no answer from org.mozilla.firefox")
+
+
+def test_start_watchdog_waits_while_a_dialog_asks(monkeypatch, _lifecycle_events):
+    import time
+
+    monkeypatch.setattr(fritap_mod, "START_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(fritap_mod, "_START_POLL_S", 0.01)
+    monkeypatch.setattr(fritap_mod, "_ui_request_pending", lambda: True)
+    inst = fritap_mod.FriTap.__new__(fritap_mod.FriTap)
+    inst.app_package = "org.x"
+    token = inst._start_token = object()
+    fritap_mod.set_lifecycle("starting", "org.x")
+    inst._start_watchdog(token)
+    time.sleep(0.3)
+    assert fritap_mod.lifecycle()[0] == "starting"  # the user is being asked
+    inst._start_token = None  # the start ended: the watchdog leaves

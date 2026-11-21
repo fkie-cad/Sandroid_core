@@ -219,7 +219,28 @@ class ExitSummaryRenderer:
                             rel_path = os.path.relpath(file_path, results_path)
                             console.print(f"    \u2022 {rel_path}")
 
+        flows = ExitSummaryRenderer._mitm_flows_dir()
+        if flows:
+            console.print()
+            console.print(
+                "[green]Mitmproxy flows:[/green] "
+                f"{os.path.relpath(flows, results_path)}{os.sep}"
+            )
+
         console.print()
+
+    @staticmethod
+    def _mitm_flows_dir() -> str | None:
+        """The session's Mitmproxy flow log folder, when it holds flows."""
+        try:
+            from sandroid.services.mitmproxy_flow_log import resolve_flow_dir
+
+            flow_dir = resolve_flow_dir()
+            if flow_dir.is_dir() and any(flow_dir.iterdir()):
+                return str(flow_dir)
+        except Exception:
+            pass
+        return None
 
 
 # ---------------------------------------------------------------------------

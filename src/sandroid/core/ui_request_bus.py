@@ -159,6 +159,10 @@ class UIRequestBus:
 
         self._pending_requests.clear()
 
+    def has_pending_requests(self) -> bool:
+        """A request (a dialog) is waiting for the user's answer."""
+        return bool(self._pending_requests)
+
     def is_shutting_down(self) -> bool:
         """Check if the bus is shutting down."""
         return self._shutting_down

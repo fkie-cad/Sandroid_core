@@ -96,6 +96,31 @@ def test_qualities_are_problems_not_custom():
     assert "QUIC not blocked" in lane_down.notes
 
 
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        # N3-B3: device proxy + Kill switch + App Proxy, Mitmproxy killed.
+        replace(WHOLE, lanes={SPOT: "ours"}, mitm_running=False),
+        replace(WHOLE, kill_switch=False, mitm_running=False),
+        replace(BASE, lanes={"com.other": "ours"}, mitm_running=False),
+    ],
+)
+def test_custom_needing_mitmproxy_shows_it_stopped(snapshot):
+    view = nm.derive_method(snapshot)
+    assert view.preset == nm.CUSTOM
+    assert view.problems[0].startswith("Mitmproxy stopped: app traffic is blocked")
+
+
+def test_custom_without_mitmproxy_pieces_has_no_stopped_problem():
+    external = replace(
+        BASE,
+        device_proxy="external",
+        device_addr="192.168.1.5:8081",
+        mitm_running=False,
+    )
+    assert not nm.derive_method(external).problems
+
+
 def test_kill_switch_without_proxy_is_a_problem():
     view = nm.derive_method(replace(BASE, kill_switch=True))
     assert view.preset == nm.CUSTOM
@@ -246,6 +271,22 @@ def test_service_apply_confirm_path_changes_nothing(monkeypatch):
     result = service.apply(nm.WHOLE_DEVICE, replace_external=True)
     assert result.ok
     assert [s[0] for s in rec.steps][:2] == ["prepare_guard", "set_device_proxy"]
+
+
+def test_apply_says_when_it_installed_the_ca(monkeypatch):
+    """N3-V13: Whole device re-installed a CA the user had just removed
+    without a word; the result toast says so now.
+    """
+    service, rec = _service(monkeypatch, replace(BASE, ca="missing"))
+    rec.run = lambda step, serial: (
+        rec.steps.append(step)
+        or (True, "CA installed" if step[0] == "inject_ca" else "")
+    )
+    result = service.apply(nm.WHOLE_DEVICE)
+    assert result.ok
+    assert "Installed the Sandroid CA for Whole device" in result.message
+    service2, _ = _service(monkeypatch, BASE)  # CA already there: no note
+    assert "Sandroid CA" not in service2.apply(nm.WHOLE_DEVICE).message
 
 
 def test_service_publishes_on_change(monkeypatch):
@@ -833,6 +874,64 @@ def test_fritap_started_by_hand_needs_a_confirmation():
     assert ("stop_fritap",) in plan.steps
     # The Network method's own keys-only friTap: no question.
     assert not nm.plan_apply(nm.OFF, replace(snap, fritap_by_hand=False)).confirm
+
+
+def test_confirmation_words_name_what_is_replaced():
+    """N3-B4: friTap gets its own title, buttons and declined toast, not
+    "Replace the external proxy?" / "External proxy kept".
+    """
+    fritap = nm.plan_apply(nm.OFF, replace(KEYS, fritap_by_hand=True))
+    assert fritap.confirm_title == "Stop friTap?"
+    assert (fritap.confirm_yes, fritap.confirm_no) == ("Stop friTap", "Keep")
+    assert "proxy" not in fritap.confirm_kept.lower()
+    ext = replace(BASE, device_proxy="external", device_addr="192.168.1.5:8081")
+    proxy = nm.plan_apply(nm.WHOLE_DEVICE, ext)
+    assert proxy.confirm_title == "Replace the external proxy?"
+    assert proxy.confirm_yes == "Replace"
+    assert proxy.confirm_kept.startswith("External proxy kept")
+    both = nm.plan_apply(nm.OFF, replace(ext, fritap=True, fritap_by_hand=True))
+    assert both.confirm_title == "Replace the external proxy and stop friTap?"
+    assert both.confirm_yes == "Continue"
+
+
+def test_tui_confirm_uses_the_plan_words(monkeypatch):
+    from sandroid.tui.modals import proxy_modal
+
+    result = nm.ApplyResult(
+        False,
+        "x",
+        confirm="friTap was started by hand. Continue?",
+        confirm_title="Stop friTap?",
+        confirm_yes="Stop friTap",
+        confirm_no="Keep",
+        confirm_kept="friTap keeps running; nothing changed",
+    )
+    monkeypatch.setattr(
+        proxy_modal,
+        "_method_service",
+        lambda: SimpleNamespace(apply=lambda *a, **k: result),
+    )
+    pushed, toasts = [], []
+
+    class _App:
+        def notify(self, message, **_kw):
+            toasts.append(message)
+
+        def call_from_thread(self, fn, *args):
+            fn(*args)
+
+        def push_screen(self, screen, callback):
+            pushed.append(screen)
+            callback(False)
+
+    import threading
+
+    monkeypatch.setattr(threading.Thread, "start", lambda self: self.run())
+    proxy_modal.run_method_apply(_App(), nm.OFF, None)
+    modal = pushed[0]
+    assert modal.title_text == "Stop friTap?"
+    assert (modal.yes_label, modal.no_label) == ("Stop friTap", "Keep")
+    assert toasts[-1] == "friTap keeps running; nothing changed"
 
 
 def test_stop_step_names_a_by_hand_fritap(monkeypatch):

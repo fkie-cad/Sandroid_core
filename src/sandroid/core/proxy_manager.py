@@ -2431,9 +2431,21 @@ class FocusManager:
 
     @property
     def _socks_base(self) -> int:
+        """The lanes' first SOCKS port: the running mitmweb's, else the
+        configured one (the default follows the proxy port, so a second
+        Sandroid instance does not share 8082-8086).
+        """
         try:
+            from sandroid.services.mitmproxy_service import (
+                effective_socks_base,
+                peek_mitmproxy_service,
+            )
+
+            svc = peek_mitmproxy_service()
+            if svc is not None and svc.is_running():
+                return int(svc.state.socks_base)
             if get_config is not None:
-                return int(get_config().mitmproxy.socks_base)
+                return effective_socks_base(get_config().mitmproxy)
         except Exception:
             pass
         return 8082
