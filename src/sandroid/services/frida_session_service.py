@@ -230,10 +230,12 @@ class FridaSessionService:
                     self._logger.debug("JobManager initialized")
                     from sandroid.core.frida_manager import (
                         daemonize_afm_job_threads,
+                        install_job_lock,
                         install_stale_detach_guard,
                     )
 
                     install_stale_detach_guard(self._job_manager)
+                    install_job_lock(self._job_manager)
                     daemonize_afm_job_threads()
                 except ImportError as e:
                     self._logger.error(f"Failed to import JobManager: {e}")

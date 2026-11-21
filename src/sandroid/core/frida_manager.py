@@ -684,6 +684,48 @@ def install_stale_detach_guard(job_manager) -> bool:
     return True
 
 
+#: AFM JobManager methods that change its jobs / session (see install_job_lock).
+_JOB_MUTATORS = (
+    "start_job",
+    "stop_job_with_id",
+    "stop_jobs",
+    "reset_session",
+    "detach_from_app",
+)
+
+
+def install_job_lock(job_manager):
+    """Serialize the JobManager's mutating calls behind one re-entrant lock.
+
+    AFM's JobManager has no lock: two threads stopping the same job (a
+    bypass toggle's teardown and a start's ``reset_session``) both ran
+    ``close_job`` and the second ``del self.jobs[job_id]`` raised KeyError.
+    With the lock the second caller finds the job gone and returns False.
+    Sandroid code that edits ``job_manager.jobs`` directly takes the same
+    lock (``job_manager._sandroid_job_lock``).
+
+    Idempotent; returns the lock (None if ``job_manager`` is None).
+    """
+    if job_manager is None:
+        return None
+    lock = getattr(job_manager, "_sandroid_job_lock", None)
+    if isinstance(lock, type(threading.RLock())):
+        return lock
+    lock = threading.RLock()
+    for name in _JOB_MUTATORS:
+        original = getattr(job_manager, name, None)
+        if not callable(original):
+            continue
+
+        def locked(*args, _original=original, **kwargs):
+            with lock:
+                return _original(*args, **kwargs)
+
+        setattr(job_manager, name, locked)
+    job_manager._sandroid_job_lock = lock
+    return lock
+
+
 # some parts are taken from ttps://github.com/Mind0xP/Frida-Python-Binding/
 
 

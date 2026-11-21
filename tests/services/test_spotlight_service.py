@@ -74,7 +74,10 @@ def test_set_app_still_validates_the_package():
         SpotlightService().set_app("com.x;id")
 
 
-def test_spawn_app_paused_of_another_package_replaces_the_selection(monkeypatch):
+def test_spawn_app_paused_of_another_package_keeps_the_selection(monkeypatch):
+    """A spawn that finishes after the user picked another app never
+    re-selects the app it spawned (the selection is the user's).
+    """
     monkeypatch.setattr(SpotlightService, "_spawn_listeners", [])
     svc = SpotlightService(job_manager_factory=_FakeJobManager)
     svc.set_app(A, pid=1)
@@ -82,8 +85,17 @@ def test_spawn_app_paused_of_another_package_replaces_the_selection(monkeypatch)
     _jm, pid = svc.spawn_app_paused(B)
 
     assert pid == 4321
+    assert svc.get_effective_package() == A
+    assert svc.get_pid() == 1
+
+
+def test_spawn_app_paused_without_a_selection_selects_the_app(monkeypatch):
+    monkeypatch.setattr(SpotlightService, "_spawn_listeners", [])
+    svc = SpotlightService(job_manager_factory=_FakeJobManager)
+
+    svc.spawn_app_paused(B)
+
     assert svc.get_effective_package() == B
-    assert svc.get_pid() is None
 
 
 def test_spawn_app_paused_of_the_same_package_drops_the_old_pid(monkeypatch):

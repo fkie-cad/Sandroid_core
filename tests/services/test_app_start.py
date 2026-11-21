@@ -2538,3 +2538,489 @@ def test_start_and_restart_always_return_a_start_result(env, monkeypatch, bus):
     t.join(5)
     assert out[0].reason == "declined"
     assert not out[0][0]
+
+
+# -- several apps: another app's bypass stays loaded (parked) ------------------
+
+OTHER = "org.mozilla.firefox"
+
+
+def test_only_another_apps_bypass_is_parked_not_refused():
+    """R6/R2: the bypass script of another app does not make Frida busy."""
+    d = decide_start(_inputs(session_pid=12, live_jobs=("Bypass",), parkable=True))
+    assert d.action == StartAction.ATTACH
+    assert d.park is True
+    assert d.reset_session is False  # its job must not be stopped
+    d = decide_start(
+        _inputs(
+            liveness=Liveness.NOT_RUNNING,
+            session_pid=12,
+            live_jobs=("Bypass",),
+            parkable=True,
+        )
+    )
+    assert d.action == StartAction.SPAWN
+    assert d.park is True
+    assert d.reset_session is False
+    # Not parkable (friTap runs there too): refused as before.
+    d = decide_start(_inputs(session_pid=12, live_jobs=("Bypass", "FriTap")))
+    assert d.action == StartAction.REFUSE
+    assert d.code == "frida_busy"
+    # Our own session never parks.
+    d = decide_start(_inputs(session_pid=77, live_jobs=("Bypass",), parkable=True))
+    assert d.action == StartAction.JOIN
+    assert d.park is False
+
+
+class _Session:
+    """A Frida session double: ``detached`` handlers, detach()."""
+
+    def __init__(self, pid):
+        self._impl = SimpleNamespace(pid=pid)
+        self.is_detached = False
+        self.off_calls: list = []
+
+    def off(self, signal, handler):
+        self.off_calls.append(signal)
+
+    def detach(self):
+        self.is_detached = True
+
+
+class _Script:
+    def __init__(self, job):
+        self.is_destroyed = False
+        self.flags: dict = {}
+        self.exports_sync = SimpleNamespace(
+            set_flags=self._set_flags, install_failures=list
+        )
+
+    def _set_flags(self, flags):
+        self.flags = dict(flags)
+
+
+class _Job(FakeJob):
+    count = 0
+
+    def __init__(self, session, display_name="job", flags=None):
+        super().__init__(display_name=display_name)
+        _Job.count += 1
+        self._id = f"job-{_Job.count}"
+        self.process_session = session
+        self.script = _Script(self)
+        self.script.flags = dict(flags or {})
+        self.closed = False
+
+    def get_id(self):
+        return self._id
+
+    def get_script_of_job(self):
+        return self.script
+
+    def close_job(self, timeout=5.0):
+        self.closed = True
+        self.state = "stopped"
+        self.script.is_destroyed = True
+        return True
+
+
+class _MultiJM(FakeJM):
+    """A JobManager double whose jobs live on their own sessions."""
+
+    def _session(self, pid):
+        self.process_session = _Session(pid)
+
+    def start_job(self, path, **kw):
+        self.calls.append(("start_job", kw.get("job_type")))
+        flags = {}
+        try:
+            text = open(path, encoding="utf-8").read()
+            start = text.index("var FLAGS = ") + len("var FLAGS = ")
+            import json
+
+            flags = json.loads(text[start : text.index(";", start)])
+        except Exception:
+            pass
+        job = _Job(self.process_session, kw.get("display_name", "job"), flags=flags)
+        self.jobs[job.get_id()] = job
+        return job
+
+    def stop_job_with_id(self, job_id, timeout=5.0):
+        job = self.jobs.pop(job_id, None)
+        if job is not None:
+            job.close_job()
+        return True
+
+    def reset_session(self, *a, **k):
+        for job in list(self.jobs.values()):
+            job.close_job()
+        super().reset_session()
+
+    def unregister_hooks(self, job_id):
+        self.calls.append(("unregister_hooks", job_id))
+
+    def _on_session_detached(self, reason, crash):  # AFM's own handler
+        pass
+
+
+@pytest.fixture
+def two_apps(env, monkeypatch):
+    """PKG at pid 77 and OTHER at pid 88, both running; a multi-session JM."""
+    env.jm = _MultiJM()
+    pids = {PKG: 77, OTHER: 88}
+    monkeypatch.setattr(
+        app_start,
+        "probe_liveness",
+        lambda package, frida_fallback=False: (
+            (Liveness.RUNNING, pids[package])
+            if package in pids
+            else (Liveness.NOT_RUNNING, None)
+        ),
+    )
+    registered: dict = {}
+    tasks = services.get_task_service()
+    tasks.register = lambda **kw: registered.__setitem__(kw["name"], kw)
+    tasks.unregister = lambda name: registered.pop(name, None)
+    tasks.is_running = lambda name: name in registered
+    env.registered = registered
+    env.pids = pids
+
+    def select(package):
+        env.spotlight.set_app(package, pid=pids[package])
+
+    env.select = select
+    return env
+
+
+def _on(script) -> set[str]:
+    return {k for k, v in script.flags.items() if v}
+
+
+def test_a_second_app_gets_its_own_bypass_while_the_first_keeps_its(two_apps):
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    assert bypass.toggle("ssl")[0] is True
+    assert bypass.toggle("root")[0] is True
+    first = bypass._job
+    assert _on(first.script) == {"ssl", "root"}
+
+    env.select(PKG)  # the selection moves; nothing is unloaded
+    assert bypass.on_categories() == []  # not the other app's bypasses
+    assert [a.package for a in bypass.hooked_apps()] == [OTHER]
+
+    now_on, msg = bypass.toggle("ssl")
+    assert now_on is True, msg
+    second = bypass._job
+    assert second is not first
+    assert second.process_session._impl.pid == 77
+    assert _on(second.script) == {"ssl"}
+    # The first app's script still runs, untouched, on its own session.
+    assert not first.closed
+    assert _on(first.script) == {"ssl", "root"}
+    assert not first.process_session.is_detached
+    # It left the JobManager (a reset for this app never stops it) ...
+    assert first.get_id() not in env.jm.jobs
+    assert env.jm.process_session is second.process_session
+    # ... and AFM's own detach handler of its session was dropped.
+    assert "detached" in first.process_session.off_calls
+    apps = {a.package: a for a in bypass.hooked_apps()}
+    assert set(apps) == {PKG, OTHER}
+    assert apps[OTHER].parked
+    assert apps[OTHER].categories == ("ssl", "root")
+    assert apps[PKG].categories == ("ssl",)
+    assert not apps[PKG].parked
+    assert bypass.on_categories() == ["ssl"]
+    # TaskService: one entry per app.
+    assert env.registered["bypass"]["app_name"] == PKG
+    assert env.registered[f"bypass:{OTHER}"]["app_name"] == OTHER
+    # A reset of the JobManager for this app leaves the other one alone.
+    env.jm.reset_session()
+    assert not first.closed
+
+
+def test_selecting_the_first_app_again_brings_its_script_back(two_apps):
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    bypass.toggle("ssl")
+    first = bypass._job
+    env.select(PKG)
+    bypass.toggle("root")
+    second = bypass._job
+
+    env.select(OTHER)
+    assert bypass.on_categories() == ["ssl"]  # its own, also while parked
+    now_on, _msg = bypass.toggle("debug")
+    assert now_on is True
+    assert bypass._job is first  # no second script in that app
+    assert _on(first.script) == {"ssl", "debug"}
+    assert env.jm.process_session is first.process_session
+    assert first.get_id() in env.jm.jobs
+    assert _on(second.script) == {"root"}
+    assert not second.closed
+    assert set(bypass._parked) == {PKG}
+    assert f"bypass:{OTHER}" not in env.registered
+    assert env.registered["bypass"]["app_name"] == OTHER
+
+    # Turning a category off in the selected app only touches its script.
+    assert bypass.toggle("ssl")[0] is False
+    assert _on(first.script) == {"debug"}
+    assert _on(second.script) == {"root"}
+
+
+def test_unloading_the_other_app_leaves_the_selected_one(two_apps):
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    bypass.toggle("ssl")
+    first = bypass._job
+    env.select(PKG)
+    bypass.toggle("ssl")
+    second = bypass._job
+
+    ok, msg = bypass.unload_app(OTHER)
+    assert ok, msg
+    assert OTHER in msg
+    assert first.closed
+    assert first.process_session.is_detached
+    assert not second.closed
+    assert [a.package for a in bypass.hooked_apps()] == [PKG]
+    assert f"bypass:{OTHER}" not in env.registered
+    assert bypass.unload_app(OTHER)[0] is False  # nothing left there
+
+
+def test_a_parked_script_whose_app_died_is_forgotten(two_apps):
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    bypass.toggle("ssl")
+    first = bypass._job
+    env.select(PKG)
+    bypass.toggle("ssl")
+
+    first.process_session.is_detached = True  # the app died
+    assert [a.package for a in bypass.hooked_apps()] == [PKG]  # read-only
+    assert bypass.prune_parked() == [OTHER]
+    assert bypass._parked == {}
+    assert f"bypass:{OTHER}" not in env.registered
+
+
+def test_no_park_while_another_tool_runs_in_the_first_app(two_apps):
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    bypass.toggle("ssl")
+    first = bypass._job
+    fritap = _Job(env.jm.process_session, "FriTap SSL Logger")
+    env.jm.jobs[fritap.get_id()] = fritap
+
+    env.select(PKG)
+    now_on, msg = bypass.toggle("root")
+    assert now_on is False
+    assert "FriTap SSL Logger" in msg
+    assert _on(first.script) == {"ssl"}  # the other app's flags untouched
+    assert bypass._job is first
+    assert bypass._parked == {}
+    assert bypass.armed_categories() == []  # the refused toggle disarmed
+
+
+def test_the_liveness_poll_keeps_the_other_apps_bypass_after_a_switch(two_apps):
+    """It compared the other app's PID with the selected one's and dropped
+    the hooks of an app that was still running.
+    """
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    bypass.toggle("ssl")
+    first = bypass._job
+    env.select(PKG)  # pid 77, the hooked process is 88
+
+    assert bypass.reconcile_liveness() == []
+    assert bypass._job is first
+    assert not first.closed
+
+
+def test_open_session_parks_the_other_apps_bypass_for_a_tool(two_apps):
+    """A tool (friTap, Dexray) on the selected app: the other keeps its bypass."""
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    bypass.toggle("ssl")
+    first = bypass._job
+    env.select(PKG)
+
+    decision = app_start.resolve_start(tool="friTap")
+    assert decision.action == StartAction.ATTACH
+    assert decision.park
+    app_start.open_session(decision)
+    assert env.jm.process_session._impl.pid == 77
+    assert not first.closed
+    assert set(bypass._parked) == {OTHER}
+
+
+def test_stop_all_for_the_selected_app_spares_the_other_app(two_apps):
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    bypass.toggle("ssl")
+    first = bypass._job
+    env.select(PKG)
+    bypass._armed.add("root")
+
+    assert bypass.stop_all(PKG) == []
+    assert not first.closed
+    assert bypass.armed_categories() == []
+
+
+def test_b_on_the_second_app_never_flips_the_first_apps_script(two_apps):
+    """(a) Even if the park step is skipped, the load never reuses another
+    app's live script for the selected app.
+    """
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    bypass.toggle("ssl")
+    first = bypass._job
+    env.select(PKG)
+    bypass._focus = lambda package, unpark=True: None  # park skipped
+
+    ok, msg = bypass.set_active({"root"}, paused=False)
+
+    assert ok is False
+    assert OTHER in msg
+    assert _on(first.script) == {"ssl"}
+    assert bypass._job is first
+
+
+def test_late_messages_of_a_parked_script_stay_out_of_the_new_load(two_apps):
+    env, bypass = two_apps, two_apps.bypass
+    seen: list = []
+    env.select(OTHER)
+    bypass.toggle("ssl")
+    first = bypass._job
+    env.select(PKG)
+    bypass.toggle("ssl")
+    bypass._on_message = seen.append
+
+    late = {"type": "send", "payload": {"merge_error": "ssl", "error": "x"}}
+    bypass._message_handler(first, late, None)
+    assert bypass._merge_errors == set()
+    assert seen == []
+    # The resident script's own messages still count.
+    bypass._message_handler(bypass._job, late, None)
+    assert bypass._merge_errors == {"ssl"}
+    assert len(seen) == 1
+
+
+def test_attach_never_reselects_an_app_the_user_left(env, monkeypatch):
+    env.spotlight.set_app(PKG, pid=77)
+
+    def probe(package, frida_fallback=False):
+        env.spotlight.set_app(OTHER)  # the user switched meanwhile
+        return Liveness.RUNNING, 77
+
+    monkeypatch.setattr(app_start, "probe_liveness", probe)
+    ok, msg = app_start.attach_app()
+    assert ok is False
+    assert "Selection changed" in msg
+    assert env.spotlight.get_effective_package() == OTHER
+
+
+def test_pid_writes_only_land_in_their_apps_record(env):
+    """A PID resolved for one app is never written into another selection."""
+    bypass = env.bypass
+    env.spotlight.set_app(OTHER, pid=88)
+    bypass._set_pid_for(env.spotlight, PKG, 77)
+    assert env.spotlight.get_pid() == 88
+    bypass._set_pid_for(env.spotlight, OTHER, 99)
+    assert env.spotlight.get_pid() == 99
+
+
+def test_spawned_pid_comes_from_the_jobmanager_after_a_switch(env):
+    bypass = env.bypass
+    env.spotlight.set_app(PKG, pid=77)
+    assert bypass._spawned_pid(env.spotlight, PKG) == 77
+    env.jm.package_name, env.jm.pid = OTHER, 4321
+    assert bypass._spawned_pid(env.spotlight, OTHER) == 4321
+    env.jm.package_name = "x.y"
+    assert bypass._spawned_pid(env.spotlight, OTHER) is None
+
+
+def test_the_liveness_poll_never_drops_during_a_load(two_apps):
+    """(b) No check-then-act: a load in flight makes the poll a no-op, and
+    the poll holds the change lock while it drops a dead script.
+    """
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    bypass.toggle("ssl")
+    first = bypass._job
+    first.process_session.is_detached = True
+    first.script.is_destroyed = True  # the app died
+
+    assert bypass._mutate_lock.acquire(blocking=False)
+    try:
+        assert bypass.reconcile_liveness() == []  # a load is in flight
+        assert bypass._job is first
+    finally:
+        bypass._mutate_lock.release()
+    assert bypass.reconcile_liveness() == ["ssl"]
+    assert bypass._job is None
+    assert not bypass._mutate_lock.locked()
+
+
+def test_job_lock_makes_a_double_stop_of_one_job_harmless():
+    """AFM's stop_job_with_id: close, then ``del jobs[id]`` -- two threads
+    stopping the same job raised KeyError in the second one.
+    """
+    from sandroid.core.frida_manager import install_job_lock
+
+    class _AfmLike:
+        def __init__(self):
+            self.jobs = {"j": object()}
+            self.closing = threading.Event()
+            self.release = threading.Event()
+
+        def stop_job_with_id(self, job_id, timeout=5.0):
+            if job_id not in self.jobs:
+                return False
+            self.closing.set()
+            self.release.wait(2)  # close_job on a slow process
+            del self.jobs[job_id]
+            return True
+
+    jm = _AfmLike()
+    lock = install_job_lock(jm)
+    assert install_job_lock(jm) is lock  # idempotent
+    results: list = []
+    errors: list = []
+
+    def stop():
+        try:
+            results.append(jm.stop_job_with_id("j"))
+        except Exception as exc:  # the KeyError without the lock
+            errors.append(exc)
+
+    first = threading.Thread(target=stop)
+    first.start()
+    jm.closing.wait(2)
+    second = threading.Thread(target=stop)
+    second.start()
+    jm.release.set()
+    first.join(3)
+    second.join(3)
+    assert errors == []
+    assert sorted(results) == [False, True]
+
+
+def test_each_load_counts_only_its_own_merge_errors(two_apps):
+    """A late merge_error of an earlier (failed or replaced) load never
+    fails the next one.
+    """
+    env, bypass = two_apps, two_apps.bypass
+    env.select(PKG)
+    old = _Job(None, "Detection Bypass")
+    bypass._retired.add(old.get_id())
+    loading = _Job(None, "Detection Bypass")
+    msg = {"type": "send", "payload": {"merge_error": "root", "error": "x"}}
+
+    bypass._message_handler(old, msg, None)  # retired: dropped
+    bypass._message_handler(loading, msg, None)  # in flight: its own set
+    assert bypass._merge_errors == set()
+    assert bypass._load_errors == {loading.get_id(): {"root"}}
+
+    now_on, _msg = bypass.toggle("ssl")  # a fresh load of another job
+    assert now_on is True
+    assert bypass._merge_errors == set()
+    assert bypass.active_categories() == ["ssl"]

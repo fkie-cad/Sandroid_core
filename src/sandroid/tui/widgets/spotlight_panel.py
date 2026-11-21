@@ -32,6 +32,7 @@ import logging
 import re
 import threading
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rich.markup import escape
@@ -46,11 +47,10 @@ from sandroid.tui.modals.objection_modal import BYPASS_KEYS
 from sandroid.tui.themes import lens_palette
 from sandroid.tui.utils.ui_thread import UiDispatcher
 from sandroid.tui.widgets.app_lens import LABEL_WIDTH, LENS_ID, AppLensSections
+from sandroid.tui.widgets.lens_shell import InspectorContent
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
-
-    from sandroid.tui.widgets.lens_shell import InspectorContent
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +137,229 @@ def duration_words(seconds: float) -> str:
     return f"{minutes} min {rest} s" if rest else f"{minutes} min"
 
 
+# -- apps with hooks (the "hooks running" row and the Shift+H list) ----------
+
+#: Inspector key of the "Hooks in other apps" list (a tuple: the App lens
+#: sections only refresh their own ``app:...`` string keys).
+HOOKS_KEY = (LENS_ID, "hooks")
+#: TaskService names that are no hooks in the app (the file monitor).
+_NOT_HOOKS = ("monitor",)
+
+
+@dataclass(frozen=True)
+class AppHooks:
+    """What runs in one app: bypass categories and other tools.
+
+    ``bypasses`` are category keys, ``tools`` display names (friTap,
+    Objection, ...); ``since`` is a ``time.time()`` stamp.
+    """
+
+    package: str
+    pid: int | None = None
+    bypasses: tuple[str, ...] = ()
+    tools: tuple[str, ...] = ()
+    since: float | None = None
+
+    def summary(self) -> str:
+        """``3 bypasses`` / ``1 bypass, friTap`` / ``Objection``."""
+        parts = []
+        if self.bypasses:
+            n = len(self.bypasses)
+            parts.append(f"{n} bypass{'es' if n != 1 else ''}")
+        parts.extend(self.tools)
+        return ", ".join(parts)
+
+
+def collect_app_hooks(bypass=None, tasks=None, objection=None) -> list[AppHooks]:
+    """Every app with something running in it, oldest first.
+
+    Reads the BypassService (resident and parked scripts), the TaskService
+    (tools registered with an ``app_name``) and a minimized Objection
+    session. In-process only (no device call); never raises.
+    """
+    by_pkg: dict[str, dict] = {}
+
+    def entry(package: str) -> dict:
+        return by_pkg.setdefault(
+            package, {"pid": None, "bypasses": (), "tools": [], "since": None}
+        )
+
+    def older(a: float | None, b: float | None) -> float | None:
+        return b if a is None else a if b is None else min(a, b)
+
+    try:
+        if bypass is None:
+            from sandroid.analysis.detection_bypass import get_bypass_service
+
+            bypass = get_bypass_service()
+        for app in bypass.hooked_apps():
+            e = entry(app.package)
+            e["bypasses"] = tuple(app.categories)
+            e["pid"] = e["pid"] or app.pid
+            e["since"] = older(e["since"], app.since)
+    except Exception:
+        logger.debug("Hooked apps: bypass unreadable", exc_info=True)
+    try:
+        if tasks is None:
+            from sandroid.services import get_task_service
+
+            tasks = get_task_service()
+        for task in tasks.get_running_tasks():
+            name = str(getattr(task, "name", ""))
+            package = getattr(task, "app_name", None)
+            if not package or name in _NOT_HOOKS:
+                continue
+            if name == "bypass" or name.startswith("bypass:"):
+                continue  # the bypass categories come from the service
+            e = entry(package)
+            e["tools"].append(str(getattr(task, "display_name", None) or name))
+            e["pid"] = e["pid"] or getattr(task, "target_pid", None)
+            started = getattr(task, "started_at", None)
+            if started is not None:
+                try:
+                    e["since"] = older(e["since"], started.timestamp())
+                except Exception:
+                    pass
+    except Exception:
+        logger.debug("Hooked apps: tasks unreadable", exc_info=True)
+    try:
+        if objection is None:
+            from sandroid.services import get_objection_service
+
+            objection = get_objection_service()
+        session = objection.get_session()
+        package = getattr(session, "package_name", None) if session else None
+        if package:
+            entry(package)["tools"].append("Objection")
+    except Exception:
+        logger.debug("Hooked apps: objection unreadable", exc_info=True)
+    apps = [
+        AppHooks(pkg, e["pid"], e["bypasses"], tuple(e["tools"]), e["since"])
+        for pkg, e in by_pkg.items()
+        if e["bypasses"] or e["tools"]
+    ]
+    apps.sort(key=lambda a: (a.since is None, a.since or 0.0, a.package))
+    return apps
+
+
+def others_note(count: int) -> str:
+    """``1 other app has hooks`` / ``3 other apps have hooks``."""
+    if count == 1:
+        return "1 other app has hooks"
+    return f"{count} other apps have hooks"
+
+
+def hooks_running_line(
+    apps: list[AppHooks], current: str | None, room: int, hint: str = ""
+) -> str:
+    """The "hooks running" row value: every app, the selected one first.
+
+    ``""`` while no *other* app has hooks (the "hooks" row covers the
+    selected one). Apps that do not fit become ``· N more``; ``hint``
+    follows when there is room for it.
+    """
+    c = lens_palette()
+    if not any(a.package != current for a in apps):
+        return ""
+    ordered = sorted(apps, key=lambda a: a.package != current)
+    sep = " · "
+    used, parts = 0, []
+    for index, app in enumerate(ordered):
+        plain = f"{app.package} ({app.summary()})"
+        left = len(ordered) - index - 1
+        tail = len(f"{sep}{left} more") if left else 0
+        extra = len(plain) + (len(sep) if parts else 0)
+        if parts and room and used + extra + tail > room:
+            more = len(ordered) - index
+            parts.append(f"[{c.dim}]{more} more[/]")
+            used += len(sep) + len(f"{more} more")
+            break
+        name = escape(app.package)
+        if app.package == current:
+            name = f"[b]{name}[/]"
+        parts.append(f"{name} [{c.dim}]({escape(app.summary())})[/]")
+        used += extra
+    line = f"[{c.dim}]{sep}[/]".join(parts)
+    if hint and (not room or used + 3 + len(hint) <= room):
+        line += f"   [{c.dim}]{escape(hint)}[/]"
+    return line
+
+
+def _clock(since: float | None, now: float | None = None) -> str:
+    """``since 14:02 (12 min)``; ``""`` without a time."""
+    if since is None:
+        return ""
+    now = time.time() if now is None else now
+    stamp = time.strftime("%H:%M", time.localtime(since))
+    return f"since {stamp} ({duration_words(now - since)})"
+
+
+def hooks_inspector(
+    apps: list[AppHooks],
+    current: str | None,
+    picked: str | None,
+    plain_name=None,
+    now: float | None = None,
+) -> tuple[InspectorContent, list[tuple[int, int, str]]]:
+    """The "Hooks in other apps" Inspector page and its clickable rows.
+
+    Returns the content (keys/click filled in by the panel) and the body
+    line range ``(first, last, package)`` of every listed app.
+    """
+    c = lens_palette()
+    others = [a for a in apps if a.package != current]
+    name_of = plain_name or (lambda cat: cat)
+    body = Text()
+    rows: list[tuple[int, int, str]] = []
+    line = 0
+    if not others:
+        body.append("No other app has hooks now.", style=c.dim)
+    for index, app in enumerate(others):
+        if index:
+            body.append("\n")
+            line += 1
+        first = line
+        on = app.package == picked
+        head = Text(app.package, style=f"bold {c.text}")
+        if app.pid:
+            head.append(f"  pid {app.pid}", style=c.dim)
+        if on:
+            head.stylize(f"on {c.cursor_focus}")
+        body.append_text(head)
+        details = []
+        if app.bypasses:
+            names = ", ".join(name_of(cat) for cat in app.bypasses)
+            details.append(("bypasses", names))
+        if app.tools:
+            details.append(("tools", ", ".join(app.tools)))
+        when = _clock(app.since, now)
+        if when:
+            details.append(("loaded", when))
+        for label, value in details:
+            body.append("\n")
+            line += 1
+            body.append(f"  {label.rjust(8)}  ", style=c.label)
+            body.append(value, style=c.text)
+        rows.append((first, line, app.package))
+        body.append("\n")
+        line += 1
+    n = len(others)
+    subtitle = (
+        f"{n} app{'s' if n != 1 else ''} with hooks besides {current}"
+        if current
+        else f"{n} app{'s' if n != 1 else ''} with hooks"
+    )
+    footer = "{ } pick · * switch to it · Shift+U unload" if others else None
+    content = InspectorContent(
+        title="Hooks in other apps",
+        subtitle=subtitle,
+        sections=[("", body)],
+        footer=footer,
+        key=HOOKS_KEY,
+    )
+    return content, rows
+
+
 #: A static analysis without an end event is forgotten after this long.
 _STATIC_RUN_MAX_S = 2 * 3600.0
 
@@ -160,6 +383,9 @@ class SpotlightPanel(Widget):
         K:       kill the app and stop its tools; the bypasses that were on
                  stay armed, so Space starts with them
         X:       clear the spotlight selection
+        H:       list the other apps with hooks in the Inspector (also a
+                 click on the header line); there ``{`` / ``}`` pick one,
+                 ``*`` selects it, U unloads its hooks (asks first)
 
     Lowercase s/r/a/p/x are deliberately NOT bound — they shadow the
     destructive global shortcuts (Screenshot/Record/Analyze/Play/Export);
@@ -283,6 +509,18 @@ class SpotlightPanel(Widget):
             "Clear the app selection (disarms the bypasses)",
             show=False,
         ),
+        Binding(
+            "H",
+            "hooks_list",
+            "List the other apps with hooks (Inspector: { } pick, * select it)",
+            show=False,
+        ),
+        Binding(
+            "U",
+            "unload_hooks",
+            "Unload the hooks of the app picked in that list (asks first)",
+            show=False,
+        ),
     ]
 
     def __init__(self, **kwargs) -> None:
@@ -309,6 +547,9 @@ class SpotlightPanel(Widget):
         # name, else package) -> {"package", "apk", "profile", "since"}.
         self._static_runs: dict[str, dict] = {}
         self._static_timer = None
+        # Shift+H list: the picked app and the body rows of the listed apps.
+        self._hooks_pick: str | None = None
+        self._hooks_rows: list[tuple[int, int, str]] = []
 
     # -- services (lazy) --------------------------------------------------
 
@@ -582,6 +823,9 @@ class SpotlightPanel(Widget):
             f"[{c.ok}]bypass: {', '.join(on)}[/]" if on else f"[{c.dim}]bypass: none[/]"
         )
         header = f"{state}  [b]{package}[/]  hooks: [b]{len(hooks)}[/]  {bypass_tag}"
+        others = sum(1 for a in collect_app_hooks() if a.package != package)
+        if others:
+            header += f"  [{c.warn}]{others_note(others)}[/]"
         sections = self._sections()
         if sections is not None and sections.refreshing:
             header += f"  [{c.dim}]refreshing app facts[/]"
@@ -633,6 +877,10 @@ class SpotlightPanel(Widget):
                 ", ".join(f"[{c.ok}]{n}[/]" for n in names) or f"[{c.dim}]none[/]",
             )
         )
+        room = max(0, self.size.width - 2 - (width + 3))
+        running = hooks_running_line(collect_app_hooks(), package, room, "Shift+H list")
+        if running:
+            lines.append(row("running" if self._compact else "hooks running", running))
         identity = self._identity_line(package, width)
 
         # Immediate bypass toggles (armed | active)
@@ -712,11 +960,15 @@ class SpotlightPanel(Widget):
         gap = None
         if package:
             try:
+                from sandroid.core.adb import Adb
                 from sandroid.services.identity import get_identity_service
 
                 svc = get_identity_service()
-                if svc.applied_state(package) == "not_applied":
-                    gap = (package, str(svc.config().profile))
+                # The device's own profile: a persona emulator runs its
+                # persona, not the active profile.
+                serial = Adb.get_target_device()
+                if svc.applied_state(package, serial) == "not_applied":
+                    gap = (package, str(svc.profile_id_for(serial)))
             except Exception:
                 logger.debug("Identity applied state unreadable", exc_info=True)
         changed = gap != self._identity_gap
@@ -748,6 +1000,7 @@ class SpotlightPanel(Widget):
             self.query_one("#act-primary", Static).update(self._primary_label())
         except Exception:
             pass
+        self._refresh_hooks_inspector()
 
     def refresh_panel(self) -> None:
         self._repaint_text()
@@ -1109,6 +1362,13 @@ class SpotlightPanel(Widget):
 
         # Self-heal a stale "paused" indicator against the live process.
         self._reconcile_paused_flag(pid)
+
+        try:
+            # A parked bypass whose app died leaves the hooks list (its state
+            # listener repaints).
+            self._bypass().prune_parked()
+        except Exception:
+            logger.debug("Pruning parked bypasses failed", exc_info=True)
 
         running = pid is not None
         identity_changed = self._read_identity_gap(package)
@@ -1498,6 +1758,199 @@ class SpotlightPanel(Widget):
             logger.warning(f"Clear spotlight failed: {exc}")
         self.refresh_panel()
 
+    # -- other apps with hooks (Shift+H list, Shift+U unload) --------------
+
+    def on_click(self, event) -> None:
+        """A click on the header line opens the list of other apps with hooks."""
+        widget = getattr(event, "widget", None)
+        if getattr(widget, "id", None) == "spotlight-header" and self._other_hooked():
+            self.action_hooks_list()
+
+    def _other_hooked(self) -> list[AppHooks]:
+        package = self._current_package()
+        return [a for a in collect_app_hooks() if a.package != package]
+
+    def _main_screen(self):
+        screen = self.screen if self.is_attached else None
+        return screen if hasattr(screen, "open_inspector") else None
+
+    def _hooks_open(self) -> bool:
+        screen = self._main_screen()
+        try:
+            return bool(
+                screen is not None
+                and screen.inspector_is_open
+                and screen.inspector_content is not None
+                and screen.inspector_content.key == HOOKS_KEY
+            )
+        except Exception:
+            return False
+
+    def _hooks_content(self) -> InspectorContent:
+        apps = collect_app_hooks()
+        current = self._current_package()
+        listed = [a.package for a in apps if a.package != current]
+        if self._hooks_pick not in listed:
+            self._hooks_pick = listed[0] if listed else None
+        content, rows = hooks_inspector(
+            apps, current, self._hooks_pick, self._bypass()._plain_name
+        )
+        self._hooks_rows = rows
+        content.keys = {
+            "left_curly_bracket": lambda _tab: self._hooks_step(-1),
+            "right_curly_bracket": lambda _tab: self._hooks_step(1),
+            "asterisk": lambda _tab: self._hooks_switch(),
+        }
+        content.click = lambda _tab, line: self._hooks_click(line)
+        return content
+
+    def _refresh_hooks_inspector(self) -> None:
+        if self._hooks_open():
+            try:
+                self._main_screen().update_inspector(self._hooks_content())
+            except Exception:
+                logger.debug("Hooks list refresh failed", exc_info=True)
+
+    def action_hooks_list(self) -> None:
+        """Shift+H / a click on the header: the other apps with hooks."""
+        screen = self._main_screen()
+        if screen is None:
+            return
+        if not self._other_hooked():
+            self._notify("No other app has hooks.", "information")
+            return
+        screen.open_inspector(self._hooks_content())
+
+    def _hooks_step(self, delta: int) -> None:
+        listed = [p for _a, _b, p in self._hooks_rows]
+        if not listed:
+            return
+        index = listed.index(self._hooks_pick) if self._hooks_pick in listed else 0
+        self._hooks_pick = listed[(index + delta) % len(listed)]
+        self._refresh_hooks_inspector()
+
+    def _hooks_click(self, line: int) -> bool:
+        for first, last, package in self._hooks_rows:
+            if first <= line <= last:
+                self._hooks_pick = package
+                self._refresh_hooks_inspector()
+                return True
+        return False
+
+    def _picked_app(self) -> AppHooks | None:
+        for app in self._other_hooked():
+            if app.package == self._hooks_pick:
+                return app
+        return None
+
+    def _hooks_switch(self) -> None:
+        """``*`` in the list: select the picked app in the App lens.
+
+        The app left keeps its hooks (it shows up in the list instead).
+        """
+        app = self._picked_app()
+        if app is None:
+            return
+        try:
+            self._spotlight().set_app(app.package, pid=app.pid)
+        except Exception as exc:
+            self._notify(f"Could not select {app.package}: {exc}", "error")
+            return
+        self._last_running_state = None
+        self._hooks_pick = None
+        self._notify(f"Selected {app.package}", "information")
+        self.refresh_panel()
+
+    def action_unload_hooks(self) -> None:
+        """Shift+U: unload the picked app's hooks after a short confirmation."""
+        if not self._hooks_open():
+            self._notify("Shift+H lists the other apps with hooks first.", "warning")
+            return
+        app = self._picked_app()
+        if app is None:
+            self._notify("No other app has hooks.", "information")
+            return
+        from sandroid.tui.modals import ConfirmModal
+
+        what = []
+        if app.bypasses:
+            what.append(", ".join(self._bypass()._plain_name(c) for c in app.bypasses))
+        what.extend(app.tools)
+        package = app.package
+
+        def on_result(yes: bool | None) -> None:
+            if yes:
+                self._run_action_bg(
+                    functools.partial(self._work_unload, package), "unload hooks"
+                )
+
+        self.app.push_screen(
+            ConfirmModal(
+                title=f"Unload the hooks in {package}?",
+                message=(
+                    f"This stops {'; '.join(what)} in {package}. The app keeps running."
+                ),
+                yes_label="Unload",
+                no_label="Keep",
+                guard_typing=True,
+            ),
+            on_result,
+        )
+
+    def _work_unload(self, package: str) -> tuple[bool, str]:
+        """Worker: unload everything running in ``package`` (not the app)."""
+        stopped: list[str] = []
+        failed: list[str] = []
+        bypass = self._bypass()
+        try:
+            if any(a.package == package for a in bypass.hooked_apps()):
+                ok, msg = bypass.unload_app(package)
+                (stopped if ok else failed).append("bypasses")
+        except Exception as exc:
+            logger.warning(f"Unloading the bypasses in {package} failed: {exc}")
+            failed.append("bypasses")
+        try:
+            svc = self._tasks()
+            for task in svc.get_running_tasks():
+                name = str(getattr(task, "name", ""))
+                if getattr(task, "app_name", None) != package:
+                    continue
+                if name in _NOT_HOOKS or name == "bypass" or name.startswith("bypass:"):
+                    continue
+                label = str(getattr(task, "display_name", None) or name)
+                try:
+                    (stopped if svc.stop(name) else failed).append(label)
+                except Exception as exc:
+                    logger.warning(f"Stopping {label} failed: {exc}")
+                    failed.append(label)
+        except Exception:
+            logger.debug("Unload: tasks unreadable", exc_info=True)
+        try:
+            from sandroid.services import get_objection_service
+
+            objection = get_objection_service()
+            session = objection.get_session()
+            if (
+                session is not None
+                and getattr(session, "package_name", None) == package
+            ):
+                cleanup = getattr(session, "_cleanup", None)
+                if callable(cleanup):
+                    cleanup()
+                objection.clear()
+                stopped.append("Objection")
+        except Exception as exc:
+            logger.warning(f"Stopping Objection in {package} failed: {exc}")
+            failed.append("Objection")
+        if failed:
+            return False, (
+                f"Could not unload {', '.join(failed)} in {package}"
+                + (f"; unloaded {', '.join(stopped)}" if stopped else "")
+            )
+        if not stopped:
+            return True, f"Nothing was running in {package} any more"
+        return True, f"Unloaded {', '.join(stopped)} in {package}"
+
     def dispatch_action_cell(self, wid: str) -> None:
         """Run the action bound to a clicked action cell (from MainScreen)."""
         method = _ACTION_CELLS.get(wid)
@@ -1591,7 +2044,7 @@ class SpotlightPanel(Widget):
         """
         stopped = 0
         try:
-            stopped += len(self._bypass().stop_all())
+            stopped += len(self._bypass().stop_all(package))
         except Exception as exc:
             logger.warning(f"Bypass stop_all failed: {exc}")
         return stopped + self._stop_app_tasks(package)

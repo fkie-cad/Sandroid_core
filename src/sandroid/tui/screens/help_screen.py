@@ -148,6 +148,7 @@ _LENS_EXTRA_ROWS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
     "App lens": [
         ("Enter", "Inspect the selected row (Evidence / Raw tabs)", ("enter",)),
         ("Tab / Shift+Tab", "Next / previous section", ("tab", "shift+tab")),
+        ("{ / } *", "Hooks list (Shift+H): pick an app / select it", ()),
     ],
     "Network lens": [
         ("Enter", "Inspect the selected flow", ("enter",)),
