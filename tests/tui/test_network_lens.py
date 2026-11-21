@@ -378,6 +378,34 @@ async def test_empty_state_and_space_starts_mitm(flow_dir, monkeypatch):
         assert calls == ["toggle", "toggle"]
 
 
+async def test_space_starts_a_stopped_mitm_with_flows_listed(flow_dir, monkeypatch):
+    """N3-B6: once flows exist Space still starts a stopped Mitmproxy; the
+    footer offers "Start Mitmproxy" only while it is stopped.
+    """
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        running = {"v": False}
+        calls = []
+        monkeypatch.setattr(panel.mitm, "is_running", lambda: running["v"])
+        monkeypatch.setattr(
+            panel.mitm, "action_toggle_running", lambda: calls.append("toggle")
+        )
+        panel._do_refresh_status()
+        await settle(pilot)
+        assert panel.check_action("start_mitm", ()) is True
+        await pilot.press("space")
+        await settle(pilot)
+        assert calls == ["toggle"]
+        running["v"] = True
+        panel._do_refresh_status()
+        await settle(pilot)
+        assert panel.check_action("start_mitm", ()) is False
+        await pilot.press("space")
+        await settle(pilot)
+        assert calls == ["toggle"]
+
+
 async def test_flows_fill_the_table_noise_hidden(flow_dir):
     app = _app()
     async with app.run_test(size=SIZE) as pilot:

@@ -1270,6 +1270,8 @@ class NetworkPanel(Widget):
         self._width = -1
         self._net_layout: list[tuple[str, str, int]] = []
         self._status_pending = False
+        #: Mitmproxy running when the footer bindings were last checked.
+        self._footer_mitm_running: bool | None = None
         self._filter_timer = None
         # identity profile values (privacy scan; see the _privacy_* methods)
         self._profile_only = False
@@ -2141,6 +2143,14 @@ class NetworkPanel(Widget):
 
     def _do_refresh_status(self) -> None:
         self._status_pending = False
+        running = self._mitm_running()
+        if running != self._footer_mitm_running:
+            # Show / hide "Space Start Mitmproxy" with the engine's state.
+            self._footer_mitm_running = running
+            try:
+                self.screen.refresh_bindings()
+            except Exception:
+                pass
         self._update_method_line()
         ms = self._main_screen()
         if ms is not None:
@@ -2899,8 +2909,9 @@ class NetworkPanel(Widget):
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if action == "start_mitm":
-            # Only while nothing is captured (footer room); M works always.
-            return not self.in_review and not self._model()
+            # Space starts a stopped Mitmproxy, also once flows exist; while
+            # it runs the key is hidden (M stops it, deliberately).
+            return not self.in_review and not self._mitm_running()
         if action == "toggle_phases":
             return self.in_review
         if action in ("cycle_highlight_filter", "clear_highlights"):
@@ -2909,6 +2920,13 @@ class NetworkPanel(Widget):
             # Nothing to filter yet: hidden, so the footer shows Ctrl+D instead.
             return bool(self._model())
         return True
+
+    def _mitm_running(self) -> bool:
+        mitm = self.mitm
+        try:
+            return bool(mitm is not None and mitm.is_running())
+        except Exception:
+            return False
 
     def action_start_mitm(self) -> None:
         """Space: start mitmproxy; never stops it (M does)."""
