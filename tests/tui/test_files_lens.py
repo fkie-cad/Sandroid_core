@@ -21,7 +21,7 @@ import pytest
 import timeline_fakes
 from pilot_helpers import boot, settle, until
 from textual.app import App, ComposeResult
-from textual.widgets import Button, Input
+from textual.widgets import Button, Input, Static
 
 from sandroid.core.events import Event, EventBus, EventType
 from sandroid.services import get_forensic_service, get_task_service
@@ -697,13 +697,15 @@ async def test_n_adds_an_arbitrary_path_and_keeps_failures_in_the_input() -> Non
         assert DB in get_forensic_service().get_spotlight_files()
         assert _keys(panel) == [DB]
         assert not field.has_class("-shown")
-        # The same path again is rejected: text and focus stay.
+        # The same path again (R1-B3): the input closes, "Already watched".
         panel.open_input("add")
         field.value = DB
         await pilot.press("enter")
         await pilot.pause()
-        assert app.focused is field
-        assert field.value == DB
+        assert app.focused is panel.table
+        assert not field.has_class("-shown")
+        assert get_forensic_service().get_spotlight_files().count(DB) == 1
+        panel.open_input("add")
         await pilot.press("escape")
         await pilot.pause()
         assert app.focused is panel.table
@@ -1332,6 +1334,85 @@ async def test_n_resolves_against_the_selected_app_and_folders_mean_all(
             await pilot.press("enter")
             await pilot.pause()
         assert added == [f"{ROOT}/shared_prefs/*", f"{ROOT}/files/*", f"{ROOT}/x.db"]
+
+
+@pytest.mark.asyncio
+async def test_n_drops_a_doubled_prefix_refuses_a_missing_folder_and_closes_on_a_dupe(
+    monkeypatch,
+) -> None:
+    """R1-B3: an absolute path typed after the prefill doubled it; a folder
+    missing on the device was saved (only a log ERROR); an already watched
+    path left the input open with the message only in the log.
+    """
+    added: list[str] = []
+    asked: list[str] = []
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        wl = panel.watchlist
+        monkeypatch.setattr(FilesPanel, "_selected_package", staticmethod(lambda: PKG))
+        monkeypatch.setattr(wl, "add_path", lambda p: added.append(p) or True)
+
+        def missing(path: str) -> str | None:
+            asked.append(path)
+            return f"{ROOT}/nope" if "/nope/" in path else None
+
+        monkeypatch.setattr(wl, "missing_folder", missing)
+        notes: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda msg, **kw: notes.append(msg))
+        await pilot.pause()
+        panel.focus()
+        await pilot.press("n")
+        await pilot.pause()
+        field = panel.query_one("#files-input", Input)
+        msg = panel.query_one("#files-input-msg", Static)
+        field.value = f"{ROOT}/{ROOT}/shared_prefs/*"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert added == [f"{ROOT}/shared_prefs/*"]
+        # A folder the device does not have: red words, the input stays.
+        panel.open_input("add")
+        field.value = f"{ROOT}/nope/*"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.focused is field
+        assert msg.has_class("-shown")
+        assert "Not found on the device" in str(msg.render())
+        assert added == [f"{ROOT}/shared_prefs/*"]
+        await pilot.press("x")  # editing clears the message
+        assert not msg.has_class("-shown")
+        # Already watched: the input closes with a toast, nothing is added.
+        monkeypatch.setattr(wl, "already_watched", lambda p: True)
+        field.value = f"{ROOT}/shared_prefs/*"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.focused is not field
+        assert not field.has_class("-shown")
+        assert notes[-1] == f"Already watched: {ROOT}/shared_prefs/*"
+        assert len(added) == 1
+
+
+def test_missing_folder_asks_the_device_once(monkeypatch) -> None:
+    from sandroid.tui.widgets.watchlist_view import WatchlistView
+
+    sent: list[str] = []
+
+    class FakeAdb:
+        @staticmethod
+        def send_adb_command(cmd):
+            sent.append(cmd)
+            if "nope" in cmd:
+                return "", "ls: /data/data/x/nope: No such file or directory"
+            return "/data/data/x/files", ""
+
+    monkeypatch.setattr(WatchlistView, "_adb", staticmethod(lambda: FakeAdb))
+    view = WatchlistView()
+    assert view.missing_folder("/data/data/x/nope/*.xml") == "/data/data/x/nope"
+    assert view.missing_folder("/data/data/x/files/a.db") is None
+    assert sent == [
+        "shell ls -d /data/data/x/nope",
+        "shell ls -d /data/data/x/files",
+    ]
 
 
 @pytest.mark.asyncio

@@ -56,6 +56,7 @@ import functools
 import hashlib
 import logging
 import os
+import re
 import shlex
 import threading
 from dataclasses import dataclass
@@ -69,6 +70,7 @@ from textual.widget import Widget
 from sandroid.core import file_diff, watchlist_store
 from sandroid.core.adb_utils import (
     canonical_device_path,
+    device_glob_arg,
     device_shell_command,
     watch_path_problem,
 )
@@ -479,6 +481,30 @@ class WatchlistView(Widget):
 
     def is_watched(self, path: str) -> bool:
         return self.watched_by(path) is not None
+
+    def already_watched(self, path: str) -> bool:
+        """``path`` (a file or a ``*`` pattern) is watched already."""
+        if "*" in path:
+            return canonical_device_path(path) in self._watched_patterns
+        return self.is_watched(path)
+
+    def missing_folder(self, path: str) -> str | None:
+        """The folder of ``path`` (a file or pattern) when the device says it
+        does not exist (one ``ls -d``), else None -- also when it cannot be
+        checked (no device, no permission).
+        """
+        literal = re.split(r"[*?]", path, maxsplit=1)[0]
+        folder = literal.rpartition("/")[0]
+        if not folder:
+            return None
+        try:
+            out, err = self._adb().send_adb_command(
+                f"shell ls -d {device_glob_arg(folder)}"
+            )
+        except Exception:
+            return None
+        text = f"{out or ''}\n{err or ''}"
+        return folder if "No such file" in text else None
 
     def summary(self) -> str:
         """``"3 watched · 1 changed"`` (empty when nothing is watched)."""

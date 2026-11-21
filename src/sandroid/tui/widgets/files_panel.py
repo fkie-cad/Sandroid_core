@@ -769,6 +769,14 @@ class FilesPanel(Widget):
     FilesPanel > #files-input.-shown {
         display: block;
     }
+    FilesPanel > #files-input-msg {
+        display: none;
+        height: 1;
+        padding: 0 1;
+    }
+    FilesPanel > #files-input-msg.-shown {
+        display: block;
+    }
     """
 
     def __init__(self, **kwargs) -> None:
@@ -786,6 +794,8 @@ class FilesPanel(Widget):
         #: ``W``: only watched files (and patterns).
         self._watched_only = False
         self._filter = ""
+        #: The ``n`` prefill: an absolute path typed after it replaces it.
+        self._add_prefill = ""
         #: Marks of the session (a copy of ``MainScreen.marks``; a lens
         #: outside a MainScreen keeps its own list).
         self._marks: list[Mark] = []
@@ -853,6 +863,8 @@ class FilesPanel(Widget):
         # No select-all on focus: the `n` prefill (the app's data directory)
         # is meant to be extended, not replaced by the first key typed.
         yield _LensInput(id="files-input", select_on_focus=False)
+        #: Why the ``n`` path was refused (red words under the field).
+        yield Static("", id="files-input-msg")
         yield WatchlistView(id="files-watchlist")
 
     def on_mount(self) -> None:
@@ -3238,6 +3250,8 @@ class FilesPanel(Widget):
                 "/data/data/<pkg>/databases/*   Enter watch · Esc cancel"
             )
             field.value = self._own_root() or ""
+        self._add_prefill = field.value if mode == "add" else ""
+        self._input_message("")
         field.set_class(True, "-shown")
         field.focus()
         field.cursor_position = len(field.value)
@@ -3255,10 +3269,23 @@ class FilesPanel(Widget):
         field.mode = "filter"
         field.value = ""
         field.set_class(False, "-shown")
+        self._input_message("")
         self.focus()
 
+    def _input_message(self, text: str) -> None:
+        """Show (or with ``""`` hide) a refusal under the ``n`` field, in red."""
+        try:
+            msg = self.query_one("#files-input-msg", Static)
+        except Exception:
+            return
+        msg.update(Text(text, style=f"bold {_c('bad')}"))
+        msg.set_class(bool(text), "-shown")
+
     def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id != "files-input" or event.input.mode != "filter":
+        if event.input.id != "files-input":
+            return
+        if event.input.mode != "filter":
+            self._input_message("")  # an edit after a refusal
             return
         if not event.input.has_class("-shown"):
             return
@@ -3278,6 +3305,14 @@ class FilesPanel(Widget):
             self.close_input()
             return
         path = event.value.strip()
+        prefill = self._add_prefill
+        if (
+            prefill
+            and path.startswith(prefill)
+            and path[len(prefill) :].startswith("/")
+        ):
+            # An absolute path typed after the /data/data/<pkg>/ prefill.
+            path = path[len(prefill) :]
         if path and not path.startswith("/"):
             # Relative to the monitored app, else the selected one (the app
             # may be stopped).
@@ -3293,7 +3328,16 @@ class FilesPanel(Widget):
         if problem is not None:
             self.app.notify(problem, severity="warning")
             return
-        if self.watchlist.add_path(path):
+        wl = self.watchlist
+        if wl.already_watched(path):
+            self.close_input()
+            self.app.notify(f"Already watched: {path}", timeout=3)
+            return
+        missing = wl.missing_folder(path)
+        if missing is not None:
+            self._input_message(f"Not found on the device: {missing}")
+            return
+        if wl.add_path(path):
             self.close_input()
 
     # -- watchlist changes ------------------------------------------------------------
