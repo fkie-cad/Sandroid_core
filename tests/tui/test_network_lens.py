@@ -699,7 +699,7 @@ def test_capture_status_is_dots_and_words(monkeypatch):
     panel._ca_ok = panel._ct_ok = True
     panel._proxy_state, panel._proxy_addr = "ours", "10.0.2.2:8080"
     caption = panel.status_caption()
-    assert f"[{pal.ok}]Mitmproxy ● on[/]" in caption
+    assert f"[{pal.ok}]Mitmproxy ● running[/]" in caption
     assert f"CA [{pal.ok}]● installed[/]" in caption
     rows = dict(panel.status_rows())
     assert rows["CA"].startswith(f"[{pal.ok}]● installed[/]")
@@ -733,6 +733,74 @@ def test_capture_status_is_dots_and_words(monkeypatch):
     assert f"CA [{pal.warn}]○ not installed[/]" in caption
     assert "CA ○ not installed" in plain(caption)
     assert not set("✓✗▸◐⚑⇧␣⏎") & set(plain(caption)), caption
+
+
+def _caption_panel(monkeypatch, running: bool):
+    from sandroid.services.mitmproxy_service import MitmproxyService
+    from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
+
+    service = MitmproxyService()
+    panel = MitmproxyPanel()
+    panel._service = service
+    monkeypatch.setattr(service, "is_running", lambda: running)
+    monkeypatch.setattr(service, "ssl_unpin_is_active", lambda: False)
+    return panel, service
+
+
+def test_caption_routing_follows_the_network_method(monkeypatch):
+    """N3-B2: "device routed" follows the method service's device read (Off,
+    keys only, Whole device, adb reverse), not only M / Ctrl+D.
+    """
+    from types import SimpleNamespace
+
+    from sandroid.services import network_method as nm
+
+    panel, _ = _caption_panel(monkeypatch, running=True)
+    snap = {"value": nm.MethodSnapshot(device_proxy="none")}
+    fake = SimpleNamespace(snapshot_cached=lambda: snap["value"])
+    monkeypatch.setattr(nm, "peek_network_method_service", lambda: fake)
+    panel._proxy_state = "ours"  # set by an earlier Ctrl+D
+    panel._handle_proxy_change("network_method", None, None)
+    assert "device routed" not in panel.status_caption()
+    assert panel._proxy_state == "none"
+    snap["value"] = nm.MethodSnapshot(device_proxy="ours", device_addr="127.0.0.1:8090")
+    panel._handle_proxy_change("network_method", None, None)
+    assert "device routed" in panel.status_caption()
+    snap["value"] = nm.MethodSnapshot(device_proxy="external", device_addr="1.2.3.4:8")
+    panel._handle_proxy_change("network_method", None, None)
+    assert "device on another proxy" in panel.status_caption()
+
+
+def test_caption_shows_a_stopped_mitmproxy_as_a_red_problem(monkeypatch):
+    """N3-B3: Mitmproxy down while something routes to it is red words, not
+    a muted "○ off"; the reason of a failed start or exit is named.
+    """
+    from sandroid.tui.themes import lens_palette
+
+    pal = lens_palette()
+    panel, service = _caption_panel(monkeypatch, running=False)
+    panel._proxy_state = "ours"
+    assert panel.status_caption() == (
+        f"[{pal.bad}]Mitmproxy stopped: app traffic blocked[/]"
+    )
+    service._state.last_error = "port 8390 is in use"
+    assert panel.status_caption() == (
+        f"[{pal.bad}]Mitmproxy stopped: port 8390 is in use, app traffic blocked[/]"
+    )
+    panel._proxy_state = "none"
+    service._state.last_error = None
+    assert panel.status_caption() == f"[{pal.dim}]Mitmproxy ○ off[/]"
+
+
+def test_caption_says_starting_until_mitmweb_listens(monkeypatch):
+    from sandroid.tui.themes import lens_palette
+
+    pal = lens_palette()
+    panel, service = _caption_panel(monkeypatch, running=True)
+    service._state.running, service._state.listening = True, False
+    assert f"[{pal.warn}]Mitmproxy ◌ starting[/]" in panel.status_caption()
+    service._state.listening = True
+    assert f"[{pal.ok}]Mitmproxy ● running[/]" in panel.status_caption()
 
 
 def test_fritap_stopped_is_muted_like_mitmproxy(monkeypatch):

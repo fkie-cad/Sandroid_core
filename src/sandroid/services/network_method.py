@@ -322,10 +322,18 @@ def derive_method(s: MethodSnapshot) -> MethodView:
             covered=("friTap writing TLS keys",),
             notes=("no proxy, no rows in this list", _pinning_note(s)),
         )
+    problems = _naming_problems(s) + _kill_switch_problems(s)
+    needs_mitm = s.device_proxy == "ours" or "ours" in s.lanes.values()
+    if needs_mitm and not s.mitm_running:
+        # Every piece routed to our Mitmproxy fails while it is down (the
+        # Kill switch blocks, the device proxy and the lanes go nowhere).
+        problems.insert(
+            0, "Mitmproxy stopped: app traffic is blocked until it runs again"
+        )
     return MethodView(
         CUSTOM,
         covered=tuple(_custom_pieces(s)),
-        problems=tuple(_naming_problems(s) + _kill_switch_problems(s)),
+        problems=tuple(problems),
     )
 
 
@@ -1257,9 +1265,11 @@ class NetworkMethodService:
     UNNAMED_REFRESH_S = 30.0
 
     def _on_mitm_line(self, line: str) -> None:
-        if line.startswith("[INFO]") and (
-            "mitmweb started" in line or "mitmweb stopped" in line or "exited" in line
-        ):
+        if (
+            line.startswith("[INFO]")
+            and ("mitmweb started" in line or "mitmweb stopped" in line)
+        ) or (line.startswith("[ERROR]") and "Mitmproxy" in line):
+            # Started (listening), stopped, exited or did not start.
             self.refresh()
         elif line.startswith("[FLOW]|") and self._unnamed_device_flow(line):
             # Maybe an app installed after "Whole device" (no relay identity

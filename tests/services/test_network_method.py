@@ -96,6 +96,31 @@ def test_qualities_are_problems_not_custom():
     assert "QUIC not blocked" in lane_down.notes
 
 
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        # N3-B3: device proxy + Kill switch + App Proxy, Mitmproxy killed.
+        replace(WHOLE, lanes={SPOT: "ours"}, mitm_running=False),
+        replace(WHOLE, kill_switch=False, mitm_running=False),
+        replace(BASE, lanes={"com.other": "ours"}, mitm_running=False),
+    ],
+)
+def test_custom_needing_mitmproxy_shows_it_stopped(snapshot):
+    view = nm.derive_method(snapshot)
+    assert view.preset == nm.CUSTOM
+    assert view.problems[0].startswith("Mitmproxy stopped: app traffic is blocked")
+
+
+def test_custom_without_mitmproxy_pieces_has_no_stopped_problem():
+    external = replace(
+        BASE,
+        device_proxy="external",
+        device_addr="192.168.1.5:8081",
+        mitm_running=False,
+    )
+    assert not nm.derive_method(external).problems
+
+
 def test_kill_switch_without_proxy_is_a_problem():
     view = nm.derive_method(replace(BASE, kill_switch=True))
     assert view.preset == nm.CUSTOM
