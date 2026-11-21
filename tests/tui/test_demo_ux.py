@@ -768,7 +768,7 @@ def _snapshot_panel(monkeypatch, ok):
     calls: list[tuple[str, str]] = []
     toolbox = SimpleNamespace(
         create_snapshot=lambda name: calls.append(("create", name)) or ok,
-        load_snapshot=lambda name: calls.append(("load", name)) or ok,
+        load_snapshot=lambda name, **_kw: calls.append(("load", name)) or ok,
     )
     answers = {"InputModal": "p5_snap", "ConfirmModal": True}
     fake_app = SimpleNamespace(
