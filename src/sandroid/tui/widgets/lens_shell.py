@@ -252,8 +252,14 @@ def is_shown(widget: Widget) -> bool:
     A ContentSwitcher hides its inactive children with ``display: none``, so
     this answers "is this lens / sub-view the visible one?" without knowing
     the switcher ids. A widget on a screen below a modal still counts.
+
+    A switcher child also has to be the switcher's ``current``: until the
+    switcher's own mount handler runs, every child still has ``display``
+    set, and a lens's poll timer firing in that gap (a slow startup) took
+    the hidden lens for the visible one.
     """
     from textual.screen import Screen
+    from textual.widgets import ContentSwitcher
 
     try:
         if not widget.is_attached:
@@ -262,7 +268,10 @@ def is_shown(widget: Widget) -> bool:
         while node is not None and not isinstance(node, Screen):
             if not node.display:
                 return False
-            node = node.parent
+            parent = node.parent
+            if isinstance(parent, ContentSwitcher) and parent.current != node.id:
+                return False
+            node = parent
         return node is not None
     except Exception:
         return False

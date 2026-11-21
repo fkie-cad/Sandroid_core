@@ -63,6 +63,39 @@ async def test_digits_switch_lenses_and_focus_them() -> None:
         assert ms.query_one("#runs-panel").__class__.__name__ == "DiffsView"
 
 
+async def test_a_switcher_child_counts_as_shown_only_when_current() -> None:
+    """A lens's poll timer can fire before the ContentSwitcher's mount
+    handler hid the other lenses (a slow startup): ``is_shown`` then took a
+    never-shown Network lens for the visible one and it polled.
+    """
+    from textual.app import App
+    from textual.widgets import ContentSwitcher, Static
+
+    seen_at_mount: dict[str, bool] = {}
+
+    class _Lens(Static):
+        def on_mount(self) -> None:
+            seen_at_mount[str(self.id)] = is_shown(self)
+
+    class _App(App):
+        def compose(self):
+            with ContentSwitcher(initial="a"):
+                yield _Lens("a", id="a")
+                yield _Lens("b", id="b")
+
+    app = _App()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        a, b = app.query_one("#a"), app.query_one("#b")
+        # Mounted before the switcher's own mount handler ran: both still
+        # had ``display`` set, and neither was shown yet.
+        assert seen_at_mount == {"a": False, "b": False}
+        assert is_shown(a)
+        assert not is_shown(b)
+        b.display = True  # displayed, but not the switcher's current
+        assert not is_shown(b)
+
+
 async def test_shift_arrows_cycle_lenses() -> None:
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
@@ -1493,14 +1526,25 @@ async def test_drawer_focus_offers_no_inspect_and_has_no_hscroll() -> None:
 # --------------------------------------------------------------------------
 
 
-async def test_q_asks_first_and_stops_running_tools_off_the_ui_thread() -> None:
+async def test_q_asks_first_and_stops_running_tools_off_the_ui_thread(
+    monkeypatch,
+) -> None:
     """NEW-1 / Files M7: with friTap or the file monitor running, ``q``
     stopped them on the UI thread instead of asking (~6 s freeze); the ``y``
     meant for the dialog then opened Proxy Settings and Sandroid stayed up.
     """
     import threading
 
+    from sandroid.core import background_tracker as bt
     from sandroid.services import get_task_service
+
+    # The real quit cleanup runs here. Its untracked-process check walks the
+    # parent of every process on the host (psutil on macOS): 6-9 s on a busy
+    # shared host, which ate the wait below and made this test flaky. It is
+    # not what this test is about (test_demo_ux covers it).
+    monkeypatch.setattr(
+        bt.BackgroundWorkTracker, "_detect_untracked_processes", lambda self: []
+    )
 
     stops: list[tuple[str, bool]] = []
     release = threading.Event()  # the stops hang until the keys are checked
@@ -1546,7 +1590,9 @@ async def test_q_asks_first_and_stops_running_tools_off_the_ui_thread() -> None:
             assert app.check_action("toggle_proxy", ()) is False
             assert stops == []  # the stops are still running meanwhile
             release.set()
-            await until(pilot, lambda: app._exit)
+            # The app exits when the cleanup is done, at the latest after its
+            # budget (counted from the confirm, so this bound always holds).
+            await until(pilot, lambda: app._exit, timeout=app.QUIT_CLEANUP_BUDGET + 5.0)
             assert app._exit
             assert sorted(stops) == [("fritap", False), ("monitor", False)]
     finally:

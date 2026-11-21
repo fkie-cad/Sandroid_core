@@ -1458,12 +1458,36 @@ async def test_narrow_lens_keeps_bypass_and_actions_on_one_line_each(fake):
         await settle(pilot)
         assert "Shift+K kill" in _screen_text(app)
         # Between the two widths: the keys alone, each with its Shift+.
-        from types import SimpleNamespace
-
-        panel.on_resize(SimpleNamespace(size=SimpleNamespace(width=75)))
+        await pilot.resize_terminal(80, 30)
+        await until(pilot, lambda: 60 <= panel.size.width < 92)
         await settle(pilot)
         assert str(panel.query_one("#act-kill").render()) == "Shift+K"
         assert not panel.query_one("#act-shift").display
+
+
+async def test_action_row_follows_the_width_without_resize_events(fake, monkeypatch):
+    """Under host load the lens came back to full width after the Inspector
+    closed but kept the narrow "Shift+ R A P K X" row: its Resize handler
+    alone decided the layout. Every layout pass of the screen re-fits it.
+    """
+    monkeypatch.setattr(SpotlightPanel, "on_resize", lambda self, _event: None)
+    app = _app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        ms = await boot(app, pilot)
+        sections = _sections(ms)
+        await until(pilot, lambda: _loaded(sections))
+        await settle(pilot)
+        panel = ms.query_one(SpotlightPanel)
+        assert "Shift+K kill" in _screen_text(app)
+        app.focused.move_cursor(row=0)
+        await pilot.press("enter")
+        await until(pilot, lambda: panel._narrow == 2)
+        await settle(pilot)
+        assert str(panel.query_one("#act-kill").render()) == "K"
+        ms.close_inspector()
+        await until(pilot, lambda: panel._narrow == 0)
+        await settle(pilot)
+        assert "Shift+K kill" in _screen_text(app)
 
 
 def _bookkeeping_ops() -> list[AppOpEntry]:
