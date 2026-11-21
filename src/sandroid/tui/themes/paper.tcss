@@ -138,10 +138,12 @@ HelpScreen {
 /* Command palette screen */
 CommandPalette {
     align: center top;
-    padding-top: 5;
 }
 
 #palette-container {
+    /* below the top edge; not padding on the screen, which shifts the
+       dimmed screen behind the palette down with it */
+    margin-top: 5;
     width: 60%;
     max-height: 60%;
     background: #FBF8F1;
