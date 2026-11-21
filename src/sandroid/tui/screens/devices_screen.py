@@ -2137,12 +2137,19 @@ class DevicesScreen(ModalScreen[str | None]):
                 if choice.snapshots
                 else "built from clean_8g on the first start"
             )
-            labels[f"{choice.name} ({choice.id}) · {saved}"] = choice.id
+            if choice.builtin:
+                label = (
+                    f"{choice.name} (built-in {choice.builtin}) · copied to "
+                    f"your library as {choice.id}, then {saved}"
+                )
+            else:
+                label = f"{choice.name} ({choice.id}) · {saved}"
+            labels[label] = choice
 
         def picked(label: str | None) -> None:
-            pid = labels.get(label or "")
-            if pid and self.is_attached:
-                self._start_persona(row, pid)
+            choice = labels.get(label or "")
+            if choice is not None and self.is_attached:
+                self._start_persona(row, choice.id, builtin=choice.builtin)
 
         self.app.push_screen(
             SelectionModal(
@@ -2155,8 +2162,13 @@ class DevicesScreen(ModalScreen[str | None]):
             picked,
         )
 
-    def _start_persona(self, row: AvdRow, profile_id: str) -> None:
-        """Work out the persona launch (worker), then start it."""
+    def _start_persona(self, row: AvdRow, profile_id: str, builtin: str = "") -> None:
+        """Work out the persona launch (worker), then start it.
+
+        A built-in profile (*builtin*) is copied into the library first: a
+        persona writes its resolved world seed back, which a built-in must
+        never get.
+        """
         options = self._shown_options(row)
         headless = bool(getattr(options, "headless", False))
         self._busy[row.key] = "preparing persona…"
@@ -2165,13 +2177,22 @@ class DevicesScreen(ModalScreen[str | None]):
         def work() -> None:
             from sandroid.world import persona
 
+            pid = profile_id
             try:
+                if builtin:
+                    pid = persona.copy_builtin(builtin)
+                    self.app.call_from_thread(
+                        self.app.notify,
+                        f"Copied built-in profile {builtin} to your library as {pid}.",
+                        title="Devices",
+                        timeout=6,
+                    )
                 result: Any = persona.persona_start(
-                    row.name, profile_id, api=row.api, headless=headless
+                    row.name, pid, api=row.api, headless=headless
                 )
             except Exception as exc:
                 result = exc
-            self.app.call_from_thread(self._persona_ready, row, profile_id, result)
+            self.app.call_from_thread(self._persona_ready, row, pid, result)
 
         self.run_worker(work, thread=True, group="devices-persona", exit_on_error=False)
 
@@ -2188,6 +2209,93 @@ class DevicesScreen(ModalScreen[str | None]):
                 timeout=8,
             )
             return
+        if start.missing_photos:
+            self._repaint_busy()
+            self._offer_photo_fetch(row, profile_id, start)
+            return
+        self._launch_persona(row, profile_id, start)
+
+    def _offer_photo_fetch(self, row: AvdRow, profile_id: str, start: Any) -> None:
+        """The persona cannot be built without its photos: fetch, then start."""
+        from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+        count = start.missing_photos
+
+        def confirmed(yes: bool | None) -> None:
+            if yes and self.is_attached:
+                self._fetch_photos_then_start(row, profile_id, start)
+
+        self.app.push_screen(
+            ConfirmModal(
+                title=f"Fetch {count} photos for persona {profile_id}?",
+                message=f"{count} photos of this persona are not downloaded "
+                "yet, and the persona cannot be built without them. Fetch "
+                f"them now from the photo pack's URLs (one request per "
+                f"second, about {count} s), then start {row.name}?",
+                yes_label="Fetch and start",
+                no_label="Cancel",
+            ),
+            confirmed,
+        )
+
+    def _fetch_photos_then_start(
+        self, row: AvdRow, profile_id: str, start: Any
+    ) -> None:
+        """Download the persona's photos (worker, progress on the row), then
+        start it; on a failure say how many are missing and what to run.
+        """
+        total = start.missing_photos
+        self._busy[row.key] = f"fetching photos 0/{total}…"
+        self._repaint_busy()
+
+        def show(done: int, of: int) -> None:
+            if row.key in self._busy and self.is_attached:
+                self._busy[row.key] = f"fetching photos {done}/{of}…"
+                self._repaint_busy()
+
+        def work() -> None:
+            from sandroid.world import persona
+
+            def progress(_pid: str, done: int, of: int) -> None:
+                self.app.call_from_thread(show, done, of)
+
+            try:
+                result: Any = persona.fetch_persona_photos(
+                    profile_id, api=row.api, progress=progress
+                )
+            except Exception as exc:
+                result = exc
+            self.app.call_from_thread(
+                self._photos_fetched, row, profile_id, start, result
+            )
+
+        self.run_worker(work, thread=True, group="devices-persona", exit_on_error=False)
+
+    def _photos_fetched(
+        self, row: AvdRow, profile_id: str, start: Any, fetch: Any
+    ) -> None:
+        if not self.is_attached:
+            return
+        self._busy.pop(row.key, None)
+        failed = str(fetch) if isinstance(fetch, Exception) else len(fetch.failed or {})
+        if failed:
+            self._repaint_busy()
+            why = (
+                f"{failed} photo{'s' if failed != 1 else ''} could not be fetched"
+                if isinstance(failed, int)
+                else f"the photo fetch failed: {failed}"
+            )
+            self.app.notify(
+                f"Not started: {why}. Try {format_key('P')} again later, or "
+                f"run python -m sandroid.world photos fetch --profile {profile_id}.",
+                title="Devices",
+                severity="error",
+                timeout=10,
+            )
+            return
+        self._launch_persona(row, profile_id, start)
+
+    def _launch_persona(self, row: AvdRow, profile_id: str, start: Any) -> None:
         how = (
             f"loading {start.snapshot}"
             if start.cached

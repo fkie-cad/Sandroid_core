@@ -501,6 +501,34 @@ def test_missing_photos_are_named_not_downloaded(stage_env, monkeypatch) -> None
     assert seen == {"download": False}
     assert note.level == "warning"
     assert "photos fetch --profile mara" in note.text
+    assert "Shift+P in Devices" in note.text  # the action in the TUI
+
+
+def test_missing_photos_do_not_use_up_the_launch_s_build(
+    stage_env, monkeypatch
+) -> None:
+    """E2E #3 bug 3: the launch was marked built before the photo check, so
+    after the photos were fetched the same launch could never build.
+    """
+    from sandroid.world import photos
+
+    missing = {"p1": "not in the cache"}
+
+    def fake_ensure(entries, cache_dir=None, **kw):
+        out = photos.PhotoFetch()
+        out.failed = dict(missing)
+        return out
+
+    monkeypatch.setattr(photos, "ensure_photos", fake_ensure)
+    calls: list = []
+    monkeypatch.setattr(persona, "build_persona", _fake_build(calls))
+    first = persona.persona_stage(SERIAL, True, 300.0)
+    assert "not downloaded" in first.text
+    assert calls == []
+    missing.clear()  # fetched meanwhile
+    second = persona.persona_stage(SERIAL, False, 300.0)
+    assert len(calls) == 1
+    assert "saved as sandroid_persona_mara_x" in second.text
 
 
 def test_a_clean_base_is_built_and_saved(stage_env, monkeypatch) -> None:
@@ -733,8 +761,32 @@ def test_persona_choices_list_world_profiles_and_their_snapshots(svc, avd_root) 
     _old_persona(avd_root, "sandroid_persona_mara_aaaaaaaaaaaa_bbbbbbbbbbbb", 1)
     _old_persona(avd_root, "sandroid_persona_other_aaaaaaaaaaaa_bbbbbbbbbbbb", 2)
     choices = persona.persona_choices(AVD, service=svc)
-    assert [(c.id, c.snapshots) for c in choices] == [("mara", 1)]
-    assert choices[0].name == "Mara (DE)"
+    library = [c for c in choices if not c.builtin]
+    assert [(c.id, c.snapshots) for c in library] == [("mara", 1)]
+    assert library[0].name == "Mara (DE)"
+
+
+def test_built_in_world_profiles_are_offered_until_copied(svc, avd_root) -> None:
+    """E2E #3 bug 3: the built-ins with a world were only offered after a
+    copy was made by hand. They are offered (as their library copy's id) and
+    picking one copies it; the built-in is never written.
+    """
+    from sandroid.services import identity_store as store
+
+    builtins = {c.builtin: c for c in persona.persona_choices(AVD, service=svc)}
+    assert "de" in builtins
+    assert "kp" not in builtins  # no world section
+    de = builtins["de"]
+    assert de.id.endswith("-de")
+    assert de.snapshots == 0
+    before = store.load_builtin("de")
+    pid = persona.copy_builtin("de", service=svc)
+    assert pid == de.id
+    assert svc.load(pid).world
+    assert store.load_builtin("de") == before
+    again = {c.builtin for c in persona.persona_choices(AVD, service=svc)}
+    assert "de" not in again  # its copy is listed as a library profile now
+    assert pid in {c.id for c in persona.persona_choices(AVD, service=svc)}
 
 
 def test_persona_start_loads_its_snapshot_else_the_base(svc, avd_root) -> None:
@@ -757,6 +809,30 @@ def test_persona_start_loads_its_snapshot_else_the_base(svc, avd_root) -> None:
     assert again.meta == {"persona_id": "mara"}
     other = persona.persona_start(AVD, "mara", api=35, base="mybase", service=svc)
     assert other.meta == {"persona_id": "mara", "persona_base": "mybase"}
+
+
+def test_persona_start_counts_the_photos_a_build_still_needs(
+    svc, avd_root, monkeypatch
+) -> None:
+    from sandroid.world import photos
+
+    base = avd_root / "snapshots" / "clean_8g"
+    base.mkdir()
+    (base / "ram.bin").write_bytes(b"x")
+    seen: list = []
+
+    def fake_ensure(entries, cache_dir=None, **kw):
+        seen.append(kw)
+        out = photos.PhotoFetch()
+        out.failed = {"p1": "not in the cache", "p2": "not in the cache"}
+        return out
+
+    monkeypatch.setattr(photos, "ensure_photos", fake_ensure)
+    first = persona.persona_start(AVD, "mara", api=35, service=svc)
+    assert first.missing_photos == 2
+    assert seen == [{"download": False}]  # only looks, never downloads
+    _old_persona(avd_root, first.snapshot, 1)
+    assert persona.persona_start(AVD, "mara", api=35, service=svc).missing_photos == 0
 
 
 # ------------------------------------------------------------------ refresh

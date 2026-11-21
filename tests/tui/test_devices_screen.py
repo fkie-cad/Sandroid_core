@@ -1990,6 +1990,128 @@ async def test_shift_p_starts_a_stopped_avd_as_a_persona(monkeypatch) -> None:
     ]
 
 
+@pytest.mark.parametrize("fetch_fails", [False, True])
+async def test_shift_p_offers_to_fetch_missing_photos_first(
+    monkeypatch, fetch_fails
+) -> None:
+    """E2E #3 bug 3: a persona from a new profile never built in the TUI
+    (its photos were not downloaded). Shift+P now offers the fetch, shows
+    its progress on the row, and starts only once the photos are there.
+    """
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
+    from sandroid.tui.modals.selection_modal import SelectionModal
+    from sandroid.world import persona, photos
+
+    monkeypatch.setattr(
+        persona,
+        "persona_choices",
+        lambda avd: [persona.PersonaChoice("mara", "Mara (DE)", 0)],
+    )
+    opts = AvdLaunchOptions(boot="snapshot", snapshot="clean_8g")
+    monkeypatch.setattr(
+        persona,
+        "persona_start",
+        lambda avd, pid, **kw: persona.PersonaStart(
+            options=opts,
+            meta={"persona_id": pid},
+            snapshot="sandroid_persona_x",
+            cached=False,
+            missing_photos=2,
+        ),
+    )
+    fetched: list = []
+    progress_seen: list = []
+
+    def fetch(pid, *, api=None, progress=None):
+        fetched.append(pid)
+        progress("p1", 1, 2)
+        progress("p2", 2, 2)
+        out = photos.PhotoFetch()
+        if fetch_fails:
+            out.failed = {"p2": "download failed: 404"}
+        return out
+
+    monkeypatch.setattr(persona, "fetch_persona_photos", fetch)
+    actions = PersonaActions()
+    app, screen = _hub(avds=[IDLE], actions=actions)
+    real_repaint = screen._repaint_busy
+
+    def repaint() -> None:
+        progress_seen.append(dict(screen._busy))
+        real_repaint()
+
+    screen._repaint_busy = repaint
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        await pilot.press("P")
+        await until(pilot, lambda: isinstance(app.screen, SelectionModal))
+        app.screen.dismiss(app.screen.all_options[0])
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        assert app.screen.title_text == "Fetch 2 photos for persona mara?"
+        assert app.screen.yes_label == "Fetch and start"
+        assert actions.calls == []  # nothing starts before the answer
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: fetched
+            and not screen._busy.get(IDLE.key, "").startswith("fetching"),
+        )
+        await settle(pilot)
+        if fetch_fails:
+            await until(pilot, lambda: app._notifications)
+            text = " ".join(n.message for n in app._notifications)
+            assert "1 photo could not be fetched" in text
+            assert "photos fetch --profile mara" in text
+    assert fetched == ["mara"]
+    assert {IDLE.key: "fetching photos 2/2…"} in progress_seen
+    if fetch_fails:
+        assert actions.calls == []
+    else:
+        assert actions.calls == [
+            ("start_avd", "Idle_AVD", opts, {"persona_id": "mara"}, False)
+        ]
+
+
+async def test_shift_p_on_a_built_in_profile_copies_it_first(monkeypatch) -> None:
+    from sandroid.tui.modals.selection_modal import SelectionModal
+    from sandroid.world import persona
+
+    monkeypatch.setattr(
+        persona,
+        "persona_choices",
+        lambda avd: [persona.PersonaChoice("lena-de", "Lena (DE)", 0, builtin="de")],
+    )
+    copied: list = []
+    monkeypatch.setattr(
+        persona, "copy_builtin", lambda bid: copied.append(bid) or "lena-de"
+    )
+    started: list = []
+    opts = AvdLaunchOptions(boot="snapshot", snapshot="clean_8g")
+
+    def start(avd, pid, **kw):
+        started.append(pid)
+        return persona.PersonaStart(
+            options=opts, meta={"persona_id": pid}, snapshot="s", cached=False
+        )
+
+    monkeypatch.setattr(persona, "persona_start", start)
+    actions = PersonaActions()
+    app, screen = _hub(avds=[IDLE], actions=actions)
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        await pilot.press("P")
+        await until(pilot, lambda: isinstance(app.screen, SelectionModal))
+        (label,) = app.screen.all_options
+        assert label.startswith("Lena (DE) (built-in de) · copied to your library")
+        app.screen.dismiss(label)
+        await until(pilot, lambda: actions.calls)
+    assert copied == ["de"]
+    assert started == ["lena-de"]
+    assert actions.calls == [
+        ("start_avd", "Idle_AVD", opts, {"persona_id": "lena-de"}, False)
+    ]
+
+
 async def test_shift_p_without_a_world_profile_says_so(monkeypatch) -> None:
     from sandroid.world import persona
 
