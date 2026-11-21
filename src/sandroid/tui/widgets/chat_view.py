@@ -1769,6 +1769,13 @@ class EmptyState(Static):
             ),
         }
 
+    def set_mascot_style(self, style: str | None = None) -> None:
+        """Switch the mascot style (``None``: re-read the configured one)."""
+        resolved = resolve_mascot_style(style) if style else configured_mascot_style()
+        if resolved != self.options["mascot_style"]:
+            self.options["mascot_style"] = resolved
+            self.refresh(layout=True)
+
     def render(self) -> Content:
         width = self.size.width or 80
         options = dict(self.options)

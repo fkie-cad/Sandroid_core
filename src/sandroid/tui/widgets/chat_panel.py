@@ -1570,8 +1570,12 @@ class ChatPanel(Widget):
             return
         mascot.set_style(configured_mascot_style())
         mascot.set_state(_MASCOT_FOR_STATE.get(state or self._state, "idle"))
-        # One mascot on screen: the empty state's, else the live one.
+        # One mascot on screen: the empty state's, else the live one. The
+        # empty state's follows the setting live too (Settings preview).
         mascot.set_suppressed(self._empty is not None)
+        if self._empty is not None:
+            with contextlib.suppress(Exception):
+                self._empty.set_mascot_style()
 
     def _set_state(self, state: str, detail: str | None = None) -> None:
         self._state = state
