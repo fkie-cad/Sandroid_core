@@ -571,6 +571,12 @@ async def test_mitm_lines_go_to_the_activity_log(flow_dir):
             "mitm:" in line and "CANNOT reach" in line for line in log._plain_lines
         )
         assert "CANNOT reach" in panel.mitm.recent_lines[-1]
+        # N6-V8: the SSL unpin bypass logs as bypass, not "mitm: Bypass …".
+        panel.mitm._append_line("[BYPASS] Bypass (experimental): SSL Pinning Bypass")
+        await settle(pilot)
+        line = next(x for x in log._plain_lines if "SSL Pinning Bypass" in x)
+        assert "bypass: Bypass (experimental)" in line
+        assert "mitm:" not in line
 
 
 async def test_proxy_controls_stay_bound(flow_dir, monkeypatch):

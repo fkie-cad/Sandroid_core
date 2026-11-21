@@ -154,3 +154,27 @@ def test_monitor_mode_esc_does_not_start_and_path_is_honoured(monkeypatch):
     assert started == []
     asyncio.run(command.start_task(ctx(lambda options: options[1])))
     assert [kind for kind, _ in started] == ["path"]
+
+
+# -- f while frida-server runs: a toast, no dead-end dialog (N6-V8) ---------------
+
+
+def test_f_while_frida_runs_is_a_toast_not_a_dialog(monkeypatch):
+    from sandroid.commands.frida_commands import FridaServerCommand
+    from sandroid.services import ui_service
+
+    shown = []
+    monkeypatch.setattr(
+        ui_service.UIService,
+        "show_blocking_info",
+        lambda self, *a, **k: shown.append(k),
+        raising=False,
+    )
+    fm = SimpleNamespace(is_frida_server_running=lambda: True)
+    result = asyncio.run(
+        FridaServerCommand().execute(_ctx(toolbox=SimpleNamespace(frida_manager=fm)))
+    )
+    assert result.success
+    assert result.data["toast"] is True
+    assert result.message == "frida-server is already running: nothing to start"
+    assert shown == []

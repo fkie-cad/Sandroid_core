@@ -4477,7 +4477,7 @@ class BypassService:
                     return False, f"{FRIDA_SERVER_DOWN_MSG} (spawn of {package})"
                 if klass == "dirty" and not restarted_server:
                     logger.warning(
-                        "[Bypass] frida-server looks wedged; restarting it "
+                        "[Frida] frida-server looks wedged; restarting it "
                         "once before re-spawn"
                     )
                     ready = self._recover_frida_server()
@@ -4551,13 +4551,13 @@ class BypassService:
             fm = svc.get_frida_manager()
             if fm is not None:
                 ok = bool(fm.restart_frida_server_and_wait())
-                logger.info("[Bypass] frida-server restart -> ready=%s", ok)
+                logger.info("[Frida] frida-server restarted, ready=%s", ok)
             try:
                 svc.invalidate_frida_device_cache()
             except Exception:
                 pass
         except Exception as exc:
-            logger.warning("[Bypass] frida-server recovery failed: %s", exc)
+            logger.warning("[Frida] frida-server recovery failed: %s", exc)
         return ok
 
     def _poll_liveness(self, device: Any, pid: int, window: float) -> bool:

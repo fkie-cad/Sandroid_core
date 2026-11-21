@@ -375,7 +375,7 @@ class StatusBar(Static):
         if self.frida_starting:
             frida = f"[{paused}]◌ starting[/]"
         elif self.frida_status != "Running" and self._frida_lost:
-            frida = f"[{stop}]connection lost[/] [{muted}] Shift+R restarts[/]"
+            frida = f"[{stop}]connection lost[/] [{muted}] Shift+R restarts the app[/]"
         elif self.frida_status == "Running":
             if self._frida_version_mismatch:
                 frida = f"[{fixed_color('notice')}]● running, version mismatch[/]"

@@ -2363,7 +2363,7 @@ class MitmproxyService:
                 self._ssl_via_mitm = self._ssl_via_mitm or owns
                 self._state.ssl_unpin_active = True
                 self._state.ssl_unpin_app = svc.target_app("ssl")
-                self._emit(f"[INFO] {msg}")
+                self._emit(f"[BYPASS] {msg}")
                 return True, msg
 
         try:
@@ -2379,7 +2379,7 @@ class MitmproxyService:
                 self._ssl_via_mitm = owns and active
                 self._state.ssl_unpin_active = active
                 self._state.ssl_unpin_app = svc.target_app("ssl")
-                self._emit(f"[INFO] {msg}")
+                self._emit(f"[BYPASS] {msg}")
             else:
                 self._state.ssl_unpin_active = False
                 self._state.ssl_unpin_app = None
@@ -2398,7 +2398,7 @@ class MitmproxyService:
             self._state.ssl_unpin_active = False
             self._state.ssl_unpin_app = None
             if stopped:
-                self._emit("[INFO] SSL pinning bypass stopped")
+                self._emit("[BYPASS] SSL pinning bypass stopped")
         return stopped
 
     def toggle_ssl_unpin(
@@ -2463,6 +2463,12 @@ class MitmproxyService:
                     self._emit(f"[ERROR] Mitmproxy exited unexpectedly: {reason}")
 
     def _emit(self, line: str) -> None:
+        """Send ``line`` to the listeners.
+
+        Prefixes: ``[INFO]`` / ``[ERROR]`` mitmproxy's own lines, ``[BYPASS]``
+        a line of the SSL unpin bypass (Ctrl+P), logged as ``bypass`` and not
+        as ``mitm`` (N6-V8), ``[FLOW]|`` ... machine lines.
+        """
         for cb in list(self._listeners):
             try:
                 cb(line)

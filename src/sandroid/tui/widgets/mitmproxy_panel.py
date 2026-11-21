@@ -526,7 +526,7 @@ class MitmproxyPanel(Widget):
             node = node.parent
         return None
 
-    def _log(self, line: str) -> None:
+    def _log(self, line: str, tag: str = "mitm") -> None:
         """Write one controller line to the ActivityLog drawer, tagged ``mitm``.
 
         ``line`` keeps its ``[INFO]``/``[ERROR]`` prefix convention; the prefix
@@ -549,9 +549,7 @@ class MitmproxyPanel(Widget):
         try:
             from sandroid.tui.widgets.activity_log import ActivityLog
 
-            self.screen.query_one("#activity-log", ActivityLog).log_message(
-                body, "mitm"
-            )
+            self.screen.query_one("#activity-log", ActivityLog).log_message(body, tag)
         except Exception:
             pass
 
@@ -580,6 +578,9 @@ class MitmproxyPanel(Widget):
                         "[INFO] TLS pinning detected? Press Ctrl+P to bypass "
                         "for the spotlight app"
                     )
+            elif line.startswith("[BYPASS]"):
+                # The SSL unpin bypass, not mitmproxy (N6-V8).
+                self._log("[INFO]" + line[len("[BYPASS]") :], tag="bypass")
             elif line.startswith(("[ERROR]", "[INFO]")):
                 self._log(line)
             elif self._service.state.verbose:

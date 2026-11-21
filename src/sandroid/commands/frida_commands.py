@@ -2,8 +2,6 @@
 
 import logging
 
-from sandroid.services import get_ui_service
-
 from .base import CommandCategory, CommandContext, CommandHandler, CommandResult
 
 logger = logging.getLogger(__name__)
@@ -56,19 +54,11 @@ class FridaServerCommand(CommandHandler):
         try:
             # Check if Frida server is already running
             if ctx.toolbox.frida_manager.is_frida_server_running():
-                logger.info("Frida server is already running")
-
-                # Show info message to user
-                get_ui_service().show_blocking_info(
-                    title="Frida Already Running",
-                    message="Frida server is already running on the device.",
-                    action_hint="No action needed - Frida is ready to use",
-                )
-
+                # A toast, not a dead-end dialog that has to be closed (N6-V8).
                 return CommandResult(
                     success=True,
-                    message="Frida server is already running",
-                    data={"frida_status": "already_running"},
+                    message="frida-server is already running: nothing to start",
+                    data={"frida_status": "already_running", "toast": True},
                 )
 
             # Frida not running - install (only if missing/outdated) and start

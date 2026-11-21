@@ -1922,7 +1922,7 @@ def test_frida_pill_says_connection_lost_until_the_server_runs_again(monkeypatch
             },
         )
     )
-    assert _pill() == "Frida connection lost  Shift+R restarts"
+    assert _pill() == "Frida connection lost  Shift+R restarts the app"  # N6-V8
     assert checks == [1]  # re-checked at once
     bar._update_frida_status("Not running")
     assert "connection lost" in _pill()

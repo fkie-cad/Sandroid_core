@@ -2491,6 +2491,11 @@ class MainScreen(Screen):
                         result.message,
                     )
 
+                if result.success and (result.data or {}).get("toast"):
+                    self.app.call_from_thread(
+                        self.app.notify, result.message, timeout=4
+                    )
+
                 # Show device settings modal (tabbed, Shift+E)
                 if (
                     result.success
