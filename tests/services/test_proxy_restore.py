@@ -1055,8 +1055,8 @@ async def test_proxy_modal_letter_keys_work_in_both_cases(monkeypatch):
         await pilot.press("y")
         await _until(pilot, lambda: jobs == ["remove"])
         hints = str(modal.query_one(proxy_modal.KeyHintFooter).render())
-        assert "R=Remove CA" in hints
-        assert "Shift+Left/Right=Tabs" in hints
+        assert "r remove CA" in hints
+        assert "Shift+Left/Right tabs" in hints
 
 
 async def test_proxy_modal_shift_arrows_cycle_the_tabs(monkeypatch):

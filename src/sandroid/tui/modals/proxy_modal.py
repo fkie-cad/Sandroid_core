@@ -447,7 +447,7 @@ class NetworkMethodModal(_MethodRepaint, ForensicModal[None]):
 
 
 #: The dialog's single-letter keys, shown in every hint line (either case).
-_LETTER_HINTS = "A=Add app  F=Spotlight  P=Push CA  I=Inject CA  R=Remove CA"
+_LETTER_HINTS = "a=Add app  f=Spotlight  p=Push CA  i=Inject CA  r=Remove CA"
 
 
 class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
