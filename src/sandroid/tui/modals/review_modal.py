@@ -26,7 +26,8 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Checkbox, Input, Label, SelectionList, Static
 from textual.widgets.selection_list import Selection
 
-from ..utils.markup import escape, plain
+from sandroid.tui.utils.markup import escape, plain
+
 from .base import ForensicModal
 
 if TYPE_CHECKING:
