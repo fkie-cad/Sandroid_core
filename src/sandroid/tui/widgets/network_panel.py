@@ -130,7 +130,10 @@ STATUS_KEY = "network:capture-status"
 #: has this many cells; Time | App | Recipient | Request | TLS | Identity |
 #: Status | Size is the full order.
 REQUEST_MIN_WIDTH = 26
-LAYOUT_DROP_ORDER = ("size", "tls", "time", "app")
+#: Columns a narrow lens drops, first to last (N3-V3): Recipient only adds
+#: an organisation name, Time is on the Inspector's Summary; App and Status
+#: are never dropped.
+LAYOUT_DROP_ORDER = ("size", "who", "time")
 
 # --------------------------------------------------------------------------
 # recipients + OS noise
@@ -364,6 +367,8 @@ def smart_request(method: str, host: str, path: str, width: int) -> Text:
         candidates.append(f"/{segs[0]}/…/{segs[-1]}")
     if len(segs) > 1:
         candidates.append(f"/…/{segs[-1]}")
+    if segs:
+        candidates.append("/…")
     room = width - len(method) - 1 - len(host)
     chosen = None
     for cand in candidates:
@@ -374,7 +379,8 @@ def smart_request(method: str, host: str, path: str, width: int) -> Text:
     text.append(method, style=lens_palette().muted)
     text.append(" ")
     if chosen is None:
-        rest = _ellipsize(host + candidates[-1], max(1, width - len(method) - 1))
+        # Only the host, cut: never "host/……" (an ellipsis cut by another).
+        rest = _ellipsize(host, max(1, width - len(method) - 1))
         hlen = min(len(host), len(rest))
         text.append(rest[:hlen], style=lens_palette().text)
         text.append(rest[hlen:], style=lens_palette().muted)
@@ -1760,21 +1766,22 @@ class NetworkPanel(Widget):
     def _layout(self) -> list[tuple[str, str, int]]:
         """``[(key, label, width)]`` of the visible columns for this width.
 
-        Time | App | Recipient | Request | TLS | Identity | Status | Size when
+        Time | App | Recipient | Request | Identity | Status | Size when
         there is room; a narrow lens (e.g. 100 columns with the Inspector
-        open) drops Size, then TLS, then Time, then App (``LAYOUT_DROP_ORDER``)
+        open) drops Size, then Recipient, then Time (``LAYOUT_DROP_ORDER``)
         until Request has ``REQUEST_MIN_WIDTH`` cells, instead of scrolling
-        sideways. Identity keeps its own rule (``_privacy_columns``).
+        sideways; App and Status stay. Identity keeps its own rule
+        (``_privacy_columns``). There is no TLS column: Status says
+        ``TLS failed`` and marks a flow sent without TLS ``plain`` (N3-V3).
         """
         avail = self.size.width or 120
         who = 18 if avail >= 110 else (16 if avail >= 58 else 12)
-        app = 20 if avail >= 140 else 14
+        app = 20 if avail >= 140 else (14 if avail >= 70 else 12)
         cols = [
             ("time", "Time", 8),
             ("app", "App", app),
             ("who", "Recipient", who),
             ("req", "Request", 0),
-            ("tls", "TLS", 10),
         ]
         cols += self._privacy_columns(avail)
         cols += [("status", "Status", 13), ("size", "Size", 16)]
@@ -1801,25 +1808,19 @@ class NetworkPanel(Widget):
 
     def _cells(self, row: FlowRow, layout: list[tuple[str, str, int]]) -> list[Text]:
         widths = {k: w for k, _, w in layout}
-        req_w, who_w = widths["req"], widths["who"]
+        req_w, who_w = widths["req"], widths.get("who", 0)
         t = Text(
             time.strftime("%H:%M:%S", time.localtime(row.ts)), style=lens_palette().dim
         )
         label, known = row.recipient
-        who = Text(_ellipsize(label, who_w), style=lens_palette().text)
+        # Only an organisation name says more than the Request's host
+        # ("Meta" for graph.facebook.com); a bare domain repeats it (N3-V3).
+        who = Text(_ellipsize(label, who_w) if known else "", style=lens_palette().text)
         app = Text(
             app_label(row.app, widths.get("app", 0)),
             style=lens_palette().muted,
             no_wrap=True,
             overflow="crop",
-        )
-        tls = tls_word(row)
-        tls_cell = Text(
-            tls,
-            style={
-                "TLS failed": f"bold {lens_palette().bad}",
-                "plain": lens_palette().warn,
-            }.get(tls, lens_palette().muted),
         )
         tag = _phase_tag(row.phase) if self.in_review else ""
         if row.kind == "tls":
@@ -1852,6 +1853,11 @@ class NetworkPanel(Widget):
                 elif code >= 500:
                     color = lens_palette().bad
                 status = Text(str(code), style=color)
+            if tls_word(row) == "plain":
+                # Sent without TLS: worth seeing (Status, no own column).
+                status.append(
+                    " plain" if len(status) else "plain", style=lens_palette().warn
+                )
             size = Text(
                 size_words(row),
                 style=lens_palette().text if row.req_bytes else lens_palette().dim,
@@ -1862,7 +1868,6 @@ class NetworkPanel(Widget):
             "app": app,
             "who": who,
             "req": req,
-            "tls": tls_cell,
             "status": status,
             "size": size,
         }

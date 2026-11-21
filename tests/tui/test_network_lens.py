@@ -418,7 +418,6 @@ async def test_flows_fill_the_table_noise_hidden(flow_dir):
             "app",
             "who",
             "req",
-            "tls",
             "status",
             "size",
         ]
@@ -1046,23 +1045,25 @@ def _layout_at(monkeypatch, width: int, identity: bool) -> list[tuple[str, str, 
 @pytest.mark.parametrize(
     ("width", "identity", "keys"),
     [
-        (160, False, ["time", "app", "who", "req", "tls", "status", "size"]),
+        (160, False, ["time", "app", "who", "req", "status", "size"]),
         (
             160,
             True,
-            ["time", "app", "who", "req", "tls", "ident", "status", "size"],
+            ["time", "app", "who", "req", "ident", "status", "size"],
         ),
-        (120, True, ["time", "app", "who", "req", "tls", "ident", "status"]),
-        (100, False, ["time", "app", "who", "req", "tls", "status"]),
+        (120, True, ["time", "app", "who", "req", "ident", "status"]),
+        (100, False, ["time", "app", "who", "req", "status"]),
         # Inspector open (~100 columns) with Identity: TLS and Time go
-        (100, True, ["app", "who", "req", "ident", "status"]),
-        (80, False, ["app", "who", "req", "status"]),
-        (60, False, ["who", "req", "status"]),
+        (100, True, ["time", "app", "req", "ident", "status"]),
+        (80, False, ["time", "app", "req", "status"]),
+        # The Inspector open at 120 columns: App and Status stay (N3-V3).
+        (60, False, ["app", "req", "status"]),
     ],
 )
 def test_column_order_and_narrow_drop_order(monkeypatch, width, identity, keys):
     """Time | App | Recipient | Request | TLS | Identity | Status | Size; a
-    narrow lens drops Size, TLS, Time, App (in that order) for Request.
+    narrow lens drops Size, Recipient, Time (in that order) for Request;
+    App and Status stay, and there is no TLS column (N3-V3).
     """
     layout = _layout_at(monkeypatch, width, identity)
     assert [k for k, _l, _w in layout] == keys
@@ -1073,7 +1074,7 @@ def test_column_order_and_narrow_drop_order(monkeypatch, width, identity, keys):
         assert widths["ident"] == (18 if width >= 130 else 14)
     labels = {k: label for k, label, _w in layout}
     assert labels.get("app", "App") == "App"
-    assert labels.get("tls", "TLS") == "TLS"
+    assert "tls" not in labels  # Status says it (N3-V3)
 
 
 def test_highlight_column_may_take_the_size_place(monkeypatch):
@@ -1085,8 +1086,12 @@ def test_highlight_column_may_take_the_size_place(monkeypatch):
     monkeypatch.setattr(HighlightView, "show_column", lambda self, width: True)
     keys = [k for k, _l, _w in _layout_at(monkeypatch, 200, False)]
     assert keys[-2:] == ["size", "hl"]
+    # Without the TLS column 158 fits Size and Highlight; at 140 Highlight
+    # takes Size's place.
     keys = [k for k, _l, _w in _layout_at(monkeypatch, 158, True)]
-    assert keys == ["time", "app", "who", "req", "tls", "ident", "status", "hl"]
+    assert keys == ["time", "app", "who", "req", "ident", "status", "size", "hl"]
+    keys = [k for k, _l, _w in _layout_at(monkeypatch, 140, True)]
+    assert keys == ["time", "app", "who", "req", "ident", "status", "hl"]
     assert "hl" not in [k for k, _l, _w in _layout_at(monkeypatch, 100, True)]
 
 
@@ -1097,7 +1102,6 @@ def _cell_texts(row: FlowRow) -> dict[str, str]:
         ("app", "App", 20),
         ("who", "Recipient", 18),
         ("req", "Request", 40),
-        ("tls", "TLS", 10),
         ("status", "Status", 13),
         ("size", "Size", 16),
     ]
@@ -1105,7 +1109,10 @@ def _cell_texts(row: FlowRow) -> dict[str, str]:
     return {k: cells[i].plain for i, (k, _l, _w) in enumerate(layout)}
 
 
-def test_app_and_tls_cells_say_it_in_words():
+def test_app_and_status_cells_say_it_in_words():
+    """No TLS column (N3-V3): Status says "TLS failed" once and marks a flow
+    sent without TLS "plain"; Recipient only names a known organisation.
+    """
     from sandroid.tui.themes import lens_palette
 
     # an App Proxy flow carries its app tag; over https it is TLS
@@ -1120,8 +1127,11 @@ def test_app_and_tls_cells_say_it_in_words():
     )
     cells = _cell_texts(proxied)
     assert cells["app"] == PKG
-    assert cells["tls"] == "TLS"
+    assert cells["status"] == "200"
+    assert cells["who"] == ""  # a bare domain would repeat the Request host
     assert cells["size"] == "sent 2.0 KB"
+    meta = FlowRow(key="m", ts=0.0, host="graph.facebook.com", status=200)
+    assert _cell_texts(meta)["who"] == "Meta"
     # an untagged flow shows no app (nothing, not a placeholder)
     untagged = FlowRow(
         key="f2",
@@ -1133,22 +1143,29 @@ def test_app_and_tls_cells_say_it_in_words():
     )
     cells = _cell_texts(untagged)
     assert cells["app"] == ""
-    assert cells["tls"] == "plain"
+    assert cells["status"] == "200 plain"
     assert cells["size"] == "received 5.0 KB"
     panel = NetworkPanel()
-    layout = [("req", "Request", 40), ("who", "Recipient", 18), ("tls", "TLS", 10)]
-    assert panel._cells(untagged, layout)[2].style == lens_palette().warn
+    layout = [("req", "Request", 40), ("who", "Recipient", 18), ("status", "S", 13)]
+    status = panel._cells(untagged, layout)[2]
+    assert any(
+        status.plain[span.start : span.end] == " plain"
+        and span.style == lens_palette().warn
+        for span in status.spans
+    )
     # a failed handshake
     tls = FlowRow(key="t1", ts=0.0, host="c.io", kind="tls", method="TLS", app=PKG)
     cells = _cell_texts(tls)
-    assert cells["tls"] == "TLS failed"
-    assert cells["status"] == "TLS failed"
+    assert cells["status"] == "TLS failed"  # once, not in a TLS column too
     assert cells["app"] == PKG
     # no protocol recorded (older log): no guess
-    assert _cell_texts(FlowRow(key="f3", ts=0.0, host="d.io"))["tls"] == ""
+    old = FlowRow(key="f3", ts=0.0, host="d.io", status=200)
+    assert _cell_texts(old)["status"] == "200"
     # websockets
-    assert _cell_texts(FlowRow(key="f4", ts=0.0, protocol="WSS"))["tls"] == "TLS"
-    assert _cell_texts(FlowRow(key="f5", ts=0.0, protocol="WS"))["tls"] == "plain"
+    wss = FlowRow(key="f4", ts=0.0, protocol="WSS", status=101)
+    assert _cell_texts(wss)["status"] == "101"
+    ws = FlowRow(key="f5", ts=0.0, protocol="WS", status=101)
+    assert _cell_texts(ws)["status"] == "101 plain"
     # a long package keeps its trailing name parts, cut without a glyph
     long_app = FlowRow(key="f6", ts=0.0, app="com.ebay.kleinanzeigen")
     assert _cell_texts(long_app)["app"] == "ebay.kleinanzeigen"
@@ -1170,7 +1187,7 @@ def test_status_and_size_cells_have_no_glyphs():
     ]
     for row in rows:
         cells = _cell_texts(row)
-        for key in ("app", "tls", "status", "size"):
+        for key in ("app", "status", "size"):
             assert not set(cells[key]) & set("\u2191\u2193\u2013\u2026\u2691"), (
                 key,
                 cells[key],
@@ -1210,6 +1227,22 @@ def test_size_column_fits_three_digit_kilobytes():
     request = panel._cells(tls, layout)[2].plain
     assert request.startswith("setup TLS ssl.gstatic.com")
     assert len(request) <= 40
+
+
+def test_request_cell_never_shows_a_doubled_ellipsis():
+    """N3-V3: at 120 columns "GET thumb.wikimedia.org/……" (an ellipsis cut
+    by another). The host is cut instead, with one ellipsis.
+    """
+    for width in range(12, 50):
+        text = np_mod.smart_request(
+            "GET", "thumb.wikimedia.org", "/wikipedia/commons/a/b/c.jpg", width
+        ).plain
+        assert "……" not in text, (width, text)
+        assert len(text) <= width, (width, text)
+    assert (
+        np_mod.smart_request("GET", "thumb.wikimedia.org", "/a/b/c.jpg", 26).plain
+        == "GET thumb.wikimedia.org/…"
+    )
 
 
 def test_decoded_body_note_and_protocol_label():
@@ -1784,12 +1817,11 @@ async def test_flows_with_profile_values_are_tinted_named_and_filtered(
     async with app.run_test(size=SIZE) as pilot:
         ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         table = panel.table
-        assert [str(c.value) for c in table.columns][:7] == [
+        assert [str(c.value) for c in table.columns][:6] == [
             "time",
             "app",
             "who",
             "req",
-            "tls",
             "ident",
             "status",
         ]
@@ -1906,7 +1938,7 @@ async def test_no_identity_column_without_a_profile(flow_dir, monkeypatch):
     async with app.run_test(size=SIZE) as pilot:
         _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         assert "ident" not in [str(c.value) for c in panel.table.columns]
-        assert len(panel.table.columns) == 7
+        assert len(panel.table.columns) == 6
         assert _tinted(panel.table) == set()
 
 
