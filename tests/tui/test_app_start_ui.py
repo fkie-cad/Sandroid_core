@@ -849,6 +849,20 @@ def test_hooks_running_line_lists_every_app_when_others_have_hooks():
     assert others_note(3) == "3 other apps have hooks"
 
 
+def test_header_note_about_other_apps_hooks_is_muted(monkeypatch):
+    from sandroid.tui.themes import lens_palette
+    from sandroid.tui.widgets import spotlight_panel as sp
+
+    _panel_env(monkeypatch)
+    apps = _hooks((OTHER, 88, ("ssl",)), (PKG, 77, ("ssl",)))
+    monkeypatch.setattr(sp, "collect_app_hooks", lambda: list(apps))
+    header = SpotlightPanel()._render_header()
+    c = lens_palette()
+    # Secondary header text: the lens' muted token, not the warning colour.
+    assert f"[{c.dim}]1 other app has hooks[/]" in header
+    assert f"[{c.warn}]1 other app" not in header
+
+
 class _InspScreen(Screen):
     """Just the Inspector API of MainScreen the panel uses."""
 

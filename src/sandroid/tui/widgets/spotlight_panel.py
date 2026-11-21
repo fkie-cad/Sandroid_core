@@ -825,7 +825,7 @@ class SpotlightPanel(Widget):
         header = f"{state}  [b]{package}[/]  hooks: [b]{len(hooks)}[/]  {bypass_tag}"
         others = sum(1 for a in collect_app_hooks() if a.package != package)
         if others:
-            header += f"  [{c.warn}]{others_note(others)}[/]"
+            header += f"  [{c.dim}]{others_note(others)}[/]"
         sections = self._sections()
         if sections is not None and sections.refreshing:
             header += f"  [{c.dim}]refreshing app facts[/]"
