@@ -129,6 +129,23 @@ def _visibility_select(screen: SettingsScreen, category: str) -> Select:
 # -- Monitor event-visibility rows ---------------------------------------------
 
 
+@pytest.mark.parametrize("size", [(100, 30), (200, 50)])
+async def test_every_settings_tab_is_visible_at_100_columns(size) -> None:
+    """At 90 columns the tab bar ended in "Ti": the Timeline tab was cut."""
+    from textual.widgets import Tab, Tabs
+
+    app = _MonitorSettingsHarness(SandroidConfig())
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        bar = app.screen.query_one("#settings-tabs").query_one(Tabs)
+        tabs = list(bar.query(Tab))
+        assert len(tabs) == 9
+        right = bar.content_region.right
+        for tab in tabs:
+            assert tab.region.right <= right, str(tab.label)
+            assert tab.region.width >= len(str(tab.label)), str(tab.label)
+
+
 @pytest.mark.asyncio
 async def test_compose_renders_default_visibility_selects() -> None:
     """Schema-default config: 5 categories 'always', noise 'verbose'."""

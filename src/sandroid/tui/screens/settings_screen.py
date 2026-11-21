@@ -147,7 +147,10 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
     }
 
     #settings-container {
-        width: 90;
+        /* 90 columns cut the nine tabs off at "Ti" (Timeline): the tab bar
+           needs about 92 inside the border and padding. */
+        width: 100%;
+        max-width: 100;
         height: auto;
         max-height: 42;
         background: #0d1117;
