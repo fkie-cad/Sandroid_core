@@ -20,9 +20,9 @@ writes the world's phone contents onto it:
 The ledger also lists every item by its world id with its row id and a
 hash of the row (``items``), so :func:`refresh` can later bring the device
 to an edited world by removing and adding only what differs. :func:`topup`
-adds the world's SMS, calls and events of the time since the anchor (a
-loaded persona snapshot looks used today); the device stamp records each
-top-up before its rows go in.
+adds new SMS and calls generated for the time since the anchor and the
+world's events of it (a loaded persona snapshot looks used today); the
+device stamp records each top-up before its rows go in.
 
 Run it from a worker thread (it blocks for minutes), never the UI thread.
 Every adb call names the serial. The identity layer and the persona snapshot
@@ -52,6 +52,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sandroid.core.adb_utils import SNAPSHOT_NAME_RE
 from sandroid.world.content import file_bytes
+from sandroid.world.generator import fresh_items, text_key
 from sandroid.world.helper import (
     DEVICE_DIR,
     Device,
@@ -70,7 +71,7 @@ from sandroid.world.photos import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Collection, Mapping
 
     from sandroid.world.manifest import RenderedWorld, WorldManifest
     from sandroid.world.packs import PackSet
@@ -1942,9 +1943,6 @@ TOPUP_MIN_GAP_S = 3600
 TOPUP_MAX_DAYS = 30
 #: Calendar events up to this far ahead of now are part of a top-up.
 TOPUP_EVENTS_AHEAD_S = 86400
-#: How many weeks back a top-up may look for SMS / calls to re-date.
-TOPUP_MAX_WEEKS = 52
-_WEEK_MS = 7 * 86400 * 1000
 
 _TOPUP_LOCKS: dict[str, threading.Lock] = {}
 _TOPUP_LOCKS_GUARD = threading.Lock()
@@ -1968,8 +1966,6 @@ class TopUpReport:
         since: The start of the window it covered, ISO 8601.
         counts: Rows added per list (``sms``, ``calls``, ``events``).
         newest: Newest added time per list, ISO 8601.
-        weeks_back: Per list, how many weeks back its items were re-dated
-            from (0: the world's own items of the window).
         warnings: Everything a person should know.
         seconds: Wall time.
     """
@@ -1982,7 +1978,6 @@ class TopUpReport:
     since: str = ""
     counts: dict[str, int] = field(default_factory=dict)
     newest: dict[str, str] = field(default_factory=dict)
-    weeks_back: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     seconds: float = 0.0
 
@@ -2005,47 +2000,51 @@ class TopUpReport:
 
 
 def topup_world(
-    world: RenderedWorld, since: dt.datetime, now: dt.datetime
-) -> tuple[RenderedWorld, dict[str, int]]:
+    manifest: WorldManifest,
+    since: dt.datetime,
+    now: dt.datetime,
+    *,
+    packs: PackSet | None = None,
+    avoid: Collection[str] = (),
+) -> RenderedWorld:
     """The SMS, calls and events of a top-up for the window ``(since, now]``.
 
-    ``world`` is rendered at ``now``. SMS and calls: the world's own items of
-    the window when one of them lies in the window's last day; otherwise
-    those of the same window ``k`` whole weeks earlier (the smallest ``k``
-    up to :data:`TOPUP_MAX_WEEKS` with an item in that last day), re-dated
-    by ``k`` weeks -- so a sparse world still gets messages and calls from
-    today, on the weekdays and at the times of day the world uses. Events:
-    the world's own (no birthdays or holidays, which recur anyway), up to
+    SMS and calls are NEW items for the window
+    (:func:`sandroid.world.generator.fresh_items`: the world's people and
+    service senders, its languages and country, a sub-seed of the world
+    seed and the window): the world's own items of the window would only
+    repeat texts already on the device. No SMS text equals one of the
+    world's (rendered at ``now``) or one whose
+    :func:`~sandroid.world.generator.text_key` is in ``avoid``. Events: the
+    world's own (no birthdays or holidays, which recur anyway), up to
     :data:`TOPUP_EVENTS_AHEAD_S` ahead. Deterministic for a world, window
-    and now.
+    and ``avoid``.
 
     Returns:
-        The world holding only those items, and the weeks each list was
-        taken from (``{"sms": k, "calls": k}``).
+        The world rendered at ``now`` holding only those items.
     """
+    world = manifest.render(now)
+    keys = {*avoid, *(text_key(m["body"]) for m in world.sms)}
+    sms, calls = fresh_items(manifest, since, now, packs=packs, avoid=keys)
     lo, hi = _ms_of(since), _ms_of(now)
-    day = max(lo, hi - 86400 * 1000)
-    weeks: dict[str, int] = {}
-    picked: dict[str, list[dict[str, Any]]] = {}
-    for name in ("sms", "calls"):
-        items = getattr(world, name)
-        chosen = 0
-        for k in range(TOPUP_MAX_WEEKS + 1):
-            shift = k * _WEEK_MS
-            if any(day < i["ts_ms"] + shift <= hi for i in items):
-                chosen = k
-                break
-        shift = chosen * _WEEK_MS
-        picked[name] = [
-            {**i, "ts_ms": i["ts_ms"] + shift}
-            for i in items
-            if lo < i["ts_ms"] + shift <= hi
-        ]
-        weeks[name] = chosen
     ahead = hi + TOPUP_EVENTS_AHEAD_S * 1000
     events = [e for e in world.events if not e.get("rule") and lo < e["ts_ms"] <= ahead]
-    sub = replace(world, sms=picked["sms"], calls=picked["calls"], events=events)
-    return sub, weeks
+    return replace(world, sms=sms, calls=calls, events=events)
+
+
+def seeded_text_keys(manifest: WorldManifest, stamp: Mapping[str, Any]) -> set[str]:
+    """:func:`~sandroid.world.generator.text_key` of every SMS text the device
+    got from ``manifest``: the prepare's (rendered at the stamp's anchor) and
+    every top-up's (its ``texts``).
+    """
+    keys: set[str] = set()
+    anchor = _parse_iso(stamp.get("anchor"))
+    if anchor is not None:
+        keys.update(text_key(m["body"]) for m in manifest.render(anchor).sms)
+    for entry in stamp.get("topups") or []:
+        if isinstance(entry, dict):
+            keys.update(str(k) for k in entry.get("texts") or [])
+    return keys
 
 
 def last_world_anchor(stamp: Mapping[str, Any]) -> dt.datetime | None:
@@ -2073,12 +2072,14 @@ def topup(
     """Add the world's SMS, calls and calendar events of the time since the
     device's world was seeded (or last topped up), so it looks used today.
 
-    The world is rendered at ``now`` (default the host clock) -- the same
-    deterministic render :func:`prepare` uses -- and its items between the
-    newest anchor on the device and now go in, at most ``max_days`` back
-    (:func:`topup_world`: a sparse world's SMS and calls come from the same
-    window whole weeks earlier, re-dated, so some are from today). The device stamp records each top-up
-    (anchor, window, row ids) BEFORE the rows go in, so a second call, or
+    The window runs from the newest anchor on the device to ``now``
+    (default the host clock), at most ``max_days`` back
+    (:func:`topup_world`): new SMS and calls generated for it from the
+    world's people, senders and languages with a sub-seed of the world seed
+    and the window (at least one of each from today; no text repeats one on
+    the device), and the world's own calendar events of the window. The
+    device stamp records each top-up (anchor, window, text hashes, row ids)
+    BEFORE the rows go in, so a second call, or
     one after an interrupted top-up, never adds them twice; within
     ``min_gap_s`` of the newest anchor nothing is done. Contacts, photos
     and files stay as they are. Call from a worker thread (seconds).
@@ -2148,11 +2149,18 @@ def topup(
                 f"the world was seeded {(now_dt - last).days} days ago; only the "
                 f"last {max_days} days are topped up"
             )
-        sub, weeks = topup_world(manifest.render(now_dt), since, now_dt)
+        sub = topup_world(
+            manifest,
+            since,
+            now_dt,
+            packs=packs,
+            avoid=seeded_text_keys(manifest, stamp),
+        )
         entry: dict[str, Any] = {
             "anchor": now_dt.isoformat(),
             "since": since.isoformat(),
-            "weeks_back": weeks,
+            # Later top-ups never repeat these texts.
+            "texts": sorted({text_key(m["body"]) for m in sub.sms}),
             "state": "running",
             "counts": {},
             "ids": {},
@@ -2180,7 +2188,6 @@ def topup(
     out.ran = True
     out.anchor = entry["anchor"]
     out.since = entry["since"]
-    out.weeks_back = dict(weeks)
     out.counts = dict(entry["counts"])
     for name, rows in (("sms", sub.sms), ("calls", sub.calls), ("events", sub.events)):
         if rows and out.counts.get(name):

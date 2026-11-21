@@ -21,6 +21,7 @@ holiday years while generating.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import math
 import re
 import unicodedata
@@ -31,6 +32,7 @@ from sandroid.world.manifest import (
     Owner,
     WorldManifest,
     WorldSpec,
+    fill_slots,
     format_date,
 )
 from sandroid.world.packs import (
@@ -49,7 +51,7 @@ from sandroid.world.packs import (
 from sandroid.world.stream import Cumulative, SeedStream, new_seed, parse_seed
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Collection, Mapping, Sequence
 
     from sandroid.world.packs import Pack
 
@@ -226,6 +228,51 @@ class _Person:
         return None
 
 
+@dataclass(frozen=True)
+class _Window:
+    """A top-up window ``(lo, hi]`` in epoch milliseconds (internal).
+
+    Attributes:
+        lo: Start (exclusive).
+        hi: End (inclusive): now.
+        now: ``hi`` as an aware datetime in the device's time zone.
+        frac: The window's share of the world's history (at most 1).
+    """
+
+    lo: int
+    hi: int
+    now: dt.datetime
+    frac: float
+
+    def count(self, total: int, bias: float, u: float) -> int:
+        """How many of ``total`` items drawn with recency ``bias`` (see
+        :meth:`_Generator.pick_time`) lie in the newest ``frac`` of the
+        history, rounded with ``u`` in [0, 1).
+        """
+        return int(total * self.frac ** (1 / bias) + u)
+
+    def when(self, s: SeedStream, bias: float, *, newest: bool = False) -> int:
+        """A time in the window: recency-biased, with the daily rhythm of
+        :meth:`_Generator.pick_time`; ``newest``: in the window's last day.
+        """
+        span_ms = self.hi - self.lo
+        if newest:
+            span_ms = min(span_ms, DAY * 1000)
+        span = span_ms / 1000
+        tz = self.now.tzinfo or dt.UTC
+        back = span
+        for _ in range(8):
+            back = span * s.random() ** bias
+            day = (self.now - dt.timedelta(seconds=back)).date()
+            start = dt.datetime.combine(
+                day, dt.time(s.weighted_index(_HOUR_CUM)), tzinfo=tz
+            )
+            ms = _ms(start) + s.below(3600) * 1000
+            if max(self.lo, self.hi - span_ms) < ms <= self.hi:
+                return ms
+        return max(self.lo + 1, self.hi - int(back * 1000))
+
+
 def generate(
     spec: WorldSpec | Mapping[str, Any],
     owner: Owner | Mapping[str, Any],
@@ -276,6 +323,57 @@ def generate(
     return gen.run()
 
 
+def text_key(text: str) -> str:
+    """Short hash of a message text: what a top-up never repeats."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def topup_seed(seed: str, since_ms: int, now_ms: int) -> bytes:
+    """The sub-seed of a top-up window: the world seed and the window only."""
+    return hashlib.sha256(
+        b"sandroid-world-topup-v1\x00"
+        + parse_seed(seed)
+        + f"\x00{int(since_ms)}:{int(now_ms)}".encode()
+    ).digest()
+
+
+def fresh_items(
+    manifest: WorldManifest,
+    since: dt.datetime,
+    now: dt.datetime,
+    *,
+    packs: PackSet | None = None,
+    avoid: Collection[str] = (),
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """New SMS and calls for the window ``(since, now]`` (a persona top-up).
+
+    The world's people, home city and service senders are restored from
+    ``manifest``; the items are drawn from streams keyed by
+    :func:`topup_seed` (world seed + window), so the same window always
+    gets the same items and another window other ones. Personal threads
+    come from the people's language packs (weighted by closeness, region
+    rules applied), service SMS from the senders the world already uses, in
+    their languages. How many follows the world's own rate near the present,
+    at least one call and one SMS (a service SMS when every thread drawn
+    repeats a text), the first of each in the window's last day. No SMS
+    text has a :func:`text_key` in ``avoid`` or repeats within the window (a
+    conversation that would is left out).
+
+    Args:
+        manifest: The world.
+        since: Start of the window (exclusive), timezone-aware.
+        now: End of the window (inclusive), in the device's time zone.
+        packs: The packs; None loads them.
+        avoid: :func:`text_key` of every text already on the device.
+
+    Returns:
+        ``(sms, calls)`` as rendered rows (``ts_ms``, final text), oldest
+        first.
+    """
+    gen = _Generator.restored(manifest, packs or load_packs())
+    return gen.fresh(since, now, avoid)
+
+
 def configured_email_domain() -> str | None:
     """Return the Sandroid config's ``world.email_domain`` (None if unset).
 
@@ -297,6 +395,10 @@ def configured_email_domain() -> str | None:
 
 
 # ----------------------------------------------------------------- helpers
+
+
+def _ms(moment: dt.datetime) -> int:
+    return int(moment.timestamp() * 1000)
 
 
 def _ascii_slug(text: str) -> str:
@@ -1254,13 +1356,16 @@ class _Generator:
 
     # -- services
 
-    def setup_services(self) -> None:
-        s = self.stream("services")
+    def _services_by_kind(self) -> dict[str, list[dict[str, Any]]]:
         by_kind: dict[str, list[dict[str, Any]]] = {}
         for svc in self.cd.get("services") or []:
             kind = KIND_ALIASES.get(svc.get("kind"), svc.get("kind"))
             by_kind.setdefault(kind, []).append({**svc, "kind": kind})
-        self.services_by_kind = by_kind
+        return by_kind
+
+    def setup_services(self) -> None:
+        s = self.stream("services")
+        by_kind = self.services_by_kind = self._services_by_kind()
         chosen: list[dict[str, Any]] = []
         for kind in sorted(by_kind):
             pool = by_kind[kind]
@@ -1854,6 +1959,274 @@ class _Generator:
                 "spoofs Pixel fingerprints)."
             )
         return dev
+
+    # -- top-up (fresh items for a window after the anchor)
+
+    @classmethod
+    def restored(cls, manifest: WorldManifest, packs: PackSet) -> _Generator:
+        """A generator holding ``manifest``'s people, places and services."""
+        gen = cls(
+            WorldSpec.from_dict(dict(manifest.spec)),
+            Owner.from_dict(dict(manifest.owner)),
+            packs,
+        )
+        gen.setup_places()  # stream "places" of the world seed: its home city
+        gen.services_by_kind = gen._services_by_kind()
+        for d in manifest.people:
+            mm, dd = (int(x) for x in str(d.get("birthday") or "01-01").split("-"))
+            year = NOMINAL_ANCHOR.year - int(d.get("age") or 30)
+            try:
+                birth = dt.date(year, mm, dd)
+            except ValueError:  # 29 February
+                birth = dt.date(year, mm, 28)
+            gen.people.append(
+                _Person(
+                    n=int(str(d["id"]).rsplit(".", 1)[-1]),
+                    role=d["role"],
+                    relation=d["relation"],
+                    closeness=float(d["closeness"]),
+                    culture=d["culture"],
+                    language=d["language"],
+                    gender=d["gender"],
+                    first=d["first"],
+                    last=d["last"],
+                    birth=birth,
+                    numbers=list(d.get("numbers") or []),
+                    email=d.get("email"),
+                    city=d.get("city") or "",
+                )
+            )
+        gen.partner = next((p for p in gen.people if p.role == "partner"), None)
+        gen.services = gen._services_of(manifest.sms)
+        return gen
+
+    def _services_of(self, sms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The service senders the world's SMS use, with their templates."""
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for m in sms:
+            kind, address = m.get("service"), m.get("address")
+            if not kind or not address or address in seen:
+                continue
+            seen.add(address)
+            templates = self._service_templates(m["lang"], kind)
+            if not templates:
+                continue
+            label = m.get("label")
+            pool = self.services_by_kind.get(kind) or []
+            base = next(
+                (
+                    p
+                    for p in pool
+                    if p.get("sender") in (address, label)
+                    or (label and p.get("label") == label)
+                ),
+                None,
+            ) or next(
+                (p for p in pool if p.get("sender_type") == m.get("sender_type")),
+                {},
+            )
+            out.append(
+                {
+                    **base,
+                    "kind": kind,
+                    "sender": base.get("sender") or label or address,
+                    "label": label or base.get("label"),
+                    "sender_type": m.get("sender_type"),
+                    "address": address,
+                    "lang": m["lang"],
+                    "templates": templates,
+                }
+            )
+        return out
+
+    def fresh(
+        self, since: dt.datetime, now: dt.datetime, avoid: Collection[str]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """See :func:`fresh_items`."""
+        lo, hi = _ms(since), _ms(now)
+        if hi <= lo:
+            return [], []
+        sub = topup_seed(self.seed, lo, hi)
+        win = _Window(lo, hi, now, min(1.0, (hi - lo) / 1000 / max(1, self.history_s)))
+        sms = self._fresh_sms(SeedStream(sub, "topup/sms"), win, set(avoid))
+        calls = self._fresh_calls(SeedStream(sub, "topup/calls"), win)
+        return sms, calls
+
+    def _fresh_sms(
+        self, s: SeedStream, win: _Window, keys: set[str]
+    ) -> list[dict[str, Any]]:
+        total = self.counts["sms"]
+        service_total = round(total * 0.35) if self.services else 0
+        reachable = [p for p in self.people if p.mobile]
+        n_personal = (
+            win.count(total - service_total, 1.7, s.random()) if reachable else 0
+        )
+        n_service = win.count(service_total, 1.4, s.random()) if self.services else 0
+        if not n_personal and not n_service:
+            if reachable:
+                n_personal = 1
+            elif self.services:
+                n_service = 1
+        rows: list[dict[str, Any]] = []
+        conv = 0
+
+        def take(new: list[dict[str, Any]]) -> bool:
+            """Keep a conversation unless one of its texts is not new."""
+            nonlocal conv
+            mine = [text_key(r["body"]) for r in new]
+            if not new or len(set(mine)) < len(mine) or keys.intersection(mine):
+                return False
+            keys.update(mine)
+            conv += 1
+            for r in new:
+                r["conv"] = conv
+                r["read"] = (
+                    r["direction"] == "sent"
+                    or win.hi - r["ts_ms"] > 2 * DAY * 1000
+                    or s.chance(0.5)
+                )
+            rows.extend(new)
+            return True
+
+        if n_personal:
+            pcum = Cumulative([p.closeness for p in reachable])
+            got = 0
+            for _ in range(n_personal * 20):
+                if got >= n_personal:
+                    break
+                p = reachable[s.weighted_index(pcum)]
+                lang = self.lang(p.language)
+                options = [
+                    t
+                    for t in lang["threads"].get(_RELATIONS[p.relation][0]) or []
+                    if self.region_ok(t, p.culture)
+                ]
+                if not options:
+                    continue
+                msgs = s.choice(options)["msgs"]  # whole: no unanswered question
+                gaps = [
+                    int(min(6 * 3600, s.lognormal(150, 1.2))) * 1000 for _ in msgs[1:]
+                ]
+                t = win.when(s, 1.7, newest=not rows)
+                t = max(win.lo + 1, min(t, win.hi - sum(gaps)))
+                new: list[dict[str, Any]] = []
+                for i, (speaker, text) in enumerate(msgs):
+                    t += gaps[i - 1] if i else 0
+                    if t > win.hi:  # a window shorter than the conversation
+                        break
+                    body = self.render(
+                        text, s, t_rel=(win.hi - t) // 1000, lang=lang, person=p
+                    )
+                    if body is None:
+                        new = []
+                        break
+                    final = fill_slots(body.text, body.slots, win.now)
+                    new.append(
+                        {
+                            "address": p.mobile,
+                            "body": final,
+                            "distinctive": body.distinctive,
+                            "direction": "sent" if speaker == "o" else "inbox",
+                            "person": p.id,
+                            "service": None,
+                            "sender_type": "number",
+                            "lang": p.language,
+                            "emoji": has_emoji(final),
+                            "ts_ms": t,
+                        }
+                    )
+                if take(new):
+                    got += len(new)
+        if self.services and not n_service and not rows:
+            # Every thread drawn repeats a text (a big world used them all):
+            # a service SMS (codes, amounts) is still new.
+            n_service = 1
+        if n_service:
+            scum = Cumulative(
+                [_SERVICE_KIND_W.get(v["kind"], 0.7) for v in self.services]
+            )
+            got = 0
+            for _ in range(n_service * 20):
+                if got >= n_service:
+                    break
+                svc = self.services[s.weighted_index(scum)]
+                text = entry_text(s.choice(svc["templates"]), "text")
+                t = win.when(s, 1.4, newest=not rows)
+                body = self.render(
+                    text or "",
+                    s,
+                    t_rel=(win.hi - t) // 1000,
+                    lang=self.lang(svc["lang"]),
+                    service=svc,
+                    context="service",
+                )
+                if not body or not body.text:
+                    continue
+                final = fill_slots(body.text, body.slots, win.now)
+                row = {
+                    "address": svc["address"],
+                    "label": svc.get("label"),
+                    "body": final,
+                    "distinctive": body.distinctive,
+                    "direction": "inbox",
+                    "person": None,
+                    "service": svc["kind"],
+                    "sender_type": svc["sender_type"],
+                    "lang": svc["lang"],
+                    "emoji": has_emoji(final),
+                    "ts_ms": t,
+                }
+                if take([row]):
+                    got += 1
+        rows.sort(key=lambda r: (r["ts_ms"], r["conv"]))
+        return [
+            {"id": f"world.topup.{win.hi}.sms.{i}", **r}
+            for i, r in enumerate(rows, start=1)
+        ]
+
+    def _fresh_calls(self, s: SeedStream, win: _Window) -> list[dict[str, Any]]:
+        reachable = [p for p in self.people if p.numbers]
+        if not reachable:
+            return []
+        n = max(1, win.count(self.counts["calls"], 1.5, s.random()))
+        pcum = Cumulative([p.closeness for p in reachable])
+        medians = {"partner": 240, "family": 180, "friend": 120, "colleague": 90}
+        out: list[dict[str, Any]] = []
+        for i in range(n):
+            person: _Person | None
+            if s.chance(0.06):
+                num = self.numbers.make("mobile", s)
+                if num is None:
+                    continue
+                person, number, median = None, num["number"], 40
+                ctype = s.weighted(["incoming", "missed"], [0.4, 0.6])
+            else:
+                person = reachable[s.weighted_index(pcum)]
+                number = person.numbers[0 if s.chance(0.85) else -1]["number"]
+                median = medians.get(person.relation, 60)
+                ctype = s.weighted(
+                    ["incoming", "outgoing", "missed"], [0.42, 0.43, 0.15]
+                )
+            dur = (
+                0
+                if ctype == "missed"
+                else max(3, min(3 * 3600, int(s.lognormal(median, 0.9))))
+            )
+            out.append(
+                {
+                    "number": number,
+                    "person": person.id if person else None,
+                    "type": ctype,
+                    "duration_s": dur,
+                    "ts_ms": win.when(s, 1.5, newest=i == 0),
+                }
+            )
+        out.sort(key=lambda c: c["ts_ms"])
+        return [
+            {"id": f"world.topup.{win.hi}.calls.{i}", **c}
+            for i, c in enumerate(out, start=1)
+        ]
 
     def run(self) -> WorldManifest:
         self.device = self.pick_device()

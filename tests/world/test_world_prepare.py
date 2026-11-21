@@ -17,6 +17,7 @@ from PIL import Image
 from sandroid.world import PackSet, generate
 from sandroid.world import prepare as pr
 from sandroid.world.content import file_bytes, pdf_bytes
+from sandroid.world.generator import text_key
 from sandroid.world.helper import JAR_SHA256, REMOTE_JAR, HelperError, ShellResult
 from sandroid.world.photos import PhotoFetch
 
@@ -131,7 +132,7 @@ class FakeHelper:
             return {"ids": self._insert("calls", [{} for _ in kw["items"]])}
         if cmd == "sms":
             return {
-                "ids": self._insert("sms", [{} for _ in kw["items"]]),
+                "ids": self._insert("sms", [{"body": i["body"]} for i in kw["items"]]),
                 "mode": "batch",
             }
         if cmd in ("sync_off", "sync_state"):
@@ -984,45 +985,105 @@ def _later(days: float, hours: float = 0.0) -> dt.datetime:
     return ANCHOR + dt.timedelta(days=days, hours=hours)
 
 
-def _window(manifest, since, now, name):
-    sub, _weeks = pr.topup_world(manifest.render(now), since, now)
-    return getattr(sub, name)
+def _texts(manifest, *moments) -> set[str]:
+    return {m["body"] for t in moments for m in manifest.render(t).sms}
 
 
-def test_a_sparse_window_is_filled_from_whole_weeks_back(manifest) -> None:
-    now = _later(2, 3)
-    world = manifest.render(now)
-    sub, weeks = pr.topup_world(world, ANCHOR, now)
-    lo, hi = ANCHOR.timestamp() * 1000, now.timestamp() * 1000
-    day = hi - 86400 * 1000
+def _check_fresh(manifest, sub, since, now) -> None:
+    """New, plausible SMS and calls of the window (since, now]."""
+    lo, hi = since.timestamp() * 1000, now.timestamp() * 1000
     for name in ("sms", "calls"):
         rows = getattr(sub, name)
         assert rows, name
-        assert all(lo < r["ts_ms"] <= hi for r in rows)
-        assert max(r["ts_ms"] for r in rows) > day  # something from today
-        k = weeks[name]
-        week = 7 * 86400 * 1000
-        own = {r["id"]: r["ts_ms"] for r in getattr(world, name)}
-        # Re-dated by whole weeks: same weekday and time of day.
-        assert all(r["ts_ms"] - own[r["id"]] == k * week for r in rows)
-    # Deterministic.
-    assert pr.topup_world(manifest.render(now), ANCHOR, now) == (sub, weeks)
+        assert all(lo < r["ts_ms"] <= hi for r in rows), name
+        assert max(r["ts_ms"] for r in rows) > hi - 86400 * 1000  # from today
+        assert not {r["id"] for r in rows} & {i["id"] for i in getattr(manifest, name)}
+    bodies = [m["body"] for m in sub.sms]
+    assert len(set(bodies)) == len(bodies)
+    # Never a text the world (on the device since the anchor) already has.
+    assert not set(bodies) & _texts(manifest, ANCHOR, since, now)
+    # Senders: the persona's contacts, the services the world uses.
+    people = {p["id"]: p for p in manifest.people}
+    services = {m["address"]: m for m in manifest.sms if m["service"]}
+    for m in sub.sms:
+        if m["service"]:
+            svc = services[m["address"]]
+            assert (m["service"], m["lang"]) == (svc["service"], svc["lang"])
+        else:
+            p = people[m["person"]]
+            assert m["address"] in {n["number"] for n in p["numbers"]}
+            assert m["lang"] == p["language"]
+    for c in sub.calls:
+        if c["person"]:
+            assert c["number"] in {n["number"] for n in people[c["person"]]["numbers"]}
+
+
+def test_a_topup_generates_fresh_items_for_an_empty_window(manifest) -> None:
+    now = _later(1, 2)
+    lo, hi = ANCHOR.timestamp() * 1000, now.timestamp() * 1000
+    # The small world has nothing of its own in this window ...
+    world = manifest.render(now)
+    assert not [m for m in world.sms if lo < m["ts_ms"] <= hi]
+    # ... the top-up still brings new SMS and calls from today.
+    sub = pr.topup_world(manifest, ANCHOR, now, packs=PACKS)
+    _check_fresh(manifest, sub, ANCHOR, now)
+    # Deterministic for the window, other texts for another window.
+    assert pr.topup_world(manifest, ANCHOR, now, packs=PACKS) == sub
+    other = pr.topup_world(manifest, ANCHOR, _later(4, 2), packs=PACKS)
+    assert {m["body"] for m in other.sms} != {m["body"] for m in sub.sms}
+    # What is to be avoided is avoided.
+    keys = {text_key(m["body"]) for m in sub.sms}
+    again = pr.topup_world(manifest, ANCHOR, now, packs=PACKS, avoid=keys)
+    assert again.sms
+    assert not {text_key(m["body"]) for m in again.sms} & keys
+
+
+def test_a_window_with_world_items_gets_new_texts_instead(manifest) -> None:
+    now = _later(9, 5)
+    lo, hi = ANCHOR.timestamp() * 1000, now.timestamp() * 1000
+    own = [m for m in manifest.render(now).sms if lo < m["ts_ms"] <= hi]
+    assert own  # re-dated copies of messages the device already has
+    assert {m["body"] for m in own} <= _texts(manifest, ANCHOR)
+    sub = pr.topup_world(manifest, ANCHOR, now, packs=PACKS)
+    _check_fresh(manifest, sub, ANCHOR, now)
+
+
+@pytest.mark.parametrize(
+    ("country", "size", "phone"),
+    [("tr", "small", "+905321234567"), ("fr", "medium", "+33612345678")],
+)
+def test_fresh_items_keep_the_world_language_and_country(
+    country: str, size: str, phone: str
+) -> None:
+    spec = {"seed": "hex:" + "a7" * 16, "size": size, "country": country}
+    world = generate(spec, {**OWNER, "phone": phone}, packs=PACKS)
+    since = ANCHOR.astimezone(pr.world_timezone(world, PACKS))
+    now = since + dt.timedelta(days=3)
+    sub = pr.topup_world(world, since, now, packs=PACKS)
+    _check_fresh(world, sub, since, now)
+    langs = set(PACKS.country(country).data["languages"])
+    assert {m["lang"] for m in sub.sms if m["service"]} <= langs
+    cc = "+" + str(PACKS.country(country).data["phone"]["country_code"])
+    assert all(m["address"].startswith(cc) for m in sub.sms if not m["service"])
 
 
 def test_a_topup_adds_the_days_since_the_anchor_once(manifest) -> None:
     dev = FakeDevice()
     _run(manifest, dev)
+    seeded = _texts(manifest, ANCHOR)
     now = _later(9, 5)
     dev.now = int(now.timestamp())
     before = {n: len(dev.inserted[n]) for n in ("sms", "calls", "events")}
     rep = pr.topup(SERIAL, manifest, now=now, device=dev, packs=PACKS)
     assert rep.ran
-    want_sms = _window(manifest, ANCHOR, now, "sms")
-    want_calls = _window(manifest, ANCHOR, now, "calls")
-    assert want_sms
-    assert rep.counts["sms"] == len(want_sms)
-    assert rep.counts.get("calls", 0) == len(want_calls)
-    assert len(dev.inserted["sms"]) - before["sms"] == len(want_sms)
+    seeded_keys = {text_key(m["body"]) for m in manifest.render(ANCHOR).sms}
+    want = pr.topup_world(manifest, ANCHOR, now, packs=PACKS, avoid=seeded_keys)
+    assert rep.counts["sms"] == len(want.sms)
+    assert rep.counts.get("calls", 0) == len(want.calls)
+    assert len(dev.inserted["sms"]) - before["sms"] == len(want.sms)
+    added = [dev.tables["sms"][i]["body"] for i in dev.inserted["sms"][before["sms"] :]]
+    assert sorted(added) == sorted(m["body"] for m in want.sms)
+    assert not set(added) & seeded
     newest = dt.datetime.fromisoformat(rep.newest["sms"])
     assert ANCHOR < newest <= now
     assert rep.since == ANCHOR.isoformat()
@@ -1046,8 +1107,16 @@ def test_a_topup_adds_the_days_since_the_anchor_once(manifest) -> None:
     third = pr.topup(SERIAL, manifest, now=later, device=dev, packs=PACKS)
     assert third.ran
     assert third.since == now.isoformat()
-    assert third.counts.get("sms", 0) == len(_window(manifest, now, later, "sms"))
+    assert third.counts["sms"] >= 1
     assert len(dev.stamps[-1]["topups"]) == 2
+    # No text twice on the device: the second top-up avoids the first's.
+    first, second = (e["texts"] for e in dev.stamps[-1]["topups"])
+    assert len(first) == rep.counts["sms"]
+    assert len(second) == third.counts["sms"]
+    assert not set(first) & set(second)
+    new = [dev.tables["sms"][i]["body"] for i in dev.inserted["sms"][before["sms"] :]]
+    assert len(set(new)) == len(new)
+    assert not set(new) & seeded
 
 
 def test_an_interrupted_topup_is_never_repeated(manifest) -> None:

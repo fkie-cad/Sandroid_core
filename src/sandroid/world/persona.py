@@ -20,8 +20,8 @@ of an AVD are kept; each holds about 2.8 GB.
 
 Starting an AVD as a persona (:func:`persona_start`, the Devices screen's
 Shift+P) loads the profile's current persona snapshot, else the clean base
-and the persona stage builds it. A loaded snapshot is topped up with the
-world's SMS, calls and events up to now (:func:`after_load_topup`,
+and the persona stage builds it. A loaded snapshot is topped up with new
+SMS and calls and the world's events up to now (:func:`after_load_topup`,
 ``world.persona_topup``, default on). :func:`refresh_persona` (the Identity
 lens' Shift+W) brings a running persona up to its edited profile, changing
 only what differs from the host ledger.
