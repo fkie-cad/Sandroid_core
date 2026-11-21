@@ -2687,6 +2687,9 @@ class BypassService:
         self._retired: set[str] = set()
         # time.time() when the resident script loaded (None without one).
         self._resident_since: float | None = None
+        # The last set_active loaded a fresh script into a running (not
+        # held) app: Frida's Java bridge then initialises in a busy process.
+        self._attached_live = False
         # Called after the armed or active set changed, see add_state_listener.
         self._state_listeners: list[Callable[[], None]] = []
         self._listeners_lock = threading.Lock()
@@ -3203,6 +3206,7 @@ class BypassService:
         if not self._mutate_lock.acquire(blocking=False):
             return False, "Bypass change already in progress"
         try:
+            self._attached_live = False
             # Published under _lock before the claim check: claim_exclusive
             # refuses a claim on any category in _mutating, so a Dexray claim
             # and this load cannot interleave (unrelated claims still can).
@@ -3259,6 +3263,7 @@ class BypassService:
             # fresh load; reuses an existing live job otherwise).
             flags = self._flag_dict(target)
             ok, msg, fresh = self._ensure_loaded(paused=paused, initial_flags=flags)
+            self._attached_live = bool(ok and fresh and not paused)
             if not ok:
                 return False, msg
 
@@ -3485,6 +3490,15 @@ class BypassService:
                     return True, (
                         f"{name} active — restart the app (Shift+R) so checks it "
                         "ran at startup see it too"
+                    )
+                if self._attached_live:
+                    # Live: Frida's Java bridge faulted in a busy app that had
+                    # just started (an ART "SuspendAll timeout" abort seconds
+                    # later); loaded at spawn, the app is held while it starts.
+                    return True, (
+                        f"{name} active in the running app. If it crashes, "
+                        "restart it (Shift+R): the bypass then loads at spawn, "
+                        "which is more reliable"
                     )
                 return True, f"{name} active"
             if self.is_paused_session():

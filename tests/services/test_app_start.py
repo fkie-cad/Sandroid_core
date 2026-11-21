@@ -2795,6 +2795,25 @@ def test_unloading_the_other_app_leaves_the_selected_one(two_apps):
     assert bypass.unload_app(OTHER)[0] is False  # nothing left there
 
 
+def test_a_fresh_live_attach_says_a_restart_is_more_reliable(two_apps):
+    """A late bypass on a just-started org.wikipedia: Frida's Java bridge
+    faulted there and ART aborted the app ("SuspendAll timeout") seconds
+    later. Loaded at spawn (Shift+R carries it) it was stable.
+    """
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    now_on, msg = bypass.toggle("ssl")
+    assert now_on is True
+    assert "running app" in msg
+    assert "restart it (Shift+R)" in msg
+    assert "more reliable" in msg
+    assert bypass.carried_categories(OTHER) >= {"ssl"}  # Shift+R re-applies it
+    # A flip on the script already loaded there needs no such hint.
+    now_on, msg = bypass.toggle("root")
+    assert now_on is True
+    assert "Shift+R" not in msg
+
+
 def _parked_other(two_apps):
     """OTHER's ssl bypass parked, PKG selected with its own."""
     env, bypass = two_apps, two_apps.bypass
