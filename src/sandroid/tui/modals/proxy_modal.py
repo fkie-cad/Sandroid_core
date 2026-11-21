@@ -579,6 +579,13 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
         padding: 0 2;
     }
 
+    ProxyModal .checkbox-note {
+        color: $text-muted;
+        padding: 0 2 0 6;
+        width: 100%;
+        height: auto;
+    }
+
     ProxyModal .app-proxy-buttons {
         height: auto;
         padding: 0 2;
@@ -762,11 +769,19 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                             value=self._default_external_addr(),
                             id="device-ext-input",
                         )
+                    # A Checkbox label never wraps: a short label, the
+                    # explanation as a note below it (wraps at any width).
                     yield Checkbox(
-                        "Kill switch: only the device proxy is reachable, "
-                        "the rest is refused",
+                        "Kill switch",
                         value=self._kill_switch_wanted(),
                         id="kill-switch-checkbox",
+                    )
+                    yield Static(
+                        # main's wording, as the note that wraps
+                        "Only the device proxy is reachable; the rest is "
+                        "refused.",
+                        id="kill-switch-note",
+                        classes="checkbox-note",
                     )
 
                 # ----- Tab 2: App Proxies ----- #
@@ -781,9 +796,14 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                         id="app-proxy-note",
                     )
                     yield Checkbox(
-                        "Block QUIC (UDP 443) — force apps onto interceptable TCP/TLS",
+                        "Block QUIC (UDP 443)",
                         value=get_config().focus.block_quic,
                         id="block-quic-checkbox",
+                    )
+                    yield Static(
+                        "Forces apps onto TCP/TLS, which Mitmproxy can intercept.",
+                        id="block-quic-note",
+                        classes="checkbox-note",
                     )
                     with Horizontal(classes="app-proxy-buttons"):
                         yield Button("Add app", id="app-add-btn", classes="-secondary")

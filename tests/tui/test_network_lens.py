@@ -2553,9 +2553,12 @@ async def test_proxy_dialog_method_tab_and_kill_switch(monkeypatch):
         await until(pilot, lambda: app.screen is modal and app.focused is not None)
         tabs = modal.query_one("#proxy-tabs", TabbedContent)
         assert tabs.active == "tab-device"  # opens where it always did
-        assert "Kill switch" in str(
-            modal.query_one("#kill-switch-checkbox", Checkbox).label
-        )
+        # A Checkbox label never wraps: the label is short, the explanation
+        # is a note below it that wraps (the one-line label was cut off).
+        box = modal.query_one("#kill-switch-checkbox", Checkbox)
+        assert str(box.label) == "Kill switch"
+        note = modal.query_one("#kill-switch-note")
+        assert "the rest is refused" in str(note.render())
         await pilot.press("shift+left")
         await until(pilot, lambda: tabs.active == "tab-method")
         modal.query_one("#nm-this_app", RadioButton).value = True
