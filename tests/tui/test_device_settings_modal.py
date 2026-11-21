@@ -463,3 +463,29 @@ async def test_closing_during_an_action_run_is_quiet(registry) -> None:
         await settle(pilot)
         assert app.is_running
         assert app._exception is None
+
+
+@pytest.mark.asyncio
+async def test_shift_arrows_cycle_the_tabs_and_tab_reaches_the_picker(
+    registry,
+) -> None:
+    from textual.widgets import Select, TabbedContent, Tabs
+
+    app = _ActionsHarness()
+    async with app.run_test(size=(120, 50)) as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DeviceSettingsModal))
+        await settle(pilot)
+        modal = app.screen
+        tabs = modal.query_one("#settings-tabs", TabbedContent)
+        modal.query_one("#settings-tabs Tabs", Tabs).focus()
+        await settle(pilot)
+        await pilot.press("shift+left")  # wraps: Location -> Actions
+        await settle(pilot)
+        assert tabs.active == "tab-actions"
+        assert isinstance(app.focused, Tabs)
+        await pilot.press("tab")
+        await settle(pilot)
+        assert app.focused is modal.query_one("#action-select", Select)
+        await pilot.press("shift+right")
+        await settle(pilot)
+        assert tabs.active == "tab-location"

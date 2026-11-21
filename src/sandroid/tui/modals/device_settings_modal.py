@@ -30,6 +30,7 @@ from textual.widgets import (
     Switch,
     TabbedContent,
     TabPane,
+    Tabs,
 )
 
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
@@ -90,6 +91,9 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", priority=True),
         Binding("ctrl+s", "apply_all", "Apply All", priority=True),
+        # Not priority: in a text field Shift+Left/Right still select text.
+        Binding("shift+left", "cycle_tab(-1)", "Previous tab", show=False),
+        Binding("shift+right", "cycle_tab(1)", "Next tab", show=False),
     ]
 
     ENTER_SUBMITS_FROM_INPUT = False  # Don't auto-submit on Enter in inputs
@@ -203,6 +207,14 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         height: 3;
         content-align: left middle;
         padding: 1 1 0 0;
+    }
+
+    DeviceSettingsModal .job-row Button {
+        margin: 1 0 0 0;
+    }
+
+    DeviceSettingsModal #action-params Switch {
+        margin: 1 0 0 0;
     }
     """
 
@@ -559,6 +571,24 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         elif button_id and button_id.startswith("btn-stop-"):
             self._stop_job(button_id.removeprefix("btn-stop-"))
 
+    def action_cycle_tab(self, delta: int) -> None:
+        """Shift+Left/Right: the previous / next tab (wraps); the tab bar
+        gets the focus, so Left/Right go on from there.
+        """
+        try:
+            tabs = self.query_one("#settings-tabs", TabbedContent)
+        except Exception:
+            return
+        panes = [pane.id for pane in tabs.query(TabPane) if pane.id]
+        if not panes:
+            return
+        current = panes.index(tabs.active) if tabs.active in panes else 0
+        tabs.active = panes[(current + delta) % len(panes)]
+        try:
+            tabs.query_one(Tabs).focus()
+        except Exception:
+            pass
+
     def action_apply_all(self) -> None:
         """Apply all settings (Ctrl+S); on the Actions tab: run the action."""
         try:
@@ -838,7 +868,8 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         from sandroid.services.device_actions import list_actions
 
         options = [(f"{a.group}: {a.title}", a.id) for a in list_actions()]
-        with VerticalScroll(id="actions-scroll"):
+        # Not focusable itself: Tab goes straight to the action picker.
+        with VerticalScroll(id="actions-scroll", can_focus=False):
             yield Select(
                 options,
                 id="action-select",

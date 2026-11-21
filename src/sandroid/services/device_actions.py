@@ -790,7 +790,7 @@ def _time_jump(dev: _Device, p: dict, action: DeviceAction) -> ActionResult:
         moved = device_clock.move_wall_clock(
             dev.serial, to_epoch=_to_epoch(dev, p["to"])
         )
-    data = {k: moved.get(k) for k in ("moved_s", "actual_moved_s", "set_by")}
+    data = {k: moved.get(k) for k in ("moved_s", "actual_moved_s", "set_by", "command")}
     if not moved.get("ok"):
         return ActionResult(action.id, False, moved.get("error") or "failed", data)
     return ActionResult(

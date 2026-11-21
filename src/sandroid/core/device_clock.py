@@ -88,7 +88,9 @@ snaps it back. The hold ends at the next real resync: a world change
 (automatic time detection back as it was, then a sync to the host;
 ``reason: "time-reset"`` or a ``sync`` line with ``trigger:
 "time-reset"``). CLOCK_MONOTONIC is never touched, so monotonic times map
-as before.
+as before. While automatic time is off for a move, a device file
+(:data:`HOLD_MARKER`) keeps its state from before the first move: after a
+Sandroid restart the session-start resync (or a reset) still restores it.
 """
 
 from __future__ import annotations
@@ -1261,6 +1263,7 @@ def after_device_connect(
         return connected
     if held(serial) is not None:
         return connected  # moved on purpose (time.jump): record only
+    _end_leftover_hold(serial)
     with _LOCK:
         _PENDING_SYNC.add(_key(serial))
     if _selinux_enforcing(serial):
@@ -1334,6 +1337,11 @@ PAIR_QUERY = "cat /proc/uptime; date +%s%N"
 MOVE_TOLERANCE_S = 2.0
 #: Seconds Android takes to apply automatic time after it is switched on.
 AUTO_TIME_SETTLE_S = 1.0
+#: Device file kept while automatic time is off for a deliberate move: it
+#: survives a Sandroid restart, so the state from before the first move is
+#: never lost (a snapshot load drops it with the rest of the device state).
+HOLD_MARKER = "/data/local/tmp/sandroid/clock_hold"
+_MARKER = re.compile(r"auto_before=(true|false|unknown)")
 _UPTIME = re.compile(r"^(\d+(?:\.\d+)?)\s")
 _DIGITS = re.compile(r"^(\d{9,})")
 
@@ -1398,6 +1406,51 @@ def _auto_detection(send: Send) -> bool | None:
 
 def _set_auto_detection(send: Send, enabled: bool) -> None:
     _send_out(send, f"{AUTO_TIME_SET.format(str(enabled).lower())} 2>&1")
+
+
+def _marker_read(send: Send) -> tuple[bool, bool | None]:
+    """``(present, auto_before)`` of the device's hold marker."""
+    match = _MARKER.search(_send_out(send, f"cat {HOLD_MARKER} 2>/dev/null") or "")
+    if match is None:
+        return False, None
+    return True, {"true": True, "false": False}.get(match.group(1))
+
+
+def _marker_write(send: Send, auto_before: bool | None) -> None:
+    word = "unknown" if auto_before is None else str(auto_before).lower()
+    folder = HOLD_MARKER.rsplit("/", 1)[0]
+    _send_out(send, f"mkdir -p {folder} && echo auto_before={word} > {HOLD_MARKER}")
+
+
+def _marker_clear(send: Send) -> None:
+    _send_out(send, f"rm -f {HOLD_MARKER}")
+
+
+def _shell_run(serial: str | None, command: str) -> str:
+    """Output of one device command over the persistent shell, else one
+    one-shot ``adb shell``.
+    """
+    key = _key(serial)
+    with _shell_lock(key):
+        try:
+            lines, _t0, _t1 = _shell(serial).query(f"{command}; echo {_END}")
+            return "\n".join(lines)
+        except (ShellDeadError, OSError, ValueError, SystemExit):
+            _SHELLS.pop(key, None)
+    return _send_out(_default_send(serial), command) or ""
+
+
+def _end_leftover_hold(serial: str | None) -> None:
+    """A session-start resync ends a move an earlier Sandroid process left
+    (its marker is on the device): automatic time back as it was before
+    that move, marker removed.
+    """
+    match = _MARKER.search(_shell_run(serial, f"cat {HOLD_MARKER} 2>/dev/null"))
+    if match is None:
+        return
+    if match.group(1) != "false":
+        _shell_run(serial, f"{AUTO_TIME_SET.format('true')} 2>&1")
+    _shell_run(serial, f"rm -f {HOLD_MARKER}")
 
 
 def _date_fallback(send: Send, target: float, boot_s: float) -> tuple[str | None, bool]:
@@ -1478,7 +1531,15 @@ def move_wall_clock(
             "moved_s": round(moved + (previous or {}).get("moved_s", 0.0), 3),
             "auto_before": (previous or {}).get("auto_before"),
         }
-    auto_before = previous["auto_before"] if previous else _auto_detection(send)
+    if previous is not None:
+        auto_before = previous["auto_before"]
+    else:
+        # A marker left by an earlier Sandroid process holds the state from
+        # before ITS first move (automatic time is still off from it).
+        present, auto_before = _marker_read(send)
+        if not present:
+            auto_before = _auto_detection(send)
+            _marker_write(send, auto_before)
     with _LOCK:
         if key in _HELD:
             _HELD[key]["auto_before"] = auto_before
@@ -1510,6 +1571,7 @@ def move_wall_clock(
                 _HELD.pop(key, None)
             if auto_before is not False:
                 _set_auto_detection(send, True)
+            _marker_clear(send)
     if after is not None:
         result["line"] = _note(
             after,
@@ -1550,12 +1612,16 @@ def reset_wall_clock(serial: str | None = None, send: Send | None = None) -> dic
         hold = _HELD.pop(key, None)
     result: dict = {"ok": False, "was_held": hold is not None, "line": None,
                     "error": None}  # fmt: skip
-    if hold is None:
-        # Not moved by this process (e.g. before a restart): "real time" is
-        # automatic time, so switch it on when it is off.
-        restore = _auto_detection(send) is False
-    else:
+    present, marked = _marker_read(send)
+    if hold is not None:
         restore = hold.get("auto_before") is not False
+    elif present:
+        restore = marked is not False  # moved by an earlier Sandroid process
+    else:
+        # No record of a move: "real time" is automatic time.
+        restore = _auto_detection(send) is False
+    if present:
+        _marker_clear(send)
     if restore:
         _set_auto_detection(send, True)
         _sleep(AUTO_TIME_SETTLE_S)  # Android applies automatic time async

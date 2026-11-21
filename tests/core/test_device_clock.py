@@ -1196,6 +1196,8 @@ class FakeSend:
     def __init__(self, device: FakeDevice, auto: str = "true", inject: bool = True):
         self.device, self.auto, self.inject = device, auto, inject
         self.commands: list[str] = []
+        #: The device's hold marker file (``None``: absent).
+        self.marker: str | None = None
 
     def __call__(self, command: str):
         import shlex
@@ -1205,6 +1207,14 @@ class FakeSend:
         dev = self.device
         dev.host += 0.005
         boot = dev.host - dev.mono_off  # BOOTTIME == MONOTONIC on the emulator
+        if inner.startswith(f"cat {device_clock.HOLD_MARKER}"):
+            return (self.marker or ""), ""
+        if inner.startswith("mkdir -p") and device_clock.HOLD_MARKER in inner:
+            self.marker = re.search(r"(auto_before=\w+)", inner)[1] + "\n"
+            return "", ""
+        if inner == f"rm -f {device_clock.HOLD_MARKER}":
+            self.marker = None
+            return "", ""
         if inner == device_clock.PAIR_QUERY:
             return f"{boot:.2f} 12.00\n{int((dev.host - dev.behind) * 1e9)}\n", ""
         if inner.startswith(device_clock.AUTO_TIME_GET):
@@ -1391,3 +1401,52 @@ def test_reset_leaves_auto_time_off_when_it_was_off_before_the_jump(device):
     device_clock.reset_wall_clock(SERIAL, send=send)
     assert send.auto == "false"
     assert not any("enabled true" in c for c in send.commands)
+
+
+def test_the_hold_marker_survives_a_restart_and_reset_uses_it(device):
+    device.behind = 0.0
+    send = FakeSend(device)
+    assert device_clock.move_wall_clock(SERIAL, delta_s=3600, send=send)["ok"]
+    assert send.marker == "auto_before=true\n"
+    assert send.auto == "false"
+
+    device_clock.reset()  # Sandroid restarted: the in-memory hold is gone
+    # A new move keeps the state from before the FIRST move ...
+    assert device_clock.move_wall_clock(SERIAL, delta_s=60, send=send)["ok"]
+    assert device_clock.held(SERIAL)["auto_before"] is True
+    device_clock.reset()
+    # ... and a reset without an in-memory hold restores it from the marker.
+    reset = device_clock.reset_wall_clock(SERIAL, send=send)
+    assert reset["ok"], reset
+    assert send.auto == "true"
+    assert send.marker is None
+
+
+def test_a_failed_first_move_removes_the_marker(device):
+    device.root = False
+    device.set_forms = set()
+    send = FakeSend(device, inject=False)
+    assert not device_clock.move_wall_clock(SERIAL, delta_s=60, send=send)["ok"]
+    assert send.marker is None
+
+
+def test_a_session_start_ends_a_leftover_hold(monkeypatch, device):
+    marker = {"text": "auto_before=true\n"}
+    ran: list[str] = []
+
+    def shell_run(serial, command):
+        ran.append(command)
+        if command.startswith("cat "):
+            return marker["text"]
+        if command.startswith("rm -f"):
+            marker["text"] = ""
+        return ""
+
+    monkeypatch.setattr(device_clock, "_shell_run", shell_run)
+    device_clock.after_device_connect(SERIAL)  # 4500 s off: resync
+    assert ran == [
+        f"cat {device_clock.HOLD_MARKER} 2>/dev/null",
+        "cmd time_detector set_auto_detection_enabled true 2>&1",
+        f"rm -f {device_clock.HOLD_MARKER}",
+    ]
+    assert [x["reason"] for x in _lines()] == ["device-connect", "sync"]

@@ -244,6 +244,8 @@ _ROW_TEXT: dict[tuple[str, str], str] = {
     ("Device settings (Shift+E)", "ctrl+s"): (
         "Apply all settings (on the Actions tab: run the action)"
     ),
+    ("Device settings (Shift+E)", "shift+left"): "Previous tab (not in a text field)",
+    ("Device settings (Shift+E)", "shift+right"): "Next tab (not in a text field)",
     ("Device settings (Shift+E)", "escape"): (
         "Close (a GPS route keeps running in the background)"
     ),
