@@ -2652,3 +2652,24 @@ def test_bypass_listener_on_the_ui_thread_only_schedules(monkeypatch):
             break
         time.sleep(0.01)
     assert started == [1]
+
+
+@pytest.mark.parametrize(
+    ("app", "ca", "why_part", "next_part"),
+    [
+        ("org.mozilla.firefox", "installed", "Firefox uses its own certificate", "h"),
+        ("org.mozilla.firefox", "missing", "own certificate store", "friTap"),
+        ("com.example", "installed", "although the CA is installed", "Ctrl+P"),
+        ("com.example", "missing", "The CA is not installed", "Ctrl+N"),
+        ("com.example", "unknown", "or the CA is not trusted yet", "Ctrl+N"),
+    ],
+)
+def test_tls_failure_why_uses_the_known_ca_state(app, ca, why_part, next_part):
+    """N3-V6: the "Why" of a TLS failure follows the CA state and names an
+    app with its own trust store instead of always blaming pinning or the CA.
+    """
+    why, nxt = np_mod.tls_failure_why("cert", app, ca)
+    assert why_part in why
+    assert next_part in nxt
+    if ca == "installed":
+        assert "installs the CA" not in nxt
