@@ -692,7 +692,7 @@ def test_snapshot_load_failure_resumes_the_monitor_and_pulls_nothing(
     from sandroid import services
 
     class Emu:
-        def load_snapshot(self, name, serial=None):
+        def load_snapshot(self, name, serial=None, **_kw):
             return False
 
     monkeypatch.setattr(services, "get_emulator_service", lambda: Emu())
@@ -981,7 +981,7 @@ def test_load_timeout_with_the_device_offline_is_not_reported_as_unchanged(
     from sandroid.tui.controllers import recording_controller as rc
 
     class Emu:
-        def load_snapshot(self, name, serial=None):
+        def load_snapshot(self, name, serial=None, **_kw):
             return False
 
     monkeypatch.setattr(services, "get_emulator_service", lambda: Emu())
@@ -993,7 +993,53 @@ def test_load_timeout_with_the_device_offline_is_not_reported_as_unchanged(
     assert deps.load_snapshot("sandroid_rec_20261120_133600", "emulator-5560") is False
 
 
-def test_replay_waits_until_the_latest_after_copy(controller, monkeypatch):
+def test_start_point_load_resets_the_network_before_step_1(controller, monkeypatch):
+    """N4-B2: a Rewind's load resets the network (and waits until it is
+    back) through the shared step; a stop during the wait stops the run.
+    """
+    from sandroid import services
+    from sandroid.services import emulator_service as es
+
+    calls: list = []
+
+    class Emu:
+        def load_snapshot(self, name, serial=None, **kw):
+            calls.append(("load", kw))
+            return True
+
+    def reset(serial, *, sleep=None, **kw):
+        calls.append(("network", serial))
+        sleep(0.01)  # the wait for the network to come back
+        return True
+
+    monkeypatch.setattr(services, "get_emulator_service", lambda: Emu())
+    monkeypatch.setattr(es, "reset_network_after_load", reset)
+    deps = controller._deps(_rec(), None, replay=True)
+    assert deps.load_snapshot("sandroid_rec_20261120_133600", "emulator-5560")
+    assert calls == [("load", {"reset_network": False}), ("network", "emulator-5560")]
+    controller._state = "running"
+    controller.stop_rewind()
+    with pytest.raises(rewind.RewindStoppedError, match=r"^Replay stopped\.$"):
+        deps.load_snapshot("sandroid_rec_20261120_133600", "emulator-5560")
+
+
+def test_stop_reasons_are_the_real_ones(controller):
+    """N4-B10: Stop records "stopped", a quit "stopped by quit", never
+    "you pressed Esc"; the first reason wins.
+    """
+    deps = controller._deps(_rec(), None, replay=True)
+    controller._state = "running"
+    assert controller.stop_playback() is True  # the quit path
+    controller.stop_rewind()  # a later Stop does not overwrite it
+    assert deps.stop_reason() == "stopped by quit"
+    controller._stop_reason = "stopped"
+    assert deps.stop_reason() == "stopped"
+
+
+def test_replay_waits_the_recorded_tail_not_the_after_copy(controller, monkeypatch):
+    """N4-B6: the wait after the last step is your run's tail (last input
+    to Stop), never the time until a file was selected in Review.
+    """
     seen: dict = {}
 
     class Rep:
@@ -1019,7 +1065,7 @@ def test_replay_waits_until_the_latest_after_copy(controller, monkeypatch):
     rec.after_at = {"/data/data/org.x/databases/c.sqlite": 143.0}
     runner = type("R", (), {"start_seq": 9, "deps": type("D", (), {"shell": None})()})()
     controller._replay(rec, runner)
-    assert seen["tail"] == pytest.approx(43.0)
+    assert seen["tail"] == pytest.approx(15.0)  # stop 115 - last tap 100
 
 
 async def test_companion_rows_keep_their_own_names():

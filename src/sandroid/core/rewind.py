@@ -1473,6 +1473,8 @@ class RewindDeps:
     ``pull(path, role, rec_id, run)`` pulls one file through the Files lens
     (watch versions) and returns the version that holds its content.
     ``replay(rec, runner)`` repeats the steps (Step 2; ``None``: not built).
+    ``stop_reason()`` says why the run was stopped once ``cancelled()`` is
+    true (``stopped``, ``stopped by quit``).
     """
 
     load_snapshot: Callable[[str, str | None], bool]
@@ -1485,6 +1487,7 @@ class RewindDeps:
     replay: Callable[[Recording, RewindRunner], dict[str, Any]] | None = None
     clock_fix: Callable[[], None] = lambda: None
     emit: Callable[..., int | None] | None = None
+    stop_reason: Callable[[], str] = lambda: "stopped"
 
 
 @dataclass
@@ -1538,6 +1541,7 @@ class RewindRunner:
         self.rec = rec
         self.deps = deps
         self.start_seq: int | None = None
+        self._what = "Rewind"
 
     # -- small helpers ------------------------------------------------------
 
@@ -1555,7 +1559,15 @@ class RewindRunner:
 
     def _check(self) -> None:
         if self.deps.cancelled():
-            raise RewindStoppedError("you pressed Esc")
+            raise RewindStoppedError(self._stop_words())
+
+    def _stop_words(self) -> str:
+        """``Replay stopped by quit.`` / ``Rewind stopped.`` (the real reason)."""
+        try:
+            reason = str(self.deps.stop_reason() or "stopped")
+        except Exception:
+            reason = "stopped"
+        return f"{self._what} {reason}."
 
     def pause_app(self) -> list[int]:
         """``kill -STOP`` every process of the app (best effort)."""
@@ -1608,6 +1620,7 @@ class RewindRunner:
         """
         rec = self.rec
         mode = "rewind-replay" if replay else "rewind"
+        self._what = "Replay" if replay else "Rewind"
         n = len(rec.runs) + 2  # run 1 is the original
         t0 = time.time()
         t_replay: float | None = None
@@ -1707,8 +1720,14 @@ class RewindRunner:
             out.result = "stopped"
             return out
         except Exception as exc:  # the worker must never die silently
-            logger.exception("rewind failed")
-            out.error = f"Rewind failed: {exc}"
+            if self.deps.cancelled():
+                # A stop that surfaced as another error (a step stopped
+                # mid-way): the reason is the stop, not a failure.
+                logger.debug("rewind stopped: %s", exc, exc_info=True)
+                out.error = self._stop_words()
+            else:
+                logger.exception("rewind failed")
+                out.error = f"Rewind failed: {exc}"
             out.result = "stopped"
             return out
         finally:

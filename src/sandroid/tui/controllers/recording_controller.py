@@ -165,6 +165,11 @@ class RecordingController:
         self._cancel = threading.Event()
         #: The running run replays the steps (Rewind + Replay), not only Rewind.
         self._run_replays = False
+        #: Why the running run was stopped (what it records).
+        self._stop_reason = "stopped"
+        #: Set when no Rewind worker runs (quit waits for it to save).
+        self._run_done = threading.Event()
+        self._run_done.set()
         self._review: Any = None  # the open ReviewModal
         self._tick_stop = threading.Event()
         self._last_run_id: str | None = None
@@ -1107,45 +1112,68 @@ class RecordingController:
         self._run_replays = bool(replay)
         self._set_state("running")
         self._replay_owner_id = owner_id
+        self._stop_reason = "stopped"
         self._cancel.clear()
+        self._run_done.clear()
         self._ui(self._set_replay_indicator, True)
         self._spawn(lambda: self._rewind_worker(rec, replay, view), "rewind_run")
         return True
 
-    def stop_rewind(self) -> bool:
-        """Ask the running Rewind / Replay to stop (Esc)."""
+    def stop_rewind(self, reason: str = "stopped") -> bool:
+        """Ask the running Rewind / Replay to stop (Stop in Review, quit).
+
+        ``reason`` is what the run records (``stopped``, ``stopped by quit``).
+        """
         if self._state != "running":
             return False
+        if not self._cancel.is_set():
+            self._stop_reason = reason
         self._cancel.set()
         self._status(
             "Stopping the replay" if self._run_replays else "Stopping the rewind"
         )
         return True
 
-    stop_playback = stop_rewind
+    def stop_playback(self, reason: str = "stopped by quit") -> bool:
+        """Stop a running Rewind / Replay because Sandroid quits."""
+        return self.stop_rewind(reason)
 
     def _deps(self, rec: Any, view: Any, replay: bool) -> Any:
         from sandroid.core import rewind
 
         shell = self._shell(rec.serial)
 
+        def network_sleep(seconds: float) -> None:
+            if self._cancel.wait(seconds):
+                raise rewind.RewindStoppedError(
+                    f"{'Replay' if replay else 'Rewind'} {self._stop_reason}."
+                )
+
         def load(name: str, serial: str | None) -> bool:
+            from sandroid.services import emulator_service, get_emulator_service
+
             self._guarded(self._suppress_disconnect_guard, True)
             try:
-                from sandroid.services import get_emulator_service
-
-                ok = bool(get_emulator_service().load_snapshot(name, serial))
+                service = get_emulator_service()
+                ok = bool(service.load_snapshot(name, serial, reset_network=False))
             finally:
                 self._guarded(self._suppress_disconnect_guard, False)
             if not ok and not _device_ready(serial):
                 # The console gave up (timeout) while the emulator went on:
-                # whether the start point was loaded is unknown.
+                # whether the start point was loaded is unknown. The service
+                # prepares the device again once it answers.
                 raise rewind.RewindStoppedError(
                     "Could not go back to the start point: the emulator did not "
                     "answer in time. The device state is unknown (it may still "
-                    "be loading the start point); check the emulator before "
-                    "going on."
+                    "be loading the start point); Sandroid prepares the device "
+                    "again (clock, SELinux, Frida, network) as soon as it "
+                    "answers. Check the emulator before going on."
                 )
+            if ok:
+                # Dead connections restored from the snapshot: reset the
+                # network and wait until it is back before step 1.
+                self._status("Resetting the device network")
+                emulator_service.reset_network_after_load(serial, sleep=network_sleep)
             return ok
 
         def pull(path: str, role: str, rec_id: str, run: int) -> Any:
@@ -1164,6 +1192,7 @@ class RecordingController:
             progress=self._status,
             cancelled=self._cancel.is_set,
             replay=self._replay if replay else None,
+            stop_reason=lambda: self._stop_reason,
         )
 
     def _rewind_worker(self, rec: Any, replay: bool, view: Any) -> dict[str, Any]:
@@ -1187,6 +1216,7 @@ class RecordingController:
             self._release_replay_world_lease()
             self._ui(self._set_replay_indicator, False)
             self._status(None)
+            self._run_done.set()  # the run is saved (a quit waits for it)
         if outcome is not None:
             if outcome.error:
                 self._ui(self._log_warning, outcome.error)
@@ -1287,11 +1317,10 @@ class RecordingController:
             return get_timeline().emit(*args, **kw)
 
         last_t = max((t for t in (_step_time(st) for st in steps) if t), default=None)
-        # Wait as long after the last step as your run did before its copies:
-        # until Stop, or until the latest After was copied (selected later).
-        until = max(
-            [rec.stopped or 0.0] + [rec.after_at.get(p, 0.0) for p in rec.selected]
-        )
+        # Wait as long after the last step as your run did: its recorded
+        # tail, last input to Stop (never the time until a file was selected
+        # in Review, which can be minutes later).
+        until = rec.stopped or 0.0
         tail = (until - last_t) if (until and last_t) else None
         first_t = min((t for t in (_step_time(st) for st in steps) if t), default=None)
         try:
@@ -1300,6 +1329,7 @@ class RecordingController:
                 shell=runner.deps.shell,
                 helper=helper,
                 cancelled=self._cancel.is_set,
+                stop_reason=lambda: self._stop_reason,
                 progress=self._status,
                 emit=emit,
                 raw_lines=_raw_reader(),

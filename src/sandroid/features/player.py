@@ -1079,6 +1079,8 @@ class StepReplayer:
         progress: Shows one plain progress line.
         emit: Writes a timeline line (``TimelineService.emit``-like).
         raw_lines: ``(file, first, last) -> getevent lines`` of a gesture.
+        stop_reason: Why the replay was stopped, in plain words (``stopped``,
+            ``stopped by quit``), once :attr:`cancelled` is true.
     """
 
     def __init__(
@@ -1094,10 +1096,12 @@ class StepReplayer:
         monotonic: Any = None,
         element_wait_s: float = ELEMENT_WAIT_S,
         tail_s: float | None = None,
+        stop_reason: Any = None,
     ) -> None:
         self.shell = shell
         self.helper = helper
         self.cancelled = cancelled
+        self.stop_reason = stop_reason
         self.progress = progress
         self.emit = emit
         self.raw_lines = raw_lines
@@ -1115,11 +1119,19 @@ class StepReplayer:
 
     # -- helpers ------------------------------------------------------------
 
+    def _stop_words(self) -> str:
+        """The plain reason of a stop (``stopped`` unless told otherwise)."""
+        try:
+            words = self.stop_reason() if self.stop_reason is not None else None
+        except Exception:
+            words = None
+        return str(words or "stopped")
+
     def _wait(self, seconds: float) -> None:
         end = self._mono() + max(0.0, seconds)
         while True:
             if self.cancelled():
-                raise StepStoppedError("you pressed Esc")
+                raise StepStoppedError(self._stop_words())
             left = end - self._mono()
             if left <= 0:
                 return
@@ -1206,7 +1218,7 @@ class StepReplayer:
         covered = False  # a spot answered with something else on top
         for n, xy in enumerate(spots):
             if self.cancelled():
-                raise StepStoppedError("you pressed Esc")
+                raise StepStoppedError(self._stop_words())
             live = self._hit(xy)
             if live is None:
                 if n == 0 and xy == mine:
@@ -1248,7 +1260,7 @@ class StepReplayer:
         self._fresh()
         while True:
             if self.cancelled():
-                raise StepStoppedError("you pressed Esc")
+                raise StepStoppedError(self._stop_words())
             reply = self._dump()
             if reply is not None:
                 item, why = find_element(target, reply, step.pkg)
@@ -1697,9 +1709,12 @@ class StepReplayer:
         plain sentence | None, "diverged_at_step": i | None, "diverged":
         plain sentence | None, "unchecked_steps": [i, ...]}``; every step
         entry has ``check`` (:data:`CHECK_VERIFIED` ...). A step diverges when its typed field reads
-        something else, or when it missed its element right after the step
-        before it missed its own (each then went by position); the replay
-        goes on, and the first such step is ``diverged_at_step``.
+        something else, or when it missed its element after an earlier step
+        missed its own with no verified step in between (swipes, keys and
+        other steps nothing checks do not count as back on track); the
+        replay goes on, and the first such step is ``diverged_at_step``.
+        When the last step that could be checked missed its element, the
+        replay ended away from your run's last screen: that step diverged.
         """
         report: list[dict[str, Any]] = []
         n = len(steps)
@@ -1707,7 +1722,10 @@ class StepReplayer:
         self._after_typing = False
         self._display_cache = None
         prev_t: float | None = None
-        missed: int | None = None  # the step before missed its element
+        #: The last step that missed its element, no step verified since.
+        missed: int | None = None
+        #: The last step that could be checked: (its entry, it missed).
+        last_checked: tuple[dict[str, Any], bool] | None = None
         div: dict[str, Any] = {
             "diverged_at_step": None,
             "diverged": None,
@@ -1755,11 +1773,20 @@ class StepReplayer:
             miss = bool(res.get("missed")) and res["way"] == WAY_POSITION
             if miss and missed is not None:
                 res["way"] = WAY_DIVERGED
+                between = (
+                    "before it"
+                    if missed == step.i - 1
+                    else "with no step confirmed in between"
+                )
                 res["reason"] = (
                     f"its element did not appear ({why}), and step {missed} "
-                    "before it missed its element too; tapped the recorded position"
+                    f"{between} missed its element too; tapped the recorded "
+                    "position"
                 )
-            missed = step.i if miss else None
+            if miss:
+                missed = step.i
+            elif res.get("check") == CHECK_VERIFIED:
+                missed = None  # back on track
             if res["way"] == WAY_DIVERGED:
                 res["check"] = WAY_DIVERGED
                 if div["diverged_at_step"] is None:
@@ -1770,9 +1797,34 @@ class StepReplayer:
             entry.update(way=res["way"], reason=res.get("reason") or "")
             entry["check"] = res.get("check") or CHECK_NONE
             report.append(entry)
+            if entry["check"] != CHECK_NONE:
+                last_checked = (entry, miss)
             self._line(step, n, res["way"], res.get("reason") or "", res)
+        if last_checked is not None and last_checked[1]:
+            # The last step that could be checked missed its element: the
+            # replay ended away from your run's last screen.
+            last = last_checked[0]
+            if div["diverged_at_step"] is None:
+                div["diverged_at_step"] = last["i"]
+                div["diverged"] = (
+                    f"step {last['i']} of {n}: the last step's element did not "
+                    f"appear ({last['reason']}), so the replay did not reach "
+                    "your run's last screen"
+                )
+            if last["i"] in div["unchecked_steps"]:
+                div["unchecked_steps"].remove(last["i"])
+            last["check"] = WAY_DIVERGED
         if n:
             tail = min(MAX_TAIL_S, max(SETTLE_AFTER_S, float(self.tail_s or 0.0)))
             self.progress(f"Waiting {tail:.0f} s for the app to finish, as in your run")
-            self._wait(tail)
+            try:
+                self._wait(tail)
+            except StepStoppedError as exc:
+                # Stopped after the last step: a stop, never a crash.
+                return {
+                    "steps": report,
+                    "stopped_at_step": None,
+                    "error": f"Replay stopped after its last step: {exc}.",
+                    **div,
+                }
         return {"steps": report, "stopped_at_step": None, "error": None, **div}
