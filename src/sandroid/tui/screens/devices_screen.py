@@ -11,8 +11,9 @@ One screen replaces the old device / AVD / boot-mode pickers. Two boxes:
   emulator (per serial, never by process name); ``e`` renames an AVD;
   ``P`` starts a stopped AVD as a persona (an identity profile's phone
   contents: its persona snapshot, else clean_8g and the persona stage
-  builds it). A snapshot whose ``snapshot.pb`` (read only) records a failed
-  load or another emulator build is marked on the row and named in the box.
+  builds it). A snapshot whose ``snapshot.pb`` (read only) says the
+  emulator refuses it, or that another emulator build wrote it, is marked
+  on the row and named in the box.
 * **Launch options** -- for the highlighted row. A stopped AVD's options
   are editable and saved for that AVD at once (``devices.json``): boot
   (quick / cold / a snapshot), headless, save state on exit and a one-off
@@ -225,8 +226,8 @@ class AvdRow:
         port: Console port a start would use (``None``: unknown / none free).
         port_reason: Why: ``pinned``, ``last used`` or ``auto``.
         snapshot_warnings: ``(snapshot, why it may not load)`` per snapshot
-            whose ``snapshot.pb`` records a failed load or another emulator
-            build (read only).
+            the emulator refuses or another emulator build wrote (its
+            ``snapshot.pb``, read only).
     """
 
     name: str
@@ -475,13 +476,6 @@ def build_snapshot(
         notes=tuple(out_notes),
         taken_at=now,
     )
-
-
-def _serious(why: str) -> bool:
-    """A snapshot warning that means a start may cold boot."""
-    from sandroid.core.snapshot_policy import snapshot_warning_serious
-
-    return snapshot_warning_serious(why)
 
 
 def _persona_of(launch: Any) -> str:
@@ -1411,7 +1405,7 @@ class DevicesScreen(ModalScreen[str | None]):
                 mark = Text("★" if row.last_used else "", style=_c("dim"))
                 name_style = "bold" if row.last_used else ""
             name = Text(row.name, style=name_style)
-            if any(_serious(why) for _n, why in row.snapshot_warnings):
+            if row.snapshot_warnings:
                 name.append(" · snapshot warning", style=_c("warn"))
             return (
                 mark,
@@ -1735,12 +1729,9 @@ class DevicesScreen(ModalScreen[str | None]):
 
     @staticmethod
     def _warning_lines(text: Text, warnings: Sequence[tuple[str, str]]) -> None:
-        """One line per snapshot that may not load (a load that failed once
-        but is not refused now: dim, and the row is not marked for it).
-        """
+        """One warning line per snapshot that may not load."""
         for name, why in warnings:
-            style = _c("warn") if _serious(why) else _c("dim")
-            text.append(f"\nSnapshot {name}: {why}.", style=style)
+            text.append(f"\nSnapshot {name}: {why}.", style=_c("warn"))
 
     def _set_options(self, row: AvdRow, options: Any) -> None:
         """Save *options* for *row*'s AVD and show them (wipe stays local)."""

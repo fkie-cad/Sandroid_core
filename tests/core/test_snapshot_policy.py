@@ -356,7 +356,8 @@ def test_snapshot_pb_scalars_are_decoded_and_the_rest_skipped():
     [
         ({}, ""),
         ({"reason": 4}, "will not load (saved by an incompatible emulator version)"),
-        ({"reason": 10005}, "a load failed before (AVD configuration changed)"),
+        ({"reason": 10005}, ""),  # a config mismatch: on working snapshots
+        ({"reason": 20003}, ""),
         ({"reason": 99}, "will not load (reason code 99)"),
         ({"build": "14214601"}, "last written by emulator build 14214601, not "
          "emulator 35.4.9 (build 13025442)"),
@@ -390,13 +391,12 @@ def test_snapshot_pb_warning_names_the_running_emulators_build():
 
 
 def test_snapshot_warnings_read_the_files_and_never_write_them(prefs):
-    import os
-
     _snapshot(prefs, "Dev", "clean_8g")
     _snapshot(prefs, "Dev", "sandroid_persona_mara_aaaaaaaaaaaa_bbbbbbbbbbbb")
     _snapshot(prefs, "Dev", "broken")
     folder = prefs / "Dev.avd" / "snapshots"
-    (folder / "clean_8g" / "snapshot.pb").write_bytes(_pb())
+    # Like Dev9's clean_8g: a config-mismatch code on a snapshot that loads.
+    (folder / "clean_8g" / "snapshot.pb").write_bytes(_pb(reason=10005))
     (
         folder / "sandroid_persona_mara_aaaaaaaaaaaa_bbbbbbbbbbbb" / "snapshot.pb"
     ).write_bytes(_pb(reason=4, build="14214601"))
@@ -422,11 +422,3 @@ def test_snapshot_warnings_read_the_files_and_never_write_them(prefs):
         assert p.read_bytes() == data
         assert p.stat().st_mtime_ns == mtime
     assert policy.snapshot_warnings("Nope", ["clean_8g"]) == {}
-
-
-def test_only_a_refused_or_foreign_build_snapshot_is_serious():
-    assert policy.snapshot_warning_serious("will not load (x); a start cold boots")
-    assert policy.snapshot_warning_serious(
-        "a load failed before (y); last written by emulator build 1, not 2"
-    )
-    assert not policy.snapshot_warning_serious("a load failed before (y)")

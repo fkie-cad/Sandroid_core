@@ -29,9 +29,9 @@ directory while the AVD is stopped) cannot be prevented; :func:`vanished_pins`
 reports a pinned snapshot that disappeared, once.
 
 :func:`snapshot_warnings` reads each snapshot's ``snapshot.pb`` (read only,
-never rewritten) and says why one may not load: a recorded
-``failed_to_load_reason_code`` or another emulator build than the installed
-one (the Devices screen shows it).
+never rewritten) and says why one will not load: a
+``failed_to_load_reason_code`` that makes the emulator refuse it, or another
+emulator build than the installed one (the Devices screen shows it).
 """
 
 from __future__ import annotations
@@ -557,11 +557,13 @@ def snapshot_pb_warning(
     """Why a snapshot may not load, in words (``""``: nothing to say).
 
     A ``failed_to_load_reason_code`` below :data:`UNRECOVERABLE_LIMIT` means
-    the emulator refuses the snapshot (a start cold boots); a higher one
-    records a failed load. A snapshot last written by another emulator build
-    than the installed one (or than the one the running emulator was
-    launched with, *launch_build*) may not load either: a 35.x snapshot
-    touched by emulator 37 becomes unloadable.
+    the emulator refuses the snapshot (a start cold boots). A higher one
+    (a config mismatch, an error during one load) stays on snapshots that
+    load fine afterwards and nobody can act on it: it says nothing. A
+    snapshot last written by another emulator build than the installed one
+    (or than the one the running emulator was launched with,
+    *launch_build*) may not load either: a 35.x snapshot touched by
+    emulator 37 becomes unloadable.
     """
     if info is None:
         return ""
@@ -569,8 +571,6 @@ def snapshot_pb_warning(
     code = info.failed_reason
     if code and code < UNRECOVERABLE_LIMIT:
         parts.append(f"will not load ({failure_words(code)}); a start cold boots")
-    elif code:
-        parts.append(f"a load failed before ({failure_words(code)})")
     build = info.emulator_build
     expected = [b for b in (launch_build, installed_build) if b]
     if build and expected and build not in expected:
@@ -584,18 +584,6 @@ def snapshot_pb_warning(
             "may fail and cold boot"
         )
     return "; ".join(parts)
-
-
-#: Words of a warning that means a load will (or may well) fail.
-_SERIOUS = ("will not load", "last written by")
-
-
-def snapshot_warning_serious(text: str) -> bool:
-    """A :func:`snapshot_pb_warning` that means a start may cold boot (the
-    snapshot is refused or another emulator build wrote it), not only that
-    a load failed once (e.g. a config mismatch the emulator got over).
-    """
-    return any(words in text for words in _SERIOUS)
 
 
 def snapshot_warnings(
@@ -651,7 +639,6 @@ __all__ = [
     "snapshot_dir",
     "snapshot_exists",
     "snapshot_pb_warning",
-    "snapshot_warning_serious",
     "snapshot_warnings",
     "unpin",
     "unregister_namespace",
