@@ -101,6 +101,12 @@ class ReviewModal(ForensicModal[None]):
         max-height: 14;
         border: none;
     }
+    /* OptionList:focus adds a tall border, which pushed the rows down by
+       one line between the press and the release of the first click on the
+       unfocused list (it selected the row above). */
+    ReviewModal SelectionList:focus {
+        border: none;
+    }
     ReviewModal .verdict-same {
         color: $success;
     }

@@ -197,6 +197,13 @@ class FakeView:
         self.watched.append(path)
         return True
 
+    def is_watched(self, path):
+        return path in self.watched
+
+    def unwatch(self, path):
+        self.watched.remove(path)
+        return True
+
     def pull_role(self, path, role, rec_id, run):
         self.pulls.append((path, role, run))
         return "v001_10-00-00", None
@@ -1621,3 +1628,35 @@ def test_a_notice_with_invalid_markup_is_shown_as_plain_text(monkeypatch):
     app.notify("x", markup=False)
     assert seen == [(f"Failed: {_COOKIE}", False), ("[b]bold[/b] fine", True),
                     ("x", False)]  # fmt: skip
+
+
+def test_deselect_unwatches_only_what_review_watched(controller):
+    """N4-B5: a deselected file stayed ★ watched in the watchlist."""
+    rec = _rec()
+    controller._rec = rec
+    mine, theirs = rec.changed[0]["path"], rec.changed[1]["path"]
+    controller.view.watched.append(theirs)  # watched before Review
+    controller.select_file(mine, True)
+    controller.select_file(theirs, True)
+    controller.select_file(mine, False)
+    controller.select_file(theirs, False)
+    assert controller.view.watched == [theirs, theirs]  # add_path again, kept
+    assert mine not in controller.view.watched
+
+
+async def test_first_click_on_the_unfocused_file_list_selects_that_row():
+    """N4-B5: the focus border appeared between press and release and
+    shifted the rows: the click selected the row above.
+    """
+    ctl = FakeController()
+    modal = ReviewModal(_rec(), ctl)
+    app = Host(modal)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await until(pilot, lambda: app.screen is modal)
+        files = modal.query_one("#review-files", SelectionList)
+        modal.query_one("#review-name").focus()
+        await settle(pilot)
+        assert not files.has_focus
+        await pilot.click(files, offset=(4, 1))  # the second row
+        await until(pilot, lambda: ctl.selected)
+        assert ctl.selected == [("/data/data/org.x/files/new.json", True)]

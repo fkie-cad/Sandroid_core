@@ -174,6 +174,9 @@ class RecordingController:
         self._start_facts: dict[str, dict | None] = {}
         #: After pulls still running (a Rewind waits for them).
         self._pending_after: set[str] = set()
+        #: Files Review put on the watchlist (not watched before): a deselect
+        #: in Review unwatches them again.
+        self._review_watched: set[str] = set()
         #: Serialises the late file list with a Rewind's snapshot load.
         self._list_lock = threading.Lock()
 
@@ -1014,6 +1017,12 @@ class RecordingController:
                 rec.selected.remove(path)
             with contextlib.suppress(Exception):
                 rewind.save_recording(rec)
+            if path in self._review_watched:
+                self._review_watched.discard(path)
+                view = self._watchlist() if self._watchlist else None
+                if view is not None:
+                    with contextlib.suppress(Exception):
+                        view.unwatch(path)
             return
         if path in rec.selected:
             return
@@ -1022,8 +1031,12 @@ class RecordingController:
             rewind.save_recording(rec)
         view = self._watchlist() if self._watchlist else None
         if view is not None:
+            was_watched = True  # unknown: never unwatch it on a deselect
             with contextlib.suppress(Exception):
-                view.add_path(path, pull_first=False)
+                was_watched = bool(view.is_watched(path))
+            with contextlib.suppress(Exception):
+                if view.add_path(path, pull_first=False) and not was_watched:
+                    self._review_watched.add(path)
         if _rewound(rec):
             # The device is no longer after the action: no After any more.
             if path not in rec.late_selected and not rec.role_version(path, "after"):
