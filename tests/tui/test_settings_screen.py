@@ -129,6 +129,20 @@ def _visibility_select(screen: SettingsScreen, category: str) -> Select:
 # -- Monitor event-visibility rows ---------------------------------------------
 
 
+async def test_title_and_switch_labels_are_plain_words() -> None:
+    """No "=== Settings ===" decoration; switch states read "on"/"off" as in
+    the header and every other dialog.
+    """
+    app = _MonitorSettingsHarness(SandroidConfig())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        title = str(screen.query_one("#settings-title").render())
+        assert title.strip() == "Settings"
+        states = {str(s.render()).strip() for s in screen.query(".switch-state")}
+        assert states <= {"on", "off"} and states
+
+
 @pytest.mark.asyncio
 async def test_compose_renders_default_visibility_selects() -> None:
     """Schema-default config: 5 categories 'always', noise 'verbose'."""
