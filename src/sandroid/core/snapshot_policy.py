@@ -586,6 +586,18 @@ def snapshot_pb_warning(
     return "; ".join(parts)
 
 
+#: Words of a warning that means a load will (or may well) fail.
+_SERIOUS = ("will not load", "last written by")
+
+
+def snapshot_warning_serious(text: str) -> bool:
+    """A :func:`snapshot_pb_warning` that means a start may cold boot (the
+    snapshot is refused or another emulator build wrote it), not only that
+    a load failed once (e.g. a config mismatch the emulator got over).
+    """
+    return any(words in text for words in _SERIOUS)
+
+
 def snapshot_warnings(
     avd: str,
     names: Iterable[str],
@@ -639,6 +651,7 @@ __all__ = [
     "snapshot_dir",
     "snapshot_exists",
     "snapshot_pb_warning",
+    "snapshot_warning_serious",
     "snapshot_warnings",
     "unpin",
     "unregister_namespace",

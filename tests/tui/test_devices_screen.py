@@ -1725,6 +1725,7 @@ WARNED = dataclasses.replace(
     snapshots=("default_boot", "clean_8g", "sandroid_persona_mara_aaaa_bbbb"),
     snapshot_warnings=(
         ("clean_8g", "a load failed before (AVD configuration changed)"),
+        ("default_boot", "will not load (saved by an incompatible emulator version)"),
     ),
 )
 
@@ -1801,10 +1802,21 @@ async def test_a_snapshot_warning_is_on_the_row_and_in_the_box() -> None:
             "Snapshot clean_8g: a load failed before (AVD configuration changed)."
             in note
         )
+        assert "Snapshot default_boot: will not load" in note
         assert "Shift+P starts it as a persona" in note
         facts = str(screen.query_one("#opt-facts").render())
         assert "1 persona snapshot" in facts
         assert not any(g in note + facts + name for g in NO_GLYPHS)
+
+
+async def test_a_load_that_failed_once_is_named_but_not_marked() -> None:
+    mild = dataclasses.replace(WARNED, snapshot_warnings=WARNED.snapshot_warnings[:1])
+    app, screen = _hub(avds=[mild])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        table = screen.query_one("#hub-table")
+        assert table.get_row(mild.key)[1].plain == "Idle_AVD"
+        assert "Snapshot clean_8g: a load failed before" in _box(screen)["note"]
 
 
 async def test_a_persona_device_row_names_its_persona() -> None:

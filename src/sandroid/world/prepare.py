@@ -1993,8 +1993,14 @@ class TopUpReport:
         """``topped up with 4 SMS, 2 calls`` (or why not)."""
         if not self.ran:
             return self.skipped
-        names = {"sms": "SMS", "calls": "calls", "events": "calendar events"}
-        parts = [f"{n} {names.get(k, k)}" for k, n in self.counts.items() if n]
+        names = {
+            "sms": ("SMS", "SMS"),
+            "calls": ("call", "calls"),
+            "events": ("calendar event", "calendar events"),
+        }
+        parts = [
+            f"{n} {names.get(k, (k, k))[n != 1]}" for k, n in self.counts.items() if n
+        ]
         return "topped up with " + (", ".join(parts) or "nothing new")
 
 

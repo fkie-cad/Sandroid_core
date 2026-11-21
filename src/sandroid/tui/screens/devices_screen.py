@@ -477,6 +477,13 @@ def build_snapshot(
     )
 
 
+def _serious(why: str) -> bool:
+    """A snapshot warning that means a start may cold boot."""
+    from sandroid.core.snapshot_policy import snapshot_warning_serious
+
+    return snapshot_warning_serious(why)
+
+
 def _persona_of(launch: Any) -> str:
     """The persona a launch of ours started as (``""``: none)."""
     meta = getattr(launch, "meta", None) if launch is not None else None
@@ -1404,7 +1411,7 @@ class DevicesScreen(ModalScreen[str | None]):
                 mark = Text("★" if row.last_used else "", style=_c("dim"))
                 name_style = "bold" if row.last_used else ""
             name = Text(row.name, style=name_style)
-            if row.snapshot_warnings:
+            if any(_serious(why) for _n, why in row.snapshot_warnings):
                 name.append(" · snapshot warning", style=_c("warn"))
             return (
                 mark,
@@ -1728,9 +1735,12 @@ class DevicesScreen(ModalScreen[str | None]):
 
     @staticmethod
     def _warning_lines(text: Text, warnings: Sequence[tuple[str, str]]) -> None:
-        """One warning line per snapshot that may not load."""
+        """One line per snapshot that may not load (a load that failed once
+        but is not refused now: dim, and the row is not marked for it).
+        """
         for name, why in warnings:
-            text.append(f"\nSnapshot {name}: {why}.", style=_c("warn"))
+            style = _c("warn") if _serious(why) else _c("dim")
+            text.append(f"\nSnapshot {name}: {why}.", style=style)
 
     def _set_options(self, row: AvdRow, options: Any) -> None:
         """Save *options* for *row*'s AVD and show them (wipe stays local)."""

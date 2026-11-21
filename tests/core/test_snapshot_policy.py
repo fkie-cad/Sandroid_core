@@ -422,3 +422,11 @@ def test_snapshot_warnings_read_the_files_and_never_write_them(prefs):
         assert p.read_bytes() == data
         assert p.stat().st_mtime_ns == mtime
     assert policy.snapshot_warnings("Nope", ["clean_8g"]) == {}
+
+
+def test_only_a_refused_or_foreign_build_snapshot_is_serious():
+    assert policy.snapshot_warning_serious("will not load (x); a start cold boots")
+    assert policy.snapshot_warning_serious(
+        "a load failed before (y); last written by emulator build 1, not 2"
+    )
+    assert not policy.snapshot_warning_serious("a load failed before (y)")
