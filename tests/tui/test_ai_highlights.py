@@ -236,7 +236,7 @@ async def test_network_tint_column_bar_and_inspector(flow_dir, store):
         bar = _bar(panel)
         assert "AI highlights" in bar
         assert "POST to Meta and Analytics 2" in bar
-        assert "H filter · X clear" in bar
+        assert "Shift+H filter · Shift+X clear" in bar
         assert panel.check_action("cycle_highlight_filter", ())
         sections = panel.flow_content(panel._row_by_key("f2")).tabs[0][1]
         titles = [title for title, _body in sections]
@@ -790,7 +790,7 @@ def test_the_bar_condenses_instead_of_overflowing(store, width):
     text = view.bar_text(width)
     plain = text.plain
     full = view.bar_text(1000).plain
-    assert "H filter · X clear" in full
+    assert "Shift+H filter · Shift+X clear" in full
     if text.cell_len > width - 2:
         # only the last form may be cut, and then with an ellipsis
         assert plain.startswith(" AI highlights   4 sets:")
@@ -1367,14 +1367,14 @@ def test_files_calm_bar_keeps_actionable_words_and_a_brief_hint(store):
     assert "new since" not in plain
     assert "1 changed since" in plain
     assert "scanning" not in plain
-    assert "H filter · X clear" in plain  # a new set: for a few seconds
+    assert "Shift+H filter · Shift+X clear" in plain  # a new set: for a few seconds
     view._first_seen = {k: v - 60 for k, v in view._first_seen.items()}
     assert view.hint_remaining() is None
     assert "H filter" not in view.bar_text(1000).plain
     store.set_filter("files", hs.id)
     plain = view.bar_text(1000).plain
     assert "filtering" in plain
-    assert "H filter · X clear" in plain  # while filtering
+    assert "Shift+H filter · Shift+X clear" in plain  # while filtering
     # The Highlight column: only with 2+ sets, never repeating the name.
     assert not view.show_column(200)
     store.create("files", "consent", short="consent", reasons={"/a/consent.xml": "r"})

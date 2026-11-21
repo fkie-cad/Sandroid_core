@@ -12,7 +12,7 @@ source). A lens shows them with
   still filling it) / ``partial`` (stopped, cancelled or out of time) /
   ``N new since`` / ``N not judged`` (rows the lens hid when the set was
   made, so the tools left them out, now in view) in words, and the keys
-  (``H filter · X clear``),
+  (``Shift+H filter · Shift+X clear``),
 * an "AI highlight" section per set in the Inspector Summary,
 * the *AI filter* (``H`` cycles off -> set 1 -> ... -> off; Esc leaves it):
   applied inside the lens's own row filter through
@@ -22,7 +22,8 @@ source). A lens shows them with
 
 ``calm`` (the Files lens): the bar keeps only actionable words
 (``filtering``, ``scanning`` while a run still fills the set,
-``partial``, ``N changed since``, ``N hidden by lens filters``; no ``N new
+``partial``, ``N changed since highlighted``, ``N hidden by lens filters``;
+no ``N new
 since`` on the live lens), the key hint shows only
 while filtering or for a few seconds after a set first appears, and the
 Highlight column shows only with 2+ sets, never repeating the file name.
@@ -68,8 +69,23 @@ HL_MIN_WIDTH = {"network": 100, "files": 110}
 TINT = 0.18
 #: Below this width the bar uses the sets' short labels.
 BAR_SHORT_BELOW = 120
+#: A long label is never wider than this (the bar uses the short one when
+#: the long one does not fit).
+BAR_LABEL_MAX = 80
 #: ``calm``: seconds the key hint stays after a set first appears.
 HINT_SECONDS = 8.0
+
+
+def _keys_hint() -> str:
+    """The bar's key hint with the real keys (both lenses bind ``H`` and
+    ``X``, i.e. Shift+H / Shift+X), as words.
+    """
+    from sandroid.tui.key_display import format_key
+
+    return f"{format_key('H', 'compact')} filter · {format_key('X', 'compact')} clear"
+
+
+_KEYS_HINT = _keys_hint()
 
 
 def highlight_store() -> Any:
@@ -399,23 +415,33 @@ class HighlightView:
     def bar_text(self, width: int = 160, scope: str | None = None) -> Text | None:
         """The bar line (None: no sets), condensed to fit *width* cells.
 
-        Forms, most verbose first: labels + flags + the key hint; without
-        the hint; short labels + flags; ``4 sets:`` with counts only. The
-        first that fits wins (the last one is cut with an ellipsis).
+        The key hint (when it shows) beats long labels and long words:
+        every set starts with its full label, and while the line is too
+        wide the longest label still in full turns into its short one; then
+        the same with the short words (``1 changed`` for ``1 changed since
+        highlighted``); then without the hint. The narrowest form is
+        ``2 sets:`` with counts only.
+        A label is never cut mid-word at a fixed width.
         """
         sets = self.sets()
         if not sets:
             return None
         room = max(10, int(width) - 2)  # the bar's own padding
-        forms = (
-            (False, True, True),
-            (False, True, False),
-            (True, True, False),
-        )
-        for short, flags, hint in forms:
-            text = self._bar_line(sets, scope, short=short, flags=flags, hint=hint)
-            if text.cell_len <= room:
-                return text
+        for hint in (True, False):
+            for compact in (False, True):
+                short: set[str] = set()
+                while True:
+                    text = self._bar_line(
+                        sets, scope, short=short, flags=True, hint=hint, compact=compact
+                    )
+                    if text.cell_len <= room:
+                        return text
+                    longs = [
+                        hs for hs in sets if hs.id not in short and hs.label != hs.short
+                    ]
+                    if not longs:
+                        break
+                    short.add(max(longs, key=lambda hs: len(hs.label or "")).id)
         return self._bar_counts(sets)
 
     def _chip(self, text: Text, hs: Any, body: str) -> None:
@@ -430,7 +456,14 @@ class HighlightView:
         return f"{c.present}" if c.present >= n else f"{c.present} of {n}"
 
     def _bar_line(
-        self, sets: list, scope: str | None, *, short: bool, flags: bool, hint: bool
+        self,
+        sets: list,
+        scope: str | None,
+        *,
+        short: bool | set[str],
+        flags: bool,
+        hint: bool,
+        compact: bool = False,
     ) -> Text:
         pal = lens_palette()
         fid = self.filter_id()
@@ -438,7 +471,8 @@ class HighlightView:
         text.append(" AI highlights ", style=_heading_style(pal))
         for hs in sets:
             c = self.counts.get(hs.id, SetCounts())
-            label = hs.short if short else _clip(hs.label, 32)
+            use_short = hs.id in short if isinstance(short, set) else short
+            label = hs.short if use_short else _clip(hs.label, BAR_LABEL_MAX)
             text.append("  ")
             self._chip(text, hs, f"{label} {self._count(hs)}")
             if not flags:
@@ -454,15 +488,17 @@ class HighlightView:
             if c.not_judged and not self.calm:
                 words.append(f"{c.not_judged} not judged")
             if c.changed:
-                words.append(f"{c.changed} changed since")
+                tail = "" if compact else " since highlighted"
+                words.append(f"{c.changed} changed{tail}")
             if c.hidden and hs.id != fid:
-                words.append(f"{c.hidden} hidden by lens filters")
+                tail = "" if compact else " by lens filters"
+                words.append(f"{c.hidden} hidden{tail}")
             if self.lens == LENS_FILES and hs.scope != scope:
                 words.append("judged on live" if hs.scope is None else "from a run")
             if words:
                 text.append(" " + ", ".join(words), style=pal.text)
         if hint and (not self.calm or fid is not None or self.hint_remaining()):
-            text.append("  ·  H filter · X clear", style=pal.dim)
+            text.append(f"  ·  {_KEYS_HINT}", style=pal.dim)
         return text
 
     def hint_remaining(self) -> float | None:

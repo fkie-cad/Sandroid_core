@@ -7,6 +7,7 @@ Events, monitor dialog and quit dialog. Same hermetic fixtures as
 
 from __future__ import annotations
 
+import pytest
 from test_files_lens import (  # _isolated: autouse fixture
     ROOT,
     T0,
@@ -269,3 +270,80 @@ async def test_no_live_in_the_title_while_the_monitor_is_off() -> None:
         panel.refresh_rows()
         assert _markup_plain(panel.caption()[0]) == "watched only · monitor ○ off"
         await pilot.pause()
+
+
+# --------------------------------------------------------------------------
+# V5: highlight bar (full labels when they fit, short ones else, the keys)
+# --------------------------------------------------------------------------
+
+
+def _files_view_with_two_sets():
+    from sandroid.services import row_highlights
+    from sandroid.services.row_highlights import get_row_highlights
+    from sandroid.tui.widgets.highlight_bar import HighlightView
+
+    row_highlights.reset_for_tests()
+    store = get_row_highlights()
+    a = store.create(
+        "files",
+        "browsing history database (privacy-relevant)",
+        short="history DB",
+        reasons={"/a/places.sqlite": "r"},
+        basis={"judged_at": 1.0},
+    )
+    b = store.create(
+        "files",
+        "privacy-relevant cookie store of the browser",
+        short="cookies",
+        reasons={"/a/cookies.sqlite": "r"},
+        basis={"judged_at": 1.0},
+    )
+    view = HighlightView("files", noun="file", calm=True)
+    view.measure(
+        iter(
+            [
+                ("/a/places.sqlite", True, None, 2.0),
+                ("/a/cookies.sqlite", True, None, 2.0),
+            ]
+        ),
+        live=True,
+        changes=True,
+    )
+    return store, view, a, b
+
+
+def test_the_bar_shows_full_labels_when_they_fit():
+    from sandroid.services import row_highlights
+
+    _store, view, a, b = _files_view_with_two_sets()
+    try:
+        plain = view.bar_text(240).plain
+        assert a.label in plain  # never clipped at a fixed 32 cells
+        assert b.label in plain
+        assert plain.count("1 changed since highlighted") == 2
+        assert "Shift+H filter · Shift+X clear" in plain
+        # 200 columns: one label in full, the other short; words and keys whole.
+        plain = view.bar_text(200).plain
+        assert b.label in plain
+        assert "history DB 1" in plain
+        assert plain.count("1 changed since highlighted") == 2
+        assert "Shift+H filter · Shift+X clear" in plain
+    finally:
+        row_highlights.reset_for_tests()
+
+
+@pytest.mark.parametrize("width", [160, 140, 120, 110])
+def test_the_bar_uses_short_labels_before_it_drops_the_keys(width):
+    from sandroid.services import row_highlights
+
+    _store, view, a, b = _files_view_with_two_sets()
+    try:
+        text = view.bar_text(width)
+        plain = text.plain
+        assert text.cell_len <= width - 2
+        assert "…" not in plain  # a label is whole: long or short
+        assert a.label in plain or "history DB" in plain
+        assert b.label in plain or "cookies" in plain
+        assert "Shift+H filter · Shift+X clear" in plain
+    finally:
+        row_highlights.reset_for_tests()
