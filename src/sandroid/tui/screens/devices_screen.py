@@ -627,6 +627,59 @@ class HubCollector:
         self._avds: list[Any] | None = None
         self._avds_at = 0.0
         self._pin_notes: list[str] = []
+        #: The host scan that names other sessions' emulators (R3-B2): a
+        #: collect waits at most ``HOST_NAMES_WAIT_S`` for it, so a slow scan
+        #: never holds back the rows; the late names then call ``on_names``.
+        self._naming: threading.Thread | None = None
+        self._naming_done = True
+        self._naming_late = False
+        self.on_names: Callable[[], None] | None = None
+
+    #: Seconds a collect waits for the host scan before showing the rows.
+    HOST_NAMES_WAIT_S = 1.0
+
+    def _name_from_host(self, serials: list[str]) -> None:
+        """Name *serials* from the host's qemu command lines (blocking at
+        most :attr:`HOST_NAMES_WAIT_S`; a scan still running is not waited
+        for again and not started twice).
+        """
+        with self._lock:
+            if self._naming is not None and self._naming.is_alive():
+                return  # a slow scan runs: the rows show without its names
+            self._naming_done = False
+            self._naming_late = False
+            thread = threading.Thread(
+                target=self._host_names_worker,
+                args=(list(serials),),
+                name="hub-host-avd-names",
+                daemon=True,
+            )
+            self._naming = thread
+        thread.start()
+        thread.join(self.HOST_NAMES_WAIT_S)
+        with self._lock:
+            if not self._naming_done:
+                self._naming_late = True
+
+    def _host_names_worker(self, serials: list[str]) -> None:
+        from sandroid.core import emulator
+
+        try:
+            host_names = emulator.host_avd_names()
+        except Exception:
+            logger.debug("Devices screen: naming emulators failed", exc_info=True)
+            host_names = {}
+        with self._lock:
+            for serial in serials:  # "" (unknown) is cached too
+                self._avd_names[serial] = host_names.get(serial, "")
+            self._naming_done = True
+            late = self._naming_late
+        callback = self.on_names
+        if late and callback is not None:
+            try:
+                callback()
+            except Exception:
+                logger.debug("Devices screen: on_names failed", exc_info=True)
 
     def invalidate_avds(self) -> None:
         """Re-read the AVD catalogue on the next collect."""
@@ -762,10 +815,7 @@ class HubCollector:
                 if serial not in self._avd_names:
                     unnamed.append(serial)
         if unnamed:
-            host_names = emulator.host_avd_names()
-            with self._lock:
-                for serial in unnamed:  # "" (unknown) is cached too
-                    self._avd_names[serial] = host_names.get(serial, "")
+            self._name_from_host(unnamed)
         soft_pin = ""
         if guard and self.startup_avd:
             with self._lock:
@@ -1308,6 +1358,7 @@ class DevicesScreen(ModalScreen[str | None]):
             self._collector = HubCollector(
                 startup_avd=self._configured_avd if mode == "startup" else None
             )
+            self._collector.on_names = self._on_host_names
             collect = self._collector.collect
         self._collect_fn = collect
         self._actions = actions
@@ -1437,6 +1488,13 @@ class DevicesScreen(ModalScreen[str | None]):
 
     def _on_adb_change(self) -> None:
         """Reader thread of the adb monitor: something was (un)plugged."""
+        try:
+            self.app.call_from_thread(self.request_refresh)
+        except Exception:
+            pass
+
+    def _on_host_names(self) -> None:
+        """Naming thread: a slow host scan named the emulators late."""
         try:
             self.app.call_from_thread(self.request_refresh)
         except Exception:

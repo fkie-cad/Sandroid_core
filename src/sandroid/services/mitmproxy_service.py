@@ -1107,12 +1107,29 @@ def _pid_listening(pid: int, port: int, host: str = "127.0.0.1") -> bool:
     *different* process holding that port (e.g. another mitmproxy) is never
     mistaken for ours. Falls back to a plain connect when psutil cannot
     inspect the process.
+
+    The children come from one ``ps`` call
+    (:func:`~sandroid.core.background_tracker.descendant_pids`):
+    ``Process.children`` reads every host process, which took tens of
+    seconds on a busy host, per poll of the start wait (R3-B2).
     """
     try:
         import psutil
 
+        from sandroid.core.background_tracker import descendant_pids
+
         proc = psutil.Process(pid)
-        for p in [proc, *proc.children(recursive=True)]:
+        child_pids = descendant_pids(pid)
+        if child_pids is None:
+            children = proc.children(recursive=True)
+        else:
+            children = []
+            for child in child_pids:
+                try:
+                    children.append(psutil.Process(child))
+                except psutil.NoSuchProcess:
+                    continue
+        for p in [proc, *children]:
             for conn in p.net_connections(kind="tcp"):
                 if (
                     conn.status == psutil.CONN_LISTEN

@@ -2362,7 +2362,68 @@ def test_host_avd_names_reads_port_and_avd_of_qemu(monkeypatch) -> None:
         SimpleNamespace(info={"name": "bash", "cmdline": ["bash", "-port", "1"]}),
     ]
     monkeypatch.setattr(psutil, "process_iter", lambda attrs=None: iter(procs))
+    # The psutil fallback (no ``ps``).
+    monkeypatch.setattr(
+        "sandroid.core.emulator_guard.host_qemu_processes", lambda: None
+    )
     assert emulator.host_avd_names() == {"emulator-5562": "Dev4"}
+
+
+def test_host_avd_names_reads_one_ps_output(monkeypatch) -> None:
+    """R3-B2: one ``ps`` call, never a psutil scan of every host process."""
+    import psutil
+
+    from sandroid.core import emulator_guard
+
+    ps_out = (
+        "  1 /sbin/launchd\n"
+        "  7 /sdk/emulator/emulator -avd Dev4 -port 5562\n"
+        "  8 /sdk/qemu/darwin-aarch64/qemu-system-aarch64 -avd Dev4 -port 5562\n"
+        "  9 /sdk/qemu/darwin-aarch64/qemu-system-aarch64 -avd NoPort\n"
+        " 10 bash -port 1\n"
+    )
+
+    def _run(argv, **kw):
+        assert kw["stdin"] is emulator_guard.subprocess.DEVNULL
+        return SimpleNamespace(returncode=0, stdout=ps_out, stderr="")
+
+    def _no_scan(*a, **k):
+        raise AssertionError("psutil.process_iter must not run")
+
+    monkeypatch.setattr(emulator_guard.subprocess, "run", _run)
+    monkeypatch.setattr(psutil, "process_iter", _no_scan)
+    monkeypatch.setattr(psutil, "Process", lambda pid: SimpleNamespace(pid=pid))
+    assert emulator.host_avd_names() == {"emulator-5562": "Dev4"}
+
+
+def test_a_slow_host_scan_never_holds_back_the_hub_rows(
+    collector_env, monkeypatch
+) -> None:
+    """R3-B2: the rows come first; the late names refresh the hub."""
+    collector_env.set_preferred_serial("emulator-5562")
+    release = threading.Event()
+    late = threading.Event()
+
+    def _slow_names():
+        release.wait(5)
+        return {"emulator-5554": "Demo8G"}
+
+    monkeypatch.setattr(emulator, "host_avd_names", _slow_names)
+    adb = _FakeAdb("emulator-5554\tdevice\n")
+    collector = hub.HubCollector(adb)
+    collector.HOST_NAMES_WAIT_S = 0.05
+    collector.on_names = late.set
+    try:
+        snap = collector.collect()
+        (row,) = snap.devices
+        assert row.in_use_elsewhere
+        assert row.avd_name != "Demo8G"  # not named yet, but listed
+        collector.collect()  # the scan still runs: not waited for again
+    finally:
+        release.set()
+    assert late.wait(5)
+    (row,) = collector.collect().devices
+    assert row.avd_name == "Demo8G"
 
 
 def test_avd_from_cmdline() -> None:

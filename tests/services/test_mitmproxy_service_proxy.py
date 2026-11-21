@@ -914,3 +914,31 @@ def test_emulator_load_snapshot_restores_the_device_proxy(monkeypatch):
     monkeypatch.setattr(ms, "_INSTANCE", None)
     assert svc.load_snapshot("tmp") is True
     assert ms._INSTANCE is None
+
+
+def test_pid_listening_reads_the_children_from_one_ps_call(monkeypatch):
+    """R3-B2: ``Process.children`` scans every host process (tens of seconds
+    on a busy host) on each poll of the start wait; one ``ps`` call instead.
+    """
+    import psutil
+
+    from sandroid.core import background_tracker
+
+    listen = SimpleNamespace(
+        status=psutil.CONN_LISTEN, laddr=SimpleNamespace(port=8390)
+    )
+
+    class _Proc:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def children(self, recursive=False):
+            raise AssertionError("psutil's full scan must not run")
+
+        def net_connections(self, kind="tcp"):
+            return [listen] if self.pid == 43 else []
+
+    monkeypatch.setattr(psutil, "Process", _Proc)
+    monkeypatch.setattr(background_tracker, "descendant_pids", lambda root: [43])
+    assert ms._pid_listening(42, 8390) is True
+    assert ms._pid_listening(42, 8391) is False

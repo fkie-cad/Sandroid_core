@@ -126,6 +126,86 @@ def _lsof_listener_pids(port: int) -> set[int] | None:
     return {int(tok) for tok in result.stdout.split() if tok.isdigit()}
 
 
+#: Seconds the one ``ps`` call that lists the host's processes may take.
+_PS_TIMEOUT_S = 5.0
+
+
+def _is_qemu(argv0: str) -> bool:
+    return os.path.basename(argv0).startswith("qemu-system")
+
+
+def parse_qemu_ps(text: str) -> list[tuple[int, list[str]]]:
+    """``(pid, argv)`` of the qemu-system lines of ``ps -o pid=,args=`` output.
+
+    ``args`` is the space-joined argv (AVD names, ports and flags have no
+    spaces); the ``emulator`` launcher and any other process are skipped.
+    """
+    rows: list[tuple[int, list[str]]] = []
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) < 2 or not _is_qemu(parts[1]):
+            continue
+        try:
+            rows.append((int(parts[0]), parts[1:]))
+        except ValueError:
+            continue
+    return rows
+
+
+def host_qemu_processes() -> list[tuple[int, list[str]]] | None:
+    """``(pid, argv)`` of every qemu-system process, from one ``ps`` call.
+
+    ``psutil.process_iter`` reads every process of the host one by one: with
+    ~9,600 processes (a busy lab host) it took 63 s, and the Devices hub and
+    the startup picker sat on "Looking for devices…" for it (R3-B2). ``ps``
+    reads the table at once (well under a second). ``None`` when ``ps`` is
+    not usable (callers fall back to psutil).
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-axww", "-o", "pid=,args="],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_PS_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return parse_qemu_ps(result.stdout)
+
+
+def _qemu_candidates() -> list[tuple[Any, list[str]]]:
+    """``(psutil.Process, argv)`` of the host's qemu processes (fast path:
+    :func:`host_qemu_processes`; psutil's full scan only without ``ps``).
+    """
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover - psutil is a core dependency
+        return []
+    rows = host_qemu_processes()
+    if rows is not None:
+        found: list[tuple[Any, list[str]]] = []
+        for pid, argv in rows:
+            try:
+                found.append((psutil.Process(pid), argv))
+            except Exception:  # gone since ps listed it
+                continue
+        return found
+    found = []
+    for proc in psutil.process_iter(["name", "cmdline"]):
+        try:
+            name = proc.info.get("name") or ""
+            cmdline = proc.info.get("cmdline") or []
+        except Exception:
+            continue
+        if name.startswith("qemu-system") and cmdline:
+            found.append((proc, [str(a) for a in cmdline]))
+    return found
+
+
 #: Serials we already warned about (could not identify their qemu process).
 _unidentified_serials: set[str] = set()
 
@@ -157,6 +237,9 @@ def find_emulator_process(serial: str | None) -> Any | None:
     once per serial) so the guard never measures or kills the wrong
     emulator -- e.g. the analyst's own AVD on another auto-assigned port.
 
+    The qemu processes come from one ``ps`` call (:func:`host_qemu_processes`),
+    not a psutil scan of every host process.
+
     Returns ``None`` for non-emulator serials, when psutil is unavailable or
     no unique matching process is found.
     """
@@ -166,19 +249,8 @@ def find_emulator_process(serial: str | None) -> Any | None:
     if not match:
         return None
     port = int(match.group(1))
-    try:
-        import psutil
-    except ImportError:  # pragma: no cover - psutil is a core dependency
-        return None
     implicit: list[Any] = []
-    for proc in psutil.process_iter(["name", "cmdline"]):
-        try:
-            name = proc.info.get("name") or ""
-            cmdline = proc.info.get("cmdline") or []
-        except Exception:
-            continue
-        if not name.startswith("qemu-system") or not cmdline:
-            continue
+    for proc, cmdline in _qemu_candidates():
         explicit = console_port(cmdline)
         if explicit == port:
             return proc
