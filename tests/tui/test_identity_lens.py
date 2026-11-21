@@ -764,8 +764,9 @@ async def test_header_privacy_indicator_states(fakes) -> None:
         assert ms.active_lens == "identity"
 
 
-async def test_empty_state_explains_and_offers_P(fakes) -> None:
+async def test_empty_state_explains_and_offers_P(fakes, monkeypatch) -> None:
     fakes.ident.cfg.profile = ""
+    monkeypatch.setattr(fakes.ident, "list_profiles", list)  # an empty library
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         ms = await boot(app, pilot)
@@ -778,6 +779,113 @@ async def test_empty_state_explains_and_offers_P(fakes) -> None:
         text = _region_text(app, ms.query_one("#lens-host"))
         assert "No identity profile yet" in text
         assert "P to" in text
+
+
+def _two_profiles(fakes, monkeypatch, active: str = "mara-copy") -> list[str]:
+    """A library of mara-de and its copy; ``delete`` recorded."""
+    import copy
+
+    copy_profile = copy.deepcopy(fakes.ident.profile)
+    copy_profile.id = "mara-copy"
+    library = {"mara-de": fakes.ident.profile, "mara-copy": copy_profile}
+    deleted: list[str] = []
+
+    def list_profiles():
+        return [
+            SimpleNamespace(id=p.id, name=p.name, revision=p.revision, error="")
+            for p in library.values()
+        ]
+
+    def load(profile_id):
+        if profile_id not in library:
+            raise identity_mod.ProfileError(f"no profile {profile_id!r}")
+        return library[profile_id]
+
+    def delete(profile_id):
+        deleted.append(profile_id)
+        library.pop(profile_id, None)
+
+    monkeypatch.setattr(fakes.ident, "list_profiles", list_profiles)
+    monkeypatch.setattr(fakes.ident, "load", load)
+    fakes.ident.delete = delete
+    fakes.ident.cfg.profile = active
+    return deleted
+
+
+async def test_deleting_the_active_profile_falls_back_to_another(
+    fakes, monkeypatch
+) -> None:
+    """N5-B2: not the first-run "no profile yet" text while profiles exist."""
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+    deleted = _two_profiles(fakes, monkeypatch)
+    app = _app()
+    async with app.run_test(size=SIZE, notifications=True) as pilot:
+        lens = await _open_lens(app, pilot)
+        assert lens.profile.id == "mara-copy"
+        lens._profile_choice("delete", "mara-copy")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        app.screen.dismiss(True)
+        await until(pilot, lambda: deleted == ["mara-copy"])
+        await until(pilot, lambda: lens.profile is not None)
+        await until(pilot, lambda: lens.profile.id == "mara-de")
+        await settle(pilot)
+        assert fakes.ident.cfg.profile == "mara-de"
+        assert not lens.has_class("-empty")
+        assert any("Active identity profile: mara-de" in m for m in _messages(app))
+
+
+async def test_empty_state_with_profiles_in_the_library_says_none_is_active(
+    fakes, monkeypatch
+) -> None:
+    _two_profiles(fakes, monkeypatch, active="")
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        await pilot.press("6")
+        await settle(pilot)
+        lens = ms.lens_widget()
+        await until(pilot, lambda: not lens._loading)
+        await settle(pilot)
+        assert lens.has_class("-empty")
+        text = _region_text(app, ms.query_one("#lens-host"))
+        assert "No active identity profile" in text
+        assert "No identity profile yet" not in text
+        assert "pick one of the 2 profiles" in text
+
+
+async def test_picking_a_profile_again_reads_the_device_again(
+    fakes, monkeypatch
+) -> None:
+    """N5-B3: the statuses do not stay "pending" until ``v``."""
+    planned = _no_statuses_yet(fakes, monkeypatch)
+    _two_profiles(fakes, monkeypatch, active="mara-de")
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        lens = await _open_lens(app, pilot)
+        await until(pilot, lambda: _cell(lens, "gaid", "status") == "verified")
+        assert planned == [SERIAL]
+        lens._profile_choice("use", "mara-copy")
+        await until(pilot, lambda: lens.profile.id == "mara-copy")
+        await until(pilot, lambda: len(planned) == 2)
+        lens._profile_choice("use", "mara-de")  # read before: read again
+        await until(pilot, lambda: lens.profile.id == "mara-de")
+        await until(pilot, lambda: len(planned) == 3)
+        await until(pilot, lambda: _cell(lens, "gaid", "status") == "verified")
+
+
+async def test_profile_ids_in_the_profiles_list_are_not_markup(fakes) -> None:
+    """N5-B6: ``[mara-de]`` was swallowed as a markup tag."""
+    from sandroid.tui.modals.selection_modal import SelectionModal
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _open_lens(app, pilot)
+        await pilot.press("P")
+        await until(pilot, lambda: isinstance(app.screen, SelectionModal))
+        await settle(pilot)
+        text = _region_text(app, app.screen.query_one("#option-list"))
+        assert "[mara-de]" in text
 
 
 async def test_help_lists_the_identity_lens_keys_first(fakes) -> None:

@@ -5,6 +5,7 @@ from typing import Any
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.content import Content
 from textual.widgets import Input, Label, OptionList
 from textual.widgets.option_list import Option
 
@@ -70,6 +71,7 @@ class SelectionModal(ForensicModal):
         options: list[Any],
         message: str = "",
         display_func: callable = None,
+        markup: bool = True,
         name: str = None,
         id: str = None,
         classes: str = None,
@@ -81,6 +83,8 @@ class SelectionModal(ForensicModal):
             options: List of options to choose from
             message: Optional description text
             display_func: Optional function to convert options to display strings
+            markup: Read the display strings as markup; False shows them as
+                plain text (ids like ``[mara-de]`` stay visible)
             name: Widget name
             id: Widget ID
             classes: CSS classes
@@ -91,6 +95,7 @@ class SelectionModal(ForensicModal):
         self.all_options = options
         self.filtered_options = options.copy()
         self.display_func = display_func or str
+        self.markup = markup
 
     def compose(self) -> ComposeResult:
         """Create the modal layout."""
@@ -105,10 +110,14 @@ class SelectionModal(ForensicModal):
                 classes="no-compact",
             )
             yield OptionList(
-                *[Option(self.display_func(o)) for o in self.filtered_options],
+                *[self._option(o) for o in self.filtered_options],
                 id="option-list",
             )
             yield KeyHintFooter()
+
+    def _option(self, option: Any) -> Option:
+        text = self.display_func(option)
+        return Option(text if self.markup else Content(text))
 
     def on_mount(self) -> None:
         """Focus the filter input on mount."""
@@ -138,7 +147,7 @@ class SelectionModal(ForensicModal):
         option_list = self.query_one("#option-list", OptionList)
         option_list.clear_options()
         for opt in self.filtered_options:
-            option_list.add_option(Option(self.display_func(opt)))
+            option_list.add_option(self._option(opt))
 
         # Highlight first option if available
         if self.filtered_options:

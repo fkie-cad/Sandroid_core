@@ -881,8 +881,19 @@ class IdentityLens(Vertical):
         if not wanted or wanted == self._followed:
             return
         self._followed = wanted  # one reload per change (a missing profile)
-        self._statuses.clear()
+        self._switched_to(wanted)
         self.reload()
+
+    def _switched_to(self, profile_id: str) -> None:
+        """Another profile is shown: drop the statuses of the old one and
+        read the device again for the new one (N5-B3: the statuses no
+        longer stay "pending" until ``v`` when a profile is picked again).
+        """
+        self._statuses.clear()
+        for key in [k for k in self._auto_read_done if k[1] == profile_id]:
+            self._auto_read_done.discard(key)
+        for key in [k for k in self._auto_read_retry if k[1] == profile_id]:
+            self._auto_read_retry.pop(key, None)
 
     # -- data -----------------------------------------------------------------
 
@@ -966,6 +977,8 @@ class IdentityLens(Vertical):
                 return
             self._auto_read_done.add(key)
             self._auto_read_retry.pop(key, None)
+            if self.profile is None or self.profile.id != key[1]:
+                return  # another profile is shown by now
             if not self._statuses:
                 self._statuses = {i.id: i for i in result.infos.values()}
                 self.refresh_data()
@@ -1172,6 +1185,17 @@ class IdentityLens(Vertical):
             text.append(self.profile_error + "\n\n", c.bad)
             text.append("P", f"bold {c.accent}")
             text.append(" to choose or create another profile.")
+        elif self.library_count:
+            # Profiles exist, none is active (the active one was deleted).
+            text.append("No active identity profile.\n\n", "bold")
+            n = self.library_count
+            text.append("P", f"bold {c.accent}")
+            text.append(
+                f" to pick one of the {n} profiles in the library"
+                if n > 1
+                else " to pick the profile in the library"
+            )
+            text.append(" or create a new one.")
         else:
             text.append("No identity profile yet.\n\n", "bold")
             text.append(
@@ -1182,10 +1206,7 @@ class IdentityLens(Vertical):
                 "recipients got it, and whether the app stored it.\n\n"
             )
             text.append("P", f"bold {c.accent}")
-            if self.library_count:
-                text.append(" to choose or create a profile, ")
-            else:
-                text.append(" to create a profile, ")
+            text.append(" to create a profile, ")
             text.append("I", f"bold {c.accent}")
             text.append(" to import one.")
         try:
@@ -1746,6 +1767,7 @@ class IdentityLens(Vertical):
                 f"The profile has errors: {errors[0].path}: {errors[0].message}",
                 severity="error",
                 timeout=6,
+                markup=False,  # paths like values[0] are not markup tags
             )
             return
         serial = _target_serial()
@@ -1912,7 +1934,7 @@ class IdentityLens(Vertical):
 
     def _failed(self, what: str, exc: Exception) -> None:
         logger.info(f"identity lens: {what}: {exc}")
-        self.app.notify(f"{what}: {exc}", severity="error", timeout=6)
+        self.app.notify(f"{what}: {exc}", severity="error", timeout=6, markup=False)
 
     # -- persona (build / refresh, workers) -----------------------------------
 
@@ -2009,7 +2031,11 @@ class IdentityLens(Vertical):
             elif build:
                 save = getattr(result, "save", None)
                 where = save.name if save is not None else result.snapshot
-                self.app.notify(f"Persona {pid} built and saved as {where}.", timeout=6)
+                self.app.notify(
+                    f"Persona {pid} built and saved as {where}.",
+                    timeout=6,
+                    markup=False,
+                )
             else:
                 self.app.notify(result.words() + ".", timeout=6)
             self.refresh_data()
@@ -2240,6 +2266,7 @@ class IdentityLens(Vertical):
                 options=options,
                 message="Type to filter; enter picks.",
                 display_func=lambda o: o[2],
+                markup=False,  # ids like [mara-de] are not markup tags
             ),
             chosen,
         )
@@ -2268,19 +2295,19 @@ class IdentityLens(Vertical):
         try:
             if action == "use":
                 ident.set_active(profile_id=arg)
-                self._statuses.clear()
+                self._switched_to(arg)
                 self._notify_active(f"Active identity profile: {arg}.", arg)
             elif action == "new":
                 profile = ident.create(arg)
                 ident.set_active(profile_id=profile.id)
-                self._statuses.clear()
+                self._switched_to(profile.id)
                 self._notify_active(
                     f"Created profile '{profile.id}'; space applies it.", profile.id
                 )
             elif action == "duplicate":
                 profile = ident.duplicate(arg)
                 ident.set_active(profile_id=profile.id)
-                self._statuses.clear()
+                self._switched_to(profile.id)
                 self._notify_active(f"Duplicated as '{profile.id}'.", profile.id)
             elif action == "rename":
 
@@ -2311,14 +2338,29 @@ class IdentityLens(Vertical):
                     if not ok:
                         return
                     try:
+                        was_active = ident.config().profile == arg
                         ident.delete(arg)
-                        if ident.config().profile == arg:
-                            ident.set_active(profile_id="")
+                        fallback = _fallback_profile(ident, arg) if was_active else ""
+                        if was_active:
+                            ident.set_active(profile_id=fallback)
                     except Exception as exc:
                         self._failed("Deleting failed", exc)
                         return
-                    self._statuses.clear()
+                    # N5-B2: the lens follows another profile instead of
+                    # the first-run "no profile yet" text.
+                    self._switched_to(fallback)
+                    if fallback:
+                        self._notify_active(
+                            f"Deleted '{arg}'. Active identity profile: {fallback}.",
+                            fallback,
+                        )
+                    elif was_active:
+                        self.app.notify(
+                            f"Deleted '{arg}'. No active identity profile now.",
+                            timeout=4,
+                        )
                     self.reload()
+                    self._refresh_header()
 
                 self.app.push_screen(
                     ConfirmModal(
@@ -2390,7 +2432,7 @@ class IdentityLens(Vertical):
             except Exception as exc:
                 self._failed("Export failed", exc)
                 return
-            self.app.notify(f"Exported to {target}.", timeout=5)
+            self.app.notify(f"Exported to {target}.", timeout=5, markup=False)
 
         self.app.push_screen(
             InputModal(
@@ -2400,6 +2442,25 @@ class IdentityLens(Vertical):
             ),
             done,
         )
+
+
+def _fallback_profile(ident: Any, deleted: str) -> str:
+    """The profile to make active after ``deleted`` (the active one) was
+    deleted: the persona the target device holds when it is in the library,
+    else the first readable profile; ``""`` when none is left.
+    """
+    try:
+        ids = [
+            info.id
+            for info in ident.list_profiles()
+            if not info.error and info.id != deleted
+        ]
+    except Exception:
+        return ""
+    persona = _launch_persona()
+    if persona in ids:
+        return persona
+    return ids[0] if ids else ""
 
 
 def _read_library(ident: Any) -> tuple[int, Any, str]:
