@@ -1897,6 +1897,16 @@ async def test_rule_editor_end_del_and_undo_act_on_the_highlighted_rule(
         assert panel.activity.rules.rules[-1].session
         await pilot.press("home")
         assert table.cursor_row == 0
+        # R1-B4: Del on a default turns it off; u turns it on again.
+        await pilot.press("delete")
+        await pilot.pause()
+        assert modal.rules[0]["enabled"] is False
+        assert "u undoes" in str(modal.query_one("#rules-status").render())
+        await pilot.press("u")
+        await pilot.pause()
+        assert modal.rules[0]["enabled"] is True
+        assert str(table.get_row_at(0)[0]) == "●"
+        assert len(modal.rules) == len(default_files_noise_rules()) + 1
 
 
 def test_saved_rules_are_only_the_changes_to_the_defaults() -> None:

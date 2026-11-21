@@ -6,7 +6,7 @@ the config (``sandroid.config.update_config``, the same mechanism as the
 Settings screen; only the changes to the shipped defaults are saved, see
 ``merge_files_noise_rules``). Keys: Space toggles the highlighted rule,
 Delete (or ``d``) removes it (a default rule is turned off instead; ``u``
-undoes the last removal), Home/End jump to the first/last rule, the row
+undoes the last Delete of either kind), Home/End jump to the first/last rule, the row
 below adds one (action, kind, pattern, Enter), "Reset to defaults" restores
 the shipped rules. Esc closes.
 
@@ -176,8 +176,9 @@ class NoiseRulesModal(ForensicModal[None]):
         super().__init__(**kwargs)
         self._rules: list[dict] = [dict(r) for r in rules]
         self._apply = apply
-        #: The last removed rule and where it was (``u`` puts it back).
-        self._removed: tuple[int, dict] | None = None
+        #: The last Delete: where the rule was, the rule, and whether it was
+        #: turned off (a default) rather than removed (``u`` undoes either).
+        self._removed: tuple[int, dict, bool] | None = None
 
     @property
     def rules(self) -> list[dict]:
@@ -330,20 +331,32 @@ class NoiseRulesModal(ForensicModal[None]):
         if self._kept(rule) == "default":
             if rule.get("enabled", True):
                 rule["enabled"] = False
+                self._removed = (index, rule, True)
                 self._fill(index)
-                self._commit(f"{label} — off (a default rule; Space turns it on)")
+                self._commit(f"{label} — off (a default rule; u undoes)")
             return
         self._rules.pop(index)
-        self._removed = (index, rule)
+        self._removed = (index, rule, False)
         self._fill(index)
         self._commit(f"Removed {label} — u undoes")
 
     def undo_remove(self) -> None:
-        """``u``: put the last removed rule back where it was."""
+        """``u``: undo the last Delete -- put a removed rule back where it
+        was, or turn a default it turned off on again (R1-B4).
+        """
         if self._removed is None:
             return
-        index, rule = self._removed
+        index, rule, turned_off = self._removed
         self._removed = None
+        if turned_off:
+            at = next((i for i, r in enumerate(self._rules) if r is rule), None)
+            if at is not None and not rule.get("enabled", True):
+                rule["enabled"] = True
+                self._fill(at)
+                self._commit(
+                    f"{rule['action']} {rule['kind']} {rule['pattern']} — on again"
+                )
+            return
         if any(self._ident(r) == self._ident(rule) for r in self._rules):
             return
         index = min(index, len(self._rules))
