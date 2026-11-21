@@ -425,7 +425,7 @@ class SpotlightPanel(Widget):
         /:       filter the rows of all sections (Esc clears)
         z:       fold / unfold the focused section
         u:       refresh runtime facts (grants, AppOps, footprint, services)
-        R:       restart (force-stop + respawn with armed hooks; no dialog)
+        R:       restart (asks first; force-stop + respawn with armed hooks)
         A:       attach to the live process + apply armed hooks
         P:       start paused (advanced; Space then resumes; asks before
                  restarting a running app; Android ends a hold after ~10 s)
