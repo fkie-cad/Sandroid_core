@@ -437,6 +437,19 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
             text = "No"
         return f"{number}  {text}"
 
+    def _note_placeholder(self) -> str:
+        """The note input's hint; for a device-pull tool it says that a No
+        blocks the other pull tools this turn unless the note names one
+        (R2-U1)."""
+        from sandroid.ai.loop import DEVICE_PULL_TOOLS
+
+        if self._tool in DEVICE_PULL_TOOLS:
+            return (
+                "Tell it what to do instead; other pull tools stay blocked "
+                "this turn unless named here (Enter sends)"
+            )
+        return "Tell it what to do instead (Enter sends, empty = just No)"
+
     def compose(self) -> ComposeResult:
         """Build the header, details, options and the (hidden) note input."""
         args_full = _format_args_full(self._arguments)
@@ -474,7 +487,7 @@ class ToolPermissionPrompt(Vertical, can_focus=True):
                     classes="-highlighted" if index == 0 else None,
                 )
         yield Input(
-            placeholder="Tell it what to do instead (Enter sends, empty = just No)",
+            placeholder=self._note_placeholder(),
             id="tool-permission-note",
             classes="-hidden",
         )

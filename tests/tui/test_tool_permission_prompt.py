@@ -192,6 +192,23 @@ async def test_option_three_reveals_note_and_enter_submits_it():
         assert decisions == [Decision("no", note="use 1 adb")]
 
 
+async def test_pull_tool_note_says_other_pull_tools_stay_blocked():
+    """R2-U1: a No to a pull tool blocks the others this turn unless the
+    note names one; the note input says so.
+    """
+    app = _new([], spec=_make_spec("pull_path"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        note = app.query_one("#tool-permission-note", Input)
+        assert "other pull tools stay blocked this turn" in note.placeholder
+        assert "unless named here" in note.placeholder
+    plain = _new([])
+    async with plain.run_test() as pilot:
+        await pilot.pause()
+        note = plain.query_one("#tool-permission-note", Input)
+        assert "blocked" not in note.placeholder
+
+
 @pytest.mark.smoke
 async def test_empty_note_is_plain_no_and_escape_keeps_typed_note():
     decisions = []

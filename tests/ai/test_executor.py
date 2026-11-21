@@ -496,3 +496,62 @@ def test_declined_pull_blocks_get_file_diff_for_the_rest_of_the_turn(
     assert ran == ["start_file_monitor"]
     # The next turn has a new executor: the remembered allow applies again.
     assert call(executor(reg, agent_id="orchestrator"), "get_file_diff").status == "ok"
+
+
+def test_declined_pull_allows_the_tool_the_note_names_once(perm_store, arbiter):
+    """R2-U1: "Not pull_path. Use get_file_diff instead" -- the named
+    alternative passes the guard once in the same turn; the others (and a
+    second call) stay refused, and the refusal says why.
+    """
+    ran = []
+    reg = ToolRegistry()
+    register_meta_tools(reg)
+    for name in ("pull_path", "get_file_diff", "read_device_files"):
+        reg.register(
+            ToolSpec(
+                name=name,
+                description=f"Tool {name}.",
+                parameters=NO_ARGS,
+                func=lambda name=name: ran.append(name) or {"ok": True},
+                risk=RiskTier.REVERSIBLE,
+                core=True,
+            )
+        )
+    perm_store.add_allow_rule("get_file_diff")
+    perm_store.add_allow_rule("read_device_files")
+    broker = perms.ApprovalBroker(perm_store)
+    note = "Not pull_path. Use get_file_diff on that file instead"
+    broker.add_listener(
+        lambda kind, request, decision: (
+            broker.resolve(request.request_id, "no", note=note)
+            if kind == "added"
+            else None
+        )
+    )
+    ex = executor(reg, agent_id="orchestrator", broker=broker)
+    assert call(ex, "pull_path").status == "denied"
+    assert call(ex, "get_file_diff", call_id="c2").status == "ok"
+    again = call(ex, "get_file_diff", call_id="c3")
+    assert again.status == "denied"
+    other = call(ex, "read_device_files", call_id="c4")
+    assert other.status == "denied"
+    message = json.loads(other.content)["error"]["message"]
+    assert "blocked for the rest of this turn" in message
+    assert "unless the analyst's note names one" in message
+    assert ran == ["get_file_diff"]
+
+
+def test_pull_tools_named_in_note_skips_negated_names():
+    from sandroid.ai.loop import pull_tools_named_in_note as named
+
+    assert named("Not pull_path. Use get_file_diff instead", "pull_path") == {
+        "get_file_diff"
+    }
+    assert named("use Get file diff", "pull_path") == {"get_file_diff"}
+    assert named("don't use get_file_diff either", "pull_path") == set()
+    assert named("no read_device_files, never pull_app_data", "pull_path") == set()
+    assert named("Use get_file_diff, not read_device_files", "pull_path") == {
+        "get_file_diff"
+    }
+    assert named("try pull_path again later", "pull_path") == set()
+    assert named(None, "pull_path") == set()

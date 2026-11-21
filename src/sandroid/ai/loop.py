@@ -21,6 +21,7 @@ import contextvars
 import itertools
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -611,6 +612,30 @@ DEVICE_PULL_TOOLS = frozenset(
     {"pull_path", "pull_app_data", "get_file_diff", "read_device_files"}
 )
 
+#: Words that turn a tool named in a decline note into "not that one" (at
+#: most two words before it, in the same sentence).
+_NEGATION_RE = re.compile(
+    r"(?i)\b(?:not|no|don'?t|never|nor|without|avoid)"
+    r"(?:[^\w.;:!?\n]++\w++){0,2}?[^\w.;:!?\n]++$"
+)
+
+
+def pull_tools_named_in_note(note: str | None, declined: str) -> set[str]:
+    """The device-pull tools (other than *declined*) a decline note names as
+    the alternative ("Not pull_path. Use get_file_diff instead", R2-U1);
+    a tool after "not" / "don't use" / "never" ... is no alternative. The
+    card's spelling ("Get file diff") counts too.
+    """
+    found: set[str] = set()
+    text = str(note or "")
+    for name in DEVICE_PULL_TOOLS - {declined}:
+        pattern = rf"(?i)(?<![\w-]){name.replace('_', '[_ ]')}(?![\w-])"
+        for m in re.finditer(pattern, text):
+            if not _NEGATION_RE.search(text[max(0, m.start() - 24) : m.start()]):
+                found.add(name)
+                break
+    return found
+
 
 class ToolExecutor:
     """Runs one agent's tool calls (sequentially) for one :class:`RunContext`.
@@ -627,6 +652,9 @@ class ToolExecutor:
         self.ctx = ctx
         #: The device-pull tool declined or denied in this turn, if any.
         self.pull_declined: str | None = None
+        #: Pull tools the analyst's decline note named as the alternative:
+        #: each passes the guard once (its own approval still applies).
+        self.pull_allowed_once: set[str] = set()
 
     # -- public ---------------------------------------------------------------
 
@@ -748,17 +776,23 @@ class ToolExecutor:
         declined = self.pull_declined
         if declined is None or spec.name not in DEVICE_PULL_TOOLS:
             return
+        if spec.name in self.pull_allowed_once:
+            self.pull_allowed_once.discard(spec.name)
+            return
         what = "the same tool" if declined == spec.name else declined
         raise ToolError(
             "denied",
             f"{spec.name} copies device data to the host, and {what} was "
-            "declined or blocked earlier in this turn, so it is refused too",
+            "declined or blocked earlier in this turn, so it is refused too: "
+            "the other device-pull tools are blocked for the rest of this turn "
+            "unless the analyst's note names one",
             hint="Do not try another way to pull device files; ask the analyst.",
         )
 
-    def _note_declined(self, spec: ToolSpec) -> None:
+    def _note_declined(self, spec: ToolSpec, note: str | None = None) -> None:
         if spec.name in DEVICE_PULL_TOOLS and self.pull_declined is None:
             self.pull_declined = spec.name
+            self.pull_allowed_once = pull_tools_named_in_note(note, spec.name)
 
     def _check_permission(self, spec: ToolSpec, args: dict) -> None:
         ctx = self.ctx
@@ -825,7 +859,7 @@ class ToolExecutor:
         )
         if decision.approved:
             return
-        self._note_declined(spec)
+        self._note_declined(spec, decision.note)
         if decision.by == "cancelled":
             raise ToolError("cancelled", "the turn was cancelled during approval")
         if decision.by == "timeout":
