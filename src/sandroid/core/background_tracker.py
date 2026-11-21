@@ -19,6 +19,7 @@ Usage:
 import logging
 import os
 import signal
+import subprocess
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -51,6 +52,73 @@ SANDROID_THREAD_PATTERNS = {
 
 #: Host proxy helpers Sandroid spawns (mitmproxy, transparent-proxy relays).
 _PROXY_PROCESS_NAMES = ("mitmdump", "mitmweb", "mitmproxy", "gost", "ipt2socks")
+
+
+#: Seconds the one ``ps`` call that lists the process tree may take.
+_PS_TIMEOUT_S = 5.0
+
+
+def descendant_pids(root: int) -> list[int] | None:
+    """Pids of every descendant of *root*, from one ``ps -axo pid=,ppid=``.
+
+    ``psutil.Process.children`` reads every process of the system one by
+    one: with thousands of processes (a busy lab host) it took 8-38 s, and
+    the quit waited for it twice (N5-B4). ``ps`` reads the table in one
+    sysctl (well under a second). ``None`` when ``ps`` is not usable (the
+    caller falls back to psutil).
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-axo", "pid=,ppid="],
+            capture_output=True,
+            text=True,
+            timeout=_PS_TIMEOUT_S,
+            check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    children: dict[int, list[int]] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(pid)
+    if not children:
+        return None
+    found: list[int] = []
+    todo = list(children.get(root, ()))
+    while todo:
+        pid = todo.pop()
+        if pid in found or pid == root:
+            continue
+        found.append(pid)
+        todo.extend(children.get(pid, ()))
+    return found
+
+
+def child_processes() -> list[Any]:
+    """``psutil.Process`` of every descendant of this process (fast:
+    :func:`descendant_pids`; psutil's own scan only without ``ps``).
+
+    Raises:
+        ImportError: psutil is not installed.
+    """
+    import psutil
+
+    pids = descendant_pids(os.getpid())
+    if pids is None:
+        return psutil.Process().children(recursive=True)
+    out = []
+    for pid in pids:
+        try:
+            out.append(psutil.Process(pid))
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return out
 
 
 def is_persistent_device_process(name: str, cmdline: str) -> bool:
@@ -252,8 +320,7 @@ class BackgroundWorkTracker:
         try:
             import psutil
 
-            main_process = psutil.Process()
-            children = main_process.children(recursive=True)
+            children = child_processes()
 
             for child in children:
                 try:

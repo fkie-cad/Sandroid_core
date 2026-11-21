@@ -49,7 +49,9 @@ def _stop_capture_children() -> None:
     except ImportError:
         return
     try:
-        children = psutil.Process().children(recursive=True)
+        from sandroid.core.background_tracker import child_processes
+
+        children = child_processes()
     except Exception:
         return
     victims = []

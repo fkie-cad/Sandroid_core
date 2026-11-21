@@ -32,6 +32,8 @@ import logging
 import os
 import sys
 import threading
+import time
+import traceback
 from collections.abc import Callable
 from typing import Any
 
@@ -81,11 +83,44 @@ def run_bounded(name: str, fn: Callable[[], Any], timeout: float) -> bool:
         finally:
             done.set()
 
+    started = time.monotonic()
     threading.Thread(target=_run, name=f"quit-{name}", daemon=True).start()
     if done.wait(timeout):
+        _log_slow_step(name, started)
         return True
     logger.warning("Quit: %s did not finish within %.0fs; going on", name, timeout)
     return False
+
+
+#: A quit step that takes longer is logged with its time (finding a slow quit).
+SLOW_STEP_S = 1.0
+
+
+def _log_slow_step(name: str, started: float) -> None:
+    took = time.monotonic() - started
+    if took >= SLOW_STEP_S:
+        logger.info("Quit: %s took %.1fs", name, took)
+
+
+def blocking_threads_report() -> str:
+    """The threads that can hold the process exit up, with where they are:
+    non-daemon threads and executor threads (Textual's thread workers run
+    in asyncio's default executor, which is joined at the end of
+    ``asyncio.run`` and again at interpreter exit). ``""`` when none.
+    """
+    frames = sys._current_frames()
+    lines: list[str] = []
+    for thread in threading.enumerate():
+        if thread is threading.main_thread() or not thread.is_alive():
+            continue
+        name = thread.name or ""
+        pooled = name.startswith(("ThreadPoolExecutor", "asyncio_"))
+        if thread.daemon and not pooled:
+            continue
+        frame = frames.get(thread.ident or -1)
+        where = "".join(traceback.format_stack(frame, limit=6)) if frame else ""
+        lines.append(f"thread {name!r} (daemon={thread.daemon}):\n{where}")
+    return "\n".join(lines)
 
 
 #: (name, callable) run early in every quit (``force_exit``), each
@@ -214,6 +249,12 @@ def mark_app_returned() -> None:
 
 def _force_process_exit(code: int, why: str) -> None:
     logger.warning("%s; forcing exit", why)
+    try:
+        report = blocking_threads_report()
+        if report:
+            logger.warning("Threads still running at the forced exit:\n%s", report)
+    except Exception:
+        logger.debug("thread report failed", exc_info=True)
     emergency_cleanup()
     try:
         from sandroid.tui.terminal_reset import reset_terminal_hard
@@ -681,6 +722,7 @@ class QuitController:
         run_bounded("network capture", _stop_capture, 4.0)
 
         # Clean up any active objection session
+        started = time.monotonic()
         try:
             objection_service = get_objection_service()
             if objection_service.has_session():
@@ -692,8 +734,10 @@ class QuitController:
                 objection_service.clear()
         except Exception as e:
             logger.debug(f"Error cleaning up objection session: {e}")
+        _log_slow_step("objection", started)
 
         # FINAL STEP: Detect and cleanup untracked background work
+        started = time.monotonic()
         try:
             from sandroid.core.background_tracker import get_background_tracker
 
@@ -719,6 +763,7 @@ class QuitController:
                 print("Please report this issue for investigation.\n")
         except Exception as e:
             logger.debug(f"Error in untracked work detection: {e}")
+        _log_slow_step("untracked-work check", started)
 
 
 __all__ = [

@@ -1624,12 +1624,12 @@ def test_kill_app_lens_adb_only_kills_its_own_commands(monkeypatch) -> None:
         "other": Proc("adb", "adb -s e shell screencap -p"),
         "fritap": Proc("python", f"fritap {PKG}"),
     }
-    fake_psutil = types.SimpleNamespace(
-        Process=lambda: types.SimpleNamespace(
-            children=lambda recursive=True: list(procs.values())
-        )
+    from sandroid.core import background_tracker
+
+    monkeypatch.setitem(__import__("sys").modules, "psutil", types.SimpleNamespace())
+    monkeypatch.setattr(
+        background_tracker, "child_processes", lambda: list(procs.values())
     )
-    monkeypatch.setitem(__import__("sys").modules, "psutil", fake_psutil)
     assert app_lens.kill_app_lens_adb(PKG) == 3
     assert {k for k, p in procs.items() if p.killed} == {"du", "pull", "dumpsys"}
 
