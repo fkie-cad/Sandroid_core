@@ -393,6 +393,9 @@ class WatchlistView(Widget):
         self._auto_timers: dict[str, tuple[object, datetime]] = {}
         #: Paths with a pull in flight (a write meanwhile re-arms the timer).
         self._pulling: set[str] = set()
+        #: A ``u`` pull of one file: its "no change" result gets a toast
+        #: (else nothing visible happened outside the Inspector).
+        self._toast_check: set[str] = set()
         #: Paths that got their ``session-start`` pull in this session.
         self._session_baselined: set[str] = set()
         #: The monitored app (from the monitor start): its privacy auto-watch.
@@ -775,6 +778,8 @@ class WatchlistView(Widget):
         if not paths:
             self._notify("Nothing watched to pull.", "warning")
             return
+        if len(paths) == 1:
+            self._toast_check.add(paths[0])
         self._start_pull(paths)
 
     def pull_all(self) -> None:
@@ -931,6 +936,8 @@ class WatchlistView(Widget):
                 timeline_pull(path, trigger, ok=True, error="not on the device")
                 self._post(self._pulling.discard, path)
                 return "absent", None
+            # No empty .current/ (or row folder) left by a failed pull.
+            watchlist_store.discard_current(path)
             timeline_pull(path, trigger, ok=False, error=result.error)
             self._post(
                 self._apply_pull_result,
@@ -1179,6 +1186,10 @@ class WatchlistView(Widget):
                 f"Checked {clock}: the pulled copy is identical to "
                 f"{entry.get('same_as') or version}, so it was not kept."
             )
+        if path in self._toast_check:
+            self._toast_check.discard(path)
+            name = os.path.basename(path.rstrip("/")) or path
+            self._notify(f"{name}: no change since {entry.get('same_as') or version}")
         self._changed([path])
 
     def _apply_pull_result(
@@ -1193,6 +1204,7 @@ class WatchlistView(Widget):
     ) -> None:
         """Main-thread callback (via ``_post``) applying one pull's outcome."""
         self._pulling.discard(path)
+        self._toast_check.discard(path)
         info = self._rows.get(path)
         if info is None:
             return  # removed from the watchlist while the pull was in flight

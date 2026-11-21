@@ -1106,6 +1106,17 @@ async def test_header_label_note_banner_and_no_clock_sampling(
         lens = ms.lens_widget("timeline")
         assert lens.badge() == "locked"
         assert "Timeline locked by PID 4711" in lens._banner()
+        # e2e3 bug 11: a bare "dropped" badge; now a count, and the
+        # caption says why.
+        fakes.service.state = "open"
+        fakes.service.dropped = {"no-device": 3, "queue-full": 0}
+        assert lens.badge() == "3 dropped"
+        assert lens.caption()[1].startswith(
+            "3 lines not recorded (no device connected 3) · "
+        )
+        fakes.service.dropped = {}
+        assert lens.badge() is None
+        fakes.service.state = "locked"
         ms._handle_timeline_event(SimpleNamespace(data={"op": "locked"}))
         await settle(pilot)
         assert ms.query_one("#lens-bar").badge("timeline") == "locked"

@@ -24,23 +24,26 @@ DIR_PATTERN = re.compile(r"/.*:$")
 # WAL/journal file suffixes
 _WAL_SUFFIX = "-wal"
 _JOURNAL_SUFFIX = "-journal"
+#: The WAL index: rebuilt by SQLite, rewritten on every read, so never
+#: watched or pulled on its own (its database row stands for it).
+_SHM_SUFFIX = "-shm"
 
 
 def is_wal_or_journal(file_path: str) -> bool:
-    """Check if a file is a SQLite WAL or journal file.
+    """Check if a file is a SQLite companion (WAL, journal or WAL index).
 
     SQLite databases use Write-Ahead Logging (WAL) and journal files
-    for transaction management. These companion files are typically
-    excluded from spotlight monitoring and grouped with their parent
-    database during change detection.
+    for transaction management, plus the ``-shm`` WAL index. These
+    companion files are excluded from spotlight monitoring (watch and
+    pull); the database's own entry stands for them.
 
     Args:
         file_path: Path or filename to check.
 
     Returns:
-        True if the file ends with '-wal' or '-journal'.
+        True if the file ends with '-wal', '-journal' or '-shm'.
     """
-    return file_path.endswith(_WAL_SUFFIX) or file_path.endswith(_JOURNAL_SUFFIX)
+    return file_path.endswith((_WAL_SUFFIX, _JOURNAL_SUFFIX, _SHM_SUFFIX))
 
 
 def get_parent_db_path(file_path: str) -> str | None:

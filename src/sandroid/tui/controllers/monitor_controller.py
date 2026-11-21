@@ -1317,6 +1317,9 @@ class MonitorWatch:
         self._gone: set[int] = set()
         #: The latest main exit noted (a later restart is ordered after it).
         self._last_exit_at: datetime | None = None
+        #: Frida hooks (bypass, tools) were seen in the app while it ran: a
+        #: restart then says they are gone (never when none were applied).
+        self._hooked = False
         #: Notes of the running poll, emitted in time order at its end:
         #: (text, level, when, kind, data).
         self._pending_notes: list[tuple] | None = None
@@ -1518,6 +1521,10 @@ class MonitorWatch:
                 return  # adb hiccup: never read as "every process exited"
             if listing.app_uid:
                 self.app_uid = listing.app_uid
+            if self.main_pid in listing.processes and self.main_pid not in (
+                self._exit_seen
+            ):
+                self._hooked = self._app_hooked()  # the running app's hooks
             self._exited = []
             self._restart_at = None
             self._gone &= set(listing.processes)
@@ -1690,8 +1697,13 @@ class MonitorWatch:
             )
             if restarted and self._sandroid_restarting():
                 text += " · restarted by Shift+R"
-            elif restarted and proc.via != "spawn":
+            elif (
+                restarted
+                and proc.via != "spawn"
+                and (self._hooked or self._app_hooked())
+            ):
                 text += " · Frida hooks are gone (Shift+R re-applies)"
+            self._hooked = False  # the new process starts without hooks
             when = started
             last_exit = self._last_exit_at
             if restarted and last_exit is not None and when <= last_exit:
@@ -1717,6 +1729,17 @@ class MonitorWatch:
                 kind="follow",
                 data={"pid": proc.pid, "label": proc.label, "gap_s": proc.gap},
             )
+
+    def _app_hooked(self) -> bool:
+        """Something of Sandroid's runs in the app (bypass scripts, tools;
+        the monitor itself does not count). In-process only, never raises.
+        """
+        try:
+            from sandroid.tui.widgets.spotlight_panel import collect_app_hooks
+
+            return any(app.package == self.package for app in collect_app_hooks())
+        except Exception:
+            return False
 
     def _sandroid_restarting(self) -> bool:
         """Sandroid's own ⇧R is restarting this package right now."""

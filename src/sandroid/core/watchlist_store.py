@@ -68,6 +68,7 @@ A pull goes ``reset_current`` (staging ``.current/``) → pull into it →
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -381,10 +382,15 @@ def reset_current(path: str) -> Path:
 
 
 def discard_current(path: str) -> None:
-    """Drop the staging folder (a pull that is not kept as a version)."""
+    """Drop the staging folder (a pull that is not kept as a version), and
+    the file's folder too when nothing else is in it (a failed first pull
+    leaves no empty folders behind).
+    """
     directory = row_dir(path) / _STAGING
     if directory.exists():
         shutil.rmtree(directory, ignore_errors=True)
+    with contextlib.suppress(OSError):
+        directory.parent.rmdir()  # only when empty
 
 
 def next_version_name(path: str, when: datetime | None = None) -> str:

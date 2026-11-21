@@ -1167,6 +1167,10 @@ def humanize_log_line(line: str) -> str:
     rest = line[match.start() :]
     detail = rest.rsplit("): ", 1)[-1].strip() if "): " in rest else ""
     detail = detail.splitlines()[0][:160] if detail else "command failed"
+    # adb's own messages start with "adb: " ("adb: error: failed to stat
+    # ..."): one prefix, not "adb: adb: error:".
+    while detail.lower().startswith("adb: "):
+        detail = detail[5:].lstrip() or "command failed"
     return f"{head}adb: {escape(detail)} [dim](` log has the command)[/dim]"
 
 

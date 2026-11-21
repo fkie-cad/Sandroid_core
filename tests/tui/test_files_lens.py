@@ -350,6 +350,22 @@ def test_a_group_row_is_one_slot_and_goes_whole() -> None:
     assert model.dropped == 100
 
 
+def test_a_file_dropped_again_is_counted_once() -> None:
+    """e2e3 bug 9: files that come back and are dropped again were counted
+    again (78 -> 771 in 3 min); the caption counts different files.
+    """
+    model = FileActivity(max_paths=50, auto_group_min=0)
+    keep = {f"{ROOT}/k{i}/f" for i in range(49)}
+    model.protected = lambda key: key in keep
+    for i, key in enumerate(sorted(keep)):
+        _ingest_one(model, _fse("FSE_CONTENT_MODIFIED", key), i)
+    a, b = f"{ROOT}/a/f", f"{ROOT}/b/f"
+    for second, key in enumerate((a, b, a, b, a, b), start=100):
+        _ingest_one(model, _fse("FSE_CONTENT_MODIFIED", key), second)
+    assert len(model.paths) == 50
+    assert model.dropped == 2  # a and b, each dropped twice or more
+
+
 def test_auto_group_thresholds_and_machine_names() -> None:
     from sandroid.tui.widgets.monitor_view import (
         auto_group_folders,
@@ -362,6 +378,8 @@ def test_auto_group_thresholds_and_machine_names() -> None:
         "0a1b2c3d4e5f",
         "6f1c2a9e-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
         "12345.tmp",
+        "4f1c9a0b2d3e4f5a.0.tmp",  # Firefox thumbnail/icon atomic write
+        "4f1c9a0b2d3e4f5a.0",
     ):
         assert machine_name(name), name
     for name in ("journal", "cafe", "aaid.txt", "f_001", "data.sqlite"):
@@ -622,6 +640,38 @@ async def test_slash_filters_and_escape_clears() -> None:
         assert app.focused is panel.table
         assert not field.has_class("-shown")
         assert set(_keys(panel)) == {PREFS, AAID}
+
+
+@pytest.mark.asyncio
+async def test_filter_enter_while_live_keeps_the_match_selected() -> None:
+    """N1-V9: Enter in the filter while live jumped to the newest row on the
+    next update, and Esc then lost the selection.
+    """
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        for i, path in enumerate((PREFS, AAID, DB)):
+            panel.ingest(
+                _items(_fse("FSE_CONTENT_MODIFIED", path)),
+                now=T0 + timedelta(seconds=i),
+            )
+        panel.refresh_rows()
+        panel.table.focus()
+        assert panel.following
+        await pilot.press("slash", *"prefs", "enter")
+        await pilot.pause()
+        assert not panel.following
+        assert panel._cursor_key() == PREFS
+        panel.ingest(
+            _items(_fse("FSE_CREATE_FILE", f"{ROOT}/files/new_prefs.txt")),
+            now=T0 + timedelta(seconds=9),
+        )
+        panel.refresh_rows()
+        assert panel._cursor_key() == PREFS  # a new match does not take it
+        assert panel.handle_escape()  # Esc (MainScreen hook): clears the filter
+        await pilot.pause()
+        assert panel._filter == ""
+        assert panel._cursor_key() == PREFS
 
 
 @pytest.mark.asyncio
@@ -1070,6 +1120,45 @@ async def test_short_paths_name_the_package_in_review_and_for_other_apps(
         )
 
 
+@pytest.mark.asyncio
+async def test_other_apps_keep_their_package_on_groups_and_without_a_monitor(
+    monkeypatch,
+) -> None:
+    """N1-B3/B4: another app's group row names its package, and its rows
+    keep the prefix once the monitor stops (the selected app is "own").
+    """
+    other = "/data/data/org.wikipedia"
+    monkeypatch.setattr(FilesPanel, "_selected_package", staticmethod(lambda: PKG))
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        _register_monitor()
+        await pilot.pause()
+        files = [f"{other}/cache/{n}" for n in ("a", "b")]
+        panel.ingest(
+            _items(
+                *[_fse("FSE_CONTENT_MODIFIED", p) for p in files],
+                _fse("FSE_CONTENT_MODIFIED", f"{other}/databases/wikipedia.db"),
+                _fse("FSE_CONTENT_MODIFIED", f"{ROOT}/cache/x"),
+            ),
+            now=T0,
+        )
+
+        def cells() -> dict[str, str]:
+            _keys(panel)
+            return {r.key: panel._path_cell(r).plain for r in panel._rows}
+
+        live = cells()
+        assert live[f"{other}/cache/"] == "org.wikipedia: cache/ · 2 files"
+        assert live[f"{ROOT}/cache/"] == "cache/ · 1 file"
+        get_task_service()._tasks.pop("monitor", None)  # monitor stopped
+        stopped = cells()
+        assert stopped[f"{other}/databases/wikipedia.db"] == (
+            "org.wikipedia: databases/wikipedia.db"
+        )
+        assert stopped[f"{other}/cache/"] == "org.wikipedia: cache/ · 2 files"
+
+
 def test_a_running_monitor_is_not_counted_as_a_hook() -> None:
     """L7: the monitor task carries the app's name but is not a Frida hook."""
     from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
@@ -1191,14 +1280,52 @@ async def test_n_prefill_is_extended_not_replaced_and_bad_paths_are_rejected(
         assert field.value == f"{ROOT}/files"
         notes: list[str] = []
         monkeypatch.setattr(app, "notify", lambda msg, **kw: notes.append(msg))
-        for bad in ("shared_prefs/x.xml", f"{ROOT}/x;touch y", ROOT + "/$" + "(id)"):
+        for bad in (f"{ROOT}/x;touch y", ROOT + "/$" + "(id)"):
             field.value = bad
             await pilot.press("enter")
             await pilot.pause()
             assert app.focused is field
-        assert "absolute" in notes[0]
-        assert all("metacharacters" in n for n in notes[1:])
+        assert all("metacharacters" in n for n in notes)
         assert get_forensic_service().get_spotlight_files() == []
+        # No monitor and no selected app: a relative path has nothing to
+        # resolve against.
+        get_task_service()._tasks.pop("monitor", None)
+        monkeypatch.setattr(FilesPanel, "_selected_package", staticmethod(lambda: None))
+        field.value = "shared_prefs/x.xml"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.focused is field
+        assert "absolute" in notes[-1]
+
+
+@pytest.mark.asyncio
+async def test_n_resolves_against_the_selected_app_and_folders_mean_all(
+    monkeypatch,
+) -> None:
+    """N1-B6: with the app stopped (no monitor) ``shared_prefs/`` is the
+    selected app's folder; an absolute folder ending in ``/`` is
+    ``folder/*``.
+    """
+    added: list[str] = []
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        monkeypatch.setattr(FilesPanel, "_selected_package", staticmethod(lambda: PKG))
+        monkeypatch.setattr(
+            panel.watchlist, "add_path", lambda p: added.append(p) or True
+        )
+        await pilot.pause()
+        panel.focus()
+        await pilot.press("n")
+        await pilot.pause()
+        field = panel.query_one("#files-input", Input)
+        assert field.value == f"{ROOT}/"  # prefilled from the selected app
+        for typed in ("shared_prefs/", f"{ROOT}/files/", f"{ROOT}/x.db"):
+            panel.open_input("add")
+            field.value = typed
+            await pilot.press("enter")
+            await pilot.pause()
+        assert added == [f"{ROOT}/shared_prefs/*", f"{ROOT}/files/*", f"{ROOT}/x.db"]
 
 
 @pytest.mark.asyncio
@@ -1577,12 +1704,14 @@ async def test_rule_editor_applies_at_once_persists_and_resets(monkeypatch) -> N
         assert modal.add_rule("hide", "suffix", ".log")
         assert f"{ROOT}/files/app.log" not in _keys(panel)
         assert "1 hidden: suffix 1" in panel.caption()[1]
-        assert saved[-1]["tui.files_noise_rules"][-1] == {
+        # N1-V11: only the user's change is saved, not every default.
+        log_rule = {
             "action": "hide",
             "kind": "suffix",
             "pattern": ".log",
             "enabled": True,
         }
+        assert saved[-1]["tui.files_noise_rules"] == [log_rule]
         assert not modal.add_rule("hide", "suffix", ".log")  # no duplicates
 
         cache_rule = next(
@@ -1590,7 +1719,10 @@ async def test_rule_editor_applies_at_once_persists_and_resets(monkeypatch) -> N
         )
         modal.toggle_rule(cache_rule)  # cache no longer grouped
         assert f"{ROOT}/cache/a" in _keys(panel)
-        assert saved[-1]["tui.files_noise_rules"][cache_rule]["enabled"] is False
+        assert saved[-1]["tui.files_noise_rules"] == [
+            {**modal.rules[cache_rule], "enabled": False},
+            log_rule,
+        ]
 
         modal.remove_rule(len(modal.rules) - 1)
         assert f"{ROOT}/files/app.log" in _keys(panel)
@@ -1598,18 +1730,25 @@ async def test_rule_editor_applies_at_once_persists_and_resets(monkeypatch) -> N
         modal.reset_defaults()
         assert modal.rules == default_files_noise_rules()
         assert f"{ROOT}/cache/" in _keys(panel)
+        assert saved[-1]["tui.files_noise_rules"] == []
         assert len(saved) == 4
 
-        # Keys inside the editor: Space toggles, Delete removes.
+        # Keys inside the editor: Space toggles; Delete turns a default off
+        # (it is never removed).
         table = modal.query_one("#rules-table")
         table.focus()
         table.move_cursor(row=0)
         await pilot.press("space")
         await pilot.pause()
         assert modal.rules[0]["enabled"] is False
+        await pilot.press("space")
+        await pilot.pause()
         await pilot.press("delete")
         await pilot.pause()
-        assert len(modal.rules) == len(default_files_noise_rules()) - 1
+        assert len(modal.rules) == len(default_files_noise_rules())
+        assert modal.rules[0]["enabled"] is False
+        assert str(table.get_row_at(0)[0]) == "○"  # "on" column: ● / ○ only
+        assert str(table.get_row_at(1)[0]) == "●"
         # E2E LOW: the focused button is visibly different from the others.
         modal.query_one("#rules-reset").focus()
         await pilot.pause()
@@ -1620,6 +1759,106 @@ async def test_rule_editor_applies_at_once_persists_and_resets(monkeypatch) -> N
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, NoiseRulesModal)
+
+
+@pytest.mark.asyncio
+async def test_rule_editor_end_del_and_undo_act_on_the_highlighted_rule(
+    monkeypatch,
+) -> None:
+    """N1-B2 / e2e3 bug 7: End scrolled sideways instead of moving to the
+    last rule, so Del removed the first rule and saved at once. Now End /
+    Home move the cursor, Del removes the highlighted rule and u undoes.
+    """
+    import sandroid.config as config_module
+    from sandroid.config.schema import default_files_noise_rules
+    from sandroid.tui.modals.noise_rules_modal import NoiseRulesModal
+
+    saved: list[dict] = []
+    monkeypatch.setattr(
+        config_module, "update_config", lambda updates, **kw: saved.append(updates)
+    )
+    deep = (
+        f"{ROOT}/files/mozilla/k3m7yjvw.default/storage/default/"
+        "https+++stackoverflow.com/"
+    )
+    app = _Harness()
+    async with app.run_test(size=(140, 40)) as pilot:
+        panel = app.query_one(FilesPanel)
+        panel.apply_mute({"action": "hide", "kind": "prefix", "pattern": deep})
+        panel.table.focus()
+        await pilot.press("R")
+        await until(pilot, lambda: isinstance(app.screen, NoiseRulesModal))
+        modal = app.screen
+        table = modal.query_one("#rules-table")
+        table.focus()
+        await pilot.pause()
+        last = len(modal.rules) - 1
+        await pilot.press("end")
+        assert table.cursor_row == last
+        assert table.scroll_x == 0
+        row = table.get_row_at(last)
+        assert str(row[1]) == "session"
+        assert str(row[4]).endswith("https+++stackoverflow.com/")  # cut at "/"
+        await pilot.press("delete")
+        await pilot.pause()
+        assert len(modal.rules) == len(default_files_noise_rules())
+        assert modal.rules[0]["pattern"] == "/proc/"  # the first rule stays
+        assert "u undoes" in str(modal.query_one("#rules-status").render())
+        await pilot.press("u")
+        await pilot.pause()
+        assert modal.rules[-1]["pattern"] == deep
+        assert panel.activity.rules.rules[-1].session
+        await pilot.press("home")
+        assert table.cursor_row == 0
+
+
+def test_saved_rules_are_only_the_changes_to_the_defaults() -> None:
+    """N1-V11: the config kept every default once one rule was saved."""
+    from sandroid.config.schema import (
+        default_files_noise_rules,
+        files_noise_rules_overrides,
+        merge_files_noise_rules,
+    )
+
+    defaults = default_files_noise_rules()
+    mine = {"action": "hide", "kind": "suffix", "pattern": ".log", "enabled": True}
+    rules = [*defaults, mine]
+    rules[0] = {**rules[0], "enabled": False}
+    del rules[1]  # an old config could drop a default: saved as off
+    saved = files_noise_rules_overrides(rules)
+    assert saved == [
+        {**defaults[0], "enabled": False},
+        mine,
+        {**defaults[1], "enabled": False},
+    ]
+    merged = merge_files_noise_rules(saved)
+    assert merged[: len(defaults)] == [
+        {**d, "enabled": i > 1} for i, d in enumerate(defaults)
+    ]
+    assert merged[-1] == mine
+    assert files_noise_rules_overrides(defaults) == []
+    # An old config with the whole list reads the same as the defaults.
+    assert merge_files_noise_rules(defaults) == defaults
+    assert merge_files_noise_rules([]) == defaults
+
+
+def test_mute_choices_fit_one_line_each_cut_at_slashes() -> None:
+    """N1-B5: long paths wrapped over 2-3 lines and broke mid-word."""
+    from sandroid.tui.modals.noise_rules_modal import MuteRowModal, fit_path
+
+    folder = (
+        f"{ROOT}/files/mozilla/k3m7yjvw.default/storage/default/"
+        "https+++stackoverflow.com/ls/"
+    )
+    text = MuteRowModal.choice_text(("this folder", folder, {}, 12), 70).plain
+    assert len(text) <= 70
+    assert text.endswith("hides 12 rows")
+    shown = text[14 : text.index("  hides")]
+    assert shown.startswith("files/…/")
+    assert shown.endswith("/ls/")
+    assert all(part in folder for part in shown.replace("…/", "").split("/"))
+    assert fit_path("a/b", 10) == "a/b"
+    assert fit_path("/data/data/x/files/deep/name.db", 20) == "/…/deep/name.db"
 
 
 def test_noise_rules_are_validated_and_saved_in_the_config() -> None:
@@ -2467,6 +2706,34 @@ async def test_restart_separator_in_events_and_writes_counted_per_process() -> N
         )
 
 
+@pytest.mark.asyncio
+async def test_path_mode_by_maps_a_thread_to_its_process() -> None:
+    """N1-B7: a thread whose first lines had no TGID (Path mode: no follow
+    table) was listed as a process of its own ("PID 5680, PID 19037").
+    """
+    from dataclasses import replace
+
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        base = _items(_fse("FSE_CONTENT_MODIFIED", DB))[0]
+        items = [
+            # the thread's first write: only its own id is known
+            replace(base, process="arch_disk_io_1", pid=19037, tid=19037),
+            replace(base, process="main", pid=5680, tid=5680),
+            # a later line of the same thread carries its TGID
+            replace(base, process="arch_disk_io_1", pid=5680, tid=19037),
+        ]
+        for i, item in enumerate(items):
+            panel.ingest([item], now=T0 + timedelta(seconds=i))
+        panel.refresh_rows()
+        summary = _plain(_tab(panel.inspect_selected(), "Summary"))
+        by = next(line for line in summary.splitlines() if "by" in line.split())
+        assert "PID 5680" in by
+        assert "19037" not in by
+
+
 # --------------------------------------------------------------------------
 # E2E round 2: companion delete (M5), separators (L1), OPEN-only idle (L3),
 # no LIVE while off / stopping (L8, M8), tid in the timeline (M4)
@@ -3084,6 +3351,10 @@ async def test_M_hides_rows_like_this_one_for_the_session_or_always(
         await pilot.press("M")
         await until(pilot, lambda: isinstance(app.screen, MuteRowModal))
         assert "hides 2 rows" in MuteRowModal.choice_text(app.screen.choices[0]).plain
+        # N1-B5: the scope-specific key hint, not the generic list one.
+        footer = app.screen.query_one("KeyHintFooter")
+        assert "a always" in str(footer.render())
+        assert "j/k" not in str(footer.render())
         await pilot.press("enter")
         await until(pilot, lambda: not isinstance(app.screen, MuteRowModal))
         assert not set(logs) & set(_keys(panel))
@@ -3097,7 +3368,9 @@ async def test_M_hides_rows_like_this_one_for_the_session_or_always(
         modal = app.screen
         assert modal.rules[-1]["session"] is True
         table = modal.query_one("#rules-table")
-        assert "this session" in str(table.get_row_at(len(modal.rules) - 1)[3])
+        # N1-B2: the mark has its own column (a long pattern hid it).
+        assert str(table.get_row_at(len(modal.rules) - 1)[1]) == "session"
+        assert str(table.get_row_at(0)[1]) == "default"
         modal.remove_rule(len(modal.rules) - 1)
         assert set(logs) <= set(_keys(panel))
         assert all(not r.get("session") for r in saved[-1]["tui.files_noise_rules"])

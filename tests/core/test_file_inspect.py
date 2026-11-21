@@ -528,3 +528,14 @@ def test_content_opens_on_a_data_table_not_android_metadata(
     preview = fi.preview_file(db)
     assert preview.table == "downloads"
     assert {t.name for t in preview.tables} >= {"android_metadata", "downloads"}
+
+
+def test_summary_says_one_key_not_one_keys() -> None:
+    """N1-V7: "~1 keys"."""
+    one = fi.StructuredDiff(kind="xml", keys=[fi.KeyChange("a", "changed")])
+    assert one.summary() == "~1 key"
+    two = fi.StructuredDiff(
+        kind="xml",
+        keys=[fi.KeyChange("a", "changed"), fi.KeyChange("b", "added")],
+    )
+    assert two.summary() == "+1 ~1 keys"

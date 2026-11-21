@@ -238,7 +238,9 @@ class StructuredDiff:
             where = f" · first diff @{b.offset}" if b.offset is not None else ""
             return f"{old} → {new}{where}"
         added, changed, removed = self.counts()
-        unit = "lines" if self.hunks else "keys"
+        unit = "line" if self.hunks else "key"
+        if added + changed + removed != 1:
+            unit += "s"  # "~1 key", "+2 ~1 keys"
         parts = []
         if added:
             parts.append(f"+{added}")

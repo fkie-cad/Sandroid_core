@@ -399,14 +399,19 @@ def _pull_and_keep(path: str) -> dict:
     fx = get_file_extraction_service()
     result = fx.pull_file(path, str(current_main))
     if not result.success:
+        watchlist_store.discard_current(path)  # no empty .current/ left
         raise ToolExecutionError(result.error or f"Failed to pull {path!r}")
 
     # Best-effort SQLite companions, same as _pull_and_diff_one -- pulled
     # directly (not via FileExtractionService's private companion-pull
     # helper) so the destination stays inside our own current/ cache dir.
+    # A missing one is normal (WAL mode has no -journal): no warning.
     if is_sqlite_file(str(current_main)):
-        for suffix in ("-wal", "-journal"):
-            fx.pull_file(f"{path}{suffix}", f"{current_main}{suffix}")
+        from sandroid.core.adb_utils import quiet_adb_warnings
+
+        with quiet_adb_warnings():
+            for suffix in ("-wal", "-journal"):
+                fx.pull_file(f"{path}{suffix}", f"{current_main}{suffix}")
 
     # Kept as a new version with diff.json + the plain diff.txt rendered from
     # it, like the Files lens's pulls.

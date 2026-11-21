@@ -1372,6 +1372,18 @@ async def test_ticker_shows_human_lines_not_adb_commands() -> None:
         assert "Task exception was never retrieved" in ticker.last_line
 
 
+def test_humanized_adb_line_has_one_adb_prefix() -> None:
+    """N1-V10: adb's own "adb: error: ..." became "adb: adb: error:"."""
+    from sandroid.tui.widgets.lens_shell import humanize_log_line
+
+    line = humanize_log_line(
+        "ADB command warning (-s emulator-5558 pull /data/x /tmp/x): "
+        "adb: error: failed to stat remote object '/data/x': No such file"
+    )
+    assert line.startswith("adb: error: failed to stat")
+    assert "adb: adb:" not in line
+
+
 async def test_recurring_errors_are_folded(monkeypatch) -> None:
     """M2: one error per network flow drowned the drawer and the ticker."""
     from sandroid.tui.widgets import ActivityLog

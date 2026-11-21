@@ -778,6 +778,53 @@ def default_files_noise_rules() -> list[dict]:
     return rules
 
 
+def _files_rule_ident(rule: dict) -> tuple:
+    return (rule.get("action", "hide"), rule.get("kind"), rule.get("pattern"))
+
+
+def merge_files_noise_rules(stored: list[dict] | None) -> list[dict]:
+    """The rules in effect: the shipped defaults, then the user's own.
+
+    ``tui.files_noise_rules`` keeps only the user's changes (see
+    :func:`files_noise_rules_overrides`): a stored rule equal to a default
+    sets that default's on/off state; every other stored rule is added
+    after the defaults, in its order. An old config that stored the whole
+    list (defaults included) reads the same way.
+    """
+    defaults = default_files_noise_rules()
+    by_ident = {_files_rule_ident(r): r for r in stored or []}
+    out: list[dict] = []
+    for rule in defaults:
+        mine = by_ident.pop(_files_rule_ident(rule), None)
+        if mine is not None:
+            rule = {**rule, "enabled": bool(mine.get("enabled", True))}
+        out.append(rule)
+    out.extend(dict(r) for r in stored or [] if _files_rule_ident(r) in by_ident)
+    return out
+
+
+def files_noise_rules_overrides(rules: list[dict]) -> list[dict]:
+    """What to save of ``rules`` (the rules in effect): the user's own
+    rules, and the defaults that are off or gone (saved as off). The
+    shipped defaults stay out, so a later release can change them.
+    """
+    defaults = {_files_rule_ident(r): r for r in default_files_noise_rules()}
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    for rule in rules:
+        ident = _files_rule_ident(rule)
+        seen.add(ident)
+        default = defaults.get(ident)
+        if default is None or bool(rule.get("enabled", True)) != default["enabled"]:
+            out.append(dict(rule))
+    out.extend(
+        {**rule, "enabled": False}
+        for ident, rule in defaults.items()
+        if ident not in seen
+    )
+    return out
+
+
 #: Chat dock split presets (fraction of the left column the chat takes).
 CHAT_DOCK_PRESETS: tuple[float, ...] = (0.3, 0.5, 0.7)
 

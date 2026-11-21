@@ -261,6 +261,8 @@ def test_get_file_diff_raises_on_pull_failure(monkeypatch, tmp_path):
         watchlist_store, "reset_current", lambda path: tmp_path / "current"
     )
     (tmp_path / "current").mkdir()
+    discarded: list[str] = []
+    monkeypatch.setattr(watchlist_store, "discard_current", discarded.append)
     monkeypatch.setattr("sandroid.services.get_forensic_service", lambda: forensic)
     monkeypatch.setattr("sandroid.services.get_file_extraction_service", lambda: fx)
 
@@ -268,6 +270,8 @@ def test_get_file_diff_raises_on_pull_failure(monkeypatch, tmp_path):
         monitor_control.get_file_diff("/data/data/com.example/prefs.xml")
 
     assert forensic.added == ["/data/data/com.example/prefs.xml"]
+    # N1-B9: no empty staging folder left behind by the failed pull.
+    assert discarded == ["/data/data/com.example/prefs.xml"]
 
 
 def test_get_file_diff_first_pull_reports_baseline(monkeypatch, tmp_path):
@@ -408,6 +412,17 @@ def test_get_file_diff_pulls_sqlite_companions(monkeypatch, tmp_path):
     monkeypatch.setattr("sandroid.services.get_file_extraction_service", lambda: fx)
     monkeypatch.setattr(file_extraction_service, "is_sqlite_file", lambda p: True)
 
+    from sandroid.core import adb_utils
+
+    quiet: list[int] = []
+    pull = fx.pull_file
+
+    def _pull(remote_path, local_path):
+        quiet.append(getattr(adb_utils._quiet, "depth", 0))
+        return pull(remote_path, local_path)
+
+    fx.pull_file = _pull
+
     monitor_control.get_file_diff("/data/data/com.example/app.db")
 
     remote_paths = [call[0] for call in fx.pull_calls]
@@ -416,6 +431,9 @@ def test_get_file_diff_pulls_sqlite_companions(monkeypatch, tmp_path):
         "/data/data/com.example/app.db-wal",
         "/data/data/com.example/app.db-journal",
     ]
+    # e2e3 bug 10: a missing companion is no WARNING (quiet adb), the main
+    # file's pull still warns.
+    assert quiet == [0, 1, 1]
 
 
 def test_get_file_diff_asks_for_approval():
