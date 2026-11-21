@@ -953,7 +953,7 @@ def test_mask_sensitive_masks_a_secret_typed_into_a_prompt(
     for text in (sent, stored, index, session.title):
         assert "sk-test1234567890abcd" not in text
         assert "hunter2x" not in text
-    assert session.title == "My test key is sk-*** and password=***"
+    assert session.title == "My test key is sk-*** and password=[text, 8 chars]"
 
 
 def test_prompt_is_unchanged_with_mask_off(tmp_path, registry, monkeypatch):

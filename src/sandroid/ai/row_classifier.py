@@ -18,8 +18,9 @@ Two parts, both without Textual:
   secret-named headers, query parameters and JSON / form fields (Network)
   and ``name = value`` lines / SQLite cells (Files) keep only their type and
   length (the name rule of main), then every digest goes through
-  :func:`~sandroid.ai.safety.redact_secrets`; if that fails, the digest is
-  withheld (fails closed). Device text is framed (``<content>`` /
+  :func:`~sandroid.ai.safety.redact_secrets` (reduced values protected) and
+  e-mail addresses, phone numbers and IMEIs are reduced by value; if that
+  fails, the digest is withheld (fails closed). Device text is framed (``<content>`` /
   ``<diff>``, ``<``/``>`` escaped) so it cannot forge digest lines.
 * **Classifier** (:class:`RowClassifier`): sends the digests in batches (at
   most ``batch_rows`` rows or about ``batch_tokens`` tokens) to the chat
@@ -433,7 +434,22 @@ def network_digest(
 
 #: ``name = value`` (prefs) / ``name=value`` / ``name: value`` at a line start.
 #: A leading ``+`` (a diff's added line) belongs to the indent, not the name.
-_NAME_VALUE_LINE_RE = re.compile(r"^(\s*+\+?)([\w.\-]{1,128}+)(\s*+[=:]\s*+)(.*)$")
+#: The name may have up to four words ("contact email: ..."); the rule then
+#: looks at its last word only (R2-B1).
+_NAME_VALUE_LINE_RE = re.compile(
+    r"^(\s*+\+?)((?:[\w.\-]{1,64}+ ){0,3}[\w.\-]{1,128}+)(\s*+[=:]\s*+)(.*)$"
+)
+#: Last words that leave the naming to the word before ("phone number").
+_NAME_TAIL_WORDS = frozenset({"number", "no", "nr", "address", "id"})
+
+
+def _name_tail(name: str) -> str:
+    """The part of a multi-word name the rule looks at: its last word, or
+    its last two words for "phone number" / "e-mail address"."""
+    words = name.split(" ")
+    if len(words) > 1 and words[-1].lower() in _NAME_TAIL_WORDS:
+        return "".join(words[-2:])
+    return words[-1]
 
 
 def mask_names(text: str, name_rule: Callable[[str], bool] | None = None) -> str:
@@ -472,7 +488,7 @@ def mask_names(text: str, name_rule: Callable[[str], bool] | None = None) -> str
         if (
             m is not None
             and m.group(4)
-            and rule(m.group(2))
+            and rule(_name_tail(m.group(2)))
             and not is_reduced(m.group(4))
         ):
             line = m.group(1) + m.group(2) + m.group(3) + reduce_value(m.group(4))
@@ -481,11 +497,9 @@ def mask_names(text: str, name_rule: Callable[[str], bool] | None = None) -> str
 
 
 def _mask(text: str) -> str:
-    """``redact_secrets(text)``; fails closed (:data:`WITHHELD`) when it raises."""
+    """:func:`redact_keeping_placeholders`; fails closed (:data:`WITHHELD`)."""
     try:
-        from sandroid.ai.safety import redact_secrets
-
-        return redact_secrets(text)
+        return redact_keeping_placeholders(text)
     except Exception:
         logger.warning("secret redaction failed; a row digest was withheld")
         return WITHHELD
@@ -557,9 +571,10 @@ _XML_ATTR_RE = re.compile(
     r'(<(?:int|long|float|boolean)\b[^>]{0,200}?\bname="([^"]{1,128})"'
     r'[^>]{0,200}?\bvalue=")([^"]*+)(")'
 )
-#: A query or form parameter after ``?``, ``&`` or ``; ``.
+#: A query or form parameter after ``?``, ``&``, ``; `` or whitespace
+#: (``query: email=...`` in a digest, R2-B1).
 _PARAM_RE = re.compile(
-    r"([?&;] ?)([A-Za-z0-9_.\-\[\]%]{1,64}+)="
+    r"(?:([?&;] ?)|(?<=\s))([A-Za-z0-9_.\-\[\]%]{1,64}+)="
     r"(\[[A-Za-z][\w-]{0,15}+, \d++ [^\]]{0,60}+\]|[^&#\s\"'<>;,]*+)"
 )
 
@@ -599,10 +614,9 @@ def mask_text(text: str) -> str:
     URL / form parameters and ``name=value`` / ``name: value`` lines whose
     name looks secret (or personal) keep only the value's type and length;
     then :func:`~sandroid.ai.safety.redact_secrets` (bearer tokens, ``sk-``
-    and AWS keys, URL credentials, the configured API key). Linear.
+    and AWS keys, URL credentials, the configured API key) and, by value,
+    e-mail addresses, phone numbers and IMEIs. Linear.
     """
-    from sandroid.ai.safety import redact_secrets
-
     text = str(text)
     if not text:
         return text
@@ -633,15 +647,83 @@ def mask_text(text: str) -> str:
         )
     text = _PARAM_RE.sub(
         lambda m: (
-            f"{m.group(1)}{m.group(2)}={_sub_reduced(m.group(3), reduce_value)}"
+            f"{m.group(1) or ''}{m.group(2)}="
+            f"{_sub_reduced(m.group(3), reduce_value)}"
             if is_sensitive_name(m.group(2))
             else m.group(0)
         ),
         text,
     )
     text = mask_names(text, name_rule=is_sensitive_name)
-    # redact_secrets would turn ``token=[text, 8 chars]`` into
-    # ``token=***, 8 chars]``: reduced values sit it out as placeholders.
+    return redact_keeping_placeholders(text)
+
+
+#: An e-mail address (also with ``%40``), whatever name it sits under.
+_EMAIL_RE = re.compile(
+    r"(?<![\w.%+\-])[A-Za-z0-9][A-Za-z0-9._%+\-]{0,63}(?:@|%40)"
+    r"((?:[A-Za-z0-9\-]{1,63}\.){1,8}([A-Za-z]{2,24}))(?![\w\-])"
+)
+#: ``icon@2x.png`` is a file name, not an address.
+_FILE_SUFFIXES = frozenset(
+    "png jpg jpeg gif webp svg bmp ico js css json xml html htm txt log so "
+    "dex apk jar db sqlite zip gz mp3 mp4 pdf".split()
+)
+#: An international phone number: ``+`` and 7-15 digits (E.164), optional
+#: spaces, dashes, dots or a bracketed area code. The ``+`` is required, so
+#: timestamps, ids and counters stay; possessive, so linear.
+_PHONE_RE = re.compile(
+    r"(?<![\w./])\+[1-9]\d{0,2}+(?:[ \-.]?+(?:\(\d{1,4}+\)|\d{1,6}+)){1,6}+(?![\d])"
+)
+#: 15 digits on their own (an IMEI if the Luhn check passes).
+_IMEI_RE = re.compile(r"(?<![\w.\-+])\d{15}(?![\w.\-])")
+
+
+def _luhn_ok(digits: str) -> bool:
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        d = int(ch)
+        if i % 2:
+            d = d * 2 - 9 if d > 4 else d * 2
+        total += d
+    return total % 10 == 0
+
+
+def mask_personal_values(text: str) -> str:
+    """E-mail addresses, international phone numbers and IMEIs reduced by
+    their VALUE, whatever name (or none) they sit under (R2-B1):
+    ``[email, 25 chars]``, ``[phone, 13 chars]``, ``[imei, 15 chars]``.
+    Linear.
+    """
+
+    def _email(m: re.Match[str]) -> str:
+        if m.group(2).lower() in _FILE_SUFFIXES:
+            return m.group(0)
+        return f"[email, {len(m.group(0))} chars]"
+
+    def _phone(m: re.Match[str]) -> str:
+        digits = sum(ch.isdigit() for ch in m.group(0))
+        if not 7 <= digits <= 15:
+            return m.group(0)
+        return f"[phone, {len(m.group(0))} chars]"
+
+    text = _EMAIL_RE.sub(_email, text)
+    text = _PHONE_RE.sub(_phone, text)
+    return _IMEI_RE.sub(
+        lambda m: "[imei, 15 chars]" if _luhn_ok(m.group(0)) else m.group(0), text
+    )
+
+
+def redact_keeping_placeholders(text: str) -> str:
+    """:func:`~sandroid.ai.safety.redact_secrets` with reduced values
+    protected, then :func:`mask_personal_values`.
+
+    redact_secrets would turn ``token=[text, 8 chars]`` into
+    ``token=***, 8 chars]`` (R2-B2): reduced values sit it out as
+    placeholders.
+    """
+    from sandroid.ai.safety import redact_secrets
+
+    text = str(text)
     kept: list[str] = []
     mark = "\ue000"
     while mark in text:
@@ -654,7 +736,8 @@ def mask_text(text: str) -> str:
 
     text = redact_secrets(_PLACEHOLDER_RE.sub(_keep, text))
     restore = re.compile(";" + re.escape(mark) + r"(\d++)" + re.escape(mark) + ";")
-    return restore.sub(lambda m: kept[int(m.group(1))], text)
+    text = restore.sub(lambda m: kept[int(m.group(1))], text)
+    return mask_personal_values(text)
 
 
 def _mask_value(value: Any, depth: int = 0) -> Any:
