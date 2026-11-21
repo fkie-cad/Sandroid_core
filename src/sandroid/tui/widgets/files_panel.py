@@ -921,10 +921,31 @@ class FilesPanel(Widget):
         app_name = getattr(config, "app_name", None) or getattr(task, "app_name", None)
         return f"/data/data/{app_name}/" if app_name else None
 
+    @staticmethod
+    def _selected_package() -> str | None:
+        """The app selected in Sandroid (spotlight), monitor or not."""
+        try:
+            from sandroid.services import get_spotlight_service
+
+            package = get_spotlight_service().get_effective_package()
+        except Exception:
+            return None
+        return package if isinstance(package, str) and package else None
+
+    def _own_root(self) -> str | None:
+        """``/data/data/<pkg>/`` of the monitored app, else of the selected
+        app (the monitor is off, in Path mode, or the app is stopped).
+        """
+        root = self._app_root()
+        if root:
+            return root
+        package = self._selected_package()
+        return f"/data/data/{package}/" if package else None
+
     def _absolute(self, path: str) -> str | None:
         if path.startswith("/"):
             return path
-        root = self._app_root()
+        root = self._own_root()
         return root + path if root else None
 
     def _main_screen(self):
@@ -1620,7 +1641,7 @@ class FilesPanel(Widget):
             return None
         if row.review_kind is not None:
             return package
-        root = self._app_root()
+        root = self._own_root()
         own = app_package(root) if root else None
         return package if own and package != own else None
 
@@ -1666,17 +1687,25 @@ class FilesPanel(Widget):
         shown = (row.group or "") if self._full_paths else app_relative(row.group or "")
         n = len(row.members)
         tail = f" · {n} file{'s' if n != 1 else ''}"
+        # Another app's group names its package, like its file rows.
+        owner = None if self._full_paths else self._foreign_package(row)
         if not self._full_paths:
+            width = self._path_width
+            if owner:
+                owner = smart_truncate(owner, max(6, min(len(owner), width // 2)))
+                width -= len(owner) + 2
             # Keep the folder's own name ("…/Default/Cache/", never "…/"):
             # on a narrow table the file count gets shorter first.
             name = shown.rpartition("/")[2]
             for candidate in (tail, f" · {n}", ""):
                 tail = candidate
-                if len(name) + 1 + len(tail) <= self._path_width:
+                if len(name) + 1 + len(tail) <= width:
                     break
-            shown = smart_truncate(shown, max(4, self._path_width - len(tail) - 1))
+            shown = smart_truncate(shown, max(4, width - len(tail) - 1))
         shown += "/"
         text = Text(no_wrap=True, overflow="ellipsis")
+        if owner:
+            text.append(f"{owner}: ", style=_c("title"))
         text.append(shown, style=_c("screen"))
         text.append(tail, style=_c("dim"))
         return self._open_word(row, text)
@@ -2576,7 +2605,15 @@ class FilesPanel(Widget):
             for ev in ours:
                 if ev.pid in pids:
                     pids[ev.pid] -= 1
-            pids = {pid: n for pid, n in pids.items() if n > 0}
+            # A thread reported as its own pid (no TGID on its first trace
+            # lines, Path mode) counts for its process once that is known.
+            owner = self.activity.thread_pids
+            merged: dict[int, int] = {}
+            for pid, n in pids.items():
+                if n > 0:
+                    real = owner.get(pid, pid)
+                    merged[real] = merged.get(real, 0) + n
+            pids = merged
             procs: dict[str, int] = {}
             for name, n in act.processes.items():
                 head = name.split(" · ", 1)[0]
@@ -3200,7 +3237,7 @@ class FilesPanel(Widget):
             field.placeholder = (
                 "/data/data/<pkg>/databases/*   Enter watch · Esc cancel"
             )
-            field.value = self._app_root() or ""
+            field.value = self._own_root() or ""
         field.set_class(True, "-shown")
         field.focus()
         field.cursor_position = len(field.value)
@@ -3237,6 +3274,12 @@ class FilesPanel(Widget):
             self.close_input()
             return
         path = event.value.strip()
+        if path and not path.startswith("/"):
+            # Relative to the monitored app, else the selected one (the app
+            # may be stopped).
+            path = self._absolute(path) or path
+        if path.endswith("/") and "*" not in path and path.startswith("/"):
+            path += "*"  # a folder: everything in it
         if not path or (path.endswith("/") and "*" not in path):
             self.app.notify("Type a file path or a pattern with *.", severity="warning")
             return

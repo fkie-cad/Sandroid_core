@@ -309,8 +309,15 @@ _SHORT_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,5}$")
 
 
 def machine_name(name: str) -> bool:
-    """``123``, ``0a1b2c3d4e``, ``<uuid>.tmp``: a name no person typed."""
-    stem = _SHORT_EXT_RE.sub("", name) or name
+    """``123``, ``0a1b2c3d4e``, ``<uuid>.tmp``, ``<hash>.0.tmp`` (an atomic
+    write's temp file): a name no person typed. Up to two short
+    extensions are dropped.
+    """
+    stem = name
+    for _ in range(2):
+        if _MACHINE_NAME_RE.match(stem):
+            return True
+        stem = _SHORT_EXT_RE.sub("", stem) or stem
     return bool(_MACHINE_NAME_RE.match(stem))
 
 
@@ -600,8 +607,9 @@ class FileActivity:
         #: ``protected(key)``: a row the cap never drops (the lens: watched
         #: and AI-highlighted files).
         self.protected: Callable[[str], bool] | None = None
-        #: Files dropped at the row cap (never silently: the caption says so).
-        self.dropped = 0
+        #: Files dropped at the row cap (never silently: the caption says
+        #: so), each counted once however often it comes back and goes again.
+        self._dropped_keys: set[str] = set()
         self.show_all = False
         self.rules: NoiseRules = rules if rules is not None else NoiseRules()
         self.paths: dict[str, PathActivity] = {}
@@ -612,6 +620,15 @@ class FileActivity:
         #: ``(key, when, category)`` of the last batch's writes (create,
         #: modify, rename-into; companions folded onto their database).
         self.writes: list[tuple[str, datetime, str]] = []
+        #: thread id -> its process (TGID), from every event that carried
+        #: both: a thread's first events may name only the thread (kprobe
+        #: "(-------)" without a follow table, i.e. Path mode).
+        self.thread_pids: dict[int, int] = {}
+
+    @property
+    def dropped(self) -> int:
+        """How many different files the row cap has dropped."""
+        return len(self._dropped_keys)
 
     def set_marks(self, times: Iterable[datetime]) -> None:
         self.mark_times = sorted(times)
@@ -658,7 +675,8 @@ class FileActivity:
         self.paths.clear()
         self.counts = dict.fromkeys(self._CATEGORIES, 0)
         self.total = 0
-        self.dropped = 0
+        self._dropped_keys.clear()
+        self.thread_pids.clear()
 
     def _tally(self, category: str | None) -> None:
         """Bump the counters -- for EVERY item, visible or not."""
@@ -712,6 +730,9 @@ class FileActivity:
                 pid=getattr(item, "pid", None),
                 tid=getattr(item, "tid", None),
             )
+            if event.pid is not None and event.tid is not None:
+                if event.pid != event.tid:
+                    self.thread_pids[event.tid] = event.pid
             row.add(event, segment)
             touched.add(key)
             if (
@@ -853,7 +874,7 @@ class FileActivity:
             for _tier, _last, keys in slots[:excess]:
                 for key in keys:
                     if self.paths.pop(key, None) is not None:
-                        self.dropped += 1
+                        self._dropped_keys.add(key)
         hard = self.max_paths * self.HARD_CAP_FACTOR
         if len(self.paths) > hard:
             rows = sorted(
@@ -862,7 +883,7 @@ class FileActivity:
             )
             for row in rows[: len(self.paths) - hard]:
                 self.paths.pop(row.key, None)
-                self.dropped += 1
+                self._dropped_keys.add(row.key)
 
     # -- visibility -------------------------------------------------------------
 

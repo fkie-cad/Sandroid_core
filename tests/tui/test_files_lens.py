@@ -350,6 +350,22 @@ def test_a_group_row_is_one_slot_and_goes_whole() -> None:
     assert model.dropped == 100
 
 
+def test_a_file_dropped_again_is_counted_once() -> None:
+    """e2e3 bug 9: files that come back and are dropped again were counted
+    again (78 -> 771 in 3 min); the caption counts different files.
+    """
+    model = FileActivity(max_paths=50, auto_group_min=0)
+    keep = {f"{ROOT}/k{i}/f" for i in range(49)}
+    model.protected = lambda key: key in keep
+    for i, key in enumerate(sorted(keep)):
+        _ingest_one(model, _fse("FSE_CONTENT_MODIFIED", key), i)
+    a, b = f"{ROOT}/a/f", f"{ROOT}/b/f"
+    for second, key in enumerate((a, b, a, b, a, b), start=100):
+        _ingest_one(model, _fse("FSE_CONTENT_MODIFIED", key), second)
+    assert len(model.paths) == 50
+    assert model.dropped == 2  # a and b, each dropped twice or more
+
+
 def test_auto_group_thresholds_and_machine_names() -> None:
     from sandroid.tui.widgets.monitor_view import (
         auto_group_folders,
@@ -362,6 +378,8 @@ def test_auto_group_thresholds_and_machine_names() -> None:
         "0a1b2c3d4e5f",
         "6f1c2a9e-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
         "12345.tmp",
+        "4f1c9a0b2d3e4f5a.0.tmp",  # Firefox thumbnail/icon atomic write
+        "4f1c9a0b2d3e4f5a.0",
     ):
         assert machine_name(name), name
     for name in ("journal", "cafe", "aaid.txt", "f_001", "data.sqlite"):
@@ -1070,6 +1088,45 @@ async def test_short_paths_name_the_package_in_review_and_for_other_apps(
         )
 
 
+@pytest.mark.asyncio
+async def test_other_apps_keep_their_package_on_groups_and_without_a_monitor(
+    monkeypatch,
+) -> None:
+    """N1-B3/B4: another app's group row names its package, and its rows
+    keep the prefix once the monitor stops (the selected app is "own").
+    """
+    other = "/data/data/org.wikipedia"
+    monkeypatch.setattr(FilesPanel, "_selected_package", staticmethod(lambda: PKG))
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        _register_monitor()
+        await pilot.pause()
+        files = [f"{other}/cache/{n}" for n in ("a", "b")]
+        panel.ingest(
+            _items(
+                *[_fse("FSE_CONTENT_MODIFIED", p) for p in files],
+                _fse("FSE_CONTENT_MODIFIED", f"{other}/databases/wikipedia.db"),
+                _fse("FSE_CONTENT_MODIFIED", f"{ROOT}/cache/x"),
+            ),
+            now=T0,
+        )
+
+        def cells() -> dict[str, str]:
+            _keys(panel)
+            return {r.key: panel._path_cell(r).plain for r in panel._rows}
+
+        live = cells()
+        assert live[f"{other}/cache/"] == "org.wikipedia: cache/ · 2 files"
+        assert live[f"{ROOT}/cache/"] == "cache/ · 1 file"
+        get_task_service()._tasks.pop("monitor", None)  # monitor stopped
+        stopped = cells()
+        assert stopped[f"{other}/databases/wikipedia.db"] == (
+            "org.wikipedia: databases/wikipedia.db"
+        )
+        assert stopped[f"{other}/cache/"] == "org.wikipedia: cache/ · 2 files"
+
+
 def test_a_running_monitor_is_not_counted_as_a_hook() -> None:
     """L7: the monitor task carries the app's name but is not a Frida hook."""
     from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
@@ -1191,14 +1248,52 @@ async def test_n_prefill_is_extended_not_replaced_and_bad_paths_are_rejected(
         assert field.value == f"{ROOT}/files"
         notes: list[str] = []
         monkeypatch.setattr(app, "notify", lambda msg, **kw: notes.append(msg))
-        for bad in ("shared_prefs/x.xml", f"{ROOT}/x;touch y", ROOT + "/$" + "(id)"):
+        for bad in (f"{ROOT}/x;touch y", ROOT + "/$" + "(id)"):
             field.value = bad
             await pilot.press("enter")
             await pilot.pause()
             assert app.focused is field
-        assert "absolute" in notes[0]
-        assert all("metacharacters" in n for n in notes[1:])
+        assert all("metacharacters" in n for n in notes)
         assert get_forensic_service().get_spotlight_files() == []
+        # No monitor and no selected app: a relative path has nothing to
+        # resolve against.
+        get_task_service()._tasks.pop("monitor", None)
+        monkeypatch.setattr(FilesPanel, "_selected_package", staticmethod(lambda: None))
+        field.value = "shared_prefs/x.xml"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.focused is field
+        assert "absolute" in notes[-1]
+
+
+@pytest.mark.asyncio
+async def test_n_resolves_against_the_selected_app_and_folders_mean_all(
+    monkeypatch,
+) -> None:
+    """N1-B6: with the app stopped (no monitor) ``shared_prefs/`` is the
+    selected app's folder; an absolute folder ending in ``/`` is
+    ``folder/*``.
+    """
+    added: list[str] = []
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        monkeypatch.setattr(FilesPanel, "_selected_package", staticmethod(lambda: PKG))
+        monkeypatch.setattr(
+            panel.watchlist, "add_path", lambda p: added.append(p) or True
+        )
+        await pilot.pause()
+        panel.focus()
+        await pilot.press("n")
+        await pilot.pause()
+        field = panel.query_one("#files-input", Input)
+        assert field.value == f"{ROOT}/"  # prefilled from the selected app
+        for typed in ("shared_prefs/", f"{ROOT}/files/", f"{ROOT}/x.db"):
+            panel.open_input("add")
+            field.value = typed
+            await pilot.press("enter")
+            await pilot.pause()
+        assert added == [f"{ROOT}/shared_prefs/*", f"{ROOT}/files/*", f"{ROOT}/x.db"]
 
 
 @pytest.mark.asyncio
@@ -2465,6 +2560,34 @@ async def test_restart_separator_in_events_and_writes_counted_per_process() -> N
             "main (4665), tab_17 (5395)" in summary
             or "tab_17 (5395), main (4665)" in summary
         )
+
+
+@pytest.mark.asyncio
+async def test_path_mode_by_maps_a_thread_to_its_process() -> None:
+    """N1-B7: a thread whose first lines had no TGID (Path mode: no follow
+    table) was listed as a process of its own ("PID 5680, PID 19037").
+    """
+    from dataclasses import replace
+
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        base = _items(_fse("FSE_CONTENT_MODIFIED", DB))[0]
+        items = [
+            # the thread's first write: only its own id is known
+            replace(base, process="arch_disk_io_1", pid=19037, tid=19037),
+            replace(base, process="main", pid=5680, tid=5680),
+            # a later line of the same thread carries its TGID
+            replace(base, process="arch_disk_io_1", pid=5680, tid=19037),
+        ]
+        for i, item in enumerate(items):
+            panel.ingest([item], now=T0 + timedelta(seconds=i))
+        panel.refresh_rows()
+        summary = _plain(_tab(panel.inspect_selected(), "Summary"))
+        by = next(line for line in summary.splitlines() if "by" in line.split())
+        assert "PID 5680" in by
+        assert "19037" not in by
 
 
 # --------------------------------------------------------------------------
