@@ -289,3 +289,136 @@ def test_the_ai_tool_says_why_it_was_refused(service, monkeypatch):
     assert result["deleted"] is False
     assert "pinned" in result["refused"]
     assert service.adb_fake.telnet == []
+
+
+# -- snapshot.pb (read only) ------------------------------------------------------
+
+
+def _varint(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        out.append(byte | (0x80 if value else 0))
+        if not value:
+            return bytes(out)
+
+
+def _field(no: int, value: int | str | bytes) -> bytes:
+    if isinstance(value, int):
+        return _varint(no << 3) + _varint(value)
+    data = value.encode() if isinstance(value, str) else value
+    return _varint(no << 3 | 2) + _varint(len(data)) + data
+
+
+def _pb(*, reason: int = 0, build: str = "13025442", loads: int = 3) -> bytes:
+    """A snapshot.pb like the emulator writes: images, host, config and
+    launch parameters (nested and repeated fields) around the scalars.
+    """
+    image = _field(2, "/sdk/system-images/android-35/system.img") + _field(3, 1)
+    parts = [
+        _field(1, 84079),
+        _field(2, 1795124175),
+        _field(3, image),
+        _field(3, _field(2, "")),
+        _field(4, b""),
+        _field(5, _field(1, 7) + _field(4, 8 << 30)),
+        _field(10, 0),
+        _field(11, loads),
+        _field(17, "-feature"),
+        _field(17, "port"),
+        _field(19, "AE3A.240806.036 dev-keys"),
+        b"\x29" + (1).to_bytes(8, "little"),  # field 5, fixed64 (skipped)
+    ]
+    if reason:
+        parts.insert(5, _field(7, reason))
+    if build:
+        parts.append(_field(18, build))
+    return b"".join(parts)
+
+
+def test_snapshot_pb_scalars_are_decoded_and_the_rest_skipped():
+    info = policy.parse_snapshot_pb(_pb(reason=10005, loads=6))
+    assert info.version == 84079
+    assert info.created == 1795124175
+    assert info.failed_reason == 10005
+    assert info.successful_loads == 6
+    assert info.emulator_build == "13025442"
+    assert info.system_image_build == "AE3A.240806.036 dev-keys"
+    assert policy.parse_snapshot_pb(b"") == policy.SnapshotPb()
+    for bad in (b"\x0a\x05ab", b"\x08", b"\x0f\x01", b"\x00\x01"):
+        with pytest.raises(ValueError):
+            policy.parse_snapshot_pb(bad)
+
+
+@pytest.mark.parametrize(
+    ("kw", "words"),
+    [
+        ({}, ""),
+        ({"reason": 4}, "will not load (saved by an incompatible emulator version)"),
+        ({"reason": 10005}, ""),  # a config mismatch: on working snapshots
+        ({"reason": 20003}, ""),
+        ({"reason": 99}, "will not load (reason code 99)"),
+        ({"build": "14214601"}, "last written by emulator build 14214601, not "
+         "emulator 35.4.9 (build 13025442)"),
+        ({"build": ""}, ""),
+    ],
+)  # fmt: skip
+def test_snapshot_pb_warnings_in_words(kw, words):
+    info = policy.parse_snapshot_pb(_pb(**kw))
+    text = policy.snapshot_pb_warning(
+        info, installed_version="35.4.9", installed_build="13025442"
+    )
+    assert (words in text) if words else text == ""
+    assert not any(g in text for g in "✓✗▸⇧␣⏎←→")
+
+
+def test_snapshot_pb_warning_names_the_running_emulators_build():
+    info = policy.parse_snapshot_pb(_pb(build="13025442"))
+    text = policy.snapshot_pb_warning(
+        info,
+        installed_version="35.4.9",
+        installed_build="13025442",
+        launch_build="14214601",
+    )
+    assert text == ""  # the installed build wrote it: fine
+    info = policy.parse_snapshot_pb(_pb(build="99"))
+    text = policy.snapshot_pb_warning(
+        info, installed_build="13025442", launch_build="14214601"
+    )
+    assert "the running emulator (build 14214601)" in text
+    assert policy.snapshot_pb_warning(None) == ""
+
+
+def test_snapshot_warnings_read_the_files_and_never_write_them(prefs):
+    _snapshot(prefs, "Dev", "clean_8g")
+    _snapshot(prefs, "Dev", "sandroid_persona_mara_aaaaaaaaaaaa_bbbbbbbbbbbb")
+    _snapshot(prefs, "Dev", "broken")
+    folder = prefs / "Dev.avd" / "snapshots"
+    # Like Dev9's clean_8g: a config-mismatch code on a snapshot that loads.
+    (folder / "clean_8g" / "snapshot.pb").write_bytes(_pb(reason=10005))
+    (
+        folder / "sandroid_persona_mara_aaaaaaaaaaaa_bbbbbbbbbbbb" / "snapshot.pb"
+    ).write_bytes(_pb(reason=4, build="14214601"))
+    (folder / "broken" / "snapshot.pb").write_bytes(b"\xff\xff")
+    stamps = {
+        p: (p.read_bytes(), p.stat().st_mtime_ns) for p in folder.glob("*/snapshot.pb")
+    }
+    found = policy.snapshot_warnings(
+        "Dev",
+        [
+            "clean_8g",
+            "sandroid_persona_mara_aaaaaaaaaaaa_bbbbbbbbbbbb",
+            "broken",
+            "gone",
+        ],
+        installed=("35.4.9", "13025442"),
+    )
+    assert list(found) == ["sandroid_persona_mara_aaaaaaaaaaaa_bbbbbbbbbbbb"]
+    text = found["sandroid_persona_mara_aaaaaaaaaaaa_bbbbbbbbbbbb"]
+    assert text.startswith("will not load")
+    assert "build 14214601" in text
+    for p, (data, mtime) in stamps.items():
+        assert p.read_bytes() == data
+        assert p.stat().st_mtime_ns == mtime
+    assert policy.snapshot_warnings("Nope", ["clean_8g"]) == {}

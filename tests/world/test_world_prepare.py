@@ -145,6 +145,14 @@ class FakeHelper:
                     for auth in kw["authorities"]
                 ],
             }
+        if cmd == "query" and "calendars" in kw.get("uri", ""):
+            name, kind = kw["args"]
+            rows = [
+                {"_id": c}
+                for c, r in t["calendars"].items()
+                if r["account"] == (kind, name)
+            ]
+            return {"rows": rows}
         if cmd == "query":
             rows = []
             for name in kw["args"]:
@@ -945,3 +953,264 @@ def test_text_ics_vcf_files() -> None:
     assert b"BEGIN:VCALENDAR" in file_bytes("a.ics", ["Termin"], when)
     assert file_bytes("a.ics", ["T"], when) == file_bytes("a.ics", ["T"], when)
     assert b"FN:Anna" in file_bytes("a.vcf", ["Anna"], when)
+
+
+# ------------------------------------------------- ledger items (for refresh)
+
+
+def test_the_ledger_lists_every_item_with_its_row_and_hash(manifest, world) -> None:
+    dev = FakeDevice()
+    report = _run(manifest, dev)
+    data = json.loads(Path(report.ledger_path).read_text())
+    items = data["items"]
+    for name, records in (
+        ("contacts", world.contacts),
+        ("events", world.events),
+        ("calls", world.calls),
+        ("sms", world.sms),
+    ):
+        assert set(items[name]) == {str(r["id"]) for r in records}, name
+        assert sorted(v[0] for v in items[name].values()) == sorted(data["lists"][name])
+        assert all(len(v[1]) == 16 for v in items[name].values())
+    assert set(items["photos"]) == {p["id"] for p in world.photos}
+    assert set(items["files"]) == {str(f["id"]) for f in world.files}
+    assert items["notes"]["notes"][0] == "/sdcard/Documents/Notizen.txt"
+
+
+# ------------------------------------------------------------------- top-up
+
+
+def _later(days: float, hours: float = 0.0) -> dt.datetime:
+    return ANCHOR + dt.timedelta(days=days, hours=hours)
+
+
+def _window(manifest, since, now, name):
+    sub, _weeks = pr.topup_world(manifest.render(now), since, now)
+    return getattr(sub, name)
+
+
+def test_a_sparse_window_is_filled_from_whole_weeks_back(manifest) -> None:
+    now = _later(2, 3)
+    world = manifest.render(now)
+    sub, weeks = pr.topup_world(world, ANCHOR, now)
+    lo, hi = ANCHOR.timestamp() * 1000, now.timestamp() * 1000
+    day = hi - 86400 * 1000
+    for name in ("sms", "calls"):
+        rows = getattr(sub, name)
+        assert rows, name
+        assert all(lo < r["ts_ms"] <= hi for r in rows)
+        assert max(r["ts_ms"] for r in rows) > day  # something from today
+        k = weeks[name]
+        week = 7 * 86400 * 1000
+        own = {r["id"]: r["ts_ms"] for r in getattr(world, name)}
+        # Re-dated by whole weeks: same weekday and time of day.
+        assert all(r["ts_ms"] - own[r["id"]] == k * week for r in rows)
+    # Deterministic.
+    assert pr.topup_world(manifest.render(now), ANCHOR, now) == (sub, weeks)
+
+
+def test_a_topup_adds_the_days_since_the_anchor_once(manifest) -> None:
+    dev = FakeDevice()
+    _run(manifest, dev)
+    now = _later(9, 5)
+    dev.now = int(now.timestamp())
+    before = {n: len(dev.inserted[n]) for n in ("sms", "calls", "events")}
+    rep = pr.topup(SERIAL, manifest, now=now, device=dev, packs=PACKS)
+    assert rep.ran
+    want_sms = _window(manifest, ANCHOR, now, "sms")
+    want_calls = _window(manifest, ANCHOR, now, "calls")
+    assert want_sms
+    assert rep.counts["sms"] == len(want_sms)
+    assert rep.counts.get("calls", 0) == len(want_calls)
+    assert len(dev.inserted["sms"]) - before["sms"] == len(want_sms)
+    newest = dt.datetime.fromisoformat(rep.newest["sms"])
+    assert ANCHOR < newest <= now
+    assert rep.since == ANCHOR.isoformat()
+    # The stamp records the top-up before the rows go in, then completes it.
+    states = [s["topups"][-1]["state"] for s in dev.stamps if s.get("topups")]
+    assert states == ["running", "complete"]
+    last = dev.stamps[-1]
+    assert last["state"] == "complete"
+    assert last["world_fp"] == manifest.world_fp
+    assert last["topups"][-1]["ids"]["sms"] == dev.inserted["sms"][before["sms"] :]
+    assert "stop_messaging" in dev.log[-12:]
+    # Idempotent: the same moment adds nothing and writes nothing.
+    stamps = len(dev.stamps)
+    again = pr.topup(SERIAL, manifest, now=now, device=dev, packs=PACKS)
+    assert not again.ran
+    assert "already fresh" in again.words()
+    assert len(dev.stamps) == stamps
+    # Later on: only the new window.
+    later = now + dt.timedelta(hours=30)
+    dev.now = int(later.timestamp())
+    third = pr.topup(SERIAL, manifest, now=later, device=dev, packs=PACKS)
+    assert third.ran
+    assert third.since == now.isoformat()
+    assert third.counts.get("sms", 0) == len(_window(manifest, now, later, "sms"))
+    assert len(dev.stamps[-1]["topups"]) == 2
+
+
+def test_an_interrupted_topup_is_never_repeated(manifest) -> None:
+    dev = FakeDevice()
+    _run(manifest, dev)
+    now = _later(9)
+    dev.now = int(now.timestamp())
+    dev.helper_fails = "sms"
+    calls_before = len(dev.inserted["calls"])
+    with pytest.raises(pr.PrepareError, match="top-up"):
+        pr.topup(SERIAL, manifest, now=now, device=dev, packs=PACKS)
+    entry = json.loads(dev.stamp)["topups"][-1]
+    assert entry["state"] == "failed"
+    # The calls that landed before the failure stay recorded.
+    assert entry["ids"].get("calls", []) == dev.inserted["calls"][calls_before:]
+    dev.helper_fails = None
+    sms = len(dev.inserted["sms"])
+    again = pr.topup(SERIAL, manifest, now=now, device=dev, packs=PACKS)
+    assert not again.ran
+    assert len(dev.inserted["sms"]) == sms
+
+
+def test_a_topup_needs_root_and_the_complete_world(manifest) -> None:
+    dev = FakeDevice()
+    with pytest.raises(pr.PrepareError, match="no complete world"):
+        pr.topup(SERIAL, manifest, now=_later(3), device=dev, packs=PACKS)
+    _run(manifest, dev)
+    dev.uid = "2000"
+    with pytest.raises(pr.PrepareError, match="adb root"):
+        pr.topup(SERIAL, manifest, now=_later(3), device=dev, packs=PACKS)
+
+
+def test_a_topup_covers_at_most_max_days_and_warns_about_the_clock(manifest) -> None:
+    dev = FakeDevice()
+    _run(manifest, dev)
+    now = _later(60)
+    # dev.now stays at the anchor: the device clock is 60 days behind.
+    rep = pr.topup(SERIAL, manifest, now=now, device=dev, packs=PACKS)
+    assert rep.ran
+    assert rep.since == (now - dt.timedelta(days=pr.TOPUP_MAX_DAYS)).isoformat()
+    text = " ".join(rep.warnings)
+    assert "only the last 30 days" in text
+    assert "device clock is" in text
+
+
+# ------------------------------------------------------------------ refresh
+
+
+def _edited(manifest):
+    """The manifest with one SMS changed, one added, one call gone and one
+    file renamed (world_fp recomputed).
+    """
+    from sandroid.world.manifest import WorldManifest
+
+    d = json.loads(manifest.to_json())
+    d["sms"][0]["body"] = "Changed text, nothing else"
+    d["sms"][0].pop("date_slots", None)
+    new = {**d["sms"][-1], "id": "world.sms.9999", "body": "A brand new message"}
+    new.pop("date_slots", None)
+    d["sms"].append(new)
+    d["calls"].pop()
+    stem, ext = d["files"][0]["name"].rsplit(".", 1)
+    d["files"][0]["name"] = f"{stem}_v2.{ext}"
+    out = WorldManifest.from_dict(d)
+    out.world_fp = out.compute_fp()
+    return out
+
+
+def test_refresh_changes_only_what_differs(manifest) -> None:
+    dev = FakeDevice()
+    first = _run(manifest, dev)
+    dev.now = int(_later(5).timestamp())
+    top = pr.topup(SERIAL, manifest, now=_later(5), device=dev, packs=PACKS)
+    assert top.counts["sms"]
+    old = json.loads(Path(first.ledger_path).read_text())
+    edited = _edited(manifest)
+    contacts = set(old["lists"]["contacts"])
+    log_from = len(dev.log)
+    old_file = next(p for p in dev.files if p.endswith(manifest.files[0]["name"]))
+    rep = pr.refresh(SERIAL, edited, device=dev, packs=PACKS)
+    assert rep.ok
+    added, removed = rep.changes["added"], rep.changes["removed"]
+    assert added["sms"] == 2  # the changed one and the new one
+    assert removed["sms"] == 1 + top.counts["sms"]  # the changed one, the top-up
+    assert removed["calls"] == 1 + top.counts.get("calls", 0)
+    assert "contacts" not in added
+    assert "contacts" not in removed
+    assert added["files"] == 1
+    assert rep.changes["topups_removed"]["sms"] == top.counts["sms"]
+    # Unchanged rows were never touched.
+    assert contacts <= set(dev.tables["contacts"])
+    assert all("contacts" not in d for d in dev.deleted)
+    # Offline while changing, like prepare; the network came back.
+    log = dev.log[log_from:]
+    assert log.index("offline") < log.index("helper:delete") < log.index("online")
+    # Files: the renamed one replaced, the rest kept.
+    assert old_file not in dev.files
+    assert any(p.endswith(edited.files[0]["name"]) for p in dev.files)
+    # The stamp and ledger name the new world; no top-ups left on it.
+    stamp = json.loads(dev.stamp)
+    assert stamp["world_fp"] == edited.world_fp
+    assert stamp["state"] == "complete"
+    assert "topups" not in stamp
+    new = json.loads(pr.ledger_path(SERIAL, "Dev9_test", edited.world_fp).read_text())
+    assert new["state"] == "complete"
+    assert new["refreshed_from"] == manifest.world_fp
+    assert new["anchor"] == old["anchor"]
+    rendered = edited.render(ANCHOR)
+    assert len(new["lists"]["sms"]) == len(rendered.sms)
+    assert len(new["lists"]["calls"]) == len(rendered.calls)
+    assert set(new["items"]["sms"]) == {m["id"] for m in rendered.sms}
+    ours = set(new["lists"]["sms"])
+    assert ours <= set(dev.tables["sms"])
+    # A second refresh to the same world changes nothing.
+    again = pr.refresh(SERIAL, edited, device=dev, packs=PACKS)
+    assert again.ok
+    assert again.changes["added"] == {}
+    assert again.changes["removed"] == {}
+
+
+def test_refresh_without_changes_touches_nothing(manifest) -> None:
+    dev = FakeDevice()
+    _run(manifest, dev)
+    log_from = len(dev.log)
+    stamps = len(dev.stamps)
+    rep = pr.refresh(SERIAL, manifest, device=dev, packs=PACKS)
+    assert rep.ok
+    assert rep.changes["added"] == {}
+    assert "offline" not in dev.log[log_from:]
+    assert "helper_start" not in dev.log[log_from:]
+    assert len(dev.stamps) == stamps
+
+
+def test_refresh_needs_a_ledger_that_lists_its_items(manifest) -> None:
+    dev = FakeDevice()
+    with pytest.raises(pr.PrepareError, match="no world to refresh"):
+        pr.refresh(SERIAL, manifest, device=dev, packs=PACKS)
+    first = _run(manifest, dev)
+    path = Path(first.ledger_path)
+    data = json.loads(path.read_text())
+    del data["items"]
+    path.write_text(json.dumps(data))
+    with pytest.raises(pr.PrepareError, match="before refresh existed"):
+        pr.refresh(SERIAL, _edited(manifest), device=dev, packs=PACKS)
+
+
+def test_refresh_plan_notices_changed_notes_and_photos(manifest) -> None:
+    tz = pr.world_timezone(manifest, PACKS)
+    world = manifest.render(ANCHOR)
+    dev = FakeDevice()
+    first = _run(manifest, dev)
+    ledger = json.loads(Path(first.ledger_path).read_text())
+    same = pr.refresh_plan(ledger, world, tz, "Notizen.txt")
+    assert same.empty
+    assert same.unchanged["sms"] == len(world.sms)
+    from dataclasses import replace
+
+    notes = [{**world.notes[0], "text": "rewritten"}, *world.notes[1:]]
+    photo = {**world.photos[0], "lat": 1.0}
+    changed = replace(world, notes=notes, photos=[photo, *world.photos[1:]])
+    plan = pr.refresh_plan(ledger, changed, tz, "Notizen.txt")
+    assert plan.notes
+    assert [p["id"] for p in plan.photos] == [photo["id"]]
+    assert "/sdcard/Documents/Notizen.txt" in plan.removed_paths
+    assert ledger["items"]["photos"][photo["id"]][0] in plan.removed_paths
+    assert plan.words().endswith("unchanged")

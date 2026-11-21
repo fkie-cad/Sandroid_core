@@ -17,6 +17,14 @@ Snapshots are saved and deleted as the ``persona`` actor
 a save never lands on a pinned base such as ``clean_8g``. Only the newest
 ``world.persona_snapshots`` (default :data:`DEFAULT_KEEP`) persona snapshots
 of an AVD are kept; each holds about 2.8 GB.
+
+Starting an AVD as a persona (:func:`persona_start`, the Devices screen's
+Shift+P) loads the profile's current persona snapshot, else the clean base
+and the persona stage builds it. A loaded snapshot is topped up with the
+world's SMS, calls and events up to now (:func:`after_load_topup`,
+``world.persona_topup``, default on). :func:`refresh_persona` (the Identity
+lens' Shift+W) brings a running persona up to its edited profile, changing
+only what differs from the host ledger.
 """
 
 from __future__ import annotations
@@ -163,6 +171,24 @@ def configured_keep() -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return DEFAULT_KEEP
     return max(1, value)
+
+
+def topup_enabled() -> bool:
+    """The config's ``world.persona_topup`` (default on): top up a loaded
+    persona snapshot with SMS, calls and events up to now.
+    """
+    try:
+        from sandroid.config import get_config
+
+        world = getattr(get_config(), "world", None)
+    except Exception:
+        return True
+    value = (
+        world.get("persona_topup")
+        if isinstance(world, dict)
+        else getattr(world, "persona_topup", None)
+    )
+    return value if isinstance(value, bool) else True
 
 
 def persona_snapshots(avd: str) -> list[str]:
@@ -516,8 +542,12 @@ def persona_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
             name = persona_name(profile, manifest)
             if avd and name in persona_snapshots(avd):
                 text = f"{label}: world {fp[:12]} loaded from {name}"
+                fresh, warned = after_load_topup(serial, manifest, device=dev)
+                if fresh:
+                    text += f", {fresh}"
                 return StageNote(
-                    "warning" if notes else "info", "; ".join([text, *notes])
+                    "warning" if notes or warned else "info",
+                    "; ".join([text, *notes]),
                 )
             return StageNote(
                 "warning",
@@ -580,6 +610,56 @@ def persona_stage(serial: str, fresh_boot: bool, budget_s: float) -> Any:
     )
 
 
+def after_load_topup(
+    serial: str, manifest: WorldManifest, *, device: Device | None = None
+) -> tuple[str, bool]:
+    """Top up a loaded persona snapshot (:func:`sandroid.world.prepare.topup`)
+    when ``world.persona_topup`` is on; a timeline line for every top-up.
+
+    Returns:
+        ``(words, warned)``: what to add to the stage line (``""`` when off)
+        and whether it failed or warned. Never raises.
+    """
+    if not topup_enabled():
+        return "", False
+    from sandroid.world.prepare import topup
+
+    try:
+        report = topup(serial, manifest, device=device)
+    except Exception as exc:
+        _topup_line(serial, manifest, None, str(exc))
+        return f"top-up failed: {exc}", True
+    if report.ran:
+        _topup_line(serial, manifest, report, "")
+    words = report.words()
+    if report.warnings:
+        words += " (" + "; ".join(report.warnings) + ")"
+    return words, bool(report.warnings)
+
+
+def _topup_line(serial: str, manifest: Any, report: Any, error: str) -> None:
+    """A timeline line for a top-up (never raises)."""
+    try:
+        from sandroid.core.timeline import get_timeline
+
+        if report is None:
+            summary = f"persona top-up failed: {error}"
+            data: dict[str, Any] = {"world_fp": manifest.world_fp, "error": error}
+        else:
+            summary = f"persona {report.words()}"
+            data = report.to_dict()
+        get_timeline().emit(
+            "device",
+            "persona_topup",
+            summary=summary,
+            data=data,
+            dev=serial,
+            level="warn" if error or (report and report.warnings) else "info",
+        )
+    except Exception:
+        logger.debug("timeline: persona top-up line failed", exc_info=True)
+
+
 def _device_profile_id(serial: str) -> str:
     """The profile the identity stage applies to ``serial`` (``""``: off).
 
@@ -607,3 +687,251 @@ def delete_persona_snapshot(serial: str, name: str, *, emulator: Any = None) -> 
         emulator = get_emulator_service()
     with acting_as(ACTOR):
         return bool(emulator.delete_snapshot(name, serial=serial))
+
+
+# ------------------------------------------------------------ refresh / start
+
+
+@dataclass
+class PersonaRefresh:
+    """What :func:`refresh_persona` did.
+
+    Attributes:
+        profile: The identity profile id.
+        snapshot: The persona snapshot name now.
+        up_to_date: World and identity were current; nothing was done.
+        world_changed: The world differed and was refreshed.
+        prepare: :meth:`PrepareReport.to_dict` of the refresh (empty when
+            the world was current).
+        identity: The identity apply's step statuses.
+        save: The snapshot save (None when up to date).
+        topup: What the top-up after the save did (words).
+    """
+
+    profile: str
+    snapshot: str
+    up_to_date: bool = False
+    world_changed: bool = False
+    prepare: dict[str, Any] = field(default_factory=dict)
+    identity: dict[str, Any] = field(default_factory=dict)
+    save: PersonaSave | None = None
+    topup: str = ""
+
+    def words(self) -> str:
+        """One line for a person."""
+        if self.up_to_date:
+            return f"persona {self.profile} is up to date ({self.snapshot})"
+        parts = []
+        changes = self.prepare.get("changes") or {}
+        if self.world_changed:
+            added = sum((changes.get("added") or {}).values())
+            removed = sum((changes.get("removed") or {}).values())
+            parts.append(f"phone contents: {added} added, {removed} removed")
+        else:
+            parts.append("phone contents unchanged")
+        if self.save is not None and self.save.saved:
+            parts.append(f"saved as {self.snapshot}")
+            if self.save.pruned:
+                parts.append(f"{len(self.save.pruned)} older persona snapshots deleted")
+        if self.topup:
+            parts.append(self.topup)
+        return f"persona {self.profile}: " + ", ".join(parts)
+
+
+def refresh_persona(
+    serial: str,
+    profile_id: str | None = None,
+    *,
+    progress: Any = None,
+    keep: int | None = None,
+    identity: IdentityService | None = None,
+    emulator: Any = None,
+    device: Device | None = None,
+) -> PersonaRefresh:
+    """Bring the persona on the running emulator ``serial`` up to its profile.
+
+    Incremental: when the world changed, only the items that differ from the
+    host ledger are removed and added (:func:`sandroid.world.prepare.refresh`);
+    the identity is applied again (values already set stay); the snapshot is
+    saved under the new name and older ones pruned. When world and identity
+    are current (the snapshot of this profile exists and the device holds its
+    world), nothing is done. A top-up follows a refreshed world (not part of
+    the snapshot). Call from a worker thread.
+
+    Args:
+        serial: The emulator.
+        profile_id: The persona; default the one the device holds.
+
+    Raises:
+        PersonaError: No persona, no world on the device, the identity apply
+            failed or the snapshot was not saved.
+        sandroid.world.prepare.PrepareError: The world refresh failed.
+    """
+    from sandroid.core import emulator as emu
+    from sandroid.services.identity import IdentityApplyError, get_identity_service
+    from sandroid.world import prepare as pr
+
+    dev = device or Device(serial)
+    avd = emu.avd_name_of(serial)
+    if not avd:
+        raise PersonaError(f"{serial} is not an emulator with a known AVD")
+    svc = identity or get_identity_service()
+    pid = profile_id or svc.persona_of(serial) or launch_persona(serial) or ""
+    if not pid:
+        raise PersonaError(f"{serial} holds no persona; build one first")
+    stamp = device_world(serial, device=dev)
+    if stamp is None or stamp.get("state") != "complete":
+        raise PersonaError("the device holds no complete world; build the persona")
+    sdk = dev.shell("getprop ro.build.version.sdk", timeout=30).out.strip()
+    manifest, profile = manifest_for_profile(
+        pid, service=svc, target_sdk=int(sdk) if sdk.isdigit() else None
+    )
+    name = persona_name(profile, manifest)
+    out = PersonaRefresh(profile=pid, snapshot=name)
+    same_world = stamp.get("world_fp") == manifest.world_fp
+    if same_world and name in persona_snapshots(avd):
+        out.up_to_date = True
+        return out
+    if not same_world:
+        report = pr.refresh(serial, manifest, progress=progress, device=dev)
+        out.prepare = report.to_dict()
+        out.world_changed = True
+    try:
+        plan = svc.apply(serial, allow_restart=True, profile=profile, as_persona=True)
+    except IdentityApplyError as exc:
+        raise PersonaError(f"identity apply refused: {exc}") from exc
+    out.identity = {
+        vid: {"status": info.status, "reason": info.reason}
+        for vid, info in plan.infos.items()
+    }
+    if getattr(plan, "restored", False):
+        raise PersonaError("the device was restored during the identity apply")
+    failed = _unbaked(plan.infos)
+    if failed:
+        raise PersonaError(f"identity apply failed for {', '.join(failed)}")
+    out.save = save_persona_snapshot(
+        serial,
+        avd,
+        name,
+        world_fp=manifest.world_fp,
+        keep=keep,
+        emulator=emulator,
+        device=dev,
+    )
+    if not out.save.saved:
+        raise PersonaError(f"persona snapshot not saved: {out.save.error}")
+    if out.world_changed:
+        out.topup = after_load_topup(serial, manifest, device=dev)[0]
+    return out
+
+
+@dataclass(frozen=True)
+class PersonaChoice:
+    """An identity profile that can be started as a persona.
+
+    Attributes:
+        id: The profile id.
+        name: Its display name.
+        snapshots: Persona snapshots of it on the AVD (any version).
+    """
+
+    id: str
+    name: str
+    snapshots: int = 0
+
+
+def persona_choices(
+    avd: str, *, service: IdentityService | None = None
+) -> list[PersonaChoice]:
+    """The library's profiles with a ``world`` section, and how many persona
+    snapshots of each the AVD holds. Reads files only (worker thread).
+    """
+    from sandroid.services.identity import get_identity_service
+
+    svc = service or get_identity_service()
+    present = persona_snapshots(avd)
+    out = []
+    for info in svc.list_profiles():
+        if info.error:
+            continue
+        try:
+            profile = svc.load(info.id)
+        except Exception:
+            continue
+        if not getattr(profile, "world", None):
+            continue
+        prefix = _snapshot_prefix(info.id)
+        count = sum(1 for n in present if prefix and n.startswith(prefix))
+        out.append(PersonaChoice(info.id, info.name or info.id, count))
+    return out
+
+
+def _snapshot_prefix(profile_id: str) -> str:
+    """``sandroid_persona_<slug>_`` of a profile (see :func:`persona_snapshot_name`)."""
+    import re
+
+    slug = re.sub(r"[^a-z0-9-]+", "-", profile_id.lower()).strip("-")[:40]
+    return f"{PERSONA_PREFIX}{slug}_" if slug else ""
+
+
+@dataclass(frozen=True)
+class PersonaStart:
+    """How to start an AVD as a persona (:func:`persona_start`).
+
+    Attributes:
+        options: The launch options (``boot="snapshot"``, no save on exit).
+        meta: The launch-record meta (``persona_id``, maybe ``persona_base``).
+        snapshot: The persona snapshot name of the current profile.
+        cached: That snapshot exists and is loaded; otherwise the start loads
+            the clean base and the persona stage builds it.
+    """
+
+    options: Any
+    meta: dict[str, Any]
+    snapshot: str
+    cached: bool
+
+
+def persona_start(
+    avd: str,
+    profile_id: str,
+    *,
+    api: int | None = None,
+    headless: bool = False,
+    base: str = DEFAULT_BASE,
+    service: IdentityService | None = None,
+) -> PersonaStart:
+    """The launch of ``avd`` as persona ``profile_id``.
+
+    The persona snapshot of the profile as it is now (world and identity
+    fingerprints) is loaded when it exists; otherwise the clean base, and the
+    persona stage builds and saves the persona. Never saves on exit. Generates
+    the world (writes a resolved ``seed: auto`` back): call off the UI thread.
+
+    Raises:
+        PersonaError: No world section, or neither the persona snapshot nor
+            the base exists.
+    """
+    from sandroid.core import emulator as emu
+    from sandroid.core.snapshot_policy import snapshot_complete
+
+    manifest, profile = manifest_for_profile(
+        profile_id, service=service, target_sdk=api
+    )
+    name = persona_name(profile, manifest)
+    cached = name in persona_snapshots(avd)
+    if not cached and not snapshot_complete(avd, base):
+        raise PersonaError(
+            f"{avd} has no persona snapshot of {profile_id} and no {base} "
+            "snapshot to build it from"
+        )
+    meta: dict[str, Any] = {META_KEY: profile_id}
+    if base != DEFAULT_BASE:
+        meta["persona_base"] = base
+    options = emu.AvdLaunchOptions(
+        headless=headless,
+        boot="snapshot",
+        snapshot=name if cached else base,
+        save_on_exit=False,
+    )
+    return PersonaStart(options=options, meta=meta, snapshot=name, cached=cached)

@@ -280,6 +280,8 @@ class DeviceController:
         options: Any,
         restart_serial: str | None = None,
         on_launched: Callable[[bool, str], Any] | None = None,
+        meta: dict[str, Any] | None = None,
+        remember: bool = True,
     ) -> Any:
         """Worker: launch (or restart) an emulator, wait for its boot, attach.
 
@@ -295,6 +297,9 @@ class DeviceController:
                 instead of launching *avd_name*.
             on_launched: UI-thread callback ``(ok, message)`` once the
                 emulator process started (or failed to).
+            meta: Launch-record meta of a new launch (e.g. ``persona_id``).
+            remember: Remember the options for the AVD's next start (a
+                persona start does not: its snapshot is the persona's).
 
         Returns:
             The :class:`~sandroid.core.emulator.EmulatorLaunch`, or ``None``
@@ -316,6 +321,8 @@ class DeviceController:
         try:
             if restart_serial:
                 launch = emulator.restart_emulator(restart_serial, options)
+            elif meta:
+                launch = emulator.launch_avd(avd_name, options, meta=meta)
             else:
                 launch = emulator.launch_avd(avd_name, options)
         except EmulatorLaunchError as e:
@@ -327,9 +334,13 @@ class DeviceController:
             say(self._log_error, f"Failed to start AVD: {type(e).__name__}: {e}")
             say(on_launched, False, f"{type(e).__name__}: {e}")
             return None
-        emulator.remember_launch(launch.avd, launch.options)
+        if remember:
+            emulator.remember_launch(launch.avd, launch.options)
         verb = "restarting" if restart_serial else "starting"
         msg = f"AVD '{launch.avd}' {verb} as {launch.serial} ({launch.options.boot})"
+        persona = (meta or {}).get("persona_id")
+        if persona:
+            msg += f" as persona {persona}"
         say(self._log_info, msg + "...")
         say(on_launched, True, msg)
 
@@ -559,6 +570,8 @@ class DeviceController:
         options: Any = None,
         *,
         on_done: Callable[[bool, str], Any] | None = None,
+        meta: dict[str, Any] | None = None,
+        remember: bool = True,
     ) -> None:
         """Launch AVD *name* in the background, then wait for its boot.
 
@@ -566,16 +579,21 @@ class DeviceController:
             name: AVD name.
             options: :class:`~sandroid.core.emulator.AvdLaunchOptions`
                 (default: the options remembered for *name*). They are
-                remembered for the next launch (a wipe as a normal boot).
+                remembered for the next launch (a wipe as a normal boot)
+                unless *remember* is False.
             on_done: UI-thread callback ``(ok, message)`` once the emulator
                 process started (not booted) or failed to start.
+            meta: Launch-record meta (``{"persona_id": ...}`` for a persona).
+            remember: Remember *options* for the AVD's next start.
         """
 
         def worker() -> None:
             from sandroid.core import emulator
 
             opts = options if options is not None else emulator.remembered_options(name)
-            self._launch_and_watch(name, opts, on_launched=on_done)
+            self._launch_and_watch(
+                name, opts, on_launched=on_done, meta=meta, remember=remember
+            )
 
         self._spawn(worker, f"start-avd-{name}")
 
