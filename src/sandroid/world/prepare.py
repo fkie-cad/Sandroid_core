@@ -1942,6 +1942,9 @@ TOPUP_MIN_GAP_S = 3600
 TOPUP_MAX_DAYS = 30
 #: Calendar events up to this far ahead of now are part of a top-up.
 TOPUP_EVENTS_AHEAD_S = 86400
+#: How many weeks back a top-up may look for SMS / calls to re-date.
+TOPUP_MAX_WEEKS = 52
+_WEEK_MS = 7 * 86400 * 1000
 
 _TOPUP_LOCKS: dict[str, threading.Lock] = {}
 _TOPUP_LOCKS_GUARD = threading.Lock()
@@ -1965,6 +1968,8 @@ class TopUpReport:
         since: The start of the window it covered, ISO 8601.
         counts: Rows added per list (``sms``, ``calls``, ``events``).
         newest: Newest added time per list, ISO 8601.
+        weeks_back: Per list, how many weeks back its items were re-dated
+            from (0: the world's own items of the window).
         warnings: Everything a person should know.
         seconds: Wall time.
     """
@@ -1977,6 +1982,7 @@ class TopUpReport:
     since: str = ""
     counts: dict[str, int] = field(default_factory=dict)
     newest: dict[str, str] = field(default_factory=dict)
+    weeks_back: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     seconds: float = 0.0
 
@@ -1990,6 +1996,50 @@ class TopUpReport:
         names = {"sms": "SMS", "calls": "calls", "events": "calendar events"}
         parts = [f"{n} {names.get(k, k)}" for k, n in self.counts.items() if n]
         return "topped up with " + (", ".join(parts) or "nothing new")
+
+
+def topup_world(
+    world: RenderedWorld, since: dt.datetime, now: dt.datetime
+) -> tuple[RenderedWorld, dict[str, int]]:
+    """The SMS, calls and events of a top-up for the window ``(since, now]``.
+
+    ``world`` is rendered at ``now``. SMS and calls: the world's own items of
+    the window when one of them lies in the window's last day; otherwise
+    those of the same window ``k`` whole weeks earlier (the smallest ``k``
+    up to :data:`TOPUP_MAX_WEEKS` with an item in that last day), re-dated
+    by ``k`` weeks -- so a sparse world still gets messages and calls from
+    today, on the weekdays and at the times of day the world uses. Events:
+    the world's own (no birthdays or holidays, which recur anyway), up to
+    :data:`TOPUP_EVENTS_AHEAD_S` ahead. Deterministic for a world, window
+    and now.
+
+    Returns:
+        The world holding only those items, and the weeks each list was
+        taken from (``{"sms": k, "calls": k}``).
+    """
+    lo, hi = _ms_of(since), _ms_of(now)
+    day = max(lo, hi - 86400 * 1000)
+    weeks: dict[str, int] = {}
+    picked: dict[str, list[dict[str, Any]]] = {}
+    for name in ("sms", "calls"):
+        items = getattr(world, name)
+        chosen = 0
+        for k in range(TOPUP_MAX_WEEKS + 1):
+            shift = k * _WEEK_MS
+            if any(day < i["ts_ms"] + shift <= hi for i in items):
+                chosen = k
+                break
+        shift = chosen * _WEEK_MS
+        picked[name] = [
+            {**i, "ts_ms": i["ts_ms"] + shift}
+            for i in items
+            if lo < i["ts_ms"] + shift <= hi
+        ]
+        weeks[name] = chosen
+    ahead = hi + TOPUP_EVENTS_AHEAD_S * 1000
+    events = [e for e in world.events if not e.get("rule") and lo < e["ts_ms"] <= ahead]
+    sub = replace(world, sms=picked["sms"], calls=picked["calls"], events=events)
+    return sub, weeks
 
 
 def last_world_anchor(stamp: Mapping[str, Any]) -> dt.datetime | None:
@@ -2018,9 +2068,10 @@ def topup(
     device's world was seeded (or last topped up), so it looks used today.
 
     The world is rendered at ``now`` (default the host clock) -- the same
-    deterministic render :func:`prepare` uses -- and only its items between
-    the newest anchor on the device and now (events up to a day ahead) go
-    in, at most ``max_days`` back. The device stamp records each top-up
+    deterministic render :func:`prepare` uses -- and its items between the
+    newest anchor on the device and now go in, at most ``max_days`` back
+    (:func:`topup_world`: a sparse world's SMS and calls come from the same
+    window whole weeks earlier, re-dated, so some are from today). The device stamp records each top-up
     (anchor, window, row ids) BEFORE the rows go in, so a second call, or
     one after an interrupted top-up, never adds them twice; within
     ``min_gap_s`` of the newest anchor nothing is done. Contacts, photos
@@ -2091,22 +2142,11 @@ def topup(
                 f"the world was seeded {(now_dt - last).days} days ago; only the "
                 f"last {max_days} days are topped up"
             )
-        world = manifest.render(now_dt)
-        lo, hi = _ms_of(since), _ms_of(now_dt)
-        ahead = hi + TOPUP_EVENTS_AHEAD_S * 1000
-        sub = replace(
-            world,
-            sms=[m for m in world.sms if lo < m["ts_ms"] <= hi],
-            calls=[c for c in world.calls if lo < c["ts_ms"] <= hi],
-            events=[
-                e
-                for e in world.events
-                if not e.get("rule") and lo < e["ts_ms"] <= ahead
-            ],
-        )
+        sub, weeks = topup_world(manifest.render(now_dt), since, now_dt)
         entry: dict[str, Any] = {
             "anchor": now_dt.isoformat(),
             "since": since.isoformat(),
+            "weeks_back": weeks,
             "state": "running",
             "counts": {},
             "ids": {},
@@ -2134,6 +2174,7 @@ def topup(
     out.ran = True
     out.anchor = entry["anchor"]
     out.since = entry["since"]
+    out.weeks_back = dict(weeks)
     out.counts = dict(entry["counts"])
     for name, rows in (("sms", sub.sms), ("calls", sub.calls), ("events", sub.events)):
         if rows and out.counts.get(name):

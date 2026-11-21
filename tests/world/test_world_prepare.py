@@ -985,8 +985,28 @@ def _later(days: float, hours: float = 0.0) -> dt.datetime:
 
 
 def _window(manifest, since, now, name):
-    lo, hi = since.timestamp() * 1000, now.timestamp() * 1000
-    return [i for i in getattr(manifest.render(now), name) if lo < i["ts_ms"] <= hi]
+    sub, _weeks = pr.topup_world(manifest.render(now), since, now)
+    return getattr(sub, name)
+
+
+def test_a_sparse_window_is_filled_from_whole_weeks_back(manifest) -> None:
+    now = _later(2, 3)
+    world = manifest.render(now)
+    sub, weeks = pr.topup_world(world, ANCHOR, now)
+    lo, hi = ANCHOR.timestamp() * 1000, now.timestamp() * 1000
+    day = hi - 86400 * 1000
+    for name in ("sms", "calls"):
+        rows = getattr(sub, name)
+        assert rows, name
+        assert all(lo < r["ts_ms"] <= hi for r in rows)
+        assert max(r["ts_ms"] for r in rows) > day  # something from today
+        k = weeks[name]
+        week = 7 * 86400 * 1000
+        own = {r["id"]: r["ts_ms"] for r in getattr(world, name)}
+        # Re-dated by whole weeks: same weekday and time of day.
+        assert all(r["ts_ms"] - own[r["id"]] == k * week for r in rows)
+    # Deterministic.
+    assert pr.topup_world(manifest.render(now), ANCHOR, now) == (sub, weeks)
 
 
 def test_a_topup_adds_the_days_since_the_anchor_once(manifest) -> None:
