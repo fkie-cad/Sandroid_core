@@ -510,6 +510,54 @@ async def test_palette_quit_goes_through_request_quit(monkeypatch) -> None:
         assert not [w for w in caught if "never awaited" in str(w.message)]
 
 
+async def test_palette_shows_no_key_the_tui_does_not_bind(monkeypatch) -> None:
+    """The palette listed "Pull spotlight DB file" under Space (starts the app);
+    v / u (remove / pull spotlight files) do nothing globally either. The
+    palette lists them without a key and still runs them by name.
+    """
+    from textual.widgets import Input
+
+    from sandroid.core.menu_controller import TUI_UNBOUND_KEY_ACTIONS
+    from sandroid.tui.screens.command_palette import CommandPalette
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        from sandroid.core.menu_controller import MenuController
+
+        ran: list[str] = []
+        monkeypatch.setattr(ms, "execute_action", ran.append)
+        # No spotlight app here: let the command count as available.
+        monkeypatch.setattr(
+            MenuController.get(), "validate_action", lambda *a, **k: (True, "")
+        )
+        await pilot.press("ctrl+shift+p")
+        await settle(pilot)
+        palette = app.screen
+        assert isinstance(palette, CommandPalette)
+        palette.query_one("#palette-input", Input).value = "spotlight DB"
+        await settle(pilot)
+        text = str(palette.query_one("#palette-results").render())
+        line = next(ln for ln in text.splitlines() if "Pull spotlight DB file" in ln)
+        assert "Space" not in line
+        for name in ("Remove spotlight file", "Pull spotlight files"):
+            palette.query_one("#palette-input", Input).value = name
+            await settle(pilot)
+            text = str(palette.query_one("#palette-results").render())
+            row = next(ln for ln in text.splitlines() if name in ln)
+            assert "[    v]" not in row
+            assert "[    u]" not in row
+        # A space typed into the search does not match the " " key.
+        palette.query_one("#palette-input", Input).value = "pull spotlight db"
+        await settle(pilot)
+        await pilot.press("enter")
+        await settle(pilot)
+        assert ran == ["pull_spotlight_db"]
+    assert {"pull_spotlight_db", "remove_file", "pull_files"} == set(
+        TUI_UNBOUND_KEY_ACTIONS
+    )
+
+
 async def test_quit_command_uses_tui_quit_path() -> None:
     from sandroid.commands.base import CommandContext
     from sandroid.commands.system_commands import QuitCommand

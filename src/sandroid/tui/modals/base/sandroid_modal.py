@@ -6,7 +6,8 @@ It enforces consistent keyboard navigation and dismiss behavior.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Generic, TypeVar
+import dataclasses
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from textual.binding import Binding
 from textual.css.query import NoMatches
@@ -23,9 +24,48 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
+#: The action a dialog's own priority Enter binding is routed through.
+ENTER_ACTION = "enter_follows_focus"
+
+
+def _enter_follows_focus(binding: Any) -> list[Any]:
+    """A dialog's priority ``enter`` binding, routed through
+    :meth:`SandroidModal.action_enter_follows_focus`.
+
+    A priority binding runs before the focused widget sees the key, so
+    ``Binding("enter", "confirm", priority=True)`` confirmed even while the
+    Cancel button had the focus (the quit dialog highlighted Cancel and
+    Enter quit). Other keys of the same binding (``"enter,y"``) keep the
+    action unchanged.
+    """
+    if not isinstance(binding, Binding) or not binding.priority:
+        return [binding]
+    keys = [k.strip() for k in binding.key.split(",")]
+    if "enter" not in keys or binding.action.startswith(ENTER_ACTION):
+        return [binding]
+    routed = dataclasses.replace(
+        binding, key="enter", action=f"{ENTER_ACTION}({binding.action!r})"
+    )
+    others = [k for k in keys if k != "enter"]
+    if not others:
+        return [routed]
+    return [dataclasses.replace(binding, key=",".join(others)), routed]
+
 
 class SandroidModal(ModalScreen[T], Generic[T]):
-    """Base class for ALL Sandroid modals."""
+    """Base class for ALL Sandroid modals.
+
+    Enter follows the focus: on a focused button it presses that button;
+    anywhere else it runs the dialog's own Enter action (see
+    :func:`_enter_follows_focus`, applied to every subclass's BINDINGS).
+    """
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Before Textual merges the bindings (DOMNode.__init_subclass__).
+        own = cls.__dict__.get("BINDINGS")
+        if own:
+            cls.BINDINGS = [r for b in own for r in _enter_follows_focus(b)]
+        super().__init_subclass__(**kwargs)
 
     # If True, pressing Enter while an Input is focused will press the primary button.
     ENTER_SUBMITS_FROM_INPUT = True
@@ -228,6 +268,16 @@ class SandroidModal(ModalScreen[T], Generic[T]):
 
     def action_cancel(self) -> None:
         self._dismiss_with_refresh(None)
+
+    async def action_enter_follows_focus(self, action: str) -> None:
+        """Enter on a focused button presses it (a focused Cancel cancels);
+        anywhere else Enter runs the dialog's own Enter ``action``.
+        """
+        focused = self.focused
+        if isinstance(focused, Button) and not focused.disabled:
+            focused.press()
+            return
+        await self.run_action(action)
 
     def on_mount(self) -> None:
         apply_compact_widgets(self)

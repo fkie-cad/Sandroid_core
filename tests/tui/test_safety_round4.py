@@ -131,11 +131,12 @@ async def test_restart_is_not_run_inside_the_stray_typing_window(
 
 
 # --------------------------------------------------------------------------
-# 2. Quit dialog: Cancel focused (and shown so), Enter still quits
+# 2. Quit dialog: Cancel focused (and shown so); Enter presses the focused
+#    button (Cancel), y quits
 # --------------------------------------------------------------------------
 
 
-async def test_quit_dialog_focuses_cancel_and_enter_still_quits(monkeypatch) -> None:
+async def test_quit_dialog_focuses_cancel_and_enter_presses_it(monkeypatch) -> None:
     from sandroid.tui.app import SandroidTUI
     from sandroid.tui.controllers import quit_controller as qc
 
@@ -157,10 +158,133 @@ async def test_quit_dialog_focuses_cancel_and_enter_still_quits(monkeypatch) -> 
         # The highlight is on Cancel, not on Quit.
         assert cancel.styles.background != quit_button.styles.background
         assert str(cancel.styles.text_style) == "bold"
+        # Enter does what the highlight says: Cancel.
+        await pilot.press("enter")
+        await until(pilot, lambda: type(app.screen).__name__ == "MainScreen")
+        assert not app._exit
+        assert cleaned == []
+        # Tab to Quit, then Enter quits.
+        await pilot.press("q")
+        await until(pilot, lambda: type(app.screen).__name__ == "QuitConfirmModal")
+        await pilot.press("tab")
+        await settle(pilot)
+        assert app.focused is app.screen.query_one("#btn-quit")
         await pilot.press("enter")
         await until(pilot, lambda: app._exit)
         assert cleaned == [1]
-        assert app._exit
+
+
+async def test_quit_dialog_y_quits_while_cancel_has_the_focus(monkeypatch) -> None:
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.controllers import quit_controller as qc
+
+    app = SandroidTUI()
+    async with app.run_test(size=SIZE) as pilot:
+        await boot(app, pilot)
+        cleaned: list[int] = []
+        monkeypatch.setattr(
+            app._quit_controller, "force_exit", lambda: cleaned.append(1)
+        )
+        monkeypatch.setattr(qc.QuitController, "_quit_notes", staticmethod(list))
+        await pilot.press("q")
+        await settle(pilot)
+        assert app.focused is app.screen.query_one("#btn-cancel")
+        await pilot.press("y")
+        await until(pilot, lambda: app._exit)
+        assert cleaned == [1]
+
+
+def _all_modal_classes() -> list[type]:
+    import importlib
+    import pkgutil
+
+    from sandroid.tui import modals
+    from sandroid.tui.modals.base import SandroidModal
+
+    for info in pkgutil.iter_modules(modals.__path__):
+        importlib.import_module(f"sandroid.tui.modals.{info.name}")
+    seen, todo = [], [SandroidModal]
+    while todo:
+        cls = todo.pop()
+        for sub in cls.__subclasses__():
+            seen.append(sub)
+            todo.append(sub)
+    return seen
+
+
+def test_every_dialog_routes_its_priority_enter_through_the_focus() -> None:
+    """No dialog's own priority Enter binding outruns a focused button."""
+    from sandroid.tui.modals.base.sandroid_modal import ENTER_ACTION
+
+    classes = _all_modal_classes()
+    assert len(classes) > 20
+    routed = []
+    for cls in classes:
+        for binding in cls._merged_bindings.key_to_bindings.get("enter", []):
+            if binding.priority:
+                assert binding.action.startswith(ENTER_ACTION), (cls, binding)
+                routed.append(cls.__name__)
+    assert "QuitConfirmModal" in routed
+    assert "DeviceSwitchConfirmModal" in routed
+
+
+async def test_enter_presses_the_focused_button_else_runs_the_enter_action() -> None:
+    from textual.app import App
+    from textual.binding import Binding
+    from textual.containers import Vertical
+    from textual.widgets import Button, Input
+
+    from sandroid.tui.modals.base import SandroidModal
+
+    class _Dialog(SandroidModal[str]):
+        BINDINGS = [
+            Binding("enter,y", "confirm", "Confirm", priority=True),
+        ]
+        AUTO_FOCUS = "#no"
+
+        def compose(self):
+            with Vertical(classes="modal-container"):
+                yield Input(id="field")
+                yield Button("Yes", id="yes", classes="-primary")
+                yield Button("No", id="no")
+
+        def action_confirm(self) -> None:
+            self.dismiss("confirm")
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            self.dismiss(event.button.id)
+
+    # "enter,y" is split: y keeps the plain action.
+    keys = {
+        b.key: b.action for b in _Dialog._merged_bindings.key_to_bindings.get("y", [])
+    }
+    assert keys == {"y": "confirm"}
+
+    results: list[str] = []
+
+    class _Host(App):
+        def on_mount(self) -> None:
+            self.push_screen(_Dialog(), results.append)
+
+    for focus, key, expected in (
+        ("#no", "enter", "no"),  # the focused No, not the Enter action
+        ("#yes", "enter", "yes"),
+        ("#no", "y", "confirm"),  # y is not Enter: the action as before
+        ("#field", "enter", None),  # Input: Enter submits via the primary
+    ):
+        results.clear()
+        app = _Host()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.screen.query_one(focus).focus()
+            await pilot.pause()
+            await pilot.press(key)
+            await pilot.pause()
+            await pilot.pause()
+        if expected is None:
+            assert results in (["yes"], ["confirm"]), results
+        else:
+            assert results == [expected], (focus, key, results)
 
 
 # --------------------------------------------------------------------------

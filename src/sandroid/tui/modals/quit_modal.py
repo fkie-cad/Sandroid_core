@@ -25,9 +25,11 @@ class QuitConfirmModal(DangerModal[bool]):
       meanwhile cannot reach the screens below (e.g. ``y`` = Proxy Settings).
     """
 
-    # Cancel has the focus (safer default; Enter still quits, see BINDINGS).
-    # Via AUTO_FOCUS: an own on_mount ran before SandroidModal's, whose
-    # auto-focus then moved the focus to the first button (Quit).
+    # Cancel has the focus (safer default), and Enter presses the focused
+    # button (SandroidModal routes Enter through the focus): Enter right
+    # away cancels, y quits. Via AUTO_FOCUS: an own on_mount ran before
+    # SandroidModal's, whose auto-focus then moved the focus to the first
+    # button (Quit).
     AUTO_FOCUS = "#btn-cancel"
 
     BINDINGS = [
@@ -35,7 +37,8 @@ class QuitConfirmModal(DangerModal[bool]):
         Binding("q", "cancel", "Cancel", show=False, priority=True),
         Binding("y", "confirm", "Yes", show=False),
         Binding("n", "cancel", "No", show=False),
-        # Enter should always quit, even when Cancel button is focused
+        # Enter presses the focused button (Cancel when the dialog opens):
+        # routed through SandroidModal.action_enter_follows_focus.
         Binding("enter", "confirm", "Confirm", show=False, priority=True),
     ]
 
@@ -93,7 +96,9 @@ class QuitConfirmModal(DangerModal[bool]):
                 yield Button("Quit", classes="-primary", id="btn-quit")
                 yield Button("Cancel", classes="-secondary", id="btn-cancel")
             yield KeyHintFooter(
-                hints={"button": "[dim]y/Enter=Quit  n/q/Esc=Cancel[/dim]"},
+                hints={
+                    "button": "[dim]y=Quit  Enter=Press button  n/q/Esc=Cancel[/dim]"
+                },
                 id="quit-hints",
             )
 

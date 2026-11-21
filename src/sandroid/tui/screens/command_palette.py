@@ -10,7 +10,11 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from sandroid.core.enums import ViewMode
-from sandroid.core.menu_controller import Action, MenuController
+from sandroid.core.menu_controller import (
+    TUI_UNBOUND_KEY_ACTIONS,
+    Action,
+    MenuController,
+)
 from sandroid.tui.key_display import format_key
 
 
@@ -134,6 +138,16 @@ class CommandPalette(ModalScreen):
         # Show all actions initially
         self._update_results("")
 
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Enter in the search field runs the selected command.
+
+        The focused Input takes Enter itself (``Input.Submitted``), so the
+        screen's ``enter`` binding never fired and Enter did nothing.
+        """
+        if event.input.id == "palette-input":
+            event.stop()
+            self.action_execute_selected()
+
     def on_input_changed(self, event: Input.Changed) -> None:
         """Handle input changes."""
         if event.input.id == "palette-input":
@@ -166,7 +180,10 @@ class CommandPalette(ModalScreen):
                     query_lower in a.name.lower()
                     or query_lower in a.display_name.lower()
                     or query_lower in a.description.lower()
-                    or query_lower in a.key.lower()
+                    or (
+                        a.name not in TUI_UNBOUND_KEY_ACTIONS
+                        and query_lower in a.key.lower()
+                    )
                 )
             ]
         else:
@@ -185,7 +202,13 @@ class CommandPalette(ModalScreen):
         else:
             lines = []
             for i, action in enumerate(self._filtered_actions[:15]):
-                key_display = _format_key_display(action.key)
+                # A key the TUI does not bind is not shown: the palette runs
+                # the command by name (Space would start the app instead).
+                key_display = (
+                    ""
+                    if action.name in TUI_UNBOUND_KEY_ACTIONS
+                    else _format_key_display(action.key)
+                )
 
                 # Check availability (view-agnostic; flat catalog)
                 valid, _ = self._controller.validate_action(action.name)

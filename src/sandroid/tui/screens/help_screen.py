@@ -26,7 +26,12 @@ from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
-from sandroid.core.menu_controller import Action, ActionCategory, MenuController
+from sandroid.core.menu_controller import (
+    TUI_UNBOUND_KEY_ACTIONS,
+    Action,
+    ActionCategory,
+    MenuController,
+)
 from sandroid.tui.key_display import format_key, key_words
 
 logger = logging.getLogger(__name__)
@@ -762,11 +767,7 @@ class HelpScreen(ModalScreen):
             # exclusion they'd fall into the generic "(fixed)" bucket below
             # and read as live TUI shortcuts when v/u/space now do nothing
             # in the TUI at all.
-            if action.name in (
-                "remove_file",
-                "pull_files",
-                "pull_spotlight_db",
-            ):
+            if action.name in TUI_UNBOUND_KEY_ACTIONS:
                 continue
             by_category.setdefault(action.category, []).append(action)
 
