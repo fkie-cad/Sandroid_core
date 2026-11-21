@@ -1054,6 +1054,94 @@ async def test_stop_or_restart_of_a_device_in_use_elsewhere_warns_first(
     assert actions.calls == [(method, "emulator-5556")]
 
 
+async def test_after_stop_the_cursor_never_lands_on_another_sessions_device(
+    monkeypatch,
+) -> None:
+    """N5-B5: after Stop the cursor slid onto another session's emulator
+    (3 of 3 times), and the row said "ready, active" until adb dropped it.
+    """
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+    mine = DeviceRow(
+        serial="emulator-5560",
+        avd_name="Dev3",
+        state=RowState.READY,
+        is_emulator=True,
+        active=True,
+        ours=True,
+    )
+    foreign = dataclasses.replace(FOREIGN, serial="emulator-5562")
+    snaps = [HubSnapshot(devices=(mine, foreign), taken_at=1.0)]
+
+    def collect(force_avds=False):
+        return snaps[-1]
+
+    actions = FakeActions()
+    screen = DevicesScreen(collect=collect, actions=actions)
+    app = HubApp(screen)
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        assert screen.current_row() == mine
+        await pilot.press("x")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        await pilot.press("y")
+        await until(pilot, lambda: app.screen is screen)
+        assert actions.calls == [("stop_emulator", "emulator-5560")]
+        # adb still lists it for a while after qemu exited.
+        await settle(pilot)
+        assert screen._state_cell(mine).plain == "◌ stopping"
+        assert screen.current_row() == mine
+        # Gone: the cursor goes to its AVD's row, not to emulator-5562.
+        snaps.append(
+            HubSnapshot(devices=(foreign,), avds=(AvdRow(name="Dev3"),), taken_at=2.0)
+        )
+        screen.request_refresh()
+        await until(pilot, lambda: screen.snapshot is snaps[-1])
+        await settle(pilot)
+        assert screen.current_row() == AvdRow(name="Dev3")
+        assert screen._stopping == {}
+        # Without its AVD row, the nearest row this session owns.
+        screen._apply(HubSnapshot(devices=(mine, foreign), avds=(IDLE,), taken_at=3))
+        screen.query_one("#hub-table").move_cursor(row=0)
+        screen._apply(HubSnapshot(devices=(foreign,), avds=(IDLE,), taken_at=4.0))
+        assert screen.current_row() == IDLE
+
+
+def test_a_device_of_an_earlier_run_keeps_its_persona_label() -> None:
+    """N5-B7: after a Sandroid restart there is no launch of ours; the
+    persona comes from the identity record.
+    """
+    entry = SimpleNamespace(serial="emulator-5560", state="device", props={})
+    snap = hub.build_snapshot(
+        [entry],
+        {},
+        {"emulator-5560": "Dev3"},
+        [],
+        {},
+        [],
+        None,
+        0.0,
+        personas={"emulator-5560": "mara-de"},
+    )
+    assert snap.devices[0].persona == "mara-de"
+
+
+def test_the_collector_asks_the_identity_record_for_personas(monkeypatch) -> None:
+    from sandroid.services import identity
+
+    held = {"emulator-5560": "mara-de"}
+    fake = SimpleNamespace(persona_of=lambda serial: held.get(serial, ""))
+    monkeypatch.setattr(identity, "get_identity_service", lambda: fake)
+    entries = [
+        SimpleNamespace(serial="emulator-5560"),
+        SimpleNamespace(serial="emulator-5562"),  # another session's
+        SimpleNamespace(serial="R58M"),  # not an emulator
+    ]
+    assert hub.HubCollector._personas(entries, {"emulator-5562"}) == {
+        "emulator-5560": "mara-de"
+    }
+
+
 async def test_the_stop_dialog_names_the_avd_and_the_serial() -> None:
     from sandroid.tui.modals.confirm_modal import ConfirmModal
 
