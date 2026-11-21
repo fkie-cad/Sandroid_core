@@ -374,6 +374,12 @@ def find_results_json(result_dir: str | os.PathLike[str]) -> Path:
 def _load_bundle(
     ctx: ReportContext, bundle_dir: Path | None, results_json: Path | None
 ) -> None:
+    """The results JSON of ``bundle_dir`` (or ``results_json``).
+
+    A Record/Replay folder (``ctx.recordings`` already loaded) has none: its
+    absence is not warned about there (R1-B5) -- only a results JSON asked
+    for by path, or one that is present but unreadable, is.
+    """
     if bundle_dir is None and results_json is None:
         return
     try:
@@ -388,6 +394,12 @@ def _load_bundle(
         ctx.bundle = sanitize_results(data)
         ctx.bundle_path = path
         ctx.bundle_sha256 = sha256_file(path)
+    except FileNotFoundError as exc:
+        if ctx.recordings and results_json is None:
+            logger.debug("Report: no results JSON in a Record/Replay folder")
+            return
+        logger.warning("Report: results JSON unavailable: %s", exc)
+        ctx.bundle_error = f"{type(exc).__name__}: {exc}"
     except Exception as exc:
         logger.warning("Report: results JSON unavailable: %s", exc)
         ctx.bundle_error = f"{type(exc).__name__}: {exc}"
@@ -484,9 +496,11 @@ def _recording_from_rec(path: Path) -> dict[str, Any] | None:
             ]
         )
     runs = []
-    for run in rec.get("runs") or []:
-        if not isinstance(run, dict):
-            continue
+    # Numbered from 1 within the report (R1-B5: the only replay read "Run 2",
+    # its number among the recording's runs).
+    for number, run in enumerate(
+        (r for r in rec.get("runs") or [] if isinstance(r, dict)), start=1
+    ):
         rows = _kv_rows(
             [
                 ("Run", run.get("run_id")),
@@ -497,7 +511,7 @@ def _recording_from_rec(path: Path) -> dict[str, Any] | None:
             ]
         )
         kind = str(run.get("kind") or "run")
-        runs.append(_run_entry(f"Run {run.get('n', '?')}: {kind}", run, rows))
+        runs.append(_run_entry(f"Run {number}: {kind}", run, rows))
     rows = _kv_rows(
         [
             ("Recording", rec.get("rec_id")),
@@ -2909,15 +2923,10 @@ def build_report(
         ctx.notes.append("No session timeline was available for this report.")
     _apply_scope(ctx)
     ctx.labels = _build_labels(ctx.lines)
-    _load_bundle(ctx, bundle_dir, results_json)
+    # Recordings first: a Record/Replay folder has no results JSON, and
+    # _load_bundle does not warn about it there.
     _load_recordings(ctx, bundle_dir)
-    if (
-        ctx.bundle is None
-        and ctx.recordings
-        and results_json is None
-        and str(ctx.bundle_error or "").startswith("FileNotFoundError")
-    ):
-        ctx.bundle_error = None  # a Record/Replay folder has no results JSON
+    _load_bundle(ctx, bundle_dir, results_json)
     sections = [
         _run_section(spec, ctx)
         for spec in _plan(options.sections)

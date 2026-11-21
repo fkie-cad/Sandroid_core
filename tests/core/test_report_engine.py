@@ -2474,9 +2474,10 @@ def _texts(section: dict) -> str:
     return json.dumps(section["blocks"], ensure_ascii=False)
 
 
-def test_run_bundle_without_seal_reports_timeline_steps_and_files(session):
+def test_run_bundle_without_seal_reports_timeline_steps_and_files(session, caplog):
     """Shift+P on a TUI run: the timeline named in run.json is sealed now,
     and run.json's steps, verdicts and changes are in the report.
+    R1-B5: no "results JSON unavailable" warning for a run folder.
     """
     bundle = session.root / "results" / "runs" / "20261121_042602_eac980"
     bundle.mkdir(parents=True)
@@ -2492,7 +2493,9 @@ def test_run_bundle_without_seal_reports_timeline_steps_and_files(session):
         "rewind": {"steps": _STEPS, "result_words": "done, 1 step unchecked"},
     }
     (bundle / "run.json").write_text(json.dumps(run), encoding="utf-8")
+    caplog.set_level("WARNING")
     out = run_report.report_from_folder(bundle)
+    assert "results JSON unavailable" not in caplog.text
     assert out.timeline_note is None
     doc = json.loads(out.report_json.read_text())
     assert doc["timeline"]["available"]
@@ -2521,7 +2524,9 @@ def test_session_folder_without_seal_reports_timeline_and_recordings(session):
         "changed": [{"path": "/data/data/org.x/db"}],
         "selected": ["/data/data/org.x/db"],
         "versions": {"/data/data/org.x/db": {"after": "v001", "before": "v002"}},
-        "runs": [{"n": 1, "kind": "rewind-replay", "result": "unchecked",
+        # R1-B5: the only replay was "Run 2" (its n); the report numbers
+        # its runs from 1.
+        "runs": [{"n": 2, "kind": "rewind-replay", "result": "unchecked",
                   "run_id": "r1", "steps": _STEPS,
                   "verdicts": {"/data/data/org.x/db": "same as your run"}}],
     }  # fmt: skip
@@ -2532,5 +2537,6 @@ def test_session_folder_without_seal_reports_timeline_and_recordings(session):
     assert _steps(doc)
     text = _texts(_section(doc, "recordings"))
     for part in ("Recording 04:18", "after v001, before v002", "tap 'Save'",
-                 "same as your run"):  # fmt: skip
+                 "same as your run", "Run 1: rewind-replay"):  # fmt: skip
         assert part in text
+    assert "Run 2" not in text
