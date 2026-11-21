@@ -252,6 +252,22 @@ def test_unexpected_exit_without_output_names_the_exit_code(make_service):
     assert lines == ["[ERROR] Mitmproxy exited unexpectedly: exit code 3"]
 
 
+@pytest.mark.parametrize(
+    ("code", "reason"),
+    [
+        (0, "terminated from outside"),
+        (-9, "killed (SIGKILL)"),
+        (-15, "killed (SIGTERM)"),
+    ],
+)
+def test_a_kill_from_outside_is_not_called_exit_code_0(make_service, code, reason):
+    """R3: SIGTERM ends mitmweb with code 0; the title read "exit code 0"."""
+    svc, _ = make_service()
+    svc._proc = _ExitedProc([], code=code)
+    svc._read_loop()
+    assert svc.state.last_error == reason
+
+
 def test_panel_toasts_engine_errors(panel, monkeypatch):
     p, _, _, _ = panel
     posted = []

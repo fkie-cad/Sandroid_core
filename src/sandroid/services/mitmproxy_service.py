@@ -1094,6 +1094,26 @@ def _exit_reason(lines: list[str]) -> str:
     return ""
 
 
+def _exit_code_reason(code: int | None) -> str:
+    """Plain words for how mitmweb ended without saying why.
+
+    mitmweb ends with code 0 on SIGTERM/SIGINT (it has no quit of its own),
+    so a 0 means someone else stopped it, not "exit code 0" (R3).
+    """
+    if code is None:
+        return "it ended"
+    if code < 0:
+        try:
+            import signal
+
+            return f"killed ({signal.Signals(-code).name})"
+        except ValueError:
+            return f"killed (signal {-code})"
+    if code == 0:
+        return "terminated from outside"
+    return f"exit code {code}"
+
+
 def _device_uids_path() -> str:
     from sandroid.core.device_guard import device_uids_path
 
@@ -2474,7 +2494,7 @@ class MitmproxyService:
                     self._state.pid = None
                     reason = _exit_reason(list(self._exit_tail))
                     if not reason:
-                        reason = f"exit code {proc.poll()}"
+                        reason = _exit_code_reason(proc.poll())
                     self._state.last_error = reason
                     logger.warning("mitmweb exited unexpectedly: %s", reason)
                     self._emit(f"[ERROR] Mitmproxy exited unexpectedly: {reason}")

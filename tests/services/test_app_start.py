@@ -3024,6 +3024,23 @@ def test_a_pid_poll_for_the_old_app_never_lands_after_a_switch_back(
     assert not first.closed
 
 
+def test_leaving_an_app_says_only_the_armed_set_is_cleared(two_apps, caplog):
+    """R3: "bypass frida disarmed" read as if the running hooks stopped."""
+    import logging
+
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    bypass._arm("frida")
+    with caplog.at_level(logging.INFO):
+        env.select(PKG)
+    (line,) = [
+        r.getMessage() for r in caplog.records if "Selection left" in r.getMessage()
+    ]
+    assert line == (
+        f"Selection left {OTHER}: bypass frida no longer armed for its next start"
+    )
+
+
 def test_set_pid_drops_a_sample_tagged_for_another_selection(env):
     spot = env.spotlight
     epoch = spot.selection_epoch()

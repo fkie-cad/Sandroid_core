@@ -608,9 +608,12 @@ class SpotlightService:
             self._logger.debug(f"Could not disarm the bypasses: {exc}")
             return
         if cleared:
+            # Only the armed set (applied at the next start) is cleared;
+            # hooks already running in the app stay loaded. "disarmed" read
+            # as if those stopped too (R3).
             self._logger.info(
                 f"Selection left {previous_package}: bypass "
-                f"{', '.join(cleared)} disarmed"
+                f"{', '.join(cleared)} no longer armed for its next start"
             )
 
     def _publish_app_changed(

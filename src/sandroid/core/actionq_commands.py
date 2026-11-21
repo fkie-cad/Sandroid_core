@@ -222,8 +222,11 @@ def execute_command_from_actionq(
             # Don't log warning for precondition failures - modal is shown to user
             logger.debug(f"Command '{char}' precondition not met: {result.message}")
         elif result.error == "cancelled":
-            # The user said no in a dialog: not a failure.
-            logger.info(f"Command '{char}' cancelled: {result.message}")
+            # The user said no in a dialog: not a failure. The TUI (``app``)
+            # puts the message in the log itself: a second INFO line here
+            # made two log lines per cancel (R3).
+            log = logger.debug if app is not None else logger.info
+            log(f"Command '{char}' cancelled: {result.message}")
         elif (result.data or {}).get("no_dialog"):
             # The command logged its own message (what to do next).
             logger.debug(f"Command '{char}' failed: {result.message}")
