@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 
 from textual.widgets import Button, Input, OptionList, RadioSet, Static
 
+from sandroid.tui.key_display import hint_words
+
 if TYPE_CHECKING:
     from textual.widget import Widget
 
@@ -50,10 +52,10 @@ class KeyHintFooter(Static):
 
     HINTS: dict[str, str] = {
         "default": "[dim]Esc=Cancel  Tab=Next[/dim]",
-        "input": "[dim]Esc=Cancel  Tab=Next Field  Enter=Submit[/dim]",
+        "input": "[dim]Esc=Cancel  Tab=Next field  Enter=Submit[/dim]",
         "list": "[dim]Esc=Cancel  j/k=Navigate  Enter=Select[/dim]",
         "button": "[dim]Esc=Cancel  Tab=Next  Enter/Space=Activate[/dim]",
-        "radioset": "[dim]Esc=Cancel  ↑↓=Navigate  Space=Select  Tab=Next[/dim]",
+        "radioset": "[dim]Esc=Cancel  Up/Down=Navigate  Space=Select  Tab=Next[/dim]",
     }
 
     def __init__(
@@ -74,11 +76,10 @@ class KeyHintFooter(Static):
             id: Widget ID
             classes: CSS classes
         """
-        # Merge custom hints with defaults (custom wins) FIRST
-        if hints:
-            self._hints = {**self.HINTS, **hints}
-        else:
-            self._hints = self.HINTS.copy()
+        # Merge custom hints with defaults (custom wins) FIRST; every hint
+        # reads in the one lens style ("Esc cancel", see hint_words).
+        merged = {**self.HINTS, **(hints or {})}
+        self._hints = {kind: hint_words(text) for kind, text in merged.items()}
 
         # Initialize with the (possibly custom) default
         super().__init__(self._hints["default"], name=name, id=id, classes=classes)
@@ -112,7 +113,7 @@ class KeyHintFooter(Static):
             hint_type: One of "default", "input", "list", "button"
             text: Rich markup string for the hint
         """
-        self._hints[hint_type] = text
+        self._hints[hint_type] = hint_words(text)
 
     def reset_to_default(self) -> None:
         """Reset display to default hints."""

@@ -2424,7 +2424,7 @@ async def test_method_dialog_pinning_is_sent_only_when_toggled(monkeypatch):
     async with app.run_test(size=(120, 40)) as pilot:
         await until(pilot, lambda: app.screen is modal and app.focused is not None)
         footer = str(modal.query_one(KeyHintFooter).render())
-        assert "Ctrl+S=Apply" in footer
+        assert "Ctrl+S apply" in footer
         assert "Up/Down" in footer
         assert not re.search("[←-⇿]", footer)  # no arrow glyphs
         assert modal.query_one("#nm-pinning", Checkbox).value  # live state
