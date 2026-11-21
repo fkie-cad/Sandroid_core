@@ -934,6 +934,22 @@ class MainScreen(Screen):
         except Exception:
             pass
 
+    def note_snapshot_deleted(self, tag: str) -> None:
+        """The header's snapshot was deleted: say so (R1-B5: it kept
+        showing "snapshot <name>" as if it still existed).
+        """
+        try:
+            header = self.query_one("#shell-header", ShellHeader)
+        except Exception:
+            return
+        current = header._snapshot
+        if (
+            current == tag
+            or current.endswith(f" · {tag}")
+            or current.startswith(f"{tag} (")
+        ):
+            header.set_snapshot(f"{tag} (deleted)")
+
     def open_fritap_tab(self) -> None:
         """Switch to the Network lens and show friTap's state (key ``h``).
 

@@ -876,9 +876,30 @@ def test_slot_pointing_at_a_deleted_snapshot(monkeypatch) -> None:
         "_run_action_bg",
         lambda work, label, refresh_after=False: results.append(work()),
     )
+    posted: list = []
+    monkeypatch.setattr(panel, "_post", lambda fn, *args: posted.append((fn, args)))
     panel.action_delete()
     assert results == [(True, "Deleted 'tmp'")]
     assert writes == [("1", None)]
+    # R1-B5: the header hears of it (it kept "snapshot tmp").
+    assert [(fn.__name__, args) for fn, args in posted] == [("_note_deleted", ("tmp",))]
+
+
+def test_header_marks_a_deleted_loaded_snapshot() -> None:
+    """R1-B5: after the loaded snapshot was deleted the header still said
+    "snapshot <name>"; it now reads "<name> (deleted)".
+    """
+    from types import SimpleNamespace
+
+    from sandroid.tui.screens.main_screen import MainScreen
+
+    labels: list[str] = []
+    header = SimpleNamespace(_snapshot="slot 1 · tmp", set_snapshot=labels.append)
+    screen = SimpleNamespace(query_one=lambda *a, **k: header)
+    MainScreen.note_snapshot_deleted(screen, "other")
+    assert labels == []  # another snapshot: the header is left alone
+    MainScreen.note_snapshot_deleted(screen, "tmp")
+    assert labels == ["tmp (deleted)"]
 
 
 def test_snapshot_load_restores_selinux_permissive() -> None:

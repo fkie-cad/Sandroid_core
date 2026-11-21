@@ -750,6 +750,7 @@ class SnapshotsPanel(Widget):
                     for slot, slot_tag in self._slot_map().items():
                         if slot_tag == tag:
                             self._write_slot(slot, None)
+                    self._post(self._note_deleted, tag)
                     return True, f"Deleted '{tag}'"
                 why = _refusal_reason("delete", tag, confirmed=owner is not None) or (
                     "emulator rejected it"
@@ -943,6 +944,17 @@ class SnapshotsPanel(Widget):
                 note = getattr(screen, "note_snapshot", None)
                 if note is not None:
                     note(tag, slot)
+        except Exception:
+            pass
+
+    def _note_deleted(self, tag: str) -> None:
+        """Tell the main screen a snapshot was deleted (header indicator)."""
+        try:
+            app = getattr(self, "_app_ref", None) or self.app
+            for screen in app.screen_stack:
+                note = getattr(screen, "note_snapshot_deleted", None)
+                if note is not None:
+                    note(tag)
         except Exception:
             pass
 
