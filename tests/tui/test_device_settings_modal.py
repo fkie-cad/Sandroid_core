@@ -82,6 +82,12 @@ def service(monkeypatch, request) -> _FakeService:
     return svc
 
 
+@pytest.fixture(autouse=True)
+def _own_ui_state(monkeypatch, tmp_path) -> None:
+    """Each test gets its own ``tui_state.json`` (the modal remembers its tab)."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+
 def _status(modal: DeviceSettingsModal) -> str:
     return str(modal.query_one("#status-label", Static).content)
 
@@ -489,3 +495,167 @@ async def test_shift_arrows_cycle_the_tabs_and_tab_reaches_the_picker(
         await pilot.press("shift+right")
         await settle(pilot)
         assert tabs.active == "tab-location"
+
+
+# -- Keyboard navigation (Shift+E E2E findings) -------------------------------
+
+
+async def _wait_modal(pilot) -> DeviceSettingsModal:
+    await until(pilot, lambda: isinstance(pilot.app.screen, DeviceSettingsModal))
+    await settle(pilot)
+    return pilot.app.screen
+
+
+@pytest.mark.asyncio
+async def test_shift_arrows_switch_tabs_right_after_opening(registry) -> None:
+    """The modal opens on the tab bar (not in a text field that would eat
+    Shift+Left/Right), without scrolling the title away.
+    """
+    from textual.widgets import TabbedContent, Tabs
+
+    app = _ActionsHarness()
+    async with app.run_test(size=(100, 30)) as pilot:
+        modal = await _wait_modal(pilot)
+        tabs = modal.query_one("#settings-tabs", TabbedContent)
+        assert isinstance(app.focused, Tabs)
+        assert modal.query_one(".modal-container").scroll_y == 0
+        await pilot.press("shift+right")
+        await settle(pilot)
+        assert tabs.active == "tab-environment"
+        await pilot.press("shift+left", "shift+left")
+        await settle(pilot)
+        assert tabs.active == "tab-actions"
+
+
+@pytest.mark.asyncio
+async def test_escape_closes_an_open_dropdown_before_the_modal(registry) -> None:
+    from textual.widgets import Select
+
+    app = _ActionsHarness()
+    async with app.run_test(size=(120, 35)) as pilot:
+        modal = await _open_actions(pilot)
+        picker = modal.query_one("#action-select", Select)
+        picker.focus()
+        await settle(pilot)
+        await pilot.press("enter")
+        await until(pilot, lambda: picker.expanded)
+
+        await pilot.press("escape")
+        await settle(pilot)
+        assert app.screen is modal
+        assert not picker.expanded
+        assert app.focused is picker
+        assert modal._built_for == "sms.receive"  # the choice is unchanged
+
+        await pilot.press("escape")
+        await until(pilot, lambda: not isinstance(app.screen, DeviceSettingsModal))
+
+
+@pytest.mark.asyncio
+async def test_the_last_tab_is_remembered_in_the_ui_state(registry, tmp_path) -> None:
+    import json
+
+    from textual.widgets import TabbedContent
+
+    app = _ActionsHarness()
+    async with app.run_test(size=(120, 35)) as pilot:
+        modal = await _wait_modal(pilot)
+        assert modal.query_one("#settings-tabs", TabbedContent).active == (
+            "tab-location"
+        )
+        await pilot.press("shift+left")  # wraps to Actions
+        await settle(pilot)
+        await pilot.press("escape")
+        await until(pilot, lambda: not isinstance(app.screen, DeviceSettingsModal))
+        state = json.loads((tmp_path / "sandroid" / "tui_state.json").read_text())
+        assert state["device_settings_tab"] == "tab-actions"
+
+        app.push_screen(DeviceSettingsModal())
+        modal = await _wait_modal(pilot)
+        assert modal.query_one("#settings-tabs", TabbedContent).active == (
+            "tab-actions"
+        )
+        await until(pilot, lambda: modal._built_for is not None)
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_remembered_tab_falls_back_to_location(
+    registry,
+) -> None:
+    from textual.widgets import TabbedContent
+
+    from sandroid.config.ui_state import update_ui_state
+
+    update_ui_state("device_settings_tab", "tab-gone")
+    app = _ActionsHarness()
+    async with app.run_test(size=(120, 35)) as pilot:
+        modal = await _wait_modal(pilot)
+        assert modal.query_one("#settings-tabs", TabbedContent).active == (
+            "tab-location"
+        )
+
+
+def _in_view(container, widget) -> bool:
+    return container.content_region.contains_region(widget.region)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(120, 35), (100, 30)])
+async def test_actions_tab_scrolls_with_the_keyboard(registry, size) -> None:
+    """Content taller than the modal scrolls: a scrollbar shows, the focused
+    widget scrolls into view, PageUp/PageDown/Up/Down scroll.
+    """
+    app = _ActionsHarness()
+    async with app.run_test(size=size) as pilot:
+        modal = await _open_actions(pilot)
+        container = modal.query_one(".modal-container")
+        assert container.max_scroll_y > 0
+        assert container.show_vertical_scrollbar
+
+        close = modal.query_one("#btn-close", Button)
+        for _ in range(12):  # Tab through the tab's widgets to Close
+            if app.focused is close:
+                break
+            await pilot.press("tab")
+            await settle(pilot)
+            assert _in_view(container, app.focused), app.focused
+        assert app.focused is close
+        await until(pilot, lambda: _in_view(container, close))
+
+        await pilot.press("pageup")
+        await until(pilot, lambda: container.scroll_y == 0)
+        await pilot.press("down")
+        await until(pilot, lambda: container.scroll_y == 1)
+        await pilot.press("pagedown")
+        await until(pilot, lambda: container.scroll_y == container.max_scroll_y)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(120, 35), (100, 30)])
+async def test_action_dropdown_reaches_the_network_actions_by_keyboard(
+    registry, size
+) -> None:
+    from textual.color import Color
+    from textual.widgets import Select
+    from textual.widgets._select import SelectOverlay
+
+    app = _ActionsHarness()
+    async with app.run_test(size=size) as pilot:
+        modal = await _open_actions(pilot)
+        picker = modal.query_one("#action-select", Select)
+        picker.focus()
+        await settle(pilot)
+        await pilot.press("enter")
+        await until(pilot, lambda: picker.expanded)
+        overlay = picker.query_one(SelectOverlay)
+        assert overlay.max_scroll_y > 0
+        assert overlay.show_vertical_scrollbar
+        # Drawn in the accent colour, not the theme's near-invisible default.
+        primary = Color.parse(app.get_css_variables()["primary"])
+        assert overlay.styles.scrollbar_color.rgb == primary.rgb
+
+        await pilot.press("end")
+        await settle(pilot)
+        assert overlay.scroll_y == overlay.max_scroll_y
+        await pilot.press("enter")
+        await until(pilot, lambda: modal._built_for.startswith("net."))

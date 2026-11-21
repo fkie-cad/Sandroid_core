@@ -40,6 +40,18 @@ logger = logging.getLogger(__name__)
 #: Longest result detail (or failure reason) shown in the status line.
 _REASON_MAX = 120
 
+#: ``tui_state.json`` key remembering the last active tab.
+_UI_STATE_TAB_KEY = "device_settings_tab"
+
+#: The tab pane ids, in order.
+_TAB_IDS = (
+    "tab-location",
+    "tab-environment",
+    "tab-sensors",
+    "tab-network",
+    "tab-actions",
+)
+
 
 @dataclass
 class DeviceSettingsResult:
@@ -98,17 +110,30 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
 
     ENTER_SUBMITS_FROM_INPUT = False  # Don't auto-submit on Enter in inputs
 
+    # No Textual auto focus: it would focus the preset picker and scroll.
+    # :meth:`_auto_focus` puts the focus on the tab bar instead.
+    AUTO_FOCUS = ""
+
     DEFAULT_CSS = """
+    /* The container scrolls when the content is taller than the screen:
+       the focused widget scrolls into view, Up/Down/PageUp/PageDown
+       scroll, and the scrollbar is drawn in a visible colour. */
     DeviceSettingsModal .modal-container {
         height: auto;
         max-height: 85%;
         width: 85%;
         max-width: 100;
+        scrollbar-size-vertical: 1;
+        scrollbar-color: $primary;
+    }
+
+    DeviceSettingsModal SelectOverlay {
+        scrollbar-size-vertical: 1;
+        scrollbar-color: $primary;
     }
 
     DeviceSettingsModal TabbedContent {
         height: auto;
-        max-height: 30;
     }
 
     DeviceSettingsModal TabPane {
@@ -179,9 +204,8 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         display: block;
     }
 
-    DeviceSettingsModal #actions-scroll {
+    DeviceSettingsModal #actions-body {
         height: auto;
-        max-height: 24;
     }
 
     DeviceSettingsModal #action-params {
@@ -250,6 +274,57 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         #: rebuilds (fields, background list) one at a time.
         self._built_for: str | None = None
         self._rebuild_lock = asyncio.Lock()
+        #: The tab to open on: the one active when the modal was last used.
+        self._initial_tab = self._remembered_tab()
+
+    @staticmethod
+    def _remembered_tab() -> str:
+        """The last active tab from ``tui_state.json`` (Location if none)."""
+        try:
+            from sandroid.config.ui_state import load_ui_state
+
+            tab = load_ui_state().get(_UI_STATE_TAB_KEY)
+        except Exception:
+            tab = None
+        return tab if tab in _TAB_IDS else _TAB_IDS[0]
+
+    def on_tabbed_content_tab_activated(
+        self, event: TabbedContent.TabActivated
+    ) -> None:
+        """Remember the active tab for the next opening."""
+        tab = event.pane.id
+        if tab not in _TAB_IDS or tab == self._initial_tab:
+            return
+        self._initial_tab = tab
+        try:
+            from sandroid.config.ui_state import update_ui_state
+
+            update_ui_state(_UI_STATE_TAB_KEY, tab)
+        except Exception:
+            logger.debug("Could not remember the device settings tab", exc_info=True)
+
+    def _auto_focus(self) -> None:
+        """Open on the tab bar: Shift+Left/Right (and Left/Right) switch
+        tabs at once, Tab goes into the fields. Without scrolling: a
+        focus scroll would centre the tab bar and hide the title.
+        """
+        try:
+            self.query_one("#settings-tabs Tabs", Tabs).focus(scroll_visible=False)
+        except Exception:
+            super()._auto_focus()
+
+    def action_cancel(self) -> None:
+        """Esc: close an open dropdown first, else close the modal.
+
+        The modal's Esc binding has priority, so the dropdown's own Esc
+        never runs; collapse it here instead.
+        """
+        for select in self.query(Select):
+            if select.expanded:
+                select.expanded = False
+                select.focus()
+                return
+        super().action_cancel()
 
     @property
     def _root_badge(self) -> str:
@@ -265,7 +340,8 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
 
         preset_options = [(p.name, key) for key, p in COUNTRY_PRESETS.items()]
 
-        with Vertical(classes="modal-container"):
+        # Not focusable itself: Tab goes straight to the widgets inside.
+        with VerticalScroll(classes="modal-container", can_focus=False):
             yield Static("[bold]Device Settings[/bold]", classes="modal-title")
 
             # Preset selector (above tabs, affects all tabs)
@@ -277,7 +353,7 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
                 allow_blank=True,
             )
 
-            with TabbedContent(id="settings-tabs"):
+            with TabbedContent(id="settings-tabs", initial=self._initial_tab):
                 # Tab 1: Location
                 with TabPane("Location", id="tab-location"):
                     with Horizontal(classes="field-row"):
@@ -868,8 +944,8 @@ class DeviceSettingsModal(ForensicModal[DeviceSettingsResult]):
         from sandroid.services.device_actions import list_actions
 
         options = [(f"{a.group}: {a.title}", a.id) for a in list_actions()]
-        # Not focusable itself: Tab goes straight to the action picker.
-        with VerticalScroll(id="actions-scroll", can_focus=False):
+        # The modal container scrolls; no nested scroll area here.
+        with Vertical(id="actions-body"):
             yield Select(
                 options,
                 id="action-select",
