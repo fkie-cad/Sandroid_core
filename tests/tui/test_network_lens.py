@@ -2555,6 +2555,85 @@ async def test_proxy_dialog_method_tab_and_kill_switch(monkeypatch):
         await until(pilot, lambda: applied == ["this_app"])
 
 
+async def test_device_radios_start_on_the_choice_and_space_types(monkeypatch):
+    """N3-B7: back on the Device tab (Shift+Left), Down + Space picks the
+    option after the current one, never Off from a stray cursor; Space in
+    the External field types a space instead of replacing the address.
+    V5: the Kill switch label fits (keeps "refused").
+    """
+    from types import SimpleNamespace
+
+    from textual.app import App
+    from textual.widgets import Checkbox, Input, RadioSet, TabbedContent
+
+    from sandroid.services import network_method as nm
+    from sandroid.tui.modals import proxy_modal
+
+    for name in (
+        "_refresh_device_proxy_status",
+        "_refresh_device_info",
+        "_detect_certificates",
+    ):
+        monkeypatch.setattr(proxy_modal.ProxyModal, name, lambda self: None)
+    monkeypatch.setattr(
+        proxy_modal,
+        "get_focus_manager",
+        lambda: SimpleNamespace(app_proxies_cached=dict),
+    )
+    service = nm.NetworkMethodService(actions=None)
+    monkeypatch.setattr(service, "refresh", lambda **kw: None)
+    monkeypatch.setattr(nm, "_INSTANCE", service)
+    modal = proxy_modal.ProxyModal()
+
+    class _App(App):
+        def on_mount(self) -> None:
+            self.push_screen(modal)
+
+    app = _App()
+    async with app.run_test(size=(120, 35)) as pilot:
+        await until(pilot, lambda: app.screen is modal and app.focused is not None)
+        radios = modal.query_one("#device-radio-set", RadioSet)
+        # The device probe found our proxy via adb reverse.
+        modal._on_device_probe_done(
+            {"device": {"state": "ours", "addr": "127.0.0.1:8080"}}
+        )
+        await settle(pilot)
+        tabs = modal.query_one("#proxy-tabs", TabbedContent)
+        await pilot.press("shift+left")
+        await until(pilot, lambda: tabs.active == "tab-method")
+        await pilot.press("shift+right")
+        await until(pilot, lambda: tabs.active == "tab-device")
+        await until(pilot, lambda: app.focused is radios)
+        assert radios.pressed_button.id == "device-radio-reverse"
+        await pilot.press("up", "space")
+        await settle(pilot)
+        assert radios.pressed_button.id == "device-radio-external"
+        await pilot.press("down", "down", "space")
+        await settle(pilot)
+        # Wraps from adb reverse straight to Off (no caption in between).
+        assert radios.pressed_button.id == "device-radio-off"
+
+        field = modal.query_one("#device-ext-input", Input)
+        field.value = "1.2.3.4:8080"
+        field.focus()
+        await settle(pilot)
+        await pilot.press("space")
+        await settle(pilot)
+        assert field.value.strip() == "1.2.3.4:8080"
+        assert field.value != " "
+
+        box = modal.query_one("#kill-switch-checkbox", Checkbox)
+        assert str(box.label).endswith("refused")
+        assert len(str(box.label)) <= 70
+
+        # V5: the CA actions are on screen at 120x35 without scrolling.
+        tabs.active = "tab-ca"
+        await settle(pilot)
+        remove = modal.query_one("#btn-remove-ca")
+        assert remove.region.height > 0
+        assert remove.region.bottom <= 35
+
+
 def test_bypass_listener_on_the_ui_thread_only_schedules(monkeypatch):
     """The bypass state callback can run on the UI thread (a new selection
     disarms from UI code): it must only schedule, never marshal or block.

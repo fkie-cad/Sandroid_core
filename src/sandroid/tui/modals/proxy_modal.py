@@ -79,12 +79,19 @@ class _ProxyInput(Input):
     """Text field of the Proxy dialog: Shift+Left/Right switch the dialog's
     tabs while the field is empty, else they select text (Textual's Input
     default), like the lens inputs (``files_panel._LensInput``).
+
+    Focus does not select the text: a Space typed after Tab reached the
+    field replaced the whole address (E2E N3-B7); it types a space.
     """
 
     BINDINGS = [
         Binding("shift+left", "nav_or_select(-1)", show=False),
         Binding("shift+right", "nav_or_select(1)", show=False),
     ]
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("select_on_focus", False)
+        super().__init__(*args, **kwargs)
 
     def action_nav_or_select(self, delta: int) -> None:
         if self.value:
@@ -96,6 +103,20 @@ class _ProxyInput(Input):
         cycle = getattr(self.screen, "action_cycle_tab", None)
         if cycle is not None:
             cycle(delta)
+
+
+class _ChoiceRadioSet(RadioSet):
+    """A RadioSet whose cursor starts on the current choice when focused.
+
+    Textual's cursor stays where it was (index 0 after mount, before the
+    device probe pre-selected another button), so after Shift+Left back to
+    the Device tab, Down + Space picked Off instead of the next option
+    (E2E N3-B7).
+    """
+
+    def on_focus(self, _event) -> None:
+        if self.pressed_index >= 0:
+            self._selected = self.pressed_index
 
 
 def _method_service():
@@ -160,7 +181,7 @@ class NetworkMethodControl(Vertical):
         )
 
         yield Static("Checking the device", id="nm-status")
-        with RadioSet(id="nm-radio"):
+        with _ChoiceRadioSet(id="nm-radio"):
             for preset in PRESETS:
                 label = LABELS[preset]
                 disabled = False
@@ -487,6 +508,10 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
         padding: 0 2;
     }
 
+    ProxyModal #device-reverse-caption {
+        padding: 0 2 0 6;
+    }
+
     ProxyModal #device-ext-row {
         height: auto;
         padding: 0 2;
@@ -707,7 +732,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                     yield Static(
                         "◌ Checking…", id="device-status", classes="status-line"
                     )
-                    with RadioSet(id="device-radio-set"):
+                    with _ChoiceRadioSet(id="device-radio-set"):
                         yield RadioButton(
                             "Off — no device proxy",
                             value=True,
@@ -722,12 +747,14 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                             "Our mitmproxy via adb reverse (127.0.0.1)",
                             id="device-radio-reverse",
                         )
-                        yield Static(
-                            "[dim]reach the host through adbd — for physical "
-                            "devices or when the host IP isn't directly "
-                            "reachable.[/dim]",
-                            id="device-reverse-caption",
-                        )
+                    # Outside the RadioSet: as its child the cursor could
+                    # land on this caption (Down wrapped to Off from it).
+                    yield Static(
+                        "[dim]adb reverse reaches the host through adbd — for "
+                        "physical devices or when the host IP isn't directly "
+                        "reachable.[/dim]",
+                        id="device-reverse-caption",
+                    )
                     with Horizontal(id="device-ext-row"):
                         yield Label("External:")
                         yield _ProxyInput(
@@ -736,8 +763,8 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                             id="device-ext-input",
                         )
                     yield Checkbox(
-                        "Kill switch: apps may only reach the device proxy, "
-                        "everything else is refused",
+                        "Kill switch: only the device proxy is reachable, "
+                        "the rest is refused",
                         value=self._kill_switch_wanted(),
                         id="kill-switch-checkbox",
                     )
@@ -772,7 +799,7 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                     VerticalScroll(classes="tab-scroll"),
                 ):
                     with VerticalScroll(id="ca-section"):
-                        with RadioSet(id="ca-radio-set"):
+                        with _ChoiceRadioSet(id="ca-radio-set"):
                             # Populated on mount.
                             pass
                     with Horizontal(id="custom-path-row"):
@@ -781,8 +808,8 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                             placeholder="Path to custom certificate...",
                             id="custom-path-input",
                         )
-                    yield Label("Device Info", classes="section-header")
-                    yield Static("Checking...", id="device-info", classes="device-info")
+                    # Trust store state and the actions first: at 120x35
+                    # the buttons used to sit below the fold (E2E N3-V5).
                     yield Label("System trust store", classes="section-header")
                     yield Static(
                         "◌ Checking...", id="zygote-status", classes="zygote-status"
@@ -795,6 +822,8 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
                         yield Button(
                             "Remove CA", id="btn-remove-ca", classes="-secondary"
                         )
+                    yield Label("Device Info", classes="section-header")
+                    yield Static("Checking...", id="device-info", classes="device-info")
 
             # ----- Global action button ----- #
             with Horizontal(classes="button-row"):
@@ -833,6 +862,11 @@ class ProxyModal(_MethodRepaint, ForensicModal[ProxyModalResult]):
         if not panes:
             return
         current = panes.index(tabs.active) if tabs.active in panes else 0
+        # Blur first: a focused control of the tab being hidden hands the
+        # focus to a sibling on its Hide event, which landed after (and
+        # overrode) the focus below -- back on Device the Kill switch had
+        # it, not the radios (E2E N3-B7).
+        self.set_focus(None)
         tabs.active = panes[(current + delta) % len(panes)]
         self.call_after_refresh(self._focus_active_tab)
 
