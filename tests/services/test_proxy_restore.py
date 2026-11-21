@@ -344,7 +344,9 @@ def test_load_on_another_serial_leaves_the_active_devices_frida_alone(
     assert steps == ["restore:emulator-5590"]
 
 
-def test_frida_auto_start_after_a_load_is_pinned_and_reported(monkeypatch):
+def test_frida_auto_start_after_a_load_is_pinned_and_reported(
+    monkeypatch, frida_after_load
+):
     from sandroid.core import frida_manager
     from sandroid.core.adb import Adb
     from sandroid.core.events import EventBus, EventType
@@ -362,7 +364,7 @@ def test_frida_auto_start_after_a_load_is_pinned_and_reported(monkeypatch):
     handler = events.append
     EventBus.get().subscribe(EventType.STATE_CHANGED, handler)
     try:
-        es._auto_start_frida_after_load("emulator-5590")
+        frida_after_load("emulator-5590")
     finally:
         EventBus.get().unsubscribe(EventType.STATE_CHANGED, handler)
     assert seen_target == ["emulator-5590"]
