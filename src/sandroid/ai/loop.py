@@ -442,6 +442,13 @@ def _redact(text: Any) -> str:
     return redact_secrets(text)
 
 
+def _mask_on() -> bool:
+    """Whether ``ai.mask_sensitive`` is on (tool results are masked)."""
+    from sandroid.ai.row_classifier import mask_enabled
+
+    return mask_enabled()
+
+
 # =============================================================================
 # Tool executor
 # =============================================================================
@@ -595,6 +602,16 @@ def _settle_leases(
     )
 
 
+#: Tools that copy device file content to the host (N2-B8). Once the
+#: analyst declines one of them, or a rule denies it, every other one is
+#: refused for the rest of that turn: get_file_diff (and read_device_files)
+#: pull the file too, so they must not work around a "No" to pull_app_data
+#: -- not even with a remembered "don't ask again" or allow_all.
+DEVICE_PULL_TOOLS = frozenset(
+    {"pull_path", "pull_app_data", "get_file_diff", "read_device_files"}
+)
+
+
 class ToolExecutor:
     """Runs one agent's tool calls (sequentially) for one :class:`RunContext`.
 
@@ -606,8 +623,10 @@ class ToolExecutor:
     """
 
     def __init__(self, ctx: RunContext) -> None:
-        """Bind the executor to *ctx*."""
+        """Bind the executor to *ctx* (one executor per turn)."""
         self.ctx = ctx
+        #: The device-pull tool declined or denied in this turn, if any.
+        self.pull_declined: str | None = None
 
     # -- public ---------------------------------------------------------------
 
@@ -725,8 +744,25 @@ class ToolExecutor:
             )
         return self._store(call_id, spec, args, result, budget)
 
+    def _refuse_after_declined_pull(self, spec: ToolSpec) -> None:
+        declined = self.pull_declined
+        if declined is None or spec.name not in DEVICE_PULL_TOOLS:
+            return
+        what = "the same tool" if declined == spec.name else declined
+        raise ToolError(
+            "denied",
+            f"{spec.name} copies device data to the host, and {what} was "
+            "declined or blocked earlier in this turn, so it is refused too",
+            hint="Do not try another way to pull device files; ask the analyst.",
+        )
+
+    def _note_declined(self, spec: ToolSpec) -> None:
+        if spec.name in DEVICE_PULL_TOOLS and self.pull_declined is None:
+            self.pull_declined = spec.name
+
     def _check_permission(self, spec: ToolSpec, args: dict) -> None:
         ctx = self.ctx
+        self._refuse_after_declined_pull(spec)
         resolution = _perms.resolve(
             spec.name,
             spec.risk,
@@ -737,6 +773,7 @@ class ToolExecutor:
         if resolution.allowed:
             return
         if resolution.denied:
+            self._note_declined(spec)
             rule = f" ({resolution.rule})" if resolution.rule else ""
             raise ToolError(
                 "denied",
@@ -788,6 +825,7 @@ class ToolExecutor:
         )
         if decision.approved:
             return
+        self._note_declined(spec)
         if decision.by == "cancelled":
             raise ToolError("cancelled", "the turn was cancelled during approval")
         if decision.by == "timeout":
@@ -912,6 +950,13 @@ class ToolExecutor:
         rid: str | None = None
         size = 0
         truncated = False
+        if _mask_on():
+            # The one masking pass (ai.mask_sensitive): every tool result is
+            # masked before it is stored (results/R*.json, read_result),
+            # shaped for the model, summarised or written to the transcript.
+            from sandroid.ai.row_classifier import mask_tool_result
+
+            result = mask_tool_result(result)
         try:
             stored = ctx.get_store().put(spec.name, args, result, agent_id=ctx.agent_id)
             rid, size = stored.id, stored.bytes
@@ -998,14 +1043,25 @@ class ToolExecutor:
         err: ToolError,
         started: float | None = None,
     ) -> ToolOutcome:
+        content = err.to_json()
+        summary = _clip(f"{err.code}: {err.message}")
+        if _mask_on():
+            from sandroid.ai.row_classifier import mask_text
+
+            try:
+                content, summary = mask_text(content), mask_text(summary)
+            except Exception:
+                logger.warning("masking a tool error failed; its text was withheld")
+                content = ToolError(err.code, "error text withheld").to_json()
+                summary = f"{err.code}: error text withheld"
         return ToolOutcome(
             call_id=call_id,
             name=name,
             args=args,
-            content=err.to_json(),
+            content=content,
             status=_ERROR_STATUS.get(err.code, "error"),
             error_code=err.code,
-            summary=_clip(f"{err.code}: {err.message}"),
+            summary=summary,
             duration_ms=int((time.monotonic() - started) * 1000) if started else 0,
         )
 

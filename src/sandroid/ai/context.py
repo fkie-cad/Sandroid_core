@@ -262,9 +262,128 @@ def _describe_lens_highlights() -> str | None:
         return None
 
 
+#: The analyst's lens as of their last message (:func:`capture_lens_state`):
+#: ``{"lens": "Files", "selected": "/data/...", "filter": "prefs"}``.
+_lens_state: dict[str, str] | None = None
+#: Characters of a selected row key / filter in the ambient line.
+_LENS_FIELD_CAP = 120
+#: Lens methods that return the cursor row's key (the lenses differ).
+_KEY_METHODS = ("cursor_key", "current_key", "_cursor_key")
+
+
+def _lens_cursor_key(widget: object) -> str | None:
+    """The cursor row key of a lens body (or of its first child that has one)."""
+    candidates = [widget]
+    walk = getattr(widget, "walk_children", None)
+    if callable(walk):
+        try:
+            candidates.extend(walk())
+        except Exception:
+            pass
+    for node in candidates[:200]:
+        for name in _KEY_METHODS:
+            method = getattr(node, name, None)
+            if not callable(method):
+                continue
+            try:
+                key = method()
+            except Exception:
+                continue
+            if isinstance(key, str) and key:
+                return key
+    return None
+
+
+def _lens_filter(widget: object) -> str | None:
+    for name in ("_filter", "_filter_text"):
+        value = getattr(widget, name, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def capture_lens_state(app: object | None = None) -> None:
+    """Snapshot the open lens, its cursor row and its ``/`` filter (N2-B1).
+
+    Call on the UI thread (``AgentSession.submit_user_message`` from the
+    chat panel): it reads widgets. Off the UI thread, without an app or on
+    any failure it keeps the last snapshot.
+    """
+    global _lens_state
+    try:
+        if app is None:
+            from sandroid.tui.utils.ui_thread import in_app_context
+
+            if not in_app_context():
+                return
+            from textual._context import active_app
+
+            app = active_app.get()
+        from sandroid.tui.widgets.lens_shell import LENS_BY_ID
+
+        screen = next(
+            (
+                s
+                for s in reversed(getattr(app, "screen_stack", []))
+                if isinstance(getattr(s, "active_lens", None), str)
+            ),
+            None,
+        )
+        if screen is None:
+            return
+        spec = LENS_BY_ID.get(screen.active_lens)
+        state = {"lens": spec.label if spec else str(screen.active_lens)}
+        widget = screen.lens_widget()
+        if widget is not None:
+            key = _lens_cursor_key(widget)
+            if key:
+                state["selected"] = key
+            text = _lens_filter(widget)
+            if text:
+                state["filter"] = text
+        _lens_state = state
+    except Exception:
+        return
+
+
+def _clip(text: str) -> str:
+    text = " ".join(str(text).split())
+    if len(text) <= _LENS_FIELD_CAP:
+        return text
+    return text[: _LENS_FIELD_CAP - 1] + "…"
+
+
+def _describe_active_lens() -> str | None:
+    """Which lens the analyst has open, its selected row and ``/`` filter.
+
+    From the snapshot taken when the analyst sent the message (in memory).
+    Omitted when unknown (no TUI). Masked with ``ai.mask_sensitive`` on (a
+    row key can be a URL with a token).
+    """
+    try:
+        state = _lens_state
+        if not state:
+            return None
+        line = f"Open lens: {state['lens']}"
+        extras = []
+        if state.get("selected"):
+            extras.append(f"selected row {_clip(state['selected'])}")
+        if state.get("filter"):
+            extras.append(f'filter "{_clip(state["filter"])}"')
+        if extras:
+            line += " (" + "; ".join(extras) + ")"
+        line += "."
+        from sandroid.ai.row_classifier import mask_enabled, mask_text
+
+        return mask_text(line) if mask_enabled() else line
+    except Exception:
+        return None
+
+
 # One helper per cheap, in-memory state source -- see the module docstring
 # for the rules every helper follows.
 _DESCRIBERS: tuple[Callable[[], str | None], ...] = (
+    _describe_active_lens,
     _describe_spotlight_app,
     _describe_active_device,
     _describe_background_tasks,

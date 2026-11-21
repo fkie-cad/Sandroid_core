@@ -928,3 +928,59 @@ def test_compact_now_summary_request_is_cancellable(
     assert done.wait(3), "the /compact summary request ignored cancel()"
     assert "cancelled" in seen["error"]
     assert session._aux_cancels == set()
+
+
+# -- N2 fixes ---------------------------------------------------------------------
+
+
+def test_mask_sensitive_masks_a_secret_typed_into_a_prompt(
+    tmp_path, registry, monkeypatch
+):
+    """N2-B3: with ai.mask_sensitive on, the model, the thread title
+    (ai/index.json) and the transcript never see the typed secret.
+    """
+    monkeypatch.setattr("sandroid.ai.row_classifier.mask_enabled", lambda: True)
+    root = tmp_path / "session"
+    client = FakeClient([text_reply("ok")])
+    session = make_session(tmp_path, client, registry)
+    run(session, "My test key is sk-test1234567890abcd and password=hunter2x")
+    session.close("new")
+
+    sent = json.dumps(client.calls[0]["messages"])
+    path = root / "ai" / "threads" / f"{session.thread_id}.jsonl"
+    stored = path.read_text()
+    index = (root / "ai" / "index.json").read_text()
+    for text in (sent, stored, index, session.title):
+        assert "sk-test1234567890abcd" not in text
+        assert "hunter2x" not in text
+    assert session.title == "My test key is sk-*** and password=***"
+
+
+def test_prompt_is_unchanged_with_mask_off(tmp_path, registry, monkeypatch):
+    monkeypatch.setattr("sandroid.ai.row_classifier.mask_enabled", lambda: False)
+    client = FakeClient([text_reply("ok")])
+    session = make_session(tmp_path, client, registry)
+    run(session, "key sk-test1234567890abcd")
+    assert "sk-test1234567890abcd" in json.dumps(client.calls[0]["messages"])
+
+
+def test_token_totals_survive_a_resume(tmp_path, registry):
+    """N2-B7: /threads resume restores the thread's token totals."""
+    root = tmp_path / "session"
+    client = FakeClient([text_reply("a"), text_reply("b")])
+    session = make_session(tmp_path, client, registry)
+    run(session, "one")
+    run(session, "two")
+    totals = dict(session.totals)
+    assert totals == {"prompt_tokens": 200, "completion_tokens": 20, "requests": 2}
+    session.close("new")
+    resumed = AgentSession.resume(
+        session.thread_id,
+        root=root,
+        client=FakeClient([]),
+        registry=registry,
+        ambient_provider=lambda: AMBIENT,
+        spawn_worker=lambda fn: fn(),
+        task_registrar=None,
+    )
+    assert resumed.totals == totals

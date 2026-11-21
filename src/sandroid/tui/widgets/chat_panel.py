@@ -74,6 +74,7 @@ from sandroid.ai.tool_permissions import (
     get_tool_permission_store,
 )
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
+from sandroid.tui.utils import copy_to_clipboard
 from sandroid.tui.widgets.chat_view import (
     AGENT_DOTS,
     AGENT_STATUS,
@@ -132,6 +133,7 @@ SLASH_HELP: dict[str, str] = {
     "/permissions": "approval mode and rules; /permissions allow_all | ask",
     "/agents": "subagents of this thread; /agents <n|id> opens one",
     "/doctor": "check the AI endpoint",
+    "/copy": "copy the last answer; /copy <n> the nth from the end",
     "/help": "list these commands",
 }
 
@@ -1090,9 +1092,12 @@ class AgentTranscriptModal(ForensicModal[None]):
             self.query_one("#agent-details-text", Static).update(
                 format_agent_details(info)
             )
-            self.query_one("#agent-cancel", Button).disabled = info.get(
-                "status"
-            ) not in ("queued", "running")
+            # A finished agent has nothing to cancel: no button (N2-V7; a
+            # disabled one still read as an action).
+            live = info.get("status") in ("queued", "running")
+            cancel = self.query_one("#agent-cancel", Button)
+            cancel.disabled = not live
+            cancel.display = live
         except Exception:
             logger.debug("agent meta render failed", exc_info=True)
 
@@ -2402,6 +2407,7 @@ class ChatPanel(Widget):
             "/permissions": self._cmd_permissions,
             "/agents": self._cmd_agents,
             "/doctor": self._cmd_doctor,
+            "/copy": self._cmd_copy,
             "/help": self._cmd_help,
         }.get(command)
         try:
@@ -2587,6 +2593,7 @@ class ChatPanel(Widget):
     def _cmd_permissions(self, arg: str) -> None:
         try:
             store = get_tool_permission_store()
+            store.refresh_if_changed()  # a hand edit of the rules file
         except Exception as exc:
             self._notice(f"Error: {redact_secrets(exc)}", style="$lens-bad")
             return
@@ -2631,6 +2638,28 @@ class ChatPanel(Widget):
         lines.append("Open one with /agents <n>, or ↑ to the agents bar.")
         self._info("\n".join(lines))
 
+    def _cmd_copy(self, arg: str) -> None:
+        """``/copy [n]``: the last (nth from the end) answer to the clipboard."""
+        session = self._session
+        answers = answer_texts(getattr(session, "messages", None) or [])
+        try:
+            n = int(arg) if arg else 1
+        except ValueError:
+            n = 0
+        if n < 1:
+            self._notice("Use /copy or /copy <n> (n = 1 is the last answer).")
+            return
+        if n > len(answers):
+            have = f"only {len(answers)}" if answers else "no"
+            self._notice(f"Nothing to copy: {have} answers in this thread.")
+            return
+        text = answers[-n]
+        if copy_to_clipboard(text, textual_copy_fn=self.app.copy_to_clipboard):
+            which = "the last answer" if n == 1 else f"answer {n} from the end"
+            self.app.notify(f"Copied {which} ({len(text):,} chars)", timeout=3)
+        else:
+            self.app.notify("Copy failed: no clipboard available", severity="error")
+
     def _cmd_doctor(self, arg: str) -> None:
         session = self._session
         self._notice("Checking the AI endpoint…", key="doctor")
@@ -2647,6 +2676,20 @@ class ChatPanel(Widget):
             self._post_ui(lambda: self._notice(text, style=style, key="doctor"))
 
         self.run_worker(work, thread=True, exclusive=False, group="chat-doctor")
+
+
+def answer_texts(messages: Iterable[dict]) -> list[str]:
+    """The thread's final answers (assistant text without tool calls), oldest
+    first: what ``/copy`` copies.
+    """
+    return [
+        msg["content"].strip()
+        for msg in messages
+        if msg.get("role") == "assistant"
+        and not msg.get("tool_calls")
+        and isinstance(msg.get("content"), str)
+        and msg["content"].strip()
+    ]
 
 
 def format_health(report: Any) -> tuple[str, str]:

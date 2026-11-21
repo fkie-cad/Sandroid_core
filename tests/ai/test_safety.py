@@ -267,7 +267,7 @@ def test_client_error_message_never_contains_key(monkeypatch):
     chunks = list(client.stream([{"role": "user", "content": "hi"}]))
     assert chunks[-1].kind == "error"
     assert KEY not in chunks[-1].error.message
-    assert "AI backend request failed" in chunks[-1].error.message
+    assert "Cannot reach AI endpoint" in chunks[-1].error.message
     assert KEY not in repr(client)
 
 

@@ -268,7 +268,7 @@ def test_connect_errors_back_off_then_give_up(monkeypatch):
     error = chunks[-1].error
     assert error.kind == "connect"
     assert "secret-key-123" not in error.message
-    assert error.message.startswith("AI backend request failed")
+    assert error.message == f"Cannot reach AI endpoint {BASE} (connection refused)"
 
 
 def test_retry_max_from_options(monkeypatch):
@@ -669,3 +669,45 @@ def test_health_reports_failures_redacted(monkeypatch):
     assert report.model_listed is None
     assert report.ping_ok is False
     assert "secret-key-123" not in report.error
+
+
+# -- error texts (N2-V5) ------------------------------------------------------------
+
+
+def test_unreachable_endpoint_reads_as_words_not_a_urllib3_repr(monkeypatch):
+    """The E2E showed HTTPConnectionPool(...) NewConnectionError('<urllib3...>')."""
+    try:
+        raise ConnectionRefusedError(61, "Connection refused")
+    except ConnectionRefusedError as cause:
+        err = requests.exceptions.ConnectionError(
+            "HTTPConnectionPool(host='127.0.0.1', port=9): Max retries exceeded "
+            "(Caused by NewConnectionError('<urllib3.connection.HTTPConnection "
+            "object at 0x12f>: Failed to establish a new connection'))"
+        )
+        err.__cause__ = cause
+    client = OpenAICompatClient(
+        "http://user:pw@127.0.0.1:9/v1", "k", "m", options=ClientOptions(retry_max=0)
+    )
+    monkeypatch.setattr(requests, "post", _Poster(err))
+    chunks = list(client.stream(HI))
+    assert chunks[-1].error.message == (
+        "Cannot reach AI endpoint http://127.0.0.1:9/v1 (connection refused)"
+    )
+    timeout = requests.exceptions.ConnectTimeout("pool timed out")
+    monkeypatch.setattr(requests, "post", _Poster(timeout))
+    assert list(client.stream(HI))[-1].error.message.endswith("(timed out)")
+
+
+def test_401_says_the_api_key_was_rejected_in_chat_and_doctor(monkeypatch):
+    client, _, _ = _client(
+        monkeypatch, FakeResponse(status=401, text='{"error": "Unauthorized"}')
+    )
+    error = list(client.stream(HI))[-1].error
+    assert error.status == 401
+    assert error.message == (
+        "API key rejected (401). Check ai.api_key or SANDROID_AI__API_KEY"
+    )
+    monkeypatch.setattr(requests, "get", lambda url, **kw: FakeResponse(status=401))
+    monkeypatch.setattr(requests, "post", _Poster(FakeResponse(status=401)))
+    report = OpenAICompatClient(BASE, "k", "m").health()
+    assert report.error == error.message

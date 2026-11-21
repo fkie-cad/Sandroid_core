@@ -469,3 +469,73 @@ def test_app_proxies_degrades_to_none_on_error(monkeypatch):
     monkeypatch.setattr(proxy_manager, "get_focus_manager", _raise)
 
     assert context._describe_app_proxies() is None
+
+
+# -- active lens (N2-B1) ------------------------------------------------------------
+
+
+class _FakeTable:
+    def __init__(self, key):
+        self.key = key
+
+    def _cursor_key(self):
+        return self.key
+
+
+class _FakeLens:
+    def __init__(self, key, filter_text=""):
+        self._filter = filter_text
+        self._child = _FakeTable(key)
+
+    def walk_children(self):
+        return [self._child]
+
+
+class _FakeScreen:
+    def __init__(self, lens_id, widget):
+        self.active_lens = lens_id
+        self._widget = widget
+
+    def lens_widget(self):
+        return self._widget
+
+
+def test_active_lens_is_captured_and_described(monkeypatch):
+    monkeypatch.setattr(context, "_lens_state", None)
+    monkeypatch.setattr("sandroid.ai.row_classifier.mask_enabled", lambda: False)
+    assert context._describe_active_lens() is None  # no TUI: omitted
+    app = SimpleNamespace(
+        screen_stack=[
+            _FakeScreen("files", _FakeLens("/data/data/com.x/a.xml", "prefs")),
+            SimpleNamespace(),  # a modal on top (the chat panel's dock)
+        ]
+    )
+    context.capture_lens_state(app)
+    line = context._describe_active_lens()
+    assert (
+        line
+        == 'Open lens: Files (selected row /data/data/com.x/a.xml; filter "prefs").'
+    )
+    assert f"- {line}" in context.build_ambient_block()
+
+    app.screen_stack[0] = _FakeScreen("timeline", _FakeLens(None))
+    context.capture_lens_state(app)
+    assert context._describe_active_lens() == "Open lens: Timeline."
+
+
+def test_active_lens_row_key_is_masked_with_mask_on(monkeypatch):
+    monkeypatch.setattr(context, "_lens_state", None)
+    monkeypatch.setattr("sandroid.ai.row_classifier.mask_enabled", lambda: True)
+    key = "https://example.com/?token=abc123secret"
+    context.capture_lens_state(
+        SimpleNamespace(screen_stack=[_FakeScreen("network", _FakeLens(key))])
+    )
+    line = context._describe_active_lens()
+    assert line.startswith("Open lens: Network (selected row https://example.com/?")
+    assert "abc123secret" not in line
+
+
+def test_capture_lens_state_off_the_ui_thread_keeps_the_last_snapshot(monkeypatch):
+    monkeypatch.setattr(context, "_lens_state", {"lens": "App"})
+    context.capture_lens_state()  # no running app in tests
+    assert context._lens_state == {"lens": "App"}

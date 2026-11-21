@@ -64,6 +64,61 @@ RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 _BACKOFF_S = (1.0, 2.0, 4.0, 8.0)
 #: Longest error-body excerpt kept in an error message.
 _ERROR_BODY_MAX = 600
+#: What a 401 means to the analyst (chat errors and /doctor).
+API_KEY_REJECTED = "API key rejected (401). Check ai.api_key or SANDROID_AI__API_KEY"
+
+
+def _endpoint_display(base_url: str) -> str:
+    """*base_url* without credentials or query (for error texts)."""
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(base_url)
+        host = parts.hostname or ""
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return "(invalid URL)"
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{parts.scheme}://{host}{port}{parts.path}"
+
+
+def _unreachable_reason(exc: BaseException) -> str:
+    """``connection refused`` / ``timed out`` / ... for a transport error."""
+    if isinstance(exc, requests.exceptions.Timeout):
+        return "timed out"
+    if isinstance(exc, requests.exceptions.SSLError):
+        return "TLS error"
+    seen: set[int] = set()
+    node: BaseException | None = exc
+    text = ""
+    while node is not None and id(node) not in seen:
+        seen.add(id(node))
+        if isinstance(node, ConnectionRefusedError):
+            return "connection refused"
+        text += f" {node}"
+        node = node.__cause__ or node.__context__
+    lowered = text.lower()
+    for needle, reason in (
+        ("refused", "connection refused"),
+        ("name or service not known", "host not found"),
+        ("nodename nor servname", "host not found"),
+        ("name resolution", "host not found"),
+        ("getaddrinfo", "host not found"),
+        ("timed out", "timed out"),
+        ("network is unreachable", "network unreachable"),
+        ("no route to host", "no route to host"),
+        ("reset by peer", "connection reset"),
+    ):
+        if needle in lowered:
+            return reason
+    return type(exc).__name__
+
+
+def _http_error_text(status: int, body: str = "") -> str:
+    if status == 401:
+        return API_KEY_REJECTED
+    return f"HTTP {status}{body}"
 
 
 # =============================================================================
@@ -646,6 +701,13 @@ class OpenAICompatClient:
     def _timeout(self) -> tuple[float, float]:
         return (self._options.connect_timeout_s, self._options.read_timeout_s)
 
+    def _unreachable(self, exc: BaseException) -> str:
+        """``Cannot reach AI endpoint <url> (connection refused)``."""
+        return (
+            f"Cannot reach AI endpoint {_endpoint_display(self._base_url)} "
+            f"({_unreachable_reason(exc)})"
+        )
+
     def _redact(self, text: str) -> str:
         from sandroid.ai.safety import redact_secrets
 
@@ -741,11 +803,11 @@ class OpenAICompatClient:
                 timeout=self._timeout(),
             )
         except requests.exceptions.ConnectionError as exc:
-            msg = self._redact(f"AI backend request failed: {exc}")
+            msg = self._redact(self._unreachable(exc))
             err = StreamError(kind="connect", message=msg, retryable=True)
             return _Retry(reason=f"connect: {type(exc).__name__}", error=err)
         except requests.exceptions.RequestException as exc:
-            msg = self._redact(f"AI backend request failed: {exc}")
+            msg = self._redact(self._unreachable(exc))
             yield StreamChunk(
                 kind="error",
                 error=StreamError(
@@ -762,7 +824,9 @@ class OpenAICompatClient:
                 err = StreamError(
                     kind="http",
                     message=self._redact(
-                        f"AI backend request failed: HTTP {status}"
+                        API_KEY_REJECTED
+                        if status == 401
+                        else f"AI backend request failed: HTTP {status}"
                         f"{self._error_body(response)}"
                     ),
                     status=status,
@@ -977,9 +1041,13 @@ class OpenAICompatClient:
                                 "max_model_len"
                             )
                             max_input = int(raw) if raw else None
+                elif resp.status_code == 401:
+                    error = API_KEY_REJECTED
                 else:
                     error = f"GET /models: HTTP {resp.status_code}"
-        except (requests.exceptions.RequestException, ValueError) as exc:
+        except requests.exceptions.RequestException as exc:
+            error = self._unreachable(exc)
+        except ValueError as exc:
             error = f"GET /models failed: {exc}"
 
         ping_ok: bool | None = None
@@ -1001,11 +1069,13 @@ class OpenAICompatClient:
                     ping_ms = (time.monotonic() - started) * 1000.0
                     ping_ok = 200 <= (resp.status_code or 0) < 300
                     if not ping_ok and error is None:
-                        error = f"ping: HTTP {resp.status_code}{self._error_body(resp)}"
+                        error = "ping: " + _http_error_text(
+                            resp.status_code or 0, self._error_body(resp)
+                        )
             except requests.exceptions.RequestException as exc:
                 ping_ok = False
                 if error is None:
-                    error = f"ping failed: {exc}"
+                    error = self._unreachable(exc)
         return HealthReport(
             ok=models_ok and ping_ok is not False,
             models_ok=models_ok,
