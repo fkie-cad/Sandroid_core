@@ -1309,6 +1309,62 @@ def test_quit_dialog_says_what_quitting_tears_down(monkeypatch):
     assert notes[:2] == ["stops Mitmproxy", "clears the device proxy"]
 
 
+async def test_q_in_review_asks_to_quit_and_names_the_running_replay(
+    monkeypatch,
+) -> None:
+    """N4-B10: q did nothing while Review was open (the footer said "q
+    Quit"), and the dialog did not say that a replay runs.
+    """
+    from sandroid.core import rewind
+    from sandroid.tui.controllers import quit_controller as qc
+    from sandroid.tui.modals.review_modal import ReviewModal
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await boot(app, pilot)
+        monkeypatch.setattr(qc.QuitController, "_quit_notes", staticmethod(list))
+        rc = app._recording_controller
+        monkeypatch.setattr(rc, "_state", "running")
+        monkeypatch.setattr(rc, "_run_replays", True)
+        rec = rewind.Recording(rec_id="rec-1", name="R", pkg="org.x", serial="e-1")
+        rec.stopped = 1.0
+        monkeypatch.setattr(ReviewModal, "refresh_lists", lambda self, **kw: None)
+        app.push_screen(ReviewModal(rec, rc))
+        await settle(pilot)
+        app.screen.set_focus(None)
+        await pilot.press("q")
+        await settle(pilot)
+        assert type(app.screen).__name__ == "QuitConfirmModal"
+        notes = str(app.screen.query_one("#quit-notes").render())
+        assert "stops the replay" in notes
+        await pilot.press("n")
+        await settle(pilot)
+
+
+def test_force_exit_finishes_the_recording_before_tracking_stops(monkeypatch):
+    """N4-B8/B10: the recording / replay is finalised first, while Tracking
+    and the timeline still run.
+    """
+    from sandroid.tui.controllers import quit_controller as qc
+
+    order: list[str] = []
+    monkeypatch.setattr(qc, "_stop_tracking", lambda *a: order.append("tracking"))
+    monkeypatch.setattr(qc, "shutdown_network", lambda **kw: None)
+    monkeypatch.setattr(qc, "run_shutdown_hooks", lambda **kw: None)
+    monkeypatch.setattr(qc, "_flush_timeline", lambda t: None)
+    monkeypatch.setattr(qc, "_close_timeline", lambda *a: None)
+    monkeypatch.setattr(qc.QuitController, "_stop_frida_sessions", staticmethod(
+        lambda: None))  # fmt: skip
+    monkeypatch.setattr(qc.QuitController, "_cleanup_rest", staticmethod(
+        lambda: None))  # fmt: skip
+    monkeypatch.setattr(
+        "sandroid.services.setup_checks.restore_selinux_on_quit", lambda: None
+    )
+    ctl = qc.QuitController(before_exit=lambda: order.append("recording"))
+    ctl.force_exit()
+    assert order[:2] == ["recording", "tracking"]
+
+
 def test_ui_dispatcher_runs_in_the_ui_context_and_reports_once(caplog):
     import asyncio
     import contextvars

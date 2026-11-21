@@ -672,6 +672,95 @@ def test_stop_worker_failure_still_returns_to_idle(controller, monkeypatch):
     assert indicator == [False]
 
 
+def test_quit_during_a_recording_finalises_it(controller, monkeypatch, tmp_path):
+    """N4-B8: quitting while recording left recording.json with stopped=None
+    and changed=0; now the capture stops and the recording is finalised.
+    """
+    from types import SimpleNamespace
+
+    stopped: list = []
+
+    def collect(rec, name):
+        rec.changed = [{"path": "/data/data/org.x/f", "state": "changed"}]
+
+    controller._collect_changes = collect
+    controller._late_writes = lambda rec, wait=None: None
+    controller._get_task_service = lambda: SimpleNamespace(unregister=lambda _n: None)
+    monkeypatch.setattr(type(controller), "_emit_phase",
+                        staticmethod(lambda *a, **k: 3))  # fmt: skip
+    opened: list = []
+    controller.open_review = lambda: opened.append(1)
+    rec = _rec()
+    rec.stopped = None
+    rec.changed = []
+    controller._rec = rec
+    controller._wrapper = SimpleNamespace(stop=lambda: stopped.append(1))
+    controller._state = "recording"
+    controller.finish_for_quit(budget=1.0)
+    assert stopped == [1]
+    assert controller.state == "idle"
+    assert opened == []  # no Review on the way out
+    saved = rewind.load_recording(rec.rec_id)
+    assert saved.stopped is not None
+    assert len(saved.changed) == 1
+
+
+def test_quit_during_a_replay_stops_it_by_quit_and_waits_for_the_save(controller):
+    controller._state = "running"
+    controller._run_replays = True
+    controller._run_done.clear()
+    assert controller.quit_note() == "stops the replay"
+
+    def worker_saves() -> None:
+        controller._cancel.wait(2.0)
+        controller._state = "idle"
+        controller._run_done.set()
+
+    import threading
+
+    threading.Thread(target=worker_saves, daemon=True).start()
+    controller.finish_for_quit(budget=2.0)
+    assert controller._stop_reason == "stopped by quit"
+    assert controller._run_done.is_set()
+    assert controller.quit_note() is None
+
+
+@pytest.mark.parametrize(
+    ("start_point", "deleted"),
+    [
+        ({"name": "sandroid_rec_20261120_133600", "saved_ok": True}, True),
+        ({"name": "sandroid_rec_20261120_133600", "saved_ok": True,
+          "pinned": True}, False),  # kept
+        ({"name": "sandroid_rec_20261120_133600", "saved_ok": True,
+          "imported": True}, False),
+        ({"name": "clean_8g", "saved_ok": True}, False),  # never another name
+        ({"name": "sandroid_rec_20261120_133600", "saved_ok": False}, False),
+    ],
+)  # fmt: skip
+def test_quit_deletes_only_this_sessions_unkept_start_point(
+    controller, monkeypatch, start_point, deleted
+):
+    """N4-B8: each session left its last start point (70+ MB) behind."""
+    from sandroid import services
+
+    calls: list = []
+
+    class Emu:
+        def delete_snapshot(self, name, serial=None, **kw):
+            calls.append((name, serial))
+            return True
+
+    monkeypatch.setattr(services, "get_emulator_service", lambda: Emu())
+    rec = _rec()
+    rec.start_point = dict(start_point)
+    controller._rec = rec
+    assert controller.delete_session_start_point() is deleted
+    assert calls == ([("sandroid_rec_20261120_133600", "emulator-5560")]
+                     if deleted else [])  # fmt: skip
+    controller._state = "running"
+    assert controller.delete_session_start_point() is False  # never mid-run
+
+
 def test_rewind_worker_failure_never_leaves_it_running(controller):
     def broken(*_a):
         raise RuntimeError("no deps")

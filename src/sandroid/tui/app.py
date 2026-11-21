@@ -497,6 +497,10 @@ class SandroidTUI(App):
             # base exit skipped it and left mitmweb + the device proxy).
             exit_app=self.exit,
             force_ui_refresh=cb.force_ui_refresh,
+            before_exit=self._finish_rewind_for_quit,
+            extra_notes=lambda: [
+                n for n in (self._recording_controller.quit_note(),) if n
+            ],
         )
 
         self._network_capture_controller = NetworkCaptureController(
@@ -1368,6 +1372,16 @@ class SandroidTUI(App):
     def action_request_quit(self) -> None:
         """Show the quit confirmation (always; running tools are listed)."""
         self._quit_controller.request_quit()
+
+    def _finish_rewind_for_quit(self) -> None:
+        """Quit (cleanup thread): finalise a running recording, stop and save
+        a running replay, then delete this session's unkept start point.
+        """
+        rc = getattr(self, "_recording_controller", None)
+        if rc is None:
+            return
+        rc.finish_for_quit(budget=4.5)
+        rc.delete_session_start_point()
 
     def action_maybe_quit(self) -> None:
         """Handle ESC -- dismiss the top modal or leave a focused input.

@@ -1526,6 +1526,55 @@ class RecordingController:
             self._ui(self._log_error, f"Could not save the rewind results: {exc}")
             return None
 
+    # -- quit ---------------------------------------------------------------------
+
+    def quit_note(self) -> str | None:
+        """What quitting stops, for the quit dialog (a recording is named by
+        its task already).
+        """
+        if self._state == "running":
+            return "stops the replay" if self._run_replays else "stops the rewind"
+        return None
+
+    def finish_for_quit(self, budget: float = 6.0) -> None:
+        """Sandroid quits (quit thread, before Tracking stops): a running
+        Rewind stops ("stopped by quit") and its run is saved; a running
+        recording is stopped and finalised (stopped time, the changed files)
+        without opening Review. Bounded by ``budget`` seconds.
+        """
+        deadline = time.monotonic() + budget
+        if self._state == "running":
+            self.stop_rewind("stopped by quit")
+            self._run_done.wait(max(0.0, deadline - time.monotonic()))
+        if self._state == "recording" and self._rec is not None:
+            self._set_state("stopping")
+            self._tick_stop.set()
+            self._stop_worker(self._rec, open_review=False)
+
+    def delete_session_start_point(self) -> bool:
+        """Quit: delete this session's start point unless it is kept.
+
+        Review (and so Rewind) is per session: after a restart nothing can
+        use it, and each one is 70+ MB. Only a ``sandroid_rec_*`` name this
+        session saved (``saved_ok``), never a pinned or imported one, and
+        never while a recording or Rewind still runs. Returns whether it was
+        deleted.
+        """
+        from sandroid.core import rewind
+
+        rec = self._rec
+        if rec is None or self._state not in ("idle",):
+            return False
+        sp = rec.start_point or {}
+        if rec.pinned or sp.get("imported") or not rec.emulator:
+            return False
+        if not rewind.is_start_point_name(rec.start_point_name):
+            return False
+        self._delete_start_point(rec)
+        with contextlib.suppress(Exception):
+            rewind.save_recording(rec)
+        return bool(rec.start_point.get("deleted"))
+
     # -- AI chat (tool-dispatch thread, never the UI thread) --------------------
 
     def start_recording_chat(self, label: str | None = None) -> dict[str, Any]:
