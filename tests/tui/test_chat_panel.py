@@ -1626,10 +1626,12 @@ async def test_agent_modal_keeps_input_and_buttons_on_screen(
         modal = app.screen
         await settle(pilot)
         height = app.size.height
-        for selector in ("#agent-message", "#agent-cancel", "#agent-close"):
+        for selector in ("#agent-message", "#agent-close"):
             region = modal.query_one(selector).region
             assert region.height > 0, selector
             assert region.bottom <= height, (selector, region, height)
+        # N2-V7: a finished agent has no Cancel button.
+        assert not modal.query_one("#agent-cancel").display
         meta = modal.query_one("#agent-meta", Static)
         assert meta.region.height <= 4
         meta_text = str(meta.render())
@@ -1775,3 +1777,33 @@ def test_banner_wraps_with_a_hanging_indent():
     assert any(line.startswith("  ") for line in lines[1:])
     assert all(len(line) <= 40 for line in lines)
     assert len(lines) > len(egress_banner_lines(settings, "ask"))  # it wrapped
+
+
+async def test_copy_puts_an_answer_on_the_clipboard(sessions, monkeypatch):
+    """N2-B5: /copy copies the last answer, /copy 2 the one before."""
+    copied: list[str] = []
+    monkeypatch.setattr(
+        chat_panel_module,
+        "copy_to_clipboard",
+        lambda text, textual_copy_fn=None: copied.append(text) or True,
+    )
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _panel(pilot)
+        await _send(pilot, panel, "hello")
+        await _send(pilot, panel, "/copy")
+        assert copied == []
+        assert "Nothing to copy: no answers" in _notices(panel)
+        sessions[0].messages = [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "assistant", "content": "checking", "tool_calls": [{}]},
+            {"role": "tool", "content": "{}"},
+            {"role": "assistant", "content": "second answer\n"},
+        ]
+        await _send(pilot, panel, "/copy")
+        await _send(pilot, panel, "/copy 2")
+        assert copied == ["second answer", "first answer"]
+        await _send(pilot, panel, "/copy 3")
+        assert "only 2 answers" in _notices(panel)
+        assert len(copied) == 2
