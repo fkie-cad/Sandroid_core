@@ -2159,15 +2159,17 @@ class NetworkPanel(Widget):
             note = self._review_note_short()
             warn = lens_palette().warn
             return f"[{warn}]review {label}[/]" + (f" · {note}" if note else "")
+        # At most one problem (N3-V2): Mitmproxy's first, else friTap's.
+        # What runs, where the device points and the method are in the
+        # status bar and the method line below; not repeated here.
         mitm = self.mitm
         title = mitm.status_caption() if mitm is not None else ""
-        fritap = self.fritap
-        token = fritap.caption_token() if fritap is not None else ""
-        if token:
-            title += f" · {token}"
+        if not title:
+            fritap = self.fritap
+            title = fritap.caption_token() if fritap is not None else ""
         if self._live:
             # Follow state: in ONE place, the title (as in every lens).
-            title = f"{self._follow.text} · {title}"
+            title = f"{self._follow.text} · {title}" if title else self._follow.text
         return title
 
     def _review_note_short(self) -> str:
@@ -2622,6 +2624,19 @@ class NetworkPanel(Widget):
         m_grid = _grid()
         for label, value in mitm.status_rows() if mitm is not None else []:
             m_grid.add_row(label, Text.from_markup(value))
+        # The method notes the lens line leaves out (pinning, SDK runtime).
+        try:
+            from sandroid.services.network_method import get_network_method_service
+
+            notes = [
+                n
+                for n in get_network_method_service().view_cached().status_notes
+                if n not in ("CA installed", "Mitmproxy running")  # rows above
+            ]
+        except Exception:
+            notes = []
+        if notes:
+            m_grid.add_row("method notes", Text(", ".join(notes)))
         m_keys = (
             "[b]M[/b] start/stop  [b]Ctrl+D[/b] device proxy  [b]Ctrl+N[/b] install CA\n"
             "[b]Ctrl+P[/b] SSL unpin  [b]Ctrl+R[/b] restart  [b]Ctrl+A[/b] addons\n"
@@ -2728,8 +2743,10 @@ class NetworkPanel(Widget):
 
         pal = lens_palette()
         view = get_network_method_service().view_cached()
+        # Brief: CA / pinning / SDK-runtime notes are on the Inspector's
+        # Network status page (I), not repeated on this line (N3-V2).
         return (
-            view.markup(pal.ok, pal.warn, pal.bad, pal.dim)
+            view.markup(pal.ok, pal.warn, pal.bad, pal.dim, brief=True)
             + f" [{pal.dim}]W changes it[/]"
         )
 

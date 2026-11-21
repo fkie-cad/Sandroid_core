@@ -2062,7 +2062,7 @@ def test_header_app_segment_shows_the_run_state_not_a_mode():
     for name, word in (
         ("App", "○ not running"),
         ("Frida", "○ off"),
-        ("Proxy", "○ off"),
+        ("Mitmproxy", "○ off"),
     ):
         seg = next(s for s in bar._segments() if s.plain.startswith(name))
         start = seg.plain.index(word)
@@ -2114,7 +2114,8 @@ def test_header_capture_segment_says_running_in_words():
     bar.network_capture_running = True
     bar.network_capture_file = "/tmp/out/run1.pcap"
     seg = next(s.plain for s in bar._segments() if s.plain.startswith("Capture"))
-    assert seg == "Capture ● running run1.pcap"
+    # The file name is on the friTap tab and in the quit summary (N3-V2).
+    assert seg == "Capture ● running"
     for text in (s.plain for s in bar._segments()):
         assert "\u2423" not in text  # no key glyphs
         assert "\u21e7" not in text
@@ -2136,7 +2137,8 @@ def test_header_says_restarting_without_a_pid_during_shift_r():
 
 
 def test_proxy_strip_segment_is_plain_words():
-    """N22: the Proxy segment of the status strip in words + theme colours:
+    """N22: the Mitmproxy segment of the status strip in words + theme colours
+    (no "Proxy" label before it and no address, N3-V2):
     no symbols, never "mitm", "Capture" or "arm".
     """
     import re
@@ -2147,34 +2149,34 @@ def test_proxy_strip_segment_is_plain_words():
         bar = StatusBar()
         for key, value in state.items():
             setattr(bar, key, value)
-        return next(s.plain for s in bar._segments() if s.plain.startswith("Proxy"))
+        return next(s.plain for s in bar._segments() if s.plain.startswith("Mitmproxy"))
 
     ours = "10.0.2.2:8080"
     cases = {
-        "Proxy Mitmproxy ○ off": {},
-        f"Proxy Mitmproxy ● running {ours} · Device proxy ● on": {
+        "Mitmproxy ○ off": {},
+        "Mitmproxy ● running · Device proxy ● on": {
             "mitmweb_running": True,
             "mitmweb_address": ours,
             "proxy_address": ours,
         },
-        "Proxy Mitmproxy ○ off · Device proxy to the stopped Mitmproxy": {
+        "Mitmproxy ○ off · Device proxy to the stopped Mitmproxy": {
             "mitmweb_address": ours,
             "proxy_address": ours,
         },
-        f"Proxy Mitmproxy ● running {ours} · Device proxy ○ off": {
+        "Mitmproxy ● running · Device proxy ○ off": {
             "mitmweb_running": True,
             "mitmweb_address": ours,
         },
         # Spawned, not listening yet (N3-B1: a busy port is no "running").
-        "Proxy Mitmproxy ◌ starting · Device proxy ○ off": {
+        "Mitmproxy ◌ starting · Device proxy ○ off": {
             "mitmweb_running": True,
             "mitmweb_starting": True,
             "mitmweb_address": ours,
         },
-        "Proxy Mitmproxy ○ off · Device proxy to 192.168.1.5:8081": {
+        "Mitmproxy ○ off · Device proxy to 192.168.1.5:8081": {
             "proxy_address": "192.168.1.5:8081",
         },
-        "Proxy Mitmproxy ○ off · App Proxy for 2 apps · App Proxy for 1 app to an "
+        "Mitmproxy ○ off · App Proxy for 2 apps · App Proxy for 1 app to an "
         "external proxy": {
             "app_proxies": {"a": "ours", "b": "ours", "c": "http://1.2.3.4:8"},
         },

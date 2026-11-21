@@ -26,7 +26,7 @@ class StatusBar(Static):
 
     A compact strip (at most ``MAX_ROWS`` rows, full width) under the shell
     header: App state (pid / paused), Frida, Hooks + bypass (when active),
-    Proxy (engine, device route, per-app lanes), Capture (when running) and
+    Mitmproxy (engine, device route, per-app lanes), Capture (when running) and
     Record/Replay (while active -- see ``recording_active``/``replay_active``,
     set by app.py's ``_set_status_bar_mode``). Device and package names are
     exposed through :meth:`breadcrumb_markup` for the header instead.
@@ -405,8 +405,9 @@ class StatusBar(Static):
         if self.mitmweb_running and self.mitmweb_starting:
             proxy = f"[{muted}]Mitmproxy[/] [{paused}]◌ starting[/]"
         elif self.mitmweb_running:
-            addr = f" {self.mitmweb_address}" if self.mitmweb_address else ""
-            proxy = f"[{muted}]Mitmproxy[/] [{run}]● running{addr}[/]"
+            # The address is on the Network status page (I), not here: the
+            # bar is a one-line glance and wrapped off at 120 columns.
+            proxy = f"[{muted}]Mitmproxy[/] [{run}]● running[/]"
         else:
             proxy = f"[{muted}]Mitmproxy[/] [{muted}]○ off[/]"
         if pointed_at_us:
@@ -433,18 +434,13 @@ class StatusBar(Static):
         for label, count in sorted(self.app_proxy_problems.items()):
             what = "app" if count == 1 else "apps"
             proxy += f" [{warn}]· {count} {what} {escape(label)}[/]"
-        segs.append(f"[{muted}]Proxy[/] {proxy}")
+        # No "Proxy" label: "Mitmproxy" already names it (N3-V2).
+        segs.append(proxy)
 
-        # Capture, only while running.
+        # Capture, only while running. The file name is on the friTap tab
+        # of the Network status page and in the quit summary (N3-V2).
         if self.network_capture_running:
-            filename = (
-                os.path.basename(self.network_capture_file)
-                if self.network_capture_file
-                else "capture.pcap"
-            )
-            segs.append(
-                f"[{muted}]Capture[/] [{run}]● running[/] [{muted}]{escape(filename)}[/]"
-            )
+            segs.append(f"[{muted}]Capture[/] [{run}]● running[/]")
 
         # Record / Rewind: ● + state word; the controller's phase line as is.
         if self.recording_active or self.replay_active or self.replay_phase:

@@ -690,8 +690,10 @@ def test_mitm_port_shown_is_the_configured_one(monkeypatch):
     monkeypatch.setattr(service, "is_running", lambda: True)
     monkeypatch.setattr(service, "ssl_unpin_is_active", lambda: False)
     caption = panel.status_caption()
-    assert ":8090" in caption
-    assert "8080" not in caption
+    assert "8080" not in caption  # the title names problems, not the port
+    running = dict(panel.status_rows())["Mitmproxy"]
+    assert ":8090" in running
+    assert "8080" not in running
 
     monkeypatch.setattr(
         ProxyManager, "get_host_ip", classmethod(lambda cls: "10.0.2.2")
@@ -719,10 +721,11 @@ def test_capture_status_is_dots_and_words(monkeypatch):
         return Text.from_markup(markup).plain
 
     monkeypatch.setattr(service, "is_running", lambda: False)
-    assert plain(panel.status_caption()) == "Mitmproxy ○ off"
+    # A clean stop: nothing in the lens title (the status bar says off).
+    assert panel.status_caption() == ""
     rows = dict(panel.status_rows())
-    assert plain(rows["Mitmproxy web interface"]).startswith("○ stopped")
-    assert rows["Mitmproxy web interface"].startswith(f"[{pal.dim}]○ stopped[/]")
+    assert plain(rows["Mitmproxy"]).startswith("○ stopped")
+    assert rows["Mitmproxy"].startswith(f"[{pal.dim}]○ stopped[/]")
     assert plain(rows["CA"]) == "○ not installed  Ctrl+N"
     # "CA not installed" is a warning (not muted), like the Proxy dialog's.
     assert rows["CA"].startswith(f"[{pal.warn}]○ not installed[/]")
@@ -732,9 +735,8 @@ def test_capture_status_is_dots_and_words(monkeypatch):
     monkeypatch.setattr(service, "is_running", lambda: True)
     panel._ca_ok = panel._ct_ok = True
     panel._proxy_state, panel._proxy_addr = "ours", "10.0.2.2:8080"
-    caption = panel.status_caption()
-    assert f"[{pal.ok}]Mitmproxy ● running[/]" in caption
-    assert f"CA [{pal.ok}]● installed[/]" in caption
+    # All well: the title names no problem (N3-V2).
+    assert panel.status_caption() == ""
     rows = dict(panel.status_rows())
     assert rows["CA"].startswith(f"[{pal.ok}]● installed[/]")
     assert plain(rows["Chrome CT"]) == "● bypassed"
@@ -764,7 +766,7 @@ def test_capture_status_is_dots_and_words(monkeypatch):
     assert not set("✓✗→▲^") & set(text), text
     panel._ca_ok = False
     caption = panel.status_caption()
-    assert f"CA [{pal.warn}]○ not installed[/]" in caption
+    assert caption == f"[{pal.warn}]CA ○ not installed[/]"
     assert "CA ○ not installed" in plain(caption)
     assert not set("✓✗▸◐⚑⇧␣⏎") & set(plain(caption)), caption
 
@@ -795,14 +797,16 @@ def test_caption_routing_follows_the_network_method(monkeypatch):
     monkeypatch.setattr(nm, "peek_network_method_service", lambda: fake)
     panel._proxy_state = "ours"  # set by an earlier Ctrl+D
     panel._handle_proxy_change("network_method", None, None)
-    assert "device routed" not in panel.status_caption()
     assert panel._proxy_state == "none"
     snap["value"] = nm.MethodSnapshot(device_proxy="ours", device_addr="127.0.0.1:8090")
     panel._handle_proxy_change("network_method", None, None)
-    assert "device routed" in panel.status_caption()
+    assert panel._proxy_state == "ours"
+    assert "Device proxy" in dict(panel.status_rows())["routing"]
     snap["value"] = nm.MethodSnapshot(device_proxy="external", device_addr="1.2.3.4:8")
     panel._handle_proxy_change("network_method", None, None)
-    assert "device on another proxy" in panel.status_caption()
+    assert panel._proxy_state == "other"
+    # Routing is no problem: the lens title stays out of it (N3-V2).
+    assert "device" not in panel.status_caption()
 
 
 def test_caption_shows_a_stopped_mitmproxy_as_a_red_problem(monkeypatch):
@@ -823,7 +827,7 @@ def test_caption_shows_a_stopped_mitmproxy_as_a_red_problem(monkeypatch):
     )
     panel._proxy_state = "none"
     service._state.last_error = None
-    assert panel.status_caption() == f"[{pal.dim}]Mitmproxy ○ off[/]"
+    assert panel.status_caption() == ""  # a clean stop: the status bar says it
 
 
 def test_caption_says_starting_until_mitmweb_listens(monkeypatch):
@@ -832,9 +836,10 @@ def test_caption_says_starting_until_mitmweb_listens(monkeypatch):
     pal = lens_palette()
     panel, service = _caption_panel(monkeypatch, running=True)
     service._state.running, service._state.listening = True, False
-    assert f"[{pal.warn}]Mitmproxy ◌ starting[/]" in panel.status_caption()
+    assert panel.status_caption() == f"[{pal.warn}]Mitmproxy ◌ starting[/]"
     service._state.listening = True
-    assert f"[{pal.ok}]Mitmproxy ● running[/]" in panel.status_caption()
+    panel._ca_ok = True
+    assert panel.status_caption() == ""  # running, nothing to flag
 
 
 def test_fritap_stopped_is_muted_like_mitmproxy(monkeypatch):
@@ -1354,9 +1359,8 @@ async def test_fritap_caption_follows_its_lifecycle(flow_dir, monkeypatch):
             )
             running["on"] = True
             fritap_mod.set_lifecycle("running", "org.wikipedia")
-            await until(
-                pilot, lambda: "friTap ● running" in ms._lens_captions["network"][0]
-            )
+            # Running fine: the title leaves it to the status bar (N3-V2).
+            await until(pilot, lambda: "friTap" not in ms._lens_captions["network"][0])
             fritap_mod.set_lifecycle("hung", "org.wikipedia is not responding")
             await until(
                 pilot, lambda: "not responding" in ms._lens_captions["network"][0]
@@ -1412,7 +1416,8 @@ def test_ssl_unpin_indicator_follows_the_hooked_process(monkeypatch):
     assert svc.reconcile_liveness() == []  # alive: nothing changes
     from rich.text import Text
 
-    assert "unpin ● on" in Text.from_markup(mitm.status_caption()).plain
+    # The SSL unpin state is on the Network status page, not in the title.
+    assert "● on" in Text.from_markup(dict(mitm.status_rows())["SSL unpin"]).plain
 
     # The Zygote restart: the session detaches, the app comes back as 8593.
     jm.has_active_session = lambda: False
@@ -1659,13 +1664,13 @@ async def test_follow_live_stops_on_up_or_a_click_and_end_resumes(flow_dir):
         ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         table = panel.table
         assert panel.following
-        assert ms._lens_captions["network"][0].startswith("live · ")
+        assert ms._lens_captions["network"][0].split(" · ")[0] == "live"
         table.focus()
         await pilot.press("up")
         await settle(pilot)
         assert not panel.following
         title = ms._lens_captions["network"][0]
-        assert title.startswith("scrolled back · End = live · ")
+        assert title.startswith("scrolled back · End = live")
         row = table.cursor_row
         count = table.row_count
         write_flows(flow_dir, time.time(), specs=_SPECS[1:3], start_seq=100)
@@ -1674,12 +1679,12 @@ async def test_follow_live_stops_on_up_or_a_click_and_end_resumes(flow_dir):
         await settle(pilot)
         assert table.cursor_row == row
         title = ms._lens_captions["network"][0]
-        assert title.startswith("scrolled back · 2 new below · End = live · ")
+        assert title.startswith("scrolled back · 2 new below · End = live")
         await pilot.press("end")
         await settle(pilot)
         assert panel.following
         assert table.cursor_row == table.row_count - 1
-        assert ms._lens_captions["network"][0].startswith("live · ")
+        assert ms._lens_captions["network"][0].split(" · ")[0] == "live"
         # A click on a row above the newest one stops following.
         await pilot.click("#net-flows", offset=(4, 2))
         await settle(pilot)
@@ -1701,7 +1706,7 @@ async def test_a_rebuild_that_loses_the_kept_flow_is_live_again(flow_dir):
         await settle(pilot)
         assert panel.table.cursor_row == panel.table.row_count - 1
         assert panel.following
-        assert ms._lens_captions["network"][0].startswith("live · ")
+        assert ms._lens_captions["network"][0].split(" · ")[0] == "live"
 
 
 async def test_new_below_counts_rows_through_a_width_rebuild(flow_dir):
@@ -2175,9 +2180,9 @@ async def test_reveal_lands_on_a_flow_the_hidden_lens_has_not_loaded(flow_dir):
 
 
 async def test_caption_follows_ca_removal_and_app_proxy_changes(flow_dir, monkeypatch):
-    """E2E: after Remove CA the caption still said "CA installed", after the
-    App Proxy was removed still "app proxies 1" -- until a lens switch.
-    Both are now repainted from STATE_CHANGED (published off the UI thread).
+    """E2E: after Remove CA the caption missed it until a lens switch. The
+    title now shows only problems (N3-V2): "CA ○ not installed" comes and
+    goes with STATE_CHANGED (published off the UI thread).
     """
     import threading
 
@@ -2213,8 +2218,8 @@ async def test_caption_follows_ca_removal_and_app_proxy_changes(flow_dir, monkey
         def title() -> str:
             return Text.from_markup(ms._lens_captions["network"][0] or "").plain
 
-        assert "app proxies 1" in title()
-        assert "CA ● installed" in title()
+        # All well: the title names no problem (N3-V2).
+        assert "CA" not in title()
 
         def publish(fn, *args) -> None:
             worker = threading.Thread(target=fn, args=args)
@@ -2231,12 +2236,11 @@ async def test_caption_follows_ca_removal_and_app_proxy_changes(flow_dir, monkey
 
         routes.clear()
         publish(pm.FocusManager._publish_health, None)
-        await until(pilot, lambda: "app proxies" not in title())
+        await settle(pilot)
 
         device["ca"] = True
         publish(pm.publish_ca_change, None, True)
-        await until(pilot, lambda: "CA ● installed" in title())
-        assert "CA ○ not installed" not in title()
+        await until(pilot, lambda: "CA" not in title())
 
 
 async def test_ca_change_of_another_device_leaves_the_caption(flow_dir, monkeypatch):
