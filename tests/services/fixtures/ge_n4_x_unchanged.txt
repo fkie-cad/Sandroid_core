@@ -1,0 +1,51 @@
+add device 1: /dev/input/event0
+  name:     "gpio-keys"
+add device 2: /dev/input/event1
+  name:     "virtio_input_multi_touch_1"
+add device 3: /dev/input/event2
+  name:     "virtio_input_multi_touch_2"
+add device 4: /dev/input/event3
+  name:     "virtio_input_multi_touch_3"
+add device 5: /dev/input/event4
+  name:     "virtio_input_multi_touch_4"
+add device 6: /dev/input/event5
+  name:     "virtio_input_multi_touch_5"
+add device 7: /dev/input/event6
+  name:     "virtio_input_multi_touch_6"
+add device 8: /dev/input/event7
+  name:     "virtio_input_multi_touch_7"
+add device 9: /dev/input/event8
+  name:     "virtio_input_multi_touch_8"
+add device 10: /dev/input/event9
+  name:     "virtio_input_multi_touch_9"
+add device 11: /dev/input/event10
+  name:     "virtio_input_multi_touch_10"
+add device 12: /dev/input/event11
+  name:     "virtio_input_multi_touch_11"
+add device 13: /dev/input/event12
+  name:     "qwerty2"
+[    1283.190447] /dev/input/event1: 0003 0039 0000004d
+[    1283.190447] /dev/input/event1: 0003 0036 00006453
+[    1283.190447] /dev/input/event1: 0000 0000 00000000
+[    1283.273493] /dev/input/event1: 0003 0036 00005f0b
+[    1283.273493] /dev/input/event1: 0000 0000 00000000
+[    1283.337357] /dev/input/event1: 0003 0036 000059c4
+[    1283.337357] /dev/input/event1: 0000 0000 00000000
+[    1283.417199] /dev/input/event1: 0003 0036 0000547c
+[    1283.417199] /dev/input/event1: 0000 0000 00000000
+[    1283.501158] /dev/input/event1: 0003 0036 00004f34
+[    1283.501158] /dev/input/event1: 0000 0000 00000000
+[    1283.574776] /dev/input/event1: 0003 0036 000049ec
+[    1283.574776] /dev/input/event1: 0000 0000 00000000
+[    1283.661159] /dev/input/event1: 0003 0036 000044a5
+[    1283.661159] /dev/input/event1: 0000 0000 00000000
+[    1283.754418] /dev/input/event1: 0003 0036 00003f5d
+[    1283.754418] /dev/input/event1: 0000 0000 00000000
+[    1283.848608] /dev/input/event1: 0003 0036 00003a15
+[    1283.848608] /dev/input/event1: 0000 0000 00000000
+[    1283.925918] /dev/input/event1: 0003 0036 000034cd
+[    1283.925918] /dev/input/event1: 0000 0000 00000000
+[    1284.013590] /dev/input/event1: 0003 0036 00002f85
+[    1284.013590] /dev/input/event1: 0000 0000 00000000
+[    1284.112272] /dev/input/event1: 0003 0039 ffffffff
+[    1284.112272] /dev/input/event1: 0000 0000 00000000

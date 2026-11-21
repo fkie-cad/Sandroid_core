@@ -22,6 +22,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from rich.text import Text
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Checkbox, Input, Label, SelectionList, Static
 from textual.widgets.selection_list import Selection
@@ -141,6 +142,10 @@ class ReviewModal(ForensicModal[None]):
     # Enter in the name field must never press Rewind + Replay (the primary
     # button): that would revert the device while the user types a name.
     ENTER_SUBMITS_FROM_INPUT = False
+
+    # The main footer under Review shows "q Quit": a modal hides the app's
+    # bindings, so q is bound here too (the name field still types a q).
+    BINDINGS = [Binding("q", "app.request_quit", "Quit", show=False)]
 
     def __init__(self, rec: Any, controller: Any) -> None:
         super().__init__()

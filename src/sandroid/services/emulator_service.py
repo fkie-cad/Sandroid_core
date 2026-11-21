@@ -327,6 +327,80 @@ def reset_device_handles_after_snapshot_load() -> None:
         log.debug("Could not publish the snapshot-load refresh", exc_info=True)
 
 
+def _publish_snapshot_state(name: str | bytes, state: str, serial: str | None) -> None:
+    """``STATE_CHANGED`` ``snapshot_state`` for the header: ``state`` is
+    ``loaded`` or ``unconfirmed`` (a load the console gave up on). Only for
+    the active device. Never raises.
+    """
+    if not is_active_serial(serial):
+        return
+    try:
+        from sandroid.core.events import Event, EventBus, EventType
+
+        EventBus.get().publish(
+            Event(
+                type=EventType.STATE_CHANGED,
+                data={
+                    "change_type": "snapshot_state",
+                    "name": _name_text(name),
+                    "state": state,
+                    "serial": serial,
+                },
+                source="emulator_service",
+            )
+        )
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "Could not publish the snapshot state", exc_info=True
+        )
+
+
+def network_reset_mode() -> str:
+    """``analysis.network_reset_after_snapshot`` (``off`` when unreadable)."""
+    try:
+        from sandroid.config import get_config
+
+        value = get_config().analysis.network_reset_after_snapshot
+    except Exception:
+        value = "off"
+    return str(value or "off").lower()
+
+
+def reset_network_after_load(
+    serial: str | None = None,
+    *,
+    mode: str | None = None,
+    sleep: Callable[[float], None] | None = None,
+    timeout: float = 30.0,
+    send: Callable[[str], tuple[str, str]] | None = None,
+) -> bool:
+    """Cycle the device network after a snapshot load and wait until it is
+    back (:func:`sandroid.core.adb_network.reset_network`).
+
+    The one network step of every load path (Rewind, the snapshot picker,
+    the AI, the engine's runs): a snapshot restores the guest's sockets but
+    not the emulator's NAT state, so an app reuses dead connections and a
+    replay right after the load sees timeouts. ``mode`` defaults to
+    ``analysis.network_reset_after_snapshot`` (``off`` skips). ``sleep`` may
+    raise to cancel the wait. Returns whether the network was cycled and is
+    up again.
+    """
+    from sandroid.core.adb_network import reset_network
+
+    mode = (mode or network_reset_mode()).lower()
+    if mode == "off":
+        return False
+    if send is None:
+        from sandroid.core.adb import Adb
+
+        def send(command: str) -> tuple[str, str]:
+            if serial is None:
+                return Adb.send_adb_command(command)
+            return Adb.send_adb_command(command, serial=serial)
+
+    return reset_network(send, mode, timeout=timeout, sleep=sleep)
+
+
 def is_active_serial(serial: str | None) -> bool:
     """Whether *serial* is the device the TUI works on (None: unknown = yes).
 
@@ -972,14 +1046,30 @@ class EmulatorService:
             _snapshot_line("save", name, False, serial, str(e))
             return False
 
-    def load_snapshot(self, name: str, serial: str | None = None) -> bool:
+    def load_snapshot(
+        self,
+        name: str,
+        serial: str | None = None,
+        *,
+        reset_network: bool = True,
+        sleep: Callable[[float], None] | None = None,
+    ) -> bool:
         """Load a previously created snapshot.
+
+        Every load runs the post-load routine (:meth:`_post_load`: SELinux,
+        device clock, device proxy, Frida handles, after-load hooks) and then
+        the network reset (:func:`reset_network_after_load`).
 
         Args:
             name: Name of the snapshot to load.
             serial: Device serial to target for this call only, without
                 mutating the shared ``Adb._target_device`` global. Omit to
                 use the current global target (default behavior, unchanged).
+            reset_network: Cycle the device network after the load
+                (``analysis.network_reset_after_snapshot``; ``off`` skips).
+                False for callers that reset it themselves (the engine).
+            sleep: Sleep of the network wait; may raise to cancel it (the
+                exception propagates, the load itself has happened).
 
         Returns:
             True if snapshot was loaded successfully.
@@ -988,9 +1078,16 @@ class EmulatorService:
         adb = self._get_adb()
         _load_started(serial)
         try:
-            return self._load_snapshot(adb, name, serial)
+            ok = self._load_snapshot(adb, name, serial)
         finally:
             _load_finished(serial)
+        if ok and reset_network:
+            reset_network_after_load(
+                serial,
+                sleep=sleep,
+                send=lambda command: adb.send_adb_command(command, serial=serial),
+            )
+        return ok
 
     def _load_snapshot(self, adb: Any, name: str, serial: str | None) -> bool:
         """:meth:`load_snapshot` body (the in-flight marker is held)."""
@@ -1009,6 +1106,10 @@ class EmulatorService:
             if stderr or "KO:" in str(stdout or ""):
                 self._logger.error(f"Failed to load snapshot: {stderr or stdout}")
                 _snapshot_line("load", name, False, serial, str(stderr or stdout))
+                if "KO:" not in str(stdout or ""):
+                    # Not a refusal: the console may have given up while the
+                    # emulator goes on loading (a slow or paused host).
+                    self._watch_unconfirmed_load(adb, name, serial, loaded)
                 return False
 
             # No device-prepared step while the restored device re-attaches:
@@ -1038,42 +1139,128 @@ class EmulatorService:
                         "console_ms": round((t_ret - t_sent) * 1000, 1),
                     },
                 )
-
-                # Reverting VM state disrupts the ADB transport for a variable
-                # window (offline -> unauthorized -> device); poll get-state for
-                # real readiness instead of blindly sleeping a fixed 2s, which
-                # was sometimes too short (a race) and often too long (needless
-                # latency on a device that recovers quickly).
-                self._wait_for_device_ready(adb, serial)
-                # The snapshot also restores the kernel's SELinux mode. One saved
-                # before startup's ``setenforce 0`` comes back Enforcing, and then
-                # root binder calls (settings, dumpsys, screencap, frida) fail with
-                # FAILED_TRANSACTION until Sandroid is restarted. Re-apply it
-                # first: the clock step's root reads of /proc/timer_list and its
-                # ``date`` may be denied under Enforcing.
-                self._restore_selinux_permissive(adb, serial)
-                # A snapshot restores the guest clock to the moment it was saved,
-                # so every revert rewinds device time (minutes after a few
-                # replays), skewing file timestamps / the timeline against the
-                # host. Record the offset in the session timeline and, with
-                # ``emulator.sync_device_clock`` on, set it to host time.
-                self._record_device_clock(adb, name, serial)
-                # ...and the device settings, including ``http_proxy``: a
-                # snapshot saved without the proxy drops mitmproxy's device
-                # proxy, so the replays were never intercepted. Re-apply it.
-                proxy_result = self._restore_device_proxy(serial)
-                # Then everything else the load invalidated, for every caller
-                # (TUI, Play, AI, headless): Frida handles, App Proxy lanes and
-                # the CA, frida-server, long-lived streams.
-                self._after_snapshot_load(adb, serial, proxy_result)
+                self._post_load(adb, name, serial)
 
             self._logger.info(f"Snapshot '{name}' loaded successfully")
+            _publish_snapshot_state(name, "loaded", loaded)
             return True
 
         except Exception as e:
             self._logger.error(f"Failed to load snapshot: {e}")
             _snapshot_line("load", name, False, serial, str(e))
             return False
+
+    def _post_load(self, adb: AdbProtocol, name: str, serial: str | None) -> None:
+        """The routine after a snapshot load (inside the device-prep hold):
+        device ready, SELinux, device clock, device proxy, then Frida
+        handles, App Proxy, frida-server and the after-load hooks. Shared by
+        every load and by a load that completes after the console gave up
+        (:meth:`_watch_unconfirmed_load`).
+        """
+        # Reverting VM state disrupts the ADB transport for a variable
+        # window (offline -> unauthorized -> device); poll get-state for
+        # real readiness instead of blindly sleeping a fixed 2s, which
+        # was sometimes too short (a race) and often too long (needless
+        # latency on a device that recovers quickly).
+        self._wait_for_device_ready(adb, serial)
+        # The snapshot also restores the kernel's SELinux mode. One saved
+        # before startup's ``setenforce 0`` comes back Enforcing, and then
+        # root binder calls (settings, dumpsys, screencap, frida) fail with
+        # FAILED_TRANSACTION until Sandroid is restarted. Re-apply it
+        # first: the clock step's root reads of /proc/timer_list and its
+        # ``date`` may be denied under Enforcing.
+        self._restore_selinux_permissive(adb, serial)
+        # A snapshot restores the guest clock to the moment it was saved,
+        # so every revert rewinds device time (minutes after a few
+        # replays), skewing file timestamps / the timeline against the
+        # host. Record the offset in the session timeline and, with
+        # ``emulator.sync_device_clock`` on, set it to host time.
+        self._record_device_clock(adb, name, serial)
+        # ...and the device settings, including ``http_proxy``: a
+        # snapshot saved without the proxy drops mitmproxy's device
+        # proxy, so the replays were never intercepted. Re-apply it.
+        proxy_result = self._restore_device_proxy(serial)
+        # Then everything else the load invalidated, for every caller
+        # (TUI, Play, AI, headless): Frida handles, App Proxy lanes and
+        # the CA, frida-server, long-lived streams.
+        self._after_snapshot_load(adb, serial, proxy_result)
+
+    #: How long a load the console gave up on is watched for the device to
+    #: answer again (s), and how often it is asked.
+    UNCONFIRMED_LOAD_WATCH_S = 600.0
+    UNCONFIRMED_LOAD_POLL_S = 3.0
+
+    def _watch_unconfirmed_load(
+        self, adb: AdbProtocol, name: str, serial: str | None, loaded: str | None
+    ) -> threading.Thread:
+        """A load the console gave up on (timeout, not a refusal) may still
+        complete in the emulator: the device state is unknown from now on
+        (a world change, so the header shows the device time as unknown
+        instead of "in sync"), and once the device answers a shell command
+        again the post-load routine and the network reset run (clock sync,
+        SELinux, Frida reset). Gives up after
+        :attr:`UNCONFIRMED_LOAD_WATCH_S` or when another load starts.
+        """
+        log = self._logger
+        gen = snapshot_load_generation()
+        _world_change(
+            "snapshot-load",
+            src="snapshot",
+            kind="load",
+            summary=(
+                f"snapshot '{_name_text(name)}' load not confirmed · "
+                "device state unknown"
+            ),
+            t=time.time(),
+            dev=loaded,
+            data={"name": name, "ok": False, "unconfirmed": True},
+        )
+        _publish_snapshot_state(name, "unconfirmed", loaded)
+
+        def responsive() -> bool:
+            try:
+                out, _err = adb.send_adb_command("shell echo ok", serial=serial)
+            except Exception:
+                return False
+            return str(out or "").strip() == "ok"
+
+        def run() -> None:
+            deadline = time.monotonic() + self.UNCONFIRMED_LOAD_WATCH_S
+            while not responsive():
+                if snapshot_load_generation() != gen:
+                    return  # another load took over
+                if time.monotonic() >= deadline:
+                    log.warning(
+                        f"The device did not answer within "
+                        f"{self.UNCONFIRMED_LOAD_WATCH_S:.0f}s after the load of "
+                        f"'{_name_text(name)}' timed out; its state stays unknown"
+                    )
+                    return
+                time.sleep(self.UNCONFIRMED_LOAD_POLL_S)
+            if snapshot_load_generation() != gen:
+                return
+            from sandroid.core import device_prep
+
+            try:
+                with device_prep.hold(loaded, "snapshot-load"):
+                    self._post_load(adb, name, serial)
+                reset_network_after_load(
+                    serial,
+                    send=lambda command: adb.send_adb_command(command, serial=serial),
+                )
+            except Exception:
+                log.warning("Post-load routine after a late load failed", exc_info=True)
+                return
+            log.warning(
+                f"The emulator answered again after the load of "
+                f"'{_name_text(name)}' timed out: the device was prepared again "
+                "(SELinux, device clock, Frida, network)"
+            )
+            _publish_snapshot_state(name, "loaded", loaded)
+
+        thread = threading.Thread(target=run, name="snapshot-late-load", daemon=True)
+        thread.start()
+        return thread
 
     def _after_snapshot_load(
         self, adb: AdbProtocol, serial: str | None, device_proxy: str | None = None

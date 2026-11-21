@@ -235,11 +235,25 @@ class Gesture:
     host_recv: float = 0.0
     gid: int = 0
     dropped: bool = False
+    #: Raw range each axis covered while the finger was down (``None``:
+    #: never seen): a swipe along a known axis is a swipe even when the
+    #: other axis is unknown.
+    x_span: tuple[int, int] | None = None
+    y_span: tuple[int, int] | None = None
 
     @property
     def xy_known(self) -> bool:
         """Both axes of the origin were seen."""
         return self.x0 is not None and self.y0 is not None
+
+    def note_axes(self, x: int | None, y: int | None) -> None:
+        """Widen :attr:`x_span` / :attr:`y_span` by one sample."""
+        if x is not None:
+            lo, hi = self.x_span or (x, x)
+            self.x_span = (min(lo, x), max(hi, x))
+        if y is not None:
+            lo, hi = self.y_span or (y, y)
+            self.y_span = (min(lo, y), max(hi, y))
 
 
 @dataclass
@@ -295,19 +309,58 @@ class TouchDecoder:
     def __init__(self) -> None:
         self._devs: dict[str, _DevState] = {}
         self._gid = 0
+        #: Bumped by every :meth:`reset`: a seed read before it is stale.
+        self.generation = 0
+        #: Inside a getevent device listing (one listing is one reset).
+        self._listing = False
+        self._seed_lock = threading.Lock()
+        self._seeds: list[tuple[int, dict[str, tuple[int, int, int]]]] = []
 
     def reset(self) -> None:
         """Forget everything (the stream restarted)."""
         self._devs.clear()
+        self.generation += 1
+
+    def seed(self, values: dict[str, tuple[int, int, int]], generation: int) -> None:
+        """Axis values the kernel held when the stream started (any thread).
+
+        The kernel never repeats an unchanged ``ABS_MT_POSITION_X/Y``, so a
+        first touch in the column (or row) of the last touch before the
+        stream started had no position. ``values`` is ``{device: (slot, x,
+        y)}`` (``dumpsys input``'s ``AbsState``); it fills only axes not seen
+        since the reset of ``generation`` (a later reset drops it). The
+        reader thread applies it before its next line.
+        """
+        with self._seed_lock:
+            self._seeds.append((generation, dict(values)))
+
+    def _apply_seeds(self) -> None:
+        with self._seed_lock:
+            seeds, self._seeds = self._seeds, []
+        for generation, values in seeds:
+            if generation != self.generation:
+                continue  # read before the stream restarted
+            for dev, (slot, x, y) in values.items():
+                st = self._devs.setdefault(dev, _DevState())
+                s = st.slots.setdefault(slot, {"x": None, "y": None, "tid": -1})
+                if s["x"] is None:
+                    s["x"] = x
+                if s["y"] is None:
+                    s["y"] = y
 
     def feed(self, line: str, line_no: int = 0) -> list[DecodedEvent]:
         """Decode one raw line; the events it completes."""
+        if self._seeds:
+            self._apply_seeds()
         if line.startswith("add device"):
-            self.reset()
+            if not self._listing:  # the listing of a (re)started getevent
+                self.reset()
+                self._listing = True
             return []
         parsed = parse_getevent(line)
         if parsed is None:
             return []
+        self._listing = False
         ts, dev, typ, code, val = parsed
         dev = dev or "-"
         st = self._devs.setdefault(dev, _DevState())
@@ -418,6 +471,7 @@ class TouchDecoder:
             g.y0 = s["y"]
         g.x1 = s["x"] if s.get("x") is not None else g.x1
         g.y1 = s["y"] if s.get("y") is not None else g.y1
+        g.note_axes(s.get("x"), s.get("y"))
         if g.x1 is not None and g.y1 is not None:
             g.path.append((g.x1, g.y1, ts))
 
@@ -469,6 +523,7 @@ class TouchDecoder:
                 )
                 if x is not None and y is not None:
                     st.gesture.path.append((x, y, t_down))
+                st.gesture.note_axes(x, y)
                 out.append(DecodedEvent("down", st.gesture))
             st.gesture.pointers = max(st.gesture.pointers, len(st.active))
         g = st.gesture
@@ -486,6 +541,7 @@ class TouchDecoder:
                     g.x1 = s["x"]
                 if s.get("y") is not None:
                     g.y1 = s["y"]
+                g.note_axes(s.get("x"), s.get("y"))
         if g is not None and st.ups and not st.active:
             g.t_up = ts
             g.line_b = line_no
@@ -513,6 +569,13 @@ class Geometry:
         if self.rotation % 2:
             return self.height, self.width
         return self.width, self.height
+
+    def span_px(self, dev: str, dx_raw: int, dy_raw: int) -> float:
+        """Screen distance (px) of a raw movement (any rotation)."""
+        mx, my = self.maxima.get(dev, (MT_MAX, MT_MAX))
+        dx = dx_raw * (self.width or 1) / (mx or MT_MAX)
+        dy = dy_raw * (self.height or 1) / (my or MT_MAX)
+        return (dx * dx + dy * dy) ** 0.5
 
     def to_px(self, dev: str, x_raw: int, y_raw: int) -> tuple[int, int]:
         """MT raw values of ``dev`` -> screen px in the current rotation."""
@@ -552,6 +615,35 @@ def parse_getevent_p(text: str) -> dict[str, tuple[int, int]]:
                 my = int(a[2])
     if dev and mx is not None and my is not None:
         out[dev] = (mx, my)
+    return out
+
+
+_ABS_STATE = re.compile(r"\b(ABS_MT_SLOT|ABS_MT_POSITION_X|ABS_MT_POSITION_Y)=(-?\d+)")
+
+
+def parse_abs_state(text: str) -> dict[str, tuple[int, int, int]]:
+    """``{device: (slot, x, y)}`` from ``dumpsys input``'s EventHub lines
+    (``Path: /dev/input/eventN``, then ``AbsState: ... ABS_MT_POSITION_X=``):
+    the MT position the device holds for its current slot. Empty when the
+    Android version prints no ``AbsState``.
+    """
+    out: dict[str, tuple[int, int, int]] = {}
+    dev = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("Path:"):
+            path = line.split(":", 1)[1].strip()
+            dev = path if path.startswith("/dev/") else None
+            continue
+        if dev and line.startswith("AbsState:"):
+            vals = dict(_ABS_STATE.findall(line))
+            if "ABS_MT_POSITION_X" in vals and "ABS_MT_POSITION_Y" in vals:
+                out[dev] = (
+                    int(vals.get("ABS_MT_SLOT", 0)),
+                    int(vals["ABS_MT_POSITION_X"]),
+                    int(vals["ABS_MT_POSITION_Y"]),
+                )
+            dev = None
     return out
 
 
@@ -1236,6 +1328,29 @@ class GeteventStream:
         if rc == 0 and text.isdigit():
             self._pid = int(text)
 
+    def _seed_axes(self, generation: int) -> None:
+        """Seed the decoder with the MT positions the device holds now
+        (``dumpsys input``): a first touch that repeats an axis of the last
+        touch before this getevent started has no event for that axis.
+        Best effort; never raises.
+        """
+        try:
+            rc, out = self._run(
+                [
+                    *_base_argv(self.serial),
+                    "shell",
+                    "dumpsys input 2>/dev/null | grep -E '^ *(Path|AbsState):'",
+                ],
+                timeout=10.0,
+            )
+            text = out.decode("utf-8", "replace") if rc == 0 else ""
+            values = parse_abs_state(text)
+        except Exception:
+            logger.debug("getevent: axis seed failed", exc_info=True)
+            return
+        if values:
+            self.decoder.seed(values, generation)
+
     def _read_loop(self) -> None:
         attempt = 0
         while not self._stop.is_set():
@@ -1250,6 +1365,7 @@ class GeteventStream:
                     else:
                         line = str(raw)
                     line = line.rstrip("\r\n")
+                    seed_due = first
                     if first:
                         first = False
                         attempt = 0
@@ -1278,6 +1394,13 @@ class GeteventStream:
                     except Exception:
                         logger.debug("getevent decode failed", exc_info=True)
                         events = []
+                    if seed_due:  # after the listing's reset: its generation
+                        threading.Thread(
+                            target=self._seed_axes,
+                            args=(self.decoder.generation,),
+                            name="getevent-seed",
+                            daemon=True,
+                        ).start()
                     if not events:
                         continue
                     for ecb in esubs:
@@ -2206,6 +2329,12 @@ class TrackingService:
             for a, b, _t in [*g.path, (g.x1, g.y1, 0.0)]:
                 px, py = geo.to_px(g.dev, a, b)
                 moved = max(moved, ((px - x) ** 2 + (py - y) ** 2) ** 0.5)
+        else:
+            # One axis unknown (the kernel did not repeat it): the known
+            # axis still tells a swipe from a long press.
+            dx = (g.x_span[1] - g.x_span[0]) if g.x_span else 0
+            dy = (g.y_span[1] - g.y_span[0]) if g.y_span else 0
+            moved = geo.span_px(g.dev, dx, dy)
         if g.pointers > 1:
             kind = "gesture"
         elif moved <= cfg.swipe_slop_px:
@@ -2501,6 +2630,8 @@ class TrackingService:
         if target is not None:
             node = answer.get("target") or answer.get("hit") or {}
             name = _node_label(answer, node)
+        if kind == "swipe" and None in (data["x"], data["y"], data["x1"], data["y1"]):
+            return "swipe · position unknown"
         if kind == "swipe":
             dx, dy = data["x1"] - data["x"], data["y1"] - data["y"]
             if abs(dx) > abs(dy):

@@ -56,6 +56,8 @@ logger = logging.getLogger(__name__)
 EXIT_DEADLINE = 20.0
 #: Seconds the post-TUI part (exit summary, thread joins) may take.
 POST_RUN_DEADLINE = 30.0
+#: Seconds a quit waits for a recording / replay to finish and save.
+RECORDING_QUIT_S = 6.0
 
 _hard_exit = {"enabled": False, "armed": False, "code": 0}
 _app_returned = threading.Event()
@@ -306,6 +308,8 @@ class QuitController:
         pop_screen: Callable[[], None] | None = None,
         exit_app: Callable[[], None] | None = None,
         force_ui_refresh: Callable[[], None] | None = None,
+        before_exit: Callable[[], Any] | None = None,
+        extra_notes: Callable[[], list[str]] | None = None,
     ):
         """Initialize QuitController with UI callbacks.
 
@@ -323,7 +327,12 @@ class QuitController:
             pop_screen: Callback to pop current screen
             exit_app: Callback to exit the application
             force_ui_refresh: Callback to force UI refresh
+            before_exit: Runs first in :meth:`force_exit` (time-boxed, before
+                Tracking stops): finishes a running recording or replay.
+            extra_notes: More lines for the quit dialog (a running replay).
         """
+        self._before_exit = before_exit
+        self._extra_notes = extra_notes
         self._log_info = log_info or self._default_log
         self._log_warning = log_warning or self._default_log
         self._log_task_stopped = log_task_stopped
@@ -483,8 +492,15 @@ class QuitController:
             if self._exit_app:
                 self._exit_app()
 
+        notes = self._quit_notes()
+        extra = getattr(self, "_extra_notes", None)
+        if extra is not None:
+            try:
+                notes = [*extra(), *notes]
+            except Exception:
+                logger.debug("quit notes failed", exc_info=True)
         self._push_modal(
-            QuitConfirmModal(notes=self._quit_notes(), on_confirm=on_confirm),
+            QuitConfirmModal(notes=notes, on_confirm=on_confirm),
             on_quit_result,
         )
 
@@ -551,6 +567,12 @@ class QuitController:
         # The session timeline first: everything recorded so far is on disk
         # before anything below can hang (bounded; the close comes last).
         run_bounded("timeline flush", lambda: _flush_timeline(1.0), 1.5)
+
+        # A running recording is finalised and a running replay stopped and
+        # saved while Tracking and the timeline still run.
+        before_exit = getattr(self, "_before_exit", None)
+        if before_exit is not None:
+            run_bounded("recording", before_exit, RECORDING_QUIT_S)
 
         # Tracking before anything kills adb processes: its stop and
         # intervention-off lines are written, the helper restores a11y, the

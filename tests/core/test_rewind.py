@@ -453,8 +453,28 @@ def test_rewind_esc_before_the_load(tmp_path, monkeypatch):
     dev.cancel = True
     rec = _rec(tmp_path, monkeypatch)
     out = rewind.RewindRunner(rec, dev.deps()).run(replay=False)
-    assert out.error == "you pressed Esc"
+    assert out.error == "Rewind stopped."
     assert not any(c.startswith("load") for c in dev.calls)
+
+
+def test_a_stop_that_surfaces_as_another_error_is_a_stop(tmp_path, monkeypatch, caplog):
+    """N4-B10: a quit during the replay was saved as "Rewind failed: you
+    pressed Esc" with a traceback; now it is the real reason, no traceback.
+    """
+    dev = FakeDevice()
+    rec = _rec(tmp_path, monkeypatch)
+
+    def replay(r, runner):
+        dev.cancel = True
+        raise RuntimeError("step stopped")
+
+    deps = dev.deps(replay)
+    deps.stop_reason = lambda: "stopped by quit"
+    with caplog.at_level("ERROR"):
+        out = rewind.RewindRunner(rec, deps).run(replay=True)
+    assert out.error == "Replay stopped by quit."
+    assert out.result == "stopped"
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
 
 
 # ---------------------------------------------------------------------------
@@ -719,7 +739,27 @@ def test_replay_keeps_the_recorded_pause_and_stops_on_esc():
     report = rep.run(steps)
     assert len(log) == 1
     assert report["stopped_at_step"] == 2
-    assert report["steps"][1]["reason"] == "you pressed Esc"
+    assert report["steps"][1]["reason"] == "stopped"
+
+
+def test_a_stop_in_the_tail_wait_is_a_stop_with_its_reason():
+    """N4-B10: a quit while the replay waited after its last step raised
+    out of the replay (a traceback, "Rewind failed").
+    """
+    steps = extract_steps([_tap(seq=1, t=100)])
+    clock = Clock()
+    cancel = {"on": False}
+
+    def shell(cmd):
+        cancel["on"] = True  # quit right after the last tap
+        return ""
+
+    rep = StepReplayer(shell=shell, helper=None, sleep=clock.sleep,
+                       monotonic=clock.mono, cancelled=lambda: cancel["on"],
+                       stop_reason=lambda: "stopped by quit", tail_s=60)  # fmt: skip
+    report = rep.run(steps)
+    assert report["stopped_at_step"] is None
+    assert report["error"] == "Replay stopped after its last step: stopped by quit."
 
 
 def test_swipe_key_and_device_gone():
@@ -781,12 +821,57 @@ def test_replay_element_gone_but_position_known_goes_by_position():
                            element_wait_s=1.0)  # fmt: skip
     report = rep.run(steps)
     assert log == ["input tap 500 600"]
+    # The step goes by position; as the last step that could be checked
+    # missed its element, the replay ends diverged (N4-B6).
     assert report["steps"][0] == {
         "i": 1, "seq": 1, "what": "tap 'Accept all' (Button)",
-        "way": "by position", "reason": "not found", "check": "unchecked",
+        "way": "by position", "reason": "not found", "check": "diverged",
     }  # fmt: skip
     assert "by position (not found)" in lines[0]["summary"]
     assert report["error"] is None
+    assert report["diverged_at_step"] == 1
+    assert report["unchecked_steps"] == []
+
+
+def _swipe(seq: int, t: float) -> dict:
+    return {"src": "input", "kind": "swipe", "seq": seq, "t": t, "actor": "user",
+            "data": {"x": 540, "y": 1800, "x1": 540, "y1": 900, "dur_ms": 300}}  # fmt: skip
+
+
+def test_n4_misses_split_by_unchecked_swipes_diverge():
+    """N4-B6 (run 1 of the N4 E2E): steps 4 and 8 missed their elements
+    with only swipes (nothing checks them) in between: the replay never
+    reached the article, so it diverged, never "done, 2 steps unchecked".
+    """
+    steps = extract_steps([
+        _tap(seq=1, t=100, target={"text": "Bonn"}),
+        _swipe(2, 101), _swipe(3, 102), _swipe(4, 103),
+        _tap(seq=5, t=104, target={"text": "Save"}),
+    ])  # fmt: skip
+    log: list[str] = []
+    rep, _lines = _replayer(FakeHelper([_dump(_node("Retry"))] * 4), log,
+                            element_wait_s=1.0)  # fmt: skip
+    report = rep.run(steps)
+    assert len(log) == 5  # every step was done
+    assert report["diverged_at_step"] == 5
+    assert report["steps"][4]["way"] == "diverged"
+    assert "with no step confirmed in between" in report["steps"][4]["reason"]
+    assert report["unchecked_steps"] == [1]
+
+
+def test_a_verified_step_puts_the_replay_back_on_track():
+    steps = extract_steps([
+        _tap(seq=1, t=100, target={"text": "Gone"}),
+        _tap(seq=2, t=101, target={"text": "Accept all"}),
+        _tap(seq=3, t=102, target={"text": "Gone too"}),
+        _tap(seq=4, t=103, target={"text": "Accept all"}),
+    ])  # fmt: skip
+    log: list[str] = []
+    rep, _lines = _replayer(FakeHelper([_dump(_node("Accept all"))] * 8), log,
+                            element_wait_s=1.0)  # fmt: skip
+    report = rep.run(steps)
+    assert report["diverged_at_step"] is None
+    assert report["unchecked_steps"] == [1, 3]
 
 
 def test_replay_ambiguous_element_without_position_fails_and_stops():

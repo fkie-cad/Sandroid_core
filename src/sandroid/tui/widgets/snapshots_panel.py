@@ -688,7 +688,7 @@ class SnapshotsPanel(Widget):
                 return
 
             def _work() -> tuple[bool, str]:
-                if self._toolbox().load_snapshot(tag) is False:
+                if self._toolbox().load_snapshot(tag, reset_network=True) is False:
                     return False, f"Could not load '{tag}' (see the log)"
                 self._post(self._note_loaded, tag, None)
                 return True, f"Loaded '{tag}'"
@@ -812,7 +812,7 @@ class SnapshotsPanel(Widget):
                 return
 
         def _work() -> tuple[bool, str]:
-            if self._toolbox().load_snapshot(tag) is False:
+            if self._toolbox().load_snapshot(tag, reset_network=True) is False:
                 return False, f"Could not load slot {slot} ('{tag}', see the log)"
             self._post(self._note_loaded, tag, slot)
             return True, f"Loaded slot {slot} ('{tag}')"
