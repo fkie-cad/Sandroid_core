@@ -66,9 +66,12 @@ class CommandPalette(ModalScreen):
         max-height: 20;
         background: #0d1117;
         padding: 0 1;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
 
     #palette-hint {
+        dock: bottom;
         text-align: center;
         color: #8b949e;
         margin-top: 1;
@@ -127,7 +130,7 @@ class CommandPalette(ModalScreen):
             )
             yield Static("", id="palette-results")
             yield Static(
-                "[dim]Enter=Execute, Esc=Close, ↑/↓=Navigate[/dim]", id="palette-hint"
+                "[dim]Enter run · Up/Down choose · Esc close[/dim]", id="palette-hint"
             )
 
     def on_mount(self) -> None:
@@ -196,71 +199,77 @@ class CommandPalette(ModalScreen):
         self._render_results()
 
     def _render_results(self) -> None:
-        """Render the filtered results."""
+        """Render the filtered results: one line per command.
+
+        ``key  name  description``: the keys in one column (words, no
+        brackets), the description dim and cut with "…" where the line
+        ends (``text-overflow: ellipsis``), never wrapped onto a second line.
+        """
+        from rich.markup import escape
+
         if not self._filtered_actions:
             content = "[dim]No matching commands[/]"
         else:
+            shown = self._filtered_actions[: self._rows()]
+            # A key the TUI does not bind is not shown: the palette runs the
+            # command by name (Space would start the app instead).
+            keys = [
+                "" if a.name in TUI_UNBOUND_KEY_ACTIONS else _format_key_display(a.key)
+                for a in shown
+            ]
+            width = min(max(len(k) for k in keys), 14)
             lines = []
-            for i, action in enumerate(self._filtered_actions[:15]):
-                # A key the TUI does not bind is not shown: the palette runs
-                # the command by name (Space would start the app instead).
-                key_display = (
-                    ""
-                    if action.name in TUI_UNBOUND_KEY_ACTIONS
-                    else _format_key_display(action.key)
-                )
-
+            for i, (action, key) in enumerate(zip(shown, keys, strict=True)):
                 # Check availability (view-agnostic; flat catalog)
                 valid, _ = self._controller.validate_action(action.name)
-
-                # Build line - single brackets with magenta for keys
+                name = escape(action.display_name)
+                desc = escape(action.description) if action.description else ""
+                cells = f"{escape(key):<{width}}  [b]{name}[/b]"
+                if desc:
+                    cells += f"  [dim]{desc}[/dim]"
                 if i == self._selected_index:
-                    # Selected item
-                    if valid:
-                        line = (
-                            f"[reverse] \\[{key_display:>5}] {action.display_name} [/]"
-                        )
-                    else:
-                        line = f"[reverse dim] \\[{key_display:>5}] {action.display_name} [/]"
-                # Normal item
+                    style = "reverse" if valid else "reverse dim"
+                    line = f"[{style}] {cells} [/]"
                 elif valid:
-                    line = (
-                        f"  [bold #ff00ff]\\[{key_display:>5}][/] {action.display_name}"
-                    )
+                    line = f" {cells}"
                 else:
-                    line = f"  [dim]\\[{key_display:>5}] {action.display_name}[/]"
-
-                # Add description if space allows
-                if action.description:
-                    desc = (
-                        action.description[:40] + "..."
-                        if len(action.description) > 40
-                        else action.description
-                    )
-                    line += f" [dim]- {desc}[/]"
-
+                    line = f"[dim] {cells}[/dim]"
                 lines.append(line)
 
             content = "\n".join(lines)
 
             # Add count
-            if len(self._filtered_actions) > 15:
-                content += f"\n[dim]...and {len(self._filtered_actions) - 15} more[/]"
+            if len(self._filtered_actions) > len(shown):
+                more = len(self._filtered_actions) - len(shown)
+                content += f"\n[dim] {more} more: type to narrow the list[/]"
 
         results = self.query_one("#palette-results", Static)
         results.update(content)
 
+    def _rows(self) -> int:
+        """Command rows that fit: the palette is at most 60% of the screen
+        high (border, padding, search field, hint and the "more" line take
+        the rest), never more than 15 and never fewer than 3.
+        """
+        height = self.size.height or 50
+        return max(3, min(15, int(height * 0.6) - 13))
+
+    def on_resize(self, _event) -> None:
+        if self._filtered_actions:
+            self._selected_index = min(self._selected_index, self._rows() - 1)
+            self._render_results()
+
     def action_select_next(self) -> None:
         """Select the next item in the list."""
         if self._filtered_actions:
-            max_visible = min(15, len(self._filtered_actions))
+            max_visible = min(self._rows(), len(self._filtered_actions))
             self._selected_index = (self._selected_index + 1) % max_visible
             self._render_results()
 
     def action_select_previous(self) -> None:
         """Select the previous item in the list."""
         if self._filtered_actions:
-            max_visible = min(15, len(self._filtered_actions))
+            max_visible = min(self._rows(), len(self._filtered_actions))
             self._selected_index = (self._selected_index - 1) % max_visible
             self._render_results()
 
@@ -276,7 +285,8 @@ class CommandPalette(ModalScreen):
                 # Show error but don't dismiss
                 results = self.query_one("#palette-results", Static)
                 results.update(
-                    f"[yellow]! {error_msg}[/yellow]\n\n" + results.renderable
+                    f"[yellow]Not available: {error_msg}[/yellow]\n\n"
+                    + results.renderable
                 )
                 return
 
