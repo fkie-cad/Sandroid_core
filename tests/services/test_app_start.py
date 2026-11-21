@@ -2594,9 +2594,16 @@ class _Script:
         self.exports_sync = SimpleNamespace(
             set_flags=self._set_flags, install_failures=list
         )
+        # Set: unload() blocks until it is set (an app thread in a hook).
+        self.unload_gate: threading.Event | None = None
 
     def _set_flags(self, flags):
         self.flags = dict(flags)
+
+    def unload(self):
+        if self.unload_gate is not None:
+            self.unload_gate.wait(10)
+        self.is_destroyed = True
 
 
 class _Job(FakeJob):
@@ -2779,12 +2786,88 @@ def test_unloading_the_other_app_leaves_the_selected_one(two_apps):
     ok, msg = bypass.unload_app(OTHER)
     assert ok, msg
     assert OTHER in msg
-    assert first.closed
+    assert first.script.is_destroyed
     assert first.process_session.is_detached
+    assert first.state == "stopped"
     assert not second.closed
     assert [a.package for a in bypass.hooked_apps()] == [PKG]
     assert f"bypass:{OTHER}" not in env.registered
     assert bypass.unload_app(OTHER)[0] is False  # nothing left there
+
+
+def _parked_other(two_apps):
+    """OTHER's ssl bypass parked, PKG selected with its own."""
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    bypass.toggle("ssl")
+    first = bypass._job
+    env.select(PKG)
+    bypass.toggle("ssl")
+    return first
+
+
+def test_an_unload_that_times_out_is_never_reported_done(two_apps):
+    """An app thread inside a hooked call blocks script.unload(): Shift+U
+    must not claim the hooks are gone (E2E: "abandoning" yet "No other app
+    has hooks now"). The app stays listed until the teardown really ends.
+    """
+    env, bypass = two_apps, two_apps.bypass
+    first = _parked_other(two_apps)
+    gate = first.script.unload_gate = threading.Event()
+    bypass.UNLOAD_WAIT_S = 0.2
+    notified: list = []
+    bypass.add_state_listener(lambda: notified.append(1))
+
+    ok, msg = bypass.unload_app(OTHER)
+    assert ok is False
+    assert "Restart the app" in msg
+    assert "switched off" in msg  # the flags-off RPC answered
+    assert _on(first.script) == set()  # the hooks are inert
+    apps = {a.package: a for a in bypass.hooked_apps()}
+    assert apps[OTHER].unload == "failed"
+    assert apps[OTHER].hooks_off is True
+    assert bypass.prune_parked() == []  # a stopped job is not a dead app
+    assert f"bypass:{OTHER}" in env.registered
+    # A second Shift+U starts no second teardown.
+    ok2, msg2 = bypass.unload_app(OTHER)
+    assert ok2 is False
+    assert "Restart the app" in msg2
+    assert notified  # "unloading", then "failed"
+
+    gate.set()  # the hooked call returns: the teardown finishes
+    deadline = time.monotonic() + 5
+    while OTHER in bypass._parked and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert [a.package for a in bypass.hooked_apps()] == [PKG]
+    assert first.process_session.is_detached
+    assert f"bypass:{OTHER}" not in env.registered
+
+
+def test_an_unloading_app_is_listed_until_it_dies(two_apps):
+    env, bypass = two_apps, two_apps.bypass
+    first = _parked_other(two_apps)
+    gate = first.script.unload_gate = threading.Event()
+    bypass.UNLOAD_WAIT_S = 0.1
+    assert bypass.unload_app(OTHER)[0] is False
+    first.process_session.is_detached = True  # restarted / died
+    assert [a.package for a in bypass.hooked_apps()] == [PKG]
+    assert bypass.prune_parked() == [OTHER]
+    gate.set()
+
+
+def test_no_new_bypass_in_an_app_whose_unload_hangs(two_apps):
+    env, bypass = two_apps, two_apps.bypass
+    first = _parked_other(two_apps)
+    gate = first.script.unload_gate = threading.Event()
+    bypass.UNLOAD_WAIT_S = 0.1
+    assert bypass.unload_app(OTHER)[0] is False
+    env.select(OTHER)
+    ok, msg = bypass.set_active({"root"}, paused=False)
+    assert ok is False
+    assert "still unloading" in msg
+    assert bypass._parked[OTHER] is not None  # never made resident again
+    assert bypass.on_categories() == []
+    gate.set()
 
 
 def test_a_parked_script_whose_app_died_is_forgotten(two_apps):

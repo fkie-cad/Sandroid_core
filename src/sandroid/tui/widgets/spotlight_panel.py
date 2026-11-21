@@ -159,6 +159,18 @@ class AppHooks:
     bypasses: tuple[str, ...] = ()
     tools: tuple[str, ...] = ()
     since: float | None = None
+    #: The bypass unload: None, "unloading" or "failed" (not finished in
+    #: time); ``hooks_off``: its flags are off (the hooks inert).
+    unload: str | None = None
+    hooks_off: bool = False
+
+    def unload_markup(self, c) -> str:
+        """``◌ unloading`` / a red ``unload failed``; ``""`` otherwise."""
+        if self.unload == "unloading":
+            return f"[{c.warn}]◌ unloading[/]"
+        if self.unload == "failed":
+            return f"[{c.bad}]unload failed[/]"
+        return ""
 
     def summary(self) -> str:
         """``3 bypasses`` / ``1 bypass, friTap`` / ``Objection``."""
@@ -181,7 +193,15 @@ def collect_app_hooks(bypass=None, tasks=None, objection=None) -> list[AppHooks]
 
     def entry(package: str) -> dict:
         return by_pkg.setdefault(
-            package, {"pid": None, "bypasses": (), "tools": [], "since": None}
+            package,
+            {
+                "pid": None,
+                "bypasses": (),
+                "tools": [],
+                "since": None,
+                "unload": None,
+                "hooks_off": False,
+            },
         )
 
     def older(a: float | None, b: float | None) -> float | None:
@@ -195,6 +215,8 @@ def collect_app_hooks(bypass=None, tasks=None, objection=None) -> list[AppHooks]
         for app in bypass.hooked_apps():
             e = entry(app.package)
             e["bypasses"] = tuple(app.categories)
+            e["unload"] = getattr(app, "unload", None)
+            e["hooks_off"] = bool(getattr(app, "hooks_off", False))
             e["pid"] = e["pid"] or app.pid
             e["since"] = older(e["since"], app.since)
     except Exception:
@@ -234,7 +256,15 @@ def collect_app_hooks(bypass=None, tasks=None, objection=None) -> list[AppHooks]
     except Exception:
         logger.debug("Hooked apps: objection unreadable", exc_info=True)
     apps = [
-        AppHooks(pkg, e["pid"], e["bypasses"], tuple(e["tools"]), e["since"])
+        AppHooks(
+            pkg,
+            e["pid"],
+            e["bypasses"],
+            tuple(e["tools"]),
+            e["since"],
+            e["unload"],
+            e["hooks_off"],
+        )
         for pkg, e in by_pkg.items()
         if e["bypasses"] or e["tools"]
     ]
@@ -265,7 +295,10 @@ def hooks_running_line(
     sep = " · "
     used, parts = 0, []
     for index, app in enumerate(ordered):
+        state = app.unload_markup(c)
         plain = f"{app.package} ({app.summary()})"
+        if state:
+            plain += " " + Text.from_markup(state).plain
         left = len(ordered) - index - 1
         tail = len(f"{sep}{left} more") if left else 0
         extra = len(plain) + (len(sep) if parts else 0)
@@ -277,7 +310,10 @@ def hooks_running_line(
         name = escape(app.package)
         if app.package == current:
             name = f"[b]{name}[/]"
-        parts.append(f"{name} [{c.dim}]({escape(app.summary())})[/]")
+        parts.append(
+            f"{name} [{c.dim}]({escape(app.summary())})[/]"
+            + (f" {state}" if state else "")
+        )
         used += extra
     line = f"[{c.dim}]{sep}[/]".join(parts)
     if hint and (not room or used + 3 + len(hint) <= room):
@@ -340,6 +376,15 @@ def hooks_inspector(
             line += 1
             body.append(f"  {label.rjust(8)}  ", style=c.label)
             body.append(value, style=c.text)
+        state = app.unload_markup(c)
+        if state:
+            body.append("\n")
+            line += 1
+            body.append(f"  {'unload'.rjust(8)}  ", style=c.label)
+            body.append_text(Text.from_markup(state))
+            if app.unload == "failed":
+                hint = "hooks off but loaded" if app.hooks_off else "hooks may be on"
+                body.append(f"  {hint}; restart the app to clear them", style=c.dim)
         rows.append((first, line, app.package))
         body.append("\n")
         line += 1
@@ -1901,11 +1946,13 @@ class SpotlightPanel(Widget):
         """Worker: unload everything running in ``package`` (not the app)."""
         stopped: list[str] = []
         failed: list[str] = []
+        why = ""  # the bypass unload's own reason (it says what to do)
         bypass = self._bypass()
         try:
             if any(a.package == package for a in bypass.hooked_apps()):
                 ok, msg = bypass.unload_app(package)
                 (stopped if ok else failed).append("bypasses")
+                why = "" if ok else msg
         except Exception as exc:
             logger.warning(f"Unloading the bypasses in {package} failed: {exc}")
             failed.append("bypasses")
@@ -1943,9 +1990,15 @@ class SpotlightPanel(Widget):
             logger.warning(f"Stopping Objection in {package} failed: {exc}")
             failed.append("Objection")
         if failed:
+            others = [f for f in failed if f != "bypasses"]
+            if why and not others:
+                return False, why + (
+                    f" Unloaded {', '.join(stopped)}." if stopped else ""
+                )
             return False, (
                 f"Could not unload {', '.join(failed)} in {package}"
                 + (f"; unloaded {', '.join(stopped)}" if stopped else "")
+                + (f". {why}" if why else "")
             )
         if not stopped:
             return True, f"Nothing was running in {package} any more"

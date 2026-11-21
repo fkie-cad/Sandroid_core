@@ -849,6 +849,81 @@ def test_hooks_running_line_lists_every_app_when_others_have_hooks():
     assert others_note(3) == "3 other apps have hooks"
 
 
+def test_an_unfinished_unload_stays_listed_with_its_state():
+    """An unload that timed out is never "No other app has hooks now"."""
+    from sandroid.analysis.detection_bypass import HookedApp
+    from sandroid.tui.themes import lens_palette
+    from sandroid.tui.widgets.spotlight_panel import (
+        collect_app_hooks,
+        hooks_inspector,
+        hooks_running_line,
+    )
+
+    c = lens_palette()
+    bypass = SimpleNamespace(
+        hooked_apps=lambda: [
+            HookedApp(OTHER, 88, ("ssl",), 100.0, True, "failed", True)
+        ]
+    )
+    apps = collect_app_hooks(
+        bypass,
+        SimpleNamespace(get_running_tasks=list),
+        SimpleNamespace(get_session=lambda: None),
+    )
+    assert apps[0].unload == "failed"
+    assert apps[0].hooks_off
+    content, _rows = hooks_inspector(apps, PKG, OTHER)
+    body = content.sections[0][1]
+    assert "No other app has hooks" not in body.plain
+    assert "unload failed" in body.plain
+    assert "restart the app to clear them" in body.plain
+    assert "hooks off but loaded" in body.plain
+    # The failure is a red word.
+    start = body.plain.index("unload failed")
+    assert any(
+        span.start <= start < span.end and str(span.style) == c.bad
+        for span in body.spans
+    )
+    line = hooks_running_line(apps, PKG, 100)
+    assert f"[{c.bad}]unload failed[/]" in line
+    assert Text.from_markup(line).plain == f"{OTHER} (1 bypass) unload failed"
+    unloading = _hooks((OTHER, 88, ("ssl",), (), None, "unloading"))
+    assert f"[{c.warn}]◌ unloading[/]" in hooks_running_line(unloading, PKG, 100)
+
+
+def test_work_unload_passes_on_why_the_bypass_unload_failed(monkeypatch):
+    from sandroid.analysis.detection_bypass import HookedApp
+
+    why = (
+        f"Could not unload the bypass hooks in {OTHER}: they are switched "
+        "off but still loaded (an app thread is inside a hooked call). "
+        "Restart the app to clear them."
+    )
+    bypass = SimpleNamespace(
+        hooked_apps=lambda: [HookedApp(OTHER, 88, ("ssl",), 1.0, True)],
+        unload_app=lambda package: (False, why),
+    )
+    monkeypatch.setattr(SpotlightPanel, "_bypass", staticmethod(lambda: bypass))
+    monkeypatch.setattr(
+        SpotlightPanel,
+        "_tasks",
+        staticmethod(lambda: SimpleNamespace(get_running_tasks=list)),
+    )
+    from sandroid import services
+
+    monkeypatch.setattr(
+        services,
+        "get_objection_service",
+        lambda: SimpleNamespace(get_session=lambda: None),
+    )
+    ok, msg = SpotlightPanel._work_unload(
+        SimpleNamespace(_bypass=SpotlightPanel._bypass, _tasks=SpotlightPanel._tasks),
+        OTHER,
+    )
+    assert ok is False
+    assert msg == why
+
+
 def test_header_note_about_other_apps_hooks_is_muted(monkeypatch):
     from sandroid.tui.themes import lens_palette
     from sandroid.tui.widgets import spotlight_panel as sp
