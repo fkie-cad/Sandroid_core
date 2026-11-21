@@ -649,14 +649,16 @@ _PIN_DETAIL = {
         "size_bytes": 50,
     },
 }
-#: What main 1e7de16's network_digest(mask=True) produced for these rows.
+#: What main 1e7de16's network_digest(mask=True) produced for these rows,
+#: except that its mangled ``apikey=***, 12 chars]`` placeholders now stay
+#: whole (R2-B2: redact_secrets ran over already reduced values).
 _PIN_MAIN = (
     "POST https://api.x/v1/login?session_id=[text, 13 chars]&sig=SIGSECRET"
-    "&apikey=***, 12 chars]&page=2 200 · app com.x\n"
-    "query: session_id=[text, 13 chars]; sig=SIGSECRET; apikey=***, 12 chars]; "
+    "&apikey=[text, 12 chars]&page=2 200 · app com.x\n"
+    "query: session_id=[text, 13 chars]; sig=SIGSECRET; apikey=[text, 12 chars]; "
     "page=2\n"
     "request headers: Authorization: [Basic, 26 chars] | Cookie: [cookie, 2 "
-    "part(s), 38 chars] | X-Api-Key: ***, 13 chars] | X-Auth: [value, 11 chars]"
+    "part(s), 38 chars] | X-Api-Key: [value, 13 chars] | X-Auth: [value, 11 chars]"
     " | Content-Type: application/json\n"
     "response headers: Set-Cookie: [set-cookie, 2 part(s), 31 chars] | "
     "Content-Type: application/json\n"
@@ -839,3 +841,99 @@ def test_mask_tool_result_fails_closed(monkeypatch):
     masked = rc.mask_tool_result({"content": "password=hunter2"})
     assert "hunter2" not in json.dumps(masked)
     assert "withheld" in masked["error"]
+
+
+# -- R2 re-verification leftovers (R2-B1 / R2-B2) -------------------------------
+
+#: The R2 device E2E's leaked tool results (R7 get_rows digest, R11
+#: read_host_file), with fake data.
+_R7_DIGEST = (
+    "GET http://example.com/login?email=[text, 19 chars]&token=[text, 14 chars]"
+    "&page=2 404 · app org.mozilla.firefox\n"
+    "resp text/html; charset=utf-8 400 B\n"
+    "query: email=anna.r2@example.org; token=[text, 14 chars]; page=2\n"
+    "request headers: Host: example.com | Accept-Language: en-US\n"
+    "response headers: Date: Sat, 21 Nov 2026 12:02:52 GMT | Age: 4361 | "
+    "CF-RAY: a5df8c468817f966-DUS\n"
+)
+_R11_FILE = (
+    "# demo config\nauth_token=[text, 27 chars]\npassword: [text, 17 chars]\n"
+    "Authorization: [text, 41 chars]\naws_key = [text, 20 chars]\n"
+    "contact email: max.mustermann@example.org\nnote: nothing secret here\n"
+)
+
+
+def test_r2_b1_email_addresses_are_masked_in_digests_and_files():
+    masked = rc.mask_tool_result(
+        {"rows": [{"digest": _R7_DIGEST}], "content": _R11_FILE}
+    )
+    flat = json.dumps(masked)
+    for personal in ("anna.r2@example.org", "max.mustermann@example.org", "@"):
+        assert personal not in flat, personal
+    digest = masked["rows"][0]["digest"]
+    assert "query: email=[text, 19 chars]; token=[text, 14 chars]; page=2" in digest
+    assert "CF-RAY: a5df8c468817f966-DUS" in digest
+    assert "Age: 4361" in digest
+    content = masked["content"]
+    assert "contact email: [text, 26 chars]\n" in content
+    assert "note: nothing secret here" in content
+    assert rc.mask_tool_result(masked) == masked
+
+
+def test_r2_b1_multi_word_names_and_params_after_whitespace():
+    out = rc.mask_text(
+        "contact email: a@b.cd\nuser phone number: 12345\n"
+        "the auth failed for user: bob\nquery: msisdn=4917012345; page=2\n"
+        "note: session=abc keep=1"
+    )
+    assert "contact email: [text, 6 chars]" in out
+    assert "user phone number: [number, 5 chars]" in out
+    # Only a name that ENDS in a sensitive word: "user" is not one.
+    assert "the auth failed for user: bob" in out
+    assert "query: msisdn=[number, 10 chars]; page=2" in out
+    assert "note: session=[text, 3 chars] keep=1" in out
+
+
+def test_r2_b1_personal_values_are_masked_by_value():
+    mask = rc.mask_personal_values
+    assert mask("mail max.mustermann@example.org.") == "mail [email, 26 chars]."
+    assert mask("to=anna%40example.org&x=1") == "to=[email, 18 chars]&x=1"
+    assert mask("call +49 170 1234567 now") == "call [phone, 15 chars] now"
+    assert mask("tel:+4917012345678") == "tel:[phone, 14 chars]"
+    assert mask("US +1 (555) 123-4567") == "US [phone, 17 chars]"
+    assert mask("imei 490154203237518") == "imei [imei, 15 chars]"
+    kept = (
+        "icon@2x.png",  # a file name
+        "2026-11-21T12:04:18.373+00:00",  # a timestamp offset
+        "ts 1763700000000 / 1763700000000123",  # ms / us timestamps
+        "id 490154203237519",  # 15 digits, Luhn fails
+        "4917012345678",  # no + prefix: an id, not a phone
+        "x=1e+1234567",  # exponent
+        "+12 tokens",  # too short
+        "+" + "1" * 40,  # too long (and linear)
+        "sha256 fc045fa28b8b950d · CF-RAY: a5df8c468817f966-DUS",
+    )
+    for text in kept:
+        assert mask(text) == text, text
+    # Linear on long runs.
+    start = time.monotonic()
+    mask(("a" * 5000 + "@") * 20 + ("+1" * 5000) + ("1" * 50000))
+    assert time.monotonic() - start < 2.0
+
+
+def test_r2_b2_digest_keeps_placeholders_whole():
+    row = {
+        "key": "k",
+        "method": "GET",
+        "url": "http://example.com/login?email=anna.r2@example.org"
+        "&token=SECRETTOKEN123&page=2",
+        "status": 404,
+        "app": "org.mozilla.firefox",
+    }
+    text = rc.network_digest(row, detail=None, mask=True).text
+    assert "***, " not in text
+    assert "token=[text, 14 chars]&page=2" in text
+    assert "query: email=[email, 19 chars]; token=[text, 14 chars]; page=2" in text
+    for leaked in ("SECRETTOKEN123", "anna.r2@example.org"):
+        assert leaked not in text
+    assert rc.mask_tool_result(text) == text

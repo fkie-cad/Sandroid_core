@@ -102,6 +102,17 @@ def _log_slow_step(name: str, started: float) -> None:
         logger.info("Quit: %s took %.1fs", name, took)
 
 
+#: Set once the quit's untracked-work check (and its force cleanup) finished:
+#: the exit after the TUI then skips its own, identical check and the
+#: leftover-capture scan (each was another 2.7-3.7 s on a busy host, N5-B4).
+_untracked_checked = threading.Event()
+
+
+def untracked_check_done() -> bool:
+    """Whether this process's quit already ran the untracked-work check."""
+    return _untracked_checked.is_set()
+
+
 def blocking_threads_report() -> str:
     """The threads that can hold the process exit up, with where they are:
     non-daemon threads and executor threads (Textual's thread workers run
@@ -761,6 +772,7 @@ class QuitController:
                     print(f"  - {item}")
                 print("=" * 60)
                 print("Please report this issue for investigation.\n")
+            _untracked_checked.set()
         except Exception as e:
             logger.debug(f"Error in untracked work detection: {e}")
         _log_slow_step("untracked-work check", started)
