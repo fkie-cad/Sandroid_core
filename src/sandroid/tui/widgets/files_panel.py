@@ -80,6 +80,12 @@ shows in the final file's row (summed ops and count), not as a second row;
 the Inspector names the temp file and Events keep the rename. ``N`` shows
 both rows raw. Display only: activity, pulls and results are untouched.
 
+**Paths**: app-relative, a browser profile folder (``<salt>.default``)
+as ``@profile/``; the files below an open group show their path inside it;
+sibling rows that must be shortened share one shortened folder prefix.
+``.`` shows full paths; the Inspector subtitle and toasts break paths
+after a ``/``, never mid-word.
+
 **Row cap** (``tui.monitor_max_lines``, default 500 rows, a group row is
 one): rows hidden by a rule go first, then open-only rows, then the oldest
 shown rows; watched and AI-highlighted rows never. The caption says how
@@ -166,7 +172,15 @@ from .highlight_bar import (
     file_snapshot,
     own_read_events,
 )
-from .lens_shell import InspectorContent, Mark, SessionMarks, ShellHeader, is_shown
+from .lens_shell import (
+    InspectorContent,
+    Mark,
+    SessionMarks,
+    ShellHeader,
+    SlashWrap,
+    is_shown,
+    toast_paths,
+)
 from .monitor_view import (
     OPS,
     FileActivity,
@@ -466,6 +480,9 @@ class _Row:
     members: list[_Row] = field(default_factory=list)
     #: 1 for a member row shown below its expanded group.
     depth: int = 0
+    #: The folder of the expanded group a member row is shown under (its
+    #: path is shown relative to it; None under the idle ★ fold).
+    under: str | None = None
     #: The group row folding the idle ★ rows (``group`` is ``IDLE_FOLD``).
     fold: bool = False
     #: A group made by auto-grouping (many touched siblings), not a rule.
@@ -474,6 +491,27 @@ class _Row:
     #: renamed to "x"), shown in this row instead of their own (display
     #: only; see ``atomic_rename_target``).
     folded: list[_Row] = field(default_factory=list)
+
+
+#: A browser profile folder (Gecko: ``<8 chars>.default``,
+#: ``….default-release``) and everything above it in an app-relative path.
+_PROFILE_DIR_RE = re.compile(r"^(?:[^/]+/)*?[a-z0-9]{8}\.default[A-Za-z0-9_-]*/")
+#: What the lens shows instead (the Inspector has the full path).
+PROFILE_MARK = "@profile/"
+#: A shared, shortened folder prefix needs this many cells, else a row
+#: truncates on its own (``FilesPanel._folder_rooms``).
+_MIN_DIR_ROOM = 8
+
+
+def short_profile(rel: str) -> str:
+    """``files/mozilla/k3m7yjvw.default/cookies.sqlite`` ->
+    ``@profile/cookies.sqlite`` (like ``@de/`` and ``@ext/`` of
+    ``app_relative``); other paths pass through.
+    """
+    match = _PROFILE_DIR_RE.match(rel)
+    if match is None or match.end() >= len(rel):
+        return rel
+    return PROFILE_MARK + rel[match.end() :]
 
 
 def atomic_rename_target(act: PathActivity | None) -> str | None:
@@ -891,6 +929,8 @@ class FilesPanel(Widget):
         self._rows: list[_Row] = []
         self._dirty = True
         self._path_width = 0
+        #: Shown folder -> the cells its shared prefix may take (refresh_rows).
+        self._dir_rooms: dict[str, int] = {}
         #: The table width the columns were last laid out for.
         self._layout_width = 0
         #: Keys of the ★ rows with activity in the view (tinted rows).
@@ -1442,6 +1482,7 @@ class FilesPanel(Widget):
             if row.group is not None and row.group in self._expanded:
                 for member in sorted(row.members, key=order):
                     member.depth = 1
+                    member.under = None if row.fold else row.group
                     out.append(member)
         return out
 
@@ -1806,7 +1847,7 @@ class FilesPanel(Widget):
     def _group_cell(self, row: _Row) -> Text:
         if row.fold:
             return self._fold_cell(row)
-        shown = (row.group or "") if self._full_paths else app_relative(row.group or "")
+        shown = self._display_path(row.group or "")
         n = len(row.members)
         tail = f" · {n} file{'s' if n != 1 else ''}"
         # Another app's group names its package, like its file rows.
@@ -1840,26 +1881,80 @@ class FilesPanel(Widget):
             return Text("  ").append_text(inner)
         return self._path_cell_inner(row)
 
-    def _path_cell_inner(self, row: _Row, indent: int = 0) -> Text:
+    def _display_path(self, path: str) -> str:
+        """``path`` as the table shows it: app-relative, a browser profile
+        folder as ``@profile/`` (``.`` full paths: unchanged).
+        """
+        if self._full_paths:
+            return path
+        return short_profile(app_relative(path))
+
+    def _cell_layout(self, row: _Row, indent: int = 0) -> tuple:
+        """``(owner, shown, suffix, width)`` of a file row's path cell:
+        the path before truncation and the cells it may take.
+        """
         act = row.activity
         moved = act.moved_to if act is not None else None
         # "old.txt renamed to new.txt": the renamed-away row says where the
         # file went.
         suffix = f" renamed to {moved.rsplit('/', 1)[-1]}" if moved else ""
-        shown = row.key if self._full_paths else app_relative(row.key)
+        under = None if self._full_paths else row.under
+        if under and row.key.startswith(under + "/"):
+            # Below its open group the folder is on the group row.
+            shown = row.key[len(under) + 1 :]
+        else:
+            shown = self._display_path(row.key)
         # Short paths drop /data/data/<pkg>/: name the package whenever it
         # is not the monitored app's -- always in REVIEW, where a run lists
         # files of several apps (bugle_db must not read as Wikipedia's).
-        owner = None if self._full_paths else self._foreign_package(row)
-        if not self._full_paths:
+        owner = None if self._full_paths or under else self._foreign_package(row)
+        width = self._path_width - len(suffix) - indent
+        if self._full_paths:
+            return owner, shown, suffix, width
+        if suffix and width < 12:
+            suffix = " renamed"
             width = self._path_width - len(suffix) - indent
-            if suffix and width < 12:
-                suffix = " renamed"
-                width = self._path_width - len(suffix)
-            if owner:
-                owner = smart_truncate(owner, max(6, min(len(owner), width // 2)))
-                width -= len(owner) + 2
-            shown = smart_truncate(shown, max(4, width))
+        if owner:
+            owner = smart_truncate(owner, max(6, min(len(owner), width // 2)))
+            width -= len(owner) + 2
+        return owner, shown, suffix, width
+
+    def _folder_rooms(self, rows: list[_Row]) -> dict[str, int]:
+        """Per shown folder, the cells its path may take so that every
+        sibling row fits: siblings share one truncated prefix
+        (``files/…/k3m7y….default/`` vs ``files/…/k3m7…default/`` was
+        the old per-row result).
+        """
+        rooms: dict[str, int] = {}
+        if self._full_paths:
+            return rooms
+        for row in rows:
+            if row.group is not None or row.depth:
+                continue
+            _owner, shown, _suffix, width = self._cell_layout(row)
+            head, sep, name = shown.rpartition("/")
+            if not sep:
+                continue
+            room = width - len(name) - 1
+            if room >= _MIN_DIR_ROOM:
+                rooms[head] = min(rooms.get(head, room), room)
+        return rooms
+
+    def _path_cell_inner(self, row: _Row, indent: int = 0) -> Text:
+        act = row.activity
+        moved = act.moved_to if act is not None else None
+        owner, shown, suffix, width = self._cell_layout(row, indent)
+        if not self._full_paths:
+            head, sep, name = shown.rpartition("/")
+            room = self._dir_rooms.get(head) if sep and not row.depth else None
+            if room is not None and len(head) > room:
+                # The folder alone, its last part elided like any folder
+                # (a stand-in name keeps smart_truncate from keeping it whole).
+                cut = smart_truncate(f"{head}/\0", room + 2)
+                cut = cut[:-2] if cut.endswith("/\0") else smart_truncate(head, room)
+                shown = f"{cut}/{name}"
+            elif len(shown) > width:
+                shown = smart_truncate(shown, max(4, width))
         head, sep, name = shown.rpartition("/")
         text = Text(no_wrap=True, overflow="ellipsis")
         if owner:
@@ -1987,6 +2082,7 @@ class FilesPanel(Widget):
                     or any(t.key in new for t in r.folded)
                 )
             )
+        self._dir_rooms = self._folder_rooms(rows)
         with self.app.batch_update():
             table.clear()
             order = ("mark", "path", "ops", "count", "last", "ident", "hl")
@@ -2763,7 +2859,9 @@ class FilesPanel(Widget):
                 top = sorted(procs.items(), key=lambda kv: -kv[1])[:3]
                 grid.add_row("by", ", ".join(name for name, _n in top))
             if act.moved_to:
-                grid.add_row("now", Text(f"renamed to {app_relative(act.moved_to)}"))
+                grid.add_row(
+                    "now", SlashWrap(f"renamed to {app_relative(act.moved_to)}")
+                )
             elif act.deleted:
                 grid.add_row("now", Text("deleted", style=op_color("delete")))
             for temp in row.folded:
@@ -3125,7 +3223,8 @@ class FilesPanel(Widget):
         wl = self.watchlist
         if row.watched is not None and row.watched != row.key and not row.pattern:
             self.app.notify(
-                f"Watched via {row.watched} — unwatch that row.", severity="warning"
+                toast_paths(self.app, f"Watched via {row.watched} — unwatch that row."),
+                severity="warning",
             )
             return
         if row.watched is not None:
@@ -3164,7 +3263,9 @@ class FilesPanel(Widget):
                 if act.moved_to
                 else "deleted on the device"
             )
-            self.app.notify(f"Nothing to pull: {what}.", severity="warning")
+            self.app.notify(
+                toast_paths(self.app, f"Nothing to pull: {what}."), severity="warning"
+            )
             return
         if row.watched is None:
             path = self._absolute(row.key)
@@ -3315,7 +3416,11 @@ class FilesPanel(Widget):
             )
             return
         how = "saved" if always else "this session"
-        self.app.notify(f"Hidden: {shown} ({how}; R undoes)", timeout=4, markup=False)
+        self.app.notify(
+            toast_paths(self.app, f"Hidden: {shown} ({how}; R undoes)"),
+            timeout=4,
+            markup=False,
+        )
 
     def action_toggle_watched_only(self) -> None:
         """``W``: watched files only ↔ all rows."""

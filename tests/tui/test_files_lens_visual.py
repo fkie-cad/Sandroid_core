@@ -117,3 +117,94 @@ async def test_a_backup_rename_and_a_move_to_another_folder_stay_rows() -> None:
         assert prefs + ".bak" in keys
         assert moved + ".tmp" in keys
         await pilot.pause()
+
+
+# --------------------------------------------------------------------------
+# V3: paths (group members, profile marker, shared prefixes, "/" breaks)
+# --------------------------------------------------------------------------
+
+PROFILE = f"{ROOT}/files/mozilla/k3m7yjvw.default"
+
+
+def test_a_browser_profile_folder_reads_profile() -> None:
+    from sandroid.tui.widgets.files_panel import short_profile
+
+    assert short_profile("files/mozilla/k3m7yjvw.default/cookies.sqlite") == (
+        "@profile/cookies.sqlite"
+    )
+    assert short_profile("files/mozilla/ab12cd34.default-release/x/y") == (
+        "@profile/x/y"
+    )
+    assert short_profile("files/places.sqlite") == "files/places.sqlite"
+    assert short_profile("files/mozilla/k3m7yjvw.default/") == (
+        "files/mozilla/k3m7yjvw.default/"
+    )
+
+
+async def test_members_of_an_open_group_show_their_name_only() -> None:
+    folder = f"{PROFILE}/safebrowsing-updating"
+    files = [f"{folder}/list-{i:02d}.sbstore" for i in range(25)]
+    app = _Harness()
+    async with app.run_test(size=(160, 40)) as pilot:
+        panel = app.query_one(FilesPanel)
+        panel.ingest(_items(*[_fse("FSE_CREATE_FILE", f) for f in files]), now=T0)
+        _keys(panel)
+        group = next(r for r in panel._rows if r.group == folder)
+        assert str(panel._path_cell(group)).startswith(
+            "@profile/safebrowsing-updating/ · 25 files"
+        )
+        panel._expanded.add(folder)
+        _keys(panel)
+        member = _row(panel, files[3])
+        assert str(panel._path_cell(member)) == "  list-03.sbstore"
+        # Full paths (.) show the whole path again.
+        panel._full_paths = True
+        _keys(panel)
+        assert str(panel._path_cell(_row(panel, files[3]))) == f"  {files[3]}"
+        await pilot.pause()
+
+
+async def test_siblings_share_one_truncated_prefix() -> None:
+    origin = f"{PROFILE}/storage/default/https+++www.a-very-long-origin.example.org"
+    short = f"{origin}/ls/usage"
+    long = f"{origin}/ls/data-with-a-much-longer-name.sqlite"
+    app = _Harness()
+    async with app.run_test(size=(90, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        panel.ingest(
+            _items(_fse("FSE_CREATE_FILE", short), _fse("FSE_CREATE_FILE", long)),
+            now=T0,
+        )
+        _keys(panel)
+        cells = [str(panel._path_cell(_row(panel, k))) for k in (short, long)]
+        heads = {c.rpartition("/")[0] for c in cells}
+        assert len(heads) == 1, cells
+        assert "…" in heads.pop()
+        assert cells[0].endswith("/usage")
+        assert cells[1].endswith("/data-with-a-much-longer-name.sqlite")
+        await pilot.pause()
+
+
+def test_paths_break_after_a_slash() -> None:
+    from rich.console import Console
+
+    from sandroid.tui.widgets.lens_shell import SlashWrap, slash_lines, toast_paths
+
+    path = f"{PROFILE}/storage/default/https+++www.zeit.de/ls/data.sqlite"
+    lines = slash_lines(path, 40)
+    assert "".join(lines) == path
+    assert all(len(line) <= 40 for line in lines)
+    assert all(line.endswith("/") for line in lines[:-1])
+    assert slash_lines(f"Watching {path} now", 57)[0] == (
+        "Watching /data/data/com.example.fit/files/mozilla/"
+    )
+    console = Console(width=40, color_system=None, record=True)
+    console.print(SlashWrap(path))
+    assert console.export_text().splitlines() == lines
+
+    class _App:
+        size = type("S", (), {"width": 120})()
+
+    toast = toast_paths(_App(), f"Watching {path}")
+    assert all(len(line) <= 57 for line in toast.splitlines())
+    assert toast.replace("\n", "") == f"Watching {path}"

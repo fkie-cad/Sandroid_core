@@ -1281,7 +1281,10 @@ class WatchlistView(Widget):
 
     def _notify(self, message: str, severity: str = "information") -> None:
         try:
-            self.app.notify(message, severity=severity)
+            from .lens_shell import toast_paths
+
+            # Paths wrap after a "/", never mid-word.
+            self.app.notify(toast_paths(self.app, message), severity=severity)
         except Exception:
             pass
 
