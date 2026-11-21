@@ -1151,6 +1151,11 @@ class NetworkMethodService:
                 text = f"{LABELS[preset]} stopped at {failure}"
             return ApplyResult(False, text, done=done, view=view)
         message = f"Network method: {view.name}"
+        if ("inject_ca",) in ran and "CA installed" in done:
+            # Never silently: the user may just have removed it (E2E N3-V13).
+            note = f"Installed the Sandroid CA for {LABELS[preset]}"
+            logger.info(note)
+            message += f". {note}"
         if view.problems:
             message += ". " + _sentence(view.problems)
         return ApplyResult(True, message, done=done, view=view)

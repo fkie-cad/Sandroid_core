@@ -532,3 +532,30 @@ def test_flow_dir_follows_the_session_not_a_running_play(tmp_path, monkeypatch):
         lambda: SimpleNamespace(get_raw_path=lambda: None),
     )
     assert flow_log.resolve_flow_dir() == live
+
+
+def test_quit_summary_lists_the_flow_log(tmp_path, monkeypatch):
+    """N3-V13: the quit summary named the pcap but not raw/mitm_flows/."""
+    import io
+
+    from rich.console import Console
+
+    from sandroid.core.console import SandroidConsole
+    from sandroid.services.renderers import ExitSummaryRenderer
+
+    flows = tmp_path / "raw" / "mitm_flows"
+    flows.mkdir(parents=True)
+    (flows / "flows.jsonl").write_text("{}\n")
+    out = io.StringIO()
+    monkeypatch.setattr(
+        SandroidConsole, "get", classmethod(lambda cls: Console(file=out, width=200))
+    )
+    monkeypatch.setattr(flow_log, "resolve_flow_dir", lambda: flows)
+    monkeypatch.setenv("SESSION_PATH", str(tmp_path))
+    ExitSummaryRenderer.print_exit_summary({})
+    assert "Mitmproxy flows: raw/mitm_flows/" in out.getvalue()
+    (flows / "flows.jsonl").unlink()
+    out.seek(0)
+    out.truncate(0)
+    ExitSummaryRenderer.print_exit_summary({})
+    assert "Mitmproxy flows" not in out.getvalue()  # empty: not listed

@@ -273,6 +273,22 @@ def test_service_apply_confirm_path_changes_nothing(monkeypatch):
     assert [s[0] for s in rec.steps][:2] == ["prepare_guard", "set_device_proxy"]
 
 
+def test_apply_says_when_it_installed_the_ca(monkeypatch):
+    """N3-V13: Whole device re-installed a CA the user had just removed
+    without a word; the result toast says so now.
+    """
+    service, rec = _service(monkeypatch, replace(BASE, ca="missing"))
+    rec.run = lambda step, serial: (
+        rec.steps.append(step)
+        or (True, "CA installed" if step[0] == "inject_ca" else "")
+    )
+    result = service.apply(nm.WHOLE_DEVICE)
+    assert result.ok
+    assert "Installed the Sandroid CA for Whole device" in result.message
+    service2, _ = _service(monkeypatch, BASE)  # CA already there: no note
+    assert "Sandroid CA" not in service2.apply(nm.WHOLE_DEVICE).message
+
+
 def test_service_publishes_on_change(monkeypatch):
     from sandroid.core.events import EventBus, EventType
 
