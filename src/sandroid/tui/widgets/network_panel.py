@@ -2618,7 +2618,7 @@ class NetworkPanel(Widget):
             title=f"{row.method} {label}",
             subtitle=rich_escape(_ellipsize(row.host + row.path, 300)),
             tabs=tabs,
-            footer="Left/Right: tab",
+            footer="Left/Right tab",
             key=key,
             lens=LENS_ID,
         )
@@ -2665,7 +2665,7 @@ class NetworkPanel(Widget):
         return InspectorContent(
             title="Network status",
             tabs=[("Mitmproxy", m_sections), ("friTap", f_sections)],
-            footer="Left/Right: tab",
+            footer="Left/Right tab",
             key=STATUS_KEY,
             lens=LENS_ID,
         )

@@ -419,14 +419,14 @@ class ActivityLog(RichLog):
         """
         if app_name:
             self.write(
-                f"[{fixed_color('running')} bold]>>> Started: {task_name} on {app_name}[/]"
+                f"[{fixed_color('running')} bold]Started: {task_name} on {app_name}[/]"
             )
         else:
-            self.write(f"[{fixed_color('running')} bold]>>> Started: {task_name}[/]")
+            self.write(f"[{fixed_color('running')} bold]Started: {task_name}[/]")
 
     def log_task_updated(self, task_name: str) -> None:
         """Log a task display-name change (not a restart)."""
-        self.write(f"[{fixed_color('running')}][~] {task_name}[/]")
+        self.write(f"[{fixed_color('running')}]Running: {task_name}[/]")
 
     def log_task_stopped(self, task_name: str) -> None:
         """Log a task stopped event.
@@ -438,7 +438,7 @@ class ActivityLog(RichLog):
         Args:
             task_name: Name of the task
         """
-        line = f"<<< Stopped: {task_name}"
+        line = f"Stopped: {task_name}"
         if self._is_repeat(line):
             return
         muted = self._get_theme_colors()["text_muted"]

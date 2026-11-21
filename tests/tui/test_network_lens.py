@@ -2761,3 +2761,52 @@ def test_activity_log_task_errors_are_red():
         "[#ff0000]"
     )
     assert ActivityLog._level_colored("plain line", colors) == "plain line"
+
+
+def test_network_lines_say_it_in_words_not_glyphs(monkeypatch):
+    """N3-V4: "[OK]" / "[~]" markers, "<<< Stopped:", ">>> Started:", the 🔑
+    of friTap key lines and the "X" of "X Command Failed" became words.
+    """
+    import re
+
+    from sandroid.analysis.fritap_formatter import FriTapMessageFormatter
+    from sandroid.tui.modals.message_modal import ErrorModal
+    from sandroid.tui.widgets.fritap_panel import FriTapPanel
+    from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
+
+    glyphs = re.compile(r"\[OK\]|\[~\]|<<<|>>>|🔑|→|✓")
+    mitm = MitmproxyPanel()
+    for line in (
+        "[INFO] [OK] device proxy set to 10.0.2.2:8090",
+        "[INFO] [~] waiting for the device to settle…",
+    ):
+        mitm._log(line)
+    assert list(mitm.recent_lines) == [
+        "device proxy set to 10.0.2.2:8090",
+        "waiting for the device to settle…",
+    ]
+    key = FriTapMessageFormatter._format_keylog(
+        {"keylog": "CLIENT_RANDOM abc 0123456789abcdef0123"}
+    )
+    assert key.startswith("TLS key CLIENT_RANDOM")
+    fritap = FriTapPanel()
+    monkeypatch.setattr(fritap, "refresh_header", lambda: None)
+    fritap._append_line(key)
+    fritap._append_line("🔑 CLIENT_RANDOM: 5f1e")  # an older engine
+    assert fritap._keys == 2
+    for text in [*mitm.recent_lines, *fritap.recent_lines]:
+        assert not glyphs.search(text), text
+    assert "X" not in ErrorModal("Command Failed", "boom").title_text.split()
+
+
+async def test_inspector_footer_and_ticker_keys_are_words(flow_dir):
+    """N3-V4: "Left/Right: tab   [ ] tabs   esc close" and "^Y AI"."""
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        await pilot.press("enter")
+        await settle(pilot)
+        footer = ms.query_one("#inspector").border_subtitle
+        assert footer == "Left/Right tab · [ ] tabs · Esc close"
+        hint = str(ms.query_one("#log-ticker-hint").render())
+        assert hint.startswith("Ctrl+Y AI")

@@ -38,6 +38,7 @@ from rich.markup import escape as rich_escape
 from textual.widget import Widget
 
 from sandroid.services.mitmproxy_service import get_mitmproxy_service
+from sandroid.tui.themes import fixed_color
 from sandroid.tui.utils.markup import escape
 from sandroid.tui.utils.ui_thread import UiDispatcher
 
@@ -540,6 +541,12 @@ class MitmproxyPanel(Widget):
             text, color = line[len("[INFO]") :].strip(), ""
         else:
             text, color = line.strip(), "#5b6479"
+        # "[OK]" / "[~]" mark a confirmation / a hint: the colour says it,
+        # the marker is dropped (no bracket glyphs in the log, N3-V4).
+        if text.startswith("[OK] "):
+            text, color = text[len("[OK] ") :], color or fixed_color("running")
+        elif text.startswith("[~] "):
+            text = text[len("[~] ") :]
         if not text:
             return
         self.recent_lines.append(("✗ " if color == "#fb7185" else "") + text)
@@ -864,7 +871,7 @@ class MitmproxyPanel(Widget):
         st = self._service.state
         if not self._service.is_running():
             return (
-                f"No flows yet — space starts mitmproxy on :{st.proxy_port}",
+                f"No flows yet — Space starts Mitmproxy on :{st.proxy_port}",
                 "then Ctrl+D routes the device · Ctrl+N installs the CA · "
                 "y proxy settings",
             )
@@ -1591,7 +1598,7 @@ class MitmproxyPanel(Widget):
                 self._proxy_state = "ours"
                 self._proxy_addr = addr
                 self._set_glance_device_proxy(addr)
-                self._append_line(f"[INFO] [OK] device proxy → {addr}")
+                self._append_line(f"[INFO] [OK] device proxy set to {addr}")
             else:
                 self._append_line("[ERROR] Failed to set device proxy")
         except Exception as exc:

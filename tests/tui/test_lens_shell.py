@@ -208,7 +208,7 @@ async def test_ticker_attention_badge_names_ctrl_y_once() -> None:
         def hint() -> str:
             return label.render().plain
 
-        assert hint() == "^Y AI · ` log"
+        assert hint() == "Ctrl+Y AI · ` log"
         ticker.set_attention("approval needed · ^Y")
         await settle(pilot)
         assert hint() == "approval needed · ^Y · ` log"
@@ -218,7 +218,7 @@ async def test_ticker_attention_badge_names_ctrl_y_once() -> None:
         assert hint() == "approval needed · ^Y · ` close log"
         ticker.set_attention(None)
         await settle(pilot)
-        assert hint() == "^Y AI · ` close log"
+        assert hint() == "Ctrl+Y AI · ` close log"
         assert not label.has_class("-attention")
 
 
@@ -1799,10 +1799,10 @@ async def test_drawer_lines_use_the_drawer_width_and_only_errors_are_red(
         pulled = [i for i, t in enumerate(texts) if "INFO:" in t and "Pulled" in t]
         assert pulled, texts
         # The long line uses the drawer width (it wrapped at 20 columns).
-        stop = next(i for i, t in enumerate(texts) if "<<< Stopped" in t)
+        stop = next(i for i, t in enumerate(texts) if "Stopped: " in t)
         assert stop - pulled[0] <= (3 if size[0] >= 200 else 6)  # 20 cols: 13
         assert max(len(t) for t in texts[pulled[0] : stop]) > 60
-        assert sum("<<< Stopped: Monitor" in t for t in texts) == 1
+        assert sum("Stopped: Monitor" in t for t in texts) == 1
         # No red / magenta on the INFO line (paths) or the normal stop.
         red = {"#fb7185", "#ff5555", "magenta", "bright_magenta"}
         for strip in log.lines[pulled[0] :]:

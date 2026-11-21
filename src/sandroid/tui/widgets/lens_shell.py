@@ -12,7 +12,7 @@ Layout (top to bottom, see ``MainScreen.compose``)::
         #lens-host  framed ContentSwitcher #lens-body holding the six lenses
         #chat-dock  the AI chat under the lens (Ctrl+Y; hidden while closed)
       #side-slot  right-hand slot: Inspector #inspector
-    LogTicker     #log-ticker     newest log line + "^Y AI · ` log" hint
+    LogTicker     #log-ticker     newest log line + "Ctrl+Y AI · ` log" hint
     LogDrawer     #log-drawer     hidden; ` toggles it; holds ActivityLog #activity-log
     SandroidFooter
 
@@ -1011,8 +1011,8 @@ class Inspector(Vertical):
         hints = [content.footer] if content.footer else []
         if content.tabs:
             hints.append(r"\[ ] tabs")
-        hints.append("esc close")
-        self.border_subtitle = "   ".join(hints)
+        hints.append("Esc close")
+        self.border_subtitle = " · ".join(hints)
         try:
             sub = self.query_one("#inspector-subtitle", Static)
             sub.update(_as_text(content.subtitle) if content.subtitle else "")
@@ -1205,10 +1205,10 @@ class LogTicker(Horizontal):
     """
 
     #: The hint (AI chat + log drawer keys), drawer closed / open.
-    HINT = "^Y AI · ` log"
-    HINT_OPEN = "^Y AI · ` close log"
+    HINT = "Ctrl+Y AI · ` log"
+    HINT_OPEN = "Ctrl+Y AI · ` close log"
     #: The same without the AI key, for while an attention badge (which
-    #: names ^Y itself) stands before it.
+    #: names Ctrl+Y itself) stands before it.
     HINT_LOG = "` log"
     HINT_LOG_OPEN = "` close log"
     #: Log lines shown (the widget's height).
@@ -1243,8 +1243,8 @@ class LogTicker(Horizontal):
         self.lines: list[str] = []
         self._renderables: list[Any] = []
         self._drawer_open = False
-        #: A badge shown before the hint (e.g. "approval needed · ^Y"); it
-        #: carries the ^Y key, so the hint then leaves "^Y AI" out.
+        #: A badge shown before the hint (e.g. "approval needed · Ctrl+Y"); it
+        #: carries the Ctrl+Y key, so the hint then leaves "Ctrl+Y AI" out.
         self.attention: str | None = None
 
     def compose(self) -> ComposeResult:

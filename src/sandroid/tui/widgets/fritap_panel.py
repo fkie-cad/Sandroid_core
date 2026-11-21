@@ -199,8 +199,11 @@ class FriTapPanel(Widget):
         stripped, was_error, was_warning = self._strip_pseudo_tags(line)
 
         # Prefix/substring dispatch. Shapes come from fritap_formatter.py:
-        # keylog "🔑 …", datalog "… (N bytes)", error "ERROR: …".
-        if "🔑" in stripped:
+        # keylog "TLS key …" (older engines: "🔑 …"), datalog "… (N bytes)",
+        # error "ERROR: …". A key emoji is shown as the words (N3-V4).
+        if stripped.startswith("🔑"):
+            stripped = "TLS key" + stripped[1:].rstrip()
+        if stripped.startswith("TLS key"):
             self._keys += 1
         elif "bytes)" in stripped:
             self._datalog += 1
@@ -218,8 +221,8 @@ class FriTapPanel(Widget):
     @staticmethod
     def _check_tag(label: str, ok: bool) -> str:
         if ok:
-            return f"[#4ade80]{label} ✓[/]"
-        return f"[#5b6479]{label} ○[/]"
+            return f"[#4ade80]{label} ● on[/]"
+        return f"[#5b6479]{label} ○ off[/]"
 
     @staticmethod
     def _phase() -> tuple[str, str]:

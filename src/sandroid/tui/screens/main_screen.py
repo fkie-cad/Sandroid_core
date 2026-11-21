@@ -1290,10 +1290,10 @@ class MainScreen(Screen):
             height = max(1, col.size.height if col is not None else 1)
             return f"{round(100 * self._chat_drag_rows / height)}% · release to snap"
         if self._chat_mode == "max":
-            return key_words("max · ⇧↓ restore · ^Y close")
+            return key_words("max · ⇧↓ restore · Ctrl+Y close")
         if self._chat_too_short():
-            return "small window · ^Y close"
-        return key_words(f"{round(self._chat_ratio * 100)}% · ⇧↑/↓ size · ^Y close")
+            return "small window · Ctrl+Y close"
+        return key_words(f"{round(self._chat_ratio * 100)}% · ⇧↑/↓ size · Ctrl+Y close")
 
     def open_chat(self, focus: bool = True, *, split: bool = False) -> None:
         """Open the chat dock (max if that was the last choice).

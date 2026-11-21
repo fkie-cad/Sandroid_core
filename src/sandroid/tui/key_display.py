@@ -7,7 +7,8 @@ look identical to the global ``r`` Record. Every place that shows a key to the
 user goes through :func:`format_key` so a shifted letter is always marked:
 
 * ``compact`` (footer, in-panel hint lines): ``r`` -> ``r``, ``R`` ->
-  ``Shift+R``, ``ctrl+b`` -> ``^b``, ``shift+right`` -> ``Shift+Right``.
+  ``Shift+R``, ``ctrl+b`` -> ``Ctrl+B``, ``shift+right`` -> ``Shift+Right``
+  (no ``^b`` / ``esc``: keys are words in both styles, E2E N3-V4).
 * ``long`` (help catalog, palette, detail panes): ``r`` -> ``r``,
   ``R`` -> ``Shift+R``, ``ctrl+b`` -> ``Ctrl+B``, ``question_mark`` -> ``?``.
 
@@ -50,10 +51,10 @@ _NAMED: dict[str, tuple[str, str]] = {
     "space": ("Space", "Space"),
     " ": ("Space", "Space"),
     "enter": ("Enter", "Enter"),
-    "escape": ("esc", "Esc"),
+    "escape": ("Esc", "Esc"),
     "tab": ("Tab", "Tab"),
     "backspace": ("Backspace", "Backspace"),
-    "delete": ("del", "Del"),
+    "delete": ("Del", "Del"),
     "question_mark": ("?", "?"),
     "comma": (",", ","),
     "full_stop": (".", "."),
@@ -74,10 +75,10 @@ _NAMED: dict[str, tuple[str, str]] = {
     "down": ("Down", "Down"),
     "left": ("Left", "Left"),
     "right": ("Right", "Right"),
-    "home": ("home", "Home"),
-    "end": ("end", "End"),
-    "pageup": ("pgup", "PgUp"),
-    "pagedown": ("pgdn", "PgDn"),
+    "home": ("Home", "Home"),
+    "end": ("End", "End"),
+    "pageup": ("PgUp", "PgUp"),
+    "pagedown": ("PgDn", "PgDn"),
 }
 
 
@@ -113,15 +114,16 @@ def format_key(key: str | None, style: str = "long") -> str:
     if base.lower() in _NAMED:
         label = _NAMED[base.lower()][0 if compact else 1]
     elif len(base) == 1:
-        # Keep the real case for plain letters; shifted ones are upper-case.
-        label = base.upper() if ("shift" in mods or (mods and not compact)) else base
+        # Keep the real case for plain letters; shifted ones and those with
+        # a modifier (Ctrl+B) are upper-case.
+        label = base.upper() if ("shift" in mods or mods) else base
     else:
         label = base if compact else base.title()
 
     if compact:
         prefix = ""
         if "ctrl" in mods:
-            prefix += "^"
+            prefix += "Ctrl+"
         if "alt" in mods:
             prefix += "Alt+"
         if "shift" in mods:
