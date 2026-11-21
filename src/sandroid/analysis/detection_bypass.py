@@ -3522,12 +3522,22 @@ class BypassService:
             return None
 
     def _active_for(self, package: str | None) -> set[str]:
-        """Categories active in ``package``'s own script (resident or parked)."""
+        """Categories active in ``package``'s own script (resident or parked).
+
+        The parked record is read first: with no resident script
+        (``_app_package`` None, e.g. after the selection moved to an app
+        that has no hooks and back), ``package``'s parked hooks are what is
+        really loaded there, so a toggle adds or removes only on top of them.
+        """
         with self._lock:
-            if package is None or self._app_package in (None, package):
+            if package is None or self._app_package == package:
                 return set(self._active)
             rec = self._parked.get(package)
-            return set(rec.categories) if rec and not rec.unload else set()
+            if rec is not None:
+                return set(rec.categories) if not rec.unload else set()
+            if self._app_package is None:
+                return set(self._active)
+            return set()
 
     @staticmethod
     def _job_session(job: Any) -> Any:

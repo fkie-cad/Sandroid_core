@@ -2774,6 +2774,42 @@ def test_selecting_the_first_app_again_brings_its_script_back(two_apps):
     assert _on(second.script) == {"root"}
 
 
+@pytest.mark.parametrize("how", ["star", "picker"])
+def test_back_on_an_app_with_parked_hooks_they_read_on_and_a_toggle_adds(two_apps, how):
+    """N6-B1: SSL+Root on OTHER, a hook-free app selected (its start parks
+    OTHER's script, nothing is resident), then back to OTHER with ``*`` or
+    the picker. Its bypasses read on, and ``b 3`` adds one category on top
+    of what is loaded instead of unloading SSL and Root.
+    """
+    env, bypass = two_apps, two_apps.bypass
+    env.select(OTHER)
+    bypass.toggle("ssl")
+    bypass.toggle("root")
+    first = bypass._job
+    env.select(PKG)
+    assert bypass.park_for(PKG) is None  # the start of PKG parks OTHER's
+    assert bypass._job is None
+    assert bypass._app_package is None
+    assert bypass.on_categories() == []
+
+    if how == "star":
+        env.spotlight.set_app(OTHER, pid=env.pids[OTHER])
+    else:  # the picker: a new selection, armed cleared
+        env.select(OTHER)
+        bypass.disarm_all()
+    assert bypass.on_categories() == ["root", "ssl"]
+
+    now_on, msg = bypass.toggle("debug")
+    assert now_on is True, msg
+    assert bypass._job is first  # the parked script, no second one
+    assert _on(first.script) == {"ssl", "root", "debug"}
+    assert not first.closed
+    # Off removes only the chosen category.
+    assert bypass.toggle("root")[0] is False
+    assert _on(first.script) == {"ssl", "debug"}
+    assert bypass.on_categories() == ["debug", "ssl"]
+
+
 def test_unloading_the_other_app_leaves_the_selected_one(two_apps):
     env, bypass = two_apps, two_apps.bypass
     env.select(OTHER)
