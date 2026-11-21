@@ -3,17 +3,21 @@
 Opened with ``R`` on the Files lens. Shows every hide / group rule in order
 and applies each change at once: the lens re-draws and the rules are saved to
 the config (``sandroid.config.update_config``, the same mechanism as the
-Settings screen). Keys: Space toggles the highlighted rule, Delete (or
-``d``) removes it, the row below adds one (action, kind, pattern, Enter),
-"Reset to defaults" restores the shipped rules. Esc closes.
+Settings screen; only the changes to the shipped defaults are saved, see
+``merge_files_noise_rules``). Keys: Space toggles the highlighted rule,
+Delete (or ``d``) removes it (a default rule is turned off instead; ``u``
+undoes the last removal), Home/End jump to the first/last rule, the row
+below adds one (action, kind, pattern, Enter), "Reset to defaults" restores
+the shipped rules. Esc closes.
 
 Rule kinds: ``prefix`` (absolute path starts with), ``segment`` (a
 directory named so), ``suffix`` (file name ends with), ``glob`` (``fnmatch``
 on the absolute or app-relative path). Actions: ``hide`` (``N`` in the lens
 still shows the rows) and ``group`` (one expandable row per folder).
 
-Rules added with ``M`` for this session only are listed too, marked "this
-session"; they apply but are never saved (removing one here undoes it).
+Rules added with ``M`` for this session only are listed too, marked
+"session" in the "kept" column (``default`` / ``saved`` / ``session``); they
+apply but are never saved (removing one here undoes it).
 
 :class:`MuteRowModal` is that ``M`` chooser: this folder / parent folder /
 this file with the number of rows each would hide; Enter hides for this
@@ -45,6 +49,7 @@ from sandroid.config.schema import (
     default_files_noise_rules,
 )
 from sandroid.tui.themes import lens_palette
+from sandroid.tui.widgets.monitor_view import app_relative
 
 from .base import ForensicModal, KeyHintFooter
 
@@ -62,14 +67,57 @@ _KIND_HELP = {
 }
 
 
+def fit_path(path: str, width: int) -> str:
+    """``path`` in ``width`` cells, cut only at ``/``: the first part and
+    as many trailing parts as fit (``/data/…/default/https+++x.com/``).
+    Only a last part longer than ``width`` loses its start.
+    """
+    if width <= 1:
+        return "…" if path else ""
+    if len(path) <= width:
+        return path
+    trail = "/" if path.endswith("/") else ""
+    parts = path.rstrip("/").split("/")
+    head = parts[0] + "/" if len(parts) > 2 else ""
+    tail = parts[-1] + trail
+    middle = parts[1:-1] if head else parts[:-1]
+    for part in reversed(middle):
+        candidate = f"{part}/{tail}"
+        if len(head) + 2 + len(candidate) > width:
+            break
+        tail = candidate
+    shown = f"{head}…/{tail}"
+    if len(shown) <= width:
+        return shown
+    return "…" + path[-(width - 1) :]
+
+
+def _default_idents() -> set[tuple]:
+    return {(r["action"], r["kind"], r["pattern"]) for r in default_files_noise_rules()}
+
+
 class _RulesTable(DataTable):
-    """The rule list: Space toggles, Delete / d removes."""
+    """The rule list: Space toggles, Delete / d removes, u undoes."""
 
     BINDINGS = [
         Binding("space", "toggle_rule", "On/off", show=False),
         Binding("delete", "remove_rule", "Remove", show=False),
         Binding("d", "remove_rule", "Remove", show=False),
+        Binding("u", "undo_remove", "Undo", show=False),
     ]
+
+    # Home/End move the cursor to the first/last rule (DataTable's own
+    # scroll the table sideways in row mode).
+    def action_scroll_home(self) -> None:
+        self.action_scroll_top()
+
+    def action_scroll_end(self) -> None:
+        self.action_scroll_bottom()
+
+    def action_undo_remove(self) -> None:
+        screen = self.screen
+        if isinstance(screen, NoiseRulesModal):
+            screen.undo_remove()
 
     def action_toggle_rule(self) -> None:
         screen = self.screen
@@ -104,6 +152,7 @@ class NoiseRulesModal(ForensicModal[None]):
     NoiseRulesModal #rules-table {
         height: 1fr;
         min-height: 3;
+        overflow-x: hidden;
     }
     NoiseRulesModal #rules-add {
         height: auto;
@@ -127,6 +176,8 @@ class NoiseRulesModal(ForensicModal[None]):
         super().__init__(**kwargs)
         self._rules: list[dict] = [dict(r) for r in rules]
         self._apply = apply
+        #: The last removed rule and where it was (``u`` puts it back).
+        self._removed: tuple[int, dict] | None = None
 
     @property
     def rules(self) -> list[dict]:
@@ -141,14 +192,15 @@ class NoiseRulesModal(ForensicModal[None]):
                 "(N in the lens shows everything raw), [b]group[/b] collapses "
                 "them into one row per folder. Open-only rows are hidden by "
                 "tui.monitor_event_visibility (noise = verbose, Settings). "
-                "Rules marked [b]this session[/b] (from M) are not saved.",
+                "Rules kept for this [b]session[/b] (from M) are not saved.",
                 id="rules-help",
             )
             table = _RulesTable(id="rules-table", cursor_type="row")
-            table.add_column("on", width=5, key="on")
+            table.add_column("on", width=2, key="on")
+            table.add_column("kept", width=7, key="kept")
             table.add_column("action", width=6, key="action")
-            table.add_column("kind", width=8, key="kind")
-            table.add_column("pattern", key="pattern")
+            table.add_column("kind", width=7, key="kind")
+            table.add_column("pattern", width=self._PATTERN_MIN, key="pattern")
             yield table
             with Horizontal(id="rules-add"):
                 yield Select(
@@ -171,8 +223,8 @@ class NoiseRulesModal(ForensicModal[None]):
                 yield Button("Close", id="rules-close")
             yield KeyHintFooter(
                 hints={
-                    "default": "[dim]Space on/off  Del remove  Tab to the add "
-                    "row  Enter add  Esc close[/dim]"
+                    "default": "[dim]Space on/off  Del remove  u undo  Tab to "
+                    "the add row  Enter add  Esc close[/dim]"
                 }
             )
 
@@ -199,22 +251,52 @@ class NoiseRulesModal(ForensicModal[None]):
 
     # -- table ---------------------------------------------------------------
 
+    #: Cells of the columns before the pattern, DataTable's cell padding
+    #: (1 each side) and the vertical scrollbar.
+    _FIXED_CELLS = (2 + 7 + 6 + 7) + 5 * 2 + 2
+    _PATTERN_MIN = 30
+
+    def _pattern_width(self) -> int:
+        table = self.query_one("#rules-table", DataTable)
+        width = table.size.width or 0
+        return max(self._PATTERN_MIN, width - self._FIXED_CELLS)
+
+    def on_resize(self, _event) -> None:
+        self._fill()
+
+    @staticmethod
+    def _ident(rule: dict) -> tuple:
+        return (rule.get("action"), rule.get("kind"), rule.get("pattern"))
+
+    def _kept(self, rule: dict) -> str:
+        """``session`` (M, not saved), ``default`` (shipped) or ``saved``."""
+        if rule.get("session"):
+            return "session"
+        return "default" if self._ident(rule) in _default_idents() else "saved"
+
     def _fill(self, cursor: int | None = None) -> None:
         table = self.query_one("#rules-table", DataTable)
         keep = table.cursor_row if cursor is None else cursor
+        width = self._pattern_width()
+        column = table.columns.get("pattern")  # type: ignore[call-overload]
+        if column is not None:
+            column.width = width
         table.clear()
         pal = lens_palette()
         for i, rule in enumerate(self._rules):
             on = rule.get("enabled", True)
             style = "" if on else pal.dim
-            pattern = Text(rule.get("pattern", ""), style=style)
-            if rule.get("session"):
-                pattern.append("  this session", style=pal.muted)
+            kept = self._kept(rule)
+            # Its own short column: a long pattern can no longer hide the
+            # "session" mark.
+            kept_style = pal.accent if kept == "session" else pal.muted
             table.add_row(
-                Text("● on" if on else "○ off", style=pal.ok if on else pal.dim),
+                # The header says "on": ● on, ○ off (muted).
+                Text("●" if on else "○", style=pal.ok if on else pal.muted),
+                Text(kept, style=kept_style),
                 Text(rule.get("action", ""), style=style or pal.accent),
                 Text(rule.get("kind", ""), style=style),
-                pattern,
+                Text(fit_path(str(rule.get("pattern", "")), width), style=style),
                 key=str(i),
             )
         if self._rules:
@@ -238,11 +320,36 @@ class NoiseRulesModal(ForensicModal[None]):
         self._commit(f"{rule['action']} {rule['kind']} {rule['pattern']} — {state}")
 
     def remove_rule(self, index: int) -> None:
+        """Remove the rule at ``index`` (the highlighted row); ``u`` puts it
+        back. A shipped default is turned off instead (Space turns it on).
+        """
         if not 0 <= index < len(self._rules):
             return
-        rule = self._rules.pop(index)
+        rule = self._rules[index]
+        label = f"{rule['action']} {rule['kind']} {rule['pattern']}"
+        if self._kept(rule) == "default":
+            if rule.get("enabled", True):
+                rule["enabled"] = False
+                self._fill(index)
+                self._commit(f"{label} — off (a default rule; Space turns it on)")
+            return
+        self._rules.pop(index)
+        self._removed = (index, rule)
         self._fill(index)
-        self._commit(f"Removed {rule['action']} {rule['kind']} {rule['pattern']}")
+        self._commit(f"Removed {label} — u undoes")
+
+    def undo_remove(self) -> None:
+        """``u``: put the last removed rule back where it was."""
+        if self._removed is None:
+            return
+        index, rule = self._removed
+        self._removed = None
+        if any(self._ident(r) == self._ident(rule) for r in self._rules):
+            return
+        index = min(index, len(self._rules))
+        self._rules.insert(index, rule)
+        self._fill(index)
+        self._commit(f"Restored {rule['action']} {rule['kind']} {rule['pattern']}")
 
     def add_rule(self, action: str, kind: str, pattern: str) -> bool:
         pattern = pattern.strip()
@@ -266,6 +373,7 @@ class NoiseRulesModal(ForensicModal[None]):
         return True
 
     def reset_defaults(self) -> None:
+        self._removed = None
         self._rules = default_files_noise_rules()
         self._fill(0)
         self._commit("Default rules restored.")
@@ -319,7 +427,6 @@ class MuteRowModal(ForensicModal[None]):
     }
     MuteRowModal #mute-choices {
         height: auto;
-        max-height: 5;
     }
     """
 
@@ -332,15 +439,40 @@ class MuteRowModal(ForensicModal[None]):
         self.choices = list(choices)
         self._apply = apply
 
+    #: Cells around an option's text: the container's border and padding,
+    #: the list's border and padding, and its scrollbar.
+    _CHROME = 2 + 4 + 2 + 2 + 2
+
     @staticmethod
-    def choice_text(choice: MuteChoice) -> Text:
+    def choice_text(choice: MuteChoice, width: int = 0) -> Text:
+        """One line per scope: ``label  path  hides N rows``. The path is
+        app-relative (like the lens rows) and, for ``width`` (0: no limit),
+        shortened at ``/`` so the line fits.
+        """
         label, shown, _rule, count = choice
         pal = lens_palette()
+        tail = f"  hides {count} row{'s' if count != 1 else ''}"
+        rel = app_relative(shown)
+        if rel != shown and shown.endswith("/") and not rel.endswith("/"):
+            rel += "/"
+        if width:
+            rel = fit_path(rel, max(12, width - 14 - len(tail)))
         text = Text(no_wrap=True, overflow="ellipsis")
         text.append(f"{label:<14}", style="bold")
-        text.append(shown)
-        text.append(f"  hides {count} row{'s' if count != 1 else ''}", style=pal.muted)
+        text.append(rel)
+        text.append(tail, style=pal.muted)
         return text
+
+    def _line_width(self) -> int:
+        """The cells an option's text has in the container (width 90, at
+        most 96 % of the screen).
+        """
+        try:
+            screen = self.app.size.width
+        except Exception:
+            screen = 0
+        container = min(90, int((screen or 100) * 0.96))
+        return max(30, container - self._CHROME)
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="modal-container"):
@@ -351,9 +483,10 @@ class MuteRowModal(ForensicModal[None]):
                 "and removes one.",
                 id="mute-help",
             )
+            width = self._line_width()
             yield OptionList(
                 *(
-                    Option(self.choice_text(c), id=str(i))
+                    Option(self.choice_text(c, width), id=str(i))
                     for i, c in enumerate(self.choices)
                 ),
                 id="mute-choices",
@@ -362,16 +495,18 @@ class MuteRowModal(ForensicModal[None]):
                 yield Button("This session", id="mute-session", classes="-primary")
                 yield Button("Always", id="mute-always")
                 yield Button("Cancel", id="mute-cancel")
-            yield KeyHintFooter(
-                hints={
-                    "default": "[dim]Up/Down choose  Enter this session  "
-                    "a always (saved)  Esc cancel[/dim]"
-                }
+            hint = (
+                "[dim]Up/Down choose  Enter this session  a always (saved)  "
+                "Esc cancel[/dim]"
             )
+            # The focused list showed the generic "j/k=Navigate" hint.
+            yield KeyHintFooter(hints={"default": hint, "list": hint})
 
     def on_mount(self) -> None:
         super().on_mount()
         choices = self.query_one("#mute-choices", OptionList)
+        # One line per scope, all of them visible (+2: the list's border).
+        choices.styles.max_height = max(1, len(self.choices)) + 2
         if self.choices:
             choices.highlighted = 0  # Enter acts on the first scope at once
 
@@ -392,6 +527,13 @@ class MuteRowModal(ForensicModal[None]):
 
     def action_always(self) -> None:
         self.choose(self._highlighted(), always=True)
+
+    # j/k (SandroidModal's bindings) move through the scopes like Up/Down.
+    def action_cursor_down(self) -> None:
+        self.query_one("#mute-choices", OptionList).action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        self.query_one("#mute-choices", OptionList).action_cursor_up()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()

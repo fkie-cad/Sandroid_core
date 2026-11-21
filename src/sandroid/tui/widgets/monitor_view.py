@@ -63,6 +63,8 @@ from sandroid.config.schema import (
     FILES_RULE_ACTIONS,
     FILES_RULE_KINDS,
     default_files_noise_rules,
+    files_noise_rules_overrides,
+    merge_files_noise_rules,
 )
 from sandroid.core.adb_utils import canonical_device_path
 
@@ -223,7 +225,7 @@ class NoiseRules:
         try:
             from sandroid.config import get_config
 
-            return cls(get_config().tui.files_noise_rules)
+            return cls(merge_files_noise_rules(get_config().tui.files_noise_rules))
         except Exception:
             return cls()
 
@@ -231,8 +233,12 @@ class NoiseRules:
         return [rule.to_dict() for rule in self.rules]
 
     def saved_list(self) -> list[dict]:
-        """The rules to save in the config (session-only rules left out)."""
-        return [rule.to_dict() for rule in self.rules if not rule.session]
+        """What to save in the config: the user's changes to the defaults
+        (own rules, defaults turned off); session-only rules left out.
+        """
+        return files_noise_rules_overrides(
+            [rule.to_dict() for rule in self.rules if not rule.session]
+        )
 
     def classify(self, path: str) -> tuple[str, NoiseRule, str] | None:
         """``("hide", rule, folder)`` / ``("group", rule, folder)`` or None.

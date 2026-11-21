@@ -1672,12 +1672,14 @@ async def test_rule_editor_applies_at_once_persists_and_resets(monkeypatch) -> N
         assert modal.add_rule("hide", "suffix", ".log")
         assert f"{ROOT}/files/app.log" not in _keys(panel)
         assert "1 hidden: suffix 1" in panel.caption()[1]
-        assert saved[-1]["tui.files_noise_rules"][-1] == {
+        # N1-V11: only the user's change is saved, not every default.
+        log_rule = {
             "action": "hide",
             "kind": "suffix",
             "pattern": ".log",
             "enabled": True,
         }
+        assert saved[-1]["tui.files_noise_rules"] == [log_rule]
         assert not modal.add_rule("hide", "suffix", ".log")  # no duplicates
 
         cache_rule = next(
@@ -1685,7 +1687,10 @@ async def test_rule_editor_applies_at_once_persists_and_resets(monkeypatch) -> N
         )
         modal.toggle_rule(cache_rule)  # cache no longer grouped
         assert f"{ROOT}/cache/a" in _keys(panel)
-        assert saved[-1]["tui.files_noise_rules"][cache_rule]["enabled"] is False
+        assert saved[-1]["tui.files_noise_rules"] == [
+            {**modal.rules[cache_rule], "enabled": False},
+            log_rule,
+        ]
 
         modal.remove_rule(len(modal.rules) - 1)
         assert f"{ROOT}/files/app.log" in _keys(panel)
@@ -1693,18 +1698,25 @@ async def test_rule_editor_applies_at_once_persists_and_resets(monkeypatch) -> N
         modal.reset_defaults()
         assert modal.rules == default_files_noise_rules()
         assert f"{ROOT}/cache/" in _keys(panel)
+        assert saved[-1]["tui.files_noise_rules"] == []
         assert len(saved) == 4
 
-        # Keys inside the editor: Space toggles, Delete removes.
+        # Keys inside the editor: Space toggles; Delete turns a default off
+        # (it is never removed).
         table = modal.query_one("#rules-table")
         table.focus()
         table.move_cursor(row=0)
         await pilot.press("space")
         await pilot.pause()
         assert modal.rules[0]["enabled"] is False
+        await pilot.press("space")
+        await pilot.pause()
         await pilot.press("delete")
         await pilot.pause()
-        assert len(modal.rules) == len(default_files_noise_rules()) - 1
+        assert len(modal.rules) == len(default_files_noise_rules())
+        assert modal.rules[0]["enabled"] is False
+        assert str(table.get_row_at(0)[0]) == "○"  # "on" column: ● / ○ only
+        assert str(table.get_row_at(1)[0]) == "●"
         # E2E LOW: the focused button is visibly different from the others.
         modal.query_one("#rules-reset").focus()
         await pilot.pause()
@@ -1715,6 +1727,106 @@ async def test_rule_editor_applies_at_once_persists_and_resets(monkeypatch) -> N
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, NoiseRulesModal)
+
+
+@pytest.mark.asyncio
+async def test_rule_editor_end_del_and_undo_act_on_the_highlighted_rule(
+    monkeypatch,
+) -> None:
+    """N1-B2 / e2e3 bug 7: End scrolled sideways instead of moving to the
+    last rule, so Del removed the first rule and saved at once. Now End /
+    Home move the cursor, Del removes the highlighted rule and u undoes.
+    """
+    import sandroid.config as config_module
+    from sandroid.config.schema import default_files_noise_rules
+    from sandroid.tui.modals.noise_rules_modal import NoiseRulesModal
+
+    saved: list[dict] = []
+    monkeypatch.setattr(
+        config_module, "update_config", lambda updates, **kw: saved.append(updates)
+    )
+    deep = (
+        f"{ROOT}/files/mozilla/k3m7yjvw.default/storage/default/"
+        "https+++stackoverflow.com/"
+    )
+    app = _Harness()
+    async with app.run_test(size=(140, 40)) as pilot:
+        panel = app.query_one(FilesPanel)
+        panel.apply_mute({"action": "hide", "kind": "prefix", "pattern": deep})
+        panel.table.focus()
+        await pilot.press("R")
+        await until(pilot, lambda: isinstance(app.screen, NoiseRulesModal))
+        modal = app.screen
+        table = modal.query_one("#rules-table")
+        table.focus()
+        await pilot.pause()
+        last = len(modal.rules) - 1
+        await pilot.press("end")
+        assert table.cursor_row == last
+        assert table.scroll_x == 0
+        row = table.get_row_at(last)
+        assert str(row[1]) == "session"
+        assert str(row[4]).endswith("https+++stackoverflow.com/")  # cut at "/"
+        await pilot.press("delete")
+        await pilot.pause()
+        assert len(modal.rules) == len(default_files_noise_rules())
+        assert modal.rules[0]["pattern"] == "/proc/"  # the first rule stays
+        assert "u undoes" in str(modal.query_one("#rules-status").render())
+        await pilot.press("u")
+        await pilot.pause()
+        assert modal.rules[-1]["pattern"] == deep
+        assert panel.activity.rules.rules[-1].session
+        await pilot.press("home")
+        assert table.cursor_row == 0
+
+
+def test_saved_rules_are_only_the_changes_to_the_defaults() -> None:
+    """N1-V11: the config kept every default once one rule was saved."""
+    from sandroid.config.schema import (
+        default_files_noise_rules,
+        files_noise_rules_overrides,
+        merge_files_noise_rules,
+    )
+
+    defaults = default_files_noise_rules()
+    mine = {"action": "hide", "kind": "suffix", "pattern": ".log", "enabled": True}
+    rules = [*defaults, mine]
+    rules[0] = {**rules[0], "enabled": False}
+    del rules[1]  # an old config could drop a default: saved as off
+    saved = files_noise_rules_overrides(rules)
+    assert saved == [
+        {**defaults[0], "enabled": False},
+        mine,
+        {**defaults[1], "enabled": False},
+    ]
+    merged = merge_files_noise_rules(saved)
+    assert merged[: len(defaults)] == [
+        {**d, "enabled": i > 1} for i, d in enumerate(defaults)
+    ]
+    assert merged[-1] == mine
+    assert files_noise_rules_overrides(defaults) == []
+    # An old config with the whole list reads the same as the defaults.
+    assert merge_files_noise_rules(defaults) == defaults
+    assert merge_files_noise_rules([]) == defaults
+
+
+def test_mute_choices_fit_one_line_each_cut_at_slashes() -> None:
+    """N1-B5: long paths wrapped over 2-3 lines and broke mid-word."""
+    from sandroid.tui.modals.noise_rules_modal import MuteRowModal, fit_path
+
+    folder = (
+        f"{ROOT}/files/mozilla/k3m7yjvw.default/storage/default/"
+        "https+++stackoverflow.com/ls/"
+    )
+    text = MuteRowModal.choice_text(("this folder", folder, {}, 12), 70).plain
+    assert len(text) <= 70
+    assert text.endswith("hides 12 rows")
+    shown = text[14 : text.index("  hides")]
+    assert shown.startswith("files/…/")
+    assert shown.endswith("/ls/")
+    assert all(part in folder for part in shown.replace("…/", "").split("/"))
+    assert fit_path("a/b", 10) == "a/b"
+    assert fit_path("/data/data/x/files/deep/name.db", 20) == "/…/deep/name.db"
 
 
 def test_noise_rules_are_validated_and_saved_in_the_config() -> None:
@@ -3207,6 +3319,10 @@ async def test_M_hides_rows_like_this_one_for_the_session_or_always(
         await pilot.press("M")
         await until(pilot, lambda: isinstance(app.screen, MuteRowModal))
         assert "hides 2 rows" in MuteRowModal.choice_text(app.screen.choices[0]).plain
+        # N1-B5: the scope-specific key hint, not the generic list one.
+        footer = app.screen.query_one("KeyHintFooter")
+        assert "a always" in str(footer.render())
+        assert "j/k" not in str(footer.render())
         await pilot.press("enter")
         await until(pilot, lambda: not isinstance(app.screen, MuteRowModal))
         assert not set(logs) & set(_keys(panel))
@@ -3220,7 +3336,9 @@ async def test_M_hides_rows_like_this_one_for_the_session_or_always(
         modal = app.screen
         assert modal.rules[-1]["session"] is True
         table = modal.query_one("#rules-table")
-        assert "this session" in str(table.get_row_at(len(modal.rules) - 1)[3])
+        # N1-B2: the mark has its own column (a long pattern hid it).
+        assert str(table.get_row_at(len(modal.rules) - 1)[1]) == "session"
+        assert str(table.get_row_at(0)[1]) == "default"
         modal.remove_rule(len(modal.rules) - 1)
         assert set(logs) <= set(_keys(panel))
         assert all(not r.get("session") for r in saved[-1]["tui.files_noise_rules"])
