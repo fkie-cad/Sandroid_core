@@ -38,6 +38,7 @@ import threading
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
+    from .device_screen_service import DeviceScreenService
     from .identity import IdentityService
 
 # ---------------------------------------------------------------------------
@@ -323,6 +324,25 @@ def get_identity_service() -> "IdentityService":
     from .identity import get_identity_service as _get_identity_service
 
     return _get_identity_service()
+
+
+def _create_device_screen_service() -> "DeviceScreenService":
+    from .device_screen_service import DeviceScreenService
+
+    return DeviceScreenService()
+
+
+def get_device_screen_service() -> "DeviceScreenService":
+    """Get or create the live device screen service (created on first open)."""
+    return _get_or_create(_create_device_screen_service)
+
+
+def peek_device_screen_service() -> "DeviceScreenService | None":
+    """The device screen service if it was created, else None (never creates).
+
+    Used at app exit: closing must not create (and start) the service.
+    """
+    return _service_instances.get(_create_device_screen_service)
 
 
 def reset_services() -> None:
