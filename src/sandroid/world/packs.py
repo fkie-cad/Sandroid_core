@@ -203,7 +203,7 @@ def device_fits(device: dict[str, Any], sdk: int) -> bool:
 def _yaml_load(text: str) -> Any:
     """Parse YAML with the safe loader (the C build when available)."""
     loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
-    return yaml.load(text, Loader=loader)  # noqa: S506 - safe loaders only
+    return yaml.load(text, Loader=loader)  # noqa: S506  # nosec B506 - safe loaders only
 
 
 def user_pack_dir() -> Path:

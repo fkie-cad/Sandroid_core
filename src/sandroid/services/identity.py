@@ -2832,7 +2832,7 @@ def _settings_document(xml_text: str) -> tuple[ET.Element, ET.Element] | None:
     """
     body = re.sub(r"^\s*<\?xml[^>]*\?>", "", xml_text)
     try:
-        document = ET.fromstring(  # noqa: S314 - device file
+        document = ET.fromstring(  # noqa: S314  # nosec B314 - device file
             f"<sandroid-document>{body}</sandroid-document>".encode()
         )
     except ET.ParseError:

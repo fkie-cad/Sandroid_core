@@ -1197,7 +1197,7 @@ class RecordingController:
 
         return rewind.RewindDeps(
             load_snapshot=load,
-            shell=shell,
+            shell=shell,  # nosec B604 - our keyword, not subprocess
             pull=pull,
             # EmulatorService.load_snapshot already drops the frida handles
             # and the Spotlight PID and runs the post-load steps.
@@ -1339,7 +1339,7 @@ class RecordingController:
         try:
             report = StepReplayer(
                 tail_s=tail,
-                shell=runner.deps.shell,
+                shell=runner.deps.shell,  # nosec B604 - our keyword, not subprocess
                 helper=helper,
                 cancelled=self._cancel.is_set,
                 stop_reason=lambda: self._stop_reason,

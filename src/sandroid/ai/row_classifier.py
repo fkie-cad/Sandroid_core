@@ -1117,7 +1117,7 @@ def _sqlite_lines(conn: Any, mode: str) -> Rendered:
     for name in names[:SQLITE_LIST_TABLES]:
         try:
             counts[name] = int(
-                conn.execute(f"SELECT count(*) FROM {_quote_ident(name)}").fetchone()[0]
+                conn.execute(f"SELECT count(*) FROM {_quote_ident(name)}").fetchone()[0]  # nosec B608
             )
             info = conn.execute(f"PRAGMA table_info({_quote_ident(name)})").fetchall()
             columns[name] = [str(c[1]) for c in info]
@@ -1141,7 +1141,7 @@ def _sqlite_lines(conn: Any, mode: str) -> Rendered:
             cols = columns.get(name) or []
             digest.append(f"{_one_line(name)}: " + _one_line(", ".join(cols)))
             try:
-                cur = conn.execute(f"SELECT * FROM {_quote_ident(name)}")
+                cur = conn.execute(f"SELECT * FROM {_quote_ident(name)}")  # nosec B608
             except sqlite3.Error:
                 continue
             # A time-out (progress handler) keeps what was read so far.
